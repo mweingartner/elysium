@@ -489,14 +489,24 @@ final class SectionMesher {
             }
             // ceiling vine when block above is solid
             if OPAQUE[cellAt(x, y + 1, z) >> 4] == 1 {
-                emitFlatTop(b, xd, yd - 1.0 / 16 + 15.0 / 16 - 14.0 / 16, zd, tile, sky, blk, tint, 15.0 / 16)
+                // typed local: same type-checker-budget hazard as the d==1 case
+                // below (arithmetic unchanged → mesh goldens unaffected)
+                let cy: Double = yd - 1.0 / 16 + 15.0 / 16 - 14.0 / 16
+                emitFlatTop(b, xd, cy, zd, tile, sky, blk, tint, 15.0 / 16)
             }
             return
         }
         // glow lichen / sculk vein: meta = attach dir 0..5
         let d = meta % 6
         if d == 0 { emitFlatTop(b, xd, yd - 14.0 / 16, zd, tile, sky, blk, tint, 15.0 / 16) }
-        else if d == 1 { emitFlatTop(b, xd, yd + 14.2 / 16 - 14.0 / 16, zd, tile, sky, blk, tint, 1.0 / 16 + 14.2 / 16 - 15.0 / 16 + 14.0 / 16) }
+        else if d == 1 {
+            // hoisted into typed locals: the inline literal chain overruns the
+            // Swift type-checker's budget on newer toolchains (arithmetic is
+            // unchanged, so mesh goldens are unaffected)
+            let oy: Double = yd + 14.2 / 16 - 14.0 / 16
+            let oh: Double = 1.0 / 16 + 14.2 / 16 - 15.0 / 16 + 14.0 / 16
+            emitFlatTop(b, xd, oy, zd, tile, sky, blk, tint, oh)
+        }
         else {
             let zq = d == 2 ? zd + e : d == 3 ? zd + 1 - e : 0
             let xq = d == 4 ? xd + e : d == 5 ? xd + 1 - e : 0

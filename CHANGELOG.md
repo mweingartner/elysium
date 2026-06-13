@@ -3,6 +3,17 @@
 All notable changes to Pebble. Versions follow `MAJOR.MINOR.PATCH`; the
 in-app version string comes from `PEBBLE_VERSION` (PebbleCore/Game/Saves.swift).
 
+## 1.0.1 — 2026-06-13 — minor bug fixes
+
+- **Fixed a build failure on newer toolchains.** A literal-arithmetic
+  expression in `Mesher.swift` overran the Swift type-checker's budget on some
+  toolchains (e.g. Swift 6.2.3 / Xcode 26.3, M-series), making `./pebble
+  install` fail to compile. The expressions are now hoisted into typed locals;
+  worldgen/mesh output is byte-identical.
+- **Fixed entity facing.** Mobs and the third-person player were rendered
+  rotated by `-yaw` instead of the Minecraft `180° - yaw` convention, so they
+  faced (and appeared to walk) backward. Render-side only.
+
 ## 1.0.0 — 2026-06-11 — first public beta
 
 **This is a beta.** The engine is pinned by 456 golden checks, but a game of
