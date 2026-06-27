@@ -21,7 +21,8 @@ Even better than a report is a PR with the fix — the rest of this file tells y
 xcode-select --install        # Swift toolchain (Swift 6, macOS 14+ SDK)
 git clone https://github.com/thebriangao/pebble.git && cd pebble
 swift build                   # debug build, ~35s clean
-swift run -c release pebsmoke # the test suite — must print "456 passed, 0 failed"
+swift test                    # focused unit/security regression tests
+swift run -c release pebsmoke # the golden suite — must print "456 passed, 0 failed"
 ./pebble install              # optional: build + install the real app
 ```
 
@@ -30,9 +31,12 @@ There is no `.xcodeproj` and there never will be — the whole workflow is Swift
 ## Before you open a PR
 
 1. `swift build -c release` — clean, **zero warnings**. The codebase is warning-free and stays that way.
-2. `swift run -c release pebsmoke` (or `pebble test`) — **456/456**, from the repo root (goldens are found relative to cwd).
-3. If goldens changed, your PR description must justify **every** changed value (see below).
-4. Keep diffs surgical. Match the style of the file you're in — this codebase has a consistent voice (compact, comment-where-it-matters), and drive-by reformatting makes review impossible.
+2. `swift test` — all focused unit/security regression tests pass.
+3. `swift run -c release pebsmoke` (or `pebble test`) — **456/456**, from the repo root (goldens are found relative to cwd).
+4. If goldens changed, your PR description must justify **every** changed value (see below).
+5. Keep diffs surgical. Match the style of the file you're in — this codebase has a consistent voice (compact, comment-where-it-matters), and drive-by reformatting makes review impossible.
+
+For the full local pipeline, run `./scripts/pipeline.sh`. It performs architecture checks, source security scans, bundled Faithful asset verification, a warning-free release build, binary security checks, XCTest, the golden suite, deploy, and final installed-app verification.
 
 ## The golden workflow (read this twice)
 
@@ -66,13 +70,14 @@ These are not style preferences. Violating them corrupts worlds or breaks determ
 
 - `PEBBLE_AUTOLOAD=1 PEBBLE_NEWWORLD=12345 swift run -c release Pebble` — straight into a fresh world.
 - `PEBBLE_CMD="/tp 0 120 0;/time set 1000" PEBBLE_SHOT="/tmp/shot.png@600"` — scripted screenshots.
+- `PEBBLE_OPEN_SCREEN=templates PEBBLE_SHOT="/tmp/templates.png@240"` — open an allowlisted screen such as the template browser or creative inventory for UI smoke checks.
 - `PEBBLE_BOT=1` — runs the physics bot through the real input path and asserts walk/sprint/jump/fall-damage numbers.
 - `PEBBLE_PHOTOBOOTH=1` (+ `PEBBLE_BOOTH_MOBS=cow,sheep` / `PEBBLE_BOOTH_BLOCKS=-`) — renders every mob/block to PNGs for visual review.
 - `PEBBLE_PROF=1` — per-stage timings for load and tick.
 
 ## Scope & conduct
 
-Pebble is **singleplayer, for now** — multiplayer is on the roadmap, but it's an architecture decision we'll make deliberately, so please open an issue to coordinate before attempting networking PRs; uncoordinated ones will likely be declined. Performance work is welcome but must keep goldens green and come with before/after numbers. Be a normal, decent person in issues and reviews; that's the whole code of conduct.
+Pebble is **singleplayer, for now** — multiplayer is on the roadmap, but it's an architecture decision we'll make deliberately. The only approved in-app network surface is the loopback-only Ollama agent; any other networking PR needs an issue and security plan first, and uncoordinated ones will likely be declined. Performance work is welcome but must keep goldens green and come with before/after numbers. Be a normal, decent person in issues and reviews; that's the whole code of conduct.
 
 By contributing you agree your contributions are licensed under the repository's MIT license.
 

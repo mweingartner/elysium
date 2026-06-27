@@ -309,12 +309,7 @@ open class Mob: LivingEntity {
         }
 
         // sunlight burning
-        if burnsInSun && world.info.hasSky && world.isDay() && fireTicks <= 0 {
-            let helm = armor[0]
-            if helm == nil && world.canSeeSky(ifloor(x), ifloor(y + height), ifloor(z)) && !inWater && world.rainLevel < 0.4 {
-                fireTicks = 160
-            }
-        }
+        tickSunlightBurning()
 
         // baby growth
         if baby && growUpAge > 0 {
@@ -362,6 +357,25 @@ open class Mob: LivingEntity {
                 world.hooks.playSound(snd, x, y, z, 1, baby ? 1.4 : 0.95 + rng.nextFloat() * 0.1)
             }
         }
+    }
+
+    func tickSunlightBurning() {
+        if shouldIgniteInSunlight() {
+            fireTicks = 160
+        }
+    }
+
+    private func shouldIgniteInSunlight() -> Bool {
+        guard burnsInSun && world.info.hasSky && fireTicks <= 0 else { return false }
+        guard armor[0] == nil && !inWater && !inPowderSnow && world.rainLevel < 0.4 else { return false }
+
+        let bx = ifloor(x)
+        let by = ifloor(y + height)
+        let bz = ifloor(z)
+        guard world.canSeeSky(bx, by, bz) else { return false }
+
+        let adjustedSkyLight = Double(world.getSkyLight(bx, by, bz)) - world.skyDarken()
+        return adjustedSkyLight >= 8
     }
 
     public func setTarget(_ t: LivingEntity?) { target = t }
@@ -552,6 +566,7 @@ public final class MeleeAttackGoal: Goal {
             m.nav.moveToEntity(t, speedMod)
         }
     }
+
 }
 
 public final class NearestTargetGoal: Goal {

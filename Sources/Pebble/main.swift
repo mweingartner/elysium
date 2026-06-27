@@ -61,7 +61,12 @@ final class HostBridge: GameHost {
     func openScreen(_ kind: String, _ data: ScreenData?) {
         guard let app else { return }
         switch kind {
-        case "crafting": ui.open(CraftingScreen(), game)
+        case "crafting":
+            if let data {
+                ui.open(CraftingScreen((data.x, data.y, data.z)), game)
+            } else {
+                ui.open(CraftingScreen(), game)
+            }
         case "inventory": ui.open(InventoryScreen(), game)
         case "creative": ui.open(CreativeScreen(), game)
         case "chest":
@@ -83,6 +88,7 @@ final class HostBridge: GameHost {
         case "grindstone": ui.open(GrindstoneScreen(), game)
         case "stonecutter": ui.open(StonecutterScreen(), game)
         case "smithing": ui.open(SmithingScreen(), game)
+        case "templates": ui.open(TemplateBrowserScreen(), game)
         case "beacon":
             if let be = data?.be { ui.open(BeaconScreen(be), game) }
         case "sign":
@@ -391,6 +397,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         let parts = v.components(separatedBy: "@")
         return (parts[0], parts.count > 1 ? Int(parts[1]) ?? 240 : 240)
     }()
+    // test hook: PEBBLE_OPEN_SCREEN=templates|creative opens an allowlisted UI screen before PEBBLE_SHOT.
+    private var pendingOpenScreen = ProcessInfo.processInfo.environment["PEBBLE_OPEN_SCREEN"]
+    private var pendingOpenScreenDelay = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         gAppDelegate = self
@@ -618,7 +627,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
                 pendingCmds = nil
             }
         }
-        if let shot = pendingShot, game.hasWorld(), pendingCmds == nil {
+        if let screen = pendingOpenScreen, game.hasWorld(), pendingCmds == nil {
+            pendingOpenScreenDelay += 1
+            if pendingOpenScreenDelay > 90 {
+                switch screen.lowercased() {
+                case "creative":
+                    game.openScreen("creative", nil)
+                case "templates":
+                    game.openScreen("templates", nil)
+                default:
+                    print("[shot] ignored unknown PEBBLE_OPEN_SCREEN=\(screen)")
+                    fflush(stdout)
+                }
+                pendingOpenScreen = nil
+            }
+        }
+        if let shot = pendingShot, game.hasWorld(), pendingCmds == nil, pendingOpenScreen == nil {
             hud.hideGui = true
             pendingShot = (shot.path, shot.frames - 1)
             if shot.frames <= 0 {

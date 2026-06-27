@@ -39,5 +39,11 @@ let package = Package(
             path: "Sources/pebsmoke",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .testTarget(
+            name: "PebbleCoreTests",
+            dependencies: ["PebbleCore"],
+            path: "Tests/PebbleCoreTests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )

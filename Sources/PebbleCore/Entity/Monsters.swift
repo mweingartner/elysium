@@ -546,6 +546,7 @@ public final class Phantom: Monster {
     public override func tick() {
         baseLivingTick()
         if dead || deathTime > 0 { return }
+        tickSunlightBurning()
         targetGoals.tick(2, age)
         if circleX == 0 && circleY == 0 {
             circleX = x; circleY = y + 10; circleZ = z

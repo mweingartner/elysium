@@ -4,6 +4,7 @@
 //   chunks(world, dim, cx, cz, data BLOB)   — modified chunks (VCK1 binary)
 //   player(world, json)                     — player snapshot per world
 //   advancements(world, json)               — earned advancement ids per world
+//   templates(name, json, created)           — local cloned construction templates
 // Legacy installs stored loose files under saves/; they are imported once on
 // first open and the old folder is kept as saves-legacy-backup. Chunk records
 // keep the VCK1 container (binary blocks + JSON tail); entity-only records
@@ -114,8 +115,12 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 public final class SaveDB {
     private var db: OpaquePointer?
 
-    public init() {
-        let url = vcSupportDir().appendingPathComponent("pebble.db")
+    public convenience init() {
+        self.init(databaseURL: vcSupportDir().appendingPathComponent("pebble.db"), migrateLegacy: true)
+    }
+
+    init(databaseURL url: URL, migrateLegacy: Bool) {
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         guard sqlite3_open_v2(url.path, &db, flags, nil) == SQLITE_OK else {
             fatalError("pebble.db could not be opened: \(String(cString: sqlite3_errmsg(db)))")
@@ -134,7 +139,11 @@ public final class SaveDB {
         """)
         exec("CREATE TABLE IF NOT EXISTS player(world TEXT PRIMARY KEY, json TEXT NOT NULL)")
         exec("CREATE TABLE IF NOT EXISTS advancements(world TEXT PRIMARY KEY, json TEXT NOT NULL)")
-        migrateLegacySaves()
+        exec("""
+        CREATE TABLE IF NOT EXISTS templates(
+            name TEXT PRIMARY KEY, json TEXT NOT NULL, created REAL NOT NULL DEFAULT 0)
+        """)
+        if migrateLegacy { migrateLegacySaves() }
     }
 
     deinit { sqlite3_close(db) }
@@ -291,9 +300,11 @@ public final class SaveDB {
         if hasBlocks {
             let blocks = r.blocks!, biomes = r.biomes!
             putU32(blocks.count)
-            blocks.withUnsafeBufferPointer { bp in
-                bp.baseAddress!.withMemoryRebound(to: UInt8.self, capacity: blocks.count * 2) { p in
-                    data.append(p, count: blocks.count * 2)  // host LE on all Apple silicon/x86
+            if !blocks.isEmpty {
+                blocks.withUnsafeBufferPointer { bp in
+                    bp.baseAddress!.withMemoryRebound(to: UInt8.self, capacity: blocks.count * 2) { p in
+                        data.append(p, count: blocks.count * 2)  // host LE on all Apple silicon/x86
+                    }
                 }
             }
             putU32(biomes.count)
@@ -311,20 +322,29 @@ public final class SaveDB {
         return data
     }
 
-    private func decodeChunk(_ data: Data, key: String, worldId: String, dim: Int, cx: Int, cz: Int) -> ChunkRecord? {
+    func decodeChunk(_ data: Data, key: String, worldId: String, dim: Int, cx: Int, cz: Int) -> ChunkRecord? {
         var rec = ChunkRecord(key: key, worldId: worldId, dim: dim, cx: cx, cz: cz)
         var off = 0
         func readU32() -> Int? {
             guard off + 4 <= data.count else { return nil }
-            let v = data.subdata(in: off..<off + 4).withUnsafeBytes { $0.load(as: UInt32.self) }
+            let v = Int(data[off])
+                | (Int(data[off + 1]) << 8)
+                | (Int(data[off + 2]) << 16)
+                | (Int(data[off + 3]) << 24)
             off += 4
-            return Int(UInt32(littleEndian: v))
+            return v
         }
         guard data.count >= 5, data.prefix(4) == Data("VCK1".utf8) else { return nil }
         off = 4
         let flags = data[off]; off += 1
+        guard flags & ~1 == 0 else { return nil }
+        guard let dimCase = Dim(rawValue: dim) else { return nil }
+        let info = dimInfo(dimCase)
+        let expectedBlocks = CHUNK_W * CHUNK_W * info.height
+        let expectedBiomes = 4 * 4 * ((info.height + 3) / 4)
         if flags & 1 != 0 {
-            guard let nBlocks = readU32(), off + nBlocks * 2 <= data.count else { return nil }
+            guard let nBlocks = readU32(), nBlocks == expectedBlocks,
+                  off + nBlocks * 2 <= data.count else { return nil }
             var blocks = [UInt16](repeating: 0, count: nBlocks)
             data.subdata(in: off..<off + nBlocks * 2).withUnsafeBytes { raw in
                 blocks.withUnsafeMutableBytes { dst in
@@ -337,7 +357,8 @@ public final class SaveDB {
             let maxId = UInt16(blockDefs.count)
             for i in 0..<blocks.count where (blocks[i] >> 4) >= maxId { blocks[i] = 0 }
             rec.blocks = blocks
-            guard let nBiomes = readU32(), off + nBiomes <= data.count else { return nil }
+            guard let nBiomes = readU32(), nBiomes == expectedBiomes,
+                  off + nBiomes <= data.count else { return nil }
             rec.biomes = [UInt8](data.subdata(in: off..<off + nBiomes))
             off += nBiomes
         }
@@ -387,6 +408,47 @@ public final class SaveDB {
             self.bindText(stmt, 1, worldId)
             self.bindText(stmt, 2, json)
         })
+    }
+
+    // ---- object templates -------------------------------------------------------
+    public func listTemplates() -> [String] {
+        var out: [String] = []
+        run("SELECT name FROM templates ORDER BY name", row: { stmt in
+            if let name = self.columnText(stmt, 0) { out.append(name) }
+        })
+        return out
+    }
+
+    public func getTemplate(named rawName: String) throws -> ObjectTemplate? {
+        guard let name = normalizedTemplateName(rawName) else { throw TemplateError.invalidName }
+        var json: String?
+        run("SELECT json FROM templates WHERE name=?", bind: { self.bindText($0, 1, name) }) { stmt in
+            json = self.columnText(stmt, 0)
+        }
+        guard let json else { return nil }
+        return try decodeObjectTemplate(Data(json.utf8))
+    }
+
+    @discardableResult
+    public func putTemplate(_ template: ObjectTemplate) throws -> Bool {
+        guard let name = normalizedTemplateName(template.name) else { throw TemplateError.invalidName }
+        var normalized = template
+        normalized.name = name
+        let data = try encodeObjectTemplate(normalized)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw TemplateError.corruptTemplate("could not encode JSON")
+        }
+        return run("INSERT OR REPLACE INTO templates(name, json, created) VALUES(?,?,?)", bind: { stmt in
+            self.bindText(stmt, 1, name)
+            self.bindText(stmt, 2, json)
+            sqlite3_bind_double(stmt, 3, Date().timeIntervalSince1970 * 1000)
+        })
+    }
+
+    @discardableResult
+    public func deleteTemplate(named rawName: String) throws -> Bool {
+        guard let name = normalizedTemplateName(rawName) else { throw TemplateError.invalidName }
+        return run("DELETE FROM templates WHERE name=?", bind: { self.bindText($0, 1, name) })
     }
 
     // ---- legacy import ----------------------------------------------------------

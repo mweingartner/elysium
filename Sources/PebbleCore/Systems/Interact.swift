@@ -137,7 +137,14 @@ public func useBlock(_ ctx: InteractCtx, _ hit: RaycastHit) -> Bool {
         return true
     }
     // containers & screens
-    if id == Int(B.crafting_table) { ctx.openScreen("crafting", nil); return true }
+    if id == Int(B.crafting_table) {
+        var data = ScreenData()
+        data.x = x
+        data.y = y
+        data.z = z
+        ctx.openScreen("crafting", data)
+        return true
+    }
     if id == Int(B.chest) || id == Int(B.trapped_chest) {
         // blocked by solid above?
         if blockDefs[world.getBlock(x, y + 1, z) >> 4].opaque { return true }
@@ -661,6 +668,10 @@ private func checkEndPortalComplete(_ world: World, _ x: Int, _ y: Int, _ z: Int
 // =============================================================================
 // ITEM USE
 // =============================================================================
+func heldUseDurationTicks(_ def: ItemDef) -> Int {
+    def.food?.fast == true ? 17 : 32
+}
+
 public func useItem(_ ctx: InteractCtx, _ hit: RaycastHit?) -> Bool {
     let world = ctx.world, player = ctx.player
     guard let held = player.mainHand else { return false }
@@ -680,20 +691,17 @@ public func useItem(_ ctx: InteractCtx, _ hit: RaycastHit?) -> Bool {
     // food → start eating
     if let food = def.food {
         if player.hunger < 20 || food.alwaysEat || player.gameMode == GameMode.creative {
-            player.usingItem = true
-            player.useItemTicks = 0
+            player.beginUsingMainHand()
             return true
         }
         return false
     }
     if name == "potion" {
-        player.usingItem = true
-        player.useItemTicks = 0
+        player.beginUsingMainHand()
         return true
     }
     if name == "bow" || name == "trident" || name == "crossbow" || name == "shield" || name == "spyglass" || name == "goat_horn" {
-        player.usingItem = true
-        player.useItemTicks = 0
+        player.beginUsingMainHand()
         if name == "goat_horn" {
             world.hooks.playSound("item.goat_horn.sound", player.x, player.y, player.z, 8, 1)
             world.emitVibration(Double(ifloor(player.x)), Double(ifloor(player.y)), Double(ifloor(player.z)), 15, player)
@@ -1300,7 +1308,10 @@ private func sturdyTopOk(_ c: Int) -> Bool {
 // =============================================================================
 public func finishUsingItem(_ ctx: InteractCtx) {
     let world = ctx.world, player = ctx.player
-    guard let held = player.mainHand else { return }
+    guard let held = player.usingMainHandStack() else {
+        player.cancelUsingItem()
+        return
+    }
     let def = itemDef(held.id)
     if let food = def.food {
         player.feed(food.hunger, food.saturation)
@@ -1311,7 +1322,7 @@ public func finishUsingItem(_ ctx: InteractCtx) {
         }
         if def.name == "milk_bucket" {
             player.clearEffects()
-            player.replaceHeld(ItemStack(iid("bucket"), 1))
+            player.replaceUsingMainHand(ItemStack(iid("bucket"), 1))
         } else if def.name == "chorus_fruit" {
             // random teleport
             for _ in 0..<16 {
@@ -1324,39 +1335,40 @@ public func finishUsingItem(_ ctx: InteractCtx) {
                     break
                 }
             }
-            player.consumeHeld(1)
+            player.consumeUsingMainHand(1)
         } else if def.name.contains("stew") || def.name.contains("soup") {
-            player.replaceHeld(ItemStack(iid("bowl"), 1))
+            player.replaceUsingMainHand(ItemStack(iid("bowl"), 1))
         } else {
-            player.consumeHeld(1)
+            player.consumeUsingMainHand(1)
         }
         world.hooks.playSound("entity.player.burp", player.x, player.y, player.z, 0.5, 1)
         ctx.advance("husbandry_eat")
     } else if def.name == "potion" {
         let pot = potionDef(held.data.potion ?? "water")
         for e in pot.effects { player.addEffect(e.effect, e.duration, e.amplifier) }
-        player.replaceHeld(ItemStack(iid("glass_bottle"), 1))
+        player.replaceUsingMainHand(ItemStack(iid("glass_bottle"), 1))
         world.hooks.playSound("entity.generic.drink", player.x, player.y, player.z, 0.5, 1)
     }
-    player.usingItem = false
-    player.useItemTicks = 0
+    player.cancelUsingItem()
 }
 
 public func releaseUsingItem(_ ctx: InteractCtx) {
     let player = ctx.player
     if !player.usingItem { return }
-    let held = player.mainHand
-    let name = held.map { itemDef($0.id).name } ?? ""
+    guard let held = player.usingMainHandStack() else {
+        player.cancelUsingItem()
+        return
+    }
+    let name = itemDef(held.id).name
     if name == "bow" { shootBow(player, player.useItemTicks) }
     else if name == "trident" { throwTridentPlayer(player, player.useItemTicks) }
     else if name == "crossbow" {
-        if player.useItemTicks >= 25 - enchLevel(held!, "quick_charge") * 5 {
+        if player.useItemTicks >= 25 - enchLevel(held, "quick_charge") * 5 {
             shootBow(player, 20) // full power
             ctx.world.hooks.playSound("item.crossbow.shoot", player.x, player.y, player.z, 1, 1)
         }
     }
-    player.usingItem = false
-    player.useItemTicks = 0
+    player.cancelUsingItem()
 }
 
 // =============================================================================

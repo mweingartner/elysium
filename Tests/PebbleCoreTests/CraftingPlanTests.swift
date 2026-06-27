@@ -1,0 +1,452 @@
+import XCTest
+@testable import PebbleCore
+
+final class CraftingPlanTests: XCTestCase {
+    private func registerCoreIfNeeded() {
+        registerAllBlocks()
+        registerAllItems()
+        registerAllSystems()
+        registerAllRecipes()
+    }
+
+    private func plan(named name: String, from inventory: [ItemStack?]) throws -> CraftingRecipePlan {
+        registerCoreIfNeeded()
+        return try XCTUnwrap(craftingPlans(for: inventory, gridWidth: 3, gridHeight: 3).first {
+            itemDef($0.output.id).name == name
+        })
+    }
+
+    private func makeWorld() -> World {
+        registerCoreIfNeeded()
+        let world = World(dim: .overworld, seed: 13579)
+        let info = dimInfo(.overworld)
+        for cz in -1...2 {
+            for cx in -1...2 {
+                let chunk = Chunk(cx: cx, cz: cz, minY: info.minY, height: info.height)
+                chunk.status = .lit
+                world.setChunk(chunk)
+                world.light.initChunkLight(chunk)
+            }
+        }
+        return world
+    }
+
+    func testCraftingPlansUseInventoryTagsAndPopulateShapedGrid() throws {
+        registerCoreIfNeeded()
+        var inventory: [ItemStack?] = [stack("oak_planks", 4)]
+        var grid = [ItemStack?](repeating: nil, count: 9)
+        let p = try plan(named: "crafting_table", from: inventory)
+
+        XCTAssertTrue(populateCraftingGrid(p, grid: &grid, inventory: &inventory))
+        XCTAssertNil(inventory[0])
+        XCTAssertEqual(grid.compactMap { $0 }.count, 4)
+        XCTAssertEqual(grid[0].map { itemDef($0.id).name }, "oak_planks")
+        XCTAssertEqual(grid[1].map { itemDef($0.id).name }, "oak_planks")
+        XCTAssertEqual(grid[3].map { itemDef($0.id).name }, "oak_planks")
+        XCTAssertEqual(grid[4].map { itemDef($0.id).name }, "oak_planks")
+        XCTAssertEqual(matchCrafting(grid, 3, 3)?.out.id, iid("crafting_table"))
+    }
+
+    func testShapelessPlanPopulatesAndConsumesInventory() throws {
+        registerCoreIfNeeded()
+        var inventory: [ItemStack?] = [stack("chest"), stack("tripwire_hook")]
+        var grid = [ItemStack?](repeating: nil, count: 9)
+        let p = try plan(named: "trapped_chest", from: inventory)
+
+        XCTAssertTrue(populateCraftingGrid(p, grid: &grid, inventory: &inventory))
+        XCTAssertNil(inventory[0])
+        XCTAssertNil(inventory[1])
+        XCTAssertEqual(grid[0].map { itemDef($0.id).name }, "chest")
+        XCTAssertEqual(grid[1].map { itemDef($0.id).name }, "tripwire_hook")
+        XCTAssertEqual(matchCrafting(grid, 3, 3)?.out.id, iid("trapped_chest"))
+    }
+
+    func testPlansDedupeDuplicateOutputRecipes() {
+        registerCoreIfNeeded()
+        let inventory: [ItemStack?] = [stack("cobblestone"), stack("vine"), stack("moss_block")]
+        let outputs = craftingPlans(for: inventory, gridWidth: 3, gridHeight: 3).map { itemDef($0.output.id).name }
+
+        XCTAssertEqual(outputs.filter { $0 == "mossy_cobblestone" }.count, 1)
+    }
+
+    func testPersonalCraftingPlansExcludeThreeByThreeOnlyRecipes() {
+        registerCoreIfNeeded()
+        let inventory: [ItemStack?] = [stack("oak_planks", 8)]
+        let personalOutputs = craftingPlans(for: inventory, gridWidth: 2, gridHeight: 2).map { itemDef($0.output.id).name }
+        let workbenchOutputs = craftingPlans(for: inventory, gridWidth: 3, gridHeight: 3).map { itemDef($0.output.id).name }
+
+        XCTAssertTrue(personalOutputs.contains("crafting_table"))
+        XCTAssertFalse(personalOutputs.contains("chest"))
+        XCTAssertTrue(workbenchOutputs.contains("chest"))
+    }
+
+    func testPersonalCraftingPlanPopulatesTwoByTwoGrid() throws {
+        registerCoreIfNeeded()
+        var inventory: [ItemStack?] = [stack("oak_planks", 2)]
+        var grid = [ItemStack?](repeating: nil, count: 4)
+        let p = try XCTUnwrap(craftingPlans(for: inventory, gridWidth: 2, gridHeight: 2).first {
+            itemDef($0.output.id).name == "stick"
+        })
+
+        XCTAssertTrue(populateCraftingGrid(p, grid: &grid, inventory: &inventory))
+        XCTAssertNil(inventory[0])
+        XCTAssertEqual(grid[0].map { itemDef($0.id).name }, "oak_planks")
+        XCTAssertEqual(grid[2].map { itemDef($0.id).name }, "oak_planks")
+        XCTAssertEqual(matchCrafting(grid, 2, 2)?.out.id, iid("stick"))
+    }
+
+    func testPopulateRejectsOccupiedGridWithoutMutatingInventory() throws {
+        registerCoreIfNeeded()
+        var inventory: [ItemStack?] = [stack("oak_planks", 2)]
+        var grid = [ItemStack?](repeating: nil, count: 9)
+        grid[0] = stack("dirt")
+        let p = try plan(named: "stick", from: inventory)
+
+        XCTAssertFalse(populateCraftingGrid(p, grid: &grid, inventory: &inventory))
+        XCTAssertEqual(inventory[0]?.count, 2)
+        XCTAssertEqual(grid[0].map { itemDef($0.id).name }, "dirt")
+        XCTAssertNil(grid[1])
+    }
+
+    func testPlansCanUseReturnedBenchContentsForRecipeSwitching() throws {
+        registerCoreIfNeeded()
+        var inventory = [ItemStack?](repeating: nil, count: 9)
+        let occupiedBench: [ItemStack?] = [stack("oak_planks", 2)]
+        let p = try XCTUnwrap(craftingPlans(for: inventory + occupiedBench, gridWidth: 3, gridHeight: 3).first {
+            itemDef($0.output.id).name == "stick"
+        })
+
+        inventory[0] = occupiedBench[0]
+        var grid = [ItemStack?](repeating: nil, count: 9)
+        XCTAssertTrue(populateCraftingGrid(p, grid: &grid, inventory: &inventory))
+        XCTAssertNil(inventory[0])
+        XCTAssertEqual(grid[0].map { itemDef($0.id).name }, "oak_planks")
+        XCTAssertEqual(grid[3].map { itemDef($0.id).name }, "oak_planks")
+        XCTAssertEqual(matchCrafting(grid, 3, 3)?.out.id, iid("stick"))
+    }
+
+    func testCraftingTablePlansUseNearbyContainerResources() throws {
+        let world = makeWorld()
+        world.setBlock(1, 64, 1, Int(cell(B.crafting_table)))
+        world.setBlock(4, 64, 1, Int(cell(B.chest)))
+        let chest = makeContainerBE(4, 64, 1, 27)
+        chest.items?[0] = stack("oak_planks", 8)
+        world.setBlockEntity(chest)
+
+        let resources = craftingTableResourceStacks(playerInventory: [], craftGrid: [], world: world,
+                                                    tableX: 1, tableY: 64, tableZ: 1)
+        let outputs = craftingPlans(for: resources, gridWidth: 3, gridHeight: 3).map { itemDef($0.output.id).name }
+
+        XCTAssertTrue(outputs.contains("chest"))
+    }
+
+    func testCraftingTableRecipeSelectionConsumesNearbyContainerResources() throws {
+        let world = makeWorld()
+        world.setBlock(1, 64, 1, Int(cell(B.crafting_table)))
+        world.setBlock(4, 64, 1, Int(cell(B.chest)))
+        let chest = makeContainerBE(4, 64, 1, 27)
+        chest.items?[0] = stack("oak_planks", 8)
+        world.setBlockEntity(chest)
+        var inventory = [ItemStack?](repeating: nil, count: 36)
+        var grid = [ItemStack?](repeating: nil, count: 9)
+        let resources = craftingTableResourceStacks(playerInventory: inventory, craftGrid: grid, world: world,
+                                                    tableX: 1, tableY: 64, tableZ: 1)
+        let p = try XCTUnwrap(craftingPlans(for: resources, gridWidth: 3, gridHeight: 3).first {
+            itemDef($0.output.id).name == "chest"
+        })
+
+        XCTAssertTrue(populateCraftingGridFromNearbyContainers(p, grid: &grid, inventory: &inventory,
+                                                               world: world, tableX: 1, tableY: 64, tableZ: 1))
+
+        XCTAssertNil(chest.items?[0])
+        XCTAssertEqual(grid.compactMap { $0 }.count, 8)
+        XCTAssertEqual(matchCrafting(grid, 3, 3)?.out.id, iid("chest"))
+    }
+
+    func testCraftingTableConsumesPlayerInventoryBeforeNearbyContainers() throws {
+        let world = makeWorld()
+        world.setBlock(1, 64, 1, Int(cell(B.crafting_table)))
+        world.setBlock(4, 64, 1, Int(cell(B.chest)))
+        let chest = makeContainerBE(4, 64, 1, 27)
+        chest.items?[0] = stack("oak_planks", 3)
+        world.setBlockEntity(chest)
+        var inventory = [ItemStack?](repeating: nil, count: 36)
+        inventory[0] = stack("oak_planks", 1)
+        var grid = [ItemStack?](repeating: nil, count: 9)
+        let resources = craftingTableResourceStacks(playerInventory: inventory, craftGrid: grid, world: world,
+                                                    tableX: 1, tableY: 64, tableZ: 1)
+        let p = try XCTUnwrap(craftingPlans(for: resources, gridWidth: 3, gridHeight: 3).first {
+            itemDef($0.output.id).name == "crafting_table"
+        })
+
+        XCTAssertTrue(populateCraftingGridFromNearbyContainers(p, grid: &grid, inventory: &inventory,
+                                                               world: world, tableX: 1, tableY: 64, tableZ: 1))
+
+        XCTAssertNil(inventory[0])
+        XCTAssertNil(chest.items?[0])
+        XCTAssertEqual(grid.compactMap { $0 }.count, 4)
+        XCTAssertEqual(matchCrafting(grid, 3, 3)?.out.id, iid("crafting_table"))
+    }
+
+    func testCraftingTableIgnoresContainersOutsideRadius() {
+        let world = makeWorld()
+        world.setBlock(1, 64, 1, Int(cell(B.crafting_table)))
+        world.setBlock(30, 64, 1, Int(cell(B.chest)))
+        let chest = makeContainerBE(30, 64, 1, 27)
+        chest.items?[0] = stack("oak_planks", 8)
+        world.setBlockEntity(chest)
+
+        let resources = craftingTableResourceStacks(playerInventory: [], craftGrid: [], world: world,
+                                                    tableX: 1, tableY: 64, tableZ: 1)
+        let outputs = craftingPlans(for: resources, gridWidth: 3, gridHeight: 3).map { itemDef($0.output.id).name }
+
+        XCTAssertFalse(outputs.contains("chest"))
+        XCTAssertEqual(chest.items?[0]?.count, 8)
+    }
+
+    func testCraftingTableUsesNearbyChestVehicles() throws {
+        let world = makeWorld()
+        world.setBlock(1, 64, 1, Int(cell(B.crafting_table)))
+        let boat = Boat(world: world)
+        boat.hasChest = true
+        boat.x = 3.5
+        boat.y = 64
+        boat.z = 1.5
+        boat.chestItems[0] = stack("oak_planks", 4)
+        world.addEntity(boat)
+        var inventory = [ItemStack?](repeating: nil, count: 36)
+        var grid = [ItemStack?](repeating: nil, count: 9)
+        let resources = craftingTableResourceStacks(playerInventory: inventory, craftGrid: grid, world: world,
+                                                    tableX: 1, tableY: 64, tableZ: 1)
+        let p = try XCTUnwrap(craftingPlans(for: resources, gridWidth: 3, gridHeight: 3).first {
+            itemDef($0.output.id).name == "crafting_table"
+        })
+
+        XCTAssertTrue(populateCraftingGridFromNearbyContainers(p, grid: &grid, inventory: &inventory,
+                                                               world: world, tableX: 1, tableY: 64, tableZ: 1))
+
+        XCTAssertNil(boat.chestItems[0])
+        XCTAssertEqual(matchCrafting(grid, 3, 3)?.out.id, iid("crafting_table"))
+    }
+
+    func testCraftingPlanSearchMatchesDisplayNamesAndItemIds() throws {
+        registerCoreIfNeeded()
+        let plans = craftingPlans(for: [stack("oak_planks", 8)], gridWidth: 3, gridHeight: 3)
+
+        let displayMatch = try XCTUnwrap(firstCraftingPlanIndex(matching: "craft", in: plans))
+        XCTAssertEqual(itemDef(plans[displayMatch].output.id).name, "crafting_table")
+
+        let containsMatch = try XCTUnwrap(firstCraftingPlanIndex(matching: "table", in: plans))
+        XCTAssertEqual(itemDef(plans[containsMatch].output.id).name, "crafting_table")
+
+        let idMatch = try XCTUnwrap(firstCraftingPlanIndex(matching: "crafting_table", in: plans))
+        XCTAssertEqual(itemDef(plans[idMatch].output.id).name, "crafting_table")
+    }
+
+    func testCraftingPlanSearchPrefersPrefixBeforeContainsFallback() throws {
+        registerCoreIfNeeded()
+        let plans = creativeCraftingPlans(gridWidth: 3, gridHeight: 3)
+
+        let stone = try XCTUnwrap(firstCraftingPlanIndex(matching: "stone", in: plans))
+        XCTAssertTrue(itemDef(plans[stone].output.id).displayName.lowercased().hasPrefix("stone"))
+
+        let ingot = try XCTUnwrap(firstCraftingPlanIndex(matching: "ingot", in: plans))
+        XCTAssertTrue(itemDef(plans[ingot].output.id).displayName.lowercased().contains("ingot"))
+    }
+
+    func testCraftingPlanSearchNormalizesCaseWhitespaceAndPunctuation() {
+        XCTAssertEqual(normalizedCraftingPlanSearch("  Crafting_Table!! "), "crafting table")
+        XCTAssertEqual(normalizedCraftingPlanSearch("OAK   DOOR"), "oak door")
+        XCTAssertNil(firstCraftingPlanIndex(matching: "", in: []))
+    }
+
+    func testCraftingRecipeTypeaheadCorrectsMistypeAndSelectsHighlightedPlan() throws {
+        registerCoreIfNeeded()
+        let plans = craftingPlans(for: [stack("oak_planks", 8)], gridWidth: 3, gridHeight: 3)
+        var typeahead = CraftingRecipeTypeahead(maxRows: 4, maxQueryLength: 16)
+
+        typeahead.open(plans: plans)
+        XCTAssertEqual(typeahead.query, "")
+        XCTAssertEqual(typeahead.highlightedIndex, 0)
+
+        XCTAssertTrue(typeahead.append("craftx", plans: plans))
+        XCTAssertEqual(typeahead.query, "craftx")
+        XCTAssertNil(typeahead.selectedPlan(in: plans))
+
+        XCTAssertTrue(typeahead.deleteBackward(plans: plans))
+        let selected = try XCTUnwrap(typeahead.selectedPlan(in: plans))
+        XCTAssertEqual(typeahead.query, "craft")
+        XCTAssertEqual(itemDef(selected.output.id).name, "crafting_table")
+    }
+
+    func testCraftingRecipeTypeaheadKeyboardNavigationKeepsHighlightVisible() {
+        registerCoreIfNeeded()
+        let plans = creativeCraftingPlans(gridWidth: 3, gridHeight: 3)
+        XCTAssertGreaterThan(plans.count, 4)
+        var typeahead = CraftingRecipeTypeahead(maxRows: 2, maxQueryLength: 16)
+
+        typeahead.open(plans: plans)
+        typeahead.moveHighlight(3, plans: plans)
+        XCTAssertEqual(typeahead.highlightedIndex, 3)
+        XCTAssertEqual(typeahead.scroll, 2)
+
+        typeahead.moveHighlight(-2, plans: plans)
+        XCTAssertEqual(typeahead.highlightedIndex, 1)
+        XCTAssertEqual(typeahead.scroll, 1)
+    }
+
+    func testCraftingRecipeTypeaheadRefreshPreservesManualScroll() {
+        registerCoreIfNeeded()
+        let plans = creativeCraftingPlans(gridWidth: 3, gridHeight: 3)
+        XCTAssertGreaterThan(plans.count, 8)
+        var typeahead = CraftingRecipeTypeahead(maxRows: 4, maxQueryLength: 16)
+
+        typeahead.open(plans: plans)
+        typeahead.scrollRows(3, plans: plans)
+        XCTAssertEqual(typeahead.scroll, 3)
+        XCTAssertEqual(typeahead.highlightedIndex, 3)
+
+        typeahead.refresh(plans: plans)
+        XCTAssertEqual(typeahead.scroll, 3)
+        XCTAssertEqual(typeahead.highlightedIndex, 3)
+    }
+
+    func testCraftingRecipeTypeaheadRefreshPreservesScrolledSearchSelection() throws {
+        registerCoreIfNeeded()
+        let plans = creativeCraftingPlans(gridWidth: 3, gridHeight: 3)
+        var typeahead = CraftingRecipeTypeahead(maxRows: 3, maxQueryLength: 16)
+
+        typeahead.open(plans: plans)
+        XCTAssertTrue(typeahead.append("door", plans: plans))
+        _ = try XCTUnwrap(typeahead.highlightedIndex)
+        let searchScroll = typeahead.scroll
+
+        typeahead.scrollRows(4, plans: plans)
+        XCTAssertGreaterThan(typeahead.scroll, searchScroll)
+        let scrolled = typeahead.scroll
+        let highlighted = typeahead.highlightedIndex
+
+        typeahead.refresh(plans: plans)
+        XCTAssertEqual(typeahead.scroll, scrolled)
+        XCTAssertEqual(typeahead.highlightedIndex, highlighted)
+    }
+
+    func testCraftingRecipeTypeaheadIgnoresControlTextAndLimitsQuery() {
+        registerCoreIfNeeded()
+        let plans = creativeCraftingPlans(gridWidth: 3, gridHeight: 3)
+        var typeahead = CraftingRecipeTypeahead(maxRows: 8, maxQueryLength: 16)
+
+        typeahead.open(plans: plans)
+        XCTAssertFalse(typeahead.append("\u{7f}\n", plans: plans))
+        XCTAssertEqual(typeahead.query, "")
+
+        XCTAssertTrue(typeahead.append("oak door", plans: plans))
+        XCTAssertEqual(typeahead.query, "oak door")
+        XCTAssertEqual(typeahead.selectedPlan(in: plans).map { itemDef($0.output.id).name }, "oak_door")
+
+        var limited = CraftingRecipeTypeahead(maxRows: 8, maxQueryLength: 4)
+        limited.open(plans: plans)
+        XCTAssertTrue(limited.append("oak door", plans: plans))
+        XCTAssertEqual(limited.query, "door")
+        XCTAssertTrue(limited.selectedPlan(in: plans).map { itemDef($0.output.id).name.contains("door") } ?? false)
+    }
+
+    func testCraftingPlansRejectInvalidGridSizes() {
+        registerCoreIfNeeded()
+        XCTAssertTrue(craftingPlans(for: [stack("oak_planks", 4)], gridWidth: 0, gridHeight: 3).isEmpty)
+        XCTAssertTrue(craftingPlans(for: [stack("oak_planks", 4)], gridWidth: 3, gridHeight: 0).isEmpty)
+        XCTAssertTrue(craftingPlans(for: [stack("oak_planks", 4)], gridWidth: 9, gridHeight: 9).isEmpty)
+        XCTAssertTrue(creativeCraftingPlans(gridWidth: 0, gridHeight: 3).isEmpty)
+        XCTAssertTrue(creativeCraftingPlans(gridWidth: 3, gridHeight: 0).isEmpty)
+        XCTAssertTrue(creativeCraftingPlans(gridWidth: 9, gridHeight: 9).isEmpty)
+    }
+
+    func testCreativeCraftingPlansIgnoreInventoryAndExposeAllFittingOutputs() {
+        registerCoreIfNeeded()
+
+        let survival = craftingPlans(for: [], gridWidth: 3, gridHeight: 3)
+        let creative = creativeCraftingPlans(gridWidth: 3, gridHeight: 3)
+        let creativeKeys = Set(creative.map(outputKey))
+        let expectedKeys = Set(craftingRecipes.compactMap { recipe -> String? in
+            recipeFits(recipe, gridWidth: 3, gridHeight: 3) ? outputKey(craftingRecipeOutput(recipe)) : nil
+        })
+
+        XCTAssertTrue(survival.isEmpty)
+        XCTAssertEqual(creativeKeys, expectedKeys)
+        XCTAssertTrue(creativeKeys.contains("chest#1"))
+    }
+
+    func testCreativeCraftingPlansStillRespectPersonalGridSize() {
+        registerCoreIfNeeded()
+
+        let personalOutputs = Set(creativeCraftingPlans(gridWidth: 2, gridHeight: 2).map { itemDef($0.output.id).name })
+        let workbenchOutputs = Set(creativeCraftingPlans(gridWidth: 3, gridHeight: 3).map { itemDef($0.output.id).name })
+
+        XCTAssertTrue(personalOutputs.contains("crafting_table"))
+        XCTAssertFalse(personalOutputs.contains("chest"))
+        XCTAssertTrue(workbenchOutputs.contains("chest"))
+    }
+
+    func testCreativeCraftingPlansChooseRepresentativeIngredientsForTags() throws {
+        registerCoreIfNeeded()
+
+        let plan = try XCTUnwrap(creativeCraftingPlans(gridWidth: 2, gridHeight: 2).first {
+            itemDef($0.output.id).name == "crafting_table"
+        })
+
+        XCTAssertEqual(plan.ingredients.compactMap { $0 }.count, 4)
+        for ingredient in plan.ingredients.compactMap({ $0 }) {
+            XCTAssertTrue(itemExists(ingredient), "creative plan used unknown representative item \(ingredient)")
+            XCTAssertTrue(tagMatches("planks", ingredient))
+        }
+    }
+
+    func testRegisteredCraftingRecipesResolveKnownItemsAndTags() {
+        registerCoreIfNeeded()
+
+        for recipe in craftingRecipes {
+            switch recipe {
+            case .shaped(_, _, let grid, let out, _):
+                XCTAssertTrue(itemExists(out), "unknown recipe output \(out)")
+                for ingredient in grid.compactMap({ $0 }) {
+                    assertKnownIngredient(ingredient)
+                }
+            case .shapeless(let inputs, let out, _):
+                XCTAssertTrue(itemExists(out), "unknown recipe output \(out)")
+                for ingredient in inputs {
+                    assertKnownIngredient(ingredient)
+                }
+            }
+        }
+    }
+
+    private func assertKnownIngredient(_ ingredient: String, file: StaticString = #filePath, line: UInt = #line) {
+        if ingredient.hasPrefix("#") {
+            let tag = String(ingredient.dropFirst())
+            let values = TAGS[tag] ?? []
+            XCTAssertFalse(values.isEmpty, "unknown or empty tag \(ingredient)", file: file, line: line)
+            for name in values {
+                XCTAssertTrue(itemExists(name), "tag \(ingredient) references unknown item \(name)", file: file, line: line)
+            }
+        } else {
+            XCTAssertTrue(itemExists(ingredient), "unknown ingredient \(ingredient)", file: file, line: line)
+        }
+    }
+
+    private func outputKey(_ plan: CraftingRecipePlan) -> String {
+        outputKey(plan.output)
+    }
+
+    private func outputKey(_ stack: ItemStack) -> String {
+        "\(itemDef(stack.id).name)#\(stack.count)"
+    }
+
+    private func recipeFits(_ recipe: CraftRecipe, gridWidth: Int, gridHeight: Int) -> Bool {
+        switch recipe {
+        case .shaped(let w, let h, _, _, _):
+            return w <= gridWidth && h <= gridHeight
+        case .shapeless(let inputs, _, _):
+            return inputs.count <= gridWidth * gridHeight
+        }
+    }
+}

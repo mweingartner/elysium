@@ -70,9 +70,180 @@ class ContainerScreen: Screen {
 // =============================================================================
 // Inventory (survival) — 2×2 crafting + armor + offhand
 // =============================================================================
+private final class CraftingRecipePopup {
+    private(set) var plans: [CraftingRecipePlan] = []
+    var open = false
+    private var typeahead = CraftingRecipeTypeahead(maxRows: 8, maxQueryLength: 48)
+    private weak var button: Button?
+    private let gridWidth: Int
+    private let gridHeight: Int
+    private let menuW = 136.0
+    private let rowH = 18.0
+    private let margin = 4.0
+    private let buttonH = 18.0
+    private let searchH = 12.0
+
+    init(gridWidth: Int, gridHeight: Int) {
+        self.gridWidth = gridWidth
+        self.gridHeight = gridHeight
+    }
+
+    func installButton(on screen: Screen, action: @escaping () -> Void) {
+        let button = Button(margin, margin, menuW, buttonH, "Recipes", action)
+        self.button = button
+        screen.buttons.append(button)
+    }
+
+    func layout(_ ui: UIManager) {
+        let w = min(menuW, max(96.0, ui.width - margin * 2))
+        button?.x = margin
+        button?.y = margin
+        button?.w = w
+        button?.h = buttonH
+    }
+
+    func refresh(_ game: GameCore, craftGrid: [ItemStack?], creative: Bool = false, resources: [ItemStack?]? = nil) {
+        if creative {
+            plans = creativeCraftingPlans(gridWidth: gridWidth, gridHeight: gridHeight)
+        } else {
+            let available = resources ?? (game.player.inventory + craftGrid)
+            plans = craftingPlans(for: available, gridWidth: gridWidth, gridHeight: gridHeight)
+        }
+        button?.label = plans.isEmpty ? "No recipes" : "Recipes (\(plans.count))"
+        typeahead.refresh(plans: plans)
+    }
+
+    func toggle() {
+        if open {
+            close()
+        } else {
+            open = true
+            typeahead.open(plans: plans)
+        }
+    }
+
+    func close() {
+        open = false
+        typeahead.close()
+    }
+
+    func selectedPlan(at mx: Double, _ my: Double) -> CraftingRecipePlan? {
+        guard open, !plans.isEmpty else { return nil }
+        let rows = min(typeahead.maxRows, plans.count)
+        guard mx >= x && mx < x + w && my >= listY && my < listY + Double(rows) * rowH else { return nil }
+        let idx = typeahead.scroll + Int((my - listY) / rowH)
+        return idx >= 0 && idx < plans.count ? plans[idx] : nil
+    }
+
+    func closeIfOpenOutsideButton(_ mx: Double, _ my: Double) {
+        if open, !(button?.contains(mx, my) ?? false) {
+            close()
+        }
+    }
+
+    func draw(_ ui: UIManager) {
+        guard open else { return }
+        let cv = ui.cv
+        if plans.isEmpty {
+            ui.drawPanel(x, y, w, 20)
+            cv.drawText("No craftable items", x + 6, y + 6, 1, "#3f3f3f", shadow: false)
+            return
+        }
+        let rows = min(typeahead.maxRows, plans.count)
+        let headerH = typeahead.query.isEmpty ? 0 : searchH
+        ui.drawPanel(x, y, w, headerH + Double(rows) * rowH + 2)
+        if !typeahead.query.isEmpty {
+            cv.setFill("#d0d0d0")
+            cv.fillRect(x + 1, y + 1, w - 2, searchH)
+            cv.drawText(searchLabel(), x + 5, y + 3, 1, "#303030", shadow: false)
+        }
+        for row in 0..<rows {
+            let idx = typeahead.scroll + row
+            let ry = listY + 1 + Double(row) * rowH
+            let hover = ui.mouseX >= x && ui.mouseX < x + w && ui.mouseY >= ry && ui.mouseY < ry + rowH
+            let selected = idx == typeahead.highlightedIndex
+            cv.setFill(selected ? "#6f7dff" : hover ? "#8a8aff" : (row % 2 == 0 ? "#b8b8b8" : "#ababab"))
+            cv.fillRect(x + 1, ry, w - 2, rowH)
+            let stack = plans[idx].output
+            cv.drawItemIcon(stack.id, stack.data, x + 3, ry + 1, 16, 16)
+            cv.drawText(label(for: stack), x + 23, ry + 5, 1, (hover || selected) ? "#ffffff" : "#303030", shadow: false)
+        }
+        if plans.count > rows {
+            cv.setFill("#555555")
+            let trackH = Double(rows) * rowH
+            cv.fillRect(x + w - 5, listY + 2, 3, trackH - 2)
+            let maxScroll = max(1, plans.count - rows)
+            let thumbH = max(8, (trackH - 4) * Double(rows) / Double(plans.count))
+            let thumbY = listY + 3 + (trackH - thumbH - 4) * Double(typeahead.scroll) / Double(maxScroll)
+            cv.setFill("#f0f0f0")
+            cv.fillRect(x + w - 5, thumbY, 3, thumbH)
+        }
+    }
+
+    func onWheel(_ dy: Double) -> Bool {
+        guard open, plans.count > typeahead.maxRows else { return false }
+        let delta = dy > 0 ? 1 : -1
+        typeahead.scrollRows(delta, plans: plans)
+        return true
+    }
+
+    func onKey(_ key: String) -> (handled: Bool, plan: CraftingRecipePlan?) {
+        guard open else { return (false, nil) }
+        switch key {
+        case "Enter", "NumpadEnter":
+            return (true, typeahead.selectedPlan(in: plans))
+        case "Backspace", "Delete":
+            typeahead.deleteBackward(plans: plans)
+            return (true, nil)
+        case "ArrowDown":
+            typeahead.moveHighlight(1, plans: plans)
+            return (true, nil)
+        case "ArrowUp":
+            typeahead.moveHighlight(-1, plans: plans)
+            return (true, nil)
+        default:
+            return (false, nil)
+        }
+    }
+
+    func onChar(_ text: String) -> Bool {
+        guard open else { return false }
+        return typeahead.append(text, plans: plans)
+    }
+
+    private var x: Double { button?.x ?? margin }
+    private var y: Double { (button?.y ?? margin) + buttonH + 2 }
+    private var w: Double { button?.w ?? menuW }
+    private var listY: Double { y + (typeahead.query.isEmpty ? 0 : searchH) }
+
+    private func label(for stack: ItemStack) -> String {
+        let def = itemDef(stack.id)
+        let suffix = stack.count > 1 ? " x\(stack.count)" : ""
+        var text = def.displayName + suffix
+        while textWidth(text) > Int(w - 28), text.count > 3 {
+            text.removeLast()
+        }
+        return text
+    }
+
+    private func searchLabel() -> String {
+        var body = typeahead.query
+        var clipped = false
+        while textWidth("> " + (clipped ? "..." : "") + body) > Int(w - 10), body.count > 1 {
+            body.removeFirst()
+            clipped = true
+        }
+        return "> " + (clipped ? "..." : "") + body
+    }
+}
+
 final class InventoryScreen: ContainerScreen {
     var craftGrid: [ItemStack?] = [nil, nil, nil, nil]
     var craftResult: ItemStack?
+    private let recipeMenu = CraftingRecipePopup(gridWidth: 2, gridHeight: 2)
+    private var creativeCrafting = false
+    private var selectedCreativePlan: CraftingRecipePlan?
+    private weak var creativeCheckbox: CheckBox?
 
     override init() {
         super.init()
@@ -84,6 +255,7 @@ final class InventoryScreen: ContainerScreen {
     }
     override func buildSlots(_ ui: UIManager, _ game: GameCore) {
         let p = game.player!
+        syncCreativeFromPlayer(game)
         let px = panelX, py = panelY
         for i in 0..<4 {
             let idx = i
@@ -115,13 +287,87 @@ final class InventoryScreen: ContainerScreen {
             output: true,
             onTake: { [weak self, weak game] _ in
                 guard let self else { return }
+                if self.creativeCrafting {
+                    self.updateResult()
+                    game?.advance("craft_any")
+                    return
+                }
                 _ = consumeCraftingGrid(&self.craftGrid)
                 self.updateResult()
                 game?.advance("craft_any")
             }))
+        recipeMenu.installButton(on: self) { [weak self] in
+            self?.recipeMenu.toggle()
+        }
+        let cb = CheckBox(148, 4, 82, 18, "Creative", isChecked: { [weak self] in
+            self?.creativeCrafting ?? false
+        }, { [weak self, weak game] in
+            guard let self else { return }
+            self.creativeCrafting = !self.creativeCrafting
+            game?.player.setGameMode(self.creativeCrafting ? GameMode.creative : GameMode.survival)
+            self.selectedCreativePlan = nil
+            self.updateResult()
+            if let game { self.recipeMenu.refresh(game, craftGrid: self.craftGrid, creative: self.creativeCrafting) }
+        })
+        creativeCheckbox = cb
+        buttons.append(cb)
     }
     func updateResult() {
-        craftResult = matchCrafting(craftGrid, 2, 2)?.out
+        if creativeCrafting {
+            craftResult = selectedCreativePlan?.output.copy()
+        } else {
+            craftResult = matchCrafting(craftGrid, 2, 2)?.out
+        }
+    }
+    private func returnCraftGridToInventory(_ game: GameCore) -> Bool {
+        var ok = true
+        for i in craftGrid.indices {
+            guard let stack = craftGrid[i] else { continue }
+            if game.player.give(stack) || stack.count <= 0 {
+                craftGrid[i] = nil
+            } else {
+                ok = false
+            }
+        }
+        updateResult()
+        return ok
+    }
+    private func syncCreativeFromPlayer(_ game: GameCore) {
+        let actual = game.player.gameMode == GameMode.creative
+        if creativeCrafting != actual {
+            creativeCrafting = actual
+            selectedCreativePlan = nil
+            updateResult()
+        }
+    }
+    private func selectRecipe(_ plan: CraftingRecipePlan, _ ui: UIManager, _ game: GameCore) {
+        guard ui.cursorStack == nil else { return }
+        if creativeCrafting {
+            selectedCreativePlan = plan
+            recipeMenu.close()
+            updateResult()
+            recipeMenu.refresh(game, craftGrid: craftGrid, creative: true)
+            game.playUISound("ui.stonecutter.select_recipe")
+            return
+        }
+        guard returnCraftGridToInventory(game) else { return }
+        if populateCraftingGrid(plan, grid: &craftGrid, inventory: &game.player.inventory) {
+            recipeMenu.close()
+            updateResult()
+            recipeMenu.refresh(game, craftGrid: craftGrid)
+            game.playUISound("ui.stonecutter.select_recipe")
+        }
+    }
+    override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
+        syncCreativeFromPlayer(game)
+        recipeMenu.layout(ui)
+        if let cb = creativeCheckbox {
+            cb.x = min(148, max(4, ui.width - cb.w - 4))
+            cb.y = 4
+        }
+        recipeMenu.refresh(game, craftGrid: craftGrid, creative: creativeCrafting)
+        super.draw(ui, game, partial)
+        recipeMenu.draw(ui)
     }
     override func drawExtra(_ ui: UIManager, _ game: GameCore) {
         let cv = ui.cv
@@ -153,13 +399,34 @@ final class InventoryScreen: ContainerScreen {
         px(1, 49, 5, 4, p.armor[3] != nil ? "#909098" : "#6a6a6a")
         if p.armor[0] != nil { px(-6, 0, 12, 5, "#c8c8d0") }
     }
-    override func onClose(_ ui: UIManager, _ game: GameCore) {
-        for i in 0..<4 {
-            if let s = craftGrid[i] {
-                _ = game.player.give(s)
-                craftGrid[i] = nil
-            }
+    override func onMouseDown(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double, _ btn: Int) -> Bool {
+        if let plan = recipeMenu.selectedPlan(at: mx, my) {
+            selectRecipe(plan, ui, game)
+            return true
         }
+        if creativeCheckbox?.contains(mx, my) == true {
+            return super.onMouseDown(ui, game, mx, my, btn)
+        }
+        recipeMenu.closeIfOpenOutsideButton(mx, my)
+        return super.onMouseDown(ui, game, mx, my, btn)
+    }
+    override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
+        recipeMenu.onWheel(dy)
+    }
+    override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
+        let result = recipeMenu.onKey(key)
+        if result.handled {
+            if let plan = result.plan { selectRecipe(plan, ui, game) }
+            return true
+        }
+        return super.onKey(ui, game, key)
+    }
+    override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
+        if recipeMenu.onChar(ch) { return true }
+        return super.onChar(ui, game, ch)
+    }
+    override func onClose(_ ui: UIManager, _ game: GameCore) {
+        _ = returnCraftGridToInventory(game)
     }
 }
 
@@ -169,14 +436,21 @@ final class InventoryScreen: ContainerScreen {
 final class CraftingScreen: ContainerScreen {
     var craftGrid: [ItemStack?] = Array(repeating: nil, count: 9)
     var craftResult: ItemStack?
+    private let recipeMenu = CraftingRecipePopup(gridWidth: 3, gridHeight: 3)
+    private let tablePos: (x: Int, y: Int, z: Int)?
+    private var creativeCrafting = false
+    private var selectedCreativePlan: CraftingRecipePlan?
+    private weak var creativeCheckbox: CheckBox?
 
-    override init() {
+    init(_ tablePos: (x: Int, y: Int, z: Int)? = nil) {
+        self.tablePos = tablePos
         super.init()
         title = "Crafting"
         titleX = 29
         sheet = "crafting_table"
     }
     override func buildSlots(_ ui: UIManager, _ game: GameCore) {
+        syncCreativeFromPlayer(game)
         let px = panelX, py = panelY
         for i in 0..<9 {
             let idx = i
@@ -194,27 +468,145 @@ final class CraftingScreen: ContainerScreen {
             get: { [weak self] in self?.craftResult },
             set: { _ in },
             output: true,
-            onTake: { [weak self] _ in
+            onTake: { [weak self, weak game] _ in
                 guard let self else { return }
+                if self.creativeCrafting {
+                    self.updateResult()
+                    game?.advance("craft_any")
+                    return
+                }
                 _ = consumeCraftingGrid(&self.craftGrid)
                 self.updateResult()
+                game?.advance("craft_any")
             }))
+        recipeMenu.installButton(on: self) { [weak self] in
+            self?.recipeMenu.toggle()
+        }
+        let cb = CheckBox(148, 4, 82, 18, "Creative", isChecked: { [weak self] in
+            self?.creativeCrafting ?? false
+        }, { [weak self, weak game] in
+            guard let self else { return }
+            self.creativeCrafting = !self.creativeCrafting
+            game?.player.setGameMode(self.creativeCrafting ? GameMode.creative : GameMode.survival)
+            self.selectedCreativePlan = nil
+            self.updateResult()
+            if let game { self.recipeMenu.refresh(game, craftGrid: self.craftGrid, creative: self.creativeCrafting) }
+        })
+        creativeCheckbox = cb
+        buttons.append(cb)
     }
     func updateResult() {
-        craftResult = matchCrafting(craftGrid, 3, 3)?.out
+        if creativeCrafting {
+            craftResult = selectedCreativePlan?.output.copy()
+        } else {
+            craftResult = matchCrafting(craftGrid, 3, 3)?.out
+        }
+    }
+    private func returnCraftGridToInventory(_ game: GameCore) -> Bool {
+        var ok = true
+        for i in craftGrid.indices {
+            guard let stack = craftGrid[i] else { continue }
+            if game.player.give(stack) || stack.count <= 0 {
+                craftGrid[i] = nil
+            } else if let tablePos,
+                      giveStackToNearbyCraftingContainers(stack, world: game.world,
+                                                          tableX: tablePos.x, tableY: tablePos.y, tableZ: tablePos.z)
+                        || stack.count <= 0 {
+                craftGrid[i] = nil
+            } else {
+                ok = false
+            }
+        }
+        updateResult()
+        return ok
+    }
+    private func availableRecipeResources(_ game: GameCore) -> [ItemStack?] {
+        guard let tablePos else { return game.player.inventory + craftGrid }
+        return craftingTableResourceStacks(playerInventory: game.player.inventory,
+                                           craftGrid: craftGrid,
+                                           world: game.world,
+                                           tableX: tablePos.x, tableY: tablePos.y, tableZ: tablePos.z)
+    }
+    private func syncCreativeFromPlayer(_ game: GameCore) {
+        let actual = game.player.gameMode == GameMode.creative
+        if creativeCrafting != actual {
+            creativeCrafting = actual
+            selectedCreativePlan = nil
+            updateResult()
+        }
+    }
+    private func selectRecipe(_ plan: CraftingRecipePlan, _ ui: UIManager, _ game: GameCore) {
+        guard ui.cursorStack == nil else { return }
+        if creativeCrafting {
+            selectedCreativePlan = plan
+            recipeMenu.close()
+            updateResult()
+            recipeMenu.refresh(game, craftGrid: craftGrid, creative: true)
+            game.playUISound("ui.stonecutter.select_recipe")
+            return
+        }
+        guard returnCraftGridToInventory(game) else { return }
+        let populated: Bool
+        if let tablePos {
+            populated = populateCraftingGridFromNearbyContainers(plan, grid: &craftGrid,
+                                                                 inventory: &game.player.inventory,
+                                                                 world: game.world,
+                                                                 tableX: tablePos.x, tableY: tablePos.y, tableZ: tablePos.z)
+        } else {
+            populated = populateCraftingGrid(plan, grid: &craftGrid, inventory: &game.player.inventory)
+        }
+        if populated {
+            recipeMenu.close()
+            updateResult()
+            recipeMenu.refresh(game, craftGrid: craftGrid, resources: availableRecipeResources(game))
+            game.playUISound("ui.stonecutter.select_recipe")
+        }
+    }
+    override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
+        syncCreativeFromPlayer(game)
+        recipeMenu.layout(ui)
+        if let cb = creativeCheckbox {
+            cb.x = min(148, max(4, ui.width - cb.w - 4))
+            cb.y = 4
+        }
+        let resources = creativeCrafting ? nil : availableRecipeResources(game)
+        recipeMenu.refresh(game, craftGrid: craftGrid, creative: creativeCrafting, resources: resources)
+        super.draw(ui, game, partial)
+        recipeMenu.draw(ui)
     }
     override func drawExtra(_ ui: UIManager, _ game: GameCore) {
         if !textured {
             ui.cv.drawText("▶", panelX + 95, panelY + 38, 2, "#3f3f3f", shadow: false)
         }
     }
-    override func onClose(_ ui: UIManager, _ game: GameCore) {
-        for i in 0..<9 {
-            if let s = craftGrid[i] {
-                _ = game.player.give(s)
-                craftGrid[i] = nil
-            }
+    override func onMouseDown(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double, _ btn: Int) -> Bool {
+        if let plan = recipeMenu.selectedPlan(at: mx, my) {
+            selectRecipe(plan, ui, game)
+            return true
         }
+        if creativeCheckbox?.contains(mx, my) == true {
+            return super.onMouseDown(ui, game, mx, my, btn)
+        }
+        recipeMenu.closeIfOpenOutsideButton(mx, my)
+        return super.onMouseDown(ui, game, mx, my, btn)
+    }
+    override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
+        recipeMenu.onWheel(dy)
+    }
+    override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
+        let result = recipeMenu.onKey(key)
+        if result.handled {
+            if let plan = result.plan { selectRecipe(plan, ui, game) }
+            return true
+        }
+        return super.onKey(ui, game, key)
+    }
+    override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
+        if recipeMenu.onChar(ch) { return true }
+        return super.onChar(ui, game, ch)
+    }
+    override func onClose(_ ui: UIManager, _ game: GameCore) {
+        _ = returnCraftGridToInventory(game)
     }
 }
 
@@ -1077,34 +1469,64 @@ final class TradingScreen: ContainerScreen {
 // =============================================================================
 private let CREATIVE_TABS: [(String, String)] = [
     ("building", "Building"), ("colored", "Colored"), ("natural", "Natural"),
-    ("functional", "Functional"), ("redstone", "Redstone"), ("tools", "Tools"),
-    ("combat", "Combat"), ("food", "Food"), ("ingredients", "Ingredients"), ("spawn_eggs", "Eggs"),
+    ("functional", "Function"), ("redstone", "Redstone"), ("tools", "Tools"),
+    ("combat", "Combat"), ("food", "Food"), ("ingredients", "Ingred."), ("spawn_eggs", "Eggs"),
 ]
+private let CREATIVE_TAB_COLUMNS = 5
+private let CREATIVE_TAB_H = 16.0
+private let CREATIVE_PANEL_W = 280.0
+private let CREATIVE_PANEL_H = 188.0
+private let CREATIVE_GRID_COLUMNS = 9
+private let CREATIVE_GRID_ROWS = 6
+private let CREATIVE_SLOT_SIZE = 18.0
 
 final class CreativeScreen: ContainerScreen {
     var tab = 0
     var scroll = 0
-    let search = TextField(0, 0, 80, 12)
+    let search = TextField(0, 0, 162, 14, "Search")
     var filtered: [Int] = []
 
     override init() {
         super.init()
-        panelW = 195
-        panelH = 186
+        panelW = CREATIVE_PANEL_W
+        panelH = CREATIVE_PANEL_H
         title = ""
+    }
+    private var gridClusterW: Double {
+        Double(CREATIVE_GRID_COLUMNS) * CREATIVE_SLOT_SIZE + 18
+    }
+    private var gridX: Double {
+        panelX + ((panelW - gridClusterW) / 2).rounded(.down)
+    }
+    private var gridY: Double { panelY + 40 }
+    private var scrollX: Double {
+        gridX + Double(CREATIVE_GRID_COLUMNS) * CREATIVE_SLOT_SIZE + 8
+    }
+    private var hotbarY: Double { panelY + 160 }
+    private var tabW: Double { panelW / Double(CREATIVE_TAB_COLUMNS) }
+    private func tabRect(_ i: Int) -> (x: Double, y: Double, w: Double, h: Double) {
+        let x = panelX + Double(i % CREATIVE_TAB_COLUMNS) * tabW
+        let y = i < CREATIVE_TAB_COLUMNS ? panelY - CREATIVE_TAB_H : panelY + panelH
+        return (x, y, tabW, CREATIVE_TAB_H)
+    }
+    private func maxScroll() -> Int {
+        max(0, (filtered.count + CREATIVE_GRID_COLUMNS - 1) / CREATIVE_GRID_COLUMNS - CREATIVE_GRID_ROWS)
     }
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         panelX = ((ui.width - panelW) / 2).rounded(.down)
         panelY = ((ui.height - panelH) / 2).rounded(.down)
-        search.x = panelX + 100
-        search.y = panelY + 5
+        panelY = max(CREATIVE_TAB_H + 4, min(panelY, ui.height - panelH - CREATIVE_TAB_H - 4))
+        search.x = gridX
+        search.y = panelY + 20
+        search.w = Double(CREATIVE_GRID_COLUMNS) * CREATIVE_SLOT_SIZE
+        search.h = 14
         fields.append(search)
         playerSlots = []
         let p = game.player!
         for col in 0..<9 {
             let idx = col
             playerSlots.append(SlotDef(
-                x: panelX + 8 + Double(col) * 18, y: panelY + 160,
+                x: gridX + Double(col) * CREATIVE_SLOT_SIZE, y: hotbarY,
                 get: { p.inventory[idx] },
                 set: { p.inventory[idx] = $0 }))
         }
@@ -1123,25 +1545,26 @@ final class CreativeScreen: ContainerScreen {
                 filtered.append(i)
             }
         }
-        scroll = min(scroll, max(0, (filtered.count + 8) / 9 - 6))
+        scroll = min(scroll, maxScroll())
     }
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         ui.drawDarkBg(0.55)
         let cv = ui.cv
         for i in 0..<CREATIVE_TABS.count {
-            let tx = panelX + Double(i % 5) * 39
-            let ty = i < 5 ? panelY - 14 : panelY + panelH
+            let (tx, ty, tw, th) = tabRect(i)
             cv.setFill(i == tab ? "#c6c6c6" : "#8a8a8a")
-            cv.fillRect(tx, ty, 38, 14)
-            cv.drawText(String(CREATIVE_TABS[i].1.prefix(7)), tx + 2, ty + 3, 1, i == tab ? "#3f3f3f" : "#e8e8e8", shadow: false)
+            cv.fillRect(tx, ty, tw - 1, th)
+            cv.drawTextCentered(CREATIVE_TABS[i].1, tx + tw / 2, ty + 4, 1,
+                                i == tab ? "#3f3f3f" : "#e8e8e8", shadow: false)
         }
         ui.drawPanel(panelX, panelY, panelW, panelH)
-        for row in 0..<6 {
-            for col in 0..<9 {
-                let gx = panelX + 8 + Double(col) * 18
-                let gy = panelY + 22 + Double(row) * 18
+        cv.drawText("Creative Inventory", panelX + 10, panelY + 6, 1, "#3f3f3f", shadow: false)
+        for row in 0..<CREATIVE_GRID_ROWS {
+            for col in 0..<CREATIVE_GRID_COLUMNS {
+                let gx = gridX + Double(col) * CREATIVE_SLOT_SIZE
+                let gy = gridY + Double(row) * CREATIVE_SLOT_SIZE
                 ui.drawSlotBg(gx, gy)
-                let idx = (scroll + row) * 9 + col
+                let idx = (scroll + row) * CREATIVE_GRID_COLUMNS + col
                 if idx < filtered.count {
                     let stack = ItemStack(filtered[idx], 1)
                     ui.drawItemStack(stack, gx, gy)
@@ -1153,31 +1576,31 @@ final class CreativeScreen: ContainerScreen {
                 }
             }
         }
-        let maxScroll = max(0, (filtered.count + 8) / 9 - 6)
+        let maxScroll = maxScroll()
         cv.setFill("#1c1c1c")
-        cv.fillRect(panelX + panelW - 16, panelY + 22, 10, 108)
+        cv.fillRect(scrollX, gridY, 10, Double(CREATIVE_GRID_ROWS) * CREATIVE_SLOT_SIZE)
         let sf = maxScroll == 0 ? 0.0 : Double(scroll) / Double(maxScroll)
         cv.setFill("#c8c8c8")
-        cv.fillRect(panelX + panelW - 16, panelY + 22 + (sf * 93).rounded(), 10, 15)
+        cv.fillRect(scrollX, gridY + (sf * 93).rounded(), 10, 15)
         ui.drawSlots(self)
         ui.drawButtons(self)
-        cv.drawText("Destroy item: drop on grid", panelX + 4, panelY + 6, 1, "#3f3f3f", shadow: false)
     }
     override func onMouseDown(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double, _ btn: Int) -> Bool {
         for i in 0..<CREATIVE_TABS.count {
-            let tx = panelX + Double(i % 5) * 39
-            let ty = i < 5 ? panelY - 14 : panelY + panelH
-            if mx >= tx && mx < tx + 38 && my >= ty && my < ty + 14 {
+            let (tx, ty, tw, th) = tabRect(i)
+            if mx >= tx && mx < tx + tw && my >= ty && my < ty + th {
                 tab = i
                 search.text = ""
+                search.caret = 0
                 refresh()
                 return true
             }
         }
-        if mx >= panelX + 8 && mx < panelX + 8 + 162 && my >= panelY + 22 && my < panelY + 22 + 108 {
-            let col = Int((mx - panelX - 8) / 18)
-            let row = Int((my - panelY - 22) / 18)
-            let idx = (scroll + row) * 9 + col
+        if mx >= gridX && mx < gridX + Double(CREATIVE_GRID_COLUMNS) * CREATIVE_SLOT_SIZE &&
+           my >= gridY && my < gridY + Double(CREATIVE_GRID_ROWS) * CREATIVE_SLOT_SIZE {
+            let col = Int((mx - gridX) / CREATIVE_SLOT_SIZE)
+            let row = Int((my - gridY) / CREATIVE_SLOT_SIZE)
+            let idx = (scroll + row) * CREATIVE_GRID_COLUMNS + col
             if ui.cursorStack != nil {
                 ui.cursorStack = nil // destroy
             } else if idx < filtered.count {
@@ -1189,7 +1612,7 @@ final class CreativeScreen: ContainerScreen {
         return super.onMouseDown(ui, game, mx, my, btn)
     }
     override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
-        let maxScroll = max(0, (filtered.count + 8) / 9 - 6)
+        let maxScroll = maxScroll()
         scroll = max(0, min(maxScroll, scroll + (dy > 0 ? 1 : -1)))
         return true
     }
@@ -1300,6 +1723,437 @@ final class DeathScreen: Screen {
 }
 
 // =============================================================================
+// Saved construction templates
+// =============================================================================
+private struct TemplateBrowserEntry {
+    let name: String
+    let template: ObjectTemplate?
+    let summary: ObjectTemplateSummary?
+    let error: String?
+}
+
+private struct TemplatePreviewFace {
+    let points: [(Double, Double)]
+    let depth: Double
+    let color: String
+}
+
+private let TEMPLATE_PREVIEW_MAX_BLOCKS = 4096
+
+final class TemplateBrowserScreen: Screen {
+    private var entries: [TemplateBrowserEntry] = []
+    private var selectedIndex = 0
+    private var scroll = 0
+    private var visualizedName: String?
+    private var visualizedTemplate: ObjectTemplate?
+    private var yaw = 0.7
+    private var pitch = 0.45
+    private var draggingPreview = false
+    private var lastDragX = 0.0
+    private var lastDragY = 0.0
+    private var lastVisibleRows = 1
+    private weak var visualizeButton: Button?
+    private weak var leftButton: Button?
+    private weak var rightButton: Button?
+    private weak var closeButton: Button?
+
+    override init() {
+        super.init()
+        pausesGame = true
+    }
+
+    override func initScreen(_ ui: UIManager, _ game: GameCore) {
+        refreshEntries(game)
+        let visualize = Button(0, 0, 90, 20, "Visualize", { [weak self] in
+            self?.visualizeSelected()
+        })
+        let left = Button(0, 0, 24, 20, "<", { [weak self] in
+            self?.yaw -= 0.18
+        })
+        let right = Button(0, 0, 24, 20, ">", { [weak self] in
+            self?.yaw += 0.18
+        })
+        let close = Button(0, 0, 56, 20, "Close", { [weak ui, weak game] in
+            guard let ui, let game else { return }
+            ui.closeTop(game)
+        })
+        visualizeButton = visualize
+        leftButton = left
+        rightButton = right
+        closeButton = close
+        buttons.append(contentsOf: [visualize, left, right, close])
+    }
+
+    private func refreshEntries(_ game: GameCore) {
+        entries = game.db.listTemplates().map { name in
+            do {
+                guard let template = try game.db.getTemplate(named: name) else {
+                    return TemplateBrowserEntry(name: name, template: nil, summary: nil, error: "Missing template data")
+                }
+                return TemplateBrowserEntry(name: name, template: template,
+                                            summary: try summarizeObjectTemplate(template), error: nil)
+            } catch {
+                return TemplateBrowserEntry(name: name, template: nil, summary: nil, error: String(describing: error))
+            }
+        }
+        selectedIndex = entries.isEmpty ? 0 : min(selectedIndex, entries.count - 1)
+        scroll = min(scroll, maxScroll(lastVisibleRows))
+        if let name = visualizedName,
+           let entry = entries.first(where: { $0.name == name && $0.template != nil }) {
+            visualizedTemplate = entry.template
+        } else {
+            visualizedName = nil
+            visualizedTemplate = nil
+        }
+    }
+
+    private func frame(_ ui: UIManager) -> (x: Double, y: Double, w: Double, h: Double) {
+        let w = max(300, min(560, ui.width - 24))
+        let h = max(210, min(310, ui.height - 24))
+        return (((ui.width - w) / 2).rounded(.down), ((ui.height - h) / 2).rounded(.down), w, h)
+    }
+
+    private func listRect(_ ui: UIManager) -> (x: Double, y: Double, w: Double, h: Double) {
+        let f = frame(ui)
+        let w = min(190.0, max(132.0, f.w * 0.36))
+        return (f.x + 10, f.y + 30, w, f.h - 66)
+    }
+
+    private func previewRect(_ ui: UIManager) -> (x: Double, y: Double, w: Double, h: Double) {
+        let f = frame(ui)
+        let l = listRect(ui)
+        return (l.x + l.w + 10, f.y + 30, f.x + f.w - (l.x + l.w + 20), f.h - 66)
+    }
+
+    private func layoutButtons(_ ui: UIManager) {
+        let f = frame(ui)
+        let l = listRect(ui)
+        let p = previewRect(ui)
+        visualizeButton?.x = l.x
+        visualizeButton?.y = f.y + f.h - 28
+        visualizeButton?.w = min(90, l.w)
+        visualizeButton?.enabled = selectedEntry?.template != nil
+        closeButton?.x = f.x + f.w - 66
+        closeButton?.y = f.y + 6
+        leftButton?.x = p.x + 4
+        leftButton?.y = f.y + f.h - 28
+        rightButton?.x = p.x + 32
+        rightButton?.y = f.y + f.h - 28
+        let hasPreview = visualizedTemplate != nil
+        leftButton?.enabled = hasPreview
+        rightButton?.enabled = hasPreview
+    }
+
+    private var selectedEntry: TemplateBrowserEntry? {
+        entries.indices.contains(selectedIndex) ? entries[selectedIndex] : nil
+    }
+
+    private func maxScroll(_ visibleRows: Int) -> Int {
+        max(0, entries.count - max(1, visibleRows))
+    }
+
+    override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
+        layoutButtons(ui)
+        let f = frame(ui)
+        let l = listRect(ui)
+        let p = previewRect(ui)
+        let cv = ui.cv
+        ui.drawDarkBg(0.6)
+        ui.drawPanel(f.x, f.y, f.w, f.h)
+        cv.drawText("Saved Templates", f.x + 10, f.y + 10, 1, "#3f3f3f", shadow: false)
+        drawTemplateList(ui, rect: l)
+        drawTemplateDetails(ui, rect: p)
+        ui.drawButtons(self)
+    }
+
+    private func drawTemplateList(_ ui: UIManager, rect: (x: Double, y: Double, w: Double, h: Double)) {
+        let cv = ui.cv
+        cv.setFill("#8b8b8b")
+        cv.fillRect(rect.x, rect.y, rect.w, rect.h)
+        cv.setFill("#1c1c1c")
+        cv.fillRect(rect.x, rect.y, rect.w, 1)
+        cv.fillRect(rect.x, rect.y, 1, rect.h)
+        let rowH = 22.0
+        let visibleRows = max(1, Int((rect.h - 2) / rowH))
+        lastVisibleRows = visibleRows
+        scroll = max(0, min(scroll, maxScroll(visibleRows)))
+        if entries.isEmpty {
+            cv.drawText("No saved templates", rect.x + 6, rect.y + 8, 1, "#303030", shadow: false)
+            return
+        }
+        for row in 0..<visibleRows {
+            let idx = scroll + row
+            guard idx < entries.count else { break }
+            let y = rect.y + 1 + Double(row) * rowH
+            let selected = idx == selectedIndex
+            let hover = ui.mouseX >= rect.x && ui.mouseX < rect.x + rect.w && ui.mouseY >= y && ui.mouseY < y + rowH
+            cv.setFill(selected ? "#6f7dff" : hover ? "#9a9ac0" : (row % 2 == 0 ? "#b8b8b8" : "#ababab"))
+            cv.fillRect(rect.x + 1, y, rect.w - 2, rowH)
+            let entry = entries[idx]
+            let name = fitTemplateText(entry.name, maxWidth: Int(rect.w - 10))
+            cv.drawText(name, rect.x + 5, y + 4, 1, selected ? "#ffffff" : "#202020", shadow: false)
+            if let summary = entry.summary {
+                cv.drawText("\(summary.blockCount)b  \(summary.sizeX)x\(summary.sizeY)x\(summary.sizeZ)",
+                            rect.x + 5, y + 13, 1, selected ? "#e8e8ff" : "#404040", shadow: false)
+            } else {
+                cv.drawText("Corrupt", rect.x + 5, y + 13, 1, selected ? "#ffd0d0" : "#802020", shadow: false)
+            }
+        }
+        if entries.count > visibleRows {
+            let trackH = rect.h - 4
+            let thumbH = max(10, trackH * Double(visibleRows) / Double(entries.count))
+            let denom = max(1, entries.count - visibleRows)
+            let thumbY = rect.y + 2 + (trackH - thumbH) * Double(scroll) / Double(denom)
+            cv.setFill("#555555")
+            cv.fillRect(rect.x + rect.w - 5, rect.y + 2, 3, trackH)
+            cv.setFill("#f0f0f0")
+            cv.fillRect(rect.x + rect.w - 5, thumbY, 3, thumbH)
+        }
+    }
+
+    private func drawTemplateDetails(_ ui: UIManager, rect: (x: Double, y: Double, w: Double, h: Double)) {
+        let cv = ui.cv
+        cv.setFill("#2b3038")
+        cv.fillRect(rect.x, rect.y, rect.w, rect.h)
+        cv.setStroke("#101218")
+        cv.strokeRect(rect.x, rect.y, rect.w, rect.h)
+        guard let entry = selectedEntry else {
+            cv.drawTextCentered("No template selected", rect.x + rect.w / 2, rect.y + rect.h / 2 - 4, 1)
+            return
+        }
+        if let summary = entry.summary {
+            cv.drawText(fitTemplateText(summary.name, maxWidth: Int(rect.w - 12)), rect.x + 6, rect.y + 6, 1)
+            cv.drawText("\(summary.blockCount) blocks  \(summary.blockEntityCount) data blocks  \(summary.sizeX)x\(summary.sizeY)x\(summary.sizeZ)",
+                        rect.x + 6, rect.y + 16, 1, "#c8c8c8", shadow: false)
+            cv.drawText(fitTemplateText(summary.dominantBlockDisplayName, maxWidth: Int(rect.w - 12)),
+                        rect.x + 6, rect.y + 26, 1, "#a8c8ff", shadow: false)
+        } else {
+            cv.drawText(fitTemplateText(entry.name, maxWidth: Int(rect.w - 12)), rect.x + 6, rect.y + 6, 1)
+            cv.drawText("Corrupt template", rect.x + 6, rect.y + 16, 1, "#ff8080", shadow: false)
+            cv.drawText(fitTemplateText(entry.error ?? "Unable to load", maxWidth: Int(rect.w - 12)),
+                        rect.x + 6, rect.y + 26, 1, "#ffb0b0", shadow: false)
+        }
+        let modelRect = (x: rect.x + 6, y: rect.y + 40, w: rect.w - 12, h: rect.h - 48)
+        cv.setFill("#15191f")
+        cv.fillRect(modelRect.x, modelRect.y, modelRect.w, modelRect.h)
+        cv.setStroke("#3f4654")
+        cv.strokeRect(modelRect.x, modelRect.y, modelRect.w, modelRect.h)
+        guard let template = visualizedTemplate, visualizedName == entry.name else {
+            cv.drawTextCentered("No preview", modelRect.x + modelRect.w / 2, modelRect.y + modelRect.h / 2 - 4, 1, "#a8a8a8", shadow: false)
+            return
+        }
+        drawTemplatePreview(ui, template, rect: modelRect)
+    }
+
+    private func visualizeSelected() {
+        guard let entry = selectedEntry, let template = entry.template else { return }
+        visualizedName = entry.name
+        visualizedTemplate = template
+        yaw = 0.7
+        pitch = 0.45
+    }
+
+    private func fitTemplateText(_ text: String, maxWidth: Int) -> String {
+        var out = text
+        while textWidth(out) > maxWidth, out.count > 3 {
+            out.removeLast()
+        }
+        return out.count < text.count && out.count > 3 ? out + "." : out
+    }
+
+    private func blockKey(_ x: Int, _ y: Int, _ z: Int) -> Int {
+        x + y * 128 + z * 16_384
+    }
+
+    private func sampledPreviewBlocks(_ template: ObjectTemplate) -> [TemplateBlock] {
+        guard template.blocks.count > TEMPLATE_PREVIEW_MAX_BLOCKS else { return template.blocks }
+        let sorted = template.blocks.sorted {
+            if $0.dy != $1.dy { return $0.dy < $1.dy }
+            if $0.dz != $1.dz { return $0.dz < $1.dz }
+            return $0.dx < $1.dx
+        }
+        let stride = Double(sorted.count) / Double(TEMPLATE_PREVIEW_MAX_BLOCKS)
+        return (0..<TEMPLATE_PREVIEW_MAX_BLOCKS).map { sorted[min(sorted.count - 1, Int(Double($0) * stride))] }
+    }
+
+    private func drawTemplatePreview(_ ui: UIManager, _ template: ObjectTemplate,
+                                     rect: (x: Double, y: Double, w: Double, h: Double)) {
+        let cv = ui.cv
+        let blocks = sampledPreviewBlocks(template)
+        let occupied = Set(template.blocks.map { blockKey($0.dx, $0.dy, $0.dz) })
+        let sx = max(1.0, Double(template.sizeX))
+        let sy = max(1.0, Double(template.sizeY))
+        let sz = max(1.0, Double(template.sizeZ))
+        let scale = max(2.0, min(18.0, min(rect.w / max(1.0, sx + sz + 2), rect.h / max(1.0, sy + (sx + sz) * 0.45 + 2))))
+        let cx = rect.x + rect.w / 2
+        let cy = rect.y + rect.h / 2 + sy * scale * 0.18
+        let cYaw = Foundation.cos(yaw), sYaw = Foundation.sin(yaw)
+        let cPitch = Foundation.cos(pitch), sPitch = Foundation.sin(pitch)
+        let centerX = sx / 2, centerY = sy / 2, centerZ = sz / 2
+
+        func project(_ x: Double, _ y: Double, _ z: Double) -> (Double, Double, Double) {
+            let mx = x - centerX, my = y - centerY, mz = z - centerZ
+            let rx = mx * cYaw - mz * sYaw
+            let rz = mx * sYaw + mz * cYaw
+            let ry = my * cPitch - rz * sPitch
+            let depth = my * sPitch + rz * cPitch
+            return (cx + rx * scale, cy - ry * scale, depth)
+        }
+
+        let faces = makePreviewFaces(blocks: blocks, occupied: occupied, project: project)
+        for face in faces.sorted(by: { $0.depth < $1.depth }) {
+            guard face.points.count == 4 else { continue }
+            cv.setFill(face.color)
+            cv.fillQuad(face.points[0].0, face.points[0].1,
+                        face.points[1].0, face.points[1].1,
+                        face.points[2].0, face.points[2].1,
+                        face.points[3].0, face.points[3].1)
+        }
+        drawPreviewBounds(cv, template, project: project)
+        if template.blocks.count > blocks.count {
+            cv.drawText("\(blocks.count)/\(template.blocks.count) blocks", rect.x + 4, rect.y + rect.h - 12, 1, "#a8a8a8", shadow: false)
+        }
+    }
+
+    private func makePreviewFaces(blocks: [TemplateBlock], occupied: Set<Int>,
+                                  project: (Double, Double, Double) -> (Double, Double, Double)) -> [TemplatePreviewFace] {
+        let faceDefs: [(Int, Int, Int, Double, [(Double, Double, Double)])] = [
+            (0, 1, 0, 1.18, [(0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)]),
+            (0, -1, 0, 0.54, [(0, 0, 0), (0, 0, 1), (1, 0, 1), (1, 0, 0)]),
+            (0, 0, 1, 0.92, [(0, 0, 1), (0, 1, 1), (1, 1, 1), (1, 0, 1)]),
+            (0, 0, -1, 0.76, [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]),
+            (1, 0, 0, 0.98, [(1, 0, 0), (1, 0, 1), (1, 1, 1), (1, 1, 0)]),
+            (-1, 0, 0, 0.72, [(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)])
+        ]
+        var faces: [TemplatePreviewFace] = []
+        faces.reserveCapacity(blocks.count * 3)
+        for block in blocks {
+            let id = Int(block.cell >> 4)
+            guard id > 0, id < blockDefs.count else { continue }
+            let base = templateBlockHSL(blockDefs[id].name)
+            for face in faceDefs {
+                if occupied.contains(blockKey(block.dx + face.0, block.dy + face.1, block.dz + face.2)) { continue }
+                let projected = face.4.map { p in
+                    project(Double(block.dx) + p.0, Double(block.dy) + p.1, Double(block.dz) + p.2)
+                }
+                let depth = projected.reduce(0.0) { $0 + $1.2 } / Double(projected.count)
+                let color = templateHSLString(base.0, base.1, max(18, min(78, base.2 * face.3)))
+                faces.append(TemplatePreviewFace(points: projected.map { ($0.0, $0.1) }, depth: depth, color: color))
+            }
+        }
+        return faces
+    }
+
+    private func drawPreviewBounds(_ cv: UICanvas, _ template: ObjectTemplate,
+                                   project: (Double, Double, Double) -> (Double, Double, Double)) {
+        let sx = Double(template.sizeX), sy = Double(template.sizeY), sz = Double(template.sizeZ)
+        let corners = [
+            project(0, 0, 0), project(sx, 0, 0), project(sx, sy, 0), project(0, sy, 0),
+            project(0, 0, sz), project(sx, 0, sz), project(sx, sy, sz), project(0, sy, sz)
+        ]
+        let edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
+        cv.setStroke("rgba(255,255,255,0.22)")
+        for edge in edges {
+            cv.line(corners[edge.0].0, corners[edge.0].1, corners[edge.1].0, corners[edge.1].1, 0.75)
+        }
+    }
+
+    private func templateBlockHSL(_ name: String) -> (Double, Double, Double) {
+        if name.contains("leaves") || name.contains("moss") { return (118, 38, 34) }
+        if name.contains("grass") { return (98, 42, 38) }
+        if name.contains("dirt") || name.contains("mud") { return (28, 42, 33) }
+        if name.contains("sand") || name.contains("birch") || name.contains("bamboo") { return (45, 44, 58) }
+        if name.contains("oak") || name.contains("spruce") || name.contains("jungle") || name.contains("mangrove") || name.contains("cherry") { return (31, 42, 45) }
+        if name.contains("stone") || name.contains("deepslate") || name.contains("andesite") || name.contains("diorite") || name.contains("granite") { return (0, 0, 46) }
+        if name.contains("copper") { return (25, 58, 48) }
+        if name.contains("iron") { return (210, 8, 66) }
+        if name.contains("gold") { return (48, 72, 54) }
+        if name.contains("diamond") || name.contains("prismarine") { return (178, 46, 48) }
+        if name.contains("redstone") || name.contains("brick") { return (6, 58, 42) }
+        if name.contains("glass") { return (195, 34, 62) }
+        var h = 0
+        for scalar in name.unicodeScalars {
+            h = (h &* 31 &+ Int(scalar.value)) & 0x7fffffff
+        }
+        return (Double(h % 360), 34, 45)
+    }
+
+    private func templateHSLString(_ h: Double, _ s: Double, _ l: Double) -> String {
+        "hsl(\(Int(h)), \(Int(s)), \(Int(l)))"
+    }
+
+    override func onMouseDown(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double, _ btn: Int) -> Bool {
+        layoutButtons(ui)
+        if super.onMouseDown(ui, game, mx, my, btn) { return true }
+        let l = listRect(ui)
+        let rowH = 22.0
+        if mx >= l.x && mx < l.x + l.w && my >= l.y && my < l.y + l.h {
+            let idx = scroll + Int((my - l.y - 1) / rowH)
+            if entries.indices.contains(idx) {
+                selectedIndex = idx
+                if entries[idx].template == nil {
+                    visualizedName = nil
+                    visualizedTemplate = nil
+                }
+                return true
+            }
+        }
+        let p = previewRect(ui)
+        if visualizedTemplate != nil, mx >= p.x && mx < p.x + p.w && my >= p.y && my < p.y + p.h {
+            draggingPreview = true
+            lastDragX = mx
+            lastDragY = my
+            return true
+        }
+        return false
+    }
+
+    override func onMouseMove(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) {
+        guard draggingPreview else { return }
+        yaw += (mx - lastDragX) * 0.012
+        pitch = max(-0.95, min(0.95, pitch + (my - lastDragY) * 0.008))
+        lastDragX = mx
+        lastDragY = my
+    }
+
+    override func onMouseUp(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) {
+        draggingPreview = false
+    }
+
+    override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
+        let maxS = maxScroll(lastVisibleRows)
+        guard maxS > 0 else { return false }
+        scroll = max(0, min(maxS, scroll + (dy > 0 ? 1 : -1)))
+        return true
+    }
+
+    override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
+        switch key {
+        case "Enter", "NumpadEnter":
+            visualizeSelected()
+            return true
+        case "ArrowUp":
+            if !entries.isEmpty { selectedIndex = max(0, selectedIndex - 1); scroll = min(scroll, selectedIndex) }
+            return true
+        case "ArrowDown":
+            if !entries.isEmpty {
+                selectedIndex = min(entries.count - 1, selectedIndex + 1)
+                if selectedIndex >= scroll + lastVisibleRows { scroll = selectedIndex - lastVisibleRows + 1 }
+            }
+            return true
+        case "ArrowLeft":
+            yaw -= 0.18
+            return true
+        case "ArrowRight":
+            yaw += 0.18
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+// =============================================================================
 // Chat / command screen + chat log
 // =============================================================================
 struct ChatMessage {
@@ -1312,46 +2166,139 @@ func pushChat(_ text: String) {
     if chatLog.count > 100 { chatLog.removeFirst() }
 }
 
+private let chatLineHeight = 10.0
+
+private func openChatTextWidth(_ ui: UIManager) -> Int {
+    max(24, Int(ui.width - 8))
+}
+
+private func overlayChatTextWidth(_ ui: UIManager) -> Int {
+    max(24, Int(min(ui.width - 8, max(160, ui.width * 0.65))))
+}
+
+private func wrappedChatLines(_ maxWidth: Int) -> [String] {
+    chatLog.flatMap { wrapText($0.text, maxWidth) }
+}
+
+private func drawChatLine(_ cv: UICanvas, _ line: String, _ x: Double, _ y: Double, _ maxWidth: Int) {
+    cv.setFill("rgba(0,0,0,0.5)")
+    cv.fillRect(x - 2, y - 1, min(Double(maxWidth) + 4, Double(textWidth(line)) + 4), chatLineHeight)
+    cv.drawText(line, x, y, 1)
+}
+
 final class ChatScreen: Screen {
     var input = ""
     var historyIdx = -1
     static var history: [String] = []
     private let runCommandFn: (String) -> Void
+    private var scrollLines = 0
+    private var completionBaseInput: String?
+    private var completionLastInput: String?
+    private var completionMatches: [String] = []
+    private var completionIndex: Int?
 
     init(_ runCommand: @escaping (String) -> Void, _ prefill: String = "") {
         runCommandFn = runCommand
         input = prefill
         super.init()
     }
+    private func resetCompletion() {
+        completionBaseInput = nil
+        completionLastInput = nil
+        completionMatches.removeAll()
+        completionIndex = nil
+    }
+    private func inputLines(_ ui: UIManager, blink: String = "") -> [String] {
+        let lines = wrapText(input + blink, openChatTextWidth(ui))
+        return lines.isEmpty ? [blink] : Array(lines.suffix(4))
+    }
+    private func visibleOutputLineCount(_ ui: UIManager) -> Int {
+        let inputHeight = Double(inputLines(ui, blink: "_").count) * chatLineHeight + 4
+        return max(0, Int((ui.height - inputHeight - 18) / chatLineHeight))
+    }
+    private func maxScroll(_ ui: UIManager) -> Int {
+        max(0, wrappedChatLines(openChatTextWidth(ui)).count - visibleOutputLineCount(ui))
+    }
+    private func clampScroll(_ ui: UIManager) {
+        scrollLines = max(0, min(scrollLines, maxScroll(ui)))
+    }
+    private func completeInput() -> Bool {
+        let base: String
+        let cycle: Int?
+        if let completionBaseInput, input == completionLastInput, !completionMatches.isEmpty {
+            let next = ((completionIndex ?? -1) + 1) % completionMatches.count
+            base = completionBaseInput
+            cycle = next
+        } else {
+            base = input
+            cycle = nil
+        }
+        guard let result = completeCommandLineItem(input: base, cycleIndex: cycle) else {
+            resetCompletion()
+            return true
+        }
+        completionBaseInput = base
+        completionLastInput = result.completedInput
+        completionMatches = result.matches
+        completionIndex = result.selectedIndex
+        input = result.completedInput
+        return true
+    }
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         let cv = ui.cv
-        let maxN = min(chatLog.count, 18)
-        for i in 0..<maxN {
-            let msg = chatLog[chatLog.count - 1 - i]
-            let y = ui.height - 36 - Double(i) * 10
-            cv.setFill("rgba(0,0,0,0.5)")
-            cv.fillRect(2, y, min(ui.width * 0.6, Double(textWidth(msg.text)) + 4), 10)
-            cv.drawText(msg.text, 4, y + 1, 1)
+        let width = openChatTextWidth(ui)
+        let blink = Int(CACurrentMediaTime() * 1000 / 400) % 2 == 0 ? "_" : ""
+        let inputWrapped = inputLines(ui, blink: blink)
+        let inputHeight = Double(inputWrapped.count) * chatLineHeight + 4
+        let outputBottom = ui.height - inputHeight - 8
+        let visibleCount = max(0, Int((outputBottom - 4) / chatLineHeight))
+        let lines = wrappedChatLines(width)
+        let maxScroll = max(0, lines.count - visibleCount)
+        scrollLines = max(0, min(scrollLines, maxScroll))
+        if visibleCount > 0 && !lines.isEmpty {
+            let end = max(0, lines.count - scrollLines)
+            let start = max(0, end - visibleCount)
+            let visible = Array(lines[start..<end])
+            let topY = outputBottom - Double(visible.count) * chatLineHeight
+            for (i, line) in visible.enumerated() {
+                drawChatLine(cv, line, 4, topY + Double(i) * chatLineHeight + 1, width)
+            }
+            if maxScroll > 0 {
+                let thumbH = max(10.0, (outputBottom - 4) * Double(visibleCount) / Double(lines.count))
+                let trackH = max(thumbH, outputBottom - 4)
+                let thumbY = 2 + (trackH - thumbH) * (1 - Double(scrollLines) / Double(maxScroll))
+                cv.setFill("rgba(255,255,255,0.35)")
+                cv.fillRect(ui.width - 4, thumbY, 2, thumbH)
+            }
         }
         cv.setFill("rgba(0,0,0,0.6)")
-        cv.fillRect(2, ui.height - 14, ui.width - 4, 12)
-        let blink = Int(CACurrentMediaTime() * 1000 / 400) % 2 == 0 ? "_" : ""
-        cv.drawText(input + blink, 4, ui.height - 12, 1)
+        cv.fillRect(2, ui.height - inputHeight - 2, ui.width - 4, inputHeight)
+        for (i, line) in inputWrapped.enumerated() {
+            cv.drawText(line, 4, ui.height - inputHeight + 1 + Double(i) * chatLineHeight, 1)
+        }
     }
     override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
         input += ch
+        resetCompletion()
         return true
     }
     override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
         if key == "Backspace" {
             if !input.isEmpty { input.removeLast() }
+            resetCompletion()
             return true
         }
+        if key == "Tab" { return completeInput() }
         if key == "Enter" {
             if !input.trimmingCharacters(in: .whitespaces).isEmpty {
-                ChatScreen.history.append(input)
-                runCommandFn(input)
+                let submitted = input
+                ChatScreen.history.append(submitted)
+                resetCompletion()
+                ui.closeTop(game)
+                runCommandFn(submitted)
+                return true
             }
+            resetCompletion()
             ui.closeTop(game)
             return true
         }
@@ -1359,6 +2306,7 @@ final class ChatScreen: Screen {
             if !ChatScreen.history.isEmpty {
                 historyIdx = historyIdx < 0 ? ChatScreen.history.count - 1 : max(0, historyIdx - 1)
                 input = ChatScreen.history[historyIdx]
+                resetCompletion()
             }
             return true
         }
@@ -1366,10 +2314,21 @@ final class ChatScreen: Screen {
             if historyIdx >= 0 {
                 historyIdx = min(ChatScreen.history.count - 1, historyIdx + 1)
                 input = ChatScreen.history[historyIdx]
+                resetCompletion()
             }
             return true
         }
         return false
+    }
+    override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
+        let step = 3
+        if dy < 0 {
+            scrollLines += step
+        } else {
+            scrollLines -= step
+        }
+        clampScroll(ui)
+        return true
     }
 }
 
@@ -1379,18 +2338,23 @@ func drawChatOverlay(_ ui: UIManager) {
     let cv = ui.cv
     var shown = 0
     var i = chatLog.count - 1
+    let width = overlayChatTextWidth(ui)
     while i >= 0 && shown < 8 {
         let msg = chatLog[i]
         let age = now - msg.time
         if age > 8000 { break }
         let alpha = age > 6000 ? 1 - (age - 6000) / 2000 : 1
-        let y = ui.height - 44 - Double(shown) * 10
-        cv.globalAlpha = Float(alpha)
-        cv.setFill("rgba(0,0,0,0.45)")
-        cv.fillRect(2, y, min(ui.width * 0.6, Double(textWidth(msg.text)) + 4), 10)
-        cv.drawText(msg.text, 4, y + 1, 1)
-        cv.globalAlpha = 1
-        shown += 1
+        let lines = wrapText(msg.text, width)
+        for line in lines.reversed() {
+            if shown >= 8 { break }
+            let y = ui.height - 44 - Double(shown) * chatLineHeight
+            cv.globalAlpha = Float(alpha)
+            cv.setFill("rgba(0,0,0,0.45)")
+            cv.fillRect(2, y, min(Double(width) + 4, Double(textWidth(line)) + 4), chatLineHeight)
+            cv.drawText(line, 4, y + 1, 1)
+            cv.globalAlpha = 1
+            shown += 1
+        }
         i -= 1
     }
 }

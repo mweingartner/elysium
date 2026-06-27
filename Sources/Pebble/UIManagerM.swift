@@ -62,6 +62,16 @@ final class Slider: Button {
     }
 }
 
+final class CheckBox: Button {
+    let isChecked: () -> Bool
+
+    init(_ x: Double, _ y: Double, _ w: Double, _ h: Double, _ label: String,
+         isChecked: @escaping () -> Bool, _ onClick: @escaping () -> Void) {
+        self.isChecked = isChecked
+        super.init(x, y, w, h, label, onClick)
+    }
+}
+
 final class TextField {
     var text = ""
     var focused = false
@@ -324,6 +334,24 @@ final class UIManager {
     }
     func drawButton(_ b: Button, _ hover: Bool) {
         if !b.visible { return }
+        if let cb = b as? CheckBox {
+            let box = 10.0
+            let by = b.y + ((b.h - box) / 2).rounded(.down)
+            cv.setFill(hover ? "#d8d8d8" : "#c6c6c6")
+            cv.fillRect(b.x, by, box, box)
+            cv.setFill("#373737")
+            cv.fillRect(b.x, by, box, 1)
+            cv.fillRect(b.x, by, 1, box)
+            cv.setFill("#ffffff")
+            cv.fillRect(b.x + 1, by + box - 1, box - 1, 1)
+            cv.fillRect(b.x + box - 1, by + 1, 1, box - 1)
+            if cb.isChecked() {
+                cv.drawText("x", b.x + 2, by + 1, 1, "#202020", shadow: false)
+            }
+            cv.drawText(cb.label, b.x + box + 4, b.y + ((b.h - 8) / 2).rounded(.down), 1,
+                        hover ? "#ffffff" : "#e0e0e0")
+            return
+        }
         // vanilla widgets.png strips: 46 disabled / 66 normal / 86 hover, 200×20,
         // blitted as left+right halves so any width keeps both end caps
         if b.w <= 200, hasSheet("widgets") {

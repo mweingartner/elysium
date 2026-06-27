@@ -14,12 +14,25 @@ public enum GameMode {
     public static let creative = 1
 }
 
+public let CREATIVE_FLIGHT_DOUBLE_JUMP_MS = 280.0
+private let CREATIVE_FLIGHT_VERTICAL_SPEED = 0.35
+
 public final class Player: LivingEntity {
     public override var type: String { "player" }
     public override var isPlayer: Bool { true }
     private var _gameMode = GameMode.survival
     public override var gameMode: Int { _gameMode }
-    public func setGameMode(_ m: Int) { _gameMode = m }
+    private var lastCreativeJumpPress: Double?
+    private var creativeFlightLaunchTicks = 0
+
+    public func setGameMode(_ m: Int) {
+        _gameMode = m
+        if _gameMode != GameMode.creative {
+            flying = false
+            creativeFlightLaunchTicks = 0
+            lastCreativeJumpPress = nil
+        }
+    }
     /// inventory: 0-8 hotbar, 9-35 main
     public var inventory: [ItemStack?] = Array(repeating: nil, count: 36)
     public var enderChest: [ItemStack?] = Array(repeating: nil, count: 27)
@@ -45,6 +58,8 @@ public final class Player: LivingEntity {
     public var usingItem = false
     public var useItemTicks = 0
     public var useItemHand = "main"   // main | off
+    public var useItemSlot = -1
+    public var useItemItemId = -1
     public var fishingBobberId: Int? = nil
     private var _wearingPumpkin = false
     public override var wearingPumpkin: Bool { _wearingPumpkin }
@@ -68,6 +83,54 @@ public final class Player: LivingEntity {
     public override var mainHand: ItemStack? {
         get { inventory[selectedSlot] }
         set { inventory[selectedSlot] = newValue }
+    }
+
+    public func beginUsingMainHand() {
+        usingItem = true
+        useItemTicks = 0
+        useItemHand = "main"
+        useItemSlot = selectedSlot
+        useItemItemId = mainHand?.id ?? -1
+    }
+
+    public func cancelUsingItem() {
+        usingItem = false
+        useItemTicks = 0
+        useItemHand = "main"
+        useItemSlot = -1
+        useItemItemId = -1
+    }
+
+    public func usingMainHandStack() -> ItemStack? {
+        guard useItemHand == "main",
+              useItemSlot >= 0,
+              useItemSlot < inventory.count,
+              selectedSlot == useItemSlot,
+              let stack = inventory[useItemSlot],
+              stack.id == useItemItemId
+        else { return nil }
+        return stack
+    }
+
+    public func consumeUsingMainHand(_ n: Int) {
+        if gameMode == GameMode.creative { return }
+        guard useItemSlot >= 0, useItemSlot < inventory.count, let stack = inventory[useItemSlot] else { return }
+        stack.count -= n
+        if stack.count <= 0 { inventory[useItemSlot] = nil }
+    }
+
+    public func replaceUsingMainHand(_ stack: ItemStack) {
+        if gameMode == GameMode.creative {
+            if countItem(stack.id) == 0 { give(stack) }
+            return
+        }
+        guard useItemSlot >= 0, useItemSlot < inventory.count else { return }
+        if let current = inventory[useItemSlot], current.count > 1 {
+            current.count -= 1
+            if !give(stack) { spawnItem(world, x, y, z, stack) }
+        } else {
+            inventory[useItemSlot] = stack
+        }
     }
 
     public override func eyeY() -> Double {
@@ -174,6 +237,60 @@ public final class Player: LivingEntity {
         }
         onGround = false
         addExhaustion(sprinting ? 0.2 : 0.05)
+    }
+
+    @discardableResult
+    public func creativeJumpPressed(now: Double) -> Bool {
+        defer { lastCreativeJumpPress = now }
+        guard gameMode == GameMode.creative else { return false }
+        guard let last = lastCreativeJumpPress, now - last < CREATIVE_FLIGHT_DOUBLE_JUMP_MS else { return false }
+        return startCreativeFlight()
+    }
+
+    @discardableResult
+    public func startCreativeFlight() -> Bool {
+        guard gameMode == GameMode.creative else {
+            flying = false
+            return false
+        }
+        flying = true
+        elytraFlying = false
+        sneaking = false
+        onGround = false
+        noJumpDelay = 0
+        fallDistance = 0
+        creativeFlightLaunchTicks = 1
+        if vy < CREATIVE_FLIGHT_VERTICAL_SPEED { vy = CREATIVE_FLIGHT_VERTICAL_SPEED }
+        return true
+    }
+
+    public func travelCreativeFlight(ascend: Bool, descend: Bool) {
+        guard gameMode == GameMode.creative && flying else {
+            if gameMode != GameMode.creative { flying = false }
+            return
+        }
+        if ascend {
+            vy = CREATIVE_FLIGHT_VERTICAL_SPEED
+            creativeFlightLaunchTicks = 0
+        } else if descend {
+            vy = -CREATIVE_FLIGHT_VERTICAL_SPEED
+            creativeFlightLaunchTicks = 0
+        } else if creativeFlightLaunchTicks > 0 {
+            vy = max(vy, CREATIVE_FLIGHT_VERTICAL_SPEED)
+            creativeFlightLaunchTicks -= 1
+        } else {
+            vy = 0
+        }
+        let speed = sprinting ? 0.05 : 0.025
+        let sin = detSin(yaw), cos = detCos(yaw)
+        vx += (moveStrafe * cos - moveForward * sin) * speed * 2.5
+        vz += (moveForward * cos + moveStrafe * sin) * speed * 2.5
+        move(vx, vy, vz)
+        vx *= 0.85
+        vy *= 0.6
+        vz *= 0.85
+        fallDistance = 0
+        if onGround { flying = false }
     }
 
     public override func travel() {
@@ -582,7 +699,7 @@ public final class Player: LivingEntity {
     // ---- combat / death -------------------------------------------------------
     @discardableResult
     public override func hurt(_ amount: Double, _ source: String, _ attacker: Entity? = nil) -> Bool {
-        if gameMode == GameMode.creative && source != "void" { return false }
+        if gameMode == GameMode.creative { return false }
         let r = super.hurt(amount, source, attacker)
         if r {
             addExhaustion(0.1)

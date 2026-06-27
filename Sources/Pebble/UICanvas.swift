@@ -216,6 +216,17 @@ final class UICanvas {
         push(x0 + nx, y0 + ny); push(x1 + nx, y1 + ny); push(x1 - nx, y1 - ny)
         push(x0 + nx, y0 + ny); push(x1 - nx, y1 - ny); push(x0 - nx, y0 - ny)
     }
+    func fillQuad(_ x0: Double, _ y0: Double, _ x1: Double, _ y1: Double,
+                  _ x2: Double, _ y2: Double, _ x3: Double, _ y3: Double) {
+        mark(false)
+        let c = fillStyle * SIMD4<Float>(1, 1, 1, globalAlpha)
+        func push(_ px: Double, _ py: Double) {
+            let p = xf(Float(px), Float(py))
+            verts.append(contentsOf: [p.x, p.y, whiteUV.0, whiteUV.1, c.x, c.y, c.z, c.w])
+        }
+        push(x0, y0); push(x1, y1); push(x2, y2)
+        push(x0, y0); push(x2, y2); push(x3, y3)
+    }
 
     // ---- atlas slots (icons, tiles) -------------------------------------------------
     private var freeSlots: [(Int, Int)] = []
@@ -487,18 +498,5 @@ func textWidth(_ text: String) -> Int {
     return Int(w.rounded())
 }
 func wrapText(_ text: String, _ maxWidth: Int) -> [String] {
-    let words = text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
-    var lines: [String] = []
-    var cur = ""
-    for w in words {
-        let tryLine = cur.isEmpty ? w : cur + " " + w
-        if textWidth(tryLine) > maxWidth && !cur.isEmpty {
-            lines.append(cur)
-            cur = w
-        } else {
-            cur = tryLine
-        }
-    }
-    if !cur.isEmpty { lines.append(cur) }
-    return lines
+    wrapTextByWidth(text, maxWidth: maxWidth, measure: textWidth)
 }

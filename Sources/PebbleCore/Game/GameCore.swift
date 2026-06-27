@@ -180,6 +180,17 @@ public struct CamState {
     public init() {}
 }
 
+let CAMERA_WALK_BOB_SCALE = 0.5
+
+func cameraBobOffset(phase: Double, amplitude: Double, yaw: Double) -> (x: Double, y: Double, z: Double) {
+    let wave = detSin(phase * .pi)
+    return (
+        x: wave * amplitude * 0.3 * CAMERA_WALK_BOB_SCALE * detCos(yaw),
+        y: abs(wave) * amplitude * 1.2 * CAMERA_WALK_BOB_SCALE,
+        z: wave * amplitude * 0.3 * CAMERA_WALK_BOB_SCALE * detSin(yaw)
+    )
+}
+
 // =============================================================================
 // Streaming bookkeeping keys
 // =============================================================================
@@ -250,9 +261,9 @@ public final class GameCore {
     private var lastSlot = 0
     public var heldNameTime = 0
     public var targetedBlock: (x: Int, y: Int, z: Int, cell: Int)?
+    public var lastCursorHit: RaycastHit?
     public var perspective = 0          // 0 first, 1 back, 2 front
     private var sprintHeld = false
-    private var lastJumpPress = 0.0
     private var lastForwardPress = 0.0
 
     // loop
@@ -339,6 +350,8 @@ public final class GameCore {
     }
 
     public func applySettings() {
+        settings = sanitizedSettings(settings)
+        keybinds = sanitizedKeybinds(keybinds)
         saveSettings(settings)
         saveKeybinds(keybinds)
     }
@@ -1133,6 +1146,7 @@ public final class GameCore {
     /// flip mesh mode at runtime and rebuild every visible section
     public func setMeshMode(simple: Bool) {
         settings.simpleMesh = simple
+        settings = sanitizedSettings(settings)
         saveSettings(settings)
         remeshAll()
     }
@@ -1412,10 +1426,7 @@ public final class GameCore {
             if wantSprint && !p.sprinting && p.moveForward > 0 { p.sprinting = true }
             if !wantSprint || p.moveForward <= 0 || p.horizontalCollision { p.sprinting = false }
             sprintHeld = p.sprinting
-            // creative flight vertical
-            if p.flying {
-                p.vy = (k("jump") ? 0.35 : 0) + (k("sneak") ? -0.35 : 0)
-            }
+            if p.gameMode != GameMode.creative && p.flying { p.flying = false }
             // elytra start: jump while airborne
             if k("jump") && !p.onGround && !p.elytraFlying && p.vy < 0 && !p.flying {
                 if p.startElytra() {
@@ -1460,15 +1471,8 @@ public final class GameCore {
                 p.fallDistance = 0
                 p.vx = 0; p.vy = 0; p.vz = 0
             } else if p.flying {
-                // creative flight: friction-only horizontal w/ input
-                let speed = p.sprinting ? 0.05 : 0.025
-                let sin = detSin(p.yaw), cos = detCos(p.yaw)
-                p.vx += (p.moveStrafe * cos - p.moveForward * sin) * speed * 2.5
-                p.vz += (p.moveForward * cos + p.moveStrafe * sin) * speed * 2.5
-                p.move(p.vx, p.vy, p.vz)
-                p.vx *= 0.85; p.vy *= 0.6; p.vz *= 0.85
-                p.fallDistance = 0
-                if p.onGround { p.flying = false }
+                p.travelCreativeFlight(ascend: keys.contains(keybinds["jump"] ?? ""),
+                                       descend: keys.contains(keybinds["sneak"] ?? ""))
             } else if p.elytraFlying {
                 p.move(p.vx, p.vy, p.vz)
             } else if p.sleepTicks <= 0 {
@@ -1651,22 +1655,25 @@ public final class GameCore {
     private func tickUsing() {
         let p = player!
         if p.dead || p.deathTime > 0 || (host?.hasScreen() ?? false) {
-            if p.usingItem { p.usingItem = false }
+            if p.usingItem { p.cancelUsingItem() }
             return
         }
         let ctx = interactCtx()
         if p.usingItem {
+            guard let held = p.usingMainHandStack() else {
+                p.cancelUsingItem()
+                return
+            }
             if !rightDown {
                 releaseUsingItem(ctx)
             } else {
                 p.useItemTicks += 1
-                let held = p.mainHand
-                let def = held.map { itemDef($0.id) }
-                if let def, def.food != nil || def.name == "potion" || def.name == "milk_bucket" {
+                let def = itemDef(held.id)
+                if def.food != nil || def.name == "potion" || def.name == "milk_bucket" {
                     if p.useItemTicks % 4 == 0 {
                         host?.playSound("entity.generic.eat", p.x, p.y, p.z, 0.4, 0.9 + Double.random(in: 0..<0.3))
                     }
-                    if p.useItemTicks >= 32 { finishUsingItem(ctx) }
+                    if p.useItemTicks >= heldUseDurationTicks(def) { finishUsingItem(ctx) }
                 }
             }
         } else if rightDown && useCooldown <= 0 {
@@ -2052,13 +2059,9 @@ public final class GameCore {
             if code.hasPrefix("Digit"), code.count == 6, let n = Int(code.suffix(1)), n >= 1, n <= 9 {
                 p.selectedSlot = n - 1
             }
-            // double-space → toggle creative flight
+            // double-space enables creative flight
             if code == keybinds["jump"] {
-                if now - lastJumpPress < 280 && p.gameMode == GameMode.creative {
-                    p.flying = !p.flying
-                    if p.flying { p.vy = 0 }
-                }
-                lastJumpPress = now
+                _ = p.creativeJumpPressed(now: now)
             }
             if code == keybinds["sprint"] { sprintHeld = true }
         }
@@ -2115,9 +2118,10 @@ public final class GameCore {
         if settings.viewBobbing && p.vehicle == nil {
             let bp = prevBobPhase + (bobPhase - prevBobPhase) * partial
             let ba = prevBobAmp + (bobAmp - prevBobAmp) * partial
-            eyeY += abs(detSin(bp * .pi)) * ba * 1.2
-            cx += detSin(bp * .pi) * ba * 0.3 * detCos(p.yaw)
-            cz += detSin(bp * .pi) * ba * 0.3 * detSin(p.yaw)
+            let bob = cameraBobOffset(phase: bp, amplitude: ba, yaw: p.yaw)
+            eyeY += bob.y
+            cx += bob.x
+            cz += bob.z
         }
         var yaw = p.yaw, pitch = p.pitch
         if perspective == 2 {

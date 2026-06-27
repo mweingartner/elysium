@@ -3,7 +3,7 @@
 #   ./pebble install    raw checkout → signed app in ~/Applications (+ this CLI on PATH)
 #   pebble update       pull the latest from GitHub, rebuild, swap the live app
 #   pebble run          launch the installed app
-#   pebble test         run the golden test suite
+#   pebble test         run XCTest + the golden test suite
 set -euo pipefail
 
 # resolve symlinks (the PATH install is a symlink to this script) so REPO is
@@ -62,6 +62,10 @@ build() {
     fi
 }
 
+verify_assets() {
+    (cd "$REPO" && ./scripts/verify-pack-assets.sh)
+}
+
 bundle() {
     say "Assembling $APP_NAME.app…"
     local stage="$REPO/dist/$APP_NAME.app"
@@ -99,6 +103,7 @@ link_cli() {
 
 cmd_install() {
     need_swift
+    verify_assets
     build
     bundle
     deploy
@@ -117,7 +122,7 @@ cmd_update() {
 }
 
 cmd_run()  { open "$APP" 2>/dev/null || die "Pebble isn't installed yet — run: pebble install"; }
-cmd_test() { need_swift; (cd "$REPO" && swift run -c release pebsmoke); }
+cmd_test() { need_swift; (cd "$REPO" && swift test && swift run -c release pebsmoke); }
 
 case "${1:-}" in
     install) cmd_install ;;
@@ -130,6 +135,6 @@ case "${1:-}" in
         echo "  ./pebble install    build from source and install ~/Applications/$APP_NAME.app"
         echo "  pebble update       pull the latest version and update the live app"
         echo "  pebble run          launch Pebble"
-        echo "  pebble test         run the golden test suite"
+        echo "  pebble test         run XCTest + the golden test suite"
         ;;
 esac

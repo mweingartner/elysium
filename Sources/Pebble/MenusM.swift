@@ -335,6 +335,9 @@ final class PauseScreen: Screen {
 final class SettingsScreen: Screen {
     var tab = "video"
     var bindingKey: String?
+    var aiModelField: TextField?
+    var aiModelChoices: [String] = []
+    var aiStatus = ""
 
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         rebuild(ui, game)
@@ -342,12 +345,18 @@ final class SettingsScreen: Screen {
     func rebuild(_ ui: UIManager, _ game: GameCore) {
         buttons = []
         sliders = []
+        fields = []
+        aiModelField = nil
         let cx = (ui.width / 2).rounded(.down)
         // tabs
-        let tabs = ["video", "audio", "controls", "accessibility"]
+        let tabs = ["video", "audio", "controls", "accessibility", "ai"]
+        let tabW = 64.0
+        let tabStart = cx - (Double(tabs.count) * tabW) / 2
         for (i, t) in tabs.enumerated() {
-            let b = Button(cx - 160 + Double(i) * 80, 20, 78, 16, t.prefix(1).uppercased() + t.dropFirst(), { [weak self, weak ui, weak game] in
+            let label = t == "accessibility" ? "Access" : t.prefix(1).uppercased() + String(t.dropFirst())
+            let b = Button(tabStart + Double(i) * tabW, 20, tabW - 2, 16, label, { [weak self, weak ui, weak game] in
                 guard let self, let ui, let game else { return }
+                self.saveAIModelIfNeeded(game)
                 self.tab = t
                 self.bindingKey = nil
                 self.rebuild(ui, game)
@@ -498,7 +507,7 @@ final class SettingsScreen: Screen {
                 buttons.append(b)
                 if col == 1 { y += 20 }
             }
-        } else {
+        } else if tab == "accessibility" {
             toggle("Subtitles", { game.settings.subtitles }, { game.settings.subtitles = $0 }, 0)
             toggle("Auto-Jump", { game.settings.autoJump }, { game.settings.autoJump = $0 }, 1)
             y += 22
@@ -513,12 +522,79 @@ final class SettingsScreen: Screen {
                     game?.settings.darknessPulse = v
                     game?.applySettings()
                 }))
+        } else if tab == "ai" {
+            let modelField = TextField(cx - 160, y + 14, W * 2 + 8, 18, "ollama model")
+            modelField.maxLength = 128
+            modelField.text = game.settings.aiOllamaModel
+            modelField.caret = modelField.text.count
+            fields.append(modelField)
+            aiModelField = modelField
+
+            buttons.append(Button(cx - 160, y + 38, W, 18, "Save Model", { [weak self, weak game] in
+                guard let self, let game else { return }
+                self.saveAIModelIfNeeded(game)
+                self.aiStatus = game.settings.aiOllamaModel.isEmpty ? "Model cleared" : "Saved \(game.settings.aiOllamaModel)"
+            }))
+            buttons.append(Button(cx - 2, y + 38, W, 18, "Refresh Models", { [weak self, weak ui, weak game] in
+                guard let self, let ui, let game else { return }
+                self.saveAIModelIfNeeded(game)
+                self.aiStatus = "Refreshing..."
+                pebbleOllamaAgent.fetchModels { [weak self, weak ui, weak game] result in
+                    guard let self, let ui, let game else { return }
+                    switch result {
+                    case .success(let names):
+                        self.aiModelChoices = names
+                        if game.settings.aiOllamaModel.isEmpty, let first = names.first {
+                            game.settings.aiOllamaModel = first
+                            game.applySettings()
+                        }
+                        self.aiStatus = names.isEmpty ? "No local models found" : "Loaded \(names.count) local models"
+                    case .failure(let error):
+                        self.aiStatus = "Ollama unavailable: \(error.localizedDescription)"
+                    }
+                    self.rebuild(ui, game)
+                }
+            }))
+            let next = Button(cx - 160, y + 60, W, 18, "Next Model", { [weak self, weak game] in
+                guard let self, let game, !self.aiModelChoices.isEmpty else { return }
+                let current = sanitizedOllamaModelName(self.aiModelField?.text ?? game.settings.aiOllamaModel)
+                let idx = self.aiModelChoices.firstIndex(of: current) ?? -1
+                let next = self.aiModelChoices[(idx + 1) % self.aiModelChoices.count]
+                self.aiModelField?.text = next
+                self.aiModelField?.caret = next.count
+                game.settings.aiOllamaModel = next
+                game.applySettings()
+                self.aiStatus = "Selected \(next)"
+            })
+            next.enabled = !aiModelChoices.isEmpty
+            buttons.append(next)
+            buttons.append(Button(cx - 2, y + 60, W, 18, "Clear Model", { [weak self, weak game] in
+                guard let self, let game else { return }
+                self.aiModelField?.text = ""
+                self.aiModelField?.caret = 0
+                game.settings.aiOllamaModel = ""
+                game.applySettings()
+                self.aiStatus = "Model cleared"
+            }))
         }
-        buttons.append(Button(cx - 100, ui.height - 30, 200, 20, "Done", { [weak ui, weak game] in
+        buttons.append(Button(cx - 100, ui.height - 30, 200, 20, "Done", { [weak self, weak ui, weak game] in
             guard let ui, let game else { return }
+            self?.saveAIModelIfNeeded(game)
             game.applySettings()
             ui.closeTop(game)
         }))
+    }
+    func saveAIModelIfNeeded(_ game: GameCore) {
+        guard tab == "ai", let field = aiModelField else { return }
+        var model = sanitizedOllamaModelName(field.text)
+        if !model.isEmpty && !isAllowedLocalOllamaModelName(model) {
+            model = ""
+            aiStatus = "Cloud models are not allowed"
+        }
+        field.text = model
+        field.caret = min(field.caret, field.text.count)
+        game.settings.aiOllamaModel = model
+        game.applySettings()
     }
     override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
         if let binding = bindingKey {
@@ -526,6 +602,11 @@ final class SettingsScreen: Screen {
             bindingKey = nil
             game.applySettings()
             rebuild(ui, game)
+            return true
+        }
+        if tab == "ai", key == "Enter" {
+            saveAIModelIfNeeded(game)
+            aiStatus = game.settings.aiOllamaModel.isEmpty ? "Model cleared" : "Saved \(game.settings.aiOllamaModel)"
             return true
         }
         return super.onKey(ui, game, key)
@@ -537,6 +618,13 @@ final class SettingsScreen: Screen {
             ui.drawDirtBg()
         }
         ui.cv.drawTextCentered("Options", ui.width / 2, 6, 1)
+        if tab == "ai" {
+            let cx = (ui.width / 2).rounded(.down)
+            ui.cv.drawText("Ollama Model", cx - 160, 46, 1)
+            if !aiStatus.isEmpty {
+                ui.cv.drawText(aiStatus, cx - 160, 132, 1, "#a0a0a0")
+            }
+        }
         ui.drawButtons(self)
     }
 }

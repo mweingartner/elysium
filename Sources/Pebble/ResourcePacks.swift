@@ -12,6 +12,29 @@ import Foundation
 import ImageIO
 import PebbleCore
 
+private let MAX_PACK_ARCHIVE_BYTES = 512 << 20
+private let MAX_PACK_FILE_BYTES = 64 << 20
+private let MAX_PACK_ENTRIES = 100_000
+
+private func safePackPath(_ path: String) -> Bool {
+    if path.isEmpty || path.hasPrefix("/") || path.hasPrefix("\\") || path.contains("\0") { return false }
+    return !path.split(separator: "/", omittingEmptySubsequences: false).contains("..")
+}
+
+private func preferredTextureRoot(from paths: Dictionary<String, String>.Keys) -> String {
+    var namespaces: Set<String> = []
+    for key in paths {
+        let lower = key.lowercased()
+        guard let assets = lower.range(of: "assets/") else { continue }
+        let parts = lower[assets.upperBound...].split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count >= 3, !parts[0].isEmpty, parts[1] == "textures" else { continue }
+        namespaces.insert(String(parts[0]))
+    }
+    guard !namespaces.isEmpty else { return "" }
+    let namespace = namespaces.contains("minecraft") ? "minecraft" : namespaces.sorted()[0]
+    return "assets/\(namespace)/textures/"
+}
+
 // =============================================================================
 // minimal read-only zip (central directory + raw deflate via Compression)
 // =============================================================================
@@ -27,6 +50,9 @@ final class MiniZip {
     private(set) var entries: [String: Entry] = [:]
 
     init?(url: URL) {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true,
+              (values.fileSize ?? 0) <= MAX_PACK_ARCHIVE_BYTES else { return nil }
         guard let d = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
         data = d
         guard parseCentralDirectory() else { return nil }
@@ -53,6 +79,7 @@ final class MiniZip {
         }
         guard eocd >= 0 else { return false }
         let count = u16(eocd + 10)
+        guard count <= MAX_PACK_ENTRIES else { return false }
         var off = u32(eocd + 16)
         for _ in 0..<count {
             guard off + 46 <= n, u32(off) == 0x02014b50 else { return false }
@@ -63,8 +90,10 @@ final class MiniZip {
             let extraLen = u16(off + 30)
             let commentLen = u16(off + 32)
             let localOffset = u32(off + 42)
-            guard off + 46 + nameLen <= n else { return false }
+            guard off + 46 + nameLen <= n,
+                  off + 46 + nameLen + extraLen + commentLen <= n else { return false }
             if let name = String(data: data.subdata(in: (off + 46)..<(off + 46 + nameLen)), encoding: .utf8),
+               safePackPath(name),
                !name.hasSuffix("/") {
                 entries[name] = Entry(method: method, compSize: compSize,
                                       uncompSize: uncompSize, localOffset: localOffset)
@@ -84,17 +113,24 @@ final class MiniZip {
         let start = lo + 30 + nameLen + extraLen
         guard start + e.compSize <= data.count else { return nil }
         let raw = data.subdata(in: start..<(start + e.compSize))
-        if e.method == 0 { return raw }
+        if e.method == 0 {
+            guard e.uncompSize == e.compSize, e.uncompSize <= MAX_PACK_FILE_BYTES else { return nil }
+            return raw
+        }
         guard e.method == 8 else { return nil }
         // uncompSize is an untrusted u32 from the central directory — cap it
         // so a tiny crafted zip can't force a multi-GB allocation
-        guard e.uncompSize <= 64 << 20 else { return nil }
+        guard e.uncompSize <= MAX_PACK_FILE_BYTES else { return nil }
+        if e.uncompSize == 0 { return Data() }
+        guard !raw.isEmpty else { return nil }
         var out = Data(count: e.uncompSize)
         let written = out.withUnsafeMutableBytes { dst in
             raw.withUnsafeBytes { src in
-                compression_decode_buffer(
-                    dst.bindMemory(to: UInt8.self).baseAddress!, e.uncompSize,
-                    src.bindMemory(to: UInt8.self).baseAddress!, raw.count,
+                guard let dstBase = dst.bindMemory(to: UInt8.self).baseAddress,
+                      let srcBase = src.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                return compression_decode_buffer(
+                    dstBase, e.uncompSize,
+                    srcBase, raw.count,
                     nil, COMPRESSION_ZLIB)
             }
         }
@@ -229,12 +265,23 @@ final class ResourcePack {
         var isDir: ObjCBool = false
         FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
         if isDir.boolValue {
+            guard let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
+                  values.isSymbolicLink != true else { return nil }
             zip = nil
             folderURL = url
             displayName = fileName
-            if let e = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil) {
+            let root = url.standardizedFileURL.path
+            if let e = FileManager.default.enumerator(
+                at: url,
+                includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ) {
                 for case let f as URL in e where f.pathExtension != "" {
-                    let rel = f.path.replacingOccurrences(of: url.path + "/", with: "")
+                    if pathIndex.count >= MAX_PACK_ENTRIES { return nil }
+                    let full = f.standardizedFileURL.path
+                    guard full.hasPrefix(root + "/") else { continue }
+                    let rel = String(full.dropFirst(root.count + 1))
+                    guard safePackPath(rel) else { continue }
                     pathIndex[rel.lowercased()] = rel
                 }
             }
@@ -247,14 +294,11 @@ final class ResourcePack {
             return nil
         }
         guard pathIndex.keys.contains(where: { $0.hasSuffix("pack.mcmeta") }) else { return nil }
-        // texture root: first assets/<ns>/textures/ prefix the pack contains
-        for k in pathIndex.keys {
-            if let r = k.range(of: "assets/"), k[r.upperBound...].contains("/textures/") {
-                let ns = k[r.upperBound...].split(separator: "/")[0]
-                texRoot = "assets/\(ns)/textures/"
-                break
-            }
-        }
+        // Texture packs often include helper namespaces (forge/fabric/realms).
+        // Block/item/UI art is vanilla-compatible only under minecraft; using
+        // dictionary iteration here made launches randomly fall back to the
+        // procedural atlas. Prefer minecraft and keep fallback deterministic.
+        texRoot = preferredTextureRoot(from: pathIndex.keys)
         parseMeta()
     }
 
@@ -264,7 +308,14 @@ final class ResourcePack {
         for candidate in [path, prefixedPath(path)] {
             guard let c = candidate, let exact = pathIndex[c.lowercased()] else { continue }
             if let z = zip { return z.file(exact) }
-            if let dir = folderURL { return try? Data(contentsOf: dir.appendingPathComponent(exact)) }
+            if let dir = folderURL {
+                let url = dir.appendingPathComponent(exact)
+                guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+                      values.isRegularFile == true,
+                      values.isSymbolicLink != true,
+                      (values.fileSize ?? 0) <= MAX_PACK_FILE_BYTES else { continue }
+                return try? Data(contentsOf: url, options: .mappedIfSafe)
+            }
         }
         return nil
     }
@@ -341,12 +392,26 @@ func resourcePacksDir() -> URL {
 let DEFAULT_PACK_FILE = "Faithful 32x - 1.20.1.zip"
 let DEFAULT_PACK_LABEL = "Default (Faithful 32x)"
 
-/// restore the default pack into the packs folder if it went missing
+private func sameFileContents(_ lhs: String, _ rhs: String) -> Bool {
+    let lhsURL = URL(fileURLWithPath: lhs)
+    let rhsURL = URL(fileURLWithPath: rhs)
+    guard let lhsValues = try? lhsURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+          let rhsValues = try? rhsURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+          lhsValues.isRegularFile == true,
+          rhsValues.isRegularFile == true,
+          lhsValues.fileSize == rhsValues.fileSize,
+          let lhsData = try? Data(contentsOf: lhsURL, options: .mappedIfSafe),
+          let rhsData = try? Data(contentsOf: rhsURL, options: .mappedIfSafe) else { return false }
+    return lhsData == rhsData
+}
+
+/// restore the bundled default pack if the app-support copy is missing or stale
 func ensureDefaultPack() {
     let dest = resourcePacksDir().appendingPathComponent(DEFAULT_PACK_FILE)
-    if !FileManager.default.fileExists(atPath: dest.path),
-       let bundled = bundleResourcePath(DEFAULT_PACK_FILE) {
-        try? FileManager.default.copyItem(atPath: bundled, toPath: dest.path)
+    guard let bundled = bundleResourcePath(DEFAULT_PACK_FILE),
+          !sameFileContents(dest.path, bundled) else { return }
+    try? FileManager.default.removeItem(at: dest)
+    if (try? FileManager.default.copyItem(atPath: bundled, toPath: dest.path)) != nil {
         print("[packs] default pack restored from app bundle")
     }
 }

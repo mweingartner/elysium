@@ -32,7 +32,7 @@ Pebble is an original fan re-creation inspired by Minecraft: Java Edition 1.20. 
 | Biomes | 63 (overworld, nether, end, cave biomes) |
 | Entity types | 100 (55+ mobs with full AI, vehicles, projectiles) |
 | Structures | 19 types, 30+ variants (villages, strongholds, bastions, end cities, ancient cities…) |
-| Golden regression checks | 456, all green (`pebble test`) |
+| Golden regression checks | 456, all green (`swift run -c release pebsmoke`) |
 | Renderer | Metal, 15+ passes, runtime-compiled MSL |
 | Textures | [Faithful 32x](https://faithfulpack.net) by the Faithful team (third-party, fully credited) |
 | Audio assets | 0 — fully synthesized (AVAudioSourceNode + biquad filters) |
@@ -47,7 +47,10 @@ Pebble is an original fan re-creation inspired by Minecraft: Java Edition 1.20. 
 - **Structures** — villages with professioned villagers and working trades, strongholds with the portal room, mineshafts, desert/jungle temples, igloos with basements, witch huts, ocean monuments and ruins, shipwrecks, buried treasure, ruined portals, woodland mansions, amethyst geodes, ancient cities with sculk and shriekers.
 - **Mobs & AI** — 55+ mobs with A* pathfinding, goal-based AI (breeding, taming, fleeing, pack hunting), villager gossip and trades, piglin bartering, raids with waves and Hero of the Village, and the three bosses: Ender Dragon, Wither, Warden (with vibration detection).
 - **Redstone** — wire networks with 0–15 power levels, repeaters with locking, comparators that read containers, pistons with quasi-connectivity and slime/honey push sets, observers, dispensers, hoppers, rails, sculk sensors.
-- **Items & systems** — shaped/shapeless/tag crafting, smelting in three furnace types, brewing, enchanting with 39 enchantments and a compatibility matrix, anvils, grindstones, smithing with armor trims, stonecutters, loot tables with fortune/looting, fishing, archaeology with sherds and decorated pots, advancements.
+- **Items & systems** — shaped/shapeless/tag crafting with recipe menus that auto-fill available ingredients, crafting tables that can draw from containers within 25 blocks, smelting in three furnace types, brewing, enchanting with 39 enchantments and a compatibility matrix, anvils, grindstones, smithing with armor trims, stonecutters, loot tables with fortune/looting, fishing, archaeology with sherds and decorated pots, advancements.
+- **Creative mode** — instant block breaking, flight, an infinite hotbar, and full player invulnerability while building.
+- **Object templates** — point at a connected construction and run `/clone the target with new name "name"` to save a local template, then `/place object "name" at the cursor` or `/place "name" at target` to replicate it later with blocks, block entities, and container contents intact. `/listTemplates` opens a browser for saved templates with a rotatable 3D preview.
+- **Local AI agent** — press T and run `/ai <request>` to ask a configured local Ollama model to inspect the current game state, give registered items, or place registered block items at the cursor. The model preference lives in Options -> AI, only talks to `http://localhost:11434`, and filters/rejects cloud-tagged Ollama models.
 - **Vanilla-exact player physics** — walk 4.317 b/s, sprint 5.612 b/s, jump apex 1.2522 blocks, sprint-jumping, water/lava/elytra movement, ice slipperiness, soul sand, honey — verified by independent-derivation tests in the suite.
 - **Faithful 32x textures, built in** — the complete [Faithful 32x](https://faithfulpack.net) art (third-party, fully credited — see [Disclaimer](#disclaimer)) ships inside the app and loads through Pebble's own zip/`.mcmeta` reader: atlas textures, animations with interpolation, GUIs, fonts, entity skins, and sun/moon art. Self-restoring if the file goes missing.
 - **Ultra graphics** — a built-in enhanced pipeline: SSAO, shadow-marched volumetric god rays, Poisson soft shadows, and ACES tonemapping. One toggle in Options → Video.
@@ -68,20 +71,20 @@ That builds in release mode, assembles a signed `Pebble.app`, installs it to `~/
 ./pebble install    build from source and install ~/Applications/Pebble.app
 pebble update       pull the latest version, rebuild, swap the live app
 pebble run          launch Pebble
-pebble test         run the 456-check golden test suite
+pebble test         run XCTest plus the 456-check golden suite
 ```
 
 For development you can also run straight from the checkout — `swift run -c release Pebble` — and the app will find its packaged assets in `packaging/`.
 
 ## Controls
 
-WASD to move, mouse to look, Space to jump, Shift to sneak, Ctrl (or double-tap forward) to sprint, E for inventory, Esc to pause. F1 hides the GUI, F3 toggles the debug overlay, F11 toggles fullscreen (also in Options → Video). Scroll the hotbar with the wheel or trackpad. Everything is rebindable in Options → Controls.
+WASD to move, mouse to look, Space to jump, Shift to sneak, Ctrl (or double-tap forward) to sprint, E for inventory, Esc to pause. Press T for chat and slash commands, including `/ai <request>` when a local Ollama model is configured. The chat/command line wraps long text, scrolls output with the mouse wheel or trackpad, and Tab-completes registered item ids. Crafting recipe popups support type-to-select search, Backspace/Delete correction, and Enter selection. Object-template commands are `/clone the target with new name "name"`, `/place object "name" at the cursor`, `/place "name" at target`, and `/listTemplates` (alias `/templates`). In creative mode, double-tap Space to fly; Space ascends and Shift descends while airborne. F1 hides the GUI, F3 toggles the debug overlay, F11 toggles fullscreen (also in Options → Video). Scroll the hotbar with the wheel or trackpad. Everything is rebindable in Options → Controls.
 
 ## Where things live
 
 | Path | What |
 |---|---|
-| `~/Library/Application Support/Pebble/pebble.db` | All worlds, chunks, players, advancements (single SQLite database) |
+| `~/Library/Application Support/Pebble/pebble.db` | All worlds, chunks, players, advancements, and object templates (single SQLite database) |
 | `~/Library/Application Support/Pebble/settings.json` + `keybinds.json` | Settings and keybinds |
 
 To uninstall completely: delete `~/Applications/Pebble.app`, `~/Library/Application Support/Pebble/`, and the `pebble` symlink on your PATH (`/opt/homebrew/bin/pebble` or `/usr/local/bin/pebble`).
@@ -100,6 +103,7 @@ Sources/PebbleCore/   the engine — headless, no AppKit, fully testable
   Game/               GameCore tick orchestrator, SQLite saves, settings
 Sources/Pebble/       the macOS app — window, Metal renderer, UI, audio, input
 Sources/pebsmoke/     golden test harness (456 checks against goldens/*.json)
+Tests/PebbleCoreTests/ focused XCTest coverage for settings and save hardening
 goldens/              golden baseline files pinning engine behavior
 packaging/            Info.plist, icon, logo, title art, bundled Faithful textures
 pebble                the build/install/test CLI
@@ -109,7 +113,7 @@ A deeper tour lives in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## The determinism contract
 
-Pebble's engine is **fully deterministic**: a portable fdlibm implementation of `sin/cos/atan2` (pure IEEE-754 operations, no platform math library), 32-bit-wrapping integer hashes, and seeded RNG everywhere mean the same seed produces the identical world — bit for bit, on any machine, across releases. That contract is enforced by golden baseline files: `pebble test` runs 456 checks covering terrain hashes over full chunk pipelines, a 55-mob zoo ticked 200 steps and compared at checkpoints, 911 transcendental-math probes, recipe/enchant/loot RNG lockstep, a redstone contraption timeline, and independent derivations of vanilla physics constants. The goldens are the contract that keeps the engine honest — a change that moves a single block in an existing world fails the suite.
+Pebble's engine is **fully deterministic**: a portable fdlibm implementation of `sin/cos/atan2` (pure IEEE-754 operations, no platform math library), 32-bit-wrapping integer hashes, and seeded RNG everywhere mean the same seed produces the identical world — bit for bit, on any machine, across releases. That contract is enforced by golden baseline files: `swift run -c release pebsmoke` runs 456 checks covering terrain hashes over full chunk pipelines, a 55-mob zoo ticked 200 steps and compared at checkpoints, 911 transcendental-math probes, recipe/enchant/loot RNG lockstep, a redstone contraption timeline, and independent derivations of vanilla physics constants. `pebble test` runs the SwiftPM XCTest target first, then the golden suite. The goldens are the contract that keeps the engine honest — a change that moves a single block in an existing world fails the suite.
 
 ## Development hooks
 
@@ -120,6 +124,7 @@ Useful environment variables for testing and automation:
 | `PEBBLE_AUTOLOAD=1` | skip menus, load the most recent world |
 | `PEBBLE_NEWWORLD=<seed>` | create a fresh world with that seed (worldgen testing) |
 | `PEBBLE_CMD="/tp 0 120 0;/time set 1000"` | run chat commands once the world is up |
+| `PEBBLE_OPEN_SCREEN=templates` or `creative` | open an allowlisted UI screen for screenshot smoke tests |
 | `PEBBLE_SHOT="/tmp/x.png@300"` | capture a frame N frames after load |
 | `PEBBLE_WORLDS=1` | jump straight to the world-select screen |
 | `PEBBLE_BOT=1` | run the physics validation bot through the real input path |
@@ -128,6 +133,16 @@ Useful environment variables for testing and automation:
 | `PEBBLE_PACKDEBUG=1` | log texture tile coverage and entity-skin resolution |
 | `PEBBLE_GEOM_DEBUG=1` | log entity geometry construction |
 | `PEBBLE_REGOLD=1` | **rewrites golden baselines** — see CONTRIBUTING before using |
+
+## Release pipeline
+
+For an end-to-end local release gate:
+
+```bash
+./scripts/pipeline.sh
+```
+
+That runs architecture checks, source security scans, bundled Faithful asset verification, a warning-free release build, binary security checks, XCTest, the 456-check golden suite, install to `~/Applications/Pebble.app`, and a final installed-app binary verification.
 
 ## Reporting bugs & contributing
 
@@ -147,7 +162,7 @@ Found a bug? [Open an issue](https://github.com/thebriangao/pebble/issues). To h
 Even better than a bug report is a **pull request with a fix** — see [CONTRIBUTING.md](CONTRIBUTING.md) for the build/test workflow and the conventions that are load-bearing (registration order, RNG discipline, determinism rules). PRs of all sizes are wanted, from typo fixes to subsystem work.
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — build, test, golden workflow, load-bearing conventions.
-- [SECURITY.md](SECURITY.md) — threat model and how to report vulnerabilities privately. Pebble makes **zero network connections** and collects nothing.
+- [SECURITY.md](SECURITY.md) — threat model and how to report vulnerabilities privately. Pebble makes no external network connections; the optional `/ai` agent is limited to local Ollama on loopback and collects nothing.
 - [LICENSE](LICENSE) — MIT, covering the code in this repository. The bundled Faithful artwork is third-party content under its own terms.
 - [CHANGELOG.md](CHANGELOG.md) — release history.
 
@@ -159,7 +174,7 @@ Pebble's *gameplay design* is inspired by Minecraft: Java Edition 1.20 — game 
 
 - **No Mojang/Microsoft source code is used.** Every line of game code was written for this project by its author — the sole third-party-derived code is the fdlibm trigonometry port in `Sources/PebbleCore/Core/DetMath.swift` (Sun Microsystems' permissive license, notice preserved there). Nothing is decompiled, disassembled, copied, or derived from Minecraft's code.
 - **No Mojang/Microsoft asset files are included.** The engine's texture atlas is generated by code; the default visual layer is the third-party Faithful 32x pack (credited below — the Faithful team's own artwork); sounds and music are synthesized in real time from oscillator recipes; fonts are a built-in bitmap glyph set; entity models are hand-written Swift reproducing the vanilla mobs' publicly documented box dimensions and UV layouts — required for Java Edition-format entity textures to map onto them correctly. There are no extracted game files anywhere in this repository.
-- Pebble is free, open-source, non-commercial, **singleplayer only**, and connects to nothing.
+- Pebble is free, open-source, non-commercial, and **singleplayer only**. It makes no external network connections; the optional `/ai` agent can call only local Ollama on loopback when the player explicitly uses it.
 
 **Third-party content:** the app bundle ships the complete, unmodified [Faithful 32x](https://faithfulpack.net) (1.20.1) as its built-in texture set. That artwork is the work of the Faithful team and its contributors, distributed under the [Faithful License](packaging/FAITHFUL-LICENSE.txt) (included verbatim here and in the app bundle, as it requires) — it is **not** covered by this repository's MIT license. Pebble is free and non-commercial, consistent with that license's no-monetization requirement. If anyone with rights in that artwork prefers it not be bundled, contact the address below and it will be removed promptly; Pebble remains fully functional without it. Pebble's ability to *read* the file format the artwork ships in is an independently implemented compatibility feature and implies no affiliation.
 

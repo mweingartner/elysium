@@ -9,8 +9,7 @@ func runCommand(_ game: GameCore, _ raw: String) {
         pushChat("<You> \(raw)")
         return
     }
-    let parts = raw.dropFirst().trimmingCharacters(in: .whitespaces)
-        .split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+    let parts = splitCommandLineArguments(String(raw.dropFirst()).trimmingCharacters(in: .whitespaces))
     let cmd = parts.first?.lowercased() ?? ""
     let args = Array(parts.dropFirst())
     guard let p = game.player else { return }
@@ -24,10 +23,63 @@ func runCommand(_ game: GameCore, _ raw: String) {
         return Double(s) ?? 0
     }
     func arg(_ i: Int) -> String? { i < args.count ? args[i] : nil }
+    func cursorHit() -> RaycastHit? {
+        game.crosshairBlock() ?? game.lastCursorHit
+    }
+    func targetBlock() -> (x: Int, y: Int, z: Int)? {
+        if let hit = cursorHit() { return (hit.x, hit.y, hit.z) }
+        if let t = game.targetedBlock { return (t.x, t.y, t.z) }
+        return nil
+    }
+    func cursorPlacement() -> (x: Int, y: Int, z: Int)? {
+        if let target = cursorPlacementPosition(from: cursorHit()) { return target }
+        if let t = game.targetedBlock { return (t.x, t.y + 1, t.z) }
+        return nil
+    }
 
     switch cmd {
     case "help":
-        ok("Commands: give, tp, time, weather, gamemode, seed, kill, summon, effect, enchant, xp, setblock, fill, locate, difficulty, gamerule, clear, spawnpoint, heal")
+        ok("Commands: ai, clone, place, listTemplates, templates, give, tp, time, weather, gamemode, seed, kill, summon, effect, enchant, xp, setblock, fill, locate, difficulty, gamerule, clear, spawnpoint, heal")
+    case "ai", "agent":
+        let prompt = args.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return fail("Usage: /ai <request>") }
+        pebbleOllamaAgent.run(prompt: prompt, game: game)
+    case "clone":
+        guard let name = cloneTemplateNameFromCommandArgs(args) else {
+            return fail("Usage: /clone the target with new name \"name\"")
+        }
+        guard let target = targetBlock() else { return fail(TemplateError.missingTarget.description) }
+        do {
+            let result = try cloneObjectTemplate(named: name, from: world, targetX: target.x, targetY: target.y, targetZ: target.z)
+            guard try game.db.putTemplate(result.template) else {
+                return fail("Template store write failed.")
+            }
+            ok("Cloned object \"\(result.template.name)\" — \(result.template.blocks.count) blocks, \(result.template.blockEntities.count) block entities, \(result.template.sizeX)x\(result.template.sizeY)x\(result.template.sizeZ)")
+        } catch let error as TemplateError {
+            fail(error.description)
+        } catch {
+            fail("Clone failed: \(error)")
+        }
+    case "place":
+        guard let name = placeTemplateNameFromCommandArgs(args) else {
+            return fail("Usage: /place object \"name\" at the cursor or /place \"name\" at target")
+        }
+        guard let target = cursorPlacement() else { return fail(TemplateError.missingTarget.description) }
+        do {
+            guard let template = try game.db.getTemplate(named: name) else {
+                return fail("Unknown template: \(name)")
+            }
+            let result = try placeObjectTemplate(template, in: world, targetX: target.x, targetY: target.y, targetZ: target.z)
+            ok("Placed object \"\(template.name)\" — \(result.blocksPlaced) blocks, \(result.blockEntitiesPlaced) block entities")
+        } catch let error as TemplateError {
+            fail(error.description)
+        } catch {
+            fail("Place failed: \(error)")
+        }
+    case "listtemplates", "templates":
+        let names = game.db.listTemplates()
+        ok(names.isEmpty ? "No templates saved." : "Opening \(names.count) saved template\(names.count == 1 ? "" : "s").")
+        game.openScreen("templates", nil)
     case "give":
         guard let itemName = arg(0) else { return fail("Usage: /give <item> [count]") }
         let count = arg(1).flatMap(Int.init) ?? 1

@@ -42,6 +42,8 @@ public struct Settings: Codable {
     public var resourcePacks: [String]? = nil
     /// nil = off, "ultra" = built-in ultra preset, anything else = shader pack file name
     public var shader: String? = nil
+    /// Local Ollama model name used by the in-game /ai command. Empty = unset.
+    public var aiOllamaModel = ""
 
     public init() {}
 }
@@ -64,6 +66,62 @@ public let DEFAULT_KEYBINDS: [String: String] = [
 
 public func defaultSettings() -> Settings { Settings() }
 
+private func clampInt(_ v: Int, _ lo: Int, _ hi: Int) -> Int {
+    min(hi, max(lo, v))
+}
+
+private func clampUnit(_ v: Double, fallback: Double) -> Double {
+    v.isFinite ? min(1, max(0, v)) : fallback
+}
+
+public func sanitizedOllamaModelName(_ raw: String) -> String {
+    let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/:")
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    return String(trimmed.prefix(128).filter { allowed.contains($0) })
+}
+
+public func isAllowedLocalOllamaModelName(_ raw: String) -> Bool {
+    let model = sanitizedOllamaModelName(raw).lowercased()
+    return !model.isEmpty && !model.hasSuffix(":cloud")
+}
+
+func sanitizedSettings(_ input: Settings) -> Settings {
+    var s = input
+    s.renderDistance = clampInt(s.renderDistance, 4, 16)
+    s.fov = clampInt(s.fov, 60, 110)
+    s.particles = clampInt(s.particles, 0, 2)
+    s.gamma = clampUnit(s.gamma, fallback: Settings().gamma)
+    s.guiScale = clampInt(s.guiScale, 0, 4)
+    s.maxFps = clampInt(s.maxFps, 30, 250)
+    s.entityDistance = s.entityDistance.isFinite ? min(256, max(16, s.entityDistance)) : Settings().entityDistance
+    s.sensitivity = clampUnit(s.sensitivity, fallback: Settings().sensitivity)
+    s.darknessPulse = clampUnit(s.darknessPulse, fallback: Settings().darknessPulse)
+
+    let defaults = Settings().volumes
+    var volumes: [String: Double] = [:]
+    for (k, def) in defaults {
+        volumes[k] = clampUnit(s.volumes[k] ?? def, fallback: def)
+    }
+    s.volumes = volumes
+
+    if let packs = s.resourcePacks {
+        s.resourcePacks = Array(packs.filter {
+            !$0.isEmpty && $0.count <= 255 && !$0.contains("/") && !$0.contains("\\")
+        }.prefix(64))
+    }
+    s.aiOllamaModel = sanitizedOllamaModelName(s.aiOllamaModel)
+    return s
+}
+
+func sanitizedKeybinds(_ input: [String: String]) -> [String: String] {
+    var binds = DEFAULT_KEYBINDS
+    for key in DEFAULT_KEYBINDS.keys {
+        guard let value = input[key], !value.isEmpty, value.count <= 64 else { continue }
+        binds[key] = value
+    }
+    return binds
+}
+
 /// ~/Library/Application Support/Pebble — created on first touch
 public func vcSupportDir() -> URL {
     let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -80,19 +138,14 @@ public func loadSettings() -> Settings {
     if let data = try? Data(contentsOf: settingsURL),
        let saved = try? JSONDecoder().decode(Settings.self, from: data) {
         s = saved
-        // merge any volume categories added since the file was written
-        for (k, v) in Settings().volumes where s.volumes[k] == nil { s.volumes[k] = v }
     }
-    // hard ceiling: above 16 the full-height chunk arrays + mesh pipeline
-    // dominate memory; floor of 4 keeps the world visible
-    s.renderDistance = min(16, max(4, s.renderDistance))
-    return s
+    return sanitizedSettings(s)
 }
 
 public func saveSettings(_ s: Settings) {
     let enc = JSONEncoder()
     enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-    if let data = try? enc.encode(s) {
+    if let data = try? enc.encode(sanitizedSettings(s)) {
         try? data.write(to: settingsURL, options: .atomic)
     }
 }
@@ -103,13 +156,13 @@ public func loadKeybinds() -> [String: String] {
        let saved = try? JSONDecoder().decode([String: String].self, from: data) {
         for (k, v) in saved { binds[k] = v }
     }
-    return binds
+    return sanitizedKeybinds(binds)
 }
 
 public func saveKeybinds(_ binds: [String: String]) {
     let enc = JSONEncoder()
     enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-    if let data = try? enc.encode(binds) {
+    if let data = try? enc.encode(sanitizedKeybinds(binds)) {
         try? data.write(to: keybindsURL, options: .atomic)
     }
 }

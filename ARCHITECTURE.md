@@ -12,6 +12,7 @@ This is the technical tour. The one-paragraph version: **PebbleCore** is a headl
 │                    screen stack, 16 gameplay screens, menus      │
 │  Audio             AVAudioSourceNode synth, recipes, reverb      │
 │  ResourcePacks (built-in Faithful loading)                       │
+│  OllamaAgent       loopback-only /api/generate and /api/tags      │
 └────────────────────────────┬─────────────────────────────────────┘
                    GameHost protocol (openScreen, playSound,
                    addParticles, mesh upload, chunk requests…)
@@ -56,15 +57,27 @@ Engine side (`Render/`): the **mesher** consumes a padded 18×18×18 snapshot an
 
 App side (`WorldRenderer`): runtime-compiled MSL (no `.metal` files — SPM doesn't build them), a **mesh arena** of 32 MB shared `MTLBuffer` pages with a first-fit free list and 3-frame deferred frees so all section draws bind one buffer at different offsets. Pass order: shadow (PCF/Poisson, snapped texel grid) → sky gradient → stars → celestials (Faithful sun/moon drawn additively) → clouds → opaque → cutout (back-culled) → translucent → entities (pose animator, Faithful skins) → particles (instanced, triple-buffered) → ultra (half-res SSAO + shadow-marched volumetrics) → bloom → composite (ACES) → UI. The UI is a single draw call: `UICanvas` mimics Canvas2D (fillRect, gradients, transforms, text via a built-in 5×7 font or the Faithful font sheets) into one vertex stream with a texture-segmented batch.
 
+Chat and command-line rendering stays in the app shell (`ScreensM.swift` + `UICanvas`), but its wrapping and item-completion rules live in `PebbleCore/Game/CommandLineSupport.swift` so XCTest can prove those behaviors against the real registered item list.
+
+Crafting recipe planning stays in `PebbleCore/Systems/Crafting.swift`. The survival inventory uses only the player's carried inventory plus the local 2x2 grid. Crafting-table screens carry their block coordinates from `Interact.swift` through `ScreenData`, then build recipe plans from the player's inventory, the current 3x3 grid, and loaded block/entity containers within a 25-block radius. Selecting a recipe withdraws concrete ingredients into the grid through the same recipe planner, consumes player inventory first, marks mutated block-entity containers dirty through `World.setBlockEntity`, and still lets the normal output-slot path consume the staged grid. Recipe-popup typeahead is split the same way: normalized search matching and the query/highlight/scroll state machine are core-tested in `Crafting.swift`, while `ScreensM.swift` owns drawing, mouse hit testing, and routing keyboard events into that state.
+
 CPU/GPU synchronization leans on `CAMetalLayer`'s default 3-drawable back-pressure: the mesh arena defers frees 3 frames, and UI/particle instance buffers are 3-deep rings. Atlas animation updates are staged into buffers and blitted at frame start so in-flight frames never see a half-written texture.
+
+## Object templates
+
+`Sources/PebbleCore/Systems/Templates.swift` implements command-driven construction cloning. A clone starts from the targeted block, flood-fills connected non-terrain blocks in deterministic neighbor order, excludes air/liquids/terrain substrate, stores block cells relative to the discovered bounds, and deep-copies block entities through `Codable` after sanitizing item stacks. Placement anchors the original targeted block to the new cursor face, using the live raycast or the last cached cursor hit from before chat opened, preflights every destination cell, then writes blocks through `World.setBlock` and reattaches cloned block entities. The `/listTemplates` browser reads the same SQLite-backed template store, summarizes each validated template in core, and draws a bounded rotatable voxel preview in `ScreensM.swift` through `UICanvas` filled quads. The feature deliberately has fixed caps on block count, template span, encoded JSON size, and preview block count so a bad target or edited database cannot create unbounded work.
 
 ## Audio
 
 No samples. `Audio.swift` is a synthesizer: each sound effect is a recipe that spawns voices (oscillator or filtered noise) with envelopes, pitch sweeps, and vibrato, mixed in an `AVAudioSourceNode` render callback at 48 kHz. Effects: RBJ biquad filters, positional stereo panning, underwater lowpass, and a cave reverb built from two coprime-length feedback delay lines. Music (ambient + jukebox discs) is generated on the fly from scale/tempo configs. The render thread owns the voice list; the main thread communicates through a locked inbox.
 
+## Local AI agent
+
+The in-game `/ai` command is split across the app and core boundary on purpose. `Sources/Pebble/OllamaAgent.swift` is the only network surface: it talks to the standard local Ollama port (`http://localhost:11434`) for model discovery and one-shot structured generation. `Sources/PebbleCore/Systems/AIAgent.swift` contains the deterministic, testable side: snapshot construction, natural-name resolution against the registered item/block registries, JSON action parsing, and whitelisted execution. Model output is treated as untrusted data; it can only choose `say`, `give_item`, or `place_block` at the current cursor, and the final world mutation runs through the normal block placement path on the main thread.
+
 ## Persistence
 
-One SQLite database (WAL, FULLMUTEX, serial save queue): `worlds(id, json, lastPlayed)`, `chunks(world, dim, cx, cz, data)`, `player(world, json)`, `advancements(world, json)`. Chunk blobs are a small binary container (`VCK1`: flags, u16 block array, biome array, JSON tail for block entities + entities). Unmodified chunks save as entity-only stubs and regenerate from seed; once a chunk has block data on disk, every rewrite keeps it (tracked via `savedFullKeys`). Failed batches log and re-mark chunks dirty for retry. Corrupt blobs are clamped (out-of-range block ids → air) rather than trusted.
+One SQLite database (WAL, FULLMUTEX, serial save queue): `worlds(id, json, lastPlayed)`, `chunks(world, dim, cx, cz, data)`, `player(world, json)`, `advancements(world, json)`, and `templates(name, json, created)`. Chunk blobs are a small binary container (`VCK1`: flags, u16 block array, biome array, JSON tail for block entities + entities). Object templates are versioned bounded JSON records with relative block coordinates and relative block-entity coordinates. Unmodified chunks save as entity-only stubs and regenerate from seed; once a chunk has block data on disk, every rewrite keeps it (tracked via `savedFullKeys`). Failed batches log and re-mark chunks dirty for retry. Corrupt blobs and corrupt templates are rejected or clamped before hot paths can index unchecked registries.
 
 ## The test harness (pebsmoke)
 
