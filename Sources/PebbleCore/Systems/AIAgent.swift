@@ -8,6 +8,11 @@ public let AIAgentNearbyRadius = 12.0
 public let AIAgentMaxGiveCount = 640
 public let AIAgentMaxModelJSONBytes = 16 * 1024
 public let AIAgentMaxPromptCharacters = 24_000
+public let AIAgentHoleFillSearchDistance = 32
+public let AIAgentHoleFillLateralSearch = 3
+public let AIAgentHoleFillMaxDepth = 64
+public let AIAgentHoleFillMaxHorizontalRadius = 24
+public let AIAgentHoleFillMaxBlocks = 8_192
 
 public struct AIAgentAction: Codable, Equatable {
     public var action: String
@@ -60,6 +65,22 @@ public struct AIAgentExecutionResult: Equatable {
     }
 }
 
+public struct AIAgentHoleFillResult: Equatable {
+    public let seedX: Int
+    public let seedY: Int
+    public let seedZ: Int
+    public let blockId: UInt16
+    public let filledBlocks: Int
+
+    public init(seedX: Int, seedY: Int, seedZ: Int, blockId: UInt16, filledBlocks: Int) {
+        self.seedX = seedX
+        self.seedY = seedY
+        self.seedZ = seedZ
+        self.blockId = blockId
+        self.filledBlocks = filledBlocks
+    }
+}
+
 public enum AIAgentError: Error, Equatable, CustomStringConvertible {
     case emptyResponse
     case responseTooLarge
@@ -69,6 +90,8 @@ public enum AIAgentError: Error, Equatable, CustomStringConvertible {
     case unknownItem(String)
     case itemNotPlaceable(String)
     case missingCursorTarget
+    case missingHoleTarget
+    case holeFillTooLarge(Int, Int)
     case unloadedTarget(Int, Int, Int)
     case targetOutOfWorld(Int, Int, Int)
     case placementFailed(String)
@@ -90,6 +113,8 @@ public enum AIAgentError: Error, Equatable, CustomStringConvertible {
         case .unknownItem(let item): return "Unknown item or block: \(item)"
         case .itemNotPlaceable(let item): return "\(item) is not placeable as a block"
         case .missingCursorTarget: return "No block is under the cursor"
+        case .missingHoleTarget: return "No fillable hole was found in front of the player"
+        case .holeFillTooLarge(let count, let max): return "Hole fill is too large: \(count) blocks exceeds \(max)"
         case .unloadedTarget(let x, let y, let z): return "Target chunk is not loaded at \(x) \(y) \(z)"
         case .targetOutOfWorld(let x, let y, let z): return "Target is outside world height at \(x) \(y) \(z)"
         case .placementFailed(let item): return "Could not place \(item) at the cursor"
@@ -331,6 +356,9 @@ public func inferDirectAIAgentAction(from userRequest: String) -> AIAgentAction?
     if let templateAction = inferDirectAIAgentTemplateAction(from: userRequest) {
         return templateAction
     }
+    if let holeAction = inferDirectAIAgentHoleFillAction(from: userRequest) {
+        return holeAction
+    }
     let normalized = normalizeAIAgentRequestText(userRequest)
     guard hasInventoryGiveIntent(normalized) else { return nil }
 
@@ -350,6 +378,31 @@ public func inferDirectAIAgentAction(from userRequest: String) -> AIAgentAction?
         item: itemDef(itemId).name,
         count: min(AIAgentMaxGiveCount, max(1, count)),
         message: "Gave \(min(AIAgentMaxGiveCount, max(1, count))) \(itemDef(itemId).displayName)")
+}
+
+private func inferDirectAIAgentHoleFillAction(from userRequest: String) -> AIAgentAction? {
+    let normalized = normalizeAIAgentRequestText(userRequest)
+    let padded = " \(normalized) "
+    guard padded.contains(" fill "), padded.contains(" hole ") else { return nil }
+
+    let words = normalized.split(separator: " ").map(String.init)
+    guard let withIndex = words.lastIndex(of: "with"), withIndex + 1 < words.count else { return nil }
+    let stopWords = Set(["at", "in", "on", "near", "around", "where", "please", "now"])
+    var blockWords: [String] = []
+    for word in words[(withIndex + 1)..<words.count] {
+        if !blockWords.isEmpty && stopWords.contains(word) { break }
+        blockWords.append(word)
+    }
+    let blockPhrase = cleanedAIAgentBlockPhrase(blockWords.joined(separator: " "))
+    guard !blockPhrase.isEmpty,
+          let blockId = resolveAIAgentBlockID(blockPhrase),
+          blockId != 0,
+          blockDefs[Int(blockId)].solid else { return nil }
+    let blockName = blockDefs[Int(blockId)].name
+    return AIAgentAction(
+        action: "fill_hole",
+        block: blockName,
+        target: "front")
 }
 
 private func normalizeAIAgentRequestText(_ raw: String) -> String {
@@ -477,6 +530,225 @@ public func aiCursorPlacementPosition(_ hit: RaycastHit, in world: World) -> (x:
     return (x, y, z)
 }
 
+private struct AIAgentHolePos: Hashable {
+    let x: Int
+    let y: Int
+    let z: Int
+}
+
+private struct AIAgentHoleSeed {
+    let x: Int
+    let y: Int
+    let z: Int
+    let topY: Int
+}
+
+public func fillAIAgentHoleInFront(world: World, player: Player, cursor: RaycastHit?,
+                                   blockId: UInt16) throws -> AIAgentHoleFillResult {
+    guard blockId != 0, blockDefs[Int(blockId)].solid else {
+        let name = blockId == 0 ? "air" : blockDefs[Int(blockId)].name
+        throw AIAgentError.itemNotPlaceable(name)
+    }
+    guard let seed = findAIAgentHoleSeed(world: world, player: player, cursor: cursor) else {
+        throw AIAgentError.missingHoleTarget
+    }
+    let cells = try collectAIAgentHoleCells(world: world, seed: seed)
+    guard !cells.isEmpty else { throw AIAgentError.missingHoleTarget }
+    let fillCell = Int(cell(blockId, 0))
+    for p in cells.sorted(by: {
+        if $0.y != $1.y { return $0.y < $1.y }
+        if $0.z != $1.z { return $0.z < $1.z }
+        return $0.x < $1.x
+    }) {
+        world.setBlock(p.x, p.y, p.z, fillCell)
+    }
+    return AIAgentHoleFillResult(
+        seedX: seed.x,
+        seedY: seed.y,
+        seedZ: seed.z,
+        blockId: blockId,
+        filledBlocks: cells.count)
+}
+
+private func findAIAgentHoleSeed(world: World, player: Player, cursor: RaycastHit?) -> AIAgentHoleSeed? {
+    let groundY = aiAgentPlayerGroundY(world: world, player: player)
+    if let cursor {
+        let placement = aiCursorPlacementPosition(cursor, in: world)
+        let candidates = [(placement.x, placement.z), (cursor.x, cursor.z)]
+        for (x, z) in candidates {
+            for y in aiAgentHoleTopCandidates(around: groundY, in: world) {
+                if isAIAgentHoleFillCandidate(world: world, x: x, y: y, z: z, topY: y) {
+                    return AIAgentHoleSeed(x: x, y: y, z: z, topY: y)
+                }
+            }
+        }
+    }
+
+    let fx = -detSin(player.yaw)
+    let fz = detCos(player.yaw)
+    let lx = -fz
+    let lz = fx
+    var checked = Set<AIAgentHolePos>()
+    let offsets = aiAgentLateralSearchOffsets(AIAgentHoleFillLateralSearch)
+    for distance in 1...AIAgentHoleFillSearchDistance {
+        for offset in offsets {
+            let x = ifloor(player.x + fx * Double(distance) + lx * Double(offset))
+            let z = ifloor(player.z + fz * Double(distance) + lz * Double(offset))
+            for y in aiAgentHoleTopCandidates(around: groundY, in: world) {
+                let pos = AIAgentHolePos(x: x, y: y, z: z)
+                guard checked.insert(pos).inserted else { continue }
+                if isAIAgentHoleFillCandidate(world: world, x: x, y: y, z: z, topY: y) {
+                    return AIAgentHoleSeed(x: x, y: y, z: z, topY: y)
+                }
+            }
+        }
+    }
+    return nil
+}
+
+private func aiAgentPlayerGroundY(world: World, player: Player) -> Int {
+    let x = ifloor(player.x)
+    let z = ifloor(player.z)
+    let feetY = ifloor(player.y)
+    let minY = max(world.info.minY, feetY - 6)
+    for y in stride(from: feetY, through: minY, by: -1) {
+        let id = world.getBlockId(x, y, z)
+        if id != 0 && blockDefs[id].solid {
+            return y
+        }
+    }
+    return max(world.info.minY, feetY - 1)
+}
+
+private func aiAgentHoleTopCandidates(around groundY: Int, in world: World) -> [Int] {
+    var result: [Int] = []
+    for dy in [0, -1, 1, -2, 2] {
+        let y = groundY + dy
+        guard y >= world.info.minY, y < world.info.minY + world.info.height else { continue }
+        if !result.contains(y) { result.append(y) }
+    }
+    return result
+}
+
+private func aiAgentLateralSearchOffsets(_ radius: Int) -> [Int] {
+    var offsets = [0]
+    guard radius > 0 else { return offsets }
+    for i in 1...radius {
+        offsets.append(-i)
+        offsets.append(i)
+    }
+    return offsets
+}
+
+private func isAIAgentHoleFillCandidate(world: World, x: Int, y: Int, z: Int, topY: Int) -> Bool {
+    guard y == topY,
+          y >= world.info.minY,
+          y < world.info.minY + world.info.height,
+          world.isLoadedAt(x, z),
+          isAIAgentHoleFillCell(world.getBlock(x, y, z)),
+          hasAIAgentLevelingRim(world: world, x: x, y: topY, z: z) else { return false }
+    let minY = max(world.info.minY, topY - AIAgentHoleFillMaxDepth + 1)
+    var currentY = topY
+    while currentY >= minY {
+        let cell = world.getBlock(x, currentY, z)
+        if !isAIAgentHoleFillCell(cell) {
+            return blockDefs[cell >> 4].solid
+        }
+        currentY -= 1
+    }
+    return false
+}
+
+private func collectAIAgentHoleCells(world: World, seed: AIAgentHoleSeed) throws -> [AIAgentHolePos] {
+    let minY = max(world.info.minY, seed.topY - AIAgentHoleFillMaxDepth + 1)
+    let maxRadius2 = AIAgentHoleFillMaxHorizontalRadius * AIAgentHoleFillMaxHorizontalRadius
+    var seen = Set<AIAgentHolePos>()
+    var queue = [AIAgentHolePos(x: seed.x, y: seed.y, z: seed.z)]
+    var cursor = 0
+    var topOpening: [AIAgentHolePos] = []
+    seen.insert(queue[0])
+
+    while cursor < queue.count {
+        let p = queue[cursor]
+        cursor += 1
+        guard p.y == seed.topY else { continue }
+        let dx = p.x - seed.x
+        let dz = p.z - seed.z
+        guard dx * dx + dz * dz <= maxRadius2,
+              world.isLoadedAt(p.x, p.z),
+              isAIAgentHoleFillCell(world.getBlock(p.x, p.y, p.z)) else { continue }
+        topOpening.append(p)
+        if topOpening.count > AIAgentHoleFillMaxBlocks {
+            throw AIAgentError.holeFillTooLarge(topOpening.count, AIAgentHoleFillMaxBlocks)
+        }
+        for dir in HORIZONTALS {
+            let next = AIAgentHolePos(
+                x: p.x + DIR_X[dir],
+                y: p.y,
+                z: p.z + DIR_Z[dir])
+            if !seen.contains(next) {
+                seen.insert(next)
+                queue.append(next)
+            }
+        }
+    }
+
+    var cells: [AIAgentHolePos] = []
+    for top in topOpening.sorted(by: {
+        if $0.z != $1.z { return $0.z < $1.z }
+        return $0.x < $1.x
+    }) {
+        var column: [AIAgentHolePos] = []
+        var y = seed.topY
+        var hasSolidFloor = false
+        while y >= minY {
+            let cell = world.getBlock(top.x, y, top.z)
+            if !isAIAgentHoleFillCell(cell) {
+                hasSolidFloor = blockDefs[cell >> 4].solid
+                break
+            }
+            column.append(AIAgentHolePos(x: top.x, y: y, z: top.z))
+            y -= 1
+        }
+        guard hasSolidFloor else { continue }
+        if cells.count + column.count > AIAgentHoleFillMaxBlocks {
+            throw AIAgentError.holeFillTooLarge(cells.count + column.count, AIAgentHoleFillMaxBlocks)
+        }
+        cells.append(contentsOf: column)
+    }
+    return cells
+}
+
+private func isAIAgentHoleFillCell(_ cell: Int) -> Bool {
+    let id = cell >> 4
+    if id == 0 { return true }
+    if id == Int(B.water) || id == Int(B.lava) { return false }
+    return REPLACEABLE[id] != 0
+}
+
+private func hasAIAgentLevelingRim(world: World, x: Int, y: Int, z: Int) -> Bool {
+    for dir in HORIZONTALS {
+        if isAIAgentLevelingRimBlock(world.getBlockId(x + DIR_X[dir], y, z + DIR_Z[dir])) {
+            return true
+        }
+    }
+    return false
+}
+
+private func isAIAgentLevelingRimBlock(_ id: Int) -> Bool {
+    guard id > 0 && id < blockDefs.count else { return false }
+    let name = blockDefs[id].name
+    return name == "dirt"
+        || name == "grass_block"
+        || name == "coarse_dirt"
+        || name == "rooted_dirt"
+        || name == "podzol"
+        || name == "mycelium"
+        || name == "farmland"
+        || name == "mud"
+        || name == "muddy_mangrove_roots"
+}
+
 public func resolveAIAgentTemplateBlockSelector(_ raw: String) -> TemplateBlockSelector? {
     let normalized = normalizeAIAgentName(cleanedAIAgentBlockPhrase(raw))
     if ["wood", "wooden", "wood_blocks", "wooden_blocks", "woods"].contains(normalized) {
@@ -594,6 +866,16 @@ public func executeAIAgentAction(_ action: AIAgentAction, world: World, player: 
         return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
                                       changedWorld: true)
 
+    case "fill_hole", "fill_hole_in_front":
+        guard let rawBlock = action.block ?? action.item else { throw AIAgentError.missingItem }
+        guard let blockId = resolveAIAgentBlockID(rawBlock), blockId != 0 else {
+            throw AIAgentError.itemNotPlaceable(rawBlock)
+        }
+        let result = try fillAIAgentHoleInFront(world: world, player: player, cursor: cursor, blockId: blockId)
+        let fallback = "Filled \(result.filledBlocks) blocks with \(blockDefs[Int(blockId)].displayName)."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: result.filledBlocks > 0)
+
     default:
         throw AIAgentError.unsupportedAction(action.action)
     }
@@ -705,12 +987,14 @@ Allowed actions:
 {"action":"say","message":"short answer"}
 {"action":"give_item","item":"registered_item_id_or_display_name","count":1,"message":"short answer"}
 {"action":"place_block","item":"registered_block_item_or_block_id","target":"cursor","message":"short answer"}
+{"action":"fill_hole","block":"registered_solid_block_id_or_display_name","target":"front","message":"short answer"}
 {"action":"replace_template_blocks","template":"saved_template_name","from_block":"wood blocks","to_block":"bamboo","message":"short answer"}
 {"action":"create_template","template":"new_template_name","kind":"pirate_ship","length":50,"style":"short style description","message":"short answer"}
 
 Rules:
 - Use only registered item or block names shown in the state.
 - To place at the current cursor location, use action "place_block" and target "cursor".
+- To fill a hole in front of the player, use action "fill_hole" and target "front"; the engine will find the bounded connected empty cavity below the local ground plane.
 - To create a non-placeable item, use action "give_item".
 - A request for "a stack" means the item's maximum stack size, usually 64.
 - To edit a saved object template, use "replace_template_blocks"; "wood blocks" means every registered wood-family block in that template.

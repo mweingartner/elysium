@@ -158,12 +158,12 @@ final class OllamaAgentService {
                 "properties": [
                     "action": [
                         "type": "string",
-                        "enum": ["say", "give_item", "place_block", "replace_template_blocks", "create_template"],
+                        "enum": ["say", "give_item", "place_block", "fill_hole", "replace_template_blocks", "create_template"],
                     ],
                     "item": ["type": "string"],
                     "block": ["type": "string"],
                     "count": ["type": "integer", "minimum": 1, "maximum": AIAgentMaxGiveCount],
-                    "target": ["type": "string", "enum": ["cursor"]],
+                    "target": ["type": "string", "enum": ["cursor", "front"]],
                     "message": ["type": "string"],
                     "template": ["type": "string"],
                     "name": ["type": "string"],

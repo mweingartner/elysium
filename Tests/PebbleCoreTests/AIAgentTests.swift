@@ -29,6 +29,37 @@ final class AIAgentTests: XCTestCase {
         return (world, player, hit)
     }
 
+    private func makeFlatWorldWithDeepHole() -> (World, Player) {
+        registerCoreIfNeeded()
+        let world = World(dim: .overworld, seed: 778)
+        let info = dimInfo(.overworld)
+        let chunk = Chunk(cx: 0, cz: 0, minY: info.minY, height: info.height)
+        chunk.status = .lit
+        world.setChunk(chunk)
+        world.light.initChunkLight(chunk)
+
+        for z in 0..<16 {
+            for x in 0..<16 {
+                world.setBlock(x, 48, z, Int(cell(B.stone)))
+                world.setBlock(x, 63, z, Int(cell(B.grass_block)))
+            }
+        }
+        for z in 8...10 {
+            for x in 3...5 {
+                for y in 49...63 {
+                    world.setBlock(x, y, z, 0)
+                }
+            }
+        }
+
+        let player = Player(world: world)
+        player.setPos(4.5, 64, 4.5)
+        player.yaw = 0
+        player.pitch = 0
+        world.addEntity(player)
+        return (world, player)
+    }
+
     func testParseExtractsFirstJSONActionFromModelText() throws {
         let action = try parseAIAgentAction(from: "```json\n{\"action\":\"place_block\",\"item\":\"crafting station\",\"target\":\"cursor\"}\n```")
 
@@ -99,6 +130,47 @@ final class AIAgentTests: XCTestCase {
         registerCoreIfNeeded()
         XCTAssertNil(inferDirectAIAgentAction(from: "place a stack of coal at the cursor"))
         XCTAssertNil(inferDirectAIAgentAction(from: "what can I craft with coal"))
+    }
+
+    func testDirectHoleFillRequestParsesTerrainLevelingAction() throws {
+        registerCoreIfNeeded()
+
+        let action = try XCTUnwrap(inferDirectAIAgentAction(
+            from: "fill the hole in front of me with dirt"))
+
+        XCTAssertEqual(action.action, "fill_hole")
+        XCTAssertEqual(action.block, "dirt")
+        XCTAssertEqual(action.target, "front")
+        XCTAssertNil(inferDirectAIAgentAction(from: "fill the hole in front of me with torch"))
+    }
+
+    func testFillHoleInFrontLevelsDeepDirtAdjacentHoleWithoutCursorHit() throws {
+        let (world, player) = makeFlatWorldWithDeepHole()
+        let action = try XCTUnwrap(inferDirectAIAgentAction(
+            from: "fill the hole in front of me with dirt"))
+
+        let result = try executeAIAgentAction(action, world: world, player: player, cursor: nil)
+
+        XCTAssertTrue(result.changedWorld)
+        XCTAssertEqual(result.message, "Filled 135 blocks with Dirt.")
+        XCTAssertEqual(world.getBlockId(4, 63, 8), Int(B.dirt))
+        XCTAssertEqual(world.getBlockId(4, 49, 8), Int(B.dirt))
+        XCTAssertEqual(world.getBlockId(4, 48, 8), Int(B.stone))
+        XCTAssertEqual(world.getBlockId(2, 63, 8), Int(B.grass_block))
+    }
+
+    func testFillHoleInFrontRequiresDirtLikeRim() throws {
+        let (world, player) = makeFlatWorldWithDeepHole()
+        for z in 0..<16 {
+            for x in 0..<16 where world.getBlockId(x, 63, z) == Int(B.grass_block) {
+                world.setBlock(x, 63, z, Int(cell(B.stone)))
+            }
+        }
+        let action = AIAgentAction(action: "fill_hole", block: "dirt", target: "front")
+
+        XCTAssertThrowsError(try executeAIAgentAction(action, world: world, player: player, cursor: nil)) { error in
+            XCTAssertEqual(error as? AIAgentError, .missingHoleTarget)
+        }
     }
 
     func testDirectTemplateReplacementRequestParsesWoodCategory() throws {
