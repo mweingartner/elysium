@@ -12,6 +12,10 @@ func runCommand(_ game: GameCore, _ raw: String) {
     let parts = splitCommandLineArguments(String(raw.dropFirst()).trimmingCharacters(in: .whitespaces))
     let cmd = parts.first?.lowercased() ?? ""
     let args = Array(parts.dropFirst())
+    if cmd == "lan" || cmd == "multiplayer" {
+        runLANCommand(game, args)
+        return
+    }
     guard let p = game.player else { return }
     let world = game.world
     func fail(_ msg: String) { pushChat("§c" + msg) }
@@ -34,7 +38,7 @@ func runCommand(_ game: GameCore, _ raw: String) {
 
     switch cmd {
     case "help":
-        ok("Commands: ai, clone, place, listTemplates, templates, give, tp, time, weather, gamemode, seed, kill, summon, effect, enchant, xp, setblock, fill, locate, difficulty, gamerule, clear, spawnpoint, heal")
+        ok("Commands: ai, lan, clone, place, listTemplates, templates, give, tp, time, weather, gamemode, seed, kill, summon, effect, enchant, xp, setblock, fill, locate, difficulty, gamerule, clear, spawnpoint, heal")
     case "ai", "agent":
         let prompt = args.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return fail("Usage: /ai <request>") }

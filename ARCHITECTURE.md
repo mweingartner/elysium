@@ -13,6 +13,7 @@ This is the technical tour. The one-paragraph version: **PebbleCore** is a headl
 │  Audio             AVAudioSourceNode synth, recipes, reverb      │
 │  ResourcePacks (built-in Faithful loading)                       │
 │  OllamaAgent       loopback-only /api/generate and /api/tags      │
+│  LANTransport      Bonjour browse/advertise + TCP Direct Connect │
 └────────────────────────────┬─────────────────────────────────────┘
                    GameHost protocol (openScreen, playSound,
                    addParticles, mesh upload, chunk requests…)
@@ -22,6 +23,7 @@ This is the technical tour. The one-paragraph version: **PebbleCore** is a headl
 │  Gen (terrain/biomes/features/structures)  ·  Entity (AI)        │
 │  Items (recipes/enchants/loot)  ·  Systems (redstone/interact/…) │
 │  Render (mesher + texture atlas — data only, no Metal)           │
+│  Net (LAN message models, bounded frame codec, validation)        │
 │  Saves (SQLite)  ·  Core (fdlibm, RNG, noise)                    │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -75,7 +77,15 @@ No samples. `Audio.swift` is a synthesizer: each sound effect is a recipe that s
 
 ## Local AI agent
 
-The in-game `/ai` command is split across the app and core boundary on purpose. `Sources/Pebble/OllamaAgent.swift` is the only network surface: it talks to the standard local Ollama port (`http://localhost:11434`) for model discovery and one-shot structured generation. `Sources/PebbleCore/Systems/AIAgent.swift` contains the deterministic, testable side: snapshot construction, natural-name resolution against the registered item/block registries, saved-template palette summaries, JSON action parsing, and whitelisted execution. Model output is treated as untrusted data; it can choose only symbolic actions: `say`, `give_item`, `place_block`, `fill_hole`, `replace_template_blocks`, or `create_template`. Terrain-leveling requests such as `/ai fill the hole in front of me with dirt` are handled deterministically before Ollama: the resolver searches in the player's horizontal view for a ground-level replaceable top cell adjacent to dirt-like terrain, flood-fills only the connected top opening, then fills each column downward to solid ground within fixed distance, radius, depth, and block-count caps. Template actions load and save through `SaveDB` closures, operate only on validated `ObjectTemplate` records, and never accept raw model-supplied coordinate arrays. Direct parsers handle unambiguous requests such as adding a stack of coal, filling a dirt-rimmed hole in front of the player, changing all wood-family blocks in a named template to another block, or generating a named pirate-ship template before invoking Ollama.
+The in-game `/ai` command is split across the app and core boundary on purpose. `Sources/Pebble/OllamaAgent.swift` is the only HTTP surface: it talks to the standard local Ollama port (`http://localhost:11434`) for model discovery and one-shot structured generation. `Sources/PebbleCore/Systems/AIAgent.swift` contains the deterministic, testable side: snapshot construction, natural-name resolution against the registered item/block registries, saved-template palette summaries, JSON action parsing, and whitelisted execution. Model output is treated as untrusted data; it can choose only symbolic actions: `say`, `give_item`, `place_block`, `fill_hole`, `replace_template_blocks`, or `create_template`. Terrain-leveling requests such as `/ai fill the hole in front of me with dirt` are handled deterministically before Ollama: the resolver searches in the player's horizontal view for a ground-level replaceable top cell adjacent to dirt-like terrain, flood-fills only the connected top opening, then fills each column downward to solid ground within fixed distance, radius, depth, and block-count caps. Template actions load and save through `SaveDB` closures, operate only on validated `ObjectTemplate` records, and never accept raw model-supplied coordinate arrays. Direct parsers handle unambiguous requests such as adding a stack of coal, filling a dirt-rimmed hole in front of the player, changing all wood-family blocks in a named template to another block, or generating a named pirate-ship template before invoking Ollama.
+
+## LAN multiplayer
+
+LAN support follows the same core/app split as rendering and AI. `Sources/PebbleCore/Net/LANMultiplayer.swift` defines the stable protocol constants, message kinds, host/client state names, sanitized input helpers, `LANWorldSummary`, `LANPlayerState`, player-input/block/container/template intent payloads, and the `PBLN` frame codec. Frames are fixed-header, length-prefixed, versioned, type-tagged, sequence-numbered, JSON payloads with a 1 MiB hard cap; the decoder validates magic, version, message type, and payload length before allocation/JSON decode and leaves partial stream frames buffered.
+
+`Sources/Pebble/LANTransport.swift` is the only local-network adapter. It imports Network.framework, advertises and browses `_pebble-lan._tcp` with Bonjour, hosts a TCP listener on the player-selected port, Direct Connects to an explicit host/port, performs join-code handshakes, and routes accepted LAN chat/status messages. The current host authority rule is conservative: clients can complete a bounded handshake and send typed intent messages, but arbitrary remote command execution and direct world/save writes are not accepted. Deeper authoritative gameplay replication is tracked in [LAN_MULTIPLAYER_PLAN.md](LAN_MULTIPLAYER_PLAN.md) and must preserve the same intent-only client boundary.
+
+`Sources/Pebble/LANLobbyScreen.swift`, `MenusM.swift`, and `/lan ...` commands expose the feature. The title menu opens Multiplayer for browse/direct-connect, the pause menu opens the same screen as "Open to LAN" for active worlds, and the chat command layer supports `/lan host [joinCode] [port]`, `/lan browse`, `/lan hosts`, `/lan join`, `/lan direct`, `/lan say`, `/lan status`, and `/lan stop`.
 
 ## Persistence
 

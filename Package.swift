@@ -30,6 +30,7 @@ let package = Package(
                 .linkedFramework("MetalKit"),
                 .linkedFramework("QuartzCore"),
                 .linkedFramework("AVFoundation"),
+                .linkedFramework("Network"),
             ]
         ),
         // headless smoke tests against the frozen golden baselines

@@ -8,11 +8,13 @@ fail() { echo "security scan failed: $*" >&2; exit 1; }
 
 echo "==> security: source scans"
 
-NETWORK_REFS="$(grep -RInE 'URLSession|NSURLConnection|NWConnection|Network\.|CFSocket|GCDAsyncSocket' Sources || true)"
-UNAPPROVED_NETWORK_REFS="$(printf '%s\n' "$NETWORK_REFS" | grep -v '^Sources/Pebble/OllamaAgent.swift:' || true)"
+NETWORK_REFS="$(grep -RInE 'URLSession|NSURLConnection|NWConnection|NWListener|NWBrowser|import Network|Network\.|CFSocket|GCDAsyncSocket' Sources || true)"
+UNAPPROVED_NETWORK_REFS="$(printf '%s\n' "$NETWORK_REFS" \
+    | grep -v '^Sources/Pebble/OllamaAgent.swift:' \
+    | grep -v '^Sources/Pebble/LANTransport.swift:' || true)"
 if [ -n "$UNAPPROVED_NETWORK_REFS" ]; then
     printf '%s\n' "$UNAPPROVED_NETWORK_REFS"
-    fail "network API reference found outside approved local Ollama client"
+    fail "network API reference found outside approved local Ollama client or LAN transport"
 fi
 
 URL_REFS="$(grep -RInE 'https?://' Sources || true)"

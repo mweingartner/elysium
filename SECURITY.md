@@ -2,13 +2,15 @@
 
 ## What Pebble is (and isn't)
 
-Pebble is a local, singleplayer macOS game:
+Pebble is a local macOS game with player-started LAN multiplayer session support. Local-network multiplayer is deliberately scoped to Bonjour discovery, Direct Connect, bounded handshakes, peer status, and LAN chat while the deeper authoritative gameplay replication plan remains tracked in [LAN_MULTIPLAYER_PLAN.md](LAN_MULTIPLAYER_PLAN.md).
 
-- **No external network access.** The app has no telemetry, analytics, update checks, multiplayer, or remote service calls. The only in-app network surface is the optional `/ai` command, which is hard-coded to local Ollama on `http://localhost:11434`; the `pebble update` shell command separately runs `git pull` on your own checkout.
+Current release properties:
+
+- **No external service access.** The app has no telemetry, analytics, update checks, account service, NAT traversal, relay, or cloud multiplayer. The in-app network surfaces are player-started LAN multiplayer over Network.framework and the optional `/ai` command, which is hard-coded to local Ollama on `http://localhost:11434`; the `pebble update` shell command separately runs `git pull` on your own checkout.
 - **No accounts, no credentials, no personal data.** Pebble stores worlds, settings, and keybinds under `~/Library/Application Support/Pebble/`.
 - **No elevated privileges.** It's an ad-hoc-signed app running in a normal user session.
 
-That makes the realistic threat model: **malicious files that you load into the game and malformed output from local tools you explicitly connect to.**
+That makes the realistic threat model: **malicious files that you load into the game, malformed output from local tools you explicitly connect to, and malformed traffic from peers on a local network you choose to join or host.**
 
 ## Attack surface
 
@@ -22,14 +24,15 @@ If you're auditing Pebble, these are the interesting places — all of them pars
 | Map overlay | `Sources/PebbleCore/Game/MapOverlay.swift`, `Sources/Pebble/MapOverlayM.swift`, `Sources/Pebble/HudM.swift`, `Sources/Pebble/ScreensM.swift` | Reads only loaded in-memory chunk height/top-block data; compact minimap size is limited to three fixed modes, maximum zoom-out is bounded to the currently loaded chunk extent, zoom-in bottoms out at about 100 blocks, and app-side drawing caps minimap/full-map sample resolution so a large loaded world cannot create unbounded UI work |
 | Settings/keybinds | `Sources/PebbleCore/Game/Settings.swift` | plain JSON via `Codable`; loaded values are normalized back to the UI/runtime ranges before use |
 | Local Ollama agent | `Sources/Pebble/OllamaAgent.swift`, `Sources/PebbleCore/Systems/AIAgent.swift` | loopback-only HTTP to `localhost:11434`; cloud-tagged Ollama models are filtered/rejected; model output is decoded as bounded JSON and can only select whitelisted symbolic actions against registered Pebble content: `say`, `give_item`, cursor `place_block`, bounded player-relative `fill_hole`, saved-template block replacement, or bounded generated-template creation |
+| LAN multiplayer | `Sources/PebbleCore/Net/LANMultiplayer.swift`, `Sources/Pebble/LANTransport.swift`, `Sources/Pebble/LANLobbyScreen.swift` | Bonjour service `_pebble-lan._tcp` plus TCP Direct Connect through Network.framework; `Info.plist` declares `NSLocalNetworkUsageDescription` and `NSBonjourServices`; frames carry `PBLN` magic, protocol version, message type, sequence, and bounded payload length before JSON decode; player names, join codes, direct hosts, chat text, and template names are normalized/capped; clients are accepted only after a join-code handshake and may not send raw save data or arbitrary command execution |
 
 Hardening that already exists: chunk-blob decoding validates section lengths and clamps corrupted block ids to air; template cloning and placement cap volume/span/JSON size, preflight all destination cells before mutation, cap prepared-placement support fill depth, snapshot placement undo state only from validated in-memory mutations, and bound both `/place` wireframe preview work and `/listTemplates` preview work by box count after template validation; AI terrain-leveling fills never accept model coordinates, require a dirt-like rim in front of the player, write only registered blocks into loaded chunks, and cap search distance, horizontal radius, depth, and total block count; AI template edits resolve source and destination blocks through the registered block registry, reset changed-cell metadata, drop block entities attached to changed cells, and re-encode templates before saving; the live map overlay bounds zoom/pan math to finite loaded chunk extents and caps per-frame UI sampling; crafting-table access to nearby storage is radius-bound and still withdraws concrete recipe ingredients before normal grid consumption; player-data loading repairs array sizes and drops out-of-range item ids; SQLite errors are surfaced and failed writes retried rather than ignored; the zip reader never writes outside its own buffers (it extracts to memory, not to disk paths from the archive), caps archive/file sizes, rejects path-traversal entries, and skips symlinked folder-pack files.
 
 Local verification scripts:
 
-- `./scripts/security-scan.sh` checks source for unapproved network/process/dynamic-loading APIs and obvious secret material. Network APIs are allowed only in the loopback Ollama client.
+- `./scripts/security-scan.sh` checks source for unapproved network/process/dynamic-loading APIs and obvious secret material. Network APIs are allowed only in the loopback Ollama client and the LAN transport adapter.
 - `./scripts/verify-pack-assets.sh` verifies the bundled Faithful archive, including the `assets/minecraft/textures/` namespace Pebble uses for its default graphics.
-- `./scripts/security-check-binary.sh ~/Applications/Pebble.app` verifies the app signature, bundle metadata, linked library paths, and network-related binary symbols/strings. It allows only the local Ollama URL and rejects other URL literals.
+- `./scripts/security-check-binary.sh ~/Applications/Pebble.app` verifies the app signature, bundle metadata, linked library paths, and network-related binary symbols/strings. It allows only the local Ollama URL, requires LAN privacy/Bonjour declarations before accepting Network.framework symbols, and rejects other URL literals.
 - `./scripts/pipeline.sh` runs the full architecture, security, asset-verification, build, binary-security, test, deploy, and installed-app verification pipeline.
 
 ## Reporting a vulnerability

@@ -1,5 +1,6 @@
-// Local Ollama transport for Pebble's in-game AI agent. The core AI action
-// executor is in PebbleCore; this app-side file is the only network surface.
+// Local Ollama HTTP transport for Pebble's in-game AI agent. The core AI action
+// executor is in PebbleCore; LAN multiplayer uses its own Network.framework
+// adapter in LANTransport.swift.
 
 import Foundation
 import PebbleCore

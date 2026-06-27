@@ -14,7 +14,7 @@ final class TitleScreen: Screen {
         "Diamonds run deep!", "Now with wardens!", "Sculk is listening!",
         "The dragon is waiting!", "Cherry blossoms!", "Archaeology!",
         "Goats will punt you!", "Trade with villagers!", "Ride a strider!",
-        "X marks the buried treasure!", "Hero of the Village!", "Singleplayer, for now!",
+        "X marks the buried treasure!", "Hero of the Village!", "Open to LAN!",
         "Do not stare at endermen!", "Beds explode in the Nether!", "Llamas spit back!",
         "Lava is not a swimming pool!", "Blame the goat!", "Bring a bucket!",
         "Mostly bug free!", "Creepers hate him!", "The chickens are watching!",
@@ -31,6 +31,11 @@ final class TitleScreen: Screen {
         buttons.append(Button(cx - 100, y, 200, 20, "Singleplayer", { [weak ui, weak game] in
             guard let ui, let game else { return }
             ui.open(WorldSelectScreen(), game)
+        }))
+        y += 24
+        buttons.append(Button(cx - 100, y, 200, 20, "Multiplayer", { [weak ui, weak game] in
+            guard let ui, let game else { return }
+            ui.open(LANLobbyScreen(), game)
         }))
         y += 24
         buttons.append(Button(cx - 100, y, 200, 20, "Credits", { [weak ui, weak game] in
@@ -79,7 +84,7 @@ final class TitleScreen: Screen {
         cv.restore()
         cv.drawText("Pebble \(PEBBLE_VERSION)", 2, ui.height - 10, 1, "#c8c8c8")
         cv.drawText("Textures: Faithful 32x (faithfulpack.net)", 2, ui.height - 20, 1, "#909090")
-        let credit = "Singleplayer, for now"
+        let credit = "LAN multiplayer"
         cv.drawText(credit, ui.width - Double(textWidth(credit)) - 2, ui.height - 10, 1, "#c8c8c8")
         ui.drawButtons(self)
     }
@@ -316,6 +321,11 @@ final class PauseScreen: Screen {
         buttons.append(Button(cx - 100, y, 200, 20, "Options...", { [weak ui, weak game] in
             guard let ui, let game else { return }
             ui.open(SettingsScreen(), game)
+        }))
+        y += 24
+        buttons.append(Button(cx - 100, y, 200, 20, "Open to LAN", { [weak ui, weak game] in
+            guard let ui, let game else { return }
+            ui.open(LANLobbyScreen(), game)
         }))
         y += 24
         buttons.append(Button(cx - 100, y, 200, 20, "Save & Quit to Title", { [weak game] in

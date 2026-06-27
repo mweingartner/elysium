@@ -77,7 +77,7 @@ These are not style preferences. Violating them corrupts worlds or breaks determ
 
 ## Scope & conduct
 
-Pebble is **singleplayer, for now** — multiplayer is on the roadmap, but it's an architecture decision we'll make deliberately. The only approved in-app network surface is the loopback-only Ollama agent; any other networking PR needs an issue and security plan first, and uncoordinated ones will likely be declined. Performance work is welcome but must keep goldens green and come with before/after numbers. Be a normal, decent person in issues and reviews; that's the whole code of conduct.
+Pebble's approved in-app network surfaces are the loopback-only Ollama agent and the local-network LAN transport tracked in [LAN_MULTIPLAYER_PLAN.md](LAN_MULTIPLAYER_PLAN.md). LAN work must preserve the split where `PebbleCore/Net` owns bounded protocol models/validation and `Sources/Pebble/LANTransport.swift` owns Network.framework. New networking beyond that, including NAT traversal, relay servers, account systems, raw sockets, or cloud services, needs an issue and security plan first. Performance work is welcome but must keep goldens green and come with before/after numbers. Be a normal, decent person in issues and reviews; that's the whole code of conduct.
 
 By contributing you agree your contributions are licensed under the repository's MIT license.
 

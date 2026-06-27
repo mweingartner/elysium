@@ -1,14 +1,21 @@
 # Changelog
 
-All notable changes to Pebble. Versions follow `MAJOR.MINOR[.PATCH]`; the
+All notable changes to Pebble. Versions follow `MAJOR.MINOR.PATCH`; the
 in-app version string comes from `PEBBLE_VERSION` (PebbleCore/Game/Saves.swift).
 
-## 1.1 — 2026-06-27 — gameplay systems update
+## 1.1.0 — 2026-06-27 — gameplay systems update
 
 - Added survival and creative-mode gameplay improvements developed after the
   first beta, including creative crafting, creative flight, copied-object
   placement workflows, minimap controls, command-line AI actions, and live
   3D fixture rendering for torches and lanterns.
+- Added player-started LAN multiplayer session support: Multiplayer and Open to
+  LAN screens, Bonjour browse/advertise for `_pebble-lan._tcp`, Direct Connect
+  by host/port/join-code, `/lan ...` command-line controls, join-code
+  handshakes, bounded protocol frames, peer status, and LAN chat.
+- Updated the security gates for the new local-network surface: Network.framework
+  use is isolated to the LAN transport, app bundles must declare local-network
+  privacy and Bonjour services, and low-level socket APIs remain rejected.
 - Expanded the local XCTest harness around these behaviors while preserving
   the 456-check golden `pebsmoke` contract.
 
