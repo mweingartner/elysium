@@ -284,6 +284,14 @@ final class GameView: MTKView {
             return
         }
         if handleObjectTemplateShortcut(event) { return }
+        if code == "Minus" || code == "NumpadSubtract" {
+            game.cycleMinimapSize(larger: false)
+            return
+        }
+        if code == "Equal" || code == "NumpadEqual" {
+            game.cycleMinimapSize(larger: true)
+            return
+        }
         if code == "KeyM" {
             game.openScreen("map", nil)
             return

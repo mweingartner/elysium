@@ -2,17 +2,40 @@ import XCTest
 @testable import PebbleCore
 
 final class MapOverlayTests: XCTestCase {
-    func testMinimapRectIsSquareAndFitsRightOfHotbar() {
-        let rect = mapMinimapRect(screenWidth: 380, screenHeight: 240,
-                                  hotbarCenterX: 190, hotbarHalfWidth: 91,
-                                  hotbarTopY: 218)
+    func testDefaultMinimapSizeModeIsMediumAndCyclesThroughThreeSizes() {
+        XCTAssertEqual(MAP_DEFAULT_MINIMAP_SIZE_MODE, .medium)
+        XCTAssertEqual(cycledMapMinimapSizeMode(.medium, larger: true), .large)
+        XCTAssertEqual(cycledMapMinimapSizeMode(.large, larger: true), .small)
+        XCTAssertEqual(cycledMapMinimapSizeMode(.medium, larger: false), .small)
+        XCTAssertEqual(cycledMapMinimapSizeMode(.small, larger: false), .large)
+    }
 
-        XCTAssertEqual(rect.size, 87)
-        XCTAssertEqual(rect.x, 293)
-        XCTAssertEqual(rect.y, 153)
-        XCTAssertEqual(rect.x, 380 - rect.size)
-        XCTAssertEqual(rect.y, 240 - rect.size)
-        XCTAssertGreaterThanOrEqual(rect.x, 190 + 91 + MAP_MARGIN)
+    func testMinimapRectsUseThreeSizesPinnedToBottomRight() {
+        let large = mapMinimapRect(screenWidth: 380, screenHeight: 240,
+                                   hotbarCenterX: 190, hotbarHalfWidth: 91,
+                                   hotbarTopY: 218,
+                                   sizeMode: .large)
+        let medium = mapMinimapRect(screenWidth: 380, screenHeight: 240,
+                                    hotbarCenterX: 190, hotbarHalfWidth: 91,
+                                    hotbarTopY: 218,
+                                    sizeMode: .medium)
+        let defaulted = mapMinimapRect(screenWidth: 380, screenHeight: 240,
+                                       hotbarCenterX: 190, hotbarHalfWidth: 91,
+                                       hotbarTopY: 218)
+        let small = mapMinimapRect(screenWidth: 380, screenHeight: 240,
+                                   hotbarCenterX: 190, hotbarHalfWidth: 91,
+                                   hotbarTopY: 218,
+                                   sizeMode: .small)
+
+        XCTAssertEqual(large.size, 87)
+        XCTAssertEqual(medium.size, 65)
+        XCTAssertEqual(defaulted, medium)
+        XCTAssertEqual(small.size, 43)
+        for rect in [large, medium, small] {
+            XCTAssertEqual(rect.x, 380 - rect.size)
+            XCTAssertEqual(rect.y, 240 - rect.size)
+            XCTAssertGreaterThanOrEqual(rect.x, 190 + 91 + MAP_MARGIN)
+        }
     }
 
     func testLoadedChunkBoundsCoverAllLoadedChunkEdges() {

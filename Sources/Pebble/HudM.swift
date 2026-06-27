@@ -126,7 +126,8 @@ final class HUD {
         if !(ui.current() is MapScreen) {
             let mapRect = mapMinimapRect(screenWidth: W, screenHeight: H,
                                          hotbarCenterX: cx, hotbarHalfWidth: 91,
-                                         hotbarTopY: hbY)
+                                         hotbarTopY: hbY,
+                                         sizeMode: game.mapMinimapSizeMode)
             let bounds = game.loadedMapBounds()
             let view = mapViewportCenteredOnPlayer(playerX: player.x, playerZ: player.z,
                                                    span: game.mapSpanBlocks,

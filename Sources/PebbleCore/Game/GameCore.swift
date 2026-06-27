@@ -228,6 +228,7 @@ public final class GameCore {
     public private(set) var inWorld = false
     public private(set) var paused = false
     public var mapSpanBlocks = MAP_DEFAULT_VIEW_BLOCKS
+    public var mapMinimapSizeMode = MAP_DEFAULT_MINIMAP_SIZE_MODE
     public var expandedMapCenterX = 0.0
     public var expandedMapCenterZ = 0.0
 
@@ -2199,6 +2200,10 @@ public final class GameCore {
 
     public func zoomMap(_ zoomIn: Bool) {
         mapSpanBlocks = mapZoomedSpan(current: mapSpanBlocks, zoomIn: zoomIn, bounds: loadedMapBounds())
+    }
+
+    public func cycleMinimapSize(larger: Bool) {
+        mapMinimapSizeMode = cycledMapMinimapSizeMode(mapMinimapSizeMode, larger: larger)
     }
 
     public func resetExpandedMapCenterToPlayer() {

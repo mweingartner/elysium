@@ -6,7 +6,32 @@ public let MAP_MAX_UNBOUNDED_VIEW_BLOCKS = 4096.0
 public let MAP_ZOOM_FACTOR = 2.0
 public let MAP_MARGIN = 6.0
 public let MAP_MINIMAP_MAX_GUI_SIZE = 128.0
-public let MAP_MINIMAP_MIN_GUI_SIZE = 64.0
+public let MAP_MINIMAP_MIN_GUI_SIZE = 32.0
+public let MAP_EXPANDED_MIN_GUI_SIZE = 64.0
+
+public enum MapMinimapSizeMode: Int, CaseIterable, Equatable {
+    case small = 0
+    case medium = 1
+    case large = 2
+
+    public var scale: Double {
+        switch self {
+        case .small: return 0.5
+        case .medium: return 0.75
+        case .large: return 1.0
+        }
+    }
+}
+
+public let MAP_DEFAULT_MINIMAP_SIZE_MODE: MapMinimapSizeMode = .medium
+
+public func cycledMapMinimapSizeMode(_ mode: MapMinimapSizeMode,
+                                     larger: Bool) -> MapMinimapSizeMode {
+    let all = MapMinimapSizeMode.allCases
+    guard let idx = all.firstIndex(of: mode) else { return MAP_DEFAULT_MINIMAP_SIZE_MODE }
+    let next = larger ? idx + 1 : idx - 1
+    return all[(next + all.count) % all.count]
+}
 
 public struct MapOverlayRect: Equatable {
     public let x: Double
@@ -74,14 +99,15 @@ public func mapBoundsForLoadedChunks(_ chunks: [(cx: Int, cz: Int)]) -> MapBlock
 
 public func mapMinimapRect(screenWidth: Double, screenHeight: Double,
                            hotbarCenterX: Double, hotbarHalfWidth: Double,
-                           hotbarTopY: Double, margin: Double = MAP_MARGIN) -> MapOverlayRect {
+                           hotbarTopY: Double,
+                           sizeMode: MapMinimapSizeMode = MAP_DEFAULT_MINIMAP_SIZE_MODE,
+                           margin: Double = MAP_MARGIN) -> MapOverlayRect {
     let hotbarRight = hotbarCenterX + hotbarHalfWidth
     let rightSpace = max(0, screenWidth - hotbarRight - margin * 2)
     let verticalSpace = max(0, hotbarTopY - margin * 2)
-    var size = min(MAP_MINIMAP_MAX_GUI_SIZE, rightSpace, verticalSpace).rounded(.down)
-    if size < MAP_MINIMAP_MIN_GUI_SIZE {
-        size = min(MAP_MINIMAP_MIN_GUI_SIZE, max(32, min(screenWidth - margin * 2, verticalSpace))).rounded(.down)
-    }
+    let fallbackSpace = max(MAP_MINIMAP_MIN_GUI_SIZE, min(screenWidth - margin * 2, verticalSpace))
+    let base = min(MAP_MINIMAP_MAX_GUI_SIZE, max(MAP_MINIMAP_MIN_GUI_SIZE, rightSpace), verticalSpace, fallbackSpace)
+    let size = max(MAP_MINIMAP_MIN_GUI_SIZE, base * sizeMode.scale).rounded(.down)
     let x = max(0, screenWidth - size).rounded(.down)
     let y = max(0, screenHeight - size).rounded(.down)
     return MapOverlayRect(x: x, y: y, size: size)
@@ -89,8 +115,8 @@ public func mapMinimapRect(screenWidth: Double, screenHeight: Double,
 
 public func mapExpandedRect(screenWidth: Double, screenHeight: Double,
                             margin: Double = 16) -> MapOverlayRect {
-    let available = max(MAP_MINIMAP_MIN_GUI_SIZE, min(screenWidth - margin * 2, screenHeight - margin * 2))
-    let size = max(MAP_MINIMAP_MIN_GUI_SIZE, (available * 0.88).rounded(.down))
+    let available = max(MAP_EXPANDED_MIN_GUI_SIZE, min(screenWidth - margin * 2, screenHeight - margin * 2))
+    let size = max(MAP_EXPANDED_MIN_GUI_SIZE, (available * 0.88).rounded(.down))
     return MapOverlayRect(x: ((screenWidth - size) / 2).rounded(.down),
                           y: ((screenHeight - size) / 2).rounded(.down),
                           size: size)
