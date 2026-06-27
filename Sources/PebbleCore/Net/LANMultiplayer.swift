@@ -8,6 +8,13 @@ public let LAN_MULTIPLAYER_MAX_FRAME_BYTES = 1_048_576
 public let LAN_MULTIPLAYER_MAX_PLAYER_NAME_CHARS = 32
 public let LAN_MULTIPLAYER_MAX_CHAT_BYTES = 512
 public let LAN_MULTIPLAYER_MAX_WORLD_NAME_CHARS = 64
+public let LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES = 4096
+public let LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS = 32
+public let LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES = 512
+public let LAN_MULTIPLAYER_MAX_REPLICATION_PLAYERS = LAN_MULTIPLAYER_MAX_CLIENTS + 1
+public let LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES = LAN_MULTIPLAYER_MAX_CLIENTS + 1
+public let LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS = 64
+public let LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT = CHUNK_W * SECTION_H * CHUNK_W
 
 private let LANFrameMagic: [UInt8] = [0x50, 0x42, 0x4c, 0x4e] // PBLN
 
@@ -40,6 +47,9 @@ public enum LANMultiplayerMessageKind: UInt16, Codable, Equatable, CaseIterable 
     case blockIntent = 11
     case containerIntent = 12
     case templateIntent = 13
+    case replicationBatch = 14
+    case chunkRequest = 15
+    case replicationAck = 16
 }
 
 public struct LANWorldSummary: Codable, Equatable {
@@ -160,20 +170,204 @@ public struct LANBlockIntent: Codable, Equatable {
         case useBlock
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case action
+        case x
+        case y
+        case z
+        case face
+        case selectedHotbarSlot
+        case cell
+    }
+
     public var action: Action
     public var x: Int
     public var y: Int
     public var z: Int
     public var face: Int
     public var selectedHotbarSlot: Int
+    public var cell: Int
 
-    public init(action: Action, x: Int, y: Int, z: Int, face: Int, selectedHotbarSlot: Int) {
+    public init(action: Action, x: Int, y: Int, z: Int, face: Int, selectedHotbarSlot: Int, cell: Int = 0) {
         self.action = action
         self.x = x
         self.y = y
         self.z = z
         self.face = max(0, min(5, face))
         self.selectedHotbarSlot = max(0, min(8, selectedHotbarSlot))
+        self.cell = max(0, min(Int(UInt16.max), cell))
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            action: try c.decode(Action.self, forKey: .action),
+            x: try c.decode(Int.self, forKey: .x),
+            y: try c.decode(Int.self, forKey: .y),
+            z: try c.decode(Int.self, forKey: .z),
+            face: try c.decode(Int.self, forKey: .face),
+            selectedHotbarSlot: try c.decode(Int.self, forKey: .selectedHotbarSlot),
+            cell: try c.decodeIfPresent(Int.self, forKey: .cell) ?? 0
+        )
+    }
+}
+
+public struct LANBlockChange: Codable, Equatable {
+    public var dimension: Int
+    public var x: Int
+    public var y: Int
+    public var z: Int
+    public var cell: Int
+
+    public init(dimension: Int, x: Int, y: Int, z: Int, cell: Int) {
+        self.dimension = dimension
+        self.x = x
+        self.y = y
+        self.z = z
+        self.cell = max(0, min(Int(UInt16.max), cell))
+    }
+}
+
+public struct LANChunkSectionSnapshot: Codable, Equatable {
+    public var dimension: Int
+    public var cx: Int
+    public var cz: Int
+    public var sectionY: Int
+    public var minY: Int
+    public var cells: [UInt16]
+
+    public init(dimension: Int, cx: Int, cz: Int, sectionY: Int, minY: Int, cells: [UInt16]) {
+        self.dimension = dimension
+        self.cx = cx
+        self.cz = cz
+        self.sectionY = sectionY
+        self.minY = minY
+        self.cells = cells.count > LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT
+            ? Array(cells.prefix(LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT))
+            : cells
+    }
+
+    public var hasExpectedCellCount: Bool {
+        cells.count == LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT
+    }
+}
+
+public struct LANEntitySnapshot: Codable, Equatable {
+    public var entityID: Int
+    public var type: String
+    public var x: Double
+    public var y: Double
+    public var z: Double
+    public var yaw: Double
+    public var pitch: Double
+    public var health: Double?
+    public var dead: Bool
+
+    public init(entityID: Int, type: String, x: Double, y: Double, z: Double, yaw: Double, pitch: Double, health: Double?, dead: Bool) {
+        self.entityID = entityID
+        self.type = sanitizedLANEntityType(type)
+        self.x = x.isFinite ? x : 0
+        self.y = y.isFinite ? y : 0
+        self.z = z.isFinite ? z : 0
+        self.yaw = yaw.isFinite ? yaw : 0
+        self.pitch = pitch.isFinite ? pitch : 0
+        self.health = health?.isFinite == true ? health : nil
+        self.dead = dead
+    }
+}
+
+public struct LANInventorySlotSnapshot: Codable, Equatable {
+    public var slot: Int
+    public var itemID: Int
+    public var count: Int
+    public var damage: Int
+    public var label: String?
+
+    public init(slot: Int, itemID: Int, count: Int, damage: Int = 0, label: String? = nil) {
+        self.slot = max(0, min(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS - 1, slot))
+        self.itemID = max(0, itemID)
+        self.count = max(0, min(127, count))
+        self.damage = max(0, damage)
+        self.label = label.map { prefixByUTF8Bytes(cleanSingleLine($0), maxBytes: 128) }
+    }
+}
+
+public struct LANPlayerInventorySnapshot: Codable, Equatable {
+    public var playerID: String
+    public var selectedHotbarSlot: Int
+    public var slots: [LANInventorySlotSnapshot]
+
+    public init(playerID: String, selectedHotbarSlot: Int, slots: [LANInventorySlotSnapshot]) {
+        self.playerID = String(playerID.prefix(128))
+        self.selectedHotbarSlot = max(0, min(8, selectedHotbarSlot))
+        self.slots = slots.count > LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS
+            ? Array(slots.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS))
+            : slots
+    }
+}
+
+public struct LANReplicationBatch: Codable, Equatable {
+    public var tick: Int
+    public var fullSnapshot: Bool
+    public var world: LANWorldSummary?
+    public var players: [LANPlayerState]
+    public var blockChanges: [LANBlockChange]
+    public var chunkSections: [LANChunkSectionSnapshot]
+    public var entities: [LANEntitySnapshot]
+    public var inventories: [LANPlayerInventorySnapshot]
+
+    public init(
+        tick: Int,
+        fullSnapshot: Bool,
+        world: LANWorldSummary? = nil,
+        players: [LANPlayerState] = [],
+        blockChanges: [LANBlockChange] = [],
+        chunkSections: [LANChunkSectionSnapshot] = [],
+        entities: [LANEntitySnapshot] = [],
+        inventories: [LANPlayerInventorySnapshot] = []
+    ) {
+        self.tick = max(0, tick)
+        self.fullSnapshot = fullSnapshot
+        self.world = world
+        self.players = Array(players.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_PLAYERS))
+        self.blockChanges = Array(blockChanges.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES))
+        self.chunkSections = Array(chunkSections.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS))
+        self.entities = Array(entities.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES))
+        self.inventories = Array(inventories.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES))
+    }
+
+    public var isWithinReplicationCaps: Bool {
+        players.count <= LAN_MULTIPLAYER_MAX_REPLICATION_PLAYERS &&
+            blockChanges.count <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES &&
+            chunkSections.count <= LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS &&
+            entities.count <= LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES &&
+            inventories.count <= LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES &&
+            chunkSections.allSatisfy(\.hasExpectedCellCount) &&
+            inventories.allSatisfy { $0.slots.count <= LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS }
+    }
+}
+
+public struct LANChunkRequest: Codable, Equatable {
+    public var dimension: Int
+    public var cx: Int
+    public var cz: Int
+    public var radius: Int
+
+    public init(dimension: Int, cx: Int, cz: Int, radius: Int) {
+        self.dimension = dimension
+        self.cx = cx
+        self.cz = cz
+        self.radius = max(0, min(4, radius))
+    }
+}
+
+public struct LANReplicationAck: Codable, Equatable {
+    public var tick: Int
+    public var receivedSequence: UInt32
+
+    public init(tick: Int, receivedSequence: UInt32) {
+        self.tick = max(0, tick)
+        self.receivedSequence = receivedSequence
     }
 }
 
@@ -237,6 +431,9 @@ public enum LANMultiplayerMessage: Codable, Equatable {
     case blockIntent(playerID: String, intent: LANBlockIntent)
     case containerIntent(playerID: String, intent: LANContainerIntent)
     case templateIntent(playerID: String, intent: LANTemplateIntent)
+    case replicationBatch(LANReplicationBatch)
+    case chunkRequest(playerID: String, request: LANChunkRequest)
+    case replicationAck(playerID: String, ack: LANReplicationAck)
 
     public var kind: LANMultiplayerMessageKind {
         switch self {
@@ -253,6 +450,9 @@ public enum LANMultiplayerMessage: Codable, Equatable {
         case .blockIntent: return .blockIntent
         case .containerIntent: return .containerIntent
         case .templateIntent: return .templateIntent
+        case .replicationBatch: return .replicationBatch
+        case .chunkRequest: return .chunkRequest
+        case .replicationAck: return .replicationAck
         }
     }
 }
@@ -432,6 +632,17 @@ public func sanitizedLANTemplateName(_ raw: String) -> String {
     let cleaned = cleanSingleLine(raw.trimmingCharacters(in: .whitespacesAndNewlines))
         .filter { allowed.contains($0) }
     return prefixByUTF8Bytes(String(cleaned.prefix(64)), maxBytes: 192)
+}
+
+public func sanitizedLANEntityType(_ raw: String) -> String {
+    var cleaned = ""
+    for scalar in raw.unicodeScalars {
+        if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" || scalar == "-" || scalar == ":" {
+            cleaned.unicodeScalars.append(scalar)
+        }
+    }
+    let clipped = prefixByUTF8Bytes(String(cleaned.prefix(64)), maxBytes: 96)
+    return clipped.isEmpty ? "entity" : clipped
 }
 
 public func normalizedLANJoinCode(_ raw: String) -> String {

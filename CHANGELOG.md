@@ -13,6 +13,10 @@ in-app version string comes from `PEBBLE_VERSION` (PebbleCore/Game/Saves.swift).
   LAN screens, Bonjour browse/advertise for `_pebble-lan._tcp`, Direct Connect
   by host/port/join-code, `/lan ...` command-line controls, join-code
   handshakes, bounded protocol frames, peer status, and LAN chat.
+- Added the first host-authoritative LAN replication layer: capped replication
+  batches now carry player state, chunk-section snapshots, block deltas, entity
+  snapshots, and inventory snapshots, with client mirrors and host-validated
+  block intents covered by XCTest.
 - Updated the security gates for the new local-network surface: Network.framework
   use is isolated to the LAN transport, app bundles must declare local-network
   privacy and Bonjour services, and low-level socket APIs remain rejected.

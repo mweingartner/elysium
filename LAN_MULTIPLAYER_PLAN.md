@@ -1,13 +1,15 @@
 # Pebble LAN Multiplayer Plan
 
-Status: implemented baseline plus remaining gameplay-replication plan. Pebble
-1.1.0 now ships the local-network session layer: Multiplayer/Open to LAN UI,
-Bonjour browse/advertise for `_pebble-lan._tcp`, Direct Connect by
-host/port/join-code, bounded `PBLN` protocol frames, join-code handshakes,
-peer status, LAN chat, source/binary security allowlists, and Info.plist
-local-network privacy declarations. The deeper host-authoritative gameplay
-replication work below remains the contract for turning accepted LAN peers into
-fully synchronized remote players.
+Status: implemented LAN baseline plus the first host-authoritative replication
+layer. Pebble 1.1.0 now ships Multiplayer/Open to LAN UI, Bonjour
+browse/advertise for `_pebble-lan._tcp`, Direct Connect by host/port/join-code,
+bounded `PBLN` protocol frames, join-code handshakes, peer status, LAN chat,
+source/binary security allowlists, Info.plist local-network privacy
+declarations, and core replication batches for player state, chunk sections,
+block deltas, entity snapshots, and inventory snapshots. The remaining work is
+gameplay completion on top of that layer: remote player entities, full
+container/crafting/template/command permissions, dimensions, deaths, respawns,
+reconnect persistence, and two-Mac installed-app soak.
 
 ## Sources
 
@@ -37,9 +39,11 @@ Initial target:
   persistence.
 - Bonjour discovery using a Pebble-specific TCP service type.
 - Join-code approval before a client can enter the world.
-- Shared chat, then host-authoritative world state, mobs, block changes,
-  inventories, crafting, containers, commands, object-template placement, and
-  map state as the remaining replication phases land.
+- Shared chat and host-authoritative state replication for chunk sections,
+  block changes, player state, entity snapshots, and inventory snapshots.
+- Full crafting, containers, commands, object-template placement, and map-state
+  interactions remain host-authoritative gameplay integrations layered on top of
+  the replication primitives.
 - Client disconnect/reconnect without corrupting host saves.
 
 Non-goals for the first LAN release:
@@ -78,17 +82,20 @@ Added core-only networking model files:
   type, message type ids, caps, frame codec, malformed-frame errors, sanitized
   inputs, and `Codable` payload models for hello, accept/reject, player state,
   player input, block/container/template intents, chat, world summaries, ping,
-  pong, and disconnect reasons.
+  pong, disconnect reasons, chunk requests, replication acknowledgments, and
+  replication batches.
+- `Sources/PebbleCore/Net/LANReplication.swift`: host-authoritative peer
+  session state, deterministic block-change log, host block-intent validation,
+  chunk-section snapshot encode/apply helpers, entity snapshots, player
+  inventory snapshots, client-side replicated mirror state, and bounded apply
+  reports.
 
-Remaining core replication files:
+Remaining core gameplay integrations:
 
-- `Sources/PebbleCore/Net/MultiplayerHostSession.swift`: authoritative tick
-  integration around a host `GameCore`.
-- `Sources/PebbleCore/Net/MultiplayerClientSession.swift`: client-side
-  interpolation, pending input tracking, and server-state application.
-- `Sources/PebbleCore/Net/Replication.swift`: interest management, chunk
-  streaming queues, entity snapshots, block diffs, inventory diffs, and event
-  queues.
+- Remote player entity control/interpolation around a host `GameCore`.
+- Container/crafting/template/command permission execution for remote clients.
+- Dimension transfer, death/respawn, disconnect/reconnect persistence, and
+  multiplayer-specific UI event replication.
 
 Added app transport/UI files:
 
@@ -126,8 +133,11 @@ Implemented client flow:
 5. Client sends `ClientHello`.
 6. Host replies with `ServerAccept` or `ServerReject`.
 7. Accepted client receives the host's `LANWorldSummary`, enters connected
-   session/chat state, and can send typed intent messages. Applying those
-   intents to synchronized remote players remains in the replication plan.
+   session/chat state, and receives an initial replication batch.
+8. Host publishes periodic bounded replication batches from the main game
+   thread. Clients acknowledge and apply them to a client mirror; if a matching
+   world is already loaded, block/chunk deltas are applied through the normal
+   world dirty-section path.
 
 ### Protocol
 
@@ -152,6 +162,11 @@ Hard caps:
 - Maximum queued outbound frames per client: fixed back-pressure cap.
 - Maximum chunk payload per frame: one section or one small section batch.
 - Maximum clients: 8.
+- Maximum replication block changes per batch: 4096.
+- Maximum chunk sections per replication batch: 32.
+- Maximum entity snapshots per replication batch: 512.
+- Maximum player/inventory snapshots per batch: 9.
+- Maximum replicated inventory slots per player: 64.
 
 Every decoder must fail closed before allocation if lengths exceed caps.
 
@@ -182,21 +197,35 @@ small rejection event and do not mutate world state.
 
 ### Simulation And Replication
 
-Host tick:
+Implemented host replication tick:
 
-1. Read bounded intent queues from all clients.
-2. Apply player inputs in stable player-slot order.
-3. Tick `GameCore` once at 20 Hz.
-4. Collect block/entity/inventory/UI/sound/particle/chat deltas.
-5. Send deltas to each client based on interest sets.
+1. App frame advances the single host `GameCore` on the main thread.
+2. `LANTransport` snapshots local host player state, accepted peer states,
+   nearby chunk sections, entity snapshots, host inventory, and drained block
+   changes.
+3. The host sends a `LANReplicationBatch` at a bounded cadence, with larger
+   full snapshots every few seconds and delta batches between them.
+4. Client block intents are accepted only from joined peers, validated against
+   the last peer state/reach and registry-valid cells, then applied to the host
+   world on the main thread.
 
-Client frame:
+Implemented client replication apply:
 
-1. Apply latest authoritative snapshot/deltas.
+1. Client decodes `LANReplicationBatch` frames under the same 1 MiB PBLN cap.
+2. The client mirror stores world summary, players, chunk sections, block cells,
+   entity snapshots, and inventory snapshots, dropping malformed sections and
+   invalid cells.
+3. If the local game has a loaded matching world, chunk sections and block
+   deltas apply to `World` on the main thread and notify dirty-section hooks for
+   remeshing.
+
+Remaining client gameplay work:
+
+1. Spawn/interpolate remote player entities from mirrored player snapshots.
 2. Predict only local player camera/input for responsiveness.
-3. Interpolate remote players and mobs.
-4. Render loaded chunks and entities from replicated state.
-5. Roll back local prediction only for the local player, never for world state.
+3. Render replicated entities from snapshots when they are not local host
+   entities.
+4. Roll back local prediction only for the local player, never for world state.
 
 Chunk streaming:
 
@@ -273,7 +302,16 @@ Scripts must change deliberately:
 
 Core unit tests:
 
-- `NetCodecTests`: round-trip every message type.
+- `LANMultiplayerTests`: round-trip every message type, stream partial frames,
+  reject bad magic/version/type/oversized frames, validate sanitizers, verify
+  Info.plist LAN declarations, and preserve same-version block-intent
+  compatibility when older peers omit the optional placement cell.
+- `LANReplicationTests`: prove deterministic block-change coalescing/drain
+  order, host break/place validation, out-of-reach and invalid-cell rejection,
+  chunk-section snapshot apply/remesh hooks, client mirror apply with malformed
+  section/invalid-cell drops, and batch caps.
+- `NetCodecTests`: keep fuzz/property coverage for malformed future protocol
+  variants.
 - `NetCodecFuzzTests`: seeded malformed lengths, truncated frames, unknown
   message types, invalid UTF-8, and over-cap payloads.
 - `MultiplayerHostSessionTests`: two synthetic clients moving, breaking,

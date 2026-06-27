@@ -54,6 +54,11 @@ final class LANMultiplayerTests: XCTestCase {
             .blockIntent(playerID: "peer-a", intent: LANBlockIntent(action: .placeBlock, x: 1, y: 2, z: 3, face: 9, selectedHotbarSlot: -5)),
             .containerIntent(playerID: "peer-a", intent: LANContainerIntent(action: .clickSlot, containerID: "chest", slot: 5, button: 1, shift: true)),
             .templateIntent(playerID: "peer-a", intent: LANTemplateIntent(action: .placeTemplate, templateName: "A House!", x: 9, y: 64, z: -4, rotation: -1)),
+            .replicationBatch(LANReplicationBatch(tick: 7, fullSnapshot: false, players: [player], blockChanges: [
+                LANBlockChange(dimension: Dim.overworld.rawValue, x: 1, y: 65, z: 1, cell: 0),
+            ])),
+            .chunkRequest(playerID: "peer-a", request: LANChunkRequest(dimension: Dim.overworld.rawValue, cx: 0, cz: 0, radius: 9)),
+            .replicationAck(playerID: "peer-a", ack: LANReplicationAck(tick: 7, receivedSequence: 42)),
         ]
 
         for (index, message) in messages.enumerated() {
@@ -128,6 +133,16 @@ final class LANMultiplayerTests: XCTestCase {
                        LANDirectConnectTarget(host: "192.168.1.20", port: LAN_MULTIPLAYER_DEFAULT_PORT))
         XCTAssertNil(LANDirectConnectTarget.parse(host: "bad host", port: "41337"))
         XCTAssertNil(LANDirectConnectTarget.parse(host: "localhost", port: "0"))
+    }
+
+    func testBlockIntentDecodesMissingPlacementCellAsZeroForCompatibility() throws {
+        let data = """
+        {"action":"placeBlock","x":1,"y":2,"z":3,"face":1,"selectedHotbarSlot":0}
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(LANBlockIntent.self, from: data)
+
+        XCTAssertEqual(decoded, LANBlockIntent(action: .placeBlock, x: 1, y: 2, z: 3, face: 1, selectedHotbarSlot: 0))
     }
 
     func testInfoPlistDeclaresLocalNetworkPrivacyAndBonjourService() throws {

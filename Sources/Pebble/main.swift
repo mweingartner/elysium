@@ -755,6 +755,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         let enc: MTLRenderCommandEncoder
         if game.hasWorld() {
             let partial = game.frame(dtMs: dt)
+            LANMultiplayerManager.shared.tickReplication(game: game)
             bot?.tick()
             booth?.tickBooth()
             renderer.particles.tick(game.world)
