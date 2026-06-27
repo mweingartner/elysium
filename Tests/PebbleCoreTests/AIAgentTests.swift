@@ -101,6 +101,96 @@ final class AIAgentTests: XCTestCase {
         XCTAssertNil(inferDirectAIAgentAction(from: "what can I craft with coal"))
     }
 
+    func testDirectTemplateReplacementRequestParsesWoodCategory() throws {
+        registerCoreIfNeeded()
+        let action = try XCTUnwrap(inferDirectAIAgentAction(
+            from: #"change the type of all wood blocks in "house" to bamboo"#))
+
+        XCTAssertEqual(action.action, "replace_template_blocks")
+        XCTAssertEqual(action.template, "house")
+        XCTAssertEqual(action.fromBlock, "wood")
+        XCTAssertEqual(action.toBlock, "bamboo")
+        XCTAssertTrue(isAIAgentTemplateAction(action))
+    }
+
+    func testTemplateReplacementActionEditsSavedWoodBlocks() throws {
+        registerCoreIfNeeded()
+        var store: [String: ObjectTemplate] = [
+            "house": ObjectTemplate(
+                name: "house",
+                anchorX: 0, anchorY: 0, anchorZ: 0,
+                sizeX: 3, sizeY: 1, sizeZ: 1,
+                blocks: [
+                    TemplateBlock(dx: 0, dy: 0, dz: 0, cell: UInt16(cell(B.oak_planks))),
+                    TemplateBlock(dx: 1, dy: 0, dz: 0, cell: UInt16(cell(B.spruce_log))),
+                    TemplateBlock(dx: 2, dy: 0, dz: 0, cell: UInt16(cell(B.stone))),
+                ]),
+        ]
+        let action = try XCTUnwrap(inferDirectAIAgentAction(
+            from: #"change the type of all wood blocks in "house" to bamboo"#))
+
+        let result = try executeAIAgentTemplateAction(
+            action,
+            loadTemplate: { store[normalizedTemplateName($0)!] },
+            saveTemplate: { store[$0.name] = $0; return true })
+
+        XCTAssertTrue(result.changedWorld)
+        XCTAssertTrue(result.message.contains("replaced 2"))
+        let updated = try XCTUnwrap(store["house"])
+        XCTAssertEqual(updated.blocks.map { Int($0.cell >> 4) }, [Int(B.bamboo), Int(B.bamboo), Int(B.stone)])
+    }
+
+    func testTemplateReplacementSupportsExactBlockTypesAndDropsChangedBlockEntities() throws {
+        registerCoreIfNeeded()
+        let chest = makeContainerBE(0, 0, 0, 27)
+        chest.items?[0] = stack("diamond", 1)
+        var store: [String: ObjectTemplate] = [
+            "storage": ObjectTemplate(
+                name: "storage",
+                anchorX: 0, anchorY: 0, anchorZ: 0,
+                sizeX: 2, sizeY: 1, sizeZ: 1,
+                blocks: [
+                    TemplateBlock(dx: 0, dy: 0, dz: 0, cell: UInt16(cell(B.chest))),
+                    TemplateBlock(dx: 1, dy: 0, dz: 0, cell: UInt16(cell(B.cobblestone))),
+                ],
+                blockEntities: [chest]),
+        ]
+
+        let result = try executeAIAgentTemplateAction(
+            AIAgentAction(action: "replace_template_blocks",
+                          template: "storage",
+                          fromBlock: "chest",
+                          toBlock: "diamond_block"),
+            loadTemplate: { store[normalizedTemplateName($0)!] },
+            saveTemplate: { store[$0.name] = $0; return true })
+
+        XCTAssertTrue(result.changedWorld)
+        let updated = try XCTUnwrap(store["storage"])
+        XCTAssertEqual(updated.blocks.map { Int($0.cell >> 4) }, [Int(B.diamond_block), Int(B.cobblestone)])
+        XCTAssertTrue(updated.blockEntities.isEmpty)
+    }
+
+    func testDirectTemplateCreationRequestBuildsStoredPirateShip() throws {
+        registerCoreIfNeeded()
+        let prompt = #"/ai create a object that looks like a pirate ship about 50 blocks long and use darker colored block type from wood to other material to make it look sinister. Name the object pirateShip"#
+        let action = try XCTUnwrap(inferDirectAIAgentAction(from: prompt))
+        var saved: ObjectTemplate?
+
+        let result = try executeAIAgentTemplateAction(
+            action,
+            loadTemplate: { _ in nil },
+            saveTemplate: { saved = $0; return true })
+
+        XCTAssertTrue(result.changedWorld)
+        let template = try XCTUnwrap(saved)
+        XCTAssertEqual(template.name, "pirateship")
+        XCTAssertEqual(template.sizeX, 50)
+        XCTAssertGreaterThan(template.blocks.count, 200)
+        let palette = try objectTemplateBlockPalette(template, limit: 8).map(\.blockName)
+        XCTAssertTrue(palette.contains("dark_oak_planks") || palette.contains("spruce_planks"))
+        XCTAssertTrue(palette.contains("black_wool") || palette.contains("polished_blackstone_bricks"))
+    }
+
     func testPlaceBlockAtCursorUsesPlacementPathAndPreservesHotbar() throws {
         let (world, player, hit) = makeWorldAndPlayer()
         player.inventory[0] = stack("dirt", 5)
@@ -141,5 +231,25 @@ final class AIAgentTests: XCTestCase {
         XCTAssertTrue(snapshot.contains("diamondx2"), snapshot)
         XCTAssertTrue(snapshot.contains("Cursor: block=stone"), snapshot)
         XCTAssertTrue(snapshot.contains("Available items:"), snapshot)
+    }
+
+    func testSnapshotIncludesSavedTemplatePalette() {
+        let (world, player, hit) = makeWorldAndPlayer()
+        let template = ObjectTemplate(
+            name: "house",
+            anchorX: 0, anchorY: 0, anchorZ: 0,
+            sizeX: 2, sizeY: 1, sizeZ: 1,
+            blocks: [
+                TemplateBlock(dx: 0, dy: 0, dz: 0, cell: UInt16(cell(B.oak_planks))),
+                TemplateBlock(dx: 1, dy: 0, dz: 0, cell: UInt16(cell(B.blackstone))),
+            ])
+
+        let snapshot = buildAIAgentSnapshot(world: world, player: player, cursor: hit,
+                                            savedTemplates: [template])
+
+        XCTAssertTrue(snapshot.contains("Saved object templates:"), snapshot)
+        XCTAssertTrue(snapshot.contains("template=\"house\""), snapshot)
+        XCTAssertTrue(snapshot.contains("oak_planksx1"), snapshot)
+        XCTAssertTrue(snapshot.contains("blackstonex1"), snapshot)
     }
 }

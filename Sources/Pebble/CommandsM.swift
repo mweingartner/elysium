@@ -31,11 +31,6 @@ func runCommand(_ game: GameCore, _ raw: String) {
         if let t = game.targetedBlock { return (t.x, t.y, t.z) }
         return nil
     }
-    func cursorPlacement() -> (x: Int, y: Int, z: Int)? {
-        if let target = cursorPlacementPosition(from: cursorHit()) { return target }
-        if let t = game.targetedBlock { return (t.x, t.y + 1, t.z) }
-        return nil
-    }
 
     switch cmd {
     case "help":
@@ -62,15 +57,14 @@ func runCommand(_ game: GameCore, _ raw: String) {
         }
     case "place":
         guard let name = placeTemplateNameFromCommandArgs(args) else {
-            return fail("Usage: /place object \"name\" at the cursor or /place \"name\" at target")
+            return fail("Usage: /place \"name\"")
         }
-        guard let target = cursorPlacement() else { return fail(TemplateError.missingTarget.description) }
         do {
             guard let template = try game.db.getTemplate(named: name) else {
                 return fail("Unknown template: \(name)")
             }
-            let result = try placeObjectTemplate(template, in: world, targetX: target.x, targetY: target.y, targetZ: target.z)
-            ok("Placed object \"\(template.name)\" — \(result.blocksPlaced) blocks, \(result.blockEntitiesPlaced) block entities")
+            try game.beginTemplatePlacement(template)
+            ok("Placing object \"\(template.name)\" - scroll to rotate, left click to place")
         } catch let error as TemplateError {
             fail(error.description)
         } catch {

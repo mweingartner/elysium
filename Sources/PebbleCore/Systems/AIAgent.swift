@@ -16,15 +16,37 @@ public struct AIAgentAction: Codable, Equatable {
     public var count: Int?
     public var target: String?
     public var message: String?
+    public var template: String?
+    public var name: String?
+    public var fromBlock: String?
+    public var toBlock: String?
+    public var kind: String?
+    public var length: Int?
+    public var style: String?
 
     public init(action: String, item: String? = nil, block: String? = nil, count: Int? = nil,
-                target: String? = nil, message: String? = nil) {
+                target: String? = nil, message: String? = nil, template: String? = nil,
+                name: String? = nil, fromBlock: String? = nil, toBlock: String? = nil,
+                kind: String? = nil, length: Int? = nil, style: String? = nil) {
         self.action = action
         self.item = item
         self.block = block
         self.count = count
         self.target = target
         self.message = message
+        self.template = template
+        self.name = name
+        self.fromBlock = fromBlock
+        self.toBlock = toBlock
+        self.kind = kind
+        self.length = length
+        self.style = style
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case action, item, block, count, target, message, template, name, kind, length, style
+        case fromBlock = "from_block"
+        case toBlock = "to_block"
     }
 }
 
@@ -51,6 +73,12 @@ public enum AIAgentError: Error, Equatable, CustomStringConvertible {
     case targetOutOfWorld(Int, Int, Int)
     case placementFailed(String)
     case inventoryFull(String)
+    case missingTemplateName
+    case unknownTemplate(String)
+    case missingBlockReplacement
+    case unknownBlock(String)
+    case templateWriteFailed(String)
+    case unsupportedTemplateAction(String)
 
     public var description: String {
         switch self {
@@ -66,6 +94,12 @@ public enum AIAgentError: Error, Equatable, CustomStringConvertible {
         case .targetOutOfWorld(let x, let y, let z): return "Target is outside world height at \(x) \(y) \(z)"
         case .placementFailed(let item): return "Could not place \(item) at the cursor"
         case .inventoryFull(let item): return "Inventory is full; could not give \(item)"
+        case .missingTemplateName: return "AI action did not name an object template"
+        case .unknownTemplate(let name): return "Unknown object template: \(name)"
+        case .missingBlockReplacement: return "AI action did not name both source and replacement blocks"
+        case .unknownBlock(let block): return "Unknown block type: \(block)"
+        case .templateWriteFailed(let name): return "Template store write failed for \(name)"
+        case .unsupportedTemplateAction(let action): return "AI template action is not allowed: \(action)"
         }
     }
 }
@@ -163,7 +197,140 @@ private func aiAgentNameCandidates(_ raw: String) -> [String] {
     return candidates
 }
 
+public func isAIAgentTemplateAction(_ action: AIAgentAction) -> Bool {
+    switch normalizeAIAgentName(action.action) {
+    case "replace_template_blocks", "change_template_blocks", "edit_template_blocks",
+         "create_template", "create_object_template":
+        return true
+    default:
+        return false
+    }
+}
+
+public func inferDirectAIAgentTemplateAction(from userRequest: String) -> AIAgentAction? {
+    if let action = inferDirectAIAgentTemplateReplacementAction(from: userRequest) { return action }
+    if let action = inferDirectAIAgentTemplateCreationAction(from: userRequest) { return action }
+    return nil
+}
+
+private func firstQuotedSegment(in raw: String) -> (value: String, range: Range<String.Index>)? {
+    var quote: Character?
+    var start: String.Index?
+    for idx in raw.indices {
+        let ch = raw[idx]
+        if quote == nil, ch == "\"" || ch == "'" {
+            quote = ch
+            start = raw.index(after: idx)
+            continue
+        }
+        if let q = quote, ch == q, let start {
+            return (String(raw[start..<idx]), start..<idx)
+        }
+    }
+    return nil
+}
+
+private func cleanedAIAgentBlockPhrase(_ raw: String) -> String {
+    var words = normalizeAIAgentRequestText(raw).split(separator: " ").map(String.init)
+    let leadingNoise = Set(["the", "type", "of", "block", "blocks"])
+    while let first = words.first, leadingNoise.contains(first) {
+        words.removeFirst()
+    }
+    while let last = words.last, last == "block" || last == "blocks" || last == "type" {
+        words.removeLast()
+    }
+    return words.joined(separator: " ")
+}
+
+private func inferDirectAIAgentTemplateReplacementAction(from raw: String) -> AIAgentAction? {
+    let lower = raw.lowercased()
+    guard ["change", "replace", "convert"].contains(where: { lower.contains($0) }),
+          let quoted = firstQuotedSegment(in: raw) else { return nil }
+
+    let beforeTemplate = String(raw[..<quoted.range.lowerBound])
+    let afterTemplate = String(raw[quoted.range.upperBound...])
+    let beforeLower = beforeTemplate.lowercased()
+    guard let allRange = beforeLower.range(of: "all ", options: .backwards),
+          let inRange = beforeLower.range(of: " in", options: .backwards),
+          allRange.upperBound < inRange.lowerBound else { return nil }
+    let sourceRaw = String(beforeLower[allRange.upperBound..<inRange.lowerBound])
+    let afterLower = afterTemplate.lowercased()
+    guard let toRange = afterLower.range(of: " to ") else { return nil }
+    let destinationRaw = String(afterLower[toRange.upperBound...])
+        .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".;:!?")))
+
+    let source = cleanedAIAgentBlockPhrase(sourceRaw)
+    let destination = cleanedAIAgentBlockPhrase(destinationRaw)
+    guard !source.isEmpty, !destination.isEmpty else { return nil }
+    return AIAgentAction(
+        action: "replace_template_blocks",
+        template: quoted.value,
+        fromBlock: source,
+        toBlock: destination)
+}
+
+private func inferDirectAIAgentTemplateCreationAction(from raw: String) -> AIAgentAction? {
+    let normalized = normalizeAIAgentRequestText(raw)
+    let padded = " \(normalized) "
+    guard padded.contains(" create ") || padded.contains(" build ") || padded.contains(" generate ") else { return nil }
+    guard padded.contains(" object ") || padded.contains(" template ") else { return nil }
+    guard let name = inferGeneratedTemplateName(from: raw) else { return nil }
+    let kind = inferGeneratedTemplateKind(from: normalized)
+    guard !kind.isEmpty else { return nil }
+    return AIAgentAction(
+        action: "create_template",
+        template: name,
+        kind: kind,
+        length: inferGeneratedTemplateLength(from: normalized),
+        style: raw)
+}
+
+private func inferGeneratedTemplateName(from raw: String) -> String? {
+    let lower = raw.lowercased()
+    let markers = [
+        "name the object ", "name the template ", "name it ",
+        "called ", "named ",
+    ]
+    for marker in markers {
+        guard let range = lower.range(of: marker, options: .backwards) else { continue }
+        let tail = String(raw[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let quoted = firstQuotedSegment(in: tail) {
+            return quoted.value
+        }
+        let token = tail.split { ch in
+            ch.isWhitespace || ch == "." || ch == "," || ch == ";" || ch == ":" || ch == "!" || ch == "?"
+        }.first.map(String.init)
+        if let token, !token.isEmpty { return token }
+    }
+    return nil
+}
+
+private func inferGeneratedTemplateKind(from normalizedRequest: String) -> String {
+    if normalizedRequest.contains("pirate ship") { return "pirate_ship" }
+    if normalizedRequest.contains("ship") { return "ship" }
+    if normalizedRequest.contains("boat") { return "boat" }
+    return ""
+}
+
+private func inferGeneratedTemplateLength(from normalizedRequest: String) -> Int? {
+    let words = normalizedRequest.split(separator: " ").map(String.init)
+    for (idx, word) in words.enumerated() {
+        guard word == "long" || word == "length" else { continue }
+        let searchStart = max(0, idx - 4)
+        for candidate in words[searchStart..<idx].reversed() {
+            if let value = Int(candidate) { return value }
+        }
+    }
+    for (idx, word) in words.enumerated() where word == "blocks" && idx > 0 {
+        if let value = Int(words[idx - 1]) { return value }
+    }
+    return nil
+}
+
 public func inferDirectAIAgentAction(from userRequest: String) -> AIAgentAction? {
+    if let templateAction = inferDirectAIAgentTemplateAction(from: userRequest) {
+        return templateAction
+    }
     let normalized = normalizeAIAgentRequestText(userRequest)
     guard hasInventoryGiveIntent(normalized) else { return nil }
 
@@ -310,6 +477,68 @@ public func aiCursorPlacementPosition(_ hit: RaycastHit, in world: World) -> (x:
     return (x, y, z)
 }
 
+public func resolveAIAgentTemplateBlockSelector(_ raw: String) -> TemplateBlockSelector? {
+    let normalized = normalizeAIAgentName(cleanedAIAgentBlockPhrase(raw))
+    if ["wood", "wooden", "wood_blocks", "wooden_blocks", "woods"].contains(normalized) {
+        return .woodFamily
+    }
+    guard let block = resolveAIAgentBlockID(raw), block != 0 else { return nil }
+    return .exact(block)
+}
+
+public func executeAIAgentTemplateAction(_ action: AIAgentAction,
+                                         loadTemplate: (String) throws -> ObjectTemplate?,
+                                         saveTemplate: (ObjectTemplate) throws -> Bool) throws -> AIAgentExecutionResult {
+    let kind = normalizeAIAgentName(action.action)
+    switch kind {
+    case "replace_template_blocks", "change_template_blocks", "edit_template_blocks":
+        guard let templateName = action.template ?? action.name else { throw AIAgentError.missingTemplateName }
+        guard let sourceRaw = action.fromBlock ?? action.block,
+              let replacementRaw = action.toBlock ?? action.item else {
+            throw AIAgentError.missingBlockReplacement
+        }
+        guard let selector = resolveAIAgentTemplateBlockSelector(sourceRaw) else {
+            throw AIAgentError.unknownBlock(sourceRaw)
+        }
+        guard let replacement = resolveAIAgentBlockID(replacementRaw), replacement != 0 else {
+            throw AIAgentError.unknownBlock(replacementRaw)
+        }
+        guard let template = try loadTemplate(templateName) else {
+            throw AIAgentError.unknownTemplate(templateName)
+        }
+        let result = try replacingObjectTemplateBlocks(template, matching: selector, with: replacement)
+        if result.replacedBlocks > 0 {
+            guard try saveTemplate(result.template) else {
+                throw AIAgentError.templateWriteFailed(result.template.name)
+            }
+        }
+        let fallback = result.replacedBlocks == 0
+            ? "No matching \(result.fromDescription) found in \"\(result.template.name)\"."
+            : "Updated \"\(result.template.name)\": replaced \(result.replacedBlocks) \(result.fromDescription) with \(result.toBlockName)."
+        return AIAgentExecutionResult(
+            message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+            changedWorld: result.replacedBlocks > 0)
+
+    case "create_template", "create_object_template":
+        guard let templateName = action.template ?? action.name else { throw AIAgentError.missingTemplateName }
+        let generated = try generatedObjectTemplate(
+            named: templateName,
+            kind: action.kind ?? "object",
+            requestedLength: action.length,
+            style: action.style ?? action.message ?? "")
+        guard try saveTemplate(generated) else {
+            throw AIAgentError.templateWriteFailed(generated.name)
+        }
+        let fallback = "Created object template \"\(generated.name)\" — \(generated.blocks.count) blocks, \(generated.sizeX)x\(generated.sizeY)x\(generated.sizeZ)."
+        return AIAgentExecutionResult(
+            message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+            changedWorld: true)
+
+    default:
+        throw AIAgentError.unsupportedTemplateAction(action.action)
+    }
+}
+
 public func executeAIAgentAction(_ action: AIAgentAction, world: World, player: Player,
                                  cursor: RaycastHit?) throws -> AIAgentExecutionResult {
     let kind = normalizeAIAgentName(action.action)
@@ -378,7 +607,8 @@ private func placeableItemID(for blockId: UInt16) -> Int? {
 }
 
 public func buildAIAgentSnapshot(world: World, player: Player, cursor: RaycastHit?,
-                                 nearbyRadius: Double = AIAgentNearbyRadius) -> String {
+                                 nearbyRadius: Double = AIAgentNearbyRadius,
+                                 savedTemplates: [ObjectTemplate] = []) -> String {
     var lines: [String] = []
     let dimName: String
     switch world.dim {
@@ -402,6 +632,14 @@ public func buildAIAgentSnapshot(world: World, player: Player, cursor: RaycastHi
         return "\(idx):\(itemDef(stack.id).name)x\(stack.count)"
     }.prefix(80).joined(separator: ", ")
     lines.append("Inventory: \(inventory.isEmpty ? "empty" : inventory)")
+
+    let templateLines = savedTemplates.prefix(32).compactMap { template -> String? in
+        guard let summary = try? summarizeObjectTemplate(template) else { return nil }
+        let palette = (try? objectTemplateBlockPalette(template, limit: 10)) ?? []
+        let paletteText = palette.map { "\($0.blockName)x\($0.count)" }.joined(separator: ", ")
+        return "template=\"\(summary.name)\" size=\(summary.sizeX)x\(summary.sizeY)x\(summary.sizeZ) blocks=\(summary.blockCount) blockEntities=\(summary.blockEntityCount) palette=\(paletteText.isEmpty ? "none" : paletteText)"
+    }
+    lines.append("Saved object templates: \(templateLines.isEmpty ? "none" : templateLines.joined(separator: "; "))")
 
     let dropped = world.getEntitiesNear(player.x, player.y, player.z, nearbyRadius) { entity in
         (entity as? ItemEntity) != nil
@@ -456,8 +694,10 @@ public func buildAIAgentSnapshot(world: World, player: Player, cursor: RaycastHi
 }
 
 public func buildAIAgentPrompt(userRequest: String, world: World, player: Player,
-                               cursor: RaycastHit?) -> String {
-    let snapshot = buildAIAgentSnapshot(world: world, player: player, cursor: cursor)
+                               cursor: RaycastHit?,
+                               savedTemplates: [ObjectTemplate] = []) -> String {
+    let snapshot = buildAIAgentSnapshot(world: world, player: player, cursor: cursor,
+                                        savedTemplates: savedTemplates)
     let prompt = """
 You are Pebble's local in-game AI agent. Inspect the state below and return exactly one JSON object. Do not use markdown.
 
@@ -465,12 +705,16 @@ Allowed actions:
 {"action":"say","message":"short answer"}
 {"action":"give_item","item":"registered_item_id_or_display_name","count":1,"message":"short answer"}
 {"action":"place_block","item":"registered_block_item_or_block_id","target":"cursor","message":"short answer"}
+{"action":"replace_template_blocks","template":"saved_template_name","from_block":"wood blocks","to_block":"bamboo","message":"short answer"}
+{"action":"create_template","template":"new_template_name","kind":"pirate_ship","length":50,"style":"short style description","message":"short answer"}
 
 Rules:
 - Use only registered item or block names shown in the state.
 - To place at the current cursor location, use action "place_block" and target "cursor".
 - To create a non-placeable item, use action "give_item".
 - A request for "a stack" means the item's maximum stack size, usually 64.
+- To edit a saved object template, use "replace_template_blocks"; "wood blocks" means every registered wood-family block in that template.
+- To create a saved composite object template, use "create_template". The engine currently supports bounded generated pirate_ship templates and stores them with copied templates.
 - Return one object only. Do not include commands, code, or extra prose.
 
 Player request:

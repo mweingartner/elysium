@@ -89,6 +89,10 @@ final class HostBridge: GameHost {
         case "stonecutter": ui.open(StonecutterScreen(), game)
         case "smithing": ui.open(SmithingScreen(), game)
         case "templates": ui.open(TemplateBrowserScreen(), game)
+        case "templatesPlace": ui.open(TemplateBrowserScreen(mode: .place), game)
+        case "map":
+            game.resetExpandedMapCenterToPlayer()
+            ui.open(MapScreen(), game)
         case "beacon":
             if let be = data?.be { ui.open(BeaconScreen(be), game) }
         case "sign":
@@ -132,6 +136,7 @@ final class HostBridge: GameHost {
     }
     func closeAllScreens() { ui.closeAll(game) }
     func releasePointer() { app?.gameView.releaseMouse() }
+    func capturePointer() { app?.gameView.captureMouse() }
 
     func showActionBar(_ text: String, _ time: Int) {
         hud.showActionBar(text)
@@ -219,6 +224,11 @@ final class GameView: MTKView {
         return (Double(p.x) * bsf / scale, (Double(bounds.height) - Double(p.y)) * bsf / scale)
     }
 
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if handleObjectTemplateShortcut(event) { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func keyDown(with event: NSEvent) {
         guard let game, let ui = ui else { return }
         let code = KEYCODE_MAP[event.keyCode] ?? ""
@@ -228,7 +238,8 @@ final class GameView: MTKView {
             return
         }
         if let screen = ui.current() {
-            if event.isARepeat && code != "Backspace" && !code.hasPrefix("Arrow") { return }
+            if event.isARepeat && code != "Backspace" && !code.hasPrefix("Arrow") &&
+                code != "Comma" && code != "Period" { return }
             if code == "Escape" {
                 if screen.closeOnEsc {
                     ui.closeTop(game)
@@ -236,7 +247,10 @@ final class GameView: MTKView {
                 }
                 return
             }
-            if screen.onKey(ui, game, code) { return }
+            if screen.onKey(ui, game, code) {
+                recaptureIfClear()
+                return
+            }
             if let chars = event.characters, !chars.isEmpty, !event.modifierFlags.contains(.command),
                !event.modifierFlags.contains(.control),
                chars.allSatisfy({ !$0.isNewline && $0.asciiValue.map { $0 >= 32 } ?? true }) {
@@ -251,6 +265,14 @@ final class GameView: MTKView {
             return
         }
         guard game.hasWorld() else { return }
+        if code == "Comma" {
+            game.zoomMap(false)
+            return
+        }
+        if code == "Period" {
+            game.zoomMap(true)
+            return
+        }
         if event.isARepeat { return }
         // HUD toggles stay app-side
         if code == "F3" {
@@ -261,9 +283,55 @@ final class GameView: MTKView {
             appd?.hud.hideGui.toggle()
             return
         }
+        if handleObjectTemplateShortcut(event) { return }
+        if code == "KeyM" {
+            game.openScreen("map", nil)
+            return
+        }
         game.keyDown(code, now: nowMs(),
                      ctrlOrCmd: event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control))
     }
+
+    @discardableResult
+    private func handleObjectTemplateShortcut(_ event: NSEvent) -> Bool {
+        guard let game, let ui = ui else { return false }
+        let code = KEYCODE_MAP[event.keyCode] ?? ""
+        guard let action = objectTemplateShortcutAction(forKey: code,
+                                                        commandDown: event.modifierFlags.contains(.command),
+                                                        hasOpenScreen: ui.hasScreen(),
+                                                        hasWorld: game.hasWorld(),
+                                                        isRepeat: event.isARepeat) else { return false }
+        return performObjectTemplateShortcut(action)
+    }
+
+    @discardableResult
+    func performObjectTemplateShortcut(_ action: ObjectTemplateShortcutAction) -> Bool {
+        guard let game, let ui = ui, game.hasWorld(), !ui.hasScreen() else { return false }
+        switch action {
+        case .copyObject:
+            openTemplateCopyDialog(game, ui)
+        case .placeObject:
+            openTemplatePlacementBrowser(game, ui)
+        }
+        return true
+    }
+
+    private func openTemplateCopyDialog(_ game: GameCore, _ ui: UIManager) {
+        guard let target = game.templateCopyTargetAtCrosshair() else {
+            let message = "Point the center crosshair at an object to copy."
+            appd?.hud.showActionBar(message)
+            game.host?.pushChat("§c" + message)
+            return
+        }
+        ui.open(TemplateNameScreen(target: target), game)
+        releaseMouse()
+    }
+
+    private func openTemplatePlacementBrowser(_ game: GameCore, _ ui: UIManager) {
+        ui.open(TemplateBrowserScreen(mode: .place), game)
+        releaseMouse()
+    }
+
     override func keyUp(with event: NSEvent) {
         guard let game, let code = KEYCODE_MAP[event.keyCode] else { return }
         game.keyUp(code)
@@ -397,7 +465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         let parts = v.components(separatedBy: "@")
         return (parts[0], parts.count > 1 ? Int(parts[1]) ?? 240 : 240)
     }()
-    // test hook: PEBBLE_OPEN_SCREEN=templates|creative opens an allowlisted UI screen before PEBBLE_SHOT.
+    // test hook: PEBBLE_OPEN_SCREEN=templates|templatesPlace|creative opens an allowlisted UI screen before PEBBLE_SHOT.
     private var pendingOpenScreen = ProcessInfo.processInfo.environment["PEBBLE_OPEN_SCREEN"]
     private var pendingOpenScreenDelay = 0
 
@@ -510,6 +578,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         for ch in s where !ch.isNewline && (ch.asciiValue.map { $0 >= 32 } ?? true) {
             _ = screen.onChar(ui, game, String(ch))
         }
+    }
+
+    @objc func copyObjectTemplate(_ sender: Any?) {
+        _ = gameView.performObjectTemplateShortcut(.copyObject)
+    }
+
+    @objc func pasteOrPlaceTemplate(_ sender: Any?) {
+        if gameView.performObjectTemplateShortcut(.placeObject) { return }
+        pasteText(sender)
     }
 
     /// AppKit refuses toggleFullScreen while the app is still activating
@@ -635,6 +712,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
                     game.openScreen("creative", nil)
                 case "templates":
                     game.openScreen("templates", nil)
+                case "templatesplace", "templates-place":
+                    game.openScreen("templatesPlace", nil)
+                case "map":
+                    game.openScreen("map", nil)
                 default:
                     print("[shot] ignored unknown PEBBLE_OPEN_SCREEN=\(screen)")
                     fflush(stdout)
@@ -695,8 +776,8 @@ let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 
-// minimal main menu: Cmd-Q quits, Cmd-V pastes into UI fields (seeds!),
-// Window gets the standard entries
+// minimal main menu: Cmd-Q quits; Cmd-C/Cmd-V route object templates in
+// world mode, while Cmd-V remains Paste for focused UI fields
 let mainMenu = NSMenu()
 let appItem = NSMenuItem()
 let appMenu = NSMenu()
@@ -709,8 +790,10 @@ appItem.submenu = appMenu
 mainMenu.addItem(appItem)
 let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
 let editMenu = NSMenu(title: "Edit")
+editMenu.addItem(withTitle: "Copy Object",
+                 action: #selector(AppDelegate.copyObjectTemplate(_:)), keyEquivalent: "c")
 editMenu.addItem(withTitle: "Paste",
-                 action: #selector(AppDelegate.pasteText(_:)), keyEquivalent: "v")
+                 action: #selector(AppDelegate.pasteOrPlaceTemplate(_:)), keyEquivalent: "v")
 editItem.submenu = editMenu
 mainMenu.addItem(editItem)
 let winItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")

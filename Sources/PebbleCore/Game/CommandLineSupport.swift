@@ -1,5 +1,23 @@
 import Foundation
 
+public enum ObjectTemplateShortcutAction: Equatable {
+    case copyObject
+    case placeObject
+}
+
+public func objectTemplateShortcutAction(forKey key: String,
+                                         commandDown: Bool,
+                                         hasOpenScreen: Bool,
+                                         hasWorld: Bool,
+                                         isRepeat: Bool) -> ObjectTemplateShortcutAction? {
+    guard commandDown, hasWorld, !hasOpenScreen, !isRepeat else { return nil }
+    switch key {
+    case "KeyC": return .copyObject
+    case "KeyV": return .placeObject
+    default: return nil
+    }
+}
+
 public func cursorPlacementPosition(from hit: RaycastHit?) -> (x: Int, y: Int, z: Int)? {
     guard let hit else { return nil }
     return (hit.x + DIR_X[hit.face], hit.y + DIR_Y[hit.face], hit.z + DIR_Z[hit.face])

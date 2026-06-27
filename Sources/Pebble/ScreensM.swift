@@ -1725,6 +1725,111 @@ final class DeathScreen: Screen {
 // =============================================================================
 // Saved construction templates
 // =============================================================================
+final class TemplateNameScreen: Screen {
+    private let target: (x: Int, y: Int, z: Int)
+    private weak var nameField: TextField?
+    private var errorMessage: String?
+
+    init(target: (x: Int, y: Int, z: Int)) {
+        self.target = target
+        super.init()
+        pausesGame = true
+    }
+
+    private func frame(_ ui: UIManager) -> (x: Double, y: Double, w: Double, h: Double) {
+        let w = max(230, min(320, ui.width - 28))
+        let h = 118.0
+        return (((ui.width - w) / 2).rounded(.down), ((ui.height - h) / 2).rounded(.down), w, h)
+    }
+
+    override func initScreen(_ ui: UIManager, _ game: GameCore) {
+        let f = frame(ui)
+        let field = TextField(f.x + 16, f.y + 48, f.w - 32, 20, "template name")
+        field.maxLength = OBJECT_TEMPLATE_NAME_MAX
+        field.focused = true
+        nameField = field
+        fields.append(field)
+        buttons.append(Button(f.x + f.w - 140, f.y + f.h - 30, 60, 20, "Save", { [weak self, weak ui, weak game] in
+            guard let self, let ui, let game else { return }
+            self.save(ui, game)
+        }))
+        buttons.append(Button(f.x + f.w - 74, f.y + f.h - 30, 60, 20, "Cancel", { [weak ui, weak game] in
+            guard let ui, let game else { return }
+            ui.closeTop(game)
+            game.host?.capturePointer()
+        }))
+    }
+
+    override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
+        let f = frame(ui)
+        ui.drawDarkBg(0.58)
+        ui.drawPanel(f.x, f.y, f.w, f.h)
+        ui.cv.drawText("Copy Object", f.x + 16, f.y + 12, 1, "#3f3f3f", shadow: false)
+        ui.cv.drawText("Target: \(target.x) \(target.y) \(target.z)", f.x + 16, f.y + 28, 1, "#606060", shadow: false)
+        if let errorMessage {
+            ui.cv.drawText(fitDialogText(errorMessage, maxWidth: Int(f.w - 32)), f.x + 16, f.y + 74, 1, "#a02020", shadow: false)
+        } else {
+            ui.cv.drawText("Name", f.x + 16, f.y + 38, 1, "#606060", shadow: false)
+        }
+        ui.drawButtons(self)
+    }
+
+    override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
+        switch key {
+        case "Enter", "NumpadEnter":
+            save(ui, game)
+            return true
+        default:
+            if super.onKey(ui, game, key) {
+                errorMessage = nil
+                return true
+            }
+            return false
+        }
+    }
+
+    override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
+        if super.onChar(ui, game, ch) {
+            errorMessage = nil
+            return true
+        }
+        return false
+    }
+
+    private func save(_ ui: UIManager, _ game: GameCore) {
+        let rawName = nameField?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !rawName.isEmpty else {
+            errorMessage = "Enter a template name."
+            return
+        }
+        do {
+            let result = try cloneObjectTemplate(named: rawName, from: game.world,
+                                                 targetX: target.x, targetY: target.y, targetZ: target.z)
+            guard try game.db.putTemplate(result.template) else {
+                errorMessage = "Template store write failed."
+                return
+            }
+            let details = "\(result.template.blocks.count) blocks, \(result.template.blockEntities.count) block entities, \(result.template.sizeX)x\(result.template.sizeY)x\(result.template.sizeZ)"
+            game.host?.pushChat("§7Copied object \"\(result.template.name)\" - \(details)")
+            game.host?.showActionBar("Copied \"\(result.template.name)\"", 80)
+            ui.closeTop(game)
+            game.host?.capturePointer()
+        } catch let error as TemplateError {
+            errorMessage = error.description
+        } catch {
+            errorMessage = "Copy failed: \(error)"
+        }
+    }
+
+    private func fitDialogText(_ text: String, maxWidth: Int) -> String {
+        var out = text
+        while textWidth(out) > maxWidth, out.count > 3 {
+            out.removeLast()
+        }
+        return out.count < text.count && out.count > 3 ? out + "." : out
+    }
+}
+
 private struct TemplateBrowserEntry {
     let name: String
     let template: ObjectTemplate?
@@ -1740,7 +1845,13 @@ private struct TemplatePreviewFace {
 
 private let TEMPLATE_PREVIEW_MAX_BLOCKS = 4096
 
+enum TemplateBrowserMode {
+    case browse
+    case place
+}
+
 final class TemplateBrowserScreen: Screen {
+    private let mode: TemplateBrowserMode
     private var entries: [TemplateBrowserEntry] = []
     private var selectedIndex = 0
     private var scroll = 0
@@ -1753,11 +1864,17 @@ final class TemplateBrowserScreen: Screen {
     private var lastDragY = 0.0
     private var lastVisibleRows = 1
     private weak var visualizeButton: Button?
+    private weak var placeButton: Button?
     private weak var leftButton: Button?
     private weak var rightButton: Button?
     private weak var closeButton: Button?
 
-    override init() {
+    override convenience init() {
+        self.init(mode: .browse)
+    }
+
+    init(mode: TemplateBrowserMode) {
+        self.mode = mode
         super.init()
         pausesGame = true
     }
@@ -1766,6 +1883,10 @@ final class TemplateBrowserScreen: Screen {
         refreshEntries(game)
         let visualize = Button(0, 0, 90, 20, "Visualize", { [weak self] in
             self?.visualizeSelected()
+        })
+        let place = Button(0, 0, 60, 20, "Place", { [weak self, weak ui, weak game] in
+            guard let self, let ui, let game else { return }
+            self.placeSelected(ui, game)
         })
         let left = Button(0, 0, 24, 20, "<", { [weak self] in
             self?.yaw -= 0.18
@@ -1778,10 +1899,15 @@ final class TemplateBrowserScreen: Screen {
             ui.closeTop(game)
         })
         visualizeButton = visualize
+        placeButton = place
         leftButton = left
         rightButton = right
         closeButton = close
-        buttons.append(contentsOf: [visualize, left, right, close])
+        if mode == .place {
+            buttons.append(contentsOf: [visualize, place, left, right, close])
+        } else {
+            buttons.append(contentsOf: [visualize, left, right, close])
+        }
     }
 
     private func refreshEntries(_ game: GameCore) {
@@ -1829,10 +1955,15 @@ final class TemplateBrowserScreen: Screen {
         let f = frame(ui)
         let l = listRect(ui)
         let p = previewRect(ui)
+        let visualizeW = mode == .place ? min(64, max(52, (l.w - 4) / 2)) : min(90, l.w)
         visualizeButton?.x = l.x
         visualizeButton?.y = f.y + f.h - 28
-        visualizeButton?.w = min(90, l.w)
+        visualizeButton?.w = visualizeW
         visualizeButton?.enabled = selectedEntry?.template != nil
+        placeButton?.x = l.x + visualizeW + 4
+        placeButton?.y = f.y + f.h - 28
+        placeButton?.w = max(52, l.w - visualizeW - 4)
+        placeButton?.enabled = selectedEntry?.template != nil
         closeButton?.x = f.x + f.w - 66
         closeButton?.y = f.y + 6
         leftButton?.x = p.x + 4
@@ -1860,7 +1991,7 @@ final class TemplateBrowserScreen: Screen {
         let cv = ui.cv
         ui.drawDarkBg(0.6)
         ui.drawPanel(f.x, f.y, f.w, f.h)
-        cv.drawText("Saved Templates", f.x + 10, f.y + 10, 1, "#3f3f3f", shadow: false)
+        cv.drawText(mode == .place ? "Place Template" : "Saved Templates", f.x + 10, f.y + 10, 1, "#3f3f3f", shadow: false)
         drawTemplateList(ui, rect: l)
         drawTemplateDetails(ui, rect: p)
         ui.drawButtons(self)
@@ -1951,6 +2082,27 @@ final class TemplateBrowserScreen: Screen {
         visualizedTemplate = template
         yaw = 0.7
         pitch = 0.45
+    }
+
+    private func placeSelected(_ ui: UIManager, _ game: GameCore) {
+        guard let entry = selectedEntry else {
+            game.host?.showActionBar("Select a saved template to place", 60)
+            return
+        }
+        guard let template = entry.template else {
+            game.host?.showActionBar("Cannot place corrupt template", 70)
+            return
+        }
+        do {
+            try game.beginTemplatePlacement(template)
+            game.host?.pushChat("§7Placing object \"\(template.name)\" - scroll to rotate, left click to place")
+        } catch let error as TemplateError {
+            game.host?.pushChat("§c" + error.description)
+            game.host?.showActionBar(error.description, 70)
+        } catch {
+            game.host?.pushChat("§cPlace failed: \(error)")
+            game.host?.showActionBar("Place failed", 70)
+        }
     }
 
     private func fitTemplateText(_ text: String, maxWidth: Int) -> String {
@@ -2130,7 +2282,11 @@ final class TemplateBrowserScreen: Screen {
     override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
         switch key {
         case "Enter", "NumpadEnter":
-            visualizeSelected()
+            if mode == .place {
+                placeSelected(ui, game)
+            } else {
+                visualizeSelected()
+            }
             return true
         case "ArrowUp":
             if !entries.isEmpty { selectedIndex = max(0, selectedIndex - 1); scroll = min(scroll, selectedIndex) }
@@ -2150,6 +2306,126 @@ final class TemplateBrowserScreen: Screen {
         default:
             return false
         }
+    }
+}
+
+// =============================================================================
+// Map
+// =============================================================================
+final class MapScreen: Screen {
+    private var dragging = false
+
+    override init() {
+        super.init()
+        closeOnEsc = true
+        pausesGame = false
+        showHUD = false
+    }
+
+    private func mapRect(_ ui: UIManager) -> MapOverlayRect {
+        mapExpandedRect(screenWidth: ui.width, screenHeight: ui.height)
+    }
+
+    private func clampedFocus(_ ui: UIManager, _ rect: MapOverlayRect) -> (Double, Double) {
+        (min(max(ui.mouseX, rect.x), rect.x + rect.size),
+         min(max(ui.mouseY, rect.y), rect.y + rect.size))
+    }
+
+    override func initScreen(_ ui: UIManager, _ game: GameCore) {
+        let r = mapRect(ui)
+        ui.mouseX = r.midX
+        ui.mouseY = r.midY
+    }
+
+    override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
+        ui.drawDarkBg(0.46)
+        let bounds = game.loadedMapBounds()
+        let viewport = clampedMapViewport(MapViewport(centerX: game.expandedMapCenterX,
+                                                      centerZ: game.expandedMapCenterZ,
+                                                      spanBlocks: game.mapSpanBlocks),
+                                          bounds: bounds)
+        drawMapOverlay(ui, game, rect: mapRect(ui), viewport: viewport, expanded: true, bounds: bounds)
+    }
+
+    override func onMouseDown(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double, _ btn: Int) -> Bool {
+        let r = mapRect(ui)
+        if btn == 0, mx >= r.x, mx < r.x + r.size, my >= r.y, my < r.y + r.size {
+            dragging = true
+        }
+        return true
+    }
+
+    override func onMouseMove(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) {
+        guard dragging else { return }
+        let r = mapRect(ui)
+        let bounds = game.loadedMapBounds()
+        let current = clampedMapViewport(MapViewport(centerX: game.expandedMapCenterX,
+                                                     centerZ: game.expandedMapCenterZ,
+                                                     spanBlocks: game.mapSpanBlocks),
+                                         bounds: bounds)
+        let next = mapPannedViewport(current,
+                                     screenDX: mx - ui.mouseX,
+                                     screenDY: my - ui.mouseY,
+                                     rect: r,
+                                     bounds: bounds)
+        game.setExpandedMapViewport(next)
+    }
+
+    override func onMouseUp(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) {
+        dragging = false
+    }
+
+    override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
+        let r = mapRect(ui)
+        if key == "KeyM" {
+            ui.closeTop(game)
+            return true
+        }
+        if key == "Comma" || key == "Period" {
+            let focus = clampedFocus(ui, r)
+            let bounds = game.loadedMapBounds()
+            let current = clampedMapViewport(MapViewport(centerX: game.expandedMapCenterX,
+                                                         centerZ: game.expandedMapCenterZ,
+                                                         spanBlocks: game.mapSpanBlocks),
+                                             bounds: bounds)
+            let next = mapZoomedViewport(current,
+                                         zoomIn: key == "Period",
+                                         focusScreenX: focus.0,
+                                         focusScreenY: focus.1,
+                                         rect: r,
+                                         bounds: bounds)
+            game.setExpandedMapViewport(next)
+            return true
+        }
+        let pan = game.expandedMapViewport().spanBlocks * 0.08
+        switch key {
+        case "ArrowLeft":
+            game.setExpandedMapViewport(MapViewport(centerX: game.expandedMapCenterX - pan,
+                                                    centerZ: game.expandedMapCenterZ,
+                                                    spanBlocks: game.mapSpanBlocks))
+            return true
+        case "ArrowRight":
+            game.setExpandedMapViewport(MapViewport(centerX: game.expandedMapCenterX + pan,
+                                                    centerZ: game.expandedMapCenterZ,
+                                                    spanBlocks: game.mapSpanBlocks))
+            return true
+        case "ArrowUp":
+            game.setExpandedMapViewport(MapViewport(centerX: game.expandedMapCenterX,
+                                                    centerZ: game.expandedMapCenterZ - pan,
+                                                    spanBlocks: game.mapSpanBlocks))
+            return true
+        case "ArrowDown":
+            game.setExpandedMapViewport(MapViewport(centerX: game.expandedMapCenterX,
+                                                    centerZ: game.expandedMapCenterZ + pan,
+                                                    spanBlocks: game.mapSpanBlocks))
+            return true
+        default:
+            return false
+        }
+    }
+
+    override func onClose(_ ui: UIManager, _ game: GameCore) {
+        dragging = false
     }
 }
 

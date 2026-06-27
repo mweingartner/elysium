@@ -18,6 +18,49 @@ final class CommandLineSupportTests: XCTestCase {
         return width
     }
 
+    func testObjectTemplateShortcutsMapCommandCAndCommandVInWorldMode() {
+        XCTAssertEqual(objectTemplateShortcutAction(forKey: "KeyC",
+                                                    commandDown: true,
+                                                    hasOpenScreen: false,
+                                                    hasWorld: true,
+                                                    isRepeat: false),
+                       .copyObject)
+        XCTAssertEqual(objectTemplateShortcutAction(forKey: "KeyV",
+                                                    commandDown: true,
+                                                    hasOpenScreen: false,
+                                                    hasWorld: true,
+                                                    isRepeat: false),
+                       .placeObject)
+    }
+
+    func testObjectTemplateShortcutsDoNotStealPasteOrLegacyCommandP() {
+        XCTAssertNil(objectTemplateShortcutAction(forKey: "KeyV",
+                                                  commandDown: true,
+                                                  hasOpenScreen: true,
+                                                  hasWorld: true,
+                                                  isRepeat: false))
+        XCTAssertNil(objectTemplateShortcutAction(forKey: "KeyV",
+                                                  commandDown: false,
+                                                  hasOpenScreen: false,
+                                                  hasWorld: true,
+                                                  isRepeat: false))
+        XCTAssertNil(objectTemplateShortcutAction(forKey: "KeyV",
+                                                  commandDown: true,
+                                                  hasOpenScreen: false,
+                                                  hasWorld: false,
+                                                  isRepeat: false))
+        XCTAssertNil(objectTemplateShortcutAction(forKey: "KeyV",
+                                                  commandDown: true,
+                                                  hasOpenScreen: false,
+                                                  hasWorld: true,
+                                                  isRepeat: true))
+        XCTAssertNil(objectTemplateShortcutAction(forKey: "KeyP",
+                                                  commandDown: true,
+                                                  hasOpenScreen: false,
+                                                  hasWorld: true,
+                                                  isRepeat: false))
+    }
+
     func testWrapTextKeepsWordsWithinWidth() {
         let lines = wrapTextByWidth("alpha beta gamma", maxWidth: 10, measure: visibleWidth)
 

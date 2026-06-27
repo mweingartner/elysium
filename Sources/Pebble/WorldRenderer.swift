@@ -1527,11 +1527,74 @@ final class WorldRenderer {
         uni.fog.z = 0
     }
 
-    // ---- selection outline ---------------------------------------------------------
+    // ---- selection / template-placement outlines ----------------------------------
+    private struct TemplatePreviewBlockKey: Hashable {
+        let x: Int
+        let y: Int
+        let z: Int
+    }
+
+    private func drawTemplatePlacementPreview(_ enc: MTLRenderCommandEncoder,
+                                              session: TemplatePlacementSession,
+                                              target: TemplatePlacementTarget,
+                                              viewProj: simd_float4x4,
+                                              camPos: SIMD3<Double>) {
+        let template = session.rotatedTemplate
+        var occupied = Set<TemplatePreviewBlockKey>()
+        occupied.reserveCapacity(template.blocks.count)
+        for block in template.blocks {
+            occupied.insert(TemplatePreviewBlockKey(x: block.dx, y: block.dy, z: block.dz))
+        }
+        let neighbors = [
+            TemplatePreviewBlockKey(x: 1, y: 0, z: 0), TemplatePreviewBlockKey(x: -1, y: 0, z: 0),
+            TemplatePreviewBlockKey(x: 0, y: 1, z: 0), TemplatePreviewBlockKey(x: 0, y: -1, z: 0),
+            TemplatePreviewBlockKey(x: 0, y: 0, z: 1), TemplatePreviewBlockKey(x: 0, y: 0, z: -1),
+        ]
+        var boxes: [(Double, Double, Double, Double, Double, Double)] = []
+        boxes.reserveCapacity(min(template.blocks.count, OBJECT_TEMPLATE_PREVIEW_MAX_BLOCKS))
+        for block in template.blocks {
+            let key = TemplatePreviewBlockKey(x: block.dx, y: block.dy, z: block.dz)
+            let isSurface = neighbors.contains { delta in
+                !occupied.contains(TemplatePreviewBlockKey(x: key.x + delta.x, y: key.y + delta.y, z: key.z + delta.z))
+            }
+            if !isSurface && template.blocks.count > OBJECT_TEMPLATE_PREVIEW_MAX_BLOCKS {
+                continue
+            }
+            let x = Double(target.originX + block.dx) - camPos.x
+            let y = Double(target.originY + block.dy) - camPos.y
+            let z = Double(target.originZ + block.dz) - camPos.z
+            boxes.append((x - 0.01, y - 0.01, z - 0.01, x + 1.01, y + 1.01, z + 1.01))
+            if boxes.count >= OBJECT_TEMPLATE_PREVIEW_MAX_BLOCKS { break }
+        }
+        if boxes.isEmpty, let block = template.blocks.first {
+            let x = Double(target.originX + block.dx) - camPos.x
+            let y = Double(target.originY + block.dy) - camPos.y
+            let z = Double(target.originZ + block.dz) - camPos.z
+            boxes.append((x - 0.01, y - 0.01, z - 0.01, x + 1.01, y + 1.01, z + 1.01))
+        }
+        if !boxes.isEmpty {
+            drawBoxOutline(enc, viewProj, boxes, asLines: false, color: SIMD4<Float>(0.08, 0.88, 1.0, 0.78))
+        }
+        let x0 = Double(target.originX) - camPos.x - 0.03
+        let y0 = Double(target.originY) - camPos.y - 0.03
+        let z0 = Double(target.originZ) - camPos.z - 0.03
+        let x1 = Double(target.originX + template.sizeX) - camPos.x + 0.03
+        let y1 = Double(target.originY + template.sizeY) - camPos.y + 0.03
+        let z1 = Double(target.originZ + template.sizeZ) - camPos.z + 0.03
+        drawBoxOutline(enc, viewProj, [(x0, y0, z0, x1, y1, z1)],
+                       asLines: false, color: SIMD4<Float>(1.0, 0.82, 0.18, 0.95))
+    }
+
     private func drawSelection(_ enc: MTLRenderCommandEncoder, game: GameCore, viewProj: simd_float4x4, camPos: SIMD3<Double>) {
         guard let p = game.player else { return }
         if (game.host?.hasScreen() ?? false) || p.deathTime > 0 {
             game.targetedBlock = nil
+            return
+        }
+        if let session = game.templatePlacement, let target = game.templatePlacementTarget() {
+            game.targetedBlock = nil
+            game.lastCursorHit = nil
+            drawTemplatePlacementPreview(enc, session: session, target: target, viewProj: viewProj, camPos: camPos)
             return
         }
         guard let hit = game.crosshairBlock() else {

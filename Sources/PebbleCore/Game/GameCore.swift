@@ -144,6 +144,7 @@ public protocol GameHost: AnyObject {
     func openTitleScreen()
     func closeAllScreens()
     func releasePointer()
+    func capturePointer()
     // HUD / chat
     func showActionBar(_ text: String, _ time: Int)
     func pushChat(_ line: String)
@@ -226,6 +227,9 @@ public final class GameCore {
     public var advancements = AdvancementTracker()
     public private(set) var inWorld = false
     public private(set) var paused = false
+    public var mapSpanBlocks = MAP_DEFAULT_VIEW_BLOCKS
+    public var expandedMapCenterX = 0.0
+    public var expandedMapCenterZ = 0.0
 
     // streaming
     private var genInFlight = Set<DimChunk>()
@@ -262,6 +266,7 @@ public final class GameCore {
     public var heldNameTime = 0
     public var targetedBlock: (x: Int, y: Int, z: Int, cell: Int)?
     public var lastCursorHit: RaycastHit?
+    public private(set) var templatePlacement: TemplatePlacementSession?
     public var perspective = 0          // 0 first, 1 back, 2 front
     private var sprintHeld = false
     private var lastForwardPress = 0.0
@@ -1884,14 +1889,30 @@ public final class GameCore {
         host?.openScreen(kind, data)
     }
 
-    /// raycast the crosshair against blocks
-    public func crosshairBlock() -> RaycastHit? {
-        let p = player!
+    /// raycast a player crosshair against blocks
+    static func crosshairBlock(in world: World, player p: Player) -> RaycastHit? {
         let reach = p.gameMode == GameMode.creative ? REACH_CREATIVE : REACH_SURVIVAL
         let dx = -detSin(p.yaw) * detCos(p.pitch)
         let dy = -detSin(p.pitch)
         let dz = detCos(p.yaw) * detCos(p.pitch)
         return world.raycast(p.x, p.eyeY(), p.z, dx, dy, dz, reach)
+    }
+
+    /// raycast the crosshair against blocks
+    public func crosshairBlock() -> RaycastHit? {
+        guard let p = player else { return nil }
+        return Self.crosshairBlock(in: world, player: p)
+    }
+
+    public func templateCopyTargetAtCrosshair() -> (x: Int, y: Int, z: Int)? {
+        guard let hit = crosshairBlock() else {
+            targetedBlock = nil
+            lastCursorHit = nil
+            return nil
+        }
+        targetedBlock = (hit.x, hit.y, hit.z, hit.cell)
+        lastCursorHit = hit
+        return (hit.x, hit.y, hit.z)
     }
 
     /// nearest entity under the crosshair within attack reach
@@ -1990,10 +2011,100 @@ public final class GameCore {
     }
 
     // ===========================================================================
+    // Object-template placement preview
+    // ===========================================================================
+    public func beginTemplatePlacement(_ template: ObjectTemplate) throws {
+        let session = try TemplatePlacementSession(template: template)
+        templatePlacement = session
+        leftDown = false
+        rightDown = false
+        player?.breakingProgress = -1
+        targetedBlock = nil
+        lastCursorHit = nil
+        host?.closeAllScreens()
+        host?.capturePointer()
+        host?.showActionBar("Placing \"\(session.name)\" - scroll to rotate, left click to place, Esc to cancel", 120)
+    }
+
+    @discardableResult
+    public func rotateTemplatePlacement(by delta: Int) -> Bool {
+        guard var session = templatePlacement else { return false }
+        do {
+            try session.rotate(by: delta)
+            templatePlacement = session
+            host?.showActionBar("Placement rotation: \(session.rotationDegrees) degrees", 45)
+        } catch {
+            host?.showActionBar("Placement rotation failed", 45)
+        }
+        return true
+    }
+
+    public func cancelTemplatePlacement(showMessage: Bool = true) {
+        guard templatePlacement != nil else { return }
+        templatePlacement = nil
+        leftDown = false
+        rightDown = false
+        player?.breakingProgress = -1
+        targetedBlock = nil
+        lastCursorHit = nil
+        if showMessage {
+            host?.showActionBar("Template placement canceled", 50)
+        }
+    }
+
+    public func templatePlacementTarget() -> TemplatePlacementTarget? {
+        guard let session = templatePlacement, let p = player else { return nil }
+        return try? objectTemplatePlacementTarget(
+            for: session.rotatedTemplate,
+            eyeX: p.x, eyeY: p.eyeY(), eyeZ: p.z,
+            yaw: p.yaw, pitch: p.pitch)
+    }
+
+    @discardableResult
+    public func commitTemplatePlacement() throws -> TemplatePlacementResult? {
+        guard let session = templatePlacement else { return nil }
+        guard let target = templatePlacementTarget() else { throw TemplateError.missingTarget }
+        let result = try placeObjectTemplate(session.rotatedTemplate, in: world,
+                                             targetX: target.targetX,
+                                             targetY: target.targetY,
+                                             targetZ: target.targetZ,
+                                             options: TemplatePlacementOptions(prepareTerrain: true))
+        templatePlacement = nil
+        leftDown = false
+        rightDown = false
+        player?.breakingProgress = -1
+        targetedBlock = nil
+        lastCursorHit = nil
+        var details = "\(result.blocksPlaced) blocks, \(result.blockEntitiesPlaced) block entities"
+        if result.blocksCleared > 0 || result.supportBlocksFilled > 0 {
+            details += ", cleared \(result.blocksCleared), filled \(result.supportBlocksFilled)"
+        }
+        host?.pushChat("§7Placed object \"\(session.name)\" - \(details)")
+        host?.showActionBar("Placed \"\(session.name)\"", 60)
+        return result
+    }
+
+    // ===========================================================================
     // Input — the app forwards events here when no screen is open
     // ===========================================================================
     public func mouseDown(_ button: Int) {
         guard inWorld, !(host?.hasScreen() ?? false) else { return }
+        if templatePlacement != nil {
+            if button == 0 {
+                do {
+                    _ = try commitTemplatePlacement()
+                } catch let error as TemplateError {
+                    host?.pushChat("§c" + error.description)
+                    host?.showActionBar(error.description, 70)
+                } catch {
+                    host?.pushChat("§cPlace failed: \(error)")
+                    host?.showActionBar("Place failed", 70)
+                }
+            } else if button == 2 {
+                cancelTemplatePlacement()
+            }
+            return
+        }
         if button == 0 {
             leftDown = true
             doAttack()
@@ -2024,6 +2135,7 @@ public final class GameCore {
 
     public func wheelHotbar(_ dir: Int) {
         guard inWorld, let p = player else { return }
+        if rotateTemplatePlacement(by: dir) { return }
         p.selectedSlot = posMod(p.selectedSlot + dir, 9)
     }
 
@@ -2034,6 +2146,10 @@ public final class GameCore {
         keys.insert(code)
         let p = player!
         if code == "Escape" {
+            if templatePlacement != nil {
+                cancelTemplatePlacement()
+                return
+            }
             host?.openPauseScreen()
             host?.releasePointer()
         } else if code == keybinds["perspective"] {
@@ -2075,6 +2191,36 @@ public final class GameCore {
     public func keyUp(_ code: String) {
         keys.remove(code)
         if code == keybinds["sprint"] { sprintHeld = player?.sprinting ?? false }
+    }
+
+    public func loadedMapBounds() -> MapBlockBounds? {
+        mapBoundsForLoadedChunks(world.chunks.values.map { (cx: $0.cx, cz: $0.cz) })
+    }
+
+    public func zoomMap(_ zoomIn: Bool) {
+        mapSpanBlocks = mapZoomedSpan(current: mapSpanBlocks, zoomIn: zoomIn, bounds: loadedMapBounds())
+    }
+
+    public func resetExpandedMapCenterToPlayer() {
+        guard let player else { return }
+        let view = mapViewportCenteredOnPlayer(playerX: player.x, playerZ: player.z,
+                                              span: mapSpanBlocks, bounds: loadedMapBounds())
+        expandedMapCenterX = view.centerX
+        expandedMapCenterZ = view.centerZ
+        mapSpanBlocks = view.spanBlocks
+    }
+
+    public func expandedMapViewport() -> MapViewport {
+        clampedMapViewport(MapViewport(centerX: expandedMapCenterX, centerZ: expandedMapCenterZ,
+                                       spanBlocks: mapSpanBlocks),
+                           bounds: loadedMapBounds())
+    }
+
+    public func setExpandedMapViewport(_ viewport: MapViewport) {
+        let clamped = clampedMapViewport(viewport, bounds: loadedMapBounds())
+        expandedMapCenterX = clamped.centerX
+        expandedMapCenterZ = clamped.centerZ
+        mapSpanBlocks = clamped.spanBlocks
     }
 
     /// window blur / screen opened — release all held input

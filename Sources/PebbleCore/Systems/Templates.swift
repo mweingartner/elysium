@@ -5,6 +5,8 @@ public let OBJECT_TEMPLATE_MAX_BLOCKS = 32_768
 public let OBJECT_TEMPLATE_MAX_SPAN = 96
 public let OBJECT_TEMPLATE_MAX_JSON_BYTES = 2_000_000
 public let OBJECT_TEMPLATE_NAME_MAX = 48
+public let OBJECT_TEMPLATE_PREVIEW_MAX_BLOCKS = 4_096
+public let OBJECT_TEMPLATE_MAX_SUPPORT_FILL_DEPTH = 32
 
 public struct TemplateBlock: Codable, Equatable {
     public var dx: Int
@@ -58,6 +60,46 @@ public struct TemplatePlacementResult {
     public let originZ: Int
     public let blocksPlaced: Int
     public let blockEntitiesPlaced: Int
+    public let blocksCleared: Int
+    public let supportBlocksFilled: Int
+}
+
+public struct TemplatePlacementTarget: Equatable {
+    public let originX: Int
+    public let originY: Int
+    public let originZ: Int
+    public let targetX: Int
+    public let targetY: Int
+    public let targetZ: Int
+    public let distance: Double
+
+    public init(originX: Int, originY: Int, originZ: Int,
+                targetX: Int, targetY: Int, targetZ: Int, distance: Double) {
+        self.originX = originX; self.originY = originY; self.originZ = originZ
+        self.targetX = targetX; self.targetY = targetY; self.targetZ = targetZ
+        self.distance = distance
+    }
+}
+
+public struct TemplatePlacementSession {
+    public let name: String
+    public let baseTemplate: ObjectTemplate
+    public private(set) var rotatedTemplate: ObjectTemplate
+    public private(set) var rotationSteps: Int
+
+    public init(template: ObjectTemplate, rotationSteps: Int = 0) throws {
+        self.baseTemplate = try validateTemplate(template)
+        self.name = self.baseTemplate.name
+        self.rotationSteps = normalizedTemplateRotation(rotationSteps)
+        self.rotatedTemplate = try rotatedObjectTemplate(self.baseTemplate, rotationSteps: self.rotationSteps)
+    }
+
+    public mutating func rotate(by delta: Int) throws {
+        rotationSteps = normalizedTemplateRotation(rotationSteps + delta)
+        rotatedTemplate = try rotatedObjectTemplate(baseTemplate, rotationSteps: rotationSteps)
+    }
+
+    public var rotationDegrees: Int { rotationSteps * 90 }
 }
 
 public struct ObjectTemplateSummary: Equatable {
@@ -69,6 +111,24 @@ public struct ObjectTemplateSummary: Equatable {
     public let blockEntityCount: Int
     public let dominantBlockName: String
     public let dominantBlockDisplayName: String
+}
+
+public enum TemplateBlockSelector: Equatable {
+    case exact(UInt16)
+    case woodFamily
+}
+
+public struct ObjectTemplateReplacementResult {
+    public let template: ObjectTemplate
+    public let replacedBlocks: Int
+    public let fromDescription: String
+    public let toBlockName: String
+}
+
+public struct ObjectTemplateBlockPaletteEntry: Equatable {
+    public let blockName: String
+    public let blockDisplayName: String
+    public let count: Int
 }
 
 public struct TemplateCloneOptions {
@@ -83,9 +143,11 @@ public struct TemplateCloneOptions {
 
 public struct TemplatePlacementOptions {
     public var replaceExisting: Bool
+    public var prepareTerrain: Bool
 
-    public init(replaceExisting: Bool = false) {
+    public init(replaceExisting: Bool = false, prepareTerrain: Bool = false) {
         self.replaceExisting = replaceExisting
+        self.prepareTerrain = prepareTerrain
     }
 }
 
@@ -100,6 +162,7 @@ public enum TemplateError: Error, Equatable, CustomStringConvertible {
     case corruptTemplate(String)
     case destinationUnavailable(Int, Int, Int)
     case destinationBlocked(Int, Int, Int)
+    case foundationTooDeep(Int, Int, Int)
 
     public var description: String {
         switch self {
@@ -123,6 +186,8 @@ public enum TemplateError: Error, Equatable, CustomStringConvertible {
             return "Destination is not loaded or out of bounds at \(x) \(y) \(z)."
         case .destinationBlocked(let x, let y, let z):
             return "Destination is blocked at \(x) \(y) \(z)."
+        case .foundationTooDeep(let x, let y, let z):
+            return "Foundation gap is too deep at \(x) \(y) \(z); move the object closer to terrain."
         }
     }
 }
@@ -212,6 +277,97 @@ private func templateBlockEntityCopy(_ be: BlockEntityData, minX: Int, minY: Int
     copy.y -= minY
     copy.z -= minZ
     return copy
+}
+
+public func normalizedTemplateRotation(_ steps: Int) -> Int {
+    ((steps % 4) + 4) % 4
+}
+
+private func rotatedTemplateSize(_ template: ObjectTemplate, rotationSteps: Int) -> (x: Int, y: Int, z: Int) {
+    switch normalizedTemplateRotation(rotationSteps) {
+    case 1, 3:
+        return (template.sizeZ, template.sizeY, template.sizeX)
+    default:
+        return (template.sizeX, template.sizeY, template.sizeZ)
+    }
+}
+
+private func rotatedTemplateCoordinate(x: Int, y: Int, z: Int,
+                                       sizeX: Int, sizeZ: Int,
+                                       rotationSteps: Int) -> (x: Int, y: Int, z: Int) {
+    switch normalizedTemplateRotation(rotationSteps) {
+    case 1:
+        return (sizeZ - 1 - z, y, x)
+    case 2:
+        return (sizeX - 1 - x, y, sizeZ - 1 - z)
+    case 3:
+        return (z, y, sizeX - 1 - x)
+    default:
+        return (x, y, z)
+    }
+}
+
+public func rotatedObjectTemplate(_ rawTemplate: ObjectTemplate, rotationSteps: Int) throws -> ObjectTemplate {
+    let rotation = normalizedTemplateRotation(rotationSteps)
+    let template = try validateTemplate(rawTemplate)
+    guard rotation != 0 else { return template }
+    let size = rotatedTemplateSize(template, rotationSteps: rotation)
+    let anchor = rotatedTemplateCoordinate(x: template.anchorX, y: template.anchorY, z: template.anchorZ,
+                                           sizeX: template.sizeX, sizeZ: template.sizeZ,
+                                           rotationSteps: rotation)
+    let blocks = template.blocks.map { block in
+        let p = rotatedTemplateCoordinate(x: block.dx, y: block.dy, z: block.dz,
+                                          sizeX: template.sizeX, sizeZ: template.sizeZ,
+                                          rotationSteps: rotation)
+        return TemplateBlock(dx: p.x, dy: p.y, dz: p.z, cell: block.cell)
+    }
+    var blockEntities: [BlockEntityData] = []
+    for be in template.blockEntities {
+        guard let copy = sanitizedTemplateBlockEntity(be) else { continue }
+        let p = rotatedTemplateCoordinate(x: copy.x, y: copy.y, z: copy.z,
+                                          sizeX: template.sizeX, sizeZ: template.sizeZ,
+                                          rotationSteps: rotation)
+        copy.x = p.x; copy.y = p.y; copy.z = p.z
+        blockEntities.append(copy)
+    }
+    return try validateTemplate(ObjectTemplate(
+        version: template.version,
+        name: template.name,
+        anchorX: anchor.x, anchorY: anchor.y, anchorZ: anchor.z,
+        sizeX: size.x, sizeY: size.y, sizeZ: size.z,
+        blocks: blocks,
+        blockEntities: blockEntities))
+}
+
+public func templatePlacementPreviewDistance(for rawTemplate: ObjectTemplate) throws -> Double {
+    let template = try validateTemplate(rawTemplate)
+    let sx = Double(template.sizeX)
+    let sy = Double(template.sizeY)
+    let sz = Double(template.sizeZ)
+    let radius = (sx * sx + sy * sy + sz * sz).squareRoot() * 0.5
+    return max(6.0, radius * 2.2 + 2.0)
+}
+
+public func objectTemplatePlacementTarget(for rawTemplate: ObjectTemplate,
+                                          eyeX: Double, eyeY: Double, eyeZ: Double,
+                                          yaw: Double, pitch: Double) throws -> TemplatePlacementTarget {
+    let template = try validateTemplate(rawTemplate)
+    let distance = try templatePlacementPreviewDistance(for: template)
+    let dx = -detSin(yaw) * detCos(pitch)
+    let dy = -detSin(pitch)
+    let dz = detCos(yaw) * detCos(pitch)
+    let centerX = eyeX + dx * distance
+    let centerY = eyeY + dy * distance
+    let centerZ = eyeZ + dz * distance
+    let originX = Int((centerX - Double(template.sizeX) * 0.5).rounded(.down))
+    let originY = Int((centerY - Double(template.sizeY) * 0.5).rounded(.down))
+    let originZ = Int((centerZ - Double(template.sizeZ) * 0.5).rounded(.down))
+    return TemplatePlacementTarget(
+        originX: originX, originY: originY, originZ: originZ,
+        targetX: originX + template.anchorX,
+        targetY: originY + template.anchorY,
+        targetZ: originZ + template.anchorZ,
+        distance: distance)
 }
 
 private func validateTemplate(_ template: ObjectTemplate) throws -> ObjectTemplate {
@@ -309,6 +465,251 @@ public func summarizeObjectTemplate(_ rawTemplate: ObjectTemplate) throws -> Obj
         dominantBlockDisplayName: def.displayName)
 }
 
+public func objectTemplateBlockPalette(_ rawTemplate: ObjectTemplate,
+                                       limit rawLimit: Int = 16) throws -> [ObjectTemplateBlockPaletteEntry] {
+    let template = try validateTemplate(rawTemplate)
+    let limit = max(0, rawLimit)
+    var counts: [Int: Int] = [:]
+    for block in template.blocks {
+        counts[Int(block.cell >> 4), default: 0] += 1
+    }
+    let entries = counts.sorted {
+        if $0.value != $1.value { return $0.value > $1.value }
+        return blockDefs[$0.key].name < blockDefs[$1.key].name
+    }.map { id, count in
+        ObjectTemplateBlockPaletteEntry(
+            blockName: blockDefs[id].name,
+            blockDisplayName: blockDefs[id].displayName,
+            count: count)
+    }
+    return Array(entries.prefix(limit))
+}
+
+public func isObjectTemplateWoodFamilyBlock(_ blockId: Int) -> Bool {
+    guard blockId > 0, blockId < blockDefs.count else { return false }
+    let name = blockDefs[blockId].name
+    let woodSuffixes: Set<String> = [
+        "planks", "log", "wood", "stem", "hyphae",
+        "stairs", "slab", "fence", "fence_gate", "door", "trapdoor",
+        "button", "pressure_plate", "sign", "wall_sign", "hanging_sign",
+    ]
+    if name == "bamboo_block" || name == "stripped_bamboo_block" ||
+        name == "bamboo_mosaic" || name == "bamboo_mosaic_stairs" ||
+        name == "bamboo_mosaic_slab" {
+        return true
+    }
+    for wood in WOODS {
+        let prefix = "\(wood)_"
+        if name.hasPrefix(prefix) {
+            let suffix = String(name.dropFirst(prefix.count))
+            if woodSuffixes.contains(suffix) { return true }
+        }
+        let strippedPrefix = "stripped_\(wood)_"
+        if name.hasPrefix(strippedPrefix) {
+            let suffix = String(name.dropFirst(strippedPrefix.count))
+            if suffix == "log" || suffix == "wood" || suffix == "stem" || suffix == "hyphae" {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+private func templateSelectorMatches(_ selector: TemplateBlockSelector, blockId: Int) -> Bool {
+    switch selector {
+    case .exact(let exact):
+        return blockId == Int(exact)
+    case .woodFamily:
+        return isObjectTemplateWoodFamilyBlock(blockId)
+    }
+}
+
+private func templateSelectorDescription(_ selector: TemplateBlockSelector) -> String {
+    switch selector {
+    case .exact(let exact):
+        let id = Int(exact)
+        return id >= 0 && id < blockDefs.count ? blockDefs[id].displayName : "unknown block"
+    case .woodFamily:
+        return "wood-family blocks"
+    }
+}
+
+public func replacingObjectTemplateBlocks(_ rawTemplate: ObjectTemplate,
+                                          matching selector: TemplateBlockSelector,
+                                          with replacementBlock: UInt16) throws -> ObjectTemplateReplacementResult {
+    let template = try validateTemplate(rawTemplate)
+    let replacementId = Int(replacementBlock)
+    guard replacementId > 0, replacementId < blockDefs.count else {
+        throw TemplateError.corruptTemplate("invalid replacement block id \(replacementId)")
+    }
+
+    var replaced = 0
+    var replacedPositions = Set<TemplatePos>()
+    let blocks = template.blocks.map { block -> TemplateBlock in
+        let blockId = Int(block.cell >> 4)
+        guard templateSelectorMatches(selector, blockId: blockId) else { return block }
+        replaced += 1
+        replacedPositions.insert(TemplatePos(x: block.dx, y: block.dy, z: block.dz))
+        return TemplateBlock(dx: block.dx, dy: block.dy, dz: block.dz, cell: cell(replacementBlock))
+    }
+    let blockEntities = template.blockEntities.filter { be in
+        !replacedPositions.contains(TemplatePos(x: be.x, y: be.y, z: be.z))
+    }
+    let updated = try validateTemplate(ObjectTemplate(
+        version: template.version,
+        name: template.name,
+        anchorX: template.anchorX, anchorY: template.anchorY, anchorZ: template.anchorZ,
+        sizeX: template.sizeX, sizeY: template.sizeY, sizeZ: template.sizeZ,
+        blocks: blocks,
+        blockEntities: blockEntities))
+    return ObjectTemplateReplacementResult(
+        template: updated,
+        replacedBlocks: replaced,
+        fromDescription: templateSelectorDescription(selector),
+        toBlockName: blockDefs[replacementId].displayName)
+}
+
+private func normalizedGeneratedTemplateKind(_ raw: String) -> String {
+    raw.lowercased()
+        .replacingOccurrences(of: "-", with: "_")
+        .replacingOccurrences(of: " ", with: "_")
+        .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+}
+
+private func generatedTemplateBlock(_ names: [String], fallback: UInt16) -> UInt16 {
+    for name in names {
+        if let id = bidOpt(name) { return id }
+    }
+    return fallback
+}
+
+private func generatedTemplateLength(_ requested: Int?, defaultValue: Int = 50) -> Int {
+    min(OBJECT_TEMPLATE_MAX_SPAN, max(16, requested ?? defaultValue))
+}
+
+private func generatedTemplateOddWidth(for length: Int) -> Int {
+    var width = min(21, max(9, length / 4))
+    if width % 2 == 0 { width += 1 }
+    return width
+}
+
+private func generatePirateShipTemplate(named rawName: String, requestedLength: Int?,
+                                        style: String) throws -> ObjectTemplate {
+    guard let name = normalizedTemplateName(rawName) else { throw TemplateError.invalidName }
+    let length = generatedTemplateLength(requestedLength)
+    let width = generatedTemplateOddWidth(for: length)
+    let centerZ = width / 2
+    let height = min(OBJECT_TEMPLATE_MAX_SPAN, max(14, length / 3 + 3))
+    let hull = generatedTemplateBlock(["dark_oak_planks", "spruce_planks", "oak_planks"], fallback: B.oak_planks)
+    let deck = generatedTemplateBlock(["spruce_planks", "dark_oak_planks", "oak_planks"], fallback: B.oak_planks)
+    let rail = generatedTemplateBlock(["dark_oak_fence", "spruce_fence", "oak_fence"], fallback: hull)
+    let mast = generatedTemplateBlock(["stripped_dark_oak_log", "dark_oak_log", "spruce_log"], fallback: hull)
+    let accent = generatedTemplateBlock(["polished_blackstone_bricks", "blackstone", "deepslate_tiles"], fallback: hull)
+    let sail = generatedTemplateBlock(
+        style.lowercased().contains("red") ? ["red_wool", "black_wool"] : ["black_wool", "gray_wool", "dark_oak_planks"],
+        fallback: hull)
+    let lantern = generatedTemplateBlock(["soul_lantern", "lantern", "torch"], fallback: rail)
+
+    var cells: [TemplatePos: UInt16] = [:]
+    func put(_ x: Int, _ y: Int, _ z: Int, _ block: UInt16) {
+        guard x >= 0, x < length, y >= 0, y < height, z >= 0, z < width else { return }
+        cells[TemplatePos(x: x, y: y, z: z)] = cell(block)
+    }
+    func halfWidth(at x: Int) -> Int {
+        let taper = min(x, length - 1 - x)
+        let full = width / 2
+        let ramp = max(1, length / 8)
+        return max(1, min(full, 1 + taper * max(1, full - 1) / ramp))
+    }
+
+    for x in 0..<length {
+        let hw = halfWidth(at: x)
+        for z in (centerZ - hw)...(centerZ + hw) {
+            let edge = abs(z - centerZ) == hw
+            if edge {
+                put(x, 1, z, hull)
+                put(x, 2, z, rail)
+            } else {
+                put(x, 0, z, hull)
+                if x > 1 && x < length - 2 {
+                    put(x, 1, z, deck)
+                }
+            }
+        }
+        put(x, 0, centerZ, accent)
+        if x < 3 || x >= length - 3 {
+            for y in 2...min(height - 1, 4 + (3 - min(x, length - 1 - x))) {
+                put(x, y, centerZ, hull)
+            }
+        }
+    }
+
+    let cabinStart = max(3, length - max(10, length / 5) - 2)
+    let cabinEnd = max(cabinStart, length - 4)
+    let cabinHalf = max(2, width / 4)
+    for x in cabinStart...cabinEnd {
+        for z in (centerZ - cabinHalf)...(centerZ + cabinHalf) {
+            let wall = x == cabinStart || x == cabinEnd || z == centerZ - cabinHalf || z == centerZ + cabinHalf
+            if wall {
+                put(x, 3, z, hull)
+                put(x, 4, z, hull)
+            }
+            put(x, 5, z, accent)
+        }
+    }
+
+    let mastXs = [length / 3, (length * 2) / 3].filter { $0 > 4 && $0 < length - 5 }
+    let mastTop = max(8, height - 2)
+    for mastX in mastXs {
+        for y in 2...mastTop {
+            put(mastX, y, centerZ, mast)
+        }
+        let sailHalfZ = max(2, min(width / 2 - 1, 4))
+        let sailMinY = max(4, mastTop - 8)
+        let sailMaxY = max(sailMinY, mastTop - 2)
+        for y in sailMinY...sailMaxY {
+            let verticalInset = min(y - sailMinY, sailMaxY - y) / 2
+            let half = max(1, sailHalfZ - verticalInset)
+            for z in (centerZ - half)...(centerZ + half) {
+                if z != centerZ || y % 2 == 0 {
+                    put(mastX + 1, y, z, sail)
+                }
+            }
+        }
+        put(mastX, mastTop + 1, centerZ, lantern)
+    }
+
+    let bowspritEnd = min(length - 1, 4)
+    for x in 0...bowspritEnd {
+        put(x, 3 + x / 2, centerZ, mast)
+    }
+
+    let sorted = cells.keys.sorted()
+    let blocks = sorted.map { pos in
+        TemplateBlock(dx: pos.x, dy: pos.y, dz: pos.z, cell: cells[pos]!)
+    }
+    return try validateTemplate(ObjectTemplate(
+        name: name,
+        anchorX: length / 2,
+        anchorY: 0,
+        anchorZ: centerZ,
+        sizeX: length,
+        sizeY: height,
+        sizeZ: width,
+        blocks: blocks))
+}
+
+public func generatedObjectTemplate(named rawName: String, kind rawKind: String,
+                                    requestedLength: Int? = nil,
+                                    style: String = "") throws -> ObjectTemplate {
+    let kind = normalizedGeneratedTemplateKind(rawKind)
+    if kind.contains("pirate_ship") || (kind.contains("pirate") && kind.contains("ship")) ||
+        kind == "ship" || kind == "boat" {
+        return try generatePirateShipTemplate(named: rawName, requestedLength: requestedLength, style: style)
+    }
+    throw TemplateError.corruptTemplate("unsupported generated object kind \(rawKind)")
+}
+
 public func cloneObjectTemplate(named rawName: String, from world: World,
                                 targetX: Int, targetY: Int, targetZ: Int,
                                 options: TemplateCloneOptions = TemplateCloneOptions()) throws -> TemplateCloneResult {
@@ -378,13 +779,134 @@ private func isDestinationReplaceable(_ world: World, _ x: Int, _ y: Int, _ z: I
     return id > 0 && id < blockDefs.count && blockDefs[id].replaceable
 }
 
+private struct TemplatePlacementPreparation {
+    let blocksCleared: Int
+    let supportBlocksFilled: Int
+}
+
+private func validateTemplateMutableDestination(_ world: World, _ x: Int, _ y: Int, _ z: Int) throws {
+    guard world.isLoadedAt(x, z), y >= world.info.minY, y < world.info.minY + world.info.height else {
+        throw TemplateError.destinationUnavailable(x, y, z)
+    }
+    let id = world.getBlock(x, y, z) >> 4
+    guard id >= 0, id < blockDefs.count else {
+        throw TemplateError.destinationBlocked(x, y, z)
+    }
+    if id > 0 && id < blockDefs.count && blockDefs[id].hardness < 0 {
+        throw TemplateError.destinationBlocked(x, y, z)
+    }
+}
+
+private func isTemplateFoundationMaterial(_ cell: Int) -> Bool {
+    let id = cell >> 4
+    guard id > 0, id < blockDefs.count else { return false }
+    let def = blockDefs[id]
+    return def.solid && def.fullCube && !def.replaceable && def.hardness >= 0
+}
+
+private func normalizedFoundationCell(_ cellValue: Int) -> Int {
+    let id = cellValue >> 4
+    guard id > 0, id < blockDefs.count else { return Int(cell(B.dirt)) }
+    return Int(cell(UInt16(id)))
+}
+
+private func adjacentFoundationCell(_ world: World, _ x: Int, _ y: Int, _ z: Int) -> Int? {
+    let deltas = [(-1, 0, 0), (1, 0, 0), (0, 0, -1), (0, 0, 1), (0, -1, 0), (0, 1, 0)]
+    for d in deltas {
+        let cellValue = world.getBlock(x + d.0, y + d.1, z + d.2)
+        if isTemplateFoundationMaterial(cellValue) {
+            return normalizedFoundationCell(cellValue)
+        }
+    }
+    return nil
+}
+
+private func prepareObjectTemplatePlacement(_ template: ObjectTemplate, in world: World,
+                                            originX: Int, originY: Int, originZ: Int) throws -> TemplatePlacementPreparation {
+    var clearance: [TemplatePos] = []
+    clearance.reserveCapacity(template.sizeX * template.sizeY * template.sizeZ)
+    var support = Set<TemplatePos>()
+    let minY = world.info.minY
+
+    for dx in 0..<template.sizeX {
+        for dz in 0..<template.sizeZ {
+            let x = originX + dx
+            let z = originZ + dz
+            for dy in 0..<template.sizeY {
+                let y = originY + dy
+                try validateTemplateMutableDestination(world, x, y, z)
+                clearance.append(TemplatePos(x: x, y: y, z: z))
+            }
+
+            let foundationY = originY - 1
+            guard foundationY >= minY else {
+                throw TemplateError.destinationUnavailable(x, foundationY, z)
+            }
+            let minSearchY = max(minY, foundationY - OBJECT_TEMPLATE_MAX_SUPPORT_FILL_DEPTH)
+            var baseY: Int?
+            var y = foundationY
+            while y >= minSearchY {
+                try validateTemplateMutableDestination(world, x, y, z)
+                if isTemplateFoundationMaterial(world.getBlock(x, y, z)) {
+                    baseY = y
+                    break
+                }
+                y -= 1
+            }
+            guard let baseY else {
+                throw TemplateError.foundationTooDeep(x, foundationY, z)
+            }
+            if baseY < foundationY {
+                for fillY in (baseY + 1)...foundationY {
+                    try validateTemplateMutableDestination(world, x, fillY, z)
+                    support.insert(TemplatePos(x: x, y: fillY, z: z))
+                }
+            }
+        }
+    }
+
+    var cleared = 0
+    var touched = Set<TemplatePos>()
+    for p in clearance.sorted() {
+        if world.getBlock(p.x, p.y, p.z) != 0 {
+            world.setBlock(p.x, p.y, p.z, 0, SET_NO_NEIGHBORS)
+            cleared += 1
+            touched.insert(p)
+        }
+    }
+
+    var filled = 0
+    for p in support.sorted() {
+        let fillCell = adjacentFoundationCell(world, p.x, p.y, p.z) ?? Int(cell(B.dirt))
+        if world.getBlock(p.x, p.y, p.z) != fillCell {
+            world.setBlock(p.x, p.y, p.z, fillCell, SET_NO_NEIGHBORS)
+            filled += 1
+            touched.insert(p)
+        }
+    }
+
+    for p in touched.sorted() {
+        world.updateNeighbors(p.x, p.y, p.z)
+        world.notifyBlock(p.x, p.y, p.z, p.x, p.y, p.z)
+    }
+    return TemplatePlacementPreparation(blocksCleared: cleared, supportBlocksFilled: filled)
+}
+
 public func placeObjectTemplate(_ rawTemplate: ObjectTemplate, in world: World,
                                 targetX: Int, targetY: Int, targetZ: Int,
+                                rotationSteps: Int = 0,
                                 options: TemplatePlacementOptions = TemplatePlacementOptions()) throws -> TemplatePlacementResult {
-    let template = try validateTemplate(rawTemplate)
+    let template = try rotatedObjectTemplate(rawTemplate, rotationSteps: rotationSteps)
     let originX = targetX - template.anchorX
     let originY = targetY - template.anchorY
     let originZ = targetZ - template.anchorZ
+    let preparation: TemplatePlacementPreparation
+    if options.prepareTerrain {
+        preparation = try prepareObjectTemplatePlacement(template, in: world,
+                                                         originX: originX, originY: originY, originZ: originZ)
+    } else {
+        preparation = TemplatePlacementPreparation(blocksCleared: 0, supportBlocksFilled: 0)
+    }
 
     for block in template.blocks {
         let x = originX + block.dx
@@ -393,7 +915,7 @@ public func placeObjectTemplate(_ rawTemplate: ObjectTemplate, in world: World,
         guard world.isLoadedAt(x, z), y >= world.info.minY, y < world.info.minY + world.info.height else {
             throw TemplateError.destinationUnavailable(x, y, z)
         }
-        if !options.replaceExisting && !isDestinationReplaceable(world, x, y, z) {
+        if !options.replaceExisting && !options.prepareTerrain && !isDestinationReplaceable(world, x, y, z) {
             throw TemplateError.destinationBlocked(x, y, z)
         }
     }
@@ -417,5 +939,7 @@ public func placeObjectTemplate(_ rawTemplate: ObjectTemplate, in world: World,
         world.notifyBlock(p.x, p.y, p.z, p.x, p.y, p.z)
     }
     return TemplatePlacementResult(originX: originX, originY: originY, originZ: originZ,
-                                   blocksPlaced: template.blocks.count, blockEntitiesPlaced: placedBEs)
+                                   blocksPlaced: template.blocks.count, blockEntitiesPlaced: placedBEs,
+                                   blocksCleared: preparation.blocksCleared,
+                                   supportBlocksFilled: preparation.supportBlocksFilled)
 }

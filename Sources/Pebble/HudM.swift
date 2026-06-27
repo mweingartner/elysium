@@ -123,6 +123,17 @@ final class HUD {
             cv.globalAlpha = 1
         }
 
+        if !(ui.current() is MapScreen) {
+            let mapRect = mapMinimapRect(screenWidth: W, screenHeight: H,
+                                         hotbarCenterX: cx, hotbarHalfWidth: 91,
+                                         hotbarTopY: hbY)
+            let bounds = game.loadedMapBounds()
+            let view = mapViewportCenteredOnPlayer(playerX: player.x, playerZ: player.z,
+                                                   span: game.mapSpanBlocks,
+                                                   bounds: bounds)
+            drawMapOverlay(ui, game, rect: mapRect, viewport: view, expanded: false, bounds: bounds)
+        }
+
         if player.gameMode != GameMode.creative {
             // 9×9 icon blit from icons.png (vanilla offsets), pack path only
             func icon9(_ sx: Double, _ sy: Double, _ dx: Double, _ dy: Double) {

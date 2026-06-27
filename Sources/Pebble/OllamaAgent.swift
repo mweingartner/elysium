@@ -24,12 +24,7 @@ final class OllamaAgentService {
         }
         let cursor = game.crosshairBlock()
         if let directAction = inferDirectAIAgentAction(from: userPrompt) {
-            do {
-                let result = try executeAIAgentAction(directAction, world: game.world, player: player, cursor: cursor)
-                pushChat("§d<Pebble AI> §r\(result.message)")
-            } catch {
-                pushChat("§cPebble AI rejected action: \(error)")
-            }
+            execute(action: directAction, game: game, player: player, cursor: cursor)
             return
         }
 
@@ -43,7 +38,9 @@ final class OllamaAgentService {
             return
         }
 
-        let prompt = buildAIAgentPrompt(userRequest: userPrompt, world: game.world, player: player, cursor: cursor)
+        let savedTemplates = loadSavedTemplates(for: game)
+        let prompt = buildAIAgentPrompt(userRequest: userPrompt, world: game.world, player: player,
+                                        cursor: cursor, savedTemplates: savedTemplates)
         pushChat("§7<Pebble AI> thinking with \(model)...")
 
         var request = URLRequest(url: baseURL.appendingPathComponent("api/generate"))
@@ -56,7 +53,7 @@ final class OllamaAgentService {
             return
         }
 
-        session.dataTask(with: request) { [weak game] data, response, error in
+        session.dataTask(with: request) { [weak self, weak game] data, response, error in
             if let error {
                 DispatchQueue.main.async {
                     pushChat("§cPebble AI could not reach local Ollama: \(error.localizedDescription)")
@@ -87,12 +84,7 @@ final class OllamaAgentService {
                         pushChat("§cPebble AI response arrived after the world closed.")
                         return
                     }
-                    do {
-                        let result = try executeAIAgentAction(action, world: game.world, player: player, cursor: cursor)
-                        pushChat("§d<Pebble AI> §r\(result.message)")
-                    } catch {
-                        pushChat("§cPebble AI rejected action: \(error)")
-                    }
+                    self?.execute(action: action, game: game, player: player, cursor: cursor)
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -100,6 +92,29 @@ final class OllamaAgentService {
                 }
             }
         }.resume()
+    }
+
+    private func loadSavedTemplates(for game: GameCore) -> [ObjectTemplate] {
+        game.db.listTemplates().prefix(32).compactMap { name in
+            try? game.db.getTemplate(named: name)
+        }
+    }
+
+    private func execute(action: AIAgentAction, game: GameCore, player: Player, cursor: RaycastHit?) {
+        do {
+            let result: AIAgentExecutionResult
+            if isAIAgentTemplateAction(action) {
+                result = try executeAIAgentTemplateAction(
+                    action,
+                    loadTemplate: { try game.db.getTemplate(named: $0) },
+                    saveTemplate: { try game.db.putTemplate($0) })
+            } else {
+                result = try executeAIAgentAction(action, world: game.world, player: player, cursor: cursor)
+            }
+            pushChat("§d<Pebble AI> §r\(result.message)")
+        } catch {
+            pushChat("§cPebble AI rejected action: \(error)")
+        }
     }
 
     func fetchModels(_ completion: @escaping (Result<[String], Error>) -> Void) {
@@ -143,13 +158,20 @@ final class OllamaAgentService {
                 "properties": [
                     "action": [
                         "type": "string",
-                        "enum": ["say", "give_item", "place_block"],
+                        "enum": ["say", "give_item", "place_block", "replace_template_blocks", "create_template"],
                     ],
                     "item": ["type": "string"],
                     "block": ["type": "string"],
                     "count": ["type": "integer", "minimum": 1, "maximum": AIAgentMaxGiveCount],
                     "target": ["type": "string", "enum": ["cursor"]],
                     "message": ["type": "string"],
+                    "template": ["type": "string"],
+                    "name": ["type": "string"],
+                    "from_block": ["type": "string"],
+                    "to_block": ["type": "string"],
+                    "kind": ["type": "string", "enum": ["pirate_ship", "ship", "boat"]],
+                    "length": ["type": "integer", "minimum": 16, "maximum": OBJECT_TEMPLATE_MAX_SPAN],
+                    "style": ["type": "string"],
                 ],
                 "required": ["action"],
             ],
