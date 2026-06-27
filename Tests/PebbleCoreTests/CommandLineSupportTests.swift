@@ -31,10 +31,21 @@ final class CommandLineSupportTests: XCTestCase {
                                                     hasWorld: true,
                                                     isRepeat: false),
                        .placeObject)
+        XCTAssertEqual(objectTemplateShortcutAction(forKey: "KeyZ",
+                                                    commandDown: true,
+                                                    hasOpenScreen: false,
+                                                    hasWorld: true,
+                                                    isRepeat: false),
+                       .undoObjectPlacement)
     }
 
-    func testObjectTemplateShortcutsDoNotStealPasteOrLegacyCommandP() {
+    func testObjectTemplateShortcutsDoNotStealScreenEditingOrLegacyCommandP() {
         XCTAssertNil(objectTemplateShortcutAction(forKey: "KeyV",
+                                                  commandDown: true,
+                                                  hasOpenScreen: true,
+                                                  hasWorld: true,
+                                                  isRepeat: false))
+        XCTAssertNil(objectTemplateShortcutAction(forKey: "KeyZ",
                                                   commandDown: true,
                                                   hasOpenScreen: true,
                                                   hasWorld: true,
@@ -44,12 +55,27 @@ final class CommandLineSupportTests: XCTestCase {
                                                   hasOpenScreen: false,
                                                   hasWorld: true,
                                                   isRepeat: false))
+        XCTAssertNil(objectTemplateShortcutAction(forKey: "KeyZ",
+                                                  commandDown: false,
+                                                  hasOpenScreen: false,
+                                                  hasWorld: true,
+                                                  isRepeat: false))
         XCTAssertNil(objectTemplateShortcutAction(forKey: "KeyV",
                                                   commandDown: true,
                                                   hasOpenScreen: false,
                                                   hasWorld: false,
                                                   isRepeat: false))
+        XCTAssertNil(objectTemplateShortcutAction(forKey: "KeyZ",
+                                                  commandDown: true,
+                                                  hasOpenScreen: false,
+                                                  hasWorld: false,
+                                                  isRepeat: false))
         XCTAssertNil(objectTemplateShortcutAction(forKey: "KeyV",
+                                                  commandDown: true,
+                                                  hasOpenScreen: false,
+                                                  hasWorld: true,
+                                                  isRepeat: true))
+        XCTAssertNil(objectTemplateShortcutAction(forKey: "KeyZ",
                                                   commandDown: true,
                                                   hasOpenScreen: false,
                                                   hasWorld: true,

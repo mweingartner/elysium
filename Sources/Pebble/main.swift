@@ -320,6 +320,8 @@ final class GameView: MTKView {
             openTemplateCopyDialog(game, ui)
         case .placeObject:
             openTemplatePlacementBrowser(game, ui)
+        case .undoObjectPlacement:
+            _ = game.undoLastTemplatePlacement()
         }
         return true
     }

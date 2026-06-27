@@ -1528,49 +1528,23 @@ final class WorldRenderer {
     }
 
     // ---- selection / template-placement outlines ----------------------------------
-    private struct TemplatePreviewBlockKey: Hashable {
-        let x: Int
-        let y: Int
-        let z: Int
-    }
-
     private func drawTemplatePlacementPreview(_ enc: MTLRenderCommandEncoder,
                                               session: TemplatePlacementSession,
                                               target: TemplatePlacementTarget,
                                               viewProj: simd_float4x4,
                                               camPos: SIMD3<Double>) {
         let template = session.rotatedTemplate
-        var occupied = Set<TemplatePreviewBlockKey>()
-        occupied.reserveCapacity(template.blocks.count)
-        for block in template.blocks {
-            occupied.insert(TemplatePreviewBlockKey(x: block.dx, y: block.dy, z: block.dz))
-        }
-        let neighbors = [
-            TemplatePreviewBlockKey(x: 1, y: 0, z: 0), TemplatePreviewBlockKey(x: -1, y: 0, z: 0),
-            TemplatePreviewBlockKey(x: 0, y: 1, z: 0), TemplatePreviewBlockKey(x: 0, y: -1, z: 0),
-            TemplatePreviewBlockKey(x: 0, y: 0, z: 1), TemplatePreviewBlockKey(x: 0, y: 0, z: -1),
-        ]
+        let previewBoxes = (try? objectTemplatePreviewBoxes(for: template)) ?? []
         var boxes: [(Double, Double, Double, Double, Double, Double)] = []
-        boxes.reserveCapacity(min(template.blocks.count, OBJECT_TEMPLATE_PREVIEW_MAX_BLOCKS))
-        for block in template.blocks {
-            let key = TemplatePreviewBlockKey(x: block.dx, y: block.dy, z: block.dz)
-            let isSurface = neighbors.contains { delta in
-                !occupied.contains(TemplatePreviewBlockKey(x: key.x + delta.x, y: key.y + delta.y, z: key.z + delta.z))
-            }
-            if !isSurface && template.blocks.count > OBJECT_TEMPLATE_PREVIEW_MAX_BLOCKS {
-                continue
-            }
-            let x = Double(target.originX + block.dx) - camPos.x
-            let y = Double(target.originY + block.dy) - camPos.y
-            let z = Double(target.originZ + block.dz) - camPos.z
-            boxes.append((x - 0.01, y - 0.01, z - 0.01, x + 1.01, y + 1.01, z + 1.01))
-            if boxes.count >= OBJECT_TEMPLATE_PREVIEW_MAX_BLOCKS { break }
-        }
-        if boxes.isEmpty, let block = template.blocks.first {
-            let x = Double(target.originX + block.dx) - camPos.x
-            let y = Double(target.originY + block.dy) - camPos.y
-            let z = Double(target.originZ + block.dz) - camPos.z
-            boxes.append((x - 0.01, y - 0.01, z - 0.01, x + 1.01, y + 1.01, z + 1.01))
+        boxes.reserveCapacity(previewBoxes.count)
+        for box in previewBoxes {
+            boxes.append((
+                Double(target.originX) + box.x0 - camPos.x - 0.01,
+                Double(target.originY) + box.y0 - camPos.y - 0.01,
+                Double(target.originZ) + box.z0 - camPos.z - 0.01,
+                Double(target.originX) + box.x1 - camPos.x + 0.01,
+                Double(target.originY) + box.y1 - camPos.y + 0.01,
+                Double(target.originZ) + box.z1 - camPos.z + 0.01))
         }
         if !boxes.isEmpty {
             drawBoxOutline(enc, viewProj, boxes, asLines: false, color: SIMD4<Float>(0.08, 0.88, 1.0, 0.78))
@@ -1640,8 +1614,18 @@ final class WorldRenderer {
         var u = LineUniforms(viewProj: viewProj, color: color)
         enc.setRenderPipelineState(linePipeline)
         enc.setDepthStencilState(depthRead)
-        verts.withUnsafeBytes { raw in
-            enc.setVertexBytes(raw.baseAddress!, length: raw.count, index: 0)
+        let byteCount = verts.count * MemoryLayout<Float>.stride
+        if byteCount <= 4_096 {
+            verts.withUnsafeBytes { raw in
+                enc.setVertexBytes(raw.baseAddress!, length: raw.count, index: 0)
+            }
+        } else if let buffer = verts.withUnsafeBytes({ raw in
+            raw.baseAddress.map { device.makeBuffer(bytes: $0, length: raw.count, options: .storageModeShared) }
+        }) {
+            enc.setVertexBuffer(buffer, offset: 0, index: 0)
+        } else {
+            enc.setDepthStencilState(depthWrite)
+            return
         }
         enc.setVertexBytes(&u, length: MemoryLayout<LineUniforms>.stride, index: 1)
         enc.setFragmentBytes(&u, length: MemoryLayout<LineUniforms>.stride, index: 1)

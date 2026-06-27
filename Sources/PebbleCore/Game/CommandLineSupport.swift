@@ -3,6 +3,7 @@ import Foundation
 public enum ObjectTemplateShortcutAction: Equatable {
     case copyObject
     case placeObject
+    case undoObjectPlacement
 }
 
 public func objectTemplateShortcutAction(forKey key: String,
@@ -14,6 +15,7 @@ public func objectTemplateShortcutAction(forKey key: String,
     switch key {
     case "KeyC": return .copyObject
     case "KeyV": return .placeObject
+    case "KeyZ": return .undoObjectPlacement
     default: return nil
     }
 }

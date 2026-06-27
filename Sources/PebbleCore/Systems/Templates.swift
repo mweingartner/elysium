@@ -6,7 +6,9 @@ public let OBJECT_TEMPLATE_MAX_SPAN = 96
 public let OBJECT_TEMPLATE_MAX_JSON_BYTES = 2_000_000
 public let OBJECT_TEMPLATE_NAME_MAX = 48
 public let OBJECT_TEMPLATE_PREVIEW_MAX_BLOCKS = 4_096
+public let OBJECT_TEMPLATE_PREVIEW_MAX_BOXES = OBJECT_TEMPLATE_PREVIEW_MAX_BLOCKS
 public let OBJECT_TEMPLATE_MAX_SUPPORT_FILL_DEPTH = 32
+public let OBJECT_TEMPLATE_PREVIEW_LINE_VERTICES_PER_BOX = 24
 
 public struct TemplateBlock: Codable, Equatable {
     public var dx: Int
@@ -64,6 +66,19 @@ public struct TemplatePlacementResult {
     public let supportBlocksFilled: Int
 }
 
+public struct TemplatePlacementUndoCell {
+    public let x: Int
+    public let y: Int
+    public let z: Int
+    public let cell: Int
+    public let blockEntity: BlockEntityData?
+}
+
+public struct TemplatePlacementUndoSnapshot {
+    public let templateName: String
+    public let cells: [TemplatePlacementUndoCell]
+}
+
 public struct TemplatePlacementTarget: Equatable {
     public let originX: Int
     public let originY: Int
@@ -78,6 +93,23 @@ public struct TemplatePlacementTarget: Equatable {
         self.originX = originX; self.originY = originY; self.originZ = originZ
         self.targetX = targetX; self.targetY = targetY; self.targetZ = targetZ
         self.distance = distance
+    }
+}
+
+public struct ObjectTemplatePreviewBox: Equatable {
+    public let cell: UInt16
+    public let x0: Double
+    public let y0: Double
+    public let z0: Double
+    public let x1: Double
+    public let y1: Double
+    public let z1: Double
+
+    public init(cell: UInt16, x0: Double, y0: Double, z0: Double,
+                x1: Double, y1: Double, z1: Double) {
+        self.cell = cell
+        self.x0 = x0; self.y0 = y0; self.z0 = z0
+        self.x1 = x1; self.y1 = y1; self.z1 = z1
     }
 }
 
@@ -421,6 +453,81 @@ private func validateTemplate(_ template: ObjectTemplate) throws -> ObjectTempla
     var out = template
     out.blocks = blocks
     out.blockEntities = blockEntities
+    return out
+}
+
+public func objectTemplatePreviewLineVertexCount(boxCount: Int, includeBounds: Bool = false) -> Int {
+    max(0, boxCount) * OBJECT_TEMPLATE_PREVIEW_LINE_VERTICES_PER_BOX
+        + (includeBounds ? OBJECT_TEMPLATE_PREVIEW_LINE_VERTICES_PER_BOX : 0)
+}
+
+public func objectTemplatePreviewLineByteCount(boxCount: Int, includeBounds: Bool = false) -> Int {
+    objectTemplatePreviewLineVertexCount(boxCount: boxCount, includeBounds: includeBounds)
+        * 3 * MemoryLayout<Float>.stride
+}
+
+public func objectTemplatePreviewBoxes(for rawTemplate: ObjectTemplate,
+                                       maxBoxes rawMaxBoxes: Int = OBJECT_TEMPLATE_PREVIEW_MAX_BOXES) throws -> [ObjectTemplatePreviewBox] {
+    let template = try validateTemplate(rawTemplate)
+    let maxBoxes = max(0, min(rawMaxBoxes, OBJECT_TEMPLATE_PREVIEW_MAX_BOXES))
+    guard maxBoxes > 0 else { return [] }
+
+    var occupied = Set<TemplatePos>()
+    occupied.reserveCapacity(template.blocks.count)
+    var cells: [TemplatePos: UInt16] = [:]
+    cells.reserveCapacity(template.blocks.count)
+    for block in template.blocks {
+        let pos = TemplatePos(x: block.dx, y: block.dy, z: block.dz)
+        occupied.insert(pos)
+        cells[pos] = block.cell
+    }
+
+    let neighbors = [
+        TemplatePos(x: 1, y: 0, z: 0), TemplatePos(x: -1, y: 0, z: 0),
+        TemplatePos(x: 0, y: 1, z: 0), TemplatePos(x: 0, y: -1, z: 0),
+        TemplatePos(x: 0, y: 0, z: 1), TemplatePos(x: 0, y: 0, z: -1),
+    ]
+    let surfaceOnly = template.blocks.count > maxBoxes
+    var out: [ObjectTemplatePreviewBox] = []
+    out.reserveCapacity(min(maxBoxes, template.blocks.count))
+    var scratch: [AABB] = []
+
+    for block in template.blocks {
+        let pos = TemplatePos(x: block.dx, y: block.dy, z: block.dz)
+        if surfaceOnly {
+            let isSurface = neighbors.contains { delta in
+                !occupied.contains(TemplatePos(x: pos.x + delta.x, y: pos.y + delta.y, z: pos.z + delta.z))
+            }
+            if !isSurface { continue }
+        }
+
+        scratch.removeAll(keepingCapacity: true)
+        shapeBoxes(Int(block.cell), { dx, dy, dz in
+            Int(cells[TemplatePos(x: pos.x + dx, y: pos.y + dy, z: pos.z + dz)] ?? 0)
+        }, &scratch, false)
+        if scratch.isEmpty {
+            scratch.append(aabb(0, 0, 0, 1, 1, 1))
+        }
+
+        for box in scratch {
+            out.append(ObjectTemplatePreviewBox(
+                cell: block.cell,
+                x0: Double(block.dx) + box.x0,
+                y0: Double(block.dy) + box.y0,
+                z0: Double(block.dz) + box.z0,
+                x1: Double(block.dx) + box.x1,
+                y1: Double(block.dy) + box.y1,
+                z1: Double(block.dz) + box.z1))
+            if out.count >= maxBoxes { return out }
+        }
+    }
+
+    if out.isEmpty, let block = template.blocks.first {
+        out.append(ObjectTemplatePreviewBox(
+            cell: block.cell,
+            x0: Double(block.dx), y0: Double(block.dy), z0: Double(block.dz),
+            x1: Double(block.dx + 1), y1: Double(block.dy + 1), z1: Double(block.dz + 1)))
+    }
     return out
 }
 
@@ -890,6 +997,115 @@ private func prepareObjectTemplatePlacement(_ template: ObjectTemplate, in world
         world.notifyBlock(p.x, p.y, p.z, p.x, p.y, p.z)
     }
     return TemplatePlacementPreparation(blocksCleared: cleared, supportBlocksFilled: filled)
+}
+
+private func objectTemplatePlacementMutationPositions(_ template: ObjectTemplate, in world: World,
+                                                      originX: Int, originY: Int, originZ: Int,
+                                                      options: TemplatePlacementOptions) throws -> [TemplatePos] {
+    var positions = Set<TemplatePos>()
+    positions.reserveCapacity(template.blocks.count)
+    for block in template.blocks {
+        let x = originX + block.dx
+        let y = originY + block.dy
+        let z = originZ + block.dz
+        guard world.isLoadedAt(x, z), y >= world.info.minY, y < world.info.minY + world.info.height else {
+            throw TemplateError.destinationUnavailable(x, y, z)
+        }
+        if !options.replaceExisting && !options.prepareTerrain && !isDestinationReplaceable(world, x, y, z) {
+            throw TemplateError.destinationBlocked(x, y, z)
+        }
+        positions.insert(TemplatePos(x: x, y: y, z: z))
+    }
+    guard options.prepareTerrain else { return positions.sorted() }
+
+    let minY = world.info.minY
+    for dx in 0..<template.sizeX {
+        for dz in 0..<template.sizeZ {
+            let x = originX + dx
+            let z = originZ + dz
+            for dy in 0..<template.sizeY {
+                let y = originY + dy
+                try validateTemplateMutableDestination(world, x, y, z)
+                if world.getBlock(x, y, z) != 0 || world.getBlockEntity(x, y, z) != nil {
+                    positions.insert(TemplatePos(x: x, y: y, z: z))
+                }
+            }
+
+            let foundationY = originY - 1
+            guard foundationY >= minY else {
+                throw TemplateError.destinationUnavailable(x, foundationY, z)
+            }
+            let minSearchY = max(minY, foundationY - OBJECT_TEMPLATE_MAX_SUPPORT_FILL_DEPTH)
+            var baseY: Int?
+            var y = foundationY
+            while y >= minSearchY {
+                try validateTemplateMutableDestination(world, x, y, z)
+                if isTemplateFoundationMaterial(world.getBlock(x, y, z)) {
+                    baseY = y
+                    break
+                }
+                y -= 1
+            }
+            guard let baseY else {
+                throw TemplateError.foundationTooDeep(x, foundationY, z)
+            }
+            if baseY < foundationY {
+                for fillY in (baseY + 1)...foundationY {
+                    try validateTemplateMutableDestination(world, x, fillY, z)
+                    positions.insert(TemplatePos(x: x, y: fillY, z: z))
+                }
+            }
+        }
+    }
+    return positions.sorted()
+}
+
+public func objectTemplatePlacementUndoSnapshot(for rawTemplate: ObjectTemplate, in world: World,
+                                                targetX: Int, targetY: Int, targetZ: Int,
+                                                rotationSteps: Int = 0,
+                                                options: TemplatePlacementOptions = TemplatePlacementOptions()) throws -> TemplatePlacementUndoSnapshot {
+    let template = try rotatedObjectTemplate(rawTemplate, rotationSteps: rotationSteps)
+    let originX = targetX - template.anchorX
+    let originY = targetY - template.anchorY
+    let originZ = targetZ - template.anchorZ
+    let positions = try objectTemplatePlacementMutationPositions(template, in: world,
+                                                                 originX: originX, originY: originY, originZ: originZ,
+                                                                 options: options)
+    let cells = positions.map { pos -> TemplatePlacementUndoCell in
+        let cellValue = world.getBlock(pos.x, pos.y, pos.z)
+        let id = cellValue >> 4
+        let blockEntity = id > 0 && id < blockDefs.count
+            ? world.getBlockEntity(pos.x, pos.y, pos.z).flatMap(sanitizedTemplateBlockEntity)
+            : nil
+        return TemplatePlacementUndoCell(x: pos.x, y: pos.y, z: pos.z, cell: cellValue, blockEntity: blockEntity)
+    }
+    return TemplatePlacementUndoSnapshot(templateName: template.name, cells: cells)
+}
+
+@discardableResult
+public func restoreObjectTemplatePlacementUndo(_ snapshot: TemplatePlacementUndoSnapshot, in world: World) -> Int {
+    var restored = 0
+    var touched: [TemplatePos] = []
+    touched.reserveCapacity(snapshot.cells.count)
+    for cell in snapshot.cells {
+        _ = world.setBlock(cell.x, cell.y, cell.z, cell.cell, SET_NO_NEIGHBORS)
+        if let blockEntity = cell.blockEntity,
+           let copy = sanitizedTemplateBlockEntity(blockEntity) {
+            copy.x = cell.x
+            copy.y = cell.y
+            copy.z = cell.z
+            world.setBlockEntity(copy)
+        } else {
+            world.removeBlockEntity(cell.x, cell.y, cell.z)
+        }
+        touched.append(TemplatePos(x: cell.x, y: cell.y, z: cell.z))
+        restored += 1
+    }
+    for p in touched.sorted() {
+        world.updateNeighbors(p.x, p.y, p.z)
+        world.notifyBlock(p.x, p.y, p.z, p.x, p.y, p.z)
+    }
+    return restored
 }
 
 public func placeObjectTemplate(_ rawTemplate: ObjectTemplate, in world: World,

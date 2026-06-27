@@ -442,10 +442,20 @@ public final class World {
     }
     public func setBlockEntity(_ be: BlockEntityData) {
         guard let c = getChunkAt(be.x, be.z) else { return }
+        if let old = c.getBlockEntity(posMod(be.x, CHUNK_W), be.y, posMod(be.z, CHUNK_W)) {
+            untrackTickingBE(old)
+        }
         c.setBlockEntity(posMod(be.x, CHUNK_W), be.y, posMod(be.z, CHUNK_W), be)
         if beTickHandlers[be.type] != nil {
             trackTickingBE(be)
         }
+    }
+    public func removeBlockEntity(_ x: Int, _ y: Int, _ z: Int) {
+        guard let c = getChunkAt(x, z) else { return }
+        if let old = c.getBlockEntity(posMod(x, CHUNK_W), y, posMod(z, CHUNK_W)) {
+            untrackTickingBE(old)
+        }
+        c.removeBlockEntity(posMod(x, CHUNK_W), y, posMod(z, CHUNK_W))
     }
     /// rebuild ticking set after chunk load — sorted by cell index so the tick
     /// order is reproducible (Dictionary.values order is hash-seeded)

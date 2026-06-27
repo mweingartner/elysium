@@ -19,6 +19,25 @@ public func resetIconCache() {
     iconCache.removeAll()
 }
 
+public func blockItemIconUsesThreeDimensionalPreview(_ blockId: Int) -> Bool {
+    guard blockId > 0, blockId < blockDefs.count else { return false }
+    let shape = Shape(rawValue: SHAPE_OF[blockId]) ?? .cube
+    switch shape {
+    case .air, .liquid, .fire, .portalShape, .endPortalShape,
+         .cross, .tallCross, .crop, .netherWart, .sweetBerry, .rootsShape, .web,
+         .caveVinesShape, .hangingRoots, .sporeBlossom,
+         .vine, .glowLichen, .sculkVein,
+         .lilyPad, .frogspawn:
+        return false
+    default:
+        var boxes: [AABB] = []
+        shapeBoxes(Int(cell(UInt16(blockId))), { _, _, _ in 0 }, &boxes, false)
+        return boxes.contains { box in
+            box.x1 > box.x0 && box.y1 > box.y0 && box.z1 > box.z0
+        }
+    }
+}
+
 private func tilePixels(_ tile: Int) -> [UInt8]? {
     guard let atlas = iconAtlas, tile >= 0, tile < atlas.pixels.count else { return nil }
     return atlas.pixels[tile]
@@ -215,15 +234,11 @@ private func paintIcon(_ img: inout [UInt8], _ def: ItemDef, _ data: StackData?)
     if let block = def.block, iconAtlas != nil {
         let bid = Int(block)
         let bdef = blockDefs[bid]
-        let shape = SHAPE_OF[bid]
-        let solidShapes: Set<UInt8> = [Shape.cube.rawValue, Shape.slab.rawValue, Shape.stairs.rawValue,
-                                       Shape.piston.rawValue, Shape.chest.rawValue, Shape.hopper.rawValue,
-                                       Shape.cauldron.rawValue]
-        let flat = !solidShapes.contains(shape)
+        let threeDimensional = blockItemIconUsesThreeDimensionalPreview(bid)
         func tile(_ face: Int) -> Int {
             bdef.texFn?(0, face) ?? (bdef.tex.isEmpty ? 0 : Int(bdef.tex[face]))
         }
-        if flat {
+        if !threeDimensional {
             blitTile(&img, tile(2), tintFor(bid))
             return
         }

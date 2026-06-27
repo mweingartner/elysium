@@ -2113,26 +2113,10 @@ final class TemplateBrowserScreen: Screen {
         return out.count < text.count && out.count > 3 ? out + "." : out
     }
 
-    private func blockKey(_ x: Int, _ y: Int, _ z: Int) -> Int {
-        x + y * 128 + z * 16_384
-    }
-
-    private func sampledPreviewBlocks(_ template: ObjectTemplate) -> [TemplateBlock] {
-        guard template.blocks.count > TEMPLATE_PREVIEW_MAX_BLOCKS else { return template.blocks }
-        let sorted = template.blocks.sorted {
-            if $0.dy != $1.dy { return $0.dy < $1.dy }
-            if $0.dz != $1.dz { return $0.dz < $1.dz }
-            return $0.dx < $1.dx
-        }
-        let stride = Double(sorted.count) / Double(TEMPLATE_PREVIEW_MAX_BLOCKS)
-        return (0..<TEMPLATE_PREVIEW_MAX_BLOCKS).map { sorted[min(sorted.count - 1, Int(Double($0) * stride))] }
-    }
-
     private func drawTemplatePreview(_ ui: UIManager, _ template: ObjectTemplate,
                                      rect: (x: Double, y: Double, w: Double, h: Double)) {
         let cv = ui.cv
-        let blocks = sampledPreviewBlocks(template)
-        let occupied = Set(template.blocks.map { blockKey($0.dx, $0.dy, $0.dz) })
+        let boxes = (try? objectTemplatePreviewBoxes(for: template, maxBoxes: TEMPLATE_PREVIEW_MAX_BLOCKS)) ?? []
         let sx = max(1.0, Double(template.sizeX))
         let sy = max(1.0, Double(template.sizeY))
         let sz = max(1.0, Double(template.sizeZ))
@@ -2152,7 +2136,7 @@ final class TemplateBrowserScreen: Screen {
             return (cx + rx * scale, cy - ry * scale, depth)
         }
 
-        let faces = makePreviewFaces(blocks: blocks, occupied: occupied, project: project)
+        let faces = makePreviewFaces(boxes: boxes, project: project)
         for face in faces.sorted(by: { $0.depth < $1.depth }) {
             guard face.points.count == 4 else { continue }
             cv.setFill(face.color)
@@ -2162,34 +2146,31 @@ final class TemplateBrowserScreen: Screen {
                         face.points[3].0, face.points[3].1)
         }
         drawPreviewBounds(cv, template, project: project)
-        if template.blocks.count > blocks.count {
-            cv.drawText("\(blocks.count)/\(template.blocks.count) blocks", rect.x + 4, rect.y + rect.h - 12, 1, "#a8a8a8", shadow: false)
+        if boxes.count >= TEMPLATE_PREVIEW_MAX_BLOCKS && template.blocks.count > boxes.count {
+            cv.drawText("\(boxes.count) preview boxes", rect.x + 4, rect.y + rect.h - 12, 1, "#a8a8a8", shadow: false)
         }
     }
 
-    private func makePreviewFaces(blocks: [TemplateBlock], occupied: Set<Int>,
+    private func makePreviewFaces(boxes: [ObjectTemplatePreviewBox],
                                   project: (Double, Double, Double) -> (Double, Double, Double)) -> [TemplatePreviewFace] {
-        let faceDefs: [(Int, Int, Int, Double, [(Double, Double, Double)])] = [
-            (0, 1, 0, 1.18, [(0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)]),
-            (0, -1, 0, 0.54, [(0, 0, 0), (0, 0, 1), (1, 0, 1), (1, 0, 0)]),
-            (0, 0, 1, 0.92, [(0, 0, 1), (0, 1, 1), (1, 1, 1), (1, 0, 1)]),
-            (0, 0, -1, 0.76, [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]),
-            (1, 0, 0, 0.98, [(1, 0, 0), (1, 0, 1), (1, 1, 1), (1, 1, 0)]),
-            (-1, 0, 0, 0.72, [(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)])
+        let faceDefs: [(Double, (ObjectTemplatePreviewBox) -> [(Double, Double, Double)])] = [
+            (1.18, { b in [(b.x0, b.y1, b.z0), (b.x1, b.y1, b.z0), (b.x1, b.y1, b.z1), (b.x0, b.y1, b.z1)] }),
+            (0.54, { b in [(b.x0, b.y0, b.z0), (b.x0, b.y0, b.z1), (b.x1, b.y0, b.z1), (b.x1, b.y0, b.z0)] }),
+            (0.92, { b in [(b.x0, b.y0, b.z1), (b.x0, b.y1, b.z1), (b.x1, b.y1, b.z1), (b.x1, b.y0, b.z1)] }),
+            (0.76, { b in [(b.x0, b.y0, b.z0), (b.x1, b.y0, b.z0), (b.x1, b.y1, b.z0), (b.x0, b.y1, b.z0)] }),
+            (0.98, { b in [(b.x1, b.y0, b.z0), (b.x1, b.y0, b.z1), (b.x1, b.y1, b.z1), (b.x1, b.y1, b.z0)] }),
+            (0.72, { b in [(b.x0, b.y0, b.z0), (b.x0, b.y1, b.z0), (b.x0, b.y1, b.z1), (b.x0, b.y0, b.z1)] }),
         ]
         var faces: [TemplatePreviewFace] = []
-        faces.reserveCapacity(blocks.count * 3)
-        for block in blocks {
-            let id = Int(block.cell >> 4)
+        faces.reserveCapacity(boxes.count * 6)
+        for box in boxes {
+            let id = Int(box.cell >> 4)
             guard id > 0, id < blockDefs.count else { continue }
             let base = templateBlockHSL(blockDefs[id].name)
             for face in faceDefs {
-                if occupied.contains(blockKey(block.dx + face.0, block.dy + face.1, block.dz + face.2)) { continue }
-                let projected = face.4.map { p in
-                    project(Double(block.dx) + p.0, Double(block.dy) + p.1, Double(block.dz) + p.2)
-                }
+                let projected = face.1(box).map { project($0.0, $0.1, $0.2) }
                 let depth = projected.reduce(0.0) { $0 + $1.2 } / Double(projected.count)
-                let color = templateHSLString(base.0, base.1, max(18, min(78, base.2 * face.3)))
+                let color = templateHSLString(base.0, base.1, max(18, min(78, base.2 * face.0)))
                 faces.append(TemplatePreviewFace(points: projected.map { ($0.0, $0.1) }, depth: depth, color: color))
             }
         }

@@ -268,6 +268,7 @@ public final class GameCore {
     public var targetedBlock: (x: Int, y: Int, z: Int, cell: Int)?
     public var lastCursorHit: RaycastHit?
     public private(set) var templatePlacement: TemplatePlacementSession?
+    public private(set) var lastTemplatePlacementUndo: TemplatePlacementUndoSnapshot?
     public var perspective = 0          // 0 first, 1 back, 2 front
     private var sprintHeld = false
     private var lastForwardPress = 0.0
@@ -2065,11 +2066,17 @@ public final class GameCore {
     public func commitTemplatePlacement() throws -> TemplatePlacementResult? {
         guard let session = templatePlacement else { return nil }
         guard let target = templatePlacementTarget() else { throw TemplateError.missingTarget }
+        let undo = try objectTemplatePlacementUndoSnapshot(for: session.rotatedTemplate, in: world,
+                                                           targetX: target.targetX,
+                                                           targetY: target.targetY,
+                                                           targetZ: target.targetZ,
+                                                           options: TemplatePlacementOptions(prepareTerrain: true))
         let result = try placeObjectTemplate(session.rotatedTemplate, in: world,
                                              targetX: target.targetX,
                                              targetY: target.targetY,
                                              targetZ: target.targetZ,
                                              options: TemplatePlacementOptions(prepareTerrain: true))
+        lastTemplatePlacementUndo = undo
         templatePlacement = nil
         leftDown = false
         rightDown = false
@@ -2083,6 +2090,27 @@ public final class GameCore {
         host?.pushChat("§7Placed object \"\(session.name)\" - \(details)")
         host?.showActionBar("Placed \"\(session.name)\"", 60)
         return result
+    }
+
+    @discardableResult
+    public func undoLastTemplatePlacement() -> Bool {
+        guard let undo = lastTemplatePlacementUndo else {
+            host?.showActionBar("No object placement to undo", 55)
+            return false
+        }
+        if templatePlacement != nil {
+            cancelTemplatePlacement(showMessage: false)
+        }
+        let restored = restoreObjectTemplatePlacementUndo(undo, in: world)
+        lastTemplatePlacementUndo = nil
+        leftDown = false
+        rightDown = false
+        player?.breakingProgress = -1
+        targetedBlock = nil
+        lastCursorHit = nil
+        host?.pushChat("§7Undid object placement \"\(undo.templateName)\" - restored \(restored) cells")
+        host?.showActionBar("Undid \"\(undo.templateName)\"", 60)
+        return true
     }
 
     // ===========================================================================

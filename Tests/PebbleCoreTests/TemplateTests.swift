@@ -215,6 +215,48 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual(world.getBlockId(8, 69, 8), 0)
     }
 
+    func testPlacementUndoRestoresPreparedPlacementMutation() throws {
+        let world = makeWorld()
+        world.setBlock(7, 69, 8, Int(cell(B.dirt)))
+        world.setBlock(8, 68, 8, Int(cell(B.stone)))
+        world.setBlock(8, 70, 8, Int(cell(B.cobblestone)))
+        world.setBlock(8, 71, 8, Int(cell(B.chest)))
+        let chest = makeContainerBE(8, 71, 8, 27)
+        chest.items?[0] = stack("diamond", 5)
+        world.setBlockEntity(chest)
+        let template = ObjectTemplate(
+            name: "Undo Place",
+            anchorX: 0, anchorY: 0, anchorZ: 0,
+            sizeX: 1, sizeY: 2, sizeZ: 1,
+            blocks: [TemplateBlock(dx: 0, dy: 0, dz: 0, cell: UInt16(cell(B.oak_planks)))])
+
+        let undo = try objectTemplatePlacementUndoSnapshot(
+            for: template,
+            in: world,
+            targetX: 8,
+            targetY: 70,
+            targetZ: 8,
+            options: TemplatePlacementOptions(prepareTerrain: true))
+        let placed = try placeObjectTemplate(template, in: world,
+                                             targetX: 8, targetY: 70, targetZ: 8,
+                                             options: TemplatePlacementOptions(prepareTerrain: true))
+
+        XCTAssertEqual(placed.blocksPlaced, 1)
+        XCTAssertEqual(world.getBlockId(8, 69, 8), Int(B.dirt))
+        XCTAssertEqual(world.getBlockId(8, 70, 8), Int(B.oak_planks))
+        XCTAssertEqual(world.getBlockId(8, 71, 8), 0)
+        XCTAssertNil(world.getBlockEntity(8, 71, 8))
+
+        let restored = restoreObjectTemplatePlacementUndo(undo, in: world)
+
+        XCTAssertEqual(restored, undo.cells.count)
+        XCTAssertEqual(world.getBlockId(8, 69, 8), 0)
+        XCTAssertEqual(world.getBlockId(8, 70, 8), Int(B.cobblestone))
+        XCTAssertEqual(world.getBlockId(8, 71, 8), Int(B.chest))
+        XCTAssertEqual(world.getBlockEntity(8, 71, 8)?.items?[0]?.id, iid("diamond"))
+        XCTAssertEqual(world.getBlockEntity(8, 71, 8)?.items?[0]?.count, 5)
+    }
+
     func testPlaceRejectsBlockedDestinationBeforeMutating() throws {
         let world = makeWorld()
         makeFurnishedObject(in: world)
@@ -302,6 +344,58 @@ final class TemplateTests: XCTestCase {
         XCTAssertGreaterThan(decoded.blocks.count, 200)
         XCTAssertLessThanOrEqual(decoded.blocks.count, OBJECT_TEMPLATE_MAX_BLOCKS)
         XCTAssertTrue(palette.contains("black_wool") || palette.contains("polished_blackstone_bricks"))
+    }
+
+    func testObjectTemplatePreviewUsesThreeDimensionalBlockShapes() throws {
+        registerCoreIfNeeded()
+        let template = ObjectTemplate(
+            name: "Lights",
+            anchorX: 0, anchorY: 0, anchorZ: 0,
+            sizeX: 3, sizeY: 1, sizeZ: 1,
+            blocks: [
+                TemplateBlock(dx: 0, dy: 0, dz: 0, cell: UInt16(cell(B.torch))),
+                TemplateBlock(dx: 1, dy: 0, dz: 0, cell: UInt16(cell(B.lantern))),
+                TemplateBlock(dx: 2, dy: 0, dz: 0, cell: UInt16(cell(B.chain))),
+            ])
+
+        let boxes = try objectTemplatePreviewBoxes(for: template)
+        let torch = try XCTUnwrap(boxes.first { $0.cell >> 4 == B.torch })
+        let lantern = try XCTUnwrap(boxes.first { $0.cell >> 4 == B.lantern })
+        let chain = try XCTUnwrap(boxes.first { $0.cell >> 4 == B.chain })
+
+        for box in [torch, lantern, chain] {
+            XCTAssertGreaterThan(box.x1 - box.x0, 0)
+            XCTAssertGreaterThan(box.y1 - box.y0, 0)
+            XCTAssertGreaterThan(box.z1 - box.z0, 0)
+        }
+        XCTAssertLessThan(torch.x1 - torch.x0, 1.0)
+        XCTAssertLessThan(torch.z1 - torch.z0, 1.0)
+        XCTAssertLessThan(lantern.x1 - lantern.x0, 1.0)
+        XCTAssertLessThan(lantern.y1 - lantern.y0, 1.0)
+        XCTAssertLessThan(chain.x1 - chain.x0, 1.0)
+        XCTAssertEqual(chain.y1 - chain.y0, 1.0, accuracy: 0.0001)
+    }
+
+    func testObjectTemplatePreviewCapsComplexGeometryForRendererSafety() throws {
+        registerCoreIfNeeded()
+        var blocks: [TemplateBlock] = []
+        for y in 0..<28 {
+            for z in 0..<28 {
+                for x in 0..<28 {
+                    blocks.append(TemplateBlock(dx: x, dy: y, dz: z, cell: UInt16(cell(B.stone))))
+                }
+            }
+        }
+        let template = ObjectTemplate(
+            name: "Large Preview",
+            anchorX: 14, anchorY: 0, anchorZ: 14,
+            sizeX: 28, sizeY: 28, sizeZ: 28,
+            blocks: blocks)
+
+        let boxes = try objectTemplatePreviewBoxes(for: template)
+
+        XCTAssertEqual(boxes.count, OBJECT_TEMPLATE_PREVIEW_MAX_BOXES)
+        XCTAssertGreaterThan(objectTemplatePreviewLineByteCount(boxCount: boxes.count, includeBounds: true), 4_096)
     }
 
     func testInvalidTemplateNamesAreRejected() {
