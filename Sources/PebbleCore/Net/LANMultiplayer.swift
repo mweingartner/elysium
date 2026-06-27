@@ -50,6 +50,99 @@ public enum LANMultiplayerMessageKind: UInt16, Codable, Equatable, CaseIterable 
     case replicationBatch = 14
     case chunkRequest = 15
     case replicationAck = 16
+    case gameplayEvent = 17
+}
+
+public enum LANPeerLifecycleState: String, Codable, Equatable {
+    case connected
+    case disconnected
+    case dead
+    case respawning
+}
+
+public enum LANGameplayPermission: String, Codable, Equatable, CaseIterable {
+    case build
+    case container
+    case crafting
+    case template
+    case command
+    case ai
+    case dimension
+    case respawn
+    case creative
+}
+
+public struct LANPeerPermissions: Codable, Equatable {
+    public var canBuild: Bool
+    public var canUseContainers: Bool
+    public var canCraft: Bool
+    public var canUseTemplates: Bool
+    public var canUseCommands: Bool
+    public var canUseAI: Bool
+    public var canChangeDimensions: Bool
+    public var canRespawn: Bool
+    public var canUseCreative: Bool
+
+    public init(
+        canBuild: Bool = true,
+        canUseContainers: Bool = true,
+        canCraft: Bool = true,
+        canUseTemplates: Bool = true,
+        canUseCommands: Bool = false,
+        canUseAI: Bool = false,
+        canChangeDimensions: Bool = false,
+        canRespawn: Bool = true,
+        canUseCreative: Bool = false
+    ) {
+        self.canBuild = canBuild
+        self.canUseContainers = canUseContainers
+        self.canCraft = canCraft
+        self.canUseTemplates = canUseTemplates
+        self.canUseCommands = canUseCommands
+        self.canUseAI = canUseAI
+        self.canChangeDimensions = canChangeDimensions
+        self.canRespawn = canRespawn
+        self.canUseCreative = canUseCreative
+    }
+
+    public func allows(_ permission: LANGameplayPermission) -> Bool {
+        switch permission {
+        case .build: return canBuild
+        case .container: return canUseContainers
+        case .crafting: return canCraft
+        case .template: return canUseTemplates
+        case .command: return canUseCommands
+        case .ai: return canUseAI
+        case .dimension: return canChangeDimensions
+        case .respawn: return canRespawn
+        case .creative: return canUseCreative
+        }
+    }
+}
+
+public enum LANGameplayEventKind: String, Codable, Equatable {
+    case permissionDenied
+    case intentAccepted
+    case peerJoined
+    case peerDisconnected
+    case peerReconnected
+    case death
+    case respawn
+    case dimensionChanged
+}
+
+public struct LANGameplayEvent: Codable, Equatable {
+    public var playerID: String
+    public var kind: LANGameplayEventKind
+    public var message: String
+    public var tick: Int
+
+    public init(playerID: String, kind: LANGameplayEventKind, message: String, tick: Int) {
+        self.playerID = String(playerID.prefix(128))
+        self.kind = kind
+        self.message = sanitizedLANChatText(message)
+        self.tick = max(0, tick)
+    }
 }
 
 public struct LANWorldSummary: Codable, Equatable {
@@ -87,6 +180,22 @@ public struct LANWorldSummary: Codable, Equatable {
 }
 
 public struct LANPlayerState: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case playerID
+        case displayName
+        case x
+        case y
+        case z
+        case yaw
+        case pitch
+        case health
+        case hunger
+        case selectedHotbarSlot
+        case gameMode
+        case dimension
+        case dead
+    }
+
     public var playerID: String
     public var displayName: String
     public var x: Double
@@ -98,6 +207,8 @@ public struct LANPlayerState: Codable, Equatable {
     public var hunger: Int
     public var selectedHotbarSlot: Int
     public var gameMode: Int
+    public var dimension: Int
+    public var dead: Bool
 
     public init(
         playerID: String,
@@ -110,19 +221,42 @@ public struct LANPlayerState: Codable, Equatable {
         health: Double,
         hunger: Int,
         selectedHotbarSlot: Int,
-        gameMode: Int
+        gameMode: Int,
+        dimension: Int = Dim.overworld.rawValue,
+        dead: Bool = false
     ) {
         self.playerID = String(playerID.prefix(128))
         self.displayName = sanitizedLANPlayerName(displayName)
-        self.x = x
-        self.y = y
-        self.z = z
-        self.yaw = yaw
-        self.pitch = pitch
-        self.health = health
+        self.x = x.isFinite ? x : 0
+        self.y = y.isFinite ? y : 0
+        self.z = z.isFinite ? z : 0
+        self.yaw = yaw.isFinite ? yaw : 0
+        self.pitch = pitch.isFinite ? max(-.pi / 2, min(.pi / 2, pitch)) : 0
+        self.health = health.isFinite ? max(0, min(2048, health)) : 0
         self.hunger = max(0, min(20, hunger))
         self.selectedHotbarSlot = max(0, min(8, selectedHotbarSlot))
-        self.gameMode = gameMode
+        self.gameMode = gameMode == GameMode.creative ? GameMode.creative : GameMode.survival
+        self.dimension = isValidLANDimension(dimension) ? dimension : Dim.overworld.rawValue
+        self.dead = dead || self.health <= 0
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            playerID: try c.decode(String.self, forKey: .playerID),
+            displayName: try c.decode(String.self, forKey: .displayName),
+            x: try c.decode(Double.self, forKey: .x),
+            y: try c.decode(Double.self, forKey: .y),
+            z: try c.decode(Double.self, forKey: .z),
+            yaw: try c.decode(Double.self, forKey: .yaw),
+            pitch: try c.decode(Double.self, forKey: .pitch),
+            health: try c.decode(Double.self, forKey: .health),
+            hunger: try c.decode(Int.self, forKey: .hunger),
+            selectedHotbarSlot: try c.decode(Int.self, forKey: .selectedHotbarSlot),
+            gameMode: try c.decode(Int.self, forKey: .gameMode),
+            dimension: try c.decodeIfPresent(Int.self, forKey: .dimension) ?? Dim.overworld.rawValue,
+            dead: try c.decodeIfPresent(Bool.self, forKey: .dead) ?? false
+        )
     }
 }
 
@@ -434,6 +568,7 @@ public enum LANMultiplayerMessage: Codable, Equatable {
     case replicationBatch(LANReplicationBatch)
     case chunkRequest(playerID: String, request: LANChunkRequest)
     case replicationAck(playerID: String, ack: LANReplicationAck)
+    case gameplayEvent(LANGameplayEvent)
 
     public var kind: LANMultiplayerMessageKind {
         switch self {
@@ -453,6 +588,7 @@ public enum LANMultiplayerMessage: Codable, Equatable {
         case .replicationBatch: return .replicationBatch
         case .chunkRequest: return .chunkRequest
         case .replicationAck: return .replicationAck
+        case .gameplayEvent: return .gameplayEvent
         }
     }
 }
@@ -677,6 +813,10 @@ public func sanitizedLANDirectHost(_ raw: String) -> String {
     let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_[]:")
     guard trimmed.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return "" }
     return trimmed
+}
+
+public func isValidLANDimension(_ dimension: Int) -> Bool {
+    Dim(rawValue: dimension) != nil
 }
 
 private func cleanSingleLine(_ raw: String) -> String {

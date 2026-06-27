@@ -17,6 +17,11 @@ in-app version string comes from `PEBBLE_VERSION` (PebbleCore/Game/Saves.swift).
   batches now carry player state, chunk-section snapshots, block deltas, entity
   snapshots, and inventory snapshots, with client mirrors and host-validated
   block intents covered by XCTest.
+- Added the LAN remote-player gameplay orchestration layer: transient remote
+  player entities, dimension/death-aware player state, reconnect-preserved peer
+  records, gameplay events, permission gates for build/container/crafting/
+  template/command/AI/creative/dimension/respawn flows, and host-authoritative
+  object-template copy/place/undo intents covered by XCTest.
 - Updated the security gates for the new local-network surface: Network.framework
   use is isolated to the LAN transport, app bundles must declare local-network
   privacy and Bonjour services, and low-level socket APIs remain rejected.

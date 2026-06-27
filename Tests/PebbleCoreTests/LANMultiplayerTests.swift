@@ -24,8 +24,10 @@ final class LANMultiplayerTests: XCTestCase {
             health: 19,
             hunger: 18,
             selectedHotbarSlot: 4,
-            gameMode: GameMode.creative
+            gameMode: GameMode.creative,
+            dimension: Dim.nether.rawValue
         )
+        let event = LANGameplayEvent(playerID: "peer-a", kind: .peerReconnected, message: "Alex reconnected", tick: 8)
         let messages: [LANMultiplayerMessage] = [
             .clientHello(playerID: "peer-a", playerName: "Alex", joinCode: "ABCD42", pebbleVersion: PEBBLE_VERSION),
             .serverAccept(peerID: "peer-a", world: world),
@@ -59,6 +61,7 @@ final class LANMultiplayerTests: XCTestCase {
             ])),
             .chunkRequest(playerID: "peer-a", request: LANChunkRequest(dimension: Dim.overworld.rawValue, cx: 0, cz: 0, radius: 9)),
             .replicationAck(playerID: "peer-a", ack: LANReplicationAck(tick: 7, receivedSequence: 42)),
+            .gameplayEvent(event),
         ]
 
         for (index, message) in messages.enumerated() {
@@ -143,6 +146,17 @@ final class LANMultiplayerTests: XCTestCase {
         let decoded = try JSONDecoder().decode(LANBlockIntent.self, from: data)
 
         XCTAssertEqual(decoded, LANBlockIntent(action: .placeBlock, x: 1, y: 2, z: 3, face: 1, selectedHotbarSlot: 0))
+    }
+
+    func testPlayerStateDecodesLegacyPayloadWithDefaultDimensionAndAliveLifecycle() throws {
+        let data = """
+        {"playerID":"peer-a","displayName":"Alex","x":1,"y":65,"z":2,"yaw":0,"pitch":0,"health":20,"hunger":18,"selectedHotbarSlot":3,"gameMode":0}
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(LANPlayerState.self, from: data)
+
+        XCTAssertEqual(decoded.dimension, Dim.overworld.rawValue)
+        XCTAssertFalse(decoded.dead)
     }
 
     func testInfoPlistDeclaresLocalNetworkPrivacyAndBonjourService() throws {

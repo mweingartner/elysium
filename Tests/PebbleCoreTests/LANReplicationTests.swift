@@ -115,6 +115,270 @@ final class LANReplicationTests: XCTestCase {
         )
     }
 
+    func testHostSessionClampsUnauthorizedCreativeDimensionAndPreservesReconnectRecord() {
+        let session = LANMultiplayerHostSession()
+
+        XCTAssertEqual(session.acceptPeer(playerID: "peer-a", displayName: "Alex", tick: 3), .joined)
+        let sanitized = session.updatePlayerState(
+            LANPlayerState(
+                playerID: "peer-a",
+                displayName: "Spoofed",
+                x: 8,
+                y: 66,
+                z: 9,
+                yaw: 0.4,
+                pitch: 0.1,
+                health: 20,
+                hunger: 19,
+                selectedHotbarSlot: 2,
+                gameMode: GameMode.creative,
+                dimension: Dim.nether.rawValue
+            ),
+            currentDimension: Dim.overworld.rawValue,
+            tick: 4
+        )
+
+        XCTAssertEqual(sanitized?.displayName, "Alex")
+        XCTAssertEqual(sanitized?.gameMode, GameMode.survival)
+        XCTAssertEqual(sanitized?.dimension, Dim.overworld.rawValue)
+
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 2, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: 1, count: 32),
+            ]),
+            from: "peer-a"
+        )
+        session.disconnectPeer(playerID: "peer-a", tick: 10)
+
+        var record = session.peerRecord(playerID: "peer-a")
+        XCTAssertEqual(record?.lifecycle, .disconnected)
+        XCTAssertEqual(record?.inventory?.slots.first?.count, 32)
+        XCTAssertEqual(record?.disconnectedTick, 10)
+
+        XCTAssertEqual(session.acceptPeer(playerID: "peer-a", displayName: "Alex Again", tick: 12), .reconnected)
+        record = session.peerRecord(playerID: "peer-a")
+        XCTAssertEqual(record?.lifecycle, .connected)
+        XCTAssertEqual(record?.inventory?.slots.first?.count, 32)
+        XCTAssertEqual(record?.playerState?.x, 8)
+    }
+
+    func testHostSessionPermissionGatesBuildContainerCraftingTemplateAndDeadPlayers() {
+        let world = makeLoadedWorld()
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex")
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 2.5,
+            y: 64,
+            z: 1.5,
+            yaw: 0,
+            pitch: 0,
+            health: 20,
+            hunger: 20,
+            selectedHotbarSlot: 0,
+            gameMode: GameMode.survival
+        ))
+        session.setPermissions(LANPeerPermissions(canBuild: false, canUseContainers: false, canCraft: false, canUseTemplates: false), for: "peer-a")
+        _ = world.setBlock(2, 64, 1, Int(B.dirt) << 4)
+
+        XCTAssertEqual(
+            session.applyBlockIntent(
+                LANBlockIntent(action: .breakBlock, x: 2, y: 64, z: 1, face: 1, selectedHotbarSlot: 0),
+                from: "peer-a",
+                to: world
+            ),
+            .rejected("permission denied: build")
+        )
+        XCTAssertEqual(
+            session.authorizeContainerIntent(LANContainerIntent(action: .open, containerID: "chest@2,64,1", slot: -1, button: 0, shift: false), from: "peer-a"),
+            .rejected("permission denied: container")
+        )
+        XCTAssertEqual(session.authorizeCraftingIntent(from: "peer-a"), .rejected("permission denied: crafting"))
+
+        let result = session.applyTemplateIntent(
+            LANTemplateIntent(action: .placeTemplate, templateName: "Tiny", x: 1, y: 64, z: 1, rotation: 0),
+            from: "peer-a",
+            world: world,
+            loadTemplate: { _ in nil },
+            saveTemplate: { _ in false }
+        )
+        XCTAssertEqual(result, .rejected("permission denied: template"))
+
+        session.setPermissions(LANPeerPermissions(), for: "peer-a")
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 2.5,
+            y: 64,
+            z: 1.5,
+            yaw: 0,
+            pitch: 0,
+            health: 0,
+            hunger: 20,
+            selectedHotbarSlot: 0,
+            gameMode: GameMode.survival,
+            dead: true
+        ))
+        XCTAssertEqual(
+            session.applyBlockIntent(
+                LANBlockIntent(action: .breakBlock, x: 2, y: 64, z: 1, face: 1, selectedHotbarSlot: 0),
+                from: "peer-a",
+                to: world
+            ),
+            .rejected("player is dead")
+        )
+    }
+
+    func testHostSessionTemplatePermissionFlowPlacesAndUndoesValidatedTemplate() {
+        let world = makeLoadedWorld()
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex")
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 1.5,
+            y: 64,
+            z: 1.5,
+            yaw: 0,
+            pitch: 0,
+            health: 20,
+            hunger: 20,
+            selectedHotbarSlot: 0,
+            gameMode: GameMode.creative
+        ))
+        let dirt = UInt16(Int(B.dirt) << 4)
+        _ = world.setBlock(1, 63, 1, Int(dirt))
+        let template = ObjectTemplate(
+            name: "Tiny",
+            anchorX: 0,
+            anchorY: 0,
+            anchorZ: 0,
+            sizeX: 1,
+            sizeY: 1,
+            sizeZ: 1,
+            blocks: [TemplateBlock(dx: 0, dy: 0, dz: 0, cell: dirt)]
+        )
+        var saved = ["Tiny": template]
+
+        let placed = session.applyTemplateIntent(
+            LANTemplateIntent(action: .placeTemplate, templateName: "Tiny", x: 1, y: 64, z: 1, rotation: 0),
+            from: "peer-a",
+            world: world,
+            loadTemplate: { saved[$0] },
+            saveTemplate: { saved[$0.name] = $0; return true }
+        )
+
+        XCTAssertEqual(placed, .placed(name: "Tiny", blocks: 1, blockEntities: 0, cleared: 0, filled: 0))
+        XCTAssertEqual(world.getBlock(1, 64, 1), Int(dirt))
+        XCTAssertEqual(session.pendingBlockChanges(), [
+            LANBlockChange(dimension: Dim.overworld.rawValue, x: 1, y: 64, z: 1, cell: Int(dirt)),
+        ])
+
+        let undone = session.applyTemplateIntent(
+            LANTemplateIntent(action: .undoPlacement, templateName: "Tiny", x: 1, y: 64, z: 1, rotation: 0),
+            from: "peer-a",
+            world: world,
+            loadTemplate: { saved[$0] },
+            saveTemplate: { saved[$0.name] = $0; return true }
+        )
+
+        XCTAssertEqual(undone, .undone(name: "Tiny", restored: 1))
+        XCTAssertEqual(world.getBlock(1, 64, 1), 0)
+    }
+
+    func testHostSessionTemplateIntentRejectsOutOfReachTargets() {
+        let world = makeLoadedWorld()
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex")
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 100,
+            y: 64,
+            z: 100,
+            yaw: 0,
+            pitch: 0,
+            health: 20,
+            hunger: 20,
+            selectedHotbarSlot: 0,
+            gameMode: GameMode.survival
+        ))
+
+        let result = session.applyTemplateIntent(
+            LANTemplateIntent(action: .placeTemplate, templateName: "Tiny", x: 1, y: 64, z: 1, rotation: 0),
+            from: "peer-a",
+            world: world,
+            loadTemplate: { _ in nil },
+            saveTemplate: { _ in false }
+        )
+
+        XCTAssertEqual(result, .rejected("target out of reach"))
+    }
+
+    func testRemotePlayerEntitiesSpawnUpdateAndRemoveFromWorldSnapshots() {
+        let world = makeLoadedWorld()
+        let initial = LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 1,
+            y: 65,
+            z: 2,
+            yaw: 0,
+            pitch: 0,
+            health: 20,
+            hunger: 18,
+            selectedHotbarSlot: 3,
+            gameMode: GameMode.survival,
+            dimension: Dim.overworld.rawValue
+        )
+
+        var report = applyLANRemotePlayers([initial], to: world, localPlayerID: "local")
+        XCTAssertEqual(report, LANRemotePlayerApplyReport(spawned: 1, updated: 0, removed: 0))
+        var remote = world.entities.compactMap { $0 as? LANRemotePlayerEntity }.first
+        XCTAssertEqual(remote?.multiplayerPlayerID, "peer-a")
+        XCTAssertEqual(remote?.x, 1)
+
+        let moved = LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 4,
+            y: 66,
+            z: 5,
+            yaw: 0.5,
+            pitch: 0,
+            health: 19,
+            hunger: 17,
+            selectedHotbarSlot: 3,
+            gameMode: GameMode.survival,
+            dimension: Dim.overworld.rawValue
+        )
+        report = applyLANRemotePlayers([moved], to: world, localPlayerID: "local")
+        XCTAssertEqual(report.spawned, 0)
+        XCTAssertEqual(report.updated, 1)
+        remote = world.entities.compactMap { $0 as? LANRemotePlayerEntity }.first
+        XCTAssertEqual(remote?.x, 4)
+        XCTAssertEqual(remote?.health, 19)
+
+        let nether = LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 4,
+            y: 66,
+            z: 5,
+            yaw: 0.5,
+            pitch: 0,
+            health: 19,
+            hunger: 17,
+            selectedHotbarSlot: 3,
+            gameMode: GameMode.survival,
+            dimension: Dim.nether.rawValue
+        )
+        report = applyLANRemotePlayers([nether], to: world, localPlayerID: "local")
+        XCTAssertEqual(report.removed, 1)
+        XCTAssertTrue(world.entities.compactMap { $0 as? LANRemotePlayerEntity }.isEmpty)
+    }
+
     func testChunkSectionSnapshotAppliesToTargetWorld() throws {
         let source = makeLoadedWorld()
         let target = World(dim: .overworld, seed: 99)

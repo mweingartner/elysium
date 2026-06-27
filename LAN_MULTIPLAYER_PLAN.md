@@ -1,15 +1,17 @@
 # Pebble LAN Multiplayer Plan
 
-Status: implemented LAN baseline plus the first host-authoritative replication
-layer. Pebble 1.1.0 now ships Multiplayer/Open to LAN UI, Bonjour
-browse/advertise for `_pebble-lan._tcp`, Direct Connect by host/port/join-code,
-bounded `PBLN` protocol frames, join-code handshakes, peer status, LAN chat,
-source/binary security allowlists, Info.plist local-network privacy
-declarations, and core replication batches for player state, chunk sections,
-block deltas, entity snapshots, and inventory snapshots. The remaining work is
-gameplay completion on top of that layer: remote player entities, full
-container/crafting/template/command permissions, dimensions, deaths, respawns,
-reconnect persistence, and two-Mac installed-app soak.
+Status: implemented LAN baseline, the first host-authoritative replication
+layer, and the core remote-player gameplay orchestration layer. Pebble 1.1.0
+now ships Multiplayer/Open to LAN UI, Bonjour browse/advertise for
+`_pebble-lan._tcp`, Direct Connect by host/port/join-code, bounded `PBLN`
+protocol frames, join-code handshakes, peer status, LAN chat, source/binary
+security allowlists, Info.plist local-network privacy declarations, core
+replication batches for player state, chunk sections, block deltas, entity
+snapshots, and inventory snapshots, plus permission-gated host orchestration for
+remote player entities, container/crafting/template/command/AI permissions,
+dimensions, deaths, respawns, and reconnect records. Remaining release
+hardening is two-Mac installed-app soak and richer client UI for synchronized
+remote container/crafting screens.
 
 ## Sources
 
@@ -41,9 +43,10 @@ Initial target:
 - Join-code approval before a client can enter the world.
 - Shared chat and host-authoritative state replication for chunk sections,
   block changes, player state, entity snapshots, and inventory snapshots.
-- Full crafting, containers, commands, object-template placement, and map-state
-  interactions remain host-authoritative gameplay integrations layered on top of
-  the replication primitives.
+- Host-authoritative permission gates for crafting, containers, commands,
+  object-template copy/place/undo, AI requests, creative privileges, dimension
+  changes, deaths, respawns, and reconnect records layered on top of the
+  replication primitives.
 - Client disconnect/reconnect without corrupting host saves.
 
 Non-goals for the first LAN release:
@@ -83,19 +86,26 @@ Added core-only networking model files:
   inputs, and `Codable` payload models for hello, accept/reject, player state,
   player input, block/container/template intents, chat, world summaries, ping,
   pong, disconnect reasons, chunk requests, replication acknowledgments, and
-  replication batches.
+  replication batches. Player state now carries bounded dimension/death
+  metadata with legacy decode defaults, and gameplay events carry permission,
+  death/respawn, dimension, and reconnect notifications.
 - `Sources/PebbleCore/Net/LANReplication.swift`: host-authoritative peer
-  session state, deterministic block-change log, host block-intent validation,
-  chunk-section snapshot encode/apply helpers, entity snapshots, player
-  inventory snapshots, client-side replicated mirror state, and bounded apply
-  reports.
+  session state, reconnect-preserved peer records, deterministic block-change
+  log, permission-gated host block/container/crafting/template/command/AI
+  validation, object-template copy/place/undo execution, chunk-section
+  snapshot encode/apply helpers, entity snapshots, player inventory snapshots,
+  client-side replicated mirror state, and bounded apply reports.
+- `Sources/PebbleCore/Net/LANGameplayOrchestration.swift`: transient remote
+  player entities, remote-player apply/remove helpers, permission result
+  types, reconnect disposition records, and host gameplay authorization result
+  types for tests and transport.
 
-Remaining core gameplay integrations:
+Remaining gameplay hardening:
 
-- Remote player entity control/interpolation around a host `GameCore`.
-- Container/crafting/template/command permission execution for remote clients.
-- Dimension transfer, death/respawn, disconnect/reconnect persistence, and
-  multiplayer-specific UI event replication.
+- Client UI state replication for simultaneous remote container/crafting screens
+  beyond the current typed-intent authorization layer.
+- Two-Mac installed-app soak covering template placement, death/respawn, and
+  reconnect persistence against real Network.framework connections.
 
 Added app transport/UI files:
 

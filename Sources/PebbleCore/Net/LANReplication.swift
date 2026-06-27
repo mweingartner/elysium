@@ -100,8 +100,14 @@ public final class LANMultiplayerHostSession {
         var playerID: String
         var displayName: String
         var joinedOrdinal: Int
+        var lifecycle: LANPeerLifecycleState
+        var permissions: LANPeerPermissions
         var playerState: LANPlayerState?
+        var inventory: LANPlayerInventorySnapshot?
+        var lastTemplateUndo: TemplatePlacementUndoSnapshot?
         var lastAckTick = 0
+        var lastSeenTick = 0
+        var disconnectedTick: Int?
     }
 
     private var peers: [String: Peer] = [:]
@@ -110,29 +116,138 @@ public final class LANMultiplayerHostSession {
 
     public init() {}
 
-    public var acceptedPeerCount: Int { peers.count }
+    public var acceptedPeerCount: Int {
+        peers.values.filter { $0.lifecycle == .connected || $0.lifecycle == .dead || $0.lifecycle == .respawning }.count
+    }
 
-    public func acceptPeer(playerID rawPlayerID: String, displayName rawDisplayName: String) {
+    @discardableResult
+    public func acceptPeer(playerID rawPlayerID: String, displayName rawDisplayName: String, tick: Int = 0) -> LANPeerConnectionDisposition {
         let playerID = String(rawPlayerID.prefix(128))
         let displayName = sanitizedLANPlayerName(rawDisplayName)
         if var existing = peers[playerID] {
             existing.displayName = displayName
+            existing.lifecycle = existing.playerState?.dead == true ? .dead : .connected
+            existing.lastSeenTick = max(existing.lastSeenTick, tick)
+            existing.disconnectedTick = nil
             peers[playerID] = existing
-            return
+            return .reconnected
         }
-        peers[playerID] = Peer(playerID: playerID, displayName: displayName, joinedOrdinal: nextOrdinal, playerState: nil)
+        peers[playerID] = Peer(
+            playerID: playerID,
+            displayName: displayName,
+            joinedOrdinal: nextOrdinal,
+            lifecycle: .connected,
+            permissions: LANPeerPermissions(),
+            playerState: nil,
+            inventory: nil,
+            lastTemplateUndo: nil,
+            lastSeenTick: max(0, tick),
+            disconnectedTick: nil
+        )
         nextOrdinal += 1
+        return .joined
     }
 
     public func removePeer(playerID rawPlayerID: String) {
         peers.removeValue(forKey: String(rawPlayerID.prefix(128)))
     }
 
-    public func updatePlayerState(_ state: LANPlayerState) {
-        let playerID = String(state.playerID.prefix(128))
+    public func disconnectPeer(playerID rawPlayerID: String, tick: Int) {
+        let playerID = String(rawPlayerID.prefix(128))
         guard var peer = peers[playerID] else { return }
-        peer.playerState = state
+        peer.lifecycle = .disconnected
+        peer.disconnectedTick = max(0, tick)
         peers[playerID] = peer
+    }
+
+    @discardableResult
+    public func updatePlayerState(_ state: LANPlayerState, currentDimension: Int? = nil, tick: Int = 0) -> LANPlayerState? {
+        let playerID = String(state.playerID.prefix(128))
+        guard var peer = peers[playerID] else { return nil }
+        let priorDimension = peer.playerState?.dimension ?? currentDimension ?? Dim.overworld.rawValue
+        let requestedDimension = isValidLANDimension(state.dimension) ? state.dimension : priorDimension
+        let allowedDimension = peer.permissions.canChangeDimensions ? requestedDimension : priorDimension
+        let allowedGameMode = state.gameMode == GameMode.creative && !peer.permissions.canUseCreative
+            ? GameMode.survival
+            : state.gameMode
+        let requestedAlive = !state.dead && state.health > 0
+        let staysDead = peer.lifecycle == .dead && requestedAlive && !peer.permissions.canRespawn
+        let sanitized = LANPlayerState(
+            playerID: peer.playerID,
+            displayName: peer.displayName,
+            x: state.x,
+            y: state.y,
+            z: state.z,
+            yaw: state.yaw,
+            pitch: state.pitch,
+            health: staysDead ? 0 : state.health,
+            hunger: state.hunger,
+            selectedHotbarSlot: state.selectedHotbarSlot,
+            gameMode: allowedGameMode,
+            dimension: allowedDimension,
+            dead: staysDead || state.dead || state.health <= 0
+        )
+        peer.playerState = sanitized
+        peer.lifecycle = sanitized.dead ? .dead : .connected
+        peer.lastSeenTick = max(peer.lastSeenTick, tick)
+        peer.disconnectedTick = nil
+        peers[playerID] = peer
+        return sanitized
+    }
+
+    public func recordInventorySnapshot(_ snapshot: LANPlayerInventorySnapshot, from rawPlayerID: String) {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard var peer = peers[playerID] else { return }
+        peer.inventory = LANPlayerInventorySnapshot(
+            playerID: peer.playerID,
+            selectedHotbarSlot: snapshot.selectedHotbarSlot,
+            slots: snapshot.slots
+        )
+        peers[playerID] = peer
+    }
+
+    public func setPermissions(_ permissions: LANPeerPermissions, for rawPlayerID: String) {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard var peer = peers[playerID] else { return }
+        peer.permissions = permissions
+        if let state = peer.playerState, state.gameMode == GameMode.creative, !permissions.canUseCreative {
+            peer.playerState = LANPlayerState(
+                playerID: state.playerID,
+                displayName: state.displayName,
+                x: state.x,
+                y: state.y,
+                z: state.z,
+                yaw: state.yaw,
+                pitch: state.pitch,
+                health: state.health,
+                hunger: state.hunger,
+                selectedHotbarSlot: state.selectedHotbarSlot,
+                gameMode: GameMode.survival,
+                dimension: state.dimension,
+                dead: state.dead
+            )
+        }
+        peers[playerID] = peer
+    }
+
+    public func permissions(for rawPlayerID: String) -> LANPeerPermissions? {
+        peers[String(rawPlayerID.prefix(128))]?.permissions
+    }
+
+    public func peerRecord(playerID rawPlayerID: String) -> LANPeerRecordSnapshot? {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard let peer = peers[playerID] else { return nil }
+        return LANPeerRecordSnapshot(
+            playerID: peer.playerID,
+            displayName: peer.displayName,
+            lifecycle: peer.lifecycle,
+            permissions: peer.permissions,
+            playerState: peer.playerState,
+            inventory: peer.inventory,
+            lastAckTick: peer.lastAckTick,
+            lastSeenTick: peer.lastSeenTick,
+            disconnectedTick: peer.disconnectedTick
+        )
     }
 
     public func recordAck(_ ack: LANReplicationAck, from rawPlayerID: String) {
@@ -144,10 +259,163 @@ public final class LANMultiplayerHostSession {
 
     public func peerPlayerStates() -> [LANPlayerState] {
         peers.values
+            .filter { $0.lifecycle != .disconnected }
             .sorted { lhs, rhs in lhs.joinedOrdinal == rhs.joinedOrdinal ? lhs.playerID < rhs.playerID : lhs.joinedOrdinal < rhs.joinedOrdinal }
             .compactMap(\.playerState)
             .prefix(LAN_MULTIPLAYER_MAX_REPLICATION_PLAYERS)
             .map { $0 }
+    }
+
+    public func peerInventorySnapshots() -> [LANPlayerInventorySnapshot] {
+        peers.values
+            .filter { $0.lifecycle != .disconnected }
+            .sorted { lhs, rhs in lhs.joinedOrdinal == rhs.joinedOrdinal ? lhs.playerID < rhs.playerID : lhs.joinedOrdinal < rhs.joinedOrdinal }
+            .compactMap(\.inventory)
+            .prefix(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES)
+            .map { $0 }
+    }
+
+    public func authorize(_ permission: LANGameplayPermission, from rawPlayerID: String) -> LANAuthorizationResult {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard let peer = peers[playerID] else { return .rejected("unknown player") }
+        guard peer.lifecycle != .disconnected else { return .rejected("player disconnected") }
+        if peer.lifecycle == .dead && permission != .respawn {
+            return .rejected("player is dead")
+        }
+        guard peer.permissions.allows(permission) else {
+            return .rejected("permission denied: \(permission.rawValue)")
+        }
+        return .accepted
+    }
+
+    public func authorizeContainerIntent(_ intent: LANContainerIntent, from rawPlayerID: String) -> LANContainerIntentResult {
+        switch authorize(.container, from: rawPlayerID) {
+        case .rejected(let reason): return .rejected(reason)
+        case .accepted:
+            guard !intent.containerID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return .rejected("missing container id")
+            }
+            return .accepted(intent.action.rawValue)
+        }
+    }
+
+    public func authorizeCraftingIntent(from rawPlayerID: String) -> LANCraftingIntentResult {
+        switch authorize(.crafting, from: rawPlayerID) {
+        case .accepted: return .accepted
+        case .rejected(let reason): return .rejected(reason)
+        }
+    }
+
+    public func authorizeCommandIntent(from rawPlayerID: String, ai: Bool = false) -> LANAuthorizationResult {
+        authorize(ai ? .ai : .command, from: rawPlayerID)
+    }
+
+    public func applyTemplateIntent(
+        _ intent: LANTemplateIntent,
+        from rawPlayerID: String,
+        world: World,
+        loadTemplate: (String) throws -> ObjectTemplate?,
+        saveTemplate: (ObjectTemplate) throws -> Bool
+    ) -> LANTemplateIntentResult {
+        let playerID = String(rawPlayerID.prefix(128))
+        switch authorize(.template, from: playerID) {
+        case .rejected(let reason): return .rejected(reason)
+        case .accepted: break
+        }
+        guard !intent.templateName.isEmpty else { return .rejected("missing template name") }
+        if intent.action != .undoPlacement {
+            guard let peer = peers[playerID], let playerState = peer.playerState else {
+                return .rejected("player state unavailable")
+            }
+            guard playerState.dimension == world.dim.rawValue else {
+                return .rejected("target dimension unavailable")
+            }
+            guard isWithinLANReach(playerState, x: intent.x, y: intent.y, z: intent.z) else {
+                return .rejected("target out of reach")
+            }
+        }
+        switch intent.action {
+        case .copyTarget:
+            switch authorize(.build, from: playerID) {
+            case .rejected(let reason): return .rejected(reason)
+            case .accepted: break
+            }
+            do {
+                let result = try cloneObjectTemplate(
+                    named: intent.templateName,
+                    from: world,
+                    targetX: intent.x,
+                    targetY: intent.y,
+                    targetZ: intent.z
+                )
+                guard try saveTemplate(result.template) else {
+                    return .rejected("template store write failed")
+                }
+                return .copied(name: result.template.name, blocks: result.template.blocks.count)
+            } catch {
+                return .rejected(String(describing: error))
+            }
+        case .placeTemplate:
+            switch authorize(.build, from: playerID) {
+            case .rejected(let reason): return .rejected(reason)
+            case .accepted: break
+            }
+            do {
+                guard let rawTemplate = try loadTemplate(intent.templateName) else {
+                    return .rejected("unknown template")
+                }
+                let template = try rotatedObjectTemplate(rawTemplate, rotationSteps: intent.rotation)
+                let undo = try objectTemplatePlacementUndoSnapshot(
+                    for: template,
+                    in: world,
+                    targetX: intent.x,
+                    targetY: intent.y,
+                    targetZ: intent.z,
+                    options: TemplatePlacementOptions(prepareTerrain: true)
+                )
+                let result = try placeObjectTemplate(
+                    template,
+                    in: world,
+                    targetX: intent.x,
+                    targetY: intent.y,
+                    targetZ: intent.z,
+                    options: TemplatePlacementOptions(prepareTerrain: true)
+                )
+                for block in template.blocks {
+                    changeLog.record(LANBlockChange(
+                        dimension: world.dim.rawValue,
+                        x: intent.x + block.dx,
+                        y: intent.y + block.dy,
+                        z: intent.z + block.dz,
+                        cell: Int(block.cell)
+                    ))
+                }
+                if var peer = peers[playerID] {
+                    peer.lastTemplateUndo = undo
+                    peers[playerID] = peer
+                }
+                return .placed(
+                    name: template.name,
+                    blocks: result.blocksPlaced,
+                    blockEntities: result.blockEntitiesPlaced,
+                    cleared: result.blocksCleared,
+                    filled: result.supportBlocksFilled
+                )
+            } catch {
+                return .rejected(String(describing: error))
+            }
+        case .undoPlacement:
+            guard var peer = peers[playerID], let undo = peer.lastTemplateUndo else {
+                return .rejected("no template placement to undo")
+            }
+            let restored = restoreObjectTemplatePlacementUndo(undo, in: world)
+            for cell in undo.cells {
+                changeLog.record(LANBlockChange(dimension: world.dim.rawValue, x: cell.x, y: cell.y, z: cell.z, cell: cell.cell))
+            }
+            peer.lastTemplateUndo = nil
+            peers[playerID] = peer
+            return .undone(name: undo.templateName, restored: restored)
+        }
     }
 
     @discardableResult
@@ -168,6 +436,10 @@ public final class LANMultiplayerHostSession {
     public func applyBlockIntent(_ intent: LANBlockIntent, from rawPlayerID: String, to world: World) -> LANBlockIntentResult {
         let playerID = String(rawPlayerID.prefix(128))
         guard let peer = peers[playerID] else { return .rejected("unknown player") }
+        switch authorize(.build, from: playerID) {
+        case .accepted: break
+        case .rejected(let reason): return .rejected(reason)
+        }
         guard let playerState = peer.playerState else { return .rejected("player state unavailable") }
         guard isWithinLANReach(playerState, x: intent.x, y: intent.y, z: intent.z) else {
             return .rejected("target out of reach")
@@ -213,6 +485,8 @@ public final class LANMultiplayerHostSession {
             players.insert(localPlayer, at: 0)
         }
         let blockChanges = fullSnapshot ? pendingBlockChanges() : drainBlockChanges()
+        var inventories = peerInventorySnapshots()
+        inventories.insert(contentsOf: inventorySnapshots, at: 0)
         return LANReplicationBatch(
             tick: tick,
             fullSnapshot: fullSnapshot,
@@ -221,7 +495,7 @@ public final class LANMultiplayerHostSession {
             blockChanges: blockChanges,
             chunkSections: chunkSections,
             entities: entitySnapshots,
-            inventories: inventorySnapshots
+            inventories: inventories
         )
     }
 }
@@ -288,7 +562,7 @@ public func isValidLANReplicatedCell(_ cell: Int) -> Bool {
     return id >= 0 && id < blockDefs.count
 }
 
-public func makeLANPlayerState(_ player: Player, playerID: String, displayName: String) -> LANPlayerState {
+public func makeLANPlayerState(_ player: Player, playerID: String, displayName: String, dimension: Int = Dim.overworld.rawValue) -> LANPlayerState {
     LANPlayerState(
         playerID: playerID,
         displayName: displayName,
@@ -300,7 +574,9 @@ public func makeLANPlayerState(_ player: Player, playerID: String, displayName: 
         health: player.health,
         hunger: player.hunger,
         selectedHotbarSlot: player.selectedSlot,
-        gameMode: player.gameMode
+        gameMode: player.gameMode,
+        dimension: dimension,
+        dead: player.dead || player.deathTime > 0
     )
 }
 
@@ -330,7 +606,7 @@ public func makeLANEntitySnapshots(
     var out: [LANEntitySnapshot] = []
     for ref in entities {
         if out.count >= max(0, min(maxCount, LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES)) { break }
-        if ref is Player { continue }
+        if ref is Player || (ref as? Entity)?.isPlayer == true { continue }
         if let aroundX, let aroundZ {
             let dx = ref.x - aroundX
             let dz = ref.z - aroundZ

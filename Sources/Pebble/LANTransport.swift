@@ -270,7 +270,7 @@ final class LANMultiplayerManager {
             }
         } else if transportState.hasClientPeer, state == .connected, now - lastClientPlayerStatePublish >= clientPlayerStateInterval {
             lastClientPlayerStatePublish = now
-            let state = makeLANPlayerState(player, playerID: localPeerID, displayName: NSFullUserName())
+            let state = makeLANPlayerState(player, playerID: localPeerID, displayName: NSFullUserName(), dimension: game.dim.rawValue)
             queue.async { [weak self] in
                 guard let self, let peer = self.clientPeer else { return }
                 self.send(.playerState(state), to: peer)
@@ -336,8 +336,10 @@ final class LANMultiplayerManager {
             switch state {
             case .failed(let error):
                 self.appendStatus("LAN client failed: \(error.localizedDescription)")
+                self.markHostPeerDisconnected(peer)
                 self.hostPeers.removeValue(forKey: peer.id)
             case .cancelled:
+                self.markHostPeerDisconnected(peer)
                 self.hostPeers.removeValue(forKey: peer.id)
             default:
                 break
@@ -432,8 +434,19 @@ final class LANMultiplayerManager {
             send(.serverAccept(peerID: peer.playerID, world: summary), to: peer)
             DispatchQueue.main.async { [weak self, weak peer] in
                 guard let self, let peer else { return }
-                self.hostReplicationSession.acceptPeer(playerID: peer.playerID, displayName: peer.playerName)
+                let tick = self.activeGame?.world.time ?? 0
+                let disposition = self.hostReplicationSession.acceptPeer(playerID: peer.playerID, displayName: peer.playerName, tick: tick)
                 self.sendInitialReplicationSnapshot(to: peer.id)
+                let eventKind: LANGameplayEventKind = disposition == .reconnected ? .peerReconnected : .peerJoined
+                let event = LANGameplayEvent(
+                    playerID: peer.playerID,
+                    kind: eventKind,
+                    message: "\(peer.playerName) \(disposition == .reconnected ? "reconnected" : "joined") the LAN world.",
+                    tick: tick
+                )
+                self.queue.async { [weak self] in
+                    self?.broadcastFromHost(.gameplayEvent(event), except: peer.id)
+                }
             }
             broadcastFromHost(.chat(sender: "Server", text: "\(name) joined the LAN world."), except: peer.id)
             postChat("§b[LAN] \(name) joined.")
@@ -452,26 +465,30 @@ final class LANMultiplayerManager {
             peer.connection.cancel()
         case .playerState(let state):
             guard peer.accepted else { return }
-            let sanitized = LANPlayerState(
-                playerID: peer.playerID,
-                displayName: peer.playerName,
-                x: state.x,
-                y: state.y,
-                z: state.z,
-                yaw: state.yaw,
-                pitch: state.pitch,
-                health: state.health,
-                hunger: state.hunger,
-                selectedHotbarSlot: state.selectedHotbarSlot,
-                gameMode: state.gameMode
-            )
             DispatchQueue.main.async { [weak self] in
-                self?.hostReplicationSession.updatePlayerState(sanitized)
+                guard let self else { return }
+                let sanitized = self.hostReplicationSession.updatePlayerState(
+                    state,
+                    currentDimension: self.activeGame?.world.dim.rawValue,
+                    tick: self.activeGame?.world.time ?? 0
+                )
+                if let game = self.activeGame, game.hasWorld() {
+                    _ = applyLANRemotePlayers(self.hostReplicationSession.peerPlayerStates(), to: game.world, localPlayerID: self.localPeerID)
+                }
+                guard let sanitized else { return }
+                self.queue.async { [weak self] in
+                    self?.broadcastFromHost(.playerState(sanitized), except: peer.id)
+                }
             }
-            broadcastFromHost(.playerState(sanitized), except: peer.id)
         case .blockIntent(_, let intent):
             guard peer.accepted else { return }
             applyHostBlockIntent(intent, from: peer.playerID, peerName: peer.playerName)
+        case .containerIntent(_, let intent):
+            guard peer.accepted else { return }
+            applyHostContainerIntent(intent, from: peer.playerID, peerID: peer.id, peerName: peer.playerName)
+        case .templateIntent(_, let intent):
+            guard peer.accepted else { return }
+            applyHostTemplateIntent(intent, from: peer.playerID, peerID: peer.id, peerName: peer.playerName)
         case .replicationAck(_, let ack):
             guard peer.accepted else { return }
             DispatchQueue.main.async { [weak self] in
@@ -512,9 +529,14 @@ final class LANMultiplayerManager {
             DispatchQueue.main.async { [weak self] in
                 let batch = LANReplicationBatch(tick: 0, fullSnapshot: false, players: [state])
                 _ = self?.clientReplicationSession.apply(batch)
+                if let self, let game = self.activeGame, game.hasWorld() {
+                    _ = applyLANRemotePlayers([state], to: game.world, localPlayerID: self.localPeerID, removeMissing: false)
+                }
             }
         case .replicationBatch(let batch):
             handleClientReplicationBatch(batch, from: peer)
+        case .gameplayEvent(let event):
+            handleGameplayEvent(event)
         default:
             appendStatus("LAN client received \(message.kind); no client-side handler was needed.")
         }
@@ -560,7 +582,8 @@ final class LANMultiplayerManager {
     private func makeHostReplicationBatch(game: GameCore, player: Player, fullSnapshot: Bool) -> LANReplicationBatch? {
         guard game.hasWorld() else { return nil }
         let acceptedCount = queue.sync { hostPeers.values.filter { $0.accepted }.count }
-        let localState = makeLANPlayerState(player, playerID: localPeerID, displayName: NSFullUserName())
+        _ = applyLANRemotePlayers(hostReplicationSession.peerPlayerStates(), to: game.world, localPlayerID: localPeerID)
+        let localState = makeLANPlayerState(player, playerID: localPeerID, displayName: NSFullUserName(), dimension: game.dim.rawValue)
         let chunks = fullSnapshot ? makeLANChunkSectionSnapshots(around: player, in: game.world) : []
         let entities = makeLANEntitySnapshots(in: game.world, aroundX: player.x, aroundZ: player.z)
         let inventories = [makeLANInventorySnapshot(player, playerID: localPeerID)]
@@ -603,6 +626,65 @@ final class LANMultiplayerManager {
                 self.appendStatus("LAN block intent from \(peerName) ignored: \(reason).")
             case .rejected(let reason):
                 self.appendStatus("LAN block intent from \(peerName) rejected: \(reason).")
+                let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: game.world.time)
+                self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: nil) }
+            }
+        }
+    }
+
+    private func applyHostContainerIntent(_ intent: LANContainerIntent, from playerID: String, peerID: UUID, peerName: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let game = self.activeGame, game.hasWorld() else { return }
+            let result = self.hostReplicationSession.authorizeContainerIntent(intent, from: playerID)
+            switch result {
+            case .accepted(let action):
+                let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "container \(action)", tick: game.world.time)
+                self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
+            case .rejected(let reason):
+                self.appendStatus("LAN container intent from \(peerName) rejected: \(reason).")
+                let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: game.world.time)
+                self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
+            }
+        }
+    }
+
+    private func applyHostTemplateIntent(_ intent: LANTemplateIntent, from playerID: String, peerID: UUID, peerName: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let game = self.activeGame, game.hasWorld() else { return }
+            let result = self.hostReplicationSession.applyTemplateIntent(
+                intent,
+                from: playerID,
+                world: game.world,
+                loadTemplate: { try game.db.getTemplate(named: $0) },
+                saveTemplate: { try game.db.putTemplate($0) }
+            )
+            switch result {
+            case .copied(let name, let blocks):
+                let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "copied \(name) (\(blocks) blocks)", tick: game.world.time)
+                self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
+            case .placed(let name, let blocks, let blockEntities, let cleared, let filled):
+                let event = LANGameplayEvent(
+                    playerID: playerID,
+                    kind: .intentAccepted,
+                    message: "placed \(name) (\(blocks) blocks, \(blockEntities) block entities, cleared \(cleared), filled \(filled))",
+                    tick: game.world.time
+                )
+                let batch = LANReplicationBatch(tick: game.world.time, fullSnapshot: false, blockChanges: self.hostReplicationSession.drainBlockChanges())
+                self.queue.async { [weak self] in
+                    self?.broadcastFromHost(.replicationBatch(batch))
+                    self?.sendGameplayEvent(event, to: peerID)
+                }
+            case .undone(let name, let restored):
+                let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "undid \(name) (\(restored) cells)", tick: game.world.time)
+                let batch = LANReplicationBatch(tick: game.world.time, fullSnapshot: false, blockChanges: self.hostReplicationSession.drainBlockChanges())
+                self.queue.async { [weak self] in
+                    self?.broadcastFromHost(.replicationBatch(batch))
+                    self?.sendGameplayEvent(event, to: peerID)
+                }
+            case .rejected(let reason):
+                self.appendStatus("LAN template intent from \(peerName) rejected: \(reason).")
+                let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: game.world.time)
+                self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
             }
         }
     }
@@ -649,6 +731,7 @@ final class LANMultiplayerManager {
             var worldReport: LANReplicationApplyReport?
             if let game = self.activeGame, game.hasWorld() {
                 worldReport = applyLANReplicationBatch(batch, to: game.world)
+                _ = applyLANRemotePlayers(batch.players, to: game.world, localPlayerID: self.localPeerID)
             }
             if batch.fullSnapshot {
                 self.appendStatus("Applied LAN snapshot tick \(batch.tick): \(mirrorReport.appliedChunkSections) sections, \(mirrorReport.appliedBlockChanges) block deltas.")
@@ -662,6 +745,46 @@ final class LANMultiplayerManager {
         clientPeer?.connection.cancel()
         clientPeer = nil
         if listener == nil { setState(.idle) }
+    }
+
+    private func markHostPeerDisconnected(_ peer: LANWirePeer) {
+        guard peer.accepted, !peer.playerID.isEmpty else { return }
+        let playerID = peer.playerID
+        let name = peer.playerName
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let tick = self.activeGame?.world.time ?? 0
+            self.hostReplicationSession.disconnectPeer(playerID: playerID, tick: tick)
+            if let game = self.activeGame, game.hasWorld() {
+                _ = removeLANRemotePlayer(playerID, from: game.world)
+            }
+            let event = LANGameplayEvent(playerID: playerID, kind: .peerDisconnected, message: "\(name) disconnected.", tick: tick)
+            self.queue.async { [weak self] in
+                self?.broadcastFromHost(.gameplayEvent(event))
+            }
+        }
+    }
+
+    private func sendGameplayEvent(_ event: LANGameplayEvent, to peerID: UUID?) {
+        if let peerID {
+            guard let peer = hostPeers[peerID], peer.accepted else { return }
+            send(.gameplayEvent(event), to: peer)
+        } else {
+            broadcastFromHost(.gameplayEvent(event))
+        }
+    }
+
+    private func handleGameplayEvent(_ event: LANGameplayEvent) {
+        appendStatus(event.message)
+        switch event.kind {
+        case .peerDisconnected, .death:
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let game = self.activeGame, game.hasWorld() else { return }
+                _ = removeLANRemotePlayer(event.playerID, from: game.world)
+            }
+        default:
+            break
+        }
     }
 
     private func setState(_ newState: LANMultiplayerConnectionState) {
