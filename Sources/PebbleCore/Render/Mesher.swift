@@ -398,6 +398,14 @@ final class SectionMesher {
                         emitPortal(translucent, x, y, z, cell, tileOf(1), b4)
                         continue
                     }
+                    if isTorchFixture(id) {
+                        emitTorchFixture(target, x, y, z, cell, s4, b4)
+                        continue
+                    }
+                    if shape == .lantern {
+                        emitLanternFixture(target, x, y, z, cell, s4, b4)
+                        continue
+                    }
                     // generic: render the outline boxes with per-face culling
                     boxes.removeAll(keepingCapacity: true)
                     shapeBoxes(cell, { dx, dy, dz in self.cellAt(x + dx, y + dy, z + dz) }, &boxes, false)
@@ -410,6 +418,87 @@ final class SectionMesher {
     }
 
     // --- shape emitters -------------------------------------------------------
+
+    private func faceTileOfBlock(_ id: UInt16, _ face: Int) -> Int {
+        let def = blockDefs[Int(id)]
+        return def.texFn?(0, face) ?? Int(def.tex[face])
+    }
+
+    private func isTorchFixture(_ id: Int) -> Bool {
+        id == Int(B.torch) || id == Int(B.soul_torch) ||
+            id == Int(B.redstone_torch) || id == Int(B.redstone_torch_off)
+    }
+
+    private func torchGlowTile(_ id: Int) -> Int {
+        if id == Int(B.soul_torch) { return faceTileOfBlock(B.sea_lantern, 2) }
+        if id == Int(B.redstone_torch) || id == Int(B.redstone_torch_off) { return faceTileOfBlock(B.redstone_block, 2) }
+        return faceTileOfBlock(B.glowstone, 2)
+    }
+
+    private func lanternGlowTile(_ id: Int) -> Int {
+        id == Int(B.soul_lantern) ? faceTileOfBlock(B.sea_lantern, 2) : faceTileOfBlock(B.glowstone, 2)
+    }
+
+    private func emitFixtureBox(
+        _ b: MeshBuilder, _ x: Int, _ y: Int, _ z: Int, _ box: AABB,
+        _ tile: Int, _ sky: Int, _ blk: Int, _ emissive: Int = 0
+    ) {
+        emitBox(b, x, y, z, box, { _ in tile }, sky, blk, WHITE, 0, emissive)
+    }
+
+    private func emitTorchFixture(_ b: MeshBuilder, _ x: Int, _ y: Int, _ z: Int, _ cell: Int, _ sky: Int, _ blk: Int) {
+        let id = cell >> 4
+        var boxes: [AABB] = []
+        shapeBoxes(cell, { dx, dy, dz in self.cellAt(x + dx, y + dy, z + dz) }, &boxes, false)
+        guard let outline = boxes.first else { return }
+
+        let cx = (outline.x0 + outline.x1) * 0.5
+        let cz = (outline.z0 + outline.z1) * 0.5
+        let stemHalf = 1.0 / 16
+        let headHalf = 2.0 / 16
+        let stemTop = max(outline.y0 + 2.0 / 16, outline.y1 - 2.0 / 16)
+        let headTop = min(1, outline.y1 + 1.0 / 16)
+        let woodTile = faceTileOfBlock(B.oak_planks, 2)
+        let glowTile = torchGlowTile(id)
+
+        emitFixtureBox(
+            b, x, y, z,
+            aabb(cx - stemHalf, outline.y0, cz - stemHalf, cx + stemHalf, stemTop, cz + stemHalf),
+            woodTile, sky, blk
+        )
+        emitFixtureBox(
+            b, x, y, z,
+            aabb(cx - headHalf, stemTop - 1.0 / 16, cz - headHalf, cx + headHalf, headTop, cz + headHalf),
+            glowTile, sky, blk, Int(EMISSIVE[id])
+        )
+    }
+
+    private func emitLanternFixture(_ b: MeshBuilder, _ x: Int, _ y: Int, _ z: Int, _ cell: Int, _ sky: Int, _ blk: Int) {
+        let id = cell >> 4
+        let hang = (cell & 1) != 0
+        let y0 = hang ? 1.0 / 16 : 0
+        let frameTile = faceTileOfBlock(B.iron_block, 2)
+        let glowTile = lanternGlowTile(id)
+
+        let posts = [
+            aabb(5 / 16, y0 + 1 / 16, 5 / 16, 6 / 16, y0 + 7 / 16, 6 / 16),
+            aabb(10 / 16, y0 + 1 / 16, 5 / 16, 11 / 16, y0 + 7 / 16, 6 / 16),
+            aabb(5 / 16, y0 + 1 / 16, 10 / 16, 6 / 16, y0 + 7 / 16, 11 / 16),
+            aabb(10 / 16, y0 + 1 / 16, 10 / 16, 11 / 16, y0 + 7 / 16, 11 / 16),
+        ]
+
+        emitFixtureBox(b, x, y, z, aabb(6 / 16, y0 + 2 / 16, 6 / 16, 10 / 16, y0 + 7 / 16, 10 / 16), glowTile, sky, blk, Int(EMISSIVE[id]))
+        emitFixtureBox(b, x, y, z, aabb(5 / 16, y0, 5 / 16, 11 / 16, y0 + 1 / 16, 11 / 16), frameTile, sky, blk)
+        emitFixtureBox(b, x, y, z, aabb(5 / 16, y0 + 7 / 16, 5 / 16, 11 / 16, y0 + 8 / 16, 11 / 16), frameTile, sky, blk)
+        for post in posts {
+            emitFixtureBox(b, x, y, z, post, frameTile, sky, blk)
+        }
+        if hang {
+            emitFixtureBox(b, x, y, z, aabb(7 / 16, 0, 7 / 16, 9 / 16, y0, 9 / 16), frameTile, sky, blk)
+        } else {
+            emitFixtureBox(b, x, y, z, aabb(7 / 16, y0 + 8 / 16, 7 / 16, 9 / 16, y0 + 10 / 16, 9 / 16), frameTile, sky, blk)
+        }
+    }
 
     private func emitCross(_ b: MeshBuilder, _ x: Int, _ y: Int, _ z: Int, _ tile: Int, _ sky: Int, _ blk: Int, _ tint: Int, _ anim: Int, _ inset: Bool) {
         let o = inset ? 4.0 / 16 : 1.6 / 16
