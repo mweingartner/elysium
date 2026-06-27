@@ -33,7 +33,7 @@ public struct DimState: Codable {
 /// single source of truth for the app version — the title screen, the F3
 /// overlay and save records all read this (Info.plist is bumped separately
 /// at packaging time)
-public let PEBBLE_VERSION = "1.0.0"
+public let PEBBLE_VERSION = "1.1"
 
 /// WorldMeta + the global-state extension (baseline WorldRecord extends WorldMeta)
 public struct WorldRecord: Codable {
