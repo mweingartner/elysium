@@ -1855,15 +1855,13 @@ final class TemplateBrowserScreen: Screen {
     private var entries: [TemplateBrowserEntry] = []
     private var selectedIndex = 0
     private var scroll = 0
-    private var visualizedName: String?
-    private var visualizedTemplate: ObjectTemplate?
     private var yaw = 0.7
     private var pitch = 0.45
     private var draggingPreview = false
     private var lastDragX = 0.0
     private var lastDragY = 0.0
     private var lastVisibleRows = 1
-    private weak var visualizeButton: Button?
+    private weak var deleteButton: Button?
     private weak var placeButton: Button?
     private weak var leftButton: Button?
     private weak var rightButton: Button?
@@ -1881,8 +1879,9 @@ final class TemplateBrowserScreen: Screen {
 
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         refreshEntries(game)
-        let visualize = Button(0, 0, 90, 20, "Visualize", { [weak self] in
-            self?.visualizeSelected()
+        let delete = Button(0, 0, 90, 20, "Delete", { [weak self, weak game] in
+            guard let self, let game else { return }
+            self.deleteSelected(game)
         })
         let place = Button(0, 0, 60, 20, "Place", { [weak self, weak ui, weak game] in
             guard let self, let ui, let game else { return }
@@ -1898,19 +1897,20 @@ final class TemplateBrowserScreen: Screen {
             guard let ui, let game else { return }
             ui.closeTop(game)
         })
-        visualizeButton = visualize
+        deleteButton = delete
         placeButton = place
         leftButton = left
         rightButton = right
         closeButton = close
         if mode == .place {
-            buttons.append(contentsOf: [visualize, place, left, right, close])
+            buttons.append(contentsOf: [delete, place, left, right, close])
         } else {
-            buttons.append(contentsOf: [visualize, left, right, close])
+            buttons.append(contentsOf: [delete, left, right, close])
         }
     }
 
     private func refreshEntries(_ game: GameCore) {
+        let previousName = selectedEntry?.name
         entries = game.db.listTemplates().map { name in
             do {
                 guard let template = try game.db.getTemplate(named: name) else {
@@ -1922,15 +1922,14 @@ final class TemplateBrowserScreen: Screen {
                 return TemplateBrowserEntry(name: name, template: nil, summary: nil, error: String(describing: error))
             }
         }
-        selectedIndex = entries.isEmpty ? 0 : min(selectedIndex, entries.count - 1)
-        scroll = min(scroll, maxScroll(lastVisibleRows))
-        if let name = visualizedName,
-           let entry = entries.first(where: { $0.name == name && $0.template != nil }) {
-            visualizedTemplate = entry.template
+        if entries.isEmpty {
+            selectedIndex = 0
+        } else if let previousName, let idx = entries.firstIndex(where: { $0.name == previousName }) {
+            selectedIndex = idx
         } else {
-            visualizedName = nil
-            visualizedTemplate = nil
+            selectedIndex = min(selectedIndex, entries.count - 1)
         }
+        scroll = min(scroll, maxScroll(lastVisibleRows))
     }
 
     private func frame(_ ui: UIManager) -> (x: Double, y: Double, w: Double, h: Double) {
@@ -1955,14 +1954,14 @@ final class TemplateBrowserScreen: Screen {
         let f = frame(ui)
         let l = listRect(ui)
         let p = previewRect(ui)
-        let visualizeW = mode == .place ? min(64, max(52, (l.w - 4) / 2)) : min(90, l.w)
-        visualizeButton?.x = l.x
-        visualizeButton?.y = f.y + f.h - 28
-        visualizeButton?.w = visualizeW
-        visualizeButton?.enabled = selectedEntry?.template != nil
-        placeButton?.x = l.x + visualizeW + 4
+        let deleteW = mode == .place ? min(64, max(52, (l.w - 4) / 2)) : min(90, l.w)
+        deleteButton?.x = l.x
+        deleteButton?.y = f.y + f.h - 28
+        deleteButton?.w = deleteW
+        deleteButton?.enabled = selectedEntry != nil
+        placeButton?.x = l.x + deleteW + 4
         placeButton?.y = f.y + f.h - 28
-        placeButton?.w = max(52, l.w - visualizeW - 4)
+        placeButton?.w = max(52, l.w - deleteW - 4)
         placeButton?.enabled = selectedEntry?.template != nil
         closeButton?.x = f.x + f.w - 66
         closeButton?.y = f.y + 6
@@ -1970,7 +1969,7 @@ final class TemplateBrowserScreen: Screen {
         leftButton?.y = f.y + f.h - 28
         rightButton?.x = p.x + 32
         rightButton?.y = f.y + f.h - 28
-        let hasPreview = visualizedTemplate != nil
+        let hasPreview = selectedEntry?.template != nil
         leftButton?.enabled = hasPreview
         rightButton?.enabled = hasPreview
     }
@@ -2069,19 +2068,47 @@ final class TemplateBrowserScreen: Screen {
         cv.fillRect(modelRect.x, modelRect.y, modelRect.w, modelRect.h)
         cv.setStroke("#3f4654")
         cv.strokeRect(modelRect.x, modelRect.y, modelRect.w, modelRect.h)
-        guard let template = visualizedTemplate, visualizedName == entry.name else {
+        if let template = entry.template {
+            drawTemplatePreview(ui, template, rect: modelRect)
+        } else {
             cv.drawTextCentered("No preview", modelRect.x + modelRect.w / 2, modelRect.y + modelRect.h / 2 - 4, 1, "#a8a8a8", shadow: false)
-            return
         }
-        drawTemplatePreview(ui, template, rect: modelRect)
     }
 
-    private func visualizeSelected() {
-        guard let entry = selectedEntry, let template = entry.template else { return }
-        visualizedName = entry.name
-        visualizedTemplate = template
-        yaw = 0.7
-        pitch = 0.45
+    private func selectEntry(_ index: Int) {
+        guard entries.indices.contains(index) else { return }
+        if index != selectedIndex {
+            selectedIndex = index
+            yaw = 0.7
+            pitch = 0.45
+        }
+    }
+
+    private func deleteSelected(_ game: GameCore) {
+        guard let entry = selectedEntry else {
+            game.host?.showActionBar("Select a saved template to delete", 60)
+            return
+        }
+        do {
+            guard try game.db.deleteTemplate(named: entry.name) else {
+                game.host?.showActionBar("Template was already gone", 60)
+                refreshEntries(game)
+                return
+            }
+            game.host?.pushChat("§7Deleted object \"\(entry.name)\"")
+            game.host?.showActionBar("Deleted \"\(entry.name)\"", 60)
+            let nextIndex = min(selectedIndex, max(0, entries.count - 2))
+            selectedIndex = nextIndex
+            refreshEntries(game)
+            yaw = 0.7
+            pitch = 0.45
+        } catch let error as TemplateError {
+            game.host?.pushChat("§c" + error.description)
+            game.host?.showActionBar(error.description, 70)
+        } catch {
+            game.host?.pushChat("§cDelete failed: \(error)")
+            game.host?.showActionBar("Delete failed", 70)
+        }
     }
 
     private func placeSelected(_ ui: UIManager, _ game: GameCore) {
@@ -2223,16 +2250,12 @@ final class TemplateBrowserScreen: Screen {
         if mx >= l.x && mx < l.x + l.w && my >= l.y && my < l.y + l.h {
             let idx = scroll + Int((my - l.y - 1) / rowH)
             if entries.indices.contains(idx) {
-                selectedIndex = idx
-                if entries[idx].template == nil {
-                    visualizedName = nil
-                    visualizedTemplate = nil
-                }
+                selectEntry(idx)
                 return true
             }
         }
         let p = previewRect(ui)
-        if visualizedTemplate != nil, mx >= p.x && mx < p.x + p.w && my >= p.y && my < p.y + p.h {
+        if selectedEntry?.template != nil, mx >= p.x && mx < p.x + p.w && my >= p.y && my < p.y + p.h {
             draggingPreview = true
             lastDragX = mx
             lastDragY = my
@@ -2265,16 +2288,17 @@ final class TemplateBrowserScreen: Screen {
         case "Enter", "NumpadEnter":
             if mode == .place {
                 placeSelected(ui, game)
-            } else {
-                visualizeSelected()
             }
             return true
         case "ArrowUp":
-            if !entries.isEmpty { selectedIndex = max(0, selectedIndex - 1); scroll = min(scroll, selectedIndex) }
+            if !entries.isEmpty {
+                selectEntry(max(0, selectedIndex - 1))
+                scroll = min(scroll, selectedIndex)
+            }
             return true
         case "ArrowDown":
             if !entries.isEmpty {
-                selectedIndex = min(entries.count - 1, selectedIndex + 1)
+                selectEntry(min(entries.count - 1, selectedIndex + 1))
                 if selectedIndex >= scroll + lastVisibleRows { scroll = selectedIndex - lastVisibleRows + 1 }
             }
             return true

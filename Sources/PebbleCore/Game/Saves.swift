@@ -448,7 +448,8 @@ public final class SaveDB {
     @discardableResult
     public func deleteTemplate(named rawName: String) throws -> Bool {
         guard let name = normalizedTemplateName(rawName) else { throw TemplateError.invalidName }
-        return run("DELETE FROM templates WHERE name=?", bind: { self.bindText($0, 1, name) })
+        guard run("DELETE FROM templates WHERE name=?", bind: { self.bindText($0, 1, name) }) else { return false }
+        return sqlite3_changes(db) > 0
     }
 
     // ---- legacy import ----------------------------------------------------------

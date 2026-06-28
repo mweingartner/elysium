@@ -329,6 +329,24 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual(loaded.blockEntities.first?.items?[0]?.count, 3)
     }
 
+    func testTemplateStoreDeletesNormalizedTemplateNames() throws {
+        let world = makeWorld()
+        makeFurnishedObject(in: world)
+        let first = try cloneObjectTemplate(named: "First Object", from: world, targetX: 1, targetY: 64, targetZ: 1)
+        let second = try cloneObjectTemplate(named: "Second Object", from: world, targetX: 2, targetY: 64, targetZ: 1)
+        let db = tempDB()
+
+        XCTAssertTrue(try db.putTemplate(first.template))
+        XCTAssertTrue(try db.putTemplate(second.template))
+        XCTAssertEqual(db.listTemplates(), ["first object", "second object"])
+        XCTAssertTrue(try db.deleteTemplate(named: " FIRST OBJECT "))
+
+        XCTAssertEqual(db.listTemplates(), ["second object"])
+        XCTAssertNil(try db.getTemplate(named: "first object"))
+        XCTAssertNotNil(try db.getTemplate(named: "second object"))
+        XCTAssertFalse(try db.deleteTemplate(named: "first object"))
+    }
+
     func testObjectTemplateSummaryReportsBrowserMetadata() throws {
         let world = makeWorld()
         makeFurnishedObject(in: world)
