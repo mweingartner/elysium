@@ -68,6 +68,49 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual(clonedChest.items?[0]?.count, 3)
     }
 
+    func testCloneIncludesEdgeTouchingConstructionBlocks() throws {
+        let world = makeWorld()
+        world.setBlock(1, 64, 1, Int(cell(B.oak_planks)))
+        world.setBlock(2, 65, 1, Int(cell(B.chest)))
+        let chest = makeContainerBE(2, 65, 1, 27)
+        chest.items?[0] = stack("diamond", 6)
+        world.setBlockEntity(chest)
+
+        let result = try cloneObjectTemplate(named: "Edge Cabin", from: world, targetX: 1, targetY: 64, targetZ: 1)
+        let names = result.template.blocks.map { blockDefs[Int($0.cell >> 4)].name }.sorted()
+
+        XCTAssertEqual(result.template.blocks.count, 2)
+        XCTAssertEqual(names, ["chest", "oak_planks"])
+        XCTAssertEqual(result.template.sizeX, 2)
+        XCTAssertEqual(result.template.sizeY, 2)
+        XCTAssertEqual(result.template.sizeZ, 1)
+        let clonedChest = try XCTUnwrap(result.template.blockEntities.first)
+        XCTAssertEqual(clonedChest.x, 1)
+        XCTAssertEqual(clonedChest.y, 1)
+        XCTAssertEqual(clonedChest.z, 0)
+        XCTAssertEqual(clonedChest.items?[0]?.id, iid("diamond"))
+        XCTAssertEqual(clonedChest.items?[0]?.count, 6)
+    }
+
+    func testCloneDoesNotBridgeTerrainOrCornerOnlyContact() throws {
+        let world = makeWorld()
+        world.setBlock(1, 64, 1, Int(cell(B.oak_planks)))
+        world.setBlock(2, 65, 1, Int(cell(B.grass_block)))
+        world.setBlock(2, 65, 2, Int(cell(B.chest)))
+        let chest = makeContainerBE(2, 65, 2, 27)
+        chest.items?[0] = stack("diamond", 4)
+        world.setBlockEntity(chest)
+
+        let result = try cloneObjectTemplate(named: "Narrow Cabin", from: world, targetX: 1, targetY: 64, targetZ: 1)
+
+        XCTAssertEqual(result.template.blocks.count, 1)
+        XCTAssertEqual(result.template.blockEntities.count, 0)
+        XCTAssertEqual(blockDefs[Int(result.template.blocks[0].cell >> 4)].name, "oak_planks")
+        XCTAssertEqual(result.template.sizeX, 1)
+        XCTAssertEqual(result.template.sizeY, 1)
+        XCTAssertEqual(result.template.sizeZ, 1)
+    }
+
     func testPlaceObjectTemplateAtCursorAnchor() throws {
         let world = makeWorld()
         makeFurnishedObject(in: world)

@@ -236,6 +236,13 @@ private struct TemplatePos: Hashable, Comparable {
     }
 }
 
+private let templateCloneNeighborDeltas: [(Int, Int, Int)] = [
+    (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+    (1, 1, 0), (-1, 1, 0), (1, -1, 0), (-1, -1, 0),
+    (1, 0, 1), (-1, 0, 1), (1, 0, -1), (-1, 0, -1),
+    (0, 1, 1), (0, -1, 1), (0, 1, -1), (0, -1, -1),
+]
+
 public func normalizedTemplateName(_ raw: String) -> String? {
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
@@ -825,7 +832,6 @@ public func cloneObjectTemplate(named rawName: String, from world: World,
     guard seedCell != 0 else { throw TemplateError.missingTarget }
     guard isTemplateCloneableBlock(seedCell) else { throw TemplateError.targetNotCloneable }
 
-    let neighborDeltas = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
     var seen = Set<TemplatePos>()
     var queue = [TemplatePos(x: targetX, y: targetY, z: targetZ)]
     var cursor = 0
@@ -842,7 +848,7 @@ public func cloneObjectTemplate(named rawName: String, from world: World,
         if maxX - minX + 1 > options.maxSpan || maxY - minY + 1 > options.maxSpan || maxZ - minZ + 1 > options.maxSpan {
             throw TemplateError.objectTooWide
         }
-        for d in neighborDeltas {
+        for d in templateCloneNeighborDeltas {
             let np = TemplatePos(x: p.x + d.0, y: p.y + d.1, z: p.z + d.2)
             if seen.contains(np) { continue }
             seen.insert(np)
