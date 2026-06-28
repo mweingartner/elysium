@@ -15,6 +15,9 @@ public let LAN_MULTIPLAYER_MAX_REPLICATION_PLAYERS = LAN_MULTIPLAYER_MAX_CLIENTS
 public let LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES = LAN_MULTIPLAYER_MAX_CLIENTS + 1
 public let LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS = 64
 public let LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT = CHUNK_W * SECTION_H * CHUNK_W
+private let LAN_MULTIPLAYER_MAX_ENTITY_COORDINATE = 30_000_000.0
+private let LAN_MULTIPLAYER_MAX_REPLICATED_ITEM_COUNT = 127
+private let LAN_MULTIPLAYER_MAX_REPLICATED_XP_AMOUNT = 4096
 
 private let LANFrameMagic: [UInt8] = [0x50, 0x42, 0x4c, 0x4e] // PBLN
 
@@ -387,6 +390,23 @@ public struct LANChunkSectionSnapshot: Codable, Equatable {
 }
 
 public struct LANEntitySnapshot: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case entityID
+        case type
+        case x
+        case y
+        case z
+        case yaw
+        case pitch
+        case health
+        case dead
+        case itemID
+        case itemCount
+        case itemDamage
+        case itemLabel
+        case xpAmount
+    }
+
     public var entityID: Int
     public var type: String
     public var x: Double
@@ -396,17 +416,62 @@ public struct LANEntitySnapshot: Codable, Equatable {
     public var pitch: Double
     public var health: Double?
     public var dead: Bool
+    public var itemID: Int?
+    public var itemCount: Int?
+    public var itemDamage: Int?
+    public var itemLabel: String?
+    public var xpAmount: Int?
 
-    public init(entityID: Int, type: String, x: Double, y: Double, z: Double, yaw: Double, pitch: Double, health: Double?, dead: Bool) {
+    public init(
+        entityID: Int,
+        type: String,
+        x: Double,
+        y: Double,
+        z: Double,
+        yaw: Double,
+        pitch: Double,
+        health: Double?,
+        dead: Bool,
+        itemID: Int? = nil,
+        itemCount: Int? = nil,
+        itemDamage: Int? = nil,
+        itemLabel: String? = nil,
+        xpAmount: Int? = nil
+    ) {
         self.entityID = entityID
         self.type = sanitizedLANEntityType(type)
-        self.x = x.isFinite ? x : 0
-        self.y = y.isFinite ? y : 0
-        self.z = z.isFinite ? z : 0
+        self.x = sanitizedLANEntityCoordinate(x)
+        self.y = sanitizedLANEntityCoordinate(y)
+        self.z = sanitizedLANEntityCoordinate(z)
         self.yaw = yaw.isFinite ? yaw : 0
         self.pitch = pitch.isFinite ? pitch : 0
         self.health = health?.isFinite == true ? health : nil
         self.dead = dead
+        self.itemID = itemID.flatMap { $0 >= 0 ? $0 : nil }
+        self.itemCount = itemCount.flatMap { $0 > 0 ? min($0, LAN_MULTIPLAYER_MAX_REPLICATED_ITEM_COUNT) : nil }
+        self.itemDamage = itemDamage.flatMap { $0 >= 0 ? $0 : nil }
+        self.itemLabel = itemLabel.map { prefixByUTF8Bytes(cleanSingleLine($0), maxBytes: 128) }
+        self.xpAmount = xpAmount.flatMap { $0 > 0 ? min($0, LAN_MULTIPLAYER_MAX_REPLICATED_XP_AMOUNT) : nil }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            entityID: try c.decode(Int.self, forKey: .entityID),
+            type: try c.decode(String.self, forKey: .type),
+            x: try c.decode(Double.self, forKey: .x),
+            y: try c.decode(Double.self, forKey: .y),
+            z: try c.decode(Double.self, forKey: .z),
+            yaw: try c.decode(Double.self, forKey: .yaw),
+            pitch: try c.decode(Double.self, forKey: .pitch),
+            health: try c.decodeIfPresent(Double.self, forKey: .health),
+            dead: try c.decode(Bool.self, forKey: .dead),
+            itemID: try c.decodeIfPresent(Int.self, forKey: .itemID),
+            itemCount: try c.decodeIfPresent(Int.self, forKey: .itemCount),
+            itemDamage: try c.decodeIfPresent(Int.self, forKey: .itemDamage),
+            itemLabel: try c.decodeIfPresent(String.self, forKey: .itemLabel),
+            xpAmount: try c.decodeIfPresent(Int.self, forKey: .xpAmount)
+        )
     }
 }
 
@@ -441,6 +506,18 @@ public struct LANPlayerInventorySnapshot: Codable, Equatable {
 }
 
 public struct LANReplicationBatch: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case tick
+        case fullSnapshot
+        case world
+        case players
+        case blockChanges
+        case chunkSections
+        case entities
+        case entitySnapshotsComplete
+        case inventories
+    }
+
     public var tick: Int
     public var fullSnapshot: Bool
     public var world: LANWorldSummary?
@@ -448,6 +525,7 @@ public struct LANReplicationBatch: Codable, Equatable {
     public var blockChanges: [LANBlockChange]
     public var chunkSections: [LANChunkSectionSnapshot]
     public var entities: [LANEntitySnapshot]
+    public var entitySnapshotsComplete: Bool
     public var inventories: [LANPlayerInventorySnapshot]
 
     public init(
@@ -458,6 +536,7 @@ public struct LANReplicationBatch: Codable, Equatable {
         blockChanges: [LANBlockChange] = [],
         chunkSections: [LANChunkSectionSnapshot] = [],
         entities: [LANEntitySnapshot] = [],
+        entitySnapshotsComplete: Bool = false,
         inventories: [LANPlayerInventorySnapshot] = []
     ) {
         self.tick = max(0, tick)
@@ -467,7 +546,23 @@ public struct LANReplicationBatch: Codable, Equatable {
         self.blockChanges = Array(blockChanges.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES))
         self.chunkSections = Array(chunkSections.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS))
         self.entities = Array(entities.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES))
+        self.entitySnapshotsComplete = entitySnapshotsComplete
         self.inventories = Array(inventories.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES))
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            tick: try c.decode(Int.self, forKey: .tick),
+            fullSnapshot: try c.decode(Bool.self, forKey: .fullSnapshot),
+            world: try c.decodeIfPresent(LANWorldSummary.self, forKey: .world),
+            players: try c.decodeIfPresent([LANPlayerState].self, forKey: .players) ?? [],
+            blockChanges: try c.decodeIfPresent([LANBlockChange].self, forKey: .blockChanges) ?? [],
+            chunkSections: try c.decodeIfPresent([LANChunkSectionSnapshot].self, forKey: .chunkSections) ?? [],
+            entities: try c.decodeIfPresent([LANEntitySnapshot].self, forKey: .entities) ?? [],
+            entitySnapshotsComplete: try c.decodeIfPresent(Bool.self, forKey: .entitySnapshotsComplete) ?? false,
+            inventories: try c.decodeIfPresent([LANPlayerInventorySnapshot].self, forKey: .inventories) ?? []
+        )
     }
 
     public var isWithinReplicationCaps: Bool {
@@ -779,6 +874,11 @@ public func sanitizedLANEntityType(_ raw: String) -> String {
     }
     let clipped = prefixByUTF8Bytes(String(cleaned.prefix(64)), maxBytes: 96)
     return clipped.isEmpty ? "entity" : clipped
+}
+
+private func sanitizedLANEntityCoordinate(_ raw: Double) -> Double {
+    guard raw.isFinite else { return 0 }
+    return max(-LAN_MULTIPLAYER_MAX_ENTITY_COORDINATE, min(LAN_MULTIPLAYER_MAX_ENTITY_COORDINATE, raw))
 }
 
 public func normalizedLANJoinCode(_ raw: String) -> String {

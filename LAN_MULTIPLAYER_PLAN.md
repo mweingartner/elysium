@@ -3,7 +3,8 @@
 Status: implemented LAN baseline, the first host-authoritative replication
 layer, and the core remote-player gameplay orchestration layer. Pebble 1.1.0
 now ships Multiplayer/Open to LAN UI, Bonjour browse/advertise for
-`_pebble-lan._tcp`, Direct Connect by host/port/join-code, bounded `PBLN`
+`_pebble-lan._tcp`, one-button Join World UX with manual Direct Connect
+fallback by host/port/join-code, bounded `PBLN`
 protocol frames, join-code handshakes, peer status, LAN chat, source/binary
 security allowlists, Info.plist local-network privacy declarations, core
 replication batches for player state, chunk sections, block deltas, entity
@@ -42,7 +43,8 @@ Initial target:
 - Bonjour discovery using a Pebble-specific TCP service type.
 - Join-code approval before a client can enter the world.
 - Shared chat and host-authoritative state replication for chunk sections,
-  block changes, player state, entity snapshots, and inventory snapshots.
+  block changes, player state, complete loaded-entity snapshots, dropped-item
+  and XP payloads, and inventory snapshots.
 - Host-authoritative permission gates for crafting, containers, commands,
   object-template copy/place/undo, AI requests, creative privileges, dimension
   changes, deaths, respawns, and reconnect records layered on top of the
@@ -143,7 +145,8 @@ Implemented client flow:
 5. Client sends `ClientHello`.
 6. Host replies with `ServerAccept` or `ServerReject`.
 7. Accepted client receives the host's `LANWorldSummary`, enters connected
-   session/chat state, and receives an initial replication batch.
+   session/chat state, opens a transient LAN client world when joining from the
+   title screen, and receives an initial replication batch.
 8. Host publishes periodic bounded replication batches from the main game
    thread. Clients acknowledge and apply them to a client mirror; if a matching
    world is already loaded, block/chunk deltas are applied through the normal
@@ -211,8 +214,8 @@ Implemented host replication tick:
 
 1. App frame advances the single host `GameCore` on the main thread.
 2. `LANTransport` snapshots local host player state, accepted peer states,
-   nearby chunk sections, entity snapshots, host inventory, and drained block
-   changes.
+   nearby chunk sections, a complete capped loaded-entity listing, host
+   inventory, and drained block changes.
 3. The host sends a `LANReplicationBatch` at a bounded cadence, with larger
    full snapshots every few seconds and delta batches between them.
 4. Client block intents are accepted only from joined peers, validated against
@@ -223,19 +226,25 @@ Implemented client replication apply:
 
 1. Client decodes `LANReplicationBatch` frames under the same 1 MiB PBLN cap.
 2. The client mirror stores world summary, players, chunk sections, block cells,
-   entity snapshots, and inventory snapshots, dropping malformed sections and
-   invalid cells.
+   entity snapshots, and inventory snapshots, dropping malformed sections,
+   invalid cells, unknown entity types, invalid dropped-item ids/counts, and
+   invalid XP payloads.
 3. If the local game has a loaded matching world, chunk sections and block
    deltas apply to `World` on the main thread and notify dirty-section hooks for
    remeshing.
+4. Complete entity batches materialize non-persistent client-side mirror
+   entities for dropped items, XP orbs, and registered entity types, update them
+   from host snapshots, skip their normal local simulation ticks, and remove
+   stale mirrors only when the batch explicitly marks the entity list complete.
+5. Remote player snapshots spawn/update/remove transient player entities, and
+   first-person rendering hides only the local player so peers remain visible.
 
 Remaining client gameplay work:
 
-1. Spawn/interpolate remote player entities from mirrored player snapshots.
-2. Predict only local player camera/input for responsiveness.
-3. Render replicated entities from snapshots when they are not local host
-   entities.
-4. Roll back local prediction only for the local player, never for world state.
+1. Predict only local player camera/input for responsiveness.
+2. Smooth/interpolate remote player and mirrored entity movement between
+   snapshots.
+3. Roll back local prediction only for the local player, never for world state.
 
 Chunk streaming:
 

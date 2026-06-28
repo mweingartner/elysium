@@ -45,9 +45,12 @@ public struct LANChunkSectionPosition: Hashable, Equatable, Comparable {
 public struct LANReplicationApplyReport: Equatable {
     public var appliedBlockChanges = 0
     public var appliedChunkSections = 0
+    public var appliedEntitySnapshots = 0
+    public var removedEntitySnapshots = 0
     public var ignoredInvalidCells = 0
     public var ignoredInvalidSections = 0
     public var ignoredUnloadedBlockChanges = 0
+    public var ignoredInvalidEntities = 0
 
     public init() {}
 }
@@ -495,6 +498,7 @@ public final class LANMultiplayerHostSession {
             blockChanges: blockChanges,
             chunkSections: chunkSections,
             entities: entitySnapshots,
+            entitySnapshotsComplete: true,
             inventories: inventories
         )
     }
@@ -542,11 +546,26 @@ public final class LANMultiplayerClientSession {
             blockCells[key] = change.cell
             report.appliedBlockChanges += 1
         }
+        var wantedEntityIDs = Set<Int>()
         for entity in batch.entities.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES) {
-            if entity.dead {
-                entities.removeValue(forKey: entity.entityID)
+            guard let snapshot = normalizedLANEntitySnapshot(entity) else {
+                report.ignoredInvalidEntities += 1
+                continue
+            }
+            if snapshot.dead {
+                if entities.removeValue(forKey: snapshot.entityID) != nil {
+                    report.removedEntitySnapshots += 1
+                }
             } else {
-                entities[entity.entityID] = entity
+                entities[snapshot.entityID] = snapshot
+                wantedEntityIDs.insert(snapshot.entityID)
+                report.appliedEntitySnapshots += 1
+            }
+        }
+        if batch.entitySnapshotsComplete {
+            for id in Array(entities.keys).sorted() where !wantedEntityIDs.contains(id) {
+                entities.removeValue(forKey: id)
+                report.removedEntitySnapshots += 1
             }
         }
         for inventory in batch.inventories.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES) {
@@ -614,6 +633,8 @@ public func makeLANEntitySnapshots(
         }
         let entity = ref as? Entity
         let living = ref as? LivingEntity
+        let item = ref as? ItemEntity
+        let xp = ref as? XPOrb
         out.append(LANEntitySnapshot(
             entityID: ref.id,
             type: entity?.type ?? "entity",
@@ -623,7 +644,12 @@ public func makeLANEntitySnapshots(
             yaw: entity?.yaw ?? 0,
             pitch: entity?.pitch ?? 0,
             health: living?.health,
-            dead: ref.dead
+            dead: ref.dead,
+            itemID: item?.stack.id,
+            itemCount: item?.stack.count,
+            itemDamage: item?.stack.damage,
+            itemLabel: item?.stack.label,
+            xpAmount: xp?.amount
         ))
     }
     return out
@@ -680,6 +706,176 @@ public func makeLANChunkSectionSnapshots(
     return out
 }
 
+private let LAN_MIRRORED_ENTITY_PICKUP_DELAY = 1_000_000_000
+private let LAN_MIRRORED_ENTITY_LIFETIME = 1_000_000_000
+
+private func normalizedLANEntitySnapshot(_ raw: LANEntitySnapshot) -> LANEntitySnapshot? {
+    let snapshot = LANEntitySnapshot(
+        entityID: raw.entityID,
+        type: raw.type,
+        x: raw.x,
+        y: raw.y,
+        z: raw.z,
+        yaw: raw.yaw,
+        pitch: raw.pitch,
+        health: raw.health,
+        dead: raw.dead,
+        itemID: raw.itemID,
+        itemCount: raw.itemCount,
+        itemDamage: raw.itemDamage,
+        itemLabel: raw.itemLabel,
+        xpAmount: raw.xpAmount
+    )
+    guard snapshot.entityID >= 0, snapshot.type != "player" else { return nil }
+    if snapshot.dead { return snapshot }
+    switch snapshot.type {
+    case "item":
+        guard let itemID = snapshot.itemID,
+              itemID >= 0,
+              itemID < itemDefs.count,
+              let count = snapshot.itemCount,
+              count > 0
+        else { return nil }
+    case "xp_orb":
+        guard let amount = snapshot.xpAmount, amount > 0 else { return nil }
+    default:
+        guard entityTypes().contains(snapshot.type) else { return nil }
+    }
+    return snapshot
+}
+
+private func mirroredEntity(sourceID: Int, in world: World) -> Entity? {
+    world.entities.first(where: {
+        ($0 as? Entity)?.lanReplicationSourceID == sourceID
+    }) as? Entity
+}
+
+private func itemStack(from snapshot: LANEntitySnapshot) -> ItemStack? {
+    guard snapshot.type == "item",
+          let itemID = snapshot.itemID,
+          itemID >= 0,
+          itemID < itemDefs.count,
+          let count = snapshot.itemCount,
+          count > 0
+    else { return nil }
+    let damage = max(0, snapshot.itemDamage ?? 0)
+    let stack = ItemStack(itemID, min(count, maxStackOf(ItemStack(itemID, 1))), damage: damage, label: snapshot.itemLabel)
+    return stack
+}
+
+private func makeMirroredEntity(from snapshot: LANEntitySnapshot, in world: World) -> Entity? {
+    switch snapshot.type {
+    case "item":
+        guard itemStack(from: snapshot) != nil else { return nil }
+        return ItemEntity(world: world)
+    case "xp_orb":
+        guard (snapshot.xpAmount ?? 0) > 0 else { return nil }
+        return XPOrb(world: world)
+    default:
+        return createEntity(snapshot.type, world)
+    }
+}
+
+private func applyMirroredEntityPayload(_ snapshot: LANEntitySnapshot, to entity: Entity) -> Bool {
+    switch snapshot.type {
+    case "item":
+        guard let item = entity as? ItemEntity, let stack = itemStack(from: snapshot) else { return false }
+        item.stack = stack
+        item.pickupDelay = LAN_MIRRORED_ENTITY_PICKUP_DELAY
+        item.lifeTime = LAN_MIRRORED_ENTITY_LIFETIME
+    case "xp_orb":
+        guard let orb = entity as? XPOrb, let amount = snapshot.xpAmount, amount > 0 else { return false }
+        orb.amount = amount
+        orb.followTarget = nil
+        orb.lifeTime = LAN_MIRRORED_ENTITY_LIFETIME
+    default:
+        break
+    }
+    return true
+}
+
+private func configureMirroredEntity(_ entity: Entity, from snapshot: LANEntitySnapshot) {
+    entity.lanReplicationSourceID = snapshot.entityID
+    entity.lanReplicatedMirror = true
+    entity.persistent = false
+    entity.noClip = true
+    entity.noGravity = true
+    entity.vx = 0
+    entity.vy = 0
+    entity.vz = 0
+    entity.setPos(snapshot.x, snapshot.y, snapshot.z)
+    entity.yaw = snapshot.yaw
+    entity.prevYaw = snapshot.yaw
+    entity.pitch = snapshot.pitch
+    entity.prevPitch = snapshot.pitch
+    entity.fireTicks = 0
+    if let living = entity as? LivingEntity, let health = snapshot.health {
+        living.health = max(0, min(living.maxHealth, health))
+        living.deathTime = living.health <= 0 ? max(1, living.deathTime) : 0
+    }
+}
+
+@discardableResult
+public func applyLANEntitySnapshots(
+    _ snapshots: [LANEntitySnapshot],
+    to world: World,
+    removeMissing: Bool = true
+) -> LANReplicationApplyReport {
+    var report = LANReplicationApplyReport()
+    var wantedSourceIDs = Set<Int>()
+
+    for raw in snapshots.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES) {
+        guard let snapshot = normalizedLANEntitySnapshot(raw) else {
+            report.ignoredInvalidEntities += 1
+            continue
+        }
+        if snapshot.dead {
+            if let existing = mirroredEntity(sourceID: snapshot.entityID, in: world) {
+                world.removeEntity(existing)
+                report.removedEntitySnapshots += 1
+            }
+            continue
+        }
+
+        wantedSourceIDs.insert(snapshot.entityID)
+        var entity = mirroredEntity(sourceID: snapshot.entityID, in: world)
+        if let existing = entity, existing.type != snapshot.type {
+            world.removeEntity(existing)
+            report.removedEntitySnapshots += 1
+            entity = nil
+        }
+        if entity == nil {
+            guard let created = makeMirroredEntity(from: snapshot, in: world) else {
+                report.ignoredInvalidEntities += 1
+                continue
+            }
+            entity = created
+            world.addEntity(created)
+        }
+        guard let entity, applyMirroredEntityPayload(snapshot, to: entity) else {
+            if let entity { world.removeEntity(entity) }
+            report.ignoredInvalidEntities += 1
+            continue
+        }
+        configureMirroredEntity(entity, from: snapshot)
+        report.appliedEntitySnapshots += 1
+    }
+
+    if removeMissing {
+        for ref in Array(world.entities) {
+            guard let entity = ref as? Entity,
+                  entity.lanReplicatedMirror,
+                  let sourceID = entity.lanReplicationSourceID,
+                  !wantedSourceIDs.contains(sourceID)
+            else { continue }
+            world.removeEntity(entity)
+            report.removedEntitySnapshots += 1
+        }
+    }
+
+    return report
+}
+
 @discardableResult
 public func applyLANReplicationBatch(_ batch: LANReplicationBatch, to world: World) -> LANReplicationApplyReport {
     var report = LANReplicationApplyReport()
@@ -702,6 +898,10 @@ public func applyLANReplicationBatch(_ batch: LANReplicationBatch, to world: Wor
         _ = world.setBlock(change.x, change.y, change.z, change.cell)
         report.appliedBlockChanges += 1
     }
+    let entityReport = applyLANEntitySnapshots(batch.entities, to: world, removeMissing: batch.entitySnapshotsComplete)
+    report.appliedEntitySnapshots += entityReport.appliedEntitySnapshots
+    report.removedEntitySnapshots += entityReport.removedEntitySnapshots
+    report.ignoredInvalidEntities += entityReport.ignoredInvalidEntities
     return report
 }
 

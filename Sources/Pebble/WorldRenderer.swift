@@ -1235,7 +1235,7 @@ final class WorldRenderer {
         for e in w.entities {
             if e.dead { continue }
             guard let ent = e as? Entity else { continue }
-            if ent.type == "player" && game.perspective == 0 { continue }
+            if ent === game.player && game.perspective == 0 { continue }
             let dx = ent.x - camPos.x, dz = ent.z - camPos.z
             if dx * dx + dz * dz > maxD { continue }
             guard let name = modelNameFor(ent) else { continue }

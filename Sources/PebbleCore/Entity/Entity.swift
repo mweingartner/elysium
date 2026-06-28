@@ -75,6 +75,10 @@ open class Entity: EntityRef {
     public var passengers: [Entity] = []
     /// mark for save persistence
     public var persistent = false
+    /// non-persistent LAN mirror metadata; host-authoritative replicated
+    /// entities use this to avoid local ticking, pickup, and save authority.
+    public var lanReplicationSourceID: Int?
+    public var lanReplicatedMirror = false
     public var data = EntityData()
     public var portalCooldown = 0
     public var portalTime = 0

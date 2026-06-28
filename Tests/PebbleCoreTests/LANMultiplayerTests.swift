@@ -172,4 +172,36 @@ final class LANMultiplayerTests: XCTestCase {
         let services = try XCTUnwrap(dict["NSBonjourServices"] as? [String])
         XCTAssertTrue(services.contains(LAN_MULTIPLAYER_SERVICE_TYPE))
     }
+
+    func testLANClientWorldEntryUsesSummaryAndSkipsSingleplayerPersistence() {
+        let game = GameCore()
+        let before = Set(game.listWorlds().map(\.id))
+        let summary = LANWorldSummary(
+            worldID: "host world !",
+            worldName: "Host LAN",
+            seed: -123_456,
+            gameMode: GameMode.creative,
+            difficulty: 3,
+            dimension: Dim.overworld.rawValue,
+            playerCount: 2
+        )
+
+        game.enterLANClientWorld(summary)
+
+        XCTAssertTrue(game.hasWorld())
+        XCTAssertTrue(game.isLANClientWorld)
+        XCTAssertEqual(game.worldRec?.id, "lan-hostworld")
+        XCTAssertEqual(game.worldRec?.name, "LAN: Host LAN")
+        XCTAssertEqual(game.worldRec?.seed, Int32(-123_456))
+        XCTAssertEqual(game.worldRec?.gameMode, GameMode.creative)
+        XCTAssertEqual(game.worldRec?.difficulty, 3)
+
+        game.saveAndFlush(synchronous: true)
+        XCTAssertEqual(Set(game.listWorlds().map(\.id)), before)
+
+        game.exitToTitle()
+        XCTAssertFalse(game.hasWorld())
+        XCTAssertFalse(game.isLANClientWorld)
+        XCTAssertEqual(Set(game.listWorlds().map(\.id)), before)
+    }
 }

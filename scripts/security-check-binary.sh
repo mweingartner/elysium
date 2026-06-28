@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-TARGET="${1:-$HOME/Applications/Pebble.app}"
+TARGET="${1:-/Applications/Pebble.app}"
 
 fail() { echo "binary security check failed: $*" >&2; exit 1; }
 

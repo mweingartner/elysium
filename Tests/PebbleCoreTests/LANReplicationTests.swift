@@ -6,6 +6,7 @@ final class LANReplicationTests: XCTestCase {
         super.setUp()
         registerAllBlocks()
         registerAllItems()
+        registerAllEntities()
     }
 
     func testChangeLogCoalescesByPositionAndDrainsInInsertionOrder() {
@@ -474,7 +475,202 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(client.blockCells[LANBlockPosition(dimension: 0, x: 1, y: 64, z: 1)], validCell)
         XCTAssertNil(client.blockCells[LANBlockPosition(dimension: 0, x: 2, y: 64, z: 1)])
         XCTAssertEqual(client.entities[7]?.type, "zombie")
+        XCTAssertEqual(report.appliedEntitySnapshots, 1)
         XCTAssertEqual(client.inventories["peer-a"]?.slots.first?.count, 64)
+    }
+
+    func testEntitySnapshotsIncludeDroppedItemAndXpPayloads() throws {
+        let world = makeLoadedWorld()
+        let item = spawnItem(world, 1.5, 65, 2.5, ItemStack(iid("coal"), 32, damage: 3, label: "Fuel"))
+        item.pickupDelay = 20
+        let orb = XPOrb(world: world)
+        orb.setPos(3.5, 65, 2.5)
+        orb.amount = 7
+        world.addEntity(orb)
+
+        let snapshots = makeLANEntitySnapshots(in: world)
+
+        let itemSnapshot = try XCTUnwrap(snapshots.first { $0.entityID == item.id })
+        XCTAssertEqual(itemSnapshot.type, "item")
+        XCTAssertEqual(itemSnapshot.itemID, iid("coal"))
+        XCTAssertEqual(itemSnapshot.itemCount, 32)
+        XCTAssertEqual(itemSnapshot.itemDamage, 3)
+        XCTAssertEqual(itemSnapshot.itemLabel, "Fuel")
+
+        let xpSnapshot = try XCTUnwrap(snapshots.first { $0.entityID == orb.id })
+        XCTAssertEqual(xpSnapshot.type, "xp_orb")
+        XCTAssertEqual(xpSnapshot.xpAmount, 7)
+    }
+
+    func testReplicationBatchMaterializesUpdatesAndRemovesMirroredDroppedItemsAndXp() throws {
+        let clientWorld = makeLoadedWorld()
+        let coalID = iid("coal")
+        let itemSnapshot = LANEntitySnapshot(
+            entityID: 44,
+            type: "item",
+            x: 1.5,
+            y: 65,
+            z: 2.5,
+            yaw: 0,
+            pitch: 0,
+            health: nil,
+            dead: false,
+            itemID: coalID,
+            itemCount: 12,
+            itemDamage: 1,
+            itemLabel: "Shared"
+        )
+        let xpSnapshot = LANEntitySnapshot(
+            entityID: 45,
+            type: "xp_orb",
+            x: 3.5,
+            y: 65,
+            z: 2.5,
+            yaw: 0,
+            pitch: 0,
+            health: nil,
+            dead: false,
+            xpAmount: 5
+        )
+
+        var report = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 1, fullSnapshot: false, entities: [itemSnapshot, xpSnapshot], entitySnapshotsComplete: true),
+            to: clientWorld
+        )
+
+        XCTAssertEqual(report.appliedEntitySnapshots, 2)
+        let item = try XCTUnwrap(clientWorld.entities.compactMap { $0 as? ItemEntity }.first)
+        XCTAssertEqual(item.lanReplicationSourceID, 44)
+        XCTAssertTrue(item.lanReplicatedMirror)
+        XCTAssertEqual(item.stack, ItemStack(coalID, 12, damage: 1, label: "Shared"))
+        XCTAssertGreaterThan(item.pickupDelay, 1000)
+        XCTAssertTrue(item.noGravity)
+        XCTAssertTrue(item.noClip)
+        let orb = try XCTUnwrap(clientWorld.entities.compactMap { $0 as? XPOrb }.first)
+        XCTAssertEqual(orb.lanReplicationSourceID, 45)
+        XCTAssertEqual(orb.amount, 5)
+
+        let movedItem = LANEntitySnapshot(
+            entityID: 44,
+            type: "item",
+            x: 4.5,
+            y: 66,
+            z: 5.5,
+            yaw: 0.1,
+            pitch: 0,
+            health: nil,
+            dead: false,
+            itemID: coalID,
+            itemCount: 8
+        )
+        report = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 2, fullSnapshot: false, entities: [movedItem], entitySnapshotsComplete: true),
+            to: clientWorld
+        )
+
+        XCTAssertEqual(report.appliedEntitySnapshots, 1)
+        XCTAssertEqual(report.removedEntitySnapshots, 1)
+        XCTAssertEqual(clientWorld.entities.compactMap { $0 as? ItemEntity }.first?.x, 4.5)
+        XCTAssertEqual(clientWorld.entities.compactMap { $0 as? ItemEntity }.first?.stack.count, 8)
+        XCTAssertTrue(clientWorld.entities.compactMap { $0 as? XPOrb }.isEmpty)
+
+        report = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 3, fullSnapshot: false, entities: [], entitySnapshotsComplete: true),
+            to: clientWorld
+        )
+
+        XCTAssertEqual(report.removedEntitySnapshots, 1)
+        XCTAssertTrue(clientWorld.entities.allSatisfy { ($0 as? Entity)?.lanReplicatedMirror != true })
+    }
+
+    func testInvalidDroppedItemSnapshotsAreRejectedWithoutMutatingWorld() {
+        let clientWorld = makeLoadedWorld()
+        let invalidItem = LANEntitySnapshot(
+            entityID: 1,
+            type: "item",
+            x: 0,
+            y: 65,
+            z: 0,
+            yaw: 0,
+            pitch: 0,
+            health: nil,
+            dead: false,
+            itemID: itemDefs.count + 100,
+            itemCount: 1
+        )
+
+        let report = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 1, fullSnapshot: false, entities: [invalidItem]),
+            to: clientWorld
+        )
+
+        XCTAssertEqual(report.ignoredInvalidEntities, 1)
+        XCTAssertTrue(clientWorld.entities.isEmpty)
+    }
+
+    func testBlockOnlyReplicationBatchDoesNotClearMirroredEntities() throws {
+        let clientWorld = makeLoadedWorld()
+        let itemSnapshot = LANEntitySnapshot(
+            entityID: 22,
+            type: "item",
+            x: 1.5,
+            y: 65,
+            z: 2.5,
+            yaw: 0,
+            pitch: 0,
+            health: nil,
+            dead: false,
+            itemID: iid("coal"),
+            itemCount: 4
+        )
+        _ = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 1, fullSnapshot: false, entities: [itemSnapshot], entitySnapshotsComplete: true),
+            to: clientWorld
+        )
+        XCTAssertEqual(clientWorld.entities.compactMap { $0 as? ItemEntity }.count, 1)
+
+        let report = applyLANReplicationBatch(
+            LANReplicationBatch(
+                tick: 2,
+                fullSnapshot: false,
+                blockChanges: [LANBlockChange(dimension: Dim.overworld.rawValue, x: 1, y: 64, z: 1, cell: Int(B.dirt) << 4)]
+            ),
+            to: clientWorld
+        )
+
+        XCTAssertEqual(report.appliedBlockChanges, 1)
+        XCTAssertEqual(report.removedEntitySnapshots, 0)
+        XCTAssertEqual(clientWorld.entities.compactMap { $0 as? ItemEntity }.count, 1)
+    }
+
+    func testMirroredDroppedItemsAndXpCannotBePickedUpByLocalPlayerTick() {
+        let world = makeLoadedWorld()
+        let player = Player(world: world)
+        player.setPos(1.5, 65, 1.5)
+        world.addEntity(player)
+
+        let item = ItemEntity(world: world)
+        item.setPos(1.5, 65, 1.5)
+        item.stack = ItemStack(iid("coal"), 4)
+        item.pickupDelay = 0
+        item.lanReplicationSourceID = 1
+        item.lanReplicatedMirror = true
+        world.addEntity(item)
+
+        let orb = XPOrb(world: world)
+        orb.setPos(1.5, 65, 1.5)
+        orb.amount = 5
+        orb.lanReplicationSourceID = 2
+        orb.lanReplicatedMirror = true
+        world.addEntity(orb)
+
+        player.age = 1
+        player.tick()
+
+        XCTAssertFalse(item.dead)
+        XCTAssertFalse(orb.dead)
+        XCTAssertEqual(player.countItem(iid("coal")), 0)
+        XCTAssertEqual(player.xp, 0)
     }
 
     func testReplicationBatchCapsLargePayloadCollections() {

@@ -1,6 +1,6 @@
 #!/bin/bash
 # pebble — build, install, run, and update the Pebble app.
-#   ./pebble install    raw checkout → signed app in ~/Applications (+ this CLI on PATH)
+#   ./pebble install    raw checkout → signed app in /Applications (+ this CLI on PATH)
 #   pebble update       pull the latest from GitHub, rebuild, swap the live app
 #   pebble run          launch the installed app
 #   pebble test         run XCTest + the golden test suite
@@ -16,8 +16,9 @@ while [ -L "$SRC" ]; do
 done
 REPO="$(cd "$(dirname "$SRC")" && pwd)"
 APP_NAME="Pebble"
-APP_DIR="$HOME/Applications"
+APP_DIR="/Applications"
 APP="$APP_DIR/$APP_NAME.app"
+LEGACY_USER_APP="$HOME/Applications/$APP_NAME.app"
 BOLD=$'\033[1m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RESET=$'\033[0m'
 
 say()  { echo "${BOLD}${GREEN}==>${RESET}${BOLD} $*${RESET}"; }
@@ -88,6 +89,10 @@ deploy() {
     mkdir -p "$APP_DIR"
     rm -rf "$APP"
     cp -R "$REPO/dist/$APP_NAME.app" "$APP"
+    if [ "$LEGACY_USER_APP" != "$APP" ] && [ -d "$LEGACY_USER_APP" ]; then
+        say "Removing legacy user-local install at ${LEGACY_USER_APP} ..."
+        rm -rf "$LEGACY_USER_APP"
+    fi
 }
 
 link_cli() {
@@ -111,7 +116,7 @@ cmd_install() {
     # "two Pebbles" in Launchpad
     rm -rf "$REPO/dist"
     link_cli
-    say "Done. Launch with:  pebble run   (or open ~/Applications/$APP_NAME.app)"
+    say "Done. Launch with:  pebble run   (or open /Applications/$APP_NAME.app)"
 }
 
 cmd_update() {
@@ -132,7 +137,7 @@ case "${1:-}" in
     *)
         echo "${BOLD}pebble${RESET} — one-command install for the Pebble app"
         echo
-        echo "  ./pebble install    build from source and install ~/Applications/$APP_NAME.app"
+        echo "  ./pebble install    build from source and install /Applications/$APP_NAME.app"
         echo "  pebble update       pull the latest version and update the live app"
         echo "  pebble run          launch Pebble"
         echo "  pebble test         run XCTest + the golden test suite"

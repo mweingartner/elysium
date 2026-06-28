@@ -226,6 +226,7 @@ public final class GameCore {
     public var worldRec: WorldRecord?
     public var advancements = AdvancementTracker()
     public private(set) var inWorld = false
+    public private(set) var isLANClientWorld = false
     public private(set) var paused = false
     public var mapSpanBlocks = MAP_DEFAULT_VIEW_BLOCKS
     public var mapMinimapSizeMode = MAP_DEFAULT_MINIMAP_SIZE_MODE
@@ -406,6 +407,7 @@ public final class GameCore {
     public func exitToTitle() {
         if inWorld { saveAndFlush(synchronous: true) }
         inWorld = false
+        isLANClientWorld = false
         worldRec = nil
         dragonSpawned = false
         deathScreenShown = false
@@ -417,6 +419,7 @@ public final class GameCore {
         genInFlight.removeAll()
         savedChunkKeys.removeAll()
         savedFullKeys.removeAll()
+        pendingChunkSaves.removeAll()
         clearEntityTimeouts()
         host?.clearAllSections()
         host?.setBossBars([])
@@ -448,7 +451,54 @@ public final class GameCore {
         let ms = Int(Date().timeIntervalSince1970 * 1000)
         let id = "w" + String(ms, radix: 36) + String(Int.random(in: 0..<1_000_000), radix: 36)
         var rec = WorldRecord(id: id, name: name, seed: seed, gameMode: mode, difficulty: difficulty)
-        // pick a spawn: walk outward for a land biome
+        let spawn = defaultWorldSpawn(seed: seed)
+        rec.spawnX = spawn.x
+        rec.spawnY = spawn.y
+        rec.spawnZ = spawn.z
+        db.putWorld(rec)
+        enterWorld(rec, nil, nil)
+    }
+
+    public func loadWorld(_ id: String) {
+        guard let rec = db.getWorld(id) else { return }
+        let playerData = db.getPlayer(id)
+        let adv = db.getAdvancements(id)
+        enterWorld(rec, playerData, adv)
+    }
+
+    public func enterLANClientWorld(_ summary: LANWorldSummary) {
+        let seed = Int32(truncatingIfNeeded: summary.seed)
+        var cleanID = ""
+        for scalar in summary.worldID.unicodeScalars where cleanID.count < 48 {
+            if CharacterSet.alphanumerics.contains(scalar) || scalar == "-" || scalar == "_" {
+                cleanID.unicodeScalars.append(scalar)
+            }
+        }
+        var rec = WorldRecord(
+            id: "lan-" + (cleanID.isEmpty ? "world" : cleanID),
+            name: "LAN: \(summary.worldName)",
+            seed: seed,
+            gameMode: summary.gameMode,
+            difficulty: summary.difficulty
+        )
+        let spawn = defaultWorldSpawn(seed: seed)
+        rec.spawnX = spawn.x
+        rec.spawnY = spawn.y
+        rec.spawnZ = spawn.z
+        enterWorld(rec, nil, nil, transientLANClient: true)
+        if let d = Dim(rawValue: summary.dimension), d != dim {
+            moveToDimension(d)
+        }
+    }
+
+    public func deleteWorld(_ id: String) {
+        db.deleteWorld(id)
+    }
+
+    // ===========================================================================
+    // World lifecycle
+    // ===========================================================================
+    private func defaultWorldSpawn(seed: Int32) -> (x: Int, y: Int, z: Int) {
         let gen = overworldGen(UInt32(bitPattern: seed))
         var sx = 8, sz = 8
         for r in 0..<40 {
@@ -462,29 +512,12 @@ public final class GameCore {
                 break
             }
         }
-        rec.spawnX = sx
-        rec.spawnZ = sz
-        rec.spawnY = gen.heightEstimate(Double(sx), Double(sz)) + 1
-        db.putWorld(rec)
-        enterWorld(rec, nil, nil)
+        return (sx, gen.heightEstimate(Double(sx), Double(sz)) + 1, sz)
     }
 
-    public func loadWorld(_ id: String) {
-        guard let rec = db.getWorld(id) else { return }
-        let playerData = db.getPlayer(id)
-        let adv = db.getAdvancements(id)
-        enterWorld(rec, playerData, adv)
-    }
-
-    public func deleteWorld(_ id: String) {
-        db.deleteWorld(id)
-    }
-
-    // ===========================================================================
-    // World lifecycle
-    // ===========================================================================
-    private func enterWorld(_ rec: WorldRecord, _ playerData: [String: Any]?, _ adv: [String]?) {
+    private func enterWorld(_ rec: WorldRecord, _ playerData: [String: Any]?, _ adv: [String]?, transientLANClient: Bool = false) {
         worldRec = rec
+        isLANClientWorld = transientLANClient
         advancements = AdvancementTracker()
         if let adv { advancements.load(adv) }
         dragonSpawned = false
@@ -585,7 +618,7 @@ public final class GameCore {
     }
 
     public func saveAndFlush(synchronous: Bool = false) {
-        guard inWorld, var rec = worldRec else { return }
+        guard inWorld, var rec = worldRec, !isLANClientWorld else { return }
         rec.lastPlayed = Date().timeIntervalSince1970 * 1000
         rec.gameMode = player.gameMode
         rec.nextEntityId = peekNextEntityId()
@@ -1502,6 +1535,7 @@ public final class GameCore {
         for e in Array(w.entities) {
             if e === p || e.dead { continue }
             guard let ent = e as? Entity else { continue }
+            if ent.lanReplicatedMirror { continue }
             let dx = ent.x - p.x, dz = ent.z - p.z
             if dx * dx + dz * dz > simR && !ALWAYS_TICK.contains(ent.type) { continue }
             ent.tick()

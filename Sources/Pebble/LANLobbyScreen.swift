@@ -1,6 +1,11 @@
 import Foundation
 import PebbleCore
 
+struct LANHostLaunchRequest {
+    let joinCode: String?
+    let port: UInt16?
+}
+
 final class LANLobbyScreen: Screen {
     private let manager = LANMultiplayerManager.shared
     private let playerNameField = TextField(0, 0, 130, 16, "Player")
@@ -44,11 +49,23 @@ final class LANLobbyScreen: Screen {
         fields.append(hostPortField)
 
         y += 24
-        let hostButton = Button(left + 10, y, 112, 18, "Host World", { [weak self, weak game] in
-            guard let self, let game else { return }
+        let hostButton = Button(left + 10, y, 112, 18, "Host World", { [weak self, weak ui, weak game] in
+            guard let self, let ui, let game else { return }
+            let code = self.hostCodeField.text.isEmpty ? nil : normalizedLANJoinCode(self.hostCodeField.text)
+            if let code, !isValidLANJoinCode(code) {
+                pushChat("§c" + LANTransportError.invalidJoinCode.description)
+                return
+            }
+            let port = UInt16(self.hostPortField.text)
+            if !self.hostPortField.text.isEmpty && port == nil {
+                pushChat("§c" + LANTransportError.invalidPort.description)
+                return
+            }
+            if !game.hasWorld() {
+                ui.open(WorldSelectScreen(lanHostRequest: LANHostLaunchRequest(joinCode: code, port: port)), game)
+                return
+            }
             do {
-                let code = self.hostCodeField.text.isEmpty ? nil : normalizedLANJoinCode(self.hostCodeField.text)
-                let port = UInt16(self.hostPortField.text)
                 try self.manager.startHost(game: game, requestedJoinCode: code, requestedPort: port)
                 if let code {
                     self.hostCodeField.text = code
@@ -60,7 +77,6 @@ final class LANLobbyScreen: Screen {
                 pushChat("§cLAN host failed: \(error)")
             }
         })
-        hostButton.enabled = game.hasWorld()
         buttons.append(hostButton)
         buttons.append(Button(left + 130, y, 92, 18, "Browse LAN", { [weak self] in
             self?.manager.startBrowsing()
@@ -91,38 +107,9 @@ final class LANLobbyScreen: Screen {
         fields.append(joinCodeField)
 
         y += 24
-        buttons.append(Button(left + 10, y, 144, 18, "Join Selected", { [weak self] in
-            guard let self else { return }
-            guard self.selectedHost >= 0, self.selectedHost < self.manager.discoveredHosts.count else {
-                pushChat("§cSelect a discovered LAN world first.")
-                return
-            }
-            do {
-                try self.manager.connectToDiscovered(
-                    self.manager.discoveredHosts[self.selectedHost],
-                    playerName: self.playerNameField.text,
-                    joinCode: self.joinCodeField.text
-                )
-            } catch let error as LANTransportError {
-                pushChat("§c" + error.description)
-            } catch {
-                pushChat("§cLAN join failed: \(error)")
-            }
-        }))
-        buttons.append(Button(left + 162, y, 140, 18, "Direct Connect", { [weak self] in
-            guard let self else { return }
-            do {
-                try self.manager.directConnect(
-                    host: self.joinHostField.text,
-                    port: self.joinPortField.text,
-                    joinCode: self.joinCodeField.text,
-                    playerName: self.playerNameField.text
-                )
-            } catch let error as LANTransportError {
-                pushChat("§c" + error.description)
-            } catch {
-                pushChat("§cDirect Connect failed: \(error)")
-            }
+        buttons.append(Button(left + 10, y, panelW - 20, 18, "Join World", { [weak self, weak game] in
+            guard let self, let game else { return }
+            self.joinWorld(game)
         }))
 
         buttons.append(Button(cx - 100, ui.height - 30, 200, 20, "Back", { [weak ui, weak game] in
@@ -158,7 +145,7 @@ final class LANLobbyScreen: Screen {
         cv.strokeRect(left + 10, listTop, panelW - 20, listH)
         drawDiscoveredHosts(ui, x: left + 12, y: listTop + 2, w: panelW - 24, h: listH - 4)
 
-        cv.drawText("Host", joinHostField.x, joinHostField.y - 9, 1, "#606060", shadow: false)
+        cv.drawText("Manual Host", joinHostField.x, joinHostField.y - 9, 1, "#606060", shadow: false)
         cv.drawText("Port", joinPortField.x, joinPortField.y - 9, 1, "#606060", shadow: false)
         cv.drawText("Code", joinCodeField.x, joinCodeField.y - 9, 1, "#606060", shadow: false)
 
@@ -176,6 +163,9 @@ final class LANLobbyScreen: Screen {
     }
 
     override func onMouseDown(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double, _ btn: Int) -> Bool {
+        if joinHostField.contains(mx, my) || joinPortField.contains(mx, my) {
+            selectedHost = -1
+        }
         if super.onMouseDown(ui, game, mx, my, btn) { return true }
         let cx = (ui.width / 2).rounded(.down)
         let panelW = min(356.0, ui.width - 24)
@@ -188,8 +178,6 @@ final class LANLobbyScreen: Screen {
         let index = Int(((my - listTop) + scroll) / 18)
         if index >= 0, index < manager.discoveredHosts.count {
             selectedHost = index
-            joinHostField.text = manager.discoveredHosts[index].displayName
-            joinHostField.caret = joinHostField.text.count
             return true
         }
         return false
@@ -197,23 +185,44 @@ final class LANLobbyScreen: Screen {
 
     override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
         if key == "Enter" {
-            if joinHostField.focused || joinPortField.focused || joinCodeField.focused {
-                do {
-                    try manager.directConnect(
-                        host: joinHostField.text,
-                        port: joinPortField.text,
-                        joinCode: joinCodeField.text,
-                        playerName: playerNameField.text
-                    )
-                } catch let error as LANTransportError {
-                    pushChat("§c" + error.description)
-                } catch {
-                    pushChat("§cDirect Connect failed: \(error)")
-                }
+            if joinHostField.focused || joinPortField.focused || joinCodeField.focused || playerNameField.focused {
+                joinWorld(game)
                 return true
             }
         }
         return super.onKey(ui, game, key)
+    }
+
+    private func joinWorld(_ game: GameCore) {
+        manager.attachGame(game)
+        do {
+            if selectedHost >= 0, selectedHost < manager.discoveredHosts.count {
+                let host = manager.discoveredHosts[selectedHost]
+                try manager.connectToDiscovered(
+                    host,
+                    playerName: playerNameField.text,
+                    joinCode: joinCodeField.text
+                )
+                pushChat("§7Joining LAN world \(host.displayName).")
+                return
+            }
+            let manualHost = joinHostField.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !manualHost.isEmpty else {
+                pushChat("§cSelect a discovered LAN world or enter a manual host address.")
+                return
+            }
+            try manager.directConnect(
+                host: manualHost,
+                port: joinPortField.text,
+                joinCode: joinCodeField.text,
+                playerName: playerNameField.text
+            )
+            pushChat("§7Connecting to \(manualHost):\(joinPortField.text).")
+        } catch let error as LANTransportError {
+            pushChat("§c" + error.description)
+        } catch {
+            pushChat("§cLAN join failed: \(error)")
+        }
     }
 
     private func drawDiscoveredHosts(_ ui: UIManager, x: Double, y: Double, w: Double, h: Double) {

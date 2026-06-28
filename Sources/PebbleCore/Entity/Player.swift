@@ -155,6 +155,7 @@ public final class Player: LivingEntity {
         // item magnet pickup
         if age % 2 == 0 && !dead {
             for e in world.getEntitiesNear(x, y + 0.5, z, 1.6) {
+                if (e as? Entity)?.lanReplicatedMirror == true { continue }
                 if let item = e as? ItemEntity, item.pickupDelay <= 0 {
                     let before = item.stack.count
                     if give(item.stack) {

@@ -39,6 +39,6 @@ swift run -c release pebsmoke
 
 stage "deploy"
 ./pebble install
-./scripts/security-check-binary.sh "$HOME/Applications/Pebble.app"
+./scripts/security-check-binary.sh "/Applications/Pebble.app"
 
 stage "clean pass deployed"

@@ -300,6 +300,7 @@ final class LANMultiplayerManager {
     private func connect(_ connection: NWConnection, playerName: String, joinCode code: String, label: String) {
         let peer = LANWirePeer(connection: connection)
         clientPeer = peer
+        clientReplicationSession = LANMultiplayerClientSession()
         setState(.connecting)
         appendStatus("Connecting to \(label).")
         connection.stateUpdateHandler = { [weak self, weak peer] state in
@@ -506,9 +507,19 @@ final class LANMultiplayerManager {
     private func handleClientMessage(_ message: LANMultiplayerMessage, from peer: LANWirePeer) {
         switch message {
         case .serverAccept(_, let world):
-            setState(.connected)
-            appendStatus("Joined LAN world \"\(world.worldName)\" with \(world.playerCount)/\(world.maxPlayers) players.")
-            postChat("§b[LAN] Connected to \"\(world.worldName)\".")
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.setState(.connected)
+                if let game = self.activeGame, !game.hasWorld() {
+                    game.enterLANClientWorld(world)
+                    game.host?.capturePointer()
+                    self.appendStatus("Entered LAN client world \"\(world.worldName)\".")
+                } else if self.activeGame == nil {
+                    self.appendStatus("LAN join accepted, but no active game was attached for world entry.")
+                }
+                self.appendStatus("Joined LAN world \"\(world.worldName)\" with \(world.playerCount)/\(world.maxPlayers) players.")
+                self.postChat("§b[LAN] Connected to \"\(world.worldName)\".")
+            }
         case .serverReject(let reason):
             setState(.rejected)
             appendStatus("LAN join rejected: \(sanitizedLANChatText(reason))")
@@ -585,7 +596,7 @@ final class LANMultiplayerManager {
         _ = applyLANRemotePlayers(hostReplicationSession.peerPlayerStates(), to: game.world, localPlayerID: localPeerID)
         let localState = makeLANPlayerState(player, playerID: localPeerID, displayName: NSFullUserName(), dimension: game.dim.rawValue)
         let chunks = fullSnapshot ? makeLANChunkSectionSnapshots(around: player, in: game.world) : []
-        let entities = makeLANEntitySnapshots(in: game.world, aroundX: player.x, aroundZ: player.z)
+        let entities = makeLANEntitySnapshots(in: game.world)
         let inventories = [makeLANInventorySnapshot(player, playerID: localPeerID)]
         let summary = fullSnapshot ? makeWorldSummary(playerCount: acceptedCount) : nil
         return hostReplicationSession.makeBatch(
@@ -734,9 +745,9 @@ final class LANMultiplayerManager {
                 _ = applyLANRemotePlayers(batch.players, to: game.world, localPlayerID: self.localPeerID)
             }
             if batch.fullSnapshot {
-                self.appendStatus("Applied LAN snapshot tick \(batch.tick): \(mirrorReport.appliedChunkSections) sections, \(mirrorReport.appliedBlockChanges) block deltas.")
-            } else if let worldReport, worldReport.appliedBlockChanges > 0 {
-                self.appendStatus("Applied \(worldReport.appliedBlockChanges) LAN block delta\(worldReport.appliedBlockChanges == 1 ? "" : "s").")
+                self.appendStatus("Applied LAN snapshot tick \(batch.tick): \(mirrorReport.appliedChunkSections) sections, \(mirrorReport.appliedBlockChanges) block deltas, \(mirrorReport.appliedEntitySnapshots) entities.")
+            } else if let worldReport, worldReport.appliedBlockChanges > 0 || worldReport.appliedEntitySnapshots > 0 || worldReport.removedEntitySnapshots > 0 {
+                self.appendStatus("Applied \(worldReport.appliedBlockChanges) LAN block delta\(worldReport.appliedBlockChanges == 1 ? "" : "s"), \(worldReport.appliedEntitySnapshots) entity update\(worldReport.appliedEntitySnapshots == 1 ? "" : "s"), \(worldReport.removedEntitySnapshots) entity removal\(worldReport.removedEntitySnapshots == 1 ? "" : "s").")
             }
         }
     }

@@ -51,7 +51,7 @@ Pebble is an original fan re-creation inspired by Minecraft: Java Edition 1.20. 
 - **Creative mode** — instant block breaking, flight, an infinite hotbar, and full player invulnerability while building.
 - **Live map overlay** — a square minimap sits flush against the lower-right HUD edge, centered on the player, and defaults to the medium of three compact sizes. Use `-` / `=` to cycle the compact size, press M to pop it into a large draggable map, and use `,` / `.` to zoom from the loaded-world overview down to roughly 100 blocks around the player.
 - **Object templates** — point the center crosshair at a connected construction and press Command-C to name and save it as a local template, then press Command-V to open the saved-template browser and choose an object to place. Placement preview captures the pointer, floats a bounded wireframe of the saved 3D object in the view center, rotates it in 90-degree steps with the mouse wheel, and commits on left click with blocks, block entities, and container contents intact. Placement automatically clears blocks inside the object volume and fills foundation gaps under the footprint with adjacent terrain material when the selected location is uneven. Press Command-Z in world mode to undo the most recent object placement, removing the placed object and restoring the cells that placement cleared or filled. Legacy commands remain available: `/clone the target with new name "name"`, `/place "name"`, and `/listTemplates`.
-- **LAN multiplayer sessions** — open the Multiplayer screen from the title menu or "Open to LAN" from the pause menu to host, browse, or Direct Connect to a player-started local-network game. Pebble advertises `_pebble-lan._tcp` with Bonjour, requires a short join code before accepting a peer, and exposes `/lan host`, `/lan browse`, `/lan join`, `/lan direct`, `/lan say`, `/lan status`, and `/lan stop` for command-line control. The shipped network layer supports bounded protocol frames, handshake, LAN discovery, Direct Connect, peer status, LAN chat, host-authoritative replication batches for player state, chunk sections, block deltas, entity snapshots, and inventory snapshots, plus remote player entities and host permission gates for build/container/crafting/template/command/AI/creative/dimension/death/respawn/reconnect flows. Public internet/NAT traversal and cloud relay are not included.
+- **LAN multiplayer sessions** — open the Multiplayer screen from the title menu or "Open to LAN" from the pause menu to host, browse, or join a player-started local-network game. The Join World button connects to the selected discovered LAN world, or to the typed manual host/port when no discovered world is selected. Pebble advertises `_pebble-lan._tcp` with Bonjour, requires a short join code before accepting a peer, and exposes `/lan host`, `/lan browse`, `/lan join`, `/lan direct`, `/lan say`, `/lan status`, and `/lan stop` for command-line control. The shipped network layer supports bounded protocol frames, handshake, LAN discovery, Direct Connect, peer status, LAN chat, host-authoritative replication batches for player state, chunk sections, block deltas, loaded entity snapshots with dropped-item/XP visibility, and inventory snapshots, plus remote player entities and host permission gates for build/container/crafting/template/command/AI/creative/dimension/death/respawn/reconnect flows. Public internet/NAT traversal and cloud relay are not included.
 - **Local AI agent** — press T and run `/ai <request>` to ask a configured local Ollama model to inspect the current game state, give registered items, place registered block items at the cursor, level dirt-adjacent holes in front of the player, inspect saved object templates, edit their block composition, or create bounded generated templates such as pirate ships. Direct requests like `/ai fill the hole in front of me with dirt`, `/ai change the type of all wood blocks in "house" to bamboo`, and `/ai create a object that looks like a pirate ship about 50 blocks long ... Name the object pirateShip` are handled deterministically and saved in the same template store as player-copied objects where applicable. The model preference lives in Options -> AI, only talks to `http://localhost:11434`, and filters/rejects cloud-tagged Ollama models.
 - **Vanilla-exact player physics** — walk 4.317 b/s, sprint 5.612 b/s, jump apex 1.2522 blocks, sprint-jumping, water/lava/elytra movement, ice slipperiness, soul sand, honey — verified by independent-derivation tests in the suite.
 - **Faithful 32x textures, built in** — the complete [Faithful 32x](https://faithfulpack.net) art (third-party, fully credited — see [Disclaimer](#disclaimer)) ships inside the app and loads through Pebble's own zip/`.mcmeta` reader: atlas textures, animations with interpolation, GUIs, fonts, entity skins, and sun/moon art. Self-restoring if the file goes missing.
@@ -67,10 +67,10 @@ git clone https://github.com/thebriangao/pebble.git && cd pebble
 ./pebble install
 ```
 
-That builds in release mode, assembles a signed `Pebble.app`, installs it to `~/Applications`, and links the `pebble` CLI onto your PATH.
+That builds in release mode, assembles a signed `Pebble.app`, installs it to `/Applications`, removes any legacy `~/Applications/Pebble.app`, and links the `pebble` CLI onto your PATH.
 
 ```
-./pebble install    build from source and install ~/Applications/Pebble.app
+./pebble install    build from source and install /Applications/Pebble.app
 pebble update       pull the latest version, rebuild, swap the live app
 pebble run          launch Pebble
 pebble test         run XCTest plus the 456-check golden suite
@@ -89,7 +89,7 @@ WASD to move, mouse to look, Space to jump, Shift to sneak, Ctrl (or double-tap 
 | `~/Library/Application Support/Pebble/pebble.db` | All worlds, chunks, players, advancements, and object templates (single SQLite database) |
 | `~/Library/Application Support/Pebble/settings.json` + `keybinds.json` | Settings and keybinds |
 
-To uninstall completely: delete `~/Applications/Pebble.app`, `~/Library/Application Support/Pebble/`, and the `pebble` symlink on your PATH (`/opt/homebrew/bin/pebble` or `/usr/local/bin/pebble`).
+To uninstall completely: delete `/Applications/Pebble.app`, `~/Library/Application Support/Pebble/`, and the `pebble` symlink on your PATH (`/opt/homebrew/bin/pebble` or `/usr/local/bin/pebble`).
 
 ## Project layout
 
@@ -145,7 +145,7 @@ For an end-to-end local release gate:
 ./scripts/pipeline.sh
 ```
 
-That runs architecture checks, source security scans, bundled Faithful asset verification, a warning-free release build, binary security checks, XCTest, the 456-check golden suite, install to `~/Applications/Pebble.app`, and a final installed-app binary verification.
+That runs architecture checks, source security scans, bundled Faithful asset verification, a warning-free release build, binary security checks, XCTest, the 456-check golden suite, install to `/Applications/Pebble.app`, and a final installed-app binary verification.
 
 ## Reporting bugs & contributing
 
@@ -182,7 +182,7 @@ Pebble's *gameplay design* is inspired by Minecraft: Java Edition 1.20 — game 
 
 **Third-party content:** the app bundle ships the complete, unmodified [Faithful 32x](https://faithfulpack.net) (1.20.1) as its built-in texture set. That artwork is the work of the Faithful team and its contributors, distributed under the [Faithful License](packaging/FAITHFUL-LICENSE.txt) (included verbatim here and in the app bundle, as it requires) — it is **not** covered by this repository's MIT license. Pebble is free and non-commercial, consistent with that license's no-monetization requirement. If anyone with rights in that artwork prefers it not be bundled, contact the address below and it will be removed promptly; Pebble remains fully functional without it. Pebble's ability to *read* the file format the artwork ships in is an independently implemented compatibility feature and implies no affiliation.
 
-Pebble is provided "as is", without warranty of any kind (see [LICENSE](LICENSE)). It writes only to `~/Library/Application Support/Pebble/` and `~/Applications/Pebble.app`. Questions, concerns, or good-faith takedown requests from rights holders: **briangaoo2@gmail.com** (subject starting with `[pebble]`) — they will be honored quickly.
+Pebble is provided "as is", without warranty of any kind (see [LICENSE](LICENSE)). It writes only to `~/Library/Application Support/Pebble/` and `/Applications/Pebble.app`. Questions, concerns, or good-faith takedown requests from rights holders: **briangaoo2@gmail.com** (subject starting with `[pebble]`) — they will be honored quickly.
 
 ---
 

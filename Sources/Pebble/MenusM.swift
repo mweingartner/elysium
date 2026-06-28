@@ -92,22 +92,27 @@ final class TitleScreen: Screen {
 
 // =============================================================================
 final class WorldSelectScreen: Screen {
+    private let lanHostRequest: LANHostLaunchRequest?
     var worlds: [WorldRecord] = []
     var selected = -1
     var loaded = false
     var playBtn: Button!
     var deleteBtn: Button!
 
+    init(lanHostRequest: LANHostLaunchRequest? = nil) {
+        self.lanHostRequest = lanHostRequest
+        super.init()
+    }
+
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         worlds = game.listWorlds().sorted { $0.lastPlayed > $1.lastPlayed }
         loaded = true
         let cx = (ui.width / 2).rounded(.down)
         let by = ui.height - 50
-        playBtn = Button(cx - 154, by, 100, 20, "Play Selected", { [weak self, weak ui, weak game] in
+        playBtn = Button(cx - 154, by, 100, 20, lanHostRequest == nil ? "Play Selected" : "Host Selected", { [weak self, weak ui, weak game] in
             guard let self, let ui, let game else { return }
             if self.selected >= 0 {
-                game.loadWorld(self.worlds[self.selected].id)
-                ui.open(LoadingScreen(), game)
+                self.openWorld(self.worlds[self.selected], ui: ui, game: game)
             }
         })
         deleteBtn = Button(cx - 50, by, 100, 20, "Delete", { [weak self, weak game] in
@@ -122,7 +127,7 @@ final class WorldSelectScreen: Screen {
         buttons.append(deleteBtn)
         buttons.append(Button(cx + 54, by, 100, 20, "Create New", { [weak ui, weak game] in
             guard let ui, let game else { return }
-            ui.open(WorldCreateScreen(), game)
+            ui.open(WorldCreateScreen(lanHostRequest: self.lanHostRequest), game)
         }))
         buttons.append(Button(cx - 100, by + 24, 200, 20, "Back", { [weak ui, weak game] in
             guard let ui, let game else { return }
@@ -138,7 +143,7 @@ final class WorldSelectScreen: Screen {
 
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         ui.drawDirtBg()
-        ui.cv.drawTextCentered("Select World", ui.width / 2, 10, 1)
+        ui.cv.drawTextCentered(lanHostRequest == nil ? "Select World" : "Select World to Host", ui.width / 2, 10, 1)
         playBtn.enabled = selected >= 0
         deleteBtn.enabled = selected >= 0
         let listX = (ui.width / 2).rounded(.down) - 130
@@ -189,8 +194,7 @@ final class WorldSelectScreen: Screen {
             if y + 28 <= top || y >= bottom { continue }
             if my >= y && my < y + 28 {
                 if selected == i {
-                    game.loadWorld(worlds[i].id)
-                    ui.open(LoadingScreen(), game)
+                    openWorld(worlds[i], ui: ui, game: game)
                 }
                 selected = i
                 return true
@@ -198,15 +202,45 @@ final class WorldSelectScreen: Screen {
         }
         return false
     }
+
+    private func openWorld(_ record: WorldRecord, ui: UIManager, game: GameCore) {
+        game.loadWorld(record.id)
+        startPendingLANHost(game)
+        ui.open(LoadingScreen(), game)
+    }
+
+    private func startPendingLANHost(_ game: GameCore) {
+        guard let lanHostRequest else { return }
+        do {
+            try LANMultiplayerManager.shared.startHost(
+                game: game,
+                requestedJoinCode: lanHostRequest.joinCode,
+                requestedPort: lanHostRequest.port
+            )
+            for line in LANMultiplayerManager.shared.statusSummary() {
+                pushChat("§7" + line)
+            }
+        } catch let error as LANTransportError {
+            pushChat("§c" + error.description)
+        } catch {
+            pushChat("§cLAN host failed: \(error)")
+        }
+    }
 }
 
 // =============================================================================
 final class WorldCreateScreen: Screen {
+    private let lanHostRequest: LANHostLaunchRequest?
     let nameField = TextField(0, 0, 200, 16, "New World")
     let seedField = TextField(0, 0, 200, 16, "Leave blank for random")
     var mode = GameMode.survival
     var difficulty = 2
     var creating = false
+
+    init(lanHostRequest: LANHostLaunchRequest? = nil) {
+        self.lanHostRequest = lanHostRequest
+        super.init()
+    }
 
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         let cx = (ui.width / 2).rounded(.down)
@@ -230,11 +264,12 @@ final class WorldCreateScreen: Screen {
         }
         buttons.append(modeBtn)
         buttons.append(diffBtn)
-        buttons.append(Button(cx - 100, 158, 98, 20, "Create World", { [weak self, weak ui, weak game] in
+        buttons.append(Button(cx - 100, 158, 98, 20, lanHostRequest == nil ? "Create World" : "Create & Host", { [weak self, weak ui, weak game] in
             guard let self, let ui, let game, !self.creating else { return }
             self.creating = true
             game.createWorld(name: self.nameField.text.isEmpty ? "New World" : self.nameField.text,
                              seedText: self.seedField.text, mode: self.mode, difficulty: self.difficulty)
+            self.startPendingLANHost(game)
             ui.open(LoadingScreen(), game)
         }))
         buttons.append(Button(cx + 2, 158, 98, 20, "Cancel", { [weak ui, weak game] in
@@ -244,13 +279,31 @@ final class WorldCreateScreen: Screen {
     }
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         ui.drawDirtBg()
-        ui.cv.drawTextCentered("Create New World", ui.width / 2, 10, 1)
+        ui.cv.drawTextCentered(lanHostRequest == nil ? "Create New World" : "Create World to Host", ui.width / 2, 10, 1)
         ui.cv.drawText("World Name", nameField.x, nameField.y - 10, 1, "#a0a0a0")
         ui.cv.drawText("Seed", seedField.x, seedField.y - 10, 1, "#a0a0a0")
         if creating {
             ui.cv.drawTextCentered("Generating world…", ui.width / 2, 190, 1, "#ffff55")
         }
         ui.drawButtons(self)
+    }
+
+    private func startPendingLANHost(_ game: GameCore) {
+        guard let lanHostRequest else { return }
+        do {
+            try LANMultiplayerManager.shared.startHost(
+                game: game,
+                requestedJoinCode: lanHostRequest.joinCode,
+                requestedPort: lanHostRequest.port
+            )
+            for line in LANMultiplayerManager.shared.statusSummary() {
+                pushChat("§7" + line)
+            }
+        } catch let error as LANTransportError {
+            pushChat("§c" + error.description)
+        } catch {
+            pushChat("§cLAN host failed: \(error)")
+        }
     }
 }
 
