@@ -200,11 +200,16 @@ public final class LANMultiplayerHostSession {
 
     public func recordInventorySnapshot(_ snapshot: LANPlayerInventorySnapshot, from rawPlayerID: String) {
         let playerID = String(rawPlayerID.prefix(128))
-        guard var peer = peers[playerID] else { return }
+        guard var peer = peers[playerID],
+              let normalized = normalizedLANInventorySnapshot(snapshot)
+        else { return }
         peer.inventory = LANPlayerInventorySnapshot(
             playerID: peer.playerID,
-            selectedHotbarSlot: snapshot.selectedHotbarSlot,
-            slots: snapshot.slots
+            selectedHotbarSlot: normalized.selectedHotbarSlot,
+            slots: normalized.slots,
+            xp: normalized.xp,
+            xpLevel: normalized.xpLevel,
+            xpProgress: normalized.xpProgress
         )
         peers[playerID] = peer
     }
@@ -276,6 +281,14 @@ public final class LANMultiplayerHostSession {
             .compactMap(\.inventory)
             .prefix(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES)
             .map { $0 }
+    }
+
+    public func peerInventorySnapshotsByPlayerID() -> [String: LANPlayerInventorySnapshot] {
+        var out: [String: LANPlayerInventorySnapshot] = [:]
+        for snapshot in peerInventorySnapshots() {
+            out[snapshot.playerID] = snapshot
+        }
+        return out
     }
 
     public func authorize(_ permission: LANGameplayPermission, from rawPlayerID: String) -> LANAuthorizationResult {
@@ -573,7 +586,8 @@ public final class LANMultiplayerClientSession {
             }
         }
         for inventory in batch.inventories.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES) {
-            inventories[inventory.playerID] = inventory
+            guard let normalized = normalizedLANInventorySnapshot(inventory) else { continue }
+            inventories[normalized.playerID] = normalized
         }
         return report
     }
@@ -603,8 +617,8 @@ public func makeLANPlayerState(_ player: Player, playerID: String, displayName: 
     )
 }
 
-public func makeLANInventorySnapshot(_ player: Player, playerID: String) -> LANPlayerInventorySnapshot {
-    let slots = player.inventory.enumerated().compactMap { index, stack -> LANInventorySlotSnapshot? in
+private func makeLANInventorySlotSnapshots(_ inventory: [ItemStack?]) -> [LANInventorySlotSnapshot] {
+    inventory.enumerated().compactMap { index, stack -> LANInventorySlotSnapshot? in
         guard let stack, stack.count > 0, stack.id >= 0, stack.id < itemDefs.count else { return nil }
         return LANInventorySlotSnapshot(
             slot: index,
@@ -614,7 +628,109 @@ public func makeLANInventorySnapshot(_ player: Player, playerID: String) -> LANP
             label: stack.label
         )
     }
-    return LANPlayerInventorySnapshot(playerID: playerID, selectedHotbarSlot: player.selectedSlot, slots: slots)
+}
+
+public func makeLANInventorySnapshot(_ player: Player, playerID: String) -> LANPlayerInventorySnapshot {
+    LANPlayerInventorySnapshot(
+        playerID: playerID,
+        selectedHotbarSlot: player.selectedSlot,
+        slots: makeLANInventorySlotSnapshots(player.inventory),
+        xp: player.xp,
+        xpLevel: player.xpLevel,
+        xpProgress: player.xpProgress
+    )
+}
+
+public func makeLANInventorySnapshot(_ player: LANRemotePlayerEntity) -> LANPlayerInventorySnapshot {
+    LANPlayerInventorySnapshot(
+        playerID: player.multiplayerPlayerID,
+        selectedHotbarSlot: player.selectedSlot,
+        slots: makeLANInventorySlotSnapshots(player.inventory),
+        xp: player.xp,
+        xpLevel: player.xpLevel,
+        xpProgress: player.xpProgress
+    )
+}
+
+public func makeLANRemotePlayerInventorySnapshots(in world: World) -> [LANPlayerInventorySnapshot] {
+    world.entities
+        .compactMap { $0 as? LANRemotePlayerEntity }
+        .filter { !$0.dead }
+        .sorted { $0.multiplayerPlayerID < $1.multiplayerPlayerID }
+        .prefix(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES)
+        .map { makeLANInventorySnapshot($0) }
+}
+
+private let LAN_PLAYER_INVENTORY_SLOT_COUNT = 36
+
+private func normalizedLANInventorySnapshot(_ snapshot: LANPlayerInventorySnapshot) -> LANPlayerInventorySnapshot? {
+    var seenSlots = Set<Int>()
+    var slots: [LANInventorySlotSnapshot] = []
+    slots.reserveCapacity(snapshot.slots.count)
+    for slot in snapshot.slots {
+        guard slot.slot >= 0,
+              slot.slot < LAN_PLAYER_INVENTORY_SLOT_COUNT,
+              seenSlots.insert(slot.slot).inserted,
+              slot.itemID >= 0,
+              slot.itemID < itemDefs.count,
+              slot.count > 0,
+              slot.damage >= 0
+        else { return nil }
+        slots.append(LANInventorySlotSnapshot(
+            slot: slot.slot,
+            itemID: slot.itemID,
+            count: min(slot.count, maxStackOf(ItemStack(slot.itemID, 1))),
+            damage: slot.damage,
+            label: slot.label
+        ))
+    }
+    return LANPlayerInventorySnapshot(
+        playerID: snapshot.playerID,
+        selectedHotbarSlot: snapshot.selectedHotbarSlot,
+        slots: slots,
+        xp: snapshot.xp,
+        xpLevel: snapshot.xpLevel,
+        xpProgress: snapshot.xpProgress
+    )
+}
+
+private func makeInventory(from snapshot: LANPlayerInventorySnapshot) -> [ItemStack?]? {
+    guard let snapshot = normalizedLANInventorySnapshot(snapshot) else { return nil }
+    var inventory: [ItemStack?] = Array(repeating: nil, count: LAN_PLAYER_INVENTORY_SLOT_COUNT)
+    for slot in snapshot.slots {
+        let stack = ItemStack(
+            slot.itemID,
+            slot.count,
+            damage: slot.damage,
+            label: slot.label
+        )
+        inventory[slot.slot] = stack
+    }
+    return inventory
+}
+
+@discardableResult
+public func applyLANInventorySnapshot(_ snapshot: LANPlayerInventorySnapshot, to player: Player) -> Bool {
+    guard let inventory = makeInventory(from: snapshot) else { return false }
+    player.inventory = inventory
+    player.selectedSlot = snapshot.selectedHotbarSlot
+    player.xp = snapshot.xp
+    player.xpLevel = snapshot.xpLevel
+    player.xpProgress = snapshot.xpProgress
+    return true
+}
+
+@discardableResult
+public func applyLANInventorySnapshot(_ snapshot: LANPlayerInventorySnapshot, to player: LANRemotePlayerEntity) -> Bool {
+    guard snapshot.playerID == player.multiplayerPlayerID,
+          let inventory = makeInventory(from: snapshot)
+    else { return false }
+    player.inventory = inventory
+    player.selectedSlot = snapshot.selectedHotbarSlot
+    player.xp = snapshot.xp
+    player.xpLevel = snapshot.xpLevel
+    player.xpProgress = snapshot.xpProgress
+    return true
 }
 
 public func makeLANWorldStateSnapshot(in world: World) -> LANWorldStateSnapshot {

@@ -60,10 +60,20 @@ public final class LANRemotePlayerEntity: LivingEntity {
     public let multiplayerPlayerID: String
     public private(set) var displayName: String
     private var remoteGameMode = GameMode.survival
+    public var inventory: [ItemStack?] = Array(repeating: nil, count: 36)
+    public var selectedSlot = 0
+    public var hunger = 20
+    public var xp = 0
+    public var xpLevel = 0
+    public var xpProgress = 0.0
 
     public override var type: String { "player" }
     public override var isPlayer: Bool { true }
     public override var gameMode: Int { remoteGameMode }
+    public override var mainHand: ItemStack? {
+        get { inventory[selectedSlot] }
+        set { inventory[selectedSlot] = newValue }
+    }
 
     public init(world: World, state: LANPlayerState) {
         self.multiplayerPlayerID = state.playerID
@@ -99,8 +109,10 @@ public final class LANRemotePlayerEntity: LivingEntity {
         pitch = state.pitch
         headYaw = renderYaw
         bodyYaw = renderYaw
+        selectedSlot = max(0, min(8, state.selectedHotbarSlot))
         remoteGameMode = state.gameMode
         health = max(0, min(maxHealth, state.health))
+        hunger = max(0, min(20, state.hunger))
         deathTime = state.dead ? max(deathTime, 1) : 0
         dead = state.dead
         noClip = true
@@ -113,6 +125,72 @@ public final class LANRemotePlayerEntity: LivingEntity {
 
     public override func tick() {
         age += 1
+        guard !dead else { return }
+        tickAuthoritativePickups()
+    }
+
+    @discardableResult
+    public override func give(_ stackIn: ItemStack?) -> Bool {
+        guard let stack = stackIn, stack.id >= 0, stack.id < itemDefs.count, stack.count > 0 else { return false }
+        for i in 0..<inventory.count where stack.count > 0 {
+            if let existing = inventory[i], canMerge(existing, stack) {
+                let take = min(maxStackOf(existing) - existing.count, stack.count)
+                if take > 0 {
+                    existing.count += take
+                    stack.count -= take
+                }
+            }
+        }
+        if stack.count <= 0 { return true }
+        for i in 0..<inventory.count where inventory[i] == nil {
+            let copy = stack.copy()
+            copy.count = min(stack.count, maxStackOf(copy))
+            inventory[i] = copy
+            stack.count -= copy.count
+            return stack.count <= 0
+        }
+        return false
+    }
+
+    public func addXP(_ pointsIn: Int) {
+        let points = max(0, min(100_000, pointsIn))
+        guard points > 0 else { return }
+        xp = max(0, min(1_000_000_000, xp + points))
+        var need = Double(xpForLevel(xpLevel))
+        var cur = xpProgress * need + Double(points)
+        while cur >= need {
+            cur -= need
+            xpLevel = min(100_000, xpLevel + 1)
+            need = Double(xpForLevel(xpLevel))
+        }
+        xpProgress = need > 0 ? max(0, min(1, cur / need)) : 0
+    }
+
+    public func xpForLevel(_ level: Int) -> Int {
+        if level >= 30 { return 112 + (level - 30) * 9 }
+        if level >= 15 { return 37 + (level - 15) * 5 }
+        return 7 + level * 2
+    }
+
+    private func tickAuthoritativePickups() {
+        guard age % 2 == 0 else { return }
+        for ref in world.getEntitiesNear(x, y + 0.5, z, 1.6).sorted(by: { $0.id < $1.id }) {
+            if ref === self { continue }
+            if (ref as? Entity)?.lanReplicatedMirror == true { continue }
+            if let item = ref as? ItemEntity, item.pickupDelay <= 0 {
+                let before = item.stack.count
+                if give(item.stack) {
+                    world.hooks.playSound("entity.item.pickup", x, y, z, 0.3, 1.4 + Double.random(in: 0..<1) * 0.6)
+                    item.remove()
+                } else if item.stack.count != before {
+                    world.hooks.playSound("entity.item.pickup", x, y, z, 0.3, 1.4)
+                }
+            } else if let orb = ref as? XPOrb {
+                addXP(orb.amount)
+                world.hooks.playSound("entity.experience_orb.pickup", x, y, z, 0.4, 0.8 + Double.random(in: 0..<1) * 0.6)
+                orb.remove()
+            }
+        }
     }
 
     @discardableResult
@@ -159,7 +237,8 @@ public func applyLANRemotePlayers(
     _ states: [LANPlayerState],
     to world: World,
     localPlayerID: String?,
-    removeMissing: Bool = true
+    removeMissing: Bool = true,
+    inventorySnapshots: [String: LANPlayerInventorySnapshot] = [:]
 ) -> LANRemotePlayerApplyReport {
     var report = LANRemotePlayerApplyReport()
     let local = localPlayerID.map { String($0.prefix(128)) }
@@ -181,6 +260,9 @@ public func applyLANRemotePlayers(
             report.updated += 1
         } else {
             let remote = LANRemotePlayerEntity(world: world, state: state)
+            if let inventory = inventorySnapshots[state.playerID] {
+                _ = applyLANInventorySnapshot(inventory, to: remote)
+            }
             world.addEntity(remote)
             report.spawned += 1
         }

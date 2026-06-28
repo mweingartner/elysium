@@ -515,7 +515,12 @@ final class LANMultiplayerManager {
                     tick: self.activeGame?.world.time ?? 0
                 )
                 if let game = self.activeGame, game.hasWorld() {
-                    _ = applyLANRemotePlayers(self.hostReplicationSession.peerPlayerStates(), to: game.world, localPlayerID: self.localPeerID)
+                    _ = applyLANRemotePlayers(
+                        self.hostReplicationSession.peerPlayerStates(),
+                        to: game.world,
+                        localPlayerID: self.localPeerID,
+                        inventorySnapshots: self.hostReplicationSession.peerInventorySnapshotsByPlayerID()
+                    )
                 }
                 guard let sanitized else { return }
                 self.queue.async { [weak self] in
@@ -640,7 +645,15 @@ final class LANMultiplayerManager {
     ) -> LANReplicationBatch? {
         guard game.hasWorld() else { return nil }
         let acceptedCount = queue.sync { hostPeers.values.filter { $0.accepted }.count }
-        _ = applyLANRemotePlayers(hostReplicationSession.peerPlayerStates(), to: game.world, localPlayerID: localPeerID)
+        _ = applyLANRemotePlayers(
+            hostReplicationSession.peerPlayerStates(),
+            to: game.world,
+            localPlayerID: localPeerID,
+            inventorySnapshots: hostReplicationSession.peerInventorySnapshotsByPlayerID()
+        )
+        for remoteInventory in makeLANRemotePlayerInventorySnapshots(in: game.world) {
+            hostReplicationSession.recordInventorySnapshot(remoteInventory, from: remoteInventory.playerID)
+        }
         let localState = makeLANPlayerState(player, playerID: localPeerID, displayName: NSFullUserName(), dimension: game.dim.rawValue)
         let chunks = fullSnapshot ? (chunkSectionsOverride ?? makeLANChunkSectionSnapshots(around: player, in: game.world)) : []
         let entities = makeLANEntitySnapshots(in: game.world)
@@ -802,6 +815,10 @@ final class LANMultiplayerManager {
                 worldReport = applyLANReplicationBatch(batch, to: game.world)
                 game.markLANChunkSectionsApplied(batch.chunkSections)
                 _ = applyLANRemotePlayers(batch.players, to: game.world, localPlayerID: self.localPeerID)
+                if let player = game.player,
+                   let localInventory = self.clientReplicationSession.inventories[self.localPeerID] {
+                    _ = applyLANInventorySnapshot(localInventory, to: player)
+                }
             }
             if batch.fullSnapshot {
                 self.appendStatus("Applied LAN snapshot tick \(batch.tick): \(mirrorReport.appliedChunkSections) sections, \(mirrorReport.appliedBlockChanges) block deltas, \(mirrorReport.appliedEntitySnapshots) entities.")

@@ -819,6 +819,143 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(player.xp, 0)
     }
 
+    func testMonsterDeathDropsReplicateToAllClientsAtAuthoritativeLocation() throws {
+        let hostWorld = makeLoadedWorld()
+        let mob = GuaranteedDropMob(world: hostWorld)
+        mob.setPos(4.5, 65, 4.5)
+
+        mob.die("test")
+
+        let hostItem = try XCTUnwrap(hostWorld.entities.compactMap { $0 as? ItemEntity }.first)
+        XCTAssertEqual(hostItem.stack, ItemStack(iid("coal"), 3))
+        XCTAssertEqual(hostItem.x, mob.x, accuracy: 0.000_001)
+        XCTAssertEqual(hostItem.y, mob.y + mob.height / 2, accuracy: 0.000_001)
+        XCTAssertEqual(hostItem.z, mob.z, accuracy: 0.000_001)
+
+        let snapshots = makeLANEntitySnapshots(in: hostWorld)
+        let itemSnapshot = try XCTUnwrap(snapshots.first { $0.entityID == hostItem.id })
+        XCTAssertEqual(itemSnapshot.itemID, iid("coal"))
+        XCTAssertEqual(itemSnapshot.itemCount, 3)
+        XCTAssertEqual(itemSnapshot.x, hostItem.x, accuracy: 0.000_001)
+        XCTAssertEqual(itemSnapshot.y, hostItem.y, accuracy: 0.000_001)
+        XCTAssertEqual(itemSnapshot.z, hostItem.z, accuracy: 0.000_001)
+
+        let clientA = makeLoadedWorld()
+        let clientB = makeLoadedWorld()
+        let batch = LANReplicationBatch(tick: 10, fullSnapshot: false, entities: [itemSnapshot], entitySnapshotsComplete: true)
+        XCTAssertEqual(applyLANReplicationBatch(batch, to: clientA).appliedEntitySnapshots, 1)
+        XCTAssertEqual(applyLANReplicationBatch(batch, to: clientB).appliedEntitySnapshots, 1)
+
+        let mirroredA = try XCTUnwrap(clientA.entities.compactMap { $0 as? ItemEntity }.first)
+        let mirroredB = try XCTUnwrap(clientB.entities.compactMap { $0 as? ItemEntity }.first)
+        XCTAssertTrue(mirroredA.lanReplicatedMirror)
+        XCTAssertTrue(mirroredB.lanReplicatedMirror)
+        XCTAssertEqual(mirroredA.stack, hostItem.stack)
+        XCTAssertEqual(mirroredB.stack, hostItem.stack)
+        XCTAssertEqual(mirroredA.x, hostItem.x, accuracy: 0.000_001)
+        XCTAssertEqual(mirroredB.x, hostItem.x, accuracy: 0.000_001)
+        XCTAssertEqual(mirroredA.y, hostItem.y, accuracy: 0.000_001)
+        XCTAssertEqual(mirroredB.y, hostItem.y, accuracy: 0.000_001)
+        XCTAssertEqual(mirroredA.z, hostItem.z, accuracy: 0.000_001)
+        XCTAssertEqual(mirroredB.z, hostItem.z, accuracy: 0.000_001)
+    }
+
+    func testLANRemotePlayerPicksUpHostAuthoritativeDroppedItemsAndPublishesInventory() throws {
+        let hostWorld = makeLoadedWorld()
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex")
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 1.5,
+            y: 65,
+            z: 1.5,
+            yaw: 0,
+            pitch: 0,
+            health: 20,
+            hunger: 20,
+            selectedHotbarSlot: 0,
+            gameMode: GameMode.survival,
+            dimension: Dim.overworld.rawValue
+        ))
+        XCTAssertEqual(
+            applyLANRemotePlayers(
+                session.peerPlayerStates(),
+                to: hostWorld,
+                localPlayerID: "host",
+                inventorySnapshots: session.peerInventorySnapshotsByPlayerID()
+            ).spawned,
+            1
+        )
+        let remote = try XCTUnwrap(hostWorld.entities.compactMap { $0 as? LANRemotePlayerEntity }.first)
+        let item = spawnItem(hostWorld, 1.5, 65.5, 1.5, ItemStack(iid("coal"), 4))
+        item.pickupDelay = 0
+
+        remote.age = 1
+        remote.tick()
+
+        XCTAssertTrue(item.dead)
+        XCTAssertEqual(remote.inventory[0], ItemStack(iid("coal"), 4))
+
+        let remoteInventory = makeLANInventorySnapshot(remote)
+        session.recordInventorySnapshot(remoteInventory, from: "peer-a")
+        let batch = session.makeBatch(
+            tick: 12,
+            fullSnapshot: false,
+            worldSummary: nil,
+            worldState: nil,
+            localPlayer: nil,
+            chunkSections: [],
+            entitySnapshots: makeLANEntitySnapshots(in: hostWorld),
+            inventorySnapshots: []
+        )
+
+        let publishedInventory = try XCTUnwrap(batch.inventories.first { $0.playerID == "peer-a" })
+        XCTAssertEqual(publishedInventory.slots, [
+            LANInventorySlotSnapshot(slot: 0, itemID: iid("coal"), count: 4),
+        ])
+        XCTAssertTrue(batch.entities.contains { $0.entityID == item.id && $0.dead })
+    }
+
+    func testLANClientAppliesHostAuthoritativeInventorySnapshotToLocalPlayer() {
+        let clientWorld = makeLoadedWorld()
+        let player = Player(world: clientWorld)
+        player.inventory[0] = ItemStack(iid("stick"), 1)
+        player.xp = 0
+        player.xpLevel = 0
+        player.xpProgress = 0
+
+        let snapshot = LANPlayerInventorySnapshot(
+            playerID: "peer-a",
+            selectedHotbarSlot: 2,
+            slots: [
+                LANInventorySlotSnapshot(slot: 2, itemID: iid("coal"), count: 4),
+                LANInventorySlotSnapshot(slot: 9, itemID: iid("bone"), count: 2),
+            ],
+            xp: 7,
+            xpLevel: 1,
+            xpProgress: 0.25
+        )
+
+        XCTAssertTrue(applyLANInventorySnapshot(snapshot, to: player))
+        XCTAssertNil(player.inventory[0])
+        XCTAssertEqual(player.selectedSlot, 2)
+        XCTAssertEqual(player.inventory[2], ItemStack(iid("coal"), 4))
+        XCTAssertEqual(player.inventory[9], ItemStack(iid("bone"), 2))
+        XCTAssertEqual(player.xp, 7)
+        XCTAssertEqual(player.xpLevel, 1)
+        XCTAssertEqual(player.xpProgress, 0.25, accuracy: 0.000_001)
+
+        let invalid = LANPlayerInventorySnapshot(
+            playerID: "peer-a",
+            selectedHotbarSlot: 0,
+            slots: [LANInventorySlotSnapshot(slot: 0, itemID: itemDefs.count + 100, count: 1)]
+        )
+        XCTAssertFalse(applyLANInventorySnapshot(invalid, to: player))
+        XCTAssertNil(player.inventory[0])
+        XCTAssertEqual(player.inventory[2], ItemStack(iid("coal"), 4))
+    }
+
     func testReplicationBatchCapsLargePayloadCollections() {
         let changes = (0..<(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES + 10)).map {
             LANBlockChange(dimension: 0, x: $0, y: 64, z: 0, cell: 0)
@@ -919,5 +1056,21 @@ final class LANReplicationTests: XCTestCase {
             }
         }
         return world
+    }
+
+    private final class GuaranteedDropMob: LivingEntity {
+        override var type: String { "guaranteed_drop_mob" }
+
+        override init(world: World) {
+            super.init(world: world)
+            width = 0.6
+            height = 1.8
+            maxHealth = 10
+            health = 10
+        }
+
+        override func drops() -> [DropEntry] {
+            [DropEntry("coal", min: 3, max: 3, chance: 1)]
+        }
     }
 }

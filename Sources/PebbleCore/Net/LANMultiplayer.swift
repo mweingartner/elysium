@@ -495,16 +495,50 @@ public struct LANInventorySlotSnapshot: Codable, Equatable {
 }
 
 public struct LANPlayerInventorySnapshot: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case playerID
+        case selectedHotbarSlot
+        case slots
+        case xp
+        case xpLevel
+        case xpProgress
+    }
+
     public var playerID: String
     public var selectedHotbarSlot: Int
     public var slots: [LANInventorySlotSnapshot]
+    public var xp: Int
+    public var xpLevel: Int
+    public var xpProgress: Double
 
-    public init(playerID: String, selectedHotbarSlot: Int, slots: [LANInventorySlotSnapshot]) {
+    public init(
+        playerID: String,
+        selectedHotbarSlot: Int,
+        slots: [LANInventorySlotSnapshot],
+        xp: Int = 0,
+        xpLevel: Int = 0,
+        xpProgress: Double = 0
+    ) {
         self.playerID = String(playerID.prefix(128))
         self.selectedHotbarSlot = max(0, min(8, selectedHotbarSlot))
         self.slots = slots.count > LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS
             ? Array(slots.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS))
             : slots
+        self.xp = max(0, min(1_000_000_000, xp))
+        self.xpLevel = max(0, min(100_000, xpLevel))
+        self.xpProgress = xpProgress.isFinite ? max(0, min(1, xpProgress)) : 0
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            playerID: try c.decode(String.self, forKey: .playerID),
+            selectedHotbarSlot: try c.decode(Int.self, forKey: .selectedHotbarSlot),
+            slots: try c.decodeIfPresent([LANInventorySlotSnapshot].self, forKey: .slots) ?? [],
+            xp: try c.decodeIfPresent(Int.self, forKey: .xp) ?? 0,
+            xpLevel: try c.decodeIfPresent(Int.self, forKey: .xpLevel) ?? 0,
+            xpProgress: try c.decodeIfPresent(Double.self, forKey: .xpProgress) ?? 0
+        )
     }
 }
 
