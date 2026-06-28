@@ -1240,17 +1240,18 @@ final class WorldRenderer {
             if dx * dx + dz * dz > maxD { continue }
             guard let name = modelNameFor(ent) else { continue }
             let liv = ent as? LivingEntity
-            let ix = ent.prevX + (ent.x - ent.prevX) * partial
-            let iy = ent.prevY + (ent.y - ent.prevY) * partial
-            let iz = ent.prevZ + (ent.z - ent.prevZ) * partial
-            let yaw = ent.prevYaw + wrapAngleD(ent.yaw - ent.prevYaw) * partial
+            let remotePose = (ent as? LANRemotePlayerEntity)?.presentationPose(timeSec: timeSec)
+            let ix = remotePose?.x ?? ent.prevX + (ent.x - ent.prevX) * partial
+            let iy = remotePose?.y ?? ent.prevY + (ent.y - ent.prevY) * partial
+            let iz = remotePose?.z ?? ent.prevZ + (ent.z - ent.prevZ) * partial
+            let yaw = remotePose?.yaw ?? ent.prevYaw + wrapAngleD(ent.yaw - ent.prevYaw) * partial
             let bx = ifloorD(ent.x), by = ifloorD(ent.y + ent.height * 0.5), bz = ifloorD(ent.z)
             let deathFlip = (liv?.deathTime ?? 0) > 0 ? min(1.0, Double(liv!.deathTime) / 20) : 0
             var pose = EntityPose()
             pose.x = ix; pose.y = iy; pose.z = iz
             pose.yaw = yaw
-            pose.headYaw = liv != nil ? wrapAngleD(liv!.headYaw - yaw) : 0
-            pose.pitch = ent.pitch
+            pose.headYaw = remotePose.map { wrapAngleD($0.headYaw - yaw) } ?? (liv != nil ? wrapAngleD(liv!.headYaw - yaw) : 0)
+            pose.pitch = remotePose?.pitch ?? ent.pitch
             pose.limbSwing = liv?.limbSwing ?? 0
             pose.limbAmp = liv?.limbAmp ?? 0
             pose.attackSwing = liv?.attackAnim ?? 0

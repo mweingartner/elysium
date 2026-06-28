@@ -391,6 +391,98 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertTrue(lanRemotePlayerRenderYaw(fromPlayerYaw: 1.0e30).isFinite)
     }
 
+    func testLANRemotePlayerPresentationSmoothsWithoutLocalTickRewind() {
+        let world = makeLoadedWorld()
+        let initial = LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 1,
+            y: 65,
+            z: 2,
+            yaw: 0,
+            pitch: 0,
+            health: 20,
+            hunger: 20,
+            selectedHotbarSlot: 0,
+            gameMode: GameMode.survival,
+            dimension: Dim.overworld.rawValue
+        )
+        let remote = LANRemotePlayerEntity(world: world, state: initial)
+
+        var pose = remote.presentationPose(timeSec: 0)
+        XCTAssertEqual(pose.x, 1, accuracy: 0.000_001)
+        XCTAssertEqual(pose.z, 2, accuracy: 0.000_001)
+
+        let moved = LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 4,
+            y: 65,
+            z: 2,
+            yaw: 0.5,
+            pitch: 0.1,
+            health: 20,
+            hunger: 20,
+            selectedHotbarSlot: 0,
+            gameMode: GameMode.survival,
+            dimension: Dim.overworld.rawValue
+        )
+        remote.apply(moved)
+        pose = remote.presentationPose(timeSec: 0.016)
+        XCTAssertGreaterThan(pose.x, 1)
+        XCTAssertLessThan(pose.x, 4)
+        let afterFirstRender = pose.x
+
+        remote.tick()
+        pose = remote.presentationPose(timeSec: 0.032)
+        XCTAssertGreaterThanOrEqual(pose.x, afterFirstRender)
+        XCTAssertLessThan(pose.x, 4)
+
+        remote.apply(moved)
+        let afterDuplicateApply = remote.presentationPose(timeSec: 0.048)
+        XCTAssertGreaterThanOrEqual(afterDuplicateApply.x, pose.x)
+        XCTAssertLessThan(afterDuplicateApply.x, 4)
+    }
+
+    func testLANRemotePlayerPresentationSnapsForTeleports() {
+        let world = makeLoadedWorld()
+        let remote = LANRemotePlayerEntity(world: world, state: LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 1,
+            y: 65,
+            z: 2,
+            yaw: 0,
+            pitch: 0,
+            health: 20,
+            hunger: 20,
+            selectedHotbarSlot: 0,
+            gameMode: GameMode.survival,
+            dimension: Dim.overworld.rawValue
+        ))
+        _ = remote.presentationPose(timeSec: 0)
+
+        remote.apply(LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 40,
+            y: 90,
+            z: -30,
+            yaw: 0,
+            pitch: 0,
+            health: 20,
+            hunger: 20,
+            selectedHotbarSlot: 0,
+            gameMode: GameMode.survival,
+            dimension: Dim.overworld.rawValue
+        ))
+
+        let pose = remote.presentationPose(timeSec: 0.016)
+        XCTAssertEqual(pose.x, 40, accuracy: 0.000_001)
+        XCTAssertEqual(pose.y, 90, accuracy: 0.000_001)
+        XCTAssertEqual(pose.z, -30, accuracy: 0.000_001)
+    }
+
     func testLANClientEntityPurgeKeepsOnlyAuthoritativeLANEntities() {
         let world = makeLoadedWorld()
         let localPlayer = Player(world: world)
