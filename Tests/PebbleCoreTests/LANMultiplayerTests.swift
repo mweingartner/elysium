@@ -204,4 +204,29 @@ final class LANMultiplayerTests: XCTestCase {
         XCTAssertFalse(game.isLANClientWorld)
         XCTAssertEqual(Set(game.listWorlds().map(\.id)), before)
     }
+
+    func testLANClientWorldRequestsHostChunksInsteadOfGeneratingLocalChunks() {
+        let game = GameCore()
+        var requested: [(Int, Int, Int)] = []
+        game.lanChunkRequestHandler = { world, cx, cz in
+            requested.append((world.dim.rawValue, cx, cz))
+            return true
+        }
+        let summary = LANWorldSummary(
+            worldID: "host world !",
+            worldName: "Host LAN",
+            seed: -123_456,
+            gameMode: GameMode.survival,
+            difficulty: 2,
+            dimension: Dim.overworld.rawValue,
+            playerCount: 2
+        )
+
+        game.enterLANClientWorld(summary)
+
+        XCTAssertTrue(game.isLANClientWorld)
+        XCTAssertFalse(requested.isEmpty)
+        XCTAssertTrue(requested.allSatisfy { $0.0 == Dim.overworld.rawValue })
+        XCTAssertTrue(game.world.chunks.isEmpty)
+    }
 }

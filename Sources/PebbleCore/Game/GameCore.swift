@@ -232,9 +232,12 @@ public final class GameCore {
     public var mapMinimapSizeMode = MAP_DEFAULT_MINIMAP_SIZE_MODE
     public var expandedMapCenterX = 0.0
     public var expandedMapCenterZ = 0.0
+    public var onWorldBlockChanged: ((World, Int, Int, Int, Int) -> Void)?
+    public var lanChunkRequestHandler: ((World, Int, Int) -> Bool)?
 
     // streaming
     private var genInFlight = Set<DimChunk>()
+    private var lanChunkRequestsInFlight = Set<DimChunk>()
     /// keys of chunks that exist on disk — fresh chunks skip the read entirely
     private var savedChunkKeys = Set<String>()
     /// keys whose DB record holds full block data — an unload rewrite of these
@@ -518,6 +521,7 @@ public final class GameCore {
     private func enterWorld(_ rec: WorldRecord, _ playerData: [String: Any]?, _ adv: [String]?, transientLANClient: Bool = false) {
         worldRec = rec
         isLANClientWorld = transientLANClient
+        lanChunkRequestsInFlight.removeAll()
         advancements = AdvancementTracker()
         if let adv { advancements.load(adv) }
         dragonSpawned = false
@@ -592,6 +596,10 @@ public final class GameCore {
         hooks.onSectionDirty = { [weak self, weak w] cx, cz, sy in
             guard let self, let w else { return }
             self.dirtySections[w.dim]!.insert(SectionPos(cx: cx, sy: sy, cz: cz))
+        }
+        hooks.onBlockChanged = { [weak self, weak w] x, y, z, _, newCell, _ in
+            guard let self, let w, !self.isLANClientWorld else { return }
+            self.onWorldBlockChanged?(w, x, y, z, newCell)
         }
         hooks.playSound = { [weak self, weak w] name, x, y, z, volume, pitch in
             guard let self, let w, w === self.worlds[self.dim] else { return }
@@ -722,9 +730,44 @@ public final class GameCore {
     // ===========================================================================
     // Chunk streaming
     // ===========================================================================
+    private func activeSimulationChunkCenters(in w: World, local p: Player) -> [(Int, Int)] {
+        var centers: [(Int, Int)] = [(floorDiv(ifloor(p.x), 16), floorDiv(ifloor(p.z), 16))]
+        if !isLANClientWorld {
+            let remoteCenters = w.entities.compactMap { ref -> (Int, Int)? in
+                guard let remote = ref as? LANRemotePlayerEntity, !remote.dead else { return nil }
+                return (floorDiv(ifloor(remote.x), 16), floorDiv(ifloor(remote.z), 16))
+            }.sorted { lhs, rhs in lhs.0 == rhs.0 ? lhs.1 < rhs.1 : lhs.0 < rhs.0 }
+            centers.append(contentsOf: remoteCenters)
+        }
+        var out: [(Int, Int)] = []
+        var seen = Set<Int64>()
+        for center in centers {
+            if seen.insert(chunkKey(center.0, center.1)).inserted {
+                out.append(center)
+            }
+        }
+        return out
+    }
+
+    private func activeSimulationEntities(in w: World, local p: Player) -> [Entity] {
+        var entities: [Entity] = [p]
+        if !isLANClientWorld {
+            entities.append(contentsOf: w.entities.compactMap { $0 as? LANRemotePlayerEntity }.filter { !$0.dead })
+        }
+        return entities
+    }
+
     private func requestChunk(_ w: World, _ cx: Int, _ cz: Int) {
         let key = chunkKey(cx, cz)
         let flight = DimChunk(dim: w.dim.rawValue, key: key)
+        if isLANClientWorld {
+            if w.chunks[key] != nil || lanChunkRequestsInFlight.contains(flight) { return }
+            if lanChunkRequestsInFlight.count >= MAX_GEN_INFLIGHT { return }
+            if lanChunkRequestHandler?(w, cx, cz) == true {
+                lanChunkRequestsInFlight.insert(flight)
+            }
+            return
+        }
         if w.chunks[key] != nil || genInFlight.contains(flight) { return }
         if genInFlight.count >= MAX_GEN_INFLIGHT { return }
         guard let rec = worldRec else { return }
@@ -766,6 +809,24 @@ public final class GameCore {
                 self.adoptChunk(w, c, beSpecs, entitySpecs, savedFinal)
                 self.enqueueLightAround(w, cx, cz)
             }
+        }
+    }
+
+    @discardableResult
+    public func ensureAuthoritativeLANChunkLoaded(dimension: Int, cx: Int, cz: Int) -> Bool {
+        guard !isLANClientWorld,
+              let dim = Dim(rawValue: dimension),
+              let w = worlds[dim]
+        else { return false }
+        ensureChunksLoaded(w, cx, cz, 0)
+        return w.getChunk(cx, cz) != nil
+    }
+
+    public func markLANChunkSectionsApplied(_ sections: [LANChunkSectionSnapshot]) {
+        guard isLANClientWorld, !sections.isEmpty else { return }
+        for section in sections {
+            let key = chunkKey(section.cx, section.cz)
+            lanChunkRequestsInFlight.remove(DimChunk(dim: section.dimension, key: key))
         }
     }
 
@@ -815,6 +876,7 @@ public final class GameCore {
             c.modified = false
         }
         w.adoptChunkBlockEntities(c)
+        if isLANClientWorld { return }
         // entities: any saved record (full or entity-only) overrides worldgen spawns
         if let saved {
             for ed in saved.entities {
@@ -1037,6 +1099,14 @@ public final class GameCore {
 
     /// Guarantee an area exists before placing the player in it (synchronous)
     private func ensureChunksLoaded(_ w: World, _ ccx: Int, _ ccz: Int, _ radius: Int) {
+        if isLANClientWorld {
+            for dz in -radius...radius {
+                for dx in -radius...radius {
+                    requestChunk(w, ccx + dx, ccz + dz)
+                }
+            }
+            return
+        }
         let worldId = worldRec?.id
         for dz in -radius...radius {
             for dx in -radius...radius {
@@ -1074,22 +1144,26 @@ public final class GameCore {
         let pcz = floorDiv(ifloor(player.z), 16)
         w.simCenterX = pcx
         w.simCenterZ = pcz
+        let centers = activeSimulationChunkCenters(in: w, local: player)
         let R = settings.renderDistance + GEN_RADIUS_PAD
         // request missing chunks ring by ring (closest first)
-        outer: for r in 0...R {
-            for dz in -r...r {
-                for dx in -r...r {
-                    if max(abs(dx), abs(dz)) != r { continue }
-                    if genInFlight.count >= MAX_GEN_INFLIGHT { break outer }
-                    let cx = pcx + dx, cz = pcz + dz
-                    if w.chunks[chunkKey(cx, cz)] == nil { requestChunk(w, cx, cz) }
+        outer: for center in centers {
+            for r in 0...R {
+                for dz in -r...r {
+                    for dx in -r...r {
+                        if max(abs(dx), abs(dz)) != r { continue }
+                        if genInFlight.count >= MAX_GEN_INFLIGHT { break outer }
+                        let cx = center.0 + dx, cz = center.1 + dz
+                        if w.chunks[chunkKey(cx, cz)] == nil { requestChunk(w, cx, cz) }
+                    }
                 }
             }
         }
         // unload far chunks (tight radius — chunk arrays are ~400KB each)
         let dropR = R + 2
         for c in Array(w.chunks.values) {
-            if abs(c.cx - pcx) > dropR || abs(c.cz - pcz) > dropR {
+            let nearActiveCenter = centers.contains { abs(c.cx - $0.0) <= dropR && abs(c.cz - $0.1) <= dropR }
+            if !nearActiveCenter {
                 unloadChunk(w, c)
             }
         }
@@ -1445,6 +1519,9 @@ public final class GameCore {
         if paused { return }
 
         streamChunks()
+        if isLANClientWorld {
+            _ = removeLANClientNonAuthoritativeEntities(from: w, localPlayer: p)
+        }
 
         // ---- player intent ----
         let playerDead = p.dead || p.deathTime > 0
@@ -1529,15 +1606,33 @@ public final class GameCore {
             }
         }
 
+        if isLANClientWorld {
+            _ = removeLANClientNonAuthoritativeEntities(from: w, localPlayer: p)
+            for e in Array(w.entities) where e.dead && e !== p {
+                w.removeEntity(e)
+            }
+            tickViewBob()
+            tickAmbience()
+            tickBossBars()
+            tickHotbarAndCooldowns(p)
+            return
+        }
+
         // ---- world & entities ----
-        w.tick()
+        let activeChunkCenters = activeSimulationChunkCenters(in: w, local: p)
+        let activeEntities = activeSimulationEntities(in: w, local: p)
+        w.tick(simCenters: activeChunkCenters)
         let simR = Double(w.simDistance * 16) * Double(w.simDistance * 16)
         for e in Array(w.entities) {
             if e === p || e.dead { continue }
             guard let ent = e as? Entity else { continue }
             if ent.lanReplicatedMirror { continue }
-            let dx = ent.x - p.x, dz = ent.z - p.z
-            if dx * dx + dz * dz > simR && !ALWAYS_TICK.contains(ent.type) { continue }
+            let inRange = activeEntities.contains { active in
+                let dx = ent.x - active.x
+                let dz = ent.z - active.z
+                return dx * dx + dz * dz <= simR
+            }
+            if !inRange && !ALWAYS_TICK.contains(ent.type) { continue }
             ent.tick()
             // sculk catalyst blooms on death
             if let liv = ent as? LivingEntity, liv.deathTime == 1 {
@@ -1582,15 +1677,7 @@ public final class GameCore {
             advance("sleep_in_bed")
         }
 
-        // hotbar name flash
-        if p.selectedSlot != lastSlot {
-            lastSlot = p.selectedSlot
-            heldNameTime = 60
-        } else if heldNameTime > 0 {
-            heldNameTime -= 1
-        }
-        if useCooldown > 0 { useCooldown -= 1 }
-        if breakCooldown > 0 { breakCooldown -= 1 }
+        tickHotbarAndCooldowns(p)
 
         // portal overlay warp factor
         let targetWarp = p.insidePortalKind == "nether" ? min(1, Double(p.portalTicks) / 60) : 0
@@ -1609,6 +1696,17 @@ public final class GameCore {
             ticksSinceSave = 0
             saveAndFlush()
         }
+    }
+
+    private func tickHotbarAndCooldowns(_ p: Player) {
+        if p.selectedSlot != lastSlot {
+            lastSlot = p.selectedSlot
+            heldNameTime = 60
+        } else if heldNameTime > 0 {
+            heldNameTime -= 1
+        }
+        if useCooldown > 0 { useCooldown -= 1 }
+        if breakCooldown > 0 { breakCooldown -= 1 }
     }
 
     private func tryCatalystBloom(_ w: World, _ x: Double, _ y: Double, _ z: Double, _ xp: Int) {

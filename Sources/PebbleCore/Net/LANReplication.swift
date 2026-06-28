@@ -478,6 +478,7 @@ public final class LANMultiplayerHostSession {
         tick: Int,
         fullSnapshot: Bool,
         worldSummary: LANWorldSummary?,
+        worldState: LANWorldStateSnapshot?,
         localPlayer: LANPlayerState?,
         chunkSections: [LANChunkSectionSnapshot],
         entitySnapshots: [LANEntitySnapshot],
@@ -494,6 +495,7 @@ public final class LANMultiplayerHostSession {
             tick: tick,
             fullSnapshot: fullSnapshot,
             world: worldSummary,
+            worldState: worldState,
             players: players,
             blockChanges: blockChanges,
             chunkSections: chunkSections,
@@ -507,6 +509,7 @@ public final class LANMultiplayerHostSession {
 public final class LANMultiplayerClientSession {
     public private(set) var latestTick = 0
     public private(set) var worldSummary: LANWorldSummary?
+    public private(set) var worldState: LANWorldStateSnapshot?
     public private(set) var players: [String: LANPlayerState] = [:]
     public private(set) var blockCells: [LANBlockPosition: Int] = [:]
     public private(set) var chunkSections: [LANChunkSectionPosition: LANChunkSectionSnapshot] = [:]
@@ -520,6 +523,7 @@ public final class LANMultiplayerClientSession {
         var report = LANReplicationApplyReport()
         latestTick = max(latestTick, batch.tick)
         if let world = batch.world { worldSummary = world }
+        if let state = batch.worldState { worldState = state }
         for player in batch.players.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_PLAYERS) {
             players[player.playerID] = player
         }
@@ -611,6 +615,20 @@ public func makeLANInventorySnapshot(_ player: Player, playerID: String) -> LANP
         )
     }
     return LANPlayerInventorySnapshot(playerID: playerID, selectedHotbarSlot: player.selectedSlot, slots: slots)
+}
+
+public func makeLANWorldStateSnapshot(in world: World) -> LANWorldStateSnapshot {
+    LANWorldStateSnapshot(
+        dimension: world.dim.rawValue,
+        time: world.time,
+        dayTime: world.dayTime,
+        difficulty: world.difficulty,
+        raining: world.raining,
+        thundering: world.thundering,
+        rainLevel: world.rainLevel,
+        thunderLevel: world.thunderLevel,
+        weatherTimer: world.weatherTimer
+    )
 }
 
 public func makeLANEntitySnapshots(
@@ -879,6 +897,9 @@ public func applyLANEntitySnapshots(
 @discardableResult
 public func applyLANReplicationBatch(_ batch: LANReplicationBatch, to world: World) -> LANReplicationApplyReport {
     var report = LANReplicationApplyReport()
+    if let worldState = batch.worldState {
+        _ = applyLANWorldStateSnapshot(worldState, to: world)
+    }
     for section in batch.chunkSections.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS) {
         if applyLANChunkSectionSnapshot(section, to: world) {
             report.appliedChunkSections += 1
@@ -903,6 +924,31 @@ public func applyLANReplicationBatch(_ batch: LANReplicationBatch, to world: Wor
     report.removedEntitySnapshots += entityReport.removedEntitySnapshots
     report.ignoredInvalidEntities += entityReport.ignoredInvalidEntities
     return report
+}
+
+@discardableResult
+public func applyLANWorldStateSnapshot(_ snapshot: LANWorldStateSnapshot, to world: World) -> Bool {
+    let normalized = LANWorldStateSnapshot(
+        dimension: snapshot.dimension,
+        time: snapshot.time,
+        dayTime: snapshot.dayTime,
+        difficulty: snapshot.difficulty,
+        raining: snapshot.raining,
+        thundering: snapshot.thundering,
+        rainLevel: snapshot.rainLevel,
+        thunderLevel: snapshot.thunderLevel,
+        weatherTimer: snapshot.weatherTimer
+    )
+    guard normalized.dimension == world.dim.rawValue else { return false }
+    world.time = normalized.time
+    world.dayTime = normalized.dayTime
+    world.difficulty = normalized.difficulty
+    world.raining = normalized.raining
+    world.thundering = normalized.thundering
+    world.rainLevel = normalized.rainLevel
+    world.thunderLevel = normalized.thunderLevel
+    world.weatherTimer = normalized.weatherTimer
+    return true
 }
 
 @discardableResult

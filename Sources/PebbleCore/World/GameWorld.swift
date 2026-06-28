@@ -54,6 +54,7 @@ public struct RaycastHit {
 
 public struct WorldHooks {
     public var onSectionDirty: (Int, Int, Int) -> Void = { _, _, _ in }
+    public var onBlockChanged: (Int, Int, Int, Int, Int, Int) -> Void = { _, _, _, _, _, _ in }
     public var playSound: (String, Double, Double, Double, Double, Double) -> Void = { _, _, _, _, _, _ in }
     public var addParticles: (String, Double, Double, Double, Int, Double, Int) -> Void = { _, _, _, _, _, _, _ in }
     public var onVibration: ((Double, Double, Double, Int, EntityRef?) -> Void)?
@@ -196,6 +197,7 @@ public final class World {
         if y >= hPrev || OPAQUE[newId] == 1 || LIGHT_OPACITY[newId] > 0 { c.updateHeight(lx, lz) }
 
         if flags & 2 != 0 { light.onBlockChanged(x, y, z, old, cellV) }
+        if flags != SET_SILENT { hooks.onBlockChanged(x, y, z, old, cellV, flags) }
 
         if flags & 4 != 0 {
             c.markDirtyAt(y)
@@ -295,6 +297,22 @@ public final class World {
 
     private var dueScratch: [ScheduledTick] = []
     public func tick() {
+        tick(simCenters: [(simCenterX, simCenterZ)])
+    }
+
+    public func tick(simCenters rawCenters: [(Int, Int)]) {
+        var simCenters: [(Int, Int)] = []
+        var seenCenters = Set<Int64>()
+        for (cx, cz) in rawCenters.sorted(by: { $0.0 == $1.0 ? $0.1 < $1.1 : $0.0 < $1.0 }) {
+            let key = chunkKey(cx, cz)
+            if seenCenters.insert(key).inserted {
+                simCenters.append((cx, cz))
+            }
+        }
+        if simCenters.isEmpty {
+            simCenters = [(simCenterX, simCenterZ)]
+        }
+
         time += 1
         if rule("doDaylightCycle") && info.hasSky {
             dayTime = (dayTime + 1) % DAY_LENGTH
@@ -326,17 +344,25 @@ public final class World {
         // random ticks in sim-range chunks
         if randomTickSpeed > 0 {
             let sd = simDistance
-            for dz in -sd...sd {
-                for dx in -sd...sd {
-                    guard let c = getChunk(simCenterX + dx, simCenterZ + dz), c.status != .empty else { continue }
-                    for s in 0..<c.sections {
-                        for _ in 0..<randomTickSpeed {
-                            let rx = rng.nextInt(16), rz = rng.nextInt(16), ry = info.minY + s * 16 + rng.nextInt(16)
-                            let cell = Int(c.get(rx, ry, rz))
-                            let id = cell >> 4
-                            if id != 0 && RANDOM_TICKS[id] == 1 {
-                                if let h = randomTickHandlers[id] {
-                                    h(self, c.cx * 16 + rx, ry, c.cz * 16 + rz, cell)
+            var visitedChunks = Set<Int64>()
+            for center in simCenters {
+                for dz in -sd...sd {
+                    for dx in -sd...sd {
+                        let cx = center.0 + dx
+                        let cz = center.1 + dz
+                        guard visitedChunks.insert(chunkKey(cx, cz)).inserted,
+                              let c = getChunk(cx, cz),
+                              c.status != .empty
+                        else { continue }
+                        for s in 0..<c.sections {
+                            for _ in 0..<randomTickSpeed {
+                                let rx = rng.nextInt(16), rz = rng.nextInt(16), ry = info.minY + s * 16 + rng.nextInt(16)
+                                let cell = Int(c.get(rx, ry, rz))
+                                let id = cell >> 4
+                                if id != 0 && RANDOM_TICKS[id] == 1 {
+                                    if let h = randomTickHandlers[id] {
+                                        h(self, c.cx * 16 + rx, ry, c.cz * 16 + rz, cell)
+                                    }
                                 }
                             }
                         }

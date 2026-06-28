@@ -94,10 +94,11 @@ public final class LANRemotePlayerEntity: LivingEntity {
         x = state.x
         y = state.y
         z = state.z
-        yaw = state.yaw
+        let renderYaw = lanRemotePlayerRenderYaw(fromPlayerYaw: state.yaw)
+        yaw = renderYaw
         pitch = state.pitch
-        headYaw = state.yaw
-        bodyYaw = state.yaw
+        headYaw = renderYaw
+        bodyYaw = renderYaw
         remoteGameMode = state.gameMode
         health = max(0, min(maxHealth, state.health))
         deathTime = state.dead ? max(deathTime, 1) : 0
@@ -120,6 +121,14 @@ public final class LANRemotePlayerEntity: LivingEntity {
     }
 }
 
+public func lanRemotePlayerRenderYaw(fromPlayerYaw yaw: Double) -> Double {
+    let turn = Double.pi * 2
+    var value = (yaw + Double.pi).truncatingRemainder(dividingBy: turn)
+    if value <= -Double.pi { value += turn }
+    if value > Double.pi { value -= turn }
+    return value
+}
+
 @discardableResult
 public func removeLANRemotePlayer(_ playerID: String, from world: World) -> Bool {
     let cleanID = String(playerID.prefix(128))
@@ -128,6 +137,21 @@ public func removeLANRemotePlayer(_ playerID: String, from world: World) -> Bool
     }) else { return false }
     world.removeEntity(existing)
     return true
+}
+
+@discardableResult
+public func removeLANClientNonAuthoritativeEntities(from world: World, localPlayer: Player?) -> Int {
+    var removed = 0
+    for entityRef in Array(world.entities) {
+        if let localPlayer, entityRef === localPlayer { continue }
+        guard let entity = entityRef as? Entity else { continue }
+        if entity is LANRemotePlayerEntity { continue }
+        if entity.lanReplicatedMirror { continue }
+        if entity.isPlayer { continue }
+        world.removeEntity(entityRef)
+        removed += 1
+    }
+    return removed
 }
 
 @discardableResult

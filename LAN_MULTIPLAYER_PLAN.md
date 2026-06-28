@@ -7,12 +7,16 @@ now ships Multiplayer/Open to LAN UI, Bonjour browse/advertise for
 fallback by host/port/join-code, bounded `PBLN`
 protocol frames, join-code handshakes, peer status, LAN chat, source/binary
 security allowlists, Info.plist local-network privacy declarations, core
-replication batches for player state, chunk sections, block deltas, entity
-snapshots, and inventory snapshots, plus permission-gated host orchestration for
-remote player entities, container/crafting/template/command/AI permissions,
-dimensions, deaths, respawns, and reconnect records. Remaining release
-hardening is two-Mac installed-app soak and richer client UI for synchronized
-remote container/crafting screens.
+replication batches for host world time/weather state, player state, chunk
+sections, block deltas, complete host-owned entity snapshots, and inventory
+snapshots, plus permission-gated host orchestration for remote player entities,
+container/crafting/template/command/AI permissions, dimensions, deaths, respawns,
+and reconnect records. Transient LAN client worlds suppress local chunk
+generation and locally generated/saved entity authority, request host
+chunk-section snapshots for missing chunks, and purge client-only spawned
+entities, so mobs, drops, XP, plants, and block simulation are visible only when
+the host publishes them. Remaining release hardening is two-Mac installed-app
+soak and richer client UI for synchronized remote container/crafting screens.
 
 ## Sources
 
@@ -95,10 +99,12 @@ Added core-only networking model files:
   session state, reconnect-preserved peer records, deterministic block-change
   log, permission-gated host block/container/crafting/template/command/AI
   validation, object-template copy/place/undo execution, chunk-section
-  snapshot encode/apply helpers, entity snapshots, player inventory snapshots,
-  client-side replicated mirror state, and bounded apply reports.
+  snapshot encode/apply helpers, world-state snapshots, entity snapshots, player
+  inventory snapshots, client-side replicated mirror state, and bounded apply
+  reports.
 - `Sources/PebbleCore/Net/LANGameplayOrchestration.swift`: transient remote
-  player entities, remote-player apply/remove helpers, permission result
+  player entities, remote-player apply/remove helpers, remote player yaw
+  conversion, transient LAN client entity-authority cleanup, permission result
   types, reconnect disposition records, and host gameplay authorization result
   types for tests and transport.
 
@@ -148,9 +154,14 @@ Implemented client flow:
    session/chat state, opens a transient LAN client world when joining from the
    title screen, and receives an initial replication batch.
 8. Host publishes periodic bounded replication batches from the main game
-   thread. Clients acknowledge and apply them to a client mirror; if a matching
-   world is already loaded, block/chunk deltas are applied through the normal
-   world dirty-section path.
+   thread. World/player/entity state publishes at 20 Hz, host runtime block
+   mutations are captured through the coalescing block-change log, and full
+   chunk-section refreshes publish once per second. Clients acknowledge and apply
+   batches to a client mirror; if a matching world is already loaded, world
+   state, block deltas, and chunk sections are applied through the normal world
+   dirty-section path.
+9. Transient LAN client worlds request missing chunks from the host with
+   `LANChunkRequest` and do not generate local seed chunks for shared play.
 
 ### Protocol
 

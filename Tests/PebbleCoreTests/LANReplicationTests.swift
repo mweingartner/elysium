@@ -339,6 +339,8 @@ final class LANReplicationTests: XCTestCase {
         var remote = world.entities.compactMap { $0 as? LANRemotePlayerEntity }.first
         XCTAssertEqual(remote?.multiplayerPlayerID, "peer-a")
         XCTAssertEqual(remote?.x, 1)
+        XCTAssertEqual(remote?.yaw ?? .nan, lanRemotePlayerRenderYaw(fromPlayerYaw: initial.yaw), accuracy: 0.000_001)
+        XCTAssertEqual(remote?.headYaw ?? .nan, lanRemotePlayerRenderYaw(fromPlayerYaw: initial.yaw), accuracy: 0.000_001)
 
         let moved = LANPlayerState(
             playerID: "peer-a",
@@ -360,6 +362,8 @@ final class LANReplicationTests: XCTestCase {
         remote = world.entities.compactMap { $0 as? LANRemotePlayerEntity }.first
         XCTAssertEqual(remote?.x, 4)
         XCTAssertEqual(remote?.health, 19)
+        XCTAssertEqual(remote?.yaw ?? .nan, lanRemotePlayerRenderYaw(fromPlayerYaw: moved.yaw), accuracy: 0.000_001)
+        XCTAssertEqual(remote?.bodyYaw ?? .nan, lanRemotePlayerRenderYaw(fromPlayerYaw: moved.yaw), accuracy: 0.000_001)
 
         let nether = LANPlayerState(
             playerID: "peer-a",
@@ -378,6 +382,52 @@ final class LANReplicationTests: XCTestCase {
         report = applyLANRemotePlayers([nether], to: world, localPlayerID: "local")
         XCTAssertEqual(report.removed, 1)
         XCTAssertTrue(world.entities.compactMap { $0 as? LANRemotePlayerEntity }.isEmpty)
+    }
+
+    func testLANRemotePlayerRenderYawAppliesHalfTurnAndWraps() {
+        XCTAssertEqual(lanRemotePlayerRenderYaw(fromPlayerYaw: 0), .pi, accuracy: 0.000_001)
+        XCTAssertEqual(lanRemotePlayerRenderYaw(fromPlayerYaw: .pi), 0, accuracy: 0.000_001)
+        XCTAssertEqual(lanRemotePlayerRenderYaw(fromPlayerYaw: -.pi / 2), .pi / 2, accuracy: 0.000_001)
+        XCTAssertTrue(lanRemotePlayerRenderYaw(fromPlayerYaw: 1.0e30).isFinite)
+    }
+
+    func testLANClientEntityPurgeKeepsOnlyAuthoritativeLANEntities() {
+        let world = makeLoadedWorld()
+        let localPlayer = Player(world: world)
+        localPlayer.setPos(1.5, 65, 1.5)
+        world.addEntity(localPlayer)
+
+        let remote = LANRemotePlayerEntity(world: world, state: LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 2,
+            y: 65,
+            z: 2,
+            yaw: 0,
+            pitch: 0,
+            health: 20,
+            hunger: 20,
+            selectedHotbarSlot: 0,
+            gameMode: GameMode.survival,
+            dimension: Dim.overworld.rawValue
+        ))
+        world.addEntity(remote)
+
+        let mirroredDrop = ItemEntity(world: world)
+        mirroredDrop.lanReplicationSourceID = 99
+        mirroredDrop.lanReplicatedMirror = true
+        world.addEntity(mirroredDrop)
+
+        let localChicken = Chicken(world: world)
+        world.addEntity(localChicken)
+
+        let removed = removeLANClientNonAuthoritativeEntities(from: world, localPlayer: localPlayer)
+
+        XCTAssertEqual(removed, 1)
+        XCTAssertTrue(world.entities.contains { $0 === localPlayer })
+        XCTAssertTrue(world.entities.contains { $0 === remote })
+        XCTAssertTrue(world.entities.contains { $0 === mirroredDrop })
+        XCTAssertFalse(world.entities.contains { $0 === localChicken })
     }
 
     func testChunkSectionSnapshotAppliesToTargetWorld() throws {
@@ -452,6 +502,17 @@ final class LANReplicationTests: XCTestCase {
                 dimension: 0,
                 playerCount: 2
             ),
+            worldState: LANWorldStateSnapshot(
+                dimension: 0,
+                time: 1234,
+                dayTime: 6000,
+                difficulty: 3,
+                raining: true,
+                thundering: false,
+                rainLevel: 0.75,
+                thunderLevel: 0.25,
+                weatherTimer: 99
+            ),
             players: [player],
             blockChanges: [
                 LANBlockChange(dimension: 0, x: 1, y: 64, z: 1, cell: validCell),
@@ -472,11 +533,67 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(report.ignoredInvalidSections, 1)
         XCTAssertEqual(client.latestTick, 12)
         XCTAssertEqual(client.players["peer-a"], player)
+        XCTAssertEqual(client.worldState?.time, 1234)
+        XCTAssertEqual(client.worldState?.dayTime, 6000)
         XCTAssertEqual(client.blockCells[LANBlockPosition(dimension: 0, x: 1, y: 64, z: 1)], validCell)
         XCTAssertNil(client.blockCells[LANBlockPosition(dimension: 0, x: 2, y: 64, z: 1)])
         XCTAssertEqual(client.entities[7]?.type, "zombie")
         XCTAssertEqual(report.appliedEntitySnapshots, 1)
         XCTAssertEqual(client.inventories["peer-a"]?.slots.first?.count, 64)
+    }
+
+    func testWorldStateSnapshotAppliesTimeWeatherAndDifficulty() {
+        let world = makeLoadedWorld()
+        world.time = 1
+        world.dayTime = 2
+        world.difficulty = 1
+        world.raining = false
+        world.thundering = false
+        world.rainLevel = 0
+        world.thunderLevel = 0
+        world.weatherTimer = 10
+
+        let snapshot = LANWorldStateSnapshot(
+            dimension: Dim.overworld.rawValue,
+            time: 42_000,
+            dayTime: DAY_LENGTH + 123,
+            difficulty: 99,
+            raining: true,
+            thundering: true,
+            rainLevel: 1.4,
+            thunderLevel: -2,
+            weatherTimer: 999_999
+        )
+
+        XCTAssertTrue(applyLANWorldStateSnapshot(snapshot, to: world))
+        XCTAssertEqual(world.time, 42_000)
+        XCTAssertEqual(world.dayTime, 123)
+        XCTAssertEqual(world.difficulty, 3)
+        XCTAssertTrue(world.raining)
+        XCTAssertTrue(world.thundering)
+        XCTAssertEqual(world.rainLevel, 1)
+        XCTAssertEqual(world.thunderLevel, 0)
+        XCTAssertEqual(world.weatherTimer, 240_000)
+
+        let nether = World(dim: .nether, seed: 42)
+        XCTAssertFalse(applyLANWorldStateSnapshot(snapshot, to: nether))
+    }
+
+    func testRuntimeBlockHookRecordsPlantAndSimulationDeltasForReplication() {
+        let world = makeLoadedWorld()
+        let session = LANMultiplayerHostSession()
+        world.hooks.onBlockChanged = { x, y, z, _, newCell, _ in
+            _ = session.recordBlockChange(dimension: world.dim.rawValue, x: x, y: y, z: z, cell: newCell)
+        }
+
+        let wheat = Int(cell(B.wheat, 4))
+        _ = world.setBlock(3, 64, 3, wheat)
+        XCTAssertEqual(session.drainBlockChanges(), [
+            LANBlockChange(dimension: Dim.overworld.rawValue, x: 3, y: 64, z: 3, cell: wheat),
+        ])
+
+        _ = world.setBlock(4, 64, 3, Int(cell(B.wheat, 5)), SET_SILENT)
+        XCTAssertTrue(session.drainBlockChanges().isEmpty)
     }
 
     func testEntitySnapshotsIncludeDroppedItemAndXpPayloads() throws {
@@ -500,6 +617,35 @@ final class LANReplicationTests: XCTestCase {
         let xpSnapshot = try XCTUnwrap(snapshots.first { $0.entityID == orb.id })
         XCTAssertEqual(xpSnapshot.type, "xp_orb")
         XCTAssertEqual(xpSnapshot.xpAmount, 7)
+    }
+
+    func testEntitySnapshotsMirrorPassiveAndHostileMobs() throws {
+        let world = makeLoadedWorld()
+        let chicken = Chicken(world: world)
+        chicken.setPos(2.5, 65, 2.5)
+        world.addEntity(chicken)
+        let zombie = Zombie(world: world)
+        zombie.setPos(4.5, 65, 4.5)
+        zombie.health = 12
+        world.addEntity(zombie)
+
+        let snapshots = makeLANEntitySnapshots(in: world)
+
+        XCTAssertTrue(snapshots.contains { $0.entityID == chicken.id && $0.type == "chicken" })
+        let zombieSnapshot = try XCTUnwrap(snapshots.first { $0.entityID == zombie.id })
+        XCTAssertEqual(zombieSnapshot.type, "zombie")
+        XCTAssertEqual(zombieSnapshot.health, 12)
+
+        let clientWorld = makeLoadedWorld()
+        let report = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 4, fullSnapshot: false, entities: snapshots, entitySnapshotsComplete: true),
+            to: clientWorld
+        )
+
+        XCTAssertEqual(report.appliedEntitySnapshots, 2)
+        XCTAssertEqual(clientWorld.entities.compactMap { $0 as? Chicken }.count, 1)
+        XCTAssertEqual(clientWorld.entities.compactMap { $0 as? Zombie }.count, 1)
+        XCTAssertTrue(clientWorld.entities.compactMap { $0 as? Entity }.allSatisfy { $0.lanReplicatedMirror })
     }
 
     func testReplicationBatchMaterializesUpdatesAndRemovesMirroredDroppedItemsAndXp() throws {

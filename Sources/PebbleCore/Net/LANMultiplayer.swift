@@ -505,11 +505,73 @@ public struct LANPlayerInventorySnapshot: Codable, Equatable {
     }
 }
 
+public struct LANWorldStateSnapshot: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case dimension
+        case time
+        case dayTime
+        case difficulty
+        case raining
+        case thundering
+        case rainLevel
+        case thunderLevel
+        case weatherTimer
+    }
+
+    public var dimension: Int
+    public var time: Int
+    public var dayTime: Int
+    public var difficulty: Int
+    public var raining: Bool
+    public var thundering: Bool
+    public var rainLevel: Double
+    public var thunderLevel: Double
+    public var weatherTimer: Int
+
+    public init(
+        dimension: Int,
+        time: Int,
+        dayTime: Int,
+        difficulty: Int,
+        raining: Bool,
+        thundering: Bool,
+        rainLevel: Double,
+        thunderLevel: Double,
+        weatherTimer: Int
+    ) {
+        self.dimension = isValidLANDimension(dimension) ? dimension : Dim.overworld.rawValue
+        self.time = max(0, time)
+        self.dayTime = ((dayTime % DAY_LENGTH) + DAY_LENGTH) % DAY_LENGTH
+        self.difficulty = max(0, min(3, difficulty))
+        self.raining = raining
+        self.thundering = thundering
+        self.rainLevel = rainLevel.isFinite ? max(0, min(1, rainLevel)) : 0
+        self.thunderLevel = thunderLevel.isFinite ? max(0, min(1, thunderLevel)) : 0
+        self.weatherTimer = max(0, min(240_000, weatherTimer))
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            dimension: try c.decode(Int.self, forKey: .dimension),
+            time: try c.decode(Int.self, forKey: .time),
+            dayTime: try c.decode(Int.self, forKey: .dayTime),
+            difficulty: try c.decode(Int.self, forKey: .difficulty),
+            raining: try c.decode(Bool.self, forKey: .raining),
+            thundering: try c.decode(Bool.self, forKey: .thundering),
+            rainLevel: try c.decode(Double.self, forKey: .rainLevel),
+            thunderLevel: try c.decode(Double.self, forKey: .thunderLevel),
+            weatherTimer: try c.decode(Int.self, forKey: .weatherTimer)
+        )
+    }
+}
+
 public struct LANReplicationBatch: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case tick
         case fullSnapshot
         case world
+        case worldState
         case players
         case blockChanges
         case chunkSections
@@ -521,6 +583,7 @@ public struct LANReplicationBatch: Codable, Equatable {
     public var tick: Int
     public var fullSnapshot: Bool
     public var world: LANWorldSummary?
+    public var worldState: LANWorldStateSnapshot?
     public var players: [LANPlayerState]
     public var blockChanges: [LANBlockChange]
     public var chunkSections: [LANChunkSectionSnapshot]
@@ -532,6 +595,7 @@ public struct LANReplicationBatch: Codable, Equatable {
         tick: Int,
         fullSnapshot: Bool,
         world: LANWorldSummary? = nil,
+        worldState: LANWorldStateSnapshot? = nil,
         players: [LANPlayerState] = [],
         blockChanges: [LANBlockChange] = [],
         chunkSections: [LANChunkSectionSnapshot] = [],
@@ -542,6 +606,7 @@ public struct LANReplicationBatch: Codable, Equatable {
         self.tick = max(0, tick)
         self.fullSnapshot = fullSnapshot
         self.world = world
+        self.worldState = worldState
         self.players = Array(players.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_PLAYERS))
         self.blockChanges = Array(blockChanges.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES))
         self.chunkSections = Array(chunkSections.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS))
@@ -556,6 +621,7 @@ public struct LANReplicationBatch: Codable, Equatable {
             tick: try c.decode(Int.self, forKey: .tick),
             fullSnapshot: try c.decode(Bool.self, forKey: .fullSnapshot),
             world: try c.decodeIfPresent(LANWorldSummary.self, forKey: .world),
+            worldState: try c.decodeIfPresent(LANWorldStateSnapshot.self, forKey: .worldState),
             players: try c.decodeIfPresent([LANPlayerState].self, forKey: .players) ?? [],
             blockChanges: try c.decodeIfPresent([LANBlockChange].self, forKey: .blockChanges) ?? [],
             chunkSections: try c.decodeIfPresent([LANChunkSectionSnapshot].self, forKey: .chunkSections) ?? [],
