@@ -859,11 +859,65 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertLessThanOrEqual(encoded.count, LANMultiplayerFrameCodec.headerByteCount + LAN_MULTIPLAYER_MAX_FRAME_BYTES)
     }
 
+    func testVisibleChunkRequestCoversNeighborReadyAreaWithinFrameCap() throws {
+        let world = makeVisibleNeighborhoodWorld(surfaceY: 63)
+        let request = LANChunkRequest(
+            dimension: Dim.overworld.rawValue,
+            cx: 0,
+            cz: 0,
+            radius: LAN_MULTIPLAYER_DEFAULT_CHUNK_REQUEST_RADIUS,
+            centerY: 64,
+            verticalRadius: LAN_MULTIPLAYER_DEFAULT_CHUNK_VERTICAL_RADIUS
+        )
+
+        let snapshots = makeLANChunkSectionSnapshots(for: request, in: world)
+        let chunkKeys = Set(snapshots.map { "\($0.cx),\($0.cz)" })
+        let encoded = try LANMultiplayerFrameCodec.encode(.replicationBatch(LANReplicationBatch(
+            tick: 1,
+            fullSnapshot: true,
+            chunkSections: snapshots
+        )))
+
+        XCTAssertEqual(chunkKeys.count, 9)
+        XCTAssertLessThanOrEqual(snapshots.count, LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS)
+        XCTAssertLessThanOrEqual(encoded.count, LANMultiplayerFrameCodec.headerByteCount + LAN_MULTIPLAYER_MAX_FRAME_BYTES)
+        XCTAssertEqual(snapshots.first?.cx, 0)
+        XCTAssertEqual(snapshots.first?.cz, 0)
+    }
+
+    func testLegacySingleChunkRequestStillReturnsFullChunkSections() {
+        let world = makeVisibleNeighborhoodWorld(surfaceY: 63)
+        let request = LANChunkRequest(dimension: Dim.overworld.rawValue, cx: 0, cz: 0, radius: 0)
+
+        let snapshots = makeLANChunkSectionSnapshots(for: request, in: world)
+
+        XCTAssertEqual(snapshots.count, world.info.height / SECTION_H)
+        XCTAssertTrue(snapshots.allSatisfy { $0.cx == 0 && $0.cz == 0 })
+    }
+
     private func makeLoadedWorld() -> World {
         let world = World(dim: .overworld, seed: 42)
         let chunk = Chunk(cx: 0, cz: 0, minY: world.info.minY, height: world.info.height)
         chunk.status = .generated
         world.setChunk(chunk)
+        return world
+    }
+
+    private func makeVisibleNeighborhoodWorld(surfaceY: Int) -> World {
+        let world = World(dim: .overworld, seed: 42)
+        for cz in -1...1 {
+            for cx in -1...1 {
+                let chunk = Chunk(cx: cx, cz: cz, minY: world.info.minY, height: world.info.height)
+                for z in 0..<CHUNK_W {
+                    for x in 0..<CHUNK_W {
+                        chunk.set(x, surfaceY, z, UInt16(Int(B.stone) << 4))
+                    }
+                }
+                chunk.status = .generated
+                chunk.buildHeightmap()
+                world.setChunk(chunk)
+            }
+        }
         return world
     }
 }

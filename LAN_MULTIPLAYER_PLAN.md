@@ -12,11 +12,13 @@ sections, block deltas, complete host-owned entity snapshots, and inventory
 snapshots, plus permission-gated host orchestration for remote player entities,
 container/crafting/template/command/AI permissions, dimensions, deaths, respawns,
 and reconnect records. Transient LAN client worlds suppress local chunk
-generation and locally generated/saved entity authority, request host
-chunk-section snapshots for missing chunks, and purge client-only spawned
-entities, so mobs, drops, XP, plants, and block simulation are visible only when
-the host publishes them. Remaining release hardening is two-Mac installed-app
-soak and richer client UI for synchronized remote container/crafting screens.
+generation and locally generated/saved entity authority, keep joining players at
+the host-advertised spawn height until authoritative chunks arrive, request
+center-first host chunk-section snapshots for missing visible neighborhoods, and
+purge client-only spawned entities, so mobs, drops, XP, plants, and block
+simulation are visible only when the host publishes them. Remaining release
+hardening is two-Mac installed-app soak and richer client UI for synchronized
+remote container/crafting screens.
 
 ## Sources
 
@@ -152,7 +154,8 @@ Implemented client flow:
 6. Host replies with `ServerAccept` or `ServerReject`.
 7. Accepted client receives the host's `LANWorldSummary`, enters connected
    session/chat state, opens a transient LAN client world when joining from the
-   title screen, and receives an initial replication batch.
+   title screen without snapping to an empty local `surfaceY`, and receives an
+   initial replication batch centered on the host world's spawn neighborhood.
 8. Host publishes periodic bounded replication batches from the main game
    thread. World/player/entity state publishes at 20 Hz, host runtime block
    mutations are captured through the coalescing block-change log, and full
@@ -162,6 +165,9 @@ Implemented client flow:
    dirty-section path.
 9. Transient LAN client worlds request missing chunks from the host with
    `LANChunkRequest` and do not generate local seed chunks for shared play.
+   New clients include the current view Y and request a bounded 3x3 visible
+   neighborhood; hosts answer with capped current-height and surface sections so
+   meshing has neighboring chunks and the minimap has useful height data quickly.
 
 ### Protocol
 
@@ -184,7 +190,8 @@ Hard caps:
 - Maximum chat message: 512 bytes after UTF-8 validation.
 - Maximum player name: 32 visible characters.
 - Maximum queued outbound frames per client: fixed back-pressure cap.
-- Maximum chunk payload per frame: one section or one small section batch.
+- Maximum chunk payload per frame: one bounded visible-neighborhood section
+  batch.
 - Maximum clients: 8.
 - Maximum replication block changes per batch: 4096.
 - Maximum chunk sections per replication batch: 32.
@@ -226,7 +233,9 @@ Implemented host replication tick:
 1. App frame advances the single host `GameCore` on the main thread.
 2. `LANTransport` snapshots local host player state, accepted peer states,
    nearby chunk sections, a complete capped loaded-entity listing, host
-   inventory, and drained block changes.
+   inventory, and drained block changes. Direct chunk-request replies are
+   center-first and include current-height plus surface sections across the
+   requested visible neighborhood, not full-height chunks for every neighbor.
 3. The host sends a `LANReplicationBatch` at a bounded cadence, with larger
    full snapshots every few seconds and delta batches between them.
 4. Client block intents are accepted only from joined peers, validated against
@@ -260,7 +269,9 @@ Remaining client gameplay work:
 Chunk streaming:
 
 - Host generates and saves chunks.
-- Clients request chunks around their replicated player position.
+- Clients request chunks around their replicated player position, marking the
+  3x3 requested neighborhood in flight so one request replaces overlapping
+  one-chunk round trips.
 - Host sends section data plus light/biome data in bounded frames.
 - Clients cache runtime chunks in memory only; persisted chunks remain host-owned.
 

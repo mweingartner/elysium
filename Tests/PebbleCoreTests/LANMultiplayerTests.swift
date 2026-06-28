@@ -190,6 +190,7 @@ final class LANMultiplayerTests: XCTestCase {
 
         XCTAssertTrue(game.hasWorld())
         XCTAssertTrue(game.isLANClientWorld)
+        XCTAssertGreaterThan(game.player.y, Double(game.world.info.minY + 32))
         XCTAssertEqual(game.worldRec?.id, "lan-hostworld")
         XCTAssertEqual(game.worldRec?.name, "LAN: Host LAN")
         XCTAssertEqual(game.worldRec?.seed, Int32(-123_456))
@@ -226,6 +227,9 @@ final class LANMultiplayerTests: XCTestCase {
 
         XCTAssertTrue(game.isLANClientWorld)
         XCTAssertFalse(requested.isEmpty)
+        XCTAssertEqual(requested.count, 1)
+        XCTAssertEqual(requested.first?.1, floorDiv(ifloor(game.player.x), CHUNK_W))
+        XCTAssertEqual(requested.first?.2, floorDiv(ifloor(game.player.z), CHUNK_W))
         XCTAssertTrue(requested.allSatisfy { $0.0 == Dim.overworld.rawValue })
         XCTAssertTrue(game.world.chunks.isEmpty)
     }

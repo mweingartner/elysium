@@ -238,6 +238,7 @@ public final class GameCore {
     // streaming
     private var genInFlight = Set<DimChunk>()
     private var lanChunkRequestsInFlight = Set<DimChunk>()
+    private var lanAppliedChunkSections = Set<DimSection>()
     /// keys of chunks that exist on disk — fresh chunks skip the read entirely
     private var savedChunkKeys = Set<String>()
     /// keys whose DB record holds full block data — an unload rewrite of these
@@ -522,6 +523,7 @@ public final class GameCore {
         worldRec = rec
         isLANClientWorld = transientLANClient
         lanChunkRequestsInFlight.removeAll()
+        lanAppliedChunkSections.removeAll()
         advancements = AdvancementTracker()
         if let adv { advancements.load(adv) }
         dragonSpawned = false
@@ -569,7 +571,7 @@ public final class GameCore {
         // edits near spawn aren't shadowed by fresh generation
         let pcx = floorDiv(ifloor(player.x), 16), pcz = floorDiv(ifloor(player.z), 16)
         ensureChunksLoaded(w, pcx, pcz, 1)
-        if playerData == nil {
+        if playerData == nil && !transientLANClient {
             let sy = w.surfaceY(rec.spawnX, rec.spawnZ)
             player.setPos(Double(rec.spawnX) + 0.5, Double(sy), Double(rec.spawnZ) + 0.5)
         }
@@ -757,14 +759,45 @@ public final class GameCore {
         return entities
     }
 
+    private func lanClientRequiredSectionYs(in w: World) -> [Int] {
+        let y = ifloor(player?.y ?? w.spawnY)
+        let center = max(0, min(w.info.height / SECTION_H - 1, (y - w.info.minY) >> 4))
+        let verticalRadius = LAN_MULTIPLAYER_DEFAULT_CHUNK_VERTICAL_RADIUS
+        var out: [Int] = []
+        for sy in max(0, center - verticalRadius)...min(w.info.height / SECTION_H - 1, center + verticalRadius) {
+            out.append(sy)
+        }
+        return out
+    }
+
+    private func hasLANClientVisibleSections(_ w: World, _ cx: Int, _ cz: Int) -> Bool {
+        guard w.getChunk(cx, cz) != nil else { return false }
+        for sy in lanClientRequiredSectionYs(in: w) {
+            let pos = DimSection(dim: w.dim.rawValue, pos: SectionPos(cx: cx, sy: sy, cz: cz))
+            if !lanAppliedChunkSections.contains(pos) { return false }
+        }
+        return true
+    }
+
     private func requestChunk(_ w: World, _ cx: Int, _ cz: Int) {
         let key = chunkKey(cx, cz)
         let flight = DimChunk(dim: w.dim.rawValue, key: key)
         if isLANClientWorld {
-            if w.chunks[key] != nil || lanChunkRequestsInFlight.contains(flight) { return }
-            if lanChunkRequestsInFlight.count >= MAX_GEN_INFLIGHT { return }
+            if hasLANClientVisibleSections(w, cx, cz) || lanChunkRequestsInFlight.contains(flight) { return }
+            let requestRadius = LAN_MULTIPLAYER_DEFAULT_CHUNK_REQUEST_RADIUS
+            let requestFlights = orderedLANChunkRequestCoordinates(cx: cx, cz: cz, radius: requestRadius)
+                .compactMap { coord -> DimChunk? in
+                    if hasLANClientVisibleSections(w, coord.cx, coord.cz) { return nil }
+                    let key = chunkKey(coord.cx, coord.cz)
+                    let candidate = DimChunk(dim: w.dim.rawValue, key: key)
+                    return lanChunkRequestsInFlight.contains(candidate) ? nil : candidate
+                }
+            if requestFlights.isEmpty { return }
+            if lanChunkRequestsInFlight.count + requestFlights.count > MAX_GEN_INFLIGHT { return }
             if lanChunkRequestHandler?(w, cx, cz) == true {
-                lanChunkRequestsInFlight.insert(flight)
+                for requestFlight in requestFlights {
+                    lanChunkRequestsInFlight.insert(requestFlight)
+                }
             }
             return
         }
@@ -826,6 +859,10 @@ public final class GameCore {
         guard isLANClientWorld, !sections.isEmpty else { return }
         for section in sections {
             let key = chunkKey(section.cx, section.cz)
+            lanAppliedChunkSections.insert(DimSection(
+                dim: section.dimension,
+                pos: SectionPos(cx: section.cx, sy: section.sectionY, cz: section.cz)
+            ))
             lanChunkRequestsInFlight.remove(DimChunk(dim: section.dimension, key: key))
         }
     }
@@ -1100,9 +1137,13 @@ public final class GameCore {
     /// Guarantee an area exists before placing the player in it (synchronous)
     private func ensureChunksLoaded(_ w: World, _ ccx: Int, _ ccz: Int, _ radius: Int) {
         if isLANClientWorld {
-            for dz in -radius...radius {
-                for dx in -radius...radius {
-                    requestChunk(w, ccx + dx, ccz + dz)
+            let radius = max(0, radius)
+            for r in 0...radius {
+                for dz in -r...r {
+                    for dx in -r...r {
+                        if max(abs(dx), abs(dz)) != r { continue }
+                        requestChunk(w, ccx + dx, ccz + dz)
+                    }
                 }
             }
             return
@@ -1207,6 +1248,7 @@ public final class GameCore {
         lightQueue[w.dim]!.remove(chunkKey(c.cx, c.cz))
         for s in 0..<c.sections {
             dirtySections[w.dim]!.remove(SectionPos(cx: c.cx, sy: s, cz: c.cz))
+            lanAppliedChunkSections.remove(DimSection(dim: w.dim.rawValue, pos: SectionPos(cx: c.cx, sy: s, cz: c.cz)))
         }
     }
 

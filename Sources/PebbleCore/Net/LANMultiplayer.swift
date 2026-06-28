@@ -15,6 +15,9 @@ public let LAN_MULTIPLAYER_MAX_REPLICATION_PLAYERS = LAN_MULTIPLAYER_MAX_CLIENTS
 public let LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES = LAN_MULTIPLAYER_MAX_CLIENTS + 1
 public let LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS = 64
 public let LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT = CHUNK_W * SECTION_H * CHUNK_W
+public let LAN_MULTIPLAYER_MAX_CHUNK_REQUEST_RADIUS = 1
+public let LAN_MULTIPLAYER_DEFAULT_CHUNK_REQUEST_RADIUS = 1
+public let LAN_MULTIPLAYER_DEFAULT_CHUNK_VERTICAL_RADIUS = 1
 private let LAN_MULTIPLAYER_MAX_ENTITY_COORDINATE = 30_000_000.0
 private let LAN_MULTIPLAYER_MAX_REPLICATED_ITEM_COUNT = 127
 private let LAN_MULTIPLAYER_MAX_REPLICATED_XP_AMOUNT = 4096
@@ -643,16 +646,48 @@ public struct LANReplicationBatch: Codable, Equatable {
 }
 
 public struct LANChunkRequest: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case dimension
+        case cx
+        case cz
+        case radius
+        case centerY
+        case verticalRadius
+    }
+
     public var dimension: Int
     public var cx: Int
     public var cz: Int
     public var radius: Int
+    public var centerY: Int?
+    public var verticalRadius: Int
 
-    public init(dimension: Int, cx: Int, cz: Int, radius: Int) {
+    public init(
+        dimension: Int,
+        cx: Int,
+        cz: Int,
+        radius: Int,
+        centerY: Int? = nil,
+        verticalRadius: Int = LAN_MULTIPLAYER_DEFAULT_CHUNK_VERTICAL_RADIUS
+    ) {
         self.dimension = dimension
         self.cx = cx
         self.cz = cz
-        self.radius = max(0, min(4, radius))
+        self.radius = max(0, min(LAN_MULTIPLAYER_MAX_CHUNK_REQUEST_RADIUS, radius))
+        self.centerY = centerY
+        self.verticalRadius = max(0, min(4, verticalRadius))
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            dimension: try c.decode(Int.self, forKey: .dimension),
+            cx: try c.decode(Int.self, forKey: .cx),
+            cz: try c.decode(Int.self, forKey: .cz),
+            radius: try c.decode(Int.self, forKey: .radius),
+            centerY: try c.decodeIfPresent(Int.self, forKey: .centerY),
+            verticalRadius: try c.decodeIfPresent(Int.self, forKey: .verticalRadius) ?? LAN_MULTIPLAYER_DEFAULT_CHUNK_VERTICAL_RADIUS
+        )
     }
 }
 

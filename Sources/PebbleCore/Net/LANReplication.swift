@@ -696,6 +696,85 @@ public func makeLANChunkSectionSnapshot(from chunk: Chunk, dimension: Int, secti
     )
 }
 
+public func orderedLANChunkRequestCoordinates(cx: Int, cz: Int, radius rawRadius: Int) -> [(cx: Int, cz: Int)] {
+    let radius = max(0, min(LAN_MULTIPLAYER_MAX_CHUNK_REQUEST_RADIUS, rawRadius))
+    var out: [(cx: Int, cz: Int, d: Int)] = []
+    out.reserveCapacity((radius * 2 + 1) * (radius * 2 + 1))
+    for dz in -radius...radius {
+        for dx in -radius...radius {
+            out.append((cx + dx, cz + dz, max(abs(dx), abs(dz))))
+        }
+    }
+    out.sort { lhs, rhs in
+        if lhs.d != rhs.d { return lhs.d < rhs.d }
+        if lhs.cz != rhs.cz { return lhs.cz < rhs.cz }
+        return lhs.cx < rhs.cx
+    }
+    return out.map { ($0.cx, $0.cz) }
+}
+
+private func clampedLANSectionY(forWorldY y: Int, in world: World) -> Int {
+    max(0, min(world.info.height / SECTION_H - 1, (y - world.info.minY) >> 4))
+}
+
+private func surfaceSectionY(in chunk: Chunk) -> Int? {
+    guard let rawTop = chunk.heightmap.max() else { return nil }
+    let top = Int(rawTop)
+    guard top >= chunk.minY else { return nil }
+    return max(0, min(chunk.sections - 1, (Int(top) - chunk.minY) >> 4))
+}
+
+private func requestedLANSectionYs(for chunk: Chunk, request: LANChunkRequest, world: World) -> [Int] {
+    if request.centerY == nil && request.radius == 0 {
+        return Array(0..<chunk.sections)
+    }
+
+    var out: [Int] = []
+    var seen = Set<Int>()
+    func append(_ sy: Int) {
+        let clamped = max(0, min(chunk.sections - 1, sy))
+        if seen.insert(clamped).inserted {
+            out.append(clamped)
+        }
+    }
+
+    if let centerY = request.centerY {
+        let centerSection = clampedLANSectionY(forWorldY: centerY, in: world)
+        let verticalRadius = max(0, min(4, request.verticalRadius))
+        for sy in max(0, centerSection - verticalRadius)...min(chunk.sections - 1, centerSection + verticalRadius) {
+            append(sy)
+        }
+    }
+    if let surface = surfaceSectionY(in: chunk) {
+        append(surface)
+    }
+    if out.isEmpty {
+        append(max(0, min(chunk.sections - 1, chunk.sections / 2)))
+    }
+    return out
+}
+
+public func makeLANChunkSectionSnapshots(
+    for request: LANChunkRequest,
+    in world: World,
+    maxCount: Int = LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS
+) -> [LANChunkSectionSnapshot] {
+    guard request.dimension == world.dim.rawValue else { return [] }
+    let cappedCount = max(0, min(maxCount, LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS))
+    if cappedCount == 0 { return [] }
+    var out: [LANChunkSectionSnapshot] = []
+    for coord in orderedLANChunkRequestCoordinates(cx: request.cx, cz: request.cz, radius: request.radius) {
+        guard let chunk = world.getChunk(coord.cx, coord.cz) else { continue }
+        for sectionY in requestedLANSectionYs(for: chunk, request: request, world: world) {
+            if out.count >= cappedCount { return out }
+            if let snapshot = makeLANChunkSectionSnapshot(from: chunk, dimension: world.dim.rawValue, sectionY: sectionY) {
+                out.append(snapshot)
+            }
+        }
+    }
+    return out
+}
+
 public func makeLANChunkSectionSnapshots(
     around player: Player,
     in world: World,
@@ -703,25 +782,15 @@ public func makeLANChunkSectionSnapshots(
     verticalSectionRadius: Int = 2,
     maxCount: Int = LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS
 ) -> [LANChunkSectionSnapshot] {
-    let centerCX = floorDiv(ifloor(player.x), CHUNK_W)
-    let centerCZ = floorDiv(ifloor(player.z), CHUNK_W)
-    let playerSection = max(0, min(world.info.height / SECTION_H - 1, (ifloor(player.y) - world.info.minY) >> 4))
-    var out: [LANChunkSectionSnapshot] = []
-    let radius = max(0, min(2, chunkRadius))
-    for dz in -radius...radius {
-        for dx in -radius...radius {
-            guard let chunk = world.getChunk(centerCX + dx, centerCZ + dz) else { continue }
-            let minSection = max(0, playerSection - verticalSectionRadius)
-            let maxSection = min(chunk.sections - 1, playerSection + verticalSectionRadius)
-            for sectionY in minSection...maxSection {
-                if out.count >= max(0, min(maxCount, LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS)) { return out }
-                if let snapshot = makeLANChunkSectionSnapshot(from: chunk, dimension: world.dim.rawValue, sectionY: sectionY) {
-                    out.append(snapshot)
-                }
-            }
-        }
-    }
-    return out
+    let request = LANChunkRequest(
+        dimension: world.dim.rawValue,
+        cx: floorDiv(ifloor(player.x), CHUNK_W),
+        cz: floorDiv(ifloor(player.z), CHUNK_W),
+        radius: chunkRadius,
+        centerY: ifloor(player.y),
+        verticalRadius: verticalSectionRadius
+    )
+    return makeLANChunkSectionSnapshots(for: request, in: world, maxCount: maxCount)
 }
 
 private let LAN_MIRRORED_ENTITY_PICKUP_DELAY = 1_000_000_000

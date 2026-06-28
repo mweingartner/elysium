@@ -100,7 +100,15 @@ final class LANMultiplayerManager {
         game.onWorldBlockChanged = nil
         game.lanChunkRequestHandler = { [weak self] world, cx, cz in
             guard let self else { return false }
-            let request = LANChunkRequest(dimension: world.dim.rawValue, cx: cx, cz: cz, radius: 0)
+            let centerY = self.activeGame?.player.map { Int($0.y.rounded(.down)) }
+            let request = LANChunkRequest(
+                dimension: world.dim.rawValue,
+                cx: cx,
+                cz: cz,
+                radius: LAN_MULTIPLAYER_DEFAULT_CHUNK_REQUEST_RADIUS,
+                centerY: centerY,
+                verticalRadius: LAN_MULTIPLAYER_DEFAULT_CHUNK_VERTICAL_RADIUS
+            )
             self.queue.async { [weak self] in
                 guard let self, let peer = self.clientPeer else { return }
                 self.send(.chunkRequest(playerID: self.localPeerID, request: request), to: peer)
@@ -624,12 +632,17 @@ final class LANMultiplayerManager {
         )
     }
 
-    private func makeHostReplicationBatch(game: GameCore, player: Player, fullSnapshot: Bool) -> LANReplicationBatch? {
+    private func makeHostReplicationBatch(
+        game: GameCore,
+        player: Player,
+        fullSnapshot: Bool,
+        chunkSectionsOverride: [LANChunkSectionSnapshot]? = nil
+    ) -> LANReplicationBatch? {
         guard game.hasWorld() else { return nil }
         let acceptedCount = queue.sync { hostPeers.values.filter { $0.accepted }.count }
         _ = applyLANRemotePlayers(hostReplicationSession.peerPlayerStates(), to: game.world, localPlayerID: localPeerID)
         let localState = makeLANPlayerState(player, playerID: localPeerID, displayName: NSFullUserName(), dimension: game.dim.rawValue)
-        let chunks = fullSnapshot ? makeLANChunkSectionSnapshots(around: player, in: game.world) : []
+        let chunks = fullSnapshot ? (chunkSectionsOverride ?? makeLANChunkSectionSnapshots(around: player, in: game.world)) : []
         let entities = makeLANEntitySnapshots(in: game.world)
         let inventories = [makeLANInventorySnapshot(player, playerID: localPeerID)]
         let summary = fullSnapshot ? makeWorldSummary(playerCount: acceptedCount) : nil
@@ -650,9 +663,26 @@ final class LANMultiplayerManager {
         guard Thread.isMainThread,
               let game = activeGame,
               game.hasWorld(),
-              let player = game.player,
-              let batch = makeHostReplicationBatch(game: game, player: player, fullSnapshot: true)
+              let player = game.player
         else { return }
+        let spawnRequest = LANChunkRequest(
+            dimension: game.world.dim.rawValue,
+            cx: floorDiv(Int(game.world.spawnX.rounded(.down)), CHUNK_W),
+            cz: floorDiv(Int(game.world.spawnZ.rounded(.down)), CHUNK_W),
+            radius: LAN_MULTIPLAYER_DEFAULT_CHUNK_REQUEST_RADIUS,
+            centerY: Int(game.world.spawnY.rounded(.down)),
+            verticalRadius: LAN_MULTIPLAYER_DEFAULT_CHUNK_VERTICAL_RADIUS
+        )
+        for coord in orderedLANChunkRequestCoordinates(cx: spawnRequest.cx, cz: spawnRequest.cz, radius: spawnRequest.radius) {
+            _ = game.ensureAuthoritativeLANChunkLoaded(dimension: spawnRequest.dimension, cx: coord.cx, cz: coord.cz)
+        }
+        let spawnChunks = makeLANChunkSectionSnapshots(for: spawnRequest, in: game.world)
+        guard let batch = makeHostReplicationBatch(
+            game: game,
+            player: player,
+            fullSnapshot: true,
+            chunkSectionsOverride: spawnChunks
+        ) else { return }
         queue.async { [weak self] in
             guard let self, let peer = self.hostPeers[peerID], peer.accepted else { return }
             self.send(.replicationBatch(batch), to: peer)
@@ -743,22 +773,10 @@ final class LANMultiplayerManager {
                   game.hasWorld(),
                   request.dimension == game.world.dim.rawValue
             else { return }
-            var snapshots: [LANChunkSectionSnapshot] = []
-            let radius = max(0, min(2, request.radius))
-            for dz in -radius...radius {
-                for dx in -radius...radius {
-                    let cx = request.cx + dx
-                    let cz = request.cz + dz
-                    _ = game.ensureAuthoritativeLANChunkLoaded(dimension: request.dimension, cx: cx, cz: cz)
-                    guard let chunk = game.world.getChunk(cx, cz) else { continue }
-                    for sectionY in 0..<chunk.sections {
-                        if snapshots.count >= LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS { break }
-                        if let snapshot = makeLANChunkSectionSnapshot(from: chunk, dimension: game.world.dim.rawValue, sectionY: sectionY) {
-                            snapshots.append(snapshot)
-                        }
-                    }
-                }
+            for coord in orderedLANChunkRequestCoordinates(cx: request.cx, cz: request.cz, radius: request.radius) {
+                _ = game.ensureAuthoritativeLANChunkLoaded(dimension: request.dimension, cx: coord.cx, cz: coord.cz)
             }
+            let snapshots = makeLANChunkSectionSnapshots(for: request, in: game.world)
             let batch = LANReplicationBatch(
                 tick: game.world.time,
                 fullSnapshot: true,
