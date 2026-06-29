@@ -6,6 +6,22 @@ import Foundation
 import QuartzCore
 import PebbleCore
 
+private enum CraftAmountStepperLayout {
+    static let buttonW = 12.0
+    static let buttonH = 8.0
+    static let gap = 2.0
+    static let outputGap = 3.0
+
+    static func frames(outputX: Double, outputY: Double) -> (up: (x: Double, y: Double, w: Double, h: Double),
+                                                            down: (x: Double, y: Double, w: Double, h: Double)) {
+        let x = outputX + 18 + outputGap
+        return (
+            up: (x, outputY, buttonW, buttonH),
+            down: (x, outputY + buttonH + gap, buttonW, buttonH)
+        )
+    }
+}
+
 // =============================================================================
 // Base container screen with player inventory
 // =============================================================================
@@ -322,12 +338,12 @@ final class InventoryScreen: ContainerScreen {
         buttons.append(cb)
     }
     private func installCraftAmountButtons(outputX: Double, outputY: Double, _ game: GameCore) {
-        let bx = outputX + 20
-        let up = Button(bx, outputY - 1, 12, 9, "^") { [weak self, weak game] in
+        let frames = CraftAmountStepperLayout.frames(outputX: outputX, outputY: outputY)
+        let up = CraftAmountButton(frames.up.x, frames.up.y, frames.up.w, frames.up.h, direction: .up) { [weak self, weak game] in
             guard let self, let game else { return }
             self.adjustCraftRounds(1, game)
         }
-        let down = Button(bx, outputY + 10, 12, 9, "v") { [weak self, weak game] in
+        let down = CraftAmountButton(frames.down.x, frames.down.y, frames.down.w, frames.down.h, direction: .down) { [weak self, weak game] in
             guard let self, let game else { return }
             self.adjustCraftRounds(-1, game)
         }
@@ -613,12 +629,12 @@ final class CraftingScreen: ContainerScreen {
         buttons.append(cb)
     }
     private func installCraftAmountButtons(outputX: Double, outputY: Double, _ game: GameCore) {
-        let bx = outputX + 20
-        let up = Button(bx, outputY - 1, 12, 9, "^") { [weak self, weak game] in
+        let frames = CraftAmountStepperLayout.frames(outputX: outputX, outputY: outputY)
+        let up = CraftAmountButton(frames.up.x, frames.up.y, frames.up.w, frames.up.h, direction: .up) { [weak self, weak game] in
             guard let self, let game else { return }
             self.adjustCraftRounds(1, game)
         }
-        let down = Button(bx, outputY + 10, 12, 9, "v") { [weak self, weak game] in
+        let down = CraftAmountButton(frames.down.x, frames.down.y, frames.down.w, frames.down.h, direction: .down) { [weak self, weak game] in
             guard let self, let game else { return }
             self.adjustCraftRounds(-1, game)
         }

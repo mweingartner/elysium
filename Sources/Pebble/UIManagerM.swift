@@ -51,6 +51,21 @@ class Button {
     }
 }
 
+enum CraftAmountDirection {
+    case up
+    case down
+}
+
+final class CraftAmountButton: Button {
+    let direction: CraftAmountDirection
+
+    init(_ x: Double, _ y: Double, _ w: Double, _ h: Double,
+         direction: CraftAmountDirection, _ onClick: @escaping () -> Void) {
+        self.direction = direction
+        super.init(x, y, w, h, "", onClick)
+    }
+}
+
 final class Slider: Button {
     let getLabel: () -> String
     let getValue: () -> Double
@@ -338,6 +353,10 @@ final class UIManager {
     }
     func drawButton(_ b: Button, _ hover: Bool) {
         if !b.visible { return }
+        if let craftButton = b as? CraftAmountButton {
+            drawCraftAmountButton(craftButton, hover)
+            return
+        }
         if let cb = b as? CheckBox {
             let box = 10.0
             let by = b.y + ((b.h - box) / 2).rounded(.down)
@@ -375,6 +394,38 @@ final class UIManager {
         cv.fillRect(b.x, b.y + b.h - 1, b.w, 1)
         cv.fillRect(b.x + b.w - 1, b.y, 1, b.h)
         cv.drawTextCentered(b.label, b.x + b.w / 2, b.y + (b.h - 8) / 2, 1, b.enabled ? "#ffffff" : "#a0a0a0")
+    }
+    private func drawCraftAmountButton(_ b: CraftAmountButton, _ hover: Bool) {
+        let face = b.enabled ? (hover ? "#b8b8b8" : "#9a9a9a") : "#5c5c5c"
+        cv.setFill(face)
+        cv.fillRect(b.x, b.y, b.w, b.h)
+        cv.setFill(b.enabled ? "#f2f2f2" : "#7a7a7a")
+        cv.fillRect(b.x, b.y, b.w, 1)
+        cv.fillRect(b.x, b.y, 1, b.h)
+        cv.setFill("#1f1f1f")
+        cv.fillRect(b.x, b.y + b.h - 1, b.w, 1)
+        cv.fillRect(b.x + b.w - 1, b.y, 1, b.h)
+
+        let arrow = b.enabled ? "#ffffff" : "#9a9a9a"
+        let shadow = b.enabled ? "#505050" : "#3a3a3a"
+        drawCraftAmountChevron(b, color: shadow, offsetX: 1, offsetY: 1)
+        drawCraftAmountChevron(b, color: arrow, offsetX: 0, offsetY: 0)
+    }
+    private func drawCraftAmountChevron(_ b: CraftAmountButton, color: String, offsetX: Double, offsetY: Double) {
+        cv.setFill(color)
+        let cx = (b.x + b.w / 2).rounded(.down) + offsetX
+        let top = b.y + 2 + offsetY
+        for row in 0..<4 {
+            let r = Double(row)
+            switch b.direction {
+            case .up:
+                cv.fillRect(cx - 1 - r, top + r, 2, 1)
+                cv.fillRect(cx + r, top + r, 2, 1)
+            case .down:
+                cv.fillRect(cx - 4 + r, top + r, 2, 1)
+                cv.fillRect(cx + 3 - r, top + r, 2, 1)
+            }
+        }
     }
     func drawButtons(_ screen: Screen) {
         for b in screen.buttons where !(b is Slider) {

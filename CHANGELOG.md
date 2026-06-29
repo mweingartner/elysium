@@ -8,8 +8,8 @@ in-app version string comes from `PEBBLE_VERSION` (PebbleCore/Game/Saves.swift).
 - Added up/down quantity arrows beside the personal and crafting-table output
   slots. Survival crafting clamps the selected batch size to available
   resources, including nearby crafting-table containers, while creative clamps
-  to the receiving inventory capacity and large output batches split across
-  legal item stacks.
+  to the receiving inventory capacity, large output batches split across legal
+  item stacks, and the compact stepper controls use matching pixel-drawn arrows.
 
 ## 1.1.0 — 2026-06-27 — gameplay systems update
 
