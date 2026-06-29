@@ -243,7 +243,11 @@ final class InventoryScreen: ContainerScreen {
     private let recipeMenu = CraftingRecipePopup(gridWidth: 2, gridHeight: 2)
     private var creativeCrafting = false
     private var selectedCreativePlan: CraftingRecipePlan?
+    private var selectedSurvivalPlan: CraftingRecipePlan?
+    private var selectedCraftRounds = 1
     private weak var creativeCheckbox: CheckBox?
+    private weak var craftUpButton: Button?
+    private weak var craftDownButton: Button?
 
     override init() {
         super.init()
@@ -274,11 +278,17 @@ final class InventoryScreen: ContainerScreen {
             containerSlots.append(SlotDef(
                 x: px + 97 + Double(i % 2) * 18, y: py + 18 + Double(i / 2) * 18,
                 get: { [weak self] in self?.craftGrid[idx] },
-                set: { [weak self] s in
+                set: { [weak self, weak game] s in
+                    self?.selectedSurvivalPlan = nil
+                    self?.selectedCraftRounds = 1
                     self?.craftGrid[idx] = s
-                    self?.updateResult()
+                    self?.updateResult(game)
                 },
-                onChange: { [weak self] in self?.updateResult() }))
+                onChange: { [weak self, weak game] in
+                    self?.selectedSurvivalPlan = nil
+                    self?.selectedCraftRounds = 1
+                    self?.updateResult(game)
+                }))
         }
         containerSlots.append(SlotDef(
             x: px + 153, y: py + 27,
@@ -286,16 +296,13 @@ final class InventoryScreen: ContainerScreen {
             set: { _ in },
             output: true,
             onTake: { [weak self, weak game] _ in
-                guard let self else { return }
-                if self.creativeCrafting {
-                    self.updateResult()
-                    game?.advance("craft_any")
-                    return
-                }
-                _ = consumeCraftingGrid(&self.craftGrid)
-                self.updateResult()
-                game?.advance("craft_any")
+                guard let self, let game else { return }
+                self.takeCraftingOutput(game)
+            },
+            repeatsOutputQuickMove: { [weak self] in
+                (self?.selectedCraftRounds ?? 1) <= 1
             }))
+        installCraftAmountButtons(outputX: px + 153, outputY: py + 27, game)
         recipeMenu.installButton(on: self) { [weak self] in
             self?.recipeMenu.toggle()
         }
@@ -306,18 +313,84 @@ final class InventoryScreen: ContainerScreen {
             self.creativeCrafting = !self.creativeCrafting
             game?.player.setGameMode(self.creativeCrafting ? GameMode.creative : GameMode.survival)
             self.selectedCreativePlan = nil
-            self.updateResult()
+            self.selectedSurvivalPlan = nil
+            self.selectedCraftRounds = 1
+            self.updateResult(game)
             if let game { self.recipeMenu.refresh(game, craftGrid: self.craftGrid, creative: self.creativeCrafting) }
         })
         creativeCheckbox = cb
         buttons.append(cb)
     }
-    func updateResult() {
-        if creativeCrafting {
-            craftResult = selectedCreativePlan?.output.copy()
-        } else {
-            craftResult = matchCrafting(craftGrid, 2, 2)?.out
+    private func installCraftAmountButtons(outputX: Double, outputY: Double, _ game: GameCore) {
+        let bx = outputX + 20
+        let up = Button(bx, outputY - 1, 12, 9, "^") { [weak self, weak game] in
+            guard let self, let game else { return }
+            self.adjustCraftRounds(1, game)
         }
+        let down = Button(bx, outputY + 10, 12, 9, "v") { [weak self, weak game] in
+            guard let self, let game else { return }
+            self.adjustCraftRounds(-1, game)
+        }
+        craftUpButton = up
+        craftDownButton = down
+        buttons.append(up)
+        buttons.append(down)
+    }
+    private func activeSurvivalPlan() -> CraftingRecipePlan? {
+        selectedSurvivalPlan ?? currentCraftingPlan(from: craftGrid, gridWidth: 2, gridHeight: 2)
+    }
+    private func activeCraftingPlan() -> CraftingRecipePlan? {
+        creativeCrafting ? selectedCreativePlan : activeSurvivalPlan()
+    }
+    private func availableCraftRounds(_ game: GameCore) -> Int {
+        guard let plan = activeCraftingPlan() else { return 0 }
+        if creativeCrafting {
+            return max(1, maxCreativeCraftingRounds(plan, into: game.player.inventory))
+        }
+        return maxCraftingRounds(plan, from: game.player.inventory + craftGrid)
+    }
+    private func clampCraftRounds(_ game: GameCore) -> Int {
+        let maxRounds = availableCraftRounds(game)
+        guard maxRounds > 0 else {
+            selectedCraftRounds = 1
+            return 0
+        }
+        selectedCraftRounds = min(max(1, selectedCraftRounds), maxRounds)
+        return maxRounds
+    }
+    private func updateCraftRoundButtons(_ game: GameCore) {
+        let maxRounds = clampCraftRounds(game)
+        let hasOutput = activeCraftingPlan() != nil && maxRounds > 0
+        craftUpButton?.visible = hasOutput
+        craftDownButton?.visible = hasOutput
+        craftUpButton?.enabled = hasOutput && selectedCraftRounds < maxRounds
+        craftDownButton?.enabled = hasOutput && selectedCraftRounds > 1
+    }
+    private func adjustCraftRounds(_ delta: Int, _ game: GameCore) {
+        syncCreativeFromPlayer(game)
+        let maxRounds = max(0, availableCraftRounds(game))
+        guard maxRounds > 0 else {
+            selectedCraftRounds = 1
+            updateResult(game)
+            return
+        }
+        selectedCraftRounds = min(max(1, selectedCraftRounds + delta), maxRounds)
+        updateResult(game)
+        updateCraftRoundButtons(game)
+    }
+    func updateResult(_ game: GameCore? = nil) {
+        if let game, clampCraftRounds(game) == 0 {
+            craftResult = nil
+            return
+        }
+        guard let plan = activeCraftingPlan() else {
+            craftResult = nil
+            selectedCraftRounds = 1
+            return
+        }
+        let out = plan.output.copy()
+        out.count = max(1, selectedCraftRounds) * max(1, plan.output.count)
+        craftResult = out
     }
     private func returnCraftGridToInventory(_ game: GameCore) -> Bool {
         var ok = true
@@ -329,7 +402,9 @@ final class InventoryScreen: ContainerScreen {
                 ok = false
             }
         }
-        updateResult()
+        selectedSurvivalPlan = nil
+        selectedCraftRounds = 1
+        updateResult(game)
         return ok
     }
     private func syncCreativeFromPlayer(_ game: GameCore) {
@@ -337,26 +412,57 @@ final class InventoryScreen: ContainerScreen {
         if creativeCrafting != actual {
             creativeCrafting = actual
             selectedCreativePlan = nil
-            updateResult()
+            selectedSurvivalPlan = nil
+            selectedCraftRounds = 1
+            updateResult(game)
         }
     }
     private func selectRecipe(_ plan: CraftingRecipePlan, _ ui: UIManager, _ game: GameCore) {
         guard ui.cursorStack == nil else { return }
         if creativeCrafting {
             selectedCreativePlan = plan
+            selectedSurvivalPlan = nil
+            selectedCraftRounds = 1
             recipeMenu.close()
-            updateResult()
+            updateResult(game)
             recipeMenu.refresh(game, craftGrid: craftGrid, creative: true)
             game.playUISound("ui.stonecutter.select_recipe")
             return
         }
         guard returnCraftGridToInventory(game) else { return }
         if populateCraftingGrid(plan, grid: &craftGrid, inventory: &game.player.inventory) {
+            selectedSurvivalPlan = plan
+            selectedCraftRounds = 1
             recipeMenu.close()
-            updateResult()
+            updateResult(game)
             recipeMenu.refresh(game, craftGrid: craftGrid)
             game.playUISound("ui.stonecutter.select_recipe")
         }
+    }
+    private func takeCraftingOutput(_ game: GameCore) {
+        if creativeCrafting {
+            updateResult(game)
+            game.advance("craft_any")
+            return
+        }
+        guard let taken = craftResult else { return }
+        let planForRefill = activeSurvivalPlan()
+        let baseCount = max(1, planForRefill?.output.count ?? taken.count)
+        let rounds = max(1, min(selectedCraftRounds, taken.count / baseCount))
+        var consumed = 0
+        while consumed < rounds {
+            if matchCrafting(craftGrid, 2, 2)?.out.id != taken.id {
+                guard let plan = planForRefill,
+                      craftGrid.allSatisfy({ $0 == nil }),
+                      populateCraftingGrid(plan, grid: &craftGrid, inventory: &game.player.inventory)
+                else { break }
+            }
+            guard matchCrafting(craftGrid, 2, 2)?.out.id == taken.id else { break }
+            _ = consumeCraftingGrid(&craftGrid)
+            consumed += 1
+        }
+        updateResult(game)
+        game.advance("craft_any")
     }
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         syncCreativeFromPlayer(game)
@@ -365,6 +471,8 @@ final class InventoryScreen: ContainerScreen {
             cb.x = min(148, max(4, ui.width - cb.w - 4))
             cb.y = 4
         }
+        updateResult(game)
+        updateCraftRoundButtons(game)
         recipeMenu.refresh(game, craftGrid: craftGrid, creative: creativeCrafting)
         super.draw(ui, game, partial)
         recipeMenu.draw(ui)
@@ -440,7 +548,11 @@ final class CraftingScreen: ContainerScreen {
     private let tablePos: (x: Int, y: Int, z: Int)?
     private var creativeCrafting = false
     private var selectedCreativePlan: CraftingRecipePlan?
+    private var selectedSurvivalPlan: CraftingRecipePlan?
+    private var selectedCraftRounds = 1
     private weak var creativeCheckbox: CheckBox?
+    private weak var craftUpButton: Button?
+    private weak var craftDownButton: Button?
 
     init(_ tablePos: (x: Int, y: Int, z: Int)? = nil) {
         self.tablePos = tablePos
@@ -457,11 +569,17 @@ final class CraftingScreen: ContainerScreen {
             containerSlots.append(SlotDef(
                 x: px + 29 + Double(i % 3) * 18, y: py + 16 + Double(i / 3) * 18,
                 get: { [weak self] in self?.craftGrid[idx] },
-                set: { [weak self] s in
+                set: { [weak self, weak game] s in
+                    self?.selectedSurvivalPlan = nil
+                    self?.selectedCraftRounds = 1
                     self?.craftGrid[idx] = s
-                    self?.updateResult()
+                    self?.updateResult(game)
                 },
-                onChange: { [weak self] in self?.updateResult() }))
+                onChange: { [weak self, weak game] in
+                    self?.selectedSurvivalPlan = nil
+                    self?.selectedCraftRounds = 1
+                    self?.updateResult(game)
+                }))
         }
         containerSlots.append(SlotDef(
             x: px + 123, y: py + 34,
@@ -469,16 +587,13 @@ final class CraftingScreen: ContainerScreen {
             set: { _ in },
             output: true,
             onTake: { [weak self, weak game] _ in
-                guard let self else { return }
-                if self.creativeCrafting {
-                    self.updateResult()
-                    game?.advance("craft_any")
-                    return
-                }
-                _ = consumeCraftingGrid(&self.craftGrid)
-                self.updateResult()
-                game?.advance("craft_any")
+                guard let self, let game else { return }
+                self.takeCraftingOutput(game)
+            },
+            repeatsOutputQuickMove: { [weak self] in
+                (self?.selectedCraftRounds ?? 1) <= 1
             }))
+        installCraftAmountButtons(outputX: px + 123, outputY: py + 34, game)
         recipeMenu.installButton(on: self) { [weak self] in
             self?.recipeMenu.toggle()
         }
@@ -489,18 +604,84 @@ final class CraftingScreen: ContainerScreen {
             self.creativeCrafting = !self.creativeCrafting
             game?.player.setGameMode(self.creativeCrafting ? GameMode.creative : GameMode.survival)
             self.selectedCreativePlan = nil
-            self.updateResult()
+            self.selectedSurvivalPlan = nil
+            self.selectedCraftRounds = 1
+            self.updateResult(game)
             if let game { self.recipeMenu.refresh(game, craftGrid: self.craftGrid, creative: self.creativeCrafting) }
         })
         creativeCheckbox = cb
         buttons.append(cb)
     }
-    func updateResult() {
-        if creativeCrafting {
-            craftResult = selectedCreativePlan?.output.copy()
-        } else {
-            craftResult = matchCrafting(craftGrid, 3, 3)?.out
+    private func installCraftAmountButtons(outputX: Double, outputY: Double, _ game: GameCore) {
+        let bx = outputX + 20
+        let up = Button(bx, outputY - 1, 12, 9, "^") { [weak self, weak game] in
+            guard let self, let game else { return }
+            self.adjustCraftRounds(1, game)
         }
+        let down = Button(bx, outputY + 10, 12, 9, "v") { [weak self, weak game] in
+            guard let self, let game else { return }
+            self.adjustCraftRounds(-1, game)
+        }
+        craftUpButton = up
+        craftDownButton = down
+        buttons.append(up)
+        buttons.append(down)
+    }
+    private func activeSurvivalPlan() -> CraftingRecipePlan? {
+        selectedSurvivalPlan ?? currentCraftingPlan(from: craftGrid, gridWidth: 3, gridHeight: 3)
+    }
+    private func activeCraftingPlan() -> CraftingRecipePlan? {
+        creativeCrafting ? selectedCreativePlan : activeSurvivalPlan()
+    }
+    private func availableCraftRounds(_ game: GameCore) -> Int {
+        guard let plan = activeCraftingPlan() else { return 0 }
+        if creativeCrafting {
+            return max(1, maxCreativeCraftingRounds(plan, into: game.player.inventory))
+        }
+        return maxCraftingRounds(plan, from: availableRecipeResources(game))
+    }
+    private func clampCraftRounds(_ game: GameCore) -> Int {
+        let maxRounds = availableCraftRounds(game)
+        guard maxRounds > 0 else {
+            selectedCraftRounds = 1
+            return 0
+        }
+        selectedCraftRounds = min(max(1, selectedCraftRounds), maxRounds)
+        return maxRounds
+    }
+    private func updateCraftRoundButtons(_ game: GameCore) {
+        let maxRounds = clampCraftRounds(game)
+        let hasOutput = activeCraftingPlan() != nil && maxRounds > 0
+        craftUpButton?.visible = hasOutput
+        craftDownButton?.visible = hasOutput
+        craftUpButton?.enabled = hasOutput && selectedCraftRounds < maxRounds
+        craftDownButton?.enabled = hasOutput && selectedCraftRounds > 1
+    }
+    private func adjustCraftRounds(_ delta: Int, _ game: GameCore) {
+        syncCreativeFromPlayer(game)
+        let maxRounds = max(0, availableCraftRounds(game))
+        guard maxRounds > 0 else {
+            selectedCraftRounds = 1
+            updateResult(game)
+            return
+        }
+        selectedCraftRounds = min(max(1, selectedCraftRounds + delta), maxRounds)
+        updateResult(game)
+        updateCraftRoundButtons(game)
+    }
+    func updateResult(_ game: GameCore? = nil) {
+        if let game, clampCraftRounds(game) == 0 {
+            craftResult = nil
+            return
+        }
+        guard let plan = activeCraftingPlan() else {
+            craftResult = nil
+            selectedCraftRounds = 1
+            return
+        }
+        let out = plan.output.copy()
+        out.count = max(1, selectedCraftRounds) * max(1, plan.output.count)
+        craftResult = out
     }
     private func returnCraftGridToInventory(_ game: GameCore) -> Bool {
         var ok = true
@@ -517,7 +698,9 @@ final class CraftingScreen: ContainerScreen {
                 ok = false
             }
         }
-        updateResult()
+        selectedSurvivalPlan = nil
+        selectedCraftRounds = 1
+        updateResult(game)
         return ok
     }
     private func availableRecipeResources(_ game: GameCore) -> [ItemStack?] {
@@ -532,15 +715,19 @@ final class CraftingScreen: ContainerScreen {
         if creativeCrafting != actual {
             creativeCrafting = actual
             selectedCreativePlan = nil
-            updateResult()
+            selectedSurvivalPlan = nil
+            selectedCraftRounds = 1
+            updateResult(game)
         }
     }
     private func selectRecipe(_ plan: CraftingRecipePlan, _ ui: UIManager, _ game: GameCore) {
         guard ui.cursorStack == nil else { return }
         if creativeCrafting {
             selectedCreativePlan = plan
+            selectedSurvivalPlan = nil
+            selectedCraftRounds = 1
             recipeMenu.close()
-            updateResult()
+            updateResult(game)
             recipeMenu.refresh(game, craftGrid: craftGrid, creative: true)
             game.playUISound("ui.stonecutter.select_recipe")
             return
@@ -556,11 +743,45 @@ final class CraftingScreen: ContainerScreen {
             populated = populateCraftingGrid(plan, grid: &craftGrid, inventory: &game.player.inventory)
         }
         if populated {
+            selectedSurvivalPlan = plan
+            selectedCraftRounds = 1
             recipeMenu.close()
-            updateResult()
+            updateResult(game)
             recipeMenu.refresh(game, craftGrid: craftGrid, resources: availableRecipeResources(game))
             game.playUISound("ui.stonecutter.select_recipe")
         }
+    }
+    private func refillSurvivalPlan(_ plan: CraftingRecipePlan?, _ game: GameCore) -> Bool {
+        guard craftGrid.allSatisfy({ $0 == nil }), let plan else { return false }
+        if let tablePos {
+            return populateCraftingGridFromNearbyContainers(plan, grid: &craftGrid,
+                                                            inventory: &game.player.inventory,
+                                                            world: game.world,
+                                                            tableX: tablePos.x, tableY: tablePos.y, tableZ: tablePos.z)
+        }
+        return populateCraftingGrid(plan, grid: &craftGrid, inventory: &game.player.inventory)
+    }
+    private func takeCraftingOutput(_ game: GameCore) {
+        if creativeCrafting {
+            updateResult(game)
+            game.advance("craft_any")
+            return
+        }
+        guard let taken = craftResult else { return }
+        let planForRefill = activeSurvivalPlan()
+        let baseCount = max(1, planForRefill?.output.count ?? taken.count)
+        let rounds = max(1, min(selectedCraftRounds, taken.count / baseCount))
+        var consumed = 0
+        while consumed < rounds {
+            if matchCrafting(craftGrid, 3, 3)?.out.id != taken.id {
+                guard refillSurvivalPlan(planForRefill, game) else { break }
+            }
+            guard matchCrafting(craftGrid, 3, 3)?.out.id == taken.id else { break }
+            _ = consumeCraftingGrid(&craftGrid)
+            consumed += 1
+        }
+        updateResult(game)
+        game.advance("craft_any")
     }
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         syncCreativeFromPlayer(game)
@@ -569,6 +790,8 @@ final class CraftingScreen: ContainerScreen {
             cb.x = min(148, max(4, ui.width - cb.w - 4))
             cb.y = 4
         }
+        updateResult(game)
+        updateCraftRoundButtons(game)
         let resources = creativeCrafting ? nil : availableRecipeResources(game)
         recipeMenu.refresh(game, craftGrid: craftGrid, creative: creativeCrafting, resources: resources)
         super.draw(ui, game, partial)

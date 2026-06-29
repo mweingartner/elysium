@@ -14,11 +14,14 @@ final class SlotDef {
     var canPlace: ((ItemStack) -> Bool)?
     var output = false
     var onTake: ((ItemStack) -> Void)?
+    var repeatsOutputQuickMove: () -> Bool
     var onChange: (() -> Void)?
 
     init(x: Double, y: Double, get: @escaping () -> ItemStack?, set: @escaping (ItemStack?) -> Void,
          canPlace: ((ItemStack) -> Bool)? = nil, output: Bool = false,
-         onTake: ((ItemStack) -> Void)? = nil, onChange: (() -> Void)? = nil) {
+         onTake: ((ItemStack) -> Void)? = nil,
+         repeatsOutputQuickMove: @escaping () -> Bool = { true },
+         onChange: (() -> Void)? = nil) {
         self.x = x
         self.y = y
         self.get = get
@@ -26,6 +29,7 @@ final class SlotDef {
         self.canPlace = canPlace
         self.output = output
         self.onTake = onTake
+        self.repeatsOutputQuickMove = repeatsOutputQuickMove
         self.onChange = onChange
     }
 }
@@ -508,6 +512,7 @@ final class UIManager {
     private func quickMoveOutput(_ screen: Screen, _ slot: SlotDef) {
         let targets = (screen as? ContainerScreen)?.playerSlots ?? []
         if targets.isEmpty { return }
+        let repeatOutput = slot.repeatsOutputQuickMove()
         var rounds = 0
         while let s = slot.get(), s.count > 0, rounds < 64 {
             guard canFullyInsert(s, targets) else { break }
@@ -515,6 +520,7 @@ final class UIManager {
             _ = quickMoveInto(taken, targets)
             slot.onTake?(s)
             rounds += 1
+            if !repeatOutput { break }
             // defensive: a slot whose onTake doesn't refresh its source would
             // hand out the same stack forever
             if let again = slot.get(), again === s { break }
@@ -537,7 +543,16 @@ final class UIManager {
         }
         if slot.output {
             // take only (all)
-            if let inSlot, cursor == nil || (canMerge(cursor!, inSlot) && cursor!.count + inSlot.count <= maxStackOf(cursor!)) {
+            if let inSlot,
+               cursor == nil,
+               inSlot.count > maxStackOf(inSlot),
+               let container = screen as? ContainerScreen {
+                guard canFullyInsert(inSlot, container.playerSlots) else { return }
+                let taken = copyStack(inSlot)!
+                _ = quickMoveInto(taken, container.playerSlots)
+                slot.onTake?(inSlot)
+                slot.onChange?()
+            } else if let inSlot, cursor == nil || (canMerge(cursor!, inSlot) && cursor!.count + inSlot.count <= maxStackOf(cursor!)) {
                 if let cursor {
                     cursor.count += inSlot.count
                 } else {
@@ -644,9 +659,11 @@ func quickMoveInto(_ stack: ItemStack, _ targets: [SlotDef]) -> Bool {
     }
     for t in targets {
         if t.get() == nil && (t.canPlace?(stack) ?? true) {
-            t.set(copyStack(stack))
-            stack.count = 0
-            return true
+            let moved = copyStack(stack)!
+            moved.count = min(maxStackOf(moved), stack.count)
+            t.set(moved)
+            stack.count -= moved.count
+            if stack.count <= 0 { return true }
         }
     }
     return stack.count <= 0

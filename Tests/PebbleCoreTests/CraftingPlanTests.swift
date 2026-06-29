@@ -401,6 +401,69 @@ final class CraftingPlanTests: XCTestCase {
         }
     }
 
+    func testCraftingRoundLimitUsesConcreteInventoryResources() throws {
+        registerCoreIfNeeded()
+        let plan = try XCTUnwrap(craftingPlans(for: [stack("oak_planks", 9)], gridWidth: 2, gridHeight: 2).first {
+            itemDef($0.output.id).name == "crafting_table"
+        })
+
+        XCTAssertEqual(maxCraftingRounds(plan, from: [stack("oak_planks", 9)]), 2)
+        XCTAssertEqual(maxCraftingRounds(plan, from: [stack("oak_planks", 3)]), 0)
+    }
+
+    func testCurrentCraftingPlanSupportsManualStackedGridRoundCounts() throws {
+        registerCoreIfNeeded()
+        var grid = [ItemStack?](repeating: nil, count: 4)
+        grid[0] = stack("oak_planks", 3)
+        grid[2] = stack("oak_planks", 3)
+
+        let plan = try XCTUnwrap(currentCraftingPlan(from: grid, gridWidth: 2, gridHeight: 2))
+
+        XCTAssertEqual(itemDef(plan.output.id).name, "stick")
+        XCTAssertEqual(plan.output.count, 4)
+        XCTAssertEqual(maxCraftingRounds(plan, from: grid), 3)
+
+        _ = consumeCraftingGrid(&grid)
+        _ = consumeCraftingGrid(&grid)
+        _ = consumeCraftingGrid(&grid)
+        XCTAssertTrue(grid.allSatisfy { $0 == nil })
+
+        var inventory: [ItemStack?] = [stack("oak_planks", 2)]
+        XCTAssertTrue(populateCraftingGrid(plan, grid: &grid, inventory: &inventory))
+        XCTAssertEqual(matchCrafting(grid, 2, 2)?.out.id, iid("stick"))
+        XCTAssertNil(inventory[0])
+    }
+
+    func testCraftingTableRoundLimitIncludesNearbyContainerResources() throws {
+        let world = makeWorld()
+        world.setBlock(1, 64, 1, Int(cell(B.crafting_table)))
+        world.setBlock(4, 64, 1, Int(cell(B.chest)))
+        let chest = makeContainerBE(4, 64, 1, 27)
+        chest.items?[0] = stack("oak_planks", 12)
+        world.setBlockEntity(chest)
+        let resources = craftingTableResourceStacks(playerInventory: [], craftGrid: [], world: world,
+                                                    tableX: 1, tableY: 64, tableZ: 1)
+        let plan = try XCTUnwrap(craftingPlans(for: resources, gridWidth: 3, gridHeight: 3).first {
+            itemDef($0.output.id).name == "crafting_table"
+        })
+
+        XCTAssertEqual(maxCraftingRounds(plan, from: resources), 3)
+    }
+
+    func testCreativeCraftingRoundLimitFillsInventoryCapacity() throws {
+        registerCoreIfNeeded()
+        let plan = try XCTUnwrap(creativeCraftingPlans(gridWidth: 2, gridHeight: 2).first {
+            itemDef($0.output.id).name == "stick"
+        })
+        var inventory = [ItemStack?](repeating: nil, count: 36)
+
+        XCTAssertEqual(maxCreativeCraftingRounds(plan, into: inventory), 36 * 64 / plan.output.count)
+
+        inventory[0] = stack("stick", 60)
+        inventory[1] = stack("cobblestone", 64)
+        XCTAssertEqual(inventoryInsertionCapacity(for: plan.output, into: inventory), 4 + 34 * 64)
+    }
+
     func testRegisteredCraftingRecipesResolveKnownItemsAndTags() {
         registerCoreIfNeeded()
 

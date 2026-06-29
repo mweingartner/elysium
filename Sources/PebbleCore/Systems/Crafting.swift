@@ -7,6 +7,12 @@ public struct CraftingRecipePlan {
     public let recipe: CraftRecipe
     public let output: ItemStack
     public let ingredients: [String?]
+
+    public init(recipe: CraftRecipe, output: ItemStack, ingredients: [String?]) {
+        self.recipe = recipe
+        self.output = output
+        self.ingredients = ingredients
+    }
 }
 
 public let CRAFTING_TABLE_CONTAINER_RADIUS = 25
@@ -145,6 +151,51 @@ public func creativeCraftingPlans(gridWidth: Int, gridHeight: Int) -> [CraftingR
     }
     sortCraftingPlans(&plans)
     return plans
+}
+
+public func currentCraftingPlan(from grid: [ItemStack?], gridWidth: Int, gridHeight: Int) -> CraftingRecipePlan? {
+    guard grid.count == gridWidth * gridHeight,
+          let match = matchCrafting(grid, gridWidth, gridHeight)
+    else { return nil }
+    var ingredients = [String?](repeating: nil, count: grid.count)
+    for i in grid.indices {
+        if let stack = grid[i], stack.count > 0 {
+            ingredients[i] = itemDef(stack.id).name
+        }
+    }
+    return CraftingRecipePlan(recipe: match.recipe, output: match.out, ingredients: ingredients)
+}
+
+public func maxCraftingRounds(_ plan: CraftingRecipePlan, from resources: [ItemStack?]) -> Int {
+    var needed: [String: Int] = [:]
+    for name in plan.ingredients.compactMap({ $0 }) {
+        needed[name, default: 0] += 1
+    }
+    guard !needed.isEmpty else { return 0 }
+    let counts = inventoryCounts(resources)
+    var rounds = Int.max
+    for (name, count) in needed {
+        rounds = min(rounds, (counts[name] ?? 0) / count)
+    }
+    return rounds == Int.max ? 0 : max(0, rounds)
+}
+
+public func inventoryInsertionCapacity(for stack: ItemStack, into inventory: [ItemStack?]) -> Int {
+    guard stack.count > 0 else { return 0 }
+    var capacity = 0
+    for slot in inventory {
+        if let existing = slot, canMerge(existing, stack) {
+            capacity += max(0, maxStackOf(existing) - existing.count)
+        } else if slot == nil {
+            capacity += maxStackOf(stack)
+        }
+    }
+    return capacity
+}
+
+public func maxCreativeCraftingRounds(_ plan: CraftingRecipePlan, into inventory: [ItemStack?]) -> Int {
+    guard plan.output.count > 0 else { return 0 }
+    return inventoryInsertionCapacity(for: plan.output, into: inventory) / plan.output.count
 }
 
 public func normalizedCraftingPlanSearch(_ raw: String) -> String {

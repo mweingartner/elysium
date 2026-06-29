@@ -3,6 +3,14 @@
 All notable changes to Pebble. Versions follow `MAJOR.MINOR.PATCH`; the
 in-app version string comes from `PEBBLE_VERSION` (PebbleCore/Game/Saves.swift).
 
+## Unreleased
+
+- Added up/down quantity arrows beside the personal and crafting-table output
+  slots. Survival crafting clamps the selected batch size to available
+  resources, including nearby crafting-table containers, while creative clamps
+  to the receiving inventory capacity and large output batches split across
+  legal item stacks.
+
 ## 1.1.0 — 2026-06-27 — gameplay systems update
 
 - Added survival and creative-mode gameplay improvements developed after the
