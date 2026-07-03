@@ -33,6 +33,19 @@ final class TemplateTests: XCTestCase {
         world.setBlockEntity(chest)
     }
 
+    private func assertEmptyItems(_ be: BlockEntityData,
+                                  slotCount: Int,
+                                  file: StaticString = #filePath,
+                                  line: UInt = #line) throws {
+        let items = try XCTUnwrap(be.items, file: file, line: line)
+        XCTAssertEqual(items.count, slotCount, file: file, line: line)
+        XCTAssertTrue(items.allSatisfy { $0 == nil }, file: file, line: line)
+    }
+
+    private func blockEntity(in template: ObjectTemplate, dx: Int, dy: Int = 0, dz: Int = 0) throws -> BlockEntityData {
+        try XCTUnwrap(template.blockEntities.first { $0.x == dx && $0.y == dy && $0.z == dz })
+    }
+
     private func tempDB() -> SaveDB {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("pebble-template-tests-\(UUID().uuidString)", isDirectory: true)
@@ -56,16 +69,18 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual(result.template.sizeZ, 1)
     }
 
-    func testCloneDeepCopiesBlockEntityContents() throws {
+    func testCloneCopiesContainerBlockEntityWithoutContainedItems() throws {
         let world = makeWorld()
         makeFurnishedObject(in: world)
 
         let result = try cloneObjectTemplate(named: "Storage", from: world, targetX: 1, targetY: 64, targetZ: 1)
-        world.getBlockEntity(2, 64, 1)?.items?[0]?.count = 1
+        let sourceChest = try XCTUnwrap(world.getBlockEntity(2, 64, 1))
+        XCTAssertEqual(sourceChest.items?[0]?.id, iid("diamond"))
+        XCTAssertEqual(sourceChest.items?[0]?.count, 3)
 
         let clonedChest = try XCTUnwrap(result.template.blockEntities.first)
-        XCTAssertEqual(clonedChest.items?[0]?.id, iid("diamond"))
-        XCTAssertEqual(clonedChest.items?[0]?.count, 3)
+        XCTAssertEqual(clonedChest.type, "container")
+        try assertEmptyItems(clonedChest, slotCount: 27)
     }
 
     func testCloneIncludesEdgeTouchingConstructionBlocks() throws {
@@ -88,8 +103,94 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual(clonedChest.x, 1)
         XCTAssertEqual(clonedChest.y, 1)
         XCTAssertEqual(clonedChest.z, 0)
-        XCTAssertEqual(clonedChest.items?[0]?.id, iid("diamond"))
-        XCTAssertEqual(clonedChest.items?[0]?.count, 6)
+        try assertEmptyItems(clonedChest, slotCount: 27)
+    }
+
+    func testCloneClearsInventoryBearingBlockEntitiesAndDeferredLoot() throws {
+        let world = makeWorld()
+        world.setBlock(1, 64, 1, Int(cell(B.chest)))
+        let chest = makeContainerBE(1, 64, 1, 27)
+        chest.items?[0] = stack("diamond", 8)
+        chest.lootTable = "mineshaft"
+        chest.lootSeed = 42
+        chest.viewers = 2
+        world.setBlockEntity(chest)
+
+        world.setBlock(2, 64, 1, Int(cell(B.dropper)))
+        let dropper = makeContainerBE(2, 64, 1, 9)
+        dropper.items?[0] = stack("coal", 4)
+        world.setBlockEntity(dropper)
+
+        world.setBlock(3, 64, 1, Int(cell(B.hopper)))
+        let hopper = makeHopperBE(3, 64, 1)
+        hopper.items?[0] = stack("iron_ingot", 2)
+        hopper.cooldown = 7
+        world.setBlockEntity(hopper)
+
+        world.setBlock(4, 64, 1, Int(cell(B.furnace_lit, 2)))
+        let furnace = makeFurnaceBE(4, 64, 1, "furnace")
+        furnace.items?[0] = stack("coal", 1)
+        furnace.items?[1] = stack("coal", 1)
+        furnace.burnTime = 120
+        furnace.burnTotal = 1600
+        furnace.cookTime = 80
+        furnace.xpBank = 3
+        world.setBlockEntity(furnace)
+
+        world.setBlock(5, 64, 1, Int(cell(B.brewing_stand)))
+        let brewing = makeBrewingBE(5, 64, 1)
+        brewing.items?[0] = stack("coal", 1)
+        brewing.items?[3] = stack("coal", 1)
+        brewing.brewTime = 200
+        brewing.fuel = 4
+        world.setBlockEntity(brewing)
+
+        world.setBlock(6, 64, 1, Int(cell(B.chiseled_bookshelf, 4)))
+        let shelf = BlockEntityData(type: "shelf", x: 6, y: 64, z: 1)
+        shelf.items = Array(repeating: nil, count: 6)
+        shelf.items?[0] = stack("book", 1)
+        shelf.lastSlot = 0
+        world.setBlockEntity(shelf)
+
+        world.setBlock(7, 64, 1, Int(cell(B.campfire, 4)))
+        let campfire = BlockEntityData(type: "campfire", x: 7, y: 64, z: 1)
+        campfire.items = Array(repeating: nil, count: 4)
+        campfire.items?[0] = stack("cooked_chicken", 1)
+        campfire.times = [100, 0, 0, 0]
+        world.setBlockEntity(campfire)
+
+        let result = try cloneObjectTemplate(named: "Empty Storage", from: world,
+                                             targetX: 1, targetY: 64, targetZ: 1)
+
+        XCTAssertEqual(result.template.blockEntities.count, 7)
+        try assertEmptyItems(blockEntity(in: result.template, dx: 0), slotCount: 27)
+        XCTAssertNil(try blockEntity(in: result.template, dx: 0).lootTable)
+        XCTAssertNil(try blockEntity(in: result.template, dx: 0).lootSeed)
+        XCTAssertNil(try blockEntity(in: result.template, dx: 0).viewers)
+        try assertEmptyItems(blockEntity(in: result.template, dx: 1), slotCount: 9)
+        let clonedHopper = try blockEntity(in: result.template, dx: 2)
+        try assertEmptyItems(clonedHopper, slotCount: 5)
+        XCTAssertEqual(clonedHopper.cooldown, 0)
+        let clonedFurnace = try blockEntity(in: result.template, dx: 3)
+        try assertEmptyItems(clonedFurnace, slotCount: 3)
+        XCTAssertEqual(clonedFurnace.burnTime, 0)
+        XCTAssertEqual(clonedFurnace.burnTotal, 0)
+        XCTAssertEqual(clonedFurnace.cookTime, 0)
+        XCTAssertEqual(clonedFurnace.xpBank, 0)
+        let furnaceBlock = try XCTUnwrap(result.template.blocks.first { $0.dx == 3 })
+        XCTAssertEqual(furnaceBlock.cell >> 4, B.furnace)
+        let clonedBrewing = try blockEntity(in: result.template, dx: 4)
+        try assertEmptyItems(clonedBrewing, slotCount: 5)
+        XCTAssertEqual(clonedBrewing.brewTime, 0)
+        XCTAssertEqual(clonedBrewing.fuel, 0)
+        let clonedShelf = try blockEntity(in: result.template, dx: 5)
+        try assertEmptyItems(clonedShelf, slotCount: 6)
+        XCTAssertEqual(clonedShelf.lastSlot, -1)
+        let shelfBlock = try XCTUnwrap(result.template.blocks.first { $0.dx == 5 })
+        XCTAssertEqual(Int(shelfBlock.cell & 15) & 4, 0)
+        let clonedCampfire = try blockEntity(in: result.template, dx: 6)
+        try assertEmptyItems(clonedCampfire, slotCount: 4)
+        XCTAssertEqual(clonedCampfire.times, [0, 0, 0, 0])
     }
 
     func testCloneDoesNotBridgeTerrainOrCornerOnlyContact() throws {
@@ -125,7 +226,7 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual(world.getBlockId(8, 70, 8), Int(B.oak_planks))
         XCTAssertEqual(world.getBlockId(9, 70, 8), Int(B.chest))
         XCTAssertEqual(world.getBlockId(8, 71, 8), Int(B.torch))
-        XCTAssertEqual(world.getBlockEntity(9, 70, 8)?.items?[0]?.count, 3)
+        try assertEmptyItems(try XCTUnwrap(world.getBlockEntity(9, 70, 8)), slotCount: 27)
     }
 
     func testRotatedObjectTemplateRotatesBlocksAnchorAndBlockEntities() throws {
@@ -325,8 +426,7 @@ final class TemplateTests: XCTestCase {
 
         XCTAssertEqual(loaded.name, "round trip")
         XCTAssertEqual(loaded.blocks.count, 3)
-        XCTAssertEqual(loaded.blockEntities.first?.items?[0]?.id, iid("diamond"))
-        XCTAssertEqual(loaded.blockEntities.first?.items?[0]?.count, 3)
+        try assertEmptyItems(try XCTUnwrap(loaded.blockEntities.first), slotCount: 27)
     }
 
     func testTemplateStoreDeletesNormalizedTemplateNames() throws {

@@ -310,8 +310,54 @@ private func sanitizedTemplateBlockEntity(_ be: BlockEntityData) -> BlockEntityD
     return copy
 }
 
-private func templateBlockEntityCopy(_ be: BlockEntityData, minX: Int, minY: Int, minZ: Int) -> BlockEntityData? {
+private func stripContainedItemsFromTemplateClone(_ copy: BlockEntityData) {
+    guard let items = copy.items else { return }
+    copy.items = Array<ItemStack?>(repeating: nil, count: items.count)
+    copy.lootTable = nil
+    copy.lootSeed = nil
+    copy.viewers = nil
+    switch copy.type {
+    case "hopper":
+        copy.cooldown = 0
+    case "furnace":
+        copy.burnTime = 0
+        copy.burnTotal = 0
+        copy.cookTime = 0
+        copy.cookTotal = copy.cookTotal ?? 200
+        copy.xpBank = 0
+    case "brewing":
+        copy.brewTime = 0
+        copy.fuel = 0
+    case "shelf":
+        copy.lastSlot = -1
+    case "campfire":
+        copy.times = Array(repeating: 0, count: max(4, items.count))
+    default:
+        break
+    }
+}
+
+private func templateCloneCellWithoutContainedItemState(_ cellValue: UInt16, blockEntity be: BlockEntityData?) -> UInt16 {
+    guard be?.items != nil else { return cellValue }
+    let id = Int(cellValue >> 4)
+    let meta = Int(cellValue & 15)
+    switch id {
+    case Int(B.furnace_lit):
+        return cell(B.furnace, meta)
+    case Int(B.blast_furnace_lit):
+        return cell(B.blast_furnace, meta)
+    case Int(B.smoker_lit):
+        return cell(B.smoker, meta)
+    case Int(B.chiseled_bookshelf):
+        return cell(B.chiseled_bookshelf, meta & ~4)
+    default:
+        return cellValue
+    }
+}
+
+private func templateCloneBlockEntityCopy(_ be: BlockEntityData, minX: Int, minY: Int, minZ: Int) -> BlockEntityData? {
     guard let copy = sanitizedTemplateBlockEntity(be) else { return nil }
+    stripContainedItemsFromTemplateClone(copy)
     copy.x -= minX
     copy.y -= minY
     copy.z -= minZ
@@ -865,12 +911,17 @@ public func cloneObjectTemplate(named rawName: String, from world: World,
     guard !cells.isEmpty else { throw TemplateError.templateEmpty }
     let sorted = cells.keys.sorted()
     let blocks = sorted.map {
-        TemplateBlock(dx: $0.x - minX, dy: $0.y - minY, dz: $0.z - minZ, cell: cells[$0]!)
+        TemplateBlock(
+            dx: $0.x - minX,
+            dy: $0.y - minY,
+            dz: $0.z - minZ,
+            cell: templateCloneCellWithoutContainedItemState(cells[$0]!,
+                                                             blockEntity: world.getBlockEntity($0.x, $0.y, $0.z)))
     }
     var bes: [BlockEntityData] = []
     for pos in sorted {
         if let be = world.getBlockEntity(pos.x, pos.y, pos.z),
-           let copy = templateBlockEntityCopy(be, minX: minX, minY: minY, minZ: minZ) {
+           let copy = templateCloneBlockEntityCopy(be, minX: minX, minY: minY, minZ: minZ) {
             bes.append(copy)
         }
     }
