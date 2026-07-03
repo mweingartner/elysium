@@ -63,7 +63,7 @@ final class HostBridge: GameHost {
         switch kind {
         case "crafting":
             if let data {
-                ui.open(CraftingScreen((data.x, data.y, data.z)), game)
+                ui.open(CraftingScreen((data.x, data.y, data.z), tableBE: data.be, readOnly: data.readOnly), game)
             } else {
                 ui.open(CraftingScreen(), game)
             }
@@ -71,16 +71,16 @@ final class HostBridge: GameHost {
         case "creative": ui.open(CreativeScreen(), game)
         case "chest":
             if let be = data?.be {
-                ui.open(ChestScreen(be, data?.title ?? "Chest", data?.other), game)
+                ui.open(ChestScreen(be, data?.title ?? "Chest", data?.other, readOnly: data?.readOnly ?? false), game)
             }
         case "ender_chest":
             let p = game.player!
             ui.open(ChestScreen(items: { p.enderChest }, set: { p.enderChest[$0] = $1 },
                                 count: p.enderChest.count, "Ender Chest"), game)
         case "furnace":
-            if let be = data?.be { ui.open(FurnaceScreen(be), game) }
+            if let be = data?.be { ui.open(FurnaceScreen(be, readOnly: data?.readOnly ?? false), game) }
         case "brewing":
-            if let be = data?.be { ui.open(BrewingScreen(be), game) }
+            if let be = data?.be { ui.open(BrewingScreen(be, readOnly: data?.readOnly ?? false), game) }
         case "enchanting":
             ui.open(EnchantingScreen((data?.x ?? 0, data?.y ?? 0, data?.z ?? 0)), game)
         case "anvil":
@@ -468,6 +468,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     // test hook: PEBBLE_CMD="/tp 0 120 0;/time set 1000" runs once the world is up
     private var pendingCmds = ProcessInfo.processInfo.environment["PEBBLE_CMD"]
     private var pendingCmdDelay = 0
+    private var pendingLANAutoJoin = ProcessInfo.processInfo.environment["PEBBLE_LAN_AUTOJOIN"]
+        .flatMap(LANAutoJoinSpec.parse)
+    private var pendingLANAutoJoinDelay = 0
+    private var lanProbe = LANLiveProbe(environment: ProcessInfo.processInfo.environment)
     // test hook: PEBBLE_SHOT="/tmp/x.png@300" captures the frame N frames after load
     private var shotQuitFrames = 0
     private var pendingShot: (path: String, frames: Int)? = {
@@ -714,6 +718,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
                 pendingCmds = nil
             }
         }
+        if let autoJoin = pendingLANAutoJoin {
+            pendingLANAutoJoinDelay += 1
+            if pendingLANAutoJoinDelay > 30 {
+                LANMultiplayerManager.shared.attachGame(game)
+                do {
+                    try LANMultiplayerManager.shared.directConnect(
+                        host: autoJoin.target.host,
+                        port: String(autoJoin.target.port),
+                        joinCode: autoJoin.joinCode,
+                        playerName: autoJoin.playerName
+                    )
+                    pebbleLANProbeLog("autojoin_started host=\(autoJoin.target.host) port=\(autoJoin.target.port) player=\(autoJoin.playerName)")
+                } catch {
+                    pebbleLANProbeLog("autojoin_failed error=\(error)")
+                }
+                pendingLANAutoJoin = nil
+            }
+        }
+        lanProbe?.tick(app: self)
         if let screen = pendingOpenScreen, game.hasWorld(), pendingCmds == nil {
             pendingOpenScreenDelay += 1
             if pendingOpenScreenDelay > 90 {

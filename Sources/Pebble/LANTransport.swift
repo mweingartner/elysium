@@ -94,6 +94,7 @@ final class LANMultiplayerManager {
             _ = self.hostReplicationSession.recordBlockChange(dimension: world.dim.rawValue, x: x, y: y, z: z, cell: cell)
         }
         game.lanChunkRequestHandler = nil
+        game.lanBlockIntentHandler = nil
     }
 
     private func configureClientReplicationHooks(for game: GameCore) {
@@ -115,11 +116,19 @@ final class LANMultiplayerManager {
             }
             return true
         }
+        game.lanBlockIntentHandler = { [weak self] intent in
+            guard let self else { return }
+            self.queue.async { [weak self] in
+                guard let self, let peer = self.clientPeer else { return }
+                self.send(.blockIntent(playerID: self.localPeerID, intent: intent), to: peer)
+            }
+        }
     }
 
     private func clearReplicationHooks(for game: GameCore?) {
         game?.onWorldBlockChanged = nil
         game?.lanChunkRequestHandler = nil
+        game?.lanBlockIntentHandler = nil
     }
 
     func startHost(game: GameCore, requestedJoinCode: String?, requestedPort: UInt16?) throws {
@@ -301,7 +310,7 @@ final class LANMultiplayerManager {
             lastHostReplicationPublish = now
             if fullSnapshot { lastHostFullSnapshot = now }
             guard let batch = makeHostReplicationBatch(game: game, player: player, fullSnapshot: fullSnapshot) else { return }
-            guard fullSnapshot || !batch.players.isEmpty || !batch.blockChanges.isEmpty || !batch.entities.isEmpty || !batch.inventories.isEmpty else { return }
+            guard fullSnapshot || !batch.players.isEmpty || !batch.blockChanges.isEmpty || !batch.entities.isEmpty || !batch.inventories.isEmpty || !batch.blockEntities.isEmpty else { return }
             queue.async { [weak self] in
                 self?.broadcastFromHost(.replicationBatch(batch))
             }
@@ -509,10 +518,16 @@ final class LANMultiplayerManager {
             guard peer.accepted else { return }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                var currentDimension: Int?
+                var tick = 0
+                if let game = self.activeGame, game.hasWorld() {
+                    currentDimension = game.world.dim.rawValue
+                    tick = game.world.time
+                }
                 let sanitized = self.hostReplicationSession.updatePlayerState(
                     state,
-                    currentDimension: self.activeGame?.world.dim.rawValue,
-                    tick: self.activeGame?.world.time ?? 0
+                    currentDimension: currentDimension,
+                    tick: tick
                 )
                 if let game = self.activeGame, game.hasWorld() {
                     _ = applyLANRemotePlayers(
@@ -658,6 +673,14 @@ final class LANMultiplayerManager {
         let chunks = fullSnapshot ? (chunkSectionsOverride ?? makeLANChunkSectionSnapshots(around: player, in: game.world)) : []
         let entities = makeLANEntitySnapshots(in: game.world)
         let inventories = [makeLANInventorySnapshot(player, playerID: localPeerID)]
+        let blockEntityFocus = ([localState] + hostReplicationSession.peerPlayerStates())
+            .filter { $0.dimension == game.world.dim.rawValue }
+            .map { (x: $0.x, z: $0.z) }
+        let blockEntities = makeLANBlockEntitySnapshots(
+            in: game.world,
+            prioritizedAround: blockEntityFocus,
+            maxCount: fullSnapshot ? 16 : LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES
+        )
         let summary = fullSnapshot ? makeWorldSummary(playerCount: acceptedCount) : nil
         let worldState = makeLANWorldStateSnapshot(in: game.world)
         return hostReplicationSession.makeBatch(
@@ -668,7 +691,8 @@ final class LANMultiplayerManager {
             localPlayer: localState,
             chunkSections: chunks,
             entitySnapshots: entities,
-            inventorySnapshots: inventories
+            inventorySnapshots: inventories,
+            blockEntitySnapshots: blockEntities
         )
     }
 
@@ -790,12 +814,14 @@ final class LANMultiplayerManager {
                 _ = game.ensureAuthoritativeLANChunkLoaded(dimension: request.dimension, cx: coord.cx, cz: coord.cz)
             }
             let snapshots = makeLANChunkSectionSnapshots(for: request, in: game.world)
+            let blockEntities = makeLANBlockEntitySnapshots(for: request, in: game.world, maxCount: 16)
             let batch = LANReplicationBatch(
                 tick: game.world.time,
                 fullSnapshot: true,
                 world: self.makeWorldSummary(playerCount: self.queue.sync { self.hostPeers.values.filter { $0.accepted }.count }),
                 worldState: makeLANWorldStateSnapshot(in: game.world),
-                chunkSections: snapshots
+                chunkSections: snapshots,
+                blockEntities: blockEntities
             )
             self.queue.async { [weak self] in
                 guard let self, let peer = self.hostPeers[peerID], peer.accepted else { return }
@@ -821,12 +847,15 @@ final class LANMultiplayerManager {
                 }
             }
             if batch.fullSnapshot {
-                self.appendStatus("Applied LAN snapshot tick \(batch.tick): \(mirrorReport.appliedChunkSections) sections, \(mirrorReport.appliedBlockChanges) block deltas, \(mirrorReport.appliedEntitySnapshots) entities.")
+                self.appendStatus("Applied LAN snapshot tick \(batch.tick): \(mirrorReport.appliedChunkSections) sections, \(mirrorReport.appliedBlockChanges) block deltas, \(mirrorReport.appliedBlockEntities) block entities, \(mirrorReport.appliedEntitySnapshots) entities.")
             } else if let worldReport,
                       worldReport.appliedBlockChanges > 0 ||
+                      worldReport.appliedBlockEntities > 0 ||
+                      worldReport.ignoredInvalidBlockEntities > 0 ||
                       worldReport.removedEntitySnapshots > 0 ||
                       worldReport.ignoredInvalidEntities > 0 {
-                self.appendStatus("Applied \(worldReport.appliedBlockChanges) LAN block delta\(worldReport.appliedBlockChanges == 1 ? "" : "s"), \(worldReport.removedEntitySnapshots) entity removal\(worldReport.removedEntitySnapshots == 1 ? "" : "s"), \(worldReport.ignoredInvalidEntities) rejected entity update\(worldReport.ignoredInvalidEntities == 1 ? "" : "s").")
+                let rejected = worldReport.ignoredInvalidEntities + worldReport.ignoredInvalidBlockEntities
+                self.appendStatus("Applied \(worldReport.appliedBlockChanges) LAN block delta\(worldReport.appliedBlockChanges == 1 ? "" : "s"), \(worldReport.appliedBlockEntities) block entit\(worldReport.appliedBlockEntities == 1 ? "y" : "ies"), \(worldReport.removedEntitySnapshots) entity removal\(worldReport.removedEntitySnapshots == 1 ? "" : "s"), \(rejected) rejected replicated update\(rejected == 1 ? "" : "s").")
             }
         }
     }
@@ -888,6 +917,9 @@ final class LANMultiplayerManager {
 
     private func appendStatus(_ line: String) {
         let clean = sanitizedLANChatText(line)
+        if ProcessInfo.processInfo.environment["PEBBLE_LAN_PROBE_LOG"] != nil {
+            pebbleLANProbeLog("status \(clean)")
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.statusLines.append(clean)

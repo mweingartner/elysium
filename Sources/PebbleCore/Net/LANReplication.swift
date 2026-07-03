@@ -51,6 +51,8 @@ public struct LANReplicationApplyReport: Equatable {
     public var ignoredInvalidSections = 0
     public var ignoredUnloadedBlockChanges = 0
     public var ignoredInvalidEntities = 0
+    public var appliedBlockEntities = 0
+    public var ignoredInvalidBlockEntities = 0
 
     public init() {}
 }
@@ -59,6 +61,11 @@ public enum LANBlockIntentResult: Equatable {
     case applied([LANBlockChange])
     case ignored(String)
     case rejected(String)
+}
+
+private func lanFacingMeta(fromPlayerYaw yaw: Double) -> Int {
+    let direction = yawToDir(yaw * 180 / .pi)
+    return [0, 0, 0, 1, 2, 3][direction]
 }
 
 public final class LANReplicationChangeLog {
@@ -449,6 +456,61 @@ public final class LANMultiplayerHostSession {
         changeLog.drain()
     }
 
+    private func applyOpenableBlockUseIntent(_ intent: LANBlockIntent, playerState: LANPlayerState, to world: World) -> LANBlockIntentResult {
+        let targetCell = world.getBlock(intent.x, intent.y, intent.z)
+        guard isValidLANReplicatedCell(targetCell), targetCell != 0 else {
+            return .ignored("missing use target")
+        }
+        let id = targetCell >> 4
+        guard id > 0, id < blockDefs.count else { return .rejected("invalid use target") }
+        let meta = targetCell & 15
+        let shape = Shape(rawValue: SHAPE_OF[id]) ?? .cube
+
+        if shape == .door {
+            guard id != Int(B.iron_door) else { return .ignored("unsupported use target") }
+            let lowerY = (meta & 8) != 0 ? intent.y - 1 : intent.y
+            let lowerCell = world.getBlock(intent.x, lowerY, intent.z)
+            guard isValidLANReplicatedCell(lowerCell), (lowerCell >> 4) == id else {
+                return .ignored("missing door base")
+            }
+            let updatedCell = Int(cell(UInt16(id), (lowerCell & 15) ^ 4))
+            _ = world.setBlock(intent.x, lowerY, intent.z, updatedCell)
+            world.hooks.playSound((lowerCell & 4) != 0 ? "block.wooden_door.close" : "block.wooden_door.open", Double(intent.x) + 0.5, Double(intent.y) + 0.5, Double(intent.z) + 0.5, 1, 1)
+            let change = LANBlockChange(dimension: world.dim.rawValue, x: intent.x, y: lowerY, z: intent.z, cell: updatedCell)
+            changeLog.record(change)
+            return .applied([change])
+        }
+
+        if shape == .trapdoor {
+            guard id != Int(B.iron_trapdoor) else { return .ignored("unsupported use target") }
+            let updatedCell = Int(cell(UInt16(id), meta ^ 4))
+            _ = world.setBlock(intent.x, intent.y, intent.z, updatedCell)
+            world.hooks.playSound((meta & 4) != 0 ? "block.wooden_trapdoor.close" : "block.wooden_trapdoor.open", Double(intent.x) + 0.5, Double(intent.y) + 0.5, Double(intent.z) + 0.5, 1, 1)
+            let change = LANBlockChange(dimension: world.dim.rawValue, x: intent.x, y: intent.y, z: intent.z, cell: updatedCell)
+            changeLog.record(change)
+            return .applied([change])
+        }
+
+        if shape == .fenceGate {
+            var updatedMeta = meta ^ 4
+            if (updatedMeta & 4) != 0 {
+                let facing = lanFacingMeta(fromPlayerYaw: playerState.yaw)
+                updatedMeta = (updatedMeta & 12) | facing
+                if (meta & 3) == ((facing + 2) % 4) {
+                    updatedMeta = (updatedMeta & 12) | facing
+                }
+            }
+            let updatedCell = Int(cell(UInt16(id), updatedMeta))
+            _ = world.setBlock(intent.x, intent.y, intent.z, updatedCell)
+            world.hooks.playSound((meta & 4) != 0 ? "block.fence_gate.close" : "block.fence_gate.open", Double(intent.x) + 0.5, Double(intent.y) + 0.5, Double(intent.z) + 0.5, 1, 1)
+            let change = LANBlockChange(dimension: world.dim.rawValue, x: intent.x, y: intent.y, z: intent.z, cell: updatedCell)
+            changeLog.record(change)
+            return .applied([change])
+        }
+
+        return .ignored("unsupported use target")
+    }
+
     public func applyBlockIntent(_ intent: LANBlockIntent, from rawPlayerID: String, to world: World) -> LANBlockIntentResult {
         let playerID = String(rawPlayerID.prefix(128))
         guard let peer = peers[playerID] else { return .rejected("unknown player") }
@@ -457,6 +519,9 @@ public final class LANMultiplayerHostSession {
         case .rejected(let reason): return .rejected(reason)
         }
         guard let playerState = peer.playerState else { return .rejected("player state unavailable") }
+        guard playerState.dimension == world.dim.rawValue else {
+            return .rejected("target dimension unavailable")
+        }
         guard isWithinLANReach(playerState, x: intent.x, y: intent.y, z: intent.z) else {
             return .rejected("target out of reach")
         }
@@ -483,7 +548,7 @@ public final class LANMultiplayerHostSession {
             changeLog.record(change)
             return .applied([change])
         case .useBlock:
-            return .ignored("use-block replication is not a world delta")
+            return applyOpenableBlockUseIntent(intent, playerState: playerState, to: world)
         }
     }
 
@@ -495,7 +560,8 @@ public final class LANMultiplayerHostSession {
         localPlayer: LANPlayerState?,
         chunkSections: [LANChunkSectionSnapshot],
         entitySnapshots: [LANEntitySnapshot],
-        inventorySnapshots: [LANPlayerInventorySnapshot]
+        inventorySnapshots: [LANPlayerInventorySnapshot],
+        blockEntitySnapshots: [LANBlockEntitySnapshot] = []
     ) -> LANReplicationBatch {
         var players = peerPlayerStates()
         if let localPlayer {
@@ -514,7 +580,8 @@ public final class LANMultiplayerHostSession {
             chunkSections: chunkSections,
             entities: entitySnapshots,
             entitySnapshotsComplete: true,
-            inventories: inventories
+            inventories: inventories,
+            blockEntities: blockEntitySnapshots
         )
     }
 }
@@ -528,6 +595,7 @@ public final class LANMultiplayerClientSession {
     public private(set) var chunkSections: [LANChunkSectionPosition: LANChunkSectionSnapshot] = [:]
     public private(set) var entities: [Int: LANEntitySnapshot] = [:]
     public private(set) var inventories: [String: LANPlayerInventorySnapshot] = [:]
+    public private(set) var blockEntities: [LANBlockPosition: LANBlockEntitySnapshot] = [:]
 
     public init() {}
 
@@ -588,6 +656,15 @@ public final class LANMultiplayerClientSession {
         for inventory in batch.inventories.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES) {
             guard let normalized = normalizedLANInventorySnapshot(inventory) else { continue }
             inventories[normalized.playerID] = normalized
+        }
+        for blockEntity in batch.blockEntities.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES) {
+            guard let normalized = normalizedLANBlockEntitySnapshot(blockEntity) else {
+                report.ignoredInvalidBlockEntities += 1
+                continue
+            }
+            let key = LANBlockPosition(dimension: normalized.dimension, x: normalized.x, y: normalized.y, z: normalized.z)
+            blockEntities[key] = normalized
+            report.appliedBlockEntities += 1
         }
         return report
     }
@@ -661,6 +738,150 @@ public func makeLANRemotePlayerInventorySnapshots(in world: World) -> [LANPlayer
         .map { makeLANInventorySnapshot($0) }
 }
 
+private let LAN_REPLICATED_BLOCK_ENTITY_TYPES: Set<String> = [
+    "container",
+    "hopper",
+    "furnace",
+    "brewing",
+    "shelf",
+    "campfire",
+    "crafting",
+]
+
+private func makeLANBlockEntitySlotSnapshots(_ items: [ItemStack?]) -> [LANBlockEntitySlotSnapshot] {
+    items.enumerated().compactMap { index, stack -> LANBlockEntitySlotSnapshot? in
+        guard let stack,
+              stack.count > 0,
+              stack.id >= 0,
+              stack.id < itemDefs.count,
+              index < LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITY_SLOTS
+        else { return nil }
+        return LANBlockEntitySlotSnapshot(
+            slot: index,
+            itemID: stack.id,
+            count: min(stack.count, maxStackOf(ItemStack(stack.id, 1))),
+            damage: stack.damage,
+            label: stack.label
+        )
+    }
+}
+
+public func makeLANBlockEntitySnapshot(_ be: BlockEntityData, dimension: Int) -> LANBlockEntitySnapshot? {
+    guard let items = be.items,
+          !items.isEmpty,
+          items.count <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITY_SLOTS,
+          LAN_REPLICATED_BLOCK_ENTITY_TYPES.contains(be.type)
+    else { return nil }
+
+    return LANBlockEntitySnapshot(
+        dimension: dimension,
+        x: be.x,
+        y: be.y,
+        z: be.z,
+        type: be.type,
+        slotCount: items.count,
+        slots: makeLANBlockEntitySlotSnapshots(items),
+        kind: be.kind,
+        burnTime: be.burnTime,
+        burnTotal: be.burnTotal,
+        cookTime: be.cookTime,
+        cookTotal: be.cookTotal,
+        xpBank: be.xpBank,
+        brewTime: be.brewTime,
+        fuel: be.fuel,
+        times: be.times
+    )
+}
+
+private func sortedLANBlockEntities(in chunk: Chunk) -> [BlockEntityData] {
+    chunk.blockEntities.values.sorted {
+        if $0.y != $1.y { return $0.y < $1.y }
+        if $0.z != $1.z { return $0.z < $1.z }
+        if $0.x != $1.x { return $0.x < $1.x }
+        return $0.type < $1.type
+    }
+}
+
+public func makeLANBlockEntitySnapshots(
+    in world: World,
+    maxCount: Int = LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES
+) -> [LANBlockEntitySnapshot] {
+    let cappedCount = max(0, min(maxCount, LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES))
+    if cappedCount == 0 { return [] }
+    var out: [LANBlockEntitySnapshot] = []
+    let chunks = world.chunks.values.sorted {
+        if $0.cx != $1.cx { return $0.cx < $1.cx }
+        return $0.cz < $1.cz
+    }
+    for chunk in chunks {
+        for be in sortedLANBlockEntities(in: chunk) {
+            if out.count >= cappedCount { return out }
+            guard let snapshot = makeLANBlockEntitySnapshot(be, dimension: world.dim.rawValue) else { continue }
+            out.append(snapshot)
+        }
+    }
+    return out
+}
+
+public func makeLANBlockEntitySnapshots(
+    in world: World,
+    prioritizedAround points: [(x: Double, z: Double)],
+    maxCount: Int = LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES
+) -> [LANBlockEntitySnapshot] {
+    guard !points.isEmpty else {
+        return makeLANBlockEntitySnapshots(in: world, maxCount: maxCount)
+    }
+    let cappedCount = max(0, min(maxCount, LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES))
+    if cappedCount == 0 { return [] }
+
+    var entries: [(snapshot: LANBlockEntitySnapshot, distance: Double)] = []
+    let chunks = world.chunks.values.sorted {
+        if $0.cx != $1.cx { return $0.cx < $1.cx }
+        return $0.cz < $1.cz
+    }
+    for chunk in chunks {
+        for be in sortedLANBlockEntities(in: chunk) {
+            guard let snapshot = makeLANBlockEntitySnapshot(be, dimension: world.dim.rawValue) else { continue }
+            let bx = Double(be.x) + 0.5
+            let bz = Double(be.z) + 0.5
+            let distance = points.reduce(Double.greatestFiniteMagnitude) { best, point in
+                let dx = bx - point.x
+                let dz = bz - point.z
+                return min(best, dx * dx + dz * dz)
+            }
+            entries.append((snapshot, distance))
+        }
+    }
+    entries.sort {
+        if $0.distance != $1.distance { return $0.distance < $1.distance }
+        if $0.snapshot.x != $1.snapshot.x { return $0.snapshot.x < $1.snapshot.x }
+        if $0.snapshot.y != $1.snapshot.y { return $0.snapshot.y < $1.snapshot.y }
+        if $0.snapshot.z != $1.snapshot.z { return $0.snapshot.z < $1.snapshot.z }
+        return $0.snapshot.type < $1.snapshot.type
+    }
+    return entries.prefix(cappedCount).map(\.snapshot)
+}
+
+public func makeLANBlockEntitySnapshots(
+    for request: LANChunkRequest,
+    in world: World,
+    maxCount: Int = LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES
+) -> [LANBlockEntitySnapshot] {
+    guard request.dimension == world.dim.rawValue else { return [] }
+    let cappedCount = max(0, min(maxCount, LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES))
+    if cappedCount == 0 { return [] }
+    var out: [LANBlockEntitySnapshot] = []
+    for coord in orderedLANChunkRequestCoordinates(cx: request.cx, cz: request.cz, radius: request.radius) {
+        guard let chunk = world.getChunk(coord.cx, coord.cz) else { continue }
+        for be in sortedLANBlockEntities(in: chunk) {
+            if out.count >= cappedCount { return out }
+            guard let snapshot = makeLANBlockEntitySnapshot(be, dimension: world.dim.rawValue) else { continue }
+            out.append(snapshot)
+        }
+    }
+    return out
+}
+
 private let LAN_PLAYER_INVENTORY_SLOT_COUNT = 36
 
 private func normalizedLANInventorySnapshot(_ snapshot: LANPlayerInventorySnapshot) -> LANPlayerInventorySnapshot? {
@@ -707,6 +928,177 @@ private func makeInventory(from snapshot: LANPlayerInventorySnapshot) -> [ItemSt
         inventory[slot.slot] = stack
     }
     return inventory
+}
+
+private func normalizedLANBlockEntitySnapshot(_ raw: LANBlockEntitySnapshot) -> LANBlockEntitySnapshot? {
+    guard LAN_REPLICATED_BLOCK_ENTITY_TYPES.contains(raw.type),
+          raw.slotCount > 0,
+          raw.slotCount <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITY_SLOTS,
+          raw.slots.count <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITY_SLOTS
+    else { return nil }
+
+    var seenSlots = Set<Int>()
+    var slots: [LANBlockEntitySlotSnapshot] = []
+    slots.reserveCapacity(raw.slots.count)
+    for slot in raw.slots {
+        guard slot.slot >= 0,
+              slot.slot < raw.slotCount,
+              seenSlots.insert(slot.slot).inserted,
+              slot.itemID >= 0,
+              slot.itemID < itemDefs.count,
+              slot.count > 0,
+              slot.count <= LAN_MULTIPLAYER_MAX_REPLICATED_ITEM_COUNT,
+              slot.damage >= 0
+        else { return nil }
+        let cappedCount = min(slot.count, maxStackOf(ItemStack(slot.itemID, 1)))
+        slots.append(LANBlockEntitySlotSnapshot(
+            slot: slot.slot,
+            itemID: slot.itemID,
+            count: cappedCount,
+            damage: slot.damage,
+            label: slot.label
+        ))
+    }
+    slots.sort { $0.slot < $1.slot }
+    let normalizedTimes = raw.times.map {
+        Array($0.prefix(raw.slotCount)).map { max(0, min(240_000, $0)) }
+    }
+    return LANBlockEntitySnapshot(
+        dimension: raw.dimension,
+        x: raw.x,
+        y: raw.y,
+        z: raw.z,
+        type: raw.type,
+        slotCount: raw.slotCount,
+        slots: slots,
+        kind: raw.kind,
+        burnTime: raw.burnTime,
+        burnTotal: raw.burnTotal,
+        cookTime: raw.cookTime,
+        cookTotal: raw.cookTotal,
+        xpBank: raw.xpBank,
+        brewTime: raw.brewTime,
+        fuel: raw.fuel,
+        times: normalizedTimes
+    )
+}
+
+private func items(from snapshot: LANBlockEntitySnapshot) -> [ItemStack?]? {
+    guard let snapshot = normalizedLANBlockEntitySnapshot(snapshot) else { return nil }
+    var items: [ItemStack?] = Array(repeating: nil, count: snapshot.slotCount)
+    for slot in snapshot.slots {
+        items[slot.slot] = ItemStack(
+            slot.itemID,
+            slot.count,
+            damage: slot.damage,
+            label: slot.label
+        )
+    }
+    return items
+}
+
+private func isLANContainerBlockID(_ id: Int) -> Bool {
+    guard id >= 0, id < blockDefs.count else { return false }
+    let name = blockDefs[id].name
+    return name == "chest" ||
+        name == "trapped_chest" ||
+        name == "barrel" ||
+        name == "dispenser" ||
+        name == "dropper" ||
+        name == "shulker_box" ||
+        name.hasSuffix("_shulker_box")
+}
+
+private func isLANFurnaceBlockID(_ id: Int) -> Bool {
+    id == Int(B.furnace) ||
+        id == Int(B.furnace_lit) ||
+        id == Int(B.blast_furnace) ||
+        id == Int(B.blast_furnace_lit) ||
+        id == Int(B.smoker) ||
+        id == Int(B.smoker_lit)
+}
+
+private func isLANBlockEntitySnapshotCompatible(_ snapshot: LANBlockEntitySnapshot, cell: Int) -> Bool {
+    guard isValidLANReplicatedCell(cell) else { return false }
+    let id = cell >> 4
+    guard id > 0 else { return false }
+    switch snapshot.type {
+    case "container":
+        return isLANContainerBlockID(id) && snapshot.slotCount == containerSizeFor(blockDefs[id].name)
+    case "hopper":
+        return id == Int(B.hopper) && snapshot.slotCount == 5
+    case "furnace":
+        return isLANFurnaceBlockID(id) && snapshot.slotCount == 3
+    case "brewing":
+        return id == Int(B.brewing_stand) && snapshot.slotCount == 5
+    case "shelf":
+        return id == Int(B.chiseled_bookshelf) && snapshot.slotCount == 6
+    case "campfire":
+        return (id == Int(B.campfire) || id == Int(B.soul_campfire)) && snapshot.slotCount == 4
+    case "crafting":
+        return id == Int(B.crafting_table) && snapshot.slotCount == 9
+    default:
+        return false
+    }
+}
+
+private func makeBlockEntity(from snapshot: LANBlockEntitySnapshot) -> BlockEntityData {
+    switch snapshot.type {
+    case "container":
+        return makeContainerBE(snapshot.x, snapshot.y, snapshot.z, snapshot.slotCount)
+    case "hopper":
+        return makeHopperBE(snapshot.x, snapshot.y, snapshot.z)
+    case "furnace":
+        return makeFurnaceBE(snapshot.x, snapshot.y, snapshot.z, snapshot.kind ?? "furnace")
+    case "brewing":
+        return makeBrewingBE(snapshot.x, snapshot.y, snapshot.z)
+    case "crafting":
+        return makeCraftingTableBE(snapshot.x, snapshot.y, snapshot.z)
+    case "shelf":
+        let be = BlockEntityData(type: "shelf", x: snapshot.x, y: snapshot.y, z: snapshot.z)
+        be.items = Array(repeating: nil, count: snapshot.slotCount)
+        be.lastSlot = -1
+        return be
+    case "campfire":
+        let be = BlockEntityData(type: "campfire", x: snapshot.x, y: snapshot.y, z: snapshot.z)
+        be.items = Array(repeating: nil, count: snapshot.slotCount)
+        be.times = Array(repeating: 0, count: snapshot.slotCount)
+        return be
+    default:
+        let be = BlockEntityData(type: snapshot.type, x: snapshot.x, y: snapshot.y, z: snapshot.z)
+        be.items = Array(repeating: nil, count: snapshot.slotCount)
+        return be
+    }
+}
+
+private func applyLANBlockEntityPayload(_ snapshot: LANBlockEntitySnapshot, to be: BlockEntityData) -> Bool {
+    guard let snapshot = normalizedLANBlockEntitySnapshot(snapshot),
+          let snapshotItems = items(from: snapshot)
+    else { return false }
+    be.type = snapshot.type
+    be.x = snapshot.x
+    be.y = snapshot.y
+    be.z = snapshot.z
+    be.items = snapshotItems
+    switch snapshot.type {
+    case "furnace":
+        be.kind = snapshot.kind
+        be.burnTime = snapshot.burnTime ?? 0
+        be.burnTotal = snapshot.burnTotal ?? 0
+        be.cookTime = snapshot.cookTime ?? 0
+        be.cookTotal = snapshot.cookTotal ?? 200
+        be.xpBank = snapshot.xpBank ?? 0
+    case "brewing":
+        be.brewTime = snapshot.brewTime ?? 0
+        be.fuel = snapshot.fuel ?? 0
+    case "campfire":
+        be.times = snapshot.times ?? Array(repeating: 0, count: snapshot.slotCount)
+    case "shelf":
+        be.lastSlot = be.lastSlot ?? -1
+    default:
+        break
+    }
+    return true
 }
 
 @discardableResult
@@ -1080,6 +1472,35 @@ public func applyLANEntitySnapshots(
 }
 
 @discardableResult
+public func applyLANBlockEntitySnapshots(
+    _ snapshots: [LANBlockEntitySnapshot],
+    to world: World
+) -> LANReplicationApplyReport {
+    var report = LANReplicationApplyReport()
+    for raw in snapshots.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES) {
+        guard let snapshot = normalizedLANBlockEntitySnapshot(raw),
+              snapshot.dimension == world.dim.rawValue,
+              let chunk = world.getChunkAt(snapshot.x, snapshot.z),
+              chunk.inYRange(snapshot.y),
+              isLANBlockEntitySnapshotCompatible(snapshot, cell: world.getBlock(snapshot.x, snapshot.y, snapshot.z))
+        else {
+            report.ignoredInvalidBlockEntities += 1
+            continue
+        }
+
+        let existing = world.getBlockEntity(snapshot.x, snapshot.y, snapshot.z)
+        let target = existing?.type == snapshot.type ? existing! : makeBlockEntity(from: snapshot)
+        guard applyLANBlockEntityPayload(snapshot, to: target) else {
+            report.ignoredInvalidBlockEntities += 1
+            continue
+        }
+        world.setBlockEntity(target)
+        report.appliedBlockEntities += 1
+    }
+    return report
+}
+
+@discardableResult
 public func applyLANReplicationBatch(_ batch: LANReplicationBatch, to world: World) -> LANReplicationApplyReport {
     var report = LANReplicationApplyReport()
     if let worldState = batch.worldState {
@@ -1104,6 +1525,9 @@ public func applyLANReplicationBatch(_ batch: LANReplicationBatch, to world: Wor
         _ = world.setBlock(change.x, change.y, change.z, change.cell)
         report.appliedBlockChanges += 1
     }
+    let blockEntityReport = applyLANBlockEntitySnapshots(batch.blockEntities, to: world)
+    report.appliedBlockEntities += blockEntityReport.appliedBlockEntities
+    report.ignoredInvalidBlockEntities += blockEntityReport.ignoredInvalidBlockEntities
     let entityReport = applyLANEntitySnapshots(batch.entities, to: world, removeMissing: batch.entitySnapshotsComplete)
     report.appliedEntitySnapshots += entityReport.appliedEntitySnapshots
     report.removedEntitySnapshots += entityReport.removedEntitySnapshots

@@ -114,6 +114,11 @@ public func makeBrewingBE(_ x: Int, _ y: Int, _ z: Int) -> BlockEntityData {
     be.fuel = 0
     return be
 }
+public func makeCraftingTableBE(_ x: Int, _ y: Int, _ z: Int) -> BlockEntityData {
+    let be = BlockEntityData(type: "crafting", x: x, y: y, z: z)
+    be.items = [ItemStack?](repeating: nil, count: 9)
+    return be
+}
 public func makeSignBE(_ x: Int, _ y: Int, _ z: Int) -> BlockEntityData {
     let be = BlockEntityData(type: "sign", x: x, y: y, z: z)
     be.lines = ["", "", "", ""]

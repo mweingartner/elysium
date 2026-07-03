@@ -15,6 +15,7 @@ public struct ScreenData {
     public var x = 0, y = 0, z = 0
     public var damage = 0
     public var text: String?
+    public var readOnly = false
     public init() {}
 }
 
@@ -23,14 +24,17 @@ public struct InteractCtx {
     public let player: Player
     public let openScreen: (String, ScreenData?) -> Void
     public let advance: (String) -> Void
+    public let persistPlayerState: () -> Void
 
     public init(world: World, player: Player,
                 openScreen: @escaping (String, ScreenData?) -> Void = { _, _ in },
-                advance: @escaping (String) -> Void = { _ in }) {
+                advance: @escaping (String) -> Void = { _ in },
+                persistPlayerState: @escaping () -> Void = {}) {
         self.world = world
         self.player = player
         self.openScreen = openScreen
         self.advance = advance
+        self.persistPlayerState = persistPlayerState
     }
 }
 
@@ -138,7 +142,13 @@ public func useBlock(_ ctx: InteractCtx, _ hit: RaycastHit) -> Bool {
     }
     // containers & screens
     if id == Int(B.crafting_table) {
+        var be = world.getBlockEntity(x, y, z)
+        if be == nil || be!.type != "crafting" {
+            be = makeCraftingTableBE(x, y, z)
+            world.setBlockEntity(be!)
+        }
         var data = ScreenData()
+        data.be = be
         data.x = x
         data.y = y
         data.z = z
@@ -287,6 +297,7 @@ public func useBlock(_ ctx: InteractCtx, _ hit: RaycastHit) -> Bool {
             if world.dim == .nether {
                 player.spawnPoint = (x, y + 1, z)
                 player.spawnDim = 1
+                ctx.persistPlayerState()
                 world.hooks.playSound("block.respawn_anchor.set_spawn", Double(x) + 0.5, Double(y) + 0.5, Double(z) + 0.5, 1, 1)
             } else {
                 // BOOM
@@ -564,6 +575,7 @@ private func useBed(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int, _ c: Int) 
     // set spawn
     player.spawnPoint = (x, y, z)
     player.spawnDim = 0
+    ctx.persistPlayerState()
     // sleep if night
     if world.isDay() && world.rainLevel < 0.9 {
         var data = ScreenData()
@@ -1387,7 +1399,7 @@ public func finishBreaking(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int) {
     // container contents spill
     if let be = world.getBlockEntity(x, y, z) {
         let isShulker = def.name.hasSuffix("shulker_box") || id == Int(B.shulker_box)
-        if !isShulker && (be.type == "container" || be.type == "hopper" || be.type == "furnace" || be.type == "brewing" || be.type == "shelf" || be.type == "campfire") {
+        if !isShulker && (be.type == "container" || be.type == "hopper" || be.type == "furnace" || be.type == "brewing" || be.type == "shelf" || be.type == "campfire" || be.type == "crafting") {
             if let items = be.items {
                 for s in items { if let s { spawnItem(world, Double(x) + 0.5, Double(y) + 0.5, Double(z) + 0.5, s) } }
             }

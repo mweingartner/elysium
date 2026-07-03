@@ -558,7 +558,25 @@ final class InventoryScreen: ContainerScreen {
 // Crafting table 3×3
 // =============================================================================
 final class CraftingScreen: ContainerScreen {
-    var craftGrid: [ItemStack?] = Array(repeating: nil, count: 9)
+    private var localCraftGrid: [ItemStack?] = Array(repeating: nil, count: 9)
+    private let tableBE: BlockEntityData?
+    var craftGrid: [ItemStack?] {
+        get {
+            guard let tableBE else { return localCraftGrid }
+            if tableBE.items?.count != 9 {
+                tableBE.items = Array(repeating: nil, count: 9)
+            }
+            return tableBE.items ?? Array(repeating: nil, count: 9)
+        }
+        set {
+            let normalized = normalizedCraftingGrid(newValue)
+            if let tableBE {
+                tableBE.items = normalized
+            } else {
+                localCraftGrid = normalized
+            }
+        }
+    }
     var craftResult: ItemStack?
     private let recipeMenu = CraftingRecipePopup(gridWidth: 3, gridHeight: 3)
     private let tablePos: (x: Int, y: Int, z: Int)?
@@ -569,13 +587,24 @@ final class CraftingScreen: ContainerScreen {
     private weak var creativeCheckbox: CheckBox?
     private weak var craftUpButton: Button?
     private weak var craftDownButton: Button?
+    private let readOnly: Bool
 
-    init(_ tablePos: (x: Int, y: Int, z: Int)? = nil) {
+    init(_ tablePos: (x: Int, y: Int, z: Int)? = nil, tableBE: BlockEntityData? = nil, readOnly: Bool = false) {
         self.tablePos = tablePos
+        self.tableBE = tableBE
+        self.readOnly = readOnly
         super.init()
+        readOnlySlots = readOnly
         title = "Crafting"
         titleX = 29
         sheet = "crafting_table"
+    }
+    private func normalizedCraftingGrid(_ raw: [ItemStack?]) -> [ItemStack?] {
+        var grid = Array(raw.prefix(9))
+        if grid.count < 9 {
+            grid.append(contentsOf: Array(repeating: nil, count: 9 - grid.count))
+        }
+        return grid
     }
     override func buildSlots(_ ui: UIManager, _ game: GameCore) {
         syncCreativeFromPlayer(game)
@@ -609,24 +638,26 @@ final class CraftingScreen: ContainerScreen {
             repeatsOutputQuickMove: { [weak self] in
                 (self?.selectedCraftRounds ?? 1) <= 1
             }))
-        installCraftAmountButtons(outputX: px + 123, outputY: py + 34, game)
-        recipeMenu.installButton(on: self) { [weak self] in
-            self?.recipeMenu.toggle()
+        if !readOnly {
+            installCraftAmountButtons(outputX: px + 123, outputY: py + 34, game)
+            recipeMenu.installButton(on: self) { [weak self] in
+                self?.recipeMenu.toggle()
+            }
+            let cb = CheckBox(148, 4, 82, 18, "Creative", isChecked: { [weak self] in
+                self?.creativeCrafting ?? false
+            }, { [weak self, weak game] in
+                guard let self else { return }
+                self.creativeCrafting = !self.creativeCrafting
+                game?.player.setGameMode(self.creativeCrafting ? GameMode.creative : GameMode.survival)
+                self.selectedCreativePlan = nil
+                self.selectedSurvivalPlan = nil
+                self.selectedCraftRounds = 1
+                self.updateResult(game)
+                if let game { self.recipeMenu.refresh(game, craftGrid: self.craftGrid, creative: self.creativeCrafting) }
+            })
+            creativeCheckbox = cb
+            buttons.append(cb)
         }
-        let cb = CheckBox(148, 4, 82, 18, "Creative", isChecked: { [weak self] in
-            self?.creativeCrafting ?? false
-        }, { [weak self, weak game] in
-            guard let self else { return }
-            self.creativeCrafting = !self.creativeCrafting
-            game?.player.setGameMode(self.creativeCrafting ? GameMode.creative : GameMode.survival)
-            self.selectedCreativePlan = nil
-            self.selectedSurvivalPlan = nil
-            self.selectedCraftRounds = 1
-            self.updateResult(game)
-            if let game { self.recipeMenu.refresh(game, craftGrid: self.craftGrid, creative: self.creativeCrafting) }
-        })
-        creativeCheckbox = cb
-        buttons.append(cb)
     }
     private func installCraftAmountButtons(outputX: Double, outputY: Double, _ game: GameCore) {
         let frames = CraftAmountStepperLayout.frames(outputX: outputX, outputY: outputY)
@@ -819,6 +850,9 @@ final class CraftingScreen: ContainerScreen {
         }
     }
     override func onMouseDown(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double, _ btn: Int) -> Bool {
+        if readOnly {
+            return super.onMouseDown(ui, game, mx, my, btn)
+        }
         if let plan = recipeMenu.selectedPlan(at: mx, my) {
             selectRecipe(plan, ui, game)
             return true
@@ -830,9 +864,11 @@ final class CraftingScreen: ContainerScreen {
         return super.onMouseDown(ui, game, mx, my, btn)
     }
     override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
-        recipeMenu.onWheel(dy)
+        if readOnly { return false }
+        return recipeMenu.onWheel(dy)
     }
     override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
+        if readOnly { return super.onKey(ui, game, key) }
         let result = recipeMenu.onKey(key)
         if result.handled {
             if let plan = result.plan { selectRecipe(plan, ui, game) }
@@ -841,11 +877,14 @@ final class CraftingScreen: ContainerScreen {
         return super.onKey(ui, game, key)
     }
     override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
+        if readOnly { return super.onChar(ui, game, ch) }
         if recipeMenu.onChar(ch) { return true }
         return super.onChar(ui, game, ch)
     }
     override func onClose(_ ui: UIManager, _ game: GameCore) {
-        _ = returnCraftGridToInventory(game)
+        if tableBE == nil && !readOnly {
+            _ = returnCraftGridToInventory(game)
+        }
     }
 }
 
@@ -855,9 +894,10 @@ final class CraftingScreen: ContainerScreen {
 final class FurnaceScreen: ContainerScreen {
     private let be: BlockEntityData
 
-    init(_ be: BlockEntityData) {
+    init(_ be: BlockEntityData, readOnly: Bool = false) {
         self.be = be
         super.init()
+        readOnlySlots = readOnly
         title = be.kind == "blast" ? "Blast Furnace" : be.kind == "smoker" ? "Smoker" : "Furnace"
         sheet = "furnace"
     }
@@ -929,12 +969,13 @@ final class ChestScreen: ContainerScreen {
     private let other: BlockEntityData?
 
     /// items live in a BlockEntityData or a vehicle — accessors close over the owner
-    init(_ be: BlockEntityData, _ title: String, _ other: BlockEntityData? = nil) {
+    init(_ be: BlockEntityData, _ title: String, _ other: BlockEntityData? = nil, readOnly: Bool = false) {
         count = be.items?.count ?? 27
         getItems = { be.items ?? [] }
         setItem = { be.items?[$0] = $1 }
         self.other = other
         super.init()
+        readOnlySlots = readOnly
         self.title = title
         let total = count + (other?.items?.count ?? 0)
         panelH = 114 + Double((total + 8) / 9) * 18
@@ -1013,9 +1054,10 @@ final class ChestScreen: ContainerScreen {
 final class BrewingScreen: ContainerScreen {
     private let be: BlockEntityData
 
-    init(_ be: BlockEntityData) {
+    init(_ be: BlockEntityData, readOnly: Bool = false) {
         self.be = be
         super.init()
+        readOnlySlots = readOnly
         title = "Brewing Stand"
         sheet = "brewing_stand"
     }

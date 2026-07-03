@@ -3,6 +3,7 @@
 //   worlds(id, json, lastPlayed)            — world metadata + global state
 //   chunks(world, dim, cx, cz, data BLOB)   — modified chunks (VCK1 binary)
 //   player(world, json)                     — player snapshot per world
+//   lan_player_resume(hostWorld, json)      — local resume point for hosted LAN worlds
 //   advancements(world, json)               — earned advancement ids per world
 //   templates(name, json, created)           — local cloned construction templates
 // Legacy installs stored loose files under saves/; they are imported once on
@@ -138,6 +139,10 @@ public final class SaveDB {
             data BLOB NOT NULL, PRIMARY KEY(world, dim, cx, cz)) WITHOUT ROWID
         """)
         exec("CREATE TABLE IF NOT EXISTS player(world TEXT PRIMARY KEY, json TEXT NOT NULL)")
+        exec("""
+        CREATE TABLE IF NOT EXISTS lan_player_resume(
+            hostWorld TEXT PRIMARY KEY, json TEXT NOT NULL, updated REAL NOT NULL DEFAULT 0)
+        """)
         exec("CREATE TABLE IF NOT EXISTS advancements(world TEXT PRIMARY KEY, json TEXT NOT NULL)")
         exec("""
         CREATE TABLE IF NOT EXISTS templates(
@@ -391,6 +396,30 @@ public final class SaveDB {
             self.bindText(stmt, 1, worldId)
             self.bindText(stmt, 2, json)
         })
+    }
+    public func getLANClientResume(_ hostWorldKey: String) -> [String: Any]? {
+        var out: [String: Any]?
+        run("SELECT json FROM lan_player_resume WHERE hostWorld=?", bind: { self.bindText($0, 1, hostWorldKey) }) { stmt in
+            if let json = self.columnText(stmt, 0) {
+                out = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
+            }
+        }
+        return out
+    }
+    public func putLANClientResume(_ hostWorldKey: String, _ data: [String: Any]) {
+        guard let bytes = try? JSONSerialization.data(withJSONObject: sanitizeJSON(data)),
+              let json = String(data: bytes, encoding: .utf8) else { return }
+        let updatedNumber = data["updated"] as? NSNumber
+        let updatedDouble = data["updated"] as? Double
+        let updated = updatedNumber?.doubleValue ?? updatedDouble ?? Date().timeIntervalSince1970 * 1000
+        run("INSERT OR REPLACE INTO lan_player_resume(hostWorld, json, updated) VALUES(?,?,?)", bind: { stmt in
+            self.bindText(stmt, 1, hostWorldKey)
+            self.bindText(stmt, 2, json)
+            sqlite3_bind_double(stmt, 3, updated)
+        })
+    }
+    public func deleteLANClientResume(_ hostWorldKey: String) {
+        run("DELETE FROM lan_player_resume WHERE hostWorld=?", bind: { self.bindText($0, 1, hostWorldKey) })
     }
     public func getAdvancements(_ worldId: String) -> [String]? {
         var out: [String]?

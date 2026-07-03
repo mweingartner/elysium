@@ -56,9 +56,25 @@ final class LANMultiplayerTests: XCTestCase {
             .blockIntent(playerID: "peer-a", intent: LANBlockIntent(action: .placeBlock, x: 1, y: 2, z: 3, face: 9, selectedHotbarSlot: -5)),
             .containerIntent(playerID: "peer-a", intent: LANContainerIntent(action: .clickSlot, containerID: "chest", slot: 5, button: 1, shift: true)),
             .templateIntent(playerID: "peer-a", intent: LANTemplateIntent(action: .placeTemplate, templateName: "A House!", x: 9, y: 64, z: -4, rotation: -1)),
-            .replicationBatch(LANReplicationBatch(tick: 7, fullSnapshot: false, players: [player], blockChanges: [
-                LANBlockChange(dimension: Dim.overworld.rawValue, x: 1, y: 65, z: 1, cell: 0),
-            ])),
+            .replicationBatch(LANReplicationBatch(
+                tick: 7,
+                fullSnapshot: false,
+                players: [player],
+                blockChanges: [
+                    LANBlockChange(dimension: Dim.overworld.rawValue, x: 1, y: 65, z: 1, cell: 0),
+                ],
+                blockEntities: [
+                    LANBlockEntitySnapshot(
+                        dimension: Dim.overworld.rawValue,
+                        x: 2,
+                        y: 65,
+                        z: 2,
+                        type: "container",
+                        slotCount: 27,
+                        slots: [LANBlockEntitySlotSnapshot(slot: 0, itemID: 1, count: 1)]
+                    ),
+                ]
+            )),
             .chunkRequest(playerID: "peer-a", request: LANChunkRequest(dimension: Dim.overworld.rawValue, cx: 0, cz: 0, radius: 9)),
             .replicationAck(playerID: "peer-a", ack: LANReplicationAck(tick: 7, receivedSequence: 42)),
             .gameplayEvent(event),
@@ -136,6 +152,17 @@ final class LANMultiplayerTests: XCTestCase {
                        LANDirectConnectTarget(host: "192.168.1.20", port: LAN_MULTIPLAYER_DEFAULT_PORT))
         XCTAssertNil(LANDirectConnectTarget.parse(host: "bad host", port: "41337"))
         XCTAssertNil(LANDirectConnectTarget.parse(host: "localhost", port: "0"))
+
+        XCTAssertEqual(
+            LANAutoJoinSpec.parse("192.168.1.20 41337 abcd42 Neo Probe"),
+            LANAutoJoinSpec(
+                target: LANDirectConnectTarget(host: "192.168.1.20", port: LAN_MULTIPLAYER_DEFAULT_PORT),
+                joinCode: "ABCD42",
+                playerName: "Neo Probe"
+            )
+        )
+        XCTAssertNil(LANAutoJoinSpec.parse("192.168.1.20 41337 bad"))
+        XCTAssertNil(LANAutoJoinSpec.parse("bad host 41337 ABCD42 Neo"))
     }
 
     func testBlockIntentDecodesMissingPlacementCellAsZeroForCompatibility() throws {
@@ -204,6 +231,48 @@ final class LANMultiplayerTests: XCTestCase {
         XCTAssertFalse(game.hasWorld())
         XCTAssertFalse(game.isLANClientWorld)
         XCTAssertEqual(Set(game.listWorlds().map(\.id)), before)
+    }
+
+    func testLANClientResumeLocationPersistsPerHostedWorldWithoutSavingHostWorld() throws {
+        let dbURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pebble-lan-resume-\(UUID().uuidString).db")
+        defer {
+            try? FileManager.default.removeItem(at: dbURL)
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: dbURL.path + "-wal"))
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: dbURL.path + "-shm"))
+        }
+        let db = SaveDB(databaseURL: dbURL, migrateLegacy: false)
+        let summary = LANWorldSummary(
+            worldID: "host world !",
+            worldName: "Host LAN",
+            seed: -123_456,
+            gameMode: GameMode.survival,
+            difficulty: 2,
+            dimension: Dim.overworld.rawValue,
+            playerCount: 2
+        )
+
+        let first = GameCore(db: db)
+        let before = Set(first.listWorlds().map(\.id))
+        first.enterLANClientWorld(summary)
+        first.player.setPos(123.25, 91.5, -45.75)
+        first.player.yaw = 1.25
+        first.player.pitch = -0.35
+        first.saveAndFlush(synchronous: true)
+        first.exitToTitle()
+
+        XCTAssertEqual(Set(first.listWorlds().map(\.id)), before)
+
+        let second = GameCore(db: db)
+        second.enterLANClientWorld(summary)
+
+        XCTAssertTrue(second.isLANClientWorld)
+        XCTAssertEqual(second.player.x, 123.25, accuracy: 0.001)
+        XCTAssertEqual(second.player.y, 91.5, accuracy: 0.001)
+        XCTAssertEqual(second.player.z, -45.75, accuracy: 0.001)
+        XCTAssertEqual(second.player.yaw, 1.25, accuracy: 0.001)
+        XCTAssertEqual(second.player.pitch, -0.35, accuracy: 0.001)
+        XCTAssertEqual(Set(second.listWorlds().map(\.id)), before)
     }
 
     func testLANClientWorldRequestsHostChunksInsteadOfGeneratingLocalChunks() {

@@ -215,7 +215,7 @@ final class MeshJobState {
 // =============================================================================
 public final class GameCore {
     public weak var host: GameHost?
-    public let db = SaveDB()
+    public let db: SaveDB
     public var settings: Settings
     public var keybinds: [String: String]
 
@@ -227,6 +227,8 @@ public final class GameCore {
     public var advancements = AdvancementTracker()
     public private(set) var inWorld = false
     public private(set) var isLANClientWorld = false
+    private var lanClientResumeStorageKey: String?
+    private var lanClientWorldSummary: LANWorldSummary?
     public private(set) var paused = false
     public var mapSpanBlocks = MAP_DEFAULT_VIEW_BLOCKS
     public var mapMinimapSizeMode = MAP_DEFAULT_MINIMAP_SIZE_MODE
@@ -234,6 +236,7 @@ public final class GameCore {
     public var expandedMapCenterZ = 0.0
     public var onWorldBlockChanged: ((World, Int, Int, Int, Int) -> Void)?
     public var lanChunkRequestHandler: ((World, Int, Int) -> Bool)?
+    public var lanBlockIntentHandler: ((LANBlockIntent) -> Void)?
 
     // streaming
     private var genInFlight = Set<DimChunk>()
@@ -301,7 +304,8 @@ public final class GameCore {
     private var heldForChunks = false
     public private(set) var musicMood = "menu"
 
-    public init() {
+    public init(db: SaveDB = SaveDB()) {
+        self.db = db
         settings = loadSettings()
         keybinds = loadKeybinds()
         // registry boot, in frozen order
@@ -412,6 +416,8 @@ public final class GameCore {
         if inWorld { saveAndFlush(synchronous: true) }
         inWorld = false
         isLANClientWorld = false
+        lanClientResumeStorageKey = nil
+        lanClientWorldSummary = nil
         worldRec = nil
         dragonSpawned = false
         deathScreenShown = false
@@ -439,6 +445,8 @@ public final class GameCore {
     }
 
     public func createWorld(name: String, seedText: String, mode: Int, difficulty: Int) {
+        lanClientResumeStorageKey = nil
+        lanClientWorldSummary = nil
         let trimmed = seedText.trimmingCharacters(in: .whitespaces)
         var seed: Int32
         if trimmed.isEmpty {
@@ -464,6 +472,8 @@ public final class GameCore {
     }
 
     public func loadWorld(_ id: String) {
+        lanClientResumeStorageKey = nil
+        lanClientWorldSummary = nil
         guard let rec = db.getWorld(id) else { return }
         let playerData = db.getPlayer(id)
         let adv = db.getAdvancements(id)
@@ -472,12 +482,9 @@ public final class GameCore {
 
     public func enterLANClientWorld(_ summary: LANWorldSummary) {
         let seed = Int32(truncatingIfNeeded: summary.seed)
-        var cleanID = ""
-        for scalar in summary.worldID.unicodeScalars where cleanID.count < 48 {
-            if CharacterSet.alphanumerics.contains(scalar) || scalar == "-" || scalar == "_" {
-                cleanID.unicodeScalars.append(scalar)
-            }
-        }
+        let cleanID = sanitizedLANWorldIdentifier(summary.worldID)
+        let resumeKey = lanClientResumeKey(for: summary)
+        let resumeData = resumeKey.flatMap { db.getLANClientResume($0) }
         var rec = WorldRecord(
             id: "lan-" + (cleanID.isEmpty ? "world" : cleanID),
             name: "LAN: \(summary.worldName)",
@@ -489,8 +496,10 @@ public final class GameCore {
         rec.spawnX = spawn.x
         rec.spawnY = spawn.y
         rec.spawnZ = spawn.z
-        enterWorld(rec, nil, nil, transientLANClient: true)
-        if let d = Dim(rawValue: summary.dimension), d != dim {
+        lanClientResumeStorageKey = resumeKey
+        lanClientWorldSummary = summary
+        enterWorld(rec, resumeData, nil, transientLANClient: true)
+        if resumeData == nil, let d = Dim(rawValue: summary.dimension), d != dim {
             moveToDimension(d)
         }
     }
@@ -628,7 +637,12 @@ public final class GameCore {
     }
 
     public func saveAndFlush(synchronous: Bool = false) {
-        guard inWorld, var rec = worldRec, !isLANClientWorld else { return }
+        guard inWorld else { return }
+        if isLANClientWorld {
+            saveLANClientResume()
+            return
+        }
+        guard var rec = worldRec else { return }
         rec.lastPlayed = Date().timeIntervalSince1970 * 1000
         rec.gameMode = player.gameMode
         rec.nextEntityId = peekNextEntityId()
@@ -666,6 +680,21 @@ public final class GameCore {
         for w in worlds.values {
             for c in w.chunks.values { c.modified = false }
         }
+    }
+
+    private func saveLANClientResume() {
+        guard let key = lanClientResumeStorageKey,
+              let summary = lanClientWorldSummary,
+              let player
+        else { return }
+        db.putLANClientResume(key, [
+            "worldID": summary.worldID,
+            "worldName": summary.worldName,
+            "seed": summary.seed,
+            "dim": dim.rawValue,
+            "updated": Date().timeIntervalSince1970 * 1000,
+            "data": player.save(),
+        ])
     }
 
     /// runs ON the save queue; on failure re-marks the chunks dirty (on main)
@@ -1656,6 +1685,7 @@ public final class GameCore {
             tickViewBob()
             tickAmbience()
             tickBossBars()
+            tickLANClientMirroredUse()
             tickHotbarAndCooldowns(p)
             return
         }
@@ -1961,6 +1991,129 @@ public final class GameCore {
         if id == Int(B.ancient_debris) { advance("obtain_ancient_debris") }
     }
 
+    private func tickLANClientMirroredUse() {
+        let p = player!
+        if p.dead || p.deathTime > 0 || (host?.hasScreen() ?? false) { return }
+        guard rightDown && useCooldown <= 0 else { return }
+        _ = performLANClientUse()
+    }
+
+    @discardableResult
+    private func performLANClientUse() -> Bool {
+        let p = player!
+        guard let hit = crosshairBlock() else { return false }
+        if openLANClientMirroredBlockScreen(hit) {
+            p.attackAnim = 0.6
+            useCooldown = 4
+            return true
+        }
+        if sendLANClientOpenableBlockUse(hit) {
+            p.attackAnim = 0.6
+            useCooldown = 4
+            return true
+        }
+        return false
+    }
+
+    private func openLANClientMirroredBlockScreen(_ hit: RaycastHit) -> Bool {
+        let x = hit.x, y = hit.y, z = hit.z
+        let id = hit.cell >> 4
+        guard id > 0 && id < blockDefs.count else { return false }
+        let name = blockDefs[id].name
+        var data = ScreenData()
+        data.x = x
+        data.y = y
+        data.z = z
+        data.block = id
+        data.readOnly = true
+
+        if id == Int(B.crafting_table) {
+            guard let be = world.getBlockEntity(x, y, z), be.type == "crafting" else { return false }
+            data.be = be
+            openScreen("crafting", data)
+            return true
+        }
+        if id == Int(B.chest) || id == Int(B.trapped_chest) {
+            if blockDefs[world.getBlock(x, y + 1, z) >> 4].opaque { return true }
+            guard let be = world.getBlockEntity(x, y, z) else { return false }
+            var other: BlockEntityData? = nil
+            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] where (world.getBlock(x + dx, y, z + dz) >> 4) == id {
+                other = world.getBlockEntity(x + dx, y, z + dz)
+                break
+            }
+            data.be = be
+            data.other = other
+            data.title = other != nil ? "Large Chest" : "Chest"
+            openScreen("chest", data)
+            return true
+        }
+        if id == Int(B.barrel) {
+            guard let be = world.getBlockEntity(x, y, z) else { return false }
+            data.be = be
+            data.title = "Barrel"
+            openScreen("chest", data)
+            return true
+        }
+        if name.hasSuffix("shulker_box") || id == Int(B.shulker_box) {
+            guard let be = world.getBlockEntity(x, y, z) else { return false }
+            data.be = be
+            data.title = "Shulker Box"
+            openScreen("chest", data)
+            return true
+        }
+        if id == Int(B.hopper) {
+            guard let be = world.getBlockEntity(x, y, z), be.type == "hopper" else { return false }
+            data.be = be
+            data.title = "Hopper"
+            openScreen("chest", data)
+            return true
+        }
+        if id == Int(B.dispenser) || id == Int(B.dropper) {
+            guard let be = world.getBlockEntity(x, y, z) else { return false }
+            data.be = be
+            data.title = id == Int(B.dispenser) ? "Dispenser" : "Dropper"
+            openScreen("chest", data)
+            return true
+        }
+        if id == Int(B.furnace) || id == Int(B.furnace_lit) || id == Int(B.blast_furnace) || id == Int(B.blast_furnace_lit) || id == Int(B.smoker) || id == Int(B.smoker_lit) {
+            guard let be = world.getBlockEntity(x, y, z), be.type == "furnace" else { return false }
+            data.be = be
+            openScreen("furnace", data)
+            return true
+        }
+        if id == Int(B.brewing_stand) {
+            guard let be = world.getBlockEntity(x, y, z), be.type == "brewing" else { return false }
+            data.be = be
+            openScreen("brewing", data)
+            return true
+        }
+        return false
+    }
+
+    private func sendLANClientOpenableBlockUse(_ hit: RaycastHit) -> Bool {
+        guard let handler = lanBlockIntentHandler else { return false }
+        let id = hit.cell >> 4
+        guard isLANClientOpenableBlockUseID(id) else { return false }
+        handler(LANBlockIntent(
+            action: .useBlock,
+            x: hit.x,
+            y: hit.y,
+            z: hit.z,
+            face: hit.face,
+            selectedHotbarSlot: player?.selectedSlot ?? 0,
+            cell: hit.cell
+        ))
+        return true
+    }
+
+    private func isLANClientOpenableBlockUseID(_ id: Int) -> Bool {
+        guard id > 0, id < blockDefs.count else { return false }
+        let shape = Shape(rawValue: SHAPE_OF[id]) ?? .cube
+        if shape == .door { return id != Int(B.iron_door) }
+        if shape == .trapdoor { return id != Int(B.iron_trapdoor) }
+        return shape == .fenceGate
+    }
+
     /// periodic inventory / situation scan for item- & place-based advancements
     private func tickAdvancementScan() {
         let w = world
@@ -2054,7 +2207,8 @@ public final class GameCore {
             world: world,
             player: player,
             openScreen: { [weak self] kind, data in self?.openScreen(kind, data) },
-            advance: { [weak self] id in self?.advance(id) })
+            advance: { [weak self] id in self?.advance(id) },
+            persistPlayerState: { [weak self] in self?.saveAndFlush(synchronous: true) })
     }
 
     public func openScreen(_ kind: String, _ data: ScreenData?) {
@@ -2315,8 +2469,12 @@ public final class GameCore {
             pickBlock()
         } else if button == 2 {
             rightDown = true
-            doUse()
-            useCooldown = 4
+            if isLANClientWorld {
+                _ = performLANClientUse()
+            } else {
+                doUse()
+                useCooldown = 4
+            }
         }
     }
 

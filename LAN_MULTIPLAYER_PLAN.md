@@ -8,17 +8,35 @@ fallback by host/port/join-code, bounded `PBLN`
 protocol frames, join-code handshakes, peer status, LAN chat, source/binary
 security allowlists, Info.plist local-network privacy declarations, core
 replication batches for host world time/weather state, player state, chunk
-sections, block deltas, complete host-owned entity snapshots, and inventory
-snapshots, plus permission-gated host orchestration for remote player entities,
+sections, block deltas, complete host-owned entity snapshots, player inventory
+snapshots, and item-bearing block-entity snapshots for containers and crafting
+stations, plus permission-gated host orchestration for remote player entities,
 container/crafting/template/command/AI permissions, dimensions, deaths, respawns,
-and reconnect records. Transient LAN client worlds suppress local chunk
+openable doors/trapdoors/fence gates, and reconnect records. Crafting tables now
+use a shared `crafting` block entity for the 3x3 station grid, so the grid can
+replicate like any other item-bearing container. Transient LAN client worlds
+suppress local chunk
 generation and locally generated/saved entity authority, keep joining players at
-the host-advertised spawn height until authoritative chunks arrive, request
-center-first host chunk-section snapshots for missing visible neighborhoods, and
-purge client-only spawned entities, so mobs, drops, XP, plants, and block
-simulation are visible only when the host publishes them. Remaining release
-hardening is two-Mac installed-app soak and richer client UI for synchronized
-remote container/crafting screens.
+their last locally saved position for the same host world id/seed when available
+or at the host-advertised spawn height otherwise until authoritative chunks
+arrive, request center-first host chunk-section snapshots for missing visible
+neighborhoods, and purge client-only spawned entities, so mobs, drops, XP,
+plants, and block simulation are visible only when the host publishes them. LAN
+clients can inspect host-published container/crafting contents through read-only
+mirrored screens and can send typed host-authoritative use intents for openable
+block mechanisms.
+Remaining release hardening is two-Mac installed-app soak and richer client
+interaction UI for authoritative remote container/crafting edits.
+
+Two-Mac installed-app soak is now scripted through
+`scripts/live-lan-test.sh`. The harness launches the local `/Applications/Pebble.app`
+as a host, launches Neo's `/Applications/Pebble.app` as a title-screen Direct
+Connect client through `PEBBLE_LAN_AUTOJOIN`, builds a deterministic spawn rig
+through `PEBBLE_LAN_PROBE=host-rig`, drives the Neo client's normal
+right-click path against an oak door through `PEBBLE_LAN_PROBE=client-door`,
+and asserts from both app logs that the host accepted the remote use intent,
+the client received the door delta, and a chest item snapshot reached the
+client mirror.
 
 ## Sources
 
@@ -50,7 +68,11 @@ Initial target:
 - Join-code approval before a client can enter the world.
 - Shared chat and host-authoritative state replication for chunk sections,
   block changes, player state, complete loaded-entity snapshots, dropped-item
-  and XP payloads, and inventory snapshots.
+  and XP payloads, player inventory snapshots, and item-bearing block entities
+  such as chests, hoppers, furnaces, brewing stands, shelves, campfires, and
+  crafting-table grids.
+- Host-authoritative openable block use for non-iron doors, non-iron trapdoors,
+  and fence gates.
 - Host-authoritative permission gates for crafting, containers, commands,
   object-template copy/place/undo, AI requests, creative privileges, dimension
   changes, deaths, respawns, and reconnect records layered on top of the
@@ -102,8 +124,8 @@ Added core-only networking model files:
   log, permission-gated host block/container/crafting/template/command/AI
   validation, object-template copy/place/undo execution, chunk-section
   snapshot encode/apply helpers, world-state snapshots, entity snapshots, player
-  inventory snapshots, client-side replicated mirror state, and bounded apply
-  reports.
+  inventory snapshots, item-bearing block-entity snapshots, client-side
+  replicated mirror state, and bounded apply reports.
 - `Sources/PebbleCore/Net/LANGameplayOrchestration.swift`: transient remote
   player entities, remote-player apply/remove helpers, remote player yaw
   conversion, transient LAN client entity-authority cleanup, permission result
@@ -112,8 +134,9 @@ Added core-only networking model files:
 
 Remaining gameplay hardening:
 
-- Client UI state replication for simultaneous remote container/crafting screens
-  beyond the current typed-intent authorization layer.
+- Client interaction UI for simultaneous remote container/crafting edits beyond
+  the current host-published item snapshots, read-only mirrored screens, and
+  typed-intent authorization layer.
 - Two-Mac installed-app soak covering template placement, death/respawn, and
   reconnect persistence against real Network.framework connections.
 
@@ -198,6 +221,8 @@ Hard caps:
 - Maximum entity snapshots per replication batch: 512.
 - Maximum player/inventory snapshots per batch: 9.
 - Maximum replicated inventory slots per player: 64.
+- Maximum block-entity snapshots per replication batch: 64.
+- Maximum replicated block-entity slots per snapshot: 64.
 
 Every decoder must fail closed before allocation if lengths exceed caps.
 
@@ -217,7 +242,7 @@ Clients may not send:
 
 - Raw block arrays.
 - Entity positions as truth.
-- Inventory contents as truth.
+- Inventory or container contents as truth.
 - Template records to store directly.
 - Save data.
 - Arbitrary command execution.
@@ -233,8 +258,9 @@ Implemented host replication tick:
 1. App frame advances the single host `GameCore` on the main thread.
 2. `LANTransport` snapshots local host player state, accepted peer states,
    nearby chunk sections, a complete capped loaded-entity listing, host
-   inventory, and drained block changes. Direct chunk-request replies are
-   center-first and include current-height plus surface sections across the
+   inventory, item-bearing block entities, and drained block changes. Direct
+   chunk-request replies are center-first and include current-height plus
+   surface sections and a small block-entity item snapshot set across the
    requested visible neighborhood, not full-height chunks for every neighbor.
 3. The host sends a `LANReplicationBatch` at a bounded cadence, with larger
    full snapshots every few seconds and delta batches between them.
@@ -246,12 +272,13 @@ Implemented client replication apply:
 
 1. Client decodes `LANReplicationBatch` frames under the same 1 MiB PBLN cap.
 2. The client mirror stores world summary, players, chunk sections, block cells,
-   entity snapshots, and inventory snapshots, dropping malformed sections,
-   invalid cells, unknown entity types, invalid dropped-item ids/counts, and
-   invalid XP payloads.
-3. If the local game has a loaded matching world, chunk sections and block
-   deltas apply to `World` on the main thread and notify dirty-section hooks for
-   remeshing.
+   entity snapshots, inventory snapshots, and block-entity item snapshots,
+   dropping malformed sections, invalid cells, unknown entity types, invalid
+   dropped-item ids/counts, invalid block-entity slots/items, and invalid XP
+   payloads.
+3. If the local game has a loaded matching world, chunk sections, block deltas,
+   and compatible block-entity item snapshots apply to `World` on the main
+   thread; chunk-section application notifies dirty-section hooks for remeshing.
 4. Complete entity batches materialize non-persistent client-side mirror
    entities for dropped items, XP orbs, and registered entity types, update them
    from host snapshots, skip their normal local simulation ticks, and remove
@@ -386,6 +413,12 @@ Manual installed-app smoke:
   fight a mob, disconnect/reconnect, and verify host save persistence.
 - Repeat with Local Network permission denied, host canceled, wrong join code,
   version mismatch, host quit, client quit, and Wi-Fi temporarily disabled.
+- The local Neo client helper is `scripts/deploy-lan-client.sh`. It defaults to
+  `neo.localdomain`, runs `./pebble install` locally, copies the resulting
+  `/Applications/Pebble.app` to `/Applications/Pebble.app` on Neo over SSH, and
+  opens it there. Use `scripts/deploy-lan-client.sh --check` after enabling
+  Remote Login on Neo, and `scripts/deploy-lan-client.sh --no-build` after a
+  pipeline run that already refreshed the local installed app.
 
 Release gate:
 

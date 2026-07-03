@@ -65,6 +65,116 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(world.getBlock(2, 65, 1), stone)
     }
 
+    func testHostSessionAppliesUseBlockIntentForOpenableBlocks() {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 2.5, y: 64, z: 1.5, yaw: .pi / 2)
+
+        forceSetBlock(world, x: 2, y: 63, z: 1, cell: Int(cell(B.stone, 0)))
+        forceSetBlock(world, x: 2, y: 64, z: 1, cell: Int(cell(B.oak_door, 0)))
+        forceSetBlock(world, x: 2, y: 65, z: 1, cell: Int(cell(B.oak_door, 8)))
+        XCTAssertEqual(
+            session.applyBlockIntent(
+                LANBlockIntent(action: .useBlock, x: 2, y: 64, z: 1, face: Dir.up, selectedHotbarSlot: 0),
+                from: "peer-a",
+                to: world
+            ),
+            .applied([
+                LANBlockChange(dimension: Dim.overworld.rawValue, x: 2, y: 64, z: 1, cell: Int(cell(B.oak_door, 4))),
+            ])
+        )
+        XCTAssertEqual(world.getBlock(2, 64, 1), Int(cell(B.oak_door, 4)))
+
+        XCTAssertEqual(
+            session.applyBlockIntent(
+                LANBlockIntent(action: .useBlock, x: 2, y: 65, z: 1, face: Dir.up, selectedHotbarSlot: 0),
+                from: "peer-a",
+                to: world
+            ),
+            .applied([
+                LANBlockChange(dimension: Dim.overworld.rawValue, x: 2, y: 64, z: 1, cell: Int(cell(B.oak_door, 0))),
+            ])
+        )
+        XCTAssertEqual(world.getBlock(2, 64, 1), Int(cell(B.oak_door, 0)))
+
+        forceSetBlock(world, x: 3, y: 63, z: 1, cell: Int(cell(B.stone, 0)))
+        forceSetBlock(world, x: 3, y: 64, z: 1, cell: Int(cell(B.oak_trapdoor, 0)))
+        XCTAssertEqual(
+            session.applyBlockIntent(
+                LANBlockIntent(action: .useBlock, x: 3, y: 64, z: 1, face: Dir.up, selectedHotbarSlot: 0),
+                from: "peer-a",
+                to: world
+            ),
+            .applied([
+                LANBlockChange(dimension: Dim.overworld.rawValue, x: 3, y: 64, z: 1, cell: Int(cell(B.oak_trapdoor, 4))),
+            ])
+        )
+
+        let gate = bid("oak_fence_gate")
+        forceSetBlock(world, x: 4, y: 63, z: 1, cell: Int(cell(B.stone, 0)))
+        forceSetBlock(world, x: 4, y: 64, z: 1, cell: Int(cell(gate, 0)))
+        XCTAssertEqual(
+            session.applyBlockIntent(
+                LANBlockIntent(action: .useBlock, x: 4, y: 64, z: 1, face: Dir.up, selectedHotbarSlot: 0),
+                from: "peer-a",
+                to: world
+            ),
+            .applied([
+                LANBlockChange(dimension: Dim.overworld.rawValue, x: 4, y: 64, z: 1, cell: Int(cell(gate, 6))),
+            ])
+        )
+    }
+
+    func testHostSessionRejectsOrIgnoresUnsupportedUseBlockIntentTargets() {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+
+        forceSetBlock(world, x: 2, y: 63, z: 1, cell: Int(cell(B.stone, 0)))
+        forceSetBlock(world, x: 2, y: 64, z: 1, cell: Int(cell(B.iron_door, 0)))
+        forceSetBlock(world, x: 2, y: 65, z: 1, cell: Int(cell(B.iron_door, 8)))
+        XCTAssertEqual(
+            session.applyBlockIntent(
+                LANBlockIntent(action: .useBlock, x: 2, y: 64, z: 1, face: Dir.up, selectedHotbarSlot: 0),
+                from: "peer-a",
+                to: world
+            ),
+            .ignored("unsupported use target")
+        )
+
+        forceSetBlock(world, x: 3, y: 64, z: 1, cell: Int(cell(B.stone, 0)))
+        XCTAssertEqual(
+            session.applyBlockIntent(
+                LANBlockIntent(action: .useBlock, x: 3, y: 64, z: 1, face: Dir.up, selectedHotbarSlot: 0),
+                from: "peer-a",
+                to: world
+            ),
+            .ignored("unsupported use target")
+        )
+
+        session.setPermissions(LANPeerPermissions(canChangeDimensions: true), for: "peer-a")
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 3.5,
+            y: 64,
+            z: 1.5,
+            yaw: 0,
+            pitch: 0,
+            health: 20,
+            hunger: 20,
+            selectedHotbarSlot: 0,
+            gameMode: GameMode.survival,
+            dimension: Dim.nether.rawValue
+        ))
+        XCTAssertEqual(
+            session.applyBlockIntent(
+                LANBlockIntent(action: .useBlock, x: 3, y: 64, z: 1, face: Dir.up, selectedHotbarSlot: 0),
+                from: "peer-a",
+                to: world
+            ),
+            .rejected("target dimension unavailable")
+        )
+    }
+
     func testHostSessionRejectsOutOfReachOrInvalidPlacementCells() {
         let world = makeLoadedWorld()
         let session = LANMultiplayerHostSession()
@@ -614,7 +724,18 @@ final class LANReplicationTests: XCTestCase {
             entities: [LANEntitySnapshot(entityID: 7, type: "zombie", x: 1, y: 64, z: 1, yaw: 0, pitch: 0, health: 20, dead: false)],
             inventories: [LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 3, slots: [
                 LANInventorySlotSnapshot(slot: 0, itemID: 1, count: 64),
-            ])]
+            ])],
+            blockEntities: [
+                LANBlockEntitySnapshot(
+                    dimension: 0,
+                    x: 4,
+                    y: 64,
+                    z: 4,
+                    type: "container",
+                    slotCount: 27,
+                    slots: [LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("coal"), count: 4)]
+                ),
+            ]
         )
 
         let report = client.apply(batch)
@@ -632,6 +753,146 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(client.entities[7]?.type, "zombie")
         XCTAssertEqual(report.appliedEntitySnapshots, 1)
         XCTAssertEqual(client.inventories["peer-a"]?.slots.first?.count, 64)
+        XCTAssertEqual(report.appliedBlockEntities, 1)
+        XCTAssertEqual(client.blockEntities[LANBlockPosition(dimension: 0, x: 4, y: 64, z: 4)]?.slots.first?.count, 4)
+    }
+
+    func testBlockEntitySnapshotsReplicateContainerContentsAndClearSlots() throws {
+        let host = makeLoadedWorld()
+        let client = makeLoadedWorld()
+        let chestCell = Int(B.chest) << 4
+        _ = host.setBlock(2, 64, 2, chestCell)
+        _ = client.setBlock(2, 64, 2, chestCell)
+        let chest = makeContainerBE(2, 64, 2, 27)
+        chest.items![0] = ItemStack(iid("diamond"), 3)
+        chest.items![5] = ItemStack(iid("stick"), 1, label: "Marker")
+        host.setBlockEntity(chest)
+
+        var snapshots = makeLANBlockEntitySnapshots(in: host)
+        XCTAssertEqual(snapshots.count, 1)
+        XCTAssertEqual(snapshots[0].slotCount, 27)
+        XCTAssertEqual(snapshots[0].slots.map(\.slot), [0, 5])
+
+        var report = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 1, fullSnapshot: false, blockEntities: snapshots),
+            to: client
+        )
+        XCTAssertEqual(report.appliedBlockEntities, 1)
+        let clientChest = try XCTUnwrap(client.getBlockEntity(2, 64, 2))
+        XCTAssertEqual(clientChest.items?[0], ItemStack(iid("diamond"), 3))
+        XCTAssertEqual(clientChest.items?[5], ItemStack(iid("stick"), 1, label: "Marker"))
+
+        chest.items![0] = nil
+        chest.items![5] = nil
+        chest.items![1] = ItemStack(iid("coal"), 4)
+        snapshots = makeLANBlockEntitySnapshots(in: host)
+        report = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 2, fullSnapshot: false, blockEntities: snapshots),
+            to: client
+        )
+        XCTAssertEqual(report.appliedBlockEntities, 1)
+        let updatedChest = try XCTUnwrap(client.getBlockEntity(2, 64, 2))
+        XCTAssertTrue(updatedChest === clientChest)
+        XCTAssertNil(updatedChest.items?[0])
+        XCTAssertNil(updatedChest.items?[5])
+        XCTAssertEqual(updatedChest.items?[1], ItemStack(iid("coal"), 4))
+    }
+
+    func testCraftingTableBlockEntitySnapshotsReplicateSharedGrid() throws {
+        let host = makeLoadedWorld()
+        let client = makeLoadedWorld()
+        let tableCell = Int(B.crafting_table) << 4
+        _ = host.setBlock(3, 64, 2, tableCell)
+        _ = client.setBlock(3, 64, 2, tableCell)
+        let table = makeCraftingTableBE(3, 64, 2)
+        table.items![0] = ItemStack(iid("oak_planks"), 1)
+        table.items![1] = ItemStack(iid("oak_planks"), 1)
+        host.setBlockEntity(table)
+
+        let snapshots = makeLANBlockEntitySnapshots(in: host)
+        XCTAssertEqual(snapshots.first?.type, "crafting")
+        XCTAssertEqual(snapshots.first?.slotCount, 9)
+
+        let report = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 3, fullSnapshot: false, blockEntities: snapshots),
+            to: client
+        )
+        XCTAssertEqual(report.appliedBlockEntities, 1)
+        let clientTable = try XCTUnwrap(client.getBlockEntity(3, 64, 2))
+        XCTAssertEqual(clientTable.type, "crafting")
+        XCTAssertEqual(clientTable.items?.count, 9)
+        XCTAssertEqual(clientTable.items?[0], ItemStack(iid("oak_planks"), 1))
+        XCTAssertEqual(clientTable.items?[1], ItemStack(iid("oak_planks"), 1))
+    }
+
+    func testBlockEntitySnapshotsPrioritizeContainersNearPlayers() throws {
+        let world = makeLoadedWorld()
+        _ = world.setBlock(1, 64, 1, Int(B.chest) << 4)
+        _ = world.setBlock(12, 64, 12, Int(B.chest) << 4)
+        let nearOrigin = makeContainerBE(1, 64, 1, 27)
+        nearOrigin.items![0] = ItemStack(iid("stick"), 1)
+        let nearPlayer = makeContainerBE(12, 64, 12, 27)
+        nearPlayer.items![0] = ItemStack(iid("diamond"), 1)
+        world.setBlockEntity(nearOrigin)
+        world.setBlockEntity(nearPlayer)
+
+        let snapshots = makeLANBlockEntitySnapshots(
+            in: world,
+            prioritizedAround: [(x: 12.5, z: 12.5)],
+            maxCount: 1
+        )
+
+        let snapshot = try XCTUnwrap(snapshots.first)
+        XCTAssertEqual(snapshot.x, 12)
+        XCTAssertEqual(snapshot.z, 12)
+        XCTAssertEqual(snapshot.slots.first?.itemID, iid("diamond"))
+    }
+
+    func testBlockEntitySnapshotValidationRejectsBadSlotsAndWrongBlocks() {
+        let world = makeLoadedWorld()
+        _ = world.setBlock(2, 64, 2, Int(B.stone) << 4)
+        _ = world.setBlock(3, 64, 2, Int(B.chest) << 4)
+
+        let wrongBlock = LANBlockEntitySnapshot(
+            dimension: Dim.overworld.rawValue,
+            x: 2,
+            y: 64,
+            z: 2,
+            type: "container",
+            slotCount: 27,
+            slots: [LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("coal"), count: 1)]
+        )
+        let invalidItem = LANBlockEntitySnapshot(
+            dimension: Dim.overworld.rawValue,
+            x: 3,
+            y: 64,
+            z: 2,
+            type: "container",
+            slotCount: 27,
+            slots: [LANBlockEntitySlotSnapshot(slot: 0, itemID: itemDefs.count + 100, count: 1)]
+        )
+        let duplicateSlot = LANBlockEntitySnapshot(
+            dimension: Dim.overworld.rawValue,
+            x: 3,
+            y: 64,
+            z: 2,
+            type: "container",
+            slotCount: 27,
+            slots: [
+                LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("coal"), count: 1),
+                LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("stick"), count: 1),
+            ]
+        )
+
+        let report = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 4, fullSnapshot: false, blockEntities: [wrongBlock, invalidItem, duplicateSlot]),
+            to: world
+        )
+
+        XCTAssertEqual(report.appliedBlockEntities, 0)
+        XCTAssertEqual(report.ignoredInvalidBlockEntities, 3)
+        XCTAssertNil(world.getBlockEntity(2, 64, 2))
+        XCTAssertNil(world.getBlockEntity(3, 64, 2))
     }
 
     func testWorldStateSnapshotAppliesTimeWeatherAndDifficulty() {
@@ -1009,6 +1270,33 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertTrue(batch.entities.contains { $0.entityID == item.id && $0.dead })
     }
 
+    func testHostSessionMakeBatchCarriesProvidedBlockEntitySnapshots() throws {
+        let hostWorld = makeLoadedWorld()
+        _ = hostWorld.setBlock(2, 64, 2, Int(B.barrel) << 4)
+        let barrel = makeContainerBE(2, 64, 2, 27)
+        barrel.items![0] = ItemStack(iid("coal"), 6)
+        hostWorld.setBlockEntity(barrel)
+        let blockEntitySnapshots = makeLANBlockEntitySnapshots(in: hostWorld)
+
+        let batch = LANMultiplayerHostSession().makeBatch(
+            tick: 13,
+            fullSnapshot: false,
+            worldSummary: nil,
+            worldState: nil,
+            localPlayer: nil,
+            chunkSections: [],
+            entitySnapshots: [],
+            inventorySnapshots: [],
+            blockEntitySnapshots: blockEntitySnapshots
+        )
+
+        let snapshot = try XCTUnwrap(batch.blockEntities.first)
+        XCTAssertEqual(snapshot.type, "container")
+        XCTAssertEqual(snapshot.slots, [
+            LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("coal"), count: 6),
+        ])
+    }
+
     func testLANClientAppliesHostAuthoritativeInventorySnapshotToLocalPlayer() {
         let clientWorld = makeLoadedWorld()
         let player = Player(world: clientWorld)
@@ -1055,16 +1343,29 @@ final class LANReplicationTests: XCTestCase {
         let entities = (0..<(LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES + 10)).map {
             LANEntitySnapshot(entityID: $0, type: "zombie", x: 0, y: 64, z: 0, yaw: 0, pitch: 0, health: 20, dead: false)
         }
+        let blockEntities = (0..<(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES + 10)).map {
+            LANBlockEntitySnapshot(
+                dimension: 0,
+                x: $0,
+                y: 64,
+                z: 0,
+                type: "container",
+                slotCount: 27,
+                slots: [LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("coal"), count: 1)]
+            )
+        }
 
         let batch = LANReplicationBatch(
             tick: 1,
             fullSnapshot: false,
             blockChanges: changes,
-            entities: entities
+            entities: entities,
+            blockEntities: blockEntities
         )
 
         XCTAssertEqual(batch.blockChanges.count, LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES)
         XCTAssertEqual(batch.entities.count, LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES)
+        XCTAssertEqual(batch.blockEntities.count, LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES)
         XCTAssertTrue(batch.isWithinReplicationCaps)
     }
 
@@ -1081,6 +1382,41 @@ final class LANReplicationTests: XCTestCase {
             tick: 1,
             fullSnapshot: true,
             chunkSections: Array(repeating: section, count: LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS)
+        )
+
+        let encoded = try LANMultiplayerFrameCodec.encode(.replicationBatch(batch))
+
+        XCTAssertLessThanOrEqual(encoded.count, LANMultiplayerFrameCodec.headerByteCount + LAN_MULTIPLAYER_MAX_FRAME_BYTES)
+    }
+
+    func testInitialSnapshotChunkSectionsAndBlockEntitiesFitFrameCap() throws {
+        let section = LANChunkSectionSnapshot(
+            dimension: 0,
+            cx: 0,
+            cz: 0,
+            sectionY: 0,
+            minY: -64,
+            cells: Array(repeating: UInt16.max, count: LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT)
+        )
+        let slots = (0..<LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITY_SLOTS).map {
+            LANBlockEntitySlotSnapshot(slot: $0, itemID: iid("stone"), count: 64)
+        }
+        let blockEntities = (0..<16).map {
+            LANBlockEntitySnapshot(
+                dimension: 0,
+                x: $0,
+                y: 64,
+                z: 0,
+                type: "container",
+                slotCount: LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITY_SLOTS,
+                slots: slots
+            )
+        }
+        let batch = LANReplicationBatch(
+            tick: 1,
+            fullSnapshot: true,
+            chunkSections: Array(repeating: section, count: LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS),
+            blockEntities: blockEntities
         )
 
         let encoded = try LANMultiplayerFrameCodec.encode(.replicationBatch(batch))
@@ -1122,6 +1458,40 @@ final class LANReplicationTests: XCTestCase {
 
         XCTAssertEqual(snapshots.count, world.info.height / SECTION_H)
         XCTAssertTrue(snapshots.allSatisfy { $0.cx == 0 && $0.cz == 0 })
+    }
+
+    private func makeAcceptedHostSession(
+        x: Double = 2.5,
+        y: Double = 64,
+        z: Double = 1.5,
+        yaw: Double = 0,
+        dimension: Int = Dim.overworld.rawValue
+    ) -> LANMultiplayerHostSession {
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex")
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: x,
+            y: y,
+            z: z,
+            yaw: yaw,
+            pitch: 0,
+            health: 20,
+            hunger: 20,
+            selectedHotbarSlot: 0,
+            gameMode: GameMode.survival,
+            dimension: dimension
+        ))
+        return session
+    }
+
+    private func forceSetBlock(_ world: World, x: Int, y: Int, z: Int, cell: Int) {
+        guard let chunk = world.getChunkAt(x, z), chunk.inYRange(y) else {
+            XCTFail("test fixture missing loaded chunk at \(x),\(y),\(z)")
+            return
+        }
+        chunk.set(posMod(x, CHUNK_W), y, posMod(z, CHUNK_W), UInt16(cell))
     }
 
     private func makeLoadedWorld() -> World {

@@ -130,6 +130,7 @@ class Screen {
     var sliders: [Slider] = []
     var fields: [TextField] = []
     var slots: [SlotDef] = []
+    var readOnlySlots = false
 
     func initScreen(_ ui: UIManager, _ game: GameCore) {}
     func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {}
@@ -149,6 +150,7 @@ class Screen {
             return true
         }
         if let slot = slotAt(mx, my) {
+            if readOnlySlots { return true }
             ui.handleSlotClick(game, self, slot, btn, shift: ui.shiftDown)
             return true
         }
