@@ -684,6 +684,11 @@ func heldUseDurationTicks(_ def: ItemDef) -> Int {
     def.food?.fast == true ? 17 : 32
 }
 
+private func canUseFood(_ player: Player, _ food: FoodDef, allowCreativeFullUse: Bool) -> Bool {
+    player.health < player.maxHealth || player.hunger < 20 || food.alwaysEat ||
+        (allowCreativeFullUse && player.gameMode == GameMode.creative)
+}
+
 public func useItem(_ ctx: InteractCtx, _ hit: RaycastHit?) -> Bool {
     let world = ctx.world, player = ctx.player
     guard let held = player.mainHand else { return false }
@@ -702,7 +707,7 @@ public func useItem(_ ctx: InteractCtx, _ hit: RaycastHit?) -> Bool {
 
     // food → start eating
     if let food = def.food {
-        if player.hunger < 20 || food.alwaysEat || player.gameMode == GameMode.creative {
+        if canUseFood(player, food, allowCreativeFullUse: true) {
             player.beginUsingMainHand()
             return true
         }
@@ -1326,6 +1331,7 @@ public func finishUsingItem(_ ctx: InteractCtx) {
     }
     let def = itemDef(held.id)
     if let food = def.food {
+        player.heal(Double(food.hunger))
         player.feed(food.hunger, food.saturation)
         for e in food.effects {
             if e.chance == 0 || gameRng.nextFloat() < e.chance {
@@ -1381,6 +1387,19 @@ public func releaseUsingItem(_ ctx: InteractCtx) {
         }
     }
     player.cancelUsingItem()
+}
+
+@discardableResult
+public func consumeSelectedFoodNow(_ ctx: InteractCtx) -> Bool {
+    let player = ctx.player
+    guard let held = player.mainHand else { return false }
+    let def = itemDef(held.id)
+    guard let food = def.food,
+          canUseFood(player, food, allowCreativeFullUse: false)
+    else { return false }
+    player.beginUsingMainHand()
+    finishUsingItem(ctx)
+    return true
 }
 
 // =============================================================================

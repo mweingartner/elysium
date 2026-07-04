@@ -1817,6 +1817,7 @@ final class CreativeScreen: ContainerScreen {
     var scroll = 0
     let search = TextField(0, 0, 162, 14, "Search")
     var filtered: [Int] = []
+    private weak var creativeCheckbox: CheckBox?
 
     override init() {
         super.init()
@@ -1853,6 +1854,15 @@ final class CreativeScreen: ContainerScreen {
         search.w = Double(CREATIVE_GRID_COLUMNS) * CREATIVE_SLOT_SIZE
         search.h = 14
         fields.append(search)
+        let cb = CheckBox(panelX + panelW - 90, panelY + 4, 82, 18, "Creative", isChecked: { [weak game] in
+            game?.player.gameMode == GameMode.creative
+        }, { [weak ui, weak game] in
+            guard let ui, let game else { return }
+            game.player.setGameMode(GameMode.survival)
+            ui.replace(InventoryScreen(), game)
+        })
+        creativeCheckbox = cb
+        buttons.append(cb)
         playerSlots = []
         let p = game.player!
         for col in 0..<9 {
@@ -1882,6 +1892,10 @@ final class CreativeScreen: ContainerScreen {
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         ui.drawDarkBg(0.55)
         let cv = ui.cv
+        if let cb = creativeCheckbox {
+            cb.x = min(panelX + panelW - cb.w - 8, max(4, ui.width - cb.w - 4))
+            cb.y = panelY + 4
+        }
         for i in 0..<CREATIVE_TABS.count {
             let (tx, ty, tw, th) = tabRect(i)
             cv.setFill(i == tab ? "#c6c6c6" : "#8a8a8a")

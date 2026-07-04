@@ -16,6 +16,13 @@ final class FoodUseTests: XCTestCase {
         return (world, player)
     }
 
+    private func makeTempDB(_ name: String = UUID().uuidString) throws -> SaveDB {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pebble-food-tests-\(name)")
+        try? FileManager.default.removeItem(at: dir)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return SaveDB(databaseURL: dir.appendingPathComponent("pebble.db"), migrateLegacy: false)
+    }
+
     func testCookedChickenEatsFromSelectedHotbarSlot() {
         let (world, player) = makePlayer()
         var advancements: [String] = []
@@ -33,11 +40,68 @@ final class FoodUseTests: XCTestCase {
         finishUsingItem(ctx)
 
         XCTAssertFalse(player.usingItem)
+        XCTAssertEqual(player.health, 20, accuracy: 0.000_001)
         XCTAssertEqual(player.hunger, 16)
         XCTAssertEqual(player.saturation, 7.2, accuracy: 0.000_001)
         XCTAssertEqual(player.inventory[0]?.id, iid("cooked_chicken"))
         XCTAssertEqual(player.inventory[0]?.count, 1)
         XCTAssertEqual(advancements, ["husbandry_eat"])
+    }
+
+    func testSelectedFoodPrimaryClickHealsAndConsumesOneUnit() {
+        let (world, player) = makePlayer()
+        var advancements: [String] = []
+        let ctx = InteractCtx(world: world, player: player, advance: { advancements.append($0) })
+        player.inventory[0] = stack("cooked_chicken", 2)
+        player.selectedSlot = 0
+        player.health = 12
+        player.hunger = 20
+        player.saturation = 5
+
+        XCTAssertTrue(consumeSelectedFoodNow(ctx))
+
+        XCTAssertFalse(player.usingItem)
+        XCTAssertEqual(player.health, 18, accuracy: 0.000_001)
+        XCTAssertEqual(player.hunger, 20)
+        XCTAssertEqual(player.saturation, 12.2, accuracy: 0.000_001)
+        XCTAssertEqual(player.inventory[0]?.id, iid("cooked_chicken"))
+        XCTAssertEqual(player.inventory[0]?.count, 1)
+        XCTAssertEqual(advancements, ["husbandry_eat"])
+    }
+
+    func testSelectedFoodPrimaryClickDoesNotConsumeWhenFull() {
+        let (world, player) = makePlayer()
+        let ctx = InteractCtx(world: world, player: player)
+        player.inventory[0] = stack("cooked_chicken")
+        player.selectedSlot = 0
+        player.health = 20
+        player.hunger = 20
+        player.saturation = 5
+
+        XCTAssertFalse(consumeSelectedFoodNow(ctx))
+
+        XCTAssertFalse(player.usingItem)
+        XCTAssertEqual(player.inventory[0]?.id, iid("cooked_chicken"))
+        XCTAssertEqual(player.inventory[0]?.count, 1)
+        XCTAssertEqual(player.health, 20, accuracy: 0.000_001)
+    }
+
+    func testLeftMouseDownConsumesSelectedFoodBeforeAttackOrMine() throws {
+        let game = GameCore(db: try makeTempDB())
+        game.createWorld(name: "Food Click", seedText: "99", mode: GameMode.survival, difficulty: 2)
+        game.player.inventory[0] = stack("cooked_chicken", 2)
+        game.player.selectedSlot = 0
+        game.player.health = 12
+        game.player.hunger = 20
+        game.player.saturation = 5
+
+        game.mouseDown(0)
+
+        XCTAssertFalse(game.player.usingItem)
+        XCTAssertEqual(game.player.health, 18, accuracy: 0.000_001)
+        XCTAssertEqual(game.player.inventory[0]?.id, iid("cooked_chicken"))
+        XCTAssertEqual(game.player.inventory[0]?.count, 1)
+        XCTAssertEqual(game.player.breakingProgress, -1, accuracy: 0.000_001)
     }
 
     func testOrdinaryFoodCannotBeEatenAtFullHunger() {
@@ -94,7 +158,7 @@ final class FoodUseTests: XCTestCase {
         XCTAssertEqual(player.inventory[1]?.count, 1)
     }
 
-    func testEatingToFullHungerEnablesNaturalHealthRegeneration() {
+    func testEatingFoodRestoresHealthImmediatelyAndStillFeedsPlayer() {
         let (world, player) = makePlayer()
         let ctx = InteractCtx(world: world, player: player)
         player.inventory[0] = stack("cooked_chicken")
@@ -104,11 +168,10 @@ final class FoodUseTests: XCTestCase {
 
         XCTAssertTrue(useItem(ctx, nil))
         finishUsingItem(ctx)
-        for _ in 0..<10 { player.tick() }
 
         XCTAssertEqual(player.hunger, 20)
-        XCTAssertEqual(player.health, 19, accuracy: 0.000_001)
-        XCTAssertLessThan(player.saturation, 7.2)
+        XCTAssertEqual(player.health, 20, accuracy: 0.000_001)
+        XCTAssertEqual(player.saturation, 7.2, accuracy: 0.000_001)
     }
 
     func testFoodUseDurationsMatchFoodDefinition() {

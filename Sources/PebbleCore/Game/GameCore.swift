@@ -3068,6 +3068,11 @@ public final class GameCore {
             return
         }
         if button == 0 {
+            if consumeSelectedFoodNow(interactCtx()) {
+                leftDown = false
+                player?.breakingProgress = -1
+                return
+            }
             leftDown = true
             if isLANClientWorld {
                 performLANClientAttackOrMine()
