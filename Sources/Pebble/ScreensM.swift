@@ -2178,9 +2178,10 @@ final class TemplateNameScreen: Screen {
 
 private struct TemplateBrowserEntry {
     let name: String
-    let template: ObjectTemplate?
-    let summary: ObjectTemplateSummary?
-    let error: String?
+    var template: ObjectTemplate?
+    var summary: ObjectTemplateSummary?
+    var previewBoxes: [ObjectTemplatePreviewBox]?
+    var error: String?
 }
 
 private struct TemplatePreviewFace {
@@ -2257,16 +2258,10 @@ final class TemplateBrowserScreen: Screen {
 
     private func refreshEntries(_ game: GameCore) {
         let previousName = selectedEntry?.name
+        let summaries = Dictionary(uniqueKeysWithValues: game.db.listTemplateSummaries().map { ($0.name, $0) })
         entries = game.db.listTemplates().map { name in
-            do {
-                guard let template = try game.db.getTemplate(named: name) else {
-                    return TemplateBrowserEntry(name: name, template: nil, summary: nil, error: "Missing template data")
-                }
-                return TemplateBrowserEntry(name: name, template: template,
-                                            summary: try summarizeObjectTemplate(template), error: nil)
-            } catch {
-                return TemplateBrowserEntry(name: name, template: nil, summary: nil, error: String(describing: error))
-            }
+            TemplateBrowserEntry(name: name, template: nil, summary: summaries[name], previewBoxes: nil,
+                                 error: summaries[name] == nil ? "Unable to summarize template" : nil)
         }
         if entries.isEmpty {
             selectedIndex = 0
@@ -2308,14 +2303,14 @@ final class TemplateBrowserScreen: Screen {
         placeButton?.x = l.x + deleteW + 4
         placeButton?.y = f.y + f.h - 28
         placeButton?.w = max(52, l.w - deleteW - 4)
-        placeButton?.enabled = selectedEntry?.template != nil
+        placeButton?.enabled = selectedEntry?.summary != nil
         closeButton?.x = f.x + f.w - 66
         closeButton?.y = f.y + 6
         leftButton?.x = p.x + 4
         leftButton?.y = f.y + f.h - 28
         rightButton?.x = p.x + 32
         rightButton?.y = f.y + f.h - 28
-        let hasPreview = selectedEntry?.template != nil
+        let hasPreview = selectedEntry?.summary != nil
         leftButton?.enabled = hasPreview
         rightButton?.enabled = hasPreview
     }
@@ -2324,11 +2319,36 @@ final class TemplateBrowserScreen: Screen {
         entries.indices.contains(selectedIndex) ? entries[selectedIndex] : nil
     }
 
+    private func ensureSelectedTemplateLoaded(_ game: GameCore) {
+        guard entries.indices.contains(selectedIndex),
+              entries[selectedIndex].template == nil,
+              entries[selectedIndex].summary != nil else { return }
+        do {
+            guard let template = try game.db.getTemplate(named: entries[selectedIndex].name) else {
+                entries[selectedIndex].error = "Missing template data"
+                entries[selectedIndex].summary = nil
+                return
+            }
+            entries[selectedIndex].template = template
+            entries[selectedIndex].previewBoxes = try objectTemplatePreviewBoxes(for: template, maxBoxes: TEMPLATE_PREVIEW_MAX_BLOCKS)
+            if entries[selectedIndex].summary == nil {
+                entries[selectedIndex].summary = try summarizeObjectTemplate(template)
+            }
+            entries[selectedIndex].error = nil
+        } catch {
+            entries[selectedIndex].template = nil
+            entries[selectedIndex].previewBoxes = nil
+            entries[selectedIndex].summary = nil
+            entries[selectedIndex].error = String(describing: error)
+        }
+    }
+
     private func maxScroll(_ visibleRows: Int) -> Int {
         max(0, entries.count - max(1, visibleRows))
     }
 
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
+        ensureSelectedTemplateLoaded(game)
         layoutButtons(ui)
         let f = frame(ui)
         let l = listRect(ui)
@@ -2414,8 +2434,8 @@ final class TemplateBrowserScreen: Screen {
         cv.fillRect(modelRect.x, modelRect.y, modelRect.w, modelRect.h)
         cv.setStroke("#3f4654")
         cv.strokeRect(modelRect.x, modelRect.y, modelRect.w, modelRect.h)
-        if let template = entry.template {
-            drawTemplatePreview(ui, template, rect: modelRect)
+        if let template = entry.template, let boxes = entry.previewBoxes {
+            drawTemplatePreview(ui, template, boxes: boxes, rect: modelRect)
         } else {
             cv.drawTextCentered("No preview", modelRect.x + modelRect.w / 2, modelRect.y + modelRect.h / 2 - 4, 1, "#a8a8a8", shadow: false)
         }
@@ -2458,6 +2478,7 @@ final class TemplateBrowserScreen: Screen {
     }
 
     private func placeSelected(_ ui: UIManager, _ game: GameCore) {
+        ensureSelectedTemplateLoaded(game)
         guard let entry = selectedEntry else {
             game.host?.showActionBar("Select a saved template to place", 60)
             return
@@ -2487,9 +2508,9 @@ final class TemplateBrowserScreen: Screen {
     }
 
     private func drawTemplatePreview(_ ui: UIManager, _ template: ObjectTemplate,
+                                     boxes: [ObjectTemplatePreviewBox],
                                      rect: (x: Double, y: Double, w: Double, h: Double)) {
         let cv = ui.cv
-        let boxes = (try? objectTemplatePreviewBoxes(for: template, maxBoxes: TEMPLATE_PREVIEW_MAX_BLOCKS)) ?? []
         let sx = max(1.0, Double(template.sizeX))
         let sy = max(1.0, Double(template.sizeY))
         let sz = max(1.0, Double(template.sizeZ))

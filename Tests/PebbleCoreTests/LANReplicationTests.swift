@@ -399,6 +399,62 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(world.getBlock(1, 64, 1), 0)
     }
 
+    func testHostSessionLargeTemplatePlacementReplicatesDirtyChunkSectionsInsteadOfBlockDeltaOverflow() {
+        let world = makeLoadedWorld()
+        let client = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 0.5, y: 64, z: 0.5)
+        let stone = UInt16(Int(B.stone) << 4)
+        for z in 0..<16 {
+            for x in 0..<16 {
+                forceSetBlock(world, x: x, y: 63, z: z, cell: Int(stone))
+            }
+        }
+        var blocks: [TemplateBlock] = []
+        blocks.reserveCapacity(16 * 17 * 16)
+        for y in 0..<17 {
+            for z in 0..<16 {
+                for x in 0..<16 {
+                    blocks.append(TemplateBlock(dx: x, dy: y, dz: z, cell: stone))
+                }
+            }
+        }
+        let template = ObjectTemplate(
+            name: "Large LAN",
+            anchorX: 0,
+            anchorY: 0,
+            anchorZ: 0,
+            sizeX: 16,
+            sizeY: 17,
+            sizeZ: 16,
+            blocks: blocks)
+        var saved = ["Large LAN": template]
+
+        let placed = session.applyTemplateIntent(
+            LANTemplateIntent(action: .placeTemplate, templateName: "Large LAN", x: 0, y: 64, z: 0, rotation: 0),
+            from: "peer-a",
+            world: world,
+            loadTemplate: { saved[$0] },
+            saveTemplate: { saved[$0.name] = $0; return true }
+        )
+
+        XCTAssertEqual(placed, .placed(name: "Large LAN", blocks: 4_352, blockEntities: 0, cleared: 0, filled: 0))
+        XCTAssertTrue(session.pendingBlockChanges().isEmpty)
+        let snapshots = session.drainDirtyChunkSectionSnapshots(in: world)
+        let positions = Set(snapshots.map {
+            LANChunkSectionPosition(dimension: $0.dimension, cx: $0.cx, cz: $0.cz, sectionY: $0.sectionY)
+        })
+        XCTAssertEqual(positions, [
+            LANChunkSectionPosition(dimension: Dim.overworld.rawValue, cx: 0, cz: 0, sectionY: (64 - world.info.minY) >> 4),
+            LANChunkSectionPosition(dimension: Dim.overworld.rawValue, cx: 0, cz: 0, sectionY: (80 - world.info.minY) >> 4),
+        ])
+        for snapshot in snapshots {
+            XCTAssertTrue(applyLANChunkSectionSnapshot(snapshot, to: client))
+        }
+        XCTAssertEqual(client.getBlock(0, 64, 0), Int(stone))
+        XCTAssertEqual(client.getBlock(15, 79, 15), Int(stone))
+        XCTAssertEqual(client.getBlock(0, 80, 0), Int(stone))
+    }
+
     func testHostSessionTemplateIntentRejectsOutOfReachTargets() {
         let world = makeLoadedWorld()
         let session = LANMultiplayerHostSession()

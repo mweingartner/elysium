@@ -184,8 +184,10 @@ public final class LANReplicationChangeLog {
         let position = LANBlockPosition(dimension: change.dimension, x: change.x, y: change.y, z: change.z)
         if changesByPosition[position] == nil {
             if positionsInOrder.count >= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES {
-                let removed = positionsInOrder.removeFirst()
-                changesByPosition.removeValue(forKey: removed)
+                let removeCount = max(1, LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES / 4)
+                let removed = positionsInOrder.prefix(removeCount)
+                for position in removed { changesByPosition.removeValue(forKey: position) }
+                positionsInOrder.removeFirst(min(removeCount, positionsInOrder.count))
             }
             positionsInOrder.append(position)
         }
@@ -244,6 +246,8 @@ public final class LANMultiplayerHostSession {
     private var pendingDeathDrops: [String: PendingDeathDrop] = [:]
     private var dirtyBlockEntityPositions: [LANBlockPosition] = []
     private var dirtyBlockEntitySet: Set<LANBlockPosition> = []
+    private var dirtyChunkSectionPositions: [LANChunkSectionPosition] = []
+    private var dirtyChunkSectionSet: Set<LANChunkSectionPosition> = []
 
     public init() {}
 
@@ -580,14 +584,20 @@ public final class LANMultiplayerHostSession {
                     targetZ: intent.z,
                     options: TemplatePlacementOptions(prepareTerrain: true)
                 )
-                for block in template.blocks {
-                    changeLog.record(LANBlockChange(
-                        dimension: world.dim.rawValue,
-                        x: intent.x + block.dx,
-                        y: intent.y + block.dy,
-                        z: intent.z + block.dz,
-                        cell: Int(block.cell)
-                    ))
+                recordDirtyChunkSections(from: undo, in: world)
+                if template.blocks.count <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES {
+                    let originX = intent.x - template.anchorX
+                    let originY = intent.y - template.anchorY
+                    let originZ = intent.z - template.anchorZ
+                    for block in template.blocks {
+                        changeLog.record(LANBlockChange(
+                            dimension: world.dim.rawValue,
+                            x: originX + block.dx,
+                            y: originY + block.dy,
+                            z: originZ + block.dz,
+                            cell: Int(block.cell)
+                        ))
+                    }
                 }
                 if var peer = peers[playerID] {
                     peer.lastTemplateUndo = undo
@@ -608,8 +618,11 @@ public final class LANMultiplayerHostSession {
                 return .rejected("no template placement to undo")
             }
             let restored = restoreObjectTemplatePlacementUndo(undo, in: world)
-            for cell in undo.cells {
-                changeLog.record(LANBlockChange(dimension: world.dim.rawValue, x: cell.x, y: cell.y, z: cell.z, cell: cell.cell))
+            recordDirtyChunkSections(from: undo, in: world)
+            if undo.cells.count <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES {
+                for cell in undo.cells {
+                    changeLog.record(LANBlockChange(dimension: world.dim.rawValue, x: cell.x, y: cell.y, z: cell.z, cell: cell.cell))
+                }
             }
             peer.lastTemplateUndo = nil
             peers[playerID] = peer
@@ -917,6 +930,40 @@ public final class LANMultiplayerHostSession {
         for position in positions {
             recordDirtyBlockEntity(position)
         }
+    }
+
+    public func recordDirtyChunkSection(_ position: LANChunkSectionPosition) {
+        guard dirtyChunkSectionSet.insert(position).inserted else { return }
+        dirtyChunkSectionPositions.append(position)
+    }
+
+    public func recordDirtyChunkSections(from undo: TemplatePlacementUndoSnapshot, in world: World) {
+        for cell in undo.cells {
+            guard cell.y >= world.info.minY, cell.y < world.info.minY + world.info.height else { continue }
+            recordDirtyChunkSection(LANChunkSectionPosition(
+                dimension: world.dim.rawValue,
+                cx: floorDiv(cell.x, CHUNK_W),
+                cz: floorDiv(cell.z, CHUNK_W),
+                sectionY: (cell.y - world.info.minY) >> 4))
+        }
+    }
+
+    public func drainDirtyChunkSectionSnapshots(in world: World,
+                                                maxCount: Int = LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS) -> [LANChunkSectionSnapshot] {
+        let cap = max(0, min(maxCount, LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS))
+        guard cap > 0, !dirtyChunkSectionPositions.isEmpty else { return [] }
+        var out: [LANChunkSectionSnapshot] = []
+        while !dirtyChunkSectionPositions.isEmpty && out.count < cap {
+            let position = dirtyChunkSectionPositions.removeFirst()
+            dirtyChunkSectionSet.remove(position)
+            guard position.dimension == world.dim.rawValue,
+                  let chunk = world.getChunk(position.cx, position.cz),
+                  let snapshot = makeLANChunkSectionSnapshot(from: chunk, dimension: world.dim.rawValue, sectionY: position.sectionY) else {
+                continue
+            }
+            out.append(snapshot)
+        }
+        return out
     }
 
     /// Builds the restore payload sent to a reconnecting/joining peer so its client authoritatively

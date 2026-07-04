@@ -39,9 +39,9 @@ final class OllamaAgentService {
             return
         }
 
-        let savedTemplates = loadSavedTemplates(for: game)
+        let savedTemplateSummaries = loadSavedTemplateSummaries(for: game)
         let prompt = buildAIAgentPrompt(userRequest: userPrompt, world: game.world, player: player,
-                                        cursor: cursor, savedTemplates: savedTemplates)
+                                        cursor: cursor, savedTemplateSummaries: savedTemplateSummaries)
         pushChat("§7<Pebble AI> thinking with \(model)...")
 
         var request = URLRequest(url: baseURL.appendingPathComponent("api/generate"))
@@ -95,10 +95,8 @@ final class OllamaAgentService {
         }.resume()
     }
 
-    private func loadSavedTemplates(for game: GameCore) -> [ObjectTemplate] {
-        game.db.listTemplates().prefix(32).compactMap { name in
-            try? game.db.getTemplate(named: name)
-        }
+    private func loadSavedTemplateSummaries(for game: GameCore) -> [ObjectTemplateSummary] {
+        Array(game.db.listTemplateSummaries().prefix(32))
     }
 
     private func execute(action: AIAgentAction, game: GameCore, player: Player, cursor: RaycastHit?) {

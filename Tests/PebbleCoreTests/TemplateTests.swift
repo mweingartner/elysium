@@ -53,6 +53,36 @@ final class TemplateTests: XCTestCase {
         return SaveDB(databaseURL: dir.appendingPathComponent("pebble.db"), migrateLegacy: false)
     }
 
+    private func makeLargeTemplate(name: String = "Large Template",
+                                   blockCount: Int = OBJECT_TEMPLATE_MAX_BLOCKS,
+                                   sizeX: Int = OBJECT_TEMPLATE_MAX_SPAN,
+                                   sizeY: Int = 57,
+                                   sizeZ: Int = OBJECT_TEMPLATE_MAX_SPAN) -> ObjectTemplate {
+        registerCoreIfNeeded()
+        var blocks: [TemplateBlock] = []
+        blocks.reserveCapacity(blockCount)
+        let stone = UInt16(cell(B.stone))
+        var emitted = 0
+        outer: for y in 0..<sizeY {
+            for z in 0..<sizeZ {
+                for x in 0..<sizeX {
+                    blocks.append(TemplateBlock(dx: x, dy: y, dz: z, cell: stone))
+                    emitted += 1
+                    if emitted == blockCount { break outer }
+                }
+            }
+        }
+        return ObjectTemplate(
+            name: name,
+            anchorX: sizeX / 2,
+            anchorY: 0,
+            anchorZ: sizeZ / 2,
+            sizeX: sizeX,
+            sizeY: sizeY,
+            sizeZ: sizeZ,
+            blocks: blocks)
+    }
+
     func testCloneConnectedObjectExcludesUnderlyingTerrain() throws {
         let world = makeWorld()
         makeFurnishedObject(in: world)
@@ -227,6 +257,44 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual(world.getBlockId(9, 70, 8), Int(B.chest))
         XCTAssertEqual(world.getBlockId(8, 71, 8), Int(B.torch))
         try assertEmptyItems(try XCTUnwrap(world.getBlockEntity(9, 70, 8)), slotCount: 27)
+    }
+
+    func testObjectTemplatePlacementJobSlicesPlacementAndBuildsUndo() throws {
+        let world = makeWorld()
+        let stone = UInt16(cell(B.stone))
+        let template = ObjectTemplate(
+            name: "Sliced Place",
+            anchorX: 0,
+            anchorY: 0,
+            anchorZ: 0,
+            sizeX: 4,
+            sizeY: 1,
+            sizeZ: 1,
+            blocks: (0..<4).map { TemplateBlock(dx: $0, dy: 0, dz: 0, cell: stone) })
+        let job = try ObjectTemplatePlacementJob(
+            rawTemplate: template,
+            in: world,
+            targetX: 8,
+            targetY: 70,
+            targetZ: 8)
+
+        XCTAssertFalse(job.step(maxOperations: 1))
+        XCTAssertNil(job.result)
+        var iterations = 0
+        while !job.isDone {
+            _ = job.step(maxOperations: 1)
+            iterations += 1
+            XCTAssertLessThan(iterations, 32)
+        }
+
+        let result = try XCTUnwrap(job.result)
+        XCTAssertEqual(result.blocksPlaced, 4)
+        XCTAssertEqual(world.getBlock(8, 70, 8), Int(stone))
+        XCTAssertEqual(world.getBlock(11, 70, 8), Int(stone))
+        XCTAssertEqual(job.undoSnapshot.cells.count, 4)
+        XCTAssertEqual(restoreObjectTemplatePlacementUndo(job.undoSnapshot, in: world), 4)
+        XCTAssertEqual(world.getBlock(8, 70, 8), 0)
+        XCTAssertEqual(world.getBlock(11, 70, 8), 0)
     }
 
     func testRotatedObjectTemplateRotatesBlocksAnchorAndBlockEntities() throws {
@@ -462,6 +530,49 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual(summary.blockEntityCount, 1)
         XCTAssertFalse(summary.dominantBlockName.isEmpty)
         XCTAssertFalse(summary.dominantBlockDisplayName.isEmpty)
+    }
+
+    func testObjectTemplateAccepts512KBlockLimitWithBinaryEncoding() throws {
+        let template = makeLargeTemplate(blockCount: OBJECT_TEMPLATE_MAX_BLOCKS)
+
+        let encoded = try encodeObjectTemplate(template)
+        let decoded = try decodeObjectTemplate(encoded)
+        let previewBoxes = try objectTemplatePreviewBoxes(for: decoded)
+
+        XCTAssertEqual(Array(encoded.prefix(4)), [UInt8(0x50), UInt8(0x42), UInt8(0x54), UInt8(0x32)])
+        XCTAssertLessThan(encoded.count, OBJECT_TEMPLATE_MAX_BINARY_BYTES)
+        XCTAssertEqual(decoded.blocks.count, OBJECT_TEMPLATE_MAX_BLOCKS)
+        XCTAssertEqual(decoded.sizeX, OBJECT_TEMPLATE_MAX_SPAN)
+        XCTAssertEqual(decoded.sizeY, 57)
+        XCTAssertEqual(decoded.sizeZ, OBJECT_TEMPLATE_MAX_SPAN)
+        XCTAssertEqual(previewBoxes.count, OBJECT_TEMPLATE_PREVIEW_MAX_BOXES)
+    }
+
+    func testObjectTemplateRejectsAbove512KBlockLimit() {
+        let template = makeLargeTemplate(blockCount: OBJECT_TEMPLATE_MAX_BLOCKS + 1)
+
+        XCTAssertThrowsError(try encodeObjectTemplate(template)) { error in
+            XCTAssertEqual(error as? TemplateError, .objectTooLarge(OBJECT_TEMPLATE_MAX_BLOCKS + 1))
+        }
+    }
+
+    func testTemplateStoreRoundTrips512KTemplateThroughSQLiteSummaries() throws {
+        let db = tempDB()
+        let template = makeLargeTemplate(name: "Large Store", blockCount: OBJECT_TEMPLATE_MAX_BLOCKS)
+
+        XCTAssertTrue(try db.putTemplate(template))
+
+        let summary = try XCTUnwrap(db.listTemplateSummaries().first)
+        XCTAssertEqual(summary.name, "large store")
+        XCTAssertEqual(summary.blockCount, OBJECT_TEMPLATE_MAX_BLOCKS)
+        XCTAssertEqual(summary.blockEntityCount, 0)
+        XCTAssertEqual(summary.sizeX, OBJECT_TEMPLATE_MAX_SPAN)
+        XCTAssertEqual(summary.sizeY, 57)
+        XCTAssertEqual(summary.sizeZ, OBJECT_TEMPLATE_MAX_SPAN)
+
+        let loaded = try XCTUnwrap(try db.getTemplate(named: "Large Store"))
+        XCTAssertEqual(loaded.name, "large store")
+        XCTAssertEqual(loaded.blocks.count, OBJECT_TEMPLATE_MAX_BLOCKS)
     }
 
     func testReplaceObjectTemplateBlocksByWoodFamilyCategory() throws {

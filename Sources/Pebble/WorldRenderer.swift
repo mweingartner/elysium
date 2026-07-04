@@ -1535,7 +1535,7 @@ final class WorldRenderer {
                                               viewProj: simd_float4x4,
                                               camPos: SIMD3<Double>) {
         let template = session.rotatedTemplate
-        let previewBoxes = (try? objectTemplatePreviewBoxes(for: template)) ?? []
+        let previewBoxes = session.previewBoxes
         var boxes: [(Double, Double, Double, Double, Double, Double)] = []
         boxes.reserveCapacity(previewBoxes.count)
         for box in previewBoxes {

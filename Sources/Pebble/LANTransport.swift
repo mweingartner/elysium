@@ -47,11 +47,12 @@ private struct LANHostReplicationContent {
     var entitySnapshotsComplete = false
     var includeInventories = false
     var includeDirtyBlockEntities = false
+    var includeDirtyChunkSections = false
     var includeBlockEntityFill = false
     var blockEntityFillCap = 0
     var entityRadius = 160.0
 
-    static let foregroundDelta = LANHostReplicationContent(includeDirtyBlockEntities: true)
+    static let foregroundDelta = LANHostReplicationContent(includeDirtyBlockEntities: true, includeDirtyChunkSections: true)
 
     static let initialSnapshot = LANHostReplicationContent(
         includeWorldSummary: true,
@@ -60,6 +61,7 @@ private struct LANHostReplicationContent {
         entitySnapshotsComplete: true,
         includeInventories: true,
         includeDirtyBlockEntities: true,
+        includeDirtyChunkSections: true,
         includeBlockEntityFill: true,
         blockEntityFillCap: 16
     )
@@ -72,6 +74,7 @@ private struct LANHostReplicationContent {
             entitySnapshotsComplete: selection.entitySnapshotsComplete,
             includeInventories: selection.includeInventories,
             includeDirtyBlockEntities: false,
+            includeDirtyChunkSections: false,
             includeBlockEntityFill: selection.includeBlockEntityFill,
             blockEntityFillCap: 8
         )
@@ -257,12 +260,16 @@ final class LANMultiplayerManager {
             guard let self else { return }
             _ = self.hostReplicationSession.recordBlockChange(dimension: world.dim.rawValue, x: x, y: y, z: z, cell: cell)
         }
+        game.onTemplatePlacementCommitted = { [weak self] world, undo in
+            self?.hostReplicationSession.recordDirtyChunkSections(from: undo, in: world)
+        }
         game.lanChunkRequestHandler = nil
         game.lanBlockIntentHandler = nil
     }
 
     private func configureClientReplicationHooks(for game: GameCore) {
         game.onWorldBlockChanged = nil
+        game.onTemplatePlacementCommitted = nil
         game.lanChunkRequestHandler = { [weak self] world, cx, cz in
             guard let self else { return false }
             let centerY = self.activeGame?.player.map { Int($0.y.rounded(.down)) }
@@ -329,6 +336,7 @@ final class LANMultiplayerManager {
 
     private func clearReplicationHooks(for game: GameCore?) {
         game?.onWorldBlockChanged = nil
+        game?.onTemplatePlacementCommitted = nil
         game?.lanChunkRequestHandler = nil
         game?.lanFullColumnRequestHandler = nil
         game?.lanBlockIntentHandler = nil
@@ -1454,7 +1462,10 @@ final class LANMultiplayerManager {
             else { continue }
             dirtyBlockEntities.append(snapshot)
         }
-        let chunks = chunkSectionsOverride ?? []
+        var chunks = chunkSectionsOverride ?? []
+        if chunkSectionsOverride == nil, content.includeDirtyChunkSections {
+            chunks.append(contentsOf: hostReplicationSession.drainDirtyChunkSectionSnapshots(in: game.world))
+        }
         let entityFocus = ([localState] + peerStates)
             .filter { $0.dimension == game.world.dim.rawValue }
             .map { (x: $0.x, z: $0.z) }
@@ -1794,7 +1805,10 @@ final class LANMultiplayerManager {
                     tick: game.world.time
                 )
                 let placedChanges = self.hostReplicationSession.drainBlockChanges()
-                let batch = LANReplicationBatch(tick: game.world.time, fullSnapshot: false, blockChanges: placedChanges)
+                let placedSections = self.hostReplicationSession.drainDirtyChunkSectionSnapshots(in: game.world)
+                let batch = LANReplicationBatch(tick: game.world.time, fullSnapshot: false,
+                                                blockChanges: placedChanges,
+                                                chunkSections: placedSections)
                 self.queue.async { [weak self] in
                     self?.broadcastHostReplicationBatch(batch, drainedBlockChanges: placedChanges)
                     self?.sendGameplayEvent(event, to: peerID)
@@ -1802,7 +1816,10 @@ final class LANMultiplayerManager {
             case .undone(let name, let restored):
                 let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "undid \(name) (\(restored) cells)", tick: game.world.time)
                 let undoneChanges = self.hostReplicationSession.drainBlockChanges()
-                let batch = LANReplicationBatch(tick: game.world.time, fullSnapshot: false, blockChanges: undoneChanges)
+                let undoneSections = self.hostReplicationSession.drainDirtyChunkSectionSnapshots(in: game.world)
+                let batch = LANReplicationBatch(tick: game.world.time, fullSnapshot: false,
+                                                blockChanges: undoneChanges,
+                                                chunkSections: undoneSections)
                 self.queue.async { [weak self] in
                     self?.broadcastHostReplicationBatch(batch, drainedBlockChanges: undoneChanges)
                     self?.sendGameplayEvent(event, to: peerID)

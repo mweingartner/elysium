@@ -241,6 +241,7 @@ public final class GameCore {
     public var expandedMapCenterX = 0.0
     public var expandedMapCenterZ = 0.0
     public var onWorldBlockChanged: ((World, Int, Int, Int, Int) -> Void)?
+    public var onTemplatePlacementCommitted: ((World, TemplatePlacementUndoSnapshot) -> Void)?
     public var lanChunkRequestHandler: ((World, Int, Int) -> Bool)?
     /// full-column (radius 0, all sections) request — used by the background completion pass,
     /// which cannot express "whole column" through `lanChunkRequestHandler`'s visible-band request.
@@ -313,6 +314,8 @@ public final class GameCore {
     public var lastCursorHit: RaycastHit?
     public private(set) var templatePlacement: TemplatePlacementSession?
     public private(set) var lastTemplatePlacementUndo: TemplatePlacementUndoSnapshot?
+    private var templatePlacementJob: ObjectTemplatePlacementJob?
+    private var templatePlacementProgressTick = 0
     public var perspective = 0          // 0 first, 1 back, 2 front
     private var sprintHeld = false
     private var lastForwardPress = 0.0
@@ -656,6 +659,9 @@ public final class GameCore {
 
         inWorld = true
         deathScreenShown = false
+        templatePlacement = nil
+        templatePlacementJob = nil
+        templatePlacementProgressTick = 0
         ticksSinceSave = 0
         host?.closeAllScreens()
         host?.showActionBar("§e\(rec.name)§r — seed \(rec.seed)", 60)
@@ -1766,6 +1772,35 @@ public final class GameCore {
         }
     }
 
+    @discardableResult
+    private func tickTemplatePlacementJob() -> Bool {
+        guard let job = templatePlacementJob else { return false }
+        templatePlacementProgressTick += 1
+        _ = job.step(maxOperations: 12_000)
+        let progress = job.progress
+        if job.isDone, let result = job.result {
+            let undo = job.undoSnapshot
+            lastTemplatePlacementUndo = undo
+            templatePlacementJob = nil
+            templatePlacementProgressTick = 0
+            leftDown = false
+            rightDown = false
+            player?.breakingProgress = -1
+            targetedBlock = nil
+            lastCursorHit = nil
+            onTemplatePlacementCommitted?(world, undo)
+            var details = "\(result.blocksPlaced) blocks, \(result.blockEntitiesPlaced) block entities"
+            if result.blocksCleared > 0 || result.supportBlocksFilled > 0 {
+                details += ", cleared \(result.blocksCleared), filled \(result.supportBlocksFilled)"
+            }
+            host?.pushChat("§7Placed object \"\(progress.templateName)\" - \(details)")
+            host?.showActionBar("Placed \"\(progress.templateName)\"", 60)
+        } else if templatePlacementProgressTick % 10 == 1 {
+            host?.showActionBar("Placing \"\(progress.templateName)\" \(progress.percent)% - \(progress.phase)", 25)
+        }
+        return true
+    }
+
     // ===========================================================================
     // Tick
     // ===========================================================================
@@ -1778,6 +1813,7 @@ public final class GameCore {
 
         if isLANClientWorld { lanClientTickCounter += 1 }
         streamChunks()
+        if tickTemplatePlacementJob() { return }
         if isLANClientWorld {
             _ = removeLANClientNonAuthoritativeEntities(from: w, localPlayer: p)
         }
@@ -2989,44 +3025,41 @@ public final class GameCore {
 
     public func templatePlacementTarget() -> TemplatePlacementTarget? {
         guard let session = templatePlacement, let p = player else { return nil }
-        return try? objectTemplatePlacementTarget(
-            for: session.rotatedTemplate,
+        return objectTemplatePlacementTargetForValidatedTemplate(
+            session.rotatedTemplate,
             eyeX: p.x, eyeY: p.eyeY(), eyeZ: p.z,
             yaw: p.yaw, pitch: p.pitch)
     }
 
     @discardableResult
     public func commitTemplatePlacement() throws -> TemplatePlacementResult? {
+        guard templatePlacementJob == nil else { return nil }
         guard let session = templatePlacement else { return nil }
         guard let target = templatePlacementTarget() else { throw TemplateError.missingTarget }
-        let undo = try objectTemplatePlacementUndoSnapshot(for: session.rotatedTemplate, in: world,
-                                                           targetX: target.targetX,
-                                                           targetY: target.targetY,
-                                                           targetZ: target.targetZ,
-                                                           options: TemplatePlacementOptions(prepareTerrain: true))
-        let result = try placeObjectTemplate(session.rotatedTemplate, in: world,
-                                             targetX: target.targetX,
-                                             targetY: target.targetY,
-                                             targetZ: target.targetZ,
-                                             options: TemplatePlacementOptions(prepareTerrain: true))
-        lastTemplatePlacementUndo = undo
+        let job = try ObjectTemplatePlacementJob(rawTemplate: session.rotatedTemplate, in: world,
+                                                 targetX: target.targetX,
+                                                 targetY: target.targetY,
+                                                 targetZ: target.targetZ,
+                                                 options: TemplatePlacementOptions(prepareTerrain: true))
+        templatePlacementJob = job
+        templatePlacementProgressTick = 0
         templatePlacement = nil
         leftDown = false
         rightDown = false
         player?.breakingProgress = -1
         targetedBlock = nil
         lastCursorHit = nil
-        var details = "\(result.blocksPlaced) blocks, \(result.blockEntitiesPlaced) block entities"
-        if result.blocksCleared > 0 || result.supportBlocksFilled > 0 {
-            details += ", cleared \(result.blocksCleared), filled \(result.supportBlocksFilled)"
-        }
-        host?.pushChat("§7Placed object \"\(session.name)\" - \(details)")
-        host?.showActionBar("Placed \"\(session.name)\"", 60)
-        return result
+        let progress = job.progress
+        host?.showActionBar("Placing \"\(progress.templateName)\" 0% - \(progress.phase)", 60)
+        return nil
     }
 
     @discardableResult
     public func undoLastTemplatePlacement() -> Bool {
+        guard templatePlacementJob == nil else {
+            host?.showActionBar("Template placement is still running", 55)
+            return false
+        }
         guard let undo = lastTemplatePlacementUndo else {
             host?.showActionBar("No object placement to undo", 55)
             return false
@@ -3051,6 +3084,11 @@ public final class GameCore {
     // ===========================================================================
     public func mouseDown(_ button: Int) {
         guard inWorld, !(host?.hasScreen() ?? false) else { return }
+        if let job = templatePlacementJob {
+            let progress = job.progress
+            host?.showActionBar("Placing \"\(progress.templateName)\" \(progress.percent)% - \(progress.phase)", 25)
+            return
+        }
         if templatePlacement != nil {
             if button == 0 {
                 do {
@@ -3121,6 +3159,11 @@ public final class GameCore {
         keys.insert(code)
         let p = player!
         if code == "Escape" {
+            if let job = templatePlacementJob {
+                let progress = job.progress
+                host?.showActionBar("Placing \"\(progress.templateName)\" \(progress.percent)% - \(progress.phase)", 45)
+                return
+            }
             if templatePlacement != nil {
                 cancelTemplatePlacement()
                 return

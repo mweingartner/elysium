@@ -6,7 +6,7 @@
 //   lan_player_resume(hostWorld, json)      — local resume point for hosted LAN worlds
 //   lan_players(world, playerID, json)      — host-side per-guest LAN player records
 //   advancements(world, json)               — earned advancement ids per world
-//   templates(name, json, created)           — local cloned construction templates
+//   templates(name, json, created, data, ...) — local cloned construction templates
 // Legacy installs stored loose files under saves/; they are imported once on
 // first open and the old folder is kept as saves-legacy-backup. Chunk records
 // keep the VCK1 container (binary blocks + JSON tail); entity-only records
@@ -154,6 +154,7 @@ public final class SaveDB {
         CREATE TABLE IF NOT EXISTS templates(
             name TEXT PRIMARY KEY, json TEXT NOT NULL, created REAL NOT NULL DEFAULT 0)
         """)
+        migrateTemplateStoreSchema()
         if migrateLegacy { migrateLegacySaves() }
     }
 
@@ -196,6 +197,36 @@ public final class SaveDB {
     }
     private func columnText(_ stmt: OpaquePointer, _ idx: Int32) -> String? {
         sqlite3_column_text(stmt, idx).map { String(cString: $0) }
+    }
+    private func bindBlob(_ stmt: OpaquePointer, _ idx: Int32, _ data: Data) {
+        data.withUnsafeBytes { raw in
+            _ = sqlite3_bind_blob(stmt, idx, raw.baseAddress, Int32(raw.count), SQLITE_TRANSIENT)
+        }
+    }
+    private func columnBlob(_ stmt: OpaquePointer, _ idx: Int32) -> Data? {
+        guard let bytes = sqlite3_column_blob(stmt, idx) else { return nil }
+        return Data(bytes: bytes, count: Int(sqlite3_column_bytes(stmt, idx)))
+    }
+
+    private func tableColumns(_ table: String) -> Set<String> {
+        var out = Set<String>()
+        run("PRAGMA table_info(\(table))", row: { stmt in
+            if let name = self.columnText(stmt, 1) { out.insert(name) }
+        })
+        return out
+    }
+
+    private func migrateTemplateStoreSchema() {
+        let columns = tableColumns("templates")
+        if !columns.contains("format") { exec("ALTER TABLE templates ADD COLUMN format INTEGER NOT NULL DEFAULT 1") }
+        if !columns.contains("data") { exec("ALTER TABLE templates ADD COLUMN data BLOB") }
+        if !columns.contains("sizeX") { exec("ALTER TABLE templates ADD COLUMN sizeX INTEGER NOT NULL DEFAULT 0") }
+        if !columns.contains("sizeY") { exec("ALTER TABLE templates ADD COLUMN sizeY INTEGER NOT NULL DEFAULT 0") }
+        if !columns.contains("sizeZ") { exec("ALTER TABLE templates ADD COLUMN sizeZ INTEGER NOT NULL DEFAULT 0") }
+        if !columns.contains("blockCount") { exec("ALTER TABLE templates ADD COLUMN blockCount INTEGER NOT NULL DEFAULT 0") }
+        if !columns.contains("blockEntityCount") { exec("ALTER TABLE templates ADD COLUMN blockEntityCount INTEGER NOT NULL DEFAULT 0") }
+        if !columns.contains("dominantBlock") { exec("ALTER TABLE templates ADD COLUMN dominantBlock TEXT NOT NULL DEFAULT ''") }
+        if !columns.contains("dominantDisplay") { exec("ALTER TABLE templates ADD COLUMN dominantDisplay TEXT NOT NULL DEFAULT ''") }
     }
 
     // ---- worlds ---------------------------------------------------------------
@@ -509,13 +540,48 @@ public final class SaveDB {
         return out
     }
 
+    public func listTemplateSummaries() -> [ObjectTemplateSummary] {
+        var out: [ObjectTemplateSummary] = []
+        run("""
+            SELECT name, sizeX, sizeY, sizeZ, blockCount, blockEntityCount, dominantBlock, dominantDisplay
+            FROM templates ORDER BY name
+            """, row: { stmt in
+            guard let name = self.columnText(stmt, 0) else { return }
+            let blockCount = Int(sqlite3_column_int(stmt, 4))
+            let dominantBlock = self.columnText(stmt, 6) ?? ""
+            let dominantDisplay = self.columnText(stmt, 7) ?? ""
+            if blockCount > 0, !dominantBlock.isEmpty, !dominantDisplay.isEmpty {
+                out.append(ObjectTemplateSummary(
+                    name: name,
+                    sizeX: Int(sqlite3_column_int(stmt, 1)),
+                    sizeY: Int(sqlite3_column_int(stmt, 2)),
+                    sizeZ: Int(sqlite3_column_int(stmt, 3)),
+                    blockCount: blockCount,
+                    blockEntityCount: Int(sqlite3_column_int(stmt, 5)),
+                    dominantBlockName: dominantBlock,
+                    dominantBlockDisplayName: dominantDisplay))
+            } else if let template = try? self.getTemplate(named: name),
+                      let summary = try? summarizeObjectTemplate(template) {
+                out.append(summary)
+            }
+        })
+        return out
+    }
+
     public func getTemplate(named rawName: String) throws -> ObjectTemplate? {
         guard let name = normalizedTemplateName(rawName) else { throw TemplateError.invalidName }
+        var format = 1
+        var blob: Data?
         var json: String?
-        run("SELECT json FROM templates WHERE name=?", bind: { self.bindText($0, 1, name) }) { stmt in
-            json = self.columnText(stmt, 0)
+        run("SELECT format, data, json FROM templates WHERE name=?", bind: { self.bindText($0, 1, name) }, row: { stmt in
+            format = Int(sqlite3_column_int(stmt, 0))
+            blob = self.columnBlob(stmt, 1)
+            json = self.columnText(stmt, 2)
+        })
+        if format >= 2, let blob, !blob.isEmpty {
+            return try decodeObjectTemplate(blob)
         }
-        guard let json else { return nil }
+        guard let json, !json.isEmpty else { return nil }
         return try decodeObjectTemplate(Data(json.utf8))
     }
 
@@ -525,13 +591,25 @@ public final class SaveDB {
         var normalized = template
         normalized.name = name
         let data = try encodeObjectTemplate(normalized)
-        guard let json = String(data: data, encoding: .utf8) else {
-            throw TemplateError.corruptTemplate("could not encode JSON")
-        }
-        return run("INSERT OR REPLACE INTO templates(name, json, created) VALUES(?,?,?)", bind: { stmt in
+        let summary = try summarizeObjectTemplate(normalized)
+        return run("""
+            INSERT OR REPLACE INTO templates(
+                name, json, created, format, data, sizeX, sizeY, sizeZ,
+                blockCount, blockEntityCount, dominantBlock, dominantDisplay)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            """, bind: { stmt in
             self.bindText(stmt, 1, name)
-            self.bindText(stmt, 2, json)
+            self.bindText(stmt, 2, "")
             sqlite3_bind_double(stmt, 3, Date().timeIntervalSince1970 * 1000)
+            sqlite3_bind_int(stmt, 4, 2)
+            self.bindBlob(stmt, 5, data)
+            sqlite3_bind_int(stmt, 6, Int32(summary.sizeX))
+            sqlite3_bind_int(stmt, 7, Int32(summary.sizeY))
+            sqlite3_bind_int(stmt, 8, Int32(summary.sizeZ))
+            sqlite3_bind_int(stmt, 9, Int32(summary.blockCount))
+            sqlite3_bind_int(stmt, 10, Int32(summary.blockEntityCount))
+            self.bindText(stmt, 11, summary.dominantBlockName)
+            self.bindText(stmt, 12, summary.dominantBlockDisplayName)
         })
     }
 

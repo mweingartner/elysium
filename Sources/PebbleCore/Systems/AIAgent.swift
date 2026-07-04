@@ -1175,7 +1175,8 @@ private func canAIAgentSpawnEntity(at target: (x: Int, y: Int, z: Int), in world
 
 public func buildAIAgentSnapshot(world: World, player: Player, cursor: RaycastHit?,
                                  nearbyRadius: Double = AIAgentNearbyRadius,
-                                 savedTemplates: [ObjectTemplate] = []) -> String {
+                                 savedTemplates: [ObjectTemplate] = [],
+                                 savedTemplateSummaries: [ObjectTemplateSummary] = []) -> String {
     var lines: [String] = []
     let dimName: String
     switch world.dim {
@@ -1200,11 +1201,17 @@ public func buildAIAgentSnapshot(world: World, player: Player, cursor: RaycastHi
     }.prefix(80).joined(separator: ", ")
     lines.append("Inventory: \(inventory.isEmpty ? "empty" : inventory)")
 
-    let templateLines = savedTemplates.prefix(32).compactMap { template -> String? in
-        guard let summary = try? summarizeObjectTemplate(template) else { return nil }
-        let palette = (try? objectTemplateBlockPalette(template, limit: 10)) ?? []
-        let paletteText = palette.map { "\($0.blockName)x\($0.count)" }.joined(separator: ", ")
-        return "template=\"\(summary.name)\" size=\(summary.sizeX)x\(summary.sizeY)x\(summary.sizeZ) blocks=\(summary.blockCount) blockEntities=\(summary.blockEntityCount) palette=\(paletteText.isEmpty ? "none" : paletteText)"
+    var templateLines = savedTemplateSummaries.prefix(32).map { summary in
+        "template=\"\(summary.name)\" size=\(summary.sizeX)x\(summary.sizeY)x\(summary.sizeZ) blocks=\(summary.blockCount) blockEntities=\(summary.blockEntityCount) palette=dominant:\(summary.dominantBlockName)"
+    }
+    if templateLines.count < 32 {
+        let known = Set(savedTemplateSummaries.map(\.name))
+        templateLines.append(contentsOf: savedTemplates.filter { !known.contains($0.name) }.prefix(32 - templateLines.count).compactMap { template -> String? in
+            guard let summary = try? summarizeObjectTemplate(template) else { return nil }
+            let palette = (try? objectTemplateBlockPalette(template, limit: 10)) ?? []
+            let paletteText = palette.map { "\($0.blockName)x\($0.count)" }.joined(separator: ", ")
+            return "template=\"\(summary.name)\" size=\(summary.sizeX)x\(summary.sizeY)x\(summary.sizeZ) blocks=\(summary.blockCount) blockEntities=\(summary.blockEntityCount) palette=\(paletteText.isEmpty ? "none" : paletteText)"
+        })
     }
     lines.append("Saved object templates: \(templateLines.isEmpty ? "none" : templateLines.joined(separator: "; "))")
 
@@ -1263,9 +1270,11 @@ public func buildAIAgentSnapshot(world: World, player: Player, cursor: RaycastHi
 
 public func buildAIAgentPrompt(userRequest: String, world: World, player: Player,
                                cursor: RaycastHit?,
-                               savedTemplates: [ObjectTemplate] = []) -> String {
+                               savedTemplates: [ObjectTemplate] = [],
+                               savedTemplateSummaries: [ObjectTemplateSummary] = []) -> String {
     let snapshot = buildAIAgentSnapshot(world: world, player: player, cursor: cursor,
-                                        savedTemplates: savedTemplates)
+                                        savedTemplates: savedTemplates,
+                                        savedTemplateSummaries: savedTemplateSummaries)
     let prompt = """
 You are Pebble's local in-game AI agent. Inspect the state below and return exactly one JSON object. Do not use markdown.
 
