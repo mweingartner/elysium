@@ -46,6 +46,7 @@ class ContainerScreen: Screen {
     /// final capture; `draw` fires a ≤5 Hz debounced capture while the screen stays open so a
     /// guest's edit reaches the host without waiting for the screen to close.
     var lanEditBE: BlockEntityData?
+    var lanEditBEs: [BlockEntityData] = []
     private var lanLastCaptureTime = 0.0
     private var lanLastCapturedFingerprint: [Int]?
     private let lanCaptureInterval = 0.2 // 5 Hz
@@ -84,17 +85,20 @@ class ContainerScreen: Screen {
     /// (slot ids/counts) of the mirrored BE actually changed since the last capture, so idle
     /// screens produce no traffic.
     private func tickLANContainerEditFlush(_ game: GameCore) {
-        guard game.isLANClientWorld, let be = lanEditBE else { return }
+        let editBEs = lanEditBEs.isEmpty ? [lanEditBE].compactMap { $0 } : lanEditBEs
+        guard game.isLANClientWorld, let be = editBEs.first else { return }
         let now = Date.timeIntervalSinceReferenceDate
         guard now - lanLastCaptureTime >= lanCaptureInterval else { return }
-        let fingerprint = (be.items ?? []).flatMap { stack -> [Int] in
-            guard let stack else { return [0, 0] }
-            return [stack.id + 1, stack.count]
+        let fingerprint = editBEs.flatMap { be -> [Int] in
+            [be.x, be.y, be.z] + (be.items ?? []).flatMap { stack -> [Int] in
+                guard let stack else { return [0, 0] }
+                return [stack.id + 1, stack.count]
+            }
         }
         guard fingerprint != lanLastCapturedFingerprint else { return }
         lanLastCaptureTime = now
         lanLastCapturedFingerprint = fingerprint
-        game.captureLANContainerEdit(be)
+        game.captureLANContainerEdit(be, additional: Array(editBEs.dropFirst()))
     }
 
     /// Final container-edit capture on close (D-C): gated inside `GameCore.gameScreenWillClose`
@@ -104,7 +108,12 @@ class ContainerScreen: Screen {
             _ = game.player?.give(cursor)
             ui.cursorStack = nil
         }
-        game.gameScreenWillClose(be: lanEditBE)
+        let editBEs = lanEditBEs.isEmpty ? [lanEditBE].compactMap { $0 } : lanEditBEs
+        if editBEs.isEmpty {
+            game.gameScreenWillClose(be: lanEditBE)
+        } else {
+            game.gameScreenWillClose(blockEntities: editBEs)
+        }
     }
 
     override func quickMove(_ game: GameCore, _ slot: SlotDef) {
@@ -1018,10 +1027,8 @@ final class ChestScreen: ContainerScreen {
         self.title = title
         let total = count + (other?.items?.count ?? 0)
         panelH = 114 + Double((total + 8) / 9) * 18
-        // D-C container-edit capture only targets the primary BE (whole-BE snapshots are keyed
-        // by a single block position); a linked large-chest `other` half is out of scope — the
-        // host's next replication pass re-syncs it from world state as usual.
         lanEditBE = be
+        lanEditBEs = [be] + [other].compactMap { $0 }
     }
     init(vehicle: Boat, _ title: String) {
         count = vehicle.chestItems.count

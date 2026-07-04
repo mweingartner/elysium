@@ -1,6 +1,6 @@
 import Foundation
 
-public let LAN_MULTIPLAYER_PROTOCOL_VERSION: UInt16 = 2
+public let LAN_MULTIPLAYER_PROTOCOL_VERSION: UInt16 = 3
 public let LAN_MULTIPLAYER_SERVICE_TYPE = "_pebble-lan._tcp"
 public let LAN_MULTIPLAYER_DEFAULT_PORT: UInt16 = 41337
 public let LAN_MULTIPLAYER_MAX_CLIENTS = 8
@@ -27,6 +27,7 @@ public let LAN_MULTIPLAYER_MAX_RLE_RUNS = LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COU
 public let LAN_MULTIPLAYER_MAX_CELLS_DATA_BYTES = LAN_MULTIPLAYER_MAX_RLE_RUNS * 4
 public let LAN_MULTIPLAYER_MAX_GRANT_ITEMS = 64
 public let LAN_MULTIPLAYER_MAX_DAMAGE_AMOUNT = 2048.0
+public let LAN_MULTIPLAYER_MAX_CONTAINER_EDIT_BLOCK_ENTITIES = 2
 
 private let LANFrameMagic: [UInt8] = [0x50, 0x42, 0x4c, 0x4e] // PBLN
 
@@ -1091,30 +1092,45 @@ public struct LANTossIntent: Codable, Equatable {
 public struct LANContainerEditIntent: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case blockEntity
+        case additionalBlockEntities
         case inventory
         case revision
         case editSeq
+        case blockEntityRevision
     }
 
     public var blockEntity: LANBlockEntitySnapshot
+    public var additionalBlockEntities: [LANBlockEntitySnapshot]
     public var inventory: LANPlayerInventorySnapshot
     public var revision: Int
     public var editSeq: Int
+    public var blockEntityRevision: Int
 
-    public init(blockEntity: LANBlockEntitySnapshot, inventory: LANPlayerInventorySnapshot, revision: Int, editSeq: Int) {
+    public init(
+        blockEntity: LANBlockEntitySnapshot,
+        additionalBlockEntities: [LANBlockEntitySnapshot] = [],
+        inventory: LANPlayerInventorySnapshot,
+        revision: Int,
+        editSeq: Int,
+        blockEntityRevision: Int = 0
+    ) {
         self.blockEntity = blockEntity
+        self.additionalBlockEntities = Array(additionalBlockEntities.prefix(max(0, LAN_MULTIPLAYER_MAX_CONTAINER_EDIT_BLOCK_ENTITIES - 1)))
         self.inventory = inventory
         self.revision = max(0, revision)
         self.editSeq = max(0, editSeq)
+        self.blockEntityRevision = max(0, blockEntityRevision)
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
             blockEntity: try c.decode(LANBlockEntitySnapshot.self, forKey: .blockEntity),
+            additionalBlockEntities: try c.decodeIfPresent([LANBlockEntitySnapshot].self, forKey: .additionalBlockEntities) ?? [],
             inventory: try c.decode(LANPlayerInventorySnapshot.self, forKey: .inventory),
             revision: try c.decodeIfPresent(Int.self, forKey: .revision) ?? 0,
-            editSeq: try c.decodeIfPresent(Int.self, forKey: .editSeq) ?? 0
+            editSeq: try c.decodeIfPresent(Int.self, forKey: .editSeq) ?? 0,
+            blockEntityRevision: try c.decodeIfPresent(Int.self, forKey: .blockEntityRevision) ?? 0
         )
     }
 }

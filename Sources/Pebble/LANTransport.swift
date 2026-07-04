@@ -38,6 +38,8 @@ private enum LANReplicationSendPriority {
     case background
 }
 
+private let LAN_MAX_SYNC_CHUNK_GENERATIONS_PER_REQUEST = 4
+
 private struct LANHostReplicationContent {
     var includeWorldSummary = false
     var includeWorldState = false
@@ -170,6 +172,7 @@ private final class LANWirePeer {
     var lastThrottleLogTime = 0.0
     /// count of sends handed to `connection.send` that have not yet completed (§7.7 backpressure).
     var inFlightSendCount = 0
+    var inFlightSendBytes = 0
 
     init(connection: NWConnection) {
         self.connection = connection
@@ -223,6 +226,7 @@ final class LANMultiplayerManager {
     private let clientConnectHandshakeTimeout = 15.0
     private let clientWaitingAbortTimeout = 10.0
     private let backpressureDeltaSkipDepth = 4
+    private let backpressureDeltaSkipBytes = LAN_MULTIPLAYER_MAX_FRAME_BYTES
     private var clientConnectDeadline: Double?
     private var clientWaitingSince: Double?
     /// every playerID this host session has accepted since `startHost` — used to persist peer
@@ -563,18 +567,21 @@ final class LANMultiplayerManager {
             guard hasAcceptedPeer, now - lastHostReplicationPublish >= hostReplicationInterval else { return }
             lastHostReplicationPublish = now
 
+            var foregroundDirtyBlockEntities: [LANBlockPosition] = []
             if let foreground = makeHostReplicationBatch(
                 game: game,
                 player: player,
                 fullSnapshot: false,
-                content: .foregroundDelta
+                content: .foregroundDelta,
+                drainedDirtyBlockEntities: &foregroundDirtyBlockEntities
             ) {
                 let drained = foreground.blockChanges
                 queue.async { [weak self] in
                     self?.broadcastHostReplicationBatch(
                         foreground,
                         drainedBlockChanges: drained,
-                        priority: .background
+                        drainedDirtyBlockEntities: foregroundDirtyBlockEntities,
+                        priority: .interactive
                     )
                 }
             }
@@ -607,14 +614,21 @@ final class LANMultiplayerManager {
             if background.includeWorldSummary {
                 lastHostWorldSummaryPublish = now
             }
+            var backgroundDirtyBlockEntities: [LANBlockPosition] = []
             guard let batch = makeHostReplicationBatch(
                 game: game,
                 player: player,
                 fullSnapshot: false,
-                content: .background(background)
+                content: .background(background),
+                drainedDirtyBlockEntities: &backgroundDirtyBlockEntities
             ) else { return }
             queue.async { [weak self] in
-                self?.broadcastHostReplicationBatch(batch, drainedBlockChanges: [], priority: .background)
+                self?.broadcastHostReplicationBatch(
+                    batch,
+                    drainedBlockChanges: [],
+                    drainedDirtyBlockEntities: backgroundDirtyBlockEntities,
+                    priority: .background
+                )
             }
         } else if transportState.hasClientPeer, state == .connected {
             configureClientReplicationHooks(for: game)
@@ -892,7 +906,7 @@ final class LANMultiplayerManager {
                 do {
                     let frames = try LANMultiplayerFrameCodec.decodeFrames(from: &peer.buffer)
                     for frame in frames {
-                        self.handle(frame.message, from: peer, mode: mode)
+                        self.handle(frame, from: peer, mode: mode)
                     }
                 } catch {
                     // A6: a malformed frame runs the SAME lifecycle cleanup as any other
@@ -940,14 +954,14 @@ final class LANMultiplayerManager {
         }
     }
 
-    private func handle(_ message: LANMultiplayerMessage, from peer: LANWirePeer, mode: LANPeerMode) {
+    private func handle(_ frame: LANMultiplayerFrame, from peer: LANWirePeer, mode: LANPeerMode) {
         switch mode {
         case .hostPeer:
-            guard !isHostRateLimited(message, from: peer) else { return }
-            handleHostMessage(message, from: peer)
+            guard !isHostRateLimited(frame.message, from: peer) else { return }
+            handleHostMessage(frame.message, from: peer)
         case .clientServer:
-            if case .pong = message { peer.pendingPingNonce = nil }
-            handleClientMessage(message, from: peer)
+            if case .pong = frame.message { peer.pendingPingNonce = nil }
+            handleClientMessage(frame.message, receivedSequence: frame.sequence, from: peer)
         }
     }
 
@@ -1134,7 +1148,7 @@ final class LANMultiplayerManager {
         }
     }
 
-    private func handleClientMessage(_ message: LANMultiplayerMessage, from peer: LANWirePeer) {
+    private func handleClientMessage(_ message: LANMultiplayerMessage, receivedSequence: UInt32, from peer: LANWirePeer) {
         switch message {
         case .serverAccept(_, let world):
             clientConnectDeadline = nil
@@ -1179,7 +1193,7 @@ final class LANMultiplayerManager {
                 }
             }
         case .replicationBatch(let batch):
-            handleClientReplicationBatch(batch, from: peer)
+            handleClientReplicationBatch(batch, receivedSequence: receivedSequence, from: peer)
         case .gameplayEvent(let event):
             handleGameplayEvent(event)
         case .restoreState(let restore):
@@ -1214,11 +1228,17 @@ final class LANMultiplayerManager {
         return false
     }
 
+    private func shouldSkipSkippableDelta(_ message: LANMultiplayerMessage, for peer: LANWirePeer) -> Bool {
+        guard isSkippableDeltaBatch(message) else { return false }
+        return peer.inFlightSendCount > backpressureDeltaSkipDepth ||
+            peer.inFlightSendBytes > backpressureDeltaSkipBytes
+    }
+
     /// Encodes `message`'s JSON payload exactly once (§7.1) and frames+sends it to `peer`, honoring
     /// backpressure (§7.7): a peer with more than `backpressureDeltaSkipDepth` sends already in
     /// flight has its non-authoritative delta batches skipped rather than queued further behind.
     private func send(_ message: LANMultiplayerMessage, to peer: LANWirePeer) {
-        if peer.inFlightSendCount > backpressureDeltaSkipDepth, isSkippableDeltaBatch(message) { return }
+        if shouldSkipSkippableDelta(message, for: peer) { return }
         do {
             let (kind, payload) = try LANMultiplayerFrameCodec.encodePayload(message)
             sendFramedPayload(kind: kind, payload: payload, to: peer)
@@ -1233,8 +1253,10 @@ final class LANMultiplayerManager {
         let frame = LANMultiplayerFrameCodec.frame(kind: kind, payload: payload, sequence: peer.nextSequence)
         peer.nextSequence &+= 1
         peer.inFlightSendCount += 1
+        peer.inFlightSendBytes += frame.count
         peer.connection.send(content: frame, completion: .contentProcessed { [weak self, weak peer] error in
             peer?.inFlightSendCount = max(0, (peer?.inFlightSendCount ?? 1) - 1)
+            peer?.inFlightSendBytes = max(0, (peer?.inFlightSendBytes ?? frame.count) - frame.count)
             if let error {
                 self?.appendStatus("LAN send failed: \(error.localizedDescription)")
                 peer?.connection.cancel()
@@ -1255,6 +1277,7 @@ final class LANMultiplayerManager {
     private func broadcastHostReplicationBatch(
         _ batch: LANReplicationBatch,
         drainedBlockChanges: [LANBlockChange],
+        drainedDirtyBlockEntities: [LANBlockPosition] = [],
         to peerID: UUID? = nil,
         priority: LANReplicationSendPriority = .interactive
     ) {
@@ -1269,6 +1292,9 @@ final class LANMultiplayerManager {
             if sent == 0, !drainedBlockChanges.isEmpty {
                 hostReplicationSession.requeueBlockChanges(drainedBlockChanges)
             }
+            if sent == 0, !drainedDirtyBlockEntities.isEmpty {
+                hostReplicationSession.requeueDirtyBlockEntities(drainedDirtyBlockEntities)
+            }
         } catch LANMultiplayerCodecError.oversizedFrame where !batch.chunkSections.isEmpty {
             if !drainedBlockChanges.isEmpty {
                 hostReplicationSession.requeueBlockChanges(drainedBlockChanges)
@@ -1277,13 +1303,19 @@ final class LANMultiplayerManager {
             withoutSections.chunkSections = []
             do {
                 let (kind, payload) = try LANMultiplayerFrameCodec.encodePayload(.replicationBatch(withoutSections))
-                _ = dispatchEncodedReplicationPayload(
+                let sent = dispatchEncodedReplicationPayload(
                     kind: kind,
                     payload: payload,
                     to: peerID,
                     skipWhenBackpressured: priority == .background && isSkippableDeltaBatch(.replicationBatch(withoutSections))
                 )
+                if sent == 0, !drainedDirtyBlockEntities.isEmpty {
+                    hostReplicationSession.requeueDirtyBlockEntities(drainedDirtyBlockEntities)
+                }
             } catch {
+                if !drainedDirtyBlockEntities.isEmpty {
+                    hostReplicationSession.requeueDirtyBlockEntities(drainedDirtyBlockEntities)
+                }
                 appendStatus("LAN encode failed even without chunk sections: \(error)")
             }
             for sectionBatch in lanHalvedChunkSectionBatches(batch.chunkSections) {
@@ -1292,6 +1324,9 @@ final class LANMultiplayerManager {
         } catch {
             if !drainedBlockChanges.isEmpty {
                 hostReplicationSession.requeueBlockChanges(drainedBlockChanges)
+            }
+            if !drainedDirtyBlockEntities.isEmpty {
+                hostReplicationSession.requeueDirtyBlockEntities(drainedDirtyBlockEntities)
             }
             appendStatus("LAN encode failed: \(error)")
         }
@@ -1337,11 +1372,13 @@ final class LANMultiplayerManager {
         if let peerID {
             guard let peer = hostPeers[peerID], peer.accepted else { return 0 }
             if skipWhenBackpressured && peer.inFlightSendCount > backpressureDeltaSkipDepth { return sent }
+            if skipWhenBackpressured && peer.inFlightSendBytes > backpressureDeltaSkipBytes { return sent }
             sendFramedPayload(kind: kind, payload: payload, to: peer)
             sent += 1
         } else {
             for peer in hostPeers.values where peer.accepted {
                 if skipWhenBackpressured && peer.inFlightSendCount > backpressureDeltaSkipDepth { continue }
+                if skipWhenBackpressured && peer.inFlightSendBytes > backpressureDeltaSkipBytes { continue }
                 sendFramedPayload(kind: kind, payload: payload, to: peer)
                 sent += 1
             }
@@ -1354,8 +1391,7 @@ final class LANMultiplayerManager {
     private func broadcastFromHost(_ message: LANMultiplayerMessage, except excludedPeerID: UUID? = nil) {
         let recipients = hostPeers.values.filter { $0.accepted && $0.id != excludedPeerID }
         guard !recipients.isEmpty else { return }
-        let skippable = isSkippableDeltaBatch(message)
-        let eligibleRecipients = recipients.filter { !(skippable && $0.inFlightSendCount > backpressureDeltaSkipDepth) }
+        let eligibleRecipients = recipients.filter { !shouldSkipSkippableDelta(message, for: $0) }
         guard !eligibleRecipients.isEmpty else { return }
         do {
             let (kind, payload) = try LANMultiplayerFrameCodec.encodePayload(message)
@@ -1388,7 +1424,8 @@ final class LANMultiplayerManager {
         player: Player,
         fullSnapshot: Bool,
         chunkSectionsOverride: [LANChunkSectionSnapshot]? = nil,
-        content: LANHostReplicationContent
+        content: LANHostReplicationContent,
+        drainedDirtyBlockEntities: inout [LANBlockPosition]
     ) -> LANReplicationBatch? {
         guard game.hasWorld() else { return nil }
         let acceptedCount = queue.sync { hostPeers.values.filter { $0.accepted }.count }
@@ -1408,6 +1445,7 @@ final class LANMultiplayerManager {
         // are replicated FIRST, ahead of the normal distance-prioritized fill, so a guest's edit
         // or a spilling container is never starved out by a busy world.
         let dirtyPositions = content.includeDirtyBlockEntities ? hostReplicationSession.drainDirtyBlockEntities() : []
+        drainedDirtyBlockEntities.append(contentsOf: dirtyPositions)
         var dirtyBlockEntities: [LANBlockEntitySnapshot] = []
         dirtyBlockEntities.reserveCapacity(dirtyPositions.count)
         for position in dirtyPositions where position.dimension == game.world.dim.rawValue {
@@ -1468,28 +1506,42 @@ final class LANMultiplayerManager {
               game.hasWorld(),
               let player = game.player
         else { return }
+        let peerPlayerID = queue.sync { hostPeers[peerID]?.playerID }
+        let restoreState = peerPlayerID.flatMap { hostReplicationSession.peerRecord(playerID: $0)?.playerState }
+        let centerDimension = game.world.dim.rawValue
+        let restoredInCurrentDimension = restoreState?.dimension == centerDimension
+        let centerX = restoredInCurrentDimension ? (restoreState?.x ?? game.world.spawnX) : game.world.spawnX
+        let centerY = restoredInCurrentDimension ? (restoreState?.y ?? game.world.spawnY) : game.world.spawnY
+        let centerZ = restoredInCurrentDimension ? (restoreState?.z ?? game.world.spawnZ) : game.world.spawnZ
         let spawnRequest = LANChunkRequest(
-            dimension: game.world.dim.rawValue,
-            cx: floorDiv(Int(game.world.spawnX.rounded(.down)), CHUNK_W),
-            cz: floorDiv(Int(game.world.spawnZ.rounded(.down)), CHUNK_W),
+            dimension: centerDimension,
+            cx: floorDiv(Int(centerX.rounded(.down)), CHUNK_W),
+            cz: floorDiv(Int(centerZ.rounded(.down)), CHUNK_W),
             radius: LAN_MULTIPLAYER_DEFAULT_CHUNK_REQUEST_RADIUS,
-            centerY: Int(game.world.spawnY.rounded(.down)),
+            centerY: Int(centerY.rounded(.down)),
             verticalRadius: LAN_MULTIPLAYER_DEFAULT_CHUNK_VERTICAL_RADIUS
         )
         for coord in orderedLANChunkRequestCoordinates(cx: spawnRequest.cx, cz: spawnRequest.cz, radius: spawnRequest.radius) {
             _ = game.ensureAuthoritativeLANChunkLoaded(dimension: spawnRequest.dimension, cx: coord.cx, cz: coord.cz)
         }
         let spawnChunks = makeLANChunkSectionSnapshots(for: spawnRequest, in: game.world)
+        var dirtyBlockEntities: [LANBlockPosition] = []
         guard let batch = makeHostReplicationBatch(
             game: game,
             player: player,
             fullSnapshot: true,
             chunkSectionsOverride: spawnChunks,
-            content: .initialSnapshot
+            content: .initialSnapshot,
+            drainedDirtyBlockEntities: &dirtyBlockEntities
         ) else { return }
         queue.async { [weak self] in
             guard let self, let peer = self.hostPeers[peerID], peer.accepted else { return }
-            self.send(.replicationBatch(batch), to: peer)
+            self.broadcastHostReplicationBatch(
+                batch,
+                drainedBlockChanges: [],
+                drainedDirtyBlockEntities: dirtyBlockEntities,
+                to: peer.id
+            )
         }
     }
 
@@ -1655,8 +1707,8 @@ final class LANMultiplayerManager {
             guard let self, let game = self.activeGame, game.hasWorld() else { return }
             let result = self.hostReplicationSession.applyContainerEditIntent(intent, from: playerID, to: game.world)
             switch result {
-            case .applied(let be):
-                let batch = LANReplicationBatch(tick: game.world.time, fullSnapshot: false, blockEntities: [be])
+            case .applied(let blockEntities):
+                let batch = LANReplicationBatch(tick: game.world.time, fullSnapshot: false, blockEntities: blockEntities)
                 self.queue.async { [weak self] in
                     self?.broadcastFromHost(.replicationBatch(batch))
                 }
@@ -1777,10 +1829,12 @@ final class LANMultiplayerManager {
             else { return }
             var syncGenerations = 0
             for coord in orderedLANChunkRequestCoordinates(cx: request.cx, cz: request.cz, radius: request.radius) {
-                if requestWorld.getChunk(coord.cx, coord.cz) == nil { syncGenerations += 1 }
+                let missing = requestWorld.getChunk(coord.cx, coord.cz) == nil
+                if missing, syncGenerations >= LAN_MAX_SYNC_CHUNK_GENERATIONS_PER_REQUEST { continue }
+                if missing { syncGenerations += 1 }
                 _ = game.ensureAuthoritativeLANChunkLoaded(dimension: request.dimension, cx: coord.cx, cz: coord.cz)
             }
-            if syncGenerations > 4 {
+            if syncGenerations >= LAN_MAX_SYNC_CHUNK_GENERATIONS_PER_REQUEST {
                 self.appendStatus("LAN chunk request forced \(syncGenerations) synchronous generations (dimension \(request.dimension)).")
             }
             let snapshots = makeLANChunkSectionSnapshots(for: request, in: requestWorld)
@@ -1799,8 +1853,8 @@ final class LANMultiplayerManager {
         }
     }
 
-    private func handleClientReplicationBatch(_ batch: LANReplicationBatch, from peer: LANWirePeer) {
-        let ack = LANReplicationAck(tick: batch.tick, receivedSequence: peer.nextSequence)
+    private func handleClientReplicationBatch(_ batch: LANReplicationBatch, receivedSequence: UInt32, from peer: LANWirePeer) {
+        let ack = LANReplicationAck(tick: batch.tick, receivedSequence: receivedSequence)
         send(.replicationAck(playerID: localPeerID, ack: ack), to: peer)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -1812,8 +1866,7 @@ final class LANMultiplayerManager {
                 // corrections) may touch it. The former per-batch
                 // `applyLANInventorySnapshot(localInventory, to: player)` call has been removed.
                 game.beginLANReplicationApply()
-                worldReport = applyLANReplicationBatch(batch, to: game.world)
-                game.markLANChunkSectionsApplied(batch.chunkSections)
+                worldReport = game.applyLANHostReplicationBatch(batch)
                 _ = applyLANRemotePlayers(batch.players, to: game.world, localPlayerID: self.localPeerID)
                 game.endLANReplicationApply()
             }

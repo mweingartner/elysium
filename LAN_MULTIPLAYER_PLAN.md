@@ -24,11 +24,15 @@ neighborhoods, and purge client-only spawned entities, so mobs, drops, XP,
 plants, and block simulation are visible only when the host publishes them. LAN
 clients can edit host-published container/crafting contents through mirrored
 screens; the host validates each submitted block-entity and inventory snapshot
-for reach, compatibility, item conservation, and crafting-table recipe
-transforms before applying it. Clients can also send typed host-authoritative use
-intents for openable block mechanisms.
-Remaining release hardening is broader two-Mac installed-app soak around
-combat, death/respawn, container contention, and long-session reconnects.
+for reach, compatibility, deterministic host block-entity revision, item
+conservation, and crafting-table recipe transforms before applying it. Protocol
+v3 container edits carry up to two block-entity snapshots so double-chest moves
+are one host-validated transaction. Clients also defer host block/entity deltas
+that arrive before their chunk and replay them after authoritative sections and
+block changes arrive. Clients can also send typed host-authoritative use intents
+for openable block mechanisms. Remaining release hardening is broader two-Mac
+installed-app soak around combat, death/respawn, simultaneous-player contention,
+and long-session reconnects.
 
 Two-Mac installed-app soak is now scripted through
 `scripts/live-lan-test.sh`. The harness launches the local `/Applications/Pebble.app`
@@ -137,9 +141,8 @@ Added core-only networking model files:
 
 Remaining gameplay hardening:
 
-- Multi-client contention probes for simultaneous edits of the same shared
-  container/crafting station, including item-duplication and stale-revision
-  attempts.
+- Multi-client installed-app contention soak for simultaneous edits of the same
+  shared container/crafting station.
 - Two-Mac installed-app soak covering template placement, combat, death/respawn,
   and longer reconnect persistence against real Network.framework connections.
 
@@ -181,7 +184,9 @@ Implemented client flow:
 7. Accepted client receives the host's `LANWorldSummary`, enters connected
    session/chat state, opens a transient LAN client world when joining from the
    title screen without snapping to an empty local `surfaceY`, and receives an
-   initial replication batch centered on the host world's spawn neighborhood.
+   initial replication batch centered on the restored peer location when it is
+   in the active host dimension, otherwise on the host world's spawn
+   neighborhood.
 8. Host publishes periodic bounded replication batches from the main game
    thread. The 20 Hz foreground batch carries player state plus drained block
    deltas and dirty block-entity contents; lower-rate background batches carry
@@ -230,6 +235,7 @@ Hard caps:
 - Maximum replicated inventory slots per player: 64.
 - Maximum block-entity snapshots per replication batch: 64.
 - Maximum replicated block-entity slots per snapshot: 64.
+- Maximum block entities in one client container-edit transaction: 2.
 
 Every decoder must fail closed before allocation if lengths exceed caps.
 
@@ -272,8 +278,9 @@ Implemented host replication tick:
    chunks for every neighbor.
 3. The host sends a small foreground `LANReplicationBatch` at 20 Hz and
    lower-rate background batches for supersedable state. Pre-encoded background
-   fanout observes per-peer send depth, while authoritative block/container
-   deltas are preserved and requeued on encode/send eligibility failures.
+   fanout observes per-peer send depth and bytes in flight, while authoritative
+   block/container deltas are preserved and requeued on encode/send eligibility
+   failures.
 4. Client block intents are accepted only from joined peers, validated against
    the last peer state/reach and registry-valid cells, then applied to the host
    world on the main thread.
@@ -289,6 +296,9 @@ Implemented client replication apply:
 3. If the local game has a loaded matching world, chunk sections, block deltas,
    and compatible block-entity item snapshots apply to `World` on the main
    thread; chunk-section application notifies dirty-section hooks for remeshing.
+   Block changes and block-entity snapshots that arrive before their chunks are
+   kept in a bounded deferred buffer and replayed after matching sections and
+   block cells arrive.
 4. Complete entity batches materialize non-persistent client-side mirror
    entities for dropped items, XP orbs, and registered entity types, update them
    from host snapshots, skip their normal local simulation ticks, and remove
@@ -323,7 +333,8 @@ Player data:
 ### Gameplay Surface Requirements
 
 - Containers: host serializes opens/moves/crafts so two players cannot duplicate
-  items.
+  items; client edit proposals are gated by the host's deterministic
+  block-entity revision and can cover both halves of a double chest.
 - Crafting: host plans and consumes resources; clients see staged grids and
   outputs as replicated UI state.
 - Creative mode: host controls whether a client may use creative inventory,
@@ -383,11 +394,14 @@ Core unit tests:
 - `LANMultiplayerTests`: round-trip every message type, stream partial frames,
   reject bad magic/version/type/oversized frames, validate sanitizers, verify
   Info.plist LAN declarations, and preserve same-version block-intent
-  compatibility when older peers omit the optional placement cell.
+  compatibility when older peers omit the optional placement cell. Container
+  edit payload tests cover protocol v3 revision/additional-block-entity bounds.
 - `LANReplicationTests`: prove deterministic block-change coalescing/drain
   order, host break/place validation, out-of-reach and invalid-cell rejection,
   chunk-section snapshot apply/remesh hooks, client mirror apply with malformed
-  section/invalid-cell drops, and batch caps.
+  section/invalid-cell drops, container revision rejection, two-block container
+  transactions, deferred block/block-entity replay, dirty block-entity requeue,
+  and batch caps.
 - `NetCodecTests`: keep fuzz/property coverage for malformed future protocol
   variants.
 - `NetCodecFuzzTests`: seeded malformed lengths, truncated frames, unknown

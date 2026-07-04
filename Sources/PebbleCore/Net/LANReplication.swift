@@ -50,11 +50,28 @@ public struct LANReplicationApplyReport: Equatable {
     public var ignoredInvalidCells = 0
     public var ignoredInvalidSections = 0
     public var ignoredUnloadedBlockChanges = 0
+    public var deferredBlockChanges = 0
     public var ignoredInvalidEntities = 0
     public var appliedBlockEntities = 0
     public var ignoredInvalidBlockEntities = 0
+    public var deferredBlockEntities = 0
 
     public init() {}
+
+    public mutating func merge(_ other: LANReplicationApplyReport) {
+        appliedBlockChanges += other.appliedBlockChanges
+        appliedChunkSections += other.appliedChunkSections
+        appliedEntitySnapshots += other.appliedEntitySnapshots
+        removedEntitySnapshots += other.removedEntitySnapshots
+        ignoredInvalidCells += other.ignoredInvalidCells
+        ignoredInvalidSections += other.ignoredInvalidSections
+        ignoredUnloadedBlockChanges += other.ignoredUnloadedBlockChanges
+        deferredBlockChanges += other.deferredBlockChanges
+        ignoredInvalidEntities += other.ignoredInvalidEntities
+        appliedBlockEntities += other.appliedBlockEntities
+        ignoredInvalidBlockEntities += other.ignoredInvalidBlockEntities
+        deferredBlockEntities += other.deferredBlockEntities
+    }
 }
 
 public enum LANBlockIntentResult: Equatable {
@@ -64,7 +81,7 @@ public enum LANBlockIntentResult: Equatable {
 }
 
 public enum LANContainerEditResult: Equatable {
-    case applied(be: LANBlockEntitySnapshot)
+    case applied(blockEntities: [LANBlockEntitySnapshot])
     case rejected(String)
 }
 
@@ -207,6 +224,7 @@ public final class LANMultiplayerHostSession {
         var deathHandledEpoch = 0
         var lastTemplateUndo: TemplatePlacementUndoSnapshot?
         var lastAckTick = 0
+        var lastAckSequence: UInt32 = 0
         var lastSeenTick = 0
         var disconnectedTick: Int?
     }
@@ -254,6 +272,7 @@ public final class LANMultiplayerHostSession {
             playerState: nil,
             inventory: LANPlayerInventorySnapshot(playerID: playerID, selectedHotbarSlot: 0, slots: []),
             lastTemplateUndo: nil,
+            lastAckSequence: 0,
             lastSeenTick: max(0, tick),
             disconnectedTick: nil
         )
@@ -414,6 +433,7 @@ public final class LANMultiplayerHostSession {
             deathHandledEpoch: 0,
             lastTemplateUndo: nil,
             lastAckTick: max(0, record.lastAckTick),
+            lastAckSequence: 0,
             lastSeenTick: max(0, record.lastSeenTick),
             disconnectedTick: record.disconnectedTick
         )
@@ -424,6 +444,7 @@ public final class LANMultiplayerHostSession {
         let playerID = String(rawPlayerID.prefix(128))
         guard var peer = peers[playerID] else { return }
         peer.lastAckTick = max(peer.lastAckTick, ack.tick)
+        peer.lastAckSequence = max(peer.lastAckSequence, ack.receivedSequence)
         peers[playerID] = peer
     }
 
@@ -707,10 +728,11 @@ public final class LANMultiplayerHostSession {
         }
     }
 
-    /// Validates and applies a whole-block-entity container edit (D-C): authorizes `.container`,
-    /// reach-checks the target, verifies the submitted snapshot is compatible with the block
-    /// actually at that position, then applies it wholesale (last-writer-wins). Also stores the
-    /// peer's published inventory, revision-gated. Fails closed on any validation error.
+    /// Validates and applies a block-entity container edit (D-C): authorizes `.container`,
+    /// reach-checks every target, verifies the submitted snapshot is compatible with the block
+    /// actually at each position, gates the edit by a host content revision, then applies the
+    /// submitted block entities as one transaction. Also stores the peer's published inventory,
+    /// revision-gated. Fails closed on any validation error.
     public func applyContainerEditIntent(
         _ intent: LANContainerEditIntent,
         from rawPlayerID: String,
@@ -726,44 +748,71 @@ public final class LANMultiplayerHostSession {
         guard playerState.dimension == world.dim.rawValue else {
             return .rejected("target dimension unavailable")
         }
-        let position = intent.blockEntity
-        guard isWithinLANReach(playerState, x: position.x, y: position.y, z: position.z) else {
-            return .rejected("target out of reach")
-        }
-        guard position.dimension == world.dim.rawValue else {
-            return .rejected("target dimension unavailable")
-        }
-        let targetCell = world.getBlock(position.x, position.y, position.z)
-        guard isLANBlockEntitySnapshotCompatible(position, cell: targetCell) else {
-            return .rejected("incompatible container target")
-        }
-        guard let normalized = normalizedLANBlockEntitySnapshot(position) else {
-            return .rejected("invalid container payload")
-        }
         guard let normalizedInventory = normalizedLANInventorySnapshot(intent.inventory) else {
             return .rejected("invalid inventory payload")
         }
         guard let beforeInventory = peer.inventory else {
             return .rejected("player inventory baseline unavailable")
         }
-        let existing = world.getBlockEntity(position.x, position.y, position.z) ?? makeBlockEntity(from: normalized)
-        guard let beforeBlockEntity = makeLANBlockEntitySnapshot(existing, dimension: world.dim.rawValue),
-              beforeBlockEntity.type == normalized.type,
-              isLANContainerEditItemTransitionAllowed(
-                  beforeInventory: beforeInventory,
-                  afterInventory: normalizedInventory,
-                  beforeBlockEntity: beforeBlockEntity,
-                  afterBlockEntity: normalized
-              )
-        else {
+        let rawBlockEntities = [intent.blockEntity] + intent.additionalBlockEntities
+        guard rawBlockEntities.count <= LAN_MULTIPLAYER_MAX_CONTAINER_EDIT_BLOCK_ENTITIES else {
+            return .rejected("too many container targets")
+        }
+        var seenPositions = Set<LANBlockPosition>()
+        var beforeBlockEntities: [LANBlockEntitySnapshot] = []
+        var afterBlockEntities: [LANBlockEntitySnapshot] = []
+        var targets: [BlockEntityData] = []
+        for raw in rawBlockEntities {
+            guard let normalized = normalizedLANBlockEntitySnapshot(raw) else {
+                return .rejected("invalid container payload")
+            }
+            let key = LANBlockPosition(dimension: normalized.dimension, x: normalized.x, y: normalized.y, z: normalized.z)
+            guard seenPositions.insert(key).inserted else {
+                return .rejected("duplicate container target")
+            }
+            guard isWithinLANReach(playerState, x: normalized.x, y: normalized.y, z: normalized.z) else {
+                return .rejected("target out of reach")
+            }
+            guard normalized.dimension == world.dim.rawValue else {
+                return .rejected("target dimension unavailable")
+            }
+            let targetCell = world.getBlock(normalized.x, normalized.y, normalized.z)
+            guard isLANBlockEntitySnapshotCompatible(normalized, cell: targetCell) else {
+                return .rejected("incompatible container target")
+            }
+            let existing = world.getBlockEntity(normalized.x, normalized.y, normalized.z)
+            let target = existing?.type == normalized.type ? existing! : makeBlockEntity(from: normalized)
+            guard let beforeBlockEntity = makeLANBlockEntitySnapshot(target, dimension: world.dim.rawValue),
+                  beforeBlockEntity.type == normalized.type
+            else {
+                return .rejected("container edit is not host-verifiable")
+            }
+            beforeBlockEntities.append(beforeBlockEntity)
+            afterBlockEntities.append(normalized)
+            targets.append(target)
+        }
+        guard lanBlockEntityRevision(beforeBlockEntities) == intent.blockEntityRevision else {
+            return .rejected("stale container revision")
+        }
+        guard isLANContainerEditItemTransitionAllowed(
+            beforeInventory: beforeInventory,
+            afterInventory: normalizedInventory,
+            beforeBlockEntities: beforeBlockEntities,
+            afterBlockEntities: afterBlockEntities
+        ) else {
             return .rejected("container edit is not host-verifiable")
         }
-        let target = existing.type == normalized.type ? existing : makeBlockEntity(from: normalized)
-        guard applyLANBlockEntityPayload(normalized, to: target) else {
-            return .rejected("invalid container payload")
+        for normalized in afterBlockEntities {
+            let probe = makeBlockEntity(from: normalized)
+            guard applyLANBlockEntityPayload(normalized, to: probe) else {
+                return .rejected("invalid container payload")
+            }
         }
-        world.setBlockEntity(target)
-        recordDirtyBlockEntity(LANBlockPosition(dimension: normalized.dimension, x: normalized.x, y: normalized.y, z: normalized.z))
+        for (normalized, target) in zip(afterBlockEntities, targets) {
+            _ = applyLANBlockEntityPayload(normalized, to: target)
+            world.setBlockEntity(target)
+            recordDirtyBlockEntity(LANBlockPosition(dimension: normalized.dimension, x: normalized.x, y: normalized.y, z: normalized.z))
+        }
 
         if intent.revision > peer.inventoryRevision {
             peer.inventory = LANPlayerInventorySnapshot(
@@ -777,7 +826,7 @@ public final class LANMultiplayerHostSession {
             peer.inventoryRevision = intent.revision
             peers[playerID] = peer
         }
-        return .applied(be: normalized)
+        return .applied(blockEntities: afterBlockEntities)
     }
 
     /// Applies a client-published inventory update if strictly newer than the stored revision
@@ -862,6 +911,12 @@ public final class LANMultiplayerHostSession {
         dirtyBlockEntityPositions.removeAll()
         dirtyBlockEntitySet.removeAll()
         return out
+    }
+
+    public func requeueDirtyBlockEntities(_ positions: [LANBlockPosition]) {
+        for position in positions {
+            recordDirtyBlockEntity(position)
+        }
     }
 
     /// Builds the restore payload sent to a reconnecting/joining peer so its client authoritatively
@@ -1032,6 +1087,110 @@ public final class LANMultiplayerClientSession {
             blockEntities[key] = normalized
             report.appliedBlockEntities += 1
         }
+        return report
+    }
+}
+
+public struct LANDeferredReplicationBuffer {
+    private var blockChangesByPosition: [LANBlockPosition: LANBlockChange] = [:]
+    private var blockChangeOrder: [LANBlockPosition] = []
+    private var blockEntitiesByPosition: [LANBlockPosition: LANBlockEntitySnapshot] = [:]
+    private var blockEntityOrder: [LANBlockPosition] = []
+
+    public init() {}
+
+    public var pendingBlockChangeCount: Int { blockChangesByPosition.count }
+    public var pendingBlockEntityCount: Int { blockEntitiesByPosition.count }
+
+    public mutating func removeAll() {
+        blockChangesByPosition.removeAll()
+        blockChangeOrder.removeAll()
+        blockEntitiesByPosition.removeAll()
+        blockEntityOrder.removeAll()
+    }
+
+    public mutating func queue(_ change: LANBlockChange) {
+        let position = LANBlockPosition(dimension: change.dimension, x: change.x, y: change.y, z: change.z)
+        if blockChangesByPosition[position] == nil {
+            if blockChangeOrder.count >= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES {
+                let removed = blockChangeOrder.removeFirst()
+                blockChangesByPosition.removeValue(forKey: removed)
+            }
+            blockChangeOrder.append(position)
+        }
+        blockChangesByPosition[position] = change
+    }
+
+    public mutating func queue(_ snapshot: LANBlockEntitySnapshot) {
+        let position = LANBlockPosition(dimension: snapshot.dimension, x: snapshot.x, y: snapshot.y, z: snapshot.z)
+        if blockEntitiesByPosition[position] == nil {
+            if blockEntityOrder.count >= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES {
+                let removed = blockEntityOrder.removeFirst()
+                blockEntitiesByPosition.removeValue(forKey: removed)
+            }
+            blockEntityOrder.append(position)
+        }
+        blockEntitiesByPosition[position] = snapshot
+    }
+
+    @discardableResult
+    public mutating func applyReadyBlockChanges(to world: World) -> LANReplicationApplyReport {
+        var report = LANReplicationApplyReport()
+        for position in blockChangeOrder {
+            guard let change = blockChangesByPosition[position] else { continue }
+            guard change.dimension == world.dim.rawValue, isValidLANReplicatedCell(change.cell) else {
+                report.ignoredInvalidCells += 1
+                blockChangesByPosition.removeValue(forKey: position)
+                continue
+            }
+            guard world.getChunkAt(change.x, change.z) != nil else { continue }
+            _ = world.setBlock(change.x, change.y, change.z, change.cell)
+            report.appliedBlockChanges += 1
+            blockChangesByPosition.removeValue(forKey: position)
+        }
+        blockChangeOrder.removeAll { blockChangesByPosition[$0] == nil }
+        return report
+    }
+
+    @discardableResult
+    public mutating func applyReadyBlockEntities(to world: World) -> LANReplicationApplyReport {
+        var report = LANReplicationApplyReport()
+        for position in blockEntityOrder {
+            guard let snapshot = blockEntitiesByPosition[position] else { continue }
+            guard snapshot.dimension == world.dim.rawValue,
+                  let normalized = normalizedLANBlockEntitySnapshot(snapshot)
+            else {
+                report.ignoredInvalidBlockEntities += 1
+                blockEntitiesByPosition.removeValue(forKey: position)
+                continue
+            }
+            guard let chunk = world.getChunkAt(normalized.x, normalized.z) else { continue }
+            guard chunk.inYRange(normalized.y),
+                  isLANBlockEntitySnapshotCompatible(normalized, cell: world.getBlock(normalized.x, normalized.y, normalized.z))
+            else {
+                report.ignoredInvalidBlockEntities += 1
+                blockEntitiesByPosition.removeValue(forKey: position)
+                continue
+            }
+            let existing = world.getBlockEntity(normalized.x, normalized.y, normalized.z)
+            let target = existing?.type == normalized.type ? existing! : makeBlockEntity(from: normalized)
+            guard applyLANBlockEntityPayload(normalized, to: target) else {
+                report.ignoredInvalidBlockEntities += 1
+                blockEntitiesByPosition.removeValue(forKey: position)
+                continue
+            }
+            world.setBlockEntity(target)
+            report.appliedBlockEntities += 1
+            blockEntitiesByPosition.removeValue(forKey: position)
+        }
+        blockEntityOrder.removeAll { blockEntitiesByPosition[$0] == nil }
+        return report
+    }
+
+    @discardableResult
+    public mutating func applyReady(to world: World) -> LANReplicationApplyReport {
+        var report = applyReadyBlockChanges(to: world)
+        report.merge(applyReadyBlockEntities(to: world))
         return report
     }
 }
@@ -1402,13 +1561,65 @@ private func addLANBlockEntitySnapshot(_ snapshot: LANBlockEntitySnapshot, to to
     }
 }
 
+public func lanBlockEntityRevision(_ snapshots: [LANBlockEntitySnapshot]) -> Int {
+    func mix(_ value: UInt64, into hash: inout UInt64) {
+        hash ^= value
+        hash &*= 1_099_511_628_211
+    }
+    var hash: UInt64 = 14_695_981_039_346_656_037
+    let normalized = snapshots.compactMap(normalizedLANBlockEntitySnapshot).sorted {
+        if $0.dimension != $1.dimension { return $0.dimension < $1.dimension }
+        if $0.x != $1.x { return $0.x < $1.x }
+        if $0.y != $1.y { return $0.y < $1.y }
+        if $0.z != $1.z { return $0.z < $1.z }
+        return $0.type < $1.type
+    }
+    mix(UInt64(normalized.count), into: &hash)
+    for snapshot in normalized {
+        mix(UInt64(bitPattern: Int64(snapshot.dimension)), into: &hash)
+        mix(UInt64(bitPattern: Int64(snapshot.x)), into: &hash)
+        mix(UInt64(bitPattern: Int64(snapshot.y)), into: &hash)
+        mix(UInt64(bitPattern: Int64(snapshot.z)), into: &hash)
+        for byte in snapshot.type.utf8 { mix(UInt64(byte), into: &hash) }
+        mix(UInt64(snapshot.slotCount), into: &hash)
+        for slot in snapshot.slots {
+            mix(UInt64(slot.slot), into: &hash)
+            mix(UInt64(slot.itemID), into: &hash)
+            mix(UInt64(slot.count), into: &hash)
+            mix(UInt64(slot.damage), into: &hash)
+            if let label = slot.label {
+                for byte in label.utf8 { mix(UInt64(byte), into: &hash) }
+            }
+            mix(0xff, into: &hash)
+        }
+        if let kind = snapshot.kind {
+            for byte in kind.utf8 { mix(UInt64(byte), into: &hash) }
+        } else {
+            mix(UInt64.max, into: &hash)
+        }
+        for value in [snapshot.burnTime, snapshot.burnTotal, snapshot.cookTime, snapshot.cookTotal, snapshot.brewTime, snapshot.fuel] {
+            mix(UInt64(bitPattern: Int64(value ?? -1)), into: &hash)
+        }
+        let xpScaled = Int64(((snapshot.xpBank ?? -1) * 1000).rounded())
+        mix(UInt64(bitPattern: xpScaled), into: &hash)
+        if let times = snapshot.times {
+            for value in times { mix(UInt64(max(0, value)), into: &hash) }
+        } else {
+            mix(UInt64.max, into: &hash)
+        }
+    }
+    return Int(hash & 0x7fff_ffff)
+}
+
 private func lanContainerEditTotals(
     inventory: LANPlayerInventorySnapshot,
-    blockEntity: LANBlockEntitySnapshot
+    blockEntities: [LANBlockEntitySnapshot]
 ) -> [LANItemMultisetKey: Int] {
     var totals: [LANItemMultisetKey: Int] = [:]
     addLANInventorySnapshot(inventory, to: &totals)
-    addLANBlockEntitySnapshot(blockEntity, to: &totals)
+    for blockEntity in blockEntities {
+        addLANBlockEntitySnapshot(blockEntity, to: &totals)
+    }
     return totals
 }
 
@@ -1444,16 +1655,24 @@ private func isLANCraftingTableTransformAllowed(
 private func isLANContainerEditItemTransitionAllowed(
     beforeInventory: LANPlayerInventorySnapshot,
     afterInventory: LANPlayerInventorySnapshot,
-    beforeBlockEntity: LANBlockEntitySnapshot,
-    afterBlockEntity: LANBlockEntitySnapshot
+    beforeBlockEntities: [LANBlockEntitySnapshot],
+    afterBlockEntities: [LANBlockEntitySnapshot]
 ) -> Bool {
-    guard beforeBlockEntity.type == afterBlockEntity.type,
-          beforeBlockEntity.slotCount == afterBlockEntity.slotCount
-    else { return false }
+    guard beforeBlockEntities.count == afterBlockEntities.count, !beforeBlockEntities.isEmpty else { return false }
+    for (before, after) in zip(beforeBlockEntities, afterBlockEntities) {
+        guard before.dimension == after.dimension,
+              before.x == after.x,
+              before.y == after.y,
+              before.z == after.z,
+              before.type == after.type,
+              before.slotCount == after.slotCount
+        else { return false }
+    }
 
-    let beforeTotals = lanContainerEditTotals(inventory: beforeInventory, blockEntity: beforeBlockEntity)
-    let afterTotals = lanContainerEditTotals(inventory: afterInventory, blockEntity: afterBlockEntity)
+    let beforeTotals = lanContainerEditTotals(inventory: beforeInventory, blockEntities: beforeBlockEntities)
+    let afterTotals = lanContainerEditTotals(inventory: afterInventory, blockEntities: afterBlockEntities)
     if beforeTotals == afterTotals { return true }
+    guard beforeBlockEntities.count == 1, let beforeBlockEntity = beforeBlockEntities.first else { return false }
     return isLANCraftingTableTransformAllowed(
         beforeBlockEntity: beforeBlockEntity,
         beforeTotals: beforeTotals,
@@ -1990,14 +2209,25 @@ public func applyLANEntitySnapshots(
 @discardableResult
 public func applyLANBlockEntitySnapshots(
     _ snapshots: [LANBlockEntitySnapshot],
-    to world: World
+    to world: World,
+    deferred: UnsafeMutablePointer<LANDeferredReplicationBuffer>? = nil
 ) -> LANReplicationApplyReport {
     var report = LANReplicationApplyReport()
     for raw in snapshots.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES) {
-        guard let snapshot = normalizedLANBlockEntitySnapshot(raw),
-              snapshot.dimension == world.dim.rawValue,
-              let chunk = world.getChunkAt(snapshot.x, snapshot.z),
-              chunk.inYRange(snapshot.y),
+        guard let snapshot = normalizedLANBlockEntitySnapshot(raw), snapshot.dimension == world.dim.rawValue else {
+            report.ignoredInvalidBlockEntities += 1
+            continue
+        }
+        guard let chunk = world.getChunkAt(snapshot.x, snapshot.z) else {
+            if let deferred {
+                deferred.pointee.queue(snapshot)
+                report.deferredBlockEntities += 1
+            } else {
+                report.ignoredInvalidBlockEntities += 1
+            }
+            continue
+        }
+        guard chunk.inYRange(snapshot.y),
               isLANBlockEntitySnapshotCompatible(snapshot, cell: world.getBlock(snapshot.x, snapshot.y, snapshot.z))
         else {
             report.ignoredInvalidBlockEntities += 1
@@ -2018,6 +2248,16 @@ public func applyLANBlockEntitySnapshots(
 
 @discardableResult
 public func applyLANReplicationBatch(_ batch: LANReplicationBatch, to world: World) -> LANReplicationApplyReport {
+    var deferred: LANDeferredReplicationBuffer? = nil
+    return applyLANReplicationBatch(batch, to: world, deferred: &deferred)
+}
+
+@discardableResult
+public func applyLANReplicationBatch(
+    _ batch: LANReplicationBatch,
+    to world: World,
+    deferred: inout LANDeferredReplicationBuffer?
+) -> LANReplicationApplyReport {
     var report = LANReplicationApplyReport()
     if let worldState = batch.worldState {
         _ = applyLANWorldStateSnapshot(worldState, to: world)
@@ -2029,21 +2269,40 @@ public func applyLANReplicationBatch(_ batch: LANReplicationBatch, to world: Wor
             report.ignoredInvalidSections += 1
         }
     }
+    if deferred != nil {
+        report.merge(deferred!.applyReadyBlockChanges(to: world))
+    }
     for change in batch.blockChanges.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES) {
         guard change.dimension == world.dim.rawValue, isValidLANReplicatedCell(change.cell) else {
             report.ignoredInvalidCells += 1
             continue
         }
         guard world.getChunkAt(change.x, change.z) != nil else {
-            report.ignoredUnloadedBlockChanges += 1
+            if deferred != nil {
+                deferred!.queue(change)
+                report.deferredBlockChanges += 1
+            } else {
+                report.ignoredUnloadedBlockChanges += 1
+            }
             continue
         }
         _ = world.setBlock(change.x, change.y, change.z, change.cell)
         report.appliedBlockChanges += 1
     }
-    let blockEntityReport = applyLANBlockEntitySnapshots(batch.blockEntities, to: world)
-    report.appliedBlockEntities += blockEntityReport.appliedBlockEntities
-    report.ignoredInvalidBlockEntities += blockEntityReport.ignoredInvalidBlockEntities
+    if deferred != nil {
+        report.merge(deferred!.applyReadyBlockEntities(to: world))
+    }
+    let blockEntityReport: LANReplicationApplyReport
+    if deferred != nil {
+        var buffer = deferred!
+        blockEntityReport = withUnsafeMutablePointer(to: &buffer) { buffer in
+            applyLANBlockEntitySnapshots(batch.blockEntities, to: world, deferred: buffer)
+        }
+        deferred = buffer
+    } else {
+        blockEntityReport = applyLANBlockEntitySnapshots(batch.blockEntities, to: world)
+    }
+    report.merge(blockEntityReport)
     let entityReport = applyLANEntitySnapshots(batch.entities, to: world, removeMissing: batch.entitySnapshotsComplete)
     report.appliedEntitySnapshots += entityReport.appliedEntitySnapshots
     report.removedEntitySnapshots += entityReport.removedEntitySnapshots

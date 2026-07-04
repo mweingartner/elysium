@@ -260,9 +260,12 @@ public final class GameCore {
     private var lanContainerEditSeq = 0
     private var lanLastAppliedGrantID = 0
     public private(set) var lanConnectionLost = false
+    private var lanDeferredReplication = LANDeferredReplicationBuffer()
     /// position/type of the mirrored container screen currently open (if any) — used to detect
     /// orphaned screens after a replication batch replaces/removes the underlying block (A9)
     private var lanOpenContainerBE: (dim: Int, x: Int, y: Int, z: Int, type: String)?
+    private var lanOpenContainerPositions: [LANBlockPosition] = []
+    private var lanOpenContainerRevision = 0
     /// LAN-client-local monotonic tick counter (world.time is frozen for LAN clients since
     /// World.tick(simCenters:) never runs for them) — drives section-request expiry
     private var lanClientTickCounter = 0
@@ -490,7 +493,10 @@ public final class GameCore {
         lanContainerEditSeq = 0
         lanLastAppliedGrantID = 0
         lanConnectionLost = false
+        lanDeferredReplication.removeAll()
         lanOpenContainerBE = nil
+        lanOpenContainerPositions.removeAll()
+        lanOpenContainerRevision = 0
         lanClientTickCounter = 0
         lanSectionRequestsInFlight.removeAll()
         lanColumnCompletionRequestsInFlight.removeAll()
@@ -1019,6 +1025,18 @@ public final class GameCore {
             guard let d = Dim(rawValue: coord.dim), let w = worlds[d] else { continue }
             enqueueLightAround(w, coord.cx, coord.cz)
         }
+    }
+
+    @discardableResult
+    public func applyLANHostReplicationBatch(_ batch: LANReplicationBatch) -> LANReplicationApplyReport {
+        guard isLANClientWorld else {
+            return applyLANReplicationBatch(batch, to: world)
+        }
+        var deferred = Optional(lanDeferredReplication)
+        let report = applyLANReplicationBatch(batch, to: world, deferred: &deferred)
+        lanDeferredReplication = deferred ?? LANDeferredReplicationBuffer()
+        markLANChunkSectionsApplied(batch.chunkSections)
+        return report
     }
 
     /// bounded background pass: full-column completion requests for chunks near the player
@@ -2403,6 +2421,13 @@ public final class GameCore {
             if let be = screenData.be {
                 lanOpenContainerBE = (dim: self.dim.rawValue, x: be.x, y: be.y, z: be.z, type: be.type)
             }
+            let editSnapshots = [screenData.be, screenData.other]
+                .compactMap { $0 }
+                .compactMap { makeLANBlockEntitySnapshot($0, dimension: self.dim.rawValue) }
+            lanOpenContainerPositions = editSnapshots.map {
+                LANBlockPosition(dimension: $0.dimension, x: $0.x, y: $0.y, z: $0.z)
+            }
+            lanOpenContainerRevision = lanBlockEntityRevision(editSnapshots)
             openScreen(kind, screenData)
         }
 
@@ -2513,29 +2538,46 @@ public final class GameCore {
         let be = world.getBlockEntity(open.x, open.y, open.z)
         if be == nil || be?.type != open.type {
             lanOpenContainerBE = nil
+            lanOpenContainerPositions.removeAll()
+            lanOpenContainerRevision = 0
             host?.closeAllScreens()
             host?.showActionBar("§cThat container is no longer available", 60)
+        } else {
+            let snapshots = lanOpenContainerPositions.compactMap { position -> LANBlockEntitySnapshot? in
+                guard position.dimension == dim.rawValue,
+                      let be = world.getBlockEntity(position.x, position.y, position.z)
+                else { return nil }
+                return makeLANBlockEntitySnapshot(be, dimension: position.dimension)
+            }
+            if !snapshots.isEmpty {
+                lanOpenContainerRevision = lanBlockEntityRevision(snapshots)
+            }
         }
     }
 
     /// captures a whole-BE snapshot of an edited mirrored container and sends it to the host
     /// (D-C). Guarded against the anti-loop flag and against firing outside LAN client worlds.
-    public func captureLANContainerEdit(_ be: BlockEntityData) {
+    public func captureLANContainerEdit(_ be: BlockEntityData, additional: [BlockEntityData] = []) {
         guard isLANClientWorld, !lanApplyingReplication,
               let handler = lanContainerEditHandler,
-              let p = player,
-              let snapshot = makeLANBlockEntitySnapshot(be, dimension: dim.rawValue)
+              let p = player
         else { return }
+        let snapshots = ([be] + additional)
+            .compactMap { makeLANBlockEntitySnapshot($0, dimension: dim.rawValue) }
+        guard let snapshot = snapshots.first else { return }
         lanContainerEditSeq += 1
         lanLocalInventoryRevision += 1
         let inventory = makeLANInventorySnapshot(p, playerID: "")
         lanLastPublishedInventory = inventory
         handler(LANContainerEditIntent(
             blockEntity: snapshot,
+            additionalBlockEntities: Array(snapshots.dropFirst()),
             inventory: inventory,
             revision: lanLocalInventoryRevision,
-            editSeq: lanContainerEditSeq
+            editSeq: lanContainerEditSeq,
+            blockEntityRevision: lanOpenContainerRevision
         ))
+        lanOpenContainerRevision = lanBlockEntityRevision(snapshots)
     }
 
     /// public entry point for the app to call from a mirrored screen's close/dismiss handler
@@ -2546,6 +2588,18 @@ public final class GameCore {
         captureLANContainerEdit(be)
         if lanOpenContainerBE?.x == be.x && lanOpenContainerBE?.y == be.y && lanOpenContainerBE?.z == be.z {
             lanOpenContainerBE = nil
+            lanOpenContainerPositions.removeAll()
+            lanOpenContainerRevision = 0
+        }
+    }
+
+    public func gameScreenWillClose(blockEntities: [BlockEntityData]) {
+        guard let be = blockEntities.first else { return }
+        captureLANContainerEdit(be, additional: Array(blockEntities.dropFirst()))
+        if lanOpenContainerBE?.x == be.x && lanOpenContainerBE?.y == be.y && lanOpenContainerBE?.z == be.z {
+            lanOpenContainerBE = nil
+            lanOpenContainerPositions.removeAll()
+            lanOpenContainerRevision = 0
         }
     }
 

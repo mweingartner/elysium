@@ -189,7 +189,7 @@ final class LANMultiplayerTests: XCTestCase {
             XCTAssertEqual(error as? LANMultiplayerCodecError, .unknownMessageType(65_535))
         }
 
-        var oversized = Data([0x50, 0x42, 0x4c, 0x4e, 0, 2, 0, 7, 0, 0, 0, 1])
+        var oversized = Data([0x50, 0x42, 0x4c, 0x4e, 0, UInt8(LAN_MULTIPLAYER_PROTOCOL_VERSION), 0, 7, 0, 0, 0, 1])
         oversized.append(contentsOf: [0x00, 0x10, 0x00, 0x01])
         XCTAssertThrowsError(try LANMultiplayerFrameCodec.decode(oversized)) { error in
             XCTAssertEqual(error as? LANMultiplayerCodecError, .oversizedFrame(LAN_MULTIPLAYER_MAX_FRAME_BYTES + 1))
@@ -549,6 +549,15 @@ final class LANMultiplayerTests: XCTestCase {
     }
 
     func testContainerEditIntentClampsRevisionAndEditSeq() {
+        let additional = (0..<4).map {
+            LANBlockEntitySnapshot(
+                dimension: Dim.overworld.rawValue,
+                x: $0 + 1, y: 0, z: 0,
+                type: "container",
+                slotCount: 1,
+                slots: []
+            )
+        }
         let intent = LANContainerEditIntent(
             blockEntity: LANBlockEntitySnapshot(
                 dimension: Dim.overworld.rawValue,
@@ -557,12 +566,16 @@ final class LANMultiplayerTests: XCTestCase {
                 slotCount: 1,
                 slots: []
             ),
+            additionalBlockEntities: additional,
             inventory: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
             revision: -4,
-            editSeq: -1
+            editSeq: -1,
+            blockEntityRevision: -9
         )
+        XCTAssertEqual(intent.additionalBlockEntities.count, LAN_MULTIPLAYER_MAX_CONTAINER_EDIT_BLOCK_ENTITIES - 1)
         XCTAssertEqual(intent.revision, 0)
         XCTAssertEqual(intent.editSeq, 0)
+        XCTAssertEqual(intent.blockEntityRevision, 0)
     }
 
     func testInventoryUpdateClampsNegativeRevision() {

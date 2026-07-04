@@ -799,6 +799,116 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(updatedChest.items?[1], ItemStack(iid("coal"), 4))
     }
 
+    func testDeferredReplicationReplaysBlockChangesAndBlockEntitiesWhenChunkArrives() throws {
+        let client = makeLoadedWorld()
+        var deferred: LANDeferredReplicationBuffer? = LANDeferredReplicationBuffer()
+        let x = CHUNK_W * 2
+        let y = 64
+        let z = 2
+        let chestCell = Int(B.chest) << 4
+        let snapshot = LANBlockEntitySnapshot(
+            dimension: Dim.overworld.rawValue,
+            x: x,
+            y: y,
+            z: z,
+            type: "container",
+            slotCount: 27,
+            slots: [LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("coal"), count: 5)]
+        )
+
+        let queued = applyLANReplicationBatch(
+            LANReplicationBatch(
+                tick: 1,
+                fullSnapshot: false,
+                blockChanges: [LANBlockChange(dimension: Dim.overworld.rawValue, x: x, y: y, z: z, cell: chestCell)],
+                blockEntities: [snapshot]
+            ),
+            to: client,
+            deferred: &deferred
+        )
+
+        XCTAssertEqual(queued.deferredBlockChanges, 1)
+        XCTAssertEqual(queued.deferredBlockEntities, 1)
+        XCTAssertEqual(deferred?.pendingBlockChangeCount, 1)
+        XCTAssertEqual(deferred?.pendingBlockEntityCount, 1)
+        XCTAssertNil(client.getChunkAt(x, z))
+
+        let section = LANChunkSectionSnapshot(
+            dimension: Dim.overworld.rawValue,
+            cx: 2,
+            cz: 0,
+            sectionY: (y - client.info.minY) / SECTION_H,
+            minY: y,
+            cells: Array(repeating: 0, count: LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT)
+        )
+        let replayed = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 2, fullSnapshot: true, chunkSections: [section]),
+            to: client,
+            deferred: &deferred
+        )
+
+        XCTAssertEqual(replayed.appliedChunkSections, 1)
+        XCTAssertEqual(replayed.appliedBlockChanges, 1)
+        XCTAssertEqual(replayed.appliedBlockEntities, 1)
+        XCTAssertEqual(deferred?.pendingBlockChangeCount, 0)
+        XCTAssertEqual(deferred?.pendingBlockEntityCount, 0)
+        XCTAssertEqual(client.getBlock(x, y, z), chestCell)
+        let chest = try XCTUnwrap(client.getBlockEntity(x, y, z))
+        XCTAssertEqual(chest.items?[0], ItemStack(iid("coal"), 5))
+    }
+
+    func testDeferredBlockEntityWaitsForLaterBlockChangeInArrivingChunk() throws {
+        let client = makeLoadedWorld()
+        var deferred: LANDeferredReplicationBuffer? = LANDeferredReplicationBuffer()
+        let x = CHUNK_W * 2
+        let y = 64
+        let z = 3
+        let chestCell = Int(B.chest) << 4
+        let snapshot = LANBlockEntitySnapshot(
+            dimension: Dim.overworld.rawValue,
+            x: x,
+            y: y,
+            z: z,
+            type: "container",
+            slotCount: 27,
+            slots: [LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 1)]
+        )
+
+        let queued = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 1, fullSnapshot: false, blockEntities: [snapshot]),
+            to: client,
+            deferred: &deferred
+        )
+        XCTAssertEqual(queued.deferredBlockEntities, 1)
+        XCTAssertEqual(deferred?.pendingBlockEntityCount, 1)
+
+        let section = LANChunkSectionSnapshot(
+            dimension: Dim.overworld.rawValue,
+            cx: 2,
+            cz: 0,
+            sectionY: (y - client.info.minY) / SECTION_H,
+            minY: y,
+            cells: Array(repeating: 0, count: LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT)
+        )
+        let replayed = applyLANReplicationBatch(
+            LANReplicationBatch(
+                tick: 2,
+                fullSnapshot: true,
+                blockChanges: [LANBlockChange(dimension: Dim.overworld.rawValue, x: x, y: y, z: z, cell: chestCell)],
+                chunkSections: [section]
+            ),
+            to: client,
+            deferred: &deferred
+        )
+
+        XCTAssertEqual(replayed.appliedChunkSections, 1)
+        XCTAssertEqual(replayed.appliedBlockChanges, 1)
+        XCTAssertEqual(replayed.appliedBlockEntities, 1)
+        XCTAssertEqual(deferred?.pendingBlockEntityCount, 0)
+        let chest = try XCTUnwrap(client.getBlockEntity(x, y, z))
+        XCTAssertEqual(chest.items?[0], ItemStack(iid("diamond"), 1))
+    }
+
     func testCraftingTableBlockEntitySnapshotsReplicateSharedGrid() throws {
         let host = makeLoadedWorld()
         let client = makeLoadedWorld()
@@ -1679,6 +1789,7 @@ final class LANReplicationTests: XCTestCase {
         _ = world.setBlock(2, 64, 1, chestCell)
         let chest = makeContainerBE(2, 64, 1, 27)
         world.setBlockEntity(chest)
+        let beforeChest = try XCTUnwrap(makeLANBlockEntitySnapshot(chest, dimension: Dim.overworld.rawValue))
 
         session.recordInventorySnapshot(
             LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
@@ -1701,10 +1812,16 @@ final class LANReplicationTests: XCTestCase {
             selectedHotbarSlot: 0,
             slots: [LANInventorySlotSnapshot(slot: 0, itemID: iid("stick"), count: 3)]
         )
-        let intent = LANContainerEditIntent(blockEntity: editedBE, inventory: inventory, revision: 1, editSeq: 1)
+        let intent = LANContainerEditIntent(
+            blockEntity: editedBE,
+            inventory: inventory,
+            revision: 1,
+            editSeq: 1,
+            blockEntityRevision: lanBlockEntityRevision([beforeChest])
+        )
 
         let result = session.applyContainerEditIntent(intent, from: "peer-a", to: world)
-        guard case .applied(let be) = result else {
+        guard case .applied(let blockEntities) = result, let be = blockEntities.first else {
             return XCTFail("expected .applied, got \(result)")
         }
         XCTAssertEqual(be.slots.first?.itemID, iid("diamond"))
@@ -1738,6 +1855,7 @@ final class LANReplicationTests: XCTestCase {
         let chest = makeContainerBE(2, 64, 1, 27)
         chest.items![0] = ItemStack(iid("coal"), 1)
         world.setBlockEntity(chest)
+        let beforeChest = try XCTUnwrap(makeLANBlockEntitySnapshot(chest, dimension: Dim.overworld.rawValue))
 
         let intent = LANContainerEditIntent(
             blockEntity: LANBlockEntitySnapshot(
@@ -1751,7 +1869,8 @@ final class LANReplicationTests: XCTestCase {
                 LANInventorySlotSnapshot(slot: 0, itemID: iid("coal"), count: 1),
             ]),
             revision: 1,
-            editSeq: 1
+            editSeq: 1,
+            blockEntityRevision: lanBlockEntityRevision([beforeChest])
         )
 
         let result = session.applyContainerEditIntent(intent, from: "peer-a", to: world)
@@ -1765,7 +1884,9 @@ final class LANReplicationTests: XCTestCase {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession()
         _ = world.setBlock(2, 64, 1, Int(B.chest) << 4)
-        world.setBlockEntity(makeContainerBE(2, 64, 1, 27))
+        let chest = makeContainerBE(2, 64, 1, 27)
+        world.setBlockEntity(chest)
+        let beforeChest = try XCTUnwrap(makeLANBlockEntitySnapshot(chest, dimension: Dim.overworld.rawValue))
         session.recordInventorySnapshot(
             LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
             from: "peer-a"
@@ -1781,16 +1902,110 @@ final class LANReplicationTests: XCTestCase {
             ),
             inventory: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
             revision: 1,
-            editSeq: 1
+            editSeq: 1,
+            blockEntityRevision: lanBlockEntityRevision([beforeChest])
         )
 
         XCTAssertEqual(
             session.applyContainerEditIntent(intent, from: "peer-a", to: world),
             .rejected("container edit is not host-verifiable")
         )
-        let chest = try XCTUnwrap(world.getBlockEntity(2, 64, 1))
-        XCTAssertNil(chest.items?[0])
+        let updatedChest = try XCTUnwrap(world.getBlockEntity(2, 64, 1))
+        XCTAssertNil(updatedChest.items?[0])
         XCTAssertNil(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first)
+    }
+
+    func testApplyContainerEditIntentRejectsStaleBlockEntityRevision() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+        _ = world.setBlock(2, 64, 1, Int(B.chest) << 4)
+        let chest = makeContainerBE(2, 64, 1, 27)
+        chest.items![0] = ItemStack(iid("coal"), 1)
+        world.setBlockEntity(chest)
+        let staleSnapshot = try XCTUnwrap(makeLANBlockEntitySnapshot(chest, dimension: Dim.overworld.rawValue))
+        chest.items![0] = ItemStack(iid("coal"), 2)
+        world.setBlockEntity(chest)
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
+            from: "peer-a"
+        )
+
+        let intent = LANContainerEditIntent(
+            blockEntity: LANBlockEntitySnapshot(
+                dimension: Dim.overworld.rawValue,
+                x: 2, y: 64, z: 1,
+                type: "container",
+                slotCount: 27,
+                slots: []
+            ),
+            inventory: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("coal"), count: 1),
+            ]),
+            revision: 1,
+            editSeq: 1,
+            blockEntityRevision: lanBlockEntityRevision([staleSnapshot])
+        )
+
+        XCTAssertEqual(
+            session.applyContainerEditIntent(intent, from: "peer-a", to: world),
+            .rejected("stale container revision")
+        )
+        let unchanged = try XCTUnwrap(world.getBlockEntity(2, 64, 1))
+        XCTAssertEqual(unchanged.items?[0], ItemStack(iid("coal"), 2))
+        XCTAssertNil(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first)
+    }
+
+    func testApplyContainerEditIntentAppliesTwoBlockContainerTransaction() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+        _ = world.setBlock(2, 64, 1, Int(B.chest) << 4)
+        _ = world.setBlock(3, 64, 1, Int(B.chest) << 4)
+        let left = makeContainerBE(2, 64, 1, 27)
+        left.items![0] = ItemStack(iid("coal"), 1)
+        let right = makeContainerBE(3, 64, 1, 27)
+        world.setBlockEntity(left)
+        world.setBlockEntity(right)
+        let beforeLeft = try XCTUnwrap(makeLANBlockEntitySnapshot(left, dimension: Dim.overworld.rawValue))
+        let beforeRight = try XCTUnwrap(makeLANBlockEntitySnapshot(right, dimension: Dim.overworld.rawValue))
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
+            from: "peer-a"
+        )
+
+        let editedLeft = LANBlockEntitySnapshot(
+            dimension: Dim.overworld.rawValue,
+            x: 2, y: 64, z: 1,
+            type: "container",
+            slotCount: 27,
+            slots: []
+        )
+        let editedRight = LANBlockEntitySnapshot(
+            dimension: Dim.overworld.rawValue,
+            x: 3, y: 64, z: 1,
+            type: "container",
+            slotCount: 27,
+            slots: [LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("coal"), count: 1)]
+        )
+        let intent = LANContainerEditIntent(
+            blockEntity: editedLeft,
+            additionalBlockEntities: [editedRight],
+            inventory: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
+            revision: 1,
+            editSeq: 1,
+            blockEntityRevision: lanBlockEntityRevision([beforeLeft, beforeRight])
+        )
+
+        let result = session.applyContainerEditIntent(intent, from: "peer-a", to: world)
+        guard case .applied(let blockEntities) = result else {
+            return XCTFail("expected .applied, got \(result)")
+        }
+        XCTAssertEqual(blockEntities.count, 2)
+        XCTAssertNil(world.getBlockEntity(2, 64, 1)?.items?[0])
+        XCTAssertEqual(world.getBlockEntity(3, 64, 1)?.items?[0], ItemStack(iid("coal"), 1))
+        XCTAssertEqual(session.drainDirtyBlockEntities(), [
+            LANBlockPosition(dimension: Dim.overworld.rawValue, x: 2, y: 64, z: 1),
+            LANBlockPosition(dimension: Dim.overworld.rawValue, x: 3, y: 64, z: 1),
+        ])
     }
 
     func testApplyContainerEditIntentAllowsCraftingTableRecipeTransform() throws {
@@ -1801,6 +2016,7 @@ final class LANReplicationTests: XCTestCase {
         table.items![0] = ItemStack(iid("oak_planks"), 1)
         table.items![3] = ItemStack(iid("oak_planks"), 1)
         world.setBlockEntity(table)
+        let beforeTable = try XCTUnwrap(makeLANBlockEntitySnapshot(table, dimension: Dim.overworld.rawValue))
         session.recordInventorySnapshot(
             LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
             from: "peer-a"
@@ -1823,11 +2039,12 @@ final class LANReplicationTests: XCTestCase {
                 LANInventorySlotSnapshot(slot: 0, itemID: iid("stick"), count: 4),
             ]),
             revision: 1,
-            editSeq: 1
+            editSeq: 1,
+            blockEntityRevision: lanBlockEntityRevision([beforeTable])
         )
 
         let result = session.applyContainerEditIntent(intent, from: "peer-a", to: world)
-        guard case .applied(let be) = result else {
+        guard case .applied(let blockEntities) = result, let be = blockEntities.first else {
             return XCTFail("expected .applied, got \(result)")
         }
         XCTAssertTrue(be.slots.isEmpty)
@@ -1841,7 +2058,9 @@ final class LANReplicationTests: XCTestCase {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession()
         _ = world.setBlock(2, 64, 1, Int(B.chest) << 4)
-        world.setBlockEntity(makeContainerBE(2, 64, 1, 27))
+        let chest = makeContainerBE(2, 64, 1, 27)
+        world.setBlockEntity(chest)
+        let beforeChest = makeLANBlockEntitySnapshot(chest, dimension: Dim.overworld.rawValue)!
         session.recordInventorySnapshot(
             LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
                 LANInventorySlotSnapshot(slot: 0, itemID: iid("coal"), count: 1),
@@ -1857,7 +2076,8 @@ final class LANReplicationTests: XCTestCase {
             blockEntity: editedBE,
             inventory: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
             revision: 1,
-            editSeq: 1
+            editSeq: 1,
+            blockEntityRevision: lanBlockEntityRevision([beforeChest])
         )
         _ = session.applyContainerEditIntent(intent, from: "peer-a", to: world)
 
@@ -2164,6 +2384,22 @@ final class LANReplicationTests: XCTestCase {
         let redrained = session.drainBlockChanges()
         XCTAssertEqual(redrained.sorted { $0.x < $1.x }, drained.sorted { $0.x < $1.x })
         XCTAssertTrue(session.drainBlockChanges().isEmpty)
+    }
+
+    func testRequeueDirtyBlockEntitiesRestoresDrainedPositionsForRedrain() {
+        let session = LANMultiplayerHostSession()
+        let first = LANBlockPosition(dimension: 0, x: 1, y: 64, z: 1)
+        let second = LANBlockPosition(dimension: 0, x: 2, y: 64, z: 1)
+        session.recordDirtyBlockEntity(first)
+        session.recordDirtyBlockEntity(second)
+
+        let drained = session.drainDirtyBlockEntities()
+        XCTAssertEqual(drained, [first, second])
+        XCTAssertTrue(session.drainDirtyBlockEntities().isEmpty)
+
+        session.requeueDirtyBlockEntities(drained)
+        XCTAssertEqual(session.drainDirtyBlockEntities(), [first, second])
+        XCTAssertTrue(session.drainDirtyBlockEntities().isEmpty)
     }
 
     private func makeAcceptedHostSession(
