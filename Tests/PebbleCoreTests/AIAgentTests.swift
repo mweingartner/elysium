@@ -291,6 +291,94 @@ final class AIAgentTests: XCTestCase {
             }
     }
 
+    func testSetTimeActionAcceptsPresetsAndNormalizesTicks() throws {
+        let (world, player, hit) = makeWorldAndPlayer()
+        let direct = try XCTUnwrap(inferDirectAIAgentAction(from: "set time to night"))
+
+        let result = try executeAIAgentAction(direct, world: world, player: player, cursor: hit)
+
+        XCTAssertTrue(result.changedWorld)
+        XCTAssertEqual(direct.action, "set_time")
+        XCTAssertEqual(world.dayTime, 13_000)
+
+        _ = try executeAIAgentAction(
+            AIAgentAction(action: "set_time", ticks: -1),
+            world: world,
+            player: player,
+            cursor: hit)
+        XCTAssertEqual(world.dayTime, DAY_LENGTH - 1)
+    }
+
+    func testSetWeatherActionAppliesImmediateWeatherState() throws {
+        let (world, player, hit) = makeWorldAndPlayer()
+        let direct = try XCTUnwrap(inferDirectAIAgentAction(from: "make it thunder"))
+
+        let result = try executeAIAgentAction(direct, world: world, player: player, cursor: hit)
+
+        XCTAssertTrue(result.changedWorld)
+        XCTAssertEqual(direct.action, "set_weather")
+        XCTAssertEqual(direct.weather, "thunder")
+        XCTAssertTrue(world.raining)
+        XCTAssertTrue(world.thundering)
+        XCTAssertEqual(world.rainLevel, 1)
+        XCTAssertEqual(world.thunderLevel, 1)
+        XCTAssertEqual(world.weatherTimer, AIAgentWeatherDurationTicks)
+
+        _ = try executeAIAgentAction(
+            AIAgentAction(action: "set_weather", weather: "clear"),
+            world: world,
+            player: player,
+            cursor: hit)
+        XCTAssertFalse(world.raining)
+        XCTAssertFalse(world.thundering)
+        XCTAssertEqual(world.rainLevel, 0)
+        XCTAssertEqual(world.thunderLevel, 0)
+    }
+
+    func testSpawnEntityAtCursorUsesRegisteredNameAndCapsCount() throws {
+        let (world, player, hit) = makeWorldAndPlayer()
+        let direct = try XCTUnwrap(inferDirectAIAgentAction(from: "spawn two zombies at the cursor"))
+
+        let directResult = try executeAIAgentAction(direct, world: world, player: player, cursor: hit)
+        let cappedResult = try executeAIAgentAction(
+            AIAgentAction(action: "spawn_entity", count: 99, target: "cursor", entity: "cow"),
+            world: world,
+            player: player,
+            cursor: hit)
+
+        XCTAssertTrue(directResult.changedWorld)
+        XCTAssertTrue(cappedResult.changedWorld)
+        XCTAssertEqual(direct.entity, "zombie")
+        XCTAssertEqual(direct.count, 2)
+        XCTAssertEqual(world.entities.compactMap { $0 as? Entity }.filter { $0.type == "zombie" }.count, 2)
+        XCTAssertEqual(world.entities.compactMap { $0 as? Entity }.filter { $0.type == "cow" }.count, AIAgentMaxSpawnCount)
+        let cow = try XCTUnwrap(world.entities.compactMap { $0 as? Entity }.first { $0.type == "cow" })
+        XCTAssertTrue(cow.persistent)
+        XCTAssertEqual(cow.x, 0.5)
+        XCTAssertEqual(cow.y, 64)
+        XCTAssertEqual(cow.z, 0.5)
+    }
+
+    func testSpawnEntityRejectsUnknownEntityAndMissingCursor() {
+        let (world, player, hit) = makeWorldAndPlayer()
+
+        XCTAssertThrowsError(try executeAIAgentAction(
+            AIAgentAction(action: "spawn_entity", count: 1, target: "cursor", entity: "missingno"),
+            world: world,
+            player: player,
+            cursor: hit)) { error in
+                XCTAssertEqual(error as? AIAgentError, .unknownEntity("missingno"))
+            }
+
+        XCTAssertThrowsError(try executeAIAgentAction(
+            AIAgentAction(action: "spawn_entity", count: 1, target: "cursor", entity: "zombie"),
+            world: world,
+            player: player,
+            cursor: nil)) { error in
+                XCTAssertEqual(error as? AIAgentError, .missingCursorTarget)
+            }
+    }
+
     func testSnapshotIncludesNearbyDroppedItems() {
         let (world, player, hit) = makeWorldAndPlayer()
         let item = ItemEntity(world: world)
@@ -303,6 +391,8 @@ final class AIAgentTests: XCTestCase {
         XCTAssertTrue(snapshot.contains("diamondx2"), snapshot)
         XCTAssertTrue(snapshot.contains("Cursor: block=stone"), snapshot)
         XCTAssertTrue(snapshot.contains("Available items:"), snapshot)
+        XCTAssertTrue(snapshot.contains("Available spawnable entities:"), snapshot)
+        XCTAssertTrue(snapshot.contains("zombie"), snapshot)
     }
 
     func testSnapshotIncludesSavedTemplatePalette() {
@@ -323,5 +413,17 @@ final class AIAgentTests: XCTestCase {
         XCTAssertTrue(snapshot.contains("template=\"house\""), snapshot)
         XCTAssertTrue(snapshot.contains("oak_planksx1"), snapshot)
         XCTAssertTrue(snapshot.contains("blackstonex1"), snapshot)
+    }
+
+    func testPromptAdvertisesWorldMutatorActions() {
+        let (world, player, hit) = makeWorldAndPlayer()
+
+        let prompt = buildAIAgentPrompt(userRequest: "make it rain and spawn a cow", world: world,
+                                        player: player, cursor: hit)
+
+        XCTAssertTrue(prompt.contains(#""set_time""#), prompt)
+        XCTAssertTrue(prompt.contains(#""set_weather""#), prompt)
+        XCTAssertTrue(prompt.contains(#""spawn_entity""#), prompt)
+        XCTAssertTrue(prompt.contains("Available spawnable entities:"), prompt)
     }
 }

@@ -6,8 +6,10 @@ import Foundation
 
 public let AIAgentNearbyRadius = 12.0
 public let AIAgentMaxGiveCount = 640
+public let AIAgentMaxSpawnCount = 16
 public let AIAgentMaxModelJSONBytes = 16 * 1024
 public let AIAgentMaxPromptCharacters = 24_000
+public let AIAgentWeatherDurationTicks = 12_000
 public let AIAgentHoleFillSearchDistance = 32
 public let AIAgentHoleFillLateralSearch = 3
 public let AIAgentHoleFillMaxDepth = 64
@@ -28,11 +30,18 @@ public struct AIAgentAction: Codable, Equatable {
     public var kind: String?
     public var length: Int?
     public var style: String?
+    public var entity: String?
+    public var value: String?
+    public var time: String?
+    public var weather: String?
+    public var ticks: Int?
 
     public init(action: String, item: String? = nil, block: String? = nil, count: Int? = nil,
                 target: String? = nil, message: String? = nil, template: String? = nil,
                 name: String? = nil, fromBlock: String? = nil, toBlock: String? = nil,
-                kind: String? = nil, length: Int? = nil, style: String? = nil) {
+                kind: String? = nil, length: Int? = nil, style: String? = nil,
+                entity: String? = nil, value: String? = nil, time: String? = nil,
+                weather: String? = nil, ticks: Int? = nil) {
         self.action = action
         self.item = item
         self.block = block
@@ -46,10 +55,16 @@ public struct AIAgentAction: Codable, Equatable {
         self.kind = kind
         self.length = length
         self.style = style
+        self.entity = entity
+        self.value = value
+        self.time = time
+        self.weather = weather
+        self.ticks = ticks
     }
 
     enum CodingKeys: String, CodingKey {
         case action, item, block, count, target, message, template, name, kind, length, style
+        case entity, value, time, weather, ticks
         case fromBlock = "from_block"
         case toBlock = "to_block"
     }
@@ -96,6 +111,13 @@ public enum AIAgentError: Error, Equatable, CustomStringConvertible {
     case targetOutOfWorld(Int, Int, Int)
     case placementFailed(String)
     case inventoryFull(String)
+    case missingTimeValue
+    case invalidTimeValue(String)
+    case missingWeatherValue
+    case invalidWeather(String)
+    case missingEntity
+    case unknownEntity(String)
+    case entitySpawnFailed(String)
     case missingTemplateName
     case unknownTemplate(String)
     case missingBlockReplacement
@@ -119,6 +141,13 @@ public enum AIAgentError: Error, Equatable, CustomStringConvertible {
         case .targetOutOfWorld(let x, let y, let z): return "Target is outside world height at \(x) \(y) \(z)"
         case .placementFailed(let item): return "Could not place \(item) at the cursor"
         case .inventoryFull(let item): return "Inventory is full; could not give \(item)"
+        case .missingTimeValue: return "AI action did not name a time preset or tick value"
+        case .invalidTimeValue(let value): return "Unknown time value: \(value)"
+        case .missingWeatherValue: return "AI action did not name a weather state"
+        case .invalidWeather(let value): return "Unknown weather state: \(value)"
+        case .missingEntity: return "AI action did not name a spawnable entity"
+        case .unknownEntity(let value): return "Unknown spawnable entity: \(value)"
+        case .entitySpawnFailed(let value): return "Could not spawn \(value) at the cursor"
         case .missingTemplateName: return "AI action did not name an object template"
         case .unknownTemplate(let name): return "Unknown object template: \(name)"
         case .missingBlockReplacement: return "AI action did not name both source and replacement blocks"
@@ -155,6 +184,26 @@ private let aiAgentAliases: [String: String] = [
     "wooden_planks": "oak_planks",
 ]
 
+private let aiAgentEntityAliases: [String: String] = [
+    "dragon": "ender_dragon",
+    "zombie_pigman": "zombified_piglin",
+    "pigman": "zombified_piglin",
+    "mooshroom_cow": "mooshroom",
+    "snowman": "snow_golem",
+]
+
+private let aiAgentTimePresets: [String: Int] = [
+    "day": 1_000,
+    "morning": 1_000,
+    "noon": 6_000,
+    "sunset": 12_000,
+    "dusk": 12_000,
+    "night": 13_000,
+    "midnight": 18_000,
+    "sunrise": 23_000,
+    "dawn": 23_000,
+]
+
 private func canonicalAIAgentName(_ raw: String) -> String {
     let normalized = normalizeAIAgentName(raw)
     return aiAgentAliases[normalized] ?? normalized
@@ -186,6 +235,62 @@ public func resolveAIAgentBlockID(_ raw: String) -> UInt16? {
         }
     }
     return nil
+}
+
+public func resolveAIAgentEntityName(_ raw: String) -> String? {
+    let spawnable = Set(spawnableMobs())
+    for baseCandidate in aiAgentNameCandidates(raw) {
+        var candidates = [baseCandidate]
+        if let alias = aiAgentEntityAliases[baseCandidate] {
+            candidates.append(alias)
+        }
+        for suffix in ["_mob", "_mobs", "_animal", "_animals", "_monster", "_monsters"] {
+            if baseCandidate.hasSuffix(suffix) {
+                candidates.append(String(baseCandidate.dropLast(suffix.count)))
+            }
+        }
+        for candidate in candidates {
+            if spawnable.contains(candidate) {
+                return candidate
+            }
+        }
+    }
+    return nil
+}
+
+public func resolveAIAgentDayTime(value rawValue: String?, ticks: Int? = nil) -> Int? {
+    if let ticks {
+        return normalizedAIAgentDayTime(ticks)
+    }
+    guard let rawValue else { return nil }
+    let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let normalized = normalizeAIAgentName(trimmed)
+    if let preset = aiAgentTimePresets[normalized] {
+        return preset
+    }
+    if let ticks = Int(trimmed) ?? Int(normalized) {
+        return normalizedAIAgentDayTime(ticks)
+    }
+    return nil
+}
+
+private func normalizedAIAgentDayTime(_ ticks: Int) -> Int {
+    ((ticks % DAY_LENGTH) + DAY_LENGTH) % DAY_LENGTH
+}
+
+public func resolveAIAgentWeather(_ raw: String?) -> (name: String, raining: Bool, thundering: Bool)? {
+    guard let raw else { return nil }
+    switch normalizeAIAgentName(raw) {
+    case "clear", "sun", "sunny", "fair", "none", "stop_rain", "stop_raining", "clear_weather":
+        return ("clear", false, false)
+    case "rain", "raining", "rainy":
+        return ("rain", true, false)
+    case "thunder", "storm", "thunderstorm", "thunder_storm", "lightning":
+        return ("thunder", true, true)
+    default:
+        return nil
+    }
 }
 
 private func aiAgentNameCandidates(_ raw: String) -> [String] {
@@ -359,6 +464,9 @@ public func inferDirectAIAgentAction(from userRequest: String) -> AIAgentAction?
     if let holeAction = inferDirectAIAgentHoleFillAction(from: userRequest) {
         return holeAction
     }
+    if let worldAction = inferDirectAIAgentWorldMutationAction(from: userRequest) {
+        return worldAction
+    }
     let normalized = normalizeAIAgentRequestText(userRequest)
     guard hasInventoryGiveIntent(normalized) else { return nil }
 
@@ -405,6 +513,107 @@ private func inferDirectAIAgentHoleFillAction(from userRequest: String) -> AIAge
         target: "front")
 }
 
+private func inferDirectAIAgentWorldMutationAction(from userRequest: String) -> AIAgentAction? {
+    let normalized = normalizeAIAgentRequestText(userRequest)
+    if let action = inferDirectAIAgentTimeAction(from: normalized) { return action }
+    if let action = inferDirectAIAgentWeatherAction(from: normalized) { return action }
+    if let action = inferDirectAIAgentSpawnEntityAction(from: normalized) { return action }
+    return nil
+}
+
+private func inferDirectAIAgentTimeAction(from normalized: String) -> AIAgentAction? {
+    let words = normalized.split(separator: " ").map(String.init)
+    guard !words.isEmpty else { return nil }
+    let padded = " \(normalized) "
+    let hasTimeIntent = padded.contains(" time ")
+        || padded.contains(" make it ")
+        || padded.contains(" make the world ")
+        || padded.contains(" set it ")
+    guard hasTimeIntent,
+          [" set ", " make ", " change "].contains(where: { padded.contains($0) }) else { return nil }
+
+    if let timeIndex = words.firstIndex(of: "time") {
+        let searchEnd = min(words.count, timeIndex + 6)
+        for word in words[(timeIndex + 1)..<searchEnd] {
+            if resolveAIAgentDayTime(value: word) != nil {
+                return AIAgentAction(action: "set_time", value: word)
+            }
+        }
+    }
+
+    for word in words {
+        if aiAgentTimePresets[word] != nil {
+            return AIAgentAction(action: "set_time", value: word)
+        }
+        if Int(word) != nil, padded.contains(" time ") {
+            return AIAgentAction(action: "set_time", value: word)
+        }
+    }
+    return nil
+}
+
+private func inferDirectAIAgentWeatherAction(from normalized: String) -> AIAgentAction? {
+    let words = normalized.split(separator: " ").map(String.init)
+    guard !words.isEmpty else { return nil }
+    let padded = " \(normalized) "
+    let hasWeatherWord = padded.contains(" weather ")
+        || padded.contains(" rain ")
+        || padded.contains(" raining ")
+        || padded.contains(" thunder ")
+        || padded.contains(" thunderstorm ")
+        || padded.contains(" storm ")
+    guard hasWeatherWord,
+          [" set ", " make ", " change ", " start ", " stop ", " clear "].contains(where: { padded.contains($0) }) else {
+        return nil
+    }
+
+    if padded.contains(" clear ") || padded.contains(" stop rain ") || padded.contains(" stop raining ") {
+        return AIAgentAction(action: "set_weather", weather: "clear")
+    }
+    for word in words {
+        if let weather = resolveAIAgentWeather(word) {
+            return AIAgentAction(action: "set_weather", weather: weather.name)
+        }
+    }
+    return nil
+}
+
+private func inferDirectAIAgentSpawnEntityAction(from normalized: String) -> AIAgentAction? {
+    let padded = " \(normalized) "
+    let hasSpawnVerb = [" spawn ", " summon ", " place "].contains { padded.contains($0) }
+    let hasCursorTarget = padded.contains(" at cursor ")
+        || padded.contains(" at the cursor ")
+        || padded.contains(" on cursor ")
+        || padded.contains(" on the cursor ")
+        || padded.contains(" at crosshair ")
+        || padded.contains(" at the crosshair ")
+        || padded.contains(" where i am looking ")
+        || padded.contains(" where im looking ")
+        || padded.contains(" where i m looking ")
+    guard hasSpawnVerb, hasCursorTarget else { return nil }
+
+    let words = normalized.split(separator: " ").map(String.init)
+    guard let verbIndex = words.firstIndex(where: { ["spawn", "summon", "place"].contains($0) }) else { return nil }
+    var entityWords: [String] = []
+    let stopWords = Set(["at", "on", "where", "near", "by", "to", "cursor", "crosshair", "there"])
+    for word in words[(verbIndex + 1)..<words.count] {
+        if !entityWords.isEmpty && stopWords.contains(word) { break }
+        entityWords.append(word)
+    }
+    let noise = Set([
+        "a", "an", "the", "some", "mob", "mobs", "animal", "animals",
+        "monster", "monsters", "hostile", "friendly",
+    ])
+    let filtered = entityWords.filter { word in
+        !noise.contains(word) && spelledAIAgentNumber(word) == nil && Int(word) == nil
+    }
+    guard !filtered.isEmpty else { return nil }
+    let phrase = filtered.joined(separator: " ")
+    guard let entity = resolveAIAgentEntityName(phrase) else { return nil }
+    let count = min(AIAgentMaxSpawnCount, max(1, inferDirectAIAgentCount(from: entityWords)))
+    return AIAgentAction(action: "spawn_entity", count: count, target: "cursor", entity: entity)
+}
+
 private func normalizeAIAgentRequestText(_ raw: String) -> String {
     var out = ""
     for scalar in raw.lowercased().unicodeScalars {
@@ -447,6 +656,11 @@ private func inferDirectAIAgentCount(from itemWords: [String], itemId: Int) -> I
         return multiplier * itemDef(itemId).maxStack
     }
     return multiplier
+}
+
+private func inferDirectAIAgentCount(from words: [String]) -> Int {
+    guard let first = words.first else { return 1 }
+    return spelledAIAgentNumber(first) ?? Int(first) ?? 1
 }
 
 private func spelledAIAgentNumber(_ word: String) -> Int? {
@@ -876,6 +1090,68 @@ public func executeAIAgentAction(_ action: AIAgentAction, world: World, player: 
         return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
                                       changedWorld: result.filledBlocks > 0)
 
+    case "set_time", "time", "set_day_time":
+        let rawValue = action.value ?? action.time
+        guard rawValue != nil || action.ticks != nil else { throw AIAgentError.missingTimeValue }
+        guard let dayTime = resolveAIAgentDayTime(value: rawValue, ticks: action.ticks) else {
+            throw AIAgentError.invalidTimeValue(rawValue ?? "\(action.ticks ?? 0)")
+        }
+        world.dayTime = dayTime
+        let fallback = "Set time to \(dayTime)."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: true)
+
+    case "set_weather", "weather":
+        guard let rawWeather = action.weather ?? action.value ?? action.kind else {
+            throw AIAgentError.missingWeatherValue
+        }
+        guard let weather = resolveAIAgentWeather(rawWeather) else {
+            throw AIAgentError.invalidWeather(rawWeather)
+        }
+        world.raining = weather.raining
+        world.thundering = weather.thundering
+        world.rainLevel = weather.raining ? 1 : 0
+        world.thunderLevel = weather.thundering ? 1 : 0
+        world.weatherTimer = AIAgentWeatherDurationTicks
+        let fallback = "Weather set to \(weather.name)."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: true)
+
+    case "spawn_entity", "spawn_mob", "summon":
+        guard let rawEntity = action.entity ?? action.name ?? action.kind else { throw AIAgentError.missingEntity }
+        guard let entityName = resolveAIAgentEntityName(rawEntity) else { throw AIAgentError.unknownEntity(rawEntity) }
+        guard let cursor else { throw AIAgentError.missingCursorTarget }
+        let target = aiCursorPlacementPosition(cursor, in: world)
+        guard target.y >= world.info.minY && target.y < world.info.minY + world.info.height else {
+            throw AIAgentError.targetOutOfWorld(target.x, target.y, target.z)
+        }
+        guard target.y + 1 < world.info.minY + world.info.height else {
+            throw AIAgentError.targetOutOfWorld(target.x, target.y + 1, target.z)
+        }
+        guard world.isLoadedAt(target.x, target.z) else {
+            throw AIAgentError.unloadedTarget(target.x, target.y, target.z)
+        }
+        guard canAIAgentSpawnEntity(at: target, in: world) else {
+            throw AIAgentError.entitySpawnFailed(entityName)
+        }
+        let count = min(AIAgentMaxSpawnCount, max(1, action.count ?? 1))
+        var spawned = 0
+        for _ in 0..<count {
+            if spawnMob(
+                world,
+                entityName,
+                Double(target.x) + 0.5,
+                Double(target.y),
+                Double(target.z) + 0.5,
+                SpawnOpts(persistent: true)) != nil {
+                spawned += 1
+            }
+        }
+        guard spawned > 0 else { throw AIAgentError.entitySpawnFailed(entityName) }
+        let fallback = "Spawned \(spawned) \(entityName) at \(target.x) \(target.y) \(target.z)."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: true)
+
     default:
         throw AIAgentError.unsupportedAction(action.action)
     }
@@ -886,6 +1162,15 @@ private func placeableItemID(for blockId: UInt16) -> Int? {
     guard idx >= 0 && idx < blockToItem.count else { return nil }
     let itemId = blockToItem[idx]
     return itemId >= 0 ? Int(itemId) : nil
+}
+
+private func canAIAgentSpawnEntity(at target: (x: Int, y: Int, z: Int), in world: World) -> Bool {
+    let footId = world.getBlockId(target.x, target.y, target.z)
+    if footId != 0 && !blockDefs[footId].replaceable {
+        return false
+    }
+    let headId = world.getBlockId(target.x, target.y + 1, target.z)
+    return headId == 0 || !blockDefs[headId].solid
 }
 
 public func buildAIAgentSnapshot(world: World, player: Player, cursor: RaycastHit?,
@@ -970,6 +1255,7 @@ public func buildAIAgentSnapshot(world: World, player: Player, cursor: RaycastHi
     }.joined(separator: ", ")
     lines.append("Loaded chunks sample: \(chunks.isEmpty ? "none" : chunks)")
 
+    lines.append("Available spawnable entities: " + spawnableMobs().sorted().joined(separator: ", "))
     lines.append("Available items: " + itemDefs.map(\.name).sorted().joined(separator: ", "))
     lines.append("Placeable block items: " + itemDefs.filter { $0.block != nil }.map(\.name).sorted().joined(separator: ", "))
     return lines.joined(separator: "\n")
@@ -988,6 +1274,9 @@ Allowed actions:
 {"action":"give_item","item":"registered_item_id_or_display_name","count":1,"message":"short answer"}
 {"action":"place_block","item":"registered_block_item_or_block_id","target":"cursor","message":"short answer"}
 {"action":"fill_hole","block":"registered_solid_block_id_or_display_name","target":"front","message":"short answer"}
+{"action":"set_time","value":"day|noon|sunset|night|midnight|sunrise|ticks","message":"short answer"}
+{"action":"set_weather","weather":"clear|rain|thunder","message":"short answer"}
+{"action":"spawn_entity","entity":"registered_spawnable_entity_name","count":1,"target":"cursor","message":"short answer"}
 {"action":"replace_template_blocks","template":"saved_template_name","from_block":"wood blocks","to_block":"bamboo","message":"short answer"}
 {"action":"create_template","template":"new_template_name","kind":"pirate_ship","length":50,"style":"short style description","message":"short answer"}
 
@@ -995,6 +1284,9 @@ Rules:
 - Use only registered item or block names shown in the state.
 - To place at the current cursor location, use action "place_block" and target "cursor".
 - To fill a hole in front of the player, use action "fill_hole" and target "front"; the engine will find the bounded connected empty cavity below the local ground plane.
+- To change time of day, use action "set_time"; ticks are normalized to one day and presets are day, noon, sunset, night, midnight, or sunrise.
+- To change weather, use action "set_weather"; only clear, rain, and thunder are allowed.
+- To spawn an animal or monster at the current cursor location, use action "spawn_entity", target "cursor", and one of the registered spawnable entity names. Keep count small.
 - To create a non-placeable item, use action "give_item".
 - A request for "a stack" means the item's maximum stack size, usually 64.
 - To edit a saved object template, use "replace_template_blocks"; "wood blocks" means every registered wood-family block in that template.

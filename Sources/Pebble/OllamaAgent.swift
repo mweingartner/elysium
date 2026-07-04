@@ -159,7 +159,11 @@ final class OllamaAgentService {
                 "properties": [
                     "action": [
                         "type": "string",
-                        "enum": ["say", "give_item", "place_block", "fill_hole", "replace_template_blocks", "create_template"],
+                        "enum": [
+                            "say", "give_item", "place_block", "fill_hole",
+                            "set_time", "set_weather", "spawn_entity",
+                            "replace_template_blocks", "create_template",
+                        ],
                     ],
                     "item": ["type": "string"],
                     "block": ["type": "string"],
@@ -168,6 +172,11 @@ final class OllamaAgentService {
                     "message": ["type": "string"],
                     "template": ["type": "string"],
                     "name": ["type": "string"],
+                    "entity": ["type": "string"],
+                    "value": ["type": "string"],
+                    "time": ["type": "string"],
+                    "weather": ["type": "string", "enum": ["clear", "rain", "thunder"]],
+                    "ticks": ["type": "integer", "minimum": 0, "maximum": DAY_LENGTH - 1],
                     "from_block": ["type": "string"],
                     "to_block": ["type": "string"],
                     "kind": ["type": "string", "enum": ["pirate_ship", "ship", "boat"]],
