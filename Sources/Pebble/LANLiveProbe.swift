@@ -42,6 +42,7 @@ final class LANLiveProbe {
     private var clientWorldFrame: Int?
     private var clientPositionedFrame: Int?
     private var clientUseSent = false
+    private var clientUseSentFrame: Int?
     private var hostStarted = false
     private var completed = false
     private let timeoutFrames: Int
@@ -131,7 +132,7 @@ final class LANLiveProbe {
         let d = door(in: game)
         let cell = game.world.getBlock(d.x, d.y, d.z)
         if (cell >> 4) == Int(B.oak_door), isDoorOpen(cell) {
-            pass("host remote-use door=\(d.x),\(d.y),\(d.z) cell=\(cell)")
+            pass("host remote-use door=\(d.x),\(d.y),\(d.z) cell=\(cell) frame=\(frames)")
         }
     }
 
@@ -201,7 +202,8 @@ final class LANLiveProbe {
 
         if isDoorOpen(lower), hasChestItem {
             game.saveAndFlush(synchronous: true)
-            pass("client shared-state door_open=true chest_item=stick:7")
+            let latencyFrames = clientUseSentFrame.map { frames - $0 } ?? -1
+            pass("client shared-state door_open=true chest_item=stick:7 latencyFrames=\(latencyFrames)")
             return
         }
 
@@ -224,6 +226,7 @@ final class LANLiveProbe {
             game.mouseDown(2)
             game.mouseUp(2)
             clientUseSent = true
+            clientUseSentFrame = frames
             pebbleLANProbeLog("client_use_sent door=\(d.x),\(d.y),\(d.z)")
         }
     }

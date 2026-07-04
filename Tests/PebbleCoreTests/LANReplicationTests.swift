@@ -973,6 +973,93 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(xpSnapshot.xpAmount, 7)
     }
 
+    func testEntitySnapshotsFilterAroundAnyPlayerFocusPoint() throws {
+        let world = makeLoadedWorld()
+        let nearHost = spawnItem(world, 1.5, 65, 1.5, ItemStack(iid("coal"), 1))
+        let nearGuest = spawnItem(world, 120.5, 65, 1.5, ItemStack(iid("stick"), 1))
+        let farAway = spawnItem(world, 260.5, 65, 1.5, ItemStack(iid("diamond"), 1))
+
+        let snapshots = makeLANEntitySnapshots(
+            in: world,
+            around: [(x: 0.5, z: 0.5), (x: 120.5, z: 0.5)],
+            radius: 8
+        )
+        let ids = Set(snapshots.map(\.entityID))
+
+        XCTAssertTrue(ids.contains(nearHost.id))
+        XCTAssertTrue(ids.contains(nearGuest.id))
+        XCTAssertFalse(ids.contains(farAway.id))
+    }
+
+    func testHostReplicationCadenceSelectsBackgroundFieldsByIndependentIntervals() {
+        let cadence = LANHostReplicationCadence(
+            entityInterval: 0.20,
+            completeEntityInterval: 1.0,
+            blockEntityFillInterval: 0.50,
+            worldStateInterval: 1.0,
+            inventoryInterval: 1.0,
+            worldSummaryInterval: 1.0
+        )
+
+        let first = cadence.backgroundSelection(
+            now: 0.05,
+            lastEntitySnapshot: 0,
+            lastCompleteEntitySnapshot: 0,
+            lastBlockEntityFill: 0,
+            lastWorldStateSnapshot: 0,
+            lastInventorySnapshot: 0,
+            lastWorldSummary: 0
+        )
+        XCTAssertTrue(first.hasContent)
+        XCTAssertTrue(first.includeEntitySnapshots)
+        XCTAssertTrue(first.entitySnapshotsComplete)
+        XCTAssertTrue(first.includeBlockEntityFill)
+        XCTAssertTrue(first.includeWorldState)
+        XCTAssertTrue(first.includeInventories)
+        XCTAssertTrue(first.includeWorldSummary)
+
+        let quiet = cadence.backgroundSelection(
+            now: 0.10,
+            lastEntitySnapshot: 0.05,
+            lastCompleteEntitySnapshot: 0.05,
+            lastBlockEntityFill: 0.05,
+            lastWorldStateSnapshot: 0.05,
+            lastInventorySnapshot: 0.05,
+            lastWorldSummary: 0.05
+        )
+        XCTAssertFalse(quiet.hasContent)
+
+        let entityOnly = cadence.backgroundSelection(
+            now: 0.26,
+            lastEntitySnapshot: 0.05,
+            lastCompleteEntitySnapshot: 0.05,
+            lastBlockEntityFill: 0.05,
+            lastWorldStateSnapshot: 0.05,
+            lastInventorySnapshot: 0.05,
+            lastWorldSummary: 0.05
+        )
+        XCTAssertTrue(entityOnly.includeEntitySnapshots)
+        XCTAssertFalse(entityOnly.entitySnapshotsComplete)
+        XCTAssertFalse(entityOnly.includeBlockEntityFill)
+        XCTAssertFalse(entityOnly.includeWorldState)
+
+        let complete = cadence.backgroundSelection(
+            now: 1.06,
+            lastEntitySnapshot: 0.86,
+            lastCompleteEntitySnapshot: 0.05,
+            lastBlockEntityFill: 0.55,
+            lastWorldStateSnapshot: 0.05,
+            lastInventorySnapshot: 0.05,
+            lastWorldSummary: 0.05
+        )
+        XCTAssertTrue(complete.includeEntitySnapshots)
+        XCTAssertTrue(complete.entitySnapshotsComplete)
+        XCTAssertTrue(complete.includeBlockEntityFill)
+        XCTAssertTrue(complete.includeWorldState)
+        XCTAssertTrue(complete.includeInventories)
+        XCTAssertTrue(complete.includeWorldSummary)
+    }
+
     func testEntitySnapshotsMirrorPassiveAndHostileMobs() throws {
         let world = makeLoadedWorld()
         let chicken = Chicken(world: world)

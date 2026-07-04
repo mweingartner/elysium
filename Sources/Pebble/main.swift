@@ -463,6 +463,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     private var fps = 0
     private var uncappedMode = false
     private var uncapTimer: Timer?
+    private var lanAutomationTimer: Timer?
+    private var lastDrawableTime = CACurrentMediaTime()
     var bot: PhysicsBot?
     var booth: PhotoBooth?
     // test hook: PEBBLE_CMD="/tp 0 120 0;/time set 1000" runs once the world is up
@@ -575,6 +577,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
                 booth = PhotoBooth(game: game, renderer: renderer)
             }
         }
+        startLANAutomationTimerIfNeeded()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -668,6 +671,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         }
     }
 
+    private func startLANAutomationTimerIfNeeded() {
+        guard lanAutomationTimer == nil, lanProbe != nil || pendingLANAutoJoin != nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.tickLANAutomationTimer()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        lanAutomationTimer = timer
+    }
+
+    private func tickLANAutomationTimer() {
+        let now = CACurrentMediaTime()
+        guard now - lastDrawableTime > 0.25 else { return }
+        tickLANAutomation()
+        if game.hasWorld() {
+            _ = game.frame(dtMs: TICK_MS)
+            LANMultiplayerManager.shared.tickReplication(game: game)
+        }
+    }
+
+    private func tickLANAutomation() {
+        if let autoJoin = pendingLANAutoJoin {
+            pendingLANAutoJoinDelay += 1
+            if pendingLANAutoJoinDelay > 30 {
+                LANMultiplayerManager.shared.attachGame(game)
+                do {
+                    try LANMultiplayerManager.shared.directConnect(
+                        host: autoJoin.target.host,
+                        port: String(autoJoin.target.port),
+                        joinCode: autoJoin.joinCode,
+                        playerName: autoJoin.playerName
+                    )
+                    pebbleLANProbeLog("autojoin_started host=\(autoJoin.target.host) port=\(autoJoin.target.port) player=\(autoJoin.playerName)")
+                } catch {
+                    pebbleLANProbeLog("autojoin_failed error=\(error)")
+                }
+                pendingLANAutoJoin = nil
+            }
+        }
+        lanProbe?.tick(app: self)
+    }
+
     func draw(in view: MTKView) {
         let now = CACurrentMediaTime()
         let dt = (now - lastFrame) * 1000
@@ -696,9 +740,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
             }
         }
 
+        tickLANAutomation()
+
         guard let drawable = view.currentDrawable,
               let rpd = view.currentRenderPassDescriptor,
               let cmd = renderer.queue.makeCommandBuffer() else { return }
+        lastDrawableTime = now
 
         if renderer.fbWidth == 0 {
             renderer.resize(Int(view.drawableSize.width), Int(view.drawableSize.height))
@@ -718,25 +765,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
                 pendingCmds = nil
             }
         }
-        if let autoJoin = pendingLANAutoJoin {
-            pendingLANAutoJoinDelay += 1
-            if pendingLANAutoJoinDelay > 30 {
-                LANMultiplayerManager.shared.attachGame(game)
-                do {
-                    try LANMultiplayerManager.shared.directConnect(
-                        host: autoJoin.target.host,
-                        port: String(autoJoin.target.port),
-                        joinCode: autoJoin.joinCode,
-                        playerName: autoJoin.playerName
-                    )
-                    pebbleLANProbeLog("autojoin_started host=\(autoJoin.target.host) port=\(autoJoin.target.port) player=\(autoJoin.playerName)")
-                } catch {
-                    pebbleLANProbeLog("autojoin_failed error=\(error)")
-                }
-                pendingLANAutoJoin = nil
-            }
-        }
-        lanProbe?.tick(app: self)
         if let screen = pendingOpenScreen, game.hasWorld(), pendingCmds == nil {
             pendingOpenScreenDelay += 1
             if pendingOpenScreenDelay > 90 {

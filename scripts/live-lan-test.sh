@@ -103,11 +103,11 @@ unset_launch_env() {
 }
 
 remote_set_launch_env() {
-    remote_gui "/bin/launchctl setenv '$1' '$(printf "%s" "$2" | sed "s/'/'\\\\''/g")'"
+    remote "/bin/launchctl setenv '$1' '$(printf "%s" "$2" | sed "s/'/'\\\\''/g")'"
 }
 
 remote_unset_launch_env() {
-    remote_gui "/bin/launchctl unsetenv '$1' >/dev/null 2>&1 || true"
+    remote "/bin/launchctl unsetenv '$1' >/dev/null 2>&1 || true"
 }
 
 cleanup_env() {

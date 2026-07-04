@@ -183,12 +183,16 @@ Implemented client flow:
    title screen without snapping to an empty local `surfaceY`, and receives an
    initial replication batch centered on the host world's spawn neighborhood.
 8. Host publishes periodic bounded replication batches from the main game
-   thread. World/player/entity state publishes at 20 Hz, host runtime block
-   mutations are captured through the coalescing block-change log, and full
-   chunk-section refreshes publish once per second. Clients acknowledge and apply
-   batches to a client mirror; if a matching world is already loaded, world
-   state, block deltas, and chunk sections are applied through the normal world
-   dirty-section path.
+   thread. The 20 Hz foreground batch carries player state plus drained block
+   deltas and dirty block-entity contents; lower-rate background batches carry
+   weather/time summaries, inventory display snapshots, relevance-filtered
+   entity snapshots, and small block-entity fill snapshots. Initial joins and
+   explicit chunk requests carry chunk sections; periodic ticks do not refresh
+   chunks. Background-only deltas may be skipped under send backpressure, but
+   batches with block deltas, chunk sections, or block-entity contents are not
+   classified as stale. Clients acknowledge and apply batches to a client
+   mirror; if a matching world is already loaded, world state, block deltas, and
+   chunk sections are applied through the normal world dirty-section path.
 9. Transient LAN client worlds request missing chunks from the host with
    `LANChunkRequest` and do not generate local seed chunks for shared play.
    New clients include the current view Y and request a bounded 3x3 visible
@@ -260,13 +264,16 @@ Implemented host replication tick:
 
 1. App frame advances the single host `GameCore` on the main thread.
 2. `LANTransport` snapshots local host player state, accepted peer states,
-   nearby chunk sections, a complete capped loaded-entity listing, host
-   inventory, item-bearing block entities, and drained block changes. Direct
-   chunk-request replies are center-first and include current-height plus
-   surface sections and a small block-entity item snapshot set across the
-   requested visible neighborhood, not full-height chunks for every neighbor.
-3. The host sends a `LANReplicationBatch` at a bounded cadence, with larger
-   full snapshots every few seconds and delta batches between them.
+   relevance-filtered entity listings around connected players, host inventory,
+   item-bearing block entities, and drained block changes on separate foreground
+   and background cadences. Direct chunk-request replies are center-first and
+   include current-height plus surface sections and a small block-entity item
+   snapshot set across the requested visible neighborhood, not full-height
+   chunks for every neighbor.
+3. The host sends a small foreground `LANReplicationBatch` at 20 Hz and
+   lower-rate background batches for supersedable state. Pre-encoded background
+   fanout observes per-peer send depth, while authoritative block/container
+   deltas are preserved and requeued on encode/send eligibility failures.
 4. Client block intents are accepted only from joined peers, validated against
    the last peer state/reach and registry-valid cells, then applied to the host
    world on the main thread.

@@ -68,6 +68,88 @@ public enum LANContainerEditResult: Equatable {
     case rejected(String)
 }
 
+public let LAN_MULTIPLAYER_HOST_ENTITY_REPLICATION_INTERVAL = 0.20
+public let LAN_MULTIPLAYER_HOST_COMPLETE_ENTITY_REPLICATION_INTERVAL = 1.0
+public let LAN_MULTIPLAYER_HOST_BLOCK_ENTITY_FILL_INTERVAL = 0.50
+public let LAN_MULTIPLAYER_HOST_WORLD_STATE_INTERVAL = 1.0
+public let LAN_MULTIPLAYER_HOST_INVENTORY_REPLICATION_INTERVAL = 1.0
+public let LAN_MULTIPLAYER_HOST_WORLD_SUMMARY_INTERVAL = 1.0
+
+public struct LANHostReplicationBackgroundSelection: Equatable {
+    public var includeWorldSummary: Bool
+    public var includeWorldState: Bool
+    public var includeEntitySnapshots: Bool
+    public var entitySnapshotsComplete: Bool
+    public var includeBlockEntityFill: Bool
+    public var includeInventories: Bool
+
+    public init(
+        includeWorldSummary: Bool = false,
+        includeWorldState: Bool = false,
+        includeEntitySnapshots: Bool = false,
+        entitySnapshotsComplete: Bool = false,
+        includeBlockEntityFill: Bool = false,
+        includeInventories: Bool = false
+    ) {
+        self.includeWorldSummary = includeWorldSummary
+        self.includeWorldState = includeWorldState
+        self.includeEntitySnapshots = includeEntitySnapshots
+        self.entitySnapshotsComplete = entitySnapshotsComplete
+        self.includeBlockEntityFill = includeBlockEntityFill
+        self.includeInventories = includeInventories
+    }
+
+    public var hasContent: Bool {
+        includeWorldSummary || includeWorldState || includeEntitySnapshots || includeBlockEntityFill || includeInventories
+    }
+}
+
+public struct LANHostReplicationCadence: Equatable {
+    public var entityInterval: Double
+    public var completeEntityInterval: Double
+    public var blockEntityFillInterval: Double
+    public var worldStateInterval: Double
+    public var inventoryInterval: Double
+    public var worldSummaryInterval: Double
+
+    public init(
+        entityInterval: Double = LAN_MULTIPLAYER_HOST_ENTITY_REPLICATION_INTERVAL,
+        completeEntityInterval: Double = LAN_MULTIPLAYER_HOST_COMPLETE_ENTITY_REPLICATION_INTERVAL,
+        blockEntityFillInterval: Double = LAN_MULTIPLAYER_HOST_BLOCK_ENTITY_FILL_INTERVAL,
+        worldStateInterval: Double = LAN_MULTIPLAYER_HOST_WORLD_STATE_INTERVAL,
+        inventoryInterval: Double = LAN_MULTIPLAYER_HOST_INVENTORY_REPLICATION_INTERVAL,
+        worldSummaryInterval: Double = LAN_MULTIPLAYER_HOST_WORLD_SUMMARY_INTERVAL
+    ) {
+        self.entityInterval = max(0.01, entityInterval)
+        self.completeEntityInterval = max(0.01, completeEntityInterval)
+        self.blockEntityFillInterval = max(0.01, blockEntityFillInterval)
+        self.worldStateInterval = max(0.01, worldStateInterval)
+        self.inventoryInterval = max(0.01, inventoryInterval)
+        self.worldSummaryInterval = max(0.01, worldSummaryInterval)
+    }
+
+    public func backgroundSelection(
+        now: Double,
+        lastEntitySnapshot: Double,
+        lastCompleteEntitySnapshot: Double,
+        lastBlockEntityFill: Double,
+        lastWorldStateSnapshot: Double,
+        lastInventorySnapshot: Double,
+        lastWorldSummary: Double
+    ) -> LANHostReplicationBackgroundSelection {
+        let completeEntities = lastCompleteEntitySnapshot == 0 || now - lastCompleteEntitySnapshot >= completeEntityInterval
+        let includeEntities = completeEntities || lastEntitySnapshot == 0 || now - lastEntitySnapshot >= entityInterval
+        return LANHostReplicationBackgroundSelection(
+            includeWorldSummary: lastWorldSummary == 0 || now - lastWorldSummary >= worldSummaryInterval,
+            includeWorldState: lastWorldStateSnapshot == 0 || now - lastWorldStateSnapshot >= worldStateInterval,
+            includeEntitySnapshots: includeEntities,
+            entitySnapshotsComplete: completeEntities,
+            includeBlockEntityFill: lastBlockEntityFill == 0 || now - lastBlockEntityFill >= blockEntityFillInterval,
+            includeInventories: lastInventorySnapshot == 0 || now - lastInventorySnapshot >= inventoryInterval
+        )
+    }
+}
+
 private func lanFacingMeta(fromPlayerYaw yaw: Double) -> Int {
     let direction = yawToDir(yaw * 180 / .pi)
     return [0, 0, 0, 1, 2, 3][direction]
@@ -815,14 +897,15 @@ public final class LANMultiplayerHostSession {
         entitySnapshots: [LANEntitySnapshot],
         entitySnapshotsComplete: Bool,
         inventorySnapshots: [LANPlayerInventorySnapshot],
-        blockEntitySnapshots: [LANBlockEntitySnapshot] = []
+        blockEntitySnapshots: [LANBlockEntitySnapshot] = [],
+        includePeerInventories: Bool = true
     ) -> LANReplicationBatch {
         var players = peerPlayerStates()
         if let localPlayer {
             players.insert(localPlayer, at: 0)
         }
         let blockChanges = fullSnapshot ? pendingBlockChanges() : drainBlockChanges()
-        var inventories = peerInventorySnapshots()
+        var inventories = includePeerInventories ? peerInventorySnapshots() : []
         inventories.insert(contentsOf: inventorySnapshots, at: 0)
         return LANReplicationBatch(
             tick: tick,
@@ -1527,16 +1610,40 @@ public func makeLANEntitySnapshots(
     radius: Double = 160,
     maxCount: Int = LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES
 ) -> [LANEntitySnapshot] {
+    if let aroundX, let aroundZ {
+        return makeLANEntitySnapshots(
+            in: world,
+            around: [(x: aroundX, z: aroundZ)],
+            radius: radius,
+            maxCount: maxCount
+        )
+    }
+    return makeLANEntitySnapshots(in: world, around: [], radius: radius, maxCount: maxCount)
+}
+
+public func makeLANEntitySnapshots(
+    in world: World,
+    around points: [(x: Double, z: Double)],
+    radius: Double = 160,
+    maxCount: Int = LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES
+) -> [LANEntitySnapshot] {
     let radius2 = radius * radius
     let entities = world.entities.sorted { $0.id < $1.id }
     var out: [LANEntitySnapshot] = []
     for ref in entities {
         if out.count >= max(0, min(maxCount, LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES)) { break }
         if ref is Player || (ref as? Entity)?.isPlayer == true { continue }
-        if let aroundX, let aroundZ {
-            let dx = ref.x - aroundX
-            let dz = ref.z - aroundZ
-            if dx * dx + dz * dz > radius2 { continue }
+        if !points.isEmpty {
+            var withinRadius = false
+            for point in points {
+                let dx = ref.x - point.x
+                let dz = ref.z - point.z
+                if dx * dx + dz * dz <= radius2 {
+                    withinRadius = true
+                    break
+                }
+            }
+            if !withinRadius { continue }
         }
         let entity = ref as? Entity
         let living = ref as? LivingEntity

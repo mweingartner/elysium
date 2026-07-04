@@ -134,6 +134,28 @@ final class LANClientRoutingTests: XCTestCase {
         XCTAssertEqual(game.world.getBlock(8, 66, 9), 0)
     }
 
+    func testRightClickOpenableWithBlockHeldEmitsUseBeforePlace() {
+        let game = makeLANClientGame()
+        guard let chunk = game.world.getChunkAt(8, 10) else {
+            return XCTFail("test fixture missing loaded chunk")
+        }
+        chunk.set(8, 66, 10, cell(B.oak_door, 0))
+        chunk.set(8, 67, 10, cell(B.oak_door, 8))
+        game.player.mainHand = ItemStack(iid("dirt"), 64)
+        var captured: [LANBlockIntent] = []
+        game.lanBlockIntentHandler = { captured.append($0) }
+
+        game.mouseDown(2)
+
+        XCTAssertEqual(captured.count, 1)
+        XCTAssertEqual(captured.first?.action, .useBlock)
+        XCTAssertEqual(captured.first?.x, 8)
+        XCTAssertEqual(captured.first?.z, 10)
+        // The LAN mirror does not locally toggle or place; the host's authoritative echo will.
+        XCTAssertEqual(game.world.getBlock(8, 66, 10), Int(cell(B.oak_door, 0)))
+        XCTAssertEqual(game.world.getBlock(8, 66, 9), 0)
+    }
+
     // MARK: - toss
 
     func testDropKeyEmitsTossIntentAndDecrementsLocalSlotOptimistically() {

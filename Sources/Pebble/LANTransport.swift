@@ -33,6 +33,49 @@ private enum LANPeerMode {
     case clientServer
 }
 
+private enum LANReplicationSendPriority {
+    case interactive
+    case background
+}
+
+private struct LANHostReplicationContent {
+    var includeWorldSummary = false
+    var includeWorldState = false
+    var includeEntities = false
+    var entitySnapshotsComplete = false
+    var includeInventories = false
+    var includeDirtyBlockEntities = false
+    var includeBlockEntityFill = false
+    var blockEntityFillCap = 0
+    var entityRadius = 160.0
+
+    static let foregroundDelta = LANHostReplicationContent(includeDirtyBlockEntities: true)
+
+    static let initialSnapshot = LANHostReplicationContent(
+        includeWorldSummary: true,
+        includeWorldState: true,
+        includeEntities: true,
+        entitySnapshotsComplete: true,
+        includeInventories: true,
+        includeDirtyBlockEntities: true,
+        includeBlockEntityFill: true,
+        blockEntityFillCap: 16
+    )
+
+    static func background(_ selection: LANHostReplicationBackgroundSelection) -> LANHostReplicationContent {
+        LANHostReplicationContent(
+            includeWorldSummary: selection.includeWorldSummary,
+            includeWorldState: selection.includeWorldState,
+            includeEntities: selection.includeEntitySnapshots,
+            entitySnapshotsComplete: selection.entitySnapshotsComplete,
+            includeInventories: selection.includeInventories,
+            includeDirtyBlockEntities: false,
+            includeBlockEntityFill: selection.includeBlockEntityFill,
+            blockEntityFillCap: 8
+        )
+    }
+}
+
 /// Fixed-size token bucket for per-peer rate limiting (§7.6/A12). Pure value type — no timers,
 /// no Network.framework dependency — so it is trivially testable logic even though it lives in
 /// this Network-framework-bound file (the plan's designated home for it).
@@ -160,11 +203,16 @@ final class LANMultiplayerManager {
     private var clientReplicationSession = LANMultiplayerClientSession()
     private var hostGhostRegistry = LANHostGhostRegistry()
     private var lastHostReplicationPublish = 0.0
-    private var lastHostFullSnapshot = 0.0
+    private var lastHostEntityPublish = 0.0
+    private var lastHostCompleteEntityPublish = 0.0
+    private var lastHostBlockEntityFillPublish = 0.0
+    private var lastHostWorldStatePublish = 0.0
+    private var lastHostInventoryPublish = 0.0
+    private var lastHostWorldSummaryPublish = 0.0
     private var lastClientPlayerStatePublish = 0.0
     private var lastHostPeerPersist = 0.0
     private let hostReplicationInterval = 0.05
-    private let hostFullSnapshotInterval = 1.0
+    private let hostBackgroundCadence = LANHostReplicationCadence()
     private let clientPlayerStateInterval = 0.05
     private let hostPeerPersistInterval = 60.0
     private let hostPingInterval = 5.0
@@ -315,7 +363,12 @@ final class LANMultiplayerManager {
         hostGhostRegistry = LANHostGhostRegistry()
         knownHostPeerIDs.removeAll()
         lastHostReplicationPublish = 0
-        lastHostFullSnapshot = 0
+        lastHostEntityPublish = 0
+        lastHostCompleteEntityPublish = 0
+        lastHostBlockEntityFillPublish = 0
+        lastHostWorldStatePublish = 0
+        lastHostInventoryPublish = 0
+        lastHostWorldSummaryPublish = 0
         lastClientPlayerStatePublish = 0
         lastHostPeerPersist = 0
         configureHostReplicationHooks(for: game)
@@ -463,7 +516,12 @@ final class LANMultiplayerManager {
         hostGhostRegistry = LANHostGhostRegistry()
         knownHostPeerIDs.removeAll()
         lastHostReplicationPublish = 0
-        lastHostFullSnapshot = 0
+        lastHostEntityPublish = 0
+        lastHostCompleteEntityPublish = 0
+        lastHostBlockEntityFillPublish = 0
+        lastHostWorldStatePublish = 0
+        lastHostInventoryPublish = 0
+        lastHostWorldSummaryPublish = 0
         lastClientPlayerStatePublish = 0
         lastHostPeerPersist = 0
         clientConnectDeadline = nil
@@ -503,17 +561,60 @@ final class LANMultiplayerManager {
             }
             let hasAcceptedPeer = transportState.hasAcceptedPeer
             guard hasAcceptedPeer, now - lastHostReplicationPublish >= hostReplicationInterval else { return }
-            let fullSnapshot = lastHostFullSnapshot == 0 || now - lastHostFullSnapshot >= hostFullSnapshotInterval
             lastHostReplicationPublish = now
-            if fullSnapshot { lastHostFullSnapshot = now }
-            guard let batch = makeHostReplicationBatch(game: game, player: player, fullSnapshot: fullSnapshot) else { return }
-            guard fullSnapshot || !batch.players.isEmpty || !batch.blockChanges.isEmpty || !batch.entities.isEmpty || !batch.inventories.isEmpty || !batch.blockEntities.isEmpty else { return }
-            // A4: a delta batch's blockChanges were already DRAINED from the change log by
-            // `makeBatch` (peek-only for full snapshots, so nothing to requeue there); if the
-            // encode below fails, they must go back so they are never silently lost.
-            let drained = fullSnapshot ? [] : batch.blockChanges
+
+            if let foreground = makeHostReplicationBatch(
+                game: game,
+                player: player,
+                fullSnapshot: false,
+                content: .foregroundDelta
+            ) {
+                let drained = foreground.blockChanges
+                queue.async { [weak self] in
+                    self?.broadcastHostReplicationBatch(
+                        foreground,
+                        drainedBlockChanges: drained,
+                        priority: .background
+                    )
+                }
+            }
+
+            let background = hostBackgroundCadence.backgroundSelection(
+                now: now,
+                lastEntitySnapshot: lastHostEntityPublish,
+                lastCompleteEntitySnapshot: lastHostCompleteEntityPublish,
+                lastBlockEntityFill: lastHostBlockEntityFillPublish,
+                lastWorldStateSnapshot: lastHostWorldStatePublish,
+                lastInventorySnapshot: lastHostInventoryPublish,
+                lastWorldSummary: lastHostWorldSummaryPublish
+            )
+            guard background.hasContent else { return }
+            if background.includeEntitySnapshots {
+                lastHostEntityPublish = now
+            }
+            if background.entitySnapshotsComplete {
+                lastHostCompleteEntityPublish = now
+            }
+            if background.includeBlockEntityFill {
+                lastHostBlockEntityFillPublish = now
+            }
+            if background.includeWorldState {
+                lastHostWorldStatePublish = now
+            }
+            if background.includeInventories {
+                lastHostInventoryPublish = now
+            }
+            if background.includeWorldSummary {
+                lastHostWorldSummaryPublish = now
+            }
+            guard let batch = makeHostReplicationBatch(
+                game: game,
+                player: player,
+                fullSnapshot: false,
+                content: .background(background)
+            ) else { return }
             queue.async { [weak self] in
-                self?.broadcastHostReplicationBatch(batch, drainedBlockChanges: drained)
+                self?.broadcastHostReplicationBatch(batch, drainedBlockChanges: [], priority: .background)
             }
         } else if transportState.hasClientPeer, state == .connected {
             configureClientReplicationHooks(for: game)
@@ -1107,7 +1208,9 @@ final class LANMultiplayerManager {
     /// next-batch delta traffic qualifies — every other kind (full snapshots, initial snapshot,
     /// chunk replies, restore, grants, damage, gameplay events, chat) is never skipped.
     private func isSkippableDeltaBatch(_ message: LANMultiplayerMessage) -> Bool {
-        if case .replicationBatch(let batch) = message, !batch.fullSnapshot { return true }
+        if case .replicationBatch(let batch) = message, !batch.fullSnapshot {
+            return batch.blockChanges.isEmpty && batch.chunkSections.isEmpty && batch.blockEntities.isEmpty
+        }
         return false
     }
 
@@ -1152,11 +1255,20 @@ final class LANMultiplayerManager {
     private func broadcastHostReplicationBatch(
         _ batch: LANReplicationBatch,
         drainedBlockChanges: [LANBlockChange],
-        to peerID: UUID? = nil
+        to peerID: UUID? = nil,
+        priority: LANReplicationSendPriority = .interactive
     ) {
         do {
             let (kind, payload) = try LANMultiplayerFrameCodec.encodePayload(.replicationBatch(batch))
-            dispatchEncodedReplicationPayload(kind: kind, payload: payload, to: peerID)
+            let sent = dispatchEncodedReplicationPayload(
+                kind: kind,
+                payload: payload,
+                to: peerID,
+                skipWhenBackpressured: priority == .background && isSkippableDeltaBatch(.replicationBatch(batch))
+            )
+            if sent == 0, !drainedBlockChanges.isEmpty {
+                hostReplicationSession.requeueBlockChanges(drainedBlockChanges)
+            }
         } catch LANMultiplayerCodecError.oversizedFrame where !batch.chunkSections.isEmpty {
             if !drainedBlockChanges.isEmpty {
                 hostReplicationSession.requeueBlockChanges(drainedBlockChanges)
@@ -1165,12 +1277,17 @@ final class LANMultiplayerManager {
             withoutSections.chunkSections = []
             do {
                 let (kind, payload) = try LANMultiplayerFrameCodec.encodePayload(.replicationBatch(withoutSections))
-                dispatchEncodedReplicationPayload(kind: kind, payload: payload, to: peerID)
+                _ = dispatchEncodedReplicationPayload(
+                    kind: kind,
+                    payload: payload,
+                    to: peerID,
+                    skipWhenBackpressured: priority == .background && isSkippableDeltaBatch(.replicationBatch(withoutSections))
+                )
             } catch {
                 appendStatus("LAN encode failed even without chunk sections: \(error)")
             }
             for sectionBatch in lanHalvedChunkSectionBatches(batch.chunkSections) {
-                sendSplitChunkSectionBatch(sectionBatch, tick: batch.tick, to: peerID)
+                sendSplitChunkSectionBatch(sectionBatch, tick: batch.tick, to: peerID, priority: priority)
             }
         } catch {
             if !drainedBlockChanges.isEmpty {
@@ -1185,29 +1302,51 @@ final class LANMultiplayerManager {
     /// single-section floor `lanHalvedChunkSectionBatches` already provides; a single section that
     /// still can't fit is logged and dropped (documented last resort — a section over 1 MiB after
     /// RLE would mean cap-violating input, which `isValidRLE` should already have rejected upstream).
-    private func sendSplitChunkSectionBatch(_ sections: [LANChunkSectionSnapshot], tick: Int, to peerID: UUID?) {
+    private func sendSplitChunkSectionBatch(
+        _ sections: [LANChunkSectionSnapshot],
+        tick: Int,
+        to peerID: UUID?,
+        priority: LANReplicationSendPriority
+    ) {
         let batch = LANReplicationBatch(tick: tick, fullSnapshot: true, chunkSections: sections)
         do {
             let (kind, payload) = try LANMultiplayerFrameCodec.encodePayload(.replicationBatch(batch))
-            dispatchEncodedReplicationPayload(kind: kind, payload: payload, to: peerID)
+            _ = dispatchEncodedReplicationPayload(
+                kind: kind,
+                payload: payload,
+                to: peerID,
+                skipWhenBackpressured: priority == .background && isSkippableDeltaBatch(.replicationBatch(batch))
+            )
         } catch LANMultiplayerCodecError.oversizedFrame where sections.count > 1 {
             for smaller in lanHalvedChunkSectionBatches(sections) {
-                sendSplitChunkSectionBatch(smaller, tick: tick, to: peerID)
+                sendSplitChunkSectionBatch(smaller, tick: tick, to: peerID, priority: priority)
             }
         } catch {
             appendStatus("LAN split chunk section batch still oversized/failed: \(error)")
         }
     }
 
-    private func dispatchEncodedReplicationPayload(kind: LANMultiplayerMessageKind, payload: Data, to peerID: UUID?) {
+    @discardableResult
+    private func dispatchEncodedReplicationPayload(
+        kind: LANMultiplayerMessageKind,
+        payload: Data,
+        to peerID: UUID?,
+        skipWhenBackpressured: Bool
+    ) -> Int {
+        var sent = 0
         if let peerID {
-            guard let peer = hostPeers[peerID], peer.accepted else { return }
+            guard let peer = hostPeers[peerID], peer.accepted else { return 0 }
+            if skipWhenBackpressured && peer.inFlightSendCount > backpressureDeltaSkipDepth { return sent }
             sendFramedPayload(kind: kind, payload: payload, to: peer)
+            sent += 1
         } else {
             for peer in hostPeers.values where peer.accepted {
+                if skipWhenBackpressured && peer.inFlightSendCount > backpressureDeltaSkipDepth { continue }
                 sendFramedPayload(kind: kind, payload: payload, to: peer)
+                sent += 1
             }
         }
+        return sent
     }
 
     /// Fans `message` out to every accepted host peer (except `excludedPeerID`) with a single JSON
@@ -1248,7 +1387,8 @@ final class LANMultiplayerManager {
         game: GameCore,
         player: Player,
         fullSnapshot: Bool,
-        chunkSectionsOverride: [LANChunkSectionSnapshot]? = nil
+        chunkSectionsOverride: [LANChunkSectionSnapshot]? = nil,
+        content: LANHostReplicationContent
     ) -> LANReplicationBatch? {
         guard game.hasWorld() else { return nil }
         let acceptedCount = queue.sync { hostPeers.values.filter { $0.accepted }.count }
@@ -1262,10 +1402,12 @@ final class LANMultiplayerManager {
             localPlayerID: localPeerID,
             inventorySnapshots: hostReplicationSession.peerInventorySnapshotsByPlayerID()
         )
+        let localState = makeLANPlayerState(player, playerID: localPeerID, displayName: NSFullUserName(), dimension: game.dim.rawValue)
+        let peerStates = hostReplicationSession.peerPlayerStates()
         // D-G: dirty block entities (container edits, ghost break spills, active furnaces/hoppers)
         // are replicated FIRST, ahead of the normal distance-prioritized fill, so a guest's edit
         // or a spilling container is never starved out by a busy world.
-        let dirtyPositions = hostReplicationSession.drainDirtyBlockEntities()
+        let dirtyPositions = content.includeDirtyBlockEntities ? hostReplicationSession.drainDirtyBlockEntities() : []
         var dirtyBlockEntities: [LANBlockEntitySnapshot] = []
         dirtyBlockEntities.reserveCapacity(dirtyPositions.count)
         for position in dirtyPositions where position.dimension == game.world.dim.rawValue {
@@ -1274,27 +1416,37 @@ final class LANMultiplayerManager {
             else { continue }
             dirtyBlockEntities.append(snapshot)
         }
-        let localState = makeLANPlayerState(player, playerID: localPeerID, displayName: NSFullUserName(), dimension: game.dim.rawValue)
-        let chunks = fullSnapshot ? (chunkSectionsOverride ?? makeLANChunkSectionSnapshots(around: player, in: game.world)) : []
-        let entities = makeLANEntitySnapshots(in: game.world)
-        let inventories = [makeLANInventorySnapshot(player, playerID: localPeerID)]
-        let blockEntityFocus = ([localState] + hostReplicationSession.peerPlayerStates())
+        let chunks = chunkSectionsOverride ?? []
+        let entityFocus = ([localState] + peerStates)
             .filter { $0.dimension == game.world.dim.rawValue }
             .map { (x: $0.x, z: $0.z) }
-        let fillCap = fullSnapshot ? 16 : LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES
-        let remainingCap = max(0, fillCap - dirtyBlockEntities.count)
+        let entities = content.includeEntities
+            ? makeLANEntitySnapshots(in: game.world, around: entityFocus, radius: content.entityRadius)
+            : []
+        let inventories = content.includeInventories ? [makeLANInventorySnapshot(player, playerID: localPeerID)] : []
+        let blockEntityFocus = ([localState] + peerStates)
+            .filter { $0.dimension == game.world.dim.rawValue }
+            .map { (x: $0.x, z: $0.z) }
         var dirtyPositionSet = Set<LANBlockPosition>()
         for be in dirtyBlockEntities {
             dirtyPositionSet.insert(LANBlockPosition(dimension: be.dimension, x: be.x, y: be.y, z: be.z))
         }
-        let fillBlockEntities = makeLANBlockEntitySnapshots(
-            in: game.world,
-            prioritizedAround: blockEntityFocus,
-            maxCount: remainingCap + dirtyPositionSet.count
-        ).filter { !dirtyPositionSet.contains(LANBlockPosition(dimension: $0.dimension, x: $0.x, y: $0.y, z: $0.z)) }
-        let blockEntities = Array((dirtyBlockEntities + fillBlockEntities).prefix(fillCap))
-        let summary = fullSnapshot ? makeWorldSummary(playerCount: acceptedCount) : nil
-        let worldState = makeLANWorldStateSnapshot(in: game.world)
+        let dirtyLimit = LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES
+        var blockEntities = Array(dirtyBlockEntities.prefix(dirtyLimit))
+        if content.includeBlockEntityFill {
+            let fillCap = max(0, min(content.blockEntityFillCap, LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES))
+            if blockEntities.count < fillCap {
+                let remainingCap = fillCap - blockEntities.count
+                let fillBlockEntities = makeLANBlockEntitySnapshots(
+                    in: game.world,
+                    prioritizedAround: blockEntityFocus,
+                    maxCount: remainingCap + dirtyPositionSet.count
+                ).filter { !dirtyPositionSet.contains(LANBlockPosition(dimension: $0.dimension, x: $0.x, y: $0.y, z: $0.z)) }
+                blockEntities.append(contentsOf: fillBlockEntities.prefix(remainingCap))
+            }
+        }
+        let summary = content.includeWorldSummary ? makeWorldSummary(playerCount: acceptedCount) : nil
+        let worldState = content.includeWorldState ? makeLANWorldStateSnapshot(in: game.world) : nil
         return hostReplicationSession.makeBatch(
             tick: game.world.time,
             fullSnapshot: fullSnapshot,
@@ -1303,9 +1455,10 @@ final class LANMultiplayerManager {
             localPlayer: localState,
             chunkSections: chunks,
             entitySnapshots: entities,
-            entitySnapshotsComplete: entities.count < LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES,
+            entitySnapshotsComplete: content.entitySnapshotsComplete && entities.count < LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES,
             inventorySnapshots: inventories,
-            blockEntitySnapshots: blockEntities
+            blockEntitySnapshots: blockEntities,
+            includePeerInventories: content.includeInventories
         )
     }
 
@@ -1331,7 +1484,8 @@ final class LANMultiplayerManager {
             game: game,
             player: player,
             fullSnapshot: true,
-            chunkSectionsOverride: spawnChunks
+            chunkSectionsOverride: spawnChunks,
+            content: .initialSnapshot
         ) else { return }
         queue.async { [weak self] in
             guard let self, let peer = self.hostPeers[peerID], peer.accepted else { return }
