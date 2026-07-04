@@ -22,11 +22,13 @@ or at the host-advertised spawn height otherwise until authoritative chunks
 arrive, request center-first host chunk-section snapshots for missing visible
 neighborhoods, and purge client-only spawned entities, so mobs, drops, XP,
 plants, and block simulation are visible only when the host publishes them. LAN
-clients can inspect host-published container/crafting contents through read-only
-mirrored screens and can send typed host-authoritative use intents for openable
-block mechanisms.
-Remaining release hardening is two-Mac installed-app soak and richer client
-interaction UI for authoritative remote container/crafting edits.
+clients can edit host-published container/crafting contents through mirrored
+screens; the host validates each submitted block-entity and inventory snapshot
+for reach, compatibility, item conservation, and crafting-table recipe
+transforms before applying it. Clients can also send typed host-authoritative use
+intents for openable block mechanisms.
+Remaining release hardening is broader two-Mac installed-app soak around
+combat, death/respawn, container contention, and long-session reconnects.
 
 Two-Mac installed-app soak is now scripted through
 `scripts/live-lan-test.sh`. The harness launches the local `/Applications/Pebble.app`
@@ -36,7 +38,8 @@ through `PEBBLE_LAN_PROBE=host-rig`, drives the Neo client's normal
 right-click path against an oak door through `PEBBLE_LAN_PROBE=client-door`,
 and asserts from both app logs that the host accepted the remote use intent,
 the client received the door delta, and a chest item snapshot reached the
-client mirror.
+client mirror. It then relaunches Neo with `PEBBLE_LAN_PROBE=client-resume` to
+verify that the guest returns to the host-world position saved on exit.
 
 ## Sources
 
@@ -134,11 +137,11 @@ Added core-only networking model files:
 
 Remaining gameplay hardening:
 
-- Client interaction UI for simultaneous remote container/crafting edits beyond
-  the current host-published item snapshots, read-only mirrored screens, and
-  typed-intent authorization layer.
-- Two-Mac installed-app soak covering template placement, death/respawn, and
-  reconnect persistence against real Network.framework connections.
+- Multi-client contention probes for simultaneous edits of the same shared
+  container/crafting station, including item-duplication and stale-revision
+  attempts.
+- Two-Mac installed-app soak covering template placement, combat, death/respawn,
+  and longer reconnect persistence against real Network.framework connections.
 
 Added app transport/UI files:
 

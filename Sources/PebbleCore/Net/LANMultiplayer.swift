@@ -1153,20 +1153,47 @@ public struct LANInventoryGrant: Codable, Equatable {
         case items
         case xp
         case clearAll
+        case slots
+        case clearedSlots
     }
 
     public var playerID: String
     public var grantID: Int
+    /// Additive merge (host-side pickups): merged into the client inventory via `give` semantics.
     public var items: [LANInventorySlotSnapshot]
     public var xp: Int
     public var clearAll: Bool
+    /// Absolute per-slot corrections (ghost durability/consumption): each entry replaces exactly
+    /// its `slot` index, preserving the client's arrangement. Idempotent by construction.
+    public var slots: [LANInventorySlotSnapshot]
+    /// Absolute per-slot empties (tool broke, stack fully consumed).
+    public var clearedSlots: [Int]
 
-    public init(playerID: String, grantID: Int, items: [LANInventorySlotSnapshot], xp: Int, clearAll: Bool) {
+    public init(
+        playerID: String,
+        grantID: Int,
+        items: [LANInventorySlotSnapshot],
+        xp: Int,
+        clearAll: Bool,
+        slots: [LANInventorySlotSnapshot] = [],
+        clearedSlots: [Int] = []
+    ) {
         self.playerID = String(playerID.prefix(128))
         self.grantID = max(0, grantID)
         self.items = Array(items.prefix(LAN_MULTIPLAYER_MAX_GRANT_ITEMS))
         self.xp = max(0, min(1_000_000_000, xp))
         self.clearAll = clearAll
+        self.slots = Array(
+            slots.lazy
+                .filter { $0.slot >= 0 && $0.slot < LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS }
+                .prefix(LAN_MULTIPLAYER_MAX_GRANT_ITEMS)
+        )
+        var seenCleared = Set<Int>()
+        self.clearedSlots = Array(
+            clearedSlots.lazy
+                .filter { $0 >= 0 && $0 < LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS && seenCleared.insert($0).inserted }
+                .prefix(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS)
+        )
     }
 
     public init(from decoder: Decoder) throws {
@@ -1176,7 +1203,9 @@ public struct LANInventoryGrant: Codable, Equatable {
             grantID: try c.decodeIfPresent(Int.self, forKey: .grantID) ?? 0,
             items: try c.decodeIfPresent([LANInventorySlotSnapshot].self, forKey: .items) ?? [],
             xp: try c.decodeIfPresent(Int.self, forKey: .xp) ?? 0,
-            clearAll: try c.decodeIfPresent(Bool.self, forKey: .clearAll) ?? false
+            clearAll: try c.decodeIfPresent(Bool.self, forKey: .clearAll) ?? false,
+            slots: try c.decodeIfPresent([LANInventorySlotSnapshot].self, forKey: .slots) ?? [],
+            clearedSlots: try c.decodeIfPresent([Int].self, forKey: .clearedSlots) ?? []
         )
     }
 }

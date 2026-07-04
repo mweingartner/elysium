@@ -41,6 +41,14 @@ class ContainerScreen: Screen {
     var playerInvY: Double { panelH - 83 }
     /// true when this frame's panel came from the pack texture (slot bgs baked in)
     private(set) var textured = false
+    /// LAN client container-edit capture (D-C, §7.10): the block entity this screen mirrors, if
+    /// any (chest/furnace/brewing/crafting subclasses assign this in `init`). `onClose` fires a
+    /// final capture; `draw` fires a ≤5 Hz debounced capture while the screen stays open so a
+    /// guest's edit reaches the host without waiting for the screen to close.
+    var lanEditBE: BlockEntityData?
+    private var lanLastCaptureTime = 0.0
+    private var lanLastCapturedFingerprint: [Int]?
+    private let lanCaptureInterval = 0.2 // 5 Hz
 
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         panelX = ((ui.width - panelW) / 2).rounded(.down)
@@ -68,8 +76,36 @@ class ContainerScreen: Screen {
         drawExtra(ui, game)
         ui.drawSlots(self, slotBg: !textured)
         ui.drawButtons(self)
+        tickLANContainerEditFlush(game)
     }
     func drawExtra(_ ui: UIManager, _ game: GameCore) {}
+
+    /// ≤5 Hz debounced capture while the screen is open: only sends when a cheap fingerprint
+    /// (slot ids/counts) of the mirrored BE actually changed since the last capture, so idle
+    /// screens produce no traffic.
+    private func tickLANContainerEditFlush(_ game: GameCore) {
+        guard game.isLANClientWorld, let be = lanEditBE else { return }
+        let now = Date.timeIntervalSinceReferenceDate
+        guard now - lanLastCaptureTime >= lanCaptureInterval else { return }
+        let fingerprint = (be.items ?? []).flatMap { stack -> [Int] in
+            guard let stack else { return [0, 0] }
+            return [stack.id + 1, stack.count]
+        }
+        guard fingerprint != lanLastCapturedFingerprint else { return }
+        lanLastCaptureTime = now
+        lanLastCapturedFingerprint = fingerprint
+        game.captureLANContainerEdit(be)
+    }
+
+    /// Final container-edit capture on close (D-C): gated inside `GameCore.gameScreenWillClose`
+    /// on `isLANClientWorld`, so this is a harmless no-op in singleplayer/hosting.
+    override func onClose(_ ui: UIManager, _ game: GameCore) {
+        if let cursor = ui.cursorStack {
+            _ = game.player?.give(cursor)
+            ui.cursorStack = nil
+        }
+        game.gameScreenWillClose(be: lanEditBE)
+    }
 
     override func quickMove(_ game: GameCore, _ slot: SlotDef) {
         guard let s = slot.get() else { return }
@@ -598,6 +634,7 @@ final class CraftingScreen: ContainerScreen {
         title = "Crafting"
         titleX = 29
         sheet = "crafting_table"
+        lanEditBE = tableBE
     }
     private func normalizedCraftingGrid(_ raw: [ItemStack?]) -> [ItemStack?] {
         var grid = Array(raw.prefix(9))
@@ -885,6 +922,7 @@ final class CraftingScreen: ContainerScreen {
         if tableBE == nil && !readOnly {
             _ = returnCraftGridToInventory(game)
         }
+        super.onClose(ui, game)
     }
 }
 
@@ -900,6 +938,7 @@ final class FurnaceScreen: ContainerScreen {
         readOnlySlots = readOnly
         title = be.kind == "blast" ? "Blast Furnace" : be.kind == "smoker" ? "Smoker" : "Furnace"
         sheet = "furnace"
+        lanEditBE = be
     }
     override func buildSlots(_ ui: UIManager, _ game: GameCore) {
         let px = panelX, py = panelY
@@ -979,6 +1018,10 @@ final class ChestScreen: ContainerScreen {
         self.title = title
         let total = count + (other?.items?.count ?? 0)
         panelH = 114 + Double((total + 8) / 9) * 18
+        // D-C container-edit capture only targets the primary BE (whole-BE snapshots are keyed
+        // by a single block position); a linked large-chest `other` half is out of scope — the
+        // host's next replication pass re-syncs it from world state as usual.
+        lanEditBE = be
     }
     init(vehicle: Boat, _ title: String) {
         count = vehicle.chestItems.count
@@ -1060,6 +1103,7 @@ final class BrewingScreen: ContainerScreen {
         readOnlySlots = readOnly
         title = "Brewing Stand"
         sheet = "brewing_stand"
+        lanEditBE = be
     }
     override func buildSlots(_ ui: UIManager, _ game: GameCore) {
         let px = panelX, py = panelY

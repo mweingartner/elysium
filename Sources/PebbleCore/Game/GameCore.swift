@@ -242,6 +242,9 @@ public final class GameCore {
     public var expandedMapCenterZ = 0.0
     public var onWorldBlockChanged: ((World, Int, Int, Int, Int) -> Void)?
     public var lanChunkRequestHandler: ((World, Int, Int) -> Bool)?
+    /// full-column (radius 0, all sections) request — used by the background completion pass,
+    /// which cannot express "whole column" through `lanChunkRequestHandler`'s visible-band request.
+    public var lanFullColumnRequestHandler: ((World, Int, Int) -> Bool)?
     public var lanBlockIntentHandler: ((LANBlockIntent) -> Void)?
     /// client → host gameplay intents (all additive, LAN-client-only)
     public var lanAttackIntentHandler: ((LANAttackIntent) -> Void)?
@@ -378,6 +381,14 @@ public final class GameCore {
     // GameUI / MenuHost surface
     // ===========================================================================
     public var world: World { worlds[dim]! }
+
+    /// resolves the loaded `World` for an arbitrary dimension (A2: LAN chunk requests must be
+    /// served from the GUEST's dimension, not just the host's current one). Returns nil for an
+    /// invalid raw dimension or a dimension that hasn't been loaded.
+    public func worldFor(dimension: Int) -> World? {
+        guard let d = Dim(rawValue: dimension) else { return nil }
+        return worlds[d]
+    }
     public func hasWorld() -> Bool { inWorld }
 
     public func playUISound(_ name: String) {
@@ -1033,7 +1044,8 @@ public final class GameCore {
                     !lanAppliedChunkSections.contains(DimSection(dim: w.dim.rawValue, pos: SectionPos(cx: cx, sy: sy, cz: cz)))
                 }
                 guard missing else { continue }
-                if lanChunkRequestHandler?(w, cx, cz) == true {
+                let issuedRequest = lanFullColumnRequestHandler?(w, cx, cz) ?? lanChunkRequestHandler?(w, cx, cz)
+                if issuedRequest == true {
                     lanColumnCompletionRequestsInFlight[flight] = lanClientTickCounter
                     issued += 1
                 }
@@ -2558,14 +2570,26 @@ public final class GameCore {
         lanLastAppliedGrantID = restore.grantID
     }
 
-    /// merges a host-originated additive inventory grant (pickups via the host ghost, death
-    /// clear, corrections). Monotone grantID: duplicates/regressions are ignored so replays
-    /// over an unreliable connection never double-apply.
+    /// merges a host-originated inventory grant (pickups via the host ghost, death clear,
+    /// per-slot corrections). Monotone grantID: duplicates/regressions are ignored so replays
+    /// over an unreliable connection never double-apply. Apply order: clearAll, then absolute
+    /// per-slot empties/sets (arrangement-preserving corrections), then additive item merges.
     public func applyLANGrant(_ grant: LANInventoryGrant) {
         guard isLANClientWorld, let p = player, grant.grantID > lanLastAppliedGrantID else { return }
         lanLastAppliedGrantID = grant.grantID
         if grant.clearAll {
             for i in 0..<p.inventory.count { p.inventory[i] = nil }
+        }
+        for slot in grant.clearedSlots where slot >= 0 && slot < p.inventory.count {
+            p.inventory[slot] = nil
+        }
+        for slot in grant.slots {
+            guard slot.slot >= 0, slot.slot < p.inventory.count,
+                  slot.itemID >= 0, slot.itemID < itemDefs.count,
+                  slot.count > 0, slot.damage >= 0
+            else { continue }
+            let count = min(slot.count, maxStackOf(ItemStack(slot.itemID, 1)))
+            p.inventory[slot.slot] = ItemStack(slot.itemID, count, damage: slot.damage, label: slot.label)
         }
         for slot in grant.items {
             guard slot.itemID >= 0, slot.itemID < itemDefs.count, slot.count > 0 else { continue }

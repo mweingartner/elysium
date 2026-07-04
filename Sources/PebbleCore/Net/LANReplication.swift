@@ -170,7 +170,7 @@ public final class LANMultiplayerHostSession {
             lifecycle: .connected,
             permissions: LANPeerPermissions(),
             playerState: nil,
-            inventory: nil,
+            inventory: LANPlayerInventorySnapshot(playerID: playerID, selectedHotbarSlot: 0, slots: []),
             lastTemplateUndo: nil,
             lastSeenTick: max(0, tick),
             disconnectedTick: nil
@@ -658,15 +658,32 @@ public final class LANMultiplayerHostSession {
         guard let normalized = normalizedLANBlockEntitySnapshot(position) else {
             return .rejected("invalid container payload")
         }
-        let existing = world.getBlockEntity(position.x, position.y, position.z)
-        let target = existing?.type == normalized.type ? existing! : makeBlockEntity(from: normalized)
+        guard let normalizedInventory = normalizedLANInventorySnapshot(intent.inventory) else {
+            return .rejected("invalid inventory payload")
+        }
+        guard let beforeInventory = peer.inventory else {
+            return .rejected("player inventory baseline unavailable")
+        }
+        let existing = world.getBlockEntity(position.x, position.y, position.z) ?? makeBlockEntity(from: normalized)
+        guard let beforeBlockEntity = makeLANBlockEntitySnapshot(existing, dimension: world.dim.rawValue),
+              beforeBlockEntity.type == normalized.type,
+              isLANContainerEditItemTransitionAllowed(
+                  beforeInventory: beforeInventory,
+                  afterInventory: normalizedInventory,
+                  beforeBlockEntity: beforeBlockEntity,
+                  afterBlockEntity: normalized
+              )
+        else {
+            return .rejected("container edit is not host-verifiable")
+        }
+        let target = existing.type == normalized.type ? existing : makeBlockEntity(from: normalized)
         guard applyLANBlockEntityPayload(normalized, to: target) else {
             return .rejected("invalid container payload")
         }
         world.setBlockEntity(target)
         recordDirtyBlockEntity(LANBlockPosition(dimension: normalized.dimension, x: normalized.x, y: normalized.y, z: normalized.z))
 
-        if intent.revision > peer.inventoryRevision, let normalizedInventory = normalizedLANInventorySnapshot(intent.inventory) {
+        if intent.revision > peer.inventoryRevision {
             peer.inventory = LANPlayerInventorySnapshot(
                 playerID: peer.playerID,
                 selectedHotbarSlot: normalizedInventory.selectedHotbarSlot,
@@ -703,14 +720,30 @@ public final class LANMultiplayerHostSession {
         return true
     }
 
-    /// Enqueues a host-originated, additive inventory grant (pickup/correction/death-clear) for
-    /// delivery to the given peer. `grantID` is monotone per peer so the client can de-duplicate.
+    /// Enqueues a host-originated inventory grant (pickup/correction/death-clear) for delivery to
+    /// the given peer. `items` merge additively; `slots`/`clearedSlots` replace exact slot indices
+    /// (arrangement-preserving corrections). `grantID` is monotone per peer for de-duplication.
     @discardableResult
-    public func enqueueGrant(items: [LANInventorySlotSnapshot], xp: Int, clearAll: Bool, to rawPlayerID: String) -> LANInventoryGrant? {
+    public func enqueueGrant(
+        items: [LANInventorySlotSnapshot],
+        xp: Int,
+        clearAll: Bool,
+        to rawPlayerID: String,
+        slots: [LANInventorySlotSnapshot] = [],
+        clearedSlots: [Int] = []
+    ) -> LANInventoryGrant? {
         let playerID = String(rawPlayerID.prefix(128))
         guard var peer = peers[playerID] else { return nil }
         peer.lastGrantID += 1
-        let grant = LANInventoryGrant(playerID: peer.playerID, grantID: peer.lastGrantID, items: items, xp: xp, clearAll: clearAll)
+        let grant = LANInventoryGrant(
+            playerID: peer.playerID,
+            grantID: peer.lastGrantID,
+            items: items,
+            xp: xp,
+            clearAll: clearAll,
+            slots: slots,
+            clearedSlots: clearedSlots
+        )
         peers[playerID] = peer
         pendingGrants[playerID, default: []].append(grant)
         return grant
@@ -1245,6 +1278,104 @@ private func items(from snapshot: LANBlockEntitySnapshot) -> [ItemStack?]? {
         )
     }
     return items
+}
+
+private struct LANItemMultisetKey: Hashable {
+    var itemID: Int
+    var damage: Int
+    var label: String?
+}
+
+private func addLANItem(
+    itemID: Int,
+    count: Int,
+    damage: Int,
+    label: String?,
+    to totals: inout [LANItemMultisetKey: Int]
+) {
+    guard itemID >= 0, itemID < itemDefs.count, count != 0 else { return }
+    let key = LANItemMultisetKey(itemID: itemID, damage: max(0, damage), label: label)
+    totals[key, default: 0] += count
+    if totals[key] == 0 { totals.removeValue(forKey: key) }
+}
+
+private func removeLANItem(_ stack: ItemStack, from totals: inout [LANItemMultisetKey: Int]) {
+    addLANItem(itemID: stack.id, count: -1, damage: stack.damage, label: stack.label, to: &totals)
+}
+
+private func addLANItem(_ stack: ItemStack, to totals: inout [LANItemMultisetKey: Int]) {
+    addLANItem(itemID: stack.id, count: stack.count, damage: stack.damage, label: stack.label, to: &totals)
+}
+
+private func addLANInventorySnapshot(_ snapshot: LANPlayerInventorySnapshot, to totals: inout [LANItemMultisetKey: Int]) {
+    for slot in snapshot.slots {
+        addLANItem(itemID: slot.itemID, count: slot.count, damage: slot.damage, label: slot.label, to: &totals)
+    }
+}
+
+private func addLANBlockEntitySnapshot(_ snapshot: LANBlockEntitySnapshot, to totals: inout [LANItemMultisetKey: Int]) {
+    for slot in snapshot.slots {
+        addLANItem(itemID: slot.itemID, count: slot.count, damage: slot.damage, label: slot.label, to: &totals)
+    }
+}
+
+private func lanContainerEditTotals(
+    inventory: LANPlayerInventorySnapshot,
+    blockEntity: LANBlockEntitySnapshot
+) -> [LANItemMultisetKey: Int] {
+    var totals: [LANItemMultisetKey: Int] = [:]
+    addLANInventorySnapshot(inventory, to: &totals)
+    addLANBlockEntitySnapshot(blockEntity, to: &totals)
+    return totals
+}
+
+private let LAN_CONTAINER_EDIT_MAX_CRAFT_ROUNDS = 64
+
+private func isLANCraftingTableTransformAllowed(
+    beforeBlockEntity: LANBlockEntitySnapshot,
+    beforeTotals: [LANItemMultisetKey: Int],
+    afterTotals: [LANItemMultisetKey: Int]
+) -> Bool {
+    guard beforeBlockEntity.type == "crafting",
+          var grid = items(from: beforeBlockEntity),
+          grid.count == 9
+    else { return false }
+
+    var totals = beforeTotals
+    for _ in 0..<LAN_CONTAINER_EDIT_MAX_CRAFT_ROUNDS {
+        guard let plan = currentCraftingPlan(from: grid, gridWidth: 3, gridHeight: 3) else {
+            return false
+        }
+        for stack in grid {
+            guard let stack else { continue }
+            removeLANItem(stack, from: &totals)
+        }
+        let returns = consumeCraftingGrid(&grid)
+        addLANItem(plan.output, to: &totals)
+        for stack in returns { addLANItem(stack, to: &totals) }
+        if totals == afterTotals { return true }
+    }
+    return false
+}
+
+private func isLANContainerEditItemTransitionAllowed(
+    beforeInventory: LANPlayerInventorySnapshot,
+    afterInventory: LANPlayerInventorySnapshot,
+    beforeBlockEntity: LANBlockEntitySnapshot,
+    afterBlockEntity: LANBlockEntitySnapshot
+) -> Bool {
+    guard beforeBlockEntity.type == afterBlockEntity.type,
+          beforeBlockEntity.slotCount == afterBlockEntity.slotCount
+    else { return false }
+
+    let beforeTotals = lanContainerEditTotals(inventory: beforeInventory, blockEntity: beforeBlockEntity)
+    let afterTotals = lanContainerEditTotals(inventory: afterInventory, blockEntity: afterBlockEntity)
+    if beforeTotals == afterTotals { return true }
+    return isLANCraftingTableTransformAllowed(
+        beforeBlockEntity: beforeBlockEntity,
+        beforeTotals: beforeTotals,
+        afterTotals: afterTotals
+    )
 }
 
 private func isLANContainerBlockID(_ id: Int) -> Bool {
@@ -1873,7 +2004,12 @@ public func applyLANChunkSectionSnapshot(_ snapshot: LANChunkSectionSnapshot, to
     return true
 }
 
-private func isWithinLANReach(_ player: LANPlayerState, x: Int, y: Int, z: Int) -> Bool {
+/// true iff the block at (x,y,z) is within the peer's interaction reach given its last-published
+/// state (host trusts the peer's reported position, not a live raycast — matches the reach model
+/// used throughout `LANMultiplayerHostSession`). Exposed (was file-private) so `LANTransport.swift`
+/// can reach-check ghost-driven break intents before invoking `LANHostGhostRegistry.applyBreak`,
+/// which — unlike `applyBlockIntent` — does not reach-check internally (deviation, flagged by W4).
+public func isWithinLANReach(_ player: LANPlayerState, x: Int, y: Int, z: Int) -> Bool {
     let eyeY = player.y + PLAYER_EYE
     let dx = Double(x) + 0.5 - player.x
     let dy = Double(y) + 0.5 - eyeY

@@ -6,6 +6,7 @@ final class LANReplicationTests: XCTestCase {
         super.setUp()
         registerAllBlocks()
         registerAllItems()
+        registerAllRecipes()
         registerAllEntities()
     }
 
@@ -1592,6 +1593,14 @@ final class LANReplicationTests: XCTestCase {
         let chest = makeContainerBE(2, 64, 1, 27)
         world.setBlockEntity(chest)
 
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 2),
+                LANInventorySlotSnapshot(slot: 1, itemID: iid("stick"), count: 3),
+            ]),
+            from: "peer-a"
+        )
+
         var slots = [LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 2)]
         let editedBE = LANBlockEntitySnapshot(
             dimension: Dim.overworld.rawValue,
@@ -1635,11 +1644,123 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(farResult, .rejected("target out of reach"))
     }
 
+    func testAcceptPeerSeedsEmptyInventoryBaselineForContainerValidation() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+        _ = world.setBlock(2, 64, 1, Int(B.chest) << 4)
+        let chest = makeContainerBE(2, 64, 1, 27)
+        chest.items![0] = ItemStack(iid("coal"), 1)
+        world.setBlockEntity(chest)
+
+        let intent = LANContainerEditIntent(
+            blockEntity: LANBlockEntitySnapshot(
+                dimension: Dim.overworld.rawValue,
+                x: 2, y: 64, z: 1,
+                type: "container",
+                slotCount: 27,
+                slots: []
+            ),
+            inventory: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("coal"), count: 1),
+            ]),
+            revision: 1,
+            editSeq: 1
+        )
+
+        let result = session.applyContainerEditIntent(intent, from: "peer-a", to: world)
+        guard case .applied = result else {
+            return XCTFail("expected .applied, got \(result)")
+        }
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.itemID, iid("coal"))
+    }
+
+    func testApplyContainerEditIntentRejectsNonConservativeItemCreation() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+        _ = world.setBlock(2, 64, 1, Int(B.chest) << 4)
+        world.setBlockEntity(makeContainerBE(2, 64, 1, 27))
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
+            from: "peer-a"
+        )
+
+        let intent = LANContainerEditIntent(
+            blockEntity: LANBlockEntitySnapshot(
+                dimension: Dim.overworld.rawValue,
+                x: 2, y: 64, z: 1,
+                type: "container",
+                slotCount: 27,
+                slots: [LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 1)]
+            ),
+            inventory: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
+            revision: 1,
+            editSeq: 1
+        )
+
+        XCTAssertEqual(
+            session.applyContainerEditIntent(intent, from: "peer-a", to: world),
+            .rejected("container edit is not host-verifiable")
+        )
+        let chest = try XCTUnwrap(world.getBlockEntity(2, 64, 1))
+        XCTAssertNil(chest.items?[0])
+        XCTAssertNil(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first)
+    }
+
+    func testApplyContainerEditIntentAllowsCraftingTableRecipeTransform() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+        _ = world.setBlock(2, 64, 1, Int(B.crafting_table) << 4)
+        let table = makeCraftingTableBE(2, 64, 1)
+        table.items![0] = ItemStack(iid("oak_planks"), 1)
+        table.items![3] = ItemStack(iid("oak_planks"), 1)
+        world.setBlockEntity(table)
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
+            from: "peer-a"
+        )
+
+        let beforeGrid = try XCTUnwrap(table.items)
+        let plan = try XCTUnwrap(currentCraftingPlan(from: beforeGrid, gridWidth: 3, gridHeight: 3))
+        XCTAssertEqual(itemDef(plan.output.id).name, "stick")
+        XCTAssertEqual(plan.output.count, 4)
+
+        let intent = LANContainerEditIntent(
+            blockEntity: LANBlockEntitySnapshot(
+                dimension: Dim.overworld.rawValue,
+                x: 2, y: 64, z: 1,
+                type: "crafting",
+                slotCount: 9,
+                slots: []
+            ),
+            inventory: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("stick"), count: 4),
+            ]),
+            revision: 1,
+            editSeq: 1
+        )
+
+        let result = session.applyContainerEditIntent(intent, from: "peer-a", to: world)
+        guard case .applied(let be) = result else {
+            return XCTFail("expected .applied, got \(result)")
+        }
+        XCTAssertTrue(be.slots.isEmpty)
+        let updatedTable = try XCTUnwrap(world.getBlockEntity(2, 64, 1))
+        XCTAssertEqual(updatedTable.items?.compactMap { $0 }.count, 0)
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.itemID, iid("stick"))
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.count, 4)
+    }
+
     func testApplyContainerEditIntentDirtiesBlockEntityQueue() {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession()
         _ = world.setBlock(2, 64, 1, Int(B.chest) << 4)
         world.setBlockEntity(makeContainerBE(2, 64, 1, 27))
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("coal"), count: 1),
+            ]),
+            from: "peer-a"
+        )
 
         let editedBE = LANBlockEntitySnapshot(
             dimension: Dim.overworld.rawValue, x: 2, y: 64, z: 1, type: "container", slotCount: 27,
