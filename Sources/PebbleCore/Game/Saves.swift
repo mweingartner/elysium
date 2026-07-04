@@ -4,6 +4,7 @@
 //   chunks(world, dim, cx, cz, data BLOB)   — modified chunks (VCK1 binary)
 //   player(world, json)                     — player snapshot per world
 //   lan_player_resume(hostWorld, json)      — local resume point for hosted LAN worlds
+//   lan_players(world, playerID, json)      — host-side per-guest LAN player records
 //   advancements(world, json)               — earned advancement ids per world
 //   templates(name, json, created)           — local cloned construction templates
 // Legacy installs stored loose files under saves/; they are imported once on
@@ -142,6 +143,11 @@ public final class SaveDB {
         exec("""
         CREATE TABLE IF NOT EXISTS lan_player_resume(
             hostWorld TEXT PRIMARY KEY, json TEXT NOT NULL, updated REAL NOT NULL DEFAULT 0)
+        """)
+        exec("""
+        CREATE TABLE IF NOT EXISTS lan_players(
+            world TEXT NOT NULL, playerID TEXT NOT NULL, json TEXT NOT NULL,
+            updated REAL NOT NULL DEFAULT 0, PRIMARY KEY(world, playerID))
         """)
         exec("CREATE TABLE IF NOT EXISTS advancements(world TEXT PRIMARY KEY, json TEXT NOT NULL)")
         exec("""
@@ -421,6 +427,61 @@ public final class SaveDB {
     public func deleteLANClientResume(_ hostWorldKey: String) {
         run("DELETE FROM lan_player_resume WHERE hostWorld=?", bind: { self.bindText($0, 1, hostWorldKey) })
     }
+
+    // ---- LAN host-side per-guest player records ---------------------------------
+    public func getLANPlayer(world: String, playerID: String) -> [String: Any]? {
+        var out: [String: Any]?
+        run("SELECT json FROM lan_players WHERE world=? AND playerID=?", bind: { stmt in
+            self.bindText(stmt, 1, world)
+            self.bindText(stmt, 2, playerID)
+        }) { stmt in
+            if let json = self.columnText(stmt, 0) {
+                out = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
+            }
+        }
+        return out
+    }
+    public func putLANPlayer(world: String, playerID: String, _ data: [String: Any]) {
+        guard let bytes = try? JSONSerialization.data(withJSONObject: sanitizeJSON(data)),
+              let json = String(data: bytes, encoding: .utf8) else { return }
+        run("INSERT OR REPLACE INTO lan_players(world, playerID, json, updated) VALUES(?,?,?,?)", bind: { stmt in
+            self.bindText(stmt, 1, world)
+            self.bindText(stmt, 2, playerID)
+            self.bindText(stmt, 3, json)
+            sqlite3_bind_double(stmt, 4, Date().timeIntervalSince1970 * 1000)
+        })
+    }
+    public func listLANPlayers(world: String) -> [(playerID: String, data: [String: Any])] {
+        var out: [(playerID: String, data: [String: Any])] = []
+        run("SELECT playerID, json FROM lan_players WHERE world=? ORDER BY playerID", bind: { stmt in
+            self.bindText(stmt, 1, world)
+        }) { stmt in
+            guard let playerID = self.columnText(stmt, 0), let json = self.columnText(stmt, 1),
+                  let obj = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
+            else { return }
+            out.append((playerID: playerID, data: obj))
+        }
+        return out
+    }
+    public func deleteLANPlayer(world: String, playerID: String) {
+        run("DELETE FROM lan_players WHERE world=? AND playerID=?", bind: { stmt in
+            self.bindText(stmt, 1, world)
+            self.bindText(stmt, 2, playerID)
+        })
+    }
+
+    /// test-only: writes an arbitrary (possibly malformed) JSON string directly
+    /// into lan_players, bypassing JSONSerialization, so tests can verify the
+    /// readers fail closed on a corrupted row instead of crashing
+    func execRawLANPlayerInsertForTesting(world: String, playerID: String, json: String) {
+        run("INSERT OR REPLACE INTO lan_players(world, playerID, json, updated) VALUES(?,?,?,?)", bind: { stmt in
+            self.bindText(stmt, 1, world)
+            self.bindText(stmt, 2, playerID)
+            self.bindText(stmt, 3, json)
+            sqlite3_bind_double(stmt, 4, Date().timeIntervalSince1970 * 1000)
+        })
+    }
+
     public func getAdvancements(_ worldId: String) -> [String]? {
         var out: [String]?
         run("SELECT json FROM advancements WHERE world=?", bind: { self.bindText($0, 1, worldId) }) { stmt in

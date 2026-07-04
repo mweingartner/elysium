@@ -1,6 +1,6 @@
 import Foundation
 
-public let LAN_MULTIPLAYER_PROTOCOL_VERSION: UInt16 = 1
+public let LAN_MULTIPLAYER_PROTOCOL_VERSION: UInt16 = 2
 public let LAN_MULTIPLAYER_SERVICE_TYPE = "_pebble-lan._tcp"
 public let LAN_MULTIPLAYER_DEFAULT_PORT: UInt16 = 41337
 public let LAN_MULTIPLAYER_MAX_CLIENTS = 8
@@ -23,6 +23,10 @@ public let LAN_MULTIPLAYER_DEFAULT_CHUNK_VERTICAL_RADIUS = 1
 private let LAN_MULTIPLAYER_MAX_ENTITY_COORDINATE = 30_000_000.0
 public let LAN_MULTIPLAYER_MAX_REPLICATED_ITEM_COUNT = 127
 private let LAN_MULTIPLAYER_MAX_REPLICATED_XP_AMOUNT = 4096
+public let LAN_MULTIPLAYER_MAX_RLE_RUNS = LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT
+public let LAN_MULTIPLAYER_MAX_CELLS_DATA_BYTES = LAN_MULTIPLAYER_MAX_RLE_RUNS * 4
+public let LAN_MULTIPLAYER_MAX_GRANT_ITEMS = 64
+public let LAN_MULTIPLAYER_MAX_DAMAGE_AMOUNT = 2048.0
 
 private let LANFrameMagic: [UInt8] = [0x50, 0x42, 0x4c, 0x4e] // PBLN
 
@@ -59,6 +63,14 @@ public enum LANMultiplayerMessageKind: UInt16, Codable, Equatable, CaseIterable 
     case chunkRequest = 15
     case replicationAck = 16
     case gameplayEvent = 17
+    case attackIntent = 18
+    case tossIntent = 19
+    case containerEditIntent = 20
+    case inventoryUpdate = 21
+    case inventoryGrant = 22
+    case restoreState = 23
+    case damageEvent = 24
+    case keepalive = 25
 }
 
 public enum LANPeerLifecycleState: String, Codable, Equatable {
@@ -218,6 +230,7 @@ public struct LANPlayerState: Codable, Equatable {
         case gameMode
         case dimension
         case dead
+        case inventoryRevision
     }
 
     public var playerID: String
@@ -233,6 +246,7 @@ public struct LANPlayerState: Codable, Equatable {
     public var gameMode: Int
     public var dimension: Int
     public var dead: Bool
+    public var inventoryRevision: Int
 
     public init(
         playerID: String,
@@ -247,7 +261,8 @@ public struct LANPlayerState: Codable, Equatable {
         selectedHotbarSlot: Int,
         gameMode: Int,
         dimension: Int = Dim.overworld.rawValue,
-        dead: Bool = false
+        dead: Bool = false,
+        inventoryRevision: Int = 0
     ) {
         self.playerID = String(playerID.prefix(128))
         self.displayName = sanitizedLANPlayerName(displayName)
@@ -262,6 +277,7 @@ public struct LANPlayerState: Codable, Equatable {
         self.gameMode = gameMode == GameMode.creative ? GameMode.creative : GameMode.survival
         self.dimension = isValidLANDimension(dimension) ? dimension : Dim.overworld.rawValue
         self.dead = dead || self.health <= 0
+        self.inventoryRevision = max(0, inventoryRevision)
     }
 
     public init(from decoder: Decoder) throws {
@@ -279,7 +295,8 @@ public struct LANPlayerState: Codable, Equatable {
             selectedHotbarSlot: try c.decode(Int.self, forKey: .selectedHotbarSlot),
             gameMode: try c.decode(Int.self, forKey: .gameMode),
             dimension: try c.decodeIfPresent(Int.self, forKey: .dimension) ?? Dim.overworld.rawValue,
-            dead: try c.decodeIfPresent(Bool.self, forKey: .dead) ?? false
+            dead: try c.decodeIfPresent(Bool.self, forKey: .dead) ?? false,
+            inventoryRevision: try c.decodeIfPresent(Int.self, forKey: .inventoryRevision) ?? 0
         )
     }
 }
@@ -386,13 +403,64 @@ public struct LANBlockChange: Codable, Equatable {
     }
 }
 
+/// RLE-encodes a full chunk section's cells into `(count: UInt16 BE, cell: UInt16 BE)` pairs.
+/// Bounded: input is clamped to `LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT` cells and each run is
+/// split so its count never exceeds `UInt16.max`.
+public func lanEncodeChunkSectionRLE(_ cells: [UInt16]) -> Data {
+    let bounded = cells.count > LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT
+        ? Array(cells.prefix(LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT))
+        : cells
+    var data = Data()
+    data.reserveCapacity(min(LAN_MULTIPLAYER_MAX_CELLS_DATA_BYTES, (bounded.count + 1) * 4))
+    var index = 0
+    while index < bounded.count {
+        let value = bounded[index]
+        var runLength = 1
+        while index + runLength < bounded.count,
+              bounded[index + runLength] == value,
+              runLength < Int(UInt16.max) {
+            runLength += 1
+        }
+        data.append(UInt8((runLength >> 8) & 0xff))
+        data.append(UInt8(runLength & 0xff))
+        data.append(UInt8((value >> 8) & 0xff))
+        data.append(UInt8(value & 0xff))
+        index += runLength
+    }
+    return data
+}
+
+/// Decodes RLE bytes produced by `lanEncodeChunkSectionRLE`. Fails closed: returns `nil` on ANY
+/// malformation (odd/non-multiple-of-4 length, zero-length run, over-cap byte count, or a decoded
+/// cell total that does not equal exactly `LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT`). Never traps,
+/// including on arbitrary/adversarial byte input.
+public func lanDecodeChunkSectionRLE(_ data: Data) -> [UInt16]? {
+    guard !data.isEmpty, data.count % 4 == 0, data.count <= LAN_MULTIPLAYER_MAX_CELLS_DATA_BYTES else {
+        return nil
+    }
+    var cells: [UInt16] = []
+    cells.reserveCapacity(LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT)
+    let bytes = [UInt8](data)
+    var offset = 0
+    while offset < bytes.count {
+        let count = (UInt16(bytes[offset]) << 8) | UInt16(bytes[offset + 1])
+        let cell = (UInt16(bytes[offset + 2]) << 8) | UInt16(bytes[offset + 3])
+        guard count > 0 else { return nil }
+        guard cells.count + Int(count) <= LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT else { return nil }
+        cells.append(contentsOf: repeatElement(cell, count: Int(count)))
+        offset += 4
+    }
+    guard cells.count == LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT else { return nil }
+    return cells
+}
+
 public struct LANChunkSectionSnapshot: Codable, Equatable {
     public var dimension: Int
     public var cx: Int
     public var cz: Int
     public var sectionY: Int
     public var minY: Int
-    public var cells: [UInt16]
+    public var cellsData: Data
 
     public init(dimension: Int, cx: Int, cz: Int, sectionY: Int, minY: Int, cells: [UInt16]) {
         self.dimension = dimension
@@ -400,15 +468,31 @@ public struct LANChunkSectionSnapshot: Codable, Equatable {
         self.cz = cz
         self.sectionY = sectionY
         self.minY = minY
-        self.cells = cells.count > LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT
-            ? Array(cells.prefix(LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT))
-            : cells
+        self.cellsData = lanEncodeChunkSectionRLE(cells)
+    }
+
+    /// Decoded cells. Returns an empty array if `cellsData` is malformed (fail closed; callers
+    /// must not assume a 4096-length result without checking `isValidRLE`/`hasExpectedCellCount`).
+    public var cells: [UInt16] {
+        lanDecodeChunkSectionRLE(cellsData) ?? []
     }
 
     public var hasExpectedCellCount: Bool {
         cells.count == LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT
     }
+
+    /// True iff `cellsData` decodes to exactly `LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT` valid
+    /// replicated cells within the byte-size cap.
+    public var isValidRLE: Bool {
+        guard cellsData.count <= LAN_MULTIPLAYER_MAX_CELLS_DATA_BYTES else { return false }
+        guard let decoded = lanDecodeChunkSectionRLE(cellsData) else { return false }
+        guard decoded.count == LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT else { return false }
+        return decoded.allSatisfy { isValidLANReplicatedCell(Int($0)) }
+    }
 }
+
+/// Bound applied to replicated entity velocity components (blocks/tick); non-finite values sanitize to 0.
+private let LAN_MULTIPLAYER_MAX_ENTITY_VELOCITY = 64.0
 
 public struct LANEntitySnapshot: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
@@ -426,6 +510,12 @@ public struct LANEntitySnapshot: Codable, Equatable {
         case itemDamage
         case itemLabel
         case xpAmount
+        case vx
+        case vy
+        case vz
+        case onGround
+        case fire
+        case dimension
     }
 
     public var entityID: Int
@@ -442,6 +532,12 @@ public struct LANEntitySnapshot: Codable, Equatable {
     public var itemDamage: Int?
     public var itemLabel: String?
     public var xpAmount: Int?
+    public var vx: Double
+    public var vy: Double
+    public var vz: Double
+    public var onGround: Bool
+    public var fire: Bool
+    public var dimension: Int
 
     public init(
         entityID: Int,
@@ -457,7 +553,13 @@ public struct LANEntitySnapshot: Codable, Equatable {
         itemCount: Int? = nil,
         itemDamage: Int? = nil,
         itemLabel: String? = nil,
-        xpAmount: Int? = nil
+        xpAmount: Int? = nil,
+        vx: Double = 0,
+        vy: Double = 0,
+        vz: Double = 0,
+        onGround: Bool = false,
+        fire: Bool = false,
+        dimension: Int = Dim.overworld.rawValue
     ) {
         self.entityID = entityID
         self.type = sanitizedLANEntityType(type)
@@ -473,6 +575,12 @@ public struct LANEntitySnapshot: Codable, Equatable {
         self.itemDamage = itemDamage.flatMap { $0 >= 0 ? $0 : nil }
         self.itemLabel = itemLabel.map { prefixByUTF8Bytes(cleanSingleLine($0), maxBytes: 128) }
         self.xpAmount = xpAmount.flatMap { $0 > 0 ? min($0, LAN_MULTIPLAYER_MAX_REPLICATED_XP_AMOUNT) : nil }
+        self.vx = vx.isFinite ? max(-LAN_MULTIPLAYER_MAX_ENTITY_VELOCITY, min(LAN_MULTIPLAYER_MAX_ENTITY_VELOCITY, vx)) : 0
+        self.vy = vy.isFinite ? max(-LAN_MULTIPLAYER_MAX_ENTITY_VELOCITY, min(LAN_MULTIPLAYER_MAX_ENTITY_VELOCITY, vy)) : 0
+        self.vz = vz.isFinite ? max(-LAN_MULTIPLAYER_MAX_ENTITY_VELOCITY, min(LAN_MULTIPLAYER_MAX_ENTITY_VELOCITY, vz)) : 0
+        self.onGround = onGround
+        self.fire = fire
+        self.dimension = isValidLANDimension(dimension) ? dimension : Dim.overworld.rawValue
     }
 
     public init(from decoder: Decoder) throws {
@@ -491,7 +599,13 @@ public struct LANEntitySnapshot: Codable, Equatable {
             itemCount: try c.decodeIfPresent(Int.self, forKey: .itemCount),
             itemDamage: try c.decodeIfPresent(Int.self, forKey: .itemDamage),
             itemLabel: try c.decodeIfPresent(String.self, forKey: .itemLabel),
-            xpAmount: try c.decodeIfPresent(Int.self, forKey: .xpAmount)
+            xpAmount: try c.decodeIfPresent(Int.self, forKey: .xpAmount),
+            vx: try c.decodeIfPresent(Double.self, forKey: .vx) ?? 0,
+            vy: try c.decodeIfPresent(Double.self, forKey: .vy) ?? 0,
+            vz: try c.decodeIfPresent(Double.self, forKey: .vz) ?? 0,
+            onGround: try c.decodeIfPresent(Bool.self, forKey: .onGround) ?? false,
+            fire: try c.decodeIfPresent(Bool.self, forKey: .fire) ?? false,
+            dimension: try c.decodeIfPresent(Int.self, forKey: .dimension) ?? Dim.overworld.rawValue
         )
     }
 }
@@ -812,7 +926,7 @@ public struct LANReplicationBatch: Codable, Equatable {
             entities.count <= LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES &&
             inventories.count <= LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES &&
             blockEntities.count <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES &&
-            chunkSections.allSatisfy(\.hasExpectedCellCount) &&
+            chunkSections.allSatisfy(\.isValidRLE) &&
             inventories.allSatisfy { $0.slots.count <= LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS } &&
             blockEntities.allSatisfy { $0.slots.count <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITY_SLOTS }
     }
@@ -920,6 +1034,230 @@ public struct LANTemplateIntent: Codable, Equatable {
     }
 }
 
+public struct LANAttackIntent: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case targetEntityID
+        case selectedHotbarSlot
+        case sprinting
+    }
+
+    public var targetEntityID: Int
+    public var selectedHotbarSlot: Int
+    public var sprinting: Bool
+
+    public init(targetEntityID: Int, selectedHotbarSlot: Int, sprinting: Bool) {
+        self.targetEntityID = max(0, targetEntityID)
+        self.selectedHotbarSlot = max(0, min(8, selectedHotbarSlot))
+        self.sprinting = sprinting
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            targetEntityID: try c.decode(Int.self, forKey: .targetEntityID),
+            selectedHotbarSlot: try c.decodeIfPresent(Int.self, forKey: .selectedHotbarSlot) ?? 0,
+            sprinting: try c.decodeIfPresent(Bool.self, forKey: .sprinting) ?? false
+        )
+    }
+}
+
+public struct LANTossIntent: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case slot
+        case count
+        case all
+    }
+
+    public var slot: Int
+    public var count: Int
+    public var all: Bool
+
+    public init(slot: Int, count: Int, all: Bool) {
+        self.slot = max(0, min(35, slot))
+        self.count = max(1, min(LAN_MULTIPLAYER_MAX_REPLICATED_ITEM_COUNT, count))
+        self.all = all
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            slot: try c.decode(Int.self, forKey: .slot),
+            count: try c.decodeIfPresent(Int.self, forKey: .count) ?? 1,
+            all: try c.decodeIfPresent(Bool.self, forKey: .all) ?? false
+        )
+    }
+}
+
+public struct LANContainerEditIntent: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case blockEntity
+        case inventory
+        case revision
+        case editSeq
+    }
+
+    public var blockEntity: LANBlockEntitySnapshot
+    public var inventory: LANPlayerInventorySnapshot
+    public var revision: Int
+    public var editSeq: Int
+
+    public init(blockEntity: LANBlockEntitySnapshot, inventory: LANPlayerInventorySnapshot, revision: Int, editSeq: Int) {
+        self.blockEntity = blockEntity
+        self.inventory = inventory
+        self.revision = max(0, revision)
+        self.editSeq = max(0, editSeq)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            blockEntity: try c.decode(LANBlockEntitySnapshot.self, forKey: .blockEntity),
+            inventory: try c.decode(LANPlayerInventorySnapshot.self, forKey: .inventory),
+            revision: try c.decodeIfPresent(Int.self, forKey: .revision) ?? 0,
+            editSeq: try c.decodeIfPresent(Int.self, forKey: .editSeq) ?? 0
+        )
+    }
+}
+
+public struct LANInventoryUpdate: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case playerID
+        case revision
+        case snapshot
+    }
+
+    public var playerID: String
+    public var revision: Int
+    public var snapshot: LANPlayerInventorySnapshot
+
+    public init(playerID: String, revision: Int, snapshot: LANPlayerInventorySnapshot) {
+        self.playerID = String(playerID.prefix(128))
+        self.revision = max(0, revision)
+        self.snapshot = snapshot
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            playerID: try c.decode(String.self, forKey: .playerID),
+            revision: try c.decodeIfPresent(Int.self, forKey: .revision) ?? 0,
+            snapshot: try c.decode(LANPlayerInventorySnapshot.self, forKey: .snapshot)
+        )
+    }
+}
+
+public struct LANInventoryGrant: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case playerID
+        case grantID
+        case items
+        case xp
+        case clearAll
+    }
+
+    public var playerID: String
+    public var grantID: Int
+    public var items: [LANInventorySlotSnapshot]
+    public var xp: Int
+    public var clearAll: Bool
+
+    public init(playerID: String, grantID: Int, items: [LANInventorySlotSnapshot], xp: Int, clearAll: Bool) {
+        self.playerID = String(playerID.prefix(128))
+        self.grantID = max(0, grantID)
+        self.items = Array(items.prefix(LAN_MULTIPLAYER_MAX_GRANT_ITEMS))
+        self.xp = max(0, min(1_000_000_000, xp))
+        self.clearAll = clearAll
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            playerID: try c.decode(String.self, forKey: .playerID),
+            grantID: try c.decodeIfPresent(Int.self, forKey: .grantID) ?? 0,
+            items: try c.decodeIfPresent([LANInventorySlotSnapshot].self, forKey: .items) ?? [],
+            xp: try c.decodeIfPresent(Int.self, forKey: .xp) ?? 0,
+            clearAll: try c.decodeIfPresent(Bool.self, forKey: .clearAll) ?? false
+        )
+    }
+}
+
+public struct LANRestoreState: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case playerState
+        case inventory
+        case revision
+        case grantID
+    }
+
+    public var playerState: LANPlayerState
+    public var inventory: LANPlayerInventorySnapshot
+    public var revision: Int
+    public var grantID: Int
+
+    public init(playerState: LANPlayerState, inventory: LANPlayerInventorySnapshot, revision: Int, grantID: Int) {
+        self.playerState = playerState
+        self.inventory = inventory
+        self.revision = max(0, revision)
+        self.grantID = max(0, grantID)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            playerState: try c.decode(LANPlayerState.self, forKey: .playerState),
+            inventory: try c.decode(LANPlayerInventorySnapshot.self, forKey: .inventory),
+            revision: try c.decodeIfPresent(Int.self, forKey: .revision) ?? 0,
+            grantID: try c.decodeIfPresent(Int.self, forKey: .grantID) ?? 0
+        )
+    }
+}
+
+public struct LANDamageEvent: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case playerID
+        case amount
+        case source
+        case knockbackX
+        case knockbackZ
+        case attackerType
+    }
+
+    public var playerID: String
+    public var amount: Double
+    public var source: String
+    public var knockbackX: Double
+    public var knockbackZ: Double
+    public var attackerType: String?
+
+    public init(
+        playerID: String,
+        amount: Double,
+        source: String,
+        knockbackX: Double,
+        knockbackZ: Double,
+        attackerType: String? = nil
+    ) {
+        self.playerID = String(playerID.prefix(128))
+        self.amount = amount.isFinite ? max(0, min(LAN_MULTIPLAYER_MAX_DAMAGE_AMOUNT, amount)) : 0
+        self.source = prefixByUTF8Bytes(cleanSingleLine(source), maxBytes: 32)
+        self.knockbackX = knockbackX.isFinite ? max(-64, min(64, knockbackX)) : 0
+        self.knockbackZ = knockbackZ.isFinite ? max(-64, min(64, knockbackZ)) : 0
+        self.attackerType = attackerType.map { prefixByUTF8Bytes(cleanSingleLine($0), maxBytes: 64) }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            playerID: try c.decode(String.self, forKey: .playerID),
+            amount: try c.decode(Double.self, forKey: .amount),
+            source: try c.decodeIfPresent(String.self, forKey: .source) ?? "",
+            knockbackX: try c.decodeIfPresent(Double.self, forKey: .knockbackX) ?? 0,
+            knockbackZ: try c.decodeIfPresent(Double.self, forKey: .knockbackZ) ?? 0,
+            attackerType: try c.decodeIfPresent(String.self, forKey: .attackerType)
+        )
+    }
+}
+
 public enum LANMultiplayerMessage: Codable, Equatable {
     case clientHello(playerID: String, playerName: String, joinCode: String, pebbleVersion: String)
     case serverAccept(peerID: String, world: LANWorldSummary)
@@ -938,6 +1276,14 @@ public enum LANMultiplayerMessage: Codable, Equatable {
     case chunkRequest(playerID: String, request: LANChunkRequest)
     case replicationAck(playerID: String, ack: LANReplicationAck)
     case gameplayEvent(LANGameplayEvent)
+    case attackIntent(playerID: String, intent: LANAttackIntent)
+    case tossIntent(playerID: String, intent: LANTossIntent)
+    case containerEditIntent(playerID: String, intent: LANContainerEditIntent)
+    case inventoryUpdate(LANInventoryUpdate)
+    case inventoryGrant(LANInventoryGrant)
+    case restoreState(LANRestoreState)
+    case damageEvent(LANDamageEvent)
+    case keepalive
 
     public var kind: LANMultiplayerMessageKind {
         switch self {
@@ -958,6 +1304,14 @@ public enum LANMultiplayerMessage: Codable, Equatable {
         case .chunkRequest: return .chunkRequest
         case .replicationAck: return .replicationAck
         case .gameplayEvent: return .gameplayEvent
+        case .attackIntent: return .attackIntent
+        case .tossIntent: return .tossIntent
+        case .containerEditIntent: return .containerEditIntent
+        case .inventoryUpdate: return .inventoryUpdate
+        case .inventoryGrant: return .inventoryGrant
+        case .restoreState: return .restoreState
+        case .damageEvent: return .damageEvent
+        case .keepalive: return .keepalive
         }
     }
 }
@@ -1000,22 +1354,35 @@ public enum LANMultiplayerCodecError: Error, Equatable, CustomStringConvertible 
 public struct LANMultiplayerFrameCodec {
     public static let headerByteCount = 16
 
-    public static func encode(_ message: LANMultiplayerMessage, sequence: UInt32 = 0) throws -> Data {
+    /// Encodes a message's JSON payload exactly once. Callers that fan the same message out to
+    /// multiple peers should call this once and reuse the result with `frame(kind:payload:sequence:)`
+    /// per peer, rather than re-encoding JSON per recipient.
+    public static func encodePayload(_ message: LANMultiplayerMessage) throws -> (kind: LANMultiplayerMessageKind, payload: Data) {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let payload = try encoder.encode(message)
         if payload.count > LAN_MULTIPLAYER_MAX_FRAME_BYTES {
             throw LANMultiplayerCodecError.oversizedFrame(payload.count)
         }
+        return (message.kind, payload)
+    }
+
+    /// Wraps an already-encoded payload with the wire header. Performs no JSON (re-)encoding.
+    public static func frame(kind: LANMultiplayerMessageKind, payload: Data, sequence: UInt32) -> Data {
         var data = Data()
         data.reserveCapacity(headerByteCount + payload.count)
         data.append(contentsOf: LANFrameMagic)
         appendUInt16(LAN_MULTIPLAYER_PROTOCOL_VERSION, to: &data)
-        appendUInt16(message.kind.rawValue, to: &data)
+        appendUInt16(kind.rawValue, to: &data)
         appendUInt32(sequence, to: &data)
         appendUInt32(UInt32(payload.count), to: &data)
         data.append(payload)
         return data
+    }
+
+    public static func encode(_ message: LANMultiplayerMessage, sequence: UInt32 = 0) throws -> Data {
+        let (kind, payload) = try encodePayload(message)
+        return frame(kind: kind, payload: payload, sequence: sequence)
     }
 
     public static func decode(_ data: Data) throws -> LANMultiplayerFrame {
