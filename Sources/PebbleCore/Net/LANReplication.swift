@@ -63,6 +63,11 @@ public enum LANBlockIntentResult: Equatable {
     case rejected(String)
 }
 
+public enum LANContainerEditResult: Equatable {
+    case applied(be: LANBlockEntitySnapshot)
+    case rejected(String)
+}
+
 private func lanFacingMeta(fromPlayerYaw yaw: Double) -> Int {
     let direction = yawToDir(yaw * 180 / .pi)
     return [0, 0, 0, 1, 2, 3][direction]
@@ -114,15 +119,31 @@ public final class LANMultiplayerHostSession {
         var permissions: LANPeerPermissions
         var playerState: LANPlayerState?
         var inventory: LANPlayerInventorySnapshot?
+        var inventoryRevision = 0
+        var lastGrantID = 0
+        var deathEpoch = 0
+        var deathHandledEpoch = 0
         var lastTemplateUndo: TemplatePlacementUndoSnapshot?
         var lastAckTick = 0
         var lastSeenTick = 0
         var disconnectedTick: Int?
     }
 
+    /// snapshot captured once per epoch by `consumeDeathDrops(for:)`; keyed by playerID for deterministic lookup.
+    private struct PendingDeathDrop {
+        var inventory: LANPlayerInventorySnapshot
+        var x: Double
+        var y: Double
+        var z: Double
+    }
+
     private var peers: [String: Peer] = [:]
     private var nextOrdinal = 0
     private let changeLog = LANReplicationChangeLog()
+    private var pendingGrants: [String: [LANInventoryGrant]] = [:]
+    private var pendingDeathDrops: [String: PendingDeathDrop] = [:]
+    private var dirtyBlockEntityPositions: [LANBlockPosition] = []
+    private var dirtyBlockEntitySet: Set<LANBlockPosition> = []
 
     public init() {}
 
@@ -197,12 +218,37 @@ public final class LANMultiplayerHostSession {
             dimension: allowedDimension,
             dead: staysDead || state.dead || state.health <= 0
         )
+        let wasAlive = peer.lifecycle != .dead
+        if wasAlive && sanitized.dead {
+            peer.deathEpoch += 1
+            pendingDeathDrops[playerID] = PendingDeathDrop(
+                inventory: peer.inventory ?? LANPlayerInventorySnapshot(playerID: peer.playerID, selectedHotbarSlot: 0, slots: []),
+                x: sanitized.x,
+                y: sanitized.y,
+                z: sanitized.z
+            )
+            peer.inventory = LANPlayerInventorySnapshot(playerID: peer.playerID, selectedHotbarSlot: 0, slots: [])
+        }
         peer.playerState = sanitized
         peer.lifecycle = sanitized.dead ? .dead : .connected
         peer.lastSeenTick = max(peer.lastSeenTick, tick)
         peer.disconnectedTick = nil
         peers[playerID] = peer
         return sanitized
+    }
+
+    /// Consumes the death-drop payload recorded on the most recent alive->dead transition, exactly
+    /// once per `deathEpoch`. Returns nil if no drop is pending or it was already handled this epoch.
+    @discardableResult
+    public func consumeDeathDrops(for rawPlayerID: String) -> (inventory: LANPlayerInventorySnapshot, x: Double, y: Double, z: Double)? {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard var peer = peers[playerID], peer.deathHandledEpoch < peer.deathEpoch,
+              let drop = pendingDeathDrops[playerID]
+        else { return nil }
+        peer.deathHandledEpoch = peer.deathEpoch
+        peers[playerID] = peer
+        pendingDeathDrops.removeValue(forKey: playerID)
+        return (drop.inventory, drop.x, drop.y, drop.z)
     }
 
     public func recordInventorySnapshot(_ snapshot: LANPlayerInventorySnapshot, from rawPlayerID: String) {
@@ -259,10 +305,37 @@ public final class LANMultiplayerHostSession {
             permissions: peer.permissions,
             playerState: peer.playerState,
             inventory: peer.inventory,
+            inventoryRevision: peer.inventoryRevision,
             lastAckTick: peer.lastAckTick,
             lastSeenTick: peer.lastSeenTick,
             disconnectedTick: peer.disconnectedTick
         )
+    }
+
+    /// Preloads a peer record from persisted storage (e.g. `SaveDB.getLANPlayer`) so a
+    /// reconnecting guest's position/inventory/permissions survive a host restart.
+    /// No-ops if a peer with the same ID is already tracked (a live session always wins).
+    public func seedPeerRecord(_ record: LANPeerRecordSnapshot) {
+        let playerID = String(record.playerID.prefix(128))
+        guard peers[playerID] == nil else { return }
+        peers[playerID] = Peer(
+            playerID: playerID,
+            displayName: sanitizedLANPlayerName(record.displayName),
+            joinedOrdinal: nextOrdinal,
+            lifecycle: .disconnected,
+            permissions: record.permissions,
+            playerState: record.playerState,
+            inventory: record.inventory,
+            inventoryRevision: max(0, record.inventoryRevision),
+            lastGrantID: 0,
+            deathEpoch: 0,
+            deathHandledEpoch: 0,
+            lastTemplateUndo: nil,
+            lastAckTick: max(0, record.lastAckTick),
+            lastSeenTick: max(0, record.lastSeenTick),
+            disconnectedTick: record.disconnectedTick
+        )
+        nextOrdinal += 1
     }
 
     public func recordAck(_ ack: LANReplicationAck, from rawPlayerID: String) {
@@ -552,6 +625,153 @@ public final class LANMultiplayerHostSession {
         }
     }
 
+    /// Validates and applies a whole-block-entity container edit (D-C): authorizes `.container`,
+    /// reach-checks the target, verifies the submitted snapshot is compatible with the block
+    /// actually at that position, then applies it wholesale (last-writer-wins). Also stores the
+    /// peer's published inventory, revision-gated. Fails closed on any validation error.
+    public func applyContainerEditIntent(
+        _ intent: LANContainerEditIntent,
+        from rawPlayerID: String,
+        to world: World
+    ) -> LANContainerEditResult {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard var peer = peers[playerID] else { return .rejected("unknown player") }
+        switch authorize(.container, from: playerID) {
+        case .accepted: break
+        case .rejected(let reason): return .rejected(reason)
+        }
+        guard let playerState = peer.playerState else { return .rejected("player state unavailable") }
+        guard playerState.dimension == world.dim.rawValue else {
+            return .rejected("target dimension unavailable")
+        }
+        let position = intent.blockEntity
+        guard isWithinLANReach(playerState, x: position.x, y: position.y, z: position.z) else {
+            return .rejected("target out of reach")
+        }
+        guard position.dimension == world.dim.rawValue else {
+            return .rejected("target dimension unavailable")
+        }
+        let targetCell = world.getBlock(position.x, position.y, position.z)
+        guard isLANBlockEntitySnapshotCompatible(position, cell: targetCell) else {
+            return .rejected("incompatible container target")
+        }
+        guard let normalized = normalizedLANBlockEntitySnapshot(position) else {
+            return .rejected("invalid container payload")
+        }
+        let existing = world.getBlockEntity(position.x, position.y, position.z)
+        let target = existing?.type == normalized.type ? existing! : makeBlockEntity(from: normalized)
+        guard applyLANBlockEntityPayload(normalized, to: target) else {
+            return .rejected("invalid container payload")
+        }
+        world.setBlockEntity(target)
+        recordDirtyBlockEntity(LANBlockPosition(dimension: normalized.dimension, x: normalized.x, y: normalized.y, z: normalized.z))
+
+        if intent.revision > peer.inventoryRevision, let normalizedInventory = normalizedLANInventorySnapshot(intent.inventory) {
+            peer.inventory = LANPlayerInventorySnapshot(
+                playerID: peer.playerID,
+                selectedHotbarSlot: normalizedInventory.selectedHotbarSlot,
+                slots: normalizedInventory.slots,
+                xp: normalizedInventory.xp,
+                xpLevel: normalizedInventory.xpLevel,
+                xpProgress: normalizedInventory.xpProgress
+            )
+            peer.inventoryRevision = intent.revision
+            peers[playerID] = peer
+        }
+        return .applied(be: normalized)
+    }
+
+    /// Applies a client-published inventory update if strictly newer than the stored revision
+    /// (monotone; stale/regressed updates are ignored). Validates every slot; rejects the whole
+    /// update (fail closed) if any slot is malformed.
+    @discardableResult
+    public func applyInventoryUpdate(_ update: LANInventoryUpdate, from rawPlayerID: String) -> Bool {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard var peer = peers[playerID] else { return false }
+        guard update.revision > peer.inventoryRevision else { return false }
+        guard let normalized = normalizedLANInventorySnapshot(update.snapshot) else { return false }
+        peer.inventory = LANPlayerInventorySnapshot(
+            playerID: peer.playerID,
+            selectedHotbarSlot: normalized.selectedHotbarSlot,
+            slots: normalized.slots,
+            xp: normalized.xp,
+            xpLevel: normalized.xpLevel,
+            xpProgress: normalized.xpProgress
+        )
+        peer.inventoryRevision = update.revision
+        peers[playerID] = peer
+        return true
+    }
+
+    /// Enqueues a host-originated, additive inventory grant (pickup/correction/death-clear) for
+    /// delivery to the given peer. `grantID` is monotone per peer so the client can de-duplicate.
+    @discardableResult
+    public func enqueueGrant(items: [LANInventorySlotSnapshot], xp: Int, clearAll: Bool, to rawPlayerID: String) -> LANInventoryGrant? {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard var peer = peers[playerID] else { return nil }
+        peer.lastGrantID += 1
+        let grant = LANInventoryGrant(playerID: peer.playerID, grantID: peer.lastGrantID, items: items, xp: xp, clearAll: clearAll)
+        peers[playerID] = peer
+        pendingGrants[playerID, default: []].append(grant)
+        return grant
+    }
+
+    /// Drains queued grants for one peer, in enqueue order.
+    public func drainGrants(for rawPlayerID: String) -> [LANInventoryGrant] {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard let queued = pendingGrants[playerID], !queued.isEmpty else { return [] }
+        pendingGrants[playerID] = []
+        return queued
+    }
+
+    /// Drains all queued grants across every peer, in deterministic playerID order.
+    public func drainAllGrants() -> [LANInventoryGrant] {
+        var out: [LANInventoryGrant] = []
+        for playerID in pendingGrants.keys.sorted() {
+            out.append(contentsOf: pendingGrants[playerID] ?? [])
+        }
+        pendingGrants.removeAll()
+        return out
+    }
+
+    /// Marks a block entity position dirty for prioritized replication (container edits, ghost
+    /// break spills). Deduplicated; drained in first-marked order.
+    public func recordDirtyBlockEntity(_ position: LANBlockPosition) {
+        guard dirtyBlockEntitySet.insert(position).inserted else { return }
+        dirtyBlockEntityPositions.append(position)
+    }
+
+    /// Drains the dirty block-entity position queue in the order positions were first marked.
+    public func drainDirtyBlockEntities() -> [LANBlockPosition] {
+        let out = dirtyBlockEntityPositions
+        dirtyBlockEntityPositions.removeAll()
+        dirtyBlockEntitySet.removeAll()
+        return out
+    }
+
+    /// Builds the restore payload sent to a reconnecting/joining peer so its client authoritatively
+    /// re-adopts its last known position + inventory + revision + grant baseline.
+    public func peerRestoreState(playerID rawPlayerID: String) -> LANRestoreState? {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard let peer = peers[playerID], let playerState = peer.playerState else { return nil }
+        let inventory = peer.inventory ?? LANPlayerInventorySnapshot(playerID: peer.playerID, selectedHotbarSlot: 0, slots: [])
+        return LANRestoreState(
+            playerState: playerState,
+            inventory: inventory,
+            revision: peer.inventoryRevision,
+            grantID: peer.lastGrantID
+        )
+    }
+
+    /// Re-records previously drained block changes (amendment A4): used when an encode attempt
+    /// fails so the drained deltas are never silently lost. Preserves the change log's normal
+    /// per-position coalescing/ordering semantics as if the changes had never been drained.
+    public func requeueBlockChanges(_ changes: [LANBlockChange]) {
+        for change in changes {
+            changeLog.record(change)
+        }
+    }
+
     public func makeBatch(
         tick: Int,
         fullSnapshot: Bool,
@@ -560,6 +780,7 @@ public final class LANMultiplayerHostSession {
         localPlayer: LANPlayerState?,
         chunkSections: [LANChunkSectionSnapshot],
         entitySnapshots: [LANEntitySnapshot],
+        entitySnapshotsComplete: Bool,
         inventorySnapshots: [LANPlayerInventorySnapshot],
         blockEntitySnapshots: [LANBlockEntitySnapshot] = []
     ) -> LANReplicationBatch {
@@ -579,7 +800,7 @@ public final class LANMultiplayerHostSession {
             blockChanges: blockChanges,
             chunkSections: chunkSections,
             entities: entitySnapshots,
-            entitySnapshotsComplete: true,
+            entitySnapshotsComplete: entitySnapshotsComplete,
             inventories: inventories,
             blockEntities: blockEntitySnapshots
         )
@@ -596,8 +817,37 @@ public final class LANMultiplayerClientSession {
     public private(set) var entities: [Int: LANEntitySnapshot] = [:]
     public private(set) var inventories: [String: LANPlayerInventorySnapshot] = [:]
     public private(set) var blockEntities: [LANBlockPosition: LANBlockEntitySnapshot] = [:]
+    /// Baseline tracking for client-authoritative inventory (D-A): the last host grant this client
+    /// has merged, and the client's own published inventory revision. `apply(_:)` never mutates
+    /// local player inventory from a normal batch — only `applyRestore(_:)` / grant merges do.
+    public private(set) var lastAppliedGrantID = 0
+    public private(set) var localRevision = 0
 
     public init() {}
+
+    /// Establishes the authoritative baseline from a host `LANRestoreState` (join/reconnect).
+    /// Host restore always wins over any local resume state; caller is responsible for applying
+    /// `restore.playerState`/`restore.inventory` to the local `Player` (GameCore concern).
+    public func applyRestore(_ restore: LANRestoreState) {
+        localRevision = restore.revision
+        lastAppliedGrantID = restore.grantID
+    }
+
+    /// Records that a grant has been merged locally, guarding against duplicate/regressed grants.
+    /// Returns false (no-op) if `grantID` is not strictly newer than the last applied grant.
+    @discardableResult
+    public func markGrantApplied(_ grantID: Int) -> Bool {
+        guard grantID > lastAppliedGrantID else { return false }
+        lastAppliedGrantID = grantID
+        return true
+    }
+
+    /// Bumps and returns the local inventory revision after a client-side inventory change.
+    @discardableResult
+    public func bumpLocalRevision() -> Int {
+        localRevision += 1
+        return localRevision
+    }
 
     @discardableResult
     public func apply(_ batch: LANReplicationBatch) -> LANReplicationApplyReport {
@@ -1175,7 +1425,13 @@ public func makeLANEntitySnapshots(
             itemCount: item?.stack.count,
             itemDamage: item?.stack.damage,
             itemLabel: item?.stack.label,
-            xpAmount: xp?.amount
+            xpAmount: xp?.amount,
+            vx: entity?.vx ?? 0,
+            vy: entity?.vy ?? 0,
+            vz: entity?.vz ?? 0,
+            onGround: entity?.onGround ?? false,
+            fire: (entity?.fireTicks ?? 0) > 0,
+            dimension: world.dim.rawValue
         ))
     }
     return out
@@ -1319,7 +1575,13 @@ private func normalizedLANEntitySnapshot(_ raw: LANEntitySnapshot) -> LANEntityS
         itemCount: raw.itemCount,
         itemDamage: raw.itemDamage,
         itemLabel: raw.itemLabel,
-        xpAmount: raw.xpAmount
+        xpAmount: raw.xpAmount,
+        vx: raw.vx,
+        vy: raw.vy,
+        vz: raw.vz,
+        onGround: raw.onGround,
+        fire: raw.fire,
+        dimension: raw.dimension
     )
     guard snapshot.entityID >= 0, snapshot.type != "player" else { return nil }
     if snapshot.dead { return snapshot }
@@ -1337,12 +1599,6 @@ private func normalizedLANEntitySnapshot(_ raw: LANEntitySnapshot) -> LANEntityS
         guard entityTypes().contains(snapshot.type) else { return nil }
     }
     return snapshot
-}
-
-private func mirroredEntity(sourceID: Int, in world: World) -> Entity? {
-    world.entities.first(where: {
-        ($0 as? Entity)?.lanReplicationSourceID == sourceID
-    }) as? Entity
 }
 
 private func itemStack(from snapshot: LANEntitySnapshot) -> ItemStack? {
@@ -1395,19 +1651,32 @@ private func configureMirroredEntity(_ entity: Entity, from snapshot: LANEntityS
     entity.persistent = false
     entity.noClip = true
     entity.noGravity = true
-    entity.vx = 0
-    entity.vy = 0
-    entity.vz = 0
+    entity.vx = snapshot.vx
+    entity.vy = snapshot.vy
+    entity.vz = snapshot.vz
     entity.setPos(snapshot.x, snapshot.y, snapshot.z)
     entity.yaw = snapshot.yaw
     entity.prevYaw = snapshot.yaw
     entity.pitch = snapshot.pitch
     entity.prevPitch = snapshot.pitch
-    entity.fireTicks = 0
+    entity.onGround = snapshot.onGround
+    entity.fireTicks = snapshot.fire ? max(entity.fireTicks, 1) : 0
     if let living = entity as? LivingEntity, let health = snapshot.health {
         living.health = max(0, min(living.maxHealth, health))
         living.deathTime = living.health <= 0 ? max(1, living.deathTime) : 0
     }
+}
+
+/// Builds a one-pass `[sourceID: Entity]` index of currently-mirrored entities in `world` (amendment
+/// A13) so `applyLANEntitySnapshots` resolves each snapshot in O(1) instead of an O(N) linear scan
+/// per snapshot (avoiding O(N^2) behavior for large batches).
+private func indexMirroredEntities(in world: World) -> [Int: Entity] {
+    var index: [Int: Entity] = [:]
+    for ref in world.entities {
+        guard let entity = ref as? Entity, let sourceID = entity.lanReplicationSourceID else { continue }
+        index[sourceID] = entity
+    }
+    return index
 }
 
 @discardableResult
@@ -1418,24 +1687,31 @@ public func applyLANEntitySnapshots(
 ) -> LANReplicationApplyReport {
     var report = LANReplicationApplyReport()
     var wantedSourceIDs = Set<Int>()
+    var mirrorsBySourceID = indexMirroredEntities(in: world)
 
     for raw in snapshots.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES) {
         guard let snapshot = normalizedLANEntitySnapshot(raw) else {
             report.ignoredInvalidEntities += 1
             continue
         }
+        guard snapshot.dimension == world.dim.rawValue else {
+            report.ignoredInvalidEntities += 1
+            continue
+        }
         if snapshot.dead {
-            if let existing = mirroredEntity(sourceID: snapshot.entityID, in: world) {
+            if let existing = mirrorsBySourceID[snapshot.entityID] {
                 world.removeEntity(existing)
+                mirrorsBySourceID.removeValue(forKey: snapshot.entityID)
                 report.removedEntitySnapshots += 1
             }
             continue
         }
 
         wantedSourceIDs.insert(snapshot.entityID)
-        var entity = mirroredEntity(sourceID: snapshot.entityID, in: world)
+        var entity = mirrorsBySourceID[snapshot.entityID]
         if let existing = entity, existing.type != snapshot.type {
             world.removeEntity(existing)
+            mirrorsBySourceID.removeValue(forKey: snapshot.entityID)
             report.removedEntitySnapshots += 1
             entity = nil
         }
@@ -1448,21 +1724,23 @@ public func applyLANEntitySnapshots(
             world.addEntity(created)
         }
         guard let entity, applyMirroredEntityPayload(snapshot, to: entity) else {
-            if let entity { world.removeEntity(entity) }
+            if let entity {
+                world.removeEntity(entity)
+                mirrorsBySourceID.removeValue(forKey: snapshot.entityID)
+            }
             report.ignoredInvalidEntities += 1
             continue
         }
         configureMirroredEntity(entity, from: snapshot)
+        mirrorsBySourceID[snapshot.entityID] = entity
         report.appliedEntitySnapshots += 1
     }
 
     if removeMissing {
-        for ref in Array(world.entities) {
-            guard let entity = ref as? Entity,
-                  entity.lanReplicatedMirror,
-                  let sourceID = entity.lanReplicationSourceID,
-                  !wantedSourceIDs.contains(sourceID)
-            else { continue }
+        // Scoped to same-dimension mirrors only (amendment A1): a mirror sourced from a snapshot
+        // in another dimension was never applied here (dropped above), so it must not be purged
+        // by this world's completion pass.
+        for (sourceID, entity) in mirrorsBySourceID where !wantedSourceIDs.contains(sourceID) {
             world.removeEntity(entity)
             report.removedEntitySnapshots += 1
         }

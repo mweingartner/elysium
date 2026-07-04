@@ -39,9 +39,34 @@ public struct LANPeerRecordSnapshot: Equatable {
     public var permissions: LANPeerPermissions
     public var playerState: LANPlayerState?
     public var inventory: LANPlayerInventorySnapshot?
+    public var inventoryRevision: Int
     public var lastAckTick: Int
     public var lastSeenTick: Int
     public var disconnectedTick: Int?
+
+    public init(
+        playerID: String,
+        displayName: String,
+        lifecycle: LANPeerLifecycleState,
+        permissions: LANPeerPermissions,
+        playerState: LANPlayerState?,
+        inventory: LANPlayerInventorySnapshot?,
+        inventoryRevision: Int = 0,
+        lastAckTick: Int,
+        lastSeenTick: Int,
+        disconnectedTick: Int?
+    ) {
+        self.playerID = playerID
+        self.displayName = displayName
+        self.lifecycle = lifecycle
+        self.permissions = permissions
+        self.playerState = playerState
+        self.inventory = inventory
+        self.inventoryRevision = inventoryRevision
+        self.lastAckTick = lastAckTick
+        self.lastSeenTick = lastSeenTick
+        self.disconnectedTick = disconnectedTick
+    }
 }
 
 public struct LANRemotePlayerApplyReport: Equatable {
@@ -105,6 +130,7 @@ public final class LANRemotePlayerEntity: LivingEntity {
     public var xp = 0
     public var xpLevel = 0
     public var xpProgress = 0.0
+    private var pendingDamage: [LANDamageEvent] = []
 
     public override var type: String { "player" }
     public override var isPlayer: Bool { true }
@@ -317,9 +343,29 @@ public final class LANRemotePlayerEntity: LivingEntity {
         }
     }
 
+    /// Records the hit as a `LANDamageEvent` for the transport to relay to the owning guest, who
+    /// applies it locally and self-reports the resulting health (D-K: client-authoritative HP).
+    /// Never mutates this cosmetic proxy's health and always returns false (no proxy knockback).
     @discardableResult
     public override func hurt(_ amount: Double, _ source: String, _ attacker: Entity? = nil) -> Bool {
-        false
+        guard !dead, amount > 0 else { return false }
+        if pendingDamage.count >= LAN_MULTIPLAYER_MAX_GRANT_ITEMS { pendingDamage.removeFirst() }
+        pendingDamage.append(LANDamageEvent(
+            playerID: multiplayerPlayerID,
+            amount: amount,
+            source: source,
+            knockbackX: attacker.map { x - $0.x } ?? 0,
+            knockbackZ: attacker.map { z - $0.z } ?? 0,
+            attackerType: attacker?.type
+        ))
+        return false
+    }
+
+    /// Drains all damage events recorded since the last drain, in the order they occurred.
+    public func drainPendingDamage() -> [LANDamageEvent] {
+        let out = pendingDamage
+        pendingDamage.removeAll()
+        return out
     }
 }
 

@@ -691,6 +691,7 @@ final class LANMultiplayerManager {
             localPlayer: localState,
             chunkSections: chunks,
             entitySnapshots: entities,
+            entitySnapshotsComplete: entities.count < LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES,
             inventorySnapshots: inventories,
             blockEntitySnapshots: blockEntities
         )

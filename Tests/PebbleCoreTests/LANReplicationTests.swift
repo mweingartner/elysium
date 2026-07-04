@@ -1260,6 +1260,7 @@ final class LANReplicationTests: XCTestCase {
             localPlayer: nil,
             chunkSections: [],
             entitySnapshots: makeLANEntitySnapshots(in: hostWorld),
+            entitySnapshotsComplete: true,
             inventorySnapshots: []
         )
 
@@ -1286,6 +1287,7 @@ final class LANReplicationTests: XCTestCase {
             localPlayer: nil,
             chunkSections: [],
             entitySnapshots: [],
+            entitySnapshotsComplete: true,
             inventorySnapshots: [],
             blockEntitySnapshots: blockEntitySnapshots
         )
@@ -1458,6 +1460,502 @@ final class LANReplicationTests: XCTestCase {
 
         XCTAssertEqual(snapshots.count, world.info.height / SECTION_H)
         XCTAssertTrue(snapshots.allSatisfy { $0.cx == 0 && $0.cz == 0 })
+    }
+
+    // MARK: - W2: entitySnapshotsComplete purge gating
+
+    func testEntitySnapshotsCompleteFalseDoesNotPurgeMissingMirrorsClientSide() {
+        let clientWorld = makeLoadedWorld()
+        let first = LANEntitySnapshot(entityID: 1, type: "zombie", x: 1, y: 64, z: 1, yaw: 0, pitch: 0, health: 20, dead: false)
+        let second = LANEntitySnapshot(entityID: 2, type: "zombie", x: 2, y: 64, z: 2, yaw: 0, pitch: 0, health: 20, dead: false)
+
+        _ = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 1, fullSnapshot: false, entities: [first, second], entitySnapshotsComplete: true),
+            to: clientWorld
+        )
+        XCTAssertEqual(clientWorld.entities.compactMap { $0 as? Zombie }.count, 2)
+
+        // A truncated batch (entitySnapshotsComplete=false) omitting `second` must NOT purge it.
+        let truncated = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 2, fullSnapshot: false, entities: [first], entitySnapshotsComplete: false),
+            to: clientWorld
+        )
+        XCTAssertEqual(truncated.removedEntitySnapshots, 0)
+        XCTAssertEqual(clientWorld.entities.compactMap { $0 as? Zombie }.count, 2)
+
+        // A complete batch omitting `second` DOES purge it.
+        let complete = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 3, fullSnapshot: false, entities: [first], entitySnapshotsComplete: true),
+            to: clientWorld
+        )
+        XCTAssertEqual(complete.removedEntitySnapshots, 1)
+        XCTAssertEqual(clientWorld.entities.compactMap { $0 as? Zombie }.count, 1)
+    }
+
+    func testHostSessionMakeBatchPassesThroughEntitySnapshotsCompleteFlag() {
+        let session = LANMultiplayerHostSession()
+
+        let incomplete = session.makeBatch(
+            tick: 1,
+            fullSnapshot: false,
+            worldSummary: nil,
+            worldState: nil,
+            localPlayer: nil,
+            chunkSections: [],
+            entitySnapshots: [],
+            entitySnapshotsComplete: false,
+            inventorySnapshots: []
+        )
+        XCTAssertFalse(incomplete.entitySnapshotsComplete)
+
+        let complete = session.makeBatch(
+            tick: 2,
+            fullSnapshot: false,
+            worldSummary: nil,
+            worldState: nil,
+            localPlayer: nil,
+            chunkSections: [],
+            entitySnapshots: [],
+            entitySnapshotsComplete: true,
+            inventorySnapshots: []
+        )
+        XCTAssertTrue(complete.entitySnapshotsComplete)
+    }
+
+    // MARK: - W2 amendment A1: entity snapshot dimension filtering
+
+    func testEntitySnapshotDimensionFilterDropsCrossDimensionSnapshotsAndPreservesOtherDimensionMirrors() {
+        let overworld = makeLoadedWorld()
+
+        let overworldZombie = LANEntitySnapshot(
+            entityID: 10, type: "zombie", x: 1, y: 64, z: 1, yaw: 0, pitch: 0, health: 20, dead: false,
+            dimension: Dim.overworld.rawValue
+        )
+        var report = applyLANEntitySnapshots([overworldZombie], to: overworld)
+        XCTAssertEqual(report.appliedEntitySnapshots, 1)
+        XCTAssertEqual(overworld.entities.compactMap { $0 as? Zombie }.count, 1)
+
+        // A nether-tagged snapshot must be dropped (never materialized) in an overworld world, even
+        // as an incomplete/delta batch that does not otherwise reference the overworld mirror.
+        let netherZombie = LANEntitySnapshot(
+            entityID: 11, type: "zombie", x: 2, y: 64, z: 2, yaw: 0, pitch: 0, health: 20, dead: false,
+            dimension: Dim.nether.rawValue
+        )
+        report = applyLANEntitySnapshots([netherZombie], to: overworld, removeMissing: false)
+        XCTAssertEqual(report.appliedEntitySnapshots, 0)
+        XCTAssertEqual(report.ignoredInvalidEntities, 1)
+        XCTAssertEqual(overworld.entities.compactMap { $0 as? Zombie }.count, 1)
+
+        // A complete-list purge pass that still includes the overworld snapshot alongside the
+        // dropped cross-dimension one must keep the overworld mirror (it IS in the wanted set) —
+        // the purge only removes mirrors that are genuinely absent from the complete list.
+        report = applyLANEntitySnapshots([overworldZombie, netherZombie], to: overworld, removeMissing: true)
+        XCTAssertEqual(report.removedEntitySnapshots, 0)
+        XCTAssertEqual(overworld.entities.compactMap { $0 as? Zombie }.count, 1)
+    }
+
+    func testMakeLANEntitySnapshotsStampsHostWorldDimension() {
+        let nether = World(dim: .nether, seed: 7)
+        let zombie = Zombie(world: nether)
+        zombie.setPos(1.5, 64, 1.5)
+        nether.addEntity(zombie)
+
+        let snapshots = makeLANEntitySnapshots(in: nether)
+
+        XCTAssertEqual(snapshots.first?.dimension, Dim.nether.rawValue)
+    }
+
+    func testMirroredEntityVelocityIsSetFromSnapshotNotZeroed() {
+        let world = makeLoadedWorld()
+        let snapshot = LANEntitySnapshot(
+            entityID: 20, type: "zombie", x: 1, y: 64, z: 1, yaw: 0, pitch: 0, health: 20, dead: false,
+            vx: 1.5, vy: -0.5, vz: 2.5, onGround: true, fire: true
+        )
+
+        _ = applyLANEntitySnapshots([snapshot], to: world)
+
+        let mirror = try! XCTUnwrap(world.entities.compactMap { $0 as? Zombie }.first)
+        XCTAssertEqual(mirror.vx, 1.5, accuracy: 0.000_001)
+        XCTAssertEqual(mirror.vy, -0.5, accuracy: 0.000_001)
+        XCTAssertEqual(mirror.vz, 2.5, accuracy: 0.000_001)
+        XCTAssertTrue(mirror.onGround)
+        XCTAssertGreaterThan(mirror.fireTicks, 0)
+    }
+
+    // MARK: - W2: container edit intent
+
+    func testApplyContainerEditIntentAppliesValidDepositAndStoresPeerInventory() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+        let chestCell = Int(B.chest) << 4
+        _ = world.setBlock(2, 64, 1, chestCell)
+        let chest = makeContainerBE(2, 64, 1, 27)
+        world.setBlockEntity(chest)
+
+        var slots = [LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 2)]
+        let editedBE = LANBlockEntitySnapshot(
+            dimension: Dim.overworld.rawValue,
+            x: 2, y: 64, z: 1,
+            type: "container",
+            slotCount: 27,
+            slots: slots
+        )
+        let inventory = LANPlayerInventorySnapshot(
+            playerID: "peer-a",
+            selectedHotbarSlot: 0,
+            slots: [LANInventorySlotSnapshot(slot: 0, itemID: iid("stick"), count: 3)]
+        )
+        let intent = LANContainerEditIntent(blockEntity: editedBE, inventory: inventory, revision: 1, editSeq: 1)
+
+        let result = session.applyContainerEditIntent(intent, from: "peer-a", to: world)
+        guard case .applied(let be) = result else {
+            return XCTFail("expected .applied, got \(result)")
+        }
+        XCTAssertEqual(be.slots.first?.itemID, iid("diamond"))
+        let stored = try XCTUnwrap(world.getBlockEntity(2, 64, 1))
+        XCTAssertEqual(stored.items?[0], ItemStack(iid("diamond"), 2))
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.itemID, iid("stick"))
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventoryRevision, 1)
+
+        // wrong-type/incompatible cell rejected
+        slots = [LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 1)]
+        _ = world.setBlock(3, 64, 1, Int(B.stone) << 4)
+        let incompatible = LANContainerEditIntent(
+            blockEntity: LANBlockEntitySnapshot(dimension: Dim.overworld.rawValue, x: 3, y: 64, z: 1, type: "container", slotCount: 27, slots: slots),
+            inventory: inventory,
+            revision: 2,
+            editSeq: 2
+        )
+        let rejected = session.applyContainerEditIntent(incompatible, from: "peer-a", to: world)
+        XCTAssertEqual(rejected, .rejected("incompatible container target"))
+
+        // out-of-reach rejected
+        let farSession = makeAcceptedHostSession(x: 500, y: 64, z: 500)
+        let farResult = farSession.applyContainerEditIntent(intent, from: "peer-a", to: world)
+        XCTAssertEqual(farResult, .rejected("target out of reach"))
+    }
+
+    func testApplyContainerEditIntentDirtiesBlockEntityQueue() {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+        _ = world.setBlock(2, 64, 1, Int(B.chest) << 4)
+        world.setBlockEntity(makeContainerBE(2, 64, 1, 27))
+
+        let editedBE = LANBlockEntitySnapshot(
+            dimension: Dim.overworld.rawValue, x: 2, y: 64, z: 1, type: "container", slotCount: 27,
+            slots: [LANBlockEntitySlotSnapshot(slot: 0, itemID: iid("coal"), count: 1)]
+        )
+        let intent = LANContainerEditIntent(
+            blockEntity: editedBE,
+            inventory: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
+            revision: 1,
+            editSeq: 1
+        )
+        _ = session.applyContainerEditIntent(intent, from: "peer-a", to: world)
+
+        XCTAssertEqual(session.drainDirtyBlockEntities(), [
+            LANBlockPosition(dimension: Dim.overworld.rawValue, x: 2, y: 64, z: 1),
+        ])
+        XCTAssertTrue(session.drainDirtyBlockEntities().isEmpty)
+    }
+
+    // MARK: - W2: inventory revision gating
+
+    func testApplyInventoryUpdateGatesOnStrictlyGreaterRevisionAndRejectsInvalidSlots() {
+        let session = makeAcceptedHostSession()
+
+        let first = LANInventoryUpdate(
+            playerID: "peer-a",
+            revision: 1,
+            snapshot: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("stick"), count: 5),
+            ])
+        )
+        XCTAssertTrue(session.applyInventoryUpdate(first, from: "peer-a"))
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.count, 5)
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventoryRevision, 1)
+
+        // equal revision ignored
+        let equal = LANInventoryUpdate(
+            playerID: "peer-a",
+            revision: 1,
+            snapshot: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("stick"), count: 99),
+            ])
+        )
+        XCTAssertFalse(session.applyInventoryUpdate(equal, from: "peer-a"))
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.count, 5)
+
+        // lower revision ignored
+        let lower = LANInventoryUpdate(
+            playerID: "peer-a",
+            revision: 0,
+            snapshot: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("stick"), count: 1),
+            ])
+        )
+        XCTAssertFalse(session.applyInventoryUpdate(lower, from: "peer-a"))
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.count, 5)
+
+        // higher revision applies
+        let higher = LANInventoryUpdate(
+            playerID: "peer-a",
+            revision: 2,
+            snapshot: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("stick"), count: 12),
+            ])
+        )
+        XCTAssertTrue(session.applyInventoryUpdate(higher, from: "peer-a"))
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.count, 12)
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventoryRevision, 2)
+
+        // invalid slot rejects the whole update (fail closed) — revision stays at 2
+        let invalidSlot = LANInventoryUpdate(
+            playerID: "peer-a",
+            revision: 3,
+            snapshot: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: itemDefs.count + 100, count: 1),
+            ])
+        )
+        XCTAssertFalse(session.applyInventoryUpdate(invalidSlot, from: "peer-a"))
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventoryRevision, 2)
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.count, 12)
+    }
+
+    // MARK: - W2: grant idempotency
+
+    func testEnqueueGrantProducesMonotoneGrantIDsAndDrainsInOrder() {
+        let session = makeAcceptedHostSession()
+
+        let first = session.enqueueGrant(items: [LANInventorySlotSnapshot(slot: 0, itemID: iid("coal"), count: 1)], xp: 0, clearAll: false, to: "peer-a")
+        let second = session.enqueueGrant(items: [LANInventorySlotSnapshot(slot: 1, itemID: iid("stick"), count: 2)], xp: 5, clearAll: false, to: "peer-a")
+
+        XCTAssertEqual(first?.grantID, 1)
+        XCTAssertEqual(second?.grantID, 2)
+
+        let drained = session.drainGrants(for: "peer-a")
+        XCTAssertEqual(drained.map(\.grantID), [1, 2])
+        XCTAssertTrue(session.drainGrants(for: "peer-a").isEmpty)
+
+        XCTAssertEqual(session.peerRestoreState(playerID: "peer-a")?.grantID, 2)
+    }
+
+    func testDrainAllGrantsReturnsDeterministicPlayerIDOrder() {
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-b", displayName: "Bea")
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex")
+
+        _ = session.enqueueGrant(items: [], xp: 1, clearAll: false, to: "peer-b")
+        _ = session.enqueueGrant(items: [], xp: 2, clearAll: false, to: "peer-a")
+
+        let drained = session.drainAllGrants()
+        XCTAssertEqual(drained.map(\.playerID), ["peer-a", "peer-b"])
+        XCTAssertTrue(session.drainAllGrants().isEmpty)
+    }
+
+    // MARK: - W2: ghost actor
+
+    func testGhostBreakSpawnsDropsConsumesToolDurabilityAndRecordsBlockChange() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+        world.hooks.onBlockChanged = { [weak session] x, y, z, _, newCell, _ in
+            _ = session?.recordBlockChange(dimension: world.dim.rawValue, x: x, y: y, z: z, cell: newCell)
+        }
+        _ = world.setBlock(2, 64, 1, Int(B.stone) << 4)
+
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 2.5, y: 64, z: 1.5, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival
+        ))
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("iron_pickaxe"), count: 1, damage: 0),
+            ]),
+            from: "peer-a"
+        )
+
+        let registry = LANHostGhostRegistry()
+        let outcome = registry.applyBreak(for: "peer-a", x: 2, y: 64, z: 1, world: world, session: session)
+
+        XCTAssertTrue(outcome.broke)
+        XCTAssertEqual(world.getBlock(2, 64, 1), 0)
+        let drop = try XCTUnwrap(world.entities.compactMap { $0 as? ItemEntity }.first)
+        XCTAssertEqual(drop.stack.id, iid("cobblestone"))
+        XCTAssertEqual(outcome.inventory.slots.first?.itemID, iid("iron_pickaxe"))
+        XCTAssertEqual(outcome.inventory.slots.first?.damage, 1)
+        XCTAssertEqual(session.drainBlockChanges(), [
+            LANBlockChange(dimension: Dim.overworld.rawValue, x: 2, y: 64, z: 1, cell: 0),
+        ])
+    }
+
+    func testGhostBreakSpillsContainerContentsAndMarksDirtyBlockEntity() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+        _ = world.setBlock(2, 64, 1, Int(B.chest) << 4)
+        let chest = makeContainerBE(2, 64, 1, 27)
+        chest.items![0] = ItemStack(iid("diamond"), 2)
+        world.setBlockEntity(chest)
+
+        let registry = LANHostGhostRegistry()
+        let outcome = registry.applyBreak(for: "peer-a", x: 2, y: 64, z: 1, world: world, session: session)
+
+        XCTAssertTrue(outcome.broke)
+        XCTAssertEqual(outcome.spilledContainerAt, LANBlockPosition(dimension: Dim.overworld.rawValue, x: 2, y: 64, z: 1))
+        XCTAssertTrue(world.entities.compactMap { $0 as? ItemEntity }.contains { $0.stack.id == iid("diamond") })
+        XCTAssertEqual(session.drainDirtyBlockEntities(), [
+            LANBlockPosition(dimension: Dim.overworld.rawValue, x: 2, y: 64, z: 1),
+        ])
+    }
+
+    func testGhostAttackHurtsRealMobRejectsProxyTargetsAndReturnsDurabilityDelta() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("iron_sword"), count: 1, damage: 0),
+            ]),
+            from: "peer-a"
+        )
+        let zombie = Zombie(world: world)
+        zombie.setPos(3, 64, 1.5)
+        zombie.health = 20
+        world.addEntity(zombie)
+
+        let registry = LANHostGhostRegistry()
+        let outcome = registry.applyAttack(for: "peer-a", targetEntityID: zombie.id, world: world, session: session)
+
+        XCTAssertTrue(outcome.attacked)
+        XCTAssertLessThan(zombie.health, 20)
+        XCTAssertEqual(outcome.inventory.slots.first?.itemID, iid("iron_sword"))
+
+        // Attacking a proxy (PvE only, D-K) must be rejected.
+        let proxy = LANRemotePlayerEntity(world: world, state: LANPlayerState(
+            playerID: "peer-b", displayName: "Bea", x: 3, y: 64, z: 1.5, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival
+        ))
+        world.addEntity(proxy)
+        let rejected = registry.applyAttack(for: "peer-a", targetEntityID: proxy.id, world: world, session: session)
+        XCTAssertFalse(rejected.attacked)
+        XCTAssertEqual(rejected.reason, "PvP not supported")
+    }
+
+    func testProxyHurtRecordsDamageEventLeavesHealthUnchangedAndReturnsFalse() {
+        let world = makeLoadedWorld()
+        let proxy = LANRemotePlayerEntity(world: world, state: LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1, y: 64, z: 1, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival
+        ))
+        world.addEntity(proxy)
+
+        let attacker = Zombie(world: world)
+        attacker.setPos(2, 64, 1)
+
+        let result = proxy.hurt(4, "mob", attacker)
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(proxy.health, 20)
+        let events = proxy.drainPendingDamage()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.playerID, "peer-a")
+        XCTAssertEqual(events.first?.amount, 4)
+        XCTAssertTrue(proxy.drainPendingDamage().isEmpty)
+
+        // no-op damage does not enqueue an event
+        XCTAssertFalse(proxy.hurt(0, "mob", attacker))
+        XCTAssertTrue(proxy.drainPendingDamage().isEmpty)
+    }
+
+    // MARK: - W2: death drops
+
+    func testConsumeDeathDropsFiresExactlyOncePerEpochAcrossDeadAliveFlaps() {
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex")
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 1),
+            ]),
+            from: "peer-a"
+        )
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1, y: 64, z: 1, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival
+        ))
+
+        // alive -> dead transition
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1, y: 64, z: 1, yaw: 0, pitch: 0,
+            health: 0, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival, dead: true
+        ))
+
+        let firstDrop = session.consumeDeathDrops(for: "peer-a")
+        XCTAssertNotNil(firstDrop)
+        XCTAssertEqual(firstDrop?.inventory.slots.first?.itemID, iid("diamond"))
+        XCTAssertNil(session.consumeDeathDrops(for: "peer-a"), "must not fire twice within the same epoch")
+
+        // dead -> alive (respawn) -> dead again: new epoch, drop fires again
+        session.setPermissions(LANPeerPermissions(canRespawn: true), for: "peer-a")
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1, y: 64, z: 1, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival, dead: false
+        ))
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("stick"), count: 1),
+            ]),
+            from: "peer-a"
+        )
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 2, y: 65, z: 2, yaw: 0, pitch: 0,
+            health: 0, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival, dead: true
+        ))
+
+        let secondDrop = session.consumeDeathDrops(for: "peer-a")
+        XCTAssertNotNil(secondDrop)
+        XCTAssertEqual(secondDrop?.inventory.slots.first?.itemID, iid("stick"))
+        XCTAssertEqual(secondDrop?.x, 2)
+        XCTAssertEqual(secondDrop?.y, 65)
+        XCTAssertEqual(secondDrop?.z, 2)
+        XCTAssertNil(session.consumeDeathDrops(for: "peer-a"))
+    }
+
+    func testSpawnPlayerDeathDropsSpawnsExpectedItemEntitiesAndXp() {
+        let world = makeLoadedWorld()
+        let inventory = LANPlayerInventorySnapshot(
+            playerID: "peer-a",
+            selectedHotbarSlot: 0,
+            slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 3),
+                LANInventorySlotSnapshot(slot: 5, itemID: iid("stick"), count: 1),
+            ],
+            xpLevel: 4
+        )
+
+        spawnPlayerDeathDrops(inventory: inventory, at: 5, 64, 5, in: world)
+
+        let drops = world.entities.compactMap { $0 as? ItemEntity }
+        XCTAssertEqual(drops.count, 2)
+        XCTAssertTrue(drops.contains { $0.stack.id == iid("diamond") && $0.stack.count == 3 })
+        XCTAssertTrue(drops.contains { $0.stack.id == iid("stick") && $0.stack.count == 1 })
+        let orbs = world.entities.compactMap { $0 as? XPOrb }
+        XCTAssertFalse(orbs.isEmpty)
+        XCTAssertEqual(orbs.reduce(0) { $0 + $1.amount }, 28)
+    }
+
+    // MARK: - W2 amendment A4: requeueBlockChanges
+
+    func testRequeueBlockChangesRestoresDrainedChangesForRedrain() {
+        let session = LANMultiplayerHostSession()
+        _ = session.recordBlockChange(dimension: 0, x: 1, y: 64, z: 1, cell: Int(B.dirt) << 4)
+        _ = session.recordBlockChange(dimension: 0, x: 2, y: 64, z: 1, cell: Int(B.stone) << 4)
+
+        let drained = session.drainBlockChanges()
+        XCTAssertEqual(drained.count, 2)
+        XCTAssertTrue(session.drainBlockChanges().isEmpty)
+
+        session.requeueBlockChanges(drained)
+        let redrained = session.drainBlockChanges()
+        XCTAssertEqual(redrained.sorted { $0.x < $1.x }, drained.sorted { $0.x < $1.x })
+        XCTAssertTrue(session.drainBlockChanges().isEmpty)
     }
 
     private func makeAcceptedHostSession(

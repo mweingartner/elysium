@@ -18,6 +18,12 @@ let GEN_RADIUS_PAD = 1                  // generate one ring beyond render dista
 let MAX_GEN_INFLIGHT = 24
 let MAX_MESH_INFLIGHT = 26
 let LIGHT_BUDGET_MS = 4.0               // seam-stitch time budget per frame
+/// how long a LAN client waits for a requested chunk section before retrying the request
+let LAN_CHUNK_REQUEST_EXPIRY_TICKS = 60
+/// background full-column completion requests issued per LAN client tick (bounded)
+let LAN_COLUMN_COMPLETION_REQUESTS_PER_TICK = 2
+/// radius (in chunks) around the player scanned for incomplete columns to background-fill
+let LAN_COLUMN_COMPLETION_RADIUS = 2
 
 /// item-billboard projectiles (the app renders these as sprites)
 public let SPRITE_TYPES: Set<String> = [
@@ -237,10 +243,34 @@ public final class GameCore {
     public var onWorldBlockChanged: ((World, Int, Int, Int, Int) -> Void)?
     public var lanChunkRequestHandler: ((World, Int, Int) -> Bool)?
     public var lanBlockIntentHandler: ((LANBlockIntent) -> Void)?
+    /// client → host gameplay intents (all additive, LAN-client-only)
+    public var lanAttackIntentHandler: ((LANAttackIntent) -> Void)?
+    public var lanTossIntentHandler: ((LANTossIntent) -> Void)?
+    public var lanContainerEditHandler: ((LANContainerEditIntent) -> Void)?
+    /// fires with the freshly-published snapshot and its new revision number
+    public var lanInventoryPublishHandler: ((LANPlayerInventorySnapshot, Int) -> Void)?
+
+    // LAN client-authoritative inventory / container-edit / connection state
+    private var lanLocalInventoryRevision = 0
+    private var lanLastPublishedInventory: LANPlayerInventorySnapshot?
+    public private(set) var lanApplyingReplication = false
+    private var lanContainerEditSeq = 0
+    private var lanLastAppliedGrantID = 0
+    public private(set) var lanConnectionLost = false
+    /// position/type of the mirrored container screen currently open (if any) — used to detect
+    /// orphaned screens after a replication batch replaces/removes the underlying block (A9)
+    private var lanOpenContainerBE: (dim: Int, x: Int, y: Int, z: Int, type: String)?
+    /// LAN-client-local monotonic tick counter (world.time is frozen for LAN clients since
+    /// World.tick(simCenters:) never runs for them) — drives section-request expiry
+    private var lanClientTickCounter = 0
 
     // streaming
     private var genInFlight = Set<DimChunk>()
-    private var lanChunkRequestsInFlight = Set<DimChunk>()
+    /// section-granular in-flight chunk requests: section → tick requested (expires after
+    /// LAN_CHUNK_REQUEST_EXPIRY_TICKS so a lost/truncated host reply is retried)
+    private var lanSectionRequestsInFlight: [DimSection: Int] = [:]
+    /// per-column background-completion requests already issued this expiry window
+    private var lanColumnCompletionRequestsInFlight: [DimChunk: Int] = [:]
     private var lanAppliedChunkSections = Set<DimSection>()
     /// keys of chunks that exist on disk — fresh chunks skip the read entirely
     private var savedChunkKeys = Set<String>()
@@ -431,12 +461,28 @@ public final class GameCore {
         savedFullKeys.removeAll()
         pendingChunkSaves.removeAll()
         clearEntityTimeouts()
+        resetLANClientRoutingState()
         host?.clearAllSections()
         host?.setBossBars([])
         host?.stopDisc()
         host?.releasePointer()
         host?.closeAllScreens()
         host?.openTitleScreen()
+    }
+
+    /// resets all LAN client-routing bookkeeping — called on world entry/exit so a fresh session
+    /// never inherits revision/grant/expiry state from a previous LAN world
+    private func resetLANClientRoutingState() {
+        lanLocalInventoryRevision = 0
+        lanLastPublishedInventory = nil
+        lanApplyingReplication = false
+        lanContainerEditSeq = 0
+        lanLastAppliedGrantID = 0
+        lanConnectionLost = false
+        lanOpenContainerBE = nil
+        lanClientTickCounter = 0
+        lanSectionRequestsInFlight.removeAll()
+        lanColumnCompletionRequestsInFlight.removeAll()
     }
 
     // ---- MenuHost ----
@@ -531,8 +577,10 @@ public final class GameCore {
     private func enterWorld(_ rec: WorldRecord, _ playerData: [String: Any]?, _ adv: [String]?, transientLANClient: Bool = false) {
         worldRec = rec
         isLANClientWorld = transientLANClient
-        lanChunkRequestsInFlight.removeAll()
+        lanSectionRequestsInFlight.removeAll()
+        lanColumnCompletionRequestsInFlight.removeAll()
         lanAppliedChunkSections.removeAll()
+        resetLANClientRoutingState()
         advancements = AdvancementTracker()
         if let adv { advancements.load(adv) }
         dragonSpawned = false
@@ -639,7 +687,9 @@ public final class GameCore {
     public func saveAndFlush(synchronous: Bool = false) {
         guard inWorld else { return }
         if isLANClientWorld {
-            saveLANClientResume()
+            // A10: once the connection is known lost, stop overwriting the last-good resume
+            // snapshot with drifting offline state
+            if !lanConnectionLost { saveLANClientResume() }
             return
         }
         guard var rec = worldRec else { return }
@@ -683,7 +733,8 @@ public final class GameCore {
     }
 
     private func saveLANClientResume() {
-        guard let key = lanClientResumeStorageKey,
+        guard !lanConnectionLost,
+              let key = lanClientResumeStorageKey,
               let summary = lanClientWorldSummary,
               let player
         else { return }
@@ -695,6 +746,18 @@ public final class GameCore {
             "updated": Date().timeIntervalSince1970 * 1000,
             "data": player.save(),
         ])
+    }
+
+    /// A10: the transport calls this once when the LAN connection is confirmed lost (socket
+    /// drop, host reap, malformed-frame disconnect). Surfaces the loss to the player and stops
+    /// any further resume writes so offline drift does not overwrite the last known-good
+    /// resume snapshot.
+    public func handleLANConnectionLost(reason: String) {
+        guard isLANClientWorld, !lanConnectionLost else { return }
+        lanConnectionLost = true
+        let trimmed = reason.isEmpty ? "Connection to the host was lost." : reason
+        host?.pushChat("§c" + trimmed)
+        host?.showActionBar(trimmed, 100)
     }
 
     /// runs ON the save queue; on failure re-marks the chunks dirty (on main)
@@ -808,24 +871,68 @@ public final class GameCore {
         return true
     }
 
+    /// true iff every section this LAN client needs for (cx,cz) is both applied AND — for a
+    /// chunk that already exists locally — not merely a stub the completion pass still owes
+    /// sections to. Distinct from `hasLANClientVisibleSections`: this only looks at the
+    /// required vertical band, so a chunk can be "visible" while still incomplete overall.
+    private func lanClientMissingSectionYs(_ w: World, _ cx: Int, _ cz: Int, sectionYs: [Int]) -> [Int] {
+        sectionYs.filter { sy in
+            !lanAppliedChunkSections.contains(DimSection(dim: w.dim.rawValue, pos: SectionPos(cx: cx, sy: sy, cz: cz)))
+        }
+    }
+
+    /// expires stale section requests (lost/truncated host replies) so they become
+    /// re-requestable instead of silently starving forever
+    private func expireLANSectionRequests() {
+        guard !lanSectionRequestsInFlight.isEmpty else { return }
+        let cutoff = lanClientTickCounter - LAN_CHUNK_REQUEST_EXPIRY_TICKS
+        for (section, requestedAt) in lanSectionRequestsInFlight where requestedAt <= cutoff {
+            lanSectionRequestsInFlight.removeValue(forKey: section)
+        }
+        for (chunk, requestedAt) in lanColumnCompletionRequestsInFlight where requestedAt <= cutoff {
+            lanColumnCompletionRequestsInFlight.removeValue(forKey: chunk)
+        }
+    }
+
     private func requestChunk(_ w: World, _ cx: Int, _ cz: Int) {
         let key = chunkKey(cx, cz)
         let flight = DimChunk(dim: w.dim.rawValue, key: key)
         if isLANClientWorld {
-            if hasLANClientVisibleSections(w, cx, cz) || lanChunkRequestsInFlight.contains(flight) { return }
+            expireLANSectionRequests()
             let requestRadius = LAN_MULTIPLAYER_DEFAULT_CHUNK_REQUEST_RADIUS
-            let requestFlights = orderedLANChunkRequestCoordinates(cx: cx, cz: cz, radius: requestRadius)
-                .compactMap { coord -> DimChunk? in
-                    if hasLANClientVisibleSections(w, coord.cx, coord.cz) { return nil }
-                    let key = chunkKey(coord.cx, coord.cz)
-                    let candidate = DimChunk(dim: w.dim.rawValue, key: key)
-                    return lanChunkRequestsInFlight.contains(candidate) ? nil : candidate
+            let requiredSectionYs = lanClientRequiredSectionYs(in: w)
+            // exact-target short-circuit: if the chunk actually passed to requestChunk is
+            // already fully visible, or every one of its own required sections is already
+            // in-flight, skip re-deriving the wider neighborhood entirely. Without this, a
+            // caller sweeping a 3×3 grid of chunks (e.g. ensureChunksLoaded's radius-1 ring)
+            // would re-issue a fresh handler call for every one of those 9 chunks even though
+            // the very first call already covered their shared neighborhood.
+            let targetStillNeedsSections = lanClientMissingSectionYs(w, cx, cz, sectionYs: requiredSectionYs)
+                .contains { sy in
+                    lanSectionRequestsInFlight[DimSection(dim: w.dim.rawValue, pos: SectionPos(cx: cx, sy: sy, cz: cz))] == nil
                 }
-            if requestFlights.isEmpty { return }
-            if lanChunkRequestsInFlight.count + requestFlights.count > MAX_GEN_INFLIGHT { return }
+            guard targetStillNeedsSections else { return }
+            let candidateCoords = orderedLANChunkRequestCoordinates(cx: cx, cz: cz, radius: requestRadius)
+            var neededSections: [DimSection] = []
+            var neededChunks = Set<DimChunk>()
+            for coord in candidateCoords {
+                for sy in lanClientMissingSectionYs(w, coord.cx, coord.cz, sectionYs: requiredSectionYs) {
+                    let section = DimSection(dim: w.dim.rawValue, pos: SectionPos(cx: coord.cx, sy: sy, cz: coord.cz))
+                    if lanSectionRequestsInFlight[section] == nil {
+                        neededSections.append(section)
+                        neededChunks.insert(DimChunk(dim: w.dim.rawValue, key: chunkKey(coord.cx, coord.cz)))
+                    }
+                }
+            }
+            if neededSections.isEmpty { return }
+            // MAX_GEN_INFLIGHT bounds concurrent chunk-request messages (one handler call covers
+            // every needed section for that chunk), not the raw section count — a single call
+            // can legitimately cover a whole vertical band's worth of sections.
+            let inFlightChunkCount = Set(lanSectionRequestsInFlight.keys.map { DimChunk(dim: $0.dim, key: chunkKey($0.pos.cx, $0.pos.cz)) }).count
+            if inFlightChunkCount + neededChunks.count > MAX_GEN_INFLIGHT { return }
             if lanChunkRequestHandler?(w, cx, cz) == true {
-                for requestFlight in requestFlights {
-                    lanChunkRequestsInFlight.insert(requestFlight)
+                for section in neededSections {
+                    lanSectionRequestsInFlight[section] = lanClientTickCounter
                 }
             }
             return
@@ -886,13 +993,51 @@ public final class GameCore {
 
     public func markLANChunkSectionsApplied(_ sections: [LANChunkSectionSnapshot]) {
         guard isLANClientWorld, !sections.isEmpty else { return }
+        var dirtiedChunks: [DimChunk: (dim: Int, cx: Int, cz: Int)] = [:]
         for section in sections {
             let key = chunkKey(section.cx, section.cz)
-            lanAppliedChunkSections.insert(DimSection(
-                dim: section.dimension,
-                pos: SectionPos(cx: section.cx, sy: section.sectionY, cz: section.cz)
-            ))
-            lanChunkRequestsInFlight.remove(DimChunk(dim: section.dimension, key: key))
+            let dimSection = DimSection(dim: section.dimension, pos: SectionPos(cx: section.cx, sy: section.sectionY, cz: section.cz))
+            lanAppliedChunkSections.insert(dimSection)
+            lanSectionRequestsInFlight.removeValue(forKey: dimSection)
+            dirtiedChunks[DimChunk(dim: section.dimension, key: key)] = (section.dimension, section.cx, section.cz)
+        }
+        // A3: replicated sections arrive with raw cells only — recompute local light for every
+        // distinct chunk touched this batch (same as the singleplayer adoptChunk path), or guests
+        // render wrong/black light until something else happens to relight the area.
+        for (_, coord) in dirtiedChunks.sorted(by: { $0.key.dim == $1.key.dim ? $0.key.key < $1.key.key : $0.key.dim < $1.key.dim }) {
+            guard let d = Dim(rawValue: coord.dim), let w = worlds[d] else { continue }
+            enqueueLightAround(w, coord.cx, coord.cz)
+        }
+    }
+
+    /// bounded background pass: full-column completion requests for chunks near the player
+    /// that already have their visible band but are still missing sections elsewhere in the
+    /// column (e.g. deep caves below the loaded band). At most
+    /// `LAN_COLUMN_COMPLETION_REQUESTS_PER_TICK` requests fire per tick, and each column is
+    /// requested at most once per expiry window.
+    private func tickLANClientColumnCompletion() {
+        guard isLANClientWorld else { return }
+        let w = world
+        expireLANSectionRequests()
+        let pcx = floorDiv(ifloor(player.x), 16)
+        let pcz = floorDiv(ifloor(player.z), 16)
+        var issued = 0
+        outer: for dz in -LAN_COLUMN_COMPLETION_RADIUS...LAN_COLUMN_COMPLETION_RADIUS {
+            for dx in -LAN_COLUMN_COMPLETION_RADIUS...LAN_COLUMN_COMPLETION_RADIUS {
+                if issued >= LAN_COLUMN_COMPLETION_REQUESTS_PER_TICK { break outer }
+                let cx = pcx + dx, cz = pcz + dz
+                guard let chunk = w.getChunk(cx, cz) else { continue }
+                let flight = DimChunk(dim: w.dim.rawValue, key: chunkKey(cx, cz))
+                if lanColumnCompletionRequestsInFlight[flight] != nil { continue }
+                let missing = (0..<chunk.sections).contains { sy in
+                    !lanAppliedChunkSections.contains(DimSection(dim: w.dim.rawValue, pos: SectionPos(cx: cx, sy: sy, cz: cz)))
+                }
+                guard missing else { continue }
+                if lanChunkRequestHandler?(w, cx, cz) == true {
+                    lanColumnCompletionRequestsInFlight[flight] = lanClientTickCounter
+                    issued += 1
+                }
+            }
         }
     }
 
@@ -1224,7 +1369,13 @@ public final class GameCore {
                         if max(abs(dx), abs(dz)) != r { continue }
                         if genInFlight.count >= MAX_GEN_INFLIGHT { break outer }
                         let cx = center.0 + dx, cz = center.1 + dz
-                        if w.chunks[chunkKey(cx, cz)] == nil { requestChunk(w, cx, cz) }
+                        // LAN clients must keep requesting a chunk that exists locally but is
+                        // still missing sections in the visible band — the singleplayer branch
+                        // below only checks presence since it always generates the full column
+                        let needsRequest = isLANClientWorld
+                            ? !hasLANClientVisibleSections(w, cx, cz)
+                            : w.chunks[chunkKey(cx, cz)] == nil
+                        if needsRequest { requestChunk(w, cx, cz) }
                     }
                 }
             }
@@ -1256,7 +1407,10 @@ public final class GameCore {
                 break
             }
         }
-        if let rec = worldRec {
+        // A8: LAN client mirror chunks are never persisted (the host owns world save
+        // authority) — queuing them here would grow pendingChunkSaves unboundedly since
+        // saveAndFlush never drains it for LAN client worlds.
+        if !isLANClientWorld, let rec = worldRec {
             let dbKey = db.chunkKey(rec.id, w.dim.rawValue, c.cx, c.cz)
             if c.modified || hasEntities || savedChunkKeys.contains(dbKey) {
                 let record = chunkRecord(rec.id, w.dim, w, c)
@@ -1275,9 +1429,12 @@ public final class GameCore {
         w.removeChunk(c.cx, c.cz)
         if w.dim == dim { host?.removeChunkMeshes(c.cx, c.cz, c.sections) }
         lightQueue[w.dim]!.remove(chunkKey(c.cx, c.cz))
+        lanColumnCompletionRequestsInFlight.removeValue(forKey: DimChunk(dim: w.dim.rawValue, key: chunkKey(c.cx, c.cz)))
         for s in 0..<c.sections {
             dirtySections[w.dim]!.remove(SectionPos(cx: c.cx, sy: s, cz: c.cz))
-            lanAppliedChunkSections.remove(DimSection(dim: w.dim.rawValue, pos: SectionPos(cx: c.cx, sy: s, cz: c.cz)))
+            let dimSection = DimSection(dim: w.dim.rawValue, pos: SectionPos(cx: c.cx, sy: s, cz: c.cz))
+            lanAppliedChunkSections.remove(dimSection)
+            lanSectionRequestsInFlight.removeValue(forKey: dimSection)
         }
     }
 
@@ -1589,6 +1746,7 @@ public final class GameCore {
         paused = host?.screenPausesGame() ?? false
         if paused { return }
 
+        if isLANClientWorld { lanClientTickCounter += 1 }
         streamChunks()
         if isLANClientWorld {
             _ = removeLANClientNonAuthoritativeEntities(from: w, localPlayer: p)
@@ -1685,8 +1843,12 @@ public final class GameCore {
             tickViewBob()
             tickAmbience()
             tickBossBars()
+            tickLANClientMining()
             tickLANClientMirroredUse()
+            tickLANClientEating()
             tickHotbarAndCooldowns(p)
+            publishLANInventoryIfChanged()
+            tickLANClientColumnCompletion()
             return
         }
 
@@ -1991,11 +2153,107 @@ public final class GameCore {
         if id == Int(B.ancient_debris) { advance("obtain_ancient_debris") }
     }
 
+    /// LAN-client mining: mirrors tickMining's exact progress math (same breakSpeed inputs,
+    /// same cracks state) but never mutates the mirror world — on completion it emits a
+    /// `.breakBlock` intent for the host to apply through the real finishBreaking path.
+    private func tickLANClientMining() {
+        let p = player!
+        if !leftDown || p.dead || p.deathTime > 0 || (host?.hasScreen() ?? false) {
+            p.breakingProgress = -1
+            return
+        }
+        let hitOpt = crosshairBlock()
+        targetedBlock = hitOpt.map { ($0.x, $0.y, $0.z, $0.cell) }
+        guard let hit = hitOpt else {
+            p.breakingProgress = -1
+            return
+        }
+        let w = world
+        let def = blockDefs[hit.cell >> 4]
+        if def.hardness < 0 && p.gameMode != GameMode.creative {
+            p.breakingProgress = -1
+            return
+        }
+        if p.gameMode == GameMode.creative {
+            if breakCooldown <= 0 {
+                emitLANBreakBlockIntent(hit)
+                breakCooldown = 5
+            }
+            return
+        }
+        if breakCooldown > 0 {
+            p.breakingProgress = -1
+            return
+        }
+        if p.breakingProgress < 0 || p.breakingX != hit.x || p.breakingY != hit.y || p.breakingZ != hit.z {
+            p.breakingX = hit.x; p.breakingY = hit.y; p.breakingZ = hit.z
+            p.breakingProgress = 0
+        }
+        p.breakingProgress += breakSpeed(p, hit.cell)
+        p.attackAnim = 1
+        if lanClientTickCounter % 4 == 0 {
+            host?.playSound("block.\(def.sound).hit", Double(hit.x) + 0.5, Double(hit.y) + 0.5, Double(hit.z) + 0.5, 0.25, 0.6)
+            w.hooks.addParticles("block", hit.px, hit.py, hit.pz, 1, 0.12, hit.cell)
+        }
+        if p.breakingProgress >= 1 {
+            emitLANBreakBlockIntent(hit)
+            p.breakingProgress = -1
+            breakCooldown = 3
+        }
+    }
+
+    private func emitLANBreakBlockIntent(_ hit: RaycastHit) {
+        guard let handler = lanBlockIntentHandler else { return }
+        handler(LANBlockIntent(
+            action: .breakBlock,
+            x: hit.x,
+            y: hit.y,
+            z: hit.z,
+            face: hit.face,
+            selectedHotbarSlot: player?.selectedSlot ?? 0,
+            cell: hit.cell
+        ))
+    }
+
     private func tickLANClientMirroredUse() {
         let p = player!
         if p.dead || p.deathTime > 0 || (host?.hasScreen() ?? false) { return }
         guard rightDown && useCooldown <= 0 else { return }
         _ = performLANClientUse()
+    }
+
+    /// LAN-client eating/drinking continuation: mirrors tickUsing's food/potion completion
+    /// path (client-authoritative inventory — the item is consumed locally, no world mutation
+    /// involved) but never falls through to doUse's held-item-repeat branch, which would place
+    /// blocks or spawn projectiles directly into the non-authoritative mirror world.
+    private func tickLANClientEating() {
+        let p = player!
+        if p.dead || p.deathTime > 0 || (host?.hasScreen() ?? false) {
+            if p.usingItem { p.cancelUsingItem() }
+            return
+        }
+        guard p.usingItem else { return }
+        let ctx = interactCtx()
+        guard let held = p.usingMainHandStack() else {
+            p.cancelUsingItem()
+            return
+        }
+        if !rightDown {
+            p.cancelUsingItem()
+            return
+        }
+        p.useItemTicks += 1
+        let def = itemDef(held.id)
+        guard def.food != nil || def.name == "potion" || def.name == "milk_bucket" else {
+            // not a food/potion use — LAN clients don't locally resolve other held-use kinds
+            // (bows/tridents/crossbows spawn projectiles into the shared world and are host-only)
+            p.cancelUsingItem()
+            return
+        }
+        if p.useItemTicks % 4 == 0 {
+            host?.playSound("entity.generic.eat", p.x, p.y, p.z, 0.4, 0.9 + Double.random(in: 0..<0.3))
+        }
+        if p.useItemTicks >= heldUseDurationTicks(def) { finishUsingItem(ctx) }
     }
 
     @discardableResult
@@ -2012,7 +2270,104 @@ public final class GameCore {
             useCooldown = 4
             return true
         }
+        if !p.sneaking, let held = p.mainHand {
+            let def = itemDef(held.id)
+            if def.block != nil, emitLANPlaceBlockIntent(hit, held: held) {
+                p.attackAnim = 0.6
+                useCooldown = 4
+                return true
+            }
+            if def.food != nil || def.name == "potion" || def.name == "milk_bucket" {
+                // client-authoritative held-item use: begins the local eat/drink continuation
+                // (tickLANClientEating finishes it); never touches the mirror world
+                if useItem(interactCtx(), hit) {
+                    p.attackAnim = 0.6
+                    useCooldown = 4
+                    return true
+                }
+            }
+        }
         return false
+    }
+
+    /// computes the placement target + orientation exactly as local placement would, and emits
+    /// a `.placeBlock` intent for the host to apply — the LAN client mirror world is never
+    /// mutated locally (the host is the sole write authority on the shared world).
+    private func emitLANPlaceBlockIntent(_ hit: RaycastHit, held: ItemStack) -> Bool {
+        guard let handler = lanBlockIntentHandler,
+              let blockRaw = itemDef(held.id).block
+        else { return false }
+        let blockId = Int(blockRaw)
+        let targetCell = world.getBlock(hit.x, hit.y, hit.z)
+        var px = hit.x, py = hit.y, pz = hit.z
+        if REPLACEABLE[targetCell >> 4] == 0 {
+            px += DIR_X[hit.face]
+            py += DIR_Y[hit.face]
+            pz += DIR_Z[hit.face]
+        }
+        let cur = world.getBlock(px, py, pz)
+        if cur != 0 && REPLACEABLE[cur >> 4] == 0 { return false }
+        let meta = lanClientPlacementMeta(hit, blockId: blockId, px: px, py: py, pz: pz)
+        guard meta >= 0 else { return false }
+        handler(LANBlockIntent(
+            action: .placeBlock,
+            x: hit.x,
+            y: hit.y,
+            z: hit.z,
+            face: hit.face,
+            selectedHotbarSlot: player?.selectedSlot ?? 0,
+            cell: Int(cell(UInt16(blockId), meta))
+        ))
+        return true
+    }
+
+    /// Conservative, read-only orientation-meta computation for LAN client placement previews.
+    /// This intentionally mirrors only the common cases (full cubes, stairs, slabs, axis blocks,
+    /// torches) rather than the complete shape-orientation table in Interact.swift's
+    /// placementMeta — that function is `Systems/*`, which this workstream is not permitted to
+    /// modify (even to widen visibility), so exotic orientation-aware shapes (doors, rails,
+    /// signs, crops, redstone components, ...) fall back to placing with meta 0 client-side.
+    /// The host is the sole write authority regardless: an incorrect preview here only affects
+    /// what the client predicts, never the shared world (documented deviation — see Builder report).
+    private func lanClientPlacementMeta(_ hit: RaycastHit, blockId: Int, px: Int, py: Int, pz: Int) -> Int {
+        guard let p = player else { return 0 }
+        let shape = Shape(rawValue: SHAPE_OF[blockId]) ?? .cube
+        let name = blockDefs[blockId].name
+        let facing = [0, 0, 0, 1, 2, 3][yawToDir(p.yaw * 180 / .pi)]      // direction player faces
+        let facingOpp = [1, 0, 3, 2][facing]                              // toward player
+        let hitFY = hit.py - Double(hit.y)
+        switch shape {
+        case .stairs:
+            let top = (hit.face == 0 || (hit.face != 1 && hitFY > 0.5)) ? 4 : 0
+            return facing | top
+        case .slab:
+            let top = (hit.face == 0 || (hit.face != 1 && hitFY > 0.5)) ? 1 : 0
+            return top
+        case .torch:
+            if blockId == Int(B.lightning_rod) || blockId == Int(B.end_rod) { return hit.face }
+            if hit.face >= 2 {
+                let support = world.getBlock(px - DIR_X[hit.face], py, pz - DIR_Z[hit.face]) >> 4
+                if blockDefs[support].fullCube { return hit.face ^ 1 }
+            }
+            let below = world.getBlock(px, py - 1, pz) >> 4
+            return blockDefs[below].fullCube ? 0 : -1
+        case .chest:
+            return facingOpp
+        case .repeater, .comparator:
+            return facing
+        default:
+            let isAxis = name.hasSuffix("_log") || name.hasSuffix("_stem") || name.hasSuffix("_wood")
+                || name.contains("hyphae") || name.contains("basalt") || name == "bone_block"
+                || name == "chain" || name == "quartz_pillar" || name == "purpur_pillar" || name == "bamboo_block"
+            if isAxis {
+                return hit.face < 2 ? 0 : (hit.face < 4 ? 2 : 1)
+            }
+            if blockId == Int(B.furnace) || blockId == Int(B.blast_furnace) || blockId == Int(B.smoker) {
+                return facingOpp
+            }
+            // full cubes and every other unhandled shape: meta 0 (see doc comment above)
+            return 0
+        }
     }
 
     private func openLANClientMirroredBlockScreen(_ hit: RaycastHit) -> Bool {
@@ -2025,12 +2380,24 @@ public final class GameCore {
         data.y = y
         data.z = z
         data.block = id
-        data.readOnly = true
+        // D-C: LAN client container/crafting/furnace/brewing screens are now interactive —
+        // edits are captured and sent to the host as whole-BE LANContainerEditIntents (the
+        // host validates and applies them; last-writer-wins). Each successful branch below
+        // records the open BE's identity (lanOpenContainerBE) so a later replication batch
+        // that removes/replaces the block can close the screen (A9).
+        data.readOnly = false
+        // records which BE this mirrored screen refers to (A9 orphan-close check), then opens it
+        func open(_ kind: String, _ screenData: ScreenData) {
+            if let be = screenData.be {
+                lanOpenContainerBE = (dim: self.dim.rawValue, x: be.x, y: be.y, z: be.z, type: be.type)
+            }
+            openScreen(kind, screenData)
+        }
 
         if id == Int(B.crafting_table) {
             guard let be = world.getBlockEntity(x, y, z), be.type == "crafting" else { return false }
             data.be = be
-            openScreen("crafting", data)
+            open("crafting", data)
             return true
         }
         if id == Int(B.chest) || id == Int(B.trapped_chest) {
@@ -2044,47 +2411,47 @@ public final class GameCore {
             data.be = be
             data.other = other
             data.title = other != nil ? "Large Chest" : "Chest"
-            openScreen("chest", data)
+            open("chest", data)
             return true
         }
         if id == Int(B.barrel) {
             guard let be = world.getBlockEntity(x, y, z) else { return false }
             data.be = be
             data.title = "Barrel"
-            openScreen("chest", data)
+            open("chest", data)
             return true
         }
         if name.hasSuffix("shulker_box") || id == Int(B.shulker_box) {
             guard let be = world.getBlockEntity(x, y, z) else { return false }
             data.be = be
             data.title = "Shulker Box"
-            openScreen("chest", data)
+            open("chest", data)
             return true
         }
         if id == Int(B.hopper) {
             guard let be = world.getBlockEntity(x, y, z), be.type == "hopper" else { return false }
             data.be = be
             data.title = "Hopper"
-            openScreen("chest", data)
+            open("chest", data)
             return true
         }
         if id == Int(B.dispenser) || id == Int(B.dropper) {
             guard let be = world.getBlockEntity(x, y, z) else { return false }
             data.be = be
             data.title = id == Int(B.dispenser) ? "Dispenser" : "Dropper"
-            openScreen("chest", data)
+            open("chest", data)
             return true
         }
         if id == Int(B.furnace) || id == Int(B.furnace_lit) || id == Int(B.blast_furnace) || id == Int(B.blast_furnace_lit) || id == Int(B.smoker) || id == Int(B.smoker_lit) {
             guard let be = world.getBlockEntity(x, y, z), be.type == "furnace" else { return false }
             data.be = be
-            openScreen("furnace", data)
+            open("furnace", data)
             return true
         }
         if id == Int(B.brewing_stand) {
             guard let be = world.getBlockEntity(x, y, z), be.type == "brewing" else { return false }
             data.be = be
-            openScreen("brewing", data)
+            open("brewing", data)
             return true
         }
         return false
@@ -2112,6 +2479,115 @@ public final class GameCore {
         if shape == .door { return id != Int(B.iron_door) }
         if shape == .trapdoor { return id != Int(B.iron_trapdoor) }
         return shape == .fenceGate
+    }
+
+    // ===========================================================================
+    // LAN client: container-edit capture, replication-apply guard, restore/grant/damage
+    // ===========================================================================
+
+    /// wraps the transport's per-batch replication apply — captureLANContainerEdit no-ops while
+    /// set, preventing an echoed host-authored BE snapshot from being re-captured as a new edit
+    /// (anti-loop, D-C §4).
+    public func beginLANReplicationApply() {
+        lanApplyingReplication = true
+    }
+
+    /// A9: after a batch is applied, close any open mirrored container/furnace/brewing/crafting
+    /// screen whose block entity is now gone or no longer compatible with what the screen
+    /// expects (broken/replaced by the host or another peer).
+    public func endLANReplicationApply() {
+        lanApplyingReplication = false
+        guard isLANClientWorld, let open = lanOpenContainerBE, open.dim == dim.rawValue else { return }
+        let be = world.getBlockEntity(open.x, open.y, open.z)
+        if be == nil || be?.type != open.type {
+            lanOpenContainerBE = nil
+            host?.closeAllScreens()
+            host?.showActionBar("§cThat container is no longer available", 60)
+        }
+    }
+
+    /// captures a whole-BE snapshot of an edited mirrored container and sends it to the host
+    /// (D-C). Guarded against the anti-loop flag and against firing outside LAN client worlds.
+    public func captureLANContainerEdit(_ be: BlockEntityData) {
+        guard isLANClientWorld, !lanApplyingReplication,
+              let handler = lanContainerEditHandler,
+              let p = player,
+              let snapshot = makeLANBlockEntitySnapshot(be, dimension: dim.rawValue)
+        else { return }
+        lanContainerEditSeq += 1
+        lanLocalInventoryRevision += 1
+        let inventory = makeLANInventorySnapshot(p, playerID: "")
+        lanLastPublishedInventory = inventory
+        handler(LANContainerEditIntent(
+            blockEntity: snapshot,
+            inventory: inventory,
+            revision: lanLocalInventoryRevision,
+            editSeq: lanContainerEditSeq
+        ))
+    }
+
+    /// public entry point for the app to call from a mirrored screen's close/dismiss handler
+    /// (and any debounced ≤5 Hz flush while the screen stays open) — forwards to
+    /// captureLANContainerEdit when there is an edit to send.
+    public func gameScreenWillClose(be: BlockEntityData?) {
+        guard let be else { return }
+        captureLANContainerEdit(be)
+        if lanOpenContainerBE?.x == be.x && lanOpenContainerBE?.y == be.y && lanOpenContainerBE?.z == be.z {
+            lanOpenContainerBE = nil
+        }
+    }
+
+    /// applies the host's authoritative reconnect/join state: position, health/hunger,
+    /// inventory + xp, and the revision/grant baselines the client resumes publishing from.
+    public func applyLANRestore(_ restore: LANRestoreState) {
+        guard isLANClientWorld, let p = player else { return }
+        let state = restore.playerState
+        if let destDim = Dim(rawValue: state.dimension), destDim != dim {
+            moveToDimension(destDim)
+        }
+        p.setPos(state.x, state.y, state.z)
+        p.yaw = state.yaw
+        p.pitch = state.pitch
+        p.health = state.health
+        p.hunger = state.hunger
+        p.selectedSlot = state.selectedHotbarSlot
+        p.setGameMode(state.gameMode)
+        _ = applyLANInventorySnapshot(restore.inventory, to: p)
+        lanLastPublishedInventory = makeLANInventorySnapshot(p, playerID: "")
+        lanLocalInventoryRevision = restore.revision
+        lanLastAppliedGrantID = restore.grantID
+    }
+
+    /// merges a host-originated additive inventory grant (pickups via the host ghost, death
+    /// clear, corrections). Monotone grantID: duplicates/regressions are ignored so replays
+    /// over an unreliable connection never double-apply.
+    public func applyLANGrant(_ grant: LANInventoryGrant) {
+        guard isLANClientWorld, let p = player, grant.grantID > lanLastAppliedGrantID else { return }
+        lanLastAppliedGrantID = grant.grantID
+        if grant.clearAll {
+            for i in 0..<p.inventory.count { p.inventory[i] = nil }
+        }
+        for slot in grant.items {
+            guard slot.itemID >= 0, slot.itemID < itemDefs.count, slot.count > 0 else { continue }
+            _ = p.give(ItemStack(slot.itemID, slot.count, damage: slot.damage, label: slot.label))
+        }
+        if grant.xp > 0 { p.xp += grant.xp }
+        lanLocalInventoryRevision += 1
+        lanLastPublishedInventory = makeLANInventorySnapshot(p, playerID: "")
+    }
+
+    /// applies a host-relayed damage event against the local player (the host validated the
+    /// hit against the mirror proxy; the client is authoritative for its own health/knockback
+    /// response). Knockback direction/magnitude mirrors the vanilla LivingEntity.hurt formula.
+    public func applyLANDamage(_ event: LANDamageEvent) {
+        guard isLANClientWorld, let p = player else { return }
+        _ = p.hurt(event.amount, event.source, nil)
+        var d = (event.knockbackX * event.knockbackX + event.knockbackZ * event.knockbackZ).squareRoot()
+        if d == 0 { d = 1 }
+        let kb = 0.4 * (1 - p.kbResist)
+        p.vx += event.knockbackX / d * kb
+        p.vz += event.knockbackZ / d * kb
+        p.vy = min(p.vy + 0.36 * (1 - p.kbResist), 0.4)
     }
 
     /// periodic inventory / situation scan for item- & place-based advancements
@@ -2289,6 +2765,57 @@ public final class GameCore {
         host?.playSound("entity.player.attack.sweep", p.x, p.y, p.z, 0.3, 1.2)
     }
 
+    /// LAN-client left-click dispatcher (replaces doAttack for LAN clients — C3 fix): raycasts
+    /// for an attackable mirror mob within attack reach first; a hurtable, non-player mirror
+    /// entity emits a LANAttackIntent targeting the HOST's real entity id (the mirror's
+    /// lanReplicationSourceID) and plays the local swing purely cosmetically. Otherwise begins
+    /// client-side mining (tickLANClientMining picks it up next tick). Never calls doAttack —
+    /// that would run playerAttack against the ghost-less local player, hurting the mirror
+    /// entity directly instead of routing through the host's authoritative combat.
+    private func performLANClientAttackOrMine() {
+        let p = player!
+        if p.dead || p.deathTime > 0 || (host?.hasScreen() ?? false) { return }
+        if let target = crosshairEntity(ATTACK_REACH),
+           target is LivingEntity,
+           !target.isPlayer,
+           let hostEntityID = target.lanReplicationSourceID,
+           let handler = lanAttackIntentHandler {
+            p.attackAnim = 1
+            handler(LANAttackIntent(
+                targetEntityID: hostEntityID,
+                selectedHotbarSlot: p.selectedSlot,
+                sprinting: p.sprinting
+            ))
+            return
+        }
+    }
+
+    /// LAN-client toss (Q / drop key): emits a LANTossIntent and optimistically decrements the
+    /// local slot (client-authoritative inventory) but never spawns a local ItemEntity — the
+    /// host is the sole authority on the shared world and spawns the dropped item there,
+    /// replicating it back as a mirror entity like any other item drop.
+    private func performLANClientToss(all: Bool) {
+        guard let p = player, let handler = lanTossIntentHandler, let stack = p.mainHand else { return }
+        let count = all ? stack.count : 1
+        guard count > 0 else { return }
+        handler(LANTossIntent(slot: p.selectedSlot, count: count, all: all))
+        stack.count -= count
+        if stack.count <= 0 { p.mainHand = nil }
+    }
+
+    /// per-tick diff of the local player's inventory/selected-slot/xp against the last published
+    /// snapshot; on change, bumps the client-owned revision counter and publishes. Client-owned
+    /// inventory authority (D-A): the host never overwrites this except via LANRestoreState
+    /// (reconnect) or LANInventoryGrant (additive correction).
+    private func publishLANInventoryIfChanged() {
+        guard let p = player, let handler = lanInventoryPublishHandler else { return }
+        let snapshot = makeLANInventorySnapshot(p, playerID: "")
+        if snapshot == lanLastPublishedInventory { return }
+        lanLastPublishedInventory = snapshot
+        lanLocalInventoryRevision += 1
+        handler(snapshot, lanLocalInventoryRevision)
+    }
+
     private func doUse() {
         let p = player!
         if p.dead || p.deathTime > 0 || (host?.hasScreen() ?? false) { return }
@@ -2464,7 +2991,11 @@ public final class GameCore {
         }
         if button == 0 {
             leftDown = true
-            doAttack()
+            if isLANClientWorld {
+                performLANClientAttackOrMine()
+            } else {
+                doAttack()
+            }
         } else if button == 1 {
             pickBlock()
         } else if button == 2 {
@@ -2526,7 +3057,11 @@ public final class GameCore {
         } else if code == keybinds["command"] {
             host?.openChat("/")
         } else if code == keybinds["drop"] {
-            p.dropSelected(ctrlOrCmd)
+            if isLANClientWorld {
+                performLANClientToss(all: ctrlOrCmd)
+            } else {
+                p.dropSelected(ctrlOrCmd)
+            }
         } else if code == keybinds["swapOffhand"] {
             let tmp = p.offHand
             p.offHand = p.mainHand
