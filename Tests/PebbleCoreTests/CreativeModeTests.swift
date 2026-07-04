@@ -152,6 +152,63 @@ final class CreativeModeTests: XCTestCase {
         }
     }
 
+    func testFlyingWandAllowsSurvivalCreativeFlightControls() {
+        let fixture = makeFlightPlayer(mode: GameMode.survival)
+        withExtendedLifetime(fixture) {
+            let player = fixture.player
+            player.inventory[0] = stack(FLYING_WAND_ITEM_NAME)
+            player.selectedSlot = 0
+
+            XCTAssertFalse(player.creativeJumpPressed(now: 1_000))
+            XCTAssertTrue(player.creativeJumpPressed(now: 1_200))
+            XCTAssertTrue(player.flying)
+            XCTAssertFalse(player.onGround)
+
+            let startY = player.y
+            player.travelCreativeFlight(ascend: true, descend: false)
+
+            XCTAssertGreaterThan(player.y, startY)
+            XCTAssertTrue(player.flying)
+            XCTAssertEqual(player.fallDistance, 0, accuracy: 0.000_001)
+        }
+    }
+
+    func testUnequippingFlyingWandMidairForcesHalfDamageFallAndLockout() {
+        let normalFixture = makeFlightPlayer(mode: GameMode.survival)
+        let wandFixture = makeFlightPlayer(mode: GameMode.survival)
+        withExtendedLifetime((normalFixture, wandFixture)) {
+            let normal = normalFixture.player
+            normal.health = 20
+            normal.invulnTicks = 0
+            normal.onLand(10)
+            let normalDamage = 20 - normal.health
+
+            let player = wandFixture.player
+            player.inventory[0] = stack(FLYING_WAND_ITEM_NAME)
+            player.inventory[1] = stack("dirt")
+            player.selectedSlot = 0
+            player.health = 20
+            player.invulnTicks = 0
+
+            XCTAssertTrue(player.startCreativeFlight())
+            XCTAssertTrue(player.flying)
+
+            player.selectedSlot = 1
+            player.syncFlightEquipmentState()
+
+            XCTAssertFalse(player.flying)
+            XCTAssertEqual(player.fallDistance, 0, accuracy: 0.000_001)
+
+            player.selectedSlot = 0
+            XCTAssertFalse(player.startCreativeFlight(), "wand flight should stay locked until landing after a midair unequip")
+
+            player.onLand(10)
+
+            XCTAssertEqual(20 - player.health, normalDamage * 0.5, accuracy: 0.000_001)
+            XCTAssertTrue(player.startCreativeFlight(), "landing should clear the wand-fall lockout")
+        }
+    }
+
     func testSurvivalCannotStartOrRetainCreativeFlight() {
         let survivalFixture = makeFlightPlayer(mode: GameMode.survival)
         withExtendedLifetime(survivalFixture) {

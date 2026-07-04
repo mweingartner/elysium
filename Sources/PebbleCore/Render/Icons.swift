@@ -38,6 +38,13 @@ public func blockItemIconUsesThreeDimensionalPreview(_ blockId: Int) -> Bool {
     }
 }
 
+private func iconAliasDef(for def: ItemDef) -> ItemDef? {
+    guard def.icon != def.name,
+          let aliasId = iidOpt(def.icon),
+          aliasId != def.id else { return nil }
+    return itemDefs[aliasId]
+}
+
 private func tilePixels(_ tile: Int) -> [UInt8]? {
     guard let atlas = iconAtlas, tile >= 0, tile < atlas.pixels.count else { return nil }
     return atlas.pixels[tile]
@@ -48,13 +55,20 @@ public func itemIconPixels(_ itemId: Int, _ data: StackData? = nil) -> [UInt8] {
     let def = itemDefs[itemId]
     let key = def.name + (data?.potion.map { ":" + $0 } ?? "")
     if let c = iconCache[key] { return c }
+    let aliasDef = iconAliasDef(for: def)
     // potion-family icons keep the procedural painter (dynamic per-effect tint)
-    if data?.potion == nil, let ov = itemIconOverride, let px = ov(def.name) {
-        iconCache[key] = px
-        return px
+    if data?.potion == nil, let ov = itemIconOverride {
+        if let px = ov(def.name) {
+            iconCache[key] = px
+            return px
+        }
+        if let aliasDef, let px = ov(aliasDef.name) {
+            iconCache[key] = px
+            return px
+        }
     }
     var img = [UInt8](repeating: 0, count: 16 * 16 * 4)
-    paintIcon(&img, def, data)
+    paintIcon(&img, aliasDef ?? def, data)
     iconCache[key] = img
     return img
 }

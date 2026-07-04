@@ -143,13 +143,13 @@ check("glass not opaque", OPAQUE[Int(B.glass)] == 0)
 // ---------------------------------------------------------------------------
 section("item registry (vs goldens)")
 registerAllItems()
-// 1186 baseline items + 2 appended (weeping/twisting vines — their drop
-// fns referenced items that never existed; appended at the END so every
-// baseline id is unchanged)
+// 1186 baseline items + 3 appended (weeping/twisting vines and the Flying
+// Wand) at the END so every baseline id is unchanged.
 let BASE_ITEM_COUNT = 1186
-check("item count", itemDefs.count == 1188, "got \(itemDefs.count) want 1188")
-check("item ids stable after append", iid("weeping_vines") == 1186 && iid("twisting_vines") == 1187,
-      "vines ids \(iid("weeping_vines"))/\(iid("twisting_vines")) want 1186/1187")
+check("item count", itemDefs.count == 1189, "got \(itemDefs.count) want 1189")
+check("item ids stable after append",
+      iid("weeping_vines") == 1186 && iid("twisting_vines") == 1187 && iid("flying_wand") == 1188,
+      "append ids \(iid("weeping_vines"))/\(iid("twisting_vines"))/\(iid("flying_wand")) want 1186/1187/1188")
 let itemGoldens: [(String, Int)] = [
     ("stone", 0), ("wheat_seeds", 764), ("wooden_sword", 832), ("netherite_hoe", 861),
     ("leather_helmet", 869), ("elytra", 894), ("apple", 896), ("milk_bucket", 934),

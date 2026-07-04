@@ -16,6 +16,8 @@ public enum GameMode {
 
 public let CREATIVE_FLIGHT_DOUBLE_JUMP_MS = 280.0
 private let CREATIVE_FLIGHT_VERTICAL_SPEED = 0.35
+public let FLYING_WAND_ITEM_NAME = "flying_wand"
+private let FLYING_WAND_FALL_DAMAGE_MULTIPLIER = 0.5
 
 public final class Player: LivingEntity {
     public override var type: String { "player" }
@@ -24,13 +26,20 @@ public final class Player: LivingEntity {
     public override var gameMode: Int { _gameMode }
     private var lastCreativeJumpPress: Double?
     private var creativeFlightLaunchTicks = 0
+    private var flyingWandFlightActive = false
+    private var flyingWandFallLocked = false
+    private var flyingWandFallDamageMultiplier: Double? = nil
 
     public func setGameMode(_ m: Int) {
         _gameMode = m
         if _gameMode != GameMode.creative {
             flying = false
+            flyingWandFlightActive = false
             creativeFlightLaunchTicks = 0
             lastCreativeJumpPress = nil
+        } else {
+            clearFlyingWandFallState()
+            flyingWandFlightActive = false
         }
     }
     /// inventory: 0-8 hotbar, 9-35 main
@@ -83,6 +92,56 @@ public final class Player: LivingEntity {
     public override var mainHand: ItemStack? {
         get { inventory[selectedSlot] }
         set { inventory[selectedSlot] = newValue }
+    }
+
+    public var hasFlyingWandEquipped: Bool {
+        guard let stack = mainHandStack else { return false }
+        return itemDef(stack.id).name == FLYING_WAND_ITEM_NAME
+    }
+
+    private var canUseFlyingWandFlight: Bool {
+        hasFlyingWandEquipped && !flyingWandFallLocked
+    }
+
+    public func canUseCreativeFlight() -> Bool {
+        gameMode == GameMode.creative || canUseFlyingWandFlight
+    }
+
+    private func clearFlyingWandFallState() {
+        flyingWandFallLocked = false
+        flyingWandFallDamageMultiplier = nil
+    }
+
+    private func clearFlyingWandFallStateIfSettled() {
+        if onGround || inWater || isClimbing() {
+            clearFlyingWandFallState()
+        }
+    }
+
+    private func stopFlyingWandFlightForUnequip() {
+        let wasWandFlight = flyingWandFlightActive
+        flying = false
+        flyingWandFlightActive = false
+        creativeFlightLaunchTicks = 0
+        lastCreativeJumpPress = nil
+        if wasWandFlight && !onGround {
+            flyingWandFallLocked = true
+            flyingWandFallDamageMultiplier = FLYING_WAND_FALL_DAMAGE_MULTIPLIER
+            fallDistance = 0
+        }
+    }
+
+    public func syncFlightEquipmentState() {
+        clearFlyingWandFallStateIfSettled()
+        if gameMode == GameMode.creative {
+            flyingWandFlightActive = false
+            return
+        }
+        if flying && !canUseFlyingWandFlight {
+            stopFlyingWandFlightForUnequip()
+        } else if flying {
+            flyingWandFlightActive = true
+        }
     }
 
     public func beginUsingMainHand() {
@@ -141,6 +200,7 @@ public final class Player: LivingEntity {
         height = sneaking ? PLAYER_SNEAK_HEIGHT : PLAYER_HEIGHT
         baseLivingTick()
         if dead { return }
+        syncFlightEquipmentState()
         _wearingPumpkin = armor[0] != nil && itemDef(armor[0]!.id).name == "carved_pumpkin"
         if attackStrengthTicker < 100 { attackStrengthTicker += attackSpeedPerTick() }
         if gameMode == GameMode.creative {
@@ -243,18 +303,20 @@ public final class Player: LivingEntity {
     @discardableResult
     public func creativeJumpPressed(now: Double) -> Bool {
         defer { lastCreativeJumpPress = now }
-        guard gameMode == GameMode.creative else { return false }
+        guard canUseCreativeFlight() else { return false }
         guard let last = lastCreativeJumpPress, now - last < CREATIVE_FLIGHT_DOUBLE_JUMP_MS else { return false }
         return startCreativeFlight()
     }
 
     @discardableResult
     public func startCreativeFlight() -> Bool {
-        guard gameMode == GameMode.creative else {
+        guard canUseCreativeFlight() else {
             flying = false
+            flyingWandFlightActive = false
             return false
         }
         flying = true
+        flyingWandFlightActive = gameMode != GameMode.creative
         elytraFlying = false
         sneaking = false
         onGround = false
@@ -266,10 +328,11 @@ public final class Player: LivingEntity {
     }
 
     public func travelCreativeFlight(ascend: Bool, descend: Bool) {
-        guard gameMode == GameMode.creative && flying else {
-            if gameMode != GameMode.creative { flying = false }
+        guard canUseCreativeFlight() && flying else {
+            if gameMode != GameMode.creative { stopFlyingWandFlightForUnequip() }
             return
         }
+        flyingWandFlightActive = gameMode != GameMode.creative
         if ascend {
             vy = CREATIVE_FLIGHT_VERTICAL_SPEED
             creativeFlightLaunchTicks = 0
@@ -291,7 +354,10 @@ public final class Player: LivingEntity {
         vy *= 0.6
         vz *= 0.85
         fallDistance = 0
-        if onGround { flying = false }
+        if onGround {
+            flying = false
+            flyingWandFlightActive = false
+        }
     }
 
     public override func travel() {
@@ -708,6 +774,16 @@ public final class Player: LivingEntity {
             bedPos = nil
         }
         return r
+    }
+    public override func fallDamageMultiplier(for fallDistance: Double) -> Double {
+        flyingWandFallDamageMultiplier ?? super.fallDamageMultiplier(for: fallDistance)
+    }
+    public override func onLand(_ fallDistance: Double) {
+        defer {
+            clearFlyingWandFallState()
+            flyingWandFlightActive = false
+        }
+        super.onLand(fallDistance)
     }
     public override func die(_ source: String, _ attacker: Entity? = nil) {
         // totem of undying

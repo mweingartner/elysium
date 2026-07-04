@@ -253,6 +253,7 @@ open class LivingEntity: Entity {
         if ground == Int(B.slime_block) || ground == Int(B.honey_block) { dmg = 0 }
         if ground == Int(B.pointed_dripstone) { dmg = (fallDistance * 2 - 2).rounded(.up) }
         if ground >= 0 && ground < blockDefs.count && blockDefs[ground].shape == .bed { dmg = (dmg * 0.5).rounded(.up) }
+        dmg *= fallDamageMultiplier(for: fallDistance)
         if dmg > 0 {
             hurt(dmg, fallDistance > 5 ? "fall_high" : "fall")
             let cell = groundBlock()
@@ -267,6 +268,8 @@ open class LivingEntity: Entity {
             }
         }
     }
+
+    open func fallDamageMultiplier(for fallDistance: Double) -> Double { 1 }
 
     /// loot drops — override per mob
     open func dropLoot(_ looting: Int, _ byPlayer: Bool) {

@@ -332,6 +332,9 @@ public func registerAllItems() {
     // making the blocks silently unobtainable
     registerItem("weeping_vines", block: B.weeping_vines, category: "natural")
     registerItem("twisting_vines", block: B.twisting_vines, category: "natural")
+    registerItem("flying_wand", display: "Flying Wand",
+                 tool: ToolDef("sword", tier: 3, speed: 1.5, attackDamage: 6, attackSpeed: 1.6, durability: 1561, enchantability: 10),
+                 category: "combat", icon: "torch")
 
     // post-registration fixups
     itemDefs[iid("cake")].maxStack = 1

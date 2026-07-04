@@ -299,6 +299,7 @@ public func registerAllRecipes() {
         shaped("X/S/S", ["X": ing, "S": "stick"], "\(mat)_shovel")
         shaped("XX/ S/ S", ["X": ing, "S": "stick"], "\(mat)_hoe")
     }
+    shaped("EDE/ D / D ", ["D": "diamond", "E": "emerald"], "flying_wand")
     for (mat, ing) in [("leather", "leather"), ("iron", "iron_ingot"), ("golden", "gold_ingot"), ("diamond", "diamond")] {
         shaped("XXX/X X", ["X": ing], "\(mat)_helmet")
         shaped("X X/XXX/XXX", ["X": ing], "\(mat)_chestplate")

@@ -1802,7 +1802,7 @@ public final class GameCore {
             if wantSprint && !p.sprinting && p.moveForward > 0 { p.sprinting = true }
             if !wantSprint || p.moveForward <= 0 || p.horizontalCollision { p.sprinting = false }
             sprintHeld = p.sprinting
-            if p.gameMode != GameMode.creative && p.flying { p.flying = false }
+            p.syncFlightEquipmentState()
             // elytra start: jump while airborne
             if k("jump") && !p.onGround && !p.elytraFlying && p.vy < 0 && !p.flying {
                 if p.startElytra() {

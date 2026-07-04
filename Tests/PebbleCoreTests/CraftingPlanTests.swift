@@ -80,6 +80,36 @@ final class CraftingPlanTests: XCTestCase {
         XCTAssertTrue(workbenchOutputs.contains("chest"))
     }
 
+    func testFlyingWandRecipeUsesEmeraldDiamondTShape() throws {
+        registerCoreIfNeeded()
+        let recipe = try XCTUnwrap(craftingRecipes.first { recipe in
+            if case .shaped(_, _, _, let out, _) = recipe { return out == FLYING_WAND_ITEM_NAME }
+            return false
+        })
+
+        guard case .shaped(let w, let h, let grid, let out, let count) = recipe else {
+            return XCTFail("flying wand recipe should be shaped")
+        }
+        XCTAssertEqual(w, 3)
+        XCTAssertEqual(h, 3)
+        XCTAssertEqual(out, FLYING_WAND_ITEM_NAME)
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(grid, [
+            "emerald", "diamond", "emerald",
+            nil, "diamond", nil,
+            nil, "diamond", nil,
+        ])
+
+        var craftingGrid = [ItemStack?](repeating: nil, count: 9)
+        craftingGrid[0] = stack("emerald")
+        craftingGrid[1] = stack("diamond")
+        craftingGrid[2] = stack("emerald")
+        craftingGrid[4] = stack("diamond")
+        craftingGrid[7] = stack("diamond")
+
+        XCTAssertEqual(matchCrafting(craftingGrid, 3, 3)?.out.id, iid(FLYING_WAND_ITEM_NAME))
+    }
+
     func testPersonalCraftingPlanPopulatesTwoByTwoGrid() throws {
         registerCoreIfNeeded()
         var inventory: [ItemStack?] = [stack("oak_planks", 2)]
