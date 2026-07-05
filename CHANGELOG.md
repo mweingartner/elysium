@@ -23,6 +23,9 @@ in-app version string comes from `PEBBLE_VERSION` (PebbleCore/Game/Saves.swift).
   resources, including nearby crafting-table containers, while creative clamps
   to the receiving inventory capacity, large output batches split across legal
   item stacks, and the compact stepper controls use matching pixel-drawn arrows.
+- Quitting or Save-and-Quit while a large object-template placement is still
+  filling in now finishes placing the object before saving, instead of
+  persisting a permanently half-placed object with no undo.
 
 ## 1.1.0 — 2026-06-27 — gameplay systems update
 

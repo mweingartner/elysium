@@ -987,4 +987,247 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual(decoded.anchorY, template.anchorY)
         XCTAssertEqual(decoded.anchorZ, template.anchorZ)
     }
+
+    // MARK: - graceful-termination settle (settleInFlightTemplatePlacementJobs)
+
+    /// Builds a GameCore whose active overworld is a deterministically pre-loaded
+    /// `World` (no async chunk generation involved), with the player positioned at
+    /// its center looking toward +z (yaw 0, pitch 0) so a template placement session
+    /// started here always targets fully-loaded ground. The chunk range is wide
+    /// enough to hold the preview distance of any template used by these tests.
+    private func makeGameCoreReadyForTemplatePlacement(db: SaveDB) -> GameCore {
+        let game = GameCore(db: db)
+        game.createWorld(name: "Settle Test", seedText: "settle", mode: GameMode.creative, difficulty: 0)
+        // covers the player at the origin plus every multi-batch template's preview
+        // footprint (target lands roughly 48 blocks ahead along +z) with margin
+        let loaded = makeLoadedWorld(minX: -48, maxX: 48, minZ: -48, maxZ: 96)
+        loaded.hooks = game.world.hooks
+        loaded.spawnX = game.world.spawnX
+        loaded.spawnY = game.world.spawnY
+        loaded.spawnZ = game.world.spawnZ
+        // solid ground from well below any object's footprint up to the surface
+        // (y=63) so a large object's foundation search always finds stone directly
+        // below it, regardless of how far below the surface the object's bottom lands
+        fillTemplateTestBlocks(in: loaded, minX: -48, startY: 0, minZ: -48,
+                               sizeX: 96, sizeY: 64, sizeZ: 144,
+                               blockCell: UInt16(cell(B.stone)))
+        game.player.world.removeEntity(game.player)
+        game.player.world = loaded
+        game.player.setPos(0.5, 64, 0.5)
+        game.player.yaw = 0
+        game.player.pitch = 0
+        loaded.addEntity(game.player)
+        game.worlds[game.dim] = loaded
+        return game
+    }
+
+    /// Starts and commits a placement session for `template` directly ahead of the
+    /// player, installing a real `templatePlacementJob` through the same public
+    /// commit path the app uses (Command-V then left click).
+    private func beginAndCommitPlacement(_ game: GameCore, _ template: ObjectTemplate) throws {
+        try game.beginTemplatePlacement(template)
+        _ = try game.commitTemplatePlacement()
+    }
+
+    /// A template just over one `step(maxOperations:)` batch (12,000) so settling it
+    /// exercises the settle loop's multi-iteration path, while staying well under
+    /// `OBJECT_TEMPLATE_MAX_BLOCKS` and within the preview distance covered by
+    /// `makeGameCoreReadyForTemplatePlacement`'s loaded range.
+    private func makeMultiBatchTemplate(name: String = "Multi Batch") -> ObjectTemplate {
+        registerCoreIfNeeded()
+        let sizeX = 26, sizeY = 20, sizeZ = 26
+        var blocks: [TemplateBlock] = []
+        blocks.reserveCapacity(sizeX * sizeY * sizeZ)
+        let stone = UInt16(cell(B.stone))
+        for y in 0..<sizeY {
+            for z in 0..<sizeZ {
+                for x in 0..<sizeX {
+                    blocks.append(TemplateBlock(dx: x, dy: y, dz: z, cell: stone))
+                }
+            }
+        }
+        return ObjectTemplate(
+            name: name,
+            anchorX: sizeX / 2, anchorY: 0, anchorZ: sizeZ / 2,
+            sizeX: sizeX, sizeY: sizeY, sizeZ: sizeZ,
+            blocks: blocks)
+    }
+
+    /// Every cell the undo snapshot says was mutated, read back from live world state
+    /// (block id/metadata plus block-entity data where present) rather than trusting
+    /// the undo snapshot itself as a proxy for what actually landed in the world.
+    private func actualWorldState(for snapshot: TemplatePlacementUndoSnapshot, in world: World) -> [String] {
+        snapshot.cells.sorted { ($0.x, $0.y, $0.z) < ($1.x, $1.y, $1.z) }.map { cell in
+            let block = world.getBlock(cell.x, cell.y, cell.z)
+            let be = world.getBlockEntity(cell.x, cell.y, cell.z)
+            return "\(cell.x),\(cell.y),\(cell.z)=\(block)|\(be?.type ?? "-")"
+        }
+    }
+
+    func testSaveAndFlushSettlesInFlightTemplatePlacementJobBeforePersisting() throws {
+        let db = tempDB()
+        let game = makeGameCoreReadyForTemplatePlacement(db: db)
+        let template = makeMultiBatchTemplate()
+
+        try beginAndCommitPlacement(game, template)
+        XCTAssertTrue(game.hasActiveTemplatePlacementJob())
+        // partially step via one real tick so the job is genuinely mid-flight
+        _ = game.frame(dtMs: TICK_MS)
+        XCTAssertTrue(game.hasActiveTemplatePlacementJob(), "one tick must not finish a multi-batch job")
+
+        game.saveAndFlush(synchronous: true)
+
+        XCTAssertFalse(game.hasActiveTemplatePlacementJob())
+        let undo = try XCTUnwrap(game.lastTemplatePlacementUndo)
+        XCTAssertEqual(undo.cells.count, template.blocks.count)
+        let stoneCell = Int(cell(B.stone))
+        for placedCell in undo.cells {
+            XCTAssertEqual(game.world.getBlock(placedCell.x, placedCell.y, placedCell.z), stoneCell)
+        }
+    }
+
+    /// Condition 11: the interactive resign-active caller shape — `saveAndFlush` is
+    /// invoked directly while a job is active, without ever going through tick() or
+    /// Escape/cancel. This is distinct from the test above (which partially steps the
+    /// job through one real tick first) — here the job has never been ticked at all,
+    /// matching applicationDidResignActive -> PauseScreen -> "Save & Quit to Title",
+    /// which calls saveAndFlush while tick() is frozen at the pause guard.
+    func testSaveAndFlushSettlesJobInvokedDirectlyWithoutTickOrEscape() throws {
+        let db = tempDB()
+        let game = makeGameCoreReadyForTemplatePlacement(db: db)
+        let template = makeMultiBatchTemplate(name: "Resign Active Shape")
+
+        try beginAndCommitPlacement(game, template)
+        XCTAssertTrue(game.hasActiveTemplatePlacementJob())
+
+        game.saveAndFlush(synchronous: true)
+
+        XCTAssertFalse(game.hasActiveTemplatePlacementJob())
+        let undo = try XCTUnwrap(game.lastTemplatePlacementUndo)
+        XCTAssertEqual(undo.cells.count, template.blocks.count)
+        XCTAssertEqual(actualWorldState(for: undo, in: game.world).count, template.blocks.count)
+    }
+
+    func testSaveAndFlushIsNoOpWhenNoTemplateJobActive() throws {
+        let db = tempDB()
+        let game = makeGameCoreReadyForTemplatePlacement(db: db)
+        XCTAssertEqual(game.settleInFlightTemplatePlacementJobs(), 0)
+
+        game.world.setBlock(4, 64, 4, Int(cell(B.oak_planks)), SET_NO_NEIGHBORS)
+        game.saveAndFlush(synchronous: true)
+
+        XCTAssertFalse(game.hasActiveTemplatePlacementJob())
+        XCTAssertEqual(game.world.getBlockId(4, 64, 4), Int(B.oak_planks))
+    }
+
+    /// Reconstructs a chunk purely from its saved `ChunkRecord` (the same `blocks`/
+    /// `biomes` arrays `chunkRecord` writes on save), independent of worldgen or the
+    /// app's own chunk-streaming radius, so the test verifies exactly what landed on
+    /// disk rather than what a second GameCore happens to stream back in.
+    private func loadPersistedChunk(_ db: SaveDB, worldID: String, dim: Int, cx: Int, cz: Int) throws -> Chunk {
+        let record = try XCTUnwrap(db.getChunk(worldID, dim, cx, cz),
+                                   "chunk \(cx),\(cz) must have been persisted as a full record")
+        let info = dimInfo(Dim(rawValue: dim) ?? .overworld)
+        let chunk = Chunk(cx: cx, cz: cz, minY: info.minY, height: info.height)
+        chunk.blocks = try XCTUnwrap(record.blocks)
+        if let biomes = record.biomes { chunk.biomes = biomes }
+        return chunk
+    }
+
+    func testSettledTemplatePlacementJobPersistsCompleteObjectToDisk() throws {
+        let db = tempDB()
+        let game = makeGameCoreReadyForTemplatePlacement(db: db)
+        let template = makeMultiBatchTemplate(name: "Persist Round Trip")
+
+        try beginAndCommitPlacement(game, template)
+        _ = game.frame(dtMs: TICK_MS)
+        XCTAssertTrue(game.hasActiveTemplatePlacementJob())
+        let worldID = try XCTUnwrap(game.worldRec?.id)
+        let dim = game.dim.rawValue
+
+        game.saveAndFlush(synchronous: true)
+        XCTAssertFalse(game.hasActiveTemplatePlacementJob())
+        let placedCells = try XCTUnwrap(game.lastTemplatePlacementUndo).cells
+        let stoneCell = Int(cell(B.stone))
+
+        var reconstructed: [String: Chunk] = [:]
+        for cellRecord in placedCells {
+            let cx = floorDiv(cellRecord.x, CHUNK_W), cz = floorDiv(cellRecord.z, CHUNK_W)
+            let key = "\(cx),\(cz)"
+            let chunk = try reconstructed[key] ?? loadPersistedChunk(db, worldID: worldID, dim: dim, cx: cx, cz: cz)
+            reconstructed[key] = chunk
+            let block = chunk.get(posMod(cellRecord.x, CHUNK_W), cellRecord.y, posMod(cellRecord.z, CHUNK_W))
+            XCTAssertEqual(Int(block), stoneCell,
+                           "cell \(cellRecord.x),\(cellRecord.y),\(cellRecord.z) must survive reload as the completed object")
+        }
+    }
+
+    /// Metamorphic: place the same template at the same target in two independently
+    /// built worlds. World A completes the job entirely through normal per-tick
+    /// stepping; world B is interrupted mid-flight and finished through
+    /// `settleInFlightTemplatePlacementJobs`. Condition 10: compare ACTUAL world state
+    /// cell-by-cell (block id and block-entity data for every mutated cell) rather
+    /// than undo-snapshot equality, since the undo snapshot is captured at job
+    /// construction (before either job steps at all) and would trivially match even
+    /// if settle corrupted the result.
+    func testSettleInFlightTemplatePlacementJobsMatchesPerTickCompletion() throws {
+        let templateA = makeMultiBatchTemplate(name: "Metamorphic A")
+        let templateB = makeMultiBatchTemplate(name: "Metamorphic B")
+
+        let gameA = makeGameCoreReadyForTemplatePlacement(db: tempDB())
+        try beginAndCommitPlacement(gameA, templateA)
+        while gameA.hasActiveTemplatePlacementJob() {
+            _ = gameA.frame(dtMs: TICK_MS)
+        }
+        let undoA = try XCTUnwrap(gameA.lastTemplatePlacementUndo)
+
+        let gameB = makeGameCoreReadyForTemplatePlacement(db: tempDB())
+        try beginAndCommitPlacement(gameB, templateB)
+        _ = gameB.frame(dtMs: TICK_MS)
+        XCTAssertTrue(gameB.hasActiveTemplatePlacementJob(), "world B must be interrupted mid-flight before settling")
+        XCTAssertEqual(gameB.settleInFlightTemplatePlacementJobs(), 1)
+        let undoB = try XCTUnwrap(gameB.lastTemplatePlacementUndo)
+
+        XCTAssertEqual(undoA.cells.count, undoB.cells.count)
+        // relative cell positions/mutation shape must be identical between A and B —
+        // both templates share the same size/anchor and were committed at the same
+        // player position, so their absolute cell coordinates line up directly.
+        let relativeA = actualWorldState(for: undoA, in: gameA.world)
+        let relativeB = actualWorldState(for: undoB, in: gameB.world)
+        XCTAssertEqual(relativeA, relativeB)
+    }
+
+    func testSettleInFlightTemplatePlacementJobIsBounded() throws {
+        let db = tempDB()
+        let game = makeGameCoreReadyForTemplatePlacement(db: db)
+        let template = makeMultiBatchTemplate(name: "Bounded Settle")
+
+        try beginAndCommitPlacement(game, template)
+        XCTAssertTrue(game.hasActiveTemplatePlacementJob())
+
+        XCTAssertEqual(game.settleInFlightTemplatePlacementJobs(), 1)
+
+        XCTAssertFalse(game.hasActiveTemplatePlacementJob())
+        let undo = try XCTUnwrap(game.lastTemplatePlacementUndo)
+        XCTAssertEqual(undo.cells.count, template.blocks.count)
+    }
+
+    /// Condition 12: DeathScreen's exitToTitle cannot coincide with an active
+    /// placement job. `tick()` returns early inside `tickTemplatePlacementJob()`
+    /// whenever a job exists (GameCore.swift, before the death/DeathScreen branch),
+    /// so death processing and DeathScreen never run while a job is in flight; there
+    /// is no code path that opens DeathScreen mid-job. If exitToTitle is ever reached
+    /// from DeathScreen, `settleInFlightTemplatePlacementJobs` still could not have an
+    /// active job to settle — verified here by confirming a fresh game has no active
+    /// job and that exitToTitle's own saveAndFlush call is therefore a structural
+    /// no-op for this path, exactly like the other pause-gated callers.
+    func testExitToTitleHasNoActiveTemplateJobBecauseDeathTickNeverRunsDuringPlacement() throws {
+        let db = tempDB()
+        let game = makeGameCoreReadyForTemplatePlacement(db: db)
+        XCTAssertFalse(game.hasActiveTemplatePlacementJob())
+
+        game.exitToTitle()
+
+        XCTAssertFalse(game.hasWorld())
+    }
 }

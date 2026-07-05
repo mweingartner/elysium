@@ -716,6 +716,19 @@ public final class GameCore {
             if !lanConnectionLost { saveLANClientResume() }
             return
         }
+        // A graceful termination (Cmd-Q), Save & Quit from the pause menu, or the
+        // interactive path (applicationDidResignActive -> PauseScreen -> Save & Quit)
+        // can all land here mid-placement: the pause guard in tick() freezes ticking
+        // BEFORE tickTemplatePlacementJob runs, so a job can be left in-flight while
+        // the player is looking at an open menu. Finish it now so the chunks about to
+        // be flushed hold the complete object, never a half-placed one. Surface the
+        // stall to the player only when there's actually a job to settle — this path
+        // can be user-visible (interactive), unlike the Cmd-Q shutdown case.
+        if hasActiveTemplatePlacementJob() {
+            host?.showActionBar("Finishing placement...", 200)
+            host?.pushChat("§7Finishing placement before saving...")
+            settleInFlightTemplatePlacementJobs()
+        }
         guard var rec = worldRec else { return }
         rec.lastPlayed = Date().timeIntervalSince1970 * 1000
         rec.gameMode = player.gameMode
@@ -1778,28 +1791,90 @@ public final class GameCore {
         guard let job = templatePlacementJob else { return false }
         templatePlacementProgressTick += 1
         _ = job.step(maxOperations: 12_000)
-        let progress = job.progress
-        if job.isDone, let result = job.result {
-            let undo = job.undoSnapshot
-            lastTemplatePlacementUndo = undo
-            templatePlacementJob = nil
-            templatePlacementProgressTick = 0
-            leftDown = false
-            rightDown = false
-            player?.breakingProgress = -1
-            targetedBlock = nil
-            lastCursorHit = nil
-            onTemplatePlacementCommitted?(world, undo)
-            var details = "\(result.blocksPlaced) blocks, \(result.blockEntitiesPlaced) block entities"
-            if result.blocksCleared > 0 || result.supportBlocksFilled > 0 {
-                details += ", cleared \(result.blocksCleared), filled \(result.supportBlocksFilled)"
-            }
-            host?.pushChat("§7Placed object \"\(progress.templateName)\" - \(details)")
-            host?.showActionBar("Placed \"\(progress.templateName)\"", 60)
+        if job.isDone {
+            finishTemplatePlacementJob(job)
         } else if templatePlacementProgressTick % 10 == 1 {
+            let progress = job.progress
             host?.showActionBar("Placing \"\(progress.templateName)\" \(progress.percent)% - \(progress.phase)", 25)
         }
         return true
+    }
+
+    /// Single completion path for a `.done` placement job, shared by the per-tick
+    /// path (`tickTemplatePlacementJob`) and the graceful-termination settle path
+    /// (`settleInFlightTemplatePlacementJobs`). Publishes the undo snapshot, fires
+    /// `onTemplatePlacementCommitted` (LAN dirty-section marking hooks this event),
+    /// resets placement-mode input state, and reports the result exactly once no
+    /// matter which caller drove the job to completion.
+    private func finishTemplatePlacementJob(_ job: ObjectTemplatePlacementJob) {
+        guard let result = job.result else { return }
+        let progress = job.progress
+        let undo = job.undoSnapshot
+        lastTemplatePlacementUndo = undo
+        templatePlacementJob = nil
+        templatePlacementProgressTick = 0
+        leftDown = false
+        rightDown = false
+        player?.breakingProgress = -1
+        targetedBlock = nil
+        lastCursorHit = nil
+        onTemplatePlacementCommitted?(world, undo)
+        var details = "\(result.blocksPlaced) blocks, \(result.blockEntitiesPlaced) block entities"
+        if result.blocksCleared > 0 || result.supportBlocksFilled > 0 {
+            details += ", cleared \(result.blocksCleared), filled \(result.supportBlocksFilled)"
+        }
+        host?.pushChat("§7Placed object \"\(progress.templateName)\" - \(details)")
+        host?.showActionBar("Placed \"\(progress.templateName)\"", 60)
+    }
+
+    /// True when an in-flight placement job (currently the single local job; LAN
+    /// per-peer jobs will extend this to OR in the per-peer collection) still has
+    /// unpersisted work. Used by callers that need to know before deciding whether
+    /// to surface a "finishing up" message ahead of a settle.
+    public func hasActiveTemplatePlacementJob() -> Bool {
+        templatePlacementJob != nil
+    }
+
+    /// Drives every in-flight placement job to completion synchronously, publishing
+    /// its undo snapshot exactly as the per-tick path does, so a graceful termination
+    /// (Cmd-Q, Save & Quit, or any other final flush) never persists a half-placed
+    /// object. Intended for the `saveAndFlush` final-flush path only — never call this
+    /// from `tick()`/autosave, since autosave must remain a structural no-op mid-job.
+    ///
+    /// LAN forward-compatibility: this is the single drain point host-side per-peer
+    /// placement jobs will extend. When that lands, peers MUST be drained in sorted
+    /// peer-ID order so the resulting world mutation order (and therefore any derived
+    /// dirty-section replication) stays deterministic across runs; `finishTemplatePlacementJob`
+    /// will be reused per peer, adapted to the per-peer LAN undo store.
+    ///
+    /// Bounded by the job's own operation caps plus a hard iteration ceiling; if that
+    /// ceiling is somehow hit (the phase machine fails to converge), the job is abandoned
+    /// so the flush is never blocked — this is a fail-toward-saving backstop, not an
+    /// expected outcome, and it is surfaced to the player and the log rather than
+    /// silently swallowed.
+    ///
+    /// - Returns: the number of jobs settled (0 or 1 today; LAN will return N).
+    @discardableResult
+    public func settleInFlightTemplatePlacementJobs() -> Int {
+        guard let job = templatePlacementJob else { return 0 }
+        let maxOperations = 12_000
+        let totalOperations = job.progress.totalOperations
+        let ceiling = (totalOperations + maxOperations - 1) / maxOperations + 2
+        var iterations = 0
+        while !job.isDone {
+            guard iterations < ceiling else {
+                templatePlacementJob = nil
+                templatePlacementProgressTick = 0
+                let warning = "Could not finish placing \"\(job.progress.templateName)\" before saving; the partial object was left in place."
+                host?.pushChat("§c" + warning)
+                print("[templates] settleInFlightTemplatePlacementJobs: abandoned after \(iterations) iterations — \(warning)")
+                return 0
+            }
+            _ = job.step(maxOperations: maxOperations)
+            iterations += 1
+        }
+        finishTemplatePlacementJob(job)
+        return 1
     }
 
     // ===========================================================================
