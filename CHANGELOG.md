@@ -26,6 +26,17 @@ in-app version string comes from `PEBBLE_VERSION` (PebbleCore/Game/Saves.swift).
 - Quitting or Save-and-Quit while a large object-template placement is still
   filling in now finishes placing the object before saving, instead of
   persisting a permanently half-placed object with no undo.
+- Fixed: LAN template placement and undo no longer stall the host. A
+  permission-gated guest placing or undoing a template at the 524,288-block
+  cap previously froze host rendering and replication for several seconds;
+  both now run through the same tick-sliced job path as local play, with
+  per-peer job state, deterministic per-tick budgets, accept-then-complete
+  guest events, and busy rejection for a second in-flight request. A graceful
+  host quit settles every guest's in-flight template job before saving, the
+  same way a local in-flight placement is settled. Template capture (clone)
+  remains synchronous. A token-bucket rate limit for repeated template
+  intents remains a tracked follow-up; busy rejection is sufficient
+  back-pressure for now.
 
 ## 1.1.0 — 2026-06-27 — gameplay systems update
 

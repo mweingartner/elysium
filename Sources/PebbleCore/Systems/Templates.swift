@@ -1654,6 +1654,107 @@ public func restoreObjectTemplatePlacementUndo(_ snapshot: TemplatePlacementUndo
     return restored
 }
 
+/// Tick-sliced, two-phase analogue of `restoreObjectTemplatePlacementUndo`, mirroring
+/// `ObjectTemplatePlacementJob`'s step-budget shape so LAN host sessions can restore a
+/// per-peer undo snapshot across many ticks instead of stalling on one. This class does
+/// **not** replace `restoreObjectTemplatePlacementUndo` — that free function stays the
+/// synchronous correctness oracle for local undo and for this job's own tests.
+///
+/// Like `ObjectTemplatePlacementJob`, this job holds an `unowned` reference to its `World`
+/// and MUST NEVER outlive it: the owner is responsible for driving the job to completion
+/// (or discarding it) before the world it targets is torn down.
+public final class ObjectTemplateUndoRestoreJob {
+    private enum Phase: String {
+        case restoring = "restoring"
+        case notifying = "updating neighbors"
+        case done = "done"
+    }
+
+    private let snapshotValue: TemplatePlacementUndoSnapshot
+    private unowned let world: World
+    private var phase: Phase = .restoring
+    private var restoreIndex = 0
+    private var notifyIndex = 0
+    private var touched: [TemplatePos] = []
+    private var sortedTouched: [TemplatePos] = []
+    private var restoredCount = 0
+    private var completedOperationCount = 0
+    private let totalOperationCount: Int
+
+    public init(snapshot: TemplatePlacementUndoSnapshot, in world: World) {
+        self.snapshotValue = snapshot
+        self.world = world
+        totalOperationCount = max(1, snapshot.cells.count * 2)
+        touched.reserveCapacity(snapshot.cells.count)
+    }
+
+    public var isDone: Bool { phase == .done }
+    /// Valid once `isDone` is true — the count of cells actually restored (unloaded cells
+    /// are skipped and do not count toward this total, matching `restoreObjectTemplatePlacementUndo`).
+    public var restored: Int { restoredCount }
+    public var undoSnapshot: TemplatePlacementUndoSnapshot { snapshotValue }
+
+    public var progress: TemplatePlacementProgress {
+        TemplatePlacementProgress(
+            templateName: snapshotValue.templateName,
+            phase: phase.rawValue,
+            completedOperations: min(completedOperationCount, totalOperationCount),
+            totalOperations: totalOperationCount)
+    }
+
+    @discardableResult
+    public func step(maxOperations rawMaxOperations: Int = 8_192) -> Bool {
+        guard phase != .done else { return true }
+        var budget = max(1, rawMaxOperations)
+        while budget > 0 && phase != .done {
+            switch phase {
+            case .restoring:
+                if restoreIndex >= snapshotValue.cells.count {
+                    sortedTouched = touched.sorted()
+                    phase = .notifying
+                    continue
+                }
+                let cellRecord = snapshotValue.cells[restoreIndex]
+                restoreIndex += 1
+                guard world.isLoadedAt(cellRecord.x, cellRecord.z) else {
+                    completedOperationCount += 1
+                    budget -= 1
+                    continue
+                }
+                _ = world.setBlock(cellRecord.x, cellRecord.y, cellRecord.z, cellRecord.cell, SET_NO_NEIGHBORS)
+                if let blockEntity = cellRecord.blockEntity,
+                   let copy = sanitizedTemplateBlockEntity(blockEntity) {
+                    copy.x = cellRecord.x
+                    copy.y = cellRecord.y
+                    copy.z = cellRecord.z
+                    world.setBlockEntity(copy)
+                } else {
+                    world.removeBlockEntity(cellRecord.x, cellRecord.y, cellRecord.z)
+                }
+                touched.append(TemplatePos(x: cellRecord.x, y: cellRecord.y, z: cellRecord.z))
+                restoredCount += 1
+                completedOperationCount += 1
+                budget -= 1
+            case .notifying:
+                if notifyIndex >= sortedTouched.count {
+                    completedOperationCount = totalOperationCount
+                    phase = .done
+                    continue
+                }
+                let p = sortedTouched[notifyIndex]
+                notifyIndex += 1
+                world.updateNeighbors(p.x, p.y, p.z)
+                world.notifyBlock(p.x, p.y, p.z, p.x, p.y, p.z)
+                completedOperationCount += 1
+                budget -= 1
+            case .done:
+                break
+            }
+        }
+        return phase == .done
+    }
+}
+
 public func placeObjectTemplate(_ rawTemplate: ObjectTemplate, in world: World,
                                 targetX: Int, targetY: Int, targetZ: Int,
                                 rotationSteps: Int = 0,

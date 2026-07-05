@@ -263,6 +263,10 @@ final class LANMultiplayerManager {
         game.onTemplatePlacementCommitted = { [weak self] world, undo in
             self?.hostReplicationSession.recordDirtyChunkSections(from: undo, in: world)
         }
+        game.lanSettleTemplateJobsHandler = { [weak self, weak game] in
+            guard let self, let game else { return }
+            _ = self.hostReplicationSession.settleAllTemplateJobs(worldForDimension: { game.worldFor(dimension: $0) })
+        }
         game.lanChunkRequestHandler = nil
         game.lanBlockIntentHandler = nil
     }
@@ -270,6 +274,7 @@ final class LANMultiplayerManager {
     private func configureClientReplicationHooks(for game: GameCore) {
         game.onWorldBlockChanged = nil
         game.onTemplatePlacementCommitted = nil
+        game.lanSettleTemplateJobsHandler = nil
         game.lanChunkRequestHandler = { [weak self] world, cx, cz in
             guard let self else { return false }
             let centerY = self.activeGame?.player.map { Int($0.y.rounded(.down)) }
@@ -344,6 +349,12 @@ final class LANMultiplayerManager {
         game?.lanTossIntentHandler = nil
         game?.lanContainerEditHandler = nil
         game?.lanInventoryPublishHandler = nil
+        game?.lanSettleTemplateJobsHandler = nil
+        // Belt-and-suspenders guard for the `unowned world` contract on every held template job:
+        // session replacement at `startHost`/`stop` already drops jobs implicitly by replacing
+        // `hostReplicationSession`, but any other world-exit path that reaches here without
+        // replacing the session must not leave a job pointing at a world that's about to die.
+        hostReplicationSession.cancelAllTemplateJobs()
     }
 
     func startHost(game: GameCore, requestedJoinCode: String?, requestedPort: UInt16?) throws {
@@ -567,6 +578,31 @@ final class LANMultiplayerManager {
             // per-tick addressed events (damage/grants/death) flow independent of the replication
             // publish cadence below so a hit or a pickup never waits on the next full-batch tick.
             drainHostPerPeerEvents(game: game)
+            // Step every peer's in-flight template PLACE/UNDO job and drain any that finished
+            // this frame. This also runs independent of the publish cadence, every tickReplication
+            // call, so jobs progress and complete promptly. Only the completion text event is
+            // sent here — per-block deltas emitted this frame ride out through the normal
+            // foreground-delta publish below (and the `onWorldBlockChanged`/dirty-section hooks
+            // that already fire during stepping); building a second bespoke replication batch
+            // here would race that same publish's own drain of the shared block-change/
+            // dirty-section queues.
+            hostReplicationSession.stepTemplateJobs(in: game.world)
+            for (playerID, result) in hostReplicationSession.drainTemplateIntentResponses() {
+                let message: String
+                switch result {
+                case .placed(let name, let blocks, let blockEntities, let cleared, let filled):
+                    message = "placed \(name) (\(blocks) blocks, \(blockEntities) block entities, cleared \(cleared), filled \(filled))"
+                case .undone(let name, let restored):
+                    message = "undid \(name) (\(restored) cells)"
+                default:
+                    continue // .accepted/.copied/.rejected never arrive through this drain
+                }
+                let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: message, tick: game.world.time)
+                queue.async { [weak self] in
+                    guard let self, let peer = self.hostPeers.values.first(where: { $0.accepted && $0.playerID == playerID }) else { return }
+                    self.sendGameplayEvent(event, to: peer.id)
+                }
+            }
             if now - lastHostPeerPersist >= hostPeerPersistInterval {
                 lastHostPeerPersist = now
                 persistAllHostPeerRecords()
@@ -1802,33 +1838,18 @@ final class LANMultiplayerManager {
             case .copied(let name, let blocks):
                 let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "copied \(name) (\(blocks) blocks)", tick: game.world.time)
                 self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
-            case .placed(let name, let blocks, let blockEntities, let cleared, let filled):
-                let event = LANGameplayEvent(
-                    playerID: playerID,
-                    kind: .intentAccepted,
-                    message: "placed \(name) (\(blocks) blocks, \(blockEntities) block entities, cleared \(cleared), filled \(filled))",
-                    tick: game.world.time
-                )
-                let placedChanges = self.hostReplicationSession.drainBlockChanges()
-                let placedSections = self.hostReplicationSession.drainDirtyChunkSectionSnapshots(in: game.world)
-                let batch = LANReplicationBatch(tick: game.world.time, fullSnapshot: false,
-                                                blockChanges: placedChanges,
-                                                chunkSections: placedSections)
-                self.queue.async { [weak self] in
-                    self?.broadcastHostReplicationBatch(batch, drainedBlockChanges: placedChanges)
-                    self?.sendGameplayEvent(event, to: peerID)
-                }
-            case .undone(let name, let restored):
-                let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "undid \(name) (\(restored) cells)", tick: game.world.time)
-                let undoneChanges = self.hostReplicationSession.drainBlockChanges()
-                let undoneSections = self.hostReplicationSession.drainDirtyChunkSectionSnapshots(in: game.world)
-                let batch = LANReplicationBatch(tick: game.world.time, fullSnapshot: false,
-                                                blockChanges: undoneChanges,
-                                                chunkSections: undoneSections)
-                self.queue.async { [weak self] in
-                    self?.broadcastHostReplicationBatch(batch, drainedBlockChanges: undoneChanges)
-                    self?.sendGameplayEvent(event, to: peerID)
-                }
+            case .accepted(let action, let name):
+                // Place/undo are now tick-sliced host jobs (LANReplication's `templateJobs`
+                // registry): admission only returns an immediate "in progress" acknowledgment.
+                // The eventual `.placed`/`.undone` completion event and its replication deltas
+                // arrive later via `tickReplication`'s `drainTemplateIntentResponses` drain —
+                // deltas ride out through the existing unconditional foreground-delta publish,
+                // exactly like every other block mutation, rather than a bespoke batch here.
+                let verb = action == .undoPlacement ? "undoing" : "placing"
+                let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "\(verb) \(name)…", tick: game.world.time)
+                self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
+            case .placed, .undone:
+                break // completion now arrives only through tickReplication's job-completion drain
             case .rejected(let reason):
                 self.appendStatus("LAN template intent from \(peerName) rejected: \(reason).")
                 let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: game.world.time)

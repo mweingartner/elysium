@@ -239,6 +239,23 @@ public final class LANMultiplayerHostSession {
         var z: Double
     }
 
+    /// One in-flight tick-sliced template job per peer. `.place`/`.undo` are held as an enum
+    /// (rather than twin optionals) so there is no force-unwrap hazard at the call site.
+    private enum TemplateJob {
+        case place(ObjectTemplatePlacementJob)
+        case undo(ObjectTemplateUndoRestoreJob)
+    }
+
+    private struct TemplateJobEntry {
+        var job: TemplateJob
+        var action: LANTemplateIntent.Action
+        var templateName: String
+        /// `world.dim.rawValue` at admission time — `stepTemplateJobs` only steps entries whose
+        /// dimension matches the world it was called with; a wrong-dimension entry pauses rather
+        /// than aborting, and resumes once the host returns to that dimension.
+        var dimension: Int
+    }
+
     private var peers: [String: Peer] = [:]
     private var nextOrdinal = 0
     private let changeLog = LANReplicationChangeLog()
@@ -248,6 +265,10 @@ public final class LANMultiplayerHostSession {
     private var dirtyBlockEntitySet: Set<LANBlockPosition> = []
     private var dirtyChunkSectionPositions: [LANChunkSectionPosition] = []
     private var dirtyChunkSectionSet: Set<LANChunkSectionPosition> = []
+    /// one in-flight template job per peer, keyed by playerID.
+    private var templateJobs: [String: TemplateJobEntry] = [:]
+    /// completion responses awaiting drain by the transport, in completion order.
+    private var pendingTemplateResponses: [(playerID: String, result: LANTemplateIntentResult)] = []
 
     public init() {}
 
@@ -285,7 +306,12 @@ public final class LANMultiplayerHostSession {
     }
 
     public func removePeer(playerID rawPlayerID: String) {
-        peers.removeValue(forKey: String(rawPlayerID.prefix(128)))
+        let playerID = String(rawPlayerID.prefix(128))
+        peers.removeValue(forKey: playerID)
+        // abandon-in-place: drop the job entry and any queued completion response rather than
+        // auto-restoring — the partial structure is real, host-authoritative world state.
+        templateJobs.removeValue(forKey: playerID)
+        pendingTemplateResponses.removeAll(where: { $0.playerID == playerID })
     }
 
     public func disconnectPeer(playerID rawPlayerID: String, tick: Int) {
@@ -295,6 +321,9 @@ public final class LANMultiplayerHostSession {
         peer.disconnectedTick = max(0, tick)
         peer.lastTemplateUndo = nil
         peers[playerID] = peer
+        // abandon-in-place: see removePeer above for rationale.
+        templateJobs.removeValue(forKey: playerID)
+        pendingTemplateResponses.removeAll(where: { $0.playerID == playerID })
     }
 
     @discardableResult
@@ -571,58 +600,43 @@ public final class LANMultiplayerHostSession {
             case .rejected(let reason): return .rejected(reason)
             case .accepted: break
             }
+            guard templateJobs[playerID] == nil else {
+                return .rejected("template placement already in progress")
+            }
             do {
                 guard let rawTemplate = try loadTemplate(intent.templateName) else {
                     return .rejected("unknown template")
                 }
-                let template = try rotatedObjectTemplate(rawTemplate, rotationSteps: intent.rotation)
-                let undo = try objectTemplatePlacementUndoSnapshot(
-                    for: template,
+                // The job's throwing init does the rotate + preparation plan + destination
+                // validation + pre-mutation undo snapshot, all synchronously and all-or-nothing;
+                // pass the raw template + rotationSteps directly rather than pre-rotating, since
+                // the init rotates internally and pre-rotating would double-rotate.
+                let job = try ObjectTemplatePlacementJob(
+                    rawTemplate: rawTemplate,
                     in: world,
                     targetX: intent.x,
                     targetY: intent.y,
                     targetZ: intent.z,
+                    rotationSteps: intent.rotation,
                     options: TemplatePlacementOptions(prepareTerrain: true)
                 )
-                let result = try placeObjectTemplate(
-                    template,
-                    in: world,
-                    targetX: intent.x,
-                    targetY: intent.y,
-                    targetZ: intent.z,
-                    options: TemplatePlacementOptions(prepareTerrain: true)
+                // No dirty-section marking and no manual change-log loop here: the
+                // `onWorldBlockChanged` hook streams every write as the job steps, and
+                // `recordDirtyChunkSections` runs once at completion (finishTemplateJob) as the
+                // eviction backstop, exactly like local completion. The undo snapshot is not
+                // stored on `peers[playerID].lastTemplateUndo` until completion either.
+                templateJobs[playerID] = TemplateJobEntry(
+                    job: .place(job),
+                    action: .placeTemplate,
+                    templateName: job.undoSnapshot.templateName,
+                    dimension: world.dim.rawValue
                 )
-                recordDirtyChunkSections(from: undo, in: world)
-                if template.blocks.count <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES {
-                    let originX = intent.x - template.anchorX
-                    let originY = intent.y - template.anchorY
-                    let originZ = intent.z - template.anchorZ
-                    for block in template.blocks {
-                        changeLog.record(LANBlockChange(
-                            dimension: world.dim.rawValue,
-                            x: originX + block.dx,
-                            y: originY + block.dy,
-                            z: originZ + block.dz,
-                            cell: Int(block.cell)
-                        ))
-                    }
-                }
-                if var peer = peers[playerID] {
-                    peer.lastTemplateUndo = undo
-                    peers[playerID] = peer
-                }
-                return .placed(
-                    name: template.name,
-                    blocks: result.blocksPlaced,
-                    blockEntities: result.blockEntitiesPlaced,
-                    cleared: result.blocksCleared,
-                    filled: result.supportBlocksFilled
-                )
+                return .accepted(action: .placeTemplate, name: job.undoSnapshot.templateName)
             } catch {
                 return .rejected(String(describing: error))
             }
         case .undoPlacement:
-            guard var peer = peers[playerID], let undo = peer.lastTemplateUndo else {
+            guard let peer = peers[playerID], let undo = peer.lastTemplateUndo else {
                 return .rejected("no template placement to undo")
             }
             guard undo.dimension == world.dim.rawValue else {
@@ -631,17 +645,168 @@ public final class LANMultiplayerHostSession {
             guard templateUndoSnapshotFullyLoaded(undo, in: world) else {
                 return .rejected("template region not loaded")
             }
-            let restored = restoreObjectTemplatePlacementUndo(undo, in: world)
-            recordDirtyChunkSections(from: undo, in: world)
-            if undo.cells.count <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES {
-                for cell in undo.cells where world.isLoadedAt(cell.x, cell.z) {
-                    changeLog.record(LANBlockChange(dimension: world.dim.rawValue, x: cell.x, y: cell.y, z: cell.z, cell: cell.cell))
-                }
+            guard templateJobs[playerID] == nil else {
+                return .rejected("template placement already in progress")
             }
-            peer.lastTemplateUndo = nil
-            peers[playerID] = peer
-            return .undone(name: undo.templateName, restored: restored)
+            // `lastTemplateUndo` is deliberately NOT cleared here — only at undo-completion
+            // (finishTemplateJob). The busy guard above already prevents a second undo from
+            // starting while this one is in flight, so early-clearing is unnecessary and would
+            // lose the snapshot if the peer disconnects mid-undo.
+            let job = ObjectTemplateUndoRestoreJob(snapshot: undo, in: world)
+            templateJobs[playerID] = TemplateJobEntry(
+                job: .undo(job),
+                action: .undoPlacement,
+                templateName: undo.templateName,
+                dimension: undo.dimension
+            )
+            return .accepted(action: .undoPlacement, name: undo.templateName)
         }
+    }
+
+    /// Steps every peer's in-flight template job by up to `budgetPerPeer` operations, in
+    /// ascending `joinedOrdinal` order (never dictionary order, per the engine's determinism
+    /// contract). A job whose stored dimension doesn't match `world`'s current dimension is
+    /// paused (skipped, not aborted or dropped) until the host returns to that dimension. Jobs
+    /// that finish this call are completed via `finishTemplateJob`, which enqueues a drainable
+    /// response and updates the peer's undo-snapshot bookkeeping exactly once.
+    public func stepTemplateJobs(in world: World, budgetPerPeer: Int = LAN_MULTIPLAYER_TEMPLATE_JOB_STEP_BUDGET) {
+        guard !templateJobs.isEmpty else { return }
+        let ordered = peers.values.sorted { $0.joinedOrdinal < $1.joinedOrdinal }.map { $0.playerID }
+        for playerID in ordered {
+            guard let entry = templateJobs[playerID] else { continue }
+            guard entry.dimension == world.dim.rawValue else { continue }
+            let done: Bool
+            switch entry.job {
+            case .place(let job): done = job.step(maxOperations: budgetPerPeer)
+            case .undo(let job): done = job.step(maxOperations: budgetPerPeer)
+            }
+            if done {
+                finishTemplateJob(playerID: playerID, in: world)
+            }
+        }
+    }
+
+    /// Single completion path for a `.done` template job, shared by `stepTemplateJobs` and
+    /// `settleAllTemplateJobs`. Marks dirty chunk sections from the undo snapshot exactly as
+    /// local completion does (`onTemplatePlacementCommitted`), writes/clears the peer's
+    /// `lastTemplateUndo` exactly once, and enqueues the drainable completion response. Does
+    /// NOT re-emit per-block change-log entries — the `onWorldBlockChanged` hook is
+    /// authoritative for per-block deltas fired during stepping.
+    private func finishTemplateJob(playerID: String, in world: World) {
+        guard let entry = templateJobs.removeValue(forKey: playerID) else { return }
+        switch entry.job {
+        case .place(let job):
+            guard let result = job.result else {
+                print("[lan] template job for \(playerID) finished without a result; dropping without completion")
+                return
+            }
+            let undo = job.undoSnapshot
+            recordDirtyChunkSections(from: undo, in: world)
+            if var peer = peers[playerID] {
+                peer.lastTemplateUndo = undo
+                peers[playerID] = peer
+            }
+            pendingTemplateResponses.append((playerID, .placed(
+                name: undo.templateName,
+                blocks: result.blocksPlaced,
+                blockEntities: result.blockEntitiesPlaced,
+                cleared: result.blocksCleared,
+                filled: result.supportBlocksFilled
+            )))
+        case .undo(let job):
+            let undo = job.undoSnapshot
+            recordDirtyChunkSections(from: undo, in: world)
+            if var peer = peers[playerID] {
+                peer.lastTemplateUndo = nil
+                peers[playerID] = peer
+            }
+            pendingTemplateResponses.append((playerID, .undone(name: undo.templateName, restored: job.restored)))
+        }
+    }
+
+    /// Drains queued template-job completion responses in completion order.
+    public func drainTemplateIntentResponses() -> [(playerID: String, result: LANTemplateIntentResult)] {
+        let out = pendingTemplateResponses
+        pendingTemplateResponses.removeAll()
+        return out
+    }
+
+    /// Test/diagnostic helper — true while `playerID` has an in-flight template job.
+    public func hasActiveTemplateJob(playerID: String) -> Bool {
+        templateJobs[String(playerID.prefix(128))] != nil
+    }
+
+    /// Guards the `unowned world` contract on every held job: drops all in-flight template jobs
+    /// without settling them. Intended for world-teardown paths that do not already replace the
+    /// whole session (session replacement at `startHost`/`stop` already drops jobs implicitly);
+    /// callers that must persist partial work before teardown should call
+    /// `settleAllTemplateJobs(in:)` first.
+    public func cancelAllTemplateJobs() {
+        templateJobs.removeAll()
+        pendingTemplateResponses.removeAll()
+    }
+
+    /// Drives every in-flight template job to completion, in ascending `joinedOrdinal` order,
+    /// so a graceful host quit never persists a half-placed or half-undone guest object. Mirrors
+    /// `GameCore.settleInFlightTemplatePlacementJobs`'s fail-toward-saving contract: each job is
+    /// bounded by its own operation caps plus a hard per-job iteration ceiling, and a job that
+    /// somehow fails to converge is abandoned (dropped, logged) rather than blocking the flush.
+    /// Each settled job goes through `finishTemplateJob` exactly as a normal per-tick completion
+    /// would — undo-store write/clear and dirty-section marking happen identically — except no
+    /// completion response is meaningful at quit time (there is no live connection to receive
+    /// it), so the drained responses are discarded by the caller.
+    ///
+    /// Settlement is exhaustive rather than current-dimension-filtered: unlike `stepTemplateJobs`,
+    /// every job is settled against its own admitted world regardless of the dimension the host
+    /// happens to be standing in when quitting, since each job already owns a bound reference to
+    /// the world it was constructed against.
+    ///
+    /// - Parameter worldForDimension: resolves the `World` a given entry's stored dimension maps
+    ///   to. This is the world the job steps against and the world `recordDirtyChunkSections`
+    ///   marks on completion.
+    /// - Returns: the number of jobs actually driven to completion (an abandoned or
+    ///   unresolvable-dimension job is dropped but does not count toward this total).
+    @discardableResult
+    public func settleAllTemplateJobs(worldForDimension: (Int) -> World?) -> Int {
+        guard !templateJobs.isEmpty else { return 0 }
+        let ordered = peers.values.sorted { $0.joinedOrdinal < $1.joinedOrdinal }.map { $0.playerID }
+        let maxOperations = LAN_MULTIPLAYER_TEMPLATE_JOB_STEP_BUDGET
+        var settled = 0
+        for playerID in ordered {
+            guard let entry = templateJobs[playerID] else { continue }
+            guard let world = worldForDimension(entry.dimension) else {
+                templateJobs.removeValue(forKey: playerID)
+                continue
+            }
+            let totalOperations: Int
+            switch entry.job {
+            case .place(let job): totalOperations = job.progress.totalOperations
+            case .undo(let job): totalOperations = job.progress.totalOperations
+            }
+            let ceiling = (totalOperations + maxOperations - 1) / maxOperations + 2
+            var iterations = 0
+            var isDone: Bool
+            switch entry.job {
+            case .place(let job): isDone = job.isDone
+            case .undo(let job): isDone = job.isDone
+            }
+            while !isDone {
+                guard iterations < ceiling else {
+                    templateJobs.removeValue(forKey: playerID)
+                    print("[templates] settleAllTemplateJobs: abandoned peer \(playerID)'s job after \(iterations) iterations — could not finish before quit; the partial object was left in place.")
+                    break
+                }
+                switch entry.job {
+                case .place(let job): isDone = job.step(maxOperations: maxOperations)
+                case .undo(let job): isDone = job.step(maxOperations: maxOperations)
+                }
+                iterations += 1
+            }
+            guard isDone else { continue }
+            finishTemplateJob(playerID: playerID, in: world)
+            settled += 1
+        }
+        return settled
     }
 
     @discardableResult

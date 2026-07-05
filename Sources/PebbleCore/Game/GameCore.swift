@@ -253,6 +253,12 @@ public final class GameCore {
     public var lanContainerEditHandler: ((LANContainerEditIntent) -> Void)?
     /// fires with the freshly-published snapshot and its new revision number
     public var lanInventoryPublishHandler: ((LANPlayerInventorySnapshot, Int) -> Void)?
+    /// Host-side LAN hook: settles every guest's in-flight template PLACE/UNDO job before a
+    /// graceful quit/save flush persists the world, exactly as `settleInFlightTemplatePlacementJobs`
+    /// does for the local job. Set in `configureHostReplicationHooks`, cleared in
+    /// `clearReplicationHooks` (LANTransport), and invoked from `saveAndFlush` alongside the local
+    /// settle call so a host quitting mid-guest-placement never persists a half-placed object.
+    public var lanSettleTemplateJobsHandler: (() -> Void)?
 
     // LAN client-authoritative inventory / container-edit / connection state
     private var lanLocalInventoryRevision = 0
@@ -729,6 +735,11 @@ public final class GameCore {
             host?.pushChat("§7Finishing placement before saving...")
             settleInFlightTemplatePlacementJobs()
         }
+        // Host-side LAN forward-compatibility: a guest's tick-sliced template job is not driven
+        // by this GameCore's own tick() at all (it lives in LANReplication's per-peer registry,
+        // stepped from LANTransport.tickReplication), so it must be settled explicitly here too —
+        // otherwise a graceful host quit could persist a guest's half-placed/half-undone object.
+        lanSettleTemplateJobsHandler?()
         guard var rec = worldRec else { return }
         rec.lastPlayed = Date().timeIntervalSince1970 * 1000
         rec.gameMode = player.gameMode

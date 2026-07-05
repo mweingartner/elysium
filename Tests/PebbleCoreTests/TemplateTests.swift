@@ -415,6 +415,89 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual(world.getBlock(11, 70, 8), 0)
     }
 
+    func testObjectTemplateUndoRestoreJobSlicesRestore() throws {
+        let world = makeWorld()
+        let stone = UInt16(cell(B.stone))
+        let template = ObjectTemplate(
+            name: "Sliced Undo",
+            anchorX: 0,
+            anchorY: 0,
+            anchorZ: 0,
+            sizeX: 4,
+            sizeY: 1,
+            sizeZ: 1,
+            blocks: (0..<4).map { TemplateBlock(dx: $0, dy: 0, dz: 0, cell: stone) })
+        let undo = try objectTemplatePlacementUndoSnapshot(for: template, in: world, targetX: 8, targetY: 70, targetZ: 8)
+        _ = try placeObjectTemplate(template, in: world, targetX: 8, targetY: 70, targetZ: 8)
+        XCTAssertEqual(world.getBlock(8, 70, 8), Int(stone))
+
+        let job = ObjectTemplateUndoRestoreJob(snapshot: undo, in: world)
+
+        // one op per step: the first step restores exactly the first cell and leaves the rest
+        // of the object (and neighbor notification) still pending.
+        XCTAssertFalse(job.step(maxOperations: 1))
+        XCTAssertEqual(job.restored, 1)
+        XCTAssertEqual(world.getBlock(8, 70, 8), 0)
+        XCTAssertEqual(world.getBlock(11, 70, 8), Int(stone), "later cells must not be touched before their slice runs")
+        var iterations = 0
+        while !job.isDone {
+            _ = job.step(maxOperations: 1)
+            iterations += 1
+            XCTAssertLessThan(iterations, 64)
+        }
+
+        XCTAssertEqual(job.restored, undo.cells.count)
+        XCTAssertEqual(world.getBlock(8, 70, 8), 0)
+        XCTAssertEqual(world.getBlock(11, 70, 8), 0)
+    }
+
+    /// Metamorphic: for any per-step operation budget, driving `ObjectTemplateUndoRestoreJob` to
+    /// completion on independent copies of the same post-place world yields identical final world
+    /// state and identical `restored` counts as the synchronous `restoreObjectTemplatePlacementUndo`
+    /// oracle — slicing must never change the outcome, only how many ticks it takes to get there.
+    func testUndoRestoreJobSlicedEqualsSynchronousUnderAnyBudget() throws {
+        let stone = UInt16(cell(B.stone))
+        let template = ObjectTemplate(
+            name: "Metamorphic Undo",
+            anchorX: 0,
+            anchorY: 0,
+            anchorZ: 0,
+            sizeX: 6,
+            sizeY: 3,
+            sizeZ: 6,
+            blocks: (0..<6).flatMap { x in (0..<3).flatMap { y in (0..<6).map { z in
+                TemplateBlock(dx: x, dy: y, dz: z, cell: stone)
+            } } })
+
+        func placedWorld() throws -> (World, TemplatePlacementUndoSnapshot) {
+            let world = makeWorld()
+            let undo = try objectTemplatePlacementUndoSnapshot(for: template, in: world, targetX: 8, targetY: 70, targetZ: 8)
+            _ = try placeObjectTemplate(template, in: world, targetX: 8, targetY: 70, targetZ: 8)
+            return (world, undo)
+        }
+
+        let (oracleWorld, oracleUndo) = try placedWorld()
+        let oracleRestored = restoreObjectTemplatePlacementUndo(oracleUndo, in: oracleWorld)
+
+        for budget in [1, 7, 2048, 100_000] {
+            let (world, undo) = try placedWorld()
+            let job = ObjectTemplateUndoRestoreJob(snapshot: undo, in: world)
+            var iterations = 0
+            while !job.isDone {
+                _ = job.step(maxOperations: budget)
+                iterations += 1
+                XCTAssertLessThan(iterations, 1_000, "budget \(budget) did not converge")
+            }
+            XCTAssertEqual(job.restored, oracleRestored, "budget \(budget) restored count mismatch")
+            for cell in undo.cells {
+                XCTAssertEqual(
+                    world.getBlock(cell.x, cell.y, cell.z),
+                    oracleWorld.getBlock(cell.x, cell.y, cell.z),
+                    "budget \(budget) diverged at \(cell.x),\(cell.y),\(cell.z)")
+            }
+        }
+    }
+
     func testRotatedObjectTemplateRotatesBlocksAnchorAndBlockEntities() throws {
         registerCoreIfNeeded()
         let chest = makeContainerBE(1, 0, 2, 27)

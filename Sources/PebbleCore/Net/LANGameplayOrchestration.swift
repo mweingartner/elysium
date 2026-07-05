@@ -26,6 +26,10 @@ public enum LANCraftingIntentResult: Equatable {
 }
 
 public enum LANTemplateIntentResult: Equatable {
+    /// Host-internal only — never encoded onto the wire. Returned synchronously the moment
+    /// a place/undo intent is admitted into the host's per-peer template job registry; the
+    /// eventual `.placed`/`.undone` result arrives later through `drainTemplateIntentResponses`.
+    case accepted(action: LANTemplateIntent.Action, name: String)
     case copied(name: String, blocks: Int)
     case placed(name: String, blocks: Int, blockEntities: Int, cleared: Int, filled: Int)
     case undone(name: String, restored: Int)

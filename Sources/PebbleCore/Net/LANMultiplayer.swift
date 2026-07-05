@@ -28,6 +28,10 @@ public let LAN_MULTIPLAYER_MAX_CELLS_DATA_BYTES = LAN_MULTIPLAYER_MAX_RLE_RUNS *
 public let LAN_MULTIPLAYER_MAX_GRANT_ITEMS = 64
 public let LAN_MULTIPLAYER_MAX_DAMAGE_AMOUNT = 2048.0
 public let LAN_MULTIPLAYER_MAX_CONTAINER_EDIT_BLOCK_ENTITIES = 2
+/// Per-peer operation budget for stepping template PLACE/UNDO jobs each `tickReplication`
+/// call — keeps a guest's in-flight template job progressing every host frame without
+/// reintroducing the multi-second stall the synchronous path used to cause.
+public let LAN_MULTIPLAYER_TEMPLATE_JOB_STEP_BUDGET = 2_048
 /// Absolute ceiling on wrong-dimension dirty chunk sections held for requeue while the host
 /// is in a different dimension. Past this, the oldest entries are dropped rather than requeued
 /// indefinitely — safe because a dropped section resyncs via the normal section-snapshot path
