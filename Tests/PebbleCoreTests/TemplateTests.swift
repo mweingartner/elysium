@@ -83,6 +83,55 @@ final class TemplateTests: XCTestCase {
             blocks: blocks)
     }
 
+    private func makeLoadedWorld(minX: Int, maxX: Int, minZ: Int, maxZ: Int) -> World {
+        registerCoreIfNeeded()
+        let world = World(dim: .overworld, seed: 8642)
+        let info = dimInfo(.overworld)
+        let minCX = floorDiv(minX, CHUNK_W)
+        let maxCX = floorDiv(maxX, CHUNK_W)
+        let minCZ = floorDiv(minZ, CHUNK_W)
+        let maxCZ = floorDiv(maxZ, CHUNK_W)
+        for cz in minCZ...maxCZ {
+            for cx in minCX...maxCX {
+                let chunk = Chunk(cx: cx, cz: cz, minY: info.minY, height: info.height)
+                chunk.status = .lit
+                world.setChunk(chunk)
+                world.light.initChunkLight(chunk)
+            }
+        }
+        return world
+    }
+
+    private func fillTemplateTestBlocks(in world: World,
+                                        minX: Int = 0, startY: Int = 64, minZ: Int = 0,
+                                        sizeX: Int, sizeY: Int, sizeZ: Int,
+                                        blockCount rawBlockCount: Int? = nil,
+                                        blockCell rawBlockCell: UInt16? = nil) {
+        let blockCount = rawBlockCount ?? sizeX * sizeY * sizeZ
+        precondition(sizeX > 0 && sizeY > 0 && sizeZ > 0)
+        precondition(blockCount >= 0 && blockCount <= sizeX * sizeY * sizeZ)
+        let blockCell = rawBlockCell ?? UInt16(cell(B.oak_planks))
+        var emitted = 0
+        outer: for yOffset in 0..<sizeY {
+            let y = startY + yOffset
+            for zOffset in 0..<sizeZ {
+                let z = minZ + zOffset
+                for xOffset in 0..<sizeX {
+                    let x = minX + xOffset
+                    guard let chunk = world.getChunkAt(x, z) else {
+                        preconditionFailure("missing chunk for \(x),\(z)")
+                    }
+                    chunk.set(posMod(x, CHUNK_W), y, posMod(z, CHUNK_W), blockCell)
+                    emitted += 1
+                    if emitted == blockCount { break outer }
+                }
+            }
+        }
+        for key in world.chunks.keys.sorted() {
+            world.chunks[key]?.buildHeightmap()
+        }
+    }
+
     func testCloneConnectedObjectExcludesUnderlyingTerrain() throws {
         let world = makeWorld()
         makeFurnishedObject(in: world)
@@ -240,6 +289,69 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual(result.template.sizeX, 1)
         XCTAssertEqual(result.template.sizeY, 1)
         XCTAssertEqual(result.template.sizeZ, 1)
+    }
+
+    func testCloneTenBySevenFootprintDoesNotFloodFillStoneSubstrate() throws {
+        let world = makeLoadedWorld(minX: -64, maxX: 64, minZ: -64, maxZ: 64)
+        fillTemplateTestBlocks(in: world, minX: -64, startY: 63, minZ: -64,
+                               sizeX: 129, sizeY: 1, sizeZ: 129,
+                               blockCell: UInt16(cell(B.stone)))
+        fillTemplateTestBlocks(in: world, minX: 0, startY: 64, minZ: 0,
+                               sizeX: 10, sizeY: 1, sizeZ: 7)
+
+        let result = try cloneObjectTemplate(named: "Ten By Seven", from: world,
+                                             targetX: 0, targetY: 64, targetZ: 0)
+
+        XCTAssertEqual(result.template.blocks.count, 70)
+        XCTAssertEqual(result.template.sizeX, 10)
+        XCTAssertEqual(result.template.sizeY, 1)
+        XCTAssertEqual(result.template.sizeZ, 7)
+        XCTAssertEqual(Set(result.template.blocks.map { Int($0.cell >> 4) }),
+                       Set([Int(B.oak_planks)]))
+    }
+
+    func testCloneAcceptsExactMaxSpanFootprint() throws {
+        let world = makeLoadedWorld(minX: 0, maxX: OBJECT_TEMPLATE_MAX_SPAN - 1,
+                                    minZ: 0, maxZ: OBJECT_TEMPLATE_MAX_SPAN - 1)
+        fillTemplateTestBlocks(in: world, sizeX: OBJECT_TEMPLATE_MAX_SPAN, sizeY: 1,
+                               sizeZ: OBJECT_TEMPLATE_MAX_SPAN)
+
+        let result = try cloneObjectTemplate(named: "Max Span", from: world,
+                                             targetX: 0, targetY: 64, targetZ: 0)
+
+        XCTAssertEqual(result.template.blocks.count, OBJECT_TEMPLATE_MAX_SPAN * OBJECT_TEMPLATE_MAX_SPAN)
+        XCTAssertEqual(result.template.sizeX, OBJECT_TEMPLATE_MAX_SPAN)
+        XCTAssertEqual(result.template.sizeY, 1)
+        XCTAssertEqual(result.template.sizeZ, OBJECT_TEMPLATE_MAX_SPAN)
+    }
+
+    func testCloneAcceptsExact512KBlockLimit() throws {
+        let world = makeLoadedWorld(minX: 0, maxX: OBJECT_TEMPLATE_MAX_SPAN - 1,
+                                    minZ: 0, maxZ: OBJECT_TEMPLATE_MAX_SPAN - 1)
+        fillTemplateTestBlocks(in: world,
+                               sizeX: OBJECT_TEMPLATE_MAX_SPAN, sizeY: 57,
+                               sizeZ: OBJECT_TEMPLATE_MAX_SPAN,
+                               blockCount: OBJECT_TEMPLATE_MAX_BLOCKS)
+
+        let result = try cloneObjectTemplate(named: "Max Blocks", from: world,
+                                             targetX: 0, targetY: 64, targetZ: 0)
+
+        XCTAssertEqual(result.template.blocks.count, OBJECT_TEMPLATE_MAX_BLOCKS)
+        XCTAssertEqual(result.template.sizeX, OBJECT_TEMPLATE_MAX_SPAN)
+        XCTAssertEqual(result.template.sizeY, 57)
+        XCTAssertEqual(result.template.sizeZ, OBJECT_TEMPLATE_MAX_SPAN)
+    }
+
+    func testCloneRejectsFootprintWiderThanMaxSpan() throws {
+        let world = makeLoadedWorld(minX: 0, maxX: OBJECT_TEMPLATE_MAX_SPAN,
+                                    minZ: 0, maxZ: 0)
+        fillTemplateTestBlocks(in: world, sizeX: OBJECT_TEMPLATE_MAX_SPAN + 1,
+                               sizeY: 1, sizeZ: 1)
+
+        XCTAssertThrowsError(try cloneObjectTemplate(named: "Too Wide", from: world,
+                                                     targetX: 0, targetY: 64, targetZ: 0)) { error in
+            XCTAssertEqual(error as? TemplateError, .objectTooWide)
+        }
     }
 
     func testPlaceObjectTemplateAtCursorAnchor() throws {

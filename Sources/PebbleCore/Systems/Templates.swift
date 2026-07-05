@@ -353,13 +353,17 @@ private func isTemplateTerrainOrFluid(_ id: Int) -> Bool {
     if def.shape == .liquid || def.replaceable || def.hardness < 0 { return true }
     let name = def.name
     if name.hasSuffix("_ore") || name.hasPrefix("deepslate_") && name.hasSuffix("_ore") { return true }
+    if name.hasSuffix("_leaves") { return true }
     let terrain: Set<String> = [
         "air", "cave_air", "void_air", "water", "lava", "fire", "soul_fire",
+        "stone", "granite", "diorite", "andesite", "deepslate", "tuff", "calcite",
+        "dripstone_block", "basalt", "smooth_basalt", "blackstone",
         "grass_block", "dirt", "coarse_dirt", "rooted_dirt", "podzol", "mycelium",
         "sand", "red_sand", "gravel", "suspicious_sand", "suspicious_gravel",
-        "clay", "mud", "farmland", "dirt_path", "snow", "powder_snow",
-        "ice", "packed_ice", "blue_ice", "frosted_ice", "bedrock",
-        "netherrack", "soul_sand", "soul_soil", "end_stone"
+        "clay", "mud", "moss_block", "farmland", "dirt_path", "snow", "snow_block",
+        "powder_snow", "ice", "packed_ice", "blue_ice", "frosted_ice", "bedrock",
+        "netherrack", "crimson_nylium", "warped_nylium", "soul_sand", "soul_soil",
+        "magma_block", "glowstone", "end_stone"
     ]
     return terrain.contains(name)
 }
