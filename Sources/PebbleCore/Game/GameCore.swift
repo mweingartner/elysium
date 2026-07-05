@@ -662,6 +662,7 @@ public final class GameCore {
         templatePlacement = nil
         templatePlacementJob = nil
         templatePlacementProgressTick = 0
+        lastTemplatePlacementUndo = nil
         ticksSinceSave = 0
         host?.closeAllScreens()
         host?.showActionBar("§e\(rec.name)§r — seed \(rec.seed)", 60)
@@ -1935,7 +1936,8 @@ public final class GameCore {
             if !inRange && !ALWAYS_TICK.contains(ent.type) { continue }
             ent.tick()
             // sculk catalyst blooms on death
-            if let liv = ent as? LivingEntity, liv.deathTime == 1 {
+            if let liv = ent as? LivingEntity, liv.catalystBloomPending {
+                liv.catalystBloomPending = false
                 tryCatalystBloom(w, ent.x, ent.y, ent.z, liv.xpReward)
             }
         }
@@ -2923,6 +2925,7 @@ public final class GameCore {
     /// (reconnect) or LANInventoryGrant (additive correction).
     private func publishLANInventoryIfChanged() {
         guard let p = player, let handler = lanInventoryPublishHandler else { return }
+        if p.dead || p.deathTime > 0 { return }   // D-race: don't overwrite the host's pre-death snapshot
         let snapshot = makeLANInventorySnapshot(p, playerID: "")
         if snapshot == lanLastPublishedInventory { return }
         lanLastPublishedInventory = snapshot
@@ -3062,6 +3065,14 @@ public final class GameCore {
         }
         guard let undo = lastTemplatePlacementUndo else {
             host?.showActionBar("No object placement to undo", 55)
+            return false
+        }
+        guard undo.dimension == dim.rawValue else {
+            host?.showActionBar("Cannot undo — object was placed in another dimension", 60)
+            return false
+        }
+        guard templateUndoSnapshotFullyLoaded(undo, in: world) else {
+            host?.showActionBar("Move closer to the object to undo it", 60)
             return false
         }
         if templatePlacement != nil {

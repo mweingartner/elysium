@@ -35,6 +35,8 @@ open class LivingEntity: Entity {
     public var offHand: ItemStack?
     public var hurtTime = 0
     public var deathTime = 0
+    /// one-shot flag consumed by the sculk catalyst bloom check after this tick's death
+    public var catalystBloomPending = false
     public var attackCooldown = 0.0
     /// movement attributes
     public var speed = 0.1
@@ -169,7 +171,7 @@ open class LivingEntity: Entity {
 
     @discardableResult
     open override func hurt(_ amount: Double, _ source: String, _ attacker: Entity? = nil) -> Bool {
-        if dead || amount <= 0 { return false }
+        if dead || deathTime > 0 || amount <= 0 { return false }
         if invulnTicks > 0 { return false }
         if source == "fire" && hasEffect("fire_resistance") { return false }
         if source == "lava" && hasEffect("fire_resistance") { return false }
@@ -235,8 +237,10 @@ open class LivingEntity: Entity {
     }
 
     open func die(_ source: String, _ attacker: Entity? = nil) {
+        if deathTime > 0 { return }
         health = 0
         deathTime = 1
+        catalystBloomPending = true
         world.hooks.playSound(deathSound(), x, y, z, 1, 1)
         if world.rule("doMobLoot") {
             let looting = (attacker as? LivingEntity)?.mainHand.map { enchLevel($0, "looting") } ?? 0

@@ -786,6 +786,7 @@ public final class Player: LivingEntity {
         super.onLand(fallDistance)
     }
     public override func die(_ source: String, _ attacker: Entity? = nil) {
+        if deathTime > 0 { return }
         // totem of undying
         for hand in 0..<2 {
             let s = hand == 0 ? mainHand : offHand

@@ -37,6 +37,7 @@ public final class Blaze: Monster {
     }
     public override func tick() {
         super.tick()
+        if dead || deathTime > 0 { return }
         if vy < 0 { vy *= 0.6 }
         if let t = target, t.y > y + 1, rng.nextFloat() < 0.1 { vy = 0.2 }
         if age % 8 == 0 { world.hooks.addParticles("smoke", x, y + 0.8, z, 1, 0.3, 0) }
@@ -286,7 +287,6 @@ open class Hoglin: Monster {
         attackDamage = 6
         xpReward = 5
         addMonsterGoals(1.2)
-        goals.add(AvoidEntityGoal(self, 1, { _ in false }, 8, 1.3))
     }
     open override func tick() {
         super.tick()

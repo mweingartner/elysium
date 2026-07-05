@@ -28,6 +28,11 @@ public let LAN_MULTIPLAYER_MAX_CELLS_DATA_BYTES = LAN_MULTIPLAYER_MAX_RLE_RUNS *
 public let LAN_MULTIPLAYER_MAX_GRANT_ITEMS = 64
 public let LAN_MULTIPLAYER_MAX_DAMAGE_AMOUNT = 2048.0
 public let LAN_MULTIPLAYER_MAX_CONTAINER_EDIT_BLOCK_ENTITIES = 2
+/// Absolute ceiling on wrong-dimension dirty chunk sections held for requeue while the host
+/// is in a different dimension. Past this, the oldest entries are dropped rather than requeued
+/// indefinitely — safe because a dropped section resyncs via the normal section-snapshot path
+/// the next time the host visits that dimension.
+public let LAN_MULTIPLAYER_MAX_REQUEUED_DIRTY_CHUNK_SECTIONS = 4096
 
 private let LANFrameMagic: [UInt8] = [0x50, 0x42, 0x4c, 0x4e] // PBLN
 

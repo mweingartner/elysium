@@ -716,11 +716,10 @@ public final class Tadpole: Animal {
 
 public final class Goat: Animal {
     public override var type: String { "goat" }
-    public var screaming = false
     public var ramCooldown = 200
     public override init(world: World) {
         super.init(world: world)
-        screaming = gameRng.nextFloat() < 0.02   // baseline field-init order
+        _ = gameRng.nextFloat()   // baseline field-init order (lockstep)
         width = 0.9; height = 1.3
         maxHealth = 10; health = 10
         speed = 0.1
@@ -804,7 +803,6 @@ public final class Turtle: Animal {
 
 public final class Dolphin: Animal {
     public override var type: String { "dolphin" }
-    public var treasureHunting = false
     public override init(world: World) {
         super.init(world: world)
         width = 0.9; height = 0.6
@@ -821,10 +819,9 @@ public final class Dolphin: Animal {
         let name = stack.map { itemDef($0.id).name }
         if name == "cod" || name == "salmon" {
             (player as? LivingEntity)?.consumeHeld(1)
-            // grant dolphin's grace & lead toward treasure
+            // grant dolphin's grace
             (player as? LivingEntity)?.addEffect("dolphins_grace", 2400, 0)
             world.hooks.playSound("entity.dolphin.eat", x, y, z, 1, 1)
-            treasureHunting = true
             return true
         }
         return false

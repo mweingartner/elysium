@@ -311,8 +311,10 @@ final class TemplateTests: XCTestCase {
     }
 
     func testCloneAcceptsExactMaxSpanFootprint() throws {
-        let world = makeLoadedWorld(minX: 0, maxX: OBJECT_TEMPLATE_MAX_SPAN - 1,
-                                    minZ: 0, maxZ: OBJECT_TEMPLATE_MAX_SPAN - 1)
+        // load one extra chunk ring around the footprint so the flood fill's boundary probe
+        // lands on loaded (non-cloneable) terrain rather than an unloaded chunk (T6 guard).
+        let world = makeLoadedWorld(minX: -CHUNK_W, maxX: OBJECT_TEMPLATE_MAX_SPAN - 1 + CHUNK_W,
+                                    minZ: -CHUNK_W, maxZ: OBJECT_TEMPLATE_MAX_SPAN - 1 + CHUNK_W)
         fillTemplateTestBlocks(in: world, sizeX: OBJECT_TEMPLATE_MAX_SPAN, sizeY: 1,
                                sizeZ: OBJECT_TEMPLATE_MAX_SPAN)
 
@@ -326,8 +328,10 @@ final class TemplateTests: XCTestCase {
     }
 
     func testCloneAcceptsExact512KBlockLimit() throws {
-        let world = makeLoadedWorld(minX: 0, maxX: OBJECT_TEMPLATE_MAX_SPAN - 1,
-                                    minZ: 0, maxZ: OBJECT_TEMPLATE_MAX_SPAN - 1)
+        // load one extra chunk ring around the footprint so the flood fill's boundary probe
+        // lands on loaded (non-cloneable) terrain rather than an unloaded chunk (T6 guard).
+        let world = makeLoadedWorld(minX: -CHUNK_W, maxX: OBJECT_TEMPLATE_MAX_SPAN - 1 + CHUNK_W,
+                                    minZ: -CHUNK_W, maxZ: OBJECT_TEMPLATE_MAX_SPAN - 1 + CHUNK_W)
         fillTemplateTestBlocks(in: world,
                                sizeX: OBJECT_TEMPLATE_MAX_SPAN, sizeY: 57,
                                sizeZ: OBJECT_TEMPLATE_MAX_SPAN,
@@ -343,8 +347,10 @@ final class TemplateTests: XCTestCase {
     }
 
     func testCloneRejectsFootprintWiderThanMaxSpan() throws {
-        let world = makeLoadedWorld(minX: 0, maxX: OBJECT_TEMPLATE_MAX_SPAN,
-                                    minZ: 0, maxZ: 0)
+        // load one extra chunk ring around the footprint so the flood fill's boundary probe
+        // lands on loaded (non-cloneable) terrain rather than an unloaded chunk (T6 guard).
+        let world = makeLoadedWorld(minX: -CHUNK_W, maxX: OBJECT_TEMPLATE_MAX_SPAN + CHUNK_W,
+                                    minZ: -CHUNK_W, maxZ: CHUNK_W)
         fillTemplateTestBlocks(in: world, sizeX: OBJECT_TEMPLATE_MAX_SPAN + 1,
                                sizeY: 1, sizeZ: 1)
 
@@ -863,5 +869,122 @@ final class TemplateTests: XCTestCase {
             options: TemplateCloneOptions(maxBlocks: 1, maxSpan: OBJECT_TEMPLATE_MAX_SPAN))) { error in
                 XCTAssertEqual(error as? TemplateError, .objectTooLarge(2))
             }
+    }
+
+    func testUndoSnapshotCarriesDimension() throws {
+        let world = makeWorld()
+        let template = ObjectTemplate(
+            name: "Dim Tag",
+            anchorX: 0, anchorY: 0, anchorZ: 0,
+            sizeX: 1, sizeY: 1, sizeZ: 1,
+            blocks: [TemplateBlock(dx: 0, dy: 0, dz: 0, cell: UInt16(cell(B.stone)))])
+
+        let undo = try objectTemplatePlacementUndoSnapshot(for: template, in: world,
+                                                            targetX: 1, targetY: 64, targetZ: 1)
+
+        XCTAssertEqual(undo.dimension, Dim.overworld.rawValue)
+    }
+
+    func testUndoRestoreSkipsUnloadedCellsAndReportsTrueCount() throws {
+        // two chunks loaded (cx 0 and cx 1) so the two template cells land in different chunks
+        let world = makeLoadedWorld(minX: 0, maxX: CHUNK_W, minZ: 0, maxZ: CHUNK_W)
+        let template = ObjectTemplate(
+            name: "Two Chunk",
+            anchorX: 0, anchorY: 0, anchorZ: 0,
+            sizeX: CHUNK_W + 1, sizeY: 1, sizeZ: 1,
+            blocks: [
+                TemplateBlock(dx: 0, dy: 0, dz: 0, cell: UInt16(cell(B.oak_planks))),
+                TemplateBlock(dx: CHUNK_W, dy: 0, dz: 0, cell: UInt16(cell(B.oak_planks))),
+            ])
+        let undo = try objectTemplatePlacementUndoSnapshot(for: template, in: world,
+                                                            targetX: 1, targetY: 64, targetZ: 1)
+        _ = try placeObjectTemplate(template, in: world, targetX: 1, targetY: 64, targetZ: 1)
+
+        // simulate the far cell's chunk becoming unloaded before undo is applied
+        let farCell = try XCTUnwrap(undo.cells.first { $0.x == 1 + CHUNK_W })
+        XCTAssertTrue(world.isLoadedAt(farCell.x, farCell.z))
+        world.removeChunk(1, 0)
+
+        XCTAssertFalse(templateUndoSnapshotFullyLoaded(undo, in: world))
+        let restored = restoreObjectTemplatePlacementUndo(undo, in: world)
+        XCTAssertEqual(restored, 1, "only the loaded cell should be restored")
+    }
+
+    func testCloneThrowsOnUnloadedNeighborInsteadOfTruncating() throws {
+        registerCoreIfNeeded()
+        let world = World(dim: .overworld, seed: 1357)
+        let info = dimInfo(.overworld)
+        // only chunk (0,0) is loaded; the object touches its edge so the flood fill
+        // must probe an unloaded neighbor chunk rather than silently stopping there.
+        let chunk = Chunk(cx: 0, cz: 0, minY: info.minY, height: info.height)
+        chunk.status = .lit
+        world.setChunk(chunk)
+        world.light.initChunkLight(chunk)
+        world.setBlock(CHUNK_W - 1, 64, 1, Int(cell(B.oak_planks)))
+
+        XCTAssertThrowsError(try cloneObjectTemplate(named: "edge", from: world,
+                                                     targetX: CHUNK_W - 1, targetY: 64, targetZ: 1)) { error in
+            guard case .destinationUnavailable = error as? TemplateError else {
+                XCTFail("expected destinationUnavailable, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testCloneOver32kBlockEntitiesReportsFriendlyError() {
+        let description = TemplateError.tooManyBlockEntities(40_000).description
+        XCTAssertFalse(description.lowercased().contains("corrupt"))
+        XCTAssertTrue(description.contains("40000") || description.contains("40,000"))
+    }
+
+    func testRotationFastPathMatchesValidatedPath() throws {
+        registerCoreIfNeeded()
+        let chest = makeContainerBE(1, 0, 2, 27)
+        chest.items?[0] = stack("diamond", 2)
+        let template = ObjectTemplate(
+            name: "Fast Path Check",
+            anchorX: 1, anchorY: 0, anchorZ: 0,
+            sizeX: 2, sizeY: 1, sizeZ: 3,
+            blocks: [
+                TemplateBlock(dx: 0, dy: 0, dz: 0, cell: UInt16(cell(B.stone))),
+                TemplateBlock(dx: 1, dy: 0, dz: 0, cell: UInt16(cell(B.oak_planks))),
+                TemplateBlock(dx: 1, dy: 0, dz: 2, cell: UInt16(cell(B.chest))),
+            ],
+            blockEntities: [chest])
+
+        for steps in 1...3 {
+            var session = try TemplatePlacementSession(template: template)
+            try session.rotate(by: steps)
+            let viaSlowPath = try rotatedObjectTemplate(template, rotationSteps: steps)
+
+            XCTAssertEqual(session.rotatedTemplate.sizeX, viaSlowPath.sizeX)
+            XCTAssertEqual(session.rotatedTemplate.sizeY, viaSlowPath.sizeY)
+            XCTAssertEqual(session.rotatedTemplate.sizeZ, viaSlowPath.sizeZ)
+            XCTAssertEqual(session.rotatedTemplate.anchorX, viaSlowPath.anchorX)
+            XCTAssertEqual(session.rotatedTemplate.anchorY, viaSlowPath.anchorY)
+            XCTAssertEqual(session.rotatedTemplate.anchorZ, viaSlowPath.anchorZ)
+            XCTAssertEqual(session.rotatedTemplate.blocks.map { [$0.dx, $0.dy, $0.dz, Int($0.cell)] },
+                           viaSlowPath.blocks.map { [$0.dx, $0.dy, $0.dz, Int($0.cell)] })
+            XCTAssertEqual(session.rotatedTemplate.blockEntities.map { [$0.x, $0.y, $0.z] },
+                           viaSlowPath.blockEntities.map { [$0.x, $0.y, $0.z] })
+            XCTAssertEqual(session.rotatedTemplate.blockEntities.first?.items?[0]?.count,
+                           viaSlowPath.blockEntities.first?.items?[0]?.count)
+        }
+    }
+
+    func testAtCapEncodeDecodePlaceRoundTrip() throws {
+        let template = makeLargeTemplate(name: "At Cap Round Trip", blockCount: OBJECT_TEMPLATE_MAX_BLOCKS)
+
+        let encoded = try encodeObjectTemplate(template)
+        let decoded = try decodeObjectTemplate(encoded)
+
+        XCTAssertEqual(decoded.name, template.name)
+        XCTAssertEqual(decoded.blocks.count, template.blocks.count)
+        XCTAssertEqual(decoded.sizeX, template.sizeX)
+        XCTAssertEqual(decoded.sizeY, template.sizeY)
+        XCTAssertEqual(decoded.sizeZ, template.sizeZ)
+        XCTAssertEqual(decoded.anchorX, template.anchorX)
+        XCTAssertEqual(decoded.anchorY, template.anchorY)
+        XCTAssertEqual(decoded.anchorZ, template.anchorZ)
     }
 }

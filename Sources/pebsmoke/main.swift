@@ -1236,7 +1236,6 @@ if let g = loadJSON("entity-goldens.json") {
         if e is Frog { e.data.variant = i % 3 }
         if e is Axolotl { e.data.variant = i % 4 }
         if e is Panda { e.data.gene = "normal" }
-        if let goat = e as? Goat { goat.screaming = false }
         if let z = e as? Zombie {
             z.baby = false; z.speed = 0.095
             if let d = z as? Drowned { d.hasTrident = false }

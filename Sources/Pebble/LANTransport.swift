@@ -677,8 +677,10 @@ final class LANMultiplayerManager {
         }
         for playerID in knownHostPeerIDs {
             if let drop = hostReplicationSession.consumeDeathDrops(for: playerID) {
-                spawnPlayerDeathDrops(inventory: drop.inventory, at: drop.x, drop.y, drop.z, in: world)
-                _ = hostReplicationSession.enqueueGrant(items: [], xp: 0, clearAll: true, to: playerID)
+                if !world.rule("keepInventory") {
+                    spawnPlayerDeathDrops(inventory: drop.inventory, at: drop.x, drop.y, drop.z, in: world)
+                    _ = hostReplicationSession.enqueueGrant(items: [], xp: 0, clearAll: true, to: playerID)
+                }
             }
             let grants = hostReplicationSession.drainGrants(for: playerID)
             guard !grants.isEmpty else { continue }
@@ -1096,14 +1098,17 @@ final class LANMultiplayerManager {
                 guard let self else { return }
                 var currentDimension: Int?
                 var tick = 0
+                var keepInventory = false
                 if let game = self.activeGame, game.hasWorld() {
                     currentDimension = game.world.dim.rawValue
                     tick = game.world.time
+                    keepInventory = game.world.rule("keepInventory")
                 }
                 let sanitized = self.hostReplicationSession.updatePlayerState(
                     state,
                     currentDimension: currentDimension,
-                    tick: tick
+                    tick: tick,
+                    keepInventory: keepInventory
                 )
                 if let game = self.activeGame, game.hasWorld() {
                     _ = applyLANRemotePlayers(

@@ -5,6 +5,19 @@ in-app version string comes from `PEBBLE_VERSION` (PebbleCore/Game/Saves.swift).
 
 ## Unreleased
 
+- Fixed mobs dropping multiple loot/XP sets and slimes/creepers/zombies
+  misbehaving when damaged during the death animation. A dying entity can no
+  longer be re-hurt or re-killed, which also stops the lava/fire re-kill loop
+  and the XP-credit decay-to-zero bug.
+- Fixed sculk catalysts not blooming on normal kills.
+- Template undo now refuses cross-dimension/cross-world and unloaded-region
+  restores instead of silently corrupting the wrong world or consuming the
+  snapshot with no effect.
+- LAN guest deaths honor `keepInventory` and no longer lose inventory to a
+  publish race between the host's death-drop capture and the client's next
+  inventory snapshot.
+- Template clone reports a clear error for oversized/unloaded captures instead
+  of a generic "corrupt" message or a silently truncated object.
 - Added up/down quantity arrows beside the personal and crafting-table output
   slots. Survival crafting clamps the selected batch size to available
   resources, including nearby crafting-table containers, while creative clamps

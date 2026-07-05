@@ -2425,6 +2425,254 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(orbs.reduce(0) { $0 + $1.amount }, 28)
     }
 
+    func testGuestDeathHonorsKeepInventoryOnHost() {
+        let keepInvSession = LANMultiplayerHostSession()
+        keepInvSession.acceptPeer(playerID: "peer-a", displayName: "Alex")
+        keepInvSession.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 1),
+            ]),
+            from: "peer-a"
+        )
+        keepInvSession.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1, y: 64, z: 1, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival
+        ), keepInventory: true)
+
+        keepInvSession.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1, y: 64, z: 1, yaw: 0, pitch: 0,
+            health: 0, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival, dead: true
+        ), keepInventory: true)
+
+        XCTAssertNotNil(keepInvSession.consumeDeathDrops(for: "peer-a"),
+                         "the death epoch still advances so the transport's consume call stays balanced")
+        let preservedInventory = keepInvSession.peerInventorySnapshotsByPlayerID()["peer-a"]
+        XCTAssertEqual(preservedInventory?.slots.first?.itemID, iid("diamond"),
+                        "keepInventory must not zero the host-side inventory mirror")
+
+        // control: with the rule off, the mirror is zeroed on the alive->dead edge as before
+        let normalSession = LANMultiplayerHostSession()
+        normalSession.acceptPeer(playerID: "peer-b", displayName: "Bo")
+        normalSession.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-b", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 1),
+            ]),
+            from: "peer-b"
+        )
+        normalSession.updatePlayerState(LANPlayerState(
+            playerID: "peer-b", displayName: "Bo", x: 1, y: 64, z: 1, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival
+        ), keepInventory: false)
+        normalSession.updatePlayerState(LANPlayerState(
+            playerID: "peer-b", displayName: "Bo", x: 1, y: 64, z: 1, yaw: 0, pitch: 0,
+            health: 0, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival, dead: true
+        ), keepInventory: false)
+
+        XCTAssertNotNil(normalSession.consumeDeathDrops(for: "peer-b"))
+        let zeroedInventory = normalSession.peerInventorySnapshotsByPlayerID()["peer-b"]
+        XCTAssertEqual(zeroedInventory?.slots.isEmpty, true,
+                       "without keepInventory the mirror is still zeroed on death")
+    }
+
+    /// Regression for the stale-rule defect: the alive->dead mirror decision must observe the
+    /// live keepInventory value passed at the death, not a session-cached flag that a
+    /// per-tick refresh (or a session-start default) could leave stale relative to the
+    /// transport's live ground-drop/clearAll decision.
+    func testGuestDeathMirrorUsesLiveKeepInventoryValueNotStaleFlag() {
+        // keepInventory just toggled true and the death arrives before any refresh: the live
+        // value at the death is what must decide the mirror.
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex")
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 3),
+            ]),
+            from: "peer-a"
+        )
+        // alive edge seen while the rule was still off — mirrors the pre-toggle window
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1, y: 64, z: 1, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival
+        ), keepInventory: false)
+        // death edge arrives after the host toggled keepInventory=true, before any flag refresh
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1, y: 64, z: 1, yaw: 0, pitch: 0,
+            health: 0, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival, dead: true
+        ), keepInventory: true)
+
+        let preserved = session.peerInventorySnapshotsByPlayerID()["peer-a"]
+        XCTAssertEqual(preserved?.slots.first?.itemID, iid("diamond"),
+                       "the live keepInventory=true at the death must preserve the mirror")
+        XCTAssertEqual(preserved?.slots.first?.count, 3)
+
+        // inverse: rule just toggled off; the death's live false must zero the mirror even if a
+        // prior alive edge observed true.
+        let session2 = LANMultiplayerHostSession()
+        session2.acceptPeer(playerID: "peer-b", displayName: "Bo")
+        session2.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-b", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 3),
+            ]),
+            from: "peer-b"
+        )
+        session2.updatePlayerState(LANPlayerState(
+            playerID: "peer-b", displayName: "Bo", x: 1, y: 64, z: 1, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival
+        ), keepInventory: true)
+        session2.updatePlayerState(LANPlayerState(
+            playerID: "peer-b", displayName: "Bo", x: 1, y: 64, z: 1, yaw: 0, pitch: 0,
+            health: 0, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival, dead: true
+        ), keepInventory: false)
+
+        let zeroed = session2.peerInventorySnapshotsByPlayerID()["peer-b"]
+        XCTAssertEqual(zeroed?.slots.isEmpty, true,
+                       "the live keepInventory=false at the death must zero the mirror")
+    }
+
+    func testEmptyInventoryPublishAfterDeathDoesNotDestroyDropPayload() {
+        let world = makeLoadedWorld()
+        let player = Player(world: world)
+        player.setPos(0.5, 64, 0.5)
+        player.inventory[0] = stack("diamond", 2)
+        world.addEntity(player)
+
+        // the death snapshot captures the last-alive inventory
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex")
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 2),
+            ]),
+            from: "peer-a"
+        )
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1, y: 64, z: 1, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival
+        ))
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1, y: 64, z: 1, yaw: 0, pitch: 0,
+            health: 0, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival, dead: true
+        ))
+
+        // client-side, publishLANInventoryIfChanged is suppressed while dead/deathTime>0 (GameCore),
+        // so an empty post-death snapshot never reaches recordInventorySnapshot here. Simulate the
+        // fixed ordering: the pending drop must still hold the pre-death items regardless.
+        let drop = session.consumeDeathDrops(for: "peer-a")
+        XCTAssertEqual(drop?.inventory.slots.first?.itemID, iid("diamond"))
+        XCTAssertEqual(drop?.inventory.slots.first?.count, 2)
+    }
+
+    func testUndoPlacementRejectedInWrongDimension() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 1.5, y: 64, z: 1.5)
+        let dirt = UInt16(Int(B.dirt) << 4)
+        _ = world.setBlock(1, 63, 1, Int(dirt))
+        let template = ObjectTemplate(
+            name: "Dim Guard",
+            anchorX: 0, anchorY: 0, anchorZ: 0,
+            sizeX: 1, sizeY: 1, sizeZ: 1,
+            blocks: [TemplateBlock(dx: 0, dy: 0, dz: 0, cell: dirt)])
+        var saved = ["Dim Guard": template]
+
+        let placed = session.applyTemplateIntent(
+            LANTemplateIntent(action: .placeTemplate, templateName: "Dim Guard", x: 1, y: 64, z: 1, rotation: 0),
+            from: "peer-a",
+            world: world,
+            loadTemplate: { saved[$0] },
+            saveTemplate: { saved[$0.name] = $0; return true }
+        )
+        XCTAssertEqual(placed, .placed(name: "Dim Guard", blocks: 1, blockEntities: 0, cleared: 0, filled: 0))
+
+        // host moves to a different dimension before the guest asks to undo
+        let netherWorld = World(dim: .nether, seed: 1)
+        let netherChunk = Chunk(cx: 0, cz: 0, minY: netherWorld.info.minY, height: netherWorld.info.height)
+        netherChunk.status = .generated
+        netherWorld.setChunk(netherChunk)
+
+        let undone = session.applyTemplateIntent(
+            LANTemplateIntent(action: .undoPlacement, templateName: "Dim Guard", x: 1, y: 64, z: 1, rotation: 0),
+            from: "peer-a",
+            world: netherWorld,
+            loadTemplate: { saved[$0] },
+            saveTemplate: { saved[$0.name] = $0; return true }
+        )
+
+        XCTAssertEqual(undone, .rejected("template dimension unavailable"))
+        XCTAssertEqual(world.getBlock(1, 64, 1), Int(dirt), "the overworld placement must remain untouched")
+
+        // retrying against the correct dimension still succeeds (the snapshot was preserved)
+        let retried = session.applyTemplateIntent(
+            LANTemplateIntent(action: .undoPlacement, templateName: "Dim Guard", x: 1, y: 64, z: 1, rotation: 0),
+            from: "peer-a",
+            world: world,
+            loadTemplate: { saved[$0] },
+            saveTemplate: { saved[$0.name] = $0; return true }
+        )
+        XCTAssertEqual(retried, .undone(name: "Dim Guard", restored: 1))
+    }
+
+    func testDisconnectClearsPeerTemplateUndo() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 1.5, y: 64, z: 1.5)
+        let dirt = UInt16(Int(B.dirt) << 4)
+        _ = world.setBlock(1, 63, 1, Int(dirt))
+        let template = ObjectTemplate(
+            name: "Disc Clear",
+            anchorX: 0, anchorY: 0, anchorZ: 0,
+            sizeX: 1, sizeY: 1, sizeZ: 1,
+            blocks: [TemplateBlock(dx: 0, dy: 0, dz: 0, cell: dirt)])
+        var saved = ["Disc Clear": template]
+
+        let placed = session.applyTemplateIntent(
+            LANTemplateIntent(action: .placeTemplate, templateName: "Disc Clear", x: 1, y: 64, z: 1, rotation: 0),
+            from: "peer-a",
+            world: world,
+            loadTemplate: { saved[$0] },
+            saveTemplate: { saved[$0.name] = $0; return true }
+        )
+        XCTAssertEqual(placed, .placed(name: "Disc Clear", blocks: 1, blockEntities: 0, cleared: 0, filled: 0))
+
+        session.disconnectPeer(playerID: "peer-a", tick: 1)
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex", tick: 2)
+        session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1.5, y: 64, z: 1.5, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival
+        ))
+
+        let undone = session.applyTemplateIntent(
+            LANTemplateIntent(action: .undoPlacement, templateName: "Disc Clear", x: 1, y: 64, z: 1, rotation: 0),
+            from: "peer-a",
+            world: world,
+            loadTemplate: { saved[$0] },
+            saveTemplate: { saved[$0.name] = $0; return true }
+        )
+
+        XCTAssertEqual(undone, .rejected("no template placement to undo"),
+                       "disconnect must clear the peer's retained undo snapshot")
+    }
+
+    func testDirtyChunkSectionRequeuedOnDimensionMismatch() {
+        let overworld = makeLoadedWorld()
+        let session = LANMultiplayerHostSession()
+        session.recordDirtyChunkSection(LANChunkSectionPosition(dimension: Dim.overworld.rawValue, cx: 0, cz: 0, sectionY: 4))
+
+        let netherWorld = World(dim: .nether, seed: 7)
+        let netherChunk = Chunk(cx: 0, cz: 0, minY: netherWorld.info.minY, height: netherWorld.info.height)
+        netherChunk.status = .generated
+        netherWorld.setChunk(netherChunk)
+
+        // draining against the wrong dimension yields nothing but must not drop the position
+        let drainedInNether = session.drainDirtyChunkSectionSnapshots(in: netherWorld)
+        XCTAssertTrue(drainedInNether.isEmpty)
+
+        // draining again against the correct dimension still finds it
+        let drainedInOverworld = session.drainDirtyChunkSectionSnapshots(in: overworld)
+        XCTAssertEqual(drainedInOverworld.count, 1)
+        XCTAssertEqual(drainedInOverworld.first?.dimension, Dim.overworld.rawValue)
+        XCTAssertEqual(drainedInOverworld.first?.cx, 0)
+        XCTAssertEqual(drainedInOverworld.first?.cz, 0)
+    }
+
     // MARK: - W2 amendment A4: requeueBlockChanges
 
     func testRequeueBlockChangesRestoresDrainedChangesForRedrain() {

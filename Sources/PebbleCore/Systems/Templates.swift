@@ -92,6 +92,7 @@ public struct TemplatePlacementUndoCell {
 
 public struct TemplatePlacementUndoSnapshot {
     public let templateName: String
+    public let dimension: Int
     public let cells: [TemplatePlacementUndoCell]
 }
 
@@ -140,14 +141,14 @@ public struct TemplatePlacementSession {
         self.baseTemplate = try validateTemplate(template)
         self.name = self.baseTemplate.name
         self.rotationSteps = normalizedTemplateRotation(rotationSteps)
-        self.rotatedTemplate = try rotatedObjectTemplate(self.baseTemplate, rotationSteps: self.rotationSteps)
-        self.previewBoxes = try objectTemplatePreviewBoxes(for: self.rotatedTemplate)
+        self.rotatedTemplate = rotatedValidatedObjectTemplate(self.baseTemplate, rotationSteps: self.rotationSteps)
+        self.previewBoxes = objectTemplatePreviewBoxes(forValidated: self.rotatedTemplate)
     }
 
     public mutating func rotate(by delta: Int) throws {
         rotationSteps = normalizedTemplateRotation(rotationSteps + delta)
-        rotatedTemplate = try rotatedObjectTemplate(baseTemplate, rotationSteps: rotationSteps)
-        previewBoxes = try objectTemplatePreviewBoxes(for: rotatedTemplate)
+        rotatedTemplate = rotatedValidatedObjectTemplate(baseTemplate, rotationSteps: rotationSteps)
+        previewBoxes = objectTemplatePreviewBoxes(forValidated: rotatedTemplate)
     }
 
     public var rotationDegrees: Int { rotationSteps * 90 }
@@ -193,6 +194,8 @@ public struct TemplateCloneOptions {
 }
 
 public struct TemplatePlacementOptions {
+    /// Bypasses the destination-replaceable check. Public API with no in-repo caller;
+    /// kept as an extension point for callers outside this package.
     public var replaceExisting: Bool
     public var prepareTerrain: Bool
 
@@ -214,6 +217,7 @@ public enum TemplateError: Error, Equatable, CustomStringConvertible {
     case destinationUnavailable(Int, Int, Int)
     case destinationBlocked(Int, Int, Int)
     case foundationTooDeep(Int, Int, Int)
+    case tooManyBlockEntities(Int)
 
     public var description: String {
         switch self {
@@ -239,6 +243,8 @@ public enum TemplateError: Error, Equatable, CustomStringConvertible {
             return "Destination is blocked at \(x) \(y) \(z)."
         case .foundationTooDeep(let x, let y, let z):
             return "Foundation gap is too deep at \(x) \(y) \(z); move the object closer to terrain."
+        case .tooManyBlockEntities(let count):
+            return "Object has too many containers/signs (\(count); limit \(OBJECT_TEMPLATE_MAX_BLOCK_ENTITIES))."
         }
     }
 }
@@ -352,7 +358,7 @@ private func isTemplateTerrainOrFluid(_ id: Int) -> Bool {
     let def = blockDefs[id]
     if def.shape == .liquid || def.replaceable || def.hardness < 0 { return true }
     let name = def.name
-    if name.hasSuffix("_ore") || name.hasPrefix("deepslate_") && name.hasSuffix("_ore") { return true }
+    if name.hasSuffix("_ore") { return true }
     if name.hasSuffix("_leaves") { return true }
     let terrain: Set<String> = [
         "air", "cave_air", "void_air", "water", "lava", "fire", "soul_fire",
@@ -477,8 +483,17 @@ private func rotatedTemplateCoordinate(x: Int, y: Int, z: Int,
 }
 
 public func rotatedObjectTemplate(_ rawTemplate: ObjectTemplate, rotationSteps: Int) throws -> ObjectTemplate {
-    let rotation = normalizedTemplateRotation(rotationSteps)
     let template = try validateTemplate(rawTemplate)
+    return rotatedValidatedObjectTemplate(template, rotationSteps: rotationSteps)
+}
+
+/// Fast path for a template that is already known to satisfy `validateTemplate`
+/// (e.g. `TemplatePlacementSession.baseTemplate`). Skips both the pre- and
+/// post-rotation revalidation passes since rotating a validated template is
+/// structurally valid by construction. Callers MUST NOT feed untrusted/raw
+/// templates here — use the throwing `rotatedObjectTemplate` for that.
+func rotatedValidatedObjectTemplate(_ template: ObjectTemplate, rotationSteps: Int) -> ObjectTemplate {
+    let rotation = normalizedTemplateRotation(rotationSteps)
     guard rotation != 0 else { return template }
     let size = rotatedTemplateSize(template, rotationSteps: rotation)
     let anchor = rotatedTemplateCoordinate(x: template.anchorX, y: template.anchorY, z: template.anchorZ,
@@ -499,13 +514,16 @@ public func rotatedObjectTemplate(_ rawTemplate: ObjectTemplate, rotationSteps: 
         copy.x = p.x; copy.y = p.y; copy.z = p.z
         blockEntities.append(copy)
     }
-    return try validateTemplate(ObjectTemplate(
+    var out = ObjectTemplate(
         version: template.version,
         name: template.name,
         anchorX: anchor.x, anchorY: anchor.y, anchorZ: anchor.z,
         sizeX: size.x, sizeY: size.y, sizeZ: size.z,
         blocks: blocks,
-        blockEntities: blockEntities))
+        blockEntities: blockEntities)
+    out.blocks.sort { templatePos($0) < templatePos($1) }
+    out.blockEntities.sort { templatePos($0) < templatePos($1) }
+    return out
 }
 
 public func templatePlacementPreviewDistance(for rawTemplate: ObjectTemplate) throws -> Double {
@@ -623,6 +641,14 @@ public func objectTemplatePreviewLineByteCount(boxCount: Int, includeBounds: Boo
 public func objectTemplatePreviewBoxes(for rawTemplate: ObjectTemplate,
                                        maxBoxes rawMaxBoxes: Int = OBJECT_TEMPLATE_PREVIEW_MAX_BOXES) throws -> [ObjectTemplatePreviewBox] {
     let template = try validateTemplate(rawTemplate)
+    return objectTemplatePreviewBoxes(forValidated: template, maxBoxes: rawMaxBoxes)
+}
+
+/// Fast path for a template that is already known to satisfy `validateTemplate`.
+/// Callers MUST NOT feed untrusted/raw templates here — use the throwing
+/// `objectTemplatePreviewBoxes(for:)` for that.
+func objectTemplatePreviewBoxes(forValidated template: ObjectTemplate,
+                                maxBoxes rawMaxBoxes: Int = OBJECT_TEMPLATE_PREVIEW_MAX_BOXES) -> [ObjectTemplatePreviewBox] {
     let maxBoxes = max(0, min(rawMaxBoxes, OBJECT_TEMPLATE_PREVIEW_MAX_BOXES))
     guard maxBoxes > 0 else { return [] }
 
@@ -750,12 +776,6 @@ public func encodeObjectTemplate(_ template: ObjectTemplate) throws -> Data {
 private struct TemplateBinaryReader {
     let data: Data
     var offset = 0
-
-    mutating func readByte() -> UInt8? {
-        guard offset < data.count else { return nil }
-        defer { offset += 1 }
-        return data[offset]
-    }
 
     mutating func readU16() -> Int? {
         guard offset + 2 <= data.count else { return nil }
@@ -1163,6 +1183,9 @@ public func cloneObjectTemplate(named rawName: String, from world: World,
             let np = TemplatePos(x: p.x + d.0, y: p.y + d.1, z: p.z + d.2)
             if seen.contains(np) { continue }
             seen.insert(np)
+            guard world.isLoadedAt(np.x, np.z) else {
+                throw TemplateError.destinationUnavailable(np.x, np.y, np.z)
+            }
             let cell = world.getBlock(np.x, np.y, np.z)
             guard isTemplateCloneableBlock(cell) else { continue }
             minX = min(minX, np.x); maxX = max(maxX, np.x)
@@ -1191,6 +1214,9 @@ public func cloneObjectTemplate(named rawName: String, from world: World,
            let copy = templateCloneBlockEntityCopy(be, minX: minX, minY: minY, minZ: minZ) {
             bes.append(copy)
         }
+    }
+    guard bes.count <= OBJECT_TEMPLATE_MAX_BLOCK_ENTITIES else {
+        throw TemplateError.tooManyBlockEntities(bes.count)
     }
     let template = ObjectTemplate(
         name: name,
@@ -1418,7 +1444,7 @@ public func objectTemplatePlacementUndoSnapshot(for rawTemplate: ObjectTemplate,
             : nil
         return TemplatePlacementUndoCell(x: pos.x, y: pos.y, z: pos.z, cell: cellValue, blockEntity: blockEntity)
     }
-    return TemplatePlacementUndoSnapshot(templateName: template.name, cells: cells)
+    return TemplatePlacementUndoSnapshot(templateName: template.name, dimension: world.dim.rawValue, cells: cells)
 }
 
 public final class ObjectTemplatePlacementJob {
@@ -1592,12 +1618,22 @@ public final class ObjectTemplatePlacementJob {
     }
 }
 
+/// Returns false if any cell in the snapshot falls in a currently unloaded chunk,
+/// so callers can refuse to consume the snapshot rather than silently no-op restoring it.
+public func templateUndoSnapshotFullyLoaded(_ snapshot: TemplatePlacementUndoSnapshot, in world: World) -> Bool {
+    for cell in snapshot.cells where !world.isLoadedAt(cell.x, cell.z) {
+        return false
+    }
+    return true
+}
+
 @discardableResult
 public func restoreObjectTemplatePlacementUndo(_ snapshot: TemplatePlacementUndoSnapshot, in world: World) -> Int {
     var restored = 0
     var touched: [TemplatePos] = []
     touched.reserveCapacity(snapshot.cells.count)
     for cell in snapshot.cells {
+        guard world.isLoadedAt(cell.x, cell.z) else { continue }
         _ = world.setBlock(cell.x, cell.y, cell.z, cell.cell, SET_NO_NEIGHBORS)
         if let blockEntity = cell.blockEntity,
            let copy = sanitizedTemplateBlockEntity(blockEntity) {

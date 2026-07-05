@@ -19,14 +19,14 @@ open class Monster: Mob {
         category = "monster"
         xpReward = 5
     }
-    public func addMonsterGoals(_ speed: Double = 1.05) {
+    public func addMonsterGoals(_ speed: Double = 1.05, targetFilter: ((LivingEntity) -> Bool)? = nil) {
         goals.add(FloatGoal(self, 0))
         goals.add(MeleeAttackGoal(self, 2, speed))
         goals.add(StrollGoal(self, 6, 0.8))
         goals.add(LookAtPlayerGoal(self, 7))
         goals.add(RandomLookGoal(self, 8))
         targetGoals.add(HurtByTargetGoal(self, 1))
-        targetGoals.add(NearestTargetGoal(self, 2, isPlayerTarget, followRange))
+        targetGoals.add(NearestTargetGoal(self, 2, targetFilter ?? isPlayerTarget, followRange))
     }
 }
 
@@ -50,6 +50,7 @@ open class Zombie: Monster {
     }
     open override func tick() {
         super.tick()
+        if dead || deathTime > 0 { return }
         // drowned conversion
         if type == "zombie" && underwater {
             if conversionTime < 0 { conversionTime = 600 }
@@ -192,6 +193,7 @@ public final class Creeper: Monster {
     public override func doMeleeAttack(_ target: LivingEntity) {} // creepers don't melee
     public override func tick() {
         super.tick()
+        if dead || deathTime > 0 { return }
         if swellTicks > 0 {
             data.swelling = Double(swellTicks) / 30
             if swellTicks == 1 { world.hooks.playSound("entity.creeper.primed", x, y, z, 1, 0.6) }
@@ -234,7 +236,7 @@ open class Spider: Monster {
         maxHealth = 16; health = 16
         speed = 0.13
         attackDamage = 2
-        addMonsterGoals(1.1)
+        addMonsterGoals(1.1, targetFilter: { [weak self] p in isPlayerTarget(p) && (self?.canTargetInLight() ?? true) })
     }
     open override func tick() {
         super.tick()
@@ -369,6 +371,7 @@ public final class Witch: Monster {
     }
     public override func tick() {
         super.tick()
+        if dead || deathTime > 0 { return }
         // drink potions defensively
         if drinkTime > 0 { drinkTime -= 1 }
         else {
@@ -837,6 +840,7 @@ public final class Evoker: Monster {
     }
     public override func tick() {
         super.tick()
+        if dead || deathTime > 0 { return }
         if let t = target, !t.dead {
             castCooldown -= 1
             if castCooldown <= 0 {

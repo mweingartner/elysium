@@ -293,11 +293,13 @@ public final class LANMultiplayerHostSession {
         guard var peer = peers[playerID] else { return }
         peer.lifecycle = .disconnected
         peer.disconnectedTick = max(0, tick)
+        peer.lastTemplateUndo = nil
         peers[playerID] = peer
     }
 
     @discardableResult
-    public func updatePlayerState(_ state: LANPlayerState, currentDimension: Int? = nil, tick: Int = 0) -> LANPlayerState? {
+    public func updatePlayerState(_ state: LANPlayerState, currentDimension: Int? = nil, tick: Int = 0,
+                                 keepInventory: Bool = false) -> LANPlayerState? {
         let playerID = String(state.playerID.prefix(128))
         guard var peer = peers[playerID] else { return nil }
         let priorDimension = peer.playerState?.dimension ?? currentDimension ?? Dim.overworld.rawValue
@@ -332,7 +334,13 @@ public final class LANMultiplayerHostSession {
                 y: sanitized.y,
                 z: sanitized.z
             )
-            peer.inventory = LANPlayerInventorySnapshot(playerID: peer.playerID, selectedHotbarSlot: 0, slots: [])
+            // Under keepInventory the guest keeps its inventory; don't clobber the mirror the
+            // guest still owns (K-keepInv suppresses the drop/clearAll on the transport side).
+            // `keepInventory` is read live at the death by the caller, so this mirror decision and
+            // the transport's ground-drop/clearAll decision always observe the same rule value.
+            if !keepInventory {
+                peer.inventory = LANPlayerInventorySnapshot(playerID: peer.playerID, selectedHotbarSlot: 0, slots: [])
+            }
         }
         peer.playerState = sanitized
         peer.lifecycle = sanitized.dead ? .dead : .connected
@@ -617,10 +625,16 @@ public final class LANMultiplayerHostSession {
             guard var peer = peers[playerID], let undo = peer.lastTemplateUndo else {
                 return .rejected("no template placement to undo")
             }
+            guard undo.dimension == world.dim.rawValue else {
+                return .rejected("template dimension unavailable")
+            }
+            guard templateUndoSnapshotFullyLoaded(undo, in: world) else {
+                return .rejected("template region not loaded")
+            }
             let restored = restoreObjectTemplatePlacementUndo(undo, in: world)
             recordDirtyChunkSections(from: undo, in: world)
             if undo.cells.count <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES {
-                for cell in undo.cells {
+                for cell in undo.cells where world.isLoadedAt(cell.x, cell.z) {
                     changeLog.record(LANBlockChange(dimension: world.dim.rawValue, x: cell.x, y: cell.y, z: cell.z, cell: cell.cell))
                 }
             }
@@ -953,15 +967,29 @@ public final class LANMultiplayerHostSession {
         let cap = max(0, min(maxCount, LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS))
         guard cap > 0, !dirtyChunkSectionPositions.isEmpty else { return [] }
         var out: [LANChunkSectionSnapshot] = []
+        // Wrong-dimension sections are requeued (not dropped) so they survive until the host
+        // returns to that dimension; current-dimension unloaded-chunk sections are legitimately
+        // gone and are dropped.
+        var requeue: [LANChunkSectionPosition] = []
         while !dirtyChunkSectionPositions.isEmpty && out.count < cap {
             let position = dirtyChunkSectionPositions.removeFirst()
             dirtyChunkSectionSet.remove(position)
-            guard position.dimension == world.dim.rawValue,
-                  let chunk = world.getChunk(position.cx, position.cz),
+            guard position.dimension == world.dim.rawValue else {
+                requeue.append(position)
+                continue
+            }
+            guard let chunk = world.getChunk(position.cx, position.cz),
                   let snapshot = makeLANChunkSectionSnapshot(from: chunk, dimension: world.dim.rawValue, sectionY: position.sectionY) else {
                 continue
             }
             out.append(snapshot)
+        }
+        // Bound the requeue so a guest cannot pin unbounded memory by churning dimensions;
+        // drop the oldest overflow (it resyncs via the normal section-snapshot path on next visit).
+        let capacity = max(0, LAN_MULTIPLAYER_MAX_REQUEUED_DIRTY_CHUNK_SECTIONS - dirtyChunkSectionPositions.count)
+        for position in requeue.suffix(capacity) where !dirtyChunkSectionSet.contains(position) {
+            dirtyChunkSectionSet.insert(position)
+            dirtyChunkSectionPositions.append(position)
         }
         return out
     }

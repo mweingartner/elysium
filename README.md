@@ -25,7 +25,7 @@ Pebble is an original fan re-creation inspired by Minecraft: Java Edition 1.20. 
 
 | | |
 |---|---|
-| Lines of Swift | ~55,000 source lines across 93 source files |
+| Lines of Swift | ~55,000 source lines across 95 source files |
 | External dependencies | **0** (Apple frameworks only) |
 | Blocks | 879 |
 | Items | 1,189 |
@@ -86,7 +86,7 @@ WASD to move, mouse to look, Space to jump, Shift to sneak, Ctrl (or double-tap 
 
 | Path | What |
 |---|---|
-| `~/Library/Application Support/Pebble/pebble.db` | All worlds, chunks, players, advancements, and object templates (single SQLite database) |
+| `~/Library/Application Support/Pebble/pebble.db` | All worlds, chunks, players, advancements, object templates, and per-guest LAN reconnect records (single SQLite database) |
 | `~/Library/Application Support/Pebble/settings.json` + `keybinds.json` | Settings and keybinds |
 
 To uninstall completely: delete `/Applications/Pebble.app`, `~/Library/Application Support/Pebble/`, and the `pebble` symlink on your PATH (`/opt/homebrew/bin/pebble` or `/usr/local/bin/pebble`).
