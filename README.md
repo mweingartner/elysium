@@ -15,7 +15,7 @@
 
 ---
 
-**Pebble** is the open-source alternative to Minecraft: Java Edition — a native macOS voxel survival game with the full overworld/nether/end progression: worldgen, mobs, redstone, crafting, enchanting, brewing, villages, raids, and boss fights — implemented in **~55,000 lines of Swift** with **zero external dependencies**. No game engine, no .xcodeproj. The renderer is hand-written Metal, the audio engine synthesizes every sound from oscillators at runtime, and the game looks the way it does thanks to [Faithful 32x](https://faithfulpack.net) as its built-in texture set.
+**Pebble** is the open-source alternative to Minecraft: Java Edition — a native macOS voxel survival game with the full overworld/nether/end progression: worldgen, mobs, redstone, crafting, enchanting, brewing, villages, raids, and boss fights — implemented in **~63,000 lines of Swift** with **zero external dependencies**. No game engine, no .xcodeproj. The renderer is hand-written Metal, the audio engine synthesizes every sound from oscillators at runtime, and the game looks the way it does thanks to [Faithful 32x](https://faithfulpack.net) as its built-in texture set.
 
 Pebble is an original fan re-creation inspired by Minecraft: Java Edition 1.20. It is **not affiliated with, endorsed by, or connected to Mojang Studios or Microsoft** in any way, and contains no Mojang code or assets. Full statement in [Disclaimer](#disclaimer) below.
 
@@ -25,7 +25,7 @@ Pebble is an original fan re-creation inspired by Minecraft: Java Edition 1.20. 
 
 | | |
 |---|---|
-| Lines of Swift | ~55,000 source lines across 95 source files |
+| Lines of Swift | ~63,000 source lines across 96 source files |
 | External dependencies | **0** (Apple frameworks only) |
 | Blocks | 879 |
 | Items | 1,194 |
@@ -57,6 +57,23 @@ Pebble is an original fan re-creation inspired by Minecraft: Java Edition 1.20. 
 - **Faithful 32x textures, built in** — the complete [Faithful 32x](https://faithfulpack.net) art (third-party, fully credited — see [Disclaimer](#disclaimer)) ships inside the app and loads through Pebble's own zip/`.mcmeta` reader: atlas textures, animations with interpolation, GUIs, fonts, entity skins, and sun/moon art. Self-restoring if the file goes missing.
 - **Ultra graphics** — a built-in enhanced pipeline: SSAO, shadow-marched volumetric god rays, Poisson soft shadows, and ACES tonemapping. One toggle in Options → Video.
 - **Generative music** — no audio files anywhere; ambient music, jukebox discs, and all ~hundreds of sound effects are synthesized from oscillator/noise recipes with envelopes, vibrato, positional stereo, underwater lowpass, and cave reverb.
+
+## Recent extension highlights
+
+Recent work has expanded the beta from a single-player survival recreation into a broader local sandbox with stronger editing, multiplayer, and automation surfaces:
+
+| Area | Enhancements |
+|---|---|
+| LAN multiplayer | Player-started "Open to LAN" hosting, title-screen browsing, Direct Connect, short join-code handshakes, LAN chat/status commands, host-authoritative player/world replication, visible-neighborhood chunk streaming, synchronized time/weather/difficulty, smoothed remote players, host-owned item/XP pickup, per-host-world guest resume records, and permission gates for build/container/crafting/template/command/AI/creative/dimension/death/respawn flows. |
+| Shared world state | Replication now covers block deltas, dirty chunk-section snapshots, item-bearing block entities, mirrored chest/furnace/brewing/crafting screens, double-chest transactions, host-validated crafting/container edits, openable door/trapdoor/fence-gate use intents, dropped items, XP orbs, mobs, plants, and remote player entities without allowing clients to author raw world state. |
+| Object templates | Command-C/Command-V object workflows now copy edge-connected constructions without terrain flood-fill, keep cloned container inventories empty, save compact binary `PBT2` template blobs with summary columns, preview and delete templates in a browser, place with rotatable 3D wireframes, auto-clear obstructions, fill foundation gaps, support one-shot undo, and handle up to 524,288 blocks inside the 96-block span cap. |
+| Large template safety | Local placement, LAN guest placement, LAN undo, and graceful quit paths are tick-sliced or drained so large object mutations do not leave half-written worlds; large mutations use chunk-section snapshots instead of overflowing per-block replication queues. |
+| World creation | Create New World now exposes Java-style presets: Default, Superflat, Large Biomes, Amplified, Single Biome with biome selection, and Option-click Debug Mode. Pebble also adds Moderate Hills - Resource Rich, a custom rolling-hill preset with doubled ore/resource attempts and rare large caverns. |
+| Local AI agent | `/ai` can give registered items, place registered block items, fill dirt-rimmed holes, set time, set weather, spawn registered mobs at the cursor, inspect/edit saved templates, generate bounded pirate-ship templates, and rework the loaded current biome into rolling resource-rich hills. Ollama output is still treated as untrusted data and reduced to whitelisted symbolic actions. |
+| Items and survival tools | Added the Flying Wand for survival flight with fall-damage tradeoffs, copper sword/pickaxe/axe/shovel/hoe recipes with copper-ingot repair, copper durability between stone and iron, iron-tier harvest capability for the copper pickaxe, and Faithful-style copper tool icons derived from matching iron pack art when copper art is absent. |
+| Crafting and inventory UX | Recipe popups gained type-to-select search and output-slot quantity arrows; crafting tables can draw from nearby containers and persist station grids; food use now follows the hotbar left-click survival flow; creative inventory toggles and survival inventory transitions are hardened. |
+| Map and rendering polish | The HUD minimap has three compact sizes, a draggable expanded map, bounded pan/zoom over loaded chunks, and screenshot hooks. Torch and lantern items render as material-built 3D fixtures instead of flat sprites, and non-block item icons prefer texture-pack art before deterministic procedural fallbacks. |
+| Verification and hardening | The golden suite now reports 457 checks, preserving frozen item/recipe prefixes while allowing appended content. The local pipeline covers architecture checks, source security scan, Faithful asset verification, warning-free release build, binary security checks, XCTest, `pebsmoke`, deployment to `/Applications/Pebble.app`, and installed-app verification. |
 
 ## Install
 
@@ -99,7 +116,7 @@ Sources/PebbleCore/   the engine — headless, no AppKit, fully testable
   World/              chunks, block registry (879), light engine, block entities
   Gen/                terrain, biomes, features, all structures
   Entity/             100 entity types, AI, pathfinding, player physics
-  Items/              item registry (1,189), recipes, enchants, potions, loot
+  Items/              item registry (1,194), recipes, enchants, potions, loot
   Systems/            interact, redstone, fluids, farming, combat, raids, portals
   Render/             section mesher, texture atlas, entity models
   Net/                LAN protocol messages, replication batches, bounded frame codec, validation
