@@ -60,6 +60,49 @@ final class AIAgentTests: XCTestCase {
         return (world, player)
     }
 
+    private func makeFlatBiomePatchWorld() -> (World, Player) {
+        registerCoreIfNeeded()
+        let world = World(dim: .overworld, seed: 779)
+        let info = dimInfo(.overworld)
+        for cz in -1...1 {
+            for cx in -1...1 {
+                let chunk = Chunk(cx: cx, cz: cz, minY: info.minY, height: info.height)
+                for z in 0..<16 {
+                    for x in 0..<16 {
+                        for y in info.minY..<0 {
+                            chunk.set(x, y, z, cell(B.deepslate))
+                        }
+                        for y in 0...59 {
+                            chunk.set(x, y, z, cell(B.stone))
+                        }
+                        for y in 60...62 {
+                            chunk.set(x, y, z, cell(B.dirt))
+                        }
+                        chunk.set(x, 63, z, cell(B.grass_block))
+                    }
+                }
+                for qy in 0..<(chunk.biomes.count / 16) {
+                    for qz in 0..<4 {
+                        for qx in 0..<4 {
+                            chunk.setBiome(qx, qy, qz, Biome.plains.rawValue)
+                        }
+                    }
+                }
+                chunk.buildHeightmap()
+                chunk.status = .lit
+                world.setChunk(chunk)
+                world.light.initChunkLight(chunk)
+            }
+        }
+
+        let player = Player(world: world)
+        player.setPos(0.5, 64, 0.5)
+        player.yaw = 0
+        player.pitch = 0
+        world.addEntity(player)
+        return (world, player)
+    }
+
     func testParseExtractsFirstJSONActionFromModelText() throws {
         let action = try parseAIAgentAction(from: "```json\n{\"action\":\"place_block\",\"item\":\"crafting station\",\"target\":\"cursor\"}\n```")
 
@@ -142,6 +185,61 @@ final class AIAgentTests: XCTestCase {
         XCTAssertEqual(action.block, "dirt")
         XCTAssertEqual(action.target, "front")
         XCTAssertNil(inferDirectAIAgentAction(from: "fill the hole in front of me with torch"))
+    }
+
+    func testDirectBiomeReworkRequestParsesRollingResourceAction() throws {
+        registerCoreIfNeeded()
+
+        let action = try XCTUnwrap(inferDirectAIAgentAction(
+            from: "change the current biome to rolling hills with rich resources"))
+
+        XCTAssertEqual(action.action, "rework_biome")
+        XCTAssertEqual(action.target, "current_biome")
+        XCTAssertEqual(action.profile, "rolling_hills_resource_rich")
+    }
+
+    func testBiomeReworkMakesCurrentLoadedBiomeRollingAndResourceRich() throws {
+        let (world, player) = makeFlatBiomePatchWorld()
+        let protectedChest = makeContainerBE(1, 64, 1, 27)
+        protectedChest.items?[0] = stack("diamond", 1)
+        world.setBlock(1, 64, 1, Int(cell(B.chest)))
+        world.setBlockEntity(protectedChest)
+        let action = try XCTUnwrap(inferDirectAIAgentAction(
+            from: "change the current biome to rolling hills with rich resources"))
+
+        let result = try executeAIAgentAction(action, world: world, player: player, cursor: nil)
+
+        XCTAssertTrue(result.changedWorld)
+        XCTAssertEqual(world.biomeAt(0, 64, 0), Biome.meadow.rawValue)
+        XCTAssertEqual(world.getBlockId(1, 64, 1), Int(B.chest))
+        XCTAssertNotNil(world.getBlockEntity(1, 64, 1))
+
+        var heights: [Int] = []
+        for z in stride(from: -20, through: 20, by: 4) {
+            for x in stride(from: -20, through: 20, by: 4) where world.isLoadedAt(x, z) {
+                heights.append(world.surfaceY(x, z))
+            }
+        }
+        let minHeight = try XCTUnwrap(heights.min())
+        let maxHeight = try XCTUnwrap(heights.max())
+        XCTAssertGreaterThan(maxHeight - minHeight, 6)
+
+        let ores = oreFamilyCounts(in: world)
+        for family in ["coal", "iron", "copper", "gold", "redstone", "lapis", "diamond", "emerald"] {
+            XCTAssertGreaterThan(ores[family, default: 0], 0, "\(family) should be present after rich-resource rework")
+        }
+
+        var deepAir = 0
+        for chunk in world.chunks.values {
+            for z in 0..<16 {
+                for x in 0..<16 {
+                    for y in -40...40 where chunk.get(x, y, z) == 0 {
+                        deepAir += 1
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(deepAir, 0, "reworking rolling resource hills must not carve underground caverns")
     }
 
     func testFillHoleInFrontLevelsDeepDirtAdjacentHoleWithoutCursorHit() throws {
@@ -424,6 +522,30 @@ final class AIAgentTests: XCTestCase {
         XCTAssertTrue(prompt.contains(#""set_time""#), prompt)
         XCTAssertTrue(prompt.contains(#""set_weather""#), prompt)
         XCTAssertTrue(prompt.contains(#""spawn_entity""#), prompt)
+        XCTAssertTrue(prompt.contains(#""rework_biome""#), prompt)
+        XCTAssertTrue(prompt.contains("rolling_hills_resource_rich"), prompt)
         XCTAssertTrue(prompt.contains("Available spawnable entities:"), prompt)
+    }
+
+    private func oreFamilyCounts(in world: World) -> [String: Int] {
+        let families: [UInt16: String] = [
+            B.coal_ore: "coal", B.deepslate_coal_ore: "coal",
+            B.iron_ore: "iron", B.deepslate_iron_ore: "iron",
+            B.copper_ore: "copper", B.deepslate_copper_ore: "copper",
+            B.gold_ore: "gold", B.deepslate_gold_ore: "gold",
+            B.redstone_ore: "redstone", B.deepslate_redstone_ore: "redstone",
+            B.lapis_ore: "lapis", B.deepslate_lapis_ore: "lapis",
+            B.diamond_ore: "diamond", B.deepslate_diamond_ore: "diamond",
+            B.emerald_ore: "emerald", B.deepslate_emerald_ore: "emerald",
+        ]
+        var counts: [String: Int] = [:]
+        for chunk in world.chunks.values {
+            for cell in chunk.blocks {
+                if let family = families[cell >> 4] {
+                    counts[family, default: 0] += 1
+                }
+            }
+        }
+        return counts
     }
 }

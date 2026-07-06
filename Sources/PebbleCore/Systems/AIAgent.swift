@@ -15,6 +15,10 @@ public let AIAgentHoleFillLateralSearch = 3
 public let AIAgentHoleFillMaxDepth = 64
 public let AIAgentHoleFillMaxHorizontalRadius = 24
 public let AIAgentHoleFillMaxBlocks = 8_192
+public let AIAgentBiomeReworkRadius = 28
+public let AIAgentBiomeReworkMaxColumns = 2_048
+public let AIAgentBiomeReworkMaxTerrainWrites = 32_768
+public let AIAgentBiomeReworkMaxOreWrites = 4_096
 
 public struct AIAgentAction: Codable, Equatable {
     public var action: String
@@ -35,13 +39,14 @@ public struct AIAgentAction: Codable, Equatable {
     public var time: String?
     public var weather: String?
     public var ticks: Int?
+    public var profile: String?
 
     public init(action: String, item: String? = nil, block: String? = nil, count: Int? = nil,
                 target: String? = nil, message: String? = nil, template: String? = nil,
                 name: String? = nil, fromBlock: String? = nil, toBlock: String? = nil,
                 kind: String? = nil, length: Int? = nil, style: String? = nil,
                 entity: String? = nil, value: String? = nil, time: String? = nil,
-                weather: String? = nil, ticks: Int? = nil) {
+                weather: String? = nil, ticks: Int? = nil, profile: String? = nil) {
         self.action = action
         self.item = item
         self.block = block
@@ -60,11 +65,12 @@ public struct AIAgentAction: Codable, Equatable {
         self.time = time
         self.weather = weather
         self.ticks = ticks
+        self.profile = profile
     }
 
     enum CodingKeys: String, CodingKey {
         case action, item, block, count, target, message, template, name, kind, length, style
-        case entity, value, time, weather, ticks
+        case entity, value, time, weather, ticks, profile
         case fromBlock = "from_block"
         case toBlock = "to_block"
     }
@@ -96,6 +102,41 @@ public struct AIAgentHoleFillResult: Equatable {
     }
 }
 
+public struct AIAgentBiomeReworkResult: Equatable {
+    public let sourceBiome: Biome
+    public let targetBiome: Biome
+    public let columns: Int
+    public let terrainBlocks: Int
+    public let resourceBlocks: Int
+    public let biomeCells: Int
+
+    public init(sourceBiome: Biome, targetBiome: Biome, columns: Int,
+                terrainBlocks: Int, resourceBlocks: Int, biomeCells: Int) {
+        self.sourceBiome = sourceBiome
+        self.targetBiome = targetBiome
+        self.columns = columns
+        self.terrainBlocks = terrainBlocks
+        self.resourceBlocks = resourceBlocks
+        self.biomeCells = biomeCells
+    }
+}
+
+public enum AIAgentBiomeReworkProfile: Equatable {
+    case rollingHillsResourceRich
+
+    var displayName: String {
+        switch self {
+        case .rollingHillsResourceRich: return "Rolling Hills - Resource Rich"
+        }
+    }
+
+    var targetBiome: Biome {
+        switch self {
+        case .rollingHillsResourceRich: return .meadow
+        }
+    }
+}
+
 public enum AIAgentError: Error, Equatable, CustomStringConvertible {
     case emptyResponse
     case responseTooLarge
@@ -118,6 +159,8 @@ public enum AIAgentError: Error, Equatable, CustomStringConvertible {
     case missingEntity
     case unknownEntity(String)
     case entitySpawnFailed(String)
+    case missingBiomeReworkTarget
+    case unsupportedBiomeRework(String)
     case missingTemplateName
     case unknownTemplate(String)
     case missingBlockReplacement
@@ -148,6 +191,8 @@ public enum AIAgentError: Error, Equatable, CustomStringConvertible {
         case .missingEntity: return "AI action did not name a spawnable entity"
         case .unknownEntity(let value): return "Unknown spawnable entity: \(value)"
         case .entitySpawnFailed(let value): return "Could not spawn \(value) at the cursor"
+        case .missingBiomeReworkTarget: return "No loaded current biome area was found around the player"
+        case .unsupportedBiomeRework(let value): return "Unsupported biome rework: \(value)"
         case .missingTemplateName: return "AI action did not name an object template"
         case .unknownTemplate(let name): return "Unknown object template: \(name)"
         case .missingBlockReplacement: return "AI action did not name both source and replacement blocks"
@@ -288,6 +333,18 @@ public func resolveAIAgentWeather(_ raw: String?) -> (name: String, raining: Boo
         return ("rain", true, false)
     case "thunder", "storm", "thunderstorm", "thunder_storm", "lightning":
         return ("thunder", true, true)
+    default:
+        return nil
+    }
+}
+
+public func resolveAIAgentBiomeReworkProfile(_ raw: String?) -> AIAgentBiomeReworkProfile? {
+    let normalized = normalizeAIAgentName(raw ?? "rolling_hills_resource_rich")
+    switch normalized {
+    case "", "rolling_hills", "rolling_hills_resource_rich", "moderate_hills_resource_rich",
+         "resource_rich", "rich_resources", "rich_resource", "hilly_resources",
+         "hills_with_rich_resources", "rolling_hills_with_rich_resources":
+        return .rollingHillsResourceRich
     default:
         return nil
     }
@@ -515,10 +572,50 @@ private func inferDirectAIAgentHoleFillAction(from userRequest: String) -> AIAge
 
 private func inferDirectAIAgentWorldMutationAction(from userRequest: String) -> AIAgentAction? {
     let normalized = normalizeAIAgentRequestText(userRequest)
+    if let action = inferDirectAIAgentBiomeReworkAction(from: normalized) { return action }
     if let action = inferDirectAIAgentTimeAction(from: normalized) { return action }
     if let action = inferDirectAIAgentWeatherAction(from: normalized) { return action }
     if let action = inferDirectAIAgentSpawnEntityAction(from: normalized) { return action }
     return nil
+}
+
+private func inferDirectAIAgentBiomeReworkAction(from normalized: String) -> AIAgentAction? {
+    let padded = " \(normalized) "
+    let hasChangeIntent = [
+        " change ", " convert ", " transform ", " rework ", " terraform ",
+        " reshape ", " remake ", " make ",
+    ].contains { padded.contains($0) }
+    let hasTerrainTarget = padded.contains(" biome ")
+        || padded.contains(" terrain ")
+        || padded.contains(" map ")
+        || padded.contains(" landscape ")
+    let hasCurrentTarget = padded.contains(" current ")
+        || padded.contains(" around me ")
+        || padded.contains(" where i am ")
+        || padded.contains(" where im ")
+        || padded.contains(" nearby ")
+        || padded.contains(" this ")
+    let wantsRollingHills = padded.contains(" rolling hill ")
+        || padded.contains(" rolling hills ")
+        || padded.contains(" moderate hill ")
+        || padded.contains(" moderate hills ")
+        || padded.contains(" hilly ")
+        || padded.contains(" hills ")
+    let wantsRichResources = padded.contains(" rich resources ")
+        || padded.contains(" resource rich ")
+        || padded.contains(" rich resource ")
+        || padded.contains(" more ores ")
+        || padded.contains(" more ore ")
+        || padded.contains(" lots of ores ")
+        || padded.contains(" lots of ore ")
+
+    guard hasChangeIntent, hasTerrainTarget, hasCurrentTarget,
+          wantsRollingHills || wantsRichResources else { return nil }
+    return AIAgentAction(
+        action: "rework_biome",
+        target: "current_biome",
+        kind: "rolling_hills_resource_rich",
+        profile: "rolling_hills_resource_rich")
 }
 
 private func inferDirectAIAgentTimeAction(from normalized: String) -> AIAgentAction? {
@@ -963,6 +1060,380 @@ private func isAIAgentLevelingRimBlock(_ id: Int) -> Bool {
         || name == "muddy_mangrove_roots"
 }
 
+private struct AIAgentBiomeColumn: Hashable {
+    let x: Int
+    let z: Int
+}
+
+private struct AIAgentBiomeChunkCoord: Hashable {
+    let cx: Int
+    let cz: Int
+}
+
+private let aiAgentBiomeReworkNaturalBlocks = Set([
+    "stone", "deepslate", "granite", "diorite", "andesite", "tuff", "calcite",
+    "dripstone_block", "grass_block", "dirt", "coarse_dirt", "rooted_dirt",
+    "podzol", "mycelium", "mud", "muddy_mangrove_roots", "clay", "gravel",
+    "sand", "red_sand", "sandstone", "red_sandstone", "snow", "snow_block",
+    "ice", "packed_ice", "blue_ice", "water", "lava",
+])
+
+public func reworkAIAgentCurrentBiome(world: World, player: Player,
+                                      profile: AIAgentBiomeReworkProfile) throws -> AIAgentBiomeReworkResult {
+    guard world.dim == .overworld else {
+        throw AIAgentError.unsupportedBiomeRework("Only Overworld terrain can be reworked")
+    }
+    let px = ifloor(player.x)
+    let pz = ifloor(player.z)
+    let sampleY = aiAgentBiomeReworkSampleY(world: world, player: player)
+    guard world.isLoadedAt(px, pz) else {
+        throw AIAgentError.unloadedTarget(px, sampleY, pz)
+    }
+    guard let sourceBiome = Biome(rawValue: world.biomeAt(px, sampleY, pz)) else {
+        throw AIAgentError.missingBiomeReworkTarget
+    }
+    let columns = collectAIAgentBiomeReworkColumns(
+        world: world,
+        centerX: px,
+        centerZ: pz,
+        sampleY: sampleY,
+        sourceBiome: sourceBiome.rawValue)
+    guard !columns.isEmpty else { throw AIAgentError.missingBiomeReworkTarget }
+
+    let centerSurface = aiAgentNaturalSurfaceY(world: world, x: px, z: pz)
+        ?? max(world.info.seaLevel + 1, world.surfaceY(px, pz) - 1)
+    let targetBiome = profile.targetBiome
+    let biomeCells = setAIAgentBiomeColumns(world: world, columns: columns, biome: targetBiome)
+    var terrainWrites = 0
+    var oreWrites = 0
+
+    for column in columns.sorted(by: {
+        if $0.z != $1.z { return $0.z < $1.z }
+        return $0.x < $1.x
+    }) {
+        if terrainWrites < AIAgentBiomeReworkMaxTerrainWrites {
+            let remaining = AIAgentBiomeReworkMaxTerrainWrites - terrainWrites
+            terrainWrites += reworkAIAgentBiomeColumn(
+                world: world,
+                x: column.x,
+                z: column.z,
+                centerX: px,
+                centerZ: pz,
+                centerSurface: centerSurface,
+                maxWrites: remaining)
+        }
+        if oreWrites < AIAgentBiomeReworkMaxOreWrites {
+            let remaining = AIAgentBiomeReworkMaxOreWrites - oreWrites
+            oreWrites += enrichAIAgentBiomeColumnResources(
+                world: world,
+                x: column.x,
+                z: column.z,
+                maxWrites: remaining)
+        }
+        if terrainWrites >= AIAgentBiomeReworkMaxTerrainWrites,
+           oreWrites >= AIAgentBiomeReworkMaxOreWrites {
+            break
+        }
+    }
+
+    let playerSurface = world.surfaceY(px, pz)
+    if Double(playerSurface) + 0.05 > player.y {
+        player.setPos(player.x, Double(playerSurface) + 0.05, player.z)
+    }
+    return AIAgentBiomeReworkResult(
+        sourceBiome: sourceBiome,
+        targetBiome: targetBiome,
+        columns: columns.count,
+        terrainBlocks: terrainWrites,
+        resourceBlocks: oreWrites,
+        biomeCells: biomeCells)
+}
+
+private func aiAgentBiomeReworkSampleY(world: World, player: Player) -> Int {
+    let y = ifloor(player.y)
+    return max(world.info.minY, min(world.info.minY + world.info.height - 1, y))
+}
+
+private func collectAIAgentBiomeReworkColumns(world: World, centerX: Int, centerZ: Int,
+                                              sampleY: Int, sourceBiome: Int) -> [AIAgentBiomeColumn] {
+    let radius2 = AIAgentBiomeReworkRadius * AIAgentBiomeReworkRadius
+    var seen = Set<AIAgentBiomeColumn>()
+    var queue = [AIAgentBiomeColumn(x: centerX, z: centerZ)]
+    var result: [AIAgentBiomeColumn] = []
+    var cursor = 0
+    seen.insert(queue[0])
+
+    while cursor < queue.count, result.count < AIAgentBiomeReworkMaxColumns {
+        let column = queue[cursor]
+        cursor += 1
+        let dx = column.x - centerX
+        let dz = column.z - centerZ
+        guard dx * dx + dz * dz <= radius2,
+              world.isLoadedAt(column.x, column.z),
+              world.biomeAt(column.x, sampleY, column.z) == sourceBiome else { continue }
+        result.append(column)
+        for dir in HORIZONTALS {
+            let next = AIAgentBiomeColumn(
+                x: column.x + DIR_X[dir],
+                z: column.z + DIR_Z[dir])
+            if seen.insert(next).inserted {
+                queue.append(next)
+            }
+        }
+    }
+    return result
+}
+
+private func setAIAgentBiomeColumns(world: World, columns: [AIAgentBiomeColumn], biome: Biome) -> Int {
+    var changedCells = 0
+    var touchedChunks = Set<AIAgentBiomeChunkCoord>()
+    var touchedQuartColumns = Set<String>()
+    for column in columns {
+        let cx = floorDiv(column.x, CHUNK_W)
+        let cz = floorDiv(column.z, CHUNK_W)
+        let qx = posMod(column.x, CHUNK_W) >> 2
+        let qz = posMod(column.z, CHUNK_W) >> 2
+        let key = "\(cx),\(cz),\(qx),\(qz)"
+        guard touchedQuartColumns.insert(key).inserted,
+              let chunk = world.getChunk(cx, cz) else { continue }
+        let qyCount = chunk.biomes.count / 16
+        for qy in 0..<qyCount {
+            let idx = (qy * 4 + qz) * 4 + qx
+            if Int(chunk.biomes[idx]) != biome.rawValue {
+                chunk.setBiome(qx, qy, qz, biome.rawValue)
+                changedCells += 1
+            }
+        }
+        touchedChunks.insert(AIAgentBiomeChunkCoord(cx: cx, cz: cz))
+    }
+    for coord in touchedChunks.sorted(by: {
+        if $0.cx != $1.cx { return $0.cx < $1.cx }
+        return $0.cz < $1.cz
+    }) {
+        guard let chunk = world.getChunk(coord.cx, coord.cz) else { continue }
+        chunk.modified = true
+        chunk.markAllDirty()
+        for sy in 0..<chunk.sections {
+            world.hooks.onSectionDirty(coord.cx, coord.cz, sy)
+        }
+    }
+    return changedCells
+}
+
+private func reworkAIAgentBiomeColumn(world: World, x: Int, z: Int, centerX: Int, centerZ: Int,
+                                      centerSurface: Int, maxWrites: Int) -> Int {
+    guard maxWrites > 0,
+          let oldSurface = aiAgentNaturalSurfaceY(world: world, x: x, z: z) else { return 0 }
+    let targetY = aiAgentRollingHillTargetY(
+        world: world,
+        x: x,
+        z: z,
+        centerX: centerX,
+        centerZ: centerZ,
+        centerSurface: centerSurface,
+        oldSurface: oldSurface)
+    guard !aiAgentColumnHasProtectedBlocks(
+        world: world,
+        x: x,
+        z: z,
+        y0: min(oldSurface, targetY) - 2,
+        y1: max(oldSurface, targetY) + 8) else { return 0 }
+
+    var writes = 0
+    func setIfAllowed(_ y: Int, _ block: UInt16) {
+        guard writes < maxWrites,
+              y >= world.info.minY,
+              y < world.info.minY + world.info.height,
+              canAIAgentRewriteTerrainBlock(world: world, x: x, y: y, z: z),
+              world.getBlock(x, y, z) != Int(cell(block)) else { return }
+        world.setBlock(x, y, z, Int(cell(block)))
+        writes += 1
+    }
+    func clearIfAllowed(_ y: Int) {
+        guard writes < maxWrites,
+              y >= world.info.minY,
+              y < world.info.minY + world.info.height,
+              canAIAgentRewriteTerrainBlock(world: world, x: x, y: y, z: z),
+              world.getBlock(x, y, z) != 0 else { return }
+        world.setBlock(x, y, z, 0)
+        writes += 1
+    }
+
+    if targetY < oldSurface {
+        let topClear = min(world.info.minY + world.info.height - 1, oldSurface + 4)
+        if targetY + 1 <= topClear {
+            for y in (targetY + 1)...topClear { clearIfAllowed(y) }
+        }
+    } else if targetY > oldSurface {
+        for y in (oldSurface + 1)...targetY {
+            let block = aiAgentBiomeHillBlock(forY: y, surfaceY: targetY)
+            setIfAllowed(y, block)
+        }
+    }
+
+    let capBase = max(world.info.minY, targetY - 4)
+    if capBase <= targetY {
+        for y in capBase...targetY {
+            setIfAllowed(y, aiAgentBiomeHillBlock(forY: y, surfaceY: targetY))
+        }
+    }
+    let decorTop = min(world.info.minY + world.info.height - 1, targetY + 2)
+    if targetY + 1 <= decorTop {
+        for y in (targetY + 1)...decorTop {
+            let id = world.getBlockId(x, y, z)
+            if isAIAgentBiomeReworkNaturalDecoration(id) {
+                clearIfAllowed(y)
+            }
+        }
+    }
+    if world.getBlockId(x, targetY + 1, z) == 0,
+       hashFloat2(world.seed, x, z, 0xB10B_10E5) < 0.18 {
+        setIfAllowed(targetY + 1, B.short_grass)
+    }
+    return writes
+}
+
+private func enrichAIAgentBiomeColumnResources(world: World, x: Int, z: Int, maxWrites: Int) -> Int {
+    guard maxWrites > 0,
+          let surface = aiAgentNaturalSurfaceY(world: world, x: x, z: z) else { return 0 }
+    let maxY = min(surface - 6, 160, world.info.minY + world.info.height - 1)
+    let minY = max(world.info.minY + 4, -64)
+    guard minY <= maxY else { return 0 }
+    var writes = 0
+    var y = minY + posMod(x &+ z, 4)
+    while y <= maxY, writes < maxWrites {
+        let id = world.getBlockId(x, y, z)
+        if let ore = aiAgentRichResourceOreCell(world: world, x: x, y: y, z: z, baseBlockId: id),
+           world.getBlockEntity(x, y, z) == nil {
+            world.setBlock(x, y, z, Int(ore))
+            writes += 1
+        }
+        y += 4
+    }
+    return writes
+}
+
+private func aiAgentNaturalSurfaceY(world: World, x: Int, z: Int) -> Int? {
+    guard world.isLoadedAt(x, z) else { return nil }
+    let top = world.info.minY + world.info.height - 1
+    let start = min(top, max(world.heightAt(x, z) + 8, world.info.seaLevel + 32))
+    for y in stride(from: start, through: world.info.minY, by: -1) {
+        let id = world.getBlockId(x, y, z)
+        if isAIAgentBiomeReworkNaturalSolid(id) {
+            return y
+        }
+    }
+    return nil
+}
+
+private func aiAgentRollingHillTargetY(world: World, x: Int, z: Int, centerX: Int, centerZ: Int,
+                                       centerSurface: Int, oldSurface: Int) -> Int {
+    let dx = Double(x - centerX)
+    let dz = Double(z - centerZ)
+    let distance = (dx * dx + dz * dz).squareRoot()
+    let edgeBlend = clampD((Double(AIAgentBiomeReworkRadius) - distance) / 8.0, 0, 1)
+    let broad = aiAgentSmoothHash2(world.seed, x, z, cellSize: 24, salt: 0xA1A1_4001) - 0.5
+    let small = aiAgentSmoothHash2(world.seed, x, z, cellSize: 10, salt: 0xA1A1_4002) - 0.5
+    let radialLift = max(0, 1 - distance / Double(AIAgentBiomeReworkRadius)) * 2.5
+    let rolling = broad * 16.0 + small * 7.0 + radialLift
+    let profileTarget = Double(centerSurface) + rolling
+    let blended = Double(oldSurface) * (1 - edgeBlend) + profileTarget * edgeBlend
+    let lower = max(world.info.minY + 8, centerSurface - 10, world.info.seaLevel - 6)
+    let upper = min(world.info.minY + world.info.height - 8, centerSurface + 24, world.info.seaLevel + 34)
+    return aiAgentClampInt(Int(detRound(blended)), lower, upper)
+}
+
+private func aiAgentSmoothHash2(_ seed: UInt32, _ x: Int, _ z: Int, cellSize: Int, salt: UInt32) -> Double {
+    let gx = floorDiv(x, cellSize)
+    let gz = floorDiv(z, cellSize)
+    let tx = Double(posMod(x, cellSize)) / Double(cellSize)
+    let tz = Double(posMod(z, cellSize)) / Double(cellSize)
+    let sx = tx * tx * (3 - 2 * tx)
+    let sz = tz * tz * (3 - 2 * tz)
+    let a = hashFloat2(seed, gx, gz, salt)
+    let b = hashFloat2(seed, gx + 1, gz, salt)
+    let c = hashFloat2(seed, gx, gz + 1, salt)
+    let d = hashFloat2(seed, gx + 1, gz + 1, salt)
+    let ab = a + (b - a) * sx
+    let cd = c + (d - c) * sx
+    return ab + (cd - ab) * sz
+}
+
+private func aiAgentBiomeHillBlock(forY y: Int, surfaceY: Int) -> UInt16 {
+    if y == surfaceY { return B.grass_block }
+    if y >= surfaceY - 3 { return B.dirt }
+    return y < 0 ? B.deepslate : B.stone
+}
+
+private func aiAgentColumnHasProtectedBlocks(world: World, x: Int, z: Int, y0: Int, y1: Int) -> Bool {
+    let lo = max(world.info.minY, y0)
+    let hi = min(world.info.minY + world.info.height - 1, y1)
+    guard lo <= hi else { return false }
+    for y in lo...hi {
+        if world.getBlockEntity(x, y, z) != nil { return true }
+        let id = world.getBlockId(x, y, z)
+        if id == 0 || isAIAgentBiomeReworkNaturalSolid(id) || isAIAgentBiomeReworkNaturalDecoration(id) {
+            continue
+        }
+        return true
+    }
+    return false
+}
+
+private func canAIAgentRewriteTerrainBlock(world: World, x: Int, y: Int, z: Int) -> Bool {
+    if world.getBlockEntity(x, y, z) != nil { return false }
+    let id = world.getBlockId(x, y, z)
+    return id == 0 || isAIAgentBiomeReworkNaturalSolid(id) || isAIAgentBiomeReworkNaturalDecoration(id)
+}
+
+private func isAIAgentBiomeReworkNaturalSolid(_ id: Int) -> Bool {
+    guard id > 0 && id < blockDefs.count else { return false }
+    let name = blockDefs[id].name
+    return aiAgentBiomeReworkNaturalBlocks.contains(name)
+        || name.hasSuffix("_ore")
+}
+
+private func isAIAgentBiomeReworkNaturalDecoration(_ id: Int) -> Bool {
+    guard id > 0 && id < blockDefs.count else { return false }
+    let def = blockDefs[id]
+    if def.replaceable { return true }
+    switch def.name {
+    case "short_grass", "fern", "tall_grass", "large_fern",
+         "dandelion", "poppy", "azure_bluet", "oxeye_daisy", "cornflower", "allium",
+         "red_tulip", "orange_tulip", "white_tulip", "pink_tulip":
+        return true
+    default:
+        return false
+    }
+}
+
+private func aiAgentRichResourceOreCell(world: World, x: Int, y: Int, z: Int,
+                                        baseBlockId: Int) -> UInt16? {
+    guard baseBlockId == Int(B.stone) || baseBlockId == Int(B.deepslate)
+            || baseBlockId == Int(B.tuff) || baseBlockId == Int(B.andesite)
+            || baseBlockId == Int(B.granite) || baseBlockId == Int(B.diorite) else {
+        return nil
+    }
+    let r = hashFloat3(world.seed, x, y, z, 0xA17E_0E55)
+    let deep = baseBlockId == Int(B.deepslate) || y < 0
+    func ore(_ stone: UInt16, _ deepslate: UInt16) -> UInt16 {
+        cell(deep ? deepslate : stone)
+    }
+    if y <= 16 && r < 0.012 { return ore(B.diamond_ore, B.deepslate_diamond_ore) }
+    if y >= -16 && y <= 160 && r < 0.024 { return ore(B.emerald_ore, B.deepslate_emerald_ore) }
+    if y <= 15 && r < 0.040 { return ore(B.redstone_ore, B.deepslate_redstone_ore) }
+    if y <= 64 && r < 0.055 { return ore(B.lapis_ore, B.deepslate_lapis_ore) }
+    if y <= 80 && r < 0.075 { return ore(B.gold_ore, B.deepslate_gold_ore) }
+    if y >= -16 && y <= 112 && r < 0.115 { return ore(B.copper_ore, B.deepslate_copper_ore) }
+    if y <= 160 && r < 0.155 { return ore(B.iron_ore, B.deepslate_iron_ore) }
+    if y <= 192 && r < 0.195 { return ore(B.coal_ore, B.deepslate_coal_ore) }
+    return nil
+}
+
+private func aiAgentClampInt(_ value: Int, _ lo: Int, _ hi: Int) -> Int {
+    min(max(value, lo), hi)
+}
+
 public func resolveAIAgentTemplateBlockSelector(_ raw: String) -> TemplateBlockSelector? {
     let normalized = normalizeAIAgentName(cleanedAIAgentBlockPhrase(raw))
     if ["wood", "wooden", "wood_blocks", "wooden_blocks", "woods"].contains(normalized) {
@@ -1089,6 +1560,16 @@ public func executeAIAgentAction(_ action: AIAgentAction, world: World, player: 
         let fallback = "Filled \(result.filledBlocks) blocks with \(blockDefs[Int(blockId)].displayName)."
         return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
                                       changedWorld: result.filledBlocks > 0)
+
+    case "rework_biome", "change_biome", "terraform_biome", "reshape_biome":
+        let rawProfile = action.profile ?? action.kind ?? action.value ?? action.style
+        guard let profile = resolveAIAgentBiomeReworkProfile(rawProfile) else {
+            throw AIAgentError.unsupportedBiomeRework(rawProfile ?? "")
+        }
+        let result = try reworkAIAgentCurrentBiome(world: world, player: player, profile: profile)
+        let fallback = "Reworked \(singleBiomeDisplayName(result.sourceBiome)) into \(profile.displayName): \(result.columns) columns, \(result.terrainBlocks) terrain blocks, \(result.resourceBlocks) resource blocks."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: result.terrainBlocks > 0 || result.resourceBlocks > 0 || result.biomeCells > 0)
 
     case "set_time", "time", "set_day_time":
         let rawValue = action.value ?? action.time
@@ -1286,6 +1767,7 @@ Allowed actions:
 {"action":"set_time","value":"day|noon|sunset|night|midnight|sunrise|ticks","message":"short answer"}
 {"action":"set_weather","weather":"clear|rain|thunder","message":"short answer"}
 {"action":"spawn_entity","entity":"registered_spawnable_entity_name","count":1,"target":"cursor","message":"short answer"}
+{"action":"rework_biome","target":"current_biome","profile":"rolling_hills_resource_rich","message":"short answer"}
 {"action":"replace_template_blocks","template":"saved_template_name","from_block":"wood blocks","to_block":"bamboo","message":"short answer"}
 {"action":"create_template","template":"new_template_name","kind":"pirate_ship","length":50,"style":"short style description","message":"short answer"}
 
@@ -1296,6 +1778,7 @@ Rules:
 - To change time of day, use action "set_time"; ticks are normalized to one day and presets are day, noon, sunset, night, midnight, or sunrise.
 - To change weather, use action "set_weather"; only clear, rain, and thunder are allowed.
 - To spawn an animal or monster at the current cursor location, use action "spawn_entity", target "cursor", and one of the registered spawnable entity names. Keep count small.
+- To rework the terrain/biome the player is standing in, use action "rework_biome", target "current_biome", and profile "rolling_hills_resource_rich". The engine chooses the loaded current biome patch; do not provide coordinates.
 - To create a non-placeable item, use action "give_item".
 - A request for "a stack" means the item's maximum stack size, usually 64.
 - To edit a saved object template, use "replace_template_blocks"; "wood blocks" means every registered wood-family block in that template.
