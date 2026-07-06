@@ -516,7 +516,8 @@ public final class GameCore {
         db.listWorlds()
     }
 
-    public func createWorld(name: String, seedText: String, mode: Int, difficulty: Int) {
+    public func createWorld(name: String, seedText: String, mode: Int, difficulty: Int,
+                            worldPreset: WorldPreset = .normal, singleBiome: Biome = .plains) {
         lanClientResumeStorageKey = nil
         lanClientWorldSummary = nil
         let trimmed = seedText.trimmingCharacters(in: .whitespaces)
@@ -534,8 +535,9 @@ public final class GameCore {
         }
         let ms = Int(Date().timeIntervalSince1970 * 1000)
         let id = "w" + String(ms, radix: 36) + String(Int.random(in: 0..<1_000_000), radix: 36)
-        var rec = WorldRecord(id: id, name: name, seed: seed, gameMode: mode, difficulty: difficulty)
-        let spawn = defaultWorldSpawn(seed: seed)
+        var rec = WorldRecord(id: id, name: name, seed: seed, gameMode: mode, difficulty: difficulty,
+                              worldPreset: worldPreset, singleBiome: singleBiome)
+        let spawn = defaultWorldSpawn(seed: seed, settings: rec.generationSettings)
         rec.spawnX = spawn.x
         rec.spawnY = spawn.y
         rec.spawnZ = spawn.z
@@ -564,7 +566,7 @@ public final class GameCore {
             gameMode: summary.gameMode,
             difficulty: summary.difficulty
         )
-        let spawn = defaultWorldSpawn(seed: seed)
+        let spawn = defaultWorldSpawn(seed: seed, settings: rec.generationSettings)
         rec.spawnX = spawn.x
         rec.spawnY = spawn.y
         rec.spawnZ = spawn.z
@@ -583,8 +585,14 @@ public final class GameCore {
     // ===========================================================================
     // World lifecycle
     // ===========================================================================
-    private func defaultWorldSpawn(seed: Int32) -> (x: Int, y: Int, z: Int) {
-        let gen = overworldGen(UInt32(bitPattern: seed))
+    private func defaultWorldSpawn(seed: Int32, settings: WorldGenerationSettings = .normal) -> (x: Int, y: Int, z: Int) {
+        if settings.preset == .flat {
+            return (8, GEN_MIN_Y + 4, 8)
+        }
+        if settings.preset == .debugAllBlockStates {
+            return (0, 71, 0)
+        }
+        let gen = overworldGen(UInt32(bitPattern: seed), settings: settings)
         var sx = 8, sz = 8
         for r in 0..<40 {
             let tx = 8 + r * 40, tz = 8 + ((r * 13) % 7 - 3) * 40
@@ -597,7 +605,8 @@ public final class GameCore {
                 break
             }
         }
-        return (sx, gen.heightEstimate(Double(sx), Double(sz)) + 1, sz)
+        let maxSpawnY = DIMS[Dim.overworld.rawValue].minY + DIMS[Dim.overworld.rawValue].height
+        return (sx, min(gen.heightEstimate(Double(sx), Double(sz)) + 1, maxSpawnY), sz)
     }
 
     private func enterWorld(_ rec: WorldRecord, _ playerData: [String: Any]?, _ adv: [String]?, transientLANClient: Bool = false) {
@@ -613,7 +622,7 @@ public final class GameCore {
         worlds.removeAll()
         resetEntityIds(max(1, rec.nextEntityId))
         for d in [Dim.overworld, .nether, .end] {
-            let w = World(dim: d, seed: UInt32(bitPattern: rec.seed))
+            let w = World(dim: d, seed: UInt32(bitPattern: rec.seed), generationSettings: rec.generationSettings)
             if let ds = rec.dims["\(d.rawValue)"] {
                 w.time = ds.time
                 w.dayTime = ds.dayTime
@@ -1011,7 +1020,7 @@ public final class GameCore {
                 c = LoadProf.shared.time("mkchunk") { Self.makeChunk(cx, cz, minY, height, savedRec.blocks!, savedRec.biomes!, light.sky, light.blk) }
             } else {
                 // fresh generation; a corrupt/entity-only record still re-attaches its entities
-                let out = LoadProf.shared.time("gen") { generateChunk(d, seed, cx, cz) }
+                let out = LoadProf.shared.time("gen") { generateChunk(d, seed, cx, cz, settings: w.generationSettings) }
                 let light = LoadProf.shared.time("light") { computeLocalLight(blocks: out.blocks, height: height, hasSky: hasSky) }
                 c = LoadProf.shared.time("mkchunk") { Self.makeChunk(cx, cz, minY, height, out.blocks, out.biomes, light.sky, light.blk) }
                 beSpecs = out.blockEntities
@@ -1398,7 +1407,7 @@ public final class GameCore {
                         continue
                     }
                 }
-                let out = generateChunk(w.dim, w.seed, cx, cz)
+                let out = generateChunk(w.dim, w.seed, cx, cz, settings: w.generationSettings)
                 let light = computeLocalLight(blocks: out.blocks, height: w.info.height, hasSky: w.info.hasSky)
                 adoptChunk(w, Self.makeChunk(cx, cz, w.info.minY, w.info.height, out.blocks, out.biomes, light.sky, light.blk),
                            out.blockEntities, saved != nil ? nil : out.entities, saved)

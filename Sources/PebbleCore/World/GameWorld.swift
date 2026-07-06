@@ -80,6 +80,7 @@ private struct TickKey: Hashable {
 public final class World {
     public let dim: Dim
     public let seed: UInt32
+    public let generationSettings: WorldGenerationSettings
     public var chunks: [Int64: Chunk] = [:]
     public var entities: [EntityRef] = []
     public var entityById: [Int: EntityRef] = [:]
@@ -123,9 +124,10 @@ public final class World {
         "naturalRegeneration": 1, "fallDamage": 1, "drowningDamage": 1, "fireDamage": 1,
     ]
 
-    public init(dim: Dim, seed: UInt32) {
+    public init(dim: Dim, seed: UInt32, generationSettings: WorldGenerationSettings = .normal) {
         self.dim = dim
         self.seed = seed
+        self.generationSettings = generationSettings
         info = DIMS[dim.rawValue]
         rng = RandomX(UInt32(bitPattern: Int32(bitPattern: seed) ^ Int32(dim.rawValue * 7919)))
         light = LightEngine(self)

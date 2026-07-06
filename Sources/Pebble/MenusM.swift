@@ -235,7 +235,11 @@ final class WorldCreateScreen: Screen {
     let seedField = TextField(0, 0, 200, 16, "Leave blank for random")
     var mode = GameMode.survival
     var difficulty = 2
+    var worldPreset = WorldPreset.normal
+    var singleBiome = Biome.plains
     var creating = false
+    private var worldTypeBtn: Button!
+    private var biomeBtn: Button!
 
     init(lanHostRequest: LANHostLaunchRequest? = nil) {
         self.lanHostRequest = lanHostRequest
@@ -264,15 +268,35 @@ final class WorldCreateScreen: Screen {
         }
         buttons.append(modeBtn)
         buttons.append(diffBtn)
-        buttons.append(Button(cx - 100, 158, 98, 20, lanHostRequest == nil ? "Create World" : "Create & Host", { [weak self, weak ui, weak game] in
+        worldTypeBtn = Button(cx - 100, 150, 200, 20, "", {})
+        worldTypeBtn.onClick = { [weak self, weak ui] in
+            guard let self, let ui else { return }
+            let cycle = ui.optionDown ? WorldPreset.extendedCycle : WorldPreset.normalCycle
+            let current = cycle.firstIndex(of: self.worldPreset) ?? -1
+            self.worldPreset = cycle[(current + 1) % cycle.count]
+            self.updateWorldTypeLabels()
+        }
+        biomeBtn = Button(cx - 100, 174, 200, 20, "", {})
+        biomeBtn.onClick = { [weak self] in
+            guard let self else { return }
+            let cases = Biome.allCases
+            let current = cases.firstIndex(of: self.singleBiome) ?? 0
+            self.singleBiome = cases[(current + 1) % cases.count]
+            self.updateWorldTypeLabels()
+        }
+        buttons.append(worldTypeBtn)
+        buttons.append(biomeBtn)
+        updateWorldTypeLabels()
+        buttons.append(Button(cx - 100, 206, 98, 20, lanHostRequest == nil ? "Create World" : "Create & Host", { [weak self, weak ui, weak game] in
             guard let self, let ui, let game, !self.creating else { return }
             self.creating = true
             game.createWorld(name: self.nameField.text.isEmpty ? "New World" : self.nameField.text,
-                             seedText: self.seedField.text, mode: self.mode, difficulty: self.difficulty)
+                             seedText: self.seedField.text, mode: self.mode, difficulty: self.difficulty,
+                             worldPreset: self.worldPreset, singleBiome: self.singleBiome)
             self.startPendingLANHost(game)
             ui.open(LoadingScreen(), game)
         }))
-        buttons.append(Button(cx + 2, 158, 98, 20, "Cancel", { [weak ui, weak game] in
+        buttons.append(Button(cx + 2, 206, 98, 20, "Cancel", { [weak ui, weak game] in
             guard let ui, let game else { return }
             ui.closeTop(game)
         }))
@@ -283,9 +307,15 @@ final class WorldCreateScreen: Screen {
         ui.cv.drawText("World Name", nameField.x, nameField.y - 10, 1, "#a0a0a0")
         ui.cv.drawText("Seed", seedField.x, seedField.y - 10, 1, "#a0a0a0")
         if creating {
-            ui.cv.drawTextCentered("Generating world…", ui.width / 2, 190, 1, "#ffff55")
+            ui.cv.drawTextCentered("Generating world...", ui.width / 2, 238, 1, "#ffff55")
         }
         ui.drawButtons(self)
+    }
+
+    private func updateWorldTypeLabels() {
+        worldTypeBtn?.label = "World Type: \(worldPreset.displayName)"
+        biomeBtn?.label = "Biome: \(singleBiomeDisplayName(singleBiome))"
+        biomeBtn?.visible = worldPreset == .singleBiomeSurface
     }
 
     private func startPendingLANHost(_ game: GameCore) {

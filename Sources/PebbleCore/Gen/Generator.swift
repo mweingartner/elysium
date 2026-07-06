@@ -73,17 +73,25 @@ public final class ArraySink: ChunkSink {
     }
 }
 
-private var overworldGens: [UInt32: OverworldGen] = [:]
+private struct OverworldGenKey: Hashable {
+    let seed: UInt32
+    let presetID: String
+    let singleBiomeID: String
+}
+
+private var overworldGens: [OverworldGenKey: OverworldGen] = [:]
 private var netherGens: [UInt32: NetherGen] = [:]
 private var endGens: [UInt32: EndGen] = [:]
 private let genLock = NSLock()
 
-public func overworldGen(_ seed: UInt32) -> OverworldGen {
+public func overworldGen(_ seed: UInt32, settings: WorldGenerationSettings = .normal) -> OverworldGen {
     genLock.lock()
     defer { genLock.unlock() }
-    if let g = overworldGens[seed] { return g }
-    let g = OverworldGen(seed)
-    overworldGens[seed] = g
+    let key = OverworldGenKey(seed: seed, presetID: settings.preset.rawValue,
+                              singleBiomeID: biomeID(settings.singleBiome))
+    if let g = overworldGens[key] { return g }
+    let g = OverworldGen(seed, settings: settings)
+    overworldGens[key] = g
     return g
 }
 public func netherGen(_ seed: UInt32) -> NetherGen {
@@ -103,7 +111,77 @@ public func endGen(_ seed: UInt32) -> EndGen {
     return g
 }
 
-public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int) -> GenOutput {
+private func filledBiomeQuarts(_ biome: Biome, height: Int) -> [UInt8] {
+    [UInt8](repeating: UInt8(biome.rawValue), count: 4 * 4 * ((height + 3) / 4))
+}
+
+private func generateFlatOverworldChunk(_ seed: UInt32, _ cx: Int, _ cz: Int) -> GenOutput {
+    let info = DIMS[Dim.overworld.rawValue]
+    var blocks = [UInt16](repeating: 0, count: CHUNK_W * CHUNK_W * info.height)
+    let bedrock = cell(B.bedrock)
+    let dirt = cell(B.dirt)
+    let grass = cell(B.grass_block)
+    for z in 0..<16 {
+        for x in 0..<16 {
+            blocks[((GEN_MIN_Y - info.minY) * 16 + z) * 16 + x] = bedrock
+            blocks[((GEN_MIN_Y + 1 - info.minY) * 16 + z) * 16 + x] = dirt
+            blocks[((GEN_MIN_Y + 2 - info.minY) * 16 + z) * 16 + x] = dirt
+            blocks[((GEN_MIN_Y + 3 - info.minY) * 16 + z) * 16 + x] = grass
+        }
+    }
+    let biomes = filledBiomeQuarts(.plains, height: info.height)
+    let sink = ArraySink(cx: cx, cz: cz, blocks: blocks, minY: info.minY, maxY: info.minY + info.height,
+                         heightFallback: { _, _ in GEN_MIN_Y + 4 })
+    let ctx = GenCtx(seed: seed, heightAt: { _, _ in GEN_MIN_Y + 4 },
+                     biomeAt: { _, _ in Biome.plains.rawValue }, dim: Dim.overworld.rawValue)
+    let flatStructs = STRUCTURES.filter { $0.id == "village" || $0.id == "stronghold" }
+    let structRefs = buildStructuresForChunk(ctx, cx, cz, sink, flatStructs)
+    return GenOutput(blocks: sink.blocks, biomes: biomes,
+                     blockEntities: sink.blockEntities, entities: [], structRefs: structRefs)
+}
+
+private func debugBlockStateCells() -> [UInt16] {
+    var cells: [UInt16] = []
+    for id in blockDefs.indices where blockDefs[id].shape != .air {
+        for meta in 0..<16 {
+            cells.append(UInt16((id << 4) | meta))
+        }
+    }
+    return cells
+}
+
+private func generateDebugOverworldChunk(_ cx: Int, _ cz: Int) -> GenOutput {
+    let info = DIMS[Dim.overworld.rawValue]
+    var blocks = [UInt16](repeating: 0, count: CHUNK_W * CHUNK_W * info.height)
+    let bedrock = cell(B.bedrock)
+    let floorY = 60
+    if floorY >= info.minY, floorY < info.minY + info.height {
+        for z in 0..<16 {
+            for x in 0..<16 {
+                blocks[((floorY - info.minY) * 16 + z) * 16 + x] = bedrock
+            }
+        }
+    }
+    let states = debugBlockStateCells()
+    let side = max(1, Int(ceil(Double(states.count).squareRoot())))
+    let y = 70
+    for z in 0..<16 {
+        for x in 0..<16 {
+            let wx = cx * 16 + x
+            let wz = cz * 16 + z
+            guard wx >= 0, wz >= 0 else { continue }
+            let idx = wz * side + wx
+            if idx < states.count {
+                blocks[((y - info.minY) * 16 + z) * 16 + x] = states[idx]
+            }
+        }
+    }
+    return GenOutput(blocks: blocks, biomes: filledBiomeQuarts(.plains, height: info.height),
+                     blockEntities: [], entities: [], structRefs: [])
+}
+
+public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
+                          settings: WorldGenerationSettings = .normal) -> GenOutput {
     registerAllStructures()
     let info = DIMS[dim.rawValue]
     let n = CHUNK_W * CHUNK_W * info.height
@@ -111,7 +189,13 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int) -> G
     var biomes = [UInt8](repeating: 0, count: 4 * 4 * ((info.height + 3) / 4))
 
     if dim == .overworld {
-        let gen = overworldGen(seed)
+        if settings.preset == .flat {
+            return generateFlatOverworldChunk(seed, cx, cz)
+        }
+        if settings.preset == .debugAllBlockStates {
+            return generateDebugOverworldChunk(cx, cz)
+        }
+        let gen = overworldGen(seed, settings: settings)
         let res = gen.fillTerrain(cx, cz, &blocks, &biomes)
         gen.carve(cx, cz, &blocks)
         gen.applySurface(cx, cz, &blocks, res.heights, res.surfaceBiomes)
@@ -140,19 +224,21 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int) -> G
                     salt += 1
                     runFeature(f, sink, &rng, ox, oz, seed, surfaceBiomeAt)
                 }
-                // cave biome features from the full 3×3 origins — running them
-                // only for the target chunk clipped dripstone/moss/sculk flat
-                // at every chunk face (their radius reaches up to 5 blocks)
-                for cb in [Biome.lushCaves, .dripstoneCaves, .deepDark] {
-                    let feats2 = biomeDef(cb.rawValue).features
-                    var salt2 = UInt32(12000 + cb.rawValue * 100)
-                    for f in feats2 {
-                        var rng = chunkRandom(seed, ox, oz, salt2)
-                        salt2 += 1
-                        runFeature(f, sink, &rng, ox, oz, seed, { x, z in
-                            let cbb = gen.caveBiomeAt(Double(x), -10, Double(z), gen.heightEstimate(Double(x), Double(z)))
-                            return cbb == -1 ? gen.surfaceBiomeAt(Double(x), Double(z)).rawValue : cbb
-                        })
+                if settings.preset != .singleBiomeSurface {
+                    // cave biome features from the full 3×3 origins — running them
+                    // only for the target chunk clipped dripstone/moss/sculk flat
+                    // at every chunk face (their radius reaches up to 5 blocks)
+                    for cb in [Biome.lushCaves, .dripstoneCaves, .deepDark] {
+                        let feats2 = biomeDef(cb.rawValue).features
+                        var salt2 = UInt32(12000 + cb.rawValue * 100)
+                        for f in feats2 {
+                            var rng = chunkRandom(seed, ox, oz, salt2)
+                            salt2 += 1
+                            runFeature(f, sink, &rng, ox, oz, seed, { x, z in
+                                let cbb = gen.caveBiomeAt(Double(x), -10, Double(z), gen.heightEstimate(Double(x), Double(z)))
+                                return cbb == -1 ? gen.surfaceBiomeAt(Double(x), Double(z)).rawValue : cbb
+                            })
+                        }
                     }
                 }
                 tryGeode(seed, ox, oz, sink)

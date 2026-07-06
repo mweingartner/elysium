@@ -52,12 +52,19 @@ public struct WorldRecord: Codable {
     public var spawnX: Int
     public var spawnY: Int
     public var spawnZ: Int
+    public var worldPreset: String
+    public var singleBiome: String
     public var gameRules: [String: Double]
     public var dragonKilled: Bool
     public var gatewaysSpawned: Int
     public var nextEntityId: Int
 
-    public init(id: String, name: String, seed: Int32, gameMode: Int, difficulty: Int) {
+    public var generationSettings: WorldGenerationSettings {
+        WorldGenerationSettings(presetID: worldPreset, singleBiomeID: singleBiome)
+    }
+
+    public init(id: String, name: String, seed: Int32, gameMode: Int, difficulty: Int,
+                worldPreset: WorldPreset = .normal, singleBiome: Biome = .plains) {
         self.id = id
         self.name = name
         self.seed = seed
@@ -69,10 +76,61 @@ public struct WorldRecord: Codable {
         spawnX = 0
         spawnY = 80
         spawnZ = 0
+        self.worldPreset = worldPreset.rawValue
+        self.singleBiome = biomeID(singleBiome)
         gameRules = [:]
         dragonKilled = false
         gatewaysSpawned = 0
         nextEntityId = 1
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, seed, gameMode, difficulty, lastPlayed, version, dims
+        case spawnX, spawnY, spawnZ, worldPreset, singleBiome, gameRules
+        case dragonKilled, gatewaysSpawned, nextEntityId
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        seed = try c.decode(Int32.self, forKey: .seed)
+        gameMode = try c.decode(Int.self, forKey: .gameMode)
+        difficulty = try c.decode(Int.self, forKey: .difficulty)
+        lastPlayed = try c.decodeIfPresent(Double.self, forKey: .lastPlayed) ?? Date().timeIntervalSince1970 * 1000
+        version = try c.decodeIfPresent(String.self, forKey: .version) ?? "pebble-\(PEBBLE_VERSION)"
+        dims = try c.decodeIfPresent([String: DimState].self, forKey: .dims)
+            ?? ["0": DimState(), "1": DimState(), "2": DimState()]
+        spawnX = try c.decodeIfPresent(Int.self, forKey: .spawnX) ?? 0
+        spawnY = try c.decodeIfPresent(Int.self, forKey: .spawnY) ?? 80
+        spawnZ = try c.decodeIfPresent(Int.self, forKey: .spawnZ) ?? 0
+        worldPreset = normalizedWorldPreset(try c.decodeIfPresent(String.self, forKey: .worldPreset)).rawValue
+        singleBiome = biomeID(normalizedSingleBiome(try c.decodeIfPresent(String.self, forKey: .singleBiome)))
+        gameRules = try c.decodeIfPresent([String: Double].self, forKey: .gameRules) ?? [:]
+        dragonKilled = try c.decodeIfPresent(Bool.self, forKey: .dragonKilled) ?? false
+        gatewaysSpawned = try c.decodeIfPresent(Int.self, forKey: .gatewaysSpawned) ?? 0
+        nextEntityId = try c.decodeIfPresent(Int.self, forKey: .nextEntityId) ?? 1
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(seed, forKey: .seed)
+        try c.encode(gameMode, forKey: .gameMode)
+        try c.encode(difficulty, forKey: .difficulty)
+        try c.encode(lastPlayed, forKey: .lastPlayed)
+        try c.encode(version, forKey: .version)
+        try c.encode(dims, forKey: .dims)
+        try c.encode(spawnX, forKey: .spawnX)
+        try c.encode(spawnY, forKey: .spawnY)
+        try c.encode(spawnZ, forKey: .spawnZ)
+        try c.encode(normalizedWorldPreset(worldPreset).rawValue, forKey: .worldPreset)
+        try c.encode(biomeID(normalizedSingleBiome(singleBiome)), forKey: .singleBiome)
+        try c.encode(gameRules, forKey: .gameRules)
+        try c.encode(dragonKilled, forKey: .dragonKilled)
+        try c.encode(gatewaysSpawned, forKey: .gatewaysSpawned)
+        try c.encode(nextEntityId, forKey: .nextEntityId)
     }
 }
 

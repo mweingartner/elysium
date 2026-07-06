@@ -18,8 +18,10 @@ public let WORLD_H = 384
 
 public final class ClimateSampler {
     let temp: FBM, humid: FBM, cont: FBM, ero: FBM, weird: FBM, rare: FBM
+    let coordinateScale: Double
 
-    public init(_ seed: UInt32) {
+    public init(_ seed: UInt32, coordinateScale: Double = 1) {
+        self.coordinateScale = max(0.0001, coordinateScale)
         temp = FBM(seed &+ 11, 4, 1 / 2800, lacunarity: 2, persistence: 0.55)
         humid = FBM(seed &+ 22, 4, 1 / 1600, lacunarity: 2, persistence: 0.55)
         cont = FBM(seed &+ 33, 6, 1 / 2400, lacunarity: 2, persistence: 0.55)
@@ -29,15 +31,17 @@ public final class ClimateSampler {
     }
 
     public func at(_ x: Double, _ z: Double) -> Climate {
-        let w = clampD(weird.sample2(x, z) * 1.6, -1, 1)
+        let sx = x / coordinateScale
+        let sz = z / coordinateScale
+        let w = clampD(weird.sample2(sx, sz) * 1.6, -1, 1)
         return Climate(
-            t: clampD(temp.sample2(x, z) * 1.7, -1, 1),
-            h: clampD(humid.sample2(x, z) * 1.7, -1, 1),
-            c: clampD(cont.sample2(x, z) * 1.55 + 0.08, -1, 1),
-            e: clampD(ero.sample2(x, z) * 1.6, -1, 1),
+            t: clampD(temp.sample2(sx, sz) * 1.7, -1, 1),
+            h: clampD(humid.sample2(sx, sz) * 1.7, -1, 1),
+            c: clampD(cont.sample2(sx, sz) * 1.55 + 0.08, -1, 1),
+            e: clampD(ero.sample2(sx, sz) * 1.6, -1, 1),
             w: w,
             pv: peaksValleys(w),
-            rare: rare.sample2(x, z) * 0.5 + 0.5
+            rare: rare.sample2(sx, sz) * 0.5 + 0.5
         )
     }
 }
@@ -96,6 +100,7 @@ public struct TerrainResult {
 
 public final class OverworldGen {
     public let seed: UInt32
+    public let settings: WorldGenerationSettings
     public let climate: ClimateSampler
     let detail: FBM
     let cheese: FBM
@@ -117,9 +122,10 @@ public final class OverworldGen {
     private let LAVA = cell(B.lava)
     private let BEDROCK = cell(B.bedrock)
 
-    public init(_ seed: UInt32) {
+    public init(_ seed: UInt32, settings: WorldGenerationSettings = .normal) {
         self.seed = seed
-        climate = ClimateSampler(seed)
+        self.settings = settings
+        climate = ClimateSampler(seed, coordinateScale: settings.preset == .largeBiomes ? 4 : 1)
         detail = FBM(seed &+ 101, 4, 1 / 110, lacunarity: 2.2, persistence: 0.5)
         cheese = FBM(seed &+ 202, 3, 1 / 150, lacunarity: 2, persistence: 0.6)
         spag1 = FBM(seed &+ 303, 2, 1 / 92, lacunarity: 2, persistence: 0.5)
@@ -134,9 +140,28 @@ public final class OverworldGen {
         bandOffset = SimplexNoise(seed &+ 1212)
     }
 
+    private func terrainBaseHeight(_ cl: Climate) -> Double {
+        var h = baseHeight(cl)
+        if settings.preset == .moderateHillsResourceRich {
+            let seaDelta = h - Double(SEA)
+            let inland = clampD(mapRange(cl.c, -0.18, 0.24, 0, 1), 0, 1)
+            let compressed = seaDelta >= 0 ? seaDelta * 0.62 : seaDelta * 0.35
+            let rolling = max(0, cl.pv) * SPLINE_PV_AMP.at(cl.e) * 0.42 * inland
+            let smallVariation = cl.w * 4.0 * inland
+            return clampD(Double(SEA) + compressed + rolling + smallVariation, 54, 118)
+        }
+        guard settings.preset == .amplified else { return h }
+        let inland = clampD(mapRange(cl.c, -0.14, 0.2, 0, 1), 0, 1)
+        let upward = max(0, cl.pv) * SPLINE_PV_AMP.at(cl.e) * 1.25 * inland
+        let seaDelta = h - Double(SEA)
+        h = Double(SEA) + seaDelta * 1.45 + upward
+        if h > 300 { h = 300 + (h - 300) / 2 }
+        return min(h, 340)
+    }
+
     /// terrain height estimate from pure noise — usable anywhere without blocks
     public func heightEstimate(_ x: Double, _ z: Double) -> Int {
-        Int(detRound(baseHeight(climate.at(x, z))))
+        Int(detRound(terrainBaseHeight(climate.at(x, z))))
     }
 
     /// height estimate INCLUDING the 3D detail term the density function adds —
@@ -145,8 +170,16 @@ public final class OverworldGen {
     /// the same detail noise land within a couple of blocks of the actual terrain.
     public func refinedHeightEstimate(_ x: Double, _ z: Double) -> Int {
         let cl = climate.at(x, z)
-        let target = baseHeight(cl)
-        let amp = SPLINE_3D_AMP.at(cl.e) * clampD(mapRange(cl.c, -0.19, -0.05, 0.35, 1), 0.35, 1)
+        let target = terrainBaseHeight(cl)
+        let ampBase = SPLINE_3D_AMP.at(cl.e) * clampD(mapRange(cl.c, -0.19, -0.05, 0.35, 1), 0.35, 1)
+        let amp: Double
+        if settings.preset == .amplified {
+            amp = ampBase * 1.65
+        } else if settings.preset == .moderateHillsResourceRich {
+            amp = ampBase * 0.85
+        } else {
+            amp = ampBase
+        }
         var y = target + detail.sample3(x, target * 1.35, z) * amp
         y = target + detail.sample3(x, y * 1.35, z) * amp
         if y > 170 { y = 170 + (y - 170) / 1.55 }   // density's high-peak rounding term
@@ -154,7 +187,8 @@ public final class OverworldGen {
     }
 
     public func surfaceBiomeAt(_ x: Double, _ z: Double) -> Biome {
-        selectBiome(climate.at(x, z))
+        if settings.preset == .singleBiomeSurface { return settings.singleBiome }
+        return selectBiome(climate.at(x, z))
     }
 
     public func aquiferAt(_ x: Double, _ z: Double, _ cl: Climate) -> AquiferInfo {
@@ -167,6 +201,7 @@ public final class OverworldGen {
 
     /// -1 when no cave biome applies
     public func caveBiomeAt(_ x: Double, _ y: Int, _ z: Double, _ surfaceH: Int) -> Int {
+        if settings.preset == .singleBiomeSurface { return -1 }
         if y > surfaceH - 9 { return -1 }
         if y < 12 {
             let dd = deepDarkNoise.sample2(x, z)
@@ -209,8 +244,9 @@ public final class OverworldGen {
                 )
                 cl.pv = peaksValleys(cl.w)
                 climates[z * 16 + x] = cl
-                heights[z * 16 + x] = Int16(detRound(baseHeight(cl)))
-                surfaceBiomes[z * 16 + x] = UInt8(selectBiome(cl).rawValue)
+                heights[z * 16 + x] = Int16(detRound(terrainBaseHeight(cl)))
+                let surfaceBiome: Biome = settings.preset == .singleBiomeSurface ? settings.singleBiome : selectBiome(cl)
+                surfaceBiomes[z * 16 + x] = UInt8(surfaceBiome.rawValue)
             }
         }
 
@@ -224,8 +260,16 @@ public final class OverworldGen {
                 // min(15,…) clamp reused the x/z=15 column for the x/z=16 edge,
                 // so adjacent chunks disagreed about their shared boundary
                 let cl = climate.at(wx, wz)
-                let target = baseHeight(cl)
-                let amp = SPLINE_3D_AMP.at(cl.e) * clampD(mapRange(cl.c, -0.19, -0.05, 0.35, 1), 0.35, 1)
+                let target = terrainBaseHeight(cl)
+                let ampBase = SPLINE_3D_AMP.at(cl.e) * clampD(mapRange(cl.c, -0.19, -0.05, 0.35, 1), 0.35, 1)
+                let amp: Double
+                if settings.preset == .amplified {
+                    amp = ampBase * 1.65
+                } else if settings.preset == .moderateHillsResourceRich {
+                    amp = ampBase * 0.85
+                } else {
+                    amp = ampBase
+                }
                 for gy in 0..<NY {
                     let y = Double(GEN_MIN_Y + gy * 8)
                     var d = (target - y) + detail.sample3(wx, y * 1.35, wz) * amp
@@ -236,8 +280,10 @@ public final class OverworldGen {
                     if y < 58 {
                         let ch = cheese.sample3(wx * 0.9, y * 2.0, wz * 0.9)
                         let fade = clampD((58 - y) / 14, 0, 1) * clampD((y - Double(GEN_MIN_Y + 4)) / 10, 0, 1)
-                        if ch > 0.42 && fade > 0 {
-                            d = min(d, lerpD(d, (0.42 - ch) * 260, fade))
+                        let cheeseThreshold = settings.preset == .moderateHillsResourceRich ? 0.74 : 0.42
+                        let cheeseStrength = settings.preset == .moderateHillsResourceRich ? 120.0 : 260.0
+                        if ch > cheeseThreshold && fade > 0 {
+                            d = min(d, lerpD(d, (cheeseThreshold - ch) * cheeseStrength, fade))
                         }
                     }
                     // spaghetti caves
@@ -245,7 +291,9 @@ public final class OverworldGen {
                         let s1 = spag1.sample3(wx, y * 1.6, wz)
                         let s2 = spag2.sample3(wx, y * 1.6, wz)
                         let tube = max(abs(s1), abs(s2))
-                        let thresh = 0.065 + clampD((y - 60) / 240, 0, 0.03)
+                        let thresh = settings.preset == .moderateHillsResourceRich
+                            ? 0.025 + clampD((y - 60) / 240, 0, 0.012)
+                            : 0.065 + clampD((y - 60) / 240, 0, 0.03)
                         if tube < thresh {
                             let fade = clampD((y - Double(GEN_MIN_Y + 3)) / 8, 0, 1)
                             if fade > 0 { d = min(d, (tube - thresh) * 900 * fade) }
@@ -256,9 +304,11 @@ public final class OverworldGen {
                         let n1 = noodleA.sample3(wx, y * 1.8, wz)
                         let n2 = noodleB.sample3(wx, y * 1.8, wz)
                         let tube = max(abs(n1), abs(n2))
-                        if tube < 0.038 {
+                        let thresh = settings.preset == .moderateHillsResourceRich ? 0.014 : 0.038
+                        if tube < thresh {
                             let fade = clampD((y - Double(GEN_MIN_Y + 3)) / 8, 0, 1)
-                            if fade > 0 { d = min(d, (tube - 0.038) * 1200 * fade) }
+                            let strength = settings.preset == .moderateHillsResourceRich ? 650.0 : 1200.0
+                            if fade > 0 { d = min(d, (tube - thresh) * strength * fade) }
                         }
                     }
                     lattice[(gy * NZ + gz) * NX + gx] = Float(d)
@@ -353,20 +403,21 @@ public final class OverworldGen {
     /// worm carvers + ravines, deterministic per source chunk, range 4
     public func carve(_ cx: Int, _ cz: Int, _ blocks: inout [UInt16]) {
         let RANGE = 4
+        let rareCaverns = settings.preset == .moderateHillsResourceRich
         for ocz in (cz - RANGE)...(cz + RANGE) {
             for ocx in (cx - RANGE)...(cx + RANGE) {
                 var rng = chunkRandom(seed, ocx, ocz, 1337)
                 // worm caves: 1 in 3 chunks spawn a system
-                if rng.nextFloat() < 0.3 {
-                    let tunnels = 1 + rng.nextInt(3)
+                if rng.nextFloat() < (rareCaverns ? 0.06 : 0.3) {
+                    let tunnels = rareCaverns ? 1 : 1 + rng.nextInt(3)
                     for _ in 0..<tunnels {
                         var x = Double(ocx * 16 + rng.nextInt(16))
                         var y = Double(GEN_MIN_Y + 8 + rng.nextInt(100))
                         var z = Double(ocz * 16 + rng.nextInt(16))
                         var yaw = rng.nextFloat() * Double.pi * 2
                         var pitch = (rng.nextFloat() - 0.5) * 0.6
-                        let length = 40 + rng.nextInt(60)
-                        var radius = 1.4 + rng.nextFloat() * 1.8
+                        let length = rareCaverns ? 24 + rng.nextInt(24) : 40 + rng.nextInt(60)
+                        var radius = rareCaverns ? 0.9 + rng.nextFloat() * 1.0 : 1.4 + rng.nextFloat() * 1.8
                         for i in 0..<length {
                             x += detCos(yaw) * detCos(pitch)
                             y += detSin(pitch) * 0.7
@@ -374,24 +425,26 @@ public final class OverworldGen {
                             yaw += (rng.nextFloat() - 0.5) * 0.5
                             pitch = clampD(pitch + (rng.nextFloat() - 0.5) * 0.3, -0.9, 0.9)
                             let r = radius * (1 + detSin(Double(i) / Double(length) * Double.pi) * 0.8)
-                            if rng.nextFloat() < 0.02 { radius = 1.2 + rng.nextFloat() * 2.2 }
+                            if rng.nextFloat() < (rareCaverns ? 0.006 : 0.02) {
+                                radius = rareCaverns ? 0.8 + rng.nextFloat() * 1.1 : 1.2 + rng.nextFloat() * 2.2
+                            }
                             carveSphere(cx, cz, &blocks, x, y, z, r)
                             // occasional branching
-                            if i > 10 && rng.nextFloat() < 0.02 && tunnels < 4 {
+                            if i > 10 && rng.nextFloat() < (rareCaverns ? 0.004 : 0.02) && tunnels < 4 {
                                 yaw += (rng.nextBoolean() ? 1 : -1) * (0.8 + rng.nextFloat())
                             }
                         }
                     }
                 }
                 // ravines: rare
-                if rng.nextFloat() < 0.02 {
+                if rng.nextFloat() < (rareCaverns ? 0.003 : 0.02) {
                     var x = Double(ocx * 16 + rng.nextInt(16))
                     var z = Double(ocz * 16 + rng.nextInt(16))
                     let y = 20 + rng.nextInt(40)
                     var yaw = rng.nextFloat() * Double.pi * 2
-                    let length = 60 + rng.nextInt(50)
-                    let depth = 24 + rng.nextInt(36)
-                    let width = 2.2 + rng.nextFloat() * 2.4
+                    let length = rareCaverns ? 32 + rng.nextInt(35) : 60 + rng.nextInt(50)
+                    let depth = rareCaverns ? 14 + rng.nextInt(22) : 24 + rng.nextInt(36)
+                    let width = rareCaverns ? 1.4 + rng.nextFloat() * 1.4 : 2.2 + rng.nextFloat() * 2.4
                     for i in 0..<length {
                         x += detCos(yaw)
                         z += detSin(yaw)
@@ -570,6 +623,7 @@ public final class OverworldGen {
     /// ore placement
     public func placeOres(_ cx: Int, _ cz: Int, _ blocks: inout [UInt16], _ surfaceBiomes: [UInt8]) {
         var rng = chunkRandom(seed, cx, cz, 4242)
+        let resourceRich = settings.preset == .moderateHillsResourceRich
         func place(_ oreStone: UInt16, _ oreDeep: UInt16, _ attempts: Int, _ minY: Int, _ maxY: Int, _ size: Int, _ triangular: Bool, _ discardOnAir: Double = 0) {
             for _ in 0..<attempts {
                 let x = rng.nextInt(16), z = rng.nextInt(16)
@@ -584,37 +638,41 @@ public final class OverworldGen {
                 oreBlob(&blocks, &rng, x, y - GEN_MIN_Y, z, size, oreStone, oreDeep, discardOnAir)
             }
         }
+        func placeResource(_ oreStone: UInt16, _ oreDeep: UInt16, _ attempts: Int, _ minY: Int, _ maxY: Int, _ size: Int, _ triangular: Bool, _ discardOnAir: Double = 0) {
+            place(oreStone, oreDeep, attempts * (resourceRich ? 2 : 1), minY, maxY, size, triangular, discardOnAir)
+        }
         // vanilla 1.20 attempts/sizes/bands (the old numbers left mountains
         // nearly iron-free — 8 attempts vs vanilla's 90 — and misplaced coal)
-        place(cell(B.coal_ore), cell(B.deepslate_coal_ore), 30, 136, 320, 17, false)
-        place(cell(B.coal_ore), cell(B.deepslate_coal_ore), 20, 0, 192, 17, true, 0.5)
-        place(cell(B.iron_ore), cell(B.deepslate_iron_ore), 10, -24, 56, 9, true)
-        place(cell(B.iron_ore), cell(B.deepslate_iron_ore), 90, 80, 384, 9, true)
-        place(cell(B.iron_ore), cell(B.deepslate_iron_ore), 10, -64, 72, 4, false)
-        place(cell(B.copper_ore), cell(B.deepslate_copper_ore), 16, -16, 112, 10, true)
-        place(cell(B.gold_ore), cell(B.deepslate_gold_ore), 4, -64, 32, 9, true)
-        place(cell(B.gold_ore), cell(B.deepslate_gold_ore), 1, -64, -48, 9, false, 0.5)
-        place(cell(B.redstone_ore), cell(B.deepslate_redstone_ore), 4, -64, 15, 8, false)
-        place(cell(B.redstone_ore), cell(B.deepslate_redstone_ore), 8, -96, -32, 8, true)
-        place(cell(B.lapis_ore), cell(B.deepslate_lapis_ore), 2, -32, 32, 7, true)
-        place(cell(B.lapis_ore), cell(B.deepslate_lapis_ore), 4, -64, 64, 7, false, 1.0)
-        place(cell(B.diamond_ore), cell(B.deepslate_diamond_ore), 7, -144, 16, 8, true, 0.5)
-        if rng.nextInt(9) == 0 {   // vanilla "large diamond" — 1 in 9 chunks
+        placeResource(cell(B.coal_ore), cell(B.deepslate_coal_ore), 30, 136, 320, 17, false)
+        placeResource(cell(B.coal_ore), cell(B.deepslate_coal_ore), 20, 0, 192, 17, true, 0.5)
+        placeResource(cell(B.iron_ore), cell(B.deepslate_iron_ore), 10, -24, 56, 9, true)
+        placeResource(cell(B.iron_ore), cell(B.deepslate_iron_ore), 90, 80, 384, 9, true)
+        placeResource(cell(B.iron_ore), cell(B.deepslate_iron_ore), 10, -64, 72, 4, false)
+        placeResource(cell(B.copper_ore), cell(B.deepslate_copper_ore), 16, -16, 112, 10, true)
+        placeResource(cell(B.gold_ore), cell(B.deepslate_gold_ore), 4, -64, 32, 9, true)
+        placeResource(cell(B.gold_ore), cell(B.deepslate_gold_ore), 1, -64, -48, 9, false, 0.5)
+        placeResource(cell(B.redstone_ore), cell(B.deepslate_redstone_ore), 4, -64, 15, 8, false)
+        placeResource(cell(B.redstone_ore), cell(B.deepslate_redstone_ore), 8, -96, -32, 8, true)
+        placeResource(cell(B.lapis_ore), cell(B.deepslate_lapis_ore), 2, -32, 32, 7, true)
+        placeResource(cell(B.lapis_ore), cell(B.deepslate_lapis_ore), 4, -64, 64, 7, false, 1.0)
+        placeResource(cell(B.diamond_ore), cell(B.deepslate_diamond_ore), 7, -144, 16, 8, true, 0.5)
+        let largeDiamondRolls = resourceRich ? 2 : 1
+        for _ in 0..<largeDiamondRolls where rng.nextInt(9) == 0 {   // vanilla "large diamond" - 1 in 9 chunks
             place(cell(B.diamond_ore), cell(B.deepslate_diamond_ore), 1, -144, 16, 12, true, 0.7)
         }
-        place(cell(B.diamond_ore), cell(B.deepslate_diamond_ore), 4, -64, -48, 8, false, 1.0)
+        placeResource(cell(B.diamond_ore), cell(B.deepslate_diamond_ore), 4, -64, -48, 8, false, 1.0)
         // badlands bonus gold (was a feature no-op — badlands had no extra gold)
         let cBiome = Int(surfaceBiomes[8 * 16 + 8])
-        if cBiome == Biome.badlands.rawValue || cBiome == Biome.woodedBadlands.rawValue
+        if resourceRich || cBiome == Biome.badlands.rawValue || cBiome == Biome.woodedBadlands.rawValue
             || cBiome == Biome.erodedBadlands.rawValue {
-            place(cell(B.gold_ore), cell(B.deepslate_gold_ore), 50, 32, 256, 9, false)
+            place(cell(B.gold_ore), cell(B.deepslate_gold_ore), resourceRich ? 100 : 50, 32, 256, 9, false)
         }
         // emeralds in mountains
         let centerBiome = Int(surfaceBiomes[8 * 16 + 8])
         let emeraldBiomes = [Biome.windsweptHills, .windsweptGravellyHills, .meadow, .grove, .snowySlopes,
                              .jaggedPeaks, .frozenPeaks, .stonyPeaks, .cherryGrove, .windsweptForest].map { $0.rawValue }
-        if emeraldBiomes.contains(centerBiome) {
-            place(cell(B.emerald_ore), cell(B.deepslate_emerald_ore), 100, -16, 480, 3, true)
+        if resourceRich || emeraldBiomes.contains(centerBiome) {
+            place(cell(B.emerald_ore), cell(B.deepslate_emerald_ore), resourceRich ? 200 : 100, -16, 480, 3, true)
         }
         // stone variety blobs
         let TUFF = cell(B.tuff)

@@ -350,6 +350,7 @@ final class GameView: MTKView {
         guard let game, let ui = ui else { return }
         let shift = event.modifierFlags.contains(.shift)
         let ctrl = event.modifierFlags.contains(.control)
+        ui.optionDown = event.modifierFlags.contains(.option)
         ui.shiftDown = shift
         if ui.hasScreen() {
             // releases must still reach the game — eating them left the
@@ -375,6 +376,7 @@ final class GameView: MTKView {
             let (mx, my) = uiPos(event)
             ui.mouseX = mx
             ui.mouseY = my
+            ui.optionDown = event.modifierFlags.contains(.option)
             _ = screen.onMouseDown(ui, game, mx, my, btn)
             recaptureIfClear()
             return
