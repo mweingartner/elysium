@@ -19,6 +19,272 @@ public let AIAgentBiomeReworkRadius = 28
 public let AIAgentBiomeReworkMaxColumns = 2_048
 public let AIAgentBiomeReworkMaxTerrainWrites = 32_768
 public let AIAgentBiomeReworkMaxOreWrites = 4_096
+public let AIAgentMaxFillRegionRadius = 6
+public let AIAgentMaxFillRegionBlocks = 4_096
+public let AIAgentMaxEntityRemovalRadius = 48
+public let AIAgentMaxEntityRemoveCount = 128
+public let AIAgentMaxDamageAmount = 2_048
+public let AIAgentMaxEffectDurationSeconds = 3_600
+public let AIAgentMaxEffectAmplifier = 4
+public let AIAgentMaxXPAmount = 100_000
+
+public struct AIAgentSkillParameter: Equatable {
+    public let name: String
+    public let type: String
+    public let summary: String
+    public let enumValues: [String]?
+    public let minimum: Int?
+    public let maximum: Int?
+
+    public init(name: String, type: String, summary: String,
+                enumValues: [String]? = nil, minimum: Int? = nil, maximum: Int? = nil) {
+        self.name = name
+        self.type = type
+        self.summary = summary
+        self.enumValues = enumValues
+        self.minimum = minimum
+        self.maximum = maximum
+    }
+}
+
+public struct AIAgentSkillDefinition: Equatable {
+    public let name: String
+    public let summary: String
+    public let required: [String]
+    public let parameters: [AIAgentSkillParameter]
+
+    public init(name: String, summary: String, required: [String] = [],
+                parameters: [AIAgentSkillParameter] = []) {
+        self.name = name
+        self.summary = summary
+        self.required = required
+        self.parameters = parameters
+    }
+}
+
+public let allAIAgentSkills: [AIAgentSkillDefinition] = [
+    AIAgentSkillDefinition(
+        name: "say",
+        summary: "Reply without mutating world or player state.",
+        required: ["message"],
+        parameters: [
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "give_item",
+        summary: "Give a registered item to the local player inventory.",
+        required: ["item"],
+        parameters: [
+            AIAgentSkillParameter(name: "item", type: "string", summary: "Registered item id or display name."),
+            AIAgentSkillParameter(name: "count", type: "integer", summary: "Item count.", minimum: 1, maximum: AIAgentMaxGiveCount),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "place_block",
+        summary: "Place a registered block item at the cursor through normal placement rules.",
+        required: ["item", "target"],
+        parameters: [
+            AIAgentSkillParameter(name: "item", type: "string", summary: "Registered block item id or display name."),
+            AIAgentSkillParameter(name: "target", type: "string", summary: "Placement target.", enumValues: ["cursor"]),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "set_block_at_cursor",
+        summary: "Replace the block under the cursor with a registered block or air.",
+        required: ["block", "target"],
+        parameters: [
+            AIAgentSkillParameter(name: "block", type: "string", summary: "Registered block id/display name, or air."),
+            AIAgentSkillParameter(name: "target", type: "string", summary: "Mutation target.", enumValues: ["cursor"]),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "break_block",
+        summary: "Break the block under the cursor through the normal break/drop path.",
+        required: ["target"],
+        parameters: [
+            AIAgentSkillParameter(name: "target", type: "string", summary: "Break target.", enumValues: ["cursor"]),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "use_block",
+        summary: "Use or toggle the block under the cursor through normal right-click behavior.",
+        required: ["target"],
+        parameters: [
+            AIAgentSkillParameter(name: "target", type: "string", summary: "Use target.", enumValues: ["cursor"]),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "fill_hole",
+        summary: "Fill a bounded dirt-rimmed hole in front of the player.",
+        required: ["block", "target"],
+        parameters: [
+            AIAgentSkillParameter(name: "block", type: "string", summary: "Registered solid block id or display name."),
+            AIAgentSkillParameter(name: "target", type: "string", summary: "Hole search target.", enumValues: ["front"]),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "fill_region",
+        summary: "Fill a bounded cube around the cursor placement cell with a registered block or air.",
+        required: ["block", "target"],
+        parameters: [
+            AIAgentSkillParameter(name: "block", type: "string", summary: "Registered block id/display name, or air."),
+            AIAgentSkillParameter(name: "target", type: "string", summary: "Region center.", enumValues: ["cursor"]),
+            AIAgentSkillParameter(name: "radius", type: "integer", summary: "Cube radius around the cursor.", minimum: 0, maximum: AIAgentMaxFillRegionRadius),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "rework_biome",
+        summary: "Rework the currently loaded biome patch into the fixed rolling resource-rich profile.",
+        required: ["target", "profile"],
+        parameters: [
+            AIAgentSkillParameter(name: "target", type: "string", summary: "Biome target.", enumValues: ["current_biome"]),
+            AIAgentSkillParameter(name: "profile", type: "string", summary: "Supported biome profile.", enumValues: ["rolling_hills_resource_rich"]),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "set_time",
+        summary: "Set normalized world day time.",
+        parameters: [
+            AIAgentSkillParameter(name: "value", type: "string", summary: "day, noon, sunset, night, midnight, sunrise, or ticks."),
+            AIAgentSkillParameter(name: "ticks", type: "integer", summary: "Day time ticks.", minimum: 0, maximum: DAY_LENGTH - 1),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "set_weather",
+        summary: "Set clear, rain, or thunder weather.",
+        required: ["weather"],
+        parameters: [
+            AIAgentSkillParameter(name: "weather", type: "string", summary: "Weather state.", enumValues: ["clear", "rain", "thunder"]),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "spawn_entity",
+        summary: "Spawn registered mobs at the cursor placement cell.",
+        required: ["entity", "target"],
+        parameters: [
+            AIAgentSkillParameter(name: "entity", type: "string", summary: "Registered spawnable entity name."),
+            AIAgentSkillParameter(name: "count", type: "integer", summary: "Spawn count.", minimum: 1, maximum: AIAgentMaxSpawnCount),
+            AIAgentSkillParameter(name: "target", type: "string", summary: "Spawn target.", enumValues: ["cursor"]),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "remove_entities_nearby",
+        summary: "Remove non-player nearby entities, optionally limited to a registered entity name.",
+        parameters: [
+            AIAgentSkillParameter(name: "entity", type: "string", summary: "Registered spawnable entity name or all."),
+            AIAgentSkillParameter(name: "radius", type: "integer", summary: "Search radius around the player.", minimum: 1, maximum: AIAgentMaxEntityRemovalRadius),
+            AIAgentSkillParameter(name: "count", type: "integer", summary: "Maximum removals.", minimum: 1, maximum: AIAgentMaxEntityRemoveCount),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "eat_selected_food",
+        summary: "Eat one selected hotbar food item if normal food-use rules allow it.",
+        parameters: [
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "set_gamemode",
+        summary: "Set the local player game mode.",
+        required: ["mode"],
+        parameters: [
+            AIAgentSkillParameter(name: "mode", type: "string", summary: "Game mode.", enumValues: ["survival", "creative"]),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "heal_player",
+        summary: "Restore the local player's health, hunger, and saturation.",
+        parameters: [
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "damage_player",
+        summary: "Damage the local player by a bounded amount.",
+        required: ["amount"],
+        parameters: [
+            AIAgentSkillParameter(name: "amount", type: "integer", summary: "Damage amount.", minimum: 1, maximum: AIAgentMaxDamageAmount),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "apply_effect",
+        summary: "Apply or clear registered player status effects.",
+        required: ["effect"],
+        parameters: [
+            AIAgentSkillParameter(name: "effect", type: "string", summary: "Registered effect id, or clear."),
+            AIAgentSkillParameter(name: "duration", type: "integer", summary: "Duration in seconds.", minimum: 1, maximum: AIAgentMaxEffectDurationSeconds),
+            AIAgentSkillParameter(name: "amplifier", type: "integer", summary: "Zero-based amplifier.", minimum: 0, maximum: AIAgentMaxEffectAmplifier),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "clear_inventory",
+        summary: "Clear the local player's carried inventory, armor, and offhand.",
+        parameters: [
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "add_xp",
+        summary: "Add bounded XP points or levels to the local player.",
+        required: ["amount"],
+        parameters: [
+            AIAgentSkillParameter(name: "amount", type: "integer", summary: "XP amount.", minimum: 1, maximum: AIAgentMaxXPAmount),
+            AIAgentSkillParameter(name: "levels", type: "boolean", summary: "True to add levels instead of points."),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "set_spawnpoint",
+        summary: "Set the local player's spawn point to the current position and dimension.",
+        parameters: [
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "set_difficulty",
+        summary: "Set world difficulty through the app-provided world-global callback.",
+        required: ["value"],
+        parameters: [
+            AIAgentSkillParameter(name: "value", type: "string", summary: "Difficulty.", enumValues: ["peaceful", "easy", "normal", "hard"]),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "set_gamerule",
+        summary: "Set an existing game rule through the app-provided world-global callback.",
+        required: ["rule"],
+        parameters: [
+            AIAgentSkillParameter(name: "rule", type: "string", summary: "Existing game rule name."),
+            AIAgentSkillParameter(name: "enabled", type: "boolean", summary: "Boolean game rule value."),
+            AIAgentSkillParameter(name: "value", type: "string", summary: "Numeric or boolean game rule value."),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "teleport_player",
+        summary: "Teleport the local player to a safe player-relative destination.",
+        required: ["target"],
+        parameters: [
+            AIAgentSkillParameter(name: "target", type: "string", summary: "Teleport target.", enumValues: ["surface"]),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "replace_template_blocks",
+        summary: "Replace registered block families/types inside a saved object template.",
+        required: ["template", "from_block", "to_block"],
+        parameters: [
+            AIAgentSkillParameter(name: "template", type: "string", summary: "Saved template name."),
+            AIAgentSkillParameter(name: "from_block", type: "string", summary: "Source registered block or family."),
+            AIAgentSkillParameter(name: "to_block", type: "string", summary: "Replacement registered block."),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "create_template",
+        summary: "Create a bounded generated object template.",
+        required: ["template", "kind"],
+        parameters: [
+            AIAgentSkillParameter(name: "template", type: "string", summary: "New template name."),
+            AIAgentSkillParameter(name: "kind", type: "string", summary: "Generated object kind.", enumValues: ["pirate_ship", "ship", "boat"]),
+            AIAgentSkillParameter(name: "length", type: "integer", summary: "Requested object length.", minimum: 16, maximum: OBJECT_TEMPLATE_MAX_SPAN),
+            AIAgentSkillParameter(name: "style", type: "string", summary: "Short style description."),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+]
+
+public let aiAgentSkillActionNames: [String] = allAIAgentSkills.map(\.name)
 
 public struct AIAgentAction: Codable, Equatable {
     public var action: String
@@ -40,13 +306,25 @@ public struct AIAgentAction: Codable, Equatable {
     public var weather: String?
     public var ticks: Int?
     public var profile: String?
+    public var radius: Int?
+    public var amount: Int?
+    public var mode: String?
+    public var effect: String?
+    public var duration: Int?
+    public var amplifier: Int?
+    public var rule: String?
+    public var enabled: Bool?
+    public var levels: Bool?
 
     public init(action: String, item: String? = nil, block: String? = nil, count: Int? = nil,
                 target: String? = nil, message: String? = nil, template: String? = nil,
                 name: String? = nil, fromBlock: String? = nil, toBlock: String? = nil,
                 kind: String? = nil, length: Int? = nil, style: String? = nil,
                 entity: String? = nil, value: String? = nil, time: String? = nil,
-                weather: String? = nil, ticks: Int? = nil, profile: String? = nil) {
+                weather: String? = nil, ticks: Int? = nil, profile: String? = nil,
+                radius: Int? = nil, amount: Int? = nil, mode: String? = nil,
+                effect: String? = nil, duration: Int? = nil, amplifier: Int? = nil,
+                rule: String? = nil, enabled: Bool? = nil, levels: Bool? = nil) {
         self.action = action
         self.item = item
         self.block = block
@@ -66,11 +344,21 @@ public struct AIAgentAction: Codable, Equatable {
         self.weather = weather
         self.ticks = ticks
         self.profile = profile
+        self.radius = radius
+        self.amount = amount
+        self.mode = mode
+        self.effect = effect
+        self.duration = duration
+        self.amplifier = amplifier
+        self.rule = rule
+        self.enabled = enabled
+        self.levels = levels
     }
 
     enum CodingKeys: String, CodingKey {
         case action, item, block, count, target, message, template, name, kind, length, style
-        case entity, value, time, weather, ticks, profile
+        case entity, value, time, weather, ticks, profile, radius, amount, mode, effect, duration
+        case amplifier, rule, enabled, levels
         case fromBlock = "from_block"
         case toBlock = "to_block"
     }
@@ -146,6 +434,7 @@ public enum AIAgentError: Error, Equatable, CustomStringConvertible {
     case unknownItem(String)
     case itemNotPlaceable(String)
     case missingCursorTarget
+    case invalidTarget(String)
     case missingHoleTarget
     case holeFillTooLarge(Int, Int)
     case unloadedTarget(Int, Int, Int)
@@ -159,6 +448,21 @@ public enum AIAgentError: Error, Equatable, CustomStringConvertible {
     case missingEntity
     case unknownEntity(String)
     case entitySpawnFailed(String)
+    case blockBreakFailed(String)
+    case blockUseFailed(String)
+    case regionFillTooLarge(Int, Int)
+    case missingMode
+    case invalidMode(String)
+    case missingAmount
+    case invalidAmount(Int)
+    case missingEffect
+    case unknownEffect(String)
+    case missingDifficulty
+    case invalidDifficulty(String)
+    case missingGameRule
+    case unknownGameRule(String)
+    case invalidGameRuleValue(String)
+    case invalidTeleportTarget(String)
     case missingBiomeReworkTarget
     case unsupportedBiomeRework(String)
     case missingTemplateName
@@ -178,6 +482,7 @@ public enum AIAgentError: Error, Equatable, CustomStringConvertible {
         case .unknownItem(let item): return "Unknown item or block: \(item)"
         case .itemNotPlaceable(let item): return "\(item) is not placeable as a block"
         case .missingCursorTarget: return "No block is under the cursor"
+        case .invalidTarget(let value): return "Unsupported target: \(value)"
         case .missingHoleTarget: return "No fillable hole was found in front of the player"
         case .holeFillTooLarge(let count, let max): return "Hole fill is too large: \(count) blocks exceeds \(max)"
         case .unloadedTarget(let x, let y, let z): return "Target chunk is not loaded at \(x) \(y) \(z)"
@@ -191,6 +496,21 @@ public enum AIAgentError: Error, Equatable, CustomStringConvertible {
         case .missingEntity: return "AI action did not name a spawnable entity"
         case .unknownEntity(let value): return "Unknown spawnable entity: \(value)"
         case .entitySpawnFailed(let value): return "Could not spawn \(value) at the cursor"
+        case .blockBreakFailed(let value): return "Could not break block: \(value)"
+        case .blockUseFailed(let value): return "Could not use block: \(value)"
+        case .regionFillTooLarge(let count, let max): return "Region fill is too large: \(count) blocks exceeds \(max)"
+        case .missingMode: return "AI action did not name a game mode"
+        case .invalidMode(let value): return "Unknown game mode: \(value)"
+        case .missingAmount: return "AI action did not name an amount"
+        case .invalidAmount(let value): return "Invalid amount: \(value)"
+        case .missingEffect: return "AI action did not name an effect"
+        case .unknownEffect(let value): return "Unknown effect: \(value)"
+        case .missingDifficulty: return "AI action did not name a difficulty"
+        case .invalidDifficulty(let value): return "Unknown difficulty: \(value)"
+        case .missingGameRule: return "AI action did not name a game rule"
+        case .unknownGameRule(let value): return "Unknown game rule: \(value)"
+        case .invalidGameRuleValue(let value): return "Invalid game rule value: \(value)"
+        case .invalidTeleportTarget(let value): return "Unsupported teleport target: \(value)"
         case .missingBiomeReworkTarget: return "No loaded current biome area was found around the player"
         case .unsupportedBiomeRework(let value): return "Unsupported biome rework: \(value)"
         case .missingTemplateName: return "AI action did not name an object template"
@@ -336,6 +656,42 @@ public func resolveAIAgentWeather(_ raw: String?) -> (name: String, raining: Boo
     default:
         return nil
     }
+}
+
+public func resolveAIAgentGameMode(_ raw: String?) -> (name: String, value: Int)? {
+    guard let raw else { return nil }
+    switch normalizeAIAgentName(raw) {
+    case "survival", "0", "s": return ("Survival", GameMode.survival)
+    case "creative", "1", "c": return ("Creative", GameMode.creative)
+    default: return nil
+    }
+}
+
+public func resolveAIAgentDifficulty(_ raw: String?) -> (name: String, value: Int)? {
+    guard let raw else { return nil }
+    switch normalizeAIAgentName(raw) {
+    case "peaceful", "0": return ("Peaceful", 0)
+    case "easy", "1": return ("Easy", 1)
+    case "normal", "2": return ("Normal", 2)
+    case "hard", "3": return ("Hard", 3)
+    default: return nil
+    }
+}
+
+public func resolveAIAgentGameRuleValue(enabled: Bool?, value raw: String?) -> Double? {
+    if let enabled { return enabled ? 1 : 0 }
+    guard let raw else { return nil }
+    switch normalizeAIAgentName(raw) {
+    case "true", "yes", "on", "enabled", "enable": return 1
+    case "false", "no", "off", "disabled", "disable": return 0
+    default:
+        return Double(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+}
+
+private func resolveAIAgentBlockOrAir(_ raw: String) -> UInt16? {
+    if normalizeAIAgentName(raw) == "air" { return 0 }
+    return resolveAIAgentBlockID(raw)
 }
 
 public func resolveAIAgentBiomeReworkProfile(_ raw: String?) -> AIAgentBiomeReworkProfile? {
@@ -576,6 +932,14 @@ private func inferDirectAIAgentWorldMutationAction(from userRequest: String) -> 
     if let action = inferDirectAIAgentTimeAction(from: normalized) { return action }
     if let action = inferDirectAIAgentWeatherAction(from: normalized) { return action }
     if let action = inferDirectAIAgentSpawnEntityAction(from: normalized) { return action }
+    if let action = inferDirectAIAgentGameModeAction(from: normalized) { return action }
+    if let action = inferDirectAIAgentHealAction(from: normalized) { return action }
+    if let action = inferDirectAIAgentEatAction(from: normalized) { return action }
+    if let action = inferDirectAIAgentBlockUseAction(from: normalized) { return action }
+    if let action = inferDirectAIAgentBlockBreakAction(from: normalized) { return action }
+    if let action = inferDirectAIAgentSurfaceTeleportAction(from: normalized) { return action }
+    if let action = inferDirectAIAgentClearInventoryAction(from: normalized) { return action }
+    if let action = inferDirectAIAgentDifficultyAction(from: normalized) { return action }
     return nil
 }
 
@@ -711,6 +1075,84 @@ private func inferDirectAIAgentSpawnEntityAction(from normalized: String) -> AIA
     return AIAgentAction(action: "spawn_entity", count: count, target: "cursor", entity: entity)
 }
 
+private func inferDirectAIAgentGameModeAction(from normalized: String) -> AIAgentAction? {
+    let padded = " \(normalized) "
+    guard padded.contains(" game mode ") || padded.contains(" gamemode ") else { return nil }
+    guard [" set ", " change ", " switch ", " make "].contains(where: { padded.contains($0) }) else {
+        return nil
+    }
+    for word in normalized.split(separator: " ").map(String.init) {
+        if let resolved = resolveAIAgentGameMode(word) {
+            return AIAgentAction(action: "set_gamemode", mode: resolved.value == GameMode.creative ? "creative" : "survival")
+        }
+    }
+    return nil
+}
+
+private func inferDirectAIAgentHealAction(from normalized: String) -> AIAgentAction? {
+    let padded = " \(normalized) "
+    guard padded.contains(" heal me ") || padded.contains(" heal player ")
+        || padded.contains(" restore my health ") || padded.contains(" restore health ") else { return nil }
+    return AIAgentAction(action: "heal_player")
+}
+
+private func inferDirectAIAgentEatAction(from normalized: String) -> AIAgentAction? {
+    let padded = " \(normalized) "
+    guard padded.contains(" eat ") || padded.contains(" use food ") || padded.contains(" consume food ") else { return nil }
+    guard padded.contains(" selected ") || padded.contains(" held ") || padded.contains(" current ") else { return nil }
+    return AIAgentAction(action: "eat_selected_food")
+}
+
+private func inferDirectAIAgentBlockUseAction(from normalized: String) -> AIAgentAction? {
+    let padded = " \(normalized) "
+    let hasCursor = padded.contains(" cursor ") || padded.contains(" crosshair ")
+        || padded.contains(" looking at ") || padded.contains(" look at ")
+    guard hasCursor else { return nil }
+    guard [" use ", " toggle ", " open ", " close ", " activate "].contains(where: { padded.contains($0) }) else {
+        return nil
+    }
+    return AIAgentAction(action: "use_block", target: "cursor")
+}
+
+private func inferDirectAIAgentBlockBreakAction(from normalized: String) -> AIAgentAction? {
+    let padded = " \(normalized) "
+    let hasCursor = padded.contains(" cursor ") || padded.contains(" crosshair ")
+        || padded.contains(" looking at ") || padded.contains(" look at ")
+    guard hasCursor else { return nil }
+    guard [" break ", " mine ", " destroy ", " remove "].contains(where: { padded.contains($0) }) else {
+        return nil
+    }
+    return AIAgentAction(action: "break_block", target: "cursor")
+}
+
+private func inferDirectAIAgentSurfaceTeleportAction(from normalized: String) -> AIAgentAction? {
+    let padded = " \(normalized) "
+    guard padded.contains(" surface ") || padded.contains(" top ") else { return nil }
+    guard [" bring ", " teleport ", " move ", " tp "].contains(where: { padded.contains($0) }) else {
+        return nil
+    }
+    return AIAgentAction(action: "teleport_player", target: "surface")
+}
+
+private func inferDirectAIAgentClearInventoryAction(from normalized: String) -> AIAgentAction? {
+    let padded = " \(normalized) "
+    guard padded.contains(" inventory ") else { return nil }
+    guard padded.contains(" clear ") || padded.contains(" empty ") else { return nil }
+    return AIAgentAction(action: "clear_inventory")
+}
+
+private func inferDirectAIAgentDifficultyAction(from normalized: String) -> AIAgentAction? {
+    let padded = " \(normalized) "
+    guard padded.contains(" difficulty ") else { return nil }
+    guard [" set ", " change ", " make "].contains(where: { padded.contains($0) }) else { return nil }
+    for word in normalized.split(separator: " ").map(String.init) {
+        if let resolved = resolveAIAgentDifficulty(word) {
+            return AIAgentAction(action: "set_difficulty", value: resolved.name.lowercased())
+        }
+    }
+    return nil
+}
+
 private func normalizeAIAgentRequestText(_ raw: String) -> String {
     var out = ""
     for scalar in raw.lowercased().unicodeScalars {
@@ -775,6 +1217,49 @@ public func parseAIAgentAction(from raw: String) throws -> AIAgentAction {
     guard data.count <= AIAgentMaxModelJSONBytes else { throw AIAgentError.responseTooLarge }
     do {
         return try JSONDecoder().decode(AIAgentAction.self, from: data)
+    } catch {
+        throw AIAgentError.malformedJSON
+    }
+}
+
+public func aiAgentActionName(fromToolName raw: String) -> String? {
+    let normalized = normalizeAIAgentName(raw)
+    var candidates = [normalized]
+    if normalized.hasPrefix("pebble_") {
+        candidates.append(String(normalized.dropFirst("pebble_".count)))
+    }
+    if let last = raw.split(separator: ".").last {
+        let lastName = normalizeAIAgentName(String(last))
+        candidates.append(lastName)
+        if lastName.hasPrefix("pebble_") {
+            candidates.append(String(lastName.dropFirst("pebble_".count)))
+        }
+    }
+    for candidate in candidates where aiAgentSkillActionNames.contains(candidate) {
+        return candidate
+    }
+    return nil
+}
+
+public func parseAIAgentAction(fromToolCallName name: String, argumentsJSONData data: Data) throws -> AIAgentAction {
+    guard data.count <= AIAgentMaxModelJSONBytes else { throw AIAgentError.responseTooLarge }
+    guard let actionName = aiAgentActionName(fromToolName: name) else {
+        throw AIAgentError.unsupportedAction(name)
+    }
+    do {
+        guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AIAgentError.malformedJSON
+        }
+        if object["action"] == nil {
+            object["action"] = actionName
+        }
+        guard let encoded = try? JSONSerialization.data(withJSONObject: object),
+              encoded.count <= AIAgentMaxModelJSONBytes else {
+            throw AIAgentError.responseTooLarge
+        }
+        return try JSONDecoder().decode(AIAgentAction.self, from: encoded)
+    } catch let error as AIAgentError {
+        throw error
     } catch {
         throw AIAgentError.malformedJSON
     }
@@ -1497,8 +1982,19 @@ public func executeAIAgentTemplateAction(_ action: AIAgentAction,
 }
 
 public func executeAIAgentAction(_ action: AIAgentAction, world: World, player: Player,
-                                 cursor: RaycastHit?) throws -> AIAgentExecutionResult {
+                                 cursor: RaycastHit?,
+                                 openScreen: @escaping (String, ScreenData?) -> Void = { _, _ in },
+                                 advance: @escaping (String) -> Void = { _ in },
+                                 persistPlayerState: @escaping () -> Void = {},
+                                 setDifficulty: ((Int) -> Void)? = nil,
+                                 setGameRule: ((String, Double) -> Void)? = nil) throws -> AIAgentExecutionResult {
     let kind = normalizeAIAgentName(action.action)
+    let interactCtx = InteractCtx(
+        world: world,
+        player: player,
+        openScreen: openScreen,
+        advance: advance,
+        persistPlayerState: persistPlayerState)
     switch kind {
     case "say", "reply", "none":
         let message = sanitizeAIAgentChatMessage(action.message, fallback: "I inspected the current game state.")
@@ -1525,6 +2021,7 @@ public func executeAIAgentAction(_ action: AIAgentAction, world: World, player: 
                                       changedWorld: false)
 
     case "place_block", "place":
+        try requireAIAgentTarget(action, expected: "cursor")
         guard let rawBlock = action.block ?? action.item else { throw AIAgentError.missingItem }
         guard let blockId = resolveAIAgentBlockID(rawBlock), blockId != 0 else {
             throw AIAgentError.itemNotPlaceable(rawBlock)
@@ -1545,13 +2042,56 @@ public func executeAIAgentAction(_ action: AIAgentAction, world: World, player: 
         player.inventory[slot] = temp
         defer { player.inventory[slot] = original }
 
-        let ok = placeBlock(InteractCtx(world: world, player: player), cursor, Int(blockId), temp)
+        let ok = placeBlock(interactCtx, cursor, Int(blockId), temp)
         guard ok else { throw AIAgentError.placementFailed(blockDefs[Int(blockId)].name) }
         let fallback = "Placed \(blockDefs[Int(blockId)].displayName) at \(target.x) \(target.y) \(target.z)"
         return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
                                       changedWorld: true)
 
+    case "set_block_at_cursor", "setblock_cursor", "replace_block_at_cursor":
+        try requireAIAgentTarget(action, expected: "cursor")
+        guard let rawBlock = action.block ?? action.item else { throw AIAgentError.missingItem }
+        guard let blockId = resolveAIAgentBlockOrAir(rawBlock) else { throw AIAgentError.unknownBlock(rawBlock) }
+        guard let cursor else { throw AIAgentError.missingCursorTarget }
+        try validateAIAgentBlockTarget(world: world, player: player, x: cursor.x, y: cursor.y, z: cursor.z)
+        let newCell = blockId == 0 ? 0 : Int(cell(blockId, 0))
+        let old = world.setBlock(cursor.x, cursor.y, cursor.z, newCell)
+        let changed = old != newCell
+        let blockName = blockId == 0 ? "Air" : blockDefs[Int(blockId)].displayName
+        let fallback = "Set cursor block to \(blockName) at \(cursor.x) \(cursor.y) \(cursor.z)."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: changed)
+
+    case "break_block", "mine_block", "destroy_block":
+        try requireAIAgentTarget(action, expected: "cursor")
+        guard let cursor else { throw AIAgentError.missingCursorTarget }
+        try validateAIAgentBlockTarget(world: world, player: player, x: cursor.x, y: cursor.y, z: cursor.z)
+        let id = world.getBlockId(cursor.x, cursor.y, cursor.z)
+        guard id != 0 else { throw AIAgentError.blockBreakFailed("air") }
+        let blockName = blockDefs[id].displayName
+        finishBreaking(interactCtx, cursor.x, cursor.y, cursor.z)
+        let fallback = "Broke \(blockName) at \(cursor.x) \(cursor.y) \(cursor.z)."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: true)
+
+    case "use_block", "toggle_block", "open_block", "activate_block":
+        try requireAIAgentTarget(action, expected: "cursor")
+        guard let cursor else { throw AIAgentError.missingCursorTarget }
+        guard world.isLoadedAt(cursor.x, cursor.z) else {
+            throw AIAgentError.unloadedTarget(cursor.x, cursor.y, cursor.z)
+        }
+        guard cursor.y >= world.info.minY && cursor.y < world.info.minY + world.info.height else {
+            throw AIAgentError.targetOutOfWorld(cursor.x, cursor.y, cursor.z)
+        }
+        guard useBlock(interactCtx, cursor) else {
+            throw AIAgentError.blockUseFailed(blockName(cursor.cell >> 4))
+        }
+        let fallback = "Used \(blockName(cursor.cell >> 4)) at \(cursor.x) \(cursor.y) \(cursor.z)."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: true)
+
     case "fill_hole", "fill_hole_in_front":
+        try requireAIAgentTarget(action, expected: "front")
         guard let rawBlock = action.block ?? action.item else { throw AIAgentError.missingItem }
         guard let blockId = resolveAIAgentBlockID(rawBlock), blockId != 0 else {
             throw AIAgentError.itemNotPlaceable(rawBlock)
@@ -1560,6 +2100,20 @@ public func executeAIAgentAction(_ action: AIAgentAction, world: World, player: 
         let fallback = "Filled \(result.filledBlocks) blocks with \(blockDefs[Int(blockId)].displayName)."
         return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
                                       changedWorld: result.filledBlocks > 0)
+
+    case "fill_region", "fill_box", "fill_cube":
+        try requireAIAgentTarget(action, expected: "cursor")
+        guard let rawBlock = action.block ?? action.item else { throw AIAgentError.missingItem }
+        guard let blockId = resolveAIAgentBlockOrAir(rawBlock) else { throw AIAgentError.unknownBlock(rawBlock) }
+        guard let cursor else { throw AIAgentError.missingCursorTarget }
+        let target = aiCursorPlacementPosition(cursor, in: world)
+        let result = try fillAIAgentRegion(world: world, player: player, center: target,
+                                           radius: action.radius ?? action.count ?? 0,
+                                           blockId: blockId)
+        let blockName = blockId == 0 ? "Air" : blockDefs[Int(blockId)].displayName
+        let fallback = "Filled \(result) blocks with \(blockName)."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: result > 0)
 
     case "rework_biome", "change_biome", "terraform_biome", "reshape_biome":
         let rawProfile = action.profile ?? action.kind ?? action.value ?? action.style
@@ -1599,6 +2153,7 @@ public func executeAIAgentAction(_ action: AIAgentAction, world: World, player: 
                                       changedWorld: true)
 
     case "spawn_entity", "spawn_mob", "summon":
+        try requireAIAgentTarget(action, expected: "cursor")
         guard let rawEntity = action.entity ?? action.name ?? action.kind else { throw AIAgentError.missingEntity }
         guard let entityName = resolveAIAgentEntityName(rawEntity) else { throw AIAgentError.unknownEntity(rawEntity) }
         guard let cursor else { throw AIAgentError.missingCursorTarget }
@@ -1633,6 +2188,145 @@ public func executeAIAgentAction(_ action: AIAgentAction, world: World, player: 
         return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
                                       changedWorld: true)
 
+    case "remove_entities_nearby", "kill_entities_nearby", "clear_entities_nearby":
+        let result = try removeAIAgentNearbyEntities(world: world, player: player, rawEntity: action.entity ?? action.kind ?? action.name,
+                                                     radius: action.radius, count: action.count)
+        let fallback = "Removed \(result) nearby non-player entit\(result == 1 ? "y" : "ies")."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: result > 0)
+
+    case "eat_selected_food", "eat_food", "consume_selected_food":
+        guard consumeSelectedFoodNow(interactCtx) else {
+            throw AIAgentError.blockUseFailed("selected food")
+        }
+        let fallback = "Ate the selected food."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: false)
+
+    case "set_gamemode", "gamemode":
+        guard let rawMode = action.mode ?? action.value ?? action.kind else { throw AIAgentError.missingMode }
+        guard let resolved = resolveAIAgentGameMode(rawMode) else { throw AIAgentError.invalidMode(rawMode) }
+        player.setGameMode(resolved.value)
+        player.flying = player.flying && player.gameMode == GameMode.creative
+        let fallback = "Game mode set to \(resolved.name)."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: false)
+
+    case "heal_player", "heal":
+        player.health = player.maxHealth
+        player.hunger = 20
+        player.saturation = 20
+        let fallback = "Healed the player."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: false)
+
+    case "damage_player", "hurt_player":
+        let amount = action.amount ?? action.count ?? action.ticks ?? 0
+        guard amount > 0 else { throw AIAgentError.missingAmount }
+        guard amount <= AIAgentMaxDamageAmount else { throw AIAgentError.invalidAmount(amount) }
+        _ = player.hurt(Double(amount), "magic")
+        let fallback = "Damaged the player by \(amount)."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: false)
+
+    case "apply_effect", "effect":
+        guard let rawEffect = action.effect ?? action.value ?? action.kind else { throw AIAgentError.missingEffect }
+        let effectName = normalizeAIAgentName(rawEffect)
+        if effectName == "clear" || effectName == "none" {
+            player.clearEffects()
+            let fallback = "Cleared player effects."
+            return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                          changedWorld: false)
+        }
+        guard EFFECT_BY_ID[effectName] != nil else { throw AIAgentError.unknownEffect(rawEffect) }
+        let durationSeconds = min(AIAgentMaxEffectDurationSeconds, max(1, action.duration ?? action.ticks ?? 30))
+        let amplifier = min(AIAgentMaxEffectAmplifier, max(0, action.amplifier ?? action.count ?? 0))
+        player.addEffect(effectName, durationSeconds * 20, amplifier)
+        let fallback = "Applied \(effectName) \(amplifier + 1) for \(durationSeconds)s."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: false)
+
+    case "clear_inventory", "clear_player_inventory":
+        for i in 0..<player.inventory.count { player.inventory[i] = nil }
+        for i in 0..<player.armor.count { player.armor[i] = nil }
+        player.offHand = nil
+        let fallback = "Cleared the player inventory."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: false)
+
+    case "add_xp", "add_experience":
+        let amount = action.amount ?? action.count ?? 0
+        guard amount > 0 else { throw AIAgentError.missingAmount }
+        guard amount <= AIAgentMaxXPAmount else { throw AIAgentError.invalidAmount(amount) }
+        if action.levels == true || normalizeAIAgentName(action.kind ?? action.value ?? "") == "levels" {
+            player.xpLevel += amount
+            let fallback = "Added \(amount) XP level\(amount == 1 ? "" : "s")."
+            return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                          changedWorld: false)
+        }
+        player.addXP(amount)
+        let fallback = "Added \(amount) XP."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: false)
+
+    case "set_spawnpoint", "spawnpoint":
+        player.spawnPoint = (ifloor(player.x), ifloor(player.y), ifloor(player.z))
+        player.spawnDim = world.dim.rawValue
+        persistPlayerState()
+        let fallback = "Spawn point set at \(player.spawnPoint!.0) \(player.spawnPoint!.1) \(player.spawnPoint!.2)."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: false)
+
+    case "set_difficulty", "difficulty":
+        let raw = action.value ?? action.kind ?? action.mode
+        guard raw != nil else { throw AIAgentError.missingDifficulty }
+        guard let resolved = resolveAIAgentDifficulty(raw) else { throw AIAgentError.invalidDifficulty(raw ?? "") }
+        if let setDifficulty {
+            setDifficulty(resolved.value)
+        } else {
+            world.difficulty = resolved.value
+        }
+        let fallback = "Difficulty set to \(resolved.name)."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: true)
+
+    case "set_gamerule", "gamerule":
+        guard let rawRule = action.rule ?? action.name ?? action.kind else { throw AIAgentError.missingGameRule }
+        guard let rule = world.gameRules.keys.first(where: { normalizeAIAgentName($0) == normalizeAIAgentName(rawRule) }) else {
+            throw AIAgentError.unknownGameRule(rawRule)
+        }
+        guard let value = resolveAIAgentGameRuleValue(enabled: action.enabled, value: action.value) else {
+            throw AIAgentError.invalidGameRuleValue(action.value ?? "")
+        }
+        if let setGameRule {
+            setGameRule(rule, value)
+        } else {
+            world.gameRules[rule] = value
+        }
+        let fallback = "\(rule) = \(value)."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: true)
+
+    case "teleport_player", "teleport":
+        let target = normalizeAIAgentName(action.target ?? action.value ?? "")
+        guard target == "surface" || target == "top" else {
+            throw AIAgentError.invalidTeleportTarget(action.target ?? action.value ?? "")
+        }
+        let sx = ifloor(player.x)
+        let sz = ifloor(player.z)
+        guard world.isLoadedAt(sx, sz) else {
+            throw AIAgentError.unloadedTarget(sx, ifloor(player.y), sz)
+        }
+        let sy = world.surfaceY(sx, sz)
+        player.setPos(player.x, Double(sy), player.z)
+        player.vx = 0
+        player.vy = 0
+        player.vz = 0
+        player.fallDistance = 0
+        let fallback = "Teleported player to the surface at y=\(sy)."
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
+                                      changedWorld: false)
+
     default:
         throw AIAgentError.unsupportedAction(action.action)
     }
@@ -1643,6 +2337,101 @@ private func placeableItemID(for blockId: UInt16) -> Int? {
     guard idx >= 0 && idx < blockToItem.count else { return nil }
     let itemId = blockToItem[idx]
     return itemId >= 0 ? Int(itemId) : nil
+}
+
+private func requireAIAgentTarget(_ action: AIAgentAction, expected: String) throws {
+    guard let raw = action.target else { return }
+    guard normalizeAIAgentName(raw) == expected else {
+        throw AIAgentError.invalidTarget(raw)
+    }
+}
+
+private func validateAIAgentBlockTarget(world: World, player: Player, x: Int, y: Int, z: Int) throws {
+    guard y >= world.info.minY && y < world.info.minY + world.info.height else {
+        throw AIAgentError.targetOutOfWorld(x, y, z)
+    }
+    guard world.isLoadedAt(x, z) else {
+        throw AIAgentError.unloadedTarget(x, y, z)
+    }
+    let id = world.getBlockId(x, y, z)
+    if id > 0 && blockDefs[id].hardness < 0 && player.gameMode != GameMode.creative {
+        throw AIAgentError.blockBreakFailed(blockDefs[id].name)
+    }
+}
+
+private func fillAIAgentRegion(world: World, player: Player, center: (x: Int, y: Int, z: Int),
+                               radius rawRadius: Int, blockId: UInt16) throws -> Int {
+    let radius = rawRadius
+    guard radius >= 0 else { throw AIAgentError.invalidAmount(radius) }
+    let side = radius * 2 + 1
+    let volume = side * side * side
+    guard radius <= AIAgentMaxFillRegionRadius, volume <= AIAgentMaxFillRegionBlocks else {
+        throw AIAgentError.regionFillTooLarge(volume, AIAgentMaxFillRegionBlocks)
+    }
+    let newCell = blockId == 0 ? 0 : Int(cell(blockId, 0))
+    var targets: [(x: Int, y: Int, z: Int)] = []
+    for y in (center.y - radius)...(center.y + radius) {
+        for z in (center.z - radius)...(center.z + radius) {
+            for x in (center.x - radius)...(center.x + radius) {
+                try validateAIAgentBlockTarget(world: world, player: player, x: x, y: y, z: z)
+                targets.append((x, y, z))
+            }
+        }
+    }
+    var changed = 0
+    for target in targets.sorted(by: {
+        if $0.y != $1.y { return $0.y < $1.y }
+        if $0.z != $1.z { return $0.z < $1.z }
+        return $0.x < $1.x
+    }) {
+        let old = world.setBlock(target.x, target.y, target.z, newCell)
+        if old != newCell { changed += 1 }
+    }
+    return changed
+}
+
+private func removeAIAgentNearbyEntities(world: World, player: Player, rawEntity: String?,
+                                         radius rawRadius: Int?, count rawCount: Int?) throws -> Int {
+    let radius = min(AIAgentMaxEntityRemovalRadius, max(1, rawRadius ?? 16))
+    let limit = min(AIAgentMaxEntityRemoveCount, max(1, rawCount ?? AIAgentMaxEntityRemoveCount))
+    let filterName: String?
+    if let rawEntity, !rawEntity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let normalized = normalizeAIAgentName(rawEntity)
+        if normalized == "all" || normalized == "entities" || normalized == "entity" {
+            filterName = nil
+        } else if normalized == "item" || normalized == "items" || normalized == "dropped_item" || normalized == "dropped_items" {
+            filterName = "item"
+        } else if normalized == "xp" || normalized == "xp_orb" || normalized == "experience_orb" {
+            filterName = "xp_orb"
+        } else if let resolved = resolveAIAgentEntityName(rawEntity) {
+            filterName = resolved
+        } else {
+            throw AIAgentError.unknownEntity(rawEntity)
+        }
+    } else {
+        filterName = nil
+    }
+
+    let candidates = world.getEntitiesNear(player.x, player.y, player.z, Double(radius)) { ref in
+        guard let entity = ref as? Entity, !entity.isPlayer else { return false }
+        if let filterName { return entity.type == filterName }
+        return true
+    }.compactMap { $0 as? Entity }
+        .sorted {
+            let da = squaredDistance($0.x, $0.y, $0.z, player.x, player.y, player.z)
+            let db = squaredDistance($1.x, $1.y, $1.z, player.x, player.y, player.z)
+            if da != db { return da < db }
+            return $0.id < $1.id
+        }
+        .prefix(limit)
+
+    var removed = 0
+    for entity in candidates {
+        entity.remove()
+        world.removeEntity(entity)
+        removed += 1
+    }
+    return removed
 }
 
 private func canAIAgentSpawnEntity(at target: (x: Int, y: Int, z: Int), in world: World) -> Bool {
@@ -1756,29 +2545,27 @@ public func buildAIAgentPrompt(userRequest: String, world: World, player: Player
     let snapshot = buildAIAgentSnapshot(world: world, player: player, cursor: cursor,
                                         savedTemplates: savedTemplates,
                                         savedTemplateSummaries: savedTemplateSummaries)
+    let allowedActions = allAIAgentSkills.map(aiAgentPromptLine).joined(separator: "\n")
     let prompt = """
 You are Pebble's local in-game AI agent. Inspect the state below and return exactly one JSON object. Do not use markdown.
 
 Allowed actions:
-{"action":"say","message":"short answer"}
-{"action":"give_item","item":"registered_item_id_or_display_name","count":1,"message":"short answer"}
-{"action":"place_block","item":"registered_block_item_or_block_id","target":"cursor","message":"short answer"}
-{"action":"fill_hole","block":"registered_solid_block_id_or_display_name","target":"front","message":"short answer"}
-{"action":"set_time","value":"day|noon|sunset|night|midnight|sunrise|ticks","message":"short answer"}
-{"action":"set_weather","weather":"clear|rain|thunder","message":"short answer"}
-{"action":"spawn_entity","entity":"registered_spawnable_entity_name","count":1,"target":"cursor","message":"short answer"}
-{"action":"rework_biome","target":"current_biome","profile":"rolling_hills_resource_rich","message":"short answer"}
-{"action":"replace_template_blocks","template":"saved_template_name","from_block":"wood blocks","to_block":"bamboo","message":"short answer"}
-{"action":"create_template","template":"new_template_name","kind":"pirate_ship","length":50,"style":"short style description","message":"short answer"}
+\(allowedActions)
 
 Rules:
 - Use only registered item or block names shown in the state.
-- To place at the current cursor location, use action "place_block" and target "cursor".
+- Use cursor/front/current_biome/surface targets only where the selected action explicitly allows them. Do not invent coordinates.
+- To place at the current cursor location, use action "place_block" and target "cursor". To replace the targeted block directly, use "set_block_at_cursor".
+- To break or use/toggle a targeted block, use "break_block" or "use_block" with target "cursor".
 - To fill a hole in front of the player, use action "fill_hole" and target "front"; the engine will find the bounded connected empty cavity below the local ground plane.
+- To fill a region, use "fill_region", target "cursor", and radius \(AIAgentMaxFillRegionRadius) or lower; the engine preflights loaded chunks and world height.
 - To change time of day, use action "set_time"; ticks are normalized to one day and presets are day, noon, sunset, night, midnight, or sunrise.
 - To change weather, use action "set_weather"; only clear, rain, and thunder are allowed.
 - To spawn an animal or monster at the current cursor location, use action "spawn_entity", target "cursor", and one of the registered spawnable entity names. Keep count small.
+- To remove nearby entities, use "remove_entities_nearby"; players are never removed by this action.
 - To rework the terrain/biome the player is standing in, use action "rework_biome", target "current_biome", and profile "rolling_hills_resource_rich". The engine chooses the loaded current biome patch; do not provide coordinates.
+- For player state, use "set_gamemode", "heal_player", "damage_player", "apply_effect", "clear_inventory", "add_xp", "set_spawnpoint", "eat_selected_food", or "teleport_player" with target "surface".
+- For global world settings, use "set_difficulty" or "set_gamerule"; only existing gamerule names are accepted.
 - To create a non-placeable item, use action "give_item".
 - A request for "a stack" means the item's maximum stack size, usually 64.
 - To edit a saved object template, use "replace_template_blocks"; "wood blocks" means every registered wood-family block in that template.
@@ -1793,6 +2580,24 @@ Game state:
 """
     if prompt.count <= AIAgentMaxPromptCharacters { return prompt }
     return String(prompt.prefix(AIAgentMaxPromptCharacters))
+}
+
+private func aiAgentPromptLine(_ skill: AIAgentSkillDefinition) -> String {
+    let fields = skill.parameters.map { parameter -> String in
+        var pieces = ["\"\(parameter.name)\":\(parameter.type)"]
+        if let enumValues = parameter.enumValues {
+            pieces.append("enum=\(enumValues.joined(separator: "|"))")
+        }
+        if let minimum = parameter.minimum {
+            pieces.append("min=\(minimum)")
+        }
+        if let maximum = parameter.maximum {
+            pieces.append("max=\(maximum)")
+        }
+        return pieces.joined(separator: " ")
+    }.joined(separator: ", ")
+    let required = skill.required.isEmpty ? "" : " required=\(skill.required.joined(separator: ","))"
+    return "- {\"action\":\"\(skill.name)\"}\(required): \(skill.summary) \(fields)"
 }
 
 private func squaredDistance(_ ax: Double, _ ay: Double, _ az: Double,

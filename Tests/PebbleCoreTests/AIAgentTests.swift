@@ -29,6 +29,33 @@ final class AIAgentTests: XCTestCase {
         return (world, player, hit)
     }
 
+    private func makeCenteredWorldAndPlayer() -> (World, Player, RaycastHit) {
+        registerCoreIfNeeded()
+        let world = World(dim: .overworld, seed: 780)
+        let info = dimInfo(.overworld)
+        let chunk = Chunk(cx: 0, cz: 0, minY: info.minY, height: info.height)
+        chunk.status = .lit
+        for z in 0..<16 {
+            for x in 0..<16 {
+                chunk.set(x, 62, z, cell(B.stone))
+                chunk.set(x, 63, z, cell(B.grass_block))
+            }
+        }
+        chunk.buildHeightmap()
+        world.setChunk(chunk)
+        world.light.initChunkLight(chunk)
+
+        let player = Player(world: world)
+        player.setPos(4.5, 64, 8.5)
+        player.yaw = .pi
+        player.pitch = 0
+        player.selectedSlot = 0
+        world.addEntity(player)
+        let hit = RaycastHit(x: 4, y: 63, z: 4, face: Dir.up, cell: Int(cell(B.grass_block)),
+                             t: 1, px: 4.5, py: 64, pz: 4.5)
+        return (world, player, hit)
+    }
+
     private func makeFlatWorldWithDeepHole() -> (World, Player) {
         registerCoreIfNeeded()
         let world = World(dim: .overworld, seed: 778)
@@ -114,6 +141,27 @@ final class AIAgentTests: XCTestCase {
     func testParseRejectsNonJSONModelText() {
         XCTAssertThrowsError(try parseAIAgentAction(from: "place a crafting table now")) { error in
             XCTAssertEqual(error as? AIAgentError, .malformedJSON)
+        }
+    }
+
+    func testSkillCatalogHasUniqueActionsAndToolCallParserInjectsAction() throws {
+        let names = aiAgentSkillActionNames
+
+        XCTAssertEqual(Set(names).count, names.count)
+        XCTAssertTrue(names.contains("break_block"))
+        XCTAssertTrue(names.contains("use_block"))
+        XCTAssertTrue(names.contains("set_gamerule"))
+        XCTAssertTrue(names.contains("remove_entities_nearby"))
+
+        let args = #"{"item":"coal","count":2}"#.data(using: .utf8)!
+        let action = try parseAIAgentAction(fromToolCallName: "pebble_give_item", argumentsJSONData: args)
+
+        XCTAssertEqual(action.action, "give_item")
+        XCTAssertEqual(action.item, "coal")
+        XCTAssertEqual(action.count, 2)
+        XCTAssertThrowsError(try parseAIAgentAction(fromToolCallName: "pebble_raw_set_coordinates",
+                                                    argumentsJSONData: Data("{}".utf8))) { error in
+            XCTAssertEqual(error as? AIAgentError, .unsupportedAction("pebble_raw_set_coordinates"))
         }
     }
 
@@ -474,6 +522,182 @@ final class AIAgentTests: XCTestCase {
             player: player,
             cursor: nil)) { error in
                 XCTAssertEqual(error as? AIAgentError, .missingCursorTarget)
+            }
+    }
+
+    func testCursorBlockSkillsUseBoundedWorldPaths() throws {
+        let (world, player, hit) = makeCenteredWorldAndPlayer()
+
+        let setResult = try executeAIAgentAction(
+            AIAgentAction(action: "set_block_at_cursor", block: "dirt", target: "cursor"),
+            world: world,
+            player: player,
+            cursor: hit)
+        XCTAssertTrue(setResult.changedWorld)
+        XCTAssertEqual(world.getBlockId(4, 63, 4), Int(B.dirt))
+
+        world.setBlock(4, 63, 4, Int(cell(B.lever, 0)))
+        let leverHit = RaycastHit(x: 4, y: 63, z: 4, face: Dir.up, cell: Int(cell(B.lever, 0)),
+                                  t: 1, px: 4.5, py: 63.5, pz: 4.5)
+        let useResult = try executeAIAgentAction(
+            AIAgentAction(action: "use_block", target: "cursor"),
+            world: world,
+            player: player,
+            cursor: leverHit)
+        XCTAssertTrue(useResult.changedWorld)
+        XCTAssertEqual(world.getMeta(4, 63, 4) & 8, 8)
+
+        let breakResult = try executeAIAgentAction(
+            AIAgentAction(action: "break_block", target: "cursor"),
+            world: world,
+            player: player,
+            cursor: leverHit)
+        XCTAssertTrue(breakResult.changedWorld)
+        XCTAssertEqual(world.getBlockId(4, 63, 4), 0)
+    }
+
+    func testFillRegionPreflightsBoundsAndRejectsOversizedRequest() throws {
+        let (world, player, hit) = makeCenteredWorldAndPlayer()
+
+        let filled = try executeAIAgentAction(
+            AIAgentAction(action: "fill_region", block: "glass", target: "cursor", radius: 1),
+            world: world,
+            player: player,
+            cursor: hit)
+
+        XCTAssertTrue(filled.changedWorld)
+        XCTAssertEqual(world.getBlockId(4, 64, 4), Int(B.glass))
+        XCTAssertEqual(world.getBlockId(5, 65, 5), Int(B.glass))
+
+        XCTAssertThrowsError(try executeAIAgentAction(
+            AIAgentAction(action: "fill_region", block: "dirt", target: "cursor",
+                          radius: AIAgentMaxFillRegionRadius + 1),
+            world: world,
+            player: player,
+            cursor: hit)) { error in
+                guard case .regionFillTooLarge = error as? AIAgentError else {
+                    return XCTFail("expected regionFillTooLarge, got \(error)")
+                }
+            }
+    }
+
+    func testPlayerStateAndGlobalSettingSkills() throws {
+        let (world, player, hit) = makeCenteredWorldAndPlayer()
+        player.inventory[0] = stack("cooked_chicken", 1)
+        player.hunger = 10
+        player.health = 4
+        player.saturation = 0
+
+        _ = try executeAIAgentAction(AIAgentAction(action: "eat_selected_food"), world: world, player: player, cursor: hit)
+        XCTAssertGreaterThan(player.hunger, 10)
+
+        _ = try executeAIAgentAction(AIAgentAction(action: "set_gamemode", mode: "creative"),
+                                     world: world, player: player, cursor: hit)
+        XCTAssertEqual(player.gameMode, GameMode.creative)
+
+        _ = try executeAIAgentAction(AIAgentAction(action: "damage_player", amount: 2),
+                                     world: world, player: player, cursor: hit)
+        XCTAssertLessThan(player.health, player.maxHealth)
+        _ = try executeAIAgentAction(AIAgentAction(action: "heal_player"), world: world, player: player, cursor: hit)
+        XCTAssertEqual(player.health, player.maxHealth)
+        XCTAssertEqual(player.hunger, 20)
+
+        _ = try executeAIAgentAction(AIAgentAction(action: "apply_effect", effect: "speed", duration: 5, amplifier: 1),
+                                     world: world, player: player, cursor: hit)
+        XCTAssertEqual(player.effectLevel("speed"), 2)
+        _ = try executeAIAgentAction(AIAgentAction(action: "apply_effect", effect: "clear"),
+                                     world: world, player: player, cursor: hit)
+        XCTAssertFalse(player.hasEffect("speed"))
+
+        player.inventory[3] = stack("diamond", 1)
+        _ = try executeAIAgentAction(AIAgentAction(action: "clear_inventory"), world: world, player: player, cursor: hit)
+        XCTAssertEqual(player.countItem(iid("diamond")), 0)
+
+        _ = try executeAIAgentAction(AIAgentAction(action: "add_xp", amount: 7), world: world, player: player, cursor: hit)
+        XCTAssertGreaterThan(player.xp, 0)
+        _ = try executeAIAgentAction(AIAgentAction(action: "add_xp", amount: 2, levels: true),
+                                     world: world, player: player, cursor: hit)
+        XCTAssertGreaterThanOrEqual(player.xpLevel, 2)
+
+        var persistedSpawn = false
+        _ = try executeAIAgentAction(
+            AIAgentAction(action: "set_spawnpoint"),
+            world: world,
+            player: player,
+            cursor: hit,
+            persistPlayerState: { persistedSpawn = true })
+        XCTAssertTrue(persistedSpawn)
+        XCTAssertEqual(player.spawnPoint?.0, 4)
+        XCTAssertEqual(player.spawnDim, world.dim.rawValue)
+
+        var callbackDifficulty = -1
+        _ = try executeAIAgentAction(
+            AIAgentAction(action: "set_difficulty", value: "hard"),
+            world: world,
+            player: player,
+            cursor: hit,
+            setDifficulty: { callbackDifficulty = $0 })
+        XCTAssertEqual(callbackDifficulty, 3)
+
+        var callbackRule: (String, Double)?
+        _ = try executeAIAgentAction(
+            AIAgentAction(action: "set_gamerule", rule: "keepInventory", enabled: true),
+            world: world,
+            player: player,
+            cursor: hit,
+            setGameRule: { callbackRule = ($0, $1) })
+        XCTAssertEqual(callbackRule?.0, "keepInventory")
+        XCTAssertEqual(callbackRule?.1, 1)
+
+        player.setPos(4.5, 40, 4.5)
+        _ = try executeAIAgentAction(AIAgentAction(action: "teleport_player", target: "surface"),
+                                     world: world, player: player, cursor: hit)
+        XCTAssertEqual(player.y, Double(world.surfaceY(4, 4)))
+        XCTAssertEqual(player.fallDistance, 0)
+    }
+
+    func testEntityRemovalAndUnsafeMutationRejections() throws {
+        let (world, player, hit) = makeCenteredWorldAndPlayer()
+        XCTAssertNotNil(spawnMob(world, "cow", player.x + 2, player.y, player.z, nil))
+        XCTAssertNotNil(spawnMob(world, "zombie", player.x + 3, player.y, player.z, nil))
+
+        let removed = try executeAIAgentAction(
+            AIAgentAction(action: "remove_entities_nearby", count: 1, entity: "cow", radius: 8),
+            world: world,
+            player: player,
+            cursor: hit)
+
+        XCTAssertTrue(removed.changedWorld)
+        XCTAssertEqual(world.entities.compactMap { $0 as? Entity }.filter { $0.type == "cow" }.count, 0)
+        XCTAssertEqual(world.entities.compactMap { $0 as? Entity }.filter { $0.type == "zombie" }.count, 1)
+        XCTAssertTrue(world.entities.contains { $0 === player })
+
+        world.setBlock(4, 63, 4, Int(cell(B.bedrock)))
+        let bedrockHit = RaycastHit(x: 4, y: 63, z: 4, face: Dir.up, cell: Int(cell(B.bedrock)),
+                                    t: 1, px: 4.5, py: 63.5, pz: 4.5)
+        player.setGameMode(GameMode.survival)
+        XCTAssertThrowsError(try executeAIAgentAction(
+            AIAgentAction(action: "break_block", target: "cursor"),
+            world: world,
+            player: player,
+            cursor: bedrockHit)) { error in
+                XCTAssertEqual(error as? AIAgentError, .blockBreakFailed("bedrock"))
+            }
+
+        XCTAssertThrowsError(try executeAIAgentAction(
+            AIAgentAction(action: "apply_effect", effect: "not_real"),
+            world: world,
+            player: player,
+            cursor: hit)) { error in
+                XCTAssertEqual(error as? AIAgentError, .unknownEffect("not_real"))
+            }
+
+        XCTAssertThrowsError(try executeAIAgentAction(
+            AIAgentAction(action: "set_gamerule", rule: "rawWorldWrites", enabled: true),
+            world: world,
+            player: player,
+            cursor: hit)) { error in
+                XCTAssertEqual(error as? AIAgentError, .unknownGameRule("rawWorldWrites"))
             }
     }
 
