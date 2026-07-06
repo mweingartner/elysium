@@ -19,7 +19,7 @@
 
 Pebble is an original fan re-creation inspired by Minecraft: Java Edition 1.20. It is **not affiliated with, endorsed by, or connected to Mojang Studios or Microsoft** in any way, and contains no Mojang code or assets. Full statement in [Disclaimer](#disclaimer) below.
 
-> **Pebble 1.1.0 is a beta.** The engine is pinned by 456 golden regression checks, but a game of this scope absolutely has bugs we haven't found yet — we just don't know where they are. If you hit one, [opening an issue](https://github.com/thebriangao/pebble/issues) would mean the world to us, and a pull request with a fix even more. See [Reporting bugs & contributing](#reporting-bugs--contributing) for what to include.
+> **Pebble 1.1.0 is a beta.** The engine is pinned by 457 golden regression checks, but a game of this scope absolutely has bugs we haven't found yet — we just don't know where they are. If you hit one, [opening an issue](https://github.com/thebriangao/pebble/issues) would mean the world to us, and a pull request with a fix even more. See [Reporting bugs & contributing](#reporting-bugs--contributing) for what to include.
 
 ## By the numbers
 
@@ -28,11 +28,11 @@ Pebble is an original fan re-creation inspired by Minecraft: Java Edition 1.20. 
 | Lines of Swift | ~55,000 source lines across 95 source files |
 | External dependencies | **0** (Apple frameworks only) |
 | Blocks | 879 |
-| Items | 1,189 |
+| Items | 1,194 |
 | Biomes | 63 (overworld, nether, end, cave biomes) |
 | Entity types | 100 (55+ mobs with full AI, vehicles, projectiles) |
 | Structures | 19 types, 30+ variants (villages, strongholds, bastions, end cities, ancient cities…) |
-| Golden regression checks | 456, all green (`swift run -c release pebsmoke`) |
+| Golden regression checks | 457, all green (`swift run -c release pebsmoke`) |
 | Renderer | Metal, 15+ passes, runtime-compiled MSL |
 | Textures | [Faithful 32x](https://faithfulpack.net) by the Faithful team (third-party, fully credited) |
 | Audio assets | 0 — fully synthesized (AVAudioSourceNode + biquad filters) |
@@ -47,12 +47,12 @@ Pebble is an original fan re-creation inspired by Minecraft: Java Edition 1.20. 
 - **Structures** — villages with professioned villagers and working trades, strongholds with the portal room, mineshafts, desert/jungle temples, igloos with basements, witch huts, ocean monuments and ruins, shipwrecks, buried treasure, ruined portals, woodland mansions, amethyst geodes, ancient cities with sculk and shriekers.
 - **Mobs & AI** — 55+ mobs with A* pathfinding, goal-based AI (breeding, taming, fleeing, pack hunting), villager gossip and trades, piglin bartering, raids with waves and Hero of the Village, and the three bosses: Ender Dragon, Wither, Warden (with vibration detection).
 - **Redstone** — wire networks with 0–15 power levels, repeaters with locking, comparators that read containers, pistons with quasi-connectivity and slime/honey push sets, observers, dispensers, hoppers, rails, sculk sensors.
-- **Items & systems** — shaped/shapeless/tag crafting with recipe menus that auto-fill available ingredients and output-slot arrows for choosing multi-craft quantities, crafting tables that can draw from containers within 25 blocks and keep a shared 3x3 station grid, smelting in three furnace types, brewing, enchanting with 39 enchantments and a compatibility matrix, anvils, grindstones, smithing with armor trims, stonecutters, loot tables with fortune/looting, fishing, archaeology with sherds and decorated pots, advancements, and the craftable Flying Wand combat tool.
+- **Items & systems** — shaped/shapeless/tag crafting with recipe menus that auto-fill available ingredients and output-slot arrows for choosing multi-craft quantities, copper sword/pickaxe/axe/shovel/hoe recipes with copper-ingot repair, crafting tables that can draw from containers within 25 blocks and keep a shared 3x3 station grid, smelting in three furnace types, brewing, enchanting with 39 enchantments and a compatibility matrix, anvils, grindstones, smithing with armor trims, stonecutters, loot tables with fortune/looting, fishing, archaeology with sherds and decorated pots, advancements, and the craftable Flying Wand combat tool.
 - **Creative mode** — instant block breaking, flight, an infinite hotbar, and full player invulnerability while building. Survival players can also fly while the Flying Wand is selected, but unequipping it midair forces a fall with half normal fall damage.
 - **Live map overlay** — a square minimap sits flush against the lower-right HUD edge, centered on the player, and defaults to the medium of three compact sizes. Use `-` / `=` to cycle the compact size, press M to pop it into a large draggable map, and use `,` / `.` to zoom from the loaded-world overview down to roughly 100 blocks around the player.
 - **Object templates** — point the center crosshair at a connected construction and press Command-C to name and save it as a local template, then press Command-V to open the saved-template browser and choose an object to place. Copying follows face- and edge-connected non-environment blocks so detailed constructions with edge-only attachments are captured without pulling in terrain substrate. Copied containers keep the container block and non-inventory block-entity metadata, but their item slots and deferred loot are saved empty. Saved templates support up to 524,288 blocks inside the existing 96-block span cap, are stored as compact SQLite binary blobs with summary metadata, and still read legacy JSON records. The browser automatically previews the selected object in the right 3D panel and includes a Delete button for removing saved templates. Placement preview captures the pointer, floats a bounded wireframe of the saved 3D object in the view center, rotates it in 90-degree steps with the mouse wheel, and commits on left click with blocks and block entities reattached. Placement automatically clears blocks inside the object volume and fills foundation gaps under the footprint with adjacent terrain material when the selected location is uneven. Large placement commits are tick-sliced so the game remains responsive while progress is shown in the action bar. Press Command-Z in world mode to undo the most recent object placement, removing the placed object and restoring the cells that placement cleared or filled. Legacy commands remain available: `/clone the target with new name "name"`, `/place "name"`, and `/listTemplates`.
 - **LAN multiplayer sessions** — open the Multiplayer screen from the title menu or "Open to LAN" from the pause menu to host, browse, or join a player-started local-network game. The Join World button connects to the selected discovered LAN world, or to the typed manual host/port when no discovered world is selected. Pebble advertises `_pebble-lan._tcp` with Bonjour, requires a short join code before accepting a peer, and exposes `/lan host`, `/lan browse`, `/lan join`, `/lan direct`, `/lan say`, `/lan status`, and `/lan stop` for command-line control. The shipped network layer supports bounded protocol frames, handshake, LAN discovery, Direct Connect, peer status, LAN chat, host-authoritative replication batches for player state, synchronized time/weather/difficulty, smoothed remote-player rendering, visible-neighborhood chunk sections, block deltas, dirty chunk-section snapshots for large object placements, item-bearing block entities such as chests, hoppers, furnaces, brewing stands, and crafting-table grids, revision-gated mirrored container/crafting screens on clients with host-validated item conservation and double-chest transactions, host-authoritative remote use for openable doors/trapdoors/fence gates, per-host-world guest resume positions and inventories, loaded animal/monster/plant/dropped-item/XP snapshots, and host-owned inventory/XP snapshots so remote players can collect host-owned monster drops, plus remote player entities and host permission gates for build/container/crafting/template/command/AI/creative/dimension/death/respawn/reconnect flows. Public internet/NAT traversal and cloud relay are not included.
-- **Local AI agent** — press T and run `/ai <request>` to ask a configured local Ollama model to inspect the current game state, give registered items, place registered block items at the cursor, level dirt-adjacent holes in front of the player, set the time of day, set clear/rain/thunder weather, spawn registered animals or monsters at the cursor, inspect saved object templates, edit their block composition, or create bounded generated templates such as pirate ships. Direct requests like `/ai fill the hole in front of me with dirt`, `/ai set time to night`, `/ai make it rain`, `/ai spawn two zombies at the cursor`, `/ai change the type of all wood blocks in "house" to bamboo`, and `/ai create a object that looks like a pirate ship about 50 blocks long ... Name the object pirateShip` are handled deterministically and saved in the same template store as player-copied objects where applicable. The model preference lives in Options -> AI, only talks to `http://localhost:11434`, and filters/rejects cloud-tagged Ollama models.
+- **Local AI agent** — press T and run `/ai <request>` to ask a configured local Ollama model to inspect the current game state, give registered items, place registered block items at the cursor, level dirt-adjacent holes in front of the player, rework the loaded current biome into bounded rolling resource-rich hills, set the time of day, set clear/rain/thunder weather, spawn registered animals or monsters at the cursor, inspect saved object templates, edit their block composition, or create bounded generated templates such as pirate ships. Direct requests like `/ai fill the hole in front of me with dirt`, `/ai change the current biome to rolling hills with rich resources`, `/ai set time to night`, `/ai make it rain`, `/ai spawn two zombies at the cursor`, `/ai change the type of all wood blocks in "house" to bamboo`, and `/ai create a object that looks like a pirate ship about 50 blocks long ... Name the object pirateShip` are handled deterministically and saved in the same template store as player-copied objects where applicable. The model preference lives in Options -> AI, only talks to `http://localhost:11434`, and filters/rejects cloud-tagged Ollama models.
 - **Vanilla-exact player physics** — walk 4.317 b/s, sprint 5.612 b/s, jump apex 1.2522 blocks, sprint-jumping, water/lava/elytra movement, ice slipperiness, soul sand, honey — verified by independent-derivation tests in the suite.
 - **Faithful 32x textures, built in** — the complete [Faithful 32x](https://faithfulpack.net) art (third-party, fully credited — see [Disclaimer](#disclaimer)) ships inside the app and loads through Pebble's own zip/`.mcmeta` reader: atlas textures, animations with interpolation, GUIs, fonts, entity skins, and sun/moon art. Self-restoring if the file goes missing.
 - **Ultra graphics** — a built-in enhanced pipeline: SSAO, shadow-marched volumetric god rays, Poisson soft shadows, and ACES tonemapping. One toggle in Options → Video.
@@ -73,7 +73,7 @@ That builds in release mode, assembles a signed `Pebble.app`, installs it to `/A
 ./pebble install    build from source and install /Applications/Pebble.app
 pebble update       pull the latest version, rebuild, swap the live app
 pebble run          launch Pebble
-pebble test         run XCTest plus the 456-check golden suite
+pebble test         run XCTest plus the 457-check golden suite
 ```
 
 For development you can also run straight from the checkout — `swift run -c release Pebble` — and the app will find its packaged assets in `packaging/`.
@@ -105,7 +105,7 @@ Sources/PebbleCore/   the engine — headless, no AppKit, fully testable
   Net/                LAN protocol messages, replication batches, bounded frame codec, validation
   Game/               GameCore tick orchestrator, SQLite saves, settings
 Sources/Pebble/       the macOS app — window, Metal renderer, UI, audio, input, LAN transport
-Sources/pebsmoke/     golden test harness (456 checks against goldens/*.json)
+Sources/pebsmoke/     golden test harness (457 checks against goldens/*.json)
 Tests/PebbleCoreTests/ focused XCTest coverage for templates, LAN, saves, settings, UI helpers, and gameplay systems
 goldens/              golden baseline files pinning engine behavior
 packaging/            Info.plist, icon, logo, title art, bundled Faithful textures
@@ -116,7 +116,7 @@ A deeper tour lives in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## The determinism contract
 
-Pebble's engine is **fully deterministic**: a portable fdlibm implementation of `sin/cos/atan2` (pure IEEE-754 operations, no platform math library), 32-bit-wrapping integer hashes, and seeded RNG everywhere mean the same seed produces the identical world — bit for bit, on any machine, across releases. That contract is enforced by golden baseline files: `swift run -c release pebsmoke` runs 456 checks covering terrain hashes over full chunk pipelines, a 55-mob zoo ticked 200 steps and compared at checkpoints, 911 transcendental-math probes, recipe/enchant/loot RNG lockstep, a redstone contraption timeline, and independent derivations of vanilla physics constants. `pebble test` runs the SwiftPM XCTest target first, then the golden suite. The goldens are the contract that keeps the engine honest — a change that moves a single block in an existing world fails the suite.
+Pebble's engine is **fully deterministic**: a portable fdlibm implementation of `sin/cos/atan2` (pure IEEE-754 operations, no platform math library), 32-bit-wrapping integer hashes, and seeded RNG everywhere mean the same seed produces the identical world — bit for bit, on any machine, across releases. That contract is enforced by golden baseline files: `swift run -c release pebsmoke` runs 457 checks covering terrain hashes over full chunk pipelines, a 55-mob zoo ticked 200 steps and compared at checkpoints, 911 transcendental-math probes, recipe/enchant/loot RNG lockstep, a redstone contraption timeline, and independent derivations of vanilla physics constants. `pebble test` runs the SwiftPM XCTest target first, then the golden suite. The goldens are the contract that keeps the engine honest — a change that moves a single block in an existing world fails the suite.
 
 ## Development hooks
 
@@ -147,7 +147,7 @@ For an end-to-end local release gate:
 ./scripts/pipeline.sh
 ```
 
-That runs architecture checks, source security scans, bundled Faithful asset verification, a warning-free release build, binary security checks, XCTest, the 456-check golden suite, install to `/Applications/Pebble.app`, and a final installed-app binary verification.
+That runs architecture checks, source security scans, bundled Faithful asset verification, a warning-free release build, binary security checks, XCTest, the 457-check golden suite, install to `/Applications/Pebble.app`, and a final installed-app binary verification.
 
 ## Reporting bugs & contributing
 
@@ -162,7 +162,7 @@ Found a bug? [Open an issue](https://github.com/thebriangao/pebble/issues). To h
 - **Settings that matter**: render distance and whether ultra graphics are on.
 - **Screenshots or video** for anything visual.
 - For crashes: the crash report from `~/Library/Logs/DiagnosticReports`, and terminal output if you launched with `pebble run` from a terminal.
-- If the engine itself seems wrong (worldgen, physics, redstone): the tail of `pebble test` — it should print `456 passed, 0 failed`.
+- If the engine itself seems wrong (worldgen, physics, redstone): the tail of `pebble test` — it should print `457 passed, 0 failed`.
 
 Even better than a bug report is a **pull request with a fix** — see [CONTRIBUTING.md](CONTRIBUTING.md) for the build/test workflow and the conventions that are load-bearing (registration order, RNG discipline, determinism rules). PRs of all sizes are wanted, from typo fixes to subsystem work.
 

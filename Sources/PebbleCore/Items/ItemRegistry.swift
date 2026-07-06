@@ -335,6 +335,14 @@ public func registerAllItems() {
     registerItem("flying_wand", display: "Flying Wand",
                  tool: ToolDef("sword", tier: 3, speed: 1.5, attackDamage: 6, attackSpeed: 1.6, durability: 1561, enchantability: 10),
                  category: "combat", icon: "torch")
+    let copper = TierSpec(tier: 2, speed: 5, dur: 190, ench: 12,
+                          swordDmg: 4, pickDmg: 2, axeDmg: 8, axeSpd: 0.85,
+                          shovelDmg: 2.5, hoeSpd: 2.5)
+    registerItem("copper_sword", tool: ToolDef("sword", tier: copper.tier, speed: 1.5, attackDamage: copper.swordDmg, attackSpeed: 1.6, durability: copper.dur, enchantability: copper.ench), category: "combat")
+    registerItem("copper_pickaxe", tool: ToolDef("pickaxe", tier: copper.tier, speed: copper.speed, attackDamage: copper.pickDmg, attackSpeed: 1.2, durability: copper.dur, enchantability: copper.ench), category: "tools")
+    registerItem("copper_axe", tool: ToolDef("axe", tier: copper.tier, speed: copper.speed, attackDamage: copper.axeDmg, attackSpeed: copper.axeSpd, durability: copper.dur, enchantability: copper.ench), category: "tools")
+    registerItem("copper_shovel", tool: ToolDef("shovel", tier: copper.tier, speed: copper.speed, attackDamage: copper.shovelDmg, attackSpeed: 1, durability: copper.dur, enchantability: copper.ench), category: "tools")
+    registerItem("copper_hoe", tool: ToolDef("hoe", tier: copper.tier, speed: copper.speed, attackDamage: 1, attackSpeed: copper.hoeSpd, durability: copper.dur, enchantability: copper.ench), category: "tools")
 
     // post-registration fixups
     itemDefs[iid("cake")].maxStack = 1

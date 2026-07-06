@@ -63,7 +63,7 @@ For release/deploy readiness:
 bash scripts/pipeline.sh
 ```
 
-The release build must be warning-free. `pebsmoke` is the golden contract and must report the expected 456 checks passing unless the project deliberately changes that count in the same reviewed change.
+The release build must be warning-free. `pebsmoke` is the golden contract and must report the expected 457 checks passing unless the project deliberately changes that count in the same reviewed change.
 
 For behavior changes that move goldens, read each failure, justify every changed value, regold only deliberate behavior changes with `PEBBLE_REGOLD=1 swift run -c release pebsmoke`, then rerun the suite. Never blanket-regold to make red go green.
 

@@ -544,4 +544,11 @@ public func registerAllRecipes() {
         shaped("DTD/DMD/DDD", ["D": "diamond", "T": "\(t)_armor_trim", "M": "cobblestone"], "\(t)_armor_trim", 2)
     }
     shaped("DTD/DMD/DDD", ["D": "diamond", "T": "netherite_upgrade", "M": "netherrack"], "netherite_upgrade", 2)
+
+    // Appended after the frozen recipe baseline so existing recipe order stays stable.
+    shaped("X/X/S", ["X": "copper_ingot", "S": "stick"], "copper_sword")
+    shaped("XXX/ S / S ", ["X": "copper_ingot", "S": "stick"], "copper_pickaxe")
+    shaped("XX/XS/ S", ["X": "copper_ingot", "S": "stick"], "copper_axe")
+    shaped("X/S/S", ["X": "copper_ingot", "S": "stick"], "copper_shovel")
+    shaped("XX/ S/ S", ["X": "copper_ingot", "S": "stick"], "copper_hoe")
 }

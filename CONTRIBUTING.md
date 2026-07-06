@@ -11,7 +11,7 @@ Bug reports mean the world to us. [Open an issue](https://github.com/thebriangao
 3. **Steps**: what you did, what happened, what you expected
 4. **World context** for in-world bugs: seed, dimension, coordinates (all on the F3 overlay)
 5. **Settings**: render distance, ultra graphics on/off
-6. **Evidence**: screenshots/video for visual bugs; `~/Library/Logs/DiagnosticReports` for crashes; the tail of `pebble test` if the engine seems wrong (expected: `456 passed, 0 failed`)
+6. **Evidence**: screenshots/video for visual bugs; `~/Library/Logs/DiagnosticReports` for crashes; the tail of `pebble test` if the engine seems wrong (expected: `457 passed, 0 failed`)
 
 Even better than a report is a PR with the fix — the rest of this file tells you how to make one that lands.
 
@@ -22,7 +22,7 @@ xcode-select --install        # Swift toolchain (Swift 6, macOS 14+ SDK)
 git clone https://github.com/thebriangao/pebble.git && cd pebble
 swift build                   # debug build, ~35s clean
 swift test                    # focused unit/security regression tests
-swift run -c release pebsmoke # the golden suite — must print "456 passed, 0 failed"
+swift run -c release pebsmoke # the golden suite — must print "457 passed, 0 failed"
 ./pebble install              # optional: build + install the real app
 ```
 
@@ -32,7 +32,7 @@ There is no `.xcodeproj` and there never will be — the whole workflow is Swift
 
 1. `swift build -c release` — clean, **zero warnings**. The codebase is warning-free and stays that way.
 2. `swift test` — all focused unit/security regression tests pass.
-3. `swift run -c release pebsmoke` (or `pebble test`) — **456/456**, from the repo root (goldens are found relative to cwd).
+3. `swift run -c release pebsmoke` (or `pebble test`) — **457/457**, from the repo root (goldens are found relative to cwd).
 4. If goldens changed, your PR description must justify **every** changed value (see below).
 5. Keep diffs surgical. Match the style of the file you're in — this codebase has a consistent voice (compact, comment-where-it-matters), and drive-by reformatting makes review impossible.
 

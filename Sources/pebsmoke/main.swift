@@ -143,13 +143,21 @@ check("glass not opaque", OPAQUE[Int(B.glass)] == 0)
 // ---------------------------------------------------------------------------
 section("item registry (vs goldens)")
 registerAllItems()
-// 1186 baseline items + 3 appended (weeping/twisting vines and the Flying
-// Wand) at the END so every baseline id is unchanged.
+// 1186 baseline items + appended Pebble items at the END so every baseline id
+// is unchanged.
 let BASE_ITEM_COUNT = 1186
-check("item count", itemDefs.count == 1189, "got \(itemDefs.count) want 1189")
-check("item ids stable after append",
-      iid("weeping_vines") == 1186 && iid("twisting_vines") == 1187 && iid("flying_wand") == 1188,
-      "append ids \(iid("weeping_vines"))/\(iid("twisting_vines"))/\(iid("flying_wand")) want 1186/1187/1188")
+check("item count", itemDefs.count == 1194, "got \(itemDefs.count) want 1194")
+let appendedItems: [(String, Int)] = [
+    ("weeping_vines", 1186), ("twisting_vines", 1187), ("flying_wand", 1188),
+    ("copper_sword", 1189), ("copper_pickaxe", 1190), ("copper_axe", 1191),
+    ("copper_shovel", 1192), ("copper_hoe", 1193),
+]
+var appendedItemsOK = true
+for (name, want) in appendedItems {
+    if iid(name) != want { appendedItemsOK = false }
+}
+check("item ids stable after append", appendedItemsOK,
+      "append ids \(appendedItems.map { "\($0.0)=\(iid($0.0))" }.joined(separator: ","))")
 let itemGoldens: [(String, Int)] = [
     ("stone", 0), ("wheat_seeds", 764), ("wooden_sword", 832), ("netherite_hoe", 861),
     ("leather_helmet", 869), ("elytra", 894), ("apple", 896), ("milk_bucket", 934),
@@ -988,18 +996,30 @@ if let g = loadJSON("items-goldens.json") {
     func hash32(_ k: String) -> UInt32 { UInt32(truncating: g[k] as! NSNumber) }
 
     // recipes
-    let craftSer = craftingRecipes.map { r -> String in
+    func serializeCraftRecipe(_ r: CraftRecipe) -> String {
         switch r {
         case .shaped(let w, let h, let grid, let out, let count):
             return "S|\(w)|\(h)|\(grid.map { $0 ?? "." }.joined(separator: ","))|\(out)|\(count)"
         case .shapeless(let inputs, let out, let count):
             return "L|\(inputs.joined(separator: ","))|\(out)|\(count)"
         }
-    }.joined(separator: ";")
-    check("crafting recipe count", craftingRecipes.count == num("craftCount"),
-          "got \(craftingRecipes.count) want \(num("craftCount"))")
-    check("crafting recipes hash", hashString(craftSer) == hash32("craftH"),
-          "got \(hashString(craftSer)) want \(hash32("craftH"))")
+    }
+    func craftRecipeOutputName(_ r: CraftRecipe) -> String {
+        switch r {
+        case .shaped(_, _, _, let out, _): return out
+        case .shapeless(_, let out, _): return out
+        }
+    }
+    let baseCraftCount = num("craftCount")
+    let baseCraftSer = craftingRecipes.prefix(baseCraftCount).map(serializeCraftRecipe).joined(separator: ";")
+    check("crafting recipe count", craftingRecipes.count == baseCraftCount + 5,
+          "got \(craftingRecipes.count) want \(baseCraftCount + 5)")
+    check("crafting recipes baseline hash", hashString(baseCraftSer) == hash32("craftH"),
+          "got \(hashString(baseCraftSer)) want \(hash32("craftH"))")
+    let appendedCraftOutputs = craftingRecipes.dropFirst(baseCraftCount).map(craftRecipeOutputName)
+    check("copper tool recipes appended",
+          appendedCraftOutputs == ["copper_sword", "copper_pickaxe", "copper_axe", "copper_shovel", "copper_hoe"],
+          "got \(appendedCraftOutputs.joined(separator: ","))")
 
     let smeltSer = smeltingRecipes.map {
         "\($0.input)>\($0.output)|\(Int(($0.xp * 1000 + 0.5).rounded(.down)))|\($0.kind)"

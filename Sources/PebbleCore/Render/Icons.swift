@@ -66,6 +66,11 @@ public func itemIconPixels(_ itemId: Int, _ data: StackData? = nil) -> [UInt8] {
             iconCache[key] = px
             return px
         }
+        if let sourceName = copperToolSourceName(def.name), let px = ov(sourceName) {
+            let copper = recolorIronToolIconToCopper(px)
+            iconCache[key] = copper
+            return copper
+        }
     }
     var img = [UInt8](repeating: 0, count: 16 * 16 * 4)
     paintIcon(&img, aliasDef ?? def, data)
@@ -105,6 +110,7 @@ private func materialColors(_ name: String) -> (Int, Int, Int) {
     if name.hasPrefix("wooden") { return (0xa8845c, 0x8a6a42, 0x5c4426) }
     if name.hasPrefix("stone") { return (0xaaaaaa, 0x8a8a8a, 0x5c5c5c) }
     if name.hasPrefix("iron") { return (0xe8e8e8, 0xc8c8c8, 0x8a8a8a) }
+    if name.hasPrefix("copper") { return (0xf0b080, 0xd0784f, 0x8a4a30) }
     if name.hasPrefix("golden") { return (0xfcee4b, 0xe8c83c, 0xa8862c) }
     if name.hasPrefix("diamond") { return (0x8cf4e2, 0x4aedd9, 0x2ca89a) }
     if name.hasPrefix("netherite") { return (0x5a5054, 0x42383b, 0x2a2326) }
@@ -112,6 +118,55 @@ private func materialColors(_ name: String) -> (Int, Int, Int) {
     if name.hasPrefix("chainmail") { return (0xd8d8d8, 0xaaaaaa, 0x787878) }
     if name.hasPrefix("turtle") { return (0x6a9a4c, 0x47702e, 0x2c4c1c) }
     return (0xcccccc, 0x999999, 0x666666)
+}
+
+private func copperToolSourceName(_ name: String) -> String? {
+    guard name.hasPrefix("copper_") else { return nil }
+    let suffix = String(name.dropFirst("copper_".count))
+    switch suffix {
+    case "sword", "pickaxe", "axe", "shovel", "hoe":
+        return "iron_\(suffix)"
+    default:
+        return nil
+    }
+}
+
+private func recolorIronToolIconToCopper(_ source: [UInt8]) -> [UInt8] {
+    guard source.count == 16 * 16 * 4 else { return source }
+    var out = source
+    let dark = (r: 0x8a, g: 0x4a, b: 0x30)
+    let base = (r: 0xd0, g: 0x78, b: 0x4f)
+    let light = (r: 0xf0, g: 0xb0, b: 0x80)
+
+    func mix(_ a: (r: Int, g: Int, b: Int), _ b: (r: Int, g: Int, b: Int), _ t: Double) -> (Int, Int, Int) {
+        let clamped = max(0, min(1, t))
+        return (
+            Int((Double(a.r) + (Double(b.r) - Double(a.r)) * clamped).rounded()),
+            Int((Double(a.g) + (Double(b.g) - Double(a.g)) * clamped).rounded()),
+            Int((Double(a.b) + (Double(b.b) - Double(a.b)) * clamped).rounded())
+        )
+    }
+
+    for i in stride(from: 0, to: out.count, by: 4) {
+        let a = Int(source[i + 3])
+        if a == 0 { continue }
+        let r = Int(source[i]), g = Int(source[i + 1]), b = Int(source[i + 2])
+        let maxC = max(r, max(g, b))
+        let minC = min(r, min(g, b))
+        let chroma = maxC - minC
+        // Faithful handles are warm brown and should stay untouched. The iron
+        // heads/blades are neutral grays, including antialiased edge pixels.
+        guard maxC >= 28, chroma <= 34 else { continue }
+        let luminance = (0.2126 * Double(r) + 0.7152 * Double(g) + 0.0722 * Double(b)) / 255.0
+        let shade = max(0, min(1, (luminance - 0.16) / 0.76))
+        let rgb = shade < 0.5
+            ? mix(dark, base, shade / 0.5)
+            : mix(base, light, (shade - 0.5) / 0.5)
+        out[i] = UInt8(rgb.0)
+        out[i + 1] = UInt8(rgb.1)
+        out[i + 2] = UInt8(rgb.2)
+    }
+    return out
 }
 
 private let TOOL_TEMPLATES: [String: [String]] = [
