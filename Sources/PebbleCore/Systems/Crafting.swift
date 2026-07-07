@@ -142,12 +142,10 @@ public func craftingPlans(for inventory: [ItemStack?], gridWidth: Int, gridHeigh
 
 public func creativeCraftingPlans(gridWidth: Int, gridHeight: Int) -> [CraftingRecipePlan] {
     guard gridWidth > 0, gridHeight > 0, gridWidth <= 8, gridHeight <= 8 else { return [] }
-    var seen = Set<String>()
     var plans: [CraftingRecipePlan] = []
     for recipe in craftingRecipes {
         guard let plan = planCreativeRecipe(recipe, gridWidth: gridWidth, gridHeight: gridHeight) else { continue }
-        let key = "\(itemDef(plan.output.id).name)#\(plan.output.count)"
-        if seen.insert(key).inserted { plans.append(plan) }
+        plans.append(plan)
     }
     sortCraftingPlans(&plans)
     return plans

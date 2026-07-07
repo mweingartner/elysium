@@ -230,6 +230,44 @@ final class WorldSelectScreen: Screen {
 
 // =============================================================================
 final class WorldCreateScreen: Screen {
+    private struct Layout {
+        let uiHeight: Double
+        let compact: Bool
+        let buttonGap: Double
+        let nameY: Double
+        let seedY: Double
+        let modeY: Double
+        let difficultyY: Double
+        let worldTypeY: Double
+        let biomeY: Double
+
+        init(uiHeight: Double) {
+            self.uiHeight = uiHeight
+            compact = uiHeight < 260
+            buttonGap = compact ? 22.0 : 24.0
+            nameY = compact ? 34 : 40
+            seedY = compact ? 64 : 76
+            modeY = compact ? 90 : 102
+            difficultyY = modeY + buttonGap
+            worldTypeY = difficultyY + buttonGap
+            biomeY = worldTypeY + buttonGap
+        }
+
+        func dungeonY(showsBiome: Bool) -> Double {
+            showsBiome ? biomeY + buttonGap : biomeY
+        }
+
+        func actionY(showsBiome: Bool) -> Double {
+            let dungeonY = dungeonY(showsBiome: showsBiome)
+            let preferredActionY = dungeonY + (compact ? 28 : 32)
+            return max(dungeonY + 24, min(preferredActionY, uiHeight - 34))
+        }
+
+        func statusY(showsBiome: Bool) -> Double {
+            min(actionY(showsBiome: showsBiome) + 30, uiHeight - 10)
+        }
+    }
+
     private let lanHostRequest: LANHostLaunchRequest?
     let nameField = TextField(0, 0, 200, 16, "New World")
     let seedField = TextField(0, 0, 200, 16, "Leave blank for random")
@@ -242,6 +280,9 @@ final class WorldCreateScreen: Screen {
     private var worldTypeBtn: Button!
     private var biomeBtn: Button!
     private var dungeonBtn: Button!
+    private weak var createBtn: Button?
+    private weak var cancelBtn: Button?
+    private var lastUIHeight = 240.0
 
     init(lanHostRequest: LANHostLaunchRequest? = nil) {
         self.lanHostRequest = lanHostRequest
@@ -250,19 +291,21 @@ final class WorldCreateScreen: Screen {
 
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         let cx = (ui.width / 2).rounded(.down)
+        lastUIHeight = ui.height
+        let layout = Layout(uiHeight: ui.height)
         nameField.x = cx - 100
-        nameField.y = 40
+        nameField.y = layout.nameY
         seedField.x = cx - 100
-        seedField.y = 76
+        seedField.y = layout.seedY
         fields.append(nameField)
         fields.append(seedField)
-        let modeBtn = Button(cx - 100, 102, 200, 20, "Game Mode: Survival", {})
+        let modeBtn = Button(cx - 100, layout.modeY, 200, 20, "Game Mode: Survival", {})
         modeBtn.onClick = { [weak self, weak modeBtn] in
             guard let self, let modeBtn else { return }
             self.mode = self.mode == GameMode.survival ? GameMode.creative : GameMode.survival
             modeBtn.label = "Game Mode: \(self.mode == GameMode.creative ? "Creative" : "Survival")"
         }
-        let diffBtn = Button(cx - 100, 126, 200, 20, "Difficulty: Normal", {})
+        let diffBtn = Button(cx - 100, layout.difficultyY, 200, 20, "Difficulty: Normal", {})
         diffBtn.onClick = { [weak self, weak diffBtn] in
             guard let self, let diffBtn else { return }
             self.difficulty = (self.difficulty + 1) % 4
@@ -270,7 +313,7 @@ final class WorldCreateScreen: Screen {
         }
         buttons.append(modeBtn)
         buttons.append(diffBtn)
-        worldTypeBtn = Button(cx - 100, 150, 200, 20, "", {})
+        worldTypeBtn = Button(cx - 100, layout.worldTypeY, 200, 20, "", {})
         worldTypeBtn.onClick = { [weak self, weak ui] in
             guard let self, let ui else { return }
             let cycle = ui.optionDown ? WorldPreset.extendedCycle : WorldPreset.normalCycle
@@ -278,7 +321,7 @@ final class WorldCreateScreen: Screen {
             self.worldPreset = cycle[(current + 1) % cycle.count]
             self.updateWorldTypeLabels()
         }
-        biomeBtn = Button(cx - 100, 174, 200, 20, "", {})
+        biomeBtn = Button(cx - 100, layout.biomeY, 200, 20, "", {})
         biomeBtn.onClick = { [weak self] in
             guard let self else { return }
             let cases = Biome.allCases
@@ -288,7 +331,7 @@ final class WorldCreateScreen: Screen {
         }
         buttons.append(worldTypeBtn)
         buttons.append(biomeBtn)
-        dungeonBtn = Button(cx - 100, 198, 200, 20, "", {})
+        dungeonBtn = Button(cx - 100, layout.dungeonY(showsBiome: false), 200, 20, "", {})
         dungeonBtn.onClick = { [weak self] in
             guard let self else { return }
             let cases = DungeonDensity.allCases
@@ -297,8 +340,7 @@ final class WorldCreateScreen: Screen {
             self.updateWorldTypeLabels()
         }
         buttons.append(dungeonBtn)
-        updateWorldTypeLabels()
-        buttons.append(Button(cx - 100, 230, 98, 20, lanHostRequest == nil ? "Create World" : "Create & Host", { [weak self, weak ui, weak game] in
+        let create = Button(cx - 100, layout.actionY(showsBiome: false), 98, 20, lanHostRequest == nil ? "Create World" : "Create & Host", { [weak self, weak ui, weak game] in
             guard let self, let ui, let game, !self.creating else { return }
             self.creating = true
             game.createWorld(name: self.nameField.text.isEmpty ? "New World" : self.nameField.text,
@@ -307,19 +349,27 @@ final class WorldCreateScreen: Screen {
                              dungeonDensity: self.dungeonDensity)
             self.startPendingLANHost(game)
             ui.open(LoadingScreen(), game)
-        }))
-        buttons.append(Button(cx + 2, 230, 98, 20, "Cancel", { [weak ui, weak game] in
+        })
+        let cancel = Button(cx + 2, layout.actionY(showsBiome: false), 98, 20, "Cancel", { [weak ui, weak game] in
             guard let ui, let game else { return }
             ui.closeTop(game)
-        }))
+        })
+        createBtn = create
+        cancelBtn = cancel
+        buttons.append(create)
+        buttons.append(cancel)
+        updateWorldTypeLabels()
     }
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
+        lastUIHeight = ui.height
+        let layout = Layout(uiHeight: ui.height)
+        let showsBiome = worldPreset == .singleBiomeSurface
         ui.drawDirtBg()
         ui.cv.drawTextCentered(lanHostRequest == nil ? "Create New World" : "Create World to Host", ui.width / 2, 10, 1)
         ui.cv.drawText("World Name", nameField.x, nameField.y - 10, 1, "#a0a0a0")
         ui.cv.drawText("Seed", seedField.x, seedField.y - 10, 1, "#a0a0a0")
         if creating {
-            ui.cv.drawTextCentered("Generating world...", ui.width / 2, 262, 1, "#ffff55")
+            ui.cv.drawTextCentered("Generating world...", ui.width / 2, layout.statusY(showsBiome: showsBiome), 1, "#ffff55")
         }
         ui.drawButtons(self)
     }
@@ -327,7 +377,13 @@ final class WorldCreateScreen: Screen {
     private func updateWorldTypeLabels() {
         worldTypeBtn?.label = "World Type: \(worldPreset.displayName)"
         biomeBtn?.label = "Biome: \(singleBiomeDisplayName(singleBiome))"
-        biomeBtn?.visible = worldPreset == .singleBiomeSurface
+        let showsBiome = worldPreset == .singleBiomeSurface
+        biomeBtn?.visible = showsBiome
+        let layout = Layout(uiHeight: lastUIHeight)
+        biomeBtn?.y = layout.biomeY
+        dungeonBtn?.y = layout.dungeonY(showsBiome: showsBiome)
+        createBtn?.y = layout.actionY(showsBiome: showsBiome)
+        cancelBtn?.y = layout.actionY(showsBiome: showsBiome)
         dungeonBtn?.label = "Dungeons: \(dungeonDensity.displayName)"
     }
 

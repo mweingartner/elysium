@@ -406,6 +406,37 @@ final class CraftingPlanTests: XCTestCase {
         XCTAssertTrue(creativeKeys.contains("chest#1"))
     }
 
+    func testCreativeCraftingTablePlansExposeEveryFittingRecipeEntry() {
+        registerCoreIfNeeded()
+
+        let plans = creativeCraftingPlans(gridWidth: 3, gridHeight: 3)
+        let expectedCount = craftingRecipes.filter {
+            recipeFits($0, gridWidth: 3, gridHeight: 3)
+        }.count
+        let uniqueOutputs = Set(plans.map(outputKey))
+
+        XCTAssertEqual(plans.count, expectedCount)
+        XCTAssertGreaterThan(plans.count, uniqueOutputs.count)
+        XCTAssertTrue(plans.contains { itemDef($0.output.id).name == "chest" })
+        XCTAssertTrue(plans.contains { itemDef($0.output.id).name == "copper_pickaxe" })
+    }
+
+    func testCreativePersonalCraftingPlansExposeEveryFittingTwoByTwoRecipeEntry() {
+        registerCoreIfNeeded()
+
+        let plans = creativeCraftingPlans(gridWidth: 2, gridHeight: 2)
+        let expectedCount = craftingRecipes.filter {
+            recipeFits($0, gridWidth: 2, gridHeight: 2)
+        }.count
+        let outputs = Set(plans.map { itemDef($0.output.id).name })
+
+        XCTAssertEqual(plans.count, expectedCount)
+        XCTAssertTrue(outputs.contains("crafting_table"))
+        XCTAssertTrue(outputs.contains("stick"))
+        XCTAssertFalse(outputs.contains("chest"))
+        XCTAssertLessThan(plans.count, creativeCraftingPlans(gridWidth: 3, gridHeight: 3).count)
+    }
+
     func testCreativeCraftingPlansStillRespectPersonalGridSize() {
         registerCoreIfNeeded()
 
