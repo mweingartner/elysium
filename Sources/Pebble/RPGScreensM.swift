@@ -23,11 +23,53 @@ final class RPGCharacterScreen: Screen {
     private var draftAttributes = RPGAttributes.defaultCreation
     private var starterSkillIndex = 0
     private var selectedStarterSpellIDs = Set<String>()
+    private var creationSpellScroll = 0.0
+    private var appliedDebugCreationSelection = false
     private var skillScroll = 0.0
     private var spellScroll = 0.0
     private var statusText = ""
     private var attrButtons: [(RPGAttributeID, Button, Button)] = []
     private var spendAttrButtons: [(RPGAttributeID, Button)] = []
+    private weak var createButton: Button?
+    private weak var closeButton: Button?
+    private weak var prevPathButton: Button?
+    private weak var nextPathButton: Button?
+    private weak var prevStarterButton: Button?
+    private weak var nextStarterButton: Button?
+
+    private struct CreationLayout {
+        let footerY: Double
+        let pathButtonY: Double
+        let pathIconX: Double
+        let pathIconY: Double
+        let pathTitleY: Double
+        let pathSummaryX: Double
+        let pathSummaryY: Double
+        let pathSummaryW: Int
+        let pathSummaryLines: Int
+        let attrHeaderY: Double
+        let attrRowStartY: Double
+        let attrMinusX: Double
+        let attrValueX: Double
+        let attrPlusX: Double
+        let starterLabelY: Double
+        let starterButtonY: Double
+        let starterIconX: Double
+        let starterIconY: Double
+        let starterNameX: Double
+        let starterNameW: Int
+        let starterSummaryX: Double
+        let starterSummaryY: Double
+        let starterSummaryW: Int
+        let starterSummaryLines: Int
+        let spellsTitleY: Double
+        let spellsListTop: Double
+        let spellsListBottom: Double
+        let spellsX: Double
+        let spellsW: Double
+        let spellRowH: Double
+        let spellRowStride: Double
+    }
 
     override init() {
         super.init()
@@ -73,6 +115,17 @@ final class RPGCharacterScreen: Screen {
     }
 
     override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
+        if game.player?.rpg.created != true {
+            let f = panel(ui)
+            let path = RPG_PATH_DEFINITIONS[pathIndex]
+            let layout = creationLayout(f, path: path)
+            let total = Double(path.starterSpellIDs.count) * layout.spellRowStride
+            let available = max(0, layout.spellsListBottom - layout.spellsListTop)
+            let maxScroll = max(0, total - available)
+            guard maxScroll > 0 else { return false }
+            creationSpellScroll = max(0, min(maxScroll, creationSpellScroll + (dy >= 0 ? layout.spellRowStride : -layout.spellRowStride)))
+            return true
+        }
         switch tab {
         case .skills:
             skillScroll = max(0, skillScroll + dy * 12)
@@ -86,15 +139,17 @@ final class RPGCharacterScreen: Screen {
     }
 
     private func panel(_ ui: UIManager) -> (x: Double, y: Double, w: Double, h: Double) {
-        let w = min(430.0, max(330.0, ui.width - 24))
-        let h = min(236.0, max(210.0, ui.height - 20))
+        let w = min(452.0, max(350.0, ui.width - 18))
+        let h = min(268.0, max(224.0, ui.height - 14))
         return (((ui.width - w) / 2).rounded(.down), ((ui.height - h) / 2).rounded(.down), w, h)
     }
 
     private func buildCreationButtons(_ ui: UIManager, _ game: GameCore) {
         let f = panel(ui)
-        let top = f.y + 34
-        buttons.append(Button(f.x + f.w - 72, f.y + f.h - 28, 58, 20, "Create", { [weak self, weak ui, weak game] in
+        applyDebugCreationSelectionIfNeeded()
+        let path = RPG_PATH_DEFINITIONS[pathIndex]
+        let layout = creationLayout(f, path: path)
+        let create = Button(f.x + f.w - 72, layout.footerY, 58, 20, "Create", { [weak self, weak ui, weak game] in
             guard let self, let ui, let game else { return }
             self.normalizeDraftSelection()
             let path = RPG_PATH_DEFINITIONS[self.pathIndex]
@@ -111,21 +166,28 @@ final class RPGCharacterScreen: Screen {
             if game.player?.rpg.created == true {
                 ui.replace(RPGCharacterScreen(), game)
             }
-        }))
-        buttons.append(Button(f.x + 14, f.y + f.h - 28, 58, 20, "Close", { [weak ui, weak game] in
+        })
+        let close = Button(f.x + 14, layout.footerY, 58, 20, "Close", { [weak ui, weak game] in
             guard let ui, let game else { return }
             ui.closeTop(game)
-        }))
-        buttons.append(Button(f.x + 14, top, 22, 18, "<", { [weak self] in self?.movePath(-1) }))
-        buttons.append(Button(f.x + f.w - 36, top, 22, 18, ">", { [weak self] in self?.movePath(1) }))
-        buttons.append(Button(f.x + 194, top + 70, 22, 18, "<", { [weak self] in self?.moveStarterSkill(-1) }))
-        buttons.append(Button(f.x + f.w - 36, top + 70, 22, 18, ">", { [weak self] in self?.moveStarterSkill(1) }))
+        })
+        let prevPath = Button(f.x + 14, layout.pathButtonY, 22, 18, "<", { [weak self] in self?.movePath(-1) })
+        let nextPath = Button(f.x + f.w - 36, layout.pathButtonY, 22, 18, ">", { [weak self] in self?.movePath(1) })
+        let prevStarter = Button(layout.starterSummaryX, layout.starterButtonY, 22, 18, "<", { [weak self] in self?.moveStarterSkill(-1) })
+        let nextStarter = Button(f.x + f.w - 36, layout.starterButtonY, 22, 18, ">", { [weak self] in self?.moveStarterSkill(1) })
+        createButton = create
+        closeButton = close
+        prevPathButton = prevPath
+        nextPathButton = nextPath
+        prevStarterButton = prevStarter
+        nextStarterButton = nextStarter
+        buttons.append(contentsOf: [create, close, prevPath, nextPath, prevStarter, nextStarter])
 
         attrButtons.removeAll()
         for (i, attr) in RPGAttributeID.allCases.enumerated() {
-            let y = f.y + 82 + Double(i) * 20
-            let minus = Button(f.x + 72, y, 18, 16, "-", { [weak self] in self?.adjustDraft(attr, -1) })
-            let plus = Button(f.x + 128, y, 18, 16, "+", { [weak self] in self?.adjustDraft(attr, 1) })
+            let y = layout.attrRowStartY + Double(i) * 20
+            let minus = Button(layout.attrMinusX, y, 18, 16, "-", { [weak self] in self?.adjustDraft(attr, -1) })
+            let plus = Button(layout.attrPlusX, y, 18, 16, "+", { [weak self] in self?.adjustDraft(attr, 1) })
             attrButtons.append((attr, minus, plus))
             buttons.append(minus)
             buttons.append(plus)
@@ -160,31 +222,39 @@ final class RPGCharacterScreen: Screen {
         let f = panel(ui)
         let cv = ui.cv
         let path = RPG_PATH_DEFINITIONS[pathIndex]
+        let layout = creationLayout(f, path: path)
+        updateCreationButtonLayout(layout, f: f, path: path)
         let remaining = RPGAttributes.creationBudget - draftAttributes.total
         ui.drawPanel(f.x, f.y, f.w, f.h)
         cv.drawText("Create Character", f.x + 12, f.y + 12, 1, "#3f3f3f", shadow: false)
-        cv.drawRPGIcon(rpgAssetIDForPath(path.id), f.x + 42, f.y + 32, 24, 24)
-        cv.drawTextCentered(path.displayName, f.x + f.w / 2, f.y + 38, 1, "#202020", shadow: false)
-        drawWrapped(cv, path.summary, f.x + 182, f.y + 58, Int(f.w - 204), "#505050", maxLines: 2)
-        cv.drawText("Attributes", f.x + 14, f.y + 66, 1, "#3f3f3f", shadow: false)
-        cv.drawText("Pool \(remaining)", f.x + 104, f.y + 66, 1, remaining == 0 ? "#206020" : "#a04020", shadow: false)
+        cv.drawRPGIcon(rpgAssetIDForPath(path.id), layout.pathIconX, layout.pathIconY, 24, 24)
+        cv.drawTextCentered(path.displayName, f.x + f.w / 2, layout.pathTitleY, 1, "#202020", shadow: false)
+        drawWrapped(cv, path.summary, layout.pathSummaryX, layout.pathSummaryY, layout.pathSummaryW, "#505050",
+                    maxLines: layout.pathSummaryLines)
+        cv.drawText("Attributes", f.x + 14, layout.attrHeaderY, 1, "#3f3f3f", shadow: false)
+        cv.drawText("Pool \(remaining)", f.x + 104, layout.attrHeaderY, 1, remaining == 0 ? "#206020" : "#a04020", shadow: false)
         for (attr, minus, plus) in attrButtons {
             let value = draftAttributes.value(attr)
             minus.enabled = value > RPGAttributes.minimum
             plus.enabled = remaining > 0 && value < RPGAttributes.maximumAtCreation
+            minus.y = layout.attrRowStartY + Double(RPGAttributeID.allCases.firstIndex(of: attr) ?? 0) * 20
+            plus.y = minus.y
+            minus.x = layout.attrMinusX
+            plus.x = layout.attrPlusX
             cv.drawText(attributeShortLabel(attr), f.x + 18, minus.y + 4, 1, "#303030", shadow: false)
-            cv.drawText(String(value), f.x + 100, minus.y + 4, 1, "#202020", shadow: false)
+            cv.drawText(String(value), layout.attrValueX, minus.y + 4, 1, "#202020", shadow: false)
         }
-        cv.drawText("Starter", f.x + 194, f.y + 88, 1, "#3f3f3f", shadow: false)
+        cv.drawText("Starter", layout.starterSummaryX, layout.starterLabelY, 1, "#3f3f3f", shadow: false)
         let starterSkill = path.starterSkillIDs.indices.contains(starterSkillIndex)
             ? path.starterSkillIDs[starterSkillIndex] : path.starterSkillIDs.first
         if let starterSkill, let def = rpgSkillDefinition(starterSkill) {
-            cv.drawRPGIcon(rpgAssetIDForSkill(starterSkill), f.x + 222, f.y + 101, 18, 18)
-            cv.drawText(def.displayName, f.x + 244, f.y + 104, 1, "#202020", shadow: false)
-            drawWrapped(cv, def.summary, f.x + 194, f.y + 123, Int(f.w - 212), "#505050", maxLines: 2)
+            cv.drawRPGIcon(rpgAssetIDForSkill(starterSkill), layout.starterIconX, layout.starterIconY, 18, 18)
+            cv.drawText(fit(def.displayName, maxWidth: layout.starterNameW), layout.starterNameX, layout.starterIconY + 3, 1, "#202020", shadow: false)
+            drawWrapped(cv, def.summary, layout.starterSummaryX, layout.starterSummaryY, layout.starterSummaryW, "#505050",
+                        maxLines: layout.starterSummaryLines)
         }
-        drawStarterSpells(ui, path: path, f: f)
-        buttons.first { $0.label == "Create" }?.enabled = remaining == 0
+        drawStarterSpells(ui, path: path, f: f, layout: layout)
+        createButton?.enabled = remaining == 0
         if !statusText.isEmpty {
             cv.drawText(fit(statusText, maxWidth: Int(f.w - 96)), f.x + 78, f.y + f.h - 22, 1, "#a03030", shadow: false)
         }
@@ -240,10 +310,15 @@ final class RPGCharacterScreen: Screen {
         let left = f.x + 20
         let right = f.x + f.w / 2 + 8
         let y = top + 94
-        cv.drawText("Health \(Int(player.health.rounded())) / \(Int(player.maxHealth.rounded()))", left, y, 1, "#303030", shadow: false)
-        cv.drawText("Skill Points \(rpgAvailableSkillPoints(state))", right, y, 1, "#303030", shadow: false)
-        cv.drawText("Attribute Points \(rpgAvailableAttributePoints(state))", left, y + 14, 1, "#303030", shadow: false)
-        cv.drawText("Prepared \(state.preparedSkillIDs.count) skills, \(state.preparedSpellIDs.count) spells", right, y + 14, 1, "#303030", shadow: false)
+        let colW = Int((f.w - 48) / 2)
+        cv.drawText(fit("Health \(Int(player.health.rounded())) / \(Int(player.maxHealth.rounded()))", maxWidth: colW),
+                    left, y, 1, "#303030", shadow: false)
+        cv.drawText(fit("Skill Points \(rpgAvailableSkillPoints(state))", maxWidth: colW),
+                    right, y, 1, "#303030", shadow: false)
+        cv.drawText(fit("Attribute Points \(rpgAvailableAttributePoints(state))", maxWidth: colW),
+                    left, y + 14, 1, "#303030", shadow: false)
+        cv.drawText(fit("Prepared \(state.preparedSkillIDs.count) skills, \(state.preparedSpellIDs.count) spells", maxWidth: colW),
+                    right, y + 14, 1, "#303030", shadow: false)
     }
 
     private func drawProgression(_ ui: UIManager, player: Player, f: (x: Double, y: Double, w: Double, h: Double)) {
@@ -259,7 +334,8 @@ final class RPGCharacterScreen: Screen {
         }
         let derived = rpgDerivedStats(state)
         let y = f.y + 196
-        cv.drawText("HP \(Int(derived.maxHealth))  Fatigue \(Int(derived.maxFatigue))  Regen \(String(format: "%.2f", derived.fatigueRegenPerTick * 20))/s",
+        cv.drawText(fit("HP \(Int(derived.maxHealth))  Fatigue \(Int(derived.maxFatigue))  Regen \(String(format: "%.2f", derived.fatigueRegenPerTick * 20))/s",
+                        maxWidth: Int(f.w - 40)),
                     f.x + 20, min(y, f.y + f.h - 44), 1, "#505050", shadow: false)
     }
 
@@ -277,8 +353,10 @@ final class RPGCharacterScreen: Screen {
             cv.drawText(fit(skill.displayName, maxWidth: 118), row.x + 24, row.y + 4, 1, known ? "#202020" : "#505050", shadow: false)
             let rank = player.rpg.skillRanks[skill.id] ?? 0
             cv.drawText(rank > 0 ? "\(rank)/\(skill.maxRank)" : "-", row.x + 146, row.y + 4, 1, "#303030", shadow: false)
-            cv.drawText(skillRowState(skill, state: player.rpg), row.x + row.w - 60, row.y + 4, 1, "#303030", shadow: false)
-            cv.drawText(fit(skill.summary, maxWidth: Int(row.w - 220)), row.x + 190, row.y + 4, 1, "#606060", shadow: false)
+            let stateX = row.x + row.w - 62
+            cv.drawText(skillRowState(skill, state: player.rpg), stateX, row.y + 4, 1, "#303030", shadow: false)
+            cv.drawText(fit(skill.summary, maxWidth: Int(max(0, stateX - (row.x + 190) - 8))),
+                        row.x + 190, row.y + 4, 1, "#606060", shadow: false)
         }
     }
 
@@ -295,38 +373,48 @@ final class RPGCharacterScreen: Screen {
             cv.drawRPGIcon(rpgAssetIDForSpell(spell.id), row.x + 3, row.y + 3, 16, 16)
             cv.drawText(fit(spell.displayName, maxWidth: 116), row.x + 24, row.y + 4, 1, known ? "#202020" : "#707070", shadow: false)
             cv.drawText("C\(spell.circle) F\(Int(spell.fatigueCost))", row.x + 146, row.y + 4, 1, "#303030", shadow: false)
-            cv.drawText(prepared ? "Prepared" : known ? "Ready" : "Locked", row.x + row.w - 62, row.y + 4, 1, "#303030", shadow: false)
-            cv.drawText(fit(spell.summary, maxWidth: Int(row.w - 220)), row.x + 190, row.y + 4, 1, "#606060", shadow: false)
+            let stateX = row.x + row.w - 62
+            cv.drawText(prepared ? "Prepared" : known ? "Ready" : "Locked", stateX, row.y + 4, 1, "#303030", shadow: false)
+            cv.drawText(fit(spell.summary, maxWidth: Int(max(0, stateX - (row.x + 190) - 8))),
+                        row.x + 190, row.y + 4, 1, "#606060", shadow: false)
         }
     }
 
     private func drawStarterSpells(_ ui: UIManager, path: RPGPathDefinition,
-                                   f: (x: Double, y: Double, w: Double, h: Double)) {
+                                   f: (x: Double, y: Double, w: Double, h: Double),
+                                   layout: CreationLayout) {
         guard !path.starterSpellIDs.isEmpty else { return }
         let cv = ui.cv
-        let x = f.x + 194
-        let y = f.y + 154
-        cv.drawText("Spells", x, y, 1, "#3f3f3f", shadow: false)
+        let x = layout.spellsX
+        cv.drawText("Spells", x, layout.spellsTitleY, 1, "#3f3f3f", shadow: false)
+        let total = Double(path.starterSpellIDs.count) * layout.spellRowStride
+        let available = max(0, layout.spellsListBottom - layout.spellsListTop)
+        creationSpellScroll = min(max(0, creationSpellScroll), max(0, total - available))
         for (i, spellID) in path.starterSpellIDs.enumerated() {
             guard let spell = rpgSpellDefinition(spellID) else { continue }
-            let rowY = y + 14 + Double(i) * 18
+            let rowY = layout.spellsListTop + Double(i) * layout.spellRowStride - creationSpellScroll
+            guard rowY >= layout.spellsListTop, rowY + layout.spellRowH <= layout.spellsListBottom else { continue }
             let selected = selectedStarterSpellIDs.contains(spellID)
             cv.setFill(selected ? "rgba(90,120,210,0.35)" : "rgba(0,0,0,0.12)")
-            cv.fillRect(x, rowY, f.w - 212, 16)
+            cv.fillRect(x, rowY, layout.spellsW, layout.spellRowH)
             cv.drawRPGIcon(rpgAssetIDForSpell(spellID), x + 2, rowY, 16, 16)
-            cv.drawText(fit(spell.displayName, maxWidth: Int(f.w - 244)), x + 22, rowY + 4, 1, "#303030", shadow: false)
+            cv.drawText(fit(spell.displayName, maxWidth: Int(layout.spellsW - 24)), x + 22, rowY + 4, 1, "#303030", shadow: false)
+        }
+        if total > available, available > 0 {
+            drawScrollBar(cv, x: x + layout.spellsW - 4, y: layout.spellsListTop, h: available,
+                          contentH: total, offset: creationSpellScroll)
         }
     }
 
     private func handleCreationClick(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) -> Bool {
         let f = panel(ui)
         let path = RPG_PATH_DEFINITIONS[pathIndex]
+        let layout = creationLayout(f, path: path)
         guard !path.starterSpellIDs.isEmpty else { return false }
-        let x = f.x + 194
-        let y = f.y + 168
         for (i, spellID) in path.starterSpellIDs.enumerated() {
-            let rowY = y + Double(i) * 18
-            if mx >= x, mx < x + f.w - 212, my >= rowY, my < rowY + 16 {
+            let rowY = layout.spellsListTop + Double(i) * layout.spellRowStride - creationSpellScroll
+            guard rowY >= layout.spellsListTop, rowY + layout.spellRowH <= layout.spellsListBottom else { continue }
+            if mx >= layout.spellsX, mx < layout.spellsX + layout.spellsW, my >= rowY, my < rowY + layout.spellRowH {
                 if selectedStarterSpellIDs.contains(spellID) {
                     selectedStarterSpellIDs.remove(spellID)
                 } else {
@@ -398,6 +486,7 @@ final class RPGCharacterScreen: Screen {
     private func movePath(_ dir: Int) {
         pathIndex = (pathIndex + dir + RPG_PATH_DEFINITIONS.count) % RPG_PATH_DEFINITIONS.count
         starterSkillIndex = 0
+        creationSpellScroll = 0
         selectedStarterSpellIDs.removeAll()
         normalizeDraftSelection()
     }
@@ -433,6 +522,96 @@ final class RPGCharacterScreen: Screen {
         if path.starterSpellIDs.isEmpty { selectedStarterSpellIDs.removeAll() }
     }
 
+    private func applyDebugCreationSelectionIfNeeded() {
+        guard !appliedDebugCreationSelection else { return }
+        appliedDebugCreationSelection = true
+        let env = ProcessInfo.processInfo.environment
+        if let requested = env["PEBBLE_RPG_PATH"]?.lowercased(),
+           let index = RPG_PATH_DEFINITIONS.firstIndex(where: { $0.id.lowercased() == requested || $0.displayName.lowercased() == requested }) {
+            pathIndex = index
+            starterSkillIndex = 0
+            selectedStarterSpellIDs.removeAll()
+        }
+        if let requested = env["PEBBLE_RPG_STARTER"]?.lowercased() {
+            let path = RPG_PATH_DEFINITIONS[pathIndex]
+            if let index = path.starterSkillIDs.firstIndex(where: { id in
+                id.lowercased() == requested || (rpgSkillDefinition(id)?.displayName.lowercased() == requested)
+            }) {
+                starterSkillIndex = index
+            }
+        }
+        normalizeDraftSelection()
+    }
+
+    private func creationLayout(_ f: (x: Double, y: Double, w: Double, h: Double), path: RPGPathDefinition) -> CreationLayout {
+        let footerY = f.y + f.h - 25
+        let rightX = f.x + max(174, min(202, f.w * 0.45))
+        let rightW = max(126, f.x + f.w - rightX - 18)
+        let pathSummaryY = f.y + 54
+        let pathSummaryW = Int(rightW)
+        let pathSummaryLines = path.starterSpellIDs.isEmpty ? 3 : 2
+        let pathLines = min(pathSummaryLines, wrapText(path.summary, max(1, pathSummaryW)).count)
+        let starterLabelY = max(f.y + 80, pathSummaryY + Double(pathLines) * 10 + 6)
+        let starterButtonY = starterLabelY + 16
+        let starterSummaryY = starterButtonY + 22
+        let starterSummaryW = Int(rightW)
+        let starterSummaryLines = path.starterSpellIDs.isEmpty ? 2 : max(1, min(2, Int((footerY - starterSummaryY - 44) / 10)))
+        let spellsTitleY = starterSummaryY + Double(starterSummaryLines) * 10 + 8
+        let spellsListTop = spellsTitleY + 13
+        let spellsListBottom = footerY - 4
+        return CreationLayout(
+            footerY: footerY,
+            pathButtonY: f.y + 34,
+            pathIconX: f.x + 42,
+            pathIconY: f.y + 32,
+            pathTitleY: f.y + 38,
+            pathSummaryX: rightX,
+            pathSummaryY: pathSummaryY,
+            pathSummaryW: pathSummaryW,
+            pathSummaryLines: pathSummaryLines,
+            attrHeaderY: f.y + 66,
+            attrRowStartY: f.y + 82,
+            attrMinusX: f.x + 72,
+            attrValueX: f.x + 100,
+            attrPlusX: f.x + 128,
+            starterLabelY: starterLabelY,
+            starterButtonY: starterButtonY,
+            starterIconX: rightX + 28,
+            starterIconY: starterButtonY + 1,
+            starterNameX: rightX + 52,
+            starterNameW: Int(max(1, f.x + f.w - 38 - (rightX + 52))),
+            starterSummaryX: rightX,
+            starterSummaryY: starterSummaryY,
+            starterSummaryW: starterSummaryW,
+            starterSummaryLines: starterSummaryLines,
+            spellsTitleY: spellsTitleY,
+            spellsListTop: spellsListTop,
+            spellsListBottom: spellsListBottom,
+            spellsX: rightX,
+            spellsW: rightW,
+            spellRowH: 16,
+            spellRowStride: 18
+        )
+    }
+
+    private func updateCreationButtonLayout(_ layout: CreationLayout, f: (x: Double, y: Double, w: Double, h: Double),
+                                            path: RPGPathDefinition) {
+        closeButton?.x = f.x + 14
+        closeButton?.y = layout.footerY
+        createButton?.x = f.x + f.w - 72
+        createButton?.y = layout.footerY
+        prevPathButton?.x = f.x + 14
+        prevPathButton?.y = layout.pathButtonY
+        nextPathButton?.x = f.x + f.w - 36
+        nextPathButton?.y = layout.pathButtonY
+        prevStarterButton?.x = layout.starterSummaryX
+        prevStarterButton?.y = layout.starterButtonY
+        nextStarterButton?.x = f.x + f.w - 36
+        nextStarterButton?.y = layout.starterButtonY
+        prevStarterButton?.visible = path.starterSkillIDs.count > 1
+        nextStarterButton?.visible = path.starterSkillIDs.count > 1
+    }
+
     private func setStatus(_ text: String, game: GameCore) {
         statusText = text
         game.host?.showActionBar(text, 70)
@@ -449,13 +628,23 @@ final class RPGCharacterScreen: Screen {
 
     private func drawWrapped(_ cv: UICanvas, _ text: String, _ x: Double, _ y: Double,
                              _ width: Int, _ color: String, maxLines: Int) {
-        let lines = Array(wrapText(text, max(1, width)).prefix(maxLines))
+        guard width > 0, maxLines > 0 else { return }
+        let wrapped = wrapText(text, max(1, width))
+        var lines = Array(wrapped.prefix(maxLines))
+        if wrapped.count > maxLines, !lines.isEmpty {
+            var last = lines[lines.count - 1]
+            while textWidth(last + "...") > width && last.count > 1 {
+                last.removeLast()
+            }
+            lines[lines.count - 1] = last + "..."
+        }
         for (i, line) in lines.enumerated() {
             cv.drawText(line, x, y + Double(i) * 10, 1, color, shadow: false)
         }
     }
 
     private func fit(_ text: String, maxWidth: Int) -> String {
+        guard maxWidth > 0 else { return "" }
         var out = text
         while textWidth(out) > maxWidth && out.count > 3 {
             out.removeLast()
@@ -465,6 +654,17 @@ final class RPGCharacterScreen: Screen {
             return out + "..."
         }
         return out
+    }
+
+    private func drawScrollBar(_ cv: UICanvas, x: Double, y: Double, h: Double, contentH: Double, offset: Double) {
+        guard contentH > h, h >= 12 else { return }
+        cv.setFill("rgba(0,0,0,0.25)")
+        cv.fillRect(x, y, 3, h)
+        let thumbH = max(8, h * h / contentH)
+        let range = max(1, contentH - h)
+        let thumbY = y + (h - thumbH) * max(0, min(1, offset / range))
+        cv.setFill("rgba(255,255,255,0.55)")
+        cv.fillRect(x, thumbY, 3, thumbH)
     }
 
     private func attributeShortLabel(_ attr: RPGAttributeID) -> String {
