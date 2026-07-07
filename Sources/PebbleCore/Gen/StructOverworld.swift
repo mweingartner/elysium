@@ -1,7 +1,8 @@
 // Overworld surface structures —
 // villages (5 styles), desert & jungle temples, igloos, witch huts, pillager
 // outposts, shipwrecks, ocean ruins, buried treasure, ruined portals, trail
-// ruins and dungeons. RNG call order mirrors baseline exactly.
+// ruins and dungeons. The legacy dungeon pass mirrors baseline RNG exactly;
+// higher density levels add deterministic independent passes.
 
 import Foundation
 
@@ -198,8 +199,10 @@ public func buildRuinedPortal(_ b: Builder, _ x: Int, _ y: Int, _ z: Int, _ neth
 // =============================================================================
 // DUNGEON (placed per-chunk, not region)
 // =============================================================================
-public func tryDungeons(_ seed: UInt32, _ ocx: Int, _ ocz: Int, _ sink: ChunkSink) {
-    let rng = Rng(hash2(seed, ocx, ocz, 0xD0D6E0))
+@discardableResult
+private func tryDungeonPass(_ seed: UInt32, _ ocx: Int, _ ocz: Int, _ sink: ChunkSink,
+                            salt: UInt32) -> Int {
+    let rng = Rng(hash2(seed, ocx, ocz, salt))
     for _ in 0..<4 {
         if rng.nextFloat() > 0.12 { continue }
         let x = ocx * 16 + 3 + rng.nextInt(10)
@@ -235,8 +238,27 @@ public func tryDungeons(_ seed: UInt32, _ ocx: Int, _ ocz: Int, _ sink: ChunkSin
         b.spawner(x, y, z, mobRoll < 0.5 ? "zombie" : mobRoll < 0.75 ? "skeleton" : "spider")
         b.chest(x + hw - 1, y, z + hw - 1, 0, "dungeon")
         if rng.nextBoolean() { b.chest(x - hw + 1, y, z - hw + 1, 0, "dungeon") }
-        return // max one per chunk
+        return 1 // max one per chunk per pass
     }
+    return 0
+}
+
+private func dungeonPassSalt(_ pass: Int) -> UInt32 {
+    0xD0D6E0 &+ UInt32(truncatingIfNeeded: pass) &* 0x9E3779B9
+}
+
+@discardableResult
+public func tryDungeons(_ seed: UInt32, _ ocx: Int, _ ocz: Int, _ sink: ChunkSink,
+                        density: DungeonDensity = .normal) -> Int {
+    let passes = density.dungeonPasses
+    guard passes > 0 else { return 0 }
+    var placed = tryDungeonPass(seed, ocx, ocz, sink, salt: 0xD0D6E0)
+    if passes > 1 {
+        for pass in 1..<passes {
+            placed += tryDungeonPass(seed, ocx, ocz, sink, salt: dungeonPassSalt(pass))
+        }
+    }
+    return placed
 }
 
 // =============================================================================

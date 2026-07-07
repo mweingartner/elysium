@@ -517,7 +517,8 @@ public final class GameCore {
     }
 
     public func createWorld(name: String, seedText: String, mode: Int, difficulty: Int,
-                            worldPreset: WorldPreset = .normal, singleBiome: Biome = .plains) {
+                            worldPreset: WorldPreset = .normal, singleBiome: Biome = .plains,
+                            dungeonDensity: DungeonDensity = .normal) {
         lanClientResumeStorageKey = nil
         lanClientWorldSummary = nil
         let trimmed = seedText.trimmingCharacters(in: .whitespaces)
@@ -536,7 +537,8 @@ public final class GameCore {
         let ms = Int(Date().timeIntervalSince1970 * 1000)
         let id = "w" + String(ms, radix: 36) + String(Int.random(in: 0..<1_000_000), radix: 36)
         var rec = WorldRecord(id: id, name: name, seed: seed, gameMode: mode, difficulty: difficulty,
-                              worldPreset: worldPreset, singleBiome: singleBiome)
+                              worldPreset: worldPreset, singleBiome: singleBiome,
+                              dungeonDensity: dungeonDensity)
         let spawn = defaultWorldSpawn(seed: seed, settings: rec.generationSettings)
         rec.spawnX = spawn.x
         rec.spawnY = spawn.y

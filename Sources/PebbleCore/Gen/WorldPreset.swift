@@ -97,15 +97,19 @@ public func singleBiomeDisplayName(_ biome: Biome) -> String {
 public struct WorldGenerationSettings: Equatable {
     public var preset: WorldPreset
     public var singleBiome: Biome
+    public var dungeonDensity: DungeonDensity
 
-    public init(preset: WorldPreset = .normal, singleBiome: Biome = .plains) {
+    public init(preset: WorldPreset = .normal, singleBiome: Biome = .plains,
+                dungeonDensity: DungeonDensity = .normal) {
         self.preset = preset
         self.singleBiome = singleBiome
+        self.dungeonDensity = dungeonDensity
     }
 
-    public init(presetID: String?, singleBiomeID: String?) {
+    public init(presetID: String?, singleBiomeID: String?, dungeonDensityLevel: Int? = nil) {
         preset = normalizedWorldPreset(presetID)
         singleBiome = normalizedSingleBiome(singleBiomeID)
+        dungeonDensity = normalizedDungeonDensity(dungeonDensityLevel)
     }
 
     public static let normal = WorldGenerationSettings()

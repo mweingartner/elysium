@@ -54,17 +54,20 @@ public struct WorldRecord: Codable {
     public var spawnZ: Int
     public var worldPreset: String
     public var singleBiome: String
+    public var dungeonDensity: Int
     public var gameRules: [String: Double]
     public var dragonKilled: Bool
     public var gatewaysSpawned: Int
     public var nextEntityId: Int
 
     public var generationSettings: WorldGenerationSettings {
-        WorldGenerationSettings(presetID: worldPreset, singleBiomeID: singleBiome)
+        WorldGenerationSettings(presetID: worldPreset, singleBiomeID: singleBiome,
+                                dungeonDensityLevel: dungeonDensity)
     }
 
     public init(id: String, name: String, seed: Int32, gameMode: Int, difficulty: Int,
-                worldPreset: WorldPreset = .normal, singleBiome: Biome = .plains) {
+                worldPreset: WorldPreset = .normal, singleBiome: Biome = .plains,
+                dungeonDensity: DungeonDensity = .normal) {
         self.id = id
         self.name = name
         self.seed = seed
@@ -78,6 +81,7 @@ public struct WorldRecord: Codable {
         spawnZ = 0
         self.worldPreset = worldPreset.rawValue
         self.singleBiome = biomeID(singleBiome)
+        self.dungeonDensity = dungeonDensity.rawValue
         gameRules = [:]
         dragonKilled = false
         gatewaysSpawned = 0
@@ -86,7 +90,7 @@ public struct WorldRecord: Codable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, seed, gameMode, difficulty, lastPlayed, version, dims
-        case spawnX, spawnY, spawnZ, worldPreset, singleBiome, gameRules
+        case spawnX, spawnY, spawnZ, worldPreset, singleBiome, dungeonDensity, gameRules
         case dragonKilled, gatewaysSpawned, nextEntityId
     }
 
@@ -106,10 +110,21 @@ public struct WorldRecord: Codable {
         spawnZ = try c.decodeIfPresent(Int.self, forKey: .spawnZ) ?? 0
         worldPreset = normalizedWorldPreset(try c.decodeIfPresent(String.self, forKey: .worldPreset)).rawValue
         singleBiome = biomeID(normalizedSingleBiome(try c.decodeIfPresent(String.self, forKey: .singleBiome)))
+        dungeonDensity = WorldRecord.decodeDungeonDensity(from: c).rawValue
         gameRules = try c.decodeIfPresent([String: Double].self, forKey: .gameRules) ?? [:]
         dragonKilled = try c.decodeIfPresent(Bool.self, forKey: .dragonKilled) ?? false
         gatewaysSpawned = try c.decodeIfPresent(Int.self, forKey: .gatewaysSpawned) ?? 0
         nextEntityId = try c.decodeIfPresent(Int.self, forKey: .nextEntityId) ?? 1
+    }
+
+    private static func decodeDungeonDensity(from c: KeyedDecodingContainer<CodingKeys>) -> DungeonDensity {
+        if let raw = try? c.decodeIfPresent(Int.self, forKey: .dungeonDensity) {
+            return normalizedDungeonDensity(raw)
+        }
+        if let raw = try? c.decodeIfPresent(String.self, forKey: .dungeonDensity) {
+            return normalizedDungeonDensity(raw)
+        }
+        return .normal
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -127,6 +142,7 @@ public struct WorldRecord: Codable {
         try c.encode(spawnZ, forKey: .spawnZ)
         try c.encode(normalizedWorldPreset(worldPreset).rawValue, forKey: .worldPreset)
         try c.encode(biomeID(normalizedSingleBiome(singleBiome)), forKey: .singleBiome)
+        try c.encode(normalizedDungeonDensity(dungeonDensity).rawValue, forKey: .dungeonDensity)
         try c.encode(gameRules, forKey: .gameRules)
         try c.encode(dragonKilled, forKey: .dragonKilled)
         try c.encode(gatewaysSpawned, forKey: .gatewaysSpawned)

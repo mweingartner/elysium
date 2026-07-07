@@ -77,6 +77,7 @@ private struct OverworldGenKey: Hashable {
     let seed: UInt32
     let presetID: String
     let singleBiomeID: String
+    let dungeonDensityLevel: Int
 }
 
 private var overworldGens: [OverworldGenKey: OverworldGen] = [:]
@@ -88,7 +89,8 @@ public func overworldGen(_ seed: UInt32, settings: WorldGenerationSettings = .no
     genLock.lock()
     defer { genLock.unlock() }
     let key = OverworldGenKey(seed: seed, presetID: settings.preset.rawValue,
-                              singleBiomeID: biomeID(settings.singleBiome))
+                              singleBiomeID: biomeID(settings.singleBiome),
+                              dungeonDensityLevel: settings.dungeonDensity.rawValue)
     if let g = overworldGens[key] { return g }
     let g = OverworldGen(seed, settings: settings)
     overworldGens[key] = g
@@ -244,7 +246,7 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
                 tryGeode(seed, ox, oz, sink)
             }
         }
-        tryDungeons(seed, cx, cz, sink)
+        tryDungeons(seed, cx, cz, sink, density: settings.dungeonDensity)
         gen.applySnowAndIce(cx, cz, &sink.blocks, res.surfaceBiomes)
 
         // worldgen passive mobs

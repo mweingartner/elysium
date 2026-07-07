@@ -563,8 +563,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         // PEBBLE_NEWWORLD=<seed> creates a fresh world instead (worldgen testing)
         if ProcessInfo.processInfo.environment["PEBBLE_AUTOLOAD"] != nil {
             if let seedText = ProcessInfo.processInfo.environment["PEBBLE_NEWWORLD"] {
+                let dungeonDensity = normalizedDungeonDensity(ProcessInfo.processInfo.environment["PEBBLE_DUNGEON_DENSITY"])
                 game.createWorld(name: "WGTest-\(seedText)", seedText: seedText,
-                                 mode: GameMode.survival, difficulty: 2)
+                                 mode: GameMode.survival, difficulty: 2,
+                                 dungeonDensity: dungeonDensity)
             } else if let rec = game.listWorlds().sorted(by: { $0.lastPlayed > $1.lastPlayed }).first {
                 game.loadWorld(rec.id)
             } else {

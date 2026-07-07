@@ -237,9 +237,11 @@ final class WorldCreateScreen: Screen {
     var difficulty = 2
     var worldPreset = WorldPreset.normal
     var singleBiome = Biome.plains
+    var dungeonDensity = DungeonDensity.normal
     var creating = false
     private var worldTypeBtn: Button!
     private var biomeBtn: Button!
+    private var dungeonBtn: Button!
 
     init(lanHostRequest: LANHostLaunchRequest? = nil) {
         self.lanHostRequest = lanHostRequest
@@ -286,17 +288,27 @@ final class WorldCreateScreen: Screen {
         }
         buttons.append(worldTypeBtn)
         buttons.append(biomeBtn)
+        dungeonBtn = Button(cx - 100, 198, 200, 20, "", {})
+        dungeonBtn.onClick = { [weak self] in
+            guard let self else { return }
+            let cases = DungeonDensity.allCases
+            let current = cases.firstIndex(of: self.dungeonDensity) ?? 1
+            self.dungeonDensity = cases[(current + 1) % cases.count]
+            self.updateWorldTypeLabels()
+        }
+        buttons.append(dungeonBtn)
         updateWorldTypeLabels()
-        buttons.append(Button(cx - 100, 206, 98, 20, lanHostRequest == nil ? "Create World" : "Create & Host", { [weak self, weak ui, weak game] in
+        buttons.append(Button(cx - 100, 230, 98, 20, lanHostRequest == nil ? "Create World" : "Create & Host", { [weak self, weak ui, weak game] in
             guard let self, let ui, let game, !self.creating else { return }
             self.creating = true
             game.createWorld(name: self.nameField.text.isEmpty ? "New World" : self.nameField.text,
                              seedText: self.seedField.text, mode: self.mode, difficulty: self.difficulty,
-                             worldPreset: self.worldPreset, singleBiome: self.singleBiome)
+                             worldPreset: self.worldPreset, singleBiome: self.singleBiome,
+                             dungeonDensity: self.dungeonDensity)
             self.startPendingLANHost(game)
             ui.open(LoadingScreen(), game)
         }))
-        buttons.append(Button(cx + 2, 206, 98, 20, "Cancel", { [weak ui, weak game] in
+        buttons.append(Button(cx + 2, 230, 98, 20, "Cancel", { [weak ui, weak game] in
             guard let ui, let game else { return }
             ui.closeTop(game)
         }))
@@ -307,7 +319,7 @@ final class WorldCreateScreen: Screen {
         ui.cv.drawText("World Name", nameField.x, nameField.y - 10, 1, "#a0a0a0")
         ui.cv.drawText("Seed", seedField.x, seedField.y - 10, 1, "#a0a0a0")
         if creating {
-            ui.cv.drawTextCentered("Generating world...", ui.width / 2, 238, 1, "#ffff55")
+            ui.cv.drawTextCentered("Generating world...", ui.width / 2, 262, 1, "#ffff55")
         }
         ui.drawButtons(self)
     }
@@ -316,6 +328,7 @@ final class WorldCreateScreen: Screen {
         worldTypeBtn?.label = "World Type: \(worldPreset.displayName)"
         biomeBtn?.label = "Biome: \(singleBiomeDisplayName(singleBiome))"
         biomeBtn?.visible = worldPreset == .singleBiomeSurface
+        dungeonBtn?.label = "Dungeons: \(dungeonDensity.displayName)"
     }
 
     private func startPendingLANHost(_ game: GameCore) {
