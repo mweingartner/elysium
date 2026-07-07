@@ -234,6 +234,16 @@ final class HUD {
                     cv.drawTextCentered(String(player.xpLevel), cx, xpY - 10, 1, "#80ff20")
                 }
             }
+            if player.rpg.created {
+                let derived = rpgDerivedStats(player.rpg)
+                let f = max(0, min(1, player.rpg.fatigue / max(1, derived.maxFatigue)))
+                let fx = hbX + 186
+                let fy = hbY
+                cv.setFill("#1c1c1c")
+                cv.fillRect(fx, fy, 5, 22)
+                cv.setFill("#55aaff")
+                cv.fillRect(fx + 1, fy + 21 - (20 * f).rounded(), 3, (20 * f).rounded())
+            }
             // vehicle health (riding)
             if let v = player.vehicle as? LivingEntity {
                 cv.drawTextCentered("♥ \(Int(v.health.rounded(.up))) / \(Int(v.maxHealth))", cx, healthY - 20, 1, "#ff5555")

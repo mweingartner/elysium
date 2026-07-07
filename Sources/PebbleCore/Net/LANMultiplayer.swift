@@ -1,6 +1,6 @@
 import Foundation
 
-public let LAN_MULTIPLAYER_PROTOCOL_VERSION: UInt16 = 3
+public let LAN_MULTIPLAYER_PROTOCOL_VERSION: UInt16 = 4
 public let LAN_MULTIPLAYER_SERVICE_TYPE = "_pebble-lan._tcp"
 public let LAN_MULTIPLAYER_DEFAULT_PORT: UInt16 = 41337
 public let LAN_MULTIPLAYER_MAX_CLIENTS = 8
@@ -81,6 +81,7 @@ public enum LANMultiplayerMessageKind: UInt16, Codable, Equatable, CaseIterable 
     case restoreState = 23
     case damageEvent = 24
     case keepalive = 25
+    case rpgIntent = 26
 }
 
 public enum LANPeerLifecycleState: String, Codable, Equatable {
@@ -176,6 +177,19 @@ public struct LANGameplayEvent: Codable, Equatable {
 }
 
 public struct LANWorldSummary: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case worldID
+        case worldName
+        case seed
+        case gameMode
+        case difficulty
+        case dimension
+        case playerCount
+        case maxPlayers
+        case pebbleVersion
+        case rpgClassesEnabled
+    }
+
     public var worldID: String
     public var worldName: String
     public var seed: Int64
@@ -185,6 +199,7 @@ public struct LANWorldSummary: Codable, Equatable {
     public var playerCount: Int
     public var maxPlayers: Int
     public var pebbleVersion: String
+    public var rpgClassesEnabled: Bool
 
     public init(
         worldID: String,
@@ -195,7 +210,8 @@ public struct LANWorldSummary: Codable, Equatable {
         dimension: Int,
         playerCount: Int,
         maxPlayers: Int = LAN_MULTIPLAYER_MAX_CLIENTS,
-        pebbleVersion: String = PEBBLE_VERSION
+        pebbleVersion: String = PEBBLE_VERSION,
+        rpgClassesEnabled: Bool = true
     ) {
         self.worldID = String(worldID.prefix(128))
         self.worldName = sanitizedLANWorldName(worldName)
@@ -206,6 +222,23 @@ public struct LANWorldSummary: Codable, Equatable {
         self.playerCount = max(0, min(maxPlayers, playerCount))
         self.maxPlayers = max(1, min(LAN_MULTIPLAYER_MAX_CLIENTS, maxPlayers))
         self.pebbleVersion = pebbleVersion
+        self.rpgClassesEnabled = rpgClassesEnabled
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            worldID: try c.decode(String.self, forKey: .worldID),
+            worldName: try c.decode(String.self, forKey: .worldName),
+            seed: try c.decode(Int64.self, forKey: .seed),
+            gameMode: try c.decode(Int.self, forKey: .gameMode),
+            difficulty: try c.decode(Int.self, forKey: .difficulty),
+            dimension: try c.decodeIfPresent(Int.self, forKey: .dimension) ?? Dim.overworld.rawValue,
+            playerCount: try c.decode(Int.self, forKey: .playerCount),
+            maxPlayers: try c.decodeIfPresent(Int.self, forKey: .maxPlayers) ?? LAN_MULTIPLAYER_MAX_CLIENTS,
+            pebbleVersion: try c.decodeIfPresent(String.self, forKey: .pebbleVersion) ?? PEBBLE_VERSION,
+            rpgClassesEnabled: try c.decodeIfPresent(Bool.self, forKey: .rpgClassesEnabled) ?? true
+        )
     }
 }
 
@@ -241,6 +274,7 @@ public struct LANPlayerState: Codable, Equatable {
         case dimension
         case dead
         case inventoryRevision
+        case rpg
     }
 
     public var playerID: String
@@ -257,6 +291,7 @@ public struct LANPlayerState: Codable, Equatable {
     public var dimension: Int
     public var dead: Bool
     public var inventoryRevision: Int
+    public var rpg: RPGCharacterState?
 
     public init(
         playerID: String,
@@ -272,7 +307,8 @@ public struct LANPlayerState: Codable, Equatable {
         gameMode: Int,
         dimension: Int = Dim.overworld.rawValue,
         dead: Bool = false,
-        inventoryRevision: Int = 0
+        inventoryRevision: Int = 0,
+        rpg: RPGCharacterState? = nil
     ) {
         self.playerID = String(playerID.prefix(128))
         self.displayName = sanitizedLANPlayerName(displayName)
@@ -288,6 +324,7 @@ public struct LANPlayerState: Codable, Equatable {
         self.dimension = isValidLANDimension(dimension) ? dimension : Dim.overworld.rawValue
         self.dead = dead || self.health <= 0
         self.inventoryRevision = max(0, inventoryRevision)
+        self.rpg = rpg.map(repairRPGCharacterState)
     }
 
     public init(from decoder: Decoder) throws {
@@ -306,7 +343,8 @@ public struct LANPlayerState: Codable, Equatable {
             gameMode: try c.decode(Int.self, forKey: .gameMode),
             dimension: try c.decodeIfPresent(Int.self, forKey: .dimension) ?? Dim.overworld.rawValue,
             dead: try c.decodeIfPresent(Bool.self, forKey: .dead) ?? false,
-            inventoryRevision: try c.decodeIfPresent(Int.self, forKey: .inventoryRevision) ?? 0
+            inventoryRevision: try c.decodeIfPresent(Int.self, forKey: .inventoryRevision) ?? 0,
+            rpg: (try? c.decodeIfPresent(RPGCharacterState.self, forKey: .rpg)) ?? nil
         )
     }
 }
@@ -1266,6 +1304,69 @@ public struct LANRestoreState: Codable, Equatable {
     }
 }
 
+public enum LANRPGIntentAction: String, Codable, Equatable {
+    case createCharacter
+    case learnSkill
+    case prepareSkill
+    case unprepareSkill
+    case spendAttribute
+    case prepareSpell
+    case unprepareSpell
+    case selectSpell
+    case castSpell
+}
+
+public struct LANRPGIntent: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case action
+        case draft
+        case skillID
+        case spellID
+        case attribute
+        case direction
+        case actionSequence
+    }
+
+    public var action: LANRPGIntentAction
+    public var draft: RPGCreationDraft?
+    public var skillID: String?
+    public var spellID: String?
+    public var attribute: RPGAttributeID?
+    public var direction: Int
+    public var actionSequence: Int
+
+    public init(
+        action: LANRPGIntentAction,
+        draft: RPGCreationDraft? = nil,
+        skillID: String? = nil,
+        spellID: String? = nil,
+        attribute: RPGAttributeID? = nil,
+        direction: Int = 1,
+        actionSequence: Int = 0
+    ) {
+        self.action = action
+        self.draft = draft
+        self.skillID = skillID.map { String($0.prefix(128)) }
+        self.spellID = spellID.map { String($0.prefix(128)) }
+        self.attribute = attribute
+        self.direction = direction < 0 ? -1 : 1
+        self.actionSequence = max(0, min(1_000_000_000, actionSequence))
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            action: try c.decode(LANRPGIntentAction.self, forKey: .action),
+            draft: try c.decodeIfPresent(RPGCreationDraft.self, forKey: .draft),
+            skillID: try c.decodeIfPresent(String.self, forKey: .skillID),
+            spellID: try c.decodeIfPresent(String.self, forKey: .spellID),
+            attribute: try c.decodeIfPresent(RPGAttributeID.self, forKey: .attribute),
+            direction: try c.decodeIfPresent(Int.self, forKey: .direction) ?? 1,
+            actionSequence: try c.decodeIfPresent(Int.self, forKey: .actionSequence) ?? 0
+        )
+    }
+}
+
 public struct LANDamageEvent: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case playerID
@@ -1338,6 +1439,7 @@ public enum LANMultiplayerMessage: Codable, Equatable {
     case restoreState(LANRestoreState)
     case damageEvent(LANDamageEvent)
     case keepalive
+    case rpgIntent(playerID: String, intent: LANRPGIntent)
 
     public var kind: LANMultiplayerMessageKind {
         switch self {
@@ -1366,6 +1468,7 @@ public enum LANMultiplayerMessage: Codable, Equatable {
         case .restoreState: return .restoreState
         case .damageEvent: return .damageEvent
         case .keepalive: return .keepalive
+        case .rpgIntent: return .rpgIntent
         }
     }
 }

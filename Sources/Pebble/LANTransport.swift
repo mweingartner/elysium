@@ -303,6 +303,9 @@ final class LANMultiplayerManager {
         }
         game.lanBlockIntentHandler = { [weak self] intent in
             guard let self else { return }
+            if ProcessInfo.processInfo.environment["PEBBLE_LAN_PROBE_LOG"] != nil {
+                pebbleLANProbeLog("client_send_block_intent action=\(intent.action.rawValue) target=\(intent.x),\(intent.y),\(intent.z) cell=\(intent.cell)")
+            }
             self.queue.async { [weak self] in
                 guard let self, let peer = self.clientPeer else { return }
                 self.send(.blockIntent(playerID: self.localPeerID, intent: intent), to: peer)
@@ -320,6 +323,13 @@ final class LANMultiplayerManager {
             self.queue.async { [weak self] in
                 guard let self, let peer = self.clientPeer else { return }
                 self.send(.tossIntent(playerID: self.localPeerID, intent: intent), to: peer)
+            }
+        }
+        game.lanRPGIntentHandler = { [weak self] intent in
+            guard let self else { return }
+            self.queue.async { [weak self] in
+                guard let self, let peer = self.clientPeer else { return }
+                self.send(.rpgIntent(playerID: self.localPeerID, intent: intent), to: peer)
             }
         }
         game.lanContainerEditHandler = { [weak self] intent in
@@ -347,6 +357,7 @@ final class LANMultiplayerManager {
         game?.lanBlockIntentHandler = nil
         game?.lanAttackIntentHandler = nil
         game?.lanTossIntentHandler = nil
+        game?.lanRPGIntentHandler = nil
         game?.lanContainerEditHandler = nil
         game?.lanInventoryPublishHandler = nil
         game?.lanSettleTemplateJobsHandler = nil
@@ -375,7 +386,8 @@ final class LANMultiplayerManager {
             gameMode: rec?.gameMode ?? game.player?.gameMode ?? GameMode.survival,
             difficulty: rec?.difficulty ?? game.world.difficulty,
             dimension: game.dim.rawValue,
-            playerCount: 1
+            playerCount: 1,
+            rpgClassesEnabled: game.world.rule(RPG_CLASSES_GAME_RULE)
         )
         joinCode = code
         hostPort = port
@@ -679,7 +691,7 @@ final class LANMultiplayerManager {
             queue.async { [weak self] in self?.tickClientRobustness() }
             guard now - lastClientPlayerStatePublish >= clientPlayerStateInterval else { return }
             lastClientPlayerStatePublish = now
-            let state = makeLANPlayerState(player, playerID: localPeerID, displayName: NSFullUserName(), dimension: game.dim.rawValue)
+            let state = makeLANPlayerState(player, playerID: localPeerID, displayName: NSFullUserName(), dimension: game.dim.rawValue, includeRPG: false)
             queue.async { [weak self] in
                 guard let self, let peer = self.clientPeer else { return }
                 self.send(.playerState(state), to: peer)
@@ -1025,7 +1037,7 @@ final class LANMultiplayerManager {
         case .chunkRequest:
             category = "chunkRequest"
             allowed = peer.rateLimiter.chunkRequest.tryConsume(now: now)
-        case .blockIntent, .attackIntent, .tossIntent:
+        case .blockIntent, .attackIntent, .tossIntent, .rpgIntent:
             category = "gameplayIntent"
             allowed = peer.rateLimiter.gameplayIntent.tryConsume(now: now)
         case .inventoryUpdate:
@@ -1161,6 +1173,9 @@ final class LANMultiplayerManager {
             }
         case .blockIntent(_, let intent):
             guard peer.accepted else { return }
+            if ProcessInfo.processInfo.environment["PEBBLE_LAN_PROBE_LOG"] != nil {
+                pebbleLANProbeLog("host_recv_block_intent player=\(peer.playerName) action=\(intent.action.rawValue) target=\(intent.x),\(intent.y),\(intent.z) cell=\(intent.cell)")
+            }
             applyHostBlockIntent(intent, from: peer.playerID, peerName: peer.playerName)
         case .containerIntent(_, let intent):
             guard peer.accepted else { return }
@@ -1174,6 +1189,9 @@ final class LANMultiplayerManager {
         case .tossIntent(_, let intent):
             guard peer.accepted else { return }
             applyHostTossIntent(intent, from: peer.playerID, peerName: peer.playerName)
+        case .rpgIntent(_, let intent):
+            guard peer.accepted else { return }
+            applyHostRPGIntent(intent, from: peer.playerID, peerID: peer.id, peerName: peer.playerName)
         case .containerEditIntent(_, let intent):
             guard peer.accepted else { return }
             applyHostContainerEditIntent(intent, from: peer.playerID, peerName: peer.playerName)
@@ -1238,6 +1256,9 @@ final class LANMultiplayerManager {
                 let batch = LANReplicationBatch(tick: 0, fullSnapshot: false, players: [state])
                 _ = self?.clientReplicationSession.apply(batch)
                 if let self, let game = self.activeGame, game.hasWorld() {
+                    if state.playerID == self.localPeerID {
+                        game.applyLANRPGState(state.rpg)
+                    }
                     _ = applyLANRemotePlayers([state], to: game.world, localPlayerID: self.localPeerID, removeMissing: false)
                 }
             }
@@ -1249,6 +1270,7 @@ final class LANMultiplayerManager {
             clientReplicationSession.applyRestore(restore)
             DispatchQueue.main.async { [weak self] in
                 self?.activeGame?.applyLANRestore(restore)
+                self?.activeGame?.applyLANRPGState(restore.playerState.rpg)
             }
         case .inventoryGrant(let grant):
             guard grant.playerID == localPeerID else { return }
@@ -1464,7 +1486,8 @@ final class LANMultiplayerManager {
             gameMode: GameMode.survival,
             difficulty: 2,
             dimension: Dim.overworld.rawValue,
-            playerCount: max(1, playerCount + 1)
+            playerCount: max(1, playerCount + 1),
+            rpgClassesEnabled: activeGame?.world.rule(RPG_CLASSES_GAME_RULE) ?? true
         )
     }
 
@@ -1488,7 +1511,7 @@ final class LANMultiplayerManager {
             localPlayerID: localPeerID,
             inventorySnapshots: hostReplicationSession.peerInventorySnapshotsByPlayerID()
         )
-        let localState = makeLANPlayerState(player, playerID: localPeerID, displayName: NSFullUserName(), dimension: game.dim.rawValue)
+        let localState = makeLANPlayerState(player, playerID: localPeerID, displayName: NSFullUserName(), dimension: game.dim.rawValue, includeRPG: false)
         let peerStates = hostReplicationSession.peerPlayerStates()
         // D-G: dirty block entities (container edits, ghost break spills, active furnaces/hoppers)
         // are replicated FIRST, ahead of the normal distance-prioritized fill, so a guest's edit
@@ -1691,6 +1714,16 @@ final class LANMultiplayerManager {
     }
 
     private func reportBlockIntentResult(_ result: LANBlockIntentResult, playerID: String, peerName: String, tick: Int) {
+        if ProcessInfo.processInfo.environment["PEBBLE_LAN_PROBE_LOG"] != nil {
+            switch result {
+            case .applied(let changes):
+                pebbleLANProbeLog("host_block_intent_result player=\(peerName) applied changes=\(changes.count)")
+            case .ignored(let reason):
+                pebbleLANProbeLog("host_block_intent_result player=\(peerName) ignored reason=\(reason)")
+            case .rejected(let reason):
+                pebbleLANProbeLog("host_block_intent_result player=\(peerName) rejected reason=\(reason)")
+            }
+        }
         switch result {
         case .applied(let changes):
             let batch = LANReplicationBatch(tick: tick, fullSnapshot: false, blockChanges: changes)
@@ -1748,6 +1781,179 @@ final class LANMultiplayerManager {
             }
             self.hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
             self.sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
+        }
+    }
+
+    private func applyHostRPGIntent(_ intent: LANRPGIntent, from playerID: String, peerID: UUID, peerName: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let game = self.activeGame, game.hasWorld() else { return }
+            let world = game.world
+            func reject(_ reason: String) {
+                self.appendStatus("LAN RPG intent from \(peerName) rejected: \(reason).")
+                let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: world.time)
+                self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
+            }
+            func publish(_ state: RPGCharacterState) {
+                guard let playerState = self.hostReplicationSession.recordRPGState(state, for: playerID) else { return }
+                self.queue.async { [weak self] in
+                    self?.broadcastFromHost(.playerState(playerState))
+                }
+            }
+
+            guard world.rule(RPG_CLASSES_GAME_RULE) else {
+                reject("RPG classes are disabled")
+                return
+            }
+            guard let record = self.hostReplicationSession.peerRecord(playerID: playerID),
+                  let playerState = record.playerState else {
+                reject("player state unavailable")
+                return
+            }
+            var state = repairRPGCharacterState(record.rpg ?? playerState.rpg ?? .uncreated())
+
+            switch intent.action {
+            case .createCharacter:
+                guard !state.created else {
+                    reject("character already created")
+                    return
+                }
+                guard let draft = intent.draft else {
+                    reject("missing character draft")
+                    return
+                }
+                switch rpgCreateCharacter(draft) {
+                case .success(let created):
+                    publish(created)
+                case .failure(let error):
+                    reject(error.description)
+                }
+            case .learnSkill:
+                guard let skillID = intent.skillID else {
+                    reject("missing skill")
+                    return
+                }
+                if let error = rpgLearnSkill(skillID, in: &state) {
+                    reject(error.description)
+                    return
+                }
+                publish(state)
+            case .prepareSkill:
+                guard let skillID = intent.skillID else {
+                    reject("missing skill")
+                    return
+                }
+                if let error = rpgPrepareSkill(skillID, in: &state) {
+                    reject(error.description)
+                    return
+                }
+                publish(state)
+            case .unprepareSkill:
+                guard let skillID = intent.skillID else {
+                    reject("missing skill")
+                    return
+                }
+                if let error = rpgUnprepareSkill(skillID, in: &state) {
+                    reject(error.description)
+                    return
+                }
+                publish(state)
+            case .spendAttribute:
+                guard let attribute = intent.attribute else {
+                    reject("missing attribute")
+                    return
+                }
+                if let error = rpgSpendAttributePoint(attribute, in: &state) {
+                    reject(error.description)
+                    return
+                }
+                publish(state)
+            case .prepareSpell:
+                guard let spellID = intent.spellID else {
+                    reject("missing spell")
+                    return
+                }
+                if let error = rpgPrepareSpell(spellID, in: &state) {
+                    reject(error.description)
+                    return
+                }
+                publish(state)
+            case .unprepareSpell:
+                guard let spellID = intent.spellID else {
+                    reject("missing spell")
+                    return
+                }
+                if let error = rpgUnprepareSpell(spellID, in: &state) {
+                    reject(error.description)
+                    return
+                }
+                publish(state)
+            case .selectSpell:
+                guard let spellID = intent.spellID else {
+                    reject("missing spell")
+                    return
+                }
+                guard state.preparedSpellIDs.contains(spellID) else {
+                    reject("spell is not prepared: \(spellID)")
+                    return
+                }
+                state.selectedPreparedSpellID = spellID
+                publish(repairRPGCharacterState(state))
+            case .castSpell:
+                guard intent.actionSequence == state.actionSequence + 1 else {
+                    reject("stale RPG action")
+                    return
+                }
+                guard playerState.dimension == world.dim.rawValue else {
+                    reject("caster dimension unavailable")
+                    return
+                }
+                let spellID = intent.spellID ?? state.selectedPreparedSpellID ?? state.preparedSpellIDs.first
+                guard let spellID else {
+                    reject(RPGActionFailure.spellNotPrepared("").description)
+                    return
+                }
+                state.selectedPreparedSpellID = spellID
+                _ = self.hostReplicationSession.recordRPGState(state, for: playerID)
+                guard let updatedRecord = self.hostReplicationSession.peerRecord(playerID: playerID) else {
+                    reject("player state unavailable")
+                    return
+                }
+                let ghost = self.hostGhostRegistry.ghost(for: playerID, record: updatedRecord, in: world)
+                switch rpgCastPreparedSpell(ghost, spellID: spellID) {
+                case .failure(let error):
+                    reject(error.description)
+                case .success:
+                    let ghostState = makeLANPlayerState(ghost, playerID: playerID, displayName: peerName, dimension: world.dim.rawValue, includeRPG: false)
+                    _ = self.hostReplicationSession.updatePlayerState(
+                        ghostState,
+                        currentDimension: world.dim.rawValue,
+                        tick: world.time,
+                        keepInventory: world.rule("keepInventory")
+                    )
+                    guard let playerState = self.hostReplicationSession.recordRPGState(ghost.rpg, for: playerID) else { return }
+                    _ = applyLANRemotePlayers(
+                        self.hostReplicationSession.peerPlayerStates(),
+                        to: world,
+                        localPlayerID: self.localPeerID,
+                        inventorySnapshots: self.hostReplicationSession.peerInventorySnapshotsByPlayerID()
+                    )
+                    let changes = self.hostReplicationSession.drainBlockChanges()
+                    let entities = makeLANEntitySnapshots(in: world, aroundX: ghost.x, aroundZ: ghost.z, radius: 48, maxCount: 64)
+                    let batch = LANReplicationBatch(
+                        tick: world.time,
+                        fullSnapshot: false,
+                        players: [playerState],
+                        blockChanges: changes,
+                        entities: entities
+                    )
+                    self.queue.async { [weak self] in
+                        self?.broadcastFromHost(.playerState(playerState))
+                        if !changes.isEmpty || !entities.isEmpty {
+                            self?.broadcastHostReplicationBatch(batch, drainedBlockChanges: changes)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1910,6 +2116,9 @@ final class LANMultiplayerManager {
                 // `applyLANInventorySnapshot(localInventory, to: player)` call has been removed.
                 game.beginLANReplicationApply()
                 worldReport = game.applyLANHostReplicationBatch(batch)
+                if let localState = batch.players.first(where: { $0.playerID == self.localPeerID }) {
+                    game.applyLANRPGState(localState.rpg)
+                }
                 _ = applyLANRemotePlayers(batch.players, to: game.world, localPlayerID: self.localPeerID)
                 game.endLANReplicationApply()
             }
@@ -2023,7 +2232,7 @@ final class LANMultiplayerManager {
 // §5/§7.3 persistence: LANPeerRecordSnapshot <-> lan_players JSON bridging.
 //
 // SaveDB's LAN player rows store a `[String: Any]` blob (JSONSerialization, matching every other
-// SaveDB table) with the schema `{ state, inventory, revision, permissions, displayName, updated }`.
+// SaveDB table) with the schema `{ state, rpg, inventory, revision, permissions, displayName, updated }`.
 // `LANPeerRecordSnapshot`'s sub-fields (`LANPlayerState`, `LANPlayerInventorySnapshot`,
 // `LANPeerPermissions`) are all `Codable`, so each is bridged individually through `JSONEncoder`/
 // `JSONDecoder` and re-nested into the `[String: Any]` shape SaveDB expects. Fails closed: any
@@ -2054,6 +2263,9 @@ func lanPeerRecordJSON(_ record: LANPeerRecordSnapshot) -> [String: Any] {
     if let state = record.playerState, let stateJSON = lanJSONObject(state) {
         out["state"] = stateJSON
     }
+    if let rpg = record.rpg, let rpgJSON = lanJSONObject(rpg) {
+        out["rpg"] = rpgJSON
+    }
     if let inventory = record.inventory, let inventoryJSON = lanJSONObject(inventory) {
         out["inventory"] = inventoryJSON
     }
@@ -2070,6 +2282,7 @@ func lanPeerRecordJSON(_ record: LANPeerRecordSnapshot) -> [String: Any] {
 func lanPeerRecordSnapshot(fromStoredJSON data: [String: Any], playerID: String) -> LANPeerRecordSnapshot? {
     guard let state = lanDecode(LANPlayerState.self, from: data["state"]) else { return nil }
     let inventory = lanDecode(LANPlayerInventorySnapshot.self, from: data["inventory"])
+    let rpg = lanDecode(RPGCharacterState.self, from: data["rpg"]) ?? state.rpg
     let permissions = lanDecode(LANPeerPermissions.self, from: data["permissions"]) ?? LANPeerPermissions()
     let displayName = (data["displayName"] as? String) ?? "Player"
     let revision = (data["revision"] as? Int) ?? Int((data["revision"] as? NSNumber)?.intValue ?? 0)
@@ -2079,6 +2292,7 @@ func lanPeerRecordSnapshot(fromStoredJSON data: [String: Any], playerID: String)
         lifecycle: .disconnected,
         permissions: permissions,
         playerState: state,
+        rpg: rpg,
         inventory: inventory,
         inventoryRevision: max(0, revision),
         lastAckTick: 0,

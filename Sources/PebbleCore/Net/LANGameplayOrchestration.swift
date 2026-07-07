@@ -42,6 +42,7 @@ public struct LANPeerRecordSnapshot: Equatable {
     public var lifecycle: LANPeerLifecycleState
     public var permissions: LANPeerPermissions
     public var playerState: LANPlayerState?
+    public var rpg: RPGCharacterState?
     public var inventory: LANPlayerInventorySnapshot?
     public var inventoryRevision: Int
     public var lastAckTick: Int
@@ -54,6 +55,7 @@ public struct LANPeerRecordSnapshot: Equatable {
         lifecycle: LANPeerLifecycleState,
         permissions: LANPeerPermissions,
         playerState: LANPlayerState?,
+        rpg: RPGCharacterState? = nil,
         inventory: LANPlayerInventorySnapshot?,
         inventoryRevision: Int = 0,
         lastAckTick: Int,
@@ -65,6 +67,7 @@ public struct LANPeerRecordSnapshot: Equatable {
         self.lifecycle = lifecycle
         self.permissions = permissions
         self.playerState = playerState
+        self.rpg = rpg.map(repairRPGCharacterState)
         self.inventory = inventory
         self.inventoryRevision = inventoryRevision
         self.lastAckTick = lastAckTick

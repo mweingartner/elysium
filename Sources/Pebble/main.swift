@@ -93,6 +93,8 @@ final class HostBridge: GameHost {
         case "map":
             game.resetExpandedMapCenterToPlayer()
             ui.open(MapScreen(), game)
+        case "rpg":
+            ui.open(RPGCharacterScreen(), game)
         case "beacon":
             if let be = data?.be { ui.open(BeaconScreen(be), game) }
         case "sign":
@@ -483,7 +485,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         let parts = v.components(separatedBy: "@")
         return (parts[0], parts.count > 1 ? Int(parts[1]) ?? 240 : 240)
     }()
-    // test hook: PEBBLE_OPEN_SCREEN=templates|templatesPlace|creative opens an allowlisted UI screen before PEBBLE_SHOT.
+    // test hook: PEBBLE_OPEN_SCREEN=templates|templatesPlace|creative|map|rpg opens an allowlisted UI screen before PEBBLE_SHOT.
     private var pendingOpenScreen = ProcessInfo.processInfo.environment["PEBBLE_OPEN_SCREEN"]
     private var pendingOpenScreenDelay = 0
 
@@ -781,6 +783,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
                     game.openScreen("templatesPlace", nil)
                 case "map":
                     game.openScreen("map", nil)
+                case "rpg", "character", "charactercreation", "character-creation":
+                    game.openScreen("rpg", nil)
                 default:
                     print("[shot] ignored unknown PEBBLE_OPEN_SCREEN=\(screen)")
                     fflush(stdout)

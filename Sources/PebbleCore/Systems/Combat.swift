@@ -20,6 +20,9 @@ public func playerAttack(_ player: Player, _ target: Entity) {
     let held = player.mainHand
     let tool = held.map { itemDef($0.id).tool } ?? nil
     var dmg = 1 + (tool?.attackDamage ?? 0)
+    if player.rpgClassesEnabled(), player.rpg.created {
+        dmg += rpgDerivedStats(player.rpg).meleeDamageBonus
+    }
     // enchants
     if let held {
         dmg += Double(enchLevel(held, "sharpness")) * 0.5 + (enchLevel(held, "sharpness") > 0 ? 0.5 : 0)

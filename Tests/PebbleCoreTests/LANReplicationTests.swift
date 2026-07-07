@@ -2248,7 +2248,84 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertTrue(session.drainAllGrants().isEmpty)
     }
 
+    func testHostSessionIgnoresClientRPGSnapshotsAndPublishesAuthoritativeRPGState() throws {
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex")
+        let rogue = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "mender",
+            starterSkillID: "field_dressing",
+            starterSpellIDs: ["mend_wounds"]
+        )).get()
+
+        let sanitized = session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 2.5,
+            y: 64,
+            z: 1.5,
+            yaw: 0,
+            pitch: 0,
+            health: 20,
+            hunger: 20,
+            selectedHotbarSlot: 0,
+            gameMode: GameMode.survival,
+            rpg: rogue
+        ))
+
+        XCTAssertNil(sanitized?.rpg)
+        XCTAssertNil(session.peerRecord(playerID: "peer-a")?.rpg)
+
+        let official = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "arcanist",
+            starterSkillID: "spell_formula",
+            starterSpellIDs: ["ignite"]
+        )).get()
+        let published = session.recordRPGState(official, for: "peer-a")
+
+        XCTAssertEqual(published?.rpg?.pathID, "arcanist")
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.rpg?.pathID, "arcanist")
+
+        _ = session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a",
+            displayName: "Alex",
+            x: 3,
+            y: 64,
+            z: 1.5,
+            yaw: 0,
+            pitch: 0,
+            health: 20,
+            hunger: 20,
+            selectedHotbarSlot: 0,
+            gameMode: GameMode.survival,
+            rpg: rogue
+        ))
+
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.rpg?.pathID, "arcanist")
+        XCTAssertNil(session.peerPlayerStates().first?.rpg)
+        XCTAssertEqual(session.peerPlayerStates(includeRPG: true).first?.rpg?.pathID, "arcanist")
+        XCTAssertEqual(session.peerRestoreState(playerID: "peer-a")?.playerState.rpg?.pathID, "arcanist")
+    }
+
     // MARK: - W2: ghost actor
+
+    func testGhostHydratesAuthoritativeRPGStateAndDerivedStats() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+        let rpg = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "arcanist",
+            starterSkillID: "spell_formula",
+            starterSpellIDs: ["ignite"]
+        )).get()
+        _ = session.recordRPGState(rpg, for: "peer-a")
+
+        let record = try XCTUnwrap(session.peerRecord(playerID: "peer-a"))
+        let ghost = LANHostGhostRegistry().ghost(for: "peer-a", record: record, in: world)
+
+        XCTAssertEqual(ghost.rpg.pathID, "arcanist")
+        XCTAssertEqual(ghost.rpg.preparedSpellIDs, ["ignite"])
+        XCTAssertGreaterThan(ghost.maxHealth, 20)
+        XCTAssertLessThanOrEqual(ghost.health, ghost.maxHealth)
+    }
 
     func testGhostBreakSpawnsDropsConsumesToolDurabilityAndRecordsBlockChange() throws {
         let world = makeLoadedWorld()

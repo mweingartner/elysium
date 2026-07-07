@@ -144,7 +144,8 @@ poll_logs() {
     host_pass=0
     client_pass=0
     while true; do
-        if [ -f "$HOST_LOG" ] && grep -q 'LANPROBE PASS host remote-use' "$HOST_LOG"; then
+        if { [ -f "$HOST_LOG" ] && grep -q 'LANPROBE PASS host remote-use' "$HOST_LOG"; } ||
+           { [ -f "$HOST_STDOUT" ] && grep -q 'LANPROBE PASS host remote-use' "$HOST_STDOUT"; }; then
             host_pass=1
         fi
         if remote "{ test -f '$REMOTE_LOG' && grep -q 'LANPROBE PASS client shared-state' '$REMOTE_LOG'; } || { test -f '$REMOTE_STDOUT' && grep -q 'LANPROBE PASS client shared-state' '$REMOTE_STDOUT'; }" >/dev/null 2>&1; then
@@ -153,7 +154,8 @@ poll_logs() {
         if [ "$host_pass" = "1" ] && [ "$client_pass" = "1" ]; then
             return 0
         fi
-        if [ -f "$HOST_LOG" ] && grep -q 'LANPROBE FAIL' "$HOST_LOG"; then
+        if { [ -f "$HOST_LOG" ] && grep -q 'LANPROBE FAIL' "$HOST_LOG"; } ||
+           { [ -f "$HOST_STDOUT" ] && grep -q 'LANPROBE FAIL' "$HOST_STDOUT"; }; then
             return 1
         fi
         if remote "{ test -f '$REMOTE_LOG' && grep -q 'LANPROBE FAIL' '$REMOTE_LOG'; } || { test -f '$REMOTE_STDOUT' && grep -q 'LANPROBE FAIL' '$REMOTE_STDOUT'; }" >/dev/null 2>&1; then
@@ -188,6 +190,12 @@ print_tails() {
     else
         printf 'missing host log\n'
     fi
+    say "Host stdout log: $HOST_STDOUT"
+    if [ -f "$HOST_STDOUT" ]; then
+        tail -n 120 "$HOST_STDOUT"
+    else
+        printf 'missing host stdout\n'
+    fi
     say "Neo probe log: $REMOTE_LOG"
     remote "if [ -f '$REMOTE_LOG' ]; then tail -n 80 '$REMOTE_LOG'; else echo missing remote log; fi" || true
     say "Neo stdout log: $REMOTE_STDOUT"
@@ -198,6 +206,7 @@ LOCAL_IP="$(find_local_ip)" || die "could not determine this Mac's LAN IP"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 LOG_DIR="/tmp/pebble-lan-live-${RUN_ID}"
 HOST_LOG="${LOG_DIR}/host.log"
+HOST_STDOUT="${LOG_DIR}/host.stdout"
 REMOTE_LOG="/tmp/pebble-lan-live-${RUN_ID}-neo.log"
 REMOTE_STDOUT="/tmp/pebble-lan-live-${RUN_ID}-neo.stdout"
 CLIENT_JOIN="${LOCAL_IP} ${PORT} ${JOIN_CODE} Neo Probe"
@@ -212,18 +221,19 @@ fi
 require_app
 cleanup_env
 stop_apps
-rm -f "$HOST_LOG"
+rm -f "$HOST_LOG" "$HOST_STDOUT"
 remote "rm -f '$REMOTE_LOG' '$REMOTE_STDOUT'"
 
 say "Launching local host from $LOCAL_APP"
-set_launch_env PEBBLE_AUTOLOAD 1
-set_launch_env PEBBLE_NEWWORLD "$SEED"
-set_launch_env PEBBLE_LAN_PROBE host-rig
-set_launch_env PEBBLE_LAN_PROBE_LOG "$HOST_LOG"
-set_launch_env PEBBLE_LAN_PROBE_TIMEOUT_FRAMES "$(( TIMEOUT * 60 ))"
-set_launch_env PEBBLE_LAN_PROBE_JOIN_CODE "$JOIN_CODE"
-set_launch_env PEBBLE_LAN_PROBE_PORT "$PORT"
-/usr/bin/open -n "$LOCAL_APP"
+nohup env \
+    PEBBLE_AUTOLOAD=1 \
+    PEBBLE_NEWWORLD="$SEED" \
+    PEBBLE_LAN_PROBE=host-rig \
+    PEBBLE_LAN_PROBE_LOG="$HOST_LOG" \
+    PEBBLE_LAN_PROBE_TIMEOUT_FRAMES="$(( TIMEOUT * 60 ))" \
+    PEBBLE_LAN_PROBE_JOIN_CODE="$JOIN_CODE" \
+    PEBBLE_LAN_PROBE_PORT="$PORT" \
+    "$LOCAL_APP/Contents/MacOS/Pebble" > "$HOST_STDOUT" 2>&1 &
 
 say "Launching Neo client against ${LOCAL_IP}:${PORT}"
 remote "cd /tmp && nohup env PEBBLE_LAN_AUTOJOIN='$(printf "%s" "$CLIENT_JOIN" | sed "s/'/'\\\\''/g")' PEBBLE_LAN_PROBE=client-door PEBBLE_LAN_PROBE_LOG='$REMOTE_LOG' PEBBLE_LAN_PROBE_TIMEOUT_FRAMES='$(( TIMEOUT * 60 ))' '$REMOTE_APP/Contents/MacOS/Pebble' > '$REMOTE_STDOUT' 2>&1 &"

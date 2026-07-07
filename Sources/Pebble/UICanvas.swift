@@ -266,6 +266,16 @@ final class UICanvas {
              SIMD4<Float>(1, 1, 1, 1), SIMD4<Float>(1, 1, 1, 1))
     }
 
+    func drawRPGIcon(_ assetID: String, _ x: Double, _ y: Double, _ w: Double = 16, _ h: Double = 16) {
+        guard let pixels = rpgIconPixels(assetID: assetID) else { return }
+        let key = "rpg|" + assetID
+        let origin = slots[key] ?? allocSlot(key, pixels)
+        quad(Float(x), Float(y), Float(w), Float(h),
+             Float(origin.0) / 1024, Float(origin.1) / 1024,
+             Float(origin.0 + 16) / 1024, Float(origin.1 + 16) / 1024,
+             SIMD4<Float>(1, 1, 1, 1), SIMD4<Float>(1, 1, 1, 1))
+    }
+
     /// draw a terrain atlas tile (dirt background etc.), tinted
     func drawTile(_ name: String, _ x: Double, _ y: Double, _ w: Double, _ h: Double, brightness: Float = 1) {
         let key = "t" + name

@@ -122,6 +122,7 @@ public final class World {
         "doDaylightCycle": 1, "doWeatherCycle": 1, "doMobSpawning": 1, "doFireTick": 1,
         "mobGriefing": 1, "keepInventory": 0, "doMobLoot": 1, "doTileDrops": 1,
         "naturalRegeneration": 1, "fallDamage": 1, "drowningDamage": 1, "fireDamage": 1,
+        RPG_CLASSES_GAME_RULE: 1,
     ]
 
     public init(dim: Dim, seed: UInt32, generationSettings: WorldGenerationSettings = .normal) {

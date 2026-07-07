@@ -219,6 +219,7 @@ public final class LANMultiplayerHostSession {
         var lifecycle: LANPeerLifecycleState
         var permissions: LANPeerPermissions
         var playerState: LANPlayerState?
+        var rpg: RPGCharacterState?
         var inventory: LANPlayerInventorySnapshot?
         var inventoryRevision = 0
         var lastGrantID = 0
@@ -237,6 +238,30 @@ public final class LANMultiplayerHostSession {
         var x: Double
         var y: Double
         var z: Double
+    }
+
+    private static func stateWithRPG(_ state: LANPlayerState, rpg: RPGCharacterState?) -> LANPlayerState {
+        LANPlayerState(
+            playerID: state.playerID,
+            displayName: state.displayName,
+            x: state.x,
+            y: state.y,
+            z: state.z,
+            yaw: state.yaw,
+            pitch: state.pitch,
+            health: state.health,
+            hunger: state.hunger,
+            selectedHotbarSlot: state.selectedHotbarSlot,
+            gameMode: state.gameMode,
+            dimension: state.dimension,
+            dead: state.dead,
+            inventoryRevision: state.inventoryRevision,
+            rpg: rpg
+        )
+    }
+
+    private func stateWithRPG(_ state: LANPlayerState, rpg: RPGCharacterState?) -> LANPlayerState {
+        Self.stateWithRPG(state, rpg: rpg)
     }
 
     /// One in-flight tick-sliced template job per peer. `.place`/`.undo` are held as an enum
@@ -295,6 +320,7 @@ public final class LANMultiplayerHostSession {
             lifecycle: .connected,
             permissions: LANPeerPermissions(),
             playerState: nil,
+            rpg: nil,
             inventory: LANPlayerInventorySnapshot(playerID: playerID, selectedHotbarSlot: 0, slots: []),
             lastTemplateUndo: nil,
             lastAckSequence: 0,
@@ -352,7 +378,8 @@ public final class LANMultiplayerHostSession {
             selectedHotbarSlot: state.selectedHotbarSlot,
             gameMode: allowedGameMode,
             dimension: allowedDimension,
-            dead: staysDead || state.dead || state.health <= 0
+            dead: staysDead || state.dead || state.health <= 0,
+            inventoryRevision: peer.inventoryRevision
         )
         let wasAlive = peer.lifecycle != .dead
         if wasAlive && sanitized.dead {
@@ -409,6 +436,25 @@ public final class LANMultiplayerHostSession {
         peers[playerID] = peer
     }
 
+    @discardableResult
+    public func recordRPGState(_ state: RPGCharacterState?, for rawPlayerID: String) -> LANPlayerState? {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard var peer = peers[playerID] else { return nil }
+        peer.rpg = state.map(repairRPGCharacterState)
+        var result: LANPlayerState?
+        if let playerState = peer.playerState {
+            peer.playerState = stateWithRPG(playerState, rpg: nil)
+            result = stateWithRPG(playerState, rpg: peer.rpg)
+        }
+        peers[playerID] = peer
+        return result
+    }
+
+    public func rpgState(for rawPlayerID: String) -> RPGCharacterState? {
+        let playerID = String(rawPlayerID.prefix(128))
+        return peers[playerID]?.rpg
+    }
+
     public func setPermissions(_ permissions: LANPeerPermissions, for rawPlayerID: String) {
         let playerID = String(rawPlayerID.prefix(128))
         guard var peer = peers[playerID] else { return }
@@ -427,7 +473,8 @@ public final class LANMultiplayerHostSession {
                 selectedHotbarSlot: state.selectedHotbarSlot,
                 gameMode: GameMode.survival,
                 dimension: state.dimension,
-                dead: state.dead
+                dead: state.dead,
+                inventoryRevision: state.inventoryRevision
             )
         }
         peers[playerID] = peer
@@ -446,6 +493,7 @@ public final class LANMultiplayerHostSession {
             lifecycle: peer.lifecycle,
             permissions: peer.permissions,
             playerState: peer.playerState,
+            rpg: peer.rpg,
             inventory: peer.inventory,
             inventoryRevision: peer.inventoryRevision,
             lastAckTick: peer.lastAckTick,
@@ -466,7 +514,8 @@ public final class LANMultiplayerHostSession {
             joinedOrdinal: nextOrdinal,
             lifecycle: .disconnected,
             permissions: record.permissions,
-            playerState: record.playerState,
+            playerState: record.playerState.map { stateWithRPG($0, rpg: nil) },
+            rpg: record.rpg.map(repairRPGCharacterState),
             inventory: record.inventory,
             inventoryRevision: max(0, record.inventoryRevision),
             lastGrantID: 0,
@@ -489,11 +538,14 @@ public final class LANMultiplayerHostSession {
         peers[playerID] = peer
     }
 
-    public func peerPlayerStates() -> [LANPlayerState] {
+    public func peerPlayerStates(includeRPG: Bool = false) -> [LANPlayerState] {
         peers.values
             .filter { $0.lifecycle != .disconnected }
             .sorted { lhs, rhs in lhs.joinedOrdinal == rhs.joinedOrdinal ? lhs.playerID < rhs.playerID : lhs.joinedOrdinal < rhs.joinedOrdinal }
-            .compactMap(\.playerState)
+            .compactMap { peer in
+                guard let state = peer.playerState else { return nil }
+                return stateWithRPG(state, rpg: includeRPG ? peer.rpg : nil)
+            }
             .prefix(LAN_MULTIPLAYER_MAX_REPLICATION_PLAYERS)
             .map { $0 }
     }
@@ -1166,7 +1218,7 @@ public final class LANMultiplayerHostSession {
         guard let peer = peers[playerID], let playerState = peer.playerState else { return nil }
         let inventory = peer.inventory ?? LANPlayerInventorySnapshot(playerID: peer.playerID, selectedHotbarSlot: 0, slots: [])
         return LANRestoreState(
-            playerState: playerState,
+            playerState: stateWithRPG(playerState, rpg: peer.rpg),
             inventory: inventory,
             revision: peer.inventoryRevision,
             grantID: peer.lastGrantID
@@ -1441,7 +1493,9 @@ public func isValidLANReplicatedCell(_ cell: Int) -> Bool {
     return id >= 0 && id < blockDefs.count
 }
 
-public func makeLANPlayerState(_ player: Player, playerID: String, displayName: String, dimension: Int = Dim.overworld.rawValue) -> LANPlayerState {
+public func makeLANPlayerState(_ player: Player, playerID: String, displayName: String,
+                               dimension: Int = Dim.overworld.rawValue,
+                               includeRPG: Bool = true) -> LANPlayerState {
     LANPlayerState(
         playerID: playerID,
         displayName: displayName,
@@ -1455,7 +1509,8 @@ public func makeLANPlayerState(_ player: Player, playerID: String, displayName: 
         selectedHotbarSlot: player.selectedSlot,
         gameMode: player.gameMode,
         dimension: dimension,
-        dead: player.dead || player.deathTime > 0
+        dead: player.dead || player.deathTime > 0,
+        rpg: includeRPG ? player.rpg : nil
     )
 }
 

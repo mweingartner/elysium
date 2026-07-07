@@ -145,7 +145,7 @@ Useful environment variables for testing and automation:
 | `PEBBLE_NEWWORLD=<seed>` | create a fresh world with that seed (worldgen testing) |
 | `PEBBLE_DUNGEON_DENSITY=1...5` | with `PEBBLE_NEWWORLD`, create that fresh world with dungeon density 1 none, 2 normal, 3 more, 4 plentiful, or 5 many |
 | `PEBBLE_CMD="/tp 0 120 0;/time set 1000"` | run chat commands once the world is up |
-| `PEBBLE_OPEN_SCREEN=templates`, `templatesPlace`, `creative`, or `map` | open an allowlisted UI screen for screenshot smoke tests |
+| `PEBBLE_OPEN_SCREEN=templates`, `templatesPlace`, `creative`, `map`, or `rpg` | open an allowlisted UI screen for screenshot smoke tests |
 | `PEBBLE_SHOT="/tmp/x.png@300"` | capture a frame N frames after load |
 | `PEBBLE_LAN_AUTOJOIN="<host> <port> <joinCode> [name]"` | test hook that joins a LAN host from the title screen through Direct Connect |
 | `PEBBLE_LAN_PROBE=host-rig`, `client-door`, or `client-resume` | test hook used by `scripts/live-lan-test.sh` to prove two-Mac LAN door use, block-entity snapshot sharing, and guest resume position |

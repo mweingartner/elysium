@@ -250,6 +250,7 @@ public final class GameCore {
     /// client → host gameplay intents (all additive, LAN-client-only)
     public var lanAttackIntentHandler: ((LANAttackIntent) -> Void)?
     public var lanTossIntentHandler: ((LANTossIntent) -> Void)?
+    public var lanRPGIntentHandler: ((LANRPGIntent) -> Void)?
     public var lanContainerEditHandler: ((LANContainerEditIntent) -> Void)?
     /// fires with the freshly-published snapshot and its new revision number
     public var lanInventoryPublishHandler: ((LANPlayerInventorySnapshot, Int) -> Void)?
@@ -539,6 +540,7 @@ public final class GameCore {
         var rec = WorldRecord(id: id, name: name, seed: seed, gameMode: mode, difficulty: difficulty,
                               worldPreset: worldPreset, singleBiome: singleBiome,
                               dungeonDensity: dungeonDensity)
+        rec.gameRules[RPG_CLASSES_GAME_RULE] = 1
         let spawn = defaultWorldSpawn(seed: seed, settings: rec.generationSettings)
         rec.spawnX = spawn.x
         rec.spawnY = spawn.y
@@ -568,6 +570,7 @@ public final class GameCore {
             gameMode: summary.gameMode,
             difficulty: summary.difficulty
         )
+        rec.gameRules[RPG_CLASSES_GAME_RULE] = summary.rpgClassesEnabled ? 1 : 0
         let spawn = defaultWorldSpawn(seed: seed, settings: rec.generationSettings)
         rec.spawnX = spawn.x
         rec.spawnY = spawn.y
@@ -683,6 +686,10 @@ public final class GameCore {
         ticksSinceSave = 0
         host?.closeAllScreens()
         host?.showActionBar("§e\(rec.name)§r — seed \(rec.seed)", 60)
+        if player.rpgClassesEnabled(), !player.rpg.created {
+            host?.openScreen("rpg", nil)
+            host?.releasePointer()
+        }
         // loaded in deep underground? say so loudly instead of looking like a render bug
         let bx = ifloor(player.x), bz = ifloor(player.z)
         if w.info.hasSky && Double(w.heightAt(bx, bz)) > player.eyeY() + 10 {
@@ -3290,6 +3297,13 @@ public final class GameCore {
             host?.openChat("")
         } else if code == keybinds["command"] {
             host?.openChat("/")
+        } else if code == "KeyK" {
+            host?.openScreen("rpg", nil)
+            host?.releasePointer()
+        } else if code == "KeyO" {
+            host?.showActionBar(requestRPGCyclePreparedSpell(), 45)
+        } else if code == "KeyL" {
+            host?.showActionBar(requestRPGCastSelectedSpell(), 70)
         } else if code == keybinds["drop"] {
             if isLANClientWorld {
                 performLANClientToss(all: ctrlOrCmd)

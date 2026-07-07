@@ -76,6 +76,7 @@ public final class Player: LivingEntity {
     public var stats: [String: Double] = [:]
     public var portalTicks = 0
     public var insidePortalKind: String? = nil   // nether | end | nil
+    public var rpg = RPGCharacterState.uncreated()
 
     public override init(world: World) {
         super.init(world: world)
@@ -210,6 +211,7 @@ public final class Player: LivingEntity {
         } else {
             tickHunger()
         }
+        tickRPGState()
         if sleepTicks > 0 { sleepTicks += 1 }
         if portalTicks > 0 && insidePortalKind == nil { portalTicks = max(0, portalTicks - 4) }
         // item magnet pickup
@@ -864,6 +866,7 @@ public final class Player: LivingEntity {
         d["spawnDim"] = spawnDim
         d["effects"] = enc(effects)
         d["stats"] = stats
+        d["rpg"] = enc(repairRPGCharacterState(rpg))
         return d
     }
     public override func load(_ d: [String: Any]) {
@@ -896,6 +899,9 @@ public final class Player: LivingEntity {
         xpProgress = dnum(d["xpProgress"])
         health = (d["health"] as? NSNumber)?.doubleValue ?? 20
         _gameMode = inum(d["gameMode"])
+        rpg = dec(d["rpg"], RPGCharacterState.self) ?? .uncreated()
+        rpg = repairRPGCharacterState(rpg)
+        applyRPGDerivedStats()
         if let sp = d["spawnPoint"] as? [NSNumber], sp.count == 3 {
             spawnPoint = (sp[0].intValue, sp[1].intValue, sp[2].intValue)
         } else {

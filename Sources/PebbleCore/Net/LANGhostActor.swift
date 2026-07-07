@@ -79,6 +79,8 @@ public final class LANHostGhostRegistry {
     private func hydrate(_ player: Player, from record: LANPeerRecordSnapshot, in world: World) {
         player.persistent = false
         if let state = record.playerState {
+            player.rpg = repairRPGCharacterState(record.rpg ?? state.rpg ?? .uncreated())
+            player.applyRPGDerivedStats()
             player.setPos(state.x, state.y, state.z)
             player.yaw = state.yaw
             player.pitch = state.pitch
@@ -86,6 +88,9 @@ public final class LANHostGhostRegistry {
             player.health = max(0, min(player.maxHealth, state.health))
             player.hunger = max(0, min(20, state.hunger))
             player.selectedSlot = max(0, min(8, state.selectedHotbarSlot))
+        } else {
+            player.rpg = repairRPGCharacterState(record.rpg ?? .uncreated())
+            player.applyRPGDerivedStats()
         }
         if let inventory = record.inventory, let materialized = makeInventoryForGhost(inventory) {
             player.inventory = materialized

@@ -246,6 +246,9 @@ open class LivingEntity: Entity {
             let looting = (attacker as? LivingEntity)?.mainHand.map { enchLevel($0, "looting") } ?? 0
             dropLoot(looting, lastHurtByPlayerTime > 0)
         }
+        if let player = attacker as? Player, player.rpgClassesEnabled(), player.rpg.created, self !== player {
+            _ = player.awardRPGXP(max(1, xpReward))
+        }
     }
 
     open override func onLand(_ fallDistance: Double) {

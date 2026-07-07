@@ -13,6 +13,11 @@ final class LANMultiplayerTests: XCTestCase {
             dimension: Dim.overworld.rawValue,
             playerCount: 2
         )
+        let rpg = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "arcanist",
+            starterSkillID: "spell_formula",
+            starterSpellIDs: ["ignite"]
+        )).get()
         let player = LANPlayerState(
             playerID: "peer-a",
             displayName: "Alex",
@@ -25,7 +30,8 @@ final class LANMultiplayerTests: XCTestCase {
             hunger: 18,
             selectedHotbarSlot: 4,
             gameMode: GameMode.creative,
-            dimension: Dim.nether.rawValue
+            dimension: Dim.nether.rawValue,
+            rpg: rpg
         )
         let event = LANGameplayEvent(playerID: "peer-a", kind: .peerReconnected, message: "Alex reconnected", tick: 8)
         let messages: [LANMultiplayerMessage] = [
@@ -136,6 +142,7 @@ final class LANMultiplayerTests: XCTestCase {
                 attackerType: "zombie"
             )),
             .keepalive,
+            .rpgIntent(playerID: "peer-a", intent: LANRPGIntent(action: .castSpell, spellID: "ignite", actionSequence: 2)),
         ]
 
         for (index, message) in messages.enumerated() {
@@ -242,6 +249,43 @@ final class LANMultiplayerTests: XCTestCase {
 
         XCTAssertEqual(decoded.dimension, Dim.overworld.rawValue)
         XCTAssertFalse(decoded.dead)
+        XCTAssertNil(decoded.rpg)
+    }
+
+    func testPlayerStateDecodesMalformedRPGComponentWithoutDroppingState() throws {
+        let data = """
+        {"playerID":"peer-a","displayName":"Alex","x":1,"y":65,"z":2,"yaw":0,"pitch":0,"health":20,"hunger":18,"selectedHotbarSlot":3,"gameMode":0,"rpg":"not-an-object"}
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(LANPlayerState.self, from: data)
+
+        XCTAssertEqual(decoded.playerID, "peer-a")
+        XCTAssertNil(decoded.rpg)
+    }
+
+    func testRPGIntentSanitizesIdentifiersDirectionAndSequence() {
+        let intent = LANRPGIntent(
+            action: .selectSpell,
+            skillID: String(repeating: "s", count: 200),
+            spellID: String(repeating: "x", count: 200),
+            direction: -99,
+            actionSequence: -1
+        )
+
+        XCTAssertEqual(intent.skillID?.count, 128)
+        XCTAssertEqual(intent.spellID?.count, 128)
+        XCTAssertEqual(intent.direction, -1)
+        XCTAssertEqual(intent.actionSequence, 0)
+    }
+
+    func testWorldSummaryDecodesLegacyPayloadWithRPGClassesEnabled() throws {
+        let data = """
+        {"worldID":"world-1","worldName":"LAN World","seed":7,"gameMode":0,"difficulty":2,"dimension":0,"playerCount":1}
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(LANWorldSummary.self, from: data)
+
+        XCTAssertTrue(decoded.rpgClassesEnabled)
     }
 
     func testInfoPlistDeclaresLocalNetworkPrivacyAndBonjourService() throws {
@@ -268,7 +312,8 @@ final class LANMultiplayerTests: XCTestCase {
             gameMode: GameMode.creative,
             difficulty: 3,
             dimension: Dim.overworld.rawValue,
-            playerCount: 2
+            playerCount: 2,
+            rpgClassesEnabled: false
         )
 
         game.enterLANClientWorld(summary)
@@ -281,6 +326,7 @@ final class LANMultiplayerTests: XCTestCase {
         XCTAssertEqual(game.worldRec?.seed, Int32(-123_456))
         XCTAssertEqual(game.worldRec?.gameMode, GameMode.creative)
         XCTAssertEqual(game.worldRec?.difficulty, 3)
+        XCTAssertFalse(game.world.rule(RPG_CLASSES_GAME_RULE))
 
         game.saveAndFlush(synchronous: true)
         XCTAssertEqual(Set(game.listWorlds().map(\.id)), before)

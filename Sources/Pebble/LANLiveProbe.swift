@@ -43,6 +43,7 @@ final class LANLiveProbe {
     private var clientPositionedFrame: Int?
     private var clientUseSent = false
     private var clientUseSentFrame: Int?
+    private var clientUseAttempts = 0
     private var hostStarted = false
     private var completed = false
     private let timeoutFrames: Int
@@ -182,6 +183,12 @@ final class LANLiveProbe {
             clientWorldFrame = frames
             pebbleLANProbeLog("client_world_ready frame=\(frames)")
         }
+        if game.host?.hasScreen() == true {
+            game.host?.closeAllScreens()
+            game.host?.capturePointer()
+            pebbleLANProbeLog("client_closed_screen_for_probe frame=\(frames)")
+            return
+        }
 
         let d = door(in: game)
         let lower = game.world.getBlock(d.x, d.y, d.z)
@@ -214,20 +221,24 @@ final class LANLiveProbe {
             return
         }
 
-        if !clientUseSent,
-           let positioned = clientPositionedFrame,
-           frames - positioned >= 90 {
+        if let positioned = clientPositionedFrame,
+           frames - positioned >= 90,
+           (clientUseSentFrame == nil || frames - (clientUseSentFrame ?? 0) >= 60) {
             position(player, toUseDoorAt: d)
             if let hit = game.crosshairBlock() {
                 pebbleLANProbeLog("client_crosshair target=\(hit.x),\(hit.y),\(hit.z) cell=\(hit.cell)")
             } else {
                 pebbleLANProbeLog("client_crosshair target=none")
             }
+            pebbleLANProbeLog("client_block_intent_handler \(game.lanBlockIntentHandler == nil ? "missing" : "ready")")
+            clientUseAttempts += 1
             game.mouseDown(2)
             game.mouseUp(2)
-            clientUseSent = true
+            if !clientUseSent {
+                clientUseSent = true
+            }
             clientUseSentFrame = frames
-            pebbleLANProbeLog("client_use_sent door=\(d.x),\(d.y),\(d.z)")
+            pebbleLANProbeLog("client_use_sent attempt=\(clientUseAttempts) door=\(d.x),\(d.y),\(d.z)")
         }
     }
 
