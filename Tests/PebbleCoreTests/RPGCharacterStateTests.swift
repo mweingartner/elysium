@@ -21,6 +21,7 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertEqual(state.skillRanks["spell_formula"], 1)
         XCTAssertEqual(state.knownSpellIDs, ["ignite", "frost_ray", "mage_light"])
         XCTAssertEqual(state.preparedSpellIDs, ["ignite", "mage_light"])
+        XCTAssertEqual(state.selectedPreparedActionID, rpgPreparedActionToken(kind: .spell, id: "ignite"))
         XCTAssertEqual(state.fatigue, rpgDerivedStats(state).maxFatigue, accuracy: 0.0001)
     }
 
@@ -88,6 +89,7 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertTrue(repaired.knownSpellIDs.contains("blur"))
         XCTAssertFalse(repaired.knownSpellIDs.contains("mend_wounds"))
         XCTAssertEqual(repaired.preparedSpellIDs, ["ignite"])
+        XCTAssertEqual(repaired.selectedPreparedActionID, rpgPreparedActionToken(kind: .spell, id: "ignite"))
         XCTAssertGreaterThanOrEqual(repaired.fatigue, 0)
         XCTAssertLessThanOrEqual(repaired.fatigue, rpgDerivedStats(repaired).maxFatigue)
         XCTAssertEqual(repaired.actionSequence, 0)
@@ -124,6 +126,34 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertEqual(loaded.rpg.skillRanks["guard_stance"], 1)
         XCTAssertEqual(loaded.maxHealth, rpgDerivedStats(loaded.rpg).maxHealth)
         XCTAssertEqual(loaded.health, loaded.maxHealth)
+    }
+
+    func testLegacyRPGStateDecodesWithoutSelectedPreparedAction() throws {
+        let data = """
+        {
+          "version": 1,
+          "created": true,
+          "pathID": "arcanist",
+          "attributes": { "strength": 9, "dexterity": 9, "intelligence": 9, "endurance": 9, "luck": 6 },
+          "xp": 0,
+          "level": 1,
+          "skillRanks": { "spell_formula": 1 },
+          "preparedSkillIDs": ["spell_formula"],
+          "knownSpellIDs": ["ignite"],
+          "preparedSpellIDs": ["ignite"],
+          "selectedPreparedSpellID": "ignite",
+          "fatigue": 12,
+          "actionSequence": 0,
+          "activeCooldowns": [],
+          "activeUpkeeps": []
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(RPGCharacterState.self, from: data)
+        let repaired = repairRPGCharacterState(decoded)
+
+        XCTAssertEqual(repaired.selectedPreparedSpellID, "ignite")
+        XCTAssertEqual(repaired.selectedPreparedActionID, rpgPreparedActionToken(kind: .spell, id: "ignite"))
     }
 
     private func tryFailure(_ result: Result<RPGCharacterState, RPGCreationError>) -> RPGCreationError? {

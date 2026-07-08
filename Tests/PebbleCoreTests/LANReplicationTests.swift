@@ -2327,6 +2327,31 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertLessThanOrEqual(ghost.health, ghost.maxHealth)
     }
 
+    func testGhostUsesAuthoritativePreparedActiveSkill() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 0.5, y: 64, z: 0.5, yaw: 0)
+        let rpg = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "warden",
+            starterSkillID: "heavy_cut"
+        )).get()
+        _ = session.recordRPGState(rpg, for: "peer-a")
+        let zombie = Zombie(world: world)
+        zombie.setPos(0.5, 64, 3.5)
+        world.addEntity(zombie)
+
+        let record = try XCTUnwrap(session.peerRecord(playerID: "peer-a"))
+        let ghost = LANHostGhostRegistry().ghost(for: "peer-a", record: record, in: world)
+        let result = rpgUsePreparedSkill(ghost, skillID: "heavy_cut")
+
+        guard case .success(let action) = result else {
+            return XCTFail("expected ghost skill use, got \(String(describing: result))")
+        }
+        XCTAssertEqual(action.targetEntityID, zombie.id)
+        XCTAssertLessThan(zombie.health, zombie.maxHealth)
+        XCTAssertEqual(ghost.rpg.actionSequence, 1)
+        XCTAssertEqual(ghost.rpg.selectedPreparedActionID, rpgPreparedActionToken(kind: .skill, id: "heavy_cut"))
+    }
+
     func testGhostBreakSpawnsDropsConsumesToolDurabilityAndRecordsBlockChange() throws {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession()

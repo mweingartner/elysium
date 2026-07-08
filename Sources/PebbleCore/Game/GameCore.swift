@@ -3301,9 +3301,9 @@ public final class GameCore {
             host?.openScreen("rpg", nil)
             host?.releasePointer()
         } else if code == "KeyO" {
-            host?.showActionBar(requestRPGCyclePreparedSpell(), 45)
+            host?.showActionBar(requestRPGCyclePreparedAction(), 45)
         } else if code == "KeyL" {
-            host?.showActionBar(requestRPGCastSelectedSpell(), 70)
+            host?.showActionBar(requestRPGUseSelectedAction(), 70)
         } else if code == keybinds["drop"] {
             if isLANClientWorld {
                 performLANClientToss(all: ctrlOrCmd)

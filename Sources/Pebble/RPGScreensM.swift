@@ -28,6 +28,7 @@ final class RPGCharacterScreen: Screen {
     private var skillScroll = 0.0
     private var spellScroll = 0.0
     private var statusText = ""
+    private var buttonsBuiltForCreatedState: Bool?
     private var attrButtons: [(RPGAttributeID, Button, Button)] = []
     private var spendAttrButtons: [(RPGAttributeID, Button)] = []
     private weak var createButton: Button?
@@ -36,6 +37,8 @@ final class RPGCharacterScreen: Screen {
     private weak var nextPathButton: Button?
     private weak var prevStarterButton: Button?
     private weak var nextStarterButton: Button?
+    private weak var nextActionButton: Button?
+    private weak var useActionButton: Button?
 
     private struct CreationLayout {
         let footerY: Double
@@ -79,17 +82,15 @@ final class RPGCharacterScreen: Screen {
 
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         guard let player = game.player else { return }
-        if player.rpg.created {
-            buildSheetButtons(ui, game)
-        } else {
-            normalizeDraftSelection()
-            buildCreationButtons(ui, game)
-        }
+        rebuildButtons(ui, game, created: player.rpg.created)
     }
 
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         ui.drawDarkBg(0.45)
         guard let player = game.player else { return }
+        if buttonsBuiltForCreatedState != player.rpg.created {
+            rebuildButtons(ui, game, created: player.rpg.created)
+        }
         if player.rpg.created {
             drawSheet(ui, game)
         } else {
@@ -194,6 +195,30 @@ final class RPGCharacterScreen: Screen {
         }
     }
 
+    private func rebuildButtons(_ ui: UIManager, _ game: GameCore, created: Bool) {
+        buttons.removeAll()
+        sliders.removeAll()
+        fields.removeAll()
+        slots.removeAll()
+        attrButtons.removeAll()
+        spendAttrButtons.removeAll()
+        createButton = nil
+        closeButton = nil
+        prevPathButton = nil
+        nextPathButton = nil
+        prevStarterButton = nil
+        nextStarterButton = nil
+        nextActionButton = nil
+        useActionButton = nil
+        buttonsBuiltForCreatedState = created
+        if created {
+            buildSheetButtons(ui, game)
+        } else {
+            normalizeDraftSelection()
+            buildCreationButtons(ui, game)
+        }
+    }
+
     private func buildSheetButtons(_ ui: UIManager, _ game: GameCore) {
         let f = panel(ui)
         let tabW = min(82.0, (f.w - 34) / Double(Tab.allCases.count))
@@ -206,6 +231,18 @@ final class RPGCharacterScreen: Screen {
             guard let ui, let game else { return }
             ui.closeTop(game)
         }))
+        let next = Button(f.x + f.w - 128, f.y + 8, 48, 20, "Next", { [weak self, weak game] in
+            guard let self, let game else { return }
+            self.setStatus(game.requestRPGCyclePreparedAction(), game: game)
+        })
+        let use = Button(f.x + f.w - 74, f.y + 8, 60, 20, "Use", { [weak self, weak game] in
+            guard let self, let game else { return }
+            self.setStatus(game.requestRPGUseSelectedAction(), game: game)
+        })
+        nextActionButton = next
+        useActionButton = use
+        buttons.append(next)
+        buttons.append(use)
         spendAttrButtons.removeAll()
         for (i, attr) in RPGAttributeID.allCases.enumerated() {
             let y = f.y + 84 + Double(i) * 22
@@ -267,6 +304,8 @@ final class RPGCharacterScreen: Screen {
         let cv = ui.cv
         ui.drawPanel(f.x, f.y, f.w, f.h)
         cv.drawText("Character", f.x + 12, f.y + 12, 1, "#3f3f3f", shadow: false)
+        updateSheetActionButtons(f: f, player: player)
+        drawSelectedActionStrip(ui, player: player, f: f)
         for b in buttons where Tab.allCases.map(\.label).contains(b.label) {
             b.enabled = b.label != tab.label
         }
@@ -374,7 +413,7 @@ final class RPGCharacterScreen: Screen {
             cv.drawText(fit(spell.displayName, maxWidth: 116), row.x + 24, row.y + 4, 1, known ? "#202020" : "#707070", shadow: false)
             cv.drawText("C\(spell.circle) F\(Int(spell.fatigueCost))", row.x + 146, row.y + 4, 1, "#303030", shadow: false)
             let stateX = row.x + row.w - 62
-            cv.drawText(prepared ? "Prepared" : known ? "Ready" : "Locked", stateX, row.y + 4, 1, "#303030", shadow: false)
+            cv.drawText(spellRowState(spell, state: player.rpg), stateX, row.y + 4, 1, "#303030", shadow: false)
             cv.drawText(fit(spell.summary, maxWidth: Int(max(0, stateX - (row.x + 190) - 8))),
                         row.x + 190, row.y + 4, 1, "#606060", shadow: false)
         }
@@ -429,9 +468,15 @@ final class RPGCharacterScreen: Screen {
     private func handleSkillClick(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) -> Bool {
         guard let player = game.player else { return false }
         for row in skillRows(panel(ui), pathID: player.rpg.pathID).visible where mx >= row.x && mx < row.x + row.w && my >= row.y && my < row.y + row.h {
+            guard let skill = rpgSkillDefinition(row.id) else { return false }
             let known = (player.rpg.skillRanks[row.id] ?? 0) > 0
             if known {
-                setStatus(game.requestRPGTogglePreparedSkill(row.id), game: game)
+                let token = rpgPreparedActionToken(kind: .skill, id: row.id)
+                if skill.kind == .active, player.rpg.preparedSkillIDs.contains(row.id), player.rpg.selectedPreparedActionID != token {
+                    setStatus(game.requestRPGSelectPreparedSkill(row.id), game: game)
+                } else {
+                    setStatus(game.requestRPGTogglePreparedSkill(row.id), game: game)
+                }
             } else {
                 setStatus(game.requestRPGLearnSkill(row.id), game: game)
             }
@@ -441,8 +486,14 @@ final class RPGCharacterScreen: Screen {
     }
 
     private func handleSpellClick(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) -> Bool {
+        guard let player = game.player else { return false }
         for row in spellRows(panel(ui)).visible where mx >= row.x && mx < row.x + row.w && my >= row.y && my < row.y + row.h {
-            setStatus(game.requestRPGTogglePreparedSpell(row.id), game: game)
+            let token = rpgPreparedActionToken(kind: .spell, id: row.id)
+            if player.rpg.preparedSpellIDs.contains(row.id), player.rpg.selectedPreparedActionID != token {
+                setStatus(game.requestRPGSelectPreparedSpell(row.id), game: game)
+            } else {
+                setStatus(game.requestRPGTogglePreparedSpell(row.id), game: game)
+            }
             return true
         }
         return false
@@ -476,11 +527,55 @@ final class RPGCharacterScreen: Screen {
 
     private func skillRowState(_ skill: RPGSkillDefinition, state: RPGCharacterState) -> String {
         let rank = state.skillRanks[skill.id] ?? 0
-        if state.preparedSkillIDs.contains(skill.id) { return "Prepared" }
+        if rank > 0, skill.kind == .passive { return "Passive" }
+        if state.selectedPreparedActionID == rpgPreparedActionToken(kind: .skill, id: skill.id) { return "Selected" }
+        if state.preparedSkillIDs.contains(skill.id), skill.kind == .active { return "Prepared" }
+        if rank > 0, skill.kind == .spell { return "Spells" }
         if rank > 0 { return "Known" }
         var copy = state
         if rpgLearnSkill(skill.id, in: &copy) == nil { return "Learn" }
         return "Locked"
+    }
+
+    private func spellRowState(_ spell: RPGSpellDefinition, state: RPGCharacterState) -> String {
+        if state.selectedPreparedActionID == rpgPreparedActionToken(kind: .spell, id: spell.id) { return "Selected" }
+        if state.preparedSpellIDs.contains(spell.id) { return "Prepared" }
+        if state.knownSpellIDs.contains(spell.id) { return "Ready" }
+        return "Locked"
+    }
+
+    private func updateSheetActionButtons(f: (x: Double, y: Double, w: Double, h: Double), player: Player) {
+        nextActionButton?.x = f.x + f.w - 128
+        nextActionButton?.y = f.y + 8
+        useActionButton?.x = f.x + f.w - 74
+        useActionButton?.y = f.y + 8
+        let actions = rpgPreparedActions(player.rpg)
+        nextActionButton?.visible = true
+        useActionButton?.visible = true
+        nextActionButton?.enabled = actions.count > 1
+        useActionButton?.enabled = rpgSelectedPreparedAction(player.rpg)?.available == true
+    }
+
+    private func drawSelectedActionStrip(_ ui: UIManager, player: Player,
+                                         f: (x: Double, y: Double, w: Double, h: Double)) {
+        let cv = ui.cv
+        let x = f.x + 92
+        let buttonX = nextActionButton?.x ?? (f.x + f.w - 128)
+        let w = max(0, buttonX - x - 8)
+        guard w >= 72 else { return }
+        let y = f.y + 9
+        cv.setFill("rgba(0,0,0,0.12)")
+        cv.fillRect(x, y, w, 18)
+        guard let action = rpgSelectedPreparedAction(player.rpg) else {
+            cv.drawTextCentered("No action", x + w / 2, y + 5, 1, "#606060", shadow: false)
+            return
+        }
+        cv.drawRPGIcon(action.iconAssetID, x + 2, y + 1, 16, 16)
+        let status = "\(action.statusText) F\(Int(action.fatigueCost.rounded(.up)))"
+        let statusW = min(64, textWidth(status) + 2)
+        cv.drawText(fit(action.displayName, maxWidth: Int(w) - statusW - 24), x + 22, y + 5, 1, "#303030", shadow: false)
+        cv.drawText(fit(status, maxWidth: statusW), x + w - Double(statusW) - 3, y + 5, 1,
+                    action.available ? "#206020" : "#904020", shadow: false)
     }
 
     private func movePath(_ dir: Int) {

@@ -2,7 +2,7 @@
 type: design
 title: RPG Classes, Skills, Progression, and Character Creation
 description: Detailed Pebble design for class identity, attributes, skills, spells, progression, combat hooks, persistence, LAN authority, and UI.
-updated: 2026-07-07
+updated: 2026-07-08
 status: implemented
 ---
 
@@ -16,13 +16,13 @@ The design uses the provided *The Fantasy Trip: Melee* and *The Fantasy Trip: Wi
 
 The first implementation is complete in the current worktree with these concrete files and guardrails:
 
-- Core model: `Sources/PebbleCore/Game/CharacterProgression.swift` defines six paths, 18 branches, 54 skills, 17 spells, five attributes, class XP/leveling, point spending, prepared skills/spells, fatigue, cooldowns, upkeep, save repair, and `GameCore.requestRPG...` routing.
-- Action mechanics: `Sources/PebbleCore/Systems/RPGActions.swift` resolves spell casting through existing world/entity APIs for damage rays, fire/light placement, wards, healing, movement, summons, cooldowns, and upkeep. `Combat.swift` adds derived melee bonus, and `Living.swift` awards RPG XP on kills.
-- UI/HUD: `Sources/Pebble/RPGScreensM.swift`, `UICanvas.swift`, `HudM.swift`, `main.swift`, and `GameCore.swift` provide creation, sheet tabs, skill/spell preparation, attribute spending, fatigue HUD, and `K`/`O`/`L` controls.
+- Core model: `Sources/PebbleCore/Game/CharacterProgression.swift` defines six paths, 18 branches, 54 skills, 17 spells, five attributes, class XP/leveling, point spending, prepared skills/spells, fatigue, cooldowns, upkeep, save repair, selected prepared action tokens, and `GameCore.requestRPG...` routing.
+- Action mechanics: `Sources/PebbleCore/Systems/RPGActions.swift` resolves spell casting and active-skill use through existing world/entity APIs for damage rays, fire/light/TNT/gravel placement, wards, healing, movement, summons, redstone triggering, gear repair, cooldowns, and upkeep. `Combat.swift` adds derived melee bonus, and `Living.swift` awards RPG XP on kills.
+- UI/HUD: `Sources/Pebble/RPGScreensM.swift`, `UICanvas.swift`, `HudM.swift`, `main.swift`, and `GameCore.swift` provide creation, sheet tabs, skill/spell preparation, row selection states, visible Next/Use controls, attribute spending, fatigue HUD, selected action belt, and `K`/`O`/`L` controls.
 - Assets: `Sources/PebbleCore/Render/RPGAssetManifest.swift` generates deterministic procedural 16x16 icons for every path, branch, skill, spell, and RPG action. No new binary art, scraped web images, or license-bearing asset files are introduced.
 - Persistence: `Player.swift` stores nested `rpg` state in player JSON and repairs it on load. `GameWorld.swift` and `GameCore.swift` default new worlds to the `rpgClasses` game rule.
-- LAN: `LAN_MULTIPLAYER_PROTOCOL_VERSION` is now 4, and `LANWorldSummary.rpgClassesEnabled` advertises the host rule to transient clients. `LANRPGIntent` carries typed create/learn/prepare/spend/select/cast proposals. Full RPG state stays host-owned in `LANMultiplayerHostSession`/`LANPeerRecordSnapshot` and app-side `lan_players` JSON; normal periodic player snapshots are lean. Direct RPG-change/restore snapshots may carry full RPG state so the owning client can converge its sheet. Remote casts require an exact-next action sequence and run through `LANHostGhostRegistry` before the host broadcasts player/world/entity deltas.
-- Tests: `RPGCharacterStateTests`, `RPGProgressionTests`, `RPGActionTests`, `RPGAssetManifestTests`, plus LAN protocol/replication additions cover save repair, progression rules, spell effects, generated asset coverage, frame round-trip, malformed nested RPG decode, host rejection of client-authored RPG snapshots, lean periodic peer states, restore/full RPG convergence, and ghost hydration with derived stats.
+- LAN: `LAN_MULTIPLAYER_PROTOCOL_VERSION` is now 5, and `LANWorldSummary.rpgClassesEnabled` advertises the host rule to transient clients. `LANRPGIntent` carries typed create/learn/prepare/spend/select/cast/use proposals. Full RPG state stays host-owned in `LANMultiplayerHostSession`/`LANPeerRecordSnapshot` and app-side `lan_players` JSON; normal periodic player snapshots are lean. Direct RPG-change/restore snapshots may carry full RPG state so the owning client can converge its sheet. Remote casts and active-skill uses require an exact-next action sequence and run through `LANHostGhostRegistry` before the host broadcasts player/world/entity deltas.
+- Tests: `RPGCharacterStateTests`, `RPGProgressionTests`, `RPGActionTests`, `RPGAssetManifestTests`, plus LAN protocol/replication additions cover save repair, legacy selected-action decode, progression rules, spell effects, active skill effects, generated asset coverage, frame round-trip, malformed nested RPG decode, host rejection of client-authored RPG snapshots, lean periodic peer states, restore/full RPG convergence, ghost hydration with derived stats, and ghost active-skill execution.
 
 Deliberate implementation differences from the early plan: the code uses `pathID`, `xp`, and `level` names instead of the early `classID`, `classXP`, and `classLevel` sketch; the starting attribute budget is 42 across five attributes rather than TFT's three-attribute 32-point table; and the first LAN implementation does not add separate `LANRPGSummary`/visual-event arrays because the lean/full split above preserves frame budget and authority without adding a second replication channel.
 
@@ -681,7 +681,7 @@ LAN guest persistence:
 
 ## LAN Design
 
-Implementation note: this section preserves the more elaborate contrary-architect sketch. The current implementation uses protocol v4 `LANRPGIntent` instead of separate create/spell/action intent structs, stores full state in host peer records, keeps periodic player snapshots lean, and sends full repaired RPG state only in direct RPG-change/restore `LANPlayerState` snapshots for owning-client convergence. Separate `LANRPGSummary` and `LANRPGVisualEvent` arrays remain a future optimization, not a shipped requirement.
+Implementation note: this section preserves the more elaborate contrary-architect sketch. The current implementation uses protocol v5 `LANRPGIntent` instead of separate create/spell/action intent structs, includes typed select/cast/use proposals for the unified prepared-action path, stores full state in host peer records, keeps periodic player snapshots lean, and sends full repaired RPG state only in direct RPG-change/restore `LANPlayerState` snapshots for owning-client convergence. Separate `LANRPGSummary` and `LANRPGVisualEvent` arrays remain a future optimization, not a shipped requirement.
 
 ### Ownership
 
@@ -694,7 +694,7 @@ Implementation note: this section preserves the more elaborate contrary-architec
 
 Current LAN frames are strict, versioned, type-tagged JSON payloads with a 1 MiB cap. RPG networking must follow the existing pattern: append message IDs, bump protocol version, and keep protocol models in `PebbleCore/Net`.
 
-The sketch below proposed separate bounded Codable payloads. The implemented v4 payload is the consolidated `LANRPGIntent`; full RPG state is not present in normal high-frequency `LANPlayerState`.
+The sketch below proposed separate bounded Codable payloads. The implemented v5 payload is the consolidated `LANRPGIntent`; full RPG state is not present in normal high-frequency `LANPlayerState`.
 
 ```swift
 public struct LANRPGSummary: Codable, Equatable {

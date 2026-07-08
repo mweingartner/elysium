@@ -142,7 +142,7 @@ final class LANMultiplayerTests: XCTestCase {
                 attackerType: "zombie"
             )),
             .keepalive,
-            .rpgIntent(playerID: "peer-a", intent: LANRPGIntent(action: .castSpell, spellID: "ignite", actionSequence: 2)),
+            .rpgIntent(playerID: "peer-a", intent: LANRPGIntent(action: .useSkill, skillID: "heavy_cut", actionSequence: 2)),
         ]
 
         for (index, message) in messages.enumerated() {
@@ -265,7 +265,7 @@ final class LANMultiplayerTests: XCTestCase {
 
     func testRPGIntentSanitizesIdentifiersDirectionAndSequence() {
         let intent = LANRPGIntent(
-            action: .selectSpell,
+            action: .selectSkill,
             skillID: String(repeating: "s", count: 200),
             spellID: String(repeating: "x", count: 200),
             direction: -99,

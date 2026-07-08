@@ -80,6 +80,38 @@ public enum RPGActionKind: String, Codable {
     case spell
 }
 
+public enum RPGPreparedActionKind: String, Codable, Equatable {
+    case skill
+    case spell
+}
+
+public struct RPGPreparedAction: Equatable {
+    public var kind: RPGPreparedActionKind
+    public var id: String
+    public var displayName: String
+    public var iconAssetID: String
+    public var fatigueCost: Double
+    public var cooldownTicks: Int
+    public var cooldownRemainingTicks: Int
+    public var available: Bool
+    public var statusText: String
+
+    public var token: String { rpgPreparedActionToken(kind: kind, id: id) }
+}
+
+public func rpgPreparedActionToken(kind: RPGPreparedActionKind, id: String) -> String {
+    "\(kind.rawValue):\(id)"
+}
+
+public func rpgParsePreparedActionToken(_ token: String?) -> (kind: RPGPreparedActionKind, id: String)? {
+    guard let token else { return nil }
+    let parts = token.split(separator: ":", maxSplits: 1).map(String.init)
+    guard parts.count == 2, let kind = RPGPreparedActionKind(rawValue: parts[0]), !parts[1].isEmpty else {
+        return nil
+    }
+    return (kind, parts[1])
+}
+
 public enum RPGSpellTargetKind: String, Codable {
     case selfTarget
     case touch
@@ -245,6 +277,25 @@ public struct RPGUpkeep: Codable, Equatable {
 }
 
 public struct RPGCharacterState: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case created
+        case pathID
+        case attributes
+        case xp
+        case level
+        case skillRanks
+        case preparedSkillIDs
+        case knownSpellIDs
+        case preparedSpellIDs
+        case selectedPreparedSpellID
+        case selectedPreparedActionID
+        case fatigue
+        case actionSequence
+        case activeCooldowns
+        case activeUpkeeps
+    }
+
     public var version: Int
     public var created: Bool
     public var pathID: String
@@ -256,6 +307,7 @@ public struct RPGCharacterState: Codable, Equatable {
     public var knownSpellIDs: [String]
     public var preparedSpellIDs: [String]
     public var selectedPreparedSpellID: String?
+    public var selectedPreparedActionID: String?
     public var fatigue: Double
     public var actionSequence: Int
     public var activeCooldowns: [RPGCooldown]
@@ -272,6 +324,7 @@ public struct RPGCharacterState: Codable, Equatable {
                 knownSpellIDs: [String],
                 preparedSpellIDs: [String],
                 selectedPreparedSpellID: String? = nil,
+                selectedPreparedActionID: String? = nil,
                 fatigue: Double,
                 actionSequence: Int = 0,
                 activeCooldowns: [RPGCooldown] = [],
@@ -287,16 +340,60 @@ public struct RPGCharacterState: Codable, Equatable {
         self.knownSpellIDs = knownSpellIDs
         self.preparedSpellIDs = preparedSpellIDs
         self.selectedPreparedSpellID = selectedPreparedSpellID
+        self.selectedPreparedActionID = selectedPreparedActionID
         self.fatigue = fatigue
         self.actionSequence = actionSequence
         self.activeCooldowns = activeCooldowns
         self.activeUpkeeps = activeUpkeeps
     }
 
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            version: try c.decodeIfPresent(Int.self, forKey: .version) ?? RPG_STATE_CURRENT_VERSION,
+            created: try c.decodeIfPresent(Bool.self, forKey: .created) ?? false,
+            pathID: try c.decodeIfPresent(String.self, forKey: .pathID) ?? "",
+            attributes: try c.decodeIfPresent(RPGAttributes.self, forKey: .attributes) ?? .defaultCreation,
+            xp: try c.decodeIfPresent(Int.self, forKey: .xp) ?? 0,
+            level: try c.decodeIfPresent(Int.self, forKey: .level) ?? 0,
+            skillRanks: try c.decodeIfPresent([String: Int].self, forKey: .skillRanks) ?? [:],
+            preparedSkillIDs: try c.decodeIfPresent([String].self, forKey: .preparedSkillIDs) ?? [],
+            knownSpellIDs: try c.decodeIfPresent([String].self, forKey: .knownSpellIDs) ?? [],
+            preparedSpellIDs: try c.decodeIfPresent([String].self, forKey: .preparedSpellIDs) ?? [],
+            selectedPreparedSpellID: try c.decodeIfPresent(String.self, forKey: .selectedPreparedSpellID),
+            selectedPreparedActionID: try c.decodeIfPresent(String.self, forKey: .selectedPreparedActionID),
+            fatigue: try c.decodeIfPresent(Double.self, forKey: .fatigue) ?? 0,
+            actionSequence: try c.decodeIfPresent(Int.self, forKey: .actionSequence) ?? 0,
+            activeCooldowns: try c.decodeIfPresent([RPGCooldown].self, forKey: .activeCooldowns) ?? [],
+            activeUpkeeps: try c.decodeIfPresent([RPGUpkeep].self, forKey: .activeUpkeeps) ?? []
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(version, forKey: .version)
+        try c.encode(created, forKey: .created)
+        try c.encode(pathID, forKey: .pathID)
+        try c.encode(attributes, forKey: .attributes)
+        try c.encode(xp, forKey: .xp)
+        try c.encode(level, forKey: .level)
+        try c.encode(skillRanks, forKey: .skillRanks)
+        try c.encode(preparedSkillIDs, forKey: .preparedSkillIDs)
+        try c.encode(knownSpellIDs, forKey: .knownSpellIDs)
+        try c.encode(preparedSpellIDs, forKey: .preparedSpellIDs)
+        try c.encodeIfPresent(selectedPreparedSpellID, forKey: .selectedPreparedSpellID)
+        try c.encodeIfPresent(selectedPreparedActionID, forKey: .selectedPreparedActionID)
+        try c.encode(fatigue, forKey: .fatigue)
+        try c.encode(actionSequence, forKey: .actionSequence)
+        try c.encode(activeCooldowns, forKey: .activeCooldowns)
+        try c.encode(activeUpkeeps, forKey: .activeUpkeeps)
+    }
+
     public static func uncreated() -> RPGCharacterState {
         RPGCharacterState(created: false, pathID: "", attributes: .defaultCreation, xp: 0, level: 0,
                           skillRanks: [:], preparedSkillIDs: [], knownSpellIDs: [], preparedSpellIDs: [],
                           selectedPreparedSpellID: nil,
+                          selectedPreparedActionID: nil,
                           fatigue: 0)
     }
 }
@@ -411,6 +508,30 @@ public extension GameCore {
     }
 
     @discardableResult
+    func requestRPGSelectPreparedSkill(_ skillID: String) -> String {
+        guard let player else { return "No player" }
+        if let error = rpgSelectPreparedSkill(skillID, in: &player.rpg) {
+            return error.description
+        }
+        if isLANClientWorld {
+            lanRPGIntentHandler?(LANRPGIntent(action: .selectSkill, skillID: skillID, actionSequence: player.rpg.actionSequence))
+        }
+        return "Selected \(rpgSkillDefinition(skillID)?.displayName ?? skillID)"
+    }
+
+    @discardableResult
+    func requestRPGSelectPreparedSpell(_ spellID: String) -> String {
+        guard let player else { return "No player" }
+        if let error = rpgSelectPreparedSpell(spellID, in: &player.rpg) {
+            return error.description
+        }
+        if isLANClientWorld {
+            lanRPGIntentHandler?(LANRPGIntent(action: .selectSpell, spellID: spellID, actionSequence: player.rpg.actionSequence))
+        }
+        return "Selected \(rpgSpellDefinition(spellID)?.displayName ?? spellID)"
+    }
+
+    @discardableResult
     func requestRPGSpendAttributePoint(_ attribute: RPGAttributeID) -> String {
         guard let player else { return "No player" }
         if let error = rpgSpendAttributePoint(attribute, in: &player.rpg) {
@@ -433,6 +554,23 @@ public extension GameCore {
             lanRPGIntentHandler?(LANRPGIntent(action: .selectSpell, spellID: spellID, direction: direction, actionSequence: player.rpg.actionSequence))
         }
         return "Selected \(rpgSpellDefinition(spellID)?.displayName ?? spellID)"
+    }
+
+    @discardableResult
+    func requestRPGCyclePreparedAction(direction: Int = 1) -> String {
+        guard let player else { return "No player" }
+        guard let action = rpgCyclePreparedAction(player, direction: direction) else {
+            return "No prepared actions"
+        }
+        if isLANClientWorld {
+            switch action.kind {
+            case .skill:
+                lanRPGIntentHandler?(LANRPGIntent(action: .selectSkill, skillID: action.id, direction: direction, actionSequence: player.rpg.actionSequence))
+            case .spell:
+                lanRPGIntentHandler?(LANRPGIntent(action: .selectSpell, spellID: action.id, direction: direction, actionSequence: player.rpg.actionSequence))
+            }
+        }
+        return "Selected \(action.displayName)"
     }
 
     @discardableResult
@@ -459,6 +597,38 @@ public extension GameCore {
             return "Casting \(spell.displayName)"
         }
         switch rpgCastPreparedSpell(player, spellID: spellID) {
+        case .success(let result): return result.message
+        case .failure(let error): return error.description
+        }
+    }
+
+    @discardableResult
+    func requestRPGUseSelectedAction() -> String {
+        guard let player else { return "No player" }
+        player.rpg = repairRPGCharacterState(player.rpg)
+        guard let action = rpgSelectedPreparedAction(player.rpg) else {
+            return RPGActionFailure.actionNotPrepared.description
+        }
+        if isLANClientWorld {
+            guard player.rpg.created else { return RPGActionFailure.characterNotCreated.description }
+            guard action.available else {
+                if action.cooldownRemainingTicks > 0 {
+                    switch action.kind {
+                    case .skill: return RPGActionFailure.skillOnCooldown(action.id).description
+                    case .spell: return RPGActionFailure.spellOnCooldown(action.id).description
+                    }
+                }
+                return RPGActionFailure.insufficientFatigue(required: action.fatigueCost, available: player.rpg.fatigue).description
+            }
+            switch action.kind {
+            case .skill:
+                lanRPGIntentHandler?(LANRPGIntent(action: .useSkill, skillID: action.id, actionSequence: player.rpg.actionSequence + 1))
+            case .spell:
+                lanRPGIntentHandler?(LANRPGIntent(action: .castSpell, spellID: action.id, actionSequence: player.rpg.actionSequence + 1))
+            }
+            return "Using \(action.displayName)"
+        }
+        switch rpgUseSelectedPreparedAction(player) {
         case .success(let result): return result.message
         case .failure(let error): return error.description
         }
@@ -1031,6 +1201,81 @@ private func sortSpellIDs(_ ids: [String]) -> [String] {
     }
 }
 
+public func rpgPreparedActions(_ state: RPGCharacterState) -> [RPGPreparedAction] {
+    guard state.created else { return [] }
+    var out: [RPGPreparedAction] = []
+    for skillID in state.preparedSkillIDs {
+        guard let skill = rpgSkillDefinition(skillID), skill.kind == .active,
+              (state.skillRanks[skillID] ?? 0) > 0 else { continue }
+        let cooldown = state.activeCooldowns.first { $0.id == skillID && $0.remainingTicks > 0 }?.remainingTicks ?? 0
+        let hasFatigue = state.fatigue >= skill.fatigueCost
+        out.append(RPGPreparedAction(
+            kind: .skill,
+            id: skillID,
+            displayName: skill.displayName,
+            iconAssetID: rpgAssetIDForSkill(skillID),
+            fatigueCost: skill.fatigueCost,
+            cooldownTicks: skill.cooldownTicks,
+            cooldownRemainingTicks: cooldown,
+            available: cooldown <= 0 && hasFatigue,
+            statusText: cooldown > 0 ? "\(max(1, Int((Double(cooldown) / 20.0).rounded(.up))))s" : hasFatigue ? "Ready" : "Fatigue"
+        ))
+    }
+    for spellID in state.preparedSpellIDs {
+        guard let spell = rpgSpellDefinition(spellID), state.knownSpellIDs.contains(spellID) else { continue }
+        let cooldown = state.activeCooldowns.first { $0.id == spellID && $0.remainingTicks > 0 }?.remainingTicks ?? 0
+        let hasFatigue = state.fatigue >= spell.fatigueCost
+        let smartEnough = state.attributes.intelligence >= spell.minimumIntelligence
+        out.append(RPGPreparedAction(
+            kind: .spell,
+            id: spellID,
+            displayName: spell.displayName,
+            iconAssetID: rpgAssetIDForSpell(spellID),
+            fatigueCost: spell.fatigueCost,
+            cooldownTicks: max(10, spell.circle * 20),
+            cooldownRemainingTicks: cooldown,
+            available: cooldown <= 0 && hasFatigue && smartEnough,
+            statusText: cooldown > 0 ? "\(max(1, Int((Double(cooldown) / 20.0).rounded(.up))))s" : !smartEnough ? "IQ \(spell.minimumIntelligence)" : hasFatigue ? "Ready" : "Fatigue"
+        ))
+    }
+    return out
+}
+
+public func rpgSelectedPreparedAction(_ state: RPGCharacterState) -> RPGPreparedAction? {
+    let actions = rpgPreparedActions(state)
+    if let selected = state.selectedPreparedActionID,
+       let found = actions.first(where: { $0.token == selected }) {
+        return found
+    }
+    if let selectedSpell = state.selectedPreparedSpellID,
+       let found = actions.first(where: { $0.kind == .spell && $0.id == selectedSpell }) {
+        return found
+    }
+    return actions.first
+}
+
+private func normalizeSelectedPreparedAction(_ state: inout RPGCharacterState) {
+    let actions = rpgPreparedActions(state)
+    if actions.isEmpty {
+        state.selectedPreparedActionID = nil
+        return
+    }
+    if let selected = state.selectedPreparedActionID,
+       let parsed = rpgParsePreparedActionToken(selected),
+       actions.contains(where: { $0.kind == parsed.kind && $0.id == parsed.id }) {
+        if parsed.kind == .spell { state.selectedPreparedSpellID = parsed.id }
+        return
+    }
+    if let selectedSpell = state.selectedPreparedSpellID,
+       actions.contains(where: { $0.kind == .spell && $0.id == selectedSpell }) {
+        state.selectedPreparedActionID = rpgPreparedActionToken(kind: .spell, id: selectedSpell)
+        return
+    }
+    let selected = actions[0]
+    state.selectedPreparedActionID = selected.token
+    if selected.kind == .spell { state.selectedPreparedSpellID = selected.id }
+}
+
 private func starterSpellIDs(for path: RPGPathDefinition, requested: [String]) -> [String] {
     let allowed = Set(path.starterSpellIDs)
     let chosen = requested.isEmpty ? path.starterSpellIDs : requested
@@ -1112,6 +1357,7 @@ public func rpgCreateCharacter(_ draft: RPGCreationDraft) -> Result<RPGCharacter
         knownSpellIDs: spells,
         preparedSpellIDs: Array(spells.prefix(RPG_MAX_PREPARED_SPELLS)),
         selectedPreparedSpellID: spells.first,
+        selectedPreparedActionID: nil,
         fatigue: 0
     )
     state.fatigue = rpgDerivedStats(state).maxFatigue
@@ -1181,6 +1427,7 @@ public func repairRPGCharacterState(_ raw: RPGCharacterState) -> RPGCharacterSta
     } else {
         state.selectedPreparedSpellID = state.preparedSpellIDs.first
     }
+    normalizeSelectedPreparedAction(&state)
 
     let derived = rpgDerivedStats(state)
     state.fatigue = max(0, min(derived.maxFatigue, state.fatigue.isFinite ? state.fatigue : derived.maxFatigue))
@@ -1261,12 +1508,15 @@ public func rpgPrepareSpell(_ spellID: String, in state: inout RPGCharacterState
     guard state.knownSpellIDs.contains(spellID) else { return .spellNotKnown(spellID) }
     if state.preparedSpellIDs.contains(spellID) {
         state.selectedPreparedSpellID = spellID
+        state.selectedPreparedActionID = rpgPreparedActionToken(kind: .spell, id: spellID)
         return nil
     }
     guard state.preparedSpellIDs.count < RPG_MAX_PREPARED_SPELLS else { return .preparedSpellLimit }
     state.preparedSpellIDs.append(spellID)
     state.preparedSpellIDs = sortSpellIDs(state.preparedSpellIDs)
     if state.selectedPreparedSpellID == nil { state.selectedPreparedSpellID = spellID }
+    if state.selectedPreparedActionID == nil { state.selectedPreparedActionID = rpgPreparedActionToken(kind: .spell, id: spellID) }
+    state = repairRPGCharacterState(state)
     return nil
 }
 
@@ -1276,7 +1526,21 @@ public func rpgUnprepareSpell(_ spellID: String, in state: inout RPGCharacterSta
     guard rpgSpellDefinition(spellID) != nil else { return .unknownSpell(spellID) }
     state.preparedSpellIDs.removeAll { $0 == spellID }
     if state.selectedPreparedSpellID == spellID { state.selectedPreparedSpellID = state.preparedSpellIDs.first }
+    if state.selectedPreparedActionID == rpgPreparedActionToken(kind: .spell, id: spellID) {
+        state.selectedPreparedActionID = nil
+    }
     state.activeUpkeeps.removeAll { $0.spellID == spellID }
+    state = repairRPGCharacterState(state)
+    return nil
+}
+
+public func rpgSelectPreparedSpell(_ spellID: String, in state: inout RPGCharacterState) -> RPGProgressionError? {
+    state = repairRPGCharacterState(state)
+    guard state.created else { return .characterNotCreated }
+    guard rpgSpellDefinition(spellID) != nil else { return .unknownSpell(spellID) }
+    guard state.preparedSpellIDs.contains(spellID) else { return .spellNotKnown(spellID) }
+    state.selectedPreparedSpellID = spellID
+    state.selectedPreparedActionID = rpgPreparedActionToken(kind: .spell, id: spellID)
     state = repairRPGCharacterState(state)
     return nil
 }
@@ -1290,6 +1554,10 @@ public func rpgPrepareSkill(_ skillID: String, in state: inout RPGCharacterState
     guard state.preparedSkillIDs.count < RPG_MAX_PREPARED_SKILLS else { return .preparedSkillLimit }
     state.preparedSkillIDs.append(skillID)
     state.preparedSkillIDs = sortSkillIDs(state.preparedSkillIDs)
+    if let def = rpgSkillDefinition(skillID), def.kind == .active, state.selectedPreparedActionID == nil {
+        state.selectedPreparedActionID = rpgPreparedActionToken(kind: .skill, id: skillID)
+    }
+    state = repairRPGCharacterState(state)
     return nil
 }
 
@@ -1298,6 +1566,20 @@ public func rpgUnprepareSkill(_ skillID: String, in state: inout RPGCharacterSta
     guard state.created else { return .characterNotCreated }
     guard rpgSkillDefinition(skillID) != nil else { return .unknownSkill(skillID) }
     state.preparedSkillIDs.removeAll { $0 == skillID }
+    if state.selectedPreparedActionID == rpgPreparedActionToken(kind: .skill, id: skillID) {
+        state.selectedPreparedActionID = nil
+    }
+    state = repairRPGCharacterState(state)
+    return nil
+}
+
+public func rpgSelectPreparedSkill(_ skillID: String, in state: inout RPGCharacterState) -> RPGProgressionError? {
+    state = repairRPGCharacterState(state)
+    guard state.created else { return .characterNotCreated }
+    guard let def = rpgSkillDefinition(skillID) else { return .unknownSkill(skillID) }
+    guard def.kind == .active, (state.skillRanks[skillID] ?? 0) > 0 else { return .skillNotKnown(skillID) }
+    guard state.preparedSkillIDs.contains(skillID) else { return .skillNotKnown(skillID) }
+    state.selectedPreparedActionID = rpgPreparedActionToken(kind: .skill, id: skillID)
     state = repairRPGCharacterState(state)
     return nil
 }

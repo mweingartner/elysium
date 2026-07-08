@@ -243,6 +243,7 @@ final class HUD {
                 cv.fillRect(fx, fy, 5, 22)
                 cv.setFill("#55aaff")
                 cv.fillRect(fx + 1, fy + 21 - (20 * f).rounded(), 3, (20 * f).rounded())
+                drawRPGActionBelt(ui, player: player, hotbarX: hbX, hotbarY: hbY, screenW: W)
             }
             // vehicle health (riding)
             if let v = player.vehicle as? LivingEntity {
@@ -379,6 +380,43 @@ final class HUD {
                 cv.fillRect(x + Double(rx) + 1, y + Double(ry) + 1, 1, 1)
             }
         }
+    }
+
+    private func drawRPGActionBelt(_ ui: UIManager, player: Player, hotbarX: Double, hotbarY: Double, screenW: Double) {
+        let cv = ui.cv
+        let rightX = hotbarX + 196
+        let preferredW = 138.0
+        let fitsRight = rightX + preferredW + 6 <= screenW
+        let w = fitsRight ? preferredW : min(150, max(104, screenW - 12))
+        let x = fitsRight ? rightX : ((screenW - w) / 2).rounded(.down)
+        let y = fitsRight ? hotbarY : hotbarY - 28
+        cv.setFill("rgba(16,16,16,0.68)")
+        cv.fillRect(x, y, w, 22)
+        cv.setStroke("rgba(255,255,255,0.32)")
+        cv.strokeRect(x, y, w, 22)
+        guard let action = rpgSelectedPreparedAction(player.rpg) else {
+            cv.drawTextCentered("No action", x + w / 2, y + 7, 1, "#c8c8c8", shadow: false)
+            return
+        }
+        cv.drawRPGIcon(action.iconAssetID, x + 3, y + 3, 16, 16)
+        let statusColor = action.available ? "#b8ffb8" : "#ffc878"
+        let cost = "F\(Int(action.fatigueCost.rounded(.up)))"
+        cv.drawText(fitHUD(action.displayName, maxWidth: Int(w - 54)), x + 23, y + 3, 1, "#ffffff", shadow: false)
+        cv.drawText(cost, x + 23, y + 13, 1, "#90c8ff", shadow: false)
+        cv.drawText(fitHUD(action.statusText, maxWidth: 38), x + w - Double(textWidth(fitHUD(action.statusText, maxWidth: 38))) - 4, y + 13, 1, statusColor, shadow: false)
+    }
+
+    private func fitHUD(_ text: String, maxWidth: Int) -> String {
+        guard maxWidth > 0 else { return "" }
+        var out = text
+        while textWidth(out) > maxWidth && out.count > 3 {
+            out.removeLast()
+        }
+        if out.count < text.count {
+            while textWidth(out + "...") > maxWidth && out.count > 1 { out.removeLast() }
+            return out + "..."
+        }
+        return out
     }
 
     private func drawDebug(_ ui: UIManager, _ game: GameCore) {

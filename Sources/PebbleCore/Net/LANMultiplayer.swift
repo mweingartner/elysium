@@ -1,6 +1,6 @@
 import Foundation
 
-public let LAN_MULTIPLAYER_PROTOCOL_VERSION: UInt16 = 4
+public let LAN_MULTIPLAYER_PROTOCOL_VERSION: UInt16 = 5
 public let LAN_MULTIPLAYER_SERVICE_TYPE = "_pebble-lan._tcp"
 public let LAN_MULTIPLAYER_DEFAULT_PORT: UInt16 = 41337
 public let LAN_MULTIPLAYER_MAX_CLIENTS = 8
@@ -1312,7 +1312,9 @@ public enum LANRPGIntentAction: String, Codable, Equatable {
     case spendAttribute
     case prepareSpell
     case unprepareSpell
+    case selectSkill
     case selectSpell
+    case useSkill
     case castSpell
 }
 
