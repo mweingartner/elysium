@@ -112,6 +112,27 @@ public func rpgUseSelectedPreparedAction(_ player: Player) -> Result<RPGActionRe
     }
 }
 
+public func rpgUseActionQuickSlot(_ player: Player, slot: Int) -> Result<RPGActionResult, RPGActionFailure> {
+    player.rpg = repairRPGCharacterState(player.rpg)
+    guard slot >= 0 && slot < RPG_ACTION_QUICK_SLOT_COUNT else {
+        return .failure(.actionNotPrepared)
+    }
+    let slots = rpgActionQuickSlotActions(player.rpg)
+    guard slot < slots.count, let action = slots[slot] else {
+        return .failure(.actionNotPrepared)
+    }
+    player.rpg.selectedPreparedActionID = action.token
+    if action.kind == .spell {
+        player.rpg.selectedPreparedSpellID = action.id
+    }
+    switch action.kind {
+    case .skill:
+        return rpgUsePreparedSkill(player, skillID: action.id)
+    case .spell:
+        return rpgCastPreparedSpell(player, spellID: action.id)
+    }
+}
+
 public func rpgCastSelectedPreparedSpell(_ player: Player) -> Result<RPGActionResult, RPGActionFailure> {
     player.rpg = repairRPGCharacterState(player.rpg)
     guard let spellID = player.rpg.selectedPreparedSpellID ?? player.rpg.preparedSpellIDs.first else {

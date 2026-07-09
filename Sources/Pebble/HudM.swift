@@ -54,6 +54,8 @@ final class HUD {
         guard let player = game.player else { return }
         let W = ui.width, H = ui.height
         let cx = (W / 2).rounded(.down)
+        let rpgQuickBarVisible = player.rpg.created
+        let rpgHudLift = rpgQuickBarVisible ? 24.0 : 0.0
 
         // vanilla pack HUD when the GUI sheets are loaded; procedural fallback
         let packHud = ui.hasSheet("icons") && ui.hasSheet("widgets")
@@ -113,13 +115,13 @@ final class HUD {
         if let held, actionBarTime <= 0, game.heldNameTime > 0 {
             let name = held.label ?? itemDef(held.id).displayName
             cv.globalAlpha = Float(min(1, Double(game.heldNameTime) / 20))
-            cv.drawTextCentered(name, cx, hbY - 38, 1)
+            cv.drawTextCentered(name, cx, hbY - 38 - rpgHudLift, 1)
             cv.globalAlpha = 1
         }
         if actionBarTime > 0 {
             actionBarTime = max(0, actionBarTime - tickSteps)
             cv.globalAlpha = Float(min(1, Double(actionBarTime) / 20))
-            cv.drawTextCentered(actionBarText, cx, hbY - 38, 1)
+            cv.drawTextCentered(actionBarText, cx, hbY - 38 - rpgHudLift, 1)
             cv.globalAlpha = 1
         }
 
@@ -141,7 +143,7 @@ final class HUD {
                 ui.blitSheet("icons", sx, sy, 9, 9, dx, dy)
             }
             // hearts
-            let healthY = packHud ? H - 39 : hbY - 10
+            let healthY = (packHud ? H - 39 : hbY - 10) - rpgHudLift
             let hearts = Int((player.maxHealth / 2).rounded(.up))
             let hp = player.health
             let shake = player.hurtTime > 0 ? (Foundation.sin(CACurrentMediaTime() * 50) * 1).rounded() : 0
@@ -217,7 +219,7 @@ final class HUD {
             }
             // XP bar
             if packHud {
-                let xpY = H - 29
+                let xpY = H - 29 - rpgHudLift
                 ui.blitSheet("icons", 0, 64, 182, 5, hbX, xpY)
                 let fill = (Double(182) * player.xpProgress).rounded()
                 if fill > 0 { ui.blitSheet("icons", 0, 69, fill, 5, hbX, xpY) }
@@ -225,7 +227,7 @@ final class HUD {
                     cv.drawTextCentered(String(player.xpLevel), cx, xpY - 6, 1, "#80ff20")
                 }
             } else {
-                let xpY = hbY - 4
+                let xpY = hbY - 4 - rpgHudLift
                 cv.setFill("#1c1c1c")
                 cv.fillRect(hbX, xpY, 182, 3)
                 cv.setFill("#80ff20")
@@ -235,15 +237,16 @@ final class HUD {
                 }
             }
             if player.rpg.created {
-                let derived = rpgDerivedStats(player.rpg)
-                let f = max(0, min(1, player.rpg.fatigue / max(1, derived.maxFatigue)))
+                let rpgState = repairRPGCharacterState(player.rpg)
+                let derived = rpgDerivedStats(rpgState)
+                let f = max(0, min(1, rpgState.fatigue / max(1, derived.maxFatigue)))
                 let fx = hbX + 186
                 let fy = hbY
                 cv.setFill("#1c1c1c")
                 cv.fillRect(fx, fy, 5, 22)
                 cv.setFill("#55aaff")
                 cv.fillRect(fx + 1, fy + 21 - (20 * f).rounded(), 3, (20 * f).rounded())
-                drawRPGActionBelt(ui, player: player, hotbarX: hbX, hotbarY: hbY, screenW: W)
+                drawRPGQuickSlots(ui, rpg: rpgState, hotbarX: hbX, hotbarY: hbY)
             }
             // vehicle health (riding)
             if let v = player.vehicle as? LivingEntity {
@@ -382,28 +385,62 @@ final class HUD {
         }
     }
 
-    private func drawRPGActionBelt(_ ui: UIManager, player: Player, hotbarX: Double, hotbarY: Double, screenW: Double) {
+    private func drawRPGQuickSlots(_ ui: UIManager, rpg: RPGCharacterState, hotbarX: Double, hotbarY: Double) {
         let cv = ui.cv
-        let rightX = hotbarX + 196
-        let preferredW = 138.0
-        let fitsRight = rightX + preferredW + 6 <= screenW
-        let w = fitsRight ? preferredW : min(150, max(104, screenW - 12))
-        let x = fitsRight ? rightX : ((screenW - w) / 2).rounded(.down)
-        let y = fitsRight ? hotbarY : hotbarY - 28
-        cv.setFill("rgba(16,16,16,0.68)")
-        cv.fillRect(x, y, w, 22)
-        cv.setStroke("rgba(255,255,255,0.32)")
-        cv.strokeRect(x, y, w, 22)
-        guard let action = rpgSelectedPreparedAction(player.rpg) else {
-            cv.drawTextCentered("No action", x + w / 2, y + 7, 1, "#c8c8c8", shadow: false)
-            return
+        let slots = rpgActionQuickSlotActions(rpg)
+        let y = hotbarY - 25
+        cv.setFill("rgba(12,12,12,0.68)")
+        cv.fillRect(hotbarX, y, 182, 22)
+        cv.setStroke("rgba(255,255,255,0.25)")
+        cv.strokeRect(hotbarX, y, 182, 22)
+        let selected = rpg.selectedPreparedActionID
+        var selectedSlot: (index: Int, action: RPGPreparedAction)?
+        for i in 0..<RPG_ACTION_QUICK_SLOT_COUNT {
+            let sx = hotbarX + 1 + Double(i) * 20
+            let action = i < slots.count ? slots[i] : nil
+            let isSelected = action?.token == selected
+            if let action, isSelected { selectedSlot = (i, action) }
+            if let action {
+                let fill = isSelected ? "rgba(80,140,230,0.45)" : action.available ? "rgba(70,130,90,0.24)" : "rgba(150,92,48,0.28)"
+                cv.setFill(fill)
+                cv.fillRect(sx, y + 1, 20, 20)
+                cv.drawRPGIcon(action.iconAssetID, sx + 2, y + 2, 16, 16)
+                cv.setFill("rgba(0,0,0,0.55)")
+                cv.fillRect(sx + 1, y + 12, 9, 8)
+                cv.drawText(String(i + 1), sx + 2, y + 13, 1, "#ffffff", shadow: false)
+                if action.cooldownRemainingTicks > 0 {
+                    cv.setFill("rgba(0,0,0,0.64)")
+                    cv.fillRect(sx + 10, y + 12, 10, 8)
+                    cv.drawText(fitHUD(action.statusText, maxWidth: 10), sx + 11, y + 13, 1, "#ffc878", shadow: false)
+                } else if !action.available {
+                    cv.setStroke("#ffb070")
+                    cv.strokeRect(sx + 1, y + 1, 18, 18)
+                }
+            } else {
+                cv.setFill("rgba(0,0,0,0.26)")
+                cv.fillRect(sx, y + 1, 20, 20)
+                cv.drawTextCentered(String(i + 1), sx + 10, y + 8, 1, "#909090", shadow: false)
+            }
+            if isSelected {
+                cv.setStroke("#ffffff")
+                cv.strokeRect(sx - 1, y, 22, 22, 2)
+            }
         }
-        cv.drawRPGIcon(action.iconAssetID, x + 3, y + 3, 16, 16)
-        let statusColor = action.available ? "#b8ffb8" : "#ffc878"
-        let cost = "F\(Int(action.fatigueCost.rounded(.up)))"
-        cv.drawText(fitHUD(action.displayName, maxWidth: Int(w - 54)), x + 23, y + 3, 1, "#ffffff", shadow: false)
-        cv.drawText(cost, x + 23, y + 13, 1, "#90c8ff", shadow: false)
-        cv.drawText(fitHUD(action.statusText, maxWidth: 38), x + w - Double(textWidth(fitHUD(action.statusText, maxWidth: 38))) - 4, y + 13, 1, statusColor, shadow: false)
+        if let selectedSlot {
+            let x = hotbarX + 196
+            let w = min(128.0, max(0, ui.width - x - 6))
+            if w >= 92 {
+                cv.setFill("rgba(12,12,12,0.68)")
+                cv.fillRect(x, y, w, 22)
+                cv.setStroke("rgba(255,255,255,0.25)")
+                cv.strokeRect(x, y, w, 22)
+                let text = "Slot \(selectedSlot.index + 1) \(selectedSlot.action.displayName)"
+                let status = "Fat \(Int(selectedSlot.action.fatigueCost.rounded(.up))) \(selectedSlot.action.statusText)"
+                cv.drawText(fitHUD(text, maxWidth: Int(w - 6)), x + 3, y + 3, 1, "#ffffff", shadow: false)
+                cv.drawText(fitHUD(status, maxWidth: Int(w - 6)), x + 3, y + 13, 1,
+                            selectedSlot.action.available ? "#b8ffb8" : "#ffc878", shadow: false)
+            }
+        }
     }
 
     private func fitHUD(_ text: String, maxWidth: Int) -> String {

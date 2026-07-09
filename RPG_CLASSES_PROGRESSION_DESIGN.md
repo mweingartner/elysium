@@ -16,13 +16,13 @@ The design uses the provided *The Fantasy Trip: Melee* and *The Fantasy Trip: Wi
 
 The first implementation is complete in the current worktree with these concrete files and guardrails:
 
-- Core model: `Sources/PebbleCore/Game/CharacterProgression.swift` defines six paths, 18 branches, 54 skills, 17 spells, five attributes, class XP/leveling, point spending, prepared skills/spells, fatigue, cooldowns, upkeep, save repair, selected prepared action tokens, and `GameCore.requestRPG...` routing.
+- Core model: `Sources/PebbleCore/Game/CharacterProgression.swift` defines six paths, 18 branches, 54 skills, 17 spells, five attributes, class XP/leveling, point spending, prepared skills/spells, fatigue, cooldowns, upkeep, save repair, selected prepared action compatibility tokens, nine repaired RPG action quick slots, and `GameCore.requestRPG...` routing.
 - Action mechanics: `Sources/PebbleCore/Systems/RPGActions.swift` resolves spell casting and active-skill use through existing world/entity APIs for damage rays, fire/light/TNT/gravel placement, wards, healing, movement, summons, redstone triggering, gear repair, cooldowns, and upkeep. `Combat.swift` adds derived melee bonus, and `Living.swift` awards RPG XP on kills.
-- UI/HUD: `Sources/Pebble/RPGScreensM.swift`, `UICanvas.swift`, `HudM.swift`, `main.swift`, and `GameCore.swift` provide creation, sheet tabs, skill/spell preparation, row selection states, visible Next/Use controls, attribute spending, fatigue HUD, selected action belt, and `K`/`O`/`L` controls.
+- UI/HUD: `Sources/Pebble/RPGScreensM.swift`, `UICanvas.swift`, `HudM.swift`, `main.swift`, and `GameCore.swift` provide creation, sheet tabs, skill/spell preparation, row slot states, a nine-slot action editor, attribute spending, fatigue HUD, a second 1-9 RPG quick-slot row above the normal hotbar, `K` character-sheet access, E-screen Character buttons, and Shift+1 through Shift+9 world-use controls.
 - Assets: `Sources/PebbleCore/Render/RPGAssetManifest.swift` generates deterministic procedural 16x16 icons for every path, branch, skill, spell, and RPG action. No new binary art, scraped web images, or license-bearing asset files are introduced.
-- Persistence: `Player.swift` stores nested `rpg` state in player JSON and repairs it on load. `GameWorld.swift` and `GameCore.swift` default new worlds to the `rpgClasses` game rule.
+- Persistence: `Player.swift` stores nested `rpg` state in player JSON and repairs it on load, including quick-slot token padding, legacy default fill, and removal of unknown, passive, unprepared, cross-path, or duplicate action tokens. `GameWorld.swift` and `GameCore.swift` default new worlds to the `rpgClasses` game rule.
 - LAN: `LAN_MULTIPLAYER_PROTOCOL_VERSION` is now 5, and `LANWorldSummary.rpgClassesEnabled` advertises the host rule to transient clients. `LANRPGIntent` carries typed create/learn/prepare/spend/select/cast/use proposals. Full RPG state stays host-owned in `LANMultiplayerHostSession`/`LANPeerRecordSnapshot` and app-side `lan_players` JSON; normal periodic player snapshots are lean. Direct RPG-change/restore snapshots may carry full RPG state so the owning client can converge its sheet. Remote casts and active-skill uses require an exact-next action sequence and run through `LANHostGhostRegistry` before the host broadcasts player/world/entity deltas.
-- Tests: `RPGCharacterStateTests`, `RPGProgressionTests`, `RPGActionTests`, `RPGAssetManifestTests`, plus LAN protocol/replication additions cover save repair, legacy selected-action decode, progression rules, spell effects, active skill effects, generated asset coverage, frame round-trip, malformed nested RPG decode, host rejection of client-authored RPG snapshots, lean periodic peer states, restore/full RPG convergence, ghost hydration with derived stats, and ghost active-skill execution.
+- Tests: `RPGCharacterStateTests`, `RPGProgressionTests`, `RPGActionTests`, `RPGQuickSlotInputTests`, `RPGAssetManifestTests`, plus LAN protocol/replication additions cover save repair, legacy selected-action decode, quick-slot assignment/clearing/persistence, Shift+digit routing, progression rules, spell effects, active skill effects, generated asset coverage, frame round-trip, malformed nested RPG decode, host rejection of client-authored RPG snapshots, lean periodic peer states, restore/full RPG convergence, ghost hydration with derived stats, and ghost active-skill execution.
 
 Deliberate implementation differences from the early plan: the code uses `pathID`, `xp`, and `level` names instead of the early `classID`, `classXP`, and `classLevel` sketch; the starting attribute budget is 42 across five attributes rather than TFT's three-attribute 32-point table; and the first LAN implementation does not add separate `LANRPGSummary`/visual-event arrays because the lean/full split above preserves frame budget and authority without adding a second replication channel.
 
@@ -138,6 +138,7 @@ Build a first RPG layer around the local player and LAN peers:
 - Unknown/corrupt class, skill, spell, or attribute values decode fail-closed to bounded defaults.
 - Existing XP (`player.xp`, `xpLevel`, `xpProgress`) remains the enchanting/currency XP. RPG progression uses separate `RPGCharacterState.xp` and `RPGCharacterState.level`.
 - LAN clients never author raw character state or spell effects. They send typed intents; the host validates class, skill, fatigue, target, reach, cooldown, permission, and world readiness.
+- RPG quick slots are local repaired player preferences. LAN clients resolve a slot to a prepared spell or active-skill id and send only the existing host-validated cast/use intent with the exact-next action sequence.
 - Full RPG state must not be embedded in high-frequency `LANPlayerState`. Full state lives in local/host-owned saves and host peer records; periodic replication carries lean player states, while direct RPG-change/restore states may carry full repaired RPG state to converge the owning client.
 - Any new LAN message kind or replication-batch field must append wire IDs, bump `LAN_MULTIPLAYER_PROTOCOL_VERSION`, and add old-version rejection plus worst-case frame-size tests under the 1 MiB cap.
 - LAN RPG intents must include a bounded per-peer action sequence. The host accepts only the exact next sequence, rejects duplicates/replays, and asks the client to resync after a jump.
@@ -890,10 +891,8 @@ Add tests under `Tests/PebbleCoreTests/`:
 
 Add allowlisted screen hooks:
 
-- `PEBBLE_OPEN_SCREEN=characterCreate`
-- `PEBBLE_OPEN_SCREEN=characterSheet`
-- `PEBBLE_OPEN_SCREEN=spellbook`
-- `PEBBLE_OPEN_SCREEN=rpgHud`
+- `PEBBLE_OPEN_SCREEN=rpg`
+- `PEBBLE_OPEN_SCREEN=inventory`
 
 Required screenshots:
 
@@ -901,7 +900,7 @@ Required screenshots:
 - 854x480 normal create screen
 - 480x270 compact character sheet
 - 854x480 spellbook
-- in-world HUD with fatigue bar and selected spell
+- in-world HUD with fatigue bar and second-row RPG quick slots
 - LAN remote-caster visual event if active spells are included
 
 Screenshots must be captured from the installed app for final closeout, not only `swift run`.

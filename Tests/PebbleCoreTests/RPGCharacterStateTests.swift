@@ -22,6 +22,11 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertEqual(state.knownSpellIDs, ["ignite", "frost_ray", "mage_light"])
         XCTAssertEqual(state.preparedSpellIDs, ["ignite", "mage_light"])
         XCTAssertEqual(state.selectedPreparedActionID, rpgPreparedActionToken(kind: .spell, id: "ignite"))
+        XCTAssertEqual(Array(state.actionQuickSlots.prefix(2)), [
+            rpgPreparedActionToken(kind: .spell, id: "ignite"),
+            rpgPreparedActionToken(kind: .spell, id: "mage_light"),
+        ])
+        XCTAssertEqual(state.actionQuickSlots.count, RPG_ACTION_QUICK_SLOT_COUNT)
         XCTAssertEqual(state.fatigue, rpgDerivedStats(state).maxFatigue, accuracy: 0.0001)
     }
 
@@ -60,6 +65,12 @@ final class RPGCharacterStateTests: XCTestCase {
             preparedSkillIDs: ["not_real", "guard_stance", "spell_formula"],
             knownSpellIDs: ["ignite", "mend_wounds", "not_real"],
             preparedSpellIDs: ["not_real", "mend_wounds", "ignite"],
+            actionQuickSlots: [
+                rpgPreparedActionToken(kind: .spell, id: "ignite"),
+                rpgPreparedActionToken(kind: .spell, id: "ignite"),
+                rpgPreparedActionToken(kind: .skill, id: "guard_stance"),
+                rpgPreparedActionToken(kind: .spell, id: "mend_wounds"),
+            ],
             fatigue: .infinity,
             actionSequence: -5,
             activeCooldowns: [
@@ -90,6 +101,8 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertFalse(repaired.knownSpellIDs.contains("mend_wounds"))
         XCTAssertEqual(repaired.preparedSpellIDs, ["ignite"])
         XCTAssertEqual(repaired.selectedPreparedActionID, rpgPreparedActionToken(kind: .spell, id: "ignite"))
+        XCTAssertEqual(repaired.actionQuickSlots[0], rpgPreparedActionToken(kind: .spell, id: "ignite"))
+        XCTAssertTrue(repaired.actionQuickSlots.dropFirst().allSatisfy { $0 == nil })
         XCTAssertGreaterThanOrEqual(repaired.fatigue, 0)
         XCTAssertLessThanOrEqual(repaired.fatigue, rpgDerivedStats(repaired).maxFatigue)
         XCTAssertEqual(repaired.actionSequence, 0)
@@ -124,8 +137,31 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertTrue(loaded.rpg.created)
         XCTAssertEqual(loaded.rpg.pathID, "warden")
         XCTAssertEqual(loaded.rpg.skillRanks["guard_stance"], 1)
+        XCTAssertEqual(loaded.rpg.actionQuickSlots.count, RPG_ACTION_QUICK_SLOT_COUNT)
         XCTAssertEqual(loaded.maxHealth, rpgDerivedStats(loaded.rpg).maxHealth)
         XCTAssertEqual(loaded.health, loaded.maxHealth)
+    }
+
+    func testActionQuickSlotsAssignClearAndPersistThroughPlayerSave() {
+        let world = World(dim: .overworld, seed: 4321)
+        let player = Player(world: world)
+        XCTAssertNil(player.createRPGCharacter(RPGCreationDraft(
+            pathID: "arcanist",
+            attributes: .defaultCreation,
+            starterSkillID: "spell_formula",
+            starterSpellIDs: ["ignite", "mage_light"]
+        )))
+
+        XCTAssertNil(rpgAssignPreparedActionToQuickSlot(kind: .spell, id: "mage_light", slot: 4, in: &player.rpg))
+        rpgClearActionQuickSlot(0, in: &player.rpg)
+        let saved = player.save()
+
+        let loaded = Player(world: world)
+        loaded.load(saved)
+
+        XCTAssertNil(loaded.rpg.actionQuickSlots[0])
+        XCTAssertEqual(loaded.rpg.actionQuickSlots[4], rpgPreparedActionToken(kind: .spell, id: "mage_light"))
+        XCTAssertEqual(rpgActionQuickSlotIndex(for: rpgPreparedActionToken(kind: .spell, id: "mage_light"), in: loaded.rpg), 4)
     }
 
     func testLegacyRPGStateDecodesWithoutSelectedPreparedAction() throws {
@@ -154,6 +190,8 @@ final class RPGCharacterStateTests: XCTestCase {
 
         XCTAssertEqual(repaired.selectedPreparedSpellID, "ignite")
         XCTAssertEqual(repaired.selectedPreparedActionID, rpgPreparedActionToken(kind: .spell, id: "ignite"))
+        XCTAssertEqual(repaired.actionQuickSlots[0], rpgPreparedActionToken(kind: .spell, id: "ignite"))
+        XCTAssertEqual(repaired.actionQuickSlots.count, RPG_ACTION_QUICK_SLOT_COUNT)
     }
 
     private func tryFailure(_ result: Result<RPGCharacterState, RPGCreationError>) -> RPGCreationError? {

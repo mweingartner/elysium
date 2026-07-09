@@ -23,6 +23,7 @@ final class RPGCharacterScreen: Screen {
     private var draftAttributes = RPGAttributes.defaultCreation
     private var starterSkillIndex = 0
     private var selectedStarterSpellIDs = Set<String>()
+    private var selectedQuickSlotIndex = 0
     private var creationSpellScroll = 0.0
     private var appliedDebugCreationSelection = false
     private var skillScroll = 0.0
@@ -105,6 +106,7 @@ final class RPGCharacterScreen: Screen {
         if !player.rpg.created {
             return handleCreationClick(ui, game, mx, my)
         }
+        if handleQuickSlotClick(ui, game, mx, my, btn) { return true }
         switch tab {
         case .skills:
             return handleSkillClick(ui, game, mx, my)
@@ -231,13 +233,13 @@ final class RPGCharacterScreen: Screen {
             guard let ui, let game else { return }
             ui.closeTop(game)
         }))
-        let next = Button(f.x + f.w - 128, f.y + 8, 48, 20, "Next", { [weak self, weak game] in
+        let next = Button(f.x + f.w - 132, f.y + f.h - 28, 54, 20, "Clear", { [weak self, weak game] in
             guard let self, let game else { return }
-            self.setStatus(game.requestRPGCyclePreparedAction(), game: game)
+            self.setStatus(game.requestRPGClearActionQuickSlot(self.selectedQuickSlotIndex), game: game)
         })
-        let use = Button(f.x + f.w - 74, f.y + 8, 60, 20, "Use", { [weak self, weak game] in
+        let use = Button(f.x + f.w - 200, f.y + f.h - 28, 62, 20, "Use Slot", { [weak self, weak game] in
             guard let self, let game else { return }
-            self.setStatus(game.requestRPGUseSelectedAction(), game: game)
+            self.setStatus(game.requestRPGUseActionQuickSlot(self.selectedQuickSlotIndex), game: game)
         })
         nextActionButton = next
         useActionButton = use
@@ -305,7 +307,7 @@ final class RPGCharacterScreen: Screen {
         ui.drawPanel(f.x, f.y, f.w, f.h)
         cv.drawText("Character", f.x + 12, f.y + 12, 1, "#3f3f3f", shadow: false)
         updateSheetActionButtons(f: f, player: player)
-        drawSelectedActionStrip(ui, player: player, f: f)
+        drawQuickSlotStrip(ui, player: player, f: f)
         for b in buttons where Tab.allCases.map(\.label).contains(b.label) {
             b.enabled = b.label != tab.label
         }
@@ -471,9 +473,8 @@ final class RPGCharacterScreen: Screen {
             guard let skill = rpgSkillDefinition(row.id) else { return false }
             let known = (player.rpg.skillRanks[row.id] ?? 0) > 0
             if known {
-                let token = rpgPreparedActionToken(kind: .skill, id: row.id)
-                if skill.kind == .active, player.rpg.preparedSkillIDs.contains(row.id), player.rpg.selectedPreparedActionID != token {
-                    setStatus(game.requestRPGSelectPreparedSkill(row.id), game: game)
+                if skill.kind == .active, player.rpg.preparedSkillIDs.contains(row.id) {
+                    setStatus(game.requestRPGAssignPreparedActionToQuickSlot(kind: .skill, id: row.id, slot: selectedQuickSlotIndex), game: game)
                 } else {
                     setStatus(game.requestRPGTogglePreparedSkill(row.id), game: game)
                 }
@@ -488,9 +489,8 @@ final class RPGCharacterScreen: Screen {
     private func handleSpellClick(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) -> Bool {
         guard let player = game.player else { return false }
         for row in spellRows(panel(ui)).visible where mx >= row.x && mx < row.x + row.w && my >= row.y && my < row.y + row.h {
-            let token = rpgPreparedActionToken(kind: .spell, id: row.id)
-            if player.rpg.preparedSpellIDs.contains(row.id), player.rpg.selectedPreparedActionID != token {
-                setStatus(game.requestRPGSelectPreparedSpell(row.id), game: game)
+            if player.rpg.preparedSpellIDs.contains(row.id) {
+                setStatus(game.requestRPGAssignPreparedActionToQuickSlot(kind: .spell, id: row.id, slot: selectedQuickSlotIndex), game: game)
             } else {
                 setStatus(game.requestRPGTogglePreparedSpell(row.id), game: game)
             }
@@ -528,7 +528,9 @@ final class RPGCharacterScreen: Screen {
     private func skillRowState(_ skill: RPGSkillDefinition, state: RPGCharacterState) -> String {
         let rank = state.skillRanks[skill.id] ?? 0
         if rank > 0, skill.kind == .passive { return "Passive" }
-        if state.selectedPreparedActionID == rpgPreparedActionToken(kind: .skill, id: skill.id) { return "Selected" }
+        if let slot = rpgActionQuickSlotIndex(for: rpgPreparedActionToken(kind: .skill, id: skill.id), in: state) {
+            return "Slot \(slot + 1)"
+        }
         if state.preparedSkillIDs.contains(skill.id), skill.kind == .active { return "Prepared" }
         if rank > 0, skill.kind == .spell { return "Spells" }
         if rank > 0 { return "Known" }
@@ -538,44 +540,76 @@ final class RPGCharacterScreen: Screen {
     }
 
     private func spellRowState(_ spell: RPGSpellDefinition, state: RPGCharacterState) -> String {
-        if state.selectedPreparedActionID == rpgPreparedActionToken(kind: .spell, id: spell.id) { return "Selected" }
+        if let slot = rpgActionQuickSlotIndex(for: rpgPreparedActionToken(kind: .spell, id: spell.id), in: state) {
+            return "Slot \(slot + 1)"
+        }
         if state.preparedSpellIDs.contains(spell.id) { return "Prepared" }
         if state.knownSpellIDs.contains(spell.id) { return "Ready" }
         return "Locked"
     }
 
     private func updateSheetActionButtons(f: (x: Double, y: Double, w: Double, h: Double), player: Player) {
-        nextActionButton?.x = f.x + f.w - 128
-        nextActionButton?.y = f.y + 8
-        useActionButton?.x = f.x + f.w - 74
-        useActionButton?.y = f.y + 8
-        let actions = rpgPreparedActions(player.rpg)
+        selectedQuickSlotIndex = max(0, min(RPG_ACTION_QUICK_SLOT_COUNT - 1, selectedQuickSlotIndex))
+        nextActionButton?.x = f.x + f.w - 132
+        nextActionButton?.y = f.y + f.h - 28
+        useActionButton?.x = f.x + f.w - 200
+        useActionButton?.y = f.y + f.h - 28
+        let slots = rpgActionQuickSlotActions(player.rpg)
+        let action = selectedQuickSlotIndex < slots.count ? slots[selectedQuickSlotIndex] : nil
         nextActionButton?.visible = true
         useActionButton?.visible = true
-        nextActionButton?.enabled = actions.count > 1
-        useActionButton?.enabled = rpgSelectedPreparedAction(player.rpg)?.available == true
+        nextActionButton?.enabled = action != nil
+        useActionButton?.enabled = action?.available == true
     }
 
-    private func drawSelectedActionStrip(_ ui: UIManager, player: Player,
-                                         f: (x: Double, y: Double, w: Double, h: Double)) {
-        let cv = ui.cv
-        let x = f.x + 92
-        let buttonX = nextActionButton?.x ?? (f.x + f.w - 128)
-        let w = max(0, buttonX - x - 8)
-        guard w >= 72 else { return }
-        let y = f.y + 9
-        cv.setFill("rgba(0,0,0,0.12)")
-        cv.fillRect(x, y, w, 18)
-        guard let action = rpgSelectedPreparedAction(player.rpg) else {
-            cv.drawTextCentered("No action", x + w / 2, y + 5, 1, "#606060", shadow: false)
-            return
+    private func handleQuickSlotClick(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double, _ btn: Int) -> Bool {
+        let f = panel(ui)
+        let x = (f.x + (f.w - 182) / 2).rounded(.down)
+        let y = f.y + 7
+        guard mx >= x, mx < x + 182, my >= y, my < y + 22 else { return false }
+        let slot = Int((mx - x) / 20)
+        guard slot >= 0 && slot < RPG_ACTION_QUICK_SLOT_COUNT else { return false }
+        selectedQuickSlotIndex = slot
+        if btn == 1 || btn == 2 {
+            setStatus(game.requestRPGClearActionQuickSlot(slot), game: game)
         }
-        cv.drawRPGIcon(action.iconAssetID, x + 2, y + 1, 16, 16)
-        let status = "\(action.statusText) F\(Int(action.fatigueCost.rounded(.up)))"
-        let statusW = min(64, textWidth(status) + 2)
-        cv.drawText(fit(action.displayName, maxWidth: Int(w) - statusW - 24), x + 22, y + 5, 1, "#303030", shadow: false)
-        cv.drawText(fit(status, maxWidth: statusW), x + w - Double(statusW) - 3, y + 5, 1,
-                    action.available ? "#206020" : "#904020", shadow: false)
+        return true
+    }
+
+    private func drawQuickSlotStrip(_ ui: UIManager, player: Player,
+                                    f: (x: Double, y: Double, w: Double, h: Double)) {
+        let cv = ui.cv
+        let x = (f.x + (f.w - 182) / 2).rounded(.down)
+        let y = f.y + 7
+        let slots = rpgActionQuickSlotActions(player.rpg)
+        cv.setFill("rgba(0,0,0,0.12)")
+        cv.fillRect(x, y, 182, 22)
+        for i in 0..<RPG_ACTION_QUICK_SLOT_COUNT {
+            let sx = x + 1 + Double(i) * 20
+            let action = i < slots.count ? slots[i] : nil
+            let selected = i == selectedQuickSlotIndex
+            cv.setFill(selected ? "rgba(80,140,230,0.38)" : "rgba(255,255,255,0.16)")
+            cv.fillRect(sx, y + 1, 20, 20)
+            if let action {
+                cv.drawRPGIcon(action.iconAssetID, sx + 2, y + 2, 16, 16)
+            } else {
+                cv.drawTextCentered(String(i + 1), sx + 10, y + 8, 1, "#707070", shadow: false)
+            }
+            cv.setStroke(selected ? "#ffffff" : "rgba(0,0,0,0.25)")
+            cv.strokeRect(sx, y + 1, 20, 20)
+        }
+        let action = selectedQuickSlotIndex < slots.count ? slots[selectedQuickSlotIndex] : nil
+        let labelX = x + 190
+        let labelW = Int(max(0, f.x + f.w - labelX - 12))
+        guard labelW >= 44 else { return }
+        if let action {
+            cv.drawText(fit("Slot \(selectedQuickSlotIndex + 1): \(action.displayName)", maxWidth: labelW),
+                        labelX, y + 2, 1, "#303030", shadow: false)
+            cv.drawText(fit("Fat \(Int(action.fatigueCost.rounded(.up))) \(action.statusText)", maxWidth: labelW),
+                        labelX, y + 12, 1, action.available ? "#206020" : "#904020", shadow: false)
+        } else {
+            cv.drawText("Empty", labelX, y + 7, 1, "#606060", shadow: false)
+        }
     }
 
     private func movePath(_ dir: Int) {

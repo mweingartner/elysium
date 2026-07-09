@@ -485,7 +485,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         let parts = v.components(separatedBy: "@")
         return (parts[0], parts.count > 1 ? Int(parts[1]) ?? 240 : 240)
     }()
-    // test hook: PEBBLE_OPEN_SCREEN=templates|templatesPlace|creative|map|rpg opens an allowlisted UI screen before PEBBLE_SHOT.
+    // test hook: PEBBLE_RPG_AUTOCREATE=1 creates a character with the debug RPG path/starter env once the world is up.
+    private var pendingRPGAutoCreate = ProcessInfo.processInfo.environment["PEBBLE_RPG_AUTOCREATE"]
+    // test hook: PEBBLE_OPEN_SCREEN=inventory|templates|templatesPlace|creative|map|rpg opens an allowlisted UI screen before PEBBLE_SHOT.
     private var pendingOpenScreen = ProcessInfo.processInfo.environment["PEBBLE_OPEN_SCREEN"]
     private var pendingOpenScreenDelay = 0
 
@@ -718,6 +720,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         lanProbe?.tick(app: self)
     }
 
+    private func runRPGAutoCreateIfNeeded() {
+        guard let player = game.player, player.rpgClassesEnabled(), !player.rpg.created else { return }
+        let env = ProcessInfo.processInfo.environment
+        let requestedPath = env["PEBBLE_RPG_PATH"]?.lowercased()
+        let path = RPG_PATH_DEFINITIONS.first { def in
+            requestedPath == def.id.lowercased() || requestedPath == def.displayName.lowercased()
+        } ?? RPG_PATH_DEFINITIONS.first!
+
+        let requestedStarter = env["PEBBLE_RPG_STARTER"]?.lowercased()
+        let starterSkill = path.starterSkillIDs.first { id in
+            requestedStarter == id.lowercased()
+                || requestedStarter == rpgSkillDefinition(id)?.displayName.lowercased()
+        } ?? path.starterSkillIDs.first
+
+        let requestedSpells = env["PEBBLE_RPG_SPELLS"]?
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? []
+        let starterSpells = requestedSpells.isEmpty
+            ? Array(path.starterSpellIDs.prefix(2))
+            : path.starterSpellIDs.filter { id in
+                requestedSpells.contains(id.lowercased())
+                    || requestedSpells.contains(rpgSpellDefinition(id)?.displayName.lowercased() ?? "")
+            }
+
+        let message = game.requestRPGCreateCharacter(RPGCreationDraft(
+            pathID: path.id,
+            attributes: .defaultCreation,
+            starterSkillID: starterSkill,
+            starterSpellIDs: starterSpells
+        ))
+        print("[shot] RPG auto-create: \(message)")
+        fflush(stdout)
+    }
+
     func draw(in view: MTKView) {
         let now = CACurrentMediaTime()
         let dt = (now - lastFrame) * 1000
@@ -771,10 +807,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
                 pendingCmds = nil
             }
         }
+        if pendingRPGAutoCreate != nil, game.hasWorld(), pendingCmds == nil {
+            runRPGAutoCreateIfNeeded()
+            pendingRPGAutoCreate = nil
+        }
         if let screen = pendingOpenScreen, game.hasWorld(), pendingCmds == nil {
             pendingOpenScreenDelay += 1
             if pendingOpenScreenDelay > 90 {
                 switch screen.lowercased() {
+                case "inventory":
+                    game.openScreen("inventory", nil)
                 case "creative":
                     game.openScreen("creative", nil)
                 case "templates":

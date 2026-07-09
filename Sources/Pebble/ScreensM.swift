@@ -309,6 +309,7 @@ final class InventoryScreen: ContainerScreen {
     private weak var creativeCheckbox: CheckBox?
     private weak var craftUpButton: Button?
     private weak var craftDownButton: Button?
+    private weak var characterButton: Button?
 
     override init() {
         super.init()
@@ -381,6 +382,14 @@ final class InventoryScreen: ContainerScreen {
         })
         creativeCheckbox = cb
         buttons.append(cb)
+        if p.rpgClassesEnabled() {
+            let character = Button(236, 4, 86, 18, "Character", { [weak ui, weak game] in
+                guard let ui, let game else { return }
+                ui.open(RPGCharacterScreen(), game)
+            })
+            characterButton = character
+            buttons.append(character)
+        }
     }
     private func installCraftAmountButtons(outputX: Double, outputY: Double, _ game: GameCore) {
         let frames = CraftAmountStepperLayout.frames(outputX: outputX, outputY: outputY)
@@ -531,6 +540,14 @@ final class InventoryScreen: ContainerScreen {
         if let cb = creativeCheckbox {
             cb.x = min(148, max(4, ui.width - cb.w - 4))
             cb.y = 4
+        }
+        if let characterButton {
+            characterButton.visible = game.player.rpgClassesEnabled()
+            characterButton.x = (creativeCheckbox?.x ?? 148) + (creativeCheckbox?.w ?? 82) + 6
+            characterButton.y = 4
+            if characterButton.x + characterButton.w > ui.width - 4 {
+                characterButton.visible = false
+            }
         }
         updateResult(game)
         updateCraftRoundButtons(game)
@@ -1818,6 +1835,7 @@ final class CreativeScreen: ContainerScreen {
     let search = TextField(0, 0, 162, 14, "Search")
     var filtered: [Int] = []
     private weak var creativeCheckbox: CheckBox?
+    private weak var characterButton: Button?
 
     override init() {
         super.init()
@@ -1863,6 +1881,14 @@ final class CreativeScreen: ContainerScreen {
         })
         creativeCheckbox = cb
         buttons.append(cb)
+        if game.player.rpgClassesEnabled() {
+            let character = Button(panelX + panelW - 176, panelY + 4, 82, 18, "Character", { [weak ui, weak game] in
+                guard let ui, let game else { return }
+                ui.open(RPGCharacterScreen(), game)
+            })
+            characterButton = character
+            buttons.append(character)
+        }
         playerSlots = []
         let p = game.player!
         for col in 0..<9 {
@@ -1896,6 +1922,14 @@ final class CreativeScreen: ContainerScreen {
             cb.x = min(panelX + panelW - cb.w - 8, max(4, ui.width - cb.w - 4))
             cb.y = panelY + 4
         }
+        if let characterButton {
+            characterButton.visible = game.player.rpgClassesEnabled()
+            characterButton.x = (creativeCheckbox?.x ?? (panelX + panelW - 90)) - characterButton.w - 6
+            characterButton.y = panelY + 4
+            if characterButton.x < panelX + 96 {
+                characterButton.visible = false
+            }
+        }
         for i in 0..<CREATIVE_TABS.count {
             let (tx, ty, tw, th) = tabRect(i)
             cv.setFill(i == tab ? "#c6c6c6" : "#8a8a8a")
@@ -1904,7 +1938,8 @@ final class CreativeScreen: ContainerScreen {
                                 i == tab ? "#3f3f3f" : "#e8e8e8", shadow: false)
         }
         ui.drawPanel(panelX, panelY, panelW, panelH)
-        cv.drawText("Creative Inventory", panelX + 10, panelY + 6, 1, "#3f3f3f", shadow: false)
+        cv.drawText(characterButton?.visible == true ? "Creative" : "Creative Inventory",
+                    panelX + 10, panelY + 6, 1, "#3f3f3f", shadow: false)
         for row in 0..<CREATIVE_GRID_ROWS {
             for col in 0..<CREATIVE_GRID_COLUMNS {
                 let gx = gridX + Double(col) * CREATIVE_SLOT_SIZE

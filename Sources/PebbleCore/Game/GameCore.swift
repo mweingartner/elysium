@@ -3301,9 +3301,11 @@ public final class GameCore {
             host?.openScreen("rpg", nil)
             host?.releasePointer()
         } else if code == "KeyO" {
-            host?.showActionBar(requestRPGCyclePreparedAction(), 45)
+            let message = requestRPGCyclePreparedAction()
+            host?.showActionBar(message, 45)
         } else if code == "KeyL" {
-            host?.showActionBar(requestRPGUseSelectedAction(), 70)
+            let message = requestRPGUseSelectedAction()
+            host?.showActionBar(message, 70)
         } else if code == keybinds["drop"] {
             if isLANClientWorld {
                 performLANClientToss(all: ctrlOrCmd)
@@ -3317,6 +3319,11 @@ public final class GameCore {
         } else {
             // hotbar digits
             if code.hasPrefix("Digit"), code.count == 6, let n = Int(code.suffix(1)), n >= 1, n <= 9 {
+                if keys.contains("ShiftLeft") {
+                    let message = requestRPGUseActionQuickSlot(n - 1)
+                    host?.showActionBar(message, 70)
+                    return
+                }
                 p.selectedSlot = n - 1
             }
             // double-space enables creative flight

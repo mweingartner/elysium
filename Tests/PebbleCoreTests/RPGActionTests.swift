@@ -101,6 +101,34 @@ final class RPGActionTests: XCTestCase {
         XCTAssertTrue(player.rpg.activeCooldowns.contains { $0.id == "heavy_cut" && $0.remainingTicks > 0 })
     }
 
+    func testActionQuickSlotUsesSlottedPreparedSpell() {
+        let world = makeWorld(seed: 7)
+        let player = makeArcanist(in: world, starterSpells: ["ignite", "mage_light"])
+        player.setPos(0.5, 64, 0.5)
+        player.yaw = 0
+        player.pitch = 0
+        world.setBlock(0, 65, 4, Int(cell(B.stone)))
+        XCTAssertNil(rpgAssignPreparedActionToQuickSlot(kind: .spell, id: "mage_light", slot: 3, in: &player.rpg))
+
+        let result = rpgUseActionQuickSlot(player, slot: 3)
+
+        guard case .success(let action) = result else {
+            return XCTFail("expected slotted spell to cast, got \(String(describing: result.failure))")
+        }
+        XCTAssertEqual(action.actionID, "mage_light")
+        XCTAssertEqual(player.rpg.selectedPreparedActionID, rpgPreparedActionToken(kind: .spell, id: "mage_light"))
+        XCTAssertEqual(world.getBlock(0, 65, 3) >> 4, Int(B.torch))
+    }
+
+    func testActionQuickSlotRejectsEmptySlotWithoutMutatingSequence() {
+        let world = makeWorld(seed: 8)
+        let player = makeArcanist(in: world, starterSpells: ["ignite"])
+        rpgClearActionQuickSlot(0, in: &player.rpg)
+
+        XCTAssertEqual(rpgUseActionQuickSlot(player, slot: 0).failure, .actionNotPrepared)
+        XCTAssertEqual(player.rpg.actionSequence, 0)
+    }
+
     func testActiveSkillRejectsPassivePreparedSkillAsAction() {
         let world = makeWorld(seed: 6)
         let player = makeWarden(in: world, starterSkillID: "guard_stance")
