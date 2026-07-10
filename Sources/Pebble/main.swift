@@ -589,7 +589,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if game.hasWorld() { game.saveAndFlush(synchronous: true) }
+        if game.hasWorld() { game.finalizeAndSave(synchronous: true) }
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 

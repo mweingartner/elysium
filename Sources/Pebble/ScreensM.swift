@@ -357,9 +357,9 @@ final class InventoryScreen: ContainerScreen {
             get: { [weak self] in self?.craftResult },
             set: { _ in },
             output: true,
-            onTake: { [weak self, weak game] _ in
-                guard let self, let game else { return }
-                self.takeCraftingOutput(game)
+            commitOutputTake: { [weak self, weak game] preview in
+                guard let self, let game else { return nil }
+                return self.commitCraftingOutput(preview, game)
             },
             repeatsOutputQuickMove: { [weak self] in
                 (self?.selectedCraftRounds ?? 1) <= 1
@@ -415,9 +415,11 @@ final class InventoryScreen: ContainerScreen {
     private func availableCraftRounds(_ game: GameCore) -> Int {
         guard let plan = activeCraftingPlan() else { return 0 }
         if creativeCrafting {
-            return max(1, maxCreativeCraftingRounds(plan, into: game.player.inventory))
+            return min(MAX_CRAFTING_BATCH_ROUNDS,
+                       max(1, maxCreativeCraftingRounds(plan, into: game.player.inventory)))
         }
-        return maxCraftingRounds(plan, from: game.player.inventory + craftGrid)
+        return min(MAX_CRAFTING_BATCH_ROUNDS,
+                   maxCraftingRounds(plan, from: game.player.inventory + craftGrid))
     }
     private func clampCraftRounds(_ game: GameCore) -> Int {
         let maxRounds = availableCraftRounds(game)
@@ -509,30 +511,29 @@ final class InventoryScreen: ContainerScreen {
             game.playUISound("ui.stonecutter.select_recipe")
         }
     }
-    private func takeCraftingOutput(_ game: GameCore) {
+    private func commitCraftingOutput(_ preview: ItemStack, _ game: GameCore) -> ItemStack? {
         if creativeCrafting {
             updateResult(game)
             game.advance("craft_any")
-            return
+            return preview.copy()
         }
-        guard let taken = craftResult else { return }
-        let planForRefill = activeSurvivalPlan()
-        let baseCount = max(1, planForRefill?.output.count ?? taken.count)
-        let rounds = max(1, min(selectedCraftRounds, taken.count / baseCount))
-        var consumed = 0
-        while consumed < rounds {
-            if matchCrafting(craftGrid, 2, 2)?.out.id != taken.id {
-                guard let plan = planForRefill,
-                      craftGrid.allSatisfy({ $0 == nil }),
-                      populateCraftingGrid(plan, grid: &craftGrid, inventory: &game.player.inventory)
-                else { break }
-            }
-            guard matchCrafting(craftGrid, 2, 2)?.out.id == taken.id else { break }
-            _ = consumeCraftingGrid(&craftGrid)
-            consumed += 1
+        guard let planForRefill = activeSurvivalPlan() else { return nil }
+        let baseCount = max(1, planForRefill.output.count)
+        let rounds = max(1, min(selectedCraftRounds, preview.count / baseCount))
+        let commit = commitCraftingOutputRounds(
+            player: game.player,
+            grid: &craftGrid, gridWidth: 2, gridHeight: 2,
+            plan: planForRefill, displayedOutput: preview,
+            requestedRounds: rounds
+        ) { grid in
+            guard grid.allSatisfy({ $0 == nil }) else { return false }
+            return populateCraftingGrid(planForRefill, grid: &grid,
+                                        inventory: &game.player.inventory)
         }
         updateResult(game)
+        guard let commit else { return nil }
         game.advance("craft_any")
+        return commit.output
     }
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         syncCreativeFromPlayer(game)
@@ -694,9 +695,9 @@ final class CraftingScreen: ContainerScreen {
             get: { [weak self] in self?.craftResult },
             set: { _ in },
             output: true,
-            onTake: { [weak self, weak game] _ in
-                guard let self, let game else { return }
-                self.takeCraftingOutput(game)
+            commitOutputTake: { [weak self, weak game] preview in
+                guard let self, let game else { return nil }
+                return self.commitCraftingOutput(preview, game)
             },
             repeatsOutputQuickMove: { [weak self] in
                 (self?.selectedCraftRounds ?? 1) <= 1
@@ -746,9 +747,11 @@ final class CraftingScreen: ContainerScreen {
     private func availableCraftRounds(_ game: GameCore) -> Int {
         guard let plan = activeCraftingPlan() else { return 0 }
         if creativeCrafting {
-            return max(1, maxCreativeCraftingRounds(plan, into: game.player.inventory))
+            return min(MAX_CRAFTING_BATCH_ROUNDS,
+                       max(1, maxCreativeCraftingRounds(plan, into: game.player.inventory)))
         }
-        return maxCraftingRounds(plan, from: availableRecipeResources(game))
+        return min(MAX_CRAFTING_BATCH_ROUNDS,
+                   maxCraftingRounds(plan, from: availableRecipeResources(game)))
     }
     private func clampCraftRounds(_ game: GameCore) -> Int {
         let maxRounds = availableCraftRounds(game)
@@ -861,37 +864,35 @@ final class CraftingScreen: ContainerScreen {
             game.playUISound("ui.stonecutter.select_recipe")
         }
     }
-    private func refillSurvivalPlan(_ plan: CraftingRecipePlan?, _ game: GameCore) -> Bool {
-        guard craftGrid.allSatisfy({ $0 == nil }), let plan else { return false }
-        if let tablePos {
-            return populateCraftingGridFromNearbyContainers(plan, grid: &craftGrid,
-                                                            inventory: &game.player.inventory,
-                                                            world: game.world,
-                                                            tableX: tablePos.x, tableY: tablePos.y, tableZ: tablePos.z)
-        }
-        return populateCraftingGrid(plan, grid: &craftGrid, inventory: &game.player.inventory)
-    }
-    private func takeCraftingOutput(_ game: GameCore) {
+    private func commitCraftingOutput(_ preview: ItemStack, _ game: GameCore) -> ItemStack? {
         if creativeCrafting {
             updateResult(game)
             game.advance("craft_any")
-            return
+            return preview.copy()
         }
-        guard let taken = craftResult else { return }
-        let planForRefill = activeSurvivalPlan()
-        let baseCount = max(1, planForRefill?.output.count ?? taken.count)
-        let rounds = max(1, min(selectedCraftRounds, taken.count / baseCount))
-        var consumed = 0
-        while consumed < rounds {
-            if matchCrafting(craftGrid, 3, 3)?.out.id != taken.id {
-                guard refillSurvivalPlan(planForRefill, game) else { break }
+        guard let planForRefill = activeSurvivalPlan() else { return nil }
+        let baseCount = max(1, planForRefill.output.count)
+        let rounds = max(1, min(selectedCraftRounds, preview.count / baseCount))
+        let commit = commitCraftingOutputRounds(
+            player: game.player,
+            grid: &craftGrid, gridWidth: 3, gridHeight: 3,
+            plan: planForRefill, displayedOutput: preview,
+            requestedRounds: rounds
+        ) { grid in
+            guard grid.allSatisfy({ $0 == nil }) else { return false }
+            if let tablePos {
+                return populateCraftingGridFromNearbyContainers(
+                    planForRefill, grid: &grid, inventory: &game.player.inventory,
+                    world: game.world, tableX: tablePos.x, tableY: tablePos.y, tableZ: tablePos.z
+                )
             }
-            guard matchCrafting(craftGrid, 3, 3)?.out.id == taken.id else { break }
-            _ = consumeCraftingGrid(&craftGrid)
-            consumed += 1
+            return populateCraftingGrid(planForRefill, grid: &grid,
+                                        inventory: &game.player.inventory)
         }
         updateResult(game)
+        guard let commit else { return nil }
         game.advance("craft_any")
+        return commit.output
     }
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         syncCreativeFromPlayer(game)

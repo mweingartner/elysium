@@ -86,6 +86,8 @@ public final class World {
     public var entityById: [Int: EntityRef] = [:]
     public let info: DimInfo
     public var time = 0            // total ticks elapsed (world age)
+    /// Monotonic world-global RPG authority time, copied to every dimension.
+    public var rpgSimulationTick = 0
     public var dayTime = 1000      // 0..23999
     public var raining = false
     public var thundering = false
@@ -115,6 +117,9 @@ public final class World {
     /// so a manual open isn't slammed shut by the next unrelated update.
     /// transient: after a reload the first power-on re-fires as a transition.
     public var poweredOpenables = Set<OpenablePos>()
+    /// Bounded, session-only RPG effects. These are deliberately not encoded;
+    /// lifecycle and persistence paths restore guarded cells before saving.
+    public internal(set) var rpgTemporaryEffects: [RPGTemporaryEffect] = []
     public var simCenterX = 0, simCenterZ = 0
     public var simDistance = 6
     public var randomTickSpeed = 3
@@ -300,10 +305,10 @@ public final class World {
 
     private var dueScratch: [ScheduledTick] = []
     public func tick() {
-        tick(simCenters: [(simCenterX, simCenterZ)])
+        tick(simCenters: [(simCenterX, simCenterZ)], advanceRPGEffects: true)
     }
 
-    public func tick(simCenters rawCenters: [(Int, Int)]) {
+    public func tick(simCenters rawCenters: [(Int, Int)], advanceRPGEffects: Bool = true) {
         var simCenters: [(Int, Int)] = []
         var seenCenters = Set<Int64>()
         for (cx, cz) in rawCenters.sorted(by: { $0.0 == $1.0 ? $0.1 < $1.1 : $0.0 < $1.0 }) {
@@ -317,6 +322,7 @@ public final class World {
         }
 
         time += 1
+        if advanceRPGEffects { tickRPGTemporaryEffects() }
         if rule("doDaylightCycle") && info.hasSky {
             dayTime = (dayTime + 1) % DAY_LENGTH
         }

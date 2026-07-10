@@ -1,1022 +1,425 @@
----
-type: design
-title: RPG Classes, Skills, Progression, and Character Creation
-description: Detailed Pebble design for class identity, attributes, skills, spells, progression, combat hooks, persistence, LAN authority, and UI.
-updated: 2026-07-08
-status: implemented
----
+# Pebble RPG Classes and Progression — v2 Implementation Contract
 
-# RPG Classes, Skills, Progression, and Character Creation
+**Status:** approved contract; implementation and verification are in progress. This document does not claim that any item is complete until the corresponding source, semantic tests, installed-app proof, and LAN proof pass.
 
-This document records the RPG layer for Pebble. The intent is to add class identity, skills, attributes, spells, and progression while preserving Pebble's current sandbox survival loop, deterministic engine contract, save hardening, and host-authoritative LAN model.
+## Purpose and boundaries
 
-The design uses the provided *The Fantasy Trip: Melee* and *The Fantasy Trip: Wizard* documents as criteria, not as a literal hex-board port. Pebble is a real-time first-person voxel game, so tactical tabletop concepts are translated into action-game mechanics only where they improve play.
+This is the source of truth for Pebble's six-path RPG layer. It replaces the historical sketches that named different classes, point economies, or mechanics. The RPG layer adds identity and progression without preventing ordinary mining, crafting, building, combat, equipment use, or exploration.
 
-## Implementation Record
+The rules live in PebbleCore. The macOS target draws UI, routes configured input, and transports messages; it does not decide progression, authority, costs, targeting, or rewards. Static registration order is deterministic and ABI-sensitive. New items append after the frozen item range.
 
-The first implementation is complete in the current worktree with these concrete files and guardrails:
+## Frozen registry
 
-- Core model: `Sources/PebbleCore/Game/CharacterProgression.swift` defines six paths, 18 branches, 54 skills, 17 spells, five attributes, class XP/leveling, point spending, prepared skills/spells, fatigue, cooldowns, upkeep, save repair, selected prepared action compatibility tokens, nine repaired RPG action quick slots, and `GameCore.requestRPG...` routing.
-- Action mechanics: `Sources/PebbleCore/Systems/RPGActions.swift` resolves spell casting and active-skill use through existing world/entity APIs for damage rays, fire/light/TNT/gravel placement, wards, healing, movement, summons, redstone triggering, gear repair, cooldowns, and upkeep. `Combat.swift` adds derived melee bonus, and `Living.swift` awards RPG XP on kills.
-- UI/HUD: `Sources/Pebble/RPGScreensM.swift`, `UICanvas.swift`, `HudM.swift`, `main.swift`, and `GameCore.swift` provide creation, sheet tabs, skill/spell preparation, row slot states, a nine-slot action editor, attribute spending, fatigue HUD, a second 1-9 RPG quick-slot row above the normal hotbar, `K` character-sheet access, E-screen Character buttons, and Shift+1 through Shift+9 world-use controls.
-- Assets: `Sources/PebbleCore/Render/RPGAssetManifest.swift` generates deterministic procedural 16x16 icons for every path, branch, skill, spell, and RPG action. No new binary art, scraped web images, or license-bearing asset files are introduced.
-- Persistence: `Player.swift` stores nested `rpg` state in player JSON and repairs it on load, including quick-slot token padding, legacy default fill, and removal of unknown, passive, unprepared, cross-path, or duplicate action tokens. `GameWorld.swift` and `GameCore.swift` default new worlds to the `rpgClasses` game rule.
-- LAN: `LAN_MULTIPLAYER_PROTOCOL_VERSION` is now 5, and `LANWorldSummary.rpgClassesEnabled` advertises the host rule to transient clients. `LANRPGIntent` carries typed create/learn/prepare/spend/select/cast/use proposals. Full RPG state stays host-owned in `LANMultiplayerHostSession`/`LANPeerRecordSnapshot` and app-side `lan_players` JSON; normal periodic player snapshots are lean. Direct RPG-change/restore snapshots may carry full RPG state so the owning client can converge its sheet. Remote casts and active-skill uses require an exact-next action sequence and run through `LANHostGhostRegistry` before the host broadcasts player/world/entity deltas.
-- Tests: `RPGCharacterStateTests`, `RPGProgressionTests`, `RPGActionTests`, `RPGQuickSlotInputTests`, `RPGAssetManifestTests`, plus LAN protocol/replication additions cover save repair, legacy selected-action decode, quick-slot assignment/clearing/persistence, Shift+digit routing, progression rules, spell effects, active skill effects, generated asset coverage, frame round-trip, malformed nested RPG decode, host rejection of client-authored RPG snapshots, lean periodic peer states, restore/full RPG convergence, ghost hydration with derived stats, and ghost active-skill execution.
+There are exactly six paths, eighteen branches, and fifty-four skills. In each branch the listed order is Foundation, Technique, Mastery. Every skill has exactly three ranks.
 
-Deliberate implementation differences from the early plan: the code uses `pathID`, `xp`, and `level` names instead of the early `classID`, `classXP`, and `classLevel` sketch; the starting attribute budget is 42 across five attributes rather than TFT's three-attribute 32-point table; and the first LAN implementation does not add separate `LANRPGSummary`/visual-event arrays because the lean/full split above preserves frame budget and authority without adding a second replication channel.
-
-## Source Register
-
-This design references 23 source groups: 14 local Pebble/TFT source groups and 9 external research source groups.
-
-| Source | Type | Used for | Risk note |
+| Path (`id`) | Primary attributes | Branch (`id`) | Skills in registry order |
 |---|---|---|---|
-| [AGENTS.md](/Users/mweingar/dev/pebble/AGENTS.md) | Local project rule | Required model-paired process and verification gates | Current repo source |
-| [README.md](/Users/mweingar/dev/pebble/README.md) | Local project doc | Current survival loop, XP, crafting, AI, LAN, verification, counts | Current repo source, counts may drift |
-| [ARCHITECTURE.md](/Users/mweingar/dev/pebble/ARCHITECTURE.md) | Local project doc | Engine/app split, persistence, test harness, LAN architecture | Current repo source |
-| [SECURITY.md](/Users/mweingar/dev/pebble/SECURITY.md) | Local project doc | Untrusted saves, LAN validation, AI boundaries, fail-closed patterns | Current repo source |
-| [LAN_MULTIPLAYER_PLAN.md](/Users/mweingar/dev/pebble/LAN_MULTIPLAYER_PLAN.md) | Local project doc | Current LAN protocol, host-authoritative constraints, live Neo probe expectations | Current repo source |
-| [Package.swift, pipeline, and asset verification](/Users/mweingar/dev/pebble/Package.swift) | Local project files | SwiftPM split, no Xcode project, built-in asset verification | Current repo source |
-| [Player.swift](/Users/mweingar/dev/pebble/Sources/PebbleCore/Entity/Player.swift) | Local code | Health, hunger, XP, inventory, save/load, attack cooldown, movement | Current code; dirty tree not modified here |
-| [Living.swift](/Users/mweingar/dev/pebble/Sources/PebbleCore/Entity/Living.swift) | Local code | Health/effects/equipment/armor/damage/death model | Current code |
-| [Combat.swift](/Users/mweingar/dev/pebble/Sources/PebbleCore/Systems/Combat.swift) | Local code | Existing melee, bow, trident, mining speed hooks | Current code |
-| [Saves.swift and LAN models](/Users/mweingar/dev/pebble/Sources/PebbleCore/Game/Saves.swift) | Local code | JSON player snapshot, `lan_players` rows, LAN protocol caps, replication batch limits | Current code |
-| [LAN transport, orchestration, and ghosts](/Users/mweingar/dev/pebble/Sources/Pebble/LANTransport.swift) | Local code | App/core boundary for Network.framework, peer record bridging, ghost-hosted intent execution | Current code |
-| [Render/Icon/ResourcePack pipeline](/Users/mweingar/dev/pebble/Sources/PebbleCore/Render/Icons.swift) | Local code | Pack-art preference, deterministic icon fallbacks, particles, HUD rendering, visual test hooks | Current code |
-| [The Fantasy Trip Melee Rules.md](/Users/mweingar/Downloads/_Documents/The%20Fantasy%20Trip%20Melee%20Rules.md) | User-provided design criterion | ST/DX, weapon ST thresholds, adjDX, armor, shields, options, force retreat, injury, XP | Local user document |
-| [The Fantasy Trip Wizard Rules.md](/Users/mweingar/Downloads/_Documents/The%20Fantasy%20Trip%20Wizard%20Rules.md) | User-provided design criterion | ST/DX/IQ, IQ spell gating, spell fatigue/upkeep, casting checks, spell categories, staff/armor constraints | Local user document |
-| [Vintage Story Class wiki](https://wiki.vintagestory.at/Class) | External | Character creation with six classes, buffs/debuffs, beginner-vs-expert framing | Wiki source; likely official/community maintained |
-| [Wynncraft class API docs](https://docs.wynncraft.com/modules/classes/get-class) | External | Fixed classes with archetype ratings and role summaries | Primary API docs |
-| [Wynncraft ability tree API docs](https://docs.wynncraft.com/modules/ability-aspect/get-ability-tree) | External | Ability trees, requirements, links, locks, pages | Primary API docs |
-| [Minecraft Dungeons FAQ](https://www.minecraft.net/pt-pt/article/minecraft-dungeons-launching-may-26) | External | Explicit "no classes" design and gear-defined identity | Official source |
-| [Minecraft Dungeons dev blog](https://www.minecraft.net/en-us/article/dungeons-september-dev-blog) | External | Gear-supported archetypes such as Acrobat, Summoner, Soul | Official source |
-| [Official Terraria class setups](https://terraria.wiki.gg/wiki/Guide:Class_setups) | External | Gear-defined class paths without formal class locks | wiki.gg blocked terminal fetch but search/open metadata confirmed URL |
-| [Portal Knights class wiki](https://portalknights.fandom.com/wiki/Class) | External | Class-linked attributes, weapons, armor, talents | Lower confidence than primary site; official-wiki label but hosted on Fandom |
-| [Trove official site](https://trovegame.com/) | External | Voxel MMO class identity and starter class examples | Official source |
-| [Cube World overview](https://en.wikipedia.org/wiki/Cube_World) | External | Voxel RPG character creation, classes, specializations, item progression | Secondary source; use only for pattern, not exact mechanics |
+| Warden (`warden`) | STR, END | Guardian (`warden_guardian`) | `guard_stance`, `interpose`, `anchor_line` |
+|  |  | Vanguard (`warden_vanguard`) | `heavy_cut`, `charge_break`, `stagger_chain` |
+|  |  | Bulwark (`warden_bulwark`) | `shield_bind`, `plate_training`, `fortify_block` |
+| Ranger (`ranger`) | DEX, LUCK | Marksman (`ranger_marksman`) | `quick_draw`, `steady_aim`, `crippling_shot` |
+|  |  | Scout (`ranger_scout`) | `trail_sense`, `soft_step`, `far_sight` |
+|  |  | Survivalist (`ranger_survivalist`) | `campcraft`, `weather_eye`, `beast_kinship` |
+| Delver (`delver`) | STR, END | Miner (`delver_miner`) | `vein_reader`, `fast_bore`, `deep_reserves` |
+|  |  | Trapper (`delver_trapper`) | `trap_probe`, `tripwire_mind`, `deadfall` |
+|  |  | Treasure-Seeker (`delver_treasure`) | `salvage_eye`, `lock_touch`, `fortune_read` |
+| Arcanist (`arcanist`) | INT, END | Elementalist (`arcanist_elementalist`) | `spell_formula`, `spark_weave`, `storm_focus` |
+|  |  | Illusionist (`arcanist_illusionist`) | `minor_glamour`, `false_step`, `mirror_work` |
+|  |  | Ritualist (`arcanist_ritualist`) | `ritual_circle`, `bound_servant`, `ward_scribe` |
+| Mender (`mender`) | INT, LUCK | Physic (`mender_physic`) | `field_dressing`, `triage`, `second_breath` |
+|  |  | Harvest (`mender_harvest`) | `herbal_lore`, `clean_brew`, `green_thumb` |
+|  |  | Sanctuary (`mender_sanctuary`) | `safe_haven`, `protective_mark`, `sanctuary_bell` |
+| Tinker (`tinker`) | INT, DEX | Redstone (`tinker_redstone`) | `circuit_sense`, `compact_gate`, `remote_trigger` |
+|  |  | Artificer (`tinker_artificer`) | `field_mod`, `quick_repair`, `tool_tune` |
+|  |  | Sapper (`tinker_sapper`) | `charge_pack`, `blast_shape`, `safe_fuse` |
 
-## Research Findings
+There are exactly seventeen spells, in this registration order:
 
-Comparable sandbox or voxel RPGs disagree on whether class should be hard identity, gear expression, or a hybrid:
+`ignite`, `frost_ray`, `shock`, `storm_aura`, `blur`, `decoy`, `shadow_step`, `mirror_image`, `mage_light`, `ward`, `summon_servant`, `stone_ward`, `mend_wounds`, `restore`, `purify`, `aegis`, `sanctuary`.
 
-| Game/system | Observed pattern | Design lesson for Pebble |
+## v2 progression economy
+
+- Character level is derived from bounded RPG XP and is always 1...20 after creation.
+- Level 1 grants no spendable point. Each gained level grants one skill point, for exactly nineteen at level 20.
+- Creation selects one specialization branch and exactly one Foundation skill in that branch. Its rank 1 is the only free rank.
+- A rank purchase costs its target rank: rank 1 costs 1, rank 2 costs 2, rank 3 costs 3. Every cross-branch purchase costs one additional point.
+- A player must buy ranks sequentially. A Technique requires its branch Foundation at rank 2. A Mastery requires its branch Technique at rank 2.
+- `rpgAvailableSkillPoints` is the only affordability calculation. All additions and subtractions use checked or saturating arithmetic.
+
+| Node | Selected-branch rank gates | Cross-branch rank gates | Selected costs | Cross costs |
+|---|---|---|---|---|
+| Foundation | 1 / 4 / 8 | 3 / 6 / 10 | free starter, then 2 / 3 | 2 / 3 / 4 |
+| Technique | 5 / 10 / 14 | 7 / 12 / 16 | 1 / 2 / 3 | 2 / 3 / 4 |
+| Mastery | 12 / 16 / 20 | 14 / 18 / 22 | 1 / 2 / 3 | 2 / 3 / 4 |
+
+The cross-branch Mastery rank-3 gate at level 22 is intentionally unreachable at the level-20 cap. Banking between gates is expected and must be shown by the UI, not treated as an error.
+
+Cap proof: after the free selected Foundation rank 1, ranks 2–3 of that Foundation cost 5; all three Technique ranks cost 6; all three Mastery ranks cost 6. A complete specialization therefore consumes 17 earned points. One cross-branch Foundation rank 1 costs 2. `17 + 2 = 19`, so a level-20 character can complete one branch and add one utility foundation with no stranded or negative points.
+
+Attribute training remains bounded: one point at levels 4, 7, 10, 13, 16, and 19; creation values are 6...14, progression values cap at 18, and the creation total is exactly 42.
+
+## Character creation and starter kits
+
+| Path | STR | DEX | END | INT | LUCK | Atomic, one-time kit |
+|---|---:|---:|---:|---:|---:|---|
+| Warden | 11 | 7 | 10 | 7 | 7 | `stone_sword`, `shield`, 4 `bread` |
+| Ranger | 7 | 11 | 8 | 7 | 9 | `bow`, 24 `arrow`, `stone_sword`, 4 `bread` |
+| Delver | 10 | 8 | 10 | 7 | 7 | `stone_pickaxe`, 16 `torch`, 4 `bread` |
+| Arcanist | 6 | 8 | 8 | 12 | 8 | `apprentice_focus`, 8 `torch`, 4 `bread` |
+| Mender | 6 | 8 | 10 | 10 | 8 | `apprentice_focus`, two separate `potion` stacks with `data.potion = "healing"`, 4 `bread` |
+| Tinker | 7 | 10 | 8 | 10 | 7 | `stone_pickaxe`, 12 `redstone`, 4 `torch`, 4 `bread` |
+
+`apprentice_focus` is a non-stackable, append-only item ID and is required in either hand for spells. Edited creation attributes must still total 42 and satisfy the selected Foundation's requirement. The registry is authoritative for requirements, and every recommended preset satisfies all three of its path's Foundation choices.
+
+Kits are preflighted and committed with character creation. New v2 characters persist `kitGrantVersion = 1` and a deterministic, at-most-64-byte `kitGrantID`; retrying creation cannot duplicate a kit. Migrated v1 characters receive no retroactive kit.
+
+All attributes have runtime consumers:
+
+- STR contributes to health, melee damage, and bounded bonus carry slots.
+- DEX contributes to ranged accuracy and reduces active-action recovery time, with a floor of 80% of base cooldown.
+- END contributes to health, maximum fatigue, and fatigue regeneration.
+- INT contributes to spell damage/healing and focus efficiency; no spell can cost less than one fatigue.
+- LUCK adds a capped deterministic bonus to explicitly tagged loot/durability/crafting procs. A stable hash is used; unordered iteration and ambient random APIs are forbidden.
+
+## Typed skill-effect contract
+
+Every rank owns one or more exhaustive `RPGSkillEffect` values: stat modifier, fatigue/cooldown modifier, weapon/tool modifier, harvest/loot modifier, action unlock, spell unlock, XP modifier, targeting modifier, or inventory/crafting modifier. Runtime systems consume those values; they do not switch on skill-ID strings. Registry validation fails if a displayed rank lacks an effect, an effect lacks a consumer, or its generated description differs from the effect.
+
+Every active is defined by `RPGActionDefinition`: target kind, friendly/hostile policy, equipment/focus requirement, range, line of sight, PvP eligibility, world mutation, material transaction, fatigue, cooldown, duration, and rank scaling. Preflight validates every field before any spend or mutation.
+
+The following summaries are the complete player-facing contract. Slash-separated values are ranks 1/2/3.
+
+### Warden
+
+| Skill | Kind | Exact observable rank effect |
 |---|---|---|
-| Vintage Story | Class is chosen during character creation, with buffs and debuffs. The Commoner all-rounder is safer for beginners. | Pebble should present a neutral all-rounder and be honest about class complexity. |
-| Wynncraft | Five Minecraft-server classes, each with archetypes and ability trees. API data exposes class difficulty and archetype axes such as damage, defense, range, and speed. | Pebble can use classes plus trees, but should keep ability data structured and inspectable. |
-| Minecraft Dungeons | Official FAQ says there are no classes; identity comes from equipped items. Dev blog still uses internal "archetypes" to support playstyles with gear/artifacts. | Pebble should not hard-lock ordinary sandbox tools. Gear and skills should express a class, not trap the player. |
-| Terraria | Classes are largely gear progression tracks rather than formal character choices. | Pebble can let players drift toward a build through equipment and skills after creation. |
-| Portal Knights | Classes have primary attributes, weapon families, and talent choices at level milestones. | Attribute and weapon affinity are useful, but overlocking gear risks undermining sandbox freedom. |
-| Trove | Voxel MMO with clear class fantasies and starter classes. | Strong class presentation helps identity, especially for multiplayer roles. |
-| Cube World | Voxel RPG uses character creation, fixed classes, unique armor/weapons/abilities, and specializations. | Specializations are a good mid-game layer, but region/gear dependency is a known risk to avoid. |
+| `guard_stance` | passive | Increase maximum health by 1 / 2 / 3. |
+| `interpose` | active | Grant 3 / 4 / 5 absorption and brief resistance to self and up to three non-hostile allies. |
+| `anchor_line` | active | Brace against knockback and pull one visible non-player ally toward the caster with 0.35 / 0.50 / 0.65 force. |
+| `heavy_cut` | active | Requires a melee weapon; one visible hostile in melee range takes +2 / +4 / +6 damage. |
+| `charge_break` | active | Rush and strike the first visible hostile for 4 / 6 / 8 damage. |
+| `stagger_chain` | passive | Heavy Cut's slow lasts 40 / 80 / 120 additional ticks. It does not claim a separate combo subsystem. |
+| `shield_bind` | passive | Increase maximum fatigue by 1 / 2 / 3. |
+| `plate_training` | passive | Add 0.002 / 0.004 / 0.006 fatigue regeneration per tick. |
+| `fortify_block` | active | Protect one targeted non-air block from 1 / 2 / 3 explosion destructions through the bounded transient registry. |
 
-First-principles conclusion: Pebble should use **soft permanent paths**. A player chooses a class/path at character creation for identity, starting kit, default attributes, and cheaper skill access. However, all core survival actions remain available to all players, with penalties or higher unlock costs instead of hard locks. This preserves Minecraft-style sandbox agency while adding RPG depth.
+### Ranger
 
-## TFT Criteria Translated to Pebble
+| Skill | Kind | Exact observable rank effect |
+|---|---|---|
+| `quick_draw` | passive | Bows reach the same power 2 / 4 / 6 charge ticks sooner. |
+| `steady_aim` | passive | While grounded, reduce bow spread by 15% / 30% / 45%. |
+| `crippling_shot` | active | Requires a bow and consumes one arrow; slow one visible hostile for 120 / 180 / 240 ticks. |
+| `trail_sense` | passive | While sneaking, reveal nearby hostiles with Glowing in radius 8 / 12 / 16; refresh at most once per 20 ticks. |
+| `soft_step` | passive | Increase sneaking movement by 5% / 10% / 15% without changing normal walking. |
+| `far_sight` | active | Grant Night Vision and reveal up to eight hostiles in radius 16 / 24 / 32. It creates no map markers. |
+| `campcraft` | passive | Safe grounded rest adds 0.005 / 0.010 / 0.015 fatigue regeneration per tick. |
+| `weather_eye` | passive | The HUD reports current weather and rounds the transition timer to 30 / 10 / 1 seconds. |
+| `beast_kinship` | passive | Passive-animal avoid goals ignore the Ranger within 4 / 7 / 10 blocks unless harmed. |
 
-The following criteria are load-bearing for the design.
+### Delver
 
-| TFT criterion | Pebble design translation |
+| Skill | Kind | Exact observable rank effect |
+|---|---|---|
+| `vein_reader` | passive | Increase stone and ore mining speed by 10% / 20% / 30%. |
+| `fast_bore` | active | Grant a Haste I / II / III mining burst. |
+| `deep_reserves` | passive | Breaking hard stone below sea level restores 0.1 / 0.2 / 0.3 fatigue within a tick cap. |
+| `trap_probe` | active | Reveal the nearest registered trap within 6 / 8 / 10 blocks. |
+| `tripwire_mind` | passive | Reduce explosion and trap damage by 15% / 30% / 45%. |
+| `deadfall` | active | Consume one carried `gravel` and place one valid temporary gravel trap for 80 / 120 / 160 ticks; Creative does not consume material. |
+| `salvage_eye` | passive | Every 12th / 8th / 5th qualifying crafted-block break preserves one tool durability. It never duplicates placed blocks. |
+| `lock_touch` | active | Inspect an authorized container and report up to 4 / 8 / 16 occupied slots. It opens no fictional locks. |
+| `fortune_read` | active | Preview one item in stable slot order with coarse / medium / exact fill detail. It does not predict future loot. |
+
+### Arcanist
+
+| Skill | Kind | Exact observable rank effect |
+|---|---|---|
+| `spell_formula` | unlock/passive | Spell damage gains +0.5 / +1.0 / +1.5; unlock Ignite at rank 1 and Frost Ray at rank 2. |
+| `spark_weave` | unlock/passive | Elemental fatigue cost is reduced by 0.5 / 1 / 1.5, never below one; unlock Shock at rank 2. |
+| `storm_focus` | unlock/passive | Storm Aura damage is 1.5 / 2.0 / 2.5; unlock it at rank 2. |
+| `minor_glamour` | unlock/passive | Illusion duration is x1.10 / x1.20 / x1.30; unlock Blur at rank 1 and Decoy at rank 2. |
+| `false_step` | unlock/passive | Shadow Step range gains +1 / +2 / +3 blocks; unlock it at rank 2. |
+| `mirror_work` | unlock/passive | Mirror Image grants 2 / 3 / 4 absorption with visible image bursts; unlock it at rank 2. |
+| `ritual_circle` | unlock/passive | Ritual duration is x1.10 / x1.25 / x1.40; unlock Mage Light at rank 1 and Ward at rank 2. |
+| `bound_servant` | unlock/passive | The owned servant lasts 400 / 600 / 800 ticks; unlock Summon Servant at rank 2. |
+| `ward_scribe` | unlock/passive | Wards absorb 1 / 2 / 3 explosion destructions; unlock Stone Ward at rank 2. |
+
+### Mender
+
+| Skill | Kind | Exact observable rank effect |
+|---|---|---|
+| `field_dressing` | unlock/passive | Rank 1 unlocks Mend Wounds; effective healing gains +1 / +2 / +3 health. |
+| `triage` | unlock/passive | Healing a target below half health gains 10% / 20% / 30%; unlock Restore at rank 2. |
+| `second_breath` | active | Spend fatigue to heal self for 8 / 11 / 14. |
+| `herbal_lore` | unlock/passive | Plant foods restore 0.5 / 1.0 / 1.5 fatigue; unlock Purify at rank 1. |
+| `clean_brew` | passive | Beneficial food and potion effect duration is x1.10 / x1.20 / x1.30. |
+| `green_thumb` | passive | Mature-crop harvest restores 0.1 / 0.2 / 0.3 fatigue within a tick cap. |
+| `safe_haven` | active/unlock | Restore 4 / 6 / 8 fatigue and place a short regeneration haven; unlock Ward at rank 1. |
+| `protective_mark` | unlock/passive | Ward and Aegis absorption increases by +2 / +4 / +6; unlock Aegis at rank 2. |
+| `sanctuary_bell` | unlock/passive | Sanctuary radius is 6 / 8 / 10; unlock it at rank 2. |
+
+### Tinker
+
+| Skill | Kind | Exact observable rank effect |
+|---|---|---|
+| `circuit_sense` | passive | Crosshair inspection within 4 / 6 / 8 blocks reports signal strength; rank 2 adds configured delay, rank 3 adds the nearest source direction. |
+| `compact_gate` | passive | Remote Trigger range becomes 6 / 8 / 10 blocks and recovery shortens by rank. |
+| `remote_trigger` | active | Activate one authorized visible lever/button/dispenser/dropper/repeater/comparator/detector within 6 / 8 / 10 blocks. |
+| `field_mod` | active | A held tool gains a Haste/tuning burst at rank I / II / III. |
+| `quick_repair` | active | Consume one matching repair material and repair the first damaged gear item in stable equipment/inventory order by 15% / 25% / 35% maximum durability. |
+| `tool_tune` | passive | Every 8th / 6th / 4th durability event is preserved deterministically. |
+| `charge_pack` | active | Consume one TNT and place one owned controlled charge. |
+| `blast_shape` | passive | Reduce self-inflicted explosion damage by 15% / 30% / 45%. |
+| `safe_fuse` | active | Remove one visible owned, undetonated charge within 4 / 6 / 8 blocks and atomically refund its TNT. |
+
+## Spell semantics
+
+All spells require a focus, sufficient INT, fatigue, a learned and prepared spell, and a legal target. A spell cooldown is at least ten ticks and defaults to `circle * 20`. Spell rays never damage players or LAN ghosts unless the existing PvP policy explicitly authorizes it. World-mutating spells require build permission.
+
+| Spell | Circle / INT | Truthful effect |
+|---|---|---|
+| `ignite` | 1 / 9 | Range 12; deal 4 fire damage and 120 fire ticks to one legal hostile, or place fire on an authorized replaceable block face. Cost 2. |
+| `frost_ray` | 1 / 9 | Range 14; deal 3 damage, Slowness I for 120 ticks, and 160 freeze ticks. Cost 3. |
+| `shock` | 2 / 11 | Range 16; deal 5 damage; if wet, chain 3 damage to the nearest legal hostile within 4 blocks, stable distance/ID order. Cost 4. |
+| `storm_aura` | 3 / 13 | For up to 300 ticks, damage legal hostiles in the skill-scaled radius for 2 each second. Cost 6 plus 1 fatigue/second. |
+| `blur` | 1 / 9 | Apply Invisibility for the skill-scaled duration. Cost 2 plus 0.25 fatigue/second. It does not claim an unimplemented accuracy formula. |
+| `decoy` | 1 / 9 | Place one owned radius-3 distraction cloud for 200 scaled ticks; legal hostiles inside receive Glowing and Slowness. Cost 3. It does not claim true aggro AI. |
+| `shadow_step` | 2 / 11 | Cost 5 to move to a visible dark destination within skill-scaled range only when line of sight, solid floor, body/head room, and collision checks pass. |
+| `mirror_image` | 3 / 13 | Apply the exact `mirror_work` Invisibility/Speed effects and image-burst particles. Cost 6 plus 0.5 fatigue/second. No image entities are claimed. |
+| `mage_light` | 1 / 8 | Place one temporary owned light for 1,200 scaled ticks without consuming a torch; guarded cleanup restores only the cell it replaced. Cost 2. |
+| `ward` | 1 / 8 | Protect one targeted block from explosion replacement for 600 scaled ticks. Cost 3. |
+| `summon_servant` | 2 / 11 | Spawn at most one owned nonpersistent servant for the `bound_servant` duration; cleanup on every terminal transition. Cost 6 plus 0.5 fatigue/second. |
+| `stone_ward` | 3 / 13 | Protect the bounded `ward_scribe` block pattern from explosions. Cost 7. |
+| `mend_wounds` | 1 / 8 | Heal self or one touched legal non-player ally for 5 plus typed bonuses. Cost 3. |
+| `restore` | 2 / 11 | Heal self or one touched legal non-player ally for 8 plus typed bonuses and remove the first present effect in stable order: poison, wither, weakness, slowness. Cost 5. |
+| `purify` | 1 / 8 | Remove poison, hunger, and nausea from self or one touched legal non-player ally. Cost 2; it does not rewrite food items. |
+| `aegis` | 2 / 11 | Give self or one touched legal non-player ally 4 plus typed bonus absorption and Resistance I for 240 ticks. Cost 5; it has no upkeep. |
+| `sanctuary` | 3 / 13 | For 300 ticks, apply outward velocity and Weakness I once per second to legal hostile mobs in the skill-scaled radius. Cost 8. |
+
+## XP events and anti-farm bounds
+
+`RPGXPEvent` is the only RPG XP proposal and `rpgAwardXPEvent` is the bounded, saturating gate. RPG XP is distinct from vanilla enchantment XP. Kills must be causally attributed and only hostile, non-player entities qualify; passive animals, players, self-damage, rejected actions, ineffective healing, Creative actions, and rejected/stale transactions never award XP. The curve is `20 × (level - 1)² + 30 × (level - 1)`, so level 2 starts at 50 XP and level 20 is exactly 7,790 XP.
+
+| Path | Event | Award and qualification |
+|---|---|---|
+| Warden | hostile melee defeat | 10, only when the Warden's legal melee damage is the causal defeat. |
+| Warden | mitigation milestone | 2, when one bounded Interpose layer absorbs at least 2 damage from registered live hostile attackers. Up to eight owner/sequence layers are retained FIFO; unowned absorption is consumed first, nonhostile damage consumes without credit, and a full layer queue rejects the whole action before spend. |
+| Ranger | hostile ranged defeat | 10, only for a causally owned arrow/projectile defeat. |
+| Ranger | chunk discovery | 3, first qualifying dimension/chunk key only. |
+| Delver | depth milestone | 3 once for first descent below each persisted threshold: Y 32, 16, 0, -16, -32, -48. |
+| Delver | dungeon container | 12 once before rolling a generated container whose nonempty `lootTable` provenance came from world generation. Player-placed containers have no provenance and never qualify. |
+| Delver | deep excavation | 4 for a legally harvestable hard-stone/ore block below Y 63 in the Overworld, keyed by exact dimension/position. |
+| Arcanist | hostile spell defeat | 10, only for a causally owned spell defeat. |
+| Arcanist | spell practice | 6 for the first successful effect-producing cast of each registered spell index in a 1,200-tick window. World-day changes do not reset the mask. |
+| Mender | effective ally healing | `floor(causalHealthDelta / 2)`, capped at 8 and requiring at least 2 causal health. The ally must have an unexpired hostile-injury token; self, overheal, unrelated damage, and absorption-only hits award zero. |
+| Mender | cleanse/rescue | 4 when a valid hostile-injury token exists and either a negative effect is actually removed or causal healing crosses from at/below 25% to above 25% health. Restore can award at most one combined cleanse/rescue bonus. |
+| Mender | provision craft | 6 per actually completed output round for positive-food items whose optional effects are all explicitly beneficial. Harmful/unknown food effects fail closed. |
+| Tinker | first recipe craft | 4 once per qualifying recipe key. |
+| Tinker | mechanism construction | 2 once per dimension/position key when an authorized registered mechanism is placed into a powered circuit. Removal does not clear discovery. |
+| Tinker | engineering craft | 6 per actually completed output round for registered circuit components or non-weapon tools. A fresh qualifying recipe batch can award one first-recipe event plus at most seven engineering events in the same window. |
+
+Every one of the three starter choices in a path shares a verified level-1 progression loop; no starter is stranded behind a later unlock:
+
+| Path | Clear first progression path to level 2 |
 |---|---|
-| Figures begin with fixed base attributes plus extra points. | Pebble characters start at ST 8, DX 8, IQ 8 plus 8 assignable points for a 32-point starting total. Class presets allocate those points but the player may adjust before confirming. |
-| ST is health and weapon/spell power. | ST controls max health bonus, fatigue capacity, heavy weapon readiness, shield-rush strength checks, and spell overexertion tolerance. |
-| DX controls action order, hit/cast success, and mishap avoidance. | DX controls cast reliability, bow spread recovery, dodge/defend checks, fumble resistance, and special combat effects. It does not randomly nullify a clean normal melee hit by default. |
-| IQ controls known spells and resistance to illusions/control. | IQ gates spell tiers, number of known spells, crafting/lore skills, disbelieve/reveal checks, and resistance to charm/fear/illusion effects. |
-| adjDX changes with armor, wounds, range, facing, and posture. | Pebble computes `adjustedDexterity` for spells and special actions from DX plus class/skill bonuses minus armor, wounds, fatigue, movement, range, and target-facing penalties. |
-| Armor stops hits but penalizes DX and movement. | Existing armor mitigation remains. The RPG layer adds armor casting/skill penalties and fatigue regen penalties. Heavy armor does not globally slow vanilla walking unless a feature explicitly opts in. |
-| Weapons have ST thresholds. | Weapon families have recommended ST for full damage/speed/special effects. Under-ST use is allowed but loses special effects and may suffer cooldown or durability penalties. |
-| One option per turn. | Pebble maps this to short action-lock categories: attack, cast, defend, dodge, ready/use, and movement commitment. The player remains in real-time control, but high-impact RPG actions commit the player for a bounded window. |
-| Charge, defend, dodge, polearm brace, shield rush, force retreat. | Add sprint-charge, brace, guard, dodge-step, shield-bash, and "force retreat" knockback/stagger windows. |
-| Injury creates DX penalties and knockdown. | Add short `staggered` and `winded` status effects after large damage bursts. Avoid long hard crowd control for normal survival mobs. |
-| Spell ST costs and continuing upkeep. | Add `fatigue` as spell/body-energy spend. Continuing spells reserve or drain fatigue. Health is not the normal mana bar; overcasting is rare and explicitly opt-in. |
-| Missile, thrown, creation, and special spells. | Spell registry has those four categories with different range, line-of-sight, cost, persistence, and LAN validation rules. |
-| Wizard staff and armor/weapon restrictions. | Staffs are spell foci. Non-staff weapons, ready shields, and heavy armor apply casting penalties unless skills reduce them. |
-| Experience can improve attributes, within limits. | Class progression grants skill points every class level and attribute training points at bounded milestones. Attribute increases are capped and persisted. |
+| Warden | Five causally owned hostile melee defeats (`5 × 10 = 50`), with mitigation milestones as an alternate combat source. |
+| Ranger | Seventeen loaded-chunk discoveries across the bounded windows (`17 × 3 = 51`). |
+| Delver | Thirteen legal deep excavations across the bounded windows (`13 × 4 = 52`). |
+| Arcanist | Nine successful effect-producing practice casts across global windows (`9 × 6 = 54`); each starter begins with a usable spell and a focus. |
+| Mender | Nine completed qualifying provision outputs (`9 × 6 = 54`), while causal healing/cleanse rewards provide the support-combat alternative. |
+| Tinker | One new engineering recipe plus seven engineering outputs in the first window (`4 + 7 × 6 = 46`), then one engineering output after rollover (`+6 = 52`). |
 
-## Architect Plan
+Deduplication is persisted and exact: six Delver depth bits, a seventeen-bit per-window spell mask, a registry-indexed recipe bitset, and one stable 64-entry recent-event ring shared by all categories. Ranger discovery, generated dungeons, mechanisms, and excavation identities can become eligible again only after their exact key rolls out of that ring; progression never permanently stops at 64 discoveries. Saves from the earlier lifetime-key shape merge those keys deterministically into the recent ring on decode, while new saves no longer encode a lifetime store. Event keys are at most 64 UTF-8 bytes.
 
-### Scope
+Each category has a 1,200-tick window and an event-count cap: combat 6, explore 8, depth/dungeon 8, cast 8, heal 8, engineer 8. These are event counts, not XP totals. Once a cap is consumed, a later discrete event is dropped in full; awards are never partially split. A forward window rollover resets only category counts and the distinct-spell mask while preserving the recent ring and persistent milestone/recipe bits. A backward or out-of-range tick/day rejects the entire proposed batch byte-for-byte; untrusted time is never clamped into eligibility and never resets history.
 
-Build a first RPG layer around the local player and LAN peers:
+One monotonic `GameCore` RPG simulation tick is persisted in `WorldRecord`, copied to every loaded dimension, and advanced once per authoritative fixed step. Legacy saves derive it from the greatest bounded dimension time. It drives action staleness, cooldown/fatigue evolution, XP windows, pulses, expiry, and off-dimension cleanup. LAN clients do not speculatively advance it or consume authoritative RPG state; replication adopts only valid host ticks and cannot rewind the clock.
 
-1. Character creation on new world entry and first entry into old worlds without RPG state.
-2. Class/path identity with class-specific starting kits and defaults.
-3. ST/DX/IQ attributes, derived health/fatigue/spell slots/weapon readiness.
-4. Skill trees and spell learning.
-5. Class XP and progression independent from vanilla enchantment XP.
-6. Spell and combat-option mechanics that use existing Pebble systems.
-7. Save/load, LAN persistence, host-authoritative action validation, and screenshot/test hooks.
-8. Complete UI/icon/particle/audio asset coverage through explicit manifest entries and tests.
+Mender hostile-injury provenance is session-only and belongs to a registered, live, non-player, nonhostile entity. It records only actual post-mitigation/post-absorption health loss from a registered live hostile, accumulates and refreshes for 1,200 ticks, and is capped by both maximum and missing health. Every effective heal reduces the outstanding hostile remainder before unrelated missing health can qualify. An XP-awarding support transaction prevalidates and clears the exact nonce before healing and publishes one RPG revision; capped/non-awarding healing receives no explicit XP clear but still reduces the remainder by the health actually restored. Natural healing that reaches zero clears the active nonce/expiry while retaining its monotonic generation, preventing stale prepared actions from aliasing later injuries.
 
-### Non-goals
+## Persistence, migration, and repair
 
-- No account-wide characters.
-- No public internet matchmaking or cloud sync.
-- No mod-loaded class/spell scripts in the first version.
-- No hard lock that prevents a non-class player from mining, crafting, building, eating, wearing armor, or using ordinary tools.
-- No replacement of existing vanilla XP/enchanting economy.
-- No random baseline misses for normal crosshair melee hits.
+`RPGCharacterState` schema v2 persists `schemaVersion`, `specializationBranchID`, `starterSkillID`, kit markers, bounded XP dedup state, and an authority revision. Quick-slot preferences are local data and are not part of authoritative RPG state.
 
-### Dependency Order
+- Missing schema is v1. A future schema fails the RPG portion to uncreated while preserving the base player/save.
+- Migration chooses an explicitly inferable old starter when unique. Otherwise it chooses the branch with greatest valid spend, ties broken by path branch registration order.
+- Repair deterministically replays known ranks in skill-registry then rank order, admitting only path-valid, gate-valid, attribute-valid, prerequisite-valid, affordable ranks. Invalid ranks are dropped/refunded; repair never converts them into different ranks.
+- Level is derived from clamped XP. XP additions saturate and level advancement iterates at most nineteen times.
+- Decode bounds apply before normal collection allocation where possible and after decode again: at most 54 known skill keys, 17 known spells, 4 unique prepared actives, 6 unique prepared spells, 32 unique cooldowns, 16 unique upkeeps, 9 local quick slots, and registry-bounded selected IDs. IDs are at most 64 UTF-8 bytes.
+- Cooldowns/upkeeps are stable-deduplicated and their ticks/costs are finite and clamped. Attributes, fatigue, health, absorption, pose, and velocity reject nonfinite data.
+- Action sequence, authority revision, and request counters are `0...1_000_000_000` and use checked increments. At exhaustion every mutation fails without state change and returns an authoritative terminal error; counters never wrap or roll over.
 
-1. Core model: class registry, attributes, skill tree, spell registry, XP curve, validation.
-2. Asset manifest: class badges, spell icons, item icons, particle cues, synthesized sound cue names, and UI fallback rules.
-3. Persistence: encode/decode `RPGCharacterState` in player JSON and LAN guest records.
-4. UI: creation flow, character/progression screen, HUD additions.
-5. Passive mechanics: derived max health, fatigue regen, armor/casting penalties, weapon readiness.
-6. Progression events: class XP awards from bounded milestones and normal play hooks.
-7. Active mechanics: dodge, defend, shield bash, brace, charge, spells.
-8. LAN: summaries, intents, host validation, visual events, reconnect tests.
-9. Docs, tests, goldens, install proof.
+## Bounded transients and cleanup
 
-### Conditions for Builder
+Mage lights, deadfalls, wards, fortifications, decoys, havens, charges, and servants are world-owned transient records. The cap is two per type per owner and 32 total per world, including deferred restorations. Before creating one, expired records receive guarded cleanup; if capacity still cannot be retained, creation is rejected before materials or fatigue are spent. Records are never silently evicted.
 
-- Class and skill state must live in PebbleCore and be testable without AppKit.
-- The macOS app may draw and route input, but it must not own RPG rules.
-- All class, skill, spell, and attribute IDs are static registry strings with deterministic registration order.
-- Old saves without RPG data load as "uncreated"; they never crash or invent invalid state.
-- Unknown/corrupt class, skill, spell, or attribute values decode fail-closed to bounded defaults.
-- Existing XP (`player.xp`, `xpLevel`, `xpProgress`) remains the enchanting/currency XP. RPG progression uses separate `RPGCharacterState.xp` and `RPGCharacterState.level`.
-- LAN clients never author raw character state or spell effects. They send typed intents; the host validates class, skill, fatigue, target, reach, cooldown, permission, and world readiness.
-- RPG quick slots are local repaired player preferences. LAN clients resolve a slot to a prepared spell or active-skill id and send only the existing host-validated cast/use intent with the exact-next action sequence.
-- Full RPG state must not be embedded in high-frequency `LANPlayerState`. Full state lives in local/host-owned saves and host peer records; periodic replication carries lean player states, while direct RPG-change/restore states may carry full repaired RPG state to converge the owning client.
-- Any new LAN message kind or replication-batch field must append wire IDs, bump `LAN_MULTIPLAYER_PROTOCOL_VERSION`, and add old-version rejection plus worst-case frame-size tests under the 1 MiB cap.
-- LAN RPG intents must include a bounded per-peer action sequence. The host accepts only the exact next sequence, rejects duplicates/replays, and asks the client to resync after a jump.
-- New item IDs, if any, must be appended after current late-added items and protected by item-prefix smoke tests.
-- Every class, skill, spell, focus item, action badge, particle cue, and sound cue must be present in an RPG asset manifest with a concrete source: bundled pack lookup, deterministic procedural generation, existing synthesized audio/particle recipe, or explicitly licensed packaged art.
-- Do not add unlicensed downloaded art. Any new binary asset must include license/provenance, be included in packaging, and be covered by `scripts/verify-pack-assets.sh`.
-- No unordered collection iteration may affect skill resolution, XP awards, spell target selection, or summon behavior.
-- New UI screenshot hooks must be allowlisted and non-mutating unless the hook name explicitly creates a test world.
+Block cleanup stores prior and placed cells and restores only if the current cell still equals the placed cell. Entity cleanup uses owned stable IDs. Expiry, owner death, disconnect, dimension change, world-rule disable, save unload, and upkeep termination all trigger cleanup. Deferred cleanup remains counted until it succeeds or the world proves the target no longer needs restoration.
 
-## Contrary Architect Review
+## LAN protocol v6 and authority
 
-The first draft was directionally sound but under-specified in several places that would break under real multiplayer, packaging, or verification pressure. These findings modify the plan below.
+Protocol v6 appends typed RPG request/ack message kinds. Every RPG frame has a 64 KiB cap checked before JSON decode; the broader LAN frame cap does not weaken it. Variable collections and ID byte lengths are bounded in custom decoders.
 
-| Finding | Risk | Required design correction |
-|---|---|---|
-| Full RPG state was easy to accidentally place in high-frequency `LANPlayerState`. | High-frequency batches would grow, leak authority, and make remote clients believe they can repair state locally. | Keep full state in saves and host peer records; keep periodic player states lean; use direct RPG-change/restore states for owning-client convergence. |
-| The LAN design did not explicitly handle wire compatibility. | Adding messages without a protocol bump would create decode ambiguity against strict protocol v3 peers. | Append message IDs, bump protocol version, and test old-version rejection and payload type mismatch. |
-| Spell/action intents lacked replay protection. | A resent or duplicated frame could double-spend fatigue, double-cast, or double-grant XP. | Add per-peer exact-next `actionSequence` and host-side duplicate/jump rejection. |
-| Character creation on LAN was treated like UI state instead of an authority transition. | A guest could spoof attributes, starter kit, or skill points if the client result is trusted. | Guest creation sends a proposed `LANRPGCreateIntent`; host validates, persists, then returns an accepted summary/restore. |
-| Visual spell effects were not separated from gameplay effects. | Clients could see damage, summons, or particles before host authority confirms the result. | Host emits cosmetic `LANRPGVisualEvent` only after validation; gameplay state still arrives via normal snapshots/deltas. |
-| Art assets were implicit. | Classes/spells could ship with missing icons, fallback boxes, or unlicensed images. | Add an RPG asset manifest, procedural icon path, license gate, pack verification, and screenshot/icon tests. |
-| The test plan named useful tests but not enough gate criteria. | Networking, frame size, asset resolution, old saves, corrupt LAN rows, and installed-app proof could remain untested. | Expand unit, fuzz/property, packet-budget, UI screenshot, asset, full pipeline, and two-Mac RPG LAN proof gates. |
-| World enablement was left as an open question. | Hosts and clients could disagree about whether RPG creation is required. | Make `rpgClasses` an explicit world rule stored in existing world metadata/game rules and advertised in LAN world summary after the protocol bump. |
+Every create/learn/rank/attribute/prepare/unprepare/action request carries a bounded `requestID`, `expectedRevision`, and exact-next `sequence`. A client permits one pending mutation, performs no optimistic authoritative mutation, and ignores stale acknowledgements. The host retains a 32-entry per-peer request/ack replay cache, returning the prior ack for an exact duplicate without reapplying it.
 
-## Core Character Model
+An owner-only ack contains the complete repaired authoritative RPG state without quick slots, plus authoritative inventory, pose, velocity, health, absorption, and bounded status effects. The client merges its local quick-slot preferences after applying the ack. Every rejection carries the same owner resync. Ordinary peer snapshots remain lean.
 
-### Data Types
+The host accepts a mutation only for an accepted, alive, non-respawning peer in an RPG-enabled world. It checks dimension, loaded target, range, line of sight, equipment/focus, fatigue, cooldown, materials, build/container authorization, and existing PvP/PvE policy. Player and ghost damage is rejected unless that policy explicitly permits it. World mutation requires build permission; container inspection requires container permission.
 
-Early sketch, superseded by the implementation record above. The shipped core file is `Sources/PebbleCore/Game/CharacterProgression.swift` and uses `pathID`, `xp`, and `level`.
+Actions use preflight then one commit. `LANRPGActionOutcome` atomically includes RPG state, inventory/durability, health/status, pose/velocity, world deltas, and sequence. Ordinary guest melee outcomes also persist awarded RPG XP. Delayed entity-owned progression (including layered Warden mitigation) must flow back through the authoritative peer record/broadcast callback; a cached ghost mutation may never exist only in a detached actor or be overwritten by a later session snapshot. There is no ghost-only debit, free placement, lost refund, or client-authored effect.
 
-```swift
-public struct RPGCharacterState: Codable, Equatable {
-    public var version: Int
-    public var revision: Int
-    public var created: Bool
-    public var classID: String
-    public var attributes: RPGAttributes
-    public var attributeIncreases: RPGAttributes
-    public var classXP: Int
-    public var classLevel: Int
-    public var unspentSkillPoints: Int
-    public var spentSkillPoints: [String: Int]
-    public var knownSpells: [String]
-    public var preparedSpells: [String]
-    public var selectedSpell: String?
-    public var fatigue: Double
-    public var cooldowns: [String: Int]
-}
+One monotonic GameCore simulation tick advances cooldowns and fatigue for every accepted peer across dimensions. Gameplay upkeep runs only when the owner's ghost and same-dimension world are loaded; time-based expiry and cleanup do not freeze. Disconnect/dimension/death/rule transitions terminate owned upkeep/transients.
 
-public struct RPGAttributes: Codable, Equatable {
-    public var st: Int
-    public var dx: Int
-    public var iq: Int
-}
-```
+## Character sheet, controls, and accessibility
 
-Validation clamps:
+The UI Design Review conditions below are part of the implementation contract. They are not optional polish and may not be replaced by a flat list, implicit click behavior, color-only state, or screenshot-only verification.
 
-- `version`: known range only; future versions decode conservatively.
-- `revision`: 0...1,000,000,000; host increments on accepted creation, skill unlocks, class XP/level changes, prepared spell changes, and fatigue/cooldown changes that need network presentation.
-- `classID`: unknown becomes `adventurer`.
-- `attributes`: each 8...24, starting sum must be 32 plus earned increases.
-- `attributeIncreases`: each 0...8, total 0...8 for the first release.
-- `classXP`: 0...1,000,000,000.
-- `classLevel`: derived from XP on load, not trusted.
-- `spentSkillPoints`: known skill IDs only, rank 0...maxRank, total cannot exceed earned points.
-- `knownSpells`: known spell IDs only, count cannot exceed IQ plus explicit perks.
-- `preparedSpells`: subset of known spells, capped by prepared slots.
-- `fatigue`: finite, 0...fatigueMax.
-- `cooldowns`: known action IDs only, bounded tick counts.
+### Pure screen model and canonical evaluation
 
-World enablement:
+`RPGScreenModel` is a pure PebbleCore projection. Drawing, focus movement, accessibility queries, and hover inspection never repair or mutate live gameplay state. The model receives a repaired authoritative state, client-local quick-slot preferences, the current pending-request presentation, viewport size, tab, selection, and scroll offsets; it produces bounded, deterministic rows and semantic elements.
 
-- Add `rpgClasses` as a world rule stored in existing world metadata/game-rule style storage instead of a new SQLite table.
-- New Survival worlds default `rpgClasses = 1`.
-- New Creative worlds may default to `rpgClasses = 0` unless the user explicitly opens Character creation.
-- Existing worlds with no rule are treated as enabled on first load so the feature is visible, but the creation screen offers a local "Classic survival for this world" opt-out before committing.
-- LAN world summaries must advertise whether `rpgClasses` is required after the protocol bump, so guests do not enter gameplay with mismatched assumptions.
+`rpgEvaluateSkillPurchase` is the sole evaluator used by both `rpgLearnSkill` and the UI. For the exact next rank it returns at most one canonical failure in this order:
 
-### Derived Stats
+1. character not created;
+2. unknown or cross-path skill;
+3. authority revision exhausted;
+4. already at maximum rank;
+5. insufficient level;
+6. first unmet attribute requirement in registry order;
+7. missing immediately previous branch node at rank 2;
+8. insufficient skill points.
 
-| Derived value | Formula or rule |
+A live created-character Skills projection contains exactly the current path's three branches, nine skills, and 27 rank cells. The selected specialization and the other two same-path branches remain visible; skills belonging to the other five paths do not enter the live drawing, focus, hit-test, keyboard/controller, or accessibility model. A rank cell below or equal to the current rank is `purchased`; a cell more than one rank ahead is `requires prior rank`; only the exact next cell uses the authoritative evaluator above. Each of the 27 live rank cells exposes exact rank delta text, point cost, selected- or cross-branch level gate, attribute gate, prerequisite, purchased/current state, and one canonical reason. Across six deterministic path fixtures, these projections cover all 162 registry rank cells exactly once under globally unique stable IDs. The UI must not discover legality by mutating a copy and comparing strings.
+
+### Four-step character creation
+
+Creation is one ordered four-step flow: **Path -> Branch -> Attributes -> Review**.
+
+1. **Path** shows all six paths with icon, role summary, primary attributes, and recommended preset. First selection of a path applies `rpgCreationPreset`; returning to a path restores that path's local draft rather than discarding edits.
+2. **Branch** shows the path's three registered branches. The free starter is always that branch's Foundation (`branch.skillIDs[0]`), validated as a member of `path.starterSkillIDs`; code must not zip the two arrays because their orders are not universally identical. Each card shows Foundation rank-1 effect, passive/active kind, and automatically unlocked starter spells.
+3. **Attributes** permits values `6...14`, requires an exact total of 42, shows remaining pool, offers Reset to Preset, and highlights the selected Foundation's first unmet requirement. Next remains disabled with the canonical reason until both budget and starter requirement are valid.
+4. **Review** shows path, specialization, free Foundation rank, the exact one-time kit entries, automatically known/prepared spells, focus requirement where applicable, the class's truthful first-XP loop, keyboard chords, controller summary, and inventory-capacity/server-authority caveat. The UI sends an empty starter-spell list so creation derives the complete legal set from the selected Foundation; it does not expose a redundant spell multiselect.
+
+The large layout (`520x330` and above) uses a three-by-two path grid, three branch columns, and a two-pane Attributes/Review composition when space permits. The compact layout below `520` uses two path columns, three full-width branch cards, and one vertically virtualized content pane. At `360x224`, header, step/tabs, status, and Back/Next/Create/Close controls remain fixed and fully visible; only the content pane scrolls. At `700x420`, content may expand but never changes semantics or focus order.
+
+### Five-tab character shell
+
+After creation the stable tab order is **Character, Skills, Actives, Spells, Progression**.
+
+- **Character** shows path, specialization, level/XP, fatigue, attributes, derived stats, available skill/attribute points, next actionable milestone, and the first-XP guidance until level 2.
+- **Skills** presents exactly the current path's three registered branch columns in registry order: nine skills and 27 rank cells. Foundation, Technique, and Mastery cards remain visible as distinct nodes; selecting a node only opens its inspector. `Rank Up` is a separate, labeled action. Other paths are excluded rather than presented as permanently invalid choices.
+- **Actives** shows only active skills belonging to the character's path. It exposes separate `Prepare`, `Unprepare`, `Select`, and `Assign Slot` actions. An unknown active links back to its Skills node and cannot be ranked from this tab.
+- **Spells** shows only spells reachable from the character's path skill registry. Every row names the exact unlocking skill/rank and shows circle, INT, fatigue, target/range, known/prepared/selected/slotted state. Non-casters receive a truthful empty state rather than all seventeen spells.
+- **Progression** presents levels 1 through 20, absolute XP thresholds, earned SP/AP, banked points, specialization purchases, attribute milestones, actual completion, and build divergence warnings.
+
+The specialization roadmap is guidance, not a hidden restriction. Its full-branch purchases are Foundation II at level 4, Technique I at 5, Foundation III at 8, Technique II at 10, Mastery I at 12, Technique III at 14, Mastery II at 16, and Mastery III at 20. The free Foundation I plus those ranks costs 17 earned points. Level 20 provides 19 earned points, leaving exactly 2 for one cross-branch Foundation I. Cross-branch rank gates remain two levels later and costs remain one point higher; cross-branch Mastery III remains truthfully shown as unreachable at level 22. Before any legal cross-branch purchase, the inspector reports whether the remaining points earnable through level 20 can still finish the selected specialization; it warns but does not invent a restriction or respec.
+
+Rows/cards select only. No click, focus change, hover, tab change, or slot destination selection implicitly ranks, prepares, unprepares, selects, assigns, or uses an action. Gameplay mutation requires the explicit labeled control associated with the current inspector.
+
+### Local quick slots and LAN pending/error states
+
+The nine quick slots are local preference, never host authority. Assigning, moving, or clearing a slot does not change `selectedPreparedActionID`, `selectedPreparedSpellID`, `authorityRevision`, `actionSequence`, or any owner/inventory revision, and it sends no LAN request. Explicit `Select` is the only character-sheet selection mutation. Owner acknowledgements exclude quick slots; client application preserves local slots and removes only tokens that no longer name acknowledged prepared actions.
+
+Only one authoritative LAN mutation may be pending. The screen presents the following exhaustive state matrix:
+
+| State | Authoritative controls | Local slot controls | Presentation and transition |
+|---|---|---|---|
+| Single-player/host commit accepted | Re-enable after synchronous commit | Enabled | Apply repaired result, announce bounded success, rebuild model, preserve semantic selection, clamp scroll. |
+| Local semantic rejection | Enabled | Enabled | Leave authoritative state byte-for-byte unchanged and show the canonical reason beside the attempted control. |
+| LAN request awaiting disposition | Disabled, including Create/Rank/Prepare/Unprepare/Select/Attribute | Enabled | Show `Awaiting host` plus bounded operation label; never predict success or mutate authority. Closing the screen does not discard durable pending work. |
+| Accepted owner ack | Disabled until the complete owner checkpoint commits | Enabled | Atomically apply owner state, then announce success, clear pending, rebuild, preserve valid local slots, and clamp/focus the acknowledged item. |
+| Rejected owner ack | Disabled until the complete owner resync commits | Enabled | Apply the same complete owner resync, clear pending, retain the local draft/selection where still valid, and show the host reason. |
+| Disconnect/incomplete bundle | Disabled | Enabled | Retain durable pending state and show reconnect/retry status; never enqueue a duplicate from drawing or reopening. |
+| Disposition-only or outcome-evicted delivery | Disabled until durable checkpoint/notice commit | Enabled | Do not install the disposition owner payload; render the one durable terminal notice exactly once. |
+| Authority exhausted | Disabled permanently for that owner | Enabled only for already valid local tokens | Show the terminal exhaustion reason; never wrap, retry as a new ID, or imply recovery. |
+| `rpgClasses` disabled while open | None | None | Dismiss the sheet after synchronous cleanup and show `RPG classes are disabled in this world`. |
+
+Status copy is bounded and persistent until replaced by the next attempted operation or acknowledgement. Success, pending, rejection, cooldown, fatigue, missing focus/equipment, and permission failure use distinct icon/text treatments and do not rely on color.
+
+### Scrolling, virtualization, and semantic focus
+
+The required layout probes are exactly `360x224`, `520x330`, and `700x420` GUI units. Creation panes, branch columns, Actives, Spells, Progression, and the expanded Controls list use bounded virtualization: model rows exist in stable registry order, drawing visits only rows intersecting the viewport, and hit testing/semantic activation use the same geometry. No partially clipped control is actionable.
+
+Every offset is clamped to `0...max(0, contentHeight - viewportHeight)` after open, resize, GUI-scale change, step/tab change, filter/content change, selected-item expansion, rank/prepare mutation, owner acknowledgement/resync, tutorial transition, and focus-driven reveal. Empty/short content forces zero. Scrollbars report the same content/viewport/offset values used by drawing and hit testing.
+
+`RPGUIElementID` is stable and semantic: creation step/path/branch/attribute/review IDs, tab IDs, `skill:<id>:rank:<1...3>`, action/spell IDs, slot `0...8`, and explicit operation IDs. Tab/Shift-Tab traverses enabled and informational semantic elements in stable order; arrows move spatially within grids/columns; Enter/Space activates the explicit focused control; Escape backs one creation/tutorial step before closing. Focus never disappears after mutation: retain the same ID when legal, otherwise choose the nearest preceding legal element and reveal it.
+
+### AppKit accessibility substrate
+
+The custom Metal canvas must expose a real AppKit accessibility tree. `Screen` supplies bounded semantic descriptors and activation by `RPGUIElementID`; `UIManager` owns the current semantic revision; `GameView` publishes main-thread `NSAccessibilityElement` children. Elements expose role, label, value/rank, selected/prepared/slotted state, enabled/locked state, canonical reason/help, frame, and press action. Tabs are a tab group; the creation wizard and each branch are groups; virtualized lists are scroll areas.
+
+All 27 rank cells belonging to the live character's path remain discoverable to accessibility even when offscreen. The Skills accessibility root identifies the current path and reports its three-branch, nine-skill, 27-rank scope. The other 135 registry rank cells are not attached to the live accessibility tree. Focusing or pressing an offscreen path-valid element first scrolls it into view through the same clamp function. Accessibility nodes are rebuilt only when semantic revision, layout, or viewport changes, never every rendered frame. The app posts focused-element, value-changed, and layout-changed notifications only after the corresponding committed state transition. The visible focus ring is shared by keyboard, controller, and VoiceOver focus. High Contrast changes borders/fills in addition to color; Reduce Motion removes tutorial/selection animation without removing state feedback.
+
+### Configurable keyboard chords and Controls layout
+
+The existing persisted keybinding map gains these exact actions and defaults:
+
+| Action key | Default chord |
 |---|---|
-| Max health | `20 + max(0, ST - 8)` for the first release. ST 8 preserves current 20 health; ST 13 gives 25. |
-| Fatigue max | `ST + floor((IQ - 8) / 2) + class/perk bonuses`, minimum 8. |
-| Fatigue regen | Base 0.10/sec while hunger > 6. +0.10/sec while standing still and not in combat. Saturation and sleep can grant short regen boosts. |
-| Known spell cap | `IQ`, matching TFT. Non-Arcanists need skill unlocks for higher-tier spells but still obey cap. |
-| Prepared spell slots | 3 base, +1 at IQ 11, +1 at IQ 14, +1 from Arcanist tree. |
-| Weapon readiness | Full effectiveness when ST meets family threshold; under-ST use still works but loses RPG special effects and may slow cooldown. |
-| adjustedDexterity | `DX + skill + focus/item + tacticalBonus - armorPenalty - rangePenalty - woundPenalty - fatiguePenalty - movementPenalty`. |
-
-### Class XP Curve
-
-Class XP is separate from vanilla XP to avoid damaging enchanting balance.
-
-Initial cap: class level 20.
-
-| Level band | XP to next | Intent |
-|---|---:|---|
-| 1-5 | `75 + level * 25` | Fast early identity |
-| 6-10 | `175 + level * 50` | Mid-game specialization |
-| 11-15 | `450 + level * 90` | Dungeon/boss progression |
-| 16-20 | `900 + level * 150` | Long-term mastery |
-
-Awards should prefer bounded, meaningful events:
-
-- First kill of a mob type per day/world period: small class XP.
-- Dungeon room cleared or spawner-like encounter resolved: medium class XP.
-- Boss and raid milestones: large class XP.
-- First craft/use of a class-relevant station or item: small one-time XP.
-- Mining/crafting/farming repeat actions: low XP with per-tick/per-minute caps.
-- Death: no class XP loss in the first release. This avoids punishing exploration and LAN desync bugs.
-
-Skill points:
-
-- +1 skill point per class level.
-- +1 attribute training point at levels 4, 8, 12, 16, and 20.
-- Additional attribute points can be milestone rewards later, but the first release keeps total earned attribute increases at 8 to match TFT's limit.
-
-## Classes
-
-Classes are called **Paths** in UI copy. "Class" can remain an internal domain term.
-
-All paths start at ST/DX/IQ total 32. The player can press "Reset to Path Default" or manually redistribute points while preserving the 8 minimum.
-
-| Path | Default ST/DX/IQ | Starting kit | Affinity | Tradeoff |
-|---|---:|---|---|---|
-| Adventurer | 11/11/10 | Stone tools, bread, torch bundle | Cheap general skills, no penalties | No exclusive cost discounts |
-| Vanguard | 13/10/9 | Stone sword, shield, leather chest | Melee, shield, armor, charge, brace | Higher spell and delicate-craft costs |
-| Ranger | 9/14/9 | Bow, arrows, leather boots, food | Bows, stealth, dodge, animals, travel | Lower heavy weapon readiness and armor casting |
-| Arcanist | 9/10/13 | Staff, 2 known spells, cloth robe item if added | Spells, staff, illusions, wards | Non-staff weapons and shield use penalize casting |
-| Artificer | 10/9/13 | Copper/iron-adjacent tool kit, redstone starter, template marker | Redstone, traps, repairs, template handling, constructs | Lower dodge and direct-combat discounts |
-| Wildspeaker | 10/12/10 | Seeds, food, simple bow, animal lure | Summons, animals, brewing, healing, foraging | Lower burst damage and heavy armor affinity |
-
-### Path Skill Trees
-
-Each path has three branches. A player can buy out-of-path skills at +1 point cost unless the skill is explicitly path-locked for balance. Path locks should be rare.
-
-#### Adventurer
-
-- **Survivalist**: hunger efficiency, faster recovery after sleep, lower fall stagger.
-- **Scavenger**: better low-tier loot rolls, faster tool swap, improved torch/food utility.
-- **Generalist**: reduced out-of-path surcharge, one extra prepared spell or combat stance.
-
-#### Vanguard
-
-- **Guardian**: defend, shield bash, armor penalty reduction, front-arc protection.
-- **Berserker**: charge attacks, low-health stagger resistance, sweeping weapon bonuses.
-- **Sentinel**: polearm brace, force-retreat reliability, protect nearby LAN allies.
-
-#### Ranger
-
-- **Marksman**: bow spread recovery, longbow readiness, weak-point shots, prone/kneeling analogue via crouch-aim.
-- **Skirmisher**: dodge-step, sprint-shot penalties reduced, disengage from mobs.
-- **Beastwise**: animal handling, pet commands, tracking particles, safer night travel.
-
-#### Arcanist
-
-- **Elementalist**: missile spells, fire/lightning/frost, staff crits on low 3d6 rolls.
-- **Illusionist**: blur, dazzle, image decoys, invisibility, disbelieve/reveal contests.
-- **Warder**: stone/iron flesh analogues, anti-projectile wards, dispel, staff defense.
-
-#### Artificer
-
-- **Machinist**: redstone diagnostics, trap placement, repeater/comparator helper overlays.
-- **Tinker**: repair efficiency, durability saves, tool readiness with lower ST.
-- **Architect**: template placement previews, support-fill hints, construct summons as bounded temporary entities.
-
-#### Wildspeaker
-
-- **Herbalist**: food/brewing improvements, healing poultices, antidotes.
-- **Summoner**: wolf/bee/golem-like temporary allies, upkeep fatigue, bounded caps.
-- **Warden of Paths**: terrain traversal, nature wards, animal calm/fear resistance.
-
-## Skills
-
-Skill registry should be data-like Swift definitions, not external scripts, for the first release.
-
-```swift
-public struct RPGSkillDef {
-    public let id: String
-    public let displayName: String
-    public let path: String
-    public let branch: String
-    public let maxRank: Int
-    public let prerequisites: [String]
-    public let cost: Int
-}
-```
-
-Skill effects are code-owned switch cases or typed effect structs, for example:
-
-- `adjustedDXBonus(action:context:)`
-- `fatigueCostMultiplier(spell:context:)`
-- `weaponReadinessBonus(family:)`
-- `unlockSpellCategory(category:)`
-- `grantAction(actionID:)`
-- `modifyXP(event:)`
-
-Avoid arbitrary closures in serializable data. Runtime closures are acceptable only in static code, never decoded from saves or network.
-
-## Spell System
-
-### Spell Categories
-
-| Category | TFT root | Pebble behavior |
-|---|---|---|
-| Missile | Magic Fist, Fireball, Lightning | Aimed projectile or ray. Range penalty affects cast roll. Cost is declared before cast; miss still spends more fatigue than thrown spells. |
-| Thrown | Blur, Freeze, Dazzle, Trip, Control | Direct target or small area under crosshair. Range penalty is per block band. Failure costs 1 fatigue unless spell says otherwise. |
-| Creation | Fire, Wall, Shadow, Image, Illusion, Summon | Temporary block/entity/visual creation with short range, no range penalty inside valid radius, bounded counts and durations. |
-| Special | Staff, Flight, Dispel, Mage Sight | Unique interactions with existing systems such as Flying Wand, effects, mobs, blocks, and UI overlays. |
-
-### Spell Definition
-
-```swift
-public struct RPGSpellDef {
-    public let id: String
-    public let displayName: String
-    public let category: RPGSpellCategory
-    public let iqRequired: Int
-    public let fatigueCost: Int
-    public let upkeepCost: Int
-    public let rangeBlocks: Double
-    public let cooldownTicks: Int
-    public let targetKind: RPGSpellTargetKind
-    public let tags: Set<String>
-}
-```
-
-Initial spell list:
-
-| Spell | Category | IQ | Cost | Effect |
-|---|---|---:|---:|---|
-| Staff Spark | Missile | 8 | 1 | Low damage ranged bolt; tutorial spell. |
-| Dazzle | Thrown | 8 | 2 | Short blind/accuracy penalty on mob or player. |
-| Trip | Thrown | 8 | 2 | Stagger/slow target if DX/IQ resistance fails. |
-| Blur | Thrown/self | 9 | 2 + upkeep | Incoming projectiles/spells suffer an adjustedDX penalty. |
-| Fire | Creation | 9 | 2 | Places temporary magical fire on valid loaded cells. |
-| Stone Flesh | Special | 10 | 3 + upkeep | Temporary damage absorption; armor-like hit stop. |
-| Wolf Image | Creation | 10 | 2 + upkeep | Decoy that vanishes on hit/touch and deals no damage. |
-| Wolf Illusion | Creation | 11 | 3 + upkeep | Belief-dependent decoy that can damage until disbelieved. |
-| Magic Fist | Missile | 11 | variable | Projectile; fatigue spent scales damage. |
-| Freeze | Thrown | 12 | 3 | Short slow/root with resistance check. |
-| Reveal | Special | 12 | 2 | Attempts to disbelieve/reveal illusions in a cone. |
-| Lightning | Missile | 13 | variable | Line ray; strong damage; strict range/armor penalties. |
-| Dispel | Special | 13 | 3 | Ends compatible magical effects and creations. |
-| Flight Step | Special | 14 | 4 + upkeep | Short controlled hover; intentionally weaker than Flying Wand. |
-| Summon Wolf | Creation | 14 | 4 + upkeep | Real temporary ally with hit points and host-owned AI. |
-
-### Casting Check
-
-For spells requiring a check:
-
-```text
-roll = deterministic 3d6
-success if roll <= adjustedDexterity
-3 = critical success
-4 = strong success
-16 = automatic failure
-17 = fumble
-18 = severe fumble
-```
-
-Pebble-specific fumble mapping:
-
-- `16`: failure, normal failure cost.
-- `17`: failure, full fatigue cost, action cooldown.
-- `18`: failure, full fatigue cost, short `staggered`, and staff/focus durability damage if any.
-
-This preserves TFT's risk curve without making players drop or break important items constantly in a survival sandbox.
-
-### Illusions and Disbelief
-
-Illusions are a core differentiator and should be implemented as explicit transient entities:
-
-- `Image`: visible decoy, no damage, vanishes when touched/hit.
-- `Illusion`: can deal reduced real damage until the target succeeds at a Reveal/Disbelieve IQ check or it is killed.
-- Mobs use AI heuristics and IQ-like resistance from mob category.
-- Players use manual Reveal or direct attack. LAN host validates outcomes.
-- Illusions are never persisted as chunk entities and are removed on save/reload.
-
-## Combat Additions
-
-### Action-Lock Model
-
-Add small, explicit action locks:
-
-| Lock | Duration | Blocks |
-|---|---:|---|
-| `attackCommitted` | existing attack cooldown window | Repeated full-power attack |
-| `castCommitted` | spell windup/cooldown | Other casts and heavy attacks |
-| `guarding` | while held, drains fatigue on block | Sprint and casting |
-| `dodging` | 8-12 ticks | Attack/cast, except class perks |
-| `winded` | 20-60 ticks | Sprint, full-power cast, special action |
-
-### Combat Options
-
-| Option | Input proposal | Rule |
-|---|---|---|
-| Charge attack | Sprint for at least 0.8 sec, then melee | Bonus knockback. Polearms/spears/tridents get extra damage if path is straight enough. |
-| Brace | Hold sneak + right-click with spear/trident/staff | If a charging enemy enters reach, make a host-authoritative counter hit before normal contact. |
-| Defend | Hold right-click with shield/staff/guard-capable weapon | Reduces or checks incoming non-missile attacks. Uses fatigue and adjustedDX. |
-| Dodge | Double-tap strafe or bound key | Short lateral movement and projectile/spell defense. Higher DX improves recovery. |
-| Shield bash | Attack while guarding with shield | Low damage, ST vs target check, applies stagger/knockback. |
-| Force retreat | Automatic after clean melee hit with no recent damage taken | Applies modest knockback/stagger if target has space and resistance fails. |
-| Disengage | Back/strafe while guarding or dodge from engaged mob | Reduces mob follow-up chance; player agency replacement for one-hex option. |
-
-### Facing and Engagement in First Person
-
-Pebble should not add hex facing. Instead:
-
-- Front arc: target within +/-70 degrees of entity facing.
-- Side arc: 70-135 degrees, eligible for +DX/sneak bonuses.
-- Rear arc: >135 degrees, eligible for backstab/ambush bonuses.
-- Engagement: a hostile entity in melee reach and front arc can suppress sprint-start, long casts, and bow full accuracy unless the player has a skirmisher/disengage skill.
-
-### Injury
-
-Map large-hit thresholds to action-game states:
-
-- `staggered`: from taking >=25% max health in 1.5 sec; -2 adjustedDX and partial movement hitch for 20 ticks.
-- `winded`: from fatigue reaching 0 or failed heavy action; slower regen and no sprint for 40 ticks.
-- `knockedDown`: reserved for shield-rush, boss hits, or explicit spells. Avoid frequent hard knockdown in normal play.
-
-## Weapons and Armor
-
-### Weapon Families
-
-| Family | Examples | Full-effect ST | DX/IQ notes |
-|---|---|---:|---|
-| Dagger | Dagger/main-gauche if added | 8 | Fast, low damage, rear/HTH bonuses. |
-| Sword | Existing swords | 9 | Baseline melee, sweeping skills. |
-| Axe | Existing axes | 10 | Higher stagger/armor pressure. |
-| Hammer/mace | New later | 12 | High stagger, slow cooldown. |
-| Spear/polearm | Trident/spear | 10 | Brace, reach, charge. |
-| Bow | Existing bow | 9 | DX affects spread/recovery. |
-| Longbow | New or high-tier bow | 11 | Range damage, slower draw. |
-| Crossbow | Existing crossbow | 12 | Ready/reload skills; prone/crouch bonus analogue. |
-| Staff | New focus item | 8 | Armed for engagement; spell focus; weak physical attack. |
-| Wand/focus | New later | 8 | Faster casting, weaker defense. |
-
-Under-ST use:
-
-- Normal vanilla use still works.
-- RPG special effects do not trigger.
-- Heavy family cooldown is 10-25% slower.
-- Fumble chance increases only for RPG special actions, not ordinary block breaking.
-
-### Armor Penalties
-
-Existing armor defense remains unchanged. RPG penalties apply to adjustedDX and fatigue:
-
-| Armor class | Casting/skill penalty | Fatigue regen | Notes |
-|---|---:|---:|---|
-| No armor/cloth | 0 to -1 | 100% | Arcanist-friendly. |
-| Leather/gold | -1 to -2 | 95% | Ranger-friendly. |
-| Chain/iron | -3 | 85% | Vanguard can reduce. |
-| Diamond/netherite | -4 to -5 | 75% | Strong protection, strong casting penalty. |
-| Shield ready | -1 cast penalty; blocks some spells unless trained | 90% while guarding | Mirrors TFT staff/shield tension. |
-
-Do not globally reduce normal movement speed from armor in the first release. Pebble's movement is golden-tested and player expectations are Minecraft-like.
-
-## Character Creation UI
-
-### Entry Points
-
-1. **New World**: `WorldCreateScreen` adds "Character..." after world type/dungeons. `Create World` is disabled until a character is confirmed when RPG mode is on.
-2. **Existing world without RPG state**: first load opens `CharacterCreateScreen` before pointer capture. The player cannot move until confirming or choosing Adventurer defaults.
-3. **LAN guest**: first accepted guest without host-side RPG record opens the same creation flow. The host persists the result in `lan_players`.
-4. **Creative worlds**: default to Adventurer and allow "Skip RPG" if world rule `rpgClasses` is false.
-
-### World Create Layout
-
-Current world creation is compact and button-stacked. Add one row:
-
-```text
-World Name
-[ text field ]
-Seed
-[ text field ]
-[ Game Mode: Survival ]
-[ Difficulty: Normal ]
-[ World Type: Default ]
-[ Dungeons: Normal ]
-[ Character: Adventurer  ST 11 DX 11 IQ 10 ]
-[ Create World ] [ Cancel ]
-```
-
-Clicking Character opens the full creation screen. The row label updates after confirmation.
-
-### Character Create Screen
-
-Use the existing dirt background and immediate-mode UI style.
-
-Desktop layout:
-
-```text
-Create Character
-
-[Path list 96w] [center preview/summary 132w] [attributes/derived 156w]
-
-Path list:
-> Adventurer
-  Vanguard
-  Ranger
-  Arcanist
-  Artificer
-  Wildspeaker
-
-Center:
-Path name
-Short role line
-Starting kit icons/list
-Complexity: Beginner/Medium/Advanced
-
-Right:
-ST [-] 11 [+]   Health 23   Fatigue 12
-DX [-] 11 [+]   Cast/check 11
-IQ [-] 10 [+]   Spells known 10
-Unassigned: 0
-
-[Starter Skill: Survivalist I]
-[Known Spells...] (enabled mainly for Arcanist)
-
-[Reset to Path Default] [Confirm] [Back]
-```
-
-Small-height layout:
-
-- Collapse center preview into a two-line summary.
-- Path list becomes a cycling button: `Path: Adventurer`.
-- Attributes remain visible because they are the decision core.
-
-### Creation Rules
-
-- Minimum 8 in each attribute.
-- Total must equal 32 at creation.
-- Confirm shows a one-line warning if the chosen path is advanced.
-- Adventurer is recommended and first in the list.
-- Known spells cannot exceed IQ.
-- Arcanist starts with 2 prepared spells; other paths start with no spells unless they spend starter choice on Hedge Magic.
-- Starting gear is regular item stacks, validated through item registry.
-
-### Character Screen In Game
-
-Keybind: `K` opens `CharacterScreen` by default, rebindable in Options -> Controls.
-
-Tabs:
-
-1. **Overview**: path, level, class XP, ST/DX/IQ, derived health/fatigue, current penalties.
-2. **Skills**: tree by branch. Nodes show rank, cost, prerequisites, and whether out-of-path surcharge applies.
-3. **Spells**: known/prepared spells. Drag/click into prepared slots; select current staff spell.
-4. **Stats**: class XP history, combat/magic/action stats, relevant advancement links.
-
-HUD:
-
-- Fatigue bar above or below the existing XP bar, visually distinct from XP.
-- Small class badge near the level number when GUI is visible.
-- Selected prepared spell icon/text near hotbar when holding a staff/focus.
-- Action bar messages for failed conditions: "Too exhausted", "Need IQ 12", "Shield blocks this spell", "Target out of range".
-
-## Art and Asset Plan
-
-The feature must ship with complete visible/audio coverage. "Fallback later" is not acceptable because class choice, spells, and progression are player-facing identity systems.
-
-### Asset Source Rules
-
-Use this priority order:
-
-1. Existing Pebble/Faithful pack art when the existing item/entity/block already maps cleanly.
-2. Deterministic procedural 16x16 icon generation in `PebbleCore/Render/Icons.swift`.
-3. Existing `UICanvas` geometry/text for UI badges, panels, progress bars, and tree nodes.
-4. Existing particle tile recipes in `ParticlesM.swift` with color/size/life variations.
-5. Existing synthesized audio recipes in `Audio.swift` with new cue names if needed.
-6. New packaged binary art only with explicit license/provenance and `scripts/verify-pack-assets.sh` coverage.
-
-Do not use scraped web images, unlicensed RPG icon packs, generative output without a license decision, or Mojang/Microsoft assets. The first implementation slice should need no new binary art.
-
-### Asset Manifest
-
-Add a static manifest, likely `Sources/PebbleCore/Game/RPGAssetManifest.swift`, that every RPG definition references by ID:
-
-```swift
-public struct RPGAssetManifestEntry: Equatable {
-    public var id: String
-    public var iconKind: RPGIconKind
-    public var particleCue: String?
-    public var soundCue: String?
-    public var fallbackLabel: String
-}
-```
-
-Required manifest entries:
-
-| Surface | Entries | Source |
-|---|---|---|
-| Path badges | Adventurer, Vanguard, Ranger, Arcanist, Artificer, Wildspeaker | UICanvas shield/bow/star/gear/leaf glyphs plus deterministic colors. |
-| Skill branches | 18 branch icons | UICanvas glyphs; no PNG dependency. |
-| Spells | Every spell in the initial spell list | Procedural icon pixels with stable palette, shape, and symbol. |
-| Staff/focus items | Staff first; wand/focus later | Prefer existing stick/blaze-rod-like pack art if registered, otherwise procedural staff icon. |
-| Fatigue HUD | bar, empty/full colors, exhaustion flash | UICanvas only. |
-| Spell particles | spark, dazzle, trip, blur, fire, stone, reveal, lightning, summon | Existing particle tiles plus deterministic color/life recipes. |
-| Spell sounds | cast, fizzle, crit, ward, reveal, summon | Existing synthesized audio engine; no sample files. |
-| Summons/illusions | Wolf image, wolf illusion, temporary ally overlays | Existing wolf/player/entity models plus tint/particle overlays; no new model in first slice. |
-
-### Asset Gate
-
-- Add `RPGAssetManifestTests` to prove every class, branch, skill, spell, action, and item references a manifest entry.
-- Extend `IconTests` for every new item icon and all spell icons; tests should verify 16x16 RGBA size, non-empty alpha, deterministic output, and distinct silhouettes for major spell categories.
-- If a new packaged file is added, update `scripts/verify-pack-assets.sh` with required entries and license file checks.
-- Add a screenshot smoke for Character creation, Character sheet, Spellbook, and in-world HUD so missing icon/text layout issues are visible before closeout.
-- Do not let a missing pack entry silently produce a blank icon; procedural fallback must be explicit and tested.
-
-## Persistence
-
-Store `RPGCharacterState` inside the existing player JSON:
-
-```swift
-d["rpg"] = enc(rpgState)
-```
-
-Load behavior:
-
-- Missing `rpg`: `created = false`, pending creation UI.
-- Corrupt `rpg`: log warning, reset to uncreated Adventurer pending state, preserve all vanilla player data.
-- Unknown IDs: drop unknown skills/spells; unknown class becomes Adventurer.
-- Over-budget points: trim in deterministic registry order and refund valid unspent points if possible.
-- Invalid finite numbers: clamp or zero, never crash.
-- Level/point mismatch: recompute derived level/points from `RPGCharacterState.xp`, clamp spending, and save only the repaired bounded state.
-- World rule mismatch: if `rpgClasses == 0`, keep decoded RPG state but do not force creation or apply RPG mechanics.
-
-No schema migration is required for the first version because player JSON already supports extension fields.
-
-LAN guest persistence:
-
-- Extend `LANPeerRecordSnapshot` with optional `rpg: RPGCharacterState?`.
-- Extend the app-side `LANTransport.swift` JSON bridge to store/read an `"rpg"` object inside `lan_players` rows.
-- Decode failures for the `"rpg"` subobject drop only RPG state and request recreation; they must not drop the whole peer record if player state/inventory are otherwise valid.
-- Host records remain authoritative on reconnect. Client-local cached RPG presentation is discarded when a host restore or direct RPG-change snapshot arrives.
-- `LANHostGhostRegistry` must hydrate ghost players with host-owned RPG state before resolving RPG combat/spell intents, while keeping ghosts nonpersistent and outside `world.entities`.
-
-## LAN Design
-
-Implementation note: this section preserves the more elaborate contrary-architect sketch. The current implementation uses protocol v5 `LANRPGIntent` instead of separate create/spell/action intent structs, includes typed select/cast/use proposals for the unified prepared-action path, stores full state in host peer records, keeps periodic player snapshots lean, and sends full repaired RPG state only in direct RPG-change/restore `LANPlayerState` snapshots for owning-client convergence. Separate `LANRPGSummary` and `LANRPGVisualEvent` arrays remain a future optimization, not a shipped requirement.
-
-### Ownership
-
-- Singleplayer: local `Player.rpg` is authoritative.
-- Host player: local host `Player.rpg` is authoritative and saved in `player(world,json)`.
-- LAN guest: host stores guest RPG state in `lan_players(world, playerID, json)`. Client local resume may cache presentation, but host record wins.
-- Remote player proxies: carry only enough RPG summary for rendering, not full authority.
-
-### Protocol Additions
-
-Current LAN frames are strict, versioned, type-tagged JSON payloads with a 1 MiB cap. RPG networking must follow the existing pattern: append message IDs, bump protocol version, and keep protocol models in `PebbleCore/Net`.
-
-The sketch below proposed separate bounded Codable payloads. The implemented v5 payload is the consolidated `LANRPGIntent`; full RPG state is not present in normal high-frequency `LANPlayerState`.
-
-```swift
-public struct LANRPGSummary: Codable, Equatable {
-    public var playerID: String
-    public var classID: String
-    public var classLevel: Int
-    public var revision: Int
-    public var fatigueRatio: Double
-    public var selectedSpell: String?
-    public var actionState: String?
-}
-
-public struct LANRPGCreateIntent: Codable, Equatable {
-    public var actionSequence: Int
-    public var classID: String
-    public var attributes: RPGAttributes
-    public var starterSkillID: String?
-    public var starterSpellIDs: [String]
-}
-
-public struct LANSpellIntent: Codable, Equatable {
-    public var actionSequence: Int
-    public var spellID: String
-    public var selectedHotbarSlot: Int
-    public var target: LANTargetReference
-}
-
-public struct LANRPGActionIntent: Codable, Equatable {
-    public var actionSequence: Int
-    public var actionID: String
-    public var selectedHotbarSlot: Int
-    public var target: LANTargetReference?
-}
-
-public struct LANRPGVisualEvent: Codable, Equatable {
-    public var eventID: Int
-    public var casterPlayerID: String
-    public var assetCueID: String
-    public var source: LANTargetReference
-    public var target: LANTargetReference?
-    public var tick: Int
-}
-```
-
-`LANTargetReference` should be typed and bounded:
-
-- entity id
-- block coordinate from current crosshair
-- direction ray with bounded max distance
-- self
-
-Never accept raw arbitrary effect scripts, arrays of coordinates, or client-supplied damage values.
-
-Protocol rules:
-
-- Append new `LANMultiplayerMessageKind` cases after the current maximum. Do not reuse or reorder existing raw values.
-- Bump `LAN_MULTIPLAYER_PROTOCOL_VERSION` because strict peers reject unsupported versions rather than negotiate optional fields.
-- Add `rpgSummaries` and `rpgVisualEvents` to `LANReplicationBatch`, capped to `LAN_MULTIPLAYER_MAX_REPLICATION_PLAYERS` and a new small visual-event cap.
-- `LANRPGSummary.playerID` is the sanitized peer ID; `classID`, `selectedSpell`, `actionState`, and `assetCueID` are registry IDs capped by bytes and validated against static registries.
-- `LANRPGSummary` is sent only when changed, on reconnect/restore, and at a low background cadence. It is not a per-frame dump.
-- `LANRPGVisualEvent` is cosmetic only. Clients may spawn particles/play sounds from the asset manifest, but must not apply damage, fatigue, XP, block changes, or entity spawns from it.
-- Worst-case encoded replication batches with max chunk sections, inventories, RPG summaries, and visual events must stay below `LAN_MULTIPLAYER_MAX_FRAME_BYTES`.
-
-### Creation Handshake
-
-RPG creation is an authority transition, not a local menu result:
-
-1. Host advertises `rpgClasses` in `LANWorldSummary`.
-2. Guest without host RPG state is accepted into a blocked pre-game creation state.
-3. Guest submits `LANRPGCreateIntent` with class, attributes, starter skill, and starter spells.
-4. Host validates totals, known IDs, IQ spell caps, starter-kit availability, and world rule.
-5. Host persists the resulting `RPGCharacterState` into the peer record and sends an accepted summary/restore.
-6. Guest enters gameplay only after the host acknowledgement.
-
-If validation fails, the guest stays on the creation screen with a sanitized reason. The client never creates items, skill points, or spells directly.
-
-### Host Validation
-
-For every RPG intent:
-
-1. Peer is accepted, alive, same dimension, and not disconnected.
-2. Host has an RPG record for the peer.
-3. Peer has permission for combat/template/AI/creative as relevant.
-4. `actionSequence` is exactly one greater than the last accepted sequence; duplicates and jumps request resync and do not mutate state.
-5. Action/spell exists and is unlocked.
-6. Cooldown and fatigue pass.
-7. Held item and selected slot match required focus/weapon using the host-owned inventory snapshot or ghost hydration.
-8. Target is loaded, in range, same dimension, and line-of-sight/reach valid.
-9. Creation/summon caps pass for caster, world, spell, and loaded area.
-10. Effect is applied only through host-owned world mutation APIs.
-11. Host increments RPG revision when state changes and emits bounded summary/visual events to clients.
-12. Host rejects duplicate, stale, or future-skipping sequences without state mutation.
-
-### Packet and Cadence Budget
-
-- RPG summaries are tiny: one per visible player, capped to accepted peers plus host.
-- RPG visual events are transient and drop-oldest when capped; state correctness must not depend on delivery.
-- Active spell creation must prefer normal block/entity/chunk replication for durable world state. Do not embed block arrays or entity definitions in visual events.
-- Background RPG summary cadence should start at 1.0 seconds, matching existing low-frequency world/player background replication. Immediate summaries are sent only on creation, level up, selected spell change, start/stop action state, and fatigue threshold crossings such as full/empty.
-- The host should avoid echoing every fatigue tick; send ratios when crossing coarse bands or when a local HUD owner needs authoritative correction.
-
-### LAN Reconnect
-
-- Host `lan_players` record includes `rpg`.
-- Guest class creation is not repeated unless host record is missing or admin command allows reset.
-- Skill unlocks and class XP are part of host-owned guest persistence.
-- Reconnect restore includes `LANRPGSummary` and the current host revision.
-- If a guest reconnects with stale local cached RPG UI, the host summary wins and the client refreshes the Character screen/spellbook.
-- If a peer record has valid position/inventory but corrupt RPG data, reconnect succeeds into the blocked creation state instead of rejecting the whole peer.
-
-## Security Review of Plan
-
-Status: CONDITIONAL PASS after the contrary-architect revisions above. Implementation must run Full tier because this touches persistence, network behavior, and untrusted structured input.
-
-Findings:
-
-- [HIGH] LAN spell/action intents can become remote world mutation if they carry raw coordinates or effect definitions. Exact fix: typed target references only; host derives actual effect cells/entities.
-- [HIGH] Duplicated LAN spell/action intents can double-apply state. Exact fix: bounded exact-next per-peer action sequences, duplicate rejection, and no mutation on stale/future-skipping requests.
-- [HIGH] LAN character creation can become client-authoritative progression. Exact fix: creation intents are proposals only; host validates, persists, grants starter items, and acknowledges before gameplay.
-- [HIGH] Full RPG state in high-frequency player replication can bloat frames and leak authority. Exact fix: full state stays in saves/peer records; batches carry capped revisioned summaries.
-- [HIGH] Save decode can become an unchecked registry index if skill/spell/class IDs are trusted. Exact fix: registry lookup returns optional and unknown IDs are dropped before hot paths.
-- [HIGH] Summons/creation spells can create unbounded entities/blocks. Exact fix: per-caster, per-world, per-spell caps plus loaded-area checks and nonpersistent transient entities by default.
-- [MEDIUM] New message kinds without a protocol bump can confuse strict LAN peers. Exact fix: append IDs, bump protocol version, and test old-version rejection and payload-type mismatch.
-- [MEDIUM] Cosmetic spell events can accidentally become gameplay authority. Exact fix: `LANRPGVisualEvent` only references asset cues and targets; gameplay arrives through normal host snapshots/deltas.
-- [MEDIUM] Missing or unlicensed RPG icons can ship unnoticed. Exact fix: manifest-backed asset coverage, no unlicensed art, `IconTests`, screenshot smoke, and asset-verification script updates for any binary files.
-- [MEDIUM] Class XP can be farmed by AFK loops. Exact fix: per-event caps, diminishing repeat awards, milestone-heavy curve.
-- [MEDIUM] Random casting checks can break determinism if they use `Double.random` or unordered iteration. Exact fix: use deterministic RNG seeded from world/player/action sequence and stable target ordering.
-- [MEDIUM] Heavy armor penalties could silently move vanilla gameplay. Exact fix: apply penalties only to RPG checks/fatigue at first, not core movement.
-- [LOW] UI can overflow on small windows. Exact fix: compact layout and screenshot hooks at small and normal sizes.
-
-Not reviewed yet:
-
-- Exact line-level code because no implementation exists.
-- Balance numbers in real combat.
-- Actual packet sizes and latency until the implementation adds concrete payloads and runs frame-budget tests.
-
-## Tester Plan
-
-### Focused Unit Tests
-
-Add tests under `Tests/PebbleCoreTests/`:
-
-- `RPGCharacterStateTests`
-  - missing RPG state requests creation
-  - corrupt/unknown IDs clamp and drop safely
-  - over-budget skill/attribute points are repaired deterministically
-  - old player saves still load
-  - `revision` clamps and increments only through accepted state changes
-  - `rpgClasses = 0` preserves state but disables prompts/mechanics
-- `RPGProgressionTests`
-  - XP curve exact level thresholds
-  - skill point totals
-  - attribute increase cap
-  - repeated event cap
-  - XP awards are deterministic when several events land in one tick
-- `RPGSpellTests`
-  - adjustedDX armor/range/fatigue/wound math
-  - deterministic 3d6 rolls
-  - critical/fumble mapping
-  - IQ known-spell cap
-  - upkeep drains/reserves fatigue
-  - spell creation/summon caps reject overflow without partial effects
-- `RPGCombatOptionTests`
-  - charge path threshold
-  - brace ordering
-  - shield-bash ST check
-  - force-retreat only after clean physical hit
-- `RPGSaveLANTests`
-  - player JSON stores and repairs `rpg`
-  - `lan_players` stores and repairs nested `rpg`
-  - corrupt nested RPG data does not discard valid peer position/inventory
-  - guest reconnect preserves host-owned RPG state
-- `RPGLANProtocolTests`
-  - new message kinds append raw IDs and protocol version is bumped
-  - codec rejects old/unknown versions and payload type mismatches
-  - worst-case replication batches with max chunk sections plus RPG summaries/events stay under the 1 MiB frame cap
-  - `LANRPGSummary` strings clamp by bytes and reject unknown registry IDs
-- `RPGLANHostValidationTests`
-  - creation intent rejects invalid class, bad attribute sum, excessive spells, unknown starter choices
-  - duplicate/stale/future-skipping action sequences do not mutate state and request resync when needed
-  - spell intents reject unknown spells, locked spells, out-of-range target, unloaded target, wrong dimension, wrong focus, wrong slot, insufficient fatigue, dead peer
-  - visual events are emitted only after accepted host mutation/check resolution
-- `RPGAssetManifestTests`
-  - every path, branch, skill, spell, action, focus item, particle cue, and sound cue has a manifest entry
-  - every icon resolves to pack art or deterministic procedural pixels
-  - every procedural icon is 16x16 RGBA, non-blank, deterministic, and distinct for major spell categories
-- `RPGUIModelTests`
-  - attribute allocation cannot go below 8 or above total 32 at creation
-  - compact layout keeps path selector, ST/DX/IQ, unassigned count, and Confirm visible
-  - spellbook prepared slots enforce known/prepared caps
-
-### UI Smoke Hooks
-
-Add allowlisted screen hooks:
-
-- `PEBBLE_OPEN_SCREEN=rpg`
-- `PEBBLE_OPEN_SCREEN=inventory`
-
-Required screenshots:
-
-- 480x270 compact create screen
-- 854x480 normal create screen
-- 480x270 compact character sheet
-- 854x480 spellbook
-- in-world HUD with fatigue bar and second-row RPG quick slots
-- LAN remote-caster visual event if active spells are included
-
-Screenshots must be captured from the installed app for final closeout, not only `swift run`.
-
-### Fuzz, Property, and Budget Tests
-
-- Seeded decode fuzz for `RPGCharacterState`, `LANRPGCreateIntent`, `LANSpellIntent`, `LANRPGActionIntent`, and `LANRPGSummary`.
-- Property checks for attribute budget repair, skill-point repair, known/prepared spell subset repair, and deterministic target ordering.
-- Packet-budget samples for idle max-client replication, active max-client casting, and reconnect restore. Report sample count and max encoded byte size.
-- Performance sample for opening Character creation and Spellbook with all classes/spells registered; report at least 5 samples or state if only smoke-tested.
-
-### Live LAN RPG Probe
-
-Extend `scripts/live-lan-test.sh` or add an RPG-specific mode. The final implementation must prove on `/Applications/Pebble.app` and Neo:
-
-- Host advertises `rpgClasses`.
-- Neo first-join opens character creation or accepts a scripted test character through the same host-validated creation intent.
-- Host persists guest RPG state in `lan_players`.
-- Guest casts one basic staff spell; host accepts the intent and emits visual proof.
-- Host and guest both observe the visual event, while durable state arrives through normal replication.
-- Neo reconnects and receives the same host-owned class, level, fatigue, selected spell, and position/inventory.
-- Duplicate/replayed spell intent is rejected in logs or probe output.
-
-### Full Verification Gate
-
-For implementation, minimum closeout:
-
-```bash
-swift build -c release
-swift test
-swift run -c release pebsmoke
-bash scripts/security-scan.sh
-bash scripts/verify-pack-assets.sh
-```
-
-Because this will touch persistence and LAN, final closeout should also run:
-
-```bash
-bash scripts/pipeline.sh
-scripts/live-lan-test.sh --deploy --timeout 90
-```
-
-Installed-app proof should include:
-
-- create a new Survival world
-- verify `rpgClasses` world rule in saved metadata
-- complete character creation
-- verify ST/DX/IQ shown in character screen
-- earn class XP
-- learn/unlock a skill
-- cast a basic spell with a staff
-- verify every new visible icon/particle cue appears or has an explicit procedural fallback
-- save and reload
-- LAN guest first-join creation and reconnect preservation
-- encoded LAN packet-size evidence for the new RPG message/batch shapes
-
-## Implementation Files
-
-Likely files to add:
-
-- `Sources/PebbleCore/Game/CharacterProgression.swift`
-- `Sources/PebbleCore/Game/RPGAssetManifest.swift`
-- `Sources/PebbleCore/Systems/Spells.swift`
-- `Sources/PebbleCore/Net/LANRPG.swift` if the payloads are kept separate from `LANMultiplayer.swift`.
-- `Tests/PebbleCoreTests/RPGCharacterStateTests.swift`
-- `Tests/PebbleCoreTests/RPGProgressionTests.swift`
-- `Tests/PebbleCoreTests/RPGSpellTests.swift`
-- `Tests/PebbleCoreTests/RPGCombatOptionTests.swift`
-- `Tests/PebbleCoreTests/RPGSaveLANTests.swift`
-- `Tests/PebbleCoreTests/RPGLANProtocolTests.swift`
-- `Tests/PebbleCoreTests/RPGLANHostValidationTests.swift`
-- `Tests/PebbleCoreTests/RPGAssetManifestTests.swift`
-- `Tests/PebbleCoreTests/RPGUIModelTests.swift`
-
-Likely files to edit:
-
-- `Sources/PebbleCore/Entity/Player.swift`: add `rpg`, save/load, derived stats hooks.
-- `Sources/PebbleCore/Entity/Living.swift`: add or reuse short effects for stagger/winded if not modeled as status effects.
-- `Sources/PebbleCore/Systems/Combat.swift`: combat option helpers and weapon readiness hooks.
-- `Sources/PebbleCore/Game/GameCore.swift`: input routing, XP events, action execution, world entry creation gate.
-- `Sources/PebbleCore/Game/Saves.swift`: store/read world `rpgClasses` rule and player `rpg`; add save validation tests.
-- `Sources/PebbleCore/Net/LANMultiplayer.swift`: append bounded RPG summary/intent/visual payloads, new message kinds, and protocol version bump.
-- `Sources/PebbleCore/Net/LANReplication.swift`: host validation, summary/event replication, duplicate sequence rejection, reconnect summary application.
-- `Sources/PebbleCore/Net/LANGameplayOrchestration.swift`: extend peer record snapshots with optional RPG state and testable result types.
-- `Sources/PebbleCore/Net/LANGhostActor.swift`: hydrate host ghosts with RPG state for authoritative remote intent execution.
-- `Sources/Pebble/LANTransport.swift`: bridge nested `rpg` in `lan_players` JSON and route create/action/spell intents without owning rules.
-- `Sources/Pebble/MenusM.swift`: world creation row and character creation screen entry.
-- `Sources/Pebble/ScreensM.swift`: character screen/spellbook if kept with gameplay screens.
-- `Sources/Pebble/HudM.swift`: fatigue bar, class badge, selected spell display.
-- `Sources/PebbleCore/Render/Icons.swift`: deterministic path/spell/focus icons and tests.
-- `Sources/Pebble/ParticlesM.swift`: RPG particle cues using existing particle tiles.
-- `Sources/Pebble/Audio.swift`: synthesized RPG cue names if needed.
-- `Sources/Pebble/main.swift`: allowlisted screenshot hooks for RPG screens.
-- `Sources/Pebble/CommandsM.swift`: optional debug/admin commands such as `/rpg status`, `/rpg resetCharacter` gated to local/host permissions.
-- `scripts/verify-pack-assets.sh`: required only if new packaged art/license files are added.
-- `scripts/live-lan-test.sh`: RPG creation/cast/reconnect probe mode.
-- `README.md`, `ARCHITECTURE.md`, `SECURITY.md`, `CONTRIBUTING.md`: update only once implementation behavior exists.
-
-## Open Questions
-
-1. Should character choice be one-time per world, or should a rare craftable "Respec Tome" allow changing path while preserving earned XP?
-2. Should spells be enabled in Peaceful/Creative by default, or should Creative bypass fatigue and skill locks for testing?
-3. Should LAN hosts be able to force Adventurer/default characters for all guests?
-4. Should class XP be awarded for building/templates, and if so how do we prevent large-template placement from farming XP?
-5. Should the first active spell slice include hostile player-vs-player effects, or should LAN spells initially target only mobs/self/blocks until PvP balance is proven?
-
-## Recommended First Implementation Slice
-
-Start with a low-risk vertical slice:
-
-1. Add `RPGCharacterState`, class registry, attribute validation, XP curve, and tests.
-2. Add `RPGAssetManifest`, deterministic path/spell/focus icons, and asset tests.
-3. Persist state inside `Player.save/load` and persist `rpgClasses` world rule.
-4. Add character creation UI with paths and ST/DX/IQ allocation.
-5. Add in-game character overview screen.
-6. Add fatigue bar but no active spells yet.
-7. Prove old saves load, new saves reload, icons resolve, and screenshots are non-overlapping.
-
-Do not begin spells or LAN active intents until the passive character model is tested, save-compatible, asset-complete, and screenshot-verified. Spells and LAN intents are the highest-risk part of the design and should be a second slice with protocol-version, packet-budget, replay, and live Neo proof gates.
+| `rpgCharacter` | `KeyK` |
+| `rpgCycleAction` | `KeyO` |
+| `rpgUseAction` | `KeyL` |
+| `rpgQuickSlot1` ... `rpgQuickSlot9` | `Shift+Digit1` ... `Shift+Digit9` |
+
+A persisted chord is one internal key code optionally preceded by unique modifiers in canonical `Command+Control+Option+Shift+Key` order. Existing one-key values remain valid. Unknown keys, repeated modifiers, modifier-only values, strings over 64 UTF-8 bytes, or malformed separators fall back only that action to its default. Capture shows the complete chord, Escape cancels capture, and Reset restores the one default. Conflicts are displayed beside both actions and require an explicit second activation to accept; they are never silently rebound.
+
+The Controls tab becomes a clamped virtualized list so all existing and RPG bindings are reachable at `360x224`. Character, cycle, use, and all nine slot chords are configurable. Matching uses the saved chord rather than fixed K/O/L/digit comparisons. Unmodified digits continue to select the normal hotbar; only the configured full chord invokes an RPG slot. The `rpgClasses` rule gates the sheet, HUD row, keyboard/controller routes, local action paths, and LAN requests in Survival and Creative.
+
+### RPG-scoped GameController contract
+
+GameController support in this feature is explicitly RPG-scoped; documentation and UI must not claim general controller movement/gameplay support. Controller input is converted to the same bounded semantic commands as keyboard input and never calls progression/network mutators directly.
+
+- In the sheet, D-pad/left-stick moves focus, A activates, B backs/closes, left/right shoulder changes tab, and right-stick vertical input scrolls with hysteresis and bounded repeat.
+- In world mode, Options opens Character, left shoulder cycles the prepared action, and right shoulder uses the selected prepared action.
+- Holding left trigger maps slots 1...4 to D-pad Up/Right/Down/Left, slots 5...8 to face buttons Y/B/A/X in spatial clockwise order, and slot 9 to right-stick click.
+- Connect, disconnect, focus loss, and screen transition clear held/repeat state. Inputs already held at connection or context change do not fire. Analog trigger/stick thresholds use enter/exit hysteresis; one physical edge yields at most one mutation request.
+
+Controller glyph/help copy switches only after a real controller input and keyboard help remains available. Synthetic mapping tests are necessary but cannot replace installed proof with a physical compatible controller when controller support is claimed verified.
+
+### Tutorial persistence and installed design coverage
+
+Tutorial state is local UI preference, not authoritative RPG/player/LAN state. `RPG_TUTORIAL_VERSION = 1`; an optional `rpgTutorialVersion` setting decodes missing/invalid values as zero. The first accepted character-sheet entry with a lower seen version opens four pages: rank branch skills; prepare and explicitly select actions; choose and assign a local slot; close the sheet and use configured keyboard/controller chords. Back/Next/Finish/Skip are keyboard-, controller-, and accessibility-operable. Only Finish or explicit Skip persists the current version; merely opening or crashing does not. Raising the version re-presents revised guidance. First-XP-loop guidance remains on Character through level 1 regardless of tutorial status.
+
+Design Sign-off uses the fresh installed `/Applications/Pebble.app`, not source inspection alone. The installed harness builds six deterministic path fixtures. Each fixture must enumerate exactly three branches, nine skill nodes, and 27 rank cells; their aggregate must enumerate exactly six paths, eighteen branches, fifty-four skill nodes, and 162 rank cells, with every global semantic ID unique and every registry rank represented exactly once. This aggregate is sign-off data and must not be published as one live accessibility tree. Designer inspection covers all six creation Review states, all eighteen specialization branch/roadmap states, every one of the fifty-four node inspectors and their three rank cells, caster and non-caster Actives/Spells empty and populated states, tutorial, local-slot independence, accepted/pending/rejected/error states, High Contrast and Reduce Motion, and each required viewport. Automated screenshots/semantic dumps support this inspection but do not replace physical keyboard navigation, VoiceOver press/focus proof, or physical controller proof.
+
+## Required implementation and verification order
+
+1. Keep this contract current.
+2. Implement v2 core, migration/repair, attributes, kits, typed effects, and XP.
+3. Implement every skill/spell semantic and bounded transient.
+4. Implement protocol-v6 authority, peer ticking, atomic outcomes, ack/resync, and quick-slot separation.
+5. Implement the pure screen model, four-step creation, five-tab shell, configurable chords, semantic focus, RPG-scoped controller adapter, AppKit accessibility bridge, tutorial, and HUD feedback.
+6. Run the independent Security code review against the actual UI/input/accessibility diff and fix findings; material fixes repeat this gate.
+7. Install the reviewed candidate and obtain Design Sign-off across all required states/viewports with physical keyboard, VoiceOver, and compatible-controller proof. Unseen or unavailable surfaces remain unsigned.
+8. Run the independent Tester/regression pass, then `bash scripts/security-scan.sh`, warning-free `swift build -c release`, `swift test`, `swift run -c release pebsmoke`, and `bash scripts/pipeline.sh`. Any golden movement must be individually reviewed; the prior 457-check count is not changed merely to hide failure.
+9. Verify the final fresh `/Applications/Pebble.app`, then run `scripts/live-lan-test.sh --deploy --timeout 90` against Neo with probes for cooldown/fatigue/upkeep advancement, XP/inventory persistence, rejection resync, permission denial, replay, disconnect cleanup, owner-state convergence, pending UI convergence, and local-slot preservation. Any later runtime-path change invalidates and repeats affected Security, Design Sign-off, Test, deploy, and LAN evidence.
+10. Commit logical changes with specific staging and co-author tags. Do not push without separate authorization.
+
+## Conditions for Builder
+
+- Across the six installed path fixtures, every one of the 162 registry skill ranks has an observable typed effect and semantic test; each live fixture contains exactly its path-valid 27 rank cells. All seventeen spells have semantic tests.
+- The pure `RPGScreenModel` and canonical `rpgEvaluateSkillPurchase` are implemented before UI mutation wiring; drawing, focus, hover, and accessibility queries are side-effect free, and evaluator/mutator parity is exhaustive.
+- Each live path fixture contains exactly its three branches, nine nodes, and 27 rank cells under stable semantic IDs, with no cross-path cells. The six-fixture aggregate contains all six paths, eighteen branches, fifty-four nodes, and 162 globally unique rank-cell IDs exactly once. Spell projection is class-accessible only and names every exact unlock skill/rank.
+- Every path has its truthful viable level-1 loop and every specialization has meaningful reachable milestones at levels 4, 5, 8, 10, 12, 14, 16, and 20.
+- Level 20 permits exactly one complete specialization for 17 earned points plus one cross-branch Foundation I for 2, with no excess or negative points. The UI shows the selected/cross gates and warns truthfully when optional spend makes capstone completion impossible without blocking legal spend.
+- Character creation is exactly Path -> Branch -> Attributes -> Review, uses the path preset without discarding restored drafts, derives the free Foundation from the chosen branch, shows the exact kit/focus/first loop, and does not expose manual starter-spell selection.
+- The post-creation shell is exactly Character, Skills, Actives, Spells, Progression. Rows select only; Rank Up, Prepare, Unprepare, Select, Assign Slot, and Clear Slot remain separate semantic operations.
+- Local quick-slot assign/move/clear changes no authoritative selection, action sequence, authority/owner/inventory revision, or LAN state. Explicit Select is authoritative, and complete owner acknowledgements preserve only still-valid local tokens.
+- A LAN client allows one durable pending authoritative mutation, performs no optimistic authority mutation, and implements every accepted/rejected/disconnected/disposition-only/evicted/exhausted transition in the pending/error matrix before re-enabling controls.
+- The `360x224`, `520x330`, and `700x420` probes have no clipped actionable controls, stale hit boxes, lost focus, or out-of-range scroll. Every resize/content/ack/tutorial transition reclamps through the one shared function.
+- K/O/L and Shift+1...Shift+9 are persisted configurable chords with legacy one-key compatibility; Controls remains fully reachable at the minimum viewport and unmodified digits keep normal hotbar semantics.
+- Keyboard, RPG-scoped controller, and AppKit accessibility invoke the same semantic commands. Accessibility exposes role/label/value/state/reason/action for all content, and controller support is never described as general gameplay controller support.
+- Tutorial version is local, backward-compatible, written only by Finish/Skip, and independent of authoritative player or LAN data.
+- XP, decoders, collections, arithmetic, transients, entity ownership, and frames are bounded and deterministic.
+- Host state is authoritative. Rejections converge the owner; inventory, RPG, pose, health, effects, durability, and world mutation commit atomically.
+- Registration order and saved IDs remain compatible; `apprentice_focus` is append-only.
+- Design Mock and Design Review PASS before UI build. Security code review PASS precedes installed Design Sign-off; unseen or source-only UI cannot pass.
+- Installed Design Sign-off proves the per-path counts of 3/9/27 and the six-fixture aggregate counts of 6/18/54/162, including global ID uniqueness and exact registry coverage. It physically proves representative mouse, keyboard, VoiceOver, and compatible-controller actions across the three required viewports. Any unavailable physical surface is reported unverified, not inferred from synthetic tests.
+- Existing non-RPG gameplay, old saves/settings/keybinds, LAN behavior, security scans, tests, smoke goldens, installed play, and Neo proof remain green. Any post-install runtime-path change invalidates and repeats affected sign-off, pipeline, deploy, and LAN evidence.
+- Documentation and UI copy describe only behavior proven by the implementation.
+
+## Historical inspiration and primary local references
+
+The Fantasy Trip documents were design inspiration for meaningful attributes, fatigue, and readable choices, not a claim that Pebble implements TFT rules: [Melee rules](/Users/mweingar/Downloads/_Documents/The%20Fantasy%20Trip%20Melee%20Rules.md) and [Wizard rules](/Users/mweingar/Downloads/_Documents/The%20Fantasy%20Trip%20Wizard%20Rules.md).
+
+Implementation sources of record are [CharacterProgression.swift](/Users/mweingar/dev/pebble/Sources/PebbleCore/Game/CharacterProgression.swift), [RPGActions.swift](/Users/mweingar/dev/pebble/Sources/PebbleCore/Systems/RPGActions.swift), [LANMultiplayer.swift](/Users/mweingar/dev/pebble/Sources/PebbleCore/Net/LANMultiplayer.swift), [LANTransport.swift](/Users/mweingar/dev/pebble/Sources/Pebble/LANTransport.swift), [RPGScreensM.swift](/Users/mweingar/dev/pebble/Sources/Pebble/RPGScreensM.swift), [ARCHITECTURE.md](/Users/mweingar/dev/pebble/ARCHITECTURE.md), [SECURITY.md](/Users/mweingar/dev/pebble/SECURITY.md), and [AGENTS.md](/Users/mweingar/dev/pebble/AGENTS.md).

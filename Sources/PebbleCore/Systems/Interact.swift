@@ -160,14 +160,14 @@ public func useBlock(_ ctx: InteractCtx, _ hit: RaycastHit) -> Bool {
         if blockDefs[world.getBlock(x, y + 1, z) >> 4].opaque { return true }
         var be = world.getBlockEntity(x, y, z)
         if be == nil { be = makeContainerBE(x, y, z, 27); world.setBlockEntity(be!) }
-        resolveLoot(world, be!)
+        resolveLoot(world, be!, discoveredBy: player)
         // double chest
         var other: BlockEntityData? = nil
         for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
             if (world.getBlock(x + dx, y, z + dz) >> 4) == id {
                 var obe = world.getBlockEntity(x + dx, y, z + dz)
                 if obe == nil { obe = makeContainerBE(x + dx, y, z + dz, 27); world.setBlockEntity(obe!) }
-                resolveLoot(world, obe!)
+                resolveLoot(world, obe!, discoveredBy: player)
                 other = obe
                 break
             }
@@ -184,7 +184,7 @@ public func useBlock(_ ctx: InteractCtx, _ hit: RaycastHit) -> Bool {
     if id == Int(B.barrel) {
         var be = world.getBlockEntity(x, y, z)
         if be == nil { be = makeContainerBE(x, y, z, 27); world.setBlockEntity(be!) }
-        resolveLoot(world, be!)
+        resolveLoot(world, be!, discoveredBy: player)
         var data = ScreenData()
         data.be = be
         data.title = "Barrel"
@@ -548,20 +548,44 @@ private func updateShelfVisual(_ world: World, _ x: Int, _ y: Int, _ z: Int, _ b
     }
 }
 
-func resolveLoot(_ world: World, _ be: BlockEntityData) {
-    if let lootTable = be.lootTable {
-        var lootRng = RandomX(UInt32(truncatingIfNeeded: be.lootSeed ?? 1))
-        let loot = rollLoot(lootTable, &lootRng)
-        var items = be.items ?? []
-        var slots = Array(0..<items.count)
-        var r = RandomX(UInt32(truncatingIfNeeded: (be.lootSeed ?? 1) ^ 0x55))
-        r.shuffle(&slots)
-        for i in 0..<min(loot.count, slots.count) {
-            items[slots[i]] = loot[i]
-        }
-        be.items = items
-        be.lootTable = nil
+struct LootMaterializationResult: Equatable {
+    var provenanceKey: String?
+    var insertedCount: Int
+    var spilledCount: Int
+}
+
+@discardableResult
+func resolveLoot(_ world: World, _ be: BlockEntityData,
+                 discoveredBy player: Player? = nil) -> LootMaterializationResult? {
+    guard be.type == "container", var items = be.items, !items.isEmpty,
+          let lootTable = be.lootTable else { return nil }
+    let seed = be.lootSeed ?? 1
+    let generatedKey = be.rpgGeneratedContainerKey.flatMap { rpgIsBoundedID($0) ? $0 : nil }
+    var lootRng = RandomX(UInt32(truncatingIfNeeded: seed))
+    let loot = rollLoot(lootTable, &lootRng)
+    var emptySlots = items.indices.filter { items[$0] == nil }
+    var slotRng = RandomX(UInt32(truncatingIfNeeded: seed ^ 0x55))
+    slotRng.shuffle(&emptySlots)
+    let inserted = min(loot.count, emptySlots.count)
+    for index in 0..<inserted { items[emptySlots[index]] = loot[index] }
+    for stack in loot.dropFirst(inserted) {
+        let entity = ItemEntity(world: world)
+        entity.setPos(Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5)
+        entity.stack = stack
+        entity.vx = 0; entity.vy = 0.2; entity.vz = 0
+        world.addEntity(entity)
     }
+    be.items = items
+    be.lootTable = nil
+    be.lootSeed = nil
+    be.rpgGeneratedContainerKey = nil
+    world.setBlockEntity(be)
+    if let player, let generatedKey {
+        _ = player.awardRPGXP(RPGXPEvent(kind: .delverDungeonMilestone,
+                                         key: generatedKey))
+    }
+    return LootMaterializationResult(provenanceKey: generatedKey, insertedCount: inserted,
+                                     spilledCount: loot.count - inserted)
 }
 
 private func useBed(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int, _ c: Int) -> Bool {
@@ -1130,7 +1154,23 @@ public func placeBlock(_ ctx: InteractCtx, _ hit: RaycastHit, _ blockId: Int, _ 
     player.consumeHeld(1)
     player.stats["blocksPlaced"] = (player.stats["blocksPlaced"] ?? 0) + 1
     world.emitVibration(Double(px), Double(py), Double(pz), 13, player)
+    rpgAwardPoweredMechanismPlacement(player, blockID: blockId, x: px, y: py, z: pz)
     return true
+}
+
+func rpgAwardPoweredMechanismPlacement(_ player: Player, blockID: Int,
+                                       x: Int, y: Int, z: Int) {
+    guard player.rpgClassesEnabled(), player.rpg.created, player.rpg.pathID == "tinker",
+          blockID >= 0, blockID < blockDefs.count else { return }
+    let name = blockDefs[blockID].name
+    let registered = blockID == Int(B.lever) || blockID == Int(B.dispenser) || blockID == Int(B.dropper)
+        || blockID == Int(B.observer) || blockID == Int(B.piston) || blockID == Int(B.sticky_piston)
+        || blockID == Int(B.repeater) || blockID == Int(B.comparator)
+        || blockID == Int(B.redstone_lamp) || name.hasSuffix("_button")
+    guard registered, powerAt(player.world, x, y, z) > 0 else { return }
+    let key = "mechanism:\(player.world.dim.rawValue):\(x):\(y):\(z)"
+    guard rpgIsBoundedID(key) else { return }
+    _ = player.awardRPGXP(RPGXPEvent(kind: .tinkerMechanismTransition, key: key))
 }
 
 private func placeEffects(_ world: World, _ blockId: Int, _ x: Int, _ y: Int, _ z: Int) {
@@ -1335,9 +1375,12 @@ public func finishUsingItem(_ ctx: InteractCtx) {
         player.feed(food.hunger, food.saturation)
         for e in food.effects {
             if e.chance == 0 || gameRng.nextFloat() < e.chance {
-                player.addEffect(e.effect, e.duration, e.amplifier)
+                player.addEffect(e.effect,
+                                 rpgCleanBrewDuration(player, effectID: e.effect, baseDuration: e.duration),
+                                 e.amplifier)
             }
         }
+        _ = rpgRestoreHerbalLoreFatigue(player, consumedItemID: held.id)
         if def.name == "milk_bucket" {
             player.clearEffects()
             player.replaceUsingMainHand(ItemStack(iid("bucket"), 1))
@@ -1363,7 +1406,11 @@ public func finishUsingItem(_ ctx: InteractCtx) {
         ctx.advance("husbandry_eat")
     } else if def.name == "potion" {
         let pot = potionDef(held.data.potion ?? "water")
-        for e in pot.effects { player.addEffect(e.effect, e.duration, e.amplifier) }
+        for e in pot.effects {
+            player.addEffect(e.effect,
+                             rpgCleanBrewDuration(player, effectID: e.effect, baseDuration: e.duration),
+                             e.amplifier)
+        }
         player.replaceUsingMainHand(ItemStack(iid("glass_bottle"), 1))
         world.hooks.playSound("entity.generic.drink", player.x, player.y, player.z, 0.5, 1)
     }
@@ -1417,6 +1464,7 @@ public func finishBreaking(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int) {
 
     // container contents spill
     if let be = world.getBlockEntity(x, y, z) {
+        if be.type == "container" { resolveLoot(world, be, discoveredBy: player) }
         let isShulker = def.name.hasSuffix("shulker_box") || id == Int(B.shulker_box)
         if !isShulker && (be.type == "container" || be.type == "hopper" || be.type == "furnace" || be.type == "brewing" || be.type == "shelf" || be.type == "campfire" || be.type == "crafting") {
             if let items = be.items {
@@ -1481,6 +1529,7 @@ public func finishBreaking(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int) {
 
     world.setBlock(x, y, z, 0)
     player.stats["blocksMined"] = (player.stats["blocksMined"] ?? 0) + 1
+    rpgHandleBlockBreak(player, cell: c, x: x, y: y, z: z)
 
     if player.gameMode == GameMode.creative { return }
     if !world.rule("doTileDrops") { return }
@@ -1539,6 +1588,14 @@ private func damageToolForBreak(_ player: Player, _ c: Int) {
     guard let held = player.mainHand else { return }
     let toolDef = itemDef(held.id).tool
     if toolDef != nil && blockDefs[c >> 4].hardness > 0 {
+        let itemID = blockToItem[c >> 4]
+        if itemID >= 0 {
+            let category = itemDef(Int(itemID)).category
+            if ["building", "functional", "redstone", "colored"].contains(category),
+               player.shouldPreserveRPGSalvageDurability() {
+                return
+            }
+        }
         player.damageHeld(toolDef!.type == "sword" ? 2 : 1)
     }
 }

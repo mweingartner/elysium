@@ -20,6 +20,45 @@ public struct DropEntry {
     }
 }
 
+public struct RPGWardenMitigationLayerSnapshot: Equatable {
+    public var ownerEntityID: Int
+    public var ownerAuthorityID: String
+    public var ownerAvailable: Bool
+    public var sequence: Int
+    public var remaining: Double
+    public var hostileAbsorbed: Double
+}
+
+private final class RPGWardenMitigationLayer {
+    weak var owner: Player?
+    let ownerEntityID: Int
+    let ownerAuthorityID: String
+    let sequence: Int
+    var remaining: Double
+    var hostileAbsorbed: Double
+
+    init(owner: Player, sequence: Int, remaining: Double) {
+        self.owner = owner
+        ownerEntityID = owner.id
+        ownerAuthorityID = owner.effectiveRPGAuthorityID
+        self.sequence = sequence
+        self.remaining = remaining
+        hostileAbsorbed = 0
+    }
+
+    var snapshot: RPGWardenMitigationLayerSnapshot {
+        RPGWardenMitigationLayerSnapshot(ownerEntityID: ownerEntityID,
+                                         ownerAuthorityID: ownerAuthorityID,
+                                         ownerAvailable: owner != nil,
+                                         sequence: sequence,
+                                         remaining: remaining,
+                                         hostileAbsorbed: hostileAbsorbed)
+    }
+}
+
+private let RPG_MAX_WARDEN_MITIGATION_LAYERS = 8
+private let RPG_MAX_WARDEN_ABSORPTION = 100.0
+
 open class LivingEntity: Entity {
     public var health = 20.0
     public var maxHealth = 20.0
@@ -59,6 +98,28 @@ open class LivingEntity: Entity {
     public var lastHurtByPlayerTime = 0
     public var rng = RandomX(0)   // seeded from gameRng in init (baseline field-init order)
     public var xpReward = 5
+    private var rpgWardenMitigationLayers: [RPGWardenMitigationLayer] = []
+    public var rpgWardenMitigationOwner: Player? { rpgWardenMitigationLayers.first?.owner }
+    public var rpgWardenMitigationSequence: Int { rpgWardenMitigationLayers.first?.sequence ?? 0 }
+    public var rpgWardenMitigationRemaining: Double {
+        rpgWardenMitigationLayers.reduce(0) { $0 + max(0, $1.remaining) }
+    }
+    public var rpgWardenMitigationAbsorbed: Double {
+        rpgWardenMitigationLayers.reduce(0) { $0 + max(0, $1.hostileAbsorbed) }
+    }
+    public var rpgWardenMitigationLayerSnapshots: [RPGWardenMitigationLayerSnapshot] {
+        rpgWardenMitigationLayers.map(\.snapshot)
+    }
+    /// Session-only hostile-injury provenance. These fields are deliberately
+    /// not persisted: a save/reload must never mint support XP from old harm.
+    /// `Generation` remains monotonic after a token is consumed so a stale
+    /// prepared heal cannot alias a later injury on the same entity.
+    public var rpgMenderInjuryGeneration = 0
+    public var rpgMenderInjuryNonce = 0
+    public var rpgMenderInjuryExpiryTick = 0
+    public var rpgMenderInjuryRemaining = 0.0
+    public weak var rpgArcanistFireOwner: Player?
+    public var rpgArcanistFireExpiryTick = 0
     /// water mobs (baseline dynamic props)
     public var breathesWater = false
     public override init(world: World) {
@@ -138,8 +199,183 @@ open class LivingEntity: Entity {
 
     // ---- health -----------------------------------------------------------
     public func heal(_ amount: Double) {
-        if dead { return }
+        guard !dead, amount.isFinite, amount > 0,
+              health.isFinite, health > 0,
+              maxHealth.isFinite, maxHealth > 0,
+              health <= maxHealth + 0.000_001 else { return }
+        let before = health
         health = min(maxHealth, health + amount)
+        let effective = max(0, health - before)
+        // Hostile injury provenance represents outstanding harm, not lifetime
+        // history. Every actual heal consumes that outstanding amount, even
+        // when no RPG XP is involved; otherwise regen followed by unrelated
+        // damage could resurrect a stale hostile token.
+        if effective > 0, rpgMenderInjuryRemaining.isFinite,
+           rpgMenderInjuryRemaining > 0 {
+            rpgMenderInjuryRemaining = max(0, rpgMenderInjuryRemaining - effective)
+            if rpgMenderInjuryRemaining <= 0.000_001 {
+                rpgMenderInjuryNonce = 0
+                rpgMenderInjuryExpiryTick = 0
+                rpgMenderInjuryRemaining = 0
+            }
+        }
+    }
+
+    private func isValidRPGWardenMitigationLayer(_ layer: RPGWardenMitigationLayer) -> Bool {
+        guard world.rule(RPG_CLASSES_GAME_RULE),
+              let owner = layer.owner,
+              owner.world === world,
+              !owner.dead, owner.deathTime <= 0,
+              owner.health.isFinite, owner.health > 0,
+              owner.effectiveRPGAuthorityID == layer.ownerAuthorityID else { return false }
+        let registered = (world.entityById[layer.ownerEntityID] as? Player) === owner
+        let hosted = !owner.rpgAuthorityID.isEmpty
+            && owner.rpgAuthorityID == layer.ownerAuthorityID
+        return registered || hosted
+    }
+
+    public func canGrantRPGWardenAbsorption(_ minimum: Double, owner: Player) -> Bool {
+        guard minimum.isFinite, minimum >= 0, minimum <= RPG_MAX_WARDEN_ABSORPTION,
+              absorption.isFinite, absorption >= 0,
+              absorption <= RPG_MAX_WARDEN_ABSORPTION,
+              owner.world === world, !owner.dead, owner.deathTime <= 0,
+              owner.health.isFinite, owner.health > 0,
+              rpgIsBoundedID(owner.effectiveRPGAuthorityID) else { return false }
+        if owner.gameMode == GameMode.creative || !world.rule(RPG_CLASSES_GAME_RULE) { return true }
+        let added = max(0, minimum - absorption)
+        let validLayerCount = rpgWardenMitigationLayers.lazy
+            .filter(isValidRPGWardenMitigationLayer)
+            .count
+        return added <= 0.000_001 || validLayerCount < RPG_MAX_WARDEN_MITIGATION_LAYERS
+    }
+
+    @discardableResult
+    public func grantRPGWardenAbsorption(_ minimum: Double, owner: Player, sequence: Int) -> Bool {
+        guard canGrantRPGWardenAbsorption(minimum, owner: owner),
+              (1...RPG_MAX_COUNTER).contains(sequence) else { return false }
+        // This is the authoritative commit boundary. Release invalid provenance
+        // here (not in the pure preflight above) so a saturated global clock cannot
+        // pin the bounded ledger while rejected/prepared actions remain side-effect free.
+        pruneInvalidRPGWardenMitigationLayers()
+        let added = max(0, minimum - absorption)
+        absorption = max(absorption, minimum)
+        guard owner.gameMode != GameMode.creative,
+              world.rule(RPG_CLASSES_GAME_RULE) else { return true }
+        guard added > 0.000_001 else { return true }
+        rpgWardenMitigationLayers.append(RPGWardenMitigationLayer(
+            owner: owner, sequence: sequence, remaining: added
+        ))
+        return true
+    }
+
+    public func clearRPGCausalProgressionState() {
+        rpgWardenMitigationLayers.removeAll(keepingCapacity: false)
+        rpgMenderInjuryNonce = 0
+        rpgMenderInjuryExpiryTick = 0
+        rpgMenderInjuryRemaining = 0
+    }
+
+    /// Removes delayed mitigation provenance for one authority without touching
+    /// the absorption already granted to the recipient. Once ownership ends,
+    /// that absorption remains an ordinary defensive resource and cannot mint XP.
+    @discardableResult
+    public func removeRPGWardenMitigationLayers(ownerAuthorityID: String) -> Int {
+        guard rpgIsBoundedID(ownerAuthorityID) else { return 0 }
+        let before = rpgWardenMitigationLayers.count
+        rpgWardenMitigationLayers.removeAll { $0.ownerAuthorityID == ownerAuthorityID }
+        return before - rpgWardenMitigationLayers.count
+    }
+
+    /// Prunes ownership that can no longer publish a causal award. Local owners
+    /// must still be registered in this world; a hosted LAN ghost is valid while
+    /// its explicit authority object remains alive in the host registry.
+    public func pruneInvalidRPGWardenMitigationLayers() {
+        rpgWardenMitigationLayers.removeAll { !isValidRPGWardenMitigationLayer($0) }
+    }
+
+    public func validRPGMenderInjury(at simulationTick: Int) -> (nonce: Int, remaining: Double)? {
+        guard (0...RPG_MAX_COUNTER).contains(simulationTick),
+              world.rule(RPG_CLASSES_GAME_RULE),
+              !dead, deathTime <= 0, health > 0,
+              !isPlayer, !rpgIsHostileTarget(self),
+              rpgMenderInjuryGeneration > 0,
+              rpgMenderInjuryGeneration <= RPG_MAX_COUNTER,
+              rpgMenderInjuryNonce > 0,
+              rpgMenderInjuryNonce <= RPG_MAX_COUNTER,
+              rpgMenderInjuryNonce == rpgMenderInjuryGeneration,
+              rpgMenderInjuryExpiryTick > simulationTick,
+              rpgMenderInjuryExpiryTick <= RPG_MAX_COUNTER,
+              rpgMenderInjuryExpiryTick <= rpgSaturatedAdd(simulationTick, RPG_XP_WINDOW_TICKS),
+              health.isFinite,
+              rpgMenderInjuryRemaining.isFinite,
+              rpgMenderInjuryRemaining > 0,
+              maxHealth.isFinite,
+              rpgMenderInjuryRemaining <= max(0, maxHealth - health) + 0.000_001
+        else { return nil }
+        return (rpgMenderInjuryNonce, min(maxHealth, rpgMenderInjuryRemaining))
+    }
+
+    public func clearRPGMenderInjury(expectedNonce: Int) -> Bool {
+        guard expectedNonce > 0, rpgMenderInjuryNonce == expectedNonce else { return false }
+        rpgMenderInjuryNonce = 0
+        rpgMenderInjuryExpiryTick = 0
+        rpgMenderInjuryRemaining = 0
+        return true
+    }
+
+    private func recordRPGMenderHostileInjury(_ amount: Double, attacker: Entity?) {
+        guard amount.isFinite, amount > 0,
+              world.rule(RPG_CLASSES_GAME_RULE),
+              !isPlayer, !rpgIsHostileTarget(self), !dead, deathTime <= 0, health > 0,
+              (world.entityById[id] as? LivingEntity) === self,
+              let hostile = attacker as? LivingEntity,
+              hostile !== self, hostile.world === world,
+              (world.entityById[hostile.id] as? LivingEntity) === hostile,
+              !hostile.dead, hostile.deathTime <= 0, hostile.health > 0,
+              rpgIsHostileTarget(hostile),
+              maxHealth.isFinite, maxHealth > 0
+        else { return }
+        let tick = world.rpgSimulationTick
+        guard (0...RPG_MAX_COUNTER).contains(tick),
+              (0...RPG_MAX_COUNTER).contains(rpgMenderInjuryGeneration) else {
+            rpgMenderInjuryNonce = 0
+            rpgMenderInjuryExpiryTick = 0
+            rpgMenderInjuryRemaining = 0
+            return
+        }
+        if let active = validRPGMenderInjury(at: tick) {
+            rpgMenderInjuryNonce = active.nonce
+            rpgMenderInjuryRemaining = min(maxHealth, active.remaining + amount)
+        } else {
+            guard rpgMenderInjuryGeneration < RPG_MAX_COUNTER else {
+                rpgMenderInjuryNonce = 0
+                rpgMenderInjuryExpiryTick = 0
+                rpgMenderInjuryRemaining = 0
+                return
+            }
+            rpgMenderInjuryGeneration += 1
+            rpgMenderInjuryNonce = rpgMenderInjuryGeneration
+            rpgMenderInjuryRemaining = min(maxHealth, amount)
+        }
+        rpgMenderInjuryExpiryTick = rpgSaturatedAdd(tick, RPG_XP_WINDOW_TICKS)
+        // At the saturated clock ceiling no strict future expiry can exist.
+        if rpgMenderInjuryExpiryTick <= tick {
+            rpgMenderInjuryNonce = 0
+            rpgMenderInjuryExpiryTick = 0
+            rpgMenderInjuryRemaining = 0
+        }
+    }
+
+    @discardableResult
+    public func hurtFromPeriodicFire(_ amount: Double) -> Bool {
+        if let owner = rpgArcanistFireOwner,
+           world.rpgSimulationTick <= rpgArcanistFireExpiryTick,
+           !owner.dead, owner.world === world {
+            return hurt(amount, RPG_DAMAGE_SOURCE_ARCANIST_FIRE, owner)
+        }
+        rpgArcanistFireOwner = nil
+        rpgArcanistFireExpiryTick = 0
+        return hurt(amount, "fire")
     }
 
     public func armorValue() -> Double {
@@ -173,13 +409,16 @@ open class LivingEntity: Entity {
     open override func hurt(_ amount: Double, _ source: String, _ attacker: Entity? = nil) -> Bool {
         if dead || deathTime > 0 || amount <= 0 { return false }
         if invulnTicks > 0 { return false }
-        if source == "fire" && hasEffect("fire_resistance") { return false }
+        if (source == "fire" || source == RPG_DAMAGE_SOURCE_ARCANIST_FIRE) && hasEffect("fire_resistance") { return false }
         if source == "lava" && hasEffect("fire_resistance") { return false }
         if source == "fall" && (type == "cat" || type == "ocelot" || type == "chicken" || type == "bat" || type == "parrot" || type == "bee" || type == "shulker" || type == "iron_golem") { return false }
 
         // armor reduction (vanilla formula)
         let bypassesArmor = source == "fall" || source == "void" || source == "magic" || source == "wither" || source == "starve" || source == "drown" || source == "freeze" || source == "sonic"
         var dmg = amount
+        if let player = self as? Player {
+            dmg *= rpgIncomingDamageMultiplier(player, source: source, attacker: attacker)
+        }
         if !bypassesArmor {
             let armorV = armorValue()
             let tough = armorToughness()
@@ -190,16 +429,59 @@ open class LivingEntity: Entity {
         let res = effectLevel("resistance")
         if res > 0 { dmg *= max(0, 1 - Double(res) * 0.2) }
         // protection enchants
-        let epf = protectionLevel(source)
+        let protectionSource = source == RPG_DAMAGE_SOURCE_ARCANIST_FIRE ? "fire" : source
+        let epf = protectionLevel(protectionSource)
         dmg *= 1 - epf / 25
 
         // absorption
         if absorption > 0 {
+            // Damage is an authoritative commit boundary. Drop provenance that
+            // can no longer publish before deciding which absorption is causal;
+            // already-granted generic absorption remains available to consume.
+            pruneInvalidRPGWardenMitigationLayers()
             let absorbed = min(absorption, dmg)
+            let uncreditedAbsorption = max(0, absorption - rpgWardenMitigationRemaining)
+            var creditedAbsorption = max(0, absorbed - uncreditedAbsorption)
             absorption -= absorbed
             dmg -= absorbed
+            let hostileHit = world.rule(RPG_CLASSES_GAME_RULE) && (attacker as? LivingEntity).map {
+                $0 !== self && $0.world === world
+                    && (world.entityById[$0.id] as? LivingEntity) === $0
+                    && !$0.dead && $0.deathTime <= 0 && $0.health > 0
+                    && rpgIsHostileTarget($0)
+            } ?? false
+            var layerIndex = 0
+            while creditedAbsorption > 0.000_001,
+                  layerIndex < rpgWardenMitigationLayers.count {
+                let layer = rpgWardenMitigationLayers[layerIndex]
+                let consumed = min(max(0, layer.remaining), creditedAbsorption)
+                layer.remaining = max(0, layer.remaining - consumed)
+                creditedAbsorption -= consumed
+                if hostileHit { layer.hostileAbsorbed += consumed }
+                let reachedAward = hostileHit && layer.hostileAbsorbed + 0.000_001 >= 2
+                let exhausted = layer.remaining <= 0.000_001
+                if reachedAward || exhausted {
+                    let owner = layer.owner
+                    let ownerID = layer.ownerEntityID
+                    let sequence = layer.sequence
+                    rpgWardenMitigationLayers.remove(at: layerIndex)
+                    if reachedAward,
+                       isValidRPGWardenMitigationLayer(layer),
+                       let owner,
+                       owner.id == ownerID,
+                       owner.gameMode != GameMode.creative {
+                        _ = owner.awardRPGXP(RPGXPEvent(kind: .wardenMitigation,
+                                                       key: "mitigate:\(ownerID):\(sequence)"))
+                    }
+                } else {
+                    layerIndex += 1
+                }
+            }
         }
+        let healthBeforeDamage = health
         health -= dmg
+        let actualHealthLoss = max(0, healthBeforeDamage - max(0, health))
+        recordRPGMenderHostileInjury(actualHealthLoss, attacker: attacker)
         hurtTime = 10
         invulnTicks = 10
         if let attacker {
@@ -246,8 +528,18 @@ open class LivingEntity: Entity {
             let looting = (attacker as? LivingEntity)?.mainHand.map { enchLevel($0, "looting") } ?? 0
             dropLoot(looting, lastHurtByPlayerTime > 0)
         }
-        if let player = attacker as? Player, player.rpgClassesEnabled(), player.rpg.created, self !== player {
-            _ = player.awardRPGXP(max(1, xpReward))
+        if let player = attacker as? Player, player.rpgClassesEnabled(), player.rpg.created,
+           self !== player, self is Monster || type == "ender_dragon" {
+            let kind: RPGXPEventKind? = switch (player.rpg.pathID, source) {
+            case ("warden", RPG_DAMAGE_SOURCE_WARDEN_MELEE): .wardenMeleeDefeat
+            case ("ranger", "projectile"), ("ranger", RPG_DAMAGE_SOURCE_RANGER_PROJECTILE): .rangerRangedDefeat
+            case ("arcanist", RPG_DAMAGE_SOURCE_ARCANIST_SPELL),
+                 ("arcanist", RPG_DAMAGE_SOURCE_ARCANIST_FIRE): .arcanistSpellDefeat
+            default: nil
+            }
+            if let kind {
+                _ = player.awardRPGXP(RPGXPEvent(kind: kind, key: "death:\(id):\(age)"))
+            }
         }
     }
 

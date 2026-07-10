@@ -2,12 +2,20 @@ import XCTest
 @testable import PebbleCore
 
 final class RPGCharacterStateTests: XCTestCase {
+    override class func setUp() {
+        super.setUp()
+        if blockDefs.isEmpty { registerAllBlocks() }
+        if itemDefs.isEmpty { registerAllItems() }
+        registerAllRecipes()
+        registerAllSystems()
+    }
+
     func testCharacterCreationBuildsPreparedArcanistWithFullFatigue() {
         let draft = RPGCreationDraft(
             pathID: "arcanist",
             attributes: .defaultCreation,
             starterSkillID: "spell_formula",
-            starterSpellIDs: ["ignite", "mage_light"]
+            starterSpellIDs: ["ignite"]
         )
 
         let result = rpgCreateCharacter(draft)
@@ -19,13 +27,12 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertEqual(state.pathID, "arcanist")
         XCTAssertEqual(state.level, 1)
         XCTAssertEqual(state.skillRanks["spell_formula"], 1)
-        XCTAssertEqual(state.knownSpellIDs, ["ignite", "frost_ray", "mage_light"])
-        XCTAssertEqual(state.preparedSpellIDs, ["ignite", "mage_light"])
+        XCTAssertEqual(state.starterSkillID, "spell_formula")
+        XCTAssertEqual(state.specializationBranchID, "arcanist_elementalist")
+        XCTAssertEqual(state.knownSpellIDs, ["ignite"])
+        XCTAssertEqual(state.preparedSpellIDs, ["ignite"])
         XCTAssertEqual(state.selectedPreparedActionID, rpgPreparedActionToken(kind: .spell, id: "ignite"))
-        XCTAssertEqual(Array(state.actionQuickSlots.prefix(2)), [
-            rpgPreparedActionToken(kind: .spell, id: "ignite"),
-            rpgPreparedActionToken(kind: .spell, id: "mage_light"),
-        ])
+        XCTAssertEqual(state.actionQuickSlots[0], rpgPreparedActionToken(kind: .spell, id: "ignite"))
         XCTAssertEqual(state.actionQuickSlots.count, RPG_ACTION_QUICK_SLOT_COUNT)
         XCTAssertEqual(state.fatigue, rpgDerivedStats(state).maxFatigue, accuracy: 0.0001)
     }
@@ -50,7 +57,7 @@ final class RPGCharacterStateTests: XCTestCase {
 
     func testRepairDropsUnknownAndCrossPathStateWithoutDroppingCharacter() {
         let raw = RPGCharacterState(
-            version: -1,
+            version: 0,
             created: true,
             pathID: "arcanist",
             attributes: RPGAttributes(strength: 100, dexterity: 3, intelligence: 16, endurance: 9, luck: 6),
@@ -92,12 +99,12 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertEqual(repaired.level, 1)
         XCTAssertEqual(repaired.attributes.total, RPGAttributes.creationBudget)
         XCTAssertEqual(repaired.skillRanks["spell_formula"], 1)
-        XCTAssertEqual(repaired.skillRanks["minor_glamour"], 1)
+        XCTAssertNil(repaired.skillRanks["minor_glamour"])
         XCTAssertNil(repaired.skillRanks["guard_stance"])
         XCTAssertNil(repaired.skillRanks["not_real"])
-        XCTAssertEqual(repaired.preparedSkillIDs, ["spell_formula"])
+        XCTAssertTrue(repaired.preparedSkillIDs.isEmpty)
         XCTAssertTrue(repaired.knownSpellIDs.contains("ignite"))
-        XCTAssertTrue(repaired.knownSpellIDs.contains("blur"))
+        XCTAssertFalse(repaired.knownSpellIDs.contains("blur"))
         XCTAssertFalse(repaired.knownSpellIDs.contains("mend_wounds"))
         XCTAssertEqual(repaired.preparedSpellIDs, ["ignite"])
         XCTAssertEqual(repaired.selectedPreparedActionID, rpgPreparedActionToken(kind: .spell, id: "ignite"))
@@ -137,6 +144,8 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertTrue(loaded.rpg.created)
         XCTAssertEqual(loaded.rpg.pathID, "warden")
         XCTAssertEqual(loaded.rpg.skillRanks["guard_stance"], 1)
+        XCTAssertEqual(loaded.rpg.kitGrantVersion, RPG_STARTER_KIT_VERSION)
+        XCTAssertEqual(loaded.rpg.kitGrantID, rpgStarterKitGrantID(pathID: "warden", starterSkillID: "guard_stance"))
         XCTAssertEqual(loaded.rpg.actionQuickSlots.count, RPG_ACTION_QUICK_SLOT_COUNT)
         XCTAssertEqual(loaded.maxHealth, rpgDerivedStats(loaded.rpg).maxHealth)
         XCTAssertEqual(loaded.health, loaded.maxHealth)
@@ -149,10 +158,10 @@ final class RPGCharacterStateTests: XCTestCase {
             pathID: "arcanist",
             attributes: .defaultCreation,
             starterSkillID: "spell_formula",
-            starterSpellIDs: ["ignite", "mage_light"]
+            starterSpellIDs: ["ignite"]
         )))
 
-        XCTAssertNil(rpgAssignPreparedActionToQuickSlot(kind: .spell, id: "mage_light", slot: 4, in: &player.rpg))
+        XCTAssertNil(rpgAssignPreparedActionToQuickSlot(kind: .spell, id: "ignite", slot: 4, in: &player.rpg))
         rpgClearActionQuickSlot(0, in: &player.rpg)
         let saved = player.save()
 
@@ -160,8 +169,8 @@ final class RPGCharacterStateTests: XCTestCase {
         loaded.load(saved)
 
         XCTAssertNil(loaded.rpg.actionQuickSlots[0])
-        XCTAssertEqual(loaded.rpg.actionQuickSlots[4], rpgPreparedActionToken(kind: .spell, id: "mage_light"))
-        XCTAssertEqual(rpgActionQuickSlotIndex(for: rpgPreparedActionToken(kind: .spell, id: "mage_light"), in: loaded.rpg), 4)
+        XCTAssertEqual(loaded.rpg.actionQuickSlots[4], rpgPreparedActionToken(kind: .spell, id: "ignite"))
+        XCTAssertEqual(rpgActionQuickSlotIndex(for: rpgPreparedActionToken(kind: .spell, id: "ignite"), in: loaded.rpg), 4)
     }
 
     func testLegacyRPGStateDecodesWithoutSelectedPreparedAction() throws {
@@ -192,6 +201,8 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertEqual(repaired.selectedPreparedActionID, rpgPreparedActionToken(kind: .spell, id: "ignite"))
         XCTAssertEqual(repaired.actionQuickSlots[0], rpgPreparedActionToken(kind: .spell, id: "ignite"))
         XCTAssertEqual(repaired.actionQuickSlots.count, RPG_ACTION_QUICK_SLOT_COUNT)
+        XCTAssertEqual(repaired.kitGrantVersion, 0)
+        XCTAssertNil(repaired.kitGrantID)
     }
 
     private func tryFailure(_ result: Result<RPGCharacterState, RPGCreationError>) -> RPGCreationError? {

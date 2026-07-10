@@ -16,6 +16,315 @@ private let FACING_DZ = [-1, 1, 0, 0]
 private var WOOD_BUTTONS: [Int] = []
 private var WOOD_PLATES: [Int] = []
 
+public struct RPGRedstoneSourceTrace: Equatable {
+    public var direction: String
+    public var distance: Int
+    public var visitedNodes: Int
+}
+
+/// Bounded, read-only breadth-first trace from a powered component through
+/// connected powered wire/relays to the nearest actual emitter. Direction and
+/// tie order use frozen engine tables; unloaded columns are never queried.
+public func rpgNearestPoweredRedstoneSource(_ world: World,
+                                            x: Int, y: Int, z: Int,
+                                            nodeLimit: Int = 64) -> RPGRedstoneSourceTrace? {
+    struct Position: Hashable { var x: Int; var y: Int; var z: Int }
+    struct Pending { var position: Position; var firstDirection: Int; var distance: Int }
+    struct RelayInput { var position: Position; var direction: Int; var terminal: Bool }
+    let cap = max(1, min(64, nodeLimit))
+    let start = Position(x: x, y: y, z: z)
+    guard world.isLoadedAt(x, z) else { return nil }
+
+    func isRelay(_ position: Position) -> Bool {
+        let id = world.getBlock(position.x, position.y, position.z) >> 4
+        return id == Int(B.repeater) || id == Int(B.repeater_on)
+            || id == Int(B.comparator) || id == Int(B.comparator_on)
+    }
+
+    func isIntrinsicEmitter(_ position: Position) -> Bool {
+        let id = world.getBlock(position.x, position.y, position.z) >> 4
+        guard id != Int(B.redstone_wire), !isRelay(position) else { return false }
+        return (0..<6).contains {
+            emittedPower(world, position.x, position.y, position.z, $0) > 0
+        }
+    }
+
+    func isPoweredConductor(_ position: Position) -> Bool {
+        let id = world.getBlock(position.x, position.y, position.z) >> 4
+        guard blockDefs[id].opaque, blockDefs[id].fullCube else { return false }
+        for direction in 0..<6 {
+            let nx = position.x + DIR_X[direction]
+            let nz = position.z + DIR_Z[direction]
+            guard world.isLoadedAt(nx, nz) else { continue }
+            if strongPowerInto(world, nx, position.y + DIR_Y[direction], nz,
+                               DIR_OPPOSITE[direction]) > 0 {
+                return true
+            }
+        }
+        return false
+    }
+
+    func relayInputs(_ position: Position) -> [RelayInput] {
+        let c = world.getBlock(position.x, position.y, position.z)
+        let id = c >> 4, facing = c & 3
+        let outputDirection = facingToDir(facing)
+        let rearDirection = DIR_OPPOSITE[outputDirection]
+        let rear = Position(x: position.x + DIR_X[rearDirection], y: position.y,
+                            z: position.z + DIR_Z[rearDirection])
+        guard world.isLoadedAt(rear.x, rear.z) else { return [] }
+
+        if id == Int(B.repeater) || id == Int(B.repeater_on) {
+            guard repeaterInputPower(world, position.x, position.y, position.z, facing) > 0 else {
+                return []
+            }
+            let rearCell = world.getBlock(rear.x, rear.y, rear.z)
+            let traceable = (rearCell >> 4) == Int(B.redstone_wire)
+                || isRelay(rear) || isIntrinsicEmitter(rear) || isPoweredConductor(rear)
+            guard traceable else { return [] }
+            return [RelayInput(position: rear, direction: rearDirection, terminal: false)]
+        }
+
+        guard id == Int(B.comparator) || id == Int(B.comparator_on) else { return [] }
+        var inputs: [RelayInput] = []
+        // Comparator containers are analog sources, not redstone emitters. A
+        // direct or through-solid nonzero container signal is therefore an
+        // exact terminal in the rear direction.
+        let directContainer = containerSignal(world, rear.x, rear.y, rear.z)
+        if directContainer > 0 {
+            inputs.append(RelayInput(position: rear, direction: rearDirection, terminal: true))
+        } else {
+            let rearCell = world.getBlock(rear.x, rear.y, rear.z)
+            let rearID = rearCell >> 4
+            let beyond = Position(x: rear.x + DIR_X[rearDirection], y: rear.y,
+                                  z: rear.z + DIR_Z[rearDirection])
+            if blockDefs[rearID].opaque, world.isLoadedAt(beyond.x, beyond.z),
+               containerSignal(world, beyond.x, beyond.y, beyond.z) > 0 {
+                inputs.append(RelayInput(position: beyond, direction: rearDirection,
+                                         terminal: true))
+            } else if comparatorRearSignal(world, position.x, position.y,
+                                           position.z, facing) > 0 {
+                let traceable = (rearCell >> 4) == Int(B.redstone_wire)
+                    || isRelay(rear) || isIntrinsicEmitter(rear) || isPoweredConductor(rear)
+                if traceable {
+                    inputs.append(RelayInput(position: rear, direction: rearDirection,
+                                             terminal: false))
+                }
+            }
+        }
+        // Frozen order is rear, then left, then right. Side inputs mirror the
+        // exact subset accepted by comparatorSideSignal.
+        for side in [leftFacing(facing), rightFacing(facing)] {
+            let direction = facingToDir(side)
+            let sidePosition = Position(x: position.x + DIR_X[direction], y: position.y,
+                                        z: position.z + DIR_Z[direction])
+            guard world.isLoadedAt(sidePosition.x, sidePosition.z) else { continue }
+            let sideCell = world.getBlock(sidePosition.x, sidePosition.y, sidePosition.z)
+            let sideID = sideCell >> 4
+            let powered = (sideID == Int(B.redstone_wire) && (sideCell & 15) > 0)
+                || sideID == Int(B.redstone_block)
+                || (sideID == Int(B.repeater_on) && (sideCell & 3) == oppFacing(side))
+                || (sideID == Int(B.comparator_on) && (sideCell & 3) == oppFacing(side)
+                    && (world.getBlockEntity(sidePosition.x, sidePosition.y,
+                                             sidePosition.z)?.output ?? 0) > 0)
+            if powered {
+                inputs.append(RelayInput(position: sidePosition, direction: direction,
+                                         terminal: false))
+            }
+        }
+        return inputs
+    }
+
+    func connectedPoweredWires(from position: Position) -> [(Position, Int)] {
+        var result: [(Position, Int)] = []
+        for facing in 0..<4 {
+            let direction = HORIZONTALS[facing]
+            let dx = FACING_DX[facing], dz = FACING_DZ[facing]
+            let nx = position.x + dx, nz = position.z + dz
+            guard world.isLoadedAt(nx, nz) else { continue }
+            let neighbor = world.getBlock(nx, position.y, nz)
+            let neighborID = neighbor >> 4
+            if neighborID == Int(B.redstone_wire), (neighbor & 15) > 0 {
+                result.append((Position(x: nx, y: position.y, z: nz), direction))
+                continue
+            }
+            let aboveCurrentOpaque = blockDefs[
+                world.getBlock(position.x, position.y + 1, position.z) >> 4
+            ].opaque
+            let upper = world.getBlock(nx, position.y + 1, nz)
+            if !aboveCurrentOpaque, blockDefs[neighborID].opaque,
+               (upper >> 4) == Int(B.redstone_wire), (upper & 15) > 0 {
+                result.append((Position(x: nx, y: position.y + 1, z: nz), direction))
+                continue
+            }
+            let lower = world.getBlock(nx, position.y - 1, nz)
+            if !blockDefs[neighborID].opaque,
+               (lower >> 4) == Int(B.redstone_wire), (lower & 15) > 0 {
+                result.append((Position(x: nx, y: position.y - 1, z: nz), direction))
+            }
+        }
+        return result
+    }
+
+    var visited: Set<Position> = [start]
+    var queue: [Pending] = []
+    queue.reserveCapacity(cap)
+    var head = 0
+    let startID = world.getBlock(x, y, z) >> 4
+    if isIntrinsicEmitter(start) {
+        return RPGRedstoneSourceTrace(direction: "self", distance: 0, visitedNodes: 1)
+    }
+    if startID == Int(B.redstone_wire) || isRelay(start) || isPoweredConductor(start) {
+        queue.append(Pending(position: start, firstDirection: -1, distance: 0))
+    } else {
+        // Prefer a direct intrinsic source over a relay whose true source is
+        // necessarily farther away.
+        for direction in 0..<6 where visited.count < cap {
+            let next = Position(x: x + DIR_X[direction], y: y + DIR_Y[direction],
+                                z: z + DIR_Z[direction])
+            guard world.isLoadedAt(next.x, next.z), isIntrinsicEmitter(next),
+                  emittedPower(world, next.x, next.y, next.z,
+                               DIR_OPPOSITE[direction]) > 0 else { continue }
+            return RPGRedstoneSourceTrace(direction: DIR_NAMES[direction], distance: 1,
+                                          visitedNodes: visited.count + 1)
+        }
+        for direction in 0..<6 where visited.count < cap {
+            let next = Position(x: x + DIR_X[direction], y: y + DIR_Y[direction],
+                                z: z + DIR_Z[direction])
+            guard world.isLoadedAt(next.x, next.z) else { continue }
+            let nextCell = world.getBlock(next.x, next.y, next.z)
+            let nextID = nextCell >> 4
+            let poweredWire = nextID == Int(B.redstone_wire) && (nextCell & 15) > 0
+                && emittedPower(world, next.x, next.y, next.z,
+                                DIR_OPPOSITE[direction]) > 0
+            let emittingRelay = isRelay(next)
+                && emittedPower(world, next.x, next.y, next.z,
+                                DIR_OPPOSITE[direction]) > 0
+            let poweredConductor = isPoweredConductor(next)
+            if poweredWire || emittingRelay || poweredConductor,
+               visited.insert(next).inserted {
+                queue.append(Pending(position: next, firstDirection: direction, distance: 1))
+            }
+        }
+    }
+
+    while head < queue.count && visited.count <= cap {
+        let current = queue[head]
+        head += 1
+        if isRelay(current.position) {
+            let inputs = relayInputs(current.position)
+            var advanced = false
+            for input in inputs where visited.count < cap {
+                let firstDirection = current.firstDirection >= 0
+                    ? current.firstDirection : input.direction
+                if input.terminal || isIntrinsicEmitter(input.position) {
+                    return RPGRedstoneSourceTrace(direction: DIR_NAMES[firstDirection],
+                                                  distance: current.distance + 1,
+                                                  visitedNodes: visited.count + 1)
+                }
+                let inputCell = world.getBlock(input.position.x, input.position.y,
+                                               input.position.z)
+                let poweredWire = (inputCell >> 4) == Int(B.redstone_wire)
+                    && (inputCell & 15) > 0
+                if poweredWire || isRelay(input.position) || isPoweredConductor(input.position),
+                   visited.insert(input.position).inserted {
+                    queue.append(Pending(position: input.position,
+                                         firstDirection: firstDirection,
+                                         distance: current.distance + 1))
+                    advanced = true
+                }
+            }
+            let currentID = world.getBlock(current.position.x, current.position.y,
+                                           current.position.z) >> 4
+            if !advanced, inputs.isEmpty,
+               currentID == Int(B.comparator) || currentID == Int(B.comparator_on),
+               (world.getBlockEntity(current.position.x, current.position.y,
+                                     current.position.z)?.output ?? 0) > 0 {
+                // A nonzero comparator output with no traversable external
+                // input is an intrinsic/legacy block-entity output fallback.
+                let direction = current.firstDirection >= 0
+                    ? DIR_NAMES[current.firstDirection] : "self"
+                return RPGRedstoneSourceTrace(direction: direction,
+                                              distance: current.distance,
+                                              visitedNodes: visited.count)
+            }
+            continue
+        }
+
+        if isPoweredConductor(current.position) {
+            for direction in 0..<6 where visited.count < cap {
+                let next = Position(x: current.position.x + DIR_X[direction],
+                                    y: current.position.y + DIR_Y[direction],
+                                    z: current.position.z + DIR_Z[direction])
+                guard world.isLoadedAt(next.x, next.z),
+                      strongPowerInto(world, next.x, next.y, next.z,
+                                      DIR_OPPOSITE[direction]) > 0 else { continue }
+                let firstDirection = current.firstDirection >= 0
+                    ? current.firstDirection : direction
+                if isIntrinsicEmitter(next) {
+                    return RPGRedstoneSourceTrace(direction: DIR_NAMES[firstDirection],
+                                                  distance: current.distance + 1,
+                                                  visitedNodes: visited.count + 1)
+                }
+                let nextCell = world.getBlock(next.x, next.y, next.z)
+                let poweredWire = (nextCell >> 4) == Int(B.redstone_wire)
+                    && (nextCell & 15) > 0
+                if poweredWire || isRelay(next), visited.insert(next).inserted {
+                    queue.append(Pending(position: next, firstDirection: firstDirection,
+                                         distance: current.distance + 1))
+                }
+            }
+            continue
+        }
+
+        for direction in 0..<6 where visited.count < cap {
+            let next = Position(x: current.position.x + DIR_X[direction],
+                                y: current.position.y + DIR_Y[direction],
+                                z: current.position.z + DIR_Z[direction])
+            guard world.isLoadedAt(next.x, next.z), isIntrinsicEmitter(next),
+                  emittedPower(world, next.x, next.y, next.z,
+                               DIR_OPPOSITE[direction]) > 0 else { continue }
+            let firstDirection = current.firstDirection >= 0 ? current.firstDirection : direction
+            return RPGRedstoneSourceTrace(direction: DIR_NAMES[firstDirection],
+                                          distance: current.distance + 1,
+                                          visitedNodes: visited.count + 1)
+        }
+        for direction in 0..<6 where visited.count < cap {
+            let next = Position(x: current.position.x + DIR_X[direction],
+                                y: current.position.y + DIR_Y[direction],
+                                z: current.position.z + DIR_Z[direction])
+            guard world.isLoadedAt(next.x, next.z), isRelay(next),
+                  emittedPower(world, next.x, next.y, next.z,
+                               DIR_OPPOSITE[direction]) > 0 else { continue }
+            if visited.insert(next).inserted {
+                let firstDirection = current.firstDirection >= 0
+                    ? current.firstDirection : direction
+                queue.append(Pending(position: next, firstDirection: firstDirection,
+                                     distance: current.distance + 1))
+            }
+        }
+        for direction in 0..<6 where visited.count < cap {
+            let next = Position(x: current.position.x + DIR_X[direction],
+                                y: current.position.y + DIR_Y[direction],
+                                z: current.position.z + DIR_Z[direction])
+            guard world.isLoadedAt(next.x, next.z), isPoweredConductor(next) else { continue }
+            if visited.insert(next).inserted {
+                let firstDirection = current.firstDirection >= 0
+                    ? current.firstDirection : direction
+                queue.append(Pending(position: next, firstDirection: firstDirection,
+                                     distance: current.distance + 1))
+            }
+        }
+        for (next, horizontalDirection) in connectedPoweredWires(from: current.position) {
+            guard visited.count < cap, visited.insert(next).inserted else { continue }
+            let firstDirection = current.firstDirection >= 0
+                ? current.firstDirection : horizontalDirection
+            queue.append(Pending(position: next, firstDirection: firstDirection,
+                                 distance: current.distance + 1))
+        }
+    }
+    return nil
+}
+
 // ---------------------------------------------------------------------------
 // Power queries
 // ---------------------------------------------------------------------------

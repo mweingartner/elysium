@@ -200,6 +200,8 @@ public final class TNTEntity: Entity {
     public override var type: String { "tnt" }
     public var fuse = 80
     public var power = 4.0
+    public var rpgControlledChargeOwnerEntityID: Int?
+    public var rpgControlledChargeOwnerAuthorityID: String?
     public override init(world: World) {
         super.init(world: world)
         width = 0.98
@@ -223,11 +225,19 @@ public final class TNTEntity: Entity {
     public override func save() -> [String: Any] {
         var d = super.save()
         d["fuse"] = fuse
+        if let owner = rpgControlledChargeOwnerEntityID { d["rpgChargeOwner"] = owner }
+        if let authority = rpgControlledChargeOwnerAuthorityID, rpgIsBoundedID(authority) {
+            d["rpgChargeAuthority"] = authority
+        }
         return d
     }
     public override func load(_ d: [String: Any]) {
         super.load(d)
         fuse = (d["fuse"] as? NSNumber)?.intValue ?? 80
+        rpgControlledChargeOwnerEntityID = (d["rpgChargeOwner"] as? NSNumber)?.intValue
+        if let authority = d["rpgChargeAuthority"] as? String, rpgIsBoundedID(authority) {
+            rpgControlledChargeOwnerAuthorityID = authority
+        }
     }
 }
 

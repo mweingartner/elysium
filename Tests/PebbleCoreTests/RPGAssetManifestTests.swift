@@ -33,6 +33,12 @@ final class RPGAssetManifestTests: XCTestCase {
         XCTAssertEqual(branchIDs.count, RPG_BRANCH_DEFINITIONS.count)
         XCTAssertEqual(skillIDs.count, RPG_SKILL_DEFINITIONS.count)
         XCTAssertEqual(spellIDs.count, RPG_SPELL_DEFINITIONS.count)
+        XCTAssertEqual(RPG_PATH_DEFINITIONS.count, 6)
+        XCTAssertEqual(RPG_BRANCH_DEFINITIONS.count, 18)
+        XCTAssertEqual(RPG_SKILL_DEFINITIONS.count, 54)
+        XCTAssertEqual(RPG_SPELL_DEFINITIONS.count, 17)
+        XCTAssertEqual(RPGSkillEffectID.allCases.count, 54)
+        XCTAssertEqual(Set(RPG_SKILL_DEFINITIONS.map(\.effectID)).count, 54)
 
         for path in RPG_PATH_DEFINITIONS {
             for branchID in path.branchIDs {
@@ -54,13 +60,19 @@ final class RPGAssetManifestTests: XCTestCase {
         }
 
         for skill in RPG_SKILL_DEFINITIONS {
+            XCTAssertEqual(skill.rankValues.count, 3, skill.id)
+            XCTAssertEqual(skill.rankBenefits.count, 3, skill.id)
+            XCTAssertTrue(skill.rankBenefits.allSatisfy { skill.summary.contains($0) }, skill.id)
+            XCTAssertEqual(skill.effectID.rawValue, skill.id)
+            XCTAssertTrue(skill.rankBenefits.allSatisfy { !$0.isEmpty }, skill.id)
             XCTAssertTrue(pathIDs.contains(skill.pathID), "\(skill.id) references missing path \(skill.pathID)")
             XCTAssertTrue(branchIDs.contains(skill.branchID), "\(skill.id) references missing branch \(skill.branchID)")
             for prereq in skill.prerequisiteSkillIDs {
                 XCTAssertTrue(skillIDs.contains(prereq), "\(skill.id) references missing prerequisite \(prereq)")
             }
-            for spellID in skill.unlockSpellIDs {
-                XCTAssertTrue(spellIDs.contains(spellID), "\(skill.id) references missing spell \(spellID)")
+            for unlock in skill.spellUnlocks {
+                XCTAssertTrue((1...3).contains(unlock.rank), skill.id)
+                XCTAssertTrue(spellIDs.contains(unlock.spellID), skill.id)
             }
         }
 

@@ -8,9 +8,18 @@ let package = Package(
     name: "Pebble",
     platforms: [.macOS(.v14)],
     targets: [
+        // the persistence boundary: typed rows/facades only; no engine dependency
+        .target(
+            name: "PebbleStorage",
+            path: "Sources/PebbleStorage",
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+            ]
+        ),
         // the engine: headless-testable, no AppKit dependencies
         .target(
             name: "PebbleCore",
+            dependencies: ["PebbleStorage"],
             path: "Sources/PebbleCore",
             swiftSettings: [
                 .swiftLanguageMode(.v5),
@@ -42,7 +51,7 @@ let package = Package(
         ),
         .testTarget(
             name: "PebbleCoreTests",
-            dependencies: ["PebbleCore"],
+            dependencies: ["PebbleCore", "PebbleStorage"],
             path: "Tests/PebbleCoreTests",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),

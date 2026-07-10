@@ -20,6 +20,7 @@ final class RPGActionTests: XCTestCase {
         world.addEntity(player)
         world.addEntity(zombie)
         let fatigueBefore = player.rpg.fatigue
+        let expectedCost = igniteCost(player.rpg)
 
         let result = rpgCastPreparedSpell(player, spellID: "ignite")
 
@@ -31,7 +32,7 @@ final class RPGActionTests: XCTestCase {
         XCTAssertEqual(action.targetEntityID, zombie.id)
         XCTAssertLessThan(zombie.health, zombie.maxHealth)
         XCTAssertGreaterThan(zombie.fireTicks, 0)
-        XCTAssertEqual(player.rpg.fatigue, fatigueBefore - 2, accuracy: 0.0001)
+        XCTAssertEqual(player.rpg.fatigue, fatigueBefore - expectedCost, accuracy: 0.0001)
         XCTAssertTrue(player.rpg.activeCooldowns.contains { $0.id == "ignite" && $0.remainingTicks > 0 })
     }
 
@@ -39,12 +40,18 @@ final class RPGActionTests: XCTestCase {
         let world = makeWorld(seed: 2)
         let player = makeArcanist(in: world, starterSpells: ["ignite"])
         player.rpg.fatigue = 1
+        let expectedCost = igniteCost(player.rpg)
 
         let result = rpgCastPreparedSpell(player, spellID: "ignite")
 
-        XCTAssertEqual(result.failure, .insufficientFatigue(required: 2, available: 1))
+        XCTAssertEqual(result.failure, .insufficientFatigue(required: expectedCost, available: 1))
         XCTAssertEqual(player.rpg.actionSequence, 0)
         XCTAssertTrue(player.rpg.activeCooldowns.isEmpty)
+    }
+
+    private func igniteCost(_ state: RPGCharacterState) -> Double {
+        let base = rpgSpellDefinition("ignite")!.fatigueCost
+        return max(1, (base * rpgDerivedStats(state).focusCostMultiplier * 10).rounded(.up) / 10)
     }
 
     func testMageLightPlacesTorchOnHitFace() {
@@ -69,9 +76,9 @@ final class RPGActionTests: XCTestCase {
         let player = makeArcanist(in: world, starterSpells: ["ignite", "mage_light"])
 
         XCTAssertEqual(player.rpg.selectedPreparedSpellID, "ignite")
-        XCTAssertEqual(rpgCyclePreparedSpell(player), "mage_light")
+        XCTAssertEqual(rpgCyclePreparedSpell(player), .selected("mage_light"))
         XCTAssertEqual(player.rpg.selectedPreparedSpellID, "mage_light")
-        XCTAssertEqual(rpgCyclePreparedSpell(player), "ignite")
+        XCTAssertEqual(rpgCyclePreparedSpell(player), .selected("ignite"))
     }
 
     func testPreparedActiveSkillUsesUnifiedSelectedAction() {
@@ -139,13 +146,20 @@ final class RPGActionTests: XCTestCase {
 
     private func makeArcanist(in world: World, starterSpells: [String]) -> Player {
         let player = Player(world: world)
+        let starter = starterSpells == ["mage_light"] ? "ritual_circle" : "spell_formula"
+        let initialSpells = starter == "ritual_circle" ? ["mage_light"] : starterSpells.filter { $0 == "ignite" }
         let error = player.createRPGCharacter(RPGCreationDraft(
             pathID: "arcanist",
             attributes: .defaultCreation,
-            starterSkillID: "spell_formula",
-            starterSpellIDs: starterSpells
+            starterSkillID: starter,
+            starterSpellIDs: initialSpells
         ))
         XCTAssertNil(error)
+        if starterSpells.contains("mage_light"), starter == "spell_formula" {
+            _ = rpgAddXP(rpgXPRequiredForLevel(3), to: &player.rpg)
+            XCTAssertNil(rpgLearnSkill("ritual_circle", in: &player.rpg))
+            XCTAssertNil(rpgPrepareSpell("mage_light", in: &player.rpg))
+        }
         return player
     }
 

@@ -393,7 +393,7 @@ final class RPGCharacterScreen: Screen {
             cv.drawRPGIcon(rpgAssetIDForSkill(skill.id), row.x + 3, row.y + 3, 16, 16)
             cv.drawText(fit(skill.displayName, maxWidth: 118), row.x + 24, row.y + 4, 1, known ? "#202020" : "#505050", shadow: false)
             let rank = player.rpg.skillRanks[skill.id] ?? 0
-            cv.drawText(rank > 0 ? "\(rank)/\(skill.maxRank)" : "-", row.x + 146, row.y + 4, 1, "#303030", shadow: false)
+            cv.drawText(rank > 0 ? "\(rank)/3" : "-", row.x + 146, row.y + 4, 1, "#303030", shadow: false)
             let stateX = row.x + row.w - 62
             cv.drawText(skillRowState(skill, state: player.rpg), stateX, row.y + 4, 1, "#303030", shadow: false)
             cv.drawText(fit(skill.summary, maxWidth: Int(max(0, stateX - (row.x + 190) - 8))),
@@ -532,7 +532,6 @@ final class RPGCharacterScreen: Screen {
             return "Slot \(slot + 1)"
         }
         if state.preparedSkillIDs.contains(skill.id), skill.kind == .active { return "Prepared" }
-        if rank > 0, skill.kind == .spell { return "Spells" }
         if rank > 0 { return "Known" }
         var copy = state
         if rpgLearnSkill(skill.id, in: &copy) == nil { return "Learn" }

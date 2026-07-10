@@ -4,16 +4,20 @@
 import Foundation
 
 public struct CraftingRecipePlan {
+    public let recipeIndex: Int
     public let recipe: CraftRecipe
     public let output: ItemStack
     public let ingredients: [String?]
 
-    public init(recipe: CraftRecipe, output: ItemStack, ingredients: [String?]) {
+    public init(recipeIndex: Int, recipe: CraftRecipe, output: ItemStack, ingredients: [String?]) {
+        self.recipeIndex = recipeIndex
         self.recipe = recipe
         self.output = output
         self.ingredients = ingredients
     }
 }
+
+public let MAX_CRAFTING_BATCH_ROUNDS = 64
 
 public let CRAFTING_TABLE_CONTAINER_RADIUS = 25
 
@@ -59,7 +63,8 @@ private func reserveIngredient(_ ingredient: String, from counts: inout [String:
     return ingredient
 }
 
-private func planRecipe(_ recipe: CraftRecipe, counts: [String: Int], gridWidth: Int, gridHeight: Int) -> CraftingRecipePlan? {
+private func planRecipe(_ recipe: CraftRecipe, recipeIndex: Int,
+                        counts: [String: Int], gridWidth: Int, gridHeight: Int) -> CraftingRecipePlan? {
     var remaining = counts
     var ingredients = [String?](repeating: nil, count: gridWidth * gridHeight)
 
@@ -81,7 +86,8 @@ private func planRecipe(_ recipe: CraftRecipe, counts: [String: Int], gridWidth:
         }
     }
 
-    return CraftingRecipePlan(recipe: recipe, output: craftingRecipeOutput(recipe), ingredients: ingredients)
+    return CraftingRecipePlan(recipeIndex: recipeIndex, recipe: recipe,
+                              output: craftingRecipeOutput(recipe), ingredients: ingredients)
 }
 
 private func representativeIngredient(_ ingredient: String) -> String? {
@@ -94,7 +100,8 @@ private func representativeIngredient(_ ingredient: String) -> String? {
     return itemExists(ingredient) ? ingredient : nil
 }
 
-private func planCreativeRecipe(_ recipe: CraftRecipe, gridWidth: Int, gridHeight: Int) -> CraftingRecipePlan? {
+private func planCreativeRecipe(_ recipe: CraftRecipe, recipeIndex: Int,
+                                gridWidth: Int, gridHeight: Int) -> CraftingRecipePlan? {
     var ingredients = [String?](repeating: nil, count: gridWidth * gridHeight)
 
     switch recipe {
@@ -115,7 +122,8 @@ private func planCreativeRecipe(_ recipe: CraftRecipe, gridWidth: Int, gridHeigh
         }
     }
 
-    return CraftingRecipePlan(recipe: recipe, output: craftingRecipeOutput(recipe), ingredients: ingredients)
+    return CraftingRecipePlan(recipeIndex: recipeIndex, recipe: recipe,
+                              output: craftingRecipeOutput(recipe), ingredients: ingredients)
 }
 
 private func sortCraftingPlans(_ plans: inout [CraftingRecipePlan]) {
@@ -131,8 +139,9 @@ public func craftingPlans(for inventory: [ItemStack?], gridWidth: Int, gridHeigh
     let counts = inventoryCounts(inventory)
     var seen = Set<String>()
     var plans: [CraftingRecipePlan] = []
-    for recipe in craftingRecipes {
-        guard let plan = planRecipe(recipe, counts: counts, gridWidth: gridWidth, gridHeight: gridHeight) else { continue }
+    for (index, recipe) in craftingRecipes.enumerated() {
+        guard let plan = planRecipe(recipe, recipeIndex: index, counts: counts,
+                                    gridWidth: gridWidth, gridHeight: gridHeight) else { continue }
         let key = "\(itemDef(plan.output.id).name)#\(plan.output.count)"
         if seen.insert(key).inserted { plans.append(plan) }
     }
@@ -143,8 +152,9 @@ public func craftingPlans(for inventory: [ItemStack?], gridWidth: Int, gridHeigh
 public func creativeCraftingPlans(gridWidth: Int, gridHeight: Int) -> [CraftingRecipePlan] {
     guard gridWidth > 0, gridHeight > 0, gridWidth <= 8, gridHeight <= 8 else { return [] }
     var plans: [CraftingRecipePlan] = []
-    for recipe in craftingRecipes {
-        guard let plan = planCreativeRecipe(recipe, gridWidth: gridWidth, gridHeight: gridHeight) else { continue }
+    for (index, recipe) in craftingRecipes.enumerated() {
+        guard let plan = planCreativeRecipe(recipe, recipeIndex: index,
+                                            gridWidth: gridWidth, gridHeight: gridHeight) else { continue }
         plans.append(plan)
     }
     sortCraftingPlans(&plans)
@@ -161,7 +171,8 @@ public func currentCraftingPlan(from grid: [ItemStack?], gridWidth: Int, gridHei
             ingredients[i] = itemDef(stack.id).name
         }
     }
-    return CraftingRecipePlan(recipe: match.recipe, output: match.out, ingredients: ingredients)
+    return CraftingRecipePlan(recipeIndex: match.recipeIndex, recipe: match.recipe,
+                              output: match.out, ingredients: ingredients)
 }
 
 public func maxCraftingRounds(_ plan: CraftingRecipePlan, from resources: [ItemStack?]) -> Int {
@@ -663,7 +674,7 @@ public func giveStackToNearbyCraftingContainers(_ stackIn: ItemStack?, world: Wo
 }
 
 /// match a w×h grid of stacks against all recipes; returns output or nil
-public func matchCrafting(_ grid: [ItemStack?], _ gw: Int, _ gh: Int) -> (out: ItemStack, recipe: CraftRecipe)? {
+public func matchCrafting(_ grid: [ItemStack?], _ gw: Int, _ gh: Int) -> (out: ItemStack, recipe: CraftRecipe, recipeIndex: Int)? {
     // trim grid to bounding box
     var minX = gw, minY = gh, maxX = -1, maxY = -1
     for y in 0..<gh {
@@ -677,7 +688,7 @@ public func matchCrafting(_ grid: [ItemStack?], _ gw: Int, _ gh: Int) -> (out: I
     if maxX < 0 { return nil }
     let bw = maxX - minX + 1, bh = maxY - minY + 1
 
-    for r in craftingRecipes {
+    for (recipeIndex, r) in craftingRecipes.enumerated() {
         switch r {
         case .shapeless(let inputs, let out, let count):
             var ok = true
@@ -694,7 +705,7 @@ public func matchCrafting(_ grid: [ItemStack?], _ gw: Int, _ gh: Int) -> (out: I
                 // no extra items
                 var extra = false
                 for i in 0..<grid.count where grid[i] != nil && !used[i] { extra = true }
-                if !extra { return (ItemStack(iid(out), count), r) }
+                if !extra { return (ItemStack(iid(out), count), r, recipeIndex) }
             }
         case .shaped(let rw, let rh, let rgrid, let out, let count):
             if rw != bw || rh != bh { continue }
@@ -709,7 +720,7 @@ public func matchCrafting(_ grid: [ItemStack?], _ gw: Int, _ gh: Int) -> (out: I
                         else if !ingMatches(ing!, stack) { ok = false }
                     }
                 }
-                if ok { return (ItemStack(iid(out), count), r) }
+                if ok { return (ItemStack(iid(out), count), r, recipeIndex) }
             }
         }
     }
@@ -730,6 +741,108 @@ public func consumeCraftingGrid(_ grid: inout [ItemStack?]) -> [ItemStack] {
         if s.count <= 0 { grid[i] = nil }
     }
     return returns
+}
+
+/// Consumes only rounds that are backed by a real recipe match. The caller's
+/// refill closure is the sole authority for moving the next round's resources
+/// into the grid; its return value is revalidated through `matchCrafting`
+/// before any ingredient is consumed. Both personal 2x2 and table 3x3 screens
+/// use this seam so progression receives the exact completed-round count.
+@discardableResult
+public func consumeCraftingOutputRounds(
+    grid: inout [ItemStack?],
+    gridWidth: Int,
+    gridHeight: Int,
+    expectedRecipeIndex: Int,
+    expectedOutputID: Int,
+    expectedOutputCount: Int,
+    requestedRounds: Int,
+    refill: (inout [ItemStack?]) -> Bool
+) -> Int {
+    guard gridWidth > 0, gridHeight > 0,
+          gridWidth <= 8, gridHeight <= 8,
+          grid.count == gridWidth * gridHeight,
+          expectedRecipeIndex >= 0, expectedRecipeIndex < craftingRecipes.count,
+          expectedOutputID >= 0, expectedOutputID < itemDefs.count,
+          expectedOutputCount > 0,
+          requestedRounds > 0 else { return 0 }
+    let rounds = min(requestedRounds, MAX_CRAFTING_BATCH_ROUNDS)
+    func isExpectedMatch() -> Bool {
+        guard let match = matchCrafting(grid, gridWidth, gridHeight) else { return false }
+        return match.recipeIndex == expectedRecipeIndex
+            && match.out.id == expectedOutputID
+            && match.out.count == expectedOutputCount
+    }
+    var consumed = 0
+    while consumed < rounds {
+        if !isExpectedMatch() {
+            guard refill(&grid) else { break }
+        }
+        guard isExpectedMatch() else { break }
+        _ = consumeCraftingGrid(&grid)
+        consumed += 1
+    }
+    return consumed
+}
+
+/// The single production commit result for survival crafting. Callers preview
+/// an output freely, but may transfer only this returned stack: it is backed by
+/// the exact number of recipe rounds consumed in the same synchronous commit.
+public struct CraftingOutputCommit {
+    public let output: ItemStack
+    public let completedRounds: Int
+    public let progression: RPGProgressionReport
+
+    public init(output: ItemStack, completedRounds: Int,
+                progression: RPGProgressionReport) {
+        self.output = output
+        self.completedRounds = completedRounds
+        self.progression = progression
+    }
+}
+
+/// Revalidates and consumes a displayed survival-crafting batch before making
+/// any output transferable. A refill race may reduce the commit to fewer rounds
+/// than the preview; the returned output is reduced by exactly the same amount,
+/// and RPG progression observes that same committed count.
+public func commitCraftingOutputRounds(
+    player: Player,
+    grid: inout [ItemStack?],
+    gridWidth: Int,
+    gridHeight: Int,
+    plan: CraftingRecipePlan,
+    displayedOutput: ItemStack,
+    requestedRounds: Int,
+    refill: (inout [ItemStack?]) -> Bool
+) -> CraftingOutputCommit? {
+    guard plan.recipeIndex >= 0, plan.recipeIndex < craftingRecipes.count,
+          plan.output.count > 0,
+          stacksEqual(plan.output, displayedOutput),
+          requestedRounds > 0 else { return nil }
+    let rounds = min(requestedRounds, MAX_CRAFTING_BATCH_ROUNDS)
+    let (previewCount, previewOverflow) = plan.output.count.multipliedReportingOverflow(by: rounds)
+    guard !previewOverflow, previewCount == displayedOutput.count else { return nil }
+
+    let completed = consumeCraftingOutputRounds(
+        grid: &grid,
+        gridWidth: gridWidth,
+        gridHeight: gridHeight,
+        expectedRecipeIndex: plan.recipeIndex,
+        expectedOutputID: plan.output.id,
+        expectedOutputCount: plan.output.count,
+        requestedRounds: rounds,
+        refill: refill
+    )
+    guard completed > 0 else { return nil }
+    // The preview multiplication above proved this product safe for `rounds`;
+    // `completed <= rounds`, so no fallible check remains after consumption.
+    let committedCount = plan.output.count * completed
+    let output = plan.output.copy()
+    output.count = committedCount
+    let report = rpgAwardCraftedRecipe(player, recipeIndex: plan.recipeIndex,
+                                       completedRounds: completed)
+    return CraftingOutputCommit(output: output, completedRounds: completed,
+                                progression: report)
 }
 
 /// smithing: template + base + addition

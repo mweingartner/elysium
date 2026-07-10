@@ -146,11 +146,11 @@ registerAllItems()
 // 1186 baseline items + appended Pebble items at the END so every baseline id
 // is unchanged.
 let BASE_ITEM_COUNT = 1186
-check("item count", itemDefs.count == 1194, "got \(itemDefs.count) want 1194")
+check("item count", itemDefs.count == 1195, "got \(itemDefs.count) want 1195")
 let appendedItems: [(String, Int)] = [
     ("weeping_vines", 1186), ("twisting_vines", 1187), ("flying_wand", 1188),
     ("copper_sword", 1189), ("copper_pickaxe", 1190), ("copper_axe", 1191),
-    ("copper_shovel", 1192), ("copper_hoe", 1193),
+    ("copper_shovel", 1192), ("copper_hoe", 1193), ("apprentice_focus", 1194),
 ]
 var appendedItemsOK = true
 for (name, want) in appendedItems {

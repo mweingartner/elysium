@@ -397,6 +397,9 @@ private func sanitizedTemplateBlockEntity(_ be: BlockEntityData) -> BlockEntityD
     }
     copy.disc = sanitizedTemplateStack(copy.disc)
     copy.item = sanitizedTemplateStack(copy.item)
+    copy.lootTable = nil
+    copy.lootSeed = nil
+    copy.rpgGeneratedContainerKey = nil
     return copy
 }
 
@@ -405,6 +408,7 @@ private func stripContainedItemsFromTemplateClone(_ copy: BlockEntityData) {
     copy.items = Array<ItemStack?>(repeating: nil, count: items.count)
     copy.lootTable = nil
     copy.lootSeed = nil
+    copy.rpgGeneratedContainerKey = nil
     copy.viewers = nil
     switch copy.type {
     case "hopper":

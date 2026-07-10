@@ -3,6 +3,19 @@ import XCTest
 @testable import PebbleCore
 
 final class LANMultiplayerTests: XCTestCase {
+    func testRPGClockCatchUpClassifierCoversEveryGuestMutationKindExactly() {
+        let expected: [LANMultiplayerMessageKind] = [
+            .playerState, .inputIntent, .blockIntent, .containerIntent,
+            .templateIntent, .attackIntent, .tossIntent, .containerEditIntent,
+            .inventoryUpdate, .rpgIntent,
+        ]
+        let classified = LANMultiplayerMessageKind.allCases.filter {
+            $0.isHostMutationBlockedByRPGClockCatchUp
+        }
+
+        XCTAssertEqual(classified, expected)
+    }
+
     func testFrameCodecRoundTripsAllHandshakeAndGameplayMessageKinds() throws {
         let world = LANWorldSummary(
             worldID: "world-1",

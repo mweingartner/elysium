@@ -27,6 +27,9 @@ public struct SmithRecipe {
 }
 
 public var craftingRecipes: [CraftRecipe] = []
+/// Nil until the append-only crafting registry has finished registering.
+/// RPG repair must not infer an empty recipe registry from early startup.
+public private(set) var registeredCraftingRecipeCount: Int? = nil
 public var smeltingRecipes: [SmeltRecipe] = []
 public var stonecuttingRecipes: [StonecutRecipe] = []
 public var smithingRecipes: [SmithRecipe] = []
@@ -551,4 +554,5 @@ public func registerAllRecipes() {
     shaped("XX/XS/ S", ["X": "copper_ingot", "S": "stick"], "copper_axe")
     shaped("X/S/S", ["X": "copper_ingot", "S": "stick"], "copper_shovel")
     shaped("XX/ S/ S", ["X": "copper_ingot", "S": "stick"], "copper_hoe")
+    registeredCraftingRecipeCount = craftingRecipes.count
 }

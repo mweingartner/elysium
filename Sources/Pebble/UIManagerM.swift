@@ -14,12 +14,17 @@ final class SlotDef {
     var canPlace: ((ItemStack) -> Bool)?
     var output = false
     var onTake: ((ItemStack) -> Void)?
+    /// Optional pre-transfer transaction. The closure must return a stack no
+    /// larger than and metadata-equal to the preview, or nil when nothing
+    /// committed. Unlike `onTake`, it runs before cursor/inventory insertion.
+    var commitOutputTake: ((ItemStack) -> ItemStack?)?
     var repeatsOutputQuickMove: () -> Bool
     var onChange: (() -> Void)?
 
     init(x: Double, y: Double, get: @escaping () -> ItemStack?, set: @escaping (ItemStack?) -> Void,
          canPlace: ((ItemStack) -> Bool)? = nil, output: Bool = false,
          onTake: ((ItemStack) -> Void)? = nil,
+         commitOutputTake: ((ItemStack) -> ItemStack?)? = nil,
          repeatsOutputQuickMove: @escaping () -> Bool = { true },
          onChange: (() -> Void)? = nil) {
         self.x = x
@@ -29,6 +34,7 @@ final class SlotDef {
         self.canPlace = canPlace
         self.output = output
         self.onTake = onTake
+        self.commitOutputTake = commitOutputTake
         self.repeatsOutputQuickMove = repeatsOutputQuickMove
         self.onChange = onChange
     }
@@ -570,9 +576,16 @@ final class UIManager {
         var rounds = 0
         while let s = slot.get(), s.count > 0, rounds < 64 {
             guard canFullyInsert(s, targets) else { break }
-            let taken = copyStack(s)!
+            let taken: ItemStack
+            if let commit = slot.commitOutputTake {
+                guard let committed = commit(s), committed.count > 0,
+                      committed.count <= s.count, stacksEqual(committed, s) else { break }
+                taken = committed
+            } else {
+                taken = copyStack(s)!
+            }
             _ = quickMoveInto(taken, targets)
-            slot.onTake?(s)
+            if slot.commitOutputTake == nil { slot.onTake?(s) }
             rounds += 1
             if !repeatOutput { break }
             // defensive: a slot whose onTake doesn't refresh its source would
@@ -596,6 +609,32 @@ final class UIManager {
             return
         }
         if slot.output {
+            if let commit = slot.commitOutputTake {
+                guard let preview = inSlot else { return }
+                let mustUseInventory = preview.count > maxStackOf(preview)
+                if mustUseInventory {
+                    guard let container = screen as? ContainerScreen,
+                          canFullyInsert(preview, container.playerSlots) else { return }
+                    guard let committed = commit(preview), committed.count > 0,
+                          committed.count <= preview.count,
+                          stacksEqual(committed, preview) else { return }
+                    let taken = copyStack(committed)!
+                    _ = quickMoveInto(taken, container.playerSlots)
+                } else {
+                    guard cursor == nil || (canMerge(cursor!, preview)
+                        && cursor!.count + preview.count <= maxStackOf(cursor!)) else { return }
+                    guard let committed = commit(preview), committed.count > 0,
+                          committed.count <= preview.count,
+                          stacksEqual(committed, preview) else { return }
+                    if let cursor {
+                        cursor.count += committed.count
+                    } else {
+                        cursorStack = copyStack(committed)
+                    }
+                }
+                slot.onChange?()
+                return
+            }
             // take only (all)
             if let inSlot,
                cursor == nil,

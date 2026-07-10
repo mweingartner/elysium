@@ -511,6 +511,86 @@ final class CraftingPlanTests: XCTestCase {
         XCTAssertEqual(maxCraftingRounds(plan, from: resources), 3)
     }
 
+    func testProductionCraftCommitTransfersAndAwardsOnlyBackedPersonalRounds() throws {
+        registerCoreIfNeeded()
+        let world = makeWorld()
+        let player = Player(world: world)
+        player.rpg = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "mender",
+            attributes: try XCTUnwrap(rpgCreationPreset(pathID: "mender")),
+            starterSkillID: "herbal_lore"
+        )).get()
+        var resources: [ItemStack?] = [
+            stack("brown_mushroom", 3), stack("red_mushroom", 3), stack("bowl", 3),
+        ]
+        var grid = [ItemStack?](repeating: nil, count: 4)
+        let recipe = try XCTUnwrap(craftingPlans(
+            for: resources, gridWidth: 2, gridHeight: 2
+        ).first { itemDef($0.output.id).name == "mushroom_stew" })
+        XCTAssertTrue(populateCraftingGrid(recipe, grid: &grid, inventory: &resources))
+        let preview = recipe.output.copy()
+        preview.count = recipe.output.count * 3
+        var successfulRefills = 0
+
+        let commit = try XCTUnwrap(commitCraftingOutputRounds(
+            player: player, grid: &grid, gridWidth: 2, gridHeight: 2,
+            plan: recipe, displayedOutput: preview, requestedRounds: 3
+        ) { nextGrid in
+            guard successfulRefills < 1 else { return false }
+            successfulRefills += 1
+            return populateCraftingGrid(recipe, grid: &nextGrid, inventory: &resources)
+        })
+
+        XCTAssertEqual(commit.completedRounds, 2)
+        XCTAssertEqual(commit.output.id, recipe.output.id)
+        XCTAssertEqual(commit.output.count, recipe.output.count * 2,
+                       "a failed final refill cannot mint the third previewed output")
+        XCTAssertEqual(commit.progression.awardedXP, 12)
+        XCTAssertEqual(player.rpg.xp, 12,
+                       "progression must observe the same two committed rounds as output transfer")
+        XCTAssertTrue(grid.allSatisfy { $0 == nil })
+        XCTAssertEqual(resources.compactMap { $0?.count }, [1, 1, 1])
+    }
+
+    func testProductionCraftCommitTransfersAndAwardsOnlyBackedTableRounds() throws {
+        registerCoreIfNeeded()
+        let world = makeWorld()
+        let player = Player(world: world)
+        player.rpg = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "tinker",
+            attributes: try XCTUnwrap(rpgCreationPreset(pathID: "tinker")),
+            starterSkillID: "circuit_sense"
+        )).get()
+        var resources: [ItemStack?] = [
+            stack("redstone_torch", 8), stack("redstone", 4), stack("stone", 12),
+        ]
+        var grid = [ItemStack?](repeating: nil, count: 9)
+        let recipe = try XCTUnwrap(craftingPlans(
+            for: resources, gridWidth: 3, gridHeight: 3
+        ).first { itemDef($0.output.id).name == "repeater" })
+        XCTAssertTrue(populateCraftingGrid(recipe, grid: &grid, inventory: &resources))
+        let preview = recipe.output.copy()
+        preview.count = recipe.output.count * 4
+        var successfulRefills = 0
+
+        let commit = try XCTUnwrap(commitCraftingOutputRounds(
+            player: player, grid: &grid, gridWidth: 3, gridHeight: 3,
+            plan: recipe, displayedOutput: preview, requestedRounds: 4
+        ) { nextGrid in
+            guard successfulRefills < 2 else { return false }
+            successfulRefills += 1
+            return populateCraftingGrid(recipe, grid: &nextGrid, inventory: &resources)
+        })
+
+        XCTAssertEqual(commit.completedRounds, 3)
+        XCTAssertEqual(commit.output.count, recipe.output.count * 3)
+        XCTAssertEqual(commit.progression.awardedXP, 22,
+                       "one first-recipe event plus three backed engineering rounds")
+        XCTAssertEqual(player.rpg.xp, 22)
+        XCTAssertTrue(grid.allSatisfy { $0 == nil })
+        XCTAssertEqual(resources.compactMap { $0?.count }, [2, 1, 3])
+    }
+
     func testCreativeCraftingRoundLimitFillsInventoryCapacity() throws {
         registerCoreIfNeeded()
         let plan = try XCTUnwrap(creativeCraftingPlans(gridWidth: 2, gridHeight: 2).first {

@@ -50,7 +50,9 @@ public func playerAttack(_ player: Player, _ target: Entity) {
         player.world.hooks.playSound("entity.player.attack.weak", player.x, player.y, player.z, 0.6, 1)
     }
 
-    let hurt = target.hurt(max(0, dmg), "mob", player)
+    let meleeSource = player.rpgClassesEnabled() && player.rpg.created && player.rpg.pathID == "warden"
+        ? RPG_DAMAGE_SOURCE_WARDEN_MELEE : "mob"
+    let hurt = target.hurt(max(0, dmg), meleeSource, player)
     if hurt {
         // knockback enchant + sprint knockback (capture sprint state first —
         // the kb branch clears it, and the sweep gate below must see it)
@@ -78,7 +80,7 @@ public func playerAttack(_ player: Player, _ target: Entity) {
             let sweepDmg = 1 + (sweepLvl > 0 ? dmg * Double(sweepLvl) / Double(sweepLvl + 1) : 0)
             for e in player.world.getEntitiesNear(target.x, target.y, target.z, 1.5) {
                 guard let other = e as? LivingEntity, other !== target, other !== player else { continue }
-                other.hurt(sweepDmg, "mob", player)
+                other.hurt(sweepDmg, meleeSource, player)
             }
             player.world.hooks.addParticles("sweep", player.x - detSin(player.yaw) * 1.5, player.y + 1.1, player.z + detCos(player.yaw) * 1.5, 1, 0, 0)
             player.world.hooks.playSound("entity.player.attack.sweep", player.x, player.y, player.z, 0.8, 1)
@@ -96,7 +98,8 @@ public func playerAttack(_ player: Player, _ target: Entity) {
 // ---------------------------------------------------------------------------
 public func shootBow(_ player: Player, _ chargeTicks: Int) {
     guard let held = player.mainHand else { return }
-    var power = Double(chargeTicks) / 20
+    let effectiveChargeTicks = rpgBowEffectiveChargeTicks(player, rawTicks: chargeTicks)
+    var power = Double(effectiveChargeTicks) / 20
     power = (power * power + power * 2) / 3
     if power < 0.1 { return }
     if power > 1 { power = 1 }
@@ -125,7 +128,7 @@ public func shootBow(_ player: Player, _ chargeTicks: Int) {
     }
 
     let arrow = ArrowEntity(world: player.world)
-    arrow.shootFrom(player, player.pitch, player.yaw, power * 3, 1)
+    arrow.shootFrom(player, player.pitch, player.yaw, power * 3, rpgBowInaccuracy(player))
     arrow.damage = 2 + Double(enchLevel(held, "power")) * 0.5 + (enchLevel(held, "power") > 0 ? 0.5 : 0)
     arrow.critical = power >= 1
     arrow.punchLevel = enchLevel(held, "punch")
@@ -223,6 +226,7 @@ public func breakSpeed(_ player: Player, _ cellVal: Int) -> Double {
     }
     if player.underwater && !(player.armor[0] != nil && enchLevel(player.armor[0]!, "aqua_affinity") > 0) { speed /= 5 }
     if !player.onGround { speed /= 5 }
+    speed *= rpgMiningSpeedMultiplier(player, blockID: bid)
 
     let canHarvestNow = !def.requiresTool || (matches && (tool?.tier ?? 0) >= def.tier)
     let divisor: Double = canHarvestNow ? 30 : 100

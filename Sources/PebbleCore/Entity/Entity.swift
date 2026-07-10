@@ -142,7 +142,10 @@ open class Entity: EntityRef {
                 fireTicks = 0
                 if inPowderSnow { world.setBlock(ifloor(x), ifloor(y), ifloor(z), 0) }
             } else {
-                if fireTicks % 20 == 0 && world.rule("fireDamage") { _ = hurt(1, "fire") }
+                if fireTicks % 20 == 0 && world.rule("fireDamage") {
+                    if let living = self as? LivingEntity { living.hurtFromPeriodicFire(1) }
+                    else { _ = hurt(1, "fire") }
+                }
                 fireTicks -= 1
             }
         }

@@ -32,6 +32,12 @@ if grep -q 'warning:' "$BUILD_LOG"; then
 fi
 rm -f "$BUILD_LOG"
 
+stage "PebbleStorage release surface"
+STORAGE_SURFACE_VERIFIER="scripts/verify-pebble-storage-release-surface.sh"
+[ -f "$STORAGE_SURFACE_VERIFIER" ] || fail "storage release-surface verifier missing"
+[ -x "$STORAGE_SURFACE_VERIFIER" ] || fail "storage release-surface verifier is not executable"
+"$STORAGE_SURFACE_VERIFIER"
+
 stage "xctest"
 swift test
 

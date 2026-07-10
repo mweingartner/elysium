@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Source of record: [ModelPairedDev.pdf](/Users/mweingar/Documents/ModelPairedDev.pdf), "The Model-Paired Development Playbook", updated 2026-06-13. This file adapts that playbook to Pebble.
+Editable source of record: [Model-Paired-Development-Playbook.md](/Users/mweingar/dev/hype-v2/docs/Model-Paired-Development-Playbook.md); exported copy: [ModelPairedDev.pdf](/Users/mweingar/Documents/ModelPairedDev.pdf), protocol version 2026-07-09. This file adapts that playbook to Pebble.
 
 ## Operating Protocol
 
@@ -16,28 +16,27 @@ Before editing, read the intent-shaping docs relevant to the task:
 
 Keep durable docs current when behavior, architecture, security posture, test workflow, or release workflow changes.
 
-## Tiering
+## Ordered Development Gates
 
-Skip the pipeline for one-line fixes, typos, comments, pure config, and additions that mirror an existing pattern exactly.
+Every Pebble change follows this order, with artifact depth scaled to semantic risk:
 
-Lite tier is the default for normal multi-file work:
+`Design Mock → Architecture → Design Review/Revision → Security (plan) → Build → Security (code) → Design Sign-off → Test → Deploy`
 
-1. Pre-grep the tree and check `git status --short --branch`.
-2. Write an Architect plan with file paths, exact edits, edge cases, test expectations, and "Conditions for Builder".
-3. Build from the plan, matching existing patterns and adding inline tests for new behavior.
-4. Perform a Security review of the actual code on disk.
-5. Run the full relevant verification gate and report command evidence.
+1. **Design Mock** — for any human-visible or interactive change, the Designer audits existing Pebble screens, HUD conventions, controls, copy, assets, accessibility, and relevant design docs; then specifies elegant, discoverable representation, every state, and checkable acceptance criteria.
+2. **Architecture** — write a plan with file paths, exact edits/APIs, dependency order, failure modes, test/deployment expectations, a risk-to-test map, and "Conditions for Builder."
+3. **Design Review/Revision** — for UI/UX work, the Designer confirms the plan preserves the design intent before code is written or returns it for revision.
+4. **Security (plan)** — review trust boundaries, abuse cases, privacy/data flow, deterministic contracts, and relevant persistence/network/input risks. PASS or resolved CONDITIONAL PASS is required before Build.
+5. **Build** — implement the approved plan, match existing patterns, and add initial tests in the same pass.
+6. **Security (code)** — inspect the actual diff on disk. Findings return to the earliest affected phase; material fixes rerun this gate.
+7. **Design Sign-off** — for UI/UX work, inspect the actual built/installed surface and representative states against the design contract. Unseen work cannot be signed off.
+8. **Test** — independently exercise functional, regression, integration, boundary/error, and applicable non-functional behavior (performance, load/stress, resource use, concurrency, accessibility, resilience), plus seeded fuzz/property/metamorphic coverage for structured input. Run the full relevant Pebble gate and report commands, counts, and exit status.
+9. **Deploy** — only after Test, perform the authorized Pebble install/deploy and verify the real installed target; if deployment was not requested or concretely authorized by current repo instructions, deliver deploy-ready evidence instead.
 
-Full tier is required for saves, settings, resource-pack parsing, SQLite/blob decoding, untrusted input, dynamic loading/execution, network behavior, sandboxing, cryptography, persistence format changes, or any capability with no shipped analog:
+Only Design Mock, Design Review/Revision, and Design Sign-off may be marked N/A, only when there is no human-visible behavior or interaction impact, and only with a written rationale. No other phase is skipped for a typo, one-line change, comment, config, or familiar pattern; those changes receive concise, proportionate artifacts. Every review returns PASS, CONDITIONAL PASS, or FAIL. A conditional pass names conditions, owner, and closing evidence; FAIL blocks. Material changes invalidate downstream approvals.
 
-1. Architect plan.
-2. Security review of the plan.
-3. Builder implementation with tests.
-4. Security review of the actual code on disk.
-5. Tester/regression pass against the implementation.
-6. Full verification gate.
+Full-depth rigor is required for saves, settings, resource-pack parsing, SQLite/blob decoding, untrusted input, dynamic loading/execution, network behavior, sandboxing, cryptography, persistence format changes, or any capability with no shipped analog: explicit threat model, independently separated roles, deep Tester evidence, and Security reruns after fixes.
 
-When sub-agent tooling is available, keep Architect, Security, Builder, and Tester as separate roles. Otherwise, preserve the same separation as explicit phases in the current session.
+When sub-agent tooling is available, keep Designer, Architect, Security, Builder, and Tester as separate roles. Otherwise preserve the same separation as explicit phases and artifacts in the current session.
 
 ## Pebble Verification Gates
 
@@ -62,6 +61,8 @@ For release/deploy readiness:
 ```bash
 bash scripts/pipeline.sh
 ```
+
+For UI/gameplay/world-state/LAN changes, the final Design Sign-off and Deploy stages must use the real installed app when the needed state is observable there. If code changes after a successful install or proof run, that evidence is stale; rerun every affected gate and renew installed-app proof.
 
 The release build must be warning-free. `pebsmoke` is the golden contract and must report the expected 457 checks passing unless the project deliberately changes that count in the same reviewed change.
 

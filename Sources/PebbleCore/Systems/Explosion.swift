@@ -67,13 +67,15 @@ public func explode(_ world: World, _ x: Double, _ y: Double, _ z: Double, _ pow
 
     // --- apply destruction ---
     for (bx, by, bz) in destroyedList {
+        if world.consumeRPGExplosionProtection(at: RPGBlockPosition(bx, by, bz)) { continue }
         let c = world.getBlock(bx, by, bz)
         let bid = c >> 4
         if bid == 0 { continue }
         if bid == Int(B.tnt) {
             // chain ignite
-            world.setBlock(bx, by, bz, 0)
             let tnt = TNTEntity(world: world)
+            _ = world.transferRPGControlledCharge(at: RPGBlockPosition(bx, by, bz), to: tnt)
+            world.setBlock(bx, by, bz, 0)
             tnt.setPos(Double(bx) + 0.5, Double(by), Double(bz) + 0.5)
             tnt.fuse = 10 + gameRng.nextInt(20)
             world.addEntity(tnt)

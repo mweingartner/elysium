@@ -26,6 +26,7 @@ final class HUD {
     private var lastTimerTime = CACurrentMediaTime()
     private var timerAccum = 0.0
     private var tickSteps = 0
+    private var rpgInsightCache = RPGHUDInsightCache()
 
     func showActionBar(_ text: String) {
         actionBarText = text
@@ -54,8 +55,12 @@ final class HUD {
         guard let player = game.player else { return }
         let W = ui.width, H = ui.height
         let cx = (W / 2).rounded(.down)
-        let rpgQuickBarVisible = player.rpg.created
-        let rpgHudLift = rpgQuickBarVisible ? 24.0 : 0.0
+        let screenOpen = ui.hasScreen()
+        let rpgDrawPlan = rpgHUDDrawPlan(player, screenOpen: screenOpen)
+        let rpgInsightLines = rpgInsightCache.resolve(
+            key: rpgHUDInsightCacheKey(player, screenOpen: screenOpen)
+        ) { rpgHUDInsightLines(player) }
+        let rpgHudLift = rpgDrawPlan.liftSurvivalHUD ? 24.0 : 0.0
 
         // vanilla pack HUD when the GUI sheets are loaded; procedural fallback
         let packHud = ui.hasSheet("icons") && ui.hasSheet("widgets")
@@ -76,6 +81,14 @@ final class HUD {
                 cv.fillRect(cx - 8, H / 2 + 8, 16, 2)
                 cv.setFill("#ffffff")
                 cv.fillRect(cx - 8, H / 2 + 8, (16 * str).rounded(), 2)
+            }
+        }
+        if rpgDrawPlan.showInsights {
+            let layout = rpgHUDInsightLayout(viewWidth: W, viewHeight: H)
+            for (index, line) in rpgInsightLines.enumerated() {
+                cv.drawText(fitHUD(line, maxWidth: layout.maximumWidth),
+                            layout.x, layout.y + Double(index * 10),
+                            1, "#b9ddff", shadow: true)
             }
         }
 
@@ -236,22 +249,22 @@ final class HUD {
                     cv.drawTextCentered(String(player.xpLevel), cx, xpY - 10, 1, "#80ff20")
                 }
             }
-            if player.rpg.created {
-                let rpgState = repairRPGCharacterState(player.rpg)
-                let derived = rpgDerivedStats(rpgState)
-                let f = max(0, min(1, rpgState.fatigue / max(1, derived.maxFatigue)))
-                let fx = hbX + 186
-                let fy = hbY
-                cv.setFill("#1c1c1c")
-                cv.fillRect(fx, fy, 5, 22)
-                cv.setFill("#55aaff")
-                cv.fillRect(fx + 1, fy + 21 - (20 * f).rounded(), 3, (20 * f).rounded())
-                drawRPGQuickSlots(ui, rpg: rpgState, hotbarX: hbX, hotbarY: hbY)
-            }
             // vehicle health (riding)
             if let v = player.vehicle as? LivingEntity {
                 cv.drawTextCentered("♥ \(Int(v.health.rounded(.up))) / \(Int(v.maxHealth))", cx, healthY - 20, 1, "#ff5555")
             }
+        }
+        if rpgDrawPlan.showQuickSlots {
+            let rpgState = repairRPGCharacterState(player.rpg)
+            let derived = rpgDerivedStats(rpgState)
+            let f = max(0, min(1, rpgState.fatigue / max(1, derived.maxFatigue)))
+            let fx = hbX + 186
+            let fy = hbY
+            cv.setFill("#1c1c1c")
+            cv.fillRect(fx, fy, 5, 22)
+            cv.setFill("#55aaff")
+            cv.fillRect(fx + 1, fy + 21 - (20 * f).rounded(), 3, (20 * f).rounded())
+            drawRPGQuickSlots(ui, rpg: rpgState, hotbarX: hbX, hotbarY: hbY)
         }
 
         // boss bars

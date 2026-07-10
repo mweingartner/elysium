@@ -56,7 +56,11 @@ final class WorldPresetTests: XCTestCase {
           "difficulty":2,
           "lastPlayed":1,
           "version":"pebble-test",
-          "dims":{"0":{"time":0,"dayTime":1000,"raining":false,"thundering":false,"weatherTimer":24000}},
+          "dims":{
+            "0":{"time":10,"dayTime":1000,"raining":false,"thundering":false,"weatherTimer":24000},
+            "1":{"time":45,"dayTime":0,"raining":false,"thundering":false,"weatherTimer":24000},
+            "2":{"time":-5,"dayTime":0,"raining":false,"thundering":false,"weatherTimer":24000}
+          },
           "spawnX":0,
           "spawnY":80,
           "spawnZ":0,
@@ -71,6 +75,29 @@ final class WorldPresetTests: XCTestCase {
         XCTAssertEqual(rec.worldPreset, WorldPreset.normal.rawValue)
         XCTAssertEqual(rec.singleBiome, "plains")
         XCTAssertEqual(rec.dungeonDensity, DungeonDensity.normal.rawValue)
+        XCTAssertEqual(rec.rpgSimulationTick, 45,
+                       "legacy saves derive one monotonic clock from the greatest dimension age")
+    }
+
+    func testWorldRecordRPGSimulationTickRoundTripsAndClampsCorruptValues() throws {
+        var record = WorldRecord(id: "clock", name: "Clock", seed: 7,
+                                 gameMode: 0, difficulty: 2)
+        record.rpgSimulationTick = 123_456
+        let encoded = try JSONEncoder().encode(record)
+        XCTAssertEqual(try JSONDecoder().decode(WorldRecord.self, from: encoded).rpgSimulationTick,
+                       123_456)
+
+        var object = try XCTUnwrap(try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object["rpgSimulationTick"] = -1
+        XCTAssertEqual(try JSONDecoder().decode(
+            WorldRecord.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        ).rpgSimulationTick, 0)
+        object["rpgSimulationTick"] = RPG_MAX_COUNTER + 1
+        XCTAssertEqual(try JSONDecoder().decode(
+            WorldRecord.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        ).rpgSimulationTick, RPG_MAX_COUNTER)
     }
 
     func testWorldRecordSanitizesUnknownPresetFields() throws {

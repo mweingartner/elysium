@@ -344,6 +344,11 @@ public func registerAllItems() {
     registerItem("copper_shovel", tool: ToolDef("shovel", tier: copper.tier, speed: copper.speed, attackDamage: copper.shovelDmg, attackSpeed: 1, durability: copper.dur, enchantability: copper.ench), category: "tools")
     registerItem("copper_hoe", tool: ToolDef("hoe", tier: copper.tier, speed: copper.speed, attackDamage: 1, attackSpeed: copper.hoeSpd, durability: copper.dur, enchantability: copper.ench), category: "tools")
 
+    // RPG schema v2 append-only focus. Keep after every previously shipped item
+    // so frozen save IDs remain stable.
+    registerItem("apprentice_focus", display: "Apprentice Focus", maxStack: 1,
+                 category: "combat", icon: "blaze_rod")
+
     // post-registration fixups
     itemDefs[iid("cake")].maxStack = 1
 }

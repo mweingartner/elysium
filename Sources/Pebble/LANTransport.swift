@@ -217,6 +217,8 @@ final class LANMultiplayerManager {
     private var lastHostWorldSummaryPublish = 0.0
     private var lastClientPlayerStatePublish = 0.0
     private var lastHostPeerPersist = 0.0
+    private var hostRPGClockCatchUpWasPending = false
+    private var lastHostedRPGRuleEnabled: Bool?
     private let hostReplicationInterval = 0.05
     private let hostBackgroundCadence = LANHostReplicationCadence()
     private let clientPlayerStateInterval = 0.05
@@ -267,6 +269,11 @@ final class LANMultiplayerManager {
             guard let self, let game else { return }
             _ = self.hostReplicationSession.settleAllTemplateJobs(worldForDimension: { game.worldFor(dimension: $0) })
         }
+        game.onRPGGameRuleTransition = { [weak self, weak game] enabled in
+            guard let self, let game else { return }
+            precondition(Thread.isMainThread)
+            self.handleHostedRPGRuleTransition(enabled: enabled, in: game)
+        }
         game.lanChunkRequestHandler = nil
         game.lanBlockIntentHandler = nil
     }
@@ -275,6 +282,7 @@ final class LANMultiplayerManager {
         game.onWorldBlockChanged = nil
         game.onTemplatePlacementCommitted = nil
         game.lanSettleTemplateJobsHandler = nil
+        game.onRPGGameRuleTransition = nil
         game.lanChunkRequestHandler = { [weak self] world, cx, cz in
             guard let self else { return false }
             let centerY = self.activeGame?.player.map { Int($0.y.rounded(.down)) }
@@ -350,6 +358,7 @@ final class LANMultiplayerManager {
     }
 
     private func clearReplicationHooks(for game: GameCore?) {
+        game?.lanHostKeepsSimulationRunning = false
         game?.onWorldBlockChanged = nil
         game?.onTemplatePlacementCommitted = nil
         game?.lanChunkRequestHandler = nil
@@ -361,6 +370,7 @@ final class LANMultiplayerManager {
         game?.lanContainerEditHandler = nil
         game?.lanInventoryPublishHandler = nil
         game?.lanSettleTemplateJobsHandler = nil
+        game?.onRPGGameRuleTransition = nil
         // Belt-and-suspenders guard for the `unowned world` contract on every held template job:
         // session replacement at `startHost`/`stop` already drops jobs implicitly by replacing
         // `hostReplicationSession`, but any other world-exit path that reaches here without
@@ -393,6 +403,7 @@ final class LANMultiplayerManager {
         hostPort = port
         hostedWorldName = hostWorldSummary?.worldName ?? "Pebble World"
         activeGame = game
+        game.lanHostKeepsSimulationRunning = true
         hostReplicationSession = LANMultiplayerHostSession()
         clientReplicationSession = LANMultiplayerClientSession()
         hostGhostRegistry = LANHostGhostRegistry()
@@ -406,6 +417,7 @@ final class LANMultiplayerManager {
         lastHostWorldSummaryPublish = 0
         lastClientPlayerStatePublish = 0
         lastHostPeerPersist = 0
+        _ = hostReplicationSession.setRPGClockBaseline(game.rpgSimulationTick)
         configureHostReplicationHooks(for: game)
         // §7.3: seed persisted per-guest records (position/inventory/permissions) so a peer that
         // reconnects to a freshly (re)started host still resumes where it left off.
@@ -416,6 +428,9 @@ final class LANMultiplayerManager {
                 }
             }
         }
+        handleHostedRPGRuleTransition(
+            enabled: game.world.rule(RPG_CLASSES_GAME_RULE), in: game
+        )
 
         do {
             let newListener = try NWListener(using: .tcp, on: nwPort)
@@ -526,6 +541,16 @@ final class LANMultiplayerManager {
     }
 
     func stop() {
+        if let game = activeGame, game.hasWorld() {
+            if Thread.isMainThread {
+                terminateAllHostedRPGAuthorities(in: game, publish: false)
+            } else {
+                DispatchQueue.main.sync { [weak self, weak game] in
+                    guard let self, let game else { return }
+                    self.terminateAllHostedRPGAuthorities(in: game, publish: false)
+                }
+            }
+        }
         // §7.5: flush every tracked peer record to SQLite before tearing the session down, so a
         // host restart (or the app quitting) doesn't lose guest position/inventory progress.
         persistAllHostPeerRecords()
@@ -559,6 +584,8 @@ final class LANMultiplayerManager {
         lastHostWorldSummaryPublish = 0
         lastClientPlayerStatePublish = 0
         lastHostPeerPersist = 0
+        hostRPGClockCatchUpWasPending = false
+        lastHostedRPGRuleEnabled = nil
         clientConnectDeadline = nil
         clientWaitingSince = nil
         setState(.idle)
@@ -578,6 +605,99 @@ final class LANMultiplayerManager {
         }
     }
 
+    @discardableResult
+    private func terminateHostedRPGAuthority(_ playerID: String, in game: GameCore,
+                                             publish: Bool) -> LANRPGPeerTermination? {
+        precondition(Thread.isMainThread)
+        let authorityID = "lan:\(String(playerID.prefix(128)))"
+        let termination = hostReplicationSession.terminateRPGAuthority(for: playerID)
+        for dimension in [Dim.overworld, .nether, .end] {
+            guard let world = game.worlds[dimension] else { continue }
+            _ = world.terminateRPGTemporaryEffects(ownerID: authorityID)
+            _ = world.removeRPGWardenMitigationLayers(ownerAuthorityID: authorityID)
+        }
+        _ = hostGhostRegistry.removeGhost(for: playerID)
+        if let worldID = game.worldRec?.id,
+           let record = hostReplicationSession.peerRecord(playerID: playerID) {
+            game.db.putLANPlayer(world: worldID, playerID: record.playerID,
+                                 lanPeerRecordJSON(record))
+        }
+        if publish, let state = termination?.playerState,
+           termination?.stateChanged == true {
+            // Rule transitions are synchronous authority boundaries: enqueue the
+            // cleaned state on every live socket before setGameRule returns.
+            queue.sync { [weak self] in self?.broadcastFromHost(.playerState(state)) }
+        }
+        return termination
+    }
+
+    private func terminateAllHostedRPGAuthorities(in game: GameCore, publish: Bool) {
+        precondition(Thread.isMainThread)
+        for playerID in hostReplicationSession.rpgAuthorityPlayerIDs {
+            _ = terminateHostedRPGAuthority(playerID, in: game, publish: publish)
+        }
+    }
+
+    private func handleHostedRPGRuleTransition(enabled: Bool, in game: GameCore) {
+        precondition(Thread.isMainThread)
+        let tick = game.rpgSimulationTick
+        if enabled {
+            // Disabled authorities were terminally cleared, so re-enabling starts
+            // a fresh clock boundary at the current GameCore tick.
+            _ = hostReplicationSession.setRPGClockBaseline(tick)
+            lastHostedRPGRuleEnabled = true
+        } else {
+            terminateAllHostedRPGAuthorities(in: game, publish: true)
+            _ = hostReplicationSession.setRPGClockBaseline(tick)
+            lastHostedRPGRuleEnabled = false
+        }
+        hostRPGClockCatchUpWasPending = false
+    }
+
+    private func processHostPeerRPGClockReport(_ report: LANRPGClockCatchUpReport,
+                                               game: GameCore) {
+        if report.mutationsBlocked, !hostRPGClockCatchUpWasPending {
+            appendStatus("LAN RPG clock is catching up \(report.pendingTicks) bounded tick(s).")
+        } else if !report.mutationsBlocked, hostRPGClockCatchUpWasPending {
+            appendStatus("LAN RPG clock catch-up converged.")
+        }
+        hostRPGClockCatchUpWasPending = report.mutationsBlocked
+        for update in report.peerUpdates {
+            hostGhostRegistry.advanceSimulationTicks(update.advancedTicks, for: update.playerID)
+            guard !update.endedUpkeeps.isEmpty else { continue }
+            let authorityID = "lan:\(update.playerID)"
+            for upkeep in update.endedUpkeeps
+                where upkeep.spellID == RPGSpellEffectID.summonServant.rawValue {
+                let key = RPGTemporaryEffectKey(ownerAuthorityID: authorityID,
+                                                ownerSequence: upkeep.ownerSequence,
+                                                kind: .servant)
+                for world in game.worlds.values {
+                    _ = world.removeRPGTemporaryEffect(key, restoreGuardedBlock: true)
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    private func advanceHostPeerRPGClock(game: GameCore) -> Bool {
+        precondition(Thread.isMainThread)
+        let tick = game.rpgSimulationTick
+        guard game.world.rule(RPG_CLASSES_GAME_RULE) else {
+            if lastHostedRPGRuleEnabled != false {
+                handleHostedRPGRuleTransition(enabled: false, in: game)
+            }
+            _ = hostReplicationSession.setRPGClockBaseline(tick)
+            hostRPGClockCatchUpWasPending = false
+            return hostReplicationSession.isRPGClockCurrent(at: tick)
+        }
+        if lastHostedRPGRuleEnabled != true {
+            handleHostedRPGRuleTransition(enabled: true, in: game)
+        }
+        let report = hostReplicationSession.advanceRPGClockToward(tick)
+        processHostPeerRPGClockReport(report, game: game)
+        return hostReplicationSession.isRPGClockCurrent(at: tick)
+    }
+
     func tickReplication(game: GameCore) {
         precondition(Thread.isMainThread)
         attachGame(game)
@@ -586,6 +706,7 @@ final class LANMultiplayerManager {
         let transportState = queue.sync { (isHosting: listener != nil, hasClientPeer: clientPeer != nil, hasAcceptedPeer: hostPeers.values.contains { $0.accepted }) }
         if transportState.isHosting {
             configureHostReplicationHooks(for: game)
+            advanceHostPeerRPGClock(game: game)
             queue.async { [weak self] in self?.tickHostRobustness() }
             // per-tick addressed events (damage/grants/death) flow independent of the replication
             // publish cadence below so a hit or a pickup never waits on the next full-batch tick.
@@ -609,7 +730,7 @@ final class LANMultiplayerManager {
                 default:
                     continue // .accepted/.copied/.rejected never arrive through this drain
                 }
-                let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: message, tick: game.world.time)
+                let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: message, tick: game.rpgSimulationTick)
                 queue.async { [weak self] in
                     guard let self, let peer = self.hostPeers.values.first(where: { $0.accepted && $0.playerID == playerID }) else { return }
                     self.sendGameplayEvent(event, to: peer.id)
@@ -1059,7 +1180,13 @@ final class LANMultiplayerManager {
         return true
     }
 
-    private func handleHostMessage(_ message: LANMultiplayerMessage, from peer: LANWirePeer) {
+    private func handleHostMessage(_ message: LANMultiplayerMessage, from peer: LANWirePeer,
+                                   passedRPGClockGate: Bool = false) {
+        if message.kind.isHostMutationBlockedByRPGClockCatchUp && !passedRPGClockGate {
+            guard peer.accepted else { return }
+            performHostPeerMutation(message, from: peer)
+            return
+        }
         switch message {
         case .clientHello(let playerID, let playerName, let rawJoinCode, let pebbleVersion):
             let name = sanitizedLANPlayerName(playerName)
@@ -1102,7 +1229,7 @@ final class LANMultiplayerManager {
             send(.serverAccept(peerID: peer.playerID, world: summary), to: peer)
             DispatchQueue.main.async { [weak self, weak peer] in
                 guard let self, let peer else { return }
-                let tick = self.activeGame?.world.time ?? 0
+                let tick = self.activeGame?.rpgSimulationTick ?? 0
                 let disposition = self.hostReplicationSession.acceptPeer(playerID: peer.playerID, displayName: peer.playerName, tick: tick)
                 // §7.3: a restore-eligible peer (known lan_players record or a still-tracked live
                 // session) gets its authoritative state BEFORE the first replication snapshot so
@@ -1142,34 +1269,45 @@ final class LANMultiplayerManager {
             peer.connection.cancel()
         case .playerState(let state):
             guard peer.accepted else { return }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                var currentDimension: Int?
-                var tick = 0
-                var keepInventory = false
-                if let game = self.activeGame, game.hasWorld() {
-                    currentDimension = game.world.dim.rawValue
-                    tick = game.world.time
-                    keepInventory = game.world.rule("keepInventory")
+            precondition(Thread.isMainThread)
+            var currentDimension: Int?
+            var tick = 0
+            var keepInventory = false
+            if let game = activeGame, game.hasWorld() {
+                currentDimension = game.world.dim.rawValue
+                tick = game.rpgSimulationTick
+                keepInventory = game.world.rule("keepInventory")
+            }
+            let before = hostReplicationSession.peerRecord(playerID: peer.playerID)
+            var sanitized = hostReplicationSession.updatePlayerState(
+                state,
+                currentDimension: currentDimension,
+                tick: tick,
+                keepInventory: keepInventory
+            )
+            if let game = activeGame, game.hasWorld() {
+                if let accepted = sanitized {
+                    let died = before?.playerState?.dead != true && accepted.dead
+                    let changedDimension = before?.playerState.map {
+                        $0.dimension != accepted.dimension
+                    } ?? false
+                    if died || changedDimension,
+                       let terminal = terminateHostedRPGAuthority(
+                        peer.playerID, in: game, publish: false
+                       ) {
+                        sanitized = terminal.playerState ?? accepted
+                    }
                 }
-                let sanitized = self.hostReplicationSession.updatePlayerState(
-                    state,
-                    currentDimension: currentDimension,
-                    tick: tick,
-                    keepInventory: keepInventory
+                _ = applyLANRemotePlayers(
+                    hostReplicationSession.peerPlayerStates(),
+                    to: game.world,
+                    localPlayerID: localPeerID,
+                    inventorySnapshots: hostReplicationSession.peerInventorySnapshotsByPlayerID()
                 )
-                if let game = self.activeGame, game.hasWorld() {
-                    _ = applyLANRemotePlayers(
-                        self.hostReplicationSession.peerPlayerStates(),
-                        to: game.world,
-                        localPlayerID: self.localPeerID,
-                        inventorySnapshots: self.hostReplicationSession.peerInventorySnapshotsByPlayerID()
-                    )
-                }
-                guard let sanitized else { return }
-                self.queue.async { [weak self] in
-                    self?.broadcastFromHost(.playerState(sanitized), except: peer.id)
-                }
+            }
+            guard let sanitized else { return }
+            queue.async { [weak self] in
+                self?.broadcastFromHost(.playerState(sanitized), except: peer.id)
             }
         case .blockIntent(_, let intent):
             guard peer.accepted else { return }
@@ -1197,10 +1335,8 @@ final class LANMultiplayerManager {
             applyHostContainerEditIntent(intent, from: peer.playerID, peerName: peer.playerName)
         case .inventoryUpdate(let update):
             guard peer.accepted, update.playerID == peer.playerID else { return }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                _ = self.hostReplicationSession.applyInventoryUpdate(update, from: peer.playerID)
-            }
+            precondition(Thread.isMainThread)
+            _ = hostReplicationSession.applyInventoryUpdate(update, from: peer.playerID)
         case .replicationAck(_, let ack):
             guard peer.accepted else { return }
             DispatchQueue.main.async { [weak self] in
@@ -1213,6 +1349,59 @@ final class LANMultiplayerManager {
             guard peer.accepted else { return }
             appendStatus("LAN host received \(message.kind) from \(peer.playerName); no authoritative handler was needed.")
         }
+    }
+
+    /// Serializes the catch-up check and the full authoritative mutation in one
+    /// main-thread turn. Helpers reached through the recursive call are deliberately
+    /// synchronous and assert the main thread, closing the gate-to-commit TOCTOU gap.
+    private func performHostPeerMutation(_ message: LANMultiplayerMessage, from peer: LANWirePeer) {
+        let perform = { [weak self, weak peer] in
+            guard let self, let peer else { return }
+            precondition(Thread.isMainThread)
+            let isLiveAcceptedSocket = self.queue.sync {
+                guard self.hostPeers[peer.id] === peer,
+                      peer.accepted, !peer.tornDown, !peer.superseded,
+                      !peer.playerID.isEmpty else { return false }
+                return !self.hostPeers.values.contains {
+                    $0 !== peer && $0.accepted && !$0.tornDown
+                        && $0.playerID == peer.playerID
+                }
+            }
+            guard isLiveAcceptedSocket else { return }
+            guard let game = self.activeGame, game.hasWorld(),
+                  self.advanceHostPeerRPGClock(game: game),
+                  self.hostReplicationSession.isRPGClockCurrent(at: game.rpgSimulationTick) else {
+                self.rejectHostMutationDuringRPGClockCatchUp(
+                    message.kind, playerID: peer.playerID, peerID: peer.id,
+                    peerName: peer.playerName
+                )
+                return
+            }
+            self.handleHostMessage(message, from: peer, passedRPGClockGate: true)
+        }
+        if Thread.isMainThread {
+            perform()
+        } else {
+            DispatchQueue.main.async(execute: perform)
+        }
+    }
+
+    private func rejectHostMutationDuringRPGClockCatchUp(
+        _ kind: LANMultiplayerMessageKind,
+        playerID: String,
+        peerID: UUID,
+        peerName: String
+    ) {
+        precondition(Thread.isMainThread)
+        let reason = "RPG authority clock is catching up"
+        appendStatus("LAN \(kind) from \(peerName) rejected: \(reason).")
+        let event = LANGameplayEvent(
+            playerID: playerID,
+            kind: .permissionDenied,
+            message: reason,
+            tick: activeGame?.rpgSimulationTick ?? hostReplicationSession.processedRPGTick ?? 0
+        )
+        queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
     }
 
     private func handleClientMessage(_ message: LANMultiplayerMessage, receivedSequence: UInt32, from peer: LANWirePeer) {
@@ -1331,6 +1520,15 @@ final class LANMultiplayerManager {
             if let error {
                 self?.appendStatus("LAN send failed: \(error.localizedDescription)")
                 peer?.connection.cancel()
+                if let self, let peer {
+                    if self.clientPeer === peer {
+                        self.disconnectClientDueToLoss(
+                            reason: "The LAN connection could not send data."
+                        )
+                    } else {
+                        self.finishHostPeerTeardown(peer)
+                    }
+                }
             }
         })
     }
@@ -1561,7 +1759,7 @@ final class LANMultiplayerManager {
         let summary = content.includeWorldSummary ? makeWorldSummary(playerCount: acceptedCount) : nil
         let worldState = content.includeWorldState ? makeLANWorldStateSnapshot(in: game.world) : nil
         return hostReplicationSession.makeBatch(
-            tick: game.world.time,
+            tick: game.rpgSimulationTick,
             fullSnapshot: fullSnapshot,
             worldSummary: summary,
             worldState: worldState,
@@ -1627,11 +1825,11 @@ final class LANMultiplayerManager {
         case .placeBlock:
             applyHostPlaceBlockIntent(intent, from: playerID, peerName: peerName)
         case .useBlock:
-            DispatchQueue.main.async { [weak self] in
-                guard let self, let game = self.activeGame, game.hasWorld() else { return }
-                let result = self.hostReplicationSession.applyBlockIntent(intent, from: playerID, to: game.world)
-                self.reportBlockIntentResult(result, playerID: playerID, peerName: peerName, tick: game.world.time)
-            }
+            precondition(Thread.isMainThread)
+            guard let game = activeGame, game.hasWorld() else { return }
+            let result = hostReplicationSession.applyBlockIntent(intent, from: playerID, to: game.world)
+            reportBlockIntentResult(result, playerID: playerID, peerName: peerName,
+                                    tick: game.rpgSimulationTick)
         }
     }
 
@@ -1641,47 +1839,47 @@ final class LANMultiplayerManager {
     /// reach/authorize preconditions `applyBlockIntent` would have enforced are done explicitly
     /// here first (mirroring its exact validation order) so a break can't bypass them.
     private func applyHostBreakBlockIntent(_ intent: LANBlockIntent, from playerID: String, peerName: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let game = self.activeGame, game.hasWorld() else { return }
-            let world = game.world
-            switch self.hostReplicationSession.authorize(.build, from: playerID) {
-            case .rejected(let reason):
-                self.reportBlockIntentRejected(reason, playerID: playerID, peerName: peerName, tick: world.time)
-                return
-            case .accepted:
-                break
+        precondition(Thread.isMainThread)
+        guard let game = activeGame, game.hasWorld() else { return }
+        let world = game.world
+        switch hostReplicationSession.authorize(.build, from: playerID) {
+        case .rejected(let reason):
+            reportBlockIntentRejected(reason, playerID: playerID, peerName: peerName, tick: game.rpgSimulationTick)
+            return
+        case .accepted:
+            break
+        }
+        guard let record = hostReplicationSession.peerRecord(playerID: playerID), let playerState = record.playerState else {
+            reportBlockIntentRejected("player state unavailable", playerID: playerID, peerName: peerName, tick: game.rpgSimulationTick)
+            return
+        }
+        guard playerState.dimension == world.dim.rawValue else {
+            reportBlockIntentRejected("target dimension unavailable", playerID: playerID, peerName: peerName, tick: game.rpgSimulationTick)
+            return
+        }
+        guard isWithinLANReach(playerState, x: intent.x, y: intent.y, z: intent.z) else {
+            reportBlockIntentRejected("target out of reach", playerID: playerID, peerName: peerName, tick: game.rpgSimulationTick)
+            return
+        }
+        let beforeInventory = record.inventory
+        let outcome = hostGhostRegistry.applyBreak(for: playerID, x: intent.x, y: intent.y, z: intent.z, world: world, session: hostReplicationSession)
+        guard outcome.broke else {
+            if let reason = outcome.reason {
+                appendStatus("LAN break intent from \(peerName) ignored: \(reason).")
             }
-            guard let record = self.hostReplicationSession.peerRecord(playerID: playerID), let playerState = record.playerState else {
-                self.reportBlockIntentRejected("player state unavailable", playerID: playerID, peerName: peerName, tick: world.time)
-                return
-            }
-            guard playerState.dimension == world.dim.rawValue else {
-                self.reportBlockIntentRejected("target dimension unavailable", playerID: playerID, peerName: peerName, tick: world.time)
-                return
-            }
-            guard isWithinLANReach(playerState, x: intent.x, y: intent.y, z: intent.z) else {
-                self.reportBlockIntentRejected("target out of reach", playerID: playerID, peerName: peerName, tick: world.time)
-                return
-            }
-            let beforeInventory = record.inventory
-            let outcome = self.hostGhostRegistry.applyBreak(for: playerID, x: intent.x, y: intent.y, z: intent.z, world: world, session: self.hostReplicationSession)
-            guard outcome.broke else {
-                if let reason = outcome.reason {
-                    self.appendStatus("LAN break intent from \(peerName) ignored: \(reason).")
-                }
-                return
-            }
-            self.hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
-            self.sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
-            // the block change itself was already captured via `onWorldBlockChanged` ->
-            // `recordBlockChange` (world.setBlock fires that hook during finishBreaking) — drain
-            // and broadcast it promptly rather than waiting for the next periodic tick.
-            let changes = self.hostReplicationSession.drainBlockChanges()
-            guard !changes.isEmpty else { return }
-            let batch = LANReplicationBatch(tick: world.time, fullSnapshot: false, blockChanges: changes)
-            self.queue.async { [weak self] in
-                self?.broadcastHostReplicationBatch(batch, drainedBlockChanges: changes)
-            }
+            return
+        }
+        hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
+        sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
+        // the block change itself was already captured via `onWorldBlockChanged` ->
+        // `recordBlockChange` (world.setBlock fires that hook during finishBreaking) — drain
+        // and broadcast it promptly rather than waiting for the next periodic tick.
+        let changes = hostReplicationSession.drainBlockChanges()
+        guard !changes.isEmpty else { return }
+        let batch = LANReplicationBatch(tick: game.rpgSimulationTick,
+                                        fullSnapshot: false, blockChanges: changes)
+        queue.async { [weak self] in
+            self?.broadcastHostReplicationBatch(batch, drainedBlockChanges: changes)
         }
     }
 
@@ -1690,26 +1888,26 @@ final class LANMultiplayerManager {
     /// which wraps it and additionally decrements one matching item from the peer's stored
     /// inventory (ghost/peer inventory decrement, §7.2).
     private func applyHostPlaceBlockIntent(_ intent: LANBlockIntent, from playerID: String, peerName: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let game = self.activeGame, game.hasWorld() else { return }
-            let world = game.world
-            guard let record = self.hostReplicationSession.peerRecord(playerID: playerID) else { return }
-            let beforeInventory = record.inventory
-            let outcome = self.hostGhostRegistry.applyPlace(for: playerID, intent: intent, world: world, session: self.hostReplicationSession)
-            guard outcome.placed else {
-                if let reason = outcome.reason {
-                    self.appendStatus("LAN place intent from \(peerName) ignored/rejected: \(reason).")
-                }
-                return
+        precondition(Thread.isMainThread)
+        guard let game = activeGame, game.hasWorld() else { return }
+        let world = game.world
+        guard let record = hostReplicationSession.peerRecord(playerID: playerID) else { return }
+        let beforeInventory = record.inventory
+        let outcome = hostGhostRegistry.applyPlace(for: playerID, intent: intent, world: world, session: hostReplicationSession)
+        guard outcome.placed else {
+            if let reason = outcome.reason {
+                appendStatus("LAN place intent from \(peerName) ignored/rejected: \(reason).")
             }
-            self.hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
-            self.sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
-            let changes = self.hostReplicationSession.drainBlockChanges()
-            guard !changes.isEmpty else { return }
-            let batch = LANReplicationBatch(tick: world.time, fullSnapshot: false, blockChanges: changes)
-            self.queue.async { [weak self] in
-                self?.broadcastHostReplicationBatch(batch, drainedBlockChanges: changes)
-            }
+            return
+        }
+        hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
+        sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
+        let changes = hostReplicationSession.drainBlockChanges()
+        guard !changes.isEmpty else { return }
+        let batch = LANReplicationBatch(tick: game.rpgSimulationTick,
+                                        fullSnapshot: false, blockChanges: changes)
+        queue.async { [weak self] in
+            self?.broadcastHostReplicationBatch(batch, drainedBlockChanges: changes)
         }
     }
 
@@ -1747,20 +1945,19 @@ final class LANMultiplayerManager {
     /// crit/sweeping/etc all flow through the exact singleplayer path); a durability delta on the
     /// ghost's inventory (post-attack) is relayed as an additive correction grant.
     private func applyHostAttackIntent(_ intent: LANAttackIntent, from playerID: String, peerName: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let game = self.activeGame, game.hasWorld() else { return }
-            guard let record = self.hostReplicationSession.peerRecord(playerID: playerID) else { return }
-            let beforeInventory = record.inventory
-            let outcome = self.hostGhostRegistry.applyAttack(for: playerID, targetEntityID: intent.targetEntityID, world: game.world, session: self.hostReplicationSession)
-            guard outcome.attacked else {
-                if let reason = outcome.reason {
-                    self.appendStatus("LAN attack intent from \(peerName) rejected: \(reason).")
-                }
-                return
+        precondition(Thread.isMainThread)
+        guard let game = activeGame, game.hasWorld() else { return }
+        guard let record = hostReplicationSession.peerRecord(playerID: playerID) else { return }
+        let beforeInventory = record.inventory
+        let outcome = hostGhostRegistry.applyAttack(for: playerID, targetEntityID: intent.targetEntityID, world: game.world, session: hostReplicationSession)
+        guard outcome.attacked else {
+            if let reason = outcome.reason {
+                appendStatus("LAN attack intent from \(peerName) rejected: \(reason).")
             }
-            self.hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
-            self.sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
+            return
         }
+        hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
+        sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
     }
 
     /// §7.2: `.tossIntent` → `ghostRegistry.applyToss` (removes items from the stored peer
@@ -1768,34 +1965,43 @@ final class LANMultiplayerManager {
     /// client's optimistic local decrement and the host's authoritative result is corrected via
     /// the same additive grant mechanism.
     private func applyHostTossIntent(_ intent: LANTossIntent, from playerID: String, peerName: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let game = self.activeGame, game.hasWorld() else { return }
-            guard let record = self.hostReplicationSession.peerRecord(playerID: playerID) else { return }
-            let beforeInventory = record.inventory
-            let outcome = self.hostGhostRegistry.applyToss(for: playerID, intent: intent, world: game.world, session: self.hostReplicationSession)
-            guard outcome.tossed else {
-                if let reason = outcome.reason {
-                    self.appendStatus("LAN toss intent from \(peerName) rejected: \(reason).")
-                }
-                return
+        precondition(Thread.isMainThread)
+        guard let game = activeGame, game.hasWorld() else { return }
+        guard let record = hostReplicationSession.peerRecord(playerID: playerID) else { return }
+        let beforeInventory = record.inventory
+        let outcome = hostGhostRegistry.applyToss(for: playerID, intent: intent, world: game.world, session: hostReplicationSession)
+        guard outcome.tossed else {
+            if let reason = outcome.reason {
+                appendStatus("LAN toss intent from \(peerName) rejected: \(reason).")
             }
-            self.hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
-            self.sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
+            return
         }
+        hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
+        sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
     }
 
     private func applyHostRPGIntent(_ intent: LANRPGIntent, from playerID: String, peerID: UUID, peerName: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let game = self.activeGame, game.hasWorld() else { return }
-            let world = game.world
-            func reject(_ reason: String) {
-                self.appendStatus("LAN RPG intent from \(peerName) rejected: \(reason).")
-                let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: world.time)
-                self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
+        precondition(Thread.isMainThread)
+        guard let game = activeGame, game.hasWorld() else { return }
+            func rejectAt(_ reason: String, tick: Int) {
+                appendStatus("LAN RPG intent from \(peerName) rejected: \(reason).")
+                let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied,
+                                             message: reason, tick: tick)
+                queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
             }
+            guard let record = hostReplicationSession.peerRecord(playerID: playerID),
+                  let playerState = record.playerState else {
+                rejectAt("player state unavailable", tick: game.rpgSimulationTick)
+                return
+            }
+            guard let world = game.worldFor(dimension: playerState.dimension) else {
+                rejectAt("caster dimension unavailable", tick: game.rpgSimulationTick)
+                return
+            }
+            func reject(_ reason: String) { rejectAt(reason, tick: game.rpgSimulationTick) }
             func publish(_ state: RPGCharacterState) {
-                guard let playerState = self.hostReplicationSession.recordRPGState(state, for: playerID) else { return }
-                self.queue.async { [weak self] in
+                guard let playerState = hostReplicationSession.recordRPGState(state, for: playerID) else { return }
+                queue.async { [weak self] in
                     self?.broadcastFromHost(.playerState(playerState))
                 }
             }
@@ -1804,37 +2010,32 @@ final class LANMultiplayerManager {
                 reject("RPG classes are disabled")
                 return
             }
-            guard let record = self.hostReplicationSession.peerRecord(playerID: playerID),
-                  let playerState = record.playerState else {
-                reject("player state unavailable")
-                return
-            }
             var state = repairRPGCharacterState(record.rpg ?? playerState.rpg ?? .uncreated())
             func publishActionSuccess(_ ghost: Player) {
                 let ghostState = makeLANPlayerState(ghost, playerID: playerID, displayName: peerName, dimension: world.dim.rawValue, includeRPG: false)
-                _ = self.hostReplicationSession.updatePlayerState(
+                _ = hostReplicationSession.updatePlayerState(
                     ghostState,
                     currentDimension: world.dim.rawValue,
-                    tick: world.time,
+                    tick: game.rpgSimulationTick,
                     keepInventory: world.rule("keepInventory")
                 )
-                guard let playerState = self.hostReplicationSession.recordRPGState(ghost.rpg, for: playerID) else { return }
+                guard let playerState = hostReplicationSession.recordRPGState(ghost.rpg, for: playerID) else { return }
                 _ = applyLANRemotePlayers(
-                    self.hostReplicationSession.peerPlayerStates(),
+                    hostReplicationSession.peerPlayerStates(),
                     to: world,
-                    localPlayerID: self.localPeerID,
-                    inventorySnapshots: self.hostReplicationSession.peerInventorySnapshotsByPlayerID()
+                    localPlayerID: localPeerID,
+                    inventorySnapshots: hostReplicationSession.peerInventorySnapshotsByPlayerID()
                 )
-                let changes = self.hostReplicationSession.drainBlockChanges()
+                let changes = hostReplicationSession.drainBlockChanges()
                 let entities = makeLANEntitySnapshots(in: world, aroundX: ghost.x, aroundZ: ghost.z, radius: 48, maxCount: 64)
                 let batch = LANReplicationBatch(
-                    tick: world.time,
+                    tick: game.rpgSimulationTick,
                     fullSnapshot: false,
                     players: [playerState],
                     blockChanges: changes,
                     entities: entities
                 )
-                self.queue.async { [weak self] in
+                queue.async { [weak self] in
                     self?.broadcastFromHost(.playerState(playerState))
                     if !changes.isEmpty || !entities.isEmpty {
                         self?.broadcastHostReplicationBatch(batch, drainedBlockChanges: changes)
@@ -1913,7 +2114,10 @@ final class LANMultiplayerManager {
                     reject("missing spell")
                     return
                 }
-                if let error = rpgUnprepareSpell(spellID, in: &state) {
+                if let error = rpgUnprepareHostedLANSpell(
+                    spellID, state: &state, playerID: playerID, record: record,
+                    world: world, ghostRegistry: self.hostGhostRegistry
+                ) {
                     reject(error.description)
                     return
                 }
@@ -1943,10 +2147,6 @@ final class LANMultiplayerManager {
                     reject("stale RPG action")
                     return
                 }
-                guard playerState.dimension == world.dim.rawValue else {
-                    reject("caster dimension unavailable")
-                    return
-                }
                 let selected = rpgSelectedPreparedAction(state)
                 let skillID = intent.skillID ?? (selected?.kind == .skill ? selected?.id : nil)
                 guard let skillID else {
@@ -1957,12 +2157,12 @@ final class LANMultiplayerManager {
                     reject(error.description)
                     return
                 }
-                _ = self.hostReplicationSession.recordRPGState(state, for: playerID)
-                guard let updatedRecord = self.hostReplicationSession.peerRecord(playerID: playerID) else {
+                _ = hostReplicationSession.recordRPGState(state, for: playerID)
+                guard let updatedRecord = hostReplicationSession.peerRecord(playerID: playerID) else {
                     reject("player state unavailable")
                     return
                 }
-                let ghost = self.hostGhostRegistry.ghost(for: playerID, record: updatedRecord, in: world)
+                let ghost = hostGhostRegistry.ghost(for: playerID, record: updatedRecord, in: world)
                 switch rpgUsePreparedSkill(ghost, skillID: skillID) {
                 case .failure(let error):
                     reject(error.description)
@@ -1974,10 +2174,6 @@ final class LANMultiplayerManager {
                     reject("stale RPG action")
                     return
                 }
-                guard playerState.dimension == world.dim.rawValue else {
-                    reject("caster dimension unavailable")
-                    return
-                }
                 let spellID = intent.spellID ?? state.selectedPreparedSpellID ?? state.preparedSpellIDs.first
                 guard let spellID else {
                     reject(RPGActionFailure.spellNotPrepared("").description)
@@ -1987,12 +2183,12 @@ final class LANMultiplayerManager {
                     reject(error.description)
                     return
                 }
-                _ = self.hostReplicationSession.recordRPGState(state, for: playerID)
-                guard let updatedRecord = self.hostReplicationSession.peerRecord(playerID: playerID) else {
+                _ = hostReplicationSession.recordRPGState(state, for: playerID)
+                guard let updatedRecord = hostReplicationSession.peerRecord(playerID: playerID) else {
                     reject("player state unavailable")
                     return
                 }
-                let ghost = self.hostGhostRegistry.ghost(for: playerID, record: updatedRecord, in: world)
+                let ghost = hostGhostRegistry.ghost(for: playerID, record: updatedRecord, in: world)
                 switch rpgCastPreparedSpell(ghost, spellID: spellID) {
                 case .failure(let error):
                     reject(error.description)
@@ -2000,27 +2196,27 @@ final class LANMultiplayerManager {
                     publishActionSuccess(ghost)
                 }
             }
-        }
     }
 
     /// §7.2: `.containerEditIntent` → `session.applyContainerEditIntent`; on success the resulting
     /// BE snapshot is immediately re-broadcast to ALL peers in its own small batch (D-C: closes the
     /// concurrent-edit window to ~1 RTT) rather than waiting for the next periodic replication tick.
     private func applyHostContainerEditIntent(_ intent: LANContainerEditIntent, from playerID: String, peerName: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let game = self.activeGame, game.hasWorld() else { return }
-            let result = self.hostReplicationSession.applyContainerEditIntent(intent, from: playerID, to: game.world)
-            switch result {
-            case .applied(let blockEntities):
-                let batch = LANReplicationBatch(tick: game.world.time, fullSnapshot: false, blockEntities: blockEntities)
-                self.queue.async { [weak self] in
-                    self?.broadcastFromHost(.replicationBatch(batch))
-                }
-            case .rejected(let reason):
-                self.appendStatus("LAN container edit from \(peerName) rejected: \(reason).")
-                let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: game.world.time)
-                self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: nil) }
+        precondition(Thread.isMainThread)
+        guard let game = activeGame, game.hasWorld() else { return }
+        let result = hostReplicationSession.applyContainerEditIntent(intent, from: playerID, to: game.world)
+        switch result {
+        case .applied(let blockEntities):
+            let batch = LANReplicationBatch(tick: game.rpgSimulationTick,
+                                            fullSnapshot: false,
+                                            blockEntities: blockEntities)
+            queue.async { [weak self] in
+                self?.broadcastFromHost(.replicationBatch(batch))
             }
+        case .rejected(let reason):
+            appendStatus("LAN container edit from \(peerName) rejected: \(reason).")
+            let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: game.rpgSimulationTick)
+            queue.async { [weak self] in self?.sendGameplayEvent(event, to: nil) }
         }
     }
 
@@ -2061,52 +2257,47 @@ final class LANMultiplayerManager {
     }
 
     private func applyHostContainerIntent(_ intent: LANContainerIntent, from playerID: String, peerID: UUID, peerName: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let game = self.activeGame, game.hasWorld() else { return }
-            let result = self.hostReplicationSession.authorizeContainerIntent(intent, from: playerID)
-            switch result {
-            case .accepted(let action):
-                let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "container \(action)", tick: game.world.time)
-                self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
-            case .rejected(let reason):
-                self.appendStatus("LAN container intent from \(peerName) rejected: \(reason).")
-                let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: game.world.time)
-                self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
-            }
+        precondition(Thread.isMainThread)
+        guard let game = activeGame, game.hasWorld() else { return }
+        let result = hostReplicationSession.authorizeContainerIntent(intent, from: playerID)
+        switch result {
+        case .accepted(let action):
+            let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "container \(action)", tick: game.rpgSimulationTick)
+            queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
+        case .rejected(let reason):
+            appendStatus("LAN container intent from \(peerName) rejected: \(reason).")
+            let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: game.rpgSimulationTick)
+            queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
         }
     }
 
     private func applyHostTemplateIntent(_ intent: LANTemplateIntent, from playerID: String, peerID: UUID, peerName: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let game = self.activeGame, game.hasWorld() else { return }
-            let result = self.hostReplicationSession.applyTemplateIntent(
-                intent,
-                from: playerID,
-                world: game.world,
-                loadTemplate: { try game.db.getTemplate(named: $0) },
-                saveTemplate: { try game.db.putTemplate($0) }
-            )
-            switch result {
-            case .copied(let name, let blocks):
-                let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "copied \(name) (\(blocks) blocks)", tick: game.world.time)
-                self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
-            case .accepted(let action, let name):
-                // Place/undo are now tick-sliced host jobs (LANReplication's `templateJobs`
-                // registry): admission only returns an immediate "in progress" acknowledgment.
-                // The eventual `.placed`/`.undone` completion event and its replication deltas
-                // arrive later via `tickReplication`'s `drainTemplateIntentResponses` drain —
-                // deltas ride out through the existing unconditional foreground-delta publish,
-                // exactly like every other block mutation, rather than a bespoke batch here.
-                let verb = action == .undoPlacement ? "undoing" : "placing"
-                let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "\(verb) \(name)…", tick: game.world.time)
-                self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
-            case .placed, .undone:
-                break // completion now arrives only through tickReplication's job-completion drain
-            case .rejected(let reason):
-                self.appendStatus("LAN template intent from \(peerName) rejected: \(reason).")
-                let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: game.world.time)
-                self.queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
-            }
+        precondition(Thread.isMainThread)
+        guard let game = activeGame, game.hasWorld() else { return }
+        let result = hostReplicationSession.applyTemplateIntent(
+            intent,
+            from: playerID,
+            world: game.world,
+            loadTemplate: { try game.db.getTemplate(named: $0) },
+            saveTemplate: { try game.db.putTemplate($0) }
+        )
+        switch result {
+        case .copied(let name, let blocks):
+            let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "copied \(name) (\(blocks) blocks)", tick: game.rpgSimulationTick)
+            queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
+        case .accepted(let action, let name):
+            // Place/undo are now tick-sliced host jobs (LANReplication's `templateJobs`
+            // registry): admission only returns an immediate "in progress" acknowledgment.
+            // The eventual `.placed`/`.undone` result arrives later via tickReplication.
+            let verb = action == .undoPlacement ? "undoing" : "placing"
+            let event = LANGameplayEvent(playerID: playerID, kind: .intentAccepted, message: "\(verb) \(name)…", tick: game.rpgSimulationTick)
+            queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
+        case .placed, .undone:
+            break // completion now arrives only through tickReplication's job-completion drain
+        case .rejected(let reason):
+            appendStatus("LAN template intent from \(peerName) rejected: \(reason).")
+            let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: game.rpgSimulationTick)
+            queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
         }
     }
 
@@ -2135,7 +2326,7 @@ final class LANMultiplayerManager {
             let snapshots = makeLANChunkSectionSnapshots(for: request, in: requestWorld)
             let blockEntities = makeLANBlockEntitySnapshots(for: request, in: requestWorld, maxCount: 16)
             let batch = LANReplicationBatch(
-                tick: requestWorld.time,
+                tick: game.rpgSimulationTick,
                 fullSnapshot: true,
                 world: self.makeWorldSummary(playerCount: self.queue.sync { self.hostPeers.values.filter { $0.accepted }.count }),
                 worldState: makeLANWorldStateSnapshot(in: requestWorld),
@@ -2149,6 +2340,13 @@ final class LANMultiplayerManager {
     }
 
     private func handleClientReplicationBatch(_ batch: LANReplicationBatch, receivedSequence: UInt32, from peer: LANWirePeer) {
+        // Reject a malformed authority clock before ACKing or touching any
+        // mirror. Core apply helpers also defend this boundary, but transport
+        // owns local RPG/remote-player application outside those helpers.
+        guard (0...RPG_MAX_COUNTER).contains(batch.tick) else {
+            appendStatus("Rejected LAN replication batch with invalid tick \(batch.tick).")
+            return
+        }
         let ack = LANReplicationAck(tick: batch.tick, receivedSequence: receivedSequence)
         send(.replicationAck(playerID: localPeerID, ack: ack), to: peer)
         DispatchQueue.main.async { [weak self] in
@@ -2195,11 +2393,12 @@ final class LANMultiplayerManager {
         let name = peer.playerName
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let tick = self.activeGame?.world.time ?? 0
-            self.hostReplicationSession.disconnectPeer(playerID: playerID, tick: tick)
+            let tick = self.activeGame?.rpgSimulationTick ?? 0
             if let game = self.activeGame, game.hasWorld() {
+                _ = self.terminateHostedRPGAuthority(playerID, in: game, publish: false)
                 _ = removeLANRemotePlayer(playerID, from: game.world)
             }
+            self.hostReplicationSession.disconnectPeer(playerID: playerID, tick: tick)
             // §7.5: persist the peer's record on disconnect (main-thread read of the session
             // record, write on the same save-queue pattern GameCore's own persistence uses) so a
             // guest who drops mid-session doesn't lose position/inventory progress even before the

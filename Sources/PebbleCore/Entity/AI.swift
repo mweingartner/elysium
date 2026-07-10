@@ -655,6 +655,12 @@ public final class AvoidEntityGoal: Goal {
     public override func canUse() -> Bool {
         let near = mob.world.getEntitiesNear(mob.x, mob.y, mob.z, range) { e in
             guard let ent = e as? Entity else { return false }
+            if self.mob is Animal, let player = ent as? Player,
+               player.rpgClassesEnabled(), player.rpg.created,
+               self.mob.lastAttacker !== player {
+                let calmRadius = rpgSkillEffectValue(.beastKinship, in: player.rpg)
+                if calmRadius > 0, self.mob.distanceToSq(player) <= calmRadius * calmRadius { return false }
+            }
             return self.filter(ent)
         }
         fleeing = near.first as? Entity

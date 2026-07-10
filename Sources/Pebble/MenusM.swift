@@ -482,7 +482,6 @@ final class PauseScreen: Screen {
         y += 24
         buttons.append(Button(cx - 100, y, 200, 20, "Save & Quit to Title", { [weak game] in
             guard let game else { return }
-            game.saveAndFlush(synchronous: true)
             game.exitToTitle()
         }))
     }

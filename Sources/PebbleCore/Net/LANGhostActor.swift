@@ -38,15 +38,31 @@ public struct LANGhostTossOutcome: Equatable {
     public var reason: String?
 }
 
-/// Attack-cooldown ticker value that makes `Player.attackStrength()` read back ~1.0 (full charge),
-/// matching a player who has waited out their weapon's cooldown before swinging.
-private let LAN_GHOST_FULL_ATTACK_STRENGTH_TICKER = 100.0
-
 /// Reach used to validate ghost-driven attacks against the peer's last known position, mirroring
 /// `isWithinLANReach`'s block-break/place reach (attacks use the same trust model: host validates
 /// against the peer's last-published state, not a live raycast).
 private let LAN_GHOST_ATTACK_REACH_SURVIVAL = 6.0
 private let LAN_GHOST_ATTACK_REACH_CREATIVE = 8.0
+
+/// Current-protocol LAN spell removal is host-authoritative in the peer's
+/// recorded dimension. Keeping state mutation and exact transient cleanup in
+/// one helper prevents the transport from publishing an unprepare while its
+/// servant remains alive in another loaded world.
+@discardableResult
+public func rpgUnprepareHostedLANSpell(_ spellID: String,
+                                       state: inout RPGCharacterState,
+                                       playerID: String,
+                                       record: LANPeerRecordSnapshot,
+                                       world: World,
+                                       ghostRegistry: LANHostGhostRegistry) -> RPGProgressionError? {
+    let endedUpkeeps = state.activeUpkeeps.filter { $0.spellID == spellID }
+    if let error = rpgUnprepareSpell(spellID, in: &state) { return error }
+    if !endedUpkeeps.isEmpty {
+        let ghost = ghostRegistry.ghost(for: playerID, record: record, in: world)
+        rpgCleanupEndedUpkeeps(ghost, endedUpkeeps)
+    }
+    return nil
+}
 
 /// Lazily creates and reuses ONE detached `Player` "ghost" per LAN peer so the host can drive the
 /// real singleplayer interaction routines (`finishBreaking`, `playerAttack`, `applyBlockIntent`)
@@ -56,6 +72,19 @@ public final class LANHostGhostRegistry {
     private var ghosts: [String: Player] = [:]
 
     public init() {}
+
+    public func advanceSimulationTicks(_ ticks: Int, for playerID: String) {
+        guard ticks > 0, ticks <= LANMultiplayerHostSession.maxRPGClockCatchUpTicks else { return }
+        ghosts[String(playerID.prefix(128))]?.advanceAttackStrengthRecovery(ticks: ticks)
+    }
+
+    /// Ends the lifetime of a detached authority actor. Warden provenance uses
+    /// weak ownership, so removing the registry's strong reference makes any
+    /// missed layer fail closed on the next world RPG tick.
+    @discardableResult
+    public func removeGhost(for playerID: String) -> Bool {
+        ghosts.removeValue(forKey: String(playerID.prefix(128))) != nil
+    }
 
     /// Returns the cached ghost for `playerID` (creating it once, lazily) hydrated from the given
     /// peer record. Hydration sets position/orientation/game mode/health/hunger/inventory/selected
@@ -78,6 +107,8 @@ public final class LANHostGhostRegistry {
 
     private func hydrate(_ player: Player, from record: LANPeerRecordSnapshot, in world: World) {
         player.persistent = false
+        player.world = world
+        player.rpgAuthorityID = "lan:\(record.playerID)"
         if let state = record.playerState {
             player.rpg = repairRPGCharacterState(record.rpg ?? state.rpg ?? .uncreated())
             player.applyRPGDerivedStats()
@@ -100,7 +131,6 @@ public final class LANHostGhostRegistry {
         } else {
             player.inventory = Array(repeating: nil, count: 36)
         }
-        player.attackStrengthTicker = LAN_GHOST_FULL_ATTACK_STRENGTH_TICKER
         player.fallDistance = 0
         player.sprinting = false
         player.onGround = true

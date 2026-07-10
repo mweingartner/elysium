@@ -233,9 +233,16 @@ public final class GameCore {
     public var advancements = AdvancementTracker()
     public private(set) var inWorld = false
     public private(set) var isLANClientWorld = false
+    /// A LAN host is authoritative for remote peers even while a local menu is
+    /// open, so fixed-step simulation cannot inherit singleplayer menu pause.
+    public var lanHostKeepsSimulationRunning = false
     private var lanClientResumeStorageKey: String?
     private var lanClientWorldSummary: LANWorldSummary?
     public private(set) var paused = false
+    public var rpgSimulationTick: Int {
+        max(0, min(RPG_MAX_COUNTER,
+                   worldRec?.rpgSimulationTick ?? worlds[dim]?.rpgSimulationTick ?? 0))
+    }
     public var mapSpanBlocks = MAP_DEFAULT_VIEW_BLOCKS
     public var mapMinimapSizeMode = MAP_DEFAULT_MINIMAP_SIZE_MODE
     public var expandedMapCenterX = 0.0
@@ -260,6 +267,11 @@ public final class GameCore {
     /// `clearReplicationHooks` (LANTransport), and invoked from `saveAndFlush` alongside the local
     /// settle call so a host quitting mid-guest-placement never persists a half-placed object.
     public var lanSettleTemplateJobsHandler: (() -> Void)?
+    /// Synchronous world-global RPG rule transition boundary. A LAN host uses
+    /// this to terminate/publish/persist remote authorities before setGameRule
+    /// returns; the Bool is the new enabled state.
+    public var onRPGGameRuleTransition: ((Bool) -> Void)?
+    public private(set) var rpgClockAdvancedThisTick = false
 
     // LAN client-authoritative inventory / container-edit / connection state
     private var lanLocalInventoryRevision = 0
@@ -467,7 +479,7 @@ public final class GameCore {
     }
 
     public func exitToTitle() {
-        if inWorld { saveAndFlush(synchronous: true) }
+        if inWorld { finalizeAndSave(synchronous: true) }
         inWorld = false
         isLANClientWorld = false
         lanClientResumeStorageKey = nil
@@ -637,6 +649,7 @@ public final class GameCore {
                 w.rainLevel = ds.raining ? 1 : 0
                 w.thunderLevel = ds.thundering ? 1 : 0
             }
+            w.rpgSimulationTick = rec.rpgSimulationTick
             w.difficulty = rec.difficulty
             for (k, v) in rec.gameRules { w.gameRules[k] = v }
             w.spawnX = Double(rec.spawnX)
@@ -767,6 +780,8 @@ public final class GameCore {
                 time: w.time, dayTime: w.dayTime,
                 raining: w.raining, thundering: w.thundering, weatherTimer: w.weatherTimer)
         }
+        rec.rpgSimulationTick = max(0, min(RPG_MAX_COUNTER,
+                                           worlds.values.map(\.rpgSimulationTick).max() ?? rec.rpgSimulationTick))
         // rules/difficulty are world-global (kept in sync across dims by
         // setGameRule/setDifficulty) — read one deterministic source
         if let cur = worlds[dim] {
@@ -796,6 +811,15 @@ public final class GameCore {
         for w in worlds.values {
             for c in w.chunks.values { c.modified = false }
         }
+    }
+
+    /// Idempotent terminal save. Ordinary autosaves and explicit player-state
+    /// persistence remain non-finalizing and preserve live transient effects.
+    public func finalizeAndSave(synchronous: Bool = true) {
+        guard inWorld else { return }
+        for w in worlds.values { w.finalizeRPGTransientState() }
+        player?.clearRPGTerminalUpkeeps()
+        saveAndFlush(synchronous: synchronous)
     }
 
     private func saveLANClientResume() {
@@ -854,15 +878,32 @@ public final class GameCore {
 
     /// Game rules are world-global: apply to every dimension.
     public func setGameRule(_ rule: String, _ value: Double) {
+        if rule == RPG_CLASSES_GAME_RULE {
+            let wasEnabled = worlds[dim]?.rule(rule)
+                ?? ((worldRec?.gameRules[rule] ?? 0) != 0)
+            let enabled = value != 0
+            if wasEnabled != enabled {
+                onRPGGameRuleTransition?(enabled)
+            }
+        }
+        if rule == RPG_CLASSES_GAME_RULE, value == 0 {
+            player?.clearRPGTerminalUpkeeps()
+            for w in worlds.values { w.finalizeRPGTransientState() }
+        }
         for w in worlds.values { w.gameRules[rule] = value }
         worldRec?.gameRules[rule] = value
+        if rule == RPG_CLASSES_GAME_RULE, value == 0 {
+            player?.applyRPGDerivedStats()
+        }
     }
 
     private func chunkRecord(_ worldId: String, _ d: Dim, _ w: World, _ c: Chunk) -> ChunkRecord {
         // persist entities standing in this chunk (skip player + transient)
         var ents: [[String: Any]] = []
+        let temporaryEntityIDs = w.rpgTemporaryEntityIDsForPersistence()
         for e in w.entities {
             guard let ent = e as? Entity, !ent.isPlayer, !ent.dead else { continue }
+            if temporaryEntityIDs.contains(ent.id) { continue }
             if floorDiv(ifloor(ent.x), 16) != c.cx || floorDiv(ifloor(ent.z), 16) != c.cz { continue }
             if (ent.type == "item" || ent.type == "xp_orb") && ent.age > 4000 { continue }
             ents.append(ent.save())
@@ -884,7 +925,8 @@ public final class GameCore {
         }
         return ChunkRecord(
             key: key, worldId: worldId, dim: d.rawValue, cx: c.cx, cz: c.cz,
-            blocks: c.blocks, biomes: c.biomes, blockEntities: besCopy ?? besLive, entities: ents)
+            blocks: w.rpgBlocksForPersistence(in: c), biomes: c.biomes,
+            blockEntities: besCopy ?? besLive, entities: ents)
     }
 
     // ===========================================================================
@@ -1078,11 +1120,17 @@ public final class GameCore {
 
     @discardableResult
     public func applyLANHostReplicationBatch(_ batch: LANReplicationBatch) -> LANReplicationApplyReport {
+        guard (0...RPG_MAX_COUNTER).contains(batch.tick) else {
+            return LANReplicationApplyReport()
+        }
         guard isLANClientWorld else {
             return applyLANReplicationBatch(batch, to: world)
         }
         var deferred = Optional(lanDeferredReplication)
         let report = applyLANReplicationBatch(batch, to: world, deferred: &deferred)
+        let acceptedTick = max(rpgSimulationTick, batch.tick)
+        worldRec?.rpgSimulationTick = acceptedTick
+        for loadedWorld in worlds.values { loadedWorld.rpgSimulationTick = acceptedTick }
         lanDeferredReplication = deferred ?? LANDeferredReplicationBuffer()
         markLANChunkSectionsApplied(batch.chunkSections)
         return report
@@ -1214,18 +1262,13 @@ public final class GameCore {
         switch spec.kind {
         case "chest_loot":
             let be = makeContainerBE(x, y, z, 27)
-            var lootRng = RandomX(UInt32(truncatingIfNeeded: Int64(num("seed") ?? 0)))
-            let items = rollLoot(str("lootTable") ?? "", &lootRng, luck: 0)
-            for s in items {
-                var slot = rng.nextInt(27)
-                var i = 0
-                while i < 27 && be.items![slot] != nil {
-                    slot = (slot + 1) % 27
-                    i += 1
-                }
-                be.items![slot] = s
-            }
-            be.lootTable = str("lootTable")
+            let table = str("lootTable") ?? ""
+            let seed = Int(num("seed") ?? Double(Int(hash3(w.seed ^ 0xBE5, x, y, z))))
+            be.lootTable = table.isEmpty ? nil : table
+            be.lootSeed = seed
+            let generatedKey = "generated:\(w.dim.rawValue):\(x):\(y):\(z)"
+            be.rpgGeneratedContainerKey = rpgIsBoundedID(generatedKey) && be.lootTable != nil
+                ? generatedKey : nil
             put(be)
         case "elytra_chest":
             let be = makeContainerBE(x, y, z, 27)
@@ -1477,6 +1520,9 @@ public final class GameCore {
     }
 
     private func unloadChunk(_ w: World, _ c: Chunk) {
+        // Temporary blocks/entities are session state and must be restored or
+        // removed before the chunk record is captured.
+        w.cancelRPGTemporaryEffects(inChunkX: c.cx, z: c.cz)
         // persist if edited, if live entities stand in it, or if a stale record exists
         var hasEntities = false
         for e in w.entities {
@@ -1673,6 +1719,11 @@ public final class GameCore {
     // ===========================================================================
     private func moveToDimension(_ dest: Dim) {
         let from = world
+        from.cancelRPGTemporaryEffects(ownerID: player.effectiveRPGAuthorityID)
+        _ = from.removeRPGWardenMitigationLayers(
+            ownerAuthorityID: player.effectiveRPGAuthorityID
+        )
+        player.clearRPGTerminalUpkeeps()
         from.removeEntity(player)
         dim = dest
         let w = world
@@ -1910,11 +1961,29 @@ public final class GameCore {
     // Tick
     // ===========================================================================
     private func tick() {
+        rpgClockAdvancedThisTick = false
         if !inWorld { return }
         let w = world
         let p = player!
-        paused = host?.screenPausesGame() ?? false
+        paused = (host?.screenPausesGame() ?? false) && !lanHostKeepsSimulationRunning
         if paused { return }
+
+        if !isLANClientWorld {
+            let current = rpgSimulationTick
+            let next = rpgSaturatedAdd(current, 1)
+            if next > current {
+                rpgClockAdvancedThisTick = true
+                worldRec?.rpgSimulationTick = next
+                for loadedWorld in worlds.values { loadedWorld.rpgSimulationTick = next }
+                // Clock-driven state and expiry must not freeze behind later
+                // early-return gates. Iterate dimensions in stable registration
+                // order for deterministic guarded cleanup.
+                p.tickRPGContinuousState()
+                for dimension in [Dim.overworld, .nether, .end] {
+                    worlds[dimension]?.tickRPGTemporaryEffects()
+                }
+            }
+        }
 
         if isLANClientWorld { lanClientTickCounter += 1 }
         streamChunks()
@@ -1982,7 +2051,9 @@ public final class GameCore {
                     p.setPos(p.x, Double(w.surfaceY(bx, bz)), p.z)
                 }
             }
-            p.tick()
+            p.tickFromGameCore(
+                authoritativeRPG: !isLANClientWorld && rpgClockAdvancedThisTick
+            )
             if let v = p.vehicle {
                 p.setPos(v.x, v.y + v.height * 0.6, v.z)
                 p.fallDistance = 0
@@ -2026,7 +2097,8 @@ public final class GameCore {
         // ---- world & entities ----
         let activeChunkCenters = activeSimulationChunkCenters(in: w, local: p)
         let activeEntities = activeSimulationEntities(in: w, local: p)
-        w.tick(simCenters: activeChunkCenters)
+        // RPG effects were already advanced for every loaded dimension above.
+        w.tick(simCenters: activeChunkCenters, advanceRPGEffects: false)
         let simR = Double(w.simDistance * 16) * Double(w.simDistance * 16)
         for e in Array(w.entities) {
             if e === p || e.dead { continue }

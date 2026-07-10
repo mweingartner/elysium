@@ -13,6 +13,7 @@
 // regenerate terrain from seed and re-attach saved entities.
 
 import Foundation
+import CoreFoundation
 import SQLite3
 
 public struct DimState: Codable {
@@ -59,6 +60,7 @@ public struct WorldRecord: Codable {
     public var dragonKilled: Bool
     public var gatewaysSpawned: Int
     public var nextEntityId: Int
+    public var rpgSimulationTick: Int
 
     public var generationSettings: WorldGenerationSettings {
         WorldGenerationSettings(presetID: worldPreset, singleBiomeID: singleBiome,
@@ -86,12 +88,13 @@ public struct WorldRecord: Codable {
         dragonKilled = false
         gatewaysSpawned = 0
         nextEntityId = 1
+        rpgSimulationTick = 0
     }
 
     enum CodingKeys: String, CodingKey {
         case id, name, seed, gameMode, difficulty, lastPlayed, version, dims
         case spawnX, spawnY, spawnZ, worldPreset, singleBiome, dungeonDensity, gameRules
-        case dragonKilled, gatewaysSpawned, nextEntityId
+        case dragonKilled, gatewaysSpawned, nextEntityId, rpgSimulationTick
     }
 
     public init(from decoder: Decoder) throws {
@@ -115,6 +118,11 @@ public struct WorldRecord: Codable {
         dragonKilled = try c.decodeIfPresent(Bool.self, forKey: .dragonKilled) ?? false
         gatewaysSpawned = try c.decodeIfPresent(Int.self, forKey: .gatewaysSpawned) ?? 0
         nextEntityId = try c.decodeIfPresent(Int.self, forKey: .nextEntityId) ?? 1
+        if let persisted = try c.decodeIfPresent(Int.self, forKey: .rpgSimulationTick) {
+            rpgSimulationTick = max(0, min(RPG_MAX_COUNTER, persisted))
+        } else {
+            rpgSimulationTick = max(0, min(RPG_MAX_COUNTER, dims.values.map(\.time).max() ?? 0))
+        }
     }
 
     private static func decodeDungeonDensity(from c: KeyedDecodingContainer<CodingKeys>) -> DungeonDensity {
@@ -147,6 +155,7 @@ public struct WorldRecord: Codable {
         try c.encode(dragonKilled, forKey: .dragonKilled)
         try c.encode(gatewaysSpawned, forKey: .gatewaysSpawned)
         try c.encode(nextEntityId, forKey: .nextEntityId)
+        try c.encode(max(0, min(RPG_MAX_COUNTER, rpgSimulationTick)), forKey: .rpgSimulationTick)
     }
 }
 
@@ -180,7 +189,13 @@ public struct ChunkRecord {
 /// JSON can't carry NaN/Infinity (structured clone could) — scrub them so one
 /// blown-up velocity never poisons a whole chunk record
 private func sanitizeJSON(_ v: Any) -> Any {
-    if let d = v as? Double { return d.isFinite ? d : 0 }
+    // JSONSerialization bridges both booleans and numbers through NSNumber.
+    // Checking `as? Double` first coerces CFBoolean values to 1/0, which makes
+    // Codable Bool fields fail to decode when the record is loaded again.
+    if let number = v as? NSNumber {
+        if CFGetTypeID(number) == CFBooleanGetTypeID() { return number.boolValue }
+        return number.doubleValue.isFinite ? number : 0
+    }
     if let arr = v as? [Any] { return arr.map(sanitizeJSON) }
     if let dict = v as? [String: Any] { return dict.mapValues(sanitizeJSON) }
     return v

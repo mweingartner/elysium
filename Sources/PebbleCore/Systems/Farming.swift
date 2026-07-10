@@ -63,8 +63,9 @@ public func growTreeAt(_ world: World, _ x: Int, _ y: Int, _ z: Int, _ sapId: In
 }
 
 public func igniteTNT(_ world: World, _ x: Int, _ y: Int, _ z: Int) {
-    world.setBlock(x, y, z, 0)
     let tnt = TNTEntity(world: world)
+    _ = world.transferRPGControlledCharge(at: RPGBlockPosition(x, y, z), to: tnt)
+    world.setBlock(x, y, z, 0)
     tnt.setPos(Double(x) + 0.5, Double(y), Double(z) + 0.5)
     world.addEntity(tnt)
     world.hooks.playSound("entity.tnt.primed", Double(x) + 0.5, Double(y), Double(z) + 0.5, 1, 1)

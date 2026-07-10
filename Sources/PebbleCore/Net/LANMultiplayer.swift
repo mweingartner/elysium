@@ -82,6 +82,25 @@ public enum LANMultiplayerMessageKind: UInt16, Codable, Equatable, CaseIterable 
     case damageEvent = 24
     case keepalive = 25
     case rpgIntent = 26
+
+    /// Guest-originated messages whose authoritative handling can mutate gameplay state.
+    /// The LAN transport holds these messages while the bounded RPG authority clock is
+    /// catching up so position, inventory, XP, world, and RPG changes cannot interleave
+    /// with older upkeep ticks. Keep this exhaustive switch explicit: new protocol kinds
+    /// must make a deliberate fail-open/fail-closed choice.
+    public var isHostMutationBlockedByRPGClockCatchUp: Bool {
+        switch self {
+        case .playerState, .inputIntent, .blockIntent, .containerIntent,
+             .templateIntent, .attackIntent, .tossIntent, .containerEditIntent,
+             .inventoryUpdate, .rpgIntent:
+            return true
+        case .clientHello, .serverAccept, .serverReject, .chat, .worldSummary,
+             .ping, .pong, .disconnect, .replicationBatch, .chunkRequest,
+             .replicationAck, .gameplayEvent, .inventoryGrant, .restoreState,
+             .damageEvent, .keepalive:
+            return false
+        }
+    }
 }
 
 public enum LANPeerLifecycleState: String, Codable, Equatable {
@@ -937,7 +956,7 @@ public struct LANReplicationBatch: Codable, Equatable {
         inventories: [LANPlayerInventorySnapshot] = [],
         blockEntities: [LANBlockEntitySnapshot] = []
     ) {
-        self.tick = max(0, tick)
+        self.tick = tick
         self.fullSnapshot = fullSnapshot
         self.world = world
         self.worldState = worldState

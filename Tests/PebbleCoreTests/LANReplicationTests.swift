@@ -2306,6 +2306,393 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(session.peerRestoreState(playerID: "peer-a")?.playerState.rpg?.pathID, "arcanist")
     }
 
+    func testHostRPGClockAdvancesConnectedPeersExactlyOnceAndFailsSyncSafely() throws {
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-b", displayName: "Bea")
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex")
+        var first = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "arcanist", attributes: try XCTUnwrap(rpgCreationPreset(pathID: "arcanist")),
+            starterSkillID: "ritual_circle"
+        )).get()
+        first.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
+        first.level = RPG_LEVEL_CAP
+        for skillID in try XCTUnwrap(rpgBranchDefinition("arcanist_ritualist")).skillIDs {
+            first.skillRanks[skillID] = 3
+        }
+        first = repairRPGCharacterState(first)
+        first.preparedSpellIDs = ["summon_servant"]
+        first.activeCooldowns = [RPGCooldown(id: "interpose", remainingTicks: 3)]
+        first.activeUpkeeps = [RPGUpkeep(spellID: "summon_servant", ownerSequence: 7,
+                                         remainingTicks: 1, costPerSecond: 0)]
+        first = repairRPGCharacterState(first)
+        first.fatigue = max(0, rpgDerivedStats(first).maxFatigue - 1)
+        var second = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "ranger", attributes: try XCTUnwrap(rpgCreationPreset(pathID: "ranger")),
+            starterSkillID: "trail_sense"
+        )).get()
+        second.activeCooldowns = [RPGCooldown(id: "far_sight", remainingTicks: 4)]
+        _ = session.recordRPGState(first, for: "peer-b")
+        _ = session.recordRPGState(second, for: "peer-a")
+        XCTAssertTrue(session.setRPGClockBaseline(100))
+
+        let firstStep = session.advanceRPGClock(to: 101)
+        XCTAssertEqual(firstStep.advancedTicks, 1)
+        XCTAssertEqual(firstStep.peerUpdates.map(\.playerID), ["peer-b", "peer-a"],
+                       "joined ordinal is the stable authority order")
+        XCTAssertEqual(firstStep.peerUpdates.first?.endedUpkeeps.map(\.ownerSequence), [7])
+        XCTAssertEqual(session.peerRecord(playerID: "peer-b")?.rpg?.activeCooldowns.first?.remainingTicks, 2)
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.rpg?.activeCooldowns.first?.remainingTicks, 3)
+
+        let afterFirst = [session.peerRecord(playerID: "peer-b"),
+                          session.peerRecord(playerID: "peer-a")]
+        XCTAssertEqual(session.advanceRPGClock(to: 101).advancedTicks, 0)
+        XCTAssertEqual([session.peerRecord(playerID: "peer-b"),
+                        session.peerRecord(playerID: "peer-a")], afterFirst)
+        XCTAssertEqual(session.advanceRPGClock(to: 100).acceptedTick, nil)
+        XCTAssertEqual(session.advanceRPGClock(to: -1).acceptedTick, nil)
+        XCTAssertEqual(session.advanceRPGClock(to: RPG_MAX_COUNTER + 1).acceptedTick, nil)
+        XCTAssertEqual(session.processedRPGTick, 101)
+        XCTAssertFalse(session.setRPGClockBaseline(100),
+                       "the explicit baseline API must not rewind authority")
+        XCTAssertEqual([session.peerRecord(playerID: "peer-b"),
+                        session.peerRecord(playerID: "peer-a")], afterFirst,
+                       "backward/out-of-range clocks are byte-for-byte no-ops")
+
+        let bounded = session.advanceRPGClock(to: 111)
+        XCTAssertEqual(bounded.advancedTicks, LANMultiplayerHostSession.maxRPGClockCatchUpTicks)
+        XCTAssertFalse(bounded.requiresResync)
+        let beforeOversized = session.peerRecord(playerID: "peer-a")
+        let oversized = session.advanceRPGClock(
+            to: 112 + LANMultiplayerHostSession.maxRPGClockCatchUpTicks
+        )
+        XCTAssertTrue(oversized.requiresResync)
+        XCTAssertEqual(session.processedRPGTick, 111)
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a"), beforeOversized)
+
+        session.disconnectPeer(playerID: "peer-b", tick: 111)
+        let disconnected = session.peerRecord(playerID: "peer-b")?.rpg
+        XCTAssertEqual(session.advanceRPGClock(to: 112).peerUpdates.map(\.playerID), ["peer-a"])
+        XCTAssertEqual(session.peerRecord(playerID: "peer-b")?.rpg, disconnected,
+                       "disconnected records do not advance")
+    }
+
+    func testHostRPGClockCatchUpIsBoundedBlocksMutationsAndConvergesWithoutSkipping() throws {
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex")
+        var state = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "arcanist",
+            attributes: try XCTUnwrap(rpgCreationPreset(pathID: "arcanist")),
+            starterSkillID: "ritual_circle"
+        )).get()
+        state.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
+        state.level = RPG_LEVEL_CAP
+        for skillID in try XCTUnwrap(rpgBranchDefinition("arcanist_ritualist")).skillIDs {
+            state.skillRanks[skillID] = 3
+        }
+        state = repairRPGCharacterState(state)
+        state.preparedSpellIDs = ["summon_servant"]
+        state.activeCooldowns = [RPGCooldown(id: "summon_servant", remainingTicks: 30)]
+        state.activeUpkeeps = [RPGUpkeep(spellID: "summon_servant", ownerSequence: 7,
+                                         remainingTicks: 25, costPerSecond: 0)]
+        state = repairRPGCharacterState(state)
+        _ = session.recordRPGState(state, for: "peer-a")
+        XCTAssertTrue(session.setRPGClockBaseline(100))
+
+        let first = session.advanceRPGClockToward(125)
+        XCTAssertEqual(first.advancedTicks, 10)
+        XCTAssertEqual(first.targetTick, 125)
+        XCTAssertEqual(first.pendingTicks, 15)
+        XCTAssertTrue(first.mutationsBlocked)
+        XCTAssertTrue(session.rpgMutationsBlocked)
+        XCTAssertEqual(session.processedRPGTick, 110)
+        XCTAssertEqual(session.rpgState(for: "peer-a")?.activeCooldowns.first?.remainingTicks, 20)
+        XCTAssertEqual(session.rpgState(for: "peer-a")?.activeUpkeeps.first?.remainingTicks, 15)
+
+        let afterFirst = session.rpgState(for: "peer-a")
+        let invalid = session.advanceRPGClockToward(-1)
+        XCTAssertEqual(invalid.advancedTicks, 0)
+        XCTAssertTrue(invalid.mutationsBlocked,
+                      "invalid input cannot clear an existing mutation block")
+        XCTAssertEqual(invalid.pendingTicks, 15)
+        XCTAssertEqual(session.rpgState(for: "peer-a"), afterFirst)
+        let backward = session.advanceRPGClockToward(105)
+        XCTAssertEqual(backward.advancedTicks, 0)
+        XCTAssertTrue(backward.mutationsBlocked)
+        XCTAssertEqual(session.rpgState(for: "peer-a"), afterFirst)
+
+        let second = session.advanceRPGClockToward(126)
+        XCTAssertEqual(second.advancedTicks, 10)
+        XCTAssertEqual(second.targetTick, 126,
+                       "a newer host tick coalesces into the pending target")
+        XCTAssertEqual(second.pendingTicks, 6)
+        XCTAssertTrue(second.mutationsBlocked)
+        XCTAssertEqual(session.processedRPGTick, 120)
+        XCTAssertEqual(session.rpgState(for: "peer-a")?.activeCooldowns.first?.remainingTicks, 10)
+        XCTAssertEqual(session.rpgState(for: "peer-a")?.activeUpkeeps.first?.remainingTicks, 5)
+
+        let final = session.advanceRPGClockToward(127)
+        XCTAssertEqual(final.advancedTicks, 7)
+        XCTAssertEqual(final.pendingTicks, 0)
+        XCTAssertFalse(final.mutationsBlocked)
+        XCTAssertFalse(session.rpgMutationsBlocked)
+        XCTAssertEqual(session.processedRPGTick, 127)
+        XCTAssertEqual(session.rpgState(for: "peer-a")?.activeCooldowns.first?.remainingTicks, 3)
+        XCTAssertTrue(session.rpgState(for: "peer-a")?.activeUpkeeps.isEmpty == true)
+        XCTAssertEqual(final.peerUpdates.first?.endedUpkeeps.map(\.ownerSequence), [7])
+
+        let converged = session.rpgState(for: "peer-a")
+        XCTAssertEqual(session.advanceRPGClockToward(127).advancedTicks, 0)
+        XCTAssertEqual(session.rpgState(for: "peer-a"), converged,
+                       "a duplicate converged target cannot double-advance state")
+    }
+
+    func testRPGClockCurrentPredicateIsPureAndRequiresExactConvergence() throws {
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex", tick: 100)
+        var state = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "warden",
+            attributes: try XCTUnwrap(rpgCreationPreset(pathID: "warden")),
+            starterSkillID: "guard_stance"
+        )).get()
+        state.activeCooldowns = [RPGCooldown(id: "guard_stance", remainingTicks: 30)]
+        _ = session.recordRPGState(state, for: "peer-a")
+        XCTAssertTrue(session.setRPGClockBaseline(100))
+        XCTAssertTrue(session.isRPGClockCurrent(at: 100))
+        XCTAssertFalse(session.isRPGClockCurrent(at: 101))
+        XCTAssertFalse(session.isRPGClockCurrent(at: -1))
+        XCTAssertFalse(session.isRPGClockCurrent(at: RPG_MAX_COUNTER + 1))
+
+        let first = session.advanceRPGClockToward(125)
+        XCTAssertEqual(first.advancedTicks, 10)
+        XCTAssertTrue(first.mutationsBlocked)
+        let recordAfterFirst = session.peerRecord(playerID: "peer-a")
+        let tickAfterFirst = session.processedRPGTick
+        let debtAfterFirst = session.pendingRPGClockTicks
+
+        XCTAssertFalse(session.isRPGClockCurrent(at: 125),
+                       "a mutation cannot commit against a partially synchronized authority clock")
+        XCTAssertFalse(session.isRPGClockCurrent(at: 125),
+                       "repeated admission checks must remain pure")
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a"), recordAfterFirst)
+        XCTAssertEqual(session.processedRPGTick, tickAfterFirst)
+        XCTAssertEqual(session.pendingRPGClockTicks, debtAfterFirst)
+
+        XCTAssertFalse(session.isRPGClockCurrent(at: 125))
+        _ = session.advanceRPGClockToward(125)
+        XCTAssertFalse(session.isRPGClockCurrent(at: 125))
+        let converged = session.advanceRPGClockToward(125)
+        XCTAssertEqual(converged.advancedTicks, 5)
+        XCTAssertFalse(converged.mutationsBlocked)
+        XCTAssertTrue(session.isRPGClockCurrent(at: 125),
+                      "mutation admission opens only after exact bounded convergence")
+
+        let finalRecord = session.peerRecord(playerID: "peer-a")
+        XCTAssertTrue(session.isRPGClockCurrent(at: 125))
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a"), finalRecord)
+        XCTAssertFalse(session.isRPGClockCurrent(at: 124),
+                       "a stale mutation tick cannot pass after convergence")
+        XCTAssertFalse(session.isRPGClockCurrent(at: 126),
+                       "a future mutation tick cannot pass before synchronization")
+    }
+
+    func testRPGClockReportIncludesExactEligibleTicksForEveryConnectedPeer() throws {
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "with-rpg", displayName: "With RPG", tick: 100)
+        session.acceptPeer(playerID: "without-rpg", displayName: "Without RPG", tick: 100)
+        let state = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "warden",
+            attributes: try XCTUnwrap(rpgCreationPreset(pathID: "warden")),
+            starterSkillID: "guard_stance"
+        )).get()
+        _ = session.recordRPGState(state, for: "with-rpg")
+        XCTAssertTrue(session.setRPGClockBaseline(100))
+
+        let report = session.advanceRPGClock(to: 103)
+        XCTAssertEqual(report.peerUpdates.map(\.playerID), ["with-rpg", "without-rpg"])
+        XCTAssertEqual(report.peerUpdates.map(\.advancedTicks), [3, 3],
+                       "transport recovery needs a tick count for every connected authority")
+        XCTAssertNotNil(report.peerUpdates[0].rpg)
+        XCTAssertNil(report.peerUpdates[1].rpg,
+                     "a peer without a character still needs its exact non-RPG recovery cadence")
+    }
+
+    func testPeerAcceptedDuringCatchUpDoesNotConsumePreJoinHistoricalTicks() throws {
+        func coolingState() throws -> RPGCharacterState {
+            var state = try rpgCreateCharacter(RPGCreationDraft(
+                pathID: "warden",
+                attributes: try XCTUnwrap(rpgCreationPreset(pathID: "warden")),
+                starterSkillID: "guard_stance"
+            )).get()
+            state.activeCooldowns = [RPGCooldown(id: "guard_stance", remainingTicks: 30)]
+            return repairRPGCharacterState(state)
+        }
+
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "existing", displayName: "Existing", tick: 100)
+        _ = session.recordRPGState(try coolingState(), for: "existing")
+        XCTAssertTrue(session.setRPGClockBaseline(100))
+        let world = makeLoadedWorld()
+        let ghosts = LANHostGhostRegistry()
+        let existingGhost = ghosts.ghost(
+            for: "existing",
+            record: try XCTUnwrap(session.peerRecord(playerID: "existing")),
+            in: world
+        )
+        existingGhost.attackStrengthTicker = 0
+        let existingExpected = Player(world: world)
+        existingExpected.rpg = try coolingState()
+        existingExpected.attackStrengthTicker = 0
+
+        let first = session.advanceRPGClockToward(125)
+        XCTAssertEqual(first.advancedTicks, 10)
+        XCTAssertEqual(first.peerUpdates.map(\.advancedTicks), [10])
+        for update in first.peerUpdates {
+            ghosts.advanceSimulationTicks(update.advancedTicks, for: update.playerID)
+        }
+        existingExpected.advanceAttackStrengthRecovery(ticks: 10)
+        XCTAssertEqual(existingGhost.attackStrengthTicker,
+                       existingExpected.attackStrengthTicker, accuracy: 0.000_001)
+        XCTAssertEqual(session.processedRPGTick, 110)
+
+        session.acceptPeer(playerID: "newcomer", displayName: "Newcomer", tick: 125)
+        _ = session.recordRPGState(try coolingState(), for: "newcomer")
+        let newcomerGhost = ghosts.ghost(
+            for: "newcomer",
+            record: try XCTUnwrap(session.peerRecord(playerID: "newcomer")),
+            in: world
+        )
+        newcomerGhost.attackStrengthTicker = 0
+        let newcomerExpected = Player(world: world)
+        newcomerExpected.rpg = try coolingState()
+        newcomerExpected.attackStrengthTicker = 0
+
+        let second = session.advanceRPGClockToward(126)
+        XCTAssertEqual(second.advancedTicks, 10)
+        XCTAssertEqual(second.peerUpdates.map(\.playerID), ["existing", "newcomer"])
+        XCTAssertEqual(second.peerUpdates.map(\.advancedTicks), [10, 0])
+        for update in second.peerUpdates {
+            ghosts.advanceSimulationTicks(update.advancedTicks, for: update.playerID)
+        }
+        existingExpected.advanceAttackStrengthRecovery(ticks: 10)
+        XCTAssertEqual(session.rpgState(for: "newcomer")?.activeCooldowns.first?.remainingTicks,
+                       30,
+                       "ticks 111...120 predate this peer's authority admission")
+        XCTAssertEqual(existingGhost.attackStrengthTicker,
+                       existingExpected.attackStrengthTicker, accuracy: 0.000_001)
+        XCTAssertEqual(newcomerGhost.attackStrengthTicker,
+                       newcomerExpected.attackStrengthTicker, accuracy: 0.000_001,
+                       "detached ghost recovery cannot replay pre-admission history")
+
+        let final = session.advanceRPGClockToward(127)
+        XCTAssertEqual(final.advancedTicks, 7)
+        XCTAssertEqual(final.peerUpdates.map(\.playerID), ["existing", "newcomer"])
+        XCTAssertEqual(final.peerUpdates.map(\.advancedTicks), [7, 2])
+        for update in final.peerUpdates {
+            ghosts.advanceSimulationTicks(update.advancedTicks, for: update.playerID)
+        }
+        existingExpected.advanceAttackStrengthRecovery(ticks: 7)
+        newcomerExpected.advanceAttackStrengthRecovery(ticks: 2)
+        XCTAssertEqual(session.pendingRPGClockTicks, 0)
+        XCTAssertEqual(session.rpgState(for: "existing")?.activeCooldowns.first?.remainingTicks,
+                       3, "the already-connected peer consumes all 27 authority ticks")
+        XCTAssertEqual(session.rpgState(for: "newcomer")?.activeCooldowns.first?.remainingTicks,
+                       28,
+                       "a peer admitted at tick 125 begins evolution with ticks 126 and 127 only")
+        XCTAssertEqual(existingGhost.attackStrengthTicker,
+                       existingExpected.attackStrengthTicker, accuracy: 0.000_001)
+        XCTAssertEqual(newcomerGhost.attackStrengthTicker,
+                       newcomerExpected.attackStrengthTicker, accuracy: 0.000_001,
+                       "ghost recovery advances only the newcomer’s two eligible ticks")
+    }
+
+    func testPeerRPGTerminationIsIdempotentAndAuthorityCleanupCrossesWorlds() throws {
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex")
+        _ = session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex",
+            x: 1.5, y: 64, z: 1.5, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0,
+            gameMode: GameMode.survival
+        ))
+        var state = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "arcanist",
+            attributes: try XCTUnwrap(rpgCreationPreset(pathID: "arcanist")),
+            starterSkillID: "ritual_circle"
+        )).get()
+        state.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
+        state.level = RPG_LEVEL_CAP
+        for skillID in try XCTUnwrap(rpgBranchDefinition("arcanist_ritualist")).skillIDs {
+            state.skillRanks[skillID] = 3
+        }
+        state = repairRPGCharacterState(state)
+        state.preparedSpellIDs = ["summon_servant"]
+        state.activeUpkeeps = [RPGUpkeep(spellID: "summon_servant", ownerSequence: 9,
+                                         remainingTicks: 100, costPerSecond: 0.5)]
+        state = repairRPGCharacterState(state)
+        let revisionBefore = state.authorityRevision
+        _ = session.recordRPGState(state, for: "peer-a")
+
+        let authorityID = "lan:peer-a"
+        let firstWorld = makeLoadedWorld()
+        let secondWorld = makeLoadedWorld()
+        let ghost = Player(world: firstWorld)
+        ghost.rpgAuthorityID = authorityID
+        ghost.rpg = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "warden",
+            attributes: try XCTUnwrap(rpgCreationPreset(pathID: "warden")),
+            starterSkillID: "guard_stance"
+        )).get()
+        let ally = Villager(world: firstWorld)
+        firstWorld.addEntity(ally)
+        XCTAssertTrue(ally.grantRPGWardenAbsorption(4, owner: ghost, sequence: 11))
+        XCTAssertTrue(firstWorld.registerRPGTemporaryEffect(RPGTemporaryEffectDraft(
+            kind: .sanctuary, ownerAuthorityID: authorityID,
+            ownerEntityID: ghost.id, ownerSequence: 12,
+            center: RPGBlockPosition(1, 64, 1), durationTicks: 200
+        )))
+        let guardedPosition = RPGBlockPosition(2, 64, 2)
+        secondWorld.setBlock(guardedPosition.x, guardedPosition.y, guardedPosition.z,
+                             Int(cell(B.torch)))
+        XCTAssertTrue(secondWorld.registerRPGTemporaryEffect(RPGTemporaryEffectDraft(
+            kind: .mageLight, ownerAuthorityID: authorityID,
+            ownerEntityID: ghost.id, ownerSequence: 13,
+            center: guardedPosition, durationTicks: 200,
+            guardedBlock: RPGGuardedTemporaryBlock(
+                position: guardedPosition, originalCell: 0,
+                temporaryCell: Int(cell(B.torch))
+            )
+        )))
+        secondWorld.removeChunk(0, 0)
+
+        let terminated = try XCTUnwrap(session.terminateRPGAuthority(for: "peer-a"))
+        for world in [firstWorld, secondWorld] {
+            XCTAssertEqual(world.terminateRPGTemporaryEffects(ownerID: authorityID), 1)
+            _ = world.removeRPGWardenMitigationLayers(ownerAuthorityID: authorityID)
+        }
+
+        XCTAssertEqual(terminated.endedUpkeeps.map(\.ownerSequence), [9])
+        XCTAssertTrue(terminated.stateChanged)
+        XCTAssertTrue(terminated.rpg?.activeUpkeeps.isEmpty == true)
+        XCTAssertEqual(terminated.rpg?.authorityRevision, revisionBefore + 1)
+        XCTAssertEqual(terminated.playerState?.rpg, terminated.rpg,
+                       "the publishable terminal state must carry the cleaned authority state")
+        XCTAssertTrue(firstWorld.rpgTemporaryEffects.isEmpty)
+        XCTAssertTrue(secondWorld.rpgTemporaryEffects.isEmpty,
+                      "terminal cleanup safely drops an unloaded guarded overlay")
+        XCTAssertTrue(ally.rpgWardenMitigationLayerSnapshots.isEmpty)
+        XCTAssertEqual(ally.absorption, 4, accuracy: 0.000_001,
+                       "terminating provenance preserves granted generic absorption")
+
+        let again = try XCTUnwrap(session.terminateRPGAuthority(for: "peer-a"))
+        XCTAssertFalse(again.stateChanged)
+        XCTAssertTrue(again.endedUpkeeps.isEmpty)
+        XCTAssertEqual(again.rpg, terminated.rpg)
+        XCTAssertEqual(firstWorld.terminateRPGTemporaryEffects(ownerID: authorityID), 0)
+        XCTAssertEqual(firstWorld.removeRPGWardenMitigationLayers(
+            ownerAuthorityID: authorityID
+        ), 0)
+    }
+
     // MARK: - W2: ghost actor
 
     func testGhostHydratesAuthoritativeRPGStateAndDerivedStats() throws {
@@ -2327,6 +2714,71 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertLessThanOrEqual(ghost.health, ghost.maxHealth)
     }
 
+    func testOffDimensionLANUnprepareRemovesOnlyExactServantInPeerWorld() throws {
+        let overworld = makeLoadedWorld()
+        let nether = World(dim: .nether, seed: 814)
+        let netherChunk = Chunk(cx: 0, cz: 0, minY: nether.info.minY,
+                                height: nether.info.height)
+        netherChunk.status = .generated
+        nether.setChunk(netherChunk)
+
+        var state = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "arcanist",
+            starterSkillID: "ritual_circle",
+            starterSpellIDs: ["mage_light"]
+        )).get()
+        state.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
+        state.level = RPG_LEVEL_CAP
+        for skillID in rpgBranchDefinition("arcanist_ritualist")!.skillIDs {
+            state.skillRanks[skillID] = 3
+        }
+        state = repairRPGCharacterState(state)
+        state.preparedSpellIDs = ["summon_servant", "mage_light"]
+        state.selectedPreparedSpellID = "summon_servant"
+        state.activeUpkeeps = [RPGUpkeep(spellID: "summon_servant", ownerSequence: 21,
+                                         remainingTicks: 100, costPerSecond: 0.5)]
+        state = repairRPGCharacterState(state)
+
+        let session = makeAcceptedHostSession(dimension: Dim.nether.rawValue)
+        _ = session.recordRPGState(state, for: "peer-a")
+        let record = try XCTUnwrap(session.peerRecord(playerID: "peer-a"))
+        let owner = "lan:peer-a"
+
+        let netherServant = Allay(world: nether)
+        netherServant.setPos(1.5, 64, 1.5)
+        nether.addEntity(netherServant)
+        let exact = RPGTemporaryEffectDraft(kind: .servant, ownerAuthorityID: owner,
+                                            ownerEntityID: nil, ownerSequence: 21,
+                                            center: RPGBlockPosition(1, 64, 1),
+                                            durationTicks: 100)
+        XCTAssertTrue(nether.registerRPGTemporaryEffect(exact, entityID: netherServant.id))
+        let unrelated = RPGTemporaryEffectDraft(kind: .mageLight, ownerAuthorityID: owner,
+                                                ownerEntityID: nil, ownerSequence: 22,
+                                                center: RPGBlockPosition(2, 64, 1),
+                                                durationTicks: 100)
+        XCTAssertTrue(nether.registerRPGTemporaryEffect(unrelated))
+
+        let overworldServant = Allay(world: overworld)
+        overworldServant.setPos(1.5, 64, 1.5)
+        overworld.addEntity(overworldServant)
+        XCTAssertTrue(overworld.registerRPGTemporaryEffect(exact,
+                                                           entityID: overworldServant.id))
+
+        let registry = LANHostGhostRegistry()
+        _ = registry.ghost(for: "peer-a", record: record, in: overworld)
+        XCTAssertNil(rpgUnprepareHostedLANSpell("summon_servant", state: &state,
+                                               playerID: "peer-a", record: record,
+                                               world: nether, ghostRegistry: registry))
+
+        XCTAssertFalse(state.preparedSpellIDs.contains("summon_servant"))
+        XCTAssertNil(nether.rpgTemporaryEffect(for: exact.key))
+        XCTAssertNil(nether.entityById[netherServant.id])
+        XCTAssertNotNil(nether.rpgTemporaryEffect(for: unrelated.key))
+        XCTAssertNotNil(overworld.rpgTemporaryEffect(for: exact.key),
+                        "active host dimension is unrelated to the peer's recorded dimension")
+        XCTAssertNotNil(overworld.entityById[overworldServant.id])
+    }
+
     func testGhostUsesAuthoritativePreparedActiveSkill() throws {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession(x: 0.5, y: 64, z: 0.5, yaw: 0)
@@ -2335,6 +2787,12 @@ final class LANReplicationTests: XCTestCase {
             starterSkillID: "heavy_cut"
         )).get()
         _ = session.recordRPGState(rpg, for: "peer-a")
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0,
+                                       slots: [LANInventorySlotSnapshot(
+                                        slot: 0, itemID: iid("stone_sword"), count: 1)]),
+            from: "peer-a"
+        )
         let zombie = Zombie(world: world)
         zombie.setPos(0.5, 64, 3.5)
         world.addEntity(zombie)

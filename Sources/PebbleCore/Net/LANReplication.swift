@@ -211,6 +211,45 @@ public final class LANReplicationChangeLog {
     }
 }
 
+public struct LANRPGPeerTickUpdate: Equatable {
+    public var playerID: String
+    public var rpg: RPGCharacterState?
+    public var endedUpkeeps: [RPGUpkeep]
+    /// Authority ticks this peer was eligible to consume in this report. This
+    /// can be zero for a peer admitted during historical catch-up and is still
+    /// reported for peers that have not created an RPG character.
+    public var advancedTicks: Int
+}
+
+public struct LANRPGClockAdvanceReport: Equatable {
+    public var previousTick: Int?
+    public var acceptedTick: Int?
+    public var advancedTicks: Int
+    public var requiresResync: Bool
+    public var peerUpdates: [LANRPGPeerTickUpdate]
+}
+
+/// One bounded transport catch-up step. `advance` contains only the ticks
+/// actually committed in this call; `pendingTicks` exposes remaining authority
+/// debt so the transport can reject discrete peer mutations until convergence.
+public struct LANRPGClockCatchUpReport: Equatable {
+    public var targetTick: Int?
+    public var advance: LANRPGClockAdvanceReport
+    public var pendingTicks: Int
+    public var mutationsBlocked: Bool
+
+    public var advancedTicks: Int { advance.advancedTicks }
+    public var peerUpdates: [LANRPGPeerTickUpdate] { advance.peerUpdates }
+}
+
+public struct LANRPGPeerTermination: Equatable {
+    public var playerID: String
+    public var rpg: RPGCharacterState?
+    public var playerState: LANPlayerState?
+    public var endedUpkeeps: [RPGUpkeep]
+    public var stateChanged: Bool
+}
+
 public final class LANMultiplayerHostSession {
     private struct Peer {
         var playerID: String
@@ -230,6 +269,10 @@ public final class LANMultiplayerHostSession {
         var lastAckSequence: UInt32 = 0
         var lastSeenTick = 0
         var disconnectedTick: Int?
+        /// Last authority tick already elapsed when this connection was accepted.
+        /// This transient boundary is reset only on join/reconnect and prevents a
+        /// peer admitted during bounded catch-up from consuming historical ticks.
+        var rpgConnectedAfterTick = 0
     }
 
     /// snapshot captured once per epoch by `consumeDeathDrops(for:)`; keyed by playerID for deterministic lookup.
@@ -294,8 +337,148 @@ public final class LANMultiplayerHostSession {
     private var templateJobs: [String: TemplateJobEntry] = [:]
     /// completion responses awaiting drain by the transport, in completion order.
     private var pendingTemplateResponses: [(playerID: String, result: LANTemplateIntentResult)] = []
+    private var lastProcessedRPGTick: Int?
+    private var rpgClockCatchUpTargetTick: Int?
+
+    /// GameCore executes at most ten fixed steps before each transport callback.
+    /// Anything larger means the host session missed an authority interval; it
+    /// fails sync without mutating peer records instead of running an unbounded
+    /// catch-up loop on the main thread.
+    public static let maxRPGClockCatchUpTicks = 10
 
     public init() {}
+
+    public var processedRPGTick: Int? { lastProcessedRPGTick }
+    public var rpgMutationsBlocked: Bool { rpgClockCatchUpTargetTick != nil }
+    public var pendingRPGClockTicks: Int {
+        guard let target = rpgClockCatchUpTargetTick,
+              let processed = lastProcessedRPGTick else { return 0 }
+        return max(0, target - processed)
+    }
+
+    public func isRPGClockCurrent(at tick: Int) -> Bool {
+        (0...RPG_MAX_COUNTER).contains(tick)
+            && lastProcessedRPGTick == tick
+            && !rpgMutationsBlocked
+    }
+
+    @discardableResult
+    public func setRPGClockBaseline(_ tick: Int) -> Bool {
+        guard (0...RPG_MAX_COUNTER).contains(tick),
+              lastProcessedRPGTick.map({ tick >= $0 }) ?? true else { return false }
+        lastProcessedRPGTick = tick
+        if let target = rpgClockCatchUpTargetTick, tick >= target {
+            rpgClockCatchUpTargetTick = nil
+        }
+        return true
+    }
+
+    /// Advances toward an authority target without ever skipping peer evolution.
+    /// Each call commits at most `maxRPGClockCatchUpTicks`; a newer forward target
+    /// coalesces with existing debt, while invalid/backward input is a no-op.
+    @discardableResult
+    public func advanceRPGClockToward(_ tick: Int) -> LANRPGClockCatchUpReport {
+        let previous = lastProcessedRPGTick
+        func result(target: Int?, advance: LANRPGClockAdvanceReport) -> LANRPGClockCatchUpReport {
+            LANRPGClockCatchUpReport(targetTick: target, advance: advance,
+                                     pendingTicks: pendingRPGClockTicks,
+                                     mutationsBlocked: rpgMutationsBlocked)
+        }
+        guard (0...RPG_MAX_COUNTER).contains(tick) else {
+            return result(target: nil, advance: LANRPGClockAdvanceReport(
+                previousTick: previous, acceptedTick: nil, advancedTicks: 0,
+                requiresResync: false, peerUpdates: []))
+        }
+        guard let previous else {
+            _ = setRPGClockBaseline(tick)
+            return result(target: tick, advance: LANRPGClockAdvanceReport(
+                previousTick: nil, acceptedTick: tick, advancedTicks: 0,
+                requiresResync: false, peerUpdates: []))
+        }
+        guard tick >= previous else {
+            return result(target: nil, advance: LANRPGClockAdvanceReport(
+                previousTick: previous, acceptedTick: nil, advancedTicks: 0,
+                requiresResync: false, peerUpdates: []))
+        }
+        let target = max(rpgClockCatchUpTargetTick ?? tick, tick)
+        let stepTick = min(target, rpgSaturatedAdd(previous, Self.maxRPGClockCatchUpTicks))
+        rpgClockCatchUpTargetTick = target > stepTick ? target : nil
+        let advance = advanceRPGClock(to: stepTick)
+        if advance.acceptedTick == nil {
+            rpgClockCatchUpTargetTick = nil
+        } else if stepTick >= target {
+            rpgClockCatchUpTargetTick = nil
+        }
+        return result(target: target, advance: advance)
+    }
+
+    /// Advances each connected peer exactly once per accepted global tick in
+    /// stable joined-ordinal/player-ID order. Invalid, backward, duplicate, and
+    /// oversized catch-up requests never partially mutate a peer record.
+    @discardableResult
+    public func advanceRPGClock(to tick: Int) -> LANRPGClockAdvanceReport {
+        let previous = lastProcessedRPGTick
+        guard (0...RPG_MAX_COUNTER).contains(tick) else {
+            return LANRPGClockAdvanceReport(previousTick: previous, acceptedTick: nil,
+                                            advancedTicks: 0, requiresResync: false,
+                                            peerUpdates: [])
+        }
+        guard let previous else {
+            lastProcessedRPGTick = tick
+            return LANRPGClockAdvanceReport(previousTick: nil, acceptedTick: tick,
+                                            advancedTicks: 0, requiresResync: false,
+                                            peerUpdates: [])
+        }
+        guard tick >= previous else {
+            return LANRPGClockAdvanceReport(previousTick: previous, acceptedTick: nil,
+                                            advancedTicks: 0, requiresResync: false,
+                                            peerUpdates: [])
+        }
+        let delta = tick - previous
+        guard delta > 0 else {
+            return LANRPGClockAdvanceReport(previousTick: previous, acceptedTick: tick,
+                                            advancedTicks: 0, requiresResync: false,
+                                            peerUpdates: [])
+        }
+        guard delta <= Self.maxRPGClockCatchUpTicks else {
+            return LANRPGClockAdvanceReport(previousTick: previous, acceptedTick: nil,
+                                            advancedTicks: 0, requiresResync: true,
+                                            peerUpdates: [])
+        }
+
+        let orderedIDs = peers.values
+            .filter { $0.lifecycle == .connected }
+            .sorted {
+                $0.joinedOrdinal == $1.joinedOrdinal
+                    ? $0.playerID < $1.playerID
+                    : $0.joinedOrdinal < $1.joinedOrdinal
+            }
+            .map(\.playerID)
+        var endedByPlayer: [String: [RPGUpkeep]] = [:]
+        var advancedByPlayer: [String: Int] = [:]
+        for offset in 1...delta {
+            let simulationTick = previous + offset
+            for playerID in orderedIDs {
+                guard var peer = peers[playerID],
+                      simulationTick > peer.rpgConnectedAfterTick else { continue }
+                advancedByPlayer[playerID, default: 0] += 1
+                guard var state = peer.rpg else { continue }
+                let ended = rpgTickState(&state)
+                peer.rpg = state
+                peers[playerID] = peer
+                if !ended.isEmpty { endedByPlayer[playerID, default: []].append(contentsOf: ended) }
+            }
+        }
+        lastProcessedRPGTick = tick
+        let updates = orderedIDs.map { playerID in
+            LANRPGPeerTickUpdate(playerID: playerID, rpg: peers[playerID]?.rpg,
+                                 endedUpkeeps: endedByPlayer[playerID] ?? [],
+                                 advancedTicks: advancedByPlayer[playerID, default: 0])
+        }
+        return LANRPGClockAdvanceReport(previousTick: previous, acceptedTick: tick,
+                                        advancedTicks: delta, requiresResync: false,
+                                        peerUpdates: updates)
+    }
 
     public var acceptedPeerCount: Int {
         peers.values.filter { $0.lifecycle == .connected || $0.lifecycle == .dead || $0.lifecycle == .respawning }.count
@@ -310,6 +493,7 @@ public final class LANMultiplayerHostSession {
             existing.lifecycle = existing.playerState?.dead == true ? .dead : .connected
             existing.lastSeenTick = max(existing.lastSeenTick, tick)
             existing.disconnectedTick = nil
+            existing.rpgConnectedAfterTick = max(0, min(RPG_MAX_COUNTER, tick))
             peers[playerID] = existing
             return .reconnected
         }
@@ -325,7 +509,8 @@ public final class LANMultiplayerHostSession {
             lastTemplateUndo: nil,
             lastAckSequence: 0,
             lastSeenTick: max(0, tick),
-            disconnectedTick: nil
+            disconnectedTick: nil,
+            rpgConnectedAfterTick: max(0, min(RPG_MAX_COUNTER, tick))
         )
         nextOrdinal += 1
         return .joined
@@ -350,6 +535,41 @@ public final class LANMultiplayerHostSession {
         // abandon-in-place: see removePeer above for rationale.
         templateJobs.removeValue(forKey: playerID)
         pendingTemplateResponses.removeAll(where: { $0.playerID == playerID })
+    }
+
+    /// Terminal-clears one peer's durable continuous RPG state. World-owned
+    /// effects and causal layers are cleaned by the transport using the same
+    /// authority ID before this result is published/persisted.
+    @discardableResult
+    public func terminateRPGAuthority(for rawPlayerID: String) -> LANRPGPeerTermination? {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard var peer = peers[playerID] else { return nil }
+        let original = peer.rpg
+        let ended = original?.activeUpkeeps ?? []
+        var repaired = original.map(repairRPGCharacterState)
+        if var state = repaired, !state.activeUpkeeps.isEmpty {
+            if !rpgClearTerminalUpkeeps(&state) {
+                state = repairRPGCharacterState(state)
+            }
+            repaired = state
+        }
+        peer.rpg = repaired
+        if let playerState = peer.playerState {
+            peer.playerState = stateWithRPG(playerState, rpg: nil)
+        }
+        peers[playerID] = peer
+        let published = peer.playerState.map { stateWithRPG($0, rpg: repaired) }
+        return LANRPGPeerTermination(playerID: playerID, rpg: repaired,
+                                     playerState: published, endedUpkeeps: ended,
+                                     stateChanged: original != repaired)
+    }
+
+    public var rpgAuthorityPlayerIDs: [String] {
+        peers.values.sorted {
+            $0.joinedOrdinal == $1.joinedOrdinal
+                ? $0.playerID < $1.playerID
+                : $0.joinedOrdinal < $1.joinedOrdinal
+        }.map(\.playerID)
     }
 
     @discardableResult
@@ -525,7 +745,8 @@ public final class LANMultiplayerHostSession {
             lastAckTick: max(0, record.lastAckTick),
             lastAckSequence: 0,
             lastSeenTick: max(0, record.lastSeenTick),
-            disconnectedTick: record.disconnectedTick
+            disconnectedTick: record.disconnectedTick,
+            rpgConnectedAfterTick: 0
         )
         nextOrdinal += 1
     }
@@ -1315,6 +1536,7 @@ public final class LANMultiplayerClientSession {
     @discardableResult
     public func apply(_ batch: LANReplicationBatch) -> LANReplicationApplyReport {
         var report = LANReplicationApplyReport()
+        guard (0...RPG_MAX_COUNTER).contains(batch.tick) else { return report }
         latestTick = max(latestTick, batch.tick)
         if let world = batch.world { worldSummary = world }
         if let state = batch.worldState { worldState = state }
@@ -2554,6 +2776,10 @@ public func applyLANReplicationBatch(
     deferred: inout LANDeferredReplicationBuffer?
 ) -> LANReplicationApplyReport {
     var report = LANReplicationApplyReport()
+    guard (0...RPG_MAX_COUNTER).contains(batch.tick) else { return report }
+    // The existing replication envelope tick is the host authority clock; no
+    // protocol field is added for RPG time. Stale batches cannot rewind it.
+    world.rpgSimulationTick = max(world.rpgSimulationTick, batch.tick)
     if let worldState = batch.worldState {
         _ = applyLANWorldStateSnapshot(worldState, to: world)
     }

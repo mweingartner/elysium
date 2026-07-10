@@ -77,6 +77,13 @@ public final class Player: LivingEntity {
     public var portalTicks = 0
     public var insidePortalKind: String? = nil   // nether | end | nil
     public var rpg = RPGCharacterState.uncreated()
+    /// Session-only authority identity used by bounded RPG world effects.
+    /// LAN ghost hydration replaces the default with the stable peer ID.
+    public var rpgAuthorityID = ""
+
+    public var effectiveRPGAuthorityID: String {
+        rpgAuthorityID.isEmpty ? "entity:\(id)" : rpgAuthorityID
+    }
 
     public override init(world: World) {
         super.init(world: world)
@@ -198,12 +205,23 @@ public final class Player: LivingEntity {
     }
 
     public override func tick() {
+        tickPlayer(advanceRPGClock: true, applyRPGGameplay: true)
+    }
+
+    /// GameCore owns the authoritative RPG clock. Keeping this entry point
+    /// separate prevents Player.tick() from double-advancing host state and
+    /// prevents a LAN client render step from locally consuming cooldowns.
+    func tickFromGameCore(authoritativeRPG: Bool) {
+        tickPlayer(advanceRPGClock: false, applyRPGGameplay: authoritativeRPG)
+    }
+
+    private func tickPlayer(advanceRPGClock: Bool, applyRPGGameplay: Bool) {
         height = sneaking ? PLAYER_SNEAK_HEIGHT : PLAYER_HEIGHT
         baseLivingTick()
         if dead { return }
         syncFlightEquipmentState()
         _wearingPumpkin = armor[0] != nil && itemDef(armor[0]!.id).name == "carved_pumpkin"
-        if attackStrengthTicker < 100 { attackStrengthTicker += attackSpeedPerTick() }
+        advanceAttackStrengthRecovery(ticks: 1)
         if gameMode == GameMode.creative {
             hunger = 20
             airSupply = 300
@@ -211,7 +229,8 @@ public final class Player: LivingEntity {
         } else {
             tickHunger()
         }
-        tickRPGState()
+        if advanceRPGClock { tickRPGContinuousState() }
+        if applyRPGGameplay { tickRPGGameplayState() }
         if sleepTicks > 0 { sleepTicks += 1 }
         if portalTicks > 0 && insidePortalKind == nil { portalTicks = max(0, portalTicks - 4) }
         // item magnet pickup
@@ -368,7 +387,7 @@ public final class Player: LivingEntity {
         if sneaking {
             // swift sneak raises the 0.3 sneak multiplier toward 1.0
             let swift = armor[2].map { enchLevel($0, "swift_sneak") } ?? 0
-            let mult = clampD(0.3 + 0.15 * Double(swift), 0, 1)
+            let mult = rpgSneakingMovementMultiplier(self, swiftSneakLevel: swift)
             f *= mult
             s *= mult
         }
@@ -521,6 +540,13 @@ public final class Player: LivingEntity {
         let speed = t?.attackSpeed ?? 4
         return speed * 5 // reaches 100 in 20/speed ticks
     }
+
+    public func advanceAttackStrengthRecovery(ticks: Int) {
+        guard ticks > 0, ticks <= RPG_MAX_EFFECT_TICKS,
+              attackStrengthTicker.isFinite else { return }
+        attackStrengthTicker = min(100,
+                                   attackStrengthTicker + attackSpeedPerTick() * Double(ticks))
+    }
     public func attackStrength() -> Double {
         clampD(attackStrengthTicker / 100, 0, 1)
     }
@@ -586,7 +612,8 @@ public final class Player: LivingEntity {
     // ---- hunger ------------------------------------------------------------
     public override func addExhaustion(_ amount: Double) {
         if gameMode == GameMode.creative { return }
-        exhaustion += amount
+        let multiplier = rpgClassesEnabled() && rpg.created ? rpgDerivedStats(rpg).exhaustionMultiplier : 1
+        exhaustion += max(0, amount) * multiplier
         while exhaustion >= 4 {
             exhaustion -= 4
             if saturation > 0 { saturation = max(0, saturation - 1) }
@@ -741,6 +768,7 @@ public final class Player: LivingEntity {
         let unb = enchLevel(s, "unbreaking")
         for _ in 0..<amount {
             if unb > 0 && gameRng.nextFloat() < Double(unb) / Double(unb + 1) { continue }
+            if def.tool != nil && shouldPreserveRPGToolDurability() { continue }
             s.damage += 1
         }
         if s.damage >= maxD {
@@ -806,6 +834,11 @@ public final class Player: LivingEntity {
         }
         health = 0
         deathTime = 1
+        world.cancelRPGTemporaryEffects(ownerID: effectiveRPGAuthorityID)
+        _ = world.removeRPGWardenMitigationLayers(
+            ownerAuthorityID: effectiveRPGAuthorityID
+        )
+        clearRPGTerminalUpkeeps()
         data.deathCause = source
         data.deathAttacker = lastAttacker.map { prettyEntityName($0.type) }
         world.hooks.playSound("entity.player.death", x, y, z, 1, 1)
@@ -899,8 +932,20 @@ public final class Player: LivingEntity {
         xpProgress = dnum(d["xpProgress"])
         health = (d["health"] as? NSNumber)?.doubleValue ?? 20
         _gameMode = inum(d["gameMode"])
-        rpg = dec(d["rpg"], RPGCharacterState.self) ?? .uncreated()
+        if let rawRPG = d["rpg"], JSONSerialization.isValidJSONObject(rawRPG),
+           let bytes = try? JSONSerialization.data(withJSONObject: rawRPG, options: [.fragmentsAllowed]),
+           bytes.count <= RPG_MAX_PERSISTED_PAYLOAD_BYTES,
+           let decoded = try? JSONDecoder().decode(RPGCharacterState.self, from: bytes) {
+            rpg = decoded
+        } else {
+            // A malformed or oversized RPG component must not discard the
+            // player's inventory, pose, health, or other vanilla save data.
+            rpg = .uncreated()
+        }
         rpg = repairRPGCharacterState(rpg)
+        // Active upkeep has no durable world counterpart: temporary servants,
+        // auras, and images are deliberately omitted from chunk persistence.
+        clearRPGTerminalUpkeeps()
         applyRPGDerivedStats()
         if let sp = d["spawnPoint"] as? [NSNumber], sp.count == 3 {
             spawnPoint = (sp[0].intValue, sp[1].intValue, sp[2].intValue)
@@ -908,7 +953,10 @@ public final class Player: LivingEntity {
             spawnPoint = nil
         }
         spawnDim = inum(d["spawnDim"])
-        stats = (d["stats"] as? [String: NSNumber])?.mapValues { $0.doubleValue } ?? [:]
+        stats = (d["stats"] as? [String: NSNumber])?.reduce(into: [:]) { result, pair in
+            let value = pair.value.doubleValue
+            result[pair.key] = value.isFinite ? max(0, min(Double(RPG_MAX_COUNTER), value)) : 0
+        } ?? [:]
         if let fx = dec(d["effects"], [ActiveEffect].self) {
             for e in fx {
                 if let i = effects.firstIndex(where: { $0.id == e.id }) { effects[i] = e }
