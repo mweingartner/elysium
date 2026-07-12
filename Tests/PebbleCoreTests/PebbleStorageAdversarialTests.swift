@@ -169,14 +169,14 @@ final class PebbleStorageAdversarialTests: XCTestCase {
 
     func testPostSQLiteOpenIdentityRaceDoesNotLeakAnUntrackedHandle() throws {
         struct Identity: Hashable {
-            let device: UInt64
-            let inode: UInt64
+            let device: dev_t
+            let inode: ino_t
         }
 
         func identity(at path: String) -> Identity? {
             var info = stat()
             guard lstat(path, &info) == 0 else { return nil }
-            return Identity(device: UInt64(info.st_dev), inode: UInt64(info.st_ino))
+            return Identity(device: info.st_dev, inode: info.st_ino)
         }
 
         func openDescriptorCount(for identities: Set<Identity>) -> Int {
@@ -184,8 +184,8 @@ final class PebbleStorageAdversarialTests: XCTestCase {
             for descriptor in 0..<min(Int(getdtablesize()), 8_192) {
                 var info = stat()
                 if fstat(Int32(descriptor), &info) == 0,
-                   identities.contains(Identity(device: UInt64(info.st_dev),
-                                                inode: UInt64(info.st_ino))) {
+                   identities.contains(Identity(device: info.st_dev,
+                                                inode: info.st_ino)) {
                     count += 1
                 }
             }
@@ -473,25 +473,102 @@ final class PebbleStorageAdversarialTests: XCTestCase {
 
         let pipeline = try String(contentsOf: repository.appendingPathComponent(
             "scripts/pipeline.sh"), encoding: .utf8)
-        guard let pipelineBuild = pipeline.range(of: "swift build -c release"),
-              let pipelineVerifier = pipeline.range(
-                of: "verify-pebble-storage-release-surface.sh"),
-              let pipelineBinary = pipeline.range(of: "security-check-binary.sh") else {
-            return XCTFail("pipeline release-surface ordering markers missing")
+        XCTAssertTrue(pipeline.contains("set -euo pipefail"))
+        XCTAssertEqual(pipeline.components(
+            separatedBy: "scripts/installed-signoff-receipt.sh run-prepare-gates").count - 1, 1)
+        var pipelineCursor = pipeline.startIndex
+        for marker in ["scripts/installed-signoff-receipt.sh run-prepare-gates",
+                       "scripts/installed-signoff-receipt.sh verify-current",
+                       "PENDING_INSTALLED_SIGNOFF", "exit 75"] {
+            let range = try XCTUnwrap(pipeline.range(
+                of: marker, range: pipelineCursor..<pipeline.endIndex), marker)
+            pipelineCursor = range.upperBound
         }
-        XCTAssertLessThan(pipelineBuild.lowerBound, pipelineVerifier.lowerBound)
-        XCTAssertLessThan(pipelineVerifier.lowerBound, pipelineBinary.lowerBound)
+        for forbidden in ["swift package clean", "verify-pebble-storage-release-surface.sh",
+                          "security-check-binary.sh", "appkit-text-entry-integration.sh",
+                          "swift test", "pebsmoke", "pebble install", "RELEASE_HASH=",
+                          "automated-gates.json", "passedCount", "failedCount", "\"PASS\"",
+                          "PASS="] {
+            XCTAssertFalse(pipeline.contains(forbidden), "caller-owned pipeline input: \(forbidden)")
+        }
+
+        let releaseGate = try String(contentsOf: repository.appendingPathComponent(
+            "Sources/PebbleReleaseGate/ReleaseGate.swift"), encoding: .utf8)
+        let specsStart = try XCTUnwrap(releaseGate.range(of: "private func specs(releaseHash:"))
+        let specsEnd = try XCTUnwrap(releaseGate.range(
+            of: "func run(receiptDirectory:", range: specsStart.upperBound..<releaseGate.endIndex))
+        let specs = String(releaseGate[specsStart.lowerBound..<specsEnd.lowerBound])
+        let commandIDs = ["source-security", "release-build", "release-surface", "binary-scan",
+                          "appkit-text-entry", "xctest", "pebsmoke"]
+        XCTAssertEqual(specs.components(separatedBy: "commandID:").count - 1, 7)
+        var specsCursor = specs.startIndex
+        for id in commandIDs {
+            let range = try XCTUnwrap(specs.range(
+                of: "commandID: \"\(id)\"", range: specsCursor..<specs.endIndex), id)
+            specsCursor = range.upperBound
+        }
+        let prepareStart = try XCTUnwrap(releaseGate.range(of: "func run(receiptDirectory:"))
+        let prepareEnd = try XCTUnwrap(releaseGate.range(
+            of: "private func removeValidatedGeneratedReleaseIfPresent",
+            range: prepareStart.upperBound..<releaseGate.endIndex))
+        let prepare = String(releaseGate[prepareStart.lowerBound..<prepareEnd.lowerBound])
+        var prepareCursor = prepare.startIndex
+        for marker in ["dependencies.commandRunner().run(", "guard result.status == 0",
+                       "ClosedGateOutputParser.counts(",
+                       "DurablePrivateFileWriter.write(result.output", "entries.append(.init(",
+                       "entries.map(\\.commandID)", "gateEvidence.validate(in: automated)",
+                       "dependencies.installAndObserve(", "manifest.validate(",
+                       "StableFileHasher.revalidate(releaseIdentity)",
+                       "LiveProcessKernelIdentityReader.revalidate"] {
+            let range = try XCTUnwrap(prepare.range(
+                of: marker, range: prepareCursor..<prepare.endIndex), marker)
+            prepareCursor = range.upperBound
+        }
+        let dispatcherStart = try XCTUnwrap(releaseGate.range(of: "case .runPrepareGates:"))
+        let dispatcherEnd = try XCTUnwrap(releaseGate.range(
+            of: "case .verifyCurrent:", range: dispatcherStart.upperBound..<releaseGate.endIndex))
+        let dispatcher = String(releaseGate[dispatcherStart.lowerBound..<dispatcherEnd.lowerBound])
+        for marker in ["gate.restart(", "ReleaseGatePreparationWorkflow(",
+                       ".run(receiptDirectory:", "from: .preparing, to: .prepared"] {
+            XCTAssertTrue(dispatcher.contains(marker), marker)
+        }
+        let receipt = try String(contentsOf: repository.appendingPathComponent(
+            "scripts/installed-signoff-receipt.swift"), encoding: .utf8)
+        for marker in ["\"install\", \"--no-build\"", "StableFileHasher.capture(",
+                       "waitForBoundPebbleProcess("] {
+            XCTAssertTrue(receipt.contains(marker), marker)
+        }
 
         let prePush = try String(contentsOf: repository.appendingPathComponent(
             ".githooks/pre-push"), encoding: .utf8)
-        guard let hookBuild = prePush.range(of: "swift build -c release"),
+        guard let firstReceipt = prePush.range(of: "installed-signoff-receipt.sh prepush"),
+              let hookSecurity = prePush.range(of: "scripts/security-scan.sh",
+                                               range: firstReceipt.upperBound..<prePush.endIndex),
+              let hookBuild = prePush.range(of: "scripts/prepush-release-build.sh",
+                                            range: hookSecurity.upperBound..<prePush.endIndex),
               let hookVerifier = prePush.range(
-                of: "verify-pebble-storage-release-surface.sh"),
-              let hookTests = prePush.range(of: "stage \"xctest\"") else {
+                of: "verify-pebble-storage-release-surface.sh",
+                range: hookBuild.upperBound..<prePush.endIndex),
+              let hookBinary = prePush.range(of: "security-check-binary.sh",
+                                             range: hookVerifier.upperBound..<prePush.endIndex),
+              let hookAppKit = prePush.range(of: "appkit-text-entry-integration.sh",
+                                             range: hookBinary.upperBound..<prePush.endIndex),
+              let hookTests = prePush.range(of: "stage \"xctest\"",
+                                            range: hookAppKit.upperBound..<prePush.endIndex),
+              let hookPebsmoke = prePush.range(of: "swift run -c release pebsmoke",
+                                               range: hookTests.upperBound..<prePush.endIndex),
+              let secondReceipt = prePush.range(of: "installed-signoff-receipt.sh prepush",
+                                                range: hookPebsmoke.upperBound..<prePush.endIndex) else {
             return XCTFail("pre-push release-surface ordering markers missing")
         }
+        XCTAssertLessThan(firstReceipt.lowerBound, hookSecurity.lowerBound)
+        XCTAssertLessThan(hookSecurity.lowerBound, hookBuild.lowerBound)
         XCTAssertLessThan(hookBuild.lowerBound, hookVerifier.lowerBound)
-        XCTAssertLessThan(hookVerifier.lowerBound, hookTests.lowerBound)
+        XCTAssertLessThan(hookVerifier.lowerBound, hookBinary.lowerBound)
+        XCTAssertLessThan(hookBinary.lowerBound, hookAppKit.lowerBound)
+        XCTAssertLessThan(hookAppKit.lowerBound, hookTests.lowerBound)
+        XCTAssertLessThan(hookTests.lowerBound, hookPebsmoke.lowerBound)
+        XCTAssertLessThan(hookPebsmoke.lowerBound, secondReceipt.lowerBound)
     }
 
     func testCloseV2UndefinedSymbolParserRejectsSpoofsAndAdjacentNames() throws {

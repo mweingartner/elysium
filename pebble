@@ -70,18 +70,11 @@ verify_assets() {
 bundle() {
     say "Assembling $APP_NAME.app…"
     local stage="$REPO/dist/$APP_NAME.app"
-    rm -rf "$stage"
-    mkdir -p "$stage/Contents/MacOS" "$stage/Contents/Resources"
-    cp "$REPO/packaging/Info.plist"     "$stage/Contents/Info.plist"
-    cp "$REPO/packaging/AppIcon.icns"   "$stage/Contents/Resources/"
-    # explicit list — only ship the assets the app actually loads
-    cp "$REPO/packaging/logo.png"       "$stage/Contents/Resources/"
-    cp "$REPO/packaging/title-bg.png"   "$stage/Contents/Resources/"
-    cp "$REPO/packaging/"*.zip          "$stage/Contents/Resources/" 2>/dev/null || true
-    # the Faithful license must travel with the pack (their requirement #6)
-    cp "$REPO/packaging/FAITHFUL-LICENSE.txt" "$stage/Contents/Resources/" 2>/dev/null || true
-    cp "$REPO/.build/release/Pebble"    "$stage/Contents/MacOS/Pebble"
-    codesign --force --sign - "$stage" >/dev/null 2>&1 || warn "codesign failed — the app may trip Gatekeeper"
+    local manifest="$REPO/dist/package-manifest"
+    local expected_hash="${1:-}"
+    local args=(--executable "$REPO/.build/release/Pebble" --output "$stage" --manifest "$manifest")
+    [ -z "$expected_hash" ] || args+=(--expected-hash "$expected_hash")
+    "$REPO/scripts/package-app.sh" "${args[@]}"
 }
 
 deploy() {
@@ -108,9 +101,31 @@ link_cli() {
 
 cmd_install() {
     need_swift
+    local no_build=false expected_hash="" manifest_output=""
+    shift || true
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --no-build) no_build=true; shift ;;
+            --executable-hash) expected_hash="$2"; shift 2 ;;
+            --manifest-output) manifest_output="$2"; shift 2 ;;
+            *) die "unknown install argument: $1" ;;
+        esac
+    done
     verify_assets
-    build
-    bundle
+    if [ "$no_build" = false ]; then build; fi
+    [ -f "$REPO/.build/release/Pebble" ] && [ ! -L "$REPO/.build/release/Pebble" ] || \
+        die "release executable missing or unsafe"
+    local actual_hash
+    actual_hash="$(shasum -a 256 "$REPO/.build/release/Pebble" | awk '{print $1}')"
+    [ -z "$expected_hash" ] || [ "$actual_hash" = "$expected_hash" ] || \
+        die "release executable hash changed"
+    bundle "${expected_hash:-$actual_hash}"
+    if [ -n "$manifest_output" ]; then
+        [ ! -e "$manifest_output" ] || die "manifest output already exists"
+        umask 077
+        cp "$REPO/dist/package-manifest" "$manifest_output"
+        chmod 600 "$manifest_output"
+    fi
     deploy
     # drop the staging copy — Spotlight indexes it and you end up with
     # "two Pebbles" in Launchpad
@@ -130,7 +145,7 @@ cmd_run()  { open "$APP" 2>/dev/null || die "Pebble isn't installed yet — run:
 cmd_test() { need_swift; (cd "$REPO" && swift test && swift run -c release pebsmoke); }
 
 case "${1:-}" in
-    install) cmd_install ;;
+    install) cmd_install "$@" ;;
     update)  cmd_update ;;
     run)     cmd_run ;;
     test)    cmd_test ;;

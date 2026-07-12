@@ -47,10 +47,7 @@ final class TemplateTests: XCTestCase {
     }
 
     private func tempDB() -> SaveDB {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("pebble-template-tests-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return SaveDB(databaseURL: dir.appendingPathComponent("pebble.db"), migrateLegacy: false)
+        try! PersistenceTestSupport.makeDatabase(owner: self, label: "template")
     }
 
     private func makeLargeTemplate(name: String = "Large Template",

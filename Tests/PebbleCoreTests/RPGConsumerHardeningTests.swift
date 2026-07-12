@@ -314,7 +314,7 @@ final class RPGConsumerHardeningTests: XCTestCase {
     }
 
     func testServantUnprepareCycleCeilingDurabilityExhaustionAndRuleCleanup() throws {
-        let game = GameCore()
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "rpg-consumer")
         game.createWorld(name: "RPG lifecycle", seedText: "807", mode: GameMode.survival,
                          difficulty: 2)
         let player = game.player!

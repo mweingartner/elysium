@@ -14,7 +14,49 @@
 
 import Foundation
 import CoreFoundation
-import SQLite3
+import CryptoKit
+import PebbleStorage
+
+public struct RPGQuickSlotStorageSnapshot: Sendable, Equatable {
+    public let preferences: RPGQuickSlotPreferences
+    public let revision: UInt64
+    public let digest: LANV6SHA256Digest
+    public let migrationOriginDigest: LANV6SHA256Digest?
+    public let migrationOriginRevision: UInt64?
+}
+
+public struct RPGLegacyQuickSlotMigrationResult: Sendable, Equatable {
+    public let snapshot: RPGQuickSlotStorageSnapshot
+    public let sourceDigest: LANV6SHA256Digest
+    public let insertedDestination: Bool
+}
+
+public struct SaveDBPlayerRowDigest: Equatable, Sendable {
+    public let data: Data
+
+    public init(data: Data) throws {
+        guard data.count == 32 else { throw SaveDBPlayerRowError.invalidCandidate }
+        self.data = data
+    }
+}
+
+public struct SaveDBPlayerRowSnapshot {
+    public let worldID: String
+    public let data: [String: Any]
+    public let canonicalDigest: SaveDBPlayerRowDigest
+}
+
+public enum SaveDBPlayerRowExpectation: Equatable, Sendable {
+    case absent
+    case present(SaveDBPlayerRowDigest)
+}
+
+public enum SaveDBPlayerRowError: Error, Equatable, Sendable {
+    case invalidCandidate
+    case invalidStoredRow
+    case conflict
+    case persistenceFailed
+}
 
 public struct DimState: Codable {
     public var time: Int
@@ -188,7 +230,7 @@ public struct ChunkRecord {
 
 /// JSON can't carry NaN/Infinity (structured clone could) — scrub them so one
 /// blown-up velocity never poisons a whole chunk record
-private func sanitizeJSON(_ v: Any) -> Any {
+func sanitizeJSON(_ v: Any) -> Any {
     // JSONSerialization bridges both booleans and numbers through NSNumber.
     // Checking `as? Double` first coerces CFBoolean values to 1/0, which makes
     // Codable Bool fields fail to decode when the record is loaded again.
@@ -201,476 +243,834 @@ private func sanitizeJSON(_ v: Any) -> Any {
     return v
 }
 
-private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+func encodeWorldRecordJSON(_ record: WorldRecord) -> Data? {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    return try? encoder.encode(record)
+}
+
+// binary container: "VCK1" | u8 flags | [u32 nBlocks, u16[] LE, u32 nBiomes, u8[]]
+// | u32 jsonLen | JSON. These helpers intentionally know nothing about storage.
+func encodeLegacyVCK(_ record: ChunkRecord) -> Data? {
+    var data = Data("VCK1".utf8)
+    let hasBlocks = record.blocks != nil && record.biomes != nil
+    data.append(hasBlocks ? 1 : 0)
+    func appendU32(_ value: Int) -> Bool {
+        guard let exact = UInt32(exactly: value) else { return false }
+        var littleEndian = exact.littleEndian
+        withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        return true
+    }
+    if hasBlocks {
+        guard let blocks = record.blocks, let biomes = record.biomes,
+              appendU32(blocks.count) else { return nil }
+        for block in blocks {
+            var littleEndian = block.littleEndian
+            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        }
+        guard appendU32(biomes.count) else { return nil }
+        data.append(contentsOf: biomes)
+    }
+    var tail: [String: Any] = ["entities": record.entities.map(sanitizeJSON)]
+    if let blockEntities = record.blockEntities,
+       let encoded = try? JSONEncoder().encode(blockEntities),
+       let object = try? JSONSerialization.jsonObject(with: encoded) {
+        tail["blockEntities"] = object
+    }
+    guard let json = try? JSONSerialization.data(withJSONObject: tail),
+          appendU32(json.count) else { return nil }
+    data.append(json)
+    return data
+}
+
+private func legacyVCKLayout(_ data: Data, dimension: Int) -> (flags: UInt8, json: Range<Int>)? {
+    guard data.count >= 9, data.prefix(4) == Data("VCK1".utf8),
+          let dim = Dim(rawValue: dimension) else { return nil }
+    var offset = 4
+    let flags = data[offset]
+    offset += 1
+    guard flags & ~1 == 0 else { return nil }
+    func readU32() -> Int? {
+        guard offset <= data.count - 4 else { return nil }
+        let value = Int(data[offset])
+            | (Int(data[offset + 1]) << 8)
+            | (Int(data[offset + 2]) << 16)
+            | (Int(data[offset + 3]) << 24)
+        offset += 4
+        return value
+    }
+    if flags & 1 != 0 {
+        let info = dimInfo(dim)
+        let expectedBlocks = CHUNK_W * CHUNK_W * info.height
+        let expectedBiomes = 4 * 4 * ((info.height + 3) / 4)
+        guard let blockCount = readU32(), blockCount == expectedBlocks,
+              blockCount <= (data.count - offset) / 2 else { return nil }
+        offset += blockCount * 2
+        guard let biomeCount = readU32(), biomeCount == expectedBiomes,
+              biomeCount <= data.count - offset else { return nil }
+        offset += biomeCount
+    }
+    guard let jsonLength = readU32(), jsonLength <= data.count - offset else { return nil }
+    return (flags, offset..<(offset + jsonLength))
+}
+
+/// Registry-independent structural validation used by migration before registry boot.
+func validateLegacyVCKStructure(_ data: Data, dimension: Int) -> Bool {
+    guard let layout = legacyVCKLayout(data, dimension: dimension),
+          legacyMigrationJSONBudget(data.subdata(in: layout.json)) != nil,
+          let object = try? JSONSerialization.jsonObject(with: data.subdata(in: layout.json)),
+          object is [String: Any] else { return false }
+    return true
+}
+
+func decodeLegacyVCK(_ data: Data, key: String, worldId: String,
+                     dimension: Int, chunkX: Int, chunkZ: Int) -> ChunkRecord? {
+    guard let layout = legacyVCKLayout(data, dimension: dimension) else { return nil }
+    var record = ChunkRecord(key: key, worldId: worldId, dim: dimension,
+                             cx: chunkX, cz: chunkZ)
+    var offset = 5
+    func readU32() -> Int {
+        defer { offset += 4 }
+        return Int(data[offset]) | (Int(data[offset + 1]) << 8)
+            | (Int(data[offset + 2]) << 16) | (Int(data[offset + 3]) << 24)
+    }
+    if layout.flags & 1 != 0 {
+        let blockCount = readU32()
+        var blocks = [UInt16]()
+        blocks.reserveCapacity(blockCount)
+        for _ in 0..<blockCount {
+            blocks.append(UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8))
+            offset += 2
+        }
+        let maximumBlockID = UInt16(clamping: blockDefs.count)
+        for index in blocks.indices where (blocks[index] >> 4) >= maximumBlockID {
+            blocks[index] = 0
+        }
+        record.blocks = blocks
+        let biomeCount = readU32()
+        record.biomes = Array(data[offset..<(offset + biomeCount)])
+    }
+    guard let tail = try? JSONSerialization.jsonObject(
+        with: data.subdata(in: layout.json)) as? [String: Any] else { return nil }
+    record.entities = tail["entities"] as? [[String: Any]] ?? []
+    if let raw = tail["blockEntities"],
+       let encoded = try? JSONSerialization.data(withJSONObject: raw),
+       let blockEntities = try? JSONDecoder().decode([BlockEntityData].self, from: encoded) {
+        record.blockEntities = blockEntities
+    }
+    return record
+}
+
+public struct SaveDBOpenError: Error, Equatable, Sendable, CustomStringConvertible {
+    public enum Stage: String, Sendable {
+        case storageOpen, schemaVerification, legacyBackupRecoveryRequired
+        case migrationParent, migrationLease, migrationManifest
+        case migrationDecode, migrationImport, migrationBarrier
+        case migrationRename, migrationDirectorySync, cleanup
+    }
+
+    public enum Result: String, Sendable {
+        case unavailable, conflict, invalidSource, limitExceeded
+        case unsupported, durabilityFailure, cleanupFailed
+    }
+
+    public let stage: Stage
+    public let result: Result
+
+    public init(stage: Stage, result: Result) {
+        self.stage = stage
+        self.result = result
+    }
+
+    public var description: String {
+        "Pebble save open failed: \(stage.rawValue)/\(result.rawValue)"
+    }
+}
+
+#if DEBUG
+enum SaveDBPlayerCASBarrierStage: Sendable {
+    case beforeFacade
+    case afterCommit
+}
+
+final class SaveDBPlayerCASBarrier: @unchecked Sendable {
+    private let reached = DispatchSemaphore(value: 0)
+    private let resumed = DispatchSemaphore(value: 0)
+
+    func waitUntilReached() -> Bool {
+        reached.wait(timeout: .now() + 5) == .success
+    }
+
+    func resume() { resumed.signal() }
+
+    fileprivate func observe() {
+        reached.signal()
+        precondition(resumed.wait(timeout: .now() + 5) == .success,
+                     "player CAS test barrier timed out")
+    }
+}
+#endif
 
 public final class SaveDB {
-    private var db: OpaquePointer?
+    private struct OpenComponents {
+        let coordinator: PebbleStorageCoordinator
+        let storage: PebbleLegacyCoreStorage
+    }
+
+    private static let deferredCleanupQueue = DispatchQueue(
+        label: "pebble.storage.deferred-cleanup", qos: .utility)
+
+    private let coordinator: PebbleStorageCoordinator
+    private let storage: PebbleLegacyCoreStorage
+#if DEBUG
+    private static let rpgDecodeRankLock = NSLock()
+    private static var rpgDecodeRank = -1
+    private let playerCASProbeLock = NSLock()
+    private var playerCASRanks: [Int] = []
+    private var playerCASBarrier: (
+        stage: SaveDBPlayerCASBarrierStage, barrier: SaveDBPlayerCASBarrier
+    )?
+
+    static func _testLastRPGDecodeRank() -> Int {
+        rpgDecodeRankLock.lock(); defer { rpgDecodeRankLock.unlock() }
+        return rpgDecodeRank
+    }
+
+    func _testPlayerCASRanks() -> [Int] {
+        playerCASProbeLock.lock(); defer { playerCASProbeLock.unlock() }
+        return playerCASRanks
+    }
+
+    func _testArmPlayerCASBarrier(
+        _ stage: SaveDBPlayerCASBarrierStage
+    ) -> SaveDBPlayerCASBarrier {
+        playerCASProbeLock.lock(); defer { playerCASProbeLock.unlock() }
+        precondition(playerCASBarrier == nil, "player CAS test barrier already armed")
+        let barrier = SaveDBPlayerCASBarrier()
+        playerCASBarrier = (stage, barrier)
+        return barrier
+    }
+
+    private func resetPlayerCASRanks() {
+        playerCASProbeLock.lock(); playerCASRanks = []; playerCASProbeLock.unlock()
+    }
+
+    private func recordPlayerCASRank() {
+        playerCASProbeLock.lock()
+        playerCASRanks.append(pebbleCurrentLockRank())
+        playerCASProbeLock.unlock()
+    }
+
+    private func observePlayerCASBarrier(_ stage: SaveDBPlayerCASBarrierStage) {
+        playerCASProbeLock.lock()
+        let armed = playerCASBarrier
+        if armed?.stage == stage { playerCASBarrier = nil }
+        playerCASProbeLock.unlock()
+        if armed?.stage == stage { armed?.barrier.observe() }
+    }
+#endif
 
     public convenience init() {
-        self.init(databaseURL: vcSupportDir().appendingPathComponent("pebble.db"), migrateLegacy: true)
+        self.init(components: Self.compatibilityComponents(
+            databaseURL: vcSupportDir().appendingPathComponent("pebble.db"),
+            migrateLegacy: true))
     }
 
-    init(databaseURL url: URL, migrateLegacy: Bool) {
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-        guard sqlite3_open_v2(url.path, &db, flags, nil) == SQLITE_OK else {
-            fatalError("pebble.db could not be opened: \(String(cString: sqlite3_errmsg(db)))")
-        }
-        exec("PRAGMA journal_mode=WAL")
-        exec("PRAGMA synchronous=NORMAL")
-        exec("PRAGMA busy_timeout=5000")
-        exec("""
-        CREATE TABLE IF NOT EXISTS worlds(
-            id TEXT PRIMARY KEY, json TEXT NOT NULL, lastPlayed REAL NOT NULL DEFAULT 0)
-        """)
-        exec("""
-        CREATE TABLE IF NOT EXISTS chunks(
-            world TEXT NOT NULL, dim INTEGER NOT NULL, cx INTEGER NOT NULL, cz INTEGER NOT NULL,
-            data BLOB NOT NULL, PRIMARY KEY(world, dim, cx, cz)) WITHOUT ROWID
-        """)
-        exec("CREATE TABLE IF NOT EXISTS player(world TEXT PRIMARY KEY, json TEXT NOT NULL)")
-        exec("""
-        CREATE TABLE IF NOT EXISTS lan_player_resume(
-            hostWorld TEXT PRIMARY KEY, json TEXT NOT NULL, updated REAL NOT NULL DEFAULT 0)
-        """)
-        exec("""
-        CREATE TABLE IF NOT EXISTS lan_players(
-            world TEXT NOT NULL, playerID TEXT NOT NULL, json TEXT NOT NULL,
-            updated REAL NOT NULL DEFAULT 0, PRIMARY KEY(world, playerID))
-        """)
-        exec("CREATE TABLE IF NOT EXISTS advancements(world TEXT PRIMARY KEY, json TEXT NOT NULL)")
-        exec("""
-        CREATE TABLE IF NOT EXISTS templates(
-            name TEXT PRIMARY KEY, json TEXT NOT NULL, created REAL NOT NULL DEFAULT 0)
-        """)
-        migrateTemplateStoreSchema()
-        if migrateLegacy { migrateLegacySaves() }
+    convenience init(databaseURL: URL, migrateLegacy: Bool) {
+        self.init(components: Self.compatibilityComponents(
+            databaseURL: databaseURL, migrateLegacy: migrateLegacy))
     }
 
-    deinit { sqlite3_close(db) }
-
-    // ---- tiny statement helpers -------------------------------------------------
-    @discardableResult
-    private func exec(_ sql: String) -> Bool {
-        if sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK {
-            print("[saves] exec failed: \(String(cString: sqlite3_errmsg(db))) — \(sql.prefix(60))")
-            return false
-        }
-        return true
+    private init(components: OpenComponents) {
+        coordinator = components.coordinator
+        storage = components.storage
     }
 
-    /// prepare + bind + step a statement; row() is called once per result row.
-    /// returns false (and logs) on prepare/step errors — a silently failed
-    /// write (disk full, SQLITE_ERROR) is data loss
-    @discardableResult
-    private func run(_ sql: String, bind: ((OpaquePointer) -> Void)? = nil,
-                     row: ((OpaquePointer) -> Void)? = nil) -> Bool {
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
-            print("[saves] prepare failed: \(String(cString: sqlite3_errmsg(db))) — \(sql.prefix(60))")
-            return false
-        }
-        defer { sqlite3_finalize(stmt) }
-        bind?(stmt)
-        var rc = sqlite3_step(stmt)
-        while rc == SQLITE_ROW { row?(stmt); rc = sqlite3_step(stmt) }
-        if rc != SQLITE_DONE {
-            print("[saves] step failed (\(rc)): \(String(cString: sqlite3_errmsg(db))) — \(sql.prefix(60))")
-            return false
-        }
-        return true
+    public static func open(databaseURL: URL, migrateLegacy: Bool) throws -> SaveDB {
+        SaveDB(components: try openComponents(databaseURL: databaseURL,
+                                              migrateLegacy: migrateLegacy))
     }
 
-    private func bindText(_ stmt: OpaquePointer, _ idx: Int32, _ s: String) {
-        sqlite3_bind_text(stmt, idx, s, -1, SQLITE_TRANSIENT)
-    }
-    private func columnText(_ stmt: OpaquePointer, _ idx: Int32) -> String? {
-        sqlite3_column_text(stmt, idx).map { String(cString: $0) }
-    }
-    private func bindBlob(_ stmt: OpaquePointer, _ idx: Int32, _ data: Data) {
-        data.withUnsafeBytes { raw in
-            _ = sqlite3_bind_blob(stmt, idx, raw.baseAddress, Int32(raw.count), SQLITE_TRANSIENT)
+    private static func compatibilityComponents(databaseURL: URL,
+                                                migrateLegacy: Bool) -> OpenComponents {
+        do {
+            return try openComponents(databaseURL: databaseURL, migrateLegacy: migrateLegacy)
+        } catch {
+            fatalError("Pebble save database initialization failed")
         }
     }
-    private func columnBlob(_ stmt: OpaquePointer, _ idx: Int32) -> Data? {
-        guard let bytes = sqlite3_column_blob(stmt, idx) else { return nil }
-        return Data(bytes: bytes, count: Int(sqlite3_column_bytes(stmt, idx)))
+
+    private static func openComponents(databaseURL: URL,
+                                       migrateLegacy: Bool) throws -> OpenComponents {
+        if migrateLegacy {
+            return try withPebbleLockRank(.migrationSource) {
+                try openComponentsHoldingMigrationRank(databaseURL: databaseURL,
+                                                       migrateLegacy: true)
+            }
+        }
+        return try openComponentsHoldingMigrationRank(databaseURL: databaseURL,
+                                                      migrateLegacy: false)
     }
 
-    private func tableColumns(_ table: String) -> Set<String> {
-        var out = Set<String>()
-        run("PRAGMA table_info(\(table))", row: { stmt in
-            if let name = self.columnText(stmt, 1) { out.insert(name) }
-        })
-        return out
+    private static func openComponentsHoldingMigrationRank(databaseURL: URL,
+                                                            migrateLegacy: Bool) throws -> OpenComponents {
+        let preflight: LegacyMigrationPreflight?
+        if migrateLegacy {
+            do {
+                try FileManager.default.createDirectory(
+                    at: databaseURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true)
+            } catch {
+                throw SaveDBOpenError(stage: .migrationParent, result: .unavailable)
+            }
+            preflight = try LegacySaveMigration.preflight(databaseURL: databaseURL)
+        } else {
+            preflight = nil
+        }
+
+        let coordinator: PebbleStorageCoordinator
+        do {
+            coordinator = try withPebbleLockRank(.saveDB) {
+                try PebbleStorageCoordinator.open(databaseURL: databaseURL)
+            }
+        } catch {
+            throw mapStorageError(error, stage: .storageOpen)
+        }
+
+        do {
+            let storage = try withPebbleLockRank(.saveDB) {
+                let facade = try coordinator.legacyCore()
+                try facade.verifyCoreSchema()
+                return facade
+            }
+            guard let preflight else {
+                return OpenComponents(coordinator: coordinator, storage: storage)
+            }
+            let session = try LegacySaveMigration.run(
+                databaseURL: databaseURL, coordinator: coordinator,
+                storage: storage, preflight: preflight)
+            return OpenComponents(coordinator: session.coordinator, storage: session.storage)
+        } catch {
+            let mapped = (error as? SaveDBOpenError)
+                ?? mapStorageError(error, stage: .schemaVerification)
+            do {
+                try withPebbleLockRank(.saveDB) { try coordinator.close() }
+            } catch {
+                throw SaveDBOpenError(stage: mapped.stage, result: .cleanupFailed)
+            }
+            throw mapped
+        }
     }
 
-    private func migrateTemplateStoreSchema() {
-        let columns = tableColumns("templates")
-        if !columns.contains("format") { exec("ALTER TABLE templates ADD COLUMN format INTEGER NOT NULL DEFAULT 1") }
-        if !columns.contains("data") { exec("ALTER TABLE templates ADD COLUMN data BLOB") }
-        if !columns.contains("sizeX") { exec("ALTER TABLE templates ADD COLUMN sizeX INTEGER NOT NULL DEFAULT 0") }
-        if !columns.contains("sizeY") { exec("ALTER TABLE templates ADD COLUMN sizeY INTEGER NOT NULL DEFAULT 0") }
-        if !columns.contains("sizeZ") { exec("ALTER TABLE templates ADD COLUMN sizeZ INTEGER NOT NULL DEFAULT 0") }
-        if !columns.contains("blockCount") { exec("ALTER TABLE templates ADD COLUMN blockCount INTEGER NOT NULL DEFAULT 0") }
-        if !columns.contains("blockEntityCount") { exec("ALTER TABLE templates ADD COLUMN blockEntityCount INTEGER NOT NULL DEFAULT 0") }
-        if !columns.contains("dominantBlock") { exec("ALTER TABLE templates ADD COLUMN dominantBlock TEXT NOT NULL DEFAULT ''") }
-        if !columns.contains("dominantDisplay") { exec("ALTER TABLE templates ADD COLUMN dominantDisplay TEXT NOT NULL DEFAULT ''") }
+    private static func mapStorageError(_ error: Error,
+                                        stage: SaveDBOpenError.Stage) -> SaveDBOpenError {
+        let result: SaveDBOpenError.Result
+        switch error as? PebbleStorageError {
+        case .duplicateOpen: result = .conflict
+        case .invalidValue, .invalidStorageClass, .invalidUTF8,
+             .schemaMismatch, .schemaIntegrity: result = .invalidSource
+        case .limitExceeded: result = .limitExceeded
+        default: result = .unavailable
+        }
+        return SaveDBOpenError(stage: stage, result: result)
     }
 
-    // ---- worlds ---------------------------------------------------------------
+    public func close() throws {
+        try withPebbleLockRank(.saveDB) { try coordinator.close() }
+    }
+
+    deinit {
+        let retainedCoordinator = coordinator
+        Self.deferredCleanupQueue.async {
+            try? withPebbleLockRank(.saveDB) { try retainedCoordinator.close() }
+        }
+    }
+
+    @inline(__always)
+    private func withStorageRank<T>(_ body: () throws -> T) rethrows -> T {
+        try withPebbleLockRank(.saveDB, body)
+    }
+
     public func listWorlds() -> [WorldRecord] {
-        var out: [WorldRecord] = []
-        run("SELECT json FROM worlds", row: { stmt in
-            if let json = self.columnText(stmt, 0),
-               let rec = try? JSONDecoder().decode(WorldRecord.self, from: Data(json.utf8)) {
-                out.append(rec)
-            }
-        })
-        return out
-    }
-    public func getWorld(_ id: String) -> WorldRecord? {
-        var rec: WorldRecord?
-        run("SELECT json FROM worlds WHERE id=?", bind: { self.bindText($0, 1, id) }) { stmt in
-            if let json = self.columnText(stmt, 0) {
-                rec = try? JSONDecoder().decode(WorldRecord.self, from: Data(json.utf8))
-            }
-        }
-        return rec
-    }
-    public func putWorld(_ rec: WorldRecord) {
-        guard let data = try? JSONEncoder().encode(rec), let json = String(data: data, encoding: .utf8) else { return }
-        run("INSERT OR REPLACE INTO worlds(id, json, lastPlayed) VALUES(?,?,?)", bind: { stmt in
-            self.bindText(stmt, 1, rec.id)
-            self.bindText(stmt, 2, json)
-            sqlite3_bind_double(stmt, 3, rec.lastPlayed)
-        })
-    }
-    public func deleteWorld(_ id: String) {
-        exec("BEGIN")
-        for table in ["worlds", "chunks", "player", "advancements"] {
-            let col = table == "worlds" ? "id" : "world"
-            run("DELETE FROM \(table) WHERE \(col)=?", bind: { self.bindText($0, 1, id) })
-        }
-        exec("COMMIT")
+        guard let values = try? withStorageRank({ try storage.listLegacyWorldJSON() }) else { return [] }
+        return values.compactMap { try? JSONDecoder().decode(WorldRecord.self, from: Data($0.utf8)) }
     }
 
-    // ---- chunks ---------------------------------------------------------------
+    public func getWorld(_ id: String) -> WorldRecord? {
+        guard let json = try? withStorageRank({ try storage.getLegacyWorldJSON(id: id) }) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(WorldRecord.self, from: Data(json.utf8))
+    }
+
+    public func putWorld(_ record: WorldRecord) {
+        guard let encoded = encodeWorldRecordJSON(record),
+              let json = String(data: encoded, encoding: .utf8),
+              let row = try? PebbleWorldStorageRow(id: record.id, json: json,
+                                                   lastPlayed: record.lastPlayed) else { return }
+        try? withStorageRank { try storage.putWorldRow(row) }
+    }
+
+    public func deleteWorld(_ id: String) {
+        _ = try? withStorageRank { try storage.deleteWorld(id: id) }
+    }
+
+    private func decodeRPGQuickSlotRow(
+        _ row: PebbleRPGLocalPreferenceStorageRow
+    ) throws -> RPGQuickSlotStorageSnapshot {
+#if DEBUG
+        Self.rpgDecodeRankLock.lock()
+        Self.rpgDecodeRank = pebbleCurrentLockRank()
+        Self.rpgDecodeRankLock.unlock()
+        precondition(pebbleCurrentLockRank() == 0,
+                     "RPG preference decode must run after SaveDB rank release")
+#endif
+        let scope = try RPGLocalPreferenceScope.validatedLocalWorld(row.worldRecordID)
+        let preferences = try rpgDecodeQuickSlotPreferencesStoragePayload(row.slotsPayload)
+        let digest = try rpgQuickSlotDestinationDigest(
+            scope: scope, preferences: preferences, schemaVersion: row.schemaVersion,
+            revision: row.revision)
+        guard LANV6Crypto.constantTimeEqual32(digest.data, row.payloadDigest) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        let originDigest = try row.migrationOriginDigest.map(LANV6SHA256Digest.init(data:))
+        return RPGQuickSlotStorageSnapshot(
+            preferences: preferences, revision: row.revision, digest: digest,
+            migrationOriginDigest: originDigest,
+            migrationOriginRevision: row.migrationOriginRevision)
+    }
+
+    private func makeRPGQuickSlotRow(
+        worldRecordID: String, preferences: RPGQuickSlotPreferences, revision: UInt64,
+        migrationOriginDigest: LANV6SHA256Digest? = nil,
+        migrationOriginRevision: UInt64? = nil
+    ) throws -> PebbleRPGLocalPreferenceStorageRow {
+        let scope = try RPGLocalPreferenceScope.validatedLocalWorld(worldRecordID)
+        let payload = try rpgEncodeQuickSlotPreferencesStoragePayload(preferences)
+        let digest = try rpgQuickSlotDestinationDigest(
+            scope: scope, preferences: preferences, schemaVersion: 1, revision: revision)
+        return try PebbleRPGLocalPreferenceStorageRow(
+            worldRecordID: worldRecordID, schemaVersion: 1, revision: revision,
+            slotsPayload: payload, payloadDigest: digest.data,
+            migrationOriginDigest: migrationOriginDigest?.data,
+            migrationOriginRevision: migrationOriginRevision)
+    }
+
+    public func loadRPGQuickSlotPreferences(
+        worldRecordID: String
+    ) throws -> RPGQuickSlotStorageSnapshot? {
+        let row = try withStorageRank {
+            let facade = try coordinator.rpgLocalPreferences()
+            return try facade.read(worldRecordID: worldRecordID)
+        }
+        return try row.map(decodeRPGQuickSlotRow)
+    }
+
+    public func materializeRPGQuickSlotPreferences(
+        worldRecordID: String, defaults: RPGQuickSlotPreferences
+    ) throws -> RPGQuickSlotStorageSnapshot {
+        let candidate = try makeRPGQuickSlotRow(
+            worldRecordID: worldRecordID, preferences: defaults, revision: 1)
+        let row = try withStorageRank {
+            let facade = try coordinator.rpgLocalPreferences()
+            return try facade.materializeIfAbsent(candidate: candidate)
+        }
+        return try decodeRPGQuickSlotRow(row)
+    }
+
+    public func compareAndSwapRPGQuickSlotPreferences(
+        worldRecordID: String, expected: RPGQuickSlotStorageSnapshot,
+        candidatePreferences: RPGQuickSlotPreferences
+    ) throws -> RPGQuickSlotStorageSnapshot {
+        guard expected.revision < 1_000_000_000 else {
+            throw PebbleStorageError.limitExceeded
+        }
+        let candidate = try makeRPGQuickSlotRow(
+            worldRecordID: worldRecordID, preferences: candidatePreferences,
+            revision: expected.revision + 1,
+            migrationOriginDigest: expected.migrationOriginDigest,
+            migrationOriginRevision: expected.migrationOriginRevision)
+        let row = try withStorageRank {
+            let facade = try coordinator.rpgLocalPreferences()
+            return try facade.compareAndSwap(
+                expectedRevision: expected.revision, expectedDigest: expected.digest.data,
+                candidate: candidate)
+        }
+        return try decodeRPGQuickSlotRow(row)
+    }
+
+    public func materializeLegacyRPGQuickSlotPreferences(
+        worldRecordID: String, legacy: RPGQuickSlotPreferences
+    ) throws -> RPGLegacyQuickSlotMigrationResult {
+        let sourceDigest = try rpgLegacyQuickSlotSourceDigest(legacy)
+        let destination = try makeRPGQuickSlotRow(
+            worldRecordID: worldRecordID, preferences: legacy, revision: 1)
+        let receipt = try withStorageRank {
+            let facade = try coordinator.rpgLocalPreferences()
+            return try facade.materializeLegacy(
+                sourceDigest: sourceDigest.data, absentDestination: destination)
+        }
+        guard LANV6Crypto.constantTimeEqual32(
+            receipt.marker.sourceDigest, sourceDigest.data) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        let snapshot = try decodeRPGQuickSlotRow(receipt.preference)
+        guard let originDigest = snapshot.migrationOriginDigest,
+              LANV6Crypto.constantTimeEqual32(
+                originDigest.data, receipt.marker.destinationDigest),
+              snapshot.migrationOriginRevision == receipt.marker.destinationRevision else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        return RPGLegacyQuickSlotMigrationResult(
+            snapshot: snapshot, sourceDigest: sourceDigest,
+            insertedDestination: receipt.insertedDestination)
+    }
+
     public func chunkKey(_ worldId: String, _ dim: Int, _ cx: Int, _ cz: Int) -> String {
         "\(worldId):\(dim):\(cx),\(cz)"
     }
 
-    /// all saved chunk keys for a world — lets the streamer skip the DB for fresh chunks
     public func getChunkKeys(_ worldId: String) -> Set<String> {
-        var keys = Set<String>()
-        run("SELECT dim, cx, cz FROM chunks WHERE world=?", bind: { self.bindText($0, 1, worldId) }) { stmt in
-            let dim = Int(sqlite3_column_int(stmt, 0))
-            let cx = Int(sqlite3_column_int(stmt, 1))
-            let cz = Int(sqlite3_column_int(stmt, 2))
-            keys.insert(self.chunkKey(worldId, dim, cx, cz))
+        guard let rows = try? withStorageRank({ try storage.listChunkKeys(world: worldId) }) else {
+            return []
         }
-        return keys
+        return Set(rows.map {
+            chunkKey($0.world, Int($0.dimension), Int($0.chunkX), Int($0.chunkZ))
+        })
     }
 
     public func getChunk(_ worldId: String, _ dim: Int, _ cx: Int, _ cz: Int) -> ChunkRecord? {
-        var rec: ChunkRecord?
-        run("SELECT data FROM chunks WHERE world=? AND dim=? AND cx=? AND cz=?", bind: { stmt in
-            self.bindText(stmt, 1, worldId)
-            sqlite3_bind_int(stmt, 2, Int32(dim))
-            sqlite3_bind_int(stmt, 3, Int32(cx))
-            sqlite3_bind_int(stmt, 4, Int32(cz))
-        }) { stmt in
-            if let bytes = sqlite3_column_blob(stmt, 0) {
-                let count = Int(sqlite3_column_bytes(stmt, 0))
-                let data = Data(bytes: bytes, count: count)
-                rec = self.decodeChunk(data, key: self.chunkKey(worldId, dim, cx, cz),
-                                       worldId: worldId, dim: dim, cx: cx, cz: cz)
-            }
+        guard let dimension = Int32(exactly: dim), let chunkX = Int32(exactly: cx),
+              let chunkZ = Int32(exactly: cz),
+              let key = try? PebbleChunkStorageKey(world: worldId, dimension: dimension,
+                                                   chunkX: chunkX, chunkZ: chunkZ),
+              let blob = try? withStorageRank({ try storage.getChunkBlob(key: key) }) else {
+            return nil
         }
-        return rec
+        return decodeLegacyVCK(blob, key: chunkKey(worldId, dim, cx, cz), worldId: worldId,
+                               dimension: dim, chunkX: cx, chunkZ: cz)
     }
 
-    /// batch write — one transaction, mirrors the once-per-second save tick.
-    /// false = the batch did not land (rolled back); callers must re-mark the
-    /// chunks dirty or the edits are silently lost
     @discardableResult
     public func putChunks(_ records: [ChunkRecord]) -> Bool {
-        guard !records.isEmpty else { return true }
-        guard exec("BEGIN") else { return false }
-        var ok = true
-        for r in records {
-            guard let data = encodeChunk(r) else { ok = false; continue }
-            let wrote = run("INSERT OR REPLACE INTO chunks(world, dim, cx, cz, data) VALUES(?,?,?,?,?)", bind: { stmt in
-                self.bindText(stmt, 1, r.worldId)
-                sqlite3_bind_int(stmt, 2, Int32(r.dim))
-                sqlite3_bind_int(stmt, 3, Int32(r.cx))
-                sqlite3_bind_int(stmt, 4, Int32(r.cz))
-                data.withUnsafeBytes { raw in
-                    _ = sqlite3_bind_blob(stmt, 5, raw.baseAddress, Int32(raw.count), SQLITE_TRANSIENT)
-                }
-            })
-            ok = ok && wrote
+        var rows: [PebbleChunkStorageRow] = []
+        rows.reserveCapacity(records.count)
+        for record in records {
+            guard let dimension = Int32(exactly: record.dim),
+                  let chunkX = Int32(exactly: record.cx),
+                  let chunkZ = Int32(exactly: record.cz),
+                  let data = encodeLegacyVCK(record),
+                  let key = try? PebbleChunkStorageKey(world: record.worldId,
+                                                       dimension: dimension,
+                                                       chunkX: chunkX, chunkZ: chunkZ),
+                  let row = try? PebbleChunkStorageRow(key: key, data: data) else { return false }
+            rows.append(row)
         }
-        if ok {
-            ok = exec("COMMIT")
-        } else {
-            exec("ROLLBACK")
-        }
-        return ok
+        return (try? withStorageRank { _ = try storage.putChunkBlobRows(rows) }) != nil
     }
 
-    // binary container: "VCK1" | u8 flags | [u32 nBlocks, u16[] LE, u32 nBiomes, u8[]] | u32 jsonLen, json
-    private func encodeChunk(_ r: ChunkRecord) -> Data? {
-        var data = Data("VCK1".utf8)
-        let hasBlocks = r.blocks != nil && r.biomes != nil
-        data.append(hasBlocks ? 1 : 0)
-        func putU32(_ v: Int) {
-            var le = UInt32(v).littleEndian
-            withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
+    func decodeChunk(_ data: Data, key: String, worldId: String,
+                     dim: Int, cx: Int, cz: Int) -> ChunkRecord? {
+        decodeLegacyVCK(data, key: key, worldId: worldId,
+                        dimension: dim, chunkX: cx, chunkZ: cz)
+    }
+
+    private func decodeJSONObject(_ json: String) -> [String: Any]? {
+        (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
+    }
+
+    private func encodeJSONObject(_ object: Any) -> String? {
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: sanitizeJSON(object), options: [.sortedKeys]) else {
+            return nil
         }
-        if hasBlocks {
-            let blocks = r.blocks!, biomes = r.biomes!
-            putU32(blocks.count)
-            if !blocks.isEmpty {
-                blocks.withUnsafeBufferPointer { bp in
-                    bp.baseAddress!.withMemoryRebound(to: UInt8.self, capacity: blocks.count * 2) { p in
-                        data.append(p, count: blocks.count * 2)  // host LE on all Apple silicon/x86
-                    }
-                }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func checkedPlayerRowDigest(
+        _ row: PebblePlayerJSONStorageRow
+    ) throws -> SaveDBPlayerRowDigest {
+        var digest = SHA256()
+        digest.update(data: Data("Pebble/player-row/exact-json/v1\0".utf8))
+        let worldBytes = Data(row.world.utf8)
+        digest.update(data: Data([
+            UInt8(truncatingIfNeeded: UInt32(worldBytes.count) >> 24),
+            UInt8(truncatingIfNeeded: UInt32(worldBytes.count) >> 16),
+            UInt8(truncatingIfNeeded: UInt32(worldBytes.count) >> 8),
+            UInt8(truncatingIfNeeded: UInt32(worldBytes.count)),
+        ]))
+        digest.update(data: worldBytes)
+        let jsonBytes = Data(row.json.utf8)
+        let jsonCount = UInt64(jsonBytes.count)
+        digest.update(data: Data((0..<8).reversed().map {
+            UInt8(truncatingIfNeeded: jsonCount >> UInt64($0 * 8))
+        }))
+        digest.update(data: jsonBytes)
+        return try SaveDBPlayerRowDigest(data: Data(digest.finalize()))
+    }
+
+    private func checkedPlayerSnapshot(
+        _ row: PebblePlayerJSONStorageRow
+    ) throws -> SaveDBPlayerRowSnapshot {
+#if DEBUG
+        precondition(pebbleCurrentLockRank() == 0)
+#endif
+        guard let decoded = decodeJSONObject(row.json) else {
+            throw SaveDBPlayerRowError.invalidStoredRow
+        }
+        return SaveDBPlayerRowSnapshot(
+            worldID: row.world, data: decoded,
+            canonicalDigest: try checkedPlayerRowDigest(row))
+    }
+
+    private func mapPlayerRowStorageError(_ error: Error) -> SaveDBPlayerRowError {
+        if let transaction = error as? PebbleStorageTransactionFailure {
+            guard transaction.rollback == nil, transaction.terminal == nil else {
+                return .persistenceFailed
             }
-            putU32(biomes.count)
-            data.append(contentsOf: biomes)
+            return mapPlayerRowStorageError(transaction.primary)
         }
-        var tail: [String: Any] = ["entities": r.entities.map(sanitizeJSON)]
-        if let bes = r.blockEntities,
-           let enc = try? JSONEncoder().encode(bes),
-           let obj = try? JSONSerialization.jsonObject(with: enc) {
-            tail["blockEntities"] = obj
+        if let statement = error as? PebbleStorageStatementFailure {
+            _ = statement
+            return .persistenceFailed
         }
-        guard let json = try? JSONSerialization.data(withJSONObject: tail) else { return nil }
-        putU32(json.count)
-        data.append(json)
-        return data
+        switch error as? PebbleStorageError {
+        case .invalidValue, .invalidStorageClass, .invalidUTF8, .limitExceeded:
+            return .invalidStoredRow
+        default:
+            return .persistenceFailed
+        }
     }
 
-    func decodeChunk(_ data: Data, key: String, worldId: String, dim: Int, cx: Int, cz: Int) -> ChunkRecord? {
-        var rec = ChunkRecord(key: key, worldId: worldId, dim: dim, cx: cx, cz: cz)
-        var off = 0
-        func readU32() -> Int? {
-            guard off + 4 <= data.count else { return nil }
-            let v = Int(data[off])
-                | (Int(data[off + 1]) << 8)
-                | (Int(data[off + 2]) << 16)
-                | (Int(data[off + 3]) << 24)
-            off += 4
-            return v
+    public func getPlayerChecked(_ worldId: String) throws -> SaveDBPlayerRowSnapshot? {
+#if DEBUG
+        precondition(pebbleCurrentLockRank() == 0)
+#endif
+        guard (try? PebblePlayerJSONStorageRow(world: worldId, json: "{}")) != nil else {
+            throw SaveDBPlayerRowError.invalidCandidate
         }
-        guard data.count >= 5, data.prefix(4) == Data("VCK1".utf8) else { return nil }
-        off = 4
-        let flags = data[off]; off += 1
-        guard flags & ~1 == 0 else { return nil }
-        guard let dimCase = Dim(rawValue: dim) else { return nil }
-        let info = dimInfo(dimCase)
-        let expectedBlocks = CHUNK_W * CHUNK_W * info.height
-        let expectedBiomes = 4 * 4 * ((info.height + 3) / 4)
-        if flags & 1 != 0 {
-            guard let nBlocks = readU32(), nBlocks == expectedBlocks,
-                  off + nBlocks * 2 <= data.count else { return nil }
-            var blocks = [UInt16](repeating: 0, count: nBlocks)
-            data.subdata(in: off..<off + nBlocks * 2).withUnsafeBytes { raw in
-                blocks.withUnsafeMutableBytes { dst in
-                    dst.copyMemory(from: raw)
-                }
+        let row: PebblePlayerJSONStorageRow?
+        do {
+            row = try withStorageRank { try storage.getPlayerJSON(world: worldId) }
+        } catch {
+            throw mapPlayerRowStorageError(error)
+        }
+#if DEBUG
+        precondition(pebbleCurrentLockRank() == 0)
+#endif
+        guard let row else { return nil }
+        do {
+            return try checkedPlayerSnapshot(row)
+        } catch let error as SaveDBPlayerRowError {
+            throw error
+        } catch {
+            throw SaveDBPlayerRowError.invalidStoredRow
+        }
+    }
+
+    public func compareAndSwapPlayerChecked(
+        _ worldId: String, expected: SaveDBPlayerRowExpectation,
+        candidate: [String: Any]
+    ) throws -> SaveDBPlayerRowSnapshot {
+#if DEBUG
+        precondition(pebbleCurrentLockRank() == 0)
+        resetPlayerCASRanks()
+        recordPlayerCASRank()
+#endif
+        guard let json = encodeJSONObject(candidate) else {
+            throw SaveDBPlayerRowError.invalidCandidate
+        }
+        let row: PebblePlayerJSONStorageRow
+        do {
+            row = try PebblePlayerJSONStorageRow(world: worldId, json: json)
+        } catch {
+            throw SaveDBPlayerRowError.invalidCandidate
+        }
+#if DEBUG
+        recordPlayerCASRank()
+        observePlayerCASBarrier(.beforeFacade)
+#endif
+        let storageExpectation: PebblePlayerJSONExpectedRowState
+        switch expected {
+        case .absent:
+            storageExpectation = .absent
+        case let .present(digest):
+            do { storageExpectation = .present(try PebblePlayerJSONRowDigest(data: digest.data)) }
+            catch { throw SaveDBPlayerRowError.invalidCandidate }
+        }
+        let result: PebblePlayerJSONCompareAndSwapResult
+        do {
+            result = try withStorageRank {
+#if DEBUG
+                preconditionPebbleLockRank(.saveDB)
+                recordPlayerCASRank()
+#endif
+                return try storage.compareAndSwapPlayerJSON(
+                    expected: storageExpectation, candidate: row)
             }
-            off += nBlocks * 2
-            // clamp corrupted ids — blockDefs[cell >> 4] is indexed unchecked
-            // in hot paths, and one bad blob must not crash the game
-            let maxId = UInt16(blockDefs.count)
-            for i in 0..<blocks.count where (blocks[i] >> 4) >= maxId { blocks[i] = 0 }
-            rec.blocks = blocks
-            guard let nBiomes = readU32(), nBiomes == expectedBiomes,
-                  off + nBiomes <= data.count else { return nil }
-            rec.biomes = [UInt8](data.subdata(in: off..<off + nBiomes))
-            off += nBiomes
+        } catch {
+            throw mapPlayerRowStorageError(error)
         }
-        guard let jsonLen = readU32(), off + jsonLen <= data.count,
-              let tail = try? JSONSerialization.jsonObject(with: data.subdata(in: off..<off + jsonLen)) as? [String: Any]
-        else { return nil }
-        rec.entities = tail["entities"] as? [[String: Any]] ?? []
-        if let rawBE = tail["blockEntities"],
-           let bytes = try? JSONSerialization.data(withJSONObject: rawBE),
-           let bes = try? JSONDecoder().decode([BlockEntityData].self, from: bytes) {
-            rec.blockEntities = bes
+#if DEBUG
+        precondition(pebbleCurrentLockRank() == 0)
+        observePlayerCASBarrier(.afterCommit)
+        recordPlayerCASRank()
+#endif
+        switch result {
+        case .conflict:
+            throw SaveDBPlayerRowError.conflict
+        case let .committed(stored):
+            guard stored == row else { throw SaveDBPlayerRowError.persistenceFailed }
+            do { return try checkedPlayerSnapshot(stored) }
+            catch { throw SaveDBPlayerRowError.persistenceFailed }
         }
-        return rec
     }
 
-    // ---- player / advancements --------------------------------------------------
     public func getPlayer(_ worldId: String) -> [String: Any]? {
-        var out: [String: Any]?
-        run("SELECT json FROM player WHERE world=?", bind: { self.bindText($0, 1, worldId) }) { stmt in
-            if let json = self.columnText(stmt, 0) {
-                out = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
-            }
-        }
-        return out
+        guard let json = try? withStorageRank({ try storage.getLegacyPlayerJSON(world: worldId) })
+        else { return nil }
+        return decodeJSONObject(json)
     }
+
     public func putPlayer(_ worldId: String, _ data: [String: Any]) {
-        guard let bytes = try? JSONSerialization.data(withJSONObject: sanitizeJSON(data)),
-              let json = String(data: bytes, encoding: .utf8) else { return }
-        run("INSERT OR REPLACE INTO player(world, json) VALUES(?,?)", bind: { stmt in
-            self.bindText(stmt, 1, worldId)
-            self.bindText(stmt, 2, json)
-        })
+        guard let json = encodeJSONObject(data),
+              let row = try? PebblePlayerJSONStorageRow(world: worldId, json: json) else { return }
+        try? withStorageRank { try storage.putPlayerJSON(row) }
     }
+
     public func getLANClientResume(_ hostWorldKey: String) -> [String: Any]? {
-        var out: [String: Any]?
-        run("SELECT json FROM lan_player_resume WHERE hostWorld=?", bind: { self.bindText($0, 1, hostWorldKey) }) { stmt in
-            if let json = self.columnText(stmt, 0) {
-                out = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
-            }
-        }
-        return out
+        guard let json = try? withStorageRank({
+            try storage.getLegacyLANClientResumeJSON(hostWorld: hostWorldKey)
+        }) else { return nil }
+        return decodeJSONObject(json)
     }
+
+    private static func normalizedResumeUpdated(_ value: Any?, now: () -> Double) -> Double {
+        if let number = value as? NSNumber {
+            let candidate = number.doubleValue
+            if candidate.isNaN { return 0 }
+            if candidate == .infinity { return .greatestFiniteMagnitude }
+            if candidate == -.infinity { return -.greatestFiniteMagnitude }
+            return candidate
+        }
+        let candidate = now()
+        return candidate.isFinite ? candidate : 0
+    }
+
     public func putLANClientResume(_ hostWorldKey: String, _ data: [String: Any]) {
-        guard let bytes = try? JSONSerialization.data(withJSONObject: sanitizeJSON(data)),
-              let json = String(data: bytes, encoding: .utf8) else { return }
-        let updatedNumber = data["updated"] as? NSNumber
-        let updatedDouble = data["updated"] as? Double
-        let updated = updatedNumber?.doubleValue ?? updatedDouble ?? Date().timeIntervalSince1970 * 1000
-        run("INSERT OR REPLACE INTO lan_player_resume(hostWorld, json, updated) VALUES(?,?,?)", bind: { stmt in
-            self.bindText(stmt, 1, hostWorldKey)
-            self.bindText(stmt, 2, json)
-            sqlite3_bind_double(stmt, 3, updated)
-        })
+        guard let json = encodeJSONObject(data) else { return }
+        let updated = Self.normalizedResumeUpdated(data["updated"]) {
+            Date().timeIntervalSince1970 * 1000
+        }
+        guard let row = try? PebbleLANClientResumeStorageRow(
+            hostWorld: hostWorldKey, json: json, updated: updated) else { return }
+        try? withStorageRank { try storage.putLANClientResumeJSON(row) }
     }
+
     public func deleteLANClientResume(_ hostWorldKey: String) {
-        run("DELETE FROM lan_player_resume WHERE hostWorld=?", bind: { self.bindText($0, 1, hostWorldKey) })
+        _ = try? withStorageRank { try storage.deleteLANClientResumeJSON(hostWorld: hostWorldKey) }
     }
 
-    // ---- LAN host-side per-guest player records ---------------------------------
     public func getLANPlayer(world: String, playerID: String) -> [String: Any]? {
-        var out: [String: Any]?
-        run("SELECT json FROM lan_players WHERE world=? AND playerID=?", bind: { stmt in
-            self.bindText(stmt, 1, world)
-            self.bindText(stmt, 2, playerID)
-        }) { stmt in
-            if let json = self.columnText(stmt, 0) {
-                out = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
-            }
-        }
-        return out
-    }
-    public func putLANPlayer(world: String, playerID: String, _ data: [String: Any]) {
-        guard let bytes = try? JSONSerialization.data(withJSONObject: sanitizeJSON(data)),
-              let json = String(data: bytes, encoding: .utf8) else { return }
-        run("INSERT OR REPLACE INTO lan_players(world, playerID, json, updated) VALUES(?,?,?,?)", bind: { stmt in
-            self.bindText(stmt, 1, world)
-            self.bindText(stmt, 2, playerID)
-            self.bindText(stmt, 3, json)
-            sqlite3_bind_double(stmt, 4, Date().timeIntervalSince1970 * 1000)
-        })
-    }
-    public func listLANPlayers(world: String) -> [(playerID: String, data: [String: Any])] {
-        var out: [(playerID: String, data: [String: Any])] = []
-        run("SELECT playerID, json FROM lan_players WHERE world=? ORDER BY playerID", bind: { stmt in
-            self.bindText(stmt, 1, world)
-        }) { stmt in
-            guard let playerID = self.columnText(stmt, 0), let json = self.columnText(stmt, 1),
-                  let obj = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
-            else { return }
-            out.append((playerID: playerID, data: obj))
-        }
-        return out
-    }
-    public func deleteLANPlayer(world: String, playerID: String) {
-        run("DELETE FROM lan_players WHERE world=? AND playerID=?", bind: { stmt in
-            self.bindText(stmt, 1, world)
-            self.bindText(stmt, 2, playerID)
-        })
+        guard let json = try? withStorageRank({
+            try storage.getLegacyLANPlayerJSON(world: world, playerID: playerID)
+        }) else { return nil }
+        return decodeJSONObject(json)
     }
 
-    /// test-only: writes an arbitrary (possibly malformed) JSON string directly
-    /// into lan_players, bypassing JSONSerialization, so tests can verify the
-    /// readers fail closed on a corrupted row instead of crashing
-    func execRawLANPlayerInsertForTesting(world: String, playerID: String, json: String) {
-        run("INSERT OR REPLACE INTO lan_players(world, playerID, json, updated) VALUES(?,?,?,?)", bind: { stmt in
-            self.bindText(stmt, 1, world)
-            self.bindText(stmt, 2, playerID)
-            self.bindText(stmt, 3, json)
-            sqlite3_bind_double(stmt, 4, Date().timeIntervalSince1970 * 1000)
-        })
+    public func putLANPlayer(world: String, playerID: String, _ data: [String: Any]) {
+        guard let json = encodeJSONObject(data),
+              let row = try? PebbleLANPlayerStorageRow(
+                world: world, playerID: playerID, json: json,
+                updated: Date().timeIntervalSince1970 * 1000) else { return }
+        try? withStorageRank { try storage.putLANPlayerJSON(row) }
     }
+
+    public func listLANPlayers(world: String) -> [(playerID: String, data: [String: Any])] {
+        guard let rows = try? withStorageRank({ try storage.listLegacyLANPlayerJSON(world: world) })
+        else { return [] }
+        return rows.compactMap { row in
+            decodeJSONObject(row.json).map { (playerID: row.playerID, data: $0) }
+        }
+    }
+
+    public func deleteLANPlayer(world: String, playerID: String) {
+        _ = try? withStorageRank {
+            try storage.deleteLANPlayerJSON(world: world, playerID: playerID)
+        }
+    }
+
+#if DEBUG
+    func execRawLANPlayerInsertForTesting(world: String, playerID: String, json: String) {
+        guard let row = try? PebbleLANPlayerStorageRow(
+            world: world, playerID: playerID, json: json,
+            updated: Date().timeIntervalSince1970 * 1000) else { return }
+        try? withStorageRank { try storage.putLANPlayerJSON(row) }
+    }
+
+    static func _testNormalizeResumeUpdated(_ value: Any?, now: Double) -> Double {
+        normalizedResumeUpdated(value) { now }
+    }
+
+    static func _testMapStorageError(_ error: PebbleStorageError,
+                                     stage: SaveDBOpenError.Stage) -> SaveDBOpenError {
+        mapStorageError(error, stage: stage)
+    }
+#endif
 
     public func getAdvancements(_ worldId: String) -> [String]? {
-        var out: [String]?
-        run("SELECT json FROM advancements WHERE world=?", bind: { self.bindText($0, 1, worldId) }) { stmt in
-            if let json = self.columnText(stmt, 0) {
-                out = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String]
-            }
-        }
-        return out
-    }
-    public func putAdvancements(_ worldId: String, _ ids: [String]) {
-        guard let bytes = try? JSONSerialization.data(withJSONObject: ids),
-              let json = String(data: bytes, encoding: .utf8) else { return }
-        run("INSERT OR REPLACE INTO advancements(world, json) VALUES(?,?)", bind: { stmt in
-            self.bindText(stmt, 1, worldId)
-            self.bindText(stmt, 2, json)
-        })
+        guard let json = try? withStorageRank({ try storage.getLegacyAdvancementJSON(world: worldId) })
+        else { return nil }
+        return (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String]
     }
 
-    // ---- object templates -------------------------------------------------------
+    public func putAdvancements(_ worldId: String, _ ids: [String]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: ids),
+              let json = String(data: data, encoding: .utf8),
+              let row = try? PebbleAdvancementStorageRow(world: worldId, json: json) else { return }
+        try? withStorageRank { try storage.putAdvancementJSON(row) }
+    }
+
     public func listTemplates() -> [String] {
-        var out: [String] = []
-        run("SELECT name FROM templates ORDER BY name", row: { stmt in
-            if let name = self.columnText(stmt, 0) { out.append(name) }
-        })
-        return out
+        (try? withStorageRank { try storage.listLegacyTemplateNames() }) ?? []
     }
 
     public func listTemplateSummaries() -> [ObjectTemplateSummary] {
-        var out: [ObjectTemplateSummary] = []
-        run("""
-            SELECT name, sizeX, sizeY, sizeZ, blockCount, blockEntityCount, dominantBlock, dominantDisplay
-            FROM templates ORDER BY name
-            """, row: { stmt in
-            guard let name = self.columnText(stmt, 0) else { return }
-            let blockCount = Int(sqlite3_column_int(stmt, 4))
-            let dominantBlock = self.columnText(stmt, 6) ?? ""
-            let dominantDisplay = self.columnText(stmt, 7) ?? ""
-            if blockCount > 0, !dominantBlock.isEmpty, !dominantDisplay.isEmpty {
-                out.append(ObjectTemplateSummary(
-                    name: name,
-                    sizeX: Int(sqlite3_column_int(stmt, 1)),
-                    sizeY: Int(sqlite3_column_int(stmt, 2)),
-                    sizeZ: Int(sqlite3_column_int(stmt, 3)),
-                    blockCount: blockCount,
-                    blockEntityCount: Int(sqlite3_column_int(stmt, 5)),
+        guard let candidates = try? withStorageRank({
+            try storage.listLegacyTemplateSummaryCandidates()
+        }) else { return [] }
+        var output: [ObjectTemplateSummary] = []
+        output.reserveCapacity(candidates.count)
+        for candidate in candidates {
+            if let sizeX = candidate.sizeX, let sizeY = candidate.sizeY,
+               let sizeZ = candidate.sizeZ, let blockCount = candidate.blockCount,
+               let blockEntityCount = candidate.blockEntityCount,
+               let dominantBlock = candidate.dominantBlock,
+               let dominantDisplay = candidate.dominantDisplay,
+               blockCount > 0, !dominantBlock.isEmpty, !dominantDisplay.isEmpty {
+                output.append(ObjectTemplateSummary(
+                    name: candidate.name, sizeX: Int(sizeX), sizeY: Int(sizeY),
+                    sizeZ: Int(sizeZ), blockCount: Int(blockCount),
+                    blockEntityCount: Int(blockEntityCount),
                     dominantBlockName: dominantBlock,
                     dominantBlockDisplayName: dominantDisplay))
-            } else if let template = try? self.getTemplate(named: name),
-                      let summary = try? summarizeObjectTemplate(template) {
-                out.append(summary)
+            } else if let value = try? getTemplate(named: candidate.name),
+                      let summary = try? summarizeObjectTemplate(value) {
+                output.append(summary)
             }
-        })
-        return out
+        }
+        return output
     }
 
     public func getTemplate(named rawName: String) throws -> ObjectTemplate? {
         guard let name = normalizedTemplateName(rawName) else { throw TemplateError.invalidName }
-        var format = 1
-        var blob: Data?
-        var json: String?
-        run("SELECT format, data, json FROM templates WHERE name=?", bind: { self.bindText($0, 1, name) }, row: { stmt in
-            format = Int(sqlite3_column_int(stmt, 0))
-            blob = self.columnBlob(stmt, 1)
-            json = self.columnText(stmt, 2)
-        })
-        if format >= 2, let blob, !blob.isEmpty {
-            return try decodeObjectTemplate(blob)
+        guard let content = try? withStorageRank({
+            try storage.getLegacyTemplateContent(name: name)
+        }) else { return nil }
+        if (content.format ?? 1) >= 2, let data = content.data, !data.isEmpty {
+            return try decodeObjectTemplate(data)
         }
-        guard let json, !json.isEmpty else { return nil }
+        guard let json = content.json, !json.isEmpty else { return nil }
         return try decodeObjectTemplate(Data(json.utf8))
     }
 
@@ -681,83 +1081,28 @@ public final class SaveDB {
         normalized.name = name
         let data = try encodeObjectTemplate(normalized)
         let summary = try summarizeObjectTemplate(normalized)
-        return run("""
-            INSERT OR REPLACE INTO templates(
-                name, json, created, format, data, sizeX, sizeY, sizeZ,
-                blockCount, blockEntityCount, dominantBlock, dominantDisplay)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-            """, bind: { stmt in
-            self.bindText(stmt, 1, name)
-            self.bindText(stmt, 2, "")
-            sqlite3_bind_double(stmt, 3, Date().timeIntervalSince1970 * 1000)
-            sqlite3_bind_int(stmt, 4, 2)
-            self.bindBlob(stmt, 5, data)
-            sqlite3_bind_int(stmt, 6, Int32(summary.sizeX))
-            sqlite3_bind_int(stmt, 7, Int32(summary.sizeY))
-            sqlite3_bind_int(stmt, 8, Int32(summary.sizeZ))
-            sqlite3_bind_int(stmt, 9, Int32(summary.blockCount))
-            sqlite3_bind_int(stmt, 10, Int32(summary.blockEntityCount))
-            self.bindText(stmt, 11, summary.dominantBlockName)
-            self.bindText(stmt, 12, summary.dominantBlockDisplayName)
-        })
+        guard let sizeX = Int32(exactly: summary.sizeX),
+              let sizeY = Int32(exactly: summary.sizeY),
+              let sizeZ = Int32(exactly: summary.sizeZ),
+              let blockCount = Int32(exactly: summary.blockCount),
+              let blockEntityCount = Int32(exactly: summary.blockEntityCount),
+              let primitiveSummary = try? PebbleTemplateSummaryStorageRow(
+                name: name, sizeX: sizeX, sizeY: sizeY, sizeZ: sizeZ,
+                blockCount: blockCount, blockEntityCount: blockEntityCount,
+                dominantBlock: summary.dominantBlockName,
+                dominantDisplay: summary.dominantBlockDisplayName),
+              let row = try? PebbleTemplateStorageRow(
+                summary: primitiveSummary, json: "",
+                created: Date().timeIntervalSince1970 * 1000,
+                format: 2, data: data) else { return false }
+        return (try? withStorageRank { _ = try storage.putTemplateRow(row) }) != nil
     }
 
     @discardableResult
     public func deleteTemplate(named rawName: String) throws -> Bool {
         guard let name = normalizedTemplateName(rawName) else { throw TemplateError.invalidName }
-        guard run("DELETE FROM templates WHERE name=?", bind: { self.bindText($0, 1, name) }) else { return false }
-        return sqlite3_changes(db) > 0
-    }
-
-    // ---- legacy import ----------------------------------------------------------
-    /// one-time import of the pre-1.0 loose-file layout (saves/worlds/*.json,
-    /// saves/chunks/<id>/*.vck, …); the old folder is renamed, never deleted
-    private func migrateLegacySaves() {
-        let fm = FileManager.default
-        let legacy = vcSupportDir().appendingPathComponent("saves", isDirectory: true)
-        let worldsDir = legacy.appendingPathComponent("worlds")
-        guard fm.fileExists(atPath: worldsDir.path),
-              let files = try? fm.contentsOfDirectory(at: worldsDir, includingPropertiesForKeys: nil),
-              !files.isEmpty else { return }
-
-        var worlds = 0, chunks = 0
-        for f in files where f.pathExtension == "json" {
-            guard let data = try? Data(contentsOf: f),
-                  let rec = try? JSONDecoder().decode(WorldRecord.self, from: data) else { continue }
-            putWorld(rec)
-            worlds += 1
-            let id = rec.id
-            if let pdata = try? Data(contentsOf: legacy.appendingPathComponent("player/\(id).json")),
-               let pobj = (try? JSONSerialization.jsonObject(with: pdata)) as? [String: Any] {
-                putPlayer(id, pobj)
-            }
-            if let adata = try? Data(contentsOf: legacy.appendingPathComponent("advancements/\(id).json")),
-               let aobj = (try? JSONSerialization.jsonObject(with: adata)) as? [String] {
-                putAdvancements(id, aobj)
-            }
-            let cdir = legacy.appendingPathComponent("chunks/\(id)", isDirectory: true)
-            guard let cfiles = try? fm.contentsOfDirectory(at: cdir, includingPropertiesForKeys: nil) else { continue }
-            exec("BEGIN")
-            for cf in cfiles where cf.pathExtension == "vck" {
-                let parts = cf.deletingPathExtension().lastPathComponent.split(separator: "_")
-                guard parts.count == 3, let dim = Int(parts[0]), let cx = Int(parts[1]), let cz = Int(parts[2]),
-                      let cdata = try? Data(contentsOf: cf) else { continue }
-                run("INSERT OR REPLACE INTO chunks(world, dim, cx, cz, data) VALUES(?,?,?,?,?)", bind: { stmt in
-                    self.bindText(stmt, 1, id)
-                    sqlite3_bind_int(stmt, 2, Int32(dim))
-                    sqlite3_bind_int(stmt, 3, Int32(cx))
-                    sqlite3_bind_int(stmt, 4, Int32(cz))
-                    cdata.withUnsafeBytes { raw in
-                        _ = sqlite3_bind_blob(stmt, 5, raw.baseAddress, Int32(raw.count), SQLITE_TRANSIENT)
-                    }
-                })
-                chunks += 1
-            }
-            exec("COMMIT")
-        }
-        let backup = vcSupportDir().appendingPathComponent("saves-legacy-backup")
-        try? fm.moveItem(at: legacy, to: backup)
-        print("[saves] migrated \(worlds) worlds, \(chunks) chunks into pebble.db (old files kept in saves-legacy-backup)")
-        fflush(stdout)
+        guard let changed = try? withStorageRank({ try storage.deleteTemplateRow(name: name) })
+        else { return false }
+        return changed > 0
     }
 }

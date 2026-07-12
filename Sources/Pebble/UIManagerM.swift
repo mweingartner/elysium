@@ -4,7 +4,9 @@
 
 import Foundation
 import QuartzCore
+import AppKit
 import PebbleCore
+import PebbleTextInput
 
 final class SlotDef {
     var x: Double
@@ -98,34 +100,99 @@ final class CheckBox: Button {
 }
 
 final class TextField {
-    var text = ""
+    let id: String
+    let accessibilityLabel: String
+    private var buffer: PebbleBoundedTextBuffer
+    var text: String {
+        get { buffer.text }
+        set { _ = replaceText(newValue, caret: newValue.count) }
+    }
     var focused = false
     var caret = 0
+    private(set) var visibleStart = 0
     var maxLength = 64
     var x: Double, y: Double, w: Double, h: Double
     var placeholder: String
 
-    init(_ x: Double, _ y: Double, _ w: Double, _ h: Double, _ placeholder: String = "") {
+    init(_ x: Double, _ y: Double, _ w: Double, _ h: Double, _ placeholder: String = "",
+         id: String = "field", accessibilityLabel: String? = nil) {
         self.x = x; self.y = y; self.w = w; self.h = h
         self.placeholder = placeholder
+        self.id = id
+        self.accessibilityLabel = accessibilityLabel ?? (placeholder.isEmpty ? "Text" : placeholder)
+        buffer = PebbleBoundedTextBuffer("", limit: PebbleTextLimit(
+            maximumCharacters: 64, maximumUTF8Bytes: 4_096))
     }
     func contains(_ mx: Double, _ my: Double) -> Bool {
         mx >= x && mx < x + w && my >= y && my < y + h
     }
-    func type(_ ch: String) {
-        if text.count < maxLength {
-            let i = text.index(text.startIndex, offsetBy: caret)
-            text.insert(contentsOf: ch, at: i)
-            caret += ch.count
-        }
+    private var limit: PebbleTextLimit {
+        PebbleTextLimit(maximumCharacters: maxLength, maximumUTF8Bytes: 4_096)
     }
-    func backspace() {
-        if caret > 0 {
-            let i = text.index(text.startIndex, offsetBy: caret - 1)
-            text.remove(at: i)
-            caret -= 1
-        }
+
+    @discardableResult
+    func replaceText(_ value: String, caret requestedCaret: Int? = nil) -> Bool {
+        var replacement = PebbleBoundedTextBuffer("", limit: limit)
+        guard replacement.replaceAtomically(value, limit: limit) else { return false }
+        buffer = replacement
+        caret = max(0, min(requestedCaret ?? value.count, value.count))
+        visibleStart = min(visibleStart, caret)
+        return true
     }
+
+    @discardableResult
+    func insert(_ proposal: String) -> Bool {
+        guard case .accepted(let characterCount, _) = buffer.insertWholeProposalAtomically(
+            proposal, atCharacterOffset: caret, limit: limit) else { return false }
+        caret += characterCount
+        return true
+    }
+    @discardableResult
+    func insertPastePrefix(_ proposal: String) -> Bool {
+        guard case .accepted(let characterCount, _) = buffer.insertValidPrefixAtomically(
+            proposal, atCharacterOffset: caret, limit: limit) else { return false }
+        caret += characterCount
+        return true
+    }
+    func type(_ ch: String) { _ = insert(ch) }
+    @discardableResult
+    func deleteBackward() -> Bool { buffer.deleteBackward(atCharacterOffset: &caret) }
+    func backspace() { _ = deleteBackward() }
+    func moveCaret(by delta: Int) { caret = max(0, min(text.count, caret + delta)) }
+
+    func focus(atX mouseX: Double, measure: (String) -> Int) {
+        focused = true
+        caret = pebbleCaretOffsetForClick(text: text, visibleStart: visibleStart,
+                                          clickAdvance: mouseX - (x + 4), measure: measure)
+    }
+
+    func visiblePresentation(measure: (String) -> Int) -> (text: String, caretX: Double) {
+        let capacity = max(0, Int(w - 9)) // 4px insets plus bitmap shadow/caret
+        let presentation = pebbleTextPresentation(text: text, caret: caret,
+                                                  visibleStart: visibleStart,
+                                                  maximumWidth: capacity, measure: measure)
+        visibleStart = presentation.visibleStart
+        return (presentation.text, x + 4 + Double(presentation.caretAdvance))
+    }
+}
+
+enum TextEntryAccessibilityRole: Equatable {
+    case textField
+    case searchField
+    case staticText
+}
+
+struct TextEntryAccessibilityDescriptor {
+    let id: String
+    let role: TextEntryAccessibilityRole
+    let label: String
+    let value: String
+    let help: String
+    let frame: (x: Double, y: Double, width: Double, height: Double)
+    let enabled: Bool
+    let focused: Bool
+    let insertionUTF16Offset: Int?
+    let focusable: Bool
 }
 
 class Screen {
@@ -137,17 +204,136 @@ class Screen {
     var fields: [TextField] = []
     var slots: [SlotDef] = []
     var readOnlySlots = false
+    fileprivate(set) var textScreenIdentity: UInt64 = 0
+    fileprivate(set) var textPresentationGeneration: UInt64 = 0
+    fileprivate(set) var rpgPassiveSemanticSnapshot: RPGPassiveSemanticSnapshot?
+    fileprivate(set) var rpgCommittedSemanticSnapshot: RPGCommittedSemanticSnapshot?
+    fileprivate(set) var rpgPassiveSemanticUnavailable = false
+    fileprivate var rpgPassiveScreenInstanceID: UInt64?
+    fileprivate var rpgPassiveSemanticRevision: UInt64?
+
+    /// Default-empty accessibility semantics. Only a screen with one atomically committed RPG
+    /// model may publish a tree or accept semantic focus.
+    var semanticSnapshot: RPGCommittedSemanticSnapshot? { nil }
+    var semanticRevision: UInt64 { 0 }
+    func focusSemanticElement(_ id: RPGUIElementID,
+                              _ ui: UIManager, _ game: GameCore) -> Bool { false }
+
+    /// Mutation-free inspection seam shared by rendering and later accessibility publication.
+    func rpgPassiveDescriptor(id: RPGUIElementID) -> RPGSemanticDescriptor? {
+        (rpgCommittedSemanticSnapshot?.model ?? rpgPassiveSemanticSnapshot?.model)?
+            .descriptors.first { $0.id == id }
+    }
+
+    func clearRPGPassiveSemanticSnapshot() {
+        rpgPassiveSemanticSnapshot = nil
+        rpgCommittedSemanticSnapshot = nil
+        rpgPassiveSemanticUnavailable = true
+    }
+
+    /// Handles presentation-only commands after the shared activation boundary dispatches them.
+    func handleRPGPresentationCommand(_ command: RPGSemanticCommand,
+                                      _ ui: UIManager, _ game: GameCore) -> Bool { false }
 
     func initScreen(_ ui: UIManager, _ game: GameCore) {}
     func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {}
     func onClose(_ ui: UIManager, _ game: GameCore) {}
+    func inputOwnershipLost(_ ui: UIManager, _ game: GameCore) {}
+
+    func ownsTextInput(_ ui: UIManager, _ game: GameCore) -> Bool {
+        fields.filter(\.focused).count == 1
+    }
+
+    @discardableResult
+    func insertText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
+        guard let field = fields.first(where: { $0.focused }),
+              fields.filter(\.focused).count == 1 else { return false }
+        return field.insert(proposal)
+    }
+
+    @discardableResult
+    func pasteText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
+        guard let field = fields.first(where: { $0.focused }),
+              fields.filter(\.focused).count == 1 else { return false }
+        return field.insertPastePrefix(proposal)
+    }
+
+    func textOwnerDescriptorID(_ ui: UIManager, _ game: GameCore) -> String? {
+        let focused = fields.filter(\.focused)
+        return focused.count == 1 ? focused[0].id : nil
+    }
+
+    /// A visible descriptor requested by an ordinary activation. Unlike the
+    /// current owner ID, this may name an editor before it acquires focus.
+    func textActivationDescriptorID(_ ui: UIManager, _ game: GameCore) -> String? {
+        textOwnerDescriptorID(ui, game)
+    }
+
+    func activateImplicitTextDescriptor(_ id: String) -> Bool { false }
+
+    @discardableResult
+    func focusTextDescriptor(authorization: UIManager.TextFocusAuthorization,
+                             ui: UIManager, clickX: Double? = nil) -> Bool {
+        guard let id = ui.claimTextFocusAuthorization(authorization, for: self) else { return false }
+        let matches = fields.filter { $0.id == id }
+        if matches.isEmpty { return activateImplicitTextDescriptor(id) }
+        guard matches.count == 1, let target = matches.first else { return false }
+        for field in fields { field.focused = field === target }
+        if let clickX { target.focus(atX: clickX, measure: textWidth) }
+        return true
+    }
+
+    func placeReadyTextCaret(descriptorID: String, clickX: Double) -> Bool {
+        let matches = fields.filter { $0.id == descriptorID && $0.focused }
+        guard matches.count == 1, fields.filter(\.focused).count == 1,
+              let target = matches.first else { return false }
+        target.focus(atX: clickX, measure: textWidth)
+        return true
+    }
+
+    func clearTextFocus() {
+        for field in fields { field.focused = false }
+    }
+
+    func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore)
+        -> [TextEntryAccessibilityDescriptor] {
+        fields.map { field in
+            let insertion = pebbleUTF16InsertionOffset(in: field.text, characterOffset: field.caret)
+            return TextEntryAccessibilityDescriptor(
+                id: field.id,
+                role: field.id.lowercased().contains("search") ? .searchField : .textField,
+                label: field.accessibilityLabel,
+                value: field.text,
+                help: field.placeholder.isEmpty
+                    ? "Editable text. Use Left, Right, and Backspace."
+                    : "\(field.placeholder). Editable text. Use Left, Right, and Backspace.",
+                frame: (field.x, field.y, field.w, field.h), enabled: true,
+                focused: field.focused, insertionUTF16Offset: insertion,
+                focusable: true)
+        }
+    }
+
+    func consumeTextAccessibilityStatusAnnouncement() -> String? { nil }
+
+    /// Reverts a custom, implicit text owner when the readiness transaction
+    /// cannot establish the real AppKit first responder. Ordinary `TextField`
+    /// owners already roll back by clearing logical focus.
+    func cancelImplicitTextOwnerActivation() -> Bool { false }
 
     @discardableResult
     func onMouseDown(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double, _ btn: Int) -> Bool {
-        for f in fields { f.focused = f.contains(mx, my) }
+        if btn == 0, let hit = fields.first(where: { $0.contains(mx, my) }) {
+            _ = ui.establishOrdinaryTextReadiness(
+                screen: self, game: game, descriptorID: hit.id,
+                cause: .primaryClick, clickX: mx)
+            return true
+        }
+        let ownerBefore = textOwnerDescriptorID(ui, game)
+        if btn == 0 { ui.clearTextReadiness(screen: self, clearLogicalFocus: true) }
         for b in buttons where b.contains(mx, my) {
             game.playUISound("ui.button.click")
             b.onClick()
+            ui.reconcileOrdinaryTextOwnerChange(on: self, game: game, previousID: ownerBefore)
             return true
         }
         for s in sliders where s.contains(mx, my) {
@@ -171,20 +357,20 @@ class Screen {
         }
     }
     func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool { false }
+    func onKeyEvent(_ ui: UIManager, _ game: GameCore, _ event: PebbleKeyEvent) -> Bool {
+        onKey(ui, game, event.terminal.rawValue)
+    }
     func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
         for f in fields where f.focused {
             if key == "Backspace" { f.backspace(); return true }
-            if key == "ArrowLeft" { f.caret = max(0, f.caret - 1); return true }
-            if key == "ArrowRight" { f.caret = min(f.text.count, f.caret + 1); return true }
+            if key == "ArrowLeft" { f.moveCaret(by: -1); return true }
+            if key == "ArrowRight" { f.moveCaret(by: 1); return true }
+            if key == "Tab" { return true }
         }
         return false
     }
     func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
-        for f in fields where f.focused {
-            f.type(ch)
-            return true
-        }
-        return false
+        insertText(ui, game, ch)
     }
     func slotAt(_ mx: Double, _ my: Double) -> SlotDef? {
         slots.first { mx >= $0.x && mx < $0.x + 18 && my >= $0.y && my < $0.y + 18 }
@@ -194,6 +380,17 @@ class Screen {
 }
 
 final class UIManager {
+    typealias OrdinaryTextReadinessCause = PebbleTextActivationCause
+
+    final class TextFocusAuthorization {
+        fileprivate let token: PebbleTextOwnerToken
+        fileprivate var consumed = false
+        private init(token: PebbleTextOwnerToken) { self.token = token }
+
+        fileprivate static func mint(_ token: PebbleTextOwnerToken) -> TextFocusAuthorization {
+            TextFocusAuthorization(token: token)
+        }
+    }
     let cv: UICanvas
     var packUI: PackUI?          // pack GUI sheets (nil = procedural UI)
     var titlePhoto = false       // renderer has a title-bg photo loaded
@@ -207,11 +404,375 @@ final class UIManager {
     var optionDown = false
     var cursorStack: ItemStack?
     private var stack: [Screen] = []
+    private var textPresentationClock = PebbleTextPresentationClock()
+    private var nextTextScreenIdentity: UInt64 = 0
+    private var textIdentityExhausted = false
+    private var textFocusTransaction = PebbleTextFocusTransactionAdapter()
+    private weak var activeTextAuthorization: TextFocusAuthorization?
+    weak var textInputView: GameView?
+    /// The sole RPG activation-receipt owner shared by mouse, keyboard, and the RPG controller.
+    /// Accessibility joins this same boundary in its separately gated build step.
+    private var rpgSemanticActivationBoundary: RPGSemanticActivationBoundary?
+    /// The sole owner of passive screen identities. Checked exhaustion is fail-closed and latched.
+    private var rpgPassiveSemanticClock = RPGPassiveSemanticClock()
+    private var rpgAccessibilityPublicationClock = RPGAccessibilityPublicationClock()
+    var rpgAccessibilityDidCommit: ((Screen, RPGAccessibilityTreeSnapshot) -> Void)?
+    var rpgAccessibilityDidInvalidate: (() -> Void)?
+    var textAccessibilityDidCommit: ((Screen, [TextEntryAccessibilityDescriptor]) -> Void)?
+    var textAccessibilityDidInvalidate: (() -> Void)?
+    var accessibilityDidInvalidateAll: (() -> Void)?
+    private var nextWorldSemanticRevision: UInt64 = 0
+    private var lastWorldScreenInstanceID: UInt64 = RPGPassiveSemanticClock.maximumScreenInstanceID
+    private var worldSemanticRevisionExhausted = false
+    private var worldScreenInstanceIDExhausted = false
+    private(set) var rpgControllerHelpPrimary = false
+    var rpgControllerContextDidChange: (() -> Void)?
     var tooltipLines: [String]?
 
     init(cv: UICanvas) {
         self.cv = cv
     }
+
+    private func allocateTextScreenIdentity() -> UInt64? {
+        guard !textIdentityExhausted else { return nil }
+        let next = nextTextScreenIdentity.addingReportingOverflow(1)
+        guard !next.overflow, next.partialValue != 0 else {
+            textIdentityExhausted = true
+            return nil
+        }
+        nextTextScreenIdentity = next.partialValue
+        return next.partialValue
+    }
+
+    @discardableResult
+    private func advanceTextPresentation(for screen: Screen) -> Bool {
+        textFocusTransaction.cancel()
+        guard let generation = textPresentationClock.next() else {
+            screen.textPresentationGeneration = 0
+            screen.clearTextFocus()
+            return false
+        }
+        screen.textPresentationGeneration = generation
+        return true
+    }
+
+    fileprivate func claimTextFocusAuthorization(_ authorization: TextFocusAuthorization,
+                                                 for screen: Screen) -> String? {
+        guard activeTextAuthorization === authorization, !authorization.consumed,
+              current() === screen,
+              authorization.token.screenIdentity == screen.textScreenIdentity,
+              authorization.token.presentationGeneration == screen.textPresentationGeneration else {
+            return nil
+        }
+        authorization.consumed = true
+        return authorization.token.descriptorID
+    }
+
+    func clearTextReadiness(screen: Screen? = nil, clearLogicalFocus: Bool) {
+        textFocusTransaction.cancel()
+        activeTextAuthorization = nil
+        if clearLogicalFocus { (screen ?? current())?.clearTextFocus() }
+    }
+
+    private func ownerToken(screen: Screen, descriptorID: String) -> PebbleTextOwnerToken {
+        PebbleTextOwnerToken(screenIdentity: screen.textScreenIdentity,
+                             presentationGeneration: screen.textPresentationGeneration,
+                             descriptorID: descriptorID)
+    }
+
+    private func descriptorIsEligible(_ descriptorID: String, screen: Screen,
+                                      game: GameCore) -> Bool {
+        let matches = screen.textAccessibilityDescriptors(self, game).filter {
+            $0.id == descriptorID && $0.enabled && $0.focusable &&
+                [$0.frame.x, $0.frame.y, $0.frame.width, $0.frame.height].allSatisfy(\.isFinite) &&
+                $0.frame.x >= 0 && $0.frame.y >= 0 && $0.frame.width > 0 && $0.frame.height > 0
+        }
+        return matches.count == 1
+    }
+
+    private func postvalidateTextOwner(_ token: PebbleTextOwnerToken, screen: Screen,
+                                       game: GameCore, expectedValue: String) -> Bool {
+        guard current() === screen, token.screenIdentity == screen.textScreenIdentity,
+              token.presentationGeneration == screen.textPresentationGeneration,
+              descriptorIsEligible(token.descriptorID, screen: screen, game: game),
+              screen.ownsTextInput(self, game),
+              screen.textOwnerDescriptorID(self, game) == token.descriptorID,
+              textInputView?.window?.firstResponder === textInputView else { return false }
+        let values = screen.textAccessibilityDescriptors(self, game).filter { $0.id == token.descriptorID }
+        return values.count == 1 && values[0].value == expectedValue
+    }
+
+    @discardableResult
+    func establishOrdinaryTextReadiness(
+        screen: Screen, game: GameCore, descriptorID: String,
+        cause: OrdinaryTextReadinessCause, clickX: Double? = nil
+    ) -> Bool {
+        return establishTextReadiness(screen: screen, game: game, descriptorID: descriptorID,
+                                      clickX: clickX,
+                                      publishLayout: cause.publishesLayoutChange)
+    }
+
+    @discardableResult
+    func establishAccessibilityTextReadiness(screen: Screen, game: GameCore,
+                                             descriptorID: String) -> Bool {
+        establishTextReadiness(screen: screen, game: game, descriptorID: descriptorID,
+                               clickX: nil, publishLayout: false)
+    }
+
+    private func establishTextReadiness(screen: Screen, game: GameCore, descriptorID: String,
+                                        clickX: Double?, publishLayout shouldPublishLayout: Bool) -> Bool {
+        guard current() === screen, screen.textPresentationGeneration != 0,
+              descriptorIsEligible(descriptorID, screen: screen, game: game),
+              let view = textInputView else { return false }
+        let token = ownerToken(screen: screen, descriptorID: descriptorID)
+        guard let expectedValue = screen.textAccessibilityDescriptors(self, game)
+            .first(where: { $0.id == descriptorID })?.value else { return false }
+        let alreadyReady = screen.ownsTextInput(self, game) &&
+            screen.textOwnerDescriptorID(self, game) == descriptorID &&
+            view.window?.firstResponder === view
+        let focusChanged = !alreadyReady
+        var succeeded = false
+        defer {
+            activeTextAuthorization = nil
+            if !succeeded {
+                if current() === screen && screen.textPresentationGeneration == token.presentationGeneration {
+                    screen.clearTextFocus()
+                }
+            }
+        }
+        let result = textFocusTransaction.perform(
+            token: token,
+            ownerAndResponderAlreadyReady: alreadyReady,
+            mutateOwner: {
+                let authorization = TextFocusAuthorization.mint(token)
+                self.activeTextAuthorization = authorization
+                return screen.focusTextDescriptor(authorization: authorization, ui: self,
+                                                  clickX: clickX)
+            },
+            establishResponder: { view.window?.makeFirstResponder(view) == true },
+            preNotificationPostvalidate: {
+                self.postvalidateTextOwner(token, screen: screen, game: game,
+                                           expectedValue: expectedValue)
+            },
+            publishLayout: {
+                self.commitTextAccessibility(screen: screen, game: game)
+                if shouldPublishLayout {
+                    NSAccessibility.post(element: view, notification: .layoutChanged)
+                }
+            },
+            publishFocus: {
+                if focusChanged, NSApp.isActive, view.window?.isKeyWindow == true {
+                    NSAccessibility.post(
+                        element: view.textAccessibilityElement(id: descriptorID) ?? view,
+                        notification: .focusedUIElementChanged)
+                }
+            },
+            takeStatusAnnouncement: {
+                screen.consumeTextAccessibilityStatusAnnouncement()
+            },
+            publishStatusAnnouncement: { announcement in
+                NSAccessibility.post(
+                    element: view, notification: .announcementRequested,
+                    userInfo: [.announcement: announcement,
+                               .priority: NSAccessibilityPriorityLevel.high.rawValue])
+            },
+            postNotificationPostvalidate: {
+                self.postvalidateTextOwner(token, screen: screen, game: game,
+                                           expectedValue: expectedValue)
+            })
+        switch result {
+        case .committed:
+            succeeded = true
+            return true
+        case .idempotentReady:
+            succeeded = true
+            if let clickX {
+                return screen.placeReadyTextCaret(descriptorID: descriptorID, clickX: clickX)
+            }
+            return true
+        case .coalesced, .rejected:
+            succeeded = true
+            return false
+        case .failed:
+            return false
+        }
+    }
+
+    func reconcileOrdinaryTextOwnerChange(on screen: Screen, game: GameCore,
+                                          previousID: String?) {
+        guard current() === screen else { return }
+        let currentID = screen.textActivationDescriptorID(self, game)
+        if let currentID, currentID != previousID {
+            let established = establishOrdinaryTextReadiness(
+                screen: screen, game: game, descriptorID: currentID,
+                cause: .implicitOwnerOpen)
+            if !established {
+                _ = screen.cancelImplicitTextOwnerActivation()
+                clearTextReadiness(screen: screen, clearLogicalFocus: true)
+            }
+        } else if currentID == nil {
+            clearTextReadiness(screen: screen, clearLogicalFocus: false)
+        }
+    }
+
+    func textIngressIsReady(for screen: Screen, game: GameCore) -> Bool {
+        guard current() === screen, !textFocusTransaction.ingressBlocked,
+              screen.ownsTextInput(self, game),
+              let descriptorID = screen.textOwnerDescriptorID(self, game),
+              textInputView?.window?.firstResponder === textInputView else { return false }
+        return textFocusTransaction.isReady(ownerToken(screen: screen, descriptorID: descriptorID))
+    }
+
+    func textIngressMustBeConsumed(for screen: Screen, game: GameCore) -> Bool {
+        textFocusTransaction.ingressBlocked ||
+            (screen.textActivationDescriptorID(self, game) != nil &&
+             !textIngressIsReady(for: screen, game: game))
+    }
+
+    func reactivateTextReadiness(game: GameCore) {
+        guard let screen = current(),
+              let id = screen.textActivationDescriptorID(self, game) else { return }
+        _ = establishOrdinaryTextReadiness(screen: screen, game: game, descriptorID: id,
+                                           cause: .applicationReactivation)
+    }
+
+    func notifyTextAccessibilityValueChanged(on screen: Screen, game: GameCore) {
+        guard current() === screen, textIngressIsReady(for: screen, game: game),
+              let view = textInputView else { return }
+        commitTextAccessibility(screen: screen, game: game)
+        let descriptorID = screen.textOwnerDescriptorID(self, game)
+        NSAccessibility.post(element: descriptorID.flatMap(view.textAccessibilityElement(id:)) ?? view,
+                             notification: .valueChanged)
+        if let announcement = screen.consumeTextAccessibilityStatusAnnouncement() {
+            NSAccessibility.post(
+                element: view, notification: .announcementRequested,
+                userInfo: [.announcement: announcement,
+                           .priority: NSAccessibilityPriorityLevel.high.rawValue])
+        }
+    }
+
+    private func postTextAccessibilityLayoutIfPresent(screen: Screen, game: GameCore) {
+        guard current() === screen, let view = textInputView,
+              !screen.textAccessibilityDescriptors(self, game).isEmpty else { return }
+        commitTextAccessibility(screen: screen, game: game)
+        NSAccessibility.post(element: view, notification: .layoutChanged)
+        if let announcement = screen.consumeTextAccessibilityStatusAnnouncement() {
+            NSAccessibility.post(
+                element: view, notification: .announcementRequested,
+                userInfo: [.announcement: announcement,
+                           .priority: NSAccessibilityPriorityLevel.high.rawValue])
+        }
+    }
+
+    private func commitTextAccessibility(screen: Screen, game: GameCore) {
+        guard current() === screen, screen.textPresentationGeneration != 0 else {
+            textAccessibilityDidInvalidate?()
+            return
+        }
+        textAccessibilityDidCommit?(screen, screen.textAccessibilityDescriptors(self, game))
+    }
+
+    @discardableResult
+    func commitPassiveRPGSemanticModel(_ model: RPGScreenModel,
+                                       to screen: Screen) -> RPGPassiveSemanticSnapshot? {
+        guard model.descriptors.allSatisfy({ $0.actionCommand == nil }),
+              model.visibleDescriptors.allSatisfy({ $0.actionCommand == nil }) else {
+            screen.rpgPassiveSemanticSnapshot = nil
+            screen.rpgPassiveSemanticUnavailable = true
+            if current() === screen { invalidateRPGAccessibilityCache() }
+            return nil
+        }
+        let instanceID: UInt64
+        if let existing = screen.rpgPassiveScreenInstanceID {
+            instanceID = existing
+        } else if let allocated = rpgPassiveSemanticClock.allocateScreenInstanceID() {
+            instanceID = allocated
+            screen.rpgPassiveScreenInstanceID = allocated
+        } else {
+            screen.rpgPassiveSemanticSnapshot = nil
+            screen.rpgPassiveSemanticUnavailable = true
+            if current() === screen { invalidateRPGAccessibilityCache() }
+            return nil
+        }
+        guard let revision = rpgPassiveSemanticClock.nextSemanticRevision(
+                after: screen.rpgPassiveSemanticRevision),
+              let snapshot = RPGPassiveSemanticSnapshot(
+                screenInstanceID: instanceID, semanticRevision: revision, model: model) else {
+            screen.rpgPassiveSemanticSnapshot = nil
+            screen.rpgPassiveSemanticUnavailable = true
+            if current() === screen { invalidateRPGAccessibilityCache() }
+            return nil
+        }
+        screen.rpgPassiveSemanticRevision = revision
+        screen.rpgPassiveSemanticSnapshot = snapshot
+        screen.rpgPassiveSemanticUnavailable = false
+        if current() === screen { invalidateRPGAccessibilityCache() }
+        return snapshot
+    }
+
+    @discardableResult
+    func commitRPGSemanticModel(_ model: RPGScreenModel, runtime: RPGScreenRuntimeSnapshot,
+                                to screen: Screen) -> RPGCommittedSemanticSnapshot? {
+        let instanceID: UInt64
+        if let existing = screen.rpgPassiveScreenInstanceID {
+            instanceID = existing
+        } else if let allocated = rpgPassiveSemanticClock.allocateScreenInstanceID() {
+            instanceID = allocated
+            screen.rpgPassiveScreenInstanceID = allocated
+        } else {
+            screen.rpgCommittedSemanticSnapshot = nil
+            screen.rpgPassiveSemanticUnavailable = true
+            if current() === screen { invalidateRPGAccessibilityCache() }
+            return nil
+        }
+        guard let revision = rpgPassiveSemanticClock.nextSemanticRevision(
+                after: screen.rpgPassiveSemanticRevision),
+              let snapshot = RPGCommittedSemanticSnapshot(
+                screenInstanceID: instanceID, semanticRevision: revision,
+                model: model, runtime: runtime) else {
+            screen.rpgCommittedSemanticSnapshot = nil
+            screen.rpgPassiveSemanticUnavailable = true
+            if current() === screen { invalidateRPGAccessibilityCache() }
+            return nil
+        }
+        screen.rpgPassiveSemanticRevision = revision
+        screen.rpgCommittedSemanticSnapshot = snapshot
+        screen.rpgPassiveSemanticSnapshot = nil
+        screen.rpgPassiveSemanticUnavailable = false
+        if current() === screen { publishRPGAccessibilityCommit(snapshot, screen: screen) }
+        return snapshot
+    }
+
+    private func publishRPGAccessibilityCommit(_ snapshot: RPGCommittedSemanticSnapshot,
+                                               screen: Screen) {
+        guard current() === screen else {
+            invalidateRPGAccessibilityCache()
+            return
+        }
+        guard let tree: RPGAccessibilityTreeSnapshot = rpgAccessibilityPublicationClock.publish({
+            generation in
+            guard let viewport = RPGAccessibilityViewport(width: width, height: height) else {
+                return nil
+            }
+            return RPGAccessibilityTreeSnapshot(
+                committed: snapshot, layoutGeneration: generation, viewport: viewport)
+        }) else {
+            invalidateRPGAccessibilityCache()
+            return
+        }
+        rpgAccessibilityDidCommit?(screen, tree)
+    }
+
+    func invalidateRPGAccessibilityCache() {
+        rpgAccessibilityDidInvalidate?()
+    }
+
+#if DEBUG
+    /// Representative/exhaustion seam; production input cannot modify snapshot identity state.
+    func debugSetRPGPassiveSemanticClock(_ clock: RPGPassiveSemanticClock) {
+        rpgPassiveSemanticClock = clock
+    }
+#endif
 
     func resize(_ pw: Double, _ ph: Double, _ guiScaleSetting: Int, relayout game: GameCore? = nil) {
         let auto = max(1.0, min((pw / 380).rounded(.down), (ph / 240).rounded(.down)))
@@ -225,34 +786,87 @@ final class UIManager {
         // screens lay widgets out in initScreen against the size at open time —
         // re-run layout for every open screen, carrying typed field state over
         guard changed, let game else { return }
+        let currentOwnerID = current()?.textActivationDescriptorID(self, game)
         for s in stack {
-            let saved = s.fields.map { ($0.text, $0.caret, $0.focused) }
+            struct SavedField {
+                let text: String
+                let caret: Int
+                let focused: Bool
+            }
+            var savedByID: [String: SavedField] = [:]
+            let oldGroups = Dictionary(grouping: s.fields, by: \.id)
+            for (id, values) in oldGroups where values.count == 1 {
+                let field = values[0]
+                savedByID[id] = SavedField(text: field.text, caret: field.caret,
+                                            focused: field.focused)
+            }
             s.buttons.removeAll()
             s.sliders.removeAll()
             s.fields.removeAll()
             s.slots.removeAll()
             s.initScreen(self, game)
-            for (i, t) in saved.enumerated() where i < s.fields.count {
-                s.fields[i].text = t.0
-                s.fields[i].caret = min(t.1, t.0.count)
-                s.fields[i].focused = t.2
+            let newGroups = Dictionary(grouping: s.fields, by: \.id)
+            var restoredFocus = false
+            for (id, values) in newGroups where values.count == 1 {
+                guard oldGroups[id]?.count == 1, let saved = savedByID[id] else { continue }
+                let field = values[0]
+                _ = field.replaceText(saved.text, caret: saved.caret)
+                field.focused = saved.focused && !restoredFocus
+                restoredFocus = restoredFocus || field.focused
             }
+            for (_, values) in newGroups where values.count > 1 {
+                values.forEach { $0.focused = false }
+            }
+            _ = advanceTextPresentation(for: s)
         }
+        if let screen = current(), let currentOwnerID {
+            _ = establishOrdinaryTextReadiness(screen: screen, game: game,
+                                               descriptorID: currentOwnerID,
+                                               cause: .resizeRenewal)
+        } else if let screen = current() {
+            postTextAccessibilityLayoutIfPresent(screen: screen, game: game)
+        }
+        if !(current() is RPGCharacterScreen) { invalidateRPGAccessibilityCache() }
     }
 
     func open(_ s: Screen, _ game: GameCore) {
         // release held movement/mouse state — keys held when a screen opens
         // never get their keyUp (the screen eats it) and stick otherwise
         if stack.isEmpty { game.clearInput() }
+        stack.last?.inputOwnershipLost(self, game)
+        guard let identity = allocateTextScreenIdentity() else { return }
+        s.textScreenIdentity = identity
         stack.append(s)
         s.initScreen(self, game)
+        _ = advanceTextPresentation(for: s)
+        commitTextAccessibility(screen: s, game: game)
+        if let id = s.textActivationDescriptorID(self, game) {
+            let cause: OrdinaryTextReadinessCause = s.fields.isEmpty ? .implicitOwnerOpen : .initialOpen
+            let established = establishOrdinaryTextReadiness(
+                screen: s, game: game, descriptorID: id, cause: cause)
+            if !established, s.fields.isEmpty {
+                closeTop(game)
+                return
+            }
+        } else {
+            postTextAccessibilityLayoutIfPresent(screen: s, game: game)
+        }
+        if s.semanticSnapshot == nil { invalidateRPGAccessibilityCache() }
+        rpgControllerContextDidChange?()
     }
     func replace(_ s: Screen, _ game: GameCore) {
         closeTop(game)
         open(s, game)
     }
     func closeTop(_ game: GameCore) {
+        clearTextReadiness(screen: stack.last, clearLogicalFocus: false)
+        accessibilityDidInvalidateAll?()
+        if let view = textInputView {
+            NSAccessibility.post(element: view, notification: .layoutChanged)
+        }
+        stack.last?.inputOwnershipLost(self, game)
         if let top = stack.popLast() {
+            top.textPresentationGeneration = 0
             top.onClose(self, game)
         }
         if stack.isEmpty, let c = cursorStack {
@@ -260,12 +874,272 @@ final class UIManager {
             _ = game.player?.give(c)
             cursorStack = nil
         }
+        if let revealed = stack.last as? RPGCharacterScreen {
+            revealed.initScreen(self, game)
+        }
+        if let revealed = stack.last {
+            _ = advanceTextPresentation(for: revealed)
+            commitTextAccessibility(screen: revealed, game: game)
+            if let id = revealed.textActivationDescriptorID(self, game) {
+                _ = establishOrdinaryTextReadiness(screen: revealed, game: game,
+                                                   descriptorID: id, cause: .screenReveal)
+            }
+        }
+        rpgControllerContextDidChange?()
     }
     func closeAll(_ game: GameCore) {
         while !stack.isEmpty { closeTop(game) }
     }
     func current() -> Screen? { stack.last }
     func hasScreen() -> Bool { !stack.isEmpty }
+
+    struct TextOwnerCapture {
+        weak var screen: Screen?
+        let token: PebbleTextOwnerToken
+    }
+
+    func captureTextOwner(game: GameCore) -> TextOwnerCapture? {
+        guard let screen = current(), screen.textPresentationGeneration != 0,
+              textIngressIsReady(for: screen, game: game),
+              screen.ownsTextInput(self, game),
+              let descriptorID = screen.textOwnerDescriptorID(self, game) else { return nil }
+        return TextOwnerCapture(screen: screen, token: PebbleTextOwnerToken(
+            screenIdentity: screen.textScreenIdentity,
+            presentationGeneration: screen.textPresentationGeneration,
+            descriptorID: descriptorID))
+    }
+
+    func revalidateTextOwner(_ capture: TextOwnerCapture, game: GameCore) -> Screen? {
+        guard let screen = capture.screen, current() === screen,
+              screen.textScreenIdentity == capture.token.screenIdentity,
+              screen.textPresentationGeneration == capture.token.presentationGeneration,
+              textFocusTransaction.isReady(capture.token),
+              textInputView?.window?.firstResponder === textInputView,
+              screen.ownsTextInput(self, game),
+              screen.textOwnerDescriptorID(self, game) == capture.token.descriptorID else { return nil }
+        return screen
+    }
+
+    func refreshCurrentRPGScreen(_ refresh: RPGLocalPreferenceUIRefresh, game: GameCore) {
+        guard let screen = current() as? RPGCharacterScreen,
+              let snapshot = screen.rpgCommittedSemanticSnapshot,
+              snapshot.worldEntryGeneration == refresh.worldEntryGeneration,
+              refresh.localPreferenceRevision >= snapshot.localPreferenceRevision else { return }
+        screen.initScreen(self, game)
+    }
+
+    func setRPGControllerHelpPrimary(_ primary: Bool, game: GameCore) {
+        guard rpgControllerHelpPrimary != primary else { return }
+        rpgControllerHelpPrimary = primary
+        (current() as? RPGCharacterScreen)?.initScreen(self, game)
+    }
+
+    @MainActor
+    func captureRPGAccessibilityActivation(
+        origin: RPGSemanticActivationOrigin
+    ) -> RPGSemanticActivationCapture? {
+        let boundary: RPGSemanticActivationBoundary
+        if let existing = rpgSemanticActivationBoundary { boundary = existing }
+        else {
+            let created = RPGSemanticActivationBoundary()
+            rpgSemanticActivationBoundary = created
+            boundary = created
+        }
+        return boundary.capture(origin: origin)
+    }
+
+    @MainActor
+    func dispatchRPGAccessibilityActivation(
+        _ capture: RPGSemanticActivationCapture,
+        on originScreen: Screen?,
+        game: GameCore
+    ) -> RPGSemanticActivationResult {
+        guard let originScreen else {
+            cancelRPGSemanticActivation(capture)
+            return .unavailable
+        }
+        return dispatchRPGSemanticActivation(
+            capture, source: .accessibility, on: originScreen, game: game)
+    }
+
+    @MainActor
+    func focusRPGAccessibilityElement(screenInstanceID: UInt64,
+                                      semanticRevision: UInt64,
+                                      id: RPGUIElementID,
+                                      on screen: Screen,
+                                      game: GameCore) -> Bool {
+        guard current() === screen,
+              let snapshot = screen.semanticSnapshot,
+              snapshot.screenInstanceID == screenInstanceID,
+              snapshot.semanticRevision == semanticRevision,
+              snapshot.model.descriptors.contains(where: {
+                $0.id == id && $0.isFocusable
+              }) else { return false }
+        return screen.focusSemanticElement(id, self, game)
+    }
+
+    /// Sole guarded synthetic boundary for RPG world commands, shared by keyboard and controller.
+    @MainActor
+    @discardableResult
+    func dispatchRPGWorldSemanticCommand(_ command: RPGSemanticCommand,
+                                         source: RPGSemanticActivationSource,
+                                         game: GameCore) -> RPGSemanticActivationResult {
+        guard game.hasWorld(), !hasScreen() else { return .unavailable }
+        if command == .openCharacter, game.player?.rpgClassesEnabled() != true { return .unavailable }
+        guard !worldSemanticRevisionExhausted, !worldScreenInstanceIDExhausted else {
+            return .unavailable
+        }
+        let instanceAddition = lastWorldScreenInstanceID.addingReportingOverflow(1)
+        guard !instanceAddition.overflow, instanceAddition.partialValue != 0 else {
+            worldScreenInstanceIDExhausted = true
+            return .unavailable
+        }
+        lastWorldScreenInstanceID = instanceAddition.partialValue
+        let revisionAddition = nextWorldSemanticRevision.addingReportingOverflow(1)
+        guard !revisionAddition.overflow, revisionAddition.partialValue != 0 else {
+            worldSemanticRevisionExhausted = true
+            return .unavailable
+        }
+        nextWorldSemanticRevision = revisionAddition.partialValue
+        guard let id = RPGUIElementID(rawValue: "world-input:\(revisionAddition.partialValue)") else {
+            return .unavailable
+        }
+        let descriptor = RPGSemanticDescriptor(
+            id: id, role: .button, label: "RPG world action", enabled: true,
+            isFocusable: true, frame: RPGLogicalRect(x: 0, y: 0, width: 1, height: 1),
+            visibleFrame: RPGLogicalRect(x: 0, y: 0, width: 1, height: 1),
+            actionCommand: command)
+        guard let capture = captureSyntheticRPGSemanticActivation(
+            descriptor, screenInstanceID: instanceAddition.partialValue,
+            semanticRevision: revisionAddition.partialValue, game: game) else {
+            return .unavailable
+        }
+        let result = dispatchSyntheticRPGSemanticActivation(
+            capture, source: source, screenInstanceID: instanceAddition.partialValue,
+            semanticRevision: revisionAddition.partialValue, descriptor: descriptor, game: game)
+        if case .dispatched = result, command == .openCharacter {
+            game.openScreen("rpg", nil)
+        }
+        return result
+    }
+
+    @MainActor
+    func captureSyntheticRPGSemanticActivation(
+        _ descriptor: RPGSemanticDescriptor,
+        screenInstanceID: UInt64,
+        semanticRevision: UInt64,
+        game: GameCore
+    ) -> RPGSemanticActivationCapture? {
+        let boundary: RPGSemanticActivationBoundary
+        if let existing = rpgSemanticActivationBoundary {
+            boundary = existing
+        } else {
+            let created = RPGSemanticActivationBoundary()
+            rpgSemanticActivationBoundary = created
+            boundary = created
+        }
+        return game.captureSyntheticRPGSemanticActivation(
+            using: boundary,
+            screenInstanceID: screenInstanceID,
+            semanticRevision: semanticRevision,
+            descriptor: descriptor
+        )
+    }
+
+    @MainActor
+    func dispatchSyntheticRPGSemanticActivation(
+        _ capture: RPGSemanticActivationCapture,
+        source: RPGSemanticActivationSource,
+        screenInstanceID: UInt64,
+        semanticRevision: UInt64,
+        descriptor: RPGSemanticDescriptor?,
+        game: GameCore
+    ) -> RPGSemanticActivationResult {
+        let boundary: RPGSemanticActivationBoundary
+        if let existing = rpgSemanticActivationBoundary {
+            boundary = existing
+        } else {
+            let created = RPGSemanticActivationBoundary()
+            rpgSemanticActivationBoundary = created
+            boundary = created
+        }
+        let protocol5TransportRejected = descriptor?.actionCommand.flatMap {
+            LANMultiplayerManager.shared.rejectProtocol5RPGSemanticOperation($0, in: game)
+        } == .unavailable
+        return game.dispatchSyntheticRPGSemanticActivation(
+            capture, source: source, using: boundary,
+            screenInstanceID: screenInstanceID, semanticRevision: semanticRevision,
+            descriptor: descriptor,
+            protocol5TransportRejected: protocol5TransportRejected
+        )
+    }
+
+    /// Sole production capture path. The command and semantic input come from the same committed
+    /// immutable publication; no mutable GameCore value is consulted until dispatch revalidation.
+    @MainActor
+    func captureRPGSemanticActivation(id: RPGUIElementID,
+                                      on screen: Screen) -> RPGSemanticActivationCapture? {
+        guard current() === screen,
+              let snapshot = screen.rpgCommittedSemanticSnapshot,
+              let descriptor = snapshot.model.descriptors.first(where: { $0.id == id }),
+              let input = snapshot.semanticInputs[id] else { return nil }
+        let boundary: RPGSemanticActivationBoundary
+        if let existing = rpgSemanticActivationBoundary { boundary = existing }
+        else {
+            let created = RPGSemanticActivationBoundary()
+            rpgSemanticActivationBoundary = created
+            boundary = created
+        }
+        return boundary.capture(screenInstanceID: snapshot.screenInstanceID,
+                                semanticRevision: snapshot.semanticRevision,
+                                descriptor: descriptor, input: input)
+    }
+
+    @MainActor
+    func cancelRPGSemanticActivation(_ capture: RPGSemanticActivationCapture) {
+        _ = rpgSemanticActivationBoundary?.cancel(capture)
+    }
+
+    /// Sole production dispatch path for every modality. The boundary consumes before current-state
+    /// revalidation. A stale genuine activation rebuilds once and is never replayed automatically.
+    @MainActor
+    func dispatchRPGSemanticActivation(_ capture: RPGSemanticActivationCapture,
+                                       source: RPGSemanticActivationSource,
+                                       on screen: Screen, game: GameCore) -> RPGSemanticActivationResult {
+        let boundary: RPGSemanticActivationBoundary
+        if let existing = rpgSemanticActivationBoundary { boundary = existing }
+        else {
+            let created = RPGSemanticActivationBoundary()
+            rpgSemanticActivationBoundary = created
+            boundary = created
+        }
+        guard current() === screen else {
+            _ = boundary.cancel(capture)
+            return .unavailable
+        }
+        let snapshot = screen.rpgCommittedSemanticSnapshot
+        let descriptor = snapshot?.model.descriptors.first { $0.id == capture.id }
+        let command = descriptor?.actionCommand
+        let protocol5TransportRejected = command.flatMap {
+            LANMultiplayerManager.shared.rejectProtocol5RPGSemanticOperation($0, in: game)
+        } == .unavailable
+        let result = game.dispatchSyntheticRPGSemanticActivation(
+            capture, source: source, using: boundary,
+            screenInstanceID: snapshot?.screenInstanceID ?? 0,
+            semanticRevision: snapshot?.semanticRevision ?? 0,
+            descriptor: descriptor,
+            protocol5TransportRejected: protocol5TransportRejected)
+        switch result {
+        case .dispatched:
+            if let command { _ = screen.handleRPGPresentationCommand(command, self, game) }
+            if current() === screen { screen.initScreen(self, game) }
+        case .staleRequiresFreshActivation:
+            if current() === screen { screen.initScreen(self, game) }
+        default:
+            break
+        }
+        return result
+    }
 
     // ---- frame ----------------------------------------------------------------
     func beginFrame() {
@@ -471,12 +1345,22 @@ final class UIManager {
             cv.fillRect(f.x, f.y, f.w, f.h)
             cv.setStroke(f.focused ? "#ffffff" : "#a0a0a0")
             cv.strokeRect(f.x, f.y, f.w, f.h)
-            cv.drawText(f.text, f.x + 4, f.y + (f.h - 8) / 2, 1, f.text.isEmpty ? "#707070" : "#ffffff")
+            let presentation = f.visiblePresentation(measure: textWidth)
             if f.text.isEmpty && !f.placeholder.isEmpty {
-                cv.drawText(f.placeholder, f.x + 4, f.y + (f.h - 8) / 2, 1, "#5a5a5a")
+                var boundedPlaceholder = ""
+                for character in f.placeholder {
+                    let candidate = boundedPlaceholder + String(character)
+                    if textWidth(candidate) > Int(f.w - 9) { break }
+                    boundedPlaceholder = candidate
+                }
+                cv.drawText(boundedPlaceholder, f.x + 4, f.y + (f.h - 8) / 2, 1,
+                            "#5a5a5a", shadow: false)
+            } else {
+                cv.drawText(presentation.text, f.x + 4, f.y + (f.h - 8) / 2, 1,
+                            "#ffffff", shadow: false)
             }
             if f.focused && Int(CACurrentMediaTime() * 1000 / 400) % 2 == 0 {
-                let cx = f.x + 4 + Double(textWidth(String(f.text.prefix(f.caret))))
+                let cx = min(f.x + f.w - 4, presentation.caretX)
                 cv.setFill("#ffffff")
                 cv.fillRect(cx, f.y + 3, 1, f.h - 6)
             }

@@ -49,7 +49,7 @@ Pebble is an original fan re-creation inspired by Minecraft: Java Edition 1.20. 
 - **Redstone** — wire networks with 0–15 power levels, repeaters with locking, comparators that read containers, pistons with quasi-connectivity and slime/honey push sets, observers, dispensers, hoppers, rails, sculk sensors.
 - **Items & systems** — shaped/shapeless/tag crafting with recipe menus that auto-fill available ingredients and output-slot arrows for choosing multi-craft quantities, copper sword/pickaxe/axe/shovel/hoe recipes with copper-ingot repair, crafting tables that can draw from containers within 25 blocks and keep a shared 3x3 station grid, smelting in three furnace types, brewing, enchanting with 39 enchantments and a compatibility matrix, anvils, grindstones, smithing with armor trims, stonecutters, loot tables with fortune/looting, fishing, archaeology with sherds and decorated pots, advancements, and the craftable Flying Wand combat tool.
 - **Creative mode** — instant block breaking, flight, an infinite hotbar, and full player invulnerability while building. Survival players can also fly while the Flying Wand is selected, but unequipping it midair forces a fall with half normal fall damage.
-- **RPG classes and actions** — optional per-world RPG rules add character creation, six class paths, attributes, class XP/levels, prepared passive skills, prepared active skills, fatigue, spell circles, and deterministic procedural icons for every path, branch, skill, spell, and RPG action. The HUD adds a second 1-9 RPG quick-slot row above the normal hotbar; prepared spells and active skills can be slotted from the character sheet and triggered with Shift+1 through Shift+9. Casters and non-casters use the same quick-slot action path, so prepared spells and active skills both spend fatigue, enter cooldown, and resolve through existing world/entity systems. LAN clients send typed RPG intents only; hosts keep RPG state authoritative and execute remote spell/skill actions through ghost players.
+- **RPG classes and actions** — optional per-world RPG rules add character creation, six class paths, attributes, class XP/levels, prepared passive skills, prepared active skills, fatigue, spell circles, and deterministic procedural icons for every path, branch, skill, spell, and RPG action. The HUD adds a second 1-9 RPG quick-slot row above the normal hotbar; prepared spells and active skills can be slotted from the character sheet and triggered with Shift+1 through Shift+9. Casters and non-casters use the same quick-slot action path, so prepared spells and active skills both spend fatigue, enter cooldown, and resolve through existing world/entity systems. Current Track B character changes and RPG quick slots are available only in an eligible local world. Protocol-5 LAN clients expose the sheet as unavailable for changes and send no Track B RPG semantic or quick-slot fallback; reviewed typed client intents and host execution remain future Track C protocol-v6 work.
 - **Live map overlay** — a square minimap sits flush against the lower-right HUD edge, centered on the player, and defaults to the medium of three compact sizes. Use `-` / `=` to cycle the compact size, press M to pop it into a large draggable map, and use `,` / `.` to zoom from the loaded-world overview down to roughly 100 blocks around the player.
 - **Object templates** — point the center crosshair at a connected construction and press Command-C to name and save it as a local template, then press Command-V to open the saved-template browser and choose an object to place. Copying follows face- and edge-connected non-environment blocks so detailed constructions with edge-only attachments are captured without pulling in terrain substrate. Copied containers keep the container block and non-inventory block-entity metadata, but their item slots and deferred loot are saved empty. Saved templates support up to 524,288 blocks inside the existing 96-block span cap, are stored as compact SQLite binary blobs with summary metadata, and still read legacy JSON records. The browser automatically previews the selected object in the right 3D panel and includes a Delete button for removing saved templates. Placement preview captures the pointer, floats a bounded wireframe of the saved 3D object in the view center, rotates it in 90-degree steps with the mouse wheel, and commits on left click with blocks and block entities reattached. Placement automatically clears blocks inside the object volume and fills foundation gaps under the footprint with adjacent terrain material when the selected location is uneven. Large placement commits are tick-sliced so the game remains responsive while progress is shown in the action bar. Press Command-Z in world mode to undo the most recent object placement, removing the placed object and restoring the cells that placement cleared or filled. Legacy commands remain available: `/clone the target with new name "name"`, `/place "name"`, and `/listTemplates`.
 - **LAN multiplayer sessions** — open the Multiplayer screen from the title menu or "Open to LAN" from the pause menu to host, browse, or join a player-started local-network game. The Join World button connects to the selected discovered LAN world, or to the typed manual host/port when no discovered world is selected. Pebble advertises `_pebble-lan._tcp` with Bonjour, requires a short join code before accepting a peer, and exposes `/lan host`, `/lan browse`, `/lan join`, `/lan direct`, `/lan say`, `/lan status`, and `/lan stop` for command-line control. The shipped network layer supports bounded protocol frames, handshake, LAN discovery, Direct Connect, peer status, LAN chat, host-authoritative replication batches for player state, synchronized time/weather/difficulty, smoothed remote-player rendering, visible-neighborhood chunk sections, block deltas, dirty chunk-section snapshots for large object placements, item-bearing block entities such as chests, hoppers, furnaces, brewing stands, and crafting-table grids, revision-gated mirrored container/crafting screens on clients with host-validated item conservation and double-chest transactions, host-authoritative remote use for openable doors/trapdoors/fence gates, per-host-world guest resume positions and inventories, loaded animal/monster/plant/dropped-item/XP snapshots, and host-owned inventory/XP snapshots so remote players can collect host-owned monster drops, plus remote player entities and host permission gates for build/container/crafting/template/command/AI/creative/dimension/death/respawn/reconnect flows. Public internet/NAT traversal and cloud relay are not included.
@@ -74,7 +74,7 @@ Recent work has expanded the beta from a single-player survival recreation into 
 | Items and survival tools | Added the Flying Wand for survival flight with fall-damage tradeoffs, copper sword/pickaxe/axe/shovel/hoe recipes with copper-ingot repair, copper durability between stone and iron, iron-tier harvest capability for the copper pickaxe, and Faithful-style copper tool icons derived from matching iron pack art when copper art is absent. |
 | Crafting and inventory UX | Recipe popups gained type-to-select search and output-slot quantity arrows; crafting tables can draw from nearby containers and persist station grids; food use now follows the hotbar left-click survival flow; creative inventory toggles and survival inventory transitions are hardened. |
 | Map and rendering polish | The HUD minimap has three compact sizes, a draggable expanded map, bounded pan/zoom over loaded chunks, and screenshot hooks. Torch and lantern items render as material-built 3D fixtures instead of flat sprites, and non-block item icons prefer texture-pack art before deterministic procedural fallbacks. |
-| Verification and hardening | The golden suite now reports 457 checks, preserving frozen item/recipe prefixes while allowing appended content. The local pipeline covers architecture checks, source security scan, Faithful asset verification, warning-free release build, binary security checks, XCTest, `pebsmoke`, deployment to `/Applications/Pebble.app`, and installed-app verification. |
+| Verification and hardening | The golden suite now reports 457 checks, preserving frozen item/recipe prefixes while allowing appended content. The local pipeline covers architecture checks, bounded local source/release safety checks, Faithful asset verification, warning-free release build, binary security checks, XCTest, `pebsmoke`, deployment to `/Applications/Pebble.app`, and installed-app verification. |
 
 ## Install
 
@@ -96,9 +96,33 @@ pebble test         run XCTest plus the 457-check golden suite
 
 For development you can also run straight from the checkout — `swift run -c release Pebble` — and the app will find its packaged assets in `packaging/`.
 
+### AppKit text-entry gate
+
+Release verification drives the freshly signed app through Title → Singleplayer → Create New
+World and checks keyboard editing and Accessibility externally. It requires a logged-in, unlocked
+macOS session with Accessibility and Input Monitoring grants. The unattended gate never reads,
+enumerates, clears, writes, restores, or pastes from the general clipboard:
+
+```bash
+scripts/appkit-text-entry-integration.sh
+```
+
+Full installed sign-off is deliberately separate. Run
+`scripts/pipeline.sh --prepare-installed-signoff`; successful installation exits 75 as
+`PENDING_INSTALLED_SIGNOFF`, not deployment completion. Then run
+`scripts/observe-installed-signoff.sh` in a TTY. Preserve any clipboard content you need and replace
+it with the documented fixed nonsensitive sentinel yourself; tooling observes one manual Pebble
+Paste but never reads or restores clipboard bytes. Complete the guided installed matrix and run
+`scripts/finalize-installed-signoff.sh`. A monotonic Keychain-authoritative state then gates the exact
+commit and push through executable `.githooks`; its JSON status cache is never authority. Preparation
+seals real logs/counts/hashes for every automated gate and the package/install chain. Observation
+captures a private screenshot, applicable external-AX report, and redacted command record for every
+checklist item, followed by a distinct Designer attestation. Any repository, evidence, build, or
+installed-artifact change requires preparation again.
+
 ## Controls
 
-WASD to move, mouse to look, Space to jump, Shift to sneak, Ctrl (or double-tap forward) to sprint, E for inventory, Esc to pause. Press T for chat and slash commands, including `/ai <request>` when a local Ollama model is configured. Use `/lan help` for LAN hosting, browsing, Direct Connect, status, and LAN chat commands. The chat/command line wraps long text, scrolls output with the mouse wheel or trackpad, and Tab-completes registered item ids. Crafting recipe popups support type-to-select search, Backspace/Delete correction, and Enter selection; the up/down arrows beside the crafting output slot increase or decrease the selected craft quantity up to the resources available in survival or the receiving inventory capacity in creative. Press K to open character creation or the character sheet when RPG classes are enabled, or use the Character button from the E inventory screen. The sheet has a nine-slot RPG action row: select a slot, click a prepared spell or active skill to slot it, then use Shift+1 through Shift+9 in world mode to trigger the matching second-row quick slot. Press M to toggle the map between the lower-right minimap and a large draggable map; `-` / `=` cycle the minimap through small, medium, and large sizes, and `,` zooms out and `.` zooms in in both modes, while the expanded map also pans by mouse drag or arrow keys. Left click with food selected in the hotbar eats one unit when it can restore health or hunger. For object templates, point the center crosshair at an object and press Command-C to copy it, then press Command-V to browse saved objects and start placement; the browser previews the selected object automatically and its Delete button removes the selected saved template. Command-Z in world mode undoes the most recent object placement. Legacy commands are `/clone the target with new name "name"`, `/place "name"` (including `/place object "name" at the cursor` and `/place "name" at target` aliases), and `/listTemplates` (alias `/templates`). While placing a template, scroll rotates the pending object, left click places it after bounded auto-clearing/foundation filling, and Esc or right click cancels. In creative mode, or in survival while the Flying Wand is selected, double-tap Space to fly; Space ascends and Shift descends while airborne. Unequipping the Flying Wand while airborne drops the player and halves the resulting fall damage. F1 hides the GUI, F3 toggles the debug overlay, F11 toggles fullscreen (also in Options → Video). Scroll the normal hotbar with the wheel or trackpad. Everything is rebindable in Options → Controls.
+WASD to move, mouse to look, Space to jump, Shift to sneak, Ctrl (or double-tap forward) to sprint, E for inventory, Esc to pause. Canvas text fields accept click-to-focus typing, Character-safe Left/Right/Backspace editing, and Edit → Paste / Command-V; long values scroll inside their field instead of covering neighboring controls. The same bounded, single-line Paste path works in recipe search, signs, and chat/commands. Pebble currently provides append/caret editing for those canvas controls, not native selection or IME composition, and Tab does not traverse generic fields. VoiceOver exposes each active editor with its exact value and insertion point; values remain read-only through Accessibility and editing still uses the guarded keyboard/Paste path. Press T for chat and slash commands, including `/ai <request>` when a local Ollama model is configured. Use `/lan help` for LAN hosting, browsing, Direct Connect, status, and LAN chat commands. The chat/command line wraps long text, scrolls output with the mouse wheel or trackpad, and Tab-completes registered item ids. Crafting recipe popups support type-to-select search, Backspace/Delete correction, and Enter selection; the up/down arrows beside the crafting output slot increase or decrease the selected craft quantity up to the resources available in survival or the receiving inventory capacity in creative. Press K to open character creation or the character sheet when RPG classes are enabled, or use the Character button from the E inventory screen. In an eligible local world, the sheet has a nine-slot RPG action row: select a slot, click a prepared spell or active skill to slot it, then use Shift+1 through Shift+9 in world mode to trigger the matching second-row quick slot. On a protocol-5 LAN client the sheet remains inspectable, but character changes and all RPG quick-slot operations are unavailable; there is no protocol-5 fallback. Press M to toggle the map between the lower-right minimap and a large draggable map; `-` / `=` cycle the minimap through small, medium, and large sizes, and `,` zooms out and `.` zooms in in both modes, while the expanded map also pans by mouse drag or arrow keys. Left click with food selected in the hotbar eats one unit when it can restore health or hunger. For object templates, point the center crosshair at an object and press Command-C to copy it, then press Command-V to browse saved objects and start placement; the browser previews the selected object automatically and its Delete button removes the selected saved template. Command-Z in world mode undoes the most recent object placement. Legacy commands are `/clone the target with new name "name"`, `/place "name"` (including `/place object "name" at the cursor` and `/place "name" at target` aliases), and `/listTemplates` (alias `/templates`). While placing a template, scroll rotates the pending object, left click places it after bounded auto-clearing/foundation filling, and Esc or right click cancels. In creative mode, or in survival while the Flying Wand is selected, double-tap Space to fly; Space ascends and Shift descends while airborne. Unequipping the Flying Wand while airborne drops the player and halves the resulting fall damage. F1 hides the GUI, F3 toggles the debug overlay, F11 toggles fullscreen (also in Options → Video). Scroll the normal hotbar with the wheel or trackpad. Everything is rebindable in Options → Controls.
 
 ## Where things live
 
@@ -146,7 +170,7 @@ Useful environment variables for testing and automation:
 | `PEBBLE_NEWWORLD=<seed>` | create a fresh world with that seed (worldgen testing) |
 | `PEBBLE_DUNGEON_DENSITY=1...5` | with `PEBBLE_NEWWORLD`, create that fresh world with dungeon density 1 none, 2 normal, 3 more, 4 plentiful, or 5 many |
 | `PEBBLE_CMD="/tp 0 120 0;/time set 1000"` | run chat commands once the world is up |
-| `PEBBLE_RPG_AUTOCREATE=1` | create a debug RPG character once an autoloaded world is up, using `PEBBLE_RPG_PATH`, `PEBBLE_RPG_STARTER`, and optional comma-separated `PEBBLE_RPG_SPELLS` |
+| `PEBBLE_RPG_UI_CASE=<closed selector>` | start the isolated RPG UI fixture runtime before ordinary app/bootstrap state is constructed; see “RPG UI harness” below |
 | `PEBBLE_OPEN_SCREEN=inventory`, `templates`, `templatesPlace`, `creative`, `map`, or `rpg` | open an allowlisted UI screen for screenshot smoke tests |
 | `PEBBLE_SHOT="/tmp/x.png@300"` | capture a frame N frames after load |
 | `PEBBLE_LAN_AUTOJOIN="<host> <port> <joinCode> [name]"` | test hook that joins a LAN host from the title screen through Direct Connect |
@@ -159,6 +183,29 @@ Useful environment variables for testing and automation:
 | `PEBBLE_GEOM_DEBUG=1` | log entity geometry construction |
 | `PEBBLE_REGOLD=1` | **rewrites golden baselines** — see CONTRIBUTING before using |
 
+### RPG UI harness
+
+The installed RPG UI harness is immutable: it never loads a world, player, settings, save database,
+LAN session, controller monitor, or audio engine. Set `PEBBLE_RPG_UI_CASE` to one closed selector
+family: `creation`, `tutorial`, `tab`, `skill`, `active`, `spell`, `slots`, `status`, or `error`.
+Registry IDs and selector relationships are validated before the AppKit fixture opens. Optional
+controls are `PEBBLE_RPG_UI_AUTHORITY`, `PEBBLE_RPG_UI_VIEWPORT`,
+`PEBBLE_RPG_UI_APPEARANCE`, and `PEBBLE_RPG_UI_SEMANTIC_SUMMARY=1`.
+
+```bash
+PEBBLE_RPG_UI_CASE=skill:guard_stance:2:nextLegal \
+PEBBLE_RPG_UI_AUTHORITY=pending \
+PEBBLE_RPG_UI_VIEWPORT=360x224 \
+PEBBLE_RPG_UI_SEMANTIC_SUMMARY=1 \
+/Applications/Pebble.app/Contents/MacOS/Pebble
+```
+
+In harness mode these keys plus optional `PEBBLE_SHOT=<basename>[@frames]` are the complete
+`PEBBLE_` allowlist. Combining an ordinary automation key with a harness case fails closed with no
+ordinary-mode fallback. Harness screenshots are exclusive, no-follow files beneath Pebble’s
+harness-owned temporary directory; unlike ordinary screenshot automation, callers cannot provide
+an arbitrary output path.
+
 ## Release pipeline
 
 For an end-to-end local release gate:
@@ -168,6 +215,11 @@ For an end-to-end local release gate:
 ```
 
 That runs architecture checks, source security scans, bundled Faithful asset verification, a warning-free release build, binary security checks, XCTest, the 457-check golden suite, install to `/Applications/Pebble.app`, and a final installed-app binary verification.
+
+For release-gate development only, `./scripts/release-gate-adversarial-test.sh` runs optional
+diagnostics whose every line begins `NON-AUTHORITATIVE DIAGNOSTIC`. It is deliberately outside the
+release sequence: it neither authorizes nor blocks installed sign-off, deployment, commit, or push,
+and it cannot substitute for any required pipeline or installed-app check.
 
 ## Reporting bugs & contributing
 

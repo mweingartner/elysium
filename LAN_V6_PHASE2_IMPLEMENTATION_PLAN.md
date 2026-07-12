@@ -1,6 +1,7 @@
 # LAN v6 Phase 2 — Identity and Persistence Implementation Contract
 
-Status: Architect draft awaiting Security plan review. This contract implements the identity,
+Status: Architect draft amended to make Phase 2.5 the sole client-authority component bootstrap;
+awaiting renewed Security plan review. This contract implements the identity,
 credential, permission, runtime-lease, legacy-claim, and client-credential foundations frozen in
 `LAN_RPG_PROTOCOL_V6.md`. It does not activate v6 transport or quarantine v5 tables.
 
@@ -631,19 +632,34 @@ Files:
 
 - `Sources/PebbleCore/Net/LANV6ClientCredentialModel.swift`
 - `Sources/PebbleCore/Game/LANV6ClientCredentialPersistence.swift`
-- Extend only the named client-credential façade implementation inside
-  `Sources/PebbleStorage/StorageEngine.swift`; the PebbleCore wrapper receives typed primitive rows
-  and never selects a capability or statement.
+- Implement the `lanClientAuthority` component bootstrap and named client-credential façade inside
+  `Sources/PebbleStorage/StorageEngine.swift` exactly as frozen in
+  `RPG_STORAGE_SURFACE_AMENDMENT_PLAN.md`; the PebbleCore wrapper receives typed primitive rows and
+  never selects a capability or statement.
 
 `lan_client_credentials_v6` is keyed by exact `(hid,wid,lk)`, recomputes `lk`, groups complete
 active/pending fields, and is capped at 65,536 bytes before decode. Host stores never contain raw
 tokens; this client-only table does. Errors and descriptions redact them.
+
+Phase 2.5 is the sole schema-bootstrap owner of `lan_client_credentials_v6`. Its one
+`lanClientAuthority` component transaction creates that credential anchor, client owner checkpoint,
+pending/disposition, notification inbox/index, and component marker together using the amendment's
+exact DDL. No Phase 2.2/2.3 schema bootstrap and no later owner-checkpoint phase creates, replaces,
+or alters the credential table. Phase 2.5 initially exposes only the admission façade limited to an
+unbound generation-zero credential row; the complete client-authority façade remains unobtainable
+until the owner-checkpoint coordinator passes its own Architecture, Security, and Test gates.
 
 Resume candidates return pending first and active second as separate one-secret attempts. An issued
 server accept durably installs the raw pending token before clientReady. A `.resumedExisting`
 accept must match an already retained pending token, generation, and tuple before clientReady; it
 cannot fabricate or replace a token. There is no public standalone pending promotion. Promotion is
 only a future coherent client checkpoint transaction with owner/disposition state.
+
+The pre-owner credential anchor is aggregate generation 0, `authority_bound=false`, active absent,
+and pending-only at credential generation 1. The first request-zero checkpoint is the sole promotion:
+its active token/generation must be fixed-time byte-equal to that stored pending pair and its pending
+token/generation/handshake/expiry must all become absent in the same owner+credential transaction.
+Neither admission nor the checkpoint may fabricate replacement credential bytes.
 
 ## 2.6 Atomic promotion coordinator gate
 

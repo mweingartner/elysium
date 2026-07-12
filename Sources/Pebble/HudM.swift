@@ -264,7 +264,9 @@ final class HUD {
             cv.fillRect(fx, fy, 5, 22)
             cv.setFill("#55aaff")
             cv.fillRect(fx + 1, fy + 21 - (20 * f).rounded(), 3, (20 * f).rounded())
-            drawRPGQuickSlots(ui, rpg: rpgState, hotbarX: hbX, hotbarY: hbY)
+            drawRPGQuickSlots(
+                ui, rpg: rpgState, preferences: game.rpgQuickSlotPreferences ?? .empty,
+                hotbarX: hbX, hotbarY: hbY)
         }
 
         // boss bars
@@ -398,9 +400,11 @@ final class HUD {
         }
     }
 
-    private func drawRPGQuickSlots(_ ui: UIManager, rpg: RPGCharacterState, hotbarX: Double, hotbarY: Double) {
+    private func drawRPGQuickSlots(_ ui: UIManager, rpg: RPGCharacterState,
+                                   preferences: RPGQuickSlotPreferences,
+                                   hotbarX: Double, hotbarY: Double) {
         let cv = ui.cv
-        let slots = rpgActionQuickSlotActions(rpg)
+        let slots = rpgActionQuickSlotActions(rpg, preferences: preferences)
         let y = hotbarY - 25
         cv.setFill("rgba(12,12,12,0.68)")
         cv.fillRect(hotbarX, y, 182, 22)

@@ -483,6 +483,13 @@ let GLYPHS: [Character: [Int]] = [
     "{": [0x08, 0x36, 0x41], "|": [0x7f], "}": [0x41, 0x36, 0x08], "~": [0x08, 0x04, 0x08, 0x10, 0x08],
     "♥": [0x06, 0x0f, 0x1e, 0x0f, 0x06], "•": [0x18, 0x18], "★": [0x24, 0x18, 0x7e, 0x18, 0x24],
     "✔": [0x10, 0x20, 0x10, 0x08, 0x04], "▶": [0x7f, 0x3e, 0x1c, 0x08], "◀": [0x08, 0x1c, 0x3e, 0x7f],
+    "·": [0x18],
+    "✓": [0x20, 0x40, 0x20, 0x10, 0x08, 0x04],
+    "←": [0x08, 0x1c, 0x2a, 0x08, 0x08, 0x08, 0x08],
+    "→": [0x08, 0x08, 0x08, 0x08, 0x2a, 0x1c, 0x08],
+    "’": [0x01, 0x03, 0x06, 0x04],
+    "…": [0x40, 0x00, 0x40, 0x00, 0x40],
+    "—": [0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08],
 ]
 
 /// per-character advances from the active resource pack's ascii.png (base px);
@@ -492,20 +499,43 @@ var packFontWidths: [Double]?
 func glyphWidth(_ ch: Character) -> Int {
     (GLYPHS[ch] ?? GLYPHS["?"]!).count + 1
 }
-func textWidth(_ text: String) -> Int {
-    var w = 0.0
-    var skip = false
-    for ch in text {
-        if skip { skip = false; continue }
-        if ch == "§" { skip = true; continue }
+private struct UIStreamingTextWidthCursor {
+    private var width = 0.0
+    private var skipFormattingValue = false
+
+    mutating func append(_ ch: Character) -> Int {
+        if skipFormattingValue {
+            skipFormattingValue = false
+            return Int(width.rounded())
+        }
+        if ch == "§" {
+            skipFormattingValue = true
+            return Int(width.rounded())
+        }
         if let pf = packFontWidths, ch.unicodeScalars.count == 1,
            let code = ch.unicodeScalars.first?.value, code >= 32, code < 127 {
-            w += pf[Int(code)]
+            width += pf[Int(code)]
         } else {
-            w += Double(glyphWidth(ch))
+            width += Double(glyphWidth(ch))
         }
+        return Int(width.rounded())
     }
-    return Int(w.rounded())
+}
+
+/// One stateful active-pack measurement cursor. Sign repair/edit and ordinary measurement use the
+/// same formatting and fractional-advance implementation.
+func makeTextWidthStep() -> (Character) -> Int? {
+    var cursor = UIStreamingTextWidthCursor()
+    return { character in cursor.append(character) }
+}
+
+func textWidth(_ text: String) -> Int {
+    let step = makeTextWidthStep()
+    var width = 0
+    for ch in text {
+        width = step(ch) ?? width
+    }
+    return width
 }
 func wrapText(_ text: String, _ maxWidth: Int) -> [String] {
     wrapTextByWidth(text, maxWidth: maxWidth, measure: textWidth)

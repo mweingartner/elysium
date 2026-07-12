@@ -2782,10 +2782,11 @@ final class LANReplicationTests: XCTestCase {
     func testGhostUsesAuthoritativePreparedActiveSkill() throws {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession(x: 0.5, y: 64, z: 0.5, yaw: 0)
-        let rpg = try rpgCreateCharacter(RPGCreationDraft(
+        var rpg = try rpgCreateCharacter(RPGCreationDraft(
             pathID: "warden",
             starterSkillID: "heavy_cut"
         )).get()
+        XCTAssertNil(rpgSelectPreparedSkill("heavy_cut", in: &rpg))
         _ = session.recordRPGState(rpg, for: "peer-a")
         session.recordInventorySnapshot(
             LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0,

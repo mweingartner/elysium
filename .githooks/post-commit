@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+if ! scripts/installed-signoff-receipt.sh postcommit; then
+    echo "post-commit receipt recording was interrupted or failed." >&2
+    echo "Do not reset, amend, bypass, or create another commit." >&2
+    echo "Recover non-destructively with: scripts/resume-installed-signoff-commit.sh" >&2
+    exit 1
+fi

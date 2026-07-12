@@ -77,6 +77,10 @@ public final class Player: LivingEntity {
     public var portalTicks = 0
     public var insidePortalKind: String? = nil   // nether | end | nil
     public var rpg = RPGCharacterState.uncreated()
+    /// Compatibility copy of the pre-local-preferences quick-slot field. LAN/protocol-5 sessions
+    /// deliberately retain it; only an exact local-world migration receipt can make it omittable.
+    public private(set) var rpgLegacyQuickSlotEnvelope: RPGLegacyQuickSlotEnvelope?
+    private var rpgLegacyEnvelopeVersion: UInt64 = 0
     /// Session-only authority identity used by bounded RPG world effects.
     /// LAN ghost hydration replaces the default with the stable peer ID.
     public var rpgAuthorityID = ""
@@ -879,6 +883,12 @@ public final class Player: LivingEntity {
     }
 
     public override func save() -> [String: Any] {
+        save(omitLegacyQuickSlots: rpgLegacyQuickSlotEnvelope?.omissionEligible == true)
+    }
+
+    /// Builds a detached player candidate. Passing `true` is reserved for GameCore's checked
+    /// player-row CAS; it never mutates the live envelope or makes ordinary saves omit early.
+    public func save(omitLegacyQuickSlots: Bool) -> [String: Any] {
         var d = super.save()
         func enc<T: Encodable>(_ v: T) -> Any? {
             guard let bytes = try? JSONEncoder().encode(v) else { return nil }
@@ -899,7 +909,14 @@ public final class Player: LivingEntity {
         d["spawnDim"] = spawnDim
         d["effects"] = enc(effects)
         d["stats"] = stats
-        d["rpg"] = enc(repairRPGCharacterState(rpg))
+        if var encodedRPG = enc(repairRPGCharacterState(rpg)) as? [String: Any] {
+            if let envelope = rpgLegacyQuickSlotEnvelope, !omitLegacyQuickSlots {
+                encodedRPG["actionQuickSlots"] = envelope.preferences.tokens.map {
+                    ($0 as Any?) ?? NSNull()
+                }
+            }
+            d["rpg"] = encodedRPG
+        }
         return d
     }
     public override func load(_ d: [String: Any]) {
@@ -937,10 +954,21 @@ public final class Player: LivingEntity {
            bytes.count <= RPG_MAX_PERSISTED_PAYLOAD_BYTES,
            let decoded = try? JSONDecoder().decode(RPGCharacterState.self, from: bytes) {
             rpg = decoded
+            if let object = rawRPG as? [String: Any], object.keys.contains("actionQuickSlots") {
+                let next = rpgLegacyEnvelopeVersion.addingReportingOverflow(1)
+                if !next.overflow, next.partialValue > 0 {
+                    rpgLegacyEnvelopeVersion = next.partialValue
+                    rpgLegacyQuickSlotEnvelope = rpgExtractLegacyQuickSlotEnvelope(
+                        from: object["actionQuickSlots"], envelopeVersion: next.partialValue)
+                }
+            } else {
+                rpgLegacyQuickSlotEnvelope = nil
+            }
         } else {
             // A malformed or oversized RPG component must not discard the
             // player's inventory, pose, health, or other vanilla save data.
             rpg = .uncreated()
+            rpgLegacyQuickSlotEnvelope = nil
         }
         rpg = repairRPGCharacterState(rpg)
         // Active upkeep has no durable world counterpart: temporary servants,
@@ -963,5 +991,19 @@ public final class Player: LivingEntity {
                 else { effects.append(e) }
             }
         }
+    }
+
+    /// Called only after GameCore verifies exact session provenance, source digest, and immutable
+    /// migration origin. Returning false preserves the compatibility key byte-for-byte.
+    @discardableResult
+    public func markRPGLegacyQuickSlotsOmittable(
+        envelopeVersion: UInt64, sourceDigest: LANV6SHA256Digest
+    ) -> Bool {
+        guard var envelope = rpgLegacyQuickSlotEnvelope,
+              envelope.markOmissionEligible(
+                envelopeVersion: envelopeVersion, sourceDigest: sourceDigest)
+        else { return false }
+        rpgLegacyQuickSlotEnvelope = envelope
+        return true
     }
 }

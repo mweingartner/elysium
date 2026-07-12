@@ -1,8 +1,9 @@
 # LAN v6 Phase 2.0B — SaveDB Typed-Adapter and Legacy-Migration Contract
 
-Status: Architecture PASS after revision for the independent Security plan FAIL; awaiting renewed
-independent Security plan review of this amendment. Phase 2.0A is complete with independent Security
-code PASS and Tester PASS evidence. Design Mock, Design Review, and Design Sign-off are N/A because this is an internal
+Status: Implementation complete with independent Security code PASS and Tester PASS. Final focused
+evidence is 175/175 expanded persistence tests and 55/55 decisive adversarial tests. Phase 2.0A is
+complete with independent Security code PASS and Tester PASS evidence. Design Mock, Design Review,
+and Design Sign-off are N/A because this is an internal
 persistence rewrite with no intended visible or interactive change. That N/A remains valid only if
 the implementation preserves every public v5 save/gameplay failure shape and adds no visible copy,
 state, control, timing promise, or interaction.

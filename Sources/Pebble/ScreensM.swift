@@ -5,6 +5,7 @@
 import Foundation
 import QuartzCore
 import PebbleCore
+import PebbleTextInput
 
 private enum CraftAmountStepperLayout {
     static let buttonW = 12.0
@@ -134,6 +135,7 @@ class ContainerScreen: Screen {
 private final class CraftingRecipePopup {
     private(set) var plans: [CraftingRecipePlan] = []
     var open = false
+    var isOpen: Bool { open }
     private var typeahead = CraftingRecipeTypeahead(maxRows: 8, maxQueryLength: 48)
     private weak var button: Button?
     private let gridWidth: Int
@@ -272,6 +274,11 @@ private final class CraftingRecipePopup {
         return typeahead.append(text, plans: plans)
     }
 
+    var accessibilityQuery: String { typeahead.query }
+    var accessibilityFrame: (x: Double, y: Double, width: Double, height: Double) {
+        (x, y, w, max(searchH, 12))
+    }
+
     private var x: Double { button?.x ?? margin }
     private var y: Double { (button?.y ?? margin) + buttonH + 2 }
     private var w: Double { button?.w ?? menuW }
@@ -310,6 +317,7 @@ final class InventoryScreen: ContainerScreen {
     private weak var craftUpButton: Button?
     private weak var craftDownButton: Button?
     private weak var characterButton: Button?
+    private var recipeTextFocused = false
 
     override init() {
         super.init()
@@ -589,12 +597,17 @@ final class InventoryScreen: ContainerScreen {
     override func onMouseDown(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double, _ btn: Int) -> Bool {
         if let plan = recipeMenu.selectedPlan(at: mx, my) {
             selectRecipe(plan, ui, game)
+            ui.clearTextReadiness(screen: self, clearLogicalFocus: false)
             return true
         }
         if creativeCheckbox?.contains(mx, my) == true {
             return super.onMouseDown(ui, game, mx, my, btn)
         }
+        let wasOpen = recipeMenu.isOpen
         recipeMenu.closeIfOpenOutsideButton(mx, my)
+        if wasOpen && !recipeMenu.isOpen {
+            ui.clearTextReadiness(screen: self, clearLogicalFocus: false)
+        }
         return super.onMouseDown(ui, game, mx, my, btn)
     }
     override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
@@ -604,13 +617,54 @@ final class InventoryScreen: ContainerScreen {
         let result = recipeMenu.onKey(key)
         if result.handled {
             if let plan = result.plan { selectRecipe(plan, ui, game) }
+            if !recipeMenu.isOpen { ui.clearTextReadiness(screen: self, clearLogicalFocus: false) }
             return true
         }
         return super.onKey(ui, game, key)
     }
-    override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
-        if recipeMenu.onChar(ch) { return true }
-        return super.onChar(ui, game, ch)
+    override func ownsTextInput(_ ui: UIManager, _ game: GameCore) -> Bool {
+        (recipeMenu.isOpen && recipeTextFocused) || super.ownsTextInput(ui, game)
+    }
+    override func textOwnerDescriptorID(_ ui: UIManager, _ game: GameCore) -> String? {
+        recipeMenu.isOpen && recipeTextFocused
+            ? "inventory.recipeQuery" : super.textOwnerDescriptorID(ui, game)
+    }
+    override func textActivationDescriptorID(_ ui: UIManager, _ game: GameCore) -> String? {
+        recipeMenu.isOpen ? "inventory.recipeQuery" : super.textActivationDescriptorID(ui, game)
+    }
+    override func activateImplicitTextDescriptor(_ id: String) -> Bool {
+        guard recipeMenu.isOpen, id == "inventory.recipeQuery" else { return false }
+        super.clearTextFocus()
+        recipeTextFocused = true
+        return true
+    }
+    override func clearTextFocus() {
+        recipeTextFocused = false
+        super.clearTextFocus()
+    }
+    override func cancelImplicitTextOwnerActivation() -> Bool {
+        guard recipeMenu.isOpen else { return false }
+        recipeTextFocused = false
+        recipeMenu.close()
+        return true
+    }
+    override func insertText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
+        if recipeMenu.onChar(proposal) { return true }
+        return super.insertText(ui, game, proposal)
+    }
+    override func pasteText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
+        insertText(ui, game, proposal)
+    }
+    override func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore)
+        -> [TextEntryAccessibilityDescriptor] {
+        guard recipeMenu.isOpen else { return super.textAccessibilityDescriptors(ui, game) }
+        let frame = recipeMenu.accessibilityFrame
+        return [TextEntryAccessibilityDescriptor(
+            id: "inventory.recipeQuery", role: .searchField, label: "Recipe Search",
+            value: recipeMenu.accessibilityQuery,
+            help: "Type to filter recipes. Use Up and Down to choose and Return to select.",
+            frame: frame, enabled: true, focused: recipeTextFocused,
+            insertionUTF16Offset: recipeMenu.accessibilityQuery.utf16.count, focusable: true)]
     }
     override func onClose(_ ui: UIManager, _ game: GameCore) {
         _ = returnCraftGridToInventory(game)
@@ -651,6 +705,7 @@ final class CraftingScreen: ContainerScreen {
     private weak var craftUpButton: Button?
     private weak var craftDownButton: Button?
     private let readOnly: Bool
+    private var recipeTextFocused = false
 
     init(_ tablePos: (x: Int, y: Int, z: Int)? = nil, tableBE: BlockEntityData? = nil, readOnly: Bool = false) {
         self.tablePos = tablePos
@@ -919,12 +974,17 @@ final class CraftingScreen: ContainerScreen {
         }
         if let plan = recipeMenu.selectedPlan(at: mx, my) {
             selectRecipe(plan, ui, game)
+            ui.clearTextReadiness(screen: self, clearLogicalFocus: false)
             return true
         }
         if creativeCheckbox?.contains(mx, my) == true {
             return super.onMouseDown(ui, game, mx, my, btn)
         }
+        let wasOpen = recipeMenu.isOpen
         recipeMenu.closeIfOpenOutsideButton(mx, my)
+        if wasOpen && !recipeMenu.isOpen {
+            ui.clearTextReadiness(screen: self, clearLogicalFocus: false)
+        }
         return super.onMouseDown(ui, game, mx, my, btn)
     }
     override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
@@ -936,14 +996,56 @@ final class CraftingScreen: ContainerScreen {
         let result = recipeMenu.onKey(key)
         if result.handled {
             if let plan = result.plan { selectRecipe(plan, ui, game) }
+            if !recipeMenu.isOpen { ui.clearTextReadiness(screen: self, clearLogicalFocus: false) }
             return true
         }
         return super.onKey(ui, game, key)
     }
-    override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
-        if readOnly { return super.onChar(ui, game, ch) }
-        if recipeMenu.onChar(ch) { return true }
-        return super.onChar(ui, game, ch)
+    override func ownsTextInput(_ ui: UIManager, _ game: GameCore) -> Bool {
+        (!readOnly && recipeMenu.isOpen && recipeTextFocused) || super.ownsTextInput(ui, game)
+    }
+    override func textOwnerDescriptorID(_ ui: UIManager, _ game: GameCore) -> String? {
+        !readOnly && recipeMenu.isOpen && recipeTextFocused
+            ? "crafting.recipeQuery" : super.textOwnerDescriptorID(ui, game)
+    }
+    override func textActivationDescriptorID(_ ui: UIManager, _ game: GameCore) -> String? {
+        !readOnly && recipeMenu.isOpen
+            ? "crafting.recipeQuery" : super.textActivationDescriptorID(ui, game)
+    }
+    override func activateImplicitTextDescriptor(_ id: String) -> Bool {
+        guard !readOnly, recipeMenu.isOpen, id == "crafting.recipeQuery" else { return false }
+        super.clearTextFocus()
+        recipeTextFocused = true
+        return true
+    }
+    override func clearTextFocus() {
+        recipeTextFocused = false
+        super.clearTextFocus()
+    }
+    override func cancelImplicitTextOwnerActivation() -> Bool {
+        guard recipeMenu.isOpen else { return false }
+        recipeTextFocused = false
+        recipeMenu.close()
+        return true
+    }
+    override func insertText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
+        if readOnly { return super.insertText(ui, game, proposal) }
+        if recipeMenu.onChar(proposal) { return true }
+        return super.insertText(ui, game, proposal)
+    }
+    override func pasteText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
+        insertText(ui, game, proposal)
+    }
+    override func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore)
+        -> [TextEntryAccessibilityDescriptor] {
+        guard !readOnly, recipeMenu.isOpen else { return super.textAccessibilityDescriptors(ui, game) }
+        let frame = recipeMenu.accessibilityFrame
+        return [TextEntryAccessibilityDescriptor(
+            id: "crafting.recipeQuery", role: .searchField, label: "Recipe Search",
+            value: recipeMenu.accessibilityQuery,
+            help: "Type to filter recipes. Use Up and Down to choose and Return to select.",
+            frame: frame, enabled: true, focused: recipeTextFocused,
+            insertionUTF16Offset: recipeMenu.accessibilityQuery.utf16.count, focusable: true)]
     }
     override func onClose(_ ui: UIManager, _ game: GameCore) {
         if tableBE == nil && !readOnly {
@@ -1294,7 +1396,8 @@ final class AnvilScreen: ContainerScreen {
     var right: ItemStack?
     var result: ItemStack?
     var cost = 0
-    let nameField = TextField(0, 0, 96, 14)
+    let nameField = TextField(0, 0, 96, 14, "",
+                              id: "anvil.name", accessibilityLabel: "Item Name")
     private var pos: (x: Int, y: Int, z: Int, damage: Int)
 
     init(_ pos: (x: Int, y: Int, z: Int, damage: Int)) {
@@ -1368,8 +1471,13 @@ final class AnvilScreen: ContainerScreen {
         result = r?.out
         cost = r?.cost ?? 0
     }
-    override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
-        let r = super.onChar(ui, game, ch)
+    override func insertText(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
+        let r = super.insertText(ui, game, ch)
+        if r { refresh() }
+        return r
+    }
+    override func pasteText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
+        let r = super.pasteText(ui, game, proposal)
         if r { refresh() }
         return r
     }
@@ -1833,7 +1941,8 @@ private let CREATIVE_SLOT_SIZE = 18.0
 final class CreativeScreen: ContainerScreen {
     var tab = 0
     var scroll = 0
-    let search = TextField(0, 0, 162, 14, "Search")
+    let search = TextField(0, 0, 162, 14, "Search",
+                           id: "creative.search", accessibilityLabel: "Search")
     var filtered: [Int] = []
     private weak var creativeCheckbox: CheckBox?
     private weak var characterButton: Button?
@@ -1998,8 +2107,13 @@ final class CreativeScreen: ContainerScreen {
         scroll = max(0, min(maxScroll, scroll + (dy > 0 ? 1 : -1)))
         return true
     }
-    override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
-        let r = super.onChar(ui, game, ch)
+    override func insertText(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
+        let r = super.insertText(ui, game, ch)
+        if r { refresh() }
+        return r
+    }
+    override func pasteText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
+        let r = super.pasteText(ui, game, proposal)
         if r { refresh() }
         return r
     }
@@ -2014,18 +2128,57 @@ final class CreativeScreen: ContainerScreen {
 // Sign editing
 // =============================================================================
 final class SignScreen: Screen {
-    var lines = ["", "", "", ""]
-    var lineIdx = 0
-    private let be: BlockEntityData?
+    private var safeLines = PebbleFourSignLines()
+    var lines: [String] { safeLines.array }
+    private var activeLine: PebbleSignLineIndex = .first
+    var lineIdx: Int { activeLine.rawValue }
+    private var sourceBE: BlockEntityData?
+    private var commitToken: SignCommitToken?
     private let pos: (x: Int, y: Int, z: Int)
+    private var initialized = false
+    private var authoritative = false
+    private var status: String?
+    private var pendingAccessibilityAnnouncement: String?
+    private var failedUnchangedEscape = false
+    private var textFocused = false
 
     init(_ be: BlockEntityData?, _ pos: (x: Int, y: Int, z: Int)) {
-        self.be = be
+        self.sourceBE = be
         self.pos = pos
         super.init()
-        if let l = be?.lines { lines = l }
+        closeOnEsc = false
+    }
+    override func initScreen(_ ui: UIManager, _ game: GameCore) {
+        guard !initialized else { return }
+        initialized = true
+        authoritative = !game.isLANClientWorld
+        let repair = pebbleRepairSignLines(sourceBE?.lines, makeWidthStep: makeTextWidthStep)
+        safeLines = repair.lines
+        if authoritative {
+            commitToken = MainActor.assumeIsolated {
+                game.captureSignCommitToken(x: pos.x, y: pos.y, z: pos.z,
+                                            expectedEntity: sourceBE)
+            }
+            status = repair.repaired ? "Sign text repaired" : nil
+        } else {
+            status = "Only the host can edit signs."
+        }
+        pendingAccessibilityAnnouncement = status
+        sourceBE = nil
     }
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
+        if authoritative && game.isLANClientWorld {
+            ui.clearTextReadiness(screen: self, clearLogicalFocus: true)
+            authoritative = false
+            let current = game.world.getBlockEntity(pos.x, pos.y, pos.z)
+            safeLines = pebbleRepairSignLines(current?.lines,
+                                              makeWidthStep: makeTextWidthStep).lines
+            status = "Only the host can edit signs."
+            pendingAccessibilityAnnouncement = status
+        } else if !authoritative && !game.isLANClientWorld {
+            ui.closeTop(game)
+            return
+        }
         ui.drawDarkBg(0.5)
         let w = 140.0, h = 80.0
         let px = ((ui.width - w) / 2).rounded(.down), py = ((ui.height - h) / 2).rounded(.down)
@@ -2034,41 +2187,122 @@ final class SignScreen: Screen {
         cv.fillRect(px, py, w, h)
         cv.setFill("#85643a")
         cv.fillRect(px + 2, py + 2, w - 4, h - 4)
-        for i in 0..<4 {
-            let blink = i == lineIdx && Int(CACurrentMediaTime() * 1000 / 400) % 2 == 0 ? "_" : ""
-            cv.drawTextCentered(lines[i] + blink, px + w / 2, py + 12 + Double(i) * 15, 1, "#1c1208", shadow: false)
+        for index in PebbleSignLineIndex.allCases {
+            let blink = authoritative && index == activeLine &&
+                Int(CACurrentMediaTime() * 1000 / 400) % 2 == 0 ? "_" : ""
+            cv.drawTextCentered(safeLines.line(index).text + blink, px + w / 2,
+                                py + 12 + Double(index.rawValue) * 15, 1,
+                                "#1c1208", shadow: false)
         }
-        cv.drawTextCentered("Press Enter / Esc to finish", px + w / 2, py + h + 8, 1)
+        cv.drawTextCentered(status ?? "Press Enter / Esc to finish",
+                            px + w / 2, py + h + 8, 1)
     }
-    override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
-        if textWidth(lines[lineIdx] + ch) < 90 {
-            lines[lineIdx] += ch
+    override func ownsTextInput(_ ui: UIManager, _ game: GameCore) -> Bool {
+        authoritative && !game.isLANClientWorld && textFocused
+    }
+    override func textOwnerDescriptorID(_ ui: UIManager, _ game: GameCore) -> String? {
+        ownsTextInput(ui, game) ? "sign.editor" : nil
+    }
+    override func textActivationDescriptorID(_ ui: UIManager, _ game: GameCore) -> String? {
+        authoritative && !game.isLANClientWorld ? "sign.editor" : nil
+    }
+    override func activateImplicitTextDescriptor(_ id: String) -> Bool {
+        guard authoritative, id == "sign.editor" else { return false }
+        textFocused = true
+        return true
+    }
+    override func clearTextFocus() { textFocused = false }
+    override func insertText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
+        guard authoritative, !game.isLANClientWorld else { return true }
+        let result = pebbleAppendSignText(proposal, to: safeLines.line(activeLine),
+                                          makeWidthStep: makeTextWidthStep)
+        if result.acceptedCharacterCount > 0 {
+            safeLines.set(result.line, at: activeLine)
+            status = nil
+            pendingAccessibilityAnnouncement = nil
+            failedUnchangedEscape = false
+        }
+        if result.stoppedForCapacity {
+            status = "Line is full"
+            pendingAccessibilityAnnouncement = status
         }
         return true
     }
+    override func pasteText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
+        insertText(ui, game, proposal)
+    }
+    override func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore)
+        -> [TextEntryAccessibilityDescriptor] {
+        let w = 140.0, h = 80.0
+        let px = ((ui.width - w) / 2).rounded(.down)
+        let py = ((ui.height - h) / 2).rounded(.down)
+        let value = safeLines.array.joined(separator: "\n")
+        if !authoritative || game.isLANClientWorld {
+            return [TextEntryAccessibilityDescriptor(
+                id: "sign.viewer", role: .staticText, label: "Sign",
+                value: value, help: "Only the host can edit signs. Read-only snapshot.",
+                frame: (px, py, w, h), enabled: true, focused: false,
+                insertionUTF16Offset: nil, focusable: false)]
+        }
+        var insertion = 0
+        for index in PebbleSignLineIndex.allCases where index.rawValue < activeLine.rawValue {
+            insertion += safeLines.line(index).text.utf16.count + 1
+        }
+        insertion += safeLines.line(activeLine).text.utf16.count
+        return [TextEntryAccessibilityDescriptor(
+            id: "sign.editor", role: .textField, label: "Sign", value: value,
+            help: "Four-line sign editor. Up and Down change lines. Return or Escape saves.",
+            frame: (px, py, w, h), enabled: true, focused: textFocused,
+            insertionUTF16Offset: insertion, focusable: true)]
+    }
+    override func consumeTextAccessibilityStatusAnnouncement() -> String? {
+        defer { pendingAccessibilityAnnouncement = nil }
+        return pendingAccessibilityAnnouncement
+    }
     override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
+        if !authoritative || game.isLANClientWorld {
+            if key == "Escape" { ui.closeTop(game) }
+            return true
+        }
         if key == "Backspace" {
-            if !lines[lineIdx].isEmpty { lines[lineIdx].removeLast() }
+            let current = safeLines.line(activeLine)
+            if !current.text.isEmpty {
+                safeLines.set(pebbleDeleteLastSignCharacter(current), at: activeLine)
+                status = nil
+                failedUnchangedEscape = false
+            }
             return true
         }
         if key == "Enter" || key == "ArrowDown" {
-            lineIdx = (lineIdx + 1) % 4
-            if key == "Enter" && lineIdx == 0 { ui.closeTop(game) }
+            let next = PebbleSignLineIndex(rawValue: (activeLine.rawValue + 1) % 4) ?? .first
+            activeLine = next
+            status = nil
+            failedUnchangedEscape = false
+            if key == "Enter" && activeLine == .first { attemptCommit(ui, game) }
             return true
         }
         if key == "ArrowUp" {
-            lineIdx = (lineIdx + 3) % 4
+            activeLine = PebbleSignLineIndex(rawValue: (activeLine.rawValue + 3) % 4) ?? .first
+            status = nil
+            failedUnchangedEscape = false
             return true
         }
+        if key == "Escape" { attemptCommit(ui, game); return true }
         return false
     }
-    override func onClose(_ ui: UIManager, _ game: GameCore) {
-        var sign = be
-        if sign == nil {
-            sign = makeSignBE(pos.x, pos.y, pos.z)
-            game.world.setBlockEntity(sign!)
+    private func attemptCommit(_ ui: UIManager, _ game: GameCore) {
+        guard authoritative, !game.isLANClientWorld else { ui.closeTop(game); return }
+        let committed = commitToken.map { token in
+            MainActor.assumeIsolated { game.commitSignEdit(token: token, lines: safeLines) }
+        } ?? false
+        guard committed else {
+            if failedUnchangedEscape { ui.closeTop(game); return }
+            status = "Sign update failed"
+            pendingAccessibilityAnnouncement = status
+            failedUnchangedEscape = true
+            return
         }
-        sign!.lines = lines
+        ui.closeTop(game)
     }
 }
 
@@ -2126,9 +2360,9 @@ final class TemplateNameScreen: Screen {
 
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         let f = frame(ui)
-        let field = TextField(f.x + 16, f.y + 48, f.w - 32, 20, "template name")
+        let field = TextField(f.x + 16, f.y + 48, f.w - 32, 20, "template name",
+                              id: "template.name", accessibilityLabel: "Template Name")
         field.maxLength = OBJECT_TEMPLATE_NAME_MAX
-        field.focused = true
         nameField = field
         fields.append(field)
         buttons.append(Button(f.x + f.w - 140, f.y + f.h - 30, 60, 20, "Save", { [weak self, weak ui, weak game] in
@@ -2140,6 +2374,10 @@ final class TemplateNameScreen: Screen {
             ui.closeTop(game)
             game.host?.capturePointer()
         }))
+    }
+
+    override func textActivationDescriptorID(_ ui: UIManager, _ game: GameCore) -> String? {
+        "template.name"
     }
 
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
@@ -2170,8 +2408,15 @@ final class TemplateNameScreen: Screen {
         }
     }
 
-    override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
-        if super.onChar(ui, game, ch) {
+    override func insertText(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
+        if super.insertText(ui, game, ch) {
+            errorMessage = nil
+            return true
+        }
+        return false
+    }
+    override func pasteText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
+        if super.pasteText(ui, game, proposal) {
             errorMessage = nil
             return true
         }
@@ -2871,7 +3116,17 @@ private func drawChatLine(_ cv: UICanvas, _ line: String, _ x: Double, _ y: Doub
 }
 
 final class ChatScreen: Screen {
-    var input = ""
+    private static let inputLimit = PebbleTextLimit(maximumCharacters: 2_048,
+                                                     maximumUTF8Bytes: 16_384)
+    private var inputBuffer = PebbleBoundedTextBuffer("", limit: ChatScreen.inputLimit)
+    var input: String {
+        get { inputBuffer.text }
+        set {
+            if !inputBuffer.replaceAtomically(newValue, limit: ChatScreen.inputLimit) {
+                limitStatus = "Input limit reached"
+            }
+        }
+    }
     var historyIdx = -1
     static var history: [String] = []
     private let runCommandFn: (String) -> Void
@@ -2880,11 +3135,15 @@ final class ChatScreen: Screen {
     private var completionLastInput: String?
     private var completionMatches: [String] = []
     private var completionIndex: Int?
+    private var limitStatus: String?
+    private var pendingAccessibilityAnnouncement: String?
+    private var validOwner = true
+    private var textFocused = false
 
     init(_ runCommand: @escaping (String) -> Void, _ prefill: String = "") {
         runCommandFn = runCommand
-        input = prefill
         super.init()
+        validOwner = inputBuffer.replaceAtomically(prefill, limit: ChatScreen.inputLimit)
     }
     private func resetCompletion() {
         completionBaseInput = nil
@@ -2925,7 +3184,12 @@ final class ChatScreen: Screen {
         completionLastInput = result.completedInput
         completionMatches = result.matches
         completionIndex = result.selectedIndex
-        input = result.completedInput
+        guard inputBuffer.replaceAtomically(result.completedInput, limit: ChatScreen.inputLimit) else {
+            limitStatus = "Input limit reached"
+            resetCompletion()
+            return true
+        }
+        limitStatus = nil
         return true
     }
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
@@ -2957,18 +3221,83 @@ final class ChatScreen: Screen {
         }
         cv.setFill("rgba(0,0,0,0.6)")
         cv.fillRect(2, ui.height - inputHeight - 2, ui.width - 4, inputHeight)
+        if let limitStatus {
+            let statusY = max(2, ui.height - inputHeight - chatLineHeight - 3)
+            cv.setFill("rgba(0,0,0,0.6)")
+            cv.fillRect(2, statusY - 1, Double(textWidth(limitStatus)) + 6, chatLineHeight)
+            cv.drawText(limitStatus, 4, statusY, 1, "#ffbf40")
+        }
         for (i, line) in inputWrapped.enumerated() {
             cv.drawText(line, 4, ui.height - inputHeight + 1 + Double(i) * chatLineHeight, 1)
         }
     }
-    override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
-        input += ch
-        resetCompletion()
+    override func ownsTextInput(_ ui: UIManager, _ game: GameCore) -> Bool {
+        validOwner && textFocused
+    }
+    override func textOwnerDescriptorID(_ ui: UIManager, _ game: GameCore) -> String? {
+        validOwner && textFocused ? "chat.input" : nil
+    }
+    override func textActivationDescriptorID(_ ui: UIManager, _ game: GameCore) -> String? {
+        validOwner ? "chat.input" : nil
+    }
+    override func activateImplicitTextDescriptor(_ id: String) -> Bool {
+        guard validOwner, id == "chat.input" else { return false }
+        textFocused = true
         return true
+    }
+    override func clearTextFocus() { textFocused = false }
+    override func insertText(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
+        guard validOwner else { return true }
+        switch inputBuffer.insertWholeProposalAtomically(
+            ch, atCharacterOffset: inputBuffer.characterCount, limit: ChatScreen.inputLimit) {
+        case .accepted:
+            limitStatus = nil
+            pendingAccessibilityAnnouncement = nil
+            resetCompletion()
+        case .rejectedLimit:
+            limitStatus = "Input limit reached"
+            pendingAccessibilityAnnouncement = limitStatus
+        case .rejectedInvalid:
+            break
+        }
+        return true
+    }
+    override func pasteText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
+        guard validOwner else { return true }
+        switch inputBuffer.insertValidPrefixAtomically(
+            proposal, atCharacterOffset: inputBuffer.characterCount, limit: ChatScreen.inputLimit) {
+        case .accepted:
+            limitStatus = nil
+            pendingAccessibilityAnnouncement = nil
+            resetCompletion()
+        case .rejectedLimit:
+            limitStatus = "Input limit reached"
+            pendingAccessibilityAnnouncement = limitStatus
+        case .rejectedInvalid:
+            break
+        }
+        return true
+    }
+    override func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore)
+        -> [TextEntryAccessibilityDescriptor] {
+        guard validOwner else { return [] }
+        let height = Double(inputLines(ui, blink: "").count) * chatLineHeight + 4
+        return [TextEntryAccessibilityDescriptor(
+            id: "chat.input", role: .textField,
+            label: input.hasPrefix("/") ? "Command" : "Chat", value: input,
+            help: "Append-only text. Backspace removes the last character. Return submits.",
+            frame: (2, ui.height - height - 2, ui.width - 4, height),
+            enabled: true, focused: textFocused, insertionUTF16Offset: input.utf16.count,
+            focusable: true)]
+    }
+    override func consumeTextAccessibilityStatusAnnouncement() -> String? {
+        defer { pendingAccessibilityAnnouncement = nil }
+        return pendingAccessibilityAnnouncement
     }
     override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
         if key == "Backspace" {
-            if !input.isEmpty { input.removeLast() }
+            var caret = inputBuffer.characterCount
+            if inputBuffer.deleteBackward(atCharacterOffset: &caret) { limitStatus = nil }
             resetCompletion()
             return true
         }
@@ -2977,6 +3306,9 @@ final class ChatScreen: Screen {
             if !input.trimmingCharacters(in: .whitespaces).isEmpty {
                 let submitted = input
                 ChatScreen.history.append(submitted)
+                if ChatScreen.history.count > 100 {
+                    ChatScreen.history.removeFirst(ChatScreen.history.count - 100)
+                }
                 resetCompletion()
                 ui.closeTop(game)
                 runCommandFn(submitted)
@@ -2989,7 +3321,12 @@ final class ChatScreen: Screen {
         if key == "ArrowUp" {
             if !ChatScreen.history.isEmpty {
                 historyIdx = historyIdx < 0 ? ChatScreen.history.count - 1 : max(0, historyIdx - 1)
-                input = ChatScreen.history[historyIdx]
+                if inputBuffer.replaceAtomically(ChatScreen.history[historyIdx],
+                                                 limit: ChatScreen.inputLimit) {
+                    limitStatus = nil
+                } else {
+                    limitStatus = "Input limit reached"
+                }
                 resetCompletion()
             }
             return true
@@ -2997,7 +3334,12 @@ final class ChatScreen: Screen {
         if key == "ArrowDown" {
             if historyIdx >= 0 {
                 historyIdx = min(ChatScreen.history.count - 1, historyIdx + 1)
-                input = ChatScreen.history[historyIdx]
+                if inputBuffer.replaceAtomically(ChatScreen.history[historyIdx],
+                                                 limit: ChatScreen.inputLimit) {
+                    limitStatus = nil
+                } else {
+                    limitStatus = "Input limit reached"
+                }
                 resetCompletion()
             }
             return true

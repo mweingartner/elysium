@@ -5,6 +5,12 @@
 import AppKit
 import MetalKit
 import PebbleCore
+import PebbleTextInput
+import PebbleAppSupport
+
+// The bounded, pure harness parse is intentionally the first bootstrap decision.
+private let pebbleBootstrapDecision =
+    RPGUIHarnessBootstrap.parseIfPresent(ProcessInfo.processInfo.environment)
 
 // ---------------------------------------------------------------------------
 // NSEvent keyCode (kVK_*) → internal key-code strings (GameCore keybinds)
@@ -57,6 +63,10 @@ final class HostBridge: GameHost {
 
     func hasScreen() -> Bool { app?.ui.hasScreen() ?? false }
     func screenPausesGame() -> Bool { app?.ui.current()?.pausesGame ?? false }
+    func rpgLocalPreferenceDidRefresh(_ refresh: RPGLocalPreferenceUIRefresh) {
+        guard let app else { return }
+        app.ui.refreshCurrentRPGScreen(refresh, game: app.game)
+    }
 
     func openScreen(_ kind: String, _ data: ScreenData?) {
         guard let app else { return }
@@ -191,14 +201,118 @@ func Pebble_pushChat(_ line: String) { pushChat(line) }
 /// LoadingScreen reads mesh progress off the renderer through this
 weak var gAppDelegate: AppDelegate?
 
+/// Owns the single launch-time request that may make Pebble active. The reveal token is minted
+/// only after the launch window is visibly usable, and consumption closes the coordinator before
+/// calling AppKit so re-entrant lifecycle callbacks cannot issue a second request.
+@MainActor
+final class LaunchActivationAtRevealCoordinator {
+    private var state: PebbleLaunchActivationState<ObjectIdentifier>
+
+    init(window: NSWindow, generation: UInt64) {
+        state = PebbleLaunchActivationState(
+            windowIdentity: ObjectIdentifier(window), generation: generation)
+    }
+
+    func token(kind: PebbleLaunchRevealKind, window: NSWindow,
+               generation: UInt64) -> PebbleLaunchRevealToken<ObjectIdentifier> {
+        state.token(
+            kind: kind, windowIdentity: ObjectIdentifier(window), generation: generation)
+    }
+
+    func consume(_ token: PebbleLaunchRevealToken<ObjectIdentifier>, window: NSWindow,
+                 generation: UInt64,
+                 fullscreenEntered: Bool) {
+        let frame = window.frame
+        let finitePositive = [frame.origin.x, frame.origin.y, frame.width, frame.height]
+            .map(Double.init).allSatisfy(\.isFinite) && frame.width > 0 && frame.height > 0
+        let decision = state.consume(
+            token,
+            predicates: PebbleLaunchRevealPredicates(
+                opaque: window.alphaValue == 1,
+                visible: window.isVisible,
+                ordinaryLevel: window.level == .normal,
+                mouseAccepting: !window.ignoresMouseEvents,
+                finitePositiveGeometry: finitePositive,
+                onScreen: window.screen.map { $0.frame.contains(frame) } == true,
+                fullscreenEntered: fullscreenEntered,
+                fullscreenStyle: window.styleMask.contains(.fullScreen),
+                keyWindow: window.isKeyWindow),
+            applicationActive: NSApp.isActive)
+        guard decision == .request else { return }
+        NSApp.activate()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MTKView with keyboard/mouse capture + screen routing
 // ---------------------------------------------------------------------------
 final class GameView: MTKView {
     weak var appd: AppDelegate?
     private(set) var mouseCaptured = false
+    private lazy var appInputRouter = AppInputRouter(view: self)
+    private lazy var rpgAccessibilityBridge = RPGAccessibilityBridge(view: self)
+    private lazy var textEntryAccessibilityBridge = TextEntryAccessibilityBridge(view: self)
 
     override var acceptsFirstResponder: Bool { true }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { "Pebble menus and actions" }
+
+    @discardableResult
+    func publishAccessibilityChildren() -> Bool {
+        let ids = textEntryAccessibilityBridge.stableIDs + rpgAccessibilityBridge.stableIDs
+        guard ids.count <= 512, Set(ids).count == ids.count else {
+            textEntryAccessibilityBridge.invalidate()
+            rpgAccessibilityBridge.invalidate(publish: false)
+            setAccessibilityChildren([])
+            NSAccessibility.post(element: self, notification: .layoutChanged)
+            return false
+        }
+        setAccessibilityChildren(textEntryAccessibilityBridge.children +
+                                 rpgAccessibilityBridge.children)
+        return true
+    }
+
+    func commitTextAccessibility(screen: Screen,
+                                 descriptors: [TextEntryAccessibilityDescriptor]) {
+        if textEntryAccessibilityBridge.commit(screen: screen, descriptors: descriptors) {
+            publishAccessibilityChildren()
+        }
+    }
+
+    func invalidateTextAccessibility() {
+        if textEntryAccessibilityBridge.invalidate() { publishAccessibilityChildren() }
+    }
+
+    func invalidateAllAccessibility() {
+        let hadText = textEntryAccessibilityBridge.invalidate()
+        let hadRPG = !rpgAccessibilityBridge.children.isEmpty
+        rpgAccessibilityBridge.invalidate(publish: false)
+        if hadText || hadRPG { setAccessibilityChildren([]) }
+    }
+
+    func textAccessibilityElement(id: String) -> TextEntryAccessibilityElement? {
+        textEntryAccessibilityBridge.element(id: id)
+    }
+
+    func commitRPGAccessibility(screen: Screen, tree: RPGAccessibilityTreeSnapshot) {
+        rpgAccessibilityBridge.commit(screen: screen, tree: tree)
+    }
+
+    func invalidateRPGAccessibility() {
+        rpgAccessibilityBridge.invalidate()
+    }
+
+    /// Returns one already-retained focused accessibility object. Ambiguity fails closed so one
+    /// activation epoch can never publish two competing focus contexts.
+    func retainedAccessibilityFocusTarget() -> Any? {
+        let candidates: [Any] = [
+            textEntryAccessibilityBridge.retainedFocusedElement(),
+            rpgAccessibilityBridge.retainedFocusedElement(),
+        ].compactMap { $0 }
+        return candidates.count == 1 ? candidates[0] : nil
+    }
 
     func captureMouse() {
         if mouseCaptured { return }
@@ -213,9 +327,9 @@ final class GameView: MTKView {
         NSCursor.unhide()
     }
 
-    private func nowMs() -> Double { CACurrentMediaTime() * 1000 }
-    private var ui: UIManager? { appd?.ui }
-    private var game: GameCore? { appd?.game }
+    func nowMs() -> Double { CACurrentMediaTime() * 1000 }
+    var ui: UIManager? { appd?.ui }
+    var game: GameCore? { appd?.game }
 
     private func uiPos(_ event: NSEvent) -> (Double, Double) {
         // AppKit origin is bottom-left in points; UI space is top-left in
@@ -227,91 +341,13 @@ final class GameView: MTKView {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if handleObjectTemplateShortcut(event) { return true }
+        if appInputRouter.route(event: event, source: .performKeyEquivalent) { return true }
         return super.performKeyEquivalent(with: event)
     }
 
     override func keyDown(with event: NSEvent) {
-        guard let game, let ui = ui else { return }
-        let code = KEYCODE_MAP[event.keyCode] ?? ""
-        // fullscreen toggle works everywhere, including over open screens
-        if code == "F11" {
-            window?.toggleFullScreen(nil)
-            return
-        }
-        if let screen = ui.current() {
-            if event.isARepeat && code != "Backspace" && !code.hasPrefix("Arrow") &&
-                code != "Comma" && code != "Period" { return }
-            if code == "Escape" {
-                if screen.closeOnEsc {
-                    ui.closeTop(game)
-                    recaptureIfClear()
-                }
-                return
-            }
-            if screen.onKey(ui, game, code) {
-                recaptureIfClear()
-                return
-            }
-            if let chars = event.characters, !chars.isEmpty, !event.modifierFlags.contains(.command),
-               !event.modifierFlags.contains(.control),
-               chars.allSatisfy({ !$0.isNewline && $0.asciiValue.map { $0 >= 32 } ?? true }) {
-                if screen.onChar(ui, game, chars) { return }
-            }
-            // inventory key closes inventory-style screens (never text screens)
-            if code == game.keybinds["inventory"], screen.closeOnEsc, !(screen is ChatScreen),
-               !screen.fields.contains(where: { $0.focused }) {
-                ui.closeTop(game)
-                recaptureIfClear()
-            }
-            return
-        }
-        guard game.hasWorld() else { return }
-        if code == "Comma" {
-            game.zoomMap(false)
-            return
-        }
-        if code == "Period" {
-            game.zoomMap(true)
-            return
-        }
-        if event.isARepeat { return }
-        // HUD toggles stay app-side
-        if code == "F3" {
-            appd?.hud.debugVisible.toggle()
-            return
-        }
-        if code == "F1" {
-            appd?.hud.hideGui.toggle()
-            return
-        }
-        if handleObjectTemplateShortcut(event) { return }
-        if code == "Minus" || code == "NumpadSubtract" {
-            game.cycleMinimapSize(larger: false)
-            return
-        }
-        if code == "Equal" || code == "NumpadEqual" {
-            game.cycleMinimapSize(larger: true)
-            return
-        }
-        if code == "KeyM" {
-            game.openScreen("map", nil)
-            return
-        }
-        game.keyDown(code, now: nowMs(),
-                     ctrlOrCmd: event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control))
-    }
-
-    @discardableResult
-    private func handleObjectTemplateShortcut(_ event: NSEvent) -> Bool {
-        guard let game, let ui = ui else { return false }
-        let code = KEYCODE_MAP[event.keyCode] ?? ""
-        guard let action = objectTemplateShortcutAction(forKey: code,
-                                                        commandDown: event.modifierFlags.contains(.command),
-                                                        hasOpenScreen: ui.hasScreen(),
-                                                        hasWorld: game.hasWorld(),
-                                                        isRepeat: event.isARepeat) else { return false }
-        return performObjectTemplateShortcut(action)
+        if appInputRouter.route(event: event, source: .keyDown) { return }
+        super.keyDown(with: event)
     }
 
     @discardableResult
@@ -345,31 +381,20 @@ final class GameView: MTKView {
     }
 
     override func keyUp(with event: NSEvent) {
-        guard let game, let code = KEYCODE_MAP[event.keyCode] else { return }
-        game.keyUp(code)
+        appInputRouter.release(event: event)
     }
     override func flagsChanged(with event: NSEvent) {
-        guard let game, let ui = ui else { return }
-        let shift = event.modifierFlags.contains(.shift)
-        let ctrl = event.modifierFlags.contains(.control)
-        ui.optionDown = event.modifierFlags.contains(.option)
-        ui.shiftDown = shift
-        if ui.hasScreen() {
-            // releases must still reach the game — eating them left the
-            // player permanently sneaking after shift+E, release, close
-            if !shift { game.keyUp("ShiftLeft") }
-            if !ctrl { game.keyUp("ControlLeft") }
-            return
-        }
-        // sneak/sprint default binds are modifier keys — synthesize code events
-        if shift { game.keyDown("ShiftLeft", now: nowMs()) } else { game.keyUp("ShiftLeft") }
-        if ctrl { game.keyDown("ControlLeft", now: nowMs()) } else { game.keyUp("ControlLeft") }
+        appInputRouter.flagsChanged(with: event)
     }
 
-    private func recaptureIfClear() {
+    func recaptureIfClear() {
         if let ui = ui, !ui.hasScreen(), let game = game, game.hasWorld() {
             captureMouse()
         }
+    }
+
+    func resetPressedBindings() {
+        appInputRouter.resetPressedBindings()
     }
 
     private func routeMouseDown(_ event: NSEvent, _ btn: Int) {
@@ -460,6 +485,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     var ui: UIManager!
     let hud = HUD()
     let audio = AudioEngineM()
+    private var rpgControllerAdapter: RPGControllerAdapter!
     private var lastFrame = CACurrentMediaTime()
     private var startTime = CACurrentMediaTime()
     private var fpsCounter = 0
@@ -485,11 +511,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         let parts = v.components(separatedBy: "@")
         return (parts[0], parts.count > 1 ? Int(parts[1]) ?? 240 : 240)
     }()
-    // test hook: PEBBLE_RPG_AUTOCREATE=1 creates a character with the debug RPG path/starter env once the world is up.
-    private var pendingRPGAutoCreate = ProcessInfo.processInfo.environment["PEBBLE_RPG_AUTOCREATE"]
     // test hook: PEBBLE_OPEN_SCREEN=inventory|templates|templatesPlace|creative|map|rpg opens an allowlisted UI screen before PEBBLE_SHOT.
     private var pendingOpenScreen = ProcessInfo.processInfo.environment["PEBBLE_OPEN_SCREEN"]
     private var pendingOpenScreenDelay = 0
+    private let launchRevealGeneration: UInt64 = 1
+    private var launchActivationAtReveal: LaunchActivationAtRevealCoordinator!
+    private var activationEpoch: UInt64 = 0
+    private var publishedAccessibilityFocusEpoch: UInt64 = 0
+    private var activationEpochOpen = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         gAppDelegate = self
@@ -509,10 +538,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         let rect = NSRect(x: 0, y: 0, width: 1440, height: 810)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
+        launchActivationAtReveal = LaunchActivationAtRevealCoordinator(
+            window: window, generation: launchRevealGeneration)
         window.title = "Pebble"
         window.center()
         gameView = GameView(frame: rect, device: device)
         gameView.appd = self
+        ui.textInputView = gameView
         gameView.delegate = self
         gameView.colorPixelFormat = .bgra8Unorm
         gameView.depthStencilPixelFormat = .invalid
@@ -529,9 +561,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         // the windowed popup or the zoom animation, just a fade-in (the reveal
         // happens in windowDidEnterFullScreen, or after the retry loop gives up)
         window.alphaValue = 0
-        window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(gameView)
-        NSApp.activate(ignoringOtherApps: true)
+        if NSApp.isActive {
+            window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(gameView)
+        } else {
+            // Ordering an inactive launch is truthful: the window is present but does not claim
+            // key/responder state until AppKit confirms that Pebble became active.
+            window.orderFront(nil)
+        }
         // launch straight into fullscreen (F11 toggles back). AppKit silently
         // drops toggleFullScreen during the launch transaction, so retry until
         // the window actually transitions.
@@ -548,6 +585,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         }
 
         ui.resize(Double(gameView.drawableSize.width), Double(gameView.drawableSize.height), game.settings.guiScale)
+        ui.rpgAccessibilityDidCommit = { [weak gameView] screen, tree in
+            gameView?.commitRPGAccessibility(screen: screen, tree: tree)
+        }
+        ui.rpgAccessibilityDidInvalidate = { [weak gameView] in
+            gameView?.invalidateRPGAccessibility()
+        }
+        ui.textAccessibilityDidCommit = { [weak gameView] screen, descriptors in
+            gameView?.commitTextAccessibility(screen: screen, descriptors: descriptors)
+        }
+        ui.textAccessibilityDidInvalidate = { [weak gameView] in
+            gameView?.invalidateTextAccessibility()
+        }
+        ui.accessibilityDidInvalidateAll = { [weak gameView] in
+            gameView?.invalidateAllAccessibility()
+        }
+        rpgControllerAdapter = RPGControllerAdapter(app: self)
+        ui.rpgControllerContextDidChange = { [weak self] in
+            self?.rpgControllerAdapter.screenContextDidChange()
+        }
+        rpgControllerAdapter.start()
 
         // settings.resourcePacks holds USER packs only — the default pack
         // (Faithful base layer) is self-healing and force-applied inside
@@ -589,7 +646,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        rpgControllerAdapter?.stop()
         if game.hasWorld() { game.finalizeAndSave(synchronous: true) }
+        try? game.db.close()
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
@@ -597,12 +656,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     /// — the UI fields are canvas-drawn, so the standard NSText paste path
     /// never reaches them
     @objc func pasteText(_ sender: Any?) {
-        guard let game, let ui, let screen = ui.current(),
-              screen.fields.contains(where: { $0.focused }),
-              let s = NSPasteboard.general.string(forType: .string) else { return }
-        for ch in s where !ch.isNewline && (ch.asciiValue.map { $0 >= 32 } ?? true) {
-            _ = screen.onChar(ui, game, String(ch))
-        }
+        guard let game, let ui else { return }
+        _ = PebbleTextPasteIngressAdapter.route(
+            ingressBlocked: {
+                guard let screen = ui.current() else { return false }
+                return ui.textIngressMustBeConsumed(for: screen, game: game)
+            },
+            captureOwner: { ui.captureTextOwner(game: game) },
+            readBoundedText: {
+                let pasteboard = NSPasteboard.general
+                guard let data = pasteboard.data(forType: .string), data.count <= 65_536 else {
+                    return nil
+                }
+                return String(data: data, encoding: .utf8)
+            },
+            revalidateOwner: { ui.revalidateTextOwner($0, game: game) },
+            dispatch: { screen, decoded in
+                let accepted = screen.pasteText(ui, game, decoded)
+                if accepted { ui.notifyTextAccessibilityValueChanged(on: screen, game: game) }
+                return accepted
+            })
     }
 
     @objc func copyObjectTemplate(_ sender: Any?) {
@@ -610,6 +683,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     }
 
     @objc func pasteOrPlaceTemplate(_ sender: Any?) {
+        if ui?.hasScreen() == true {
+            pasteText(sender)
+            return
+        }
         if gameView.performObjectTemplateShortcut(.placeObject) { return }
         pasteText(sender)
     }
@@ -618,18 +695,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     /// (windowDidFailToEnterFullScreen fires and the window reverts), so the
     /// launch toggle re-checks until the transition actually completes.
     func windowDidEnterFullScreen(_ notification: Notification) {
+        guard let enteredWindow = notification.object as? NSWindow,
+              enteredWindow === window else { return }
         fsEntered = true
-        NSAnimationContext.runAnimationGroup {
+        NSAnimationContext.runAnimationGroup({
             $0.duration = 0.3
-            window?.animator().alphaValue = 1
-        }
+            enteredWindow.animator().alphaValue = 1
+        }, completionHandler: { [weak self, weak enteredWindow] in
+            MainActor.assumeIsolated {
+                guard let self, let enteredWindow, self.window === enteredWindow,
+                      self.fsEntered, enteredWindow.styleMask.contains(.fullScreen),
+                      enteredWindow.alphaValue == 1 else { return }
+                let token = self.launchActivationAtReveal.token(
+                    kind: .fullscreen, window: enteredWindow,
+                    generation: self.launchRevealGeneration)
+                self.launchActivationAtReveal.consume(
+                    token, window: enteredWindow, generation: self.launchRevealGeneration,
+                    fullscreenEntered: true)
+            }
+        })
     }
     private var fsEntered = false
     private var fsChecks = 0
-    private func enterFullscreenAtLaunch() {
+    @MainActor private func enterFullscreenAtLaunch() {
         guard let w = window, !fsEntered else { return }
         if fsChecks >= 5 {
             w.alphaValue = 1   // fullscreen never engaged: show windowed, don't stay invisible
+            let token = launchActivationAtReveal.token(
+                kind: .windowedFallback, window: w, generation: launchRevealGeneration)
+            launchActivationAtReveal.consume(
+                token, window: w, generation: launchRevealGeneration,
+                fullscreenEntered: false)
             return
         }
         fsChecks += 1
@@ -643,11 +739,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     /// give the system its cursor back (capture sets GLOBAL state that froze
     /// the cursor system-wide), and auto-pause like vanilla.
     func applicationDidResignActive(_ notification: Notification) {
+        activationEpochOpen = false
+        rpgControllerAdapter?.applicationDidResignActive()
+        if let game, let ui {
+            ui.clearTextReadiness(screen: ui.current(), clearLogicalFocus: false)
+            ui.current()?.inputOwnershipLost(ui, game)
+        }
         game?.clearInput()
+        gameView?.resetPressedBindings()
         gameView?.releaseMouse()
         if let game, let ui, game.hasWorld(), !ui.hasScreen() {
             ui.open(PauseScreen(), game)
         }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        rpgControllerAdapter?.applicationDidBecomeActive()
+        guard let window, let gameView, window.isVisible else { return }
+        window.makeKey()
+        guard window.makeFirstResponder(gameView), NSApp.isActive, window.isKeyWindow,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier ==
+                ProcessInfo.processInfo.processIdentifier else { return }
+        if let game, let ui { ui.reactivateTextReadiness(game: game) }
+
+        guard !activationEpochOpen else { return }
+        activationEpochOpen = true
+        activationEpoch &+= 1
+        guard publishedAccessibilityFocusEpoch != activationEpoch,
+              let focused = gameView.retainedAccessibilityFocusTarget() else { return }
+        publishedAccessibilityFocusEpoch = activationEpoch
+        NSAccessibility.post(element: focused, notification: .focusedUIElementChanged)
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -720,41 +841,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         lanProbe?.tick(app: self)
     }
 
-    private func runRPGAutoCreateIfNeeded() {
-        guard let player = game.player, player.rpgClassesEnabled(), !player.rpg.created else { return }
-        let env = ProcessInfo.processInfo.environment
-        let requestedPath = env["PEBBLE_RPG_PATH"]?.lowercased()
-        let path = RPG_PATH_DEFINITIONS.first { def in
-            requestedPath == def.id.lowercased() || requestedPath == def.displayName.lowercased()
-        } ?? RPG_PATH_DEFINITIONS.first!
-
-        let requestedStarter = env["PEBBLE_RPG_STARTER"]?.lowercased()
-        let starterSkill = path.starterSkillIDs.first { id in
-            requestedStarter == id.lowercased()
-                || requestedStarter == rpgSkillDefinition(id)?.displayName.lowercased()
-        } ?? path.starterSkillIDs.first
-
-        let requestedSpells = env["PEBBLE_RPG_SPELLS"]?
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? []
-        let starterSpells = requestedSpells.isEmpty
-            ? Array(path.starterSpellIDs.prefix(2))
-            : path.starterSpellIDs.filter { id in
-                requestedSpells.contains(id.lowercased())
-                    || requestedSpells.contains(rpgSpellDefinition(id)?.displayName.lowercased() ?? "")
-            }
-
-        let message = game.requestRPGCreateCharacter(RPGCreationDraft(
-            pathID: path.id,
-            attributes: .defaultCreation,
-            starterSkillID: starterSkill,
-            starterSpellIDs: starterSpells
-        ))
-        print("[shot] RPG auto-create: \(message)")
-        fflush(stdout)
-    }
-
     func draw(in view: MTKView) {
+        rpgControllerAdapter?.synchronizeContext()
         let now = CACurrentMediaTime()
         let dt = (now - lastFrame) * 1000
         lastFrame = now
@@ -806,10 +894,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
                 }
                 pendingCmds = nil
             }
-        }
-        if pendingRPGAutoCreate != nil, game.hasWorld(), pendingCmds == nil {
-            runRPGAutoCreateIfNeeded()
-            pendingRPGAutoCreate = nil
         }
         if let screen = pendingOpenScreen, game.hasWorld(), pendingCmds == nil {
             pendingOpenScreenDelay += 1
@@ -883,38 +967,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     }
 }
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.regular)
+private func shippingMenuItem(commandID: String, title: String, action: Selector) -> NSMenuItem {
+    guard let definition = SHIPPING_MENU_COMMANDS.first(where: { $0.commandID == commandID }) else {
+        preconditionFailure("Missing shipping shortcut catalog entry for \(commandID)")
+    }
+    let terminal = definition.chord.terminal.rawValue
+    guard terminal.hasPrefix("Key"), terminal.count == 4 else {
+        preconditionFailure("Shipping menu terminal must be a single KeyA...KeyZ value")
+    }
+    let item = NSMenuItem(title: title, action: action,
+                          keyEquivalent: String(terminal.suffix(1)).lowercased())
+    var mask: NSEvent.ModifierFlags = []
+    if definition.chord.modifiers.contains(.command) { mask.insert(.command) }
+    if definition.chord.modifiers.contains(.control) { mask.insert(.control) }
+    if definition.chord.modifiers.contains(.option) { mask.insert(.option) }
+    if definition.chord.modifiers.contains(.shift) { mask.insert(.shift) }
+    item.keyEquivalentModifierMask = mask
+    return item
+}
 
-// minimal main menu: Cmd-Q quits; Cmd-C/Cmd-V route object templates in
-// world mode, while Cmd-V remains Paste for focused UI fields
-let mainMenu = NSMenu()
-let appItem = NSMenuItem()
-let appMenu = NSMenu()
-appMenu.addItem(withTitle: "About Pebble",
-                action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
-appMenu.addItem(NSMenuItem.separator())
-appMenu.addItem(withTitle: "Quit Pebble",
-                action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-appItem.submenu = appMenu
-mainMenu.addItem(appItem)
-let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
-let editMenu = NSMenu(title: "Edit")
-editMenu.addItem(withTitle: "Copy Object",
-                 action: #selector(AppDelegate.copyObjectTemplate(_:)), keyEquivalent: "c")
-editMenu.addItem(withTitle: "Paste",
-                 action: #selector(AppDelegate.pasteOrPlaceTemplate(_:)), keyEquivalent: "v")
-editItem.submenu = editMenu
-mainMenu.addItem(editItem)
-let winItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
-let winMenu = NSMenu(title: "Window")
-winMenu.addItem(withTitle: "Minimize",
-                action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m")
-winItem.submenu = winMenu
-mainMenu.addItem(winItem)
-app.mainMenu = mainMenu
-app.windowsMenu = winMenu
+@MainActor
+private func runOrdinaryPebbleApplication() {
+    let app = NSApplication.shared
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    app.setActivationPolicy(.regular)
 
-app.run()
+    // minimal main menu: Cmd-Q quits; Cmd-C/Cmd-V route object templates in
+    // world mode, while Cmd-V remains Paste for focused UI fields
+    let mainMenu = NSMenu()
+    let appItem = NSMenuItem()
+    let appMenu = NSMenu()
+    appMenu.addItem(withTitle: "About Pebble",
+                    action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+    appMenu.addItem(NSMenuItem.separator())
+    appMenu.addItem(shippingMenuItem(commandID: "quit", title: "Quit Pebble",
+                                     action: #selector(NSApplication.terminate(_:))))
+    appItem.submenu = appMenu
+    mainMenu.addItem(appItem)
+    let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+    let editMenu = NSMenu(title: "Edit")
+    editMenu.addItem(shippingMenuItem(commandID: "copyObjectTemplate", title: "Copy Object",
+                                      action: #selector(AppDelegate.copyObjectTemplate(_:))))
+    editMenu.addItem(shippingMenuItem(commandID: "placeObjectTemplate", title: "Paste",
+                                      action: #selector(AppDelegate.pasteOrPlaceTemplate(_:))))
+    editItem.submenu = editMenu
+    mainMenu.addItem(editItem)
+    let winItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
+    let winMenu = NSMenu(title: "Window")
+    winMenu.addItem(shippingMenuItem(commandID: "minimize", title: "Minimize",
+                                     action: #selector(NSWindow.miniaturize(_:))))
+    winItem.submenu = winMenu
+    mainMenu.addItem(winItem)
+    app.mainMenu = mainMenu
+    app.windowsMenu = winMenu
+    app.run()
+}
+
+switch pebbleBootstrapDecision {
+case .ordinary:
+    MainActor.assumeIsolated { runOrdinaryPebbleApplication() }
+case .harness(let bootstrap):
+    MainActor.assumeIsolated { runRPGUIHarness(bootstrap) }
+case .rejected(let diagnostic):
+    FileHandle.standardError.write(Data((String(diagnostic.prefix(256)) + "\n").utf8))
+    exit(64)
+}

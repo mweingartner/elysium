@@ -8,12 +8,18 @@ struct LANHostLaunchRequest {
 
 final class LANLobbyScreen: Screen {
     private let manager = LANMultiplayerManager.shared
-    private let playerNameField = TextField(0, 0, 130, 16, "Player")
-    private let hostCodeField = TextField(0, 0, 70, 16, "Join code")
-    private let hostPortField = TextField(0, 0, 58, 16, "Port")
-    private let joinHostField = TextField(0, 0, 130, 16, "Host")
-    private let joinPortField = TextField(0, 0, 58, 16, "Port")
-    private let joinCodeField = TextField(0, 0, 70, 16, "Code")
+    private let playerNameField = TextField(0, 0, 130, 16, "Player",
+                                            id: "lan.player", accessibilityLabel: "Player")
+    private let hostCodeField = TextField(0, 0, 70, 16, "Join code",
+                                          id: "lan.hostCode", accessibilityLabel: "Host Join Code")
+    private let hostPortField = TextField(0, 0, 58, 16, "Port",
+                                          id: "lan.hostPort", accessibilityLabel: "Host Port")
+    private let joinHostField = TextField(0, 0, 130, 16, "Host",
+                                          id: "lan.joinHost", accessibilityLabel: "Manual Host")
+    private let joinPortField = TextField(0, 0, 58, 16, "Port",
+                                          id: "lan.joinPort", accessibilityLabel: "Join Port")
+    private let joinCodeField = TextField(0, 0, 70, 16, "Code",
+                                          id: "lan.joinCode", accessibilityLabel: "Join Code")
     private var selectedHost = -1
     private var scroll = 0.0
 

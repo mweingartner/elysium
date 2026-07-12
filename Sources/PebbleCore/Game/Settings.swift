@@ -44,25 +44,16 @@ public struct Settings: Codable {
     public var shader: String? = nil
     /// Local Ollama model name used by the in-game /ai command. Empty = unset.
     public var aiOllamaModel = ""
+    /// Version of the local RPG tutorial that the player finished or skipped.
+    /// Nil means the tutorial has not been acknowledged.
+    public var rpgTutorialVersion: Int? = nil
 
     public init() {}
 }
 
-public let DEFAULT_KEYBINDS: [String: String] = [
-    "forward": "KeyW",
-    "back": "KeyS",
-    "left": "KeyA",
-    "right": "KeyD",
-    "jump": "Space",
-    "sneak": "ShiftLeft",
-    "sprint": "ControlLeft",
-    "inventory": "KeyE",
-    "drop": "KeyQ",
-    "chat": "KeyT",
-    "command": "Slash",
-    "perspective": "F5",
-    "swapOffhand": "KeyF",
-]
+/// Compatibility spelling retained for older callers. There is exactly one canonical default
+/// source: the stable 25-entry definition table in `InputChords.swift`.
+public var DEFAULT_KEYBINDS: [String: String] { rpgDefaultChordBindings() }
 
 public func defaultSettings() -> Settings { Settings() }
 
@@ -110,16 +101,14 @@ func sanitizedSettings(_ input: Settings) -> Settings {
         }.prefix(64))
     }
     s.aiOllamaModel = sanitizedOllamaModelName(s.aiOllamaModel)
+    let tutorialVersion = s.rpgTutorialVersion ?? 0
+    s.rpgTutorialVersion = (0...RPG_TUTORIAL_VERSION).contains(tutorialVersion)
+        ? tutorialVersion : 0
     return s
 }
 
 func sanitizedKeybinds(_ input: [String: String]) -> [String: String] {
-    var binds = DEFAULT_KEYBINDS
-    for key in DEFAULT_KEYBINDS.keys {
-        guard let value = input[key], !value.isEmpty, value.count <= 64 else { continue }
-        binds[key] = value
-    }
-    return binds
+    rpgSanitizedChordBindings(input)
 }
 
 /// ~/Library/Application Support/Pebble — created on first touch
@@ -128,41 +117,4 @@ public func vcSupportDir() -> URL {
     let dir = base.appendingPathComponent("Pebble", isDirectory: true)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir
-}
-
-private var settingsURL: URL { vcSupportDir().appendingPathComponent("settings.json") }
-private var keybindsURL: URL { vcSupportDir().appendingPathComponent("keybinds.json") }
-
-public func loadSettings() -> Settings {
-    var s = Settings()
-    if let data = try? Data(contentsOf: settingsURL),
-       let saved = try? JSONDecoder().decode(Settings.self, from: data) {
-        s = saved
-    }
-    return sanitizedSettings(s)
-}
-
-public func saveSettings(_ s: Settings) {
-    let enc = JSONEncoder()
-    enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-    if let data = try? enc.encode(sanitizedSettings(s)) {
-        try? data.write(to: settingsURL, options: .atomic)
-    }
-}
-
-public func loadKeybinds() -> [String: String] {
-    var binds = DEFAULT_KEYBINDS
-    if let data = try? Data(contentsOf: keybindsURL),
-       let saved = try? JSONDecoder().decode([String: String].self, from: data) {
-        for (k, v) in saved { binds[k] = v }
-    }
-    return sanitizedKeybinds(binds)
-}
-
-public func saveKeybinds(_ binds: [String: String]) {
-    let enc = JSONEncoder()
-    enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-    if let data = try? enc.encode(sanitizedKeybinds(binds)) {
-        try? data.write(to: keybindsURL, options: .atomic)
-    }
 }

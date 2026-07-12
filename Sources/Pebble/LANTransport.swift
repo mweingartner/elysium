@@ -250,8 +250,35 @@ final class LANMultiplayerManager {
     private(set) var state: LANMultiplayerConnectionState = .idle
     private(set) var discoveredHosts: [LANDiscoveredHost] = []
     private(set) var statusLines: [String] = ["LAN multiplayer idle."]
+    private(set) var protocol5RPGSemanticRejectionCount: UInt64 = 0
+    private(set) var protocol5RPGSemanticRejectionCounterExhausted = false
 
     private init() {}
+
+    /// Track-B protocol-5 zero-fallback seam. New RPG semantic operations are terminally rejected
+    /// here and are never translated into the legacy `LANRPGIntent` callback below. The reviewed v6
+    /// coordinator is the only future component allowed to replace this disposition.
+    func rejectProtocol5RPGSemanticOperation(_ command: RPGSemanticCommand,
+                                             in game: GameCore) -> RPGSemanticActivationResult? {
+        guard game.isLANClientWorld else { return nil }
+        switch command {
+        case .create, .rankUp, .spendAttribute, .prepareSkill, .unprepareSkill,
+             .prepareSpell, .unprepareSpell, .selectSkill, .selectSpell,
+             .cyclePreparedAction, .useSelectedAction, .useQuickSlot,
+             .assignSlot, .moveSlot, .clearSlot:
+            if !protocol5RPGSemanticRejectionCounterExhausted {
+                let next = protocol5RPGSemanticRejectionCount.addingReportingOverflow(1)
+                if next.overflow || next.partialValue == 0 {
+                    protocol5RPGSemanticRejectionCounterExhausted = true
+                } else {
+                    protocol5RPGSemanticRejectionCount = next.partialValue
+                }
+            }
+            return .unavailable
+        default:
+            return nil
+        }
+    }
 
     func attachGame(_ game: GameCore) {
         activeGame = game

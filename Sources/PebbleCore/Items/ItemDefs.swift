@@ -3,6 +3,26 @@
 
 import Foundation
 
+/// Display names required by pure RPG creation review before the global item registry boots.
+/// `registerItem` consumes this same table, so pre-bootstrap review and the live registry cannot
+/// silently drift. Keep this closed: unknown IDs must not acquire a prettified RPG Review fallback.
+public let RPG_STARTER_KIT_ITEM_REGISTRATION_DISPLAY_NAMES: [String: String] = [
+    "stone_sword": "Stone Sword",
+    "shield": "Shield",
+    "bread": "Bread",
+    "bow": "Bow",
+    "arrow": "Arrow",
+    "stone_pickaxe": "Stone Pickaxe",
+    "torch": "Torch",
+    "apprentice_focus": "Apprentice Focus",
+    "potion": "Potion",
+    "redstone": "Redstone",
+]
+
+public func rpgStarterKitItemRegistrationDisplayName(_ name: String) -> String? {
+    RPG_STARTER_KIT_ITEM_REGISTRATION_DISPLAY_NAMES[name]
+}
+
 public struct FoodDef {
     public let hunger: Int
     public let saturation: Double
@@ -174,7 +194,7 @@ public func registerItem(
     let id = itemDefs.count
     let def = ItemDef(
         id: id, name: name,
-        displayName: display ?? prettify(name),
+        displayName: rpgStarterKitItemRegistrationDisplayName(name) ?? display ?? prettify(name),
         maxStack: maxStack ?? ((tool != nil || armor != nil) ? 1 : 64),
         block: block, food: food, tool: tool, armor: armor,
         category: category,

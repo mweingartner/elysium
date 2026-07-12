@@ -8,6 +8,25 @@ let package = Package(
     name: "Pebble",
     platforms: [.macOS(.v14)],
     targets: [
+        // shared pure text-ingress kernels; deliberately not exposed as a product
+        .target(
+            name: "PebbleTextInput",
+            path: "Sources/PebbleTextInput",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        // shared production AppKit disposition/retention kernels; no standalone product
+        .target(
+            name: "PebbleAppSupport",
+            path: "Sources/PebbleAppSupport",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        // nonshipping release/receipt authority shared by the CLI adapter and executable tests
+        .target(
+            name: "PebbleReleaseGate",
+            path: "Sources/PebbleReleaseGate",
+            swiftSettings: [.swiftLanguageMode(.v5)],
+            linkerSettings: [.linkedFramework("Security")]
+        ),
         // the persistence boundary: typed rows/facades only; no engine dependency
         .target(
             name: "PebbleStorage",
@@ -19,7 +38,7 @@ let package = Package(
         // the engine: headless-testable, no AppKit dependencies
         .target(
             name: "PebbleCore",
-            dependencies: ["PebbleStorage"],
+            dependencies: ["PebbleStorage", "PebbleTextInput"],
             path: "Sources/PebbleCore",
             swiftSettings: [
                 .swiftLanguageMode(.v5),
@@ -28,7 +47,7 @@ let package = Package(
         // the app: AppKit + MTKView shell
         .executableTarget(
             name: "Pebble",
-            dependencies: ["PebbleCore"],
+            dependencies: ["PebbleCore", "PebbleTextInput", "PebbleAppSupport"],
             path: "Sources/Pebble",
             swiftSettings: [
                 .swiftLanguageMode(.v5),
@@ -40,6 +59,7 @@ let package = Package(
                 .linkedFramework("QuartzCore"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("Network"),
+                .linkedFramework("GameController"),
             ]
         ),
         // headless smoke tests against the frozen golden baselines
@@ -51,9 +71,29 @@ let package = Package(
         ),
         .testTarget(
             name: "PebbleCoreTests",
-            dependencies: ["PebbleCore", "PebbleStorage"],
+            dependencies: ["PebbleCore", "PebbleStorage", "PebbleTextInput"],
             path: "Tests/PebbleCoreTests",
             swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "PebbleTextInputTests",
+            dependencies: ["PebbleTextInput"],
+            path: "Tests/PebbleTextInputTests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "PebbleAppSupportTests",
+            dependencies: ["PebbleAppSupport"],
+            path: "Tests/PebbleAppSupportTests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "PebbleReleaseGateTests",
+            dependencies: ["PebbleReleaseGate"],
+            path: "Tests/PebbleReleaseGateTests",
+            exclude: ["Fixtures"],
+            swiftSettings: [.swiftLanguageMode(.v5)],
+            linkerSettings: [.linkedFramework("Security")]
         ),
     ]
 )

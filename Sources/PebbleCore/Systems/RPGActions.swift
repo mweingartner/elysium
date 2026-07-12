@@ -156,10 +156,12 @@ public func rpgUseSelectedPreparedAction(_ player: Player) -> Result<RPGActionRe
     return rpgExecuteAction(player, kind: action.kind, id: action.id, authorization: .local(for: player))
 }
 
-public func rpgUseActionQuickSlot(_ player: Player, slot: Int) -> Result<RPGActionResult, RPGActionFailure> {
+public func rpgUseActionQuickSlot(
+    _ player: Player, slot: Int, preferences: RPGQuickSlotPreferences
+) -> Result<RPGActionResult, RPGActionFailure> {
     let state = repairRPGCharacterState(player.rpg)
     guard slot >= 0 && slot < RPG_ACTION_QUICK_SLOT_COUNT else { return .failure(.actionNotPrepared) }
-    let slots = rpgActionQuickSlotActions(state)
+    let slots = rpgActionQuickSlotActions(state, preferences: preferences)
     guard slot < slots.count, let action = slots[slot] else { return .failure(.actionNotPrepared) }
     return rpgExecuteAction(player, kind: action.kind, id: action.id, authorization: .local(for: player))
 }
@@ -306,8 +308,6 @@ public func rpgPrepareAction(_ player: Player,
     next.fatigue = min(rpgDerivedStats(next).maxFatigue,
                        max(0, next.fatigue - cost + plan.fatigueCredit))
     next.actionSequence = sequence
-    next.selectedPreparedActionID = rpgPreparedActionToken(kind: kind, id: id)
-    if kind == .spell { next.selectedPreparedSpellID = id }
     next.activeCooldowns.removeAll { $0.id == id }
     var cooldown = effectiveRPGCooldown(baseCooldown, state: state)
     if metadata.id == .skill(.remoteTrigger) {

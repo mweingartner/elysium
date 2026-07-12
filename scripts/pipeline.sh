@@ -1,50 +1,29 @@
 #!/bin/bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT"
 
-stage() { echo; echo "==> pipeline: $*"; }
-fail() { echo "pipeline failed: $*" >&2; exit 1; }
+[ "$#" -eq 1 ] && [ "$1" = "--prepare-installed-signoff" ] || {
+    echo "usage: scripts/pipeline.sh --prepare-installed-signoff" >&2
+    exit 64
+}
 
-stage "architect"
-[ -f Package.swift ] || fail "Package.swift missing"
-[ -f ARCHITECTURE.md ] || fail "ARCHITECTURE.md missing"
-[ -f SECURITY.md ] || fail "SECURITY.md missing"
-[ ! -e Pebble.xcodeproj ] || fail "unexpected Xcode project present"
+[ -f Package.swift ] && [ -f ARCHITECTURE.md ] && [ -f SECURITY.md ] || {
+    echo "pipeline failed: project intent files missing" >&2
+    exit 1
+}
+[ "$(git config --get core.hooksPath || true)" = ".githooks" ] || {
+    echo "pipeline failed: core.hooksPath must equal .githooks" >&2
+    exit 1
+}
 
-stage "security"
-./scripts/security-scan.sh
-
-stage "asset verification"
-./scripts/verify-pack-assets.sh
-
-stage "build"
-BUILD_LOG="$(mktemp /tmp/pebble-build.XXXXXX)"
-if ! swift build -c release 2>&1 | tee "$BUILD_LOG"; then
-    fail "release build failed"
-fi
-if grep -q 'warning:' "$BUILD_LOG"; then
-    rm -f "$BUILD_LOG"
-    fail "release build emitted warnings"
-fi
-rm -f "$BUILD_LOG"
-
-stage "PebbleStorage release surface"
-STORAGE_SURFACE_VERIFIER="./scripts/verify-pebble-storage-release-surface.sh"
-[ -f "$STORAGE_SURFACE_VERIFIER" ] || fail "storage release-surface verifier missing"
-[ -x "$STORAGE_SURFACE_VERIFIER" ] || fail "storage release-surface verifier is not executable"
-"$STORAGE_SURFACE_VERIFIER"
-
-stage "security check binary"
-./scripts/security-check-binary.sh .build/release/Pebble
-
-stage "test"
-swift test
-swift run -c release pebsmoke
-
-stage "deploy"
-./pebble install
-./scripts/security-check-binary.sh "/Applications/Pebble.app"
-
-stage "clean pass deployed"
+echo "==> pipeline: self-executing closed release authority"
+# This command accepts no paths, logs, digests, argv, counts, statuses, or PASS assertions.
+# The stable authority binary mints the attempt, runs and seals all seven reviewed gates,
+# packages/installs the captured release, binds the live process, and alone publishes prepared.
+scripts/installed-signoff-receipt.sh run-prepare-gates
+scripts/installed-signoff-receipt.sh verify-current
+echo "PENDING_INSTALLED_SIGNOFF: installation succeeded, but deployment completion, commit, and push remain blocked."
+echo "Run scripts/observe-installed-signoff.sh before receipt expiry."
+exit 75

@@ -5,6 +5,10 @@ import Darwin
 @testable import PebbleStorage
 
 final class PebbleStorageExecutorTests: XCTestCase {
+    private func deviceBitPattern(_ device: dev_t) -> UInt64 {
+        UInt64(UInt32(bitPattern: device))
+    }
+
     private func databaseURL(_ name: String = UUID().uuidString) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("PebbleStorageExecutorTests-\(name)-\(UUID().uuidString)",
@@ -47,6 +51,31 @@ final class PebbleStorageExecutorTests: XCTestCase {
             }
         }
         return count
+    }
+
+    func testDescriptorCountHandlesNegativeNativeDeviceWithoutTrap() {
+        let inode: ino_t = 91
+        let positive: dev_t = 7
+        let negative = dev_t(bitPattern: 0xb00007ff)
+        let distinctNegative = dev_t(bitPattern: 0xb0000800)
+        let observations: [(dev_t, ino_t)?] = [
+            (positive, inode), (negative, inode), nil,
+            (positive, inode), (distinctNegative, inode),
+        ]
+        XCTAssertEqual(PebbleStorageDescriptorIdentityProbe.descriptorCount(
+            targetDevice: positive, targetInode: inode,
+            observations: observations), 2)
+        XCTAssertEqual(PebbleStorageDescriptorIdentityProbe.descriptorCount(
+            targetDevice: negative, targetInode: inode,
+            observations: observations), 1)
+        XCTAssertEqual(PebbleStorageDescriptorIdentityProbe.descriptorCount(
+            targetDevice: distinctNegative, targetInode: inode,
+            observations: [(negative, inode)]), 0)
+        XCTAssertEqual(PebbleStorageDescriptorIdentityProbe.deviceBitPattern(negative),
+                       0x00000000b00007ff)
+        XCTAssertNil(PebbleStorageDescriptorIdentityProbe.descriptorCount(
+            targetDevice: positive, targetInode: inode,
+            observations: Array(repeating: nil, count: 65_537)))
     }
 
     func testOpenConfiguresBootstrapsAndCloses() throws {
@@ -341,7 +370,7 @@ final class PebbleStorageExecutorTests: XCTestCase {
         let coordinator = try PebbleStorageCoordinator.open(databaseURL: url)
         var info = stat()
         XCTAssertEqual(lstat(url.deletingLastPathComponent().path, &info), 0)
-        let device = UInt64(info.st_dev)
+        let device = deviceBitPattern(info.st_dev)
         let inode = UInt64(info.st_ino)
 
         XCTAssertNoThrow(try coordinator.verifyDatabaseParentIdentity(device: device, inode: inode))
@@ -359,7 +388,7 @@ final class PebbleStorageExecutorTests: XCTestCase {
         var aliasInfo = stat()
         XCTAssertEqual(stat(alias.path, &aliasInfo), 0)
         XCTAssertNoThrow(try coordinator.verifyDatabaseParentIdentity(
-            device: UInt64(aliasInfo.st_dev), inode: UInt64(aliasInfo.st_ino)))
+            device: deviceBitPattern(aliasInfo.st_dev), inode: UInt64(aliasInfo.st_ino)))
 
         try coordinator.close()
         XCTAssertThrowsError(try coordinator.verifyDatabaseParentIdentity(device: device, inode: inode)) {
@@ -375,7 +404,7 @@ final class PebbleStorageExecutorTests: XCTestCase {
         let coordinator = try PebbleStorageCoordinator.open(databaseURL: url)
         var info = stat()
         XCTAssertEqual(lstat(parent.path, &info), 0)
-        let device = UInt64(info.st_dev)
+        let device = deviceBitPattern(info.st_dev)
         let inode = UInt64(info.st_ino)
 
         XCTAssertEqual(Darwin.rename(parent.path, displaced.path), 0)

@@ -2,6 +2,7 @@
 // mirroring, shapeless, tags), enchanting table / anvil / grindstone math.
 
 import Foundation
+import PebbleTextInput
 
 public struct CraftingRecipePlan {
     public let recipeIndex: Int
@@ -303,16 +304,19 @@ public struct CraftingRecipeTypeahead {
 
     @discardableResult
     public mutating func append(_ text: String, plans: [CraftingRecipePlan]) -> Bool {
-        var accepted = ""
-        for scalar in text.unicodeScalars where scalar.value >= 32 && scalar.value != 127 {
-            accepted.unicodeScalars.append(scalar)
+        var changed = false
+        for character in text {
+            guard case .accepted(let accepted) = pebbleValidateTextCharacter(character) else { break }
+            while !query.isEmpty &&
+                    (query.count >= maxQueryLength ||
+                     query.utf8.count + accepted.utf8ByteCount > 1_024) {
+                query.removeFirst()
+            }
+            guard maxQueryLength > 0, accepted.utf8ByteCount <= 1_024 else { break }
+            query.append(character)
+            changed = true
         }
-        guard !accepted.isEmpty else { return false }
-
-        query.append(accepted)
-        if query.count > maxQueryLength {
-            query = String(query.suffix(maxQueryLength))
-        }
+        guard changed else { return false }
         updateHighlight(plans: plans)
         return true
     }

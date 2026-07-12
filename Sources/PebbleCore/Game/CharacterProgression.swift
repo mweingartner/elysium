@@ -890,7 +890,6 @@ public struct RPGCharacterState: Codable, Equatable {
         case preparedSpellIDs
         case selectedPreparedSpellID
         case selectedPreparedActionID
-        case actionQuickSlots
         case fatigue
         case actionSequence
         case activeCooldowns
@@ -915,7 +914,6 @@ public struct RPGCharacterState: Codable, Equatable {
     public var preparedSpellIDs: [String]
     public var selectedPreparedSpellID: String?
     public var selectedPreparedActionID: String?
-    public var actionQuickSlots: [String?]
     public var fatigue: Double
     public var actionSequence: Int
     public var activeCooldowns: [RPGCooldown]
@@ -939,7 +937,6 @@ public struct RPGCharacterState: Codable, Equatable {
                 preparedSpellIDs: [String],
                 selectedPreparedSpellID: String? = nil,
                 selectedPreparedActionID: String? = nil,
-                actionQuickSlots: [String?] = [],
                 fatigue: Double,
                 actionSequence: Int = 0,
                 activeCooldowns: [RPGCooldown] = [],
@@ -962,7 +959,6 @@ public struct RPGCharacterState: Codable, Equatable {
         self.preparedSpellIDs = preparedSpellIDs
         self.selectedPreparedSpellID = selectedPreparedSpellID
         self.selectedPreparedActionID = selectedPreparedActionID
-        self.actionQuickSlots = actionQuickSlots
         self.fatigue = fatigue
         self.actionSequence = actionSequence
         self.activeCooldowns = activeCooldowns
@@ -998,7 +994,6 @@ public struct RPGCharacterState: Codable, Equatable {
             selectedPreparedSpellID: decodeBoundedID(from: c, key: .selectedPreparedSpellID),
             selectedPreparedActionID: (try? c.decodeIfPresent(String.self, forKey: .selectedPreparedActionID))
                 .flatMap(canonicalPreparedActionToken),
-            actionQuickSlots: decodeCappedOptionalStrings(from: c, key: .actionQuickSlots, limit: RPG_ACTION_QUICK_SLOT_COUNT),
             fatigue: try c.decodeIfPresent(Double.self, forKey: .fatigue) ?? 0,
             actionSequence: try c.decodeIfPresent(Int.self, forKey: .actionSequence) ?? 0,
             activeCooldowns: try decodeCappedArray(RPGCooldown.self, from: c,
@@ -1037,8 +1032,6 @@ public struct RPGCharacterState: Codable, Equatable {
         try c.encodeIfPresent(selectedPreparedSpellID.flatMap { rpgIsBoundedID($0) ? $0 : nil },
                               forKey: .selectedPreparedSpellID)
         try c.encodeIfPresent(canonicalPreparedActionToken(selectedPreparedActionID), forKey: .selectedPreparedActionID)
-        let encodedSlots = Array(actionQuickSlots.prefix(RPG_ACTION_QUICK_SLOT_COUNT)).map(canonicalPreparedActionToken)
-        try c.encode(encodedSlots, forKey: .actionQuickSlots)
         try c.encode(fatigue.isFinite ? max(0, fatigue) : 0, forKey: .fatigue)
         try c.encode(max(0, min(RPG_MAX_COUNTER, actionSequence)), forKey: .actionSequence)
         let cooldowns = activeCooldowns.filter {
@@ -1063,7 +1056,6 @@ public struct RPGCharacterState: Codable, Equatable {
                           skillRanks: [:], preparedSkillIDs: [], knownSpellIDs: [], preparedSpellIDs: [],
                           selectedPreparedSpellID: nil,
                           selectedPreparedActionID: nil,
-                          actionQuickSlots: Array(repeating: nil, count: RPG_ACTION_QUICK_SLOT_COUNT),
                           fatigue: 0)
     }
 }
@@ -1142,13 +1134,19 @@ public struct RPGCreationDraft: Codable, Equatable {
 }
 
 public extension GameCore {
+    private var protocol5RPGSemanticDenial: String {
+        "Character changes are unavailable in this LAN session"
+    }
+
     @discardableResult
     func requestRPGCreateCharacter(_ draft: RPGCreationDraft) -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
         if let error = player.createRPGCharacter(draft) {
             return error.description
         }
+        materializeRPGPreferencesAfterCharacterCreationIfNeeded()
         if isLANClientWorld {
             lanRPGIntentHandler?(LANRPGIntent(action: .createCharacter, draft: draft, actionSequence: player.rpg.actionSequence))
         }
@@ -1157,6 +1155,7 @@ public extension GameCore {
 
     @discardableResult
     func requestRPGLearnSkill(_ skillID: String) -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
         if let error = rpgLearnSkill(skillID, in: &player.rpg) {
@@ -1171,6 +1170,7 @@ public extension GameCore {
 
     @discardableResult
     func requestRPGTogglePreparedSkill(_ skillID: String) -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
         if player.rpg.preparedSkillIDs.contains(skillID) {
@@ -1193,6 +1193,7 @@ public extension GameCore {
 
     @discardableResult
     func requestRPGTogglePreparedSpell(_ spellID: String) -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
         if player.rpg.preparedSpellIDs.contains(spellID) {
@@ -1217,6 +1218,7 @@ public extension GameCore {
 
     @discardableResult
     func requestRPGSelectPreparedSkill(_ skillID: String) -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
         if let error = rpgSelectPreparedSkill(skillID, in: &player.rpg) {
@@ -1230,6 +1232,7 @@ public extension GameCore {
 
     @discardableResult
     func requestRPGSelectPreparedSpell(_ spellID: String) -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
         if let error = rpgSelectPreparedSpell(spellID, in: &player.rpg) {
@@ -1243,29 +1246,73 @@ public extension GameCore {
 
     @discardableResult
     func requestRPGAssignPreparedActionToQuickSlot(kind: RPGPreparedActionKind, id: String, slot: Int) -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
-        if let error = rpgAssignPreparedActionToQuickSlot(kind: kind, id: id, slot: slot, in: &player.rpg) {
-            return error.description
+        guard let preferences = rpgQuickSlotPreferences, rpgLocalPreferenceWritable else {
+            return "RPG slots are unavailable"
+        }
+        let token = rpgPreparedActionToken(kind: kind, id: id)
+        let candidate: RPGQuickSlotPreferences
+        switch rpgAssignQuickSlot(token: token, slot: slot, preferences: preferences,
+                                  state: repairRPGCharacterState(player.rpg)) {
+        case .failure(let error): return rpgQuickSlotPreferenceErrorDescription(error)
+        case .success(let value): candidate = value
+        }
+        guard persistRPGQuickSlotCandidate(candidate) else {
+            return "Could not save RPG quick slots"
         }
         let name: String
         switch kind {
         case .skill: name = rpgSkillDefinition(id)?.displayName ?? id
         case .spell: name = rpgSpellDefinition(id)?.displayName ?? id
         }
-        return "Slot \(slot + 1): \(name)"
+        return "Saving slot \(slot + 1): \(name)"
     }
 
     @discardableResult
     func requestRPGClearActionQuickSlot(_ slot: Int) -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
-        rpgClearActionQuickSlot(slot, in: &player.rpg)
-        return "Cleared slot \(slot + 1)"
+        guard let preferences = rpgQuickSlotPreferences, rpgLocalPreferenceWritable else {
+            return "RPG slots are unavailable"
+        }
+        let candidate: RPGQuickSlotPreferences
+        switch rpgClearQuickSlot(slot, preferences: preferences,
+                                 state: repairRPGCharacterState(player.rpg)) {
+        case .failure(let error): return rpgQuickSlotPreferenceErrorDescription(error)
+        case .success(let value): candidate = value
+        }
+        guard persistRPGQuickSlotCandidate(candidate) else {
+            return "Could not save RPG quick slots"
+        }
+        return "Saving cleared slot \(slot + 1)"
+    }
+
+    @discardableResult
+    func requestRPGMoveActionQuickSlot(from: Int, to: Int) -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
+        guard let player else { return "No player" }
+        guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
+        guard let preferences = rpgQuickSlotPreferences, rpgLocalPreferenceWritable else {
+            return "RPG slots are unavailable"
+        }
+        let candidate: RPGQuickSlotPreferences
+        switch rpgMoveQuickSlot(from: from, to: to, preferences: preferences,
+                                state: repairRPGCharacterState(player.rpg)) {
+        case .failure(let error): return rpgQuickSlotPreferenceErrorDescription(error)
+        case .success(let value): candidate = value
+        }
+        guard persistRPGQuickSlotCandidate(candidate) else {
+            return "Could not save RPG quick slots"
+        }
+        return "Saving slot move"
     }
 
     @discardableResult
     func requestRPGSpendAttributePoint(_ attribute: RPGAttributeID) -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
         if let error = rpgSpendAttributePoint(attribute, in: &player.rpg) {
@@ -1280,6 +1327,7 @@ public extension GameCore {
 
     @discardableResult
     func requestRPGCyclePreparedSpell(direction: Int = 1) -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
         let step = rpgNormalizedCycleDirection(direction)
@@ -1299,6 +1347,7 @@ public extension GameCore {
 
     @discardableResult
     func requestRPGCyclePreparedAction(direction: Int = 1) -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
         let step = rpgNormalizedCycleDirection(direction)
@@ -1323,6 +1372,7 @@ public extension GameCore {
 
     @discardableResult
     func requestRPGCastSelectedSpell() -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
         player.rpg = repairRPGCharacterState(player.rpg)
@@ -1354,6 +1404,7 @@ public extension GameCore {
 
     @discardableResult
     func requestRPGUseSelectedAction() -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
         player.rpg = repairRPGCharacterState(player.rpg)
@@ -1393,46 +1444,19 @@ public extension GameCore {
 
     @discardableResult
     func requestRPGUseActionQuickSlot(_ slot: Int) -> String {
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
         player.rpg = repairRPGCharacterState(player.rpg)
         guard slot >= 0 && slot < RPG_ACTION_QUICK_SLOT_COUNT else {
             return RPGActionFailure.actionNotPrepared.description
         }
-        let actions = rpgActionQuickSlotActions(player.rpg)
-        guard slot < actions.count, let action = actions[slot] else {
+        guard let preferences = rpgQuickSlotPreferences else { return "RPG slots are unavailable" }
+        let actions = rpgActionQuickSlotActions(player.rpg, preferences: preferences)
+        guard slot < actions.count, actions[slot] != nil else {
             return "RPG slot \(slot + 1) is empty"
         }
-        if isLANClientWorld {
-            guard player.rpg.created else { return RPGActionFailure.characterNotCreated.description }
-            guard action.available else {
-                if action.cooldownRemainingTicks > 0 {
-                    switch action.kind {
-                    case .skill: return RPGActionFailure.skillOnCooldown(action.id).description
-                    case .spell: return RPGActionFailure.spellOnCooldown(action.id).description
-                    }
-                }
-                if action.kind == .spell,
-                   let spell = rpgSpellDefinition(action.id),
-                   player.rpg.attributes.intelligence < spell.minimumIntelligence {
-                    return RPGActionFailure.insufficientIntelligence(required: spell.minimumIntelligence).description
-                }
-                return RPGActionFailure.insufficientFatigue(required: action.fatigueCost, available: player.rpg.fatigue).description
-            }
-            player.rpg.selectedPreparedActionID = action.token
-            if action.kind == .spell {
-                player.rpg.selectedPreparedSpellID = action.id
-            }
-            guard let nextSequence = rpgNextActionSequence(player.rpg) else { return "RPG action sequence is exhausted" }
-            switch action.kind {
-            case .skill:
-                lanRPGIntentHandler?(LANRPGIntent(action: .useSkill, skillID: action.id, actionSequence: nextSequence))
-            case .spell:
-                lanRPGIntentHandler?(LANRPGIntent(action: .castSpell, spellID: action.id, actionSequence: nextSequence))
-            }
-            return "Using slot \(slot + 1): \(action.displayName)"
-        }
-        switch rpgUseActionQuickSlot(player, slot: slot) {
+        switch rpgUseActionQuickSlot(player, slot: slot, preferences: preferences) {
         case .success(let result): return result.message
         case .failure(let error): return error.description
         }
@@ -1442,6 +1466,16 @@ public extension GameCore {
         guard isLANClientWorld, let player, let state else { return }
         player.rpg = repairRPGCharacterState(state)
         player.applyRPGDerivedStats()
+    }
+}
+
+private func rpgQuickSlotPreferenceErrorDescription(
+    _ error: RPGQuickSlotPreferenceError
+) -> String {
+    switch error {
+    case .characterNotCreated: return RPGActionFailure.characterNotCreated.description
+    case .invalidSlot: return RPGActionFailure.actionNotPrepared.description
+    case .actionNotPrepared(let token): return "Action is not prepared: \(token)"
     }
 }
 
@@ -2085,34 +2119,16 @@ private func rpgPreparedAction(withToken token: String?, in actions: [RPGPrepare
     return actions.first { $0.kind == parsed.kind && $0.id == parsed.id }
 }
 
-private func normalizedRPGActionQuickSlots(_ rawSlots: [String?], actions: [RPGPreparedAction]) -> [String?] {
-    var out = Array(repeating: Optional<String>.none, count: RPG_ACTION_QUICK_SLOT_COUNT)
-    var used = Set<String>()
-    for index in 0..<min(rawSlots.count, RPG_ACTION_QUICK_SLOT_COUNT) {
-        guard let action = rpgPreparedAction(withToken: rawSlots[index], in: actions),
-              !used.contains(action.token) else { continue }
-        out[index] = action.token
-        used.insert(action.token)
-    }
-    if rawSlots.isEmpty {
-        for action in actions where !used.contains(action.token) {
-            guard let empty = out.firstIndex(where: { $0 == nil }) else { break }
-            out[empty] = action.token
-            used.insert(action.token)
-        }
-    }
-    return out
+public func rpgActionQuickSlotActions(
+    _ state: RPGCharacterState, preferences: RPGQuickSlotPreferences
+) -> [RPGPreparedAction?] {
+    rpgQuickSlotActions(state: state, preferences: preferences)
 }
 
-public func rpgActionQuickSlotActions(_ state: RPGCharacterState) -> [RPGPreparedAction?] {
-    let actions = rpgPreparedActions(state)
-    let tokens = normalizedRPGActionQuickSlots(state.actionQuickSlots, actions: actions)
-    return tokens.map { rpgPreparedAction(withToken: $0, in: actions) }
-}
-
-public func rpgActionQuickSlotIndex(for token: String, in state: RPGCharacterState) -> Int? {
-    normalizedRPGActionQuickSlots(state.actionQuickSlots, actions: rpgPreparedActions(state))
-        .firstIndex { $0 == token }
+public func rpgActionQuickSlotIndex(
+    for token: String, in state: RPGCharacterState, preferences: RPGQuickSlotPreferences
+) -> Int? {
+    rpgNormalizeQuickSlotPreferences(preferences, against: state).tokens.firstIndex { $0 == token }
 }
 
 public func rpgSelectedPreparedAction(_ state: RPGCharacterState) -> RPGPreparedAction? {
@@ -2132,64 +2148,14 @@ private func normalizeSelectedPreparedAction(_ state: inout RPGCharacterState) {
     let actions = rpgPreparedActions(state)
     if actions.isEmpty {
         state.selectedPreparedActionID = nil
-        state.actionQuickSlots = Array(repeating: nil, count: RPG_ACTION_QUICK_SLOT_COUNT)
         return
     }
-    state.actionQuickSlots = normalizedRPGActionQuickSlots(state.actionQuickSlots, actions: actions)
     if let selected = state.selectedPreparedActionID,
        let parsed = rpgParsePreparedActionToken(selected),
        actions.contains(where: { $0.kind == parsed.kind && $0.id == parsed.id }) {
-        if parsed.kind == .spell { state.selectedPreparedSpellID = parsed.id }
         return
     }
-    if let selectedSpell = state.selectedPreparedSpellID,
-       actions.contains(where: { $0.kind == .spell && $0.id == selectedSpell }) {
-        state.selectedPreparedActionID = rpgPreparedActionToken(kind: .spell, id: selectedSpell)
-        return
-    }
-    let selected = actions[0]
-    state.selectedPreparedActionID = selected.token
-    if selected.kind == .spell { state.selectedPreparedSpellID = selected.id }
-}
-
-public func rpgAssignPreparedActionToQuickSlot(kind: RPGPreparedActionKind,
-                                               id: String,
-                                               slot: Int,
-                                               in state: inout RPGCharacterState) -> RPGActionFailure? {
-    state = repairRPGCharacterState(state)
-    guard state.created else { return .characterNotCreated }
-    guard slot >= 0 && slot < RPG_ACTION_QUICK_SLOT_COUNT else { return .actionNotPrepared }
-    let actions = rpgPreparedActions(state)
-    guard let action = actions.first(where: { $0.kind == kind && $0.id == id }) else {
-        switch kind {
-        case .skill:
-            guard let skill = rpgSkillDefinition(id) else { return .unknownSkill(id) }
-            return skill.kind == .active ? .skillNotPrepared(id) : .skillNotActive(id)
-        case .spell:
-            return rpgSpellDefinition(id) == nil ? .unknownSpell(id) : .spellNotPrepared(id)
-        }
-    }
-    var slots = normalizedRPGActionQuickSlots(state.actionQuickSlots, actions: actions)
-    for i in slots.indices where slots[i] == action.token {
-        slots[i] = nil
-    }
-    slots[slot] = action.token
-    state.actionQuickSlots = slots
-    state.selectedPreparedActionID = action.token
-    if action.kind == .spell {
-        state.selectedPreparedSpellID = action.id
-    }
-    state = repairRPGCharacterState(state)
-    return nil
-}
-
-public func rpgClearActionQuickSlot(_ slot: Int, in state: inout RPGCharacterState) {
-    state = repairRPGCharacterState(state)
-    guard slot >= 0 && slot < RPG_ACTION_QUICK_SLOT_COUNT else { return }
-    var slots = normalizedRPGActionQuickSlots(state.actionQuickSlots, actions: rpgPreparedActions(state))
-    slots[slot] = nil
-    state.actionQuickSlots = slots
-    state = repairRPGCharacterState(state)
+    state.selectedPreparedActionID = nil
 }
 
 private func trimRPGAttributesToEarnedBudget(_ attributes: RPGAttributes, level: Int) -> RPGAttributes {
@@ -2701,32 +2667,22 @@ public func rpgAwardXPEvent(_ event: RPGXPEvent,
 
 public func rpgLearnSkill(_ skillID: String, in state: inout RPGCharacterState) -> RPGProgressionError? {
     state = repairRPGCharacterState(state)
-    guard state.created else { return .characterNotCreated }
-    guard state.authorityRevision < RPG_MAX_NORMAL_AUTHORITY_REVISION else { return .authorityExhausted }
-    guard let def = rpgSkillDefinition(skillID), def.pathID == state.pathID else { return .unknownSkill(skillID) }
-    let current = state.skillRanks[skillID] ?? 0
-    guard current < 3 else { return .alreadyAtMaximumRank(skillID) }
-    let targetRank = current + 1
-    guard let gate = rpgMinimumLevel(for: skillID, targetRank: targetRank,
-                                     specializationBranchID: state.specializationBranchID),
-          state.level >= gate else {
-        return .insufficientLevel(required: rpgMinimumLevel(for: skillID, targetRank: targetRank,
-                                                            specializationBranchID: state.specializationBranchID) ?? RPG_LEVEL_CAP)
-    }
-    for req in def.requirements {
-        guard state.attributes.value(req.attribute) >= req.minimum else {
-            return .insufficientAttribute(req.attribute, required: req.minimum)
+    let evaluation = rpgEvaluateSkillPurchase(skillID, in: state)
+    if let failure = evaluation.failure {
+        switch failure {
+        case .characterNotCreated: return .characterNotCreated
+        case .unknownOrCrossPathSkill(let id): return .unknownSkill(id)
+        case .authorityRevisionExhausted: return .authorityExhausted
+        case .alreadyAtMaximumRank(let id): return .alreadyAtMaximumRank(id)
+        case .insufficientLevel(let required): return .insufficientLevel(required: required)
+        case .insufficientAttribute(let attribute, let required):
+            return .insufficientAttribute(attribute, required: required)
+        case .missingPrerequisite(let id): return .missingPrerequisite(id)
+        case .insufficientSkillPoints: return .insufficientSkillPoints
         }
     }
-    if let node = rpgSkillNodeIndex(skillID), node > 0,
-       let branch = rpgBranchDefinition(def.branchID) {
-        let prerequisite = branch.skillIDs[node - 1]
-        guard (state.skillRanks[prerequisite] ?? 0) >= 2 else { return .missingPrerequisite(prerequisite) }
-    }
-    let cost = rpgSkillPointCost(skillID, targetRank: targetRank, in: state) ?? Int.max
-    guard rpgAvailableSkillPoints(state) >= cost else { return .insufficientSkillPoints }
 
-    state.skillRanks[skillID] = targetRank
+    state.skillRanks[skillID] = evaluation.targetRank
     state.knownSpellIDs = rpgUnlockedSpellIDs(for: state.skillRanks)
     _ = rpgIncrementAuthorityRevision(&state)
     state = repairRPGCharacterState(state)
@@ -2758,8 +2714,6 @@ public func rpgPrepareSpell(_ spellID: String, in state: inout RPGCharacterState
     guard state.preparedSpellIDs.count < RPG_MAX_PREPARED_SPELLS else { return .preparedSpellLimit }
     state.preparedSpellIDs.append(spellID)
     state.preparedSpellIDs = sortSpellIDs(state.preparedSpellIDs)
-    if state.selectedPreparedSpellID == nil { state.selectedPreparedSpellID = spellID }
-    if state.selectedPreparedActionID == nil { state.selectedPreparedActionID = rpgPreparedActionToken(kind: .spell, id: spellID) }
     _ = rpgIncrementAuthorityRevision(&state)
     state = repairRPGCharacterState(state)
     return nil
@@ -2809,9 +2763,6 @@ public func rpgPrepareSkill(_ skillID: String, in state: inout RPGCharacterState
     guard state.preparedSkillIDs.count < RPG_MAX_PREPARED_SKILLS else { return .preparedSkillLimit }
     state.preparedSkillIDs.append(skillID)
     state.preparedSkillIDs = sortSkillIDs(state.preparedSkillIDs)
-    if let def = rpgSkillDefinition(skillID), def.kind == .active, state.selectedPreparedActionID == nil {
-        state.selectedPreparedActionID = rpgPreparedActionToken(kind: .skill, id: skillID)
-    }
     _ = rpgIncrementAuthorityRevision(&state)
     state = repairRPGCharacterState(state)
     return nil
@@ -3431,6 +3382,12 @@ private func inventoryByAdding(_ additions: [ItemStack], to inventory: [ItemStac
         }
     }
     return result
+}
+
+public func rpgStarterKitFitsInInventory(pathID: String,
+                                         inventory: [ItemStack?]) -> Bool {
+    guard case .success(let stacks) = rpgStarterKitStacks(pathID: pathID) else { return false }
+    return inventoryByAdding(stacks, to: inventory) != nil
 }
 
 public enum RPGFatigueRestorationSource: String, CaseIterable {

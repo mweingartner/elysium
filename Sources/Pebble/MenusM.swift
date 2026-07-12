@@ -269,8 +269,10 @@ final class WorldCreateScreen: Screen {
     }
 
     private let lanHostRequest: LANHostLaunchRequest?
-    let nameField = TextField(0, 0, 200, 16, "New World")
-    let seedField = TextField(0, 0, 200, 16, "Leave blank for random")
+    let nameField = TextField(0, 0, 200, 16, "New World",
+                              id: "create.worldName", accessibilityLabel: "World Name")
+    let seedField = TextField(0, 0, 200, 16, "Leave blank for random",
+                              id: "create.seed", accessibilityLabel: "Seed")
     var mode = GameMode.survival
     var difficulty = 2
     var worldPreset = WorldPreset.normal
@@ -496,18 +498,66 @@ final class PauseScreen: Screen {
 final class SettingsScreen: Screen {
     var tab = "video"
     var bindingKey: String?
+    private var controlsScrollOffset = 0.0
+    private var controlsLayout: PebbleControlsLayout?
+    private var pendingKeybindConflict: PebbleControlsPendingConflict?
+    private var pendingKeybindExpectedRevision: UInt64?
+    private var controlsStatus = ""
     var aiModelField: TextField?
     var aiModelChoices: [String] = []
     var aiStatus = ""
+    var hasActiveControlsCapture: Bool { bindingKey != nil }
 
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         rebuild(ui, game)
     }
+
+    @discardableResult
+    private func persistSettingsMutation(
+        _ game: GameCore, _ mutation: (inout Settings) -> Void
+    ) -> Bool {
+        var candidate = game.settings
+        mutation(&candidate)
+        return persistSettingsCandidate(
+            game, candidate: candidate, expectedRevision: game.settingsRevision)
+    }
+
+    @discardableResult
+    private func persistSettingsCandidate(
+        _ game: GameCore, candidate: Settings, expectedRevision: UInt64
+    ) -> Bool {
+        return MainActor.assumeIsolated {
+            if case .success = game.persistAndPublishSettingsCandidate(
+                candidate, expectedLiveRevision: expectedRevision) { return true }
+            return false
+        }
+    }
+
+    @discardableResult
+    private func persistControlsCandidate(
+        _ game: GameCore, candidate: [String: String], expectedRevision: UInt64,
+        successMessage: String
+    ) -> Bool {
+        let result = MainActor.assumeIsolated {
+            game.persistAndPublishKeybindCandidate(
+                candidate, expectedLiveRevision: expectedRevision)
+        }
+        switch result {
+        case .success:
+            controlsStatus = successMessage
+            return true
+        case .failure(let error):
+            controlsStatus = "Could not save binding: \(error.description)"
+            return false
+        }
+    }
+
     func rebuild(_ ui: UIManager, _ game: GameCore) {
         buttons = []
         sliders = []
         fields = []
         aiModelField = nil
+        controlsLayout = nil
         let cx = (ui.width / 2).rounded(.down)
         // tabs
         let tabs = ["video", "audio", "controls", "accessibility", "ai"]
@@ -517,22 +567,27 @@ final class SettingsScreen: Screen {
             let label = t == "accessibility" ? "Access" : t.prefix(1).uppercased() + String(t.dropFirst())
             let b = Button(tabStart + Double(i) * tabW, 20, tabW - 2, 16, label, { [weak self, weak ui, weak game] in
                 guard let self, let ui, let game else { return }
-                self.saveAIModelIfNeeded(game)
+                guard self.saveAIModelIfNeeded(game) else { return }
                 self.tab = t
                 self.bindingKey = nil
+                self.pendingKeybindConflict = nil
+                self.pendingKeybindExpectedRevision = nil
+                self.controlsStatus = ""
                 self.rebuild(ui, game)
             })
             buttons.append(b)
         }
         var y = 46.0
         let W = 150.0, GAP = 158.0
-        func toggle(_ label: String, _ get: @escaping () -> Bool, _ set: @escaping (Bool) -> Void, _ col: Int) {
-            let b = Button(cx - 160 + Double(col) * GAP, y, W, 18, "\(label): \(get() ? "ON" : "OFF")", {})
-            b.onClick = { [weak b, weak game] in
-                guard let b, let game else { return }
-                set(!get())
-                b.label = "\(label): \(get() ? "ON" : "OFF")"
-                game.applySettings()
+        func toggle(_ label: String, _ get: @escaping (Settings) -> Bool,
+                    _ set: @escaping (inout Settings, Bool) -> Void, _ col: Int) {
+            let b = Button(cx - 160 + Double(col) * GAP, y, W, 18,
+                           "\(label): \(get(game.settings) ? "ON" : "OFF")", {})
+            b.onClick = { [weak self, weak b, weak game] in
+                guard let self, let b, let game else { return }
+                let next = !get(game.settings)
+                guard self.persistSettingsMutation(game, { set(&$0, next) }) else { return }
+                b.label = "\(label): \(get(game.settings) ? "ON" : "OFF")"
             }
             buttons.append(b)
         }
@@ -540,24 +595,28 @@ final class SettingsScreen: Screen {
             sliders.append(Slider(cx - 160, y, W, 18,
                 { [weak game] in "Render Distance: \(game?.settings.renderDistance ?? 8)" },
                 { [weak game] in Double((game?.settings.renderDistance ?? 8) - 4) / 12 },
-                { [weak game] v in
-                    game?.settings.renderDistance = 4 + Int((v * 12).rounded())
-                    game?.applySettings()
+                { [weak self, weak game] v in
+                    guard let self, let game else { return }
+                    _ = self.persistSettingsMutation(game) {
+                        $0.renderDistance = 4 + Int((v * 12).rounded())
+                    }
                 }))
             sliders.append(Slider(cx - 2, y, W, 18,
                 { [weak game] in "FOV: \(game?.settings.fov ?? 70)" },
                 { [weak game] in Double((game?.settings.fov ?? 70) - 60) / 50 },
-                { [weak game] v in
-                    game?.settings.fov = 60 + Int((v * 50).rounded())
-                    game?.applySettings()
+                { [weak self, weak game] v in
+                    guard let self, let game else { return }
+                    _ = self.persistSettingsMutation(game) {
+                        $0.fov = 60 + Int((v * 50).rounded())
+                    }
                 }))
             y += 22
             sliders.append(Slider(cx - 160, y, W, 18,
                 { [weak game] in "Brightness: \(Int(((game?.settings.gamma ?? 0.5) * 100).rounded()))%" },
                 { [weak game] in game?.settings.gamma ?? 0.5 },
-                { [weak game] v in
-                    game?.settings.gamma = v
-                    game?.applySettings()
+                { [weak self, weak game] v in
+                    guard let self, let game else { return }
+                    _ = self.persistSettingsMutation(game) { $0.gamma = v }
                 }))
             sliders.append(Slider(cx - 2, y, W, 18,
                 { [weak game] in
@@ -565,37 +624,42 @@ final class SettingsScreen: Screen {
                     return "GUI Scale: \(g == 0 ? "Auto" : String(g))"
                 },
                 { [weak game] in Double(game?.settings.guiScale ?? 0) / 4 },
-                { [weak game] v in
-                    game?.settings.guiScale = Int((v * 4).rounded())
-                    game?.applySettings()
-                    // re-layout immediately — applySettings only persists,
-                    // and ui.resize otherwise waits for a window resize
-                    if let a = gAppDelegate {
+                { [weak self, weak game] v in
+                    guard let self, let game else { return }
+                    let persisted = self.persistSettingsMutation(game) {
+                        $0.guiScale = Int((v * 4).rounded())
+                    }
+                    // Re-layout only after the durable candidate publishes.
+                    if persisted, let a = gAppDelegate {
                         a.ui.resize(Double(a.gameView.drawableSize.width),
                                     Double(a.gameView.drawableSize.height),
                                     a.game.settings.guiScale, relayout: a.game)
                     }
                 }))
             y += 22
-            toggle("Fancy Graphics", { game.settings.fancyGraphics }, { game.settings.fancyGraphics = $0 }, 0)
-            toggle("Smooth Lighting", { game.settings.smoothLighting }, { game.settings.smoothLighting = $0 }, 1)
+            toggle("Fancy Graphics", { $0.fancyGraphics }, { $0.fancyGraphics = $1 }, 0)
+            toggle("Smooth Lighting", { $0.smoothLighting }, { $0.smoothLighting = $1 }, 1)
             y += 22
-            toggle("Bloom", { game.settings.bloom }, { game.settings.bloom = $0 }, 0)
-            toggle("Soft Shadows", { game.settings.shadows }, { game.settings.shadows = $0 }, 1)
+            toggle("Bloom", { $0.bloom }, { $0.bloom = $1 }, 0)
+            toggle("Soft Shadows", { $0.shadows }, { $0.shadows = $1 }, 1)
             y += 22
-            toggle("Clouds", { game.settings.clouds }, { game.settings.clouds = $0 }, 0)
-            toggle("View Bobbing", { game.settings.viewBobbing }, { game.settings.viewBobbing = $0 }, 1)
+            toggle("Clouds", { $0.clouds }, { $0.clouds = $1 }, 0)
+            toggle("View Bobbing", { $0.viewBobbing }, { $0.viewBobbing = $1 }, 1)
             y += 22
-            toggle("Fullscreen",
-                   { gAppDelegate?.window?.styleMask.contains(.fullScreen) ?? false },
-                   { _ in gAppDelegate?.window?.toggleFullScreen(nil) }, 0)
+            let fullscreen = Button(cx - 160, y, W, 18,
+                "Fullscreen: \((gAppDelegate?.window?.styleMask.contains(.fullScreen) ?? false) ? "ON" : "OFF")", {
+                    gAppDelegate?.window?.toggleFullScreen(nil)
+                })
+            buttons.append(fullscreen)
             y += 22
             sliders.append(Slider(cx - 160, y, W, 18,
                 { [weak game] in "Particles: \(["Minimal", "Decreased", "All"][min(2, game?.settings.particles ?? 2)])" },
                 { [weak game] in Double(game?.settings.particles ?? 2) / 2 },
-                { [weak game] v in
-                    game?.settings.particles = Int((v * 2).rounded())
-                    game?.applySettings()
+                { [weak self, weak game] v in
+                    guard let self, let game else { return }
+                    _ = self.persistSettingsMutation(game) {
+                        $0.particles = Int((v * 2).rounded())
+                    }
                 }))
             sliders.append(Slider(cx - 2, y, W, 18,
                 { [weak game] in
@@ -603,9 +667,11 @@ final class SettingsScreen: Screen {
                     return "Max FPS: \(f >= 250 ? "Unlimited" : String(f))"
                 },
                 { [weak game] in Double((game?.settings.maxFps ?? 250) - 30) / 220 },
-                { [weak game] v in
-                    game?.settings.maxFps = 30 + Int((v * 220).rounded())
-                    game?.applySettings()
+                { [weak self, weak game] v in
+                    guard let self, let game else { return }
+                    _ = self.persistSettingsMutation(game) {
+                        $0.maxFps = 30 + Int((v * 220).rounded())
+                    }
                 }))
             y += 22
             let shaderB = Button(cx - 160, y, W, 18, "", {})
@@ -613,11 +679,12 @@ final class SettingsScreen: Screen {
                 "Shaders: \(game.settings.shader == "ultra" ? "§6ULTRA§r" : "OFF")"
             }
             shaderB.label = shaderLabel()
-            shaderB.onClick = { [weak shaderB, weak game] in
-                guard let shaderB, let game else { return }
-                game.settings.shader = game.settings.shader == "ultra" ? nil : "ultra"
+            shaderB.onClick = { [weak self, weak shaderB, weak game] in
+                guard let self, let shaderB, let game else { return }
+                guard self.persistSettingsMutation(game, {
+                    $0.shader = game.settings.shader == "ultra" ? nil : "ultra"
+                }) else { return }
                 shaderB.label = shaderLabel()
-                game.applySettings()
             }
             buttons.append(shaderB)
         } else if tab == "audio" {
@@ -633,9 +700,9 @@ final class SettingsScreen: Screen {
                 sliders.append(Slider(cx - 160 + Double(col) * GAP, y, W, 18,
                     { [weak game] in "\(label): \(Int(((game?.settings.volumes[key] ?? 1) * 100).rounded()))%" },
                     { [weak game] in game?.settings.volumes[key] ?? 1 },
-                    { [weak game] v in
-                        game?.settings.volumes[key] = v
-                        game?.applySettings()
+                    { [weak self, weak game] v in
+                        guard let self, let game else { return }
+                        _ = self.persistSettingsMutation(game) { $0.volumes[key] = v }
                     }))
                 if col == 1 { y += 22 }
             }
@@ -643,48 +710,85 @@ final class SettingsScreen: Screen {
             sliders.append(Slider(cx - 160, y, W, 18,
                 { [weak game] in "Sensitivity: \(Int(((game?.settings.sensitivity ?? 0.5) * 200).rounded()))%" },
                 { [weak game] in game?.settings.sensitivity ?? 0.5 },
-                { [weak game] v in
-                    game?.settings.sensitivity = v
-                    game?.applySettings()
+                { [weak self, weak game] v in
+                    guard let self, let game else { return }
+                    _ = self.persistSettingsMutation(game) { $0.sensitivity = v }
                 }))
-            toggle("Invert Y", { game.settings.invertY }, { game.settings.invertY = $0 }, 1)
+            toggle("Invert Y", { $0.invertY }, { $0.invertY = $1 }, 1)
             y += 26
-            let binds: [(String, String)] = [
-                ("forward", "Forward"), ("back", "Back"), ("left", "Left"), ("right", "Right"),
-                ("jump", "Jump"), ("sneak", "Sneak"), ("sprint", "Sprint"), ("inventory", "Inventory"),
-                ("drop", "Drop Item"), ("chat", "Chat"), ("command", "Command"), ("perspective", "Perspective"),
-                ("swapOffhand", "Swap Offhand"),
-            ]
-            for (i, bind) in binds.enumerated() {
-                let col = i % 2
-                let key = bind.0, label = bind.1
-                let b = Button(cx - 160 + Double(col) * GAP, y, W, 16, "", {})
-                b.onClick = { [weak self, weak b] in
-                    guard let self, let b else { return }
-                    self.bindingKey = key
-                    b.label = "\(label): §e[press key]"
+            let contentBottom = max(y, ui.height - (pendingKeybindConflict == nil ? 52 : 72))
+            let layout = PebbleControlsLayout(
+                viewportWidth: ui.width, contentTop: y, contentBottom: contentBottom,
+                requestedScrollOffset: controlsScrollOffset, bindings: game.keybinds)
+            controlsLayout = layout
+            controlsScrollOffset = layout.clampedScrollOffset
+            for row in layout.visibleRows {
+                let captureWidth = 48.0
+                let resetWidth = 36.0
+                let resetX = row.x + row.width - resetWidth
+                let captureX = resetX - captureWidth - 2
+                let capture = Button(captureX, row.y + 1, captureWidth, 18,
+                                     bindingKey == row.actionID ? "Listening" : "Capture", {})
+                capture.onClick = { [weak self, weak ui, weak game] in
+                    guard let self, let ui, let game else { return }
+                    self.bindingKey = row.actionID
+                    self.pendingKeybindConflict = nil
+                    self.pendingKeybindExpectedRevision = nil
+                    self.controlsStatus = "Press a chord; Escape cancels."
+                    self.rebuild(ui, game)
                 }
-                b.label = "\(label): \(bindingKey == key ? "§e[press key]" : game.keybinds[key] ?? "?")"
-                buttons.append(b)
-                if col == 1 { y += 20 }
+                buttons.append(capture)
+
+                let reset = Button(resetX, row.y + 1, resetWidth, 18, "Reset", {})
+                reset.onClick = { [weak self, weak ui, weak game] in
+                    guard let self, let ui, let game,
+                          let definition = KEYBIND_DEFINITIONS.first(where: {
+                              $0.actionID == row.actionID
+                          }) else { return }
+                    self.bindingKey = nil
+                    self.pendingKeybindConflict = nil
+                    self.pendingKeybindExpectedRevision = nil
+                    self.applyControlsChord(definition.defaultChord, actionID: row.actionID,
+                                            ui: ui, game: game)
+                }
+                buttons.append(reset)
+            }
+            if let pending = pendingKeybindConflict,
+               let expectedRevision = pendingKeybindExpectedRevision {
+                let useAnyway = Button(cx - 50, ui.height - 52, 100, 16, "Use Anyway", {})
+                useAnyway.onClick = { [weak self, weak ui, weak game] in
+                    guard let self, let ui, let game else { return }
+                    if self.persistControlsCandidate(
+                        game, candidate: pending.candidateBindings,
+                        expectedRevision: expectedRevision,
+                        successMessage: "Saved \(pending.chord.description) for \(pending.actionID)."
+                    ) {
+                        self.pendingKeybindConflict = nil
+                        self.pendingKeybindExpectedRevision = nil
+                    }
+                    self.rebuild(ui, game)
+                }
+                buttons.append(useAnyway)
             }
         } else if tab == "accessibility" {
-            toggle("Subtitles", { game.settings.subtitles }, { game.settings.subtitles = $0 }, 0)
-            toggle("Auto-Jump", { game.settings.autoJump }, { game.settings.autoJump = $0 }, 1)
+            toggle("Subtitles", { $0.subtitles }, { $0.subtitles = $1 }, 0)
+            toggle("Auto-Jump", { $0.autoJump }, { $0.autoJump = $1 }, 1)
             y += 22
-            toggle("Reduce Motion", { game.settings.reduceMotion }, { game.settings.reduceMotion = $0 }, 0)
-            toggle("Reduced Flashes", { game.settings.reducedFlashes }, { game.settings.reducedFlashes = $0 }, 1)
+            toggle("Reduce Motion", { $0.reduceMotion }, { $0.reduceMotion = $1 }, 0)
+            toggle("Reduced Flashes", { $0.reducedFlashes }, { $0.reducedFlashes = $1 }, 1)
             y += 22
-            toggle("High Contrast UI", { game.settings.highContrast }, { game.settings.highContrast = $0 }, 0)
+            toggle("High Contrast UI", { $0.highContrast }, { $0.highContrast = $1 }, 0)
             sliders.append(Slider(cx - 2, y, W, 18,
                 { [weak game] in "Darkness Pulsing: \(Int(((game?.settings.darknessPulse ?? 1) * 100).rounded()))%" },
                 { [weak game] in game?.settings.darknessPulse ?? 1 },
-                { [weak game] v in
-                    game?.settings.darknessPulse = v
-                    game?.applySettings()
+                { [weak self, weak game] v in
+                    guard let self, let game else { return }
+                    _ = self.persistSettingsMutation(game) { $0.darknessPulse = v }
                 }))
         } else if tab == "ai" {
-            let modelField = TextField(cx - 160, y + 14, W * 2 + 8, 18, "ollama model")
+            let modelField = TextField(cx - 160, y + 14, W * 2 + 8, 18, "ollama model",
+                                       id: "settings.ollamaModel",
+                                       accessibilityLabel: "Ollama Model")
             modelField.maxLength = 128
             modelField.text = game.settings.aiOllamaModel
             modelField.caret = modelField.text.count
@@ -693,22 +797,27 @@ final class SettingsScreen: Screen {
 
             buttons.append(Button(cx - 160, y + 38, W, 18, "Save Model", { [weak self, weak game] in
                 guard let self, let game else { return }
-                self.saveAIModelIfNeeded(game)
+                guard self.saveAIModelIfNeeded(game) else { return }
                 self.aiStatus = game.settings.aiOllamaModel.isEmpty ? "Model cleared" : "Saved \(game.settings.aiOllamaModel)"
             }))
             buttons.append(Button(cx - 2, y + 38, W, 18, "Refresh Models", { [weak self, weak ui, weak game] in
                 guard let self, let ui, let game else { return }
-                self.saveAIModelIfNeeded(game)
+                guard self.saveAIModelIfNeeded(game) else { return }
+                let refreshCandidate = game.settings
+                let refreshExpectedRevision = game.settingsRevision
                 self.aiStatus = "Refreshing..."
                 pebbleOllamaAgent.fetchModels { [weak self, weak ui, weak game] result in
                     guard let self, let ui, let game else { return }
                     switch result {
                     case .success(let names):
-                        self.aiModelChoices = names
-                        if game.settings.aiOllamaModel.isEmpty, let first = names.first {
-                            game.settings.aiOllamaModel = first
-                            game.applySettings()
+                        var candidate = refreshCandidate
+                        if candidate.aiOllamaModel.isEmpty, let first = names.first {
+                            candidate.aiOllamaModel = first
                         }
+                        guard self.persistSettingsCandidate(
+                            game, candidate: candidate,
+                            expectedRevision: refreshExpectedRevision) else { return }
+                        self.aiModelChoices = names
                         self.aiStatus = names.isEmpty ? "No local models found" : "Loaded \(names.count) local models"
                     case .failure(let error):
                         self.aiStatus = "Ollama unavailable: \(error.localizedDescription)"
@@ -721,56 +830,111 @@ final class SettingsScreen: Screen {
                 let current = sanitizedOllamaModelName(self.aiModelField?.text ?? game.settings.aiOllamaModel)
                 let idx = self.aiModelChoices.firstIndex(of: current) ?? -1
                 let next = self.aiModelChoices[(idx + 1) % self.aiModelChoices.count]
+                guard self.persistSettingsMutation(game, { $0.aiOllamaModel = next }) else { return }
                 self.aiModelField?.text = next
                 self.aiModelField?.caret = next.count
-                game.settings.aiOllamaModel = next
-                game.applySettings()
                 self.aiStatus = "Selected \(next)"
             })
             next.enabled = !aiModelChoices.isEmpty
             buttons.append(next)
             buttons.append(Button(cx - 2, y + 60, W, 18, "Clear Model", { [weak self, weak game] in
                 guard let self, let game else { return }
+                guard self.persistSettingsMutation(game, { $0.aiOllamaModel = "" }) else { return }
                 self.aiModelField?.text = ""
                 self.aiModelField?.caret = 0
-                game.settings.aiOllamaModel = ""
-                game.applySettings()
                 self.aiStatus = "Model cleared"
             }))
         }
         buttons.append(Button(cx - 100, ui.height - 30, 200, 20, "Done", { [weak self, weak ui, weak game] in
-            guard let ui, let game else { return }
-            self?.saveAIModelIfNeeded(game)
-            game.applySettings()
+            guard let self, let ui, let game else { return }
+            guard self.saveAIModelIfNeeded(game) else { return }
             ui.closeTop(game)
         }))
     }
-    func saveAIModelIfNeeded(_ game: GameCore) {
-        guard tab == "ai", let field = aiModelField else { return }
+
+    /// Shared capture seam for the AppKit router: validation is pure and the live label remains
+    /// sourced from `game.keybinds` until the detached candidate has durably published.
+    func applyControlsChord(_ chord: PebbleKeyChord, actionID: String,
+                            ui: UIManager, game: GameCore) {
+        let expectedRevision = game.keybindRevision
+        bindingKey = nil
+        pendingKeybindConflict = nil
+        pendingKeybindExpectedRevision = nil
+        switch prepareControlsKeybindCandidate(
+            bindings: game.keybinds, actionID: actionID, chord: chord) {
+        case .reserved:
+            controlsStatus = "Reserved by Pebble"
+        case .invalidAction, .invalidBindings:
+            controlsStatus = "Binding was not changed."
+        case .conflict(let pending):
+            pendingKeybindConflict = pending
+            pendingKeybindExpectedRevision = expectedRevision
+            controlsStatus = "Conflict: \(pending.conflictingActionIDs.joined(separator: ", ")). "
+                + "Winner: \(pending.winnerActionID)."
+        case .ready(let committedActionID, let canonicalChord, let candidate):
+            _ = persistControlsCandidate(
+                game, candidate: candidate, expectedRevision: expectedRevision,
+                successMessage: "Saved \(canonicalChord.description) for \(committedActionID).")
+        }
+        rebuild(ui, game)
+    }
+
+    @discardableResult
+    func cancelControlsCapture(_ ui: UIManager, _ game: GameCore) -> Bool {
+        guard bindingKey != nil || pendingKeybindConflict != nil else { return false }
+        bindingKey = nil
+        pendingKeybindConflict = nil
+        pendingKeybindExpectedRevision = nil
+        controlsStatus = "Capture cancelled."
+        rebuild(ui, game)
+        return true
+    }
+
+    @discardableResult
+    func handleControlsKeyEvent(_ event: PebbleKeyEvent,
+                                ui: UIManager, game: GameCore) -> Bool {
+        guard let binding = bindingKey else { return false }
+        if event.terminal.rawValue == "Escape" { return cancelControlsCapture(ui, game) }
+        guard !event.isRepeat, let chord = event.chord else {
+            controlsStatus = "That key cannot be bound."
+            rebuild(ui, game)
+            return true
+        }
+        applyControlsChord(chord, actionID: binding, ui: ui, game: game)
+        return true
+    }
+
+    @discardableResult
+    func saveAIModelIfNeeded(_ game: GameCore) -> Bool {
+        guard tab == "ai", let field = aiModelField else { return true }
         var model = sanitizedOllamaModelName(field.text)
         if !model.isEmpty && !isAllowedLocalOllamaModelName(model) {
             model = ""
             aiStatus = "Cloud models are not allowed"
         }
+        guard persistSettingsMutation(game, { $0.aiOllamaModel = model }) else { return false }
         field.text = model
         field.caret = min(field.caret, field.text.count)
-        game.settings.aiOllamaModel = model
-        game.applySettings()
+        return true
     }
     override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
-        if let binding = bindingKey {
-            game.keybinds[binding] = key
-            bindingKey = nil
-            game.applySettings()
-            rebuild(ui, game)
-            return true
-        }
         if tab == "ai", key == "Enter" {
-            saveAIModelIfNeeded(game)
+            guard saveAIModelIfNeeded(game) else { return true }
             aiStatus = game.settings.aiOllamaModel.isEmpty ? "Model cleared" : "Saved \(game.settings.aiOllamaModel)"
             return true
         }
         return super.onKey(ui, game, key)
+    }
+    override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
+        guard tab == "controls", let layout = controlsLayout else {
+            return super.onWheel(ui, game, dy)
+        }
+        let finiteDelta = dy.isFinite ? dy : 0
+        controlsScrollOffset = min(max(0,
+            layout.clampedScrollOffset + finiteDelta * PebbleControlsLayout.rowStride),
+            layout.maximumScrollOffset)
+        rebuild(ui, game)
+        return true
     }
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         if game.hasWorld() {
@@ -779,7 +943,55 @@ final class SettingsScreen: Screen {
             ui.drawDirtBg()
         }
         ui.cv.drawTextCentered("Options", ui.width / 2, 6, 1)
-        if tab == "ai" {
+        if tab == "controls", let layout = controlsLayout {
+            for row in layout.visibleRows {
+                let definition = KEYBIND_DEFINITIONS[row.definitionIndex]
+                let hovered = ui.mouseX >= row.x && ui.mouseX < row.x + row.width
+                    && ui.mouseY >= row.y && ui.mouseY < row.y + row.height
+                ui.cv.setFill(hovered ? "rgba(255,255,255,0.16)" : "rgba(0,0,0,0.24)")
+                ui.cv.fillRect(row.x, row.y, row.width, row.height)
+                let textWidthAvailable = max(24, row.width - 92)
+                ui.cv.drawText(controlsClipped(definition.displayName,
+                                               maximumPixels: textWidthAvailable),
+                               row.x + 3, row.y + 2, 0.75, "#ffffff", shadow: false)
+                let bindingText = bindingKey == row.actionID
+                    ? "[press chord]" : row.chordText + (row.conflictText == nil ? "" : " • Conflict")
+                ui.cv.drawText(controlsClipped(bindingText, maximumPixels: textWidthAvailable,
+                                               scale: 0.75),
+                               row.x + 3, row.y + 11, 0.75,
+                               row.conflictText == nil ? "#b8b8b8" : "#ffb060", shadow: false)
+                if hovered {
+                    var lines = [definition.displayName, "Binding: \(row.chordText)"]
+                    if let conflict = row.conflictText { lines.append(conflict) }
+                    ui.tooltipLines = lines
+                }
+            }
+            let contentTop = 72.0
+            let contentBottom = max(contentTop,
+                ui.height - (pendingKeybindConflict == nil ? 52 : 72))
+            if layout.maximumScrollOffset > 0, contentBottom > contentTop {
+                let trackHeight = contentBottom - contentTop
+                let contentHeight = trackHeight + layout.maximumScrollOffset
+                let thumbHeight = max(10, trackHeight * trackHeight / contentHeight)
+                let thumbY = contentTop + (trackHeight - thumbHeight)
+                    * layout.clampedScrollOffset / layout.maximumScrollOffset
+                ui.cv.setFill("rgba(0,0,0,0.45)")
+                ui.cv.fillRect(ui.width - 5, contentTop, 3, trackHeight)
+                ui.cv.setFill("rgba(255,255,255,0.60)")
+                ui.cv.fillRect(ui.width - 5, thumbY, 3, thumbHeight)
+            }
+            if !controlsStatus.isEmpty {
+                let statusY = contentBottom + 2
+                ui.cv.drawText(controlsClipped(controlsStatus,
+                                               maximumPixels: max(20, ui.width - 28), scale: 0.75),
+                               14, statusY, 0.75,
+                               pendingKeybindConflict == nil ? "#d0d0d0" : "#ffb060",
+                               shadow: false)
+                if ui.mouseY >= statusY - 2 && ui.mouseY < statusY + 10 {
+                    ui.tooltipLines = [controlsStatus]
+                }
+            }
+        } else if tab == "ai" {
             let cx = (ui.width / 2).rounded(.down)
             ui.cv.drawText("Ollama Model", cx - 160, 46, 1)
             if !aiStatus.isEmpty {
@@ -787,6 +999,16 @@ final class SettingsScreen: Screen {
             }
         }
         ui.drawButtons(self)
+    }
+
+    private func controlsClipped(_ text: String, maximumPixels: Double,
+                                 scale: Double = 0.75) -> String {
+        guard maximumPixels > 0, Double(textWidth(text)) * scale > maximumPixels else { return text }
+        var result = text
+        while !result.isEmpty && Double(textWidth(result + "…")) * scale > maximumPixels {
+            result.removeLast()
+        }
+        return result + "…"
     }
 }
 

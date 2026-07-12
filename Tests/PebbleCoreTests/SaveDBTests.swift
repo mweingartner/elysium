@@ -3,14 +3,24 @@ import XCTest
 
 final class SaveDBTests: XCTestCase {
     private func makeDB() throws -> SaveDB {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PebbleCoreTests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return SaveDB(databaseURL: dir.appendingPathComponent("pebble.db"), migrateLegacy: false)
+        try PersistenceTestSupport.makeDatabase(owner: self, label: "save-db")
     }
 
     private func registerBlocksIfNeeded() {
         if blockDefs.isEmpty { registerAllBlocks() }
+    }
+
+    private func runSQLite(_ databaseURL: URL, _ sql: String) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [databaseURL.path, sql]
+        process.standardOutput = FileHandle.nullDevice
+        let errors = Pipe()
+        process.standardError = errors
+        try process.run()
+        process.waitUntilExit()
+        let diagnostics = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        XCTAssertEqual(process.terminationStatus, 0, diagnostics)
     }
 
     private func chunkBlob(flags: UInt8, blocks: [UInt16]? = nil, biomes: [UInt8]? = nil,
@@ -180,5 +190,90 @@ final class SaveDBTests: XCTestCase {
         // return the good one
         let all = db.listLANPlayers(world: "world-a")
         XCTAssertEqual(all.map(\.playerID), ["good"])
+    }
+
+    func testWorldPlayerAdvancementAndResumeAdapterMatrix() throws {
+        let db = try makeDB()
+        let world = WorldRecord(id: "adapter-world", name: "Adapter World", seed: 77,
+                                gameMode: GameMode.survival, difficulty: 2)
+        db.putWorld(world)
+        XCTAssertEqual(db.getWorld(world.id)?.name, world.name)
+        XCTAssertEqual(db.listWorlds().map(\.id), [world.id])
+
+        db.putPlayer(world.id, ["health": 19.5, "alive": true])
+        XCTAssertEqual(db.getPlayer(world.id)?["health"] as? Double, 19.5)
+        XCTAssertEqual(db.getPlayer(world.id)?["alive"] as? Bool, true)
+
+        db.putAdvancements(world.id, ["story_root", "mine_stone"])
+        XCTAssertEqual(db.getAdvancements(world.id), ["story_root", "mine_stone"])
+
+        db.putLANClientResume("host-world", ["updated": false, "x": 12.25])
+        XCTAssertEqual(db.getLANClientResume("host-world")?["updated"] as? Bool, false)
+        XCTAssertEqual(db.getLANClientResume("host-world")?["x"] as? Double, 12.25)
+        db.deleteLANClientResume("host-world")
+        XCTAssertNil(db.getLANClientResume("host-world"))
+
+        db.deleteWorld(world.id)
+        XCTAssertNil(db.getWorld(world.id))
+        XCTAssertNil(db.getPlayer(world.id))
+        XCTAssertNil(db.getAdvancements(world.id))
+    }
+
+    func testTemplateFormatNilZeroOneAndModernFallbackMatrix() throws {
+        registerBlocksIfNeeded()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "pebble-template-fallback-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("pebble.db")
+        let bootstrap = try SaveDB.open(databaseURL: databaseURL, migrateLegacy: false)
+        try bootstrap.close()
+
+        let base = ObjectTemplate(name: "base", anchorX: 0, anchorY: 0, anchorZ: 0,
+                                  sizeX: 1, sizeY: 1, sizeZ: 1,
+                                  blocks: [TemplateBlock(dx: 0, dy: 0, dz: 0,
+                                                         cell: UInt16(cell(B.stone)))])
+        let legacy = try JSONEncoder().encode(base).map { String(format: "%02x", $0) }.joined()
+        let modern = try encodeObjectTemplate(base).map { String(format: "%02x", $0) }.joined()
+        let rows = [
+            ("nil", "'bad'", "NULL", legacy),
+            ("zero", "0", "NULL", legacy),
+            ("one", "1", "NULL", legacy),
+            ("two", "2", modern, ""),
+            ("three", "3", modern, ""),
+            ("candidate", "2", modern, ""),
+        ].map { name, format, data, json -> String in
+            let dataSQL = data == "NULL" ? "NULL" : "X'\(data)'"
+            let jsonSQL = json.isEmpty ? "''" : "CAST(X'\(json)' AS TEXT)"
+            let sizeX = name == "candidate" ? "'bad'" : "0"
+            return "INSERT INTO templates(name,json,created,format,data,sizeX,sizeY,sizeZ,blockCount,blockEntityCount,dominantBlock,dominantDisplay) VALUES('\(name)',\(jsonSQL),0,\(format),\(dataSQL),\(sizeX),0,0,0,0,'','');"
+        }.joined()
+        try runSQLite(databaseURL, rows + "INSERT INTO templates(name,json,created,format,data,sizeX,sizeY,sizeZ,blockCount,blockEntityCount,dominantBlock,dominantDisplay) VALUES('corrupt','bad',0,2,X'00','bad',0,0,0,0,'','');")
+
+        let database = try SaveDB.open(databaseURL: databaseURL, migrateLegacy: false)
+        defer { try? database.close() }
+        for name in ["nil", "zero", "one", "two", "three", "candidate"] {
+            let value = try XCTUnwrap(database.getTemplate(named: name), name)
+            XCTAssertEqual(value.blocks.count, 1, name)
+            XCTAssertEqual(value.sizeX, 1, name)
+        }
+        XCTAssertThrowsError(try database.getTemplate(named: "corrupt"))
+        let summaries = database.listTemplateSummaries()
+        XCTAssertEqual(summaries.count, 6)
+        XCTAssertTrue(summaries.allSatisfy { $0.name == "base" && $0.blockCount == 1 })
+    }
+
+    func testChunkBatchPreflightsEveryRowBeforeAtomicWrite() throws {
+        registerBlocksIfNeeded()
+        let db = try makeDB()
+        let valid = ChunkRecord(key: db.chunkKey("world", 0, 1, 2), worldId: "world",
+                                dim: 0, cx: 1, cz: 2, entities: [])
+        let outOfRange = ChunkRecord(key: "bad", worldId: "world", dim: 0,
+                                     cx: Int.max, cz: 3, entities: [])
+        XCTAssertFalse(db.putChunks([valid, outOfRange]))
+        XCTAssertEqual(db.getChunkKeys("world"), [])
+        XCTAssertTrue(db.putChunks([]))
+        XCTAssertTrue(db.putChunks([valid]))
+        XCTAssertEqual(db.getChunkKeys("world"), [db.chunkKey("world", 0, 1, 2)])
     }
 }

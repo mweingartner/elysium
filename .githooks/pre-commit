@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+scripts/installed-signoff-receipt.sh precommit || {
+    echo "pre-commit blocked: installed sign-off is not finalized for the exact staged/worktree content." >&2
+    echo "Inspect with: scripts/installed-signoff-receipt.sh status" >&2
+    exit 1
+}

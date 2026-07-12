@@ -67,18 +67,18 @@ final class LANV6SchemaAuthorizerTests: XCTestCase {
             """)
     }
 
-    private func fileIdentity(_ url: URL) -> (device: UInt64, inode: UInt64)? {
+    private func fileIdentity(_ url: URL) -> (device: dev_t, inode: ino_t)? {
         var info = stat()
         guard lstat(url.path, &info) == 0 else { return nil }
-        return (UInt64(info.st_dev), UInt64(info.st_ino))
+        return (info.st_dev, info.st_ino)
     }
 
-    private func descriptorCount(device: UInt64, inode: UInt64) -> Int {
+    private func descriptorCount(device: dev_t, inode: ino_t) -> Int {
         var count = 0
         for descriptor in 0..<min(Int(getdtablesize()), 8_192) {
             var info = stat()
             if fstat(Int32(descriptor), &info) == 0,
-               UInt64(info.st_dev) == device, UInt64(info.st_ino) == inode {
+               info.st_dev == device, info.st_ino == inode {
                 count += 1
             }
         }

@@ -4,6 +4,7 @@
 // and input + screens reach the app through the GameHost protocol.
 
 import Foundation
+import PebbleTextInput
 
 // =============================================================================
 // Constants (the frozen baseline)
@@ -137,6 +138,19 @@ public struct BossBarInfo {
     }
 }
 
+public struct RPGLocalPreferenceUIRefresh: Equatable, Sendable {
+    public let worldEntryGeneration: UInt64
+    public let localPreferenceRevision: UInt64
+    public let persistenceFailed: Bool
+
+    public init(worldEntryGeneration: UInt64, localPreferenceRevision: UInt64,
+                persistenceFailed: Bool) {
+        self.worldEntryGeneration = worldEntryGeneration
+        self.localPreferenceRevision = localPreferenceRevision
+        self.persistenceFailed = persistenceFailed
+    }
+}
+
 public protocol GameHost: AnyObject {
     // screens
     func hasScreen() -> Bool
@@ -170,6 +184,11 @@ public protocol GameHost: AnyObject {
     func uploadMesh(_ cx: Int, _ sy: Int, _ cz: Int, _ minY: Int, _ mesh: MeshOutput)
     func removeChunkMeshes(_ cx: Int, _ cz: Int, _ sections: Int)
     func clearAllSections()
+    func rpgLocalPreferenceDidRefresh(_ refresh: RPGLocalPreferenceUIRefresh)
+}
+
+public extension GameHost {
+    func rpgLocalPreferenceDidRefresh(_ refresh: RPGLocalPreferenceUIRefresh) {}
 }
 
 /// interpolated camera for the renderer — reference implementation CameraState
@@ -216,14 +235,89 @@ final class MeshJobState {
     var dirtyAgain = false
 }
 
+private struct RPGSemanticEquipmentFocusState: Encodable {
+    let selectedSlot: Int
+    let selectedStack: ItemStack?
+    let offHand: ItemStack?
+    let armor: [ItemStack?]
+}
+
+private struct RPGLegacyPlayerOmissionIdentity: Equatable, Sendable {
+    let worldID: String
+    let worldEntryGeneration: UInt64
+    let envelopeVersion: UInt64
+    let sourceDigest: LANV6SHA256Digest
+}
+
+private struct RPGLegacyPlayerOmissionRequest {
+    let context: RPGLocalPreferenceRequestContext
+    let identity: RPGLegacyPlayerOmissionIdentity
+    let originDigest: LANV6SHA256Digest
+    let originRevision: UInt64
+    let livePreferenceDigest: LANV6SHA256Digest
+}
+
+private struct RPGLegacyPlayerOmissionCommit {
+    let request: RPGLegacyPlayerOmissionRequest
+    let stored: SaveDBPlayerRowSnapshot
+}
+
+private struct RPGUncheckedSendable<Value>: @unchecked Sendable {
+    let value: Value
+}
+
+private enum LocalSettingsPublicationKind: String {
+    case settings, keybinds, tutorial
+}
+
 // =============================================================================
 // The Game
 // =============================================================================
+package final class SignCommitToken {
+    fileprivate let world: World
+    fileprivate let worldID: String
+    fileprivate let worldEntryGeneration: UInt64
+    fileprivate let dimension: Dim
+    fileprivate let x: Int
+    fileprivate let y: Int
+    fileprivate let z: Int
+    fileprivate let expectedBlock: Int
+    fileprivate let expectedEntity: BlockEntityData?
+    fileprivate var consumed = false
+
+    fileprivate init(world: World, worldID: String, worldEntryGeneration: UInt64,
+                     dimension: Dim, x: Int, y: Int, z: Int, expectedBlock: Int,
+                     expectedEntity: BlockEntityData?) {
+        self.world = world
+        self.worldID = worldID
+        self.worldEntryGeneration = worldEntryGeneration
+        self.dimension = dimension
+        self.x = x; self.y = y; self.z = z
+        self.expectedBlock = expectedBlock
+        self.expectedEntity = expectedEntity
+    }
+}
+
 public final class GameCore {
     public weak var host: GameHost?
     public let db: SaveDB
-    public var settings: Settings
-    public var keybinds: [String: String]
+    private let localSettingsStore: LocalSettingsStore
+    public private(set) var settings: Settings
+    public private(set) var keybinds: [String: String]
+    public private(set) var settingsRevision: UInt64
+    public private(set) var keybindRevision: UInt64
+    public private(set) var localSettingsPersistenceFailed: Bool
+    public private(set) var localSettingsPersistenceFailureCount: UInt64
+#if DEBUG
+    var _testLocalSettingsPersistenceFailure: ((LocalSettingsStoreError) -> Void)?
+    var _testLocalSettingsDidPublish: ((String, UInt64) -> Void)?
+    private(set) var _testLocalSettingsSemanticRevision: UInt64 = 1
+    private(set) var _testLocalSettingsDirtyCount: UInt64 = 0
+    private(set) var _testLocalSettingsNotificationIntentCount: UInt64 = 0
+
+    func _testSetSettingsRevision(_ value: UInt64) { settingsRevision = value }
+    func _testSetKeybindRevision(_ value: UInt64) { keybindRevision = value }
+#endif
 
     // world state
     public var worlds: [Dim: World] = [:]
@@ -233,6 +327,64 @@ public final class GameCore {
     public var advancements = AdvancementTracker()
     public private(set) var inWorld = false
     public private(set) var isLANClientWorld = false
+    /// Checked session provenance for RPG semantic captures. It is never reset, so leaving and
+    /// re-entering the same world record cannot make an old activation current again.
+    private var rpgWorldEntryGeneration: UInt64 = 0
+    private var rpgWorldEntryGenerationExhausted = false
+    private var rpgLocalPreferenceOperationID: UInt64 = 0
+    private var rpgLocalPreferenceOperationExhausted = false
+    private var rpgActiveLocalPreferenceOperationID: UInt64?
+    private var rpgLocalPreferenceStorageSnapshot: RPGQuickSlotStorageSnapshot?
+    public private(set) var rpgQuickSlotPreferences: RPGQuickSlotPreferences?
+    public private(set) var rpgLocalPreferenceStatus: RPGStatusPresentation?
+    public var rpgLocalPreferencePersistenceFailed: Bool {
+        rpgLocalPreferenceStatus?.kind == .persistenceFailure
+    }
+    public private(set) var rpgLocalPreferenceFailureCount: UInt64 = 0
+    private var rpgLocalPreferenceStatusCounterExhausted = false
+    public var rpgLocalPreferenceRevision: UInt64? {
+        rpgLocalPreferenceStorageSnapshot?.revision
+    }
+#if DEBUG
+    var _testRPGLocalPreferenceBeforeIO: ((RPGLocalPreferenceRequestContext) -> Void)?
+    var _testRPGLocalPreferenceFailure: ((RPGLocalPreferenceRequestContext) -> Error?)?
+    var _testRPGLegacyMigrationResultTransform: ((RPGLegacyQuickSlotMigrationResult) -> RPGLegacyQuickSlotMigrationResult)?
+    var _testRPGWorldTeardownDidInvalidate: (() -> Void)?
+    var _testRPGCheckedPlayerOmissionBeforeFinalSegment: (() -> Void)?
+    var _testRPGCheckedPlayerOmissionDidCommit: (() -> Void)?
+    private(set) var _testRPGCheckedPlayerOmissionFinalSegmentCount = 0
+    private(set) var _testLastRPGLocalPreferenceContext: RPGLocalPreferenceRequestContext?
+
+    func _testSetRPGWorldEntryGeneration(_ value: UInt64) {
+        rpgWorldEntryGeneration = value
+        rpgWorldEntryGenerationExhausted = false
+    }
+
+    func _testSetRPGLocalPreferenceOperationID(_ value: UInt64) {
+        rpgLocalPreferenceOperationID = value
+        rpgLocalPreferenceOperationExhausted = false
+    }
+
+    func _testSetRPGLocalPreferenceFailureCount(_ value: UInt64) {
+        rpgLocalPreferenceFailureCount = value
+        rpgLocalPreferenceStatusCounterExhausted = false
+    }
+
+    func _testInstallRPGLocalPreferenceSnapshot(_ snapshot: RPGQuickSlotStorageSnapshot) {
+        rpgLocalPreferenceStorageSnapshot = snapshot
+        rpgQuickSlotPreferences = snapshot.preferences
+        rpgActiveLocalPreferenceOperationID = nil
+    }
+
+    func _testRPGPlayerPersistenceQueueSelfEntry() -> Bool {
+        rpgPlayerPersistenceQueue.sync {
+            withRPGPlayerPersistenceQueueSync { true }
+        }
+    }
+#endif
+    /// Checked generation for the RPG game-rule input used by semantic activation.
+    private var rpgRulesGeneration: UInt64 = 1
+    private var rpgRulesGenerationExhausted = false
     /// A LAN host is authoritative for remote peers even while a local menu is
     /// open, so fixed-step simulation cannot inherit singleplayer menu pause.
     public var lanHostKeepsSimulationRunning = false
@@ -242,6 +394,33 @@ public final class GameCore {
     public var rpgSimulationTick: Int {
         max(0, min(RPG_MAX_COUNTER,
                    worldRec?.rpgSimulationTick ?? worlds[dim]?.rpgSimulationTick ?? 0))
+    }
+
+    /// Track-B authority projection. Protocol-5 clients deliberately have no compatible RPG
+    /// semantic authority or writable preference destination and therefore always fail closed.
+    public var rpgAuthorityPresentation: RPGAuthorityPresentation {
+        guard inWorld, !isLANClientWorld, !rpgWorldEntryGenerationExhausted,
+              !rpgRulesGenerationExhausted, rpgLocalPreferenceScope != nil,
+              player?.rpgClassesEnabled() == true else { return .unavailable }
+        return (try? RPGAuthorityPresentation(validating: .localReady,
+                                               semanticRevision: rpgWorldEntryGeneration)) ?? .unavailable
+    }
+
+    public var rpgLocalPreferenceScope: RPGLocalPreferenceScope? {
+        guard inWorld, !isLANClientWorld, !rpgWorldEntryGenerationExhausted,
+              let id = worldRec?.id else { return nil }
+        return try? RPGLocalPreferenceScope.validatedLocalWorld(id)
+    }
+
+    /// Becomes true only after the next dependency-ordered local-preference lifecycle step has
+    /// loaded/materialized an exact session value. Merely having a local world identity is not a
+    /// license to publish slot edits.
+    public var rpgLocalPreferenceWritable: Bool {
+        guard let snapshot = rpgLocalPreferenceStorageSnapshot,
+              rpgQuickSlotPreferences != nil, rpgActiveLocalPreferenceOperationID == nil,
+              let scope = rpgLocalPreferenceScope,
+              case .localWorld = scope else { return false }
+        return snapshot.revision > 0
     }
     public var mapSpanBlocks = MAP_DEFAULT_VIEW_BLOCKS
     public var mapMinimapSizeMode = MAP_DEFAULT_MINIMAP_SIZE_MODE
@@ -319,6 +498,17 @@ public final class GameCore {
     private let genQueue = DispatchQueue(label: "pebble.gen", qos: .userInitiated, attributes: .concurrent)
     private let meshQueue = DispatchQueue(label: "pebble.mesh", qos: .userInitiated, attributes: .concurrent)
     private let saveQueue = DispatchQueue(label: "pebble.save", qos: .utility)
+    private let rpgLocalPreferenceQueue = DispatchQueue(
+        label: "pebble.rpg-local-preferences", qos: .utility)
+    private let rpgPlayerPersistenceQueue = DispatchQueue(
+        label: "pebble.rpg-player-persistence", qos: .utility)
+    /// Accessed only on `rpgPlayerPersistenceQueue`. It lets ordinary player writes queued after a
+    /// committed omission strip the compatibility key without dropping unrelated newer player data.
+    private var rpgCommittedPlayerOmissions: [String: RPGLegacyPlayerOmissionIdentity] = [:]
+    private let saveQueueSpecificKey = DispatchSpecificKey<UInt8>()
+    private let saveQueueSpecificValue: UInt8 = 1
+    private let rpgPlayerPersistenceQueueSpecificKey = DispatchSpecificKey<UInt8>()
+    private let rpgPlayerPersistenceQueueSpecificValue: UInt8 = 1
 
     // input
     private var keys = Set<String>()
@@ -362,10 +552,36 @@ public final class GameCore {
     private var heldForChunks = false
     public private(set) var musicMood = "menu"
 
-    public init(db: SaveDB = SaveDB()) {
+    public convenience init(db: SaveDB = SaveDB()) {
+        self.init(db: db, localSettingsStore: LocalSettingsStore())
+    }
+
+    init(db: SaveDB, localSettingsStore: LocalSettingsStore) {
         self.db = db
-        settings = loadSettings()
-        keybinds = loadKeybinds()
+        self.localSettingsStore = localSettingsStore
+        let loadedSettings = localSettingsStore.loadSettings()
+        let loadedKeybinds = localSettingsStore.loadKeybinds()
+        switch loadedSettings {
+        case .success(let value): settings = sanitizedSettings(value)
+        case .failure: settings = sanitizedSettings(Settings())
+        }
+        switch loadedKeybinds {
+        case .success(let value): keybinds = sanitizedKeybinds(value)
+        case .failure: keybinds = rpgDefaultChordBindings()
+        }
+        settingsRevision = 1
+        keybindRevision = 1
+        let settingsLoadFailed: Int
+        if case .failure = loadedSettings { settingsLoadFailed = 1 } else { settingsLoadFailed = 0 }
+        let keybindLoadFailed: Int
+        if case .failure = loadedKeybinds { keybindLoadFailed = 1 } else { keybindLoadFailed = 0 }
+        let loadFailureCount = settingsLoadFailed + keybindLoadFailed
+        localSettingsPersistenceFailed = loadFailureCount > 0
+        localSettingsPersistenceFailureCount = UInt64(loadFailureCount)
+        saveQueue.setSpecific(key: saveQueueSpecificKey, value: saveQueueSpecificValue)
+        rpgPlayerPersistenceQueue.setSpecific(
+            key: rpgPlayerPersistenceQueueSpecificKey,
+            value: rpgPlayerPersistenceQueueSpecificValue)
         // registry boot, in frozen order
         registerAllBlocks()
         registerAllItems()
@@ -407,6 +623,48 @@ public final class GameCore {
     // ===========================================================================
     public var world: World { worlds[dim]! }
 
+    @MainActor
+    package func captureSignCommitToken(x: Int, y: Int, z: Int,
+                                        expectedEntity: BlockEntityData?) -> SignCommitToken? {
+        guard inWorld, !isLANClientWorld, !rpgWorldEntryGenerationExhausted,
+              rpgWorldEntryGeneration > 0, let worldID = worldRec?.id,
+              let currentWorld = worlds[dim] else { return nil }
+        let block = currentWorld.getBlock(x, y, z)
+        let blockID = Int(block >> 4)
+        guard blockID >= 0, blockID < blockDefs.count,
+              blockDefs[blockID].name.hasSuffix("_sign") else { return nil }
+        let currentEntity = currentWorld.getBlockEntity(x, y, z)
+        guard (expectedEntity == nil && currentEntity == nil) ||
+              (expectedEntity != nil && currentEntity === expectedEntity) else { return nil }
+        return SignCommitToken(world: currentWorld, worldID: worldID,
+                               worldEntryGeneration: rpgWorldEntryGeneration,
+                               dimension: dim, x: x, y: y, z: z,
+                               expectedBlock: block, expectedEntity: expectedEntity)
+    }
+
+    @MainActor
+    package func commitSignEdit(token: SignCommitToken,
+                                lines: PebbleFourSignLines) -> Bool {
+        guard !token.consumed,
+              inWorld, !isLANClientWorld, !rpgWorldEntryGenerationExhausted,
+              rpgWorldEntryGeneration == token.worldEntryGeneration,
+              worldRec?.id == token.worldID, dim == token.dimension,
+              let currentWorld = worlds[dim], currentWorld === token.world,
+              currentWorld.getBlock(token.x, token.y, token.z) == token.expectedBlock else {
+            return false
+        }
+        let currentEntity = currentWorld.getBlockEntity(token.x, token.y, token.z)
+        guard (token.expectedEntity == nil && currentEntity == nil) ||
+              (token.expectedEntity != nil && currentEntity === token.expectedEntity) else {
+            return false
+        }
+        let sign = currentEntity ?? makeSignBE(token.x, token.y, token.z)
+        token.consumed = true
+        sign.lines = lines.array
+        currentWorld.setBlockEntity(sign)
+        return true
+    }
+
     /// resolves the loaded `World` for an arbitrary dimension (A2: LAN chunk requests must be
     /// served from the GUEST's dimension, not just the host's current one). Returns nil for an
     /// invalid raw dimension or a dimension that hasn't been loaded.
@@ -420,6 +678,208 @@ public final class GameCore {
         host?.playUI(name)
     }
 
+    /// Rebuilds the exact authority/scope/gameplay capture from current state. The renderer will
+    /// consume this in a later build step; this step deliberately exposes only the synthetic guard
+    /// seam so no production input modality is actionable before its Security gate passes.
+    public func rpgSemanticInputSnapshot(for command: RPGSemanticCommand) -> RPGSemanticInputSnapshot? {
+        guard inWorld, let player, rpgWorldEntryGeneration > 0,
+              !rpgWorldEntryGenerationExhausted, !rpgRulesGenerationExhausted else { return nil }
+        let authority = rpgAuthorityPresentation
+        guard let inventoryDigest = rpgSemanticInventoryDigest(player.inventory),
+              let equipmentFocusDigest = rpgSemanticEquipmentFocusDigest(RPGSemanticEquipmentFocusState(
+            selectedSlot: player.selectedSlot,
+            selectedStack: player.mainHand,
+            offHand: player.offHand,
+            armor: player.armor
+              )),
+              let expectedState = rpgSemanticOperationExpectedState(
+                command, state: player.rpg, settingsRevision: settingsRevision,
+                tutorialVersion: settings.rpgTutorialVersion ?? 0)
+        else { return nil }
+        return RPGSemanticInputSnapshot(
+            localPreferenceScope: rpgLocalPreferenceScope,
+            localPreferenceRevision: rpgLocalPreferenceStorageSnapshot?.revision ?? 0,
+            localPreferenceWritable: rpgLocalPreferenceWritable,
+            worldEntryGeneration: rpgWorldEntryGeneration,
+            rulesGeneration: rpgRulesGeneration,
+            ownerRevision: UInt64(max(0, player.rpg.authorityRevision)),
+            inventoryDigest: inventoryDigest,
+            equipmentFocusDigest: equipmentFocusDigest,
+            authorityRevision: UInt64(max(0, player.rpg.authorityRevision)),
+            authorityPhase: authority.phase,
+            authorityRequestIdentity: authority.requestIdentity,
+            operationExpectedState: expectedState
+        )
+    }
+
+    /// Captures the complete passive RPG screen input in one read-only main-thread segment. The
+    /// returned value owns copies/value projections only; building or drawing from it cannot repair
+    /// or mutate Player, local preferences, Settings, or LAN state.
+    @MainActor
+    public func rpgScreenRuntimeSnapshot() -> RPGScreenRuntimeSnapshot? {
+        guard inWorld, let player, rpgWorldEntryGeneration > 0,
+              !rpgWorldEntryGenerationExhausted else { return nil }
+        let state = repairRPGCharacterState(player.rpg)
+        let quickSlots = rpgNormalizeQuickSlotPreferences(
+            rpgQuickSlotPreferences ?? .empty, against: state)
+        guard let inventoryDigest = rpgSemanticInventoryDigest(player.inventory),
+              let equipmentDigest = rpgSemanticEquipmentFocusDigest(
+                RPGSemanticEquipmentFocusState(
+                    selectedSlot: player.selectedSlot, selectedStack: player.mainHand,
+                    offHand: player.offHand, armor: player.armor)) else { return nil }
+        let mainName = player.mainHand.map { itemDef($0.id).displayName } ?? "Empty"
+        let offhandName = player.offHand.map { itemDef($0.id).displayName } ?? "Empty"
+        let armorCount = player.armor.compactMap { $0 }.count
+        let hasFocus = [player.mainHand, player.offHand].compactMap { $0 }.contains {
+            itemDef($0.id).name == "apprentice_focus"
+        }
+        let seenTutorialVersion = settings.rpgTutorialVersion ?? 0
+        let tutorial = RPGTutorialState(
+            seenVersion: seenTutorialVersion,
+            page: state.created && seenTutorialVersion < RPG_TUTORIAL_VERSION ? 1 : nil)
+        return RPGScreenRuntimeSnapshot(
+            state: state, quickSlots: quickSlots,
+            localPreferenceScope: rpgLocalPreferenceScope,
+            localPreferenceRevision: rpgLocalPreferenceStorageSnapshot?.revision ?? 0,
+            localPreferenceWritable: rpgLocalPreferenceWritable,
+            worldEntryGeneration: rpgWorldEntryGeneration,
+            localPreferenceStatus: rpgLocalPreferenceStatus,
+            authority: rpgAuthorityPresentation,
+            rulesGeneration: rpgRulesGenerationExhausted ? 0 : rpgRulesGeneration,
+            inventoryRevision: rpgPassiveRevision(fromDigest: inventoryDigest),
+            equipmentFocusRevision: rpgPassiveRevision(fromDigest: equipmentDigest),
+            inventoryDigest: inventoryDigest, equipmentFocusDigest: equipmentDigest,
+            settingsRevision: settingsRevision,
+            equipmentSummary: "Main hand \(mainName); off hand \(offhandName); armor \(armorCount) of 4.",
+            focusSummary: hasFocus ? "A spellcasting focus is equipped." :
+                "No spellcasting focus is equipped.",
+            configuredChords: keybinds,
+            inventoryCapacitySummary:
+                "The starter kit requires enough inventory capacity; creation fails atomically if it cannot fit.",
+            inventoryCapacityByPath: Dictionary(uniqueKeysWithValues:
+                RPG_PATH_DEFINITIONS.map {
+                    ($0.id, rpgStarterKitFitsInInventory(
+                        pathID: $0.id, inventory: player.inventory))
+                }),
+            tutorial: tutorial, highContrast: settings.highContrast,
+            reduceMotion: settings.reduceMotion)
+    }
+
+    private func rpgPassiveRevision(fromDigest digest: String) -> UInt64 {
+        let value = UInt64(digest.prefix(16), radix: 16) ?? 0
+        return value == 0 ? 1 : value
+    }
+
+    @MainActor
+    public func captureSyntheticRPGSemanticActivation(
+        using boundary: RPGSemanticActivationBoundary,
+        screenInstanceID: UInt64,
+        semanticRevision: UInt64,
+        descriptor: RPGSemanticDescriptor
+    ) -> RPGSemanticActivationCapture? {
+        guard let command = descriptor.actionCommand,
+              let input = rpgSemanticInputSnapshot(for: command) else { return nil }
+        return boundary.capture(screenInstanceID: screenInstanceID,
+                                semanticRevision: semanticRevision,
+                                descriptor: descriptor,
+                                input: input)
+    }
+
+    /// Synthetic-only guarded dispatch used to prove the pre-actionability boundary. A successful
+    /// routing decision executes exactly once; unavailable/stale/replayed decisions execute none.
+    @MainActor
+    public func dispatchSyntheticRPGSemanticActivation(
+        _ capture: RPGSemanticActivationCapture,
+        source: RPGSemanticActivationSource,
+        using boundary: RPGSemanticActivationBoundary,
+        screenInstanceID: UInt64,
+        semanticRevision: UInt64,
+        descriptor: RPGSemanticDescriptor?,
+        protocol5TransportRejected: Bool = false
+    ) -> RPGSemanticActivationResult {
+        guard let command = descriptor?.actionCommand,
+              let input = rpgSemanticInputSnapshot(for: command) else {
+            // Preserve consume-before-revalidation even when the current session/input vanished.
+            let unavailableInventoryDigest = rpgSemanticInventoryDigest([String]())!
+            let unavailableEquipmentDigest = rpgSemanticEquipmentFocusDigest([String]())!
+            let unavailableInput = RPGSemanticInputSnapshot(
+                localPreferenceScope: nil, localPreferenceRevision: 0,
+                localPreferenceWritable: false, worldEntryGeneration: 0,
+                rulesGeneration: 0, ownerRevision: 0,
+                inventoryDigest: unavailableInventoryDigest,
+                equipmentFocusDigest: unavailableEquipmentDigest, authorityRevision: 0,
+                authorityPhase: .unavailable, authorityRequestIdentity: nil,
+                operationExpectedState: "unavailable")!
+            return boundary.dispatch(capture, source: source,
+                                     screenInstanceID: screenInstanceID,
+                                     semanticRevision: semanticRevision,
+                                     descriptor: descriptor,
+                                     input: unavailableInput)
+        }
+        let result = boundary.dispatch(capture, source: source,
+                                       screenInstanceID: screenInstanceID,
+                                       semanticRevision: semanticRevision,
+                                       descriptor: descriptor,
+                                       input: input)
+        guard case .dispatched = result else { return result }
+        guard !protocol5TransportRejected else { return .unavailable }
+        executeGuardedRPGSemanticCommand(command)
+        return result
+    }
+
+    @MainActor
+    private func executeGuardedRPGSemanticCommand(_ command: RPGSemanticCommand) {
+        // The boundary already requires localReady for this closed set. Keep an explicit final
+        // defense immediately adjacent to mutation so later routing changes cannot bypass it.
+        if command.requiresAuthority {
+            guard rpgAuthorityPresentation.phase == .localReady, !isLANClientWorld else { return }
+        }
+        let message: String?
+        switch command {
+        case .create(let draft): message = requestRPGCreateCharacter(draft)
+        case .rankUp(let id): message = requestRPGLearnSkill(id)
+        case .spendAttribute(let attribute): message = requestRPGSpendAttributePoint(attribute)
+        case .prepareSkill(let id):
+            message = player?.rpg.preparedSkillIDs.contains(id) == false
+                ? requestRPGTogglePreparedSkill(id) : nil
+        case .unprepareSkill(let id):
+            message = player?.rpg.preparedSkillIDs.contains(id) == true
+                ? requestRPGTogglePreparedSkill(id) : nil
+        case .prepareSpell(let id):
+            message = player?.rpg.preparedSpellIDs.contains(id) == false
+                ? requestRPGTogglePreparedSpell(id) : nil
+        case .unprepareSpell(let id):
+            message = player?.rpg.preparedSpellIDs.contains(id) == true
+                ? requestRPGTogglePreparedSpell(id) : nil
+        case .selectSkill(let id): message = requestRPGSelectPreparedSkill(id)
+        case .selectSpell(let id): message = requestRPGSelectPreparedSpell(id)
+        case .cyclePreparedAction: message = requestRPGCyclePreparedAction()
+        case .useSelectedAction: message = requestRPGUseSelectedAction()
+        case .useQuickSlot(let slot): message = requestRPGUseActionQuickSlot(slot)
+        case .assignSlot(let token, let slot):
+            if let action = rpgParsePreparedActionToken(token) {
+                message = requestRPGAssignPreparedActionToQuickSlot(
+                    kind: action.kind, id: action.id, slot: slot)
+            } else {
+                message = "Invalid RPG quick-slot action"
+            }
+        case .moveSlot(let from, let to):
+            message = requestRPGMoveActionQuickSlot(from: from, to: to)
+        case .clearSlot(let slot):
+            message = requestRPGClearActionQuickSlot(slot)
+        case .tutorialFinish, .tutorialSkip:
+            switch persistAndPublishTutorialVersionCandidate(
+                RPG_TUTORIAL_VERSION, expectedLiveRevision: settingsRevision) {
+            case .success: message = "RPG tutorial complete"
+            case .failure: message = "Could not save RPG tutorial progress"
+            }
+        default:
+            // Pure presentation/tutorial commands are owned by the later screen-model step.
+            message = nil
+        }
+        if let message { host?.showActionBar(message, 80) }
+    }
+
     public func advance(_ id: String) {
         if !inWorld { return }
         if advancements.grant(id) {
@@ -431,11 +891,109 @@ public final class GameCore {
         DispatchQueue.main.async { [weak self] in self?.advance(id) }
     }
 
-    public func applySettings() {
-        settings = sanitizedSettings(settings)
-        keybinds = sanitizedKeybinds(keybinds)
-        saveSettings(settings)
-        saveKeybinds(keybinds)
+    @MainActor
+    public func persistAndPublishSettingsCandidate(
+        _ candidate: Settings, expectedLiveRevision: UInt64
+    ) -> Result<UInt64, LocalSettingsStoreError> {
+        guard expectedLiveRevision == settingsRevision else {
+            return failLocalSettingsPublication(.staleLiveRevision(
+                expected: expectedLiveRevision, actual: settingsRevision))
+        }
+        guard settingsRevision > 0, settingsRevision < UInt64.max else {
+            return failLocalSettingsPublication(.revisionExhausted)
+        }
+        let nextRevision = settingsRevision + 1
+        var persisted = sanitizedSettings(candidate)
+        // General settings edits never own tutorial acknowledgement.
+        persisted.rpgTutorialVersion = settings.rpgTutorialVersion ?? 0
+        persisted = sanitizedSettings(persisted)
+        switch localSettingsStore.persistSettings(persisted) {
+        case .failure(let error): return failLocalSettingsPublication(error)
+        case .success:
+            settings = persisted
+            settingsRevision = nextRevision
+            completeLocalSettingsPublication(.settings, revision: nextRevision)
+            return .success(nextRevision)
+        }
+    }
+
+    @MainActor
+    public func persistAndPublishKeybindCandidate(
+        _ candidate: [String: String], expectedLiveRevision: UInt64
+    ) -> Result<UInt64, LocalSettingsStoreError> {
+        guard expectedLiveRevision == keybindRevision else {
+            return failLocalSettingsPublication(.staleLiveRevision(
+                expected: expectedLiveRevision, actual: keybindRevision))
+        }
+        guard keybindRevision > 0, keybindRevision < UInt64.max else {
+            return failLocalSettingsPublication(.revisionExhausted)
+        }
+        let nextRevision = keybindRevision + 1
+        switch localSettingsStore.persistKeybinds(candidate) {
+        case .failure(let error): return failLocalSettingsPublication(error)
+        case .success:
+            keybinds = candidate
+            keybindRevision = nextRevision
+            completeLocalSettingsPublication(.keybinds, revision: nextRevision)
+            return .success(nextRevision)
+        }
+    }
+
+    @MainActor
+    public func persistAndPublishTutorialVersionCandidate(
+        _ candidateVersion: Int, expectedLiveRevision: UInt64
+    ) -> Result<UInt64, LocalSettingsStoreError> {
+        guard expectedLiveRevision == settingsRevision else {
+            return failLocalSettingsPublication(.staleLiveRevision(
+                expected: expectedLiveRevision, actual: settingsRevision))
+        }
+        guard settingsRevision > 0, settingsRevision < UInt64.max else {
+            return failLocalSettingsPublication(.revisionExhausted)
+        }
+        guard (0...RPG_TUTORIAL_VERSION).contains(candidateVersion) else {
+            return failLocalSettingsPublication(.invalidSettings(
+                "tutorial version must be in 0...\(RPG_TUTORIAL_VERSION)"))
+        }
+        let nextRevision = settingsRevision + 1
+        var persisted = settings
+        persisted.rpgTutorialVersion = candidateVersion
+        persisted = sanitizedSettings(persisted)
+        switch localSettingsStore.persistSettings(persisted) {
+        case .failure(let error): return failLocalSettingsPublication(error)
+        case .success:
+            settings = persisted
+            settingsRevision = nextRevision
+            completeLocalSettingsPublication(.tutorial, revision: nextRevision)
+            return .success(nextRevision)
+        }
+    }
+
+    @MainActor
+    private func failLocalSettingsPublication<T>(
+        _ error: LocalSettingsStoreError
+    ) -> Result<T, LocalSettingsStoreError> {
+        localSettingsPersistenceFailed = true
+        let next = localSettingsPersistenceFailureCount.addingReportingOverflow(1)
+        if !next.overflow { localSettingsPersistenceFailureCount = next.partialValue }
+#if DEBUG
+        _testLocalSettingsPersistenceFailure?(error)
+#endif
+        return .failure(error)
+    }
+
+    @MainActor
+    private func completeLocalSettingsPublication(
+        _ kind: LocalSettingsPublicationKind, revision: UInt64
+    ) {
+        localSettingsPersistenceFailed = false
+#if DEBUG
+        if _testLocalSettingsSemanticRevision < UInt64.max {
+            _testLocalSettingsSemanticRevision += 1
+        }
+        if _testLocalSettingsDirtyCount < UInt64.max { _testLocalSettingsDirtyCount += 1 }
+        // Step 4 has no value/layout/VoiceOver bridge. This remains exactly zero until Step 5.
+        _testLocalSettingsDidPublish?(kind.rawValue, revision)
+#endif
     }
 
     public func respawnPlayer() {
@@ -479,7 +1037,21 @@ public final class GameCore {
     }
 
     public func exitToTitle() {
-        if inWorld { finalizeAndSave(synchronous: true) }
+        if inWorld {
+            let retiringWorldID = worldRec?.id
+            let retiringWorldEntryGeneration = rpgWorldEntryGeneration
+            _ = advanceRPGWorldEntryGeneration()
+            resetRPGLocalPreferenceSession()
+            if let retiringWorldID, retiringWorldEntryGeneration > 0 {
+                retireRPGCommittedPlayerOmission(
+                    worldID: retiringWorldID,
+                    worldEntryGeneration: retiringWorldEntryGeneration)
+            }
+#if DEBUG
+            _testRPGWorldTeardownDidInvalidate?()
+#endif
+            finalizeAndSave(synchronous: true)
+        }
         inWorld = false
         isLANClientWorld = false
         lanClientResumeStorageKey = nil
@@ -596,6 +1168,8 @@ public final class GameCore {
     }
 
     public func deleteWorld(_ id: String) {
+        guard !inWorld || worldRec?.id != id else { return }
+        retireRPGCommittedPlayerOmission(worldID: id, worldEntryGeneration: nil)
         db.deleteWorld(id)
     }
 
@@ -626,7 +1200,588 @@ public final class GameCore {
         return (sx, min(gen.heightEstimate(Double(sx), Double(sz)) + 1, maxSpawnY), sz)
     }
 
+    private func advanceRPGWorldEntryGeneration() -> Bool {
+        guard !rpgWorldEntryGenerationExhausted else { return false }
+        let next = rpgWorldEntryGeneration.addingReportingOverflow(1)
+        guard !next.overflow, next.partialValue > 0 else {
+            rpgWorldEntryGenerationExhausted = true
+            rpgActiveLocalPreferenceOperationID = nil
+            rpgLocalPreferenceStorageSnapshot = nil
+            rpgQuickSlotPreferences = nil
+            return false
+        }
+        rpgWorldEntryGeneration = next.partialValue
+        return true
+    }
+
+    private func resetRPGLocalPreferenceSession() {
+        rpgActiveLocalPreferenceOperationID = nil
+        rpgLocalPreferenceStorageSnapshot = nil
+        rpgQuickSlotPreferences = nil
+        rpgLocalPreferenceStatus = nil
+    }
+
+    private func nextRPGLocalPreferenceContext(
+        expected: RPGExpectedLivePreferenceRevision
+    ) -> RPGLocalPreferenceRequestContext? {
+        guard inWorld, !isLANClientWorld, !rpgWorldEntryGenerationExhausted,
+              !rpgLocalPreferenceOperationExhausted,
+              let scope = rpgLocalPreferenceScope else { return nil }
+        let next = rpgLocalPreferenceOperationID.addingReportingOverflow(1)
+        guard !next.overflow, next.partialValue > 0 else {
+            rpgLocalPreferenceOperationExhausted = true
+            rpgActiveLocalPreferenceOperationID = nil
+            return nil
+        }
+        rpgLocalPreferenceOperationID = next.partialValue
+        guard let context = try? RPGLocalPreferenceRequestContext(
+            scope: scope, worldEntryGeneration: rpgWorldEntryGeneration,
+            expectedLiveRevision: expected, operationID: next.partialValue) else { return nil }
+        rpgActiveLocalPreferenceOperationID = context.operationID
+#if DEBUG
+        _testLastRPGLocalPreferenceContext = context
+#endif
+        return context
+    }
+
+    private func rpgLocalPreferenceTestGate(_ context: RPGLocalPreferenceRequestContext) {
+#if DEBUG
+        _testRPGLocalPreferenceBeforeIO?(context)
+#endif
+    }
+
+    private func rpgLocalPreferenceTestFailure(
+        _ context: RPGLocalPreferenceRequestContext
+    ) -> Error? {
+#if DEBUG
+        return _testRPGLocalPreferenceFailure?(context)
+#else
+        return nil
+#endif
+    }
+
+    private func localWorldID(
+        for context: RPGLocalPreferenceRequestContext
+    ) -> String? {
+        guard case .localWorld(let id) = context.scope else { return nil }
+        return id
+    }
+
+    private func acceptsRPGLocalPreferenceCompletion(
+        _ context: RPGLocalPreferenceRequestContext
+    ) -> Bool {
+        guard inWorld, !isLANClientWorld, !rpgWorldEntryGenerationExhausted,
+              rpgWorldEntryGeneration == context.worldEntryGeneration,
+              rpgActiveLocalPreferenceOperationID == context.operationID,
+              rpgLocalPreferenceScope == context.scope else { return false }
+        switch context.expectedLiveRevision {
+        case .absent:
+            return rpgLocalPreferenceStorageSnapshot == nil && rpgQuickSlotPreferences == nil
+        case .exact(let revision):
+            return rpgLocalPreferenceStorageSnapshot?.revision == revision
+                && rpgQuickSlotPreferences != nil
+        }
+    }
+
+    private func publishRPGLocalPreferenceSnapshot(
+        _ snapshot: RPGQuickSlotStorageSnapshot,
+        context: RPGLocalPreferenceRequestContext
+    ) -> Bool {
+        guard acceptsRPGLocalPreferenceCompletion(context), snapshot.revision > 0,
+              let digest = try? rpgQuickSlotDestinationDigest(
+                scope: context.scope, preferences: snapshot.preferences,
+                revision: snapshot.revision), digest == snapshot.digest else { return false }
+        rpgLocalPreferenceStorageSnapshot = snapshot
+        rpgQuickSlotPreferences = snapshot.preferences
+        rpgLocalPreferenceStatus = nil
+        rpgActiveLocalPreferenceOperationID = nil
+        host?.rpgLocalPreferenceDidRefresh(RPGLocalPreferenceUIRefresh(
+            worldEntryGeneration: context.worldEntryGeneration,
+            localPreferenceRevision: snapshot.revision, persistenceFailed: false))
+        return true
+    }
+
+    private func projectRPGLocalPreferenceFailure(
+        context: RPGLocalPreferenceRequestContext
+    ) {
+        guard acceptsRPGLocalPreferenceCompletion(context) else { return }
+        rpgActiveLocalPreferenceOperationID = nil
+        let next = rpgLocalPreferenceFailureCount.addingReportingOverflow(1)
+        if !rpgLocalPreferenceStatusCounterExhausted,
+           !next.overflow, next.partialValue > 0 {
+            rpgLocalPreferenceFailureCount = next.partialValue
+            rpgLocalPreferenceStatus = RPGStatusPresentation(
+                identity: .local(counter: next.partialValue,
+                                 operationTag: .saveQuickSlots),
+                operation: .saveQuickSlots, target: .character,
+                kind: .persistenceFailure,
+                rawDetail: "Quick-slot preferences could not be written to local storage.",
+                persistence: .localUntilReplaced, acknowledgement: .never)
+        } else {
+            rpgLocalPreferenceStatusCounterExhausted = true
+            rpgLocalPreferenceStatus = nil
+        }
+        host?.showActionBar("Could not save RPG quick slots", 100)
+        host?.rpgLocalPreferenceDidRefresh(RPGLocalPreferenceUIRefresh(
+            worldEntryGeneration: context.worldEntryGeneration,
+            localPreferenceRevision: rpgLocalPreferenceStorageSnapshot?.revision ?? 0,
+            persistenceFailed: true))
+    }
+
+    private func beginRPGLocalPreferenceLifecycle() {
+        guard let player, !isLANClientWorld else { return }
+        if let envelope = player.rpgLegacyQuickSlotEnvelope, !envelope.omissionEligible {
+            beginRPGLegacyPreferenceMaterialization(envelope)
+        } else {
+            beginRPGPreferenceLoad()
+        }
+    }
+
+    private func beginRPGPreferenceLoad() {
+        guard let context = nextRPGLocalPreferenceContext(expected: .absent),
+              let worldID = localWorldID(for: context) else { return }
+        let database = db
+        rpgLocalPreferenceQueue.async { [weak self] in
+            self?.rpgLocalPreferenceTestGate(context)
+            let result: Result<RPGQuickSlotStorageSnapshot?, Error>
+            if let error = self?.rpgLocalPreferenceTestFailure(context) {
+                result = .failure(error)
+            } else {
+                result = Result { try database.loadRPGQuickSlotPreferences(worldRecordID: worldID) }
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.completeRPGPreferenceLoad(
+                    RPGLocalPreferenceCompletion(context: context, result: result))
+            }
+        }
+    }
+
+    private func completeRPGPreferenceLoad(
+        _ completion: RPGLocalPreferenceCompletion<RPGQuickSlotStorageSnapshot?>
+    ) {
+        guard acceptsRPGLocalPreferenceCompletion(completion.context) else { return }
+        switch completion.result {
+        case .failure:
+            projectRPGLocalPreferenceFailure(context: completion.context)
+        case .success(let snapshot?):
+            _ = publishRPGLocalPreferenceSnapshot(snapshot, context: completion.context)
+        case .success(nil):
+            rpgActiveLocalPreferenceOperationID = nil
+            if player?.rpg.created == true {
+                beginRPGDefaultPreferenceMaterialization()
+            }
+        }
+    }
+
+    private func beginRPGDefaultPreferenceMaterialization() {
+        guard let player,
+              let context = nextRPGLocalPreferenceContext(expected: .absent),
+              let worldID = localWorldID(for: context) else { return }
+        let defaults = rpgDefaultQuickSlotPreferences(for: repairRPGCharacterState(player.rpg))
+        let database = db
+        rpgLocalPreferenceQueue.async { [weak self] in
+            self?.rpgLocalPreferenceTestGate(context)
+            let result: Result<RPGQuickSlotStorageSnapshot, Error>
+            if let error = self?.rpgLocalPreferenceTestFailure(context) {
+                result = .failure(error)
+            } else {
+                result = Result {
+                    try database.materializeRPGQuickSlotPreferences(
+                        worldRecordID: worldID, defaults: defaults)
+                }
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.completeRPGPreferenceWrite(
+                    RPGLocalPreferenceCompletion(context: context, result: result))
+            }
+        }
+    }
+
+    private func beginRPGLegacyPreferenceMaterialization(
+        _ envelope: RPGLegacyQuickSlotEnvelope
+    ) {
+        guard let context = nextRPGLocalPreferenceContext(expected: .absent),
+              let worldID = localWorldID(for: context) else { return }
+        let capturedVersion = envelope.envelopeVersion
+        let capturedSource = envelope.sourceDigest
+        let database = db
+        rpgLocalPreferenceQueue.async { [weak self] in
+            self?.rpgLocalPreferenceTestGate(context)
+            let result: Result<RPGLegacyQuickSlotMigrationResult, Error>
+            if let error = self?.rpgLocalPreferenceTestFailure(context) {
+                result = .failure(error)
+            } else {
+                result = Result {
+                    try database.materializeLegacyRPGQuickSlotPreferences(
+                        worldRecordID: worldID, legacy: envelope.preferences)
+                }
+            }
+            let transformed: Result<RPGLegacyQuickSlotMigrationResult, Error>
+#if DEBUG
+            if case .success(let receipt) = result,
+               let transform = self?._testRPGLegacyMigrationResultTransform {
+                transformed = .success(transform(receipt))
+            } else {
+                transformed = result
+            }
+#else
+            transformed = result
+#endif
+            DispatchQueue.main.async { [weak self] in
+                self?.completeRPGLegacyPreferenceMaterialization(
+                    RPGLocalPreferenceCompletion(context: context, result: transformed),
+                    envelopeVersion: capturedVersion, sourceDigest: capturedSource)
+            }
+        }
+    }
+
+    @MainActor
+    private func completeRPGLegacyPreferenceMaterialization(
+        _ completion: RPGLocalPreferenceCompletion<RPGLegacyQuickSlotMigrationResult>,
+        envelopeVersion: UInt64, sourceDigest: LANV6SHA256Digest
+    ) {
+        guard acceptsRPGLocalPreferenceCompletion(completion.context) else { return }
+        switch completion.result {
+        case .failure:
+            projectRPGLocalPreferenceFailure(context: completion.context)
+        case .success(let receipt):
+            guard let envelope = player?.rpgLegacyQuickSlotEnvelope,
+                  envelope.envelopeVersion == envelopeVersion,
+                  envelope.sourceDigest == sourceDigest,
+                  receipt.sourceDigest == sourceDigest,
+                  receipt.snapshot.migrationOriginDigest != nil,
+                  let originRevision = receipt.snapshot.migrationOriginRevision,
+                  originRevision > 0,
+                  originRevision <= receipt.snapshot.revision
+            else {
+                rpgActiveLocalPreferenceOperationID = nil
+                return
+            }
+            guard publishRPGLocalPreferenceSnapshot(
+                    receipt.snapshot, context: completion.context) else {
+                rpgActiveLocalPreferenceOperationID = nil
+                rpgLocalPreferenceStorageSnapshot = nil
+                rpgQuickSlotPreferences = nil
+                return
+            }
+            beginCheckedLegacyPlayerOmission(
+                snapshot: receipt.snapshot, envelopeVersion: envelopeVersion,
+                sourceDigest: sourceDigest)
+        }
+    }
+
+    private func playerRowContainsLegacyQuickSlots(_ row: [String: Any]) -> Bool {
+        guard let playerData = row["data"] as? [String: Any],
+              let rpg = playerData["rpg"] as? [String: Any] else { return false }
+        return rpg.keys.contains("actionQuickSlots")
+    }
+
+    private func strippingLegacyQuickSlots(from row: [String: Any]) -> [String: Any] {
+        var result = row
+        guard var playerData = result["data"] as? [String: Any],
+              var rpg = playerData["rpg"] as? [String: Any] else { return result }
+        rpg.removeValue(forKey: "actionQuickSlots")
+        playerData["rpg"] = rpg
+        result["data"] = playerData
+        return result
+    }
+
+    private func legacyQuickSlotSourceDigest(
+        inPlayerRow row: [String: Any]
+    ) -> LANV6SHA256Digest? {
+        guard let playerData = row["data"] as? [String: Any],
+              let rpg = playerData["rpg"] as? [String: Any],
+              rpg.keys.contains("actionQuickSlots")
+        else { return nil }
+        return rpgExtractLegacyQuickSlotEnvelope(
+            from: rpg["actionQuickSlots"]
+        )?.sourceDigest
+    }
+
+    @MainActor
+    private func beginCheckedLegacyPlayerOmission(
+        snapshot: RPGQuickSlotStorageSnapshot,
+        envelopeVersion: UInt64,
+        sourceDigest: LANV6SHA256Digest
+    ) {
+        guard let player,
+              let envelope = player.rpgLegacyQuickSlotEnvelope,
+              envelope.envelopeVersion == envelopeVersion,
+              envelope.sourceDigest == sourceDigest,
+              !envelope.omissionEligible,
+              rpgLocalPreferenceStorageSnapshot == snapshot,
+              let originDigest = snapshot.migrationOriginDigest,
+              let originRevision = snapshot.migrationOriginRevision,
+              originRevision > 0, originRevision <= snapshot.revision,
+              let context = nextRPGLocalPreferenceContext(expected: .exact(snapshot.revision)),
+              case .localWorld(let worldID) = context.scope,
+              worldID == worldRec?.id
+        else { return }
+        let identity = RPGLegacyPlayerOmissionIdentity(
+            worldID: worldID, worldEntryGeneration: context.worldEntryGeneration,
+            envelopeVersion: envelopeVersion, sourceDigest: sourceDigest)
+        let request = RPGLegacyPlayerOmissionRequest(
+            context: context, identity: identity,
+            originDigest: originDigest, originRevision: originRevision,
+            livePreferenceDigest: snapshot.digest)
+        let database = RPGUncheckedSendable(value: db)
+        let owner = RPGUncheckedSendable(value: self)
+        rpgPlayerPersistenceQueue.async {
+            let result = Result { try database.value.getPlayerChecked(worldID) }
+            DispatchQueue.main.async { [weak owner = owner.value] in
+                owner?.continueCheckedLegacyPlayerOmission(result, request: request)
+            }
+        }
+    }
+
+    @MainActor
+    private func continueCheckedLegacyPlayerOmission(
+        _ checked: Result<SaveDBPlayerRowSnapshot?, Error>,
+        request: RPGLegacyPlayerOmissionRequest
+    ) {
+#if DEBUG
+        _testRPGCheckedPlayerOmissionBeforeFinalSegment?()
+#endif
+        guard acceptsRPGLocalPreferenceCompletion(request.context),
+              let player,
+              let snapshot = rpgLocalPreferenceStorageSnapshot,
+              snapshot.digest == request.livePreferenceDigest,
+              snapshot.migrationOriginDigest == request.originDigest,
+              snapshot.migrationOriginRevision == request.originRevision,
+              let envelope = player.rpgLegacyQuickSlotEnvelope,
+              envelope.envelopeVersion == request.identity.envelopeVersion,
+              envelope.sourceDigest == request.identity.sourceDigest,
+              !envelope.omissionEligible else { return }
+        let current: SaveDBPlayerRowSnapshot?
+        switch checked {
+        case .failure:
+            projectRPGLocalPreferenceFailure(context: request.context)
+            return
+        case .success(let value): current = value
+        }
+        if let current {
+            guard current.worldID == request.identity.worldID else {
+                projectRPGLocalPreferenceFailure(context: request.context)
+                return
+            }
+        }
+        let expected = current.map {
+            SaveDBPlayerRowExpectation.present($0.canonicalDigest)
+        } ?? .absent
+        let detachedCandidate = [
+            "dim": dim.rawValue,
+            "data": player.save(omitLegacyQuickSlots: true)
+        ] as [String: Any]
+        guard !playerRowContainsLegacyQuickSlots(detachedCandidate) else {
+            projectRPGLocalPreferenceFailure(context: request.context)
+            return
+        }
+        let candidate: [String: Any]
+        if let current {
+            if playerRowContainsLegacyQuickSlots(current.data) {
+                guard legacyQuickSlotSourceDigest(inPlayerRow: current.data)
+                        == request.identity.sourceDigest else {
+                    projectRPGLocalPreferenceFailure(context: request.context)
+                    return
+                }
+            }
+            // The omission owns only the legacy compatibility field. Deriving the candidate from
+            // the checked row preserves unrelated writes that landed before this exact CAS read.
+            candidate = strippingLegacyQuickSlots(from: current.data)
+        } else {
+            candidate = detachedCandidate
+        }
+        let database = RPGUncheckedSendable(value: db)
+        let owner = RPGUncheckedSendable(value: self)
+        let candidateBox = RPGUncheckedSendable(value: candidate)
+#if DEBUG
+        _testRPGCheckedPlayerOmissionFinalSegmentCount += 1
+#endif
+        // This is the non-suspending final segment: MainActor owns the exact live provenance from
+        // the last guard through the serialized CAS and the post-commit publication below. World
+        // replacement or teardown therefore happens either before this segment (and fails the
+        // guard) or after the commit and live-envelope publication; it can never interleave.
+        let result: Result<RPGLegacyPlayerOmissionCommit, Error> =
+            withRPGPlayerPersistenceQueueSync {
+                do {
+                    let stored = try database.value.compareAndSwapPlayerChecked(
+                        request.identity.worldID, expected: expected,
+                        candidate: candidateBox.value)
+                    guard stored.worldID == request.identity.worldID,
+                          owner.value.playerRowContainsLegacyQuickSlots(stored.data) == false else {
+                        throw SaveDBPlayerRowError.persistenceFailed
+                    }
+                    owner.value.rpgCommittedPlayerOmissions[request.identity.worldID] = request.identity
+                    return .success(RPGLegacyPlayerOmissionCommit(
+                        request: request, stored: stored))
+                } catch {
+                    return .failure(error)
+                }
+            }
+#if DEBUG
+        if case .success = result { _testRPGCheckedPlayerOmissionDidCommit?() }
+#endif
+        completeCheckedLegacyPlayerOmission(result, request: request)
+    }
+
+    @inline(__always)
+    private func withRPGPlayerPersistenceQueueSync<T>(
+        _ body: () throws -> T
+    ) rethrows -> T {
+        if DispatchQueue.getSpecific(key: rpgPlayerPersistenceQueueSpecificKey)
+            == rpgPlayerPersistenceQueueSpecificValue {
+            return try body()
+        }
+        return try rpgPlayerPersistenceQueue.sync(execute: body)
+    }
+
+    @MainActor
+    private func completeCheckedLegacyPlayerOmission(
+        _ result: Result<RPGLegacyPlayerOmissionCommit, Error>,
+        request: RPGLegacyPlayerOmissionRequest
+    ) {
+        guard acceptsRPGLocalPreferenceCompletion(request.context) else { return }
+        guard case .exact(let expectedRevision) = request.context.expectedLiveRevision else {
+            return
+        }
+        switch result {
+        case .failure:
+            projectRPGLocalPreferenceFailure(context: request.context)
+        case .success(let commit):
+            guard commit.request.identity == request.identity,
+                  commit.stored.worldID == request.identity.worldID,
+                  !playerRowContainsLegacyQuickSlots(commit.stored.data),
+                  let snapshot = rpgLocalPreferenceStorageSnapshot,
+                  snapshot.revision == expectedRevision,
+                  snapshot.digest == request.livePreferenceDigest,
+                  snapshot.migrationOriginDigest == request.originDigest,
+                  snapshot.migrationOriginRevision == request.originRevision,
+                  let envelope = player?.rpgLegacyQuickSlotEnvelope,
+                  envelope.envelopeVersion == request.identity.envelopeVersion,
+                  envelope.sourceDigest == request.identity.sourceDigest,
+                  player?.markRPGLegacyQuickSlotsOmittable(
+                    envelopeVersion: request.identity.envelopeVersion,
+                    sourceDigest: request.identity.sourceDigest) == true
+            else {
+                rpgActiveLocalPreferenceOperationID = nil
+                return
+            }
+            rpgActiveLocalPreferenceOperationID = nil
+            rpgLocalPreferenceStatus = nil
+        }
+    }
+
+    private func persistCheckedPlayerCandidate(
+        worldID: String, candidate: [String: Any],
+        retainedEnvelope: RPGLegacyPlayerOmissionIdentity?, synchronous: Bool
+    ) {
+        let database = RPGUncheckedSendable(value: db)
+        let owner = RPGUncheckedSendable(value: self)
+        let write = {
+            let ownerValue = owner.value
+            var effective = candidate
+            if let retainedEnvelope,
+               ownerValue.rpgCommittedPlayerOmissions[worldID] == retainedEnvelope {
+                effective = ownerValue.strippingLegacyQuickSlots(from: effective)
+            }
+            do {
+                let current = try database.value.getPlayerChecked(worldID)
+                let expected: SaveDBPlayerRowExpectation = try current.map {
+                    guard $0.worldID == worldID else { throw SaveDBPlayerRowError.invalidStoredRow }
+                    return .present($0.canonicalDigest)
+                } ?? .absent
+                _ = try database.value.compareAndSwapPlayerChecked(
+                    worldID, expected: expected, candidate: effective)
+            } catch {
+                // Ordinary saves historically fail closed without mutating live state. A checked
+                // conflict deliberately preserves the newer durable row instead of retrying stale
+                // player data over it.
+            }
+        }
+        if synchronous {
+            withRPGPlayerPersistenceQueueSync(write)
+        } else {
+            rpgPlayerPersistenceQueue.async(execute: write)
+        }
+    }
+
+    /// Serializes identity retirement behind every player writer already accepted for the
+    /// retiring session. An exact generation removes only that session's receipt; `nil` is
+    /// reserved for world deletion, where every receipt for the deleted durable identity is stale.
+    private func retireRPGCommittedPlayerOmission(
+        worldID: String, worldEntryGeneration: UInt64?
+    ) {
+        withRPGPlayerPersistenceQueueSync {
+            guard let committed = rpgCommittedPlayerOmissions[worldID] else { return }
+            if let worldEntryGeneration {
+                guard worldEntryGeneration > 0,
+                      committed.worldEntryGeneration == worldEntryGeneration else { return }
+            }
+            rpgCommittedPlayerOmissions.removeValue(forKey: worldID)
+        }
+    }
+
+    private func completeRPGPreferenceWrite(
+        _ completion: RPGLocalPreferenceCompletion<RPGQuickSlotStorageSnapshot>
+    ) {
+        switch completion.result {
+        case .failure:
+            projectRPGLocalPreferenceFailure(context: completion.context)
+        case .success(let snapshot):
+            _ = publishRPGLocalPreferenceSnapshot(snapshot, context: completion.context)
+        }
+    }
+
+    @discardableResult
+    func persistRPGQuickSlotCandidate(_ candidate: RPGQuickSlotPreferences) -> Bool {
+        guard rpgActiveLocalPreferenceOperationID == nil,
+              let expected = rpgLocalPreferenceStorageSnapshot,
+              expected.revision < 1_000_000_000,
+              let context = nextRPGLocalPreferenceContext(expected: .exact(expected.revision)),
+              let worldID = localWorldID(for: context)
+        else { return false }
+        let database = db
+        rpgLocalPreferenceQueue.async { [weak self] in
+            self?.rpgLocalPreferenceTestGate(context)
+            let result: Result<RPGQuickSlotStorageSnapshot, Error>
+            if let error = self?.rpgLocalPreferenceTestFailure(context) {
+                result = .failure(error)
+            } else {
+                result = Result {
+                    try database.compareAndSwapRPGQuickSlotPreferences(
+                        worldRecordID: worldID, expected: expected,
+                        candidatePreferences: candidate)
+                }
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.completeRPGPreferenceWrite(
+                    RPGLocalPreferenceCompletion(context: context, result: result))
+            }
+        }
+        return true
+    }
+
+    func materializeRPGPreferencesAfterCharacterCreationIfNeeded() {
+        guard inWorld, !isLANClientWorld, player?.rpg.created == true,
+              rpgLocalPreferenceStorageSnapshot == nil,
+              rpgActiveLocalPreferenceOperationID == nil else { return }
+        beginRPGDefaultPreferenceMaterialization()
+    }
+
     private func enterWorld(_ rec: WorldRecord, _ playerData: [String: Any]?, _ adv: [String]?, transientLANClient: Bool = false) {
+        if inWorld {
+            let retiringWorldID = worldRec?.id
+            let retiringWorldEntryGeneration = rpgWorldEntryGeneration
+            _ = advanceRPGWorldEntryGeneration()
+            resetRPGLocalPreferenceSession()
+            if let retiringWorldID, retiringWorldEntryGeneration > 0 {
+                retireRPGCommittedPlayerOmission(
+                    worldID: retiringWorldID,
+                    worldEntryGeneration: retiringWorldEntryGeneration)
+            }
+        }
+        _ = advanceRPGWorldEntryGeneration()
+        resetRPGLocalPreferenceSession()
         worldRec = rec
         isLANClientWorld = transientLANClient
         lanSectionRequestsInFlight.removeAll()
@@ -691,6 +1846,7 @@ public final class GameCore {
         }
 
         inWorld = true
+        beginRPGLocalPreferenceLifecycle()
         deathScreenShown = false
         templatePlacement = nil
         templatePlacementJob = nil
@@ -745,6 +1901,32 @@ public final class GameCore {
         w.hooks = hooks
     }
 
+    @inline(__always)
+    private func withSaveQueueSync<T>(_ body: () throws -> T) rethrows -> T {
+        if DispatchQueue.getSpecific(key: saveQueueSpecificKey) == saveQueueSpecificValue {
+            preconditionPebbleLockRank(.saveQueue)
+            return try body()
+        }
+        return try saveQueue.sync {
+            try withPebbleLockRank(.saveQueue, body)
+        }
+    }
+
+    @inline(__always)
+    private func withSaveQueueAsync(_ body: @escaping () -> Void) {
+        saveQueue.async {
+            withPebbleLockRank(.saveQueue, body)
+        }
+    }
+
+#if DEBUG
+    func _testSaveQueueSelfEntry() -> Int {
+        withSaveQueueSync {
+            withSaveQueueSync { pebbleCurrentLockRank() }
+        }
+    }
+#endif
+
     public func saveAndFlush(synchronous: Bool = false) {
         guard inWorld else { return }
         if isLANClientWorld {
@@ -790,7 +1972,17 @@ public final class GameCore {
         }
         worldRec = rec
         db.putWorld(rec)
-        db.putPlayer(rec.id, ["dim": dim.rawValue, "data": player.save()])
+        let retainedEnvelope = player.rpgLegacyQuickSlotEnvelope.flatMap { envelope in
+            envelope.omissionEligible || rpgWorldEntryGeneration == 0
+                || rpgWorldEntryGenerationExhausted ? nil : RPGLegacyPlayerOmissionIdentity(
+                    worldID: rec.id, worldEntryGeneration: rpgWorldEntryGeneration,
+                    envelopeVersion: envelope.envelopeVersion,
+                    sourceDigest: envelope.sourceDigest)
+        }
+        let playerCandidate = ["dim": dim.rawValue, "data": player.save()] as [String: Any]
+        persistCheckedPlayerCandidate(
+            worldID: rec.id, candidate: playerCandidate,
+            retainedEnvelope: retainedEnvelope, synchronous: synchronous)
         db.putAdvancements(rec.id, advancements.save())
         // all modified chunks across all dims
         var records: [ChunkRecord] = []
@@ -804,9 +1996,9 @@ public final class GameCore {
         pendingChunkSaves.removeAll()
         for r in records { savedChunkKeys.insert(r.key) }
         if synchronous {
-            saveQueue.sync { self.writeChunkBatch(records) }
+            withSaveQueueSync { self.writeChunkBatch(records) }
         } else {
-            saveQueue.async { [weak self] in self?.writeChunkBatch(records) }
+            withSaveQueueAsync { [weak self] in self?.writeChunkBatch(records) }
         }
         for w in worlds.values {
             for c in w.chunks.values { c.modified = false }
@@ -883,6 +2075,14 @@ public final class GameCore {
                 ?? ((worldRec?.gameRules[rule] ?? 0) != 0)
             let enabled = value != 0
             if wasEnabled != enabled {
+                if !rpgRulesGenerationExhausted {
+                    let next = rpgRulesGeneration.addingReportingOverflow(1)
+                    if next.overflow || next.partialValue == 0 {
+                        rpgRulesGenerationExhausted = true
+                    } else {
+                        rpgRulesGeneration = next.partialValue
+                    }
+                }
                 onRPGGameRuleTransition?(enabled)
             }
         }
@@ -1612,10 +2812,14 @@ public final class GameCore {
 
     /// flip mesh mode at runtime and rebuild every visible section
     public func setMeshMode(simple: Bool) {
-        settings.simpleMesh = simple
-        settings = sanitizedSettings(settings)
-        saveSettings(settings)
-        remeshAll()
+        var candidate = settings
+        candidate.simpleMesh = simple
+        MainActor.assumeIsolated {
+            if case .success = persistAndPublishSettingsCandidate(
+                candidate, expectedLiveRevision: settingsRevision) {
+                remeshAll()
+            }
+        }
     }
 
     private func remeshAll() {
@@ -2165,7 +3369,7 @@ public final class GameCore {
         if !pendingChunkSaves.isEmpty && w.time % 20 == 0 {
             let batch = Array(pendingChunkSaves.values)
             pendingChunkSaves.removeAll()
-            saveQueue.async { [weak self] in self?.writeChunkBatch(batch) }
+            withSaveQueueAsync { [weak self] in self?.writeChunkBatch(batch) }
         }
 
         // autosave
@@ -3369,15 +4573,6 @@ public final class GameCore {
             host?.openChat("")
         } else if code == keybinds["command"] {
             host?.openChat("/")
-        } else if code == "KeyK" {
-            host?.openScreen("rpg", nil)
-            host?.releasePointer()
-        } else if code == "KeyO" {
-            let message = requestRPGCyclePreparedAction()
-            host?.showActionBar(message, 45)
-        } else if code == "KeyL" {
-            let message = requestRPGUseSelectedAction()
-            host?.showActionBar(message, 70)
         } else if code == keybinds["drop"] {
             if isLANClientWorld {
                 performLANClientToss(all: ctrlOrCmd)
@@ -3391,11 +4586,6 @@ public final class GameCore {
         } else {
             // hotbar digits
             if code.hasPrefix("Digit"), code.count == 6, let n = Int(code.suffix(1)), n >= 1, n <= 9 {
-                if keys.contains("ShiftLeft") {
-                    let message = requestRPGUseActionQuickSlot(n - 1)
-                    host?.showActionBar(message, 70)
-                    return
-                }
                 p.selectedSlot = n - 1
             }
             // double-space enables creative flight
@@ -3409,6 +4599,53 @@ public final class GameCore {
             if now - lastForwardPress < 250 { sprintHeld = true }
             lastForwardPress = now
         }
+    }
+
+    /// Executes a resolved configurable binding by canonical identity while retaining its exact
+    /// configured chord as the held-key token consumed by the simulation tick.
+    public func keyDown(binding action: PebbleGameBindingAction, configuredCode: String,
+                        now: Double, dropAll: Bool = false) {
+        guard inWorld, keybinds[action.rawValue] == configuredCode else { return }
+        keys.insert(configuredCode)
+        let p = player!
+        switch action {
+        case .perspective:
+            perspective = (perspective + 1) % 3
+        case .inventory:
+            if p.gameMode == GameMode.creative {
+                host?.openScreen("creative", nil)
+            } else {
+                host?.openScreen("inventory", nil)
+            }
+        case .chat:
+            host?.openChat("")
+        case .command:
+            host?.openChat("/")
+        case .drop:
+            if isLANClientWorld {
+                performLANClientToss(all: dropAll)
+            } else {
+                p.dropSelected(dropAll)
+            }
+        case .swapOffhand:
+            let tmp = p.offHand
+            p.offHand = p.mainHand
+            p.mainHand = tmp
+        case .jump:
+            _ = p.creativeJumpPressed(now: now)
+        case .sprint:
+            sprintHeld = true
+        case .forward:
+            if now - lastForwardPress < 250 { sprintHeld = true }
+            lastForwardPress = now
+        case .back, .left, .right, .sneak:
+            break
+        }
+    }
+
+    public func keyUp(binding action: PebbleGameBindingAction, configuredCode: String) {
+        keys.remove(configuredCode)
+        if action == .sprint { sprintHeld = player?.sprinting ?? false }
     }
 
     public func keyUp(_ code: String) {

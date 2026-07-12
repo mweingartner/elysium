@@ -1,47 +1,41 @@
 #!/bin/sh
 set -eu
-
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
-
-stage() {
-    printf '\n==> pre-push: %s\n' "$*"
-}
-
-fail() {
-    printf 'pre-push failed: %s\n' "$*" >&2
-    exit 1
-}
+TUPLES="$(mktemp /tmp/pebble-pre-push-refs.XXXXXX)"
+BUILD_LOG="$(mktemp /tmp/pebble-pre-push-build.XXXXXX)"
+trap 'rm -f "$TUPLES" "$BUILD_LOG"' EXIT INT TERM
+stage() { echo "==> pre-push: $*"; }
+count=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "$local_ref" ] || continue
+    case "$local_sha" in 0000000000000000000000000000000000000000) continue ;; esac
+    count=$((count + 1))
+    printf '%s\t%s\n' "$local_sha" "$local_ref->$remote_ref" >> "$TUPLES"
+    scripts/installed-signoff-receipt.sh prepush "$local_sha" "$local_ref->$remote_ref" || {
+        echo "pre-push blocked: outgoing ref lacks the matching committed installed sign-off." >&2
+        exit 1
+    }
+done
+[ "$count" -gt 0 ] || { echo "pre-push blocked: no verifiable outgoing ref" >&2; exit 1; }
 
 stage "source security scan"
-if [ -f scripts/security-scan.sh ]; then
-    bash scripts/security-scan.sh
-else
-    fail "scripts/security-scan.sh not found"
-fi
-
-stage "release build without warnings"
-BUILD_LOG="$(mktemp /tmp/pebble-pre-push-build.XXXXXX)"
-if ! swift build -c release 2>&1 | tee "$BUILD_LOG"; then
-    rm -f "$BUILD_LOG"
-    fail "release build failed"
-fi
-if grep -q 'warning:' "$BUILD_LOG"; then
-    rm -f "$BUILD_LOG"
-    fail "release build emitted warnings"
-fi
-rm -f "$BUILD_LOG"
-
-stage "PebbleStorage release surface"
-STORAGE_SURFACE_VERIFIER="scripts/verify-pebble-storage-release-surface.sh"
-[ -f "$STORAGE_SURFACE_VERIFIER" ] || fail "storage release-surface verifier missing"
-[ -x "$STORAGE_SURFACE_VERIFIER" ] || fail "storage release-surface verifier is not executable"
-"$STORAGE_SURFACE_VERIFIER"
-
+bash scripts/security-scan.sh
+stage "warning-free release build"
+scripts/prepush-release-build.sh "$BUILD_LOG"
+stage "release surface and binary"
+scripts/verify-pebble-storage-release-surface.sh
+scripts/security-check-binary.sh .build/release/Pebble
+RELEASE_HASH="$(shasum -a 256 .build/release/Pebble | awk '{print $1}')"
+stage "real AppKit keyboard and Accessibility"
+scripts/appkit-text-entry-integration.sh --no-build --executable "$(cd .build/release && pwd -P)/Pebble" \
+    --expected-hash "$RELEASE_HASH" --timeout 90
 stage "xctest"
 swift test
-
-stage "golden suite"
+stage "pebsmoke"
 swift run -c release pebsmoke
 
+while IFS="$(printf '\t')" read -r local_sha tuple; do
+    scripts/installed-signoff-receipt.sh prepush "$local_sha" "$tuple"
+done < "$TUPLES"
 stage "pass"

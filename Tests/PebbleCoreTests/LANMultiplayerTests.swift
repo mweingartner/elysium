@@ -316,7 +316,7 @@ final class LANMultiplayerTests: XCTestCase {
     }
 
     func testLANClientWorldEntryUsesSummaryAndSkipsSingleplayerPersistence() {
-        let game = GameCore()
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "lan-entry")
         let before = Set(game.listWorlds().map(\.id))
         let summary = LANWorldSummary(
             worldID: "host world !",
@@ -358,7 +358,8 @@ final class LANMultiplayerTests: XCTestCase {
             try? FileManager.default.removeItem(at: URL(fileURLWithPath: dbURL.path + "-wal"))
             try? FileManager.default.removeItem(at: URL(fileURLWithPath: dbURL.path + "-shm"))
         }
-        let db = SaveDB(databaseURL: dbURL, migrateLegacy: false)
+        let db = try SaveDB.open(databaseURL: dbURL, migrateLegacy: false)
+        defer { try? db.close() }
         let summary = LANWorldSummary(
             worldID: "host world !",
             worldName: "Host LAN",
@@ -393,7 +394,7 @@ final class LANMultiplayerTests: XCTestCase {
     }
 
     func testLANClientWorldRequestsHostChunksInsteadOfGeneratingLocalChunks() {
-        let game = GameCore()
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "lan-chunk-request")
         var requested: [(Int, Int, Int)] = []
         game.lanChunkRequestHandler = { world, cx, cz in
             requested.append((world.dim.rawValue, cx, cz))
@@ -424,7 +425,9 @@ final class LANMultiplayerTests: XCTestCase {
 
     /// Ensures `blockDefs` (and therefore `isValidLANReplicatedCell`) is populated before any test
     /// asserts on `isValidRLE`, independent of test execution order.
-    private static let blockRegistryBootstrap: Void = { _ = GameCore() }()
+    private static let blockRegistryBootstrap: Void = {
+        if blockDefs.isEmpty { registerAllBlocks() }
+    }()
 
     private func seededCells(_ seed: UInt32, valueBound: Int = 4096) -> [UInt16] {
         var rng = RandomX(seed)

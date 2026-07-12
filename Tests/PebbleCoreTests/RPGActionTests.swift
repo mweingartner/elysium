@@ -104,7 +104,7 @@ final class RPGActionTests: XCTestCase {
         XCTAssertEqual(action.targetEntityID, zombie.id)
         XCTAssertLessThan(zombie.health, zombie.maxHealth)
         XCTAssertEqual(player.rpg.fatigue, fatigueBefore - 2, accuracy: 0.0001)
-        XCTAssertEqual(player.rpg.selectedPreparedActionID, rpgPreparedActionToken(kind: .skill, id: "heavy_cut"))
+        XCTAssertNil(player.rpg.selectedPreparedActionID)
         XCTAssertTrue(player.rpg.activeCooldowns.contains { $0.id == "heavy_cut" && $0.remainingTicks > 0 })
     }
 
@@ -115,24 +115,26 @@ final class RPGActionTests: XCTestCase {
         player.yaw = 0
         player.pitch = 0
         world.setBlock(0, 65, 4, Int(cell(B.stone)))
-        XCTAssertNil(rpgAssignPreparedActionToQuickSlot(kind: .spell, id: "mage_light", slot: 3, in: &player.rpg))
+        let beforeSelection = player.rpg.selectedPreparedActionID
+        let preferences = try! rpgAssignQuickSlot(
+            token: rpgPreparedActionToken(kind: .spell, id: "mage_light"), slot: 3,
+            preferences: .empty, state: player.rpg).get()
 
-        let result = rpgUseActionQuickSlot(player, slot: 3)
+        let result = rpgUseActionQuickSlot(player, slot: 3, preferences: preferences)
 
         guard case .success(let action) = result else {
             return XCTFail("expected slotted spell to cast, got \(String(describing: result.failure))")
         }
         XCTAssertEqual(action.actionID, "mage_light")
-        XCTAssertEqual(player.rpg.selectedPreparedActionID, rpgPreparedActionToken(kind: .spell, id: "mage_light"))
+        XCTAssertEqual(player.rpg.selectedPreparedActionID, beforeSelection)
         XCTAssertEqual(world.getBlock(0, 65, 3) >> 4, Int(B.torch))
     }
 
     func testActionQuickSlotRejectsEmptySlotWithoutMutatingSequence() {
         let world = makeWorld(seed: 8)
         let player = makeArcanist(in: world, starterSpells: ["ignite"])
-        rpgClearActionQuickSlot(0, in: &player.rpg)
-
-        XCTAssertEqual(rpgUseActionQuickSlot(player, slot: 0).failure, .actionNotPrepared)
+        XCTAssertEqual(rpgUseActionQuickSlot(
+            player, slot: 0, preferences: .empty).failure, .actionNotPrepared)
         XCTAssertEqual(player.rpg.actionSequence, 0)
     }
 

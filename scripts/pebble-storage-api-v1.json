@@ -1,0 +1,16 @@
+{
+  "formatVersion": 1,
+  "module": "PebbleStorage",
+  "symbolGraphSHA256": "3ef21a963a12029462112c17e540ad129d9ae7d2f1c85504acff5d1f130d4d7d",
+  "owner": "Sources/PebbleStorage/StorageEngine.swift",
+  "checkedPlayerCASPublicDeclarations": [
+    "PebblePlayerJSONRowDigest",
+    "PebblePlayerJSONExpectedRowState",
+    "PebblePlayerJSONCompareAndSwapResult",
+    "PebbleLegacyCoreStorage.compareAndSwapPlayerJSON(expected:candidate:)"
+  ],
+  "frozenExistentialCarriers": [
+    "PebbleStorageTransactionFailure.primary",
+    "PebbleStorageStatementFailure.primary"
+  ]
+}

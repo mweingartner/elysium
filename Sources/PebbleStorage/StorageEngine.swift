@@ -2,6 +2,7 @@ import Foundation
 import Dispatch
 import SQLite3
 import Darwin
+import CryptoKit
 
 // This target is deliberately a single physical persistence boundary. PebbleCore can
 // exchange only the primitive row values and named façades declared in this file;
@@ -49,6 +50,90 @@ private func storageSQLiteOpenFailure(_ extendedCode: Int32) -> PebbleStorageErr
     return .openFailed(primaryCode: codes.primary, extendedCode: codes.extended)
 }
 
+private func storageFixedTimeEqual(_ lhs: Data, _ rhs: Data) -> Bool {
+    guard lhs.count == rhs.count else { return false }
+    var difference: UInt8 = 0
+    lhs.withUnsafeBytes { left in
+        rhs.withUnsafeBytes { right in
+            for index in 0..<lhs.count {
+                difference |= left[index] ^ right[index]
+            }
+        }
+    }
+    return difference == 0
+}
+
+private func storageSHA256(_ input: Data) -> Data {
+    let constants: [UInt32] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ]
+    var bytes = Array(input)
+    let bitCount = UInt64(bytes.count) &* 8
+    bytes.append(0x80)
+    while bytes.count % 64 != 56 { bytes.append(0) }
+    for shift in stride(from: 56, through: 0, by: -8) {
+        bytes.append(UInt8(truncatingIfNeeded: bitCount >> UInt64(shift)))
+    }
+    var hash: [UInt32] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ]
+    for offset in stride(from: 0, to: bytes.count, by: 64) {
+        var words = [UInt32](repeating: 0, count: 64)
+        for index in 0..<16 {
+            let base = offset + index * 4
+            words[index] = UInt32(bytes[base]) << 24 | UInt32(bytes[base + 1]) << 16
+                | UInt32(bytes[base + 2]) << 8 | UInt32(bytes[base + 3])
+        }
+        for index in 16..<64 {
+            let x = words[index - 15]
+            let y = words[index - 2]
+            let s0 = x.rotateRight(7) ^ x.rotateRight(18) ^ (x >> 3)
+            let s1 = y.rotateRight(17) ^ y.rotateRight(19) ^ (y >> 10)
+            words[index] = words[index - 16] &+ s0 &+ words[index - 7] &+ s1
+        }
+        var a = hash[0], b = hash[1], c = hash[2], d = hash[3]
+        var e = hash[4], f = hash[5], g = hash[6], h = hash[7]
+        for index in 0..<64 {
+            let upper = e.rotateRight(6) ^ e.rotateRight(11) ^ e.rotateRight(25)
+            let choice = (e & f) ^ (~e & g)
+            let t1 = h &+ upper &+ choice &+ constants[index] &+ words[index]
+            let lower = a.rotateRight(2) ^ a.rotateRight(13) ^ a.rotateRight(22)
+            let majority = (a & b) ^ (a & c) ^ (b & c)
+            let t2 = lower &+ majority
+            h = g; g = f; f = e; e = d &+ t1
+            d = c; c = b; b = a; a = t1 &+ t2
+        }
+        hash[0] &+= a; hash[1] &+= b; hash[2] &+= c; hash[3] &+= d
+        hash[4] &+= e; hash[5] &+= f; hash[6] &+= g; hash[7] &+= h
+    }
+    var result = Data()
+    result.reserveCapacity(32)
+    for word in hash {
+        result.append(UInt8(truncatingIfNeeded: word >> 24))
+        result.append(UInt8(truncatingIfNeeded: word >> 16))
+        result.append(UInt8(truncatingIfNeeded: word >> 8))
+        result.append(UInt8(truncatingIfNeeded: word))
+    }
+    return result
+}
+
+private extension UInt32 {
+    func rotateRight(_ count: UInt32) -> UInt32 {
+        (self >> count) | (self << (32 - count))
+    }
+}
+
 extension PebbleStorageError: CustomStringConvertible {
     public var description: String {
         switch self {
@@ -94,6 +179,344 @@ public struct PebbleStorageStatementFailure: Error {
     public init(primary: any Error, finalize: PebbleStorageError) {
         self.primary = primary
         self.finalize = finalize
+    }
+}
+
+public struct PebbleRPGLocalPreferenceStorageRow: Sendable, Equatable {
+    public let worldRecordID: String
+    public let schemaVersion: UInt16
+    public let revision: UInt64
+    public let slotsPayload: Data
+    public let payloadDigest: Data
+    public let migrationOriginDigest: Data?
+    public let migrationOriginRevision: UInt64?
+
+    public init(worldRecordID: String, schemaVersion: UInt16, revision: UInt64,
+                slotsPayload: Data, payloadDigest: Data,
+                migrationOriginDigest: Data?, migrationOriginRevision: UInt64?) throws {
+        try StorageBounds.validateRPGWorldRecordID(worldRecordID)
+        guard schemaVersion == 1, (1...1_000_000_000).contains(revision),
+              (18...4_096).contains(slotsPayload.count), payloadDigest.count == 32,
+              (migrationOriginDigest == nil) == (migrationOriginRevision == nil) else {
+            throw PebbleStorageError.invalidValue
+        }
+        if let migrationOriginDigest, let migrationOriginRevision {
+            guard migrationOriginDigest.count == 32,
+                  (1...1_000_000_000).contains(migrationOriginRevision) else {
+                throw PebbleStorageError.invalidValue
+            }
+        }
+        let originBytes = migrationOriginDigest == nil ? 0 : 40
+        let accounted = 256 + worldRecordID.utf8.count + 2 + 8 + slotsPayload.count
+            + 32 + 1 + originBytes
+        guard accounted <= 4_096 else { throw PebbleStorageError.limitExceeded }
+        self.worldRecordID = worldRecordID
+        self.schemaVersion = schemaVersion
+        self.revision = revision
+        self.slotsPayload = slotsPayload
+        self.payloadDigest = payloadDigest
+        self.migrationOriginDigest = migrationOriginDigest
+        self.migrationOriginRevision = migrationOriginRevision
+    }
+}
+
+public struct PebbleRPGLegacyQuickSlotMigrationStorageRow: Sendable, Equatable {
+    public let worldRecordID: String
+    public let schemaVersion: UInt16
+    public let sourceDigest: Data
+    public let destinationDigest: Data
+    public let destinationRevision: UInt64
+
+    public init(worldRecordID: String, schemaVersion: UInt16, sourceDigest: Data,
+                destinationDigest: Data, destinationRevision: UInt64) throws {
+        try StorageBounds.validateRPGWorldRecordID(worldRecordID)
+        guard schemaVersion == 1, sourceDigest.count == 32, destinationDigest.count == 32,
+              (1...1_000_000_000).contains(destinationRevision) else {
+            throw PebbleStorageError.invalidValue
+        }
+        let accounted = 256 + worldRecordID.utf8.count + 2 + 32 + 32 + 8
+        guard accounted <= 4_096 else { throw PebbleStorageError.limitExceeded }
+        self.worldRecordID = worldRecordID
+        self.schemaVersion = schemaVersion
+        self.sourceDigest = sourceDigest
+        self.destinationDigest = destinationDigest
+        self.destinationRevision = destinationRevision
+    }
+}
+
+public struct PebbleRPGLocalPreferenceMigrationReceipt: Sendable, Equatable {
+    public let preference: PebbleRPGLocalPreferenceStorageRow
+    public let marker: PebbleRPGLegacyQuickSlotMigrationStorageRow
+    public let insertedDestination: Bool
+
+    public init(preference: PebbleRPGLocalPreferenceStorageRow,
+                marker: PebbleRPGLegacyQuickSlotMigrationStorageRow,
+                insertedDestination: Bool) {
+        self.preference = preference
+        self.marker = marker
+        self.insertedDestination = insertedDestination
+    }
+}
+
+public struct PebbleLANClientAuthorityStorageKey: Sendable, Equatable, Hashable {
+    public let hostInstallationID: Data
+    public let worldLANID: Data
+    public let lookupDigest: Data
+
+    public init(hostInstallationID: Data, worldLANID: Data, lookupDigest: Data) throws {
+        guard hostInstallationID.count == 16, worldLANID.count == 16,
+              lookupDigest.count == 32 else { throw PebbleStorageError.invalidValue }
+        var input = Data("Pebble-LAN-v6".utf8)
+        input.append(hostInstallationID)
+        input.append(worldLANID)
+        guard storageFixedTimeEqual(storageSHA256(input), lookupDigest) else {
+            throw PebbleStorageError.invalidValue
+        }
+        self.hostInstallationID = hostInstallationID
+        self.worldLANID = worldLANID
+        self.lookupDigest = lookupDigest
+    }
+}
+
+public struct PebbleLANClientCredentialStorageRow: Sendable {
+    public let key: PebbleLANClientAuthorityStorageKey
+    public let schemaVersion: UInt16
+    public let aggregateGeneration: UInt64
+    public let aggregateDigest: Data
+    public let authorityBound: Bool
+    public let payload: Data
+    public let payloadDigest: Data
+
+    public init(key: PebbleLANClientAuthorityStorageKey, schemaVersion: UInt16,
+                aggregateGeneration: UInt64, aggregateDigest: Data,
+                authorityBound: Bool, payload: Data, payloadDigest: Data) throws {
+        guard schemaVersion == 1, aggregateGeneration <= 1_000_000_000,
+              aggregateDigest.count == 32, (1...65_536).contains(payload.count),
+              payloadDigest.count == 32,
+              (authorityBound ? aggregateGeneration >= 1 : aggregateGeneration == 0) else {
+            throw PebbleStorageError.invalidValue
+        }
+        self.key = key
+        self.schemaVersion = schemaVersion
+        self.aggregateGeneration = aggregateGeneration
+        self.aggregateDigest = aggregateDigest
+        self.authorityBound = authorityBound
+        self.payload = payload
+        self.payloadDigest = payloadDigest
+    }
+}
+
+public struct PebbleLANClientOwnerCheckpointStorageRow: Sendable {
+    public let key: PebbleLANClientAuthorityStorageKey
+    public let schemaVersion: UInt16
+    public let lastChangeGeneration: UInt64
+    public let payload: Data
+    public let payloadDigest: Data
+
+    public init(key: PebbleLANClientAuthorityStorageKey, schemaVersion: UInt16,
+                lastChangeGeneration: UInt64, payload: Data, payloadDigest: Data) throws {
+        guard schemaVersion == 1, (1...1_000_000_000).contains(lastChangeGeneration),
+              (1...786_432).contains(payload.count), payloadDigest.count == 32 else {
+            throw PebbleStorageError.invalidValue
+        }
+        self.key = key
+        self.schemaVersion = schemaVersion
+        self.lastChangeGeneration = lastChangeGeneration
+        self.payload = payload
+        self.payloadDigest = payloadDigest
+    }
+}
+
+public enum PebbleLANClientPendingMode: UInt8, Sendable, Equatable {
+    case awaitingState = 1
+    case dispositionOnly = 2
+}
+
+public struct PebbleLANClientPendingDispositionStorageRow: Sendable {
+    public let key: PebbleLANClientAuthorityStorageKey
+    public let schemaVersion: UInt16
+    public let lastChangeGeneration: UInt64
+    public let mode: PebbleLANClientPendingMode
+    public let payload: Data
+    public let payloadDigest: Data
+
+    public init(key: PebbleLANClientAuthorityStorageKey, schemaVersion: UInt16,
+                lastChangeGeneration: UInt64, mode: PebbleLANClientPendingMode,
+                payload: Data, payloadDigest: Data) throws {
+        guard schemaVersion == 1, (1...1_000_000_000).contains(lastChangeGeneration),
+              (1...131_072).contains(payload.count), payloadDigest.count == 32 else {
+            throw PebbleStorageError.invalidValue
+        }
+        self.key = key
+        self.schemaVersion = schemaVersion
+        self.lastChangeGeneration = lastChangeGeneration
+        self.mode = mode
+        self.payload = payload
+        self.payloadDigest = payloadDigest
+    }
+}
+
+public enum PebbleLANClientNoticeStatus: UInt8, Sendable, Equatable {
+    case accepted = 1
+    case rejected = 2
+    case outcomeEvicted = 3
+    case requestExhausted = 4
+}
+
+public enum PebbleLANClientNoticeAcknowledgement: UInt8, Sendable, Equatable {
+    case pendingRender = 0
+    case acknowledged = 1
+}
+
+public struct PebbleLANClientNotificationStorageRow: Sendable {
+    public let key: PebbleLANClientAuthorityStorageKey
+    public let notificationID: Data
+    public let sessionEpoch: Data
+    public let requestID: UInt64
+    public let snapshotID: Data
+    public let status: PebbleLANClientNoticeStatus
+    public let creationGeneration: UInt64
+    public let acknowledgement: PebbleLANClientNoticeAcknowledgement
+    public let acknowledgementGeneration: UInt64
+    public let payload: Data
+    public let payloadDigest: Data
+
+    public init(key: PebbleLANClientAuthorityStorageKey, notificationID: Data,
+                sessionEpoch: Data, requestID: UInt64, snapshotID: Data,
+                status: PebbleLANClientNoticeStatus, creationGeneration: UInt64,
+                acknowledgement: PebbleLANClientNoticeAcknowledgement,
+                acknowledgementGeneration: UInt64, payload: Data,
+                payloadDigest: Data) throws {
+        guard notificationID.count == 32, sessionEpoch.count == 16, snapshotID.count == 16,
+              (1...1_000_000_000).contains(requestID),
+              (1...1_000_000_000).contains(creationGeneration),
+              acknowledgementGeneration == UInt64(acknowledgement.rawValue),
+              (1...4_096).contains(payload.count), payloadDigest.count == 32 else {
+            throw PebbleStorageError.invalidValue
+        }
+        let accounted = 512 + 16 + 16 + 32 + 32 + 16 + 8 + 16 + 8 + 8 + 8
+            + payload.count + 32
+        guard accounted <= 4_608 else { throw PebbleStorageError.limitExceeded }
+        self.key = key
+        self.notificationID = notificationID
+        self.sessionEpoch = sessionEpoch
+        self.requestID = requestID
+        self.snapshotID = snapshotID
+        self.status = status
+        self.creationGeneration = creationGeneration
+        self.acknowledgement = acknowledgement
+        self.acknowledgementGeneration = acknowledgementGeneration
+        self.payload = payload
+        self.payloadDigest = payloadDigest
+    }
+}
+
+public enum PebbleLANClientOwnerRowChange: Sendable {
+    case unchanged
+    case set(PebbleLANClientOwnerCheckpointStorageRow)
+    case remove(expectedDigest: Data)
+}
+
+public enum PebbleLANClientPendingRowChange: Sendable {
+    case unchanged
+    case set(PebbleLANClientPendingDispositionStorageRow)
+    case remove(expectedDigest: Data)
+}
+
+public struct PebbleLANClientAuthorityCheckpointSnapshot: Sendable {
+    public let credential: PebbleLANClientCredentialStorageRow
+    public let owner: PebbleLANClientOwnerCheckpointStorageRow?
+    public let pending: PebbleLANClientPendingDispositionStorageRow?
+    public let oldestPendingNotice: PebbleLANClientNotificationStorageRow?
+
+    public init(credential: PebbleLANClientCredentialStorageRow,
+                owner: PebbleLANClientOwnerCheckpointStorageRow?,
+                pending: PebbleLANClientPendingDispositionStorageRow?,
+                oldestPendingNotice: PebbleLANClientNotificationStorageRow?) throws {
+        guard owner?.key == nil || owner?.key == credential.key,
+              pending?.key == nil || pending?.key == credential.key,
+              oldestPendingNotice?.key == nil || oldestPendingNotice?.key == credential.key,
+              owner.map({ $0.lastChangeGeneration <= credential.aggregateGeneration }) ?? true,
+              pending.map({ $0.lastChangeGeneration <= credential.aggregateGeneration }) ?? true else {
+            throw PebbleStorageError.invalidValue
+        }
+        self.credential = credential
+        self.owner = owner
+        self.pending = pending
+        self.oldestPendingNotice = oldestPendingNotice
+    }
+}
+
+public enum PebbleLANClientAuthorityTransitionKind: UInt8, Sendable, Equatable {
+    case firstRequestZeroBind = 1
+    case ordinary = 2
+}
+
+public struct PebbleLANClientAuthorityCheckpointCandidate: Sendable {
+    public let key: PebbleLANClientAuthorityStorageKey
+    public let transition: PebbleLANClientAuthorityTransitionKind
+    public let expectedAggregateGeneration: UInt64
+    public let expectedAggregateDigest: Data
+    public let credential: PebbleLANClientCredentialStorageRow
+    public let ownerChange: PebbleLANClientOwnerRowChange
+    public let pendingChange: PebbleLANClientPendingRowChange
+    public let noticeInsert: PebbleLANClientNotificationStorageRow?
+
+    public init(key: PebbleLANClientAuthorityStorageKey,
+                transition: PebbleLANClientAuthorityTransitionKind,
+                expectedAggregateGeneration: UInt64, expectedAggregateDigest: Data,
+                credential: PebbleLANClientCredentialStorageRow,
+                ownerChange: PebbleLANClientOwnerRowChange,
+                pendingChange: PebbleLANClientPendingRowChange,
+                noticeInsert: PebbleLANClientNotificationStorageRow?) throws {
+        guard expectedAggregateGeneration <= 999_999_999, expectedAggregateDigest.count == 32,
+              credential.key == key,
+              credential.aggregateGeneration == expectedAggregateGeneration + 1,
+              noticeInsert?.key == nil || noticeInsert?.key == key else {
+            throw PebbleStorageError.invalidValue
+        }
+        switch ownerChange {
+        case .unchanged: break
+        case let .set(row): guard row.key == key else { throw PebbleStorageError.invalidValue }
+        case let .remove(digest): guard digest.count == 32 else {
+            throw PebbleStorageError.invalidValue
+        }
+        }
+        switch pendingChange {
+        case .unchanged: break
+        case let .set(row): guard row.key == key else { throw PebbleStorageError.invalidValue }
+        case let .remove(digest): guard digest.count == 32 else {
+            throw PebbleStorageError.invalidValue
+        }
+        }
+        self.key = key
+        self.transition = transition
+        self.expectedAggregateGeneration = expectedAggregateGeneration
+        self.expectedAggregateDigest = expectedAggregateDigest
+        self.credential = credential
+        self.ownerChange = ownerChange
+        self.pendingChange = pendingChange
+        self.noticeInsert = noticeInsert
+    }
+}
+
+public struct PebbleLANClientAuthorityCheckpointReceipt: Sendable {
+    public let snapshot: PebbleLANClientAuthorityCheckpointSnapshot
+    public let committedAggregateGeneration: UInt64
+    public let committedAggregateDigest: Data
+
+    public init(snapshot: PebbleLANClientAuthorityCheckpointSnapshot,
+                committedAggregateGeneration: UInt64,
+                committedAggregateDigest: Data) throws {
+        guard committedAggregateGeneration == snapshot.credential.aggregateGeneration,
+              committedAggregateDigest.count == 32,
+              storageFixedTimeEqual(committedAggregateDigest,
+                                    snapshot.credential.aggregateDigest) else {
+            throw PebbleStorageError.invalidValue
+        }
+        self.snapshot = snapshot
+        self.committedAggregateGeneration = committedAggregateGeneration
+        self.committedAggregateDigest = committedAggregateDigest
     }
 }
 
@@ -169,6 +592,25 @@ public struct PebblePlayerJSONStorageRow: Sendable, Equatable {
         self.world = world
         self.json = json
     }
+}
+
+public struct PebblePlayerJSONRowDigest: Sendable, Equatable {
+    public let data: Data
+
+    public init(data: Data) throws {
+        guard data.count == 32 else { throw PebbleStorageError.invalidValue }
+        self.data = data
+    }
+}
+
+public enum PebblePlayerJSONExpectedRowState: Sendable, Equatable {
+    case absent
+    case present(PebblePlayerJSONRowDigest)
+}
+
+public enum PebblePlayerJSONCompareAndSwapResult: Sendable, Equatable {
+    case conflict
+    case committed(PebblePlayerJSONStorageRow)
 }
 
 public struct PebbleLANClientResumeStorageRow: Sendable, Equatable {
@@ -372,6 +814,11 @@ private enum StorageBounds {
         try validateBoundedText(value, maximumBytes: maximumBytes)
     }
 
+    static func validateRPGWorldRecordID(_ value: String) throws {
+        guard !value.utf8.isEmpty else { throw PebbleStorageError.invalidValue }
+        guard value.utf8.count <= 64 else { throw PebbleStorageError.limitExceeded }
+    }
+
     static func validateBoundedText(_ value: String, maximumBytes: Int) throws {
         guard value.utf8.count <= maximumBytes else { throw PebbleStorageError.limitExceeded }
     }
@@ -390,9 +837,61 @@ private enum StorageBounds {
 // MARK: - Process-wide physical database lease
 
 private struct StorageFileIdentity: Hashable {
-    let device: UInt64
-    let inode: UInt64
+    let device: dev_t
+    let inode: ino_t
+
+    init(_ value: stat) {
+        device = value.st_dev
+        inode = value.st_ino
+    }
+
+    var deviceBitPattern: UInt64 {
+        UInt64(UInt32(bitPattern: device))
+    }
 }
+
+private let storageDescriptorIdentityObservationLimit = 65_536
+
+/// One bounded native-identity equality/count kernel for production fstat scans and the DEBUG
+/// value-only regression seam. A nil observation is absent and can never match.
+private func storageDescriptorIdentityCount(
+    target: StorageFileIdentity,
+    observationCount: Int,
+    observation: (Int) -> StorageFileIdentity?
+) -> Int? {
+    guard (0...storageDescriptorIdentityObservationLimit).contains(observationCount) else {
+        return nil
+    }
+    var count = 0
+    for index in 0..<observationCount {
+        if observation(index) == target { count += 1 }
+    }
+    return count
+}
+
+#if DEBUG
+enum PebbleStorageDescriptorIdentityProbe {
+    static func descriptorCount(targetDevice: dev_t, targetInode: ino_t,
+                                observations: [(dev_t, ino_t)?]) -> Int? {
+        var targetValue = stat()
+        targetValue.st_dev = targetDevice
+        targetValue.st_ino = targetInode
+        let target = StorageFileIdentity(targetValue)
+        return storageDescriptorIdentityCount(
+            target: target, observationCount: observations.count) { index in
+                guard let value = observations[index] else { return nil }
+                var information = stat()
+                information.st_dev = value.0
+                information.st_ino = value.1
+                return StorageFileIdentity(information)
+            }
+    }
+
+    static func deviceBitPattern(_ device: dev_t) -> UInt64 {
+        UInt64(UInt32(bitPattern: device))
+    }
+}
+#endif
 
 #if DEBUG
 private enum StorageLegacyImportFailurePoint: Equatable {
@@ -445,6 +944,23 @@ enum PebbleStorageSchemaAuditProbe: CaseIterable {
 enum PebbleStorageTestStage: Sendable {
     case afterChunkKeyPreflight
     case afterDurabilitySyncBeforeIdentityProof
+}
+
+enum PebbleStorageRPGLocalTestOperation: Sendable, CaseIterable {
+    case legacyMaterialization
+    case worldDelete
+}
+
+enum PebbleStorageRPGLocalFailureStage: Sendable, Equatable {
+    case begin
+    case prepare(statement: Int)
+    case bind(statement: Int)
+    case step(statement: Int)
+    case changes(statement: Int)
+    case finalize(statement: Int)
+    case postcondition
+    case commit
+    case afterCommitBeforePublication
 }
 
 enum PebbleStorageTestStageError: Error, Equatable {
@@ -777,8 +1293,7 @@ private final class StoragePathLease {
                 let code = parentStatRC == 0 ? EIO : Int32(errno)
                 throw PebbleStorageError.openFailed(primaryCode: code, extendedCode: code)
             }
-            lease.parentIdentity = StorageFileIdentity(device: UInt64(parentInfo.st_dev),
-                                                       inode: UInt64(parentInfo.st_ino))
+            lease.parentIdentity = StorageFileIdentity(parentInfo)
 
             let fd = Darwin.openat(parentFD, filename,
                                    O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC,
@@ -794,7 +1309,7 @@ private final class StoragePathLease {
                 let code = statRC == 0 ? EIO : Int32(errno)
                 throw PebbleStorageError.openFailed(primaryCode: code, extendedCode: code)
             }
-            let identity = StorageFileIdentity(device: UInt64(info.st_dev), inode: UInt64(info.st_ino))
+            let identity = StorageFileIdentity(info)
 
             // SQLite is not opened until this identity reservation succeeds. Thus two
             // path aliases can race through path reservation, but only one can bind the
@@ -823,8 +1338,7 @@ private final class StoragePathLease {
         let retainedParentRC = fstat(parentDescriptor, &retainedParentInfo)
         guard retainedParentRC == 0,
               (retainedParentInfo.st_mode & S_IFMT) == S_IFDIR,
-              UInt64(retainedParentInfo.st_dev) == parentIdentity.device,
-              UInt64(retainedParentInfo.st_ino) == parentIdentity.inode else {
+              StorageFileIdentity(retainedParentInfo) == parentIdentity else {
             let code = retainedParentRC == 0 ? EIO : Int32(errno)
             throw PebbleStorageError.openFailed(primaryCode: code, extendedCode: code)
         }
@@ -833,8 +1347,7 @@ private final class StoragePathLease {
         let namedParentRC = lstat(parentPath, &namedParentInfo)
         guard namedParentRC == 0,
               (namedParentInfo.st_mode & S_IFMT) == S_IFDIR,
-              UInt64(namedParentInfo.st_dev) == parentIdentity.device,
-              UInt64(namedParentInfo.st_ino) == parentIdentity.inode else {
+              StorageFileIdentity(namedParentInfo) == parentIdentity else {
             let code = namedParentRC == 0 ? EIO : Int32(errno)
             throw PebbleStorageError.openFailed(primaryCode: code, extendedCode: code)
         }
@@ -842,8 +1355,7 @@ private final class StoragePathLease {
         var retainedFileInfo = stat()
         let retainedFileRC = fstat(descriptor, &retainedFileInfo)
         guard retainedFileRC == 0, (retainedFileInfo.st_mode & S_IFMT) == S_IFREG,
-              UInt64(retainedFileInfo.st_dev) == identity.device,
-              UInt64(retainedFileInfo.st_ino) == identity.inode else {
+              StorageFileIdentity(retainedFileInfo) == identity else {
             let code = retainedFileRC == 0 ? EIO : Int32(errno)
             throw PebbleStorageError.openFailed(primaryCode: code, extendedCode: code)
         }
@@ -851,8 +1363,7 @@ private final class StoragePathLease {
         var namedFileInfo = stat()
         let namedFileRC = fstatat(parentDescriptor, filename, &namedFileInfo, AT_SYMLINK_NOFOLLOW)
         guard namedFileRC == 0, (namedFileInfo.st_mode & S_IFMT) == S_IFREG,
-              UInt64(namedFileInfo.st_dev) == identity.device,
-              UInt64(namedFileInfo.st_ino) == identity.inode else {
+              StorageFileIdentity(namedFileInfo) == identity else {
             let code = namedFileRC == 0 ? EIO : Int32(errno)
             throw PebbleStorageError.openFailed(primaryCode: code, extendedCode: code)
         }
@@ -890,16 +1401,12 @@ private final class StoragePathLease {
         // attacker-inflated process limit.
         let desiredBound = max(Int(descriptor) + 1_024, 4_096)
         let upperBound = min(Int(getdtablesize()), min(desiredBound, 65_536))
-        var count = 0
-        for descriptor in 0..<upperBound {
+        return storageDescriptorIdentityCount(
+            target: identity, observationCount: upperBound) { descriptor in
             var info = stat()
-            if fstat(Int32(descriptor), &info) == 0,
-               UInt64(info.st_dev) == identity.device,
-               UInt64(info.st_ino) == identity.inode {
-                count += 1
-            }
-        }
-        return count
+            guard fstat(Int32(descriptor), &info) == 0 else { return nil }
+            return StorageFileIdentity(info)
+        } ?? 0
     }
 
     func verifySQLiteDescriptorStillBound() throws {
@@ -948,6 +1455,14 @@ private enum StorageAuthorizationScope: Equatable {
     case coreRead(Set<String>)
     case coreMutation(table: String)
     case coreMultiMutation(Set<String>)
+    case rpgLocalPreferencesBootstrap
+    case rpgLocalPreferencesReadV1
+    case rpgLocalPreferencesWriteV1
+    case playerJSONCompareAndSwapV1
+    case coreWorldDeleteWithRPGV1
+    case lanClientAuthorityBootstrap
+    case lanClientAuthorityCheckpointV6
+    case lanClientNoticeAcknowledgementV6
     case legacyWorldCollection
     case legacyTemplateCollection
     case legacyLANPlayerCollection
@@ -979,7 +1494,7 @@ private let storageAuthorizerCallback: StorageAuthorizerCallback = {
     rawState, action, argument1, argument2, database, triggerOrView in
     guard let rawState else { return SQLITE_DENY }
     let state = Unmanaged<StorageAuthorizerState>.fromOpaque(rawState).takeUnretainedValue()
-    guard triggerOrView == nil else {
+    if triggerOrView != nil {
         state.denied = true
         return SQLITE_DENY
     }
@@ -988,14 +1503,15 @@ private let storageAuthorizerCallback: StorageAuthorizerCallback = {
     func columnName() -> String? { argument2.map(String.init(cString:)) }
     func isMainDatabase() -> Bool { cStringEquals(database, "main") }
     func deny() -> Int32 { state.denied = true; return SQLITE_DENY }
-    func allowedCoreTable(_ name: String?) -> Bool {
+    func allowedKnownTable(_ name: String?) -> Bool {
         guard let name else { return false }
-        return StorageSchema.coreTables.contains(name)
+        return StorageSchema.knownTables.contains(name)
     }
     func allowedAutomaticIndex() -> Bool {
         guard let index = tableName(), let table = columnName(),
-              StorageSchema.coreTables.contains(table) else { return false }
+              StorageSchema.knownTables.contains(table) else { return false }
         return index == "sqlite_autoindex_\(table)_1"
+            || StorageSchema.componentImplicitIndexes[index] == table
     }
     func allowedSchemaLayoutPragma() -> Bool {
         guard let argument = columnName() else { return false }
@@ -1006,7 +1522,7 @@ private let storageAuthorizerCallback: StorageAuthorizerCallback = {
             || cStringEquals(argument1, "index_list")
             || cStringEquals(argument1, "foreign_key_list")
             || cStringEquals(argument1, "table_list") {
-            return StorageSchema.coreTables.contains(argument)
+            return StorageSchema.knownTables.contains(argument)
         }
         return false
     }
@@ -1030,7 +1546,7 @@ private let storageAuthorizerCallback: StorageAuthorizerCallback = {
             if table == "sqlite_master" {
                 return StorageSchema.sqliteMasterColumns.contains(columnName() ?? "") ? SQLITE_OK : deny()
             }
-            guard let table, allowedCoreTable(table) else { return deny() }
+            guard let table, allowedKnownTable(table) else { return deny() }
             return StorageSchema.columns[table]?.contains(columnName() ?? "") == true ? SQLITE_OK : deny()
         }
         if action == SQLITE_FUNCTION {
@@ -1051,11 +1567,11 @@ private let storageAuthorizerCallback: StorageAuthorizerCallback = {
     case .coreBootstrap:
         switch action {
         case SQLITE_CREATE_TABLE:
-            return allowedCoreTable(tableName()) ? SQLITE_OK : deny()
+            return StorageSchema.coreTables.contains(tableName() ?? "") ? SQLITE_OK : deny()
         case SQLITE_CREATE_INDEX:
             return allowedAutomaticIndex() ? SQLITE_OK : deny()
         case SQLITE_ALTER_TABLE:
-            return allowedCoreTable(columnName()) ? SQLITE_OK : deny()
+            return StorageSchema.coreTables.contains(columnName() ?? "") ? SQLITE_OK : deny()
         case SQLITE_INSERT, SQLITE_UPDATE, SQLITE_DELETE:
             let table = tableName()
             if table == "sqlite_master", action == SQLITE_UPDATE {
@@ -1067,7 +1583,7 @@ private let storageAuthorizerCallback: StorageAuthorizerCallback = {
             if table == "sqlite_master" {
                 return StorageSchema.sqliteMasterColumns.contains(columnName() ?? "") ? SQLITE_OK : deny()
             }
-            guard let table, allowedCoreTable(table) else { return deny() }
+            guard let table, StorageSchema.coreTables.contains(table) else { return deny() }
             return StorageSchema.columns[table]?.contains(columnName() ?? "") == true ? SQLITE_OK : deny()
         case SQLITE_SELECT, SQLITE_TRANSACTION:
             return SQLITE_OK
@@ -1109,6 +1625,152 @@ private let storageAuthorizerCallback: StorageAuthorizerCallback = {
            tableName().map(tables.contains) == true { return SQLITE_OK }
         if action == SQLITE_UPDATE, let table = tableName(), tables.contains(table),
            StorageSchema.columns[table]?.contains(columnName() ?? "") == true { return SQLITE_OK }
+        return deny()
+    case .rpgLocalPreferencesBootstrap:
+        switch action {
+        case SQLITE_CREATE_TABLE:
+            return tableName().map(StorageSchema.rpgLocalTables.contains) == true ? SQLITE_OK : deny()
+        case SQLITE_CREATE_INDEX:
+            return allowedAutomaticIndex() ? SQLITE_OK : deny()
+        case SQLITE_INSERT:
+            let table = tableName()
+            return table == "sqlite_master" || table == StorageSchema.componentMarkerTable
+                ? SQLITE_OK : deny()
+        case SQLITE_UPDATE, SQLITE_DELETE:
+            return tableName() == "sqlite_master" ? SQLITE_OK : deny()
+        case SQLITE_READ:
+            guard isMainDatabase(), let table = tableName() else { return deny() }
+            if table == "sqlite_master" {
+                return StorageSchema.sqliteMasterColumns.contains(columnName() ?? "") ? SQLITE_OK : deny()
+            }
+            return StorageSchema.rpgLocalTables.contains(table)
+                && StorageSchema.columns[table]?.contains(columnName() ?? "") == true
+                ? SQLITE_OK : deny()
+        case SQLITE_SELECT, SQLITE_TRANSACTION:
+            return SQLITE_OK
+        case SQLITE_FUNCTION:
+            let function = columnName()
+            return (function == "typeof" || function == "length") ? SQLITE_OK : deny()
+        default:
+            return deny()
+        }
+    case .rpgLocalPreferencesReadV1:
+        if action == SQLITE_SELECT { return SQLITE_OK }
+        if action == SQLITE_READ, tableName() == "worlds",
+           (columnName() == "" || columnName() == "id") { return SQLITE_OK }
+        if action == SQLITE_READ, let table = tableName(),
+           StorageSchema.rpgLocalRuntimeTables.contains(table),
+           (columnName() == "" || StorageSchema.columns[table]?
+            .contains(columnName() ?? "") == true) { return SQLITE_OK }
+        if action == SQLITE_FUNCTION {
+            let function = columnName()
+            return (function == "length" || function == "coalesce" || function == "count"
+                    || function == "sum") ? SQLITE_OK : deny()
+        }
+        return deny()
+    case .rpgLocalPreferencesWriteV1:
+        if action == SQLITE_SELECT { return SQLITE_OK }
+        if action == SQLITE_READ, let table = tableName() {
+            if table == "worlds" {
+                return (columnName() == "" || columnName() == "id") ? SQLITE_OK : deny()
+            }
+            return StorageSchema.rpgLocalRuntimeTables.contains(table)
+                && (columnName() == "" || StorageSchema.columns[table]?
+                    .contains(columnName() ?? "") == true)
+                ? SQLITE_OK : deny()
+        }
+        if action == SQLITE_INSERT || action == SQLITE_UPDATE {
+            return tableName().map(StorageSchema.rpgLocalRuntimeTables.contains) == true
+                ? SQLITE_OK : deny()
+        }
+        if action == SQLITE_FUNCTION {
+            let function = columnName()
+            return (function == "length" || function == "coalesce" || function == "count"
+                    || function == "sum") ? SQLITE_OK : deny()
+        }
+        return deny()
+    case .playerJSONCompareAndSwapV1:
+        if action == SQLITE_SELECT { return SQLITE_OK }
+        if action == SQLITE_READ, isMainDatabase(), tableName() == "worlds",
+           (columnName() == "" || columnName() == "id") { return SQLITE_OK }
+        if action == SQLITE_READ, isMainDatabase(), tableName() == "player",
+           (columnName() == "" || columnName() == "world" || columnName() == "json") {
+            return SQLITE_OK
+        }
+        if action == SQLITE_INSERT, isMainDatabase(), tableName() == "player" {
+            return SQLITE_OK
+        }
+        if action == SQLITE_UPDATE, isMainDatabase(), tableName() == "player",
+           columnName() == "json" { return SQLITE_OK }
+        return deny()
+    case .coreWorldDeleteWithRPGV1:
+        let tables = StorageSchema.rpgLocalRuntimeTables.union(
+            ["worlds", "chunks", "player", "advancements"])
+        if action == SQLITE_SELECT { return SQLITE_OK }
+        if action == SQLITE_READ, let table = tableName(), tables.contains(table),
+           (columnName() == "" || StorageSchema.columns[table]?
+            .contains(columnName() ?? "") == true) { return SQLITE_OK }
+        if action == SQLITE_DELETE, tableName().map(tables.contains) == true { return SQLITE_OK }
+        if action == SQLITE_FUNCTION {
+            let function = columnName()
+            return (function == "count" || function == "sum" || function == "length"
+                    || function == "coalesce") ? SQLITE_OK : deny()
+        }
+        return deny()
+    case .lanClientAuthorityBootstrap:
+        switch action {
+        case SQLITE_CREATE_TABLE:
+            return tableName().map(StorageSchema.clientTables.contains) == true ? SQLITE_OK : deny()
+        case SQLITE_CREATE_INDEX:
+            return (tableName() == StorageSchema.clientRenderIndex || allowedAutomaticIndex())
+                ? SQLITE_OK : deny()
+        case SQLITE_REINDEX:
+            return tableName() == StorageSchema.clientRenderIndex ? SQLITE_OK : deny()
+        case SQLITE_INSERT:
+            let table = tableName()
+            return table == "sqlite_master" || table == StorageSchema.componentMarkerTable
+                ? SQLITE_OK : deny()
+        case SQLITE_UPDATE, SQLITE_DELETE:
+            return tableName() == "sqlite_master" ? SQLITE_OK : deny()
+        case SQLITE_READ:
+            guard isMainDatabase(), let table = tableName() else { return deny() }
+            if table == "sqlite_master" {
+                return StorageSchema.sqliteMasterColumns.contains(columnName() ?? "") ? SQLITE_OK : deny()
+            }
+            return (StorageSchema.clientTables.contains(table)
+                    || table == StorageSchema.componentMarkerTable)
+                && StorageSchema.columns[table]?.contains(columnName() ?? "") == true
+                ? SQLITE_OK : deny()
+        case SQLITE_SELECT, SQLITE_TRANSACTION:
+            return SQLITE_OK
+        case SQLITE_FUNCTION:
+            let function = columnName()
+            return (function == "typeof" || function == "length") ? SQLITE_OK : deny()
+        default:
+            return deny()
+        }
+    case .lanClientAuthorityCheckpointV6:
+        if action == SQLITE_SELECT { return SQLITE_OK }
+        if action == SQLITE_READ, let table = tableName(), StorageSchema.clientTables.contains(table),
+           (columnName() == "" || StorageSchema.columns[table]?
+            .contains(columnName() ?? "") == true) { return SQLITE_OK }
+        if action == SQLITE_INSERT || action == SQLITE_UPDATE || action == SQLITE_DELETE {
+            return tableName().map(StorageSchema.clientTables.contains) == true ? SQLITE_OK : deny()
+        }
+        if action == SQLITE_FUNCTION {
+            let function = columnName()
+            return (function == "length" || function == "coalesce" || function == "count"
+                    || function == "sum") ? SQLITE_OK : deny()
+        }
+        return deny()
+    case .lanClientNoticeAcknowledgementV6:
+        if action == SQLITE_SELECT { return SQLITE_OK }
+        if action == SQLITE_READ, tableName() == "lan_client_notification_inbox_v6",
+           StorageSchema.columns["lan_client_notification_inbox_v6"]?
+            .contains(columnName() ?? "") == true { return SQLITE_OK }
+        if action == SQLITE_UPDATE, tableName() == "lan_client_notification_inbox_v6",
+           ["acknowledgement_state", "acknowledgement_generation"]
+            .contains(columnName() ?? "") { return SQLITE_OK }
         return deny()
     case .legacyWorldCollection:
         if action == SQLITE_SELECT { return SQLITE_OK }
@@ -1557,6 +2219,11 @@ private final class StorageExecutor {
     private var legacyImportFailurePoint: StorageLegacyImportFailurePoint?
     private var barrierFailurePoint: PebbleStorageBarrierFailurePoint?
     private var activeTestStage: (stage: PebbleStorageTestStage, latch: PebbleStorageTestLatch)?
+    private var rpgLocalFailurePoint: (
+        operation: PebbleStorageRPGLocalTestOperation,
+        stage: PebbleStorageRPGLocalFailureStage
+    )?
+    private var activeRPGLocalTestOperation: PebbleStorageRPGLocalTestOperation?
 #endif
 
     static func open(databaseURL: URL) throws -> StorageExecutor {
@@ -1734,7 +2401,10 @@ private final class StorageExecutor {
             (SQLITE_LIMIT_COLUMN, 128),
             (SQLITE_LIMIT_VARIABLE_NUMBER, 128),
             (SQLITE_LIMIT_ATTACHED, 0),
-            (SQLITE_LIMIT_TRIGGER_DEPTH, 0),
+            // SQLite implements foreign-key actions with internal trigger programs. One
+            // bounded level permits the reviewed CASCADE/RESTRICT contracts; schema audit
+            // still rejects every user-defined trigger.
+            (SQLITE_LIMIT_TRIGGER_DEPTH, 1),
             (SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 1_024),
             (SQLITE_LIMIT_FUNCTION_ARG, 32),
             (SQLITE_LIMIT_COMPOUND_SELECT, 8),
@@ -1870,6 +2540,19 @@ private final class StorageExecutor {
         guard rc == SQLITE_OK else { throw sqliteError(.bind, code: rc) }
     }
 
+    private func bindRawData(_ statement: OpaquePointer, index: Int32, value: Data) throws {
+        let rc: Int32
+        if value.isEmpty {
+            rc = sqlite3_bind_zeroblob(statement, index, 0)
+        } else {
+            rc = value.withUnsafeBytes { bytes in
+                sqlite3_bind_blob64(statement, index, bytes.baseAddress,
+                                    sqlite3_uint64(bytes.count), storageSQLiteTransient)
+            }
+        }
+        guard rc == SQLITE_OK else { throw sqliteError(.bind, code: rc) }
+    }
+
     private func auditCoreSchema(mode: CoreSchemaAuditMode,
                                  runGlobalQuickCheck: Bool) throws {
         let pageCount = try exactSchemaIntegerPragma("PRAGMA main.page_count")
@@ -1881,8 +2564,75 @@ private final class StorageExecutor {
         }
         let layouts = try auditSchemaObjects(mode: mode, pageCount: pageCount)
         try auditCoreTableLayouts(layouts)
+        try auditComponentMarkers()
         if runGlobalQuickCheck {
             try globalQuickCheck(pageCount: pageCount, pageSize: pageSize)
+        }
+    }
+
+    private func auditComponentMarkers() throws {
+        let tables: Set<String> = try withRawStatement("""
+            SELECT name FROM sqlite_master WHERE type='table' AND name IN (
+              'pebble_storage_component_schema_v1','rpg_local_preferences_v1',
+              'rpg_local_preference_migrations_v1','lan_client_credentials_v6',
+              'lan_client_owner_checkpoint_v6','lan_client_pending_disposition_v6',
+              'lan_client_notification_inbox_v6') ORDER BY name
+            """) { statement in
+            var result = Set<String>()
+            while true {
+                let rc = sqlite3_step(statement)
+                if rc == SQLITE_DONE { break }
+                guard rc == SQLITE_ROW else { throw PebbleStorageError.schemaIntegrity }
+                result.insert(try copyRawText(statement, column: 0, maximumBytes: 64))
+            }
+            return result
+        }
+        guard tables.contains(StorageSchema.componentMarkerTable) else {
+            guard tables.isDisjoint(with: StorageSchema.rpgLocalRuntimeTables),
+                  tables.isDisjoint(with: StorageSchema.clientTables) else {
+                throw PebbleStorageError.schemaIntegrity
+            }
+            return
+        }
+        let expected: [String: Data]
+        if StorageSchema.clientTables.isSubset(of: tables) {
+            guard StorageSchema.rpgLocalRuntimeTables.isSubset(of: tables) else {
+                throw PebbleStorageError.schemaIntegrity
+            }
+            expected = ["rpgLocalPreferences": StorageSchema.rpgLocalManifestDigest,
+                        "lanClientAuthority": StorageSchema.clientManifestDigest]
+        } else {
+            guard StorageSchema.rpgLocalRuntimeTables.isSubset(of: tables),
+                  tables.isDisjoint(with: StorageSchema.clientTables) else {
+                throw PebbleStorageError.schemaIntegrity
+            }
+            expected = ["rpgLocalPreferences": StorageSchema.rpgLocalManifestDigest]
+        }
+        try withRawStatement("""
+            SELECT component,revision,manifest_digest
+            FROM pebble_storage_component_schema_v1 ORDER BY component LIMIT 4
+            """) { statement in
+            var observed: [String: Data] = [:]
+            while true {
+                let rc = sqlite3_step(statement)
+                if rc == SQLITE_DONE { break }
+                guard rc == SQLITE_ROW,
+                      sqlite3_column_type(statement, 1) == SQLITE_INTEGER,
+                      sqlite3_column_int64(statement, 1) == 1,
+                      sqlite3_column_type(statement, 2) == SQLITE_BLOB,
+                      sqlite3_column_bytes(statement, 2) == 32,
+                      let bytes = sqlite3_column_blob(statement, 2) else {
+                    throw PebbleStorageError.schemaIntegrity
+                }
+                let name = try copyRawText(statement, column: 0, maximumBytes: 32)
+                guard observed.updateValue(Data(bytes: bytes, count: 32), forKey: name) == nil else {
+                    throw PebbleStorageError.schemaIntegrity
+                }
+            }
+            guard observed.count == expected.count,
+                  expected.allSatisfy({ name, digest in
+                      observed[name].map { storageFixedTimeEqual($0, digest) } == true
+                  }) else { throw PebbleStorageError.schemaIntegrity }
         }
     }
 
@@ -1967,15 +2717,30 @@ private final class StorageExecutor {
 
                     switch type {
                     case "table":
-                        guard StorageSchema.coreTables.contains(name), name == table,
+                        guard StorageSchema.knownTables.contains(name), name == table,
                               sqlType == SQLITE_TEXT else {
                             throw PebbleStorageError.schemaMismatch
                         }
                         observedTables.insert(name)
                         observedTableSQL[name] = schemaSQL
                     case "index":
-                        guard StorageSchema.indexNameByTable[table] == name,
-                              StorageSchema.coreTables.contains(table), sqlType == SQLITE_NULL else {
+                        if StorageSchema.indexNameByTable[table] == name,
+                           StorageSchema.coreTables.contains(table) {
+                            guard sqlType == SQLITE_NULL else {
+                                throw PebbleStorageError.schemaMismatch
+                            }
+                        } else if StorageSchema.componentImplicitIndexes[name] == table {
+                            guard sqlType == SQLITE_NULL else {
+                                throw PebbleStorageError.schemaMismatch
+                            }
+                        } else if let expectedSQL = StorageSchema.componentIndexSQL[name],
+                                  table == "lan_client_notification_inbox_v6" {
+                            guard let schemaSQL,
+                                  normalizedSchemaSQL(schemaSQL)
+                                    == normalizedSchemaSQL(expectedSQL) else {
+                                throw PebbleStorageError.schemaMismatch
+                            }
+                        } else {
                             throw PebbleStorageError.schemaMismatch
                         }
                     default:
@@ -2003,12 +2768,16 @@ private final class StorageExecutor {
         } else if pageCount < 2 {
             throw PebbleStorageError.schemaMismatch
         }
-        if mode == .exactReady, observedTables != StorageSchema.coreTables {
+        let observedComponents = observedTables.subtracting(StorageSchema.coreTables)
+        let legalComponentPrefix = observedComponents.isEmpty
+            || observedComponents == StorageSchema.rpgLocalTables
+            || observedComponents == StorageSchema.rpgLocalTables.union(StorageSchema.clientTables)
+        guard legalComponentPrefix else { throw PebbleStorageError.schemaMismatch }
+        if mode == .exactReady, !StorageSchema.coreTables.isSubset(of: observedTables) {
             throw PebbleStorageError.schemaMismatch
         }
         let expectedObjects = StorageSchema.expectedPhysicalObjects(for: observedTables)
-        guard observedObjects == expectedObjects,
-              mode != .exactReady || observedObjects.count == 13 else {
+        guard observedObjects == expectedObjects else {
             throw PebbleStorageError.schemaMismatch
         }
 
@@ -2026,11 +2795,12 @@ private final class StorageExecutor {
                 layouts.append(StorageSchema.templateLayout(prefixCount: prefix))
             } else {
                 guard let expectedSQL = StorageSchema.canonicalTableSQL[table],
-                      normalizedSchemaSQL(actualSQL) == normalizedSchemaSQL(expectedSQL),
-                      let layout = StorageSchema.layouts.first(where: { $0.name == table }) else {
+                      normalizedSchemaSQL(actualSQL) == normalizedSchemaSQL(expectedSQL) else {
                     throw PebbleStorageError.schemaMismatch
                 }
-                layouts.append(layout)
+                if let layout = StorageSchema.layouts.first(where: { $0.name == table }) {
+                    layouts.append(layout)
+                }
             }
         }
         return layouts
@@ -2311,6 +3081,122 @@ private final class StorageExecutor {
         return try admitted { try runImmediateTransaction(scope: scope, body) }
     }
 
+    fileprivate func rpgLocalPreferencesRead<T>(
+        _ body: (StorageContext) throws -> T
+    ) throws -> T {
+        if isOnQueue { return try runContext(scope: .rpgLocalPreferencesReadV1, body) }
+        return try admitted { try runContext(scope: .rpgLocalPreferencesReadV1, body) }
+    }
+
+    fileprivate func rpgLocalPreferencesWrite<T>(
+        _ body: (StorageContext) throws -> T
+    ) throws -> T {
+        if isOnQueue {
+            return try runImmediateTransaction(scope: .rpgLocalPreferencesWriteV1, body)
+        }
+        return try admitted {
+            try runImmediateTransaction(scope: .rpgLocalPreferencesWriteV1, body)
+        }
+    }
+
+    fileprivate func playerJSONCompareAndSwap<T>(
+        _ body: (StorageContext) throws -> T
+    ) throws -> T {
+        if isOnQueue {
+            return try runImmediateTransaction(scope: .playerJSONCompareAndSwapV1, body)
+        }
+        return try admitted {
+            try runImmediateTransaction(scope: .playerJSONCompareAndSwapV1, body)
+        }
+    }
+
+#if DEBUG
+    fileprivate func testRPGLocalPreferencesWrite<T>(
+        operation: PebbleStorageRPGLocalTestOperation,
+        _ body: (StorageContext) throws -> T
+    ) throws -> T {
+        try admitted {
+            try withActiveRPGLocalTestOperation(operation) {
+                try runImmediateTransaction(
+                    scope: .rpgLocalPreferencesWriteV1, body)
+            }
+        }
+    }
+#endif
+
+    fileprivate func rpgLocalPreferencesLegacyMaterialization<T>(
+        _ body: (StorageContext) throws -> T
+    ) throws -> T {
+#if DEBUG
+        try testRPGLocalPreferencesWrite(operation: .legacyMaterialization, body)
+#else
+        try rpgLocalPreferencesWrite(body)
+#endif
+    }
+
+    fileprivate func coreWorldDeleteWithRPG<T>(
+        _ body: (StorageContext) throws -> T
+    ) throws -> T {
+        if isOnQueue {
+            return try runImmediateTransaction(scope: .coreWorldDeleteWithRPGV1, body)
+        }
+        return try admitted {
+            try runImmediateTransaction(scope: .coreWorldDeleteWithRPGV1, body)
+        }
+    }
+
+#if DEBUG
+    fileprivate func testCoreWorldDeleteWithRPG<T>(
+        operation: PebbleStorageRPGLocalTestOperation,
+        _ body: (StorageContext) throws -> T
+    ) throws -> T {
+        try admitted {
+            try withActiveRPGLocalTestOperation(operation) {
+                try runImmediateTransaction(scope: .coreWorldDeleteWithRPGV1, body)
+            }
+        }
+    }
+#endif
+
+    fileprivate func coreWorldDeleteWithRPGAtomic<T>(
+        _ body: (StorageContext) throws -> T
+    ) throws -> T {
+#if DEBUG
+        try testCoreWorldDeleteWithRPG(operation: .worldDelete, body)
+#else
+        try coreWorldDeleteWithRPG(body)
+#endif
+    }
+
+    fileprivate func clientAuthorityRead<T>(
+        _ body: (StorageContext) throws -> T
+    ) throws -> T {
+        if isOnQueue { return try runContext(scope: .lanClientAuthorityCheckpointV6, body) }
+        return try admitted { try runContext(scope: .lanClientAuthorityCheckpointV6, body) }
+    }
+
+    fileprivate func clientAuthorityWrite<T>(
+        _ body: (StorageContext) throws -> T
+    ) throws -> T {
+        if isOnQueue {
+            return try runImmediateTransaction(scope: .lanClientAuthorityCheckpointV6, body)
+        }
+        return try admitted {
+            try runImmediateTransaction(scope: .lanClientAuthorityCheckpointV6, body)
+        }
+    }
+
+    fileprivate func clientNoticeAcknowledgement<T>(
+        _ body: (StorageContext) throws -> T
+    ) throws -> T {
+        if isOnQueue {
+            return try runImmediateTransaction(scope: .lanClientNoticeAcknowledgementV6, body)
+        }
+        return try admitted {
+            try runImmediateTransaction(scope: .lanClientNoticeAcknowledgementV6, body)
+        }
+    }
+
     fileprivate func legacyWorldCollection<T>(_ body: (StorageContext) throws -> T) throws -> T {
         try legacyCollection(scope: .legacyWorldCollection, body)
     }
@@ -2375,10 +3261,193 @@ private final class StorageExecutor {
         try admitted { () }
     }
 
+    fileprivate func ensureRPGLocalPreferencesSchema() throws {
+        try admitted {
+            guard authorizer.scope == .denyAll, !authorizer.denied,
+                  currentContext == nil, !transactionActive else {
+                throw PebbleStorageError.capabilityViolation
+            }
+            let installed = try withAuthorization(.schemaAudit) {
+                try withRawStatement("""
+                    SELECT count(*) FROM sqlite_master
+                    WHERE type='table' AND name IN (
+                      'pebble_storage_component_schema_v1',
+                      'rpg_local_preferences_v1',
+                      'rpg_local_preference_migrations_v1')
+                    """) { statement in
+                    guard sqlite3_step(statement) == SQLITE_ROW,
+                          sqlite3_column_type(statement, 0) == SQLITE_INTEGER else {
+                        throw PebbleStorageError.schemaMismatch
+                    }
+                    let count = sqlite3_column_int(statement, 0)
+                    guard sqlite3_step(statement) == SQLITE_DONE else {
+                        throw PebbleStorageError.schemaMismatch
+                    }
+                    guard count == 0 || count == 3 else {
+                        throw PebbleStorageError.schemaIntegrity
+                    }
+                    return count == 3
+                }
+            }
+            if !installed {
+                _ = try runImmediateTransaction(scope: .rpgLocalPreferencesBootstrap) { context in
+                    for sql in StorageSchema.rpgLocalCreateStatements {
+                        let statement = try context.prepare(sql)
+                        guard try statement.step() == .done else {
+                            throw PebbleStorageError.schemaIntegrity
+                        }
+                        try statement.finalize()
+                    }
+                    let marker = try context.prepare("""
+                        INSERT INTO pebble_storage_component_schema_v1(
+                          component,revision,manifest_digest) VALUES('rpgLocalPreferences',1,?)
+                        """)
+                    try marker.bindData(1, StorageSchema.rpgLocalManifestDigest)
+                    guard try marker.step() == .done else { throw PebbleStorageError.schemaIntegrity }
+                    try marker.finalize()
+                }
+            }
+            try withAuthorization(.schemaAudit) {
+                try auditCoreSchema(mode: .exactReady, runGlobalQuickCheck: false)
+                try verifyRPGLocalComponentMarker()
+            }
+        }
+    }
+
+    fileprivate func bootstrapClientAuthoritySchemaForAdmission() throws {
+        try ensureRPGLocalPreferencesSchema()
+        try admitted {
+            guard authorizer.scope == .denyAll, !authorizer.denied,
+                  currentContext == nil, !transactionActive else {
+                throw PebbleStorageError.capabilityViolation
+            }
+            let objectCount = try withAuthorization(.schemaAudit) {
+                try withRawStatement("""
+                    SELECT count(*) FROM sqlite_master WHERE
+                      (type='table' AND name IN (
+                        'lan_client_credentials_v6','lan_client_owner_checkpoint_v6',
+                        'lan_client_pending_disposition_v6','lan_client_notification_inbox_v6'))
+                      OR (type='index' AND name='lan_client_notification_inbox_v6_render_order')
+                    """) { statement in
+                    guard sqlite3_step(statement) == SQLITE_ROW,
+                          sqlite3_column_type(statement, 0) == SQLITE_INTEGER else {
+                        throw PebbleStorageError.schemaMismatch
+                    }
+                    let count = sqlite3_column_int(statement, 0)
+                    guard sqlite3_step(statement) == SQLITE_DONE else {
+                        throw PebbleStorageError.schemaMismatch
+                    }
+                    return count
+                }
+            }
+            guard objectCount == 0 || objectCount == 5 else {
+                throw PebbleStorageError.schemaIntegrity
+            }
+            if objectCount == 0 {
+                _ = try runImmediateTransaction(scope: .lanClientAuthorityBootstrap) { context in
+                    for sql in StorageSchema.clientCreateStatements {
+                        let statement = try context.prepare(sql)
+                        guard try statement.step() == .done else {
+                            throw PebbleStorageError.schemaIntegrity
+                        }
+                        try statement.finalize()
+                    }
+                    let marker = try context.prepare("""
+                        INSERT INTO pebble_storage_component_schema_v1(
+                          component,revision,manifest_digest) VALUES('lanClientAuthority',1,?)
+                        """)
+                    try marker.bindData(1, StorageSchema.clientManifestDigest)
+                    guard try marker.step() == .done else {
+                        throw PebbleStorageError.schemaIntegrity
+                    }
+                    try marker.finalize()
+                }
+            }
+            try withAuthorization(.schemaAudit) {
+                try auditCoreSchema(mode: .exactReady, runGlobalQuickCheck: false)
+                try verifyClientComponentMarker()
+            }
+        }
+    }
+
+    fileprivate func verifyClientAuthoritySchemaInstalled() throws {
+        try admitted {
+            guard authorizer.scope == .denyAll, !authorizer.denied,
+                  currentContext == nil, !transactionActive else {
+                throw PebbleStorageError.capabilityViolation
+            }
+            let objectCount = try withAuthorization(.schemaAudit) {
+                try withRawStatement("""
+                    SELECT count(*) FROM sqlite_master WHERE
+                      (type='table' AND name IN (
+                        'lan_client_credentials_v6','lan_client_owner_checkpoint_v6',
+                        'lan_client_pending_disposition_v6','lan_client_notification_inbox_v6'))
+                      OR (type='index' AND name='lan_client_notification_inbox_v6_render_order')
+                    """) { statement in
+                    guard sqlite3_step(statement) == SQLITE_ROW,
+                          sqlite3_column_type(statement, 0) == SQLITE_INTEGER else {
+                        throw PebbleStorageError.schemaIntegrity
+                    }
+                    let count = sqlite3_column_int(statement, 0)
+                    guard sqlite3_step(statement) == SQLITE_DONE else {
+                        throw PebbleStorageError.schemaIntegrity
+                    }
+                    return count
+                }
+            }
+            guard objectCount == 5 else { throw PebbleStorageError.invalidValue }
+            try withAuthorization(.schemaAudit) {
+                try auditCoreSchema(mode: .exactReady, runGlobalQuickCheck: false)
+                try verifyClientComponentMarker()
+            }
+        }
+    }
+
+    private func verifyRPGLocalComponentMarker() throws {
+        try withRawStatement("""
+            SELECT revision,manifest_digest FROM pebble_storage_component_schema_v1
+            WHERE component='rpgLocalPreferences'
+            """) { statement in
+            guard sqlite3_step(statement) == SQLITE_ROW,
+                  sqlite3_column_type(statement, 0) == SQLITE_INTEGER,
+                  sqlite3_column_int64(statement, 0) == 1,
+                  sqlite3_column_type(statement, 1) == SQLITE_BLOB,
+                  sqlite3_column_bytes(statement, 1) == 32,
+                  let bytes = sqlite3_column_blob(statement, 1) else {
+                throw PebbleStorageError.schemaIntegrity
+            }
+            let digest = Data(bytes: bytes, count: 32)
+            guard storageFixedTimeEqual(digest, StorageSchema.rpgLocalManifestDigest),
+                  sqlite3_step(statement) == SQLITE_DONE else {
+                throw PebbleStorageError.schemaIntegrity
+            }
+        }
+    }
+
+    private func verifyClientComponentMarker() throws {
+        try withRawStatement("""
+            SELECT revision,manifest_digest FROM pebble_storage_component_schema_v1
+            WHERE component='lanClientAuthority'
+            """) { statement in
+            guard sqlite3_step(statement) == SQLITE_ROW,
+                  sqlite3_column_type(statement, 0) == SQLITE_INTEGER,
+                  sqlite3_column_int64(statement, 0) == 1,
+                  sqlite3_column_type(statement, 1) == SQLITE_BLOB,
+                  sqlite3_column_bytes(statement, 1) == 32,
+                  let bytes = sqlite3_column_blob(statement, 1),
+                  storageFixedTimeEqual(Data(bytes: bytes, count: 32),
+                                        StorageSchema.clientManifestDigest),
+                  sqlite3_step(statement) == SQLITE_DONE else {
+                throw PebbleStorageError.schemaIntegrity
+            }
+        }
+    }
+
     fileprivate func verifyDatabaseParentIdentity(device: UInt64, inode: UInt64) throws {
         try admitted {
             let retained = try verifyRetainedIdentityOrPoison()
-            guard retained.device == device, retained.inode == inode else {
+            guard retained.deviceBitPattern == device,
+                  UInt64(retained.inode) == inode else {
                 throw PebbleStorageError.invalidValue
             }
         }
@@ -2507,6 +3576,9 @@ private final class StorageExecutor {
         guard currentContext == nil, !transactionActive else {
             throw PebbleStorageError.nestedTransaction
         }
+#if DEBUG
+        try injectActiveRPGLocalFailure(.begin)
+#endif
         do {
             try executeTransactionControl("BEGIN IMMEDIATE", operation: .beginImmediate)
         } catch {
@@ -2518,6 +3590,9 @@ private final class StorageExecutor {
         var primary: (any Error)?
         do {
             value = try runContext(scope: scope, body)
+#if DEBUG
+            try injectActiveRPGLocalFailure(.commit)
+#endif
             try executeTransactionControl("COMMIT", operation: .commit)
             transactionActive = false
             guard let handle, sqlite3_get_autocommit(handle) != 0 else {
@@ -2597,6 +3672,56 @@ private final class StorageExecutor {
     fileprivate func testInject(_ operation: PebbleStorageOperationID, count: Int) throws {
         guard count > 0 else { throw PebbleStorageError.invalidValue }
         try admitted { injectedFailures[operation] = count }
+    }
+
+    fileprivate func testSetRPGLocalFailure(
+        operation: PebbleStorageRPGLocalTestOperation,
+        stage: PebbleStorageRPGLocalFailureStage
+    ) throws {
+        switch stage {
+        case let .prepare(statement), let .bind(statement), let .step(statement),
+             let .changes(statement), let .finalize(statement):
+            guard statement >= 0 else { throw PebbleStorageError.invalidValue }
+        case .begin, .postcondition, .commit, .afterCommitBeforePublication:
+            break
+        }
+        try admitted {
+            guard rpgLocalFailurePoint == nil,
+                  activeRPGLocalTestOperation == nil else {
+                throw PebbleStorageError.invalidValue
+            }
+            rpgLocalFailurePoint = (operation, stage)
+        }
+    }
+
+    fileprivate func injectActiveRPGLocalFailure(
+        _ stage: PebbleStorageRPGLocalFailureStage
+    ) throws {
+        precondition(isOnQueue)
+        guard let activeRPGLocalTestOperation,
+              let point = rpgLocalFailurePoint,
+              point.operation == activeRPGLocalTestOperation,
+              point.stage == stage else { return }
+        rpgLocalFailurePoint = nil
+        throw PebbleStorageError.invalidValue
+    }
+
+    private func withActiveRPGLocalTestOperation<T>(
+        _ operation: PebbleStorageRPGLocalTestOperation,
+        _ body: () throws -> T
+    ) throws -> T {
+        precondition(isOnQueue)
+        guard activeRPGLocalTestOperation == nil else {
+            throw PebbleStorageError.invalidValue
+        }
+        activeRPGLocalTestOperation = operation
+        defer {
+            activeRPGLocalTestOperation = nil
+            rpgLocalFailurePoint = nil
+        }
+        let value = try body()
+        try injectActiveRPGLocalFailure(.afterCommitBeforePublication)
+        return value
     }
 
     fileprivate func testSetLegacyCollectionFailure(
@@ -3135,6 +4260,17 @@ private enum StorageSchema {
         "worlds", "chunks", "player", "lan_player_resume", "lan_players",
         "advancements", "templates",
     ]
+    static let componentMarkerTable = "pebble_storage_component_schema_v1"
+    static let rpgLocalRuntimeTables: Set<String> = [
+        "rpg_local_preferences_v1", "rpg_local_preference_migrations_v1",
+    ]
+    static let rpgLocalTables = rpgLocalRuntimeTables.union([componentMarkerTable])
+    static let clientTables: Set<String> = [
+        "lan_client_credentials_v6", "lan_client_owner_checkpoint_v6",
+        "lan_client_pending_disposition_v6", "lan_client_notification_inbox_v6",
+    ]
+    static let clientRenderIndex = "lan_client_notification_inbox_v6_render_order"
+    static let knownTables = coreTables.union(rpgLocalTables).union(clientTables)
     static let sqliteMasterColumns: Set<String> = ["type", "name", "tbl_name", "rootpage", "sql", "ROWID"]
     static let columns: [String: Set<String>] = [
         "worlds": ["id", "json", "lastPlayed"],
@@ -3145,7 +4281,260 @@ private enum StorageSchema {
         "advancements": ["world", "json"],
         "templates": ["name", "json", "created", "format", "data", "sizeX", "sizeY", "sizeZ",
                       "blockCount", "blockEntityCount", "dominantBlock", "dominantDisplay"],
+        "pebble_storage_component_schema_v1": ["component", "revision", "manifest_digest"],
+        "rpg_local_preferences_v1": ["world_record_id", "schema_version", "revision",
+            "slots_payload", "payload_digest", "migration_origin_digest",
+            "migration_origin_revision"],
+        "rpg_local_preference_migrations_v1": ["world_record_id", "schema_version",
+            "source_digest", "destination_digest", "destination_revision"],
+        "lan_client_credentials_v6": ["hid", "wid", "lookup_digest", "schema_version",
+            "aggregate_generation", "aggregate_digest", "authority_bound", "payload",
+            "payload_digest"],
+        "lan_client_owner_checkpoint_v6": ["hid", "wid", "lookup_digest", "schema_version",
+            "last_change_generation", "payload", "payload_digest"],
+        "lan_client_pending_disposition_v6": ["hid", "wid", "lookup_digest", "schema_version",
+            "last_change_generation", "mode", "payload", "payload_digest"],
+        "lan_client_notification_inbox_v6": ["hid", "wid", "lookup_digest",
+            "notification_id", "session_epoch", "request_id", "snapshot_id", "status",
+            "creation_generation", "acknowledgement_state", "acknowledgement_generation",
+            "payload", "payload_digest"],
     ]
+
+    static let rpgLocalCreateStatements: [StaticString] = [
+        """
+        CREATE TABLE pebble_storage_component_schema_v1(
+          component TEXT NOT NULL COLLATE BINARY,
+          revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision=1),
+          manifest_digest BLOB NOT NULL CHECK(typeof(manifest_digest)='blob' AND length(manifest_digest)=32),
+          PRIMARY KEY(component),
+          CHECK(component IN ('rpgLocalPreferences','lanClientAuthority','lanHostOwnerRows'))
+        ) WITHOUT ROWID
+        """,
+        """
+        CREATE TABLE rpg_local_preferences_v1(
+          world_record_id TEXT NOT NULL COLLATE BINARY
+            CHECK(typeof(world_record_id)='text'
+              AND length(CAST(world_record_id AS BLOB)) BETWEEN 1 AND 64),
+          schema_version INTEGER NOT NULL
+            CHECK(typeof(schema_version)='integer' AND schema_version=1),
+          revision INTEGER NOT NULL
+            CHECK(typeof(revision)='integer' AND revision BETWEEN 1 AND 1000000000),
+          slots_payload BLOB NOT NULL
+            CHECK(typeof(slots_payload)='blob' AND length(slots_payload) BETWEEN 18 AND 4096),
+          payload_digest BLOB NOT NULL
+            CHECK(typeof(payload_digest)='blob' AND length(payload_digest)=32),
+          migration_origin_digest BLOB
+            CHECK(migration_origin_digest IS NULL
+              OR (typeof(migration_origin_digest)='blob' AND length(migration_origin_digest)=32)),
+          migration_origin_revision INTEGER
+            CHECK(migration_origin_revision IS NULL
+              OR (typeof(migration_origin_revision)='integer'
+                AND migration_origin_revision BETWEEN 1 AND 1000000000)),
+          CHECK((migration_origin_digest IS NULL AND migration_origin_revision IS NULL)
+             OR (migration_origin_digest IS NOT NULL AND migration_origin_revision IS NOT NULL)),
+          PRIMARY KEY(world_record_id)
+        ) WITHOUT ROWID
+        """,
+        """
+        CREATE TABLE rpg_local_preference_migrations_v1(
+          world_record_id TEXT NOT NULL COLLATE BINARY
+            CHECK(typeof(world_record_id)='text'
+              AND length(CAST(world_record_id AS BLOB)) BETWEEN 1 AND 64),
+          schema_version INTEGER NOT NULL
+            CHECK(typeof(schema_version)='integer' AND schema_version=1),
+          source_digest BLOB NOT NULL
+            CHECK(typeof(source_digest)='blob' AND length(source_digest)=32),
+          destination_digest BLOB NOT NULL
+            CHECK(typeof(destination_digest)='blob' AND length(destination_digest)=32),
+          destination_revision INTEGER NOT NULL
+            CHECK(typeof(destination_revision)='integer'
+              AND destination_revision BETWEEN 1 AND 1000000000),
+          PRIMARY KEY(world_record_id),
+          FOREIGN KEY(world_record_id) REFERENCES rpg_local_preferences_v1(world_record_id)
+            ON UPDATE RESTRICT ON DELETE CASCADE
+        ) WITHOUT ROWID
+        """,
+    ]
+    static let rpgLocalManifestDigest: Data = {
+        let component = Data("rpgLocalPreferences".utf8)
+        let statements = rpgLocalCreateStatements.map { statement -> Data in
+            let canonical = statement.description.split(whereSeparator: \.isWhitespace)
+                .joined(separator: " ")
+            return Data(canonical.utf8)
+        }
+        var manifest = Data("Pebble/storage-schema/v1\0".utf8)
+        func appendUInt32(_ value: Int) {
+            let narrowed = UInt32(value)
+            manifest.append(UInt8(truncatingIfNeeded: narrowed >> 24))
+            manifest.append(UInt8(truncatingIfNeeded: narrowed >> 16))
+            manifest.append(UInt8(truncatingIfNeeded: narrowed >> 8))
+            manifest.append(UInt8(truncatingIfNeeded: narrowed))
+        }
+        appendUInt32(component.count)
+        manifest.append(component)
+        appendUInt32(statements.count)
+        for statement in statements {
+            appendUInt32(statement.count)
+            manifest.append(statement)
+        }
+        return storageSHA256(manifest)
+    }()
+
+    static let clientCreateStatements: [StaticString] = [
+        """
+        CREATE TABLE lan_client_credentials_v6(
+          hid BLOB NOT NULL CHECK(typeof(hid)='blob' AND length(hid)=16),
+          wid BLOB NOT NULL CHECK(typeof(wid)='blob' AND length(wid)=16),
+          lookup_digest BLOB NOT NULL CHECK(typeof(lookup_digest)='blob' AND length(lookup_digest)=32),
+          schema_version INTEGER NOT NULL CHECK(typeof(schema_version)='integer' AND schema_version=1),
+          aggregate_generation INTEGER NOT NULL
+            CHECK(typeof(aggregate_generation)='integer' AND aggregate_generation BETWEEN 0 AND 1000000000),
+          aggregate_digest BLOB NOT NULL
+            CHECK(typeof(aggregate_digest)='blob' AND length(aggregate_digest)=32),
+          authority_bound INTEGER NOT NULL
+            CHECK(typeof(authority_bound)='integer' AND authority_bound IN (0,1)),
+          payload BLOB NOT NULL CHECK(typeof(payload)='blob' AND length(payload) BETWEEN 1 AND 65536),
+          payload_digest BLOB NOT NULL
+            CHECK(typeof(payload_digest)='blob' AND length(payload_digest)=32),
+          CHECK((authority_bound=0 AND aggregate_generation=0)
+             OR (authority_bound=1 AND aggregate_generation BETWEEN 1 AND 1000000000)),
+          PRIMARY KEY(hid,wid,lookup_digest),
+          UNIQUE(hid,wid)
+        ) WITHOUT ROWID
+        """,
+        """
+        CREATE TABLE lan_client_owner_checkpoint_v6(
+          hid BLOB NOT NULL CHECK(typeof(hid)='blob' AND length(hid)=16),
+          wid BLOB NOT NULL CHECK(typeof(wid)='blob' AND length(wid)=16),
+          lookup_digest BLOB NOT NULL CHECK(typeof(lookup_digest)='blob' AND length(lookup_digest)=32),
+          schema_version INTEGER NOT NULL CHECK(typeof(schema_version)='integer' AND schema_version=1),
+          last_change_generation INTEGER NOT NULL
+            CHECK(typeof(last_change_generation)='integer' AND last_change_generation BETWEEN 1 AND 1000000000),
+          payload BLOB NOT NULL CHECK(typeof(payload)='blob' AND length(payload) BETWEEN 1 AND 786432),
+          payload_digest BLOB NOT NULL CHECK(typeof(payload_digest)='blob' AND length(payload_digest)=32),
+          PRIMARY KEY(hid,wid,lookup_digest),
+          FOREIGN KEY(hid,wid,lookup_digest)
+            REFERENCES lan_client_credentials_v6(hid,wid,lookup_digest)
+            ON UPDATE RESTRICT ON DELETE CASCADE
+        ) WITHOUT ROWID
+        """,
+        """
+        CREATE TABLE lan_client_pending_disposition_v6(
+          hid BLOB NOT NULL CHECK(typeof(hid)='blob' AND length(hid)=16),
+          wid BLOB NOT NULL CHECK(typeof(wid)='blob' AND length(wid)=16),
+          lookup_digest BLOB NOT NULL CHECK(typeof(lookup_digest)='blob' AND length(lookup_digest)=32),
+          schema_version INTEGER NOT NULL CHECK(typeof(schema_version)='integer' AND schema_version=1),
+          last_change_generation INTEGER NOT NULL
+            CHECK(typeof(last_change_generation)='integer' AND last_change_generation BETWEEN 1 AND 1000000000),
+          mode INTEGER NOT NULL CHECK(typeof(mode)='integer' AND mode IN (1,2)),
+          payload BLOB NOT NULL CHECK(typeof(payload)='blob' AND length(payload) BETWEEN 1 AND 131072),
+          payload_digest BLOB NOT NULL CHECK(typeof(payload_digest)='blob' AND length(payload_digest)=32),
+          PRIMARY KEY(hid,wid,lookup_digest),
+          FOREIGN KEY(hid,wid,lookup_digest)
+            REFERENCES lan_client_credentials_v6(hid,wid,lookup_digest)
+            ON UPDATE RESTRICT ON DELETE CASCADE
+        ) WITHOUT ROWID
+        """,
+        """
+        CREATE TABLE lan_client_notification_inbox_v6(
+          hid BLOB NOT NULL CHECK(typeof(hid)='blob' AND length(hid)=16),
+          wid BLOB NOT NULL CHECK(typeof(wid)='blob' AND length(wid)=16),
+          lookup_digest BLOB NOT NULL CHECK(typeof(lookup_digest)='blob' AND length(lookup_digest)=32),
+          notification_id BLOB NOT NULL CHECK(typeof(notification_id)='blob' AND length(notification_id)=32),
+          session_epoch BLOB NOT NULL CHECK(typeof(session_epoch)='blob' AND length(session_epoch)=16),
+          request_id INTEGER NOT NULL CHECK(typeof(request_id)='integer' AND request_id BETWEEN 1 AND 1000000000),
+          snapshot_id BLOB NOT NULL CHECK(typeof(snapshot_id)='blob' AND length(snapshot_id)=16),
+          status INTEGER NOT NULL CHECK(typeof(status)='integer' AND status BETWEEN 1 AND 4),
+          creation_generation INTEGER NOT NULL
+            CHECK(typeof(creation_generation)='integer' AND creation_generation BETWEEN 1 AND 1000000000),
+          acknowledgement_state INTEGER NOT NULL
+            CHECK(typeof(acknowledgement_state)='integer' AND acknowledgement_state IN (0,1)),
+          acknowledgement_generation INTEGER NOT NULL
+            CHECK(typeof(acknowledgement_generation)='integer' AND acknowledgement_generation IN (0,1)),
+          payload BLOB NOT NULL CHECK(typeof(payload)='blob' AND length(payload) BETWEEN 1 AND 4096),
+          payload_digest BLOB NOT NULL CHECK(typeof(payload_digest)='blob' AND length(payload_digest)=32),
+          CHECK(acknowledgement_state=acknowledgement_generation),
+          PRIMARY KEY(hid,wid,notification_id),
+          UNIQUE(hid,wid,session_epoch,request_id),
+          FOREIGN KEY(hid,wid,lookup_digest)
+            REFERENCES lan_client_credentials_v6(hid,wid,lookup_digest)
+            ON UPDATE RESTRICT ON DELETE CASCADE
+        ) WITHOUT ROWID
+        """,
+        """
+        CREATE INDEX lan_client_notification_inbox_v6_render_order
+        ON lan_client_notification_inbox_v6(
+          hid,wid,lookup_digest,acknowledgement_state,creation_generation,notification_id
+        )
+        """,
+    ]
+    static let clientManifestDigest: Data = componentManifestDigest(
+        component: "lanClientAuthority", statements: clientCreateStatements)
+    // Compiled now so the later coherent host-checkpoint phase cannot silently drift the
+    // approved row contract. There is deliberately no bootstrap accessor or runtime scope:
+    // the reviewed parent identity tables do not exist in this amendment.
+    static let dormantHostOwnerCreateStatements: [StaticString] = [
+        """
+        CREATE TABLE lan_peer_authority_checkpoint_v6(
+          hid BLOB NOT NULL CHECK(typeof(hid)='blob' AND length(hid)=16),
+          wid BLOB NOT NULL CHECK(typeof(wid)='blob' AND length(wid)=16),
+          authority TEXT NOT NULL COLLATE BINARY
+            CHECK(typeof(authority)='text' AND length(CAST(authority AS BLOB)) BETWEEN 5 AND 24),
+          checkpoint_generation BLOB NOT NULL
+            CHECK(typeof(checkpoint_generation)='blob' AND length(checkpoint_generation)=8),
+          payload BLOB NOT NULL CHECK(typeof(payload)='blob' AND length(payload) BETWEEN 1 AND 786432),
+          payload_digest BLOB NOT NULL CHECK(typeof(payload_digest)='blob' AND length(payload_digest)=32),
+          world_checkpoint_digest BLOB NOT NULL
+            CHECK(typeof(world_checkpoint_digest)='blob' AND length(world_checkpoint_digest)=32),
+          PRIMARY KEY(hid,wid,authority),
+          FOREIGN KEY(hid,wid,authority)
+            REFERENCES lan_peer_identity_v6(hid,wid,authority)
+            ON UPDATE RESTRICT ON DELETE RESTRICT
+        ) WITHOUT ROWID
+        """,
+        """
+        CREATE TABLE lan_host_local_authority_checkpoint_v6(
+          hid BLOB NOT NULL CHECK(typeof(hid)='blob' AND length(hid)=16),
+          wid BLOB NOT NULL CHECK(typeof(wid)='blob' AND length(wid)=16),
+          authority TEXT NOT NULL COLLATE BINARY
+            CHECK(typeof(authority)='text' AND authority='host:local'),
+          checkpoint_generation BLOB NOT NULL
+            CHECK(typeof(checkpoint_generation)='blob' AND length(checkpoint_generation)=8),
+          payload BLOB NOT NULL CHECK(typeof(payload)='blob' AND length(payload) BETWEEN 1 AND 786432),
+          payload_digest BLOB NOT NULL CHECK(typeof(payload_digest)='blob' AND length(payload_digest)=32),
+          world_checkpoint_digest BLOB NOT NULL
+            CHECK(typeof(world_checkpoint_digest)='blob' AND length(world_checkpoint_digest)=32),
+          PRIMARY KEY(hid,wid),
+          FOREIGN KEY(hid,wid)
+            REFERENCES lan_world_identity_registry_v1(hid,wid)
+            ON UPDATE RESTRICT ON DELETE RESTRICT
+        ) WITHOUT ROWID
+        """,
+    ]
+    static let dormantHostOwnerManifestDigest: Data = componentManifestDigest(
+        component: "lanHostOwnerRows", statements: dormantHostOwnerCreateStatements)
+
+    private static func componentManifestDigest(component: String,
+                                                statements: [StaticString]) -> Data {
+        let componentData = Data(component.utf8)
+        let canonicalStatements = statements.map {
+            Data($0.description.split(whereSeparator: \.isWhitespace).joined(separator: " ").utf8)
+        }
+        var manifest = Data("Pebble/storage-schema/v1\0".utf8)
+        func appendUInt32(_ value: Int) {
+            let narrowed = UInt32(value)
+            manifest.append(UInt8(truncatingIfNeeded: narrowed >> 24))
+            manifest.append(UInt8(truncatingIfNeeded: narrowed >> 16))
+            manifest.append(UInt8(truncatingIfNeeded: narrowed >> 8))
+            manifest.append(UInt8(truncatingIfNeeded: narrowed))
+        }
+        appendUInt32(componentData.count); manifest.append(componentData)
+        appendUInt32(canonicalStatements.count)
+        for statement in canonicalStatements {
+            appendUInt32(statement.count); manifest.append(statement)
+        }
+        return storageSHA256(manifest)
+    }
 
     static let createStatements: [StaticString] = [
         """
@@ -3220,6 +4609,21 @@ private enum StorageSchema {
         "lan_players": "CREATE TABLE lan_players(world TEXT NOT NULL, playerID TEXT NOT NULL, json TEXT NOT NULL, updated REAL NOT NULL DEFAULT 0, PRIMARY KEY(world, playerID))",
         "advancements": "CREATE TABLE advancements(world TEXT PRIMARY KEY, json TEXT NOT NULL)",
         "templates": "CREATE TABLE templates(name TEXT PRIMARY KEY, json TEXT NOT NULL, created REAL NOT NULL DEFAULT 0, format INTEGER NOT NULL DEFAULT 1, data BLOB, sizeX INTEGER NOT NULL DEFAULT 0, sizeY INTEGER NOT NULL DEFAULT 0, sizeZ INTEGER NOT NULL DEFAULT 0, blockCount INTEGER NOT NULL DEFAULT 0, blockEntityCount INTEGER NOT NULL DEFAULT 0, dominantBlock TEXT NOT NULL DEFAULT '', dominantDisplay TEXT NOT NULL DEFAULT '')",
+        "pebble_storage_component_schema_v1": rpgLocalCreateStatements[0].description,
+        "rpg_local_preferences_v1": rpgLocalCreateStatements[1].description,
+        "rpg_local_preference_migrations_v1": rpgLocalCreateStatements[2].description,
+        "lan_client_credentials_v6": clientCreateStatements[0].description,
+        "lan_client_owner_checkpoint_v6": clientCreateStatements[1].description,
+        "lan_client_pending_disposition_v6": clientCreateStatements[2].description,
+        "lan_client_notification_inbox_v6": clientCreateStatements[3].description,
+    ]
+    static let componentIndexSQL: [String: String] = [
+        clientRenderIndex: clientCreateStatements[4].description,
+    ]
+    static let componentImplicitIndexes: [String: String] = [
+        "sqlite_autoindex_lan_client_credentials_v6_2": "lan_client_credentials_v6",
+        "sqlite_autoindex_lan_client_notification_inbox_v6_2":
+            "lan_client_notification_inbox_v6",
     ]
 
     static let layouts: [Layout] = [
@@ -3316,6 +4720,13 @@ private enum StorageSchema {
                 objects.insert(.init(type: "index", name: indexName, table: table))
             }
         }
+        for (name, table) in componentImplicitIndexes where tables.contains(table) {
+            objects.insert(.init(type: "index", name: name, table: table))
+        }
+        if tables.contains("lan_client_notification_inbox_v6") {
+            objects.insert(.init(type: "index", name: clientRenderIndex,
+                                 table: "lan_client_notification_inbox_v6"))
+        }
         return objects
     }
 
@@ -3350,6 +4761,17 @@ public final class PebbleStorageCoordinator {
         return PebbleLegacyCoreStorage(executor: executor)
     }
 
+    public func rpgLocalPreferences() throws -> PebbleRPGLocalPreferencesStorage {
+        try executor.ensureRPGLocalPreferencesSchema()
+        return PebbleRPGLocalPreferencesStorage(executor: executor)
+    }
+
+    public func clientAuthorityCheckpointV6() throws
+        -> PebbleClientAuthorityCheckpointV6Storage {
+        try executor.verifyClientAuthoritySchemaInstalled()
+        return PebbleClientAuthorityCheckpointV6Storage(executor: executor)
+    }
+
     public func close() throws {
         try executor.close()
     }
@@ -3359,6 +4781,10 @@ public final class PebbleStorageCoordinator {
     }
 
 #if DEBUG
+    func _testBootstrapClientAuthoritySchemaForAdmission() throws {
+        try executor.bootstrapClientAuthoritySchemaForAdmission()
+    }
+
     static func _testOpen(databaseURL: URL,
                           failurePoint: PebbleStorageFactoryFailurePoint) throws
         -> PebbleStorageCoordinator {
@@ -3369,6 +4795,12 @@ public final class PebbleStorageCoordinator {
 
     func _testInject(_ operation: PebbleStorageOperationID, count: Int = 1) throws {
         try executor.testInject(operation, count: count)
+    }
+    func _testSetRPGLocalFailure(
+        operation: PebbleStorageRPGLocalTestOperation,
+        stage: PebbleStorageRPGLocalFailureStage
+    ) throws {
+        try executor.testSetRPGLocalFailure(operation: operation, stage: stage)
     }
     func _testSetLegacyCollectionFailure(
         _ point: PebbleStorageLegacyCollectionFailurePoint
@@ -3426,6 +4858,1283 @@ public final class PebbleStorageCoordinator {
         try executor.testExtendedPrimaryKeyConstraint()
     }
 #endif
+}
+
+private struct RPGLocalStorageAccounting {
+    let preferenceCount: Int64
+    let markerCount: Int64
+    let totalBytes: Int64
+}
+
+private func rpgPreferenceAccountedBytes(_ row: PebbleRPGLocalPreferenceStorageRow) -> Int64 {
+    Int64(256 + row.worldRecordID.utf8.count + 2 + 8 + row.slotsPayload.count + 32 + 1
+          + (row.migrationOriginDigest == nil ? 0 : 40))
+}
+
+private func rpgMarkerAccountedBytes(
+    _ row: PebbleRPGLegacyQuickSlotMigrationStorageRow
+) -> Int64 {
+    Int64(256 + row.worldRecordID.utf8.count + 2 + 32 + 32 + 8)
+}
+
+private func readRPGLocalAccounting(_ context: StorageContext) throws
+    -> RPGLocalStorageAccounting {
+    try withStatement(context, """
+        SELECT
+          (SELECT count(*) FROM rpg_local_preferences_v1),
+          (SELECT count(*) FROM rpg_local_preference_migrations_v1),
+          coalesce((SELECT sum(256+length(CAST(world_record_id AS BLOB))+2+8+
+            length(slots_payload)+32+1+coalesce(length(migration_origin_digest),0)+
+            CASE WHEN migration_origin_revision IS NULL THEN 0 ELSE 8 END)
+            FROM rpg_local_preferences_v1),0)+
+          coalesce((SELECT sum(256+length(CAST(world_record_id AS BLOB))+2+32+32+8)
+            FROM rpg_local_preference_migrations_v1),0)
+        """) { statement in
+        guard try statement.step() == .row else { throw PebbleStorageError.schemaIntegrity }
+        let accounting = RPGLocalStorageAccounting(
+            preferenceCount: try statement.int64(0), markerCount: try statement.int64(1),
+            totalBytes: try statement.int64(2))
+        guard try statement.step() == .done,
+              (0...256).contains(accounting.preferenceCount),
+              (0...256).contains(accounting.markerCount),
+              (0...1_048_576).contains(accounting.totalBytes) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        return accounting
+    }
+}
+
+private func readRPGPreference(_ context: StorageContext, worldRecordID: String) throws
+    -> PebbleRPGLocalPreferenceStorageRow? {
+    try withStatement(context, """
+        SELECT world_record_id,schema_version,revision,slots_payload,payload_digest,
+               migration_origin_digest,migration_origin_revision
+        FROM rpg_local_preferences_v1 WHERE world_record_id=?
+        """) { statement in
+        try statement.bindText(1, worldRecordID)
+        guard try statement.step() == .row else { return nil }
+        guard let storedWorld = try statement.text(0, maximumBytes: 64),
+              let schemaVersion = UInt16(exactly: try statement.int64(1)),
+              let revision = UInt64(exactly: try statement.int64(2)),
+              let payload = try statement.data(3, maximumBytes: 4_096),
+              let digest = try statement.data(4, maximumBytes: 32) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        let originDigest = try statement.data(5, maximumBytes: 32, nullable: true)
+        let originRevision: UInt64?
+        if try statement.isNull(6) { originRevision = nil }
+        else { originRevision = UInt64(exactly: try statement.int64(6)) }
+        let row = try PebbleRPGLocalPreferenceStorageRow(
+            worldRecordID: storedWorld, schemaVersion: schemaVersion, revision: revision,
+            slotsPayload: payload, payloadDigest: digest,
+            migrationOriginDigest: originDigest, migrationOriginRevision: originRevision)
+        guard storedWorld == worldRecordID, try statement.step() == .done else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        return row
+    }
+}
+
+private func readRPGMigrationMarker(_ context: StorageContext, worldRecordID: String) throws
+    -> PebbleRPGLegacyQuickSlotMigrationStorageRow? {
+    try withStatement(context, """
+        SELECT world_record_id,schema_version,source_digest,destination_digest,
+               destination_revision
+        FROM rpg_local_preference_migrations_v1 WHERE world_record_id=?
+        """) { statement in
+        try statement.bindText(1, worldRecordID)
+        guard try statement.step() == .row else { return nil }
+        guard let storedWorld = try statement.text(0, maximumBytes: 64),
+              let schemaVersion = UInt16(exactly: try statement.int64(1)),
+              let source = try statement.data(2, maximumBytes: 32),
+              let destination = try statement.data(3, maximumBytes: 32),
+              let revision = UInt64(exactly: try statement.int64(4)) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        let row = try PebbleRPGLegacyQuickSlotMigrationStorageRow(
+            worldRecordID: storedWorld, schemaVersion: schemaVersion, sourceDigest: source,
+            destinationDigest: destination, destinationRevision: revision)
+        guard storedWorld == worldRecordID, try statement.step() == .done else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        return row
+    }
+}
+
+private func proveRPGWorldParent(_ context: StorageContext, worldRecordID: String) throws {
+    try withStatement(context, "SELECT count(*) FROM worlds WHERE id=?") { statement in
+        try statement.bindText(1, worldRecordID)
+        guard try statement.step() == .row, try statement.int64(0) == 1,
+              try statement.step() == .done else {
+            throw PebbleStorageError.invalidValue
+        }
+    }
+}
+
+private struct RPGLocalIntegrityState {
+    let preference: PebbleRPGLocalPreferenceStorageRow?
+    let marker: PebbleRPGLegacyQuickSlotMigrationStorageRow?
+    let accounting: RPGLocalStorageAccounting
+    let parentExists: Bool
+}
+
+private func validateRPGLocalIntegrity(
+    _ context: StorageContext, worldRecordID: String, requireParent: Bool
+) throws -> RPGLocalIntegrityState {
+    let accounting = try readRPGLocalAccounting(context)
+    let preference = try readRPGPreference(context, worldRecordID: worldRecordID)
+    let marker = try readRPGMigrationMarker(context, worldRecordID: worldRecordID)
+    let parentCount: Int64 = try withStatement(
+        context, "SELECT count(*) FROM worlds WHERE id=?"
+    ) { statement in
+        try statement.bindText(1, worldRecordID)
+        guard try statement.step() == .row else { throw PebbleStorageError.schemaIntegrity }
+        let value = try statement.int64(0)
+        guard try statement.step() == .done, (0...1).contains(value) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        return value
+    }
+    if requireParent, parentCount != 1 { throw PebbleStorageError.invalidValue }
+    guard preference == nil || parentCount == 1,
+          marker == nil || preference != nil else {
+        throw PebbleStorageError.schemaIntegrity
+    }
+    switch (preference, marker) {
+    case (nil, nil): break
+    case let (preference?, nil):
+        guard preference.migrationOriginDigest == nil,
+              preference.migrationOriginRevision == nil else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+    case let (preference?, marker?):
+        guard preference.schemaVersion == marker.schemaVersion,
+              preference.worldRecordID == marker.worldRecordID,
+              preference.migrationOriginDigest != nil,
+              preference.migrationOriginRevision != nil,
+              preference.migrationOriginDigest.map({
+                storageFixedTimeEqual($0, marker.destinationDigest)
+              }) == true,
+              preference.migrationOriginRevision == marker.destinationRevision else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+    case (nil, _?):
+        throw PebbleStorageError.schemaIntegrity
+    }
+    return RPGLocalIntegrityState(
+        preference: preference, marker: marker, accounting: accounting,
+        parentExists: parentCount == 1)
+}
+
+private func insertRPGPreference(_ context: StorageContext,
+                                 _ row: PebbleRPGLocalPreferenceStorageRow,
+                                 legacyMaterializationStatementIndex: Int? = nil) throws {
+    let sql: StaticString = """
+        INSERT INTO rpg_local_preferences_v1(
+          world_record_id,schema_version,revision,slots_payload,payload_digest,
+          migration_origin_digest,migration_origin_revision) VALUES(?,?,?,?,?,?,?)
+        """
+    let bind: (StorageStatement) throws -> Void = { statement in
+        try statement.bindText(1, row.worldRecordID)
+        try statement.bindInt64(2, Int64(row.schemaVersion))
+        try statement.bindInt64(3, Int64(row.revision))
+        try statement.bindData(4, row.slotsPayload)
+        try statement.bindData(5, row.payloadDigest)
+        if let digest = row.migrationOriginDigest { try statement.bindData(6, digest) }
+        else { try statement.bindNull(6) }
+        if let revision = row.migrationOriginRevision {
+            try statement.bindInt64(7, Int64(revision))
+        } else { try statement.bindNull(7) }
+    }
+    let changes: Int
+    if let statementIndex = legacyMaterializationStatementIndex {
+        changes = try executeLegacyMaterializationMutation(
+            context, statementIndex: statementIndex, sql, bind: bind)
+    } else {
+        changes = try executeMutation(context, sql, bind: bind)
+    }
+    guard changes == 1 else { throw PebbleStorageError.schemaIntegrity }
+}
+
+public final class PebbleRPGLocalPreferencesStorage {
+    private let executor: StorageExecutor
+
+    fileprivate init(executor: StorageExecutor) { self.executor = executor }
+
+    public func read(worldRecordID: String) throws -> PebbleRPGLocalPreferenceStorageRow? {
+        try StorageBounds.validateRPGWorldRecordID(worldRecordID)
+        return try executor.rpgLocalPreferencesRead { context in
+            try validateRPGLocalIntegrity(
+                context, worldRecordID: worldRecordID, requireParent: false).preference
+        }
+    }
+
+    public func materializeIfAbsent(
+        candidate: PebbleRPGLocalPreferenceStorageRow
+    ) throws -> PebbleRPGLocalPreferenceStorageRow {
+        guard candidate.revision == 1, candidate.migrationOriginDigest == nil,
+              candidate.migrationOriginRevision == nil else {
+            throw PebbleStorageError.invalidValue
+        }
+        return try executor.rpgLocalPreferencesWrite { context in
+            let state = try validateRPGLocalIntegrity(
+                context, worldRecordID: candidate.worldRecordID, requireParent: true)
+            let accounting = state.accounting
+            if let existing = state.preference {
+                return existing
+            }
+            guard accounting.preferenceCount < 256,
+                  accounting.totalBytes + rpgPreferenceAccountedBytes(candidate) <= 1_048_576 else {
+                throw PebbleStorageError.limitExceeded
+            }
+            try insertRPGPreference(context, candidate)
+            let post = try validateRPGLocalIntegrity(
+                context, worldRecordID: candidate.worldRecordID, requireParent: true)
+            guard let stored = post.preference,
+                  stored == candidate else { throw PebbleStorageError.schemaIntegrity }
+            return stored
+        }
+    }
+
+    public func compareAndSwap(
+        expectedRevision: UInt64, expectedDigest: Data,
+        candidate: PebbleRPGLocalPreferenceStorageRow
+    ) throws -> PebbleRPGLocalPreferenceStorageRow {
+        guard (1...999_999_999).contains(expectedRevision), expectedDigest.count == 32,
+              candidate.revision == expectedRevision + 1 else {
+            throw PebbleStorageError.invalidValue
+        }
+        return try executor.rpgLocalPreferencesWrite { context in
+            let state = try validateRPGLocalIntegrity(
+                context, worldRecordID: candidate.worldRecordID, requireParent: true)
+            let accounting = state.accounting
+            guard let existing = state.preference,
+                  existing.revision == expectedRevision,
+                  storageFixedTimeEqual(existing.payloadDigest, expectedDigest),
+                  existing.migrationOriginDigest == candidate.migrationOriginDigest,
+                  existing.migrationOriginRevision == candidate.migrationOriginRevision else {
+                throw PebbleStorageError.invalidValue
+            }
+            let newTotal = accounting.totalBytes - rpgPreferenceAccountedBytes(existing)
+                + rpgPreferenceAccountedBytes(candidate)
+            guard (0...1_048_576).contains(newTotal) else {
+                throw PebbleStorageError.limitExceeded
+            }
+            let changes = try executeMutation(context, """
+                UPDATE rpg_local_preferences_v1 SET
+                  schema_version=?,revision=?,slots_payload=?,payload_digest=?,
+                  migration_origin_digest=?,migration_origin_revision=?
+                WHERE world_record_id=? AND revision=? AND payload_digest=?
+                """) { statement in
+                try statement.bindInt64(1, Int64(candidate.schemaVersion))
+                try statement.bindInt64(2, Int64(candidate.revision))
+                try statement.bindData(3, candidate.slotsPayload)
+                try statement.bindData(4, candidate.payloadDigest)
+                if let digest = candidate.migrationOriginDigest { try statement.bindData(5, digest) }
+                else { try statement.bindNull(5) }
+                if let revision = candidate.migrationOriginRevision {
+                    try statement.bindInt64(6, Int64(revision))
+                } else { try statement.bindNull(6) }
+                try statement.bindText(7, candidate.worldRecordID)
+                try statement.bindInt64(8, Int64(expectedRevision))
+                try statement.bindData(9, expectedDigest)
+            }
+            let post = try validateRPGLocalIntegrity(
+                context, worldRecordID: candidate.worldRecordID, requireParent: true)
+            guard changes == 1, let stored = post.preference, stored == candidate else {
+                throw PebbleStorageError.schemaIntegrity
+            }
+            return stored
+        }
+    }
+
+    public func materializeLegacy(
+        sourceDigest: Data, absentDestination: PebbleRPGLocalPreferenceStorageRow
+    ) throws -> PebbleRPGLocalPreferenceMigrationReceipt {
+        guard sourceDigest.count == 32, absentDestination.revision == 1,
+              absentDestination.migrationOriginDigest == nil,
+              absentDestination.migrationOriginRevision == nil else {
+            throw PebbleStorageError.invalidValue
+        }
+        return try executor.rpgLocalPreferencesLegacyMaterialization { context in
+            let initial = try validateRPGLocalIntegrity(
+                context, worldRecordID: absentDestination.worldRecordID,
+                requireParent: true)
+            var accounting = initial.accounting
+            var preference = initial.preference
+            var marker = initial.marker
+            var insertedDestination = false
+            if preference == nil {
+                guard accounting.preferenceCount < 256,
+                      accounting.totalBytes + rpgPreferenceAccountedBytes(absentDestination)
+                        <= 1_048_576 else { throw PebbleStorageError.limitExceeded }
+                try insertRPGPreference(
+                    context, absentDestination, legacyMaterializationStatementIndex: 0)
+                preference = absentDestination
+                insertedDestination = true
+                accounting = RPGLocalStorageAccounting(
+                    preferenceCount: accounting.preferenceCount + 1,
+                    markerCount: accounting.markerCount,
+                    totalBytes: accounting.totalBytes
+                        + rpgPreferenceAccountedBytes(absentDestination))
+            }
+            guard var chosen = preference else { throw PebbleStorageError.schemaIntegrity }
+            if marker == nil {
+                guard chosen.migrationOriginDigest == nil,
+                      chosen.migrationOriginRevision == nil else {
+                    throw PebbleStorageError.schemaIntegrity
+                }
+                let originAddedBytes: Int64 = 40
+                let newMarker = try PebbleRPGLegacyQuickSlotMigrationStorageRow(
+                    worldRecordID: chosen.worldRecordID, schemaVersion: 1,
+                    sourceDigest: sourceDigest, destinationDigest: chosen.payloadDigest,
+                    destinationRevision: chosen.revision)
+                guard accounting.markerCount < 256,
+                      accounting.totalBytes + originAddedBytes
+                        + rpgMarkerAccountedBytes(newMarker) <= 1_048_576 else {
+                    throw PebbleStorageError.limitExceeded
+                }
+                let updated = try executeLegacyMaterializationMutation(
+                    context, statementIndex: 1, """
+                    UPDATE rpg_local_preferences_v1 SET
+                      migration_origin_digest=?,migration_origin_revision=?
+                    WHERE world_record_id=? AND migration_origin_digest IS NULL
+                      AND migration_origin_revision IS NULL
+                    """) { statement in
+                    try statement.bindData(1, chosen.payloadDigest)
+                    try statement.bindInt64(2, Int64(chosen.revision))
+                    try statement.bindText(3, chosen.worldRecordID)
+                }
+                guard updated == 1 else { throw PebbleStorageError.schemaIntegrity }
+                let inserted = try executeLegacyMaterializationMutation(
+                    context, statementIndex: 2, """
+                    INSERT INTO rpg_local_preference_migrations_v1(
+                      world_record_id,schema_version,source_digest,destination_digest,
+                      destination_revision) VALUES(?,?,?,?,?)
+                    """) { statement in
+                    try statement.bindText(1, newMarker.worldRecordID)
+                    try statement.bindInt64(2, Int64(newMarker.schemaVersion))
+                    try statement.bindData(3, newMarker.sourceDigest)
+                    try statement.bindData(4, newMarker.destinationDigest)
+                    try statement.bindInt64(5, Int64(newMarker.destinationRevision))
+                }
+                guard inserted == 1 else { throw PebbleStorageError.schemaIntegrity }
+                marker = newMarker
+                guard let reread = try readRPGPreference(
+                    context, worldRecordID: chosen.worldRecordID) else {
+                    throw PebbleStorageError.schemaIntegrity
+                }
+                chosen = reread
+            }
+#if DEBUG
+            try context.executor?.injectActiveRPGLocalFailure(.postcondition)
+#endif
+            let post = try validateRPGLocalIntegrity(
+                context, worldRecordID: chosen.worldRecordID, requireParent: true)
+            guard let finalMarker = marker,
+                  storageFixedTimeEqual(finalMarker.sourceDigest, sourceDigest),
+                  chosen.migrationOriginDigest == finalMarker.destinationDigest,
+                  chosen.migrationOriginRevision == finalMarker.destinationRevision,
+                  let finalPreference = post.preference,
+                  let rereadMarker = post.marker,
+                  finalPreference == chosen, rereadMarker == finalMarker else {
+                throw PebbleStorageError.schemaIntegrity
+            }
+            return PebbleRPGLocalPreferenceMigrationReceipt(
+                preference: finalPreference, marker: finalMarker,
+                insertedDestination: insertedDestination)
+        }
+    }
+}
+
+public final class PebbleClientAuthorityCheckpointV6Storage {
+    private let executor: StorageExecutor
+
+    fileprivate init(executor: StorageExecutor) { self.executor = executor }
+
+    public func load(
+        key: PebbleLANClientAuthorityStorageKey
+    ) throws -> PebbleLANClientAuthorityCheckpointSnapshot {
+        try loadClientAuthoritySnapshot(executor: executor, key: key)
+    }
+
+    public func commit(
+        _ candidate: PebbleLANClientAuthorityCheckpointCandidate
+    ) throws -> PebbleLANClientAuthorityCheckpointReceipt {
+        try commitClientAuthorityCheckpoint(executor: executor, candidate: candidate)
+    }
+
+    public func oldestPendingNotice(
+        key: PebbleLANClientAuthorityStorageKey
+    ) throws -> PebbleLANClientNotificationStorageRow? {
+        try loadOldestClientNotice(executor: executor, key: key)
+    }
+
+    public func acknowledgeNotice(
+        key: PebbleLANClientAuthorityStorageKey, notificationID: Data,
+        expectedPayloadDigest: Data, expectedAcknowledgementGeneration: UInt64
+    ) throws -> PebbleLANClientNotificationStorageRow {
+        try acknowledgeClientNotice(
+            executor: executor, key: key, notificationID: notificationID,
+            expectedPayloadDigest: expectedPayloadDigest,
+            expectedAcknowledgementGeneration: expectedAcknowledgementGeneration)
+    }
+}
+
+private func loadClientAuthoritySnapshot(
+    executor: StorageExecutor, key: PebbleLANClientAuthorityStorageKey
+) throws -> PebbleLANClientAuthorityCheckpointSnapshot {
+    try executor.clientAuthorityRead { context in
+        try verifyClientAuthorityCaps(context, key: key)
+        guard let credential = try readClientCredential(context, key: key) else {
+            throw PebbleStorageError.invalidValue
+        }
+        let owner = try readClientOwner(context, key: key)
+        let pending = try readClientPending(context, key: key)
+        try validateClientAuthorityRowDigests(
+            credential: credential, owner: owner, pending: pending)
+        let notice = try readOldestClientNotice(context, key: key)
+        let expectedAggregate = clientAggregateDigest(
+            credential: credential, owner: owner, pending: pending)
+        guard storageFixedTimeEqual(expectedAggregate, credential.aggregateDigest) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        return try PebbleLANClientAuthorityCheckpointSnapshot(
+            credential: credential, owner: owner, pending: pending,
+            oldestPendingNotice: notice)
+    }
+}
+
+private func commitClientAuthorityCheckpoint(
+    executor: StorageExecutor, candidate: PebbleLANClientAuthorityCheckpointCandidate
+) throws -> PebbleLANClientAuthorityCheckpointReceipt {
+    try executor.clientAuthorityWrite { context in
+        try verifyClientAuthorityCaps(context, key: candidate.key)
+        guard let oldCredential = try readClientCredential(context, key: candidate.key),
+              oldCredential.aggregateGeneration == candidate.expectedAggregateGeneration,
+              storageFixedTimeEqual(oldCredential.aggregateDigest,
+                                    candidate.expectedAggregateDigest) else {
+            throw PebbleStorageError.invalidValue
+        }
+        let oldOwner = try readClientOwner(context, key: candidate.key)
+        let oldPending = try readClientPending(context, key: candidate.key)
+        guard oldOwner.map({ oldCredential.aggregateGeneration >= 1
+            && $0.lastChangeGeneration >= 1
+            && $0.lastChangeGeneration <= oldCredential.aggregateGeneration }) ?? true,
+              oldPending.map({ oldCredential.aggregateGeneration >= 1
+                && $0.lastChangeGeneration >= 1
+                && $0.lastChangeGeneration <= oldCredential.aggregateGeneration }) ?? true else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        try validateClientAuthorityRowDigests(
+            credential: oldCredential, owner: oldOwner, pending: oldPending)
+        guard storageFixedTimeEqual(
+            clientAggregateDigest(credential: oldCredential, owner: oldOwner,
+                                  pending: oldPending),
+            oldCredential.aggregateDigest) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+
+        let newGeneration = candidate.credential.aggregateGeneration
+        let finalOwner: PebbleLANClientOwnerCheckpointStorageRow?
+        switch candidate.ownerChange {
+        case .unchanged:
+            finalOwner = oldOwner
+        case let .set(row):
+            guard row.lastChangeGeneration == newGeneration else {
+                throw PebbleStorageError.invalidValue
+            }
+            finalOwner = row
+        case let .remove(expectedDigest):
+            guard let oldOwner,
+                  storageFixedTimeEqual(oldOwner.payloadDigest, expectedDigest) else {
+                throw PebbleStorageError.invalidValue
+            }
+            finalOwner = nil
+        }
+        let finalPending: PebbleLANClientPendingDispositionStorageRow?
+        switch candidate.pendingChange {
+        case .unchanged:
+            finalPending = oldPending
+        case let .set(row):
+            guard row.lastChangeGeneration == newGeneration else {
+                throw PebbleStorageError.invalidValue
+            }
+            finalPending = row
+        case let .remove(expectedDigest):
+            guard let oldPending,
+                  storageFixedTimeEqual(oldPending.payloadDigest, expectedDigest) else {
+                throw PebbleStorageError.invalidValue
+            }
+            finalPending = nil
+        }
+
+        switch candidate.transition {
+        case .firstRequestZeroBind:
+            guard !oldCredential.authorityBound,
+                  oldCredential.aggregateGeneration == 0,
+                  candidate.credential.authorityBound,
+                  newGeneration == 1,
+                  oldOwner == nil, oldPending == nil,
+                  candidate.noticeInsert == nil,
+                  case .set = candidate.ownerChange,
+                  case .unchanged = candidate.pendingChange else {
+                throw PebbleStorageError.invalidValue
+            }
+            try verifyFirstClientAuthorityBind(
+                oldPayload: oldCredential.payload,
+                candidatePayload: candidate.credential.payload)
+        case .ordinary:
+            guard oldCredential.authorityBound,
+                  oldCredential.aggregateGeneration >= 1,
+                  candidate.credential.authorityBound else {
+                throw PebbleStorageError.invalidValue
+            }
+        }
+        guard storageFixedTimeEqual(
+            clientAggregateDigest(credential: candidate.credential, owner: finalOwner,
+                                  pending: finalPending),
+            candidate.credential.aggregateDigest) else {
+            throw PebbleStorageError.invalidValue
+        }
+        try validateClientAuthorityRowDigests(
+            credential: candidate.credential, owner: finalOwner, pending: finalPending)
+        let pruneNotificationIDs = try preflightClientCandidateCaps(
+            context, oldCredential: oldCredential, oldOwner: oldOwner,
+            oldPending: oldPending, candidate: candidate, finalOwner: finalOwner,
+            finalPending: finalPending)
+
+        for notificationID in pruneNotificationIDs {
+            let changes = try executeMutation(context, """
+                DELETE FROM lan_client_notification_inbox_v6
+                WHERE hid=? AND wid=? AND lookup_digest=? AND notification_id=?
+                  AND acknowledgement_state=1 AND acknowledgement_generation=1
+                """) { statement in
+                try bindClientKey(statement, key: candidate.key)
+                try statement.bindData(4, notificationID)
+            }
+            guard changes == 1 else { throw PebbleStorageError.schemaIntegrity }
+        }
+
+        switch candidate.ownerChange {
+        case .unchanged: break
+        case let .set(row):
+            if let oldOwner {
+                let changes = try executeMutation(context, """
+                    UPDATE lan_client_owner_checkpoint_v6 SET
+                      schema_version=?,last_change_generation=?,payload=?,payload_digest=?
+                    WHERE hid=? AND wid=? AND lookup_digest=? AND payload_digest=?
+                    """) { statement in
+                    try statement.bindInt64(1, Int64(row.schemaVersion))
+                    try statement.bindInt64(2, Int64(row.lastChangeGeneration))
+                    try statement.bindData(3, row.payload)
+                    try statement.bindData(4, row.payloadDigest)
+                    try bindClientKey(statement, key: row.key, startingAt: 5)
+                    try statement.bindData(8, oldOwner.payloadDigest)
+                }
+                guard changes == 1 else { throw PebbleStorageError.invalidValue }
+            } else {
+                try insertClientOwner(context, row: row)
+            }
+        case let .remove(expectedDigest):
+            let changes = try executeMutation(context, """
+                DELETE FROM lan_client_owner_checkpoint_v6
+                WHERE hid=? AND wid=? AND lookup_digest=? AND payload_digest=?
+                """) { statement in
+                try bindClientKey(statement, key: candidate.key)
+                try statement.bindData(4, expectedDigest)
+            }
+            guard changes == 1 else { throw PebbleStorageError.invalidValue }
+        }
+
+        switch candidate.pendingChange {
+        case .unchanged: break
+        case let .set(row):
+            if let oldPending {
+                let changes = try executeMutation(context, """
+                    UPDATE lan_client_pending_disposition_v6 SET
+                      schema_version=?,last_change_generation=?,mode=?,payload=?,payload_digest=?
+                    WHERE hid=? AND wid=? AND lookup_digest=? AND payload_digest=?
+                    """) { statement in
+                    try statement.bindInt64(1, Int64(row.schemaVersion))
+                    try statement.bindInt64(2, Int64(row.lastChangeGeneration))
+                    try statement.bindInt64(3, Int64(row.mode.rawValue))
+                    try statement.bindData(4, row.payload)
+                    try statement.bindData(5, row.payloadDigest)
+                    try bindClientKey(statement, key: row.key, startingAt: 6)
+                    try statement.bindData(9, oldPending.payloadDigest)
+                }
+                guard changes == 1 else { throw PebbleStorageError.invalidValue }
+            } else {
+                try insertClientPending(context, row: row)
+            }
+        case let .remove(expectedDigest):
+            let changes = try executeMutation(context, """
+                DELETE FROM lan_client_pending_disposition_v6
+                WHERE hid=? AND wid=? AND lookup_digest=? AND payload_digest=?
+                """) { statement in
+                try bindClientKey(statement, key: candidate.key)
+                try statement.bindData(4, expectedDigest)
+            }
+            guard changes == 1 else { throw PebbleStorageError.invalidValue }
+        }
+
+        if let notice = candidate.noticeInsert {
+            if let existing = try readClientNotice(
+                context, key: notice.key, notificationID: notice.notificationID) {
+                guard storageFixedTimeEqual(existing.payloadDigest, notice.payloadDigest) else {
+                    throw PebbleStorageError.invalidValue
+                }
+            } else {
+                try insertClientNotice(context, row: notice)
+            }
+        }
+        let credentialChanges = try executeMutation(context, """
+            UPDATE lan_client_credentials_v6 SET
+              schema_version=?,aggregate_generation=?,aggregate_digest=?,authority_bound=?,
+              payload=?,payload_digest=?
+            WHERE hid=? AND wid=? AND lookup_digest=?
+              AND aggregate_generation=? AND aggregate_digest=?
+            """) { statement in
+            let row = candidate.credential
+            try statement.bindInt64(1, Int64(row.schemaVersion))
+            try statement.bindInt64(2, Int64(row.aggregateGeneration))
+            try statement.bindData(3, row.aggregateDigest)
+            try statement.bindInt64(4, row.authorityBound ? 1 : 0)
+            try statement.bindData(5, row.payload)
+            try statement.bindData(6, row.payloadDigest)
+            try bindClientKey(statement, key: row.key, startingAt: 7)
+            try statement.bindInt64(10, Int64(candidate.expectedAggregateGeneration))
+            try statement.bindData(11, candidate.expectedAggregateDigest)
+        }
+        guard credentialChanges == 1 else { throw PebbleStorageError.invalidValue }
+        try verifyClientAuthorityCaps(context, key: candidate.key)
+        guard let storedCredential = try readClientCredential(context, key: candidate.key),
+              clientCredentialMatches(storedCredential, candidate.credential) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        let storedOwner = try readClientOwner(context, key: candidate.key)
+        let storedPending = try readClientPending(context, key: candidate.key)
+        guard clientOwnerMatches(storedOwner, finalOwner),
+              clientPendingMatches(storedPending, finalPending),
+              storageFixedTimeEqual(
+                clientAggregateDigest(credential: storedCredential, owner: storedOwner,
+                                      pending: storedPending),
+                storedCredential.aggregateDigest) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        let snapshot = try PebbleLANClientAuthorityCheckpointSnapshot(
+            credential: storedCredential, owner: storedOwner, pending: storedPending,
+            oldestPendingNotice: try readOldestClientNotice(context, key: candidate.key))
+        return try PebbleLANClientAuthorityCheckpointReceipt(
+            snapshot: snapshot, committedAggregateGeneration: newGeneration,
+            committedAggregateDigest: storedCredential.aggregateDigest)
+    }
+}
+
+private func loadOldestClientNotice(
+    executor: StorageExecutor, key: PebbleLANClientAuthorityStorageKey
+) throws -> PebbleLANClientNotificationStorageRow? {
+    try executor.clientAuthorityRead { context in
+        try verifyClientAuthorityCaps(context, key: key)
+        return try readOldestClientNotice(context, key: key)
+    }
+}
+
+private func acknowledgeClientNotice(
+    executor: StorageExecutor, key: PebbleLANClientAuthorityStorageKey,
+    notificationID: Data, expectedPayloadDigest: Data,
+    expectedAcknowledgementGeneration: UInt64
+) throws -> PebbleLANClientNotificationStorageRow {
+    guard notificationID.count == 32, expectedPayloadDigest.count == 32,
+          expectedAcknowledgementGeneration == 0 else {
+        throw PebbleStorageError.invalidValue
+    }
+    return try executor.clientNoticeAcknowledgement { context in
+        let changes = try executeMutation(context, """
+            UPDATE lan_client_notification_inbox_v6 SET
+              acknowledgement_state=1,acknowledgement_generation=1
+            WHERE hid=? AND wid=? AND lookup_digest=? AND notification_id=?
+              AND payload_digest=? AND acknowledgement_state=0
+              AND acknowledgement_generation=?
+            """) { statement in
+            try bindClientKey(statement, key: key)
+            try statement.bindData(4, notificationID)
+            try statement.bindData(5, expectedPayloadDigest)
+            try statement.bindInt64(6, Int64(expectedAcknowledgementGeneration))
+        }
+        guard changes == 1,
+              let row = try readClientNotice(
+                context, key: key, notificationID: notificationID),
+              row.acknowledgement == .acknowledged,
+              row.acknowledgementGeneration == 1,
+              storageFixedTimeEqual(row.payloadDigest, expectedPayloadDigest) else {
+            throw PebbleStorageError.invalidValue
+        }
+        return row
+    }
+}
+
+private func bindClientKey(_ statement: StorageStatement,
+                           key: PebbleLANClientAuthorityStorageKey,
+                           startingAt index: Int32 = 1) throws {
+    try statement.bindData(index, key.hostInstallationID)
+    try statement.bindData(index + 1, key.worldLANID)
+    try statement.bindData(index + 2, key.lookupDigest)
+}
+
+private func clientUInt64BE(_ value: UInt64) -> Data {
+    var result = Data()
+    for shift in stride(from: 56, through: 0, by: -8) {
+        result.append(UInt8(truncatingIfNeeded: value >> UInt64(shift)))
+    }
+    return result
+}
+
+private func clientAggregateDigest(
+    credential: PebbleLANClientCredentialStorageRow,
+    owner: PebbleLANClientOwnerCheckpointStorageRow?,
+    pending: PebbleLANClientPendingDispositionStorageRow?
+) -> Data {
+    var input = Data("Pebble/LANv6/client-checkpoint-aggregate/v1\0".utf8)
+    input.append(credential.key.hostInstallationID)
+    input.append(credential.key.worldLANID)
+    input.append(credential.key.lookupDigest)
+    input.append(clientUInt64BE(credential.aggregateGeneration))
+    input.append(credential.payloadDigest)
+    if let owner {
+        input.append(1); input.append(clientUInt64BE(owner.lastChangeGeneration))
+        input.append(owner.payloadDigest)
+    } else { input.append(0) }
+    if let pending {
+        input.append(1); input.append(clientUInt64BE(pending.lastChangeGeneration))
+        input.append(pending.payloadDigest)
+    } else { input.append(0) }
+    return storageSHA256(input)
+}
+
+private func clientKeyBytes(_ key: PebbleLANClientAuthorityStorageKey) -> Data {
+    var bytes = key.hostInstallationID
+    bytes.append(key.worldLANID); bytes.append(key.lookupDigest)
+    return bytes
+}
+
+private func clientRowDigest(domain: String, key: PebbleLANClientAuthorityStorageKey,
+                             generation: UInt64, suffix: Data) -> Data {
+    var input = Data((domain + "\0").utf8)
+    input.append(clientKeyBytes(key)); input.append(clientUInt64BE(generation)); input.append(suffix)
+    return storageSHA256(input)
+}
+
+private func validateClientAuthorityRowDigests(
+    credential: PebbleLANClientCredentialStorageRow,
+    owner: PebbleLANClientOwnerCheckpointStorageRow?,
+    pending: PebbleLANClientPendingDispositionStorageRow?
+) throws {
+    guard storageFixedTimeEqual(
+        clientRowDigest(domain: "Pebble/LANv6/client-credential/v1",
+                        key: credential.key, generation: credential.aggregateGeneration,
+                        suffix: credential.payload), credential.payloadDigest) else {
+        throw PebbleStorageError.schemaIntegrity
+    }
+    if let owner {
+        guard storageFixedTimeEqual(
+            clientRowDigest(domain: "Pebble/LANv6/client-owner/v1", key: owner.key,
+                            generation: owner.lastChangeGeneration, suffix: owner.payload),
+            owner.payloadDigest) else { throw PebbleStorageError.schemaIntegrity }
+    }
+    if let pending {
+        var suffix = Data([pending.mode.rawValue]); suffix.append(pending.payload)
+        guard storageFixedTimeEqual(
+            clientRowDigest(domain: "Pebble/LANv6/client-pending/v1", key: pending.key,
+                            generation: pending.lastChangeGeneration, suffix: suffix),
+            pending.payloadDigest) else { throw PebbleStorageError.schemaIntegrity }
+    }
+}
+
+private func clientCredentialMatches(
+    _ lhs: PebbleLANClientCredentialStorageRow,
+    _ rhs: PebbleLANClientCredentialStorageRow
+) -> Bool {
+    lhs.key == rhs.key && lhs.schemaVersion == rhs.schemaVersion
+        && lhs.aggregateGeneration == rhs.aggregateGeneration
+        && storageFixedTimeEqual(lhs.aggregateDigest, rhs.aggregateDigest)
+        && lhs.authorityBound == rhs.authorityBound
+        && storageFixedTimeEqual(lhs.payload, rhs.payload)
+        && storageFixedTimeEqual(lhs.payloadDigest, rhs.payloadDigest)
+}
+
+private func clientOwnerMatches(
+    _ lhs: PebbleLANClientOwnerCheckpointStorageRow?,
+    _ rhs: PebbleLANClientOwnerCheckpointStorageRow?
+) -> Bool {
+    switch (lhs, rhs) {
+    case (nil, nil): return true
+    case let (lhs?, rhs?):
+        return lhs.key == rhs.key && lhs.schemaVersion == rhs.schemaVersion
+            && lhs.lastChangeGeneration == rhs.lastChangeGeneration
+            && storageFixedTimeEqual(lhs.payload, rhs.payload)
+            && storageFixedTimeEqual(lhs.payloadDigest, rhs.payloadDigest)
+    default: return false
+    }
+}
+
+private func clientPendingMatches(
+    _ lhs: PebbleLANClientPendingDispositionStorageRow?,
+    _ rhs: PebbleLANClientPendingDispositionStorageRow?
+) -> Bool {
+    switch (lhs, rhs) {
+    case (nil, nil): return true
+    case let (lhs?, rhs?):
+        return lhs.key == rhs.key && lhs.schemaVersion == rhs.schemaVersion
+            && lhs.lastChangeGeneration == rhs.lastChangeGeneration && lhs.mode == rhs.mode
+            && storageFixedTimeEqual(lhs.payload, rhs.payload)
+            && storageFixedTimeEqual(lhs.payloadDigest, rhs.payloadDigest)
+    default: return false
+    }
+}
+
+private struct ClientCredentialEnvelope {
+    let activeGeneration: UInt64?
+    let activeToken: Data?
+    let pendingGeneration: UInt64?
+    let pendingToken: Data?
+}
+
+private func decodeClientCredentialEnvelope(_ payload: Data) throws
+    -> ClientCredentialEnvelope {
+    let bytes = [UInt8](payload)
+    guard bytes.count >= 9, Array(bytes[0..<6]) == Array("PBLCC1".utf8),
+          bytes[6] == 0, bytes[7] == 1, bytes[8] & 0xFC == 0 else {
+        throw PebbleStorageError.invalidValue
+    }
+    var cursor = 9
+    func readUInt64() throws -> UInt64 {
+        guard cursor + 8 <= bytes.count else { throw PebbleStorageError.invalidValue }
+        var value: UInt64 = 0
+        for byte in bytes[cursor..<(cursor + 8)] { value = value << 8 | UInt64(byte) }
+        cursor += 8
+        return value
+    }
+    func readData(_ count: Int) throws -> Data {
+        guard cursor + count <= bytes.count else { throw PebbleStorageError.invalidValue }
+        defer { cursor += count }
+        return Data(bytes[cursor..<(cursor + count)])
+    }
+    var activeGeneration: UInt64?
+    var activeToken: Data?
+    if bytes[8] & 1 != 0 {
+        activeGeneration = try readUInt64()
+        activeToken = try readData(32)
+    }
+    var pendingGeneration: UInt64?
+    var pendingToken: Data?
+    if bytes[8] & 2 != 0 {
+        pendingGeneration = try readUInt64()
+        pendingToken = try readData(32)
+        _ = try readData(16)
+        _ = try readUInt64()
+    }
+    guard cursor == bytes.count,
+          activeGeneration.map({ (1...1_000_000_000).contains($0) }) ?? true,
+          pendingGeneration.map({ (1...1_000_000_000).contains($0) }) ?? true else {
+        throw PebbleStorageError.invalidValue
+    }
+    return ClientCredentialEnvelope(
+        activeGeneration: activeGeneration, activeToken: activeToken,
+        pendingGeneration: pendingGeneration, pendingToken: pendingToken)
+}
+
+private func verifyFirstClientAuthorityBind(oldPayload: Data,
+                                            candidatePayload: Data) throws {
+    let old = try decodeClientCredentialEnvelope(oldPayload)
+    let new = try decodeClientCredentialEnvelope(candidatePayload)
+    guard old.activeGeneration == nil, old.activeToken == nil,
+          old.pendingGeneration == 1, let pendingToken = old.pendingToken,
+          new.activeGeneration == 1, let activeToken = new.activeToken,
+          new.pendingGeneration == nil, new.pendingToken == nil,
+          storageFixedTimeEqual(pendingToken, activeToken) else {
+        throw PebbleStorageError.invalidValue
+    }
+}
+
+private func insertClientOwner(
+    _ context: StorageContext, row: PebbleLANClientOwnerCheckpointStorageRow
+) throws {
+    let changes = try executeMutation(context, """
+        INSERT INTO lan_client_owner_checkpoint_v6(
+          hid,wid,lookup_digest,schema_version,last_change_generation,payload,payload_digest)
+        VALUES(?,?,?,?,?,?,?)
+        """) { statement in
+        try bindClientKey(statement, key: row.key)
+        try statement.bindInt64(4, Int64(row.schemaVersion))
+        try statement.bindInt64(5, Int64(row.lastChangeGeneration))
+        try statement.bindData(6, row.payload)
+        try statement.bindData(7, row.payloadDigest)
+    }
+    guard changes == 1 else { throw PebbleStorageError.schemaIntegrity }
+}
+
+private func insertClientPending(
+    _ context: StorageContext, row: PebbleLANClientPendingDispositionStorageRow
+) throws {
+    let changes = try executeMutation(context, """
+        INSERT INTO lan_client_pending_disposition_v6(
+          hid,wid,lookup_digest,schema_version,last_change_generation,mode,payload,payload_digest)
+        VALUES(?,?,?,?,?,?,?,?)
+        """) { statement in
+        try bindClientKey(statement, key: row.key)
+        try statement.bindInt64(4, Int64(row.schemaVersion))
+        try statement.bindInt64(5, Int64(row.lastChangeGeneration))
+        try statement.bindInt64(6, Int64(row.mode.rawValue))
+        try statement.bindData(7, row.payload)
+        try statement.bindData(8, row.payloadDigest)
+    }
+    guard changes == 1 else { throw PebbleStorageError.schemaIntegrity }
+}
+
+private func insertClientNotice(
+    _ context: StorageContext, row: PebbleLANClientNotificationStorageRow
+) throws {
+    let changes = try executeMutation(context, """
+        INSERT INTO lan_client_notification_inbox_v6(
+          hid,wid,lookup_digest,notification_id,session_epoch,request_id,snapshot_id,status,
+          creation_generation,acknowledgement_state,acknowledgement_generation,payload,
+          payload_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """) { statement in
+        try bindClientKey(statement, key: row.key)
+        try statement.bindData(4, row.notificationID)
+        try statement.bindData(5, row.sessionEpoch)
+        try statement.bindInt64(6, Int64(row.requestID))
+        try statement.bindData(7, row.snapshotID)
+        try statement.bindInt64(8, Int64(row.status.rawValue))
+        try statement.bindInt64(9, Int64(row.creationGeneration))
+        try statement.bindInt64(10, Int64(row.acknowledgement.rawValue))
+        try statement.bindInt64(11, Int64(row.acknowledgementGeneration))
+        try statement.bindData(12, row.payload)
+        try statement.bindData(13, row.payloadDigest)
+    }
+    guard changes == 1 else { throw PebbleStorageError.schemaIntegrity }
+}
+
+private func verifyClientAuthorityCaps(
+    _ context: StorageContext, key: PebbleLANClientAuthorityStorageKey
+) throws {
+    try withStatement(context, """
+        SELECT
+          (SELECT count(*) FROM lan_client_credentials_v6),
+          coalesce((SELECT sum(length(payload)) FROM lan_client_credentials_v6),0),
+          (SELECT count(*) FROM lan_client_owner_checkpoint_v6),
+          coalesce((SELECT sum(length(payload)) FROM lan_client_owner_checkpoint_v6),0),
+          (SELECT count(*) FROM lan_client_pending_disposition_v6),
+          coalesce((SELECT sum(length(payload)) FROM lan_client_pending_disposition_v6),0),
+          (SELECT count(*) FROM lan_client_notification_inbox_v6),
+          coalesce((SELECT sum(704+length(payload))
+                    FROM lan_client_notification_inbox_v6),0)
+        """) { statement in
+        guard try statement.step() == .row else { throw PebbleStorageError.schemaIntegrity }
+        let values = try (0..<8).map { try statement.int64(Int32($0)) }
+        guard try statement.step() == .done,
+              values[0] <= 256, values[1] <= 16_777_216,
+              values[2] <= 256, values[3] <= 201_326_592,
+              values[4] <= 256, values[5] <= 33_554_432,
+              values[6] <= 65_536, values[7] <= 268_435_456,
+              values.allSatisfy({ $0 >= 0 }) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+    }
+    try withStatement(context, """
+        SELECT count(*),coalesce(sum(704+length(payload)),0)
+        FROM lan_client_notification_inbox_v6
+        WHERE hid=? AND wid=? AND lookup_digest=?
+        """) { statement in
+        try bindClientKey(statement, key: key)
+        guard try statement.step() == .row,
+              try statement.int64(0) <= 256, try statement.int64(1) <= 1_048_576,
+              try statement.step() == .done else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+    }
+}
+
+private func checkedClientAdd(_ lhs: Int64, _ rhs: Int64) throws -> Int64 {
+    let (value, overflow) = lhs.addingReportingOverflow(rhs)
+    guard !overflow, value >= 0 else { throw PebbleStorageError.limitExceeded }
+    return value
+}
+
+private func checkedClientSubtract(_ lhs: Int64, _ rhs: Int64) throws -> Int64 {
+    let (value, overflow) = lhs.subtractingReportingOverflow(rhs)
+    guard !overflow, value >= 0 else { throw PebbleStorageError.schemaIntegrity }
+    return value
+}
+
+private func replacingClientBytes(current: Int64, old: Data?, new: Data?) throws -> Int64 {
+    var result = current
+    if let old { result = try checkedClientSubtract(result, Int64(old.count)) }
+    if let new { result = try checkedClientAdd(result, Int64(new.count)) }
+    return result
+}
+
+private func preflightClientCandidateCaps(
+    _ context: StorageContext,
+    oldCredential: PebbleLANClientCredentialStorageRow,
+    oldOwner: PebbleLANClientOwnerCheckpointStorageRow?,
+    oldPending: PebbleLANClientPendingDispositionStorageRow?,
+    candidate: PebbleLANClientAuthorityCheckpointCandidate,
+    finalOwner: PebbleLANClientOwnerCheckpointStorageRow?,
+    finalPending: PebbleLANClientPendingDispositionStorageRow?
+) throws -> [Data] {
+    let totals: [Int64] = try withStatement(context, """
+        SELECT
+          (SELECT count(*) FROM lan_client_credentials_v6),
+          coalesce((SELECT sum(length(payload)) FROM lan_client_credentials_v6),0),
+          (SELECT count(*) FROM lan_client_owner_checkpoint_v6),
+          coalesce((SELECT sum(length(payload)) FROM lan_client_owner_checkpoint_v6),0),
+          (SELECT count(*) FROM lan_client_pending_disposition_v6),
+          coalesce((SELECT sum(length(payload)) FROM lan_client_pending_disposition_v6),0),
+          (SELECT count(*) FROM lan_client_notification_inbox_v6),
+          coalesce((SELECT sum(704+length(payload))
+                    FROM lan_client_notification_inbox_v6),0)
+        """) { statement in
+        guard try statement.step() == .row else { throw PebbleStorageError.schemaIntegrity }
+        let values = try (0..<8).map { try statement.int64(Int32($0)) }
+        guard try statement.step() == .done, values.allSatisfy({ $0 >= 0 }) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        return values
+    }
+    let credentialBytes = try replacingClientBytes(
+        current: totals[1], old: oldCredential.payload,
+        new: candidate.credential.payload)
+    let ownerBytes = try replacingClientBytes(
+        current: totals[3], old: oldOwner?.payload, new: finalOwner?.payload)
+    let pendingBytes = try replacingClientBytes(
+        current: totals[5], old: oldPending?.payload, new: finalPending?.payload)
+    let ownerCount = try checkedClientAdd(
+        try checkedClientSubtract(totals[2], oldOwner == nil ? 0 : 1),
+        finalOwner == nil ? 0 : 1)
+    let pendingCount = try checkedClientAdd(
+        try checkedClientSubtract(totals[4], oldPending == nil ? 0 : 1),
+        finalPending == nil ? 0 : 1)
+    guard totals[0] <= 256, credentialBytes <= 16_777_216,
+          ownerCount <= 256, ownerBytes <= 201_326_592,
+          pendingCount <= 256, pendingBytes <= 33_554_432 else {
+        throw PebbleStorageError.limitExceeded
+    }
+
+    guard let notice = candidate.noticeInsert else { return [] }
+    guard notice.acknowledgement == .pendingRender,
+          notice.acknowledgementGeneration == 0,
+          notice.creationGeneration == candidate.credential.aggregateGeneration else {
+        throw PebbleStorageError.invalidValue
+    }
+    if let existing = try readClientNotice(
+        context, key: notice.key, notificationID: notice.notificationID) {
+        guard storageFixedTimeEqual(existing.payloadDigest, notice.payloadDigest),
+              storageFixedTimeEqual(existing.payload, notice.payload) else {
+            throw PebbleStorageError.invalidValue
+        }
+        return []
+    }
+    let addition = Int64(704 + notice.payload.count)
+    let scope: (count: Int64, bytes: Int64) = try withStatement(context, """
+        SELECT count(*),coalesce(sum(704+length(payload)),0)
+        FROM lan_client_notification_inbox_v6
+        WHERE hid=? AND wid=? AND lookup_digest=?
+        """) { statement in
+        try bindClientKey(statement, key: candidate.key)
+        guard try statement.step() == .row else { throw PebbleStorageError.schemaIntegrity }
+        let value = (try statement.int64(0), try statement.int64(1))
+        guard try statement.step() == .done, value.0 >= 0, value.1 >= 0 else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        return value
+    }
+    var projectedScopeCount = try checkedClientAdd(scope.count, 1)
+    var projectedScopeBytes = try checkedClientAdd(scope.bytes, addition)
+    var projectedGlobalCount = try checkedClientAdd(totals[6], 1)
+    var projectedGlobalBytes = try checkedClientAdd(totals[7], addition)
+    var pruned: [Data] = []
+    if projectedScopeCount > 256 || projectedScopeBytes > 1_048_576 {
+        let acknowledged: [(Data, Int64)] = try withStatement(context, """
+            SELECT notification_id,704+length(payload)
+            FROM lan_client_notification_inbox_v6
+            WHERE hid=? AND wid=? AND lookup_digest=?
+              AND acknowledgement_state=1 AND acknowledgement_generation=1
+            ORDER BY acknowledgement_generation,notification_id LIMIT 257
+            """) { statement in
+            try bindClientKey(statement, key: candidate.key)
+            var rows: [(Data, Int64)] = []
+            while try statement.step() == .row {
+                guard let id = try statement.data(0, maximumBytes: 32), id.count == 32 else {
+                    throw PebbleStorageError.schemaIntegrity
+                }
+                let bytes = try statement.int64(1)
+                guard (704...4_608).contains(bytes) else {
+                    throw PebbleStorageError.schemaIntegrity
+                }
+                rows.append((id, bytes))
+            }
+            return rows
+        }
+        for (id, bytes) in acknowledged
+            where projectedScopeCount > 256 || projectedScopeBytes > 1_048_576 {
+            pruned.append(id)
+            projectedScopeCount = try checkedClientSubtract(projectedScopeCount, 1)
+            projectedScopeBytes = try checkedClientSubtract(projectedScopeBytes, bytes)
+            projectedGlobalCount = try checkedClientSubtract(projectedGlobalCount, 1)
+            projectedGlobalBytes = try checkedClientSubtract(projectedGlobalBytes, bytes)
+        }
+    }
+    guard projectedScopeCount <= 256, projectedScopeBytes <= 1_048_576,
+          projectedGlobalCount <= 65_536, projectedGlobalBytes <= 268_435_456 else {
+        throw PebbleStorageError.limitExceeded
+    }
+    return pruned
+}
+
+private func readClientCredential(
+    _ context: StorageContext, key: PebbleLANClientAuthorityStorageKey
+) throws -> PebbleLANClientCredentialStorageRow? {
+    try withStatement(context, """
+        SELECT schema_version,aggregate_generation,aggregate_digest,authority_bound,
+               payload,payload_digest FROM lan_client_credentials_v6
+        WHERE hid=? AND wid=? AND lookup_digest=?
+        """) { statement in
+        try bindClientKey(statement, key: key)
+        guard try statement.step() == .row else { return nil }
+        guard let schema = UInt16(exactly: try statement.int64(0)),
+              let generation = UInt64(exactly: try statement.int64(1)),
+              let aggregate = try statement.data(2, maximumBytes: 32),
+              let payload = try statement.data(4, maximumBytes: 65_536),
+              let digest = try statement.data(5, maximumBytes: 32) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        let boundValue = try statement.int64(3)
+        guard boundValue == 0 || boundValue == 1 else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        let row = try PebbleLANClientCredentialStorageRow(
+            key: key, schemaVersion: schema, aggregateGeneration: generation,
+            aggregateDigest: aggregate, authorityBound: boundValue == 1,
+            payload: payload, payloadDigest: digest)
+        guard try statement.step() == .done else { throw PebbleStorageError.schemaIntegrity }
+        return row
+    }
+}
+
+private func readClientOwner(
+    _ context: StorageContext, key: PebbleLANClientAuthorityStorageKey
+) throws -> PebbleLANClientOwnerCheckpointStorageRow? {
+    try withStatement(context, """
+        SELECT schema_version,last_change_generation,payload,payload_digest
+        FROM lan_client_owner_checkpoint_v6 WHERE hid=? AND wid=? AND lookup_digest=?
+        """) { statement in
+        try bindClientKey(statement, key: key)
+        guard try statement.step() == .row else { return nil }
+        guard let schema = UInt16(exactly: try statement.int64(0)),
+              let generation = UInt64(exactly: try statement.int64(1)),
+              let payload = try statement.data(2, maximumBytes: 786_432),
+              let digest = try statement.data(3, maximumBytes: 32) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        let row = try PebbleLANClientOwnerCheckpointStorageRow(
+            key: key, schemaVersion: schema, lastChangeGeneration: generation,
+            payload: payload, payloadDigest: digest)
+        guard try statement.step() == .done else { throw PebbleStorageError.schemaIntegrity }
+        return row
+    }
+}
+
+private func readClientPending(
+    _ context: StorageContext, key: PebbleLANClientAuthorityStorageKey
+) throws -> PebbleLANClientPendingDispositionStorageRow? {
+    try withStatement(context, """
+        SELECT schema_version,last_change_generation,mode,payload,payload_digest
+        FROM lan_client_pending_disposition_v6 WHERE hid=? AND wid=? AND lookup_digest=?
+        """) { statement in
+        try bindClientKey(statement, key: key)
+        guard try statement.step() == .row else { return nil }
+        guard let schema = UInt16(exactly: try statement.int64(0)),
+              let generation = UInt64(exactly: try statement.int64(1)),
+              let modeRaw = UInt8(exactly: try statement.int64(2)),
+              let mode = PebbleLANClientPendingMode(rawValue: modeRaw),
+              let payload = try statement.data(3, maximumBytes: 131_072),
+              let digest = try statement.data(4, maximumBytes: 32) else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        let row = try PebbleLANClientPendingDispositionStorageRow(
+            key: key, schemaVersion: schema, lastChangeGeneration: generation,
+            mode: mode, payload: payload, payloadDigest: digest)
+        guard try statement.step() == .done else { throw PebbleStorageError.schemaIntegrity }
+        return row
+    }
+}
+
+private func materializeClientNotice(
+    _ statement: StorageStatement, key: PebbleLANClientAuthorityStorageKey
+) throws -> PebbleLANClientNotificationStorageRow {
+    guard let notificationID = try statement.data(0, maximumBytes: 32),
+          let sessionEpoch = try statement.data(1, maximumBytes: 16),
+          let requestID = UInt64(exactly: try statement.int64(2)),
+          let snapshotID = try statement.data(3, maximumBytes: 16),
+          let statusRaw = UInt8(exactly: try statement.int64(4)),
+          let status = PebbleLANClientNoticeStatus(rawValue: statusRaw),
+          let creation = UInt64(exactly: try statement.int64(5)),
+          let acknowledgementRaw = UInt8(exactly: try statement.int64(6)),
+          let acknowledgement = PebbleLANClientNoticeAcknowledgement(
+            rawValue: acknowledgementRaw),
+          let acknowledgementGeneration = UInt64(exactly: try statement.int64(7)),
+          let payload = try statement.data(8, maximumBytes: 4_096),
+          let digest = try statement.data(9, maximumBytes: 32) else {
+        throw PebbleStorageError.schemaIntegrity
+    }
+    return try PebbleLANClientNotificationStorageRow(
+        key: key, notificationID: notificationID, sessionEpoch: sessionEpoch,
+        requestID: requestID, snapshotID: snapshotID, status: status,
+        creationGeneration: creation, acknowledgement: acknowledgement,
+        acknowledgementGeneration: acknowledgementGeneration, payload: payload,
+        payloadDigest: digest)
+}
+
+private func readClientNotice(
+    _ context: StorageContext, key: PebbleLANClientAuthorityStorageKey,
+    notificationID: Data
+) throws -> PebbleLANClientNotificationStorageRow? {
+    try withStatement(context, """
+        SELECT notification_id,session_epoch,request_id,snapshot_id,status,
+               creation_generation,acknowledgement_state,acknowledgement_generation,
+               payload,payload_digest
+        FROM lan_client_notification_inbox_v6
+        WHERE hid=? AND wid=? AND lookup_digest=? AND notification_id=?
+        """) { statement in
+        try bindClientKey(statement, key: key)
+        try statement.bindData(4, notificationID)
+        guard try statement.step() == .row else { return nil }
+        let row = try materializeClientNotice(statement, key: key)
+        guard try statement.step() == .done else { throw PebbleStorageError.schemaIntegrity }
+        return row
+    }
+}
+
+private func readOldestClientNotice(
+    _ context: StorageContext, key: PebbleLANClientAuthorityStorageKey
+) throws -> PebbleLANClientNotificationStorageRow? {
+    try withStatement(context, """
+        SELECT notification_id,session_epoch,request_id,snapshot_id,status,
+               creation_generation,acknowledgement_state,acknowledgement_generation,
+               payload,payload_digest
+        FROM lan_client_notification_inbox_v6
+        WHERE hid=? AND wid=? AND lookup_digest=? AND acknowledgement_state=0
+        ORDER BY creation_generation,notification_id LIMIT 1
+        """) { statement in
+        try bindClientKey(statement, key: key)
+        guard try statement.step() == .row else { return nil }
+        let row = try materializeClientNotice(statement, key: key)
+        guard try statement.step() == .done else { throw PebbleStorageError.schemaIntegrity }
+        return row
+    }
 }
 
 public final class PebbleLegacyCoreStorage {
@@ -3768,21 +6477,75 @@ public final class PebbleLegacyCoreStorage {
 
     public func deleteWorld(id: String) throws -> Int {
         try StorageBounds.validateIdentifier(id, maximumBytes: StorageBounds.manifestText)
-        return try executor.mutate(tables: ["worlds", "chunks", "player", "advancements"]) { context in
-            var changes = 0
-            changes += try executeMutation(context, "DELETE FROM worlds WHERE id=?") {
-                try $0.bindText(1, id)
+        try executor.ensureRPGLocalPreferencesSchema()
+        return try executor.coreWorldDeleteWithRPGAtomic { context in
+            _ = try readRPGLocalAccounting(context)
+            let counts: [Int64] = try withStatement(context, """
+                SELECT
+                  (SELECT count(*) FROM rpg_local_preference_migrations_v1 WHERE world_record_id=?),
+                  (SELECT count(*) FROM rpg_local_preferences_v1 WHERE world_record_id=?),
+                  (SELECT count(*) FROM worlds WHERE id=?),
+                  (SELECT count(*) FROM chunks WHERE world=?),
+                  (SELECT count(*) FROM player WHERE world=?),
+                  (SELECT count(*) FROM advancements WHERE world=?)
+                """) { statement in
+                for index in 1...6 { try statement.bindText(Int32(index), id) }
+                guard try statement.step() == .row else {
+                    throw PebbleStorageError.schemaIntegrity
+                }
+                let values = try (0..<6).map { try statement.int64(Int32($0)) }
+                guard try statement.step() == .done else {
+                    throw PebbleStorageError.schemaIntegrity
+                }
+                return values
             }
-            changes += try executeMutation(context, "DELETE FROM chunks WHERE world=?") {
-                try $0.bindText(1, id)
+            guard counts[0] <= 1, counts[1] <= 1, counts[2] <= 1,
+                  counts[3] <= 1_048_576, counts[4] <= 1, counts[5] <= 1,
+                  counts.allSatisfy({ $0 >= 0 }),
+                  counts[0] <= counts[1], counts[1] <= counts[2] else {
+                throw PebbleStorageError.schemaIntegrity
             }
-            changes += try executeMutation(context, "DELETE FROM player WHERE world=?") {
-                try $0.bindText(1, id)
+            let statements: [(StaticString, Int64)] = [
+                ("DELETE FROM rpg_local_preference_migrations_v1 WHERE world_record_id=?", counts[0]),
+                ("DELETE FROM rpg_local_preferences_v1 WHERE world_record_id=?", counts[1]),
+                ("DELETE FROM worlds WHERE id=?", counts[2]),
+                ("DELETE FROM chunks WHERE world=?", counts[3]),
+                ("DELETE FROM player WHERE world=?", counts[4]),
+                ("DELETE FROM advancements WHERE world=?", counts[5]),
+            ]
+            var observed: [Int] = []
+            for (statementIndex, element) in statements.enumerated() {
+                let (sql, expected) = element
+                let changes = try executeWorldDeleteMutation(
+                    context, statementIndex: statementIndex, sql
+                ) { try $0.bindText(1, id) }
+                guard Int64(changes) == expected else { throw PebbleStorageError.schemaIntegrity }
+                observed.append(changes)
             }
-            changes += try executeMutation(context, "DELETE FROM advancements WHERE world=?") {
-                try $0.bindText(1, id)
+            let postcondition: Int64 = try withStatement(context, """
+                SELECT
+                  (SELECT count(*) FROM rpg_local_preference_migrations_v1 WHERE world_record_id=?)+
+                  (SELECT count(*) FROM rpg_local_preferences_v1 WHERE world_record_id=?)+
+                  (SELECT count(*) FROM worlds WHERE id=?)+
+                  (SELECT count(*) FROM chunks WHERE world=?)+
+                  (SELECT count(*) FROM player WHERE world=?)+
+                  (SELECT count(*) FROM advancements WHERE world=?)
+                """) { statement in
+                for index in 1...6 { try statement.bindText(Int32(index), id) }
+                guard try statement.step() == .row else {
+                    throw PebbleStorageError.schemaIntegrity
+                }
+                let value = try statement.int64(0)
+                guard try statement.step() == .done else {
+                    throw PebbleStorageError.schemaIntegrity
+                }
+                return value
             }
-            return changes
+#if DEBUG
+            try context.executor?.injectActiveRPGLocalFailure(.postcondition)
+#endif
+            guard postcondition == 0 else { throw PebbleStorageError.schemaIntegrity }
+            return observed[2] + observed[3] + observed[4] + observed[5]
         }
     }
 
@@ -3890,7 +6653,10 @@ public final class PebbleLegacyCoreStorage {
     public func getPlayerJSON(world: String) throws -> PebblePlayerJSONStorageRow? {
         try StorageBounds.validateIdentifier(world, maximumBytes: StorageBounds.manifestText)
         return try executor.read(tables: ["player"]) { context in
-            try withStatement(context, "SELECT world,json FROM player WHERE world=?") { statement in
+            try withStatement(context, """
+                SELECT world,json FROM player
+                WHERE CAST(world AS BLOB)=CAST(? AS BLOB) LIMIT 2
+                """) { statement in
                 try statement.bindText(1, world)
                 guard try statement.step() == .row else { return nil }
                 guard let storedWorld = try statement.text(0, maximumBytes: StorageBounds.manifestText),
@@ -4248,6 +7014,116 @@ public final class PebbleLegacyCoreStorage {
     }
 }
 
+private func playerJSONDigestUInt32BE(_ value: UInt32) -> Data {
+    Data([
+        UInt8(truncatingIfNeeded: value >> 24),
+        UInt8(truncatingIfNeeded: value >> 16),
+        UInt8(truncatingIfNeeded: value >> 8),
+        UInt8(truncatingIfNeeded: value),
+    ])
+}
+
+private func playerJSONDigestUInt64BE(_ value: UInt64) -> Data {
+    Data((0..<8).reversed().map {
+        UInt8(truncatingIfNeeded: value >> UInt64($0 * 8))
+    })
+}
+
+private func playerJSONExactDigest(_ row: PebblePlayerJSONStorageRow) -> Data {
+    let worldBytes = Data(row.world.utf8)
+    let jsonBytes = Data(row.json.utf8)
+    var digest = SHA256()
+    digest.update(data: Data("Pebble/player-row/exact-json/v1\0".utf8))
+    digest.update(data: playerJSONDigestUInt32BE(UInt32(worldBytes.count)))
+    digest.update(data: worldBytes)
+    digest.update(data: playerJSONDigestUInt64BE(UInt64(jsonBytes.count)))
+    digest.update(data: jsonBytes)
+    return Data(digest.finalize())
+}
+
+private func readExactPlayerJSONRow(
+    _ context: StorageContext, world: String
+) throws -> PebblePlayerJSONStorageRow? {
+    try withStatement(context, """
+        SELECT world,json FROM player
+        WHERE CAST(world AS BLOB)=CAST(? AS BLOB) LIMIT 2
+        """) { statement in
+        try statement.bindText(1, world)
+        guard try statement.step() == .row else { return nil }
+        guard let storedWorld = try statement.text(
+            0, maximumBytes: StorageBounds.manifestText),
+              let json = try statement.text(1, maximumBytes: StorageBounds.playerJSON) else {
+            throw PebbleStorageError.invalidStorageClass
+        }
+        let row = try PebblePlayerJSONStorageRow(world: storedWorld, json: json)
+        guard row.world == world, try statement.step() == .done else {
+            throw PebbleStorageError.schemaIntegrity
+        }
+        return row
+    }
+}
+
+public extension PebbleLegacyCoreStorage {
+    func compareAndSwapPlayerJSON(
+        expected: PebblePlayerJSONExpectedRowState,
+        candidate: PebblePlayerJSONStorageRow
+    ) throws -> PebblePlayerJSONCompareAndSwapResult {
+        try executor.playerJSONCompareAndSwap { context in
+            let parentExists: Bool = try withStatement(context, """
+                SELECT id FROM worlds
+                WHERE CAST(id AS BLOB)=CAST(? AS BLOB) LIMIT 2
+                """) { statement in
+                    try statement.bindText(1, candidate.world)
+                    guard try statement.step() == .row,
+                          try statement.legacyText(
+                            0, maximumBytes: StorageBounds.manifestText) == candidate.world,
+                          try statement.step() == .done else { return false }
+                    return true
+                }
+            guard parentExists else { return .conflict }
+
+            let existing = try readExactPlayerJSONRow(context, world: candidate.world)
+            switch (expected, existing) {
+            case (.absent, nil):
+                break
+            case let (.present(expectedDigest), existing?):
+                guard storageFixedTimeEqual(
+                    expectedDigest.data, playerJSONExactDigest(existing)) else {
+                    return .conflict
+                }
+            case (.absent, _?), (.present, nil):
+                return .conflict
+            }
+
+            let changes: Int
+            switch expected {
+            case .absent:
+                changes = try executeMutation(
+                    context, "INSERT INTO player(world,json) VALUES(?,?)"
+                ) { statement in
+                    try statement.bindText(1, candidate.world)
+                    try statement.bindText(2, candidate.json)
+                }
+            case .present:
+                changes = try executeMutation(
+                    context, "UPDATE player SET json=? WHERE world=?"
+                ) { statement in
+                    try statement.bindText(1, candidate.json)
+                    try statement.bindText(2, candidate.world)
+                }
+            }
+            guard changes == 1,
+                  let stored = try readExactPlayerJSONRow(context, world: candidate.world),
+                  stored == candidate,
+                  storageFixedTimeEqual(
+                    playerJSONExactDigest(stored), playerJSONExactDigest(candidate)) else {
+                throw PebbleStorageError.schemaIntegrity
+            }
+            return .committed(stored)
+        }
+    }
+}
+
 // MARK: - Private façade helpers
 
 private func legacyCollectionCount(
@@ -4426,6 +7302,55 @@ private func executeMutation(_ context: StorageContext, _ sql: StaticString,
         guard try statement.step() == .done else { throw PebbleStorageError.schemaMismatch }
         return try context.changes()
     }
+}
+
+#if DEBUG
+private func executeRPGLocalTestMutation(
+    _ context: StorageContext, statementIndex: Int, _ sql: StaticString,
+    bind: (StorageStatement) throws -> Void
+) throws -> Int {
+    guard let executor = context.executor else { throw PebbleStorageError.inactiveContext }
+    try executor.injectActiveRPGLocalFailure(.prepare(statement: statementIndex))
+    let statement = try context.prepare(sql)
+    do {
+        try executor.injectActiveRPGLocalFailure(.bind(statement: statementIndex))
+        try bind(statement)
+        try executor.injectActiveRPGLocalFailure(.step(statement: statementIndex))
+        guard try statement.step() == .done else { throw PebbleStorageError.schemaMismatch }
+        try executor.injectActiveRPGLocalFailure(.changes(statement: statementIndex))
+        let changes = try context.changes()
+        try statement.finalize()
+        try executor.injectActiveRPGLocalFailure(.finalize(statement: statementIndex))
+        return changes
+    } catch {
+        if statement.pointer != nil { try? statement.finalize() }
+        throw error
+    }
+}
+#endif
+
+private func executeLegacyMaterializationMutation(
+    _ context: StorageContext, statementIndex: Int, _ sql: StaticString,
+    bind: (StorageStatement) throws -> Void
+) throws -> Int {
+#if DEBUG
+    try executeRPGLocalTestMutation(
+        context, statementIndex: statementIndex, sql, bind: bind)
+#else
+    try executeMutation(context, sql, bind: bind)
+#endif
+}
+
+private func executeWorldDeleteMutation(
+    _ context: StorageContext, statementIndex: Int, _ sql: StaticString,
+    bind: (StorageStatement) throws -> Void
+) throws -> Int {
+#if DEBUG
+    try executeRPGLocalTestMutation(
+        context, statementIndex: statementIndex, sql, bind: bind)
+#else
+    try executeMutation(context, sql, bind: bind)
+#endif
 }
 
 private func checkCollection(_ context: StorageContext, sql: StaticString,

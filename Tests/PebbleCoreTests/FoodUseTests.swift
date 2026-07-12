@@ -17,10 +17,7 @@ final class FoodUseTests: XCTestCase {
     }
 
     private func makeTempDB(_ name: String = UUID().uuidString) throws -> SaveDB {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pebble-food-tests-\(name)")
-        try? FileManager.default.removeItem(at: dir)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return SaveDB(databaseURL: dir.appendingPathComponent("pebble.db"), migrateLegacy: false)
+        try PersistenceTestSupport.makeDatabase(owner: self, label: "food-\(name)")
     }
 
     func testCookedChickenEatsFromSelectedHotbarSlot() {

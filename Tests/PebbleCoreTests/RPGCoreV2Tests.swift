@@ -403,7 +403,6 @@ final class RPGCoreV2Tests: XCTestCase {
         var raw = makeState(pathID: "arcanist", starter: "spell_formula")
         raw.preparedSpellIDs = Array(repeating: sixtyFour + "x", count: 100)
         raw.selectedPreparedActionID = "spell:\(sixtyFour)"
-        raw.actionQuickSlots = ["spell:\(sixtyFour)", "spell:\(sixtyFour)x"]
         raw.activeCooldowns = [RPGCooldown(id: sixtyFour + "x", remainingTicks: 10)]
         raw.activeUpkeeps = [RPGUpkeep(spellID: "blur", ownerSequence: 1,
                                        remainingTicks: 10, costPerSecond: .nan)]
@@ -411,7 +410,7 @@ final class RPGCoreV2Tests: XCTestCase {
         let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         XCTAssertEqual((object["preparedSpellIDs"] as? [Any])?.count, 0)
         XCTAssertEqual(object["selectedPreparedActionID"] as? String, "spell:\(sixtyFour)")
-        XCTAssertEqual((object["actionQuickSlots"] as? [Any])?.count, 2)
+        XCTAssertNil(object["actionQuickSlots"])
         XCTAssertEqual((object["activeCooldowns"] as? [Any])?.count, 0)
         XCTAssertEqual((object["activeUpkeeps"] as? [Any])?.count, 0)
 
@@ -807,7 +806,7 @@ final class RPGCoreV2Tests: XCTestCase {
         XCTAssertEqual(disabledXP.maxHealth, 20)
         XCTAssertEqual(disabledXP.health, 20)
 
-        let game = GameCore()
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "rpg-disabled-api")
         game.createWorld(name: "Disabled RPG API", seedText: "105", mode: GameMode.survival,
                          difficulty: 2)
         game.player.rpg = mastered(pathID: "arcanist", starter: "spell_formula")
@@ -1192,7 +1191,7 @@ final class RPGCoreV2Tests: XCTestCase {
     }
 
     func testGameCoreGlobalClockDrivesAuthorityButNeverSpeculatesOnLANClient() {
-        let host = GameCore()
+        let host = PersistenceTestSupport.makeGame(owner: self, label: "rpg-clock-host")
         host.createWorld(name: "RPG Clock Host", seedText: "107",
                          mode: GameMode.survival, difficulty: 2)
         host.player.rpg = makeState(pathID: "warden", starter: "guard_stance")
@@ -1215,7 +1214,7 @@ final class RPGCoreV2Tests: XCTestCase {
         XCTAssertEqual(host.player.rpg, stateAtClockCeiling,
                        "cooldowns, fatigue, and upkeeps must freeze when the global clock cannot advance")
 
-        let client = GameCore()
+        let client = PersistenceTestSupport.makeGame(owner: self, label: "rpg-clock-client")
         client.enterLANClientWorld(LANWorldSummary(
             worldID: "clock-host", worldName: "Clock Host", seed: 108,
             gameMode: GameMode.survival, difficulty: 2,
@@ -1231,7 +1230,7 @@ final class RPGCoreV2Tests: XCTestCase {
     }
 
     func testClockCeilingCannotReplayRangerDelverOrCampcraftGameplayHooks() {
-        let game = GameCore()
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "rpg-clock-ceiling")
         game.createWorld(name: "RPG Gameplay Clock Ceiling", seedText: "112",
                          mode: GameMode.survival, difficulty: 2)
         let world = game.world
@@ -1282,7 +1281,7 @@ final class RPGCoreV2Tests: XCTestCase {
     }
 
     func testRPGGameRuleTransitionHookIsSynchronousEdgeTriggeredAndPreMutation() {
-        let game = GameCore()
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "rpg-rule-transition")
         game.createWorld(name: "RPG Rule Transition Hook", seedText: "113",
                          mode: GameMode.survival, difficulty: 2)
         var callbackValues: [Bool] = []
@@ -1321,7 +1320,7 @@ final class RPGCoreV2Tests: XCTestCase {
     }
 
     func testLANHostMenuKeepsGlobalClockRunningWhilePlayerInputRemainsBlocked() throws {
-        let game = GameCore()
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "rpg-menu-host")
         game.createWorld(name: "RPG Clock Menu Host", seedText: "110",
                          mode: GameMode.survival, difficulty: 2)
         let menuHost = RPGClockMenuHost()
@@ -1358,7 +1357,7 @@ final class RPGCoreV2Tests: XCTestCase {
     }
 
     func testSyntheticTickZeroPlayerStateBatchCannotRewindOrPoisonNewerClientClock() {
-        let game = GameCore()
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "rpg-synthetic-tick")
         game.enterLANClientWorld(LANWorldSummary(
             worldID: "clock-batch-host", worldName: "Clock Batch Host", seed: 111,
             gameMode: GameMode.survival, difficulty: 2,
@@ -1417,7 +1416,7 @@ final class RPGCoreV2Tests: XCTestCase {
     }
 
     func testGlobalClockExpiresGuardedEffectInInactiveDimension() {
-        let game = GameCore()
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "rpg-cross-dimension")
         game.createWorld(name: "RPG Cross-Dimension Clock", seedText: "109",
                          mode: GameMode.survival, difficulty: 2)
         let nether = game.worlds[.nether]!

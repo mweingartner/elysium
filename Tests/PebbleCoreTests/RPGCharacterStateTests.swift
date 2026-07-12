@@ -31,9 +31,9 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertEqual(state.specializationBranchID, "arcanist_elementalist")
         XCTAssertEqual(state.knownSpellIDs, ["ignite"])
         XCTAssertEqual(state.preparedSpellIDs, ["ignite"])
-        XCTAssertEqual(state.selectedPreparedActionID, rpgPreparedActionToken(kind: .spell, id: "ignite"))
-        XCTAssertEqual(state.actionQuickSlots[0], rpgPreparedActionToken(kind: .spell, id: "ignite"))
-        XCTAssertEqual(state.actionQuickSlots.count, RPG_ACTION_QUICK_SLOT_COUNT)
+        XCTAssertNil(state.selectedPreparedActionID)
+        XCTAssertEqual(rpgDefaultQuickSlotPreferences(for: state).tokens[0],
+                       rpgPreparedActionToken(kind: .spell, id: "ignite"))
         XCTAssertEqual(state.fatigue, rpgDerivedStats(state).maxFatigue, accuracy: 0.0001)
     }
 
@@ -72,12 +72,6 @@ final class RPGCharacterStateTests: XCTestCase {
             preparedSkillIDs: ["not_real", "guard_stance", "spell_formula"],
             knownSpellIDs: ["ignite", "mend_wounds", "not_real"],
             preparedSpellIDs: ["not_real", "mend_wounds", "ignite"],
-            actionQuickSlots: [
-                rpgPreparedActionToken(kind: .spell, id: "ignite"),
-                rpgPreparedActionToken(kind: .spell, id: "ignite"),
-                rpgPreparedActionToken(kind: .skill, id: "guard_stance"),
-                rpgPreparedActionToken(kind: .spell, id: "mend_wounds"),
-            ],
             fatigue: .infinity,
             actionSequence: -5,
             activeCooldowns: [
@@ -107,9 +101,7 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertFalse(repaired.knownSpellIDs.contains("blur"))
         XCTAssertFalse(repaired.knownSpellIDs.contains("mend_wounds"))
         XCTAssertEqual(repaired.preparedSpellIDs, ["ignite"])
-        XCTAssertEqual(repaired.selectedPreparedActionID, rpgPreparedActionToken(kind: .spell, id: "ignite"))
-        XCTAssertEqual(repaired.actionQuickSlots[0], rpgPreparedActionToken(kind: .spell, id: "ignite"))
-        XCTAssertTrue(repaired.actionQuickSlots.dropFirst().allSatisfy { $0 == nil })
+        XCTAssertNil(repaired.selectedPreparedActionID)
         XCTAssertGreaterThanOrEqual(repaired.fatigue, 0)
         XCTAssertLessThanOrEqual(repaired.fatigue, rpgDerivedStats(repaired).maxFatigue)
         XCTAssertEqual(repaired.actionSequence, 0)
@@ -146,12 +138,12 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertEqual(loaded.rpg.skillRanks["guard_stance"], 1)
         XCTAssertEqual(loaded.rpg.kitGrantVersion, RPG_STARTER_KIT_VERSION)
         XCTAssertEqual(loaded.rpg.kitGrantID, rpgStarterKitGrantID(pathID: "warden", starterSkillID: "guard_stance"))
-        XCTAssertEqual(loaded.rpg.actionQuickSlots.count, RPG_ACTION_QUICK_SLOT_COUNT)
+        XCTAssertNil((saved["rpg"] as? [String: Any])?["actionQuickSlots"])
         XCTAssertEqual(loaded.maxHealth, rpgDerivedStats(loaded.rpg).maxHealth)
         XCTAssertEqual(loaded.health, loaded.maxHealth)
     }
 
-    func testActionQuickSlotsAssignClearAndPersistThroughPlayerSave() {
+    func testLegacyActionQuickSlotsRemainInPlayerSaveUntilReceipt() throws {
         let world = World(dim: .overworld, seed: 4321)
         let player = Player(world: world)
         XCTAssertNil(player.createRPGCharacter(RPGCreationDraft(
@@ -161,16 +153,39 @@ final class RPGCharacterStateTests: XCTestCase {
             starterSpellIDs: ["ignite"]
         )))
 
-        XCTAssertNil(rpgAssignPreparedActionToQuickSlot(kind: .spell, id: "ignite", slot: 4, in: &player.rpg))
-        rpgClearActionQuickSlot(0, in: &player.rpg)
-        let saved = player.save()
-
         let loaded = Player(world: world)
-        loaded.load(saved)
+        var legacy = player.save()
+        var legacyRPG = try XCTUnwrap(legacy["rpg"] as? [String: Any])
+        legacyRPG["actionQuickSlots"] = [NSNull(), NSNull(), NSNull(), NSNull(),
+                                           "spell:ignite"]
+        legacy["rpg"] = legacyRPG
+        loaded.load(legacy)
+        let retained = try XCTUnwrap(loaded.rpgLegacyQuickSlotEnvelope)
+        XCTAssertEqual(retained.preferences.tokens[4], "spell:ignite")
+        XCTAssertNotNil((loaded.save()["rpg"] as? [String: Any])?["actionQuickSlots"])
+        XCTAssertTrue(loaded.markRPGLegacyQuickSlotsOmittable(
+            envelopeVersion: retained.envelopeVersion, sourceDigest: retained.sourceDigest))
+        XCTAssertNil((loaded.save()["rpg"] as? [String: Any])?["actionQuickSlots"])
+    }
 
-        XCTAssertNil(loaded.rpg.actionQuickSlots[0])
-        XCTAssertEqual(loaded.rpg.actionQuickSlots[4], rpgPreparedActionToken(kind: .spell, id: "ignite"))
-        XCTAssertEqual(rpgActionQuickSlotIndex(for: rpgPreparedActionToken(kind: .spell, id: "ignite"), in: loaded.rpg), 4)
+    func testDetachedOmissionCandidateDoesNotMutateLiveEnvelopeOrOrdinarySave() throws {
+        let world = World(dim: .overworld, seed: 4_322)
+        let source = Player(world: world)
+        source.rpg = try rpgCreateCharacter(RPGCreationDraft(
+            pathID: "arcanist", attributes: .defaultCreation,
+            starterSkillID: "spell_formula", starterSpellIDs: ["ignite"])).get()
+        var legacy = source.save()
+        var rpg = try XCTUnwrap(legacy["rpg"] as? [String: Any])
+        rpg["actionQuickSlots"] = ["spell:ignite"]
+        legacy["rpg"] = rpg
+        let loaded = Player(world: world); loaded.load(legacy)
+        let envelopeBefore = try XCTUnwrap(loaded.rpgLegacyQuickSlotEnvelope)
+
+        let candidate = loaded.save(omitLegacyQuickSlots: true)
+        XCTAssertNil((candidate["rpg"] as? [String: Any])?["actionQuickSlots"])
+        XCTAssertNotNil((loaded.save()["rpg"] as? [String: Any])?["actionQuickSlots"])
+        XCTAssertEqual(loaded.rpgLegacyQuickSlotEnvelope, envelopeBefore)
+        XCTAssertFalse(try XCTUnwrap(loaded.rpgLegacyQuickSlotEnvelope).omissionEligible)
     }
 
     func testLegacyRPGStateDecodesWithoutSelectedPreparedAction() throws {
@@ -198,9 +213,7 @@ final class RPGCharacterStateTests: XCTestCase {
         let repaired = repairRPGCharacterState(decoded)
 
         XCTAssertEqual(repaired.selectedPreparedSpellID, "ignite")
-        XCTAssertEqual(repaired.selectedPreparedActionID, rpgPreparedActionToken(kind: .spell, id: "ignite"))
-        XCTAssertEqual(repaired.actionQuickSlots[0], rpgPreparedActionToken(kind: .spell, id: "ignite"))
-        XCTAssertEqual(repaired.actionQuickSlots.count, RPG_ACTION_QUICK_SLOT_COUNT)
+        XCTAssertNil(repaired.selectedPreparedActionID)
         XCTAssertEqual(repaired.kitGrantVersion, 0)
         XCTAssertNil(repaired.kitGrantID)
     }

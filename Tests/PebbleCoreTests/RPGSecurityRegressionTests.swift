@@ -419,10 +419,7 @@ final class RPGSecurityRegressionTests: XCTestCase {
     }
 
     private func makeTempDB() throws -> SaveDB {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("pebble-rpg-security-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return SaveDB(databaseURL: directory.appendingPathComponent("pebble.db"), migrateLegacy: false)
+        try PersistenceTestSupport.makeDatabase(owner: self, label: "rpg-security")
     }
 
     private func configureRitualist(_ player: Player, preparedSpell: String) {

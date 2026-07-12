@@ -1,0 +1,12 @@
+{
+  "formatVersion": 2,
+  "inventory": "compiler -dump-parse canonical AST; externally reachable USRs are frozen by pebble-storage-api-v1.json",
+  "owners": {
+    "Sources/PebbleCore/Game/LegacySaveMigration.swift": {
+      "compilerParseASTSHA256": "aa1539d1a2361fa73c89ededa6e1756976ea351a593f251aebb67ec8795166f0"
+    },
+    "Sources/PebbleCore/Game/Saves.swift": {
+      "compilerParseASTSHA256": "e195fc67b22ecb26e7b27ae397caea418b8bc3745e85399d3ee734f71cc4fea7"
+    }
+  }
+}

@@ -8,7 +8,7 @@ final class LANClientRoutingTests: XCTestCase {
     // MARK: - fixtures
 
     private func makeLANClientGame() -> GameCore {
-        let game = GameCore()
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "lan-client-routing")
         let summary = LANWorldSummary(
             worldID: "host world",
             worldName: "Host LAN",
@@ -321,7 +321,7 @@ final class LANClientRoutingTests: XCTestCase {
     // MARK: - streaming: section-granular in-flight expiry
 
     func testUnansweredSectionRequestBecomesRequestableAgainAfterExpiry() {
-        let game = GameCore()
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "lan-request-expiry")
         let summary = LANWorldSummary(
             worldID: "host world", worldName: "Host LAN", seed: 7,
             gameMode: GameMode.survival, difficulty: 1,
@@ -363,8 +363,7 @@ final class LANClientRoutingTests: XCTestCase {
     // MARK: - connection loss
 
     func testSaveLANClientResumeIsNoOpAfterConnectionLost() {
-        let db = SaveDB(databaseURL: FileManager.default.temporaryDirectory
-            .appendingPathComponent("pebble-lan-routing-\(UUID().uuidString).db"), migrateLegacy: false)
+        let db = try! PersistenceTestSupport.makeDatabase(owner: self, label: "lan-routing-loss")
         let game = GameCore(db: db)
         let summary = LANWorldSummary(
             worldID: "host world", worldName: "Host LAN", seed: 11,
@@ -387,5 +386,31 @@ final class LANClientRoutingTests: XCTestCase {
         second.enterLANClientWorld(summary)
         XCTAssertEqual(second.player.x, 1, accuracy: 0.001)
         XCTAssertEqual(second.player.z, 1, accuracy: 0.001)
+    }
+
+    // MARK: - protocol-5 RPG zero fallback
+
+    func testProtocol5RPGSubmissionDeniesBeforeLegacyIntentOrLocalMutation() {
+        let game = makeLANClientGame()
+        XCTAssertNil(game.player.createRPGCharacter(RPGCreationDraft(
+            pathID: "arcanist", attributes: .defaultCreation,
+            starterSkillID: "spell_formula", starterSpellIDs: []
+        )))
+        let beforeRPG = game.player.rpg
+        let beforeInventory = game.player.inventory
+        var intents: [LANRPGIntent] = []
+        game.lanRPGIntentHandler = { intents.append($0) }
+
+        _ = game.requestRPGLearnSkill("spell_formula")
+        _ = game.requestRPGAssignPreparedActionToQuickSlot(kind: .skill,
+                                                            id: "spell_formula", slot: 0)
+        _ = game.requestRPGUseSelectedAction()
+
+        XCTAssertEqual(game.rpgAuthorityPresentation, .unavailable)
+        XCTAssertNil(game.rpgLocalPreferenceScope)
+        XCTAssertFalse(game.rpgLocalPreferenceWritable)
+        XCTAssertEqual(game.player.rpg, beforeRPG)
+        XCTAssertEqual(game.player.inventory, beforeInventory)
+        XCTAssertTrue(intents.isEmpty)
     }
 }
