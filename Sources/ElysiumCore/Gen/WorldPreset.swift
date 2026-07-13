@@ -21,7 +21,7 @@ public enum WorldPreset: String, CaseIterable, Equatable {
         case .flat: return "Superflat"
         case .largeBiomes: return "Large Biomes"
         case .amplified: return "Amplified"
-        case .moderateHillsResourceRich: return "Moderate Hills - Resource Rich"
+        case .moderateHillsResourceRich: return "Rich Resources"
         case .singleBiomeSurface: return "Single Biome"
         case .debugAllBlockStates: return "Debug Mode"
         }

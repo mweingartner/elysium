@@ -5,6 +5,23 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- The Create New World screen now has a **Character Classes** toggle (On by
+  default). Turn it Off to play a classless world with the RPG progression
+  system disabled — the choice is stored per world (the existing `rpgClasses`
+  game rule) and survives save/reload, and it propagates to LAN guests. With it
+  On, the character sheet is reachable from the Character button in the
+  inventory as before.
+- The custom world type "Moderate Hills - Resource Rich" is now simply
+  **"Rich Resources"** in the Create New World screen. Only the display label
+  changed; the on-disk/wire preset id is unchanged, so existing worlds are
+  unaffected.
+- Entering a world no longer force-opens the RPG character sheet as an overlay
+  that could only be dismissed with Escape. You now land directly in the world;
+  when classes are enabled and you have not yet chosen one, a quiet one-line
+  chat hint points you to the Character button instead.
+- Holding a movement (or any) key in-world no longer triggers a stream of macOS
+  system beeps. Held-key OS repeats are now consumed in-world instead of
+  falling through to AppKit as unhandled key events.
 - Fixed mobs dropping multiple loot/XP sets and slimes/creepers/zombies
   misbehaving when damaged during the death animation. A dying entity can no
   longer be re-hurt or re-killed, which also stops the lava/fire re-kill loop

@@ -1354,18 +1354,25 @@ final class WorldCreateScreen: Screen {
         let seedY: Double
         let modeY: Double
         let difficultyY: Double
+        let classesY: Double
         let worldTypeY: Double
         let biomeY: Double
 
         init(uiHeight: Double) {
             self.uiHeight = uiHeight
-            compact = uiHeight < 260
-            buttonGap = compact ? 22.0 : 24.0
-            nameY = compact ? 34 : 40
-            seedY = compact ? 64 : 76
-            modeY = compact ? 90 : 102
+            // The stack is Name, Seed, Game Mode, Difficulty, Character Classes, World Type,
+            // (Biome), Dungeons, Create/Cancel. With the Character Classes row added, the
+            // roomy 24px-gap spacing overflows the Create button below the canonical minimum
+            // height (~240) once the Biome row is also shown, so anything under 300 uses the
+            // tighter compact spacing that keeps the action row fully on-screen at height 240.
+            compact = uiHeight < 300
+            buttonGap = compact ? 20.0 : 24.0
+            nameY = compact ? 30 : 40
+            seedY = compact ? 56 : 76
+            modeY = compact ? 80 : 102
             difficultyY = modeY + buttonGap
-            worldTypeY = difficultyY + buttonGap
+            classesY = difficultyY + buttonGap
+            worldTypeY = classesY + buttonGap
             biomeY = worldTypeY + buttonGap
         }
 
@@ -1394,7 +1401,9 @@ final class WorldCreateScreen: Screen {
     var worldPreset = WorldPreset.normal
     var singleBiome = Biome.plains
     var dungeonDensity = DungeonDensity.normal
+    var rpgClasses = true
     var creating = false
+    private var classesBtn: Button!
     private var worldTypeBtn: Button!
     private var biomeBtn: Button!
     private var dungeonBtn: Button!
@@ -1431,6 +1440,13 @@ final class WorldCreateScreen: Screen {
         }
         buttons.append(modeBtn)
         buttons.append(diffBtn)
+        classesBtn = Button(cx - 100, layout.classesY, 200, 20, "", {})
+        classesBtn.onClick = { [weak self] in
+            guard let self else { return }
+            self.rpgClasses.toggle()
+            self.updateWorldTypeLabels()
+        }
+        buttons.append(classesBtn)
         worldTypeBtn = Button(cx - 100, layout.worldTypeY, 200, 20, "", {})
         worldTypeBtn.onClick = { [weak self, weak ui] in
             guard let self, let ui else { return }
@@ -1467,7 +1483,8 @@ final class WorldCreateScreen: Screen {
                     seedText: self.seedField.text, mode: self.mode,
                     difficulty: self.difficulty, worldPreset: self.worldPreset,
                     singleBiome: self.singleBiome,
-                    dungeonDensity: self.dungeonDensity)
+                    dungeonDensity: self.dungeonDensity,
+                    rpgClassesEnabled: self.rpgClasses)
             }
             self.startPendingLANHost(game)
             ui.open(LoadingScreen(), game)
@@ -1497,6 +1514,7 @@ final class WorldCreateScreen: Screen {
     }
 
     private func updateWorldTypeLabels() {
+        classesBtn?.label = "Character Classes: \(rpgClasses ? "On" : "Off")"
         worldTypeBtn?.label = "World Type: \(worldPreset.displayName)"
         biomeBtn?.label = "Biome: \(singleBiomeDisplayName(singleBiome))"
         let showsBiome = worldPreset == .singleBiomeSurface

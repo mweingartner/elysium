@@ -23,6 +23,24 @@ final class WorldPresetTests: XCTestCase {
         XCTAssertEqual(normalizedWorldPreset("not-real"), .normal)
     }
 
+    func testModerateHillsResourceRichDisplayNameIsRichResources() {
+        // Rebrand: the create-world button used to read "Moderate Hills - Resource Rich",
+        // which overflowed the fixed-width preset button. The on-disk/wire ID (used by
+        // normalizedWorldPreset above) intentionally keeps the old wording; only the
+        // user-facing label changed.
+        XCTAssertEqual(WorldPreset.moderateHillsResourceRich.displayName, "Rich Resources")
+        XCTAssertEqual(WorldPreset.moderateHillsResourceRich.rawValue,
+                       "elysium:moderate_hills_resource_rich")
+    }
+
+    func testEveryWorldPresetHasANonEmptyDisplayName() {
+        // Guards against a future case being added to the enum without a matching
+        // displayName arm silently falling through to an empty/placeholder string.
+        for preset in WorldPreset.allCases {
+            XCTAssertFalse(preset.displayName.isEmpty, "\(preset) has no display name")
+        }
+    }
+
     func testDungeonDensityAliasesNormalizeToKnownLevels() {
         XCTAssertEqual(normalizedDungeonDensity(nil as Int?), .normal)
         XCTAssertEqual(normalizedDungeonDensity(1), .none)

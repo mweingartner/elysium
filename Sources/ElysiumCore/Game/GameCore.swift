@@ -1187,7 +1187,8 @@ public final class GameCore {
     @MainActor
     public func createWorld(name: String, seedText: String, mode: Int, difficulty: Int,
                             worldPreset: WorldPreset = .normal, singleBiome: Biome = .plains,
-                            dungeonDensity: DungeonDensity = .normal) {
+                            dungeonDensity: DungeonDensity = .normal,
+                            rpgClassesEnabled: Bool = true) {
         guard savedWorldMaintenanceAllowsTransitions() else { return }
         lanClientResumeStorageKey = nil
         lanClientWorldSummary = nil
@@ -1209,7 +1210,7 @@ public final class GameCore {
         var rec = WorldRecord(id: id, name: name, seed: seed, gameMode: mode, difficulty: difficulty,
                               worldPreset: worldPreset, singleBiome: singleBiome,
                               dungeonDensity: dungeonDensity)
-        rec.gameRules[RPG_CLASSES_GAME_RULE] = 1
+        rec.gameRules[RPG_CLASSES_GAME_RULE] = rpgClassesEnabled ? 1 : 0
         let spawn = defaultWorldSpawn(seed: seed, settings: rec.generationSettings)
         rec.spawnX = spawn.x
         rec.spawnY = spawn.y
@@ -1977,9 +1978,13 @@ public final class GameCore {
         ticksSinceSave = 0
         host?.closeAllScreens()
         host?.showActionBar("§e\(rec.name)§r — seed \(rec.seed)", 60)
+        // The player lands directly in the world. When RPG classes are enabled the character
+        // sheet stays one click away via the Character button; it is no longer force-opened on
+        // entry (that overlay only dismissed on Escape and read as a stray screen). A quiet,
+        // non-modal chat nudge replaces the ambush so a first-time player still knows the
+        // progression system is waiting; it stops appearing once a class is chosen.
         if player.rpgClassesEnabled(), !player.rpg.created {
-            host?.openScreen("rpg", nil)
-            host?.releasePointer()
+            host?.pushChat("§7Open your inventory and pick a class under §fCharacter§7 to begin progression.")
         }
         // loaded in deep underground? say so loudly instead of looking like a render bug
         let bx = ifloor(player.x), bz = ifloor(player.z)

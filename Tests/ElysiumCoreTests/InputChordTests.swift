@@ -166,6 +166,48 @@ final class InputChordTests: XCTestCase {
             .unhandledForMainMenu)
     }
 
+    func testInWorldHeldKeyRepeatsAreConsumedNotUnhandled() throws {
+        // Regression: holding a movement (or any) key in-world used to fall through to
+        // `.unhandled`, which the AppKit adapter forwards to `super.keyDown`, making macOS emit
+        // one system beep per OS key-repeat. In-world repeats must be swallowed instead.
+        let forward = try XCTUnwrap(ElysiumTerminalKey(rawValue: "KeyW"))
+        let contexts: Set<ElysiumBindingContext> = [.appHUD, .rpgWorldAction, .hotbar, .movement]
+        var router = RPGPureInputRouter()
+
+        let press = ElysiumKeyEvent(terminal: forward, routingSerial: 401)
+        let pressFingerprint = AppKeyEventFingerprint(
+            eventNumber: 0, keyCode: 13, timestampMicroseconds: 0,
+            windowNumber: 1, modifiers: [], isRepeat: false, origin: .physical)
+        XCTAssertEqual(
+            router.route(event: press, fingerprint: pressFingerprint, nowMilliseconds: 1,
+                         screenPresent: false, allowedContexts: contexts,
+                         bindings: rpgDefaultChordBindings()),
+            .resolved(.binding(.forward)))
+
+        let repeated = ElysiumKeyEvent(terminal: forward, isRepeat: true, routingSerial: 402)
+        let repeatFingerprint = AppKeyEventFingerprint(
+            eventNumber: 0, keyCode: 13, timestampMicroseconds: 1,
+            windowNumber: 1, modifiers: [], isRepeat: true, origin: .physical)
+        XCTAssertEqual(
+            router.route(event: repeated, fingerprint: repeatFingerprint, nowMilliseconds: 2,
+                         screenPresent: false, allowedContexts: contexts,
+                         bindings: rpgDefaultChordBindings()),
+            .consumedRepeat)
+
+        // Even a key with no in-world binding must not beep on repeat once held.
+        let unboundRepeat = ElysiumKeyEvent(
+            terminal: try XCTUnwrap(ElysiumTerminalKey(rawValue: "KeyP")),
+            isRepeat: true, routingSerial: 403)
+        let unboundFingerprint = AppKeyEventFingerprint(
+            eventNumber: 0, keyCode: 35, timestampMicroseconds: 2,
+            windowNumber: 1, modifiers: [], isRepeat: true, origin: .physical)
+        XCTAssertEqual(
+            router.route(event: unboundRepeat, fingerprint: unboundFingerprint, nowMilliseconds: 3,
+                         screenPresent: false, allowedContexts: contexts,
+                         bindings: rpgDefaultChordBindings()),
+            .consumedRepeat)
+    }
+
     func testNewInputSessionAcceptsReusedSerialOnlyAfterRouterLedgerReplacement() throws {
         let terminal = try XCTUnwrap(ElysiumTerminalKey(rawValue: "ArrowRight"))
         let event = ElysiumKeyEvent(terminal: terminal, routingSerial: 1)

@@ -577,6 +577,14 @@ public struct RPGPureInputRouter: Equatable {
             remember(event.deliveryIdentity)
             return .resolved(independentCommand)
         }
+        // A held key in-world emits a stream of OS key-repeat events. Movement, hotbar, and
+        // world actions all act on the press/release edge, so a repeat carries no new intent.
+        // Swallow it here rather than returning `.unhandled` — otherwise the AppKit responder
+        // chain surfaces each repeat as an unhandled-key system beep for as long as the key is held.
+        if event.isRepeat {
+            remember(event.deliveryIdentity)
+            return .consumedRepeat
+        }
         return .unhandled
     }
 
