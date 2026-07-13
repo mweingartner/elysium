@@ -1,9 +1,9 @@
-# Pebble LAN Multiplayer Plan
+# Elysium LAN Multiplayer Plan
 
 Status: implemented LAN baseline, the first host-authoritative replication
-layer, and the core remote-player gameplay orchestration layer. Pebble 1.1.0
+layer, and the core remote-player gameplay orchestration layer. Elysium 1.1.0
 now ships Multiplayer/Open to LAN UI, Bonjour browse/advertise for
-`_pebble-lan._tcp`, one-button Join World UX with manual Direct Connect
+`_elysium-lan._tcp`, one-button Join World UX with manual Direct Connect
 fallback by host/port/join-code, bounded `PBLN`
 protocol frames, join-code handshakes, peer status, LAN chat, source/binary
 security allowlists, Info.plist local-network privacy declarations, core
@@ -35,14 +35,14 @@ installed-app soak around combat, death/respawn, simultaneous-player contention,
 and long-session reconnects.
 
 Two-Mac installed-app soak is now scripted through
-`scripts/live-lan-test.sh`. The harness launches the local `/Applications/Pebble.app`
-as a host, launches Neo's `/Applications/Pebble.app` as a title-screen Direct
-Connect client through `PEBBLE_LAN_AUTOJOIN`, builds a deterministic spawn rig
-through `PEBBLE_LAN_PROBE=host-rig`, drives the Neo client's normal
-right-click path against an oak door through `PEBBLE_LAN_PROBE=client-door`,
+`scripts/live-lan-test.sh`. The harness launches the local `/Applications/Elysium.app`
+as a host, launches Neo's `/Applications/Elysium.app` as a title-screen Direct
+Connect client through `ELYSIUM_LAN_AUTOJOIN`, builds a deterministic spawn rig
+through `ELYSIUM_LAN_PROBE=host-rig`, drives the Neo client's normal
+right-click path against an oak door through `ELYSIUM_LAN_PROBE=client-door`,
 and asserts from both app logs that the host accepted the remote use intent,
 the client received the door delta, and a chest item snapshot reached the
-client mirror. It then relaunches Neo with `PEBBLE_LAN_PROBE=client-resume` to
+client mirror. It then relaunches Neo with `ELYSIUM_LAN_PROBE=client-resume` to
 verify that the guest returns to the host-world position saved on exit.
 
 ## Sources
@@ -63,7 +63,7 @@ verify that the guest returns to the host-world position saved on exit.
 Support Mac-to-Mac multiplayer on the same local network without accounts,
 internet relay, telemetry, NAT traversal, or cloud services. The first shipped
 release makes it possible for one player to host a LAN session and for other
-local players to discover it or Direct Connect to it from Pebble's title-screen
+local players to discover it or Direct Connect to it from Elysium's title-screen
 Multiplayer UI or `/lan ...` command line.
 
 Initial target:
@@ -71,7 +71,7 @@ Initial target:
 - 2-8 players on one LAN.
 - One host-owned world; the host remains the authority for all simulation and
   persistence.
-- Bonjour discovery using a Pebble-specific TCP service type.
+- Bonjour discovery using a Elysium-specific TCP service type.
 - Join-code approval before a client can enter the world.
 - Shared chat and host-authoritative state replication for chunk sections,
   block changes, player state, complete loaded-entity snapshots, dropped-item
@@ -97,17 +97,17 @@ Non-goals for the first LAN release:
 
 ## Current Architecture Constraints
 
-PebbleCore is deterministic and headless. It owns `GameCore`, `GameWorld`,
+ElysiumCore is deterministic and headless. It owns `GameCore`, `GameWorld`,
 entity simulation, interaction systems, saves, templates, crafting, and command
 execution. The app target owns AppKit, Metal, UI, audio, and the only current
 network surface: loopback-only Ollama.
 
 LAN multiplayer must preserve this split:
 
-- `PebbleCore` may define protocol data, message validation, replication state,
+- `ElysiumCore` may define protocol data, message validation, replication state,
   and deterministic host/client session logic.
-- `PebbleCore` must not import AppKit, Network.framework, or socket APIs.
-- `Sources/Pebble` owns Bonjour discovery, `NWListener`, `NWBrowser`, and
+- `ElysiumCore` must not import AppKit, Network.framework, or socket APIs.
+- `Sources/Elysium` owns Bonjour discovery, `NWListener`, `NWBrowser`, and
   `NWConnection`.
 - The host's `GameCore` remains the only process that mutates world state.
 - Clients send intents, never authoritative block/entity/world writes.
@@ -118,7 +118,7 @@ LAN multiplayer must preserve this split:
 
 Added core-only networking model files:
 
-- `Sources/PebbleCore/Net/LANMultiplayer.swift`: protocol version, service
+- `Sources/ElysiumCore/Net/LANMultiplayer.swift`: protocol version, service
   type, message type ids, caps, frame codec, malformed-frame errors, sanitized
   inputs, and `Codable` payload models for hello, accept/reject, player state,
   player input, block/container/template intents, chat, world summaries, ping,
@@ -126,14 +126,14 @@ Added core-only networking model files:
   replication batches. Player state now carries bounded dimension/death
   metadata with legacy decode defaults, and gameplay events carry permission,
   death/respawn, dimension, and reconnect notifications.
-- `Sources/PebbleCore/Net/LANReplication.swift`: host-authoritative peer
+- `Sources/ElysiumCore/Net/LANReplication.swift`: host-authoritative peer
   session state, reconnect-preserved peer records, deterministic block-change
   log, permission-gated host block/container/crafting/template/command/AI
   validation, object-template copy/place/undo execution, chunk-section
   snapshot encode/apply helpers, world-state snapshots, entity snapshots, player
   inventory snapshots, item-bearing block-entity snapshots, client-side
   replicated mirror state, and bounded apply reports.
-- `Sources/PebbleCore/Net/LANGameplayOrchestration.swift`: transient remote
+- `Sources/ElysiumCore/Net/LANGameplayOrchestration.swift`: transient remote
   player entities, remote-player apply/remove helpers, remote player yaw
   conversion, transient LAN client entity-authority cleanup, permission result
   types, reconnect disposition records, and host gameplay authorization result
@@ -148,12 +148,12 @@ Remaining gameplay hardening:
 
 Added app transport/UI files:
 
-- `Sources/Pebble/LANTransport.swift`: Network.framework adapter for listener,
+- `Sources/Elysium/LANTransport.swift`: Network.framework adapter for listener,
   browser, Direct Connect, connections, send queues, receive loops, handshake,
   LAN chat, status, and connection lifecycle.
-- `Sources/Pebble/LANLobbyScreen.swift`: host/join screen, join code, player
+- `Sources/Elysium/LANLobbyScreen.swift`: host/join screen, join code, player
   name, service list, direct host/port fields, errors, and connection status.
-- `Sources/Pebble/MenusM.swift`: title-screen Multiplayer and pause-menu
+- `Sources/Elysium/MenusM.swift`: title-screen Multiplayer and pause-menu
   Open to LAN entry points.
 - `packaging/Info.plist`: local-network privacy text and Bonjour service type.
 - `scripts/security-scan.sh` and `scripts/security-check-binary.sh`: explicit
@@ -161,13 +161,13 @@ Added app transport/UI files:
 
 ### Discovery And Session Establishment
 
-Use Bonjour service discovery with service type `_pebble-lan._tcp`.
+Use Bonjour service discovery with service type `_elysium-lan._tcp`.
 
 Implemented host flow:
 
 1. Player opens a world and chooses "Open to LAN".
 2. App creates an `NWListener` using TCP parameters.
-3. Listener advertises `_pebble-lan._tcp` with the sanitized world display
+3. Listener advertises `_elysium-lan._tcp` with the sanitized world display
    name. TXT metadata is intentionally deferred until the browser can consume
    and test it without trusting unvalidated strings.
 4. Host UI displays a short join code generated for this session.
@@ -176,7 +176,7 @@ Implemented host flow:
 Implemented client flow:
 
 1. Player opens "Join LAN".
-2. App uses `NWBrowser` for `_pebble-lan._tcp`.
+2. App uses `NWBrowser` for `_elysium-lan._tcp`.
 3. UI lists discovered worlds with their sanitized Bonjour service names.
 4. Client enters join code and display name.
 5. Client sends `ClientHello`.
@@ -325,7 +325,7 @@ Chunk streaming:
 Player data:
 
 - Host assigns a stable multiplayer player id.
-- Client identity is a random local UUID stored in Pebble settings, not a
+- Client identity is a random local UUID stored in Elysium settings, not a
   credential.
 - Host stores per-client player inventory, location, dimension, health, hunger,
   advancements, and permissions in the host world database.
@@ -361,7 +361,7 @@ Required controls:
 
 - Use Bonjour and Network.framework for local discovery/connections.
 - Add `NSLocalNetworkUsageDescription` explaining local multiplayer.
-- Add `NSBonjourServices` with `_pebble-lan._tcp`.
+- Add `NSBonjourServices` with `_elysium-lan._tcp`.
 - Do not add cloud endpoints, update checks, telemetry, analytics, relay
   servers, NAT traversal, or hard-coded public URLs.
 - Keep the existing Ollama loopback path separate from LAN multiplayer.
@@ -380,7 +380,7 @@ Required controls:
 Scripts must change deliberately:
 
 - `scripts/security-scan.sh` allows Network.framework symbols only in
-  `Sources/Pebble/LANTransport.swift` and continues failing other unapproved
+  `Sources/Elysium/LANTransport.swift` and continues failing other unapproved
   network references.
 - `scripts/security-check-binary.sh` distinguishes approved Network.framework
   symbols from unapproved low-level socket symbols and URL strings. It still
@@ -423,7 +423,7 @@ Integration tests:
 
 Security tests:
 
-- Info.plist has local network usage text and only the Pebble Bonjour service.
+- Info.plist has local network usage text and only the Elysium Bonjour service.
 - Source scan allows only the LAN transport network surface.
 - Binary scan still rejects public URL literals.
 - Oversized frames and chat floods fail closed.
@@ -438,8 +438,8 @@ Manual installed-app smoke:
 - Repeat with Local Network permission denied, host canceled, wrong join code,
   version mismatch, host quit, client quit, and Wi-Fi temporarily disabled.
 - The local Neo client helper is `scripts/deploy-lan-client.sh`. It defaults to
-  `neo.localdomain`, runs `./pebble install` locally, copies the resulting
-  `/Applications/Pebble.app` to `/Applications/Pebble.app` on Neo over SSH, and
+  `neo.localdomain`, runs `./elysium install` locally, copies the resulting
+  `/Applications/Elysium.app` to `/Applications/Elysium.app` on Neo over SSH, and
   opens it there. Use `scripts/deploy-lan-client.sh --check` after enabling
   Remote Login on Neo, and `scripts/deploy-lan-client.sh --no-build` after a
   pipeline run that already refreshed the local installed app.
@@ -448,7 +448,7 @@ Release gate:
 
 - `swift build -c release`
 - `swift test`
-- `swift run -c release pebsmoke`
+- `swift run -c release elysmoke`
 - `bash scripts/security-scan.sh`
 - `bash scripts/pipeline.sh`
 - Installed-app two-Mac LAN smoke before marking the feature done.
@@ -495,7 +495,7 @@ Release gate:
 - All remote data is length-capped, versioned, registry-validated, and decoded
   before use.
 - Host simulation remains deterministic with stable player-slot intent order.
-- Existing singleplayer behavior and `pebsmoke` goldens remain unchanged unless
+- Existing singleplayer behavior and `elysmoke` goldens remain unchanged unless
   a deliberate multiplayer-only test path is being exercised.
 - Security scripts fail closed on network surfaces outside the approved LAN
   transport and Ollama loopback client.

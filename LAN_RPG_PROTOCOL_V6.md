@@ -255,9 +255,9 @@ are `0x01...0x09` in the order above. With `worldSeed` encoded as signed two's-c
 `Int64BE`, `generationSettingsDigest` as 32 raw bytes and `worldLANID` as 16 raw bytes, compute:
 
 ```text
-root = SHA256(UTF8("Pebble-LAN-v6-world-rng-root\0") ||
+root = SHA256(UTF8("Elysium-LAN-v6-world-rng-root\0") ||
               Int64BE(worldSeed) || generationSettingsDigest || worldLANID)
-streamDigest(id) = SHA256(UTF8("Pebble-LAN-v6-world-rng-stream\0") ||
+streamDigest(id) = SHA256(UTF8("Elysium-LAN-v6-world-rng-stream\0") ||
                           root || id.tag:UInt8 || 0x00 || 0x00 || 0x00)
 ```
 
@@ -274,9 +274,9 @@ Copy/save-as/import creates an independent RNG lineage after the source coherent
 closed. `sourceRNGBytes` is the concatenation in stream-tag order of each strict binary row
 `schema:UInt16BE=1, tag:UInt8, zero:UInt8, a/b/c/d:UInt32BE,
 drawCount.generation/value:UInt32BE`. Compute
-`copyRoot = SHA256(UTF8("Pebble-LAN-v6-world-rng-copy\0") || sourceRNGBytes ||
+`copyRoot = SHA256(UTF8("Elysium-LAN-v6-world-rng-copy\0") || sourceRNGBytes ||
 newWorldLANID || newWorldStorageID || newMutationLineageID)` and derive every destination stream with
-`SHA256(UTF8("Pebble-LAN-v6-world-rng-copy-stream\0") || copyRoot || tag || 0x000000)`, the same
+`SHA256(UTF8("Elysium-LAN-v6-world-rng-copy-stream\0") || copyRoot || tag || 0x000000)`, the same
 first-16-byte/nonzero rule and a reset `{0,0}` draw count. Destination rows are inserted atomically
 with the new namespace metadata; no source row or draw count is copied. An explicit proven Move
 preserves all nine rows and draw-count pairs byte-for-byte. Checked-in fixed vectors cover both
@@ -448,7 +448,7 @@ Credential lookup never uses service name, mutable endpoint, display world name,
 legacy `worldID#seed` resume key. Installation creates one public 128-bit CSPRNG
 `hostInstallationID` in protected app support; each world creates one public 128-bit CSPRNG
 `worldLANID` in world metadata. The stable credential key is
-`SHA256("Pebble-LAN-v6" || hostInstallationID || worldLANID)` and the client credential row is keyed
+`SHA256("Elysium-LAN-v6" || hostInstallationID || worldLANID)` and the client credential row is keyed
 and uniquely constrained by the exact `(hostInstallationID,worldLANID,lookupDigest)` tuple.
 Production obtains host/world LAN/storage and mutation-lineage IDs, every session epoch, handshake ID, snapshot ID, delayed-effect
 descriptor ID, resume token, legacy nonce, join code, and other security/replay nonce from
@@ -637,7 +637,7 @@ host; the user chooses explicitly between different tuples with the same display
 ### Bounded Direct Connect invite
 
 `LANDirectInviteV6` is the only Direct Connect input. Its canonical ASCII serialization is exactly
-`pebble-lan-v6://<host>:<port>?hid=<hid>&wid=<wid>&lk=<lk>&code=<joinCode>` in that query order,
+`elysium-lan-v6://<host>:<port>?hid=<hid>&wid=<wid>&lk=<lk>&code=<joinCode>` in that query order,
 with no userinfo, password, path, fragment, percent escapes, duplicate/unknown query keys, omitted
 field, whitespace, control character, or trailing data. Total length is `1...1_024` bytes. Port is
 decimal canonical `1...65_535` with no sign/leading zero. Host is exactly one canonical dotted IPv4,
@@ -658,16 +658,16 @@ Human-visible contract: hosting shows a **Copy Direct Invite** action beside the
 trusted-LAN warning; joining replaces naked manual host/port fields with one **Direct Invite** paste
 field, inline exact validation, disabled Connect while invalid, and redacted identity prefixes after
 parse. `/lan direct <invite>` accepts exactly one bounded no-whitespace URI argument. Automation sets
-`PEBBLE_LAN_AUTOJOIN` to the exact invite only and puts the separately validated display name in
-`PEBBLE_LAN_AUTOJOIN_NAME`; legacy `<host> <port> <code> [name]` parsing is removed and rejected.
+`ELYSIUM_LAN_AUTOJOIN` to the exact invite only and puts the separately validated display name in
+`ELYSIUM_LAN_AUTOJOIN_NAME`; legacy `<host> <port> <code> [name]` parsing is removed and rejected.
 Environment values containing NUL/newline, over 1,024 bytes, missing names, or mixed legacy tokens
 fail before network work.
 
-Builder updates the real surfaces, not only a DTO: `Sources/Pebble/LANTransport.swift`,
-`Sources/Pebble/LANLobbyScreen.swift`, command routing in `main.swift`, README/ARCHITECTURE/SECURITY,
+Builder updates the real surfaces, not only a DTO: `Sources/Elysium/LANTransport.swift`,
+`Sources/Elysium/LANLobbyScreen.swift`, command routing in `main.swift`, README/ARCHITECTURE/SECURITY,
 and `scripts/live-lan-test.sh`. The installed probe obtains the host-generated invite through a
-dedicated `PEBBLE_LAN_PROBE_INVITE_FILE` created mode 0600, passes it unchanged to Neo via
-`PEBBLE_LAN_AUTOJOIN`, supplies `PEBBLE_LAN_AUTOJOIN_NAME`, then deletes the file. Tests cover every
+dedicated `ELYSIUM_LAN_PROBE_INVITE_FILE` created mode 0600, passes it unchanged to Neo via
+`ELYSIUM_LAN_AUTOJOIN`, supplies `ELYSIUM_LAN_AUTOJOIN_NAME`, then deletes the file. Tests cover every
 byte/host/port/query boundary, UI/CLI/env equivalence, IPv4/IPv6/DNS, spoofed/mismatched tuples,
 multi-address ambiguity, redaction, old-format rejection, and installed Neo join plus resume.
 
@@ -1977,21 +1977,21 @@ registry hash or alternate concatenation is a second serialization.
 entityBytes,totalContentBytes,rowBytes,blockRoot,biomeRoot,blockEntityRoot,entityRoot,contentRoot,
 contentDigest}` and is produced by the same canonical field/record emitters as VCK2. Each section is
 partitioned into consecutive 4,096-byte leaves. A leaf is
-`SHA256("Pebble-LAN-v6-merkle-leaf\0" || sectionTag || UInt64BE(index) || UInt32BE(actualBytes) ||
-leafBytes)`; an empty section is `SHA256("Pebble-LAN-v6-merkle-empty\0" || sectionTag)`. At level
+`SHA256("Elysium-LAN-v6-merkle-leaf\0" || sectionTag || UInt64BE(index) || UInt32BE(actualBytes) ||
+leafBytes)`; an empty section is `SHA256("Elysium-LAN-v6-merkle-empty\0" || sectionTag)`. At level
 zero and above, adjacent hashes form
-`SHA256("Pebble-LAN-v6-merkle-node\0" || sectionTag || UInt32BE(level) || left || right)`; an odd
-last hash is promoted as `SHA256("Pebble-LAN-v6-merkle-promote\0" || sectionTag || UInt32BE(level)
+`SHA256("Elysium-LAN-v6-merkle-node\0" || sectionTag || UInt32BE(level) || left || right)`; an odd
+last hash is promoted as `SHA256("Elysium-LAN-v6-merkle-promote\0" || sectionTag || UInt32BE(level)
 || hash)`, never duplicated. The content root is
-`SHA256("Pebble-LAN-v6-merkle-content\0" || each ordered sectionTag/count/byteCount/root)`.
+`SHA256("Elysium-LAN-v6-merkle-content\0" || each ordered sectionTag/count/byteCount/root)`.
 Merkle `sectionTag` is one byte (`0x01` blocks, `0x02` biomes, `0x03` block entities, `0x04`
 entities); leaf indexes are `UInt64BE`, actual lengths/levels/counts are `UInt32BE`, section byte
 counts are `UInt64BE`, and roots are exactly 32 raw bytes. The content-root tuple order is those four
 tags, each followed by count, byte count and root. Domain strings are the shown ASCII bytes including
 their terminating NUL; no platform string encoding or native-endian integer is accepted.
-`contentDigest = SHA256("Pebble-LAN-v6-chunk-content\0" || generationSettingsDigest ||
+`contentDigest = SHA256("Elysium-LAN-v6-chunk-content\0" || generationSettingsDigest ||
 chunkDomainDigest || UInt64BE(totalContentBytes) || contentRoot)`. The canonical envelope separately
-hashes `SHA256("Pebble-LAN-v6-chunk-envelope\0" || all length-prefixed envelope fields including
+hashes `SHA256("Elysium-LAN-v6-chunk-envelope\0" || all length-prefixed envelope fields including
 contentDigest)`. Lineage, coordinates, capture/mutation versions and watermarks never enter the
 content digest. No generic VCK/JSON digest substitutes. Measurement and final encoding compare the
 complete measure plus roots, so preparation never needs a second 64-MiB in-memory copy or an
@@ -2076,12 +2076,12 @@ section records in fixed tag order. A section record is `sectionTag:UInt8`, thre
 append-order definition bytes specified by that section's checked-in schema manifest. Lengths count
 bytes following their own field only; no optional field, native padding, JSON, locale or dictionary
 order exists. The formulas are exclusively
-`generationSettingsDigest = SHA256("Pebble-LAN-v6-generation\0" ||
+`generationSettingsDigest = SHA256("Elysium-LAN-v6-generation\0" ||
 UInt32BE(generationSettingsLength) || generationSettingsBytes)` and
-`chunkDomainDigest = SHA256("Pebble-LAN-v6-chunk-domain\0" ||
+`chunkDomainDigest = SHA256("Elysium-LAN-v6-chunk-domain\0" ||
 UInt64BE(canonicalPayload.count) || canonicalPayload)`.
 
-`Tests/PebbleCoreTests/Fixtures/LANGenerationContractDigestVectors.json` contains independent fixed
+`Tests/ElysiumCoreTests/Fixtures/LANGenerationContractDigestVectors.json` contains independent fixed
 canonical-payload hex and intermediate/final hashes for the minimum contract, every dimension, a
 definition at its byte cap and a compatible append. Both the contract-table writer and VCK2 encoder
 must match those vectors; changing a byte requires a deliberate schema/baseline version change.
@@ -2170,7 +2170,7 @@ endian, all reserved bits/bytes are zero, and trailing bytes reject:
 | 176 | 16 | blocks, biomes, block-entity and entity counts as `UInt32` |
 | 192 | 40 | the four section byte lengths plus total content length as `UInt64` |
 | 232 | 32 | content digest |
-| 264 | 32 | `SHA256("Pebble-LAN-v6-vck2-header\0" || UInt32BE(264) || bytes[0..<264])` |
+| 264 | 32 | `SHA256("Elysium-LAN-v6-vck2-header\0" || UInt32BE(264) || bytes[0..<264])` |
 
 Sections are: (1) exactly `blocksCount` registered `UInt16` cells; (2) exactly `biomeCount`
 registered `UInt16` IDs; (3) cell-index-sorted block-entity records; (4) persistent-key-sorted entity/
@@ -2194,11 +2194,11 @@ sumEntity(4+recordLength)`. It must equal `296 + totalContentLength`, every decl
 the actual SQLite blob length and the at-most-67,108,864-byte row cap without overflow.
 
 The canonical per-record digest is exactly
-`SHA256("Pebble-LAN-v6-vck2-record\0" || sectionTag:UInt8 ||
+`SHA256("Elysium-LAN-v6-vck2-record\0" || sectionTag:UInt8 ||
 UInt32BE(4+recordLength) || exactRecordBytes)`, where `exactRecordBytes` starts with the little-
 endian `recordLength` prefix and includes every little-endian header/tag/length plus payload byte in
 wire order. The relationship digest is
-`SHA256("Pebble-LAN-v6-vck2-relation\0" || UInt32BE(canonicalReferenceBytes.count) ||
+`SHA256("Elysium-LAN-v6-vck2-relation\0" || UInt32BE(canonicalReferenceBytes.count) ||
 canonicalReferenceBytes)`; the binding and namespace rolling digests use distinct literal domains
 and length-prefix each exact key/digest tuple in stable key order. No digest hashes a Swift value,
 JSON object or host-endian struct.
@@ -2209,7 +2209,7 @@ field tag, record schema, wire type, required/optional mask, nested bound and re
 digest is in the generator/specification registry section. Decode dispatches only when header schema,
 record schema and stored manifest digest all match; no `V1` DTO is accepted under a schema-2 header,
 and no unknown schema falls through to a current decoder.
-`Tests/PebbleCoreTests/Fixtures/LANVCK2DigestVectors.json` is a checked-in independent oracle with
+`Tests/ElysiumCoreTests/Fixtures/LANVCK2DigestVectors.json` is a checked-in independent oracle with
 hex header/record/reference bytes and every intermediate leaf/node/section/content/record/header
 digest for empty sections, one BE, one entity, and 4,095/4,096/4,097-byte leaf boundaries. Tests
 recompute it through both the streaming encoder and a separately implemented reference hasher; a
@@ -2314,7 +2314,7 @@ reserves four raw words from the durable `entitySpawn` world stream in its prepa
 them as `a/b/c/d`, applies the all-zero `d = 1` escape, and starts its entity-local draw count at
 `{0,0}`; the four world-stream draws and entity row publish atomically. A legacy VCK1 entity instead
 uses the stable baseline key assigned before construction and computes
-`SHA256("Pebble-LAN-v6-legacy-entity-rng-genesis\0" || worldStorageID || mutationLineageID ||
+`SHA256("Elysium-LAN-v6-legacy-entity-rng-genesis\0" || worldStorageID || mutationLineageID ||
 dimensionTag:UInt8 || Int32BE(chunkZ) || Int32BE(chunkX) || UInt32BE(sourceEntityOrdinal) ||
 persistentKeyCanonicalBytes || UInt16BE(kindTag) || canonicalLegacyTypedRecordDigest)`.
 The first 16 digest bytes are four `UInt32BE` words with the same nonzero escape and draw count
@@ -2327,7 +2327,7 @@ keys are each exactly 24 bytes, raw 16-byte wid followed by generation/value `UI
 132-byte `copyInput` is `sourceEntityRNGBytes || sourcePersistentKeyBytes || newWorldLANID ||
 newWorldStorageID || newMutationLineageID || newPersistentKeyBytes || kindTag:UInt16BE ||
 zero:UInt16BE`. Compute
-`copyDigest = SHA256("Pebble-LAN-v6-copy-entity-rng\0" || UInt16BE(132) || copyInput)`.
+`copyDigest = SHA256("Elysium-LAN-v6-copy-entity-rng\0" || UInt16BE(132) || copyInput)`.
 Digest bytes `0..<16` become destination `a/b/c/d` as four consecutive `UInt32BE`; if all four are
 zero, only `d` becomes one. Destination draw count is exactly `{0,0}`; digest bytes `16..<32` are
 unused and no source count is numerically carried forward. The destination RNG row, rekeyed entity,
@@ -2444,14 +2444,14 @@ before hashing, counter advance or allocation. Domain 4 also uses ordinal zero; 
 their separately bounded shot/output ordinals.
 
 Context digests are exact: domain 1 hashes
-`"Pebble-LAN-v6-blaze-rng-context\0" || sourcePersistentKeyBytes || reservedProjectileKeyBytes`;
-domain 2 hashes `"Pebble-LAN-v6-barter-rng-context\0" || sourcePersistentKeyBytes ||
-chunkDomainDigest`; domain 3 hashes `"Pebble-LAN-v6-fishing-rng-context\0" ||
+`"Elysium-LAN-v6-blaze-rng-context\0" || sourcePersistentKeyBytes || reservedProjectileKeyBytes`;
+domain 2 hashes `"Elysium-LAN-v6-barter-rng-context\0" || sourcePersistentKeyBytes ||
+chunkDomainDigest`; domain 3 hashes `"Elysium-LAN-v6-fishing-rng-context\0" ||
 UInt16BE(ownerAuthorityBytes.count) || ownerAuthorityBytes || descriptorID || rodItemDigest`;
-domain 4 hashes `"Pebble-LAN-v6-fishing-session-rng-context\0" ||
+domain 4 hashes `"Elysium-LAN-v6-fishing-session-rng-context\0" ||
 UInt16BE(ownerAuthorityBytes.count) || ownerAuthorityBytes || descriptorID || rodItemDigest ||
 dimensionTag:UInt8 || 0x00 || 0x00 || 0x00`.
-Compute `SHA256("Pebble-LAN-v6-continuation-rng-split\0" || UInt16BE(72) || input)`. Digest bytes
+Compute `SHA256("Elysium-LAN-v6-continuation-rng-split\0" || UInt16BE(72) || input)`. Digest bytes
 `0..<16`, read as four `UInt32BE`, are the child words; bytes `16..<32` are the result parent words.
 Each half independently applies the all-zero escape by replacing only `d` with one. Child draw count
 is `{0,0}` and result parent draw count is the checked successor of the complete expected parent
@@ -2963,9 +2963,9 @@ Cross-generation retention is closed by one
 `LANPrimaryEntityRetentionManifestV1 {schema:1,mutationLineageID,entries,count,encodedBytes,root}`.
 Each stable-key-sorted entry is exactly `{checkpointGeneration,persistentKey,recordDigest,
 primaryRowDigest,referenceCount,referenceDigest}`. `referenceDigest` is
-`SHA256("Pebble-LAN-v6-primary-retention-refs\0" ||` every canonical length-prefixed live journal
+`SHA256("Elysium-LAN-v6-primary-retention-refs\0" ||` every canonical length-prefixed live journal
 membership key `(checkpointGeneration,chunkKey,captureSequence,stableDeltaKey,rowDigest)` in sorted
-order `)`. `root` is `SHA256("Pebble-LAN-v6-primary-retention-root\0" || UInt32BE(count) ||
+order `)`. `root` is `SHA256("Elysium-LAN-v6-primary-retention-root\0" || UInt32BE(count) ||
 UInt64BE(encodedBytes) ||` every length-prefixed canonical entry `)`. Count is `0...128`; encoded
 bytes charge the referenced primary rows and must be `0...134,742,016`.
 Each retention-entry row/index is charged inside its referenced primary row's existing 4,096-byte
@@ -3000,15 +3000,15 @@ prefix, and entries sort by `(dimension,chunkZ,chunkX,captureGeneration,captureV
 stableDeltaKeyBytes)`. `entriesByteLength` is `sum(4 + entryLength)`. Reserved/trailing bytes,
 duplicate keys, scalar generations and a count/length/byte mismatch reject.
 
-`ordinaryMembershipSHA = SHA256("Pebble-LAN-v6-journal-membership-v1\0" || UInt32BE(count) ||
+`ordinaryMembershipSHA = SHA256("Elysium-LAN-v6-journal-membership-v1\0" || UInt32BE(count) ||
 UInt64BE(accountedBytes) || exactEntriesBytes)`. The manifest row's separately stored
-`manifestDigest = SHA256("Pebble-LAN-v6-journal-manifest-chain-v1\0" ||
+`manifestDigest = SHA256("Elysium-LAN-v6-journal-manifest-chain-v1\0" ||
 UInt32BE(168 + entriesByteLength) || exactHeaderAndEntriesBytes)`. Thus the digest binds lineage,
 full generation/predecessor, ordinary membership SHA and the generation-local retention root in one
 named domain; JSON, native-endian structs and a generic SHA are forbidden.
 
 The lineage-bound empty anchor generation is exactly `{0,0}` and
-`emptyAnchorDigest = SHA256("Pebble-LAN-v6-journal-chain-empty-v1\0" || mutationLineageID ||
+`emptyAnchorDigest = SHA256("Elysium-LAN-v6-journal-chain-empty-v1\0" || mutationLineageID ||
 UInt32BE(0) || UInt32BE(0))`. Fresh-world creation and existing-world baseline enrollment atomically
 store the empty global retention root, anchor generation/digest and identical tip generation/digest
 with the new lineage, while creating no manifest row. First append names that anchor as predecessor.
@@ -3058,7 +3058,7 @@ the specified included-generation/watermark transition, and replaces each covere
 one bounded immutable `LANJournalCompactionReceiptV1 {mutationLineageID,manifestGeneration,
 manifestDigest,previousManifestGeneration,previousManifestDigest,chunkKey,stableDeltaKey,rowDigest,
 preBaseCAS,resultBaseCAS,receiptDigest}`. `receiptDigest` is
-`SHA256("Pebble-LAN-v6-journal-compaction-receipt-v1\0" ||` canonical length-prefixed preceding
+`SHA256("Elysium-LAN-v6-journal-compaction-receipt-v1\0" ||` canonical length-prefixed preceding
 fields `)`; manifest generation/digests must match the immutable chain row exactly. The per-generation
 manifest/membership bytes never change. An entry resolves to
 exactly one live journal row or one receipt; receipts are charged to the same row/byte journal budget
@@ -3073,7 +3073,7 @@ The transaction that writes a first receipt for a chunk also installs
 `LANReceiptedChunkBaseFreezeV1 {chunkKey,frozenBaseCAS,oldestManifestGeneration,receiptCount,
 receiptRoot}`. `frozenBaseCAS` is byte-equal to every receipt's `resultBaseCAS`; `receiptRoot` hashes
 receipts sorted by `(manifestGeneration,stableDeltaKey,receiptDigest)` exactly as
-`SHA256("Pebble-LAN-v6-receipted-chunk-freeze-v1\0" || UInt32BE(receiptCount) ||` each
+`SHA256("Elysium-LAN-v6-receipted-chunk-freeze-v1\0" || UInt32BE(receiptCount) ||` each
 length-prefixed canonical receipt `)`. One base-compaction transaction may create receipts for
 the same chunk from multiple contiguous manifest generations when that one `resultBaseCAS` includes
 all of them; `oldestManifestGeneration` is their minimum. At most 128 frozen chunks/
@@ -3258,7 +3258,7 @@ every component changed by one protocol transition is committed in the same tran
    full `dispositionOnly` request-zero binding.
 4. `LANClientNotificationInboxV1` is a separate table bounded to 256 rows/1,048,576 encoded bytes
    per host/world. A terminal insert contains unique deterministic
-   `notificationID = SHA256("Pebble-LAN-v6-notice\0" || hid[16] || wid[16] || epoch[16] ||
+   `notificationID = SHA256("Elysium-LAN-v6-notice\0" || hid[16] || wid[16] || epoch[16] ||
    UInt64BE(requestID))`, exact
    request/epoch/snapshot/status/reason/message, a digest of the fully validated bundle-record
    identity for audit/deduplication (`SHA256` over length-prefixed exact manifest payload, canonical
@@ -3532,7 +3532,7 @@ assert every per-peer/global byte and count cap. These deterministic suites run 
 `swift test` and the pipeline; a disabled, skipped, flaky, unreproducible, or reduced-case fuzz gate
 is a release failure.
 
-Extend the installed two-Mac probe. Before launch, SHA-256 of both installed Pebble executables
+Extend the installed two-Mac probe. Before launch, SHA-256 of both installed Elysium executables
 must match. Through public UI/input/transport paths, prove generated-code `joinNew`, indexed
 one-token `resume`, detached `legacyClaim` socket close/approval and one-nonce `legacyConsume`; use a
 bounded raw probe to prove a mixed/extra-field hello gets the generic rejection and creates no

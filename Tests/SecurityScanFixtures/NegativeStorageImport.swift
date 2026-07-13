@@ -1,3 +1,3 @@
-@_exported import PebbleStorage
+@_exported import ElysiumStorage
 
 let forbiddenStorageImport = 1

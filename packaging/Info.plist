@@ -2,20 +2,20 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleExecutable</key><string>Pebble</string>
-    <key>CFBundleIdentifier</key><string>com.briangao.pebble</string>
-    <key>CFBundleName</key><string>Pebble</string>
-    <key>CFBundleDisplayName</key><string>Pebble</string>
+    <key>CFBundleExecutable</key><string>Elysium</string>
+    <key>CFBundleIdentifier</key><string>com.briangao.elysium</string>
+    <key>CFBundleName</key><string>Elysium</string>
+    <key>CFBundleDisplayName</key><string>Elysium</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.1.0</string>
     <key>CFBundleVersion</key><string>1.1.0</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
-    <key>NSLocalNetworkUsageDescription</key><string>Pebble uses the local network only to discover, host, and join player-started LAN multiplayer worlds.</string>
+    <key>NSLocalNetworkUsageDescription</key><string>Elysium uses the local network only to discover, host, and join player-started LAN multiplayer worlds.</string>
     <key>NSBonjourServices</key>
     <array>
-        <string>_pebble-lan._tcp</string>
+        <string>_elysium-lan._tcp</string>
     </array>
     <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>

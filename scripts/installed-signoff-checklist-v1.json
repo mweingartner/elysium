@@ -1,6 +1,6 @@
 {
-  "version": "pebble-installed-text-entry-v2",
-  "fixedPasteSentinel": "PebblePasteProof",
+  "version": "elysium-installed-text-entry-v2",
+  "fixedPasteSentinel": "ElysiumPasteProof",
   "items": [
     {"id":"create-world","prompt":"Create World Name and Seed","requiresAX":true},
     {"id":"lan-fields","prompt":"LAN Player Host Code Host Port Manual Host Join Port Join Code","requiresAX":true},

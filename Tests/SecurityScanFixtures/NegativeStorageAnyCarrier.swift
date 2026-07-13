@@ -1,3 +1,3 @@
-import PebbleStorage
+import ElysiumStorage
 
-let forbiddenStorageAny: Any = Optional<PebbleLANClientAuthorityCheckpointCandidate>.none as Any
+let forbiddenStorageAny: Any = Optional<ElysiumLANClientAuthorityCheckpointCandidate>.none as Any

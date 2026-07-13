@@ -28,7 +28,7 @@ in particular "packaging/Faithful 32x - 1.20.1.zip", which belongs to the
 Faithful team and its contributors under their own terms
 (https://faithfulpack.net), and the in-game screenshots in packaging/
 (homepage.png, title-bg.png) to the extent they depict Faithful 32x artwork.
-The fdlibm-derived trigonometry in Sources/PebbleCore/Core/DetMath.swift
+The fdlibm-derived trigonometry in Sources/ElysiumCore/Core/DetMath.swift
 carries Sun Microsystems' permissive notice at the top of that file.
 See the Disclaimer section of README.md.
 

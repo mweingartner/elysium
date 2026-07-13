@@ -8,7 +8,7 @@ approved model copy. It introduces no new wording, controls, states, or interact
 ### Observed user-visible failure
 
 The real installed screenshot
-`/tmp/pebble-storage-launch-proof-20260711/disposable-rpg-window.png` renders required Unicode
+`/tmp/elysium-storage-launch-proof-20260711/disposable-rpg-window.png` renders required Unicode
 characters as the bitmap font's fallback `?`: the preset and footer lose `·`, the selected adornment
 loses `✓`, and the same production path cannot faithfully present directional arrows or frozen
 typographic punctuation. The AppKit harness is not sufficient evidence because it uses a system
@@ -42,7 +42,7 @@ No normalization is added. Approved RPG copy retains the bare listed scalar.
 ### Pixel geometry and readability
 
 - Each required glyph is drawn on the canonical bitmap grid with integer pixel placement, the same
-  baseline, cap region, logical cell height, and non-antialiased edge language as the existing Pebble
+  baseline, cap region, logical cell height, and non-antialiased edge language as the existing Elysium
   font.
 - Strokes remain at least one source pixel and retain an open counter or directional gap where
   needed, so nearest-neighbor scaling cannot merge `✓`, `←`, `→`, `’`, `…`, `—`, `·`, and `?`.
@@ -80,7 +80,7 @@ No normalization is added. Approved RPG copy retains the bare listed scalar.
 
 ### Ordinary installed acceptance
 
-After Security and Test PASS, a fresh signed `/Applications/Pebble.app` must be inspected through
+After Security and Test PASS, a fresh signed `/Applications/Elysium.app` must be inspected through
 the production Metal renderer, not only the AppKit harness. At all three required viewports, capture
 standard and High Contrast evidence containing:
 
@@ -107,10 +107,10 @@ interaction change returns to Design Review rather than being accepted as a font
 
 ### Decision and production surface
 
-The defect is confined to `Sources/Pebble/UICanvas.swift`. `drawText`, `glyphWidth`, and
+The defect is confined to `Sources/Elysium/UICanvas.swift`. `drawText`, `glyphWidth`, and
 `textWidth` already iterate Swift `Character` values and share the
 `GLYPHS[ch] ?? GLYPHS["?"]!` fallback. The resource-pack branch is deliberately limited to
-U+0020...U+007E, so these seven non-ASCII scalars must use Pebble's deterministic built-in glyphs
+U+0020...U+007E, so these seven non-ASCII scalars must use Elysium's deterministic built-in glyphs
 even when `font/ascii.png` is active. No RPG model, layout, renderer, resource-pack parser,
 accessibility, or Core API change is required.
 
@@ -145,10 +145,10 @@ draw/measure parity.
 
 ### Files and verification
 
-1. Edit only production file `Sources/Pebble/UICanvas.swift` to add the seven rows. Do not edit
+1. Edit only production file `Sources/Elysium/UICanvas.swift` to add the seven rows. Do not edit
    `RPGScreensM.swift`, `RPGScreenModel.swift`, `RPGUIHarnessM.swift`, `RPGUIHarness.swift`, or
    `ResourcePacks.swift` unless review first proves the existing routing predicate has drifted.
-2. Add `Tests/PebbleCoreTests/RPGPixelFontSourceTests.swift`, using the existing App-target
+2. Add `Tests/ElysiumCoreTests/RPGPixelFontSourceTests.swift`, using the existing App-target
    source-test pattern. Parse/assert the exact seven bitmaps and advances; prove each is nonempty,
    uses only row bits 0...6, differs from `?`, every pre-existing glyph, and the other six; rasterize
    each into an isolated eight-row monochrome bitmap and compare checked inline pixel snapshots.
@@ -163,8 +163,8 @@ draw/measure parity.
 4. Retain the existing exact model tests, especially `← Move Left` / `Move Right →`, complete
    `visualLines`, selected adornment, and semantic/accessibility copy. Add a narrow model-source
    assertion only if needed to collect all seven scalars; it may assert copy but never rewrite it.
-5. A fresh release changes Pebble, not PebbleCore, PebbleStorage, or `pebsmoke`. Update only the
-   reviewed Pebble product hash in `scripts/verify-pebble-storage-release-surface.sh` after the exact
+5. A fresh release changes Elysium, not ElysiumCore, ElysiumStorage, or `elysmoke`. Update only the
+   reviewed Elysium product hash in `scripts/verify-elysium-storage-release-surface.sh` after the exact
    warning-free build if all other pins remain exact. Any other API, manifest, object, product, or
    production-file delta fails this architecture gate.
 6. Add no production DEBUG/SPI/package test seam. The new test keeps its trusted-source parser and
@@ -183,7 +183,7 @@ draw/measure parity.
 | Existing glyphs drift under the repair | Exact 101-key baseline declaration hash after removing the seven reviewed lines |
 | Glyph clips or becomes ambiguous | Isolated bitmap snapshots and installed inspection at every RPG scale |
 | Copy/layout/accessibility changes hide the defect | Unchanged model/renderer diff plus existing model, renderer-source, semantic, and accessibility suites |
-| Stale or harness renderer is inspected | Fresh verifier, installed hash/signature, and `/Applications/Pebble.app` screenshots |
+| Stale or harness renderer is inspected | Fresh verifier, installed hash/signature, and `/Applications/Elysium.app` screenshots |
 
 ### Dependency order
 
@@ -194,7 +194,7 @@ draw/measure parity.
 4. Builder adds the seven entries, then the isolated/source tests, with no copy workaround.
 5. Security (code) reviews the exact diff. Tester runs the new tests; affected RPG model, renderer,
    semantic, and accessibility suites; source scan; warning-free release; full XCTest; 457-check
-   `pebsmoke`; release verifier; and pipeline.
+   `elysmoke`; release verifier; and pipeline.
 6. Install that exact signed build. In the ordinary installed Metal app—not the AppKit harness—open
    the real RPG screen and capture standard and High Contrast creation, review, footer, move-control,
    and authority/status states at all three viewports. Compare visible pixels to semantic/model copy,
@@ -232,7 +232,7 @@ so lookup, raster work, and width arithmetic remain constant and bounded per `Ch
 non-ASCII keys cannot enter the U+0020...U+007E pack branch. The source-only test adds no release
 seam. RPG copy, wrapping, semantics, accessibility, hit/focus geometry, receipts, and resource-pack
 parsing remain outside Builder authority; all unchanged object, manifest, Core/storage product, and
-pebsmoke pins remain exact while only Pebble is renewed.
+elysmoke pins remain exact while only Elysium is renewed.
 
 **Security(plan) verdict: PASS.** Build is authorized only for the exact seven immutable entries and
 test-only source/raster assertions above. Security(code), affected tests, warning-free release, pin
@@ -242,7 +242,7 @@ verifier, signed install, and ordinary Metal-renderer pixel proof remain mandato
 
 Builder implemented the approved plan at SHA-256
 `aa8ae48f497076852acd12911b624a94f55301eabddc7fed5bb6942876b70c24`. The only production
-change is the seven exact frozen `GLYPHS` entries in `Sources/Pebble/UICanvas.swift`. No RPG copy,
+change is the seven exact frozen `GLYPHS` entries in `Sources/Elysium/UICanvas.swift`. No RPG copy,
 model, layout, renderer routing, accessibility, resource-pack parsing, API, cache, or mutable font
 surface changed.
 
@@ -263,27 +263,27 @@ Verification evidence, all final exit status 0:
 - full `swift test`: 967 tests, 0 failures in 222.078 s;
 - `swift build -c release`: warning-free, completed in 103.39 s;
 - `bash scripts/security-scan.sh`: passed, including the 126-file SQLite boundary scan;
-- `swift run -c release pebsmoke`: 457 passed, 0 failed;
-- `bash scripts/verify-pebble-storage-release-surface.sh`: verified after the final release rebuild;
+- `swift run -c release elysmoke`: 457 passed, 0 failed;
+- `bash scripts/verify-elysium-storage-release-surface.sh`: verified after the final release rebuild;
 - `git diff --check`: passed.
 
 Reviewed SHA-256 consequences:
 
-- `Sources/Pebble/UICanvas.swift`:
+- `Sources/Elysium/UICanvas.swift`:
   `023b65e2d6e8b45ab62f3059b8b92df7f54f71310e528f6fb558996b28456a42`;
-- `Tests/PebbleCoreTests/RPGPixelFontSourceTests.swift`:
+- `Tests/ElysiumCoreTests/RPGPixelFontSourceTests.swift`:
   `9ab94f3f921722e0ebeefea6d4c9dc7df1fa77e4a7086d3cafe37e5ca74d06cb`;
-- `scripts/verify-pebble-storage-release-surface.sh`:
+- `scripts/verify-elysium-storage-release-surface.sh`:
   `128f773532c2a729cc8274605d0bc27ac84ad4373dc810e8e574299fbb067709`;
-- fresh Pebble product:
+- fresh Elysium product:
   `3bbff96d8154f412b6c8745b05745f3056037d5322c761b67b7143cb26a4df60`.
 
 Every artifact required to remain stable did so after the warning-free build and the later
-`pebsmoke` release-graph rebuild: `PebbleStorage.o`
-`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `PebbleCore.o`
-`7e7caeec1e760a60739736ad240993562bd972e29e6a03c6c54ace486b37751a`, and `pebsmoke`
+`elysmoke` release-graph rebuild: `ElysiumStorage.o`
+`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `ElysiumCore.o`
+`7e7caeec1e760a60739736ad240993562bd972e29e6a03c6c54ace486b37751a`, and `elysmoke`
 `5e1d47e14ab3e427a0ff35ef6ae2a00b887d38c5c53883bf2afc40a556e5f2ec`. Accordingly, Builder
-renewed only `EXPECTED_PEBBLE_PRODUCT_SHA256`; all other verifier pins remained exact.
+renewed only `EXPECTED_ELYSIUM_PRODUCT_SHA256`; all other verifier pins remained exact.
 
 **Builder verdict: PASS.** Production and automated release gates are green. Per the assigned
 Builder boundary, no installation, deployment, ordinary installed Metal screenshot proof, commit,
@@ -325,16 +325,16 @@ keys and exact full-table baseline recovery rather than merely searching for gly
 Independent closing evidence:
 
 - `RPGPixelFontSourceTests`: **5 tests, 0 failures**;
-- release-surface verifier: PASS, exit 0, with explicit `Pebble storage release surface verified.`;
-- fresh Pebble hash/pin:
+- release-surface verifier: PASS, exit 0, with explicit `Elysium storage release surface verified.`;
+- fresh Elysium hash/pin:
   `3bbff96d8154f412b6c8745b05745f3056037d5322c761b67b7143cb26a4df60`;
 - replacing only that pin with its prior value reconstructs the complete pre-remediation verifier at
   SHA-256 `47ed918601ac8a7962b9e65a2d9ccf4cf52518a98d5a734d5c6d376a6043a9f7`;
-- unchanged release artifacts remain exact: `PebbleStorage.o`
-  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `PebbleCore.o`
-  `7e7caeec1e760a60739736ad240993562bd972e29e6a03c6c54ace486b37751a`, and pebsmoke
+- unchanged release artifacts remain exact: `ElysiumStorage.o`
+  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `ElysiumCore.o`
+  `7e7caeec1e760a60739736ad240993562bd972e29e6a03c6c54ace486b37751a`, and elysmoke
   `5e1d47e14ab3e427a0ff35ef6ae2a00b887d38c5c53883bf2afc40a556e5f2ec`;
-- the Pebble artifact is newer than `UICanvas.swift`, and `git diff --check` passed.
+- the Elysium artifact is newer than `UICanvas.swift`, and `git diff --check` passed.
 
 No Security(code) finding remains. This PASS does not claim signed installation, ordinary installed
 Metal-renderer glyph inspection, deployment, commit, or push. Any production, test, verifier, pin,

@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
   - name: Security vulnerability (private)
-    url: https://github.com/thebriangao/pebble/blob/main/SECURITY.md
-    about: "For anything a crafted file can do beyond crashing the game, report privately per SECURITY.md (email with a subject starting with [pebble security])."
+    url: https://github.com/thebriangao/elysium/blob/main/SECURITY.md
+    about: "For anything a crafted file can do beyond crashing the game, report privately per SECURITY.md (email with a subject starting with [elysium security])."

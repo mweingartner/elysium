@@ -1,5 +1,5 @@
-import PebbleStorage
+import ElysiumStorage
 
 struct EscapedPlayerCASCarrier {
-    let expectation: PebblePlayerJSONExpectedRowState
+    let expectation: ElysiumPlayerJSONExpectedRowState
 }

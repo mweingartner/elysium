@@ -18,12 +18,12 @@ Status: Architecture gate for the `LANDirectInviteV6` Network.framework import b
 ## Evidence and first-principles decision
 
 `scripts/security-scan.sh` currently fails because
-`Sources/PebbleCore/Net/LANDirectInviteV6.swift` imports Network.framework. That is not a false
+`Sources/ElysiumCore/Net/LANDirectInviteV6.swift` imports Network.framework. That is not a false
 positive: `ARCHITECTURE.md`, `CONTRIBUTING.md`, `SECURITY.md`, and the package target split reserve
-Network.framework, DNS resolution, endpoints, and sockets for `Sources/Pebble/LANTransport.swift`.
-`PebbleCore` owns bounded protocol values and deterministic validation.
+Network.framework, DNS resolution, endpoints, and sockets for `Sources/Elysium/LANTransport.swift`.
+`ElysiumCore` owns bounded protocol values and deterministic validation.
 
-The chosen design is a bounded, side-effect-free address parser in `PebbleCore`: strict pure-Swift
+The chosen design is a bounded, side-effect-free address parser in `ElysiumCore`: strict pure-Swift
 IPv4 validation plus Darwin `inet_pton`/`inet_ntop` IPv6 parsing/canonicalization. It does not resolve
 DNS, inspect interfaces, open sockets, or import Network.framework. Darwin is already used by the
 headless core for address normalization, and `Package.swift` supports macOS 14 or newer only.
@@ -34,7 +34,7 @@ dependent on an app callback, and create two validation paths between UI/CLI/env
 would also make `LANDirectInviteV6` unable to enforce its own encode/decode/encode invariant.
 
 Expanding the scanner allowlist is rejected. Address *syntax* validation is not transport work, and
-allowlisting Network.framework in `PebbleCore` would weaken the machine-enforced guarantee that all
+allowlisting Network.framework in `ElysiumCore` would weaken the machine-enforced guarantee that all
 actual network capability stays in the app adapter.
 
 ## Frozen behavior and invariants
@@ -68,11 +68,11 @@ invariant; it is not an accepted human-visible invite.
 
 ## Exact implementation contract
 
-### 1. `Sources/PebbleCore/Net/LANDirectInviteV6.swift`
+### 1. `Sources/ElysiumCore/Net/LANDirectInviteV6.swift`
 
 1. Remove `import Network`; add `import Darwin` beside Foundation.
 2. Add an internal, non-public namespace `LANIPAddressCanonicalizerV6` so `@testable` tests can
-   exercise the primitive without widening Pebble's API:
+   exercise the primitive without widening Elysium's API:
 
    ```swift
    enum LANIPAddressCanonicalizerV6 {
@@ -130,7 +130,7 @@ invariant; it is not an accepted human-visible invite.
 9. Do not change the public structs, enum cases, serialized form, query parser, digest validation,
    access levels, or any transport API.
 
-### 2. `Tests/PebbleCoreTests/LANDirectInviteV6Tests.swift`
+### 2. `Tests/ElysiumCoreTests/LANDirectInviteV6Tests.swift`
 
 Keep all existing cases and add these fixed, deterministic gates:
 
@@ -178,10 +178,10 @@ returns to Architecture; it is not resolved by deleting a case or importing Netw
 
 ## Files explicitly unchanged
 
-- `Sources/Pebble/LANTransport.swift`: remains the sole Network.framework/DNS/socket adapter. No
+- `Sources/Elysium/LANTransport.swift`: remains the sole Network.framework/DNS/socket adapter. No
   canonicalization callback or new public API is added.
 - `scripts/security-scan.sh`: no allowlist change. Its existing failure must turn green solely because
-  `PebbleCore` no longer references Network.framework.
+  `ElysiumCore` no longer references Network.framework.
 - `Package.swift`: no target dependency or linker change.
 - `LAN_RPG_PROTOCOL_V6.md`, `ARCHITECTURE.md`, `CONTRIBUTING.md`, `SECURITY.md`: no durable behavior or
   architecture text changes are needed; the implementation is brought back into their existing
@@ -213,10 +213,10 @@ bash scripts/security-scan.sh
 swift test --filter LANDirectInviteV6Tests
 swift build -c release
 swift test
-swift run -c release pebsmoke
+swift run -c release elysmoke
 ```
 
-The release build must be warning-free. `pebsmoke` must report the repository's reviewed expected
+The release build must be warning-free. `elysmoke` must report the repository's reviewed expected
 count (currently 457) unless a separately reviewed change deliberately updates it. After independent
 Security (code) PASS and independent Test PASS, the complete branch still requires
 `bash scripts/pipeline.sh`, deployment, installed-app verification, and the two-Mac LAN proof before
@@ -225,12 +225,12 @@ commit/push under the broader RPG/LAN closeout.
 ## Conditions for Builder
 
 1. Build starts only after an independent Security (plan) PASS on this exact plan hash.
-2. Edit only `Sources/PebbleCore/Net/LANDirectInviteV6.swift` and
-   `Tests/PebbleCoreTests/LANDirectInviteV6Tests.swift` for this remediation.
+2. Edit only `Sources/ElysiumCore/Net/LANDirectInviteV6.swift` and
+   `Tests/ElysiumCoreTests/LANDirectInviteV6Tests.swift` for this remediation.
 3. Preserve all public APIs, typed error cases, valid serialized bytes, redaction, and digest-before-
    network ordering.
 4. Do not edit `LANTransport.swift`, `Package.swift`, `scripts/security-scan.sh`, or any scanner
-   allowlist; do not add a PebbleCore dependency on Network.framework.
+   allowlist; do not add a ElysiumCore dependency on Network.framework.
 5. Keep all parsing bounded and synchronous with no DNS, interface, filesystem, clock, randomness, or
    socket access.
 6. Treat any reference-oracle mismatch, accepted noncanonical form, changed valid invite, warning,

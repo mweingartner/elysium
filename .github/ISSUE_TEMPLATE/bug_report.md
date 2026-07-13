@@ -14,7 +14,7 @@ assignees: ""
 ## Environment
 
 - macOS version + Mac model/chip (e.g. macOS 15.2, M2 MacBook Air):
-- Pebble version (bottom-left of the title screen):
+- Elysium version (bottom-left of the title screen):
 - Ultra graphics (on/off):
 - Render distance / other non-default settings:
 
@@ -27,6 +27,6 @@ assignees: ""
 
 <!-- Screenshots or video for anything visual.
      For crashes: the report from ~/Library/Logs/DiagnosticReports, plus
-     terminal output if you launched with `pebble run` from a terminal.
+     terminal output if you launched with `elysium run` from a terminal.
      If the engine itself seems wrong (worldgen/physics/redstone): the tail
-     of `pebble test` — it should print "456 passed, 0 failed". -->
+     of `elysium test` — it should print "456 passed, 0 failed". -->

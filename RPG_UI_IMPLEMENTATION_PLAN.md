@@ -12,17 +12,17 @@ Architecture revalidated the clean `feature/lan-shared-state` tree at commit `58
 new implementation. The exact frozen inputs relevant to this plan were:
 
 - `Package.swift`: `50270ebc175f60239feba2c4f2ba0ce75ee3f26e4fd97c7af1630a0d9000710a`;
-- `Sources/PebbleStorage/StorageEngine.swift`:
+- `Sources/ElysiumStorage/StorageEngine.swift`:
   `ae73b775aef8f7e286a47eaae4260d9f63064feb63ec16c916787f32208db5bb`;
-- `Sources/PebbleCore/Game/Saves.swift`:
+- `Sources/ElysiumCore/Game/Saves.swift`:
   `cb1b32c3b973f0486ff6ffc7822086049a0a540d574e96fc6ce7e5b9a78c85e3`;
-- `scripts/verify-pebble-storage-release-surface.sh`:
+- `scripts/verify-elysium-storage-release-surface.sh`:
   `ca5fe73a61d812365db78e26fc627614b73e138cc50b5e1336eb7ed9e81a12bb`;
 - `LAN_V6_PHASE20B_ADAPTER_PLAN.md`:
   `c7c10539189fe6b8912f952648cea9aeb97dac7067232157a485f23ddbf95325`.
 
 Those hashes are a historical pre-Phase-2.0B record, not the current Builder baseline. Phase 2.0B
-subsequently removed SQLite ownership from PebbleCore and received independent Security code and
+subsequently removed SQLite ownership from ElysiumCore and received independent Security code and
 Tester PASS. The safe-deferral implementation of `RPG_STORAGE_SURFACE_AMENDMENT_PLAN.md` then
 received independent Security code and Tester PASS with local-world storage operational and its
 client/host authority surfaces deliberately dormant. This table remains the passed safe-deferral
@@ -33,12 +33,12 @@ hash and is not rewritten by this planning edit:
 | --- | --- |
 | `RPG_STORAGE_SURFACE_AMENDMENT_PLAN.md` | `dd2f035e0c97228ca871edbdde0156481967902ea460d56cb361a8036ca993ee` |
 | `LAN_V6_PHASE20B_ADAPTER_PLAN.md` | `86c87ae1fb2b4ba2e3c710a3ac5d97768aeef7cf7b9e2927d16d4ab86fc50589` |
-| `Sources/PebbleStorage/StorageEngine.swift` | `0a226d3b4a78cbe44738f1111776a2d66f5351c8e9699c078da9fa073b5c3b04` |
-| `Sources/PebbleCore/Game/Saves.swift` | `3d8a9e897046ef1674f7d6db947718c3a73078607151fc4c4abb9e8d1ce30342` |
-| `Sources/PebbleCore/Game/RPGLocalPreferences.swift` | `7cc47fb13e09369d4071e48a1c603a2081c8c09b0bbedeae8ecb992e944a801d` |
-| `scripts/pebble-storage-api-v1.json` | `b65f67f5bec8209862221e3a09ff1452501f9a2769e70190d6595f8a36617f22` |
-| `scripts/pebble-core-storage-capability-v1.json` | `8c14d434f43b8f7666135aafb4c12dac918f21eadbda76fbcf24333ac1744a1e` |
-| `scripts/verify-pebble-storage-release-surface.sh` | `f9889eaed05fa941ee1b332bebcb2ccf2173f7df9267a83447a7f01d90e3458c` |
+| `Sources/ElysiumStorage/StorageEngine.swift` | `0a226d3b4a78cbe44738f1111776a2d66f5351c8e9699c078da9fa073b5c3b04` |
+| `Sources/ElysiumCore/Game/Saves.swift` | `3d8a9e897046ef1674f7d6db947718c3a73078607151fc4c4abb9e8d1ce30342` |
+| `Sources/ElysiumCore/Game/RPGLocalPreferences.swift` | `7cc47fb13e09369d4071e48a1c603a2081c8c09b0bbedeae8ecb992e944a801d` |
+| `scripts/elysium-storage-api-v1.json` | `b65f67f5bec8209862221e3a09ff1452501f9a2769e70190d6595f8a36617f22` |
+| `scripts/elysium-core-storage-capability-v1.json` | `8c14d434f43b8f7666135aafb4c12dac918f21eadbda76fbcf24333ac1744a1e` |
+| `scripts/verify-elysium-storage-release-surface.sh` | `f9889eaed05fa941ee1b332bebcb2ccf2173f7df9267a83447a7f01d90e3458c` |
 
 The current `SaveDB` boundary exposes four Track-B local-world preference operations:
 
@@ -67,10 +67,10 @@ parent -> `conflict`; lifecycle/I/O/SQLite/transaction/durability failure -> `pe
 All decode/digest work occurs after the rank-12 storage critical section. The returned
 `RPGQuickSlotStorageSnapshot` carries preferences, revision, digest, and immutable migration-origin
 digest/revision; the legacy call returns `RPGLegacyQuickSlotMigrationResult`. The storage-amendment
-Builder, not the UI Builder, may add only four public PebbleStorage CAS additions:
-`PebblePlayerJSONRowDigest`, `PebblePlayerJSONExpectedRowState`,
-`PebblePlayerJSONCompareAndSwapResult`, and
-`PebbleLegacyCoreStorage.compareAndSwapPlayerJSON(expected:candidate:)`. In `Saves.swift` it may add
+Builder, not the UI Builder, may add only four public ElysiumStorage CAS additions:
+`ElysiumPlayerJSONRowDigest`, `ElysiumPlayerJSONExpectedRowState`,
+`ElysiumPlayerJSONCompareAndSwapResult`, and
+`ElysiumLegacyCoreStorage.compareAndSwapPlayerJSON(expected:candidate:)`. In `Saves.swift` it may add
 only the exact checked Core digest/expectation/snapshot/error types plus `getPlayerChecked` and
 `compareAndSwapPlayerChecked`. The old section-0 source/API/manifest/verifier hashes remain passed
 input evidence and are not rewritten by this plan; new hashes are recorded only after implementation
@@ -90,11 +90,11 @@ The resulting three-track boundary is now:
    row save succeeds; wire settings/keybind/tutorial
    persistence; and connect the pure model to the AppKit renderer, shared input router, Controls,
    HUD/entry points, accessibility bridge, isolated harness, and physical RPG-scoped controller
-   adapter. `Sources/Pebble/LANTransport.swift` may only project `.unavailable` for a protocol-5 LAN
+   adapter. `Sources/Elysium/LANTransport.swift` may only project `.unavailable` for a protocol-5 LAN
    client and prove zero `LANRPGIntent`/zero local mutation fallback. This local-production scope may
    proceed through installed Design Sign-off, Test, pipeline, deploy, and installed local-world proof.
-3. **Track C — still blocked.** Track B must not add a PebbleCore client semantic adapter, call or
-   wrap `PebbleStorageCoordinator.clientAuthorityCheckpointV6()`, acquire a client checkpoint facade,
+3. **Track C — still blocked.** Track B must not add a ElysiumCore client semantic adapter, call or
+   wrap `ElysiumStorageCoordinator.clientAuthorityCheckpointV6()`, acquire a client checkpoint facade,
    add a host owner/checkpoint writer, enable host authority persistence, activate protocol v6,
    change cutover/version/quarantine/credentials, publish pending/terminal LAN authority state,
    acknowledge a durable notice, or submit any new LAN RPG authority operation. Those changes require
@@ -117,7 +117,7 @@ and exposes the custom Metal UI through a real AppKit accessibility tree.
 The implementation is not allowed to make dormant v6 code callable. In particular, this UI change
 must not change `LAN_MULTIPLAYER_PROTOCOL_VERSION`, a v6 ready marker, schema cutover, credential
 promotion, admission publication, socket routing, v5 quarantine, or any file under
-`Sources/PebbleCore/Net/LANV6*`. The transport/authority phase owns that cutover. The UI consumes one
+`Sources/ElysiumCore/Net/LANV6*`. The transport/authority phase owns that cutover. The UI consumes one
 read-only `RPGAuthorityPresentation` snapshot supplied by the authority layer after that layer has
 passed its own gates. If an active LAN client has no installed v6 authority coordinator, the snapshot
 is `.unavailable`; the sheet remains inspectable and every authoritative operation is disabled.
@@ -167,40 +167,40 @@ The implementation begins from these observed facts, not from the intended contr
 
 ## 3. Source ownership and exact file map
 
-### 3.1 New PebbleCore files
+### 3.1 New ElysiumCore files
 
-1. `Sources/PebbleCore/Game/RPGProgressionEvaluation.swift`
+1. `Sources/ElysiumCore/Game/RPGProgressionEvaluation.swift`
    - Owns `RPGSkillPurchaseEvaluation`, `RPGSkillPurchaseFailure`,
      `rpgEvaluateSkillPurchase`, specialization completion math, and level-one guidance.
    - Contains no `Player`, `World`, UI, AppKit, transport, or persistence mutation.
 
-2. `Sources/PebbleCore/Game/RPGLocalPreferences.swift`
+2. `Sources/ElysiumCore/Game/RPGLocalPreferences.swift`
    - Owns bounded `RPGLocalPreferenceScope`, `RPGQuickSlotPreferences`, syntactic/semantic
      normalization, assign/move/clear reducers, and bounded legacy `actionQuickSlots` extraction
      from raw player JSON.
    - Owns no authoritative revision, action sequence, selected action, or LAN message.
 
-3. `Sources/PebbleCore/Game/RPGScreenModel.swift`
+3. `Sources/ElysiumCore/Game/RPGScreenModel.swift`
    - Owns all app-independent creation/sheet projections, stable semantic IDs, semantic
      descriptors, bounded geometry/virtualization, focus navigation, tutorial model, installed
      fixtures, and the sole LAN presentation input.
 
-4. `Sources/PebbleCore/Game/InputChords.swift`
+4. `Sources/ElysiumCore/Game/InputChords.swift`
    - Owns canonical chord parsing/formatting, modifier/key domains, binding definitions, conflict
      detection, zero-or-one command resolution, and the pure routing/dedupe state exercised with
      synthetic `performKeyEquivalent`/`keyDown` sources.
 
-5. `Sources/PebbleCore/Game/RPGControllerInput.swift`
+5. `Sources/ElysiumCore/Game/RPGControllerInput.swift`
    - Owns the platform-independent controller reducer, thresholds, hysteresis, neutral arming,
      repeat timing, and emitted `RPGSemanticCommand` values. It imports no GameController framework.
 
-6. `Sources/PebbleCore/Game/LocalSettingsStore.swift`
+6. `Sources/ElysiumCore/Game/LocalSettingsStore.swift`
    - Owns byte-capped, known-field-tolerant settings/keybind decoding and Result-returning atomic
      persistence. No UI mutates published Settings/keybind values before this store succeeds.
 
-### 3.2 Modified PebbleCore files
+### 3.2 Modified ElysiumCore files
 
-1. `Sources/PebbleCore/Game/CharacterProgression.swift`
+1. `Sources/ElysiumCore/Game/CharacterProgression.swift`
    - Removes quick slots from `RPGCharacterState` authority/encoding.
    - Makes `rpgLearnSkill` consume `rpgEvaluateSkillPurchase`.
    - Removes quick-slot helpers that accept/mutate `RPGCharacterState` and replaces action lookup
@@ -211,18 +211,18 @@ The implementation begins from these observed facts, not from the intended contr
      compatibility wrapper may preserve mutate-before-authority behavior for a LAN client.
    - Keeps registration IDs/order and schema-v2 gameplay fields unchanged.
 
-2. `Sources/PebbleCore/Systems/RPGActions.swift`
+2. `Sources/ElysiumCore/Systems/RPGActions.swift`
    - Removes selection writes from generic action execution.
    - Replaces `rpgUseActionQuickSlot(_:slot:)` with
      `rpgUseActionQuickSlot(_:slot:preferences:)`, resolving an explicit kind/ID and executing it
      without changing authoritative selection.
 
-3. `Sources/PebbleCore/Game/Settings.swift`
+3. `Sources/ElysiumCore/Game/Settings.swift`
    - Adds the optional, backward-compatible `rpgTutorialVersion` field; quick slots are not a
      process-global setting and never live in this type.
    - Adds the 12 RPG default chords and uses the canonical chord sanitizer for every known action.
 
-4. `Sources/PebbleCore/Game/GameCore.swift`
+4. `Sources/ElysiumCore/Game/GameCore.swift`
    - Owns the current local quick-slot value and its local persistence mode.
    - Owns the checked nonzero world-entry generation and wraps every local preference request/result
      with exact scope, generation, and expected live revision before invoking the closed `SaveDB` API.
@@ -240,7 +240,7 @@ The implementation begins from these observed facts, not from the intended contr
    - Owns the three `persistAndPublish*Candidate` APIs in section 4.3 and is the only live
      settings/keybind/tutorial publication owner.
 
-5. `Sources/PebbleCore/Entity/Player.swift`
+5. `Sources/ElysiumCore/Entity/Player.swift`
    - New saves with no pending legacy migration encode the slot-free repaired RPG state.
    - A bounded internal `RPGLegacyQuickSlotEnvelope` retains and re-encodes an old
      `actionQuickSlots` value until its local-world destination and migration marker commit. It is
@@ -251,52 +251,52 @@ The implementation begins from these observed facts, not from the intended contr
    - Adds pure `save(omitLegacyQuickSlots:)`; ordinary `save()` follows live eligibility, while the
      explicit true candidate never mutates the live envelope.
 
-6. `Sources/PebbleCore/Net/LANMultiplayer.swift`
+6. `Sources/ElysiumCore/Net/LANMultiplayer.swift`
    - Track B may make only the compatibility edits forced by removing quick slots from the existing
      authoritative/public/player state and update the matching protocol-5 fixtures. It must not add a
      message, intent, semantic adapter, host writer, v6 DTO, checkpoint call, or transport route.
 
-7. `Sources/PebbleCore/Game/Saves.swift` and `Sources/PebbleStorage/StorageEngine.swift`
+7. `Sources/ElysiumCore/Game/Saves.swift` and `Sources/ElysiumStorage/StorageEngine.swift`
    - A separately gated storage-amendment Builder adds only the exact concrete player digest/
      expectation/result/CAS storage symbols and checked get/CAS Core types/methods. Digest/decode/
      candidate/error work stays outside rank 12; rank 12 contains one get or one transactional CAS.
      The UI Builder calls only the six exact `SaveDB` methods in section 0; it
-     never imports `PebbleStorage`, holds a storage facade, or prepares SQL.
+     never imports `ElysiumStorage`, holds a storage facade, or prepares SQL.
    - Client checkpoint primitives and host row layouts remain dormant storage-only prerequisites.
-     Track B adds no PebbleCore client semantic adapter and no host writer or access path.
+     Track B adds no ElysiumCore client semantic adapter and no host writer or access path.
 
 ### 3.3 New macOS app files
 
-1. `Sources/Pebble/RPGControllerM.swift`
+1. `Sources/Elysium/RPGControllerM.swift`
    - Imports `GameController` and adapts compatible physical controller callbacks to the pure
      `RPGControllerInput` reducer.
 
-2. `Sources/Pebble/RPGAccessibilityM.swift`
-   - Owns `PebbleAccessibilityElement`, GUI-to-screen frame conversion, semantic snapshot caching,
+2. `Sources/Elysium/RPGAccessibilityM.swift`
+   - Owns `ElysiumAccessibilityElement`, GUI-to-screen frame conversion, semantic snapshot caching,
      AppKit activation/focus callbacks, and accessibility notifications.
    - Every press-capable cached element retains its full committed origin tuple and dispatches Press
      with that tuple plus a fresh receipt; it never reconstructs activation identity from current UI.
 
-3. `Sources/Pebble/RPGUIHarnessM.swift`
+3. `Sources/Elysium/RPGUIHarnessM.swift`
    - Parses only the allowlisted installed-harness environment values, constructs deterministic
      fixtures, and emits bounded sorted semantic summaries. It never edits a world/save.
 
-4. `Sources/Pebble/AppInputRouterM.swift`
+4. `Sources/Elysium/AppInputRouterM.swift`
    - Is the thin `NSEvent` adapter into the sole pure routing/deduplication path shared by
      `performKeyEquivalent(with:)` and `keyDown(with:)`; neither override contains an independent
      shortcut or screen-routing ladder.
 
 ### 3.4 Modified macOS app files
 
-1. `Sources/Pebble/RPGScreensM.swift`
+1. `Sources/Elysium/RPGScreensM.swift`
    - Replace the prototype implementation. This file becomes a thin renderer/controller for
      `RPGScreenModel`; it owns no legality, registry filtering, quick-slot authority, or LAN state.
 
-2. `Sources/Pebble/UIManagerM.swift`
+2. `Sources/Elysium/UIManagerM.swift`
    - Add structured key events, semantic snapshot/activation defaults on `Screen`, shared semantic
      revision ownership, focus routing, and dirty notifications.
 
-3. `Sources/Pebble/main.swift`
+3. `Sources/Elysium/main.swift`
    - Parse/validate harness mode before constructing GameCore, settings, SaveDB, player, or network
      services; in ordinary mode construct structured modifier-aware key events.
    - Delegate both AppKit keyboard entry points to `AppInputRouter`; preserve only lifecycle wiring
@@ -305,29 +305,29 @@ The implementation begins from these observed facts, not from the intended contr
      menu and binding-protection set cannot drift.
    - Own `RPGControllerAdapter` and `RPGAccessibilityBridge` lifetimes.
    - Forward app resign/focus/screen-context transitions to clear controller held state.
-   - Delete the shipping `PEBBLE_RPG_AUTOCREATE` path and replace its proof cases with pure harness
+   - Delete the shipping `ELYSIUM_RPG_AUTOCREATE` path and replace its proof cases with pure harness
      fixtures; do not broaden ordinary screenshot paths.
 
-4. `Sources/Pebble/MenusM.swift`
+4. `Sources/Elysium/MenusM.swift`
    - Replace the Controls fixed list/capture with the virtualized chord editor.
 
-5. `Sources/Pebble/HudM.swift`
+5. `Sources/Elysium/HudM.swift`
    - Resolve the nine displayed actions from `game.rpgQuickSlotPreferences` plus repaired
      authoritative state; no HUD method reads slots from `RPGCharacterState`.
 
-6. `Sources/Pebble/ScreensM.swift`
+6. `Sources/Elysium/ScreensM.swift`
    - Keep Inventory/Creative Character entry points, but route through one rule/presentation-aware
      open helper and preserve focus when returning.
 
-7. `Sources/Pebble/MenusM.swift`, `Sources/Pebble/HudM.swift`, and
-   `Sources/Pebble/RPGScreensM.swift`
+7. `Sources/Elysium/MenusM.swift`, `Sources/Elysium/HudM.swift`, and
+   `Sources/Elysium/RPGScreensM.swift`
    - Use High Contrast and Reduce Motion from `Settings`; no state is conveyed by color alone.
 
 8. `Package.swift`
-   - Add `.linkedFramework("GameController")` to the Pebble executable only. PebbleCore remains
+   - Add `.linkedFramework("GameController")` to the Elysium executable only. ElysiumCore remains
      headless and AppKit/GameController-free.
 
-9. `Sources/Pebble/LANTransport.swift`
+9. `Sources/Elysium/LANTransport.swift`
    - During Track B, explicitly projects `.unavailable` for a v5 LAN client and clears/rejects
      every new-sheet authoritative submission before the existing `lanRPGIntentHandler`; local-slot
      editing remains separately scoped and rejects without publication when no v6 scope/store
@@ -575,9 +575,9 @@ DTOs, but migrate the old player JSON transactionally:
    completion never overwrites newer slots or publishes omission into another session.
 
 The two digests use versioned, domain-separated canonical bytes. The source digest is SHA-256 over
-`Pebble/RPGLegacyQuickSlots/source/v1`, then a length-prefixed source-envelope version and exactly
+`Elysium/RPGLegacyQuickSlots/source/v1`, then a length-prefixed source-envelope version and exactly
 nine slot encodings. The destination digest uses
-`Pebble/RPGLocalQuickSlots/destination/v1`, then the length-prefixed canonical scope encoding,
+`Elysium/RPGLocalQuickSlots/destination/v1`, then the length-prefixed canonical scope encoding,
 destination schema/revision, and exactly nine slot encodings. Every slot is encoded with an explicit
 nil/value tag; values are UTF-8 byte-length-prefixed canonical tokens. All integer lengths are
 fixed-width big-endian and checked before allocation. Neither digest hashes JSON text, dictionary
@@ -852,10 +852,10 @@ even when an operation status/notice is also present. These are the exact non-co
 | --- | --- | --- | --- | --- |
 | `ready` / `localReady` | `authority.ready` (outlined check) | `Ready` | `Character controls are available when their requirements are met.` Authority supplies no disabled-control explanation; a disabled operation shows only its exact canonical evaluator reason. | `Ready. Character controls are available when their requirements are met.` |
 | `pending` / `awaitingHost` | `authority.awaitingHost` (outlined hourglass) | `Awaiting host` | `Character changes are disabled until the host responds. Local quick slots remain available.` | `Awaiting host. Character changes are disabled until the host responds. Local quick slots remain available.` |
-| `acceptedCommit` / `committingAcceptedOwnerCheckpoint` | `authority.savingAccepted` (disk outline with check) | `Saving accepted update` | `Character changes are disabled while Pebble saves the accepted host update. Local quick slots remain available.` | `Saving accepted update. Character changes are disabled while Pebble saves the accepted host update. Local quick slots remain available.` |
-| `rejectedCommit` / `committingRejectedOwnerCheckpoint` | `authority.savingRejected` (disk outline with cross) | `Restoring host state` | `Character changes are disabled while Pebble restores the host’s character state. Local quick slots remain available.` | `Restoring host state. Character changes are disabled while Pebble restores the host’s character state. Local quick slots remain available.` |
+| `acceptedCommit` / `committingAcceptedOwnerCheckpoint` | `authority.savingAccepted` (disk outline with check) | `Saving accepted update` | `Character changes are disabled while Elysium saves the accepted host update. Local quick slots remain available.` | `Saving accepted update. Character changes are disabled while Elysium saves the accepted host update. Local quick slots remain available.` |
+| `rejectedCommit` / `committingRejectedOwnerCheckpoint` | `authority.savingRejected` (disk outline with cross) | `Restoring host state` | `Character changes are disabled while Elysium restores the host’s character state. Local quick slots remain available.` | `Restoring host state. Character changes are disabled while Elysium restores the host’s character state. Local quick slots remain available.` |
 | `reconnecting` / `reconnecting` | `authority.reconnecting` (two opposed circular arrows) | `Reconnecting` | `Character changes are disabled until the connection and pending request recover. Local quick slots remain available.` | `Reconnecting. Character changes are disabled until the connection and pending request recover. Local quick slots remain available.` |
-| `disposition` / `awaitingDispositionCheckpoint` | `authority.finalizing` (inbox outline with solid dot) | `Finalizing host response` | `Character changes are disabled while Pebble finishes processing the host response. Local quick slots remain available.` | `Finalizing host response. Character changes are disabled while Pebble finishes processing the host response. Local quick slots remain available.` |
+| `disposition` / `awaitingDispositionCheckpoint` | `authority.finalizing` (inbox outline with solid dot) | `Finalizing host response` | `Character changes are disabled while Elysium finishes processing the host response. Local quick slots remain available.` | `Finalizing host response. Character changes are disabled while Elysium finishes processing the host response. Local quick slots remain available.` |
 | `exhausted` / `authorityExhausted` | `authority.exhausted` (octagonal stop outline) | `Authority exhausted` | `Character changes are permanently disabled for this character session. Valid local quick slots may still be moved or cleared.` | `Authority exhausted. Character changes are permanently disabled for this character session. Valid local quick slots may still be moved or cleared.` |
 | `unavailable` / `unavailable` | `authority.unavailable` (closed padlock outline) | `Character changes unavailable` | `Character changes are unavailable in this LAN session. Quick-slot editing requires a compatible host session.` | `Character changes unavailable. Character changes are unavailable in this LAN session. Quick-slot editing requires a compatible host session.` |
 
@@ -1256,8 +1256,8 @@ authority request for a valid activation.
 
 ## 7. Configurable chord and Controls contract
 
-`InputChords.swift` adds `PebbleKeyModifiers` (Command, Control, Option, Shift),
-`PebbleTerminalKey`, `PebbleKeyChord`, `PebbleKeyEvent`, and `KEYBIND_DEFINITIONS`. Modifier tokens
+`InputChords.swift` adds `ElysiumKeyModifiers` (Command, Control, Option, Shift),
+`ElysiumTerminalKey`, `ElysiumKeyChord`, `ElysiumKeyEvent`, and `KEYBIND_DEFINITIONS`. Modifier tokens
 and terminal tokens are distinct domains. The terminal allowlist is exactly the physical terminal
 values in `KEYCODE_MAP` plus legacy synthesized `ShiftLeft` and `ControlLeft`; bare `Command`,
 `Control`, `Option`, and `Shift` are modifiers and can never be terminal keys. The two synthesized
@@ -1280,7 +1280,7 @@ Command+V, Command+M, and Command+Z.
 At app startup and in tests, recursive enumeration of the constructed main menu's nonempty key
 equivalents must equal the catalog set exactly; any new/changed nonempty shipping menu equivalent is
 therefore protected automatically or fails construction/testing before settings load. Binding
-capture rejects every protected chord with `Reserved by Pebble`; `Use Anyway` is never offered. Load
+capture rejects every protected chord with `Reserved by Elysium`; `Use Anyway` is never offered. Load
 sanitization falls back only the affected action, persistence rejects a candidate containing one,
 and dispatch never sends one to screen/world binding resolution. The same immutable protected set is
 passed to `LocalSettingsStore`, Controls capture, and `AppInputRouter`; no layer keeps a copied subset.
@@ -1295,7 +1295,7 @@ Append these exact defaults to `DEFAULT_KEYBINDS`:
 `AppInputRouterM.swift` is the one AppKit event router. Both
 `GameView.performKeyEquivalent(with:)` and `GameView.keyDown(with:)` call
 `appInputRouter.route(event:source:)`; neither override checks F11, Command shortcuts, Escape,
-screens, bindings, or gameplay independently. The router sends a full `PebbleKeyEvent` to a new
+screens, bindings, or gameplay independently. The router sends a full `ElysiumKeyEvent` to a new
 `Screen.onKeyEvent` hook; the existing `onKey` default remains for non-RPG screens. `GameCore.keyDown`
 is removed as a raw-event fan-out; `GameCore` receives at most one already resolved command.
 
@@ -1325,7 +1325,7 @@ The router runs this exact precedence:
 The dedupe FIFO holds at most 16 consumed fingerprints and expires entries after 250 monotonic
 milliseconds. An unconsumed `performKeyEquivalent` event is not inserted, so later `keyDown` can
 handle it. A consumed physical event delivered to both entry points dispatches exactly once.
-`flagsChanged` updates `PebbleKeyModifiers` and may emit a legacy `ShiftLeft`/`ControlLeft` terminal
+`flagsChanged` updates `ElysiumKeyModifiers` and may emit a legacy `ShiftLeft`/`ControlLeft` terminal
 edge with a checked local serial and `.synthesizedLegacy` origin; that terminal fingerprint cannot
 alias the physical event, and changing a modifier never masquerades as a terminal key.
 
@@ -1406,7 +1406,7 @@ visible. Synthetic tests do not satisfy installed controller proof.
 `Screen` receives default-empty `semanticSnapshot`, `focusSemanticElement`, and `semanticRevision`.
 Accessibility activation is not a screen callback: it constructs the section 6.4 capture and calls
 the sole `UIManager.dispatchSemanticActivation`. Each press-capable cached
-`PebbleAccessibilityElement` stores the complete origin tuple from one atomically committed model:
+`ElysiumAccessibilityElement` stores the complete origin tuple from one atomically committed model:
 `(screenInstanceID, semanticRevision, ID, commandFingerprint, semanticInputFingerprint)`, plus its
 layout generation, viewport, and descriptor. It does not look up or substitute any tuple component
 from the current screen when Press occurs. Nonactionable elements expose no Press action.
@@ -1420,7 +1420,7 @@ a changed command/semantic-input fingerprint, or any other stale cached element 
 require the caller to fetch the newly committed accessibility element.
 
 `RPGAccessibilityBridge` makes `GameView` an accessibility group and publishes main-thread
-`PebbleAccessibilityElement` children. GUI top-left frames convert through UI scale, backing scale,
+`ElysiumAccessibilityElement` children. GUI top-left frames convert through UI scale, backing scale,
 view/window coordinates, then `window.convertPoint(toScreen:)`. Descriptors map to AppKit roles:
 buttons, static text, tabs/tab group, groups, rows, and scroll areas. Labels, values, rank,
 selected/prepared/slotted, enabled/locked, canonical reason/help, and press action are populated.
@@ -1467,18 +1467,18 @@ Harness detection is the first bootstrap decision in `main.swift`, before any `G
 `SaveDB`, `StorageEngine`, `LocalSettingsStore`, player/world loader, audio engine, controller monitor,
 LAN socket/listener, or background task is constructed. `RPGUIHarnessBootstrap.parseIfPresent` reads
 a bounded environment snapshot and returns either ordinary mode, one fully validated fixture, or a
-bounded fatal harness diagnostic. When `PEBBLE_RPG_UI_CASE` is present, the complete allowed
-`PEBBLE_` key set is exactly:
+bounded fatal harness diagnostic. When `ELYSIUM_RPG_UI_CASE` is present, the complete allowed
+`ELYSIUM_` key set is exactly:
 
-- `PEBBLE_RPG_UI_CASE`;
-- `PEBBLE_RPG_UI_AUTHORITY`;
-- `PEBBLE_RPG_UI_VIEWPORT`;
-- `PEBBLE_RPG_UI_APPEARANCE`;
-- `PEBBLE_RPG_UI_SEMANTIC_SUMMARY`;
-- optional `PEBBLE_SHOT`, solely for an explicitly requested screenshot output.
+- `ELYSIUM_RPG_UI_CASE`;
+- `ELYSIUM_RPG_UI_AUTHORITY`;
+- `ELYSIUM_RPG_UI_VIEWPORT`;
+- `ELYSIUM_RPG_UI_APPEARANCE`;
+- `ELYSIUM_RPG_UI_SEMANTIC_SUMMARY`;
+- optional `ELYSIUM_SHOT`, solely for an explicitly requested screenshot output.
 
-Any other `PEBBLE_` key, including autoload/new-world/command/LAN/probe/bot/AI/debug/open-screen and
-the retired `PEBBLE_RPG_AUTOCREATE` family, rejects the entire harness invocation before side
+Any other `ELYSIUM_` key, including autoload/new-world/command/LAN/probe/bot/AI/debug/open-screen and
+the retired `ELYSIUM_RPG_AUTOCREATE` family, rejects the entire harness invocation before side
 effects; values are never combined and ordinary mode is not used as fallback. The shipping
 `pendingRPGAutoCreate` state, parser, and `runRPGAutoCreateIfNeeded` mutator are removed. Creation
 step/review coverage comes only from immutable fixture profiles.
@@ -1489,7 +1489,7 @@ selector and the screenshot value below. Exceeding any bound rejects before side
 
 The installed harness accepts one closed case selector of at most 192 UTF-8 bytes:
 
-`PEBBLE_RPG_UI_CASE=<case>`, where `<case>` is exactly one of:
+`ELYSIUM_RPG_UI_CASE=<case>`, where `<case>` is exactly one of:
 
 - `creation:<path|branch|attributes|review>:<pathID>:<branchID>:<preset|editedValid|underBudget|unmetRequirement|inventoryFull>`;
 - `tutorial:<1|2|3|4>:<pathID>:<branchID>`;
@@ -1524,18 +1524,18 @@ context is valid because merely viewing a skill can precede a local quick-slot s
 
 The remaining allowlisted selectors are:
 
-- `PEBBLE_RPG_UI_AUTHORITY=<ready|pending|acceptedCommit|rejectedCommit|reconnecting|disposition|exhausted|unavailable>`;
-- `PEBBLE_RPG_UI_VIEWPORT=<360x224|520x330|700x420>`;
-- `PEBBLE_RPG_UI_APPEARANCE=<standard|highContrast|reduceMotion|highContrastReduceMotion>`;
-- `PEBBLE_RPG_UI_SEMANTIC_SUMMARY=1`.
+- `ELYSIUM_RPG_UI_AUTHORITY=<ready|pending|acceptedCommit|rejectedCommit|reconnecting|disposition|exhausted|unavailable>`;
+- `ELYSIUM_RPG_UI_VIEWPORT=<360x224|520x330|700x420>`;
+- `ELYSIUM_RPG_UI_APPEARANCE=<standard|highContrast|reduceMotion|highContrastReduceMotion>`;
+- `ELYSIUM_RPG_UI_SEMANTIC_SUMMARY=1`.
 
-If `PEBBLE_SHOT` is present, its value is one relative basename plus an optional `@<frames>` suffix;
+If `ELYSIUM_SHOT` is present, its value is one relative basename plus an optional `@<frames>` suffix;
 the basename is 1...96 bytes from `[A-Za-z0-9._-]`, may not be `.` or `..`, and frames are 1...600.
 The output resolves beneath the harness-owned canonical temporary directory, is created no-follow
 and exclusive, and rejects existing files, symlinks, absolute paths, separators, traversal, and
 extra suffixes before bootstrap. Harness mode cannot overwrite a caller-selected arbitrary path.
 
-Each of the eight `PEBBLE_RPG_UI_AUTHORITY` fixtures uses the table in section 4.5 without alternate
+Each of the eight `ELYSIUM_RPG_UI_AUTHORITY` fixtures uses the table in section 4.5 without alternate
 copy. Its pure draw output must contain the exact icon ID/shape, title, and visible help; its semantic
 summary must contain `RPG authority`, the exact value/help, exact announcement string, and every
 otherwise-legal authoritative control's exact enabled state/reason. `ready` asserts the canonical
@@ -1565,9 +1565,9 @@ owner data.
 Harness tests inject dependency factories whose GameCore/storage/settings/player/network counters
 must remain exactly zero; run every selector with a fresh temporary support home; compare recursive
 directory manifests before/after; and assert no files, database handles, sockets, listeners, or
-network tasks are created. Combined-mutation-environment tests cover every shipping `PEBBLE_` family
-and must reject before those counters change. Zero-mutation runs omit `PEBBLE_SHOT`; when explicitly
-present, `PEBBLE_SHOT` may create only its named screenshot output and still may not create or alter
+network tasks are created. Combined-mutation-environment tests cover every shipping `ELYSIUM_` family
+and must reject before those counters change. Zero-mutation runs omit `ELYSIUM_SHOT`; when explicitly
+present, `ELYSIUM_SHOT` may create only its named screenshot output and still may not create or alter
 support/save/settings/network state.
 
 ## 11. Failure-state behavior
@@ -1618,7 +1618,7 @@ support/save/settings/network state.
      Security code and Tester PASS then freeze the new implementation hashes. No UI Builder edits a
      storage file or anticipates those hashes.
    - Until that gate closes, no path may mark a legacy envelope omittable or persist a slot-free
-     player candidate. Raw PebbleCore SQL, direct generic storage, or compatibility `putPlayer`
+     player candidate. Raw ElysiumCore SQL, direct generic storage, or compatibility `putPlayer`
      is never an interim omission implementation.
    - Client checkpoint acquisition/semantic decoding, host writers, and `.lanV6` production
      persistence remain absent. A v5 client has no synthesizable v6 preference scope and publishes no
@@ -1685,7 +1685,7 @@ support/save/settings/network state.
      removal, durable docs, focused regression and canonical-number executable rejection, and the
      complete 24-shot compact/wrapped screenshot matrix passed. Renewed Security code and Tester
      reviews of the actual corrected diff are PASS; a post-remediation warning-free Track B release
-     build and `scripts/verify-pebble-storage-release-surface.sh` also pass. These results do not replace
+     build and `scripts/verify-elysium-storage-release-surface.sh` also pass. These results do not replace
      Step 10 installed Design Sign-off, independent full Test, pipeline, deploy, or installed-world proof.
 10. **Stop Track B and run its downstream gates**
     - Source-audit that no client semantic adapter/facade, host writer, v6 activation, or nonfixture
@@ -1705,15 +1705,15 @@ Any material fix returns to the earliest affected step and invalidates later rev
 
 ### 13.1 New test files
 
-1. `Tests/PebbleCoreTests/RPGSkillPurchaseEvaluationTests.swift`
+1. `Tests/ElysiumCoreTests/RPGSkillPurchaseEvaluationTests.swift`
    - Every failure precedence pair; evaluator/mutator parity; 54 skills x ranks/states; selected vs
      cross gates/costs; authority exhaustion; checked capstone math.
-2. `Tests/PebbleCoreTests/RPGEffectCoverageTests.swift`
+2. `Tests/ElysiumCoreTests/RPGEffectCoverageTests.swift`
    - An exhaustive switch over all 54 `RPGSkillEffectID` cases, looping ranks 1...3, invokes the real
      consumer/action/spell preparation path and records one observable assertion per rank: exactly
      162. It also verifies generated effect text and 17 spell semantics. A new enum case cannot
      compile without evidence.
-3. `Tests/PebbleCoreTests/RPGLocalPreferencesTests.swift`
+3. `Tests/ElysiumCoreTests/RPGLocalPreferencesTests.swift`
    - Track B covers exact local record scope, pure 16-byte v6 host/world scope encoding without a
      production adapter, local-table caps, local-only legacy extraction/marker/destination crash cuts
      and omission, load/default/CAS stale and failure paths, delayed cross-world completion rejection,
@@ -1731,7 +1731,7 @@ Any material fix returns to the earliest affected step and invalidates later rev
      a slot-free row then publishes omission. Pre-write/post-commit barriers race same-world/A-B-A,
      envelope replacement, ordinary save, saveAndFlush, shutdown, and compatibility putPlayer; no
      stale candidate changes the durable row.
-4. `Tests/PebbleCoreTests/SaveDBPlayerRowCASTests.swift`
+4. `Tests/ElysiumCoreTests/SaveDBPlayerRowCASTests.swift`
    - Exact digest/get/absent-present/CAS/error APIs, full digest mutation and fixed-time comparison,
      compatibility serialization, encode/row failure before rank 12, transaction conflict/fault/
      restart proof, rank 0/12/0 and rank11->12 instrumentation, deterministic barriers, redacted
@@ -1740,7 +1740,7 @@ Any material fix returns to the earliest affected step and invalidates later rev
      oversized/invalid-UTF8 stored rows; incremental bounded digest construction; exact private CAS
      authorizer matrix; exactly-one-world parent; missing-parent conflict; and world-delete-before/
      after absent/present ordering all reject or commit without stale mutation.
-5. `Tests/PebbleCoreTests/LocalSettingsStoreTests.swift`
+5. `Tests/ElysiumCoreTests/LocalSettingsStoreTests.swift`
    - Settings 256-KiB and keybind 16-KiB exact/cap-plus-one, object/root/UTF-8 hostile inputs,
      independent known-field fallback, unknown fields, exactly 25 canonical <=64-byte chords,
      protected/extra/missing binding rejection, candidate-before-publish, and injected temporary
@@ -1749,44 +1749,44 @@ Any material fix returns to the earliest affected step and invalidates later rev
      write/write/file-sync/rename/directory-sync/stale-revision/revision-exhaustion faults and assert
      byte-identical live state, unchanged live+semantic revisions/dirty count, and zero notifications.
      Missing, negative, malformed string/object/fraction, and future tutorial versions load as zero.
-6. `Tests/PebbleCoreTests/RPGScreenModelTests.swift`
+6. `Tests/ElysiumCoreTests/RPGScreenModelTests.swift`
    - Four steps; all six exact path icon/role/primary/preset/selection/help contracts; six retained
      drafts; all eighteen Review branches; Foundation derivation; kits/spells/focus/XP copy; five
      tabs; every inspector/rank; caster/non-caster filtering; 3/9/27 each and 6/18/54/162 aggregate.
    - Exact neutral ready help/VoiceOver copy and exact context-aware `.localReady`/`.unavailable`
      Creation Review copy at all viewports; forbidden host-authoritative/internal terms are absent.
-7. `Tests/PebbleCoreTests/RPGScreenLayoutTests.swift`
+7. `Tests/ElysiumCoreTests/RPGScreenLayoutTests.swift`
    - Exact viewports, seeded resize/content transitions, full-control containment, shared scroll
      tuple, virtualization bounds, focus reveal/retention/nearest-preceding-focusable fallback, full
      wrapped card containment, and forward/reverse traversal of all 27 ranks exactly once for all six
      paths at all three viewports with nonactionable activation byte-equality.
-8. `Tests/PebbleCoreTests/RPGPendingPresentationTests.swift`
+8. `Tests/ElysiumCoreTests/RPGPendingPresentationTests.swift`
    - Track B proves every section 4.5 phase's pure fixture icon geometry/title/visible help/disabled-
      control reason/accessibility value+help/VoiceOver announcement, including ready's enabled/no-
      authority-reason assertion, forbidden internal-copy absence, byte-identical no-reannouncement,
      and production construction limited to `.localReady`/`.unavailable`. Digest-keyed durable inbox,
      capacity, replay, coordinator mapping, and committed-storage acknowledgement tests are Track C.
-9. `Tests/PebbleCoreTests/InputChordTests.swift`
+9. `Tests/ElysiumCoreTests/InputChordTests.swift`
    - Canonical terminal/modifier domains, all malformed cases, 25 defaults, recursive equality of
      nonempty shipping-menu chords with the protected set, capture/load/persist rejection for each,
      pairwise conflict winner across definitions/contexts, modified-digit precedence, legacy
      movement compatibility, zero-or-one resolution, routing-serial reuse rejection, and repeats.
-10. `Tests/PebbleCoreTests/AppInputRoutingTests.swift`
+10. `Tests/ElysiumCoreTests/AppInputRoutingTests.swift`
    - Shared `performKeyEquivalent`/`keyDown` fingerprint dedupe; F11 then Command+C/V/Z; every
      unconsumed shipping-menu chord (including Command+Q/M) returned to the main menu before
      screen/binding resolution; screen-before-Escape thereafter; physical versus synthesized legacy
      edges; and at most one dispatched command/mutation.
-11. `Tests/PebbleCoreTests/RPGControllerInputTests.swift`
+11. `Tests/ElysiumCoreTests/RPGControllerInputTests.swift`
    - Every mapping, enter/exit hysteresis, neutral arming, repeat caps/timing, connect/disconnect/focus/
      context reset, one edge/one command.
-12. `Tests/PebbleCoreTests/RPGSemanticAccessibilityTests.swift`
+12. `Tests/ElysiumCoreTests/RPGSemanticAccessibilityTests.swift`
    - Roles/labels/values/help/actions, offscreen 27 discoverability, exclusion of 135 other-path
      ranks, stable IDs/revisions, notification intent, High Contrast/Reduce Motion model flags, and
      the full cached `(screenInstanceID, semanticRevision, ID, commandFingerprint,
      semanticInputFingerprint)` origin tuple. Retained old elements across same-ID screen replacement,
      same-ID revision/fingerprint change, and offscreen focus/reveal reject with zero dispatch; only a
      newly fetched committed element Press succeeds.
-13. `Tests/PebbleCoreTests/RPGSemanticActivationTests.swift`
+13. `Tests/ElysiumCoreTests/RPGSemanticActivationTests.swift`
     - Exact nonzero activation-receipt/screen-instance/ID/revision/command-fingerprint/semantic-input-
       fingerprint capture through mouse/keyboard/controller/accessibility; a unique receipt for each
       genuine press with byte-identical semantic fingerprints; race interleavings for ack/rule/path/
@@ -1794,7 +1794,7 @@ Any material fix returns to the earliest affected step and invalidates later rev
       exhaustion; consume-before-revalidation; zero/unissued/replay rejection before and after the
       64-entry FIFO/set rolls over; stale rebuild without replay; fresh-press requirement; and one
       valid mutation maximum through the independent routing serial.
-14. `Tests/PebbleCoreTests/RPGUIHarnessTests.swift`
+14. `Tests/ElysiumCoreTests/RPGUIHarnessTests.swift`
     - Pre-bootstrap exact allowlist, every combined shipping mutation env rejection, bounded
       diagnostics/summary, creation steps/all six drafts/all eighteen reviews/four tutorials/all
       inspectors and ranks/slot profiles/notices/local errors/appearance states; all eight authority
@@ -1835,11 +1835,11 @@ After focused suites and each remediation loop:
 swift build -c release
 swift test
 bash scripts/security-scan.sh
-swift run -c release pebsmoke
+swift run -c release elysmoke
 bash scripts/pipeline.sh
 ```
 
-The release build must be warning-free. `pebsmoke` must still report 457 unless a separately reviewed
+The release build must be warning-free. `elysmoke` must still report 457 unless a separately reviewed
 intentional check addition changes that count. Verify each command's exit code and actual test/check
 count.
 
@@ -1889,7 +1889,7 @@ count.
 
 ## 15. Installed Design Sign-off and deployment proof
 
-After Security code PASS, build/deploy a fresh `/Applications/Pebble.app`. Use a fresh
+After Security code PASS, build/deploy a fresh `/Applications/Elysium.app`. Use a fresh
 `CFFIXED_USER_HOME` for deterministic local settings and the allowlisted harness. For each of
 360x224, 520x330, and 700x420 capture creation, all five tabs, tutorial, every one of the eight
 authority fixtures, every local error, High Contrast, and Reduce Motion. Collect the sorted semantic
@@ -1913,7 +1913,7 @@ Screenshots, semantic dumps, and synthetic controller tests support but cannot r
 checks. Any unavailable physical surface is unsigned and blocks a claim of full Design Sign-off.
 
 After independent Track B Test PASS, run `bash scripts/pipeline.sh`, deploy a fresh
-`/Applications/Pebble.app`, verify the installed executable/signature and local-world UI again, and
+`/Applications/Elysium.app`, verify the installed executable/signature and local-world UI again, and
 prove a protocol-5 LAN client sees `.unavailable` with zero RPG mutation/request fallback. This is a
 valid local-production deployment, not full RPG LAN completion.
 
@@ -1941,7 +1941,7 @@ Test, pipeline, deploy, installed, and Neo evidence.
   separately gated storage Builder adds exactly checked snapshot/CAS Core plus concrete digest/
   expectation/result/CAS storage symbols, preserves serialized compatibility `putPlayer`, and passes
   Security/Tester plus reviewed API/capability/scanner/verifier hashes. The UI Builder must not edit
-  storage files, manifests, or verifier; import `PebbleStorage`; prepare SQL; add a client adapter; or
+  storage files, manifests, or verifier; import `ElysiumStorage`; prepare SQL; add a client adapter; or
   add a host writer.
 - The storage delta is exactly four public additions and zero package/SPI mirrors, with only the
   frozen `Sendable`/`Equatable` conformances and 32-byte throwing digest initializer in the storage
@@ -1950,7 +1950,7 @@ Test, pipeline, deploy, installed, and Neo evidence.
   world-ID boundaries, JSON cap boundaries, and wrong-class/oversized rows reject before copy/rank.
 - Use `LANHostInstallationIDV6` and `LANWorldIDV6`, the exact typed identifiers already shipped in
   `LANV6Scalars.swift`; do not introduce alias spellings for UI convenience.
-- Treat `Sources/Pebble/LANTransport.swift` and `LANClientRoutingTests.swift` as mandatory v5
+- Treat `Sources/Elysium/LANTransport.swift` and `LANClientRoutingTests.swift` as mandatory v5
   zero-fallback surfaces. Until Track C is installed, a LAN client submits zero authoritative RPG
   UI/world operations and never routes them through `LANRPGIntent`.
 - Do not activate v6, edit its wire/version/cutover, or route the new UI through v5.
@@ -2042,7 +2042,7 @@ Test, pipeline, deploy, installed, and Neo evidence.
   VoiceOver; the 27 current-path rank cells remain discoverable offscreen.
 - Tutorial version is local and publishes only after a successful Finish/Skip persistence write.
 - Harness parsing occurs before GameCore/storage/settings/player/network construction, rejects every
-  non-harness `PEBBLE_` key, removes shipping `PEBBLE_RPG_AUTOCREATE`, contains no secrets/private
+  non-harness `ELYSIUM_` key, removes shipping `ELYSIUM_RPG_AUTOCREATE`, contains no secrets/private
   owner data, and creates no save/settings/database/network state.
 - Update README/architecture/security copy to match only proven behavior.
 - Security code PASS precedes installed Design Sign-off; Design Sign-off precedes independent Test;
@@ -2064,8 +2064,8 @@ Track B resumes. This PASS authorizes no client adapter, v6 activation, host wri
 
 ### 17.1 Design Mock audit
 
-The existing RPG surface establishes a useful Pebble visual baseline but is not the requested
-product. `RPGScreensM.swift` currently uses Pebble's dimmed-world modal, beveled gray panel, pixel
+The existing RPG surface establishes a useful Elysium visual baseline but is not the requested
+product. `RPGScreensM.swift` currently uses Elysium's dimmed-world modal, beveled gray panel, pixel
 font, procedural 16/24/32-unit RPG icons, compact widget buttons, fixed footer Close action, and a
 nine-cell strip that visually relates to the HUD. Inventory and Creative already expose a visible
 `Character` entry point. Those conventions remain the visual language for the replacement.
@@ -2087,12 +2087,12 @@ evaluators supply content and truth; the renderer supplies hierarchy, focus, and
 
 ### 17.2 Visual and interaction token amendment
 
-The implementation uses these existing Pebble conventions as fixed design tokens:
+The implementation uses these existing Elysium conventions as fixed design tokens:
 
 - The outer surface uses `UIManager.drawDarkBg` plus the existing beveled `drawPanel` treatment.
   Shipping widget strips remain the default button treatment where available; the procedural
   fallback must preserve the same raised/disabled geometry. No new raster dependency is required.
-- The existing Pebble pixel font and text metrics are canonical. Path, branch, skill, spell, action,
+- The existing Elysium pixel font and text metrics are canonical. Path, branch, skill, spell, action,
   authority, and status imagery comes from the RPG asset manifest or the procedural IDs frozen in
   this plan. State-specific color may supplement, but never replace, the required icon, text,
   border/pattern, and accessibility value.
@@ -2288,7 +2288,7 @@ pending/terminal authority state, durable-notice acknowledgement, Neo proof, or 
 
 ### 19.1 Gate input and verdict
 
-The fresh installed `/Applications/Pebble.app` Design Sign-off inspected 122 PNGs, 120 semantic
+The fresh installed `/Applications/Elysium.app` Design Sign-off inspected 122 PNGs, 120 semantic
 summaries, and 42 renewed three-frame captures across all three required viewports, creation,
 tutorial, five tabs, eight authority phases, appearance variants, eighteen branch progression
 fixtures, and representative rank/action/spell/slot states. That gate returned **FAIL** for seven
@@ -2318,10 +2318,10 @@ or protocol-v6 work.
 
 Primary files:
 
-- `Sources/PebbleCore/Game/RPGScreenModel.swift`;
-- `Sources/PebbleCore/Game/RPGScreenInteraction.swift`;
-- `Sources/Pebble/RPGScreensM.swift`;
-- `Sources/Pebble/RPGUIHarnessM.swift`.
+- `Sources/ElysiumCore/Game/RPGScreenModel.swift`;
+- `Sources/ElysiumCore/Game/RPGScreenInteraction.swift`;
+- `Sources/Elysium/RPGScreensM.swift`;
+- `Sources/Elysium/RPGUIHarnessM.swift`.
 
 Add `RPGScreenLayout` with `panelFrame`, `headerFrame`, `authorityChipFrame`, optional
 `statusChipFrame`, optional shared `contextualDetailFrame`, `stepOrTabFrame`, `contentFrame`,
@@ -2546,7 +2546,7 @@ the complete Track B focused group. No visual golden is moved merely to accept a
 
 ### 19.10 Installed acceptance
 
-After renewed Security code PASS, build and install a fresh `/Applications/Pebble.app` and repeat the
+After renewed Security code PASS, build and install a fresh `/Applications/Elysium.app` and repeat the
 entire section-15/17.3 Design Sign-off. At minimum renew:
 
 - every creation step/profile at `360x224`, `520x330`, and `700x420`;
@@ -2706,12 +2706,12 @@ fresh installed renewal.
 
 ### 20.2 Step 1 - make step and tutorial lines model-owned
 
-In `Sources/PebbleCore/Game/RPGScreenModel.swift`, the existing `creation-step:<step>` and
+In `Sources/ElysiumCore/Game/RPGScreenModel.swift`, the existing `creation-step:<step>` and
 `tutorial-step` descriptors must publish their complete `Path`, `Branch`, `Attributes`, `Review`, or
 `Tutorial N of 4` text in `visualLines`, using the same bounded model-owned wrapping and complete-fit
 contract as every other descriptor. `label`, `value`, accessibility help, `stepOrTabText`, and
-`visualLines` must agree. `Sources/Pebble/RPGScreensM.swift` and
-`Sources/Pebble/RPGUIHarnessM.swift` continue to use only the generic descriptor renderer; neither
+`visualLines` must agree. `Sources/Elysium/RPGScreensM.swift` and
+`Sources/Elysium/RPGUIHarnessM.swift` continue to use only the generic descriptor renderer; neither
 may reconstruct or special-case step text. Empty lines, ellipsis, or accessibility-only fallback are
 invalid.
 
@@ -2767,8 +2767,8 @@ remedy.
 ### 20.5 Step 4 - reveal selector-requested focus before harness publication
 
 Expose one pure shared reveal calculation from
-`Sources/PebbleCore/Game/RPGScreenInteraction.swift` and use it both from
-`rpgRevealInteractionFocus` and `Sources/PebbleCore/Game/RPGUIHarness.swift`. For a harness selector
+`Sources/ElysiumCore/Game/RPGScreenInteraction.swift` and use it both from
+`rpgRevealInteractionFocus` and `Sources/ElysiumCore/Game/RPGUIHarness.swift`. For a harness selector
 that requests focus, build an uncommitted model, verify that the exact requested ID exists and is
 focusable, apply the shared one-clamp nearest-edge reveal to that ID, then rebuild the final
 `RPGScreenModelInput` and model at the revealed offset. Only that final input/model may enter
@@ -2804,7 +2804,7 @@ focused group. No golden may move merely to accept blank, clipped, overlapping, 
 
 ### 20.7 Installed renewal and Security impact
 
-After renewed Security(code) PASS, rebuild and install a fresh `/Applications/Pebble.app`; prior
+After renewed Security(code) PASS, rebuild and install a fresh `/Applications/Elysium.app`; prior
 release hashes and screenshots are stale. Repeat the complete section-19 installed matrix, with
 explicit pixel and semantic checks for all creation/tutorial step bands, all five compact tabs, all
 eight authority explanations, and all 162 requested rank cells visibly revealed. Renew keyboard,
@@ -2967,15 +2967,15 @@ deployment, or commit completion; those downstream gates remain mandatory.
 **Security(code) remains PASS.** A warning-free `swift build -c release` completed with exit 0 and
 no warning output. The rebuilt release artifacts exactly matched the three reviewed updated pins:
 
-- `PebbleCore.o`:
+- `ElysiumCore.o`:
   `54d3d01f7dc1cd3c5ecbb9e293ad104012c25a835c1b05a8f6b050819fb1f23c`;
-- `Pebble`:
+- `Elysium`:
   `33a93cba6aacd2b46e7547556ea0b95b3044b9f399344e67c1ad6018ee900502`;
-- `pebsmoke`:
+- `elysmoke`:
   `fe5908db8c3c54fd5cd82e0a451b6bc474e30444aa7b8f886d7bf446d4bbf053`.
 
-The independently invoked release-surface verifier returned `Pebble storage release surface
-verified.` with exit 0. Its frozen inputs remained exact: `PebbleStorage.o`
+The independently invoked release-surface verifier returned `Elysium storage release surface
+verified.` with exit 0. Its frozen inputs remained exact: `ElysiumStorage.o`
 `b1883c34e94f191d15309738d6fab4a264809b9c638c207fafcb3ae871c6cd6a`, storage source
 `4688f3326280ebcec940e98f0db77bb63d2afdd65fc92ec621223134ffaee527`, storage API manifest
 `01e80eb490ab7c7ccd8837f21d08ceff82f47822972f9ea70f160fc316517163`, and Core capability
@@ -2985,7 +2985,7 @@ Section-20 model, interaction, and harness source hashes likewise remained
 `f09799f858a18465fba0f10ad589310d18f5ec409c337d6cf3834e78339bfe97`, and
 `9bc6aff4e7861f94f9413c635ef33b07ad2a155f6c7a0cbf0e54d06e02a30b79`.
 
-The installed `/Applications/Pebble.app` passed independent deep strict `codesign` verification,
+The installed `/Applications/Elysium.app` passed independent deep strict `codesign` verification,
 including its Designated Requirement. `scripts/security-check-binary.sh` then passed its bundle ID,
 Info.plist, linked-library, network-symbol, network-string, and URL checks against the installed
 executable. The signed installed executable SHA-256 was

@@ -138,7 +138,7 @@ test injection/stage API.
 Exactly two DEBUG-only stages exist:
 
 ```swift
-enum PebbleStorageTestStage: Sendable {
+enum ElysiumStorageTestStage: Sendable {
     case afterChunkKeyPreflight
     case afterDurabilitySyncBeforeIdentityProof
 }
@@ -164,7 +164,7 @@ accepted `resumedAt` may expire to `executorTimedOut`. A transition already reco
 its deadline remains accepted even if the waiting thread reacquires the lock later; resumed/consumed
 success is never retroactively expired. The helper signals both dispatch groups exactly once before
 unlocking. Terminal state is irreversible and `waitUntilReached()`, the now-throwing
-`resume()`, and `executorReachAndWait()` always throw `PebbleStorageTestStageError.timeout`; the
+`resume()`, and `executorReachAndWait()` always throw `ElysiumStorageTestStageError.timeout`; the
 executor may never treat a cancelled latch as a successful no-op. Thus a reach/resume racing the
 waiter's timeout succeeds only when its recorded tick is strictly before the applicable deadline;
 a transition at or after the deadline cannot resurrect or consume the latch.
@@ -180,7 +180,7 @@ rearm; a later matching observation must throw and then clear it. Resumed/consum
 receives no executor reference or cleanup callback.
 
 Deterministic boundary coverage uses one additional closed DEBUG-only seam, not wall-clock sleeps:
-`PebbleStorageTestDeadlineBoundary` has exactly `.externalWait` and `.executorWait`, and
+`ElysiumStorageTestDeadlineBoundary` has exactly `.externalWait` and `.executorWait`, and
 `_testExpireDeadline(_:)` accepts only that enum. Under the latch lock, `.externalWait` is valid only
 while armed and captures the external deadline if absent; `.executorWait` is valid only while
 reached. It sets that deadline equal to the current uptime tick and calls the same production
@@ -202,37 +202,37 @@ early/double resume; executor timeout; single-use; identity precedence; and rele
 
 ## 5. Machine-enforce the closed release surface
 
-Add executable `scripts/verify-pebble-storage-release-surface.sh` with no optional/skip mode and no
+Add executable `scripts/verify-elysium-storage-release-surface.sh` with no optional/skip mode and no
 arguments. It runs only after a successful `swift build -c release` in the same gate. It resolves one
 absolute release directory with `swift build -c release --show-bin-path` and requires these exact,
 non-symlink, nonempty artifacts; glob/fallback discovery is forbidden:
 
-- `$RELEASE_DIR/PebbleStorage.o`
-- `$RELEASE_DIR/Pebble`
-- `$RELEASE_DIR/pebsmoke`
+- `$RELEASE_DIR/ElysiumStorage.o`
+- `$RELEASE_DIR/Elysium`
+- `$RELEASE_DIR/elysmoke`
 
 Artifact discovery fails closed on absent `xcrun`/`nm`/`strings`/`swift-demangle` tools,
 multiple/nonabsolute bin-path output, missing or unreadable artifacts, or command failure.
-`PebbleStorage.o` must be no older than `Package.swift` or
-any regular file under `Sources/PebbleStorage`; each linked product must be no older than that
+`ElysiumStorage.o` must be no older than `Package.swift` or
+any regular file under `Sources/ElysiumStorage`; each linked product must be no older than that
 object. `xcrun nm -a` and `xcrun strings -a` run successfully against all three artifacts into fresh
 temporary files removed by `trap`. Demangled `nm` output for each artifact must contain the exact
-production sentinel `PebbleStorage.PebbleStorageCoordinator.open(databaseURL:` so an unrelated or
+production sentinel `ElysiumStorage.ElysiumStorageCoordinator.open(databaseURL:` so an unrelated or
 empty artifact cannot pass.
 
 The following fixed-string denylist is closed and is checked independently against both
 raw/demangled `nm` output and `strings` output for every artifact:
 
 ```text
-PebbleStorageTest
-PebbleStorageFactoryFailurePoint
-PebbleStorageSQLiteLengthLimitProbe
-PebbleStorageLegacyCollectionFailurePoint
-PebbleStorageLegacyImportFailurePoint
-PebbleStorageBarrierFailurePoint
-PebbleStorageSchemaAuditProbe
-PebbleStorageTestDeadlineBoundary
-PebbleStorageTestBodyError
+ElysiumStorageTest
+ElysiumStorageFactoryFailurePoint
+ElysiumStorageSQLiteLengthLimitProbe
+ElysiumStorageLegacyCollectionFailurePoint
+ElysiumStorageLegacyImportFailurePoint
+ElysiumStorageBarrierFailurePoint
+ElysiumStorageSchemaAuditProbe
+ElysiumStorageTestDeadlineBoundary
+ElysiumStorageTestBodyError
 StorageLegacyImportFailurePoint
 _test
 testOpen
@@ -295,10 +295,10 @@ and does not substitute for or skip this release-artifact gate.
 
 The Builder may edit only:
 
-- `Sources/PebbleStorage/StorageEngine.swift`
-- `Tests/PebbleCoreTests/PebbleStorageExecutorTests.swift`
-- `Tests/PebbleCoreTests/PebbleStorageAdversarialTests.swift`
-- new executable `scripts/verify-pebble-storage-release-surface.sh`
+- `Sources/ElysiumStorage/StorageEngine.swift`
+- `Tests/ElysiumCoreTests/ElysiumStorageExecutorTests.swift`
+- `Tests/ElysiumCoreTests/ElysiumStorageAdversarialTests.swift`
+- new executable `scripts/verify-elysium-storage-release-surface.sh`
 - `scripts/pipeline.sh`
 - `.githooks/pre-push`
 
@@ -310,11 +310,11 @@ files are out of scope.
 Builder runs focused feedback first:
 
 ```bash
-swift test --filter 'PebbleStorageExecutorTests|LANV6SchemaAuthorizerTests|PebbleStorageAdversarialTests'
-swift build -c release --target PebbleStorage
+swift test --filter 'ElysiumStorageExecutorTests|LANV6SchemaAuthorizerTests|ElysiumStorageAdversarialTests'
+swift build -c release --target ElysiumStorage
 swift build -c release
-bash scripts/verify-pebble-storage-release-surface.sh
-bash -n scripts/verify-pebble-storage-release-surface.sh scripts/pipeline.sh .githooks/pre-push
+bash scripts/verify-elysium-storage-release-surface.sh
+bash -n scripts/verify-elysium-storage-release-surface.sh scripts/pipeline.sh .githooks/pre-push
 git diff --check
 ```
 

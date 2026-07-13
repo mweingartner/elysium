@@ -1,3 +1,3 @@
-import PebbleStorage
+import ElysiumStorage
 
-let escapedRPGFacade: PebbleRPGLocalPreferencesStorage? = nil
+let escapedRPGFacade: ElysiumRPGLocalPreferencesStorage? = nil

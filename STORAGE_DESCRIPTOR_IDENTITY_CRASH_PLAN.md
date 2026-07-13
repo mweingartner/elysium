@@ -2,12 +2,12 @@
 
 ## Design Mock — ordinary launch recovery
 
-**Verdict: PASS.** This change restores access to Pebble’s existing experience; it does not design
+**Verdict: PASS.** This change restores access to Elysium’s existing experience; it does not design
 a new experience.
 
 ### User-visible contract
 
-- A valid ordinary launch reaches Pebble’s existing window, title/world flow, and RPG surface with
+- A valid ordinary launch reaches Elysium’s existing window, title/world flow, and RPG surface with
   no new screen, dialog, banner, status, control, or copy.
 - Existing layout, focus, accessibility, controller/keyboard help, RPG creation, tabs, authority
   presentation, progression, and visual tokens remain pixel- and semantics-equivalent. Harness mode
@@ -17,7 +17,7 @@ a new experience.
   any world is loaded or mutated.
 - A fail-closed open failure remains diagnosable through the one existing stable, path-redacted fatal
   message and a nonzero exit. Swift's runtime may add toolchain-owned fatal/crash framing; that
-  framing is not treated as Pebble application copy. The captured stderr is capped for evidence and
+  framing is not treated as Elysium application copy. The captured stderr is capped for evidence and
   must expose no save contents, credentials, absolute user paths, or SQL payloads. No new recovery UI
   or user-facing terminology is introduced by this correction.
 
@@ -25,8 +25,8 @@ a new experience.
 
 1. **Normal title launch:** the signed installed app opens its ordinary existing title window.
 2. **Disposable world plus RPG:** with a fresh `CFFIXED_USER_HOME`, the documented
-   `PEBBLE_AUTOLOAD=1`, `PEBBLE_NEWWORLD=<seed>`, `PEBBLE_OPEN_SCREEN=rpg`, and
-   `PEBBLE_SHOT=<disposable path>@<frames>` flow creates only the disposable world, reaches the
+   `ELYSIUM_AUTOLOAD=1`, `ELYSIUM_NEWWORLD=<seed>`, `ELYSIUM_OPEN_SCREEN=rpg`, and
+   `ELYSIUM_SHOT=<disposable path>@<frames>` flow creates only the disposable world, reaches the
    existing RPG surface, writes the requested PNG, and exits normally.
 3. **Unsafe or invalid storage identity:** no title/world/RPG surface is published; no fallback
    database is opened; the process produces the bounded diagnostic and exits nonzero.
@@ -34,7 +34,7 @@ a new experience.
 ### Design acceptance
 
 - The installed executable hash and signature are recorded before proof.
-- Normal launch produces a real Pebble window and remains alive long enough for ordinary use; there
+- Normal launch produces a real Elysium window and remains alive long enough for ordinary use; there
   is no signal, abort, uncaught exception, or `StorageEngine.swift:1361` termination.
 - Disposable-world proof exits zero, produces a valid nonempty PNG of the existing RPG surface, and
   confines every created file to the fresh home plus the explicitly requested screenshot path.
@@ -52,10 +52,10 @@ a new experience.
 ### Incident evidence and exact root cause
 
 The installed release crash report
-`~/Library/Logs/DiagnosticReports/Pebble-2026-07-11-092458.ips` is authoritative evidence. Its
+`~/Library/Logs/DiagnosticReports/Elysium-2026-07-11-092458.ips` is authoritative evidence. Its
 faulting storage-queue frame is `StoragePathLease.descriptorCount(for:)` at
-`Sources/PebbleStorage/StorageEngine.swift:1361`; Swift reports `Negative value is not
-representable`. Ordinary launch reaches `SaveDB` -> `PebbleStorageCoordinator.open` -> SQLite open,
+`Sources/ElysiumStorage/StorageEngine.swift:1361`; Swift reports `Negative value is not
+representable`. Ordinary launch reaches `SaveDB` -> `ElysiumStorageCoordinator.open` -> SQLite open,
 then the post-open descriptor proof scans every successfully `fstat`ed process descriptor. The
 database reservation itself had a positive device ID. A different, unrelated open descriptor had a
 negative Darwin `dev_t`; the scan evaluated `UInt64(info.st_dev)` before it could compare that
@@ -63,7 +63,7 @@ descriptor with the retained database identity, so Swift's checked signed-to-uns
 trapped. This is a process crash, not a SQLite error and not evidence of database corruption.
 
 The existing unit environment did not contain that descriptor class. Moreover,
-`PebbleStorageExecutorTests.descriptorCount(for:)` compares native `st_dev` values directly, so its
+`ElysiumStorageExecutorTests.descriptorCount(for:)` compares native `st_dev` values directly, so its
 leak assertions do not exercise the production conversion that failed. The adversarial and schema
 tests contain their own checked `UInt64(st_dev)` conversions, but only observe the test process's
 ordinary files and therefore also missed the negative-device case.
@@ -80,7 +80,7 @@ Use the operating system's native identity types for every in-process equality/h
   same-physical-file lease or tombstone rules.
 
 The existing public
-`PebbleStorageCoordinator.verifyDatabaseParentIdentity(device: UInt64, inode: UInt64)` signature
+`ElysiumStorageCoordinator.verifyDatabaseParentIdentity(device: UInt64, inode: UInt64)` signature
 and the legacy `PBLM2` identity fields remain unchanged. At those existing UInt64 boundaries only,
 encode Darwin's signed 32-bit `dev_t` as its zero-extended raw bit pattern:
 `UInt64(UInt32(bitPattern: device))`. Positive device values therefore remain byte-for-byte
@@ -92,7 +92,7 @@ or widen the reviewed API.
 
 ### Exact implementation surface
 
-1. **`Sources/PebbleStorage/StorageEngine.swift`**
+1. **`Sources/ElysiumStorage/StorageEngine.swift`**
    - Change the private `StorageFileIdentity` fields to `dev_t`/`ino_t`; give it one initializer from
      `stat` and one computed UInt64 device-bit-pattern representation for the frozen public boundary.
    - Route lease acquisition, parent/file revalidation, descriptor scanning, and retained-parent
@@ -105,13 +105,13 @@ or widen the reviewed API.
    - Keep `verifyDatabaseParentIdentity(device:inode:)` public signature and error behavior. Compare
      the caller's UInt64 device value with the retained identity's explicit bit-pattern encoding.
    - Under `#if DEBUG`, expose only the internal
-     `PebbleStorageDescriptorIdentityProbe` bounded value-based descriptor-count probe. It accepts a
+     `ElysiumStorageDescriptorIdentityProbe` bounded value-based descriptor-count probe. It accepts a
      target native `dev_t`/`ino_t` pair plus at most 65,536 optional native identity pairs and
      delegates to the same counting kernel. `nil` represents one failed/absent observation. More
      than 65,536 observations is rejected rather than truncated or partially counted. It must not
      accept file paths, raw descriptors, callbacks, global injection, or mutable retained state.
 
-2. **`Sources/PebbleCore/Game/LegacySaveMigration.swift`**
+2. **`Sources/ElysiumCore/Game/LegacySaveMigration.swift`**
    - Centralize the existing persistent/public device representation in one private
      `dev_t -> UInt64` raw-bit-pattern helper and use it at all four current `st_dev` capture/compare
      sites. This is the same signedness defect family and prevents a valid negative-device legacy
@@ -122,7 +122,7 @@ or widen the reviewed API.
      negative bit pattern; no test injection reaches filesystem or migration state.
 
 3. **Focused tests**
-   - In `Tests/PebbleCoreTests/PebbleStorageExecutorTests.swift`, add
+   - In `Tests/ElysiumCoreTests/ElysiumStorageExecutorTests.swift`, add
      `testDescriptorCountHandlesNegativeNativeDeviceWithoutTrap`. Its synthetic observations must
      include: a positive target, an unrelated negative device with the same inode, a matching target,
      an absent/failed observation, and a negative target/matching observation. Assert exact counts
@@ -131,7 +131,7 @@ or widen the reviewed API.
      without a partial count.
    - Update parent-identity helpers in that file to use the explicit bit-pattern conversion when
      calling the frozen UInt64 API; keep native comparisons for actual descriptor leak counts.
-   - Update `PebbleStorageAdversarialTests.swift` identity/race helpers and
+   - Update `ElysiumStorageAdversarialTests.swift` identity/race helpers and
      `LANV6SchemaAuthorizerTests.swift` descriptor helpers to native `dev_t`/`ino_t` comparisons, so
      the tests themselves cannot trap before evaluating storage behavior.
    - In `LegacySaveMigrationAdversarialTests.swift`, add a pure negative-device encoding regression
@@ -141,23 +141,23 @@ or widen the reviewed API.
    - After edits, `rg 'UInt64\([^)]*st_dev' Sources Tests` must return no direct checked conversion.
 
 4. **Reviewed manifests and release verifier**
-   - `scripts/pebble-storage-api-v1.json` must have an empty semantic diff: no public/package/SPI
+   - `scripts/elysium-storage-api-v1.json` must have an empty semantic diff: no public/package/SPI
      declaration, signature, conformance, or owner changes. Regenerate/compare it in a temporary
      location; do not accept a changed API to fix a private representation bug.
    - Because `LegacySaveMigration.swift` changes, regenerate and review only that owner's
-     `compilerParseASTSHA256` in `scripts/pebble-core-storage-capability-v1.json`; `Saves.swift` and
+     `compilerParseASTSHA256` in `scripts/elysium-core-storage-capability-v1.json`; `Saves.swift` and
      the two-owner inventory remain unchanged.
-   - In `scripts/verify-pebble-storage-release-surface.sh`, update only reviewed hashes that actually
+   - In `scripts/verify-elysium-storage-release-surface.sh`, update only reviewed hashes that actually
      change after a clean warning-free release build: storage source, storage object, Core capability
-     manifest, Core object, Pebble, and pebsmoke. Existing `Saves.swift`, `GameCore.swift`, `Player.swift`,
+     manifest, Core object, Elysium, and elysmoke. Existing `Saves.swift`, `GameCore.swift`, `Player.swift`,
      and storage API-manifest pins remain unchanged. Add the exact DEBUG seam names
-     `PebbleStorageDescriptorIdentityProbe` and `legacyDeviceBitPatternForTesting` to the binary
-     denylist and prove neither exists in `PebbleStorage.o`, `PebbleCore.o`, Pebble, or pebsmoke.
+     `ElysiumStorageDescriptorIdentityProbe` and `legacyDeviceBitPatternForTesting` to the binary
+     denylist and prove neither exists in `ElysiumStorage.o`, `ElysiumCore.o`, Elysium, or elysmoke.
    - Hashes are consequences, never inputs: no placeholder, blanket rehash, `--accept`, or verifier
      bypass is allowed. Any unexpected manifest/symbol diff returns to Architecture and Security.
 
 5. **Separate pre-existing source-contract test drift**
-   - `Tests/PebbleCoreTests/SaveDBLifecycleTests.swift` currently fails the full suite because
+   - `Tests/ElysiumCoreTests/SaveDBLifecycleTests.swift` currently fails the full suite because
      `testSourceSurfaceHasOneBareGameCoreCompatibilityInitializerAndNoSilentAlternative` searches
      for `public init(db: SaveDB = SaveDB())`, while the reviewed shipping source intentionally uses
      `public convenience init(db: SaveDB = SaveDB())` to delegate to the designated
@@ -173,8 +173,8 @@ or widen the reviewed API.
    - In the same test file, strengthen the existing compatibility-initializer subprocess assertion:
      asynchronously drain stderr while the child runs, reject and terminate the child if output
      exceeds 65,536 bytes rather than truncating it, require the exact stable
-     `Pebble save database initialization failed` message exactly once, and reject the disposable
-     home path, `pebble.db`, SQL text, and a caller-provided secret sentinel. Runtime-owned fatal
+     `Elysium save database initialization failed` message exactly once, and reject the disposable
+     home path, `elysium.db`, SQL text, and a caller-provided secret sentinel. Runtime-owned fatal
      framing is permitted; no assertion may depend on its addresses, source locations, or wording.
 
 ### Risk-to-test map
@@ -185,7 +185,7 @@ or widen the reviewed API.
 | Negative target is skipped or aliases a positive device | Exact native negative-target match plus same-inode/different-device non-match |
 | Identity proof weakens to a path or descriptor heuristic | Existing alias, replacement, tombstone, post-open race, and physical-binding tests remain green |
 | Public API or legacy record encoding drifts | Empty storage API semantic diff; positive-device compatibility and exact negative raw-bit-pattern tests |
-| DEBUG injection leaks into release | Verifier denylist over fresh `PebbleStorage.o`, `PebbleCore.o`, Pebble, and pebsmoke |
+| DEBUG injection leaks into release | Verifier denylist over fresh `ElysiumStorage.o`, `ElysiumCore.o`, Elysium, and elysmoke |
 | Descriptor leak/close behavior regresses | Existing deterministic post-open failure, close injection, reopen, and adversarial race tests |
 | A second direct checked conversion remains | Repository-wide `rg` audit plus focused legacy negative-device test |
 | Stale release is installed | Freshness checks, reviewed hashes, installed executable hash/signature, and launch timestamp evidence |
@@ -203,24 +203,24 @@ or widen the reviewed API.
    manifest/verifier changes.
 6. Security (code) inspects the actual diff and fresh API/symbol artifacts.
 7. Focused Test runs descriptor/lease/adversarial/schema/migration suites, then the full source scan,
-   warning-free release build, release-surface verifier, full XCTest, and 457-check `pebsmoke`.
+   warning-free release build, release-surface verifier, full XCTest, and 457-check `elysmoke`.
    Run `scripts/pipeline.sh` as the final pre-install gate and retain the exact artifact hashes it
    verifies.
-8. Install only those exact verified artifacts. Record `/Applications/Pebble.app` executable SHA-256
-   and strict signature. With no Pebble process running and no harness variables, record the crash
+8. Install only those exact verified artifacts. Record `/Applications/Elysium.app` executable SHA-256
+   and strict signature. With no Elysium process running and no harness variables, record the crash
    report directory baseline, launch the signed installed app normally at least three times, require
    a real window and a live process for at least 15 seconds each, quit cleanly, and prove no new
-   Pebble crash report. This is mandatory because the escaped failure was release-only and depended
+   Elysium crash report. This is mandatory because the escaped failure was release-only and depended
    on the ordinary app descriptor table.
 9. Run the disposable-home RPG screenshot state from the Design Mock. For the installed fail-closed
    open probe, create a second fresh `CFFIXED_USER_HOME`, create its `Library/Application Support`
-   directory, and precreate `Library/Application Support/Pebble` as a regular file before launch.
+   directory, and precreate `Library/Application Support/Elysium` as a regular file before launch.
    Launch the installed app with no harness, autoload, world, LAN, or screenshot variable. Require a
    bounded nonzero exit, the stable path-free storage-open diagnostic exactly once while stderr is
-   drained with a hard 65,536-byte reject-on-overflow cap and a launch timeout, no Pebble window, no
+   drained with a hard 65,536-byte reject-on-overflow cap and a launch timeout, no Elysium window, no
    database, WAL, SHM, world, or settings file, and a
    before/after manifest of non-directory entries whose only entry is the caller-made obstruction.
-   Reject the fresh-home path, `pebble.db`, SQL text, and a unique secret sentinel in captured output;
+   Reject the fresh-home path, `elysium.db`, SQL text, and a unique secret sentinel in captured output;
    do not assert on or publish runtime-owned crash addresses. Remove the disposable home after
    evidence is recorded. This exercises a real unsafe
    storage-open failure without adding a release hook; the focused identity-mismatch tests separately
@@ -255,7 +255,7 @@ Security reviewed the pre-amendment plan at SHA-256
 binding above: the DEBUG observation seam now has the production 65,536 ceiling plus exact release
 denylist names; the legacy audit now names the actual four conversion sites and tests zero-extension
 against sign extension and out-of-range UInt64 callers; and the invalid-support-path proof now
-separates Pebble's stable path-redacted fatal message from toolchain-owned crash framing while
+separates Elysium's stable path-redacted fatal message from toolchain-owned crash framing while
 bounding and scanning captured evidence.
 
 The native `(dev_t, ino_t)` equality is collision-preserving on the supported Darwin target. The
@@ -283,7 +283,7 @@ failed-observation, and 65,537-observation rejection regressions were added. The
 initializer assertion now names the intentional convenience initializer exactly and its subprocess
 stderr reader is asynchronous, bounded to 65,536 bytes, and path/SQL/secret rejecting.
 
-The raw PebbleStorage symbol-graph hash changed because private additions moved source locations.
+The raw ElysiumStorage symbol-graph hash changed because private additions moved source locations.
 Before renewing that raw pin, Builder reconstructed the pre-fix storage source in a disposable tree,
 removed generator and location metadata, sorted symbols and relationships, and compared canonical
 graphs. Both graphs contained exactly 296 symbols and 379 relationships and were byte-identical
@@ -307,10 +307,10 @@ Verification evidence, all exit status 0:
   files;
 - `rg 'UInt64\([^)]*st_dev' Sources Tests`: no matches;
 - `bash scripts/security-scan.sh`: passed;
-- `bash scripts/verify-pebble-storage-release-surface.sh`: verified, including absence of
-  `PebbleStorageDescriptorIdentityProbe` and `legacyDeviceBitPatternForTesting` from release objects
+- `bash scripts/verify-elysium-storage-release-surface.sh`: verified, including absence of
+  `ElysiumStorageDescriptorIdentityProbe` and `legacyDeviceBitPatternForTesting` from release objects
   and products;
-- `swift run -c release pebsmoke`: 457 passed, 0 failed;
+- `swift run -c release elysmoke`: 457 passed, 0 failed;
 - `git diff --check`: passed.
 
 Reviewed source and manifest SHA-256 consequences:
@@ -321,12 +321,12 @@ Reviewed source and manifest SHA-256 consequences:
 - Core capability manifest: `af2caf0d306172437f0b311e9c0ca1c65c8b89520b2174794c885a3708af654d`;
 - release verifier: `47ed918601ac8a7962b9e65a2d9ccf4cf52518a98d5a734d5c6d376a6043a9f7`.
 
-Fresh release artifact SHA-256 values, rechecked after `pebsmoke` rebuilt the release graph:
+Fresh release artifact SHA-256 values, rechecked after `elysmoke` rebuilt the release graph:
 
-- `PebbleStorage.o`: `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`;
-- `PebbleCore.o`: `7e7caeec1e760a60739736ad240993562bd972e29e6a03c6c54ace486b37751a`;
-- `Pebble`: `70847c5282589a387b2aa08e3d5233cb81e5d8bbe01edfb527934cd60f5285ea`;
-- `pebsmoke`: `5e1d47e14ab3e427a0ff35ef6ae2a00b887d38c5c53883bf2afc40a556e5f2ec`.
+- `ElysiumStorage.o`: `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`;
+- `ElysiumCore.o`: `7e7caeec1e760a60739736ad240993562bd972e29e6a03c6c54ace486b37751a`;
+- `Elysium`: `70847c5282589a387b2aa08e3d5233cb81e5d8bbe01edfb527934cd60f5285ea`;
+- `elysmoke`: `5e1d47e14ab3e427a0ff35ef6ae2a00b887d38c5c53883bf2afc40a556e5f2ec`.
 
 **Builder verdict: PASS.** The implementation and local build/test/release-surface gates are green.
 Per the assigned Builder boundary, no install, ordinary installed-app launch proof, deployment,
@@ -353,7 +353,7 @@ domain, keeps positive values unchanged, and maps negative values into a disjoin
 Inode conversion remains lossless on the supported target. Failed `fstat` observations are absent,
 not wildcard identities, and the shared kernel cannot exceed 65,536 matches.
 
-The DEBUG `PebbleStorageDescriptorIdentityProbe` accepts only native value tuples and a bounded array;
+The DEBUG `ElysiumStorageDescriptorIdentityProbe` accepts only native value tuples and a bounded array;
 it exposes no descriptor, path, callback, registry, lease, retained state, or mutation hook, and
 65,537 observations are rejected without a partial count. Legacy migration uses the one frozen
 zero-extension helper at all four audited `st_dev` sites without changing the UInt64 identity fields,
@@ -381,8 +381,8 @@ Independent closing evidence:
   initializer, one public SaveDB convenience initializer, and the one bounded fatal message;
 - `scripts/security-scan.sh` passed the 126-file source/semantic scan; the release-surface verifier
   passed with fresh pinned objects/products;
-- independent symbol and string scans found both DEBUG seam names absent from `PebbleStorage.o`,
-  `PebbleCore.o`, Pebble, and pebsmoke; release hashes exactly matched
+- independent symbol and string scans found both DEBUG seam names absent from `ElysiumStorage.o`,
+  `ElysiumCore.o`, Elysium, and elysmoke; release hashes exactly matched
   `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`,
   `7e7caeec1e760a60739736ad240993562bd972e29e6a03c6c54ace486b37751a`,
   `70847c5282589a387b2aa08e3d5233cb81e5d8bbe01edfb527934cd60f5285ea`, and

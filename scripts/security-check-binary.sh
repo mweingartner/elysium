@@ -1,19 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 
-TARGET="${1:-/Applications/Pebble.app}"
+TARGET="${1:-/Applications/Elysium.app}"
 
 fail() { echo "binary security check failed: $*" >&2; exit 1; }
 
 if [ -d "$TARGET" ]; then
     APP="$TARGET"
-    BIN="$APP/Contents/MacOS/Pebble"
+    BIN="$APP/Contents/MacOS/Elysium"
     PLIST="$APP/Contents/Info.plist"
     [ -x "$BIN" ] || fail "missing executable at $BIN"
     /usr/bin/codesign --verify --deep --strict "$APP" || fail "codesign verification failed"
     /usr/bin/plutil -lint "$PLIST" >/dev/null || fail "Info.plist is invalid"
     BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")
-    [ "$BID" = "com.briangao.pebble" ] || fail "unexpected bundle id: $BID"
+    [ "$BID" = "com.briangao.elysium" ] || fail "unexpected bundle id: $BID"
 else
     BIN="$TARGET"
     PLIST="packaging/Info.plist"
@@ -24,7 +24,7 @@ LAN_ALLOWED=0
 if [ -f "${PLIST:-}" ]; then
     if /usr/bin/plutil -lint "$PLIST" >/dev/null &&
        /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$PLIST" >/dev/null 2>&1 &&
-       /usr/libexec/PlistBuddy -c 'Print :NSBonjourServices:0' "$PLIST" 2>/dev/null | grep -Fx '_pebble-lan._tcp' >/dev/null; then
+       /usr/libexec/PlistBuddy -c 'Print :NSBonjourServices:0' "$PLIST" 2>/dev/null | grep -Fx '_elysium-lan._tcp' >/dev/null; then
         LAN_ALLOWED=1
     fi
 fi
@@ -44,7 +44,7 @@ if [ -n "$NETWORK_SYMBOLS" ]; then
     fi
     if [ "$LAN_ALLOWED" != "1" ]; then
         printf '%s\n' "$NETWORK_SYMBOLS"
-        fail "Network.framework symbols found without Pebble LAN Info.plist declarations"
+        fail "Network.framework symbols found without Elysium LAN Info.plist declarations"
     fi
 fi
 
@@ -64,7 +64,7 @@ if [ -n "$NETWORK_STRINGS" ]; then
     fi
     if [ "$LAN_ALLOWED" != "1" ]; then
         printf '%s\n' "$NETWORK_STRINGS"
-        fail "Network.framework string found without Pebble LAN Info.plist declarations"
+        fail "Network.framework string found without Elysium LAN Info.plist declarations"
     fi
 fi
 

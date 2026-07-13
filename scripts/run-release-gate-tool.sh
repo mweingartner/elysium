@@ -5,12 +5,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SOURCE="$1"; shift
 cd "$ROOT"
 case "$SOURCE" in scripts/installed-signoff-receipt.swift) ;; *) echo "unapproved release-gate tool" >&2; exit 64 ;; esac
-swift build --target PebbleReleaseGate >/dev/null
+swift build --target ElysiumReleaseGate >/dev/null
 PRODUCTS="$(swift build --show-bin-path)"
-OBJECT="$PRODUCTS/PebbleReleaseGate.o"
+OBJECT="$PRODUCTS/ElysiumReleaseGate.o"
 [ -f "$OBJECT" ] || { echo "release-gate object missing" >&2; exit 1; }
 KEY="$(shasum -a 256 scripts/installed-signoff-receipt.swift scripts/observe-installed-signoff.swift \
-    scripts/designer-attest-installed-signoff.swift Sources/PebbleReleaseGate/*.swift | \
+    scripts/designer-attest-installed-signoff.swift Sources/ElysiumReleaseGate/*.swift | \
     shasum -a 256 | awk '{print $1}')"
 TOOLS="$ROOT/.build/release-gate-tools"
 mkdir -p "$TOOLS"

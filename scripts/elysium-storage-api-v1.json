@@ -1,0 +1,28 @@
+{
+  "formatVersion": 1,
+  "module": "ElysiumStorage",
+  "symbolGraphSHA256": "01de2142622976254de1d0ad39fff0e400c851a4067459e8b5daaf2196fa32bd",
+  "owner": "Sources/ElysiumStorage/StorageEngine.swift",
+  "checkedPlayerCASPublicDeclarations": [
+    "ElysiumPlayerJSONRowDigest",
+    "ElysiumPlayerJSONExpectedRowState",
+    "ElysiumPlayerJSONCompareAndSwapResult",
+    "ElysiumLegacyCoreStorage.compareAndSwapPlayerJSON(expected:candidate:)"
+  ],
+  "checkedWorldBatchDeletePublicDeclarations": [
+    "ElysiumCheckedWorldStorageRow",
+    "ElysiumCheckedWorldCollectionSnapshot",
+    "ElysiumWorldBatchDeleteExpectation",
+    "ElysiumWorldBatchDeleteRequest",
+    "ElysiumWorldBatchDeleteReceipt",
+    "ElysiumWorldBatchDeleteRecoveryAuthority",
+    "ElysiumWorldBatchDeleteOutcome",
+    "ElysiumLegacyCoreStorage.checkedWorldSnapshot()",
+    "ElysiumLegacyCoreStorage.deleteWorldsChecked(_:)",
+    "ElysiumLegacyCoreStorage.recoverWorldsChecked(_:)"
+  ],
+  "frozenExistentialCarriers": [
+    "ElysiumStorageTransactionFailure.primary",
+    "ElysiumStorageStatementFailure.primary"
+  ]
+}

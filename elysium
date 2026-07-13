@@ -1,0 +1,160 @@
+#!/bin/bash
+# elysium — build, install, run, and update the Elysium app.
+#   ./elysium install    raw checkout → signed app in /Applications (+ this CLI on PATH)
+#   elysium update       pull the latest from GitHub, rebuild, swap the live app
+#   elysium run          launch the installed app
+#   elysium test         run XCTest + the golden test suite
+set -euo pipefail
+
+# resolve symlinks (the PATH install is a symlink to this script) so REPO is
+# the real checkout, not the bin dir the symlink lives in
+SRC="${BASH_SOURCE[0]}"
+while [ -L "$SRC" ]; do
+    SRC_DIR="$(cd "$(dirname "$SRC")" && pwd)"
+    SRC="$(readlink "$SRC")"
+    [[ "$SRC" != /* ]] && SRC="$SRC_DIR/$SRC"
+done
+REPO="$(cd "$(dirname "$SRC")" && pwd)"
+APP_NAME="Elysium"
+APP_DIR="/Applications"
+APP="$APP_DIR/$APP_NAME.app"
+LEGACY_USER_APP="$HOME/Applications/$APP_NAME.app"
+BOLD=$'\033[1m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RESET=$'\033[0m'
+
+say()  { echo "${BOLD}${GREEN}==>${RESET}${BOLD} $*${RESET}"; }
+warn() { echo "${BOLD}${YELLOW}warning:${RESET} $*"; }
+die()  { echo "${BOLD}error:${RESET} $*" >&2; exit 1; }
+
+need_swift() {
+    # `command -v swift` always succeeds on macOS (the OS ships a shim), so
+    # gate on the actual developer-tools install instead
+    xcode-select -p >/dev/null 2>&1 || die "Xcode command-line tools not found. Install them with:  xcode-select --install"
+}
+
+build() {
+    say "Building Elysium (release)…"
+    # not a terminal (CI, piped): plain passthrough
+    if [ ! -t 1 ]; then
+        (cd "$REPO" && swift build -c release)
+        return
+    fi
+    # release mode compiles the whole engine as one optimized unit and SwiftPM
+    # prints nothing for minutes — spin so it doesn't look frozen
+    local log; log="$(mktemp /tmp/elysium-build.XXXXXX)"
+    (cd "$REPO" && swift build -c release >"$log" 2>&1) &
+    local pid=$!
+    trap 'kill "$pid" 2>/dev/null; printf "\r\033[K"; exit 130' INT TERM
+    local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0 start=$SECONDS last=""
+    while kill -0 "$pid" 2>/dev/null; do
+        last="$(tail -n 1 "$log" 2>/dev/null | tr -d '\r')"
+        printf '\r\033[K  %s%s%s %3ds  %.70s' "$GREEN" "${frames:$((i % 10)):1}" "$RESET" "$((SECONDS - start))" "${last:-warming up…}"
+        i=$((i + 1))
+        sleep 0.12
+    done
+    trap - INT TERM
+    printf '\r\033[K'
+    if wait "$pid"; then
+        echo "  ${GREEN}✓${RESET} built in $((SECONDS - start))s"
+        rm -f "$log"
+    else
+        cat "$log"
+        rm -f "$log"
+        die "build failed — full output above"
+    fi
+}
+
+verify_assets() {
+    (cd "$REPO" && ./scripts/verify-pack-assets.sh)
+}
+
+bundle() {
+    say "Assembling $APP_NAME.app…"
+    local stage="$REPO/dist/$APP_NAME.app"
+    local manifest="$REPO/dist/package-manifest"
+    local expected_hash="${1:-}"
+    local args=(--executable "$REPO/.build/release/Elysium" --output "$stage" --manifest "$manifest")
+    [ -z "$expected_hash" ] || args+=(--expected-hash "$expected_hash")
+    "$REPO/scripts/package-app.sh" "${args[@]}"
+}
+
+deploy() {
+    say "Installing to ${APP} ..."
+    mkdir -p "$APP_DIR"
+    rm -rf "$APP"
+    cp -R "$REPO/dist/$APP_NAME.app" "$APP"
+    if [ "$LEGACY_USER_APP" != "$APP" ] && [ -d "$LEGACY_USER_APP" ]; then
+        say "Removing legacy user-local install at ${LEGACY_USER_APP} ..."
+        rm -rf "$LEGACY_USER_APP"
+    fi
+}
+
+link_cli() {
+    for bin in /opt/homebrew/bin /usr/local/bin; do
+        if [ -d "$bin" ] && [ -w "$bin" ]; then
+            ln -sf "$REPO/elysium" "$bin/elysium"
+            say "CLI linked: ${bin}/elysium → you can now run 'elysium update' from anywhere"
+            return
+        fi
+    done
+    warn "couldn't find a writable bin dir — run elysium via $REPO/elysium (or add it to your PATH)"
+}
+
+cmd_install() {
+    need_swift
+    local no_build=false expected_hash="" manifest_output=""
+    shift || true
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --no-build) no_build=true; shift ;;
+            --executable-hash) expected_hash="$2"; shift 2 ;;
+            --manifest-output) manifest_output="$2"; shift 2 ;;
+            *) die "unknown install argument: $1" ;;
+        esac
+    done
+    verify_assets
+    if [ "$no_build" = false ]; then build; fi
+    [ -f "$REPO/.build/release/Elysium" ] && [ ! -L "$REPO/.build/release/Elysium" ] || \
+        die "release executable missing or unsafe"
+    local actual_hash
+    actual_hash="$(shasum -a 256 "$REPO/.build/release/Elysium" | awk '{print $1}')"
+    [ -z "$expected_hash" ] || [ "$actual_hash" = "$expected_hash" ] || \
+        die "release executable hash changed"
+    bundle "${expected_hash:-$actual_hash}"
+    if [ -n "$manifest_output" ]; then
+        [ ! -e "$manifest_output" ] || die "manifest output already exists"
+        umask 077
+        cp "$REPO/dist/package-manifest" "$manifest_output"
+        chmod 600 "$manifest_output"
+    fi
+    deploy
+    # drop the staging copy — Spotlight indexes it and you end up with
+    # "two Elysiums" in Launchpad
+    rm -rf "$REPO/dist"
+    link_cli
+    say "Done. Launch with:  elysium run   (or open /Applications/$APP_NAME.app)"
+}
+
+cmd_update() {
+    [ -d "$REPO/.git" ] || die "$REPO is not a git checkout — 'elysium update' needs one (re-clone from GitHub, or just run: elysium install)"
+    say "Pulling latest…"
+    (cd "$REPO" && git pull --ff-only) || die "git pull failed — if you have local changes, commit/stash them; if upstream history changed, run: git fetch origin && git reset --hard origin/main"
+    exec "$REPO/elysium" install
+}
+
+cmd_run()  { open "$APP" 2>/dev/null || die "Elysium isn't installed yet — run: elysium install"; }
+cmd_test() { need_swift; (cd "$REPO" && swift test && swift run -c release elysmoke); }
+
+case "${1:-}" in
+    install) cmd_install "$@" ;;
+    update)  cmd_update ;;
+    run)     cmd_run ;;
+    test)    cmd_test ;;
+    *)
+        echo "${BOLD}elysium${RESET} — one-command install for the Elysium app"
+        echo
+        echo "  ./elysium install    build from source and install /Applications/$APP_NAME.app"
+        echo "  elysium update       pull the latest version and update the live app"
+        echo "  elysium run          launch Elysium"
+        echo "  elysium test         run XCTest + the golden test suite"
+        ;;
+esac

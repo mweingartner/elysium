@@ -3,13 +3,13 @@ import ApplicationServices
 import CryptoKit
 import Darwin
 import Foundation
-import PebbleReleaseGate
+import ElysiumReleaseGate
 import Security
 
 private struct ChecklistItem: Decodable { let id: String; let prompt: String; let requiresAX: Bool }
 private struct Checklist: Decodable { let version: String; let fixedPasteSentinel: String; let items: [ChecklistItem] }
 
-struct BoundLivePebbleProcess: Equatable {
+struct BoundLiveElysiumProcess: Equatable {
     let pid: Int32
     let startIdentity: String
     let executablePath: String
@@ -26,7 +26,7 @@ func processStartIdentity(pid: Int32) throws -> String {
     return "\(start.tv_sec).\(start.tv_usec)"
 }
 
-func captureBoundPebbleProcess(pid: Int32) throws -> BoundLivePebbleProcess {
+func captureBoundElysiumProcess(pid: Int32) throws -> BoundLiveElysiumProcess {
     var path = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
     guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else {
         throw ReleaseGateError.evidence
@@ -54,17 +54,17 @@ func captureBoundPebbleProcess(pid: Int32) throws -> BoundLivePebbleProcess {
     var requirementText: CFString?
     guard SecRequirementCopyString(requirementRef, [], &requirementText) == errSecSuccess,
           let requirementText else { throw ReleaseGateError.authorization }
-    return BoundLivePebbleProcess(
+    return BoundLiveElysiumProcess(
         pid: pid, startIdentity: try processStartIdentity(pid: pid),
         executablePath: executable,
         cdhash: unique.map { String(format: "%02x", $0) }.joined(),
         requirement: requirementText as String)
 }
 
-func validateBoundPebbleProcess(_ payload: ReleaseGatePayload) throws -> BoundLivePebbleProcess {
+func validateBoundElysiumProcess(_ payload: ReleaseGatePayload) throws -> BoundLiveElysiumProcess {
     let expected = payload.artifacts
     guard expected.livePID > 0 else { throw ReleaseGateError.evidence }
-    let live = try captureBoundPebbleProcess(pid: expected.livePID)
+    let live = try captureBoundElysiumProcess(pid: expected.livePID)
     guard live.startIdentity == expected.liveStartIdentity,
           live.executablePath == expected.installedExecutablePath,
           live.cdhash == expected.installedCDHash,
@@ -78,14 +78,14 @@ func validateBoundPebbleProcess(_ payload: ReleaseGatePayload) throws -> BoundLi
     return live
 }
 
-func waitForBoundPebbleProcess(expectedExecutable: StableFileIdentity, expectedCDHash: String,
-                               expectedRequirement: String) throws -> BoundLivePebbleProcess {
+func waitForBoundElysiumProcess(expectedExecutable: StableFileIdentity, expectedCDHash: String,
+                               expectedRequirement: String) throws -> BoundLiveElysiumProcess {
     let deadline = Date().addingTimeInterval(15)
     repeat {
         if let app = NSWorkspace.shared.runningApplications.first(where: {
-            $0.bundleIdentifier == "com.briangao.pebble" &&
-                $0.bundleURL?.path == "/Applications/Pebble.app"
-        }), let live = try? captureBoundPebbleProcess(pid: app.processIdentifier),
+            $0.bundleIdentifier == "com.briangao.elysium" &&
+                $0.bundleURL?.path == "/Applications/Elysium.app"
+        }), let live = try? captureBoundElysiumProcess(pid: app.processIdentifier),
            live.executablePath == expectedExecutable.canonicalPath,
            live.cdhash == expectedCDHash, live.requirement == expectedRequirement {
             return live
@@ -118,11 +118,11 @@ private func privateWrite(_ data: Data, _ url: URL) throws {
 }
 private func appWindow(payload: ReleaseGatePayload) throws -> (NSRunningApplication, CGWindowID) {
     guard let app = NSWorkspace.shared.runningApplications.first(where: {
-        $0.bundleIdentifier == "com.briangao.pebble" && $0.bundleURL?.path == "/Applications/Pebble.app"
+        $0.bundleIdentifier == "com.briangao.elysium" && $0.bundleURL?.path == "/Applications/Elysium.app"
     }), app.isActive, app.processIdentifier == payload.artifacts.livePID else {
         throw ReleaseGateError.evidence
     }
-    _ = try validateBoundPebbleProcess(payload)
+    _ = try validateBoundElysiumProcess(payload)
     let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
     let matches = info.filter {
         ($0[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier &&
@@ -174,7 +174,7 @@ private func axReport(pid: pid_t, itemID: String) throws -> Data {
             }
         }
     }
-    let value: [String: Any] = ["schema": "PebbleInstalledAXEvidenceV1", "itemID": itemID,
+    let value: [String: Any] = ["schema": "ElysiumInstalledAXEvidenceV1", "itemID": itemID,
         "windowCount": windows.count, "elementCount": elements.count, "focusedCount": focused,
         "settableValueCount": settableValues, "finiteFrameCount": finiteFrames, "roleCounts": roles]
     return try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
@@ -206,10 +206,10 @@ func captureIntegratedInstalledObservation(
           prepared.observerDigest == (try observerDigest()) else { throw ReleaseGateError.staleSequence }
     try productionValidateCurrent(prepared)
     let checklist = try JSONDecoder().decode(Checklist.self, from: Data(contentsOf: URL(fileURLWithPath: "scripts/installed-signoff-checklist-v1.json")))
-    guard checklist.version == "pebble-installed-text-entry-v2", checklist.items.count == 14,
+    guard checklist.version == "elysium-installed-text-entry-v2", checklist.items.count == 14,
           Set(checklist.items.map(\.id)).count == checklist.items.count else { throw ReleaseGateError.evidence }
     print("This is pending installed proof, not deployment success. Cancellation invalidates it.")
-    print("Preserve clipboard content yourself. Pebble/tooling will not restore it; this tool never performs Paste or reads clipboard bytes.")
+    print("Preserve clipboard content yourself. Elysium/tooling will not restore it; this tool never performs Paste or reads clipboard bytes.")
     try ReleaseGateCoordinator.ensurePrivateDirectory(installed)
 
     for (index, item) in checklist.items.enumerated() {
@@ -233,7 +233,7 @@ func captureIntegratedInstalledObservation(
         let operationLog = Data("capture=0 ax=\(item.requiresAX ? 0 : -1) screenshot_bytes=\((try Data(contentsOf: screenshot)).count)\n".utf8)
         let operationLogURL = installed.appendingPathComponent("\(prefix).operation.log")
         try privateWrite(operationLog, operationLogURL)
-        let command: [String: Any] = ["schema": "PebbleInstalledCommandEvidenceV1",
+        let command: [String: Any] = ["schema": "ElysiumInstalledCommandEvidenceV1",
             "commandID": item.id, "captureStatus": 0,
             "axStatus": item.requiresAX ? 0 : -1, "windowID": windowID,
             "screenshotSHA256": screenshotHash, "axReportSHA256": axHash,
@@ -243,6 +243,6 @@ func captureIntegratedInstalledObservation(
         try observerPrompt("After reviewing the captured state, type PASS:", expected: "PASS")
         print("completed=\(index + 1) remaining=\(checklist.items.count - index - 1)")
     }
-    _ = try validateBoundPebbleProcess(prepared)
+    _ = try validateBoundElysiumProcess(prepared)
     return .init(processID: getpid(), processStart: try processStartIdentity(pid: getpid()))
 }

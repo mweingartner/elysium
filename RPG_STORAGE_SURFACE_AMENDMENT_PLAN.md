@@ -10,14 +10,14 @@
 exist in the repository. The incomplete Core client codec/candidate adapter was removed rather than
 substitute opaque bounded bytes or invented tags. The storage component remains dormant behind a
 test-only bootstrap and verify-only production accessor; Phase 2.5 must implement and review those
-semantic prerequisites before PebbleCore gains any client checkpoint adapter or façade acquisition.
+semantic prerequisites before ElysiumCore gains any client checkpoint adapter or façade acquisition.
 Host runtime allocation and cap matrices are likewise deferred until the reviewed host identity
 parents and coherent host checkpoint façade exist; this amendment does not add a test-only host
 writer to imitate that future authority boundary.
 
 ## 1. Purpose and non-authority
 
-This amendment freezes the first post-Phase-2.0B expansion of the `PebbleStorage` API needed by the
+This amendment freezes the first post-Phase-2.0B expansion of the `ElysiumStorage` API needed by the
 RPG UI contract:
 
 1. world-scoped local RPG quick-slot preferences and their one-time legacy-player migration marker;
@@ -29,7 +29,7 @@ RPG UI contract:
 It does not activate protocol v6, change `LAN_MULTIPLAYER_PROTOCOL_VERSION`, advertise a v6 ready
 marker, rename/quarantine v5 tables, allocate identities, promote credentials, submit an RPG request,
 acknowledge a notice, or publish any gameplay/UI value. The storage API moves primitive, bounded,
-already-validated bytes only. PebbleCore retains registry validation, strict DTO decoding, gameplay
+already-validated bytes only. ElysiumCore retains registry validation, strict DTO decoding, gameplay
 legality, canonical RPG repair, and candidate-before-publish orchestration.
 
 The implemented safe-deferral portion of this amendment has independent Security code and Tester
@@ -62,7 +62,7 @@ listed because this amendment must preserve their remediated invariants:
   cleanup, two-process, and rank-inversion test matrices.
 
 This amendment consumes those remediations without weakening or duplicating them. If their final code
-changes `Package.swift`, `Sources/PebbleStorage/StorageEngine.swift`, the release verifier, the
+changes `Package.swift`, `Sources/ElysiumStorage/StorageEngine.swift`, the release verifier, the
 adapter ownership model, lock ranks, public symbol graph, or scanner manifest format, this plan must
 be revalidated and rehashed before Security plan review.
 
@@ -85,27 +85,27 @@ this revalidation.
 | --- | --- |
 | `LAN_V6_PHASE20B_ADAPTER_PLAN.md` after status reconciliation | `86c87ae1fb2b4ba2e3c710a3ac5d97768aeef7cf7b9e2927d16d4ab86fc50589` |
 | `Package.swift` | `50270ebc175f60239feba2c4f2ba0ce75ee3f26e4fd97c7af1630a0d9000710a` |
-| `Sources/PebbleStorage/StorageEngine.swift` | `ae73b775aef8f7e286a47eaae4260d9f63064feb63ec16c916787f32208db5bb` |
-| `Sources/PebbleCore/Game/Saves.swift` | `08db0b3290c4c1750d297934cb56d9ba5de02f2a4c841f00f38ef1e3f5a22d7a` |
-| `Sources/PebbleCore/Game/LegacySaveMigration.swift` | `5a5358076905427ba4ba62fd3e1efca78a5f845333a7c2aa034aa291c5c57890` |
-| `Sources/PebbleCore/Game/LockRank.swift` | `af87d214e878dfa81ffbdb56e9ea0dc0bcdeca5bced174a36b2b69591f0701a1` |
-| `Sources/PebbleCore/Game/GameCore.swift` | `3e381982ebc0e782bf90ccac88fe6b35633f385dddc4e4a616d02478da26cdbd` |
-| `Sources/Pebble/main.swift` | `4c0831b9a2664dfef5f2aa6c89bede21912bc79f93b15314a69eadfee045abf0` |
+| `Sources/ElysiumStorage/StorageEngine.swift` | `ae73b775aef8f7e286a47eaae4260d9f63064feb63ec16c916787f32208db5bb` |
+| `Sources/ElysiumCore/Game/Saves.swift` | `08db0b3290c4c1750d297934cb56d9ba5de02f2a4c841f00f38ef1e3f5a22d7a` |
+| `Sources/ElysiumCore/Game/LegacySaveMigration.swift` | `5a5358076905427ba4ba62fd3e1efca78a5f845333a7c2aa034aa291c5c57890` |
+| `Sources/ElysiumCore/Game/LockRank.swift` | `af87d214e878dfa81ffbdb56e9ea0dc0bcdeca5bced174a36b2b69591f0701a1` |
+| `Sources/ElysiumCore/Game/GameCore.swift` | `3e381982ebc0e782bf90ccac88fe6b35633f385dddc4e4a616d02478da26cdbd` |
+| `Sources/Elysium/main.swift` | `4c0831b9a2664dfef5f2aa6c89bede21912bc79f93b15314a69eadfee045abf0` |
 | `scripts/sqlite-boundary-scan.swift` | `e238953cc0e40c4de3846989eeceaa713bb023c107f82cd1b570b1bf1d1f37a5` |
-| `scripts/pebble-storage-api-v1.json` | `8ab5084ce458d40d0f2c1638e0dee4cde246b5f4c8aa5978995f7cecc2d74ab8` |
-| `scripts/pebble-core-storage-capability-v1.json` | `175deda4759ee301a24df4a6848d45eea305d7c5b7da1fc9a7f231cb25b08cd9` |
+| `scripts/elysium-storage-api-v1.json` | `8ab5084ce458d40d0f2c1638e0dee4cde246b5f4c8aa5978995f7cecc2d74ab8` |
+| `scripts/elysium-core-storage-capability-v1.json` | `175deda4759ee301a24df4a6848d45eea305d7c5b7da1fc9a7f231cb25b08cd9` |
 | `scripts/security-scan.sh` | `26ea71253b1474c6533bf047ba7c9bf2894b68b9b547ceef915044477f220a07` |
-| `scripts/verify-pebble-storage-release-surface.sh` | `ca5fe73a61d812365db78e26fc627614b73e138cc50b5e1336eb7ed9e81a12bb` |
+| `scripts/verify-elysium-storage-release-surface.sh` | `ca5fe73a61d812365db78e26fc627614b73e138cc50b5e1336eb7ed9e81a12bb` |
 | ordered `Tests/SecurityScanFixtures` file/hash manifest | `7528e547bc0b2bd6a11a398df5beb94d2f631ce410aa964962db1f482d87e8bf` |
-| `Tests/PebbleCoreTests/PersistenceTestSupport.swift` | `ed4ef97415ee2452b044233b3e631173e9a230b5739bd68dddd2ed2539dbc461` |
-| `Tests/PebbleCoreTests/SaveDBLifecycleTests.swift` | `6caa772fd437337821dbfc9f7d67b3f2bb036a55bb032a808db6102023538bbb` |
-| `Tests/PebbleCoreTests/LegacySaveMigrationTests.swift` | `b5341673254f9ce715f582ffb5b7bf205de0fcc9f9e00d7fd3204dec105943a4` |
-| `Tests/PebbleCoreTests/LegacySaveMigrationAdversarialTests.swift` | `3b917d472c3c1f4418a66638c185fa349b8c8561f3eed49aa934f1804d5c37ac` |
-| `Tests/PebbleCoreTests/PersistenceLockRankTests.swift` | `68386c36cb3e9d741240e044fc084f2148c68996b59711f4158066041084abf7` |
-| `Tests/PebbleCoreTests/SaveDBTests.swift` | `6a3391b7a725c0d5563e2702d914084639974773827b8e474466380b9004f240` |
-| `Tests/PebbleCoreTests/PebbleStorageExecutorTests.swift` | `8abf4699ccce64f20066e9bdd9b2d6146be45913651de3a967516e199d123381` |
-| `Tests/PebbleCoreTests/PebbleStorageAdversarialTests.swift` | `d93cf4f9aa2ce8f2cdea5f8e2dd882776662685598d0166e9d2f408b83d60851` |
-| `Tests/PebbleCoreTests/LANV6SchemaAuthorizerTests.swift` | `be5744cdf8dfe79c3b364b501812f63954b857bdb179d19fabe639adf2c22de7` |
+| `Tests/ElysiumCoreTests/PersistenceTestSupport.swift` | `ed4ef97415ee2452b044233b3e631173e9a230b5739bd68dddd2ed2539dbc461` |
+| `Tests/ElysiumCoreTests/SaveDBLifecycleTests.swift` | `6caa772fd437337821dbfc9f7d67b3f2bb036a55bb032a808db6102023538bbb` |
+| `Tests/ElysiumCoreTests/LegacySaveMigrationTests.swift` | `b5341673254f9ce715f582ffb5b7bf205de0fcc9f9e00d7fd3204dec105943a4` |
+| `Tests/ElysiumCoreTests/LegacySaveMigrationAdversarialTests.swift` | `3b917d472c3c1f4418a66638c185fa349b8c8561f3eed49aa934f1804d5c37ac` |
+| `Tests/ElysiumCoreTests/PersistenceLockRankTests.swift` | `68386c36cb3e9d741240e044fc084f2148c68996b59711f4158066041084abf7` |
+| `Tests/ElysiumCoreTests/SaveDBTests.swift` | `6a3391b7a725c0d5563e2702d914084639974773827b8e474466380b9004f240` |
+| `Tests/ElysiumCoreTests/ElysiumStorageExecutorTests.swift` | `8abf4699ccce64f20066e9bdd9b2d6146be45913651de3a967516e199d123381` |
+| `Tests/ElysiumCoreTests/ElysiumStorageAdversarialTests.swift` | `d93cf4f9aa2ce8f2cdea5f8e2dd882776662685598d0166e9d2f408b83d60851` |
+| `Tests/ElysiumCoreTests/LANV6SchemaAuthorizerTests.swift` | `be5744cdf8dfe79c3b364b501812f63954b857bdb179d19fabe639adf2c22de7` |
 | ordered compatibility-owner test file/hash manifest | `aba0b4e5f66c774a6b9d5bf547c1020d878ca54986a2aa92ffb2d8d5df9b581a` |
 | ordered `ARCHITECTURE.md`/`SECURITY.md`/`CONTRIBUTING.md` file/hash manifest | `53332a64f1ae7ebc6aa54da529f06afb27bda572f327b943704653a5419f9a0f` |
 
@@ -125,30 +125,30 @@ inputs is forbidden.
 
 ### 3.1 Files modified after Phase 2.0B PASS
 
-1. `Sources/PebbleStorage/StorageEngine.swift`
+1. `Sources/ElysiumStorage/StorageEngine.swift`
    - Add the exact revision-1 schema below, its private schema bootstrap/verification manifest, its
      private authorizer scopes, primitive row types, and the three named façades.
    - Retain sole ownership of SQLite, DDL, SQL, statement/context/capability types, aggregate count/
      byte checks, and transaction failure injection.
-2. `Sources/PebbleCore/Game/Saves.swift`
+2. `Sources/ElysiumCore/Game/Saves.swift`
    - Obtain the new façades from the existing coordinator and expose only typed domain adapter
-     methods. It remains one of exactly two permitted PebbleCore `import PebbleStorage` owners.
+     methods. It remains one of exactly two permitted ElysiumCore `import ElysiumStorage` owners.
    - Encode/decode and validate domain bytes outside storage rank 12; invoke a façade only inside the
      existing rank-12 wrapper; publish nothing from a storage callback.
    - Add exactly the checked `getPlayerChecked` snapshot and `compareAndSwapPlayerChecked` APIs plus
      concrete digest/expectation/snapshot and closed redacted error types below. Keep compatibility
      `putPlayer(_:_:) -> Void` on its existing serialized transaction; do not add an unconditional
      throwing writer or change any other caller implicitly to CAS behavior.
-3. `Sources/PebbleCore/Game/RPGLocalPreferences.swift`
+3. `Sources/ElysiumCore/Game/RPGLocalPreferences.swift`
    - Own exact scope validation, the quick-slot codec, canonical digests, pure reducers, and mapping
-     between domain values and `SaveDB` operations. It does not import or name `PebbleStorage`.
-4. `Sources/PebbleCore/Game/CharacterProgression.swift`,
-   `Sources/PebbleCore/Entity/Player.swift`, and `Sources/PebbleCore/Game/GameCore.swift`
+     between domain values and `SaveDB` operations. It does not import or name `ElysiumStorage`.
+4. `Sources/ElysiumCore/Game/CharacterProgression.swift`,
+   `Sources/ElysiumCore/Entity/Player.swift`, and `Sources/ElysiumCore/Game/GameCore.swift`
    - Retain the bounded legacy envelope, route local-world migration and writes, remove slots from
      authoritative encoding only after migration safety exists, and enforce persist-before-publish.
    - `Player` adds only the explicit pure `save(omitLegacyQuickSlots:)` candidate overload; GameCore
      owns the migration-committed/non-omittable -> checked durable row -> omittable state transition.
-5. `Sources/PebbleCore/Net/LANMultiplayer.swift`
+5. `Sources/ElysiumCore/Net/LANMultiplayer.swift`
    - Remove quick slots from v5/public/owner RPG encoding after local migration is available; add no
      v5-to-v6 persistence bridge.
 6. Future reviewed v6 client authority coordinator source
@@ -160,25 +160,25 @@ inputs is forbidden.
 
 ### 3.2 Tests and enforcement files
 
-- Add `Tests/PebbleCoreTests/RPGLocalPreferenceStorageTests.swift`.
-- Add `Tests/PebbleCoreTests/SaveDBPlayerRowCASTests.swift` for checked snapshot/CAS, rank split,
+- Add `Tests/ElysiumCoreTests/RPGLocalPreferenceStorageTests.swift`.
+- Add `Tests/ElysiumCoreTests/SaveDBPlayerRowCASTests.swift` for checked snapshot/CAS, rank split,
   redacted errors, injected storage failures, restart rows, and compatibility wrapper.
-- Add `Tests/PebbleCoreTests/LANV6ClientAuthorityCheckpointStorageTests.swift`.
-- Add `Tests/PebbleCoreTests/LANV6HostOwnerCheckpointStorageTests.swift`.
-- Extend `PebbleStorageExecutorTests.swift`, `LANV6SchemaAuthorizerTests.swift`,
+- Add `Tests/ElysiumCoreTests/LANV6ClientAuthorityCheckpointStorageTests.swift`.
+- Add `Tests/ElysiumCoreTests/LANV6HostOwnerCheckpointStorageTests.swift`.
+- Extend `ElysiumStorageExecutorTests.swift`, `LANV6SchemaAuthorizerTests.swift`,
   `RPGLocalPreferencesTests.swift`, `RPGCharacterStateTests.swift`, `RPGCoreV2Tests.swift`,
   `RPGQuickSlotInputTests.swift`, `LANClientRoutingTests.swift`, `LANMultiplayerTests.swift`, and
   `LANReplicationTests.swift`.
-- Semantically update `scripts/pebble-storage-api-v1.json` and
-  `scripts/pebble-core-storage-capability-v1.json` only after reviewing the exact public/package/SPI
+- Semantically update `scripts/elysium-storage-api-v1.json` and
+  `scripts/elysium-core-storage-capability-v1.json` only after reviewing the exact public/package/SPI
   symbol and use-site diff.
-- Update `scripts/sqlite-boundary-scan.swift`, `scripts/verify-pebble-storage-release-surface.sh`,
+- Update `scripts/sqlite-boundary-scan.swift`, `scripts/verify-elysium-storage-release-surface.sh`,
   `scripts/security-scan.sh`, and `scripts/pipeline.sh` only for the new reviewed schema/API manifest
   and artifact expectations. No automatic manifest-accept/regeneration mode is allowed.
 - Update `ARCHITECTURE.md`, `SECURITY.md`, `CONTRIBUTING.md`, and implementation status in the RPG
   design/UI plan only after behavior is proven.
 
-No additional production file may import `PebbleStorage`. No façade accepts SQL, table/column names,
+No additional production file may import `ElysiumStorage`. No façade accepts SQL, table/column names,
 capabilities, closures, callbacks, protocols, generic carriers, or arbitrary error values.
 
 ## 4. Schema revision and atomic bootstrap
@@ -188,7 +188,7 @@ three dependency-ordered, individually atomic components rather than one transac
 host table before its identity parent exists:
 
 1. `rpgLocalPreferences` may install immediately after final Phase2B PASS. It is the sole first-
-   bootstrap owner of `pebble_storage_component_schema_v1`: the marker table, both local tables, and
+   bootstrap owner of `elysium_storage_component_schema_v1`: the marker table, both local tables, and
    the local marker row commit together or none exists.
 2. `lanClientAuthority` is installed only by the Phase-2.5 client credential schema bootstrap after
    that phase's model/storage plan passes. That one bootstrap creates the credential anchor and the
@@ -205,7 +205,7 @@ component is `schemaIntegrity`. Each private component-bootstrap capability perf
 1. verifies the exact current earlier-component/core/v6-parent schema and proves none of its new
    object names exists;
 2. creates exactly its tables/indexes below using literal SQL in stated order;
-3. inserts exactly its marker row into `pebble_storage_component_schema_v1`;
+3. inserts exactly its marker row into `elysium_storage_component_schema_v1`;
 4. verifies `sqlite_master`, `table_info`, `table_list`, `index_list`, `index_xinfo`,
    `foreign_key_list`, and every CHECK/canonical SQL string against its compiled manifest; and
 5. commits, verifies autocommit, and makes only that component's façade obtainable.
@@ -213,7 +213,7 @@ component is `schemaIntegrity`. Each private component-bootstrap capability perf
 The marker component values are exactly `rpgLocalPreferences`, `lanClientAuthority`, and
 `lanHostOwnerRows`; each has revision 1 and its own 32-byte SHA-256 manifest digest over:
 
-`"Pebble/storage-schema/v1\0" || UInt32BE(componentNameBytes) || componentNameUTF8 ||
+`"Elysium/storage-schema/v1\0" || UInt32BE(componentNameBytes) || componentNameUTF8 ||
 UInt32BE(statementCount) || each(UInt32BE(utf8Count) || canonicalSQLUTF8)`.
 
 Canonical SQL is the exact whitespace-normalized literal manifest in source order, not the mutable
@@ -238,7 +238,7 @@ commit together. No bootstrap temporarily disables foreign keys.
 ### 4.1 Exact marker DDL
 
 ```sql
-CREATE TABLE pebble_storage_component_schema_v1(
+CREATE TABLE elysium_storage_component_schema_v1(
   component TEXT NOT NULL COLLATE BINARY,
   revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision=1),
   manifest_digest BLOB NOT NULL CHECK(typeof(manifest_digest)='blob' AND length(manifest_digest)=32),
@@ -299,7 +299,7 @@ CREATE TABLE rpg_local_preference_migrations_v1(
 
 There is no player, authority, address, seed, display name, world name, v5 host-world key, or LAN
 identity column. `world_record_id` is the exact 1...64-byte `WorldRecord.id`, compared byte-for-byte
-under BINARY collation. A `.lanV6` scope is rejected by PebbleCore before a storage row is built and
+under BINARY collation. A `.lanV6` scope is rejected by ElysiumCore before a storage row is built and
 the façade has no LAN-shaped initializer.
 
 ### 5.2 Exact row and aggregate accounting
@@ -342,9 +342,9 @@ Every integer below is unsigned fixed-width big-endian and every variable field 
 `UInt32BE(byteCount)`.
 
 - Legacy source digest:
-  `SHA256("Pebble/RPGLegacyQuickSlots/source/v1\0" || UInt16BE(envelopeVersion) || slotsPayload)`.
+  `SHA256("Elysium/RPGLegacyQuickSlots/source/v1\0" || UInt16BE(envelopeVersion) || slotsPayload)`.
 - Local destination digest:
-  `SHA256("Pebble/RPGLocalQuickSlots/destination/v1\0" || worldID || UInt16BE(1) || UInt64BE(revision) || slotsPayload)`.
+  `SHA256("Elysium/RPGLocalQuickSlots/destination/v1\0" || worldID || UInt16BE(1) || UInt64BE(revision) || slotsPayload)`.
 - The stored `payload_digest` is exactly the local destination digest.
 - The marker stores the exact source digest and chosen destination digest; it contains no digest of
   JSON serialization, display data, dictionary order, filesystem path, or native-endian integer.
@@ -355,10 +355,10 @@ a missing/default preference.
 
 ## 7. Local preference typed surface and transactions
 
-`PebbleStorage` adds only primitive, immutable values:
+`ElysiumStorage` adds only primitive, immutable values:
 
 ```swift
-public struct PebbleRPGLocalPreferenceStorageRow: Sendable, Equatable {
+public struct ElysiumRPGLocalPreferenceStorageRow: Sendable, Equatable {
     public let worldRecordID: String
     public let schemaVersion: UInt16
     public let revision: UInt64
@@ -368,7 +368,7 @@ public struct PebbleRPGLocalPreferenceStorageRow: Sendable, Equatable {
     public let migrationOriginRevision: UInt64?
 }
 
-public struct PebbleRPGLegacyQuickSlotMigrationStorageRow: Sendable, Equatable {
+public struct ElysiumRPGLegacyQuickSlotMigrationStorageRow: Sendable, Equatable {
     public let worldRecordID: String
     public let schemaVersion: UInt16
     public let sourceDigest: Data
@@ -376,30 +376,30 @@ public struct PebbleRPGLegacyQuickSlotMigrationStorageRow: Sendable, Equatable {
     public let destinationRevision: UInt64
 }
 
-public struct PebbleRPGLocalPreferenceMigrationReceipt: Sendable, Equatable {
-    public let preference: PebbleRPGLocalPreferenceStorageRow
-    public let marker: PebbleRPGLegacyQuickSlotMigrationStorageRow
+public struct ElysiumRPGLocalPreferenceMigrationReceipt: Sendable, Equatable {
+    public let preference: ElysiumRPGLocalPreferenceStorageRow
+    public let marker: ElysiumRPGLegacyQuickSlotMigrationStorageRow
     public let insertedDestination: Bool
 }
 
-public final class PebbleRPGLocalPreferencesStorage {
-    public func read(worldRecordID: String) throws -> PebbleRPGLocalPreferenceStorageRow?
+public final class ElysiumRPGLocalPreferencesStorage {
+    public func read(worldRecordID: String) throws -> ElysiumRPGLocalPreferenceStorageRow?
     public func materializeIfAbsent(
-        candidate: PebbleRPGLocalPreferenceStorageRow
-    ) throws -> PebbleRPGLocalPreferenceStorageRow
+        candidate: ElysiumRPGLocalPreferenceStorageRow
+    ) throws -> ElysiumRPGLocalPreferenceStorageRow
     public func compareAndSwap(
         expectedRevision: UInt64,
         expectedDigest: Data,
-        candidate: PebbleRPGLocalPreferenceStorageRow
-    ) throws -> PebbleRPGLocalPreferenceStorageRow
+        candidate: ElysiumRPGLocalPreferenceStorageRow
+    ) throws -> ElysiumRPGLocalPreferenceStorageRow
     public func materializeLegacy(
         sourceDigest: Data,
-        absentDestination: PebbleRPGLocalPreferenceStorageRow
-    ) throws -> PebbleRPGLocalPreferenceMigrationReceipt
+        absentDestination: ElysiumRPGLocalPreferenceStorageRow
+    ) throws -> ElysiumRPGLocalPreferenceMigrationReceipt
 }
 ```
 
-The coordinator adds `rpgLocalPreferences() throws -> PebbleRPGLocalPreferencesStorage`. No method
+The coordinator adds `rpgLocalPreferences() throws -> ElysiumRPGLocalPreferencesStorage`. No method
 accepts `RPGLocalPreferenceScope`, a LAN ID, a player/save object, JSON, registry callback, mutation
 closure, or generic encoder.
 
@@ -505,34 +505,34 @@ public func compareAndSwapPlayerChecked(
 synthesized public memberwise initializer, unlabeled initializer, default argument, package/SPI
 initializer, unsafe/unchecked constructor, decoding initializer, or other factory is permitted.
 
-The complete PebbleStorage source-level addition is exactly this public block; it adds no package or
+The complete ElysiumStorage source-level addition is exactly this public block; it adds no package or
 SPI declaration:
 
 ```swift
-public struct PebblePlayerJSONRowDigest: Sendable, Equatable {
+public struct ElysiumPlayerJSONRowDigest: Sendable, Equatable {
     public let data: Data
 
     public init(data: Data) throws {
-        guard data.count == 32 else { throw PebbleStorageError.invalidValue }
+        guard data.count == 32 else { throw ElysiumStorageError.invalidValue }
         self.data = data
     }
 }
 
-public enum PebblePlayerJSONExpectedRowState: Sendable, Equatable {
+public enum ElysiumPlayerJSONExpectedRowState: Sendable, Equatable {
     case absent
-    case present(PebblePlayerJSONRowDigest)
+    case present(ElysiumPlayerJSONRowDigest)
 }
 
-public enum PebblePlayerJSONCompareAndSwapResult: Sendable, Equatable {
+public enum ElysiumPlayerJSONCompareAndSwapResult: Sendable, Equatable {
     case conflict
-    case committed(PebblePlayerJSONStorageRow)
+    case committed(ElysiumPlayerJSONStorageRow)
 }
 
-public extension PebbleLegacyCoreStorage {
+public extension ElysiumLegacyCoreStorage {
     func compareAndSwapPlayerJSON(
-        expected: PebblePlayerJSONExpectedRowState,
-        candidate: PebblePlayerJSONStorageRow
-    ) throws -> PebblePlayerJSONCompareAndSwapResult
+        expected: ElysiumPlayerJSONExpectedRowState,
+        candidate: ElysiumPlayerJSONStorageRow
+    ) throws -> ElysiumPlayerJSONCompareAndSwapResult
 }
 ```
 
@@ -545,7 +545,7 @@ executor, transaction, or arbitrary-error parameter/return. The extension spelli
 the fourth public addition; no package/SPI mirror is permitted.
 
 The canonical digest is
-`SHA256("Pebble/player-row/exact-json/v1\0" || UInt32BE(worldIDUTF8.count) || worldIDUTF8 ||
+`SHA256("Elysium/player-row/exact-json/v1\0" || UInt32BE(worldIDUTF8.count) || worldIDUTF8 ||
 UInt64BE(exactStoredJSONUTF8.count) || exactStoredJSONUTF8)`. It covers the full exact persisted row,
 including world ID and every JSON byte; it never hashes a decoded dictionary, unordered iteration,
 display value, native-endian integer, or partial RPG field. `getPlayerChecked` obtains the existing
@@ -564,20 +564,20 @@ the bounded object, and returns both data and digest. Error mapping is total and
 No underlying error is passed through, and no case falls back to another mapping. No raw path, SQL,
 SQLite code, JSON, player value, or underlying error text escapes.
 
-Bounds are inherited exactly from `PebblePlayerJSONStorageRow`: world ID UTF-8 bytes
+Bounds are inherited exactly from `ElysiumPlayerJSONStorageRow`: world ID UTF-8 bytes
 0/1/1,048,576/1,048,577 and player JSON UTF-8 bytes 786,431/786,432/786,433 are explicit tests.
 Digest construction is incremental over the fixed domain, checked big-endian lengths, world bytes,
 and JSON bytes; it never concatenates or duplicates the bounded row into one aggregate buffer.
-`PebblePlayerJSONRowDigest(data:)` tests 31/32/33 bytes and rejects non-32 before assigning/copying
+`ElysiumPlayerJSONRowDigest(data:)` tests 31/32/33 bytes and rejects non-32 before assigning/copying
 into an expectation, enqueueing, or entering rank 12. Candidate world/JSON cap violations reject
 before enqueue/rank entry. Stored `world`/`json` wrong SQLite classes, oversized text returned by a
 hostile database, invalid UTF-8, or cap-plus-one fail in the bounded statement reader before full
 copy/digest construction and map exactly to `.invalidStoredRow` without candidate write; they never
 map to `.persistenceFailed`.
 
-PebbleStorage adds only concrete `PebblePlayerJSONRowDigest`,
-`PebblePlayerJSONExpectedRowState`, `PebblePlayerJSONCompareAndSwapResult`, and
-`PebbleLegacyCoreStorage.compareAndSwapPlayerJSON(expected:candidate:)`. The expectation is exactly
+ElysiumStorage adds only concrete `ElysiumPlayerJSONRowDigest`,
+`ElysiumPlayerJSONExpectedRowState`, `ElysiumPlayerJSONCompareAndSwapResult`, and
+`ElysiumLegacyCoreStorage.compareAndSwapPlayerJSON(expected:candidate:)`. The expectation is exactly
 `.absent` or `.present(32-byte digest)`. In one existing rank-12 immediate `player` transaction the
 facade reads the exact row, recomputes the full digest, and fixed-time compares all 32 bytes. Absent
 matches only no row; present matches only an existing row with equal digest. Mismatch returns
@@ -643,7 +643,7 @@ the final durable row; main-actor session changes cannot enter the non-suspendin
 commit is old row; crash after commit is the CAS candidate or a demonstrably later serialized writer.
 
 LAN entry never calls either materializer. World deletion uses the existing
-`PebbleLegacyCoreStorage.deleteWorld(id:)` entry point but replaces its private implementation scope
+`ElysiumLegacyCoreStorage.deleteWorld(id:)` entry point but replaces its private implementation scope
 with one closed, non-nestable `coreWorldDeleteWithRPGV1` capability. One immediate transaction first
 validates the exact parent/child relationship and caps, then executes in this exact order:
 
@@ -668,7 +668,7 @@ facade or capability and no foreign-key cascade hides a cross-scope write.
 
 The client checkpoint is keyed only by raw `(hostInstallationID[16], worldLANID[16],
 lookupDigest[32])`. `lookupDigest` must fixed-time equal
-`SHA256("Pebble-LAN-v6" || hid || wid)` before a storage key is constructed. Textual 22-character
+`SHA256("Elysium-LAN-v6" || hid || wid)` before a storage key is constructed. Textual 22-character
 base64url exists only at UI/wire boundaries; SQL stores fixed BLOBs.
 
 The credential row is the mandatory aggregate anchor. It may exist before owner request-zero; owner
@@ -870,23 +870,23 @@ result accumulation or partial prefix is returned from an invalid table.
 
 ### 9.2 Canonical row digests
 
-Each row payload is a strict, duplicate-free, sorted-key canonical byte codec owned by PebbleCore,
+Each row payload is a strict, duplicate-free, sorted-key canonical byte codec owned by ElysiumCore,
 not arbitrary JSON. Storage constructors verify only fixed identity, cap, generation, and 32-byte
 digest shape; the SaveDB adapter recomputes and fixed-time compares the digest before and after every
 facade call. Digest inputs are:
 
-- credential: `SHA256("Pebble/LANv6/client-credential/v1\0" || key || UInt64BE(generation) || payload)`;
-- owner: `SHA256("Pebble/LANv6/client-owner/v1\0" || key || UInt64BE(generation) || payload)`;
+- credential: `SHA256("Elysium/LANv6/client-credential/v1\0" || key || UInt64BE(generation) || payload)`;
+- owner: `SHA256("Elysium/LANv6/client-owner/v1\0" || key || UInt64BE(generation) || payload)`;
 - pending/disposition:
-  `SHA256("Pebble/LANv6/client-pending/v1\0" || key || UInt64BE(generation) || UInt8(mode) || payload)`;
+  `SHA256("Elysium/LANv6/client-pending/v1\0" || key || UInt64BE(generation) || UInt8(mode) || payload)`;
 - inbox payload:
-  `SHA256("Pebble/LANv6/client-notice-payload/v1\0" || key || notificationID || sessionEpoch ||
+  `SHA256("Elysium/LANv6/client-notice-payload/v1\0" || key || notificationID || sessionEpoch ||
   UInt64BE(requestID) || snapshotID || UInt8(status) || UInt64BE(creationGeneration) || payload)`.
 
 `key` is exactly `hid[16] || wid[16] || lookupDigest[32]`. The aggregate digest stored on the
 credential anchor is:
 
-`SHA256("Pebble/LANv6/client-checkpoint-aggregate/v1\0" || key || UInt64BE(generation) ||
+`SHA256("Elysium/LANv6/client-checkpoint-aggregate/v1\0" || key || UInt64BE(generation) ||
 credentialDigest || ownerPresenceTag || ownerLastChangeGenerationIfPresent || ownerDigestIfPresent ||
 pendingPresenceTag || pendingLastChangeGenerationIfPresent || pendingDigestIfPresent)`.
 
@@ -906,7 +906,7 @@ generation exactly unchanged.
 
 The deterministic notification ID is exactly:
 
-`SHA256("Pebble-LAN-v6-notice\0" || hid[16] || wid[16] || sessionEpoch[16] || UInt64BE(requestID))`.
+`SHA256("Elysium-LAN-v6-notice\0" || hid[16] || wid[16] || sessionEpoch[16] || UInt64BE(requestID))`.
 
 The notice payload digest stored in its canonical payload is separately the protocol bundle identity
 digest over length-prefixed exact manifest payload, canonical owner bytes, and canonical chunk-
@@ -918,14 +918,14 @@ that retains the old row and rolls back the complete checkpoint.
 The storage target exports exact primitive values with throwing, bound-checking initializers:
 
 ```swift
-public struct PebbleLANClientAuthorityStorageKey: Sendable, Equatable, Hashable {
+public struct ElysiumLANClientAuthorityStorageKey: Sendable, Equatable, Hashable {
     public let hostInstallationID: Data // 16
     public let worldLANID: Data         // 16
     public let lookupDigest: Data       // 32
 }
 
-public struct PebbleLANClientCredentialStorageRow: Sendable {
-    public let key: PebbleLANClientAuthorityStorageKey
+public struct ElysiumLANClientCredentialStorageRow: Sendable {
+    public let key: ElysiumLANClientAuthorityStorageKey
     public let schemaVersion: UInt16
     public let aggregateGeneration: UInt64
     public let aggregateDigest: Data
@@ -933,78 +933,78 @@ public struct PebbleLANClientCredentialStorageRow: Sendable {
     public let payload: Data
     public let payloadDigest: Data
 }
-public struct PebbleLANClientOwnerCheckpointStorageRow: Sendable {
-    public let key: PebbleLANClientAuthorityStorageKey
+public struct ElysiumLANClientOwnerCheckpointStorageRow: Sendable {
+    public let key: ElysiumLANClientAuthorityStorageKey
     public let schemaVersion: UInt16
     public let lastChangeGeneration: UInt64
     public let payload: Data
     public let payloadDigest: Data
 }
-public enum PebbleLANClientPendingMode: UInt8, Sendable, Equatable { case awaitingState = 1, dispositionOnly = 2 }
-public struct PebbleLANClientPendingDispositionStorageRow: Sendable {
-    public let key: PebbleLANClientAuthorityStorageKey
+public enum ElysiumLANClientPendingMode: UInt8, Sendable, Equatable { case awaitingState = 1, dispositionOnly = 2 }
+public struct ElysiumLANClientPendingDispositionStorageRow: Sendable {
+    public let key: ElysiumLANClientAuthorityStorageKey
     public let schemaVersion: UInt16
     public let lastChangeGeneration: UInt64
-    public let mode: PebbleLANClientPendingMode
+    public let mode: ElysiumLANClientPendingMode
     public let payload: Data
     public let payloadDigest: Data
 }
-public enum PebbleLANClientNoticeStatus: UInt8, Sendable, Equatable {
+public enum ElysiumLANClientNoticeStatus: UInt8, Sendable, Equatable {
     case accepted = 1, rejected = 2, outcomeEvicted = 3, requestExhausted = 4
 }
-public enum PebbleLANClientNoticeAcknowledgement: UInt8, Sendable, Equatable {
+public enum ElysiumLANClientNoticeAcknowledgement: UInt8, Sendable, Equatable {
     case pendingRender = 0, acknowledged = 1
 }
-public struct PebbleLANClientNotificationStorageRow: Sendable {
-    public let key: PebbleLANClientAuthorityStorageKey
+public struct ElysiumLANClientNotificationStorageRow: Sendable {
+    public let key: ElysiumLANClientAuthorityStorageKey
     public let notificationID: Data
     public let sessionEpoch: Data
     public let requestID: UInt64
     public let snapshotID: Data
-    public let status: PebbleLANClientNoticeStatus
+    public let status: ElysiumLANClientNoticeStatus
     public let creationGeneration: UInt64
-    public let acknowledgement: PebbleLANClientNoticeAcknowledgement
+    public let acknowledgement: ElysiumLANClientNoticeAcknowledgement
     public let acknowledgementGeneration: UInt64
     public let payload: Data
     public let payloadDigest: Data
 }
 
-public enum PebbleLANClientOwnerRowChange: Sendable {
+public enum ElysiumLANClientOwnerRowChange: Sendable {
     case unchanged
-    case set(PebbleLANClientOwnerCheckpointStorageRow)
+    case set(ElysiumLANClientOwnerCheckpointStorageRow)
     case remove(expectedDigest: Data)
 }
-public enum PebbleLANClientPendingRowChange: Sendable {
+public enum ElysiumLANClientPendingRowChange: Sendable {
     case unchanged
-    case set(PebbleLANClientPendingDispositionStorageRow)
+    case set(ElysiumLANClientPendingDispositionStorageRow)
     case remove(expectedDigest: Data)
 }
 
-public struct PebbleLANClientAuthorityCheckpointSnapshot: Sendable {
-    public let credential: PebbleLANClientCredentialStorageRow
-    public let owner: PebbleLANClientOwnerCheckpointStorageRow?
-    public let pending: PebbleLANClientPendingDispositionStorageRow?
-    public let oldestPendingNotice: PebbleLANClientNotificationStorageRow?
+public struct ElysiumLANClientAuthorityCheckpointSnapshot: Sendable {
+    public let credential: ElysiumLANClientCredentialStorageRow
+    public let owner: ElysiumLANClientOwnerCheckpointStorageRow?
+    public let pending: ElysiumLANClientPendingDispositionStorageRow?
+    public let oldestPendingNotice: ElysiumLANClientNotificationStorageRow?
 }
 
-public enum PebbleLANClientAuthorityTransitionKind: UInt8, Sendable, Equatable {
+public enum ElysiumLANClientAuthorityTransitionKind: UInt8, Sendable, Equatable {
     case firstRequestZeroBind = 1
     case ordinary = 2
 }
 
-public struct PebbleLANClientAuthorityCheckpointCandidate: Sendable {
-    public let key: PebbleLANClientAuthorityStorageKey
-    public let transition: PebbleLANClientAuthorityTransitionKind
+public struct ElysiumLANClientAuthorityCheckpointCandidate: Sendable {
+    public let key: ElysiumLANClientAuthorityStorageKey
+    public let transition: ElysiumLANClientAuthorityTransitionKind
     public let expectedAggregateGeneration: UInt64
     public let expectedAggregateDigest: Data
-    public let credential: PebbleLANClientCredentialStorageRow
-    public let ownerChange: PebbleLANClientOwnerRowChange
-    public let pendingChange: PebbleLANClientPendingRowChange
-    public let noticeInsert: PebbleLANClientNotificationStorageRow?
+    public let credential: ElysiumLANClientCredentialStorageRow
+    public let ownerChange: ElysiumLANClientOwnerRowChange
+    public let pendingChange: ElysiumLANClientPendingRowChange
+    public let noticeInsert: ElysiumLANClientNotificationStorageRow?
 }
 
-public struct PebbleLANClientAuthorityCheckpointReceipt: Sendable {
-    public let snapshot: PebbleLANClientAuthorityCheckpointSnapshot
+public struct ElysiumLANClientAuthorityCheckpointReceipt: Sendable {
+    public let snapshot: ElysiumLANClientAuthorityCheckpointSnapshot
     public let committedAggregateGeneration: UInt64
     public let committedAggregateDigest: Data
 }
@@ -1018,25 +1018,25 @@ types are not `Equatable`, `Hashable`, `Codable`, `CustomStringConvertible`, or
 the fixed 32-byte XOR accumulator rather than `Data ==`.
 
 ```swift
-public final class PebbleClientAuthorityCheckpointV6Storage {
+public final class ElysiumClientAuthorityCheckpointV6Storage {
     public func load(
-        key: PebbleLANClientAuthorityStorageKey
-    ) throws -> PebbleLANClientAuthorityCheckpointSnapshot
+        key: ElysiumLANClientAuthorityStorageKey
+    ) throws -> ElysiumLANClientAuthorityCheckpointSnapshot
 
     public func commit(
-        _ candidate: PebbleLANClientAuthorityCheckpointCandidate
-    ) throws -> PebbleLANClientAuthorityCheckpointReceipt
+        _ candidate: ElysiumLANClientAuthorityCheckpointCandidate
+    ) throws -> ElysiumLANClientAuthorityCheckpointReceipt
 
     public func oldestPendingNotice(
-        key: PebbleLANClientAuthorityStorageKey
-    ) throws -> PebbleLANClientNotificationStorageRow?
+        key: ElysiumLANClientAuthorityStorageKey
+    ) throws -> ElysiumLANClientNotificationStorageRow?
 
     public func acknowledgeNotice(
-        key: PebbleLANClientAuthorityStorageKey,
+        key: ElysiumLANClientAuthorityStorageKey,
         notificationID: Data,
         expectedPayloadDigest: Data,
         expectedAcknowledgementGeneration: UInt64
-    ) throws -> PebbleLANClientNotificationStorageRow
+    ) throws -> ElysiumLANClientNotificationStorageRow
 }
 ```
 
@@ -1050,7 +1050,7 @@ quarantine, or any core/local-world table.
 
 ### 10.1 Complete commit algorithm
 
-Before enqueue, PebbleCore strictly decodes every candidate payload, validates the cross-row host/
+Before enqueue, ElysiumCore strictly decodes every candidate payload, validates the cross-row host/
 world/generation/revision/credential/pending relationship, computes every row/aggregate digest,
 reserves the post-COMMIT publication value, and encodes all bytes. Storage then performs one immediate
 transaction:
@@ -1077,7 +1077,7 @@ transaction:
 10. COMMIT, verify autocommit, and return the immutable receipt.
 
 Candidate generation is exactly expected + 1 and expected must be 0...999,999,999. Exhaustion never
-wraps. `.firstRequestZeroBind` is the sole first-bind transition. Before enqueue, PebbleCore strictly
+wraps. `.firstRequestZeroBind` is the sole first-bind transition. Before enqueue, ElysiumCore strictly
 decodes the old credential receipt and candidate: the old row must be `authority_bound=0`, aggregate
 generation 0, pending-only flags, no active token, and one pending raw token at credential generation
 1 with its handshake/expiry present. The candidate must be `authority_bound=1`, aggregate generation
@@ -1118,7 +1118,7 @@ or change the authority aggregate generation/digest.
 
 The caller may invoke it only after `UIManager.commitSemanticModel` returns the exact screen instance,
 semantic revision, notification ID, and payload digest receipt. Storage knows none of those UI types;
-PebbleCore verifies them before constructing primitive arguments. Bundle receipt, decode, draw,
+ElysiumCore verifies them before constructing primitive arguments. Bundle receipt, decode, draw,
 screenshot, or accessibility rebuild cannot acknowledge.
 
 ## 11. Host owner checkpoint row schema
@@ -1169,7 +1169,7 @@ CREATE TABLE lan_host_local_authority_checkpoint_v6(
 ) WITHOUT ROWID;
 ```
 
-Guest authority text must additionally pass the strict `lan:<joinedOrdinal>` parser in PebbleCore;
+Guest authority text must additionally pass the strict `lan:<joinedOrdinal>` parser in ElysiumCore;
 DDL length is defense in depth. Persistent capacity is at most 256 guest owner rows plus exactly zero
 or one host-local row per world. Guest owner payload bytes are at most 201,326,592; guest rows,
 host-local row, keys, digests, and the frozen per-row/index overhead share one 268,435,456-byte
@@ -1190,7 +1190,7 @@ may not drop the foreign keys or add an adapter index to make a stale plan compi
 The public/package symbol graph may include primitive row constructors only when the complete host
 checkpoint phase is approved. This amendment exposes no `put`, `upsert`, `compareAndSwap`, or
 owner-only façade method for these tables. The future
-`PebbleHostAuthorityCheckpointV6Storage.commit(_ completeCheckpoint:)` must span the complete world/
+`ElysiumHostAuthorityCheckpointV6Storage.commit(_ completeCheckpoint:)` must span the complete world/
 journal/entity/relation/RNG/task/descriptor/owner transaction frozen in `LAN_RPG_PROTOCOL_V6.md`.
 Its authorizer must deny every credential/index/identity/permission/client table and use explicit
 columns plus earliest-expected/latest-result CAS. Until that complete candidate type and all its
@@ -1208,7 +1208,7 @@ Two other future transactions receive closed, non-general access:
   retiring owner and cannot insert/update owner payload or touch host-local state.
 
 These are concrete methods on the future closed host identity façade, not a host-owner façade or
-capability token exposed to PebbleCore callers. Their candidates contain every affected typed row and
+capability token exposed to ElysiumCore callers. Their candidates contain every affected typed row and
 expected digest; no callback/generic/SQL carrier exists. Allocation/retirement authorizer scopes are
 inactive until their separately reviewed parent phases pass.
 
@@ -1236,7 +1236,7 @@ trigger/view source at prepare time. Dynamic scope is restored to deny-all after
 prepared statements cannot escape. A façade cannot select its capability and cross-capability nested
 entry fails before SQL.
 
-`PebbleLegacyCoreStorage.deleteWorld(id:)` selects `coreWorldDeleteWithRPGV1` directly; it is the
+`ElysiumLegacyCoreStorage.deleteWorld(id:)` selects `coreWorldDeleteWithRPGV1` directly; it is the
 only façade method that can obtain it. That scope cannot call/re-enter `rpgLocalPreferences*`, and the
 local façade has no delete method. Existing outward `SaveDB.deleteWorld` behavior remains idempotent,
 but no other core delete or LAN/template operation inherits access to either RPG table.
@@ -1289,27 +1289,27 @@ escape rejection, and the complete compiling bypass fixture matrix.
 
 Afterward:
 
-1. Regenerate `pebble-storage-api-v1.json` into a temporary diff only. Review every new public,
+1. Regenerate `elysium-storage-api-v1.json` into a temporary diff only. Review every new public,
    package, or SPI symbol. Accept only the concrete primitive row/candidate/receipt/facade symbols in
    sections 7 and 10, coordinator accessors, and no host mutation façade.
    The old checked-in manifest/hash remains input evidence. The only accepted semantic diff is the
    four exact public symbols in section 7.4 with their frozen signatures/access/conformances. A fifth
    symbol, package/SPI mirror, different signature/access/conformance, generic/callback/unconditional
    checked-write symbol, or broader core facade fails review and verification.
-2. Update `pebble-core-storage-capability-v1.json` for exact additional declaration/use occurrences in
+2. Update `elysium-core-storage-capability-v1.json` for exact additional declaration/use occurrences in
    `Saves.swift`, including exact checked get and CAS row/digest/expectation/result occurrences.
    `LegacySaveMigration.swift` is unchanged. `RPGLocalPreferences.swift`, network/UI,
-   app, and tests outside `@testable` test imports may not name a PebbleStorage type or qualifier.
+   app, and tests outside `@testable` test imports may not name a ElysiumStorage type or qualifier.
 3. The scanner must reject copied façade types, aliases, protocols, generic wrappers, stored storage-
    typed properties outside `SaveDB`, closures/callbacks, `Any` carriers, SQL strings, raw table names,
    and a third production import owner. Add independently compiling negative fixtures for each new
    row/facade escape and for a slot-only client checkpoint wrapper.
 4. Update the release-surface verifier's reviewed storage source/object/API hashes and symbol
-   allowlist. It must still prove fresh `PebbleStorage.o`, `Pebble`, and `pebsmoke`; zero SQLite
-   imports/calls in PebbleCore objects; no DEBUG failure seams; no new dylib/framework; and no
+   allowlist. It must still prove fresh `ElysiumStorage.o`, `Elysium`, and `elysmoke`; zero SQLite
+   imports/calls in ElysiumCore objects; no DEBUG failure seams; no new dylib/framework; and no
    credential/owner payload sentinel in symbols, strings, logs, or errors.
    It must additionally prove exactly one public checked get and CAS plus closed Core row types/error;
-   exactly the four reviewed concrete PebbleStorage CAS symbols; no unconditional throwing player
+   exactly the four reviewed concrete ElysiumStorage CAS symbols; no unconditional throwing player
    writer; no checked method outside `SaveDB`; no omission path calling compatibility `putPlayer`;
    and no error string containing JSON/player data, paths, SQL, or SQLite codes.
 5. Run source scan and API comparison before build; run binary verifier immediately after the exact
@@ -1476,7 +1476,7 @@ written now.
 1. **COMPLETED:** Phase2B Builder remediated every Security code FAIL finding.
 2. **COMPLETED:** independent Phase2B Security code review PASS.
 3. **COMPLETED:** independent Phase2B Tester PASS, with 175/175 expanded and 55/55 decisive tests;
-   its root release/verifier/full-suite/`pebsmoke`/pipeline evidence remains part of the retained gate.
+   its root release/verifier/full-suite/`elysmoke`/pipeline evidence remains part of the retained gate.
 4. **COMPLETED:** rehash final Phase2B source, scanner/manifests, verifier, tests, and this amendment's
    pre-baseline contract; exact hashes are section 2.1.
 5. **COMPLETED:** reconcile the immutable migration-origin rule into the RPG UI plan and renew its
@@ -1500,11 +1500,11 @@ Focused storage command, followed by the unchanged full release sequence:
 
 ```bash
 bash scripts/security-scan.sh
-swift test --filter 'SaveDBPlayerRowCASTests|RPGLocalPreferenceStorageTests|RPGLocalPreferencesTests|LANV6ClientAuthorityCheckpointStorageTests|LANV6HostOwnerCheckpointStorageTests|LANV6SchemaAuthorizerTests|PebbleStorageExecutorTests|PebbleStorageAdversarialTests|RPGCharacterStateTests|RPGCoreV2Tests|RPGQuickSlotInputTests|LANClientRoutingTests|LANMultiplayerTests|LANReplicationTests'
+swift test --filter 'SaveDBPlayerRowCASTests|RPGLocalPreferenceStorageTests|RPGLocalPreferencesTests|LANV6ClientAuthorityCheckpointStorageTests|LANV6HostOwnerCheckpointStorageTests|LANV6SchemaAuthorizerTests|ElysiumStorageExecutorTests|ElysiumStorageAdversarialTests|RPGCharacterStateTests|RPGCoreV2Tests|RPGQuickSlotInputTests|LANClientRoutingTests|LANMultiplayerTests|LANReplicationTests'
 swift build -c release
-bash scripts/verify-pebble-storage-release-surface.sh
+bash scripts/verify-elysium-storage-release-surface.sh
 swift test
-swift run -c release pebsmoke
+swift run -c release elysmoke
 bash scripts/pipeline.sh
 ```
 
@@ -1527,11 +1527,11 @@ installed proof. A code change after any gate invalidates the affected evidence.
 - Export only the concrete primitive values and named façades frozen here. No generic, callback,
   closure, protocol, `Any`, SQL, capability, table-name, or storage-context escape.
 - Add exactly checked get/snapshot and expected-old-row CAS Core APIs/types plus the four closed
-  redacted error cases and exact concrete PebbleStorage digest/expectation/result/CAS symbols. Keep
+  redacted error cases and exact concrete ElysiumStorage digest/expectation/result/CAS symbols. Keep
   compatibility `putPlayer(_:_:) -> Void` on existing serialization. Digest/decode/candidate/error
   work occurs at rank 0; rank 12 contains only get or one CAS transaction. No unconditional checked
   writer, generic carrier, callback, production barrier, or new lock rank is permitted.
-- PebbleStorage adds exactly the four public declarations in section 7.4 and zero package/SPI mirror.
+- ElysiumStorage adds exactly the four public declarations in section 7.4 and zero package/SPI mirror.
   Preserve their exact `Sendable`/`Equatable` conformances and 32-byte throwing initializer; every
   listed prohibited conformance/property/initializer/carrier is forbidden.
 - The private `playerJSONCompareAndSwapV1` scope reads only exact worlds.id parent and player
@@ -1565,7 +1565,7 @@ installed proof. A code change after any gate invalidates the affected evidence.
   v6 or rename/quarantine legacy tables.
 - Update scanner/API/capability/release manifests through reviewed semantic diffs only; every bypass
   fixture must compile before the scanner rejects it.
-- Treat the old PebbleStorage API manifest/hash as input only. Its post-implementation semantic diff
+- Treat the old ElysiumStorage API manifest/hash as input only. Its post-implementation semantic diff
   must contain exactly the four frozen public CAS symbols and nothing else; a fifth symbol or any
   package/SPI addition fails. Core capability manifest, scanner fixtures, tests, verifier, and fresh
   hashes update only from reviewed code and must prove CAS-only omission call sites.

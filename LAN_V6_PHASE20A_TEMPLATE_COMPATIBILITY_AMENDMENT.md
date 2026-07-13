@@ -3,19 +3,19 @@
 Status: Architect amendment revised after Security plan FAIL; awaiting renewed review.
 
 This amendment is required before Phase 2.0A can pass. It closes compatibility blockers found by
-the Phase 2.0B Security plan review; it does not authorize the PebbleCore adapter or loose-file
+the Phase 2.0B Security plan review; it does not authorize the ElysiumCore adapter or loose-file
 parser yet.
 
 ## Exact template limits and encoded-row ceiling
 
-The storage boundary preserves the shipped PebbleCore limits:
+The storage boundary preserves the shipped ElysiumCore limits:
 
 - legacy template JSON: exactly 24,000,000 UTF-8 bytes;
 - PBT2 template data: exactly 64,000,000 bytes;
 - template name, dominant block, and dominant display: at most 1,048,576 UTF-8 bytes each at the
-  storage-corruption boundary (PebbleCore continues to enforce its smaller domain/name limits).
+  storage-corruption boundary (ElysiumCore continues to enforce its smaller domain/name limits).
 
-`PebbleTemplateStorageRow` validates each field and one checked co-resident variable-width sum:
+`ElysiumTemplateStorageRow` validates each field and one checked co-resident variable-width sum:
 
 `name + json + data + dominantBlock + dominantDisplay <= 91,145,728` bytes.
 
@@ -28,7 +28,7 @@ ceiling.
 Tests persist/read template JSON and binary at cap and reject cap+1 before enqueue, persist one row
 with every template variable field simultaneously at maximum and every legal fixed numeric field at
 its minimum/maximum extreme, verify the exact connection ceiling, and round-trip the existing
-maximum-block PebbleCore template once the adapter exists.
+maximum-block ElysiumCore template once the adapter exists.
 
 ## Database-parent physical binding
 
@@ -56,18 +56,18 @@ Strict full-row DTOs remain unchanged. The legacy facade adds only these named p
 no generic selector, table, column, SQL, predicate, ordering, or callback input:
 
 ```swift
-public struct PebbleLegacyLANPlayerJSON: Sendable, Equatable {
+public struct ElysiumLegacyLANPlayerJSON: Sendable, Equatable {
     public let playerID: String
     public let json: String
 }
 
-public struct PebbleLegacyTemplateContent: Sendable, Equatable {
+public struct ElysiumLegacyTemplateContent: Sendable, Equatable {
     public let format: Int32?
     public let data: Data?
     public let json: String?
 }
 
-public struct PebbleTemplateSummaryCandidate: Sendable, Equatable {
+public struct ElysiumTemplateSummaryCandidate: Sendable, Equatable {
     public let name: String
     public let sizeX: Int32?
     public let sizeY: Int32?
@@ -83,11 +83,11 @@ public func getLegacyWorldJSON(id: String) throws -> String?
 public func getLegacyPlayerJSON(world: String) throws -> String?
 public func getLegacyLANClientResumeJSON(hostWorld: String) throws -> String?
 public func getLegacyLANPlayerJSON(world: String, playerID: String) throws -> String?
-public func listLegacyLANPlayerJSON(world: String) throws -> [PebbleLegacyLANPlayerJSON]
+public func listLegacyLANPlayerJSON(world: String) throws -> [ElysiumLegacyLANPlayerJSON]
 public func getLegacyAdvancementJSON(world: String) throws -> String?
 public func listLegacyTemplateNames() throws -> [String]
-public func getLegacyTemplateContent(name: String) throws -> PebbleLegacyTemplateContent?
-public func listLegacyTemplateSummaryCandidates() throws -> [PebbleTemplateSummaryCandidate]
+public func getLegacyTemplateContent(name: String) throws -> ElysiumLegacyTemplateContent?
+public func listLegacyTemplateSummaryCandidates() throws -> [ElysiumTemplateSummaryCandidate]
 ```
 
 The selected-column matrix is deliberately strict and deterministic. It narrows only corrupt legacy
@@ -194,7 +194,7 @@ Checkpoint and sync failures leave the database open and retryable; identity fai
 executor and its lease. No rename authority is returned—the successful `Void` result is the only
 signal Phase 2.0B may use.
 
-`PebbleStorageOperationID` adds closed `checkpoint` and `durabilitySync` cases. DEBUG adds only the
+`ElysiumStorageOperationID` adds closed `checkpoint` and `durabilitySync` cases. DEBUG adds only the
 closed failure points `checkpointBusy`, `checkpointRemainingFrames`, and `durabilitySyncFailure`,
 plus the existing statement-leak seam. They accept no SQL, path, descriptor, errno, callback,
 context, or capability and compile out of release builds.

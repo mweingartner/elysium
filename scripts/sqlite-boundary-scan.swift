@@ -200,7 +200,7 @@ func productionInventory(root: URL) throws -> (files: [URL], description: [Strin
           let targets = description["targets"] as? [[String: Any]] else {
         throw ScanFailure(description: "swift package describe failed")
     }
-    let productionNames: Set<String> = ["PebbleStorage", "PebbleCore", "Pebble", "pebsmoke"]
+    let productionNames: Set<String> = ["ElysiumStorage", "ElysiumCore", "Elysium", "elysmoke"]
     var described = Set<String>()
     var discovered = Set<String>()
     let manager = FileManager.default
@@ -241,7 +241,7 @@ func storageIdentifiers(graph: [String: Any]) -> Set<String> {
     for symbol in symbols {
         guard let fragments = symbol["declarationFragments"] as? [[String: Any]] else { continue }
         for fragment in fragments where fragment["kind"] as? String == "identifier" {
-            if let spelling = fragment["spelling"] as? String, spelling.hasPrefix("Pebble") {
+            if let spelling = fragment["spelling"] as? String, spelling.hasPrefix("Elysium") {
                 output.insert(spelling)
             }
         }
@@ -251,10 +251,10 @@ func storageIdentifiers(graph: [String: Any]) -> Set<String> {
 
 func scanSource(relative: String, source: String,
                 storageTypeNames: Set<String>) throws {
-    let owner = "Sources/PebbleStorage/StorageEngine.swift"
+    let owner = "Sources/ElysiumStorage/StorageEngine.swift"
     let adapterOwners: Set<String> = [
-        "Sources/PebbleCore/Game/Saves.swift",
-        "Sources/PebbleCore/Game/LegacySaveMigration.swift",
+        "Sources/ElysiumCore/Game/Saves.swift",
+        "Sources/ElysiumCore/Game/LegacySaveMigration.swift",
     ]
     let lexed = try lexSwift(source)
     let tokens = identifiers(in: lexed.code)
@@ -264,16 +264,16 @@ func scanSource(relative: String, source: String,
         .filter { $0.contains("import ") || $0.hasPrefix("import") }
     let interpolatedCapability = lexed.literals.contains {
         $0.text.contains("\\(") && ($0.text.lowercased().contains("sqlite")
-            || $0.text.lowercased().contains("pebblestorage"))
+            || $0.text.lowercased().contains("elysiumstorage"))
     }
 
     if relative == owner {
         guard importLines.contains("import SQLite3") else {
             throw ScanFailure(description: "SQLite owner lost its plain import")
         }
-        if tokenSet.contains("PebbleCore") || lexed.code.contains("DispatchQueue.main")
+        if tokenSet.contains("ElysiumCore") || lexed.code.contains("DispatchQueue.main")
             || tokenSet.contains("MainActor") {
-            throw ScanFailure(description: "PebbleStorage gained a reverse/publication dependency")
+            throw ScanFailure(description: "ElysiumStorage gained a reverse/publication dependency")
         }
     } else {
         if tokenSet.contains("SQLite3") || tokens.contains(where: {
@@ -295,19 +295,19 @@ func scanSource(relative: String, source: String,
         }
     }
 
-    let referencesStorage = tokenSet.contains("PebbleStorage")
+    let referencesStorage = tokenSet.contains("ElysiumStorage")
     if adapterOwners.contains(relative) {
-        guard importLines.filter({ $0.contains("PebbleStorage") }) == ["import PebbleStorage"] else {
-            throw ScanFailure(description: "adapter requires one plain PebbleStorage import: \(relative)")
+        guard importLines.filter({ $0.contains("ElysiumStorage") }) == ["import ElysiumStorage"] else {
+            throw ScanFailure(description: "adapter requires one plain ElysiumStorage import: \(relative)")
         }
-    } else if referencesStorage || lexed.code.contains("PebbleStorage.") {
-        throw ScanFailure(description: "PebbleStorage import/qualification outside adapter: \(relative)")
+    } else if referencesStorage || lexed.code.contains("ElysiumStorage.") {
+        throw ScanFailure(description: "ElysiumStorage import/qualification outside adapter: \(relative)")
     }
 
     if !adapterOwners.contains(relative), relative != owner {
         let escaped = tokenSet.intersection(storageTypeNames)
         if !escaped.isEmpty {
-            throw ScanFailure(description: "PebbleStorage type escaped adapter in \(relative)")
+            throw ScanFailure(description: "ElysiumStorage type escaped adapter in \(relative)")
         }
         let bridgeNames: Set<String> = ["LegacyMigrationStorageSession", "LegacyMigrationPreflight",
                                         "LegacySaveMigration", "OpenComponents"]
@@ -316,29 +316,29 @@ func scanSource(relative: String, source: String,
         }
     }
 
-    if relative == "Sources/PebbleCore/Game/LegacySaveMigration.swift" {
+    if relative == "Sources/ElysiumCore/Game/LegacySaveMigration.swift" {
         let denied = ["FileManager", "contentsOfDirectory", "moveItem"]
         if denied.contains(where: tokenSet.contains) || lexed.code.contains("Data(contentsOf:") {
             throw ScanFailure(description: "path-based migration API in LegacySaveMigration.swift")
         }
     }
-    if relative.hasPrefix("Sources/PebbleCore/"),
+    if relative.hasPrefix("Sources/ElysiumCore/"),
        lexed.literals.contains(where: { containsSQL($0.text) }) ||
         literalConcatenationChains(lexed).contains(where: { chain in
             containsSQL(chain.map(\.text).joined())
         }) {
-        throw ScanFailure(description: "persistence SQL literal in PebbleCore: \(relative)")
+        throw ScanFailure(description: "persistence SQL literal in ElysiumCore: \(relative)")
     }
 }
 
 func verifyCapabilityManifest(root: URL) throws {
-    let url = root.appendingPathComponent("scripts/pebble-core-storage-capability-v1.json")
+    let url = root.appendingPathComponent("scripts/elysium-core-storage-capability-v1.json")
     guard let object = try loadJSON(url) as? [String: Any],
           object["formatVersion"] as? Int == 2,
           let owners = object["owners"] as? [String: [String: String]],
           Set(owners.keys) == [
-            "Sources/PebbleCore/Game/Saves.swift",
-            "Sources/PebbleCore/Game/LegacySaveMigration.swift",
+            "Sources/ElysiumCore/Game/Saves.swift",
+            "Sources/ElysiumCore/Game/LegacySaveMigration.swift",
           ] else {
         throw ScanFailure(description: "invalid Core storage capability manifest")
     }
@@ -363,7 +363,7 @@ func compilerParseASTDigest(path: String, root: URL,
     guard status == 0 else {
         throw ScanFailure(description: "compiler AST inventory failed: \(path)")
     }
-    if requireStorageImport, !rawAST.contains("module=\"PebbleStorage\"") {
+    if requireStorageImport, !rawAST.contains("module=\"ElysiumStorage\"") {
         throw ScanFailure(description: "compiler AST lost adapter import: \(path)")
     }
     let basename = URL(fileURLWithPath: path).lastPathComponent
@@ -378,15 +378,15 @@ func compilerParseASTDigest(path: String, root: URL,
 }
 
 func verifySemanticMutationSelfTests(root: URL) throws {
-    let relative = "Sources/PebbleCore/Game/LegacySaveMigration.swift"
+    let relative = "Sources/ElysiumCore/Game/LegacySaveMigration.swift"
     let source = try String(contentsOf: root.appendingPathComponent(relative), encoding: .utf8)
     let baseline = try compilerParseASTDigest(path: relative, root: root,
                                               requireStorageImport: true)
     var ownerUseMutation = source
-    guard let ownerUseRange = ownerUseMutation.range(of: "PebbleStorageCoordinator") else {
+    guard let ownerUseRange = ownerUseMutation.range(of: "ElysiumStorageCoordinator") else {
         throw ScanFailure(description: "compiler AST owner-use fixture anchor missing")
     }
-    ownerUseMutation.replaceSubrange(ownerUseRange, with: "PebbleLegacyCoreStorage")
+    ownerUseMutation.replaceSubrange(ownerUseRange, with: "ElysiumLegacyCoreStorage")
     let mutations: [(String, String)] = [
         ("access", source.replacingOccurrences(of: "fileprivate struct LegacyFileIdentity",
                                                 with: "private struct LegacyFileIdentity")),
@@ -394,7 +394,7 @@ func verifySemanticMutationSelfTests(root: URL) throws {
         ("closure-generic", source + "\nprivate func scannerGeneric<T>(_ value: T) -> T { { value }() }\n"),
     ]
     let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(
-        "pebble-scanner-ast-\(UUID().uuidString)", isDirectory: true)
+        "elysium-scanner-ast-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: temporary) }
     for (label, mutation) in mutations {
@@ -416,9 +416,9 @@ func verifyPackageEdges(_ description: [String: Any]) throws {
         guard let target = targets.first(where: { $0["name"] as? String == name }) else { return nil }
         return Set(target["target_dependencies"] as? [String] ?? [])
     }
-    guard dependencies("PebbleStorage") == [],
-          dependencies("PebbleCore")?.contains("PebbleStorage") == true else {
-        throw ScanFailure(description: "PebbleCore/PebbleStorage dependency direction drift")
+    guard dependencies("ElysiumStorage") == [],
+          dependencies("ElysiumCore")?.contains("ElysiumStorage") == true else {
+        throw ScanFailure(description: "ElysiumCore/ElysiumStorage dependency direction drift")
     }
 }
 
@@ -429,49 +429,51 @@ func verifySymbolGraph(root: URL) throws -> Set<String> {
     ], root: root)
     guard status == 0,
           let range = output.range(of: "Files written to ", options: .backwards) else {
-        throw ScanFailure(description: "PebbleStorage symbol graph generation failed")
+        throw ScanFailure(description: "ElysiumStorage symbol graph generation failed")
     }
     let directory = output[range.upperBound...].split(separator: "\n", maxSplits: 1).first
         .map(String.init) ?? ""
-    let graphURL = URL(fileURLWithPath: directory).appendingPathComponent("PebbleStorage.symbols.json")
+    let graphURL = URL(fileURLWithPath: directory).appendingPathComponent("ElysiumStorage.symbols.json")
     let data = try Data(contentsOf: graphURL)
     guard let manifest = try loadJSON(
-        root.appendingPathComponent("scripts/pebble-storage-api-v1.json")) as? [String: Any],
+        root.appendingPathComponent("scripts/elysium-storage-api-v1.json")) as? [String: Any],
           let expected = manifest["symbolGraphSHA256"] as? String,
           let manifestPlayerCASDeclarations =
-            manifest["checkedPlayerCASPublicDeclarations"] as? [String] else {
-        throw ScanFailure(description: "invalid PebbleStorage API manifest")
+            manifest["checkedPlayerCASPublicDeclarations"] as? [String],
+          let manifestWorldDeleteDeclarations =
+            manifest["checkedWorldBatchDeletePublicDeclarations"] as? [String] else {
+        throw ScanFailure(description: "invalid ElysiumStorage API manifest")
     }
     let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     guard actual == expected else {
-        throw ScanFailure(description: "PebbleStorage externally reachable API drift")
+        throw ScanFailure(description: "ElysiumStorage externally reachable API drift")
     }
     guard let graph = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-        throw ScanFailure(description: "invalid PebbleStorage symbol graph")
+        throw ScanFailure(description: "invalid ElysiumStorage symbol graph")
     }
     guard let symbols = graph["symbols"] as? [[String: Any]] else {
-        throw ScanFailure(description: "PebbleStorage symbol list missing")
+        throw ScanFailure(description: "ElysiumStorage symbol list missing")
     }
     let requiredPlayerCASDeclarations = [
-        "PebblePlayerJSONRowDigest",
-        "PebblePlayerJSONExpectedRowState",
-        "PebblePlayerJSONCompareAndSwapResult",
-        "PebbleLegacyCoreStorage.compareAndSwapPlayerJSON(expected:candidate:)",
+        "ElysiumPlayerJSONRowDigest",
+        "ElysiumPlayerJSONExpectedRowState",
+        "ElysiumPlayerJSONCompareAndSwapResult",
+        "ElysiumLegacyCoreStorage.compareAndSwapPlayerJSON(expected:candidate:)",
     ]
     guard manifestPlayerCASDeclarations == requiredPlayerCASDeclarations else {
         throw ScanFailure(description: "checked player CAS API manifest declaration drift")
     }
     let requiredPlayerCASSurface: [String: String] = [
-        "PebblePlayerJSONRowDigest": "public|swift.struct",
-        "PebblePlayerJSONRowDigest.data": "public|swift.property",
-        "PebblePlayerJSONRowDigest.init(data:)": "public|swift.init",
-        "PebblePlayerJSONExpectedRowState": "public|swift.enum",
-        "PebblePlayerJSONExpectedRowState.absent": "public|swift.enum.case",
-        "PebblePlayerJSONExpectedRowState.present(_:)": "public|swift.enum.case",
-        "PebblePlayerJSONCompareAndSwapResult": "public|swift.enum",
-        "PebblePlayerJSONCompareAndSwapResult.conflict": "public|swift.enum.case",
-        "PebblePlayerJSONCompareAndSwapResult.committed(_:)": "public|swift.enum.case",
-        "PebbleLegacyCoreStorage.compareAndSwapPlayerJSON(expected:candidate:)":
+        "ElysiumPlayerJSONRowDigest": "public|swift.struct",
+        "ElysiumPlayerJSONRowDigest.data": "public|swift.property",
+        "ElysiumPlayerJSONRowDigest.init(data:)": "public|swift.init",
+        "ElysiumPlayerJSONExpectedRowState": "public|swift.enum",
+        "ElysiumPlayerJSONExpectedRowState.absent": "public|swift.enum.case",
+        "ElysiumPlayerJSONExpectedRowState.present(_:)": "public|swift.enum.case",
+        "ElysiumPlayerJSONCompareAndSwapResult": "public|swift.enum",
+        "ElysiumPlayerJSONCompareAndSwapResult.conflict": "public|swift.enum.case",
+        "ElysiumPlayerJSONCompareAndSwapResult.committed(_:)": "public|swift.enum.case",
+        "ElysiumLegacyCoreStorage.compareAndSwapPlayerJSON(expected:candidate:)":
             "public|swift.method",
     ]
     let playerCASTypeRoots = Set(requiredPlayerCASDeclarations.prefix(3))
@@ -480,7 +482,7 @@ func verifySymbolGraph(root: URL) throws -> Set<String> {
         guard let path = symbol["pathComponents"] as? [String], let root = path.first else {
             continue
         }
-        let isCASMethod = root == "PebbleLegacyCoreStorage"
+        let isCASMethod = root == "ElysiumLegacyCoreStorage"
             && path.dropFirst().first?.hasPrefix("compareAndSwapPlayerJSON") == true
         guard playerCASTypeRoots.contains(root) || isCASMethod else { continue }
         let joined = path.joined(separator: ".")
@@ -494,6 +496,52 @@ func verifySymbolGraph(root: URL) throws -> Set<String> {
     guard actualPlayerCASSurface == requiredPlayerCASSurface else {
         throw ScanFailure(description: "checked player CAS public surface drift")
     }
+    let requiredWorldDeleteDeclarations = [
+        "ElysiumCheckedWorldStorageRow",
+        "ElysiumCheckedWorldCollectionSnapshot",
+        "ElysiumWorldBatchDeleteExpectation",
+        "ElysiumWorldBatchDeleteRequest",
+        "ElysiumWorldBatchDeleteReceipt",
+        "ElysiumWorldBatchDeleteRecoveryAuthority",
+        "ElysiumWorldBatchDeleteOutcome",
+        "ElysiumLegacyCoreStorage.checkedWorldSnapshot()",
+        "ElysiumLegacyCoreStorage.deleteWorldsChecked(_:)",
+        "ElysiumLegacyCoreStorage.recoverWorldsChecked(_:)",
+    ]
+    guard manifestWorldDeleteDeclarations == requiredWorldDeleteDeclarations else {
+        throw ScanFailure(description: "checked world batch-delete API manifest declaration drift")
+    }
+    let requiredWorldDeleteKinds: [String: String] = [
+        "ElysiumCheckedWorldStorageRow": "swift.struct",
+        "ElysiumCheckedWorldCollectionSnapshot": "swift.struct",
+        "ElysiumWorldBatchDeleteExpectation": "swift.struct",
+        "ElysiumWorldBatchDeleteRequest": "swift.struct",
+        "ElysiumWorldBatchDeleteReceipt": "swift.struct",
+        "ElysiumWorldBatchDeleteRecoveryAuthority": "swift.struct",
+        "ElysiumWorldBatchDeleteOutcome": "swift.enum",
+        "checkedWorldSnapshot()": "swift.method",
+        "deleteWorldsChecked(_:)": "swift.method",
+        "recoverWorldsChecked(_:)": "swift.method",
+    ]
+    var observedWorldDeleteKinds: [String: String] = [:]
+    for symbol in symbols {
+        guard let path = symbol["pathComponents"] as? [String],
+              let title = (symbol["names"] as? [String: Any])?["title"] as? String,
+              let expectedKind = requiredWorldDeleteKinds[title],
+              let access = symbol["accessLevel"] as? String,
+              let kind = (symbol["kind"] as? [String: Any])?["identifier"] as? String else {
+            continue
+        }
+        if expectedKind == "swift.method", path.first != "ElysiumLegacyCoreStorage" { continue }
+        guard access == "public", kind == expectedKind,
+              observedWorldDeleteKinds[title] == nil else {
+            throw ScanFailure(description: "malformed checked world batch-delete symbol")
+        }
+        observedWorldDeleteKinds[title] = kind
+    }
+    guard observedWorldDeleteKinds == requiredWorldDeleteKinds else {
+        throw ScanFailure(description: "checked world batch-delete public declarations missing")
+    }
     return storageIdentifiers(graph: graph)
 }
 
@@ -502,7 +550,7 @@ func runSelfTests(root: URL, storageNames: Set<String>) throws {
     let positives = ["PositiveDarwinFD.swift", "PositiveUnrelatedLiteralsAndPlus.swift"]
     for name in positives {
         let source = try String(contentsOf: fixtures.appendingPathComponent(name), encoding: .utf8)
-        try scanSource(relative: "Sources/PebbleCore/Game/\(name)",
+        try scanSource(relative: "Sources/ElysiumCore/Game/\(name)",
                        source: source, storageTypeNames: storageNames)
         if name == "PositiveUnrelatedLiteralsAndPlus.swift" {
             let lexed = try lexSwift(source)
@@ -539,7 +587,7 @@ func runSelfTests(root: URL, storageNames: Set<String>) throws {
         let source = try String(contentsOf: fixtures.appendingPathComponent(name), encoding: .utf8)
         var rejected = false
         do {
-            try scanSource(relative: "Sources/PebbleCore/Game/\(name)",
+            try scanSource(relative: "Sources/ElysiumCore/Game/\(name)",
                            source: source, storageTypeNames: storageNames)
         } catch is ScanFailure {
             rejected = true

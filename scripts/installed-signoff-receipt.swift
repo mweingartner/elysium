@@ -2,7 +2,7 @@ import AppKit
 import CryptoKit
 import Darwin
 import Foundation
-import PebbleReleaseGate
+import ElysiumReleaseGate
 import Security
 
 private enum CLIError: Error, CustomStringConvertible {
@@ -51,7 +51,7 @@ let repositoryRoot: String = {
 let rootDigest = digest(Data(repositoryRoot.utf8))
 private let support = URL(fileURLWithPath: NSHomeDirectory())
     .appendingPathComponent("Library/Application Support")
-let authorityRoot = support.appendingPathComponent("Pebble/InstalledSignoffAuthority/\(rootDigest)")
+let authorityRoot = support.appendingPathComponent("Elysium/InstalledSignoffAuthority/\(rootDigest)")
 let evidenceRoot = authorityRoot.appendingPathComponent("evidence")
 
 func productionCoordinator() throws -> ReleaseGateCoordinator {
@@ -78,7 +78,7 @@ private func worktreeSnapshot() throws -> Snapshot {
     let untracked = try nulStrings(git(["ls-files", "--others", "--exclude-standard", "-z"]))
     let paths = (tracked + untracked).sorted()
     guard Set(paths).count == paths.count else { throw CLIError.message("duplicate repository path") }
-    var stream = Data("pebble-content-v2\0".utf8)
+    var stream = Data("elysium-content-v2\0".utf8)
     for path in paths {
         guard validPath(path) else { throw CLIError.message("unsafe repository path") }
         let url = URL(fileURLWithPath: repositoryRoot).appendingPathComponent(path)
@@ -100,7 +100,7 @@ private func indexSnapshot() throws -> Snapshot {
               ["100644", "100755"].contains(String(fields[0])) else { throw CLIError.message("unsafe index") }
         values.append((path, String(fields[0]), try git(["cat-file", "blob", String(fields[1])])))
     }
-    values.sort { $0.0 < $1.0 }; var stream = Data("pebble-content-v2\0".utf8)
+    values.sort { $0.0 < $1.0 }; var stream = Data("elysium-content-v2\0".utf8)
     values.forEach { appendRecord(&stream, path: $0.0, mode: $0.1, data: $0.2) }
     return Snapshot(digest: digest(stream), count: values.count, paths: values.map(\.0), untracked: [])
 }
@@ -108,7 +108,7 @@ func evidenceDigest(_ directory: URL) throws -> String {
     try ReleaseGateCoordinator.requirePrivateDirectory(directory)
     guard let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: nil) else { throw CLIError.message("evidence enumeration failed") }
     let urls = (enumerator.allObjects as? [URL] ?? []).sorted { $0.path < $1.path }
-    var stream = Data("pebble-private-evidence-v2\0".utf8)
+    var stream = Data("elysium-private-evidence-v2\0".utf8)
     for url in urls {
         var info = stat(); guard lstat(url.path, &info) == 0 else { throw CLIError.message("evidence identity failed") }
         let relative = String(url.path.dropFirst(directory.path.count + 1))
@@ -157,8 +157,8 @@ private func codesign(_ bundle: String) throws -> (identifier: String, cdhash: S
 }
 private func validateArtifactContinuity(_ payload: ReleaseGatePayload) throws {
     guard payload.state != .preparing else { return }
-    let expectedInstalled = "/Applications/Pebble.app/Contents/MacOS/Pebble"
-    guard payload.artifacts.installedBundlePath == "/Applications/Pebble.app",
+    let expectedInstalled = "/Applications/Elysium.app/Contents/MacOS/Elysium"
+    guard payload.artifacts.installedBundlePath == "/Applications/Elysium.app",
           payload.artifacts.installedExecutablePath == expectedInstalled else {
         throw CLIError.message("installed path identity changed")
     }
@@ -201,7 +201,7 @@ private func installAndObserveProduction(
     release: StableFileIdentity, manifestURL: URL,
     context: ReleaseGateWorkflowContext
 ) throws -> ReleaseGateInstalledFacts {
-    _ = try run(repositoryRoot + "/pebble", ["install", "--no-build",
+    _ = try run(repositoryRoot + "/elysium", ["install", "--no-build",
                 "--executable-hash", release.sha256,
                 "--manifest-output", manifestURL.path])
     try ReleaseGateCoordinator.requirePrivateFile(manifestURL)
@@ -211,7 +211,7 @@ private func installAndObserveProduction(
         requireExecutable: true)
     let signed = try codesign(context.installedBundle.path)
     _ = try run("/usr/bin/open", ["-a", context.installedBundle.path])
-    let live = try waitForBoundPebbleProcess(
+    let live = try waitForBoundElysiumProcess(
         expectedExecutable: installed, expectedCDHash: signed.cdhash,
         expectedRequirement: signed.requirement)
     return .init(
@@ -228,12 +228,12 @@ private final class ProductionReleaseGateDependencies: ReleaseGateCommandDepende
         ReleaseGateWorkflowContext(
             repository: URL(fileURLWithPath: repositoryRoot), evidenceRoot: evidenceRoot,
             releaseExecutable: URL(fileURLWithPath:
-                repositoryRoot + "/.build/out/Products/Release/Pebble"),
-            stagedBundle: URL(fileURLWithPath: repositoryRoot + "/dist/Pebble.app"),
-            installedBundle: URL(fileURLWithPath: "/Applications/Pebble.app"),
+                repositoryRoot + "/.build/out/Products/Release/Elysium"),
+            stagedBundle: URL(fileURLWithPath: repositoryRoot + "/dist/Elysium.app"),
+            installedBundle: URL(fileURLWithPath: "/Applications/Elysium.app"),
             installedExecutable: URL(fileURLWithPath:
-                "/Applications/Pebble.app/Contents/MacOS/Pebble"),
-            bundleID: "com.briangao.pebble")
+                "/Applications/Elysium.app/Contents/MacOS/Elysium"),
+            bundleID: "com.briangao.elysium")
     }
     func preparationFacts() throws -> ReleaseGatePreparationFacts {
         let value = try worktreeSnapshot()

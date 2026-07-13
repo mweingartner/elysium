@@ -1,12 +1,12 @@
-# Pebble RPG Classes and Progression — v2 Implementation Contract
+# Elysium RPG Classes and Progression — v2 Implementation Contract
 
 **Status:** approved contract; implementation and verification are in progress. This document does not claim that any item is complete until the corresponding source, semantic tests, installed-app proof, and LAN proof pass.
 
 ## Purpose and boundaries
 
-This is the source of truth for Pebble's six-path RPG layer. It replaces the historical sketches that named different classes, point economies, or mechanics. The RPG layer adds identity and progression without preventing ordinary mining, crafting, building, combat, equipment use, or exploration.
+This is the source of truth for Elysium's six-path RPG layer. It replaces the historical sketches that named different classes, point economies, or mechanics. The RPG layer adds identity and progression without preventing ordinary mining, crafting, building, combat, equipment use, or exploration.
 
-The rules live in PebbleCore. The macOS target draws UI, routes configured input, and transports messages; it does not decide progression, authority, costs, targeting, or rewards. Static registration order is deterministic and ABI-sensitive. New items append after the frozen item range.
+The rules live in ElysiumCore. The macOS target draws UI, routes configured input, and transports messages; it does not decide progression, authority, costs, targeting, or rewards. Static registration order is deterministic and ABI-sensitive. New items append after the frozen item range.
 
 ## Frozen registry
 
@@ -276,7 +276,7 @@ The UI Design Review conditions below are part of the implementation contract. T
 
 ### Pure screen model and canonical evaluation
 
-`RPGScreenModel` is a pure PebbleCore projection. Drawing, focus movement, accessibility queries, and hover inspection never repair or mutate live gameplay state. The model receives a repaired authoritative state, client-local quick-slot preferences, the current pending-request presentation, viewport size, tab, selection, and scroll offsets; it produces bounded, deterministic rows and semantic elements.
+`RPGScreenModel` is a pure ElysiumCore projection. Drawing, focus movement, accessibility queries, and hover inspection never repair or mutate live gameplay state. The model receives a repaired authoritative state, client-local quick-slot preferences, the current pending-request presentation, viewport size, tab, selection, and scroll offsets; it produces bounded, deterministic rows and semantic elements.
 
 `rpgEvaluateSkillPurchase` is the sole evaluator used by both `rpgLearnSkill` and the UI. For the exact next rank it returns at most one canonical failure in this order:
 
@@ -380,7 +380,7 @@ Controller glyph/help copy switches only after a real controller input and keybo
 
 Tutorial state is local UI preference, not authoritative RPG/player/LAN state. `RPG_TUTORIAL_VERSION = 1`; an optional `rpgTutorialVersion` setting decodes missing/invalid values as zero. The first accepted character-sheet entry with a lower seen version opens four pages: rank branch skills; prepare and explicitly select actions; choose and assign a local slot; close the sheet and use configured keyboard/controller chords. Back/Next/Finish/Skip are keyboard-, controller-, and accessibility-operable. Only Finish or explicit Skip persists the current version; merely opening or crashing does not. Raising the version re-presents revised guidance. First-XP-loop guidance remains on Character through level 1 regardless of tutorial status.
 
-Design Sign-off uses the fresh installed `/Applications/Pebble.app`, not source inspection alone. The installed harness builds six deterministic path fixtures. Each fixture must enumerate exactly three branches, nine skill nodes, and 27 rank cells; their aggregate must enumerate exactly six paths, eighteen branches, fifty-four skill nodes, and 162 rank cells, with every global semantic ID unique and every registry rank represented exactly once. This aggregate is sign-off data and must not be published as one live accessibility tree. Designer inspection covers all six creation Review states, all eighteen specialization branch/roadmap states, every one of the fifty-four node inspectors and their three rank cells, caster and non-caster Actives/Spells empty and populated states, tutorial, local-slot independence, accepted/pending/rejected/error states, High Contrast and Reduce Motion, and each required viewport. Automated screenshots/semantic dumps support this inspection but do not replace physical keyboard navigation, VoiceOver press/focus proof, or physical controller proof.
+Design Sign-off uses the fresh installed `/Applications/Elysium.app`, not source inspection alone. The installed harness builds six deterministic path fixtures. Each fixture must enumerate exactly three branches, nine skill nodes, and 27 rank cells; their aggregate must enumerate exactly six paths, eighteen branches, fifty-four skill nodes, and 162 rank cells, with every global semantic ID unique and every registry rank represented exactly once. This aggregate is sign-off data and must not be published as one live accessibility tree. Designer inspection covers all six creation Review states, all eighteen specialization branch/roadmap states, every one of the fifty-four node inspectors and their three rank cells, caster and non-caster Actives/Spells empty and populated states, tutorial, local-slot independence, accepted/pending/rejected/error states, High Contrast and Reduce Motion, and each required viewport. Automated screenshots/semantic dumps support this inspection but do not replace physical keyboard navigation, VoiceOver press/focus proof, or physical controller proof.
 
 ## Required implementation and verification order
 
@@ -391,8 +391,8 @@ Design Sign-off uses the fresh installed `/Applications/Pebble.app`, not source 
 5. Implement the pure screen model, four-step creation, five-tab shell, configurable chords, semantic focus, RPG-scoped controller adapter, AppKit accessibility bridge, tutorial, and HUD feedback.
 6. Run the independent Security code review against the actual UI/input/accessibility diff and fix findings; material fixes repeat this gate.
 7. Install the reviewed candidate and obtain Design Sign-off across all required states/viewports with physical keyboard, VoiceOver, and compatible-controller proof. Unseen or unavailable surfaces remain unsigned.
-8. Run the independent Tester/regression pass, then `bash scripts/security-scan.sh`, warning-free `swift build -c release`, `swift test`, `swift run -c release pebsmoke`, and `bash scripts/pipeline.sh`. Any golden movement must be individually reviewed; the prior 457-check count is not changed merely to hide failure.
-9. Verify the final fresh `/Applications/Pebble.app`, then run `scripts/live-lan-test.sh --deploy --timeout 90` against Neo with probes for cooldown/fatigue/upkeep advancement, XP/inventory persistence, rejection resync, permission denial, replay, disconnect cleanup, owner-state convergence, pending UI convergence, and local-slot preservation. Any later runtime-path change invalidates and repeats affected Security, Design Sign-off, Test, deploy, and LAN evidence.
+8. Run the independent Tester/regression pass, then `bash scripts/security-scan.sh`, warning-free `swift build -c release`, `swift test`, `swift run -c release elysmoke`, and `bash scripts/pipeline.sh`. Any golden movement must be individually reviewed; the prior 457-check count is not changed merely to hide failure.
+9. Verify the final fresh `/Applications/Elysium.app`, then run `scripts/live-lan-test.sh --deploy --timeout 90` against Neo with probes for cooldown/fatigue/upkeep advancement, XP/inventory persistence, rejection resync, permission denial, replay, disconnect cleanup, owner-state convergence, pending UI convergence, and local-slot preservation. Any later runtime-path change invalidates and repeats affected Security, Design Sign-off, Test, deploy, and LAN evidence.
 10. Commit logical changes with specific staging and co-author tags. Do not push without separate authorization.
 
 ## Conditions for Builder
@@ -420,6 +420,6 @@ Design Sign-off uses the fresh installed `/Applications/Pebble.app`, not source 
 
 ## Historical inspiration and primary local references
 
-The Fantasy Trip documents were design inspiration for meaningful attributes, fatigue, and readable choices, not a claim that Pebble implements TFT rules: [Melee rules](/Users/mweingar/Downloads/_Documents/The%20Fantasy%20Trip%20Melee%20Rules.md) and [Wizard rules](/Users/mweingar/Downloads/_Documents/The%20Fantasy%20Trip%20Wizard%20Rules.md).
+The Fantasy Trip documents were design inspiration for meaningful attributes, fatigue, and readable choices, not a claim that Elysium implements TFT rules: [Melee rules](/Users/mweingar/Downloads/_Documents/The%20Fantasy%20Trip%20Melee%20Rules.md) and [Wizard rules](/Users/mweingar/Downloads/_Documents/The%20Fantasy%20Trip%20Wizard%20Rules.md).
 
-Implementation sources of record are [CharacterProgression.swift](/Users/mweingar/dev/pebble/Sources/PebbleCore/Game/CharacterProgression.swift), [RPGActions.swift](/Users/mweingar/dev/pebble/Sources/PebbleCore/Systems/RPGActions.swift), [LANMultiplayer.swift](/Users/mweingar/dev/pebble/Sources/PebbleCore/Net/LANMultiplayer.swift), [LANTransport.swift](/Users/mweingar/dev/pebble/Sources/Pebble/LANTransport.swift), [RPGScreensM.swift](/Users/mweingar/dev/pebble/Sources/Pebble/RPGScreensM.swift), [ARCHITECTURE.md](/Users/mweingar/dev/pebble/ARCHITECTURE.md), [SECURITY.md](/Users/mweingar/dev/pebble/SECURITY.md), and [AGENTS.md](/Users/mweingar/dev/pebble/AGENTS.md).
+Implementation sources of record are [CharacterProgression.swift](/Users/mweingar/dev/elysium/Sources/ElysiumCore/Game/CharacterProgression.swift), [RPGActions.swift](/Users/mweingar/dev/elysium/Sources/ElysiumCore/Systems/RPGActions.swift), [LANMultiplayer.swift](/Users/mweingar/dev/elysium/Sources/ElysiumCore/Net/LANMultiplayer.swift), [LANTransport.swift](/Users/mweingar/dev/elysium/Sources/Elysium/LANTransport.swift), [RPGScreensM.swift](/Users/mweingar/dev/elysium/Sources/Elysium/RPGScreensM.swift), [ARCHITECTURE.md](/Users/mweingar/dev/elysium/ARCHITECTURE.md), [SECURITY.md](/Users/mweingar/dev/elysium/SECURITY.md), and [AGENTS.md](/Users/mweingar/dev/elysium/AGENTS.md).

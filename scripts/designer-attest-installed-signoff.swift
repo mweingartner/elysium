@@ -1,7 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
-import PebbleReleaseGate
+import ElysiumReleaseGate
 
 private struct DesignerChecklistItem: Decodable {
     let id: String
@@ -29,7 +29,7 @@ private func validateSealedInstalledEvidence(
     _ directory: URL, checklist: DesignerChecklist
 ) throws {
     try ReleaseGateCoordinator.requirePrivateDirectory(directory)
-    guard checklist.version == "pebble-installed-text-entry-v2", checklist.items.count == 14,
+    guard checklist.version == "elysium-installed-text-entry-v2", checklist.items.count == 14,
           Set(checklist.items.map(\.id)).count == checklist.items.count else {
         throw ReleaseGateError.evidence
     }
@@ -49,7 +49,7 @@ private func validateSealedInstalledEvidence(
             "screenshotSHA256", "axReportSHA256", "operationLogSHA256",
         ])
         try ReleaseGateCoordinator.requirePrivateFile(operation)
-        guard values["schema"] as? String == "PebbleInstalledCommandEvidenceV1",
+        guard values["schema"] as? String == "ElysiumInstalledCommandEvidenceV1",
               values["commandID"] as? String == item.id,
               values["captureStatus"] as? Int == 0,
               values["screenshotSHA256"] as? String ==
@@ -70,7 +70,7 @@ private func validateSealedInstalledEvidence(
                   Set(reportObject.keys) == ["schema", "itemID", "windowCount",
                     "elementCount", "focusedCount", "settableValueCount",
                     "finiteFrameCount", "roleCounts"],
-                  reportObject["schema"] as? String == "PebbleInstalledAXEvidenceV1",
+                  reportObject["schema"] as? String == "ElysiumInstalledAXEvidenceV1",
                   reportObject["itemID"] as? String == item.id else {
                 throw ReleaseGateError.evidence
             }
@@ -98,7 +98,7 @@ func reviewIndependentDesignerAttestation(
         throw ReleaseGateError.staleSequence
     }
     try productionValidateCurrent(pending)
-    _ = try validateBoundPebbleProcess(pending)
+    _ = try validateBoundElysiumProcess(pending)
     let checklist = try JSONDecoder().decode(
         DesignerChecklist.self,
         from: Data(contentsOf: URL(fileURLWithPath: "scripts/installed-signoff-checklist-v1.json")))

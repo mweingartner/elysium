@@ -2,8 +2,8 @@
 set -eu
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
-TUPLES="$(mktemp /tmp/pebble-pre-push-refs.XXXXXX)"
-BUILD_LOG="$(mktemp /tmp/pebble-pre-push-build.XXXXXX)"
+TUPLES="$(mktemp /tmp/elysium-pre-push-refs.XXXXXX)"
+BUILD_LOG="$(mktemp /tmp/elysium-pre-push-build.XXXXXX)"
 trap 'rm -f "$TUPLES" "$BUILD_LOG"' EXIT INT TERM
 stage() { echo "==> pre-push: $*"; }
 count=0
@@ -24,16 +24,16 @@ bash scripts/security-scan.sh
 stage "warning-free release build"
 scripts/prepush-release-build.sh "$BUILD_LOG"
 stage "release surface and binary"
-scripts/verify-pebble-storage-release-surface.sh
-scripts/security-check-binary.sh .build/release/Pebble
-RELEASE_HASH="$(shasum -a 256 .build/release/Pebble | awk '{print $1}')"
+scripts/verify-elysium-storage-release-surface.sh
+scripts/security-check-binary.sh .build/release/Elysium
+RELEASE_HASH="$(shasum -a 256 .build/release/Elysium | awk '{print $1}')"
 stage "real AppKit keyboard and Accessibility"
-scripts/appkit-text-entry-integration.sh --no-build --executable "$(cd .build/release && pwd -P)/Pebble" \
+scripts/appkit-text-entry-integration.sh --no-build --executable "$(cd .build/release && pwd -P)/Elysium" \
     --expected-hash "$RELEASE_HASH" --timeout 90
 stage "xctest"
 swift test
-stage "pebsmoke"
-swift run -c release pebsmoke
+stage "elysmoke"
+swift run -c release elysmoke
 
 while IFS="$(printf '\t')" read -r local_sha tuple; do
     scripts/installed-signoff-receipt.sh prepush "$local_sha" "$tuple"

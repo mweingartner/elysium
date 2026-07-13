@@ -1,4 +1,4 @@
-Pebble exhaustive repository content digest v1
+Elysium exhaustive repository content digest v1
 
 Union: git ls-files -z plus git ls-files --others --exclude-standard -z.
 Includes every tracked and nonignored untracked regular file and executable mode.

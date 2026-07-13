@@ -3,16 +3,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEFAULT_HOST="neo.localdomain"
-REMOTE_HOST="${PEBBLE_LAN_CLIENT_HOST:-$DEFAULT_HOST}"
-REMOTE_USER="${PEBBLE_LAN_CLIENT_USER:-${USER:-}}"
-REMOTE_TARGET="${PEBBLE_LAN_CLIENT_TARGET:-}"
-REMOTE_APP="${PEBBLE_LAN_CLIENT_APP:-/Applications/Pebble.app}"
-SOURCE_APP="${PEBBLE_LAN_CLIENT_SOURCE_APP:-/Applications/Pebble.app}"
-IDENTITY_FILE="${PEBBLE_LAN_CLIENT_IDENTITY:-$HOME/.ssh/pebble_neo_ed25519}"
+REMOTE_HOST="${ELYSIUM_LAN_CLIENT_HOST:-$DEFAULT_HOST}"
+REMOTE_USER="${ELYSIUM_LAN_CLIENT_USER:-${USER:-}}"
+REMOTE_TARGET="${ELYSIUM_LAN_CLIENT_TARGET:-}"
+REMOTE_APP="${ELYSIUM_LAN_CLIENT_APP:-/Applications/Elysium.app}"
+SOURCE_APP="${ELYSIUM_LAN_CLIENT_SOURCE_APP:-/Applications/Elysium.app}"
+IDENTITY_FILE="${ELYSIUM_LAN_CLIENT_IDENTITY:-$HOME/.ssh/elysium_neo_ed25519}"
 BUILD_FIRST=1
 LAUNCH_AFTER=1
 CHECK_ONLY=0
-REMOTE_STAGE_REL="Library/Caches/PebbleRemoteClient"
+REMOTE_STAGE_REL="Library/Caches/ElysiumRemoteClient"
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2)
 if [ -f "$IDENTITY_FILE" ]; then
     SSH_OPTS+=(-i "$IDENTITY_FILE")
@@ -24,24 +24,24 @@ usage() {
     cat <<EOF
 Usage: scripts/deploy-lan-client.sh [options]
 
-Builds Pebble locally, copies Pebble.app to a LAN client Mac, installs it in
+Builds Elysium locally, copies Elysium.app to a LAN client Mac, installs it in
 /Applications, and launches it.
 
 Options:
   --host HOST       Remote host name or address (default: ${DEFAULT_HOST})
   --user USER       SSH user (default: current local user)
   --target TARGET   Full SSH target, e.g. user@neo.local (overrides host/user)
-  --app PATH        Remote app path (default: /Applications/Pebble.app)
-  --source-app PATH Local app bundle to copy (default: /Applications/Pebble.app)
-  --no-build        Copy the existing local app instead of running ./pebble install
+  --app PATH        Remote app path (default: /Applications/Elysium.app)
+  --source-app PATH Local app bundle to copy (default: /Applications/Elysium.app)
+  --no-build        Copy the existing local app instead of running ./elysium install
   --no-launch       Install on the client but do not open it
   --check           Only verify SSH reachability and remote write prerequisites
   -h, --help        Show this help
 
 Environment overrides:
-  PEBBLE_LAN_CLIENT_HOST, PEBBLE_LAN_CLIENT_USER, PEBBLE_LAN_CLIENT_TARGET,
-  PEBBLE_LAN_CLIENT_APP, PEBBLE_LAN_CLIENT_SOURCE_APP,
-  PEBBLE_LAN_CLIENT_IDENTITY
+  ELYSIUM_LAN_CLIENT_HOST, ELYSIUM_LAN_CLIENT_USER, ELYSIUM_LAN_CLIENT_TARGET,
+  ELYSIUM_LAN_CLIENT_APP, ELYSIUM_LAN_CLIENT_SOURCE_APP,
+  ELYSIUM_LAN_CLIENT_IDENTITY
 EOF
 }
 
@@ -124,19 +124,19 @@ if [ -w /Applications ]; then
 else
     echo "applications_writable=no"
 fi
-mkdir -p "$HOME/Library/Caches/PebbleRemoteClient"
-test -w "$HOME/Library/Caches/PebbleRemoteClient"
+mkdir -p "$HOME/Library/Caches/ElysiumRemoteClient"
+test -w "$HOME/Library/Caches/ElysiumRemoteClient"
 '
     if ! output="$(remote "$probe" 2>&1)"; then
         if printf '%s\n' "$output" | grep -qi 'permission denied'; then
             cat >&2 <<EOF
 error: ${REMOTE_TARGET} is reachable, but SSH authentication failed.
 
-Add this Mac's Pebble LAN client key to the Neo account's authorized_keys:
+Add this Mac's Elysium LAN client key to the Neo account's authorized_keys:
   ${IDENTITY_FILE}.pub
 
 If the account name differs, rerun with:
-  PEBBLE_LAN_CLIENT_USER=<neo-user> scripts/deploy-lan-client.sh --check
+  ELYSIUM_LAN_CLIENT_USER=<neo-user> scripts/deploy-lan-client.sh --check
 EOF
         else
             cat >&2 <<EOF
@@ -150,7 +150,7 @@ Then verify from this Mac:
   ssh ${REMOTE_TARGET} hostname
 
 If the account name differs, rerun with:
-  PEBBLE_LAN_CLIENT_USER=<neo-user> scripts/deploy-lan-client.sh --check
+  ELYSIUM_LAN_CLIENT_USER=<neo-user> scripts/deploy-lan-client.sh --check
 
 If the key has not been authorized yet, add this public key to the Neo account:
   ${IDENTITY_FILE}.pub
@@ -167,16 +167,16 @@ EOF
 
 install_remote() {
     local archive temp_dir
-    temp_dir="$(mktemp -d /tmp/pebble-lan-client.XXXXXX)"
+    temp_dir="$(mktemp -d /tmp/elysium-lan-client.XXXXXX)"
     ARCHIVE_TO_CLEAN="$temp_dir"
-    archive="$temp_dir/Pebble.app.zip"
+    archive="$temp_dir/Elysium.app.zip"
 
     say "Packaging ${SOURCE_APP}"
     /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$SOURCE_APP" "$archive"
 
-    say "Copying Pebble.app archive to ${REMOTE_TARGET}"
+    say "Copying Elysium.app archive to ${REMOTE_TARGET}"
     remote "mkdir -p '$REMOTE_STAGE_REL'"
-    scp "${SSH_OPTS[@]}" "$archive" "${REMOTE_TARGET}:${REMOTE_STAGE_REL}/Pebble.app.zip" >/dev/null
+    scp "${SSH_OPTS[@]}" "$archive" "${REMOTE_TARGET}:${REMOTE_STAGE_REL}/Elysium.app.zip" >/dev/null
 
     say "Installing and launching on ${REMOTE_TARGET}"
     ssh "${SSH_OPTS[@]}" "$REMOTE_TARGET" 'bash -s' -- "$REMOTE_APP" "$REMOTE_STAGE_REL" "$LAUNCH_AFTER" <<'REMOTE_SCRIPT'
@@ -185,17 +185,17 @@ REMOTE_APP="$1"
 REMOTE_STAGE_REL="$2"
 LAUNCH_AFTER="$3"
 STAGE="$HOME/$REMOTE_STAGE_REL"
-ARCHIVE="$STAGE/Pebble.app.zip"
+ARCHIVE="$STAGE/Elysium.app.zip"
 UNPACK="$STAGE/unpack"
 
-/usr/bin/osascript -e 'tell application "Pebble" to quit' >/dev/null 2>&1 || true
-/usr/bin/pkill -x Pebble >/dev/null 2>&1 || true
+/usr/bin/osascript -e 'tell application "Elysium" to quit' >/dev/null 2>&1 || true
+/usr/bin/pkill -x Elysium >/dev/null 2>&1 || true
 rm -rf "$UNPACK"
 mkdir -p "$UNPACK"
 /usr/bin/ditto -x -k "$ARCHIVE" "$UNPACK"
-test -d "$UNPACK/Pebble.app"
+test -d "$UNPACK/Elysium.app"
 rm -rf "$REMOTE_APP"
-/usr/bin/ditto "$UNPACK/Pebble.app" "$REMOTE_APP"
+/usr/bin/ditto "$UNPACK/Elysium.app" "$REMOTE_APP"
 /usr/bin/xattr -dr com.apple.quarantine "$REMOTE_APP" >/dev/null 2>&1 || true
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$REMOTE_APP/Contents/Info.plist" 2>/dev/null || echo unknown)"
 echo "installed=${REMOTE_APP}"
@@ -203,7 +203,7 @@ echo "version=${VERSION}"
 if [ "$LAUNCH_AFTER" = "1" ]; then
     /usr/bin/open -n "$REMOTE_APP"
     sleep 2
-    if /usr/bin/pgrep -x Pebble >/dev/null; then
+    if /usr/bin/pgrep -x Elysium >/dev/null; then
         echo "launched=yes"
     else
         echo "launched=no"
@@ -222,8 +222,8 @@ if [ "$CHECK_ONLY" = "1" ]; then
 fi
 
 if [ "$BUILD_FIRST" = "1" ]; then
-    say "Building and installing local Pebble.app"
-    (cd "$ROOT" && ./pebble install)
+    say "Building and installing local Elysium.app"
+    (cd "$ROOT" && ./elysium install)
 fi
 
 [ -d "$SOURCE_APP" ] || die "source app does not exist: ${SOURCE_APP}"

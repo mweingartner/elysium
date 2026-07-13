@@ -51,7 +51,7 @@ trap 'on_signal TERM 143' TERM
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT"
-MANIFEST="Tests/PebbleReleaseGateTests/Fixtures/release-gate-adversarial-rows-v16.txt"
+MANIFEST="Tests/ElysiumReleaseGateTests/Fixtures/release-gate-adversarial-rows-v16.txt"
 EXPECTED_HASH='bf782a2be35778c467f4c58fba65fc473e458892c6478a00b84716eae64c6bbd'
 EXPECTED_TOTALS=(8 7 7 9 50 7 11 23 20 6)
 tests=(
@@ -92,7 +92,7 @@ for category in $(seq 1 10); do
   [ "$actual" = "${EXPECTED_TOTALS[$((category - 1))]}" ] || fail "category $category manifest total"
 done
 
-work="$(mktemp -d /tmp/pebble-release-gate-adversarial.XXXXXX)"
+work="$(mktemp -d /tmp/elysium-release-gate-adversarial.XXXXXX)"
 chmod 700 "$work"
 : > "$work/observed.txt"; chmod 600 "$work/observed.txt"
 

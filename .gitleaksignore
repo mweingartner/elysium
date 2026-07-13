@@ -1,0 +1,9 @@
+# Reviewed false positives: SHA-256 release-manifest documentation and pins.
+0240eca890f5f10192b6355278b0e388d9ab5b76:STORAGE_DESCRIPTOR_IDENTITY_CRASH_PLAN.md:generic-api-key:320
+0240eca890f5f10192b6355278b0e388d9ab5b76:scripts/verify-elysium-storage-release-surface.sh:generic-api-key:31
+STORAGE_DESCRIPTOR_IDENTITY_CRASH_PLAN.md:generic-api-key:320
+scripts/verify-elysium-storage-release-surface.sh:generic-api-key:31
+
+# Reviewed false positive: Swift LAN admission policy type name, not a credential.
+58fe3d89b369334c4695cadd7e2118087b11c6a7:Sources/ElysiumCore/Net/LANV6HandshakeMessages.swift:generic-api-key:557
+Sources/ElysiumCore/Net/LANV6HandshakeMessages.swift:generic-api-key:557

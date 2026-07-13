@@ -1,4 +1,4 @@
-import PebbleStorage
+import ElysiumStorage
 
-let firstCapability: PebbleStorageCoordinator? = nil
-let secondCapability: PebbleLegacyCoreStorage? = nil
+let firstCapability: ElysiumStorageCoordinator? = nil
+let secondCapability: ElysiumLegacyCoreStorage? = nil

@@ -103,7 +103,7 @@ if ($mode eq "fixture") {
 }
 die "capture args" unless $mode eq "capture" && @ARGV == 4;
 my ($bundle, $stdout_path, $stderr_path, $normalized) = @ARGV;
-my $expected = "$bundle/Contents/MacOS/Pebble";
+my $expected = "$bundle/Contents/MacOS/Elysium";
 sysopen(my $stdout, $stdout_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or
     die "stdout open";
 sysopen(my $stderr, $stderr_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or
@@ -157,19 +157,19 @@ cp "$ROOT/packaging/title-bg.png" "$OUTPUT/Contents/Resources/"
 for asset in "$ROOT"/packaging/*.zip "$ROOT"/packaging/FAITHFUL-LICENSE.txt; do
     [ ! -e "$asset" ] || cp "$asset" "$OUTPUT/Contents/Resources/"
 done
-cp "$EXECUTABLE" "$OUTPUT/Contents/MacOS/Pebble"
-STAGED="$OUTPUT/Contents/MacOS/Pebble"
+cp "$EXECUTABLE" "$OUTPUT/Contents/MacOS/Elysium"
+STAGED="$OUTPUT/Contents/MacOS/Elysium"
 [ -f "$STAGED" ] && [ ! -L "$STAGED" ] || die "staged executable is not a regular file"
 cmp -s "$EXECUTABLE" "$STAGED" || die "staged executable differs before signing"
 STAGED_PRE_HASH="$(sha256 "$STAGED")"
 [ "$INPUT_HASH" = "$STAGED_PRE_HASH" ] || die "pre-sign hashes differ"
 
-/usr/bin/codesign --force --sign - --identifier com.briangao.pebble "$OUTPUT" >/dev/null
+/usr/bin/codesign --force --sign - --identifier com.briangao.elysium "$OUTPUT" >/dev/null
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$OUTPUT" >/dev/null 2>&1 || die "strict signature verification failed"
 DETAILS="$(/usr/bin/codesign -d --verbose=4 "$OUTPUT" 2>&1)"
 BUNDLE_ID="$(printf '%s\n' "$DETAILS" | awk -F= '/^Identifier=/{print $2; exit}')"
 CDHASH="$(printf '%s\n' "$DETAILS" | awk -F= '/^CDHash=/{print $2; exit}')"
-[ "$BUNDLE_ID" = "com.briangao.pebble" ] || die "unexpected bundle identifier"
+[ "$BUNDLE_ID" = "com.briangao.elysium" ] || die "unexpected bundle identifier"
 [ -n "$CDHASH" ] || die "missing CDHash"
 case "$DETAILS" in
     *"Sealed Resources version="*) ;;
@@ -178,7 +178,7 @@ esac
 POST_HASH="$(sha256 "$STAGED")"
 OUTPUT_CANON="$(cd "$(dirname "$OUTPUT")" && pwd -P)/$(basename "$OUTPUT")"
 STAGED_CANON="$(canonical_file "$STAGED")"
-CAPTURE_DIR="$(mktemp -d /tmp/pebble-package-codesign.XXXXXX)"
+CAPTURE_DIR="$(mktemp -d /tmp/elysium-package-codesign.XXXXXX)"
 chmod 700 "$CAPTURE_DIR"
 REQUIREMENT_STDOUT="$CAPTURE_DIR/stdout.raw"
 REQUIREMENT_STDERR="$CAPTURE_DIR/stderr.raw"

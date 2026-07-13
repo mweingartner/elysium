@@ -1,7 +1,7 @@
 # Changelog
 
-All notable changes to Pebble. Versions follow `MAJOR.MINOR.PATCH`; the
-in-app version string comes from `PEBBLE_VERSION` (PebbleCore/Game/Saves.swift).
+All notable changes to Elysium. Versions follow `MAJOR.MINOR.PATCH`; the
+in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift).
 
 ## Unreleased
 
@@ -45,7 +45,7 @@ in-app version string comes from `PEBBLE_VERSION` (PebbleCore/Game/Saves.swift).
   placement workflows, minimap controls, command-line AI actions, and live
   3D fixture rendering for torches and lanterns.
 - Added player-started LAN multiplayer session support: Multiplayer and Open to
-  LAN screens, Bonjour browse/advertise for `_pebble-lan._tcp`, Direct Connect
+  LAN screens, Bonjour browse/advertise for `_elysium-lan._tcp`, Direct Connect
   by host/port/join-code, `/lan ...` command-line controls, join-code
   handshakes, bounded protocol frames, peer status, and LAN chat.
 - Added the first host-authoritative LAN replication layer: capped replication
@@ -61,13 +61,13 @@ in-app version string comes from `PEBBLE_VERSION` (PebbleCore/Game/Saves.swift).
   use is isolated to the LAN transport, app bundles must declare local-network
   privacy and Bonjour services, and low-level socket APIs remain rejected.
 - Expanded the local XCTest harness around these behaviors while preserving
-  the 456-check golden `pebsmoke` contract.
+  the 456-check golden `elysmoke` contract.
 
 ## 1.0.0 — 2026-06-11 — first public beta
 
 **This is a beta.** The engine is pinned by 456 golden checks, but a game of
 this scope certainly has bugs we haven't found yet. Reports and fix PRs are
-incredibly welcome: https://github.com/thebriangao/pebble/issues (the README
+incredibly welcome: https://github.com/mweingartner/elysium/issues (the README
 lists what to include).
 
 The initial release. What ships:
@@ -92,7 +92,7 @@ The initial release. What ships:
   from oscillator recipes — zero audio files.
 - **Faithful 32x textures built in** (self-restoring, credited, license
   included) — atlas art, `.mcmeta` animations, GUIs, fonts, entity skins,
-  and sun/moon, loaded through Pebble's own zip reader. **Ultra graphics**:
+  and sun/moon, loaded through Elysium's own zip reader. **Ultra graphics**:
   a built-in enhanced pipeline (SSAO, volumetric light, soft shadows, ACES).
 - **Persistence**: single SQLite database (WAL) holding worlds, chunks
   (compact binary records), players, and advancements.

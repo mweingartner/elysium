@@ -2,16 +2,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOCAL_APP="${PEBBLE_LAN_TEST_LOCAL_APP:-/Applications/Pebble.app}"
-REMOTE_HOST="${PEBBLE_LAN_CLIENT_HOST:-neo.localdomain}"
-REMOTE_USER="${PEBBLE_LAN_CLIENT_USER:-${USER:-}}"
-REMOTE_TARGET="${PEBBLE_LAN_CLIENT_TARGET:-}"
-REMOTE_APP="${PEBBLE_LAN_CLIENT_APP:-/Applications/Pebble.app}"
-IDENTITY_FILE="${PEBBLE_LAN_CLIENT_IDENTITY:-$HOME/.ssh/pebble_neo_ed25519}"
-JOIN_CODE="${PEBBLE_LAN_TEST_JOIN_CODE:-TST42A}"
-PORT="${PEBBLE_LAN_TEST_PORT:-41337}"
-SEED="${PEBBLE_LAN_TEST_SEED:-424242}"
-TIMEOUT="${PEBBLE_LAN_TEST_TIMEOUT:-75}"
+LOCAL_APP="${ELYSIUM_LAN_TEST_LOCAL_APP:-/Applications/Elysium.app}"
+REMOTE_HOST="${ELYSIUM_LAN_CLIENT_HOST:-neo.localdomain}"
+REMOTE_USER="${ELYSIUM_LAN_CLIENT_USER:-${USER:-}}"
+REMOTE_TARGET="${ELYSIUM_LAN_CLIENT_TARGET:-}"
+REMOTE_APP="${ELYSIUM_LAN_CLIENT_APP:-/Applications/Elysium.app}"
+IDENTITY_FILE="${ELYSIUM_LAN_CLIENT_IDENTITY:-$HOME/.ssh/elysium_neo_ed25519}"
+JOIN_CODE="${ELYSIUM_LAN_TEST_JOIN_CODE:-TST42A}"
+PORT="${ELYSIUM_LAN_TEST_PORT:-41337}"
+SEED="${ELYSIUM_LAN_TEST_SEED:-424242}"
+TIMEOUT="${ELYSIUM_LAN_TEST_TIMEOUT:-75}"
 DEPLOY=0
 KEEP_RUNNING=0
 REMOTE_UID=""
@@ -31,17 +31,17 @@ Direct Connect, drives the client right-click path against a door, and checks
 that a chest item snapshot replicated to the client.
 
 Options:
-  --deploy       Copy the current local /Applications/Pebble.app to Neo first
-  --keep-running Leave both Pebble processes open after the probe
+  --deploy       Copy the current local /Applications/Elysium.app to Neo first
+  --keep-running Leave both Elysium processes open after the probe
   --timeout SEC  Probe timeout in seconds (default: ${TIMEOUT})
   -h, --help     Show this help
 
 Environment overrides:
-  PEBBLE_LAN_TEST_LOCAL_APP, PEBBLE_LAN_CLIENT_HOST,
-  PEBBLE_LAN_CLIENT_USER, PEBBLE_LAN_CLIENT_TARGET,
-  PEBBLE_LAN_CLIENT_APP, PEBBLE_LAN_CLIENT_IDENTITY,
-  PEBBLE_LAN_TEST_JOIN_CODE, PEBBLE_LAN_TEST_PORT,
-  PEBBLE_LAN_TEST_SEED, PEBBLE_LAN_TEST_TIMEOUT
+  ELYSIUM_LAN_TEST_LOCAL_APP, ELYSIUM_LAN_CLIENT_HOST,
+  ELYSIUM_LAN_CLIENT_USER, ELYSIUM_LAN_CLIENT_TARGET,
+  ELYSIUM_LAN_CLIENT_APP, ELYSIUM_LAN_CLIENT_IDENTITY,
+  ELYSIUM_LAN_TEST_JOIN_CODE, ELYSIUM_LAN_TEST_PORT,
+  ELYSIUM_LAN_TEST_SEED, ELYSIUM_LAN_TEST_TIMEOUT
 EOF
 }
 
@@ -111,16 +111,16 @@ remote_unset_launch_env() {
 }
 
 cleanup_env() {
-    for key in PEBBLE_AUTOLOAD PEBBLE_NEWWORLD PEBBLE_CMD PEBBLE_LAN_PROBE PEBBLE_LAN_PROBE_LOG PEBBLE_LAN_PROBE_TIMEOUT_FRAMES PEBBLE_LAN_PROBE_JOIN_CODE PEBBLE_LAN_PROBE_PORT PEBBLE_LAN_AUTOJOIN; do
+    for key in ELYSIUM_AUTOLOAD ELYSIUM_NEWWORLD ELYSIUM_CMD ELYSIUM_LAN_PROBE ELYSIUM_LAN_PROBE_LOG ELYSIUM_LAN_PROBE_TIMEOUT_FRAMES ELYSIUM_LAN_PROBE_JOIN_CODE ELYSIUM_LAN_PROBE_PORT ELYSIUM_LAN_AUTOJOIN; do
         unset_launch_env "$key"
         remote_unset_launch_env "$key" >/dev/null 2>&1 || true
     done
 }
 
 stop_apps() {
-    /usr/bin/osascript -e 'tell application "Pebble" to quit' >/dev/null 2>&1 || true
-    /usr/bin/pkill -x Pebble >/dev/null 2>&1 || true
-    remote "/usr/bin/osascript -e 'tell application \"Pebble\" to quit' >/dev/null 2>&1 || true; /usr/bin/pkill -x Pebble >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
+    /usr/bin/osascript -e 'tell application "Elysium" to quit' >/dev/null 2>&1 || true
+    /usr/bin/pkill -x Elysium >/dev/null 2>&1 || true
+    remote "/usr/bin/osascript -e 'tell application \"Elysium\" to quit' >/dev/null 2>&1 || true; /usr/bin/pkill -x Elysium >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
 }
 
 find_local_ip() {
@@ -134,8 +134,8 @@ find_local_ip() {
 
 require_app() {
     [ -d "$LOCAL_APP" ] || die "local app not found: $LOCAL_APP"
-    [ -x "$LOCAL_APP/Contents/MacOS/Pebble" ] || die "local app executable not found: $LOCAL_APP/Contents/MacOS/Pebble"
-    remote "test -d '$REMOTE_APP' && test -x '$REMOTE_APP/Contents/MacOS/Pebble'" >/dev/null || die "remote app not installed/executable: $REMOTE_APP"
+    [ -x "$LOCAL_APP/Contents/MacOS/Elysium" ] || die "local app executable not found: $LOCAL_APP/Contents/MacOS/Elysium"
+    remote "test -d '$REMOTE_APP' && test -x '$REMOTE_APP/Contents/MacOS/Elysium'" >/dev/null || die "remote app not installed/executable: $REMOTE_APP"
 }
 
 poll_logs() {
@@ -204,11 +204,11 @@ print_tails() {
 
 LOCAL_IP="$(find_local_ip)" || die "could not determine this Mac's LAN IP"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
-LOG_DIR="/tmp/pebble-lan-live-${RUN_ID}"
+LOG_DIR="/tmp/elysium-lan-live-${RUN_ID}"
 HOST_LOG="${LOG_DIR}/host.log"
 HOST_STDOUT="${LOG_DIR}/host.stdout"
-REMOTE_LOG="/tmp/pebble-lan-live-${RUN_ID}-neo.log"
-REMOTE_STDOUT="/tmp/pebble-lan-live-${RUN_ID}-neo.stdout"
+REMOTE_LOG="/tmp/elysium-lan-live-${RUN_ID}-neo.log"
+REMOTE_STDOUT="/tmp/elysium-lan-live-${RUN_ID}-neo.stdout"
 CLIENT_JOIN="${LOCAL_IP} ${PORT} ${JOIN_CODE} Neo Probe"
 
 mkdir -p "$LOG_DIR"
@@ -226,22 +226,22 @@ remote "rm -f '$REMOTE_LOG' '$REMOTE_STDOUT'"
 
 say "Launching local host from $LOCAL_APP"
 nohup env \
-    PEBBLE_AUTOLOAD=1 \
-    PEBBLE_NEWWORLD="$SEED" \
-    PEBBLE_LAN_PROBE=host-rig \
-    PEBBLE_LAN_PROBE_LOG="$HOST_LOG" \
-    PEBBLE_LAN_PROBE_TIMEOUT_FRAMES="$(( TIMEOUT * 60 ))" \
-    PEBBLE_LAN_PROBE_JOIN_CODE="$JOIN_CODE" \
-    PEBBLE_LAN_PROBE_PORT="$PORT" \
-    "$LOCAL_APP/Contents/MacOS/Pebble" > "$HOST_STDOUT" 2>&1 &
+    ELYSIUM_AUTOLOAD=1 \
+    ELYSIUM_NEWWORLD="$SEED" \
+    ELYSIUM_LAN_PROBE=host-rig \
+    ELYSIUM_LAN_PROBE_LOG="$HOST_LOG" \
+    ELYSIUM_LAN_PROBE_TIMEOUT_FRAMES="$(( TIMEOUT * 60 ))" \
+    ELYSIUM_LAN_PROBE_JOIN_CODE="$JOIN_CODE" \
+    ELYSIUM_LAN_PROBE_PORT="$PORT" \
+    "$LOCAL_APP/Contents/MacOS/Elysium" > "$HOST_STDOUT" 2>&1 &
 
 say "Launching Neo client against ${LOCAL_IP}:${PORT}"
-remote "cd /tmp && nohup env PEBBLE_LAN_AUTOJOIN='$(printf "%s" "$CLIENT_JOIN" | sed "s/'/'\\\\''/g")' PEBBLE_LAN_PROBE=client-door PEBBLE_LAN_PROBE_LOG='$REMOTE_LOG' PEBBLE_LAN_PROBE_TIMEOUT_FRAMES='$(( TIMEOUT * 60 ))' '$REMOTE_APP/Contents/MacOS/Pebble' > '$REMOTE_STDOUT' 2>&1 &"
+remote "cd /tmp && nohup env ELYSIUM_LAN_AUTOJOIN='$(printf "%s" "$CLIENT_JOIN" | sed "s/'/'\\\\''/g")' ELYSIUM_LAN_PROBE=client-door ELYSIUM_LAN_PROBE_LOG='$REMOTE_LOG' ELYSIUM_LAN_PROBE_TIMEOUT_FRAMES='$(( TIMEOUT * 60 ))' '$REMOTE_APP/Contents/MacOS/Elysium' > '$REMOTE_STDOUT' 2>&1 &"
 
 if poll_logs; then
     say "Door/container phase passed; relaunching Neo to verify client resume position"
-    remote "/usr/bin/pkill -x Pebble >/dev/null 2>&1 || true; sleep 2"
-    remote "cd /tmp && nohup env PEBBLE_LAN_AUTOJOIN='$(printf "%s" "$CLIENT_JOIN" | sed "s/'/'\\\\''/g")' PEBBLE_LAN_PROBE=client-resume PEBBLE_LAN_PROBE_LOG='$REMOTE_LOG' PEBBLE_LAN_PROBE_TIMEOUT_FRAMES='$(( TIMEOUT * 60 ))' '$REMOTE_APP/Contents/MacOS/Pebble' >> '$REMOTE_STDOUT' 2>&1 &"
+    remote "/usr/bin/pkill -x Elysium >/dev/null 2>&1 || true; sleep 2"
+    remote "cd /tmp && nohup env ELYSIUM_LAN_AUTOJOIN='$(printf "%s" "$CLIENT_JOIN" | sed "s/'/'\\\\''/g")' ELYSIUM_LAN_PROBE=client-resume ELYSIUM_LAN_PROBE_LOG='$REMOTE_LOG' ELYSIUM_LAN_PROBE_TIMEOUT_FRAMES='$(( TIMEOUT * 60 ))' '$REMOTE_APP/Contents/MacOS/Elysium' >> '$REMOTE_STDOUT' 2>&1 &"
     if poll_remote_resume; then
         say "Live LAN probe passed"
         print_tails

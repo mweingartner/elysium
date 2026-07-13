@@ -23,16 +23,16 @@ projected owner checkpoint participates in capacity validation and the ordinal-b
 
 Files:
 
-- Add a dependency-free `PebbleStorage` target in `Package.swift` and
-  `Sources/PebbleStorage/StorageEngine.swift`. `PebbleCore` depends on it; `PebbleStorage` never
-  imports or depends on `PebbleCore`.
+- Add a dependency-free `ElysiumStorage` target in `Package.swift` and
+  `Sources/ElysiumStorage/StorageEngine.swift`. `ElysiumCore` depends on it; `ElysiumStorage` never
+  imports or depends on `ElysiumCore`.
 - The storage target exports only named, typed row values and persistence façades. Its generic
   executor, contexts, statements, SQL, authorizer scopes, and capability identifiers are private to
-  one physical implementation boundary and are not visible to `PebbleCore`.
+  one physical implementation boundary and are not visible to `ElysiumCore`.
 - Modify the connection/executor seams and rewrite each complete existing transaction body in
-  `Sources/PebbleCore/Game/Saves.swift`; do not change save formats or gameplay semantics.
-- Add `Tests/PebbleCoreTests/PebbleStorageExecutorTests.swift` and
-  `Tests/PebbleCoreTests/LANV6SchemaAuthorizerTests.swift`.
+  `Sources/ElysiumCore/Game/Saves.swift`; do not change save formats or gameplay semantics.
+- Add `Tests/ElysiumCoreTests/ElysiumStorageExecutorTests.swift` and
+  `Tests/ElysiumCoreTests/LANV6SchemaAuthorizerTests.swift`.
 
 The private executor owns the one SQLite handle on a private serial `DispatchQueue`. Opening, pragmas,
 schema setup, every prepare/bind/step/finalize, transaction, and close execute on that queue.
@@ -41,11 +41,11 @@ itself is forbidden. SQLite callbacks never acquire game/domain locks, dispatch 
 gameplay/publication code.
 
 The exported API is named rather than generic. Phase 2.0 initially exposes a
-`PebbleLegacyCoreStorage` façade with exact methods for the current world/chunk/player/LAN-v5/
+`ElysiumLegacyCoreStorage` façade with exact methods for the current world/chunk/player/LAN-v5/
 advancement/template rows and a coordinator close operation. Later phases add separate
-`PebbleWorldRegistryV6Storage`, `PebbleHostCredentialV6Storage`, `PebblePermissionV6Storage`,
-`PebbleLegacyClaimV6Storage`, `PebbleClientCredentialAdmissionV6Storage`,
-`PebbleHostAuthorityCheckpointV6Storage`, and `PebbleClientAuthorityCheckpointV6Storage` façades.
+`ElysiumWorldRegistryV6Storage`, `ElysiumHostCredentialV6Storage`, `ElysiumPermissionV6Storage`,
+`ElysiumLegacyClaimV6Storage`, `ElysiumClientCredentialAdmissionV6Storage`,
+`ElysiumHostAuthorityCheckpointV6Storage`, and `ElysiumClientAuthorityCheckpointV6Storage` façades.
 No façade accepts SQL, a capability enum/token, a generic context, a statement ID, table/column
 names, or a closure that can issue storage operations. Host checkpoint methods cannot name or
 return credential rows; client admission cannot name owner/disposition/inbox rows; only the named
@@ -70,28 +70,28 @@ limits remain smaller. Schema
 audit caps each `sqlite_master.sql` value at 65,536 bytes and the complete manifest at 512 objects/
 1,048,576 bytes before copying or normalization.
 
-`PebbleLegacyCoreStorage` has these exact named
+`ElysiumLegacyCoreStorage` has these exact named
 operations: list/get/put/delete world rows; list keys/get/put chunk blob rows; get/put player JSON;
 get/put/delete LAN-client-resume JSON; get/put/list/delete LAN-player JSON; get/put advancement JSON;
 list/get/put/delete template rows and summary columns; one atomic per-world loose-save import; and
 the fixed core-schema verify/upgrade operation. Delete-world, chunk batch, template write/delete,
 and each imported world are indivisible methods, not caller-composed statement sequences. The
-PebbleCore `SaveDB` adapter alone performs domain JSON/VCK/template encoding and exposes existing
+ElysiumCore `SaveDB` adapter alone performs domain JSON/VCK/template encoding and exposes existing
 game-facing types.
 
 Representative exported lifecycle API:
 
 ```swift
-public enum PebbleStorageOperationID: String {
+public enum ElysiumStorageOperationID: String {
     case open, configure, prepare, bind, step, changes, finalize
     case beginImmediate, commit, rollback, authorizer, close
 }
 
-public enum PebbleStorageError: Error {
+public enum ElysiumStorageError: Error {
     case openFailed(primaryCode: Int32, extendedCode: Int32)
     case duplicateOpen
     case sqlite(primaryCode: Int32, extendedCode: Int32,
-                operation: PebbleStorageOperationID)
+                operation: ElysiumStorageOperationID)
     case nestedTransaction
     case capabilityViolation
     case inactiveContext
@@ -102,20 +102,20 @@ public enum PebbleStorageError: Error {
     case closed
 }
 
-public struct PebbleStorageTransactionFailure: Error {
+public struct ElysiumStorageTransactionFailure: Error {
     public let primary: any Error
-    public let rollback: PebbleStorageError?
-    public let terminal: PebbleStorageError?
+    public let rollback: ElysiumStorageError?
+    public let terminal: ElysiumStorageError?
 }
 
-public final class PebbleStorageCoordinator {
-    public static func open(databaseURL: URL) throws -> PebbleStorageCoordinator
-    public func legacyCore() throws -> PebbleLegacyCoreStorage
+public final class ElysiumStorageCoordinator {
+    public static func open(databaseURL: URL) throws -> ElysiumStorageCoordinator
+    public func legacyCore() throws -> ElysiumLegacyCoreStorage
     public func close() throws
 }
 ```
 
-`PebbleStorageCoordinator.open` is the sole factory and publishes an instance only after handle open,
+`ElysiumStorageCoordinator.open` is the sole factory and publishes an instance only after handle open,
 configuration, callback installation, and pragma verification all succeed. `SaveDB` has a throwing
 `open(databaseURL:migrateLegacy:)` factory for tests and new callers. Its existing no-argument and
 internal compatibility initializers delegate to the same throwing path and terminate locally with
@@ -211,7 +211,7 @@ template schema migration and initialization are one bootstrap operation. They c
 caller between BEGIN and COMMIT, ignore a failed BEGIN/statement/COMMIT, or return with an active
 transaction. New v6 APIs are throwing and never use the legacy log-and-continue adapter.
 
-Executor errors use only closed `PebbleStorageOperationID` plus primary/extended SQLite result codes. They
+Executor errors use only closed `ElysiumStorageOperationID` plus primary/extended SQLite result codes. They
 never contain SQL text, bind values, paths, IDs, names, or payloads. After rejecting new work,
 `close()` drains prior queued work, proves autocommit, rejects live statements, uninstalls callback
 state, closes on the owner queue, checks the close result, and cannot synchronously re-enter itself
@@ -239,7 +239,7 @@ primary-plus-rollback error preservation; autocommit restoration; no transaction
 foreign-key enforcement; bootstrap/runtime authorizer separation by action/table/column; statement
 leak refusal; close and deinit both on and off the executor queue without deadlock; unchanged
 `SaveDBTests`; and a source audit proving no direct `sqlite3_*` use remains outside private
-executor/context implementation; production `PebbleCore` cannot name private capabilities,
+executor/context implementation; production `ElysiumCore` cannot name private capabilities,
 contexts, statements, or SQL; read-scope writes and caught-error COMMIT both fail; concurrent
 same-path/alias/hard-link opens, failed-factory cleanup, close-then-reopen, close races, repeated close,
 post-close calls, and descriptor leakage; hostile preseeded trigger/view rejection; redacted stdout/
@@ -254,13 +254,13 @@ callbacks.
 
 Files:
 
-- `Sources/PebbleCore/Net/LANV6IdentityModel.swift`
-- `Sources/PebbleCore/Net/LANV6Permissions.swift`
-- `Sources/PebbleCore/Net/LANV6AuthorityRuntime.swift`
-- `Sources/PebbleCore/Net/LANV6StorageLimits.swift`
-- Modify the private deadline helpers in `Sources/PebbleCore/Net/LANV6HandshakeState.swift` and
+- `Sources/ElysiumCore/Net/LANV6IdentityModel.swift`
+- `Sources/ElysiumCore/Net/LANV6Permissions.swift`
+- `Sources/ElysiumCore/Net/LANV6AuthorityRuntime.swift`
+- `Sources/ElysiumCore/Net/LANV6StorageLimits.swift`
+- Modify the private deadline helpers in `Sources/ElysiumCore/Net/LANV6HandshakeState.swift` and
   add the unpublished-candidate permit seam in
-  `Sources/PebbleCore/Net/LANV6AdmissionControl.swift`.
+  `Sources/ElysiumCore/Net/LANV6AdmissionControl.swift`.
 - Matching pure XCTest files.
 
 ### Identity and credential values
@@ -541,10 +541,10 @@ immediate/standalone promotion; and do not activate SQLite integration or transp
 
 Files:
 
-- `Sources/PebbleCore/Game/LANV6SaveSchema.swift`
-- `Sources/PebbleCore/Game/LANV6WorldIdentityRegistry.swift`
+- `Sources/ElysiumCore/Game/LANV6SaveSchema.swift`
+- `Sources/ElysiumCore/Game/LANV6WorldIdentityRegistry.swift`
 - Extend the named schema/registry façade implementations inside
-  `Sources/PebbleStorage/StorageEngine.swift`; no SQL/context enters either PebbleCore file.
+  `Sources/ElysiumStorage/StorageEngine.swift`; no SQL/context enters either ElysiumCore file.
 - Matching schema/registry tests.
 
 Dormant tables:
@@ -567,9 +567,9 @@ rekey or identity preservation.
 
 ## 2.3 Host credential, index, permission, and bounded-storage stores
 
-File: `Sources/PebbleCore/Game/LANV6HostIdentityPersistence.swift` for typed domain coordination;
+File: `Sources/ElysiumCore/Game/LANV6HostIdentityPersistence.swift` for typed domain coordination;
 extend the named host-identity/credential/permission façade implementations inside
-`Sources/PebbleStorage/StorageEngine.swift`. The PebbleCore file contains no SQL or generic storage
+`Sources/ElysiumStorage/StorageEngine.swift`. The ElysiumCore file contains no SQL or generic storage
 access.
 
 Tables:
@@ -610,10 +610,10 @@ No production-callable provisional allocator exists until it accepts a later str
 
 Files:
 
-- `Sources/PebbleCore/Net/LANV6LegacyMigration.swift`
-- `Sources/PebbleCore/Game/LANV6LegacyPersistence.swift`
+- `Sources/ElysiumCore/Net/LANV6LegacyMigration.swift`
+- `Sources/ElysiumCore/Game/LANV6LegacyPersistence.swift`
 - Extend only the named legacy-claim façade implementation inside
-  `Sources/PebbleStorage/StorageEngine.swift`; PebbleCore owns validation/orchestration, not SQL.
+  `Sources/ElysiumStorage/StorageEngine.swift`; ElysiumCore owns validation/orchestration, not SQL.
 
 Dormant tables include claim, nonce index, and legacy identity mapping. A detached claim stores only
 the nonce hash, an exact six-character display code, bounded metadata, absolute expiry, and closed
@@ -630,11 +630,11 @@ tables, writes a ready marker, commits, and only then disables v5 callers.
 
 Files:
 
-- `Sources/PebbleCore/Net/LANV6ClientCredentialModel.swift`
-- `Sources/PebbleCore/Game/LANV6ClientCredentialPersistence.swift`
+- `Sources/ElysiumCore/Net/LANV6ClientCredentialModel.swift`
+- `Sources/ElysiumCore/Game/LANV6ClientCredentialPersistence.swift`
 - Implement the `lanClientAuthority` component bootstrap and named client-credential façade inside
-  `Sources/PebbleStorage/StorageEngine.swift` exactly as frozen in
-  `RPG_STORAGE_SURFACE_AMENDMENT_PLAN.md`; the PebbleCore wrapper receives typed primitive rows and
+  `Sources/ElysiumStorage/StorageEngine.swift` exactly as frozen in
+  `RPG_STORAGE_SURFACE_AMENDMENT_PLAN.md`; the ElysiumCore wrapper receives typed primitive rows and
   never selects a capability or statement.
 
 `lan_client_credentials_v6` is keyed by exact `(hid,wid,lk)`, recomputes `lk`, groups complete
@@ -684,7 +684,7 @@ every step and race close, supersession, host stop, and pending resume.
 
 For each subphase: focused new suites, all `SaveDBTests`, all `LANV6*` tests, then `swift test
 --filter 'LAN|RPG'`. After all Phase 2 code: warning-free release build, full `swift test`,
-`pebsmoke`, Security code review, Tester regression pass, then `scripts/pipeline.sh` at the final
+`elysmoke`, Security code review, Tester regression pass, then `scripts/pipeline.sh` at the final
 release gate.
 
 ## Conditions for Builder

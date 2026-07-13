@@ -10,7 +10,7 @@ echo "==> assets: verifying bundled Faithful pack"
 
 [ -f "$PACK" ] || fail "missing $PACK"
 unzip -tq "$PACK" >/dev/null || fail "zip integrity check failed"
-LIST="$(mktemp /tmp/pebble-pack-list.XXXXXX)"
+LIST="$(mktemp /tmp/elysium-pack-list.XXXXXX)"
 trap 'rm -f "$LIST"' EXIT
 unzip -Z1 "$PACK" >"$LIST"
 

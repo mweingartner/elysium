@@ -5,19 +5,19 @@ Status: Architect amendment awaiting Security plan review.
 This amendment is subordinate to section 2.0 of
 `LAN_V6_PHASE2_IMPLEMENTATION_PLAN.md` and supersedes that section only where empirical SQLite
 behavior made its original wording impossible. It closes the 2026-07-10 independent Security and
-Tester FAIL findings before `Saves.swift` may use `PebbleStorage`.
+Tester FAIL findings before `Saves.swift` may use `ElysiumStorage`.
 
 ## Files and dependency order
 
 1. Amend constants, closed errors, and test-only failure seams in
-   `Sources/PebbleStorage/StorageEngine.swift`.
+   `Sources/ElysiumStorage/StorageEngine.swift`.
 2. Repair factory ownership and filesystem-error closure.
 3. Enforce the authorization transition matrix and UTF-8/byte-accounting contract.
 4. Make schema preflight and bootstrap one fail-atomic operation.
 5. Separate the typed 64 MiB chunk-value cap from SQLite's whole-record ceiling.
 6. Remove the empty-mutation lifecycle bypass.
-7. Extend `PebbleStorageExecutorTests.swift`, `LANV6SchemaAuthorizerTests.swift`, and
-   `PebbleStorageAdversarialTests.swift`; then repeat independent Security and Tester gates.
+7. Extend `ElysiumStorageExecutorTests.swift`, `LANV6SchemaAuthorizerTests.swift`, and
+   `ElysiumStorageAdversarialTests.swift`; then repeat independent Security and Tester gates.
 
 `Saves.swift`, v6 schema tables, and Phase 2.1 domain types remain out of this remediation.
 
@@ -34,7 +34,7 @@ Debug tests may select only these closed factory failure points:
 - before bootstrap schema statement index `0...15` for an empty/legacy-prefix fixture.
 
 The selector is internal under `#if DEBUG`, accepts no SQL/path/callback, and has no production
-entry point. Runtime operation injection remains the existing closed `PebbleStorageOperationID`
+entry point. Runtime operation injection remains the existing closed `ElysiumStorageOperationID`
 map.
 
 ## 2. Factory handle ownership and filesystem redaction
@@ -113,7 +113,7 @@ a normal restart produces the one exact full schema.
 ## 6. Chunk value cap versus SQLite encoded-row envelope
 
 The public chunk BLOB cap remains exactly 67,108,864 bytes and the maximum world-key UTF-8 length
-remains 1,048,576 bytes. `PebbleChunkStorageRow` also performs one checked aggregate validation that
+remains 1,048,576 bytes. `ElysiumChunkStorageRow` also performs one checked aggregate validation that
 its only co-resident variable-width fields, `key.world.utf8.count + data.count`, are at most exactly
 68,157,440 bytes (65 MiB). No second text/blob field exists in that row. Every other manifested row
 has a strictly smaller checked sum of its simultaneously legal variable-width fields.
@@ -139,7 +139,7 @@ pre-admission success return.
 
 - All adversarial tests that were red before remediation must pass without weakening assertions.
 - Focused storage suites report the real test count and zero failures.
-- `swift build -c release --target PebbleStorage` and full `swift build -c release` are warning-free.
+- `swift build -c release --target ElysiumStorage` and full `swift build -c release` are warning-free.
 - `git diff --check` is clean.
 - Independent Security reviews the actual repaired code and ends PASS.
 - Independent Tester reads the repaired implementation, reruns original plus adversarial suites,

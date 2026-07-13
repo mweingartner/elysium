@@ -1,4 +1,4 @@
-import PebbleStorage
+import ElysiumStorage
 
-typealias ForbiddenStorageAlias<T> = Result<T, PebbleStorageError>
-let forbiddenAlias: ForbiddenStorageAlias<PebbleRPGLocalPreferenceStorageRow>? = nil
+typealias ForbiddenStorageAlias<T> = Result<T, ElysiumStorageError>
+let forbiddenAlias: ForbiddenStorageAlias<ElysiumRPGLocalPreferenceStorageRow>? = nil

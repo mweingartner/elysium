@@ -11,7 +11,7 @@ state, control, timing promise, or interaction.
 This phase starts only after Phase 2.0A has independent Security and Tester PASS results, including
 the template limits, narrow legacy projections, replace-complete import, durability barrier, and
 database-parent identity seam frozen in
-`LAN_V6_PHASE20A_TEMPLATE_COMPATIBILITY_AMENDMENT.md`. It removes SQLite from PebbleCore while
+`LAN_V6_PHASE20A_TEMPLATE_COMPATIBILITY_AMENDMENT.md`. It removes SQLite from ElysiumCore while
 preserving valid save formats and public failure shapes. It does not add v6 identity/schema,
 transport, gameplay, or UI behavior.
 
@@ -27,9 +27,9 @@ Architecture revalidation used these exact inputs:
   `b7e94a92f906b2cc4fb10ceace16dda665e6ad636ec5737071efa38c48a81233`;
 - current `Package.swift` SHA
   `50270ebc175f60239feba2c4f2ba0ce75ee3f26e4fd97c7af1630a0d9000710a`;
-- final Builder `Sources/PebbleStorage/StorageEngine.swift` SHA
+- final Builder `Sources/ElysiumStorage/StorageEngine.swift` SHA
   `ae73b775aef8f7e286a47eaae4260d9f63064feb63ec16c916787f32208db5bb`;
-- current adapter input `Sources/PebbleCore/Game/Saves.swift` SHA
+- current adapter input `Sources/ElysiumCore/Game/Saves.swift` SHA
   `cb1b32c3b973f0486ff6ffc7822086049a0a540d574e96fc6ce7e5b9a78c85e3`;
 - mandatory release verifier SHA
   `ca5fe73a61d812365db78e26fc627614b73e138cc50b5e1336eb7ed9e81a12bb`.
@@ -39,43 +39,43 @@ focused storage/schema/adversarial tests, and 618/618 full XCTest. Its warning-f
 and the verifier above also passed. Phase 2.0B must preserve that exact executor and verifier.
 
 Before Build, the owner rehashes these files and confirms Phase 2.0A has actual independent Security
-code-review and Tester PASS evidence. Any drift in `Package.swift`, the PebbleStorage source, its
+code-review and Tester PASS evidence. Any drift in `Package.swift`, the ElysiumStorage source, its
 externally reachable symbol graph, or the release verifier stops Phase 2.0B and returns to
 Architecture plus Security plan review. Drift in `Saves.swift` requires a complete call-site and
 outward-semantics reconciliation before Build. A matching hash is a dependency check, not a
 substitute for Phase 2.0A gate evidence.
 
-The reviewed PebbleStorage surface is exactly the current closed operation/error types (including
+The reviewed ElysiumStorage surface is exactly the current closed operation/error types (including
 the already-frozen `primary: any Error` fields on transaction/statement failures), primitive row/DTO constructors,
-`PebbleStorageCoordinator.open(databaseURL:)`, `legacyCore()`, `close()`,
-`verifyDatabaseParentIdentity(device:inode:)`, and the named `PebbleLegacyCoreStorage` methods
+`ElysiumStorageCoordinator.open(databaseURL:)`, `legacyCore()`, `close()`,
+`verifyDatabaseParentIdentity(device:inode:)`, and the named `ElysiumLegacyCoreStorage` methods
 already present in that source, including `verifyCoreSchema()`, parameter-free
 `prepareLegacyMigrationRename()`, narrow legacy projections, replace-complete
-`importLegacyWorld(_:)`, and typed core row methods. Phase 2.0B adds no PebbleStorage symbol and does
-not edit `Package.swift`, `StorageEngine.swift`, `scripts/verify-pebble-storage-release-surface.sh`,
+`importLegacyWorld(_:)`, and typed core row methods. Phase 2.0B adds no ElysiumStorage symbol and does
+not edit `Package.swift`, `StorageEngine.swift`, `scripts/verify-elysium-storage-release-surface.sh`,
 `scripts/pipeline.sh`, or `.githooks/pre-push`.
 
 ## Files and dependency order
 
-1. Add `Sources/PebbleCore/Game/LockRank.swift` with the closed persistence rank utility.
-2. Add `Sources/PebbleCore/Game/LegacySaveMigration.swift` with the fd-relative parser, source
+1. Add `Sources/ElysiumCore/Game/LockRank.swift` with the closed persistence rank utility.
+2. Add `Sources/ElysiumCore/Game/LegacySaveMigration.swift` with the fd-relative parser, source
    lease, manifest, import, and rename state machine.
-3. Rewrite `Sources/PebbleCore/Game/Saves.swift` as a typed `PebbleStorage` adapter; retain the
+3. Rewrite `Sources/ElysiumCore/Game/Saves.swift` as a typed `ElysiumStorage` adapter; retain the
    domain JSON, VCK1, and template codecs.
-4. Route all `Sources/PebbleCore/Game/GameCore.swift` save-queue entries through the rank-11
-   helpers, and explicitly close the database after the terminal save in `Sources/Pebble/main.swift`.
-5. Add `Tests/PebbleCoreTests/PersistenceTestSupport.swift`,
-   `Tests/PebbleCoreTests/SaveDBLifecycleTests.swift`,
-   `Tests/PebbleCoreTests/LegacySaveMigrationTests.swift`, and
-   `Tests/PebbleCoreTests/PersistenceLockRankTests.swift`; extend
-   `Tests/PebbleCoreTests/SaveDBTests.swift` for the adapter matrix. Update only database ownership,
+4. Route all `Sources/ElysiumCore/Game/GameCore.swift` save-queue entries through the rank-11
+   helpers, and explicitly close the database after the terminal save in `Sources/Elysium/main.swift`.
+5. Add `Tests/ElysiumCoreTests/PersistenceTestSupport.swift`,
+   `Tests/ElysiumCoreTests/SaveDBLifecycleTests.swift`,
+   `Tests/ElysiumCoreTests/LegacySaveMigrationTests.swift`, and
+   `Tests/ElysiumCoreTests/PersistenceLockRankTests.swift`; extend
+   `Tests/ElysiumCoreTests/SaveDBTests.swift` for the adapter matrix. Update only database ownership,
    unique-temporary-database construction, and explicit-close cleanup in the existing direct
    SaveDB/GameCore owners in `FoodUseTests.swift`, `LANClientRoutingTests.swift`,
    `LANMultiplayerTests.swift`, `RPGConsumerHardeningTests.swift`, `RPGCoreV2Tests.swift`,
    `RPGQuickSlotInputTests.swift`, `RPGSecurityRegressionTests.swift`, and `TemplateTests.swift`.
 6. Add `scripts/sqlite-boundary-scan.swift`, scanner fixtures under `Tests/SecurityScanFixtures/`,
-   freeze `scripts/pebble-storage-api-v1.json` plus
-   `scripts/pebble-core-storage-capability-v1.json`, and call the scanner/self-test from
+   freeze `scripts/elysium-storage-api-v1.json` plus
+   `scripts/elysium-core-storage-capability-v1.json`, and call the scanner/self-test from
    `scripts/security-scan.sh`.
 7. Update `ARCHITECTURE.md`, `SECURITY.md`, and `CONTRIBUTING.md` with the one-way storage boundary,
    migration limits/recovery states, lock ranks, explicit close, and verifier command.
@@ -89,8 +89,8 @@ changes in this phase without a renewed plan review.
 `SaveDB` stores exactly:
 
 ```swift
-private let coordinator: PebbleStorageCoordinator
-private let storage: PebbleLegacyCoreStorage
+private let coordinator: ElysiumStorageCoordinator
+private let storage: ElysiumLegacyCoreStorage
 ```
 
 It adds:
@@ -121,7 +121,7 @@ public struct SaveDBOpenError: Error, Equatable, Sendable, CustomStringConvertib
 }
 ```
 
-`description` is exactly `Pebble save open failed: <stage>/<result>` using only the two closed raw
+`description` is exactly `Elysium save open failed: <stage>/<result>` using only the two closed raw
 values. It stores no `Error`, `NSError`, errno,
 SQLite code/detail, URL/path, filename, identifier, JSON, or payload. The factory opens the
 coordinator under rank 12, obtains `legacyCore`, verifies the exact schema, and exits that rank.
@@ -149,7 +149,7 @@ constructed `SaveDB`, and neither the storage facade nor the migration runner ac
 codec/storage closure.
 
 When `migrateLegacy` is true, `openComponents` first runs a filesystem-only namespace preflight
-under the persistent parent migration lock, before calling `PebbleStorageCoordinator.open`. Source,
+under the persistent parent migration lock, before calling `ElysiumStorageCoordinator.open`. Source,
 backup, provenance, and recovery-state classification therefore occurs before SQLite bootstrap can
 CREATE/ALTER or otherwise mutate the database. An unmarked backup-only state creates/validates the
 recovery-required record and throws without opening a coordinator. Only source-only, neither-state,
@@ -157,7 +157,7 @@ or already-valid v2-provenance states may proceed to coordinator open; the sourc
 through coordinator open, import, barrier, restart, and final publication.
 
 The storage-to-public factory mapping is closed and exhaustive. During
-`PebbleStorageCoordinator.open`, `duplicateOpen` maps to `storageOpen/conflict`; `invalidValue`,
+`ElysiumStorageCoordinator.open`, `duplicateOpen` maps to `storageOpen/conflict`; `invalidValue`,
 `invalidStorageClass`, `invalidUTF8`, `schemaMismatch`, and `schemaIntegrity` map to
 `storageOpen/invalidSource`; `limitExceeded` maps to `storageOpen/limitExceeded`; every other error
 maps to `storageOpen/unavailable`. After a coordinator exists, failure to obtain `legacyCore` or to
@@ -176,7 +176,7 @@ nonthrowing compatibility seams over the same factory. They terminate with exact
 never interpolate even the closed error:
 
 ```text
-Pebble save database initialization failed
+Elysium save database initialization failed
 ```
 
 `close()` synchronously enters rank 12 and delegates to the coordinator lifecycle. A successful
@@ -200,7 +200,7 @@ rank zero. `withRank` requires `previous < requested` and restores the exact pri
 `defer`; release builds preserve the wrapper shape with no assertion overhead.
 
 ```swift
-enum PebbleLockRank: Int {
+enum ElysiumLockRank: Int {
     case migrationSource = 10
     case saveQueue = 11
     case saveDB = 12
@@ -239,11 +239,11 @@ expected duplicate lease into the compatibility initializer's intentional fatal 
 
 ## Domain adapters and exact outward behavior
 
-`sanitizeJSON`, `chunkKey`, VCK1 `encodeChunk`, and `decodeChunk` remain in PebbleCore. The VCK1
+`sanitizeJSON`, `chunkKey`, VCK1 `encodeChunk`, and `decodeChunk` remain in ElysiumCore. The VCK1
 implementation is shared through the module-internal pure helpers frozen above. All domain
 validation/encoding finishes before a storage call and all decoding occurs after it returns.
 Private adapters perform exact `Int32(exactly:)` coordinate conversion and primitive-row mapping.
-PebbleStorage never imports a PebbleCore type.
+ElysiumStorage never imports a ElysiumCore type.
 
 - `listWorlds` uses `listLegacyWorldJSON`, decodes each bounded JSON string, and skips bad domain
   rows. Storage failure returns `[]`; world order remains unspecified.
@@ -265,7 +265,7 @@ PebbleStorage never imports a PebbleCore type.
   BLOB and propagates a domain decode error without JSON fallback; only format below 2 or absent/empty
   data reaches nonempty legacy JSON. Missing/storage payload returns nil. Put/delete retain their
   Bool/domain-throw shapes. Names and summaries use the narrow methods and remain UTF-8/BINARY ordered.
-- For each `PebbleTemplateSummaryCandidate`, stored metadata is used only when every required field
+- For each `ElysiumTemplateSummaryCandidate`, stored metadata is used only when every required field
   is nonnil, block count is positive, and both dominant strings are nonempty. Otherwise SaveDB loads
   and summarizes that one template after the list call has returned. A failed fallback skips only
   that row; top-level list failure returns `[]`.
@@ -301,7 +301,7 @@ It also opens the one database filename relative to that parent with
 The runner brackets that open with coordinator parent/retained-database proofs and requires a
 no-follow `fstatat` of the database name to equal the retained migration descriptor before and after
 every barrier, restart, equivalence proof, and provenance operation. Thus the provenance database
-identity is derived without a new PebbleStorage getter yet cannot bind a raced replacement.
+identity is derived without a new ElysiumStorage getter yet cannot bind a raced replacement.
 
 That comparison call is the exact Phase 2.0A public seam: it returns no retained identity or
 descriptor. A supplied mismatch is a closed migration-parent failure and does not by itself poison
@@ -471,7 +471,7 @@ expected to fail before allocation.
 Backup presence alone is never migration provenance. For a new source-only import, the shipped
 pre-2.0B migrator ignored failed
 writes and could rename `saves` after a partial database import, so an unmarked backup-only state is
-untrusted. Phase 2.0B creates a same-parent `.pebble-legacy-migration-v2` provenance file only after:
+untrusted. Phase 2.0B creates a same-parent `.elysium-legacy-migration-v2` provenance file only after:
 
 1. every valid world has completed replace-complete import;
 2. the complete source manifest and content digests still match;
@@ -504,7 +504,7 @@ manifest/fingerprint scan may produce a diagnostic report for recovery, but it n
 rows, runs the barrier, renames the backup, publishes `SaveDB`, or creates inferred provenance.
 
 The durable recovery state is an exact 80-byte little-endian
-`.pebble-legacy-backup-recovery-required` record: eight-byte magic `PBLR2\0\0\0`, `UInt32` version 1,
+`.elysium-legacy-backup-recovery-required` record: eight-byte magic `PBLR2\0\0\0`, `UInt32` version 1,
 `UInt32` flags 0, the current database device/inode (both zero only when the database entry is
 absent), the backup device/inode, and the 32-byte complete-backup-manifest root. It is created only
 after the backup is fully validated, through a
@@ -526,7 +526,7 @@ The provenance file is an exact 128-byte little-endian record: eight-byte magic
 `PBLM2\0\0\0`; `UInt32` version `1`; `UInt32` flags `0`; six `UInt64` values for database
 device/inode, backup device/inode, valid-world count, and chunk count; the 32-byte complete-manifest
 root; and the 32-byte exact equivalence root. No other flag bit is accepted. It is created via
-a fixed `.pebble-legacy-migration-v2.tmp` using `openat(O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,
+a fixed `.elysium-legacy-migration-v2.tmp` using `openat(O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,
 0600)`, complete write, `F_FULLFSYNC`, identity reproof, exclusive same-parent rename, and checked
 parent `fsync`. Final and temporary entries are always no-follow classified. A final marker must be
 regular, single-linked, effective-UID-owned, mode 0600, exact length/content, bound to the current
@@ -561,7 +561,7 @@ source, or backup content.
 A process-local fail-fast registry keyed by canonical parent `(device,inode)` prevents two database
 files in one parent from inspecting the same source. Its `NSLock` is never held during I/O. Before
 any source/backup/provenance/temp inspection, every process unconditionally opens persistent same-parent
-`.pebble-legacy-migration.lock` with
+`.elysium-legacy-migration.lock` with
 `O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK` mode 0600, proves it is regular,
 single-linked, effective-UID-owned, exact mode 0600, and acquires a nonblocking write
 `fcntl(F_SETLK)`. The file is never unlinked. Its retained device/inode/mode/owner/link identity is
@@ -634,20 +634,20 @@ its canonical regular `.swift` inventory with `swift package describe --type jso
 compiled production source. Across those sources it rejects SQLite3 imports—including scoped
 imports and any prefix attribute (`@testable`, `@_implementationOnly`, `@_exported`, or another
 attribute)—plus qualified/bare/backtick-escaped `sqlite3_` and `SQLITE_` identifiers and
-`OpaquePointer`. Exactly `Sources/PebbleStorage/StorageEngine.swift` may contain them; no second owner
+`OpaquePointer`. Exactly `Sources/ElysiumStorage/StorageEngine.swift` may contain them; no second owner
 is allowed.
 
-PebbleCore's adapter capability is independently closed. Exactly
-`Sources/PebbleCore/Game/Saves.swift` and
-`Sources/PebbleCore/Game/LegacySaveMigration.swift` may contain one plain, unscoped
-`import PebbleStorage`; every attribute-bearing, scoped, aliased, conditional, `@testable`,
+ElysiumCore's adapter capability is independently closed. Exactly
+`Sources/ElysiumCore/Game/Saves.swift` and
+`Sources/ElysiumCore/Game/LegacySaveMigration.swift` may contain one plain, unscoped
+`import ElysiumStorage`; every attribute-bearing, scoped, aliased, conditional, `@testable`,
 `@_implementationOnly`, or `@_exported` import/re-export is denied even in those files. Every other
-production PebbleCore/Pebble/pebsmoke file rejects the import, module qualifier, and every externally
-reachable PebbleStorage type identifier derived from the pinned symbol graph, including DTO names
+production ElysiumCore/Elysium/elysmoke file rejects the import, module qualifier, and every externally
+reachable ElysiumStorage type identifier derived from the pinned symbol graph, including DTO names
 that do not contain the word `Storage`.
 
-`scripts/pebble-core-storage-capability-v1.json` freezes, separately for the two allowed files, each
-PebbleStorage symbol USR/base identifier and every module-internal bridge identifier
+`scripts/elysium-core-storage-capability-v1.json` freezes, separately for the two allowed files, each
+ElysiumStorage symbol USR/base identifier and every module-internal bridge identifier
 (`LegacyMigrationStorageSession`, runner, and component handoff), with exact occurrence count,
 lexical declaration/use kind, and source-relative owner. The scanner rejects moving/copying an
 allowed file, an extra occurrence, inferred bridge use from a third file, typealias/protocol/generic
@@ -669,7 +669,7 @@ rather than invalid token samples.
 
 The lexer handles nested block/line comments; ordinary and multiline strings; raw ordinary/
 multiline strings with arbitrary pound counts; escapes; interpolation boundaries; backtick
-identifiers; and `+` concatenation. In PebbleCore literal segments, after concatenation and
+identifiers; and `+` concatenation. In ElysiumCore literal segments, after concatenation and
 whitespace/case normalization, it rejects persistence SQL forms: `SELECT ... FROM`,
 `INSERT [OR REPLACE] INTO`, `UPDATE ... SET`, `DELETE FROM`, `CREATE/ALTER/DROP TABLE`, `PRAGMA`,
 `BEGIN [IMMEDIATE]`, `COMMIT`, and `ROLLBACK`. Interpolation is a wildcard separator and cannot hide
@@ -677,13 +677,13 @@ the two fixed halves of a denied form. This SQL-string rule is defense in depth;
 boundary is no SQLite imports/symbols and no SQL-accepting public facade.
 
 In `LegacySaveMigration.swift` the token scan additionally rejects `FileManager`,
-`Data(contentsOf:)`, `contentsOfDirectory`, and `moveItem`. Under PebbleStorage it rejects any import
-of PebbleCore, `DispatchQueue.main`, and `MainActor`.
+`Data(contentsOf:)`, `contentsOfDirectory`, and `moveItem`. Under ElysiumStorage it rejects any import
+of ElysiumCore, `DispatchQueue.main`, and `MainActor`.
 
 The script runs `swift package dump-symbol-graph --minimum-access-level package
---include-spi-symbols --skip-synthesized-members`, canonicalizes PebbleStorage's `public`, `open`,
+--include-spi-symbols --skip-synthesized-members`, canonicalizes ElysiumStorage's `public`, `open`,
 `package`, and SPI symbol kinds/access/declaration fragments, and byte-compares them with reviewed
-`scripts/pebble-storage-api-v1.json`. That checked-in manifest is the complete externally reachable
+`scripts/elysium-storage-api-v1.json`. That checked-in manifest is the complete externally reachable
 API inventory; any addition/removal/signature/access change fails until the manifest and Security
 review change together. Across this inventory, "Core callback/generic escape" includes closure
 parameters, closure returns/properties/typealiases, `@escaping`, `@Sendable` function values,
@@ -692,14 +692,14 @@ outside the exact reviewed primitive/row/facade signature. These are rejected fo
 `package`, and SPI—not only public functions. Private executor closures remain legal.
 
 The sole existing existential-carrier exception is the byte-for-byte frozen
-`PebbleStorageTransactionFailure.primary: any Error` and
-`PebbleStorageStatementFailure.primary: any Error` surface already present in the pinned Phase 2.0A
+`ElysiumStorageTransactionFailure.primary: any Error` and
+`ElysiumStorageStatementFailure.primary: any Error` surface already present in the pinned Phase 2.0A
 symbol graph. The scanner permits those two exact declarations only; it rejects another existential,
 generic, protocol, closure, callback, or carrier surface. Phase 2.0B never constructs either error
 with caller-controlled callbacks and never retains or exposes either through `SaveDBOpenError`.
 
 The security script runs `swift package dump-package`; the scanner parses that JSON and requires
-`PebbleStorage.dependencies == []`, a direct `PebbleCore -> PebbleStorage` dependency, and no reverse
+`ElysiumStorage.dependencies == []`, a direct `ElysiumCore -> ElysiumStorage` dependency, and no reverse
 edge. Fixtures cover every import attribute/scoped form; escaped identifiers; raw/multiline/
 interpolated/concatenated strings; nested comments; symlinked files/directories; omitted/extra source
 inventory; silgen/cdecl/extern foreign symbols; and public/open/package/SPI closure parameters,
@@ -709,12 +709,12 @@ prove package/SPI surfaces are callable before the scanner rejects them. Benign 
 imports, and main publication fail.
 Dedicated fixtures are outside `Sources`.
 
-The frozen API manifest is generated only from the revalidated PebbleStorage SHA above, reviewed as
+The frozen API manifest is generated only from the revalidated ElysiumStorage SHA above, reviewed as
 a semantic diff, and then checked in; the Builder may not make the scanner green by changing the
 storage source or deleting an unexpected symbol. Phase 2.0B also inherits the mandatory Phase 2.0A
 release-artifact verifier unchanged. After every release build used as gate evidence,
-`scripts/verify-pebble-storage-release-surface.sh` runs immediately and must still prove fresh
-`PebbleStorage.o`, `Pebble`, and `pebsmoke` artifacts, the production sentinel, the closed DEBUG
+`scripts/verify-elysium-storage-release-surface.sh` runs immediately and must still prove fresh
+`ElysiumStorage.o`, `Elysium`, and `elysmoke` artifacts, the production sentinel, the closed DEBUG
 denylist, and the one permitted pre-publication `sqlite3_close_v2` import/source call. The new source
 scanner complements that binary gate; neither replaces or weakens the other.
 
@@ -790,15 +790,15 @@ scanner complements that binary gate; neither replaces or weakens the other.
 
 ```bash
 bash scripts/security-scan.sh
-swift test --filter 'SaveDBTests|SaveDBLifecycleTests|LegacySaveMigrationTests|PersistenceLockRankTests|PebbleStorageExecutorTests|PebbleStorageAdversarialTests|LANV6SchemaAuthorizerTests|TemplateTests'
+swift test --filter 'SaveDBTests|SaveDBLifecycleTests|LegacySaveMigrationTests|PersistenceLockRankTests|ElysiumStorageExecutorTests|ElysiumStorageAdversarialTests|LANV6SchemaAuthorizerTests|TemplateTests'
 swift build -c release
-bash scripts/verify-pebble-storage-release-surface.sh
+bash scripts/verify-elysium-storage-release-surface.sh
 swift test
-swift run -c release pebsmoke
+swift run -c release elysmoke
 bash scripts/pipeline.sh
 ```
 
-Report real test/check counts, warning status, deployed `/Applications/Pebble.app` evidence, and
+Report real test/check counts, warning status, deployed `/Applications/Elysium.app` evidence, and
 remember that later LAN/RPG/UI changes stale this phase's deployment proof.
 
 ## Conditions for Builder
@@ -806,9 +806,9 @@ remember that later LAN/RPG/UI changes stale this phase's deployment proof.
 - Phase 2.0A must PASS before this build starts, including exact template caps, narrow reads,
   replace-complete import, durability barrier, physical parent binding, terminal disposal, and the
   release verifier; every frozen dependency hash must match.
-- Do not edit `Package.swift`, PebbleStorage, the release verifier, pipeline, or pre-push hook in
+- Do not edit `Package.swift`, ElysiumStorage, the release verifier, pipeline, or pre-push hook in
   Phase 2.0B. Any required change returns to Architecture and Security plan review.
-- Zero SQLite/SQL/handle/schema knowledge remains in PebbleCore; every mutation uses one named facade.
+- Zero SQLite/SQL/handle/schema knowledge remains in ElysiumCore; every mutation uses one named facade.
 - Valid public Bool/optional/Void/throwing behavior and ordered results remain exact.
 - The seven current core/v5 SQLite tables and all v5 LAN callers remain live with unchanged names,
   schema, formats, and authority semantics; this phase creates no v6 table, v6 schema marker,
@@ -835,6 +835,6 @@ remember that later LAN/RPG/UI changes stale this phase's deployment proof.
   owners explicitly close, and parallel tests never use the production default database.
 - Resume timestamp normalization and clock sampling follow the frozen table exactly.
 - The scanner owns the one-way dependency as a machine-enforced gate.
-- The scanner confines all PebbleStorage and migration-session capability to the exact reviewed
+- The scanner confines all ElysiumStorage and migration-session capability to the exact reviewed
   `Saves.swift`/`LegacySaveMigration.swift` inventories and forbids every re-export.
 - Security code review precedes independent Tester; material implementation changes repeat Security.

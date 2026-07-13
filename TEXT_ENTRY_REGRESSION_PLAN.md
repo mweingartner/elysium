@@ -1,23 +1,23 @@
-# Pebble Text-Entry Regression Plan
+# Elysium Text-Entry Regression Plan
 
 ## Design Mock — shared canvas text entry
 
 ### Audit and evidence
 
-Pebble has one canvas-drawn `TextField` implementation in
-[`UIManagerM.swift`](Sources/Pebble/UIManagerM.swift), used by every shipping `TextField` found in
+Elysium has one canvas-drawn `TextField` implementation in
+[`UIManagerM.swift`](Sources/Elysium/UIManagerM.swift), used by every shipping `TextField` found in
 the source tree:
 
-- [`CreateWorldScreen`](Sources/Pebble/MenusM.swift): World Name and Seed;
-- [`LANLobbyScreen`](Sources/Pebble/LANLobbyScreen.swift): Player, host Code/Port, manual Host,
+- [`CreateWorldScreen`](Sources/Elysium/MenusM.swift): World Name and Seed;
+- [`LANLobbyScreen`](Sources/Elysium/LANLobbyScreen.swift): Player, host Code/Port, manual Host,
   join Port/Code;
-- [`SettingsScreen`](Sources/Pebble/MenusM.swift): Ollama Model;
-- [`AnvilScreen`](Sources/Pebble/ScreensM.swift): item rename;
-- [`CreativeScreen`](Sources/Pebble/ScreensM.swift): item Search;
-- [`TemplateNameScreen`](Sources/Pebble/ScreensM.swift): copied-template Name.
+- [`SettingsScreen`](Sources/Elysium/MenusM.swift): Ollama Model;
+- [`AnvilScreen`](Sources/Elysium/ScreensM.swift): item rename;
+- [`CreativeScreen`](Sources/Elysium/ScreensM.swift): item Search;
+- [`TemplateNameScreen`](Sources/Elysium/ScreensM.swift): copied-template Name.
 
 The complete typed-text inventory is broader than `TextField`. A second source audit of every
-`onChar` owner found three custom editors in [`ScreensM.swift`](Sources/Pebble/ScreensM.swift):
+`onChar` owner found three custom editors in [`ScreensM.swift`](Sources/Elysium/ScreensM.swift):
 
 - `CraftingRecipePopup`/`CraftingRecipeTypeahead`, shared by the survival Inventory 2x2 recipe menu
   and Crafting Table 3x3 recipe menu;
@@ -59,7 +59,7 @@ must therefore inspect the rebuilt installed app rather than infer success from 
 | Creative Search | Empty `Search` placeholder; category tab clears it | Existing shared 64-Character limit | Live filtering; no new Return action |
 | Template Name | Empty `template name` placeholder and initially focused | 48 Characters; existing ASCII name grammar | Return/Numpad Return or Save attempts save and retains visible validation on failure |
 
-There is no established generic Tab traversal for Pebble canvas fields, so this repair does not
+There is no established generic Tab traversal for Elysium canvas fields, so this repair does not
 invent one. Tab must neither insert a tab nor leak to world/hotbar/RPG actions while a text-entry
 screen owns input. Any future focus traversal is a separate, screen-wide keyboard-navigation design.
 
@@ -127,7 +127,7 @@ implicit active state owns the screen.
      caret movement, Backspace, limits, and relayout must never split a grapheme or misindex.
    - Fields whose existing domain is ASCII-only still reject unsupported values at their existing
      validation boundary. Domain-permitted Unicode retains exact model/accessibility text. A glyph
-     absent from Pebble's bitmap font consumes one fallback cell, not one cell per scalar, and never
+     absent from Elysium's bitmap font consumes one fallback cell, not one cell per scalar, and never
      corrupts the stored value; adding normalization or expanding a domain grammar requires separate
      review.
    - Recipe suffix truncation, Sign width rejection, Chat append/history, custom Backspace/Delete,
@@ -166,7 +166,7 @@ implicit active state owns the screen.
    - Keyboard-only and VoiceOver focus must not activate a neighboring button or world action.
      Validation/status copy is announced without exposing hidden paths, secrets, or unrelated field
      values.
-   - Final Design Sign-off uses a freshly built and installed `/Applications/Pebble.app`. On every
+   - Final Design Sign-off uses a freshly built and installed `/Applications/Elysium.app`. On every
      `TextField` surface above, exercise click focus, middle insertion, Left/Right, Backspace,
      exact-limit and one-over input, Shift/Option characters, Command-V, Escape/loss of focus, and
      resize. Capture focused/unfocused, empty/placeholder, filled, horizontally scrolled,
@@ -286,7 +286,7 @@ In `AppInputRouterM.swift`, use `AppKeyEventSource` instead of discarding it:
 3. An unmapped non-text key fails closed at an open screen. A text-producing key may not be dropped
    merely because no gameplay terminal exists: retain an adapter-only text path for valid
    `keyDown.characters` after shortcut classification, without manufacturing a bindable
-   `PebbleTerminalKey` or widening Core's key grammar.
+   `ElysiumTerminalKey` or widening Core's key grammar.
 
 In `main.swift`, `pasteText` asks only the current top screen whether it owns text, filters the
 pasteboard once, and calls that screen's `pasteText` once. `pasteOrPlaceTemplate` keeps current
@@ -298,7 +298,7 @@ screen does neither. Do not add Select All, Copy, Cut, marked-text/IME compositi
 
 - `CraftingRecipePopup` exposes `isOpen`. Inventory and Crafting override the three ownership hooks
   only while that popup is open (or delegate to a genuinely focused base field). In
-  `CraftingRecipeTypeahead.append` (`PebbleCore/Systems/Crafting.swift`), filter by whole Character,
+  `CraftingRecipeTypeahead.append` (`ElysiumCore/Systems/Crafting.swift`), filter by whole Character,
   append the proposal, and keep the newest 48 Characters exactly as today. Backspace/Delete,
   highlight, wheel, Return, selection, and close-clear behavior are unchanged.
 - `SignScreen` always owns text while topmost. Typed input uses one proposed Character; paste walks
@@ -313,7 +313,7 @@ screen does neither. Do not add Select All, Copy, Cut, marked-text/IME compositi
 
 ### 4. Accessibility integration
 
-Add `Sources/Pebble/TextEntryAccessibilityM.swift`, separate from the RPG activation bridge. Define
+Add `Sources/Elysium/TextEntryAccessibilityM.swift`, separate from the RPG activation bridge. Define
 an immutable App-local descriptor containing stable ID, role, label, exact value, placeholder/help,
 frame, enabled/focused state, and insertion Character offset. Base `Screen` derives descriptors from
 visible fields. Inventory/Crafting publish one search-field descriptor only while Recipe is open;
@@ -351,11 +351,11 @@ and Paste support without promising IME, selection, or generic Tab traversal.
   notifications, hidden invalidation, custom roles, and coexistence with the RPG bridge.
 - Run affected input, controls, crafting, screen, LAN sanitizer, settings, template, RPG routing, and
   accessibility suites; then security scan, warning-free release, release verifier, full XCTest,
-  457-check `pebsmoke`, and `scripts/pipeline.sh`. App/Core source changes require reviewed
-  `PebbleCore.o`, Pebble, pebsmoke, and verifier pins; storage API/manifests and PebbleStorage must not
+  457-check `elysmoke`, and `scripts/pipeline.sh`. App/Core source changes require reviewed
+  `ElysiumCore.o`, Elysium, elysmoke, and verifier pins; storage API/manifests and ElysiumStorage must not
   change.
 
-Final Design Sign-off and Deploy use the exact signed `/Applications/Pebble.app`, not a release-only
+Final Design Sign-off and Deploy use the exact signed `/Applications/Elysium.app`, not a release-only
 probe seam or the RPG AppKit harness. Execute the complete amended Design Mock matrix at 360x224,
 520x330, and 700x420 in Standard and High Contrast. At minimum retain screenshots/logs proving:
 exact New World name/seed survives focus, middle edit, horizontal scrolling, resize, and creates the
@@ -377,7 +377,7 @@ crash reports. Any post-proof code change invalidates this evidence.
 | Resize transfers text to wrong field | Stable-ID duplicate/missing/reorder tests |
 | Custom editor behavior is accidentally normalized | Recipe suffix, Sign width, Chat/history/completion tests |
 | Hidden accessibility node mutates replacement screen | Invalidation/identity/focus tests and VoiceOver proof |
-| Existing RPG/world routing regresses | App router, RPG routing, controls, full suite, pebsmoke |
+| Existing RPG/world routing regresses | App router, RPG routing, controls, full suite, elysmoke |
 | Uncapped Chat paste is unacceptable | Explicit independent Security-plan verdict; no Builder policy invention |
 
 ### Dependency order and Conditions for Builder
@@ -427,7 +427,7 @@ The following corrections are binding revisions to the Architecture:
    shadow, placeholder, nor caret may escape the field. Standard and High Contrast keep identical
    advances, slices, caret positions, and control geometry.
 3. **App-local behavior needs executable tests, not source assertions alone.** Add a test-only target
-   dependency that can `@testable import Pebble` and directly exercise the pure field/filter/
+   dependency that can `@testable import Elysium` and directly exercise the pure field/filter/
    presentation and accessibility-descriptor kernels. Prove that this imports and runs without
    launching the app before relying on it. If SwiftPM cannot test the executable module, return to
    Architecture for a test-only module split; do not publish a new Core text API or accept regex
@@ -447,7 +447,7 @@ The following corrections are binding revisions to the Architecture:
    active owner exactly once. A non-owner open screen still fails closed to world actions.
 6. **Accessibility coordinates and ranges use platform units.** Cache elements by screen identity
    plus stable descriptor ID. Convert Character insertion boundaries to UTF-16 `NSRange` values;
-   Sign's joined-line offset includes preceding UTF-16 line lengths and separators. Convert Pebble's
+   Sign's joined-line offset includes preceding UTF-16 line lengths and separators. Convert Elysium's
    top-left logical frames through GUI scale, view/window coordinates, backing scale, flipped Y, and
    screen origin before publishing macOS screen-space frames. Recipe's empty implicit search owner
    receives a truthful nonzero popup-region frame but does not claim a visual caret that is not
@@ -531,11 +531,11 @@ isolation from test seams.
   accidentally force production visibility, launch side effects, or test-only hooks into the release
   graph. Keep the dependency exclusively under `.testTarget`; no product or non-test target may
   depend on the harness, and no source symbol may become `public`, acquire a release environment
-  trigger, or weaken access control solely for tests. The gate must prove `@testable import Pebble`
+  trigger, or weaken access control solely for tests. The gate must prove `@testable import Elysium`
   runs without application launch/global side effects, inspect the release package graph, and scan
   the signed release executable (`nm`/`strings` plus source scan) for named test hooks and test-only
   dependencies. If direct executable import cannot meet those constraints, return to Architecture
-  for an internal App-local support module linked normally by Pebble and testable without any release
+  for an internal App-local support module linked normally by Elysium and testable without any release
   probe API.
 
 ### Review boundary and verdict
@@ -663,8 +663,8 @@ Any executable-import harness is referenced exclusively by a `.testTarget`. No p
 target may depend on it; no symbol becomes public, gains a release environment trigger, performs
 global/app launch side effects, or weakens access solely for tests. Verification must inspect the
 package graph and signed release `nm`/`strings` plus source surface for named hooks/dependencies. If
-`@testable import Pebble` cannot satisfy this, Architecture must use an internal App-local support
-module linked normally by Pebble and tests, with no release probe API.
+`@testable import Elysium` cannot satisfy this, Architecture must use an internal App-local support
+module linked normally by Elysium and tests, with no release probe API.
 
 The installed matrix now adds, through ordinary `GameView` input only:
 
@@ -695,49 +695,49 @@ value mutation, or rely on source assertions/direct executable import for behavi
 
 An isolated SwiftPM 6.0 probe was run under the current toolchain. A `.testTarget` depending on a
 simple `@main` executable successfully used `@testable import` without calling `main` (1 XCTest,
-0 failures). Repeating the probe with top-level `main.swift` code, matching Pebble's bootstrap
+0 failures). Repeating the probe with top-level `main.swift` code, matching Elysium's bootstrap
 shape, produced XCTest signal 11; its side-effect marker remained absent. Direct
-`@testable import Pebble` is therefore rejected for this repository.
+`@testable import Elysium` is therefore rejected for this repository.
 
-Add a normal, non-product `PebbleTextInput` target at `Sources/PebbleTextInput`, with no dependency
-on PebbleCore, AppKit, or storage. `PebbleCore` and `Pebble` depend on it normally;
-`PebbleTextInputTests` depends only on it, and existing `PebbleCoreTests` may depend on it for recipe
+Add a normal, non-product `ElysiumTextInput` target at `Sources/ElysiumTextInput`, with no dependency
+on ElysiumCore, AppKit, or storage. `ElysiumCore` and `Elysium` depend on it normally;
+`ElysiumTextInputTests` depends only on it, and existing `ElysiumCoreTests` may depend on it for recipe
 integration. Cross-module declarations use Swift `package` access, never `public` solely for tests.
 The release links the same pure kernels tested in debug; there is no environment trigger, probe API,
 test callback, or alternate implementation.
 
 ### Closed pure API
 
-`PebbleTextInput` owns these package-scoped values:
+`ElysiumTextInput` owns these package-scoped values:
 
 ```swift
-package struct PebbleTextLimit: Equatable, Sendable {
+package struct ElysiumTextLimit: Equatable, Sendable {
     let maximumCharacters: Int
     let maximumUTF8Bytes: Int
 }
-package struct PebbleValidatedCharacter: Equatable, Sendable {
+package struct ElysiumValidatedCharacter: Equatable, Sendable {
     let value: Character
     let scalarCount: Int
     let utf8ByteCount: Int
 }
-package enum PebbleTextValidationResult: Equatable, Sendable {
-    case accepted(PebbleValidatedCharacter)
+package enum ElysiumTextValidationResult: Equatable, Sendable {
+    case accepted(ElysiumValidatedCharacter)
     case rejected
 }
-package func pebbleValidateTextCharacter(_ value: Character) -> PebbleTextValidationResult
-package struct PebbleBoundedTextBuffer: Equatable, Sendable {
+package func elysiumValidateTextCharacter(_ value: Character) -> ElysiumTextValidationResult
+package struct ElysiumBoundedTextBuffer: Equatable, Sendable {
     private(set) var text: String
     private(set) var characterCount: Int
     private(set) var utf8ByteCount: Int
-    mutating func replaceAtomically(_ proposal: String, limit: PebbleTextLimit) -> Bool
+    mutating func replaceAtomically(_ proposal: String, limit: ElysiumTextLimit) -> Bool
     mutating func insertAtomically(_ proposal: String, atCharacterOffset: Int,
-                                   limit: PebbleTextLimit) -> Bool
+                                   limit: ElysiumTextLimit) -> Bool
     mutating func deleteBackward(atCharacterOffset: inout Int) -> Bool
 }
-package struct PebbleTextPresentationClock: Equatable, Sendable {
+package struct ElysiumTextPresentationClock: Equatable, Sendable {
     mutating func next() -> UInt64?
 }
-package struct PebbleTextOwnerToken: Equatable, Sendable {
+package struct ElysiumTextOwnerToken: Equatable, Sendable {
     let screenIdentity: UInt64
     let presentationGeneration: UInt64
     let descriptorID: String
@@ -760,7 +760,7 @@ caller-settable. Limits are: each TextField `(existing Character limit, 4_096 by
 
 ### Owner-specific bounded flow
 
-- `TextField` wraps `PebbleBoundedTextBuffer`; typing and Paste use atomic insert, so a one-over
+- `TextField` wraps `ElysiumBoundedTextBuffer`; typing and Paste use atomic insert, so a one-over
   proposal changes nothing. Programmatic `replaceText` uses the same limit before changing caret,
   focus, viewport, persistence, or Accessibility.
 - `ChatScreen` validates empty or `/` prefill before becoming an owner. Type, Paste, history recall,
@@ -785,13 +785,13 @@ caller-settable. Limits are: each TextField `(existing Character limit, 4_096 by
 ### Paste privacy and generation
 
 `UIManager` assigns each `Screen` a checked monotonic `screenIdentity` on open and advances one
-global `PebbleTextPresentationClock` on open, every `initScreen` rebuild, and resize. All text-screen
+global `ElysiumTextPresentationClock` on open, every `initScreen` rebuild, and resize. All text-screen
 rebuilds go through one `UIManager.rebuild(_:game:)` API; source tests reject direct text-owner
 `initScreen` calls elsewhere. Overflow latches async Paste/Accessibility unavailable and invalidates
 their nodes; synchronous current-screen keyboard handling remains screen-exclusive.
 
 `UIManager.captureTextOwner()` returns a main-actor capture holding a weak screen plus
-`PebbleTextOwnerToken`; it succeeds only for the visible, enabled top owner. Explicit Paste follows
+`ElysiumTextOwnerToken`; it succeeds only for the visible, enabled top owner. Explicit Paste follows
 this exact order:
 
 1. Capture/revalidate the text owner before touching `NSPasteboard`. If present, it takes precedence.
@@ -829,7 +829,7 @@ user action.
 
 ### Tests, graph proof, and order
 
-`PebbleTextInputTests` directly imports `@testable PebbleTextInput` and covers: exact/one-over
+`ElysiumTextInputTests` directly imports `@testable ElysiumTextInput` and covers: exact/one-over
 character and byte caps; 64/65 scalars; 256/257 bytes; decomposed accents; non-Latin; bounded emoji
 ZWJ; standalone ZWJ; repeated marks; every bidi/private-use/noncharacter/unassigned/separator class;
 overflow arithmetic; atomic insert/replace; Recipe rolling suffix; Sign streaming prefix helper;
@@ -845,18 +845,18 @@ history, all TextField/Recipe/Sign byte boundaries, statuses/announcements, raw 
 same-ID close/reopen through ordinary `GameView` only.
 
 Before Build, update `Package.swift` in this dependency order:
-`PebbleTextInput -> PebbleCore -> Pebble`, with test targets depending downward only. After Build:
+`ElysiumTextInput -> ElysiumCore -> Elysium`, with test targets depending downward only. After Build:
 
-- `swift package describe --type json` must show no product for `PebbleTextInput`, no non-test
-  dependency on a test target, and no test dependency on executable `Pebble`;
+- `swift package describe --type json` must show no product for `ElysiumTextInput`, no non-test
+  dependency on a test target, and no test dependency on executable `Elysium`;
 - source scan rejects `XCTest`, `@testable`, test fixture names, or test environment switches under
   `Sources/`;
 - `otool -L`, `nm`, and `strings` over the fresh release and signed installed executable reject
-  XCTest/Testing linkage and exact new test/probe names (`PebbleTextInputTests`,
+  XCTest/Testing linkage and exact new test/probe names (`ElysiumTextInputTests`,
   `probeLaunchMarker`, `TextInputTestHook`, `InjectedPasteboard`);
 - release verifier freshness/hashes cover the new normal object dependency plus changed Core,
-  Pebble, and pebsmoke; PebbleStorage/API manifests remain exact;
-- focused suites precede security scan, warning-free release, full XCTest, 457-check `pebsmoke`,
+  Elysium, and elysmoke; ElysiumStorage/API manifests remain exact;
+- focused suites precede security scan, warning-free release, full XCTest, 457-check `elysmoke`,
   pipeline, install, installed matrix, and final pipeline renewal after any change.
 
 Implementation order is: pure target/limits/validator -> direct pure tests -> TextField/Recipe/Sign/
@@ -870,7 +870,7 @@ The Design Security Revision's finite caps and feedback supersede every older co
 condition. Builder must use the shared validator before concatenation/measurement/wrapping/
 completion/history/submission; preserve accepted bytes; stop Paste at the first invalid Character;
 perform predecode clipboard and postread generation checks; keep Accessibility read-only; and use
-the normal `PebbleTextInput` module with package access. It may not import the executable in tests,
+the normal `ElysiumTextInput` module with package access. It may not import the executable in tests,
 expose a public/Core text API, add a release probe, poll/log/cache clipboard data, add selection/IME,
 or bypass existing domain validation, screen exclusivity, RPG routing, or installed proof.
 
@@ -884,7 +884,7 @@ Design Review and independent Security-plan PASS of this revision.
 Reviewed the complete Design and Architecture Security Revisions through SHA-256
 `f77a44d6da6dff0f4c8b38b0eeb39cf1c180a0b0805b8d4bcc4b61f2f994225d`. The finite limits,
 single-owner model, bounded streaming, read-only Accessibility, and installed-app requirement
-preserve Pebble's existing interaction language. The following clarifications are binding so the
+preserve Elysium's existing interaction language. The following clarifications are binding so the
 security behavior remains truthful and usable rather than merely bounded:
 
 1. **Atomic and prefix behavior are owner- and cause-specific.** TextField and Chat typing,
@@ -941,7 +941,7 @@ security behavior remains truthful and usable rather than merely bounded:
    clipboard-to-world leakage. Evidence records hashes and counts, never clipboard contents.
 
 No infeasible new interaction is introduced: selection, IME, generic Tab traversal, multiline
-Paste, and direct Accessibility replacement remain out of scope. The normal `PebbleTextInput`
+Paste, and direct Accessibility replacement remain out of scope. The normal `ElysiumTextInput`
 module is an implementation/test topology and adds no product-visible surface.
 
 **Renewed Design Review verdict: PASS.** With the seven corrections above binding, the revised
@@ -1085,16 +1085,16 @@ typed host-authoritative path below rather than route Sign text through inventor
 
 ### Four-line Sign repair: API, ownership, and data flow
 
-Add these package-visible value types and pure functions to the normal `PebbleTextInput` target:
+Add these package-visible value types and pure functions to the normal `ElysiumTextInput` target:
 
-- `PebbleSignLine` owns one bounded `String` and exposes Character iteration, UTF-8 byte count, and
+- `ElysiumSignLine` owns one bounded `String` and exposes Character iteration, UTF-8 byte count, and
   replacement only through the approved streaming validator.
-- `PebbleFourSignLines` stores four named slots (`first` through `fourth`), exposes access by a
+- `ElysiumFourSignLines` stores four named slots (`first` through `fourth`), exposes access by a
   `SignLineIndex: CaseIterable` enum, and emits an exact four-element array only for serialization.
   It has no integer subscript and cannot represent nil, fewer, or extra lines.
-- `PebbleSignRepairResult { lines: PebbleFourSignLines, repaired: Bool }` is the only result accepted
+- `ElysiumSignRepairResult { lines: ElysiumFourSignLines, repaired: Bool }` is the only result accepted
   by `SignScreen` initialization.
-- `pebbleRepairSignLines(_:widthStep:)` accepts optional `[String]`, obtains an iterator without
+- `elysiumRepairSignLines(_:widthStep:)` accepts optional `[String]`, obtains an iterator without
   reading `count`, consumes no more than five entries (four inputs plus one excess probe), and pads
   absent entries. For each of the first four entries it iterates whole Characters, applies the
   approved scalar policy, checks overflow-safe prospective UTF-8 bytes `<= 4096`, then asks the
@@ -1109,7 +1109,7 @@ advance rules must be the same implementation used by `textWidth`/`drawText`, in
 state; a parallel approximation is forbidden. `SignScreen` captures the raw optional source but,
 in its first `initScreen`, performs repair before registration, layout, draw, AX descriptor creation,
 or input ownership. It immediately discards the raw reference and thereafter stores only
-`PebbleFourSignLines`. Drawing and editing iterate `SignLineIndex.allCases`; no `lines[i]`, unchecked
+`ElysiumFourSignLines`. Drawing and editing iterate `SignLineIndex.allCases`; no `lines[i]`, unchecked
 cardinality assertion, force unwrap, or pre-repair measurement/publication remains.
 
 The repair sources and ownership rules are exact:
@@ -1181,7 +1181,7 @@ read-only; AX focus never edits text.
 
 ### Revised dependency order and verification map
 
-1. Implement/test the pure scalar validator, `PebbleFourSignLines`, iterator-bounded repair, and
+1. Implement/test the pure scalar validator, `ElysiumFourSignLines`, iterator-bounded repair, and
    streaming production width cursor equivalence. No UI or network code proceeds while these fail.
 2. Replace `SignScreen` raw-array state and add local tokenized atomic commit; prove no source
    mutation before successful close and persistence after reopen.
@@ -1202,7 +1202,7 @@ duplicate IDs, disabled/hidden/non-finite descriptors, close/reopen and resize d
 generation overflow, implicit owners, notification order/count, immediate bounded typing, and zero
 button/world mutation. Source scans reject integer Sign-line indexing, raw `BlockEntityData.lines`
 publication, Sign use of container intents, cached focus authorizations, and notification before
-postvalidation. The full warning-free release build, XCTest, 457-check `pebsmoke`, security scan,
+postvalidation. The full warning-free release build, XCTest, 457-check `elysmoke`, security scan,
 pipeline, installed-app Sign/VoiceOver proof, and installed LAN two-machine proof remain mandatory.
 
 **Architecture Security Revision 2 verdict: PASS.** The two Security findings now have exact bounded
@@ -1350,7 +1350,7 @@ in this scoped text-entry repair.
 - Single-player and the authoritative LAN host retain the full repaired four-line Sign editor.
   Typing, Paste, width/byte limits, `Sign text repaired`, `Line is full`, synchronous tokenized
   commit, template-source isolation, and local/host reopen behavior remain exactly as approved. A
-  successful host edit reaches guests only through Pebble's existing authoritative world/block-
+  successful host edit reaches guests only through Elysium's existing authoritative world/block-
   entity replication; this work adds no Sign-edit wire kind or client write capability.
 - A LAN guest may open a Sign only as a bounded read-only viewer. The instruction row always reads
   exactly `Only the host can edit signs.` It draws the safely repaired four-line snapshot, with no
@@ -1427,7 +1427,7 @@ thread, `SignScreen.initScreen` samples that property into a non-upgradeable
 `SignAccessMode.authoritative(SignCommitToken) | .guestViewer` only after performing the approved
 four-line streaming repair and before creating controls, descriptors, or input ownership.
 
-In `.authoritative`, the local/host editor retains the typed `PebbleFourSignLines`, caret, bounded
+In `.authoritative`, the local/host editor retains the typed `ElysiumFourSignLines`, caret, bounded
 typing/Paste, local repair/capacity status, and synchronous `GameCore.commitSignEdit`. Its commit
 token now contains only authoritative world/session generation, dimension/position, target Sign
 block identity, and expected block-entity identity/absence; all proposed LAN request/connection/
@@ -1533,10 +1533,10 @@ viewer gate and local tokenized commit; optional Sign data on existing one-way r
 one-shot AX transaction; Security (code); Design sign-off; focused/property/fuzz and full tests; then
 installed local, VoiceOver, and two-machine replication proof. Delete/supersede the Revision 2 LAN
 request/result dependency and all of its correlation, replay, negotiation, pending-state, and codec
-tests. The warning-free release build, XCTest, 457-check `pebsmoke`, security scan, pipeline, and
+tests. The warning-free release build, XCTest, 457-check `elysmoke`, security scan, pipeline, and
 installed deploy proof remain mandatory after the final code change.
 
-**Architecture Security Revision 3 verdict: PASS.** Sign mutation is now confined to Pebble's
+**Architecture Security Revision 3 verdict: PASS.** Sign mutation is now confined to Elysium's
 existing local/host authority, guests have a fail-closed non-owning viewer with zero outbound write
 surface, ordinary one-way replication proves convergence, and UIManager alone can execute one
 non-reentrant, one-shot, postvalidated AX focus transaction. Renewed Design Review and Security
@@ -1676,7 +1676,7 @@ placed-template source isolation, and the same full editor on an authoritative h
 open the current existing mirrored state, verify the exact authority status and static AX value,
 attempt typing/Paste/Return with no owner/write/new outbound packet, close, and reopen safely. Source,
 binary, protocol-golden, and captured-frame comparisons must prove this change adds no LAN field,
-kind, capability, scheduler path, or Sign-specific traffic. They do not promise that current Pebble
+kind, capability, scheduler path, or Sign-specific traffic. They do not promise that current Elysium
 replication transports host Sign edits.
 
 ### Focus becomes ready only after its notification completes
@@ -1759,7 +1759,7 @@ replacement closes fail-closed. Ordinary mirror changes while the viewer remains
 
 The authoritative editor retains Revision 3's local `SignCommitToken`, exact close/retry/discard
 semantics, save/reopen proof, and placed-template isolation. Its successful LAN-host mutation may
-have whatever behavior Pebble's current unmodified replication already provides; this scope neither
+have whatever behavior Elysium's current unmodified replication already provides; this scope neither
 depends on nor asserts Sign transport. Tests and product copy make no guest freshness/convergence
 promise.
 
@@ -1812,8 +1812,8 @@ capability and both postchecks fail closed. Guest Sign's static descriptor is ne
 
 ### Files, dependency order, and evidence amendment
 
-Implementation scope is limited to the normal `PebbleTextInput` support target and its tests,
-`Sources/Pebble/ScreensM.swift` for Sign editor/viewer state, UIManager/GameView text-owner,
+Implementation scope is limited to the normal `ElysiumTextInput` support target and its tests,
+`Sources/Elysium/ScreensM.swift` for Sign editor/viewer state, UIManager/GameView text-owner,
 Accessibility, key, and Paste routing files for capability/readiness ordering, plus focused UI test
 seams and durable text-entry docs. No Sign-related Core networking, transport, codec, replication,
 scheduler, or protocol test file may change.
@@ -1838,7 +1838,7 @@ first and second postcheck failures; cleanup; ordinary resize renewal and resize
 close/reopen, role change, replacement and overflow; exact notification/AppKit counts; and immediate
 bounded ingress only after the action returns. Installed VoiceOver proof covers observable focus,
 idempotence, resize renewal, immediate ordinary typing/Paste, and guest static navigation. The
-warning-free release build, XCTest, 457-check `pebsmoke`, security scan, pipeline, and installed app
+warning-free release build, XCTest, 457-check `elysmoke`, security scan, pipeline, and installed app
 proof remain mandatory after the final code change.
 
 **Architecture Security Revision 4 verdict: PASS.** The scoped implementation now has no Sign LAN
@@ -2102,7 +2102,7 @@ and failure at each validation phase. Forced key and Command-V callbacks from ow
 every notification must prove zero text, clipboard-read, template, command, commit, or world leakage
 before return. Installed proof repeats the observable click/open/slash/reveal/reactivation/resize
 matrix and immediate ordinary typing/Paste after success. The warning-free release build, XCTest,
-457-check `pebsmoke`, security scan, pipeline, and installed app proof remain mandatory.
+457-check `elysmoke`, security scan, pipeline, and installed app proof remain mandatory.
 
 **Architecture Security Revision 5 verdict: PASS.** Every ordinary shipping owner now obtains the
 same exact-generation, notification-ordered UIManager readiness without duplicating its initiating
@@ -2180,7 +2180,7 @@ gates.
 
 ### Findings
 
-- **[HIGH] `Sources/Pebble/UIManagerM.swift:236-299,596-617`; `Sources/Pebble/AppInputRouterM.swift:33-40,151-170`; `Sources/Pebble/TextEntryAccessibilityM.swift:75-101` ->** The approved readiness boundary is
+- **[HIGH] `Sources/Elysium/UIManagerM.swift:236-299,596-617`; `Sources/Elysium/AppInputRouterM.swift:33-40,151-170`; `Sources/Elysium/TextEntryAccessibilityM.swift:75-101` ->** The approved readiness boundary is
   absent. There is no `TextIngressReadiness`, ordinary activation transaction, one-shot
   `TextFocusAuthorization`, focusing/reentrancy state, or notification-ordered double postcheck.
   Mouse and AX call raw `focusTextDescriptor(id:)`/set `focused` directly; owner capture trusts only a
@@ -2192,7 +2192,7 @@ gates.
   before clipboard access, establish truthful state and exact `GameView` first responder, notify,
   postvalidate again, then install the exact screen/generation/descriptor tuple. Remove raw ID focus
   mutation and require readiness in owner capture and every mapped/unmapped insertion path.
-- **[HIGH] `Sources/PebbleTextInput/PebbleTextInput.swift:122-129`; `Sources/Pebble/AppInputRouterM.swift:33-40,166-170` ->** `validPrefix` materializes the entire valid prefix with no destination cap,
+- **[HIGH] `Sources/ElysiumTextInput/ElysiumTextInput.swift:122-129`; `Sources/Elysium/AppInputRouterM.swift:33-40,166-170` ->** `validPrefix` materializes the entire valid prefix with no destination cap,
   and mapped input computes it twice. Paste is raw-capped at 65,536 bytes, but untrusted
   `NSEvent.characters` has no corresponding bound, so an input source can force duplicate large
   allocations/scans before TextField/Chat rejects the result or Sign/Recipe reaches its prefix/suffix
@@ -2201,7 +2201,7 @@ gates.
   stream only their bounded prefix/suffix. Validate once, only after readiness, without constructing
   an over-cap filtered `String`. Add adversarial very-large mapped/unmapped `characters`, first-invalid,
   and exact/one-over allocation/work tests.
-- **[HIGH] `Sources/Pebble/ScreensM.swift:2070-2087,2098-2109,2216-2229` ->** Sign commit has no immutable
+- **[HIGH] `Sources/Elysium/ScreensM.swift:2070-2087,2098-2109,2216-2229` ->** Sign commit has no immutable
   world/session generation, dimension, expected Sign block identity, or serial commit API; it checks
   only current block-entity object identity/absence and mutates the entity directly. In the nil-entity
   case, replacing/loading the world while the screen is open can still satisfy `current == nil` and
@@ -2211,7 +2211,7 @@ gates.
   entity identity/absence on the serial world/save boundary, atomically writes exactly four bounded
   lines, marks persistence dirty, and otherwise changes nothing. Test world load/replacement,
   dimension/target/entity replacement, authority loss, nil-entity ABA, retry/discard, and reopen.
-- **[MEDIUM] `Sources/Pebble/TextEntryAccessibilityM.swift:19-40,52-123` ->** The bridge does not
+- **[MEDIUM] `Sources/Elysium/TextEntryAccessibilityM.swift:19-40,52-123` ->** The bridge does not
   explicitly expose values as non-settable, publishes `selectedTextRange` while claiming no selection
   API, never clamps the converted frame to the current macOS screen, and posts only a focus
   notification—no generation-bound layout/value/status notifications exist for open, edit, repair,
@@ -2221,7 +2221,7 @@ gates.
   announcements only after the readiness/generation postcheck. Add retained-element same-ID reopen,
   non-BMP/separator range, off-screen/nonfinite frame, read-only mutation attempt, repair/limit status,
   resize and notification-order tests.
-- **[MEDIUM] `Sources/PebbleTextInput/PebbleTextInput.swift:222-247,255-281`; `Sources/Pebble/ScreensM.swift:2087-2089,2135-2153` ->** `PebbleSignLine(text:)` is package-visible and accepts arbitrary
+- **[MEDIUM] `Sources/ElysiumTextInput/ElysiumTextInput.swift:222-247,255-281`; `Sources/Elysium/ScreensM.swift:2087-2089,2135-2153` ->** `ElysiumSignLine(text:)` is package-visible and accepts arbitrary
   unvalidated/unbounded strings, so the claimed unrepresentable-invalid four-line model is not
   enforced. Repair also receives a stateless width closure, and the app supplies the sum of
   `textWidth(String(character))`; that is not the renderer's stateful resource-pack/formatting cursor
@@ -2230,7 +2230,7 @@ gates.
   cursor shared with draw/measurement that carries formatting state and never receives an over-byte
   candidate. Test formatting pairs, fractional/pack advances, fallback graphemes, invalid raw
   construction, and width/byte boundaries.
-- **[HIGH] `Tests/PebbleCoreTests/TextEntrySourceTests.swift:14-97`; `Tests/PebbleTextInputTests/PebbleTextInputTests.swift:4-101`; `scripts/security-scan.sh:10-18`; `scripts/verify-pebble-storage-release-surface.sh:203-227` ->** The verifier does not verify the
+- **[HIGH] `Tests/ElysiumCoreTests/TextEntrySourceTests.swift:14-97`; `Tests/ElysiumTextInputTests/ElysiumTextInputTests.swift:4-101`; `scripts/security-scan.sh:10-18`; `scripts/verify-elysium-storage-release-surface.sh:203-227` ->** The verifier does not verify the
   verifier-critical behavior. The focused command passed 19 tests, but the seven app tests are string
   presence/absence checks and neither suite instantiates UIManager/router/AX focus/Paste/Sign commit.
   Consequently `scripts/security-scan.sh` and the pinned release verifier both passed even though the
@@ -2244,13 +2244,13 @@ gates.
 ### Evidence and review boundary
 
 Fresh evidence: the selected text-entry command executed **19 tests, 0 failures**; `bash
-scripts/security-scan.sh` exited 0; `bash scripts/verify-pebble-storage-release-surface.sh` exited 0;
-and `swift package describe --type json` showed only the `Pebble` and `pebsmoke` products, with
-`PebbleTextInput` remaining a normal non-product target. Those green results establish the pure
+scripts/security-scan.sh` exited 0; `bash scripts/verify-elysium-storage-release-surface.sh` exited 0;
+and `swift package describe --type json` showed only the `Elysium` and `elysmoke` products, with
+`ElysiumTextInput` remaining a normal non-product target. Those green results establish the pure
 validator/package/artifact facts only; the findings above demonstrate that they do not establish the
 approved App behavior.
 
-Reviewed: `Package.swift`, `PebbleTextInput`, its tests, TextField/Screen/UIManager ownership and
+Reviewed: `Package.swift`, `ElysiumTextInput`, its tests, TextField/Screen/UIManager ownership and
 resize, source-aware App router, AppDelegate Paste/activation, text Accessibility bridge, every custom
 Recipe/Sign/Chat owner, Crafting typeahead, field call sites/IDs, text-entry source tests, security scan,
 release verifier pins, README text-entry claims, and source/binary absence of Sign-specific LAN symbols.
@@ -2259,7 +2259,7 @@ postread screen-generation check, Chat/history limits, guest Sign read-only guar
 Paste precedence, normal non-product module topology, and zero Sign-specific LAN symbols.
 
 Not reviewed or approved: unrelated preexisting Track A/B RPG, storage, LAN V6, controller, font, or
-other dirty-tree changes; full XCTest/pipeline/pebsmoke; runtime/VoiceOver/installed UI; signing,
+other dirty-tree changes; full XCTest/pipeline/elysmoke; runtime/VoiceOver/installed UI; signing,
 deployment, git publication, or GitHub state. Downstream Design Sign-off/Test/Deploy evidence is
 invalid until Security (code) passes after fixes.
 
@@ -2274,7 +2274,7 @@ Design Sign-off and Test.
 
 Implemented the approved text-entry repair in dependency order without installing, deploying,
 committing, pushing, or editing any Sign-specific LAN wire/schema/codec/transport/replication/
-scheduler source. The implementation adds the normal non-product `PebbleTextInput` target; bounded
+scheduler source. The implementation adds the normal non-product `ElysiumTextInput` target; bounded
 Unicode validation/buffers, presentation geometry, and four-line Sign repair; stable-ID shared
 fields; the source-aware AppKit callback split; bounded owner-captured Paste; Recipe/Sign/Chat
 adapters; the generation-bound read-only text Accessibility bridge merged with RPG Accessibility;
@@ -2283,7 +2283,7 @@ release artifact verification.
 
 Evidence, in execution order:
 
-1. `swift test --filter PebbleTextInputTests` — **10/10 passed**, 0 failures. Direct pure coverage
+1. `swift test --filter ElysiumTextInputTests` — **10/10 passed**, 0 failures. Direct pure coverage
    includes atomic Character/UTF-8 caps, grapheme Backspace, Unicode accepted/rejected classes,
    scalar boundaries, valid-prefix stopping, presentation/click geometry, four-line repair, and
    generation exhaustion.
@@ -2291,30 +2291,30 @@ Evidence, in execution order:
    — **34/34 passed**, 0 failures. This covers callback ownership, stable field IDs, Paste precedence,
    custom owners, Recipe rolling bounds, package isolation, zero Sign-LAN symbols, RPG bridge
    coexistence, protected shortcut routing, and existing Accessibility contracts.
-3. `swift package describe --type json` — PASS: only `Pebble` and `pebsmoke` are products;
-   `PebbleTextInput` is a normal library target but not a product; no test target depends on the
-   `Pebble` executable; production dependencies are exactly
-   `PebbleTextInput -> PebbleCore -> Pebble` with PebbleCore retaining PebbleStorage.
+3. `swift package describe --type json` — PASS: only `Elysium` and `elysmoke` are products;
+   `ElysiumTextInput` is a normal library target but not a product; no test target depends on the
+   `Elysium` executable; production dependencies are exactly
+   `ElysiumTextInput -> ElysiumCore -> Elysium` with ElysiumCore retaining ElysiumStorage.
 4. `bash scripts/security-scan.sh` — **PASS**, including the SQLite boundary scanner over **127
    production Swift files**, production test-symbol denial, and zero Sign-specific LAN-write scan.
 5. `swift package clean && swift build -c release` with warning/error scan — **PASS**, warning-free,
-   **116.94 seconds**. A following incremental warning-free release renewal after `pebsmoke` also
+   **116.94 seconds**. A following incremental warning-free release renewal after `elysmoke` also
    passed in 17.73 seconds.
 6. Fresh release hashes:
-   - `PebbleStorage.o`: `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`
-   - `PebbleTextInput.o`: `88da5e6b8b5f49238f3a6f55b00b88e239fd600fc2f8984173b08db1a49206e2`
-   - `PebbleCore.o`: `abc9e864e40c4dfef0d39dbf0de980f1042d9fa2cdd0c07b7598a5a533f84f17`
-   - `Pebble`: `fee11ef355931f86f72820e4664617f2d6e5ec2925ef2fdd3146fbce6b7338e6`
-   - `pebsmoke`: `d312bc19bfe1ffda8dad178efdff0f0501fda2d7cb733f61b30b78d92812addb`
+   - `ElysiumStorage.o`: `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`
+   - `ElysiumTextInput.o`: `88da5e6b8b5f49238f3a6f55b00b88e239fd600fc2f8984173b08db1a49206e2`
+   - `ElysiumCore.o`: `abc9e864e40c4dfef0d39dbf0de980f1042d9fa2cdd0c07b7598a5a533f84f17`
+   - `Elysium`: `fee11ef355931f86f72820e4664617f2d6e5ec2925ef2fdd3146fbce6b7338e6`
+   - `elysmoke`: `d312bc19bfe1ffda8dad178efdff0f0501fda2d7cb733f61b30b78d92812addb`
 7. `otool -L`, `nm | swift-demangle`, and `strings` over the fresh release — **PASS**: no
-   XCTest/Testing linkage and no `PebbleTextInputTests`, `probeLaunchMarker`, `TextInputTestHook`, or
+   XCTest/Testing linkage and no `ElysiumTextInputTests`, `probeLaunchMarker`, `TextInputTestHook`, or
    `InjectedPasteboard` surface.
-8. `bash scripts/verify-pebble-storage-release-surface.sh` — **PASS** after the exact clean build and
+8. `bash scripts/verify-elysium-storage-release-surface.sh` — **PASS** after the exact clean build and
    again after the final release renewal. The unchanged storage object retained its reviewed hash;
-   verifier freshness now also covers `PebbleTextInput.o` and both linked products.
-9. `swift test` — **986/986 passed**, 0 failures: 10 PebbleTextInput tests plus 976 PebbleCore tests
+   verifier freshness now also covers `ElysiumTextInput.o` and both linked products.
+9. `swift test` — **986/986 passed**, 0 failures: 10 ElysiumTextInput tests plus 976 ElysiumCore tests
    (Core bundle 227.207 seconds).
-10. `swift run -c release pebsmoke` — **457 passed, 0 failed**.
+10. `swift run -c release elysmoke` — **457 passed, 0 failed**.
 11. `git diff --check` — PASS.
 
 **Builder verdict: PASS.** The implementation and same-pass tests are on disk and every Builder-owned
@@ -2365,21 +2365,21 @@ Fresh empirical evidence, in order:
    both `NSEvent` byte caps, no materialized `validPrefix`, and zero Sign-specific LAN write surface.
 3. `swift package clean && swift build -c release` — **PASS**, warning-free, **119.50 seconds**.
 4. Fresh reviewed release hashes:
-   - `PebbleStorage.o`: `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`
-   - `PebbleTextInput.o`: `c6216049a974b398340182e0d30d15cb33af5ef61e1c11fbd5c79693411713f2`
-   - `PebbleCore.o`: `c7f3fb7f726f2f3a9eb2d44bb3dd678275ea19852fbb01b7ef5196c6e17d77f2`
-   - `Pebble`: `2a70b907242108c1bf264d3e13acdfcded21d638c02802d39bcb9bf4284842ed`
-   - `pebsmoke`: `299da68b2ba2562923feccb62a3f95af8a67f5a3bb3e91677c1caa599c235282`
+   - `ElysiumStorage.o`: `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`
+   - `ElysiumTextInput.o`: `c6216049a974b398340182e0d30d15cb33af5ef61e1c11fbd5c79693411713f2`
+   - `ElysiumCore.o`: `c7f3fb7f726f2f3a9eb2d44bb3dd678275ea19852fbb01b7ef5196c6e17d77f2`
+   - `Elysium`: `2a70b907242108c1bf264d3e13acdfcded21d638c02802d39bcb9bf4284842ed`
+   - `elysmoke`: `299da68b2ba2562923feccb62a3f95af8a67f5a3bb3e91677c1caa599c235282`
 5. `swift package describe --type json`, `otool`, `nm | swift-demangle`, and `strings` — **PASS**:
-   only `Pebble` and `pebsmoke` are products; no XCTest/Testing linkage or text-input test/probe hook
+   only `Elysium` and `elysmoke` are products; no XCTest/Testing linkage or text-input test/probe hook
    is present in release artifacts.
-6. `bash scripts/verify-pebble-storage-release-surface.sh` — **PASS** against the exact fresh hashes,
+6. `bash scripts/verify-elysium-storage-release-surface.sh` — **PASS** against the exact fresh hashes,
    including again after the final incremental release/smoke build.
 7. The first full XCTest run exposed two stale RPG pixel-font source assertions expecting the retired
    stateless width-loop spelling. The updated assertions now require the shared stateful cursor and
    passed **5/5** focused. The mandatory full rerun then passed **995/995**, 0 failures: 15
-   PebbleTextInput tests plus 980 PebbleCore tests; the Core bundle completed in **230.016 seconds**.
-8. `swift run -c release pebsmoke` — **457 passed, 0 failed**.
+   ElysiumTextInput tests plus 980 ElysiumCore tests; the Core bundle completed in **230.016 seconds**.
+8. `swift run -c release elysmoke` — **457 passed, 0 failed**.
 9. Final `bash scripts/security-scan.sh`, release verifier, and `git diff --check` — **PASS**.
 
 **Builder remediation verdict: PASS.** The failed-review implementation findings are remediated on
@@ -2395,7 +2395,7 @@ reinspected from source and artifacts rather than accepted from Builder evidence
 
 ### Findings
 
-- **[MEDIUM] `Sources/Pebble/UIManagerM.swift:566-580` ->** Layout/focus notifications are guarded,
+- **[MEDIUM] `Sources/Elysium/UIManagerM.swift:566-580` ->** Layout/focus notifications are guarded,
   but `textIngressMachine.complete` installs readiness before the pending Sign/Chat status
   announcement is posted. A notification observer can therefore reenter keyboard/Paste while the
   open-time notification sequence is still executing, contrary to the final transition contract.
@@ -2404,7 +2404,7 @@ reinspected from source and artifacts rather than accepted from Builder evidence
   screen/generation/descriptor/value/owner/first-responder postcheck, and only then complete
   readiness. Add a callback test that attempts mapped/unmapped text and Command-V from the status
   announcement and proves zero text, clipboard read, fallback, or buffered replay.
-- **[MEDIUM] `Sources/Pebble/AppInputRouterM.swift:33-40,173-176`; `Sources/PebbleTextInput/PebbleTextInput.swift:117-150` ->** The materialized-prefix allocation is removed, but each event first computes
+- **[MEDIUM] `Sources/Elysium/AppInputRouterM.swift:33-40,173-176`; `Sources/ElysiumTextInput/ElysiumTextInput.swift:117-150` ->** The materialized-prefix allocation is removed, but each event first computes
   `characters.utf8.count` over the full untrusted String and then scans it again in the owner, so an
   oversized mapped/unmapped event still performs unbounded full-input work rather than one bounded
   pass. Also, TextField and Chat typing now use `insertValidPrefixAtomically`, accepting a valid prefix
@@ -2413,14 +2413,14 @@ reinspected from source and artifacts rather than accepted from Builder evidence
   with a nonallocating prefix byte check that stops at byte 65,537, then route typed TextField/Chat to
   whole-proposal atomic validation while Paste uses bounded valid-prefix insertion. Add million-byte
   router tests with a counting sequence plus valid-prefix-then-invalid typed-versus-Paste tests.
-- **[MEDIUM] `Sources/PebbleCore/Game/GameCore.swift:625-660`; `Tests/PebbleCoreTests/SignCommitTokenTests.swift:29-74` ->** The token now covers authority, world entry, world identity, dimension,
+- **[MEDIUM] `Sources/ElysiumCore/Game/GameCore.swift:625-660`; `Tests/ElysiumCoreTests/SignCommitTokenTests.swift:29-74` ->** The token now covers authority, world entry, world identity, dimension,
   block and entity/absence, but the validate-then-write method is not `@MainActor` or otherwise bound
   to the serial world mutation path. It also remains reusable after a successful edit to an existing
   entity because identity does not change; the replay test covers only the nil-entity case. Isolate
   capture/commit to the main actor (or the existing serial world boundary), add a token state consumed
   only on successful commit so failed edits remain retryable, and test concurrent world/authority
   replacement plus successful existing-entity replay rejection.
-- **[HIGH] `Tests/PebbleCoreTests/TextEntrySourceTests.swift:14-129`; `Tests/PebbleTextInputTests/PebbleTextInputTests.swift:99-190`; `scripts/security-scan.sh:18-52` ->** The pure state machine and Core Sign
+- **[HIGH] `Tests/ElysiumCoreTests/TextEntrySourceTests.swift:14-129`; `Tests/ElysiumTextInputTests/ElysiumTextInputTests.swift:99-190`; `scripts/security-scan.sh:18-52` ->** The pure state machine and Core Sign
   token now have executable tests, but UIManager/AppInputRouter/TextEntryAccessibility remain covered
   only by source-string assertions. No test executes the actual notification callbacks, ordinary/AX
   adapter, first-responder transitions, Pasteboard read suppression, recipe-toggle/reveal/reactivate/
@@ -2435,7 +2435,7 @@ reinspected from source and artifacts rather than accepted from Builder evidence
 Fresh rerun evidence: the selected remediation command executed **31 tests, 0 failures** (15 pure
 text-input, 3 App-router source, 2 Recipe, 3 real GameCore Sign-token, and 8 text-entry source tests);
 `bash scripts/security-scan.sh` passed including the 127-file SQLite scan; and
-`bash scripts/verify-pebble-storage-release-surface.sh` passed against the pinned release artifacts.
+`bash scripts/verify-elysium-storage-release-surface.sh` passed against the pinned release artifacts.
 Package/product topology, test-symbol denial, and zero Sign-specific LAN field/kind/codec/transport/
 replication/scheduler symbols were independently rechecked and remain clean.
 
@@ -2450,7 +2450,7 @@ value/range, finite frame clamp, invariant-only Sign lines, stateful production 
 non-product target and artifact test-seam denial.
 
 Not reviewed: unrelated preexisting Track A/B RPG/storage/LAN/controller/font changes; full suite and
-pebsmoke were not rerun by this reviewer because the fresh focused review already found blockers;
+elysmoke were not rerun by this reviewer because the fresh focused review already found blockers;
 installed UI/VoiceOver/two-machine behavior, pipeline, signing, deployment, commit, push, and GitHub
 state remain downstream and unauthorized. No implementation file was edited.
 
@@ -2466,19 +2466,19 @@ Remediated all four rerun findings without installing, deploying, committing, pu
 any Sign-specific LAN field/kind/schema/codec/transport/replication/scheduler surface.
 
 - UIManager now delegates its real focus sequence to the normal non-product
-  `PebbleTextFocusTransactionAdapter`. Layout, focus, and the consumed one-shot Sign/Chat status
+  `ElysiumTextFocusTransactionAdapter`. Layout, focus, and the consumed one-shot Sign/Chat status
   announcement all publish while the adapter remains `.focusing` with readiness absent. Only after
   the complete synchronous notification sequence returns does the adapter mark delivery, repeat the
   exact postvalidation, and install readiness. Notification-time same-target reentry coalesces,
   other-target reentry rejects, and mapped text, unmapped text, Paste capture/read, and fallback all
   remain blocked with no replay.
-- Both AppKit character paths use the executable `PebbleTextEventIngressAdapter` and a nonallocating
+- Both AppKit character paths use the executable `ElysiumTextEventIngressAdapter` and a nonallocating
   byte-sequence envelope that stops at byte 65,537. No `characters.utf8.count` full scan remains.
   TextField and Chat typing use a single-pass whole-proposal atomic result, rejecting invalid or
   over-cap proposals unchanged; Paste uses one bounded valid-prefix commit. Recipe and Sign retain
   their approved streaming suffix/prefix behavior. Paste side effects for Anvil, Creative Search,
   and Template Name remain refreshed after the cause split.
-- AppDelegate Paste uses the executable `PebbleTextPasteIngressAdapter`: blocked readiness denies
+- AppDelegate Paste uses the executable `ElysiumTextPasteIngressAdapter`: blocked readiness denies
   owner capture and clipboard access, capture precedes read, and exact owner revalidation precedes
   dispatch. Text Accessibility retained-element validation uses the shared executable screen/
   generation/descriptor identity adapter in both focus and focus-state paths.
@@ -2500,18 +2500,18 @@ Fresh evidence, in execution order:
    and SQLite boundary scan over **127 production Swift files**.
 3. `swift package clean && swift build -c release` — **PASS**, warning-free, **118.33 seconds**.
 4. Fresh release hashes:
-   - `PebbleStorage.o`: `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`
-   - `PebbleTextInput.o`: `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`
-   - `PebbleCore.o`: `af6bb876418ef83169502bd062c58227fa9008029a79034d6788142aca612e8f`
-   - `Pebble`: `e173f209e7ec27cba108abc2fd7bc34115641d16f954036892c79bef0e53e347`
-   - `pebsmoke`: `83015fa97079d1d0169001f19aa5332d00f6b4a0e4dc4cbe55b1adb62ae4094c`
+   - `ElysiumStorage.o`: `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`
+   - `ElysiumTextInput.o`: `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`
+   - `ElysiumCore.o`: `af6bb876418ef83169502bd062c58227fa9008029a79034d6788142aca612e8f`
+   - `Elysium`: `e173f209e7ec27cba108abc2fd7bc34115641d16f954036892c79bef0e53e347`
+   - `elysmoke`: `83015fa97079d1d0169001f19aa5332d00f6b4a0e4dc4cbe55b1adb62ae4094c`
 5. Package graph and `otool`/`nm | swift-demangle`/`strings` artifact scans — **PASS**: only
-   `Pebble` and `pebsmoke` are products and no XCTest/Testing or adapter-test symbols escaped.
-6. `bash scripts/verify-pebble-storage-release-surface.sh` — **PASS** against the fresh pins after
+   `Elysium` and `elysmoke` are products and no XCTest/Testing or adapter-test symbols escaped.
+6. `bash scripts/verify-elysium-storage-release-surface.sh` — **PASS** against the fresh pins after
    the clean build and again after the final release smoke build.
-7. Full `swift test` — **1,004/1,004 passed**, 0 failures: 21 PebbleTextInput plus 983 PebbleCore;
+7. Full `swift test` — **1,004/1,004 passed**, 0 failures: 21 ElysiumTextInput plus 983 ElysiumCore;
    the Core bundle completed in **233.027 seconds**.
-8. `swift run -c release pebsmoke` — **457 passed, 0 failed**.
+8. `swift run -c release elysmoke` — **457 passed, 0 failed**.
 9. Final executable security scan, artifact scan, verifier, and `git diff --check` — **PASS**.
 
 **Builder rerun-remediation verdict: PASS.** All four findings are closed in production paths with
@@ -2533,7 +2533,7 @@ None.
 
 ### Closure evidence
 
-- The shipping `UIManager` invokes `PebbleTextFocusTransactionAdapter.perform` for the complete
+- The shipping `UIManager` invokes `ElysiumTextFocusTransactionAdapter.perform` for the complete
   owner/responder/notification transaction. Layout, focus, and the consumed one-shot status
   announcement execute while the adapter is still `.focusing`; readiness is installed only after
   notification return, repeated owner/value/generation/responder postvalidation, and delivery
@@ -2541,12 +2541,12 @@ None.
   mapped and unmapped text suppression, Paste suppression before clipboard read, no fallback, no
   mutation, and no buffered replay during the status notification.
 - Both shipping mapped and unmapped AppKit character paths call
-  `PebbleTextEventIngressAdapter.route`. Its envelope iterates `String.UTF8View` and returns at byte
+  `ElysiumTextEventIngressAdapter.route`. Its envelope iterates `String.UTF8View` and returns at byte
   65,537 rather than computing the complete count. The executable counting-sequence test observed
   exactly 65,537 reads for a million-byte rejection and 65,536 for an exact-limit acceptance.
   `TextField` and Chat typed proposals use whole-proposal atomic insertion; their Paste paths use
   bounded valid-prefix insertion; Recipe and Sign preserve destination-bounded streaming behavior.
-- AppDelegate Paste calls `PebbleTextPasteIngressAdapter.route`, which checks readiness before owner
+- AppDelegate Paste calls `ElysiumTextPasteIngressAdapter.route`, which checks readiness before owner
   capture or pasteboard access, captures before read, and revalidates the exact owner before
   dispatch. The real Accessibility bridge calls the shared exact screen/generation/descriptor
   identity predicate from retained-element focus and focus-state paths, keeps value and selected
@@ -2558,20 +2558,20 @@ None.
   rejection, block/entity/world replacement rejection, successful nil and existing-entity replay
   rejection, failed-validation retry, 32-contender one-success serialization, and queued world
   replacement rejection.
-- The package still exposes only the `Pebble` and `pebsmoke` products. `PebbleTextInput` is a normal
+- The package still exposes only the `Elysium` and `elysmoke` products. `ElysiumTextInput` is a normal
   non-product support target used by the shipping executable and the behavioral tests. The release
-  verifier accepted the pinned `PebbleTextInput.o`, `PebbleCore.o`, `PebbleStorage.o`, `Pebble`, and
-  `pebsmoke` artifacts and found no test/probe hooks. Independent source scans found no Sign-specific
+  verifier accepted the pinned `ElysiumTextInput.o`, `ElysiumCore.o`, `ElysiumStorage.o`, `Elysium`, and
+  `elysmoke` artifacts and found no test/probe hooks. Independent source scans found no Sign-specific
   LAN field, kind, schema, codec, transport, replication, scheduler, status, or result surface.
 
 Fresh reviewer commands and results:
 
-1. `swift test --filter 'PebbleTextInputTests|SignCommitTokenTests|TextEntrySourceTests|AppInputRouterSourceTests|CraftingRecipeTypeaheadTextEntryTests'`
+1. `swift test --filter 'ElysiumTextInputTests|SignCommitTokenTests|TextEntrySourceTests|AppInputRouterSourceTests|CraftingRecipeTypeaheadTextEntryTests'`
    — **40/40 passed**, 0 failures: 21 executable production text-adapter/bounds/Unicode/AX tests,
    6 executable MainActor Sign-token tests, and 13 supplemental App/source/Recipe tests.
 2. `bash scripts/security-scan.sh` — **PASS**, including the executable production adapter/Sign
    behavior gate and SQLite boundary scan over **127 production Swift files**.
-3. `bash scripts/verify-pebble-storage-release-surface.sh` — **PASS** against the exact pinned release
+3. `bash scripts/verify-elysium-storage-release-surface.sh` — **PASS** against the exact pinned release
    objects and products.
 4. `swift package describe --type json`, zero-Sign-LAN scans, package/product review, and worktree
    review — **PASS** for the reviewed boundary. Builder's already-recorded full **1,004/1,004**
@@ -2597,19 +2597,19 @@ pipeline, deployment, commit, push, or GitHub completion.
 
 ## Installed Design Sign-off — 2026-07-11
 
-Inspected the ordinary signed Metal app at `/Applications/Pebble.app`, not a source model, UI
-harness, `PEBBLE_OPEN_SCREEN`, or other release probe. The installed executable SHA-256 was exactly
+Inspected the ordinary signed Metal app at `/Applications/Elysium.app`, not a source model, UI
+harness, `ELYSIUM_OPEN_SCREEN`, or other release probe. The installed executable SHA-256 was exactly
 `46e2d286312d2f2ccd7bb881007068a5856c33f82af6143f8eec37b696283f47`; `codesign --verify
 --deep --strict` passed. LaunchServices started that bundle with only disposable
 `CFFIXED_USER_HOME`/`HOME` at
-`/tmp/pebble-text-entry-design-signoff-20260711/profile`. Evidence is retained under
-`/tmp/pebble-text-entry-design-signoff-20260711`.
+`/tmp/elysium-text-entry-design-signoff-20260711/profile`. Evidence is retained under
+`/tmp/elysium-text-entry-design-signoff-20260711`.
 
 ### Blocking real-target findings
 
 1. **Ordinary keyboard text/editing does not work on the primary New World field.** On Create New
    World, a primary click produced the correct white focused outline and blinking caret. System
-   Events then reported `frontmost=true`, one Pebble window, and Pebble as the active application.
+   Events then reported `frontmost=true`, one Elysium window, and Elysium as the active application.
    Nevertheless, `cliclick` text `Alpha`, System Events `keystroke "Alpha"`, explicit A/B/C/D key
    codes, five Left-arrow events, and Backspace caused no text or caret edit. The field remained
    empty after the typing trials. In contrast, menu Command-V inserted the nonsensitive exact value
@@ -2619,7 +2619,7 @@ harness, `PEBBLE_OPEN_SCREEN`, or other release probe. The installed executable 
    the before/after result.
 2. **Installed text Accessibility is absent on the same screen.** With the app frontmost and the
    field focused/populated, System Events' complete window traversal exposed only the GameView
-   `AXGroup` (`Pebble RPG menus and actions`) and window-title `AXStaticText`; the group had no
+   `AXGroup` (`Elysium RPG menus and actions`) and window-title `AXStaticText`; the group had no
    published World Name or Seed text children. Labels, exact values, focus, insertion range, and
    read-only behavior therefore could not be inspected because the required installed elements were
    not present. `logs/window-ax-report.txt` records the traversal.
@@ -2628,7 +2628,7 @@ The captured window was `(0, 33)` at **1728 x 1084 logical points**. Full-screen
 x 2234 physical pixels**, establishing backing scale 2 and a 1728 x 1117 display-point surface; the
 33-point title/menu offset yields the 1728 x 1084 content window. The initial title, practical LAN
 field layout, empty Singleplayer screen, default New World layout, focused field, successful Paste,
-and failed key-edit states were captured with SHA-256 manifests. No new Pebble crash report appeared
+and failed key-edit states were captured with SHA-256 manifests. No new Elysium crash report appeared
 (0 before, 0 after, 0 delta), app stderr was empty, and the app quit cleanly after capture.
 
 ### Unclosed installed conditions
@@ -2650,7 +2650,7 @@ matrix; Test, pipeline, deployment completion, commit, and push remain blocked b
 
 Diagnosed the installed failure at plan SHA-256
 `b5d66bd9c5b32fd69abe903ff09f11fdb2d3a3ae157862d8d435221b4b4c45cd` using the signed
-`/Applications/Pebble.app`, its retained evidence, and read-only LLDB/AX inspection. No
+`/Applications/Elysium.app`, its retained evidence, and read-only LLDB/AX inspection. No
 implementation file was changed and no LAN scope is added.
 
 ### Verified root causes
@@ -2676,7 +2676,7 @@ implementation file was changed and no LAN scope is added.
 
 ### Required runtime edits
 
-In `Sources/Pebble/AppInputRouterM.swift`, eliminate every keyboard/flags path read of
+In `Sources/Elysium/AppInputRouterM.swift`, eliminate every keyboard/flags path read of
 `NSEvent.eventNumber`; add a source scan forbidding `.eventNumber` in `AppInputRouter`. Construct
 `AppKeyEventFingerprint` only from keyboard-valid data already present: key code, monotonic
 timestamp, window number, normalized modifiers, repeat bit, and origin. Keep `eventNumber` as a
@@ -2686,7 +2686,7 @@ routing serial remains the per-delivery identity. Existing F11/capture `performK
 behavior remains: ordinary keys return unconsumed there and route once through `keyDown`, while an
 actually handled equivalent is not replayed. The same safe factory must serve `flagsChanged`.
 
-In `Sources/Pebble/TextEntryAccessibilityM.swift`, replace the computed fresh `children` bridge with
+In `Sources/Elysium/TextEntryAccessibilityM.swift`, replace the computed fresh `children` bridge with
 a retained commit boundary:
 
 - `commit(screen:descriptors:)` validates one current screen/generation and unique descriptor IDs,
@@ -2697,7 +2697,7 @@ a retained commit boundary:
 - The bridge exposes the retained root array and exact current element for a descriptor/token; it
   never creates an element from an AX query.
 
-In `Sources/Pebble/main.swift`, remove `GameView`'s dynamic `accessibilityChildren()` override.
+In `Sources/Elysium/main.swift`, remove `GameView`'s dynamic `accessibilityChildren()` override.
 Add one main-actor `publishAccessibilityChildren()` that calls AppKit's
 `setAccessibilityChildren(textEntryAccessibilityBridge.children +
 rpgAccessibilityBridge.children)`. Call it after every text or RPG bridge commit/invalidation and
@@ -2705,7 +2705,7 @@ before any `.layoutChanged`, `.focusedUIElementChanged`, or `.valueChanged` post
 `GameView`'s group role/label. Focus/value notifications target the exact retained child when one
 exists; container layout and announcements still target the group.
 
-In `Sources/Pebble/UIManagerM.swift`, add text commit/invalidate callbacks parallel to the existing
+In `Sources/Elysium/UIManagerM.swift`, add text commit/invalidate callbacks parallel to the existing
 RPG callbacks. Commit the complete current descriptor set after open/reveal/resize, after owner
 mutation but before readiness notifications, and after accepted value/caret changes before
 `.valueChanged`. Invalidate before close/replacement/generation retirement. AppDelegate wires those
@@ -2718,9 +2718,9 @@ notifications so one bridge cannot erase or stale the other.
 
 Pure adapter XCTest and source-string scans remain supplemental; neither can close this failure.
 Add `scripts/appkit-text-entry-integration.sh` plus a non-shipping Swift driver under
-`Tests/PebbleAppKitIntegration/`. The script must build the release executable, assemble and ad-hoc
-sign a temporary `Pebble.app` with the same packaging function used by install, and launch that
-bundle normally with a disposable home. It must not use `PEBBLE_OPEN_SCREEN`, call UIManager/router
+`Tests/ElysiumAppKitIntegration/`. The script must build the release executable, assemble and ad-hoc
+sign a temporary `Elysium.app` with the same packaging function used by install, and launch that
+bundle normally with a disposable home. It must not use `ELYSIUM_OPEN_SCREEN`, call UIManager/router
 methods, import the executable as a model, or read source to decide PASS.
 
 The driver requires an interactive trusted macOS session, records the launched PID and executable
@@ -2739,7 +2739,7 @@ and verifies the real window/group through `AXUIElement`. It then:
    or unchanged/incorrect value.
 
 The gate checks that the tested PID belongs to the freshly packaged bundle and that its executable
-hash equals `.build/release/Pebble`; an adapter-only runner, manually invoked bridge getter, source
+hash equals `.build/release/Elysium`; an adapter-only runner, manually invoked bridge getter, source
 assertion, screenshot-only caret, or menu-Paste-only success cannot satisfy it. Missing Accessibility/
 Input Monitoring trust fails with an explicit prerequisite rather than skipping or passing. Run this
 gate after the warning-free release build and before pipeline deployment, and add it to the
@@ -2815,7 +2815,7 @@ publication is the correct platform model. These corrections are binding:
    they must not call `setAccessibilityChildren` on every keystroke or move VoiceOver to the group.
    Text children remain in stable visual/focus order, followed by stable RPG order, with unique IDs.
 2. **Use truthful roles and group copy.** The combined GameView group label becomes exactly
-   `Pebble menus and actions`; the installed `Pebble RPG menus and actions` label is misleading on
+   `Elysium menus and actions`; the installed `Elysium RPG menus and actions` label is misleading on
    Create World. Every field exposes its approved nearby label and exact value; Recipe is announced
    as a search field, guest Sign as static read-only text, and editable TextField/Sign/Chat elements
    retain concise keyboard-editing help without claiming selection, direct AX replacement, or IME.
@@ -2866,7 +2866,7 @@ but five blocking plan defects remain.
 
 ### Findings
 
-- **[HIGH] `TEXT_ENTRY_REGRESSION_PLAN.md:2679-2687,2748-2751,2769-2770`; `Sources/PebbleCore/Game/InputChords.swift:499-585` ->** The proposed keyboard fingerprint is not a unique delivery identity. Two distinct
+- **[HIGH] `TEXT_ENTRY_REGRESSION_PLAN.md:2679-2687,2748-2751,2769-2770`; `Sources/ElysiumCore/Game/InputChords.swift:499-585` ->** The proposed keyboard fingerprint is not a unique delivery identity. Two distinct
   `keyDown` events can have identical key code, rounded timestamp, window, modifiers, repeat bit, and
   origin and will be collapsed by the existing 250 ms equality ledger. The checked routing serial is
   allocated per callback and is not part of that ledger, so it also cannot correlate one physical
@@ -2877,7 +2877,7 @@ but five blocking plan defects remain.
   because their observable fields collide. Keep modifier identities in a noncolliding namespace and
   fail closed on serial exhaustion. Test same-signature distinct keyDowns, handled-equivalent replay,
   unhandled-equivalent then keyDown, repeats, F11/capture, modifier edges, expiry, and exhaustion.
-- **[HIGH] `TEXT_ENTRY_REGRESSION_PLAN.md:2689-2715,2771-2776,2811-2828`; `Sources/Pebble/TextEntryAccessibilityM.swift:5-52` ->** Dropping an element from bridge arrays does not revoke an external AX client's retained reference; the object can continue serving its cached text,
+- **[HIGH] `TEXT_ENTRY_REGRESSION_PLAN.md:2689-2715,2771-2776,2811-2828`; `Sources/Elysium/TextEntryAccessibilityM.swift:5-52` ->** Dropping an element from bridge arrays does not revoke an external AX client's retained reference; the object can continue serving its cached text,
   range, help, enabled state, and stale focusability. The in-place refresh list also omits role and
   focusability, while current focus authorization reads the element's immutable old descriptor.
   Make commit all-or-nothing after validating the complete bounded candidate and combined text/RPG
@@ -2886,7 +2886,7 @@ but five blocking plan defects remain.
   value/help/character count/range/focus/enabled/parent/children, then atomically republish the new
   roots. Add external old-reference tests proving value/range/help are unavailable as well as focus
   denied after close, replacement, generation change, role change, and bridge collision/failure.
-- **[HIGH] `TEXT_ENTRY_REGRESSION_PLAN.md:2720-2746`; `pebble:70-85` ->** The gate requires the launched ad-hoc-signed executable SHA-256 to equal the pre-sign `.build/release/Pebble`, but bundle signing replaces the executable's embedded signature and therefore cannot be bound by that whole-file equality. The current packager also converts signing failure into a warning. Extract one reusable fail-closed packager. Verify the regular non-symlink staged executable equals the resolved release executable **before** signing; sign successfully; verify `codesign --verify --deep --strict`, expected bundle ID and sealed resources; record the post-sign executable SHA-256 and CDHash; then prove the launched PID's canonical executable path, bundle path/ID, SHA-256, and CDHash equal that post-sign artifact. Rehash the release input after the run to detect races. Never accept a signing warning, a prior installed bundle, or pre-sign/post-sign hash equality as identity evidence.
+- **[HIGH] `TEXT_ENTRY_REGRESSION_PLAN.md:2720-2746`; `elysium:70-85` ->** The gate requires the launched ad-hoc-signed executable SHA-256 to equal the pre-sign `.build/release/Elysium`, but bundle signing replaces the executable's embedded signature and therefore cannot be bound by that whole-file equality. The current packager also converts signing failure into a warning. Extract one reusable fail-closed packager. Verify the regular non-symlink staged executable equals the resolved release executable **before** signing; sign successfully; verify `codesign --verify --deep --strict`, expected bundle ID and sealed resources; record the post-sign executable SHA-256 and CDHash; then prove the launched PID's canonical executable path, bundle path/ID, SHA-256, and CDHash equal that post-sign artifact. Rehash the release input after the run to detect races. Never accept a signing warning, a prior installed bundle, or pre-sign/post-sign hash equality as identity evidence.
 - **[HIGH] `TEXT_ENTRY_REGRESSION_PLAN.md:2726-2745,2773-2780,2829-2835` ->** The trusted-session driver can send keys or Paste to another application if focus changes, overwrite or materialize the user's general pasteboard, leave the launched app/provider/temp home running after failure, and retain raw logs containing input. Require fail-closed Accessibility/event-post trust preflight with finite deadlines; exact PID, canonical path, frontmost app, key window, and target-element revalidation immediately before every CGEvent/menu action; and abort before posting on any mismatch. Use a bounded in-memory, never-logged, lossless general-pasteboard save/restore with explicit prerequisite failure when preservation is impossible, plus a lazy fixed-sentinel provider to prove zero pre-read and exactly one approved read. On EXIT/INT/TERM, restore pasteboard, terminate only the recorded process identity, remove driver/app/home artifacts, and emit only redacted exception counts/hashes/generic errors—never raw unified logs, clipboard bytes, or entered values.
 - **[MEDIUM] `TEXT_ENTRY_REGRESSION_PLAN.md:2744-2746,2782-2796`; `.githooks/pre-push:16-45`; `scripts/pipeline.sh:16-47` ->** The plan mandates the interactive gate in pre-push/pipeline but forbids edits outside a list that omits those files, and both current machine paths run `security-scan.sh` before the warning-free release build. Explicitly authorize and name `.githooks/pre-push`, `scripts/pipeline.sh`, `scripts/security-scan.sh`, the reusable packager, and documentation. Keep headless source security separate; place the mandatory AppKit stage after one warning-free release build and pass its exact hash into a no-rebuild integration run. Locked/noninteractive sessions or missing TCC must fail promptly with a prerequisite error, never hang, skip, or pass; CI requires an explicitly provisioned interactive macOS runner. Prove both pre-push and pipeline invoke the stage in the required order and propagate every nonzero/timeout/cleanup failure before deploy.
 
@@ -2971,11 +2971,11 @@ value/range/help/parent/action unavailability as well as focus denial.
 ### 3. Achievable signed-artifact identity
 
 Extract `scripts/package-app.sh` as the single fail-closed packager used by integration,
-`pebble install`, and pipeline. It accepts an explicit resolved release executable and output path.
+`elysium install`, and pipeline. It accepts an explicit resolved release executable and output path.
 Before signing it requires both input and staged executable to be regular non-symlink files, resolves their
 canonical paths, byte-compares them, and records equal pre-sign SHA-256 values. It then signs the
 bundle; signing failure is fatal, never a warning. After signing it requires `codesign --verify
---deep --strict`, expected identifier `com.briangao.pebble`, and a valid sealed-resource report, then
+--deep --strict`, expected identifier `com.briangao.elysium`, and a valid sealed-resource report, then
 records the post-sign executable SHA-256 and CDHash. Post-sign equality with the unsigned input is
 neither expected nor used.
 
@@ -2983,7 +2983,7 @@ The packager emits a private temporary manifest containing canonical release/sta
 input/staged hashes, post-sign executable hash, CDHash, bundle ID, and resource-seal success. The
 driver accepts that manifest once. After launch it proves the recorded PID/start identity resolves
 to the canonical staged bundle/executable, `NSRunningApplication` reports the expected bundle ID,
-and on-disk SHA-256/CDHash equal the post-sign manifest. It rejects `/Applications/Pebble.app`, a
+and on-disk SHA-256/CDHash equal the post-sign manifest. It rejects `/Applications/Elysium.app`, a
 symlink, path substitution, different PID/start identity, and any prior bundle. After the run it
 rehashes the original release input and requires the original pre-sign hash, detecting build/sign
 races.
@@ -3014,12 +3014,12 @@ stream to redacted counts before deletion.
 
 ### 5. Authorized files and machine-gate order
 
-Builder may edit exactly: `Sources/Pebble/AppInputRouterM.swift`,
-`Sources/PebbleCore/Game/InputChords.swift`, `Sources/Pebble/TextEntryAccessibilityM.swift`,
-`Sources/Pebble/RPGAccessibilityM.swift`, `Sources/Pebble/UIManagerM.swift`,
-`Sources/Pebble/main.swift`, their focused pure/source tests, new non-shipping
-`Tests/PebbleAppKitIntegration/` and `scripts/appkit-text-entry-integration.sh`, new reusable
-`scripts/package-app.sh`, `pebble`, `scripts/security-scan.sh`, `scripts/pipeline.sh`,
+Builder may edit exactly: `Sources/Elysium/AppInputRouterM.swift`,
+`Sources/ElysiumCore/Game/InputChords.swift`, `Sources/Elysium/TextEntryAccessibilityM.swift`,
+`Sources/Elysium/RPGAccessibilityM.swift`, `Sources/Elysium/UIManagerM.swift`,
+`Sources/Elysium/main.swift`, their focused pure/source tests, new non-shipping
+`Tests/ElysiumAppKitIntegration/` and `scripts/appkit-text-entry-integration.sh`, new reusable
+`scripts/package-app.sh`, `elysium`, `scripts/security-scan.sh`, `scripts/pipeline.sh`,
 `.githooks/pre-push`, `Package.swift` only if required for the non-product driver, and the directly
 affected `README.md`, `CONTRIBUTING.md`, `ARCHITECTURE.md`, `SECURITY.md`, and this plan. No LAN,
 world, save, Sign protocol, or unrelated product file is authorized.
@@ -3034,12 +3034,12 @@ Both `.githooks/pre-push` and `scripts/pipeline.sh` use this fail-closed order:
 4. the mandatory AppKit script with `--no-build`, exact executable path/hash, outer finite timeout,
    and post-build TCC/interactive preflight; any prerequisite, timeout, assertion, or cleanup failure
    exits nonzero;
-5. XCTest and the 457-check release `pebsmoke`, followed by a release-input rehash; and
+5. XCTest and the 457-check release `elysmoke`, followed by a release-input rehash; and
 6. pipeline only: fail-closed package/install of that same rehashed release input, installed binary/
    signing verification, and installed acceptance. Pre-push stops after step 5.
 
 The AppKit script never rebuilds or silently selects an installed binary. Pipeline deployment may
-not call the current rebuilding `pebble install`; it passes `--no-build` plus the captured hash to
+not call the current rebuilding `elysium install`; it passes `--no-build` plus the captured hash to
 the shared packager/deployer. A locked/noninteractive local session or missing TCC fails with a
 bounded prerequisite error, never skip/pass/hang. CI can pass only on an explicitly provisioned,
 logged-in interactive macOS runner with required grants; there is no environment skip flag. Tests
@@ -3096,7 +3096,7 @@ These corrections are binding:
    truthful logical focus, then hand VoiceOver focus to that exact replacement after layout
    publication. Never transfer focus across close, screen replacement, collision/failure, or merely
    matching IDs. Ordinary value/caret changes retain the object and never reset root children.
-2. The prior semantic contract remains exact: root label `Pebble menus and actions`, text children
+2. The prior semantic contract remains exact: root label `Elysium menus and actions`, text children
    in stable visual order before RPG children, Recipe search role, guest Sign static role, read-only
    value/range, and targeted notifications only after the complete retained-tree transaction.
    Retirement must not move focus to the group or announce scrubbed content.
@@ -3296,7 +3296,7 @@ presented as proof of the shipping menu path.
 
 ### Paste verification split
 
-Executable `PebbleTextPasteIngressAdapter` tests remain mandatory and cover the security contract:
+Executable `ElysiumTextPasteIngressAdapter` tests remain mandatory and cover the security contract:
 blocked readiness performs zero read; owner capture precedes read; exact owner/generation is
 revalidated after read; decode/raw-size limits fail closed; valid bounded Paste dispatches once;
 invalid, stale, reentrant, over-limit, and clipboard-error cases produce no text/world/template
@@ -3307,10 +3307,10 @@ Sign-off after deployment. The proof gives this actionable sequence:
 
 1. Warn the user to preserve any clipboard content they need. The user deliberately replaces it
    with the documented fixed nonsensitive sentinel (for example with `pbcopy`) outside the driver.
-2. The observer records only the current `changeCount`, verifies the installed Pebble PID/path/hash/
+2. The observer records only the current `changeCount`, verifies the installed Elysium PID/path/hash/
    CDHash, frontmost app, key window, ready target field and pre-Paste AX value/range, then prompts on
    an interactive TTY. It does not read or alter the clipboard.
-3. The user manually invokes Pebble's Edit -> Paste or Command-V. No synthetic Paste event is posted
+3. The user manually invokes Elysium's Edit -> Paste or Command-V. No synthetic Paste event is posted
    by test tooling. Afterward the observer requires unchanged `changeCount`, the exact single
    sentinel insertion and bounded AX range/value transition, and no exception/crash. Equality is
    checked in memory; entered/sentinel text is not logged.
@@ -3339,9 +3339,9 @@ proof. They must explain why the driver cannot safely acquire the general pasteb
 fixed-sentinel preparation/cleanup steps without claiming automatic restoration.
 
 The allowed-file list also narrowly authorizes reviewed pin-only updates in
-`scripts/verify-pebble-storage-release-surface.sh` for the new `PebbleCore.o`, `Pebble`, and
-`pebsmoke` SHA-256 values produced by the approved `InputChords` and App runtime changes.
-`PebbleStorage.o` and `PebbleTextInput.o` pins must remain byte-for-byte unchanged. Builder must
+`scripts/verify-elysium-storage-release-surface.sh` for the new `ElysiumCore.o`, `Elysium`, and
+`elysmoke` SHA-256 values produced by the approved `InputChords` and App runtime changes.
+`ElysiumStorage.o` and `ElysiumTextInput.o` pins must remain byte-for-byte unchanged. Builder must
 present before/after hashes, rerun the verifier against the final release build, and obtain PASS;
 no symbol allowlist, API/capability manifest, product, dependency, verifier logic, or storage/text-
 input surface may be broadened under this authorization.
@@ -3362,7 +3362,7 @@ blocking final sign-off/commit/push on the manual evidence.
    pasteboard alone cannot satisfy them.
 4. Require a human-controlled fixed-sentinel menu Paste on the newly installed app before installed
    Design Sign-off or deployment completion. Test tooling observes only and never restores/clobbers.
-5. Limit release-verifier edits to reviewed `PebbleCore.o`/`Pebble`/`pebsmoke` hash pins, retain the
+5. Limit release-verifier edits to reviewed `ElysiumCore.o`/`Elysium`/`elysmoke` hash pins, retain the
    exact Storage/TextInput pins and surface rules, and rerun the verifier successfully.
 6. All prior event-correlation, AX retirement, signing/PID, readiness, bounded text, Sign authority,
    zero-LAN, Security, Test, installed-matrix, and no-commit/push-on-failure conditions remain binding.
@@ -3376,12 +3376,12 @@ material gate split before Builder resumes.
 ### Artifact Pin Authorization addendum
 
 The reviewed final release build authorizes pin-only edits in
-`scripts/verify-pebble-storage-release-surface.sh` to `PebbleCore.o`
-`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, `Pebble`
-`4f62d01f93d4c9dfd47c8c410a92abd95deaf39d5e34cb7bc3d50e04367d2179`, and `pebsmoke`
+`scripts/verify-elysium-storage-release-surface.sh` to `ElysiumCore.o`
+`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, `Elysium`
+`4f62d01f93d4c9dfd47c8c410a92abd95deaf39d5e34cb7bc3d50e04367d2179`, and `elysmoke`
 `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`. The unchanged pins remain
-`PebbleStorage.o` `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba` and
-`PebbleTextInput.o` `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`. Builder must rerun the
+`ElysiumStorage.o` `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba` and
+`ElysiumTextInput.o` `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`. Builder must rerun the
 verifier against these exact final artifacts and obtain PASS. This authorization permits no change
 to verifier logic, symbol/type allowlists or denylists, API/capability manifests, products,
 dependencies, or storage/text-input surface.
@@ -3393,7 +3393,7 @@ Reviewed through plan SHA-256
 gate is truthful and developer-safe: it still proves the real signed-app keyboard/AX regression and
 never conditions routine pre-push/pipeline work on surrendering clipboard contents. The installed
 prompt must plainly state the fixed sentinel, that the user's prior clipboard must be preserved by
-them, that Pebble/tooling will not restore it, how to clear it afterward, and how to cancel/timeout
+them, that Elysium/tooling will not restore it, how to clear it afterward, and how to cancel/timeout
 without posting Paste or claiming completion.
 
 The manual New World sentinel transition is the minimum real AppDelegate/Edit-menu wiring proof, not
@@ -3414,11 +3414,11 @@ clarification at plan SHA-256
 `e2436cf8ec039ce35464037840f336cad708b8905ae2c5e46d85abdf06b4ab95`.
 
 The unattended boundary is sound: its real signed-app keyboard/AX driver has zero general-pasteboard
-or Paste activity, while executable production `PebbleTextPasteIngressAdapter` tests retain blocked-
+or Paste activity, while executable production `ElysiumTextPasteIngressAdapter` tests retain blocked-
 read, owner-before-read, exact post-read revalidation, byte/decode bounds, exactly-once dispatch, and
 no fallback/replay coverage. Real AppDelegate/menu wiring and all practical owner/non-owner behavior
 remain explicitly assigned to user-controlled installed proof. The release-verifier authorization is
-properly pin-only for `PebbleCore.o`, `Pebble`, and `pebsmoke`; Storage/TextInput pins and every
+properly pin-only for `ElysiumCore.o`, `Elysium`, and `elysmoke`; Storage/TextInput pins and every
 verifier rule, manifest, product, dependency, and surface remain frozen.
 
 ### Finding
@@ -3459,7 +3459,7 @@ commit, or push.
 ### Canonical content identity and private schema
 
 `scripts/installed-signoff-content-v1.txt` is a reviewed manifest of every build/gate input:
-`Package.swift`, `Sources/**`, `Tests/**`, `packaging/**`, `scripts/**`, `.githooks/**`, and `pebble`.
+`Package.swift`, `Sources/**`, `Tests/**`, `packaging/**`, `scripts/**`, `.githooks/**`, and `elysium`.
 The digest enumerator includes tracked and untracked regular files under those roots, rejects
 symlinks/duplicates/missing manifest roots, sorts raw relative UTF-8 paths, and hashes a versioned
 NUL-delimited stream of path, executable mode, byte length, and per-file SHA-256. It excludes `.git`,
@@ -3469,19 +3469,19 @@ test, package, hook, checklist, or gate-script byte/mode change invalidates it. 
 `planRevision`, `evidenceRevision`, and checklist digest are separate required fields.
 
 Receipts live only at mode 0600 beneath
-`~/Library/Application Support/Pebble/InstalledSignoff/<canonical-repo-root-digest>/`; the directory
+`~/Library/Application Support/Elysium/InstalledSignoff/<canonical-repo-root-digest>/`; the directory
 is 0700 and outside the repository. `.gitignore` defensively excludes any local receipt/evidence
 name, and tests fail if one is staged, committed, copied into the worktree, or printed. Each atomic
 JSON receipt is HMAC-SHA256 authenticated with a 256-bit per-user/per-canonical-repository key stored
 in macOS Keychain; there is no environment/file key or unsigned mode.
 
-Schema `PebbleInstalledSignoffReceiptV1` contains only:
+Schema `ElysiumInstalledSignoffReceiptV1` contains only:
 
 - schema/state/receipt random IDs; canonical repository-root digest; `contentDigest`; manifest,
   plan, evidence, and checklist versions/digests;
 - build epoch plus release executable path identity, stat identity, SHA-256, and prior gate-evidence
   digests/statuses for source security, warning-free build, release surface, binary scan, black-box
-  keyboard/AX, XCTest, and 457-check `pebsmoke`;
+  keyboard/AX, XCTest, and 457-check `elysmoke`;
 - staged and installed canonical bundle/executable paths, bundle ID, signing result, sealed-resource
   result, executable SHA-256, CDHash, and installed-vs-staged equality;
 - observed installed PID and process-start identity; interactive-TTY confirmation boolean/challenge
@@ -3814,23 +3814,23 @@ pipeline finalization, commit and push remain mandatory downstream gates.
 ## Final App Artifact Pin Addendum
 
 The approved final AppKit/Accessibility runtime edits authorize one pin-only update in
-`scripts/verify-pebble-storage-release-surface.sh`: the `Pebble` executable changes from
+`scripts/verify-elysium-storage-release-surface.sh`: the `Elysium` executable changes from
 `4f62d01f93d4c9dfd47c8c410a92abd95deaf39d5e34cb7bc3d50e04367d2179` to the exact real-gate
 release SHA-256 `6c770799df8b85344994541408a1c7e23b199a21188300fc2cdf264faa51b700`.
 
 Every other authorized pin remains exact and unchanged:
 
-- `PebbleStorage.o`: `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`
-- `PebbleCore.o`: `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`
-- `PebbleTextInput.o`: `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`
-- `pebsmoke`: `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`
+- `ElysiumStorage.o`: `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`
+- `ElysiumCore.o`: `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`
+- `ElysiumTextInput.o`: `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`
+- `elysmoke`: `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`
 
 Builder must perform a clean warning-free final release build, prove these five exact hashes, rerun
 the binary security scan, and obtain release-surface verifier PASS before preparation or installed
 sign-off. This addendum permits no verifier logic, allowlist/denylist, API/capability manifest,
 product, dependency, symbol, storage, Core, TextInput, smoke, LAN, or other surface change.
 
-**Final App Artifact Pin Addendum verdict: PASS.** Only the reviewed final `Pebble` executable pin
+**Final App Artifact Pin Addendum verdict: PASS.** Only the reviewed final `Elysium` executable pin
 moves; all other artifacts and release-surface enforcement remain frozen and empirically gated.
 
 ## Security (plan) — Final App Artifact Pin Addendum (2026-07-11)
@@ -3842,10 +3842,10 @@ Acting solely as the adversarial Security reviewer, reviewed the addendum at pla
 
 None.
 
-The authorization changes exactly one expected SHA-256 value—the shipping `Pebble` executable from
+The authorization changes exactly one expected SHA-256 value—the shipping `Elysium` executable from
 `4f62d01f93d4c9dfd47c8c410a92abd95deaf39d5e34cb7bc3d50e04367d2179` to
 `6c770799df8b85344994541408a1c7e23b199a21188300fc2cdf264faa51b700`. Storage, Core, TextInput and
-`pebsmoke` remain pinned to their previously approved exact values. Verifier logic, symbol/type
+`elysmoke` remain pinned to their previously approved exact values. Verifier logic, symbol/type
 allowlists and denylists, manifests, products, dependencies, APIs, capabilities, LAN and every other
 release surface remain explicitly frozen. The required clean warning-free build, five-hash proof,
 binary scan and verifier PASS fail closed before receipt preparation or installed sign-off.
@@ -3866,20 +3866,20 @@ push was performed in this phase; those actions remain downstream of independent
 
 ### Implemented surface
 
-- `Sources/Pebble/AppInputRouterM.swift` and `Sources/PebbleCore/Game/InputChords.swift` now assign
+- `Sources/Elysium/AppInputRouterM.swift` and `Sources/ElysiumCore/Game/InputChords.swift` now assign
   one delivery identity per physical/synthesized input, deduplicate only handled-equivalent delivery,
   never use `NSEvent.eventNumber`, and fail closed when physical or modifier serial space is
   exhausted. Ordinary text follows the canonical key-down ingress after protected/global routing.
-- `Sources/Pebble/UIManagerM.swift`, `Sources/Pebble/TextEntryAccessibilityM.swift`,
-  `Sources/Pebble/RPGAccessibilityM.swift`, and `Sources/Pebble/main.swift` now publish text and RPG
+- `Sources/Elysium/UIManagerM.swift`, `Sources/Elysium/TextEntryAccessibilityM.swift`,
+  `Sources/Elysium/RPGAccessibilityM.swift`, and `Sources/Elysium/main.swift` now publish text and RPG
   Accessibility children as one committed retained generation. Old retained elements are retired and
   scrubbed before replacement; focus/value/range notifications follow committed state; external old
-  references fail closed; the game-view label remains exactly `Pebble menus and actions`.
+  references fail closed; the game-view label remains exactly `Elysium menus and actions`.
 - The text-input support target and all shipping text-owner adapters retain bounded scalar/UTF-8
   policies, grapheme-safe editing, capability-bound focus, owner capture/revalidation for Paste, and
   one insertion path for Recipe, Sign, Chat, slash-command, template-name, and ordinary fields.
-- `scripts/package-app.sh`, `pebble`, `scripts/appkit-text-entry-integration.sh`, and
-  `Tests/PebbleAppKitIntegration/Driver.swift` use one fail-closed package/sign/manifest path. The
+- `scripts/package-app.sh`, `elysium`, `scripts/appkit-text-entry-integration.sh`, and
+  `Tests/ElysiumAppKitIntegration/Driver.swift` use one fail-closed package/sign/manifest path. The
   real-window driver binds the exact staged PID/start/path/signature/hash/CDHash, performs no
   pasteboard access, exercises mouse/keyboard/AX focus and editing through Create New World, proves
   retained-element invalidation across resize, and verifies exact cleanup with no staged process.
@@ -3893,9 +3893,9 @@ push was performed in this phase; those actions remain downstream of independent
   idempotent committed query revalidates content, evidence, index, commit, and artifacts.
 - `.githooks/pre-push` composes receipt authorization with the complete existing gate in enforced
   order: receipt, source-security scan, warning-free release build, release-surface verifier, binary
-  scan, real AppKit gate, XCTest, 457-check `pebsmoke`, then receipt revalidation. It does not replace
+  scan, real AppKit gate, XCTest, 457-check `elysmoke`, then receipt revalidation. It does not replace
   or weaken the standard pre-push gate.
-- The authorized verifier change is exactly the `Pebble` product pin
+- The authorized verifier change is exactly the `Elysium` product pin
   `6c770799df8b85344994541408a1c7e23b199a21188300fc2cdf264faa51b700`.
   Storage, Core, TextInput, smoke, verifier logic, manifests, and symbol policy remain unchanged.
 
@@ -3904,14 +3904,14 @@ push was performed in this phase; those actions remain downstream of independent
 The first final full XCTest run executed 986 tests with one failure: the composed pre-push rewrite
 had preserved the XCTest command but dropped the storage suite's machine-checked `stage "xctest"`
 ordering marker. Builder restored the standard stage interface and strengthened the assertion to
-prove the full receipt/security/build/verifier/binary/AppKit/XCTest/pebsmoke/receipt order. The exact
+prove the full receipt/security/build/verifier/binary/AppKit/XCTest/elysmoke/receipt order. The exact
 failed test then passed 1/1, and the subsequent full run passed 986/986 with a separately persisted
 exit status of zero.
 
 The real-window gate initially exposed staged-process cleanup identity races. Builder replaced the
 transient cleanup lookup with exact `/bin/ps` command identity, made every success/failure path clean
 up explicitly, and added a final no-process-under-staging-root assertion. The final run passed and an
-independent process scan found zero staged Pebble processes.
+independent process scan found zero staged Elysium processes.
 
 Receipt review found and closed four additional fail-closed details before handoff: actual evidence
 mode verification, retry-plus-fallback installed executable lookup, strict regular/nonsymlink
@@ -3921,9 +3921,9 @@ edits.
 
 ### Empirical evidence
 
-- `swift test --filter 'PebbleTextInputTests|InputChordTests|AppInputRouterSourceTests|TextEntrySourceTests|RPGAccessibilitySourceTests|SignCommitTokenTests'`
+- `swift test --filter 'ElysiumTextInputTests|InputChordTests|AppInputRouterSourceTests|TextEntrySourceTests|RPGAccessibilitySourceTests|SignCommitTokenTests'`
   -> 58 tests passed, 0 failed (21 support-target plus 37 Core/source/runtime tests).
-- `swift test --filter PebbleStorageAdversarialTests.testReleaseSurfaceVerifierIsExecutableFailClosedAndIntegrated`
+- `swift test --filter ElysiumStorageAdversarialTests.testReleaseSurfaceVerifierIsExecutableFailClosedAndIntegrated`
   -> 1 passed, 0 failed after composed-hook repair.
 - `/bin/bash -o pipefail -c 'swift test > /tmp/swift-test-text-entry-exit.log 2>&1; ...'`
   -> persisted status `0`; 986 tests passed, 0 failed in 230.821 seconds. After the later receipt-only
@@ -3938,15 +3938,15 @@ edits.
   `6c770799df8b85344994541408a1c7e23b199a21188300fc2cdf264faa51b700`, signed SHA-256
   `9368c99544b49d434e750f94d2518a9ef1302eba2385d80d4f58c1386f5a645c`, CDHash
   `d8b05502ae5c1fa9f0e98730d5426e323685eef5`; post-run staged-process count was zero.
-- `swift run -c release pebsmoke` -> 457 passed, 0 failed; the production build log contained no
+- `swift run -c release elysmoke` -> 457 passed, 0 failed; the production build log contained no
   warning/error diagnostics.
-- `scripts/verify-pebble-storage-release-surface.sh` -> exit `0`, verified; binary security scan ->
+- `scripts/verify-elysium-storage-release-surface.sh` -> exit `0`, verified; binary security scan ->
   exit `0`, passed. Exact release hashes after the final production build were:
-  `Pebble` `6c770799df8b85344994541408a1c7e23b199a21188300fc2cdf264faa51b700`,
-  `pebsmoke` `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`,
-  `PebbleStorage.o` `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`,
-  `PebbleCore.o` `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`,
-  and `PebbleTextInput.o` `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`.
+  `Elysium` `6c770799df8b85344994541408a1c7e23b199a21188300fc2cdf264faa51b700`,
+  `elysmoke` `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`,
+  `ElysiumStorage.o` `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`,
+  `ElysiumCore.o` `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`,
+  and `ElysiumTextInput.o` `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`.
 - `git diff --check` -> PASS.
 
 ### Builder boundary and verdict
@@ -3969,20 +3969,20 @@ SHA-256 `d72dfa4868672626e505b3f411e200db3a97b01d9cce4668973783ce8f37b856`.
 
 ### Findings
 
-- **[HIGH] `.githooks/pre-push:1-42`; `Tests/PebbleCoreTests/TextEntrySourceTests.swift:137-159`; `Tests/PebbleCoreTests/PebbleStorageAdversarialTests.swift:485-514` ->** The required pre-push hook is mode `0644`, not executable, so Git ignores the entire receipt/security/build/AppKit/XCTest/smoke gate. The submitted tests inspect only source tokens/order and miss hook mode. After restoring `0755`, its `swift build | tee` under `/bin/sh` also observes only `tee`'s status and can continue after a failed build. Restore executable mode, make build failure propagation explicit without a non-pipefail pipeline, and require executable-mode tests for all three hooks plus a fixture whose build command exits nonzero while output succeeds.
-- **[MEDIUM] `Sources/Pebble/AppInputRouterM.swift:32-44` ->** Once the keyboard delivery counter latches exhausted, `performKeyEquivalent` returns `false` before classifying F11 or active binding capture. Those protected events can escape to `super.performKeyEquivalent` rather than being consumed fail-closed as the approved exhaustion contract requires. On exhaustion, continue returning `false` only for ordinary unhandled equivalents; consume eligible F11/capture equivalents and every keyDown without dispatch. Add executable AppKit-adapter exhaustion tests, not source assertions.
-- **[MEDIUM] `Sources/Pebble/RPGAccessibilityM.swift:102-155`; `Sources/Pebble/main.swift:219-231` ->** Every RPG semantic commit constructs a completely new element set, retires all current elements, and republishes the combined root array even when membership, order, screen/generation, role, and focusability are unchanged. This violates the binding retained-identity contract and resets VoiceOver context on ordinary focus/value/selection updates. Implement the same structural comparison/in-place bounded refresh used for text elements; replace/republish only for a structural identity change, while preserving retirement and fail-closed combined validation. Add executable retained-object identity tests across nonstructural RPG updates and replacement tests for structural changes.
+- **[HIGH] `.githooks/pre-push:1-42`; `Tests/ElysiumCoreTests/TextEntrySourceTests.swift:137-159`; `Tests/ElysiumCoreTests/ElysiumStorageAdversarialTests.swift:485-514` ->** The required pre-push hook is mode `0644`, not executable, so Git ignores the entire receipt/security/build/AppKit/XCTest/smoke gate. The submitted tests inspect only source tokens/order and miss hook mode. After restoring `0755`, its `swift build | tee` under `/bin/sh` also observes only `tee`'s status and can continue after a failed build. Restore executable mode, make build failure propagation explicit without a non-pipefail pipeline, and require executable-mode tests for all three hooks plus a fixture whose build command exits nonzero while output succeeds.
+- **[MEDIUM] `Sources/Elysium/AppInputRouterM.swift:32-44` ->** Once the keyboard delivery counter latches exhausted, `performKeyEquivalent` returns `false` before classifying F11 or active binding capture. Those protected events can escape to `super.performKeyEquivalent` rather than being consumed fail-closed as the approved exhaustion contract requires. On exhaustion, continue returning `false` only for ordinary unhandled equivalents; consume eligible F11/capture equivalents and every keyDown without dispatch. Add executable AppKit-adapter exhaustion tests, not source assertions.
+- **[MEDIUM] `Sources/Elysium/RPGAccessibilityM.swift:102-155`; `Sources/Elysium/main.swift:219-231` ->** Every RPG semantic commit constructs a completely new element set, retires all current elements, and republishes the combined root array even when membership, order, screen/generation, role, and focusability are unchanged. This violates the binding retained-identity contract and resets VoiceOver context on ordinary focus/value/selection updates. Implement the same structural comparison/in-place bounded refresh used for text elements; replace/republish only for a structural identity change, while preserving retirement and fail-closed combined validation. Add executable retained-object identity tests across nonstructural RPG updates and replacement tests for structural changes.
 - **[HIGH] `scripts/observe-installed-signoff.swift:63-116`; `scripts/installed-signoff-receipt.swift:446-499` ->** Installed observation is caller-asserted, not authenticated evidence. A caller can create a mode-0700 directory containing an arbitrary `installed-signoff.json` with all booleans `true`, pass any 64-hex challenge and matching live PID/start to the public `observe` command, and have the receipt helper HMAC-sign `observed`. The challenge is caller-supplied, not minted by the prepared receipt. The guided observer itself seals only that summary JSON: it collects and requires no screenshots, AX reports, command evidence, or independent Designer evidence despite the approved frozen-evidence contract. Mint the observation challenge in `prepared`; bind it and the exact observer/checklist executable hashes in the HMAC payload; make one controlled observer-to-receipt transition that rejects caller-authored summaries; and require a nonempty per-checklist evidence manifest with actual regular `0600` screenshots/AX reports/redacted command evidence plus a distinct Designer attestation before `observed`. Test direct-command forgery, arbitrary JSON, reused challenge, omitted/swapped evidence, and observer substitution.
 - **[HIGH] `scripts/pipeline.sh:79-83`; `scripts/installed-signoff-receipt.swift:399-443` ->** Automated gate evidence is equally forgeable. Pipeline's digest is only the release hash plus constant labels, while `prepare` accepts any 64-hex value, creates `automated-gates.json` with hardcoded `PASS`, and independently sets `automatedGatesPassed = true`; it never authenticates actual command logs, exit statuses, test counts, or verifier/AppKit outputs. Seal real per-gate command identity, status, counts, artifact hashes and redacted log hashes in a private pipeline-created evidence manifest, validate the closed schema in `prepare`, and reject direct preparation without exact evidence. Derive the gate digest from those sealed bytes rather than labels.
 - **[HIGH] `scripts/package-app.sh:31-81`; `scripts/pipeline.sh:65-83`; `scripts/installed-signoff-receipt.swift:399-440` ->** The receipt does not bind the installed bundle to the release executable that passed the gates. Pipeline rehashes before packaging, but never after package/install; `prepare` records whatever release bytes exist then and receives neither the captured release hash nor package pre-sign hash. A replacement after packaging can therefore make the receipt validate a different untested release while the installed executable remains the earlier staged bundle. Pass the captured release SHA and the fail-closed package manifest into `prepare`; require its pre-sign input/staged hashes equal that SHA, the current release still equals it after install, and installed post-sign SHA/CDHash equal the same manifest. Rehash again after receipt publication and cover replacement at every boundary.
 - **[HIGH] `scripts/installed-signoff-receipt.swift:261-287,335-366,640-675` ->** HMAC authenticates bytes but provides no rollback protection. `load()` does not require `current.json` to be the canonical regular non-symlink `0600` file, and no external monotonic anchor records the latest receipt ID/state/transition. Replacing it with an earlier still-unexpired HMAC-valid copy replays an older state and defeats the promised copied/replayed-receipt rejection. Make the canonical state a Keychain-backed latest receipt ID plus monotonic transition sequence/state/MAC (or store the authoritative receipt there), require canonical `0700` roots and regular nonlinked `0600` receipt/lock files with no-follow opens, and define crash recovery across file/anchor publication. Test replay of every prior valid state, copied/symlinked/hard-linked receipts and locks, interrupted anchor/file writes, and concurrent transitions.
-- **[HIGH] `scripts/installed-signoff-receipt.swift:607-637`; `Tests/PebbleCoreTests/TextEntrySourceTests.swift:174-199` ->** The claimed 16-case adversarial receipt test is a false green. It exercises stable worktree enumeration, string/path/SHA/reflog parsing and a standalone HMAC primitive, but never executes receipt save/load authentication, Keychain behavior, state transitions, evidence sealing, prepare/observe/finalize, hooks, commit recovery, push arming, tamper, replay, concurrency, or fault injection. The supplemental XCTest merely searches source strings. Extract a testable nonshipping receipt/state implementation and add real temporary-repository/private-evidence/ephemeral-key integration tests for the full approved adversarial matrix, including injected failures before and after every fsync/rename/state-anchor transition. Make the machine security gate execute them.
+- **[HIGH] `scripts/installed-signoff-receipt.swift:607-637`; `Tests/ElysiumCoreTests/TextEntrySourceTests.swift:174-199` ->** The claimed 16-case adversarial receipt test is a false green. It exercises stable worktree enumeration, string/path/SHA/reflog parsing and a standalone HMAC primitive, but never executes receipt save/load authentication, Keychain behavior, state transitions, evidence sealing, prepare/observe/finalize, hooks, commit recovery, push arming, tamper, replay, concurrency, or fault injection. The supplemental XCTest merely searches source strings. Extract a testable nonshipping receipt/state implementation and add real temporary-repository/private-evidence/ephemeral-key integration tests for the full approved adversarial matrix, including injected failures before and after every fsync/rename/state-anchor transition. Make the machine security gate execute them.
 
 ### Fresh evidence and boundary
 
 Fresh reviewer execution: the focused command passed **58/58** tests; the receipt self-test reported
 **16/16**; `bash scripts/security-scan.sh` passed including the 127-production-file SQLite scan; the
-release-surface verifier passed; the package graph exposed only `Pebble` and `pebsmoke`; all five
+release-surface verifier passed; the package graph exposed only `Elysium` and `elysmoke`; all five
 release hashes exactly matched their pins; zero Sign-specific LAN symbols were found; and
 `git diff --check` passed. These green results are explicitly insufficient because the findings above
 show the hooks and receipt authority they purport to verify are not exercised. The Builder's real
@@ -4014,7 +4014,7 @@ and keeps product behavior limited to the approved keyboard/AX fixes.
 ### Authoritative receipt/store simplification
 
 Extract the closed state model, canonical codec, content/evidence hashing and transition validation
-into a normal non-product `PebbleReleaseGate` target. Production uses
+into a normal non-product `ElysiumReleaseGate` target. Production uses
 `KeychainReceiptStateStore`; tests use only an explicitly injected ephemeral store. One generic-
 password Keychain item per canonical repository root contains the complete authoritative canonical
 payload: schema, receipt ID, checked monotonic transition sequence, state, content/checklist/gate/
@@ -4042,7 +4042,7 @@ and advances to `observed` once. Reuse, different helper/checklist, partial/canc
 direct CLI field injection fails and terminally consumes/invalidates the attempt as specified.
 
 Each checklist item must produce its schema-declared private evidence beneath the receipt's 0700
-directory: at least one real Pebble-window PNG screenshot (validated PNG header/dimensions/window
+directory: at least one real Elysium-window PNG screenshot (validated PNG header/dimensions/window
 identity), one external AX JSON report where applicable (closed roles/counts/focus/range/settable/
 frame schema), and one redacted command-result record with command ID, exit status, counts and log
 hash. Evidence files are regular single-link 0600 files. Visual-only items still require screenshot
@@ -4060,7 +4060,7 @@ redacted display copy, captures the command's direct exit status without a maski
 the gate's closed expected counts/status, and records command ID/version, status, counts, relevant
 artifact hashes and log SHA-256 in `AutomatedGateEvidenceV1`. Required entries are source security,
 warning-free release build, release-surface verifier, binary scan, no-Paste real AppKit gate, XCTest,
-and 457-check `pebsmoke`; duplicates, unknown/missing fields, hardcoded labels without files, nonzero
+and 457-check `elysmoke`; duplicates, unknown/missing fields, hardcoded labels without files, nonzero
 status or wrong counts fail. `prepare` accepts only this exact private manifest, reopens and hashes
 every evidence file, and derives `gateDigest` from the canonical sealed bytes—never caller booleans
 or an arbitrary 64-hex value.
@@ -4098,7 +4098,7 @@ pipeline rehashes release and installed artifacts again; mismatch immediately ad
 
 ### Real integration tests and exact files
 
-Add `Sources/PebbleReleaseGate/**` and `Tests/PebbleReleaseGateTests/**`; Package.swift exposes no new
+Add `Sources/ElysiumReleaseGate/**` and `Tests/ElysiumReleaseGateTests/**`; Package.swift exposes no new
 product. Tests create real temporary Git repositories, private evidence trees and ephemeral secure
 stores, invoke the actual state/codec/evidence APIs and shell hooks, and cover every state from
 prepare through push. They include malformed/tampered/old cache, replay of every previously valid
@@ -4108,13 +4108,13 @@ transitions, sequence exhaustion, and injected failures before/after every evide
 store update and cache rename. Commit/reflog/resume and hook failure fixtures use actual temporary
 repos. `scripts/security-scan.sh` must execute this suite and fail if it is absent or skipped.
 
-Authorized edits are limited to `Package.swift`, `Sources/PebbleReleaseGate/**`,
-`Tests/PebbleReleaseGateTests/**`, `Sources/Pebble/AppInputRouterM.swift`,
-`Sources/Pebble/RPGAccessibilityM.swift`, `Sources/Pebble/main.swift`, the shared production input/
+Authorized edits are limited to `Package.swift`, `Sources/ElysiumReleaseGate/**`,
+`Tests/ElysiumReleaseGateTests/**`, `Sources/Elysium/AppInputRouterM.swift`,
+`Sources/Elysium/RPGAccessibilityM.swift`, `Sources/Elysium/main.swift`, the shared production input/
 retention support target and its tests, `scripts/installed-signoff-receipt.swift`, the observer/
 finalizer/resume scripts and checklist, `scripts/pipeline.sh`, `scripts/package-app.sh`,
 `scripts/security-scan.sh`, all three `.githooks`, focused existing source/integration tests, and
-directly affected docs/this plan. Verifier edits remain the already approved Pebble pin only;
+directly affected docs/this plan. Verifier edits remain the already approved Elysium pin only;
 Storage/Core/TextInput/smoke pins, verifier logic/surfaces, product topology, LAN and Sign protocol
 scope remain frozen.
 
@@ -4156,7 +4156,7 @@ approved product and release workflow. These clarifications are binding:
 1. Nonstructural RPG updates retain exact objects and VoiceOver position. When a same-screen
    generation change legitimately replaces them, atomically publish same-ID replacements and hand
    focus only to the truthful replacement after layout; never hand focus across screen/collision/
-   failure. Text-before-RPG ordering, `Pebble menus and actions`, roles, and retirement privacy remain
+   failure. Text-before-RPG ordering, `Elysium menus and actions`, roles, and retirement privacy remain
    exact.
 2. The integrated observer guides and observes the full matrix but never performs the manual Paste,
    reads clipboard data, or infers Designer approval. It preserves the prior item-by-item progress,
@@ -4212,8 +4212,8 @@ deployment, receipt, commit, and push gates remain blocked.
 
 ## Production Keychain Store Test Amendment
 
-Add `Tests/PebbleReleaseGateTests/KeychainReceiptStateStoreIntegrationTests.swift` and the smallest
-test-only helper executable under `Tests/PebbleReleaseGateTests/Fixtures/KeychainStoreProbe/`. The
+Add `Tests/ElysiumReleaseGateTests/KeychainReceiptStateStoreIntegrationTests.swift` and the smallest
+test-only helper executable under `Tests/ElysiumReleaseGateTests/Fixtures/KeychainStoreProbe/`. The
 test must instantiate the actual production `KeychainReceiptStateStore`, never an ephemeral-store
 substitute, with a cryptographically random, nonproduction service/account namespace carrying an
 explicit test prefix. The store must reject a test identity equal to or sharing the canonical
@@ -4242,39 +4242,39 @@ for arbitrary service/account access; use the production codec, locking, access 
 and `SecItemAdd`/load/checked-update/delete paths unchanged; ensure every child inherits only the
 random test identity; guarantee bounded timeout and cleanup; and add no new product, LAN, clipboard,
 Paste, receipt-bypass, or verifier surface. Exact authorized files are
-`Tests/PebbleReleaseGateTests/KeychainReceiptStateStoreIntegrationTests.swift`, its test-only fixture,
-the minimum test-only initializer/dependency seam in `Sources/PebbleReleaseGate/**`, `Package.swift`
+`Tests/ElysiumReleaseGateTests/KeychainReceiptStateStoreIntegrationTests.swift`, its test-only fixture,
+the minimum test-only initializer/dependency seam in `Sources/ElysiumReleaseGate/**`, `Package.swift`
 only if the helper target requires it, and `scripts/security-scan.sh`.
 
 **Production Keychain Store Test Amendment verdict: PASS.** This mandatory isolated integration
 boundary closes the sole Security-plan gap; Build remains blocked until Security (plan) is renewed
 and passes this amendment.
 
-## Remediation Final Pebble Pin Addendum
+## Remediation Final Elysium Pin Addendum
 
-Authorize exactly one release-verifier pin change: `Pebble` moves from
+Authorize exactly one release-verifier pin change: `Elysium` moves from
 `6c770799df8b85344994541408a1c7e23b199a21188300fc2cdf264faa51b700` to
 `f5eb66575e17a7bf1ea31427c2021968c633b7e779c8f9fcba9329a7de33ac90`. The changed bytes are the
-expected result of the approved `PebbleAppSupport` extraction plus keyboard-exhaustion and stable RPG
-AX remediation. Supporting build evidence is `PebbleAppSupport.o`
+expected result of the approved `ElysiumAppSupport` extraction plus keyboard-exhaustion and stable RPG
+AX remediation. Supporting build evidence is `ElysiumAppSupport.o`
 `57d91481a1947e0798ceed302c8cd66e288675ad9b8298896fac50b228957d63`; it is evidence only and must
 not become a new verifier surface or product.
 
-All other verifier pins remain frozen: `PebbleStorage.o`
-`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `PebbleCore.o`
-`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, `PebbleTextInput.o`
-`547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`, and `pebsmoke`
+All other verifier pins remain frozen: `ElysiumStorage.o`
+`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `ElysiumCore.o`
+`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, `ElysiumTextInput.o`
+`547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`, and `elysmoke`
 `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`. No verifier logic, checked
 surface, package product, Storage/Core/TextInput behavior, smoke contract, LAN scope, or signing
 policy may change under this addendum.
 
-Builder may edit only the existing `EXPECTED_PEBBLE_PRODUCT_SHA256` value in
-`scripts/verify-pebble-storage-release-surface.sh`. Closing evidence requires a fresh warning-free
+Builder may edit only the existing `EXPECTED_ELYSIUM_PRODUCT_SHA256` value in
+`scripts/verify-elysium-storage-release-surface.sh`. Closing evidence requires a fresh warning-free
 clean release build, exact SHA-256 verification of all six values above, a passing binary security
 scan, and a passing unmodified release-surface verifier. Any other hash or surface delta returns to
 Architecture and Security review.
 
-**Remediation Final Pebble Pin Addendum verdict: PASS.** The final executable delta is bounded to the
+**Remediation Final Elysium Pin Addendum verdict: PASS.** The final executable delta is bounded to the
 approved remediation; all supporting surfaces remain frozen.
 
 ## Design Review — Production Keychain Store Test Amendment (2026-07-11)
@@ -4282,7 +4282,7 @@ approved remediation; all supporting surfaces remain frozen.
 **Design Review verdict: N/A.** Reviewed through plan SHA-256
 `551030c646dff5e913576f86f58ac60dd8f1dcc519437d08bfa6572da2868028`. This amendment adds only
 non-shipping, automatically cleaned integration coverage for a randomly isolated Keychain identity.
-It changes no Pebble screen, copy, Accessibility tree, installed checklist, observer/receipt prompt,
+It changes no Elysium screen, copy, Accessibility tree, installed checklist, observer/receipt prompt,
 clipboard interaction, or developer action; existing security-scan pass/fail behavior remains the
 only outward contract. The bounded timeout, secret-free failure, and residue-as-failure requirements
 are sufficient for that unchanged test workflow. All prior Design conditions remain binding.
@@ -4331,7 +4331,7 @@ matrix, deployment, commit, or push was performed; independent Security (code) i
    `scripts/prepush-release-build.sh`, which captures `swift build` directly without a pipeline,
    displays its log only after status capture, and blocks nonzero status or warnings. A real fake-
    `swift` fixture exits 42 while printing output and proves the hook helper remains nonzero.
-2. `PebbleAppSupport` owns executable exhausted-input classification. Exhausted `keyDown`, F11, and
+2. `ElysiumAppSupport` owns executable exhausted-input classification. Exhausted `keyDown`, F11, and
    active capture are consumed without dispatch; ordinary unhandled equivalents alone pass through;
    modifier changes remain nondispatching. Matrix tests execute the production function.
 3. `RPGAccessibilityBridge` now computes a structural key from screen/layout generation, ordered
@@ -4341,7 +4341,7 @@ matrix, deployment, commit, or push was performed; independent Security (code) i
 4. Caller-authored `observe`, summary JSON, boolean, PID/start, and challenge arguments are deleted.
    The same stable compiled release-gate binary owns Keychain and `observe-interactive`, verifies its
    own binary/source/checklist digests and Keychain-minted one-shot observer/Designer challenges,
-   performs no Paste, and advances once. Fourteen checklist items each require a real Pebble-window
+   performs no Paste, and advances once. Fourteen checklist items each require a real Elysium-window
    PNG, a private command/hash record, and external AX role/count/focus/settable/frame evidence where
    declared; a separate Designer challenge writes the final attestation.
 5. Pipeline runs seven gates through one direct-status recorder and seals real private redacted logs,
@@ -4351,13 +4351,13 @@ matrix, deployment, commit, or push was performed; independent Security (code) i
 6. Preparation accepts the captured pre-package release hash, fail-closed package manifest, and gate
    evidence directory. It requires release/pre-sign/staged continuity, signed installed hash/CDHash/
    bundle/seal identity, then rehashes release and installed bytes after authoritative publication.
-7. `PebbleReleaseGate` makes one generic-password Keychain item authoritative. Receipt ID, checked
+7. `ElysiumReleaseGate` makes one generic-password Keychain item authoritative. Receipt ID, checked
    monotonic sequence/state, closed payload, challenges, digests, artifacts, expiry, commit, and push
    fields live there; JSON is regenerated cache only. A stable integrated binary preserves default
    current-application ACL ownership. Lock/cache/evidence identities use `O_NOFOLLOW`, `0700`/`0600`,
    regular-file and single-link checks. Restart advances rather than resets sequence; stale,
    concurrent, malformed, replayed-cache, linked, mode, fault, and exhaustion cases fail closed.
-8. The false string/HMAC self-test is removed. `PebbleReleaseGateTests` executes the real codec,
+8. The false string/HMAC self-test is removed. `ElysiumReleaseGateTests` executes the real codec,
    ephemeral store, transitions, cache replay, concurrency, injected before/after-update failures,
    link/mode attacks, gate evidence, package continuity, and hook fixture. The mandatory real
    Keychain test compiles one random test-only stable probe and launches separate instances for
@@ -4365,9 +4365,9 @@ matrix, deployment, commit, or push was performed; independent Security (code) i
    `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (`cku`), delete/recreate, final confirmed
    absence, and cleanup. Production identity cannot be selected by the test seam.
 
-The runtime kernels live in non-product `PebbleAppSupport`, preserving the frozen
-`PebbleTextInput.o` pin. `PebbleReleaseGate` is also non-product. `swift package describe` exposes
-exactly `Pebble` and `pebsmoke`; zero LAN or Sign protocol surface was added.
+The runtime kernels live in non-product `ElysiumAppSupport`, preserving the frozen
+`ElysiumTextInput.o` pin. `ElysiumReleaseGate` is also non-product. `swift package describe` exposes
+exactly `Elysium` and `elysmoke`; zero LAN or Sign protocol surface was added.
 
 ### Fresh empirical evidence
 
@@ -4381,19 +4381,19 @@ exactly `Pebble` and `pebsmoke`; zero LAN or Sign protocol surface was added.
   object older than `Package.swift`; the clean rebuild renewed freshness.
 - Full XCTest under an exit-capturing Bash wrapper: exit 0; TextInput 21/21, ReleaseGate/Keychain
   11/11, Core 986/986, AppSupport 2/2 = **1,020 tests passed, 0 failed**.
-- `swift run -c release pebsmoke`: exit 0, **457 passed, 0 failed**.
+- `swift run -c release elysmoke`: exit 0, **457 passed, 0 failed**.
 - Post-clean real signed-window AppKit gate: exit 0; `fields=2`, `clipboard_access=0`,
   `cleanup=verified`, zero staged processes, release SHA-256
   `f5eb66575e17a7bf1ea31427c2021968c633b7e779c8f9fcba9329a7de33ac90`, signed SHA-256
   `96a5f9443030810fa65a3731704f7c00c055e86de6e01f7446ae58b1d60bae52`, CDHash
   `49eaa5f4388edaa26a352eb28ab8663c33f587dc`.
 - Release-surface verifier exit 0; binary security scan exit 0; `git diff --check` PASS.
-- Exact release hashes: `Pebble` `f5eb66575e17a7bf1ea31427c2021968c633b7e779c8f9fcba9329a7de33ac90`;
-  `pebsmoke` `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`;
-  `PebbleStorage.o` `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`;
-  `PebbleCore.o` `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`;
-  `PebbleTextInput.o` `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`;
-  `PebbleAppSupport.o` `57d91481a1947e0798ceed302c8cd66e288675ad9b8298896fac50b228957d63`.
+- Exact release hashes: `Elysium` `f5eb66575e17a7bf1ea31427c2021968c633b7e779c8f9fcba9329a7de33ac90`;
+  `elysmoke` `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`;
+  `ElysiumStorage.o` `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`;
+  `ElysiumCore.o` `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`;
+  `ElysiumTextInput.o` `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`;
+  `ElysiumAppSupport.o` `57d91481a1947e0798ceed302c8cd66e288675ad9b8298896fac50b228957d63`.
 
 ### Boundary and verdict
 
@@ -4407,7 +4407,7 @@ is green. Independent Security (code) must inspect the actual remediation diff a
 installed Design Sign-off, downstream Test renewal, pipeline/receipt finalization, deployment,
 commit, or push.
 
-## Security (plan) — Remediation Final Pebble Pin Addendum (2026-07-11)
+## Security (plan) — Remediation Final Elysium Pin Addendum (2026-07-11)
 
 Reviewed the addendum at plan SHA-256
 `d3013cce3355b328c39e2452fded29370f3cdfc68d4c9494ca0cf4616367c882` against the frozen release-
@@ -4418,10 +4418,10 @@ surface verifier, package-product graph, and prior remediation authorization.
 None.
 
 The authorized executable change is exactly one replacement of the existing
-`EXPECTED_PEBBLE_PRODUCT_SHA256` value, from
+`EXPECTED_ELYSIUM_PRODUCT_SHA256` value, from
 `6c770799df8b85344994541408a1c7e23b199a21188300fc2cdf264faa51b700` to
 `f5eb66575e17a7bf1ea31427c2021968c633b7e779c8f9fcba9329a7de33ac90`. The
-`PebbleAppSupport.o` digest remains corroborating build evidence only: it creates no verifier pin,
+`ElysiumAppSupport.o` digest remains corroborating build evidence only: it creates no verifier pin,
 checked surface, target, product, runtime command, or independently shipped artifact. The four
 remaining verifier pins, verifier logic, package products, Storage/Core/TextInput behavior, smoke
 contract, LAN scope, and signing policy stay frozen.
@@ -4444,9 +4444,9 @@ LAN, verifier, and Builder-record bytes at plan SHA-256
 
 ### Findings
 
-- **[HIGH] `Sources/PebbleReleaseGate/ReleaseGate.swift:416-452`;
+- **[HIGH] `Sources/ElysiumReleaseGate/ReleaseGate.swift:416-452`;
   `scripts/installed-signoff-receipt.swift:184-197`;
-  `Tests/PebbleReleaseGateTests/ReleaseGateTests.swift:169-183` ->** Automated gate evidence is still
+  `Tests/ElysiumReleaseGateTests/ReleaseGateTests.swift:169-183` ->** Automated gate evidence is still
   caller-forgeable. The validator authenticates only caller-written bytes, caller-written status and
   caller-written counts; it records no closed executable/argv/tool-version identity and has no
   runner-minted one-shot authority. Its own passing test creates seven arbitrary files containing
@@ -4458,11 +4458,11 @@ LAN, verifier, and Builder-record bytes at plan SHA-256
   Add an actual direct-prepare forgery test using the current fake-log construction and require it to
   fail.
 
-- **[HIGH] `Sources/PebbleReleaseGate/ReleaseGate.swift:464-486`;
+- **[HIGH] `Sources/ElysiumReleaseGate/ReleaseGate.swift:464-486`;
   `scripts/installed-signoff-receipt.swift:147-159,184-219` ->** Package/artifact continuity is not
   closed. `PackageManifest.validate` never requires `executable_path` to equal the canonical
-  `/Applications/Pebble.app/Contents/MacOS/Pebble` beneath its declared bundle, so a forged closed-
-  field manifest can combine a valid signed Pebble bundle with an unrelated file whose hash becomes
+  `/Applications/Elysium.app/Contents/MacOS/Elysium` beneath its declared bundle, so a forged closed-
+  field manifest can combine a valid signed Elysium bundle with an unrelated file whose hash becomes
   authoritative. Subsequent `fileDigest` calls use path-following `Data(contentsOf:)` without
   no-follow open/fstat/revalidation, permitting file/symlink substitution between identity checks.
   Canonically derive the installed executable from the fixed bundle instead of accepting it, reject
@@ -4483,8 +4483,8 @@ LAN, verifier, and Builder-record bytes at plan SHA-256
   authoritative transition. Test stale live process, PID reuse, observer substitution, same-session
   Designer forgery, reused challenges and missing/swapped evidence.
 
-- **[MEDIUM] `Sources/Pebble/AppInputRouterM.swift:106-132`;
-  `Tests/PebbleAppSupportTests/PebbleAppSupportTests.swift:4-10` ->** Exhaustion remains dispatchable
+- **[MEDIUM] `Sources/Elysium/AppInputRouterM.swift:106-132`;
+  `Tests/ElysiumAppSupportTests/ElysiumAppSupportTests.swift:4-10` ->** Exhaustion remains dispatchable
   through the real `flagsChanged` entry point. That method never checks `routingSerialExhausted` and
   can synthesize and route modifier edges after the latch; the pure four-row helper test does not
   execute this production state or prove latch/reset behavior. Guard the production modifier path so
@@ -4492,8 +4492,8 @@ LAN, verifier, and Builder-record bytes at plan SHA-256
   if needed, and test the actual latch across protected/ordinary equivalents, keyDown, modifiers,
   release/reset and repeated post-exhaustion calls.
 
-- **[MEDIUM] `Sources/Pebble/RPGAccessibilityM.swift:42-56,141-152,239-249`;
-  `Tests/PebbleAppSupportTests/PebbleAppSupportTests.swift:11-25` ->** The nonstructural RPG refresh
+- **[MEDIUM] `Sources/Elysium/RPGAccessibilityM.swift:42-56,141-152,239-249`;
+  `Tests/ElysiumAppSupportTests/ElysiumAppSupportTests.swift:11-25` ->** The nonstructural RPG refresh
   retains object allocation but not the promised stable Accessibility relationship. Every refresh
   first reparents every nested child to `GameView`, then calls `setAccessibilityChildren` and reparents
   it again; this is exactly the publication/reset operation the approved in-place path forbids and can
@@ -4503,8 +4503,8 @@ LAN, verifier, and Builder-record bytes at plan SHA-256
   proving `===` identity, stable parentage/no root-or-child publication on nonstructural changes, plus
   replacement and retired-reference denial for every structural dimension.
 
-- **[HIGH] `Tests/PebbleReleaseGateTests/ReleaseGateTests.swift:41-220`;
-  `Tests/PebbleReleaseGateTests/KeychainReceiptStateStoreIntegrationTests.swift:37-87`;
+- **[HIGH] `Tests/ElysiumReleaseGateTests/ReleaseGateTests.swift:41-220`;
+  `Tests/ElysiumReleaseGateTests/KeychainReceiptStateStoreIntegrationTests.swift:37-87`;
   `scripts/security-scan.sh:104-109` ->** The prior false-green test finding is only partially closed.
   The suite has no executable prepare/observe/finalize/precommit/postcommit/resume/prepush path, no
   direct observation or gate-forgery test, no helper/checklist/evidence substitution, no artifact
@@ -4522,14 +4522,14 @@ All three hooks and `scripts/prepush-release-build.sh` are currently `0755`; the
 fixture passes, so the original hook/status-masking finding is closed in the reviewed bytes. The
 exhausted keyDown/F11/capture pure disposition and RPG structural-key separation pass, but the real
 adapter/bridge gaps above remain. The release-surface verifier and binary scan pass. Exact hashes are
-`Pebble` `f5eb66575e17a7bf1ea31427c2021968c633b7e779c8f9fcba9329a7de33ac90`,
-`pebsmoke` `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`,
-`PebbleStorage.o` `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`,
-`PebbleCore.o` `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`,
-`PebbleTextInput.o` `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`,
-and evidence-only `PebbleAppSupport.o`
+`Elysium` `f5eb66575e17a7bf1ea31427c2021968c633b7e779c8f9fcba9329a7de33ac90`,
+`elysmoke` `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`,
+`ElysiumStorage.o` `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`,
+`ElysiumCore.o` `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`,
+`ElysiumTextInput.o` `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`,
+and evidence-only `ElysiumAppSupport.o`
 `57d91481a1947e0798ceed302c8cd66e288675ad9b8298896fac50b228957d63`. Package products remain exactly
-`Pebble` and `pebsmoke`; the remediation targets add no LAN/Sign protocol symbol, so pin-only product
+`Elysium` and `elysmoke`; the remediation targets add no LAN/Sign protocol symbol, so pin-only product
 topology and zero-LAN scope pass.
 
 During this review, `KeychainReceiptStateStore.accessibilityClass()` changed after a fresh focused run
@@ -4560,11 +4560,11 @@ file, process, input, and Accessibility identities are required rather than infe
 
 ### Self-executing prepare and canonical artifact continuity
 
-`PebbleReleaseGate` owns one `run-prepare-gates` transition. Starting from no receipt, its authoritative
+`ElysiumReleaseGate` owns one `run-prepare-gates` transition. Starting from no receipt, its authoritative
 binary acquires the canonical coordinator lock, mints the Keychain-held attempt/challenge, and itself
 executes exactly seven reviewed gates in fixed order: source security scan; warning-free clean release
 build; release-surface verifier; binary security scan; real no-Paste AppKit integration; full XCTest;
-and 457-check `pebsmoke`. It constructs each argv from compiled closed command IDs, resolves and
+and 457-check `elysmoke`. It constructs each argv from compiled closed command IDs, resolves and
 records executable identity/version, launches with a sanitized environment and canonical repository,
 captures direct termination status, parses the closed expected counts, writes/fsyncs private logs,
 and hashes the logs internally before atomically advancing to `prepared`. No public `prepare`, log
@@ -4576,18 +4576,18 @@ Before packaging, the same transition opens the canonical clean release executab
 requires a regular single-link executable file, hashes a stable descriptor with matching pre/post
 device/inode/size/mtime identity, and binds that digest. `scripts/package-app.sh` returns its manifest
 directly to the still-running authority. The installed bundle is fixed exactly at
-`/Applications/Pebble.app`; the installed executable is derived, never accepted, as the canonical
-strict child `/Applications/Pebble.app/Contents/MacOS/Pebble`. Canonicalization, parent identity,
+`/Applications/Elysium.app`; the installed executable is derived, never accepted, as the canonical
+strict child `/Applications/Elysium.app/Contents/MacOS/Elysium`. Canonicalization, parent identity,
 regular-file/single-link/mode, bundle signing, requirement, CDHash, package pre/post-sign hashes and
 captured release digest must all agree. Every prepare publication and later transition repeats stable
 no-follow descriptor hashing before and after the Keychain update; symlink, hard link, rename, mount/
 parent change, unrelated path, byte replacement or package-manifest disagreement invalidates the
-attempt. Exact implementation files: `Sources/PebbleReleaseGate/ReleaseGate.swift`,
+attempt. Exact implementation files: `Sources/ElysiumReleaseGate/ReleaseGate.swift`,
 `scripts/installed-signoff-receipt.swift`, `scripts/pipeline.sh`, and `scripts/package-app.sh`.
 
 ### Bound live observation and independent Designer transition
 
-`observe-interactive` verifies before every checklist capture that the live Pebble PID has the same
+`observe-interactive` verifies before every checklist capture that the live Elysium PID has the same
 start identity, has not been reused, resolves to that exact canonical installed executable, and has
 the expected bundle/signing requirement, dynamic code-signing identity, CDHash and installed SHA from
 the prepared receipt. Each screenshot, AX report and command record is generated by a fixed internal
@@ -4608,25 +4608,25 @@ both unattended helpers retain zero clipboard/Paste access.
 
 ### Exhausted input and stable RPG Accessibility
 
-`Sources/Pebble/AppInputRouterM.swift` must consult the same latched state at every entry point.
+`Sources/Elysium/AppInputRouterM.swift` must consult the same latched state at every entry point.
 After exhaustion, `flagsChanged` may update only bounded internal modifier bookkeeping and must never
 synthesize or dispatch an edge; keyDown and protected F11/capture equivalents remain consumed without
 dispatch, ordinary unhandled equivalents alone return false, and only the defined reset releases the
 latch. The stateful production adapter, not a value-only table, is exercised through actual entry
-methods in `Tests/PebbleAppSupportTests/PebbleAppSupportTests.swift`.
+methods in `Tests/ElysiumAppSupportTests/ElysiumAppSupportTests.swift`.
 
-For an equal RPG structural key, `Sources/Pebble/RPGAccessibilityM.swift` changes only bounded scalar
+For an equal RPG structural key, `Sources/Elysium/RPGAccessibilityM.swift` changes only bounded scalar
 Accessibility attributes on the already retained objects. It must not call any parent/children/root
 setter, reparent descendants, rebuild root arrays, or publish children; existing root, parent and
 child identities remain untouched. Structural changes alone build and validate a complete candidate,
 publish once, retire old references and deny their actions/focus. Real bridge seams in
-`Sources/PebbleAppSupport/**` and AppSupport tests assert `===` object identity, unchanged parent/
+`Sources/ElysiumAppSupport/**` and AppSupport tests assert `===` object identity, unchanged parent/
 children/root publication counters for every nonstructural field, and replacement plus retired-
 reference denial for every structural dimension.
 
 ### Mandatory executable adversarial matrix
 
-Expand `Tests/PebbleReleaseGateTests/ReleaseGateTests.swift` with an actual injectable command runner
+Expand `Tests/ElysiumReleaseGateTests/ReleaseGateTests.swift` with an actual injectable command runner
 that executes temporary helper programs, and add temporary-repository integration tests that invoke
 the real receipt commands, observers, finalizer, resume script and all three hooks. Required cases are
 the seven successful real command transitions; nonzero/missing/wrong-version/wrong-argv/wrong-count/
@@ -4658,17 +4658,17 @@ closed if any test, fixture, subprocess, cleanup assertion or category is absent
 
 Builder conditions: (1) delete every caller-evidence prepare interface; (2) keep command identities,
 argv, versions, parsers, statuses, counts and log hashes internally generated and closed; (3) derive
-the sole installed path from exact `/Applications/Pebble.app` and use stable no-follow identities;
+the sole installed path from exact `/Applications/Elysium.app` and use stable no-follow identities;
 (4) require `observedPendingDesigner` and a later distinct Designer process before `observed`; (5)
 permit only scalar attribute mutation during nonstructural RPG refresh and no exhausted modifier
 dispatch; (6) make every adversarial category execute under `security-scan.sh`; (7) preserve the
 authoritative monotonic Keychain state, disposable cache, executable hooks, private evidence, manual
 installed Paste, zero unattended clipboard/Paste, bounded ingress, Sign one-shot authority, frozen
 pin-only verifier/product surface and zero LAN; and (8) any product hash delta beyond the approved
-final Pebble pin, or any Storage/Core/TextInput/pebsmoke delta, returns to Architecture and Security.
+final Elysium pin, or any Storage/Core/TextInput/elysmoke delta, returns to Architecture and Security.
 
-Authorized edits are limited to the files named above, `Sources/PebbleReleaseGate/**`,
-`Tests/PebbleReleaseGateTests/**`, `Sources/PebbleAppSupport/**`, the directly affected AppSupport
+Authorized edits are limited to the files named above, `Sources/ElysiumReleaseGate/**`,
+`Tests/ElysiumReleaseGateTests/**`, `Sources/ElysiumAppSupport/**`, the directly affected AppSupport
 tests, receipt/observer/designer/finalize/resume/pipeline/package/security scripts, all three hooks,
 and this plan. No new shipping product, protocol, LAN path or verifier surface is authorized.
 
@@ -4704,7 +4704,7 @@ recoverable. Security (plan) must PASS before Build.
 
 Independently reviewed Revision II and its Design Review at plan SHA-256
 `692d937e04f420170b83fa6f5568757f079594ce2c22612f896f5aa92cc50cb2` against all six blocking
-Security-code findings, the authoritative monotonic-Keychain boundary, and the Pebble ordered-gate
+Security-code findings, the authoritative monotonic-Keychain boundary, and the Elysium ordered-gate
 requirements.
 
 ### Findings
@@ -4725,7 +4725,7 @@ refresh with zero parent/child/root publication closes the retained VoiceOver re
 mandatory runner, CLI, temporary-repository, process/artifact substitution, transition/fault/recovery
 and production-Keychain integration matrices provide executable closing evidence for the prior false-
 green gap. The plan preserves monotonic sequence across attempts, private evidence and disposable
-cache behavior, executable hooks, bounded ingress, Sign one-shot authority, the one approved Pebble
+cache behavior, executable hooks, bounded ingress, Sign one-shot authority, the one approved Elysium
 pin, all other frozen artifacts/products, and zero LAN scope.
 
 Conditions for Build are the Revision II conditions exactly as written: no caller-evidence prepare
@@ -4744,29 +4744,29 @@ machine evidence for all six findings. Builder may proceed only within the autho
 conditions; fresh Security (code), installed Design Sign-off, independent Test, pipeline/receipt,
 deployment, commit and push gates remain mandatory against stable final bytes.
 
-## Revision II Final Pebble Pin Amendment
+## Revision II Final Elysium Pin Amendment
 
 The frozen-artifact stop is resolved by authorizing exactly one verifier change: the release
-`Pebble` SHA-256 moves from
+`Elysium` SHA-256 moves from
 `f5eb66575e17a7bf1ea31427c2021968c633b7e779c8f9fcba9329a7de33ac90` to
 `406929c1592d50f964c8dcc0976358dbe1c1c89885aff0c5f6027beda4f3f347`.
 
 First-principles inspection bounds the causal shipping delta to Revision II's approved
-`Sources/Pebble/AppInputRouterM.swift` exhaustion latch and
-`Sources/Pebble/RPGAccessibilityM.swift` scalar-only retained-tree path, supported by
-`Sources/PebbleAppSupport/PebbleAppSupport.swift`. Those changes implement the approved
+`Sources/Elysium/AppInputRouterM.swift` exhaustion latch and
+`Sources/Elysium/RPGAccessibilityM.swift` scalar-only retained-tree path, supported by
+`Sources/ElysiumAppSupport/ElysiumAppSupport.swift`. Those changes implement the approved
 post-exhaustion nondispatch and equal-structure zero-publication contracts; no unrelated shipping
-source changed after the prior pinned build. The clean release evidence produced the new Pebble hash,
+source changed after the prior pinned build. The clean release evidence produced the new Elysium hash,
 and an independent release rebuild completed without warning/error diagnostics. The unchanged
-verifier stopped at exactly the old Pebble pin; the binary security scan passed. Focused executable
+verifier stopped at exactly the old Elysium pin; the binary security scan passed. Focused executable
 AppSupport coverage passed 3/3.
 
-Frozen artifacts independently remain exact: `pebsmoke`
-`d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, `PebbleStorage.o`
-`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `PebbleCore.o`
-`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, and `PebbleTextInput.o`
+Frozen artifacts independently remain exact: `elysmoke`
+`d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, `ElysiumStorage.o`
+`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `ElysiumCore.o`
+`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, and `ElysiumTextInput.o`
 `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`.
-`PebbleAppSupport.o` changed from corroborating evidence
+`ElysiumAppSupport.o` changed from corroborating evidence
 `57d91481a1947e0798ceed302c8cd66e288675ad9b8298896fac50b228957d63` to
 `d543fc8af3427cd5fcfea8d6ed113e32212b28f7040dfbbc957db0ba21a4e1f5`; it remains evidence only,
 with no new product or verifier surface.
@@ -4775,19 +4775,19 @@ Risk and closing evidence: unintended scope drift is blocked by exact frozen has
 unmodified product/symbol/binary scans; exhaustion regression requires real entry/latch/reset tests;
 Accessibility regression requires retained `===` identity, zero parent/child/root publication,
 structural replacement/retirement tests and installed VoiceOver Design Sign-off. Builder may edit
-only `EXPECTED_PEBBLE_PRODUCT_SHA256` in
-`scripts/verify-pebble-storage-release-surface.sh`. After that edit, rerun a clean warning-free release
+only `EXPECTED_ELYSIUM_PRODUCT_SHA256` in
+`scripts/verify-elysium-storage-release-surface.sh`. After that edit, rerun a clean warning-free release
 build, exact six-hash check, binary scan, unmodified verifier logic, focused and full suites, and all
 Revision II Security/code and installed gates. Any other source, product, verifier logic/surface, LAN,
 or frozen-hash delta invalidates this amendment.
 
-**Revision II Final Pebble Pin Amendment verdict: PASS.** The new executable hash is causally bounded
-to approved shipping remediation; only the Pebble pin may advance, and all downstream gates remain
+**Revision II Final Elysium Pin Amendment verdict: PASS.** The new executable hash is causally bounded
+to approved shipping remediation; only the Elysium pin may advance, and all downstream gates remain
 mandatory on the final bytes.
 
 ## Revision II Stale Test-contract Reconciliation Amendment
 
-The five reproducible failures at `PebbleStorageAdversarialTests.swift:480` and
+The five reproducible failures at `ElysiumStorageAdversarialTests.swift:480` and
 `TextEntrySourceTests.swift:18,140,184,194` assert superseded implementation ownership. They must be
 replaced one-for-one with the stronger Revision II contracts below; every other passing assertion in
 both tests remains unchanged. No test may be deleted, skipped, renamed out of a gate, or weakened to
@@ -4796,25 +4796,25 @@ mere token presence when an ordering/absence invariant is specified.
 ### Exact assertion replacements
 
 1. In
-   `PebbleStorageAdversarialTests.testReleaseSurfaceVerifierIsExecutableFailClosedAndIntegrated`,
+   `ElysiumStorageAdversarialTests.testReleaseSurfaceVerifierIsExecutableFailClosedAndIntegrated`,
    retain the executable/verifier-content and complete pre-push ordering assertions. Replace only the
    obsolete pipeline `swift build -> verifier -> binary` block. Assert that `scripts/pipeline.sh`
    contains exactly one `scripts/installed-signoff-receipt.sh run-prepare-gates`, ordered before
    `installed-signoff-receipt.sh verify-current`, `PENDING_INSTALLED_SIGNOFF`, and `exit 75`; contains
    no direct `swift package clean`, release verifier, binary scanner, AppKit driver, `swift test`,
-   `pebsmoke`, `pebble install`, `RELEASE_HASH=`, caller log/digest/count/status, or PASS input; and
+   `elysmoke`, `elysium install`, `RELEASE_HASH=`, caller log/digest/count/status, or PASS input; and
    uses `set -euo pipefail`. Read `scripts/installed-signoff-receipt.swift` and assert its
    `closedGateSpecs` range contains exactly seven command IDs in this exact order:
    `source-security`, `release-build`, `release-surface`, `binary-scan`, `appkit-text-entry`,
-   `xctest`, `pebsmoke`. In `runAuthoritativePrepare`, require ordering of `runner.run` before
+   `xctest`, `elysmoke`. In `runAuthoritativePrepare`, require ordering of `runner.run` before
    nonzero-status rejection, count parsing, private log write and sealed entry; all seven entries and
    gate evidence validation before install; and install/artifact validation before
    `preparing -> prepared`. Thus integration remains fail-closed even though the pipeline no longer
    owns individual gates.
 
 2. In `TextEntrySourceTests.testCanonicalKeyDownOwnsOrdinaryTextAndPreflightDoesNotFingerprintIt`,
-   replace the stale `pebbleExhaustedInputDisposition(` expectation. Require AppInputRouter's owned
-   `private let exhaustionLatch = PebbleAppInputExhaustionLatch()`; require
+   replace the stale `elysiumExhaustedInputDisposition(` expectation. Require AppInputRouter's owned
+   `private let exhaustionLatch = ElysiumAppInputExhaustionLatch()`; require
    `exhaustionLatch.disposition` before the protected-equivalent branch; require
    `exhaustionLatch.recordFlagsChanged` before either release or `modifierSynthesizer.update` in the
    `flagsChanged` span; require `routingSerialExhausted = true` before `exhaustionLatch.exhaust()` on
@@ -4881,7 +4881,7 @@ receipt-authority or Accessibility behavior change is authorized.
 stronger exact replacements that prove current ownership and fail-closed ordering without deleting
 coverage. Build may resume only with the specified test-only edits and renewed downstream evidence.
 
-## Design Review — Revision II Final Pebble Pin Amendment (2026-07-11)
+## Design Review — Revision II Final Elysium Pin Amendment (2026-07-11)
 
 Reviewed through plan SHA-256
 `35c54996ce7e29354da0e75450352eb15e7ac9430558794c47e5b71e366f1c5b`. The one-pin amendment does
@@ -4903,12 +4903,12 @@ exhaustion-latch and scalar-only retained-tree remediation, with these binding c
    input-routing or verifier behavior, cannot advance any other frozen artifact, and cannot replace
    the complete installed text-entry and VoiceOver Design Sign-off matrix on the final bytes.
 
-**Revision II Final Pebble Pin Amendment Design Review verdict: PASS.** Exact one-pin authorization
+**Revision II Final Elysium Pin Amendment Design Review verdict: PASS.** Exact one-pin authorization
 preserves the approved text-entry, exhaustion and stable RPG/VoiceOver interaction contracts under
 the binding conditions above. Builder may make only the named pin edit; all downstream installed
 Design Sign-off and verification gates remain mandatory.
 
-## Security (plan) — Revision II Final Pebble Pin Amendment (2026-07-11)
+## Security (plan) — Revision II Final Elysium Pin Amendment (2026-07-11)
 
 Independently reviewed the amendment and Design Review at plan SHA-256
 `820be6aff14ad4583bf2a75e98a6c129809f7060724b5d907848a7d133bbc3aa` against the approved Revision
@@ -4919,21 +4919,21 @@ boundary.
 
 None.
 
-The current release `Pebble` bytes independently hash to
+The current release `Elysium` bytes independently hash to
 `406929c1592d50f964c8dcc0976358dbe1c1c89885aff0c5f6027beda4f3f347`; the verifier still contains
 the prior `f5eb66575e17a7bf1ea31427c2021968c633b7e779c8f9fcba9329a7de33ac90` pin, so the authorized
 Builder delta is exactly one existing constant replacement and no verifier-logic change. The shipping
 causal scope is the approved exhaustion-latch and scalar-only retained-RPG-tree remediation through
-`PebbleAppSupport`. Its changed object digest
+`ElysiumAppSupport`. Its changed object digest
 `d543fc8af3427cd5fcfea8d6ed113e32212b28f7040dfbbc957db0ba21a4e1f5` remains corroborating evidence
 only and does not become a product, verifier pin, or checked surface.
 
-The four frozen verifier artifacts independently remain exact: `PebbleStorage.o`
-`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `PebbleCore.o`
-`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, `PebbleTextInput.o`
-`547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`, and `pebsmoke`
+The four frozen verifier artifacts independently remain exact: `ElysiumStorage.o`
+`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `ElysiumCore.o`
+`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, `ElysiumTextInput.o`
+`547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`, and `elysmoke`
 `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`. Package products remain
-exactly `Pebble` and `pebsmoke`; no AppSupport/Revision II LAN or Sign protocol surface is introduced.
+exactly `Elysium` and `elysmoke`; no AppSupport/Revision II LAN or Sign protocol surface is introduced.
 
 Closing conditions are binding: after the one pin edit, rebuild clean and warning-free; remeasure all
 six digests; rerun the unchanged release-surface verifier and binary scan; rerun focused and full
@@ -4945,7 +4945,7 @@ Architecture and Security.
 Review boundary: plan and current read-only artifact verification only. No code, pin, build,
 deployment, commit, or push was performed by Security.
 
-**Security (plan) verdict: PASS.** The new Pebble digest is causally and mechanically bounded to the
+**Security (plan) verdict: PASS.** The new Elysium digest is causally and mechanically bounded to the
 approved Revision II shipping remediation; Builder may replace only the named product-pin value and
 must produce every renewed closing artifact before downstream approval.
 
@@ -5025,7 +5025,7 @@ renewed.
 
 At plan SHA-256 `c8174be1c2043cd4b6e4e927e80da8ccc69e70eb995196c8e7e634449375ee9f`,
 extend replacement 5 only in
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift`. The test must read both Swift helpers and both
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift`. The test must read both Swift helpers and both
 wrappers as four distinct sources:
 
 - `scripts/observe-installed-signoff.swift`
@@ -5044,11 +5044,11 @@ reject arbitrary command construction by containing no `eval`, `sh -c`, `bash -c
 forwarding; they may invoke only their fixed receipt commands.
 
 Machine-check the three serialized schemas by isolating their dictionary/key-set source ranges, not
-by scanning the whole file. `PebbleInstalledCommandEvidenceV1` is limited exactly to `schema`,
+by scanning the whole file. `ElysiumInstalledCommandEvidenceV1` is limited exactly to `schema`,
 `commandID`, `captureStatus`, `axStatus`, `windowID`, `screenshotSHA256`, `axReportSHA256`, and
-`operationLogSHA256`. `PebbleInstalledAXEvidenceV1` is limited exactly to `schema`, `itemID`,
+`operationLogSHA256`. `ElysiumInstalledAXEvidenceV1` is limited exactly to `schema`, `itemID`,
 `windowCount`, `elementCount`, `focusedCount`, `settableValueCount`, `finiteFrameCount`, and
-`roleCounts`. `PebbleDesignerAttestationV2` is limited exactly to `schema`, `verdict`,
+`roleCounts`. `ElysiumDesignerAttestationV2` is limited exactly to `schema`, `verdict`,
 `checklistPassed`, `checklistTotal`, `sealedEvidenceSHA256`, `designerPID`, `designerProcessStart`, and
 `timestamp`. In those ranges assert absence of fields or values named `text`, `enteredText`, `value`,
 `selectedText`, `clipboard`, `pasteboard`, `sentinel`, `axValue`, `description`, `label`, or `help`.
@@ -5184,7 +5184,7 @@ Designer, observed or later state, is stale and must fail validation; no old evi
 or re-signed. Builder must invalidate the old attempt and rerun the authoritative
 `scripts/pipeline.sh --prepare-installed-signoff` path so the new observer digest, content digest,
 challenges, evidence and installed proof are freshly bound. The edit is nonshipping and must not
-change Pebble, pebsmoke, Storage, Core, TextInput or evidence-only AppSupport artifact hashes, any
+change Elysium, elysmoke, Storage, Core, TextInput or evidence-only AppSupport artifact hashes, any
 verifier pin/surface, package product or LAN protocol.
 
 Risk and closing evidence: usability regression is blocked by asserting the exact replacement string
@@ -5214,7 +5214,7 @@ Reviewed through plan SHA-256
 the correct destination, empty-field precondition, one manual action and privacy boundary, but it is
 not yet truthful or unambiguous enough for the installed flow.
 
-- **[BLOCKING]** `then return when Pebble shows the action completed` implies an in-app completion
+- **[BLOCKING]** `then return when Elysium shows the action completed` implies an in-app completion
   message or state that the contract does not establish, and `return` does not identify the terminal
   awaiting the user. Replace the authorized line with exactly:
 
@@ -5256,7 +5256,7 @@ binding correction exactly. The revised line identifies the screen and empty fie
 manual Paste without prescribing keyboard versus menu/Accessibility activation, uses the field
 update as the truthful visual or spoken result cue, and explicitly returns the user to the waiting
 terminal. It reveals no sentinel, entered value or clipboard content and does not imply observation,
-Designer approval or an unimplemented Pebble completion message. All privacy, stale-evidence,
+Designer approval or an unimplemented Elysium completion message. All privacy, stale-evidence,
 fresh-receipt and installed-proof conditions remain binding.
 
 **Observer Manual-Paste Copy Remediation Design re-review verdict: PASS.** The prior Design blocker
@@ -5290,7 +5290,7 @@ content digest, the one-line edit invalidates every prior prepared, pending-Desi
 later receipt on validation. No old evidence may transition, resume, or be attested. Builder must
 replace the attempt through the monotonic authoritative path and regenerate helper/content digests,
 one-shot challenges, evidence, installed observation and Designer approval; sequence authority may
-advance but never reset. The edit remains nonshipping and cannot change Pebble, pebsmoke,
+advance but never reset. The edit remains nonshipping and cannot change Elysium, elysmoke,
 Storage/Core/TextInput/AppSupport hashes, verifier logic/pins, products, protocols or LAN surface.
 
 Closing conditions are exact: change no branch, prompt order, sentinel check, checklist, schema,
@@ -5310,10 +5310,10 @@ requirements. Builder may implement only that literal replacement under the bind
 ## Strict codesign Designated-requirement Parser Remediation
 
 At plan SHA-256 `41f8239b64cc8eefb2733b55bfdade81c51bcb63a68b5a268f97a5550049622a`,
-read-only execution of `/usr/bin/codesign -d -r- /Applications/Pebble.app` succeeded and emitted:
+read-only execution of `/usr/bin/codesign -d -r- /Applications/Elysium.app` succeeded and emitted:
 
 ```text
-Executable=/Applications/Pebble.app/Contents/MacOS/Pebble
+Executable=/Applications/Elysium.app/Contents/MacOS/Elysium
 # designated => cdhash H"cbc0e038d072ccf610c573850d66aaae8f1abb23"
 ```
 
@@ -5327,7 +5327,7 @@ both trust-boundary parsers require the same minimal grammar correction.
 Capture output directly from a successful `/usr/bin/codesign -d -r- <canonical bundle>` invocation;
 no caller-supplied output or PATH-selected executable is authoritative. After allowing one terminal
 newline only, require exactly two records in exact order: one
-`Executable=<expected canonical bundle>/Contents/MacOS/Pebble` record and one designated-requirement
+`Executable=<expected canonical bundle>/Contents/MacOS/Elysium` record and one designated-requirement
 record at column zero. The second record may begin with exactly either `designated => ` or
 `# designated => `. The optional prefix is exactly one codesign-owned hash and one ASCII space; do
 not treat general comments as requirements. Strip only the optional exact `# ` and the exact
@@ -5372,13 +5372,13 @@ Changing either parser changes the exhaustive repository-content digest; changin
 also changes the compiled authority/observer digest. Every earlier preparing, prepared, pending-
 Designer, observed or later receipt and package manifest is stale and must be invalidated through the
 monotonic authority. Builder must rerun the authoritative clean pipeline, package/install, challenges,
-observation, Designer review and all evidence. These are nonshipping script/test changes: Pebble,
-pebsmoke, Storage, Core, TextInput and evidence-only AppSupport hashes and every verifier/product/LAN
+observation, Designer review and all evidence. These are nonshipping script/test changes: Elysium,
+elysmoke, Storage, Core, TextInput and evidence-only AppSupport hashes and every verifier/product/LAN
 surface must remain unchanged.
 
 Builder conditions: edit only `scripts/package-app.sh`, the designated-requirement parser in
 `scripts/installed-signoff-receipt.swift`, the minimum shared/nonshipping parser test fixture if
-needed, `Tests/PebbleReleaseGateTests/ReleaseGateTests.swift`, focused source-contract tests, and
+needed, `Tests/ElysiumReleaseGateTests/ReleaseGateTests.swift`, focused source-contract tests, and
 `scripts/security-scan.sh` only to enforce the new executable category. Do not relax strict signing,
 canonical path/no-follow hashing, CDHash/identifier/seal checks, closed manifest fields, receipt
 sequence/state, observer privacy or any prior gate. Capture `/usr/bin/codesign` status separately so a
@@ -5434,7 +5434,7 @@ implementable. Live Security.framework output is exactly
 ### Condition
 
 - **[MEDIUM] parser capture contract ->** Live macOS does not emit the two records on one ordered
-  stream: `Executable=/Applications/Pebble.app/Contents/MacOS/Pebble\n` is written to **stderr** and
+  stream: `Executable=/Applications/Elysium.app/Contents/MacOS/Elysium\n` is written to **stderr** and
   `# designated => cdhash H"cbc0e038d072ccf610c573850d66aaae8f1abb23"\n` is written to
   **stdout**. The plan's current "exactly two records in exact order" wording is ambiguous and a
   merged `2>&1` parser cannot securely assign a total order across descriptors; the current Swift
@@ -5467,7 +5467,7 @@ downstream gate must be regenerated on the final helper/content digests.
 ## Codesign Two-channel Raw-capture Architecture Revision
 
 At plan SHA-256 `a36f090d732f909086df15e22a69642cba5d8f513ea5d775461b5dc3a9790cd8`,
-raw read-only capture confirms current `/usr/bin/codesign -d -r- /Applications/Pebble.app` exits zero
+raw read-only capture confirms current `/usr/bin/codesign -d -r- /Applications/Elysium.app` exits zero
 and writes exactly one LF-terminated requirement record to stdout and exactly one LF-terminated
 executable record to stderr. This revision supersedes the earlier merged-stream/two-record ordering
 language for both package and receipt parsers; no merge or cross-descriptor ordering is authoritative.
@@ -5496,7 +5496,7 @@ has proved that command substitution cannot erase evidence.
 The channel contracts are independent and exact:
 
 - stderr bytes equal exactly `Executable=<expected canonical executable>\n`, where the expected
-  executable is derived from the canonical bundle (`Contents/MacOS/Pebble`), never parsed as a new
+  executable is derived from the canonical bundle (`Contents/MacOS/Elysium`), never parsed as a new
   authority. No decoration, second record, requirement, whitespace or other output is accepted.
 - stdout contains exactly one record beginning at byte zero with either `designated => ` or exact
   codesign-owned `# designated => `, followed by the prior nonempty bounded payload and one LF. No
@@ -5541,7 +5541,7 @@ manifest value and Security-framework equality. Seeded channel/byte mutation cov
 
 Authorized edits remain limited to `scripts/package-app.sh`, the codesign runner/parser in
 `scripts/installed-signoff-receipt.swift`, the minimum nonshipping shared raw-channel parser/capture
-seam in `Sources/PebbleReleaseGate/**`, `Tests/PebbleReleaseGateTests/**`, focused source-contract and
+seam in `Sources/ElysiumReleaseGate/**`, `Tests/ElysiumReleaseGateTests/**`, focused source-contract and
 process fixtures, and `scripts/security-scan.sh` only to enforce the category. Builder must not use
 command substitution before validation, merge descriptors, sequentially drain bounded pipes, trim
 unknown bytes, accept extra diagnostics, relax canonical path/signature/CDHash/seal/manifest/state
@@ -5659,10 +5659,10 @@ the retained router may classify as `.consumedDuplicate`. Resetting one half of 
 while retaining its duplicate ledger violates uniqueness and can drop legitimate post-reactivation
 keys. The fingerprint hypothesis is disproved by current code: `RPGPureInputRouter.route` explicitly
 ignores `fingerprint` and `nowMilliseconds`; duplicate authorization uses the independently incremented
-`PebbleInputDeliveryIdentity.keyboard(routingSerial)`. Reintroducing `NSEvent.eventNumber`, accepting
+`ElysiumInputDeliveryIdentity.keyboard(routingSerial)`. Reintroducing `NSEvent.eventNumber`, accepting
 nonpositive timestamp exceptions or weakening duplicate checks is neither necessary nor authorized.
 
-The driver also has an independent automation race. It waits a fixed three seconds while Pebble's
+The driver also has an independent automation race. It waits a fixed three seconds while Elysium's
 launch-fullscreen logic may retry at 1.2-second intervals up to five times, and it treats
 `NSRunningApplication.isActive` plus logical AX focus as proof that the fullscreen/key-window/
 first-responder/reactivation transaction is settled. It then posts six global HID key pairs with no
@@ -5673,14 +5673,14 @@ forbidden.
 
 ### Minimal remediation in dependency order
 
-1. In `Sources/Pebble/AppInputRouterM.swift`, make `resetPressedBindings()` one MainActor input-session
+1. In `Sources/Elysium/AppInputRouterM.swift`, make `resetPressedBindings()` one MainActor input-session
    reset. Before reusing serial zero or clearing exhaustion, replace `router` with a fresh
    `RPGPureInputRouter()` and clear `handledEquivalents`; then clear the configured-press and modifier
    ledgers, reset the physical serial/exhaustion flag, and reset the latch. Old duplicate identities
    and equivalent markers must never coexist with the restarted serial namespace. Within a session,
    the existing bounded 16-identity duplicate ledger and monotonic serial remain unchanged; exhaustion
    stays fail-closed until this defined lifecycle reset.
-2. In `Tests/PebbleAppKitIntegration/Driver.swift`, replace the fixed launch sleep with a bounded
+2. In `Tests/ElysiumAppKitIntegration/Driver.swift`, replace the fixed launch sleep with a bounded
    semantic barrier: exact active app/PID/bundle, exactly one focused AX window, launch fullscreen
    true and stable, stable finite geometry, and the unique GameView group over consecutive samples.
    After Finder reactivation, require the same focused-window barrier and deliberately invoke the
@@ -5703,7 +5703,7 @@ forbidden.
 - The driver must prove first post-reactivation input, every edit/range transition, AX field switching,
   retained element identity, resize retirement, cleanup and zero clipboard access. Run five
   consecutive cold-profile no-build gates against one exact release hash; any failure fails the
-  evidence set, with no retry-discard. Then run full XCTest, `security-scan.sh`, pebsmoke, binary scan,
+  evidence set, with no retry-discard. Then run full XCTest, `security-scan.sh`, elysmoke, binary scan,
   verifier and installed Design/Security/Test gates.
 
 Risks map as follows: old-event/new-session collision -> clear ledger and markers atomically before
@@ -5712,13 +5712,13 @@ bounded router ledger and same-event tests; automation false red -> semantic ful
 barriers and per-event acknowledgements; false green -> no retry masking and explicit intermediate
 states; privacy regression -> aggregate-only failures and unchanged zero-clipboard driver.
 
-Builder may edit only `Sources/Pebble/AppInputRouterM.swift`,
-`Tests/PebbleAppKitIntegration/Driver.swift`, the focused InputChord/AppInputRouter/TextEntry tests and
+Builder may edit only `Sources/Elysium/AppInputRouterM.swift`,
+`Tests/ElysiumAppKitIntegration/Driver.swift`, the focused InputChord/AppInputRouter/TextEntry tests and
 this plan's directly affected source contract. Do not change Core delivery-identity shape, text model,
 AX setters, RPG AX, AppSupport latch, UI copy, clipboard/Paste behavior, package/receipt/parser,
-products, LAN or verifier logic. The shipping AppInputRouter edit will change only the Pebble product
+products, LAN or verifier logic. The shipping AppInputRouter edit will change only the Elysium product
 hash; stop after a clean warning-free build for a fresh exact one-pin Architecture/Security review.
-Storage/Core/TextInput/pebsmoke and evidence-only AppSupport hashes must remain frozen.
+Storage/Core/TextInput/elysmoke and evidence-only AppSupport hashes must remain frozen.
 
 **Diagnosis verdict: FAIL.** The current product can discard valid post-reactivation keys because its
 serial namespace and duplicate ledger reset inconsistently, and the current real-AppKit verifier can
@@ -5777,7 +5777,7 @@ authorized.
 Immediately before activating Finder, capture only fixed-test expectations and retained identities:
 the original World Name AX element, current GameView group/window identity, World Name length `1`,
 selected range `{1,0}`, focused `true`, and Seed focused `false`. Issue Finder activation exactly once,
-observe resignation, then issue Pebble activation exactly once. The reactivation wait is observation-
+observe resignation, then issue Elysium activation exactly once. The reactivation wait is observation-
 only and requires the exact app/PID/bundle, one focused stable fullscreen AX window, stable finite
 geometry and the unique current GameView group.
 
@@ -5838,17 +5838,17 @@ discarded, retried, replaced or excluded, and the gate has no retry-until-green 
 full suite, security, smoke, binary/verifier, exact-hash/pin and installed gates.
 
 The automated AX proof remains corroboration only. Final Design Sign-off must inspect the installed
-Pebble app with VoiceOver and prove field names/roles, focus announcements, caret navigation, World
+Elysium app with VoiceOver and prove field names/roles, focus announcements, caret navigation, World
 Name/Seed switching, retained identity/context through reactivation, and resize retirement. It must
 preserve manual Paste and entered-text privacy and may record only the previously approved private/
 aggregate evidence. No UI copy, text/AX model, Paste/clipboard or RPG Accessibility change is
 authorized.
 
 Authorized files and the pin stop remain exactly those in the prior remediation: shipping changes are
-limited to `Sources/Pebble/AppInputRouterM.swift`; nonshipping changes to
-`Tests/PebbleAppKitIntegration/Driver.swift` and focused InputChord/AppInputRouter/TextEntry tests.
-Storage/Core/TextInput/pebsmoke/AppSupport hashes and all verifier logic, product and LAN surfaces stay
-frozen; the changed Pebble hash requires fresh exact one-pin Architecture/Security approval.
+limited to `Sources/Elysium/AppInputRouterM.swift`; nonshipping changes to
+`Tests/ElysiumAppKitIntegration/Driver.swift` and focused InputChord/AppInputRouter/TextEntry tests.
+Storage/Core/TextInput/elysmoke/AppSupport hashes and all verifier logic, product and LAN surfaces stay
+frozen; the changed Elysium hash requires fresh exact one-pin Architecture/Security approval.
 
 **AppKit Reactivation/Input-identity Remediation Architecture Revision verdict: PASS.** The revised
 driver first proves reactivation preservation, then performs each action once with observation-only
@@ -5903,7 +5903,7 @@ ledger, exact AppKit-event marker and fail-closed exhaustion semantics remain un
 defined lifecycle reset can release exhaustion, with no event-number/timestamp authorization escape.
 
 The revised driver does not repair the product before proving it. It first binds the exact app, PID,
-bundle, release hash, one stable fullscreen window and unique GameView; after one Finder/Pebble
+bundle, release hash, one stable fullscreen window and unique GameView; after one Finder/Elysium
 activation pair it proves the original field/group/window identity, fixed test value length/range and
 focus state before any setter. The later one-shot AX setter is explicitly nonmutating. A fixed action-
 ID ledger covers every activation, click, AX setter and global HID down/up pair; waits are predicate-
@@ -5918,10 +5918,10 @@ Closing evidence is exactly five ordered cold fresh-profile first attempts again
 release hash, requiring five passes and zero discarded/replaced failures, followed by the full test,
 security, smoke, binary/verifier, exact-hash/pin and installed gates.
 
-Authorized shipping scope remains only `Sources/Pebble/AppInputRouterM.swift`; driver and focused tests
+Authorized shipping scope remains only `Sources/Elysium/AppInputRouterM.swift`; driver and focused tests
 are nonshipping. Core delivery identity, text/AX/RPG models, AppSupport latch, UI copy, Paste/clipboard,
-receipt/parser, products, verifier logic and LAN stay frozen. The resulting Pebble hash must stop for
-the required exact one-pin Architecture/Security review; Storage/Core/TextInput/pebsmoke and evidence-
+receipt/parser, products, verifier logic and LAN stay frozen. The resulting Elysium hash must stop for
+the required exact one-pin Architecture/Security review; Storage/Core/TextInput/elysmoke and evidence-
 only AppSupport hashes may not move.
 
 Review boundary: plan and read-only source inspection only. No source, test, build, AppKit run,
@@ -5933,29 +5933,29 @@ exhaustion, privacy or scope. Builder may proceed only within the named files an
 Security (code), five-run AppKit evidence, installed Design Sign-off, independent Test and every
 downstream gate remain mandatory against stable final bytes.
 
-## AppKit Reactivation Final Pebble Pin Amendment (2026-07-11)
+## AppKit Reactivation Final Elysium Pin Amendment (2026-07-11)
 
 Reviewed the final release artifacts and approved remediation scope at plan SHA-256
 `a94429b087ca549e6222d085dc19bf9f956594fec2ae94ec263ac95b37db63fe`. The only authorized shipping
-change is the ordered MainActor input-session reset in `Sources/Pebble/AppInputRouterM.swift`: it
+change is the ordered MainActor input-session reset in `Sources/Elysium/AppInputRouterM.swift`: it
 replaces the pure router and clears handled-equivalent state before serial-zero and exhaustion-latch
 reuse, then clears configured-press and modifier state in the same transaction. Driver and focused-
-test changes are nonshipping. The resulting release `Pebble` SHA-256 is
+test changes are nonshipping. The resulting release `Elysium` SHA-256 is
 `a25cabbf1da2bc4dacceb6bd2b02dead4dfa82f38dcf7ace9f956d7592aee998`, replacing only the previously
 reviewed product pin `406929c1592d50f964c8dcc0976358dbe1c1c89885aff0c5f6027beda4f3f347`.
 
 The focused AppInputRouter/text-entry suite reports 33/33 passing, the AppKit driver typecheck and
 scope-diff checks are green, and the warning-free release build completed in 116.27 seconds. The
 release binary security scan passes. The storage-surface verifier reaches its intended one-pin stop
-only because it still contains the old `Pebble` product hash; every preceding frozen check passes.
+only because it still contains the old `Elysium` product hash; every preceding frozen check passes.
 The other four verifier-pinned artifact hashes remain exact:
 
-- `pebsmoke`: `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`
-- `PebbleStorage.o`: `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`
-- `PebbleCore.o`: `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`
-- `PebbleTextInput.o`: `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`
+- `elysmoke`: `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`
+- `ElysiumStorage.o`: `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`
+- `ElysiumCore.o`: `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`
+- `ElysiumTextInput.o`: `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`
 
-The evidence-only `PebbleAppSupport.o` hash also remains exact at
+The evidence-only `ElysiumAppSupport.o` hash also remains exact at
 `d543fc8af3427cd5fcfea8d6ed113e32212b28f7040dfbbc957db0ba21a4e1f5`; this amendment does not add it
 to the verifier surface. These unchanged artifacts, the shipping/nonshipping diff boundary and the
 passing binary scan establish that the new product digest is caused by the approved input-session
@@ -5964,8 +5964,8 @@ drift.
 
 ### Exact scope, risks, tests and Conditions for Builder
 
-Builder may edit only the existing `EXPECTED_PEBBLE_PRODUCT_SHA256` value in
-`scripts/verify-pebble-storage-release-surface.sh`, changing it from the old digest above to the exact
+Builder may edit only the existing `EXPECTED_ELYSIUM_PRODUCT_SHA256` value in
+`scripts/verify-elysium-storage-release-surface.sh`, changing it from the old digest above to the exact
 new digest above. No verifier logic, path, product, surface, error behavior or other expected hash may
 change. No source, test, AppSupport pin/surface, receipt/parser, product or LAN edit is authorized by
 this amendment.
@@ -5979,20 +5979,20 @@ gate.
 
 After the exact one-line pin change, Builder must rerun the clean warning-free release build, confirm
 the five verifier hashes plus the evidence-only AppSupport hash above, rerun the binary scan and prove
-the otherwise unchanged verifier passes. The same final `Pebble` bytes must then pass the full XCTest,
-security-scan and `pebsmoke` gates; five ordered cold fresh-profile AppKit first attempts with zero
+the otherwise unchanged verifier passes. The same final `Elysium` bytes must then pass the full XCTest,
+security-scan and `elysmoke` gates; five ordered cold fresh-profile AppKit first attempts with zero
 failures, retries, replacements or discarded outcomes; fresh Security (code); installed VoiceOver
 Design Sign-off; the release pipeline, receipt/deployed-bundle verification and authorized deployment.
 Any other hash, source, verifier, product, receipt or LAN delta invalidates this amendment and requires
 renewed review before continuing.
 
-**AppKit Reactivation Final Pebble Pin Architecture verdict: PASS.** The exact one-pin update from
+**AppKit Reactivation Final Elysium Pin Architecture verdict: PASS.** The exact one-pin update from
 `406929c1592d50f964c8dcc0976358dbe1c1c89885aff0c5f6027beda4f3f347` to
 `a25cabbf1da2bc4dacceb6bd2b02dead4dfa82f38dcf7ace9f956d7592aee998` is causally justified and
 authorized. Architecture performed no source, test or verifier-pin edit. Full runtime, Security,
 installed-design, Test, deployment and source-control closure remains incomplete and mandatory.
 
-## Design Review — AppKit Reactivation Final Pebble Pin Amendment (2026-07-11)
+## Design Review — AppKit Reactivation Final Elysium Pin Amendment (2026-07-11)
 
 Reviewed through plan SHA-256
 `ad5f4a7c8c029ca4e7b781f93367fbb330175e4ad7080e5e15ef20959831b4cc`. The exact product-pin
@@ -6012,14 +6012,14 @@ Accessibility behavior and preserves the approved design only under these bindin
    must confirm names/roles, focus announcements, caret navigation, World Name/Seed switching,
    retained focus/context through reactivation and resize retirement. The approved manual-Paste copy,
    entered-text privacy, UI and RPG Accessibility behavior remain unchanged.
-4. Only the named Pebble product hash may advance. Any additional source, verifier behavior, frozen
+4. Only the named Elysium product hash may advance. Any additional source, verifier behavior, frozen
    hash, receipt, product or LAN delta invalidates this Design approval and all later evidence.
 
-**AppKit Reactivation Final Pebble Pin Amendment Design Review verdict: PASS.** Exact one-pin
+**AppKit Reactivation Final Elysium Pin Amendment Design Review verdict: PASS.** Exact one-pin
 bookkeeping preserves the approved text, caret, focus and VoiceOver contracts; five undiscarded cold
 first attempts and installed VoiceOver Design Sign-off remain mandatory before completion.
 
-## Security (plan) — AppKit Reactivation Final Pebble Pin Amendment (2026-07-11)
+## Security (plan) — AppKit Reactivation Final Elysium Pin Amendment (2026-07-11)
 
 Independently reviewed the amendment, Design PASS, current release artifacts, product graph, binary
 scan and verifier pin at plan SHA-256
@@ -6030,26 +6030,26 @@ reactivation/input-session remediation and frozen-surface conditions.
 
 None.
 
-The current clean release `Pebble` independently hashes to
+The current clean release `Elysium` independently hashes to
 `a25cabbf1da2bc4dacceb6bd2b02dead4dfa82f38dcf7ace9f956d7592aee998`, while the verifier still
 contains only the prior `406929c1592d50f964c8dcc0976358dbe1c1c89885aff0c5f6027beda4f3f347`
 product pin. The shipping causal delta is limited to the approved MainActor input-session reset in
-`Sources/Pebble/AppInputRouterM.swift`; the AppKit driver and focused tests are nonshipping. The
-release binary security scan passes and package products remain exactly `Pebble` and `pebsmoke`.
+`Sources/Elysium/AppInputRouterM.swift`; the AppKit driver and focused tests are nonshipping. The
+release binary security scan passes and package products remain exactly `Elysium` and `elysmoke`.
 
-Every other measured artifact remains frozen: `pebsmoke`
-`d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, `PebbleStorage.o`
-`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `PebbleCore.o`
-`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, `PebbleTextInput.o`
+Every other measured artifact remains frozen: `elysmoke`
+`d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, `ElysiumStorage.o`
+`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `ElysiumCore.o`
+`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, `ElysiumTextInput.o`
 `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`, and evidence-only
-`PebbleAppSupport.o` `d543fc8af3427cd5fcfea8d6ed113e32212b28f7040dfbbc957db0ba21a4e1f5`.
+`ElysiumAppSupport.o` `d543fc8af3427cd5fcfea8d6ed113e32212b28f7040dfbbc957db0ba21a4e1f5`.
 No AppSupport verifier surface, product, receipt/parser, protocol, Sign-specific LAN symbol or other
 LAN scope is introduced.
 
-Builder may replace exactly the existing `EXPECTED_PEBBLE_PRODUCT_SHA256` value and nothing else in
+Builder may replace exactly the existing `EXPECTED_ELYSIUM_PRODUCT_SHA256` value and nothing else in
 the verifier. After that one-line edit, closing evidence must be renewed on stable final bytes: clean
 warning-free release build; all six hashes; otherwise unchanged verifier and binary scan; focused
-33/33 plus full XCTest, `security-scan.sh` and 457-check pebsmoke; five ordered cold, independently
+33/33 plus full XCTest, `security-scan.sh` and 457-check elysmoke; five ordered cold, independently
 packaged fresh-profile AppKit first attempts using the same measured hash with five passes and no
 retry/replacement/discard; fresh Security (code); installed VoiceOver Design Sign-off; independent
 Test; authoritative pipeline/receipt and deployed-bundle verification; and authorized deployment.
@@ -6059,7 +6059,7 @@ receipt or LAN delta invalidates this approval and returns to Architecture and S
 Review boundary: plan and read-only artifact/source verification only. No code, pin, build, AppKit
 run, installed state, deployment, commit or push was changed or performed by Security.
 
-**Security (plan) verdict: PASS.** The new Pebble digest is causally bounded to the approved router-
+**Security (plan) verdict: PASS.** The new Elysium digest is causally bounded to the approved router-
 session repair, all other artifacts and surfaces remain frozen, and the exact one-pin edit is safe only
 with the complete five-cold/full/Security/installed/deployment renewal above.
 
@@ -6117,7 +6117,7 @@ retroactively prove an unobserved router receipt.
 
 ### Minimal remediation in dependency order
 
-1. Change only `Tests/PebbleAppKitIntegration/Driver.swift` to add one observation-only active-surface
+1. Change only `Tests/ElysiumAppKitIntegration/Driver.swift` to add one observation-only active-surface
    barrier. Success requires several consecutive samples spanning a defined minimum stability window,
    not a single sample or fixed sleep: `app.isActive`; exact
    `NSWorkspace.shared.frontmostApplication` object/PID/bundle/executable; exactly one AX window and
@@ -6125,7 +6125,7 @@ retroactively prove an unobserved router receipt.
    geometry; unique retained GameView group; and the expected retained field identities, aggregate
    values/ranges and focus state. A mismatching sample resets only the sample counter; it performs no
    action.
-2. Use that barrier after the one Pebble activation and before the preservation proof, immediately
+2. Use that barrier after the one Elysium activation and before the preservation proof, immediately
    before and after the one idempotent AX focus setter, and before every keyboard/AX action. Inside
    each existing one-shot ledger closure, perform one final non-waiting active/frontmost/focused-
    window/field identity check immediately before posting or setting. No run-loop turn or unrelated
@@ -6136,7 +6136,7 @@ retroactively prove an unobserved router receipt.
    length/range/focus. Do not print app names, paths, field values, event payloads or free-form AX
    content. This will distinguish activation loss from a routed-but-unapplied key without product
    instrumentation or global keyboard capture.
-4. Keep exactly one Finder activation, one Pebble activation and one execution of each existing
+4. Keep exactly one Finder activation, one Elysium activation and one execution of each existing
    action ID. Do not reactivate after a failed barrier, repost any event, use PID-targeted delivery,
    add retry-until-green, use a fixed sleep as the success condition, weaken the global HID proof, or
    add event-number/timestamp/fingerprint exceptions. A failed stability/action/postcondition check
@@ -6144,7 +6144,7 @@ retroactively prove an unobserved router receipt.
 
 ### Tests, risks and Conditions for Builder
 
-Strengthen `Tests/PebbleCoreTests/TextEntrySourceTests.swift` to require exact frontmost identity,
+Strengthen `Tests/ElysiumCoreTests/TextEntrySourceTests.swift` to require exact frontmost identity,
 consecutive semantic stability, the final in-ledger pre-action check, active-surface postconditions,
 action-scoped aggregate diagnostics and the existing action-free waits/one-shot completeness. Retain
 the focused router-session tests, driver typecheck, privacy scan, zero clipboard access, retained AX
@@ -6158,10 +6158,10 @@ ordered, independently packaged cold first attempts with five passes and zero re
 discard or selection. If any active-surface barrier or semantic action fails, stop the set and return
 the exact aggregate evidence to Architecture; do not continue simply to collect a later pass.
 
-Builder scope is limited to `Tests/PebbleAppKitIntegration/Driver.swift`, the directly affected
+Builder scope is limited to `Tests/ElysiumAppKitIntegration/Driver.swift`, the directly affected
 `TextEntrySourceTests` contract and this plan. No shipping source, AppInputRouter, Core/TextInput/
 AppSupport, verifier/pin, package/receipt/parser, product or LAN change is authorized. Consequently the
-release `Pebble` hash must remain `a25cabbf1da2bc4dacceb6bd2b02dead4dfa82f38dcf7ace9f956d7592aee998`
+release `Elysium` hash must remain `a25cabbf1da2bc4dacceb6bd2b02dead4dfa82f38dcf7ace9f956d7592aee998`
 and every frozen hash/pin remains exact. Any product-byte or broader verifier delta invalidates this
 plan. Build is blocked until renewed Design Review and Security (plan) approve this proof correction;
 after implementation, fresh Security (code), the focused/full/security/smoke gates, five-run set,
@@ -6183,7 +6183,7 @@ surface for global-HID usability and Accessibility proof. The final in-ledger ch
 diagnostics, retained failed set and prohibition on reactivation/repost/sleeps/product logging are
 also correct. One no-masking defect remains in the barrier contract:
 
-1. Only the first barrier immediately following the single Pebble activation may reset its consecutive
+1. Only the first barrier immediately following the single Elysium activation may reset its consecutive
    sample count while the requested activation settles within a fixed bound. Once that barrier and
    the pre-repair preservation proof establish the ready surface, readiness is a sustained invariant
    for the rest of the attempt. Every later pre-action barrier must start from the already-ready epoch;
@@ -6215,7 +6215,7 @@ failed set and unchanged product bytes remain binding.
 ### One settling barrier, then a fail-fast ready epoch
 
 Model reactivation verification as a one-way driver state transition. Immediately after the single
-`pebble.reactivate` action, and only there, the driver is in `settling`. Within one fixed deadline, an
+`elysium.reactivate` action, and only there, the driver is in `settling`. Within one fixed deadline, an
 observation-only barrier may require consecutive exact samples and reset that consecutive-sample
 count when a sample is not yet ready. It performs no activation, focus, keyboard, mouse or other
 repair action. Each successful sample requires the exact app/PID/bundle/executable and
@@ -6264,7 +6264,7 @@ keyboard tap or any other input observation to infer router receipt.
 ### Tests and Conditions for Builder
 
 Update the directly affected source contract to prove there is exactly one counter-resetting settling
-barrier and it occurs only after the single Pebble activation; the preservation proof precedes the
+barrier and it occurs only after the single Elysium activation; the preservation proof precedes the
 irreversible ready-epoch transition; no later pre-action path calls the settling helper, resets a
 counter or waits for readiness recovery; every one-shot action contains the adjacent final assertion;
 and every semantic poll sample calls a fail-fast active-surface assertion before checking the target
@@ -6272,8 +6272,8 @@ value/range. Add a negative source/driver test that a first post-ready mismatch 
 later supplied sample would be exact. Retain all prior action-ledger, ordering, aggregate-diagnostic,
 privacy, cleanup, AX identity/resize and router-session coverage.
 
-Builder scope remains only `Tests/PebbleAppKitIntegration/Driver.swift`, the directly affected
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift` contract and this plan. No shipping source,
+Builder scope remains only `Tests/ElysiumAppKitIntegration/Driver.swift`, the directly affected
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift` contract and this plan. No shipping source,
 AppInputRouter, verifier/pin, package/receipt/parser, product or LAN edit is authorized. The failed
 attempt-1 log and stopped set remain immutable evidence. Do not reactivate, repost, retry, replace or
 discard an outcome; do not use PID-targeted input or a fixed sleep as correctness. After implementation
@@ -6325,7 +6325,7 @@ global-HID time-of-check/use, action masking, evidence selection, privacy and fr
 
 None.
 
-The revised lifecycle is one-way and fail-closed. Exactly one post-`pebble.reactivate` `settling`
+The revised lifecycle is one-way and fail-closed. Exactly one post-`elysium.reactivate` `settling`
 barrier may reset only its consecutive observation count within a fixed deadline and may perform no
 action. The independent preservation proof then binds the unchanged app/PID/bundle/executable,
 frontmost app, focused fullscreen window/geometry, GameView group, retained fields and pre-repair
@@ -6387,8 +6387,8 @@ and its wrappers are not documented as pointer-canonical.
 
 Two separately labeled read-only diagnostics confirm this is deterministic rather than a three-second
 timing shortage. For the same stable process, frontmost versus PID/list wrappers reported pointer
-identity false, object equality true and PID equality true. More decisively, the exact packaged Pebble
-launch-completion object reported at both launch and Finder/Pebble reactivation:
+identity false, object equality true and PID equality true. More decisively, the exact packaged Elysium
+launch-completion object reported at both launch and Finder/Elysium reactivation:
 
 `active=true pointer=false equal=true pid=true bundle=true executable=true`.
 
@@ -6424,7 +6424,7 @@ Quartz coordinates, and preserves rather than weakens the fullscreen requirement
 
 ### Minimal remediation architecture
 
-1. In `Tests/PebbleAppKitIntegration/Driver.swift`, replace both `frontmost === app` checks—the active-
+1. In `Tests/ElysiumAppKitIntegration/Driver.swift`, replace both `frontmost === app` checks—the active-
    surface observation and resize transition—with value equality plus the existing exact PID/bundle/
    executable checks. No code path may compare `NSRunningApplication` wrappers by pointer identity.
 2. Preserve the one-way ReadyEpoch contract unchanged: only initial settling may reset consecutive
@@ -6449,7 +6449,7 @@ Quartz coordinates, and preserves rather than weakens the fullscreen requirement
 
 ### Tests and Conditions for Builder
 
-Update `Tests/PebbleCoreTests/TextEntrySourceTests.swift` to forbid `frontmost === app` and any other
+Update `Tests/ElysiumCoreTests/TextEntrySourceTests.swift` to forbid `frontmost === app` and any other
 frontmost `NSRunningApplication` pointer comparison; require value equality plus PID/bundle/executable
 in both active-surface and resize paths; prove structured settling diagnostics reach the timeout error;
 and require every named predicate, sample count and maximum-consecutive count in aggregate output.
@@ -6458,8 +6458,8 @@ are accepted while any PID/bundle/executable mismatch remains rejected. Retain t
 first-post-ready-mismatch-terminal, adjacent one-shot, action-free wait, privacy, cleanup, AX identity,
 resize and router-session tests.
 
-Builder scope remains only `Tests/PebbleAppKitIntegration/Driver.swift`, the directly affected
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift` contract and this plan. No shipping source,
+Builder scope remains only `Tests/ElysiumAppKitIntegration/Driver.swift`, the directly affected
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift` contract and this plan. No shipping source,
 AppInputRouter, verifier/pin, package/receipt/parser, product or LAN edit is authorized. Preserve the
 immutable failed `ready-epoch-cold-five-v1` logs; they cannot become a pass or be omitted. After renewed
 Design Review, Security (plan), Builder work and Security (code), start one distinctly named cold-five
@@ -6581,7 +6581,7 @@ A separately labeled diagnostic launched the exact packaged bytes and observed o
 presentation state. The active Quartz display bound was `x=0, y=0, width=1728, height=1117`. The
 corresponding `NSScreen.frame` was identical, `visibleFrame` was
 `x=58, y=0, width=1670, height=1084`, and backing scale was `2.0`. Once the launch transition settled,
-Pebble had one exact focused AX window with stable rectangle
+Elysium had one exact focused AX window with stable rectangle
 `x=0, y=33, width=1728, height=1084`.
 
 The window's published AX attribute names include `AXFullScreen` and `AXFullScreenButton`.
@@ -6607,7 +6607,7 @@ window as ready.
 ### Presentation contract revision
 
 The AppKit text-entry gate verifies usable global-HID text entry and reactivation in the presentation
-mode Pebble actually exposes. It must bind exactly one stable initial presentation mode rather than
+mode Elysium actually exposes. It must bind exactly one stable initial presentation mode rather than
 require display-filling geometry:
 
 - `fullscreen`: the exact AX window publishes a present Boolean `AXFullScreen == true`.
@@ -6634,7 +6634,7 @@ window loss.
 
 ### Minimal remediation architecture
 
-1. In `Tests/PebbleAppKitIntegration/Driver.swift`, replace exact display-bound equality with a typed
+1. In `Tests/ElysiumAppKitIntegration/Driver.swift`, replace exact display-bound equality with a typed
    `LaunchPresentationMode` and a fail-closed `AXFullScreen` Boolean reader. Attribute absence, wrong
    type, multiple windows or ambiguous mode fails with aggregate predicates; geometry must never infer
    fullscreen when the AX state is available.
@@ -6667,7 +6667,7 @@ clipboard content.
 
 ### Tests and Conditions for Builder
 
-Update `Tests/PebbleCoreTests/TextEntrySourceTests.swift` to forbid
+Update `Tests/ElysiumCoreTests/TextEntrySourceTests.swift` to forbid
 `CGDisplayBounds($0) == fullscreenRectangle`, `fullscreenRectangle == fullscreenDisplayBounds` and any
 geometry-derived fullscreen Boolean. Require presentation binding before title navigation, typed AX
 fullscreen state, unique containing-display and matching-visible-CG-window checks, and exact bound-mode
@@ -6681,8 +6681,8 @@ adjacent one-shot checks, first-mismatch failure, action-free waits, privacy, cl
 resize and router-session coverage. The immutable v1 and v2 failed sets remain evidence and cannot be
 relabelled, omitted or selected away.
 
-Builder scope remains only `Tests/PebbleAppKitIntegration/Driver.swift`, the directly affected
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift` contract and this plan. No shipping source,
+Builder scope remains only `Tests/ElysiumAppKitIntegration/Driver.swift`, the directly affected
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift` contract and this plan. No shipping source,
 AppInputRouter, verifier/pin, package/receipt/parser, product or LAN edit is authorized. Product and
 all frozen hashes remain unchanged. After renewed Design Review, Security (plan), Builder work and
 Security (code), begin one distinctly named cold-five set on the same exact release bytes; it must
@@ -6702,11 +6702,11 @@ Review and Security (plan), followed by every unchanged downstream gate.
 Reviewed through plan SHA-256
 `52bfc9b3657d2e89e5b8efc80e5699092111c695873f4897630f4c5edfbcf2d0`. The revision follows macOS
 presentation conventions by treating typed `AXFullScreen` state as authoritative, accepting AppKit's
-system-managed inset, and recognizing only Pebble's deliberately revealed fallback. It preserves
+system-managed inset, and recognizing only Elysium's deliberately revealed fallback. It preserves
 adaptive interaction and no-masking evidence under these binding conditions:
 
 1. Presentation binds before title navigation. The observation-only launch deadline is derived from
-   Pebble's documented fullscreen-attempt/fallback schedule plus a fixed bounded margin; it may sample
+   Elysium's documented fullscreen-attempt/fallback schedule plus a fixed bounded margin; it may sample
    transition state but may not sleep, toggle, activate or extend itself. `windowedFallback` requires
    stable `AXFullScreen == false` and one layer-zero, on-screen, fully opaque matching owner window;
    false state while hidden, translucent, ambiguous or still transitioning never qualifies.
@@ -6810,25 +6810,25 @@ identity or product reactivation-state corruption.
 
 ### Timestamped read-only handoff evidence
 
-A separately labeled diagnostic reproduced Finder -> exact packaged fullscreen Pebble activation and
+A separately labeled diagnostic reproduced Finder -> exact packaged fullscreen Elysium activation and
 registered workspace activation/deactivation notifications before either action. It recorded only
 monotonic timestamps, fixed app categories, PIDs and aggregate AX/CG booleans:
 
-- Finder PID `1620` activated and Pebble PID `45029` deactivated at `t=1.593`.
-- The single Pebble activation request produced a real Pebble-activate/Finder-deactivate pair at
+- Finder PID `1620` activated and Elysium PID `45029` deactivated at `t=1.593`.
+- The single Elysium activation request produced a real Elysium-activate/Finder-deactivate pair at
   `t=1.669`/`1.670`.
-- At `t=1.723`, Pebble was active and frontmost with one retained AX window, while the exact matching
+- At `t=1.723`, Elysium was active and frontmost with one retained AX window, while the exact matching
   on-screen CG rectangle was temporarily absent.
 - At `t=1.776`, sequential queries disagreed: `app.isActive` was false while the frontmost wrapper
-  still categorized Pebble; AX window count and on-screen CG owner count were zero although the
+  still categorized Elysium; AX window count and on-screen CG owner count were zero although the
   retained AX object still reported the bound fullscreen state.
-- At `t=2.971`, Finder really activated again and Pebble emitted deactivation. This was a Finder
+- At `t=2.971`, Finder really activated again and Elysium emitted deactivation. This was a Finder
   bounce, not merely a stale property read.
 - At `t=3.484`, Safari PID `1611` activated and Finder deactivated; Safari remained frontmost. This is
   confirmed third-application interference in the shared interactive console session.
 
 The immutable v3 log lacks a workspace-notification/category ledger, so it cannot identify whether
-its final non-Pebble state was Finder, Safari or another application. It must not be retroactively
+its final non-Elysium state was Finder, Safari or another application. It must not be retroactively
 labelled a product failure from the separate diagnostic. The diagnostic does establish all relevant
 classes of behavior present in this environment.
 
@@ -6840,12 +6840,12 @@ classes of behavior present in this environment.
    on-screen CG list and the AX application window list even while its retained AX object, mode,
    geometry and content remain valid. One cross-framework sample is not an activation transaction.
 2. **Finder bounce: confirmed in the diagnostic and strongly consistent with v3, but unclassified in
-   v3 itself.** A successful `activate(options:)` request and even a Pebble activation notification do
+   v3 itself.** A successful `activate(options:)` request and even a Elysium activation notification do
    not guarantee activation will remain sticky. A later Finder activation is a real loss and may not
    be sampled away.
 3. **Environment interference: confirmed.** Safari activation is external to the authorized Finder/
-   Pebble sequence. Any such third-app activation invalidates the first attempt immediately.
-4. **Product activation bug: not supported.** Pebble entered active state, retained its exact
+   Elysium sequence. Any such third-app activation invalidates the first attempt immediately.
+4. **Product activation bug: not supported.** Elysium entered active state, retained its exact
    fullscreen presentation and field state, and its `applicationDidBecomeActive` path has no authority
    over which macOS Space remains frontmost. The failure is in the OS/automation handoff or shared
    environment, not a demonstrated shipping input defect.
@@ -6856,21 +6856,21 @@ classes of behavior present in this environment.
 
 ### Minimal remediation architecture
 
-1. In `Tests/PebbleAppKitIntegration/Driver.swift`, register a bounded
+1. In `Tests/ElysiumAppKitIntegration/Driver.swift`, register a bounded
    `WorkspaceActivationHandoffLedger` before the Finder action. It records only activate/deactivate,
-   monotonic offset and category `pebble | expectedFinder | unexpectedOther`, with expected-PID/value-
+   monotonic offset and category `elysium | expectedFinder | unexpectedOther`, with expected-PID/value-
    identity booleans. It never records application names, paths, arbitrary bundle identifiers or
    object descriptions, and its observers are removed during every cleanup path.
 2. Split the reactivation gate into an event-authority phase and a surface-settlement phase. The
-   event phase requires the one Finder action to produce Pebble-deactivate plus expected-Finder-
-   activate, then the one Pebble action to produce expected-Finder-deactivate plus Pebble-activate.
+   event phase requires the one Finder action to produce Elysium-deactivate plus expected-Finder-
+   activate, then the one Elysium action to produce expected-Finder-deactivate plus Elysium-activate.
    Notification order inside either system pair may vary, but no duplicate action or extra activation
    is allowed. Request acceptance alone is not success.
 3. Any `unexpectedOther` activation is terminal environment interference, including during initial
-   settling. After the Pebble-activate commit, any Pebble-deactivate or expected-Finder-activate is a
+   settling. After the Elysium-activate commit, any Elysium-deactivate or expected-Finder-activate is a
    terminal non-sticky reactivation/Finder-bounce failure. Neither may reset a counter and later pass.
    Preserve the event category and offset, clean up and stop the cold-five set.
-4. Only after the Pebble activation event commits may the observation-only Space-surface barrier seek
+4. Only after the Elysium activation event commits may the observation-only Space-surface barrier seek
    consecutive exact snapshots. While no terminal event is latched, transient `app.isActive`/
    frontmost property disagreement, AX window-list absence or on-screen CG-owner absence may reset
    this one pre-ready counter because those queries are non-atomic during the Space animation. Final
@@ -6888,7 +6888,7 @@ classes of behavior present in this environment.
 
 Diagnostics on failure include the bounded categorized event ledger, whether each expected event pair
 committed, first terminal event category/offset, total surface samples, maximum consecutive exact
-count and the existing fixed predicate aggregates. Actual Pebble/Finder PIDs may be reported as
+count and the existing fixed predicate aggregates. Actual Elysium/Finder PIDs may be reported as
 numeric process evidence; unexpected applications remain `unexpectedOther` without name, bundle or
 path. No field values, AX free-form data, CG window titles, event payloads or clipboard content are
 authorized.
@@ -6897,8 +6897,8 @@ authorized.
 
 Add deterministic handoff-state tests for: both legal notification orders within each expected pair;
 AX/CG/on-screen zeroes followed by a stable surface without any terminal notification; value-property
-lag that recovers before ready; missing Pebble activation; Finder bounce after Pebble commit;
-Pebble deactivation after one exact sample; unexpected-other activation before and after commit;
+lag that recovers before ready; missing Elysium activation; Finder bounce after Elysium commit;
+Elysium deactivation after one exact sample; unexpected-other activation before and after commit;
 notification arriving during an expensive surface sample; duplicate/out-of-order events; cleanup
 observer removal; and post-ready first-mismatch termination. Prove Finder bounce and unexpected-other
 events cannot reset settling and later pass. Retain bound-presentation, value/process identity,
@@ -6909,8 +6909,8 @@ driver does not suppress user activity or other applications; it detects and fai
 An interference failure remains immutable and stops the set rather than authorizing automatic retry.
 The immutable v1, v2 and v3 logs remain retained and may not be relabelled, omitted or selected away.
 
-Builder scope remains only `Tests/PebbleAppKitIntegration/Driver.swift`, the directly affected
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift` contract and this plan. No shipping source,
+Builder scope remains only `Tests/ElysiumAppKitIntegration/Driver.swift`, the directly affected
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift` contract and this plan. No shipping source,
 AppInputRouter, verifier/pin, package/receipt/parser, product or LAN change is authorized; release and
 all frozen hashes remain exact. After renewed Design Review, Security (plan), Builder work and Security
 (code), begin one distinctly named same-byte cold-five set and stop at its first failure without retry,
@@ -6933,11 +6933,11 @@ separates an expected macOS Space handoff from user-visible loss of frontmost/fo
 first-attempt proof under these binding conditions:
 
 1. The bounded ledger is installed before Finder and records an immutable monotonic sequence. It
-   accepts exactly one Finder-activate/Pebble-deactivate pair and one Pebble-activate/Finder-deactivate
+   accepts exactly one Finder-activate/Elysium-deactivate pair and one Elysium-activate/Finder-deactivate
    pair, allowing order only within each pair. Missing, duplicate, out-of-order, `unexpectedOther`,
-   post-commit Pebble-deactivate or Finder-activate events are terminal and can never be cleared by a
+   post-commit Elysium-deactivate or Finder-activate events are terminal and can never be cleared by a
    later exact surface.
-2. AX/CG visibility and time-varying value properties may settle only after the Pebble activation
+2. AX/CG visibility and time-varying value properties may settle only after the Elysium activation
    event commits and only before `ready`. Every expensive sample binds the ledger sequence before and
    after the query and performs a final synchronized terminal check before counting that sample; an
    event arriving or being delivered during the query invalidates it. Observer delivery/removal must
@@ -6975,12 +6975,12 @@ selection risks.
 None.
 
 The bounded ledger is authoritative only after installation before the first Finder action and binds
-events to the fixed Pebble and uniquely selected Finder value/PID identities. It accepts exactly one
-Pebble-deactivate plus Finder-activate pair for the one Finder action, followed by exactly one Finder-
-deactivate plus Pebble-activate pair for the one Pebble action; only order within each system-generated
+events to the fixed Elysium and uniquely selected Finder value/PID identities. It accepts exactly one
+Elysium-deactivate plus Finder-activate pair for the one Finder action, followed by exactly one Finder-
+deactivate plus Elysium-activate pair for the one Elysium action; only order within each system-generated
 pair may vary. Action boundaries, monotonic sequence/offset and one-shot ledger ownership prevent stale
 pre-action events from satisfying a pair. Missing, duplicate, extra or out-of-order events, an
-`unexpectedOther` activation, post-commit Pebble deactivation, Finder reactivation/bounce or any event
+`unexpectedOther` activation, post-commit Elysium deactivation, Finder reactivation/bounce or any event
 after ready is terminal and cannot be cleared by later surface recovery.
 
 Observer lifetime is fail-closed: callbacks and state transitions must use one synchronized ledger/
@@ -6990,7 +6990,7 @@ later attempt's evidence. Tests cover both legal pair orders, missing/duplicate/
 sample events, every terminal category, cleanup removal and stale-callback denial.
 
 Activation authority and query settling are correctly separated. No AX/CG settling begins until the
-Pebble activation pair commits. While and only while the ledger remains nonterminal before ready,
+Elysium activation pair commits. While and only while the ledger remains nonterminal before ready,
 non-atomic `isActive`/frontmost/AX-window-list/on-screen-CG publication lag may reset the surface sample
 counter. The ledger sequence and terminal state are checked before and after every expensive sample
 and once more synchronously before counting it, so a notification delivered during the query cannot be
@@ -7035,11 +7035,11 @@ attempt was retried.
 
 The event ledger is exact:
 
-- Finder activate at `+19 ms`; Pebble deactivate at `+20 ms`.
-- Pebble activate and Finder deactivate at `+44 ms`.
-- Finder activate and Pebble deactivate at `+1446 ms`, terminal after commit.
+- Finder activate at `+19 ms`; Elysium deactivate at `+20 ms`.
+- Elysium activate and Finder deactivate at `+44 ms`.
+- Finder activate and Elysium deactivate at `+1446 ms`, terminal after commit.
 
-The driver calls `awaitFinderPair`, then immediately enters the one Pebble activation action. It has
+The driver calls `awaitFinderPair`, then immediately enters the one Elysium activation action. It has
 no observation between Finder notification commit and the reverse request. Thus the reverse activation
 was issued only about `24 ms` after the first system pair. The delayed Finder completion arrived about
 `1426 ms` after the original Finder activation, consistent with the prior timestamped diagnostic's
@@ -7049,68 +7049,68 @@ status transition; it does not prove the corresponding Space/window transaction 
 ### Root cause
 
 The driver overlaps two opposing fullscreen Space transactions. It requests Finder, treats the first
-activation/deactivation notification pair as complete presentation settlement, and requests Pebble
+activation/deactivation notification pair as complete presentation settlement, and requests Elysium
 while Finder's Space migration is still in flight. When the earlier Finder transaction finishes, it
 wins frontmost ownership and produces the correctly terminal postcommit pair at `+1446 ms`.
 
 This is a driver sequencing defect, not evidence of product activation or text-entry failure. It is
-also distinct from a retry or timeout problem: making the post-Pebble surface deadline longer would
+also distinct from a retry or timeout problem: making the post-Elysium surface deadline longer would
 only wait after the conflict was already created. The correct dependency is to finish the first
 Space presentation transaction before issuing the sole reverse activation.
 
 ### Finder-surface settlement contract
 
-After the exact Finder pair commits and before entering `beginPebbleAction`, add one bounded,
-observation-only `FinderSurfaceSettlement`. It may reset consecutive samples only in this pre-Pebble-
+After the exact Finder pair commits and before entering `beginElysiumAction`, add one bounded,
+observation-only `FinderSurfaceSettlement`. It may reset consecutive samples only in this pre-Elysium-
 action phase. Every sample requires the exact value/PID/bundle/executable-bound Finder to be active
-and frontmost, Pebble to be inactive, the fixed handoff ledger to remain in `finderCommitted`, and no
+and frontmost, Elysium to be inactive, the fixed handoff ledger to remain in `finderCommitted`, and no
 unexpected or additional activation event before or after the sample.
 
-Window proof is mode-specific and uses the already bound Pebble presentation rather than assuming
+Window proof is mode-specific and uses the already bound Elysium presentation rather than assuming
 Finder owns an AX window:
 
-- For bound `fullscreen`, query the exact Pebble `CGWindowID` without the on-screen-only filter and
+- For bound `fullscreen`, query the exact Elysium `CGWindowID` without the on-screen-only filter and
   require that same PID/window/rectangle to be present but `kCGWindowIsOnscreen == false`. This proves
-  the Finder Space has actually displaced the fullscreen surface. The retained Pebble AX window may
+  the Finder Space has actually displaced the fullscreen surface. The retained Elysium AX window may
   remain queryable and must retain its mode/geometry identity, but AX application-window-list absence
   is diagnostic only because it is non-atomic across Spaces.
-- For bound `windowedFallback`, no Space displacement is expected. Require the exact Pebble CG window
+- For bound `windowedFallback`, no Space displacement is expected. Require the exact Elysium CG window
   to remain on-screen, opaque and rectangle-identical behind the exact active/frontmost Finder, while
-  Pebble itself is inactive. Requiring it to disappear would falsely reject the documented shared-
+  Elysium itself is inactive. Requiring it to disappear would falsely reject the documented shared-
   desktop mode.
 
 Success requires the complete mode-specific Finder surface over the existing minimum consecutive
 duration inside a fixed deadline. No elapsed-time threshold, sleep or magic `1.4 s` delay constitutes
 success. A mismatch resets only this pre-action surface counter; a ledger event, identity mismatch,
-unexpected application or timeout is terminal and prevents the Pebble action from entering its
+unexpected application or timeout is terminal and prevents the Elysium action from entering its
 one-shot ledger.
 
-Only after Finder-surface settlement succeeds may the driver enter `beginPebbleAction` directly
-inside the existing final check adjacent to the one `app.activate` request. The exact Pebble/Finder
+Only after Finder-surface settlement succeeds may the driver enter `beginElysiumAction` directly
+inside the existing final check adjacent to the one `app.activate` request. The exact Elysium/Finder
 event pair, postcommit terminal-event rule, Space-surface settlement, preservation and irreversible
 ReadyEpoch then remain unchanged. A later Finder bounce still fails immediately and cannot trigger a
 second activation or renewed Finder settling.
 
 ### Tests and Conditions for Builder
 
-In `Tests/PebbleAppKitIntegration/Driver.swift`, add the bounded mode-aware Finder-surface observation
+In `Tests/ElysiumAppKitIntegration/Driver.swift`, add the bounded mode-aware Finder-surface observation
 and a bound-window query capable of reporting the exact CG window while it is off-screen. Do not
 enumerate or report unrelated window titles/content. Extend
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift` to enforce this order:
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift` to enforce this order:
 
-`awaitFinderPair -> settleFinderSurface -> activateOnce("pebble.reactivate") -> awaitPebblePair`.
+`awaitFinderPair -> settleFinderSurface -> activateOnce("elysium.reactivate") -> awaitElysiumPair`.
 
-Add deterministic tests for: notification pair committed while fullscreen Pebble remains on-screen
+Add deterministic tests for: notification pair committed while fullscreen Elysium remains on-screen
 must not allow the reverse action; exact off-screen bound fullscreen window across consecutive samples
 does allow it; windowed fallback remains exact/on-screen behind Finder; Finder not active/frontmost;
-Pebble still active; missing/substituted CG ID/PID/rectangle; an event during an expensive sample;
-unexpected-other activation; a Finder-surface timeout; and a post-Pebble Finder bounce. Prove timeout
-or terminal failure leaves `pebble.reactivate` unperformed, while a successful barrier permits it
+Elysium still active; missing/substituted CG ID/PID/rectangle; an event during an expensive sample;
+unexpected-other activation; a Finder-surface timeout; and a post-Elysium Finder bounce. Prove timeout
+or terminal failure leaves `elysium.reactivate` unperformed, while a successful barrier permits it
 exactly once. Retain both notification orders within each pair, observer cleanup/generation, bound-
 presentation, ready-epoch, adjacent one-shot, aggregate privacy, field identity/resize and router-
 session tests.
 
-Diagnostics may report fixed booleans for Finder identity/active/frontmost, Pebble inactive,
+Diagnostics may report fixed booleans for Finder identity/active/frontmost, Elysium inactive,
 bound-CG-window present/identity/rectangle/on-screen-expected, presentation mode, total samples,
 maximum consecutive count and ledger event sequence/offset. They may not report unrelated app/window
 names, bundle IDs, paths, titles, field values, free-form AX/CG content, event payloads or clipboard
@@ -7143,21 +7143,21 @@ before the sole reverse activation. It preserves usability and no-masking eviden
 binding conditions:
 
 1. Ordering remains exact: Finder action -> exact event pair -> bounded Finder-surface settlement ->
-   adjacent final check and sole Pebble activation -> exact reverse pair. Elapsed time, request
+   adjacent final check and sole Elysium activation -> exact reverse pair. Elapsed time, request
    acceptance, one sample or a fixed delay is never readiness. Timeout, identity mismatch, ledger
-   event or interference prevents the Pebble action from entering its one-shot ledger.
-2. In bound fullscreen mode, the exact previously bound Pebble PID/`CGWindowID`/rectangle must remain
+   event or interference prevents the Elysium action from entering its one-shot ledger.
+2. In bound fullscreen mode, the exact previously bound Elysium PID/`CGWindowID`/rectangle must remain
    present in the unfiltered query and be off-screen over consecutive semantic samples; retained AX
    mode/geometry identity remains exact. In documented windowed fallback, that exact layer-zero
    window instead remains on-screen, fully opaque and rectangle-identical while exact Finder is
-   active/frontmost and Pebble inactive. The verifier may not force one mode's Space convention onto
+   active/frontmost and Elysium inactive. The verifier may not force one mode's Space convention onto
    the other, substitute a window, or inspect unrelated titles/content.
-3. Only non-authoritative Space-publication mismatch may reset the counter during this one pre-Pebble
+3. Only non-authoritative Space-publication mismatch may reset the counter during this one pre-Elysium
    phase. The handoff-ledger generation and terminal state are checked before, after and immediately
    before accepting each expensive CG/AX sample. Any event, app/process/window identity change or
    `unexpectedOther` is terminal rather than recoverable.
-4. After settlement, the Pebble activation occurs exactly once with no run-loop gap after its final
-   check. There is no return to Finder settlement. A later Finder activation, Pebble deactivation or
+4. After settlement, the Elysium activation occurs exactly once with no run-loop gap after its final
+   check. There is no return to Finder settlement. A later Finder activation, Elysium deactivation or
    other app activation is a terminal retained bounce/interference result; no reselect, recovery,
    API swap, sleep, repost, retry or deadline extension is permitted.
 5. Diagnostics remain fixed aggregate booleans, presentation mode, counts and monotonic ledger
@@ -7185,22 +7185,22 @@ selection risks.
 None.
 
 The dependency order is exact and one-shot: Finder action, committed Finder notification pair,
-bounded Finder-surface settlement, adjacent final check plus sole Pebble activation, then committed
+bounded Finder-surface settlement, adjacent final check plus sole Elysium activation, then committed
 reverse pair. Request acceptance, elapsed time, one sample or fixed delay is never presentation
 readiness. Timeout, terminal ledger event, identity mismatch or interference prevents
-`pebble.reactivate` from entering its action ledger; success permits it exactly once with no later
+`elysium.reactivate` from entering its action ledger; success permits it exactly once with no later
 return to Finder settlement.
 
 The mode-aware window proof preserves the already bound CG authority rather than selecting a new
-surface. In fullscreen, the unfiltered CG query must contain the exact prior Pebble PID,
+surface. In fullscreen, the unfiltered CG query must contain the exact prior Elysium PID,
 `CGWindowID`, layer, rectangle and owner identity while that same window is explicitly off-screen over
 consecutive samples; the retained AX window/mode/geometry remains exact. In documented windowed
 fallback, the same bound layer-zero window must instead remain on-screen, fully opaque and rectangle-
-identical behind exact active/frontmost Finder while Pebble is inactive. Missing, substituted or
+identical behind exact active/frontmost Finder while Elysium is inactive. Missing, substituted or
 ambiguous PID/window ID/rectangle is an identity failure, not a candidate for reselection; unrelated
 titles/content are neither queried as authority nor emitted.
 
-Only non-authoritative on-screen/Space publication mismatch may reset this one pre-Pebble surface
+Only non-authoritative on-screen/Space publication mismatch may reset this one pre-Elysium surface
 counter. The synchronized handoff-ledger generation/terminal state is checked before and after every
 expensive CG/AX sample and immediately before accepting it. An event delivered mid-query, unexpected
 application, app/process/window identity change or postcommit bounce is terminal and cannot be sampled
@@ -7209,10 +7209,10 @@ no reactivation, second activation, API substitution, repost, retry, sleep-as-co
 extension is authorized.
 
 Deterministic tests cover on-screen fullscreen rejection, exact off-screen fullscreen acceptance,
-on-screen opaque fallback, Finder/Pebble state, missing/substituted CG identity/rectangle, mid-sample
+on-screen opaque fallback, Finder/Elysium state, missing/substituted CG identity/rectangle, mid-sample
 events, interference, timeout and later bounce, plus explicit proof that failures leave the reverse
 action unperformed. Source ordering enforces
-`awaitFinderPair -> settleFinderSurface -> activateOnce("pebble.reactivate") -> awaitPebblePair`.
+`awaitFinderPair -> settleFinderSurface -> activateOnce("elysium.reactivate") -> awaitElysiumPair`.
 Diagnostics remain fixed booleans, bound mode, sample/count data and monotonic ledger sequence/offset;
 unrelated identities/names/bundles/paths/titles, field values, free-form AX/CG data, event payloads and
 clipboard content are forbidden.
@@ -7253,19 +7253,19 @@ reason; the immutable log cannot establish that every earlier sample had the sam
 
 A separately labelled exact-package diagnostic reproduced the relevant publication lifecycle:
 
-- `t=0.324`: Pebble active/frontmost; AX windows `0`; PID-owned layer-zero CG windows `0`.
+- `t=0.324`: Elysium active/frontmost; AX windows `0`; PID-owned layer-zero CG windows `0`.
 - `t=0.479`: AX windows `1`, role `AXWindow`, subrole `AXUnknown`, `AXFullScreen=false`, rectangle
   `0,0,1728,1117`. The exact PID owned seven layer-zero CG windows in the unfiltered list and one
   on-screen full-display transition window.
 - `t=1.465`: AX windows `1`, role `AXWindow`, subrole `AXStandardWindow`, `AXFullScreen=true`,
   rectangle `0,33,1728,1084`. The same PID owned the stable main and auxiliary on-screen CG windows.
-- `t=1.802`: the AX application window list and focused-window publication became absent while Pebble
+- `t=1.802`: the AX application window list and focused-window publication became absent while Elysium
   remained active/frontmost and the same two PID-owned layer-zero CG windows remained on-screen.
 
 A second run queried one cached and one newly created `AXUIElementCreateApplication(pid)` on every
 sample. Both reported the same sequence: AX `0`; AX `1/fullscreen=false`; AX `1/fullscreen=true`; both
 AX lists `0` at `t=4.578`; both AX lists restored to `1/fullscreen=true` at `t=5.853`, while CG windows
-remained present and Pebble stayed active/frontmost. Recreating the AX application element therefore
+remained present and Elysium stayed active/frontmost. Recreating the AX application element therefore
 does not repair or change the observation.
 
 This excludes wrong process ownership, a stale cached AX application object and multiple competing AX
@@ -7337,17 +7337,17 @@ on-screen/opaque, file identity and final rehash, plus a bounded candidate-reset
 Numeric rectangles/backing scale remain allowed; titles, app/display names, arbitrary bundles/paths,
 object descriptions, field values, free-form AX/CG content, input and clipboard data remain forbidden.
 
-Update `Tests/PebbleCoreTests/TextEntrySourceTests.swift` with deterministic lifecycle cases: no AX
+Update `Tests/ElysiumCoreTests/TextEntrySourceTests.swift` with deterministic lifecycle cases: no AX
 window before publication; `AXUnknown` transition rejection; standard fullscreen candidate; candidate
 withdrawal to AX zero; restored same and replacement identities; cached/fresh application-element
 equivalence; exact PID main-plus-auxiliary CG ownership; missing/ambiguous matching owner; observer
 invalidation during a full snapshot; metadata mutation; post-bind rehash mismatch; deadline with full
 structured diagnostics; and post-bind AX withdrawal terminality. Prove no navigation/click/key occurs
-before `bound` and that launch settlement invokes neither Finder nor Pebble activation.
+before `bound` and that launch settlement invokes neither Finder nor Elysium activation.
 
 Retain typed presentation/fallback, Finder-surface ordering, handoff event authority, one-shot actions,
 ReadyEpoch, privacy, field identity/resize and router-session coverage. Builder scope remains only
-`Tests/PebbleAppKitIntegration/Driver.swift`, the directly affected `TextEntrySourceTests` contract and
+`Tests/ElysiumAppKitIntegration/Driver.swift`, the directly affected `TextEntrySourceTests` contract and
 this plan. No shipping source, AppInputRouter, activation behavior, verifier/pin, package/receipt/
 parser, product or LAN edit is authorized; all product hashes remain exact. The immutable v1-v5 sets
 remain retained. After renewed Design Review, Security (plan), Builder work and Security (code), start
@@ -7379,13 +7379,13 @@ every post-bind AX gap terminal. One no-masking ambiguity remains blocking:
    cannot later recover into a bound presentation.
 2. Install a bounded launch-lifecycle observer immediately after exact process identity and before
    settlement (or extend the existing synchronized activation ledger to cover this phase). Any
-   `unexpectedOther` activation or Pebble deactivation after current Pebble activation is terminal
+   `unexpectedOther` activation or Elysium deactivation after current Elysium activation is terminal
    environment/non-sticky-launch evidence. Without that event authority, an external app can briefly
    take frontmost focus, allow the candidate to reset, and later be sampled away before `bound`.
    Property lag without a corresponding terminal event may remain a recoverable pre-bind reset.
 3. Record the reset-versus-terminal classification in fixed categories and test that a later exact AX/
    CG surface cannot pass after any terminal identity or lifecycle event. Observer generation must be
-   closed race-safely during cleanup and before the later Finder/Pebble handoff ledger starts, so no
+   closed race-safely during cleanup and before the later Finder/Elysium handoff ledger starts, so no
    callback crosses phases or attempts.
 4. All other Design conditions are approved: candidate stability is measured semantically rather
    than by sleep; `AXUnknown` and wrong/missing typed mode never qualify; the full snapshot plus
@@ -7428,20 +7428,20 @@ terminal workspace event. These reasons clear only the current pre-bind candidat
 
 Terminal reasons are fixed: process termination; original app value/PID/bundle/executable mismatch;
 file device/inode/type/size/mtime mismatch; pre-bind or post-bind rehash mismatch; workspace lifecycle
-unexpected-application activation; Pebble deactivation after the launch-active baseline; observer
+unexpected-application activation; Elysium deactivation after the launch-active baseline; observer
 generation/capacity corruption; or a terminal event delivered during a sample. A full snapshot may
 reset for AX/CG publication churn, but it may never reset for any app/process/file/hash predicate.
 
 ### Launch lifecycle event authority
 
 Install a bounded workspace lifecycle ledger after exact process/file/hash identity and an exact
-active/frontmost Pebble baseline, before the first launch-settlement sample. During its launch phase,
-any non-Pebble activation is categorized `unexpectedOther` and terminal; any Pebble deactivation is
+active/frontmost Elysium baseline, before the first launch-settlement sample. During its launch phase,
+any non-Elysium activation is categorized `unexpectedOther` and terminal; any Elysium deactivation is
 terminal. It records only fixed category, activate/deactivate, monotonic offset and expected-identity
 booleans. Names, arbitrary bundle identifiers and paths remain forbidden.
 
 Prefer extending the existing synchronized handoff ledger into one `WorkspaceLifecycleLedger` that
-spans launch, bound navigation and the later Finder/Pebble sequence. It installs observers once and
+spans launch, bound navigation and the later Finder/Elysium sequence. It installs observers once and
 transitions atomically from `launch` to `finderAction` inside the adjacent final check before the one
 Finder action. Thus there is no observer-removal/installation gap in which an application switch can
 escape both phases. If separate ledgers are retained, the replacement generation must be installed
@@ -7465,7 +7465,7 @@ Make reset-versus-terminal classification machine-enforced with exhaustive switc
 fixtures. For each allowed reset category, prove an initial mismatch clears the candidate and a later
 exact surface may bind only while process/file/hash and lifecycle authority remain exact. For every
 terminal category—termination; PID, value, bundle, executable or file-tuple mismatch; pre/post hash
-mismatch; unexpected activation; Pebble deactivation; mid-snapshot lifecycle event; generation/
+mismatch; unexpected activation; Elysium deactivation; mid-snapshot lifecycle event; generation/
 capacity failure—feed a later exact AX/CG surface and prove binding remains impossible.
 
 Also test active/frontmost property lag without an event as recoverable pre-bind; the same property
@@ -7481,8 +7481,8 @@ phase/generation, bounded event category/offset and the prior safe aggregate pre
 must not expose app names, arbitrary bundles/paths, window titles, object descriptions, field values,
 free-form AX/CG data, input or clipboard content.
 
-Builder scope remains only `Tests/PebbleAppKitIntegration/Driver.swift`, the directly affected
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift` contract and this plan. No shipping source,
+Builder scope remains only `Tests/ElysiumAppKitIntegration/Driver.swift`, the directly affected
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift` contract and this plan. No shipping source,
 AppInputRouter, activation behavior, verifier/pin, package/receipt/parser, product or LAN edit is
 authorized; all product hashes remain exact. The immutable v1-v5 sets remain retained. Do not extend
 the deadline, add product logging, sleep, activate again, repost or retry. After renewed Design Review,
@@ -7506,8 +7506,8 @@ terminal; target AX invalidation cannot substitute for read-back; and every post
 
 One lifecycle masking gap remains:
 
-- **[BLOCKING]** The launch ledger is specified to install **after** an exact active/frontmost Pebble
-  baseline. An app activation or Pebble deactivation can occur between that baseline read and observer
+- **[BLOCKING]** The launch ledger is specified to install **after** an exact active/frontmost Elysium
+  baseline. An app activation or Elysium deactivation can occur between that baseline read and observer
   installation, leave no lifecycle event in the new generation, then be treated as recoverable
   event-free property lag. Install and arm the ledger immediately after immutable process/file/hash
   identity and **before** establishing the active/frontmost launch baseline. Establish that baseline
@@ -7538,7 +7538,7 @@ The mandatory order is now:
 1. Establish immutable process/file/hash identity without making a presentation or active/frontmost
    claim.
 2. Create, install and arm the generation-scoped workspace lifecycle ledger.
-3. Establish the exact active/frontmost Pebble launch baseline under that armed ledger.
+3. Establish the exact active/frontmost Elysium launch baseline under that armed ledger.
 4. Enter recoverable launch presentation settlement only after the baseline commits.
 
 No active/frontmost read before ledger arming is launch authority. Installation should use one
@@ -7593,8 +7593,8 @@ resize and router-session coverage. Diagnostics add only fixed baseline phase, a
 sequence-before/after equality, event-during-baseline, sample count and prior safe reason categories;
 no names, arbitrary bundles/paths, values or free-form data are authorized.
 
-Builder scope remains only `Tests/PebbleAppKitIntegration/Driver.swift`, the directly affected
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift` contract and this plan. No shipping source,
+Builder scope remains only `Tests/ElysiumAppKitIntegration/Driver.swift`, the directly affected
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift` contract and this plan. No shipping source,
 activation behavior, verifier/pin, package/receipt/parser, product or LAN edit is authorized; hashes
 remain exact. Do not add an action, sleep, timeout extension, repair, repost or retry. Immutable v1-v5
 sets remain retained; a reviewed new set stops at its first failure.
@@ -7614,16 +7614,16 @@ sequence-before/after/final checks are correct. One platform-lifecycle correctio
 
 - **[BLOCKING]** Treating **every** activation/deactivation event from arm through baseline commit as
   terminal can reject the normal launch handoff itself. `openApplication` completion does not design a
-  user-visible guarantee that Pebble's activation notification and the prior frontmost application's
+  user-visible guarantee that Elysium's activation notification and the prior frontmost application's
   deactivation were already delivered. After arming, permit exactly these two baseline paths without
   issuing another action:
 
-  1. Pebble is already exact active/frontmost and the zero-event sequence-bound baseline commits; or
-  2. one expected launch pair commits—exact Pebble activates and the one predecessor already observed
+  1. Elysium is already exact active/frontmost and the zero-event sequence-bound baseline commits; or
+  2. one expected launch pair commits—exact Elysium activates and the one predecessor already observed
      under the armed generation deactivates, in either system order—then the exact property baseline
      commits under an unchanged sequence.
 
-  Any Pebble deactivation, non-Pebble activation, different predecessor, duplicate/extra/out-of-order
+  Any Elysium deactivation, non-Elysium activation, different predecessor, duplicate/extra/out-of-order
   event, identity mismatch or event after the expected launch pair remains sticky-terminal. Request or
   launch completion alone is not success, and this exception must not call `activate`, wait through a
   later app switch or repair a failed baseline. Diagnostics may use only fixed `alreadyFrontmost` /
@@ -7652,25 +7652,25 @@ state machine. `openApplication` remains the sole launch action; the baseline co
 
 Immediately after the lifecycle generation is installed and armed, and before accepting a launch
 event, capture one sequence-bound workspace snapshot under that generation. It must preserve exact
-immutable Pebble authority and classify the current frontmost application as either exact Pebble or
-one exact non-Pebble predecessor. A predecessor is bound as the observed application value plus PID,
+immutable Elysium authority and classify the current frontmost application as either exact Elysium or
+one exact non-Elysium predecessor. A predecessor is bound as the observed application value plus PID,
 canonical bundle identity and executable identity; it is used only for equality checks and is never
 reported. Missing, ambiguous or changing identity, or any lifecycle event before or during this
 capture, is sticky-terminal because no already-observed predecessor could authenticate that event.
 
 From that snapshot, exactly two no-extra-action paths can commit:
 
-1. **`alreadyFrontmost`.** If the captured application is exact Pebble, read `app.isActive` and the
+1. **`alreadyFrontmost`.** If the captured application is exact Elysium, read `app.isActive` and the
    exact frontmost value/PID/bundle/executable under the same zero-event sequence. Commit only after
    the sequence-after and final synchronized checks still show the armed generation, no event and no
    terminal state.
-2. **`expectedLaunchPair`.** If the captured application is one exact non-Pebble predecessor, accept
-   exactly one exact Pebble activation notification and exactly one deactivation notification for
+2. **`expectedLaunchPair`.** If the captured application is one exact non-Elysium predecessor, accept
+   exactly one exact Elysium activation notification and exactly one deactivation notification for
    that bound predecessor, in either delivery order. Each notification must match its retained value,
    PID, canonical bundle and executable identity. On receipt of the first member the state permits
    only its missing complement; on receipt of the second it atomically freezes the pair-completion
    sequence and enters `pairCompleteAwaitingBaseline`. Under that unchanged sequence, establish exact
-   Pebble `isActive` and frontmost value/PID/bundle/executable authority, perform the sequence-after
+   Elysium `isActive` and frontmost value/PID/bundle/executable authority, perform the sequence-after
    and final synchronized checks, and only then commit the baseline.
 
 Pair completion is necessary but not sufficient. Request completion, launch completion, a property
@@ -7691,7 +7691,7 @@ there is still one observer generation and no callback gap.
 The baseline event alphabet contains only the two identity-exact members of the bound expected pair.
 All of the following latch terminal for the generation and no later exact surface can recover:
 
-- Pebble deactivation, or activation of any non-Pebble application;
+- Elysium deactivation, or activation of any non-Elysium application;
 - deactivation by an application other than the one bound predecessor;
 - an identity mismatch on either expected member;
 - either member before a predecessor is bound, the same member twice, a third event, any event not
@@ -7707,19 +7707,19 @@ baseline lifecycle terminal state.
 
 Diagnostics expose only the fixed `launch_baseline_path=alreadyFrontmost|expectedLaunchPair|terminal`
 category; fixed phase and terminal-reason enums; event count and monotonic offsets; and safe Booleans
-such as `predecessor_bound`, `predecessor_identity_exact`, `pebble_activate_seen`,
+such as `predecessor_bound`, `predecessor_identity_exact`, `elysium_activate_seen`,
 `predecessor_deactivate_seen`, `pair_complete` and `sequence_unchanged`. They must not expose the
 predecessor name, PID, bundle, executable or path, nor any free-form workspace or AX value.
 
 ### Tests and Conditions for Builder
 
-Add deterministic state-machine fixtures proving the zero-event exact-Pebble path and both delivery
+Add deterministic state-machine fixtures proving the zero-event exact-Elysium path and both delivery
 orders of the exact expected pair. For each pair order, require the frozen completion sequence plus an
 exact unchanged-sequence property baseline before success; cover event-free property lag that becomes
 exact within the existing bound and timeout when it does not. Prove that exact properties without one
 pair member cannot commit.
 
-Individually inject Pebble deactivation, non-Pebble activation, wrong-predecessor deactivation,
+Individually inject Elysium deactivation, non-Elysium activation, wrong-predecessor deactivation,
 identity mismatch, an event before predecessor binding, duplicate activation, duplicate deactivation,
 a third/foreign event, an event after pair completion, and an event during the final property read or
 commit check. After each, present a later exact surface and prove terminal state remains sticky. Also
@@ -7728,22 +7728,22 @@ cleanup from every state, deadline expiry with only the first pair member, and a
 synchronized boundary.
 
 Source and spy assertions must prove the only order is
-`immutableLaunchAuthority -> installAndArmLifecycleLedger -> capturePredecessorOrExactPebble ->
+`immutableLaunchAuthority -> installAndArmLifecycleLedger -> capturePredecessorOrExactElysium ->
 establishZeroEventOrExpectedPairBaseline -> settleLaunchPresentation`, with no call to `activate`, no
 second `openApplication`, no sleep, no deadline extension and no retry. Retain all prior exhaustive
 authority, typed-presentation, full-snapshot/rehash, post-bind, Finder-surface/handoff, ReadyEpoch,
 privacy, field identity/resize and router-session tests, followed by the distinctly named same-byte
 cold-five set that stops at its first failure.
 
-Builder scope remains only `Tests/PebbleAppKitIntegration/Driver.swift`, the directly affected
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift` contract and this plan. No shipping source,
+Builder scope remains only `Tests/ElysiumAppKitIntegration/Driver.swift`, the directly affected
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift` contract and this plan. No shipping source,
 activation behavior, verifier/pin, package/receipt/parser, product or LAN edit is authorized; all
 product hashes remain exact.
 
 **Launch Lifecycle Authority Ordering Architecture verdict: SUPERSEDED.** Its blanket terminal rule
 could reject the legitimate launch notifications delivered after ledger arming. **Expected Launch
 Pair Baseline Architecture verdict: PASS.** The ledger now admits only an exact, already-observed
-predecessor's single deactivation plus Pebble's single activation, in either order, followed by an
+predecessor's single deactivation plus Elysium's single activation, in either order, followed by an
 unchanged-sequence exact baseline; every foreign, duplicate or later event remains sticky-terminal.
 Build remains blocked pending renewed Design Review and Security (plan), followed by every unchanged
 downstream gate.
@@ -7755,14 +7755,14 @@ Reviewed through plan SHA-256
 platform-lifecycle blocker exactly:
 
 1. Ledger authority is armed before a sequence-bound snapshot classifies either exact already-
-   frontmost Pebble or one exact predecessor. The already-frontmost path requires zero events; the
-   predecessor path admits only its one deactivation plus exact Pebble's one activation, in either
+   frontmost Elysium or one exact predecessor. The already-frontmost path requires zero events; the
+   predecessor path admits only its one deactivation plus exact Elysium's one activation, in either
    system order, without issuing another action.
 2. Pair events are necessary but not sufficient. Success still requires exact active/frontmost
-   Pebble properties under the frozen completion sequence and final synchronized check. Event-free
+   Elysium properties under the frozen completion sequence and final synchronized check. Event-free
    property publication may settle only within the existing bound; a missing pair member, timeout or
    request/launch completion alone cannot be promoted to readiness.
-3. Pebble deactivation, non-Pebble activation, wrong predecessor, identity mismatch, event before
+3. Elysium deactivation, non-Elysium activation, wrong predecessor, identity mismatch, event before
    binding, duplicate/extra/out-of-order/late event or authority failure remains sticky-terminal. No
    later exact property, presentation or Accessibility surface may repair it, and no activation,
    relaunch, retry, repost, sleep or deadline extension is introduced.
@@ -7792,19 +7792,19 @@ The observer-arm race is closed before any launch-active claim. Immutable origin
 PID, canonical bundle/executable, nontermination, regular nonsymlink file tuple and premeasured hash are
 established first; one generation enters `installing`, registers both activation/deactivation names
 without a token gap, retains callbacks delivered during registration, arms under synchronization, and
-only then begins a sequence-bound predecessor/Pebble snapshot. Generation, sequence and terminal state
+only then begins a sequence-bound predecessor/Elysium snapshot. Generation, sequence and terminal state
 are checked before, after and immediately before every baseline commit, so no event can fall between
 property authority and lifecycle authority.
 
-Exactly two mutually bounded launch paths exist. `alreadyFrontmost` requires exact Pebble and zero
-events through final baseline commit. `expectedLaunchPair` first binds one observed non-Pebble
+Exactly two mutually bounded launch paths exist. `alreadyFrontmost` requires exact Elysium and zero
+events through final baseline commit. `expectedLaunchPair` first binds one observed non-Elysium
 predecessor by value/PID/canonical bundle/executable, then admits exactly one exact predecessor
-deactivation and one exact Pebble activation in either system order; it freezes the completion sequence
-and still requires exact active/frontmost Pebble properties under that unchanged sequence. Pair events
+deactivation and one exact Elysium activation in either system order; it freezes the completion sequence
+and still requires exact active/frontmost Elysium properties under that unchanged sequence. Pair events
 without properties, properties with a missing member, request/completion alone or deadline expiry
 cannot commit, and no action, relaunch, synthesis or fallback between paths is available.
 
-The terminal alphabet is closed and sticky: Pebble deactivation; any non-Pebble activation; wrong-
+The terminal alphabet is closed and sticky: Elysium deactivation; any non-Elysium activation; wrong-
 predecessor deactivation; identity mismatch; event before binding; duplicate, third, foreign,
 out-of-order or post-pair event; event during property reads/final check; process termination; original
 app/PID/bundle/executable or file tuple/hash mismatch; observer generation/capacity failure; timeout or
@@ -7849,22 +7849,22 @@ remain fail-closed.
 Architecture diagnoses the first immutable v6 run against input plan SHA-256
 `66d829cb4deeb9fe108bc75d26a8fb6061962478fa9a7c5efa33fd98ce1ddc45`. This section supersedes the
 post-completion observer ordering only. Immutable product/file/hash authority, the exact launch-pair
-alphabet, presentation settlement, post-bind fatality and the later atomic Finder/Pebble handoff
+alphabet, presentation settlement, post-bind fatality and the later atomic Finder/Elysium handoff
 remain mandatory.
 
 ### Evidence and root cause
 
 The immutable v6 failure reported
 `launch_baseline_path=expectedLaunchPair`, `predecessor_bound=true`,
-`pebble_activate_seen=false`, `predecessor_deactivate_seen=false`, `events=0` and `ingress=0` while
-later reads already showed exact active/frontmost Pebble. That is positive evidence of an unobserved
+`elysium_activate_seen=false`, `predecessor_deactivate_seen=false`, `events=0` and `ingress=0` while
+later reads already showed exact active/frontmost Elysium. That is positive evidence of an unobserved
 interval, not event-delivery lag inside the ledger: the ledger received no callback at all.
 
 The implementation calls `openApplication`, waits for its completion, binds and verifies the returned
 process, constructs `WorkspaceActivationHandoffLedger`, and only then installs its workspace
 observers. `OpenConfiguration.activates = true` asks the system to activate and foreground the app,
 and Apple documents that activation/deactivation notifications are obtained only by registering with
-`NSWorkspace.shared.notificationCenter`. The normal predecessor-deactivate/Pebble-activate handoff can
+`NSWorkspace.shared.notificationCenter`. The normal predecessor-deactivate/Elysium-activate handoff can
 therefore complete before this generation exists. A later sequence-bound property sample correctly
 cannot invent those missing events, so the v6 timeout is deterministic under that ordering rather
 than repairable publication churn. See Apple's primary documentation for
@@ -7873,7 +7873,7 @@ than repairable publication churn. See Apple's primary documentation for
 and [`didDeactivateApplicationNotification`](https://developer.apple.com/documentation/appkit/nsworkspace/diddeactivateapplicationnotification).
 
 Setting `configuration.activates = false` and issuing an explicit post-completion activation is not a
-race closure. Pebble itself calls `NSApp.activate(ignoringOtherApps: true)` during
+race closure. Elysium itself calls `NSApp.activate(ignoringOtherApps: true)` during
 `applicationDidFinishLaunching`, so it may still activate before the completion callback and before a
 post-completion ledger. Removing or conditioning that call would change shipping activation behavior,
 which is outside this remediation. Adding a driver activation would introduce a second focus-changing
@@ -7908,7 +7908,7 @@ retains only kind, monotonic offset, the `NSRunningApplication` value, event-tim
 canonical bundle/executable/bundle-identifier predicates. Static target equality may reject an
 obviously foreign candidate early, but it may never mark a target event accepted. The only potentially
 valid buffered events are one activation whose event-time static identity equals the expected target
-and one exact bound-predecessor deactivation, in either order. Pebble-like deactivation,
+and one exact bound-predecessor deactivation, in either order. Elysium-like deactivation,
 non-predecessor deactivation, non-target activation, missing/malformed identity, a duplicate, a third
 ingress or capacity overflow latches terminal. The buffer capacity is exactly two expected baseline
 events; overflow fails before discarding evidence. Arbitrary app identity and paths remain internal
@@ -7945,9 +7945,9 @@ Then perform one synchronized `bindTargetAndReconcile` transaction:
 If completion precedes one or both normal notifications, the same bound generation remains in
 `launchPairAwaitingEvents` only within the existing deadline and accepts only the missing exact pair
 member. If both events preceded completion, reconciliation may enter
-`launchPairAwaitingBaseline` directly. If Pebble was already exact frontmost before the action,
+`launchPairAwaitingBaseline` directly. If Elysium was already exact frontmost before the action,
 completion must bind the identical pre-launch value/PID and the generation must remain zero-event.
-Zero events with a non-Pebble predecessor can never commit, even if later properties are exact.
+Zero events with a non-Elysium predecessor can never commit, even if later properties are exact.
 
 After either authorized path, establish exact target `isActive` and frontmost
 value/PID/bundle/executable under the frozen event sequence, immutable authority and a final
@@ -7970,7 +7970,7 @@ Diagnostics add only the fixed `prelaunch`, `actionPending`, `bindingCompletion`
 `awaitingBaseline` and `terminal` phases; fixed reason/path categories; bounded counts/offsets; and
 safe Booleans:
 `observer_prearmed`, `predecessor_bound`, `static_target_exact`, `completion_bound`,
-`buffer_reconciled`, `pebble_activate_seen`, `predecessor_deactivate_seen`, `pair_complete` and
+`buffer_reconciled`, `elysium_activate_seen`, `predecessor_deactivate_seen`, `pair_complete` and
 `sequence_unchanged`. Do not emit the predecessor or provisional target name, PID, bundle identifier,
 URL/path, object description or other free-form workspace data.
 
@@ -7978,11 +7978,11 @@ Builder tests must deterministically cover:
 
 - both expected pair orders entirely before completion, straddling completion, and entirely after
   completion; completion before pair, pair before completion and callback blocked on reconciliation;
-- exact already-frontmost value/PID with zero events, and rejection of zero events with a non-Pebble
+- exact already-frontmost value/PID with zero events, and rejection of zero events with a non-Elysium
   predecessor even when final properties are exact;
 - event during observer installation, predecessor capture or before the open action boundary;
 - static-target lookalike whose value/PID differs from completion, wrong predecessor, missing or
-  mutating event identity, foreign activation/deactivation, Pebble deactivation, duplicate, third
+  mutating event identity, foreign activation/deactivation, Elysium deactivation, duplicate, third
   event, capacity/ingress mismatch and event after pair completion;
 - launch error, no/duplicate completion, returned-app mutation/termination, running-command mismatch,
   pre/post file tuple mismatch, rehash mismatch, stale generation and cleanup at every phase;
@@ -7992,10 +7992,10 @@ Builder tests must deterministically cover:
   `staticArtifactAuthority -> installAndArmPrelaunchLedger -> capturePredecessor ->
   armOpenAction -> openApplication -> exactCompletionAuthority -> bindTargetAndReconcile ->
   exactBaseline -> launchSettlement`, exactly one `openApplication`, `activates = true`, no driver
-  activation and no change to Pebble's shipping activation call.
+  activation and no change to Elysium's shipping activation call.
 
-Builder scope remains `Tests/PebbleAppKitIntegration/Driver.swift`, the directly affected
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift` contract and this plan only. No shipping source,
+Builder scope remains `Tests/ElysiumAppKitIntegration/Driver.swift`, the directly affected
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift` contract and this plan only. No shipping source,
 product activation, package/receipt/parser, verifier/pin, product hash, storage, RPG or LAN edit is
 authorized. Immutable earlier sets remain retained; after renewed Design Review and Security (plan),
 use a distinctly named same-byte v7 cold-five set and stop at its first failure without replacement,
@@ -8123,15 +8123,15 @@ Architecture diagnoses immutable v7 against input plan SHA-256
 `1d9790546694121dc3527c3fe1de7fc1653841c6663dff87480e754687f17f3b`. This revision changes only
 the positive authority required for the initial `openApplication` launch. The prearmed generation,
 static artifact and exact completion authority, closed handling of every observed workspace event,
-typed launch-presentation binder, post-bind fatality and exact later Finder/Pebble event pairs remain
+typed launch-presentation binder, post-bind fatality and exact later Finder/Elysium event pairs remain
 mandatory.
 
 ### Evidence and actual platform contract
 
-V7 armed the workspace ledger before the sole open action, sequence-bound one exact non-Pebble
+V7 armed the workspace ledger before the sole open action, sequence-bound one exact non-Elysium
 predecessor, and later reconciled the exact returned application value/PID/bundle/executable,
 unchanged file tuple and executable hash. Nevertheless, both ingress and retained activation-event
-counts remained zero while exact active/frontmost Pebble properties became true. This eliminates the
+counts remained zero while exact active/frontmost Elysium properties became true. This eliminates the
 v6 observer-installation race: on this real target, no `didActivateApplicationNotification` or
 `didDeactivateApplicationNotification` callback accompanied a successful launch activation.
 
@@ -8172,10 +8172,10 @@ After exact completion binding and complete callback-admission drainage, select 
 candidate paths:
 
 1. **`zeroEventSurface`.** If activation/deactivation ingress remains exactly zero, permit the path
-   regardless of which exact non-Pebble predecessor was captured. Zero events are not treated as an
+   regardless of which exact non-Elysium predecessor was captured. Zero events are not treated as an
    inferred pair. They merely leave final-surface authority as the positive proof.
 2. **`expectedPairSurface`.** If lifecycle callbacks are emitted, require exactly one completion-bound
-   Pebble activation and exactly one exact captured-predecessor deactivation, in either order. The
+   Elysium activation and exactly one exact captured-predecessor deactivation, in either order. The
    first exact member permanently disables the zero-event path, clears all accumulated surface
    stability and waits only for its complement inside the existing deadline. Pair completion freezes
    its sequence and restarts surface settlement from zero consecutive samples.
@@ -8183,16 +8183,16 @@ candidate paths:
 An exact first pair member may arrive while a zero-event surface candidate is settling; that is an
 authorized transition to `expectedPairSurface`, not a terminal event, but no zero-event samples carry
 forward. One member without its complement times out terminal and cannot fall back to zero events.
-Pebble deactivation, activation by any other app, deactivation by a different predecessor, malformed
+Elysium deactivation, activation by any other app, deactivation by a different predecessor, malformed
 or mismatched identity, duplicate member, third/extra event, capacity/ingress mismatch, stale
 generation, or any event after the pair sequence or zero-event surface commits is sticky-terminal.
 Properties and AX/CG publication can never repair an observed invalid or partial lifecycle sequence.
 
 The zero-event exception exists only from the adjacent initial open-action boundary through the one
 initial launch-surface commit. It cannot be re-entered after commit and does not apply to Finder,
-Pebble reactivation, F11, ReadyEpoch or any later phase. Before the Finder action, any lifecycle event
-is terminal. After that action, exact Finder activation plus Pebble deactivation remains mandatory;
-after the one Pebble action, exact Pebble activation plus Finder deactivation remains mandatory. Zero
+Elysium reactivation, F11, ReadyEpoch or any later phase. Before the Finder action, any lifecycle event
+is terminal. After that action, exact Finder activation plus Elysium deactivation remains mandatory;
+after the one Elysium action, exact Elysium activation plus Finder deactivation remains mandatory. Zero
 events, a partial pair or properties alone fail those deliberate handoffs.
 
 ### Frozen-sequence launch-surface commit
@@ -8214,7 +8214,7 @@ and AX invalidation sequence before reading, and requires all of the following i
 - unchanged event/invalidation sequences and nonterminal authority after the read.
 
 Apple defines `frontmostApplication` as the application that receives key events, so it is the correct
-current-state predicate. Pebble is an AppKit application, making exact
+current-state predicate. Elysium is an AppKit application, making exact
 [`isFinishedLaunching`](https://developer.apple.com/documentation/appkit/nsrunningapplication/isfinishedlaunching)
 an additional supported completion predicate; it supplements rather than replaces the open callback
 or usable-window proof.
@@ -8257,20 +8257,20 @@ cannot substitute for either completion or the complete surface. Do not set
 
 ### Tests, diagnostics and Conditions for Builder
 
-Add deterministic fixtures for a prearmed, non-Pebble predecessor with zero activation/deactivation
+Add deterministic fixtures for a prearmed, non-Elysium predecessor with zero activation/deactivation
 callbacks and exact completion plus consecutive complete standard-window snapshots; this is the v7
 regression and must bind through `zeroEventSurface`. Cover both expected pair orders before, around
 and after completion; an exact first member arriving during zero-event stability must clear that
 stability, require the complement and restart under the pair sequence.
 
-Also prove: one pair member never falls back; foreign activation, Pebble deactivation, wrong
+Also prove: one pair member never falls back; foreign activation, Elysium deactivation, wrong
 predecessor, malformed/mismatched/duplicate/third ingress, pending-ingress timeout and event during or
 after final commit are sticky-terminal; later exact surfaces cannot recover. Exercise AXUnknown,
 missing/ambiguous AX/CG, changing candidate identity/mode/geometry, active/frontmost lag, process/file/
 hash mutation, AX invalidation races, final-check races and consecutive samples that do not span a
 run-loop turn or the minimum duration. Verify the final full snapshot and rehash are mandatory.
 
-Deliberate-handoff tests must prove zero callbacks fail Finder activation and Pebble reactivation,
+Deliberate-handoff tests must prove zero callbacks fail Finder activation and Elysium reactivation,
 partial pairs fail, exact pairs in either order are required and no initial-launch exception can be
 reused. If optional `didLaunch` corroboration is implemented, cover exact match, absence, existing-
 instance absence, duplicate and completion mismatch; none may alter surface requirements.
@@ -8283,8 +8283,8 @@ predecessor/target identity, PID, names, bundle/path, titles, object description
 field, input or clipboard content. Diagnostics and final reports must describe zero-event launch proof
 as current exact-surface authority, not exhaustive lifecycle history.
 
-Builder scope remains `Tests/PebbleAppKitIntegration/Driver.swift`, the directly affected
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift` contract and this plan only. No shipping source,
+Builder scope remains `Tests/ElysiumAppKitIntegration/Driver.swift`, the directly affected
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift` contract and this plan only. No shipping source,
 activation behavior, product hash, verifier/pin, package/receipt/parser, storage, RPG or LAN edit is
 authorized. Preserve immutable v1-v7 evidence. After renewed Design Review and Security (plan), use a
 distinctly named same-byte v8 cold-five set and stop at its first failure without replacement,
@@ -8324,7 +8324,7 @@ conditions:
    revalidation, fresh rehash and final synchronized callback-drain check are mandatory.
 4. Atomic commit enters `boundNavigation`; any later callback, active/frontmost or finished-launching
    loss, AX publication/identity/mode/geometry change or authority mismatch is immediately fatal. The
-   zero-event exception cannot be reused for Finder, Pebble reactivation, F11 or ReadyEpoch; every
+   zero-event exception cannot be reused for Finder, Elysium reactivation, F11 or ReadyEpoch; every
    deliberate handoff retains its exact required event pair and no repair/retry path.
 5. Diagnostics must label zero-event evidence as current exact-surface proof, expose only fixed
    paths/reasons/counts/offsets and aggregate predicates, and never emit identities, PIDs, names,
@@ -8357,7 +8357,7 @@ is eligible only while activation/deactivation ingress and retained event count 
 It proves the current exact usable foreground surface, not exhaustive lifecycle history. The first
 exact expected-pair member permanently disables that path, clears every accumulated candidate sample
 and requires its complement under the existing deadline. One missing member, foreign/malformed/
-mismatched event, Pebble deactivation, wrong predecessor, duplicate, third/extra, ingress mismatch,
+mismatched event, Elysium deactivation, wrong predecessor, duplicate, third/extra, ingress mismatch,
 stale generation or any event during/after commit is sticky-terminal and cannot fall back to properties
 or a later exact surface.
 
@@ -8381,8 +8381,8 @@ the final snapshot.
 
 Every callback, finished-launching/active/frontmost loss, AX publication/identity/mode/geometry change,
 CG/display/file/process/hash or authority mismatch after bind is terminal. The zero-event exception
-cannot be re-entered or reused for Finder, Pebble reactivation, F11/ReadyEpoch or any later phase. The
-deliberate Finder and Pebble handoffs remain exact pair-only; F11 remains its one-shot opposite-mode
+cannot be re-entered or reused for Finder, Elysium reactivation, F11/ReadyEpoch or any later phase. The
+deliberate Finder and Elysium handoffs remain exact pair-only; F11 remains its one-shot opposite-mode
 surface transition; no properties or zero callbacks replace their existing authority.
 
 Deterministic fixtures cover the zero-event v7 regression, both exact pair orders around completion,
@@ -8427,10 +8427,10 @@ focused element but never one `AXWindow/AXStandardWindow` with typed fullscreen 
 geometry. The v7 binder correctly rejected that transitional, inactive surface.
 
 This is not evidence of a wrong process or executable and does not establish a shipping-window defect.
-It shows that the launch request's activation preference and Pebble's early process-local activation
+It shows that the launch request's activation preference and Elysium's early process-local activation
 attempt are not reliable completion barriers in this runner context. Apple describes
 [`OpenConfiguration.activates`](https://developer.apple.com/documentation/appkit/nsworkspace/openconfiguration/activates)
-as a request to foreground the app; it exposes no success result or completion postcondition. Pebble's
+as a request to foreground the app; it exposes no success result or completion postcondition. Elysium's
 startup call is also made while `applicationDidFinishLaunching` is constructing the window and before
 the exact returned process reports finished launching. The brief nonstandard AX publication is
 consistent with launch/fullscreen transition before a usable active presentation, not authority.
@@ -8450,7 +8450,7 @@ primary branch selected from an exact inactive baseline, not a retry or repair a
 ### Deterministic two-branch launch
 
 Set `configuration.activates = false` so the open request has one job—launch or resolve the exact app—
-and does not add a third implicit activation actor. Pebble's unchanged shipping startup call may still
+and does not add a third implicit activation actor. Elysium's unchanged shipping startup call may still
 self-activate. Preserve this source order:
 
 `staticArtifactAuthority -> prearmLifecycleLedger -> capturePrelaunchPredecessor -> armOpenAction ->
@@ -8476,7 +8476,7 @@ deadline. There are only two mutually exclusive branches:
 The one-shot action ledger must support branch-aware cardinality rather than pretending both runs have
 the same action count. `launch.application` is required exactly once. `launch.activate` is permitted
 zero times only when `selfActivated` commits, or required exactly once after `explicitActivation` is
-claimed. Branch selection permanently retires the other cardinality. Every later Finder, Pebble,
+claimed. Branch selection permanently retires the other cardinality. Every later Finder, Elysium,
 mouse, key and F11 action remains exactly once under its existing adjacent checks.
 
 ### Exact inactive decision barrier
@@ -8491,7 +8491,7 @@ binds the same workspace/AX generation and requires:
 - activation/deactivation ingress and retained count are both zero with no callback admission pending,
   no overflow and no terminal state;
 - `app.isActive == false`; and
-- `frontmostApplication` remains the exact prelaunch non-Pebble predecessor by value/PID/canonical
+- `frontmostApplication` remains the exact prelaunch non-Elysium predecessor by value/PID/canonical
   bundle/executable, and that predecessor remains nonterminated.
 
 Do not require an AX window, typed mode or geometry for this inactive barrier; v8 proves those values
@@ -8522,10 +8522,10 @@ extra event remains terminal. This residual platform limitation does not authori
 Once `explicitActivation` is armed, the initial zero-event exception is unavailable. Require exactly
 one activation for the exact completion-bound target plus exactly one deactivation for the exact
 action predecessor, in either order, with full identity reconciliation and complete ingress drainage.
-One member, zero events, duplicate, third/foreign event, Pebble deactivation, wrong predecessor,
+One member, zero events, duplicate, third/foreign event, Elysium deactivation, wrong predecessor,
 capacity mismatch or timeout is terminal even if properties later become exact. This deliberately
 tests the same controlled `NSRunningApplication.activate(options:)` transition contract used by the
-later Finder/Pebble handoffs.
+later Finder/Elysium handoffs.
 
 Pair completion freezes the workspace sequence and starts the unchanged v7
 `LaunchSurfaceAuthority`: at least two complete snapshots on distinct run-loop turns and across the
@@ -8574,11 +8574,11 @@ Deterministic tests must cover:
   post-bind loss retain their existing disposition;
 - deadline is fixed across branch decision/action/surface; no second activation/open and no force-
   activation option exist; and
-- later Finder/Pebble handoffs remain exact-pair-only and cannot consume or reuse the launch branch or
+- later Finder/Elysium handoffs remain exact-pair-only and cannot consume or reuse the launch branch or
   optional action slot.
 
-Builder scope remains `Tests/PebbleAppKitIntegration/Driver.swift`, the directly affected
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift` contract and this plan only. No shipping source,
+Builder scope remains `Tests/ElysiumAppKitIntegration/Driver.swift`, the directly affected
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift` contract and this plan only. No shipping source,
 product activation, verifier/pin, package/receipt/parser, product hash, storage, RPG or LAN edit is
 authorized. Preserve immutable v1-v8 evidence. After renewed Design Review and Security (plan), use a
 distinctly named same-byte v9 cold-five set and stop at its first failure without replacement,
@@ -8600,7 +8600,7 @@ platform-appropriate: the open request resolves the exact app without becoming a
 actor, while a finished app that truly remains inactive may receive one explicit standard activation.
 Approval is binding on these conditions:
 
-1. `activates = false` is driver-only and Pebble's shipping startup behavior remains unchanged.
+1. `activates = false` is driver-only and Elysium's shipping startup behavior remains unchanged.
    `selfActivated` and `explicitActivation` are mutually exclusive, permanently retire the other
    action cardinality, and share the original fixed deadline. No second open/activate, force-focus
    option, in-process activation, sleep, deadline reset, repair or retry is permitted.
@@ -8621,7 +8621,7 @@ Approval is binding on these conditions:
    properties alone, or a later exact surface fail. Diagnostics must not claim causal attribution if
    the product's earlier request completes near the one action boundary.
 5. Both branches retain the full snapshot, immediate AX revalidation, fresh rehash and atomic
-   `boundNavigation` commit. Every post-bind loss remains fatal; later Finder/Pebble handoffs remain
+   `boundNavigation` commit. Every post-bind loss remains fatal; later Finder/Elysium handoffs remain
    exact-pair-only and cannot consume the optional launch action slot.
 6. Diagnostics remain fixed branch/action/result booleans, counts, durations, reasons and safe
    aggregates, with no identities, PIDs, names, bundles/paths, object descriptions or free-form AX/CG,
@@ -8646,7 +8646,7 @@ through plan SHA-256 `d30761f4f23eeae56cf2abb589ff7b056d81334acc338005a8f3c6cc77
 None.
 
 Setting `OpenConfiguration.activates = false` cleanly separates completion-bound application launch
-from focus authority without changing Pebble's shipping startup path. Static artifact authority,
+from focus authority without changing Elysium's shipping startup path. Static artifact authority,
 pre-armed lifecycle collection, exact completion identity, process/file tuple capture and rehash
 remain prerequisites rather than evidence reconstructed after the action.
 
@@ -8658,7 +8658,7 @@ inactive baseline or fall through to explicit activation.
 
 The explicit branch is authorized only after finished-launch authority and a stable exact zero-event
 inactive baseline: multiple consecutive samples on distinct common-mode turns over a minimum duration,
-the same live non-Pebble frontmost predecessor, no pending ingress, overflow or terminal condition, and
+the same live non-Elysium frontmost predecessor, no pending ingress, overflow or terminal condition, and
 unchanged immutable application/process/file/hash authority. The final synchronized inactive snapshot
 is adjacent to branch sealing and optional-slot claim. A target-active observation at that boundary
 selects self-activation and issues no action; admitted callbacks are drained and accounted without
@@ -8674,7 +8674,7 @@ permitted.
 
 Both branches retain the full immutable binding snapshot, immediate AX revalidation, fresh executable
 rehash, atomic `boundNavigation` commit and fatal post-bind mismatch rules. The original deadline stays
-fixed; later Finder/Pebble handoffs remain exact-pair-only and cannot reuse the launch action slot.
+fixed; later Finder/Elysium handoffs remain exact-pair-only and cannot reuse the launch action slot.
 Diagnostics remain bounded aggregates and fixed booleans/reasons, excluding identities, PIDs, names,
 bundles, paths, object descriptions and free-form AX/CG, input, field or clipboard content. The product
 hash, verifier/pin, receipt/parser and shipping source remain unchanged, and same-byte v9 cold-five
@@ -8751,12 +8751,12 @@ would not fix this: Apple requires that predecessor to call `yieldActivation(to:
 external driver cannot do.
 
 The driver-side conditional activation is therefore an invalid authority design on this platform,
-not an option-bit bug. The four false returns do not prove that a Finder/Dock/user launch of Pebble
+not an option-bit bug. The four false returns do not prove that a Finder/Dock/user launch of Elysium
 fails; they prove only that this inactive command-line caller cannot force a transfer. Likewise,
 Accessibility raise, synthesized Cmd-Tab, AppleScript, deprecated ignore-other-apps flags or repeated
 open/activate calls would manufacture focus or retry around platform policy and remain forbidden.
 
-There is also a product compatibility defect in the explicit source intent. Pebble calls deprecated
+There is also a product compatibility defect in the explicit source intent. Elysium calls deprecated
 `NSApp.activate(ignoringOtherApps: true)` while its window is transparent and before fullscreen
 readiness. On current AppKit the supported target-side API is `NSApp.activate()`, which is still only a
 request and deliberately does not steal focus. The existing early forced call is neither a reliable
@@ -8771,7 +8771,7 @@ the first actual reveal, without force or retry.
 
 ### Shipping one-shot reveal request
 
-In `Sources/Pebble/main.swift`, remove the early
+In `Sources/Elysium/main.swift`, remove the early
 `NSApp.activate(ignoringOtherApps: true)` call. Add one main-thread-only launch activation owner with
 closed states `pendingReveal -> systemActivated | requestIssued -> complete`. It may issue at most one
 `NSApp.activate()` request for the process lifetime and exposes no external trigger or product log.
@@ -8797,7 +8797,7 @@ application-active/resign handling remains unchanged.
 
 Calling only at reveal avoids requesting focus for an invisible alpha-zero window and uses the exact
 point where the product claims it is ready for interaction. It does not guarantee fullscreen entry:
-normal Finder/Dock/active-launcher context may activate Pebble before fullscreen and therefore select
+normal Finder/Dock/active-launcher context may activate Elysium before fullscreen and therefore select
 `systemActivated`; an initially denied background launch reaches the documented visible fallback and
 makes its single modern request there. No activation request may be added to each fullscreen retry.
 
@@ -8819,7 +8819,7 @@ the exact target and then make one cooperative activation request. Merely packag
 without proving it active, or invoking `activate(from:)` without the helper's prior yield, is not
 sufficient. The helper is outside this minimal product fix and requires its own Design/Security plan.
 
-The same limitation applies to later Finder/Pebble handoff claims. Keep their exact pair requirements,
+The same limitation applies to later Finder/Elysium handoff claims. Keep their exact pair requirements,
 but do not execute them from an ineligible command-line source and interpret false activation as a
 product failure. Installed/manual proof or a reviewed active yielding helper must own those deliberate
 actions. No zero-event/property fallback weakens a deliberate handoff.
@@ -8857,9 +8857,9 @@ focus announcement, caret navigation, field switching, reactivation context and 
 retirement. Security must review focus-stealing, phishing/window-fronting and unintended background-
 launch risks; the absence of force flags and the one-shot visible-only request are binding invariants.
 
-Builder scope expands only to `Sources/Pebble/main.swift`,
-`Tests/PebbleAppKitIntegration/Driver.swift`, the directly affected
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift` contract and this plan. No RPG, storage, LAN,
+Builder scope expands only to `Sources/Elysium/main.swift`,
+`Tests/ElysiumAppKitIntegration/Driver.swift`, the directly affected
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift` contract and this plan. No RPG, storage, LAN,
 package/parser/receipt, verifier-pin or unrelated product edit is authorized. After renewed Design
 Mock/Architecture review, Design Review and Security (plan), build one new release hash and run a
 distinctly named v10 cold-five/install set that stops at its first failure without replacement,
@@ -8879,16 +8879,16 @@ Reviewed input plan SHA-256
 `347c051931278a578f80fa2379f4fbec8f1d8860c181121fadda93887f7c2700`. The human-visible contract
 for the shipping activation change is:
 
-1. A Finder/Dock/user launch never requests focus while Pebble is transparent, transitional or not
+1. A Finder/Dock/user launch never requests focus while Elysium is transparent, transitional or not
    ready for interaction. Fullscreen reveal is the completed fade with the same window at alpha `1`;
    fallback reveal is the documented opaque windowed state. No intermediate frame is presented as
    ready.
-2. At first reveal, already-active Pebble makes zero activation requests. Otherwise it makes one
+2. At first reveal, already-active Elysium makes zero activation requests. Otherwise it makes one
    modern cooperative `NSApp.activate()` request after closing the one-shot state first. System denial
    leaves the exact usable window visible and inactive so the user may click it; there is no force,
    flash/hide cycle, repeated prompt, retry, fullscreen-loop request or later F11 request.
 3. Activation changes no text, caret, logical focus or retained AX identity. Before system activation,
-   Pebble must not claim focused Accessibility state. After a granted user/cooperative launch,
+   Elysium must not claim focused Accessibility state. After a granted user/cooperative launch,
    VoiceOver receives one standard-window/focus context and can navigate the same fields and controls;
    fallback remains visible, finite and usable at adaptive window/display sizes.
 4. No new copy, dialog, permission request, telemetry, product logging or entered-text capture is
@@ -8944,11 +8944,11 @@ reveal kind, alpha, mode and finite owning-screen geometry; it does not poll AX/
 fullscreen retry, missing geometry or intermediate animation can mint a reveal token or reach the
 activation owner.
 
-The initial window-order path must not create a false focus claim. If Pebble is not active while the
+The initial window-order path must not create a false focus claim. If Elysium is not active while the
 window is constructed, order the window without making it key; retain the intended GameView responder
 as application state but do not publish it as active Accessibility focus. Only an actual
 `applicationDidBecomeActive` transition may make the same visible window key and restore that same
-responder. If Pebble is already active, existing key-window behavior is retained. This separates
+responder. If Elysium is already active, existing key-window behavior is retained. This separates
 visible readiness from system-granted focus and prevents the inactive v9 surface from reporting a
 focused AX window merely because `makeKeyAndOrderFront` ran early.
 
@@ -8984,7 +8984,7 @@ UTF-16 caret/selection, logical focus owner, presentation generations and retain
 identities. Do not invalidate or rebuild Accessibility trees merely because application-active state
 changes.
 
-Inactive Pebble must report no custom element as Accessibility-focused and must reject an AX focus
+Inactive Elysium must report no custom element as Accessibility-focused and must reject an AX focus
 setter as nonauthoritative. Conjoin actual application-active state in both retained bridges:
 
 - `TextEntryAccessibilityBridge.isFocused` and `focus`; and
@@ -9040,7 +9040,7 @@ the complete RPG names/roles/actions/focus invariants.
 Automated byte/surface checks are necessary but not sufficient. On one unchanged newly built product
 hash, the installed matrix must include:
 
-1. Finder launch and Dock launch where Pebble is already system-activated: exact first reveal, zero
+1. Finder launch and Dock launch where Elysium is already system-activated: exact first reveal, zero
    product activation requests and standard active/key/frontmost AX/CG surface.
 2. Finder and Dock fullscreen reveal requiring the one modern request, with granted focus and no
    hidden/transitional request.
@@ -9063,13 +9063,13 @@ invalidates all installed evidence.
 
 Authorized scope is now explicit:
 
-- `Sources/Pebble/main.swift`: exact window ordering, reveal token/coordinator, modern one-shot request
+- `Sources/Elysium/main.swift`: exact window ordering, reveal token/coordinator, modern one-shot request
   and application-active key/responder handoff;
-- `Sources/Pebble/TextEntryAccessibilityM.swift` and `Sources/Pebble/RPGAccessibilityM.swift`:
+- `Sources/Elysium/TextEntryAccessibilityM.swift` and `Sources/Elysium/RPGAccessibilityM.swift`:
   application-active focus read/set guards and retained focus-context publication only;
-- `Sources/Pebble/UIManagerM.swift` only if required to gate the existing text focused notification or
+- `Sources/Elysium/UIManagerM.swift` only if required to gate the existing text focused notification or
   route the retained activation-epoch notification without changing text semantics;
-- `Tests/PebbleAppKitIntegration/Driver.swift` and directly affected source/integration tests for
+- `Tests/ElysiumAppKitIntegration/Driver.swift` and directly affected source/integration tests for
   no external activation, no false focus and exact installed evidence; and
 - this plan.
 
@@ -9190,12 +9190,12 @@ new-hash invalidation rules close the relevant focus-fronting, false-Accessibili
 exposure risks. Build may proceed only within the reviewed scope and remains subject to every downstream
 gate against the actual diff and installed artifact.
 
-## Activation Reveal Final Pebble Pin Amendment (2026-07-11)
+## Activation Reveal Final Elysium Pin Amendment (2026-07-11)
 
 Architecture reviewed the actual reveal/focus implementation, clean release artifacts and unchanged
 release-surface verifier through input plan SHA-256
 `dc06e539ce6f62358651321e22bf88c37fabe7ac689475701e8b663eef6a72d6`. The frozen-artifact stop is
-resolved by authorizing exactly one verifier value change: release `Pebble` SHA-256 advances from
+resolved by authorizing exactly one verifier value change: release `Elysium` SHA-256 advances from
 `a25cabbf1da2bc4dacceb6bd2b02dead4dfa82f38dcf7ace9f956d7592aee998` to
 `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`.
 
@@ -9206,14 +9206,14 @@ this amendment.
 
 The shipping delta is bounded to the reviewed activation-reveal contract:
 
-- `Sources/Pebble/main.swift` owns the exact-window coordinator, inactive nonkey ordering, alpha-one
+- `Sources/Elysium/main.swift` owns the exact-window coordinator, inactive nonkey ordering, alpha-one
   fullscreen/fallback reveal, the sole modern `NSApp.activate()` call, real active/key/frontmost
   read-back and one retained focus notification per activation epoch;
-- `Sources/Pebble/TextEntryAccessibilityM.swift` and
-  `Sources/Pebble/RPGAccessibilityM.swift` add active/key guards to retained focus reads and setters and
+- `Sources/Elysium/TextEntryAccessibilityM.swift` and
+  `Sources/Elysium/RPGAccessibilityM.swift` add active/key guards to retained focus reads and setters and
   expose only the retained current focus target;
-- `Sources/Pebble/UIManagerM.swift` suppresses focused-element notification while inactive; and
-- `Sources/PebbleAppSupport/PebbleAppSupport.swift` adds the pure typed reveal token, predicates and
+- `Sources/Elysium/UIManagerM.swift` suppresses focused-element notification while inactive; and
+- `Sources/ElysiumAppSupport/ElysiumAppSupport.swift` adds the pure typed reveal token, predicates and
   fail-closed first-consume state machine used by the shipping coordinator.
 
 The corresponding nonshipping driver and tests remove external activation, enforce exact source
@@ -9221,33 +9221,33 @@ ownership/order/absence and exercise invalid, already-active, inactive and reent
 Inspection found no activation option, deprecated force API, retry owner, new product or reveal-driven
 gameplay/storage/LAN mutation.
 
-The package graph is unchanged and contains exactly two products: `Pebble` and `pebsmoke`.
-`PebbleAppSupport` is a source target, not a standalone product. It is linked directly into `Pebble`
-and its own test target; `pebsmoke` depends only on `PebbleCore`. Thus the separately measured
-`PebbleAppSupport.o` digest is corroborating evidence rather than a verifier pin, while its reveal
-kernel is legitimately shipping code inside the changed Pebble executable. The final Pebble symbol
-table contains the expected `PebbleLaunchActivationState`, `PebbleLaunchRevealToken`, predicates and
+The package graph is unchanged and contains exactly two products: `Elysium` and `elysmoke`.
+`ElysiumAppSupport` is a source target, not a standalone product. It is linked directly into `Elysium`
+and its own test target; `elysmoke` depends only on `ElysiumCore`. Thus the separately measured
+`ElysiumAppSupport.o` digest is corroborating evidence rather than a verifier pin, while its reveal
+kernel is legitimately shipping code inside the changed Elysium executable. The final Elysium symbol
+table contains the expected `ElysiumLaunchActivationState`, `ElysiumLaunchRevealToken`, predicates and
 decision symbols, and the release AppSupport object exposes the same owners. This matches the source
 dependency graph rather than an unexplained binary delta.
 
-The release `PebbleAppSupport.o` evidence digest changed from
+The release `ElysiumAppSupport.o` evidence digest changed from
 `d543fc8af3427cd5fcfea8d6ed113e32212b28f7040dfbbc957db0ba21a4e1f5` to
 `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383` because it now owns that
-pure reveal state. It remains absent from `scripts/verify-pebble-storage-release-surface.sh`; this
+pure reveal state. It remains absent from `scripts/verify-elysium-storage-release-surface.sh`; this
 amendment must not add it as a product or pin.
 
 The four independently frozen release artifacts remain exact:
 
-- `pebsmoke`: `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`
-- `PebbleStorage.o`: `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`
-- `PebbleCore.o`: `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`
-- `PebbleTextInput.o`: `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`
+- `elysmoke`: `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`
+- `ElysiumStorage.o`: `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`
+- `ElysiumCore.o`: `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`
+- `ElysiumTextInput.o`: `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`
 
 These exact unchanged hashes exclude smoke, persistence, engine and text-ingress drift and agree with
-the package graph: none consumes the changed AppSupport or Pebble AppKit sources. Running the unchanged
+the package graph: none consumes the changed AppSupport or Elysium AppKit sources. Running the unchanged
 release-surface verifier against the clean artifacts checked all source and preceding Storage/Core/
-TextInput object contracts, then stopped with exit `1` at `reviewed Pebble product hash drift`. Its
-smoke comparison is ordered after the Pebble comparison and was therefore not executed in that run;
+TextInput object contracts, then stopped with exit `1` at `reviewed Elysium product hash drift`. Its
+smoke comparison is ordered after the Elysium comparison and was therefore not executed in that run;
 the exact smoke digest above was measured independently and must be rechecked by the passing verifier
 after the one pin edit.
 
@@ -9266,7 +9266,7 @@ The remaining risks are:
 
 1. **False hash attribution.** An unrelated shipping delta could be hidden behind a broad product pin.
    Close with the named source scope, exact product graph, new reveal symbols, all four frozen hashes,
-   evidence-only AppSupport digest and a clean rebuild that reproduces the exact Pebble hash.
+   evidence-only AppSupport digest and a clean rebuild that reproduces the exact Elysium hash.
 2. **Reveal-state regression.** Invalid or transitional first consumption intentionally closes the
    state fail-closed and could prevent a later request; a loose implementation could instead retry.
    Close with exhaustive token/generation/window/predicate tests, exact alpha-one fullscreen/fallback
@@ -9285,13 +9285,13 @@ The remaining risks are:
 
 After the exact one-line pin edit, Builder must run, in order:
 
-1. a clean warning-free release build and exact hashes for `Pebble`, `pebsmoke`, Storage, Core,
+1. a clean warning-free release build and exact hashes for `Elysium`, `elysmoke`, Storage, Core,
    TextInput and evidence-only AppSupport;
 2. the otherwise byte-for-byte unchanged release-surface verifier, which must pass rather than merely
    reach a later failure, followed by the release binary security scan;
 3. the focused 29-test suite, AppKit driver typecheck and full `security-scan.sh` with the 127-file
    boundary result;
-4. full XCTest and release `pebsmoke`, with each test runner confirmed to have executed real
+4. full XCTest and release `elysmoke`, with each test runner confirmed to have executed real
    tests/checks rather than a no-op;
 5. fresh Security (code) against the actual diff;
 6. the complete installed Finder/Dock, already-active, fullscreen, adaptive fallback, controlled
@@ -9306,13 +9306,13 @@ selection or manual receipt/pin adjustment beyond the one authorized value.
 ### Conditions for Pin Builder
 
 Builder may edit exactly one existing assignment in
-`scripts/verify-pebble-storage-release-surface.sh`:
+`scripts/verify-elysium-storage-release-surface.sh`:
 
-`EXPECTED_PEBBLE_PRODUCT_SHA256='a25cabbf1da2bc4dacceb6bd2b02dead4dfa82f38dcf7ace9f956d7592aee998'`
+`EXPECTED_ELYSIUM_PRODUCT_SHA256='a25cabbf1da2bc4dacceb6bd2b02dead4dfa82f38dcf7ace9f956d7592aee998'`
 
 becomes:
 
-`EXPECTED_PEBBLE_PRODUCT_SHA256='648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8'`.
+`EXPECTED_ELYSIUM_PRODUCT_SHA256='648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8'`.
 
 Do not edit any other expected hash, verifier command, scanner, manifest, source, test, package graph,
 receipt/parser, hook, product, AppSupport surface, storage, RPG or LAN file under this amendment. Stage
@@ -9320,14 +9320,14 @@ that verifier file specifically; never use a blanket stage. If any artifact afte
 from the six exact digests above, stop and return to Architecture/Security rather than advancing a
 second pin.
 
-**Activation Reveal Final Pebble Pin Architecture verdict: PASS.** The new product digest is causally
+**Activation Reveal Final Elysium Pin Architecture verdict: PASS.** The new product digest is causally
 bounded to the approved shipping reveal/focus implementation, the AppSupport movement is explained by
 its direct static dependency and remains separately evidence-only, and all other frozen artifacts are
-exact. Exactly one Pebble verifier-pin value may advance. Architecture performed no source, test,
+exact. Exactly one Elysium verifier-pin value may advance. Architecture performed no source, test,
 package, receipt or verifier-pin edit; every downstream code, runtime, installed, deployment and
 source-control gate remains mandatory.
 
-## Design Review — Activation Reveal Final Pebble Pin Amendment (2026-07-11)
+## Design Review — Activation Reveal Final Elysium Pin Amendment (2026-07-11)
 
 Reviewed through plan SHA-256
 `05ec91f490f409cd751c92952d90607bc07fe7e7d10f1e66259cca698a4f0201`. The exact product-pin
@@ -9336,7 +9336,7 @@ no independent design authority. Approval is binding on these conditions:
 
 1. The shipping delta remains exactly the reviewed reveal coordinator, inactive nonkey window
    ordering, active/key/frontmost read-back, retained text/RPG focus guards and inactive notification
-   suppression. The AppSupport state machine is linked shipping code inside `Pebble`, but remains
+   suppression. The AppSupport state machine is linked shipping code inside `Elysium`, but remains
    neither a new product nor a separately pinned verifier surface.
 2. A request remains impossible before the same retained window reaches exact alpha `1` at completed
    fullscreen reveal or usable adaptive fallback. Already-active reveal performs zero calls; inactive
@@ -9352,15 +9352,15 @@ no independent design authority. Approval is binding on these conditions:
    controlled denial plus real click, repeated/reentrant/F11/reactivation and granted/denied-then-
    clicked VoiceOver matrix. Request count/kind evidence must disclose its machine-cardinality plus
    observed-branch provenance and may not rely on an unreviewed product log or AX/debug field.
-5. Only the named Pebble hash may advance. Any other source, behavior, product graph, verifier logic,
+5. Only the named Elysium hash may advance. Any other source, behavior, product graph, verifier logic,
    frozen artifact, AppSupport surface, receipt, storage, RPG-semantic or LAN delta invalidates this
    Design approval and all installed evidence.
 
-**Activation Reveal Final Pebble Pin Amendment Design Review verdict: PASS.** Exact one-pin
+**Activation Reveal Final Elysium Pin Amendment Design Review verdict: PASS.** Exact one-pin
 bookkeeping preserves the adopted reveal, denial-recovery, text/caret and VoiceOver/focus contracts;
 the complete real installed matrix and final Designer Sign-off remain mandatory before completion.
 
-## Security (plan) — Activation Reveal Final Pebble Pin Amendment (2026-07-11)
+## Security (plan) — Activation Reveal Final Elysium Pin Amendment (2026-07-11)
 
 Independently reviewed the pin Architecture, Design PASS, current clean-release artifacts, resolved
 SwiftPM graph, release-surface verifier and symbol evidence through plan SHA-256
@@ -9371,37 +9371,37 @@ the exact pin plan only; it is not Security (code), runtime, installed or deploy
 
 None.
 
-The exact currently measured release artifacts corroborate the amendment: `Pebble` is
-`648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`; `pebsmoke`,
-`PebbleStorage.o`, `PebbleCore.o` and `PebbleTextInput.o` retain the four stated frozen hashes; and
-`PebbleAppSupport.o` is exactly
+The exact currently measured release artifacts corroborate the amendment: `Elysium` is
+`648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`; `elysmoke`,
+`ElysiumStorage.o`, `ElysiumCore.o` and `ElysiumTextInput.o` retain the four stated frozen hashes; and
+`ElysiumAppSupport.o` is exactly
 `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`. The current verifier still
-contains the old Pebble value, contains no AppSupport expected hash and fails with exit `1` exactly at
-`reviewed Pebble product hash drift`. It therefore has not silently accepted the new binary, skipped
+contains the old Elysium value, contains no AppSupport expected hash and fails with exit `1` exactly at
+`reviewed Elysium product hash drift`. It therefore has not silently accepted the new binary, skipped
 the product comparison or consumed the unreviewed value early.
 
 Hash causality is bounded by independent surfaces rather than asserted from the new product digest
 alone. The reviewed shipping source scope owns launch reveal, active/key focus authority and the pure
-reveal state; the final Pebble and AppSupport symbol tables contain the expected token/state/decision
+reveal state; the final Elysium and AppSupport symbol tables contain the expected token/state/decision
 owners. The unchanged smoke, Storage, Core and TextInput hashes exclude drift in their respective
 product, persistence, engine and text-ingress surfaces. A clean rebuild after the pin must reproduce
 all six digests; any source, package, toolchain-output or artifact mismatch invalidates this approval
 and returns to Architecture/Security instead of authorizing another pin.
 
-The resolved SwiftPM graph has exactly two executable products, `Pebble` and `pebsmoke`.
-`PebbleAppSupport` is not a product or verifier surface: it has product membership only in `Pebble`, is
-consumed directly by the Pebble target and separately by its test target, while `pebsmoke` remains
+The resolved SwiftPM graph has exactly two executable products, `Elysium` and `elysmoke`.
+`ElysiumAppSupport` is not a product or verifier surface: it has product membership only in `Elysium`, is
+consumed directly by the Elysium target and separately by its test target, while `elysmoke` remains
 Core-only. Its object digest is evidence-only even though its code legitimately ships inside the
-Pebble executable. The pin amendment may not add an AppSupport product, expected hash, verifier path,
+Elysium executable. The pin amendment may not add an AppSupport product, expected hash, verifier path,
 receipt field or other externally trusted surface.
 
-The mutation authority is singular: only the existing `EXPECTED_PEBBLE_PRODUCT_SHA256` assignment may
+The mutation authority is singular: only the existing `EXPECTED_ELYSIUM_PRODUCT_SHA256` assignment may
 advance from the stated old digest to the stated new digest. No other expected value, comparison order,
 failure rule, scanner, manifest, source/test file, package graph, receipt/parser, hook or product may
 change under this amendment. The verifier file must be staged specifically, and its amendment-local
 diff must prove the one assignment is the sole edit. A passing post-pin verifier must execute every
 ordered comparison, including the independently measured smoke hash that the current intentional
-Pebble failure has not yet reached.
+Elysium failure has not yet reached.
 
 Preliminary build, 29-test, typecheck and scan results remain implementability evidence only. After
 the pin edit, the plan correctly requires a clean warning-free rebuild and six-hash proof; unchanged
@@ -9412,7 +9412,7 @@ pipeline/receipt; deployed-bundle hash verification and authorized deployment; t
 review, logical commit, push and exact local/remote synchronization. Failure stops the sequence with no
 regold, retry, replacement, discarded run, alternate hash selection or second manual pin/receipt edit.
 
-**Security (plan) verdict: PASS.** The new Pebble pin is causally constrained by exact source/symbol,
+**Security (plan) verdict: PASS.** The new Elysium pin is causally constrained by exact source/symbol,
 product-graph and frozen-artifact evidence; AppSupport remains a shipping dependency whose separate
 digest is corroboration only; and exactly one existing verifier value may change. Full security,
 regression, runtime, installed Accessibility, deployment and source-control gates remain mandatory on
@@ -9424,7 +9424,7 @@ This amendment is based on the immutable V10 black-box run and plan input SHA-25
 `e3037e4b71a05f42ac26ddf42dc228d97cb115a54fe4a6e9140bad388cffd3ab`. All pre-runtime gates were
 green and the exact reviewed product hash was revealed. Launch completed, the target process and
 executable identity remained exact, `isFinishedLaunching` was true, and exactly one finite on-screen
-Pebble-owned layer-zero CG window became visible. Pebble nevertheless remained inactive and was not
+Elysium-owned layer-zero CG window became visible. Elysium nevertheless remained inactive and was not
 frontmost until timeout, while the prearmed workspace ledger observed zero activation/deactivation
 events. Accessibility exposed one focused-window object, but its role, subrole, mode and finite frame
 never became a typed eligible standard-window surface.
@@ -9456,7 +9456,7 @@ not another entry in the unconditional action list and must not add a generic ac
 Its closed states are exactly `unresolved`, `skippedSystemGranted` and `performedDeniedClick`; each run
 must make one terminal transition and may make it only once.
 
-1. **System-granted branch.** If Pebble becomes exact active/frontmost and publishes the exact typed
+1. **System-granted branch.** If Elysium becomes exact active/frontmost and publishes the exact typed
    standard AX surface before the denial action's final adjacent check, transition to
    `skippedSystemGranted`. Emit no mouse event. Continue with the existing settlement and navigation
    sequence without relaxing any lifecycle, CG, AX or text invariant.
@@ -9484,26 +9484,26 @@ All of these conditions are conjunctive at both stable samples and at the adjace
   `isFinishedLaunching` remain exact;
 - the launch workspace ingress was prearmed and completely drained, its sequence remains unchanged,
   and it has observed zero target activation/deactivation events;
-- Pebble is inactive and is not the workspace frontmost application;
+- Elysium is inactive and is not the workspace frontmost application;
 - the exact bound predecessor is still running, still frontmost and has not changed identity;
-- exactly one Pebble-PID-owned, layer-zero, on-screen, alpha-exactly-one CG window exists; its window
+- exactly one Elysium-PID-owned, layer-zero, on-screen, alpha-exactly-one CG window exists; its window
   ID and finite rectangle are stable and equal the bound reveal identity;
 - the rectangle has positive usable dimensions and is strictly contained by one active display. A
   display-filling, cross-display, off-screen, nonfinite or otherwise ambiguous rectangle is
   ineligible. Fullscreen denial is deliberately ineligible because it has no proven safe titlebar;
-- no standard public AX surface is eligible: Pebble remains inactive, no product AX child claims
+- no standard public AX surface is eligible: Elysium remains inactive, no product AX child claims
   `kAXFocused == true`, and no role `AXWindow` plus subrole `AXStandardWindow` plus typed mode plus
   finite-frame tuple has matured. A raw focused-window object may be recorded only as
   `inactive_intended_focus_present=true`; it is neither a public-focus claim nor success;
 - the private bounded pre-action state snapshot is exact and unambiguous, including retained screen
-  identity and every discoverable Pebble text field's object identity, value, UTF-16 selection/caret
+  identity and every discoverable Elysium text field's object identity, value, UTF-16 selection/caret
   and editability. Values and hashes remain private; only counts and equality booleans may escape;
 - the exact reviewed source and product prove the ordinary standard titled-window style
   `[.titled, .closable, .miniaturizable, .resizable]`; and
 - Input Monitoring/CG-event preflight was granted before the test began. The driver must never open a
   permission prompt or reinterpret denied permission as product denial.
 
-If Pebble becomes active/frontmost or the exact standard surface appears at the adjacent final check,
+If Elysium becomes active/frontmost or the exact standard surface appears at the adjacent final check,
 the driver selects `skippedSystemGranted` and does not click. If an unpaired, foreign, duplicate,
 third-party or wrong-predecessor workspace event appears at any point, the run is terminal. Exact
 properties may corroborate a valid event pair, but may never replace it.
@@ -9538,12 +9538,12 @@ not retry.
 ### Post-action proof and continuation
 
 The click does not earn success by itself. From the prearmed action boundary, require exactly the
-Pebble-activate and bound-predecessor-deactivate workspace events, once each, in either order. Zero,
+Elysium-activate and bound-predecessor-deactivate workspace events, once each, in either order. Zero,
 partial, duplicate, foreign, third or wrong-identity events fail sticky even if later property reads
 look correct. After the exact pair, require all of the following across the existing consecutive
 settlement samples and again in the final snapshot:
 
-- Pebble is exact active and workspace-frontmost;
+- Elysium is exact active and workspace-frontmost;
 - the same CG window ID, owner, layer, rectangle, display containment, on-screen state and alpha-one
   reveal identity remain exact;
 - exactly one AX mapping describes that same window with role `AXWindow`, subrole
@@ -9558,7 +9558,7 @@ settlement samples and again in the final snapshot:
   reactivation.
 
 Only after this proof may the existing driver continue to title navigation, text entry and the later
-Finder/Pebble lifecycle epochs. No launch settlement rule is weakened. The click branch adds one
+Finder/Elysium lifecycle epochs. No launch settlement rule is weakened. The click branch adds one
 bounded prerequisite action and one exact event-pair epoch; it does not change the expected evidence
 for any subsequent action.
 
@@ -9568,7 +9568,7 @@ The synthetic CG pair is **automation-only evidence**. It proves that, with test
 Monitoring already granted, the immutable installed app can recover from the exact observed inactive
 visible denial when it receives one user-like titlebar click. It is not product activation behavior,
 not evidence that a person discovered the recovery, not a human click, not a Finder/Dock launch, not
-VoiceOver evidence and not an authorization to ship global input generation in Pebble.
+VoiceOver evidence and not an authorization to ship global input generation in Elysium.
 
 Accordingly, the Design Mock remains open until the same final installed bytes complete the manual
 Finder and Dock matrix, controlled denial followed by one real human click on the visible window, and
@@ -9580,10 +9580,10 @@ Designer Sign-off must distinguish the two evidence classes by provenance.
 
 Scope is restricted to nonshipping verifier surfaces:
 
-1. `Tests/PebbleAppKitIntegration/Driver.swift` — add the closed conditional action, pure titlebar
+1. `Tests/ElysiumAppKitIntegration/Driver.swift` — add the closed conditional action, pure titlebar
    coordinate derivation, double-sampled denial predicate, one down/up post and exact post-action
    lifecycle/CG/AX/state proof.
-2. `Tests/PebbleCoreTests/TextEntrySourceTests.swift` — enforce the closed branch cardinality, no
+2. `Tests/ElysiumCoreTests/TextEntrySourceTests.swift` — enforce the closed branch cardinality, no
    generic retire path, no forbidden activation/AX/AppleScript/key APIs, no retry and immutable product
    boundaries.
 3. Existing AppSupport tests may test a pure helper only if the helper already belongs to the
@@ -9591,7 +9591,7 @@ Scope is restricted to nonshipping verifier surfaces:
    authority.
 4. `TEXT_ENTRY_REGRESSION_PLAN.md` — retain this architecture, downstream verdicts and exact evidence.
 
-Do not edit Pebble shipping source, the activation coordinator, package product membership, product
+Do not edit Elysium shipping source, the activation coordinator, package product membership, product
 hash pin, release verifier, receipt format or installed-signoff content under this amendment. If the
 implementation cannot remain wholly nonshipping, return to Architecture and Security rather than
 moving the authority into the app.
@@ -9625,7 +9625,7 @@ moving the authority into the app.
    same bytes after automated proof.
 
 Focused tests, driver typecheck, source scans and an immutable-product hash check precede the full
-XCTest, security scan, release build, `pebsmoke`, pipeline and installed proof. Any failure or code
+XCTest, security scan, release build, `elysmoke`, pipeline and installed proof. Any failure or code
 change invalidates later evidence and returns to the earliest affected gate. There is no regold,
 replacement run, action retry or second product pin.
 
@@ -9756,12 +9756,12 @@ only fixed branches/transitions, bounded counts, Booleans and safe geometry pred
 provenance cannot populate Finder, Dock, human-click or VoiceOver receipt fields. Event creation and
 posting remain confined to the standalone AppKit integration driver, which is not a package product;
 current shipping sources contain no CG event creation/posting authority, the two-product graph is
-unchanged and the release `Pebble` remains exactly
+unchanged and the release `Elysium` remains exactly
 `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`. Any shipping, package,
 pin, verifier, receipt or installed-signoff format change invalidates this review.
 
 Focused state/coordinate/cardinality/race tests, driver typecheck, source scans and immutable hash
-proof must precede full XCTest, security scan, warning-free release build, `pebsmoke`, pipeline and
+proof must precede full XCTest, security scan, warning-free release build, `elysmoke`, pipeline and
 installed proof. Security (code) must inspect the actual global-input implementation. The same final
 bytes still require the manual Finder/Dock matrix, one real human denial click, granted and denied-
 then-clicked VoiceOver, installed Designer Sign-off and Deploy. No automated result may replace those
@@ -9771,7 +9771,7 @@ regold, replacement, discarded run, action retry or another product pin.
 **Security (plan) verdict: PASS.** Exact grant and stable denial branches, converted non-content
 geometry, precreated one-shot HID ownership, permission/race fail-closure, full lifecycle/CG/AX/text
 postconditions, private diagnostics, explicit synthetic provenance and frozen nonshipping/hash scope
-bound the new global-input risk without granting Pebble any event-generation or focus authority.
+bound the new global-input risk without granting Elysium any event-generation or focus authority.
 
 ## Architecture — V11 Denial-Predicate Attribution and Sleeping-Display Remediation (2026-07-12)
 
@@ -9789,7 +9789,7 @@ shape as the integration gate, posted no input, and sampled the complete denial 
 seconds. It produced this fixed evidence:
 
 - package identity, single launch completion and `isFinishedLaunching` were true;
-- Pebble was inactive/nonfrontmost, the exact predecessor remained frontmost, and target-activation
+- Elysium was inactive/nonfrontmost, the exact predecessor remained frontmost, and target-activation
   and predecessor-deactivation event counts were both zero;
 - AX trust, initial CG input preflight and final CG input preflight were true;
 - AX window count was one, focused nonwindow child count was zero, typed standard inactive-surface
@@ -9816,7 +9816,7 @@ Graphics enumeration error and not evidence that online display geometry is safe
 
 ### Root cause and rejected hypothesis
 
-The current implementation at `Tests/PebbleAppKitIntegration/Driver.swift:2400-2417` admits a CG
+The current implementation at `Tests/ElysiumAppKitIntegration/Driver.swift:2400-2417` admits a CG
 candidate only when `visibleCGOwnerWindows(pid:)` returns exactly one window, then derives the
 containing display exclusively from `activeDisplayIDs()`. V11 had the one exact window, but zero active
 displays, so `displayID` and `titlebar` remained nil. `LaunchDenialObservation.eligible` consequently
@@ -9837,7 +9837,7 @@ Preserve the existing active-display-only click authority. An online-but-inactiv
 may support diagnosis of stale desktop geometry, but may never bind a click coordinate. The verifier
 must not synthesize user activity to wake a display, post a wake click, invoke `caffeinate`, substitute
 `CGGetOnlineDisplayList`, or wait indefinitely for the display to change. Waking the console is user or
-test-environment authority outside Pebble's black-box behavior.
+test-environment authority outside Elysium's black-box behavior.
 
 Replace ambiguous array-return display enumeration with a typed, bounded observation that separates:
 
@@ -9888,14 +9888,14 @@ future run cannot fail with an unattributed aggregate.
 
 ### File and dependency order
 
-1. `Tests/PebbleAppKitIntegration/Driver.swift` — introduce typed active/online display observations,
+1. `Tests/ElysiumAppKitIntegration/Driver.swift` — introduce typed active/online display observations,
    active-and-awake preflight/adjacent guards, the fixed denial predicate/field aggregate and the
    immediate redacted display-unavailable failure. Keep the existing unique-window rule exact.
-2. `Tests/PebbleCoreTests/TextEntrySourceTests.swift` — enforce ordered diagnostics, error-versus-zero
+2. `Tests/ElysiumCoreTests/TextEntrySourceTests.swift` — enforce ordered diagnostics, error-versus-zero
    distinction, sleeping-display no-input behavior, absence of an online-display click fallback and
    absence of maximal-area window selection.
 3. Pure deterministic display/predicate fixtures may live in an existing nonshipping test support
-   target only if that target remains outside every Pebble product. No shipping source or package
+   target only if that target remains outside every Elysium product. No shipping source or package
    membership changes.
 4. Rerun the gate only after the physical/console display is independently active and awake. This is
    an execution prerequisite, not a code recovery step.
@@ -9938,7 +9938,7 @@ accompany the code. Security(code), full Test, an awake exact-package rerun and 
 installed evidence remain downstream.
 
 **V11 Denial-Predicate Attribution and Sleeping-Display Remediation Architecture verdict: PASS.**
-V11 did not expose multiple Pebble windows or a product regression. It exposed a sleeping console
+V11 did not expose multiple Elysium windows or a product regression. It exposed a sleeping console
 display: the sole online display was inactive/not drawable, correctly leaving the click's active
 display and titlebar authority unavailable. The safe remedy is explicit typed attribution and early
 zero-input failure, followed by a fresh run in an independently awake environment. Online geometry,
@@ -10033,7 +10033,7 @@ mapping/ID changes at every boundary, exact V11 attribution, redaction/order/cap
 rejection and the unchanged happy path.
 
 Scope remains wholly nonshipping: only the standalone AppKit integration driver, directly affected
-source/deterministic tests and this plan may change. Pure fixtures must stay outside every Pebble
+source/deterministic tests and this plan may change. Pure fixtures must stay outside every Elysium
 product. No shipping source, package membership, product pin, release verifier, receipt or installed-
 signoff format change is authorized. The current release executable remains exactly
 `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`; focused and full gates
@@ -10041,7 +10041,7 @@ must rehash it before and after verifier work.
 
 The immutable sleeping-display run is diagnostic evidence only and cannot populate denial recovery,
 Finder, Dock, human-click or VoiceOver fields. After focused tests, typecheck, source scans and hash
-proof, the unchanged full XCTest, security scan, warning-free release build, `pebsmoke` and pipeline
+proof, the unchanged full XCTest, security scan, warning-free release build, `elysmoke` and pipeline
 remain mandatory. A new awake exact-package set is required before the complete manual installed and
 Accessibility matrix, Designer Sign-off and Deploy. Any failure or code/artifact change invalidates
 later evidence; there is no wake fallback, evidence substitution, regold, replacement, resumed run,
@@ -10058,7 +10058,7 @@ required on the exact immutable product.
 This amendment diagnoses the immutable awake V12 run against plan input SHA-256
 `0f61e940d8e24c1b0afa54666014662055f6377a8bdef4cb2b04bbd8a5584256`. All static,
 completion, process, file, hash, permission and awake-display authorities were exact. The prearmed
-workspace ledger received exactly the completion-bound Pebble activation and exact predecessor
+workspace ledger received exactly the completion-bound Elysium activation and exact predecessor
 deactivation at offsets 507 and 508 milliseconds, completely drained ingress, and selected
 `expectedPairSurface`. The conditional loop posted zero input, but terminated as
 `conditional_launch_mixed_evidence` because the active/frontmost properties had matured before one
@@ -10183,10 +10183,10 @@ alternate activation authority.
 
 ### File and dependency order
 
-1. `Tests/PebbleAppKitIntegration/Driver.swift` — add the typed launch-settlement lease/path, separate
+1. `Tests/ElysiumAppKitIntegration/Driver.swift` — add the typed launch-settlement lease/path, separate
    workspace and AX stability, reorder the conditional decision, and make postpair nonpublication
    authority losses terminal inside settlement.
-2. `Tests/PebbleCoreTests/TextEntrySourceTests.swift` — enforce the typed path/lease and branch order,
+2. `Tests/ElysiumCoreTests/TextEntrySourceTests.swift` — enforce the typed path/lease and branch order,
    pair-versus-surface fixture matrix, zero input on every pair path and unchanged zero-event denial.
 3. Pure ledger/reducer fixtures may be added only to an existing nonshipping support/test target. No
    product target or package product may consume this authority.
@@ -10356,7 +10356,7 @@ paths, raw AX/CG, text, caret/selection, input and clipboard data. Automated pai
 cannot populate Finder, Dock, human denial-click or VoiceOver fields.
 
 Scope remains wholly nonshipping: only the standalone AppKit integration driver, directly affected
-source/deterministic tests and this plan may change; any pure fixture must remain outside every Pebble
+source/deterministic tests and this plan may change; any pure fixture must remain outside every Elysium
 product. No shipping source, activation coordinator, package graph, pin, release verifier, receipt or
 installed-signoff format change is authorized. The current release executable remains exactly
 `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8` and must be rehashed
@@ -10460,7 +10460,7 @@ the existing privacy boundary and must not emit the raw IDs/rectangles above.
 - Prove there is no dynamic deadline extension, retry, relaxed equality, online-display fallback,
   second click or shipping-source change, and rehash the exact product before and after all gates.
 
-Builder scope is limited to `Tests/PebbleAppKitIntegration/Driver.swift`, directly affected
+Builder scope is limited to `Tests/ElysiumAppKitIntegration/Driver.swift`, directly affected
 `TextEntrySourceTests`/pure nonshipping fixtures, and this plan. A distinct Design Review and renewed
 Security(plan) must approve the sampling/diagnostic contract before Build. Security(code), full Test,
 fresh awake exact-package proof and all installed human/VoiceOver/Deploy gates remain mandatory.
@@ -10728,13 +10728,13 @@ push was changed or performed by Architecture.
 
 ### Immutable evidence and diagnosis
 
-`/tmp/pebble-text-entry-v14-cold-1-20260712T0842.log` is read-only and is the only V14 cold-run
+`/tmp/elysium-text-entry-v14-cold-1-20260712T0842.log` is read-only and is the only V14 cold-run
 artifact. The gate used exact release executable SHA-256
 `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`; its independently signed
 temporary package reported executable SHA-256
 `bee1551f3a117fd5d13cd1503e0eb143410074a907177ca9cf060c1ba39f026f` and CDHash
 `39259d833d231189fb8a2bbc857de663fd134b89`. A post-failure read-only rehash still returns the exact
-release hash. Cleanup left zero `pebble-appkit-gate.*` directories and zero matching temporary Pebble
+release hash. Cleanup left zero `elysium-appkit-gate.*` directories and zero matching temporary Elysium
 or driver processes. V14 was stopped at run 1 and was not retried, replaced or selected around.
 
 The one run obtained the exact expected lifecycle pair—target activation at bounded offset 401 ms and
@@ -10746,7 +10746,7 @@ finished-launching, active and frontmost predicates were always exact. The final
 does not erase the retained maximum candidate evidence.
 
 The verifier rejected that evidence only because the call at
-`Tests/PebbleAppKitIntegration/Driver.swift:3219` still passes
+`Tests/ElysiumAppKitIntegration/Driver.swift:3219` still passes
 `requiredConsecutiveSamples: 4`. The reducer already requires candidate equality over AX object,
 typed mode, rectangle, containing display and CG owner; it records the first candidate time and also
 requires the independent `minimumStableDuration: 0.25` before proceeding to the mandatory final full
@@ -10768,11 +10768,11 @@ unreviewed inherited count of four after the approved semantic pair has already 
 
 ### Minimal remediation and dependency order
 
-1. In `Tests/PebbleAppKitIntegration/Driver.swift`, change only the initial
+1. In `Tests/ElysiumAppKitIntegration/Driver.swift`, change only the initial
    `launchSettlement.settle` call from `requiredConsecutiveSamples: 4` to `2`. Retain
    `minimumStableDuration: 0.25`, the existing reducer, common-mode yield between observations and all
    complete/final snapshot authority. Do not change the generic settlement guard or use one sample.
-2. In `Tests/PebbleCoreTests/TextEntrySourceTests.swift`, replace the inherited four-candidate launch
+2. In `Tests/ElysiumCoreTests/TextEntrySourceTests.swift`, replace the inherited four-candidate launch
    model with a timestamped, distinct-turn two-candidate model followed by a separately represented
    mandatory final snapshot/rehash/commit. Scope source assertions to the initial launch call so they
    prove it uses exactly two while `FinderSurfaceSettlement` and `ReadyEpoch` each continue to require
@@ -10808,12 +10808,12 @@ unreviewed inherited count of four after the approved semantic pair has already 
   release executable before and after focused/full gates and retain the immutable V14 run-1 artifact.
 - **Regression gates:** compile the standalone driver, run the focused `TextEntrySourceTests`, all
   directly affected deterministic tests, `scripts/security-scan.sh`, warning-free release build,
-  full XCTest, 457/457 `pebsmoke`, release-surface/binary verification and fresh Security (code).
+  full XCTest, 457/457 `elysmoke`, release-surface/binary verification and fresh Security (code).
   Runtime proof remains downstream and must use exact same-byte product/verifier evidence with normal
   cleanup and no replacement runs.
 
-Builder is limited to `Tests/PebbleAppKitIntegration/Driver.swift`, the directly affected
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift` fixtures/assertions and this plan. Product source,
+Builder is limited to `Tests/ElysiumAppKitIntegration/Driver.swift`, the directly affected
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift` fixtures/assertions and this plan. Product source,
 package graph, launch deadline, presentation semantics, hooks, installed receipt, deployment and LAN
 remain frozen. Design Review and Security (plan) must both PASS this amendment before Build.
 
@@ -10934,8 +10934,8 @@ failure remains runtime evidence only; it is not treated as code approval.
 
 ### Findings
 
-- **[HIGH] `Tests/PebbleAppKitIntegration/Driver.swift:2953-2965`;
-  `Tests/PebbleCoreTests/TextEntrySourceTests.swift:697-712` ->** The current implementation does not
+- **[HIGH] `Tests/ElysiumAppKitIntegration/Driver.swift:2953-2965`;
+  `Tests/ElysiumCoreTests/TextEntrySourceTests.swift:697-712` ->** The current implementation does not
   execute the exact pair/no-click branch first. `commonModeLaunchSample` begins a lease and then runs
   the full `launchCheapObservation`, including CG owner enumeration, display capture/mapping,
   titlebar derivation and input preflight, before it tests `lease.authority == .expectedPairSurface`.
@@ -10947,8 +10947,8 @@ failure remains runtime evidence only; it is not treated as code approval.
   optional bounded AX snapshot`. Prove the pair branch performs zero denial observation and zero
   event allocation/posting.
 
-- **[HIGH] `Tests/PebbleAppKitIntegration/Driver.swift:3175-3205`;
-  `Tests/PebbleCoreTests/TextEntrySourceTests.swift:778-786,839-867` ->** The final 100-millisecond
+- **[HIGH] `Tests/ElysiumAppKitIntegration/Driver.swift:3175-3205`;
+  `Tests/ElysiumCoreTests/TextEntrySourceTests.swift:778-786,839-867` ->** The final 100-millisecond
   guard does not enclose the irreversible action as approved. After the adjacent reserve check, the
   driver mutates the lifecycle/action ledgers, reads `postStart`, and posts both HID events without
   first requiring `postStart` to be finite, at or before the deadline, and to satisfy the retained
@@ -10961,7 +10961,7 @@ failure remains runtime evidence only; it is not treated as code approval.
   Exercise nonfinite, 99/100/101-ms, exact-deadline, pre-post stall and one-tick post-overrun cases
   against the executable reducer/action seam with exact post counts and no retry.
 
-- **[HIGH] `Tests/PebbleReleaseGateTests/ReleaseGateTests.swift:568-640`;
+- **[HIGH] `Tests/ElysiumReleaseGateTests/ReleaseGateTests.swift:568-640`;
   `scripts/security-scan.sh:118-137` ->** The mandatory Revision-II adversarial matrix is still a
   false green. The test called `testActualHooksFinalizeResumeAndInteractiveWrappers...` replaces the
   authoritative receipt command and every security/build/verifier/AppKit command with scripts that
@@ -10976,8 +10976,8 @@ failure remains runtime evidence only; it is not treated as code approval.
   category results rather than method-name presence. Stubs may supplement failure injection but must
   not stand in for the authority under test.
 
-- **[MEDIUM] `Tests/PebbleAppKitIntegration/Driver.swift:3217-3221`;
-  `Tests/PebbleCoreTests/TextEntrySourceTests.swift:663-867` ->** The newly approved V14 repair is not
+- **[MEDIUM] `Tests/ElysiumAppKitIntegration/Driver.swift:3217-3221`;
+  `Tests/ElysiumCoreTests/TextEntrySourceTests.swift:663-867` ->** The newly approved V14 repair is not
   present in the actual code: the initial `LaunchPresentationSettlement` still passes
   `requiredConsecutiveSamples: 4`, and no phase-sliced one/same-turn/249/250/822-ms plus independent
   final-snapshot fixture exists. Change only this initial threshold to `2`; keep Finder settlement,
@@ -10987,10 +10987,10 @@ failure remains runtime evidence only; it is not treated as code approval.
 
 - **[MEDIUM] `scripts/installed-signoff-receipt.swift:197-216,247-254`;
   `scripts/security-scan.sh:118-137`;
-  `Tests/PebbleReleaseGateTests/ReleaseGateTests.swift:403-418` ->** A clean checkout cannot execute
+  `Tests/ElysiumReleaseGateTests/ReleaseGateTests.swift:403-418` ->** A clean checkout cannot execute
   the self-authoritative order as written. `source-security` is gate one, but the security scan runs
   all ReleaseGate tests, and `testRealPackageCodesignRequirementMatchesFreshParserAndSecurityFramework`
-  unconditionally captures `.build/out/Products/Release/Pebble`; the clean release build is gate two.
+  unconditionally captures `.build/out/Products/Release/Elysium`; the clean release build is gate two.
   Thus the source-security gate depends on a pre-existing release artifact and can fail before the
   authority has built one, or validate a stale prior artifact. Make the package/codesign test create
   and bind its own isolated executable fixture, or otherwise remove its dependency on the current
@@ -11001,13 +11001,13 @@ failure remains runtime evidence only; it is not treated as code approval.
 ### Read-only evidence and boundary
 
 `swift test --filter
-'TextEntrySourceTests|PebbleTextInputTests|PebbleAppSupportTests|ReleaseGateTests|KeychainReceiptStateStoreIntegrationTests'`
+'TextEntrySourceTests|ElysiumTextInputTests|ElysiumAppSupportTests|ReleaseGateTests|KeychainReceiptStateStoreIntegrationTests'`
 reported TextInput 21/21, ReleaseGate/Keychain 25/25, TextEntrySource 24/24 and AppSupport 6/6 passing.
 `bash scripts/security-scan.sh` and `git diff --check` passed. Those green results demonstrate the
 false-green coverage defects above; they do not close them. `swift package describe --type json`
-reports exactly two products, `Pebble` and `pebsmoke`, with `PebbleReleaseGate` remaining a nonproduct
+reports exactly two products, `Elysium` and `elysmoke`, with `ElysiumReleaseGate` remaining a nonproduct
 target. The current release, smoke, Storage, Core and TextInput hashes exactly match their verifier
-pins (`Pebble` `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`), all three hooks and
+pins (`Elysium` `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`), all three hooks and
 release-gate wrappers are mode `0755`, the router contains no `NSEvent.eventNumber` access, exhausted
 `flagsChanged` is nondispatching, equal-key RPG refresh mutates scalar attributes without parent/child
 publication, and no ReleaseGate/TextInput/AppSupport/driver LAN surface was found. These reviewed
@@ -11035,7 +11035,7 @@ previously approved product, privacy, evidence, deadline and installed-signoff i
 
 ### 1. Close the exact pair before all denial observation
 
-`Tests/PebbleAppKitIntegration/Driver.swift` must replace the current always-populated
+`Tests/ElysiumAppKitIntegration/Driver.swift` must replace the current always-populated
 `CommonModeLaunchSample` path with a typed pair-or-denial disposition. Immediately after
 `beginLaunchSettlementSample()`, inspect only the immutable lease authority. If it is
 `.expectedPairSurface`, call `finishLaunchSettlementSample(lease:)` and close that exact pair before
@@ -11051,7 +11051,7 @@ hands off to the independent launch-presentation settlement. It grants neither n
 Only `.zeroEventSurface` may proceed to a separately named denial-observation routine. That routine
 performs the current bounded CG/display/titlebar/preflight work, then—only for visible-alpha-one
 denial sampling—takes the one capped AX snapshot. Invalid lease authority remains terminal before
-either branch. `Tests/PebbleCoreTests/TextEntrySourceTests.swift` must reverse the currently contrary
+either branch. `Tests/ElysiumCoreTests/TextEntrySourceTests.swift` must reverse the currently contrary
 `begin -> cheapCapture -> pairFirst` assertion: slice the complete function and prove
 `begin -> pair switch -> finish exact pair -> denial cheap observation -> optional AX snapshot`.
 Pair-branch source and executable fixtures must prove zero calls to CG-window/display/titlebar/input-
@@ -11096,7 +11096,7 @@ self-test argument and the AppKit gate must continue to invoke the ordinary six-
 
 Move the receipt command orchestration currently hidden behind globals in
 `scripts/installed-signoff-receipt.swift` into package-internal workflow types in
-`Sources/PebbleReleaseGate/ReleaseGate.swift` (or one new file in that same nonproduct target).
+`Sources/ElysiumReleaseGate/ReleaseGate.swift` (or one new file in that same nonproduct target).
 `ReleaseGateCommandDispatcher` must own the existing closed command enum and state transitions;
 dependencies are narrow protocols for receipt store/coordinator, closed-command execution, durable
 evidence writes, repository/Git snapshots, artifact package/install identity, live-process capture,
@@ -11106,7 +11106,7 @@ closed commands/arguments. No environment variable, path, manifest, log, digest,
 boolean, alternate executable or dependency selector may choose a production dependency.
 
 Add a compile-time test-only executable at
-`Tests/PebbleReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift`, excluded from SwiftPM test
+`Tests/ElysiumReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift`, excluded from SwiftPM test
 sources as `Fixtures` already is. It calls that exact dispatcher with isolated ephemeral/Keychain-test
 stores, private temporary evidence roots, temporary Git repositories, real
 `FoundationClosedCommandRunner` helper processes and deterministic injected faults. It is a dependency
@@ -11147,7 +11147,7 @@ The mandatory matrix is divided into individually executable categories with cle
 10. production-Keychain isolated identity cross-process visibility, required accessibility class,
     stale coordinator race and identity-only cleanup after every success/failure.
 
-`Tests/PebbleReleaseGateTests/ReleaseGateTests.swift` owns categories 1–9;
+`Tests/ElysiumReleaseGateTests/ReleaseGateTests.swift` owns categories 1–9;
 `KeychainReceiptStateStoreIntegrationTests.swift` owns category 10 and the injected real adapter
 failure rows. A new `scripts/release-gate-adversarial-test.sh` must first enumerate the exact expected
 test names, then run every category separately, capture its XCTest log, require exit zero and a
@@ -11180,25 +11180,25 @@ four-sample source tests must slice and assert the later Finder and Ready calls 
 ### 5. Make source-security independent of the release artifact built at gate two
 
 `testRealPackageCodesignRequirementMatchesFreshParserAndSecurityFramework` must stop opening
-`.build/out/Products/Release/Pebble`. It must compile a minimal isolated executable fixture into its
+`.build/out/Products/Release/Elysium`. It must compile a minimal isolated executable fixture into its
 private temporary directory, capture that regular single-link executable with `StableFileHasher`, run
 the real `scripts/package-app.sh` against it, and compare the emitted designated requirement with both
 `CodesignRawCapture` and Security.framework. The fixture exercises package/codesign parsing without
 asserting product correctness; production product continuity remains exclusively downstream of the
 authoritative clean release-build gate and package/install capture. No source-security test may read,
-hash or require `.build/out/Products/Release/Pebble` or `.build/release/Pebble`.
+hash or require `.build/out/Products/Release/Elysium` or `.build/release/Elysium`.
 
 Add a clean-start dispatcher integration row to the category-1 workflow probe. Its isolated fixture
 begins with no release product. Gate one runs the real source-security command boundary and asserts
 that absence without opening the artifact. Gate two invokes a real warning-free Swift release build
-of a minimal temporary package named `Pebble`, and only after its successful parsed result may the
+of a minimal temporary package named `Elysium`, and only after its successful parsed result may the
 workflow capture the newly created release identity and let gates three through seven observe it.
 Assert gate-one evidence has no artifact hash, gate-two and every product-dependent later entry bind
 the one newly created digest, and a stale preseeded artifact is removed/rejected rather than accepted.
 This proves `run-prepare-gates` reaches and produces its release artifact without recursively invoking
 the repository's own full pipeline or depending on a prior build. The production fixed seven-gate
 order remains source-security → clean warning-free release build → release surface → binary scan →
-AppKit → XCTest → 457/457 pebsmoke.
+AppKit → XCTest → 457/457 elysmoke.
 
 ### Dependency order, risk-to-test map and Conditions for Builder
 
@@ -11224,29 +11224,29 @@ No runtime cold set, installed receipt transition, deployment, commit or push oc
 - **Test escape hatch:** production tool/source scans prove no fixture import, compiler testing flag,
   environment selector or caller dependency injection; Fixtures remain excluded from products/tests.
 - **Privacy and product scope:** diagnostics stay fixed/capped/redacted; unattended paths retain zero
-  clipboard read/write/Paste; only the nonshipping verifier/release-gate test surface changes. Pebble,
-  PebbleCore, PebbleStorage, PebbleTextInput, `pebsmoke`, LAN and Sign protocol behavior remain frozen.
+  clipboard read/write/Paste; only the nonshipping verifier/release-gate test surface changes. Elysium,
+  ElysiumCore, ElysiumStorage, ElysiumTextInput, `elysmoke`, LAN and Sign protocol behavior remain frozen.
 
 Conditions for Builder: preserve the unchanged absolute presentation deadline and 100-ms reservation;
 post no event unless the immediate final guard passes; never relabel a pre-post rejection as a
 post-overrun; never retry or select a later runtime result; keep initial settlement at exactly two and
 later settlements at four; remove every unconditional-success authority stub and source-security
 artifact dependency; make every required matrix category actually execute and fail closed on zero
-tests or cleanup failure; retain exact `/Applications/Pebble.app/Contents/MacOS/Pebble` production
+tests or cleanup failure; retain exact `/Applications/Elysium.app/Contents/MacOS/Elysium` production
 identity, monotonic Keychain authority, disposable cache, sealed private evidence, distinct Designer
 transition and executable hooks. Authorized edits are limited to
-`Tests/PebbleAppKitIntegration/Driver.swift`, `Tests/PebbleCoreTests/TextEntrySourceTests.swift`,
-`Sources/PebbleReleaseGate/**`, `Tests/PebbleReleaseGateTests/**`,
+`Tests/ElysiumAppKitIntegration/Driver.swift`, `Tests/ElysiumCoreTests/TextEntrySourceTests.swift`,
+`Sources/ElysiumReleaseGate/**`, `Tests/ElysiumReleaseGateTests/**`,
 `scripts/installed-signoff-receipt.swift`, `scripts/run-release-gate-tool.sh`,
 `scripts/security-scan.sh`, the new adversarial runner, directly necessary receipt/observer/Designer/
 finalize/resume wrappers and hooks, `Package.swift` only if fixture exclusion requires an exact update,
 and this plan. Any shipping source, product graph, release deadline/predicate, Storage/Core/TextInput/
-pebsmoke bytes, LAN surface or clipboard behavior change returns to Architecture and Security(plan).
+elysmoke bytes, LAN surface or clipboard behavior change returns to Architecture and Security(plan).
 
 Required closing evidence is: standalone driver compile and executable self-test matrix; focused
 `TextEntrySourceTests`, `ReleaseGateTests` and real Keychain integration with reported counts; the new
 adversarial runner showing all ten categories executed; `scripts/security-scan.sh`; warning-free clean
-release build; full XCTest; 457/457 `pebsmoke`; release-surface and binary verification; unchanged
+release build; full XCTest; 457/457 `elysmoke`; release-surface and binary verification; unchanged
 release executable hash; `git diff --check`; and a fresh independent Security (code) review. Only that
 PASS reopens the next distinctly named same-byte cold-five proof and installed human/VoiceOver gates.
 
@@ -11260,7 +11260,7 @@ is stale until the authorized implementation is stable.
 Reviewed the exact Architecture above through plan SHA-256
 `4854605d9674e89d71b2fe92d2743d6b9e31cad5724f435076a820963d428567`. The remediation changes
 nonshipping verification timing, evidence authority and developer workflow; it does not authorize a
-Pebble screen, control, focus, text-entry or RPG semantic change. Approval is binding on these
+Elysium screen, control, focus, text-entry or RPG semantic change. Approval is binding on these
 user/developer-visible conditions:
 
 1. The exact-pair branch is visually inert and zero-input. It closes the conditional action before any
@@ -11386,7 +11386,7 @@ and the test may not recurse into the repository pipeline or substitute an old p
 
 TOCTOU, privacy and scope remain bounded. Every initial and later artifact transition exercises stable
 no-follow regular/single-link identity, exact canonical release/package/install paths, exact
-`/Applications/Pebble.app/Contents/MacOS/Pebble`, signature/requirement/hash/CDHash continuity and
+`/Applications/Elysium.app/Contents/MacOS/Elysium`, signature/requirement/hash/CDHash continuity and
 live PID/start/executable identity. Keychain state remains monotonic authority; cache is disposable;
 private logs and evidence remain sealed; observer and later Designer are distinct one-shot
 transitions. Diagnostics stay fixed, capped and redacted, unattended paths have zero clipboard/Paste
@@ -11394,7 +11394,7 @@ access, and the binding Design deadline messages distinguish zero-input exhausti
 post-overrun input without exposing paths, hashes, identities, geometry, AX/text or clipboard data.
 
 Builder scope is limited exactly as V15 states. No shipping source, product graph, release deadline or
-predicate, Storage/Core/TextInput/`pebsmoke` byte, LAN/Sign protocol or installed/manual behavior may
+predicate, Storage/Core/TextInput/`elysmoke` byte, LAN/Sign protocol or installed/manual behavior may
 change. Production fixture selectors, testing compiler flags, dependency injection controls or test
 paths are prohibited. Existing tests are replaced only where they machine-enforce a contrary order or
 false green; every semantic contract receives stronger executable coverage. Any scope/hash drift,
@@ -11410,8 +11410,8 @@ deployment, commit or push action.
 
 ## Build — V15 Final Security-code Remediation evidence (2026-07-12)
 
-Builder implemented the binding V15 A-through-G order without changing shipping Pebble, PebbleCore,
-PebbleStorage, PebbleTextInput, AppSupport, `pebsmoke`, LAN, Sign or clipboard source. The exact-pair
+Builder implemented the binding V15 A-through-G order without changing shipping Elysium, ElysiumCore,
+ElysiumStorage, ElysiumTextInput, AppSupport, `elysmoke`, LAN, Sign or clipboard source. The exact-pair
 lease now closes before denial CG/display/titlebar/preflight/AX work; the real conditional-action
 executor owns the finite immediate pre-HID deadline guard and distinguishes zero-input exhaustion
 from possible-input post overrun. Initial launch presentation alone uses two distinct-turn samples;
@@ -11434,22 +11434,22 @@ Empirical closing evidence, all exit zero:
 - Two independent clean `swift package clean && swift build -c release` runs were warning-free
   (`120.77` and `120.20` seconds). The second build was byte-identical to the first for both the
   release executable and AppSupport object.
-- Final full `swift test` executed PebbleTextInput 21, PebbleReleaseGate 27, PebbleCore 1003 and
-  PebbleAppSupport 6 tests: 1057 total, zero failures and zero unexpected failures.
-- Final post-rebuild `swift run -c release pebsmoke` reported `457 passed, 0 failed`.
-- Final post-rebuild `scripts/verify-pebble-storage-release-surface.sh` reported
-  `Pebble storage release surface verified.`; `scripts/security-check-binary.sh
-  .build/out/Products/Release/Pebble` reported `binary: passed`.
-- Exact final release hashes are Pebble
-  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, `pebsmoke`
-  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, PebbleStorage.o
-  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, PebbleCore.o
-  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, PebbleTextInput.o
-  `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and PebbleAppSupport.o
+- Final full `swift test` executed ElysiumTextInput 21, ElysiumReleaseGate 27, ElysiumCore 1003 and
+  ElysiumAppSupport 6 tests: 1057 total, zero failures and zero unexpected failures.
+- Final post-rebuild `swift run -c release elysmoke` reported `457 passed, 0 failed`.
+- Final post-rebuild `scripts/verify-elysium-storage-release-surface.sh` reported
+  `Elysium storage release surface verified.`; `scripts/security-check-binary.sh
+  .build/out/Products/Release/Elysium` reported `binary: passed`.
+- Exact final release hashes are Elysium
+  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, `elysmoke`
+  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, ElysiumStorage.o
+  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, ElysiumCore.o
+  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, ElysiumTextInput.o
+  `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and ElysiumAppSupport.o
   `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
   The older `f5eb6657`/`57d91481` pair is superseded historical evidence; the binding Activation
   Reveal Final Pin baseline is `648af840`/`12d4b146`, which this build retains exactly.
-- `swift package describe --type json` exposes only `Pebble` and `pebsmoke` products. The forbidden
+- `swift package describe --type json` exposes only `Elysium` and `elysmoke` products. The forbidden
   Sign-specific LAN symbol scan returned zero matches. `git diff --check` passed.
 
 No runtime cold set, installed receipt transition, deployment, commit or push occurred. Those remain
@@ -11469,8 +11469,8 @@ disk against the V15 Architecture, Design PASS and Security(plan) PASS through i
 
 ### Findings
 
-- **[HIGH] `Sources/PebbleReleaseGate/ReleaseGate.swift:1036-1046,1072-1077`;
-  `Tests/PebbleReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift:36-57,103-113` ->** The
+- **[HIGH] `Sources/ElysiumReleaseGate/ReleaseGate.swift:1036-1046,1072-1077`;
+  `Tests/ElysiumReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift:36-57,103-113` ->** The
   production dispatcher does not own all state transitions as the binding V15 contract requires, and
   the test adapter remains able to manufacture authoritative success. `observeInteractive` and
   `designerAttest` are dependency methods with no typed validated result; the dispatcher delegates to
@@ -11485,7 +11485,7 @@ disk against the V15 Architecture, Design PASS and Security(plan) PASS through i
   adapter run the real dispatcher-owned prepare publication, and prove that no dependency can return
   a preconstructed transition, payload, digest or PASS decision.
 
-- **[HIGH] `Tests/PebbleReleaseGateTests/ReleaseGateTests.swift:231-317,551-600,652-703,705-815`;
+- **[HIGH] `Tests/ElysiumReleaseGateTests/ReleaseGateTests.swift:231-317,551-600,652-703,705-815`;
   `scripts/release-gate-adversarial-test.sh:7-17,26-50` ->** The ten-category matrix still reports a
   false green because its named tests do not execute the mandatory category semantics. Category 1
   manually loops a `FoundationClosedCommandRunner` over a minimal package and helper-generated PASS
@@ -11508,8 +11508,8 @@ disk against the V15 Architecture, Design PASS and Security(plan) PASS through i
   production adapter and stale-coordinator category-10 rows, before printing
   `categories=10 cleanup=verified`.
 
-- **[MEDIUM] `Tests/PebbleReleaseGateTests/ReleaseGateTests.swift:231-317`;
-  `Tests/PebbleReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift:36-38` ->** The isolated
+- **[MEDIUM] `Tests/ElysiumReleaseGateTests/ReleaseGateTests.swift:231-317`;
+  `Tests/ElysiumReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift:36-38` ->** The isolated
   codesign fixture correctly removes the old direct dependency on the repository release product, but
   the required clean-start integration evidence is still absent. The clean-start test builds a
   separate minimal package through a hand-written loop, while the only workflow probe's
@@ -11539,15 +11539,15 @@ Read-only focused evidence passed but does not cure the coverage findings: `swif
 TextEntrySource 25/25 and ReleaseGate/Keychain 27/27 with zero failures; the standalone driver test
 reported its ten-case conditional-action PASS. `scripts/release-gate-adversarial-test.sh` reported ten
 one-test category subprocesses and final PASS, which is precisely the semantically incomplete result
-described above. `git diff --check` passed. `swift package describe --type json` exposes only `Pebble`
-and `pebsmoke`. Current hashes match the binding pins: Pebble
-`648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, pebsmoke
-`d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, PebbleStorage.o
-`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, PebbleCore.o
-`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, PebbleTextInput.o
-`547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and PebbleAppSupport.o
+described above. `git diff --check` passed. `swift package describe --type json` exposes only `Elysium`
+and `elysmoke`. Current hashes match the binding pins: Elysium
+`648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, elysmoke
+`d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, ElysiumStorage.o
+`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, ElysiumCore.o
+`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, ElysiumTextInput.o
+`547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and ElysiumAppSupport.o
 `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`. No ReleaseGate, AppSupport
-or standalone-driver LAN surface was found; generic bounded Sign text support in PebbleTextInput is
+or standalone-driver LAN surface was found; generic bounded Sign text support in ElysiumTextInput is
 not a LAN protocol addition.
 
 Reviewed: the five prior formal findings; pair/denial ordering; one-shot action timing and outcomes;
@@ -11574,18 +11574,18 @@ This Architecture responds only to the three formal findings in the immediately 
 (code) FAIL, read at input plan SHA-256
 `65d284a41621a1448a01ebff44e7b5941f9c35182d37bad7090a7cc7dbc38e28`. It does not reopen the
 closed pair-first, pre-HID deadline or initial-settlement work. The shipping product, storage,
-text-input and LAN surfaces are frozen at these current release hashes: Pebble
-`648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, pebsmoke
-`d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, PebbleStorage.o
-`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, PebbleCore.o
-`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, PebbleTextInput.o
-`547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and PebbleAppSupport.o
+text-input and LAN surfaces are frozen at these current release hashes: Elysium
+`648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, elysmoke
+`d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, ElysiumStorage.o
+`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, ElysiumCore.o
+`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, ElysiumTextInput.o
+`547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and ElysiumAppSupport.o
 `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`. The SwiftPM product graph
-remains only `Pebble` and `pebsmoke`.
+remains only `Elysium` and `elysmoke`.
 
 ### 1. Put every receipt transition behind the dispatcher
 
-In `Sources/PebbleReleaseGate/ReleaseGate.swift`, replace the authority-bearing methods on
+In `Sources/ElysiumReleaseGate/ReleaseGate.swift`, replace the authority-bearing methods on
 `ReleaseGateCommandDependencies`. Remove `runAuthoritativePrepare(_:)`, `observeInteractive()` and
 `designerAttest()`. No dependency receives a `ReleaseGateCoordinator`, `ReceiptStateStore`, current
 payload or transition closure. The replacement seams expose only operations, never conclusions:
@@ -11626,7 +11626,7 @@ For `.designerAttest`, the dispatcher validates `.observedPendingDesigner`, exac
 evidence and a different reviewer PID/start. The dependency displays the evidence and returns the raw
 line. The dispatcher alone interprets `FAIL` as invalidation or exact `DESIGN-<challenge>` as consent;
 all other input fails without transition. The dispatcher itself creates the fixed
-`PebbleDesignerAttestationV2` record with `DurablePrivateFileWriter`, reopens and validates it,
+`ElysiumDesignerAttestationV2` record with `DurablePrivateFileWriter`, reopens and validates it,
 recomputes the evidence digest, consumes the one-shot challenge and transitions
 `.observedPendingDesigner -> .observed`. `finalize`, `precommit`, `postcommit`/`resume-commit` and
 `prepush` retain their current dispatcher-owned transitions. A source test must establish exactly
@@ -11642,7 +11642,7 @@ with no testing define, fixture import or alternate executable selector.
 
 ### 2. Make the excluded workflow probe execute real `run-prepare-gates`
 
-Replace `Tests/PebbleReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift` completely as an
+Replace `Tests/ElysiumReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift` completely as an
 adapter to the same dispatcher. Delete `fixturePayload`, `fixture-bootstrap-finalized`, all direct
 coordinator access and all state construction. Its outer syntax is a closed test-only scenario id,
 an absolute private temporary-repository path and one production `ReleaseGateCommand`; scenario ids
@@ -11651,7 +11651,7 @@ persistence fault only. They cannot supply paths inside the workflow, statuses, 
 digests, payload fields, transitions or PASS values.
 
 The probe's success fixture is a real temporary Git repository and minimal Swift package with
-executable products `Pebble` and `pebsmoke` plus one XCTest. The package starts with no canonical
+executable products `Elysium` and `elysmoke` plus one XCTest. The package starts with no canonical
 release executable. Its copied closed helper scripts are conditional validators: each verifies exact
 argv/version, prior-stage ledger, canonical artifact identity and expected digest before emitting the
 real parser grammar; a wrong call exits nonzero. Gate two remains the actual fixed
@@ -11673,9 +11673,9 @@ are dispatcher-produced. Wrong helper output or a missing stage must leave no `.
 
 ### 3. Replace category labels with an exact executable row inventory
 
-Add `Tests/PebbleReleaseGateTests/Fixtures/ReleaseGateAdversarialRowsV16.swift` and the matching
+Add `Tests/ElysiumReleaseGateTests/Fixtures/ReleaseGateAdversarialRowsV16.swift` and the matching
 checked-in text manifest
-`Tests/PebbleReleaseGateTests/Fixtures/release-gate-adversarial-rows-v16.txt`. Both expand to the same
+`Tests/ElysiumReleaseGateTests/Fixtures/release-gate-adversarial-rows-v16.txt`. Both expand to the same
 sorted 148 unique row ids below. `ReleaseGateTests` owns categories 1-9 and
 `KeychainReceiptStateStoreIntegrationTests` owns category 10. A test-only `AdversarialRowLedger`
 records a row only after its assertion helper observes the named real effect or expected rejection;
@@ -11794,7 +11794,7 @@ change returns to Architecture and Security(plan).
 - **Privacy/cleanup:** capped private evidence, no clipboard/text capture, exact isolated Keychain
   identity and post-row process/path absence prove tests do not widen production privacy or cleanup.
 - **Product/LAN scope:** pre/post six hashes, product graph, zero ReleaseGate/AppSupport/driver LAN
-  symbols and source diff prove no shipping, storage, text-input, pebsmoke or LAN byte moved.
+  symbols and source diff prove no shipping, storage, text-input, elysmoke or LAN byte moved.
 
 Conditions for Builder: preserve the production CLI command grammar and paths; dispatcher alone owns
 every state creation/transition/invalidation and challenge decision; dependencies return only raw
@@ -11803,22 +11803,22 @@ but never caller evidence; helpers must conditionally validate exact predecessor
 real clean and stale `run-prepare-gates` both execute the fixed seven stages; all 148 rows execute and
 cleanup; production Keychain identity is never used by categories 1-9 and category 10 deletes only its
 random isolated identity; no shipping source, release deadline, AppKit driver, Core, Storage,
-TextInput, AppSupport, pebsmoke, RPG or LAN behavior changes.
+TextInput, AppSupport, elysmoke, RPG or LAN behavior changes.
 
-Authorized edits are limited to `Sources/PebbleReleaseGate/**`,
-`Tests/PebbleReleaseGateTests/**`, `scripts/installed-signoff-receipt.swift`,
+Authorized edits are limited to `Sources/ElysiumReleaseGate/**`,
+`Tests/ElysiumReleaseGateTests/**`, `scripts/installed-signoff-receipt.swift`,
 `scripts/observe-installed-signoff.swift`, `scripts/designer-attest-installed-signoff.swift`,
 `scripts/run-release-gate-tool.sh`, `scripts/release-gate-adversarial-test.sh`,
 `scripts/security-scan.sh`, the receipt/observer/Designer/finalize/resume wrappers and three hooks only
 where required to preserve the closed command path, `Package.swift` only for fixture exclusion, and
-this plan. The shipping-hash files, `Tests/PebbleAppKitIntegration/Driver.swift`,
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift`, pipeline/deploy code and all LAN files are frozen.
+this plan. The shipping-hash files, `Tests/ElysiumAppKitIntegration/Driver.swift`,
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift`, pipeline/deploy code and all LAN files are frozen.
 
 Required closing evidence: source tests for sole dispatcher authority and production fixture escape;
 probe compile; clean and stale real `run-prepare-gates`; focused `ReleaseGateTests` and
 `KeychainReceiptStateStoreIntegrationTests` with exact counts; adversarial runner
 `categories=10 rows=148`; `scripts/security-scan.sh`; warning-free clean release build; full XCTest;
-457/457 `pebsmoke`; release-surface and binary scans; identical six frozen hashes/product graph and
+457/457 `elysmoke`; release-surface and binary scans; identical six frozen hashes/product graph and
 zero-LAN scan; `git diff --check`; and fresh independent Security (code). Only a Security(code) PASS
 reopens same-byte runtime, installed Design sign-off, Test, pipeline/deploy, commit and push.
 
@@ -11834,7 +11834,7 @@ Reviewed the exact V16 Architecture above at input plan SHA-256
 Revision-II, privacy/copy and V15 operator contracts, and the actual current dispatcher, production
 CLI, pipeline, observer, Designer, finalizer, resume, adversarial-runner and hook-facing messages.
 This is not Design N/A: V16 changes a developer-facing interactive release workflow even though it
-changes no Pebble game UI. The Architecture preserves that workflow only with the following binding,
+changes no Elysium game UI. The Architecture preserves that workflow only with the following binding,
 checkable acceptance criteria.
 
 1. **Clean bootstrap and fixed progress.** The normal entry remains exactly
@@ -11845,7 +11845,7 @@ checkable acceptance criteria.
    loss, deployment failure or a request to delete source manually. Normal preparation displays these
    seven human-readable stages in this exact order and numbering: `1/7 Source security`,
    `2/7 Release build`, `3/7 Release surface`, `4/7 Binary scan`, `5/7 AppKit text entry`,
-   `6/7 XCTest`, `7/7 pebsmoke`. Each stage has one bounded running indication and one truthful passed
+   `6/7 XCTest`, `7/7 elysmoke`. Each stage has one bounded running indication and one truthful passed
    indication; no later stage appears after a failure and no pre-build artifact is implied before
    stage 2. Tests must capture clean and stale terminal transcripts and compare their ordered stage
    labels, count and terminal state.
@@ -11895,7 +11895,7 @@ checkable acceptance criteria.
    recovery command without private identifiers. Interrupting any stage leaves a non-success state
    whose next invocation cannot skip prior authority. Existing closed command grammar and wrapper
    paths remain unchanged; test-only controls are absent. No V16 copy, timing or test infrastructure
-   changes a Pebble screen, focus, text field, installed checklist, manual action, accessibility
+   changes a Elysium screen, focus, text field, installed checklist, manual action, accessibility
    requirement, RPG semantic, shipping product or LAN behavior.
 
 The implementation must exercise these transcript assertions from a clean temporary repository,
@@ -11996,8 +11996,8 @@ commit or push.
 
 No unresolved plan-level finding remains after the binding interpretations above. The plan removes
 the actual alternate transition/bootstrap authority visible in
-`Sources/PebbleReleaseGate/ReleaseGate.swift:1036-1077` and
-`Tests/PebbleReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift:23-113`; it replaces the
+`Sources/ElysiumReleaseGate/ReleaseGate.swift:1036-1077` and
+`Tests/ElysiumReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift:23-113`; it replaces the
 current category-label-only runner with an external exact row contract; and it requires real clean
 and stale dispatcher preparation rather than the current probe's uncallable prepare path. The six
 Design criteria are preserved as security properties: truthful bounded progress/failure, public
@@ -12043,14 +12043,14 @@ requires the separately named category-10 production-adapter and stale-coordinat
 
 ### Builder verification evidence
 
-- `swift build --target PebbleReleaseGate` passed. The excluded workflow probe compiled against the
+- `swift build --target ElysiumReleaseGate` passed. The excluded workflow probe compiled against the
   real module, and `scripts/run-release-gate-tool.sh scripts/installed-signoff-receipt.swift preflight`
   passed with redacted operator output.
 - The clean and stale real-dispatcher preparation test passed both scenarios, each with ordered
   `1/7` through `7/7` progress, nil source-security artifact, release-build sole digest, all later
   gates bound to that digest and authoritative `.prepared` publication.
 - `swift test --filter
-  'PebbleReleaseGateTests\.(ReleaseGateTests|KeychainReceiptStateStoreIntegrationTests)'` executed
+  'ElysiumReleaseGateTests\.(ReleaseGateTests|KeychainReceiptStateStoreIntegrationTests)'` executed
   27/27 tests with zero failures: ReleaseGate 24 and Keychain 3.
 - `scripts/release-gate-adversarial-test.sh` passed all ten exact categories and terminated
   `Release-gate adversarial matrix: PASS categories=10 rows=148 cleanup=verified`.
@@ -12058,20 +12058,20 @@ requires the separately named category-10 production-adapter and stale-coordinat
   preflight, SQLite boundary scan over 127 production Swift files, source/privacy/secret/network
   checks and final `security: passed`.
 - Two independent `swift package clean && swift build -c release` runs were warning-free. Their six
-  hash manifests compared byte-for-byte equal and match the binding pins: Pebble
-  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`; pebsmoke
-  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`; PebbleStorage.o
-  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`; PebbleCore.o
-  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`; PebbleTextInput.o
+  hash manifests compared byte-for-byte equal and match the binding pins: Elysium
+  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`; elysmoke
+  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`; ElysiumStorage.o
+  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`; ElysiumCore.o
+  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`; ElysiumTextInput.o
   `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`; and
-  PebbleAppSupport.o `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
+  ElysiumAppSupport.o `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
 - The first full XCTest run exposed three source-shape tests still locating V15 preparation and
   Designer code in the production script. Those assertions were migrated to the V16 package-owned
   workflow/dispatcher and operation-only adapters; the directly focused regression passed 3/3.
-  The mandatory full rerun at `/tmp/pebble-v16-full-test-rerun.log` passed 1057/1057 with zero
-  failures: PebbleTextInput 21, PebbleReleaseGate 27, PebbleCore 1003 and PebbleAppSupport 6.
-- `swift run -c release pebsmoke` passed 457/457. The release-surface verifier and release binary
-  scan passed. `swift package describe --type json` exposes only `Pebble` and `pebsmoke` products.
+  The mandatory full rerun at `/tmp/elysium-v16-full-test-rerun.log` passed 1057/1057 with zero
+  failures: ElysiumTextInput 21, ElysiumReleaseGate 27, ElysiumCore 1003 and ElysiumAppSupport 6.
+- `swift run -c release elysmoke` passed 457/457. The release-surface verifier and release binary
+  scan passed. `swift package describe --type json` exposes only `Elysium` and `elysmoke` products.
   The ReleaseGate/AppSupport/AppKit-driver zero-LAN scan passed; `git diff --check` passed; the final
   dispatcher/adapter source audit reports seven dispatcher transition sites and zero adapter/probe
   mutation sites.
@@ -12098,9 +12098,9 @@ manifest SHA-256 is the claimed
 
 ### Findings
 
-- **[HIGH] `Sources/PebbleReleaseGate/ReleaseGate.swift:1111-1128`;
+- **[HIGH] `Sources/ElysiumReleaseGate/ReleaseGate.swift:1111-1128`;
   `scripts/installed-signoff-receipt.swift:225-278`;
-  `Tests/PebbleReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift:5-54,113-156` ->** The
+  `Tests/ElysiumReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift:5-54,113-156` ->** The
   dispatcher is not the sole authority principal required by V16. The dependency protocol still
   exposes `coordinator()`, accepts the complete authoritative `ReleaseGatePayload` in validation,
   observation and Designer methods, and receives the private authority directory. The production
@@ -12114,9 +12114,9 @@ manifest SHA-256 is the claimed
   handles and factual process/reviewer observations; and add a compile/executable attack proving a
   malicious dependency cannot read, construct, replace, invalidate or transition receipt state.
 
-- **[HIGH] `Tests/PebbleReleaseGateTests/AdversarialRowsV16.swift:157-164`;
-  `Tests/PebbleReleaseGateTests/ReleaseGateTests.swift:231-367,561-618,670-910`;
-  `Tests/PebbleReleaseGateTests/KeychainReceiptStateStoreIntegrationTests.swift:50-94`;
+- **[HIGH] `Tests/ElysiumReleaseGateTests/AdversarialRowsV16.swift:157-164`;
+  `Tests/ElysiumReleaseGateTests/ReleaseGateTests.swift:231-367,561-618,670-910`;
+  `Tests/ElysiumReleaseGateTests/KeychainReceiptStateStoreIntegrationTests.swift:50-94`;
   `scripts/release-gate-adversarial-test.sh:37-64` ->** The 148-row executable inventory remains a
   false green. `AdversarialRowsV16.emit` unconditionally prints every manifest row in a category
   after checking only that the static names/counts exist; it has no per-row assertion ledger. An
@@ -12132,9 +12132,9 @@ manifest SHA-256 is the claimed
   a distinct table case or test; and make the external runner reject a row that lacks its individual
   assertion/effect record, rather than accepting names emitted en masse.
 
-- **[HIGH] `Tests/PebbleReleaseGateTests/ReleaseGateTests.swift:735-865` ->** The advertised real
+- **[HIGH] `Tests/ElysiumReleaseGateTests/ReleaseGateTests.swift:735-865` ->** The advertised real
   Git/wrapper/hook category still substitutes the security-critical product gates and does not run
-  the specified recovery matrix. It injects a fake `swift` that creates a shell `Pebble` and prints
+  the specified recovery matrix. It injects a fake `swift` that creates a shell `Elysium` and prints
   fabricated build/XCTest/smoke success, plus replacement security/surface/binary/AppKit helpers
   whose principal behavior is fixed success text. It does not hash-check the copied wrappers/hooks,
   does not execute separate divergent-sibling, amended-commit and reflog-recovery repositories, and
@@ -12143,8 +12143,8 @@ manifest SHA-256 is the claimed
   execution, and exercise exact-parent resume, divergent sibling, amend, reflog recovery, tuple
   replay and different-ref rejection as separately asserted real-Git rows before recording them.
 
-- **[HIGH] `Sources/PebbleReleaseGate/ReleaseGate.swift:1390-1408,1424-1469,1540-1585`;
-  `Tests/PebbleReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift:120-156` ->** Observation
+- **[HIGH] `Sources/ElysiumReleaseGate/ReleaseGate.swift:1390-1408,1424-1469,1540-1585`;
+  `Tests/ElysiumReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift:120-156` ->** Observation
   and Designer results are not sealed factual seams. The validator accepts any fourteen files per
   suffix, checks command JSON only for schema plus `captureStatus == 0`, checks PNGs only for their
   eight-byte signature, never validates the fixed fourteen-item inventory or linked operation/AX/
@@ -12156,7 +12156,7 @@ manifest SHA-256 is the claimed
   receipt sequence immediately before transition; keep the challenge out of adapter-readable data;
   and test substitution, replay and PID/start/executable churn at the adjacent transition boundary.
 
-- **[MEDIUM] `Sources/PebbleReleaseGate/ReleaseGate.swift:773-806,1207-1224,1290-1312` ->** Two
+- **[MEDIUM] `Sources/ElysiumReleaseGate/ReleaseGate.swift:773-806,1207-1224,1290-1312` ->** Two
   required resource/TOCTOU boundaries are absent. Closed command output is read in full and only then
   checked against the 16 MiB limit, allowing an untrusted child to consume unbounded disk/read memory.
   Stale-release cleanup uses separate path-based `lstat`, `realpath` and `unlink` operations without a
@@ -12167,8 +12167,8 @@ manifest SHA-256 is the claimed
   entry fd-relatively only after an adjacent revalidation. Add clean/stale symlink, rename, hardlink,
   ancestor-mode and output-cap rows that assert no unrelated deletion or residue.
 
-- **[MEDIUM] `Sources/PebbleReleaseGate/ReleaseGate.swift:1213-1244,1378-1382,1525-1530`;
-  `Tests/PebbleReleaseGateTests/ReleaseGateTests.swift:231-325,619-652` ->** The binding operator-
+- **[MEDIUM] `Sources/ElysiumReleaseGate/ReleaseGate.swift:1213-1244,1378-1382,1525-1530`;
+  `Tests/ElysiumReleaseGateTests/ReleaseGateTests.swift:231-325,619-652` ->** The binding operator-
   transcript contract is not implemented or tested. Preparation failure does not identify the failed
   `n/7` stage or a stable public reason category; `status` prints internal sequence and an absolute
   expiry instead of time remaining; and no executable canary matrix covers every stage failure,
@@ -12185,15 +12185,15 @@ Independent focused execution passed but proves the false-green mechanism: categ
 passes. Static audit found exactly seven dispatcher `gate.transition(` call sites, but also the
 forbidden dependency/probe coordinator and payload interfaces above. `git diff --check` passed. All
 three hooks and all release-gate wrappers are mode `0755`. The package graph exposes exactly two
-products, `Pebble` and `pebsmoke`; the ReleaseGate/AppSupport/standalone-driver zero-LAN/network scan
+products, `Elysium` and `elysmoke`; the ReleaseGate/AppSupport/standalone-driver zero-LAN/network scan
 returned zero matches.
 
-The current release artifacts retain all six binding SHA-256 values: Pebble
-`648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`; pebsmoke
-`d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`; PebbleStorage.o
-`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`; PebbleCore.o
-`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`; PebbleTextInput.o
-`547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`; and PebbleAppSupport.o
+The current release artifacts retain all six binding SHA-256 values: Elysium
+`648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`; elysmoke
+`d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`; ElysiumStorage.o
+`ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`; ElysiumCore.o
+`39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`; ElysiumTextInput.o
+`547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`; and ElysiumAppSupport.o
 `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
 These frozen-product checks pass and show no V16 shipping/LAN drift; they do not repair release-gate
 authority or test semantics.
@@ -12220,19 +12220,19 @@ Architecture/Design/Security(plan) phase and receive a fresh independent Securit
 
 This Architecture closes only the six findings in the immediately preceding V16 Security(code)
 FAIL, read at whole-plan SHA-256
-`467475ff72f0ee2ba1aa8359903e2d1548dbccd48563f9767688f8e633175923`. It changes no Pebble game,
+`467475ff72f0ee2ba1aa8359903e2d1548dbccd48563f9767688f8e633175923`. It changes no Elysium game,
 AppKit driver, storage, text-input, RPG, LAN, pipeline or deploy behavior. The protected same-byte
-boundary remains: Pebble `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`;
-pebsmoke `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`;
-PebbleStorage.o `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`;
-PebbleCore.o `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`;
-PebbleTextInput.o `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`;
-PebbleAppSupport.o `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`;
-and exactly the `Pebble` and `pebsmoke` products.
+boundary remains: Elysium `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`;
+elysmoke `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`;
+ElysiumStorage.o `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`;
+ElysiumCore.o `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`;
+ElysiumTextInput.o `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`;
+ElysiumAppSupport.o `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`;
+and exactly the `Elysium` and `elysmoke` products.
 
 ### 1. One closed dispatcher authority and one-shot operation leases
 
-In `Sources/PebbleReleaseGate/ReleaseGate.swift`, remove `coordinator()`, `validateCurrent(_:)`, every
+In `Sources/ElysiumReleaseGate/ReleaseGate.swift`, remove `coordinator()`, `validateCurrent(_:)`, every
 `ReleaseGatePayload` parameter and every private-authority-directory parameter from
 `ReleaseGateCommandDependencies`. Replace the public dependency surface with raw operations only:
 
@@ -12319,9 +12319,9 @@ Keychain test is not accepted as evidence for either.
 
 Category 7 uses fresh private clones/worktrees of the actual tracked source with copied production
 wrappers/hooks hash-checked immediately before every execution. It uses `/usr/bin/swift`, real
-`swift package clean`, warning-free release build, XCTest and `pebsmoke`, plus the real release-
+`swift package clean`, warning-free release build, XCTest and `elysmoke`, plus the real release-
 surface, binary and AppKit gate parsers against the actual built product. A fake `swift`, a shell
-`Pebble`, fixed success text or replacement security/surface/binary/AppKit helper is a hard failure.
+`Elysium`, fixed success text or replacement security/surface/binary/AppKit helper is a hard failure.
 Each of the eleven rows is a separate invocation with exactly one named Git/hook fault; all other
 inputs equal the clean baseline. Independent repositories cover exact-parent resume, divergent
 sibling, amend, reflog recovery, exact tuple, replay and different-ref rejection. Real commit ids,
@@ -12340,7 +12340,7 @@ UTF-8 bytes each and a fixed count per command.
 
 Replace path-based stale removal with a `GeneratedReleaseLeaf` descriptor utility. Open every
 repository/`.build` ancestor using `openat(...O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)`, require current uid,
-no group/other write, same device and directory type, then capture the exact `Pebble` leaf with
+no group/other write, same device and directory type, then capture the exact `Elysium` leaf with
 `openat`/`fstatat(AT_SYMLINK_NOFOLLOW)`. Immediately before removal compare device/inode/type/link/
 mode/uid/size; atomically move that exact name with `renameatx_np(...RENAME_EXCL)` to a random
 same-directory quarantine, reopen and compare the quarantined identity, and only then `unlinkat` the
@@ -12402,19 +12402,19 @@ uses real tools and one fault per invocation; categories 8/9 cover every named e
 actually invokes adapter/stale-coordinator tests; all output and reads are capped; stale deletion is
 descriptor/quarantine bound; transcript redaction and one-next-command rules are executable.
 
-Authorized edits are limited to `Sources/PebbleReleaseGate/**`,
-`Tests/PebbleReleaseGateTests/**`, the three installed-signoff Swift adapters and their wrappers,
+Authorized edits are limited to `Sources/ElysiumReleaseGate/**`,
+`Tests/ElysiumReleaseGateTests/**`, the three installed-signoff Swift adapters and their wrappers,
 `scripts/run-release-gate-tool.sh`, `scripts/release-gate-adversarial-test.sh`,
 `scripts/security-scan.sh`, finalize/resume wrappers and three hooks only where their closed command
 path needs preservation, `Package.swift` only for excluded test fixtures, and this plan. Shipping
-sources, AppKit driver, Core/Storage/TextInput/AppSupport, pebsmoke, checklist, pipeline/deploy and LAN
+sources, AppKit driver, Core/Storage/TextInput/AppSupport, elysmoke, checklist, pipeline/deploy and LAN
 files remain frozen.
 
 Required closing evidence: negative compile and malicious-dependency probes; exact clean/stale real
 prepare; exact inventory/substitution/process focused tests; 148 separately invoked rows with totals
 `8,7,7,9,50,7,11,23,20,6`; category-7 real-tool attestations; exhaustive category-5/8/9/10 evidence;
 transcript canary matrix; `scripts/security-scan.sh`; warning-free clean release build; full XCTest;
-457/457 `pebsmoke`; release-surface and binary scans; identical six hashes, two products and zero-LAN
+457/457 `elysmoke`; release-surface and binary scans; identical six hashes, two products and zero-LAN
 scan; `git diff --check`; then fresh independent Security(code). Only Security(code) PASS may reopen
 same-byte runtime, installed Design sign-off, independent Test, pipeline/deploy, commit and push.
 
@@ -12429,12 +12429,12 @@ Reviewed the V17 Architecture above at input whole-plan SHA-256
 `3a81a0738eb108b29e734fb15751529e2a146bb55c139b67ebf76c3710923657`, the six binding V16 Design
 criteria, and the current production dispatcher, CLI, observer, Designer, finalizer and wrapper copy.
 This is not Design N/A: V17 changes a terminal- and VoiceOver-facing release workflow. It changes no
-Pebble game surface. The architecture preserves the approved experience with these binding
+Elysium game surface. The architecture preserves the approved experience with these binding
 interpretations and acceptance criteria.
 
 1. **The seven stages remain exact.** Normal preparation presents only `1/7 Source security`, `2/7
    Release build`, `3/7 Release surface`, `4/7 Binary scan`, `5/7 AppKit text entry`, `6/7 XCTest`
-   and `7/7 pebsmoke`, in that order. Each started stage prints one `running` line and either one
+   and `7/7 elysmoke`, in that order. Each started stage prints one `running` line and either one
    `passed` or one `failed` line; no later stage appears after failure. A clean start says that the
    release artifact will first be created by stage 2. A stale start says only that one generated
    output was safely cleared and source content was unchanged. Neither case implies corruption,
@@ -12485,7 +12485,7 @@ interpretations and acceptance criteria.
    stale, every stage, bootstrap/publication, observer and Designer handoffs, all rejection/recovery
    cases and the exact-parent resume path.
 7. **Frozen product scope remains visible in the gate.** The implementation must preserve the six
-   pinned hashes, two-product graph, zero-LAN scan and zero edits to Pebble UI, focus, checklist,
+   pinned hashes, two-product graph, zero-LAN scan and zero edits to Elysium UI, focus, checklist,
    AppKit driver, RPG, storage, text-input, pipeline/deploy or LAN behavior. Design Sign-off must
    inspect the emitted built transcripts in a narrow terminal with VoiceOver as well as the unchanged
    installed app; source assertions alone do not approve operator copy.
@@ -12606,7 +12606,7 @@ frozen game/AppKit-driver/checklist/storage/text-input/RPG/LAN/pipeline/deploy s
 
 ### A. Package-owned evidence processes and scoped capture handles
 
-`Sources/PebbleReleaseGate/**` owns every process, descriptor and byte that can become evidence.
+`Sources/ElysiumReleaseGate/**` owns every process, descriptor and byte that can become evidence.
 Delete raw-byte/result submission and public evidence-acceptance methods from
 `ReleaseGateCommandDependencies` and `ReleaseGateOperationLease`. The production dependency may only
 write already-formatted public lines and perform non-evidentiary terminal presentation/input; it
@@ -12807,7 +12807,7 @@ repairs preserve the approved operator experience only under these binding crite
    must cover pre-move mismatch, successful restoration, retained output, repeated retained status,
    later successful reconciliation and later still-retained reconciliation, asserting order,
    redaction, no false PASS/COMPLETE/cleanup/deployment language and no retry/bypass suggestion.
-7. **Scope remains frozen.** V17.1 introduces no Pebble UI, checklist, text-entry, AppKit-driver,
+7. **Scope remains frozen.** V17.1 introduces no Elysium UI, checklist, text-entry, AppKit-driver,
    RPG, storage, LAN, pipeline/deploy or product behavior. The six pinned hashes, two-product graph
    and zero-LAN result remain Design-sign-off prerequisites.
 
@@ -12973,7 +12973,7 @@ Review/Revision and Security(plan) PASS on this exact revision.
 
 Reviewed V17.2 at input whole-plan SHA-256
 `dda697cfe61fbaa637bb3675e1912084c02bd3588ffa511c2a4154e78aecc644` against the V17 and V17.1
-Design contracts. The no-delete rule preserves private data and does not change Pebble game behavior,
+Design contracts. The no-delete rule preserves private data and does not change Elysium game behavior,
 but its current operator progression is not complete.
 
 ### Blocking finding
@@ -13008,7 +13008,7 @@ but its current operator progression is not complete.
    the single `Next:` command; no color, cursor rewrite or animation carries meaning. VoiceOver must
    read the held state and outcome once per invocation without a silent loop.
 5. The frozen six hashes, two-product graph and zero-LAN result remain mandatory. This revision may
-   not change Pebble UI, checklist, text entry, AppKit driver, RPG, storage, LAN, pipeline/deploy or
+   not change Elysium UI, checklist, text entry, AppKit driver, RPG, storage, LAN, pipeline/deploy or
    shipped product behavior merely to escape the release-gate dead end.
 
 **V17.2 Design Re-review verdict: FAIL.** The retained-output copy is private, bounded and
@@ -13174,7 +13174,7 @@ operator dead end under these binding acceptance criteria.
 7. **Privacy and frozen scope remain absolute.** Normal output reveals no quarantine/scratch path,
    journal, identity, sequence, hash, process fact, challenge, raw error or retained bytes. Nothing
    claims deletion or cleanup. The six pinned hashes, two-product graph and zero-LAN result remain
-   mandatory; V17.3 changes no Pebble UI, checklist, text entry, AppKit driver, RPG, storage, LAN,
+   mandatory; V17.3 changes no Elysium UI, checklist, text entry, AppKit driver, RPG, storage, LAN,
    pipeline/deploy or shipped behavior.
 
 **V17.3 Design Re-review verdict: PASS.** The consumed restoration marker, permanent exclusion and
@@ -13212,7 +13212,7 @@ These interpretations are binding on Build:
 - The restored excluded identity must remain untouched by every gate. Stage 1 and any verification
   script it calls may perform source-only work or compile solely in a separate dispatcher-owned
   scratch root; they may not clean, build in, hash as candidate or otherwise mutate the default
-  `.build` leaf. Stage 2 and every later Swift/XCTest/pebsmoke, surface, binary and AppKit command
+  `.build` leaf. Stage 2 and every later Swift/XCTest/elysmoke, surface, binary and AppKit command
   must receive the same package-owned scratch-root/product identity through fixed package-selected
   argv, never an environment/operator selector. Each later parser and artifact record binds that
   fresh identity and proves it differs from the permanently excluded device/inode/path. No inherited
@@ -13270,19 +13270,19 @@ Input whole-plan SHA-256 is
 ### Exact rollback and edits
 
 1. Restore only the interrupted V17.3 compile-surface changes to the proven V16 implementation:
-   in `Sources/PebbleReleaseGate/ReleaseGate.swift`, remove only `AppKit`,
+   in `Sources/ElysiumReleaseGate/ReleaseGate.swift`, remove only `AppKit`,
    `ApplicationServices`, `CoreGraphics` and `ImageIO` imports and restore `public` on the V16 access
    inventory: `ReleaseGateState`, `ReleaseArtifactIdentity`, `ReleaseGatePayload`,
    `ReleaseGateCodec`, `ReceiptStateStore`, `EphemeralReceiptStateStore`,
    `KeychainReceiptIdentity`, `KeychainSecurityOperating`, `SystemKeychainSecurityOperations`,
    `KeychainReceiptStateStore`, `ReleaseGatePersistencePoint` and `ReleaseGateCoordinator`. In
-   `Package.swift`, restore `PebbleReleaseGate` linker settings to Security only. Do not revert any
+   `Package.swift`, restore `ElysiumReleaseGate` linker settings to Security only. Do not revert any
    V16 receipt/dispatcher/test behavior or any unrelated dirty-worktree file.
 2. In `scripts/security-scan.sh`, remove the blocking invocation of
    `scripts/release-gate-adversarial-test.sh`. Replace it with bounded local-safety gates: reject
    fixture/scenario/fault/alternate-executable or caller-evidence selectors in production CLI,
    wrappers, hooks and dispatcher; require every receipt/observer/Designer/finalize/resume wrapper
-   and hook to exist and be executable; compile `PebbleReleaseGate` and the production receipt tool;
+   and hook to exist and be executable; compile `ElysiumReleaseGate` and the production receipt tool;
    run receipt `preflight`; run the focused `ReleaseGateTests` and
    `KeychainReceiptStateStoreIntegrationTests` and require a nonzero executed count with zero
    failures/skips. Retain source-security, text-adapter, SQLite boundary, secret/network/process and
@@ -13308,8 +13308,8 @@ preparation tests; (E) run the complete real closeout.
 
 The complete closeout remains: production tool compile/preflight; real clean and stale
 `run-prepare-gates`; deterministic warning-free release build; full XCTest with exact executed count;
-457/457 `pebsmoke`; source security and SQLite self-test; release-surface and binary scans; the six
-pinned product/object hashes, exactly two products and zero-LAN scan; real installed Pebble app;
+457/457 `elysmoke`; source security and SQLite self-test; release-surface and binary scans; the six
+pinned product/object hashes, exactly two products and zero-LAN scan; real installed Elysium app;
 the full manual text-field/RPG/standard/high-contrast/Paste/Finder/Dock matrix; granted and denied-
 then-clicked VoiceOver; separate Designer attestation; `scripts/pipeline.sh`; installed bundle/
 executable hash and codesign verification; receipt finalization; logical commits; pre-push gate and
@@ -13341,7 +13341,7 @@ Keep scope to the exact files above and directly necessary focused tests. The V1
 receipt behavior are the baseline; no new AppKit/capture/quarantine/candidate-snapshot production
 architecture is built. The adversarial runner is never blocking and never authorizes receipt,
 installed sign-off or deployment. Focused tests must prove they actually execute. All ordinary
-Pebble, security/SQLite, full-suite, smoke, installed accessibility, deploy, signature and source-
+Elysium, security/SQLite, full-suite, smoke, installed accessibility, deploy, signature and source-
 control gates remain mandatory. Preserve the six hashes, product graph and zero-LAN requirement.
 Report optional diagnostic failures honestly, but they do not block under this exception unless a
 bounded authoritative check independently reproduces the defect.
@@ -13375,7 +13375,7 @@ under these binding acceptance criteria.
 3. **Bounded authoritative checks remain truthful.** The required scan reports `Bounded local safety
    checks: passed`, not comprehensive security, adversarial proof or resistance to a malicious local
    actor. The ordinary seven stages retain their exact order and copy—`Source security`, release
-   build, release surface, binary scan, AppKit text entry, XCTest and pebsmoke—with one running and
+   build, release surface, binary scan, AppKit text entry, XCTest and elysmoke—with one running and
    one truthful pass/fail result. A stage pass means only its documented bounded checks ran. Existing
    redaction, failed-stage, no-prepared-authority, disposition and single-next-command rules remain.
 4. **Real release authority stays visually separate.** Only successful required gates may reach
@@ -13403,7 +13403,7 @@ under these binding acceptance criteria.
    Operators are never encouraged to ignore a required failure, bypass hooks, use `--no-verify` or
    treat an optional success as remediation.
 8. **Product scope remains frozen.** The exception changes release tooling and documentation only.
-   It changes no Pebble screen, text entry, RPG behavior, installed checklist, VoiceOver behavior,
+   It changes no Elysium screen, text entry, RPG behavior, installed checklist, VoiceOver behavior,
    AppKit driver, storage, LAN, product graph, packaging or deployment behavior. The six hashes, two
    products and zero-LAN result remain required closing evidence.
 
@@ -13455,16 +13455,16 @@ mode mismatch, zero-test filter, malformed preflight or unexpected selector is b
 fault seams and random non-production Keychain identities remain confined to tests and cannot be
 selected by production argv, environment, manifest or file input.
 
-The exception does not weaken shipped Pebble security or replace release evidence. Security scan
+The exception does not weaken shipped Elysium security or replace release evidence. Security scan
 must retain its existing source/privacy/secret/network/process checks, text-adapter and AppKit-driver
 compile checks, and real SQLite boundary scanner/self-test. Pre-push, pipeline and receipt preparation
 remain fail-closed on that scan plus real warning-free release build, full XCTest, 457/457
-`pebsmoke`, release-surface and binary scans. Closing evidence must reproduce both clean and stale
+`elysmoke`, release-surface and binary scans. Closing evidence must reproduce both clean and stale
 dispatcher preparation, two deterministic release builds, the six pinned product/object hashes,
-exactly `Pebble` and `pebsmoke` products and zero-LAN scan. The package/product graph and frozen game,
+exactly `Elysium` and `elysmoke` products and zero-LAN scan. The package/product graph and frozen game,
 AppKit-driver, checklist, storage, text-input, RPG, LAN, packaging and deploy behavior may not move.
 
-Installed and publication authority remains entirely real: `/Applications/Pebble.app`, exact
+Installed and publication authority remains entirely real: `/Applications/Elysium.app`, exact
 bundle/executable hashes and codesign identity; the complete manual text-field/RPG/appearance/size/
 Paste/Finder/Dock matrix; granted and denied-then-clicked VoiceOver; fourteen observer records;
 separate Designer attestation; receipt finalization; pipeline/deploy status; logical commits; the
@@ -13493,8 +13493,8 @@ state, package/deploy behavior, LAN behavior, commit or push path was changed in
 ### Scoped rollback and implementation evidence
 
 Before editing, Builder recorded SHA-256 for the nine-file exception set in
-`/tmp/pebble-exception-preedit-hashes.txt`: `bda8394cbb251f9742b7bf153a1a238673925af184fe7fdbf4e5ab8cefe93980`
-for `Sources/PebbleReleaseGate/ReleaseGate.swift`,
+`/tmp/elysium-exception-preedit-hashes.txt`: `bda8394cbb251f9742b7bf153a1a238673925af184fe7fdbf4e5ab8cefe93980`
+for `Sources/ElysiumReleaseGate/ReleaseGate.swift`,
 `afcfa231a0ccd2d5500dca5e2d6d8f2a063d7c63b04ddf171b00cabc20d553c8` for
 `Package.swift`, `4bb595e08d8dcd58090fb6c7d27edb3ec9b14251cbd8206acf5d06e63f64ed33`
 for `scripts/security-scan.sh`,
@@ -13512,7 +13512,7 @@ CoreGraphics and ImageIO imports were removed; the enumerated V16 ReleaseGate ty
 `public` access; and the target returned to Security-only linking. The resulting source/manifest
 hashes are `d426b659cbc8f61fcedc8a14f13d83009983a6e7ab15b3c11c206e2876d02c59`
 and `be0d1b483cf0c18ef60e061b234874cac86aaf9ff20793fc28b06cff7e38bb98`.
-`swift build --target PebbleReleaseGate` and the real
+`swift build --target ElysiumReleaseGate` and the real
 `scripts/run-release-gate-tool.sh scripts/installed-signoff-receipt.swift preflight` both exited
 zero; preflight enumerated 311 content items without exposing private evidence.
 
@@ -13539,23 +13539,23 @@ sequence.
   release authority. Required-path source scanning found no runner name or diagnostic vocabulary.
 - Two `swift package clean` plus `swift build -c release` runs completed warning-free. Their six
   SHA-256 values were byte-identical, and the final post-test files retain those exact hashes:
-  `Pebble` `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`,
-  `pebsmoke` `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`,
-  `PebbleStorage.o` `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`,
-  `PebbleCore.o` `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`,
-  `PebbleTextInput.o` `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`
-  and `PebbleAppSupport.o`
+  `Elysium` `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`,
+  `elysmoke` `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`,
+  `ElysiumStorage.o` `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`,
+  `ElysiumCore.o` `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`,
+  `ElysiumTextInput.o` `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`
+  and `ElysiumAppSupport.o`
   `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
-- Full XCTest executed 1,058 tests with zero failures: 21 PebbleTextInput, 28 ReleaseGate, 1,003
-  PebbleCore and 6 PebbleAppSupport. `swift run -c release pebsmoke` then reported 457 passed and
+- Full XCTest executed 1,058 tests with zero failures: 21 ElysiumTextInput, 28 ReleaseGate, 1,003
+  ElysiumCore and 6 ElysiumAppSupport. `swift run -c release elysmoke` then reported 457 passed and
   zero failed.
-- `scripts/verify-pebble-storage-release-surface.sh` reported
-  `Pebble storage release surface verified.` The binary gate reported linked-library and network
-  scans followed by `==> binary: passed` for `.build/out/Products/Release/Pebble`.
-- Package description contains exactly the `Pebble` and `pebsmoke` products. The frozen-scope scan
-  found no LAN/Network symbol in PebbleReleaseGate, PebbleAppSupport or the AppKit integration
+- `scripts/verify-elysium-storage-release-surface.sh` reported
+  `Elysium storage release surface verified.` The binary gate reported linked-library and network
+  scans followed by `==> binary: passed` for `.build/out/Products/Release/Elysium`.
+- Package description contains exactly the `Elysium` and `elysmoke` products. The frozen-scope scan
+  found no LAN/Network symbol in ElysiumReleaseGate, ElysiumAppSupport or the AppKit integration
   driver. `git diff --check` exited zero. The stale accidental
-  `error: unknown argument: '--package-path'/Pebble` artifact is absent from disk and status.
+  `error: unknown argument: '--package-path'/Elysium` artifact is absent from disk and status.
 
 **Reviewed Exception Builder verdict: PASS.** The approved V16 rollback, optional diagnostic
 demotion and bounded authoritative checks are implemented and empirically green. This verdict does
@@ -13574,7 +13574,7 @@ passed 1/1. A direct broken-`PATH` run exited nonzero with 4/4 lines prefixed/ca
 no-authority statement; the normal optional run completed ten categories/148 rows with 13/13 lines
 prefixed/capped and exactly one no-authority statement. The authoritative security scan passed its
 bounded local checks and 127-file SQLite scan. Required paths remain disconnected; the six release
-hashes remain exactly pinned, products remain exactly `Pebble` and `pebsmoke`, zero-LAN and
+hashes remain exactly pinned, products remain exactly `Elysium` and `elysmoke`, zero-LAN and
 `git diff --check` pass. No runtime, receipt, installed, deploy, commit or push action occurred.
 
 **Builder remediation verdict: PASS.** Fresh Security(code) review is required on these final bytes;
@@ -13590,7 +13590,7 @@ exited nonzero; every visible line was prefixed and capped; exactly one no-autho
 emitted; exactly one new workspace was observed and it was absent after exit. The normal optional
 run completed ten categories/148 rows with 13/13 valid lines, one no-authority statement and no
 workspace residue. The authoritative security scan, bounded checks and 127-file SQLite scan passed.
-Six release hashes remained exactly pinned; products remained exactly `Pebble` and `pebsmoke`;
+Six release hashes remained exactly pinned; products remained exactly `Elysium` and `elysmoke`;
 single-EXIT-handler, independent-signal-trap, zero-LAN, required-path disconnect and
 `git diff --check` checks passed. No runtime, receipt, installed, deploy, commit or push action ran.
 
@@ -13601,7 +13601,7 @@ on these final bytes; every later gate remains unapproved and sequentially downs
 
 Independently reviewed the implemented exception against the binding accidental/stale-regression
 threat model and the Architecture, Design and Security(plan) contracts above. Reviewed the actual
-`PebbleReleaseGate` import/access inventory and package linker setting; production parser,
+`ElysiumReleaseGate` import/access inventory and package linker setting; production parser,
 dispatcher, receipt, observer, Designer, finalize, resume, package, pipeline and three hook paths;
 the bounded security scan and its focused-suite count parsing; the optional runner and its source
 disconnect test; clean/stale preparation fixture; durable documentation; current product/hash/LAN
@@ -13637,26 +13637,26 @@ transition, installed-signoff, deployment, commit or push authority from the opt
   ran. The Builder's exact focused counts remain 25 ReleaseGate plus 3 Keychain, zero failures and
   zero skips.
 - Independently reran
-  `swift test --filter PebbleReleaseGateTests.ReleaseGateTests/testAdversarialCategory01FixedPrepareWorkflowCleanStartAndRealBuild`:
+  `swift test --filter ElysiumReleaseGateTests.ReleaseGateTests/testAdversarialCategory01FixedPrepareWorkflowCleanStartAndRealBuild`:
   1/1 test passed in 17.693 seconds and exercised both `clean` and
   `stale-generated-release` preparation, emitting the eight expected category-1 diagnostics.
 - The V16 rollback is exact at the reviewed surface: no `AppKit`, `ApplicationServices`,
   `CoreGraphics` or `ImageIO` import remains in `ReleaseGate.swift`; all eleven enumerated access
-  declarations are `public`; and `PebbleReleaseGate` links only Security. Current source/manifest
+  declarations are `public`; and `ElysiumReleaseGate` links only Security. Current source/manifest
   SHA-256 values are
   `d426b659cbc8f61fcedc8a14f13d83009983a6e7ab15b3c11c206e2876d02c59` and
   `be0d1b483cf0c18ef60e061b234874cac86aaf9ff20793fc28b06cff7e38bb98`.
-- The six release hashes exactly match Builder evidence: Pebble
-  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, pebsmoke
-  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, PebbleStorage.o
-  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, PebbleCore.o
-  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, PebbleTextInput.o
+- The six release hashes exactly match Builder evidence: Elysium
+  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, elysmoke
+  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, ElysiumStorage.o
+  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, ElysiumCore.o
+  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, ElysiumTextInput.o
   `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac`, and
-  PebbleAppSupport.o
+  ElysiumAppSupport.o
   `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
-  `swift package describe --type json` reported exactly `pebsmoke` and `Pebble`; the exact-word
-  LAN/Network scan across PebbleReleaseGate, PebbleAppSupport and the AppKit driver returned zero;
-  the stale malformed `Pebble/Pebble` artifact was absent; and `git diff --check` exited zero.
+  `swift package describe --type json` reported exactly `elysmoke` and `Elysium`; the exact-word
+  LAN/Network scan across ElysiumReleaseGate, ElysiumAppSupport and the AppKit driver returned zero;
+  the stale malformed `Elysium/Elysium` artifact was absent; and `git diff --check` exited zero.
 
 Not reviewed or performed here: installed UI/VoiceOver observation, Designer sign-off,
 `scripts/pipeline.sh`, deployment, receipt finalization, commit, pre-push or GitHub push. The
@@ -13715,7 +13715,7 @@ statement. Required paths remain disconnected and the normal successful diagnost
   `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`,
   `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and
   `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
-  Products remain exactly `Pebble` and `pebsmoke`; the frozen release-gate/AppSupport/AppKit-driver
+  Products remain exactly `Elysium` and `elysmoke`; the frozen release-gate/AppSupport/AppKit-driver
   LAN/Network scan returned zero; and `git diff --check` exited zero.
 
 Not performed: runtime, installed UI/VoiceOver/Designer review, pipeline, deployment, receipt,
@@ -13766,8 +13766,8 @@ and caps the raw payload of every stdout/stderr line at 220 bytes before adding 
   `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`,
   `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and
   `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
-  Package description remains exactly `Pebble` and `pebsmoke`; the exact-word LAN/Network scan over
-  PebbleReleaseGate, PebbleAppSupport and the AppKit driver returned zero; `git diff --check` exited
+  Package description remains exactly `Elysium` and `elysmoke`; the exact-word LAN/Network scan over
+  ElysiumReleaseGate, ElysiumAppSupport and the AppKit driver returned zero; `git diff --check` exited
   zero. Unchanged authority-source hashes are security scan
   `65401e2072f6084902967c1750ed894ada11816b4393db6f657bb3d3be5e1f9d`, ReleaseGate
   `d426b659cbc8f61fcedc8a14f13d83009983a6e7ab15b3c11c206e2876d02c59` and Package.swift
@@ -13805,10 +13805,10 @@ samples spanning at least 250 milliseconds, the adjacent recheck, event allocati
 100-millisecond pre-HID reservation and initial presentation binding. The terminal can arise only
 from the pre-arm deadline guards in this path; the present log intentionally contains too little
 timing detail to claim which individual guard crossed the boundary. This is verifier timing
-contention, not evidence of a Pebble product, identity, lease or text-entry defect.
+contention, not evidence of a Elysium product, identity, lease or text-entry defect.
 
-Builder may change only `Tests/PebbleAppKitIntegration/Driver.swift` and the corresponding source
-tests in `Tests/PebbleCoreTests/TextEntrySourceTests.swift`:
+Builder may change only `Tests/ElysiumAppKitIntegration/Driver.swift` and the corresponding source
+tests in `Tests/ElysiumCoreTests/TextEntrySourceTests.swift`:
 
 1. Add a package-excluded, pure `ConditionalDenialTimingBudget`. Capture one monotonic
    `conditionalSamplingStarted` before conditional sampling. Preserve the existing 8.1-second
@@ -13851,8 +13851,8 @@ tests in `Tests/PebbleCoreTests/TextEntrySourceTests.swift`:
   `max`, retry/resume loops or product-source references. Keep the existing identity/lease,
   two-sample/250-ms, candidate-mutation and 100-ms action matrices green.
 - Builder runs Driver compile/self-test, filtered `TextEntrySourceTests`, `git diff --check`, the
-  authoritative security scan, warning-free release build, full XCTest and 457/457 `pebsmoke`.
-  Because only excluded verifier/tests/docs may change, the Pebble product SHA-256 must remain
+  authoritative security scan, warning-free release build, full XCTest and 457/457 `elysmoke`.
+  Because only excluded verifier/tests/docs may change, the Elysium product SHA-256 must remain
   `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`; any product/hash, Package,
   shipping source, checklist, receipt, deploy or LAN change invalidates this architecture.
 - After independent Security(code) PASS, start the distinct same-byte directory
@@ -13883,7 +13883,7 @@ interaction, denial-recovery, VoiceOver and verifier-failure contracts. This is 
 timing change with potential visible side effects, so Design is not N/A. It passes only under these
 binding criteria.
 
-1. **Pebble remains visually unchanged.** The budget changes no product timing, animation, copy,
+1. **Elysium remains visually unchanged.** The budget changes no product timing, animation, copy,
    focus ring, control state, screen, window or accessibility element. Waiting for the eligible
    denial state produces no activation request, focus flash, permission prompt, cursor move,
    clipboard access or synthetic event. The one authorized denial click remains the first and only
@@ -13891,7 +13891,7 @@ binding criteria.
 2. **One anchor and one hard stop are observable invariants.** The first eligible visible-alpha-one
    sample may set one immutable anchor. No later sample, AX/Workspace change, candidate mutation or
    presentation reset moves or recreates it. The launch ends by the non-restarting 10.5-second hard
-   cap. No progress message, spinner or countdown is added to Pebble; verifier diagnostics remain
+   cap. No progress message, spinner or countdown is added to Elysium; verifier diagnostics remain
    terminal-only and line-oriented.
 3. **Every terminal result states whether input could have occurred.** The two bare Architecture
    tokens are revised for operator safety. Pre-anchor expiry emits
@@ -13919,7 +13919,7 @@ binding criteria.
    matrix resume. No verifier pass substitutes for any installed or accessibility observation.
 7. **Scope and accessibility stay frozen.** Public verifier lines remain bounded, stable and
    VoiceOver-readable without color, cursor rewriting or animation. Only the excluded Driver and its
-   source tests may change. The Pebble hash, six protected hashes, two-product graph, checklist,
+   source tests may change. The Elysium hash, six protected hashes, two-product graph, checklist,
    receipt, package/deploy behavior, shipping sources and zero-LAN result must remain unchanged.
 
 **V19 Conditional-Denial Budget Design Review verdict: PASS.** A one-shot eligible-surface anchor
@@ -13972,7 +13972,7 @@ coordinate/event value.
 
 Required proof is the compiled pure boundary matrix plus existing identity/lease/candidate/action
 self-tests, filtered source tests, security scan, warning-free release build, full XCTest, 457/457
-`pebsmoke`, `git diff --check`, and exact source-order/absence checks for one anchor site and no
+`elysmoke`, `git diff --check`, and exact source-order/absence checks for one anchor site and no
 `+=`, `max`, reset/rearm or retry loop. Only the excluded Driver and its source tests may change.
 All six protected hashes, two products, checklist/receipt/package/deploy behavior, shipping sources
 and zero-LAN result remain frozen. Runtime cold-five remains blocked until fresh Security(code) PASS;
@@ -14018,21 +14018,21 @@ activation, permission, clipboard or second-click path was added.
 - The focused conditional-denial source suite passed 5/5. After stale pre-V19 source-shape
   assertions were revised to the approved typed owner and effective deadline, the complete
   `TextEntrySourceTests` suite passed 26/26. The mandatory final full suite passed 1,061/1,061 with
-  zero failures: 21 PebbleTextInput, 30 ReleaseGate, 1,004 PebbleCore and 6 PebbleAppSupport tests.
+  zero failures: 21 ElysiumTextInput, 30 ReleaseGate, 1,004 ElysiumCore and 6 ElysiumAppSupport tests.
 - The renewed authoritative security scan passed bounded local safety and
   `sqlite-boundary-scan: passed (127 production Swift files)` before reporting
   `==> security: passed`.
 - A clean `swift build -c release` completed warning-free in 121.46 seconds. Final protected hashes
-  remain exactly: `Pebble`
-  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, `pebsmoke`
-  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, `PebbleStorage.o`
-  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `PebbleCore.o`
-  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, `PebbleTextInput.o`
+  remain exactly: `Elysium`
+  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, `elysmoke`
+  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, `ElysiumStorage.o`
+  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `ElysiumCore.o`
+  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, `ElysiumTextInput.o`
   `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and
-  `PebbleAppSupport.o` `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
-- `swift run -c release pebsmoke` passed 457/457. The storage release-surface verifier reported
-  `Pebble storage release surface verified.` The release binary linked-library/network scan passed.
-  Products remain exactly `Pebble` and `pebsmoke`; zero-LAN and `git diff --check` passed.
+  `ElysiumAppSupport.o` `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
+- `swift run -c release elysmoke` passed 457/457. The storage release-surface verifier reported
+  `Elysium storage release surface verified.` The release binary linked-library/network scan passed.
+  Products remain exactly `Elysium` and `elysmoke`; zero-LAN and `git diff --check` passed.
 
 **V19 Conditional-Denial Budget Builder verdict: PASS.** The typed one-shot budget, immutable
 deadline propagation, checked diagnostics and pre/post-HID disposition boundary are implemented and
@@ -14046,7 +14046,7 @@ Independently reviewed the stopped V18 attempt and its exact SHA-256
 Architecture, Design and Security(plan), the Builder evidence, and the actual final Driver and source
 test bytes. No unresolved security finding remains in this verifier-only amendment.
 
-The private timing owner at `Tests/PebbleAppKitIntegration/Driver.swift:1596-1654` constructs the
+The private timing owner at `Tests/ElysiumAppKitIntegration/Driver.swift:1596-1654` constructs the
 old 8.1-second deadline and the non-restarting 10.5-second cap with finite, nonnegative, checked
 additions. Its sole runtime anchor call at `Driver.swift:3457-3458` is after visible-alpha-one,
 expected-pair precedence, Workspace/AX stability, mixed-evidence rejection and
@@ -14077,15 +14077,15 @@ state and executable second-execution matrix enforce at most one down/up pair.
   failures in 2.132 seconds; the V19-specific test also independently passed 1/1. Builder's final
   1,061-XCTest, warning-free release build, security scan and 457-smoke results were read from the
   recorded evidence rather than rerun by Security.
-- `git diff --check` exited zero. Package products remain exactly `Pebble` and `pebsmoke`; the
-  exact-word LAN/Network scan over PebbleReleaseGate, PebbleAppSupport and the excluded Driver
+- `git diff --check` exited zero. Package products remain exactly `Elysium` and `elysmoke`; the
+  exact-word LAN/Network scan over ElysiumReleaseGate, ElysiumAppSupport and the excluded Driver
   returned zero.
-- The protected release hashes independently remain Pebble
-  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, pebsmoke
-  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, PebbleStorage.o
-  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, PebbleCore.o
-  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, PebbleTextInput.o
-  `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and PebbleAppSupport.o
+- The protected release hashes independently remain Elysium
+  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, elysmoke
+  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, ElysiumStorage.o
+  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, ElysiumCore.o
+  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, ElysiumTextInput.o
+  `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and ElysiumAppSupport.o
   `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`. Unchanged release-authority
   hashes remain security scan `65401e2072f6084902967c1750ed894ada11816b4393db6f657bb3d3be5e1f9d`,
   ReleaseGate `d426b659cbc8f61fcedc8a14f13d83009983a6e7ab15b3c11c206e2876d02c59` and Package.swift
@@ -14116,7 +14116,7 @@ unmet and `launch_presentation_timeout`. The set stopped at that first nonzero a
 
 ### First-principles diagnosis and exact edit
 
-This is a verifier clock-ownership defect, not evidence of a Pebble product or text-entry defect.
+This is a verifier clock-ownership defect, not evidence of a Elysium product or text-entry defect.
 `LaunchPresentationSettlement.settle` receives
 `conditionalDenialTimingBudget.effectiveDeadline`. On the system-granted expected-pair path no
 eligible denial exists, so V19 correctly leaves that value at the conditional sampler's original
@@ -14125,8 +14125,8 @@ clock created before it began. The log proves that all authority predicates surv
 publication changed; it does not justify relaxing identity, lifecycle, AX, display, CG or stability
 predicates.
 
-Builder may change only `Tests/PebbleAppKitIntegration/Driver.swift`, the directly corresponding
-`Tests/PebbleCoreTests/TextEntrySourceTests.swift`, and this evidence:
+Builder may change only `Tests/ElysiumAppKitIntegration/Driver.swift`, the directly corresponding
+`Tests/ElysiumCoreTests/TextEntrySourceTests.swift`, and this evidence:
 
 1. Add a package-excluded pure `LaunchPresentationTimingBudget`. Capture exactly one finite monotonic
    `presentationSamplingStart` after `ConditionalLaunchDenialAction` has reached its terminal state
@@ -14182,7 +14182,7 @@ Builder may change only `Tests/PebbleAppKitIntegration/Driver.swift`, the direct
   250-millisecond, final-rehash, action one-shot and 100/99-millisecond tests green.
 - Builder runs optimized standalone Driver compile/self-test, filtered and complete
   `TextEntrySourceTests`, `git diff --check`, authoritative security scan, warning-free release build,
-  full XCTest with exact count and 457/457 `pebsmoke`; then reconfirms release-surface/binary scans,
+  full XCTest with exact count and 457/457 `elysmoke`; then reconfirms release-surface/binary scans,
   all six protected hashes, exactly two products and zero LAN drift. Any shipping, Product, Package,
   release-authority or hash drift invalidates this Architecture.
 - After fresh independent Security(code) PASS, start exactly
@@ -14219,7 +14219,7 @@ verifier-only timing change passes under these binding criteria.
    its one authorized click, or failed without input. It cannot authorize, postpone or repeat HID,
    reopen denial sampling, request activation/permission, move focus, touch the clipboard or restart
    launch. No input event exists anywhere in the new budget or settlement path.
-2. **The change is visually inert.** Pebble gains no spinner, countdown, focus flash, cursor motion,
+2. **The change is visually inert.** Elysium gains no spinner, countdown, focus flash, cursor motion,
    prompt, copy, control-state change or animation during the additional presentation allowance.
    Only terminal verifier timing changes. Timeout or publication churn stops the attempt; it never
    triggers refocus, relaunch, a second click or an operator retry instruction.
@@ -14351,17 +14351,17 @@ unchanged.
   denial/HID deadline, and no forbidden back-edge or product reference.
 - The authoritative security scan passed bounded local safety, the 127-file SQLite scan and overall
   security. A clean `swift build -c release` completed warning-free in 119.84 seconds.
-- Mandatory full XCTest passed 1,062/1,062 with zero failures: 21 PebbleTextInput, 30 ReleaseGate,
-  1,005 PebbleCore and 6 PebbleAppSupport. `swift run -c release pebsmoke` passed 457/457.
+- Mandatory full XCTest passed 1,062/1,062 with zero failures: 21 ElysiumTextInput, 30 ReleaseGate,
+  1,005 ElysiumCore and 6 ElysiumAppSupport. `swift run -c release elysmoke` passed 457/457.
 - Storage release-surface verification and binary linked-library/network scanning passed. Products
-  remain exactly `Pebble` and `pebsmoke`; zero-LAN and `git diff --check` passed.
-- Protected hashes remain exactly: `Pebble`
-  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, `pebsmoke`
-  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, `PebbleStorage.o`
-  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `PebbleCore.o`
-  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, `PebbleTextInput.o`
+  remain exactly `Elysium` and `elysmoke`; zero-LAN and `git diff --check` passed.
+- Protected hashes remain exactly: `Elysium`
+  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, `elysmoke`
+  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, `ElysiumStorage.o`
+  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `ElysiumCore.o`
+  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, `ElysiumTextInput.o`
   `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and
-  `PebbleAppSupport.o` `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
+  `ElysiumAppSupport.o` `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
 
 **V20 Presentation-Settlement Budget Builder verdict: PASS.** The presentation clock is separately
 owned, one-shot, bounded through post-commit invalidation and unable to affect HID. Fresh
@@ -14412,15 +14412,15 @@ that latch. Presentation timeout cannot arm, authorize, delay or replay input.
   failures in 2.722 seconds. The tests pin one post-terminal construction, one eligible anchor,
   eight deadline boundaries, final publication order, unchanged denial deadline and later
   four-sample contracts.
-- `git diff --check` passed. `swift package describe --type json` reports exactly `Pebble` and
-  `pebsmoke`. The exact-word LAN/Network scan over the excluded Driver, PebbleReleaseGate and
-  PebbleAppSupport returned zero.
-- Protected release hashes independently remain Pebble
-  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, pebsmoke
-  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, PebbleStorage.o
-  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, PebbleCore.o
-  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, PebbleTextInput.o
-  `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and PebbleAppSupport.o
+- `git diff --check` passed. `swift package describe --type json` reports exactly `Elysium` and
+  `elysmoke`. The exact-word LAN/Network scan over the excluded Driver, ElysiumReleaseGate and
+  ElysiumAppSupport returned zero.
+- Protected release hashes independently remain Elysium
+  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, elysmoke
+  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, ElysiumStorage.o
+  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, ElysiumCore.o
+  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, ElysiumTextInput.o
+  `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and ElysiumAppSupport.o
   `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`. Package, security-scan
   and ReleaseGate hashes also remain the reviewed V19 values.
 - Builder's warning-free release build, authoritative security scan, 1,062/1,062 full XCTest,
@@ -14500,7 +14500,7 @@ evidence:
   event posting and product-source references in the budget/barrier owner.
 - Run Driver compile/self-test, filtered and complete `TextEntrySourceTests`, `git diff --check`, the
   authoritative security scan, warning-free release build, full XCTest with exact count, 457/457
-  `pebsmoke`, surface/binary scans, six protected hashes, exactly two products and zero LAN drift.
+  `elysmoke`, surface/binary scans, six protected hashes, exactly two products and zero LAN drift.
   Fresh independent Security(code) PASS is required before runtime.
 - Start only `/tmp/reviewed-exception-cold-five-v21-shipping-barrier-<UTC>/` on one unchanged candidate.
   Preserve attempts 1-5 in order and stop at the first nonzero result without retry, replacement or
@@ -14530,9 +14530,9 @@ presentation, failure-copy and installed-proof contracts. The verifier-only barr
 these binding criteria.
 
 1. **The 6.1-second interval is visually and input inert.** It begins only after the conditional
-   action is terminal and changes no Pebble timing or behavior. Before the barrier the verifier may
+   action is terminal and changes no Elysium timing or behavior. Before the barrier the verifier may
    only wait in common modes; it performs no activation, focus, permission, cursor, clipboard, HID,
-   relaunch, retry or user-facing action and shows no Pebble spinner, prompt, countdown or flash.
+   relaunch, retry or user-facing action and shows no Elysium spinner, prompt, countdown or flash.
 2. **No candidate or AX epoch exists before the barrier.** Before exactly 6.100 seconds, the verifier
    acquires no lifecycle lease, begins no AX generation, performs no fast/full/CG sample, evaluates no
    presentation predicate, stores no candidate and accrues no stability time. The temporary
@@ -14660,17 +14660,17 @@ remain unchanged. V19 denial/HID/100-millisecond/latch/disposition behavior is u
   the barrier slice.
 - The authoritative security scan passed bounded local safety, the 127-file SQLite scan and overall
   security. A clean release build completed warning-free in 119.91 seconds.
-- Mandatory full XCTest passed 1,062/1,062 with zero failures: 21 PebbleTextInput, 30 ReleaseGate,
-  1,005 PebbleCore and 6 PebbleAppSupport. Golden smoke passed 457/457.
+- Mandatory full XCTest passed 1,062/1,062 with zero failures: 21 ElysiumTextInput, 30 ReleaseGate,
+  1,005 ElysiumCore and 6 ElysiumAppSupport. Golden smoke passed 457/457.
 - Storage release-surface and binary linked-library/network scans passed. Products remain exactly
-  `Pebble` and `pebsmoke`; zero-LAN and `git diff --check` passed.
-- Protected hashes remain exactly: `Pebble`
-  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, `pebsmoke`
-  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, `PebbleStorage.o`
-  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `PebbleCore.o`
-  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, `PebbleTextInput.o`
+  `Elysium` and `elysmoke`; zero-LAN and `git diff --check` passed.
+- Protected hashes remain exactly: `Elysium`
+  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, `elysmoke`
+  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, `ElysiumStorage.o`
+  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, `ElysiumCore.o`
+  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, `ElysiumTextInput.o`
   `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and
-  `PebbleAppSupport.o` `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
+  `ElysiumAppSupport.o` `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
 
 **V21 Shipping Not-before Barrier Builder verdict: PASS.** The immutable common-mode barrier blocks
 all premature presentation observation without extending or affecting HID. Fresh Security(code)
@@ -14732,16 +14732,16 @@ failure.
   construction/wait and the retained V19/V20 contracts.
 - `bash scripts/security-scan.sh` passed source scans, executable adapter behavior, bounded local
   release safety and the 127-production-Swift-file SQLite boundary scan. `git diff --check` passed.
-- `swift package describe --type json` reports exactly two unique executable products, `Pebble` and
-  `pebsmoke`. Exact-word LAN/network scans over the Driver and V21 test range returned zero.
-- Protected release hashes independently remain Pebble
-  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, pebsmoke
-  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, PebbleStorage.o
-  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, PebbleCore.o
-  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, PebbleTextInput.o
-  `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and PebbleAppSupport.o
+- `swift package describe --type json` reports exactly two unique executable products, `Elysium` and
+  `elysmoke`. Exact-word LAN/network scans over the Driver and V21 test range returned zero.
+- Protected release hashes independently remain Elysium
+  `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, elysmoke
+  `d989c030656377ea1dca57b563408e2f6ae739e391904bde8be25f4f1d6dde2f`, ElysiumStorage.o
+  `ed37590e383037968b25905cb7ecd1d29e8faa43ba1f62a4919baebf9aabc6ba`, ElysiumCore.o
+  `39e37366bcba82ba65131a1112ad0b262f562279e363cf621542a804bd3ae028`, ElysiumTextInput.o
+  `547f0c44a950be0b7287ab73b918b6a3f486502e7ba57d7897e2d751b4d040ac` and ElysiumAppSupport.o
   `12d4b146ea24da2457066590f0b2c54e331fa098f8f82f54849856e838b07383`.
-- Builder's warning-free release build, 1,062/1,062 full XCTest, 457/457 `pebsmoke`, storage
+- Builder's warning-free release build, 1,062/1,062 full XCTest, 457/457 `elysmoke`, storage
   release-surface and binary scans were checked against recorded Builder evidence rather than rerun
   in this independent focused review.
 
@@ -14763,14 +14763,14 @@ This is a narrow exception to the installed-signoff receipt gate, not a claim th
 manual Paste, VoiceOver, or independent installed Designer matrix passed. The immutable stopped set is
 `/tmp/reviewed-exception-cold-five-v21-shipping-barrier-20260712T220438Z/`; attempt 1 exited nonzero
 after the nonshipping Driver called `CFRunLoopRunSpecific` with the invalid pseudo-mode
-`kCFRunLoopCommonModes`. Pebble itself retained exact expected-pair authority, no synthetic click was
+`kCFRunLoopCommonModes`. Elysium itself retained exact expected-pair authority, no synthetic click was
 sent, and no input may have occurred. Attempts 2 through 5 were not run.
 
 Deployment is authorized only for the already verified release executable SHA-256
 `648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8`, after the warning-free build,
 1,062/1,062 XCTest cases, 457/457 smoke checks, security/SQLite, release-surface, binary, two-product,
 six-hash, zero-LAN, and diff checks recorded above. The raw install path must verify assets, package and
-sign that exact release executable, install `/Applications/Pebble.app`, and then verify the installed
+sign that exact release executable, install `/Applications/Elysium.app`, and then verify the installed
 signature and executable identity. Source-control commits may record the reviewed work and this known
 verification limitation. No receipt, final installed sign-off, or accessibility PASS may be minted or
 implied by this exception.
@@ -14779,14 +14779,14 @@ implied by this exception.
 
 ### Exception deployment evidence
 
-`./pebble install --no-build --executable-hash
+`./elysium install --no-build --executable-hash
 648af840890e9feee9a5e3f5ce2743ee043f4336fb7b122a1b4d8b263fee2ac8` completed successfully.
 The asset verifier passed; packaging retained pre-sign SHA-256 `648af840…` and produced signed
 installed executable SHA-256 `bee1551f3a117fd5d13cd1503e0eb143410074a907177ca9cf060c1ba39f026f`,
-CDHash `39259d833d231189fb8a2bbc857de663fd134b89`, identifier `com.briangao.pebble`, and a sealed-resource
-manifest. `codesign --verify --deep --strict --verbose=2 /Applications/Pebble.app` reported the bundle
+CDHash `39259d833d231189fb8a2bbc857de663fd134b89`, identifier `com.briangao.elysium`, and a sealed-resource
+manifest. `codesign --verify --deep --strict --verbose=2 /Applications/Elysium.app` reported the bundle
 valid on disk and satisfying its Designated Requirement. The installed app launched from the exact
-path `/Applications/Pebble.app/Contents/MacOS/Pebble`; live process identity matched that path.
+path `/Applications/Elysium.app/Contents/MacOS/Elysium`; live process identity matched that path.
 
 This proves exception-authorized packaging, installation, signature, byte identity, and launch only.
 It does not close or supersede the disclosed cold-five/manual Paste/VoiceOver/Designer limitations.
