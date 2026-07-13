@@ -7,3 +7,5 @@ dist/
 *.zip
 !packaging/*.zip
 .claude/
+.mpd/
+openspec/
