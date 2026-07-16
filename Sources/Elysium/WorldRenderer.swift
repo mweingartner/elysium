@@ -266,6 +266,7 @@ final class WorldRenderer {
     // item sprite atlas (dropped items / thrown projectiles)
     var spriteTex: MTLTexture!
     var spriteSlots: [String: Int] = [:]
+    private var spriteIconGeneration: UInt64 = 0
 
     // scratch GPU meshes for cubes/crack
     private var cubeMesh: (vb: MTLBuffer, ib: MTLBuffer, count: Int)?
@@ -458,7 +459,17 @@ final class WorldRenderer {
     }
 
     // ---- atlas install (procedural / resource pack) ------------------------------
-    private func makeAtlasTexture(_ slices: [[UInt8]], res: Int) {
+    struct StagedWorldAtlas {
+        let texture: MTLTexture
+        let res: Int
+        let animations: [TileAnimation]
+        let fluidDamp: Float
+    }
+
+    private func stageAtlasTexture(_ slices: [[UInt8]], res: Int,
+                                   animations: [TileAnimation], fluidDamp: Float) -> StagedWorldAtlas? {
+        guard res > 0, !slices.isEmpty,
+              slices.allSatisfy({ $0.count == res * res * 4 }) else { return nil }
         let td = MTLTextureDescriptor()
         td.textureType = .type2DArray
         td.pixelFormat = .rgba8Unorm
@@ -466,38 +477,54 @@ final class WorldRenderer {
         td.height = res
         td.arrayLength = slices.count
         td.usage = .shaderRead
-        let tex = device.makeTexture(descriptor: td)!
+        guard let tex = device.makeTexture(descriptor: td) else { return nil }
         for (i, px) in slices.enumerated() {
             px.withUnsafeBytes { raw in
                 tex.replace(region: MTLRegionMake2D(0, 0, res, res), mipmapLevel: 0, slice: i,
                             withBytes: raw.baseAddress!, bytesPerRow: res * 4, bytesPerImage: res * res * 4)
             }
         }
-        atlasTexture = tex
-        atlasRes = res
+        return StagedWorldAtlas(texture: tex, res: res, animations: animations, fluidDamp: fluidDamp)
+    }
+
+    func stageProceduralAtlas(_ atlas: BuiltAtlas) -> StagedWorldAtlas? {
+        stageAtlasTexture(atlas.pixels, res: TILE, animations: [], fluidDamp: 0)
+    }
+
+    func stagePackAtlas(_ result: PackAtlasResult) -> StagedWorldAtlas? {
+        stageAtlasTexture(result.slices, res: result.res, animations: result.animations,
+                          fluidDamp: result.fluidAnimated ? 1 : 0)
+    }
+
+    func installStagedWorldAtlas(_ staged: StagedWorldAtlas) {
+        atlasTexture = staged.texture
+        atlasRes = staged.res
+        tileAnimations = staged.animations
+        animState = Array(repeating: (0, 0), count: staged.animations.count)
+        animAccumMs = 0
+        packFluidDamp = staged.fluidDamp
     }
 
     func installProceduralAtlas() {
         let atlas = ElysiumCore.buildAtlas()
-        initIcons(atlas)      // item icons sample atlas tiles
-        setUIAtlas(atlas)     // UI dirt-background blits reuse the same build
-        makeAtlasTexture(atlas.pixels, res: TILE)
-        tileAnimations = []
-        animState = []
-        packFluidDamp = 0
-    }
-
-    func installPackAtlas(_ result: PackAtlasResult) {
-        makeAtlasTexture(result.slices, res: result.res)
-        tileAnimations = result.animations
-        animState = Array(repeating: (0, 0), count: result.animations.count)
-        animAccumMs = 0
-        packFluidDamp = result.fluidAnimated ? 1 : 0
+        guard let candidate = IconSourceCandidate(atlas: atlas),
+              let stagedWorld = stageProceduralAtlas(atlas) else { return }
+        installUIAtlas(atlas)
+        installStagedWorldAtlas(stagedWorld)
+        let generation = publishIconSourceSnapshot(candidate)
+        recordUIIconGeneration(generation)
+        recordWorldIconGeneration(generation)
+        precondition(currentIconSourceGeneration() == generation &&
+                     currentUIIconGeneration() == generation &&
+                     currentWorldIconGeneration() == generation)
     }
 
     func resetSpriteSlots() {
         spriteSlots.removeAll()
     }
+
+    func recordWorldIconGeneration(_ generation: UInt64) { spriteIconGeneration = generation }
+    func currentWorldIconGeneration() -> UInt64 { spriteIconGeneration }
 
     // ---- frame capture (photo booth) ---------------------------------------------
     private var pendingCapture: String?
@@ -1305,9 +1332,11 @@ final class WorldRenderer {
         if let slot = spriteSlots[key] { return slot }
         let slot = spriteSlots.count
         if slot >= 128 * 32 { return 0 }
-        spriteSlots[key] = slot
         let px = itemIconPixels(stack.id, stack.data)
         let sx = (slot % 128) * 16, sy = (slot / 128) * 16
+        guard px.count == 1024, sx >= 0, sy >= 0,
+              sx + 16 <= spriteTex.width, sy + 16 <= spriteTex.height else { return 0 }
+        spriteSlots[key] = slot
         px.withUnsafeBytes { raw in
             spriteTex.replace(region: MTLRegionMake2D(sx, sy, 16, 16), mipmapLevel: 0,
                               withBytes: raw.baseAddress!, bytesPerRow: 16 * 4)

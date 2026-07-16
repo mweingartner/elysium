@@ -284,6 +284,20 @@ final class CraftingPlanTests: XCTestCase {
         XCTAssertTrue(itemDef(plans[ingot].output.id).displayName.lowercased().contains("ingot"))
     }
 
+    func testFilteredCraftingPlansContainsEveryMatchOnceInCanonicalOrder() {
+        registerCoreIfNeeded()
+        let plans = creativeCraftingPlans(gridWidth: 3, gridHeight: 3)
+        let filtered = filteredCraftingPlans(plans, query: "door")
+
+        XCTAssertFalse(filtered.isEmpty)
+        XCTAssertTrue(filtered.allSatisfy { craftingPlanMatchesSearch($0, query: "door") })
+        XCTAssertEqual(filtered.map(\.recipeIndex), plans.filter {
+            craftingPlanMatchesSearch($0, query: "door")
+        }.map(\.recipeIndex))
+        XCTAssertEqual(Set(filtered.map(\.recipeIndex)).count, filtered.count)
+        XCTAssertEqual(filteredCraftingPlans(plans, query: "" ).map(\.recipeIndex), plans.map(\.recipeIndex))
+    }
+
     func testCraftingPlanSearchNormalizesCaseWhitespaceAndPunctuation() {
         XCTAssertEqual(normalizedCraftingPlanSearch("  Crafting_Table!! "), "crafting table")
         XCTAssertEqual(normalizedCraftingPlanSearch("OAK   DOOR"), "oak door")
@@ -353,12 +367,70 @@ final class CraftingPlanTests: XCTestCase {
 
         typeahead.scrollRows(4, plans: plans)
         XCTAssertGreaterThan(typeahead.scroll, searchScroll)
-        let scrolled = typeahead.scroll
-        let highlighted = typeahead.highlightedIndex
+        XCTAssertGreaterThan(typeahead.scroll, 0)
 
         typeahead.refresh(plans: plans)
-        XCTAssertEqual(typeahead.scroll, scrolled)
-        XCTAssertEqual(typeahead.highlightedIndex, highlighted)
+        XCTAssertEqual(typeahead.scroll, 0)
+        XCTAssertEqual(typeahead.highlightedIndex, 0)
+        XCTAssertTrue(typeahead.matchingPlans(in: plans).allSatisfy {
+            craftingPlanMatchesSearch($0, query: "door")
+        })
+    }
+
+    func testCraftingRecipeTypeaheadFiltersCorrectionNavigationAndSelection() throws {
+        registerCoreIfNeeded()
+        let plans = creativeCraftingPlans(gridWidth: 3, gridHeight: 3)
+        var typeahead = CraftingRecipeTypeahead(maxRows: 2, maxQueryLength: 16)
+
+        typeahead.open(plans: plans)
+        XCTAssertTrue(typeahead.append("door", plans: plans))
+        let matches = typeahead.matchingPlans(in: plans)
+        XCTAssertGreaterThan(matches.count, 2)
+        XCTAssertEqual(typeahead.highlightedIndex, 0)
+        XCTAssertEqual(typeahead.selectedPlan(in: plans)?.recipeIndex, matches[0].recipeIndex)
+
+        typeahead.moveHighlight(2, plans: plans)
+        XCTAssertEqual(typeahead.highlightedIndex, 2)
+        XCTAssertEqual(typeahead.scroll, 1)
+        XCTAssertEqual(typeahead.selectedPlan(in: plans)?.recipeIndex, matches[2].recipeIndex)
+
+        XCTAssertTrue(typeahead.append("zzz", plans: plans))
+        XCTAssertTrue(typeahead.matchingPlans(in: plans).isEmpty)
+        XCTAssertNil(typeahead.highlightedIndex)
+        XCTAssertNil(typeahead.selectedPlan(in: plans))
+        typeahead.moveHighlight(1, plans: plans)
+        typeahead.scrollRows(1, plans: plans)
+        XCTAssertNil(typeahead.selectedPlan(in: plans))
+
+        XCTAssertTrue(typeahead.deleteBackward(plans: plans))
+        XCTAssertTrue(typeahead.deleteBackward(plans: plans))
+        XCTAssertTrue(typeahead.deleteBackward(plans: plans))
+        XCTAssertEqual(typeahead.query, "door")
+        XCTAssertEqual(typeahead.highlightedIndex, 0)
+        XCTAssertEqual(typeahead.scroll, 0)
+        XCTAssertEqual(typeahead.selectedPlan(in: plans)?.recipeIndex, matches[0].recipeIndex)
+    }
+
+    func testCraftingRecipeTypeaheadDeletionRestoresFullListAndRefreshUsesCurrentMatches() {
+        registerCoreIfNeeded()
+        let plans = creativeCraftingPlans(gridWidth: 3, gridHeight: 3)
+        var typeahead = CraftingRecipeTypeahead(maxRows: 3, maxQueryLength: 16)
+
+        typeahead.open(plans: plans)
+        XCTAssertTrue(typeahead.append("door", plans: plans))
+        let matches = typeahead.matchingPlans(in: plans)
+        XCTAssertFalse(matches.isEmpty)
+        typeahead.refresh(plans: Array(plans.reversed()))
+        XCTAssertEqual(typeahead.highlightedIndex, 0)
+        XCTAssertEqual(typeahead.scroll, 0)
+        XCTAssertEqual(typeahead.selectedPlan(in: Array(plans.reversed()))?.recipeIndex,
+                       Array(matches.reversed()).first?.recipeIndex)
+
+        for _ in 0..<4 { XCTAssertTrue(typeahead.deleteBackward(plans: plans)) }
+        XCTAssertEqual(typeahead.query, "")
+        XCTAssertEqual(typeahead.matchingPlans(in: plans).map(\.recipeIndex), plans.map(\.recipeIndex))
+        XCTAssertEqual(typeahead.highlightedIndex, 0)
+        XCTAssertEqual(typeahead.scroll, 0)
     }
 
     func testCraftingRecipeTypeaheadIgnoresControlTextAndLimitsQuery() {
@@ -372,7 +444,9 @@ final class CraftingPlanTests: XCTestCase {
 
         XCTAssertTrue(typeahead.append("oak door", plans: plans))
         XCTAssertEqual(typeahead.query, "oak door")
-        XCTAssertEqual(typeahead.selectedPlan(in: plans).map { itemDef($0.output.id).name }, "oak_door")
+        let topMatch = typeahead.selectedPlan(in: plans).map { itemDef($0.output.id).name }
+        XCTAssertEqual(topMatch, typeahead.matchingPlans(in: plans).first.map { itemDef($0.output.id).name })
+        XCTAssertTrue(topMatch?.contains("oak_door") ?? false)
 
         var limited = CraftingRecipeTypeahead(maxRows: 8, maxQueryLength: 4)
         limited.open(plans: plans)

@@ -240,6 +240,11 @@ public func craftingPlanMatchesSearch(_ plan: CraftingRecipePlan, query rawQuery
     firstCraftingPlanIndex(matching: rawQuery, in: [plan]) != nil
 }
 
+public func filteredCraftingPlans(_ plans: [CraftingRecipePlan], query rawQuery: String) -> [CraftingRecipePlan] {
+    guard !normalizedCraftingPlanSearch(rawQuery).isEmpty else { return plans }
+    return plans.filter { craftingPlanMatchesSearch($0, query: rawQuery) }
+}
+
 public func firstCraftingPlanIndex(matching rawQuery: String, in plans: [CraftingRecipePlan]) -> Int? {
     let query = normalizedCraftingPlanSearch(rawQuery)
     guard !query.isEmpty else { return nil }
@@ -289,16 +294,22 @@ public struct CraftingRecipeTypeahead {
     }
 
     public mutating func refresh(plans: [CraftingRecipePlan]) {
-        guard !plans.isEmpty else {
+        let results = matchingPlans(in: plans)
+        guard !results.isEmpty else {
             highlightedIndex = nil
             scroll = 0
             return
         }
-        scroll = min(scroll, max(0, plans.count - maxRows))
-        if let idx = highlightedIndex, idx >= plans.count {
-            highlightedIndex = plans.count - 1
+        if !query.isEmpty {
+            highlightedIndex = 0
+            scroll = 0
+            return
+        }
+        scroll = min(scroll, max(0, results.count - maxRows))
+        if let idx = highlightedIndex, idx >= results.count {
+            highlightedIndex = results.count - 1
         } else if highlightedIndex == nil {
-            highlightedIndex = query.isEmpty ? min(scroll, plans.count - 1) : firstCraftingPlanIndex(matching: query, in: plans)
+            highlightedIndex = min(scroll, results.count - 1)
         }
     }
 
@@ -333,26 +344,28 @@ public struct CraftingRecipeTypeahead {
     }
 
     public mutating func moveHighlight(_ delta: Int, plans: [CraftingRecipePlan]) {
-        guard !plans.isEmpty else {
+        let results = matchingPlans(in: plans)
+        guard !results.isEmpty else {
             highlightedIndex = nil
             scroll = 0
             return
         }
         let current = highlightedIndex ?? scroll
-        highlightedIndex = max(0, min(plans.count - 1, current + delta))
-        ensureHighlightedVisible(planCount: plans.count)
+        highlightedIndex = max(0, min(results.count - 1, current + delta))
+        ensureHighlightedVisible(planCount: results.count)
     }
 
     public mutating func scrollRows(_ delta: Int, plans: [CraftingRecipePlan]) {
-        guard plans.count > maxRows else {
+        let results = matchingPlans(in: plans)
+        guard results.count > maxRows else {
             scroll = 0
-            if let idx = highlightedIndex, idx >= plans.count {
-                highlightedIndex = plans.isEmpty ? nil : plans.count - 1
+            if let idx = highlightedIndex, idx >= results.count {
+                highlightedIndex = results.isEmpty ? nil : results.count - 1
             }
             return
         }
-        scroll = max(0, min(plans.count - maxRows, scroll + delta))
-        let rows = min(maxRows, plans.count)
+        scroll = max(0, min(results.count - maxRows, scroll + delta))
+        let rows = min(maxRows, results.count)
         if let idx = highlightedIndex {
             if idx < scroll {
                 highlightedIndex = scroll
@@ -365,22 +378,25 @@ public struct CraftingRecipeTypeahead {
     }
 
     public func selectedPlan(in plans: [CraftingRecipePlan]) -> CraftingRecipePlan? {
-        guard let idx = highlightedIndex, idx >= 0 && idx < plans.count else { return nil }
-        return plans[idx]
+        let results = matchingPlans(in: plans)
+        guard let idx = highlightedIndex, idx >= 0 && idx < results.count else { return nil }
+        return results[idx]
+    }
+
+    public func matchingPlans(in plans: [CraftingRecipePlan]) -> [CraftingRecipePlan] {
+        filteredCraftingPlans(plans, query: query)
     }
 
     private mutating func updateHighlight(plans: [CraftingRecipePlan]) {
-        guard !plans.isEmpty else {
+        let results = matchingPlans(in: plans)
+        guard !results.isEmpty else {
             highlightedIndex = nil
             scroll = 0
             return
         }
-        if query.isEmpty {
-            highlightedIndex = min(highlightedIndex ?? 0, plans.count - 1)
-        } else {
-            highlightedIndex = firstCraftingPlanIndex(matching: query, in: plans)
-        }
-        ensureHighlightedVisible(planCount: plans.count)
+        highlightedIndex = 0
+        scroll = 0
+        ensureHighlightedVisible(planCount: results.count)
     }
 
     private mutating func ensureHighlightedVisible(planCount: Int) {

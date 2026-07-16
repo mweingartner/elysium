@@ -191,11 +191,12 @@ private final class CraftingRecipePopup {
     }
 
     func selectedPlan(at mx: Double, _ my: Double) -> CraftingRecipePlan? {
-        guard open, !plans.isEmpty else { return nil }
-        let rows = min(typeahead.maxRows, plans.count)
+        let results = typeahead.matchingPlans(in: plans)
+        guard open, !results.isEmpty else { return nil }
+        let rows = min(typeahead.maxRows, results.count)
         guard mx >= x && mx < x + w && my >= listY && my < listY + Double(rows) * rowH else { return nil }
         let idx = typeahead.scroll + Int((my - listY) / rowH)
-        return idx >= 0 && idx < plans.count ? plans[idx] : nil
+        return idx >= 0 && idx < results.count ? results[idx] : nil
     }
 
     func closeIfOpenOutsideButton(_ mx: Double, _ my: Double) {
@@ -212,13 +213,21 @@ private final class CraftingRecipePopup {
             cv.drawText("No craftable items", x + 6, y + 6, 1, "#3f3f3f", shadow: false)
             return
         }
-        let rows = min(typeahead.maxRows, plans.count)
+        let results = typeahead.matchingPlans(in: plans)
+        let rows = min(typeahead.maxRows, results.count)
         let headerH = typeahead.query.isEmpty ? 0 : searchH
-        ui.drawPanel(x, y, w, headerH + Double(rows) * rowH + 2)
+        let emptyResultH = results.isEmpty ? rowH : 0
+        ui.drawPanel(x, y, w, headerH + Double(rows) * rowH + emptyResultH + 2)
         if !typeahead.query.isEmpty {
             cv.setFill("#d0d0d0")
             cv.fillRect(x + 1, y + 1, w - 2, searchH)
             cv.drawText(searchLabel(), x + 5, y + 3, 1, "#303030", shadow: false)
+        }
+        if results.isEmpty {
+            cv.setFill("#b8b8b8")
+            cv.fillRect(x + 1, listY + 1, w - 2, rowH)
+            cv.drawText("No matching recipes", x + 6, listY + 6, 1, "#3f3f3f", shadow: false)
+            return
         }
         for row in 0..<rows {
             let idx = typeahead.scroll + row
@@ -227,16 +236,16 @@ private final class CraftingRecipePopup {
             let selected = idx == typeahead.highlightedIndex
             cv.setFill(selected ? "#6f7dff" : hover ? "#8a8aff" : (row % 2 == 0 ? "#b8b8b8" : "#ababab"))
             cv.fillRect(x + 1, ry, w - 2, rowH)
-            let stack = plans[idx].output
+            let stack = results[idx].output
             cv.drawItemIcon(stack.id, stack.data, x + 3, ry + 1, 16, 16)
             cv.drawText(label(for: stack), x + 23, ry + 5, 1, (hover || selected) ? "#ffffff" : "#303030", shadow: false)
         }
-        if plans.count > rows {
+        if results.count > rows {
             cv.setFill("#555555")
             let trackH = Double(rows) * rowH
             cv.fillRect(x + w - 5, listY + 2, 3, trackH - 2)
-            let maxScroll = max(1, plans.count - rows)
-            let thumbH = max(8, (trackH - 4) * Double(rows) / Double(plans.count))
+            let maxScroll = max(1, results.count - rows)
+            let thumbH = max(8, (trackH - 4) * Double(rows) / Double(results.count))
             let thumbY = listY + 3 + (trackH - thumbH - 4) * Double(typeahead.scroll) / Double(maxScroll)
             cv.setFill("#f0f0f0")
             cv.fillRect(x + w - 5, thumbY, 3, thumbH)
@@ -244,7 +253,7 @@ private final class CraftingRecipePopup {
     }
 
     func onWheel(_ dy: Double) -> Bool {
-        guard open, plans.count > typeahead.maxRows else { return false }
+        guard open, typeahead.matchingPlans(in: plans).count > typeahead.maxRows else { return false }
         let delta = dy > 0 ? 1 : -1
         typeahead.scrollRows(delta, plans: plans)
         return true
@@ -275,8 +284,14 @@ private final class CraftingRecipePopup {
     }
 
     var accessibilityQuery: String { typeahead.query }
+    var accessibilityShowsNoMatches: Bool {
+        open && !plans.isEmpty && !typeahead.query.isEmpty && typeahead.matchingPlans(in: plans).isEmpty
+    }
     var accessibilityFrame: (x: Double, y: Double, width: Double, height: Double) {
         (x, y, w, max(searchH, 12))
+    }
+    var accessibilityNoMatchesFrame: (x: Double, y: Double, width: Double, height: Double) {
+        (x + 1, listY + 1, max(0, w - 2), rowH)
     }
 
     private var x: Double { button?.x ?? margin }
@@ -659,12 +674,20 @@ final class InventoryScreen: ContainerScreen {
         -> [TextEntryAccessibilityDescriptor] {
         guard recipeMenu.isOpen else { return super.textAccessibilityDescriptors(ui, game) }
         let frame = recipeMenu.accessibilityFrame
-        return [TextEntryAccessibilityDescriptor(
+        var descriptors = [TextEntryAccessibilityDescriptor(
             id: "inventory.recipeQuery", role: .searchField, label: "Recipe Search",
             value: recipeMenu.accessibilityQuery,
             help: "Type to filter recipes. Use Up and Down to choose and Return to select.",
             frame: frame, enabled: true, focused: recipeTextFocused,
             insertionUTF16Offset: recipeMenu.accessibilityQuery.utf16.count, focusable: true)]
+        if recipeMenu.accessibilityShowsNoMatches {
+            descriptors.append(TextEntryAccessibilityDescriptor(
+                id: "inventory.recipeNoMatches", role: .staticText,
+                label: "No matching recipes", value: "", help: "No recipes match the current search.",
+                frame: recipeMenu.accessibilityNoMatchesFrame, enabled: false, focused: false,
+                insertionUTF16Offset: nil, focusable: false, actionable: false))
+        }
+        return descriptors
     }
     override func onClose(_ ui: UIManager, _ game: GameCore) {
         _ = returnCraftGridToInventory(game)
@@ -1040,12 +1063,20 @@ final class CraftingScreen: ContainerScreen {
         -> [TextEntryAccessibilityDescriptor] {
         guard !readOnly, recipeMenu.isOpen else { return super.textAccessibilityDescriptors(ui, game) }
         let frame = recipeMenu.accessibilityFrame
-        return [TextEntryAccessibilityDescriptor(
+        var descriptors = [TextEntryAccessibilityDescriptor(
             id: "crafting.recipeQuery", role: .searchField, label: "Recipe Search",
             value: recipeMenu.accessibilityQuery,
             help: "Type to filter recipes. Use Up and Down to choose and Return to select.",
             frame: frame, enabled: true, focused: recipeTextFocused,
             insertionUTF16Offset: recipeMenu.accessibilityQuery.utf16.count, focusable: true)]
+        if recipeMenu.accessibilityShowsNoMatches {
+            descriptors.append(TextEntryAccessibilityDescriptor(
+                id: "crafting.recipeNoMatches", role: .staticText,
+                label: "No matching recipes", value: "", help: "No recipes match the current search.",
+                frame: recipeMenu.accessibilityNoMatchesFrame, enabled: false, focused: false,
+                insertionUTF16Offset: nil, focusable: false, actionable: false))
+        }
+        return descriptors
     }
     override func onClose(_ ui: UIManager, _ game: GameCore) {
         if tableBE == nil && !readOnly {

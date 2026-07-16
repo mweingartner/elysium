@@ -237,7 +237,8 @@ final class UICanvas {
         slots.removeAll()
     }
 
-    private func allocSlot(_ key: String, _ pixels: [UInt8]) -> (Int, Int) {
+    private func allocSlot(_ key: String, _ pixels: [UInt8]) -> (Int, Int)? {
+        guard pixels.count == 1024 else { return nil }
         if let s = slots[key] { return s }
         let cols = 64  // 1024/16
         let origin: (Int, Int)
@@ -248,6 +249,8 @@ final class UICanvas {
             nextSlot += 1
             origin = ((cell % cols) * 16, (cell / cols) * 16)
         }
+        guard origin.0 >= 0, origin.1 >= 0,
+              origin.0 + 16 <= atlas.width, origin.1 + 16 <= atlas.height else { return nil }
         pixels.withUnsafeBytes { raw in
             atlas.replace(region: MTLRegionMake2D(origin.0, origin.1, 16, 16), mipmapLevel: 0,
                           withBytes: raw.baseAddress!, bytesPerRow: 16 * 4)
@@ -259,7 +262,7 @@ final class UICanvas {
     /// draw an item icon (uses the shared icon cache)
     func drawItemIcon(_ itemId: Int, _ data: StackData?, _ x: Double, _ y: Double, _ w: Double = 16, _ h: Double = 16) {
         let key = "i\(itemId)|\(data?.potion ?? "")"
-        let origin = slots[key] ?? allocSlot(key, itemIconPixels(itemId, data))
+        guard let origin = slots[key] ?? allocSlot(key, itemIconPixels(itemId, data)) else { return }
         quad(Float(x), Float(y), Float(w), Float(h),
              Float(origin.0) / 1024, Float(origin.1) / 1024,
              Float(origin.0 + 16) / 1024, Float(origin.1 + 16) / 1024,
@@ -269,7 +272,7 @@ final class UICanvas {
     func drawRPGIcon(_ assetID: String, _ x: Double, _ y: Double, _ w: Double = 16, _ h: Double = 16) {
         guard let pixels = rpgIconPixels(assetID: assetID) else { return }
         let key = "rpg|" + assetID
-        let origin = slots[key] ?? allocSlot(key, pixels)
+        guard let origin = slots[key] ?? allocSlot(key, pixels) else { return }
         quad(Float(x), Float(y), Float(w), Float(h),
              Float(origin.0) / 1024, Float(origin.1) / 1024,
              Float(origin.0 + 16) / 1024, Float(origin.1 + 16) / 1024,
@@ -285,7 +288,8 @@ final class UICanvas {
         } else {
             let id = tileId(name)
             let built = uiAtlasPixels(id)
-            origin = allocSlot(key, built)
+            guard let allocated = allocSlot(key, built) else { return }
+            origin = allocated
         }
         let c = SIMD4<Float>(brightness, brightness, brightness, 1)
         quad(Float(x), Float(y), Float(w), Float(h),
@@ -410,7 +414,14 @@ final class UICanvas {
 
 /// 16×16 RGBA pixels of a terrain atlas tile, for UI blits (dirt bg etc.)
 private var uiAtlasCache: BuiltAtlas?
-func setUIAtlas(_ atlas: BuiltAtlas) { uiAtlasCache = atlas }
+private var uiAtlasGeneration: UInt64 = 0
+func installUIAtlas(_ atlas: BuiltAtlas) {
+    uiAtlasCache = atlas
+}
+func recordUIIconGeneration(_ generation: UInt64) {
+    uiAtlasGeneration = generation
+}
+func currentUIIconGeneration() -> UInt64 { uiAtlasGeneration }
 func uiAtlasPixels(_ tile: Int) -> [UInt8] {
     if uiAtlasCache == nil { uiAtlasCache = buildAtlas() }
     let atlas = uiAtlasCache!

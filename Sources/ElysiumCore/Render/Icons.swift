@@ -4,19 +4,61 @@
 
 import Foundation
 
-private var iconCache: [String: [UInt8]] = [:]
-private var iconAtlas: BuiltAtlas?
+private struct IconCacheKey: Hashable {
+    let itemId: Int
+    let aliasId: Int?
+    let potion: String?
+    let generation: UInt64
+    let rendererRevision: UInt64
+}
+
+private var iconCache: [IconCacheKey: [UInt8]] = [:]
+private struct IconSourceSnapshot {
+    let atlas: BuiltAtlas
+    let overrides: [String: [UInt8]]
+    let generation: UInt64
+    let rendererRevision: UInt64
+}
+private let iconSourceLock = NSLock()
+private var iconSourceSnapshot: IconSourceSnapshot?
+private var nextIconGeneration: UInt64 = 0
+let iconMaximumShapeBoxes = 256
+let iconMaximumCandidateFaces = iconMaximumShapeBoxes * 6
+let iconMaximumFacePixelTests = iconMaximumCandidateFaces * 16 * 16
+
+public struct IconSourceCandidate {
+    fileprivate let atlas: BuiltAtlas
+    fileprivate let overrides: [String: [UInt8]]
+    fileprivate let rendererRevision: UInt64
+
+    public init?(atlas: BuiltAtlas, itemOverrides: [String: [UInt8]] = [:],
+                 rendererRevision: UInt64 = 1) {
+        guard atlas.count == atlas.pixels.count,
+              atlas.pixels.allSatisfy({ $0.count == 16 * 16 * 4 }) else { return nil }
+        self.atlas = atlas
+        self.overrides = itemOverrides.filter { $0.value.count == 16 * 16 * 4 }
+        self.rendererRevision = rendererRevision
+    }
+}
 
 /// app-installed resource-pack item textures (item name → 16×16 straight RGBA).
 /// elysmoke never sets this, so the icon goldens always see the painters.
-public var itemIconOverride: ((String) -> [UInt8]?)? = nil
-
-public func initIcons(_ atlas: BuiltAtlas) {
-    iconAtlas = atlas
+/// Sole Core publication seam. Candidate validation/copying is complete before this lock is acquired;
+/// Core never invokes caller or App code while holding its source/cache lock.
+@discardableResult
+public func publishIconSourceSnapshot(_ candidate: IconSourceCandidate) -> UInt64 {
+    iconSourceLock.lock(); defer { iconSourceLock.unlock() }
+    nextIconGeneration &+= 1
+    iconSourceSnapshot = IconSourceSnapshot(atlas: candidate.atlas, overrides: candidate.overrides,
+                                            generation: nextIconGeneration,
+                                            rendererRevision: candidate.rendererRevision)
+    iconCache.removeAll(keepingCapacity: true)
+    return nextIconGeneration
 }
 
-public func resetIconCache() {
-    iconCache.removeAll()
+public func currentIconSourceGeneration() -> UInt64 {
+    iconSourceLock.lock(); defer { iconSourceLock.unlock() }
+    return iconSourceSnapshot?.generation ?? 0
 }
 
 public func blockItemIconUsesThreeDimensionalPreview(_ blockId: Int) -> Bool {
@@ -45,36 +87,65 @@ private func iconAliasDef(for def: ItemDef) -> ItemDef? {
     return itemDefs[aliasId]
 }
 
-private func tilePixels(_ tile: Int) -> [UInt8]? {
-    guard let atlas = iconAtlas, tile >= 0, tile < atlas.pixels.count else { return nil }
+private func tilePixels(_ tile: Int, atlas: BuiltAtlas) -> [UInt8]? {
+    guard tile >= 0, tile < atlas.pixels.count, atlas.pixels[tile].count == 1024 else { return nil }
     return atlas.pixels[tile]
 }
 
 /// 16×16 RGBA pixels for an item icon (cached per item+potion)
 public func itemIconPixels(_ itemId: Int, _ data: StackData? = nil) -> [UInt8] {
+    guard itemId >= 0, itemId < itemDefs.count else { return missingIconPixels() }
     let def = itemDefs[itemId]
-    let key = def.name + (data?.potion.map { ":" + $0 } ?? "")
-    if let c = iconCache[key] { return c }
     let aliasDef = iconAliasDef(for: def)
-    // potion-family icons keep the procedural painter (dynamic per-effect tint)
-    if data?.potion == nil, let ov = itemIconOverride {
-        if let px = ov(def.name) {
-            iconCache[key] = px
-            return px
+    while true {
+        iconSourceLock.lock()
+        guard let snapshot = iconSourceSnapshot else {
+            iconSourceLock.unlock()
+            return missingIconPixels()
         }
-        if let aliasDef, let px = ov(aliasDef.name) {
-            iconCache[key] = px
-            return px
+        let key = IconCacheKey(itemId: itemId, aliasId: aliasDef?.id,
+                               potion: data?.potion, generation: snapshot.generation,
+                               rendererRevision: snapshot.rendererRevision)
+        if let cached = iconCache[key] {
+            iconSourceLock.unlock()
+            return cached
         }
-        if let sourceName = copperToolSourceName(def.name), let px = ov(sourceName) {
-            let copper = recolorIronToolIconToCopper(px)
-            iconCache[key] = copper
-            return copper
+        iconSourceLock.unlock()
+
+        let rendered: [UInt8]
+        if data?.potion == nil, let px = snapshot.overrides[def.name] {
+            rendered = px
+        } else if data?.potion == nil, let aliasDef, let px = snapshot.overrides[aliasDef.name] {
+            rendered = px
+        } else if data?.potion == nil, let sourceName = copperToolSourceName(def.name),
+                  let px = snapshot.overrides[sourceName] {
+            rendered = recolorIronToolIconToCopper(px)
+        } else {
+            var img = [UInt8](repeating: 0, count: 1024)
+            paintIcon(&img, aliasDef ?? def, data, atlas: snapshot.atlas)
+            rendered = stride(from: 3, to: img.count, by: 4).contains(where: { img[$0] != 0 })
+                ? img : missingIconPixels()
+        }
+
+        iconSourceLock.lock()
+        if iconSourceSnapshot?.generation == snapshot.generation {
+            iconCache[key] = rendered
+            iconSourceLock.unlock()
+            return rendered
+        }
+        iconSourceLock.unlock()
+        // Publication raced rendering. Retry against the complete new snapshot; stale work is discarded.
+    }
+}
+
+private func missingIconPixels() -> [UInt8] {
+    var img = [UInt8](repeating: 0, count: 16 * 16 * 4)
+    for y in 2..<14 {
+        for x in 2..<14 where x == 2 || x == 13 || y == 2 || y == 13 || x == y || x + y == 15 {
+            let i = (y * 16 + x) * 4
+            img[i] = 255; img[i + 1] = 0; img[i + 2] = 255; img[i + 3] = 255
         }
     }
-    var img = [UInt8](repeating: 0, count: 16 * 16 * 4)
-    paintIcon(&img, aliasDef ?? def, data)
-    iconCache[key] = img
     return img
 }
 
@@ -285,7 +356,7 @@ private func drawTemplate(_ img: inout [UInt8], _ rows: [String], _ H: Int, _ Bc
     }
 }
 
-private func paintIcon(_ img: inout [UInt8], _ def: ItemDef, _ data: StackData?) {
+private func paintIcon(_ img: inout [UInt8], _ def: ItemDef, _ data: StackData?, atlas: BuiltAtlas) {
     let name = def.name
     // tools
     if let tool = def.tool, let tpl = TOOL_TEMPLATES[tool.type] {
@@ -300,7 +371,7 @@ private func paintIcon(_ img: inout [UInt8], _ def: ItemDef, _ data: StackData?)
         return
     }
     // block items → mini isometric cube or flat tile
-    if let block = def.block, iconAtlas != nil {
+    if let block = def.block {
         let bid = Int(block)
         let bdef = blockDefs[bid]
         let threeDimensional = blockItemIconUsesThreeDimensionalPreview(bid)
@@ -308,10 +379,18 @@ private func paintIcon(_ img: inout [UInt8], _ def: ItemDef, _ data: StackData?)
             bdef.texFn?(0, face) ?? (bdef.tex.isEmpty ? 0 : Int(bdef.tex[face]))
         }
         if !threeDimensional {
-            blitTile(&img, tile(2), tintFor(bid))
+            blitTile(&img, tile(2), tintFor(bid), atlas: atlas)
             return
         }
-        drawIsoCube(&img, tile(1), tile(2), tile(5), tintFor(bid))
+        var boxes: [AABB] = []
+        // Inventory previews are deliberately isolated and use canonical metadata 0:
+        // straight bottom stairs, closed doors/trapdoors/gates, and unconnected posts.
+        shapeBoxes(Int(cell(UInt16(bid), 0)), { _, _, _ in 0 }, &boxes, false)
+        if !drawIsometricShape(&img, boxes: boxes,
+                               topTile: tile(1), leftTile: tile(2), rightTile: tile(5),
+                               tint: tintFor(bid), atlas: atlas) {
+            img = missingIconPixels()
+        }
         return
     }
     if paintSpecific(&img, name, data) { return }
@@ -341,6 +420,86 @@ private func paintIcon(_ img: inout [UInt8], _ def: ItemDef, _ data: StackData?)
     }
 }
 
+private struct IconFace {
+    let points: [(Double, Double)]
+    let tile: [UInt8]
+    let uv: [(Double, Double)]
+    let brightness: Double
+    let tint: Bool
+    let depth: Double
+    let order: Int
+}
+
+@inline(__always) private func iconProject(_ x: Double, _ y: Double, _ z: Double) -> (Double, Double) {
+    (8 + (x - z) * 6, 2 + (x + z) * 3 + (1 - y) * 9)
+}
+
+/// Internal for focused adversarial tests. Invalid geometry is rejected as a whole before projection.
+@discardableResult
+func drawIsometricShape(_ img: inout [UInt8], boxes: [AABB],
+                        topTile: Int, leftTile: Int, rightTile: Int, tint: Int?,
+                        atlas: BuiltAtlas) -> Bool {
+    guard img.count == 1024, !boxes.isEmpty, boxes.count <= iconMaximumShapeBoxes,
+          let top = tilePixels(topTile, atlas: atlas),
+          let left = tilePixels(leftTile, atlas: atlas),
+          let right = tilePixels(rightTile, atlas: atlas) else { return false }
+    for b in boxes {
+        let values = [b.x0, b.y0, b.z0, b.x1, b.y1, b.z1]
+        guard values.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }),
+              b.x0 < b.x1, b.y0 < b.y1, b.z0 < b.z1 else { return false }
+    }
+
+    var faces: [IconFace] = []
+    faces.reserveCapacity(boxes.count * 3)
+    for (index, b) in boxes.enumerated() {
+        func face(_ xyz: [(Double, Double, Double)], _ pix: [UInt8],
+                  _ uv: [(Double, Double)], _ bright: Double, _ useTint: Bool) {
+            faces.append(IconFace(points: xyz.map(iconProject), tile: pix, uv: uv,
+                                  brightness: bright, tint: useTint,
+                                  depth: xyz.map { $0.0 + $0.1 + $0.2 }.reduce(0, +) / 4,
+                                  order: index))
+        }
+        face([(b.x0,b.y1,b.z0),(b.x1,b.y1,b.z0),(b.x1,b.y1,b.z1),(b.x0,b.y1,b.z1)], top,
+             [(b.x0,b.z0),(b.x1,b.z0),(b.x1,b.z1),(b.x0,b.z1)], 1, true)
+        face([(b.x1,b.y0,b.z0),(b.x1,b.y0,b.z1),(b.x1,b.y1,b.z1),(b.x1,b.y1,b.z0)], right,
+             [(b.z0,1-b.y0),(b.z1,1-b.y0),(b.z1,1-b.y1),(b.z0,1-b.y1)], 0.8, false)
+        face([(b.x0,b.y0,b.z1),(b.x1,b.y0,b.z1),(b.x1,b.y1,b.z1),(b.x0,b.y1,b.z1)], left,
+             [(b.x0,1-b.y0),(b.x1,1-b.y0),(b.x1,1-b.y1),(b.x0,1-b.y1)], 0.65, false)
+    }
+    faces.sort { $0.depth == $1.depth ? $0.order < $1.order : $0.depth < $1.depth }
+
+    func rasterTriangle(_ f: IconFace, _ a: Int, _ b: Int, _ c: Int) {
+        let p0 = f.points[a], p1 = f.points[b], p2 = f.points[c]
+        let area = (p1.0-p0.0)*(p2.1-p0.1) - (p1.1-p0.1)*(p2.0-p0.0)
+        guard abs(area) > 0.000_001 else { return }
+        for y in 0..<16 { for x in 0..<16 {
+            let px = Double(x) + 0.5, py = Double(y) + 0.5
+            let w1 = ((px-p0.0)*(p2.1-p0.1) - (py-p0.1)*(p2.0-p0.0)) / area
+            let w2 = ((p1.0-p0.0)*(py-p0.1) - (p1.1-p0.1)*(px-p0.0)) / area
+            let w0 = 1 - w1 - w2
+            guard w0 >= -0.000_001, w1 >= -0.000_001, w2 >= -0.000_001 else { continue }
+            let u = f.uv[a].0*w0 + f.uv[b].0*w1 + f.uv[c].0*w2
+            let v = f.uv[a].1*w0 + f.uv[b].1*w1 + f.uv[c].1*w2
+            let tx = min(15, max(0, Int(u * 16))), ty = min(15, max(0, Int(v * 16)))
+            let si = (ty * 16 + tx) * 4
+            guard f.tile[si + 3] >= 50 else { continue }
+            var r = Double(f.tile[si]), g = Double(f.tile[si+1]), bl = Double(f.tile[si+2])
+            if f.tint, let tint {
+                r *= Double((tint >> 16) & 255) / 255
+                g *= Double((tint >> 8) & 255) / 255
+                bl *= Double(tint & 255) / 255
+            }
+            let di = (y * 16 + x) * 4
+            img[di] = UInt8(min(255, (r*f.brightness).rounded()))
+            img[di+1] = UInt8(min(255, (g*f.brightness).rounded()))
+            img[di+2] = UInt8(min(255, (bl*f.brightness).rounded()))
+            img[di+3] = f.tile[si+3]
+        }}
+    }
+    for f in faces { rasterTriangle(f, 0, 1, 2); rasterTriangle(f, 0, 2, 3) }
+    return stride(from: 3, to: img.count, by: 4).contains { img[$0] != 0 }
+}
+
 private func tintFor(_ blockId: Int) -> Int? {
     let t = blockDefs[blockId].tint
     if t == 1 { return 0x7cbd4f }
@@ -349,8 +508,8 @@ private func tintFor(_ blockId: Int) -> Int? {
     return nil
 }
 
-private func blitTile(_ img: inout [UInt8], _ tile: Int, _ tint: Int?) {
-    guard let pix = tilePixels(tile) else { return }
+private func blitTile(_ img: inout [UInt8], _ tile: Int, _ tint: Int?, atlas: BuiltAtlas) {
+    guard img.count == 1024, let pix = tilePixels(tile, atlas: atlas) else { return }
     for i in 0..<256 {
         var r = Double(pix[i * 4]), g = Double(pix[i * 4 + 1]), b = Double(pix[i * 4 + 2])
         if let tint {
@@ -362,63 +521,6 @@ private func blitTile(_ img: inout [UInt8], _ tile: Int, _ tint: Int?) {
         img[i * 4 + 1] = UInt8(min(255, g))
         img[i * 4 + 2] = UInt8(min(255, b))
         img[i * 4 + 3] = pix[i * 4 + 3]
-    }
-}
-
-private func drawIsoCube(_ img: inout [UInt8], _ topTile: Int, _ leftTile: Int, _ rightTile: Int, _ tint: Int?) {
-    guard let top = tilePixels(topTile), let left = tilePixels(leftTile), let right = tilePixels(rightTile) else { return }
-    func sample(_ pix: [UInt8], _ u: Double, _ v: Double, _ bright: Double, _ useTint: Bool) -> Int? {
-        let x = min(15, max(0, Int(u * 16)))
-        let y = min(15, max(0, Int(v * 16)))
-        let i = (y * 16 + x) * 4
-        if pix[i + 3] < 50 { return nil }
-        var r = Double(pix[i]), g = Double(pix[i + 1]), b = Double(pix[i + 2])
-        if useTint, let tint {
-            r = r * Double((tint >> 16) & 255) / 255
-            g = g * Double((tint >> 8) & 255) / 255
-            b = b * Double(tint & 255) / 255
-        }
-        let ri = Int((r * bright).rounded()), gi = Int((g * bright).rounded()), bi = Int((b * bright).rounded())
-        return (min(255, ri) << 16) | (min(255, gi) << 8) | min(255, bi)
-    }
-    for sy in 0..<16 {
-        for sx in 0..<16 {
-            let fx = Double(sx) - 8 + 0.5
-            let fy = Double(sy) - 0.5
-            let ty = fy - 4
-            if abs(fx) / 8 + abs(ty) / 4 <= 1 {
-                let u = (fx / 8 + (-ty / 4)) / 2 + 0.5
-                let v = ((-fx / 8) + (-ty / 4)) / 2 + 0.5
-                if let col = sample(top, u, v, 1.0, true) {
-                    put(&img, sx, sy, col)
-                    continue
-                }
-            }
-            if fx >= -8 && fx < 0 {
-                let yTop2 = 8 - (-fx) / 8 * 4
-                let yBot = yTop2 + 8
-                if fy >= yTop2 && fy < yBot {
-                    let u = (fx + 8) / 8
-                    let v = (fy - yTop2) / 8
-                    if let col = sample(left, u, v, 0.65, false) {
-                        put(&img, sx, sy, col)
-                        continue
-                    }
-                }
-            }
-            if fx >= 0 && fx < 8 {
-                let yTop2 = 4 + fx / 8 * 4
-                let yBot = yTop2 + 8
-                if fy >= yTop2 && fy < yBot {
-                    let u = fx / 8
-                    let v = (fy - yTop2) / 8
-                    if let col = sample(right, u, v, 0.8, false) {
-                        put(&img, sx, sy, col)
-                        continue
-                    }
-                }
-            }
-        }
     }
 }
 

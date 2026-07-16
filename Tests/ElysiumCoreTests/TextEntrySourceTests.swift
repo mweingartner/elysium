@@ -1978,6 +1978,25 @@ final class TextEntrySourceTests: XCTestCase {
 }
 
 final class CraftingRecipeTypeaheadTextEntryTests: XCTestCase {
+    private var root: URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+    }
+
+    func testZeroMatchAccessibilityIsStaticNonActionableAndHostUnique() throws {
+        let screens = try String(contentsOf: root.appendingPathComponent("Sources/Elysium/ScreensM.swift"),
+                                 encoding: .utf8)
+
+        for id in ["inventory.recipeNoMatches", "crafting.recipeNoMatches"] {
+            XCTAssertEqual(screens.components(separatedBy: "id: \"\(id)\"").count - 1, 1)
+        }
+        XCTAssertEqual(screens.components(separatedBy: "label: \"No matching recipes\"").count - 1, 2)
+        XCTAssertGreaterThanOrEqual(screens.components(separatedBy: "role: .staticText").count - 1, 2)
+        XCTAssertGreaterThanOrEqual(screens.components(separatedBy: "focusable: false, actionable: false").count - 1, 2)
+        XCTAssertTrue(screens.contains("open && !plans.isEmpty && !typeahead.query.isEmpty"))
+        XCTAssertTrue(screens.contains("typeahead.matchingPlans(in: plans).isEmpty"))
+    }
+
     func testRollingSuffixIsCharacterAndByteBounded() {
         var value = CraftingRecipeTypeahead(maxRows: 8, maxQueryLength: 48)
         value.open(plans: [])

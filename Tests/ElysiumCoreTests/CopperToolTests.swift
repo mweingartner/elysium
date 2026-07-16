@@ -187,12 +187,13 @@ final class CopperToolTests: XCTestCase {
     }
 
     private func withItemIconOverride(_ override: ((String) -> [UInt8]?)?, _ body: () -> Void) {
-        let old = itemIconOverride
-        itemIconOverride = override
-        resetIconCache()
+        let atlas = buildAtlas()
+        let overrides = Dictionary(uniqueKeysWithValues: itemDefs.compactMap { def in
+            override?(def.name).map { (def.name, $0) }
+        })
+        _ = publishIconSourceSnapshot(IconSourceCandidate(atlas: atlas, itemOverrides: overrides)!)
         defer {
-            itemIconOverride = old
-            resetIconCache()
+            _ = publishIconSourceSnapshot(IconSourceCandidate(atlas: atlas)!)
         }
         body()
     }

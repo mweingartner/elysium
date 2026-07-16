@@ -899,20 +899,54 @@ func packEntityImage(_ rels: [String], stack: Bool = false, tints: [Int] = []) -
     return base
 }
 
+private var iconPackPublicationActive = false // main-thread confined
+enum IconPackPublicationBoundary { case staged, retired, uiWorldInstalled, coreCommitted }
+var iconPackPublicationHook: ((IconPackPublicationBoundary) -> Void)?
+var failNextIconPackPublicationBeforeMutation = false
+
 func applyResourcePacks(_ userPacks: [String], game: GameCore, renderer: WorldRenderer, ui: UIManager) {
+    guard Thread.isMainThread, !iconPackPublicationActive else {
+        print("[packs] rejected off-main or re-entrant pack publication")
+        return
+    }
+    iconPackPublicationActive = true
+    defer { iconPackPublicationActive = false }
     let t0 = CFAbsoluteTimeGetCurrent()
     ensureDefaultPack()
     let enabled = withDefaultPack(userPacks)
     if let result = buildPackAtlas(enabledFileNames: enabled) {
-        renderer.installPackAtlas(result)
-        initIcons(result.icon16)
-        setUIAtlas(result.icon16)
-        PACK_TINT_GATE = result.tintGate
         let items = result.itemIcons
-        itemIconOverride = items.isEmpty ? nil : { name in items[name] }
+        guard let candidate = IconSourceCandidate(
+            atlas: result.icon16,
+            itemOverrides: items
+        ), let stagedWorld = renderer.stagePackAtlas(result) else {
+            print("[packs] rejected invalid icon generation; retaining prior pack")
+            return
+        }
         // GUI sheets + bitmap font from the same pack stack
         let all = discoverResourcePacks()
         let packs = enabled.compactMap { name in all.first { $0.fileName == name } }
+        iconPackPublicationHook?(.staged)
+        if failNextIconPackPublicationBeforeMutation {
+            failNextIconPackPublicationBeforeMutation = false
+            print("[packs] injected pre-commit failure; retaining prior pack")
+            return
+        }
+        ui.cv.resetIconSlots()
+        renderer.resetSpriteSlots()
+        iconPackPublicationHook?(.retired)
+        installUIAtlas(result.icon16)
+        renderer.installStagedWorldAtlas(stagedWorld)
+        iconPackPublicationHook?(.uiWorldInstalled)
+        // Core is the final source commit. Until this line, background icon readers remain on A.
+        let generation = publishIconSourceSnapshot(candidate)
+        recordUIIconGeneration(generation)
+        renderer.recordWorldIconGeneration(generation)
+        precondition(currentIconSourceGeneration() == generation &&
+                     currentUIIconGeneration() == generation &&
+                     renderer.currentWorldIconGeneration() == generation)
+        iconPackPublicationHook?(.coreCommitted)
+        PACK_TINT_GATE = result.tintGate
         ACTIVE_PACKS = packs
         renderer.sunTex = packEntityImage(["environment/sun.png"]).flatMap { renderer.makeImageTexture($0) }
         renderer.moonTex = packEntityImage(["environment/moon_phases.png"]).flatMap { renderer.makeImageTexture($0) }
@@ -925,9 +959,32 @@ func applyResourcePacks(_ userPacks: [String], game: GameCore, renderer: WorldRe
                      result.appliedItems, result.animations.count, result.res, pui?.sheets.count ?? 0,
                      (CFAbsoluteTimeGetCurrent() - t0) * 1000))
     } else {
-        renderer.installProceduralAtlas()
+        let atlas = ElysiumCore.buildAtlas()
+        guard let candidate = IconSourceCandidate(atlas: atlas),
+              let stagedWorld = renderer.stageProceduralAtlas(atlas) else {
+            print("[packs] procedural icon generation failed; retaining prior pack")
+            return
+        }
+        iconPackPublicationHook?(.staged)
+        if failNextIconPackPublicationBeforeMutation {
+            failNextIconPackPublicationBeforeMutation = false
+            print("[packs] injected procedural pre-commit failure; retaining prior pack")
+            return
+        }
+        ui.cv.resetIconSlots()
+        renderer.resetSpriteSlots()
+        iconPackPublicationHook?(.retired)
+        installUIAtlas(atlas)
+        renderer.installStagedWorldAtlas(stagedWorld)
+        iconPackPublicationHook?(.uiWorldInstalled)
+        let generation = publishIconSourceSnapshot(candidate)
+        recordUIIconGeneration(generation)
+        renderer.recordWorldIconGeneration(generation)
+        precondition(currentIconSourceGeneration() == generation &&
+                     currentUIIconGeneration() == generation &&
+                     renderer.currentWorldIconGeneration() == generation)
+        iconPackPublicationHook?(.coreCommitted)
         PACK_TINT_GATE = nil
-        itemIconOverride = nil
         ACTIVE_PACKS = []
         renderer.sunTex = nil
         renderer.moonTex = nil
@@ -937,9 +994,6 @@ func applyResourcePacks(_ userPacks: [String], game: GameCore, renderer: WorldRe
         print("[packs] procedural atlas restored")
     }
     fflush(stdout)
-    resetIconCache()
-    ui.cv.resetIconSlots()
-    renderer.resetSpriteSlots()
     renderer.entityRenderer.resetSkins()   // entity textures re-resolve vs the new stack
     game.remeshAllLoaded()   // vertex tints depend on the gate — rebuild meshes
 }
