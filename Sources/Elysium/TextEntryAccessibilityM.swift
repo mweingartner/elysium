@@ -43,6 +43,7 @@ final class TextEntryAccessibilityElement: NSAccessibilityElement {
         setAccessibilityFocused(false)
         setAccessibilityEnabled(false)
         setAccessibilityLabel(nil)
+        setAccessibilityIdentifier(nil)
         setAccessibilityValue(nil)
         setAccessibilityHelp(nil)
         setAccessibilityNumberOfCharacters(0)
@@ -75,6 +76,7 @@ final class TextEntryAccessibilityElement: NSAccessibilityElement {
             setAccessibilitySubrole(nil)
         }
         setAccessibilityElement(true)
+        setAccessibilityIdentifier(stableID)
         setAccessibilityParent(parent)
         setAccessibilityFrame(frame)
         setAccessibilityLabel(descriptor.label)

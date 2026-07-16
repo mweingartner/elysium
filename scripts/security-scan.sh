@@ -5,66 +5,24 @@ if rg -n 'event\.eventNumber|NSEvent[^\n]*\.eventNumber' Sources/Elysium/AppInpu
     echo "security scan failed: keyboard router reads NSEvent.eventNumber" >&2
     exit 1
 fi
-for required in scripts/package-app.sh scripts/appkit-text-entry-integration.sh \
+for required in scripts/pipeline.sh scripts/release-source-snapshot.py \
+                scripts/package-app.sh scripts/appkit-text-entry-integration.sh \
                 Tests/ElysiumAppKitIntegration/Driver.swift \
-                scripts/installed-signoff-receipt.swift scripts/installed-signoff-receipt.sh \
-                scripts/run-release-gate-tool.sh \
-                scripts/prepush-release-build.sh scripts/build-automated-gate-evidence.swift \
-                scripts/installed-signoff-content-v1.txt \
-                scripts/installed-signoff-checklist-v1.json \
-                scripts/observe-installed-signoff.sh scripts/observe-installed-signoff.swift \
-                scripts/designer-attest-installed-signoff.sh \
-                scripts/designer-attest-installed-signoff.swift \
-                scripts/finalize-installed-signoff.sh \
-                scripts/resume-installed-signoff-commit.sh \
-                .githooks/pre-commit .githooks/post-commit .githooks/pre-push; do
+                scripts/prepush-release-build.sh .githooks/pre-commit .githooks/pre-push; do
     [ -f "$required" ] || { echo "security scan failed: missing $required" >&2; exit 1; }
 done
-if grep -F 'case "prepare"' scripts/installed-signoff-receipt.swift >/dev/null; then
-    echo "security scan failed: caller-evidence prepare command returned" >&2
-    exit 1
-fi
-if grep -E 'automated-gates\.json|PACKAGE_MANIFEST|run_and_record_gate' scripts/pipeline.sh >/dev/null; then
-    echo "security scan failed: pipeline regained caller-authored gate evidence" >&2
-    exit 1
-fi
-DISPATCHER_TRANSITIONS="$(grep -Fc 'gate.transition(' Sources/ElysiumReleaseGate/ReleaseGate.swift)"
-[ "$DISPATCHER_TRANSITIONS" -eq 7 ] || {
-    echo "security scan failed: dispatcher must own exactly seven transition call sites" >&2
-    exit 1
-}
-for adapter in scripts/installed-signoff-receipt.swift \
-               scripts/observe-installed-signoff.swift \
-               scripts/designer-attest-installed-signoff.swift \
-               Tests/ElysiumReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift; do
-    if grep -E '\.(create|restart|transition|invalidate)\(' "$adapter" >/dev/null; then
-        echo "security scan failed: receipt mutation escaped dispatcher in $adapter" >&2
-        exit 1
-    fi
-done
-if grep -E 'fixture-bootstrap|fixturePayload|ReleaseGatePayload\(' \
-    Tests/ElysiumReleaseGateTests/Fixtures/ReleaseGateWorkflowProbe/main.swift >/dev/null; then
-    echo "security scan failed: workflow probe regained payload/bootstrap authority" >&2
-    exit 1
-fi
 PRODUCTION_RELEASE_SURFACES=(
-    Sources/ElysiumReleaseGate/ReleaseGate.swift
-    scripts/installed-signoff-receipt.swift scripts/run-release-gate-tool.sh
-    scripts/installed-signoff-receipt.sh scripts/observe-installed-signoff.sh
-    scripts/designer-attest-installed-signoff.sh scripts/finalize-installed-signoff.sh
-    scripts/resume-installed-signoff-commit.sh .githooks/pre-commit
-    .githooks/post-commit .githooks/pre-push
+    scripts/pipeline.sh scripts/release-source-snapshot.py scripts/package-app.sh
+    scripts/appkit-text-entry-integration.sh .githooks/pre-commit .githooks/pre-push
 )
-if grep -E '(ELYSIUM_RELEASE_GATE|--(fixture|scenario|fault|alternate-executable|caller-evidence)|case "(fixture|scenario|fault))' \
+if grep -E '(--(fixture|scenario|fault|alternate-executable|caller-evidence)|case "(fixture|scenario|fault))' \
     "${PRODUCTION_RELEASE_SURFACES[@]}" >/dev/null; then
     echo "security scan failed: production release surface exposes a fixture/fault selector" >&2
     exit 1
 fi
 EXECUTABLE_RELEASE_SURFACES=(
-    scripts/installed-signoff-receipt.sh scripts/run-release-gate-tool.sh
-    scripts/observe-installed-signoff.sh scripts/designer-attest-installed-signoff.sh
-    scripts/finalize-installed-signoff.sh scripts/resume-installed-signoff-commit.sh
-    .githooks/pre-commit .githooks/post-commit .githooks/pre-push
+    scripts/pipeline.sh scripts/release-source-snapshot.py scripts/package-app.sh
+    scripts/appkit-text-entry-integration.sh .githooks/pre-commit .githooks/pre-push
 )
 CURRENT_UID="$(id -u)"
 for surface in "${EXECUTABLE_RELEASE_SURFACES[@]}"; do
@@ -78,16 +36,33 @@ done
 [ "$(git config --get core.hooksPath || true)" = ".githooks" ] || {
     echo "security scan failed: core.hooksPath is not .githooks" >&2; exit 1;
 }
-if grep -E 'NSPasteboard|pasteboard|postKey\(9|maskCommand' \
-    Tests/ElysiumAppKitIntegration/Driver.swift >/dev/null; then
-    echo "security scan failed: unattended AppKit driver accesses Paste/general pasteboard" >&2
-    exit 1
-fi
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 fail() { echo "security scan failed: $*" >&2; exit 1; }
+
+DRIVER='Tests/ElysiumAppKitIntegration/Driver.swift'
+if grep -Eiq 'pasteboard|postKey\(9' "$DRIVER"; then
+    fail "unattended AppKit driver accesses Paste/general pasteboard"
+fi
+if grep -En '(NotificationCenter[^\n]*\.post|notificationCenter\.post|\.post\([[:space:]]*name:[^\n]*(didBecomeActive|didResignActive)|NSApplication(DidBecomeActive|DidResignActive)Notification)' \
+    "$DRIVER" >/dev/null; then
+    fail "AppKit lifecycle evidence can be posted synthetically"
+fi
+if grep -En '(recordLocal|recordLocalResign)\([[:space:]]*Notification\(' "$DRIVER" >/dev/null; then
+    fail "AppKit lifecycle observer callback can be invoked with constructed evidence"
+fi
+awk '
+  index($0, ".maskCommand") { modifiers++; modifierLine=NR }
+  /^[[:space:]]*try[[:space:]]+postKeyOnce\("title\.activate\.modified",[[:space:]]*36,[[:space:]]*flags:[[:space:]]*\.maskCommand,[[:space:]]*$/ { probes++; probeLine=NR }
+  /^[[:space:]]*gateStage[[:space:]]*=[[:space:]]*"title-navigation"[[:space:]]*$/ { titles++; titleLine=NR }
+  /^[[:space:]]*gateStage[[:space:]]*=[[:space:]]*"field-publication"[[:space:]]*$/ { fields++; fieldLine=NR }
+  END {
+    valid = modifiers == 1 && probes == 1 && titles == 1 && fields == 1 &&
+            titleLine < probeLine && probeLine < fieldLine && modifierLine < fieldLine
+    exit(valid ? 0 : 1)
+  }
+' "$DRIVER" || fail "AppKit Command-key rejection probe contract changed"
 
 echo "==> security: source scans"
 
@@ -159,55 +134,44 @@ echo "==> security: executable text adapter behavior"
 swift test --filter 'ElysiumTextInputTests|ElysiumAppSupportTests|SignCommitTokenTests' >/dev/null \
     || fail "executable text adapter or Sign transaction behavior failed"
 echo "==> security: bounded local release safety"
-if grep -E '(ProcessInfo\.processInfo\.environment|getenv\()[^\n]*(FIXTURE|SCENARIO|FAULT|EXECUTABLE)' \
-    scripts/installed-signoff-receipt.swift Sources/ElysiumReleaseGate/ReleaseGate.swift >/dev/null; then
-    fail "environment-selected release implementation found"
-fi
-swift build --target ElysiumReleaseGate >/dev/null \
-    || fail "ElysiumReleaseGate target compile failed"
-PREFLIGHT_LOG="$(mktemp /tmp/elysium-release-preflight.XXXXXX)"
-RELEASE_FOCUSED_LOG="$(mktemp /tmp/elysium-release-focused.XXXXXX)"
-KEYCHAIN_FOCUSED_LOG="$(mktemp /tmp/elysium-keychain-focused.XXXXXX)"
-chmod 600 "$PREFLIGHT_LOG" "$RELEASE_FOCUSED_LOG" "$KEYCHAIN_FOCUSED_LOG"
-cleanup_release_logs() {
-    rm -f "$PREFLIGHT_LOG" "$RELEASE_FOCUSED_LOG" "$KEYCHAIN_FOCUSED_LOG"
-}
-trap cleanup_release_logs EXIT INT TERM
-scripts/installed-signoff-receipt.sh preflight >"$PREFLIGHT_LOG" 2>&1 \
-    || fail "installed sign-off preflight failed"
-[ "$(wc -c < "$PREFLIGHT_LOG" | tr -d ' ')" -le 65536 ] \
-    || fail "installed sign-off preflight output exceeded cap"
-grep -Fx 'Preflight complete. Tracked and untracked content was enumerated safely.' \
-    "$PREFLIGHT_LOG" >/dev/null || fail "installed sign-off preflight output malformed"
-if grep -E '([0-9a-f]{64}|/Users/|/tmp/|Keychain|CDHash|sequence=|receipt)' "$PREFLIGHT_LOG" >/dev/null; then
-    fail "installed sign-off preflight exposed private state"
-fi
-run_focused_release_suite() {
-    local filter="$1" expected_suite="$2" log="$3"
-    swift test --filter "$filter" >"$log" 2>&1 \
-        || fail "$expected_suite focused tests failed"
-    [ "$(wc -c < "$log" | tr -d ' ')" -le 16777216 ] \
-        || fail "$expected_suite focused output exceeded cap"
-    grep -Eq 'Executed [1-9][0-9]* tests?, with 0 failures' "$log" \
-        || fail "$expected_suite focused tests did not execute"
-    ! grep -Eiq 'skipped|Executed 0 tests|with [1-9][0-9]* failures' "$log" \
-        || fail "$expected_suite focused tests skipped or failed"
-}
-run_focused_release_suite 'ElysiumReleaseGateTests\.ReleaseGateTests/' \
-    'ReleaseGateTests' "$RELEASE_FOCUSED_LOG"
-run_focused_release_suite \
-    'ElysiumReleaseGateTests\.KeychainReceiptStateStoreIntegrationTests/' \
-    'KeychainReceiptStateStoreIntegrationTests' "$KEYCHAIN_FOCUSED_LOG"
-cleanup_release_logs
-trap - EXIT
+scripts/release-source-snapshot.py "$ROOT" | \
+    grep -Eq '^sha256=[0-9a-f]{64} count=[1-9][0-9]* bytes=[1-9][0-9]*$' \
+    || fail "source snapshot contract failed"
+for stale in installed-signoff observe-installed designer-attest-installed \
+             finalize-installed resume-installed KeychainReceipt ReleaseGatePayload \
+             PENDING_INSTALLED_SIGNOFF; do
+    if rg -n "$stale" README.md CONTRIBUTING.md ARCHITECTURE.md SECURITY.md AGENTS.md \
+        Package.swift Sources Tests scripts .githooks --glob '!security-scan.sh' >/dev/null; then
+        fail "retired interactive release authority remains: $stale"
+    fi
+done
 echo 'Bounded local safety checks: passed'
 
 DRIVER_CHECK="$(mktemp /tmp/elysium-appkit-driver-check.XXXXXX)"
-trap 'rm -f "$DRIVER_CHECK"' EXIT
-xcrun swiftc -O -framework AppKit -framework ApplicationServices -framework CryptoKit \
-    -framework SystemConfiguration Tests/ElysiumAppKitIntegration/Driver.swift \
+COORDINATOR_CHECK="$(mktemp /tmp/elysium-appkit-coordinator-check.XXXXXX)"
+PROTOCOL_CHECK="$(mktemp /tmp/elysium-appkit-protocol-check.XXXXXX)"
+APPKIT_SOURCE_ROOT="$(mktemp -d /tmp/elysium-appkit-source.XXXXXX)"
+mkdir "$APPKIT_SOURCE_ROOT/driver" "$APPKIT_SOURCE_ROOT/coordinator" "$APPKIT_SOURCE_ROOT/protocol"
+ln -s "$ROOT/Tests/ElysiumAppKitIntegration/Driver.swift" "$APPKIT_SOURCE_ROOT/driver/main.swift"
+ln -s "$ROOT/Tests/ElysiumAppKitIntegration/Coordinator.swift" "$APPKIT_SOURCE_ROOT/coordinator/main.swift"
+ln -s "$ROOT/Tests/ElysiumAppKitIntegration/CoordinatorProtocolSecurityHarness.swift" "$APPKIT_SOURCE_ROOT/protocol/main.swift"
+trap 'rm -f "$DRIVER_CHECK" "$COORDINATOR_CHECK" "$PROTOCOL_CHECK"; rm -rf "$APPKIT_SOURCE_ROOT"' EXIT
+xcrun swiftc -O -warnings-as-errors -framework AppKit -framework ApplicationServices \
+    -framework CryptoKit -framework Security -framework SystemConfiguration \
+    Tests/ElysiumAppKitIntegration/CoordinatorProtocol.swift \
+    "$APPKIT_SOURCE_ROOT/driver/main.swift" \
     -o "$DRIVER_CHECK" || fail "AppKit driver compile failed"
-rm -f "$DRIVER_CHECK"
+xcrun swiftc -O -warnings-as-errors -framework AppKit -framework CryptoKit -framework Security \
+    Tests/ElysiumAppKitIntegration/CoordinatorProtocol.swift \
+    "$APPKIT_SOURCE_ROOT/coordinator/main.swift" \
+    -o "$COORDINATOR_CHECK" || fail "AppKit Coordinator compile failed"
+xcrun swiftc -O -warnings-as-errors -framework CryptoKit \
+    Tests/ElysiumAppKitIntegration/CoordinatorProtocol.swift \
+    "$APPKIT_SOURCE_ROOT/protocol/main.swift" \
+    -o "$PROTOCOL_CHECK" || fail "Coordinator protocol security harness compile failed"
+"$PROTOCOL_CHECK" || fail "Coordinator protocol security harness failed"
+rm -f "$DRIVER_CHECK" "$COORDINATOR_CHECK" "$PROTOCOL_CHECK"
+rm -rf "$APPKIT_SOURCE_ROOT"
 trap - EXIT
 
 swift scripts/sqlite-boundary-scan.swift --root "$ROOT" --self-test
@@ -228,8 +192,7 @@ if [ -n "$UNAPPROVED_URL_REFS" ]; then
     fail "URL literal found outside approved local Ollama endpoint"
 fi
 
-if grep -RInE 'Process\(|NSTask|system\(|popen\(|dlopen\(|dlsym\(' Sources \
-    --exclude-dir=ElysiumReleaseGate; then
+if grep -RInE 'Process\(|NSTask|system\(|popen\(|dlopen\(|dlsym\(' Sources; then
     fail "dynamic process/loading API reference found in Swift source"
 fi
 

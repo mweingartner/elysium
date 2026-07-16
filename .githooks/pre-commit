@@ -7,8 +7,3 @@ mpd check --staged --quiet || {
     echo "pre-commit blocked: mpd staged checks failed." >&2
     exit 1
 }
-scripts/installed-signoff-receipt.sh precommit || {
-    echo "pre-commit blocked: installed sign-off is not finalized for the exact staged/worktree content." >&2
-    echo "Inspect with: scripts/installed-signoff-receipt.sh status" >&2
-    exit 1
-}

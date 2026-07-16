@@ -2,8 +2,6 @@
 .swiftpm/
 dist/
 .DS_Store
-/installed-signoff*.receipt
-/installed-signoff-evidence/
 *.zip
 !packaging/*.zip
 .claude/

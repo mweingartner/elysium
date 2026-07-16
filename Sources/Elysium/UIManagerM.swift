@@ -496,7 +496,7 @@ final class UIManager {
     let cv: UICanvas
     var packUI: PackUI?          // pack GUI sheets (nil = procedural UI)
     var titlePhoto = false       // renderer has a title-bg photo loaded
-    var titleLogo = false        // renderer draws the wordmark texture
+    var titleLogo = false        // renderer has a hero-embedded or fallback wordmark
     var scale = 3.0
     var width = 0.0    // GUI units
     var height = 0.0
@@ -783,6 +783,13 @@ final class UIManager {
               !screen.textAccessibilityDescriptors(self, game).isEmpty else { return }
         commitTextAccessibility(screen: screen, game: game)
         NSAccessibility.post(element: view, notification: .layoutChanged)
+        let focused = screen.textAccessibilityDescriptors(self, game).filter {
+            $0.focused && $0.enabled && $0.focusable
+        }
+        if focused.count == 1 {
+            _ = publishOrdinaryAccessibilityFocus(
+                screen: screen, game: game, descriptorID: focused[0].id)
+        }
         if let announcement = screen.consumeTextAccessibilityStatusAnnouncement() {
             NSAccessibility.post(
                 element: view, notification: .announcementRequested,
@@ -797,6 +804,36 @@ final class UIManager {
             return
         }
         textAccessibilityDidCommit?(screen, screen.textAccessibilityDescriptors(self, game))
+    }
+
+    @discardableResult
+    func publishOrdinaryAccessibilityFocus(
+        screen: Screen, game: GameCore, descriptorID: String
+    ) -> Bool {
+        elysiumMainActorSync {
+            guard current() === screen, screen.textPresentationGeneration != 0,
+                  let view = textInputView, NSApp.isActive,
+                  view.window?.isKeyWindow == true, view.window?.firstResponder === view else {
+                return false
+            }
+            let generation = screen.textPresentationGeneration
+            let matches = screen.textAccessibilityDescriptors(self, game).filter {
+                $0.id == descriptorID && $0.enabled && $0.focusable && $0.focused
+            }
+            guard matches.count == 1 else { return false }
+            commitTextAccessibility(screen: screen, game: game)
+            guard current() === screen, screen.textPresentationGeneration == generation,
+                  let element = view.textAccessibilityElement(id: descriptorID),
+                  !element.retired, element.originScreen === screen,
+                  element.presentationGeneration == generation,
+                  element.isAccessibilityFocused() else { return false }
+            NSAccessibility.post(element: element, notification: .focusedUIElementChanged)
+            let post = screen.textAccessibilityDescriptors(self, game).filter {
+                $0.id == descriptorID && $0.enabled && $0.focusable && $0.focused
+            }
+            return current() === screen && screen.textPresentationGeneration == generation &&
+                post.count == 1 && !element.retired && element.isAccessibilityFocused()
+        }
     }
 
     /// Retires every previously published canvas AX child before a screen

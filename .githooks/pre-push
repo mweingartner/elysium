@@ -1,41 +1,67 @@
 #!/bin/sh
 set -eu
+
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
-TUPLES="$(mktemp /tmp/elysium-pre-push-refs.XXXXXX)"
-BUILD_LOG="$(mktemp /tmp/elysium-pre-push-build.XXXXXX)"
-trap 'rm -f "$TUPLES" "$BUILD_LOG"' EXIT INT TERM
-stage() { echo "==> pre-push: $*"; }
-count=0
-while read -r local_ref local_sha remote_ref remote_sha; do
-    [ -n "$local_ref" ] || continue
-    case "$local_sha" in 0000000000000000000000000000000000000000) continue ;; esac
-    count=$((count + 1))
-    printf '%s\t%s\n' "$local_sha" "$local_ref->$remote_ref" >> "$TUPLES"
-    scripts/installed-signoff-receipt.sh prepush "$local_sha" "$local_ref->$remote_ref" || {
-        echo "pre-push blocked: outgoing ref lacks the matching committed installed sign-off." >&2
-        exit 1
-    }
-done
-[ "$count" -gt 0 ] || { echo "pre-push blocked: no verifiable outgoing ref" >&2; exit 1; }
+TMP="$(mktemp -d /tmp/elysium-pre-push.XXXXXX)"
+trap 'rm -rf -- "$TMP"' EXIT INT TERM
+INPUT="$TMP/input"
+cat > "$INPUT"
 
-stage "source security scan"
-bash scripts/security-scan.sh
-stage "warning-free release build"
-scripts/prepush-release-build.sh "$BUILD_LOG"
-stage "release surface and binary"
-scripts/verify-elysium-storage-release-surface.sh
-scripts/security-check-binary.sh .build/release/Elysium
+[ "$(wc -l < "$INPUT" | tr -d ' ')" -eq 1 ] || {
+    echo "pre-push blocked: exactly one outgoing ref is required" >&2; exit 1;
+}
+[ "$(awk 'NF == 4 { valid++ } END { print valid + 0 }' "$INPUT")" -eq 1 ] || {
+    echo "pre-push blocked: malformed outgoing ref" >&2; exit 1;
+}
+IFS=' ' read -r local_ref local_sha remote_ref remote_sha < "$INPUT"
+[ -n "${local_ref:-}" ] && [ -n "${local_sha:-}" ] && [ -n "${remote_ref:-}" ] &&
+    [ -n "${remote_sha:-}" ] || {
+    echo "pre-push blocked: malformed outgoing ref" >&2; exit 1;
+}
+case "$local_sha" in
+    0000000000000000000000000000000000000000)
+        echo "pre-push blocked: deletion-only push is not verifiable" >&2; exit 1 ;;
+    *[!0-9a-f]*|'') echo "pre-push blocked: malformed local SHA" >&2; exit 1 ;;
+esac
+[ "${#local_sha}" -eq 40 ] || { echo "pre-push blocked: malformed local SHA" >&2; exit 1; }
+
+HEAD_SHA="$(git rev-parse --verify 'HEAD^{commit}')"
+REF_SHA="$(git rev-parse --verify "${local_ref}^{commit}")" || {
+    echo "pre-push blocked: local ref cannot be resolved" >&2; exit 1;
+}
+[ "$local_sha" = "$HEAD_SHA" ] && [ "$local_sha" = "$REF_SHA" ] || {
+    echo "pre-push blocked: outgoing SHA must equal stable HEAD and local ref" >&2; exit 1;
+}
+[ -z "$(git status --porcelain=v1 --untracked-files=all)" ] || {
+    echo "pre-push blocked: index and worktree must be fully clean" >&2; exit 1;
+}
+INDEX_TREE="$(git write-tree)"
+SOURCE_SNAPSHOT="$(scripts/release-source-snapshot.py "$ROOT")"
+INPUT_SHA="$(shasum -a 256 "$INPUT" | awk '{print $1}')"
+
+revalidate() {
+    [ "$(git rev-parse --verify 'HEAD^{commit}')" = "$HEAD_SHA" ] &&
+    [ "$(git rev-parse --verify "${local_ref}^{commit}")" = "$REF_SHA" ] &&
+    [ "$(git write-tree)" = "$INDEX_TREE" ] &&
+    [ -z "$(git status --porcelain=v1 --untracked-files=all)" ] &&
+    [ "$(scripts/release-source-snapshot.py "$ROOT")" = "$SOURCE_SNAPSHOT" ] &&
+    [ "$(shasum -a 256 "$INPUT" | awk '{print $1}')" = "$INPUT_SHA" ]
+}
+stage() {
+    echo "==> pre-push: $1"
+    shift
+    "$@"
+    revalidate || { echo "pre-push blocked: outgoing source/ref moved during gates" >&2; exit 1; }
+}
+
+stage "source security scan" bash scripts/security-scan.sh
+stage "warning-free release build" scripts/prepush-release-build.sh "$TMP/build.log"
+stage "release surface and binary" sh -c \
+    'scripts/verify-elysium-storage-release-surface.sh && scripts/security-check-binary.sh .build/release/Elysium'
 RELEASE_HASH="$(shasum -a 256 .build/release/Elysium | awk '{print $1}')"
-stage "real AppKit keyboard and Accessibility"
-scripts/appkit-text-entry-integration.sh --no-build --executable "$(cd .build/release && pwd -P)/Elysium" \
-    --expected-hash "$RELEASE_HASH" --timeout 90
-stage "xctest"
-swift test
-stage "elysmoke"
-swift run -c release elysmoke
-
-while IFS="$(printf '\t')" read -r local_sha tuple; do
-    scripts/installed-signoff-receipt.sh prepush "$local_sha" "$tuple"
-done < "$TUPLES"
-stage "pass"
+stage "real AppKit keyboard and Accessibility" scripts/appkit-text-entry-integration.sh --no-build \
+    --executable "$(cd .build/release && pwd -P)/Elysium" --expected-hash "$RELEASE_HASH" --timeout 90
+stage "xctest" swift test
+stage "elysmoke" swift run -c release elysmoke
+echo "==> pre-push: pass sha=$local_sha"

@@ -146,7 +146,8 @@ final class HostBridge: GameHost {
         app?.gameView.releaseMouse()
     }
     func openTitleScreen() {
-        ui.titlePhoto = app?.renderer.titleBgTex != nil; ui.titleLogo = app?.renderer.titleLogoTex != nil
+        ui.titlePhoto = app?.renderer.titleBgTex != nil
+        ui.titleLogo = app?.renderer.titleBgTex != nil || app?.renderer.titleLogoTex != nil
         elysiumMainActorSync { ui.open(TitleScreen(), game) }
         app?.gameView.releaseMouse()
     }
@@ -567,25 +568,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         window.contentView = gameView
         window.acceptsMouseMovedEvents = true
         window.delegate = self
-        // invisible until the fullscreen transition lands — the user never sees
-        // the windowed popup or the zoom animation, just a fade-in (the reveal
-        // happens in windowDidEnterFullScreen, or after the retry loop gives up)
-        window.alphaValue = 0
-        if NSApp.isActive {
-            window.makeKeyAndOrderFront(nil)
-            window.makeFirstResponder(gameView)
-        } else {
-            // Ordering an inactive launch is truthful: the window is present but does not claim
-            // key/responder state until AppKit confirms that Elysium became active.
-            window.orderFront(nil)
-        }
-        // launch straight into fullscreen (F11 toggles back). AppKit silently
-        // drops toggleFullScreen during the launch transaction, so retry until
-        // the window actually transitions.
+        // The user may enter fullscreen with F11 after launch. Publishing a stable ordinary
+        // window avoids racing AppKit's activation transaction with a launch-time mode change.
         window.collectionBehavior.insert(.fullScreenPrimary)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.enterFullscreenAtLaunch()
-        }
+        window.collectionBehavior.insert(.moveToActiveSpace)
 
         audio.initEngine()
         audio.applyVolumes(game.settings.volumes)
@@ -623,7 +609,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         // (withDefaultPack dedupes it to the base slot).
         applyResourcePacks(game.settings.resourcePacks ?? [], game: game, renderer: renderer, ui: ui)
 
-        ui.titlePhoto = renderer.titleBgTex != nil ; ui.titleLogo = renderer.titleLogoTex != nil
+        ui.titlePhoto = renderer.titleBgTex != nil
+        ui.titleLogo = renderer.titleBgTex != nil || renderer.titleLogoTex != nil
         ui.open(TitleScreen(), game)
         // test hook: jump straight to the world list (UI testing)
         if ProcessInfo.processInfo.environment["ELYSIUM_WORLDS"] != nil {
@@ -652,6 +639,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
                 booth = PhotoBooth(game: game, renderer: renderer)
             }
         }
+        revealLaunchWindowed()
         startLANAutomationTimerIfNeeded()
     }
 
@@ -701,48 +689,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         pasteText(sender)
     }
 
-    /// AppKit refuses toggleFullScreen while the app is still activating
-    /// (windowDidFailToEnterFullScreen fires and the window reverts), so the
-    /// launch toggle re-checks until the transition actually completes.
-    func windowDidEnterFullScreen(_ notification: Notification) {
-        guard let enteredWindow = notification.object as? NSWindow,
-              enteredWindow === window else { return }
-        fsEntered = true
-        NSAnimationContext.runAnimationGroup({
-            $0.duration = 0.3
-            enteredWindow.animator().alphaValue = 1
-        }, completionHandler: { [weak self, weak enteredWindow] in
-            MainActor.assumeIsolated {
-                guard let self, let enteredWindow, self.window === enteredWindow,
-                      self.fsEntered, enteredWindow.styleMask.contains(.fullScreen),
-                      enteredWindow.alphaValue == 1 else { return }
-                let token = self.launchActivationAtReveal.token(
-                    kind: .fullscreen, window: enteredWindow,
-                    generation: self.launchRevealGeneration)
-                self.launchActivationAtReveal.consume(
-                    token, window: enteredWindow, generation: self.launchRevealGeneration,
-                    fullscreenEntered: true)
-            }
-        })
+    @MainActor private func revealLaunchWindowed() {
+        guard let window else { return }
+        window.alphaValue = 1
+        if NSApp.isActive {
+            window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(gameView)
+        } else {
+            // Keep the inactive reveal non-key so the fail-closed activation kernel can
+            // validate it and spend its single request. orderFrontRegardless() may create
+            // an inactive-but-key window, which the kernel intentionally rejects.
+            window.orderFront(nil)
+        }
+        completeLaunchWindowedReveal(attempt: 0)
     }
-    private var fsEntered = false
-    private var fsChecks = 0
-    @MainActor private func enterFullscreenAtLaunch() {
-        guard let w = window, !fsEntered else { return }
-        if fsChecks >= 5 {
-            w.alphaValue = 1   // fullscreen never engaged: show windowed, don't stay invisible
-            let token = launchActivationAtReveal.token(
-                kind: .windowedFallback, window: w, generation: launchRevealGeneration)
-            launchActivationAtReveal.consume(
-                token, window: w, generation: launchRevealGeneration,
-                fullscreenEntered: false)
+
+    /// Ordering an inactive AppKit window is asynchronous. Do not consume the
+    /// one-shot activation token until the ordinary window is visibly valid;
+    /// an early fail-closed consume would leave a healthy window inactive.
+    @MainActor private func completeLaunchWindowedReveal(attempt: Int) {
+        guard let window, attempt < 40 else { return }
+        let frame = window.frame
+        let finitePositive = [frame.origin.x, frame.origin.y, frame.width, frame.height]
+            .map(Double.init).allSatisfy(\.isFinite) && frame.width > 0 && frame.height > 0
+        let ready = window.alphaValue == 1 && window.isVisible && window.level == .normal
+            && !window.ignoresMouseEvents && finitePositive
+            && window.screen.map { $0.frame.contains(frame) } == true
+            && !window.styleMask.contains(.fullScreen)
+            && (NSApp.isActive || !window.isKeyWindow)
+        guard ready else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.completeLaunchWindowedReveal(attempt: attempt + 1)
+            }
             return
         }
-        fsChecks += 1
-        if !w.styleMask.contains(.fullScreen) { w.toggleFullScreen(nil) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            self?.enterFullscreenAtLaunch()
-        }
+        let token = launchActivationAtReveal.token(
+            kind: .windowedFallback, window: window, generation: launchRevealGeneration)
+        launchActivationAtReveal.consume(
+            token, window: window, generation: launchRevealGeneration,
+            fullscreenEntered: false)
     }
 
     /// Cmd-Tab away: release every held key (keyUps go to the other app),
@@ -789,7 +774,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     /// maxFps >= 250 = unlimited: MTKView's display link can't exceed the panel
     /// refresh, so drive draw() from a runloop timer with vsync off instead
     private func applyFpsMode() {
-        let unlimited = game.settings.maxFps >= 250
+        // Never busy-loop title and menu surfaces. A fresh profile defaults to the unlimited
+        // gameplay setting; applying its 0.1 ms timer before a world exists starves AppKit and
+        // withdraws the otherwise valid Accessibility tree.
+        let unlimited = game.hasWorld() && game.settings.maxFps >= 250
         if unlimited != uncappedMode {
             uncappedMode = unlimited
             (gameView.layer as? CAMetalLayer)?.displaySyncEnabled = !unlimited
@@ -806,7 +794,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
             }
         }
         if !unlimited {
-            gameView.preferredFramesPerSecond = max(30, game.settings.maxFps)
+            gameView.preferredFramesPerSecond = game.hasWorld()
+                ? max(30, game.settings.maxFps)
+                : 60
         }
     }
 
@@ -854,6 +844,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     }
 
     func draw(in view: MTKView) {
+        // CAMetalLayer.nextDrawable may block the main thread before AppKit has attached the
+        // launch window to a visible display surface. Keep the display link harmless until
+        // AppKit grants drawable authority; this also preserves Accessibility publication.
+        guard NSApp.isActive, window.isVisible,
+              window.occlusionState.contains(.visible) else { return }
         rpgControllerAdapter?.synchronizeContext()
         let now = CACurrentMediaTime()
         let dt = (now - lastFrame) * 1000

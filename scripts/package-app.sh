@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 EXECUTABLE=""
 OUTPUT=""
-MANIFEST=""
+MANIFEST_STDOUT=false
 EXPECTED_HASH=""
 CAPTURE_DIR=""
 
@@ -135,14 +135,14 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --executable) EXECUTABLE="$2"; shift 2 ;;
         --output) OUTPUT="$2"; shift 2 ;;
-        --manifest) MANIFEST="$2"; shift 2 ;;
+        --manifest-stdout) MANIFEST_STDOUT=true; shift ;;
         --expected-hash) EXPECTED_HASH="$2"; shift 2 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
 
-[ -n "$EXECUTABLE" ] && [ -n "$OUTPUT" ] && [ -n "$MANIFEST" ] || \
-    die "usage: package-app.sh --executable PATH --output APP --manifest PATH [--expected-hash SHA256]"
+[ -n "$EXECUTABLE" ] && [ -n "$OUTPUT" ] && [ "$MANIFEST_STDOUT" = true ] || \
+    die "usage: package-app.sh --executable PATH --output APP --manifest-stdout [--expected-hash SHA256]"
 [ -f "$EXECUTABLE" ] && [ ! -L "$EXECUTABLE" ] || die "release executable must be a regular non-symlink file"
 EXECUTABLE="$(canonical_file "$EXECUTABLE")" || die "cannot resolve release executable"
 INPUT_HASH="$(sha256 "$EXECUTABLE")"
@@ -193,20 +193,24 @@ IFS= read -r REQUIREMENT < "$REQUIREMENT_FILE" || die "missing designated requir
 rm -rf -- "$CAPTURE_DIR"
 CAPTURE_DIR=""
 
-umask 077
-TMP_MANIFEST="${MANIFEST}.tmp.$$"
-{
-    printf 'release_path=%s\n' "$EXECUTABLE"
-    printf 'bundle_path=%s\n' "$OUTPUT_CANON"
-    printf 'executable_path=%s\n' "$STAGED_CANON"
-    printf 'pre_sign_input_sha256=%s\n' "$INPUT_HASH"
-    printf 'pre_sign_staged_sha256=%s\n' "$STAGED_PRE_HASH"
-    printf 'post_sign_executable_sha256=%s\n' "$POST_HASH"
-    printf 'bundle_id=%s\n' "$BUNDLE_ID"
-    printf 'cdhash=%s\n' "$CDHASH"
-    printf 'designated_requirement=%s\n' "$REQUIREMENT"
-    printf 'sealed_resources=true\n'
-} > "$TMP_MANIFEST"
-mv "$TMP_MANIFEST" "$MANIFEST"
-chmod 600 "$MANIFEST"
-printf 'packaged_sha256=%s cdhash=%s\n' "$POST_HASH" "$CDHASH"
+# The package producer's stdout is a closed value channel. This audited emitter is the
+# only writer: it bounds and validates the already-composed canonical bytes, handles
+# EINTR/short writes, rejects zero/errors, and closes stdout exactly once.
+MANIFEST_DATA="$(printf 'release_path=%s\nbundle_path=%s\nexecutable_path=%s\npre_sign_input_sha256=%s\npre_sign_staged_sha256=%s\npost_sign_executable_sha256=%s\nbundle_id=%s\ncdhash=%s\ndesignated_requirement=%s\nsealed_resources=true\n' \
+    "$EXECUTABLE" "$OUTPUT_CANON" "$STAGED_CANON" "$INPUT_HASH" "$STAGED_PRE_HASH" \
+    "$POST_HASH" "$BUNDLE_ID" "$CDHASH" "$REQUIREMENT")"
+MANIFEST_DATA="${MANIFEST_DATA}"$'\n'
+export MANIFEST_DATA
+/usr/bin/perl -e 'use strict; use warnings; use bytes; use POSIX ();
+my $data = $ENV{"MANIFEST_DATA"};
+defined($data) && length($data) >= 1 && length($data) <= 65536 && index($data, "\0") < 0
+    or POSIX::_exit(125);
+my $offset = 0;
+while ($offset < length($data)) {
+    my $written = syswrite(STDOUT, $data, length($data) - $offset, $offset);
+    if (!defined($written)) { next if $!{EINTR}; close(STDOUT); POSIX::_exit(126); }
+    if ($written == 0) { close(STDOUT); POSIX::_exit(126); }
+    $offset += $written;
+}
+close(STDOUT) or POSIX::_exit(126);
+POSIX::_exit(0);'

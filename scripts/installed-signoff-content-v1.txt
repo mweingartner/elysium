@@ -1,6 +1,0 @@
-Elysium exhaustive repository content digest v1
-
-Union: git ls-files -z plus git ls-files --others --exclude-standard -z.
-Includes every tracked and nonignored untracked regular file and executable mode.
-Rejects symlinks, gitlinks, conflict stages, duplicate/noncanonical paths, and unsupported modes.
-Excludes only .git, .build, .swiftpm, dist, ignored paths, and external private receipt/evidence.

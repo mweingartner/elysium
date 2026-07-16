@@ -1186,7 +1186,11 @@ final class WorldRenderer {
             enc.setFragmentSamplerState(linearSampler, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         }
-        if let logo = titleLogoTex, let target = rpd.colorAttachments[0].texture {
+        // title-bg.png is the canonical branded hero and already includes the
+        // Elysium wordmark. The standalone logo remains a decode-failure
+        // fallback only; never composite both title treatments.
+        if titleBgTex == nil, let logo = titleLogoTex,
+           let target = rpd.colorAttachments[0].texture {
             // mirror the UI auto scale so the wordmark sits where the text logo did
             let pw = Double(target.width), ph = Double(target.height)
             let scale = max(1.0, min((pw / 380).rounded(.down), (ph / 240).rounded(.down)))

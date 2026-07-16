@@ -1233,8 +1233,11 @@ final class SavedWorldBatchDeleteTests: XCTestCase {
             let endRange = try XCTUnwrap(tail.range(of: end))
             return String(tail[..<endRange.lowerBound])
         }
+        let worldSelect = try boundedSlice(
+            menus, from: "final class WorldSelectScreen: Screen",
+            to: "final class WorldCreateScreen: Screen")
         let pointerAction = try boundedSlice(
-            menus, from: "override func onPointerDown", to: "override func onKeyEvent")
+            worldSelect, from: "override func onPointerDown", to: "override func onKeyEvent")
         let consumeOffset = try XCTUnwrap(pointerAction.range(
             of: "openingPointerEvents.consume")).lowerBound
         XCTAssertLessThan(consumeOffset, try XCTUnwrap(pointerAction.range(
@@ -1244,7 +1247,7 @@ final class SavedWorldBatchDeleteTests: XCTestCase {
         XCTAssertTrue(pointerAction.contains("commitSelectionMutation(ui: ui, game: game)"))
 
         let selectionCommit = try boundedSlice(
-            menus, from: "private func commitSelectionMutation(", to: "private var isReady")
+            worldSelect, from: "private func commitSelectionMutation(", to: "private var isReady")
         XCTAssertTrue(selectionCommit.contains("let previous = selection"))
         XCTAssertTrue(selectionCommit.contains(
             "guard selection != previous else { return false }"))
@@ -1252,7 +1255,7 @@ final class SavedWorldBatchDeleteTests: XCTestCase {
             "ui.renewTextAccessibilityPresentation(screen: self, game: game)").count - 1, 1)
 
         let controls = try boundedSlice(
-            menus, from: "private func installControls(",
+            worldSelect, from: "private func installControls(",
             to: "/// The sole user-selection commit boundary")
         XCTAssertGreaterThanOrEqual(controls.components(separatedBy:
             "[weak self, weak ui, weak game]").count - 1, 2)
@@ -1260,23 +1263,61 @@ final class SavedWorldBatchDeleteTests: XCTestCase {
             "commitSelectionMutation(ui: ui, game: game)").count - 1, 2)
 
         let keyboardAction = try boundedSlice(
-            menus, from: "override func onKeyEvent", to: "override func onClose")
+            worldSelect, from: "override func onKeyEvent", to: "override func onClose")
         XCTAssertGreaterThanOrEqual(keyboardAction.components(separatedBy:
             "commitSelectionMutation").count - 1, 4)
 
+        let modalPointer = try boundedSlice(
+            worldSelect, from: "private func handleModalPointer(",
+            to: "private func handleModalKey(")
+        XCTAssertEqual(modalPointer.components(separatedBy:
+            "cancelDeleteModal(ui: ui, game: game)").count - 1, 2)
+        let modalKey = try boundedSlice(
+            worldSelect, from: "private func handleModalKey(",
+            to: "private func cancelDeleteModal(")
+        XCTAssertEqual(modalKey.components(separatedBy:
+            "cancelDeleteModal(ui: ui, game: game)").count - 1, 2)
+        let cancelBoundary = try boundedSlice(
+            worldSelect, from: "private func cancelDeleteModal(",
+            to: "private func retryDeletePrecheck(")
+        XCTAssertTrue(cancelBoundary.contains("keyboardFocus = 3"))
+        XCTAssertTrue(cancelBoundary.contains("releaseMaintenanceLease()"))
+        XCTAssertTrue(cancelBoundary.contains(
+            "publishPhase(.ready, ui: ui, game: game)"))
+        XCTAssertTrue(cancelBoundary.contains("setControlsEnabled(true)"))
+        XCTAssertFalse(cancelBoundary.contains("selection ="))
+        XCTAssertFalse(cancelBoundary.contains("selection."))
+
         let axFocus = try boundedSlice(
-            menus, from: "override func focusTextAccessibilityElement",
+            worldSelect, from: "override func focusTextAccessibilityElement",
             to: "override func performTextAccessibilityAction")
         XCTAssertTrue(axFocus.contains("$0.focus(id: row.storedID)"))
         XCTAssertFalse(axFocus.contains("selection.select("))
         XCTAssertTrue(axFocus.contains("commitSelectionMutation("))
 
         let axAction = try boundedSlice(
-            menus, from: "override func performTextAccessibilityAction",
+            worldSelect, from: "override func performTextAccessibilityAction",
             to: "private func worldAccessibilityID")
         XCTAssertGreaterThanOrEqual(axAction.components(separatedBy:
             "commitSelectionMutation(ui: ui, game: game)").count - 1, 2)
         XCTAssertTrue(axAction.contains("id == accessibility.bulkActionID"))
+        XCTAssertEqual(axAction.components(separatedBy:
+            "cancelDeleteModal(ui: ui, game: game)").count - 1, 2)
+
+        let readyDescriptors = try boundedSlice(
+            worldSelect, from: "let accessibility = SavedWorldSelectionAccessibilitySnapshot",
+            to: "override func consumeTextAccessibilityStatusAnnouncement")
+        for projection in [
+            "focused: keyboardFocus == 0",
+            "focused: keyboardFocus == 1 && selection.focusedID == row.storedID",
+            "focused: keyboardFocus == 2",
+            "focused: keyboardFocus == 3",
+            "focused: keyboardFocus == 4",
+            "focused: keyboardFocus == 5",
+        ] {
+            XCTAssertTrue(readyDescriptors.contains(projection),
+                          "ready AX descriptors must project unique focus via \(projection)")
+        }
         XCTAssertTrue(bridge.contains("elements.forEach { $0.retire() }"))
         XCTAssertTrue(bridge.contains("!element.retired"))
         XCTAssertTrue(bridge.contains("elements.contains(where: { $0 === element })"))

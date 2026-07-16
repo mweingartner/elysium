@@ -20,13 +20,6 @@ let package = Package(
             path: "Sources/ElysiumAppSupport",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
-        // nonshipping release/receipt authority shared by the CLI adapter and executable tests
-        .target(
-            name: "ElysiumReleaseGate",
-            path: "Sources/ElysiumReleaseGate",
-            swiftSettings: [.swiftLanguageMode(.v5)],
-            linkerSettings: [.linkedFramework("Security")]
-        ),
         // the persistence boundary: typed rows/facades only; no engine dependency
         .target(
             name: "ElysiumStorage",
@@ -86,14 +79,6 @@ let package = Package(
             dependencies: ["ElysiumAppSupport"],
             path: "Tests/ElysiumAppSupportTests",
             swiftSettings: [.swiftLanguageMode(.v5)]
-        ),
-        .testTarget(
-            name: "ElysiumReleaseGateTests",
-            dependencies: ["ElysiumReleaseGate"],
-            path: "Tests/ElysiumReleaseGateTests",
-            exclude: ["Fixtures"],
-            swiftSettings: [.swiftLanguageMode(.v5)],
-            linkerSettings: [.linkedFramework("Security")]
         ),
     ]
 )

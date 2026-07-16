@@ -52,35 +52,25 @@ coherent host façade; no dormant test façade widens that boundary.
 
 Local verification scripts:
 
-- `./scripts/security-scan.sh` checks source for unapproved network/process/dynamic-loading APIs and obvious secret material. Its bounded local-release checks reject production fixture/fault selectors, verify release entry-point ownership and modes, compile and preflight the production receipt tool, and run nonzero ReleaseGate and Keychain regression suites. It also runs the lexical SQLite boundary scanner, compiling its bypass fixture, rejecting SQLite/SQL/storage-capability escapes, comparing the SwiftPM source inventory and dependency direction, and byte-pinning ElysiumStorage's package/SPI symbol graph plus the exact two-file Core capability inventory. Network APIs are allowed only in the loopback Ollama client and the LAN transport adapter.
+- `./scripts/security-scan.sh` checks source for unapproved network/process/dynamic-loading APIs and obvious secret material. Its bounded local-release checks reject production fixture/fault selectors, verify release entry-point ownership and modes, validate the exhaustive source-snapshot contract, and reject retired release-authority surfaces. It also runs the lexical SQLite boundary scanner, compiling its bypass fixture, rejecting SQLite/SQL/storage-capability escapes, comparing the SwiftPM source inventory and dependency direction, and byte-pinning ElysiumStorage's package/SPI symbol graph plus the exact two-file Core capability inventory. Network APIs are allowed only in the loopback Ollama client and the LAN transport adapter.
 - `./scripts/verify-pack-assets.sh` verifies the bundled Faithful archive, including the `assets/minecraft/textures/` namespace Elysium uses for its default graphics.
 - `./scripts/security-check-binary.sh /Applications/Elysium.app` verifies the app signature, bundle metadata, linked library paths, and network-related binary symbols/strings. It allows only the local Ollama URL, requires LAN privacy/Bonjour declarations before accepting Network.framework symbols, and rejects other URL literals.
-- `./scripts/pipeline.sh` runs the full architecture, security, asset-verification, build, binary-security, test, deploy, and installed-app verification pipeline.
-
-### Optional non-authoritative release diagnostics
-
-`./scripts/release-gate-adversarial-test.sh` is an optional local diagnostic under the reviewed
-accidental/stale-regression threat model. Every visible line identifies itself as
-`NON-AUTHORITATIVE DIAGNOSTIC`. It is not invoked or parsed by the security scan, hooks, pipeline,
-receipt, packaging, deployment, observer, Designer, finalize, or resume paths. Running, skipping,
-passing, or failing it does not authorize or block release, installed sign-off, deployment, commit,
-or push. Required failures from the bounded scan, build, tests, installed proof, signature, receipt,
-pipeline, or hooks remain blocking.
+- `./scripts/pipeline.sh` runs the full source-security, warning-free build, release-surface/binary, XCTest, golden, package, packaged-AppKit, install, and installed identity/codesign pipeline.
 
 The unattended AppKit gate is deliberately fail closed. It requires the current unlocked console user plus
 Accessibility/Input Monitoring trust, a regular hash-pinned release executable, strict ad-hoc
 signing and resource sealing, and exact launched bundle/PID identity. It has zero general-pasteboard
 or Paste activity. Deadlines, signal cleanup, redacted diagnostics, and release rehashing prevent an
 adapter-only or stale installed binary from satisfying it. Production Paste adapter tests cover
-readiness/owner/bounds/race behavior; real menu wiring is proven only by the user's deliberate fixed-
-sentinel Paste during TTY installed sign-off, without tooling reading or restoring clipboard bytes.
+readiness/owner/bounds/race behavior.
 
-Pipeline installation ends pending rather than successful. Monotonic Keychain authority outside the
-repository binds exhaustive committable content, actual private gate logs/status/counts, per-item
-installed screenshots/AX/command records, a distinct Designer attestation, release/package/install
-signing/hash/CDHash, and exact Git transitions. The JSON cache is never transition input. Finalizer
-and executable hooks revalidate those inputs with no environment, CI, or `--no-verify` workflow
-bypass. Missing/tampered/expired/replayed state or changed content/evidence/artifacts fails closed.
+The pipeline binds all tracked and nonignored-untracked regular inputs at entry and revalidates them
+after every stage. It rejects persistent additions, removals, replacements, mode changes, unsafe
+links/types, and boundary-visible races. The current console user and workspace are trusted: an
+exact same-user mutate-and-restore wholly between boundary scans and malicious local build plugins
+are explicitly out of scope. The pipeline therefore does not claim concurrent-tamper resistance.
+Executable SHA continuity remains mandatory from warning-free build through signed package,
+packaged AppKit execution, installation, and final independent identity/signature verification.
 
 ## Reporting a vulnerability
 

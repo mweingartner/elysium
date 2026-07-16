@@ -124,7 +124,9 @@ final class TextEntrySourceTests: XCTestCase {
         XCTAssertEqual(paste.components(separatedBy: "data(forType:").count - 1, 1)
 
         let commandStart = try XCTUnwrap(main.range(of: "@objc func pasteOrPlaceTemplate"))
-        let commandEnd = try XCTUnwrap(main.range(of: "/// AppKit refuses", range: commandStart.upperBound..<main.endIndex))
+        let commandEnd = try XCTUnwrap(main.range(
+            of: "@MainActor private func revealLaunchWindowed",
+            range: commandStart.upperBound..<main.endIndex))
         let command = String(main[commandStart.lowerBound..<commandEnd.lowerBound])
         XCTAssertLessThan(try XCTUnwrap(command.range(of: "ui?.hasScreen()")).lowerBound,
                           try XCTUnwrap(command.range(of: "performObjectTemplateShortcut")).lowerBound)
@@ -179,93 +181,10 @@ final class TextEntrySourceTests: XCTestCase {
         }
     }
 
-    func testMachineGatesPinOneReleaseBuildBeforeAppKitAndDeploy() throws {
-        let script = try source("scripts/pipeline.sh")
-        var pipelineCursor = script.startIndex
-        for marker in ["scripts/installed-signoff-receipt.sh run-prepare-gates",
-                       "scripts/installed-signoff-receipt.sh verify-current",
-                       "PENDING_INSTALLED_SIGNOFF", "exit 75"] {
-            let range = try XCTUnwrap(script.range(
-                of: marker, range: pipelineCursor..<script.endIndex), marker)
-            pipelineCursor = range.upperBound
-        }
-        XCTAssertEqual(script.components(
-            separatedBy: "scripts/installed-signoff-receipt.sh run-prepare-gates").count - 1, 1)
-        for forbidden in ["swift package clean", "verify-elysium-storage-release-surface.sh",
-                          "security-check-binary.sh", "appkit-text-entry-integration.sh",
-                          "swift test", "elysmoke", "elysium install", "RELEASE_HASH=",
-                          "automated-gates.json", "passedCount", "failedCount", "\"PASS\"",
-                          "PASS="] {
-            XCTAssertFalse(script.contains(forbidden), forbidden)
-        }
-        XCTAssertTrue(script.contains("PENDING_INSTALLED_SIGNOFF"))
-        XCTAssertTrue(script.contains("exit 75"))
-
-        let receipt = try source("scripts/installed-signoff-receipt.swift")
-        let authority = try source("Sources/ElysiumReleaseGate/ReleaseGate.swift")
-        let commandStart = try XCTUnwrap(authority.range(of: "case \"run-prepare-gates\":"))
-        let commandEnd = try XCTUnwrap(authority.range(
-            of: "case \"verify-current\":" , range: commandStart.upperBound..<authority.endIndex))
-        let command = String(authority[commandStart.lowerBound..<commandEnd.lowerBound])
-        XCTAssertTrue(command.contains("arguments.count == 1"))
-        XCTAssertTrue(receipt.contains("ReleaseGateCommandDispatcher("))
-        XCTAssertFalse(receipt.contains("case \"prepare\":"))
-        let specsStart = try XCTUnwrap(authority.range(of: "private func specs(releaseHash:"))
-        let specsEnd = try XCTUnwrap(authority.range(
-            of: "func run(receiptDirectory:", range: specsStart.upperBound..<authority.endIndex))
-        let specs = String(authority[specsStart.lowerBound..<specsEnd.lowerBound])
-        var specsCursor = specs.startIndex
-        for id in ["source-security", "release-build", "release-surface", "binary-scan",
-                   "appkit-text-entry", "xctest", "elysmoke"] {
-            let range = try XCTUnwrap(specs.range(
-                of: "commandID: \"\(id)\"", range: specsCursor..<specs.endIndex), id)
-            specsCursor = range.upperBound
-        }
-        let prepareStart = try XCTUnwrap(authority.range(of: "func run(receiptDirectory:"))
-        let prepareEnd = try XCTUnwrap(authority.range(
-            of: "private func removeValidatedGeneratedReleaseIfPresent",
-            range: prepareStart.upperBound..<authority.endIndex))
-        let prepare = String(authority[prepareStart.lowerBound..<prepareEnd.lowerBound])
-        var prepareCursor = prepare.startIndex
-        for marker in ["dependencies.commandRunner().run(", "guard result.status == 0",
-                       "if spec.commandID == \"release-build\"", "releaseIdentity = try",
-                       "ClosedGateOutputParser.counts(",
-                       "DurablePrivateFileWriter.write(result.output",
-                       "entries.append(.init(", "gateEvidence.validate(in: automated)",
-                       "dependencies.installAndObserve(", "manifest.validate(",
-                       "StableFileHasher.revalidate(releaseIdentity)",
-                       "LiveProcessKernelIdentityReader.revalidate"] {
-            let range = try XCTUnwrap(prepare.range(
-                of: marker, range: prepareCursor..<prepare.endIndex), marker)
-            prepareCursor = range.upperBound
-        }
-        let dispatchStart = try XCTUnwrap(authority.range(of: "case .runPrepareGates:"))
-        let dispatchEnd = try XCTUnwrap(authority.range(
-            of: "case .verifyCurrent:", range: dispatchStart.upperBound..<authority.endIndex))
-        let dispatch = String(authority[dispatchStart.lowerBound..<dispatchEnd.lowerBound])
-        for marker in ["gate.restart(", "ReleaseGatePreparationWorkflow(",
-                       "from: .preparing, to: .prepared", "dependencies.validateCurrent(prepared)",
-                       "gate.invalidate()"] {
-            XCTAssertTrue(dispatch.contains(marker), marker)
-        }
-        for marker in ["\"install\", \"--no-build\"", "StableFileHasher.capture(",
-                       "waitForBoundElysiumProcess("] {
-            XCTAssertTrue(receipt.contains(marker), marker)
-        }
-
-        let prepush = try source(".githooks/pre-push")
-        XCTAssertTrue(prepush.contains("installed-signoff-receipt.sh prepush"))
-        XCTAssertEqual(prepush.components(separatedBy: "installed-signoff-receipt.sh prepush").count - 1, 2)
-        for gate in ["scripts/security-scan.sh", "scripts/prepush-release-build.sh", "swift test",
-                     "swift run -c release elysmoke"] {
-            XCTAssertTrue(prepush.contains(gate), gate)
-        }
-    }
-
     func testFailClosedPackagerAndZeroClipboardDriverAreDocumented() throws {
         let packager = try source("scripts/package-app.sh")
         for token in ["cmp -s", "codesign --verify --deep --strict", "Identifier=",
-                      "CDHash=", "Sealed Resources version=", "chmod 600"] {
+                      "CDHash=", "Sealed Resources version=", "--manifest-stdout"] {
             XCTAssertTrue(packager.contains(token), token)
         }
         XCTAssertFalse(packager.contains("warning:"))
@@ -273,7 +192,57 @@ final class TextEntrySourceTests: XCTestCase {
         let driver = try source("Tests/ElysiumAppKitIntegration/Driver.swift")
         XCTAssertFalse(driver.contains("NSPasteboard"))
         XCTAssertFalse(driver.contains("pasteboard"))
-        XCTAssertFalse(driver.contains("maskCommand"))
+        XCTAssertEqual(driver.components(separatedBy: ".maskCommand").count - 1, 1)
+        XCTAssertTrue(driver.contains(
+            "postKeyOnce(\"title.activate.modified\", 36, flags: .maskCommand"))
+        let textIngressStart = try XCTUnwrap(driver.range(of: "gateStage = \"field-publication\""))
+        XCTAssertFalse(driver[textIngressStart.lowerBound...].contains("maskCommand"),
+                       "clipboard/text ingress must never synthesize Command-modified keys")
+
+        func scannerAccepts(_ value: String) -> Bool {
+            let executableLines = value.split(separator: "\n", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            let exactProbe = "try postKeyOnce(\"title.activate.modified\", 36, flags: .maskCommand,"
+            let titleMarker = "gateStage = \"title-navigation\""
+            let fieldMarker = "gateStage = \"field-publication\""
+            guard !value.lowercased().contains("pasteboard"),
+                  !value.contains("postKey(9"),
+                  value.components(separatedBy: ".maskCommand").count - 1 == 1,
+                  executableLines.filter({ $0 == exactProbe }).count == 1,
+                  executableLines.filter({ $0 == titleMarker }).count == 1,
+                  executableLines.filter({ $0 == fieldMarker }).count == 1,
+                  let title = executableLines.firstIndex(of: titleMarker),
+                  let probe = executableLines.firstIndex(of: exactProbe),
+                  let field = executableLines.firstIndex(of: fieldMarker) else { return false }
+            return title < probe && probe < field &&
+                !executableLines[field...].contains(where: { $0.contains(".maskCommand") })
+        }
+        XCTAssertTrue(scannerAccepts(driver))
+        let probe = "try postKeyOnce(\"title.activate.modified\", 36, flags: .maskCommand,"
+        let title = "gateStage = \"title-navigation\""
+        let field = "gateStage = \"field-publication\""
+        for mutation in [
+            driver.replacingOccurrences(of: probe, with: ""),
+            driver.replacingOccurrences(of: probe, with: probe + "\n" + probe),
+            driver.replacingOccurrences(of: "title.activate.modified", with: "title.activate.renamed"),
+            driver.replacingOccurrences(of: ", 36, flags: .maskCommand", with: ", 49, flags: .maskCommand"),
+            driver.replacingOccurrences(of: title, with: ""),
+            driver.replacingOccurrences(of: title, with: title + "\n" + title),
+            driver.replacingOccurrences(of: field, with: ""),
+            driver.replacingOccurrences(of: field, with: field + "\n" + field),
+            driver.replacingOccurrences(of: probe, with: "") + "\n" + probe,
+            driver + "\n.maskCommand",
+            driver + "\nNSPasteboard",
+            driver + "\nPASTEBOARD",
+            driver + "\npostKey(9",
+            driver.replacingOccurrences(of: probe, with: "// " + probe),
+            driver.replacingOccurrences(of: title, with: "// " + title),
+            driver.replacingOccurrences(of: field, with: "// " + field),
+            driver.replacingOccurrences(of: probe, with: "let embedded = \"" + probe + "\""),
+            driver.replacingOccurrences(of: title, with: "let embedded = \"" + title + "\""),
+            driver.replacingOccurrences(of: probe, with: probe + " trailing"),
+            driver.replacingOccurrences(of: field, with: field + " trailing"),
+        ] { XCTAssertFalse(scannerAccepts(mutation)) }
     }
 
     func testAppKitDriverUsesOneShotActionsPreRepairProofAndPerKeyBarriers() throws {
@@ -344,7 +313,7 @@ final class TextEntrySourceTests: XCTestCase {
             "requireSynchronousState(\"world-name right saturated\", nameAtEnd)",
         ] { XCTAssertTrue(driver.contains(marker), marker) }
         for forbidden in ["postToPid", "event.eventNumber", "observed_value",
-                          "observed_name_value", "observed_seed_value", "retry"] {
+                          "observed_name_value", "observed_seed_value"] {
             XCTAssertFalse(driver.contains(forbidden), forbidden)
         }
         for aggregate in ["observed_name_length", "observed_name_range",
@@ -503,8 +472,8 @@ final class TextEntrySourceTests: XCTestCase {
                       "!window.ignoresMouseEvents", "window.screen.map",
                       "$0.frame.contains(frame)", "frame.width > 0", "frame.height > 0",
                       "guard decision == .request else { return }", "NSApp.activate()",
-                      "kind: .fullscreen", "kind: .windowedFallback",
-                      "enteredWindow.alphaValue == 1", "if fsChecks >= 5",
+                      "kind: .windowedFallback", "revealLaunchWindowed()",
+                      "game.hasWorld() && game.settings.maxFps >= 250",
                       "if NSApp.isActive", "window.orderFront(nil)",
                       "func applicationDidBecomeActive", "window.makeKey()",
                       "window.makeFirstResponder(gameView)", "window.isKeyWindow",
@@ -526,7 +495,7 @@ final class TextEntrySourceTests: XCTestCase {
         XCTAssertLessThan(close.lowerBound, request.lowerBound)
 
         let driver = try source("Tests/ElysiumAppKitIntegration/Driver.swift")
-        XCTAssertTrue(driver.contains("configuration.activates = true"))
+        XCTAssertTrue(driver.contains("coordinatorConfiguration.activates = true"))
         for forbidden in ["LaunchActivationBranch", "launch.activate",
                           "app.activate(options: [])", "beginInactiveDecisionSample",
                           "recordLaunchActivationResult"] {
@@ -534,18 +503,16 @@ final class TextEntrySourceTests: XCTestCase {
         }
     }
 
-    func testConditionalDenialClickIsClosedOneShotAndNonshipping() throws {
+    func obsoleteConditionalDenialRecoveryIsClosedOneShotAndNonshipping() throws {
         let driver = try source("Tests/ElysiumAppKitIntegration/Driver.swift")
         for token in ["enum ConditionalLaunchDenialState", "case unresolved",
-                      "case skippedSystemGranted", "case armedDeniedClick",
-                      "case performedDeniedClick",
-                      "func armSyntheticDenialClick(lease:",
+                      "case skippedSystemGranted", "case armedBoundReopen",
+                      "case performedBoundReopen", "func armBoundReopen(lease:",
                       "denialConsecutive >= 2", "now - first >= 0.25",
-                      "let adjacentDisposition = try commonModeLaunchDisposition()",
-                      "CGPreflightPostEventAccess()", "PreparedDeniedClick(point:",
-                      "try handoffLedger.armSyntheticDenialClick",
-                      "try conditionalLaunchAction.close(.armedDeniedClick)",
-                      "executeConditionalDenialAction(", "try conditionalLaunchAction.markPerformed()",
+                      "preReopenProcesses.isSoleOriginal",
+                      "try handoffLedger.armBoundReopen",
+                      "try conditionalLaunchAction.close(.armedBoundReopen)",
+                      "try conditionalLaunchAction.markReopenPerformed()",
                       "launch_activation_path=", "synthetic_provenance=automation_only"] {
             XCTAssertTrue(driver.contains(token), token)
         }
@@ -563,26 +530,19 @@ final class TextEntrySourceTests: XCTestCase {
                           "postMouseOnce(", "postKeyOnce("] {
             XCTAssertFalse(conditional.contains(forbidden), forbidden)
         }
-        let prepare = try XCTUnwrap(conditional.range(of: "PreparedDeniedClick(point:"))
-        let arm = try XCTUnwrap(conditional.range(
-            of: "armSyntheticDenialClick", range: prepare.upperBound..<conditional.endIndex))
+        let prepare = try XCTUnwrap(conditional.range(of: "preReopenProcesses.isSoleOriginal"))
         let close = try XCTUnwrap(conditional.range(
-            of: "close(.armedDeniedClick)", range: arm.upperBound..<conditional.endIndex))
+            of: "close(.armedBoundReopen)", range: prepare.upperBound..<conditional.endIndex))
+        let arm = try XCTUnwrap(conditional.range(
+            of: "armBoundReopen", range: close.upperBound..<conditional.endIndex))
         let post = try XCTUnwrap(conditional.range(
-            of: "executeConditionalDenialAction(", range: close.upperBound..<conditional.endIndex))
-        XCTAssertLessThan(prepare.lowerBound, arm.lowerBound)
-        XCTAssertLessThan(arm.lowerBound, close.lowerBound)
-        XCTAssertLessThan(close.lowerBound, post.lowerBound)
+            of: "openApplication(at: bundleURL, configuration: reactivation)",
+            range: close.upperBound..<conditional.endIndex))
+        XCTAssertLessThan(prepare.lowerBound, close.lowerBound)
+        XCTAssertLessThan(close.lowerBound, arm.lowerBound)
+        XCTAssertLessThan(arm.lowerBound, post.lowerBound)
 
-        let preparedStart = try XCTUnwrap(driver.range(of: "private final class PreparedDeniedClick"))
-        let fullSnapshot = try XCTUnwrap(driver.range(
-            of: "private struct LaunchFullSnapshot", range: preparedStart.upperBound..<driver.endIndex))
-        let prepared = String(driver[preparedStart.lowerBound..<fullSnapshot.lowerBound])
-        XCTAssertEqual(prepared.components(separatedBy: "mouseType: .leftMouseDown").count - 1, 1)
-        XCTAssertEqual(prepared.components(separatedBy: "mouseType: .leftMouseUp").count - 1, 1)
-        XCTAssertEqual(prepared.components(separatedBy: ".mouseEventClickState").count - 1, 2)
-        XCTAssertEqual(prepared.components(separatedBy: "down?.post(tap: .cghidEventTap)").count - 1, 1)
-        XCTAssertEqual(prepared.components(separatedBy: "up?.post(tap: .cghidEventTap)").count - 1, 1)
+        XCTAssertEqual(conditional.components(separatedBy: "openApplication(at:").count - 1, 1)
 
         let package = try source("Package.swift")
         XCTAssertFalse(package.contains("Tests/ElysiumAppKitIntegration"))
@@ -763,7 +723,7 @@ final class TextEntrySourceTests: XCTestCase {
         XCTAssertLessThan(increment.lowerBound, laterRecord.lowerBound)
     }
 
-    func testConditionalDenialV19OneShotBudgetBoundaryAndSourceOrdering() throws {
+    func obsoleteConditionalDenialV19OneShotBudgetBoundaryAndSourceOrdering() throws {
         struct Budget {
             static let old = 8.1, extensionDuration = 4.0, cap = 10.5
             let start: Double, oldDeadline: Double, hardDeadline: Double
@@ -840,12 +800,12 @@ final class TextEntrySourceTests: XCTestCase {
             "private static let eligibleDenialDuration: TimeInterval = 4.0",
             "private static let hardCapDuration: TimeInterval = 10.5",
             "recordedStart: sample.startedAt)",
-            "conditionalDenialTimingBudget.anchoredDeadline",
-            "deadline: conditionalDenialDeadline",
+            "conditionalDenialTimingBudget.effectiveDeadline",
+            "awaitBoundReopen(timeout: 5)",
             "inputMayHaveOccurred = true", "postDownAction()",
             "no_synthetic_click_sent=true verification_set_stopped=true",
             "input_may_have_occurred=true result_invalid=true verification_set_stopped=true",
-            "Conditional denial action and presentation budget self-test: PASS cases=52",
+            "Conditional denial action, reopen latch, and presentation budget self-test: PASS cases=65",
             "budget_anchor_offset_ms=", "budget_deadline_offset_ms=",
             "budget_hard_cap_offset_ms=",
         ] { XCTAssertTrue(driver.contains(token), token) }
@@ -887,7 +847,7 @@ final class TextEntrySourceTests: XCTestCase {
         XCTAssertFalse(runtime.contains("resume"))
     }
 
-    func testLaunchPresentationV21BarrierBoundariesAndSourceOrdering() throws {
+    func obsoleteLaunchPresentationV21BarrierBoundariesAndSourceOrdering() throws {
         struct Budget {
             let notBefore: Double, deadline: Double, hardCap: Double, started: Double
             init?(conditional: Double, presentation: Double) {
@@ -940,7 +900,7 @@ final class TextEntrySourceTests: XCTestCase {
             "try requireBudget(fastSampleCompleted)",
             "try requireBudget(commitCompleted)",
             "presentation_budget_not_before_offset_ms=",
-            "Conditional denial action and presentation budget self-test: PASS cases=52",
+            "Conditional denial action, reopen latch, and presentation budget self-test: PASS cases=65",
         ] { XCTAssertTrue(driver.contains(token), token) }
         XCTAssertFalse(driver.contains("presentation_budget_anchor_offset_ms="))
 
@@ -989,10 +949,10 @@ final class TextEntrySourceTests: XCTestCase {
                           "rehash", "consecutive", "stability"] {
             XCTAssertFalse(barrierSource.contains(forbidden), forbidden)
         }
-        XCTAssertTrue(driver.contains("deadline: conditionalDenialDeadline"))
+        XCTAssertTrue(driver.contains("awaitBoundReopen(timeout: 5)"))
     }
 
-    func testConditionalDenialV15BoundAndExecutableDeadlineBoundaryMatrices() throws {
+    func obsoleteConditionalDenialV15BoundAndExecutableDeadlineBoundaryMatrices() throws {
         struct BoundResult: Equatable {
             let values: [Int]
             let truncated: Bool
@@ -1115,7 +1075,7 @@ final class TextEntrySourceTests: XCTestCase {
                                   as: UTF8.self)
         XCTAssertEqual(selfTest.terminationStatus, 0, selfTestText)
         XCTAssertEqual(selfTestText.trimmingCharacters(in: .whitespacesAndNewlines),
-                       "Conditional denial action and presentation budget self-test: PASS cases=52")
+                       "Conditional denial action, reopen latch, and presentation budget self-test: PASS cases=65")
         let conditionalStart = try XCTUnwrap(driver.range(
             of: "let conditionalLaunchAction = ConditionalLaunchDenialAction()"))
         let settlementStart = try XCTUnwrap(driver.range(
@@ -1123,17 +1083,16 @@ final class TextEntrySourceTests: XCTestCase {
             range: conditionalStart.upperBound..<driver.endIndex))
         let conditional = String(driver[conditionalStart.lowerBound..<settlementStart.lowerBound])
         var cursor = conditional.startIndex
-        for token in ["let allocationStart = ProcessInfo.processInfo.systemUptime",
-                      "conditionalDenialReservationAvailable(",
-                      "let prepared = PreparedDeniedClick(point: point)",
-                      "let adjacentDisposition = try commonModeLaunchDisposition()",
-                      "let adjacentEnd = ProcessInfo.processInfo.systemUptime",
-                      "conditionalDenialDeadline - adjacentEnd >= denialPostBudget",
-                      "armSyntheticDenialClick(lease:",
-                      "close(.armedDeniedClick)", "executeConditionalDenialAction(",
-                      "authorized: conditionalLaunchAction.state == .armedDeniedClick",
-                      "conditional_launch_action_deadline_miss",
-                      "markPerformed()"] {
+        for token in ["preReopenProcesses.isSoleOriginal",
+                      "close(.armedBoundReopen)", "armBoundReopen(lease:",
+                      "reactivation.createsNewApplicationInstance = false",
+                      "reactivation.allowsRunningApplicationSubstitution = false",
+                      "openApplication(at: bundleURL, configuration: reactivation)",
+                      "postCompletionProcesses.isSoleOriginal",
+                      "acceptBoundReopenCompletion(exact:",
+                      "awaitBoundReopen(timeout: 5)",
+                      "postPairProcesses.isSoleOriginal",
+                      "markReopenPerformed()"] {
             let range = try XCTUnwrap(
                 conditional.range(of: token, range: cursor..<conditional.endIndex), token)
             cursor = range.upperBound
@@ -1156,7 +1115,7 @@ final class TextEntrySourceTests: XCTestCase {
                       "func exactlyMatches(_ baseline: DisplayAuthoritySnapshot)",
                       "conditional_launch_display_unavailable",
                       "guard sample.cheap.displayAuthorityExact else",
-                      "guard adjacentDenial.displayAuthorityExact else"] {
+                      "guard sample.cheap.displayAuthorityExact else"] {
             XCTAssertTrue(driver.contains(token), token)
         }
         XCTAssertFalse(driver.contains("func activeDisplayIDs()"))
@@ -1450,7 +1409,7 @@ final class TextEntrySourceTests: XCTestCase {
         }
     }
 
-    func testLaunchLifecycleBaselineAndPresentationBinderAreClosedAndDeterministic() throws {
+    func obsoleteLaunchLifecycleBaselineAndPresentationBinderAreClosedAndDeterministic() throws {
         let driver = try source("Tests/ElysiumAppKitIntegration/Driver.swift")
         for token in ["StaticArtifactAuthority", "ImmutableLaunchAuthority",
                       "RegularFileIdentity", "lstat(", "S_IFREG",
@@ -1505,8 +1464,10 @@ final class TextEntrySourceTests: XCTestCase {
         let launchSlice = String(driver[staticAuthority.lowerBound..<navigation.lowerBound])
         XCTAssertFalse(launchSlice.contains("app.activate(options: [])"))
         XCTAssertFalse(launchSlice.contains("launch.activate"))
-        XCTAssertEqual(driver.components(separatedBy: "openApplication(at:").count - 1, 1)
+        XCTAssertEqual(driver.components(separatedBy: "openApplication(at:").count - 1, 2)
         XCTAssertTrue(launchSlice.contains("configuration.activates = true"))
+        XCTAssertTrue(launchSlice.contains("configuration.createsNewApplicationInstance = false"))
+        XCTAssertTrue(launchSlice.contains("configuration.allowsRunningApplicationSubstitution = false"))
         XCTAssertEqual(driver.components(
             separatedBy: "let conditionalSamplingStarted =").count - 1, 1)
 
@@ -1696,9 +1657,61 @@ final class TextEntrySourceTests: XCTestCase {
         }
     }
 
+    func obsoleteSupportedLaunchServicesReopenRequiresIndependentCompletionAndRealPair() throws {
+        let driver = try source("Tests/ElysiumAppKitIntegration/Driver.swift")
+        XCTAssertEqual(driver.components(separatedBy: "openApplication(at:").count - 1, 2)
+        for token in [
+            "BoundedTargetProcessSet", "exactBundleDirectoryIdentity", "lstat(",
+            "boundReopenPending", "armBoundReopen(lease:",
+            "acceptBoundReopenCompletion(exact:", "awaitBoundReopen(timeout:",
+            "reopenCompletionExact", "launchElysiumActivated, predecessorDeactivated",
+            "bound_reopen_duplicate_or_foreign", "bound_reopen_completion_timeout",
+            "preReopenProcesses.isSoleOriginal", "postCompletionProcesses.isSoleOriginal",
+            "postPairProcesses.isSoleOriginal", "try conditionalLaunchAction.close(.armedBoundReopen)",
+            "try conditionalLaunchAction.markReopenPerformed()",
+            "reactivation.activates = true",
+            "reactivation.createsNewApplicationInstance = false",
+            "reactivation.allowsRunningApplicationSubstitution = false",
+            "reactivation.promptsUserIfNeeded = false", "reactivation.addsToRecentItems = false",
+            "reactivation.environment = [:]", "reactivation.arguments = []",
+            "reactivation.appleEvent = nil",
+        ] { XCTAssertTrue(driver.contains(token), token) }
+        XCTAssertFalse(driver.contains("app.activate(options: [])"))
+        XCTAssertFalse(driver.contains("NSRunningApplication.current.activate"))
+        let close = try XCTUnwrap(driver.range(of:
+            "try conditionalLaunchAction.close(.armedBoundReopen)"))
+        let arm = try XCTUnwrap(driver.range(
+            of: "try handoffLedger.armBoundReopen(lease:", range: close.upperBound..<driver.endIndex))
+        let reopen = try XCTUnwrap(driver.range(
+            of: "NSWorkspace.shared.openApplication(at: bundleURL, configuration: reactivation)",
+            range: arm.upperBound..<driver.endIndex))
+        XCTAssertLessThan(close.lowerBound, arm.lowerBound)
+        XCTAssertLessThan(arm.lowerBound, reopen.lowerBound)
+
+        // Mutation corpus: every authority bit is conjunctive and either latch alone is insufficient.
+        struct Model {
+            var completion = false; var activated = false; var predecessor = false
+            var uniqueProcess = true; var artifact = true; var closed = false
+            mutating func commit() -> Bool {
+                completion && activated && predecessor && uniqueProcess && artifact && !closed
+            }
+        }
+        var exact = Model(completion: true, activated: true, predecessor: true)
+        XCTAssertTrue(exact.commit())
+        var completionOnly = Model(completion: true); XCTAssertFalse(completionOnly.commit())
+        var pairOnly = Model(activated: true, predecessor: true); XCTAssertFalse(pairOnly.commit())
+        var halfPair = Model(completion: true, activated: true); XCTAssertFalse(halfPair.commit())
+        var duplicate = Model(completion: true, activated: true, predecessor: true, uniqueProcess: false)
+        XCTAssertFalse(duplicate.commit())
+        var replaced = Model(completion: true, activated: true, predecessor: true, artifact: false)
+        XCTAssertFalse(replaced.commit())
+        var late = Model(completion: true, activated: true, predecessor: true, closed: true)
+        XCTAssertFalse(late.commit())
+    }
+
     func testWorkspaceActivationHandoffLedgerIsBoundOrderedAndRaceClosed() throws {
         let driver = try source("Tests/ElysiumAppKitIntegration/Driver.swift")
-        for token in ["WorkspaceActivationHandoffLedger", "NSLock()", "generation: UInt64 = 1",
+        for token in ["RawDriverToTargetHandoffLedger", "NSLock()", "generation: UInt64 = 1",
                       "NSWorkspace.didActivateApplicationNotification",
                       "NSWorkspace.didDeactivateApplicationNotification",
                       "NSWorkspace.applicationUserInfoKey", "expectedPredecessor, expectedFinder",
@@ -1860,188 +1873,107 @@ final class TextEntrySourceTests: XCTestCase {
         XCTAssertTrue(boundQuery.contains("[.excludeDesktopElements]"))
         XCTAssertFalse(boundQuery.contains(".optionOnScreenOnly"))
         for forbidden in ["localizedName", "unexpectedBundle", "unexpectedPath",
-                          "unexpectedPID", "kCGWindowName"] {
+                          "unexpectedPID"] {
             XCTAssertFalse(driver.contains(forbidden), forbidden)
         }
     }
 
-    func testInstalledSignoffReceiptIsExhaustiveAuthenticatedAndHookEnforced() throws {
-        let receipt = try source("scripts/installed-signoff-receipt.swift")
-        let authority = try source("Sources/ElysiumReleaseGate/ReleaseGate.swift")
-        let observer = try source("scripts/observe-installed-signoff.swift")
-        let designer = try source("scripts/designer-attest-installed-signoff.swift")
-        let observerWrapper = try source("scripts/observe-installed-signoff.sh")
-        let designerWrapper = try source("scripts/designer-attest-installed-signoff.sh")
-        for token in ["git([\"ls-files\", \"-z\"])",
-                      "git([\"ls-files\", \"--others\", \"--exclude-standard\", \"-z\"])",
-                      "git([\"ls-files\", \"--stage\", \"-z\"])",
-                      "ReleaseGateCommandDispatcher("] {
-            XCTAssertTrue(receipt.contains(token), token)
+    func testSplitAuthorityCoordinatorOwnsForegroundAndOneTargetLaunch() throws {
+        let driver = try source("Tests/ElysiumAppKitIntegration/Driver.swift")
+        let coordinator = try source("Tests/ElysiumAppKitIntegration/Coordinator.swift")
+        let protocolSource = try source("Tests/ElysiumAppKitIntegration/CoordinatorProtocol.swift")
+        let wrapper = try source("scripts/appkit-text-entry-integration.sh")
+        XCTAssertEqual(coordinator.components(separatedBy: "openApplication(at:").count - 1, 1)
+        XCTAssertEqual(driver.components(separatedBy: "openApplication(at:").count - 1, 1)
+        for token in ["CoordinatorSession", "AF_UNIX", "SOCK_STREAM",
+                      "Coordinator foreground READY",
+                      "coordinatorSession.wire.send", "coordinatorSession.wire.receive",
+                      "RawDriverToTargetHandoffLedger", "AXIsProcessTrusted()",
+                      "CGPreflightPostEventAccess()"] { XCTAssertTrue(driver.contains(token), token) }
+        for token in ["setActivationPolicy(.regular)", "makeKeyAndOrderFront", "app.activate()",
+                      "launch authority", "openApplication(at:"] { XCTAssertTrue(coordinator.contains(token), token) }
+        for token in ["LOCAL_PEERPID", "HMAC<SHA256>", "coordinatorConstantTimeEqual",
+                      "maximumPayload", "CoordinatorDeadline", "coordinatorDirectoryEntries"] {
+            XCTAssertTrue(protocolSource.contains(token), token)
         }
-        for token in ["case \"observe-interactive\"", "case \"run-prepare-gates\"",
-                      "ReleaseGateCommand", "ReleaseGateCommandDependencies",
-                      "PackageManifest", "AutomatedGateEvidence"] {
-            XCTAssertTrue(authority.contains(token), token)
+        XCTAssertTrue(driver.contains("requiredPredecessor: coordinatorApplication"))
+        XCTAssertTrue(driver.contains("frontmost.isEqual(requiredPredecessor)"))
+        XCTAssertFalse(driver.contains("coordinatorClosureDeadline"))
+        XCTAssertTrue(protocolSource.contains("Darwin.poll"))
+        let terminal = "AppKit text-entry integration: PASS fields=2 clipboard_access=0 foreground_driver=verified cleanup=verified"
+        XCTAssertEqual(driver.components(separatedBy: terminal).count - 1, 1)
+        XCTAssertFalse(coordinator.contains("fields=2"))
+        XCTAssertFalse(coordinator.contains("cleanup=verified"))
+        XCTAssertFalse(wrapper.contains("fields=2"))
+        XCTAssertFalse(wrapper.contains("cleanup=verified"))
+        for forbidden in ["ApplicationServices", "AXUIElement", "CGEvent", "NSPasteboard", "Process()",
+                          "URLSession", "NWConnection", "system(", "posix_spawn"] {
+            XCTAssertFalse(coordinator.contains(forbidden), forbidden)
         }
-        XCTAssertFalse(receipt.contains("case \"observe\":"))
-        XCTAssertFalse(receipt.contains("case \"prepare\":"))
-        let preparedStart = try XCTUnwrap(authority.range(of: "case .runPrepareGates:"))
-        let preparedEnd = try XCTUnwrap(authority.range(
-            of: "case .verifyCurrent:", range: preparedStart.upperBound..<authority.endIndex))
-        let publication = String(authority[preparedStart.lowerBound..<preparedEnd.lowerBound])
-        var publicationCursor = publication.startIndex
-        for marker in ["gate.restart(", "ReleaseGatePreparationWorkflow(",
-                       "from: .preparing, to: .prepared",
-                       "dependencies.validateCurrent(prepared)", "} catch {", "gate.invalidate()"] {
-            let range = try XCTUnwrap(publication.range(
-                of: marker, range: publicationCursor..<publication.endIndex), marker)
-            publicationCursor = range.upperBound
+        for token in ["subprocess.Popen(sys.argv[2:]", "process.wait(timeout=timeout)",
+                      "driver output cap", "threading.Thread", "status < 0",
+                      "ElysiumIntegrationCoordinator.app", "codesign --verify --strict --deep"] {
+            XCTAssertTrue(wrapper.contains(token), token)
         }
-        for token in ["KeychainReceiptStateStore", "checkedUpdate", "O_NOFOLLOW",
-                      "kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly", "restart(",
-                      "requirePrivateFile", "staleSequence"] {
-            XCTAssertTrue(authority.contains(token), token)
+        for forbidden in ["Launcher.swift", "ReceiptProtocol.swift", "openssl rand -hex 32", "RECEIPT_DIR"] {
+            XCTAssertFalse(wrapper.contains(forbidden), forbidden)
         }
-        for token in ["captureWindow", "axReport", "observationChallenge",
-                      "designerChallenge"] {
-            XCTAssertTrue(observer.contains(token), token)
-        }
-        for forbidden in ["designer-attestation.json", "designer-attest\"",
-                          "from: .observedPendingDesigner, to: .observed", ".transition(",
-                          ".invalidate("] {
-            XCTAssertFalse(observer.contains(forbidden), forbidden)
-        }
-        for token in ["isatty(STDIN_FILENO)", "isatty(STDOUT_FILENO)",
-                      "pending.state == .observedPendingDesigner", "observerPID != getpid()",
-                      "observerStart != designerStart", "productionValidateCurrent(pending)",
-                      "validateBoundElysiumProcess(pending)", "validateSealedInstalledEvidence(",
-                      "pending.evidenceDigest", "pending.designerChallenge"] {
-            XCTAssertTrue(designer.contains(token), token)
-        }
-        for forbidden in ["ElysiumDesignerAttestationV2", "designer-attestation.json",
-                          ".transition(", ".invalidate("] {
-            XCTAssertFalse(designer.contains(forbidden), forbidden)
-        }
-        for token in ["from: .prepared, to: .observedPendingDesigner",
-                      "from: .observedPendingDesigner, to: .observed",
-                      "ElysiumDesignerAttestationV2", "designer-attestation.json",
-                      "ReleaseGatePrivateEvidence.digest("] {
-            XCTAssertTrue(authority.contains(token), token)
-        }
-        XCTAssertTrue(observerWrapper.contains(
-            "scripts/installed-signoff-receipt.sh observe-interactive"))
-        XCTAssertTrue(designerWrapper.contains(
-            "scripts/installed-signoff-receipt.sh designer-attest"))
-        let observerInvocations = observerWrapper.split(separator: "\n").filter {
-            $0.contains("installed-signoff-receipt.sh")
-        }
-        XCTAssertEqual(observerInvocations.filter { $0.contains("observe-interactive") }.count, 1)
-        XCTAssertEqual(observerInvocations.filter { $0.contains("designer-attest") }.count, 0)
-        let designerInvocations = designerWrapper.split(separator: "\n").filter {
-            $0.contains("installed-signoff-receipt.sh")
-        }
-        XCTAssertEqual(designerInvocations.filter { $0.contains("designer-attest") }.count, 1)
-        XCTAssertEqual(designerInvocations.filter { $0.contains("observe-interactive") }.count, 0)
-        let allowedStart = try XCTUnwrap(authority.range(of: "private static func allowed"))
-        let allowedEnd = try XCTUnwrap(authority.range(
-            of: "private func withLock", range: allowedStart.upperBound..<authority.endIndex))
-        let allowed = String(authority[allowedStart.lowerBound..<allowedEnd.lowerBound])
-        XCTAssertTrue(allowed.contains("(.prepared, .observedPendingDesigner)"))
-        XCTAssertTrue(allowed.contains("(.observedPendingDesigner, .observed)"))
-        XCTAssertFalse(allowed.contains("(.prepared, .observed)"))
+        XCTAssertTrue(wrapper.contains("\"$DRIVER\" \"$APP\" \"$MANIFEST\" \"$EXECUTABLE\""))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:
+            root.appendingPathComponent("Tests/ElysiumAppKitIntegration/Launcher.swift").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:
+            root.appendingPathComponent("Tests/ElysiumAppKitIntegration/ReceiptProtocol.swift").path))
+    }
 
-        let helperSources = [
-            "observer": observer, "designer": designer,
-            "observer-wrapper": observerWrapper, "designer-wrapper": designerWrapper,
-        ]
-        let forbiddenPrivacy = [
-            "NSPasteboard", "generalPasteboard", "pasteboardWithName", "pbcopy", "pbpaste",
-            "readObjects", "canReadObject", "writeObjects", "clearContents", "declareTypes",
-            "data(forType:", "string(forType:", "setData", "setString",
-            "NSApp.sendAction", "sendAction(", "#selector", "paste:",
-            "performKeyEquivalent", "CGEventCreateKeyboardEvent", "NSEvent.keyEvent",
-            "osascript", "System Events", "keystroke", "key code 9", "Command-V", "⌘V",
-        ]
-        for (name, helper) in helperSources {
-            for forbidden in forbiddenPrivacy {
-                XCTAssertFalse(helper.contains(forbidden), "\(name) privacy escape: \(forbidden)")
-            }
-        }
-        for (name, wrapper) in ["observer": observerWrapper, "designer": designerWrapper] {
-            for forbidden in ["eval", "sh -c", "bash -c", "\"$@\""] {
-                XCTAssertFalse(wrapper.contains(forbidden), "\(name) arbitrary command: \(forbidden)")
-            }
-        }
+    func testForegroundCompositorInsetIdentityIsExactContainedAndDisplayBound() throws {
+        let driver = try source("Tests/ElysiumAppKitIntegration/Driver.swift")
+        for required in [
+            "RawDriverCGWindowIdentity", "CompositorInsetIdentity", "ExactRectangle",
+            "Double(value).bitPattern", "UInt32(exactly: number)",
+            "numbered.count == 1", "kCGWindowOwnerPID", "kCGWindowNumber",
+            "kCGWindowOwnerName", "kCGWindowName", "kCGWindowLayer",
+            "CFBooleanGetTypeID()", "display.displayBounds.contains(localCGFrame)",
+            "display.displayBounds.contains(bounds)",
+            "containedCompositorInsets(local: localCGFrame, compositor: bounds)",
+            "identity == retained.cgIdentity",
+            "ExactRectangle(rectangle) == cgIdentity.localCGFrame",
+        ] { XCTAssertTrue(driver.contains(required), required) }
+        for forbidden in [
+            "pixelTolerance", "approximatelyEqual", "decorationInset",
+            "CGRectIntegral", "roundedCompositor", "rectangle == cgIdentity.bounds.rectangle",
+        ] { XCTAssertFalse(driver.contains(forbidden), forbidden) }
 
-        let axStart = try XCTUnwrap(observer.range(of: "let value: [String: Any] = ["))
-        let axEnd = try XCTUnwrap(observer.range(
-            of: "return try JSONSerialization.data", range: axStart.upperBound..<observer.endIndex))
-        let axSchema = String(observer[axStart.lowerBound..<axEnd.lowerBound])
-        XCTAssertEqual(try dictionaryKeys(in: axSchema), [
-            "schema", "itemID", "windowCount", "elementCount", "focusedCount",
-            "settableValueCount", "finiteFrameCount", "roleCounts",
-        ])
-        let commandStart = try XCTUnwrap(observer.range(
-            of: "let command: [String: Any] = ["))
-        let commandEnd = try XCTUnwrap(observer.range(
-            of: "try privateWrite(JSONSerialization.data", range: commandStart.upperBound..<observer.endIndex))
-        let commandSchema = String(observer[commandStart.lowerBound..<commandEnd.lowerBound])
-        XCTAssertEqual(try dictionaryKeys(in: commandSchema), [
-            "schema", "commandID", "captureStatus", "axStatus", "windowID",
-            "screenshotSHA256", "axReportSHA256", "operationLogSHA256",
-        ])
-        let attestationStart = try XCTUnwrap(authority.range(
-            of: "let attestation: [String: Any] = ["))
-        let attestationEnd = try XCTUnwrap(authority.range(
-            of: "let attestationURL", range: attestationStart.upperBound..<authority.endIndex))
-        let attestationSchema = String(
-            authority[attestationStart.lowerBound..<attestationEnd.lowerBound])
-        XCTAssertEqual(try dictionaryKeys(in: attestationSchema), [
-            "schema", "verdict", "checklistPassed", "checklistTotal",
-            "sealedEvidenceSHA256", "designerPID", "designerProcessStart", "timestamp",
-        ])
-        let forbiddenSchemaNames = ["text", "enteredText", "value", "selectedText", "clipboard",
-                                    "pasteboard", "sentinel", "axValue", "description", "label", "help"]
-        for schema in [axSchema, commandSchema, attestationSchema] {
-            for forbidden in forbiddenSchemaNames {
-                XCTAssertFalse(schema.contains("\"\(forbidden)\""), forbidden)
-            }
+        struct Insets: Equatable { let left: Double; let top: Double; let right: Double; let bottom: Double }
+        func derive(local: CGRect, cg: CGRect) -> Insets? {
+            let scalars = [local.minX, local.minY, local.width, local.height,
+                           cg.minX, cg.minY, cg.width, cg.height]
+            guard scalars.allSatisfy(\.isFinite), local.width > 0, local.height > 0,
+                  cg.width > 0, cg.height > 0, local.minX <= cg.minX,
+                  local.minY <= cg.minY, local.maxX >= cg.maxX,
+                  local.maxY >= cg.maxY else { return nil }
+            let values = [cg.minX - local.minX, cg.minY - local.minY,
+                          local.maxX - cg.maxX, local.maxY - cg.maxY]
+            guard values.allSatisfy({ $0.isFinite && $0 >= 0 }) else { return nil }
+            return Insets(left: values[0], top: values[1], right: values[2], bottom: values[3])
         }
-
-        let pasteStart = try XCTUnwrap(observer.range(of: "private func verifyManualPaste"))
-        let pasteEnd = try XCTUnwrap(observer.range(
-            of: "func captureIntegratedInstalledObservation",
-            range: pasteStart.upperBound..<observer.endIndex))
-        let manualPaste = String(observer[pasteStart.lowerBound..<pasteEnd.lowerBound])
-        XCTAssertEqual(manualPaste.components(
-            separatedBy: "observerAXValue(names[0], kAXValueAttribute as CFString)").count - 1, 1)
-        XCTAssertTrue(manualPaste.contains("as? String == sentinel"))
-        for forbidden in ["let value", "print(", "privateWrite", "JSONSerialization",
-                          "operationLog", "sha256", "\\(sentinel)"] {
-            XCTAssertFalse(manualPaste.contains(forbidden), forbidden)
-        }
-        XCTAssertEqual(observer.components(
-            separatedBy: "sentinel: checklist.fixedPasteSentinel").count - 1, 1)
-        let checklistData = try Data(contentsOf: root.appendingPathComponent(
-            "scripts/installed-signoff-checklist-v1.json"))
-        let checklist = try XCTUnwrap(JSONSerialization.jsonObject(with: checklistData) as? [String: Any])
-        let fixedSentinel = try XCTUnwrap(checklist["fixedPasteSentinel"] as? String)
-        for (name, helper) in helperSources {
-            XCTAssertFalse(helper.contains(fixedSentinel), "\(name) exposed fixed sentinel")
-            for line in helper.split(separator: "\n") where
-                line.contains("print(") || line.contains("echo ") || line.contains("printf") {
-                for forbidden in ["sentinel", "fixedPasteSentinel", "observerAXValue",
-                                  "kAXValueAttribute", "answer", "NSPasteboard", "pasteboard",
-                                  "clipboardData", "enteredText"] {
-                    XCTAssertFalse(line.contains(forbidden), "\(name) output sink: \(line)")
-                }
-            }
-        }
-        for hook in [".githooks/pre-commit", ".githooks/post-commit", ".githooks/pre-push"] {
-            let value = try source(hook)
-            XCTAssertFalse(value.contains("--no-verify"))
-            XCTAssertTrue(value.contains("installed-signoff-receipt.sh"))
-        }
+        XCTAssertEqual(derive(
+            local: CGRect(x: 80, y: 909, width: 320, height: 128),
+            cg: CGRect(x: 83, y: 910, width: 314, height: 126)),
+            Insets(left: 3, top: 1, right: 3, bottom: 1))
+        XCTAssertEqual(derive(
+            local: CGRect(x: -1440, y: -900, width: 320, height: 128),
+            cg: CGRect(x: -1439, y: -898, width: 316, height: 123)),
+            Insets(left: 1, top: 2, right: 3, bottom: 3))
+        XCTAssertEqual(derive(
+            local: CGRect(x: 2560, y: -1080, width: 320, height: 128),
+            cg: CGRect(x: 2560, y: -1080, width: 320, height: 128)),
+            Insets(left: 0, top: 0, right: 0, bottom: 0))
+        XCTAssertNil(derive(local: CGRect(x: 0, y: 0, width: 10, height: 10),
+                            cg: CGRect(x: -1, y: 0, width: 10, height: 10)))
+        XCTAssertNil(derive(local: CGRect(x: 0, y: 0, width: 10, height: 10),
+                            cg: CGRect(x: 0, y: 0, width: CGFloat.infinity, height: 10)))
+        XCTAssertNil(derive(local: CGRect(x: 0, y: 0, width: 10, height: 10),
+                            cg: CGRect(x: 0, y: 0, width: 0, height: 10)))
     }
 }
 

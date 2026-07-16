@@ -34,29 +34,41 @@ There is no `.xcodeproj` and there never will be — the whole workflow is Swift
 2. `swift test` — all focused unit/security regression tests pass.
 3. `swift run -c release elysmoke` (or `elysium test`) — **457/457**, from the repo root (goldens are found relative to cwd).
 4. `swift scripts/sqlite-boundary-scan.swift --root "$PWD" --self-test` after any persistence, package, or source-inventory change. A manifest update requires a reviewed semantic API/capability diff; never regenerate it merely to turn the gate green.
+5. For saved-world browser or batch-deletion changes, run
+   `swift test --filter SavedWorldBatchDeleteTests` before the full suite. Preserve checked collection
+   authority, the atomic six-scope transaction, read-only recovery, and installed Accessibility proof.
 
-The release preparation path runs a real AppKit text-entry stage after one warning-free release
-build and before XCTest. It requires an unlocked interactive session and Accessibility/Input
-Monitoring permission, but it performs zero clipboard/Paste operations. Run
-`scripts/pipeline.sh --prepare-installed-signoff`; a correct install intentionally exits 75 with
-`PENDING_INSTALLED_SIGNOFF`. The exact next steps are the TTY-only observer and finalizer documented
-in README. Preserve clipboard contents before deliberately setting the fixed sentinel: the observer
-never reads or restores clipboard bytes. Monotonic Keychain state—not its disposable JSON cache—binds
-every committable repository file, real automated-gate logs/counts, frozen per-item screenshot/AX/
-command evidence, release/package/install identity, distinct Designer attestation, and the exact
-commit/push. There is no skip or noninteractive bypass.
-5. For RPG/LAN-v6 storage changes, run `swift test --filter 'RPGLocalPreferenceStorageTests|RPGLocalPreferencesTests|LANV6ClientAuthorityCheckpointStorageTests|LANV6HostOwnerCheckpointStorageTests'` before the full suite. These named suites are the minimum persistence-contract gate, not a replacement for `swift test`.
-6. For RPG UI/harness changes, run `swift test --filter 'RPGUIHarnessTests|RPGUIHarnessSourceTests|RPGScreenModelTests|RPGSemanticAccessibilityTests'`, then exercise the built executable with a semantic-summary case, a mixed-environment rejection, and an exclusive screenshot case. The harness must leave a fresh support home unchanged when `ELYSIUM_SHOT` is absent.
-7. If goldens changed, your PR description must justify **every** changed value (see below).
-8. Keep diffs surgical. Match the style of the file you're in — this codebase has a consistent voice (compact, comment-where-it-matters), and drive-by reformatting makes review impossible.
+The zero-argument release command is `bash scripts/pipeline.sh`. It runs exactly nine automated
+stages in order and fails closed: (1) source security scan, (2) warning-free release build,
+(3) release-surface and binary security checks, (4) full XCTest, (5) the 457-check `elysmoke`
+golden suite, (6) application packaging, (7) packaged AppKit keyboard and Accessibility integration,
+(8) installation at `/Applications/Elysium.app`, and (9) installed-app identity and code-signature
+verification against the packaged candidate.
 
-Optional diagnostics: `./scripts/release-gate-adversarial-test.sh` may help investigate local
-release-gate changes, but it is explicitly a `NON-AUTHORITATIVE DIAGNOSTIC`, not a prerequisite or
-release gate. It is outside the authoritative sequence above and cannot replace the bounded security
-scan, build, XCTest, 457-check smoke suite, installed human/VoiceOver/Designer proof, receipt,
-pipeline, pre-push hook, or deployment verification.
+`PASS proves this checkout produced and installed the verified local /Applications/Elysium.app; it does not mean committed, pushed, CI-green, published, or subjectively visually approved.`
 
-For the full local pipeline, run `./scripts/pipeline.sh`. It performs architecture checks, source security scans, bundled Faithful asset verification, a warning-free release build, binary security checks, XCTest, the golden suite, deploy, and final installed-app verification.
+Keep the evidence categories distinct:
+
+| Evidence | Proves | Does not prove |
+| --- | --- | --- |
+| Commit succeeds | Staged content passed fast pre-commit policy and secret checks. | Push, pipeline, install, CI, or publication. |
+| Push succeeds | The outgoing commit passed the pre-push source/build/test regression gate. | Installation, CI, publication, or visual quality. |
+| Pipeline passes | The exact candidate passed all nine stages, including package/install identity and signature verification. | CI, GitHub publication, or subjective visual quality. |
+| CI passes | Hosted checks passed for the identified commit. | Local installation or subjective visual quality. |
+| Commit is on GitHub `main` | The identified commit is published on the public default branch. | CI, installation, or subjective visual quality. |
+| Human visual review passes | A person judged the reviewed screens and interactions acceptable. | Automated correctness, reproducibility, installation identity, or signature validity. |
+
+The pre-commit hook must remain fast and staged-only. The pre-push hook runs the heavier source scan,
+release build, binary checks, AppKit integration, XCTest, and `elysmoke`; it does not package or
+install. Run the zero-argument pipeline for the complete real-target release gate.
+6. For RPG/LAN-v6 storage changes, run `swift test --filter 'RPGLocalPreferenceStorageTests|RPGLocalPreferencesTests|LANV6ClientAuthorityCheckpointStorageTests|LANV6HostOwnerCheckpointStorageTests'` before the full suite. These named suites are the minimum persistence-contract gate, not a replacement for `swift test`.
+7. For RPG UI/harness changes, run `swift test --filter 'RPGUIHarnessTests|RPGUIHarnessSourceTests|RPGScreenModelTests|RPGSemanticAccessibilityTests'`, then exercise the built executable with a semantic-summary case, a mixed-environment rejection, and an exclusive screenshot case. The harness must leave a fresh support home unchanged when `ELYSIUM_SHOT` is absent.
+8. If goldens changed, your PR description must justify **every** changed value (see below).
+9. Keep diffs surgical. Match the style of the file you're in — this codebase has a consistent voice (compact, comment-where-it-matters), and drive-by reformatting makes review impossible.
+
+For authoritative local release verification, run `bash scripts/pipeline.sh` and require all nine
+stages to pass. Report that result separately from commit, push, CI, publication, and subjective
+human review.
 
 ## The golden workflow (read this twice)
 

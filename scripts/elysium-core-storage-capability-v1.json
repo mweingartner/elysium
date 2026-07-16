@@ -3,10 +3,10 @@
   "inventory": "compiler -dump-parse canonical AST; externally reachable USRs are frozen by elysium-storage-api-v1.json",
   "owners": {
     "Sources/ElysiumCore/Game/LegacySaveMigration.swift": {
-      "compilerParseASTSHA256": "aa1539d1a2361fa73c89ededa6e1756976ea351a593f251aebb67ec8795166f0"
+      "compilerParseASTSHA256": "d70db5d852119908765ba28f2479ffd44096d2fe655964358c78f0d0cc6164e0"
     },
     "Sources/ElysiumCore/Game/Saves.swift": {
-      "compilerParseASTSHA256": "8f920eb2c62ee969fbe4edf34d29ccea1ad3bb0d4e362b41a6abd85b6fd18bb4"
+      "compilerParseASTSHA256": "6fb2a3f82c469d89395cf55196c126785a8961e7d5af0b7bc58f17b03cdaabe4"
     }
   }
 }

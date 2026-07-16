@@ -89,6 +89,11 @@ the exact eight authority titles/help strings, distinct non-color shapes, and pa
 accessibility children. Screenshot output is an exclusive fd-relative file under a no-follow,
 owner-only temporary directory.
 
+The optional RPG harness remains separate from release authority. Release completion is the
+zero-argument automated pipeline: it binds the exhaustive tracked plus nonignored-untracked source
+snapshot, one release-executable SHA, the signed package, packaged AppKit result, installed bytes,
+and independently expected signing identity. Human visual review is useful but never release authority.
+
 CPU/GPU synchronization leans on `CAMetalLayer`'s default 3-drawable back-pressure: the mesh arena defers frees 3 frames, and UI/particle instance buffers are 3-deep rings. Atlas animation updates are staged into buffers and blitted at frame start so in-flight frames never see a half-written texture.
 
 Checked player-row migration writes use a full-row expected-old digest CAS. `SaveDB` encodes and
@@ -156,12 +161,10 @@ external AX APIs. It runs after one warning-free release build and is pinned to 
 hash; it performs zero clipboard/Paste operations, and pure adapters/source scans are supplemental
 rather than runtime proof.
 
-Installed completion is a separate authenticated state machine. The canonical digest covers the
-union of every tracked and nonignored untracked regular repository file and has equivalent
-worktree/index/commit implementations. One monotonic Keychain item is authoritative through
-`prepared → observed → finalized → commitArmed → committed → pushArmed`; the external 0600 JSON is a
-regenerable status cache only. Preparation seals actual command logs, statuses, counts, artifact
-hashes, and the release/package/install chain, then exits 75 pending the TTY-only manual Paste/full-
-matrix proof. The integrated stable binary records private per-item PNG/AX/command evidence and a
-separate Designer challenge/attestation. Finalization and every source-control transition revalidate
-repository, evidence, release, signing, installed hash/CDHash, expiry, and monotonic state.
+Automated completion runs nine ordered fail-closed stages. A bounded source snapshot covers every
+tracked and nonignored-untracked regular file and is revalidated after every stage. The release
+executable identity and SHA are retained through package creation, packaged AppKit verification,
+installation, and final path/hash/signature checks. Expected bundle identifier, CDHash, designated
+requirement, and resource sealing come from the validated package rather than the installed candidate.
+Pre-commit is staged MPD policy only; pre-push binds its full automated suite to one clean outgoing
+SHA equal to stable `HEAD` and its local ref. There is no persistent release state or post-commit hook.

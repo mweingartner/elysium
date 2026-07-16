@@ -1984,7 +1984,7 @@ public final class GameCore {
         // non-modal chat nudge replaces the ambush so a first-time player still knows the
         // progression system is waiting; it stops appearing once a class is chosen.
         if player.rpgClassesEnabled(), !player.rpg.created {
-            host?.pushChat("§7Open your inventory and pick a class under §fCharacter§7 to begin progression.")
+            host?.pushChat("§7Open your inventory and pick a class under §fCharacter§7 to start progression.")
         }
         // loaded in deep underground? say so loudly instead of looking like a render bug
         let bx = ifloor(player.x), bz = ifloor(player.z)

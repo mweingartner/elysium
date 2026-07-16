@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import CryptoKit
 import Darwin
+import Security
 import SystemConfiguration
 
 private enum GateError: Error { case failed(String) }
@@ -23,6 +24,111 @@ private func hash(_ url: URL) throws -> String {
 private func stringHash(_ value: String) -> String {
     SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
 }
+private func secureRandom32() throws -> Data {
+    var bytes = [UInt8](repeating: 0, count: 32)
+    guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+        throw GateError.failed("coordinator random")
+    }
+    return Data(bytes)
+}
+private func hexString(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+
+private func setCloseOnExec(_ fd: Int32) throws {
+    let flags = fcntl(fd, F_GETFD)
+    guard flags >= 0, fcntl(fd, F_SETFD, flags | FD_CLOEXEC) == 0,
+          fcntl(fd, F_GETFD) & FD_CLOEXEC != 0 else {
+        throw GateError.failed("Coordinator descriptor CLOEXEC")
+    }
+}
+
+private final class CoordinatorSession {
+    let directory: URL, socketURL: URL, nonce: Data
+    private let directoryFD: Int32
+    private let directoryDevice: dev_t
+    private let directoryInode: ino_t
+    private let directoryGroup: gid_t
+    var listener: Int32
+    var connection: Int32 = -1; var application: NSRunningApplication?; var wire: CoordinatorWire
+    init(root: URL) throws {
+        nonce = try secureRandom32(); wire = CoordinatorWire(key: SymmetricKey(data: nonce))
+        directory = root.appendingPathComponent("coordinator-ipc-" + hexString(Data(SHA256.hash(data: nonce))).prefix(16))
+        let priorMask = umask(0o077); defer { umask(priorMask) }
+        guard mkdir(directory.path, 0o700) == 0 else { throw GateError.failed("coordinator directory") }
+        directoryFD = open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directoryFD >= 0 else { throw GateError.failed("coordinator directory authority") }
+        var directoryStat = stat()
+        guard fstat(directoryFD, &directoryStat) == 0, (directoryStat.st_mode & S_IFMT) == S_IFDIR,
+              directoryStat.st_uid == geteuid(),
+              directoryStat.st_mode & 0o777 == 0o700, directoryStat.st_nlink == 2 else {
+            close(directoryFD); throw GateError.failed(
+                "coordinator directory identity mode=\(directoryStat.st_mode & 0o777) " +
+                "uid=\(directoryStat.st_uid)/\(geteuid()) gid=\(directoryStat.st_gid) " +
+                "links=\(directoryStat.st_nlink)")
+        }
+        directoryDevice = directoryStat.st_dev; directoryInode = directoryStat.st_ino
+        directoryGroup = directoryStat.st_gid
+        socketURL = directory.appendingPathComponent("control.sock")
+        guard socketURL.path.utf8.count < 104 else { throw GateError.failed("coordinator socket path") }
+        listener = socket(AF_UNIX, SOCK_STREAM, 0); guard listener >= 0 else { throw GateError.failed("coordinator socket") }
+        try setCloseOnExec(listener)
+        var one: Int32 = 1
+        guard setsockopt(listener, SOL_SOCKET, SO_NOSIGPIPE, &one,
+                         socklen_t(MemoryLayout.size(ofValue: one))) == 0 else {
+            throw GateError.failed("coordinator socket option")
+        }
+        var address = sockaddr_un(); address.sun_family = sa_family_t(AF_UNIX); address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        _ = withUnsafeMutablePointer(to: &address.sun_path) { pointer in socketURL.path.withCString { source in
+            strncpy(UnsafeMutableRawPointer(pointer).assumingMemoryBound(to: CChar.self), source, 103)
+        }}
+        let bound = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }}
+        var socketStat = stat()
+        guard bound == 0, fchmodat(directoryFD, "control.sock", 0o600, AT_SYMLINK_NOFOLLOW) == 0,
+              fstatat(directoryFD, "control.sock", &socketStat, AT_SYMLINK_NOFOLLOW) == 0,
+              (socketStat.st_mode & S_IFMT) == S_IFSOCK, socketStat.st_uid == geteuid(),
+              socketStat.st_gid == directoryGroup, socketStat.st_mode & 0o777 == 0o600,
+              listen(listener, 1) == 0 else {
+            throw GateError.failed("coordinator bind")
+        }
+    }
+    deinit { if connection >= 0 { close(connection) }; if listener >= 0 { close(listener) }; close(directoryFD) }
+    func validateNamespace(expectSocket: Bool) throws {
+        var current = stat(), socketStat = stat()
+        guard fstat(directoryFD, &current) == 0, current.st_dev == directoryDevice,
+              current.st_ino == directoryInode, current.st_uid == geteuid(),
+              current.st_mode & 0o777 == 0o700 else { throw GateError.failed("Coordinator namespace replaced") }
+        var ambient = stat()
+        guard lstat(directory.path, &ambient) == 0, (ambient.st_mode & S_IFMT) == S_IFDIR,
+              ambient.st_dev == directoryDevice, ambient.st_ino == directoryInode else {
+            throw GateError.failed("Coordinator ambient namespace replaced")
+        }
+        let names = try coordinatorDirectoryEntries(directoryFD)
+        guard names == (expectSocket ? ["control.sock"] : []) else { throw GateError.failed("Coordinator namespace entries") }
+        if expectSocket {
+            guard fstatat(directoryFD, "control.sock", &socketStat, AT_SYMLINK_NOFOLLOW) == 0,
+                  (socketStat.st_mode & S_IFMT) == S_IFSOCK, socketStat.st_uid == geteuid(),
+                  socketStat.st_gid == directoryGroup, socketStat.st_mode & 0o777 == 0o600 else {
+                throw GateError.failed("Coordinator socket replaced")
+            }
+        }
+    }
+    func cleanup() throws {
+        var first: String?
+        if connection >= 0 { if close(connection) != 0 { first = "connection close" }; connection = -1 }
+        if listener >= 0 { if close(listener) != 0, first == nil { first = "listener close" }; listener = -1 }
+        do { try validateNamespace(expectSocket: true) } catch { first = first ?? "namespace before unlink" }
+        if first == nil && unlinkat(directoryFD, "control.sock", 0) != 0 { first = "socket unlink" }
+        if first == nil && fsync(directoryFD) != 0 { first = "directory fsync" }
+        do { try validateNamespace(expectSocket: false) } catch { first = first ?? "namespace after unlink" }
+        var ambient = stat()
+        if first == nil && (lstat(directory.path, &ambient) != 0 || ambient.st_dev != directoryDevice ||
+                            ambient.st_ino != directoryInode) { first = "ambient identity before rmdir" }
+        if first == nil && rmdir(directory.path) != 0 { first = "directory removal" }
+        if first == nil && lstat(directory.path, &ambient) == 0 { first = "directory remains" }
+        if let first { throw GateError.failed("Coordinator cleanup: \(first)") }
+    }
+}
 private func runningCommand(_ pid: pid_t) -> String? {
     let process = Process(), pipe = Pipe()
     process.executableURL = URL(fileURLWithPath: "/bin/ps")
@@ -34,11 +140,125 @@ private func runningCommand(_ pid: pid_t) -> String? {
     let command = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
     return command?.split(separator: " ").first.map(String.init)
 }
+private struct ProcessStartIdentity: Equatable {
+    let seconds: UInt64
+    let microseconds: UInt64
+
+    static func capture(_ pid: pid_t) -> ProcessStartIdentity? {
+        var info = proc_bsdinfo()
+        let size = MemoryLayout<proc_bsdinfo>.size
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(size)) == size else { return nil }
+        return ProcessStartIdentity(
+            seconds: UInt64(info.pbi_start_tvsec), microseconds: UInt64(info.pbi_start_tvusec))
+    }
+}
+private struct LiveCodeIdentity: Equatable {
+    let cdHash: Data
+    let requirement: String
+}
+private func liveCodeIdentity(_ pid: pid_t) -> LiveCodeIdentity? {
+    var code: SecCode?
+    let attributes = [kSecGuestAttributePid as String: NSNumber(value: pid)] as CFDictionary
+    guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess,
+          let code, SecCodeCheckValidity(code, [], nil) == errSecSuccess else { return nil }
+    var staticCode: SecStaticCode?
+    guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
+          SecStaticCodeCheckValidity(staticCode, [], nil) == errSecSuccess else { return nil }
+    var information: CFDictionary?
+    guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation),
+                                        &information) == errSecSuccess,
+          let dictionary = information as? [String: Any],
+          let cdHash = dictionary[kSecCodeInfoUnique as String] as? Data else { return nil }
+    var requirement: SecRequirement?, text: CFString?
+    guard SecCodeCopyDesignatedRequirement(staticCode, [], &requirement) == errSecSuccess,
+          let requirement,
+          SecRequirementCopyString(requirement, [], &text) == errSecSuccess, let text else { return nil }
+    return LiveCodeIdentity(cdHash: cdHash, requirement: text as String)
+}
+private func staticCodeIdentity(_ url: URL) -> LiveCodeIdentity? {
+    var staticCode: SecStaticCode?
+    guard SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode) == errSecSuccess,
+          let staticCode, SecStaticCodeCheckValidity(staticCode, [], nil) == errSecSuccess else { return nil }
+    var information: CFDictionary?
+    guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation),
+                                        &information) == errSecSuccess,
+          let dictionary = information as? [String: Any],
+          let cdHash = dictionary[kSecCodeInfoUnique as String] as? Data else { return nil }
+    var requirement: SecRequirement?, text: CFString?
+    guard SecCodeCopyDesignatedRequirement(staticCode, [], &requirement) == errSecSuccess,
+          let requirement, SecRequirementCopyString(requirement, [], &text) == errSecSuccess,
+          let text else { return nil }
+    return LiveCodeIdentity(cdHash: cdHash, requirement: text as String)
+}
+
+private final class CoordinatorForegroundLedger {
+    private let center = NSWorkspace.shared.notificationCenter
+    private let predecessor: NSRunningApplication
+    private var coordinator: NSRunningApplication?
+    private var provisionalActivation: NSRunningApplication?
+    private var tokens: [NSObjectProtocol] = []
+    private var predecessorDeactivated = 0
+    private var coordinatorActivated = 0
+    private var invalid = false
+    init?() {
+        guard let current = NSWorkspace.shared.frontmostApplication,
+              current.processIdentifier != getpid() else { return nil }
+        predecessor = current
+    }
+    func install() {
+        for (name, activation) in [(NSWorkspace.didDeactivateApplicationNotification, false),
+                                   (NSWorkspace.didActivateApplicationNotification, true)] {
+            tokens.append(center.addObserver(forName: name, object: NSWorkspace.shared, queue: .main) {
+                [weak self] note in self?.record(note, activation: activation)
+            })
+        }
+    }
+    func bind(_ application: NSRunningApplication) {
+        coordinator = application
+        if let provisionalActivation {
+            if provisionalActivation.processIdentifier == application.processIdentifier {
+                coordinatorActivated = 1
+            } else { invalid = true }
+            self.provisionalActivation = nil
+        }
+    }
+    private func record(_ notification: Notification, activation: Bool) {
+        guard !invalid,
+              let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication else { invalid = true; return }
+        if !activation, application.processIdentifier == predecessor.processIdentifier {
+            predecessorDeactivated += 1
+        } else if activation, let coordinator,
+                  application.processIdentifier == coordinator.processIdentifier {
+            coordinatorActivated += 1
+        } else if activation, coordinator == nil, provisionalActivation == nil {
+            provisionalActivation = application
+        } else { invalid = true }
+        if predecessorDeactivated > 1 || coordinatorActivated > 1 { invalid = true }
+    }
+    func ready(_ application: NSRunningApplication) -> Bool {
+        coordinator?.processIdentifier == application.processIdentifier && !invalid &&
+        predecessorDeactivated == 1 && coordinatorActivated == 1 &&
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier &&
+        application.isActive
+    }
+    func close() { tokens.forEach(center.removeObserver); tokens.removeAll() }
+    deinit { close() }
+}
+private func pumpAppKitEvent(until date: Date) {
+    if let event = NSApp.nextEvent(
+        matching: .any, until: date, inMode: .default, dequeue: true
+    ) {
+        NSApp.sendEvent(event)
+    } else {
+        RunLoop.current.run(until: date)
+    }
+}
 private func wait(_ seconds: TimeInterval, until condition: () -> Bool) -> Bool {
     let deadline = ProcessInfo.processInfo.systemUptime + seconds
     repeat {
         if condition() { return true }
-        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        pumpAppKitEvent(until: Date(timeIntervalSinceNow: 0.05))
     } while ProcessInfo.processInfo.systemUptime < deadline
     return false
 }
@@ -204,24 +424,27 @@ private struct BoundCGWindowObservation {
     let pidExact: Bool
     let windowIDExact: Bool
     let layerExact: Bool
+    let titleExact: Bool
     let rectangleExact: Bool
     let onScreen: Bool?
     let alpha: Double?
 
     var identityExact: Bool {
-        presentExactlyOnce && pidExact && windowIDExact && layerExact && rectangleExact
+        presentExactlyOnce && pidExact && windowIDExact && layerExact && titleExact && rectangleExact
     }
 }
 
 private func boundCGOwnerWindow(
-    pid: pid_t, windowID: CGWindowID, layer: Int, rectangle: CGRect
+    pid: pid_t, windowID: CGWindowID, layer: Int, rectangle: CGRect,
+    title: String? = nil
 ) -> BoundCGWindowObservation {
     let options: CGWindowListOption = [.excludeDesktopElements]
     guard let rows = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
             as? [[String: Any]] else {
         return BoundCGWindowObservation(
             presentExactlyOnce: false, pidExact: false, windowIDExact: false,
-            layerExact: false, rectangleExact: false, onScreen: nil, alpha: nil)
+            layerExact: false, titleExact: false, rectangleExact: false,
+            onScreen: nil, alpha: nil)
     }
     let boundRows = rows.filter {
         ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID
@@ -229,12 +452,14 @@ private func boundCGOwnerWindow(
     guard boundRows.count == 1 else {
         return BoundCGWindowObservation(
             presentExactlyOnce: false, pidExact: false, windowIDExact: false,
-            layerExact: false, rectangleExact: false, onScreen: nil, alpha: nil)
+            layerExact: false, titleExact: false, rectangleExact: false,
+            onScreen: nil, alpha: nil)
     }
     let row = boundRows[0]
     let candidatePID = (row[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
     let candidateID = (row[kCGWindowNumber as String] as? NSNumber)?.uint32Value
     let candidateLayer = (row[kCGWindowLayer as String] as? NSNumber)?.intValue
+    let candidateTitle = row[kCGWindowName as String] as? String
     let candidateRectangle = (row[kCGWindowBounds as String]).flatMap {
         CGRect(dictionaryRepresentation: $0 as! CFDictionary)
     }
@@ -243,6 +468,7 @@ private func boundCGOwnerWindow(
         pidExact: candidatePID == pid,
         windowIDExact: candidateID == windowID,
         layerExact: candidateLayer == layer,
+        titleExact: title == nil || candidateTitle == title,
         rectangleExact: candidateRectangle == rectangle,
         onScreen: (row[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue,
         alpha: (row[kCGWindowAlpha as String] as? NSNumber)?.doubleValue)
@@ -398,6 +624,11 @@ private func descendants(_ root: AXUIElement, cap: Int = 512) -> [AXUIElement] {
 
 private let expectedOneShotActionIDs = [
     "launch.application",
+    "title.tab.forward.1", "title.tab.forward.2", "title.tab.forward.3",
+    "title.tab.forward.4", "title.tab.forward.5", "title.activate.modified",
+    "title.activate.repeat", "title.activate.credits", "title.credits.escape",
+    "title.tab.reverse.1", "title.tab.reverse.2", "title.tab.reverse.3",
+    "title.tab.reverse.4", "title.tab.reverse.5",
     "navigation.singleplayer.click", "navigation.create-world.click",
     "world-name.click", "world-name.key.a",
     "finder.activate", "elysium.reactivate", "world-name.reactivation-focus",
@@ -433,6 +664,14 @@ private final class OneShotActionLedger {
         guard performed == expected else {
             throw GateError.failed("incomplete one-shot actions")
         }
+    }
+
+    var receiptCount: Int { expected.count }
+
+    var receiptDigest: String {
+        let bytes = expected.sorted().map { "\($0)=\(performed.contains($0) ? 1 : 0)" }
+            .joined(separator: "\n") + "\n"
+        return stringHash(bytes)
     }
 }
 
@@ -537,6 +776,26 @@ private struct RegularFileIdentity: Equatable {
     let modifiedNanoseconds: Int64
 }
 
+private struct BundleDirectoryIdentity: Equatable {
+    let device: UInt64
+    let inode: UInt64
+    let owner: uid_t
+    let fileType: mode_t
+    let permissions: mode_t
+}
+
+private func exactBundleDirectoryIdentity(_ url: URL) -> BundleDirectoryIdentity? {
+    var value = stat()
+    guard lstat(url.path, &value) == 0,
+          value.st_mode & S_IFMT == S_IFDIR,
+          canonicalURL(url.path).path == url.path,
+          value.st_uid == geteuid(),
+          value.st_mode & 0o022 == 0 else { return nil }
+    return BundleDirectoryIdentity(
+        device: UInt64(value.st_dev), inode: UInt64(value.st_ino), owner: value.st_uid,
+        fileType: value.st_mode & S_IFMT, permissions: value.st_mode & 0o7777)
+}
+
 private func regularFileIdentity(_ url: URL) -> RegularFileIdentity? {
     var value = stat()
     guard lstat(url.path, &value) == 0,
@@ -553,11 +812,13 @@ private struct ImmutableLaunchAuthority {
     let identity: BoundRunningApplicationIdentity
     let fileIdentity: RegularFileIdentity
     let executable: URL
+    let bundleDirectoryIdentity: BundleDirectoryIdentity
 
     func exactWithoutRehash() -> Bool {
         !application.isTerminated && application.processIdentifier == identity.pid &&
             application.bundleURL.map({ canonicalURL($0.path) }) == identity.bundle &&
             application.executableURL.map({ canonicalURL($0.path) }) == identity.executable &&
+            exactBundleDirectoryIdentity(identity.bundle) == bundleDirectoryIdentity &&
             regularFileIdentity(executable) == fileIdentity
     }
 
@@ -770,7 +1031,7 @@ private struct LaunchSettlementLease {
     fileprivate let eventCount: Int
 }
 
-private final class WorkspaceActivationHandoffLedger {
+private final class RawDriverToTargetHandoffLedger {
     private enum Phase {
         case installing, prelaunch, preLaunchActionArmed, actionPending,
              targetBoundAwaitingIngressDrain, launchPairAwaitingEvents,
@@ -784,11 +1045,17 @@ private final class WorkspaceActivationHandoffLedger {
         case provisionalTarget, elysium, expectedPredecessor, expectedFinder, unexpectedOther
     }
     private enum Kind: String { case activate, deactivate }
+    private enum ExpectedApplicationKind { case packaged, rawPredecessor }
     private struct ExpectedApplication {
+        let kind: ExpectedApplicationKind
         let object: NSRunningApplication
         let pid: pid_t
-        let bundle: URL
+        let bundleIdentifier: String?
+        let bundle: URL?
         let executable: URL
+        let processStart: ProcessStartIdentity?
+        let executableIdentity: RegularFileIdentity?
+        let executableHash: String?
     }
     private struct Event {
         let kind: Kind
@@ -819,9 +1086,8 @@ private final class WorkspaceActivationHandoffLedger {
     private var launchPath: LaunchPath?
     private var launchAuthorityPath: LaunchAuthorityPath?
     private var launchElysiumActivated = false
-    private var predecessorDeactivated = false
+    private var launchPredecessorDeactivated = false
     private var launchPairCompletionSequence: UInt64?
-    private var syntheticDenialActionArmed = false
     private var finderActivated = false
     private var elysiumDeactivated = false
     private var elysiumActivated = false
@@ -862,19 +1128,30 @@ private final class WorkspaceActivationHandoffLedger {
     }
 
     func capturePredecessorOrStaticTarget(
-        sequence: UInt64, frontmost: NSRunningApplication?
+        sequence: UInt64, frontmost: NSRunningApplication?,
+        requiredPredecessor: NSRunningApplication
     ) throws {
         lock.lock(); defer { lock.unlock() }
         try requireNonterminalLocked([.prelaunch])
         guard launchPath == nil, UInt64(events.count) == sequence, let frontmost,
-              let bundle = frontmost.bundleURL.map({ canonicalURL($0.path) }),
+              frontmost.isEqual(requiredPredecessor),
+              frontmost.processIdentifier == requiredPredecessor.processIdentifier,
+              frontmost.bundleIdentifier == requiredPredecessor.bundleIdentifier,
+              frontmost.bundleURL.map({ canonicalURL($0.path) }) ==
+                requiredPredecessor.bundleURL.map({ canonicalURL($0.path) }),
+              frontmost.executableURL.map({ canonicalURL($0.path) }) ==
+                requiredPredecessor.executableURL.map({ canonicalURL($0.path) }),
               let executable = frontmost.executableURL.map({ canonicalURL($0.path) }) else {
             failLocked("launch_path_capture")
             throw GateError.failed(diagnosticsLocked())
         }
+        let bundle = frontmost.bundleURL.map({ canonicalURL($0.path) })
         let captured = ExpectedApplication(
-            object: frontmost, pid: frontmost.processIdentifier,
-            bundle: bundle, executable: executable)
+            kind: .rawPredecessor, object: frontmost, pid: frontmost.processIdentifier,
+            bundleIdentifier: frontmost.bundleIdentifier, bundle: bundle, executable: executable,
+            processStart: ProcessStartIdentity.capture(frontmost.processIdentifier),
+            executableIdentity: regularFileIdentity(executable),
+            executableHash: try? hash(executable))
         if frontmost.bundleIdentifier == staticTarget.bundleIdentifier &&
             bundle == staticTarget.bundle && executable == staticTarget.executable {
             alreadyFrontmostCandidate = captured
@@ -904,29 +1181,30 @@ private final class WorkspaceActivationHandoffLedger {
             throw GateError.failed(diagnosticsLocked())
         }
         let target = ExpectedApplication(
-            object: application, pid: application.processIdentifier,
-            bundle: bundle, executable: executable)
+            kind: .packaged, object: application, pid: application.processIdentifier,
+            bundleIdentifier: application.bundleIdentifier, bundle: bundle, executable: executable,
+            processStart: nil, executableIdentity: nil, executableHash: nil)
         elysium = target
         for event in events {
             let targetEventExact = event.kind == .activate &&
                 event.application.isEqual(target.object) && event.pid == target.pid &&
                 event.bundleIdentifier == staticTarget.bundleIdentifier &&
                 event.bundle == target.bundle && event.executable == target.executable
-            let predecessorEventExact = event.kind == .deactivate && predecessor.map {
-                event.application.isEqual($0.object) && event.pid == $0.pid &&
-                    event.bundle == $0.bundle && event.executable == $0.executable
-            } == true
+            let predecessorEventExact = event.kind == .deactivate &&
+                predecessor.map { event.application.isEqual($0.object) && event.pid == $0.pid &&
+                    event.bundle == $0.bundle && event.executable == $0.executable } == true
             if targetEventExact, !launchElysiumActivated {
                 launchElysiumActivated = true
-            } else if predecessorEventExact, !predecessorDeactivated {
-                predecessorDeactivated = true
+            } else if predecessorEventExact, !launchPredecessorDeactivated {
+                launchPredecessorDeactivated = true
             } else {
                 failLocked("provisional_reconciliation");
                 throw GateError.failed(diagnosticsLocked())
             }
         }
         let observedIngress = ingressSnapshot()
-        guard observedIngress <= 2, UInt64(events.count) <= observedIngress else {
+        guard observedIngress <= 2, UInt64(events.count) <= observedIngress,
+              events.count <= 2 else {
             failLocked("provisional_capacity_or_ingress")
             throw GateError.failed(diagnosticsLocked())
         }
@@ -943,7 +1221,7 @@ private final class WorkspaceActivationHandoffLedger {
             phase = .launchSettlement
         } else if observedIngress > UInt64(events.count) {
             phase = .targetBoundAwaitingIngressDrain
-        } else if launchElysiumActivated && predecessorDeactivated {
+        } else if launchElysiumActivated && launchPredecessorDeactivated {
             launchPairCompletionSequence = UInt64(events.count)
             launchAuthorityPath = .expectedPairSurface
             phase = .launchSettlement
@@ -972,7 +1250,7 @@ private final class WorkspaceActivationHandoffLedger {
                 throw GateError.failed(diagnosticsLocked())
             }
             if observedIngress > UInt64(events.count) { return nil }
-            if launchElysiumActivated && predecessorDeactivated {
+            if launchElysiumActivated && launchPredecessorDeactivated {
                 launchPairCompletionSequence = UInt64(events.count)
                 phase = .launchPairAwaitingBaseline
             } else {
@@ -992,10 +1270,14 @@ private final class WorkspaceActivationHandoffLedger {
         if launchPath == .expectedLaunchPair, let predecessor {
             guard !predecessor.object.isTerminated,
                   predecessor.object.processIdentifier == predecessor.pid,
+                  predecessor.object.bundleIdentifier == predecessor.bundleIdentifier,
                   predecessor.object.bundleURL.map({ canonicalURL($0.path) }) ==
                     predecessor.bundle,
                   predecessor.object.executableURL.map({ canonicalURL($0.path) }) ==
-                    predecessor.executable else {
+                    predecessor.executable,
+                  ProcessStartIdentity.capture(predecessor.pid) == predecessor.processStart,
+                  regularFileIdentity(predecessor.executable) == predecessor.executableIdentity,
+                  (try? hash(predecessor.executable)) == predecessor.executableHash else {
                 failLocked("predecessor_identity_changed")
                 throw GateError.failed(diagnosticsLocked())
             }
@@ -1047,7 +1329,7 @@ private final class WorkspaceActivationHandoffLedger {
                 throw GateError.failed(diagnosticsLocked())
             }
             if observedIngress > UInt64(events.count) { return nil }
-            if launchElysiumActivated && predecessorDeactivated {
+            if launchElysiumActivated && launchPredecessorDeactivated {
                 launchPairCompletionSequence = UInt64(events.count)
                 launchAuthorityPath = .expectedPairSurface
                 phase = .launchSettlement
@@ -1065,7 +1347,7 @@ private final class WorkspaceActivationHandoffLedger {
         switch launchAuthorityPath {
         case .zeroEventSurface:
             guard events.isEmpty, observedIngress == 0,
-                  !launchElysiumActivated, !predecessorDeactivated,
+                  !launchElysiumActivated,
                   launchPairCompletionSequence == 0 else {
                 failLocked("zero_event_lease_authority")
                 throw GateError.failed(diagnosticsLocked())
@@ -1073,7 +1355,7 @@ private final class WorkspaceActivationHandoffLedger {
             authority = .zeroEventSurface
         case .expectedPairSurface:
             guard events.count == 2, observedIngress == 2,
-                  launchElysiumActivated, predecessorDeactivated,
+                  launchElysiumActivated, launchPredecessorDeactivated,
                   launchPairCompletionSequence == 2 else {
                 failLocked("expected_pair_lease_authority")
                 throw GateError.failed(diagnosticsLocked())
@@ -1099,28 +1381,13 @@ private final class WorkspaceActivationHandoffLedger {
         switch lease.authority {
         case .zeroEventSurface:
             return launchAuthorityPath == .zeroEventSurface && events.isEmpty &&
-                !launchElysiumActivated && !predecessorDeactivated &&
+                !launchElysiumActivated &&
                 launchPairCompletionSequence == 0
         case .expectedPairSurface:
             return launchAuthorityPath == .expectedPairSurface && events.count == 2 &&
-                launchElysiumActivated && predecessorDeactivated &&
+                launchElysiumActivated && launchPredecessorDeactivated &&
                 launchPairCompletionSequence == lease.sequence
         }
-    }
-
-    func armSyntheticDenialClick(lease: LaunchSettlementLease) throws {
-        lock.lock(); defer { lock.unlock() }
-        try requireNonterminalLocked([.launchSettlement])
-        guard !syntheticDenialActionArmed, launchPath == .expectedLaunchPair,
-              lease.authority == .zeroEventSurface,
-              lease.generation == generation, launchAuthorityPath == .zeroEventSurface,
-              lease.sequence == 0, lease.eventCount == 0,
-              events.isEmpty, ingressSnapshot() == 0,
-              !launchElysiumActivated, !predecessorDeactivated else {
-            failLocked("synthetic_denial_arm")
-            throw GateError.failed(diagnosticsLocked())
-        }
-        syntheticDenialActionArmed = true
     }
 
     func commitLaunchPresentation(lease: LaunchSettlementLease) throws -> Bool {
@@ -1156,8 +1423,9 @@ private final class WorkspaceActivationHandoffLedger {
         lock.lock(); defer { lock.unlock() }
         try requireNonterminalLocked([.boundNavigation])
         self.finder = ExpectedApplication(
-            object: finder, pid: finder.processIdentifier,
-            bundle: bundle, executable: executable)
+            kind: .packaged, object: finder, pid: finder.processIdentifier,
+            bundleIdentifier: finder.bundleIdentifier, bundle: bundle, executable: executable,
+            processStart: nil, executableIdentity: nil, executableHash: nil)
         phase = .finderAction
     }
 
@@ -1253,7 +1521,7 @@ private final class WorkspaceActivationHandoffLedger {
             let complete = phase == expected
             lock.unlock()
             if complete { return }
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+            pumpAppKitEvent(until: Date(timeIntervalSinceNow: 0.02))
         } while ProcessInfo.processInfo.systemUptime < deadline
         lock.lock()
         failLocked(missing)
@@ -1290,12 +1558,11 @@ private final class WorkspaceActivationHandoffLedger {
             guard ingressSnapshot() <= 2, events.count < 2 else {
                 failLocked("provisional_capacity"); return
             }
+            let provisionalTarget = classified.category == .provisionalTarget && kind == .activate
+            let predecessorExit = classified.category == .expectedPredecessor && kind == .deactivate
             guard launchPath == .expectedLaunchPair, classified.identityExact,
-                  (classified.category == .provisionalTarget && kind == .activate ||
-                   classified.category == .expectedPredecessor && kind == .deactivate),
-                  !events.contains(where: {
-                    $0.category == classified.category && $0.kind == kind
-                  }) else {
+                  (provisionalTarget || predecessorExit),
+                  !events.contains(where: { $0.category == classified.category && $0.kind == kind }) else {
                 events.append(event)
                 failLocked("provisional_foreign_or_duplicate"); return
             }
@@ -1311,12 +1578,12 @@ private final class WorkspaceActivationHandoffLedger {
             if classified.category == .elysium, kind == .activate, !launchElysiumActivated {
                 launchElysiumActivated = true
             } else if classified.category == .expectedPredecessor, kind == .deactivate,
-                      !predecessorDeactivated {
-                predecessorDeactivated = true
+                      !launchPredecessorDeactivated {
+                launchPredecessorDeactivated = true
             } else {
                 failLocked("bound_pair_duplicate_or_foreign"); return
             }
-            if launchElysiumActivated && predecessorDeactivated &&
+            if launchElysiumActivated && launchPredecessorDeactivated &&
                 ingressSnapshot() == UInt64(events.count) {
                 launchPairCompletionSequence = UInt64(events.count)
                 launchAuthorityPath = .expectedPairSurface
@@ -1326,20 +1593,18 @@ private final class WorkspaceActivationHandoffLedger {
             failLocked("event_after_launch_pair")
         case .launchSettlement:
             guard launchAuthorityPath == .zeroEventSurface,
-                  ingressSnapshot() <= 2, events.isEmpty else {
+                  ingressSnapshot() <= 1, events.isEmpty else {
                 if events.count < 32 { events.append(event) }
                 failLocked("event_after_launch_authority_freeze"); return
             }
             events.append(event)
             guard classified.identityExact,
-                  (classified.category == .elysium && kind == .activate ||
-                   classified.category == .expectedPredecessor && kind == .deactivate) else {
+                  classified.category == .elysium && kind == .activate else {
                 failLocked("launch_surface_foreign_event"); return
             }
             launchAuthorityPath = .expectedPairSurface
             launchPairCompletionSequence = nil
             if classified.category == .elysium { launchElysiumActivated = true }
-            if classified.category == .expectedPredecessor { predecessorDeactivated = true }
             phase = .launchPairAwaitingEvents
         case .boundNavigation:
             guard events.count < 32 else { failLocked("event_capacity"); return }
@@ -1405,8 +1670,12 @@ private final class WorkspaceActivationHandoffLedger {
         }
         if let predecessor, candidate.processIdentifier == predecessor.pid {
             return (.expectedPredecessor, candidate.isEqual(predecessor.object) &&
+                candidate.bundleIdentifier == predecessor.bundleIdentifier &&
                 candidate.bundleURL.map({ canonicalURL($0.path) }) == predecessor.bundle &&
-                candidate.executableURL.map({ canonicalURL($0.path) }) == predecessor.executable)
+                candidate.executableURL.map({ canonicalURL($0.path) }) == predecessor.executable &&
+                ProcessStartIdentity.capture(candidate.processIdentifier) == predecessor.processStart &&
+                regularFileIdentity(predecessor.executable) == predecessor.executableIdentity &&
+                (try? hash(predecessor.executable)) == predecessor.executableHash)
         }
         return (.unexpectedOther, false)
     }
@@ -1458,9 +1727,8 @@ private final class WorkspaceActivationHandoffLedger {
             "launch_baseline_path=\(launchPath?.rawValue ?? "terminal") " +
             "launch_authority_path=\(launchAuthorityPath?.rawValue ?? "terminal") " +
             "predecessor_bound=\(predecessor != nil) " +
-            "synthetic_denial_armed=\(syntheticDenialActionArmed) " +
             "pebble_activate_seen=\(launchElysiumActivated) " +
-            "predecessor_deactivate_seen=\(predecessorDeactivated) " +
+            "raw_state_transition_required=true " +
             "pair_complete=\(launchPairCompletionSequence != nil) " +
             "static_target_exact=\(staticTarget.exact()) " +
             "completion_bound=\(elysium != nil) buffer_reconciled=\(elysium != nil) " +
@@ -1479,6 +1747,36 @@ private func runningApplicationIdentityMatches(
 ) -> Bool {
     valueEqual && candidatePID == original.pid && candidateBundle == original.bundle &&
         candidateExecutable == original.executable && measuredSHA256 == original.measuredSHA256
+}
+
+private struct BoundedTargetProcessSet {
+    let matches: [NSRunningApplication]
+    let enumerationExact: Bool
+
+    static func capture(
+        workspace: NSWorkspace = .shared, identity: BoundRunningApplicationIdentity,
+        bundleIdentifier: String, cap: Int = 512
+    ) -> BoundedTargetProcessSet {
+        let applications = workspace.runningApplications
+        guard applications.count <= cap else {
+            return BoundedTargetProcessSet(matches: [], enumerationExact: false)
+        }
+        let matches = applications.filter { candidate in
+            candidate.processIdentifier == identity.pid ||
+                candidate.bundleIdentifier == bundleIdentifier ||
+                candidate.bundleURL.map({ canonicalURL($0.path) }) == identity.bundle ||
+                candidate.executableURL.map({ canonicalURL($0.path) }) == identity.executable
+        }
+        return BoundedTargetProcessSet(matches: matches, enumerationExact: true)
+    }
+
+    func isSoleOriginal(_ original: NSRunningApplication,
+                        identity: BoundRunningApplicationIdentity) -> Bool {
+        enumerationExact && matches.count == 1 && matches[0].isEqual(original) &&
+            matches[0].processIdentifier == identity.pid &&
+            matches[0].bundleURL.map({ canonicalURL($0.path) }) == identity.bundle &&
+            matches[0].executableURL.map({ canonicalURL($0.path) }) == identity.executable
+    }
 }
 
 private struct LaunchFastObservation {
@@ -1664,34 +1962,22 @@ private struct ConditionalDenialTimingBudget {
 private enum ConditionalLaunchDenialState: String {
     case unresolved
     case skippedSystemGranted
-    case armedDeniedClick
-    case performedDeniedClick
 }
 
 private final class ConditionalLaunchDenialAction {
     private(set) var state: ConditionalLaunchDenialState = .unresolved
 
     func close(_ terminal: ConditionalLaunchDenialState) throws {
-        guard state == .unresolved,
-              terminal == .skippedSystemGranted || terminal == .armedDeniedClick else {
+        guard state == .unresolved, terminal == .skippedSystemGranted else {
             throw GateError.failed("conditional launch action reused")
         }
         state = terminal
-    }
-
-    func markPerformed() throws {
-        guard state == .armedDeniedClick else {
-            throw GateError.failed("conditional launch action not armed")
-        }
-        state = .performedDeniedClick
     }
 
     var diagnosticPath: String {
         switch state {
         case .unresolved: return "terminal"
         case .skippedSystemGranted: return "systemGranted"
-        case .armedDeniedClick: return "syntheticDenialClickDeadlineMiss"
-        case .performedDeniedClick: return "syntheticDenialClick"
         }
     }
 }
@@ -2381,7 +2667,7 @@ private final class LaunchPresentationSettlement {
     func settle(
         budget: LaunchPresentationTimingBudget, requiredConsecutiveSamples: Int,
         minimumStableDuration: TimeInterval, allowInitialPartialPair: Bool,
-        lifecycle: WorkspaceActivationHandoffLedger,
+        lifecycle: RawDriverToTargetHandoffLedger,
         axInvalidation: TargetAXInvalidationLedger,
         fastSample: () -> LaunchFastObservation,
         fullSnapshot: (_ window: AXUIElement, _ mode: LaunchPresentationMode,
@@ -2708,7 +2994,7 @@ private final class FinderSurfaceSettlement {
     func settle(
         mode: LaunchPresentationMode, timeout: TimeInterval,
         minimumStableDuration: TimeInterval, requiredConsecutiveSamples: Int,
-        ledger: WorkspaceActivationHandoffLedger,
+        ledger: RawDriverToTargetHandoffLedger,
         sample: () -> FinderSurfaceObservation
     ) throws {
         guard phase == .pending, requiredConsecutiveSamples > 1 else {
@@ -2895,6 +3181,22 @@ private func postKeyOnce(_ id: String, _ code: CGKeyCode,
     }
 }
 
+private func postRepeatingKeyOnce(_ id: String, _ code: CGKeyCode,
+                                  ledger: OneShotActionLedger,
+                                  finalCheck: () throws -> Void) throws {
+    try ledger.perform(id) {
+        guard CGPreflightPostEventAccess(),
+              let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true),
+              let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else {
+            throw GateError.failed("event-post prerequisite \(id)")
+        }
+        event.setIntegerValueField(.keyboardEventAutorepeat, value: 1)
+        try finalCheck()
+        event.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+    }
+}
+
 private func activateOnce(_ id: String, _ application: NSRunningApplication,
                           ledger: OneShotActionLedger,
                           finalCheck: () throws -> Void) throws {
@@ -3001,21 +3303,648 @@ private final class Cleanup {
     }
 }
 
+private struct RawDriverForegroundSample: Equatable {
+    let processStart: ProcessStartIdentity
+    let command: String
+    let executableIdentity: RegularFileIdentity
+    let executableHash: String
+    let windowRectangle: CGRect
+    let cgWindowID: CGWindowID
+    let consoleUser: String
+    let displayID: CGDirectDisplayID
+    let cgIdentity: RawDriverCGWindowIdentity
+    let appKitActive: Bool
+    let runningApplicationActive: Bool
+}
+
+private let rawDriverWindowIdentifierPrefix = "elysium-integration-driver-window:"
+
+private func randomRawDriverWindowIdentifier() -> String? {
+    var bytes = [UInt8](repeating: 0, count: 32)
+    guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+        return nil
+    }
+    return rawDriverWindowIdentifierPrefix + bytes.map { String(format: "%02x", $0) }.joined()
+}
+
+private struct RawDriverDisplayBinding: Equatable {
+    let displayID: CGDirectDisplayID
+    let screenFrame: CGRect
+    let displayBounds: CGRect
+}
+
+private struct RawDriverDisplayTopology: Equatable {
+    let online: [CGDirectDisplayID]
+    let bounds: [CGRect]
+    let active: [Bool]
+    let awake: [Bool]
+    let screenFrames: [CGRect?]
+
+    static func capture(containing displayID: CGDirectDisplayID) -> RawDriverDisplayTopology? {
+        let observation = onlineDisplayObservation()
+        guard observation.querySuccess, !observation.displays.isEmpty,
+              observation.displays.filter({ $0 == displayID }).count == 1 else { return nil }
+        let bounds = observation.displays.map(CGDisplayBounds)
+        let awake = observation.displays.map { CGDisplayIsAsleep($0) == 0 }
+        let frames = observation.displays.map { id -> CGRect? in
+            let matches = NSScreen.screens.filter {
+                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?
+                    .uint32Value == id
+            }
+            return matches.count == 1 ? matches[0].frame : nil
+        }
+        // NSScreen is AppKit's active display topology. CGGetActiveDisplayList/CGDisplayIsActive
+        // are empirically empty/false for this raw CLI process despite the same online display
+        // owning a live NSScreen and the window-server surface.
+        let active = frames.map { $0 != nil }
+        guard bounds.allSatisfy({ $0.origin.x.isFinite && $0.origin.y.isFinite &&
+            $0.width.isFinite && $0.height.isFinite && $0.width > 0 && $0.height > 0 }),
+              active.count == observation.displays.count, awake.count == observation.displays.count,
+              active[observation.displays.firstIndex(of: displayID)!],
+              frames[observation.displays.firstIndex(of: displayID)!] != nil else { return nil }
+        return RawDriverDisplayTopology(
+            online: observation.displays, bounds: bounds, active: active,
+            awake: awake, screenFrames: frames)
+    }
+}
+
+private struct ExactCGFloat: Equatable {
+    let value: CGFloat
+    private let bits: UInt64
+
+    init?(_ value: CGFloat) {
+        guard value.isFinite else { return nil }
+        self.value = value
+        bits = Double(value).bitPattern
+    }
+}
+
+private struct ExactRectangle: Equatable {
+    let rectangle: CGRect
+    private let x: ExactCGFloat
+    private let y: ExactCGFloat
+    private let width: ExactCGFloat
+    private let height: ExactCGFloat
+
+    init?(_ rectangle: CGRect) {
+        guard let x = ExactCGFloat(rectangle.origin.x),
+              let y = ExactCGFloat(rectangle.origin.y),
+              let width = ExactCGFloat(rectangle.width),
+              let height = ExactCGFloat(rectangle.height),
+              width.value > 0, height.value > 0 else { return nil }
+        self.rectangle = rectangle
+        self.x = x; self.y = y; self.width = width; self.height = height
+    }
+}
+
+private struct CompositorInsetIdentity: Equatable {
+    let left: ExactCGFloat
+    let top: ExactCGFloat
+    let right: ExactCGFloat
+    let bottom: ExactCGFloat
+}
+
+private struct RawDriverCGWindowIdentity: Equatable {
+    let pid: pid_t
+    let number: CGWindowID
+    let layer: Int
+    let owner: String
+    let title: String
+    let bounds: ExactRectangle
+    let localCGFrame: ExactRectangle
+    let display: RawDriverDisplayBinding
+    let insets: CompositorInsetIdentity
+    let onScreen: Bool
+    let alpha: ExactCGFloat
+}
+
+private struct RawDriverLocalWindowBinding {
+    let objectIdentity: ObjectIdentifier
+    let number: Int
+    let title: String
+    let identifier: String
+    let styleMask: NSWindow.StyleMask
+    let level: NSWindow.Level
+    let alpha: CGFloat
+    let ignoresMouse: Bool
+    let frame: CGRect
+    let display: RawDriverDisplayBinding
+    let displayTopology: RawDriverDisplayTopology
+    let cgIdentity: RawDriverCGWindowIdentity
+}
+
+private enum RawDriverAXGeometry {
+    case absent
+    case exact(CGRect)
+    case invalid
+}
+
+private func rawDriverDisplayBinding(for window: NSWindow) -> RawDriverDisplayBinding? {
+    guard let screen = window.screen,
+          let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+        return nil
+    }
+    let displayID = CGDirectDisplayID(number.uint32Value)
+    let displayBounds = CGDisplayBounds(displayID)
+    guard displayBounds.origin.x.isFinite, displayBounds.origin.y.isFinite,
+          displayBounds.width.isFinite, displayBounds.height.isFinite,
+          displayBounds.width > 0, displayBounds.height > 0 else { return nil }
+    return RawDriverDisplayBinding(
+        displayID: displayID, screenFrame: screen.frame, displayBounds: displayBounds)
+}
+
+private func rawDriverCGRectangle(
+    appKitFrame: CGRect, display: RawDriverDisplayBinding
+) -> CGRect? {
+    guard appKitFrame.origin.x.isFinite, appKitFrame.origin.y.isFinite,
+          appKitFrame.width.isFinite, appKitFrame.height.isFinite,
+          appKitFrame.width > 0, appKitFrame.height > 0,
+          display.screenFrame.contains(appKitFrame) else { return nil }
+    let x = display.displayBounds.minX + (appKitFrame.minX - display.screenFrame.minX)
+    let y = display.displayBounds.minY + (display.screenFrame.maxY - appKitFrame.maxY)
+    let rectangle = CGRect(x: x, y: y, width: appKitFrame.width, height: appKitFrame.height)
+    guard rectangle.origin.x.isFinite, rectangle.origin.y.isFinite,
+          rectangle.width.isFinite, rectangle.height.isFinite else { return nil }
+    return rectangle
+}
+
+private func containedCompositorInsets(
+    local: CGRect, compositor: CGRect
+) -> CompositorInsetIdentity? {
+    guard let localExact = ExactRectangle(local), let compositorExact = ExactRectangle(compositor),
+          localExact.rectangle.minX <= compositorExact.rectangle.minX,
+          localExact.rectangle.minY <= compositorExact.rectangle.minY,
+          localExact.rectangle.maxX >= compositorExact.rectangle.maxX,
+          localExact.rectangle.maxY >= compositorExact.rectangle.maxY,
+          let left = ExactCGFloat(compositor.minX - local.minX),
+          let top = ExactCGFloat(compositor.minY - local.minY),
+          let right = ExactCGFloat(local.maxX - compositor.maxX),
+          let bottom = ExactCGFloat(local.maxY - compositor.maxY),
+          left.value >= 0, top.value >= 0, right.value >= 0, bottom.value >= 0 else {
+        return nil
+    }
+    return CompositorInsetIdentity(left: left, top: top, right: right, bottom: bottom)
+}
+
+private func exactInteger<T: FixedWidthInteger>(_ value: Any?, as: T.Type) -> T? {
+    guard let number = value as? NSNumber else { return nil }
+    let double = number.doubleValue
+    guard double.isFinite, double.rounded(.towardZero) == double,
+          let exact = T(exactly: double) else { return nil }
+    return exact
+}
+
+private func captureRawDriverCGIdentity(
+    pid: pid_t, number: Int, title: String, localCGFrame: CGRect,
+    display: RawDriverDisplayBinding
+) -> RawDriverCGWindowIdentity? {
+    guard number > 0, let exactNumber = UInt32(exactly: number),
+          let localExact = ExactRectangle(localCGFrame),
+          display.displayBounds.contains(localCGFrame),
+          let rows = CGWindowListCopyWindowInfo([.excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] else { return nil }
+    let numbered = rows.filter {
+        exactInteger($0[kCGWindowNumber as String], as: UInt32.self) == exactNumber
+    }
+    guard numbered.count == 1 else { return nil }
+    let row = numbered[0]
+    guard exactInteger(row[kCGWindowOwnerPID as String], as: Int32.self) == pid,
+          exactInteger(row[kCGWindowLayer as String], as: Int.self) == 0,
+          let owner = row[kCGWindowOwnerName as String] as? String,
+          owner == ProcessInfo.processInfo.processName,
+          let candidateTitle = row[kCGWindowName as String] as? String, candidateTitle == title,
+          let onScreenNumber = row[kCGWindowIsOnscreen as String] as? NSNumber,
+          CFGetTypeID(onScreenNumber) == CFBooleanGetTypeID(), onScreenNumber.boolValue,
+          let alphaNumber = row[kCGWindowAlpha as String] as? NSNumber,
+          let alpha = ExactCGFloat(CGFloat(alphaNumber.doubleValue)), alpha.value == 1,
+          let boundsValue = row[kCGWindowBounds as String],
+          let bounds = CGRect(dictionaryRepresentation: boundsValue as! CFDictionary),
+          let exactBounds = ExactRectangle(bounds), display.displayBounds.contains(bounds),
+          let insets = containedCompositorInsets(local: localCGFrame, compositor: bounds) else { return nil }
+    return RawDriverCGWindowIdentity(
+        pid: pid, number: exactNumber, layer: 0, owner: owner, title: candidateTitle,
+        bounds: exactBounds, localCGFrame: localExact, display: display, insets: insets,
+        onScreen: true, alpha: alpha)
+}
+
+private func captureRawDriverLocalWindowBinding(_ window: NSWindow) -> RawDriverLocalWindowBinding? {
+    let identifier = window.accessibilityIdentifier()
+    guard window.windowNumber > 0,
+          identifier.hasPrefix(rawDriverWindowIdentifierPrefix),
+          identifier.count == rawDriverWindowIdentifierPrefix.count + 64,
+          identifier.dropFirst(rawDriverWindowIdentifierPrefix.count).allSatisfy({
+              $0.isNumber || ("a"..."f").contains(String($0))
+          }),
+          let display = rawDriverDisplayBinding(for: window),
+          let displayTopology = RawDriverDisplayTopology.capture(containing: display.displayID),
+          let localCGFrame = rawDriverCGRectangle(appKitFrame: window.frame, display: display),
+          let cgIdentity = captureRawDriverCGIdentity(
+            pid: getpid(), number: window.windowNumber, title: window.title,
+            localCGFrame: localCGFrame, display: display) else { return nil }
+    return RawDriverLocalWindowBinding(
+        objectIdentity: ObjectIdentifier(window), number: window.windowNumber,
+        title: window.title, identifier: identifier, styleMask: window.styleMask,
+        level: window.level, alpha: window.alphaValue,
+        ignoresMouse: window.ignoresMouseEvents, frame: window.frame, display: display,
+        displayTopology: displayTopology,
+        cgIdentity: cgIdentity)
+}
+
+private func rawDriverAXGeometry(_ window: AXUIElement) -> RawDriverAXGeometry {
+    var rawPosition: CFTypeRef?
+    var rawSize: CFTypeRef?
+    let positionError = AXUIElementCopyAttributeValue(
+        window, kAXPositionAttribute as CFString, &rawPosition)
+    let sizeError = AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &rawSize)
+    let absent: Set<AXError> = [.noValue, .attributeUnsupported]
+    if absent.contains(positionError), absent.contains(sizeError) { return .absent }
+    guard positionError == .success, sizeError == .success,
+          let rawPosition, let rawSize,
+          CFGetTypeID(rawPosition) == AXValueGetTypeID(),
+          CFGetTypeID(rawSize) == AXValueGetTypeID() else { return .invalid }
+    var point = CGPoint.zero
+    var size = CGSize.zero
+    guard AXValueGetValue(rawPosition as! AXValue, .cgPoint, &point),
+          AXValueGetValue(rawSize as! AXValue, .cgSize, &size) else { return .invalid }
+    let rectangle = CGRect(origin: point, size: size)
+    guard rectangle.origin.x.isFinite, rectangle.origin.y.isFinite,
+          rectangle.width.isFinite, rectangle.height.isFinite,
+          rectangle.width > 0, rectangle.height > 0 else { return .invalid }
+    return .exact(rectangle)
+}
+
+private func validateRawDriverLocalCGBinding(
+    window: NSWindow, retained: RawDriverLocalWindowBinding
+) -> RawDriverCGWindowIdentity? {
+    guard ObjectIdentifier(window) == retained.objectIdentity,
+          NSApplication.shared.windows.count == 1,
+          window.windowNumber == retained.number, window.title == retained.title,
+          window.accessibilityIdentifier() == retained.identifier,
+          window.styleMask == retained.styleMask, window.level == retained.level,
+          window.alphaValue == retained.alpha, window.ignoresMouseEvents == retained.ignoresMouse,
+          window.frame == retained.frame,
+          rawDriverDisplayBinding(for: window) == retained.display,
+          RawDriverDisplayTopology.capture(containing: retained.display.displayID) ==
+            retained.displayTopology,
+          let localCGFrame = rawDriverCGRectangle(
+            appKitFrame: retained.frame, display: retained.display),
+          let identity = captureRawDriverCGIdentity(
+            pid: getpid(), number: retained.number, title: retained.title,
+            localCGFrame: localCGFrame, display: retained.display),
+          identity == retained.cgIdentity else { return nil }
+    return identity
+}
+
+private struct RawForegroundPredecessor {
+    let application: NSRunningApplication
+    let pid: pid_t
+    let bundleIdentifier: String?
+    let bundle: URL?
+    let executable: URL
+    let processStart: ProcessStartIdentity
+    let executableIdentity: RegularFileIdentity
+    let executableHash: String
+
+    static func capture(_ application: NSRunningApplication) -> RawForegroundPredecessor? {
+        let pid = application.processIdentifier
+        guard pid > 0, pid != getpid(), !application.isTerminated,
+              let executable = application.executableURL.map({ canonicalURL($0.path) }),
+              let processStart = ProcessStartIdentity.capture(pid),
+              let executableIdentity = regularFileIdentity(executable),
+              let executableHash = try? hash(executable) else { return nil }
+        return RawForegroundPredecessor(
+            application: application, pid: pid,
+            bundleIdentifier: application.bundleIdentifier,
+            bundle: application.bundleURL.map({ canonicalURL($0.path) }),
+            executable: executable, processStart: processStart,
+            executableIdentity: executableIdentity, executableHash: executableHash)
+    }
+
+    func matches(_ candidate: NSRunningApplication) -> Bool {
+        candidate.isEqual(application) && candidate.processIdentifier == pid &&
+            !candidate.isTerminated && candidate.bundleIdentifier == bundleIdentifier &&
+            candidate.bundleURL.map({ canonicalURL($0.path) }) == bundle &&
+            candidate.executableURL.map({ canonicalURL($0.path) }) == executable &&
+            ProcessStartIdentity.capture(pid) == processStart &&
+            regularFileIdentity(executable) == executableIdentity &&
+            (try? hash(executable)) == executableHash
+    }
+}
+
+private final class RawDriverActiveLifecycleLedger {
+    private enum Phase { case installing, prestateBound, actionConsumed, poststateCandidate, stableCommitted, frozen, failed }
+    private let lock = NSLock()
+    private let generation: UInt64 = 1
+    private let predecessor: RawForegroundPredecessor
+    private var phase: Phase = .installing
+    private var workspaceIngress = 0
+    private var workspaceTokens: [NSObjectProtocol] = []
+    private var actionConsumed = false
+    private var applicationFrontmostSucceeded = false
+    private var successfulWindowWrites: Set<String> = []
+    private var terminalReason: String?
+
+    init(predecessor: RawForegroundPredecessor) {
+        self.predecessor = predecessor
+    }
+
+    func install() throws {
+        lock.lock()
+        guard phase == .installing, workspaceTokens.isEmpty else {
+            lock.unlock(); throw GateError.failed("driver foreground ledger install")
+        }
+        let installedGeneration = generation
+        let activate = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: NSWorkspace.shared, queue: .main
+        ) { [weak self] notification in
+            self?.recordWorkspace(notification, activation: true, generation: installedGeneration)
+        }
+        let deactivate = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didDeactivateApplicationNotification,
+            object: NSWorkspace.shared, queue: .main
+        ) { [weak self] notification in
+            self?.recordWorkspace(notification, activation: false, generation: installedGeneration)
+        }
+        workspaceTokens = [activate, deactivate]
+        phase = .prestateBound
+        lock.unlock()
+    }
+
+    func armCompositeAction() throws {
+        lock.lock(); defer { lock.unlock() }
+        guard phase == .prestateBound, workspaceIngress == 0, !actionConsumed else {
+            failLocked("driver_foreground_arm"); throw GateError.failed(diagnosticsLocked())
+        }
+        actionConsumed = true
+        phase = .actionConsumed
+    }
+
+    func requireBeforeApplicationFrontmostSet() throws {
+        lock.lock(); defer { lock.unlock() }
+        guard phase == .actionConsumed, actionConsumed,
+              !applicationFrontmostSucceeded, successfulWindowWrites.isEmpty,
+              workspaceIngress <= 1,
+              terminalReason == nil else {
+            failLocked("driver_foreground_set_order"); throw GateError.failed(diagnosticsLocked())
+        }
+    }
+
+    func recordApplicationFrontmostResult(success: Bool) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard phase == .actionConsumed, !applicationFrontmostSucceeded,
+              terminalReason == nil, success else {
+            failLocked("driver_foreground_set_result"); throw GateError.failed(diagnosticsLocked())
+        }
+        applicationFrontmostSucceeded = true
+        phase = .poststateCandidate
+    }
+
+    func requirePoststateCandidate() throws {
+        lock.lock(); defer { lock.unlock() }
+        guard phase == .poststateCandidate, applicationFrontmostSucceeded,
+              workspaceIngress <= 1, terminalReason == nil else {
+            failLocked("driver_foreground_pair_boundary")
+            throw GateError.failed(diagnosticsLocked())
+        }
+    }
+
+    func recordWindowWrite(_ attribute: CFString) throws {
+        let name = attribute as String
+        lock.lock(); defer { lock.unlock() }
+        guard phase == .poststateCandidate, applicationFrontmostSucceeded,
+              workspaceIngress <= 1, terminalReason == nil,
+              (name == (kAXMainAttribute as String) ||
+               name == (kAXFocusedAttribute as String)),
+              !successfulWindowWrites.contains(name) else {
+            failLocked("driver_foreground_window_write")
+            throw GateError.failed(diagnosticsLocked())
+        }
+        successfulWindowWrites.insert(name)
+    }
+
+    func commitStable() throws {
+        lock.lock(); defer { lock.unlock() }
+        guard phase == .poststateCandidate, applicationFrontmostSucceeded,
+              workspaceIngress <= 1, terminalReason == nil else {
+            failLocked("driver_foreground_stable_commit")
+            throw GateError.failed(diagnosticsLocked())
+        }
+        phase = .stableCommitted
+    }
+
+    func closeAndFreeze() throws -> String {
+        lock.lock()
+        guard phase == .stableCommitted, applicationFrontmostSucceeded,
+              workspaceIngress <= 1, terminalReason == nil else {
+            failLocked("driver_foreground_freeze")
+            let result = diagnosticsLocked(); lock.unlock()
+            throw GateError.failed(result)
+        }
+        let closingWorkspaceTokens = workspaceTokens
+        workspaceTokens.removeAll()
+        phase = .frozen
+        let material = "generation=\(generation);workspace_ingress=\(workspaceIngress);" +
+            "event=causalRawForegroundTransition" +
+            ";frontmost=1;window_writes=\(successfulWindowWrites.sorted().joined(separator: ","))"
+        lock.unlock()
+        for token in closingWorkspaceTokens {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+        }
+        return stringHash(material)
+    }
+
+    private func recordWorkspace(
+        _ notification: Notification, activation: Bool, generation: UInt64
+    ) {
+        lock.lock(); defer { lock.unlock() }
+        guard generation == self.generation, phase != .frozen else {
+            failLocked("driver_foreground_late_event"); return
+        }
+        workspaceIngress += 1
+        guard phase == .actionConsumed || phase == .poststateCandidate,
+              workspaceIngress == 1, !activation,
+              notification.name == NSWorkspace.didDeactivateApplicationNotification,
+              notification.object as AnyObject? === NSWorkspace.shared,
+              let candidate = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication,
+              predecessor.matches(candidate) else {
+            failLocked("driver_foreground_workspace_interposition"); return
+        }
+    }
+
+    private func failLocked(_ reason: String) {
+        if terminalReason == nil { terminalReason = reason }
+        phase = .failed
+    }
+
+    private func diagnosticsLocked() -> String {
+        "driver_foreground generation=\(generation) workspace_ingress=\(workspaceIngress) " +
+            "frontmost=\(applicationFrontmostSucceeded) " +
+            "window_writes=\(successfulWindowWrites.count) " +
+            "terminal=\(terminalReason ?? "none")"
+    }
+}
+
+private func validateRawDriverAXApplication(
+    _ axApplication: AXUIElement, localWindow: NSWindow,
+    localBinding: RawDriverLocalWindowBinding,
+    executable: URL, expectedStart: ProcessStartIdentity,
+    expectedIdentity: RegularFileIdentity, expectedHash: String
+) -> Bool {
+    var applicationPID: pid_t = 0
+    guard AXIsProcessTrusted(), CGPreflightPostEventAccess(),
+          AXUIElementGetPid(axApplication, &applicationPID) == .success,
+          applicationPID == getpid(),
+          axString(axApplication, kAXRoleAttribute as CFString) == (kAXApplicationRole as String),
+          axBool(axApplication, kAXFrontmostAttribute as CFString) != nil,
+          NSRunningApplication.current.processIdentifier == getpid(),
+          !NSRunningApplication.current.isTerminated,
+          ProcessStartIdentity.capture(getpid()) == expectedStart,
+          runningCommand(getpid()).map({ canonicalURL($0).path }) == executable.path,
+          regularFileIdentity(executable) == expectedIdentity,
+          (try? hash(executable)) == expectedHash,
+          validateRawDriverLocalCGBinding(window: localWindow, retained: localBinding) != nil else {
+        return false
+    }
+    var settable = DarwinBoolean(false)
+    return AXUIElementIsAttributeSettable(
+        axApplication, kAXFrontmostAttribute as CFString, &settable) == .success &&
+        settable.boolValue
+}
+
+private func validateRawDriverAXWindowBinding(
+    axApplication: AXUIElement, axWindow: AXUIElement, localWindow: NSWindow,
+    localBinding: RawDriverLocalWindowBinding,
+    executable: URL, expectedStart: ProcessStartIdentity,
+    expectedIdentity: RegularFileIdentity, expectedHash: String
+) -> Bool {
+    var windowPID: pid_t = 0
+    guard validateRawDriverAXApplication(
+            axApplication, localWindow: localWindow, localBinding: localBinding,
+            executable: executable, expectedStart: expectedStart,
+            expectedIdentity: expectedIdentity, expectedHash: expectedHash),
+          AXUIElementGetPid(axWindow, &windowPID) == .success, windowPID == getpid(),
+          let windows = axValue(axApplication, kAXWindowsAttribute as CFString) as? [AXUIElement],
+          windows.count == 1, !CFEqual(axApplication, axWindow), CFEqual(windows[0], axWindow),
+          axString(axWindow, kAXRoleAttribute as CFString) == (kAXWindowRole as String),
+          axString(axWindow, kAXSubroleAttribute as CFString) == (kAXStandardWindowSubrole as String),
+          axString(axWindow, kAXTitleAttribute as CFString) == localBinding.title,
+          axString(axWindow, kAXIdentifierAttribute as CFString) == localBinding.identifier,
+          let cgIdentity = validateRawDriverLocalCGBinding(
+            window: localWindow, retained: localBinding) else { return false }
+    switch rawDriverAXGeometry(axWindow) {
+    case .absent: return false
+    case .exact(let rectangle):
+        return ExactRectangle(rectangle) == cgIdentity.localCGFrame
+    case .invalid: return false
+    }
+}
+
+private func rawDriverForegroundPrestate(
+    axApplication: AXUIElement, window: NSWindow,
+    localBinding: RawDriverLocalWindowBinding, predecessor: RawForegroundPredecessor,
+    executable: URL, expectedStart: ProcessStartIdentity,
+    expectedIdentity: RegularFileIdentity, expectedHash: String
+) -> RawDriverLocalWindowBinding? {
+    guard let frontmost = NSWorkspace.shared.frontmostApplication,
+          predecessor.matches(frontmost), predecessor.application.isActive,
+          !NSRunningApplication.current.isActive,
+          axBool(axApplication, kAXFrontmostAttribute as CFString) == false,
+          !window.isKeyWindow, !window.isMainWindow,
+          NSRunningApplication.runningApplications(
+            withBundleIdentifier: "com.briangao.elysium").isEmpty,
+          validateRawDriverAXApplication(
+            axApplication, localWindow: window, localBinding: localBinding,
+            executable: executable, expectedStart: expectedStart,
+            expectedIdentity: expectedIdentity, expectedHash: expectedHash) else { return nil }
+    return localBinding
+}
+
+private func rawDriverForegroundSample(
+    application: NSApplication, window: NSWindow, executable: URL,
+    expectedStart: ProcessStartIdentity, expectedIdentity: RegularFileIdentity,
+    expectedHash: String, localBinding: RawDriverLocalWindowBinding,
+    predecessor: RawForegroundPredecessor
+) -> RawDriverForegroundSample? {
+    guard AXIsProcessTrusted(), CGPreflightPostEventAccess(),
+          window.isKeyWindow, window.isMainWindow,
+          let frontmost = NSWorkspace.shared.frontmostApplication,
+          frontmost.isEqual(NSRunningApplication.current),
+          frontmost.processIdentifier == getpid(), !predecessor.application.isActive,
+          !predecessor.application.isTerminated,
+          predecessor.matches(predecessor.application),
+          frontmost.executableURL.map({ canonicalURL($0.path) }) == executable,
+          runningCommand(getpid()).map({ canonicalURL($0).path }) == executable.path,
+          ProcessStartIdentity.capture(getpid()) == expectedStart,
+          regularFileIdentity(executable) == expectedIdentity,
+          (try? hash(executable)) == expectedHash,
+          let cgIdentity = validateRawDriverLocalCGBinding(
+            window: window, retained: localBinding) else { return nil }
+    var consoleUID: uid_t = 0
+    var consoleGID: gid_t = 0
+    guard let console = SCDynamicStoreCopyConsoleUser(nil, &consoleUID, &consoleGID) as String?,
+          console != "loginwindow", consoleUID == getuid(),
+          let screen = window.screen,
+          let displayNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+            as? NSNumber else { return nil }
+    let axApplication = AXUIElementCreateApplication(getpid())
+    guard axBool(axApplication, kAXFrontmostAttribute as CFString) == true,
+          let axWindows = axValue(axApplication, kAXWindowsAttribute as CFString) as? [AXUIElement],
+          axWindows.count == 1,
+          let focusedWindow = axElement(axApplication, kAXFocusedWindowAttribute as CFString),
+          CFEqual(axWindows[0], focusedWindow),
+          axBool(focusedWindow, kAXMainAttribute as CFString) == true,
+          axBool(focusedWindow, kAXFocusedAttribute as CFString) == true,
+          axString(focusedWindow, kAXRoleAttribute as CFString) == (kAXWindowRole as String),
+          axString(focusedWindow, kAXSubroleAttribute as CFString) ==
+            (kAXStandardWindowSubrole as String),
+          axString(focusedWindow, kAXTitleAttribute as CFString) == localBinding.title,
+          axString(focusedWindow, kAXIdentifierAttribute as CFString) == localBinding.identifier,
+          let position = axPoint(focusedWindow, kAXPositionAttribute as CFString),
+          let size = axSize(focusedWindow, kAXSizeAttribute as CFString) else { return nil }
+    let rectangle = CGRect(origin: position, size: size)
+    guard ExactRectangle(rectangle) == cgIdentity.localCGFrame,
+          let focusedElement = axElement(axApplication, kAXFocusedUIElementAttribute as CFString),
+          CFEqual(focusedElement, focusedWindow) || CFEqual(focusedElement, window.contentView) else {
+        return nil
+    }
+    return RawDriverForegroundSample(
+        processStart: expectedStart, command: executable.path,
+        executableIdentity: expectedIdentity, executableHash: expectedHash,
+        windowRectangle: rectangle, cgWindowID: CGWindowID(localBinding.number),
+        consoleUser: console, displayID: CGDirectDisplayID(displayNumber.uint32Value),
+        cgIdentity: cgIdentity, appKitActive: application.isActive,
+        runningApplicationActive: NSRunningApplication.current.isActive)
+}
+
 let arguments = CommandLine.arguments
 if arguments == [arguments[0], "--self-test-conditional-denial-action-v1"] {
-    guard runConditionalDenialActionSelfTest(),
-          runLaunchPresentationTimingBudgetSelfTest() else {
+    guard runConditionalDenialActionSelfTest(), runLaunchPresentationTimingBudgetSelfTest() else {
         fail("conditional action and presentation budget self-test")
     }
-    print("Conditional denial action and presentation budget self-test: PASS cases=52")
+    print("Conditional denial action and presentation budget self-test: PASS cases=53")
     exit(0)
 }
-guard arguments.count == 6 else { fail("arguments") }
+guard arguments.count == 9 else { fail("arguments") }
 let bundleURL = canonicalURL(arguments[1])
 let manifestURL = URL(fileURLWithPath: arguments[2])
 let releaseURL = canonicalURL(arguments[3])
 let expectedReleaseHash = arguments[4]
 let pidFile = arguments[5]
+let rawDriverExecutable = canonicalURL(arguments[0])
+guard let rawDriverStart = ProcessStartIdentity.capture(getpid()),
+      let rawDriverFileIdentity = regularFileIdentity(rawDriverExecutable),
+      let rawDriverHash = try? hash(rawDriverExecutable),
+      AXIsProcessTrusted(), CGPreflightPostEventAccess() else {
+    fail("raw Driver identity or TCC preflight")
+}
+let rawDriverApplication = NSApplication.shared
+guard rawDriverApplication.setActivationPolicy(.accessory) else {
+    fail("raw Driver accessory activation policy")
+}
+rawDriverApplication.finishLaunching()
+private let workspaceCenter = NSWorkspace.shared.notificationCenter
 private let cleanup = Cleanup()
 private var gateStage = "preflight"
 private let actionLedger = OneShotActionLedger(expectedIDs: expectedOneShotActionIDs)
@@ -3074,6 +4003,9 @@ do {
     guard let launchFileIdentity = regularFileIdentity(stagedExecutable) else {
         throw GateError.failed("static artifact file identity")
     }
+    guard let launchBundleDirectoryIdentity = exactBundleDirectoryIdentity(bundleURL) else {
+        throw GateError.failed("static bundle directory identity")
+    }
     let staticArtifactAuthority = StaticArtifactAuthority(
         bundle: bundleURL, bundleIdentifier: "com.briangao.elysium",
         executable: stagedExecutable, fileIdentity: launchFileIdentity,
@@ -3081,43 +4013,137 @@ do {
     guard staticArtifactAuthority.exact() else {
         throw GateError.failed("static artifact authority")
     }
-    let workspaceCenter = NSWorkspace.shared.notificationCenter
-    let handoffLedger = WorkspaceActivationHandoffLedger(
+    let coordinatorBundle = canonicalURL(arguments[6])
+    guard coordinatorBundle.lastPathComponent == "ElysiumIntegrationCoordinator.app",
+          let coordinatorExecutable = Bundle(url: coordinatorBundle)?.executableURL.map({ canonicalURL($0.path) }),
+          try hash(coordinatorExecutable) == arguments[7],
+          let coordinatorStaticCode = staticCodeIdentity(coordinatorBundle) else {
+        throw GateError.failed("Coordinator static identity")
+    }
+    let coordinatorSession = try CoordinatorSession(root: coordinatorBundle.deletingLastPathComponent())
+    try coordinatorSession.validateNamespace(expectSocket: true)
+    guard let coordinatorForeground = CoordinatorForegroundLedger() else {
+        throw GateError.failed("Coordinator predecessor identity")
+    }
+    coordinatorForeground.install()
+    defer { coordinatorForeground.close() }
+    let coordinatorConfiguration = NSWorkspace.OpenConfiguration()
+    coordinatorConfiguration.activates = true
+    coordinatorConfiguration.createsNewApplicationInstance = true
+    coordinatorConfiguration.allowsRunningApplicationSubstitution = false
+    coordinatorConfiguration.arguments = [
+        "1", coordinatorSession.socketURL.path, hexString(coordinatorSession.nonce), "\(getpid())",
+        rawDriverHash, bundleURL.path, measuredStagedHash,
+    ]
+    coordinatorConfiguration.environment = [:]
+    let coordinatorLaunch = LaunchCompletionState()
+    NSWorkspace.shared.openApplication(at: coordinatorBundle, configuration: coordinatorConfiguration) {
+        coordinatorLaunch.receive(application: $0, error: $1)
+    }
+    guard wait(8, until: { coordinatorLaunch.isComplete() }),
+          let coordinatorApplication = try? coordinatorLaunch.exactApplication(),
+          coordinatorApplication.bundleIdentifier == "com.briangao.elysium.integration-coordinator",
+          coordinatorApplication.bundleURL.map({ canonicalURL($0.path) }) == coordinatorBundle,
+          coordinatorApplication.executableURL.map({ canonicalURL($0.path) }) == coordinatorExecutable else {
+        throw GateError.failed("Coordinator LaunchServices identity")
+    }
+    coordinatorForeground.bind(coordinatorApplication)
+    coordinatorSession.application = coordinatorApplication
+    try Data("\(coordinatorApplication.processIdentifier)\n".utf8).write(
+        to: URL(fileURLWithPath: arguments[8]), options: [.atomic])
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: arguments[8])
+    let originalFlags = fcntl(coordinatorSession.listener, F_GETFL)
+    guard originalFlags >= 0,
+          fcntl(coordinatorSession.listener, F_SETFL, originalFlags | O_NONBLOCK) == 0 else {
+        throw GateError.failed("Coordinator listener nonblocking")
+    }
+    let acceptDeadline = ProcessInfo.processInfo.systemUptime + 5
+    repeat {
+        coordinatorSession.connection = accept(coordinatorSession.listener, nil, nil)
+        if coordinatorSession.connection >= 0 { break }
+        guard errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR else {
+            throw GateError.failed("Coordinator accept")
+        }
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+    } while ProcessInfo.processInfo.systemUptime < acceptDeadline
+    guard coordinatorSession.connection >= 0 else { throw GateError.failed("Coordinator accept") }
+    try setCloseOnExec(coordinatorSession.connection)
+    let connectionFlags = fcntl(coordinatorSession.connection, F_GETFL)
+    guard connectionFlags >= 0,
+          fcntl(coordinatorSession.connection, F_SETFL, connectionFlags & ~O_NONBLOCK) == 0 else {
+        throw GateError.failed("Coordinator connection blocking mode")
+    }
+    var protocolTimeout = timeval(tv_sec: 5, tv_usec: 0)
+    guard setsockopt(coordinatorSession.connection, SOL_SOCKET, SO_RCVTIMEO, &protocolTimeout,
+                     socklen_t(MemoryLayout.size(ofValue: protocolTimeout))) == 0,
+          setsockopt(coordinatorSession.connection, SOL_SOCKET, SO_SNDTIMEO, &protocolTimeout,
+                     socklen_t(MemoryLayout.size(ofValue: protocolTimeout))) == 0 else {
+        throw GateError.failed("Coordinator connection deadline")
+    }
+    close(coordinatorSession.listener); coordinatorSession.listener = -1
+    try coordinatorSession.validateNamespace(expectSocket: true)
+    let peerCredentials = try coordinatorPeerCredentials(coordinatorSession.connection)
+    let peer = peerCredentials.pid
+    guard peer == coordinatorApplication.processIdentifier,
+          let peerStart = ProcessStartIdentity.capture(peer),
+          runningCommand(peer).map({ canonicalURL($0).path }) == coordinatorExecutable.path,
+          regularFileIdentity(coordinatorExecutable) != nil,
+          (try? hash(coordinatorExecutable)) == arguments[7],
+          let peerCode = liveCodeIdentity(peer), peerCode == coordinatorStaticCode else {
+        throw GateError.failed("Coordinator peer identity")
+    }
+    let hello = try coordinatorSession.wire.receive(coordinatorSession.connection, type: 1)
+    guard hello == Data("pid=\(peer)".utf8) else { throw GateError.failed("Coordinator HELLO") }
+    let challenge = try secureRandom32()
+    try coordinatorSession.wire.send(coordinatorSession.connection, type: 2, payload: challenge)
+    let ready = try coordinatorSession.wire.receive(coordinatorSession.connection, type: 3)
+    guard ready == Data(SHA256.hash(data: challenge)),
+          ProcessStartIdentity.capture(peer) == peerStart,
+          runningCommand(peer).map({ canonicalURL($0).path }) == coordinatorExecutable.path,
+          liveCodeIdentity(peer) == peerCode,
+          coordinatorForeground.ready(coordinatorApplication) else {
+        throw GateError.failed("Coordinator foreground READY")
+    }
+    // Install the target observer while the exact retained Coordinator foreground
+    // generation is still live. There is no unobserved authorization interval.
+    let handoffLedger = RawDriverToTargetHandoffLedger(
         staticTarget: staticArtifactAuthority)
     try handoffLedger.installAndArmLifecycleLedger(center: workspaceCenter)
     cleanup.closeObservers = { handoffLedger.close(center: workspaceCenter) }
     let launchCaptureSequence = try handoffLedger.beginLaunchPathCapture()
     let launchFrontmost = NSWorkspace.shared.frontmostApplication
     let launchPredecessorIdentity = launchFrontmost.flatMap { predecessor ->
-        (application: NSRunningApplication, pid: pid_t, bundle: URL, executable: URL)? in
-        guard let bundle = predecessor.bundleURL.map({ canonicalURL($0.path) }),
-              let executable = predecessor.executableURL.map({ canonicalURL($0.path) }) else {
+        (application: NSRunningApplication, pid: pid_t, bundle: URL?, executable: URL)? in
+        guard let executable = predecessor.executableURL.map({ canonicalURL($0.path) }) else {
             return nil
         }
-        return (predecessor, predecessor.processIdentifier, bundle, executable)
+        return (predecessor, predecessor.processIdentifier,
+                predecessor.bundleURL.map({ canonicalURL($0.path) }), executable)
     }
     try handoffLedger.capturePredecessorOrStaticTarget(
-        sequence: launchCaptureSequence, frontmost: launchFrontmost)
+        sequence: launchCaptureSequence, frontmost: launchFrontmost,
+        requiredPredecessor: coordinatorApplication)
+    coordinatorForeground.close()
 
-    let configuration = NSWorkspace.OpenConfiguration()
-    configuration.activates = true
     let home = bundleURL.deletingLastPathComponent().appendingPathComponent("profile").path
     try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
-    configuration.environment = ["CFFIXED_USER_HOME": home, "HOME": home]
     let launchCompletion = LaunchCompletionState()
     try actionLedger.perform("launch.application") {
         guard !launchCompletion.isComplete() else {
             throw GateError.failed("launch adjacent assertion")
         }
         try handoffLedger.armOpenAction()
-        NSWorkspace.shared.openApplication(at: bundleURL, configuration: configuration) {
-            launchCompletion.receive(application: $0, error: $1)
-        }
+        let authority = Data(SHA256.hash(data: Data((bundleURL.path + measuredStagedHash).utf8)))
+        try coordinatorSession.wire.send(coordinatorSession.connection, type: 4, payload: authority)
     }
-    guard wait(10, until: { launchCompletion.isComplete() }) else {
-        throw GateError.failed(
-            handoffLedger.terminatePrelaunch("launch_completion_timeout"))
+    let completionFrame = try coordinatorSession.wire.receive(coordinatorSession.connection, type: 5)
+    guard let completionString = String(data: completionFrame, encoding: .utf8),
+          completionString.hasPrefix("pid="),
+          let completionPID = pid_t(completionString.dropFirst(4)), completionPID > 0,
+          let completedApplication = NSRunningApplication(processIdentifier: completionPID) else {
+        throw GateError.failed(handoffLedger.terminatePrelaunch("launch_completion_invalid"))
     }
+    launchCompletion.receive(application: completedApplication, error: nil)
     let app: NSRunningApplication
     do {
         app = try launchCompletion.exactApplication()
@@ -3153,6 +4179,9 @@ do {
     let boundAppIdentity = BoundRunningApplicationIdentity(
         pid: app.processIdentifier, bundle: bundleURL, executable: stagedExecutable,
         measuredSHA256: measuredStagedHash)
+    guard ProcessStartIdentity.capture(boundAppIdentity.pid) != nil else {
+        throw GateError.failed("target process start identity")
+    }
     guard runningApplicationIdentityMatches(
         valueEqual: true, original: boundAppIdentity, candidatePID: app.processIdentifier,
         candidateBundle: bundleURL, candidateExecutable: stagedExecutable,
@@ -3181,7 +4210,8 @@ do {
     }
     let immutableLaunchAuthority = ImmutableLaunchAuthority(
         application: app, identity: boundAppIdentity,
-        fileIdentity: launchFileIdentity, executable: stagedExecutable)
+        fileIdentity: launchFileIdentity, executable: stagedExecutable,
+        bundleDirectoryIdentity: launchBundleDirectoryIdentity)
     guard immutableLaunchAuthority.exactWithRehash() else {
         throw GateError.failed(
             handoffLedger.terminatePrelaunch("immutable_launch_authority"))
@@ -3198,6 +4228,11 @@ do {
             immutableLaunchAuthority.exactWithoutRehash()
     }
     let axApp = AXUIElementCreateApplication(app.processIdentifier)
+    guard wait(3, until: {
+        axString(axApp, kAXRoleAttribute as CFString) == (kAXApplicationRole as String)
+    }) else {
+        throw GateError.failed("launch AX application publication")
+    }
     let launchAXInvalidation = TargetAXInvalidationLedger()
     try launchAXInvalidation.install(pid: boundAppIdentity.pid, application: axApp)
     cleanup.closeObservers = {
@@ -3466,15 +4501,14 @@ do {
     // Shipping waits 0.1s, then checks fullscreen five times at 1.2s intervals before revealing
     // its opaque windowed fallback. The extra two-second margin is fixed and cannot extend itself.
     let conditionalLaunchAction = ConditionalLaunchDenialAction()
-    var deniedWindow: CGOwnerWindow?
-    var deniedDisplayID: CGDirectDisplayID?
-    var deniedPrivateState: PrivateLaunchStateSnapshot?
     var denialCandidate: LaunchDenialObservation?
     var denialFirstExact: TimeInterval?
     var denialConsecutive = 0
+    var zeroEventFirstExact: TimeInterval?
+    var zeroEventConsecutive = 0
     let denialDiagnostics = LaunchDenialDiagnostics()
     denialDiagnostics.recordBudget(conditionalDenialTimingBudget)
-    var inputMayHaveOccurred = false
+    let inputMayHaveOccurred = false
     func inputDisposition() -> String {
         inputMayHaveOccurred
             ? "input_may_have_occurred=true result_invalid=true verification_set_stopped=true"
@@ -3566,6 +4600,23 @@ do {
                     throw GateError.failed(handoffLedger.terminateLaunchSettlement(
                         "conditional_launch_sampling_budget_exhausted"))
                 }
+                if sample.cheap.finishedLaunching, sample.cheap.predecessorFrontmostExact,
+                   sample.workspaceUnchanged, sample.axUnchanged {
+                    if zeroEventFirstExact == nil {
+                        zeroEventFirstExact = sample.endedAt
+                        zeroEventConsecutive = 1
+                    } else {
+                        zeroEventConsecutive += 1
+                    }
+                    if zeroEventConsecutive >= 2,
+                       let first = zeroEventFirstExact, sample.endedAt - first >= 0.25 {
+                        throw GateError.failed(handoffLedger.terminateLaunchSettlement(
+                            "foreground_driver_initial_handoff_missing"))
+                    }
+                } else {
+                    zeroEventFirstExact = nil
+                    zeroEventConsecutive = 0
+                }
                 RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
                 continue
             }
@@ -3586,6 +4637,23 @@ do {
                 (!denial.noStandardInactiveSurface && denial.inactive) {
                 throw GateError.failed(handoffLedger.terminateLaunchSettlement(
                     "conditional_launch_mixed_evidence"))
+            }
+            if sample.cheap.finishedLaunching, sample.cheap.predecessorFrontmostExact,
+               sample.workspaceUnchanged, sample.axUnchanged, denial.inactive {
+                if zeroEventFirstExact == nil {
+                    zeroEventFirstExact = sample.endedAt
+                    zeroEventConsecutive = 1
+                } else {
+                    zeroEventConsecutive += 1
+                }
+                if zeroEventConsecutive >= 2,
+                   let first = zeroEventFirstExact, sample.endedAt - first >= 0.25 {
+                    throw GateError.failed(handoffLedger.terminateLaunchSettlement(
+                        "foreground_driver_initial_handoff_missing"))
+                }
+            } else {
+                zeroEventFirstExact = nil
+                zeroEventConsecutive = 0
             }
             guard denial.eligible else {
                 denialCandidate = nil
@@ -3638,150 +4706,16 @@ do {
         if conditionalLaunchAction.state != .unresolved { break }
         guard case .denial(let sample) = disposition else { continue }
         precondition(sample.cheap.lease.authority == .zeroEventSurface)
-        guard let denial = sample.denial else { continue }
+        guard sample.denial != nil else { continue }
         let now = sample.endedAt
         guard denialConsecutive >= 2, let first = denialFirstExact,
-              now - first >= 0.25, let candidate = denialCandidate else {
+              now - first >= 0.25, denialCandidate != nil else {
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
             continue
         }
 
-        guard let conditionalDenialDeadline =
-                conditionalDenialTimingBudget.anchoredDeadline else {
-            throw GateError.failed(handoffLedger.terminateLaunchSettlement(
-                "conditional_launch_denial_budget_unavailable"))
-        }
-        let allocationStart = ProcessInfo.processInfo.systemUptime
-        let allocationStartedBeforeDeadline = allocationStart.isFinite &&
-            allocationStart <= conditionalDenialDeadline
-        let allocationBudgetRemaining = conditionalDenialReservationAvailable(
-            allocationStart: allocationStart, deadline: conditionalDenialDeadline)
-        denialDiagnostics.recordAllocation(
-            startedBeforeDeadline: allocationStartedBeforeDeadline,
-            budgetRemaining: allocationBudgetRemaining)
-        guard allocationBudgetRemaining,
-              let point = denial.titlebar?.cgPoint,
-              let prepared = PreparedDeniedClick(point: point), prepared.point == point else {
-            throw GateError.failed(
-                handoffLedger.terminateLaunchSettlement(
-                    "conditional_launch_denial_budget_exhausted") + " " +
-                "no_synthetic_click_sent=true verification_set_stopped=true " +
-                denialDiagnostics.aggregate(
-                    state: conditionalLaunchAction.state, consecutive: denialConsecutive))
-        }
-        let preparedAction = prepared.conditionalAction()
-        defer { preparedAction.discard() }
-        guard let adjacentDisposition = try commonModeLaunchDisposition() else {
-            throw GateError.failed(handoffLedger.terminateLaunchSettlement(
-                "conditional_launch_adjacent_sequence"))
-        }
-        if case .expectedPair(let adjacentPair) = adjacentDisposition {
-            guard adjacentPair.completedWithinDeadline,
-                  adjacentPair.endedAt <= conditionalDenialDeadline else {
-                throw GateError.failed(handoffLedger.terminateLaunchSettlement(
-                    "conditional_launch_denial_budget_exhausted"))
-            }
-            guard adjacentPair.authorityExact else {
-                throw GateError.failed(handoffLedger.terminateLaunchSettlement(
-                    "conditional_launch_authority"))
-            }
-            guard adjacentPair.workspaceUnchanged, adjacentPair.finishedLaunching,
-                  adjacentPair.active, adjacentPair.frontmostExact else {
-                throw GateError.failed(handoffLedger.terminateLaunchSettlement(
-                    "conditional_launch_adjacent_pair_authority"))
-            }
-            try conditionalLaunchAction.close(.skippedSystemGranted)
-            break conditionalSampling
-        }
-        guard case .denial(let adjacent) = adjacentDisposition else {
-            throw GateError.failed(handoffLedger.terminateLaunchSettlement(
-                "conditional_launch_adjacent_sequence"))
-        }
-        guard adjacent.completedWithinDeadline,
-              adjacent.endedAt <= conditionalDenialDeadline else {
-            throw GateError.failed(handoffLedger.terminateLaunchSettlement(
-                "conditional_launch_denial_budget_exhausted"))
-        }
-        guard adjacent.cheap.authorityExact else {
-            throw GateError.failed(handoffLedger.terminateLaunchSettlement(
-                "conditional_launch_authority"))
-        }
-        guard adjacent.workspaceUnchanged else {
-            throw GateError.failed(handoffLedger.terminateLaunchSettlement(
-                "conditional_launch_adjacent_lease_changed"))
-        }
-        guard adjacent.cheap.shippingPhase == .visibleAlphaOne,
-              let adjacentFast = adjacent.fast, let adjacentDenial = adjacent.denial else {
-            throw GateError.failed(handoffLedger.terminateLaunchSettlement(
-                "conditional_launch_adjacent_denial"))
-        }
-        denialDiagnostics.record(
-            adjacentDenial, consecutive: denialConsecutive + 1, comparedTo: candidate,
-            shippingPhase: adjacent.cheap.shippingPhase,
-            sampleDuration: adjacent.endedAt - adjacent.startedAt,
-            firstEligibleOffset: nil)
-        guard adjacentDenial.displayAuthorityExact else {
-            throw GateError.failed(
-                handoffLedger.terminateLaunchSettlement(
-                    "conditional_launch_display_unavailable") + " " +
-                denialDiagnostics.aggregate(
-                    state: conditionalLaunchAction.state, consecutive: denialConsecutive))
-        }
-        if adjacentFast.eligible && adjacent.axUnchanged {
-            try conditionalLaunchAction.close(.skippedSystemGranted)
-            break
-        }
-        guard adjacentDenial.sameCandidate(as: candidate),
-              let exactWindow = adjacentDenial.cgWindow,
-              let exactDisplay = adjacentDenial.displayID,
-              let exactPrivateState = adjacentDenial.privateState else {
-            throw GateError.failed(handoffLedger.terminateLaunchSettlement(
-                "conditional_launch_adjacent_denial"))
-        }
-        let adjacentEnd = ProcessInfo.processInfo.systemUptime
-        let adjacentCompleted = adjacentEnd.isFinite && adjacentEnd <= conditionalDenialDeadline
-        let adjacentBudgetRemaining = adjacentCompleted &&
-            conditionalDenialDeadline - adjacentEnd >= denialPostBudget
-        denialDiagnostics.recordAdjacent(
-            completed: adjacentCompleted, duration: adjacentEnd - allocationStart,
-            postBudgetRemaining: adjacentBudgetRemaining)
-        guard adjacentBudgetRemaining else {
-            throw GateError.failed(
-                handoffLedger.terminateLaunchSettlement(
-                    "conditional_launch_denial_budget_exhausted") + " " +
-                "no_synthetic_click_sent=true verification_set_stopped=true " +
-                denialDiagnostics.aggregate(
-                    state: conditionalLaunchAction.state, consecutive: denialConsecutive))
-        }
-        deniedWindow = exactWindow
-        deniedDisplayID = exactDisplay
-        deniedPrivateState = exactPrivateState
-        try handoffLedger.armSyntheticDenialClick(lease: adjacentDenial.lease)
-        try conditionalLaunchAction.close(.armedDeniedClick)
-        let actionResult = executeConditionalDenialAction(
-            preparedAction, deadline: conditionalDenialDeadline,
-            authorized: conditionalLaunchAction.state == .armedDeniedClick,
-            inputMayHaveOccurred: &inputMayHaveOccurred,
-            now: { ProcessInfo.processInfo.systemUptime })
-        if actionResult == .preActionExhausted {
-            throw GateError.failed(
-                handoffLedger.terminateLaunchSettlement(
-                    "conditional_launch_denial_budget_exhausted") + " " +
-                "no_synthetic_click_sent=true verification_set_stopped=true " +
-                denialDiagnostics.aggregate(
-                    state: conditionalLaunchAction.state, consecutive: denialConsecutive))
-        }
-        if actionResult == .actionDeadlineMiss {
-            throw GateError.failed(
-                handoffLedger.terminateLaunchSettlement(
-                    "conditional_launch_action_deadline_miss") + " " +
-                "input_may_have_occurred=true result_invalid=true " +
-                "verification_set_stopped=true " +
-                denialDiagnostics.aggregate(
-                    state: conditionalLaunchAction.state, consecutive: denialConsecutive))
-        }
-        try conditionalLaunchAction.markPerformed()
-        break
+        throw GateError.failed(handoffLedger.terminateLaunchSettlement(
+            "foreground_driver_initial_handoff_missing"))
     } while ProcessInfo.processInfo.systemUptime < conditionalDenialTimingBudget.effectiveDeadline
     guard conditionalLaunchAction.state != .unresolved else {
         throw GateError.failed(handoffLedger.terminateLaunchSettlement(
@@ -3792,8 +4726,7 @@ do {
                 state: conditionalLaunchAction.state, consecutive: denialConsecutive))
     }
 
-    guard conditionalLaunchAction.state == .skippedSystemGranted ||
-            conditionalLaunchAction.state == .performedDeniedClick else {
+    guard conditionalLaunchAction.state == .skippedSystemGranted else {
         throw GateError.failed(handoffLedger.terminateLaunchSettlement(
             "conditional_launch_action_not_terminal"))
     }
@@ -3813,7 +4746,7 @@ do {
         budget: launchPresentationTimingBudget,
         requiredConsecutiveSamples: 2,
         minimumStableDuration: 0.25,
-        allowInitialPartialPair: conditionalLaunchAction.state == .performedDeniedClick,
+        allowInitialPartialPair: false,
         lifecycle: handoffLedger,
         axInvalidation: launchAXInvalidation,
         fastSample: { launchFastObservation() },
@@ -3861,18 +4794,6 @@ do {
                 binding: binding)
         })
     stableWindow = presentationBinding.axWindow
-    if conditionalLaunchAction.state == .performedDeniedClick {
-        guard let deniedWindow, let deniedDisplayID, let deniedPrivateState,
-              presentationBinding.mode == .windowedFallback,
-              presentationBinding.cgWindowID == deniedWindow.id,
-              presentationBinding.rectangle == deniedWindow.rectangle,
-              presentationBinding.displayID == deniedDisplayID,
-              deniedPrivateState.text.isEmpty,
-              deniedPrivateState.isExactlyRetained(in: axApp),
-              exactCompletionRuntimeAuthority(requireRehash: true) else {
-            throw GateError.failed("synthetic denial postcondition")
-        }
-    }
     return presentationBinding
     } catch GateError.failed(let message) {
         throw GateError.failed(appendInputDisposition(message))
@@ -3928,13 +4849,85 @@ do {
     }()
     let backing = NSScreen.main?.backingScaleFactor ?? 2
     let uiScale = max(1, min(floor(Double(size.width * backing) / 380), floor(Double(size.height * backing) / 240)))
+    let uiWidth = Double(size.width * backing) / uiScale
     let uiHeight = Double(size.height * backing) / uiScale
+    let titleButtons = descendants(try currentGroup()).filter {
+        axString($0, kAXRoleAttribute as CFString) == kAXButtonRole
+    }
+    let expectedTitleIDs = ["text:title:singleplayer", "text:title:multiplayer",
+        "text:title:credits", "text:title:options", "text:title:quit"]
+    let expectedTitleLabels = ["Singleplayer", "Multiplayer", "Credits", "Options...", "Quit Game"]
+    guard titleButtons.count == 5,
+          titleButtons.compactMap({ axString($0, kAXIdentifierAttribute as CFString) }) == expectedTitleIDs,
+          titleButtons.compactMap({ axString($0, kAXDescriptionAttribute as CFString) }) == expectedTitleLabels,
+          titleButtons.filter({ axBool($0, kAXFocusedAttribute as CFString) == true }).count == 1 else {
+        throw GateError.failed("title production accessibility publication")
+    }
+    func currentTitleButtons() throws -> [AXUIElement] {
+        let values = descendants(try currentGroup()).filter {
+            axString($0, kAXRoleAttribute as CFString) == kAXButtonRole &&
+                (axString($0, kAXIdentifierAttribute as CFString) ?? "").hasPrefix("text:title:")
+        }
+        guard values.count == 5 else { throw GateError.failed("title button count") }
+        return values
+    }
+    func requireTitleFocus(_ expectedID: String, _ stage: String) throws {
+        guard try waitFailFast(2, until: {
+            guard let values = try? currentTitleButtons() else { return false }
+            let focused = values.filter { axBool($0, kAXFocusedAttribute as CFString) == true }
+            return focused.count == 1 &&
+                axString(focused[0], kAXIdentifierAttribute as CFString) == expectedID
+        }) else { throw GateError.failed("\(stage) title focus") }
+    }
+    let forwardIDs = ["text:title:multiplayer", "text:title:credits",
+                      "text:title:options", "text:title:quit", "text:title:singleplayer"]
+    for (index, expectedID) in forwardIDs.enumerated() {
+        try postKeyOnce("title.tab.forward.\(index + 1)", 48, ledger: actionLedger,
+                        finalCheck: { try requireLaunchPresentation("title forward adjacent") })
+        try requireTitleFocus(expectedID, "title forward \(index + 1)")
+        if index == 1 {
+            try postKeyOnce("title.activate.credits", 49, ledger: actionLedger,
+                            finalCheck: { try requireLaunchPresentation("credits activate adjacent") })
+            guard try waitFailFast(2, until: {
+                (try? currentTitleButtons()) == nil
+            }) else { throw GateError.failed("credits keyboard activation") }
+            try postKeyOnce("title.credits.escape", 53, ledger: actionLedger,
+                            finalCheck: { try requireLaunchPresentation("credits escape adjacent") })
+            try requireTitleFocus("text:title:credits", "credits return retention")
+        }
+    }
+    let reverseIDs = ["text:title:quit", "text:title:options", "text:title:credits",
+                      "text:title:multiplayer", "text:title:singleplayer"]
+    for (index, expectedID) in reverseIDs.enumerated() {
+        try postKeyOnce("title.tab.reverse.\(index + 1)", 48, flags: .maskShift,
+                        ledger: actionLedger,
+                        finalCheck: { try requireLaunchPresentation("title reverse adjacent") })
+        try requireTitleFocus(expectedID, "title reverse \(index + 1)")
+    }
+    try postKeyOnce("title.activate.modified", 36, flags: .maskCommand,
+                    ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("title modified activation adjacent") })
+    try requireTitleFocus("text:title:singleplayer", "modified activation rejected")
+    try postRepeatingKeyOnce("title.activate.repeat", 36, ledger: actionLedger,
+                             finalCheck: { try requireLaunchPresentation("title repeat adjacent") })
+    try requireTitleFocus("text:title:singleplayer", "repeat activation rejected")
+    let imageAspect = 1_672.0 / 941.0, viewportAspect = uiWidth / uiHeight
+    let protectedBottom: Double
+    if imageAspect > viewportAspect {
+        protectedBottom = 416.0 / 941.0 * uiHeight
+    } else {
+        let visible = imageAspect / viewportAspect
+        protectedBottom = ((416.0 / 941.0 - (1 - visible) / 2) / visible) * uiHeight
+    }
+    let heroSafeOrigin = ceil(min(uiHeight, max(0, protectedBottom)) + 6)
+    let maximumPrimaryOrigin = (uiHeight - 20) - 4 - 20 - 72
+    let titlePrimaryOrigin = min(max(floor(uiHeight / 4) + 48, heroSafeOrigin), maximumPrimaryOrigin)
     try validateBeforeAction()
     try requireLaunchPresentation("singleplayer pre-action")
     try postMouseOnce(
         "navigation.singleplayer.click",
         logicalPoint(x: Double(size.width * backing) / uiScale / 2,
-                     y: floor(uiHeight / 4) + 58), ledger: actionLedger,
+                     y: titlePrimaryOrigin + 10), ledger: actionLedger,
         finalCheck: {
             try validateBeforeAction()
             try requireLaunchPresentation("singleplayer adjacent")
@@ -3948,7 +4941,7 @@ do {
     try postMouseOnce(
         "navigation.create-world.click",
         logicalPoint(x: Double(size.width * backing) / uiScale / 2 + 104,
-                     y: uiHeight - 40), ledger: actionLedger,
+                     y: uiHeight - 72), ledger: actionLedger,
         finalCheck: {
             try validateBeforeAction()
             try requireLaunchPresentation("create-world adjacent")
@@ -4431,9 +5424,11 @@ do {
               let extent = axSize(windows[0], kAXSizeAttribute as CFString),
               let fullscreenValue = axFullScreen(windows[0]),
               [position.x, position.y, extent.width, extent.height].allSatisfy(\.isFinite) else {
-            throw GateError.failed(
-                "resize active=false_or_ambiguous frontmost=false_or_ambiguous " +
-                "window=false_or_ambiguous fullscreen=false_or_ambiguous")
+            // AppKit may temporarily withdraw the focused AX window while moving the app
+            // between Spaces. No transient sample is accepted; retry until the fixed deadline,
+            // where the exact identity, geometry and mode predicates below must still converge.
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+            continue
         }
         let candidate = windows[0]
         let currentMode: LaunchPresentationMode = fullscreenValue ? .fullscreen : .windowedFallback
@@ -4545,16 +5540,26 @@ do {
     }
     guard try hash(releaseURL) == expectedReleaseHash else { throw GateError.failed("release race") }
     try actionLedger.validateComplete()
+    try coordinatorSession.wire.send(
+        coordinatorSession.connection, type: 6,
+        payload: Data(SHA256.hash(data: coordinatorSession.wire.transcript)))
+    guard try coordinatorSession.wire.receive(coordinatorSession.connection, type: 7) == Data("bye".utf8),
+          wait(5, until: { coordinatorApplication.isTerminated }) else {
+        throw GateError.failed("Coordinator terminal handshake")
+    }
+    try coordinatorSession.cleanup()
     cleanup.run()
     gateStage = "cleanup"
     guard !cleanup.cleanupFailed else {
         throw GateError.failed("cleanup \(cleanup.cleanupFailureReason)")
     }
-    print("AppKit text-entry integration: PASS pid=verified fields=2 clipboard_access=0 " +
-          "launch_activation_path=\(conditionalLaunchAction.diagnosticPath) " +
-          "synthetic_provenance=automation_only cleanup=verified " +
-          "release_sha256=\(expectedReleaseHash) " +
-          "signed_sha256=\(manifest["post_sign_executable_sha256"]) cdhash=\(manifest["cdhash"])")
+    guard ProcessStartIdentity.capture(getpid()) == rawDriverStart,
+          regularFileIdentity(rawDriverExecutable) == rawDriverFileIdentity,
+          (try? hash(rawDriverExecutable)) == rawDriverHash,
+          AXIsProcessTrusted(), CGPreflightPostEventAccess() else {
+        throw GateError.failed("raw Driver terminal identity")
+    }
+    print("AppKit text-entry integration: PASS fields=2 clipboard_access=0 foreground_driver=verified cleanup=verified")
 } catch GateError.failed(let stage) {
     cleanup.run()
     fail("\(gateStage): \(stage)")

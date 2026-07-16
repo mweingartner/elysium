@@ -21,7 +21,26 @@ private func savedWorldCanvasName(_ raw: String, maximumAdvance: Int) -> String 
 
 // =============================================================================
 final class TitleScreen: Screen {
+    private enum Action: String, CaseIterable {
+        case singleplayer = "title:singleplayer"
+        case multiplayer = "title:multiplayer"
+        case credits = "title:credits"
+        case options = "title:options"
+        case quit = "title:quit"
+
+        var label: String {
+            switch self {
+            case .singleplayer: return "Singleplayer"
+            case .multiplayer: return "Multiplayer"
+            case .credits: return "Credits"
+            case .options: return "Options..."
+            case .quit: return "Quit Game"
+            }
+        }
+    }
+
     var splash = ""
+    private var focusedAction: Action? = .singleplayer
     static let SPLASHES = [
         "Punch a tree!", "Watch out for creepers!", "Don't dig straight down!",
         "Diamonds run deep!", "Now with wardens!", "Sculk is listening!",
@@ -39,23 +58,29 @@ final class TitleScreen: Screen {
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         if splash.isEmpty { splash = TitleScreen.SPLASHES[Int.random(in: 0..<TitleScreen.SPLASHES.count)] }
         let cx = (ui.width / 2).rounded(.down)
-        // vanilla layout: stacked main buttons at h/4+48, then a half-width row
-        var y = (ui.height / 4).rounded(.down) + 48
+        let layout = TitleMenuLayout.resolve(viewportWidth: ui.width, viewportHeight: ui.height)
+        assert(layout.heroClearanceIsSatisfiable, "supported title viewport must preserve hero clearance")
+        guard layout.heroClearanceIsSatisfiable,
+              layout.primaryButtonOriginsY.count == 3 else {
+            focusedAction = nil
+            return
+        }
+        var y = layout.primaryButtonOriginsY[0]
         buttons.append(Button(cx - 100, y, 200, 20, "Singleplayer", { [weak ui, weak game] in
             guard let ui, let game else { return }
             ui.open(WorldSelectScreen(), game)
         }))
-        y += 24
+        y = layout.primaryButtonOriginsY[1]
         buttons.append(Button(cx - 100, y, 200, 20, "Multiplayer", { [weak ui, weak game] in
             guard let ui, let game else { return }
             ui.open(LANLobbyScreen(), game)
         }))
-        y += 24
+        y = layout.primaryButtonOriginsY[2]
         buttons.append(Button(cx - 100, y, 200, 20, "Credits", { [weak ui, weak game] in
             guard let ui, let game else { return }
             ui.open(CreditsScreen(), game)
         }))
-        y += 36
+        y = layout.secondaryButtonOriginY
         buttons.append(Button(cx - 100, y, 98, 20, "Options...", { [weak ui, weak game] in
             guard let ui, let game else { return }
             ui.open(SettingsScreen(), game)
@@ -63,6 +88,60 @@ final class TitleScreen: Screen {
         buttons.append(Button(cx + 2, y, 98, 20, "Quit Game", {
             NSApp.terminate(nil)
         }))
+        reconcileFocus()
+    }
+
+    private func actionButtons() -> [(Action, Button)]? {
+        guard buttons.count == Action.allCases.count else { return nil }
+        let mapped = Array(zip(Action.allCases, buttons))
+        guard mapped.allSatisfy({ action, button in
+            button.label == action.label &&
+                [button.x, button.y, button.w, button.h].allSatisfy(\.isFinite) &&
+                button.w > 0 && button.h > 0
+        }) else { return nil }
+        return mapped
+    }
+
+    private func reconcileFocus() {
+        guard let mapped = actionButtons() else { focusedAction = nil; return }
+        let eligible = mapped.filter { $0.1.visible && $0.1.enabled }.map(\.0)
+        guard !eligible.isEmpty else { focusedAction = nil; return }
+        if focusedAction.map(eligible.contains) != true { focusedAction = eligible[0] }
+    }
+
+    private func activate(_ action: Action, _ ui: UIManager, _ game: GameCore) -> Bool {
+        guard ui.current() === self, let mapped = actionButtons(),
+              let match = mapped.first(where: { $0.0 == action }),
+              mapped.filter({ $0.0 == action }).count == 1,
+              match.1.visible, match.1.enabled else { return false }
+        game.playUISound("ui.button.click")
+        match.1.onClick()
+        return true
+    }
+
+    override func onKeyEvent(_ ui: UIManager, _ game: GameCore, _ event: ElysiumKeyEvent) -> Bool {
+        let key = event.terminal.rawValue
+        if key == "Tab" {
+            guard event.modifiers.isEmpty || event.modifiers == [.shift] else { return true }
+            guard let mapped = actionButtons() else { focusedAction = nil; return true }
+            let eligible = mapped.filter { $0.1.visible && $0.1.enabled }.map(\.0)
+            guard !eligible.isEmpty else { focusedAction = nil; return true }
+            let current = focusedAction.flatMap(eligible.firstIndex) ?? 0
+            let delta = event.modifiers.contains(.shift) ? -1 : 1
+            focusedAction = eligible[(current + delta + eligible.count) % eligible.count]
+            if let focusedAction {
+                _ = ui.publishOrdinaryAccessibilityFocus(
+                    screen: self, game: game, descriptorID: focusedAction.rawValue)
+            }
+            return true
+        }
+        if key == "Enter" || key == "NumpadEnter" || key == "Space" {
+            guard event.modifiers.isEmpty else { return true }
+            guard !event.isRepeat, let focusedAction else { return true }
+            _ = activate(focusedAction, ui, game)
+            return true
+        }
+        return false
     }
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         let cv = ui.cv
@@ -87,19 +166,65 @@ final class TitleScreen: Screen {
             cv.drawTextCentered("ELYSIUM", ui.width / 2 + 2, logoY + 2, 4, "#1c1c1c", shadow: false)
             cv.drawTextCentered("ELYSIUM", ui.width / 2, logoY, 4, "#e8e8e8", shadow: false)
         }
-        // splash anchored to the logo's right edge
-        cv.save()
-        cv.translate(ui.width / 2 + 92, logoY + 26)
-        cv.rotate(-0.25)
-        let pulse = 1 + Foundation.sin(now / 250) * 0.06
-        cv.scale(pulse, pulse)
-        cv.drawTextCentered(splash, 0, 0, 1, "#ffff55")
-        cv.restore()
+        // The branded hero contains its own wordmark and subtitle. Keep the
+        // classic rotating splash only for the procedural/logo fallback so
+        // title treatments never overlap or compete.
+        if !ui.titlePhoto {
+            cv.save()
+            cv.translate(ui.width / 2 + 92, logoY + 26)
+            cv.rotate(-0.25)
+            let pulse = 1 + Foundation.sin(now / 250) * 0.06
+            cv.scale(pulse, pulse)
+            cv.drawTextCentered(splash, 0, 0, 1, "#ffff55")
+            cv.restore()
+        }
         cv.drawText("Elysium \(ELYSIUM_VERSION)", 2, ui.height - 10, 1, "#c8c8c8")
         cv.drawText("Textures: Faithful 32x (faithfulpack.net)", 2, ui.height - 20, 1, "#909090")
         let credit = "LAN multiplayer"
         cv.drawText(credit, ui.width - Double(textWidth(credit)) - 2, ui.height - 10, 1, "#c8c8c8")
         ui.drawButtons(self)
+        if let focusedAction, let mapped = actionButtons(),
+           let button = mapped.first(where: { $0.0 == focusedAction })?.1,
+           button.visible && button.enabled {
+            let light = game.settings.highContrast ? "#ffff00" : "#ffffff"
+            cv.setStroke("#000000")
+            cv.strokeRect(button.x + 1, button.y + 1, button.w - 2, button.h - 2)
+            cv.setStroke(light)
+            cv.strokeRect(button.x + 2, button.y + 2, button.w - 4, button.h - 4)
+        }
+    }
+
+    override func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore)
+        -> [TextEntryAccessibilityDescriptor] {
+        guard ui.current() === self, let mapped = actionButtons() else { return [] }
+        return mapped.map { action, button in
+            TextEntryAccessibilityDescriptor(
+                id: action.rawValue, role: .button, label: button.label, value: "",
+                help: "Open \(button.label).", frame: (button.x, button.y, button.w, button.h),
+                enabled: button.visible && button.enabled, focused: focusedAction == action,
+                insertionUTF16Offset: nil, focusable: true, actionable: true)
+        }
+    }
+
+    override func focusTextAccessibilityElement(_ id: String, _ ui: UIManager,
+                                                _ game: GameCore) -> Bool {
+        guard ui.current() === self, let action = Action(rawValue: id),
+              let mapped = actionButtons(),
+              mapped.filter({ $0.0 == action && $0.1.visible && $0.1.enabled }).count == 1 else {
+            return false
+        }
+        focusedAction = action
+        return ui.publishOrdinaryAccessibilityFocus(
+            screen: self, game: game, descriptorID: action.rawValue)
+    }
+
+    override func performTextAccessibilityAction(_ id: String, _ ui: UIManager,
+                                                 _ game: GameCore) -> Bool {
+        guard ui.current() === self, let action = Action(rawValue: id),
+              textAccessibilityDescriptors(ui, game).filter({
+                  $0.id == id && $0.enabled && $0.actionable
+              }).count == 1 else { return false }
+        return activate(action, ui, game)
     }
 }
 
@@ -920,17 +1045,13 @@ final class WorldSelectScreen: Screen {
         switch phase {
         case .confirming(let request, let names):
             if frames.left.contains(mx, my) {
-                keyboardFocus = 3
-                releaseMaintenanceLease(); publishPhase(.ready, ui: ui, game: game)
-                setControlsEnabled(true)
+                cancelDeleteModal(ui: ui, game: game)
             }
             else if frames.right.contains(mx, my) { executeDelete(request, names: names, ui: ui, game: game) }
             return true
         case .deleteFailure(_, _):
             if frames.left.contains(mx, my) {
-                keyboardFocus = 3
-                releaseMaintenanceLease(); publishPhase(.ready, ui: ui, game: game)
-                setControlsEnabled(true)
+                cancelDeleteModal(ui: ui, game: game)
             }
             else if frames.right.contains(mx, my) { retryDeletePrecheck(ui: ui, game: game) }
             return true
@@ -960,9 +1081,7 @@ final class WorldSelectScreen: Screen {
             if key == "Tab" || key == "ArrowLeft" || key == "ArrowRight" {
                 modalFocus = modalFocus == 0 ? 1 : 0
             } else if key == "Escape" || ((key == "Enter" || key == "Space") && modalFocus == 0) {
-                keyboardFocus = 3
-                releaseMaintenanceLease(); publishPhase(.ready, ui: ui, game: game)
-                setControlsEnabled(true)
+                cancelDeleteModal(ui: ui, game: game)
             } else if (key == "Enter" || key == "Space") && modalFocus == 1 {
                 executeDelete(request, names: names, ui: ui, game: game)
             }
@@ -971,9 +1090,7 @@ final class WorldSelectScreen: Screen {
             if key == "Tab" || key == "ArrowLeft" || key == "ArrowRight" {
                 modalFocus = modalFocus == 0 ? 1 : 0
             } else if key == "Escape" || ((key == "Enter" || key == "Space") && modalFocus == 0) {
-                keyboardFocus = 3
-                releaseMaintenanceLease(); publishPhase(.ready, ui: ui, game: game)
-                setControlsEnabled(true)
+                cancelDeleteModal(ui: ui, game: game)
             } else if (key == "Enter" || key == "Space") && modalFocus == 1 {
                 retryDeletePrecheck(ui: ui, game: game)
             }
@@ -990,6 +1107,17 @@ final class WorldSelectScreen: Screen {
         default:
             return false
         }
+    }
+
+    /// The sole transition from a cancellable destructive modal back to the
+    /// ready world list. Cancel never mutates selection or delete authority;
+    /// it releases the maintenance lease before publishing the renewed ready
+    /// accessibility tree, with keyboard focus restored to Delete.
+    private func cancelDeleteModal(ui: UIManager, game: GameCore) {
+        keyboardFocus = 3
+        releaseMaintenanceLease()
+        publishPhase(.ready, ui: ui, game: game)
+        setControlsEnabled(true)
     }
 
     private func retryDeletePrecheck(ui: UIManager, game: GameCore) {
@@ -1183,7 +1311,8 @@ final class WorldSelectScreen: Screen {
             SavedWorldSelectionLayout.Rect(
                 x: layout.toolbar.x + 208, y: layout.toolbar.y,
                 width: 100, height: 20),
-            enabled: accessibility.bulkActionEnabled, actionable: true)]
+            enabled: accessibility.bulkActionEnabled, focused: keyboardFocus == 0,
+            actionable: true)]
         let rows = snapshot?.rows ?? []
         for (index, row) in rows.enumerated() {
             let y = layout.list.y + Double(index) * 30 - scroll
@@ -1195,22 +1324,26 @@ final class WorldSelectScreen: Screen {
                 accessibility.rowValue(row.storedID),
                 SavedWorldSelectionLayout.Rect(
                     x: layout.list.x, y: y, width: layout.list.width, height: 28),
-                focused: selection.focusedID == row.storedID, selected: checked,
+                focused: keyboardFocus == 1 && selection.focusedID == row.storedID,
+                selected: checked,
                 actionable: true,
                 help: "Toggle selection for this saved world."))
         }
         result.append(descriptor(
             "worlds.play", .button, playBtn.label, "", layout.primaryButtons[0],
-            enabled: accessibility.playEnabled, actionable: true))
+            enabled: accessibility.playEnabled, focused: keyboardFocus == 2,
+            actionable: true))
         result.append(descriptor(
             destructiveAccessibilityID("beginDelete"), .button, "Delete", "",
             layout.primaryButtons[1],
-            enabled: accessibility.deleteEnabled, actionable: true))
-        result.append(descriptor(
-            "worlds.create", .button, "Create New", "", layout.primaryButtons[2],
+            enabled: accessibility.deleteEnabled, focused: keyboardFocus == 3,
             actionable: true))
         result.append(descriptor(
-            "worlds.back", .button, "Back", "", layout.backButton, actionable: true))
+            "worlds.create", .button, "Create New", "", layout.primaryButtons[2],
+            focused: keyboardFocus == 4, actionable: true))
+        result.append(descriptor(
+            "worlds.back", .button, "Back", "", layout.backButton,
+            focused: keyboardFocus == 5, actionable: true))
         if let statusAnnouncement {
             result.append(descriptor(
                 "worlds.status", .staticText, statusAnnouncement, "",
@@ -1264,9 +1397,7 @@ final class WorldSelectScreen: Screen {
         }
         if case .confirming(let request, let names) = phase {
             if id == destructiveAccessibilityID("cancel", request: request) {
-                keyboardFocus = 3
-                releaseMaintenanceLease(); publishPhase(.ready, ui: ui, game: game)
-                setControlsEnabled(true); return true
+                cancelDeleteModal(ui: ui, game: game); return true
             }
             if id == destructiveAccessibilityID("delete", request: request) {
                 executeDelete(request, names: names, ui: ui, game: game); return true
@@ -1274,9 +1405,7 @@ final class WorldSelectScreen: Screen {
         }
         if case .deleteFailure(let request, _) = phase {
             if id == destructiveAccessibilityID("cancel", request: request) {
-                keyboardFocus = 3
-                releaseMaintenanceLease(); publishPhase(.ready, ui: ui, game: game)
-                setControlsEnabled(true); return true
+                cancelDeleteModal(ui: ui, game: game); return true
             }
             if id == destructiveAccessibilityID("retry", request: request) {
                 retryDeletePrecheck(ui: ui, game: game); return true
@@ -2252,8 +2381,8 @@ final class CreditsScreen: Screen {
     let lines = [
         "§eELYSIUM",
         "",
-        "§7A complete block-survival game",
-        "§7built from scratch in Swift + Metal.",
+        "§7A native block-survival game",
+        "§7built with Swift + Metal.",
         "",
         "§fEvery sound synthesized in real time.",
         "§fEvery chunk carved from noise.",
@@ -2275,9 +2404,14 @@ final class CreditsScreen: Screen {
         "§eThank you for playing.",
         "",
         "§7Inspired by the classic block game.",
-        "§7Elysium is an original fan re-creation.",
+        "§7Elysium is an independent fan project.",
         "§7Not affiliated with Mojang or Microsoft.",
         "§7No Mojang code or asset files included.",
+        "",
+        "§7Elysium began with the open-source",
+        "§fPebble project by Brian Gao:",
+        "§ethebriangao/pebble",
+        "§egithub.com/thebriangao/pebble",
         "",
         "§fAll textures: Faithful 32x,",
         "§funmodified, by the Faithful Team.",

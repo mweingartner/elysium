@@ -68,11 +68,10 @@ verify_assets() {
 }
 
 bundle() {
-    say "Assembling $APP_NAME.app…"
+    say "Assembling $APP_NAME.app…" >&2
     local stage="$REPO/dist/$APP_NAME.app"
-    local manifest="$REPO/dist/package-manifest"
     local expected_hash="${1:-}"
-    local args=(--executable "$REPO/.build/release/Elysium" --output "$stage" --manifest "$manifest")
+    local args=(--executable "$REPO/.build/release/Elysium" --output "$stage" --manifest-stdout)
     [ -z "$expected_hash" ] || args+=(--expected-hash "$expected_hash")
     "$REPO/scripts/package-app.sh" "${args[@]}"
 }
@@ -101,37 +100,44 @@ link_cli() {
 
 cmd_install() {
     need_swift
-    local no_build=false expected_hash="" manifest_output=""
+    local no_build=false expected_hash="" manifest_stdout=false
     shift || true
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --no-build) no_build=true; shift ;;
             --executable-hash) expected_hash="$2"; shift 2 ;;
-            --manifest-output) manifest_output="$2"; shift 2 ;;
+            --manifest-stdout) manifest_stdout=true; shift ;;
             *) die "unknown install argument: $1" ;;
         esac
     done
-    verify_assets
-    if [ "$no_build" = false ]; then build; fi
+    if [ "$manifest_stdout" = true ]; then verify_assets >&2; else verify_assets; fi
+    if [ "$no_build" = false ]; then
+        if [ "$manifest_stdout" = true ]; then build >&2; else build; fi
+    fi
     [ -f "$REPO/.build/release/Elysium" ] && [ ! -L "$REPO/.build/release/Elysium" ] || \
         die "release executable missing or unsafe"
     local actual_hash
     actual_hash="$(shasum -a 256 "$REPO/.build/release/Elysium" | awk '{print $1}')"
     [ -z "$expected_hash" ] || [ "$actual_hash" = "$expected_hash" ] || \
         die "release executable hash changed"
-    bundle "${expected_hash:-$actual_hash}"
-    if [ -n "$manifest_output" ]; then
-        [ ! -e "$manifest_output" ] || die "manifest output already exists"
-        umask 077
-        cp "$REPO/dist/package-manifest" "$manifest_output"
-        chmod 600 "$manifest_output"
+    if [ "$manifest_stdout" = true ]; then
+        # In producer mode all CLI progress is diagnostics; only the package manifest
+        # emitted by package-app.sh is allowed on stdout.
+        bundle "${expected_hash:-$actual_hash}" 2>&2
+    else
+        bundle "${expected_hash:-$actual_hash}" >/dev/null
     fi
-    deploy
+    if [ "$manifest_stdout" = true ]; then deploy >&2; else deploy; fi
     # drop the staging copy — Spotlight indexes it and you end up with
     # "two Elysiums" in Launchpad
     rm -rf "$REPO/dist"
-    link_cli
-    say "Done. Launch with:  elysium run   (or open /Applications/$APP_NAME.app)"
+    if [ "$manifest_stdout" = true ]; then
+        link_cli >&2
+        say "Done. Launch with:  elysium run   (or open /Applications/$APP_NAME.app)" >&2
+    else
+        link_cli
+        say "Done. Launch with:  elysium run   (or open /Applications/$APP_NAME.app)"
+    fi
 }
 
 cmd_update() {
