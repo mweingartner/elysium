@@ -743,7 +743,7 @@ public final class GameCore {
         let seenTutorialVersion = settings.rpgTutorialVersion ?? 0
         let tutorial = RPGTutorialState(
             seenVersion: seenTutorialVersion,
-            page: state.created && seenTutorialVersion < RPG_TUTORIAL_VERSION ? 1 : nil)
+            page: nil)
         return RPGScreenRuntimeSnapshot(
             state: state, quickSlots: quickSlots,
             localPreferenceScope: rpgLocalPreferenceScope,

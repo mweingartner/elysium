@@ -148,6 +148,23 @@ final class RPGUIHarnessSourceTests: XCTestCase {
         XCTAssertFalse(harness.contains("guard y + 8 <= frame.maxY else { break }"))
     }
 
+    func testBothRenderersMirrorCenteredPixelAlignedCarouselChevrons() throws {
+        let harness = try source("Sources/Elysium/RPGUIHarnessM.swift")
+        let production = try source("Sources/Elysium/RPGScreensM.swift")
+        for value in [harness, production] {
+            for required in [".carouselPrevious", ".carouselNext",
+                             "floor(", "+ 0.5", "direction * 3",
+                             "centerY - 5", "centerY + 5"] {
+                XCTAssertTrue(value.contains(required), required)
+            }
+        }
+        let model = try source("Sources/ElysiumCore/Game/RPGScreenModel.swift")
+        XCTAssertTrue(model.contains("adornment: .carouselPrevious"))
+        XCTAssertTrue(model.contains("adornment: .carouselNext"))
+        XCTAssertFalse(model.contains("visualLines: [\"‹\"]"))
+        XCTAssertFalse(model.contains("visualLines: [\"›\"]"))
+    }
+
     func testBothRenderersUseOnlyTheSharedFocusRingTokenAndGeometry() throws {
         let harness = try source("Sources/Elysium/RPGUIHarnessM.swift")
         let production = try source("Sources/Elysium/RPGScreensM.swift")

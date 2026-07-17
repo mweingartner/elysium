@@ -118,7 +118,10 @@ stage_install() {
         [ "$(shasum -a 256 "$INSTALLED_EXECUTABLE" | awk '{print $1}')" = "$(sed -n '1p' "$TMP/package.sha")" ]
 }
 codesign_field() {
-    /usr/bin/codesign -d --verbose=4 "$1" 2>&1 | awk -F= -v key="$2" '$1 == key { print $2; exit }'
+    awk -v prefix="$2=" '
+        index($0, prefix) == 1 { count += 1; value = substr($0, length(prefix) + 1) }
+        END { if (count != 1) exit 1; print value }
+    ' "$1"
 }
 codesign_requirement() {
     /usr/bin/codesign -d -r- "$1" 2>&1 | sed -n 's/^# designated => //p; s/^designated => //p' | tail -1
@@ -127,15 +130,19 @@ stage_installed_identity() {
     release_unchanged && package_unchanged || return 1
     [ "$(shasum -a 256 "$INSTALLED_EXECUTABLE" | awk '{print $1}')" = "$(sed -n '1p' "$TMP/package.sha")" ] || return 1
     /usr/bin/codesign --verify --deep --strict "$INSTALLED_APP" || return 1
+    local installed_codesign_details="$TMP/installed-codesign-details.txt"
+    /usr/bin/codesign -d --verbose=4 "$INSTALLED_APP" >"$installed_codesign_details" 2>&1 || return 1
+    [ -f "$installed_codesign_details" ] && [ ! -L "$installed_codesign_details" ] &&
+        [ -r "$installed_codesign_details" ] || return 1
     local package_id package_cdhash package_requirement
     package_id="$(sed -n 's/^bundle_id=//p' "$TMP/package-manifest.txt")"
     package_cdhash="$(sed -n 's/^cdhash=//p' "$TMP/package-manifest.txt")"
     package_requirement="$(sed -n 's/^designated_requirement=//p' "$TMP/package-manifest.txt")"
     [ "$package_id" = "com.briangao.elysium" ] && [ -n "$package_cdhash" ] && [ -n "$package_requirement" ] &&
-        [ "$(codesign_field "$INSTALLED_APP" Identifier)" = "$package_id" ] &&
-        [ "$(codesign_field "$INSTALLED_APP" CDHash)" = "$package_cdhash" ] &&
+        [ "$(codesign_field "$installed_codesign_details" Identifier)" = "$package_id" ] &&
+        [ "$(codesign_field "$installed_codesign_details" CDHash)" = "$package_cdhash" ] &&
         [ "$(codesign_requirement "$INSTALLED_APP")" = "$package_requirement" ] &&
-        /usr/bin/codesign -d --verbose=4 "$INSTALLED_APP" 2>&1 | grep -Fq 'Sealed Resources version='
+        [ "$(grep -Ec '^Sealed Resources version=' "$installed_codesign_details")" -eq 1 ]
 }
 
 run_stage 1 source-security 'Source security' '' stage_security

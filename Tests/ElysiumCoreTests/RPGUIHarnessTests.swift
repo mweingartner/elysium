@@ -2,6 +2,25 @@ import XCTest
 @testable import ElysiumCore
 
 final class RPGUIHarnessTests: XCTestCase {
+    func testIntegratedCreationAndDirectCharacterLandingProfiles() throws {
+        let creation = try fixture("creation:path:warden:warden_guardian:preset",
+            options: ["ELYSIUM_RPG_UI_VIEWPORT": "360x224"])
+        XCTAssertEqual(creation.model.stepOrTabText, "Choose Class")
+        XCTAssertNotNil(creation.model.descriptors.first {
+            $0.id.rawValue == "creation:path:card"
+        })
+        XCTAssertFalse(creation.model.descriptors.contains {
+            $0.id.rawValue.hasPrefix("tutorial:")
+        })
+
+        let landed = try fixture("tab:warden:warden_guardian:character",
+            options: ["ELYSIUM_RPG_UI_VIEWPORT": "360x224"])
+        XCTAssertTrue(landed.characterState.created)
+        XCTAssertEqual(landed.model.stepOrTabText, "Character")
+        XCTAssertFalse(landed.model.descriptors.contains {
+            $0.id.rawValue.hasPrefix("tutorial:")
+        })
+    }
     private func bootstrap(_ selector: String,
                            options: [String: String] = [:],
                            file: StaticString = #filePath,
@@ -554,6 +573,32 @@ final class RPGUIHarnessTests: XCTestCase {
         XCTAssertEqual(Set(RPGUIHarnessAuthority.allCases.map {
             rpgAuthorityPhasePresentation($0.phase).proceduralIconID
         }).count, 8)
+    }
+
+    func testCreationCarouselFixtureKeepsProceduralMarksAndFooterAcrossVariants() throws {
+        for appearance in RPGUIHarnessAppearance.allCases {
+            for viewport in RPGUIHarnessViewport.allCases {
+                let built = try fixture("creation:path:warden:warden_guardian:preset", options: [
+                    "ELYSIUM_RPG_UI_APPEARANCE": appearance.rawValue,
+                    "ELYSIUM_RPG_UI_VIEWPORT": viewport.rawValue,
+                ])
+                let previous = try XCTUnwrap(built.model.descriptors.first {
+                    $0.id.rawValue == "creation:path:previous-class"
+                })
+                let next = try XCTUnwrap(built.model.descriptors.first {
+                    $0.id.rawValue == "creation:path:next-class"
+                })
+                XCTAssertEqual(previous.adornment, .carouselPrevious)
+                XCTAssertEqual(previous.visualLines, [])
+                XCTAssertEqual(next.adornment, .carouselNext)
+                XCTAssertEqual(next.visualLines, [])
+                XCTAssertEqual(built.model.footerText,
+                               "Tab to move focus; Enter to activate")
+                XCTAssertFalse(built.model.descriptors.contains {
+                    $0.visualLines.contains("‹") || $0.visualLines.contains("›")
+                })
+            }
+        }
     }
 
     func testLongestStatusAndAuthorityBandsNeverOverlapContentAtAnyViewport() throws {

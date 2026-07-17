@@ -256,4 +256,15 @@ final class RPGPixelFontSourceTests: XCTestCase {
             XCTAssertEqual(String(scalar).unicodeScalars.count, 1)
         }
     }
+
+    func testClassCarouselNeverRoutesUnsupportedChevronTextThroughPixelFont() throws {
+        let model = try source("Sources/ElysiumCore/Game/RPGScreenModel.swift")
+        let renderer = try source("Sources/Elysium/RPGScreensM.swift")
+        XCTAssertFalse(model.contains("visualLines: [\"‹\"]"))
+        XCTAssertFalse(model.contains("visualLines: [\"›\"]"))
+        XCTAssertTrue(model.contains("adornment: .carouselPrevious"))
+        XCTAssertTrue(model.contains("adornment: .carouselNext"))
+        XCTAssertTrue(renderer.contains("descriptor.adornment == .carouselPrevious"))
+        XCTAssertTrue(renderer.contains("descriptor.adornment == .carouselNext"))
+    }
 }

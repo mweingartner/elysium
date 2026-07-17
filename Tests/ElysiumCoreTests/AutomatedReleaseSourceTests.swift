@@ -34,6 +34,29 @@ final class AutomatedReleaseSourceTests: XCTestCase {
         XCTAssertTrue(pipeline.contains("release_unchanged"))
     }
 
+    func testInstalledCodesignDetailsAreCapturedBeforeParsingWithoutEarlyClose() throws {
+        let pipeline = try source("scripts/pipeline.sh")
+        XCTAssertEqual(pipeline.components(separatedBy:
+            "/usr/bin/codesign -d --verbose=4 \"$INSTALLED_APP\"").count - 1, 1)
+        for marker in [
+            "local installed_codesign_details=\"$TMP/installed-codesign-details.txt\"",
+            ">\"$installed_codesign_details\" 2>&1 || return 1",
+            "[ -f \"$installed_codesign_details\" ]",
+            "[ ! -L \"$installed_codesign_details\" ]",
+            "[ -r \"$installed_codesign_details\" ]",
+            "codesign_field \"$installed_codesign_details\" Identifier",
+            "codesign_field \"$installed_codesign_details\" CDHash",
+            "grep -Ec '^Sealed Resources version=' \"$installed_codesign_details\"",
+            "codesign --verify --deep --strict",
+            "codesign_requirement \"$INSTALLED_APP\"",
+        ] {
+            XCTAssertTrue(pipeline.contains(marker), marker)
+        }
+        XCTAssertFalse(pipeline.contains("codesign -d --verbose=4 \"$1\" 2>&1 |"))
+        XCTAssertFalse(pipeline.contains("codesign -d --verbose=4 \"$INSTALLED_APP\" 2>&1 |"))
+        XCTAssertFalse(pipeline.contains("$1 == key { print $2; exit }"))
+    }
+
     func testHooksSeparateFastCommitFromExactOutgoingPushAuthority() throws {
         let commit = try source(".githooks/pre-commit")
         XCTAssertTrue(commit.contains("mpd check --staged --quiet"))

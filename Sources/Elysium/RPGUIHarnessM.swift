@@ -193,6 +193,20 @@ private final class RPGUIHarnessView: NSView {
             path.line(to: NSPoint(x: x + direction * 6, y: frame.midY + 4))
             path.lineWidth = 1
             path.stroke()
+        } else if descriptor.adornment == .carouselPrevious ||
+                    descriptor.adornment == .carouselNext {
+            let centerX = floor(frame.midX) + 0.5
+            let centerY = floor(frame.midY) + 0.5
+            let direction = descriptor.adornment == .carouselPrevious ? -1.0 : 1.0
+            let tipX = centerX + direction * 3
+            let wingX = centerX - direction * 3
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: tipX, y: centerY))
+            path.line(to: NSPoint(x: wingX, y: centerY - 5))
+            path.move(to: NSPoint(x: tipX, y: centerY))
+            path.line(to: NSPoint(x: wingX, y: centerY + 5))
+            path.lineWidth = 1
+            path.stroke()
         }
         var textX = frame.minX + 4
         if let icon = descriptor.iconAssetID {

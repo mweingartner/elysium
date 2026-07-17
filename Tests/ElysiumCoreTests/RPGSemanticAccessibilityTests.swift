@@ -3,6 +3,23 @@ import XCTest
 
 @MainActor
 final class RPGSemanticAccessibilityTests: XCTestCase {
+    @MainActor
+    func testCreatedRuntimeDoesNotAutomaticallyPresentTutorial() throws {
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "direct-character")
+        game.createWorld(name: "Direct Character", seedText: "8081",
+                         mode: GameMode.survival, difficulty: 2)
+        game.player.rpg = try XCTUnwrap(rpgScreenFixture(
+            pathID: "warden", branchID: "warden_guardian"))
+        let runtime = try XCTUnwrap(game.rpgScreenRuntimeSnapshot())
+        XCTAssertTrue(runtime.state.created)
+        XCTAssertNil(runtime.tutorial.page)
+        let model = rpgBuildScreenModel(runtime.modelInput(
+            viewportWidth: 360, viewportHeight: 224, tab: .character))
+        XCTAssertEqual(model.stepOrTabText, "Character")
+        XCTAssertFalse(model.descriptors.contains {
+            $0.id.rawValue.hasPrefix("tutorial:")
+        })
+    }
     private struct Fixture {
         let game: GameCore
         let runtime: RPGScreenRuntimeSnapshot
@@ -357,6 +374,37 @@ final class RPGSemanticAccessibilityTests: XCTestCase {
         XCTAssertTrue(appearance.tree.reduceMotion)
         XCTAssertTrue(rpgAccessibilityNotificationIntents(
             previous: baseline.tree, current: appearance.tree).contains(.layoutChanged))
+    }
+
+    func testClassChangePublishesOneValueAnnouncementAndRetainsFocus() throws {
+        let viewport = try XCTUnwrap(RPGAccessibilityViewport(width: 360, height: 224))
+        let cardID = try XCTUnwrap(RPGUIElementID(rawValue: "creation:path:card"))
+        let focusID = try XCTUnwrap(RPGUIElementID(rawValue: "creation:path:next-class"))
+        func tree(name: String, revision: UInt64) throws -> RPGAccessibilityTreeSnapshot {
+            let descriptor = RPGSemanticDescriptor(
+                id: cardID, role: .group, label: "\(name), class 1 of 6",
+                value: name, help: "Class changed to \(name).", enabled: true,
+                isFocusable: true,
+                frame: RPGLogicalRect(x: 20, y: 20, width: 300, height: 100),
+                visibleFrame: RPGLogicalRect(x: 20, y: 20, width: 300, height: 100))
+            let element = try XCTUnwrap(RPGAccessibilityElementSnapshot(
+                descriptor: descriptor, activationOrigin: nil,
+                layoutGeneration: revision, viewport: viewport))
+            return try XCTUnwrap(RPGAccessibilityTreeSnapshot(
+                screenInstanceID: 1, semanticRevision: revision,
+                layoutGeneration: revision, viewport: viewport,
+                elements: [element], focusedID: focusID,
+                highContrast: false, reduceMotion: false))
+        }
+        let warden = try tree(name: "Warden", revision: 1)
+        let ranger = try tree(name: "Ranger", revision: 2)
+        let intents = rpgAccessibilityNotificationIntents(
+            previous: warden, current: ranger)
+        XCTAssertEqual(intents.filter { $0 == .valueChanged }.count, 1)
+        XCTAssertFalse(intents.contains(.focusedElementChanged))
+        XCTAssertEqual(ranger.focusedID, focusID)
+        XCTAssertEqual(rpgAccessibilityNotificationIntents(
+            previous: ranger, current: ranger), [])
     }
 
     @MainActor

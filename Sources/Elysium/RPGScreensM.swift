@@ -125,12 +125,17 @@ final class RPGCharacterScreen: Screen {
         let capture = descriptor.isActionable ? MainActor.assumeIsolated {
             ui.captureRPGSemanticActivation(id: descriptor.id, on: self)
         } : nil
+        if !descriptor.isActionable {
+            return reduceInteraction(.beginClassDrag(x: mx, y: my), ui: ui, game: game,
+                                     rebuild: false)
+        }
         let handled = reduceInteraction(
             .mouseDown(elementID: descriptor.id, capture: capture),
             ui: ui, game: game, rebuild: !descriptor.isActionable)
         return handled
     }
     override func onMouseUp(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) {
+        if reduceInteraction(.endClassDrag(x: mx, y: my), ui: ui, game: game) { return }
         let releasedID: RPGUIElementID?
         if let model = rpgCommittedSemanticSnapshot?.model {
             releasedID = rpgScreenDescriptor(atX: mx, y: my, in: model)?.id
@@ -140,7 +145,10 @@ final class RPGCharacterScreen: Screen {
         _ = reduceInteraction(.mouseUp(elementID: releasedID),
                               ui: ui, game: game, rebuild: false)
     }
-    override func onMouseMove(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) {}
+    override func onMouseMove(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) {
+        _ = reduceInteraction(.updateClassDrag(x: mx, y: my), ui: ui, game: game,
+                              rebuild: false)
+    }
     override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
         reduceInteraction(.scrollRows(dy >= 0 ? 1 : -1), ui: ui, game: game)
     }
@@ -362,6 +370,15 @@ final class RPGCharacterScreen: Screen {
                        frame.maxX - 9, frame.y + frame.height / 2 - 4, 1)
             ui.cv.line(frame.maxX - 3, frame.y + frame.height / 2,
                        frame.maxX - 9, frame.y + frame.height / 2 + 4, 1)
+        } else if descriptor.adornment == .carouselPrevious ||
+                    descriptor.adornment == .carouselNext {
+            let centerX = floor(frame.x + frame.width / 2) + 0.5
+            let centerY = floor(frame.y + frame.height / 2) + 0.5
+            let direction = descriptor.adornment == .carouselPrevious ? -1.0 : 1.0
+            let tipX = centerX + direction * 3
+            let wingX = centerX - direction * 3
+            ui.cv.line(tipX, centerY, wingX, centerY - 5, 1)
+            ui.cv.line(tipX, centerY, wingX, centerY + 5, 1)
         }
 
         let inset = 4.0

@@ -8,6 +8,7 @@ final class RPGScreenInteractionTests: XCTestCase {
 
     private func descriptor(_ value: String, x: Double, y: Double,
                             width: Double = 20, height: Double = 20,
+                            role: RPGSemanticRole = .button,
                             visible: Bool = true, focusable: Bool = true,
                             enabled: Bool = true, locked: Bool = false,
                             command: RPGSemanticCommand? = nil,
@@ -16,7 +17,7 @@ final class RPGScreenInteractionTests: XCTestCase {
         -> RPGSemanticDescriptor {
         let frame = RPGLogicalRect(x: x, y: y, width: width, height: height)
         return RPGSemanticDescriptor(
-            id: id(value), role: .button, label: value, enabled: enabled,
+            id: id(value), role: role, label: value, enabled: enabled,
             locked: locked, isFocusable: focusable, focusSelection: selection,
             layoutRegion: layoutRegion,
             frame: frame, visibleFrame: visible ? frame : nil,
@@ -83,26 +84,22 @@ final class RPGScreenInteractionTests: XCTestCase {
             context: context)
     }
 
-    func testCreationReducerTraversesAllFourStepsAndRetainsPerPathDrafts() throws {
+    func testCreationReducerTraversesIntegratedThreeStepsAndRetainsPerPathDrafts() throws {
         let empty = context([])
         var state = RPGScreenInteractionState()
 
         var transition = apply(state, .choosePath("arcanist"), context: empty)
         XCTAssertTrue(transition.handled)
         state = transition.state
+        transition = apply(state, .adjustAttribute(.luck, -1), context: empty)
+        state = transition.state
+        transition = apply(state, .adjustAttribute(.endurance, 1), context: empty)
+        state = transition.state
         transition = apply(state, .creationNext, context: empty)
         XCTAssertEqual(transition.state.creation.step, .branch)
         state = transition.state
 
         transition = apply(state, .chooseBranch("arcanist_ritualist"), context: empty)
-        state = transition.state
-        transition = apply(state, .creationNext, context: empty)
-        XCTAssertEqual(transition.state.creation.step, .attributes)
-        state = transition.state
-
-        transition = apply(state, .adjustAttribute(.luck, -1), context: empty)
-        state = transition.state
-        transition = apply(state, .adjustAttribute(.endurance, 1), context: empty)
         state = transition.state
         transition = apply(state, .creationNext, context: empty)
         XCTAssertEqual(transition.state.creation.step, .review)
@@ -117,8 +114,6 @@ final class RPGScreenInteractionTests: XCTestCase {
         XCTAssertEqual(transition.state, state)
 
         transition = apply(state, .creationBack, context: empty)
-        XCTAssertEqual(transition.state.creation.step, .attributes)
-        transition = apply(transition.state, .creationBack, context: empty)
         XCTAssertEqual(transition.state.creation.step, .branch)
         transition = apply(transition.state, .creationBack, context: empty)
         XCTAssertEqual(transition.state.creation.step, .path)
@@ -591,5 +586,249 @@ final class RPGScreenInteractionTests: XCTestCase {
             model: value, screenInstanceID: 0, semanticRevision: 1))
         XCTAssertNil(RPGScreenInteractionContext(
             model: value, screenInstanceID: 1, semanticRevision: 0))
+    }
+
+    func testClassSwipeIsThresholdedDirectionalAndSingleCommit() throws {
+        let card = descriptor("creation:path:card", x: 10, y: 10,
+                              width: 100, height: 50, role: .group, focusable: false)
+        let ctx = context([card])
+        var state = RPGScreenInteractionState()
+        let original = state.creation.selectedPathID
+        var transition = rpgReduceScreenInteraction(state,
+            event: .beginClassDrag(x: 80, y: 30), context: ctx)
+        XCTAssertTrue(transition.handled)
+        transition = rpgReduceScreenInteraction(transition.state,
+            event: .endClassDrag(x: 40, y: 31), context: ctx)
+        XCTAssertNotEqual(transition.state.creation.selectedPathID, original)
+        let changed = transition.state.creation.selectedPathID
+        transition = rpgReduceScreenInteraction(transition.state,
+            event: .endClassDrag(x: 10, y: 31), context: ctx)
+        XCTAssertFalse(transition.handled)
+        XCTAssertEqual(transition.state.creation.selectedPathID, changed)
+
+        state = RPGScreenInteractionState()
+        transition = rpgReduceScreenInteraction(state,
+            event: .beginClassDrag(x: 50, y: 30), context: ctx)
+        transition = rpgReduceScreenInteraction(transition.state,
+            event: .endClassDrag(x: 25, y: 31), context: ctx)
+        XCTAssertEqual(transition.state.creation.selectedPathID, original)
+    }
+
+    func testClassSwipeRejectsActionOriginVerticalAndNonfiniteInput() {
+        let card = descriptor("creation:path:card", x: 10, y: 10,
+                              width: 100, height: 50, role: .group, focusable: false)
+        let action = descriptor("creation:path:operation:reset", x: 20, y: 20,
+                                width: 30, height: 20, command: .resetAttributes)
+        let ctx = context([card, action])
+        var transition = rpgReduceScreenInteraction(RPGScreenInteractionState(),
+            event: .beginClassDrag(x: 25, y: 25), context: ctx)
+        XCTAssertFalse(transition.handled)
+        transition = rpgReduceScreenInteraction(RPGScreenInteractionState(),
+            event: .beginClassDrag(x: 80, y: 30), context: ctx)
+        transition = rpgReduceScreenInteraction(transition.state,
+            event: .endClassDrag(x: 75, y: 70), context: ctx)
+        XCTAssertEqual(transition.state.creation.selectedPathID,
+                       rpgInitialCreationSession().selectedPathID)
+        transition = rpgReduceScreenInteraction(RPGScreenInteractionState(),
+            event: .beginClassDrag(x: .nan, y: 30), context: ctx)
+        XCTAssertFalse(transition.handled)
+    }
+
+    func testClassSwipeRejectsDisabledAttributeControlOrigin() {
+        let card = descriptor("creation:path:card", x: 10, y: 10,
+                              width: 100, height: 50, role: .group, focusable: false)
+        let disabledMinus = descriptor("attribute:strength:operation:decrement",
+            x: 20, y: 20, width: 22, height: 20,
+            enabled: false, locked: true, command: nil)
+        let disabledPlus = descriptor("attribute:strength:operation:increment",
+            x: 46, y: 20, width: 22, height: 20,
+            enabled: false, locked: true, command: nil)
+        let ctx = context([card, disabledMinus, disabledPlus])
+        for x in [25.0, 50.0] {
+            let transition = rpgReduceScreenInteraction(RPGScreenInteractionState(),
+                event: .beginClassDrag(x: x, y: 25), context: ctx)
+            XCTAssertFalse(transition.handled)
+            XCTAssertNil(transition.state.pendingClassDrag)
+        }
+    }
+
+    func testClassSwipeCancelStaleRevisionAndScreenReplacementNeverCommit() {
+        let card = descriptor("creation:path:card", x: 10, y: 10,
+                              width: 100, height: 50, role: .group, focusable: false)
+        let original = RPGScreenInteractionState()
+        let first = context([card], instance: 7, revision: 11)
+        var begun = rpgReduceScreenInteraction(original,
+            event: .beginClassDrag(x: 80, y: 30), context: first)
+        XCTAssertNotNil(begun.state.pendingClassDrag)
+        let cancelled = rpgReduceScreenInteraction(begun.state,
+            event: .cancelClassDrag, context: first)
+        XCTAssertTrue(cancelled.handled)
+        XCTAssertNil(cancelled.state.pendingClassDrag)
+        XCTAssertEqual(cancelled.state.creation, original.creation)
+
+        begun = rpgReduceScreenInteraction(original,
+            event: .beginClassDrag(x: 80, y: 30), context: first)
+        let revised = context([card], instance: 7, revision: 12)
+        let staleEnd = rpgReduceScreenInteraction(begun.state,
+            event: .endClassDrag(x: 40, y: 30), context: revised)
+        XCTAssertFalse(staleEnd.handled)
+        XCTAssertNil(staleEnd.state.pendingClassDrag)
+        XCTAssertEqual(staleEnd.state.creation, original.creation)
+
+        begun = rpgReduceScreenInteraction(original,
+            event: .beginClassDrag(x: 80, y: 30), context: first)
+        let replacement = context([card], instance: 8, revision: 11)
+        let replacedEnd = rpgReduceScreenInteraction(begun.state,
+            event: .endClassDrag(x: 40, y: 30), context: replacement)
+        XCTAssertFalse(replacedEnd.handled)
+        XCTAssertNil(replacedEnd.state.pendingClassDrag)
+        XCTAssertEqual(replacedEnd.state.creation, original.creation)
+    }
+
+    func testClassSwipeRejectsExtremeInfiniteAndOutOfViewportCoordinatesAtEveryPhase() {
+        let card = descriptor("creation:path:card", x: 10, y: 10,
+                              width: 100, height: 50, role: .group, focusable: false)
+        let ctx = context([card])
+        for point in [(Double.greatestFiniteMagnitude, 30.0),
+                      (-Double.greatestFiniteMagnitude, 30.0),
+                      (Double.infinity, 30.0), (-Double.infinity, 30.0),
+                      (80.0, Double.infinity), (121.0, 30.0), (-1.0, 30.0)] {
+            let begin = rpgReduceScreenInteraction(RPGScreenInteractionState(),
+                event: .beginClassDrag(x: point.0, y: point.1), context: ctx)
+            XCTAssertFalse(begin.handled)
+            XCTAssertNil(begin.state.pendingClassDrag)
+        }
+
+        for invalidEvent in [
+            RPGScreenInteractionEvent.updateClassDrag(
+                x: Double.greatestFiniteMagnitude, y: 30),
+            .updateClassDrag(x: .infinity, y: 30),
+            .updateClassDrag(x: 121, y: 30),
+            .endClassDrag(x: Double.greatestFiniteMagnitude, y: 30),
+            .endClassDrag(x: .infinity, y: 30),
+            .endClassDrag(x: 121, y: 30),
+        ] {
+            let begun = rpgReduceScreenInteraction(RPGScreenInteractionState(),
+                event: .beginClassDrag(x: 80, y: 30), context: ctx)
+            let rejected = rpgReduceScreenInteraction(begun.state,
+                event: invalidEvent, context: ctx)
+            XCTAssertTrue(rejected.handled)
+            XCTAssertNil(rejected.state.pendingClassDrag)
+            XCTAssertEqual(rejected.state.creation,
+                           rpgInitialCreationSession())
+        }
+    }
+
+    func testClassArrowActivationAndSwipeProduceEquivalentFocusedTransition() throws {
+        let creation = rpgInitialCreationSession()
+        let model = rpgBuildScreenModel(RPGScreenModelInput(
+            state: .uncreated(), creation: creation,
+            viewportWidth: 360, viewportHeight: 224))
+        let ctx = try XCTUnwrap(RPGScreenInteractionContext(
+            model: model, screenInstanceID: 7, semanticRevision: 11))
+        let next = try XCTUnwrap(model.descriptors.first {
+            $0.id.rawValue == "creation:path:next-class"
+        })
+        XCTAssertEqual(next.actionCommand, .nextClass)
+        let focused = RPGScreenInteractionState(
+            creation: creation, focusedID: next.id)
+        let activation = rpgReduceScreenInteraction(focused,
+            event: .activateFocused, context: ctx)
+        XCTAssertEqual(activation.effects, [.activate(next.id)])
+        let semantic = apply(activation.state, .nextClass, context: ctx)
+        XCTAssertEqual(semantic.state.focusedID, next.id)
+
+        let card = try XCTUnwrap(model.descriptors.first {
+            $0.id.rawValue == "creation:path:card"
+        })
+        let x = card.frame.x + card.frame.width / 2
+        let y = card.frame.y + 15
+        let begun = rpgReduceScreenInteraction(focused,
+            event: .beginClassDrag(x: x, y: y), context: ctx)
+        let swipe = rpgReduceScreenInteraction(begun.state,
+            event: .endClassDrag(x: x - RPG_CLASS_SWIPE_THRESHOLD, y: y), context: ctx)
+        XCTAssertEqual(swipe.state.creation, semantic.state.creation)
+        XCTAssertEqual(swipe.state.focusedID, semantic.state.focusedID)
+
+        for source in RPGSemanticActivationSource.allCases {
+            XCTAssertEqual(next.actionCommand, .nextClass, source.rawValue)
+        }
+    }
+
+    func testCarouselCentersDispatchMatchingClicksCancelMismatchAndTraverseBothWays() throws {
+        var creation = rpgInitialCreationSession()
+        creation = try rpgReduceCreationSession(
+            creation, command: .adjustAttribute(.luck, -1)).get()
+        creation = try rpgReduceCreationSession(
+            creation, command: .adjustAttribute(.endurance, 1)).get()
+        let editedFirstDraft = creation.selectedDraft
+
+        for (idValue, command) in [
+            ("creation:path:previous-class", RPGSemanticCommand.previousClass),
+            ("creation:path:next-class", RPGSemanticCommand.nextClass),
+        ] {
+            let model = rpgBuildScreenModel(RPGScreenModelInput(
+                state: .uncreated(), creation: creation,
+                viewportWidth: 360, viewportHeight: 224))
+            let ctx = try XCTUnwrap(RPGScreenInteractionContext(
+                model: model, screenInstanceID: 7, semanticRevision: 11))
+            let control = try XCTUnwrap(model.descriptors.first {
+                $0.id.rawValue == idValue
+            })
+            let centerX = control.frame.x + control.frame.width / 2
+            let centerY = control.frame.y + control.frame.height / 2
+            XCTAssertEqual(rpgScreenDescriptor(
+                atX: centerX, y: centerY, in: model)?.id, control.id)
+
+            let issued = capture(control.id)
+            let down = rpgReduceScreenInteraction(
+                RPGScreenInteractionState(creation: creation),
+                event: .mouseDown(elementID: control.id, capture: issued), context: ctx)
+            XCTAssertEqual(down.state.focusedID, control.id)
+            XCTAssertTrue(down.effects.isEmpty)
+            let up = rpgReduceScreenInteraction(
+                down.state, event: .mouseUp(elementID: control.id), context: ctx)
+            XCTAssertEqual(up.effects, [.dispatchMouse(issued)])
+            let applied = apply(up.state, command, context: ctx)
+            XCTAssertEqual(applied.state.focusedID, control.id)
+            XCTAssertEqual(applied.state.creation.pathDrafts, creation.pathDrafts)
+
+            let held = rpgReduceScreenInteraction(
+                RPGScreenInteractionState(creation: creation),
+                event: .mouseDown(elementID: control.id, capture: issued), context: ctx)
+            let cancelled = rpgReduceScreenInteraction(
+                held.state, event: .mouseUp(elementID: nil), context: ctx)
+            XCTAssertEqual(cancelled.effects, [.cancelMouse(issued)])
+            XCTAssertEqual(cancelled.state.creation, creation)
+        }
+
+        let traversalModel = rpgBuildScreenModel(RPGScreenModelInput(
+            state: .uncreated(), creation: creation,
+            viewportWidth: 360, viewportHeight: 224))
+        let traversalContext = try XCTUnwrap(RPGScreenInteractionContext(
+            model: traversalModel, screenInstanceID: 7, semanticRevision: 11))
+        var forward = RPGScreenInteractionState(creation: creation,
+            focusedID: id("creation:path:next-class"))
+        var forwardIDs: [String] = []
+        for _ in RPG_PATH_DEFINITIONS {
+            forwardIDs.append(forward.creation.selectedPathID)
+            forward = apply(forward, .nextClass, context: traversalContext).state
+        }
+        XCTAssertEqual(forwardIDs, RPG_PATH_DEFINITIONS.map(\.id))
+        XCTAssertEqual(forward.creation.selectedPathID, creation.selectedPathID)
+        XCTAssertEqual(forward.creation.pathDrafts.first, editedFirstDraft)
+        XCTAssertEqual(forward.focusedID, id("creation:path:next-class"))
+
+        var reverse = RPGScreenInteractionState(creation: creation,
+            focusedID: id("creation:path:previous-class"))
+        var reverseIDs: [String] = []
+        for _ in RPG_PATH_DEFINITIONS {
+            reverse = apply(reverse, .previousClass, context: traversalContext).state
+            reverseIDs.append(reverse.creation.selectedPathID)
+        }
+        XCTAssertEqual(reverseIDs, Array(RPG_PATH_DEFINITIONS.map(\.id).reversed()))
+        XCTAssertEqual(reverse.creation.selectedPathID, creation.selectedPathID)
+        XCTAssertEqual(reverse.creation.pathDrafts.first, editedFirstDraft)
+        XCTAssertEqual(reverse.focusedID, id("creation:path:previous-class"))
     }
 }
