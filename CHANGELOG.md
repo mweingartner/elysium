@@ -5,6 +5,17 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Survival crafting now pools ingredients from **every nearby container within 50
+  blocks of you** — for both the inventory's 2×2 grid and a crafting table's 3×3
+  grid (previously only the table pooled, and only from containers within 25
+  blocks of the table). Chests, barrels, foundries (furnace family), hoppers,
+  brewing stands, dispensers/droppers, shulker boxes, and chest boats and
+  chest/hopper minecarts all contribute, and crafting withdraws from them
+  automatically. Leftover ingredients returning to storage go only to general
+  containers, never into a foundry/brewing slot. Pooling runs in single-player
+  and for a LAN host; a LAN client crafts from its carried inventory only (this
+  also fixes a latent item-duplication path for LAN guests). The container scan
+  is bounded to the chunks within range, keeping it well within frame budget.
 - The Create New World screen now has a **Character Classes** toggle (On by
   default). Turn it Off to play a classless world with the RPG progression
   system disabled — the choice is stored per world (the existing `rpgClasses`

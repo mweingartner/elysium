@@ -20,7 +20,17 @@ public struct CraftingRecipePlan {
 
 public let MAX_CRAFTING_BATCH_ROUNDS = 64
 
-public let CRAFTING_TABLE_CONTAINER_RADIUS = 25
+public let CRAFTING_CONTAINER_RADIUS = 50
+
+/// The player-centered origin for pooled crafting-ingredient withdrawal/deposit, or `nil`
+/// when pooling must stay disabled (inventory-only fallback).
+///
+/// LAN gate is a correctness fix for honest clients under the client-owned-inventory (D-A)
+/// trust model, NOT anti-cheat against a malicious peer.
+public func craftingContainerPoolCenter(for player: Player, isLANClientWorld: Bool) -> (x: Int, y: Int, z: Int)? {
+    guard !isLANClientWorld else { return nil }
+    return (ifloor(player.x), ifloor(player.y), ifloor(player.z))
+}
 
 public func craftingIngredientMatches(_ ing: String, _ stack: ItemStack?) -> Bool {
     guard let stack else { return false }
@@ -479,6 +489,19 @@ private enum CraftingResourceOwner {
             break
         }
     }
+
+    /// DEPOSIT eligibility for crafting-grid returns: general storage only. Furnace/brewing
+    /// inputs must never receive a return deposit, even though they remain withdrawal-eligible
+    /// (see `isCraftingResourceContainer`) — a furnace output slot is a legitimate ingredient
+    /// source but not a legitimate place to stash leftover grid contents.
+    var acceptsCraftingReturnDeposits: Bool {
+        switch self {
+        case .blockEntity(let be, _):
+            return be.type == "container" || be.type == "hopper"
+        case .boat, .minecart:
+            return true
+        }
+    }
 }
 
 private struct CraftingResourceSlot {
@@ -490,7 +513,7 @@ private struct CraftingResourceSlot {
     let slot: Int
 }
 
-private func isCraftingTableResourceContainer(_ be: BlockEntityData) -> Bool {
+private func isCraftingResourceContainer(_ be: BlockEntityData) -> Bool {
     guard let items = be.items, !items.isEmpty else { return false }
     return be.type == "container" || be.type == "hopper" || be.type == "furnace" || be.type == "brewing"
 }
@@ -500,24 +523,33 @@ private func craftingDistanceSquared(_ ax: Int, _ ay: Int, _ az: Int, _ bx: Int,
     return dx * dx + dy * dy + dz * dz
 }
 
-public func nearbyCraftingTableContainers(in world: World, tableX: Int, tableY: Int, tableZ: Int,
-                                          radius: Int = CRAFTING_TABLE_CONTAINER_RADIUS) -> [BlockEntityData] {
+/// Block entities within `radius` of (centerX,centerY,centerZ) that can supply crafting
+/// ingredients. Bounded to the chunks whose AABB intersects the search sphere (inclusive
+/// bounding-box math over 16-block chunks) instead of scanning every loaded chunk, so this
+/// stays cheap at the wider player-centered radius. Output order is identical to a full scan:
+/// sorted by (distance², y, z, x, type).
+public func nearbyCraftingContainers(in world: World, centerX: Int, centerY: Int, centerZ: Int,
+                                     radius: Int) -> [BlockEntityData] {
+    guard radius >= 0 else { return [] }
     let r2 = radius * radius
     var out: [BlockEntityData] = []
-    let chunks = world.chunks.values.sorted {
-        if $0.cx != $1.cx { return $0.cx < $1.cx }
-        return $0.cz < $1.cz
-    }
-    for chunk in chunks {
-        for be in chunk.blockEntities.values where isCraftingTableResourceContainer(be) {
-            if craftingDistanceSquared(tableX, tableY, tableZ, be.x, be.y, be.z) <= r2 {
-                out.append(be)
+    let cxMin = floorDiv(centerX - radius, CHUNK_W)
+    let cxMax = floorDiv(centerX + radius, CHUNK_W)
+    let czMin = floorDiv(centerZ - radius, CHUNK_W)
+    let czMax = floorDiv(centerZ + radius, CHUNK_W)
+    for cx in cxMin...cxMax {
+        for cz in czMin...czMax {
+            guard let chunk = world.getChunk(cx, cz) else { continue }
+            for be in chunk.blockEntities.values where isCraftingResourceContainer(be) {
+                if craftingDistanceSquared(centerX, centerY, centerZ, be.x, be.y, be.z) <= r2 {
+                    out.append(be)
+                }
             }
         }
     }
     out.sort {
-        let ad = craftingDistanceSquared(tableX, tableY, tableZ, $0.x, $0.y, $0.z)
-        let bd = craftingDistanceSquared(tableX, tableY, tableZ, $1.x, $1.y, $1.z)
+        let ad = craftingDistanceSquared(centerX, centerY, centerZ, $0.x, $0.y, $0.z)
+        let bd = craftingDistanceSquared(centerX, centerY, centerZ, $1.x, $1.y, $1.z)
         if ad != bd { return ad < bd }
         if $0.y != $1.y { return $0.y < $1.y }
         if $0.z != $1.z { return $0.z < $1.z }
@@ -527,25 +559,25 @@ public func nearbyCraftingTableContainers(in world: World, tableX: Int, tableY: 
     return out
 }
 
-private func nearbyCraftingResourceSlots(in world: World, tableX: Int, tableY: Int, tableZ: Int,
+private func nearbyCraftingResourceSlots(in world: World, centerX: Int, centerY: Int, centerZ: Int,
                                          radius: Int) -> [CraftingResourceSlot] {
     let r2 = radius * radius
     var slots: [CraftingResourceSlot] = []
 
-    for be in nearbyCraftingTableContainers(in: world, tableX: tableX, tableY: tableY, tableZ: tableZ, radius: radius) {
-        let d2 = craftingDistanceSquared(tableX, tableY, tableZ, be.x, be.y, be.z)
+    for be in nearbyCraftingContainers(in: world, centerX: centerX, centerY: centerY, centerZ: centerZ, radius: radius) {
+        let d2 = craftingDistanceSquared(centerX, centerY, centerZ, be.x, be.y, be.z)
         for i in 0..<(be.items?.count ?? 0) {
             slots.append(CraftingResourceSlot(owner: .blockEntity(be, i), distanceKey: d2 * 1000,
                                               x: be.x, y: be.y, z: be.z, slot: i))
         }
     }
 
-    let tableCX = Double(tableX) + 0.5
-    let tableCY = Double(tableY) + 0.5
-    let tableCZ = Double(tableZ) + 0.5
+    let poolCX = Double(centerX) + 0.5
+    let poolCY = Double(centerY) + 0.5
+    let poolCZ = Double(centerZ) + 0.5
     for entity in world.entities.sorted(by: { $0.id < $1.id }) where !entity.dead {
         if let boat = entity as? Boat, boat.hasChest {
-            let dx = boat.x - tableCX, dy = boat.y - tableCY, dz = boat.z - tableCZ
+            let dx = boat.x - poolCX, dy = boat.y - poolCY, dz = boat.z - poolCZ
             let d2 = dx * dx + dy * dy + dz * dz
             guard d2 <= Double(r2) else { continue }
             let key = Int((d2 * 1000).rounded(.down))
@@ -555,7 +587,7 @@ private func nearbyCraftingResourceSlots(in world: World, tableX: Int, tableY: I
                                                   x: ex, y: ey, z: ez, slot: i))
             }
         } else if let cart = entity as? Minecart, cart.variant == "chest" || cart.variant == "hopper" {
-            let dx = cart.x - tableCX, dy = cart.y - tableCY, dz = cart.z - tableCZ
+            let dx = cart.x - poolCX, dy = cart.y - poolCY, dz = cart.z - poolCZ
             let d2 = dx * dx + dy * dy + dz * dz
             guard d2 <= Double(r2) else { continue }
             let key = Int((d2 * 1000).rounded(.down))
@@ -577,11 +609,11 @@ private func nearbyCraftingResourceSlots(in world: World, tableX: Int, tableY: I
     return slots
 }
 
-public func craftingTableResourceStacks(playerInventory: [ItemStack?], craftGrid: [ItemStack?],
-                                        world: World, tableX: Int, tableY: Int, tableZ: Int,
-                                        radius: Int = CRAFTING_TABLE_CONTAINER_RADIUS) -> [ItemStack?] {
+public func craftingResourceStacks(playerInventory: [ItemStack?], craftGrid: [ItemStack?],
+                                   world: World, centerX: Int, centerY: Int, centerZ: Int,
+                                   radius: Int) -> [ItemStack?] {
     var stacks = (playerInventory + craftGrid).map(copyStack)
-    for slot in nearbyCraftingResourceSlots(in: world, tableX: tableX, tableY: tableY, tableZ: tableZ, radius: radius) {
+    for slot in nearbyCraftingResourceSlots(in: world, centerX: centerX, centerY: centerY, centerZ: centerZ, radius: radius) {
         guard let stack = slot.owner.get(), stack.count > 0 else { continue }
         stacks.append(stack.copy())
     }
@@ -635,12 +667,12 @@ private func withdrawOneConcreteIngredient(_ name: String, inventory: inout [Ite
 
 public func populateCraftingGridFromNearbyContainers(_ plan: CraftingRecipePlan, grid: inout [ItemStack?],
                                                      inventory: inout [ItemStack?], world: World,
-                                                     tableX: Int, tableY: Int, tableZ: Int,
-                                                     radius: Int = CRAFTING_TABLE_CONTAINER_RADIUS) -> Bool {
+                                                     centerX: Int, centerY: Int, centerZ: Int,
+                                                     radius: Int) -> Bool {
     guard grid.count == plan.ingredients.count else { return false }
     guard grid.allSatisfy({ $0 == nil }) else { return false }
 
-    let slots = nearbyCraftingResourceSlots(in: world, tableX: tableX, tableY: tableY, tableZ: tableZ, radius: radius)
+    let slots = nearbyCraftingResourceSlots(in: world, centerX: centerX, centerY: centerY, centerZ: centerZ, radius: radius)
     var counts = inventoryCounts(inventory)
     addNearbySlotCounts(slots, to: &counts)
     guard hasConcreteIngredients(plan.ingredients, in: counts) else { return false }
@@ -670,19 +702,21 @@ public func populateCraftingGridFromNearbyContainers(_ plan: CraftingRecipePlan,
 
 @discardableResult
 public func giveStackToNearbyCraftingContainers(_ stackIn: ItemStack?, world: World,
-                                                tableX: Int, tableY: Int, tableZ: Int,
-                                                radius: Int = CRAFTING_TABLE_CONTAINER_RADIUS) -> Bool {
+                                                centerX: Int, centerY: Int, centerZ: Int,
+                                                radius: Int) -> Bool {
     guard let stack = stackIn else { return false }
-    let slots = nearbyCraftingResourceSlots(in: world, tableX: tableX, tableY: tableY, tableZ: tableZ, radius: radius)
+    let slots = nearbyCraftingResourceSlots(in: world, centerX: centerX, centerY: centerY, centerZ: centerZ, radius: radius)
 
-    for slot in slots where stack.count > 0 {
+    // Deposits are general-storage only: furnace/brewing input slots are withdrawal-eligible
+    // ingredient sources above, but must never receive a crafting-grid return.
+    for slot in slots where stack.count > 0 && slot.owner.acceptsCraftingReturnDeposits {
         guard let existing = slot.owner.get(), canMerge(existing, stack), existing.count < maxStackOf(existing) else { continue }
         let take = min(maxStackOf(existing) - existing.count, stack.count)
         existing.count += take
         stack.count -= take
         slot.owner.markDirty(in: world)
     }
-    for slot in slots where stack.count > 0 {
+    for slot in slots where stack.count > 0 && slot.owner.acceptsCraftingReturnDeposits {
         guard slot.owner.get() == nil else { continue }
         let moved = stack.copy()
         moved.count = min(maxStackOf(stack), stack.count)

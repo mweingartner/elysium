@@ -184,10 +184,16 @@ craft. The inventory provides a 2×2 crafting grid. Place and use a crafting tab
 Furnaces, brewing stands, enchanting tables, anvils, and other workstations extend the items and upgrades
 you can make. Containers hold resources outside your carried inventory.
 
-In Survival, the recipe popup lists recipes you can currently craft from available ingredients. At a
-crafting table, eligible nearby crafting containers can also contribute. Open the recipe popup and type
-to filter it live by a word or substring in the recipe name; use Up/Down to move through results and
-Return to select one.
+In Survival, the recipe popup lists recipes you can currently craft from available ingredients. Both
+grids — the inventory's 2×2 and a crafting table's 3×3 — pool ingredients from your carried inventory
+plus every nearby container within 50 blocks of you, in all directions (including above and below).
+Chests, barrels, foundries (the furnace family), hoppers, brewing stands, dispensers, droppers, shulker
+boxes, and chest boats and chest/hopper minecarts all count as sources, and crafting withdraws from them
+automatically. When leftover ingredients return to storage, they go only to general containers — never
+into a foundry or brewing-stand slot. This pooling applies in single-player and when you are hosting; on
+a machine that has joined someone else's LAN world, crafting uses only your carried inventory. Open the
+recipe popup and type to filter it live by a word or substring in the recipe name; use Up/Down to move
+through results and Return to select one.
 
 Workstations have distinct jobs. A furnace smelts, a brewing stand makes potions, and an enchanting table
 enchants equipment. An anvil repairs and names items; a grindstone repairs or combines items and removes

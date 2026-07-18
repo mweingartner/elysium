@@ -7,6 +7,14 @@ import QuartzCore
 import ElysiumCore
 import ElysiumTextInput
 
+/// Player-centered pooling origin shared by the 3×3 crafting-table and 2×2 personal-inventory
+/// grids. `nil` (LAN client) means pooling is disabled and callers must fall back to
+/// inventory/grid-only resources — see `craftingContainerPoolCenter` for the correctness
+/// rationale.
+private func craftingPoolCenter(_ game: GameCore) -> (x: Int, y: Int, z: Int)? {
+    craftingContainerPoolCenter(for: game.player, isLANClientWorld: game.isLANClientWorld)
+}
+
 private enum CraftAmountStepperLayout {
     static let buttonW = 12.0
     static let buttonH = 8.0
@@ -333,6 +341,10 @@ final class InventoryScreen: ContainerScreen {
     private weak var craftDownButton: Button?
     private weak var characterButton: Button?
     private var recipeTextFocused = false
+    /// Per-draw() snapshot of pooled resources so `updateResult`, `updateCraftRoundButtons`,
+    /// and the recipe-popup refresh share one scan instead of re-running it (Design D2). Reset
+    /// to `nil` at the end of every `draw()`; outside draw(), callers get a fresh scan.
+    private var drawResourcesCache: [ItemStack?]?
 
     override init() {
         super.init()
@@ -442,7 +454,7 @@ final class InventoryScreen: ContainerScreen {
                        max(1, maxCreativeCraftingRounds(plan, into: game.player.inventory)))
         }
         return min(MAX_CRAFTING_BATCH_ROUNDS,
-                   maxCraftingRounds(plan, from: game.player.inventory + craftGrid))
+                   maxCraftingRounds(plan, from: availableRecipeResources(game)))
     }
     private func clampCraftRounds(_ game: GameCore) -> Int {
         let maxRounds = availableCraftRounds(game)
@@ -489,9 +501,16 @@ final class InventoryScreen: ContainerScreen {
     }
     private func returnCraftGridToInventory(_ game: GameCore) -> Bool {
         var ok = true
+        let center = craftingPoolCenter(game)
         for i in craftGrid.indices {
             guard let stack = craftGrid[i] else { continue }
             if game.player.give(stack) || stack.count <= 0 {
+                craftGrid[i] = nil
+            } else if let center,
+                      giveStackToNearbyCraftingContainers(stack, world: game.world,
+                                                          centerX: center.x, centerY: center.y, centerZ: center.z,
+                                                          radius: CRAFTING_CONTAINER_RADIUS)
+                        || stack.count <= 0 {
                 craftGrid[i] = nil
             } else {
                 ok = false
@@ -501,6 +520,20 @@ final class InventoryScreen: ContainerScreen {
         selectedCraftRounds = 1
         updateResult(game)
         return ok
+    }
+    /// The actual pooled-resource scan (side-effect-free). Called at most once per `draw()` —
+    /// see `drawResourcesCache` — and directly by non-draw callers (recipe selection, commit).
+    private func pooledRecipeResources(_ game: GameCore) -> [ItemStack?] {
+        guard let center = craftingPoolCenter(game) else { return game.player.inventory + craftGrid }
+        return craftingResourceStacks(playerInventory: game.player.inventory,
+                                      craftGrid: craftGrid,
+                                      world: game.world,
+                                      centerX: center.x, centerY: center.y, centerZ: center.z,
+                                      radius: CRAFTING_CONTAINER_RADIUS)
+    }
+    private func availableRecipeResources(_ game: GameCore) -> [ItemStack?] {
+        if let cached = drawResourcesCache { return cached }
+        return pooledRecipeResources(game)
     }
     private func syncCreativeFromPlayer(_ game: GameCore) {
         let actual = game.player.gameMode == GameMode.creative
@@ -525,12 +558,22 @@ final class InventoryScreen: ContainerScreen {
             return
         }
         guard returnCraftGridToInventory(game) else { return }
-        if populateCraftingGrid(plan, grid: &craftGrid, inventory: &game.player.inventory) {
+        let populated: Bool
+        if let center = craftingPoolCenter(game) {
+            populated = populateCraftingGridFromNearbyContainers(plan, grid: &craftGrid,
+                                                                 inventory: &game.player.inventory,
+                                                                 world: game.world,
+                                                                 centerX: center.x, centerY: center.y, centerZ: center.z,
+                                                                 radius: CRAFTING_CONTAINER_RADIUS)
+        } else {
+            populated = populateCraftingGrid(plan, grid: &craftGrid, inventory: &game.player.inventory)
+        }
+        if populated {
             selectedSurvivalPlan = plan
             selectedCraftRounds = 1
             recipeMenu.close()
             updateResult(game)
-            recipeMenu.refresh(game, craftGrid: craftGrid)
+            recipeMenu.refresh(game, craftGrid: craftGrid, resources: availableRecipeResources(game))
             game.playUISound("ui.stonecutter.select_recipe")
         }
     }
@@ -550,6 +593,13 @@ final class InventoryScreen: ContainerScreen {
             requestedRounds: rounds
         ) { grid in
             guard grid.allSatisfy({ $0 == nil }) else { return false }
+            if let center = craftingPoolCenter(game) {
+                return populateCraftingGridFromNearbyContainers(
+                    planForRefill, grid: &grid, inventory: &game.player.inventory,
+                    world: game.world, centerX: center.x, centerY: center.y, centerZ: center.z,
+                    radius: CRAFTING_CONTAINER_RADIUS
+                )
+            }
             return populateCraftingGrid(planForRefill, grid: &grid,
                                         inventory: &game.player.inventory)
         }
@@ -573,11 +623,16 @@ final class InventoryScreen: ContainerScreen {
                 characterButton.visible = false
             }
         }
+        // One pooled scan per draw() (Design D2): `updateResult`, `updateCraftRoundButtons`,
+        // and the popup refresh below all read this cache via `availableRecipeResources`.
+        drawResourcesCache = creativeCrafting ? nil : pooledRecipeResources(game)
         updateResult(game)
         updateCraftRoundButtons(game)
-        recipeMenu.refresh(game, craftGrid: craftGrid, creative: creativeCrafting)
+        let resources = creativeCrafting ? nil : availableRecipeResources(game)
+        recipeMenu.refresh(game, craftGrid: craftGrid, creative: creativeCrafting, resources: resources)
         super.draw(ui, game, partial)
         recipeMenu.draw(ui)
+        drawResourcesCache = nil
     }
     override func drawExtra(_ ui: UIManager, _ game: GameCore) {
         let cv = ui.cv
@@ -690,7 +745,17 @@ final class InventoryScreen: ContainerScreen {
         return descriptors
     }
     override func onClose(_ ui: UIManager, _ game: GameCore) {
-        _ = returnCraftGridToInventory(game)
+        guard !returnCraftGridToInventory(game) else { return }
+        // returnCraftGridToInventory already tried the player's inventory, then (when pooling
+        // is enabled) nearby containers; unlike the crafting table this grid has no block
+        // entity of its own to leave leftovers in, so anything still occupying a slot here has
+        // nowhere left to go. Drop it into the world rather than lose it silently (HIGH: do not
+        // swallow the failure).
+        for i in craftGrid.indices {
+            guard let stack = craftGrid[i] else { continue }
+            game.player.dropStack(stack)
+            craftGrid[i] = nil
+        }
     }
 }
 
@@ -720,6 +785,8 @@ final class CraftingScreen: ContainerScreen {
 
     var craftResult: ItemStack?
     private let recipeMenu = CraftingRecipePopup(gridWidth: 3, gridHeight: 3)
+    /// Only identifies the bound crafting table for deposit fallback / LAN block-entity mirroring;
+    /// pooling itself is player-centered via `craftingPoolCenter`, not table-centered.
     private let tablePos: (x: Int, y: Int, z: Int)?
     private var creativeCrafting = false
     private var selectedCreativePlan: CraftingRecipePlan?
@@ -730,6 +797,10 @@ final class CraftingScreen: ContainerScreen {
     private weak var craftDownButton: Button?
     private let readOnly: Bool
     private var recipeTextFocused = false
+    /// Per-draw() snapshot of pooled resources so `updateResult`, `updateCraftRoundButtons`,
+    /// and the recipe-popup refresh share one scan instead of re-running it (Design D2). Reset
+    /// to `nil` at the end of every `draw()`; outside draw(), callers get a fresh scan.
+    private var drawResourcesCache: [ItemStack?]?
 
     init(_ tablePos: (x: Int, y: Int, z: Int)? = nil, tableBE: BlockEntityData? = nil, readOnly: Bool = false) {
         self.tablePos = tablePos
@@ -877,13 +948,15 @@ final class CraftingScreen: ContainerScreen {
     }
     private func returnCraftGridToInventory(_ game: GameCore) -> Bool {
         var ok = true
+        let center = craftingPoolCenter(game)
         for i in craftGrid.indices {
             guard let stack = craftGrid[i] else { continue }
             if game.player.give(stack) || stack.count <= 0 {
                 craftGrid[i] = nil
-            } else if let tablePos,
+            } else if let center,
                       giveStackToNearbyCraftingContainers(stack, world: game.world,
-                                                          tableX: tablePos.x, tableY: tablePos.y, tableZ: tablePos.z)
+                                                          centerX: center.x, centerY: center.y, centerZ: center.z,
+                                                          radius: CRAFTING_CONTAINER_RADIUS)
                         || stack.count <= 0 {
                 craftGrid[i] = nil
             } else {
@@ -895,12 +968,19 @@ final class CraftingScreen: ContainerScreen {
         updateResult(game)
         return ok
     }
+    /// The actual pooled-resource scan (side-effect-free). Called at most once per `draw()` —
+    /// see `drawResourcesCache` — and directly by non-draw callers (recipe selection, commit).
+    private func pooledRecipeResources(_ game: GameCore) -> [ItemStack?] {
+        guard let center = craftingPoolCenter(game) else { return game.player.inventory + craftGrid }
+        return craftingResourceStacks(playerInventory: game.player.inventory,
+                                      craftGrid: craftGrid,
+                                      world: game.world,
+                                      centerX: center.x, centerY: center.y, centerZ: center.z,
+                                      radius: CRAFTING_CONTAINER_RADIUS)
+    }
     private func availableRecipeResources(_ game: GameCore) -> [ItemStack?] {
-        guard let tablePos else { return game.player.inventory + craftGrid }
-        return craftingTableResourceStacks(playerInventory: game.player.inventory,
-                                           craftGrid: craftGrid,
-                                           world: game.world,
-                                           tableX: tablePos.x, tableY: tablePos.y, tableZ: tablePos.z)
+        if let cached = drawResourcesCache { return cached }
+        return pooledRecipeResources(game)
     }
     private func syncCreativeFromPlayer(_ game: GameCore) {
         let actual = game.player.gameMode == GameMode.creative
@@ -926,11 +1006,12 @@ final class CraftingScreen: ContainerScreen {
         }
         guard returnCraftGridToInventory(game) else { return }
         let populated: Bool
-        if let tablePos {
+        if let center = craftingPoolCenter(game) {
             populated = populateCraftingGridFromNearbyContainers(plan, grid: &craftGrid,
                                                                  inventory: &game.player.inventory,
                                                                  world: game.world,
-                                                                 tableX: tablePos.x, tableY: tablePos.y, tableZ: tablePos.z)
+                                                                 centerX: center.x, centerY: center.y, centerZ: center.z,
+                                                                 radius: CRAFTING_CONTAINER_RADIUS)
         } else {
             populated = populateCraftingGrid(plan, grid: &craftGrid, inventory: &game.player.inventory)
         }
@@ -959,10 +1040,11 @@ final class CraftingScreen: ContainerScreen {
             requestedRounds: rounds
         ) { grid in
             guard grid.allSatisfy({ $0 == nil }) else { return false }
-            if let tablePos {
+            if let center = craftingPoolCenter(game) {
                 return populateCraftingGridFromNearbyContainers(
                     planForRefill, grid: &grid, inventory: &game.player.inventory,
-                    world: game.world, tableX: tablePos.x, tableY: tablePos.y, tableZ: tablePos.z
+                    world: game.world, centerX: center.x, centerY: center.y, centerZ: center.z,
+                    radius: CRAFTING_CONTAINER_RADIUS
                 )
             }
             return populateCraftingGrid(planForRefill, grid: &grid,
@@ -980,12 +1062,16 @@ final class CraftingScreen: ContainerScreen {
             cb.x = min(148, max(4, ui.width - cb.w - 4))
             cb.y = 4
         }
+        // One pooled scan per draw() (Design D2): `updateResult`, `updateCraftRoundButtons`,
+        // and the popup refresh below all read this cache via `availableRecipeResources`.
+        drawResourcesCache = creativeCrafting ? nil : pooledRecipeResources(game)
         updateResult(game)
         updateCraftRoundButtons(game)
         let resources = creativeCrafting ? nil : availableRecipeResources(game)
         recipeMenu.refresh(game, craftGrid: craftGrid, creative: creativeCrafting, resources: resources)
         super.draw(ui, game, partial)
         recipeMenu.draw(ui)
+        drawResourcesCache = nil
     }
     override func drawExtra(_ ui: UIManager, _ game: GameCore) {
         if !textured {
@@ -1080,8 +1166,16 @@ final class CraftingScreen: ContainerScreen {
         return descriptors
     }
     override func onClose(_ ui: UIManager, _ game: GameCore) {
-        if tableBE == nil && !readOnly {
-            _ = returnCraftGridToInventory(game)
+        if tableBE == nil && !readOnly, !returnCraftGridToInventory(game) {
+            // A table-backed screen leaves leftovers inside its persisted block entity, but the
+            // ad-hoc (tableBE == nil) 3×3 grid is screen-local with nowhere to persist. After the
+            // inventory and any pooled containers are exhausted, drop the remainder into the world
+            // rather than lose it silently (mirrors InventoryScreen.onClose; do not swallow the failure).
+            for i in craftGrid.indices {
+                guard let stack = craftGrid[i] else { continue }
+                game.player.dropStack(stack)
+                craftGrid[i] = nil
+            }
         }
         super.onClose(ui, game)
     }
