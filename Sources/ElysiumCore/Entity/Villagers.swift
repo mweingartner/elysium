@@ -7,13 +7,46 @@
 
 import Foundation
 
-public struct TradeOffer: Codable {
+public struct TradeOffer: Codable, Equatable {
     public var buyA: ItemStack
     public var buyB: ItemStack?
     public var sell: ItemStack
     public var maxUses: Int
     public var uses: Int
     public var xp: Int
+    public var stableID: String
+    public var unlockLevel: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case buyA, buyB, sell, maxUses, uses, xp, stableID, unlockLevel
+    }
+
+    public init(buyA: ItemStack, buyB: ItemStack?, sell: ItemStack,
+                maxUses: Int, uses: Int, xp: Int,
+                stableID: String = "", unlockLevel: Int = 1) {
+        self.buyA = buyA
+        self.buyB = buyB
+        self.sell = sell
+        self.maxUses = maxUses
+        self.uses = uses
+        self.xp = xp
+        self.stableID = stableID
+        self.unlockLevel = unlockLevel
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            buyA: try c.decode(ItemStack.self, forKey: .buyA),
+            buyB: try c.decodeIfPresent(ItemStack.self, forKey: .buyB),
+            sell: try c.decode(ItemStack.self, forKey: .sell),
+            maxUses: try c.decode(Int.self, forKey: .maxUses),
+            uses: try c.decode(Int.self, forKey: .uses),
+            xp: try c.decode(Int.self, forKey: .xp),
+            stableID: try c.decodeIfPresent(String.self, forKey: .stableID) ?? "",
+            unlockLevel: try c.decodeIfPresent(Int.self, forKey: .unlockLevel) ?? 1
+        )
+    }
 }
 
 private func offer(_ buyA: (String, Int), _ sell: (String, Int), _ maxUses: Int = 12, _ xp: Int = 2,
@@ -35,6 +68,240 @@ public let WORKSTATIONS: [String: String] = [
     "fletching_table": "fletcher", "stonecutter": "mason", "cartography_table": "cartographer",
     "cauldron": "leatherworker",
 ]
+
+let MERCHANT_MAX_PERSISTED_BYTES = 262_144
+let MERCHANT_MAX_RAW_OFFERS = 64
+let MERCHANT_MAX_RAW_DEPTH = 8
+private let MERCHANT_MAX_RAW_NODES = 4_096
+private let MERCHANT_MAX_RAW_COLLECTION = 64
+private let MERCHANT_MAX_RAW_DICTIONARY = 32
+private let MERCHANT_MAX_RAW_STRING_BYTES = 4_096
+
+private func validatedMerchantPosition(_ raw: Any?) -> (Int, Int, Int)? {
+    guard let values = raw as? [NSNumber], values.count == 3 else { return nil }
+    let coordinates = values.map(\.intValue)
+    guard coordinates[0] >= -30_000_000, coordinates[0] <= 30_000_000,
+          coordinates[1] >= -2_048, coordinates[1] <= 2_048,
+          coordinates[2] >= -30_000_000, coordinates[2] <= 30_000_000 else { return nil }
+    return (coordinates[0], coordinates[1], coordinates[2])
+}
+
+func validMerchantStack(_ stack: ItemStack) -> Bool {
+    guard stack.id >= 0, stack.id < itemDefs.count,
+          stack.count > 0, stack.count <= maxStackOf(stack),
+          stack.damage >= 0, stack.damage <= max(0, maxDamageOf(stack)),
+          (stack.label?.utf8.count ?? 0) <= 128,
+          stack.ench.count <= 32 else { return false }
+    return true
+}
+
+/// Rejects oversized or deeply nested merchant payloads before any second
+/// serialization or Codable object graph can be allocated. The chunk container
+/// has its own larger admission limit, so this feature-local walk must remain
+/// independently bounded.
+func merchantRawPayloadWithinBudget(_ raw: Any?) -> Bool {
+    guard let raw else { return false }
+    var pending: [(Any, Int)] = [(raw, 0)]
+    var nodes = 0
+    var aggregateBytes = 0
+    while let (value, depth) = pending.popLast() {
+        guard depth <= MERCHANT_MAX_RAW_DEPTH else { return false }
+        nodes += 1
+        guard nodes <= MERCHANT_MAX_RAW_NODES else { return false }
+        switch value {
+        case let string as String:
+            let bytes = string.utf8.count
+            guard bytes <= MERCHANT_MAX_RAW_STRING_BYTES,
+                  aggregateBytes <= MERCHANT_MAX_PERSISTED_BYTES - bytes else { return false }
+            aggregateBytes += bytes
+        case let array as [Any]:
+            guard array.count <= MERCHANT_MAX_RAW_COLLECTION else { return false }
+            for child in array { pending.append((child, depth + 1)) }
+        case let dictionary as [String: Any]:
+            guard dictionary.count <= MERCHANT_MAX_RAW_DICTIONARY else { return false }
+            for (key, child) in dictionary {
+                let keyBytes = key.utf8.count
+                guard keyBytes <= 64,
+                      aggregateBytes <= MERCHANT_MAX_PERSISTED_BYTES - keyBytes else { return false }
+                aggregateBytes += keyBytes
+                pending.append((child, depth + 1))
+            }
+        case is NSNumber, is NSNull:
+            guard aggregateBytes <= MERCHANT_MAX_PERSISTED_BYTES - 16 else { return false }
+            aggregateBytes += 16
+        default:
+            return false
+        }
+    }
+    return true
+}
+
+func merchantInt(_ raw: Any?) -> Int? {
+    guard let number = raw as? NSNumber,
+          CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+    let value = number.doubleValue
+    guard value.isFinite, value.rounded(.towardZero) == value,
+          value >= Double(Int.min), value < Double(Int.max) else { return nil }
+    return Int(value)
+}
+
+private func merchantBool(_ raw: Any?) -> Bool? {
+    guard let number = raw as? NSNumber,
+          CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+    return number.boolValue
+}
+
+private func decodeMerchantStackData(_ raw: Any?) -> StackData? {
+    guard let dictionary = raw as? [String: Any] else { return nil }
+    let allowed = ["potion", "trim", "sherds", "charged", "priorWork",
+                   "repairUnits", "contents", "lodestone", "flight"]
+    guard dictionary.keys.allSatisfy(allowed.contains) else { return nil }
+    var data = StackData()
+    if let rawPotion = dictionary["potion"] {
+        guard let potion = rawPotion as? String, potion.utf8.count <= 64,
+              POTIONS.contains(where: { $0.id == potion }) else { return nil }
+        data.potion = potion
+    }
+    if let rawTrim = dictionary["trim"] {
+        guard let trim = rawTrim as? [String: Any], trim.count == 2,
+              trim.keys.allSatisfy(["pattern", "material"].contains),
+              let pattern = trim["pattern"] as? String, pattern.utf8.count <= 64,
+              let material = trim["material"] as? String, material.utf8.count <= 64 else { return nil }
+        data.trim = TrimData(pattern: pattern, material: material)
+    }
+    if let rawSherds = dictionary["sherds"] {
+        guard let sherds = rawSherds as? [String], sherds.count <= 4,
+              sherds.allSatisfy({ $0.utf8.count <= 64 }) else { return nil }
+        data.sherds = sherds
+    }
+    if let rawCharged = dictionary["charged"] {
+        guard let charged = merchantBool(rawCharged) else { return nil }
+        data.charged = charged
+    }
+    if let rawPriorWork = dictionary["priorWork"] {
+        guard let priorWork = merchantInt(rawPriorWork), priorWork >= 0, priorWork <= 1_000_000 else { return nil }
+        data.priorWork = priorWork
+    }
+    if let rawRepairUnits = dictionary["repairUnits"] {
+        guard let repairUnits = merchantInt(rawRepairUnits), repairUnits >= 0, repairUnits <= 64 else { return nil }
+        data.repairUnits = repairUnits
+    }
+    // Canonical merchant catalogs never carry container inventories. Rejecting
+    // the field closes recursive ItemStack aliasing and allocation entirely.
+    if dictionary["contents"] != nil { return nil }
+    if let rawLodestone = dictionary["lodestone"] {
+        guard let values = rawLodestone as? [Any], values.count == 4 else { return nil }
+        let decoded = values.compactMap(merchantInt)
+        guard decoded.count == 4,
+              decoded[0] >= -30_000_000, decoded[0] <= 30_000_000,
+              decoded[1] >= -2_048, decoded[1] <= 2_048,
+              decoded[2] >= -30_000_000, decoded[2] <= 30_000_000,
+              Dim(rawValue: decoded[3]) != nil else { return nil }
+        data.lodestone = decoded
+    }
+    if let rawFlight = dictionary["flight"] {
+        guard let flight = merchantInt(rawFlight), flight >= 0, flight <= 3 else { return nil }
+        data.flight = flight
+    }
+    return data
+}
+
+private func decodeMerchantStack(_ raw: Any?) -> ItemStack? {
+    guard let dictionary = raw as? [String: Any] else { return nil }
+    let allowed = ["id", "count", "damage", "ench", "label", "data"]
+    guard dictionary.keys.allSatisfy(allowed.contains),
+          let id = merchantInt(dictionary["id"]), id >= 0, id < itemDefs.count,
+          let count = merchantInt(dictionary["count"]), count > 0,
+          let damage = merchantInt(dictionary["damage"]), damage >= 0,
+          let rawEnchantments = dictionary["ench"] as? [Any], rawEnchantments.count <= 32,
+          let data = decodeMerchantStackData(dictionary["data"]) else { return nil }
+    var enchantments: [EnchInstance] = []
+    enchantments.reserveCapacity(rawEnchantments.count)
+    for rawEnchantment in rawEnchantments {
+        guard let entry = rawEnchantment as? [String: Any], entry.count == 2,
+              entry.keys.allSatisfy(["id", "lvl"].contains),
+              let enchantmentID = entry["id"] as? String, enchantmentID.utf8.count <= 64,
+              let level = merchantInt(entry["lvl"]),
+              let definition = ENCHANTMENTS.first(where: { $0.id == enchantmentID }),
+              level >= 1, level <= definition.maxLevel else { return nil }
+        enchantments.append(EnchInstance(enchantmentID, level))
+    }
+    let label: String?
+    if let rawLabel = dictionary["label"] {
+        if rawLabel is NSNull {
+            label = nil
+        } else {
+            guard let value = rawLabel as? String, value.utf8.count <= 128 else { return nil }
+            label = value
+        }
+    } else {
+        label = nil
+    }
+    let stack = ItemStack(id, count, damage: damage, ench: enchantments, label: label, data: data)
+    return validMerchantStack(stack) ? stack : nil
+}
+
+private func decodeMerchantOffer(_ raw: Any?) -> TradeOffer? {
+    guard let dictionary = raw as? [String: Any] else { return nil }
+    let allowed = ["buyA", "buyB", "sell", "maxUses", "uses", "xp", "stableID", "unlockLevel"]
+    guard dictionary.keys.allSatisfy(allowed.contains),
+          let buyA = decodeMerchantStack(dictionary["buyA"]),
+          let sell = decodeMerchantStack(dictionary["sell"]),
+          let maxUses = merchantInt(dictionary["maxUses"]),
+          let uses = merchantInt(dictionary["uses"]),
+          let xp = merchantInt(dictionary["xp"]) else { return nil }
+    let buyB: ItemStack?
+    if let rawBuyB = dictionary["buyB"], !(rawBuyB is NSNull) {
+        guard let decoded = decodeMerchantStack(rawBuyB) else { return nil }
+        buyB = decoded
+    } else {
+        buyB = nil
+    }
+    let stableID: String
+    if let rawStableID = dictionary["stableID"] {
+        guard let decoded = rawStableID as? String else { return nil }
+        stableID = decoded
+    } else {
+        stableID = ""
+    }
+    let unlockLevel: Int
+    if let rawUnlockLevel = dictionary["unlockLevel"] {
+        guard let decoded = merchantInt(rawUnlockLevel) else { return nil }
+        unlockLevel = decoded
+    } else {
+        unlockLevel = 1
+    }
+    return TradeOffer(buyA: buyA, buyB: buyB, sell: sell, maxUses: maxUses,
+                      uses: uses, xp: xp, stableID: stableID, unlockLevel: unlockLevel)
+}
+
+func decodeMerchantOffers(_ raw: Any?, profession: String) -> [TradeOffer] {
+    guard merchantRawPayloadWithinBudget(raw),
+          let rawOffers = raw as? [Any], rawOffers.count <= MERCHANT_MAX_RAW_OFFERS else { return [] }
+    let prefix = profession == "wandering" ? "wandering" : profession
+    var seen = Set<String>()
+    var sanitized: [TradeOffer] = []
+    sanitized.reserveCapacity(rawOffers.count)
+    for (index, rawOffer) in rawOffers.enumerated() {
+        guard let source = decodeMerchantOffer(rawOffer) else { return [] }
+        guard validMerchantStack(source.buyA), source.buyB.map(validMerchantStack) ?? true,
+              validMerchantStack(source.sell),
+              source.maxUses > 0, source.maxUses <= 1_024,
+              source.uses >= 0, source.uses <= source.maxUses,
+              source.xp >= 0, source.xp <= 1_000,
+              source.unlockLevel >= 1, source.unlockLevel <= (profession == "wandering" ? 1 : 5)
+        else { return [] }
+        var offer = source
+        if offer.stableID.isEmpty {
+            offer.stableID = "\(prefix).\(offer.unlockLevel).legacy\(index)"
+        }
+        guard offer.stableID.utf8.count <= 96,
+              offer.stableID.hasPrefix(prefix + "."),
+              seen.insert(offer.stableID).inserted else { return [] }
+        sanitized.append(offer)
+    }
+    return sanitized
+}
 
 func tradesFor(_ prof: String, _ level: Int, _ rng: inout RandomX) -> [TradeOffer] {
     // table construction consumes rng for the librarian's book offers — must
@@ -132,13 +399,17 @@ func tradesFor(_ prof: String, _ level: Int, _ rng: inout RandomX) -> [TradeOffe
         [offer(("scute", 4), ("emerald", 1)), offer(("emerald", 4), ("leather_boots", 1))],
         [offer(("emerald", 6), ("leather_horse_armor", 1)), offer(("emerald", 5), ("saddle", 1))],
     ]
-    guard let tables = T[prof] else { return [] }
+    guard var tables = T[prof] else { return [] }
+    for tier in tables.indices {
+        for row in tables[tier].indices {
+            tables[tier][row].stableID = "\(prof).\(tier + 1).\(row)"
+            tables[tier][row].unlockLevel = tier + 1
+        }
+    }
     let lvl = min(level, tables.count)
     var out: [TradeOffer] = []
     for i in 0..<lvl {
-        var pool = tables[i]
-        rng.shuffle(&pool)
-        out.append(contentsOf: pool.prefix(min(2, pool.count)))
+        out.append(contentsOf: tables[i])
     }
     return out
 }
@@ -164,6 +435,9 @@ open class Villager: Mob {
     public var tradeXP = 0
     public var offers: [TradeOffer] = []
     public var restockTimer = 0
+    public var barterSeed: UInt32 = 0
+    public var barterRevision: UInt64 = 1
+    public var barterUnavailable = false
     public var workstation: (Int, Int, Int)? = nil
     public var homeBed: (Int, Int, Int)? = nil
     public override init(world: World) {
@@ -173,6 +447,7 @@ open class Villager: Mob {
         maxHealth = 20; health = 20
         speed = 0.1
         persistent = true
+        barterSeed = rng.debugStateA
         xpReward = 0
         goals.add(FloatGoal(self, 0))
         goals.add(AvoidEntityGoal(self, 1, { e in
@@ -198,24 +473,52 @@ open class Villager: Mob {
             }
         }
         // restock at workstation
-        if restockTimer > 0 { restockTimer -= 1 }
+        if restockTimer > 0 {
+            restockTimer -= 1
+            if restockTimer == 0, hasValidWorkstation(), offers.contains(where: { $0.uses > 0 }) {
+                restock()
+            }
+        }
     }
     public func refreshTrades() {
         if profession == "none" || profession == "nitwit" { return }
-        offers = tradesFor(profession, tradeLevel, &rng)
+        var catalogRNG = RandomX(barterSeed)
+        let generated = tradesFor(profession, 5, &catalogRNG)
+        var priorUses: [String: Int] = [:]
+        for offer in offers where priorUses[offer.stableID] == nil {
+            priorUses[offer.stableID] = offer.uses
+        }
+        offers = generated.map { source in
+            var value = source
+            value.uses = min(value.maxUses, max(0, priorUses[value.stableID] ?? 0))
+            return value
+        }
+        bumpBarterRevision()
     }
     public func addTradeXP(_ xp: Int) {
-        tradeXP += xp
+        tradeXP = min(1_000_000, max(0, tradeXP) + max(0, xp))
         let thresholds = [0, 10, 70, 150, 250]
-        if tradeLevel < 5 && tradeXP >= thresholds[tradeLevel] {
+        while tradeLevel < 5 && tradeXP >= thresholds[tradeLevel] {
             tradeLevel += 1
-            refreshTrades()
             world.hooks.addParticles("heart", x, y + 2, z, 5, 0.4, 0)
         }
     }
     public func restock() {
         for i in offers.indices { offers[i].uses = 0 }
-        restockTimer = 2400
+        restockTimer = 0
+        bumpBarterRevision()
+    }
+    public func hasValidWorkstation() -> Bool {
+        guard let workstation else { return false }
+        let name = blockNameOf(world.getBlock(workstation.0, workstation.1, workstation.2) >> 4)
+        return WORKSTATIONS[name] == profession
+    }
+    public func bumpBarterRevision() {
+        guard barterRevision < UInt64.max else {
+            barterUnavailable = true
+            return
+        }
+        barterRevision += 1
     }
     open override func interact(_ player: Entity, _ stack: ItemStack?) -> Bool {
         if baby || profession == "none" || profession == "nitwit" {
@@ -242,7 +545,13 @@ open class Villager: Mob {
         d["profession"] = profession
         d["tradeLevel"] = tradeLevel
         d["tradeXP"] = tradeXP
-        if let enc = try? JSONEncoder().encode(offers),
+        d["restockTimer"] = restockTimer
+        d["barterSeed"] = NSNumber(value: barterSeed)
+        d["barterRevision"] = NSNumber(value: barterRevision)
+        if let workstation { d["workstation"] = [workstation.0, workstation.1, workstation.2] }
+        if let homeBed { d["homeBed"] = [homeBed.0, homeBed.1, homeBed.2] }
+        if let enc = try? JSONEncoder().encode(Array(offers.prefix(MERCHANT_MAX_RAW_OFFERS))),
+           enc.count <= MERCHANT_MAX_PERSISTED_BYTES,
            let obj = try? JSONSerialization.jsonObject(with: enc) {
             d["offers"] = obj
         }
@@ -250,16 +559,17 @@ open class Villager: Mob {
     }
     open override func load(_ d: [String: Any]) {
         super.load(d)
-        profession = (d["profession"] as? String) ?? "none"
-        tradeLevel = (d["tradeLevel"] as? NSNumber)?.intValue ?? 1
-        tradeXP = (d["tradeXP"] as? NSNumber)?.intValue ?? 0
-        if let raw = d["offers"],
-           let bytes = try? JSONSerialization.data(withJSONObject: raw),
-           let decoded = try? JSONDecoder().decode([TradeOffer].self, from: bytes) {
-            offers = decoded
-        } else {
-            offers = []
-        }
+        let rawProfession = (d["profession"] as? String) ?? "none"
+        profession = (PROFESSIONS.contains(rawProfession) || rawProfession == "none") ? rawProfession : "none"
+        tradeLevel = min(5, max(1, (d["tradeLevel"] as? NSNumber)?.intValue ?? 1))
+        tradeXP = min(1_000_000, max(0, (d["tradeXP"] as? NSNumber)?.intValue ?? 0))
+        restockTimer = min(2400, max(0, (d["restockTimer"] as? NSNumber)?.intValue ?? 0))
+        barterSeed = (d["barterSeed"] as? NSNumber)?.uint32Value ?? rng.debugStateA
+        barterRevision = max(1, (d["barterRevision"] as? NSNumber)?.uint64Value ?? 1)
+        workstation = validatedMerchantPosition(d["workstation"])
+        homeBed = validatedMerchantPosition(d["homeBed"])
+        offers = decodeMerchantOffers(d["offers"], profession: profession)
+        if offers.isEmpty, profession != "none" { refreshTrades() }
     }
 }
 
@@ -288,6 +598,9 @@ public final class WanderingTrader: Mob {
     public var offers: [TradeOffer] = []
     public var despawnTimer = 48000
     public var restockTimer = 0
+    public var barterSeed: UInt32 = 0
+    public var barterRevision: UInt64 = 1
+    public var barterUnavailable = false
     public override init(world: World) {
         super.init(world: world)
         category = "creature"
@@ -295,6 +608,7 @@ public final class WanderingTrader: Mob {
         maxHealth = 20; health = 20
         speed = 0.12
         persistent = true
+        barterSeed = rng.debugStateA
         goals.add(FloatGoal(self, 0))
         goals.add(PanicGoal(self, 1, 1.4))
         goals.add(AvoidEntityGoal(self, 2, { e in
@@ -314,7 +628,12 @@ public final class WanderingTrader: Mob {
             offer(("emerald", 1), ("kelp", 1)), offer(("emerald", 5), ("nautilus_shell", 1)),
             offer(("emerald", 1), ("bamboo", 1)), offer(("emerald", 4), ("sea_pickle", 1)),
         ]
-        rng.shuffle(&pool)
+        for i in pool.indices {
+            pool[i].stableID = "wandering.1.\(i)"
+            pool[i].unlockLevel = 1
+        }
+        var catalogRNG = RandomX(barterSeed)
+        catalogRNG.shuffle(&pool)
         offers = Array(pool.prefix(6))
     }
     public override func tick() {
@@ -328,6 +647,33 @@ public final class WanderingTrader: Mob {
     }
     public func addTradeXP(_ xp: Int) {}
     public func restock() {}
+    public func bumpBarterRevision() {
+        guard barterRevision < UInt64.max else {
+            barterUnavailable = true
+            return
+        }
+        barterRevision += 1
+    }
+    public override func save() -> [String: Any] {
+        var d = super.save()
+        d["despawnTimer"] = despawnTimer
+        d["barterSeed"] = NSNumber(value: barterSeed)
+        d["barterRevision"] = NSNumber(value: barterRevision)
+        if let enc = try? JSONEncoder().encode(offers),
+           enc.count <= MERCHANT_MAX_PERSISTED_BYTES,
+           let obj = try? JSONSerialization.jsonObject(with: enc) {
+            d["offers"] = obj
+        }
+        return d
+    }
+    public override func load(_ d: [String: Any]) {
+        super.load(d)
+        despawnTimer = min(48_000, max(0, (d["despawnTimer"] as? NSNumber)?.intValue ?? 48_000))
+        barterSeed = (d["barterSeed"] as? NSNumber)?.uint32Value ?? rng.debugStateA
+        barterRevision = max(1, (d["barterRevision"] as? NSNumber)?.uint64Value ?? 1)
+        let decoded = decodeMerchantOffers(d["offers"], profession: "wandering")
+        if !decoded.isEmpty { offers = Array(decoded.prefix(6)) }
+    }
 }
 
 public final class IronGolem: Mob {

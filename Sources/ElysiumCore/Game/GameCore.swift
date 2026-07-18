@@ -327,6 +327,9 @@ public final class GameCore {
     public var advancements = AdvancementTracker()
     public private(set) var inWorld = false
     public private(set) var isLANClientWorld = false
+    let barterCapabilityNonce = UInt64.random(in: 1...UInt64.max)
+    var barterNextNonce: UInt64 = 1
+    var barterIssuedNonces = Set<UInt64>()
     /// Checked session provenance for RPG semantic captures. It is never reset, so leaving and
     /// re-entering the same world record cannot make an old activation current again.
     private var rpgWorldEntryGeneration: UInt64 = 0
@@ -615,9 +618,8 @@ public final class GameCore {
         }
         // screen-opening hooks fired from entity interactions
         bindOpenTrading { [weak self] player, villager in
-            guard let self, player is Player else { return }
+            guard let self, player is Player, !self.isLANClientWorld else { return }
             self.host?.openTrading(villager)
-            self.advanceLater("trade_villager")
         }
         openContainerScreenFn = { [weak self] player, kind, vehicle in
             guard let self, player is Player else { return }

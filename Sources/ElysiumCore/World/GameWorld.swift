@@ -93,6 +93,21 @@ public final class World {
     public var thundering = false
     public var rainLevel = 0.0
     public var thunderLevel = 0.0
+    private var hostileDaylightParticleTick = Int.min
+    private var hostileDaylightParticleCount = 0
+
+    /// Bounded world-level budget for the spatial ignition edge. The renderer's
+    /// continuous burning treatment is particle-free, so a daylight crowd can
+    /// never amplify this burst beyond one small fixed budget per simulation tick.
+    func consumeHostileDaylightParticles(_ requested: Int) -> Int {
+        if hostileDaylightParticleTick != time {
+            hostileDaylightParticleTick = time
+            hostileDaylightParticleCount = 0
+        }
+        let allowed = min(max(0, requested), max(0, 24 - hostileDaylightParticleCount))
+        hostileDaylightParticleCount += allowed
+        return allowed
+    }
     public var weatherTimer = 12000
     public var rng: RandomX
     public var spawnX = 0.0, spawnY = 80.0, spawnZ = 0.0

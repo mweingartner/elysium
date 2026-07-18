@@ -3,8 +3,9 @@ import GameController
 import QuartzCore
 import ElysiumCore
 
-/// Physical controller support is deliberately scoped to RPG menus and actions. It does not route
-/// movement, camera, inventory, crafting, or other general gameplay input.
+/// Physical controller support is scoped to RPG menus and actions plus the explicit
+/// villager barter sheet. It does not route movement, camera, inventory, or
+/// crafting input.
 @MainActor
 final class RPGControllerAdapter {
     private weak var app: AppDelegate?
@@ -88,7 +89,7 @@ final class RPGControllerAdapter {
 
     private func desiredContext() -> RPGControllerContext {
         guard focused, let app, app.game.hasWorld() else { return .inactive }
-        if app.ui.current() is RPGCharacterScreen { return .sheet }
+        if app.ui.current() is RPGCharacterScreen || app.ui.current() is TradingScreen { return .sheet }
         return app.ui.hasScreen() ? .inactive : .world
     }
 
@@ -229,8 +230,13 @@ final class RPGControllerAdapter {
             let accepted: Bool
             switch context {
             case .sheet:
-                accepted = (app.ui.current() as? RPGCharacterScreen)?
-                    .handleRPGControllerCommand(command, ui: app.ui, game: app.game) ?? false
+                if let screen = app.ui.current() as? RPGCharacterScreen {
+                    accepted = screen.handleRPGControllerCommand(command, ui: app.ui, game: app.game)
+                } else if let screen = app.ui.current() as? TradingScreen {
+                    accepted = screen.handleControllerCommand(command, ui: app.ui, game: app.game)
+                } else {
+                    accepted = false
+                }
             case .world:
                 let result = app.ui.dispatchRPGWorldSemanticCommand(
                     command, source: .controller, game: app.game)

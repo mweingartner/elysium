@@ -2405,6 +2405,11 @@ public func makeLANEntitySnapshots(
             vz: entity?.vz ?? 0,
             onGround: entity?.onGround ?? false,
             fire: (entity?.fireTicks ?? 0) > 0,
+            fuseProgress: (entity as? Creeper)?.fuse.map {
+                min(1, Double($0.elapsedTicks) / Double($0.totalTicks))
+            },
+            fuseRapid: (entity as? Creeper)?.fuse.map { $0.trigger == .sunlight },
+            charged: (entity as? Creeper)?.charged,
             dimension: world.dim.rawValue
         ))
     }
@@ -2555,6 +2560,9 @@ private func normalizedLANEntitySnapshot(_ raw: LANEntitySnapshot) -> LANEntityS
         vz: raw.vz,
         onGround: raw.onGround,
         fire: raw.fire,
+        fuseProgress: raw.fuseProgress,
+        fuseRapid: raw.fuseRapid,
+        charged: raw.charged,
         dimension: raw.dimension
     )
     guard snapshot.entityID >= 0, snapshot.type != "player" else { return nil }
@@ -2635,6 +2643,12 @@ private func configureMirroredEntity(_ entity: Entity, from snapshot: LANEntityS
     entity.prevPitch = snapshot.pitch
     entity.onGround = snapshot.onGround
     entity.fireTicks = snapshot.fire ? max(entity.fireTicks, 1) : 0
+    if snapshot.type == "creeper" {
+        entity.data.swelling = snapshot.fuseProgress ?? 0
+        entity.data.fuseRapid = snapshot.fuseRapid ?? false
+        entity.data.charged = snapshot.charged ?? false
+        if let creeper = entity as? Creeper { creeper.charged = snapshot.charged ?? false }
+    }
     if let living = entity as? LivingEntity, let health = snapshot.health {
         living.health = max(0, min(living.maxHealth, health))
         living.deathTime = living.health <= 0 ? max(1, living.deathTime) : 0

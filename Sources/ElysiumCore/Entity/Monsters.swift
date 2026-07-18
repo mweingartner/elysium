@@ -4,6 +4,21 @@
 
 import Foundation
 
+public struct CreeperFuseVisual: Equatable {
+    public let scale: Double
+    public let overlayAlpha: Double
+}
+
+/// Pure presentation projection shared by runtime rendering and boundary tests.
+/// Normalized progress advances twice as quickly in real time for the 15-tick
+/// sunlight fuse, while the visual curve itself remains bounded and stable.
+public func creeperFuseVisual(progress rawProgress: Double) -> CreeperFuseVisual {
+    let progress = rawProgress.isFinite ? max(0, min(1, rawProgress)) : 0
+    let scale = 1.02 + progress * 0.06
+    let pulse = 0.5 + 0.5 * detSin(progress * Double.pi * 8 - Double.pi / 2)
+    return CreeperFuseVisual(scale: scale, overlayAlpha: 0.15 + pulse * 0.30)
+}
+
 let isPlayerTarget: (LivingEntity) -> Bool = { e in e.isPlayer && !e.dead }
 let targetsVillagers: (LivingEntity) -> Bool = { e in
     e.isPlayer || e.type == "villager" || e.type == "wandering_trader" || e.type == "iron_golem"
@@ -17,6 +32,7 @@ open class Monster: Mob {
     public override init(world: World) {
         super.init(world: world)
         category = "monster"
+        burnsInSun = true
         xpReward = 5
     }
     public func addMonsterGoals(_ speed: Double = 1.05, targetFilter: ((LivingEntity) -> Bool)? = nil) {
@@ -78,7 +94,6 @@ public final class Husk: Zombie {
     public override var type: String { "husk" }
     public override init(world: World) {
         super.init(world: world)
-        burnsInSun = false
     }
     public override func doMeleeAttack(_ target: LivingEntity) {
         super.doMeleeAttack(target)
@@ -173,8 +188,37 @@ public final class Stray: Skeleton {
 // CREEPER ------------------------------------------------------------------------
 public final class Creeper: Monster {
     public override var type: String { "creeper" }
-    public var swellTicks = 0
+    public static let proximityFuseTicks = 30
+    public static let sunlightFuseTicks = 15
+
+    public enum FuseTrigger: String, Codable, Equatable {
+        case proximity
+        case sunlight
+    }
+
+    public struct FuseState: Codable, Equatable {
+        public var trigger: FuseTrigger
+        public var elapsedTicks: Int
+        public var totalTicks: Int
+        public var latchedX: Double
+        public var latchedZ: Double
+    }
+
+    public private(set) var fuse: FuseState?
+    /// Compatibility/test projection of the former counter. Production starts
+    /// a fuse through `startFuse`; setting zero never clears a latched fuse.
+    public var swellTicks: Int {
+        get { fuse.map { $0.elapsedTicks + 1 } ?? 0 }
+        set {
+            guard newValue > 0, fuse == nil else { return }
+            fuse = FuseState(trigger: .proximity,
+                             elapsedTicks: min(Self.proximityFuseTicks - 1, newValue - 1),
+                             totalTicks: Self.proximityFuseTicks,
+                             latchedX: x, latchedZ: z)
+        }
+    }
     public var charged = false
+    public override var suppressesMobAI: Bool { fuse != nil }
     public override init(world: World) {
         super.init(world: world)
         width = 0.6; height = 1.7
@@ -191,20 +235,114 @@ public final class Creeper: Monster {
         targetGoals.add(NearestTargetGoal(self, 2, isPlayerTarget, 16))
     }
     public override func doMeleeAttack(_ target: LivingEntity) {} // creepers don't melee
+    public func startFuse(_ trigger: FuseTrigger) {
+        if var active = fuse {
+            if trigger == .sunlight && active.trigger != .sunlight {
+                let remaining = max(0, active.totalTicks - active.elapsedTicks)
+                active.trigger = .sunlight
+                active.totalTicks = min(active.totalTicks,
+                                        active.elapsedTicks + min(remaining, Self.sunlightFuseTicks))
+                fuse = active
+            }
+            return
+        }
+        let total = trigger == .sunlight ? Self.sunlightFuseTicks : Self.proximityFuseTicks
+        fuse = FuseState(trigger: trigger, elapsedTicks: 0, totalTicks: total,
+                         latchedX: x, latchedZ: z)
+        nav.stop()
+        moveForward = 0
+        moveStrafe = 0
+        jumping = false
+        vx = 0
+        vz = 0
+        data.swelling = 0
+        data.fuseRapid = trigger == .sunlight
+        world.hooks.playSound("entity.creeper.primed", x, y, z, 1, 0.6)
+    }
+    public override func reactToDirectSunlight() {
+        startFuse(.sunlight)
+    }
     public override func tick() {
         super.tick()
         if dead || deathTime > 0 { return }
-        if swellTicks > 0 {
-            data.swelling = Double(swellTicks) / 30
-            if swellTicks == 1 { world.hooks.playSound("entity.creeper.primed", x, y, z, 1, 0.6) }
-            swellTicks += 1
-            if swellTicks > 30 {
+        if var active = fuse {
+            // Horizontal position is an invariant, including after travel,
+            // collision resolution, entity pushes, and attack knockback.
+            x = active.latchedX
+            z = active.latchedZ
+            vx = 0
+            vz = 0
+            limbAmp = 0
+            active.elapsedTicks += 1
+            fuse = active
+            data.swelling = min(1, Double(active.elapsedTicks) / Double(active.totalTicks))
+            data.fuseRapid = active.trigger == .sunlight
+            if active.elapsedTicks >= active.totalTicks {
+                fuse = nil
                 remove()
                 explodeFn?(world, x, y + 0.5, z, charged ? 6 : 3, false, self)
             }
         } else {
             data.swelling = 0
+            data.fuseRapid = false
         }
+    }
+    @discardableResult
+    public override func hurt(_ amount: Double, _ source: String, _ attacker: Entity? = nil) -> Bool {
+        let result = super.hurt(amount, source, attacker)
+        if let active = fuse {
+            x = active.latchedX
+            z = active.latchedZ
+            vx = 0
+            vz = 0
+        }
+        return result
+    }
+    public override func save() -> [String: Any] {
+        var d = super.save()
+        d["charged"] = charged
+        if let fuse {
+            d["creeperFuse"] = [
+                "trigger": fuse.trigger.rawValue,
+                "elapsed": fuse.elapsedTicks,
+                "total": fuse.totalTicks,
+                "x": fuse.latchedX,
+                "z": fuse.latchedZ,
+            ] as [String: Any]
+        }
+        return d
+    }
+    public override func load(_ d: [String: Any]) {
+        super.load(d)
+        charged = (d["charged"] as? Bool) ?? (data.charged ?? false)
+        data.charged = charged
+        fuse = nil
+        guard let raw = d["creeperFuse"] as? [String: Any],
+              let triggerRaw = raw["trigger"] as? String,
+              let trigger = FuseTrigger(rawValue: triggerRaw),
+              let elapsed = (raw["elapsed"] as? NSNumber)?.intValue,
+              let total = (raw["total"] as? NSNumber)?.intValue,
+              let lx = (raw["x"] as? NSNumber)?.doubleValue,
+              let lz = (raw["z"] as? NSNumber)?.doubleValue,
+              lx.isFinite, lz.isFinite,
+              abs(lx) <= 30_000_000, abs(lz) <= 30_000_000,
+              abs(lx - x) <= 0.001, abs(lz - z) <= 0.001,
+              (trigger == .proximity && total == Self.proximityFuseTicks) ||
+                (trigger == .sunlight &&
+                 total >= Self.sunlightFuseTicks &&
+                 total <= Self.proximityFuseTicks &&
+                 total - elapsed <= Self.sunlightFuseTicks),
+              elapsed >= 0, elapsed < total else {
+            data.swelling = 0
+            data.fuseRapid = false
+            return
+        }
+        fuse = FuseState(trigger: trigger, elapsedTicks: elapsed, totalTicks: total,
+                         latchedX: lx, latchedZ: lz)
+        vx = 0
+        vz = 0
+        data.swelling = Double(elapsed) / Double(total)
+        data.fuseRapid = trigger == .sunlight
     }
     public override func drops() -> [DropEntry] {
         [DropEntry("gunpowder", min: 0, max: 2, lootingBonus: 1)]
@@ -218,13 +356,10 @@ final class SwellGoal: Goal {
     override func tick() {
         guard let c = mob as? Creeper else { return }
         if let t = c.target, c.distanceToSq(t) < 9, c.canSee(t) {
-            if c.swellTicks == 0 { c.swellTicks = 1 }
-            c.nav.stop()
-        } else {
-            c.swellTicks = 0
+            c.startFuse(.proximity)
         }
     }
-    override func stop() { (mob as? Creeper)?.swellTicks = 0 }
+    override func stop() {}
 }
 
 // SPIDERS -----------------------------------------------------------------------

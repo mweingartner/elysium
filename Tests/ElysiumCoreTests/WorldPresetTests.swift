@@ -362,7 +362,6 @@ private final class DungeonFixtureSink: ChunkSink {
     let minY = GEN_MIN_Y
     let maxY = GEN_MIN_Y + WORLD_H
     var blockEntities: [BESpec] = []
-    private var openingProbe = 0
 
     init(cx: Int, cz: Int) {
         self.cx = cx
@@ -372,8 +371,7 @@ private final class DungeonFixtureSink: ChunkSink {
     func set(_ x: Int, _ y: Int, _ z: Int, _ c: UInt16) {}
 
     func get(_ x: Int, _ y: Int, _ z: Int) -> Int {
-        defer { openingProbe = (openingProbe + 1) % 4 }
-        return openingProbe == 0 ? 0 : Int(cell(B.stone))
+        0 // deterministic dry cavern; density, not terrain rejection, is under test
     }
 
     func topY(_ x: Int, _ z: Int) -> Int { 64 }

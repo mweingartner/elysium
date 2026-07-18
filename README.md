@@ -12,8 +12,10 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 
 - **Native engine and renderer** — the headless-testable Swift engine drives a hand-written Metal renderer, AppKit interface, runtime texture atlas, lighting, particles, weather, and optional enhanced effects such as SSAO, volumetric light, soft shadows, and ACES tonemapping.
 - **Survival across three dimensions** — procedural overworld, nether, and end terrain; caves and structures; mining, farming, crafting, smelting, brewing, enchanting, combat, hunger, experience, sleep, death, respawn, bosses, and advancements.
-- **Living worlds** — animals, monsters, villagers, projectiles, vehicles, dropped items, raids, pathfinding, fluids, portals, redstone, block entities, containers, and host-owned simulation state.
+- **Living worlds** — animals, monsters, villagers, projectiles, vehicles, dropped items, raids, pathfinding, fluids, portals, redstone, block entities, containers, and host-owned simulation state. Hostile monsters react consistently to direct daylight: ordinary monsters ignite, while creepers latch a short fuse and stop chasing.
+- **Villager trading** — profession-specific villagers and wandering traders advertise the resources they want, expose their complete ordered offer catalog, and show both costs, stock, level locks, restock state, and affordability before an atomic trade. The trade sheet supports pointer, keyboard, controller, and macOS Accessibility navigation.
 - **World creation choices** — Default, Superflat, Large Biomes, Amplified, Single Biome, Debug, and Elysium's Rich Resources preset, plus configurable dungeon density and an optional Character Classes rule.
+- **Playable structure sites** — new village plans are moved to validated dry, supported terrain or omitted; ordinary dungeons stay dry, cave-connected, and wholly inside their origin chunk, while a region-budgeted minority may generate as intentionally sealed underwater rooms. Existing saved/modified chunks are never migrated or rewritten; mixed old/new generation seams are supported.
 - **RPG progression** — six character paths with attributes, levels, prepared passive and active skills, spells, fatigue, cooldowns, and a second quick-slot bar activated with Shift+1 through Shift+9. Character progression is optional per world; some character operations remain local-world-only while LAN authority continues to be hardened.
 - **Object templates** — copy connected builds with Command-C, browse and preview saved templates with Command-V, rotate and place them, and undo the most recent placement with Command-Z. Template parsing and placement are bounded and validated before world mutation.
 - **Local-network multiplayer** — host, discover, join, or directly connect to LAN worlds with join codes and host-authoritative replication. Elysium has no public matchmaking, cloud relay, or built-in NAT traversal; a join code is an access gate, not protection from an already hostile local network.
@@ -72,6 +74,22 @@ All gameplay bindings can be changed in Options → Controls.
 | Shift+1 … Shift+9 | Use a prepared RPG action |
 | F1 / F3 / F11 | Toggle HUD, debug overlay, or fullscreen |
 | Escape | Pause or close the current screen |
+
+### Trading with NPCs
+
+Use the normal **use/place** action on an adult professioned villager or a
+wandering trader while playing locally or as the LAN host. The trade sheet lists
+the resource types that the merchant wants, every ordered offer, required counts,
+current holdings, result count, stock, level locks, and workstation/restock state.
+Select an offer with the pointer, Up/Down, Page Up/Page Down, Home/End, or the
+equivalent controller commands; scroll the offer list to reach later tiers, then
+activate **Trade**. A disabled Trade button remains focusable and explains the
+blocking reason, such as missing resources, level, stock, range, line of sight,
+or inventory capacity. Payment and output commit together or not at all.
+
+LAN clients cannot trade yet because Elysium has no host-authoritative remote
+barter protocol; the interaction fails closed instead of approximating merchant
+state on the client.
 
 ## Local data
 

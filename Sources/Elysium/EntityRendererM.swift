@@ -21,6 +21,11 @@ struct EntityPose {
     var sky = 0, block = 0
     var ageTicks = 0
     var alpha = 1.0
+    var onFire = false
+    var fuseProgress = 0.0
+    var fuseRapid = false
+    var fuseCharged = false
+    var fuseOverlay = 0.0
     // mob-specific data (the golden baselines read these off ent.data)
     var aiming = false
     var crossed = false
@@ -365,6 +370,15 @@ final class EntityRendererM {
         let sc = Float(p.scale * g.model.scale * (p.baby ? 0.5 : 1))
         m = mScale(m, sc, sc, sc)
 
+        var overlay = SIMD4<Float>(1, 0.2, 0.2, Float(p.hurtFlash * 0.5))
+        if p.onFire && overlay.w < 0.22 {
+            overlay = SIMD4<Float>(1, 0.45, 0.08, 0.22)
+        }
+        if p.fuseOverlay > Double(overlay.w) {
+            overlay = p.fuseCharged
+                ? SIMD4<Float>(0.55, 0.85, 1, Float(p.fuseOverlay))
+                : SIMD4<Float>(1, 1, 1, Float(p.fuseOverlay))
+        }
         var u = EntityUniforms(
             viewProj: viewProj,
             model: m,
@@ -374,7 +388,7 @@ final class EntityRendererM {
                     partMats[20], partMats[21], partMats[22], partMats[23]),
             light: SIMD4<Float>(Float(p.sky), Float(p.block), Float(dayLight), Float(gamma)),
             misc: SIMD4<Float>(Float(ambient), Float(p.alpha), fog.start, fog.end),
-            overlay: SIMD4<Float>(1, 0.2, 0.2, Float(p.hurtFlash * 0.5)),
+            overlay: overlay,
             fogColor: SIMD4<Float>(fog.color.x, fog.color.y, fog.color.z, 1))
         enc.setRenderPipelineState(pipeline)
         enc.setVertexBuffer(g.vb, offset: 0, index: 0)

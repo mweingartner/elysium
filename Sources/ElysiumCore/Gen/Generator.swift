@@ -12,6 +12,136 @@ public struct GenOutput {
     public let structRefs: [StructRef]
 }
 
+/// Immutable terrain state immediately before structures and features. Both
+/// ordinary chunk generation and structure validation use this exact function.
+public struct BaseTerrainChunk {
+    public let cx: Int
+    public let cz: Int
+    public let blocks: [UInt16]
+    public let biomes: [UInt8]
+    public let heights: [Int16]
+    public let surfaceBiomes: [UInt8]
+
+    @inline(__always)
+    public func cell(worldX x: Int, y: Int, worldZ z: Int) -> Int? {
+        guard floorDiv(x, 16) == cx, floorDiv(z, 16) == cz,
+              y >= GEN_MIN_Y, y < GEN_MIN_Y + WORLD_H else { return nil }
+        let lx = x - cx * 16, lz = z - cz * 16
+        return Int(blocks[((y - GEN_MIN_Y) * 16 + lz) * 16 + lx])
+    }
+
+    public func topSolidY(worldX x: Int, worldZ z: Int) -> Int? {
+        guard floorDiv(x, 16) == cx, floorDiv(z, 16) == cz else { return nil }
+        let lx = x - cx * 16, lz = z - cz * 16
+        for y in stride(from: GEN_MIN_Y + WORLD_H - 1, through: GEN_MIN_Y, by: -1) {
+            let c = blocks[((y - GEN_MIN_Y) * 16 + lz) * 16 + lx]
+            let id = Int(c >> 4)
+            if c != 0, id != Int(B.water), id != Int(B.lava), SOLID[id] == 1 { return y }
+        }
+        return nil
+    }
+
+    public func highestOccupiedCell(worldX x: Int, worldZ z: Int) -> (y: Int, cell: Int)? {
+        guard floorDiv(x, 16) == cx, floorDiv(z, 16) == cz else { return nil }
+        let lx = x - cx * 16, lz = z - cz * 16
+        for y in stride(from: GEN_MIN_Y + WORLD_H - 1, through: GEN_MIN_Y, by: -1) {
+            let c = Int(blocks[((y - GEN_MIN_Y) * 16 + lz) * 16 + lx])
+            if c != 0 { return (y, c) }
+        }
+        return nil
+    }
+}
+
+public let baseTerrainOracleVersion = 1
+
+public func buildBaseTerrainChunk(seed: UInt32, cx: Int, cz: Int,
+                                  settings: WorldGenerationSettings = .normal) -> BaseTerrainChunk {
+    let recursionKey = "ElysiumCore.buildBaseTerrainChunk.active"
+    precondition(Thread.current.threadDictionary[recursionKey] == nil,
+                 "base terrain generation must remain a non-reentrant leaf")
+    Thread.current.threadDictionary[recursionKey] = true
+    defer { Thread.current.threadDictionary.removeObject(forKey: recursionKey) }
+    precondition(settings.preset != .flat && settings.preset != .debugAllBlockStates,
+                 "base terrain oracle is only defined for noise-based Overworld presets")
+    let info = DIMS[Dim.overworld.rawValue]
+    var blocks = [UInt16](repeating: 0, count: CHUNK_W * CHUNK_W * info.height)
+    var biomes = [UInt8](repeating: 0, count: 4 * 4 * ((info.height + 3) / 4))
+    let gen = overworldGen(seed, settings: settings)
+    let result = gen.fillTerrain(cx, cz, &blocks, &biomes)
+    gen.carve(cx, cz, &blocks)
+    gen.applySurface(cx, cz, &blocks, result.heights, result.surfaceBiomes)
+    gen.placeOres(cx, cz, &blocks, result.surfaceBiomes)
+    return BaseTerrainChunk(cx: cx, cz: cz, blocks: blocks, biomes: biomes,
+                            heights: result.heights, surfaceBiomes: result.surfaceBiomes)
+}
+
+/// Plan-local, bounded memoization over exact pre-structure chunks. A miss is
+/// built outside the lock, then installed only if another caller did not win.
+public final class BaseTerrainOracle {
+    public let seed: UInt32
+    public let settings: WorldGenerationSettings
+    public let maxCachedChunks: Int
+    public let maxQueries: Int
+
+    private let lock = NSLock()
+    private var chunks: [ChunkCoord: BaseTerrainChunk] = [:]
+    private var order: [ChunkCoord] = []
+    private var queryCount = 0
+
+    private struct ChunkCoord: Hashable { let x: Int; let z: Int }
+
+    public init(seed: UInt32, settings: WorldGenerationSettings,
+                maxCachedChunks: Int = 128, maxQueries: Int = 32_768) {
+        self.seed = seed
+        self.settings = settings
+        self.maxCachedChunks = max(1, maxCachedChunks)
+        self.maxQueries = max(1, maxQueries)
+    }
+
+    public var observedQueryCount: Int { lock.withLock { queryCount } }
+    public var cachedChunkCount: Int { lock.withLock { chunks.count } }
+
+    public func chunk(cx: Int, cz: Int) -> BaseTerrainChunk? {
+        let key = ChunkCoord(x: cx, z: cz)
+        if let existing = lock.withLock({ chunks[key] }) { return existing }
+        let built = buildBaseTerrainChunk(seed: seed, cx: cx, cz: cz, settings: settings)
+        return lock.withLock {
+            if let existing = chunks[key] { return existing }
+            if chunks.count >= maxCachedChunks, let evicted = order.first {
+                order.removeFirst()
+                chunks.removeValue(forKey: evicted)
+            }
+            chunks[key] = built
+            order.append(key)
+            return built
+        }
+    }
+
+    public func cell(_ x: Int, _ y: Int, _ z: Int) -> Int? {
+        guard consumeQuery() else { return nil }
+        return chunk(cx: floorDiv(x, 16), cz: floorDiv(z, 16))?.cell(worldX: x, y: y, worldZ: z)
+    }
+
+    public func topSolidY(_ x: Int, _ z: Int) -> Int? {
+        guard consumeQuery() else { return nil }
+        return chunk(cx: floorDiv(x, 16), cz: floorDiv(z, 16))?.topSolidY(worldX: x, worldZ: z)
+    }
+
+
+    public func highestOccupiedCell(_ x: Int, _ z: Int) -> (y: Int, cell: Int)? {
+        guard consumeQuery() else { return nil }
+        return chunk(cx: floorDiv(x, 16), cz: floorDiv(z, 16))?.highestOccupiedCell(worldX: x, worldZ: z)
+    }
+
+    private func consumeQuery() -> Bool {
+        lock.withLock {
+            guard queryCount < maxQueries else { return false }
+            queryCount += 1
+            return true
+        }
+    }
+}
+
 public final class ArraySink: ChunkSink {
     public let cx: Int
     public let cz: Int
@@ -198,10 +328,9 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
             return generateDebugOverworldChunk(cx, cz)
         }
         let gen = overworldGen(seed, settings: settings)
-        let res = gen.fillTerrain(cx, cz, &blocks, &biomes)
-        gen.carve(cx, cz, &blocks)
-        gen.applySurface(cx, cz, &blocks, res.heights, res.surfaceBiomes)
-        gen.placeOres(cx, cz, &blocks, res.surfaceBiomes)
+        let base = buildBaseTerrainChunk(seed: seed, cx: cx, cz: cz, settings: settings)
+        blocks = base.blocks
+        biomes = base.biomes
 
         // refined estimate (incl. 3D detail) — the spline-only one diverged ±34
         // from real terrain, scattering trees and burying/hovering structures
@@ -210,7 +339,10 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
         let ctx = GenCtx(seed: seed,
                          heightAt: { x, z in gen.refinedHeightEstimate(Double(x), Double(z)) },
                          biomeAt: { x, z in gen.surfaceBiomeAt(Double(x), Double(z)).rawValue },
-                         dim: dim.rawValue)
+                         dim: dim.rawValue,
+                         generationSettingsIdentity: settings.cacheIdentity,
+                         baseTerrainOracleVersion: baseTerrainOracleVersion,
+                         terrainOracle: BaseTerrainOracle(seed: seed, settings: settings))
         let overworldStructs = STRUCTURES.filter { !["fortress", "bastion", "end_city"].contains($0.id) }
         let structRefs = buildStructuresForChunk(ctx, cx, cz, sink, overworldStructs)
 
@@ -246,8 +378,9 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
                 tryGeode(seed, ox, oz, sink)
             }
         }
-        tryDungeons(seed, cx, cz, sink, density: settings.dungeonDensity)
-        gen.applySnowAndIce(cx, cz, &sink.blocks, res.surfaceBiomes)
+        tryDungeons(seed, cx, cz, sink, density: settings.dungeonDensity,
+                    settings: settings, terrainOracle: ctx.terrainOracle)
+        gen.applySnowAndIce(cx, cz, &sink.blocks, base.surfaceBiomes)
 
         // worldgen passive mobs
         var mobRng = chunkRandom(seed, cx, cz, 0xAB1E)

@@ -113,4 +113,10 @@ public struct WorldGenerationSettings: Equatable {
     }
 
     public static let normal = WorldGenerationSettings()
+
+    /// Stable, complete identity for generation caches. Keep this explicit so a
+    /// future setting cannot silently alias an older structure plan.
+    public var cacheIdentity: String {
+        "\(preset.rawValue)|\(biomeID(singleBiome))|dungeons:\(dungeonDensity.rawValue)"
+    }
 }

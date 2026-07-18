@@ -95,7 +95,7 @@ final class SunlightBurnTests: XCTestCase {
         XCTAssertFalse(zombie.dead)
     }
 
-    func testHuskDoesNotBurnInDirectSunlight() throws {
+    func testHuskBurnsInDirectSunlightLikeEveryNonCreeperMonster() throws {
         let world = makeOverworld()
         world.dayTime = 1_000
         world.gameRules["doDaylightCycle"] = 0
@@ -105,8 +105,59 @@ final class SunlightBurnTests: XCTestCase {
 
         tick(world, count: 240)
 
-        XCTAssertEqual(husk.fireTicks, 0)
-        XCTAssertEqual(husk.health, husk.maxHealth)
+        XCTAssertGreaterThan(husk.fireTicks, 0)
+        XCTAssertLessThan(husk.health, husk.maxHealth)
         XCTAssertFalse(husk.dead)
+    }
+
+    func testEveryRegisteredMonsterUsesUniformSunlightReaction() throws {
+        // Keep this inventory explicit so adding a hostile factory requires a
+        // deliberate sunlight classification update rather than silently
+        // inheriting whichever registry snapshot a concurrent test observes.
+        let registered = [
+            "zombie", "husk", "drowned", "zombie_villager",
+            "skeleton", "stray", "creeper", "spider", "cave_spider",
+            "slime", "witch", "enderman", "silverfish", "endermite",
+            "phantom", "guardian", "elder_guardian", "shulker",
+            "pillager", "vindicator", "evoker", "vex", "ravager",
+            "blaze", "ghast", "magma_cube", "zombified_piglin",
+            "piglin", "piglin_brute", "hoglin", "zoglin",
+            "wither_skeleton", "warden", "wither",
+        ]
+        var checked: [String] = []
+        for type in registered {
+            let world = makeOverworld()
+            world.gameRules["doDaylightCycle"] = 0
+            guard let monster = createEntity(type, world) as? Monster else { continue }
+            monster.setPos(0.5, 64, 0.5)
+            monster.persistent = true
+            monster.tickSunlightBurning()
+            checked.append(type)
+            if let creeper = monster as? Creeper {
+                XCTAssertNotNil(creeper.fuse, "creeper should start its rapid sunlight fuse")
+                XCTAssertEqual(creeper.fuse?.trigger, .sunlight)
+                XCTAssertEqual(creeper.fireTicks, 0)
+            } else {
+                XCTAssertGreaterThan(monster.fireTicks, 0, "\(type) should ignite")
+            }
+        }
+        XCTAssertGreaterThan(checked.count, 20, "the registry-wide assertion must cover the hostile catalog")
+        XCTAssertTrue(checked.contains("husk"))
+        XCTAssertTrue(checked.contains("creeper"))
+    }
+
+    func testDaylightIgnitionParticleDensityIsCappedAcrossACrowd() throws {
+        let world = makeOverworld()
+        var emitted = 0
+        world.hooks.addParticles = { name, _, _, _, count, _, _ in
+            if name == "flame" { emitted += count }
+        }
+
+        for _ in 0..<40 {
+            let monster = Zombie(world: world)
+            monster.reactToDirectSunlight()
+        }
+
+        XCTAssertEqual(emitted, 24)
     }
 }

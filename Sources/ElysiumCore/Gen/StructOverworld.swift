@@ -163,6 +163,82 @@ private func well(_ b: Builder, _ x: Int, _ y: Int, _ z: Int, _ st: VillageStyle
     b.fill(x - 1, y + 3, z - 1, x + 4, y + 3, z + 4, st.slab)
 }
 
+private let villageCenterOffsets: [(Int, Int)] = [
+    (0, 0), (-16, 0), (16, 0), (0, -16), (0, 16),
+    (-16, -16), (16, -16), (-16, 16), (16, 16),
+    (-32, 0), (32, 0), (0, -32), (0, 32),
+]
+
+private struct VillageXZFootprint {
+    let x0: Int
+    let z0: Int
+    let x1: Int
+    let z1: Int
+
+    init(_ x0: Int, _ z0: Int, _ x1: Int, _ z1: Int) {
+        self.x0 = min(x0, x1)
+        self.z0 = min(z0, z1)
+        self.x1 = max(x0, x1)
+        self.z1 = max(z0, z1)
+    }
+
+    func intersects(_ other: VillageXZFootprint) -> Bool {
+        x0 <= other.x1 && other.x0 <= x1 && z0 <= other.z1 && other.z0 <= z1
+    }
+}
+
+private func dryVillageSurface(_ ctx: GenCtx, _ x: Int, _ z: Int) -> Int? {
+    guard let oracle = ctx.terrainOracle,
+          let occupied = oracle.highestOccupiedCell(x, z),
+          let solidY = oracle.topSolidY(x, z) else { return nil }
+    let id = occupied.cell >> 4
+    guard id != Int(B.water), id != Int(B.lava), occupied.y == solidY else { return nil }
+    return solidY + 1
+}
+
+/// Cheap ordered preflight. The exact occupied piece footprints are checked
+/// after planning, so a coarse pass cannot authorize a wet or unsupported plan.
+private func chooseVillageCenter(_ ctx: GenCtx, _ originX: Int, _ originZ: Int) -> (Int, Int)? {
+    for (dx, dz) in villageCenterOffsets {
+        let x = originX + dx, z = originZ + dz
+        guard styleFor(ctx.biomeAt(x, z)) != nil else { continue }
+        var heights: [Int] = []
+        var valid = true
+        for sz in stride(from: -40, through: 40, by: 8) {
+            for sx in stride(from: -40, through: 40, by: 8) {
+                guard let y = dryVillageSurface(ctx, x + sx, z + sz) else {
+                    valid = false
+                    break
+                }
+                heights.append(y)
+            }
+            if !valid { break }
+        }
+        if valid, let lo = heights.min(), let hi = heights.max(), hi - lo <= 12 { return (x, z) }
+    }
+    return nil
+}
+
+private func validateVillagePieces(_ ctx: GenCtx, _ pieces: [StructPiece]) -> Bool {
+    guard !pieces.isEmpty else { return false }
+    var checked = 0
+    for p in pieces {
+        var previousRow: [Int] = []
+        for z in p.z0...p.z1 {
+            var row: [Int] = []
+            for x in p.x0...p.x1 {
+                checked += 1
+                guard checked <= 24_000, let y = dryVillageSurface(ctx, x, z) else { return false }
+                row.append(y)
+                if row.count > 1, abs(row[row.count - 1] - row[row.count - 2]) > 1 { return false }
+                if !previousRow.isEmpty, abs(y - previousRow[row.count - 1]) > 1 { return false }
+            }
+            previousRow = row
+        }
+    }
+    return true
+}
+
 // =============================================================================
 // RUINED PORTAL (shared with nether)
 // =============================================================================
@@ -199,45 +275,281 @@ public func buildRuinedPortal(_ b: Builder, _ x: Int, _ y: Int, _ z: Int, _ neth
 // =============================================================================
 // DUNGEON (placed per-chunk, not region)
 // =============================================================================
+private struct DungeonRegionKey: Hashable {
+    let seed: UInt32
+    let settingsIdentity: String
+    let rx: Int
+    let rz: Int
+    let passes: Int
+}
+
+private let dungeonRegionSide = 32
+private let dungeonRegionCacheLimit = 64
+private let dungeonRegionMaximumPasses = 8
+private let dungeonRegionMaximumRawCandidates = dungeonRegionSide * dungeonRegionSide
+    * dungeonRegionMaximumPasses * 4
+private let dungeonRegionMaximumStoredMembers = dungeonRegionSide * dungeonRegionSide
+    * dungeonRegionMaximumPasses
+private let dungeonRegionMaximumRetainedBytesPerPlan = 512 * 1_024
+
+private struct DungeonBudgetMember: Hashable {
+    let cx: Int
+    let cz: Int
+    let pass: Int
+}
+
+private struct DungeonRawCandidate {
+    let x: Int
+    let y: Int
+    let z: Int
+    let halfWidth: Int
+    let attempt: Int
+}
+
+private struct DungeonRegionPlan {
+    let rawAcceptedCount: Int
+    let underwater: Set<DungeonBudgetMember>
+}
+
+private var dungeonRegionPlans: [DungeonRegionKey: DungeonRegionPlan] = [:]
+private var dungeonRegionInFlight: Set<DungeonRegionKey> = []
+private let dungeonRegionCondition = NSCondition()
+
+private func rawDungeonCandidates(_ seed: UInt32, _ cx: Int, _ cz: Int, pass: Int) -> [DungeonRawCandidate] {
+    let salt = pass == 0 ? UInt32(0xD0D6E0) : dungeonPassSalt(pass)
+    let rng = Rng(hash2(seed, cx, cz, salt))
+    var result: [DungeonRawCandidate] = []
+    result.reserveCapacity(4)
+    for attempt in 0..<4 {
+        guard rng.nextFloat() <= 0.12 else { continue }
+        let x = cx * 16 + 3 + rng.nextInt(10)
+        let z = cz * 16 + 3 + rng.nextInt(10)
+        let y = -40 + rng.nextInt(90)
+        let halfWidth = 3 + rng.nextInt(2)
+        result.append(DungeonRawCandidate(x: x, y: y, z: z,
+                                          halfWidth: halfWidth, attempt: attempt))
+    }
+    return result
+}
+
+@inline(__always)
+private func dungeonRarityHash(_ seed: UInt32, _ cx: Int, _ cz: Int, _ pass: Int) -> UInt32 {
+    hash2(seed, cx, cz, 0x55D3EA ^ UInt32(truncatingIfNeeded: pass))
+}
+
+private func buildDungeonRegionPlan(_ key: DungeonRegionKey) -> DungeonRegionPlan {
+    precondition(key.passes >= 0 && key.passes <= dungeonRegionMaximumPasses)
+    let x0 = key.rx * dungeonRegionSide, z0 = key.rz * dungeonRegionSide
+    var raw: [(member: DungeonBudgetMember, hash: UInt32)] = []
+    var rawCandidateCount = 0
+    raw.reserveCapacity(512)
+    for cz in z0..<(z0 + dungeonRegionSide) {
+        for cx in x0..<(x0 + dungeonRegionSide) {
+            for pass in 0..<key.passes {
+                let candidates = rawDungeonCandidates(key.seed, cx, cz, pass: pass)
+                rawCandidateCount += candidates.count
+                guard !candidates.isEmpty else { continue }
+                let member = DungeonBudgetMember(cx: cx, cz: cz, pass: pass)
+                raw.append((member, dungeonRarityHash(key.seed, cx, cz, pass)))
+            }
+        }
+    }
+    precondition(rawCandidateCount <= dungeonRegionMaximumRawCandidates)
+    precondition(raw.count <= dungeonRegionMaximumStoredMembers)
+    let budget = rawCandidateCount / 16
+    // 29 mod 64 preserves the reviewed pinned fixture (also 13 mod 16)
+    // while keeping actual submerged rooms substantially rarer than the hard
+    // regional 1/16 ceiling.
+    let eligible = raw.filter { Int($0.hash & 0x3F) == 29 }.sorted {
+        if $0.hash != $1.hash { return $0.hash < $1.hash }
+        if $0.member.cx != $1.member.cx { return $0.member.cx < $1.member.cx }
+        if $0.member.cz != $1.member.cz { return $0.member.cz < $1.member.cz }
+        return $0.member.pass < $1.member.pass
+    }
+    let orderedEligible = eligible.map(\.member)
+    let estimatedRetainedBytes = raw.count * 40 + orderedEligible.count * 24
+    precondition(estimatedRetainedBytes <= dungeonRegionMaximumRetainedBytesPerPlan)
+    return DungeonRegionPlan(rawAcceptedCount: rawCandidateCount,
+                             underwater: Set(orderedEligible.prefix(budget)))
+}
+
+private func dungeonRegionPlan(seed: UInt32, cx: Int, cz: Int, passes: Int,
+                               settingsIdentity: String) -> DungeonRegionPlan {
+    let key = DungeonRegionKey(seed: seed, settingsIdentity: settingsIdentity,
+                               rx: floorDiv(cx, dungeonRegionSide),
+                               rz: floorDiv(cz, dungeonRegionSide), passes: passes)
+    dungeonRegionCondition.lock()
+    while true {
+        if let cached = dungeonRegionPlans[key] {
+            dungeonRegionCondition.unlock()
+            return cached
+        }
+        if !dungeonRegionInFlight.contains(key) {
+            dungeonRegionInFlight.insert(key)
+            dungeonRegionCondition.unlock()
+            break
+        }
+        dungeonRegionCondition.wait()
+    }
+    let built = buildDungeonRegionPlan(key)
+    dungeonRegionCondition.lock()
+    if dungeonRegionPlans.count >= dungeonRegionCacheLimit { dungeonRegionPlans.removeAll(keepingCapacity: true) }
+    let installed = dungeonRegionPlans[key] ?? built
+    dungeonRegionPlans[key] = installed
+    dungeonRegionInFlight.remove(key)
+    dungeonRegionCondition.broadcast()
+    dungeonRegionCondition.unlock()
+    return installed
+}
+
+func dungeonUnderwaterBudgetSelected(seed: UInt32, cx: Int, cz: Int, pass: Int,
+                                     settings: WorldGenerationSettings = .normal) -> Bool {
+    let passes = settings.dungeonDensity.dungeonPasses
+    guard pass >= 0, pass < passes else { return false }
+    let plan = dungeonRegionPlan(seed: seed, cx: cx, cz: cz, passes: passes,
+                                 settingsIdentity: settings.cacheIdentity)
+    return plan.underwater.contains(DungeonBudgetMember(cx: cx, cz: cz, pass: pass))
+}
+
+struct DungeonRegionBudgetSummary: Equatable {
+    public let rawAcceptedCount: Int
+    public let underwaterSelectedCount: Int
+}
+
+struct DungeonRegionPlannerLimits: Equatable {
+    public let side: Int
+    public let cacheEntries: Int
+    public let maximumPasses: Int
+    public let maximumRawCandidates: Int
+    public let maximumStoredMembers: Int
+    public let maximumRetainedBytesPerPlan: Int
+}
+
+let dungeonRegionPlannerLimits = DungeonRegionPlannerLimits(
+    side: dungeonRegionSide,
+    cacheEntries: dungeonRegionCacheLimit,
+    maximumPasses: dungeonRegionMaximumPasses,
+    maximumRawCandidates: dungeonRegionMaximumRawCandidates,
+    maximumStoredMembers: dungeonRegionMaximumStoredMembers,
+    maximumRetainedBytesPerPlan: dungeonRegionMaximumRetainedBytesPerPlan)
+
+func dungeonRegionBudgetSummary(seed: UInt32, regionX: Int, regionZ: Int,
+                                settings: WorldGenerationSettings = .normal) -> DungeonRegionBudgetSummary {
+    let passes = settings.dungeonDensity.dungeonPasses
+    let plan = dungeonRegionPlan(seed: seed, cx: regionX * dungeonRegionSide,
+                                 cz: regionZ * dungeonRegionSide,
+                                 passes: passes, settingsIdentity: settings.cacheIdentity)
+    return DungeonRegionBudgetSummary(rawAcceptedCount: plan.rawAcceptedCount,
+                                      underwaterSelectedCount: plan.underwater.count)
+}
+
+private final class DetachedDungeonSink: ChunkSink {
+    let cx: Int, cz: Int, minY: Int, maxY: Int
+    private let base: ChunkSink
+    private struct Key: Hashable { let x: Int; let y: Int; let z: Int }
+    private var orderedWrites: [(Key, UInt16)] = []
+    private var latest: [Key: UInt16] = [:]
+    private(set) var blockEntities: [BESpec] = []
+
+    init(_ base: ChunkSink) {
+        self.base = base
+        cx = base.cx; cz = base.cz; minY = base.minY; maxY = base.maxY
+    }
+    func set(_ x: Int, _ y: Int, _ z: Int, _ c: UInt16) {
+        guard floorDiv(x, 16) == cx, floorDiv(z, 16) == cz, y >= minY, y < maxY else { return }
+        let key = Key(x: x, y: y, z: z)
+        orderedWrites.append((key, c)); latest[key] = c
+    }
+    func get(_ x: Int, _ y: Int, _ z: Int) -> Int {
+        latest[Key(x: x, y: y, z: z)].map(Int.init) ?? base.get(x, y, z)
+    }
+    func topY(_ x: Int, _ z: Int) -> Int { base.topY(x, z) }
+    func addBlockEntity(_ spec: BESpec) { blockEntities.append(spec) }
+    func addEntity(_ spec: EntitySpec) {}
+    func commit() {
+        for (key, value) in orderedWrites { base.set(key.x, key.y, key.z, value) }
+        for spec in blockEntities { base.addBlockEntity(spec) }
+    }
+}
+
+private func isFluidCell(_ value: Int) -> Bool {
+    guard value >= 0 else { return false }
+    let id = value >> 4
+    return id == Int(B.water) || id == Int(B.lava)
+}
+
 @discardableResult
 private func tryDungeonPass(_ seed: UInt32, _ ocx: Int, _ ocz: Int, _ sink: ChunkSink,
-                            salt: UInt32) -> Int {
+                            pass: Int, settings: WorldGenerationSettings,
+                            oracle: BaseTerrainOracle?) -> Int {
+    let salt = pass == 0 ? UInt32(0xD0D6E0) : dungeonPassSalt(pass)
     let rng = Rng(hash2(seed, ocx, ocz, salt))
+    let underwaterBudgeted = dungeonUnderwaterBudgetSelected(seed: seed, cx: ocx, cz: ocz,
+                                                              pass: pass, settings: settings)
     for _ in 0..<4 {
         if rng.nextFloat() > 0.12 { continue }
-        let x = ocx * 16 + 3 + rng.nextInt(10)
-        let z = ocz * 16 + 3 + rng.nextInt(10)
+        let rawX = ocx * 16 + 3 + rng.nextInt(10)
+        let rawZ = ocz * 16 + 3 + rng.nextInt(10)
         let y = -40 + rng.nextInt(90)
-        let b = Builder(sink, rng)
-        // need air adjacent (cave opening)
-        var openings = 0
-        for (dx, dz) in [(-4, 0), (4, 0), (0, -4), (0, 4)] {
-            if b.get(x + dx, y + 1, z + dz) == 0 { openings += 1 }
-        }
-        if openings == 0 || openings > 3 { continue }
         let hw = 3 + rng.nextInt(2)
+        let minLocal = hw + 1, maxLocal = 15 - hw - 1
+        let x = ocx * 16 + min(max(rawX - ocx * 16, minLocal), maxLocal)
+        let z = ocz * 16 + min(max(rawZ - ocz * 16, minLocal), maxLocal)
+        let read: (Int, Int, Int) -> Int = { x, y, z in
+            oracle?.cell(x, y, z) ?? sink.get(x, y, z)
+        }
+        let genuinelySubmerged = isFluidCell(read(rawX, y, rawZ))
+        let underwater = underwaterBudgeted && genuinelySubmerged
+        var entrance: (dx: Int, dz: Int)?
+        if !underwater {
+            var fluidFound = false
+            for py in (y - 1)...(y + 3) {
+                for pz in (z - hw - 1)...(z + hw + 1) {
+                    for px in (x - hw - 1)...(x + hw + 1) where isFluidCell(read(px, py, pz)) {
+                        fluidFound = true
+                    }
+                }
+            }
+            if fluidFound { continue }
+            for direction in [(dx: -1, dz: 0), (dx: 1, dz: 0), (dx: 0, dz: -1), (dx: 0, dz: 1)] {
+                let ex = x + direction.dx * (hw + 1), ez = z + direction.dz * (hw + 1)
+                if read(ex, y, ez) == 0, read(ex, y + 1, ez) == 0 {
+                    entrance = direction
+                    break
+                }
+            }
+            if entrance == nil { continue }
+        }
+
+        let detached = DetachedDungeonSink(sink)
+        let b = Builder(detached, rng)
         let mossy: [(Int, Double)] = [(Int(cell(B.cobblestone)), 5), (Int(cell(B.mossy_cobblestone)), 5)]
-        // floor + walls + ceiling
         b.fillRandom(x - hw, y - 1, z - hw, x + hw, y - 1, z + hw, mossy)
         for dy in 0...3 {
             for dz in -hw...hw {
                 for dx in -hw...hw {
-                    let isWall = abs(dx) == hw || abs(dz) == hw
-                    if dy == 3 { b.set(x + dx, y + dy, z + dz, Int(cell(B.cobblestone))); continue }
-                    if isWall {
-                        if b.rng.nextFloat() < 0.85 {
-                            b.set(x + dx, y + dy, z + dz, b.rng.nextFloat() < 0.5 ? Int(cell(B.cobblestone)) : Int(cell(B.mossy_cobblestone)))
-                        }
-                    } else {
-                        b.set(x + dx, y + dy, z + dz, AIR)
-                    }
+                    let shell = abs(dx) == hw || abs(dz) == hw || dy == 3
+                    b.set(x + dx, y + dy, z + dz,
+                          shell ? (b.rng.nextFloat() < 0.5 ? Int(cell(B.cobblestone)) : Int(cell(B.mossy_cobblestone))) : AIR)
                 }
+            }
+        }
+        if let entrance {
+            for distance in hw...(hw + 1) {
+                let ex = x + entrance.dx * distance, ez = z + entrance.dz * distance
+                b.set(ex, y, ez, AIR); b.set(ex, y + 1, ez, AIR)
             }
         }
         let mobRoll = rng.nextFloat()
         b.spawner(x, y, z, mobRoll < 0.5 ? "zombie" : mobRoll < 0.75 ? "skeleton" : "spider")
         b.chest(x + hw - 1, y, z + hw - 1, 0, "dungeon")
         if rng.nextBoolean() { b.chest(x - hw + 1, y, z - hw + 1, 0, "dungeon") }
+        guard detached.blockEntities.allSatisfy({ spec in
+            let id = detached.get(spec.x, spec.y, spec.z) >> 4
+            return (spec.kind == "spawner" && id == Int(B.spawner))
+                || (spec.kind == "chest_loot" && id == Int(B.chest))
+        }) else { continue }
+        detached.commit()
         return 1 // max one per chunk per pass
     }
     return 0
@@ -249,14 +561,17 @@ private func dungeonPassSalt(_ pass: Int) -> UInt32 {
 
 @discardableResult
 public func tryDungeons(_ seed: UInt32, _ ocx: Int, _ ocz: Int, _ sink: ChunkSink,
-                        density: DungeonDensity = .normal) -> Int {
+                        density: DungeonDensity = .normal,
+                        settings: WorldGenerationSettings? = nil,
+                        terrainOracle: BaseTerrainOracle? = nil) -> Int {
     let passes = density.dungeonPasses
     guard passes > 0 else { return 0 }
-    var placed = tryDungeonPass(seed, ocx, ocz, sink, salt: 0xD0D6E0)
-    if passes > 1 {
-        for pass in 1..<passes {
-            placed += tryDungeonPass(seed, ocx, ocz, sink, salt: dungeonPassSalt(pass))
-        }
+    var effectiveSettings = settings ?? WorldGenerationSettings(dungeonDensity: density)
+    effectiveSettings.dungeonDensity = density
+    var placed = 0
+    for pass in 0..<passes {
+        placed += tryDungeonPass(seed, ocx, ocz, sink, pass: pass,
+                                 settings: effectiveSettings, oracle: terrainOracle)
     }
     return placed
 }
@@ -271,11 +586,20 @@ func registerOverworldStructures() {
             styleFor(ctx.biomeAt(ocx * 16 + 8, ocz * 16 + 8)) != nil
         },
         plan: { ctx, ocx, ocz, rng in
-            let centerX = ocx * 16 + 8, centerZ = ocz * 16 + 8
+            guard let (centerX, centerZ) = chooseVillageCenter(ctx, ocx * 16 + 8, ocz * 16 + 8) else {
+                return nil
+            }
             let biomeId = ctx.biomeAt(centerX, centerZ)
-            let st = styleFor(biomeId)!
+            guard let st = styleFor(biomeId) else { return nil }
+            let siteHeight: (Int, Int) -> Int = { x, z in
+                dryVillageSurface(ctx, x, z) ?? ctx.heightAt(x, z)
+            }
             var pieces: [StructPiece] = []
-            let cy = ctx.heightAt(centerX, centerZ)
+            var acceptedBuildingFootprints: [VillageXZFootprint] = []
+            var acceptedConnectorCorridors: [VillageXZFootprint] = []
+            acceptedBuildingFootprints.reserveCapacity(16)
+            acceptedConnectorCorridors.reserveCapacity(16)
+            let cy = siteHeight(centerX, centerZ)
 
             // well at center
             pieces.append(piece(centerX - 2, cy - 12, centerZ - 2, centerX + 5, cy + 4, centerZ + 5) { b in
@@ -288,10 +612,20 @@ func registerOverworldStructures() {
                 b.set(centerX - 4, cy + 1, centerZ, Int(cell(B.bell, 0)))
             })
             // iron golem + extras at center
-            pieces.append(piece(centerX, cy, centerZ - 3, centerX, cy + 2, centerZ - 3) { b in
-                b.mob("iron_golem", centerX, cy, centerZ - 3)
-                b.mob("cat", centerX + 2, cy, centerZ - 3)
-                if biomeId == Biome.desert.rawValue { b.mob("camel", centerX - 3, cy, centerZ - 4) }
+            let golemY = siteHeight(centerX, centerZ - 3)
+            let catY = siteHeight(centerX + 2, centerZ - 3)
+            let camelY = biomeId == Biome.desert.rawValue
+                ? siteHeight(centerX - 3, centerZ - 4)
+                : nil
+            let residentMinX = camelY == nil ? centerX : centerX - 3
+            let residentMinZ = camelY == nil ? centerZ - 3 : centerZ - 4
+            let residentMinY = min(golemY, catY, camelY ?? golemY)
+            let residentMaxY = max(golemY, catY, camelY ?? golemY)
+            pieces.append(piece(residentMinX, residentMinY, residentMinZ,
+                                centerX + 2, residentMaxY + 2, centerZ - 3) { b in
+                b.mob("iron_golem", centerX, golemY, centerZ - 3)
+                b.mob("cat", centerX + 2, catY, centerZ - 3)
+                if let camelY { b.mob("camel", centerX - 3, camelY, centerZ - 4) }
             })
 
             // roads in 4 directions with buildings
@@ -323,10 +657,10 @@ func registerOverworldStructures() {
                 pieces.append(piece(rx0, cy - 6, rz0, rx1, cy + 30, rz1) { b in
                     for i in 4...(4 + len) {
                         let px = centerX + dx * i, pz = centerZ + dz * i
-                        _ = ctx.heightAt(px, pz)
+                        _ = siteHeight(px, pz)
                         for w in -1...1 {
                             let wx = px + (dz != 0 ? w : 0), wz = pz + (dx != 0 ? w : 0)
-                            let wy = ctx.heightAt(wx, wz)
+                            let wy = siteHeight(wx, wz)
                             b.foundation(wx, wy - 1, wz, st.path, 4)
                             b.set(wx, wy, wz, AIR)
                             b.set(wx, wy + 1, wz, AIR)
@@ -334,7 +668,7 @@ func registerOverworldStructures() {
                         // lamp posts
                         if i % 7 == 0 {
                             let lx = px + (dz != 0 ? 2 : 0), lz = pz + (dx != 0 ? 2 : 0)
-                            let ly = ctx.heightAt(lx, lz)
+                            let ly = siteHeight(lx, lz)
                             b.set(lx, ly, lz, st.fence)
                             b.set(lx, ly + 1, lz, st.fence)
                             b.set(lx, ly + 2, lz, Int(cell(B.torch)))
@@ -347,10 +681,56 @@ func registerOverworldStructures() {
                     let along = 7 + rng.nextInt(max(1, len - 6))
                     let side = rng.nextBoolean() ? 1 : -1
                     let off = 3 + rng.nextInt(2)
-                    let bx = centerX + dx * along + (dz != 0 ? side * off : 0)
-                    let bz = centerZ + dz * along + (dx != 0 ? side * off : 0)
-                    let by = ctx.heightAt(bx + 3, bz + 3)
                     let kind = rng.nextFloat()
+                    let pieceReach = kind < 0.4 ? 6 : kind < 0.62 ? 10 : 7
+                    let lateralOffset = side > 0 ? off : -(off + pieceReach)
+                    let bx = centerX + dx * along + (dz != 0 ? lateralOffset : 0)
+                    let bz = centerZ + dz * along + (dx != 0 ? lateralOffset : 0)
+                    let by = siteHeight(bx + 3, bz + 3)
+                    let buildingFootprint: VillageXZFootprint
+                    if kind < 0.4 {
+                        buildingFootprint = VillageXZFootprint(bx - 1, bz - 1, bx + 6, bz + 6)
+                    } else if kind < 0.62 {
+                        buildingFootprint = VillageXZFootprint(bx - 1, bz - 1, bx + 10, bz + 8)
+                    } else {
+                        buildingFootprint = VillageXZFootprint(bx - 1, bz - 1, bx + 7, bz + 7)
+                    }
+                    let connectorFootprint: VillageXZFootprint?
+                    let doorX = bx + 2, doorZ = bz
+                    let roadX = dz != 0 ? centerX : doorX
+                    let roadZ = dx != 0 ? centerZ : doorZ
+                    if kind < 0.4 || kind >= 0.62 {
+                        connectorFootprint = VillageXZFootprint(doorX, doorZ, roadX, roadZ)
+                    } else {
+                        connectorFootprint = nil
+                    }
+                    let selectedJob: (block: Int, loot: String?)?
+                    if kind >= 0.62 {
+                        let job = jobs[jobIdx % jobs.count]
+                        jobIdx += 1
+                        selectedJob = (job.0, job.1)
+                    } else {
+                        selectedJob = nil
+                    }
+                    let buildingConflicts = acceptedConnectorCorridors.contains {
+                        buildingFootprint.intersects($0)
+                    }
+                    let connectorConflicts = connectorFootprint.map { connector in
+                        acceptedBuildingFootprints.contains { connector.intersects($0) }
+                    } ?? false
+                    guard !buildingConflicts && !connectorConflicts else {
+                        let placeholder = piece(centerX, cy, centerZ,
+                                                centerX, cy, centerZ) { _ in }
+                        pieces.append(placeholder)
+                        if connectorFootprint != nil { pieces.append(placeholder) }
+                        continue
+                    }
+                    precondition(acceptedBuildingFootprints.count < 16)
+                    acceptedBuildingFootprints.append(buildingFootprint)
+                    if let connectorFootprint {
+                        precondition(acceptedConnectorCorridors.count < 16)
+                        acceptedConnectorCorridors.append(connectorFootprint)
+                    }
                     if kind < 0.4 {
                         pieces.append(piece(bx - 1, by - 8, bz - 1, bx + 6, by + 6, bz + 6) { b in
                             houseSmall(b, bx, by, bz, st, 0, b.s)
@@ -360,14 +740,35 @@ func registerOverworldStructures() {
                             farm(b, bx, by, bz, st, b.rng)
                         })
                     } else {
-                        let (jobBlock, loot) = jobs[jobIdx % jobs.count]
-                        jobIdx += 1
+                        guard let selectedJob else { preconditionFailure("job offer must be resolved") }
                         pieces.append(piece(bx - 1, by - 8, bz - 1, bx + 7, by + 6, bz + 7) { b in
-                            houseJob(b, bx, by, bz, st, jobBlock, loot, b.s)
+                            houseJob(b, bx, by, bz, st, selectedJob.block, selectedJob.loot, b.s)
+                        })
+                    }
+                    if connectorFootprint != nil {
+                        let x0 = min(doorX, roadX), x1 = max(doorX, roadX)
+                        let z0 = min(doorZ, roadZ), z1 = max(doorZ, roadZ)
+                        pieces.append(piece(x0, by - 4, z0, x1, by + 2, z1) { b in
+                            if x0 == x1 {
+                                for pz in z0...z1 {
+                                    let py = siteHeight(x0, pz)
+                                    b.foundation(x0, py - 1, pz, st.path, 4)
+                                    b.set(x0, py, pz, AIR)
+                                    b.set(x0, py + 1, pz, AIR)
+                                }
+                            } else {
+                                for px in x0...x1 {
+                                    let py = siteHeight(px, z0)
+                                    b.foundation(px, py - 1, z0, st.path, 4)
+                                    b.set(px, py, z0, AIR)
+                                    b.set(px, py + 1, z0, AIR)
+                                }
+                            }
                         })
                     }
                 }
             }
+            guard validateVillagePieces(ctx, pieces) else { return nil }
             return StructurePlan(id: "village", pieces: pieces,
                                  ref: StructRefBox(centerX - 80, cy - 20, centerZ - 80, centerX + 80, cy + 40, centerZ + 80))
         }

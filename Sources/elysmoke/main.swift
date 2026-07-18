@@ -1455,6 +1455,7 @@ if let g = loadJSON("entity-goldens.json") {
     let tradeWorld = buildWorld()
     var tradeOK = true
     let tradeGold = g["tradeProbes"] as! [String]
+    var tradeCaptured: [String] = []
     var tg = 0
     for prof in PROFESSIONS {
         for lvl in 1...5 {
@@ -1471,14 +1472,29 @@ if let g = loadJSON("entity-goldens.json") {
                 return s
             }.joined(separator: ";")
             let got = "\(prof)@\(lvl)=\(ser)"
-            if got != tradeGold[tg] {
+            tradeCaptured.append(got)
+            if !regold, got != tradeGold[tg] {
                 tradeOK = false
                 print("    trade \(prof)@\(lvl):\n      got \(got)\n      want \(tradeGold[tg])")
             }
             tg += 1
         }
     }
-    check("\(tradeGold.count) villager trade tables byte-identical", tradeOK)
+    if regold {
+        for path in goldenPaths("entity-goldens.json") {
+            guard let d = FileManager.default.contents(atPath: path),
+                  var obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { continue }
+            obj["tradeProbes"] = tradeCaptured
+            if let out = try? JSONSerialization.data(withJSONObject: obj) {
+                try? out.write(to: URL(fileURLWithPath: path))
+                print("    REGENERATED villager trade tables (\(tradeCaptured.count))")
+            }
+            break
+        }
+        check("villager trade tables: goldens regenerated", true)
+    } else {
+        check("\(tradeGold.count) villager trade tables byte-identical", tradeOK)
+    }
 
     // --- E) pathfinding (terrain-dependent: regold rewrites with the rest)
     resetGameRng(hashString("paths"))

@@ -582,6 +582,9 @@ public struct LANEntitySnapshot: Codable, Equatable {
         case vz
         case onGround
         case fire
+        case fuseProgress
+        case fuseRapid
+        case charged
         case dimension
     }
 
@@ -604,6 +607,9 @@ public struct LANEntitySnapshot: Codable, Equatable {
     public var vz: Double
     public var onGround: Bool
     public var fire: Bool
+    public var fuseProgress: Double?
+    public var fuseRapid: Bool?
+    public var charged: Bool?
     public var dimension: Int
 
     public init(
@@ -626,6 +632,9 @@ public struct LANEntitySnapshot: Codable, Equatable {
         vz: Double = 0,
         onGround: Bool = false,
         fire: Bool = false,
+        fuseProgress: Double? = nil,
+        fuseRapid: Bool? = nil,
+        charged: Bool? = nil,
         dimension: Int = Dim.overworld.rawValue
     ) {
         self.entityID = entityID
@@ -647,6 +656,15 @@ public struct LANEntitySnapshot: Codable, Equatable {
         self.vz = vz.isFinite ? max(-LAN_MULTIPLAYER_MAX_ENTITY_VELOCITY, min(LAN_MULTIPLAYER_MAX_ENTITY_VELOCITY, vz)) : 0
         self.onGround = onGround
         self.fire = fire
+        if self.type == "creeper" {
+            self.fuseProgress = fuseProgress.flatMap { $0.isFinite ? max(0, min(1, $0)) : nil }
+            self.fuseRapid = self.fuseProgress == nil ? nil : (fuseRapid ?? false)
+            self.charged = charged ?? false
+        } else {
+            self.fuseProgress = nil
+            self.fuseRapid = nil
+            self.charged = nil
+        }
         self.dimension = isValidLANDimension(dimension) ? dimension : Dim.overworld.rawValue
     }
 
@@ -672,6 +690,9 @@ public struct LANEntitySnapshot: Codable, Equatable {
             vz: try c.decodeIfPresent(Double.self, forKey: .vz) ?? 0,
             onGround: try c.decodeIfPresent(Bool.self, forKey: .onGround) ?? false,
             fire: try c.decodeIfPresent(Bool.self, forKey: .fire) ?? false,
+            fuseProgress: try c.decodeIfPresent(Double.self, forKey: .fuseProgress),
+            fuseRapid: try c.decodeIfPresent(Bool.self, forKey: .fuseRapid),
+            charged: try c.decodeIfPresent(Bool.self, forKey: .charged),
             dimension: try c.decodeIfPresent(Int.self, forKey: .dimension) ?? Dim.overworld.rawValue
         )
     }

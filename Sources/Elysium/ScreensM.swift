@@ -717,6 +717,7 @@ final class CraftingScreen: ContainerScreen {
             }
         }
     }
+
     var craftResult: ItemStack?
     private let recipeMenu = CraftingRecipePopup(gridWidth: 3, gridHeight: 3)
     private let tablePos: (x: Int, y: Int, z: Int)?
@@ -1847,109 +1848,405 @@ final class BeaconScreen: Screen {
 // Villager trading
 // =============================================================================
 final class TradingScreen: ContainerScreen {
-    var selected = 0
-    var buyA: ItemStack?
-    var buyB: ItemStack?
     private let villager: Mob
+    private var snapshot: NPCBarterSnapshot?
+    private var selectedOfferID: String?
+    private var scroll = 0
+    private var inFlight = false
+    private var statusOverride: String?
+    private var pendingAccessibilityAnnouncement: String?
+    private var accessibilityFocusedID: String?
+    private var observedInventoryDigest: String?
+    private weak var tradeButton: Button?
+    private let listRows = 7
+    private let rowH = 20.0
 
     init(_ villager: Mob) {
         self.villager = villager
         super.init()
-        panelW = 250
-        title = "Trading"
+        panelW = 340
+        panelH = 224
+        title = ""
     }
-    var offers: [TradeOffer] {
-        (villager as? Villager)?.offers ?? (villager as? WanderingTrader)?.offers ?? []
+
+    override func initScreen(_ ui: UIManager, _ game: GameCore) {
+        let layout = NPCBarterScreenLayout.make(viewWidth: ui.width, viewHeight: ui.height)
+        panelW = layout.panelW
+        panelH = layout.panelH
+        panelX = layout.panelX
+        panelY = layout.panelY
+        playerSlots = playerInvSlots(game.player, layout.inventorySlotsX, layout.inventorySlotsY)
+        slots = playerSlots
+        let button = Button(layout.tradeX, layout.tradeY, 76, 18, "Trade") { [weak self, weak game] in
+            guard let self, let game else { return }
+            self.executeTrade(game)
+        }
+        tradeButton = button
+        buttons = [button]
+        refresh(game, preserveSelection: true)
     }
-    override func buildSlots(_ ui: UIManager, _ game: GameCore) {
-        let px = panelX + 80, py = panelY
-        containerSlots.append(SlotDef(
-            x: px + 24, y: py + 40,
-            get: { [weak self] in self?.buyA },
-            set: { [weak self] in self?.buyA = $0 }))
-        containerSlots.append(SlotDef(
-            x: px + 48, y: py + 40,
-            get: { [weak self] in self?.buyB },
-            set: { [weak self] in self?.buyB = $0 }))
-        containerSlots.append(SlotDef(
-            x: px + 100, y: py + 40,
-            get: { [weak self] in self?.tradeResult() },
-            set: { _ in },
-            output: true,
-            onTake: { [weak self, weak game] _ in
-                if let game { self?.executeTrade(game) }
-            }))
-        playerSlots = playerInvSlots(game.player, panelX + 80, panelY + panelH - 83)
-        slots = containerSlots + playerSlots
+
+    override func relayoutScreen(_ ui: UIManager, _ game: GameCore) {
+        let selection = selectedOfferID
+        buttons.removeAll()
+        slots.removeAll()
+        initScreen(ui, game)
+        if let selection, snapshot?.offers.contains(where: { $0.id == selection }) == true {
+            selectedOfferID = selection
+        }
     }
-    func tradeResult() -> ItemStack? {
-        guard selected < offers.count else { return nil }
-        let o = offers[selected]
-        if o.uses >= o.maxUses { return nil }
-        if !matches(buyA, o.buyA) { return nil }
-        if let b = o.buyB, !matches(buyB, b) { return nil }
-        return copyStack(o.sell)
+
+    private var selectedOffer: NPCBarterOfferSnapshot? {
+        guard let selectedOfferID else { return nil }
+        return snapshot?.offers.first { $0.id == selectedOfferID }
     }
-    private func matches(_ have: ItemStack?, _ want: ItemStack) -> Bool {
-        guard let have else { return false }
-        return have.id == want.id && have.count >= want.count
+
+    private func refresh(_ game: GameCore, preserveSelection: Bool) {
+        let prior = preserveSelection ? selectedOfferID : nil
+        snapshot = elysiumMainActorSync { game.prepareNPCBarter(for: villager) }
+        observedInventoryDigest = rpgSemanticInventoryDigest(game.player.inventory)
+        if let prior, snapshot?.offers.contains(where: { $0.id == prior }) == true {
+            selectedOfferID = prior
+        } else {
+            selectedOfferID = snapshot?.offers.first?.id
+        }
+        clampScrollToSelection()
+        updateTradeButton()
     }
+
+    private func refreshIfChanged(_ game: GameCore) {
+        let digest = rpgSemanticInventoryDigest(game.player.inventory)
+        let revision = (villager as? Villager)?.barterRevision
+            ?? (villager as? WanderingTrader)?.barterRevision
+        if digest != observedInventoryDigest || revision != snapshot?.merchantRevision {
+            statusOverride = nil
+            refresh(game, preserveSelection: true)
+        }
+    }
+
+    private func updateTradeButton() {
+        tradeButton?.enabled = selectedOffer?.canTrade == true && !inFlight
+    }
+
+    private func maxScroll() -> Int {
+        max(0, (snapshot?.offers.count ?? 0) - listRows)
+    }
+
+    private func clampScrollToSelection() {
+        guard let offers = snapshot?.offers,
+              let id = selectedOfferID,
+              let index = offers.firstIndex(where: { $0.id == id }) else {
+            scroll = 0
+            return
+        }
+        if index < scroll { scroll = index }
+        if index >= scroll + listRows { scroll = index - listRows + 1 }
+        scroll = min(maxScroll(), max(0, scroll))
+    }
+
+    private func select(index: Int) {
+        guard let offers = snapshot?.offers, index >= 0, index < offers.count else { return }
+        selectedOfferID = offers[index].id
+        accessibilityFocusedID = "trading.offer.\(offers[index].id)"
+        statusOverride = nil
+        clampScrollToSelection()
+        updateTradeButton()
+    }
+
+    private func blockingStatus() -> String {
+        if let statusOverride { return statusOverride }
+        guard snapshot != nil else { return "Move closer to trade" }
+        guard let offer = selectedOffer else { return "No trades available" }
+        if offer.locked { return "Requires merchant level \(offer.tier)" }
+        if !offer.inStock { return "Out of stock" }
+        if let missing = offer.costs.first(where: { $0.shortage > 0 }) {
+            return "Need \(missing.stack.count) - You have \(missing.playerCount)"
+        }
+        if !offer.outputFitsAfterPayment {
+            return "Inventory full - make room for \(itemDef(offer.output.id).displayName)"
+        }
+        if inFlight { return "Trade in progress" }
+        return "Ready to trade"
+    }
+
     private func executeTrade(_ game: GameCore) {
-        guard selected < offers.count else { return }
-        let o = offers[selected]
-        buyA!.count -= o.buyA.count
-        if buyA!.count <= 0 { buyA = nil }
-        if let b = o.buyB, let mine = buyB {
-            mine.count -= b.count
-            if mine.count <= 0 { buyB = nil }
+        guard !inFlight else { return }
+        refreshIfChanged(game)
+        guard let offer = selectedOffer, offer.canTrade else {
+            updateTradeButton()
+            return
         }
-        if let v = villager as? Villager {
-            v.offers[selected].uses += 1
-            v.addTradeXP(o.xp)
-        } else if let w = villager as? WanderingTrader {
-            w.offers[selected].uses += 1
+        inFlight = true
+        updateTradeButton()
+        let result = elysiumMainActorSync { game.commitNPCBarter(offer.receipt, merchant: villager) }
+        inFlight = false
+        switch result {
+        case .success(let commit):
+            statusOverride = npcBarterSuccessMessage(commit)
+        case .failure(let failure):
+            statusOverride = failure == .outOfStock ? "Out of stock"
+                : failure == .inventoryFull ? "Inventory full"
+                : failure == .missingPayment ? "Resources changed - review costs"
+                : failure == .outOfRange ? "Move closer to trade"
+                : failure == .blockedLineOfSight ? "Merchant is not visible"
+                : "Trade changed - review offers"
         }
-        game.playUISound("entity.villager.yes")
-        game.advance("trade_villager")
+        pendingAccessibilityAnnouncement = statusOverride
+        refresh(game, preserveSelection: true)
+        updateTradeButton()
     }
+
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
+        refreshIfChanged(game)
+        let layout = NPCBarterScreenLayout.make(viewWidth: ui.width, viewHeight: ui.height)
         ui.drawDarkBg(0.55)
         ui.drawPanel(panelX, panelY, panelW, panelH)
         let cv = ui.cv
-        let prof = (villager as? Villager)?.profession ?? "wandering trader"
-        let lvl = (villager as? Villager).map { String($0.tradeLevel) } ?? "-"
-        cv.drawText("\(prof.prefix(1).uppercased())\(prof.dropFirst()) (lvl \(lvl))", panelX + 8, panelY + 6, 1, "#3f3f3f", shadow: false)
-        for (i, o) in offers.enumerated() where i < 7 {
-            let oy = panelY + 18 + Double(i) * 20
-            let hover = ui.mouseX >= panelX + 5 && ui.mouseX < panelX + 75 && ui.mouseY >= oy && ui.mouseY < oy + 20
-            cv.setFill(i == selected ? "#6a8aff" : hover ? "#7a7a7a" : "#5a5a5a")
-            cv.fillRect(panelX + 5, oy, 72, 20)
-            cv.drawItemIcon(o.buyA.id, nil, panelX + 7, oy + 2, 16, 16)
-            cv.drawText(String(o.buyA.count), panelX + 18, oy + 10, 1)
-            cv.drawText("→", panelX + 32, oy + 6, 1, "#e8e8e8")
-            cv.drawItemIcon(o.sell.id, o.sell.data, panelX + 46, oy + 2, 16, 16)
-            if o.sell.count > 1 { cv.drawText(String(o.sell.count), panelX + 58, oy + 10, 1) }
-            if o.uses >= o.maxUses {
-                cv.setFill("rgba(180,0,0,0.4)")
-                cv.fillRect(panelX + 5, oy, 72, 20)
+        cv.drawText(snapshot?.header ?? "Trading unavailable", panelX + 8, panelY + 6,
+                    1, "#3f3f3f", shadow: false)
+        if let snapshot {
+            let wants = snapshot.wantedResourceNames.joined(separator: ", ")
+            cv.drawText("Wants: \(wants)", panelX + 8, panelY + 18,
+                        0.8, "#555555", shadow: false)
+        }
+
+        let listX = layout.listX
+        let listY = layout.listY
+        let listW = layout.listW
+        cv.setFill("#9a9a9a")
+        cv.fillRect(listX, listY, listW, Double(listRows) * rowH)
+        let offers = snapshot?.offers ?? []
+        for row in 0..<min(listRows, max(0, offers.count - scroll)) {
+            let index = scroll + row
+            let o = offers[index]
+            let oy = listY + Double(row) * rowH
+            let hover = ui.mouseX >= listX && ui.mouseX < listX + listW
+                && ui.mouseY >= oy && ui.mouseY < oy + rowH
+            let selected = o.id == selectedOfferID
+            let focused = accessibilityFocusedID == "trading.offer.\(o.id)"
+            cv.setFill(selected ? "#6a8aff" : hover ? "#777777" : (row % 2 == 0 ? "#5a5a5a" : "#505050"))
+            cv.fillRect(listX + 1, oy + 1, listW - 9, rowH - 1)
+            if selected {
+                cv.setStroke("#ffffff")
+                cv.strokeRect(listX + 1, oy + 1, listW - 9, rowH - 1)
+            }
+            if focused {
+                cv.setStroke("#202020")
+                cv.strokeRect(listX + 3, oy + 3, listW - 13, rowH - 5)
+            }
+            var iconX = listX + 3
+            for cost in o.costs.prefix(2) {
+                cv.drawItemIcon(cost.stack.id, cost.stack.data, iconX, oy + 2, 16, 16)
+                cv.drawText(String(cost.stack.count), iconX + 10, oy + 11, 1)
+                iconX += 24
+            }
+            cv.drawText("→", listX + 54, oy + 7, 1, "#e8e8e8")
+            cv.drawItemIcon(o.output.id, o.output.data, listX + 67, oy + 2, 16, 16)
+            if o.output.count > 1 { cv.drawText(String(o.output.count), listX + 78, oy + 11, 1) }
+            let stock = o.locked ? "L\(o.tier)" : "\(o.maxUses - o.uses)"
+            cv.drawText(stock, listX + listW - 30, oy + 7, 1,
+                        o.locked || !o.inStock ? "#ffb0b0" : "#ffffff")
+            if ui.mouseX >= listX && ui.mouseX < listX + listW && ui.mouseY >= oy && ui.mouseY < oy + rowH {
+                ui.tooltipLines = o.costs.map { "\(itemDef($0.stack.id).displayName): \($0.stack.count) (you have \($0.playerCount))" }
+                    + ["Offers: \(o.output.count) \(itemDef(o.output.id).displayName)"]
             }
         }
-        cv.drawText("Trade", panelX + 104, panelY + 28, 1, "#3f3f3f", shadow: false)
+
+        if maxScroll() > 0 {
+            cv.setFill("#303030")
+            cv.fillRect(listX + listW - 7, listY + 1, 6, Double(listRows) * rowH - 2)
+            let thumbY = listY + 2 + Double(scroll) / Double(maxScroll()) * (Double(listRows) * rowH - 18)
+            cv.setFill("#d0d0d0")
+            cv.fillRect(listX + listW - 6, thumbY, 4, 14)
+        }
+
+        let detailX = layout.detailX
+        if let offer = selectedOffer {
+            cv.drawText("Villager wants:", detailX, panelY + 34,
+                        1, "#3f3f3f", shadow: false)
+            for (index, cost) in offer.costs.enumerated() {
+                let conjunction = index == 0 ? "" : "and "
+                cv.drawText("\(conjunction)\(cost.stack.count) \(itemDef(cost.stack.id).displayName) (you have \(cost.playerCount))",
+                            detailX, panelY + 44 + Double(index) * 10, 0.8,
+                            cost.shortage == 0 ? "#3f3f3f" : "#9b2020", shadow: false)
+            }
+            let outputY = panelY + 44 + Double(offer.costs.count) * 10
+            cv.drawText("You receive: \(offer.output.count) \(itemDef(offer.output.id).displayName)",
+                        detailX, outputY, 0.8, "#3f3f3f", shadow: false)
+            cv.drawText("Stock: \(max(0, offer.maxUses - offer.uses)) / \(offer.maxUses)",
+                        detailX, panelY + 74, 1, "#3f3f3f", shadow: false)
+        }
+        if let snapshot, let level = snapshot.level, let xp = snapshot.xp {
+            let progress = snapshot.nextLevelXP.map { "XP: \(xp) / \($0)" } ?? "Max level"
+            cv.drawText("Level \(level)  \(progress)", detailX, panelY + 90,
+                        1, "#3f3f3f", shadow: false)
+            let restock = npcBarterRestockMessage(
+                hasWorkstation: snapshot.hasWorkstation,
+                restockTicks: snapshot.restockTicks)
+            for (index, line) in wrapText(restock, 164).prefix(2).enumerated() {
+                cv.drawText(line, detailX, panelY + 102 + Double(index) * 10,
+                            1, "#555555", shadow: false)
+            }
+        }
+        let statusColor = selectedOffer?.canTrade == true ? "#276b27" : "#8b2020"
+        for (index, line) in wrapText(blockingStatus(), Int(layout.statusW)).prefix(2).enumerated() {
+            cv.drawText(line, layout.statusX, layout.statusY + Double(index) * 10,
+                        1, statusColor, shadow: false)
+        }
+        cv.drawText("Inventory", layout.inventoryLabelX, layout.inventoryLabelY,
+                    1, "#3f3f3f", shadow: false)
         ui.drawSlots(self)
+        ui.drawButtons(self)
     }
+
     override func onMouseDown(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double, _ btn: Int) -> Bool {
-        for i in 0..<min(offers.count, 7) {
-            let oy = panelY + 18 + Double(i) * 20
-            if mx >= panelX + 5 && mx < panelX + 77 && my >= oy && my < oy + 20 {
-                selected = i
+        let layout = NPCBarterScreenLayout.make(viewWidth: ui.width, viewHeight: ui.height)
+        let listX = layout.listX
+        let listY = layout.listY
+        let listW = layout.listW
+        if mx >= listX && mx < listX + listW && my >= listY && my < listY + Double(listRows) * rowH {
+            let row = Int((my - listY) / rowH)
+            let index = scroll + row
+            if index < (snapshot?.offers.count ?? 0) {
+                select(index: index)
                 return true
             }
         }
         return super.onMouseDown(ui, game, mx, my, btn)
     }
-    override func onClose(_ ui: UIManager, _ game: GameCore) {
-        if let buyA { _ = game.player.give(buyA) }
-        if let buyB { _ = game.player.give(buyB) }
+
+    override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
+        scroll = max(0, min(maxScroll(), scroll + (dy > 0 ? 1 : -1)))
+        return true
+    }
+
+    override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
+        let offers = snapshot?.offers ?? []
+        guard !offers.isEmpty else { return super.onKey(ui, game, key) }
+        let current = offers.firstIndex { $0.id == selectedOfferID } ?? 0
+        switch key {
+        case "ArrowUp": select(index: max(0, current - 1)); return true
+        case "ArrowDown": select(index: min(offers.count - 1, current + 1)); return true
+        case "Home": select(index: 0); return true
+        case "End": select(index: offers.count - 1); return true
+        case "PageUp": select(index: max(0, current - listRows)); return true
+        case "PageDown": select(index: min(offers.count - 1, current + listRows)); return true
+        case "Enter", "Space": executeTrade(game); return true
+        default: return super.onKey(ui, game, key)
+        }
+    }
+
+    func handleControllerCommand(_ command: RPGSemanticCommand,
+                                 ui: UIManager, game: GameCore) -> Bool {
+        let offers = snapshot?.offers ?? []
+        let current = offers.firstIndex { $0.id == selectedOfferID } ?? 0
+        switch command {
+        case .moveFocus(.up):
+            guard !offers.isEmpty else { return true }
+            select(index: max(0, current - 1)); return true
+        case .moveFocus(.down):
+            guard !offers.isEmpty else { return true }
+            select(index: min(offers.count - 1, current + 1)); return true
+        case .moveFocus(.left), .previousTab:
+            guard !offers.isEmpty else { return true }
+            select(index: max(0, current - listRows)); return true
+        case .moveFocus(.right), .nextTab:
+            guard !offers.isEmpty else { return true }
+            select(index: min(offers.count - 1, current + listRows)); return true
+        case .scrollRows(let rows):
+            guard !offers.isEmpty else { return true }
+            select(index: min(offers.count - 1, max(0, current + rows))); return true
+        case .activate:
+            executeTrade(game); return true
+        case .back:
+            ui.closeTop(game); return true
+        default:
+            return false
+        }
+    }
+
+    override func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore)
+        -> [TextEntryAccessibilityDescriptor] {
+        let layout = NPCBarterScreenLayout.make(viewWidth: ui.width, viewHeight: ui.height)
+        let listX = layout.listX
+        let listY = layout.listY
+        let listW = layout.listW
+        var descriptors = [TextEntryAccessibilityDescriptor(
+            id: "trading.heading", role: .heading,
+            label: snapshot?.header ?? "Trading unavailable", value: "", help: "",
+            frame: (panelX + 8, panelY + 4, panelW - 16, 14),
+            enabled: true, focused: accessibilityFocusedID == "trading.heading",
+            insertionUTF16Offset: nil, focusable: false),
+            TextEntryAccessibilityDescriptor(
+                id: "trading.offers", role: .list, label: "Trade offers", value: "",
+                help: "Use Up and Down to review every offer.",
+                frame: (listX, listY, listW, Double(listRows) * rowH),
+                enabled: true, focused: false, insertionUTF16Offset: nil, focusable: false)]
+        for (index, offer) in (snapshot?.offers ?? []).enumerated() {
+            let row = max(0, min(listRows - 1, index - scroll))
+            let costs = offer.costs.map {
+                "\($0.stack.count) \(itemDef($0.stack.id).displayName), you have \($0.playerCount)"
+            }.joined(separator: "; ")
+            let state = offer.locked ? "Locked until level \(offer.tier)"
+                : !offer.inStock ? "Out of stock"
+                : offer.affordable ? "Affordable" : "Missing resources"
+            let id = "trading.offer.\(offer.id)"
+            descriptors.append(TextEntryAccessibilityDescriptor(
+                id: id, role: .listItem,
+                label: "\(itemDef(offer.output.id).displayName), \(offer.output.count)",
+                value: "Costs \(costs). Stock \(offer.maxUses - offer.uses) of \(offer.maxUses). \(state)",
+                help: "Select this offer to review and trade.",
+                frame: (listX + 1, listY + Double(row) * rowH + 1, listW - 9, rowH - 1),
+                enabled: true, focused: accessibilityFocusedID == id,
+                insertionUTF16Offset: nil, focusable: true,
+                selected: selectedOfferID == offer.id, actionable: true,
+                parentID: "trading.offers"))
+        }
+        let tradeEnabled = selectedOffer?.canTrade == true && !inFlight
+        descriptors.append(TextEntryAccessibilityDescriptor(
+            id: "trading.trade", role: .button, label: "Trade", value: "",
+            help: blockingStatus(),
+            frame: (layout.tradeX, layout.tradeY, 76, 18),
+            enabled: true, focused: accessibilityFocusedID == "trading.trade",
+            insertionUTF16Offset: nil, focusable: true,
+            actionable: tradeEnabled))
+        descriptors.append(TextEntryAccessibilityDescriptor(
+            id: "trading.status", role: .staticText, label: "Trade status",
+            value: blockingStatus(), help: "",
+            frame: (layout.statusX, layout.statusY, layout.statusW, layout.statusH),
+            enabled: true, focused: false, insertionUTF16Offset: nil, focusable: false))
+        return descriptors
+    }
+
+    override func focusTextAccessibilityElement(_ id: String, _ ui: UIManager,
+                                                _ game: GameCore) -> Bool {
+        if id == "trading.trade" {
+            accessibilityFocusedID = id
+            return true
+        }
+        guard id.hasPrefix("trading.offer."),
+              let offer = snapshot?.offers.first(where: { "trading.offer.\($0.id)" == id }),
+              let index = snapshot?.offers.firstIndex(where: { $0.id == offer.id }) else { return false }
+        select(index: index)
+        accessibilityFocusedID = id
+        return true
+    }
+
+    override func performTextAccessibilityAction(_ id: String, _ ui: UIManager,
+                                                 _ game: GameCore) -> Bool {
+        if id == "trading.trade", selectedOffer?.canTrade == true, !inFlight {
+            executeTrade(game)
+            return true
+        }
+        if id.hasPrefix("trading.offer.") {
+            return focusTextAccessibilityElement(id, ui, game)
+        }
+        return false
+    }
+
+    override func consumeTextAccessibilityStatusAnnouncement() -> String? {
+        defer { pendingAccessibilityAnnouncement = nil }
+        return pendingAccessibilityAnnouncement
     }
 }
 

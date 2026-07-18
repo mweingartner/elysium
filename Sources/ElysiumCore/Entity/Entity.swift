@@ -20,6 +20,7 @@ public struct EntityData: Codable, Equatable {
     public var pattern: Int?
     public var puffed: Bool?
     public var swelling: Double?
+    public var fuseRapid: Bool?
     public var grazing: Bool?
     public var stingTimer: Int?
     public var buckTimer: Int?

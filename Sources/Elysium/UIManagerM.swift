@@ -192,6 +192,8 @@ enum TextEntryAccessibilityRole: Equatable {
     case button
     case checkbox
     case listItem
+    case heading
+    case list
 }
 
 struct TextEntryAccessibilityDescriptor {
@@ -207,15 +209,17 @@ struct TextEntryAccessibilityDescriptor {
     let focusable: Bool
     let selected: Bool?
     let actionable: Bool
+    let parentID: String?
 
     init(id: String, role: TextEntryAccessibilityRole, label: String, value: String,
          help: String, frame: (x: Double, y: Double, width: Double, height: Double),
          enabled: Bool, focused: Bool, insertionUTF16Offset: Int?, focusable: Bool,
-         selected: Bool? = nil, actionable: Bool = false) {
+         selected: Bool? = nil, actionable: Bool = false, parentID: String? = nil) {
         self.id = id; self.role = role; self.label = label; self.value = value
         self.help = help; self.frame = frame; self.enabled = enabled; self.focused = focused
         self.insertionUTF16Offset = insertionUTF16Offset; self.focusable = focusable
         self.selected = selected; self.actionable = actionable
+        self.parentID = parentID
     }
 }
 

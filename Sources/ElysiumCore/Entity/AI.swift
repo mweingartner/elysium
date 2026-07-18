@@ -287,6 +287,10 @@ open class Mob: LivingEntity {
     public var ownerId: Int? = nil
     public var sitting = false
 
+    /// Hostile state machines may suppress navigation and horizontal input
+    /// while still using ordinary vertical collision/gravity in `travel()`.
+    open var suppressesMobAI: Bool { false }
+
     open override func tick() { mobTick() }
 
     /// the Mob-level tick body — exposed so PiglinBrute/Zoglin can mimic the
@@ -322,18 +326,30 @@ open class Mob: LivingEntity {
         }
         if breedCooldown > 0 { breedCooldown -= 1 }
 
-        // AI
-        targetGoals.tick(2, age)
-        goals.tick(2, age)
-        nav.tick()
+        // AI. A latched hostile state may freeze navigation/horizontal intent
+        // while retaining ordinary vertical settling below.
+        if suppressesMobAI {
+            targetGoals.stopAll()
+            goals.stopAll()
+            nav.stop()
+            moveForward = 0
+            moveStrafe = 0
+            jumping = false
+            vx = 0
+            vz = 0
+        } else {
+            targetGoals.tick(2, age)
+            goals.tick(2, age)
+            nav.tick()
 
-        // look control
-        if let lx = lookX {
-            lookAt(lx, lookY, lookZ, 0.25, 0.25)
+            // look control
+            if let lx = lookX {
+                lookAt(lx, lookY, lookZ, 0.25, 0.25)
+            }
         }
 
         // leash physics
-        if leashedTo != nil || leashFence != nil {
+        if !suppressesMobAI && (leashedTo != nil || leashFence != nil) {
             let lx = leashedTo?.x ?? Double(leashFence!.0) + 0.5
             let ly = leashedTo?.y ?? Double(leashFence!.1) + 0.5
             let lz = leashedTo?.z ?? Double(leashFence!.2) + 0.5
@@ -348,6 +364,11 @@ open class Mob: LivingEntity {
         }
 
         travel()
+        if suppressesMobAI {
+            vx = 0
+            vz = 0
+            limbAmp = 0
+        }
 
         // ambient sound
         ambientSoundTimer -= 1
@@ -361,7 +382,18 @@ open class Mob: LivingEntity {
 
     func tickSunlightBurning() {
         if shouldIgniteInSunlight() {
-            fireTicks = 160
+            reactToDirectSunlight()
+        }
+    }
+
+    /// Called only after the shared direct-sunlight classifier passes.
+    /// Creepers override this reaction without weakening exposure rules.
+    open func reactToDirectSunlight() {
+        fireTicks = 160
+        let count = world.consumeHostileDaylightParticles(3)
+        if count > 0 {
+            world.hooks.addParticles("flame", x, y + height * 0.55, z,
+                                     count, min(0.45, width), 0)
         }
     }
 

@@ -522,7 +522,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         let parts = v.components(separatedBy: "@")
         return (parts[0], parts.count > 1 ? Int(parts[1]) ?? 240 : 240)
     }()
-    // test hook: ELYSIUM_OPEN_SCREEN=inventory|templates|templatesPlace|creative|map|rpg opens an allowlisted UI screen before ELYSIUM_SHOT.
+    // test hook: ELYSIUM_OPEN_SCREEN=inventory|templates|templatesPlace|creative|map|rpg|trading opens an allowlisted UI screen before ELYSIUM_SHOT.
     private var pendingOpenScreen = ProcessInfo.processInfo.environment["ELYSIUM_OPEN_SCREEN"]
     private var pendingOpenScreenDelay = 0
     private let launchRevealGeneration: UInt64 = 1
@@ -918,6 +918,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
                     game.openScreen("map", nil)
                 case "rpg", "character", "charactercreation", "character-creation":
                     game.openScreen("rpg", nil)
+                case "trading", "barter":
+                    if let player = game.player {
+                        let villager = Villager(world: game.world)
+                        villager.setPos(player.x, player.y, player.z)
+                        villager.profession = "farmer"
+                        villager.refreshTrades()
+                        game.world.addEntity(villager)
+                        ui.open(TradingScreen(villager), game)
+                    }
                 default:
                     print("[shot] ignored unknown ELYSIUM_OPEN_SCREEN=\(screen)")
                     fflush(stdout)

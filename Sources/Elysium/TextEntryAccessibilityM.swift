@@ -74,6 +74,16 @@ final class TextEntryAccessibilityElement: NSAccessibilityElement {
         case .listItem:
             setAccessibilityRole(.row)
             setAccessibilitySubrole(nil)
+        case .heading:
+            if #available(macOS 26.0, *) {
+                setAccessibilityRole(NSAccessibility.Role.headingRole)
+            } else {
+                setAccessibilityRole(.staticText)
+            }
+            setAccessibilitySubrole(nil)
+        case .list:
+            setAccessibilityRole(.list)
+            setAccessibilitySubrole(nil)
         }
         setAccessibilityElement(true)
         setAccessibilityIdentifier(stableID)
@@ -117,6 +127,13 @@ final class TextEntryAccessibilityElement: NSAccessibilityElement {
         guard action == .press else { return }
         _ = bridge?.press(self)
     }
+
+    func configureHierarchy(parent: AnyObject,
+                            children: [TextEntryAccessibilityElement]) {
+        guard !retired else { return }
+        setAccessibilityParent(parent)
+        setAccessibilityChildren(children.isEmpty ? nil : children)
+    }
 }
 
 /// Retained, generation-bound Accessibility publication for canvas editors. AX getters never mint
@@ -128,14 +145,15 @@ final class TextEntryAccessibilityBridge {
 
     init(view: GameView) { self.view = view }
 
-    var children: [Any] { elements }
+    var children: [Any] { elements.filter { $0.descriptor.parentID == nil } }
     var stableIDs: [String] { elements.map(\.stableID) }
 
     /// Returns true only when root membership/object identity changed and AppKit must republish.
     func commit(screen: Screen, descriptors: [TextEntryAccessibilityDescriptor]) -> Bool {
         guard let view, descriptors.count <= 64,
               screen.textPresentationGeneration != 0,
-              Set(descriptors.map(\.id)).count == descriptors.count else {
+              Set(descriptors.map(\.id)).count == descriptors.count,
+              hierarchyIsValid(descriptors) else {
             return invalidate()
         }
         let projected: [(TextEntryAccessibilityDescriptor, NSRect)] = descriptors.compactMap {
@@ -153,12 +171,14 @@ final class TextEntryAccessibilityBridge {
                 element.presentationGeneration == screen.textPresentationGeneration &&
                 element.descriptor.id == candidate.0.id &&
                 element.descriptor.role == candidate.0.role &&
+                element.descriptor.parentID == candidate.0.parentID &&
                 element.descriptor.focusable == candidate.0.focusable && !element.retired
         }
         if sameStructure {
             for (element, candidate) in zip(elements, projected) {
                 element.refresh(descriptor: candidate.0, frame: candidate.1, parent: view)
             }
+            configureHierarchy(view: view)
             return false
         }
 
@@ -168,6 +188,7 @@ final class TextEntryAccessibilityBridge {
         }
         elements.forEach { $0.retire() }
         elements = replacements
+        configureHierarchy(view: view)
         return true
     }
 
@@ -251,7 +272,34 @@ final class TextEntryAccessibilityBridge {
     private func descriptorIsBounded(_ descriptor: TextEntryAccessibilityDescriptor) -> Bool {
         !descriptor.id.isEmpty && descriptor.id.utf8.count <= 256 &&
             descriptor.label.utf8.count <= 4_096 && descriptor.value.utf8.count <= 16_384 &&
-            descriptor.help.utf8.count <= 4_096
+            descriptor.help.utf8.count <= 4_096 &&
+            (descriptor.parentID?.utf8.count ?? 0) <= 256
+    }
+
+    private func hierarchyIsValid(_ descriptors: [TextEntryAccessibilityDescriptor]) -> Bool {
+        let ids = Set(descriptors.map(\.id))
+        let parents = Dictionary(uniqueKeysWithValues: descriptors.map { ($0.id, $0.parentID) })
+        for descriptor in descriptors {
+            if let parent = descriptor.parentID {
+                guard parent != descriptor.id, ids.contains(parent) else { return false }
+            }
+            var cursor: String? = descriptor.id
+            var visited = Set<String>()
+            while let id = cursor {
+                guard visited.insert(id).inserted else { return false }
+                cursor = parents[id] ?? nil
+            }
+        }
+        return true
+    }
+
+    private func configureHierarchy(view: GameView) {
+        let byID = Dictionary(uniqueKeysWithValues: elements.map { ($0.descriptor.id, $0) })
+        for element in elements {
+            let parent: AnyObject = element.descriptor.parentID.flatMap { byID[$0] } ?? view
+            let children = elements.filter { $0.descriptor.parentID == element.descriptor.id }
+            element.configureHierarchy(parent: parent, children: children)
+        }
     }
 
     private func screenFrame(

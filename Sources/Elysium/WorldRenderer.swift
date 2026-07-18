@@ -1288,6 +1288,22 @@ final class WorldRenderer {
             pose.attackSwing = liv?.attackAnim ?? 0
             pose.hurtFlash = (liv?.hurtTime ?? 0) > 0 ? Double(liv!.hurtTime) / 10 : deathFlip * 0.6
             pose.scale = 1
+            pose.onFire = ent.fireTicks > 0
+            if pose.onFire {
+                pose.scale *= 1 + (0.004 + 0.004 * abs(detSin(timeSec * 8 + Double(ent.id))))
+            }
+            if ent.type == "creeper" {
+                let progress = max(0, min(1, ent.data.swelling ?? 0))
+                if progress > 0 {
+                    let visual = creeperFuseVisual(progress: progress)
+                    pose.fuseProgress = progress
+                    pose.fuseRapid = ent.data.fuseRapid ?? false
+                    pose.fuseCharged = (ent as? Creeper)?.charged ?? (ent.data.charged ?? false)
+                    pose.fuseOverlay = visual.overlayAlpha
+                    pose.scale *= visual.scale
+                    pose.limbAmp = 0
+                }
+            }
             pose.baby = ent.data.baby ?? false
             pose.sky = w.getSkyLight(bx, by, bz)
             pose.block = w.getBlockLight(bx, by, bz)

@@ -28,12 +28,22 @@ public struct GenCtx {
     public let heightAt: (Int, Int) -> Int
     public let biomeAt: (Int, Int) -> Int
     public let dim: Int
+    public let generationSettingsIdentity: String
+    public let baseTerrainOracleVersion: Int
+    public let terrainOracle: BaseTerrainOracle?
 
-    public init(seed: UInt32, heightAt: @escaping (Int, Int) -> Int, biomeAt: @escaping (Int, Int) -> Int, dim: Int) {
+    public init(seed: UInt32, heightAt: @escaping (Int, Int) -> Int,
+                biomeAt: @escaping (Int, Int) -> Int, dim: Int,
+                generationSettingsIdentity: String = "legacy",
+                baseTerrainOracleVersion: Int = 0,
+                terrainOracle: BaseTerrainOracle? = nil) {
         self.seed = seed
         self.heightAt = heightAt
         self.biomeAt = biomeAt
         self.dim = dim
+        self.generationSettingsIdentity = generationSettingsIdentity
+        self.baseTerrainOracleVersion = baseTerrainOracleVersion
+        self.terrainOracle = terrainOracle
     }
 }
 
@@ -224,6 +234,70 @@ public final class Builder {
     }
 }
 
+/// Detached per-chunk structure mutation buffer. Structure closures can read
+/// staged writes, but the target sink is untouched until every intersecting
+/// piece has finished. Commit order installs blocks first, then block entities, then
+/// entity spawns so callbacks never observe half-built post-state.
+private final class BufferedChunkSink: ChunkSink {
+    let cx: Int
+    let cz: Int
+    let minY: Int
+    let maxY: Int
+    private let base: ChunkSink
+
+    private struct CellKey: Hashable { let x: Int; let y: Int; let z: Int }
+    private struct Write { let key: CellKey; let cell: UInt16 }
+    private var writes: [Write] = []
+    private var latest: [CellKey: UInt16] = [:]
+    private var blockEntities: [BESpec] = []
+    private var entities: [EntitySpec] = []
+
+    init(_ base: ChunkSink) {
+        self.base = base
+        cx = base.cx; cz = base.cz; minY = base.minY; maxY = base.maxY
+    }
+
+    func set(_ x: Int, _ y: Int, _ z: Int, _ c: UInt16) {
+        guard floorDiv(x, 16) == cx, floorDiv(z, 16) == cz, y >= minY, y < maxY else { return }
+        let key = CellKey(x: x, y: y, z: z)
+        writes.append(Write(key: key, cell: c))
+        latest[key] = c
+    }
+
+    func get(_ x: Int, _ y: Int, _ z: Int) -> Int {
+        latest[CellKey(x: x, y: y, z: z)].map(Int.init) ?? base.get(x, y, z)
+    }
+
+    func topY(_ x: Int, _ z: Int) -> Int {
+        guard floorDiv(x, 16) == cx, floorDiv(z, 16) == cz else { return base.topY(x, z) }
+        for y in stride(from: maxY - 1, through: minY, by: -1) {
+            let value = get(x, y, z)
+            guard value > 0 else { continue }
+            let id = value >> 4
+            if id == Int(B.water) || id == Int(B.lava) || SOLID[id] == 1 { return y + 1 }
+        }
+        return minY + 1
+    }
+
+    func addBlockEntity(_ spec: BESpec) {
+        guard floorDiv(spec.x, 16) == cx, floorDiv(spec.z, 16) == cz,
+              spec.y >= minY, spec.y < maxY else { return }
+        blockEntities.append(spec)
+    }
+
+    func addEntity(_ spec: EntitySpec) {
+        let x = Int(spec.x.rounded(.down)), z = Int(spec.z.rounded(.down))
+        guard floorDiv(x, 16) == cx, floorDiv(z, 16) == cz else { return }
+        entities.append(spec)
+    }
+
+    func commit() {
+        for write in writes { base.set(write.key.x, write.key.y, write.key.z, write.cell) }
+        for spec in blockEntities { base.addBlockEntity(spec) }
+        for spec in entities { base.addEntity(spec) }
+    }
+}
+
 /// rotate a horizontal facing (0=N 1=S 2=W 3=E) by template rotation
 public func rotF(_ facing: Int, _ rot: Int) -> Int {
     let cw = [3, 2, 0, 1] // N→E, S→W, W→N, E→S
@@ -238,8 +312,56 @@ public func rotF(_ facing: Int, _ rot: Int) -> Int {
 public var STRUCTURES: [StructureDef] = []
 public func registerStructure(_ def: StructureDef) { STRUCTURES.append(def) }
 
-private var planCache: [String: StructurePlan?] = [:]
-private let planCacheLock = NSLock()
+private struct StructurePlanCacheKey: Hashable {
+    let seed: UInt32
+    let dim: Int
+    let generationSettingsIdentity: String
+    let baseTerrainOracleVersion: Int
+    let structureID: String
+    let ocx: Int
+    let ocz: Int
+}
+
+private enum StructurePlanCacheValue {
+    case accepted(StructurePlan)
+    case rejected
+
+    var plan: StructurePlan? {
+        switch self {
+        case .accepted(let plan): return plan
+        case .rejected: return nil
+        }
+    }
+}
+
+struct StructurePlanCacheStats: Equatable {
+    public let entries: Int
+    public let computations: Int
+    public let waits: Int
+}
+
+private var planCache: [StructurePlanCacheKey: StructurePlanCacheValue] = [:]
+private var planCacheInFlight: Set<StructurePlanCacheKey> = []
+private var planCacheComputations = 0
+private var planCacheWaits = 0
+private let planCacheCondition = NSCondition()
+
+func resetStructurePlanCacheForTesting() {
+    planCacheCondition.lock()
+    while !planCacheInFlight.isEmpty { planCacheCondition.wait() }
+    planCache.removeAll(keepingCapacity: false)
+    planCacheComputations = 0
+    planCacheWaits = 0
+    planCacheCondition.unlock()
+}
+
+func structurePlanCacheStatsForTesting() -> StructurePlanCacheStats {
+    planCacheCondition.lock()
+    defer { planCacheCondition.unlock() }
+    return StructurePlanCacheStats(entries: planCache.count,
+                                   computations: planCacheComputations,
+                                   waits: planCacheWaits)
+}
 
 public func structureOriginFor(_ def: StructureDef, _ seed: UInt32, _ rcx: Int, _ rcz: Int) -> (Int, Int) {
     var rng = RandomX(hash2(seed, rcx, rcz, def.salt))
@@ -248,30 +370,48 @@ public func structureOriginFor(_ def: StructureDef, _ seed: UInt32, _ rcx: Int, 
 }
 
 public func getPlan(_ def: StructureDef, _ ctx: GenCtx, _ ocx: Int, _ ocz: Int) -> StructurePlan? {
-    let key = "\(ctx.dim):\(def.id):\(ocx):\(ocz)"
-    planCacheLock.lock()
-    if let cached = planCache[key] {
-        planCacheLock.unlock()
-        return cached
+    let key = StructurePlanCacheKey(seed: ctx.seed, dim: ctx.dim,
+                                    generationSettingsIdentity: ctx.generationSettingsIdentity,
+                                    baseTerrainOracleVersion: ctx.baseTerrainOracleVersion,
+                                    structureID: def.id, ocx: ocx, ocz: ocz)
+    planCacheCondition.lock()
+    while true {
+        if let cached = planCache[key] {
+            planCacheCondition.unlock()
+            return cached.plan
+        }
+        if !planCacheInFlight.contains(key) {
+            planCacheInFlight.insert(key)
+            planCacheComputations += 1
+            planCacheCondition.unlock()
+            break
+        }
+        planCacheWaits += 1
+        planCacheCondition.wait()
     }
-    planCacheLock.unlock()
     let rng = Rng(hash2(ctx.seed, ocx, ocz, def.salt ^ 0x5757))
     var plan: StructurePlan?
     if def.check(ctx, ocx, ocz, rng) {
         plan = def.plan(ctx, ocx, ocz, Rng(hash2(ctx.seed, ocx, ocz, def.salt ^ 0x1234)))
     }
-    planCacheLock.lock()
-    if planCache.count > 600 {
+    if plan?.pieces.count ?? 0 > 256 { plan = nil }
+    let computed: StructurePlanCacheValue = plan.map(StructurePlanCacheValue.accepted) ?? .rejected
+    planCacheCondition.lock()
+    if planCache.count >= 600 {
         planCache.removeAll(keepingCapacity: true) // recompute is deterministic; policy is correctness-neutral
     }
-    planCache[key] = plan
-    planCacheLock.unlock()
-    return plan
+    let installed = planCache[key] ?? computed
+    planCache[key] = installed
+    planCacheInFlight.remove(key)
+    planCacheCondition.broadcast()
+    planCacheCondition.unlock()
+    return installed.plan
 }
 
 public func buildStructuresForChunk(_ ctx: GenCtx, _ cx: Int, _ cz: Int, _ sink: ChunkSink, _ dimStructures: [StructureDef]) -> [StructRef] {
     var refs: [StructRef] = []
     let chunkX0 = cx * 16, chunkZ0 = cz * 16
+    let buffered = BufferedChunkSink(sink)
     for def in dimStructures {
         let r = def.maxRadiusChunks
         let rc0x = floorDiv(cx - r, def.spacing), rc1x = floorDiv(cx + r, def.spacing)
@@ -288,7 +428,7 @@ public func buildStructuresForChunk(_ ctx: GenCtx, _ cx: Int, _ cz: Int, _ sink:
                     // target chunk — so a piece spanning a chunk border draws the
                     // identical stream in both rebuilds (rails/decay/chests used
                     // to discontinue exactly at chunk seams)
-                    let b = Builder(sink, Rng(hash2(ctx.seed, ocx &* 1_000_003 &+ pi, ocz &* 31 &- pi, def.salt ^ 0x9999)))
+                    let b = Builder(buffered, Rng(hash2(ctx.seed, ocx &* 1_000_003 &+ pi, ocz &* 31 &- pi, def.salt ^ 0x9999)))
                     piece.build(b)
                 }
                 if let rf = plan.ref {
@@ -299,6 +439,7 @@ public func buildStructuresForChunk(_ ctx: GenCtx, _ cx: Int, _ cz: Int, _ sink:
             }
         }
     }
+    buffered.commit()
     return refs
 }
 
