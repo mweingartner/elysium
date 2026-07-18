@@ -29,6 +29,19 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 
 For the subsystem boundaries and determinism rules, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
+### Character paths and branches
+
+When the Character Classes rule is on, character creation runs **Path → Branch → Attributes → Review**. A **path** is the class (the top-level choice); each path has exactly three **branches** (specializations — stored internally as the character's specialization, not a separate "role"). Each branch defines a small skill tree (three skills, some always-on passive, some prepared active skills with a cooldown and fatigue cost), and two paths (Arcanist, Mender) also grant starter spells. Attributes are Strength, Dexterity, Intelligence, Endurance, and Luck.
+
+| Path (class) | Primary attributes | Focus | Branches (specializations) |
+|---|---|---|---|
+| **Warden** | Strength, Endurance | Armor, shield timing, threat control, protection | **Guardian** (defend an area, keep allies up) · **Vanguard** (close distance, punish exposed foes) · **Bulwark** (turn armor and blocks into durable defense) |
+| **Ranger** | Dexterity, Luck | Bows, scouting, terrain movement, ambushes, fieldcraft | **Marksman** (accurate ranged, fast target-swap) · **Scout** (stealth, map-reading, ambush setup) · **Survivalist** (forage, camp, weather, animals) |
+| **Delver** | Strength, Endurance | Mining, traps, underground navigation, lockwork, treasure | **Miner** (ore-finding, fast tunneling) · **Trapper** (detect, disarm, and build traps) · **Treasure-Seeker** (salvage, locks, risky loot) |
+| **Arcanist** | Intelligence, Endurance | Fatigue-driven spellcasting *(+ starter spells)* | **Elementalist** (fire, frost, force, light) · **Illusionist** (blur, decoys, invisibility) · **Ritualist** (long casts, wards, summons) |
+| **Mender** | Intelligence, Luck | Healing, food, antidotes, protective rites *(+ starter spells)* | **Physic** (direct and emergency healing) · **Harvest** (food, herbs, medicine) · **Sanctuary** (safe zones, wards, rescues) |
+| **Tinker** | Intelligence, Dexterity | Redstone, automation, gear mods, explosives | **Redstone** (compact circuits, signals) · **Artificer** (gear tuning, field repairs) · **Sapper** (controlled blasts, demolition) |
+
 ## Install and run
 
 Requirements:
