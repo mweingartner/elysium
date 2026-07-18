@@ -8,6 +8,9 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 
 > **Project origin:** Elysium began with [Brian Gao's open-source Pebble project (`thebriangao/pebble`)](https://github.com/thebriangao/pebble) as its starting point. The codebase has since been renamed and substantially extended as Elysium. We gratefully acknowledge Brian Gao and Pebble's contributors for the foundation they created.
 
+> **New to Elysium?** The [Player Guide](PLAYER_GUIDE.md) walks through a first world, complete controls,
+> progression, classes, trading, saves, LAN play, accessibility, and the current beta limits.
+
 ## What is in Elysium
 
 - **Native engine and renderer** — the headless-testable Swift engine drives a hand-written Metal renderer, AppKit interface, runtime texture atlas, lighting, particles, weather, and optional enhanced effects such as SSAO, volumetric light, soft shadows, and ACES tonemapping.
@@ -16,7 +19,7 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 - **Villager trading** — profession-specific villagers and wandering traders advertise the resources they want, expose their complete ordered offer catalog, and show both costs, stock, level locks, restock state, and affordability before an atomic trade. The trade sheet supports pointer, keyboard, controller, and macOS Accessibility navigation.
 - **World creation choices** — Default, Superflat, Large Biomes, Amplified, Single Biome, Debug, and Elysium's Rich Resources preset, plus configurable dungeon density and an optional Character Classes rule.
 - **Playable structure sites** — new village plans are moved to validated dry, supported terrain or omitted; ordinary dungeons stay dry, cave-connected, and wholly inside their origin chunk, while a region-budgeted minority may generate as intentionally sealed underwater rooms. Existing saved/modified chunks are never migrated or rewritten; mixed old/new generation seams are supported.
-- **RPG progression** — six character paths with attributes, levels, prepared passive and active skills, spells, fatigue, cooldowns, and a second quick-slot bar activated with Shift+1 through Shift+9. Character progression is optional per world; some character operations remain local-world-only while LAN authority continues to be hardened.
+- **RPG progression** — six character paths with attributes, levels, always-on passive skills, prepared active skills and spells, fatigue, cooldowns, and a second quick-slot bar activated with Shift+1 through Shift+9. Character progression is optional per world; some character operations remain local-world-only while LAN authority continues to be hardened.
 - **Object templates** — copy connected builds with Command-C, browse and preview saved templates with Command-V, rotate and place them, and undo the most recent placement with Command-Z. Template parsing and placement are bounded and validated before world mutation.
 - **Local-network multiplayer** — host, discover, join, or directly connect to LAN worlds with join codes and host-authoritative replication. Elysium has no public matchmaking, cloud relay, or built-in NAT traversal; a join code is an access gate, not protection from an already hostile local network.
 - **Optional local AI assistant** — `/ai <request>` sends context to a configured Ollama endpoint at `http://localhost:11434`. Model output is treated as untrusted and reduced to registered, validated, count- and distance-bounded game actions. Elysium does not control what an independently configured Ollama installation or model provider does beyond that interface.
@@ -55,6 +58,8 @@ swift run -c release Elysium
 ```
 
 ## Essential controls
+
+For the complete gameplay reference and troubleshooting help, see the [Player Guide](PLAYER_GUIDE.md).
 
 All gameplay bindings can be changed in Options → Controls.
 
