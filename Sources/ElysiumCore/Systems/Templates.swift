@@ -136,6 +136,15 @@ public struct TemplatePlacementSession {
     public private(set) var rotatedTemplate: ObjectTemplate
     public private(set) var previewBoxes: [ObjectTemplatePreviewBox]
     public private(set) var rotationSteps: Int
+    /// Player-controlled distance adjustment (Up/Down arrows) added to the
+    /// size-derived preview distance. Clamped so the wireframe can neither be
+    /// pulled inside the player's head nor pushed unreasonably far away.
+    public private(set) var distanceOffset: Double = 0
+
+    /// How far beyond the size-derived preview distance the wireframe may be pushed.
+    public static let maxExtraDistance = 48.0
+    /// The closest the wireframe center may be pulled toward the eye.
+    public static let minPreviewDistance = 2.0
 
     public init(template: ObjectTemplate, rotationSteps: Int = 0) throws {
         self.baseTemplate = try validateTemplate(template)
@@ -149,6 +158,26 @@ public struct TemplatePlacementSession {
         rotationSteps = normalizedTemplateRotation(rotationSteps + delta)
         rotatedTemplate = rotatedValidatedObjectTemplate(baseTemplate, rotationSteps: rotationSteps)
         previewBoxes = objectTemplatePreviewBoxes(forValidated: rotatedTemplate)
+    }
+
+    /// Size-derived base preview distance; rotation only permutes the template's
+    /// axes, so this is stable across rotations.
+    public var basePreviewDistance: Double {
+        templatePlacementPreviewDistance(forValidated: rotatedTemplate)
+    }
+
+    /// The effective eye-to-center distance after the player's adjustment.
+    public var previewDistance: Double {
+        max(Self.minPreviewDistance, basePreviewDistance + distanceOffset)
+    }
+
+    /// Moves the wireframe along the view ray (positive = away from the player),
+    /// clamping the total distance to [minPreviewDistance, base + maxExtraDistance].
+    public mutating func nudgeDistance(by delta: Double) {
+        let base = basePreviewDistance
+        let total = clampD(base + distanceOffset + delta,
+                           Self.minPreviewDistance, base + Self.maxExtraDistance)
+        distanceOffset = total - base
     }
 
     public var rotationDegrees: Int { rotationSteps * 90 }
@@ -545,8 +574,10 @@ private func templatePlacementPreviewDistance(forValidated template: ObjectTempl
 
 public func objectTemplatePlacementTargetForValidatedTemplate(_ template: ObjectTemplate,
                                                               eyeX: Double, eyeY: Double, eyeZ: Double,
-                                                              yaw: Double, pitch: Double) -> TemplatePlacementTarget {
-    let distance = templatePlacementPreviewDistance(forValidated: template)
+                                                              yaw: Double, pitch: Double,
+                                                              distanceOffset: Double = 0) -> TemplatePlacementTarget {
+    let distance = max(TemplatePlacementSession.minPreviewDistance,
+                       templatePlacementPreviewDistance(forValidated: template) + distanceOffset)
     let dx = -detSin(yaw) * detCos(pitch)
     let dy = -detSin(pitch)
     let dz = detCos(yaw) * detCos(pitch)

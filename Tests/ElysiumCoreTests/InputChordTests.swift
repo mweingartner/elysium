@@ -166,6 +166,50 @@ final class InputChordTests: XCTestCase {
             .unhandledForMainMenu)
     }
 
+    func testTemplateArrowCommandsResolveIncludingRepeatsAndYieldToProtectedChords() throws {
+        let up = try XCTUnwrap(ElysiumTerminalKey(rawValue: "ArrowUp"))
+        var router = RPGPureInputRouter()
+        let contexts: Set<ElysiumBindingContext> = [.appHUD, .rpgWorldAction, .hotbar, .movement]
+        let fingerprint = AppKeyEventFingerprint(
+            eventNumber: 0, keyCode: 126, timestampMicroseconds: 0,
+            windowNumber: 1, modifiers: [], isRepeat: false, origin: .physical)
+
+        // Press resolves the supplied template command.
+        let press = ElysiumKeyEvent(terminal: up, routingSerial: 601)
+        XCTAssertEqual(
+            router.route(event: press, fingerprint: fingerprint, nowMilliseconds: 1,
+                         eligibleTemplateArrowCommand: .worldAction("templateFurther"),
+                         allowedContexts: contexts, bindings: rpgDefaultChordBindings()),
+            .resolved(.worldAction("templateFurther")))
+
+        // Holding the arrow glides: repeats also resolve (unlike ordinary commands).
+        let repeated = ElysiumKeyEvent(terminal: up, isRepeat: true, routingSerial: 602)
+        XCTAssertEqual(
+            router.route(event: repeated, fingerprint: fingerprint, nowMilliseconds: 2,
+                         eligibleTemplateArrowCommand: .worldAction("templateFurther"),
+                         allowedContexts: contexts, bindings: rpgDefaultChordBindings()),
+            .resolved(.worldAction("templateFurther")))
+
+        // Without a placement session (nil command) the repeat is still swallowed
+        // in-world, and a fresh press falls through to normal routing.
+        let plainRepeat = ElysiumKeyEvent(terminal: up, isRepeat: true, routingSerial: 603)
+        XCTAssertEqual(
+            router.route(event: plainRepeat, fingerprint: fingerprint, nowMilliseconds: 3,
+                         allowedContexts: contexts, bindings: rpgDefaultChordBindings()),
+            .consumedRepeat)
+
+        // A protected app chord still wins over the template command.
+        let protectedQuit = ElysiumKeyEvent(
+            terminal: try XCTUnwrap(ElysiumTerminalKey(rawValue: "KeyQ")),
+            modifiers: .command, routingSerial: 604)
+        let disposition = router.route(
+            event: protectedQuit, fingerprint: fingerprint, nowMilliseconds: 4,
+            eligibleTemplateArrowCommand: .worldAction("templateRotateLeft"),
+            allowedContexts: contexts, bindings: rpgDefaultChordBindings())
+        XCTAssertTrue(disposition == .unhandledProtected || disposition == .unhandledForMainMenu,
+                      "protected/menu chords must not be hijacked by template arrows: \(disposition)")
+    }
+
     func testInWorldHeldKeyRepeatsAreConsumedNotUnhandled() throws {
         // Regression: holding a movement (or any) key in-world used to fall through to
         // `.unhandled`, which the AppKit adapter forwards to `super.keyDown`, making macOS emit

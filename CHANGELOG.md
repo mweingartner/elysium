@@ -5,6 +5,12 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Template placement (`Command-V`) wireframes can now be steered with the arrow
+  keys before clicking to place: Left/Right rotate the wireframe (same as the
+  scroll wheel), Up pushes it away from you, and Down pulls it closer, with the
+  distance clamped to a sane range around the size-based default. Holding Up or
+  Down glides the distance continuously; rotation steps once per press. The
+  placement hint text and Player Guide document the new controls.
 - The RPG character system is simplified. Attributes (Strength/Dexterity/Intelligence/Endurance/Luck) are
   retired: health and fatigue now grow automatically with level at a fixed per-path rate (for example,
   Warden 26 Health +2/level, 10 Fatigue +1/level), shown on the Character tab as base plus per-level

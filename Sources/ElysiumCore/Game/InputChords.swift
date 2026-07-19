@@ -538,6 +538,7 @@ public struct RPGPureInputRouter: Equatable {
     public mutating func route(event: ElysiumKeyEvent, fingerprint: AppKeyEventFingerprint,
                                nowMilliseconds: UInt64,
                                eligibleAppShortcutCommand: ResolvedKeyCommand? = nil,
+                               eligibleTemplateArrowCommand: ResolvedKeyCommand? = nil,
                                screenCommand: ResolvedKeyCommand? = nil,
                                screenPresent: Bool = false,
                                independentCommand: ResolvedKeyCommand? = nil,
@@ -563,6 +564,12 @@ public struct RPGPureInputRouter: Equatable {
             return .unhandledForMainMenu
         }
         if let chord, isProtectedAppChord(chord) { return .unhandledProtected }
+        // Arrow-key wireframe adjustment during template placement. Deliberately
+        // dispatched for repeats too: holding an arrow glides the wireframe.
+        if let eligibleTemplateArrowCommand {
+            remember(event.deliveryIdentity)
+            return .resolved(eligibleTemplateArrowCommand)
+        }
         if let screenCommand, !event.isRepeat {
             remember(event.deliveryIdentity)
             return .resolved(screenCommand)

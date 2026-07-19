@@ -582,6 +582,46 @@ final class TemplateTests: XCTestCase {
         XCTAssertEqual(target.targetZ, target.originZ + 1)
     }
 
+    func testPlacementSessionDistanceNudgeMovesTargetAlongViewRayAndClamps() throws {
+        registerCoreIfNeeded()
+        let template = ObjectTemplate(
+            name: "Nudge",
+            anchorX: 1, anchorY: 0, anchorZ: 1,
+            sizeX: 4, sizeY: 2, sizeZ: 2,
+            blocks: [TemplateBlock(dx: 1, dy: 0, dz: 1, cell: UInt16(cell(B.oak_planks)))])
+        var session = try TemplatePlacementSession(template: template)
+        let base = session.basePreviewDistance
+        XCTAssertEqual(session.distanceOffset, 0)
+        XCTAssertEqual(session.previewDistance, base)
+
+        // Push away: total distance grows 1:1 and the target's Z origin advances.
+        session.nudgeDistance(by: 5)
+        XCTAssertEqual(session.previewDistance, base + 5, accuracy: 1e-9)
+        let near = objectTemplatePlacementTargetForValidatedTemplate(
+            session.rotatedTemplate, eyeX: 0, eyeY: 2, eyeZ: 0, yaw: 0, pitch: 0)
+        let far = objectTemplatePlacementTargetForValidatedTemplate(
+            session.rotatedTemplate, eyeX: 0, eyeY: 2, eyeZ: 0, yaw: 0, pitch: 0,
+            distanceOffset: session.distanceOffset)
+        XCTAssertEqual(far.originZ, near.originZ + 5)
+
+        // Pull-in clamps at the minimum preview distance, never inside the eye.
+        session.nudgeDistance(by: -1000)
+        XCTAssertEqual(session.previewDistance, TemplatePlacementSession.minPreviewDistance,
+                       accuracy: 1e-9)
+
+        // Push-out clamps at base + maxExtraDistance.
+        session.nudgeDistance(by: 1000)
+        XCTAssertEqual(session.previewDistance,
+                       base + TemplatePlacementSession.maxExtraDistance, accuracy: 1e-9)
+
+        // Rotation preserves the player's distance adjustment (diagonal is
+        // rotation-stable, so the base does not shift underneath the offset).
+        let offsetBefore = session.distanceOffset
+        try session.rotate(by: 1)
+        XCTAssertEqual(session.distanceOffset, offsetBefore)
+        XCTAssertEqual(session.basePreviewDistance, base, accuracy: 1e-9)
+    }
+
     func testPreparedPlacementClearsObstructionsAndFillsFoundationGapFromAdjacentBlock() throws {
         let world = makeWorld()
         world.setBlock(7, 69, 8, Int(cell(B.dirt)))

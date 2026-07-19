@@ -204,12 +204,14 @@ final class AppInputRouter {
             return true
         }
         let appShortcut = eligibleObjectTemplateCommand(event, game: game, ui: ui)
+        let templateArrow = eligibleTemplateArrowCommand(event, game: game, ui: ui)
         let independent = independentCommand(event, hasWorld: game.hasWorld())
         let contexts: Set<ElysiumBindingContext> = game.hasWorld()
             ? [.appHUD, .rpgWorldAction, .hotbar, .movement] : []
         let disposition = router.route(
             event: event, fingerprint: fingerprint, nowMilliseconds: nowMilliseconds,
-            eligibleAppShortcutCommand: appShortcut, screenPresent: screenPresent,
+            eligibleAppShortcutCommand: appShortcut,
+            eligibleTemplateArrowCommand: templateArrow, screenPresent: screenPresent,
             independentCommand: independent, allowedContexts: contexts, bindings: game.keybinds)
 
         switch disposition {
@@ -295,6 +297,28 @@ final class AppInputRouter {
         }
     }
 
+    /// Arrow keys steer the pending template wireframe (Command-V placement):
+    /// Left/Right rotate it, Up pushes it away, Down pulls it toward the player.
+    /// Only active in-world with a live placement session and no open screen, so
+    /// the arrows keep their ordinary meaning everywhere else.
+    private func eligibleTemplateArrowCommand(_ event: ElysiumKeyEvent, game: GameCore,
+                                              ui: UIManager) -> ResolvedKeyCommand? {
+        guard event.modifiers.isEmpty, game.hasWorld(), !ui.hasScreen(),
+              game.templatePlacement != nil else { return nil }
+        switch event.terminal.rawValue {
+        // Rotation is press-only: a 90-degree cycle gains nothing from key
+        // repeat, and each rotation remaps the whole template (O(blocks)) —
+        // repeat-rate remaps of a maximum-size template would stall the main
+        // thread. Repeats fall through to the in-world repeat swallow.
+        case "ArrowLeft": return event.isRepeat ? nil : .worldAction("templateRotateLeft")
+        case "ArrowRight": return event.isRepeat ? nil : .worldAction("templateRotateRight")
+        // Distance nudges are O(1), so holding Up/Down glides the wireframe.
+        case "ArrowUp": return .worldAction("templateFurther")
+        case "ArrowDown": return .worldAction("templateCloser")
+        default: return nil
+        }
+    }
+
     private func independentCommand(_ event: ElysiumKeyEvent, hasWorld: Bool) -> ResolvedKeyCommand? {
         guard hasWorld else { return nil }
         if let dropAll = resolveLegacyControlDropAll(event: event,
@@ -334,6 +358,10 @@ final class AppInputRouter {
             case "copyObjectTemplate": _ = view.performObjectTemplateShortcut(.copyObject)
             case "placeObjectTemplate": _ = view.performObjectTemplateShortcut(.placeObject)
             case "undoObjectPlacement": _ = view.performObjectTemplateShortcut(.undoObjectPlacement)
+            case "templateRotateLeft": _ = game.rotateTemplatePlacement(by: -1)
+            case "templateRotateRight": _ = game.rotateTemplatePlacement(by: 1)
+            case "templateFurther": _ = game.nudgeTemplatePlacementDistance(by: 1)
+            case "templateCloser": _ = game.nudgeTemplatePlacementDistance(by: -1)
             case "pause":
                 game.keyDown("Escape", now: view.nowMs())
             case "mapZoomOut": game.zoomMap(false)

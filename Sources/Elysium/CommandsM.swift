@@ -68,7 +68,7 @@ func runCommand(_ game: GameCore, _ raw: String) {
                 return fail("Unknown template: \(name)")
             }
             try game.beginTemplatePlacement(template)
-            ok("Placing object \"\(template.name)\" - scroll to rotate, left click to place")
+            ok("Placing object \"\(template.name)\" - Left/Right arrows or scroll rotate, Up/Down arrows push/pull, left click to place")
         } catch let error as TemplateError {
             fail(error.description)
         } catch {

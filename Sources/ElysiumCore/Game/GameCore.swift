@@ -4546,7 +4546,7 @@ public final class GameCore {
         lastCursorHit = nil
         host?.closeAllScreens()
         host?.capturePointer()
-        host?.showActionBar("Placing \"\(session.name)\" - scroll to rotate, left click to place, Esc to cancel", 120)
+        host?.showActionBar("Placing \"\(session.name)\" - arrows rotate/push/pull, scroll rotates, left click places, Esc cancels", 120)
     }
 
     @discardableResult
@@ -4580,7 +4580,19 @@ public final class GameCore {
         return objectTemplatePlacementTargetForValidatedTemplate(
             session.rotatedTemplate,
             eyeX: p.x, eyeY: p.eyeY(), eyeZ: p.z,
-            yaw: p.yaw, pitch: p.pitch)
+            yaw: p.yaw, pitch: p.pitch,
+            distanceOffset: session.distanceOffset)
+    }
+
+    /// Up/Down-arrow adjustment while a template wireframe is pending:
+    /// positive delta pushes it away from the player, negative pulls it closer.
+    @discardableResult
+    public func nudgeTemplatePlacementDistance(by delta: Double) -> Bool {
+        guard var session = templatePlacement else { return false }
+        session.nudgeDistance(by: delta)
+        templatePlacement = session
+        host?.showActionBar("Placement distance: \(Int(session.previewDistance.rounded())) blocks", 45)
+        return true
     }
 
     @discardableResult

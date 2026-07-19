@@ -136,6 +136,7 @@ These inputs are routed separately and do not appear as configurable gameplay bi
 | `,` / `.` | Zoom the map out or in. |
 | `Command-C` | Copy a targeted connected build as a template. |
 | `Command-V` | Open the template placement browser. |
+| Arrow keys (during placement) | Left/Right rotate the pending wireframe; Up pushes it away; Down pulls it closer. |
 | `Command-Z` | Undo the most recent template placement. |
 
 Physical-controller support currently covers the RPG interface/actions and villager trading sheet. Do
@@ -436,7 +437,9 @@ Object templates let you reuse a connected build:
 2. Enter a **Template Name** and save it. Very large or terrain-like connected selections can be rejected
    rather than copied without bounds.
 3. Press `Command-V` to browse saved templates and open a placement preview.
-4. Use the mouse wheel to rotate the preview. Left click places it; right click cancels placement.
+4. Steer the wireframe before committing: the Left and Right arrow keys (or the mouse wheel) rotate
+   it, the Up arrow pushes it away from you, and the Down arrow pulls it closer — hold Up or Down to
+   glide the distance. Left click places it; right click cancels placement.
 5. Press `Command-Z` to undo the most recent template placement.
 
 Template placement is previewed and validated before it changes the world. Undo applies to the most recent
