@@ -366,7 +366,12 @@ final class EntityRendererM {
         pose(g, p, time)
         var m = matrix_identity_float4x4
         m = mTranslate(m, Float(p.x - camPos.x), Float(p.y - camPos.y), Float(p.z - camPos.z))
-        m = mRotateY(m, Float(-p.yaw))
+        // Vanilla-rig facing flip: every mob model is authored with its face at -Z
+        // (pig head z -6/snout -9, back legs +7), while the movement basis drives a
+        // yaw-0 entity toward +Z (vx = -sin(yaw), vz = +cos(yaw)). Rotating by
+        // (pi - yaw) instead of (-yaw) points the authored front along the direction
+        // of travel; without the pi term every creature walks backwards.
+        m = mRotateY(m, Float(.pi - p.yaw))
         let sc = Float(p.scale * g.model.scale * (p.baby ? 0.5 : 1))
         m = mScale(m, sc, sc, sc)
 

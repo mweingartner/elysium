@@ -110,9 +110,11 @@ final class PhotoBooth {
 
     private func aimCamera(_ p: Player, dist: Double, height: Double, yawDeg: Double) {
         let yaw = yawDeg * .pi / 180
-        // camera orbits the subject; engine yaw 0 faces +Z, camera looks along
-        // (-sin(yaw)·cos(pitch)? — use the same basis the renderer uses: place at
-        // subject + offset and face back toward it
+        // Camera orbits the subject, which stands at yaw 0 facing +Z (the
+        // renderer's vanilla-rig flip points authored -Z fronts along +Z).
+        // yawDeg 150 lands on the face side; -30 on the rear quarter. This
+        // orbit was always authored for that convention — before the facing
+        // flip landed, "front" captures actually photographed backs.
         let cx = Double(SX) + 0.5 + sin(yaw) * dist
         let cz = Double(SZ) + 0.5 - cos(yaw) * dist
         let cy = Double(SY) + height
