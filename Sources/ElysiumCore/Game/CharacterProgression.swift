@@ -1,10 +1,13 @@
 import Foundation
 
-public let RPG_STATE_CURRENT_VERSION = 2
+public let RPG_STATE_CURRENT_VERSION = 3
 public let RPG_CLASSES_GAME_RULE = "rpgClasses"
 public let RPG_LEVEL_CAP = 20
 public let RPG_MAX_PREPARED_SPELLS = 6
 public let RPG_MAX_PREPARED_SKILLS = 4
+public let RPG_SKILL_RANK_CAP = 5
+public let RPG_MILESTONE_LEVELS = [4, 7, 10, 13, 16, 19]
+public let RPG_STARTING_SKILL_COUNT = 3
 public let RPG_ACTION_QUICK_SLOT_COUNT = 9
 public let RPG_MAX_ID_UTF8_BYTES = 64
 public let RPG_MAX_COOLDOWNS = 32
@@ -35,72 +38,17 @@ public func rpgIsBoundedID(_ value: String) -> Bool {
     !value.isEmpty && value.utf8.count <= RPG_MAX_ID_UTF8_BYTES
 }
 
+/// Decode-only identity retained for the frozen protocol-5 LAN wire format
+/// (`LANRPGIntent.attribute`) and for the fixed backward-compatibility
+/// `attributes` vector `RPGCreationDraft` still encodes. The attribute
+/// system itself (values, budgets, gates) was removed in state v3; nothing
+/// in this build ever reads a value through this identifier.
 public enum RPGAttributeID: String, Codable, CaseIterable, Hashable {
     case strength
     case dexterity
     case intelligence
     case endurance
     case luck
-}
-
-public struct RPGAttributes: Codable, Equatable {
-    public var strength: Int
-    public var dexterity: Int
-    public var intelligence: Int
-    public var endurance: Int
-    public var luck: Int
-
-    public init(strength: Int, dexterity: Int, intelligence: Int, endurance: Int, luck: Int) {
-        self.strength = strength
-        self.dexterity = dexterity
-        self.intelligence = intelligence
-        self.endurance = endurance
-        self.luck = luck
-    }
-
-    public static let minimum = 6
-    public static let maximumAtCreation = 14
-    public static let maximumWithProgression = 18
-    public static let creationBudget = 42
-    public static let defaultCreation = RPGAttributes(strength: 9, dexterity: 9, intelligence: 9, endurance: 9, luck: 6)
-
-    public var total: Int {
-        strength + dexterity + intelligence + endurance + luck
-    }
-
-    public func value(_ id: RPGAttributeID) -> Int {
-        switch id {
-        case .strength: return strength
-        case .dexterity: return dexterity
-        case .intelligence: return intelligence
-        case .endurance: return endurance
-        case .luck: return luck
-        }
-    }
-
-    public mutating func set(_ id: RPGAttributeID, _ value: Int) {
-        switch id {
-        case .strength: strength = value
-        case .dexterity: dexterity = value
-        case .intelligence: intelligence = value
-        case .endurance: endurance = value
-        case .luck: luck = value
-        }
-    }
-
-    public func clamped(maximum: Int = RPGAttributes.maximumWithProgression) -> RPGAttributes {
-        RPGAttributes(
-            strength: clampAttribute(strength, maximum: maximum),
-            dexterity: clampAttribute(dexterity, maximum: maximum),
-            intelligence: clampAttribute(intelligence, maximum: maximum),
-            endurance: clampAttribute(endurance, maximum: maximum),
-            luck: clampAttribute(luck, maximum: maximum)
-        )
-    }
-}
-
-private func clampAttribute(_ value: Int, maximum: Int) -> Int {
-    max(RPGAttributes.minimum, min(maximum, value))
 }
 
 public enum RPGActionKind: String, Codable, Equatable {
@@ -173,7 +121,7 @@ public struct RPGSpellUnlock: Codable, Equatable, Hashable {
 
     public init(_ spellID: String, rank: Int) {
         self.spellID = spellID
-        self.rank = max(1, min(3, rank))
+        self.rank = max(1, min(RPG_SKILL_RANK_CAP, rank))
     }
 }
 
@@ -183,7 +131,7 @@ public struct RPGSkillEffectContract: Equatable {
     public var spellUnlocks: [RPGSpellUnlock]
 
     public init(values: [Double], benefits: [String], spellUnlocks: [RPGSpellUnlock] = []) {
-        precondition(values.count == 3 && benefits.count == 3, "RPG skills require exactly three rank effects")
+        precondition(values.count == 5 && benefits.count == 5, "RPG skills require exactly five rank effects")
         self.values = values
         self.benefits = benefits
         self.spellUnlocks = spellUnlocks
@@ -191,120 +139,120 @@ public struct RPGSkillEffectContract: Equatable {
 }
 
 /// The exhaustive rank-effect registry. Adding an enum case cannot compile
-/// until its three values, three benefit strings, and spell unlock ranks exist.
+/// until its five values, five benefit strings, and spell unlock ranks exist.
 public func rpgSkillEffectContract(_ id: RPGSkillEffectID) -> RPGSkillEffectContract {
     func c(_ values: [Double], _ benefits: [String], _ unlocks: [RPGSpellUnlock] = []) -> RPGSkillEffectContract {
         RPGSkillEffectContract(values: values, benefits: benefits, spellUnlocks: unlocks)
     }
     switch id {
     case .guardStance:
-        return c([1, 2, 3], ["+1 maximum health", "+2 maximum health", "+3 maximum health"])
+        return c([1, 2, 3, 4, 5], ["+1 maximum health", "+2 maximum health", "+3 maximum health", "+4 maximum health", "+5 maximum health"])
     case .interpose:
-        return c([3, 4, 5], ["Grant 3 absorption", "Grant 4 absorption", "Grant 5 absorption"])
+        return c([3, 4, 5, 6, 7], ["Grant 3 absorption", "Grant 4 absorption", "Grant 5 absorption", "Grant 6 absorption", "Grant 7 absorption"])
     case .anchorLine:
-        return c([0.35, 0.50, 0.65], ["Brace and pull with light force", "Brace and pull with medium force", "Brace and pull with strong force"])
+        return c([0.35, 0.50, 0.65, 0.80, 0.95], ["Brace and pull with light force", "Brace and pull with medium force", "Brace and pull with strong force", "Brace and pull with greater force", "Brace and pull with maximum force"])
     case .heavyCut:
-        return c([2, 4, 6], ["Weapon strike deals +2 damage", "Weapon strike deals +4 damage", "Weapon strike deals +6 damage"])
+        return c([2, 4, 6, 8, 10], ["Weapon strike deals +2 damage", "Weapon strike deals +4 damage", "Weapon strike deals +6 damage", "Weapon strike deals +8 damage", "Weapon strike deals +10 damage"])
     case .chargeBreak:
-        return c([4, 6, 8], ["Rush for 4 damage", "Rush for 6 damage", "Rush for 8 damage"])
+        return c([4, 6, 8, 10, 12], ["Rush for 4 damage", "Rush for 6 damage", "Rush for 8 damage", "Rush for 10 damage", "Rush for 12 damage"])
     case .staggerChain:
-        return c([40, 80, 120], ["Heavy Cut slow lasts +40 ticks", "Heavy Cut slow lasts +80 ticks", "Heavy Cut slow lasts +120 ticks"])
+        return c([40, 80, 120, 160, 200], ["Heavy Cut slow lasts +40 ticks", "Heavy Cut slow lasts +80 ticks", "Heavy Cut slow lasts +120 ticks", "Heavy Cut slow lasts +160 ticks", "Heavy Cut slow lasts +200 ticks"])
     case .shieldBind:
-        return c([1, 2, 3], ["+1 maximum fatigue", "+2 maximum fatigue", "+3 maximum fatigue"])
+        return c([1, 2, 3, 4, 5], ["+1 maximum fatigue", "+2 maximum fatigue", "+3 maximum fatigue", "+4 maximum fatigue", "+5 maximum fatigue"])
     case .plateTraining:
-        return c([0.002, 0.004, 0.006], ["+0.002 fatigue per tick", "+0.004 fatigue per tick", "+0.006 fatigue per tick"])
+        return c([0.002, 0.004, 0.006, 0.008, 0.010], ["+0.002 fatigue per tick", "+0.004 fatigue per tick", "+0.006 fatigue per tick", "+0.008 fatigue per tick", "+0.010 fatigue per tick"])
     case .fortifyBlock:
-        return c([1, 2, 3], ["Block absorbs 1 explosion destruction", "Block absorbs 2 explosion destructions", "Block absorbs 3 explosion destructions"])
+        return c([1, 2, 3, 4, 5], ["Block absorbs 1 explosion destruction", "Block absorbs 2 explosion destructions", "Block absorbs 3 explosion destructions", "Block absorbs 4 explosion destructions", "Block absorbs 5 explosion destructions"])
     case .quickDraw:
-        return c([2, 4, 6], ["Bow reaches power 2 ticks sooner", "Bow reaches power 4 ticks sooner", "Bow reaches power 6 ticks sooner"])
+        return c([2, 4, 6, 8, 10], ["Bow reaches power 2 ticks sooner", "Bow reaches power 4 ticks sooner", "Bow reaches power 6 ticks sooner", "Bow reaches power 8 ticks sooner", "Bow reaches power 10 ticks sooner"])
     case .steadyAim:
-        return c([0.15, 0.30, 0.45], ["Grounded bow spread -15%", "Grounded bow spread -30%", "Grounded bow spread -45%"])
+        return c([0.15, 0.30, 0.45, 0.60, 0.75], ["Grounded bow spread -15%", "Grounded bow spread -30%", "Grounded bow spread -45%", "Grounded bow spread -60%", "Grounded bow spread -75%"])
     case .cripplingShot:
-        return c([120, 180, 240], ["Slow target for 120 ticks", "Slow target for 180 ticks", "Slow target for 240 ticks"])
+        return c([120, 180, 240, 300, 360], ["Slow target for 120 ticks", "Slow target for 180 ticks", "Slow target for 240 ticks", "Slow target for 300 ticks", "Slow target for 360 ticks"])
     case .trailSense:
-        return c([8, 12, 16], ["Sneaking reveals hostiles within 8 blocks", "Sneaking reveals hostiles within 12 blocks", "Sneaking reveals hostiles within 16 blocks"])
+        return c([8, 12, 16, 20, 24], ["Sneaking reveals hostiles within 8 blocks", "Sneaking reveals hostiles within 12 blocks", "Sneaking reveals hostiles within 16 blocks", "Sneaking reveals hostiles within 20 blocks", "Sneaking reveals hostiles within 24 blocks"])
     case .softStep:
-        return c([0.05, 0.10, 0.15], ["Sneaking movement +5%", "Sneaking movement +10%", "Sneaking movement +15%"])
+        return c([0.05, 0.10, 0.15, 0.20, 0.25], ["Sneaking movement +5%", "Sneaking movement +10%", "Sneaking movement +15%", "Sneaking movement +20%", "Sneaking movement +25%"])
     case .farSight:
-        return c([16, 24, 32], ["Reveal up to 8 hostiles within 16 blocks", "Reveal up to 8 hostiles within 24 blocks", "Reveal up to 8 hostiles within 32 blocks"])
+        return c([16, 24, 32, 40, 48], ["Reveal up to 8 hostiles within 16 blocks", "Reveal up to 8 hostiles within 24 blocks", "Reveal up to 8 hostiles within 32 blocks", "Reveal up to 8 hostiles within 40 blocks", "Reveal up to 8 hostiles within 48 blocks"])
     case .campcraft:
-        return c([0.005, 0.010, 0.015], ["Safe rest regen +0.005 per tick", "Safe rest regen +0.010 per tick", "Safe rest regen +0.015 per tick"])
+        return c([0.005, 0.010, 0.015, 0.020, 0.025], ["Safe rest regen +0.005 per tick", "Safe rest regen +0.010 per tick", "Safe rest regen +0.015 per tick", "Safe rest regen +0.020 per tick", "Safe rest regen +0.025 per tick"])
     case .weatherEye:
-        return c([600, 200, 20], ["Weather HUD shows the next transition rounded up to 30 seconds", "Weather HUD shows the next transition rounded up to 10 seconds", "Weather HUD shows the next transition rounded up to 1 second"])
+        return c([600, 200, 20, 20, 20], ["Weather HUD shows the next transition rounded up to 30 seconds", "Weather HUD shows the next transition rounded up to 10 seconds", "Weather HUD shows the next transition rounded up to 1 second", "Weather HUD names the incoming weather kind", "Weather Eye works in the Nether and the End"])
     case .beastKinship:
-        return c([4, 7, 10], ["Animals ignore you within 4 blocks", "Animals ignore you within 7 blocks", "Animals ignore you within 10 blocks"])
+        return c([4, 7, 10, 13, 16], ["Animals ignore you within 4 blocks", "Animals ignore you within 7 blocks", "Animals ignore you within 10 blocks", "Animals ignore you within 13 blocks", "Animals ignore you within 16 blocks"])
     case .veinReader:
-        return c([0.10, 0.20, 0.30], ["Stone and ore mining +10%", "Stone and ore mining +20%", "Stone and ore mining +30%"])
+        return c([0.10, 0.20, 0.30, 0.40, 0.50], ["Stone and ore mining +10%", "Stone and ore mining +20%", "Stone and ore mining +30%", "Stone and ore mining +40%", "Stone and ore mining +50%"])
     case .fastBore:
-        return c([1, 2, 3], ["Haste I mining burst", "Haste II mining burst", "Haste III mining burst"])
+        return c([1, 2, 3, 4, 5], ["Haste I mining burst", "Haste II mining burst", "Haste III mining burst", "Haste IV mining burst", "Haste V mining burst"])
     case .deepReserves:
-        return c([0.1, 0.2, 0.3], ["Deep hard blocks restore 0.1 fatigue", "Deep hard blocks restore 0.2 fatigue", "Deep hard blocks restore 0.3 fatigue"])
+        return c([0.1, 0.2, 0.3, 0.4, 0.5], ["Deep hard blocks restore 0.1 fatigue", "Deep hard blocks restore 0.2 fatigue", "Deep hard blocks restore 0.3 fatigue", "Deep hard blocks restore 0.4 fatigue", "Deep hard blocks restore 0.5 fatigue"])
     case .trapProbe:
-        return c([6, 8, 10], ["Reveal traps within 6 blocks", "Reveal traps within 8 blocks", "Reveal traps within 10 blocks"])
+        return c([6, 8, 10, 12, 14], ["Reveal traps within 6 blocks", "Reveal traps within 8 blocks", "Reveal traps within 10 blocks", "Reveal traps within 12 blocks", "Reveal traps within 14 blocks"])
     case .tripwireMind:
-        return c([0.15, 0.30, 0.45], ["Explosion and trap damage -15%", "Explosion and trap damage -30%", "Explosion and trap damage -45%"])
+        return c([0.15, 0.30, 0.45, 0.60, 0.75], ["Explosion and trap damage -15%", "Explosion and trap damage -30%", "Explosion and trap damage -45%", "Explosion and trap damage -60%", "Explosion and trap damage -75%"])
     case .deadfall:
-        return c([80, 120, 160], ["Place an 80-tick gravel trap", "Place a 120-tick gravel trap", "Place a 160-tick gravel trap"])
+        return c([80, 120, 160, 200, 240], ["Place an 80-tick gravel trap", "Place a 120-tick gravel trap", "Place a 160-tick gravel trap", "Place a 200-tick gravel trap", "Place a 240-tick gravel trap"])
     case .salvageEye:
-        return c([12, 8, 5], ["Every 12th crafted-block break preserves durability", "Every 8th crafted-block break preserves durability", "Every 5th crafted-block break preserves durability"])
+        return c([12, 8, 5, 3, 2], ["Every 12th crafted-block break preserves durability", "Every 8th crafted-block break preserves durability", "Every 5th crafted-block break preserves durability", "Every 3rd crafted-block break preserves durability", "Every 2nd crafted-block break preserves durability"])
     case .lockTouch:
-        return c([4, 8, 16], ["Inspect up to 4 occupied slots", "Inspect up to 8 occupied slots", "Inspect up to 16 occupied slots"])
+        return c([4, 8, 16, 24, 32], ["Inspect up to 4 occupied slots", "Inspect up to 8 occupied slots", "Inspect up to 16 occupied slots", "Inspect up to 24 occupied slots", "Inspect up to 32 occupied slots"])
     case .fortuneRead:
-        return c([1, 2, 3], ["Reveal one item and coarse fill", "Reveal one item and medium fill", "Reveal one item and exact fill"])
+        return c([1, 2, 3, 4, 5], ["Reveal one item and coarse fill", "Reveal one item and medium fill", "Reveal one item and exact fill", "Reveal two items and exact fill", "Reveal three items and exact fill"])
     case .spellFormula:
-        return c([0.5, 1.0, 1.5], ["Spell damage +0.5; unlock Ignite", "Spell damage +1.0; unlock Frost Ray", "Spell damage +1.5"], [RPGSpellUnlock("ignite", rank: 1), RPGSpellUnlock("frost_ray", rank: 2)])
+        return c([0.5, 1.0, 1.5, 2.0, 2.5], ["Spell damage +0.5; unlock Ignite", "Spell damage +1.0", "Spell damage +1.5; unlock Frost Ray", "Spell damage +2.0", "Spell damage +2.5"], [RPGSpellUnlock("ignite", rank: 1), RPGSpellUnlock("frost_ray", rank: 3)])
     case .sparkWeave:
-        return c([0.5, 1.0, 1.5], ["Elemental fatigue cost -0.5", "Elemental fatigue cost -1.0; unlock Shock", "Elemental fatigue cost -1.5"], [RPGSpellUnlock("shock", rank: 2)])
+        return c([0.5, 1.0, 1.5, 2.0, 2.5], ["Elemental fatigue cost -0.5", "Elemental fatigue cost -1.0", "Elemental fatigue cost -1.5; unlock Shock", "Elemental fatigue cost -2.0", "Elemental fatigue cost -2.5"], [RPGSpellUnlock("shock", rank: 3)])
     case .stormFocus:
-        return c([1.5, 2.0, 2.5], ["Storm Aura damage 1.5", "Storm Aura damage 2.0; unlock Storm Aura", "Storm Aura damage 2.5"], [RPGSpellUnlock("storm_aura", rank: 2)])
+        return c([1.5, 2.0, 2.5, 3.0, 3.5], ["Storm Aura damage 1.5", "Storm Aura damage 2.0", "Storm Aura damage 2.5; unlock Storm Aura", "Storm Aura damage 3.0", "Storm Aura damage 3.5"], [RPGSpellUnlock("storm_aura", rank: 3)])
     case .minorGlamour:
-        return c([1.10, 1.20, 1.30], ["Illusion duration x1.10; unlock Blur", "Illusion duration x1.20; unlock Decoy", "Illusion duration x1.30"], [RPGSpellUnlock("blur", rank: 1), RPGSpellUnlock("decoy", rank: 2)])
+        return c([1.10, 1.20, 1.30, 1.40, 1.50], ["Illusion duration x1.10; unlock Blur", "Illusion duration x1.20", "Illusion duration x1.30; unlock Decoy", "Illusion duration x1.40", "Illusion duration x1.50"], [RPGSpellUnlock("blur", rank: 1), RPGSpellUnlock("decoy", rank: 3)])
     case .falseStep:
-        return c([1, 2, 3], ["Shadow Step range +1", "Shadow Step range +2; unlock Shadow Step", "Shadow Step range +3"], [RPGSpellUnlock("shadow_step", rank: 2)])
+        return c([1, 2, 3, 4, 5], ["Shadow Step range +1", "Shadow Step range +2", "Shadow Step range +3; unlock Shadow Step", "Shadow Step range +4", "Shadow Step range +5"], [RPGSpellUnlock("shadow_step", rank: 3)])
     case .mirrorWork:
-        return c([2, 3, 4], ["Mirror Image grants 2 absorption", "Mirror Image grants 3 absorption; unlock Mirror Image", "Mirror Image grants 4 absorption"], [RPGSpellUnlock("mirror_image", rank: 2)])
+        return c([2, 3, 4, 5, 6], ["Mirror Image grants 2 absorption", "Mirror Image grants 3 absorption", "Mirror Image grants 4 absorption; unlock Mirror Image", "Mirror Image grants 5 absorption", "Mirror Image grants 6 absorption"], [RPGSpellUnlock("mirror_image", rank: 3)])
     case .ritualCircle:
-        return c([1.10, 1.25, 1.40], ["Ritual duration x1.10; unlock Mage Light", "Ritual duration x1.25; unlock Ward", "Ritual duration x1.40"], [RPGSpellUnlock("mage_light", rank: 1), RPGSpellUnlock("ward", rank: 2)])
+        return c([1.10, 1.25, 1.40, 1.55, 1.70], ["Ritual duration x1.10; unlock Mage Light", "Ritual duration x1.25", "Ritual duration x1.40; unlock Ward", "Ritual duration x1.55", "Ritual duration x1.70"], [RPGSpellUnlock("mage_light", rank: 1), RPGSpellUnlock("ward", rank: 3)])
     case .boundServant:
-        return c([400, 600, 800], ["Servant lasts 400 ticks", "Servant lasts 600 ticks; unlock Summon Servant", "Servant lasts 800 ticks"], [RPGSpellUnlock("summon_servant", rank: 2)])
+        return c([400, 600, 800, 1000, 1200], ["Servant lasts 400 ticks", "Servant lasts 600 ticks", "Servant lasts 800 ticks; unlock Summon Servant", "Servant lasts 1000 ticks", "Servant lasts 1200 ticks"], [RPGSpellUnlock("summon_servant", rank: 3)])
     case .wardScribe:
-        return c([1, 2, 3], ["Wards absorb 1 explosion", "Wards absorb 2 explosions; unlock Stone Ward", "Wards absorb 3 explosions"], [RPGSpellUnlock("stone_ward", rank: 2)])
+        return c([1, 2, 3, 4, 5], ["Wards absorb 1 explosion", "Wards absorb 2 explosions", "Wards absorb 3 explosions; unlock Stone Ward", "Wards absorb 4 explosions", "Wards absorb 5 explosions"], [RPGSpellUnlock("stone_ward", rank: 3)])
     case .fieldDressing:
-        return c([1, 2, 3], ["Healing spells restore +1; unlock Mend Wounds", "Healing spells restore +2", "Healing spells restore +3"], [RPGSpellUnlock("mend_wounds", rank: 1)])
+        return c([1, 2, 3, 4, 5], ["Healing spells restore +1; unlock Mend Wounds", "Healing spells restore +2", "Healing spells restore +3", "Healing spells restore +4", "Healing spells restore +5"], [RPGSpellUnlock("mend_wounds", rank: 1)])
     case .triage:
-        return c([0.10, 0.20, 0.30], ["Low-health healing +10%", "Low-health healing +20%; unlock Restore", "Low-health healing +30%"], [RPGSpellUnlock("restore", rank: 2)])
+        return c([0.10, 0.20, 0.30, 0.40, 0.50], ["Low-health healing +10%", "Low-health healing +20%", "Low-health healing +30%; unlock Restore", "Low-health healing +40%", "Low-health healing +50%"], [RPGSpellUnlock("restore", rank: 3)])
     case .secondBreath:
-        return c([8, 11, 14], ["Emergency heal 8", "Emergency heal 11", "Emergency heal 14"])
+        return c([8, 11, 14, 17, 20], ["Emergency heal 8", "Emergency heal 11", "Emergency heal 14", "Emergency heal 17", "Emergency heal 20"])
     case .herbalLore:
-        return c([0.5, 1.0, 1.5], ["Typed plant food restores 0.5 fatigue; unlock Purify", "Typed plant food restores 1.0 fatigue", "Typed plant food restores 1.5 fatigue"], [RPGSpellUnlock("purify", rank: 1)])
+        return c([0.5, 1.0, 1.5, 2.0, 2.5], ["Typed plant food restores 0.5 fatigue; unlock Purify", "Typed plant food restores 1.0 fatigue", "Typed plant food restores 1.5 fatigue", "Typed plant food restores 2.0 fatigue", "Typed plant food restores 2.5 fatigue"], [RPGSpellUnlock("purify", rank: 1)])
     case .cleanBrew:
-        return c([1.10, 1.20, 1.30], ["Beneficial food and potion effects x1.10", "Beneficial food and potion effects x1.20", "Beneficial food and potion effects x1.30"])
+        return c([1.10, 1.20, 1.30, 1.40, 1.50], ["Beneficial food and potion effects x1.10", "Beneficial food and potion effects x1.20", "Beneficial food and potion effects x1.30", "Beneficial food and potion effects x1.40", "Beneficial food and potion effects x1.50"])
     case .greenThumb:
-        return c([0.1, 0.2, 0.3], ["Mature crops restore 0.1 fatigue", "Mature crops restore 0.2 fatigue", "Mature crops restore 0.3 fatigue"])
+        return c([0.1, 0.2, 0.3, 0.4, 0.5], ["Mature crops restore 0.1 fatigue", "Mature crops restore 0.2 fatigue", "Mature crops restore 0.3 fatigue", "Mature crops restore 0.4 fatigue", "Mature crops restore 0.5 fatigue"])
     case .safeHaven:
-        return c([4, 6, 8], ["Restore 4 fatigue; unlock Ward", "Restore 6 fatigue", "Restore 8 fatigue"], [RPGSpellUnlock("ward", rank: 1)])
+        return c([4, 6, 8, 10, 12], ["Restore 4 fatigue; unlock Ward", "Restore 6 fatigue", "Restore 8 fatigue", "Restore 10 fatigue", "Restore 12 fatigue"], [RPGSpellUnlock("ward", rank: 1)])
     case .protectiveMark:
-        return c([2, 4, 6], ["Ward and Aegis absorption +2", "Ward and Aegis absorption +4; unlock Aegis", "Ward and Aegis absorption +6"], [RPGSpellUnlock("aegis", rank: 2)])
+        return c([2, 4, 6, 8, 10], ["Ward and Aegis absorption +2", "Ward and Aegis absorption +4", "Ward and Aegis absorption +6; unlock Aegis", "Ward and Aegis absorption +8", "Ward and Aegis absorption +10"], [RPGSpellUnlock("aegis", rank: 3)])
     case .sanctuaryBell:
-        return c([6, 8, 10], ["Sanctuary radius 6", "Sanctuary radius 8; unlock Sanctuary", "Sanctuary radius 10"], [RPGSpellUnlock("sanctuary", rank: 2)])
+        return c([6, 8, 10, 12, 14], ["Sanctuary radius 6", "Sanctuary radius 8", "Sanctuary radius 10; unlock Sanctuary", "Sanctuary radius 12", "Sanctuary radius 14"], [RPGSpellUnlock("sanctuary", rank: 3)])
     case .circuitSense:
-        return c([4, 6, 8], ["Crosshair-inspect redstone signal within 4 blocks", "Crosshair-inspect signal and configured repeater delay within 6 blocks", "Crosshair-inspect signal, configured repeater delay, and nearest powered source direction within 8 blocks"])
+        return c([4, 6, 8, 10, 12], ["Crosshair-inspect redstone signal within 4 blocks", "Crosshair-inspect signal and configured repeater delay within 6 blocks", "Crosshair-inspect signal, configured repeater delay, and nearest powered source direction within 8 blocks", "Crosshair-inspect signal, configured repeater delay, and nearest powered source direction within 10 blocks", "Crosshair-inspect signal, configured repeater delay, and nearest powered source direction within 12 blocks"])
     case .compactGate:
-        return c([20, 40, 60], ["Remote Trigger recovery -20 ticks", "Remote Trigger recovery -40 ticks", "Remote Trigger recovery -60 ticks"])
+        return c([20, 40, 60, 80, 100], ["Remote Trigger recovery -20 ticks", "Remote Trigger recovery -40 ticks", "Remote Trigger recovery -60 ticks", "Remote Trigger recovery -80 ticks", "Remote Trigger recovery -100 ticks"])
     case .remoteTrigger:
-        return c([6, 8, 10], ["Trigger a device within 6 blocks", "Trigger a device within 8 blocks", "Trigger a device within 10 blocks"])
+        return c([6, 8, 10, 12, 14], ["Trigger a device within 6 blocks", "Trigger a device within 8 blocks", "Trigger a device within 10 blocks", "Trigger a device within 12 blocks", "Trigger a device within 14 blocks"])
     case .fieldMod:
-        return c([1, 2, 3], ["Haste and tuning I", "Haste and tuning II", "Haste and tuning III"])
+        return c([1, 2, 3, 4, 5], ["Haste and tuning I", "Haste and tuning II", "Haste and tuning III", "Haste and tuning IV", "Haste and tuning V"])
     case .quickRepair:
-        return c([0.15, 0.25, 0.35], ["Repair 15% durability", "Repair 25% durability", "Repair 35% durability"])
+        return c([0.15, 0.25, 0.35, 0.45, 0.55], ["Repair 15% durability", "Repair 25% durability", "Repair 35% durability", "Repair 45% durability", "Repair 55% durability"])
     case .toolTune:
-        return c([8, 6, 4], ["Every 8th tool durability event is preserved", "Every 6th tool durability event is preserved", "Every 4th tool durability event is preserved"])
+        return c([8, 6, 4, 3, 2], ["Every 8th tool durability event is preserved", "Every 6th tool durability event is preserved", "Every 4th tool durability event is preserved", "Every 3rd tool durability event is preserved", "Every 2nd tool durability event is preserved"])
     case .chargePack:
-        return c([400, 600, 800], ["Controlled charge remains armed for 400 ticks", "Controlled charge remains armed for 600 ticks", "Controlled charge remains armed for 800 ticks"])
+        return c([400, 600, 800, 1000, 1200], ["Controlled charge remains armed for 400 ticks", "Controlled charge remains armed for 600 ticks", "Controlled charge remains armed for 800 ticks", "Controlled charge remains armed for 1000 ticks", "Controlled charge remains armed for 1200 ticks"])
     case .blastShape:
-        return c([0.15, 0.30, 0.45], ["Self-inflicted explosion damage -15%", "Self-inflicted explosion damage -30%", "Self-inflicted explosion damage -45%"])
+        return c([0.15, 0.30, 0.45, 0.60, 0.75], ["Self-inflicted explosion damage -15%", "Self-inflicted explosion damage -30%", "Self-inflicted explosion damage -45%", "Self-inflicted explosion damage -60%", "Self-inflicted explosion damage -75%"])
     case .safeFuse:
-        return c([4, 6, 8], ["Refund your charge within 4 blocks", "Refund your charge within 6 blocks", "Refund your charge within 8 blocks"])
+        return c([4, 6, 8, 10, 12], ["Refund your charge within 4 blocks", "Refund your charge within 6 blocks", "Refund your charge within 8 blocks", "Refund your charge within 10 blocks", "Refund your charge within 12 blocks"])
     }
 }
 
@@ -361,31 +309,19 @@ public enum RPGSpellCategory: String, Codable, Hashable {
     case control
 }
 
-public struct RPGAttributeRequirement: Codable, Equatable {
-    public var attribute: RPGAttributeID
-    public var minimum: Int
-
-    public init(_ attribute: RPGAttributeID, _ minimum: Int) {
-        self.attribute = attribute
-        self.minimum = minimum
-    }
-}
-
 public struct RPGPathDefinition: Codable, Equatable {
     public var id: String
     public var displayName: String
     public var summary: String
-    public var primaryAttributes: [RPGAttributeID]
     public var branchIDs: [String]
     public var starterSkillIDs: [String]
     public var starterSpellIDs: [String]
 
-    public init(id: String, displayName: String, summary: String, primaryAttributes: [RPGAttributeID],
+    public init(id: String, displayName: String, summary: String,
                 branchIDs: [String], starterSkillIDs: [String], starterSpellIDs: [String] = []) {
         self.id = id
         self.displayName = displayName
         self.summary = summary
-        self.primaryAttributes = primaryAttributes
         self.branchIDs = branchIDs
         self.starterSkillIDs = starterSkillIDs
         self.starterSpellIDs = starterSpellIDs
@@ -414,14 +350,12 @@ public struct RPGSkillDefinition: Codable, Equatable {
     public var branchID: String
     public var displayName: String
     public var kind: RPGActionKind
-    public var requirements: [RPGAttributeRequirement]
-    public var prerequisiteSkillIDs: [String]
     public var cooldownTicks: Int
     public var fatigueCost: Double
     public var effectID: RPGSkillEffectID
-    /// Three canonical numeric values, indexed by learned rank minus one.
+    /// Five canonical numeric values, indexed by learned rank minus one.
     public var rankValues: [Double]
-    /// Three canonical player-facing benefits, indexed by learned rank minus one.
+    /// Five canonical player-facing benefits, indexed by learned rank minus one.
     public var rankBenefits: [String]
     public var spellUnlocks: [RPGSpellUnlock]
 
@@ -435,7 +369,6 @@ public struct RPGSkillDefinition: Codable, Equatable {
 
     public init(id: String, pathID: String, branchID: String, displayName: String,
                 kind: RPGActionKind = .passive,
-                requirements: [RPGAttributeRequirement] = [], prerequisiteSkillIDs: [String] = [],
                 cooldownTicks: Int = 0, fatigueCost: Double = 0) {
         self.id = id
         self.pathID = pathID
@@ -446,8 +379,6 @@ public struct RPGSkillDefinition: Codable, Equatable {
             preconditionFailure("missing typed RPG skill effect for \(id)")
         }
         let contract = rpgSkillEffectContract(effectID)
-        self.requirements = requirements
-        self.prerequisiteSkillIDs = prerequisiteSkillIDs
         self.cooldownTicks = max(0, cooldownTicks)
         self.fatigueCost = max(0, fatigueCost)
         self.effectID = effectID
@@ -469,14 +400,13 @@ public struct RPGSpellDefinition: Codable, Equatable {
     public var durationTicks: Int
     public var fatigueCost: Double
     public var upkeepCostPerSecond: Double
-    public var minimumIntelligence: Int
     public var prerequisiteSkillIDs: [String]
     public var actionSequenceWindow: Int
 
     public init(id: String, displayName: String, summary: String, circle: Int,
                 categories: [RPGSpellCategory], targetKind: RPGSpellTargetKind, rangeBlocks: Double,
                 radiusBlocks: Double = 0, durationTicks: Int = 0, fatigueCost: Double,
-                upkeepCostPerSecond: Double = 0, minimumIntelligence: Int,
+                upkeepCostPerSecond: Double = 0,
                 prerequisiteSkillIDs: [String], actionSequenceWindow: Int = 0) {
         self.id = id
         self.displayName = displayName
@@ -489,7 +419,6 @@ public struct RPGSpellDefinition: Codable, Equatable {
         self.durationTicks = max(0, durationTicks)
         self.fatigueCost = max(0, fatigueCost)
         self.upkeepCostPerSecond = max(0, upkeepCostPerSecond)
-        self.minimumIntelligence = minimumIntelligence
         self.prerequisiteSkillIDs = prerequisiteSkillIDs
         self.actionSequenceWindow = max(0, actionSequenceWindow)
     }
@@ -881,7 +810,7 @@ public struct RPGCharacterState: Codable, Equatable {
         case pathID
         case starterSkillID
         case specializationBranchID
-        case attributes
+        case startingSkillIDs
         case xp
         case level
         case skillRanks
@@ -898,6 +827,7 @@ public struct RPGCharacterState: Codable, Equatable {
         case kitGrantID
         case authorityRevision
         case xpLedger
+        case migrationNoticePending
     }
 
     public var version: Int
@@ -905,7 +835,9 @@ public struct RPGCharacterState: Codable, Equatable {
     public var pathID: String
     public var starterSkillID: String
     public var specializationBranchID: String
-    public var attributes: RPGAttributes
+    /// The exactly-three skills chosen at creation as Rank-1 starting skills.
+    /// Legacy (pre-v3) saves synthesize this set during repair.
+    public var startingSkillIDs: [String]
     public var xp: Int
     public var level: Int
     public var skillRanks: [String: Int]
@@ -922,13 +854,17 @@ public struct RPGCharacterState: Codable, Equatable {
     public var kitGrantID: String?
     public var authorityRevision: Int
     public var xpLedger: RPGXPLedger
+    /// True exactly once, immediately after a legacy (version <= 2) save has
+    /// been repaired into v3, until the one-time migration notice has been
+    /// surfaced to the player.
+    public var migrationNoticePending: Bool
 
     public init(version: Int = RPG_STATE_CURRENT_VERSION,
                 created: Bool,
                 pathID: String,
                 starterSkillID: String = "",
                 specializationBranchID: String = "",
-                attributes: RPGAttributes,
+                startingSkillIDs: [String] = [],
                 xp: Int,
                 level: Int,
                 skillRanks: [String: Int],
@@ -944,13 +880,14 @@ public struct RPGCharacterState: Codable, Equatable {
                 kitGrantVersion: Int = 0,
                 kitGrantID: String? = nil,
                 authorityRevision: Int = 0,
-                xpLedger: RPGXPLedger = RPGXPLedger()) {
+                xpLedger: RPGXPLedger = RPGXPLedger(),
+                migrationNoticePending: Bool = false) {
         self.version = version
         self.created = created
         self.pathID = pathID
         self.starterSkillID = starterSkillID
         self.specializationBranchID = specializationBranchID
-        self.attributes = attributes
+        self.startingSkillIDs = startingSkillIDs
         self.xp = xp
         self.level = level
         self.skillRanks = skillRanks
@@ -967,6 +904,7 @@ public struct RPGCharacterState: Codable, Equatable {
         self.kitGrantID = kitGrantID
         self.authorityRevision = authorityRevision
         self.xpLedger = xpLedger
+        self.migrationNoticePending = migrationNoticePending
     }
 
     public init(from decoder: Decoder) throws {
@@ -984,7 +922,7 @@ public struct RPGCharacterState: Codable, Equatable {
             pathID: decodeBoundedID(from: c, key: .pathID) ?? "",
             starterSkillID: decodeBoundedID(from: c, key: .starterSkillID) ?? "",
             specializationBranchID: decodeBoundedID(from: c, key: .specializationBranchID) ?? "",
-            attributes: try c.decodeIfPresent(RPGAttributes.self, forKey: .attributes) ?? .defaultCreation,
+            startingSkillIDs: decodeCappedBoundedIDs(from: c, key: .startingSkillIDs, limit: RPG_STARTING_SKILL_COUNT),
             xp: try c.decodeIfPresent(Int.self, forKey: .xp) ?? 0,
             level: try c.decodeIfPresent(Int.self, forKey: .level) ?? 0,
             skillRanks: decodedRanks,
@@ -1005,7 +943,8 @@ public struct RPGCharacterState: Codable, Equatable {
             kitGrantVersion: try c.decodeIfPresent(Int.self, forKey: .kitGrantVersion) ?? 0,
             kitGrantID: decodeBoundedID(from: c, key: .kitGrantID),
             authorityRevision: try c.decodeIfPresent(Int.self, forKey: .authorityRevision) ?? 0,
-            xpLedger: try c.decodeIfPresent(RPGXPLedger.self, forKey: .xpLedger) ?? RPGXPLedger()
+            xpLedger: try c.decodeIfPresent(RPGXPLedger.self, forKey: .xpLedger) ?? RPGXPLedger(),
+            migrationNoticePending: try c.decodeIfPresent(Bool.self, forKey: .migrationNoticePending) ?? false
         )
     }
 
@@ -1016,13 +955,13 @@ public struct RPGCharacterState: Codable, Equatable {
         try c.encode(rpgIsBoundedID(pathID) ? pathID : "", forKey: .pathID)
         try c.encode(rpgIsBoundedID(starterSkillID) ? starterSkillID : "", forKey: .starterSkillID)
         try c.encode(rpgIsBoundedID(specializationBranchID) ? specializationBranchID : "", forKey: .specializationBranchID)
-        try c.encode(attributes.clamped(), forKey: .attributes)
+        try c.encode(Array(startingSkillIDs.filter(rpgIsBoundedID).prefix(RPG_STARTING_SKILL_COUNT)), forKey: .startingSkillIDs)
         try c.encode(max(0, min(rpgXPRequiredForLevel(RPG_LEVEL_CAP), xp)), forKey: .xp)
         try c.encode(max(0, min(RPG_LEVEL_CAP, level)), forKey: .level)
         var encodedRanks: [String: Int] = [:]
         for definition in RPG_SKILL_DEFINITIONS.prefix(RPGSkillEffectID.allCases.count) {
             if let rank = skillRanks[definition.id], rank > 0 {
-                encodedRanks[definition.id] = min(3, rank)
+                encodedRanks[definition.id] = min(RPG_SKILL_RANK_CAP, rank)
             }
         }
         try c.encode(encodedRanks, forKey: .skillRanks)
@@ -1048,11 +987,14 @@ public struct RPGCharacterState: Codable, Equatable {
         try c.encodeIfPresent(kitGrantID.flatMap { rpgIsBoundedID($0) ? $0 : nil }, forKey: .kitGrantID)
         try c.encode(max(0, min(RPG_MAX_COUNTER, authorityRevision)), forKey: .authorityRevision)
         try c.encode(xpLedger, forKey: .xpLedger)
+        if migrationNoticePending {
+            try c.encode(true, forKey: .migrationNoticePending)
+        }
     }
 
     public static func uncreated() -> RPGCharacterState {
         RPGCharacterState(created: false, pathID: "", starterSkillID: "", specializationBranchID: "",
-                          attributes: .defaultCreation, xp: 0, level: 0,
+                          startingSkillIDs: [], xp: 0, level: 0,
                           skillRanks: [:], preparedSkillIDs: [], knownSpellIDs: [], preparedSpellIDs: [],
                           selectedPreparedSpellID: nil,
                           selectedPreparedActionID: nil,
@@ -1097,18 +1039,35 @@ public struct RPGDerivedStats: Equatable {
                                                 luckProcChance: 0)
 }
 
+/// Character-creation draft. Tolerant, forward/backward-compatible codec:
+/// unknown keys are ignored on decode, and `attributes` is retained as an
+/// encode-only compatibility field (security amendment S1) so an old (v2)
+/// LAN host can still synthesize a valid character from a new client's draft.
 public struct RPGCreationDraft: Codable, Equatable {
-    private enum CodingKeys: String, CodingKey { case pathID, attributes, starterSkillID, starterSpellIDs }
+    private enum CodingKeys: String, CodingKey {
+        case pathID, branchID, startingSkillIDs, starterSkillID, starterSpellIDs, attributes
+    }
+    private enum LegacyAttributesCodingKeys: String, CodingKey {
+        case strength, dexterity, intelligence, endurance, luck
+    }
 
     public var pathID: String
-    public var attributes: RPGAttributes
+    /// The chosen sub-class. `nil` only for legacy drafts that predate the
+    /// Path -> Sub-class -> Starting Skills -> Review flow.
+    public var branchID: String?
+    /// Exactly three skill IDs chosen as Rank-1 starting skills. Empty for
+    /// legacy drafts; `rpgCreateCharacter` synthesizes the defaults.
+    public var startingSkillIDs: [String]
+    /// Legacy single-starter identity, still decoded for old drafts and used
+    /// to synthesize `branchID` when it is absent.
     public var starterSkillID: String?
     public var starterSpellIDs: [String]
 
-    public init(pathID: String, attributes: RPGAttributes = .defaultCreation,
+    public init(pathID: String, branchID: String? = nil, startingSkillIDs: [String] = [],
                 starterSkillID: String? = nil, starterSpellIDs: [String] = []) {
         self.pathID = pathID
-        self.attributes = attributes
+        self.branchID = branchID
+        self.startingSkillIDs = startingSkillIDs
         self.starterSkillID = starterSkillID
         self.starterSpellIDs = starterSpellIDs
     }
@@ -1116,20 +1075,44 @@ public struct RPGCreationDraft: Codable, Equatable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         pathID = decodeBoundedID(from: c, key: .pathID) ?? ""
-        attributes = try c.decodeIfPresent(RPGAttributes.self, forKey: .attributes) ?? .defaultCreation
+        branchID = decodeBoundedID(from: c, key: .branchID)
+        startingSkillIDs = decodeCappedBoundedIDs(from: c, key: .startingSkillIDs, limit: RPG_STARTING_SKILL_COUNT)
         starterSkillID = decodeBoundedID(from: c, key: .starterSkillID)
         starterSpellIDs = decodeCappedBoundedIDs(from: c, key: .starterSpellIDs,
                                                  limit: RPG_SPELL_DEFINITIONS.count)
+        // "attributes" is intentionally never decoded here: the attribute
+        // system was removed in state v3. The key is still recognized on the
+        // wire only so this build's own encode-only compatibility vector
+        // round-trips harmlessly through a tolerant decoder.
     }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(rpgIsBoundedID(pathID) ? pathID : "", forKey: .pathID)
-        try c.encode(attributes.clamped(maximum: RPGAttributes.maximumAtCreation), forKey: .attributes)
-        try c.encodeIfPresent(starterSkillID.flatMap { rpgIsBoundedID($0) ? $0 : nil },
+        try c.encodeIfPresent(branchID.flatMap { rpgIsBoundedID($0) ? $0 : nil }, forKey: .branchID)
+        try c.encode(Array(startingSkillIDs.filter(rpgIsBoundedID).prefix(RPG_STARTING_SKILL_COUNT)), forKey: .startingSkillIDs)
+        // Frozen kit-grant preimage: encode the chosen sub-class's signature
+        // (node-0) skill as starterSkillID so an old (v2) host decoding this
+        // draft grants the same starter kit identity a v2 client would have.
+        let signature = branchID.flatMap(rpgSignatureSkillID)
+        try c.encodeIfPresent((signature ?? starterSkillID).flatMap { rpgIsBoundedID($0) ? $0 : nil },
                               forKey: .starterSkillID)
-        try c.encode(Array(starterSpellIDs.filter(rpgIsBoundedID).prefix(RPG_SPELL_DEFINITIONS.count)),
-                     forKey: .starterSpellIDs)
+        try c.encode([String](), forKey: .starterSpellIDs)
+        // Security amendment S1: fixed backward-compatibility attribute
+        // vector (total 42, within the frozen v2 6-14 bounds). It satisfies
+        // every node-0 signature-skill attribute requirement in the frozen
+        // v2 registry (maximum luck requirement 7, maximum endurance
+        // requirement 8, every strength/dexterity/intelligence requirement
+        // <= 9), so an old (v2) host accepting a new client's draft creates a
+        // valid character for all 18 sub-classes. This build never reads the
+        // key back; see the fixture-driven coverage in
+        // RPGCharacterStateTests for the full v2 requirement table.
+        var attrs = c.nestedContainer(keyedBy: LegacyAttributesCodingKeys.self, forKey: .attributes)
+        try attrs.encode(9, forKey: .strength)
+        try attrs.encode(9, forKey: .dexterity)
+        try attrs.encode(9, forKey: .intelligence)
+        try attrs.encode(8, forKey: .endurance)
+        try attrs.encode(7, forKey: .luck)
     }
 }
 
@@ -1311,21 +1294,6 @@ public extension GameCore {
     }
 
     @discardableResult
-    func requestRPGSpendAttributePoint(_ attribute: RPGAttributeID) -> String {
-        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
-        guard let player else { return "No player" }
-        guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
-        if let error = rpgSpendAttributePoint(attribute, in: &player.rpg) {
-            return error.description
-        }
-        player.applyRPGDerivedStats()
-        if isLANClientWorld {
-            lanRPGIntentHandler?(LANRPGIntent(action: .spendAttribute, attribute: attribute, actionSequence: player.rpg.actionSequence))
-        }
-        return "+1 \(attribute.rawValue)"
-    }
-
-    @discardableResult
     func requestRPGCyclePreparedSpell(direction: Int = 1) -> String {
         guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
@@ -1383,9 +1351,6 @@ public extension GameCore {
             guard player.rpg.created else { return RPGActionFailure.characterNotCreated.description }
             guard let spell = rpgSpellDefinition(spellID) else { return RPGActionFailure.unknownSpell(spellID).description }
             guard player.rpg.preparedSpellIDs.contains(spellID) else { return RPGActionFailure.spellNotPrepared(spellID).description }
-            guard player.rpg.attributes.intelligence >= spell.minimumIntelligence else {
-                return RPGActionFailure.insufficientIntelligence(required: spell.minimumIntelligence).description
-            }
             guard !player.rpg.activeCooldowns.contains(where: { $0.id == spellID && $0.remainingTicks > 0 }) else {
                 return RPGActionFailure.spellOnCooldown(spellID).description
             }
@@ -1419,11 +1384,6 @@ public extension GameCore {
                     case .skill: return RPGActionFailure.skillOnCooldown(action.id).description
                     case .spell: return RPGActionFailure.spellOnCooldown(action.id).description
                     }
-                }
-                if action.kind == .spell,
-                   let spell = rpgSpellDefinition(action.id),
-                   player.rpg.attributes.intelligence < spell.minimumIntelligence {
-                    return RPGActionFailure.insufficientIntelligence(required: spell.minimumIntelligence).description
                 }
                 return RPGActionFailure.insufficientFatigue(required: action.fatigueCost, available: player.rpg.fatigue).description
             }
@@ -1482,10 +1442,9 @@ private func rpgQuickSlotPreferenceErrorDescription(
 public enum RPGCreationError: Error, Equatable, CustomStringConvertible {
     case classesDisabled
     case unknownPath(String)
-    case invalidAttributeBudget(total: Int, expected: Int)
-    case invalidAttributeValue(RPGAttributeID, Int)
     case invalidStarterSkill(String)
     case invalidStarterSpell(String)
+    case invalidStartingSkillSelection([String])
     case alreadyCreated
     case starterKitUnavailable(String)
     case insufficientInventoryForStarterKit
@@ -1494,10 +1453,10 @@ public enum RPGCreationError: Error, Equatable, CustomStringConvertible {
         switch self {
         case .classesDisabled: return RPGActionFailure.classesDisabled.description
         case .unknownPath(let id): return "Unknown path: \(id)"
-        case .invalidAttributeBudget(let total, let expected): return "Attribute total \(total) does not match \(expected)"
-        case .invalidAttributeValue(let id, let value): return "\(id.rawValue) value \(value) is out of creation range"
         case .invalidStarterSkill(let id): return "Invalid starter skill: \(id)"
         case .invalidStarterSpell(let id): return "Invalid starter spell: \(id)"
+        case .invalidStartingSkillSelection(let ids):
+            return "Choose exactly \(RPG_STARTING_SKILL_COUNT) starting skills: \(ids.joined(separator: ", "))"
         case .alreadyCreated: return "Character has already been created"
         case .starterKitUnavailable(let id): return "Starter kit item is unavailable: \(id)"
         case .insufficientInventoryForStarterKit: return "Not enough inventory space for the starter kit"
@@ -1525,10 +1484,7 @@ public enum RPGProgressionError: Error, Equatable, CustomStringConvertible {
     case unknownSpell(String)
     case alreadyAtMaximumRank(String)
     case insufficientLevel(required: Int)
-    case insufficientAttribute(RPGAttributeID, required: Int)
-    case missingPrerequisite(String)
     case insufficientSkillPoints
-    case insufficientAttributePoints
     case spellNotKnown(String)
     case skillNotKnown(String)
     case skillNotActive(String)
@@ -1543,10 +1499,7 @@ public enum RPGProgressionError: Error, Equatable, CustomStringConvertible {
         case .unknownSpell(let id): return "Unknown spell: \(id)"
         case .alreadyAtMaximumRank(let id): return "Skill is at maximum rank: \(id)"
         case .insufficientLevel(let level): return "Requires level \(level)"
-        case .insufficientAttribute(let id, let value): return "Requires \(id.rawValue) \(value)"
-        case .missingPrerequisite(let id): return "Missing prerequisite: \(id)"
         case .insufficientSkillPoints: return "Not enough skill points"
-        case .insufficientAttributePoints: return "Not enough attribute points"
         case .spellNotKnown(let id): return "Spell is not known: \(id)"
         case .skillNotKnown(let id): return "Skill is not known: \(id)"
         case .skillNotActive(let id): return "Skill is passive and always active: \(id)"
@@ -1562,7 +1515,6 @@ public let RPG_PATH_DEFINITIONS: [RPGPathDefinition] = [
         id: "warden",
         displayName: "Warden",
         summary: "Armor, shield timing, threat control, and short-range protection.",
-        primaryAttributes: [.strength, .endurance],
         branchIDs: ["warden_guardian", "warden_vanguard", "warden_bulwark"],
         starterSkillIDs: ["guard_stance", "shield_bind", "heavy_cut"]
     ),
@@ -1570,7 +1522,6 @@ public let RPG_PATH_DEFINITIONS: [RPGPathDefinition] = [
         id: "ranger",
         displayName: "Ranger",
         summary: "Bows, scouting, terrain movement, ambushes, and survival fieldcraft.",
-        primaryAttributes: [.dexterity, .luck],
         branchIDs: ["ranger_marksman", "ranger_scout", "ranger_survivalist"],
         starterSkillIDs: ["quick_draw", "trail_sense", "campcraft"]
     ),
@@ -1578,7 +1529,6 @@ public let RPG_PATH_DEFINITIONS: [RPGPathDefinition] = [
         id: "delver",
         displayName: "Delver",
         summary: "Mining, traps, underground navigation, lockwork, and risky treasure work.",
-        primaryAttributes: [.strength, .endurance],
         branchIDs: ["delver_miner", "delver_trapper", "delver_treasure"],
         starterSkillIDs: ["vein_reader", "trap_probe", "salvage_eye"]
     ),
@@ -1586,7 +1536,6 @@ public let RPG_PATH_DEFINITIONS: [RPGPathDefinition] = [
         id: "arcanist",
         displayName: "Arcanist",
         summary: "Fatigue-driven spellcasting, illusions, creations, wards, and rituals.",
-        primaryAttributes: [.intelligence, .endurance],
         branchIDs: ["arcanist_elementalist", "arcanist_illusionist", "arcanist_ritualist"],
         starterSkillIDs: ["spell_formula", "minor_glamour", "ritual_circle"],
         starterSpellIDs: ["ignite", "blur", "mage_light"]
@@ -1595,7 +1544,6 @@ public let RPG_PATH_DEFINITIONS: [RPGPathDefinition] = [
         id: "mender",
         displayName: "Mender",
         summary: "Healing, food efficiency, antidotes, protective rites, and rescue timing.",
-        primaryAttributes: [.intelligence, .luck],
         branchIDs: ["mender_physic", "mender_harvest", "mender_sanctuary"],
         starterSkillIDs: ["field_dressing", "herbal_lore", "safe_haven"],
         starterSpellIDs: ["mend_wounds", "purify", "ward"]
@@ -1604,7 +1552,6 @@ public let RPG_PATH_DEFINITIONS: [RPGPathDefinition] = [
         id: "tinker",
         displayName: "Tinker",
         summary: "Redstone devices, automation, gear mods, explosives, and compact tools.",
-        primaryAttributes: [.intelligence, .dexterity],
         branchIDs: ["tinker_redstone", "tinker_artificer", "tinker_sapper"],
         starterSkillIDs: ["circuit_sense", "field_mod", "charge_pack"]
     ),
@@ -1668,209 +1615,170 @@ public let RPG_BRANCH_DEFINITIONS: [RPGBranchDefinition] = [
 ]
 
 public let RPG_SKILL_DEFINITIONS: [RPGSkillDefinition] = [
-    RPGSkillDefinition(id: "guard_stance", pathID: "warden", branchID: "warden_guardian", displayName: "Guard Stance",
-                                              requirements: [RPGAttributeRequirement(.strength, 8)]),
+    RPGSkillDefinition(id: "guard_stance", pathID: "warden", branchID: "warden_guardian", displayName: "Guard Stance"),
     RPGSkillDefinition(id: "interpose", pathID: "warden", branchID: "warden_guardian", displayName: "Interpose",
-                       kind: .active,                        requirements: [RPGAttributeRequirement(.endurance, 9)], prerequisiteSkillIDs: ["guard_stance"],
-                       cooldownTicks: 100, fatigueCost: 3),
+                       kind: .active, cooldownTicks: 100, fatigueCost: 3),
     RPGSkillDefinition(id: "anchor_line", pathID: "warden", branchID: "warden_guardian", displayName: "Anchor Line",
-                       kind: .active,                        prerequisiteSkillIDs: ["interpose"], cooldownTicks: 180, fatigueCost: 4),
+                       kind: .active, cooldownTicks: 180, fatigueCost: 4),
     RPGSkillDefinition(id: "heavy_cut", pathID: "warden", branchID: "warden_vanguard", displayName: "Heavy Cut",
-                       kind: .active,                        requirements: [RPGAttributeRequirement(.strength, 9)], cooldownTicks: 60, fatigueCost: 2),
+                       kind: .active, cooldownTicks: 60, fatigueCost: 2),
     RPGSkillDefinition(id: "charge_break", pathID: "warden", branchID: "warden_vanguard", displayName: "Charge Break",
-                       kind: .active,                        prerequisiteSkillIDs: ["heavy_cut"], cooldownTicks: 140, fatigueCost: 4),
-    RPGSkillDefinition(id: "stagger_chain", pathID: "warden", branchID: "warden_vanguard", displayName: "Stagger Chain",
-                                              prerequisiteSkillIDs: ["charge_break"]),
-    RPGSkillDefinition(id: "shield_bind", pathID: "warden", branchID: "warden_bulwark", displayName: "Shield Bind",
-                                              requirements: [RPGAttributeRequirement(.endurance, 8)]),
-    RPGSkillDefinition(id: "plate_training", pathID: "warden", branchID: "warden_bulwark", displayName: "Plate Training",
-                                              prerequisiteSkillIDs: ["shield_bind"]),
+                       kind: .active, cooldownTicks: 140, fatigueCost: 4),
+    RPGSkillDefinition(id: "stagger_chain", pathID: "warden", branchID: "warden_vanguard", displayName: "Stagger Chain"),
+    RPGSkillDefinition(id: "shield_bind", pathID: "warden", branchID: "warden_bulwark", displayName: "Shield Bind"),
+    RPGSkillDefinition(id: "plate_training", pathID: "warden", branchID: "warden_bulwark", displayName: "Plate Training"),
     RPGSkillDefinition(id: "fortify_block", pathID: "warden", branchID: "warden_bulwark", displayName: "Fortify Block",
-                       kind: .active,                        prerequisiteSkillIDs: ["plate_training"], cooldownTicks: 240, fatigueCost: 5),
+                       kind: .active, cooldownTicks: 240, fatigueCost: 5),
 
-    RPGSkillDefinition(id: "quick_draw", pathID: "ranger", branchID: "ranger_marksman", displayName: "Quick Draw",
-                                              requirements: [RPGAttributeRequirement(.dexterity, 9)]),
-    RPGSkillDefinition(id: "steady_aim", pathID: "ranger", branchID: "ranger_marksman", displayName: "Steady Aim",
-                                              prerequisiteSkillIDs: ["quick_draw"]),
+    RPGSkillDefinition(id: "quick_draw", pathID: "ranger", branchID: "ranger_marksman", displayName: "Quick Draw"),
+    RPGSkillDefinition(id: "steady_aim", pathID: "ranger", branchID: "ranger_marksman", displayName: "Steady Aim"),
     RPGSkillDefinition(id: "crippling_shot", pathID: "ranger", branchID: "ranger_marksman", displayName: "Crippling Shot",
-                       kind: .active,                        prerequisiteSkillIDs: ["steady_aim"], cooldownTicks: 160, fatigueCost: 4),
-    RPGSkillDefinition(id: "trail_sense", pathID: "ranger", branchID: "ranger_scout", displayName: "Trail Sense",
-                                              requirements: [RPGAttributeRequirement(.luck, 7)]),
-    RPGSkillDefinition(id: "soft_step", pathID: "ranger", branchID: "ranger_scout", displayName: "Soft Step",
-                                              prerequisiteSkillIDs: ["trail_sense"]),
+                       kind: .active, cooldownTicks: 160, fatigueCost: 4),
+    RPGSkillDefinition(id: "trail_sense", pathID: "ranger", branchID: "ranger_scout", displayName: "Trail Sense"),
+    RPGSkillDefinition(id: "soft_step", pathID: "ranger", branchID: "ranger_scout", displayName: "Soft Step"),
     RPGSkillDefinition(id: "far_sight", pathID: "ranger", branchID: "ranger_scout", displayName: "Far Sight",
-                       kind: .active,                        prerequisiteSkillIDs: ["soft_step"], cooldownTicks: 220, fatigueCost: 3),
-    RPGSkillDefinition(id: "campcraft", pathID: "ranger", branchID: "ranger_survivalist", displayName: "Campcraft",
-                                              requirements: [RPGAttributeRequirement(.endurance, 8)]),
-    RPGSkillDefinition(id: "weather_eye", pathID: "ranger", branchID: "ranger_survivalist", displayName: "Weather Eye",
-                                              prerequisiteSkillIDs: ["campcraft"]),
-    RPGSkillDefinition(id: "beast_kinship", pathID: "ranger", branchID: "ranger_survivalist", displayName: "Beast Kinship",
-                                              prerequisiteSkillIDs: ["weather_eye"]),
+                       kind: .active, cooldownTicks: 220, fatigueCost: 3),
+    RPGSkillDefinition(id: "campcraft", pathID: "ranger", branchID: "ranger_survivalist", displayName: "Campcraft"),
+    RPGSkillDefinition(id: "weather_eye", pathID: "ranger", branchID: "ranger_survivalist", displayName: "Weather Eye"),
+    RPGSkillDefinition(id: "beast_kinship", pathID: "ranger", branchID: "ranger_survivalist", displayName: "Beast Kinship"),
 
-    RPGSkillDefinition(id: "vein_reader", pathID: "delver", branchID: "delver_miner", displayName: "Vein Reader",
-                                              requirements: [RPGAttributeRequirement(.intelligence, 7)]),
+    RPGSkillDefinition(id: "vein_reader", pathID: "delver", branchID: "delver_miner", displayName: "Vein Reader"),
     RPGSkillDefinition(id: "fast_bore", pathID: "delver", branchID: "delver_miner", displayName: "Fast Bore",
-                       kind: .active,                        prerequisiteSkillIDs: ["vein_reader"], cooldownTicks: 120, fatigueCost: 3),
-    RPGSkillDefinition(id: "deep_reserves", pathID: "delver", branchID: "delver_miner", displayName: "Deep Reserves",
-                                              prerequisiteSkillIDs: ["fast_bore"]),
+                       kind: .active, cooldownTicks: 120, fatigueCost: 3),
+    RPGSkillDefinition(id: "deep_reserves", pathID: "delver", branchID: "delver_miner", displayName: "Deep Reserves"),
     RPGSkillDefinition(id: "trap_probe", pathID: "delver", branchID: "delver_trapper", displayName: "Trap Probe",
-                       kind: .active,
-                       requirements: [RPGAttributeRequirement(.dexterity, 8)], cooldownTicks: 80, fatigueCost: 2),
-    RPGSkillDefinition(id: "tripwire_mind", pathID: "delver", branchID: "delver_trapper", displayName: "Tripwire Mind",
-                                              prerequisiteSkillIDs: ["trap_probe"]),
+                       kind: .active, cooldownTicks: 80, fatigueCost: 2),
+    RPGSkillDefinition(id: "tripwire_mind", pathID: "delver", branchID: "delver_trapper", displayName: "Tripwire Mind"),
     RPGSkillDefinition(id: "deadfall", pathID: "delver", branchID: "delver_trapper", displayName: "Deadfall",
-                       kind: .active,                        prerequisiteSkillIDs: ["tripwire_mind"], cooldownTicks: 240, fatigueCost: 5),
-    RPGSkillDefinition(id: "salvage_eye", pathID: "delver", branchID: "delver_treasure", displayName: "Salvage Eye",
-                                              requirements: [RPGAttributeRequirement(.luck, 7)]),
+                       kind: .active, cooldownTicks: 240, fatigueCost: 5),
+    RPGSkillDefinition(id: "salvage_eye", pathID: "delver", branchID: "delver_treasure", displayName: "Salvage Eye"),
     RPGSkillDefinition(id: "lock_touch", pathID: "delver", branchID: "delver_treasure", displayName: "Lock Touch",
-                       kind: .active,                        prerequisiteSkillIDs: ["salvage_eye"], cooldownTicks: 200, fatigueCost: 4),
+                       kind: .active, cooldownTicks: 200, fatigueCost: 4),
     RPGSkillDefinition(id: "fortune_read", pathID: "delver", branchID: "delver_treasure", displayName: "Fortune Read",
-                       kind: .active,                        prerequisiteSkillIDs: ["lock_touch"], cooldownTicks: 400, fatigueCost: 6),
+                       kind: .active, cooldownTicks: 400, fatigueCost: 6),
 
-    RPGSkillDefinition(id: "spell_formula", pathID: "arcanist", branchID: "arcanist_elementalist", displayName: "Spell Formula",
-                                              requirements: [RPGAttributeRequirement(.intelligence, 9)]),
-    RPGSkillDefinition(id: "spark_weave", pathID: "arcanist", branchID: "arcanist_elementalist", displayName: "Spark Weave",
-                                              prerequisiteSkillIDs: ["spell_formula"]),
-    RPGSkillDefinition(id: "storm_focus", pathID: "arcanist", branchID: "arcanist_elementalist", displayName: "Storm Focus",
-                                              prerequisiteSkillIDs: ["spark_weave"]),
-    RPGSkillDefinition(id: "minor_glamour", pathID: "arcanist", branchID: "arcanist_illusionist", displayName: "Minor Glamour",
-                                              requirements: [RPGAttributeRequirement(.intelligence, 9)]),
-    RPGSkillDefinition(id: "false_step", pathID: "arcanist", branchID: "arcanist_illusionist", displayName: "False Step",
-                                              prerequisiteSkillIDs: ["minor_glamour"]),
-    RPGSkillDefinition(id: "mirror_work", pathID: "arcanist", branchID: "arcanist_illusionist", displayName: "Mirror Work",
-                                              prerequisiteSkillIDs: ["false_step"]),
-    RPGSkillDefinition(id: "ritual_circle", pathID: "arcanist", branchID: "arcanist_ritualist", displayName: "Ritual Circle",
-                                              requirements: [RPGAttributeRequirement(.endurance, 8)]),
-    RPGSkillDefinition(id: "bound_servant", pathID: "arcanist", branchID: "arcanist_ritualist", displayName: "Bound Servant",
-                                              prerequisiteSkillIDs: ["ritual_circle"]),
-    RPGSkillDefinition(id: "ward_scribe", pathID: "arcanist", branchID: "arcanist_ritualist", displayName: "Ward Scribe",
-                                              prerequisiteSkillIDs: ["bound_servant"]),
+    RPGSkillDefinition(id: "spell_formula", pathID: "arcanist", branchID: "arcanist_elementalist", displayName: "Spell Formula"),
+    RPGSkillDefinition(id: "spark_weave", pathID: "arcanist", branchID: "arcanist_elementalist", displayName: "Spark Weave"),
+    RPGSkillDefinition(id: "storm_focus", pathID: "arcanist", branchID: "arcanist_elementalist", displayName: "Storm Focus"),
+    RPGSkillDefinition(id: "minor_glamour", pathID: "arcanist", branchID: "arcanist_illusionist", displayName: "Minor Glamour"),
+    RPGSkillDefinition(id: "false_step", pathID: "arcanist", branchID: "arcanist_illusionist", displayName: "False Step"),
+    RPGSkillDefinition(id: "mirror_work", pathID: "arcanist", branchID: "arcanist_illusionist", displayName: "Mirror Work"),
+    RPGSkillDefinition(id: "ritual_circle", pathID: "arcanist", branchID: "arcanist_ritualist", displayName: "Ritual Circle"),
+    RPGSkillDefinition(id: "bound_servant", pathID: "arcanist", branchID: "arcanist_ritualist", displayName: "Bound Servant"),
+    RPGSkillDefinition(id: "ward_scribe", pathID: "arcanist", branchID: "arcanist_ritualist", displayName: "Ward Scribe"),
 
-    RPGSkillDefinition(id: "field_dressing", pathID: "mender", branchID: "mender_physic", displayName: "Field Dressing",
-                                              requirements: [RPGAttributeRequirement(.intelligence, 8)]),
-    RPGSkillDefinition(id: "triage", pathID: "mender", branchID: "mender_physic", displayName: "Triage",
-                                              prerequisiteSkillIDs: ["field_dressing"]),
+    RPGSkillDefinition(id: "field_dressing", pathID: "mender", branchID: "mender_physic", displayName: "Field Dressing"),
+    RPGSkillDefinition(id: "triage", pathID: "mender", branchID: "mender_physic", displayName: "Triage"),
     RPGSkillDefinition(id: "second_breath", pathID: "mender", branchID: "mender_physic", displayName: "Second Breath",
-                       kind: .active,                        prerequisiteSkillIDs: ["triage"], cooldownTicks: 600, fatigueCost: 6),
-    RPGSkillDefinition(id: "herbal_lore", pathID: "mender", branchID: "mender_harvest", displayName: "Herbal Lore",
-                                              requirements: [RPGAttributeRequirement(.luck, 7)]),
-    RPGSkillDefinition(id: "clean_brew", pathID: "mender", branchID: "mender_harvest", displayName: "Clean Brew",
-                                              prerequisiteSkillIDs: ["herbal_lore"]),
-    RPGSkillDefinition(id: "green_thumb", pathID: "mender", branchID: "mender_harvest", displayName: "Green Thumb",
-                                              prerequisiteSkillIDs: ["clean_brew"]),
+                       kind: .active, cooldownTicks: 600, fatigueCost: 6),
+    RPGSkillDefinition(id: "herbal_lore", pathID: "mender", branchID: "mender_harvest", displayName: "Herbal Lore"),
+    RPGSkillDefinition(id: "clean_brew", pathID: "mender", branchID: "mender_harvest", displayName: "Clean Brew"),
+    RPGSkillDefinition(id: "green_thumb", pathID: "mender", branchID: "mender_harvest", displayName: "Green Thumb"),
     RPGSkillDefinition(id: "safe_haven", pathID: "mender", branchID: "mender_sanctuary", displayName: "Safe Haven",
-                       kind: .active,
-                       requirements: [RPGAttributeRequirement(.endurance, 8)],                        cooldownTicks: 400, fatigueCost: 0),
-    RPGSkillDefinition(id: "protective_mark", pathID: "mender", branchID: "mender_sanctuary", displayName: "Protective Mark",
-                                              prerequisiteSkillIDs: ["safe_haven"]),
-    RPGSkillDefinition(id: "sanctuary_bell", pathID: "mender", branchID: "mender_sanctuary", displayName: "Sanctuary Bell",
-                                              prerequisiteSkillIDs: ["protective_mark"]),
+                       kind: .active, cooldownTicks: 400, fatigueCost: 0),
+    RPGSkillDefinition(id: "protective_mark", pathID: "mender", branchID: "mender_sanctuary", displayName: "Protective Mark"),
+    RPGSkillDefinition(id: "sanctuary_bell", pathID: "mender", branchID: "mender_sanctuary", displayName: "Sanctuary Bell"),
 
-    RPGSkillDefinition(id: "circuit_sense", pathID: "tinker", branchID: "tinker_redstone", displayName: "Circuit Sense",
-                                              requirements: [RPGAttributeRequirement(.intelligence, 8)]),
-    RPGSkillDefinition(id: "compact_gate", pathID: "tinker", branchID: "tinker_redstone", displayName: "Compact Gate",
-                                              prerequisiteSkillIDs: ["circuit_sense"]),
+    RPGSkillDefinition(id: "circuit_sense", pathID: "tinker", branchID: "tinker_redstone", displayName: "Circuit Sense"),
+    RPGSkillDefinition(id: "compact_gate", pathID: "tinker", branchID: "tinker_redstone", displayName: "Compact Gate"),
     RPGSkillDefinition(id: "remote_trigger", pathID: "tinker", branchID: "tinker_redstone", displayName: "Remote Trigger",
-                       kind: .active,                        prerequisiteSkillIDs: ["compact_gate"], cooldownTicks: 180, fatigueCost: 3),
+                       kind: .active, cooldownTicks: 180, fatigueCost: 3),
     RPGSkillDefinition(id: "field_mod", pathID: "tinker", branchID: "tinker_artificer", displayName: "Field Mod",
-                       kind: .active,                        requirements: [RPGAttributeRequirement(.dexterity, 8)], cooldownTicks: 180, fatigueCost: 3),
+                       kind: .active, cooldownTicks: 180, fatigueCost: 3),
     RPGSkillDefinition(id: "quick_repair", pathID: "tinker", branchID: "tinker_artificer", displayName: "Quick Repair",
-                       kind: .active,                        prerequisiteSkillIDs: ["field_mod"], cooldownTicks: 220, fatigueCost: 4),
-    RPGSkillDefinition(id: "tool_tune", pathID: "tinker", branchID: "tinker_artificer", displayName: "Tool Tune",
-                                              prerequisiteSkillIDs: ["quick_repair"]),
+                       kind: .active, cooldownTicks: 220, fatigueCost: 4),
+    RPGSkillDefinition(id: "tool_tune", pathID: "tinker", branchID: "tinker_artificer", displayName: "Tool Tune"),
     RPGSkillDefinition(id: "charge_pack", pathID: "tinker", branchID: "tinker_sapper", displayName: "Charge Pack",
-                       kind: .active,
-                       requirements: [RPGAttributeRequirement(.intelligence, 8)], cooldownTicks: 240, fatigueCost: 5),
-    RPGSkillDefinition(id: "blast_shape", pathID: "tinker", branchID: "tinker_sapper", displayName: "Blast Shape",
-                                              prerequisiteSkillIDs: ["charge_pack"]),
+                       kind: .active, cooldownTicks: 240, fatigueCost: 5),
+    RPGSkillDefinition(id: "blast_shape", pathID: "tinker", branchID: "tinker_sapper", displayName: "Blast Shape"),
     RPGSkillDefinition(id: "safe_fuse", pathID: "tinker", branchID: "tinker_sapper", displayName: "Safe Fuse",
-                       kind: .active,                        prerequisiteSkillIDs: ["blast_shape"], cooldownTicks: 120, fatigueCost: 2),
+                       kind: .active, cooldownTicks: 120, fatigueCost: 2),
 ]
 
 public let RPG_SPELL_DEFINITIONS: [RPGSpellDefinition] = [
     RPGSpellDefinition(id: "ignite", displayName: "Ignite",
-                       summary: "Deal 4 + INT potency + Spell Formula damage and 120 fire ticks to one visible hostile, or place fire on an authorized replaceable face within 12 blocks.",
+                       summary: "Deal 4 + spell potency + Spell Formula damage and 120 fire ticks to one visible hostile, or place fire on an authorized replaceable face within 12 blocks.",
                        circle: 1, categories: [.damage, .utility], targetKind: .ray, rangeBlocks: 12,
-                       fatigueCost: 2, minimumIntelligence: 9, prerequisiteSkillIDs: ["spell_formula"],
+                       fatigueCost: 2, prerequisiteSkillIDs: ["spell_formula"],
                        actionSequenceWindow: 12),
     RPGSpellDefinition(id: "frost_ray", displayName: "Frost Ray",
-                       summary: "Deal 3 + INT potency + Spell Formula damage, Slowness II for 120 ticks, and 160 freeze ticks to one visible hostile within 14 blocks.",
+                       summary: "Deal 3 + spell potency + Spell Formula damage, Slowness II for 120 ticks, and 160 freeze ticks to one visible hostile within 14 blocks.",
                        circle: 1, categories: [.damage, .control], targetKind: .ray, rangeBlocks: 14,
-                       durationTicks: 80, fatigueCost: 3, minimumIntelligence: 9,
+                       durationTicks: 80, fatigueCost: 3,
                        prerequisiteSkillIDs: ["spell_formula"], actionSequenceWindow: 12),
     RPGSpellDefinition(id: "shock", displayName: "Shock",
-                       summary: "Deal 5 + INT potency + Spell Formula damage to one visible hostile within 16 blocks; if it is wet, the nearest wet hostile within 4 blocks takes 3 + INT potency damage.",
+                       summary: "Deal 5 + spell potency + Spell Formula damage to one visible hostile within 16 blocks; if it is wet, the nearest wet hostile within 4 blocks takes 3 + spell potency damage.",
                        circle: 2, categories: [.damage], targetKind: .ray, rangeBlocks: 16,
-                       fatigueCost: 4, minimumIntelligence: 11, prerequisiteSkillIDs: ["spark_weave"],
+                       fatigueCost: 4, prerequisiteSkillIDs: ["spark_weave"],
                        actionSequenceWindow: 10),
     RPGSpellDefinition(id: "storm_aura", displayName: "Storm Aura",
-                       summary: "For 300 ticks, spend 1 fatigue per second to damage up to 32 legal hostiles within 4 blocks once per second for 1.5 / 2.0 / 2.5 Storm Focus damage.",
+                       summary: "For 300 ticks, spend 1 fatigue per second to damage up to 32 legal hostiles within 4 blocks once per second for Storm Focus damage.",
                        circle: 3, categories: [.damage, .control], targetKind: .selfTarget, rangeBlocks: 0,
                        radiusBlocks: 4, durationTicks: 300, fatigueCost: 6, upkeepCostPerSecond: 1,
-                       minimumIntelligence: 13, prerequisiteSkillIDs: ["storm_focus"]),
+                       prerequisiteSkillIDs: ["storm_focus"]),
     RPGSpellDefinition(id: "blur", displayName: "Blur",
                        summary: "Maintain invisibility for 240 ticks, extended by Minor Glamour, at 0.25 fatigue per second.",
                        circle: 1, categories: [.defense, .illusion], targetKind: .selfTarget, rangeBlocks: 0,
                        durationTicks: 240, fatigueCost: 2, upkeepCostPerSecond: 0.25,
-                       minimumIntelligence: 9, prerequisiteSkillIDs: ["minor_glamour"]),
+                       prerequisiteSkillIDs: ["minor_glamour"]),
     RPGSpellDefinition(id: "decoy", displayName: "Decoy",
                        summary: "Create one bounded radius-3 illusion at the targeted point within 8 blocks for 200 ticks, extended by Minor Glamour; each pulse gives legal hostiles Glowing and Slowness I for 40 ticks.",
                        circle: 1, categories: [.illusion, .control], targetKind: .placed, rangeBlocks: 8,
-                       durationTicks: 200, fatigueCost: 3, minimumIntelligence: 9,
+                       durationTicks: 200, fatigueCost: 3,
                        prerequisiteSkillIDs: ["minor_glamour"]),
     RPGSpellDefinition(id: "shadow_step", displayName: "Shadow Step",
-                       summary: "Teleport to a visible dark destination with solid footing and clear headroom within 10 + 1 / 2 / 3 False Step blocks.",
+                       summary: "Teleport to a visible dark destination with solid footing and clear headroom within 10 + False Step blocks.",
                        circle: 2, categories: [.movement, .illusion], targetKind: .ray, rangeBlocks: 10,
-                       fatigueCost: 5, minimumIntelligence: 11, prerequisiteSkillIDs: ["false_step"],
+                       fatigueCost: 5, prerequisiteSkillIDs: ["false_step"],
                        actionSequenceWindow: 8),
     RPGSpellDefinition(id: "mirror_image", displayName: "Mirror Image",
-                       summary: "Maintain invisibility and Speed I and raise absorption to at least 2 / 3 / 4 for 260 ticks, extended by Minor Glamour, at 0.5 fatigue per second.",
+                       summary: "Maintain invisibility and Speed I and raise absorption to at least Mirror Work absorption for 260 ticks, extended by Minor Glamour, at 0.5 fatigue per second.",
                        circle: 3, categories: [.illusion, .defense], targetKind: .selfTarget, rangeBlocks: 0,
                        radiusBlocks: 3, durationTicks: 260, fatigueCost: 6, upkeepCostPerSecond: 0.5,
-                       minimumIntelligence: 13, prerequisiteSkillIDs: ["mirror_work"]),
+                       prerequisiteSkillIDs: ["mirror_work"]),
     RPGSpellDefinition(id: "mage_light", displayName: "Mage Light",
                        summary: "Place one guarded temporary torch on a valid full-cube face within 12 blocks for 1,200 ticks, extended by Ritual Circle; it restores the prior cell on cleanup.",
                        circle: 1, categories: [.utility, .creation], targetKind: .placed, rangeBlocks: 12,
-                       durationTicks: 1200, fatigueCost: 2, minimumIntelligence: 8,
+                       durationTicks: 1200, fatigueCost: 2,
                        prerequisiteSkillIDs: ["ritual_circle"]),
     RPGSpellDefinition(id: "ward", displayName: "Ward",
-                       summary: "Place one bounded radius-1 ward on a visible solid block within 6 blocks for 600 ticks, extended by Ritual Circle, with 1 / 2 / 3 Ward Scribe explosion-protection charges.",
+                       summary: "Place one bounded radius-1 ward on a visible solid block within 6 blocks for 600 ticks, extended by Ritual Circle, with Ward Scribe explosion-protection charges.",
                        circle: 1, categories: [.defense], targetKind: .placed, rangeBlocks: 6,
-                       durationTicks: 600, fatigueCost: 3, minimumIntelligence: 8,
+                       durationTicks: 600, fatigueCost: 3,
                        prerequisiteSkillIDs: ["ritual_circle"]),
     RPGSpellDefinition(id: "summon_servant", displayName: "Summon Servant",
-                       summary: "Summon one nonpersistent Allay in free space ahead for 400 / 600 / 800 ticks at 0.5 fatigue per second; terminal or upkeep cleanup removes that exact servant.",
+                       summary: "Summon one nonpersistent Allay in free space ahead for Bound Servant ticks at 0.5 fatigue per second; terminal or upkeep cleanup removes that exact servant.",
                        circle: 2, categories: [.creation, .utility], targetKind: .summon, rangeBlocks: 4,
                        durationTicks: 600, fatigueCost: 6, upkeepCostPerSecond: 0.5,
-                       minimumIntelligence: 11, prerequisiteSkillIDs: ["bound_servant"],
+                       prerequisiteSkillIDs: ["bound_servant"],
                        actionSequenceWindow: 20),
     RPGSpellDefinition(id: "stone_ward", displayName: "Stone Ward",
-                       summary: "Place one bounded radius-2 ward on a visible solid block within 8 blocks for 1,200 ticks, extended by Ritual Circle, with 1 / 2 / 3 Ward Scribe explosion-protection charges.",
+                       summary: "Place one bounded radius-2 ward on a visible solid block within 8 blocks for 1,200 ticks, extended by Ritual Circle, with Ward Scribe explosion-protection charges.",
                        circle: 3, categories: [.defense, .creation], targetKind: .area, rangeBlocks: 8,
                        radiusBlocks: 2, durationTicks: 1200, fatigueCost: 7,
-                       minimumIntelligence: 13, prerequisiteSkillIDs: ["ward_scribe"]),
+                       prerequisiteSkillIDs: ["ward_scribe"]),
     RPGSpellDefinition(id: "mend_wounds", displayName: "Mend Wounds",
-                       summary: "Heal self or one visible touched non-player ally for 5 + Field Dressing + INT potency, increased by Triage below half health; a no-effect cast is rejected.",
+                       summary: "Heal self or one visible touched non-player ally for 5 + Field Dressing + spell potency, increased by Triage below half health; a no-effect cast is rejected.",
                        circle: 1, categories: [.healing], targetKind: .touch, rangeBlocks: 2,
-                       fatigueCost: 3, minimumIntelligence: 8, prerequisiteSkillIDs: ["field_dressing"]),
+                       fatigueCost: 3, prerequisiteSkillIDs: ["field_dressing"]),
     RPGSpellDefinition(id: "restore", displayName: "Restore",
-                       summary: "Heal self or one visible touched non-player ally for 8 + Field Dressing + INT potency, increased by Triage below half health, and remove the first poison, wither, weakness, or slowness effect.",
+                       summary: "Heal self or one visible touched non-player ally for 8 + Field Dressing + spell potency, increased by Triage below half health, and remove the first poison, wither, weakness, or slowness effect.",
                        circle: 2, categories: [.healing], targetKind: .touch, rangeBlocks: 2,
-                       fatigueCost: 5, minimumIntelligence: 11, prerequisiteSkillIDs: ["triage"]),
+                       fatigueCost: 5, prerequisiteSkillIDs: ["triage"]),
     RPGSpellDefinition(id: "purify", displayName: "Purify",
                        summary: "Remove every poison, hunger, and nausea effect from self or one visible touched non-player ally; a no-effect cast is rejected.",
                        circle: 1, categories: [.healing, .utility], targetKind: .touch, rangeBlocks: 2,
-                       fatigueCost: 2, minimumIntelligence: 8, prerequisiteSkillIDs: ["herbal_lore"]),
+                       fatigueCost: 2, prerequisiteSkillIDs: ["herbal_lore"]),
     RPGSpellDefinition(id: "aegis", displayName: "Aegis",
                        summary: "One-shot cast: raise self or one visible touched non-player ally to at least 4 + Protective Mark absorption and grant Resistance I for 240 ticks; there is no upkeep.",
                        circle: 2, categories: [.defense, .healing], targetKind: .touch, rangeBlocks: 2,
                        durationTicks: 240, fatigueCost: 5, upkeepCostPerSecond: 0,
-                       minimumIntelligence: 11, prerequisiteSkillIDs: ["protective_mark"]),
+                       prerequisiteSkillIDs: ["protective_mark"]),
     RPGSpellDefinition(id: "sanctuary", displayName: "Sanctuary",
-                       summary: "Create one bounded sanctuary centered on the caster for 300 ticks; each pulse gives legal hostiles within 6 / 8 / 10 blocks Weakness I for 40 ticks and adds 0.35 outward velocity.",
+                       summary: "Create one bounded sanctuary centered on the caster for 300 ticks; each pulse gives legal hostiles within Sanctuary Bell radius Weakness I for 40 ticks and adds 0.35 outward velocity.",
                        circle: 3, categories: [.defense, .control], targetKind: .area, rangeBlocks: 0,
                        radiusBlocks: 8, durationTicks: 300, fatigueCost: 8,
-                       minimumIntelligence: 13, prerequisiteSkillIDs: ["sanctuary_bell"]),
+                       prerequisiteSkillIDs: ["sanctuary_bell"]),
 ]
 
 private let RPG_PATH_BY_ID = Dictionary(uniqueKeysWithValues: RPG_PATH_DEFINITIONS.map { ($0.id, $0) })
@@ -1885,20 +1793,35 @@ public func rpgBranchDefinition(_ id: String) -> RPGBranchDefinition? { RPG_BRAN
 public func rpgSkillDefinition(_ id: String) -> RPGSkillDefinition? { RPG_SKILL_BY_ID[id] }
 public func rpgSpellDefinition(_ id: String) -> RPGSpellDefinition? { RPG_SPELL_BY_ID[id] }
 
-public func rpgCreationPreset(pathID: String) -> RPGAttributes? {
-    switch pathID {
-    case "warden": return RPGAttributes(strength: 11, dexterity: 7, intelligence: 7, endurance: 10, luck: 7)
-    case "ranger": return RPGAttributes(strength: 7, dexterity: 11, intelligence: 7, endurance: 8, luck: 9)
-    case "delver": return RPGAttributes(strength: 10, dexterity: 8, intelligence: 7, endurance: 10, luck: 7)
-    case "arcanist": return RPGAttributes(strength: 6, dexterity: 8, intelligence: 12, endurance: 8, luck: 8)
-    case "mender": return RPGAttributes(strength: 6, dexterity: 8, intelligence: 10, endurance: 10, luck: 8)
-    case "tinker": return RPGAttributes(strength: 7, dexterity: 10, intelligence: 10, endurance: 8, luck: 7)
-    default: return nil
+/// The node-0 (first) skill of a sub-class -- its player-facing "signature skill".
+public func rpgSignatureSkillID(branchID: String) -> String? {
+    rpgBranchDefinition(branchID)?.skillIDs.first
+}
+
+/// The default starting-skill selection for a path before a sub-class has
+/// been chosen: the signature skill of every sub-class in registry order.
+/// This is exactly the legacy auto-grant (e.g. Arcanist ignite/blur/mage_light).
+public func rpgDefaultStartingSkillIDs(pathID: String) -> [String] {
+    guard let path = rpgPathDefinition(pathID) else { return [] }
+    return path.branchIDs.compactMap(rpgSignatureSkillID)
+}
+
+/// The pool of five skills a player may choose exactly three starting skills
+/// from: the chosen sub-class's three skills (in that sub-class's order),
+/// followed by the signature skill of every other sub-class in the path
+/// (registry order).
+public func rpgStartingSkillPool(pathID: String, branchID: String) -> [String] {
+    guard let path = rpgPathDefinition(pathID), let branch = rpgBranchDefinition(branchID),
+          branch.pathID == pathID else { return [] }
+    var pool = branch.skillIDs
+    for otherBranchID in path.branchIDs where otherBranchID != branchID {
+        if let signature = rpgSignatureSkillID(branchID: otherBranchID) { pool.append(signature) }
     }
+    return pool
 }
 
 public func rpgSkillRank(_ effectID: RPGSkillEffectID, in state: RPGCharacterState) -> Int {
-    max(0, min(3, state.skillRanks[effectID.rawValue] ?? 0))
+    max(0, min(RPG_SKILL_RANK_CAP, state.skillRanks[effectID.rawValue] ?? 0))
 }
 
 public func rpgSkillEffectValue(_ effectID: RPGSkillEffectID, in state: RPGCharacterState) -> Double {
@@ -1908,7 +1831,7 @@ public func rpgSkillEffectValue(_ effectID: RPGSkillEffectID, in state: RPGChara
 }
 
 public func rpgSkillRankBenefit(_ skillID: String, rank: Int) -> String? {
-    guard let def = rpgSkillDefinition(skillID), rank >= 1, rank <= 3 else { return nil }
+    guard let def = rpgSkillDefinition(skillID), rank >= 1, rank <= RPG_SKILL_RANK_CAP else { return nil }
     return def.rankBenefits[rank - 1]
 }
 
@@ -1919,7 +1842,7 @@ public func rpgSpellUnlockRank(_ spellID: String, from skillID: String) -> Int? 
 public func rpgUnlockedSpellIDs(for ranks: [String: Int]) -> [String] {
     var unlocked = Set<String>()
     for def in RPG_SKILL_DEFINITIONS {
-        let rank = max(0, min(3, ranks[def.id] ?? 0))
+        let rank = max(0, min(RPG_SKILL_RANK_CAP, ranks[def.id] ?? 0))
         for unlock in def.spellUnlocks where rank >= unlock.rank {
             if RPG_SPELL_BY_ID[unlock.spellID] != nil { unlocked.insert(unlock.spellID) }
         }
@@ -1944,14 +1867,14 @@ public func rpgLevel(forXP xp: Int) -> Int {
     return level
 }
 
+/// Lifetime skill points earned by `level`: one per level above 1, plus one
+/// bonus point at every milestone level reached. 25 total at the level cap
+/// (19 base + 6 milestones).
 public func rpgEarnedSkillPoints(level: Int) -> Int {
     let boundedLevel = max(0, min(RPG_LEVEL_CAP, level))
-    return boundedLevel > 0 ? boundedLevel - 1 : 0
-}
-
-public func rpgEarnedAttributePoints(level: Int) -> Int {
-    let level = max(0, min(RPG_LEVEL_CAP, level))
-    return [4, 7, 10, 13, 16, 19].filter { $0 <= level }.count
+    let base = boundedLevel > 0 ? boundedLevel - 1 : 0
+    let milestoneBonus = RPG_MILESTONE_LEVELS.filter { $0 <= boundedLevel }.count
+    return base + milestoneBonus
 }
 
 public func rpgSkillNodeIndex(_ skillID: String) -> Int? {
@@ -1959,30 +1882,41 @@ public func rpgSkillNodeIndex(_ skillID: String) -> Int? {
     return branch.skillIDs.firstIndex(of: skillID)
 }
 
+/// Level gate for learning `skillID` to `targetRank`, indexed by the skill's
+/// node position (0 = signature) within its sub-class. Off-sub-class
+/// purchases add a +2 surcharge, except a skill's very first rank (rank 1 of
+/// a node-0 signature skill), which is level-1 legal from any sub-class in
+/// the path -- every pool skill's rank 1 is always reachable immediately.
 public func rpgMinimumLevel(for skillID: String, targetRank: Int, specializationBranchID: String) -> Int? {
     guard let def = rpgSkillDefinition(skillID), let node = rpgSkillNodeIndex(skillID),
-          targetRank >= 1, targetRank <= 3 else { return nil }
-    let selectedGates = [
-        [1, 4, 8],
-        [5, 10, 14],
-        [12, 16, 20],
+          targetRank >= 1, targetRank <= RPG_SKILL_RANK_CAP else { return nil }
+    let nodeGates = [
+        [1, 4, 8, 12, 16],
+        [1, 6, 10, 14, 18],
+        [1, 8, 12, 16, 20],
     ]
-    let surcharge = def.branchID == specializationBranchID ? 0 : 2
-    return selectedGates[node][targetRank - 1] + surcharge
+    let offSubClass = def.branchID != specializationBranchID
+    let waived = node == 0 && targetRank == 1
+    let surcharge = offSubClass && !waived ? 2 : 0
+    return nodeGates[node][targetRank - 1] + surcharge
 }
 
+/// Skill-point cost to learn `skillID` to `targetRank`: free for a rank-1
+/// starting skill, 1 point per rank inside the chosen sub-class, 2 points per
+/// rank elsewhere in the path. Prerequisite-skill gating is removed entirely
+/// -- only the level gate above governs eligibility.
 public func rpgSkillPointCost(_ skillID: String, targetRank: Int, in state: RPGCharacterState) -> Int? {
     guard state.created, let def = rpgSkillDefinition(skillID), def.pathID == state.pathID,
-          targetRank >= 1, targetRank <= 3 else { return nil }
-    if skillID == state.starterSkillID && targetRank == 1 { return 0 }
-    return targetRank + (def.branchID == state.specializationBranchID ? 0 : 1)
+          targetRank >= 1, targetRank <= RPG_SKILL_RANK_CAP else { return nil }
+    if targetRank == 1, state.startingSkillIDs.contains(skillID) { return 0 }
+    return def.branchID == state.specializationBranchID ? 1 : 2
 }
 
 public func rpgSpentSkillPoints(_ state: RPGCharacterState) -> Int {
     guard state.created else { return 0 }
     var spent = 0
     for def in RPG_SKILL_DEFINITIONS where def.pathID == state.pathID {
-        let rank = max(0, min(3, state.skillRanks[def.id] ?? 0))
+        let rank = max(0, min(RPG_SKILL_RANK_CAP, state.skillRanks[def.id] ?? 0))
         guard rank > 0 else { continue }
         for targetRank in 1...rank {
             spent += rpgSkillPointCost(def.id, targetRank: targetRank, in: state) ?? 0
@@ -1996,38 +1930,156 @@ public func rpgAvailableSkillPoints(_ state: RPGCharacterState) -> Int {
     return max(0, rpgEarnedSkillPoints(level: state.level) - rpgSpentSkillPoints(state))
 }
 
-public func rpgSpentAttributePoints(_ state: RPGCharacterState) -> Int {
-    guard state.created else { return 0 }
-    let base = RPGAttributes.creationBudget
-    return max(0, state.attributes.clamped().total - base)
+/// Per-path flat level growth, replacing every attribute-derived stat.
+/// Health and fatigue base/per-level values are design-fixed; the rest are
+/// tunable but the *shape* (base +/- per-level, with a floor or cap) is the
+/// contract. `rpgDerivedStats` combines this with skill-effect bonuses.
+public struct RPGPathGrowthProfile: Equatable {
+    public var healthBase: Double
+    public var healthPerLevel: Double
+    public var fatigueBase: Double
+    public var fatiguePerLevel: Double
+    public var regenBase: Double
+    public var regenPerLevel: Double
+    public var meleePerLevel: Double
+    public var accuracyPerLevel: Double
+    public var potencyPerLevel: Double
+    public var focusCostBase: Double
+    public var focusCostPerLevel: Double
+    public var focusCostFloor: Double
+    public var recoveryBase: Double
+    public var recoveryPerLevel: Double
+    public var recoveryFloor: Double
+    public var exhaustionBase: Double
+    public var exhaustionPerLevel: Double
+    public var exhaustionFloor: Double
+    public var luckBase: Double
+    public var luckPerLevel: Double
+    public var luckCap: Double
+
+    public init(healthBase: Double, healthPerLevel: Double,
+                fatigueBase: Double, fatiguePerLevel: Double,
+                regenBase: Double, regenPerLevel: Double,
+                meleePerLevel: Double = 0, accuracyPerLevel: Double = 0, potencyPerLevel: Double = 0,
+                focusCostBase: Double, focusCostPerLevel: Double, focusCostFloor: Double,
+                recoveryBase: Double, recoveryPerLevel: Double, recoveryFloor: Double,
+                exhaustionBase: Double, exhaustionPerLevel: Double, exhaustionFloor: Double,
+                luckBase: Double, luckPerLevel: Double, luckCap: Double) {
+        self.healthBase = healthBase
+        self.healthPerLevel = healthPerLevel
+        self.fatigueBase = fatigueBase
+        self.fatiguePerLevel = fatiguePerLevel
+        self.regenBase = regenBase
+        self.regenPerLevel = regenPerLevel
+        self.meleePerLevel = meleePerLevel
+        self.accuracyPerLevel = accuracyPerLevel
+        self.potencyPerLevel = potencyPerLevel
+        self.focusCostBase = focusCostBase
+        self.focusCostPerLevel = focusCostPerLevel
+        self.focusCostFloor = focusCostFloor
+        self.recoveryBase = recoveryBase
+        self.recoveryPerLevel = recoveryPerLevel
+        self.recoveryFloor = recoveryFloor
+        self.exhaustionBase = exhaustionBase
+        self.exhaustionPerLevel = exhaustionPerLevel
+        self.exhaustionFloor = exhaustionFloor
+        self.luckBase = luckBase
+        self.luckPerLevel = luckPerLevel
+        self.luckCap = luckCap
+    }
 }
 
-public func rpgAvailableAttributePoints(_ state: RPGCharacterState) -> Int {
-    guard state.created else { return 0 }
-    return max(0, rpgEarnedAttributePoints(level: state.level) - rpgSpentAttributePoints(state))
+/// Warden supplies the shared regen/focus/recovery/exhaustion defaults that
+/// other paths inherit wherever the design table leaves a cell unlisted.
+private let RPG_WARDEN_GROWTH_PROFILE = RPGPathGrowthProfile(
+    healthBase: 26, healthPerLevel: 2,
+    fatigueBase: 10, fatiguePerLevel: 1,
+    regenBase: 0.022, regenPerLevel: 0.0007,
+    meleePerLevel: 0.06, accuracyPerLevel: 0.002, potencyPerLevel: 0,
+    focusCostBase: 0.975, focusCostPerLevel: 0.002, focusCostFloor: 0.90,
+    recoveryBase: 0.98, recoveryPerLevel: 0.002, recoveryFloor: 0.92,
+    exhaustionBase: 0.95, exhaustionPerLevel: 0.004, exhaustionFloor: 0.85,
+    luckBase: 0.01, luckPerLevel: 0.002, luckCap: 0.06
+)
+
+public func rpgPathGrowthProfile(_ pathID: String) -> RPGPathGrowthProfile {
+    let d = RPG_WARDEN_GROWTH_PROFILE
+    switch pathID {
+    case "warden":
+        return d
+    case "ranger":
+        return RPGPathGrowthProfile(
+            healthBase: 20, healthPerLevel: 1, fatigueBase: 14, fatiguePerLevel: 2,
+            regenBase: d.regenBase, regenPerLevel: d.regenPerLevel,
+            meleePerLevel: 0, accuracyPerLevel: 0.006, potencyPerLevel: 0,
+            focusCostBase: d.focusCostBase, focusCostPerLevel: d.focusCostPerLevel, focusCostFloor: d.focusCostFloor,
+            recoveryBase: 0.925, recoveryPerLevel: 0.005, recoveryFloor: 0.80,
+            exhaustionBase: 0.99, exhaustionPerLevel: 0.001, exhaustionFloor: 0.95,
+            luckBase: 0.03, luckPerLevel: 0.004, luckCap: 0.12
+        )
+    case "delver":
+        return RPGPathGrowthProfile(
+            healthBase: 24, healthPerLevel: 2, fatigueBase: 12, fatiguePerLevel: 1,
+            regenBase: d.regenBase, regenPerLevel: d.regenPerLevel,
+            meleePerLevel: 0.04, accuracyPerLevel: 0.002, potencyPerLevel: 0,
+            focusCostBase: d.focusCostBase, focusCostPerLevel: d.focusCostPerLevel, focusCostFloor: d.focusCostFloor,
+            recoveryBase: d.recoveryBase, recoveryPerLevel: d.recoveryPerLevel, recoveryFloor: d.recoveryFloor,
+            exhaustionBase: 0.96, exhaustionPerLevel: 0.004, exhaustionFloor: 0.86,
+            luckBase: 0.01, luckPerLevel: 0.004, luckCap: 0.10
+        )
+    case "arcanist":
+        return RPGPathGrowthProfile(
+            healthBase: 16, healthPerLevel: 1, fatigueBase: 20, fatiguePerLevel: 3,
+            regenBase: d.regenBase, regenPerLevel: d.regenPerLevel,
+            meleePerLevel: 0, accuracyPerLevel: 0, potencyPerLevel: 0.10,
+            focusCostBase: 0.85, focusCostPerLevel: 0.008, focusCostFloor: 0.65,
+            recoveryBase: d.recoveryBase, recoveryPerLevel: d.recoveryPerLevel, recoveryFloor: d.recoveryFloor,
+            exhaustionBase: d.exhaustionBase, exhaustionPerLevel: d.exhaustionPerLevel, exhaustionFloor: d.exhaustionFloor,
+            luckBase: 0.01, luckPerLevel: 0.002, luckCap: 0.06
+        )
+    case "mender":
+        return RPGPathGrowthProfile(
+            healthBase: 18, healthPerLevel: 1, fatigueBase: 18, fatiguePerLevel: 2,
+            regenBase: d.regenBase, regenPerLevel: d.regenPerLevel,
+            meleePerLevel: 0, accuracyPerLevel: 0, potencyPerLevel: 0.06,
+            focusCostBase: 0.90, focusCostPerLevel: 0.006, focusCostFloor: 0.75,
+            recoveryBase: d.recoveryBase, recoveryPerLevel: d.recoveryPerLevel, recoveryFloor: d.recoveryFloor,
+            exhaustionBase: d.exhaustionBase, exhaustionPerLevel: d.exhaustionPerLevel, exhaustionFloor: d.exhaustionFloor,
+            luckBase: 0.02, luckPerLevel: 0.004, luckCap: 0.11
+        )
+    case "tinker":
+        return RPGPathGrowthProfile(
+            healthBase: 20, healthPerLevel: 1, fatigueBase: 16, fatiguePerLevel: 2,
+            regenBase: d.regenBase, regenPerLevel: d.regenPerLevel,
+            meleePerLevel: 0, accuracyPerLevel: 0.005, potencyPerLevel: 0.03,
+            focusCostBase: 0.90, focusCostPerLevel: 0.006, focusCostFloor: 0.75,
+            recoveryBase: 0.94, recoveryPerLevel: 0.004, recoveryFloor: 0.84,
+            exhaustionBase: d.exhaustionBase, exhaustionPerLevel: d.exhaustionPerLevel, exhaustionFloor: d.exhaustionFloor,
+            luckBase: 0.01, luckPerLevel: 0.002, luckCap: 0.06
+        )
+    default:
+        return d
+    }
 }
 
 public func rpgDerivedStats(_ state: RPGCharacterState) -> RPGDerivedStats {
     guard state.created else { return .vanilla }
-    let attr = state.attributes.clamped()
+    let profile = rpgPathGrowthProfile(state.pathID)
+    let n = Double(max(0, state.level - 1))
     let guardHealth = rpgSkillEffectValue(.guardStance, in: state)
     let shieldFatigue = rpgSkillEffectValue(.shieldBind, in: state)
     let plateRegen = rpgSkillEffectValue(.plateTraining, in: state)
-    let dexteritySteps = max(0, attr.dexterity - 6)
-    let strengthSteps = max(0, attr.strength - 6)
-    let intelligenceSteps = max(0, attr.intelligence - 6)
-    let luckSteps = max(0, attr.luck - 6)
     return RPGDerivedStats(
-        maxHealth: Double(12 + attr.strength + attr.endurance / 2) + guardHealth,
-        maxFatigue: Double(attr.strength + attr.endurance + max(0, attr.intelligence - 8)) + shieldFatigue,
-        fatigueRegenPerTick: 0.010 + Double(attr.endurance) * 0.0015 + plateRegen,
-        meleeDamageBonus: Double(max(0, attr.strength - 10)) * 0.15,
-        actionAccuracyBonus: Double(dexteritySteps) * 0.01,
-        spellPotencyBonus: Double(max(0, attr.intelligence - 10)) * 0.25,
-        focusCostMultiplier: max(0.65, 1 - Double(intelligenceSteps) * 0.025),
-        actionRecoveryMultiplier: max(0.80, 1 - Double(dexteritySteps) * 0.015),
-        exhaustionMultiplier: max(0.85, 1 - Double(strengthSteps) * 0.01),
-        luckProcChance: min(0.12, Double(luckSteps) * 0.01)
+        maxHealth: profile.healthBase + profile.healthPerLevel * n + guardHealth,
+        maxFatigue: profile.fatigueBase + profile.fatiguePerLevel * n + shieldFatigue,
+        fatigueRegenPerTick: profile.regenBase + profile.regenPerLevel * n + plateRegen,
+        meleeDamageBonus: profile.meleePerLevel * n,
+        actionAccuracyBonus: profile.accuracyPerLevel * n,
+        spellPotencyBonus: profile.potencyPerLevel * n,
+        focusCostMultiplier: max(profile.focusCostFloor, profile.focusCostBase - profile.focusCostPerLevel * n),
+        actionRecoveryMultiplier: max(profile.recoveryFloor, profile.recoveryBase - profile.recoveryPerLevel * n),
+        exhaustionMultiplier: max(profile.exhaustionFloor, profile.exhaustionBase - profile.exhaustionPerLevel * n),
+        luckProcChance: min(profile.luckCap, profile.luckBase + profile.luckPerLevel * n)
     )
 }
 
@@ -2097,7 +2149,6 @@ public func rpgPreparedActions(_ state: RPGCharacterState) -> [RPGPreparedAction
         guard let spell = rpgSpellDefinition(spellID), state.knownSpellIDs.contains(spellID) else { continue }
         let cooldown = state.activeCooldowns.first { $0.id == spellID && $0.remainingTicks > 0 }?.remainingTicks ?? 0
         let hasFatigue = state.fatigue >= spell.fatigueCost
-        let smartEnough = state.attributes.intelligence >= spell.minimumIntelligence
         out.append(RPGPreparedAction(
             kind: .spell,
             id: spellID,
@@ -2106,8 +2157,8 @@ public func rpgPreparedActions(_ state: RPGCharacterState) -> [RPGPreparedAction
             fatigueCost: spell.fatigueCost,
             cooldownTicks: max(10, spell.circle * 20),
             cooldownRemainingTicks: cooldown,
-            available: cooldown <= 0 && hasFatigue && smartEnough,
-            statusText: cooldown > 0 ? "\(max(1, Int((Double(cooldown) / 20.0).rounded(.up))))s" : !smartEnough ? "IQ \(spell.minimumIntelligence)" : hasFatigue ? "Ready" : "Fatigue"
+            available: cooldown <= 0 && hasFatigue,
+            statusText: cooldown > 0 ? "\(max(1, Int((Double(cooldown) / 20.0).rounded(.up))))s" : hasFatigue ? "Ready" : "Fatigue"
         ))
     }
     return out
@@ -2158,49 +2209,27 @@ private func normalizeSelectedPreparedAction(_ state: inout RPGCharacterState) {
     state.selectedPreparedActionID = nil
 }
 
-private func trimRPGAttributesToEarnedBudget(_ attributes: RPGAttributes, level: Int) -> RPGAttributes {
-    var out = attributes.clamped()
-    let maximumTotal = RPGAttributes.creationBudget + rpgEarnedAttributePoints(level: level)
-    while out.total > maximumTotal {
-        let attr = RPGAttributeID.allCases
-            .filter { out.value($0) > RPGAttributes.minimum }
-            .max { lhs, rhs in
-                let lv = out.value(lhs)
-                let rv = out.value(rhs)
-                if lv != rv { return lv < rv }
-                return RPGAttributeID.allCases.firstIndex(of: lhs)! > RPGAttributeID.allCases.firstIndex(of: rhs)!
-            }
-        guard let attr else { break }
-        out.set(attr, out.value(attr) - 1)
-    }
-    return out
-}
-
-private func skillRequirementsMet(_ def: RPGSkillDefinition, attributes: RPGAttributes) -> Bool {
-    def.requirements.allSatisfy { attributes.value($0.attribute) >= $0.minimum }
-}
-
+/// Reconstructs the only skill-rank map v3 rules would ever legally produce
+/// given `base`'s level, sub-class, and `startingSkillIDs`. Every starting
+/// skill is seeded at rank 1 for free; every further increase must clear the
+/// current level gate and be payable from the current point budget.
+/// Prerequisite-skill gating is removed entirely -- level and budget are the
+/// only checks. Used both for live purchase replay and for save migration.
 private func replayLegalSkillRanks(_ requested: [String: Int],
-                                   base: RPGCharacterState,
-                                   grandfatherStarterFoundation: Bool = false) -> [String: Int] {
+                                   base: RPGCharacterState) -> [String: Int] {
     var state = base
-    state.skillRanks = [state.starterSkillID: 1]
+    var seeded: [String: Int] = [:]
+    for skillID in state.startingSkillIDs { seeded[skillID] = 1 }
+    state.skillRanks = seeded
     for def in RPG_SKILL_DEFINITIONS where def.pathID == state.pathID {
-        let desired = max(def.id == state.starterSkillID ? 1 : 0, min(3, requested[def.id] ?? 0))
+        let seededRank = state.startingSkillIDs.contains(def.id) ? 1 : 0
+        let desired = max(seededRank, min(RPG_SKILL_RANK_CAP, requested[def.id] ?? 0))
         while (state.skillRanks[def.id] ?? 0) < desired {
             let current = state.skillRanks[def.id] ?? 0
             let targetRank = current + 1
             guard let gate = rpgMinimumLevel(for: def.id, targetRank: targetRank,
                                              specializationBranchID: state.specializationBranchID),
                   state.level >= gate else { break }
-            let grandfatheredRankOne = grandfatherStarterFoundation
-                && def.id == state.starterSkillID && targetRank == 1
-            guard grandfatheredRankOne || skillRequirementsMet(def, attributes: state.attributes) else { break }
-            if let node = rpgSkillNodeIndex(def.id), node > 0 {
-                guard let branch = rpgBranchDefinition(def.branchID) else { break }
-                let prerequisite = branch.skillIDs[node - 1]
-                guard (state.skillRanks[prerequisite] ?? 0) >= 2 else { break }
-            }
             let cost = rpgSkillPointCost(def.id, targetRank: targetRank, in: state) ?? Int.max
             guard cost <= rpgAvailableSkillPoints(state) else { break }
             state.skillRanks[def.id] = targetRank
@@ -2209,34 +2238,36 @@ private func replayLegalSkillRanks(_ requested: [String: Int],
     return state.skillRanks
 }
 
+/// Legacy (v0/v1) migration only: recovers which sub-class the player had
+/// actually chosen before saves recorded a `specializationBranchID`, by
+/// finding the signature skill with the requested ranks most consistent with
+/// v3 replay. `starterSkillIDs` is UI/preset order and historically differs
+/// from branch order for Warden Vanguard and Bulwark.
 private func inferredStarterSkillID(path: RPGPathDefinition,
                                     requestedRanks: [String: Int],
                                     base: RPGCharacterState) -> String {
-    // Legacy inference follows the frozen gameplay registry: path branch order,
-    // then each branch's Foundation node. `starterSkillIDs` is UI/preset order
-    // and historically differs for Warden Vanguard and Bulwark.
-    let foundations = path.branchIDs.compactMap { branchID in
+    let signatures = path.branchIDs.compactMap { branchID in
         rpgBranchDefinition(branchID)?.skillIDs.first
     }
-    let positiveFoundations = foundations.filter { (requestedRanks[$0] ?? 0) > 0 }
-    if positiveFoundations.count == 1 { return positiveFoundations[0] }
+    let positiveSignatures = signatures.filter { (requestedRanks[$0] ?? 0) > 0 }
+    if positiveSignatures.count == 1 { return positiveSignatures[0] }
 
-    guard var best = foundations.first else { return path.starterSkillIDs.first ?? "" }
+    guard var best = signatures.first else { return path.starterSkillIDs.first ?? "" }
     var bestScore = -1
-    for starter in foundations {
-        guard let definition = rpgSkillDefinition(starter) else { continue }
-        var candidate = base
-        candidate.starterSkillID = starter
-        candidate.specializationBranchID = definition.branchID
-        let replayed = replayLegalSkillRanks(requestedRanks, base: candidate,
-                                             grandfatherStarterFoundation: true)
+    for candidate in signatures {
+        guard let definition = rpgSkillDefinition(candidate) else { continue }
+        var probe = base
+        probe.starterSkillID = candidate
+        probe.specializationBranchID = definition.branchID
+        probe.startingSkillIDs = [candidate]
+        let replayed = replayLegalSkillRanks(requestedRanks, base: probe)
         var score = 0
         for skill in RPG_SKILL_DEFINITIONS where skill.pathID == path.id {
             score += min(max(0, requestedRanks[skill.id] ?? 0), replayed[skill.id] ?? 0)
         }
         // Iteration is frozen registry order; retain the first candidate on ties.
         if score > bestScore {
-            best = starter
+            best = candidate
             bestScore = score
         }
     }
@@ -2311,57 +2342,66 @@ public func rpgCreateCharacter(_ draft: RPGCreationDraft) -> Result<RPGCharacter
     if let starter = draft.starterSkillID, !rpgIsBoundedID(starter) {
         return .failure(.invalidStarterSkill(starter))
     }
-    guard draft.starterSpellIDs.count <= RPG_SPELL_DEFINITIONS.count else {
-        return .failure(.invalidStarterSpell("too_many"))
-    }
-    for spellID in draft.starterSpellIDs where !rpgIsBoundedID(spellID) {
-        return .failure(.invalidStarterSpell(spellID))
+    if let branchID = draft.branchID, !rpgIsBoundedID(branchID) {
+        return .failure(.invalidStarterSkill(branchID))
     }
     guard let path = rpgPathDefinition(draft.pathID) else { return .failure(.unknownPath(draft.pathID)) }
-    let attrs = draft.attributes
-    for id in RPGAttributeID.allCases {
-        let value = attrs.value(id)
-        if value < RPGAttributes.minimum || value > RPGAttributes.maximumAtCreation {
-            return .failure(.invalidAttributeValue(id, value))
-        }
+
+    // The chosen sub-class. New drafts always carry branchID directly; a
+    // legacy (single-starter) draft synthesizes it from starterSkillID so an
+    // old client's draft still creates a valid character.
+    let branchID: String
+    if let requested = draft.branchID {
+        branchID = requested
+    } else if let legacyStarter = draft.starterSkillID, let legacyBranch = rpgSkillDefinition(legacyStarter)?.branchID {
+        branchID = legacyBranch
+    } else {
+        return .failure(.invalidStarterSkill(draft.starterSkillID ?? ""))
     }
-    guard attrs.total == RPGAttributes.creationBudget else {
-        return .failure(.invalidAttributeBudget(total: attrs.total, expected: RPGAttributes.creationBudget))
+    guard let branch = rpgBranchDefinition(branchID), branch.pathID == path.id else {
+        return .failure(.invalidStarterSkill(branchID))
     }
 
-    let starterSkill = draft.starterSkillID ?? path.starterSkillIDs.first
-    guard let skillID = starterSkill, path.starterSkillIDs.contains(skillID) else {
-        return .failure(.invalidStarterSkill(starterSkill ?? ""))
+    // Host-authoritative validation: never trust the draft's starting-skill
+    // selection blindly. It must be exactly three unique skills drawn from
+    // this path/sub-class's five-skill pool.
+    let pool = rpgStartingSkillPool(pathID: path.id, branchID: branchID)
+    let requestedSkills = draft.startingSkillIDs.isEmpty
+        ? rpgDefaultStartingSkillIDs(pathID: path.id)
+        : draft.startingSkillIDs
+    let uniqueRequestedSkills = Set(requestedSkills)
+    guard requestedSkills.count == RPG_STARTING_SKILL_COUNT,
+          uniqueRequestedSkills.count == RPG_STARTING_SKILL_COUNT,
+          requestedSkills.allSatisfy(pool.contains) else {
+        return .failure(.invalidStartingSkillSelection(requestedSkills))
     }
-    guard let starterDefinition = rpgSkillDefinition(skillID), skillRequirementsMet(starterDefinition, attributes: attrs) else {
-        return .failure(.invalidStarterSkill(skillID))
-    }
+    let startingSkillIDs = pool.filter(requestedSkills.contains)
 
-    let branchID = starterDefinition.branchID
-    let ranks = [skillID: 1]
-    let unlocked = rpgUnlockedSpellIDs(for: ranks)
-    for spellID in draft.starterSpellIDs where !unlocked.contains(spellID) {
-        return .failure(.invalidStarterSpell(spellID))
-    }
+    var ranks: [String: Int] = [:]
+    for skillID in startingSkillIDs { ranks[skillID] = 1 }
+    let starterSkillID = branch.skillIDs[0]
+    let knownSpellIDs = rpgUnlockedSpellIDs(for: ranks)
+    let activeStartingSkillIDs = stableUniqueSkillIDs(
+        startingSkillIDs.filter { rpgSkillDefinition($0)?.kind == .active }
+    )
 
-    let spells = draft.starterSpellIDs.isEmpty ? unlocked : stableUniqueSpellIDs(draft.starterSpellIDs)
-    let preparedSkills = starterDefinition.kind == .active ? [skillID] : []
     var state = RPGCharacterState(
         created: true,
         pathID: path.id,
-        starterSkillID: skillID,
-        specializationBranchID: branchID,
-        attributes: attrs,
+        starterSkillID: starterSkillID,
+        specializationBranchID: branch.id,
+        startingSkillIDs: startingSkillIDs,
         xp: 0,
         level: 1,
         skillRanks: ranks,
-        preparedSkillIDs: preparedSkills,
-        knownSpellIDs: spells,
-        preparedSpellIDs: Array(spells.prefix(RPG_MAX_PREPARED_SPELLS)),
-        selectedPreparedSpellID: spells.first,
+        preparedSkillIDs: Array(activeStartingSkillIDs.prefix(RPG_MAX_PREPARED_SKILLS)),
+        knownSpellIDs: knownSpellIDs,
+        preparedSpellIDs: Array(knownSpellIDs.prefix(RPG_MAX_PREPARED_SPELLS)),
+        selectedPreparedSpellID: knownSpellIDs.first,
         selectedPreparedActionID: nil,
         fatigue: 0,
-        authorityRevision: 1
+        authorityRevision: 1,
+        migrationNoticePending: false
     )
     state.fatigue = rpgDerivedStats(state).maxFatigue
     return .success(repairRPGCharacterState(state))
@@ -2373,23 +2413,20 @@ public func repairRPGCharacterState(_ raw: RPGCharacterState) -> RPGCharacterSta
     guard let path = rpgPathDefinition(raw.pathID) else { return .uncreated() }
 
     var state = raw
-    let isLegacy = raw.version == 0 || raw.version == 1
+    let isLegacyXP = raw.version == 0 || raw.version == 1
     state.version = RPG_STATE_CURRENT_VERSION
     state.created = true
     state.pathID = path.id
-    state.xp = isLegacy
+    state.xp = isLegacyXP
         ? migratedV1XP(state.xp)
         : max(0, min(rpgXPRequiredForLevel(RPG_LEVEL_CAP), state.xp))
     state.level = rpgLevel(forXP: state.xp)
-    state.attributes = state.attributes.clamped()
-    if state.attributes.total < RPGAttributes.creationBudget {
-        guard isLegacy else { return .uncreated() }
-        state.attributes = rpgCreationPreset(pathID: path.id) ?? RPGAttributes.defaultCreation
-    }
-    state.attributes = trimRPGAttributesToEarnedBudget(state.attributes, level: state.level)
 
+    // Step 2: starter identity. v0/v1 saves never recorded a sub-class, so
+    // it is inferred from the legacy rank distribution; v2/v3 saves already
+    // carry it directly and are only validated.
     let starter: String
-    if isLegacy {
+    if isLegacyXP {
         starter = inferredStarterSkillID(path: path, requestedRanks: state.skillRanks, base: state)
     } else {
         starter = state.starterSkillID
@@ -2397,17 +2434,40 @@ public func repairRPGCharacterState(_ raw: RPGCharacterState) -> RPGCharacterSta
     guard let starterDef = rpgSkillDefinition(starter), path.starterSkillIDs.contains(starter) else {
         return .uncreated()
     }
-    if !isLegacy {
-        guard state.specializationBranchID == starterDef.branchID,
-              (state.skillRanks[starter] ?? 0) >= 1,
-              skillRequirementsMet(starterDef, attributes: state.attributes) else {
-            return .uncreated()
-        }
+    if !isLegacyXP {
+        guard state.specializationBranchID == starterDef.branchID else { return .uncreated() }
     }
     state.starterSkillID = starter
     state.specializationBranchID = starterDef.branchID
-    state.skillRanks = replayLegalSkillRanks(state.skillRanks, base: state,
-                                              grandfatherStarterFoundation: isLegacy)
+
+    // Step 3: normalize startingSkillIDs to an exactly-3, unique, pool-valid
+    // set. Any invalid or legacy (empty) value fails open to the path's
+    // default signatures; this normalization is idempotent.
+    let pool = rpgStartingSkillPool(pathID: path.id, branchID: state.specializationBranchID)
+    let uniqueStarting = Set(state.startingSkillIDs)
+    // Always normalize to POOL order (both the valid path and the fail-open default), so repair
+    // is a fixed point: a second repair of a repaired state produces byte-identical output.
+    if state.startingSkillIDs.count == RPG_STARTING_SKILL_COUNT,
+       uniqueStarting.count == RPG_STARTING_SKILL_COUNT,
+       state.startingSkillIDs.allSatisfy(pool.contains) {
+        state.startingSkillIDs = pool.filter(state.startingSkillIDs.contains)
+    } else {
+        let defaults = Set(rpgDefaultStartingSkillIDs(pathID: path.id))
+        state.startingSkillIDs = pool.filter(defaults.contains)
+    }
+
+    // Step 4: backfill rank 1 for any starting skill not yet learned. This
+    // is the only way migration ever ADDS a rank -- e.g. a migrated Arcanist
+    // gains blur/mage_light alongside their original spell_formula rank.
+    for skillID in state.startingSkillIDs where (state.skillRanks[skillID] ?? 0) < 1 {
+        state.skillRanks[skillID] = 1
+    }
+
+    // Step 5: replay every rank under current (v3) rules. New level gates
+    // are <= old gates, new per-rank costs are <= old costs, and the new
+    // point budget is >= the old budget, so every rank a pre-v3 save legally
+    // held remains legal here -- ranks are preserved, never dropped.
+    state.skillRanks = replayLegalSkillRanks(state.skillRanks, base: state)
 
     let knownSkills = sortSkillIDs(state.skillRanks.compactMap { $0.value > 0 ? $0.key : nil })
     state.preparedSkillIDs = stableUniqueSkillIDs(state.preparedSkillIDs)
@@ -2454,7 +2514,7 @@ public func repairRPGCharacterState(_ raw: RPGCharacterState) -> RPGCharacterSta
     if state.authorityRevision == RPG_MAX_COUNTER {
         state.activeUpkeeps.removeAll(keepingCapacity: false)
     }
-    if isLegacy {
+    if isLegacyXP {
         state.kitGrantVersion = 0
         state.kitGrantID = nil
     } else if state.kitGrantVersion == RPG_STARTER_KIT_VERSION,
@@ -2466,6 +2526,12 @@ public func repairRPGCharacterState(_ raw: RPGCharacterState) -> RPGCharacterSta
         state.kitGrantID = nil
     }
     state.xpLedger = repairedXPLedger(state.xpLedger)
+    // Step 8 (security amendment S3): a FULL unconditional assignment, never
+    // a set-true-only branch, so a forged v3 payload with the flag already
+    // true is normalized false on first repair. Only pre-v3 saves ever set
+    // it true; the notice is cleared by the caller once surfaced, and
+    // encoded only when true, so it never re-arms on a v3 round-trip.
+    state.migrationNoticePending = raw.version <= 2 && state.created
     return state
 }
 
@@ -2675,30 +2741,12 @@ public func rpgLearnSkill(_ skillID: String, in state: inout RPGCharacterState) 
         case .authorityRevisionExhausted: return .authorityExhausted
         case .alreadyAtMaximumRank(let id): return .alreadyAtMaximumRank(id)
         case .insufficientLevel(let required): return .insufficientLevel(required: required)
-        case .insufficientAttribute(let attribute, let required):
-            return .insufficientAttribute(attribute, required: required)
-        case .missingPrerequisite(let id): return .missingPrerequisite(id)
         case .insufficientSkillPoints: return .insufficientSkillPoints
         }
     }
 
     state.skillRanks[skillID] = evaluation.targetRank
     state.knownSpellIDs = rpgUnlockedSpellIDs(for: state.skillRanks)
-    _ = rpgIncrementAuthorityRevision(&state)
-    state = repairRPGCharacterState(state)
-    return nil
-}
-
-public func rpgSpendAttributePoint(_ attribute: RPGAttributeID, in state: inout RPGCharacterState) -> RPGProgressionError? {
-    state = repairRPGCharacterState(state)
-    guard state.created else { return .characterNotCreated }
-    guard state.authorityRevision < RPG_MAX_NORMAL_AUTHORITY_REVISION else { return .authorityExhausted }
-    guard rpgAvailableAttributePoints(state) > 0 else { return .insufficientAttributePoints }
-    let current = state.attributes.value(attribute)
-    guard current < RPGAttributes.maximumWithProgression else {
-        return .insufficientAttribute(attribute, required: current + 1)
-    }
-    state.attributes.set(attribute, current + 1)
     _ = rpgIncrementAuthorityRevision(&state)
     state = repairRPGCharacterState(state)
     return nil
@@ -2897,29 +2945,43 @@ public func rpgSneakingMovementMultiplier(_ player: Player, swiftSneakLevel: Int
 }
 
 public enum RPGWeatherEyeStatus: Equatable {
+    /// `incomingWeather` is the named weather kind the next transition will bring (rank 4+); it is
+    /// `nil` for ranks 1-3, whose reported output is byte-identical to the shipped v2 behavior.
     case active(currentWeather: String, roundedTransitionTicks: Int,
-                roundedTransitionSeconds: Int)
+                roundedTransitionSeconds: Int, incomingWeather: String?)
     case cycleLocked(currentWeather: String)
     case unavailable(dimensionName: String)
 }
 
 public func rpgWeatherEyeStatus(_ player: Player) -> RPGWeatherEyeStatus? {
     guard player.rpgClassesEnabled(), player.rpg.created else { return nil }
+    let rank = rpgSkillRank(.weatherEye, in: player.rpg)
     let quantum = Int(rpgSkillEffectValue(.weatherEye, in: player.rpg))
-    guard quantum > 0 else { return nil }
-    guard player.world.dim == .overworld else {
+    guard rank > 0, quantum > 0 else { return nil }
+    // Rank 5 senses the overworld surface weather from any dimension; ranks 1-4 only work while
+    // standing in the overworld. The overworld is the sole world whose weather actually ticks.
+    let source: World
+    if player.world.dim == .overworld {
+        source = player.world
+    } else if rank >= 5, let overworld = player.world.overworldWeatherSource {
+        source = overworld
+    } else {
         let name = player.world.dim == .nether ? "Nether" : "End"
         return .unavailable(dimensionName: name)
     }
-    let weather = player.world.thundering ? "thunder" : player.world.raining ? "rain" : "clear"
-    guard player.world.rule("doWeatherCycle") else {
+    let weather = source.thundering ? "thunder" : source.raining ? "rain" : "clear"
+    guard source.rule("doWeatherCycle") else {
         return .cycleLocked(currentWeather: weather)
     }
-    let remaining = max(0, min(RPG_MAX_COUNTER, player.world.weatherTimer))
+    let remaining = max(0, min(RPG_MAX_COUNTER, source.weatherTimer))
     let rounded = remaining == 0 ? 0
         : min(RPG_MAX_COUNTER, ((remaining - 1) / quantum + 1) * quantum)
+    // Rank 4+ names the incoming weather kind. The engine's transition is deterministic in type:
+    // rain/thunder always clears next, and clear always brings rain next (the thunder sub-roll is
+    // decided only at the transition, so "rain" is the honest minimum forecast).
+    let incoming = rank >= 4 ? ((source.raining || source.thundering) ? "clear" : "rain") : nil
     return .active(currentWeather: weather, roundedTransitionTicks: rounded,
-                   roundedTransitionSeconds: rounded / 20)
+                   roundedTransitionSeconds: rounded / 20, incomingWeather: incoming)
 }
 
 private let RPG_PLANT_FOOD_ITEM_NAMES: Set<String> = [
@@ -3087,8 +3149,13 @@ public func rpgHUDInsightLines(_ player: Player) -> [String] {
     var lines: [String] = []
     if let weather = rpgWeatherEyeStatus(player) {
         switch weather {
-        case .active(let current, _, let seconds):
-            lines.append("Weather \(current) · change ~\(seconds)s")
+        case .active(let current, _, let seconds, let incoming):
+            if let incoming {
+                // Rank 4+ names the incoming weather kind, e.g. "Weather clear · Rain in 40s".
+                lines.append("Weather \(current) · \(incoming.capitalized) in \(seconds)s")
+            } else {
+                lines.append("Weather \(current) · change ~\(seconds)s")
+            }
         case .cycleLocked(let current):
             lines.append("Weather \(current) · cycle locked")
         case .unavailable(let dimensionName):

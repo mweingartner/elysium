@@ -82,16 +82,21 @@ final class RPGSemanticAccessibilityTests: XCTestCase {
     func testTreePublishesRolesLabelsValuesHelpStateAndOnlyActionablePresses() throws {
         let fixture = try fixture()
         XCTAssertTrue(fixture.tree.elements.contains { $0.descriptor.role == .tab })
-        XCTAssertTrue(fixture.tree.elements.contains { $0.descriptor.role == .rankCell })
+        XCTAssertTrue(fixture.tree.elements.contains {
+            $0.descriptor.role == .row && $0.descriptor.rankPips != nil
+        })
         XCTAssertTrue(fixture.tree.elements.contains { $0.descriptor.role == .scrollArea })
         for element in fixture.tree.elements {
             XCTAssertFalse(element.descriptor.label.isEmpty)
             XCTAssertEqual(element.hasPressAction, element.descriptor.isActionable)
             XCTAssertEqual(element.activationOrigin != nil, element.descriptor.isActionable)
-            if element.descriptor.role == .rankCell {
-                XCTAssertTrue(element.accessibilityValue.contains("Rank"))
+            if let pips = element.descriptor.rankPips {
+                XCTAssertTrue(element.accessibilityValue.contains("Rank \(pips.filled) of \(pips.total)"))
+            }
+            if !["authority:phase", "status:current"].contains(element.descriptor.id.rawValue) {
                 XCTAssertTrue(element.accessibilityValue.contains(
-                    element.descriptor.locked ? "Locked" : "Enabled"))
+                    element.descriptor.locked ? "Locked"
+                        : element.descriptor.enabled ? "Enabled" : "Disabled"))
             }
             if element.descriptor.selected {
                 XCTAssertTrue(element.accessibilityValue.contains("Selected"))
@@ -175,32 +180,177 @@ final class RPGSemanticAccessibilityTests: XCTestCase {
                        "Awaiting host. Character changes are disabled.")
     }
 
+    /// D4: the creation step-indicator title is announced on step transitions (and first appearance),
+    /// and not re-announced when a focus/scroll rebuild leaves the step unchanged.
+    func testCreationStepTitleIsAnnouncedOnTransitionsOnly() throws {
+        let viewport = try XCTUnwrap(RPGAccessibilityViewport(width: 400, height: 300))
+        func stepTree(_ step: RPGCreationStep, revision: UInt64) throws -> RPGAccessibilityTreeSnapshot {
+            let descriptor = RPGSemanticDescriptor(
+                id: .creationStep(step), role: .staticText,
+                label: rpgCreationStepTitle(step), value: rpgCreationStepTitle(step),
+                help: rpgCreationStepTitle(step), enabled: true, isFocusable: false,
+                frame: RPGLogicalRect(x: 1, y: 2, width: 200, height: 20))
+            let element = try XCTUnwrap(RPGAccessibilityElementSnapshot(
+                descriptor: descriptor, activationOrigin: nil, layoutGeneration: 1, viewport: viewport))
+            return try XCTUnwrap(RPGAccessibilityTreeSnapshot(
+                screenInstanceID: 1, semanticRevision: revision, layoutGeneration: 1,
+                viewport: viewport, elements: [element], focusedID: nil,
+                highContrast: false, reduceMotion: false))
+        }
+        let path = try stepTree(.path, revision: 1)
+        let branch = try stepTree(.branch, revision: 2)
+        // First appearance announces the current step.
+        XCTAssertEqual(rpgAccessibilityCreationStepAnnouncement(previous: nil, current: path),
+                       "Path · Step 1 of 4")
+        // Unchanged step (focus/scroll rebuild) does not re-announce.
+        XCTAssertNil(rpgAccessibilityCreationStepAnnouncement(previous: path, current: path))
+        // A step transition announces the new step title.
+        XCTAssertEqual(rpgAccessibilityCreationStepAnnouncement(previous: path, current: branch),
+                       "Sub-class · Step 2 of 4")
+        XCTAssertEqual(rpgAccessibilityCreationStepAnnouncement(previous: branch, current: path),
+                       "Path · Step 1 of 4")
+        // A tree without a creation-step element (a created character's tabs) never announces a step.
+        let noStep = try XCTUnwrap(RPGAccessibilityTreeSnapshot(
+            screenInstanceID: 1, semanticRevision: 3, layoutGeneration: 1,
+            viewport: viewport, elements: [], focusedID: nil,
+            highContrast: false, reduceMotion: false))
+        XCTAssertNil(rpgAccessibilityCreationStepAnnouncement(previous: branch, current: noStep))
+    }
+
     @MainActor
-    func testSkillsTreeHasRootAndExactlyCurrentPathTwentySevenRanksIncludingOffscreen() throws {
+    func testSkillsTreeHasRootAndExactlyCurrentPathNineSkillCardsIncludingOffscreen() throws {
         let fixture = try fixture()
-        let ranks = fixture.tree.elements.filter { $0.descriptor.role == .rankCell }
-        XCTAssertEqual(ranks.count, 27)
-        XCTAssertTrue(ranks.contains { $0.descriptor.visibleFrame == nil })
-        XCTAssertEqual(Set(ranks.map(\.descriptor.id)),
-                       Set(try XCTUnwrap(fixture.model.projection).ranks.map(\.id)))
-        let allOtherPathRanks: Set<RPGUIElementID> = Set(
+        let cards = fixture.tree.elements.filter { $0.descriptor.role == .row && $0.descriptor.rankPips != nil }
+        XCTAssertEqual(cards.count, 9)
+        XCTAssertTrue(cards.contains { $0.descriptor.visibleFrame == nil })
+        XCTAssertEqual(Set(cards.map(\.descriptor.id)),
+                       Set(try XCTUnwrap(fixture.model.projection).skillCards.map(\.id)))
+        let allOtherPathCards: Set<RPGUIElementID> = Set(
             RPG_PATH_DEFINITIONS.filter { $0.id != "warden" }.flatMap { path -> [RPGUIElementID] in
             guard let branch = path.branchIDs.first,
                   let state = rpgScreenFixture(pathID: path.id, branchID: branch),
                   let projection = rpgPathProjection(pathID: path.id, state: state) else { return [] }
-            return projection.ranks.map(\.id)
+            return projection.skillCards.map(\.id)
         })
-        XCTAssertEqual(allOtherPathRanks.count, 135)
-        XCTAssertTrue(Set(ranks.map(\.descriptor.id)).isDisjoint(with: allOtherPathRanks))
+        XCTAssertEqual(allOtherPathCards.count, 45)
+        XCTAssertTrue(Set(cards.map(\.descriptor.id)).isDisjoint(with: allOtherPathCards))
         let root = try XCTUnwrap(fixture.tree.elements.first {
             $0.descriptor.id.rawValue == "accessibility:skills-root"
         })
         XCTAssertEqual(root.descriptor.role, .scrollArea)
-        XCTAssertEqual(root.descriptor.value, "3 branches, 9 skills, 27 ranks")
+        XCTAssertEqual(root.descriptor.value, "3 sub-classes, 9 skills, 5 ranks each")
         XCTAssertFalse(root.hasPressAction)
         XCTAssertNotNil(fixture.tree.elements.first {
             $0.descriptor.id.rawValue == "accessibility:tab-group"
         })
+    }
+
+    /// The creation flow's Path / Sub-class / Starting Skills / Review steps expose the same
+    /// accessibility contract as the Skills tab: every card is a pressable role (button or row)
+    /// with a non-empty label and a value that states its selection state ("Selected", "Rank 1 of
+    /// 5"), the step is announced, and -- per Condition 10's player-facing vocabulary sweep --
+    /// nothing in the tree ever surfaces retired attribute language (Strength/Dexterity/
+    /// Intelligence/Endurance/Luck, "Class", "Specialization", "Foundation", "Attribute").
+    @MainActor
+    func testCreationFlowAccessibilityTreeExposesButtonRoleLabelValueStepAnnouncementAndNoAttributeVocabulary() throws {
+        let banned = ["strength", "dexterity", "intelligence", "endurance", "luck",
+                       "attribute", "specialization", "foundation", " class "]
+        let viewport = try XCTUnwrap(RPGAccessibilityViewport(width: 700, height: 420))
+
+        func buildTree(_ game: GameCore, _ session: RPGCreationSession, revision: UInt64) throws
+            -> (tree: RPGAccessibilityTreeSnapshot, model: RPGScreenModel) {
+            let runtime = try XCTUnwrap(game.rpgScreenRuntimeSnapshot())
+            let model = rpgBuildScreenModel(runtime.modelInput(
+                viewportWidth: 700, viewportHeight: 420, creation: session))
+            let committed = try XCTUnwrap(RPGCommittedSemanticSnapshot(
+                screenInstanceID: 1, semanticRevision: revision, model: model, runtime: runtime))
+            let tree = try XCTUnwrap(RPGAccessibilityTreeSnapshot(
+                committed: committed, layoutGeneration: revision, viewport: viewport))
+            return (tree, model)
+        }
+
+        func assertNoAttributeVocabulary(_ tree: RPGAccessibilityTreeSnapshot, _ step: String,
+                                         file: StaticString = #filePath, line: UInt = #line) {
+            for element in tree.elements {
+                let haystack = (element.descriptor.label + " " + element.accessibilityValue + " "
+                    + element.descriptor.help).lowercased()
+                for word in banned {
+                    XCTAssertFalse(haystack.contains(word),
+                                   "\(step) element \(element.descriptor.id.rawValue) leaks '\(word)': \(haystack)",
+                                   file: file, line: line)
+                }
+            }
+        }
+
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "creation-accessibility")
+        game.createWorld(name: "Creation Accessibility", seedText: "9091",
+                         mode: GameMode.survival, difficulty: 2)
+        XCTAssertFalse(game.player.rpg.created)
+
+        // Step 1: Path. Every path card is an actionable button with a non-empty label/help.
+        var session = rpgInitialCreationSession()
+        var (tree, _) = try buildTree(game, session, revision: 1)
+        assertNoAttributeVocabulary(tree, "path")
+        let pathCards = tree.elements.filter { $0.hasPressAction && $0.descriptor.id.rawValue.hasPrefix("path:") }
+        XCTAssertEqual(pathCards.count, RPG_PATH_DEFINITIONS.count)
+        for card in pathCards {
+            XCTAssertEqual(card.descriptor.role, .button, card.descriptor.id.rawValue)
+            XCTAssertFalse(card.descriptor.label.isEmpty, card.descriptor.id.rawValue)
+            XCTAssertFalse(card.accessibilityHelp.isEmpty, card.descriptor.id.rawValue)
+        }
+        let stepAnnouncement = try XCTUnwrap(tree.elements.first { $0.descriptor.id == .creationStep(.path) })
+        XCTAssertEqual(stepAnnouncement.descriptor.value, "Path · Step 1 of 4")
+
+        // Step 2: Sub-class (Branch). Reached via the pure reducer, mirroring an actual click.
+        session = try rpgReduceCreationSession(session, command: .choosePath("warden")).get()
+        (tree, _) = try buildTree(game, session, revision: 2)
+        assertNoAttributeVocabulary(tree, "branch")
+        let branchCards = tree.elements.filter { $0.hasPressAction && $0.descriptor.id.rawValue.hasPrefix("branch:") }
+        XCTAssertEqual(branchCards.count, 3, "warden has exactly 3 sub-classes")
+        for card in branchCards {
+            XCTAssertEqual(card.descriptor.role, .button, card.descriptor.id.rawValue)
+            XCTAssertFalse(card.descriptor.label.isEmpty, card.descriptor.id.rawValue)
+        }
+        XCTAssertEqual(try XCTUnwrap(tree.elements.first { $0.descriptor.id == .creationStep(.branch) })
+            .descriptor.value, "Sub-class · Step 2 of 4")
+
+        // Step 3: Starting Skills. Cards carry rank pips ("Rank 1 of 5") and toggle selection.
+        session = try rpgReduceCreationSession(session, command: .chooseBranch("warden_guardian")).get()
+        (tree, _) = try buildTree(game, session, revision: 3)
+        assertNoAttributeVocabulary(tree, "skills")
+        let skillCards = tree.elements.filter { $0.hasPressAction && $0.descriptor.rankPips != nil }
+        XCTAssertEqual(skillCards.count, 5, "the starting-skill pool always has exactly 5 cards")
+        for card in skillCards {
+            XCTAssertEqual(card.descriptor.role, .button, card.descriptor.id.rawValue)
+            XCTAssertTrue(card.accessibilityValue.contains("Rank 1 of 5"), card.descriptor.id.rawValue)
+        }
+        let selectedDefaults = skillCards.filter { $0.descriptor.selected }
+        XCTAssertEqual(selectedDefaults.count, RPG_STARTING_SKILL_COUNT)
+        for card in selectedDefaults {
+            XCTAssertTrue(card.accessibilityValue.contains("Selected"), card.descriptor.id.rawValue)
+        }
+        XCTAssertEqual(try XCTUnwrap(tree.elements.first { $0.descriptor.id == .creationStep(.skills) })
+            .descriptor.value, "Starting Skills · Step 3 of 4")
+
+        // Step 4: Review. Confirm the exactly-3 default selection, then check the review tree.
+        session = try rpgReduceCreationSession(session, command: .confirmStartingSkills).get()
+        XCTAssertEqual(session.step, .review)
+        (tree, _) = try buildTree(game, session, revision: 4)
+        assertNoAttributeVocabulary(tree, "review")
+        XCTAssertEqual(try XCTUnwrap(tree.elements.first { $0.descriptor.id == .creationStep(.review) })
+            .descriptor.value, "Review · Step 4 of 4")
+        // The review step summarizes the three starting skills in a single labeled row rather
+        // than one rank-pip card per skill; every skill's rank is still stated in plain text.
+        let startingSkillsRow = try XCTUnwrap(tree.elements.first { $0.descriptor.label == "Starting skills" })
+        XCTAssertEqual(startingSkillsRow.descriptor.role, .row)
+        XCTAssertEqual(startingSkillsRow.accessibilityValue.components(
+            separatedBy: "Rank 1 of 5").count - 1, RPG_STARTING_SKILL_COUNT,
+            "each of the 3 starting skills must state its rank")
+        let acceptButton = try XCTUnwrap(tree.elements.first {
+            $0.descriptor.id.rawValue == "creation:review:operation:create"
+        })
+        XCTAssertEqual(acceptButton.descriptor.role, .button)
+        XCTAssertEqual(acceptButton.descriptor.label, "Accept")
     }
 
     @MainActor
@@ -336,7 +486,7 @@ final class RPGSemanticAccessibilityTests: XCTestCase {
     func testOffscreenSemanticFocusUsesSharedReducerRevealAndInvalidatesOldRevision() throws {
         let fixture = try fixture()
         let offscreen = try XCTUnwrap(fixture.tree.elements.first {
-            $0.descriptor.role == .rankCell && $0.descriptor.visibleFrame == nil
+            $0.descriptor.role == .row && $0.descriptor.rankPips != nil && $0.descriptor.visibleFrame == nil
         })
         let context = try XCTUnwrap(RPGScreenInteractionContext(
             model: fixture.model, screenInstanceID: 1, semanticRevision: 1))
@@ -497,9 +647,7 @@ final class RPGSemanticAccessibilityTests: XCTestCase {
         let game = PersistenceTestSupport.makeGame(owner: self, label: "accessibility-e2e")
         game.createWorld(name: "Accessibility E2E", seedText: "9090",
                          mode: GameMode.survival, difficulty: 2)
-        let draft = RPGCreationDraft(
-            pathID: "arcanist", attributes: .defaultCreation,
-            starterSkillID: "spell_formula", starterSpellIDs: [])
+        let draft = RPGCreationDraft(pathID: "arcanist", starterSkillID: "spell_formula")
         let command = RPGSemanticCommand.create(draft)
         let id = RPGUIElementID(rawValue: "accessibility:create")!
         let descriptor = RPGSemanticDescriptor(
@@ -512,9 +660,7 @@ final class RPGSemanticAccessibilityTests: XCTestCase {
         let oldOrigin = try XCTUnwrap(RPGSemanticActivationOrigin(
             screenInstanceID: 1, semanticRevision: 1,
             descriptor: descriptor, input: input))
-        let changedDraft = RPGCreationDraft(
-            pathID: "warden", attributes: .defaultCreation,
-            starterSkillID: "guard_stance", starterSpellIDs: [])
+        let changedDraft = RPGCreationDraft(pathID: "warden", starterSkillID: "guard_stance")
         let changedDescriptor = RPGSemanticDescriptor(
             id: id, role: .button, label: "Create character",
             enabled: true, isFocusable: true,
@@ -572,6 +718,6 @@ final class RPGSemanticAccessibilityTests: XCTestCase {
 
 private extension RPGSemanticRole {
     static var allCasesForAccessibilityTesting: [RPGSemanticRole] {
-        [.button, .staticText, .tab, .group, .row, .scrollArea, .rankCell]
+        [.button, .staticText, .tab, .group, .row, .scrollArea]
     }
 }

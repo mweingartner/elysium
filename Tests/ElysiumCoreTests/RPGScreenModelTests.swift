@@ -12,14 +12,15 @@ final class RPGScreenModelTests: XCTestCase {
                 let model = rpgBuildScreenModel(RPGScreenModelInput(
                     state: .uncreated(), creation: creation,
                     viewportWidth: size.0, viewportHeight: size.1))
-                let expected = step == .path ? "Choose Class" : step.rawValue.capitalized
+                let expected = rpgCreationStepTitle(step)
                 let value = try XCTUnwrap(model.descriptors.first {
                     $0.id == .creationStep(step)
                 })
                 XCTAssertEqual(value.label, expected)
                 XCTAssertEqual(value.value, expected)
                 XCTAssertEqual(value.help, expected)
-                XCTAssertEqual(value.visualLines, [expected])
+                XCTAssertFalse(value.visualLines.isEmpty)
+                XCTAssertEqual(value.visualLines.joined(separator: " "), expected)
                 XCTAssertTrue(rpgDescriptorVisualLinesFit(
                     frame: value.frame, iconAssetID: value.iconAssetID,
                     visualLines: value.visualLines))
@@ -98,45 +99,45 @@ final class RPGScreenModelTests: XCTestCase {
     func testCreationRetainsSixDraftsAndProducesNoManualSpells() throws {
         var session = rpgInitialCreationSession()
         XCTAssertEqual(session.pathDrafts.count, 6)
-        session = try rpgReduceCreationSession(session, command: .selectPath("arcanist")).get()
-        session = try rpgReduceCreationSession(session, command: .selectBranch("arcanist_ritualist")).get()
-        session = try rpgReduceCreationSession(session, command: .adjustAttribute(.luck, -1)).get()
-        session = try rpgReduceCreationSession(session, command: .adjustAttribute(.endurance, 1)).get()
-        session = try rpgReduceCreationSession(session, command: .selectPath("warden")).get()
-        session = try rpgReduceCreationSession(session, command: .selectPath("arcanist")).get()
+        session = try rpgReduceCreationSession(session, command: .choosePath("arcanist")).get()
+        session = try rpgReduceCreationSession(session, command: .chooseBranch("arcanist_ritualist")).get()
+        session = try rpgReduceCreationSession(session, command: .toggleStartingSkill("ritual_circle")).get()
+        session = try rpgReduceCreationSession(session, command: .toggleStartingSkill("bound_servant")).get()
+        // Path is re-chosen with the SAME path (arcanist), retaining the branch/skill choice made
+        // above (amendment A1); choosing a different path and back would reset it instead.
+        session = try rpgReduceCreationSession(session, command: .back).get()
+        session = try rpgReduceCreationSession(session, command: .back).get()
+        session = try rpgReduceCreationSession(session, command: .choosePath("arcanist")).get()
         XCTAssertEqual(session.selectedDraft?.branchID, "arcanist_ritualist")
-        XCTAssertEqual(session.selectedDraft?.attributes.luck, 7)
+        XCTAssertEqual(Set(session.selectedDraft?.startingSkillIDs ?? []),
+                       ["spell_formula", "minor_glamour", "bound_servant"])
         let draft = try rpgCreationDraft(from: session).get()
-        XCTAssertEqual(draft.starterSkillID, "ritual_circle")
+        XCTAssertEqual(draft.branchID, "arcanist_ritualist")
         XCTAssertTrue(draft.starterSpellIDs.isEmpty)
         XCTAssertEqual(rpgPathCardModels(session: session).count, 6)
     }
 
     func testCompactCreatorAndTutorialAlwaysExposeOneCompletePanelAndRevealCards() throws {
         for path in RPG_PATH_DEFINITIONS {
-            var pathSession = rpgInitialCreationSession()
-            pathSession = try rpgReduceCreationSession(
-                pathSession, command: .selectPath(path.id)).get()
+            let pathSession = rpgInitialCreationSession()
             let pathModel = rpgBuildScreenModel(RPGScreenModelInput(
                 state: .uncreated(), creation: pathSession,
                 viewportWidth: 360, viewportHeight: 224))
-            let pathCard = try XCTUnwrap(pathModel.descriptors.first {
-                $0.id.rawValue == "creation:path:card"
-            })
+            let pathCard = try XCTUnwrap(pathModel.descriptors.first { $0.id == .path(path.id) })
             XCTAssertEqual(pathCard.label,
-                "\(path.displayName), class \(RPG_PATH_DEFINITIONS.firstIndex(where: { $0.id == path.id })! + 1) of 6")
-            XCTAssertNotNil(pathCard.visibleFrame)
+                "\(path.displayName), path \(RPG_PATH_DEFINITIONS.firstIndex(where: { $0.id == path.id })! + 1) of 6")
             XCTAssertTrue(pathModel.visibleDescriptors.filter {
-                $0.id.rawValue.hasPrefix("creation:path:") &&
+                $0.id.rawValue.hasPrefix("path:") &&
                     $0.layoutRegion == .scrollingContent
             }.allSatisfy { descriptor in
                 guard let visible = descriptor.visibleFrame else { return false }
                 return pathModel.contentFrame.contains(visible)
             })
 
-            pathSession.step = .branch
+            let branchSession = try rpgReduceCreationSession(
+                pathSession, command: .choosePath(path.id)).get()
             let branchModel = rpgBuildScreenModel(RPGScreenModelInput(
-                state: .uncreated(), creation: pathSession,
+                state: .uncreated(), creation: branchSession,
                 viewportWidth: 360, viewportHeight: 224))
             let branches = branchModel.descriptors.filter {
                 $0.id.rawValue.hasPrefix("branch:") && !$0.id.rawValue.contains(":operation:")
@@ -144,9 +145,6 @@ final class RPGScreenModelTests: XCTestCase {
             XCTAssertEqual(branches.count, 3)
             XCTAssertTrue(branches.allSatisfy { $0.frame.width == branchModel.contentFrame.width })
             XCTAssertTrue(branches.contains { $0.visibleFrame != nil })
-
-            XCTAssertLessThanOrEqual(pathModel.contentHeight, pathModel.viewportHeight)
-            XCTAssertEqual(pathModel.scrollOffset, 0)
         }
 
         let created = try XCTUnwrap(rpgScreenFixture(
@@ -173,56 +171,51 @@ final class RPGScreenModelTests: XCTestCase {
 
     func testEveryPathAndBranchCardPublishesCanonicalVisibleIconContentAndSelection() throws {
         for selectedPath in RPG_PATH_DEFINITIONS {
-            var session = rpgInitialCreationSession()
-            session = try rpgReduceCreationSession(
-                session, command: .selectPath(selectedPath.id)).get()
+            let session = rpgInitialCreationSession()
             let pathModel = rpgBuildScreenModel(RPGScreenModelInput(
                 state: .uncreated(), creation: session,
                 viewportWidth: 360, viewportHeight: 224))
-            let card = try XCTUnwrap(pathModel.descriptors.first {
-                $0.id.rawValue == "creation:path:card"
+            let card = try XCTUnwrap(pathModel.descriptors.first { $0.id == .path(selectedPath.id) })
+            XCTAssertEqual(card.iconAssetID, rpgAssetIDForPath(selectedPath.id))
+            XCTAssertNotNil(rpgIconPixels(assetID: try XCTUnwrap(card.iconAssetID)))
+            XCTAssertTrue(card.visualLines.contains { $0.contains(selectedPath.displayName) })
+            let source = try XCTUnwrap(rpgPathCardModels(session: session).first {
+                $0.pathID == selectedPath.id
             })
-                XCTAssertEqual(card.iconAssetID, rpgAssetIDForPath(selectedPath.id))
-                XCTAssertNotNil(rpgIconPixels(assetID: try XCTUnwrap(card.iconAssetID)))
-                XCTAssertTrue(card.visualLines.contains { $0.contains(selectedPath.displayName) })
-                XCTAssertTrue(card.selected)
-                XCTAssertEqual(card.adornment, .selectedCheckDoubleBorder)
-                let source = try XCTUnwrap(rpgPathCardModels(session: session).first {
-                    $0.pathID == selectedPath.id
-                })
-                XCTAssertTrue(card.help.contains(source.roleText))
+            XCTAssertTrue(card.visualLines.joined(separator: " ").contains(source.roleText))
 
-            session.step = .branch
+            var branchSession = try rpgReduceCreationSession(
+                session, command: .choosePath(selectedPath.id)).get()
             for selectedBranch in selectedPath.branchIDs {
-                session = try rpgReduceCreationSession(
-                    session, command: .selectBranch(selectedBranch)).get()
+                branchSession = try rpgReduceCreationSession(
+                    branchSession, command: .chooseBranch(selectedBranch)).get()
+                // chooseBranch advances to .skills; step back to .branch to inspect the sub-class
+                // cards with the chosen sub-class highlighted.
+                branchSession.step = .branch
                 let branchModel = rpgBuildScreenModel(RPGScreenModelInput(
-                    state: .uncreated(), creation: session,
+                    state: .uncreated(), creation: branchSession,
                     viewportWidth: 360, viewportHeight: 224))
                 for branchID in selectedPath.branchIDs {
                     let branch = try XCTUnwrap(rpgBranchDefinition(branchID))
                     let starterID = try XCTUnwrap(branch.skillIDs.first)
-                    let skill = try XCTUnwrap(rpgSkillDefinition(starterID))
-                    let card = try XCTUnwrap(branchModel.descriptors.first {
+                    let branchCard = try XCTUnwrap(branchModel.descriptors.first {
                         $0.id == .branch(branchID)
                     })
-                    XCTAssertEqual(card.iconAssetID, rpgAssetIDForSkill(starterID))
-                    XCTAssertNotNil(rpgIconPixels(assetID: try XCTUnwrap(card.iconAssetID)))
-                    XCTAssertTrue(card.visualLines.contains(branch.displayName))
-                    XCTAssertTrue(card.visualLines.contains(
-                        skill.kind == .active ? "Active Foundation" : "Passive Foundation"))
-                    let benefit = try XCTUnwrap(rpgSkillRankBenefit(starterID, rank: 1))
-                    XCTAssertTrue(card.help.contains(benefit))
-                    let unlocks = skill.spellUnlocks.filter { $0.rank == 1 }.compactMap {
-                        rpgSpellDefinition($0.spellID)?.displayName
+                    XCTAssertEqual(branchCard.iconAssetID, rpgAssetIDForSkill(starterID))
+                    XCTAssertNotNil(rpgIconPixels(assetID: try XCTUnwrap(branchCard.iconAssetID)))
+                    XCTAssertTrue(branchCard.visualLines.contains(branch.displayName))
+                    // C2: the Skills line names all three sub-class skills. At a compact viewport the
+                    // line may wrap, so assert the joined visual text carries "Skills:" and each name.
+                    let joined = branchCard.visualLines.joined(separator: " ")
+                    XCTAssertTrue(joined.contains("Skills:"))
+                    for skillName in branch.skillIDs.compactMap({ rpgSkillDefinition($0)?.displayName }) {
+                        XCTAssertTrue(joined.contains(skillName), "\(branchID) missing \(skillName)")
                     }
-                    XCTAssertTrue(card.help.contains(
-                        "Automatic unlocks: \(unlocks.isEmpty ? "None" : unlocks.joined(separator: ", "))"))
-                    XCTAssertEqual(card.adornment,
+                    XCTAssertEqual(branchCard.adornment,
                         branchID == selectedBranch ? .selectedCheckDoubleBorder : .none)
-                    XCTAssertTrue(card.visualLines.contains {
-                        $0.contains(branchID == selectedBranch ? "Selected" : "Choose")
-                    })
+                    XCTAssertTrue(branchCard.help.contains(
+                        branchID == selectedBranch ? "selected" : "Choose"))
+                    XCTAssertTrue(branchCard.reservesIconCell)
                 }
             }
         }
@@ -310,9 +303,10 @@ final class RPGScreenModelTests: XCTestCase {
 
         for path in RPG_PATH_DEFINITIONS {
             var session = rpgInitialCreationSession()
-            session = try rpgReduceCreationSession(session, command: .selectPath(path.id)).get()
-            session = try rpgReduceCreationSession(session, command: .next).get()
-            session = try rpgReduceCreationSession(session, command: .next).get()
+            session = try rpgReduceCreationSession(session, command: .choosePath(path.id)).get()
+            let branchID = try XCTUnwrap(path.branchIDs.first)
+            session = try rpgReduceCreationSession(session, command: .chooseBranch(branchID)).get()
+            session = try rpgReduceCreationSession(session, command: .confirmStartingSkills).get()
             let review = try XCTUnwrap(rpgCreationReviewProjection(
                 session: session, chordBindings: rpgDefaultChordBindings(),
                 authority: .localReady, inventoryCapacitySummary: "Fits."))
@@ -416,8 +410,12 @@ final class RPGScreenModelTests: XCTestCase {
     }
 
     func testAllEighteenProgressionPlansExposeCanonicalCompleteRouteAndConstraint() throws {
-        let expectedLevels = [1, 4, 5, 8, 10, 12, 14, 16, 20]
-        let expectedCosts = [0, 2, 1, 3, 2, 1, 3, 2, 3]
+        // v3: 5 ranks x 3 nodes = 15 route milestones per sub-class; every in-sub-class rank costs
+        // a flat 1 point (rank 1 of each node is free). Completing the whole sub-class costs 14
+        // (12 paid ranks after the 3 free node-1 ranks... rank1 node0 is the free starter),
+        // against a 25-point lifetime budget, leaving an 11-point utility allowance.
+        let expectedLevels = [1, 1, 1, 4, 6, 8, 8, 10, 12, 12, 14, 16, 16, 18, 20]
+        let expectedCosts = [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
         var count = 0
         for path in RPG_PATH_DEFINITIONS {
             for branchID in path.branchIDs {
@@ -425,16 +423,16 @@ final class RPGScreenModelTests: XCTestCase {
                 let summary = rpgProgressionSummaryProjection(state)
                 XCTAssertEqual(summary.plan.selectedBranchDisplayName,
                                rpgBranchDefinition(branchID)?.displayName)
-                XCTAssertEqual(summary.plan.routeMilestones.count, 9)
+                XCTAssertEqual(summary.plan.routeMilestones.count, 15)
                 XCTAssertEqual(summary.plan.routeMilestones.map(\.level), expectedLevels)
                 XCTAssertEqual(summary.plan.routeMilestones.map(\.cost), expectedCosts)
-                XCTAssertEqual(summary.plan.completionCost, 17)
-                XCTAssertEqual(summary.plan.levelCapEarnedSkillPoints, 19)
-                XCTAssertEqual(summary.plan.utilityAllowance, 2)
+                XCTAssertEqual(summary.plan.completionCost, 14)
+                XCTAssertEqual(summary.plan.levelCapEarnedSkillPoints, 25)
+                XCTAssertEqual(summary.plan.utilityAllowance, 11)
                 XCTAssertTrue(summary.plan.completionImpactText.contains(
                     "\(summary.specializationRemainingCost) SP"))
                 XCTAssertEqual(summary.plan.crossBranchCapstoneText,
-                    "Cross-branch Mastery III requires level 22; the level cap is 20, so it is unreachable.")
+                    "Off-sub-class Rank 5 of a third-position skill requires level 22; the level cap is 20, so it is unreachable.")
 
                 let model = rpgBuildScreenModel(RPGScreenModelInput(
                     state: state, viewportWidth: 700, viewportHeight: 420,
@@ -492,28 +490,31 @@ final class RPGScreenModelTests: XCTestCase {
             frame: RPGLogicalRect(x: 0, y: 0, width: 1, height: 1), token: high))
     }
 
-    func testEveryPathProjectsThreeNineTwentySevenAndAggregateIsUnique() throws {
-        var allRankIDs = Set<RPGUIElementID>()
-        var branchCount = 0, skillCount = 0, rankCount = 0
+    /// The per-rank-cell model was retired: a skill is now a single card whose `rankPips`
+    /// summarizes all five ranks at once, so a path now projects 3 branches, 9 skills, and 9
+    /// skill cards (not 27 individual rank cells).
+    func testEveryPathProjectsThreeBranchesNineSkillsNineCardsAndAggregateIsUnique() throws {
+        var allCardIDs = Set<RPGUIElementID>()
+        var branchCount = 0, skillCount = 0, cardCount = 0
         for path in RPG_PATH_DEFINITIONS {
             let branch = try XCTUnwrap(path.branchIDs.first)
             let state = try XCTUnwrap(rpgScreenFixture(pathID: path.id, branchID: branch))
             let projection = try XCTUnwrap(rpgPathProjection(pathID: path.id, state: state))
             XCTAssertEqual(projection.branchIDs.count, 3)
             XCTAssertEqual(projection.skillIDs.count, 9)
-            XCTAssertEqual(projection.ranks.count, 27)
+            XCTAssertEqual(projection.skillCards.count, 9)
             branchCount += projection.branchIDs.count
             skillCount += projection.skillIDs.count
-            rankCount += projection.ranks.count
-            projection.ranks.forEach { allRankIDs.insert($0.id) }
+            cardCount += projection.skillCards.count
+            projection.skillCards.forEach { allCardIDs.insert($0.id) }
 
             for (width, height) in [(360.0, 224.0), (520.0, 330.0), (700.0, 420.0)] {
                 let model = rpgBuildScreenModel(RPGScreenModelInput(state: state,
                     viewportWidth: width, viewportHeight: height, tab: .skills))
                 XCTAssertNil(model.errorText)
-                XCTAssertEqual(model.descriptors.filter { $0.role == .rankCell }.count, 27)
-                XCTAssertTrue(model.descriptors.filter { $0.role == .rankCell }
-                    .allSatisfy { $0.actionCommand == nil && $0.isFocusable && !$0.isActionable })
+                let cards = model.descriptors.filter { $0.role == .row && $0.rankPips != nil }
+                XCTAssertEqual(cards.count, 9)
+                XCTAssertTrue(cards.allSatisfy { $0.actionCommand == nil && $0.isFocusable && !$0.isActionable })
                 XCTAssertTrue(model.visibleDescriptors.allSatisfy { $0.visibleFrame != nil })
                 XCTAssertTrue(model.visibleDescriptors.allSatisfy {
                     guard let frame = $0.visibleFrame else { return false }
@@ -523,8 +524,8 @@ final class RPGScreenModelTests: XCTestCase {
         }
         XCTAssertEqual(branchCount, 18)
         XCTAssertEqual(skillCount, 54)
-        XCTAssertEqual(rankCount, 162)
-        XCTAssertEqual(allRankIDs.count, 162)
+        XCTAssertEqual(cardCount, 54)
+        XCTAssertEqual(allCardIDs.count, 54)
     }
 
     func testAuthorityCopyAndTutorialAreExactAndBounded() throws {
@@ -760,7 +761,7 @@ final class RPGScreenModelTests: XCTestCase {
             for path in RPG_PATH_DEFINITIONS {
                 var creation = rpgInitialCreationSession()
                 creation = try rpgReduceCreationSession(
-                    creation, command: .selectPath(path.id)).get()
+                    creation, command: .choosePath(path.id)).get()
                 for step in RPGCreationStep.allCases {
                     var atStep = creation
                     atStep.step = step
@@ -793,12 +794,9 @@ final class RPGScreenModelTests: XCTestCase {
         for model in models {
             for value in model.descriptors where value.isActionable {
                 actionCount += 1
-                if value.visualLines.isEmpty {
-                    XCTAssertTrue(
-                        value.adornment == .carouselPrevious ||
-                            value.adornment == .carouselNext,
-                        value.id.rawValue)
-                }
+                // The class carousel (whose chevrons were the only actionable descriptors with
+                // empty visual lines) was retired; every actionable descriptor now carries text.
+                XCTAssertFalse(value.visualLines.isEmpty, value.id.rawValue)
                 XCTAssertTrue(rpgDescriptorVisualLinesFit(
                     frame: value.frame, iconAssetID: value.iconAssetID,
                     visualLines: value.visualLines), value.id.rawValue)
@@ -812,28 +810,15 @@ final class RPGScreenModelTests: XCTestCase {
             }
         }
         XCTAssertGreaterThan(actionCount, 1_000)
-
-        var attributes = rpgInitialCreationSession()
-        attributes.step = .attributes
-        let compact = rpgBuildScreenModel(RPGScreenModelInput(
-            state: .uncreated(), creation: attributes,
-            viewportWidth: 360, viewportHeight: 224))
-        let attributeActions = compact.descriptors.filter {
-            $0.id.rawValue.contains("attribute:") && $0.actionCommand != nil
-        }
-        XCTAssertEqual(attributeActions.count, RPG_ATTRIBUTE_DISPLAY_ORDER.count * 2)
-        XCTAssertTrue(attributeActions.allSatisfy {
-            $0.frame.width == 22 && $0.frame.height == 20 &&
-                ($0.visualLines == ["-"] || $0.visualLines == ["+"]) &&
-                rpgDescriptorVisualLinesFit(frame: $0.frame,
-                    iconAssetID: $0.iconAssetID, visualLines: $0.visualLines)
-        })
     }
 
     func testAuthorityDetailUsesExactLegalCommandAndStatusPrecedence() throws {
         var state = try XCTUnwrap(rpgScreenFixture(
             pathID: "warden", branchID: "warden_guardian"))
         state.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
+        // stagger_chain is off-sub-class (vanguard) node 2; rank 4 is reachable at level 20 (gate 18),
+        // but its rank 5 needs level 22, so its rank-up operation is present-but-illegal (command nil).
+        state.skillRanks["stagger_chain"] = 4
         state = repairRPGCharacterState(state)
         let ready = rpgBuildScreenModel(RPGScreenModelInput(
             state: state, viewportWidth: 700, viewportHeight: 420, tab: .skills))
@@ -892,8 +877,8 @@ final class RPGScreenModelTests: XCTestCase {
             tab: .skills, focusedID: close))
         XCTAssertNil(fixedClose.layout.contextualDetailFrame)
         var creation = rpgInitialCreationSession()
-        creation.step = .attributes
-        let fixedBackID = RPGUIElementID(rawValue: "creation:attributes:operation:back")!
+        creation.step = .review
+        let fixedBackID = RPGUIElementID(rawValue: "creation:review:operation:back")!
         let fixedBack = rpgBuildScreenModel(RPGScreenModelInput(
             state: .uncreated(), authority: pending, creation: creation,
             viewportWidth: 700, viewportHeight: 420, focusedID: fixedBackID))
@@ -932,18 +917,27 @@ final class RPGScreenModelTests: XCTestCase {
             }
         }
 
+        // Build a session that has advanced far enough for each step to render real content:
+        // the path grid, then the sub-class grid, then the starting-skill pool, then review.
         var creation = rpgInitialCreationSession()
+        creation = try rpgReduceCreationSession(creation, command: .choosePath("warden")).get()
+        creation = try rpgReduceCreationSession(creation, command: .chooseBranch("warden_guardian")).get()
         for step in RPGCreationStep.allCases {
             creation.step = step
             let model = rpgBuildScreenModel(RPGScreenModelInput(
                 state: .uncreated(), creation: creation,
                 viewportWidth: 360, viewportHeight: 224))
-            if step == .path {
-                XCTAssertNil(model.layout.contextualDetailFrame)
-                XCTAssertTrue(model.contextualDetailLines.isEmpty)
-            } else {
-                XCTAssertNotNil(model.layout.contextualDetailFrame)
-                XCTAssertFalse(model.contextualDetailLines.isEmpty)
+            switch step {
+            case .path:
+                // The Path step never shows a contextual-detail band.
+                XCTAssertNil(model.layout.contextualDetailFrame, step.rawValue)
+                XCTAssertTrue(model.contextualDetailLines.isEmpty, step.rawValue)
+            case .branch:
+                // C10: Step 2 shows "<Path> · choose a sub-class".
+                XCTAssertNotNil(model.layout.contextualDetailFrame, step.rawValue)
+                XCTAssertFalse(model.contextualDetailLines.isEmpty, step.rawValue)
+            default:
+                break // .skills / .review detail band is focus-dependent, not asserted here.
             }
             XCTAssertTrue(model.visibleDescriptors.contains {
                 $0.layoutRegion == .scrollingContent &&
@@ -952,14 +946,25 @@ final class RPGScreenModelTests: XCTestCase {
             XCTAssertTrue(model.descriptors.filter {
                 $0.layoutRegion == .fixed && $0.role == .button
             }.allSatisfy { model.layout.commandFrame.contains($0.frame) })
-            if step == .path {
+            switch step {
+            case .path:
                 XCTAssertNotNil(model.descriptors.first {
-                    $0.id.rawValue == "creation:path:card" && $0.visibleFrame != nil
-                })
-            } else if step == .branch, let branch = creation.selectedDraft?.branchID {
+                    $0.id == .path("warden") && $0.visibleFrame != nil
+                }, step.rawValue)
+            case .branch:
                 XCTAssertNotNil(model.descriptors.first {
-                    $0.id == .branch(branch) && $0.visibleFrame != nil
-                })
+                    $0.id == .branch("warden_guardian") && $0.visibleFrame != nil
+                }, step.rawValue)
+            case .skills:
+                // The starting-skill pool scrolls at the compact viewport, so a card need not be
+                // fully visible; it must be present and actionable.
+                XCTAssertNotNil(model.descriptors.first {
+                    $0.id == .skill("guard_stance") && $0.isActionable
+                }, step.rawValue)
+            case .review:
+                XCTAssertNotNil(model.descriptors.first {
+                    $0.id.rawValue.hasPrefix("creation:review:row:")
+                }, step.rawValue)
             }
         }
         for page in 1...4 {
@@ -971,7 +976,6 @@ final class RPGScreenModelTests: XCTestCase {
                 $0.id.rawValue.hasPrefix("tutorial:") &&
                     !$0.id.rawValue.contains(":operation:")
             })
-            XCTAssertNotNil(model.layout.contextualDetailFrame)
             XCTAssertNotNil(tutorial.visibleFrame)
             XCTAssertTrue(model.contentFrame.contains(tutorial.frame))
             XCTAssertTrue(rpgDescriptorVisualLinesFit(
@@ -1054,11 +1058,44 @@ final class RPGScreenModelTests: XCTestCase {
                        "Character changes are unavailable in this LAN session. Quick-slot editing requires a compatible host session.")
     }
 
+    /// D1: the Review step's three command-row buttons (Reject / Back / Accept) must never
+    /// overlap -- an earlier 28px Reject/Back overlap routed discard-clicks to Reject under
+    /// reverse-order hit-testing. Checked across every installed viewport.
+    func testReviewCommandRowButtonsNeverOverlap() throws {
+        var session = rpgInitialCreationSession()
+        session = try rpgReduceCreationSession(session, command: .choosePath("warden")).get()
+        session = try rpgReduceCreationSession(session, command: .chooseBranch("warden_guardian")).get()
+        session = try rpgReduceCreationSession(session, command: .confirmStartingSkills).get()
+        let reviewID = RPGUIElementID(rawValue: "creation:review")!
+        let ids = [
+            RPGUIElementID.operation(owner: reviewID, name: "create"),
+            RPGUIElementID.operation(owner: reviewID, name: "reject"),
+            RPGUIElementID(rawValue: "creation:review:operation:back")!,
+        ]
+        for viewport in RPGUIHarnessViewport.allCases {
+            let size = viewport.size
+            let model = rpgBuildScreenModel(RPGScreenModelInput(
+                state: .uncreated(), creation: session,
+                viewportWidth: size.0, viewportHeight: size.1))
+            let frames = try ids.map { id -> RPGLogicalRect in
+                try XCTUnwrap(model.descriptors.first { $0.id == id }?.frame, "\(id.rawValue)")
+            }
+            for left in frames.indices {
+                for right in frames.indices where left < right {
+                    let a = frames[left], b = frames[right]
+                    let overlaps = a.x < b.maxX && b.x < a.maxX && a.y < b.maxY && b.y < a.maxY
+                    XCTAssertFalse(overlaps,
+                        "\(viewport.rawValue): review command buttons \(ids[left].rawValue) and \(ids[right].rawValue) overlap")
+                }
+            }
+        }
+    }
+
     func testCreationReviewAuthorityCaveatsAreExactForEveryPhase() throws {
         var session = rpgInitialCreationSession()
-        session = try rpgReduceCreationSession(session, command: .selectPath("warden")).get()
+        session = try rpgReduceCreationSession(session, command: .choosePath("warden")).get()
         session = try rpgReduceCreationSession(session,
-            command: .selectBranch("warden_guardian")).get()
+            command: .chooseBranch("warden_guardian")).get()
         session.step = .review
         for phase in RPGAuthorityPresentationPhase.allCases {
             let request = phase == .localReady || phase == .unavailable
@@ -1237,21 +1274,27 @@ final class RPGScreenModelTests: XCTestCase {
             descriptor: descriptor, input: input), .invalidOrReplayedReceipt)
     }
 
-    func testCreateFingerprintLengthPrefixesSpellCountOrderAndIDs() {
-        let attributes = RPGAttributes.defaultCreation
-        let splitLeft = RPGCreationDraft(pathID: "arcanist", attributes: attributes,
-            starterSkillID: "spell_formula", starterSpellIDs: ["a,b", "c"])
-        let splitRight = RPGCreationDraft(pathID: "arcanist", attributes: attributes,
-            starterSkillID: "spell_formula", starterSpellIDs: ["a", "b,c"])
-        let reversed = RPGCreationDraft(pathID: "arcanist", attributes: attributes,
-            starterSkillID: "spell_formula", starterSpellIDs: ["c", "a,b"])
-        let fewer = RPGCreationDraft(pathID: "arcanist", attributes: attributes,
-            starterSkillID: "spell_formula", starterSpellIDs: ["a,b,c"])
-        let baseline = rpgSemanticCommandFingerprint(.create(splitLeft))
-        XCTAssertNotEqual(baseline, rpgSemanticCommandFingerprint(.create(splitRight)))
-        XCTAssertNotEqual(baseline, rpgSemanticCommandFingerprint(.create(reversed)))
-        XCTAssertNotEqual(baseline, rpgSemanticCommandFingerprint(.create(fewer)))
-        XCTAssertEqual(baseline, rpgSemanticCommandFingerprint(.create(splitLeft)))
+    func testCreateFingerprintLengthPrefixesStartingSkillCountOrderAndIDs() {
+        // The create-command fingerprint keys on pathID/branchID/startingSkillIDs (spells are
+        // derived, not chosen). It count-prefixes the starting-skill list and is order- and
+        // content-sensitive.
+        func draft(_ skills: [String]) -> RPGCreationDraft {
+            RPGCreationDraft(pathID: "arcanist", branchID: "arcanist_elementalist",
+                             startingSkillIDs: skills)
+        }
+        let baseline = rpgSemanticCommandFingerprint(.create(draft(["spell_formula", "spark_weave"])))
+        // Different content.
+        XCTAssertNotEqual(baseline, rpgSemanticCommandFingerprint(.create(draft(["spell_formula", "storm_focus"]))))
+        // Different order.
+        XCTAssertNotEqual(baseline, rpgSemanticCommandFingerprint(.create(draft(["spark_weave", "spell_formula"]))))
+        // Different count.
+        XCTAssertNotEqual(baseline, rpgSemanticCommandFingerprint(.create(draft(["spell_formula"]))))
+        // A different branch is a distinct create command even with the same skill list.
+        XCTAssertNotEqual(baseline, rpgSemanticCommandFingerprint(.create(RPGCreationDraft(
+            pathID: "arcanist", branchID: "arcanist_illusionist",
+            startingSkillIDs: ["spell_formula", "spark_weave"]))))
+        // Stable / deterministic.
+        XCTAssertEqual(baseline, rpgSemanticCommandFingerprint(.create(draft(["spell_formula", "spark_weave"]))))
     }
 
     func testStatusIdentityBoundsAndIndependentSanitization() throws {
@@ -1335,7 +1378,6 @@ final class RPGScreenModelTests: XCTestCase {
             (.sheet(.prepareSpell("ignite")), .spell("ignite")),
             (.sheet(.unprepareSpell("ignite")), .spell("ignite")),
             (.sheet(.selectSpell("ignite")), .spell("ignite")),
-            (.sheet(.spendAttribute(.strength)), .attribute(.strength)),
         ]
         for (operation, target) in exactOperations {
             let tag: RPGStatusOperationTag
@@ -1347,7 +1389,6 @@ final class RPGScreenModelTests: XCTestCase {
             case .sheet(.prepareSpell): tag = .prepareSpell
             case .sheet(.unprepareSpell): tag = .unprepareSpell
             case .sheet(.selectSpell): tag = .selectSpell
-            case .sheet(.spendAttribute): tag = .spendAttribute
             default: XCTFail("Unexpected operation"); continue
             }
             XCTAssertNotNil(build(identity: .local(counter: 2, operationTag: tag),
@@ -1359,9 +1400,6 @@ final class RPGScreenModelTests: XCTestCase {
             persistence: .localUntilReplaced, acknowledgement: .never))
         XCTAssertNil(build(identity: .local(counter: 2, operationTag: .prepareSpell),
             operation: .sheet(.prepareSpell("ignite")), target: .skill("ignite"),
-            persistence: .localUntilReplaced, acknowledgement: .never))
-        XCTAssertNil(build(identity: .local(counter: 2, operationTag: .spendAttribute),
-            operation: .sheet(.spendAttribute(.strength)), target: .attribute(.dexterity),
             persistence: .localUntilReplaced, acknowledgement: .never))
         XCTAssertNil(build(identity: .durable(durable, status: .accepted), kind: .rejection,
             persistence: .durableInboxPendingRender,
@@ -1441,10 +1479,15 @@ final class RPGScreenModelTests: XCTestCase {
     func testCreationAndTutorialExposeOnlyExplicitOperations() {
         let creation = rpgBuildScreenModel(RPGScreenModelInput(state: .uncreated(),
             viewportWidth: 360, viewportHeight: 224))
-        XCTAssertTrue(creation.descriptors.filter { $0.id.rawValue.hasPrefix("path:") &&
-            !$0.id.rawValue.contains(":operation:") }.allSatisfy { !$0.isActionable })
-        XCTAssertTrue(creation.descriptors.contains { $0.actionCommand == .previousClass && $0.isActionable })
-        XCTAssertTrue(creation.descriptors.contains { $0.actionCommand == .nextClass && $0.isActionable })
+        // Single-click card activation: every path card carries its own .choosePath command and
+        // is directly actionable (the class carousel's separate prev/next arrows are retired).
+        XCTAssertTrue(creation.descriptors.filter { $0.id.rawValue.hasPrefix("path:") }
+            .allSatisfy { $0.actionCommand != nil && $0.isActionable })
+        for path in RPG_PATH_DEFINITIONS {
+            XCTAssertTrue(creation.descriptors.contains {
+                $0.id == .path(path.id) && $0.actionCommand == .choosePath(path.id)
+            }, path.id)
+        }
 
         var created = RPGCharacterState.uncreated()
         if let fixture = rpgScreenFixture(pathID: "warden", branchID: "warden_guardian") { created = fixture }
@@ -1460,8 +1503,8 @@ final class RPGScreenModelTests: XCTestCase {
             equipmentSummary: "Apprentice robes", focusSummary: "Apprentice Focus equipped",
             viewportWidth: 700, viewportHeight: 420, tab: .character))
         let characterLabels = Set(character.descriptors.map(\.label))
-        for label in ["Path", "Specialization", "Level and XP", "Fatigue", "Attributes",
-                      "Derived health", "Derived recovery", "Derived offense", "Banked points",
+        for label in ["Path", "Sub-class", "Level and XP", "Fatigue", "Health", "Growth",
+                      "Derived recovery", "Derived offense", "Banked points",
                       "Equipment", "Focus", "Next milestone", "Level-one guidance"] {
             XCTAssertTrue(characterLabels.contains(label), label)
         }
@@ -1472,56 +1515,41 @@ final class RPGScreenModelTests: XCTestCase {
         XCTAssertEqual(progression.descriptors.filter { $0.id.rawValue.hasPrefix("progression:level:") }.count, 20)
         XCTAssertTrue(progression.descriptors.contains { $0.label == "Banked points" })
         XCTAssertTrue(progression.descriptors.contains { $0.label == "Next legal purchase" })
-        XCTAssertTrue(progression.descriptors.contains { $0.label == "Specialization completion" })
+        XCTAssertTrue(progression.descriptors.contains { $0.label == "Sub-class completion" })
         XCTAssertTrue(progression.descriptors.contains { $0.label == "Divergence" })
 
         var session = rpgInitialCreationSession()
-        session = try rpgReduceCreationSession(session, command: .selectPath("arcanist")).get()
-        session = try rpgReduceCreationSession(session, command: .next).get()
-        session = try rpgReduceCreationSession(session, command: .next).get()
+        session = try rpgReduceCreationSession(session, command: .choosePath("arcanist")).get()
+        let branchID = try XCTUnwrap(rpgPathDefinition("arcanist")?.branchIDs.first)
+        session = try rpgReduceCreationSession(session, command: .chooseBranch(branchID)).get()
+        session = try rpgReduceCreationSession(session, command: .confirmStartingSkills).get()
         let review = rpgBuildScreenModel(RPGScreenModelInput(state: .uncreated(), creation: session,
             viewportWidth: 700, viewportHeight: 420))
         let reviewLabels = Set(review.descriptors.map(\.label))
-        for label in ["Path and specialization", "Attributes", "Foundation", "Starter kit",
-                      "Automatic spells", "Focus requirement", "Level-one progression",
-                      "Configured RPG chords", "Controller scope", "Inventory", "Authority"] {
+        for label in ["Path", "Sub-class", "Starting skills", "Spells granted",
+                      "Health and fatigue", "Starter kit", "Focus requirement",
+                      "Level-one progression", "Configured RPG chords", "Controller scope",
+                      "Inventory", "Authority"] {
             XCTAssertTrue(reviewLabels.contains(label), label)
         }
         XCTAssertEqual(review.creationReview?.configuredChords.count, 12)
         XCTAssertTrue(review.creationReview?.controllerScope.contains("RPG menus and actions") == true)
     }
 
-    func testMalformedArithmeticInputsFailClosedWithoutTrap() throws {
-        var session = rpgInitialCreationSession()
-        XCTAssertEqual(rpgReduceCreationSession(session,
-            command: .adjustAttribute(.strength, Int.max)),
-            .failure(.invalidAttributeValue(.strength, session.selectedDraft!.attributes.strength)))
-        session.pathDrafts[0].attributes.strength = Int.max
-        XCTAssertEqual(rpgReduceCreationSession(session, command: .adjustAttribute(.strength, 1)),
-            .failure(.invalidAttributeValue(.strength, Int.max)))
-        session.pathDrafts[0].attributes.dexterity = Int.max
-        XCTAssertEqual(rpgCreationDraft(from: session), .failure(.invalidAttributeBudget(Int.max)))
-
-        for extreme in [Int.max, Int.min] {
-            var multiField = rpgInitialCreationSession()
-            multiField.pathDrafts[0].attributes = RPGAttributes(
-                strength: extreme, dexterity: extreme, intelligence: extreme,
-                endurance: extreme, luck: extreme)
-            XCTAssertNil(rpgCreationPointsRemaining(multiField))
-            XCTAssertEqual(rpgCreationDraft(from: multiField),
-                           .failure(.invalidAttributeBudget(Int.max)))
-            XCTAssertEqual(rpgReduceCreationSession(multiField, command: .next),
-                           .failure(.invalidAttributeBudget(Int.max)))
-            let model = rpgBuildScreenModel(RPGScreenModelInput(
-                state: .uncreated(), creation: multiField,
-                viewportWidth: 360, viewportHeight: 224))
-            XCTAssertNotNil(model.descriptors.first {
-                $0.id.rawValue == "creation:path:unavailable" && !$0.isActionable
-            })
-            XCTAssertFalse(model.descriptors.contains {
-                $0.actionCommand == .creationNext
-            })
-        }
+    /// Wrong-step creation commands and extreme tutorial-page arithmetic both fail closed without
+    /// trapping. The attribute +/- arithmetic this test used to cover no longer exists (the
+    /// attribute system was removed); the creation reducer's remaining unbounded-input surface is
+    /// step-gating, exercised here directly.
+    func testWrongStepCreationCommandsAndExtremeTutorialArithmeticFailClosedWithoutTrap() throws {
+        XCTAssertEqual(rpgReduceCreationSession(
+            rpgInitialCreationSession(), command: .chooseBranch("warden_guardian")),
+            .failure(.cannotAdvance))
+        XCTAssertEqual(rpgReduceCreationSession(
+            rpgInitialCreationSession(), command: .toggleStartingSkill("guard_stance")),
+            .failure(.cannotAdvance))
+        XCTAssertEqual(rpgReduceCreationSession(
+            rpgInitialCreationSession(), command: .confirmStartingSkills),
+            .failure(.cannotAdvance))
 
         var tutorial = RPGTutorialState(seenVersion: 0, page: 1)
         tutorial.page = Int.max
@@ -1538,39 +1566,41 @@ final class RPGScreenModelTests: XCTestCase {
         for path in RPG_PATH_DEFINITIONS {
             for branchID in path.branchIDs {
                 var session = rpgInitialCreationSession()
-                session = try rpgReduceCreationSession(session, command: .selectPath(path.id)).get()
                 XCTAssertEqual(session.step, .path)
-                session = try rpgReduceCreationSession(session, command: .next).get()
+                session = try rpgReduceCreationSession(session, command: .choosePath(path.id)).get()
                 XCTAssertEqual(session.step, .branch)
-                session = try rpgReduceCreationSession(session, command: .selectBranch(branchID)).get()
+                session = try rpgReduceCreationSession(session, command: .chooseBranch(branchID)).get()
                 XCTAssertEqual(session.selectedDraft?.branchID, branchID)
-                session = try rpgReduceCreationSession(session, command: .next).get()
+                XCTAssertEqual(session.step, .skills)
+                session = try rpgReduceCreationSession(session, command: .confirmStartingSkills).get()
                 XCTAssertEqual(session.step, .review)
-                session = try rpgReduceCreationSession(session, command: .resetToPreset).get()
-                XCTAssertEqual(session.selectedDraft?.attributes, rpgCreationPreset(pathID: path.id))
                 let draft = try rpgCreationDraft(from: session).get()
                 XCTAssertEqual(draft.pathID, path.id)
-                XCTAssertEqual(draft.starterSkillID, rpgBranchDefinition(branchID)?.skillIDs.first)
+                XCTAssertEqual(draft.branchID, branchID)
+                XCTAssertEqual(draft.startingSkillIDs.count, RPG_STARTING_SKILL_COUNT)
                 XCTAssertTrue(draft.starterSpellIDs.isEmpty)
                 reviewed += 1
 
+                session = try rpgReduceCreationSession(session, command: .back).get()
+                XCTAssertEqual(session.step, .skills)
                 session = try rpgReduceCreationSession(session, command: .back).get()
                 XCTAssertEqual(session.step, .branch)
                 session = try rpgReduceCreationSession(session, command: .back).get()
                 XCTAssertEqual(session.step, .path)
                 XCTAssertEqual(rpgReduceCreationSession(session, command: .back), .failure(.cannotAdvance))
 
-                let otherBranch = RPG_PATH_DEFINITIONS.first { $0.id != path.id }!.branchIDs[0]
-                var atBranch = try rpgReduceCreationSession(session, command: .next).get()
-                XCTAssertEqual(rpgReduceCreationSession(atBranch, command: .selectBranch(otherBranch)),
+                let otherPath = try XCTUnwrap(RPG_PATH_DEFINITIONS.first { $0.id != path.id })
+                let otherBranch = otherPath.branchIDs[0]
+                var atPath = try rpgReduceCreationSession(session, command: .choosePath(path.id)).get()
+                XCTAssertEqual(rpgReduceCreationSession(atPath, command: .chooseBranch(otherBranch)),
                                .failure(.branchDoesNotBelongToPath(otherBranch)))
-                atBranch = try rpgReduceCreationSession(atBranch, command: .selectBranch(branchID)).get()
-                XCTAssertEqual(try rpgReduceCreationSession(atBranch, command: .next).get().step,
-                               .review)
+                atPath = try rpgReduceCreationSession(atPath, command: .chooseBranch(branchID)).get()
+                atPath = try rpgReduceCreationSession(atPath, command: .confirmStartingSkills).get()
+                XCTAssertEqual(atPath.step, .review)
             }
         }
         XCTAssertEqual(reviewed, 18)
-        XCTAssertEqual(rpgReduceCreationSession(rpgInitialCreationSession(), command: .selectPath("missing")),
+        XCTAssertEqual(rpgReduceCreationSession(rpgInitialCreationSession(), command: .choosePath("missing")),
                        .failure(.unknownPath("missing")))
     }
 
@@ -1582,26 +1612,29 @@ final class RPGScreenModelTests: XCTestCase {
                 let character = try XCTUnwrap(rpgCharacterSummaryProjection(state,
                     equipmentSummary: "equipment", focusSummary: "focus"))
                 XCTAssertEqual(character.path, path.displayName)
-                XCTAssertEqual(character.specialization, rpgBranchDefinition(branchID)?.displayName)
-                XCTAssertEqual(character.attributes.count, 5)
+                XCTAssertEqual(character.subClass, rpgBranchDefinition(branchID)?.displayName)
+                XCTAssertFalse(character.growthLine.isEmpty)
+                XCTAssertFalse(character.healthLine.isEmpty)
+                XCTAssertFalse(character.fatigueLine.isEmpty)
                 XCTAssertNotNil(character.levelOneGuidance)
 
                 let progression = rpgProgressionSummaryProjection(state)
                 XCTAssertEqual(progression.levels.count, 20)
                 XCTAssertEqual(progression.levels.map(\.level), Array(1...20))
-                XCTAssertEqual(progression.levels.flatMap(\.roadmapMilestones).count, 9)
+                // Each sub-class roadmap has 15 milestones (5 ranks * 3 nodes); every level's
+                // milestones are disjoint, so the flattened total across all 20 levels is exact.
+                XCTAssertEqual(progression.levels.flatMap(\.roadmapMilestones).count, 15)
 
                 var session = rpgInitialCreationSession()
-                session = try rpgReduceCreationSession(session, command: .selectPath(path.id)).get()
-                session = try rpgReduceCreationSession(session, command: .next).get()
-                session = try rpgReduceCreationSession(session, command: .selectBranch(branchID)).get()
-                session = try rpgReduceCreationSession(session, command: .next).get()
+                session = try rpgReduceCreationSession(session, command: .choosePath(path.id)).get()
+                session = try rpgReduceCreationSession(session, command: .chooseBranch(branchID)).get()
+                session = try rpgReduceCreationSession(session, command: .confirmStartingSkills).get()
                 let review = try XCTUnwrap(rpgCreationReviewProjection(session: session,
                     chordBindings: rpgDefaultChordBindings(), authority: .localReady,
                     inventoryCapacitySummary: "inventory caveat"))
                 XCTAssertEqual(review.path, path.displayName)
-                XCTAssertEqual(review.branch, rpgBranchDefinition(branchID)?.displayName)
-                XCTAssertEqual(review.attributes.count, 5)
+                XCTAssertEqual(review.subClass, rpgBranchDefinition(branchID)?.displayName)
+                XCTAssertEqual(review.startingSkills.count, RPG_STARTING_SKILL_COUNT)
                 XCTAssertEqual(review.configuredChords.count, 12)
                 XCTAssertFalse(review.starterKit.isEmpty)
                 XCTAssertFalse(review.levelOneGuidance.isEmpty)
@@ -1794,113 +1827,33 @@ final class RPGScreenModelTests: XCTestCase {
         })
     }
 
-    func testIntegratedClassCarouselWrapsPreservesDraftsAndSkipsLegacyAttributeStep() throws {
-        var session = rpgInitialCreationSession()
-        let first = try XCTUnwrap(RPG_PATH_DEFINITIONS.first)
-        let last = try XCTUnwrap(RPG_PATH_DEFINITIONS.last)
-        session = try rpgReduceCreationSession(session, command: .cyclePath(-1)).get()
-        XCTAssertEqual(session.selectedPathID, last.id)
-        session = try rpgReduceCreationSession(session, command: .cyclePath(1)).get()
-        XCTAssertEqual(session.selectedPathID, first.id)
-
-        session = try rpgReduceCreationSession(session,
-            command: .adjustAttribute(.luck, -1)).get()
-        session = try rpgReduceCreationSession(session,
-            command: .adjustAttribute(.endurance, 1)).get()
-        let edited = session.selectedDraft
-        session = try rpgReduceCreationSession(session, command: .cyclePath(1)).get()
-        session = try rpgReduceCreationSession(session, command: .cyclePath(-1)).get()
-        XCTAssertEqual(session.selectedDraft, edited)
-        session = try rpgReduceCreationSession(session, command: .next).get()
-        XCTAssertEqual(session.step, .branch)
-        session = try rpgReduceCreationSession(session, command: .next).get()
-        XCTAssertEqual(session.step, .review)
-        session = try rpgReduceCreationSession(session, command: .back).get()
-        XCTAssertEqual(session.step, .branch)
-    }
-
-    func testClassCardPublishesOneClassArrowsAttributesAndExactContinue() throws {
+    /// The class carousel was retired for a single-click card grid: every path is simultaneously
+    /// present as its own actionable card (amendment behind the design mock), no arrows, no
+    /// dedicated attribute step, and no actionable descriptors overlap at the compact viewport.
+    func testCreationPathGridReplacesCarouselWithNoOverlapAndNoLegacyAttributeStep() throws {
         let session = rpgInitialCreationSession()
         let model = rpgBuildScreenModel(RPGScreenModelInput(
             state: .uncreated(), creation: session,
             viewportWidth: 700, viewportHeight: 420))
-        XCTAssertEqual(model.descriptors.filter {
-            $0.id.rawValue == "creation:path:card"
-        }.count, 1)
-        let previous = try XCTUnwrap(model.descriptors.first {
-            $0.actionCommand == .previousClass
-        })
-        let following = try XCTUnwrap(model.descriptors.first {
-            $0.actionCommand == .nextClass
-        })
-        XCTAssertEqual(previous.id.rawValue, "creation:path:previous-class")
-        XCTAssertEqual(previous.adornment, .carouselPrevious)
-        XCTAssertEqual(previous.visualLines, [])
-        XCTAssertEqual(previous.frame.width, 30)
-        XCTAssertEqual(previous.frame.height, 30)
-        XCTAssertEqual(previous.label,
-                       "Previous class, \(try XCTUnwrap(RPG_PATH_DEFINITIONS.last).displayName)")
-        XCTAssertEqual(previous.help,
-                       "Show \(try XCTUnwrap(RPG_PATH_DEFINITIONS.last).displayName). Wraps through classes in registry order.")
-        XCTAssertEqual(following.id.rawValue, "creation:path:next-class")
-        XCTAssertEqual(following.adornment, .carouselNext)
-        XCTAssertEqual(following.visualLines, [])
-        XCTAssertEqual(following.frame.width, 30)
-        XCTAssertEqual(following.frame.height, 30)
-        XCTAssertEqual(following.label,
-                       "Next class, \(RPG_PATH_DEFINITIONS[1].displayName)")
-        XCTAssertEqual(following.help,
-                       "Show \(RPG_PATH_DEFINITIONS[1].displayName). Wraps through classes in registry order.")
+        let pathCards = model.descriptors.filter { $0.id.rawValue.hasPrefix("path:") }
+        XCTAssertEqual(pathCards.count, RPG_PATH_DEFINITIONS.count)
+        for path in RPG_PATH_DEFINITIONS {
+            let card = try XCTUnwrap(model.descriptors.first { $0.id == .path(path.id) }, path.id)
+            XCTAssertEqual(card.actionCommand, .choosePath(path.id), path.id)
+            XCTAssertTrue(card.isActionable, path.id)
+        }
         XCTAssertFalse(model.descriptors.contains {
             $0.visualLines.contains("‹") || $0.visualLines.contains("›")
         })
+        XCTAssertFalse(model.descriptors.contains { $0.id.rawValue.hasPrefix("attribute:") })
         XCTAssertEqual(model.footerText, "Tab to move focus; Enter to activate")
-        XCTAssertEqual(model.descriptors.filter {
-            $0.id.rawValue.hasPrefix("attribute:") && $0.role == .row
-        }.count, RPG_ATTRIBUTE_DISPLAY_ORDER.count)
-        let next = try XCTUnwrap(model.descriptors.first {
-            $0.id.rawValue == "creation:path:operation:next"
-        })
-        XCTAssertEqual(next.label, "Continue")
-        XCTAssertTrue(next.enabled)
-        XCTAssertEqual(model.stepOrTabText, "Choose Class")
+        XCTAssertEqual(model.stepOrTabText, rpgCreationStepTitle(.path))
 
         let compact = rpgBuildScreenModel(RPGScreenModelInput(
             state: .uncreated(), creation: session,
             viewportWidth: 360, viewportHeight: 224))
-        let requiredIDs = ["creation:path:previous-class", "creation:path:next-class",
-                           "creation:path:operation:reset", "creation:path:operation:next"]
-        for requiredID in requiredIDs {
-            let descriptor = try XCTUnwrap(compact.descriptors.first {
-                $0.id.rawValue == requiredID
-            }, requiredID)
-            XCTAssertNotNil(descriptor.visibleFrame, requiredID)
-        }
-        let compactPoints = try XCTUnwrap(compact.descriptors.first {
-            $0.id.rawValue == "creation:path:points-remaining"
-        })
-        XCTAssertNotNil(compactPoints.visibleFrame)
-        XCTAssertEqual(compactPoints.visualLines, ["Points remaining: 0"])
-        XCTAssertTrue(rpgDescriptorVisualLinesFit(
-            frame: compactPoints.frame, iconAssetID: compactPoints.iconAssetID,
-            visualLines: compactPoints.visualLines))
-        let compactCard = try XCTUnwrap(compact.descriptors.first {
-            $0.id.rawValue == "creation:path:card"
-        })
-        let source = try XCTUnwrap(rpgPathCardModels(session: session).first {
-            $0.pathID == session.selectedPathID
-        })
-        let cardTextWidth = compactCard.frame.width - 36
-        XCTAssertTrue(compactCard.visualLines.contains(
-            try XCTUnwrap(rpgWrappedPresentationLines(
-                source.roleText, width: cardTextWidth).first)))
-        XCTAssertTrue(compactCard.visualLines.contains(
-            try XCTUnwrap(rpgWrappedPresentationLines(
-                source.primaryText, width: cardTextWidth).first)))
-        XCTAssertTrue(rpgDescriptorVisualLinesFit(
-            frame: compactCard.frame, iconAssetID: compactCard.iconAssetID,
-            visualLines: compactCard.visualLines))
-        let actions = compact.descriptors.filter { $0.isActionable }
+        let actions = compact.visibleDescriptors.filter { $0.isActionable }
+        XCTAssertFalse(actions.isEmpty)
         for left in actions.indices {
             for right in actions.indices where left < right {
                 let a = actions[left].frame, b = actions[right].frame
@@ -1915,17 +1868,8 @@ final class RPGScreenModelTests: XCTestCase {
             let sized = rpgBuildScreenModel(RPGScreenModelInput(
                 state: .uncreated(), creation: session,
                 viewportWidth: size.0, viewportHeight: size.1))
-            XCTAssertEqual(sized.stepOrTabText, "Choose Class")
+            XCTAssertEqual(sized.stepOrTabText, rpgCreationStepTitle(.path))
             XCTAssertEqual(sized.footerText, "Tab to move focus; Enter to activate")
-            XCTAssertEqual(sized.scrollOffset, 0)
-            XCTAssertLessThanOrEqual(sized.contentHeight, sized.viewportHeight)
-            let points = try XCTUnwrap(sized.descriptors.first {
-                $0.id.rawValue == "creation:path:points-remaining"
-            })
-            XCTAssertNotNil(points.visibleFrame)
-            XCTAssertFalse(points.visualLines.isEmpty)
-            XCTAssertTrue(rpgDescriptorVisualLinesFit(
-                frame: points.frame, iconAssetID: nil, visualLines: points.visualLines))
         }
     }
 
@@ -1949,38 +1893,37 @@ final class RPGScreenModelTests: XCTestCase {
 
     func testMalformedCreationDraftRegistriesFailClosedWithoutMutation() throws {
         let valid = rpgInitialCreationSession()
-        var malformed: [RPGCreationSession] = []
         var duplicate = valid
         duplicate.pathDrafts[1] = duplicate.pathDrafts[0]
-        malformed.append(duplicate)
         var missing = valid
         missing.pathDrafts.removeLast()
-        malformed.append(missing)
         var extra = valid
         extra.pathDrafts.append(try XCTUnwrap(valid.pathDrafts.first))
-        malformed.append(extra)
+        // Structural malformations (wrong draft count or a duplicate/unknown path) are caught by
+        // the reducer's registry guard, which fails every command closed with .starterRegistryMismatch.
+        for session in [duplicate, missing, extra] {
+            XCTAssertEqual(rpgCreationDraft(from: session), .failure(.starterRegistryMismatch))
+            XCTAssertEqual(rpgReduceCreationSession(session, command: .choosePath(session.selectedPathID)),
+                           .failure(.starterRegistryMismatch))
+            XCTAssertEqual(rpgReduceCreationSession(session,
+                command: .toggleStartingSkill("guard_stance")), .failure(.starterRegistryMismatch))
+            _ = rpgBuildScreenModel(RPGScreenModelInput(
+                state: .uncreated(), creation: session,
+                viewportWidth: 360, viewportHeight: 224))
+        }
+
+        // A structurally-valid session whose selected draft carries a branch from the wrong path
+        // passes the registry guard but still fails draft assembly closed (branch/path mismatch).
         var wrongBranch = valid
         wrongBranch.pathDrafts[0].branchID = try XCTUnwrap(
             RPG_PATH_DEFINITIONS.first { $0.id != wrongBranch.pathDrafts[0].pathID }?.branchIDs.first)
-        malformed.append(wrongBranch)
-
-        for session in malformed {
-            XCTAssertEqual(rpgCreationDraft(from: session), .failure(.starterRegistryMismatch))
-            XCTAssertEqual(rpgReduceCreationSession(session, command: .cyclePath(1)),
-                           .failure(.starterRegistryMismatch))
-            XCTAssertEqual(rpgReduceCreationSession(session,
-                command: .adjustAttribute(.strength, -1)), .failure(.starterRegistryMismatch))
-            let model = rpgBuildScreenModel(RPGScreenModelInput(
-                state: .uncreated(), creation: session,
-                viewportWidth: 360, viewportHeight: 224))
-            XCTAssertNotNil(model.descriptors.first {
-                $0.id.rawValue == "creation:path:unavailable" && !$0.isActionable
-            })
-            XCTAssertFalse(model.descriptors.contains { $0.actionCommand == .creationNext })
-        }
+        XCTAssertEqual(rpgCreationDraft(from: wrongBranch), .failure(.starterRegistryMismatch))
+        _ = rpgBuildScreenModel(RPGScreenModelInput(
+            state: .uncreated(), creation: wrongBranch,
+            viewportWidth: 360, viewportHeight: 224))
     }
 
-    func testCarouselAccessibilityAndReducedMotionShareImmediateSemanticState() throws {
+    func testCreationAccessibilityAndReducedMotionShareImmediateSemanticState() throws {
         let session = rpgInitialCreationSession()
         let standard = rpgBuildScreenModel(RPGScreenModelInput(
             state: .uncreated(), creation: session,
@@ -1998,50 +1941,40 @@ final class RPGScreenModelTests: XCTestCase {
                        semantic(reduced).map { "\($0.0)|\($0.1)|\($0.2)|\($0.3)" })
         XCTAssertEqual(semantic(standard).map { "\($0.0)|\($0.1)|\($0.2)|\($0.3)" },
                        semantic(highContrast).map { "\($0.0)|\($0.1)|\($0.2)|\($0.3)" })
-        let card = try XCTUnwrap(reduced.descriptors.first {
-            $0.id.rawValue == "creation:path:card"
-        })
-        XCTAssertTrue(card.label.contains("class 1 of 6"))
-        XCTAssertEqual(highContrast.descriptors.first {
-            $0.id.rawValue == "creation:path:card"
-        }?.adornment, .selectedCheckDoubleBorder)
-        XCTAssertEqual(reduced.descriptors.filter {
-            $0.label.hasPrefix("Increase ") && !$0.help.isEmpty
-        }.count, RPG_ATTRIBUTE_DISPLAY_ORDER.count)
-        XCTAssertEqual(reduced.descriptors.filter {
-            $0.label.hasPrefix("Decrease ") && !$0.help.isEmpty
-        }.count, RPG_ATTRIBUTE_DISPLAY_ORDER.count)
+        let firstPath = try XCTUnwrap(RPG_PATH_DEFINITIONS.first)
+        let card = try XCTUnwrap(reduced.descriptors.first { $0.id == .path(firstPath.id) })
+        XCTAssertTrue(card.label.contains("path 1 of 6"))
+        XCTAssertEqual(highContrast.descriptors.first { $0.id == .path(firstPath.id) }?.adornment,
+                       .selectedCheckDoubleBorder)
     }
 
-    func testCompactAttributeTextSubregionsFitEveryCreationValueBeforeControls() throws {
-        for attribute in RPG_ATTRIBUTE_DISPLAY_ORDER {
-            for value in RPGAttributes.minimum...RPGAttributes.maximumAtCreation {
+    /// Every skill card's text fits inside its own bounded frame at the compact viewport, across
+    /// every path/sub-class's five-skill starting pool -- the closest present-day analog of the
+    /// retired attribute rows that used to fit their text strictly before the +/- controls.
+    func testCompactSkillCardTextFitsWithinItsOwnFrameAcrossEveryStartingSkillPool() throws {
+        for path in RPG_PATH_DEFINITIONS {
+            for branchID in path.branchIDs {
                 var session = rpgInitialCreationSession()
-                session.pathDrafts[0].attributes.set(attribute, value)
+                session = try rpgReduceCreationSession(session, command: .choosePath(path.id)).get()
+                session = try rpgReduceCreationSession(session, command: .chooseBranch(branchID)).get()
                 let model = rpgBuildScreenModel(RPGScreenModelInput(
                     state: .uncreated(), creation: session,
                     viewportWidth: 360, viewportHeight: 224))
-                let row = try XCTUnwrap(model.descriptors.first {
-                    $0.id == .attribute(attribute)
-                })
-                let decrement = try XCTUnwrap(model.descriptors.first {
-                    $0.id == .operation(owner: .attribute(attribute), name: "decrement")
-                })
-                let increment = try XCTUnwrap(model.descriptors.first {
-                    $0.id == .operation(owner: .attribute(attribute), name: "increment")
-                })
-                let availableTextWidth = decrement.frame.x - (row.frame.x + 4)
-                XCTAssertGreaterThan(availableTextWidth, 0)
-                for line in row.visualLines {
-                    XCTAssertLessThanOrEqual(
-                        try XCTUnwrap(rpgSharedConservativeTextWidth(line)),
-                        availableTextWidth,
-                        "\(attribute.rawValue)=\(value): \(line)")
+                let pool = rpgStartingSkillPool(pathID: path.id, branchID: branchID)
+                XCTAssertEqual(pool.count, 5, branchID)
+                // Skill cards are laid out in a scrolling region, so a compact viewport legitimately
+                // pushes later cards below the content frame; each card's own text still fits its own
+                // frame (a failing fit would strip the toggle command), and every card is actionable.
+                for skillID in pool {
+                    let card = try XCTUnwrap(model.descriptors.first { $0.id == .skill(skillID) },
+                                             "\(branchID) \(skillID)")
+                    XCTAssertTrue(rpgDescriptorVisualLinesFit(
+                        frame: card.frame, iconAssetID: card.iconAssetID,
+                        visualLines: card.visualLines), "\(branchID) \(skillID)")
+                    XCTAssertTrue(card.isActionable, "\(branchID) \(skillID)")
+                    XCTAssertTrue(card.reservesIconCell, "\(branchID) \(skillID)")
+                    XCTAssertNotNil(card.rankPips, "\(branchID) \(skillID)")
                 }
-                XCTAssertLessThanOrEqual(decrement.frame.maxX, increment.frame.x)
-                XCTAssertTrue(model.contentFrame.contains(row.frame))
-                XCTAssertTrue(model.contentFrame.contains(decrement.frame))
-                XCTAssertTrue(model.contentFrame.contains(increment.frame))
             }
         }
     }

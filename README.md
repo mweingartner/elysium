@@ -19,7 +19,7 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 - **Villager trading** — profession-specific villagers and wandering traders advertise the resources they want, expose their complete ordered offer catalog, and show both costs, stock, level locks, restock state, and affordability before an atomic trade. The trade sheet supports pointer, keyboard, controller, and macOS Accessibility navigation.
 - **World creation choices** — Default, Superflat, Large Biomes, Amplified, Single Biome, Debug, and Elysium's Rich Resources preset, plus configurable dungeon density and an optional Character Classes rule.
 - **Playable structure sites** — new village plans are moved to validated dry, supported terrain or omitted; ordinary dungeons stay dry, cave-connected, and wholly inside their origin chunk, while a region-budgeted minority may generate as intentionally sealed underwater rooms. Existing saved/modified chunks are never migrated or rewritten; mixed old/new generation seams are supported.
-- **RPG progression** — six character paths with attributes, levels, always-on passive skills, prepared active skills and spells, fatigue, cooldowns, and a second quick-slot bar activated with Shift+1 through Shift+9. Character progression is optional per world; some character operations remain local-world-only while LAN authority continues to be hardened.
+- **RPG progression** — six character paths, each with three sub-classes, levels, five-rank skills with a skill-point economy, always-on passive skills, prepared active skills and spells, fatigue, cooldowns, and a second quick-slot bar activated with Shift+1 through Shift+9. Character progression is optional per world; some character operations remain local-world-only while LAN authority continues to be hardened.
 - **Object templates** — copy connected builds with Command-C, browse and preview saved templates with Command-V, rotate and place them, and undo the most recent placement with Command-Z. Template parsing and placement are bounded and validated before world mutation.
 - **Local-network multiplayer** — host, discover, join, or directly connect to LAN worlds with join codes and host-authoritative replication. Elysium has no public matchmaking, cloud relay, or built-in NAT traversal; a join code is an access gate, not protection from an already hostile local network.
 - **Optional local AI assistant** — `/ai <request>` sends context to a configured Ollama endpoint at `http://localhost:11434`. Model output is treated as untrusted and reduced to registered, validated, count- and distance-bounded game actions. Elysium does not control what an independently configured Ollama installation or model provider does beyond that interface.
@@ -29,18 +29,25 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 
 For the subsystem boundaries and determinism rules, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-### Character paths and branches
+### Character paths and sub-classes
 
-When the Character Classes rule is on, character creation runs **Path → Branch → Attributes → Review**. A **path** is the class (the top-level choice); each path has exactly three **branches** (specializations — stored internally as the character's specialization, not a separate "role"). Each branch defines a small skill tree (three skills, some always-on passive, some prepared active skills with a cooldown and fatigue cost), and two paths (Arcanist, Mender) also grant starter spells. Attributes are Strength, Dexterity, Intelligence, Endurance, and Luck.
+When the Character Classes rule is on, character creation runs **Path → Sub-class → Starting Skills →
+Review**. A **path** is the top-level choice; each path has exactly three **sub-classes** (a
+focused build within that path). Choosing a sub-class picks its three-skill tree (some skills always-on
+passive, some prepared active with a cooldown and fatigue cost); you then pick exactly 3 starting skills
+at rank 1 from a 5-skill pool (your sub-class's 3 plus the signature skill of each of the path's other two
+sub-classes). Every skill has 5 ranks, and two paths (Arcanist, Mender) grant starter spells through their
+first-rank skill unlocks. There are no attributes — health and fatigue grow with level according to a
+fixed per-path rate.
 
-| Path (class) | Primary attributes | Focus | Branches (specializations) |
+| Path | Growth | Focus | Sub-classes |
 |---|---|---|---|
-| **Warden** | Strength, Endurance | Armor, shield timing, threat control, protection | **Guardian** (defend an area, keep allies up) · **Vanguard** (close distance, punish exposed foes) · **Bulwark** (turn armor and blocks into durable defense) |
-| **Ranger** | Dexterity, Luck | Bows, scouting, terrain movement, ambushes, fieldcraft | **Marksman** (accurate ranged, fast target-swap) · **Scout** (stealth, map-reading, ambush setup) · **Survivalist** (forage, camp, weather, animals) |
-| **Delver** | Strength, Endurance | Mining, traps, underground navigation, lockwork, treasure | **Miner** (ore-finding, fast tunneling) · **Trapper** (detect, disarm, and build traps) · **Treasure-Seeker** (salvage, locks, risky loot) |
-| **Arcanist** | Intelligence, Endurance | Fatigue-driven spellcasting *(+ starter spells)* | **Elementalist** (fire, frost, force, light) · **Illusionist** (blur, decoys, invisibility) · **Ritualist** (long casts, wards, summons) |
-| **Mender** | Intelligence, Luck | Healing, food, antidotes, protective rites *(+ starter spells)* | **Physic** (direct and emergency healing) · **Harvest** (food, herbs, medicine) · **Sanctuary** (safe zones, wards, rescues) |
-| **Tinker** | Intelligence, Dexterity | Redstone, automation, gear mods, explosives | **Redstone** (compact circuits, signals) · **Artificer** (gear tuning, field repairs) · **Sapper** (controlled blasts, demolition) |
+| **Warden** | Health 26 +2/lvl · Fatigue 10 +1/lvl | Armor, shield timing, threat control, protection | **Guardian** (defend an area, keep allies up) · **Vanguard** (close distance, punish exposed foes) · **Bulwark** (turn armor and blocks into durable defense) |
+| **Ranger** | Health 20 +1/lvl · Fatigue 14 +2/lvl | Bows, scouting, terrain movement, ambushes, fieldcraft | **Marksman** (accurate ranged, fast target-swap) · **Scout** (stealth, map-reading, ambush setup) · **Survivalist** (forage, camp, weather, animals) |
+| **Delver** | Health 24 +2/lvl · Fatigue 12 +1/lvl | Mining, traps, underground navigation, lockwork, treasure | **Miner** (ore-finding, fast tunneling) · **Trapper** (detect, disarm, and build traps) · **Treasure-Seeker** (salvage, locks, risky loot) |
+| **Arcanist** | Health 16 +1/lvl · Fatigue 20 +3/lvl | Fatigue-driven spellcasting *(+ starter spells)* | **Elementalist** (fire, frost, force, light) · **Illusionist** (blur, decoys, invisibility) · **Ritualist** (long casts, wards, summons) |
+| **Mender** | Health 18 +1/lvl · Fatigue 18 +2/lvl | Healing, food, antidotes, protective rites *(+ starter spells)* | **Physic** (direct and emergency healing) · **Harvest** (food, herbs, medicine) · **Sanctuary** (safe zones, wards, rescues) |
+| **Tinker** | Health 20 +1/lvl · Fatigue 16 +2/lvl | Redstone, automation, gear mods, explosives | **Redstone** (compact circuits, signals) · **Artificer** (gear tuning, field repairs) · **Sapper** (controlled blasts, demolition) |
 
 ## Install and run
 

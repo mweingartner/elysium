@@ -5,6 +5,24 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- The RPG character system is simplified. Attributes (Strength/Dexterity/Intelligence/Endurance/Luck) are
+  retired: health and fatigue now grow automatically with level at a fixed per-path rate (for example,
+  Warden 26 Health +2/level, 10 Fatigue +1/level), shown on the Character tab as base plus per-level
+  ("Health 38 (26 + 2 per level)"). Skills now have 5 ranks instead of 3, each with its own benefit and
+  level requirement; skills in your chosen sub-class cost 1 skill point per rank, skills from the path's
+  other two sub-classes cost 2; you still earn a skill point per level after level 1, plus a bonus skill
+  point at levels 4, 7, 10, 13, 16, and 19. Character creation is redesigned as four single-click steps —
+  Path → Sub-class → Starting Skills → Review — replacing the old attribute-spending carousel: choose a
+  path, choose one of its three sub-classes, then pick exactly 3 starting skills at rank 1 from a 5-skill
+  pool (your sub-class's 3 plus the signature skill of each other sub-class); the three signature skills
+  are preselected by default, reproducing each path's classic starting skills and starter spells. Escape (or
+  controller B) steps back through creation with your draft intact, closing only
+  from the first step. Existing
+  characters migrate automatically the first time they load: path, sub-class, level, and skill ranks are
+  preserved, health/fatigue are recalculated from the new growth table, any points freed by the attribute
+  retirement become available to spend, and you see a one-time notice explaining the change. Weather Eye
+  also gains two new top ranks: rank 4 names the incoming weather instead of just counting down to it, and
+  rank 5 lets it work in the Nether and the End.
 - Survival crafting now pools ingredients from **every nearby container within 50
   blocks of you** — for both the inventory's 2×2 grid and a crafting table's 3×3
   grid (previously only the table pooled, and only from containers within 25

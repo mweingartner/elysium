@@ -109,6 +109,12 @@ public final class World {
         return allowed
     }
     public var weatherTimer = 12000
+    /// The authoritative overworld world whose surface weather this world's occupants can sense
+    /// remotely (a rank-5 Weather Eye works in the Nether and the End). GameCore sets this on the
+    /// non-overworld dimension worlds at world setup; it is `nil` on the overworld world itself
+    /// (which reads its own fields) and on standalone worlds with no dimension siblings. Weak to
+    /// avoid a world<->world retain cycle.
+    public weak var overworldWeatherSource: World?
     public var rng: RandomX
     public var spawnX = 0.0, spawnY = 80.0, spawnZ = 0.0
     public private(set) var light: LightEngine!

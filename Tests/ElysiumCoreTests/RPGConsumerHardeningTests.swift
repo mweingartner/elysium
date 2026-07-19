@@ -16,15 +16,26 @@ final class RPGConsumerHardeningTests: XCTestCase {
         let ranger = Player(world: world)
         ranger.rpg = mastered(pathID: "ranger", starter: "campcraft")
         world.raining = true
-        let weatherQuanta = [600, 200, 20]
-        for rank in 1...3 {
+        // Ranks 1-3: transition timer only, byte-identical to the shipped v2 output (no incoming
+        // kind). Ranks 4-5: the same 20-tick quantum PLUS the named incoming weather kind.
+        let weatherQuanta = [600, 200, 20, 20, 20]
+        let weatherSeconds = [30, 10, 1, 1, 1]
+        for rank in 1...RPG_SKILL_RANK_CAP {
             ranger.rpg.skillRanks["weather_eye"] = rank
             world.weatherTimer = weatherQuanta[rank - 1]
+            let incoming = rank >= 4 ? "clear" : nil // currently raining -> next transition clears
             let status = rpgWeatherEyeStatus(ranger)
             XCTAssertEqual(status, .active(currentWeather: "rain",
                                            roundedTransitionTicks: weatherQuanta[rank - 1],
-                                           roundedTransitionSeconds: [30, 10, 1][rank - 1]))
-            XCTAssertTrue(rpgHUDInsightLines(ranger).first?.contains("change ~\([30, 10, 1][rank - 1])s") == true)
+                                           roundedTransitionSeconds: weatherSeconds[rank - 1],
+                                           incomingWeather: incoming))
+            let line = rpgHUDInsightLines(ranger).first
+            if rank >= 4 {
+                // Rank 4+ names the incoming kind: "Weather rain · Clear in 1s".
+                XCTAssertEqual(line, "Weather rain · Clear in \(weatherSeconds[rank - 1])s")
+            } else {
+                XCTAssertEqual(line, "Weather rain · change ~\(weatherSeconds[rank - 1])s")
+            }
         }
         world.gameRules["doWeatherCycle"] = 0
         XCTAssertEqual(rpgWeatherEyeStatus(ranger), .cycleLocked(currentWeather: "rain"))
@@ -32,25 +43,54 @@ final class RPGConsumerHardeningTests: XCTestCase {
         XCTAssertFalse(rpgHUDInsightLines(ranger).joined().contains("change ~"))
         world.gameRules["doWeatherCycle"] = 1
 
+        // Cross-dimension: a rank-5 Weather Eye senses the overworld surface weather from the Nether.
         let nether = World(dim: .nether, seed: 813)
         nether.setChunk(Chunk(cx: 0, cz: 0, minY: nether.info.minY,
                               height: nether.info.height))
         let netherRanger = Player(world: nether)
         netherRanger.rpg = mastered(pathID: "ranger", starter: "campcraft")
+
+        // With no overworld source wired, even rank 5 has nothing to read: unavailable (not faked).
         XCTAssertEqual(rpgWeatherEyeStatus(netherRanger),
                        .unavailable(dimensionName: "Nether"))
         XCTAssertEqual(rpgHUDInsightLines(netherRanger).first,
                        "Weather unavailable in Nether")
-        XCTAssertFalse(rpgHUDInsightLines(netherRanger).joined().contains("change ~"))
+
+        // Rank 4 never reaches across dimensions, even with a source available.
+        nether.overworldWeatherSource = world
+        world.raining = true
+        world.thundering = false
+        world.weatherTimer = 20
+        netherRanger.rpg.skillRanks["weather_eye"] = 4
+        XCTAssertEqual(rpgWeatherEyeStatus(netherRanger),
+                       .unavailable(dimensionName: "Nether"))
+
+        // Rank 5 reads the overworld weather (rain -> incoming clear) from the Nether.
+        netherRanger.rpg.skillRanks["weather_eye"] = 5
+        XCTAssertEqual(rpgWeatherEyeStatus(netherRanger),
+                       .active(currentWeather: "rain", roundedTransitionTicks: 20,
+                               roundedTransitionSeconds: 1, incomingWeather: "clear"))
+        XCTAssertEqual(rpgHUDInsightLines(netherRanger).first, "Weather rain · Clear in 1s")
+
+        // When the overworld is clear, a rank-5 Nether reading names the incoming rain.
+        world.raining = false
+        world.thundering = false
+        world.weatherTimer = 40
+        XCTAssertEqual(rpgWeatherEyeStatus(netherRanger),
+                       .active(currentWeather: "clear", roundedTransitionTicks: 40,
+                               roundedTransitionSeconds: 2, incomingWeather: "rain"))
+        XCTAssertEqual(rpgHUDInsightLines(netherRanger).first, "Weather clear · Rain in 2s")
 
         let mender = Player(world: world)
         mender.rpg = mastered(pathID: "mender", starter: "herbal_lore")
-        for rank in 1...3 {
+        // Herbal Lore's rank values are [0.5, 1.0, 1.5, 2.0, 2.5], but a single consume is capped
+        // by the 1.5-fatigue-per-tick Herbal Lore budget, so ranks 4-5 restore 1.5 in one bite.
+        for rank in 1...RPG_SKILL_RANK_CAP {
             mender.rpg.skillRanks["herbal_lore"] = rank
             mender.rpg.fatigue = 0
             world.rpgSimulationTick = rank
             XCTAssertEqual(rpgRestoreHerbalLoreFatigue(mender, consumedItemID: iid("apple")),
-                           [0.5, 1.0, 1.5][rank - 1], accuracy: 0.000_001)
+                           min(1.5, [0.5, 1.0, 1.5, 2.0, 2.5][rank - 1]), accuracy: 0.000_001)
         }
         mender.rpg.skillRanks["herbal_lore"] = 3
         mender.rpg.fatigue = 0
@@ -66,7 +106,8 @@ final class RPGConsumerHardeningTests: XCTestCase {
         mender.rpg.fatigue = 0
         world.rpgSimulationTick += 1
         rpgHandleBlockBreak(mender, cell: Int(cell(B.wheat, 7)), y: 64)
-        XCTAssertEqual(mender.rpg.fatigue, 0.3, accuracy: 0.000_001)
+        // Green Thumb is mastered (rank 5) -> 0.5 fatigue per mature crop.
+        XCTAssertEqual(mender.rpg.fatigue, 0.5, accuracy: 0.000_001)
         XCTAssertEqual(rpgRestoreHerbalLoreFatigue(mender, consumedItemID: iid("apple")),
                        1.5, accuracy: 0.000_001,
                        "Green Thumb and Herbal Lore have independent source budgets")
@@ -128,6 +169,129 @@ final class RPGConsumerHardeningTests: XCTestCase {
         XCTAssertTrue(cache.resolve(key: nil) { computations += 1; return ["stale"] }.isEmpty)
         _ = cache.resolve(key: nextKey) { computations += 1; return [] }
         XCTAssertEqual(computations, 3, "hiding resets the cache before the HUD is shown again")
+    }
+
+    /// Amendment C5 / acceptance criterion 13: each of Weather Eye's five ranks is a distinct
+    /// experience -- coarse (30s), finer (10s), precise (1s), named-forecast (rank 4), and
+    /// named-forecast-that-works-anywhere (rank 5). No rank is an empty tier.
+    func testWeatherEyeFiveRanksAreFiveDistinctExperiences() {
+        let world = makeWorld(seed: 850)
+        let ranger = Player(world: world)
+        ranger.rpg = mastered(pathID: "ranger", starter: "campcraft")
+        world.raining = false // clear -> next transition brings rain
+        world.weatherTimer = 33
+        var lines: [String] = []
+        for rank in 1...RPG_SKILL_RANK_CAP {
+            ranger.rpg.skillRanks["weather_eye"] = rank
+            lines.append(rpgHUDInsightLines(ranger).first ?? "<none>")
+        }
+        XCTAssertEqual(lines, [
+            "Weather clear · change ~30s",  // rank 1: 33 -> ceil to 600 ticks = 30s
+            "Weather clear · change ~10s",  // rank 2: 33 -> ceil to 200 ticks = 10s
+            "Weather clear · change ~2s",   // rank 3: 33 -> ceil to 40 ticks = 2s
+            "Weather clear · Rain in 2s",   // rank 4: names the incoming rain
+            "Weather clear · Rain in 2s",   // rank 5: same forecast, plus cross-dimension reach
+        ])
+        // Rank 4 and rank 5 are only distinguishable by reach: rank 5 forecasts from the Nether.
+        let nether = World(dim: .nether, seed: 851)
+        nether.setChunk(Chunk(cx: 0, cz: 0, minY: nether.info.minY, height: nether.info.height))
+        nether.overworldWeatherSource = world
+        let netherRanger = Player(world: nether)
+        netherRanger.rpg = mastered(pathID: "ranger", starter: "campcraft")
+        netherRanger.rpg.skillRanks["weather_eye"] = 4
+        XCTAssertEqual(rpgWeatherEyeStatus(netherRanger), .unavailable(dimensionName: "Nether"))
+        netherRanger.rpg.skillRanks["weather_eye"] = 5
+        XCTAssertEqual(rpgHUDInsightLines(netherRanger).first, "Weather clear · Rain in 2s")
+    }
+
+    /// Rank 5 senses the End's overworld weather too, not just the Nether.
+    func testWeatherEyeRankFiveReachesFromTheEnd() {
+        let overworld = makeWorld(seed: 860)
+        overworld.raining = true
+        overworld.thundering = true
+        overworld.weatherTimer = 20
+        let end = World(dim: .end, seed: 861)
+        end.setChunk(Chunk(cx: 0, cz: 0, minY: end.info.minY, height: end.info.height))
+        end.overworldWeatherSource = overworld
+        let ender = Player(world: end)
+        ender.rpg = mastered(pathID: "ranger", starter: "campcraft")
+        ender.rpg.skillRanks["weather_eye"] = 4
+        XCTAssertEqual(rpgWeatherEyeStatus(ender), .unavailable(dimensionName: "End"))
+        ender.rpg.skillRanks["weather_eye"] = 5
+        // Overworld is thundering -> reported as "thunder", incoming transition clears.
+        XCTAssertEqual(rpgWeatherEyeStatus(ender),
+                       .active(currentWeather: "thunder", roundedTransitionTicks: 20,
+                               roundedTransitionSeconds: 1, incomingWeather: "clear"))
+        XCTAssertEqual(rpgHUDInsightLines(ender).first, "Weather thunder · Clear in 1s")
+    }
+
+    /// Fortune Read's registry benefit text promises "Reveal two items" at rank 4 and "Reveal
+    /// three items" at rank 5 (ranks 1-3 all stay at one item, differing only in fill precision).
+    /// This pins the consumer to that scaling: revealed item count is 1/1/1/2/3, and a container
+    /// with fewer occupied slots than the rank's reveal count is bounded rather than padded with
+    /// duplicates.
+    func testFortuneReadRevealsScaledItemCountsAtRanksFourAndFive() throws {
+        func itemCount(_ message: String) -> Int { message.components(separatedBy: "×").count - 1 }
+
+        let world = makeWorld(seed: 870)
+        let delver = Player(world: world)
+        delver.rpg = mastered(pathID: "delver", starter: "fortune_read")
+        delver.rpg.preparedSkillIDs = ["fortune_read"]
+        delver.rpg.selectedPreparedActionID = rpgPreparedActionToken(kind: .skill, id: "fortune_read")
+        delver.rpg = repairRPGCharacterState(delver.rpg)
+        delver.setPos(0.5, 64, 0.5)
+        world.addEntity(delver)
+        world.setBlock(0, 65, 4, Int(cell(B.chest)))
+        let be = makeContainerBE(0, 65, 4, 6)
+        be.items![0] = ItemStack(iid("torch"), 3)
+        be.items![1] = ItemStack(iid("redstone"), 5)
+        be.items![2] = ItemStack(iid("bread"), 1)
+        world.setBlockEntity(be)
+
+        for rank in 1...3 {
+            delver.rpg.skillRanks["fortune_read"] = rank
+            delver.rpg.activeCooldowns = []
+            delver.rpg.fatigue = rpgDerivedStats(delver.rpg).maxFatigue
+            let outcome = rpgUsePreparedSkill(delver, skillID: "fortune_read")
+            guard case .success(let result) = outcome else {
+                return XCTFail("rank \(rank) fortune_read must succeed against a loaded container: \(outcome)")
+            }
+            XCTAssertEqual(itemCount(result.message), 1, "rank \(rank) reveals exactly one item")
+        }
+        delver.rpg.skillRanks["fortune_read"] = 4
+        delver.rpg.activeCooldowns = []
+        delver.rpg.fatigue = rpgDerivedStats(delver.rpg).maxFatigue
+        guard case .success(let rankFour) = rpgUsePreparedSkill(delver, skillID: "fortune_read") else {
+            return XCTFail("rank 4 fortune_read must succeed")
+        }
+        XCTAssertEqual(itemCount(rankFour.message), 2, "rank 4 must reveal two items per its benefit text")
+        XCTAssertTrue(rankFour.message.hasSuffix("3/6 slots filled"))
+
+        delver.rpg.skillRanks["fortune_read"] = 5
+        delver.rpg.activeCooldowns = []
+        delver.rpg.fatigue = rpgDerivedStats(delver.rpg).maxFatigue
+        guard case .success(let rankFive) = rpgUsePreparedSkill(delver, skillID: "fortune_read") else {
+            return XCTFail("rank 5 fortune_read must succeed")
+        }
+        XCTAssertEqual(itemCount(rankFive.message), 3, "rank 5 must reveal three items per its benefit text")
+
+        let sparseWorld = makeWorld(seed: 871)
+        let sparseDelver = Player(world: sparseWorld)
+        sparseDelver.rpg = mastered(pathID: "delver", starter: "fortune_read")
+        sparseDelver.rpg.preparedSkillIDs = ["fortune_read"]
+        sparseDelver.rpg.selectedPreparedActionID = rpgPreparedActionToken(kind: .skill, id: "fortune_read")
+        sparseDelver.rpg = repairRPGCharacterState(sparseDelver.rpg)
+        sparseDelver.setPos(0.5, 64, 0.5)
+        sparseWorld.addEntity(sparseDelver)
+        sparseWorld.setBlock(0, 65, 4, Int(cell(B.chest)))
+        let sparseBE = makeContainerBE(0, 65, 4, 6)
+        sparseBE.items![0] = ItemStack(iid("torch"), 1)
+        sparseWorld.setBlockEntity(sparseBE)
+        guard case .success(let sparseResult) = rpgUsePreparedSkill(sparseDelver, skillID: "fortune_read") else {
+            return XCTFail("rank 5 against a one-item container must still succeed")
+        }
+        XCTAssertEqual(itemCount(sparseResult.message), 1,
+                       "reveal count is bounded by occupied slots, not padded with duplicates")
     }
 
     func testCircuitSenseRanksAndBoundedSourceTrace() throws {
@@ -415,9 +579,9 @@ final class RPGConsumerHardeningTests: XCTestCase {
     }
 
     private func state(pathID: String, starter: String) -> RPGCharacterState {
-        try! rpgCreateCharacter(RPGCreationDraft(pathID: pathID,
-                                                 attributes: rpgCreationPreset(pathID: pathID)!,
-                                                 starterSkillID: starter)).get()
+        let branch = RPG_BRANCH_DEFINITIONS.first { $0.pathID == pathID && $0.skillIDs.contains(starter) }!
+        return try! rpgCreateCharacter(RPGCreationDraft(
+            pathID: pathID, branchID: branch.id, startingSkillIDs: branch.skillIDs)).get()
     }
 
     private func mastered(pathID: String, starter: String) -> RPGCharacterState {
@@ -425,7 +589,7 @@ final class RPGConsumerHardeningTests: XCTestCase {
         result.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
         result.level = RPG_LEVEL_CAP
         if let branch = rpgBranchDefinition(result.specializationBranchID) {
-            for skill in branch.skillIDs { result.skillRanks[skill] = 3 }
+            for skill in branch.skillIDs { result.skillRanks[skill] = RPG_SKILL_RANK_CAP }
         }
         return repairRPGCharacterState(result)
     }

@@ -95,7 +95,6 @@ final class ElysiumAccessibilityElement: NSAccessibilityElement {
         case .group: return .group
         case .row: return .row
         case .scrollArea: return .scrollArea
-        case .rankCell: return .cell
         }
     }
 }
@@ -164,7 +163,9 @@ final class RPGAccessibilityBridge {
             currentElements = replacements
             rootElements = replacements
             nestChildren(parentID: "accessibility:tab-group", roles: [.tab])
-            nestChildren(parentID: "accessibility:skills-root", roles: [.rankCell])
+            // The Skills tab is the only surface where "accessibility:skills-root" is present,
+            // and its nine skill cards are the only .row descriptors on that tab.
+            nestChildren(parentID: "accessibility:skills-root", roles: [.row])
             guard view.publishAccessibilityChildren() else { return }
             postNotifications(previous: previous, current: newTree, view: view)
         }
@@ -198,6 +199,16 @@ final class RPGAccessibilityBridge {
                     .priority: NSAccessibilityPriorityLevel.high.rawValue,
                 ])
         }
+        // D4: announce the creation step title ("Path · Step 1 of 4", ...) on each step transition.
+        if let stepAnnouncement = rpgAccessibilityCreationStepAnnouncement(
+            previous: previous, current: newTree) {
+            NSAccessibility.post(
+                element: view, notification: .announcementRequested,
+                userInfo: [
+                    .announcement: stepAnnouncement,
+                    .priority: NSAccessibilityPriorityLevel.high.rawValue,
+                ])
+        }
     }
 
     private func structuralKey(_ value: RPGAccessibilityTreeSnapshot)
@@ -210,7 +221,7 @@ final class RPGAccessibilityBridge {
                 let parentID: String?
                 switch descriptor.role {
                 case .tab: parentID = "accessibility:tab-group"
-                case .rankCell: parentID = "accessibility:skills-root"
+                case .row where descriptor.rankPips != nil: parentID = "accessibility:skills-root"
                 default: parentID = descriptor.groupID?.rawValue
                 }
                 return ElysiumRetainedDescriptorKey(

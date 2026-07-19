@@ -2311,7 +2311,7 @@ final class LANReplicationTests: XCTestCase {
         session.acceptPeer(playerID: "peer-b", displayName: "Bea")
         session.acceptPeer(playerID: "peer-a", displayName: "Alex")
         var first = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "arcanist", attributes: try XCTUnwrap(rpgCreationPreset(pathID: "arcanist")),
+            pathID: "arcanist",
             starterSkillID: "ritual_circle"
         )).get()
         first.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
@@ -2327,7 +2327,7 @@ final class LANReplicationTests: XCTestCase {
         first = repairRPGCharacterState(first)
         first.fatigue = max(0, rpgDerivedStats(first).maxFatigue - 1)
         var second = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "ranger", attributes: try XCTUnwrap(rpgCreationPreset(pathID: "ranger")),
+            pathID: "ranger",
             starterSkillID: "trail_sense"
         )).get()
         second.activeCooldowns = [RPGCooldown(id: "far_sight", remainingTicks: 4)]
@@ -2381,7 +2381,6 @@ final class LANReplicationTests: XCTestCase {
         session.acceptPeer(playerID: "peer-a", displayName: "Alex")
         var state = try rpgCreateCharacter(RPGCreationDraft(
             pathID: "arcanist",
-            attributes: try XCTUnwrap(rpgCreationPreset(pathID: "arcanist")),
             starterSkillID: "ritual_circle"
         )).get()
         state.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
@@ -2451,7 +2450,6 @@ final class LANReplicationTests: XCTestCase {
         session.acceptPeer(playerID: "peer-a", displayName: "Alex", tick: 100)
         var state = try rpgCreateCharacter(RPGCreationDraft(
             pathID: "warden",
-            attributes: try XCTUnwrap(rpgCreationPreset(pathID: "warden")),
             starterSkillID: "guard_stance"
         )).get()
         state.activeCooldowns = [RPGCooldown(id: "guard_stance", remainingTicks: 30)]
@@ -2501,7 +2499,6 @@ final class LANReplicationTests: XCTestCase {
         session.acceptPeer(playerID: "without-rpg", displayName: "Without RPG", tick: 100)
         let state = try rpgCreateCharacter(RPGCreationDraft(
             pathID: "warden",
-            attributes: try XCTUnwrap(rpgCreationPreset(pathID: "warden")),
             starterSkillID: "guard_stance"
         )).get()
         _ = session.recordRPGState(state, for: "with-rpg")
@@ -2520,7 +2517,6 @@ final class LANReplicationTests: XCTestCase {
         func coolingState() throws -> RPGCharacterState {
             var state = try rpgCreateCharacter(RPGCreationDraft(
                 pathID: "warden",
-                attributes: try XCTUnwrap(rpgCreationPreset(pathID: "warden")),
                 starterSkillID: "guard_stance"
             )).get()
             state.activeCooldowns = [RPGCooldown(id: "guard_stance", remainingTicks: 30)]
@@ -2616,7 +2612,6 @@ final class LANReplicationTests: XCTestCase {
         ))
         var state = try rpgCreateCharacter(RPGCreationDraft(
             pathID: "arcanist",
-            attributes: try XCTUnwrap(rpgCreationPreset(pathID: "arcanist")),
             starterSkillID: "ritual_circle"
         )).get()
         state.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
@@ -2639,7 +2634,6 @@ final class LANReplicationTests: XCTestCase {
         ghost.rpgAuthorityID = authorityID
         ghost.rpg = try rpgCreateCharacter(RPGCreationDraft(
             pathID: "warden",
-            attributes: try XCTUnwrap(rpgCreationPreset(pathID: "warden")),
             starterSkillID: "guard_stance"
         )).get()
         let ally = Villager(world: firstWorld)
@@ -2709,8 +2703,13 @@ final class LANReplicationTests: XCTestCase {
         let ghost = LANHostGhostRegistry().ghost(for: "peer-a", record: record, in: world)
 
         XCTAssertEqual(ghost.rpg.pathID, "arcanist")
-        XCTAssertEqual(ghost.rpg.preparedSpellIDs, ["ignite"])
-        XCTAssertGreaterThan(ghost.maxHealth, 20)
+        // A default arcanist's three signature starting skills grant ignite, blur, and mage_light;
+        // the ghost hydrates the exact recorded prepared set rather than a single starter spell.
+        XCTAssertEqual(ghost.rpg.preparedSpellIDs, rpg.preparedSpellIDs)
+        XCTAssertFalse(ghost.rpg.preparedSpellIDs.isEmpty)
+        // Derived stats are applied (path growth profile), replacing the vanilla 20-health baseline.
+        XCTAssertEqual(Double(ghost.maxHealth), rpgDerivedStats(rpg).maxHealth, accuracy: 0.0001)
+        XCTAssertEqual(ghost.maxHealth, 16, "arcanist level-1 health base is 16")
         XCTAssertLessThanOrEqual(ghost.health, ghost.maxHealth)
     }
 

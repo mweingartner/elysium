@@ -50,8 +50,12 @@ final class RPGActionTests: XCTestCase {
     }
 
     private func igniteCost(_ state: RPGCharacterState) -> Double {
+        // Mirrors production effectiveRPGFatigueCost: elemental spells subtract the Spark Weave
+        // discount, scale by the focus-cost multiplier, then floor at 0.5 fatigue.
         let base = rpgSpellDefinition("ignite")!.fatigueCost
-        return max(1, (base * rpgDerivedStats(state).focusCostMultiplier * 10).rounded(.up) / 10)
+        let discounted = max(0, base - rpgSkillEffectValue(.sparkWeave, in: state))
+        let scaled = discounted * rpgDerivedStats(state).focusCostMultiplier
+        return max(0.5, (scaled * 10).rounded(.up) / 10)
     }
 
     func testMageLightPlacesTorchOnHitFace() {
@@ -141,37 +145,50 @@ final class RPGActionTests: XCTestCase {
     func testActiveSkillRejectsPassivePreparedSkillAsAction() {
         let world = makeWorld(seed: 6)
         let player = makeWarden(in: world, starterSkillID: "guard_stance")
+        // Guardian's other two starting skills (interpose, anchor_line) are active and would
+        // otherwise auto-prepare; unprepare everything to isolate the passive-only scenario.
+        for skillID in player.rpg.preparedSkillIDs {
+            _ = rpgUnprepareSkill(skillID, in: &player.rpg)
+        }
 
         XCTAssertNil(rpgSelectedPreparedAction(player.rpg))
         XCTAssertEqual(rpgUseSelectedPreparedAction(player).failure, .actionNotPrepared)
     }
 
+    /// Constructs an Arcanist whose known spells are exactly `starterSpells`, by choosing a
+    /// starting-skill selection whose rank-1 unlocks are exactly that set (spells come only from
+    /// skill ranks -- there is no separate starter-spell input anymore).
     private func makeArcanist(in world: World, starterSpells: [String]) -> Player {
         let player = Player(world: world)
-        let starter = starterSpells == ["mage_light"] ? "ritual_circle" : "spell_formula"
-        let initialSpells = starter == "ritual_circle" ? ["mage_light"] : starterSpells.filter { $0 == "ignite" }
-        let error = player.createRPGCharacter(RPGCreationDraft(
-            pathID: "arcanist",
-            attributes: .defaultCreation,
-            starterSkillID: starter,
-            starterSpellIDs: initialSpells
-        ))
-        XCTAssertNil(error)
-        if starterSpells.contains("mage_light"), starter == "spell_formula" {
-            _ = rpgAddXP(rpgXPRequiredForLevel(3), to: &player.rpg)
-            XCTAssertNil(rpgLearnSkill("ritual_circle", in: &player.rpg))
-            XCTAssertNil(rpgPrepareSpell("mage_light", in: &player.rpg))
+        let branchID: String
+        let startingSkillIDs: [String]
+        switch Set(starterSpells) {
+        case ["ignite"]:
+            branchID = "arcanist_elementalist"
+            startingSkillIDs = ["spell_formula", "spark_weave", "storm_focus"]
+        case ["mage_light"]:
+            branchID = "arcanist_ritualist"
+            startingSkillIDs = ["ritual_circle", "bound_servant", "ward_scribe"]
+        case ["ignite", "mage_light"]:
+            branchID = "arcanist_elementalist"
+            startingSkillIDs = ["spell_formula", "ritual_circle", "spark_weave"]
+        default:
+            branchID = "arcanist_elementalist"
+            startingSkillIDs = rpgDefaultStartingSkillIDs(pathID: "arcanist")
         }
+        let error = player.createRPGCharacter(RPGCreationDraft(
+            pathID: "arcanist", branchID: branchID, startingSkillIDs: startingSkillIDs))
+        XCTAssertNil(error)
+        XCTAssertEqual(Set(player.rpg.knownSpellIDs), Set(starterSpells))
         return player
     }
 
     private func makeWarden(in world: World, starterSkillID: String) -> Player {
         let player = Player(world: world)
+        let branchID = rpgSkillDefinition(starterSkillID)!.branchID
+        let startingSkillIDs = rpgBranchDefinition(branchID)!.skillIDs
         let error = player.createRPGCharacter(RPGCreationDraft(
-            pathID: "warden",
-            attributes: .defaultCreation,
-            starterSkillID: starterSkillID
-        ))
+            pathID: "warden", branchID: branchID, startingSkillIDs: startingSkillIDs))
         XCTAssertNil(error)
         return player
     }

@@ -21,15 +21,6 @@ public struct RPGScreenMouseActivation: Equatable {
     }
 }
 
-public struct RPGClassDrag: Equatable {
-    public let originX: Double
-    public let originY: Double
-    public var currentX: Double
-    public var currentY: Double
-    public let screenInstanceID: UInt64
-    public let semanticRevision: UInt64
-}
-
 /// Presentation-only state for the RPG sheet. It deliberately contains no GameCore, persistence,
 /// authority, or registry mutation capability; the app rebuilds the pure screen model from it.
 public struct RPGScreenInteractionState: Equatable {
@@ -45,7 +36,6 @@ public struct RPGScreenInteractionState: Equatable {
     public fileprivate(set) var focusedScreenFrame: RPGLogicalRect?
     public fileprivate(set) var focusOrder: [RPGUIElementID]
     public fileprivate(set) var pendingMouseActivation: RPGScreenMouseActivation?
-    public fileprivate(set) var pendingClassDrag: RPGClassDrag?
 
     public init(creation: RPGCreationSession = rpgInitialCreationSession(),
                 tab: RPGCharacterTab = .character,
@@ -65,7 +55,6 @@ public struct RPGScreenInteractionState: Equatable {
         self.focusedScreenFrame = focusedScreenFrame
         self.focusOrder = focusOrder
         self.pendingMouseActivation = pendingMouseActivation
-        self.pendingClassDrag = nil
     }
 }
 
@@ -96,10 +85,6 @@ public enum RPGScreenInteractionEvent: Equatable {
     /// A nil ID represents release outside every fully visible semantic descriptor.
     case mouseUp(elementID: RPGUIElementID?)
     case cancelMouse
-    case beginClassDrag(x: Double, y: Double)
-    case updateClassDrag(x: Double, y: Double)
-    case endClassDrag(x: Double, y: Double)
-    case cancelClassDrag
     /// Screen cover, replacement, close, and app focus loss share this ownership-loss event.
     case inputOwnershipLost
     /// Apply a successfully dispatched semantic command. Tutorial completion is published only
@@ -135,13 +120,6 @@ public struct RPGScreenInteractionTransition: Equatable {
 }
 
 public let RPG_SCREEN_SCROLL_STRIDE = 28.0
-public let RPG_CLASS_SWIPE_THRESHOLD = 32.0
-
-private func validClassDragPoint(x: Double, y: Double, model: RPGScreenModel) -> Bool {
-    guard x.isFinite, y.isFinite, model.panelFrame.isFinite else { return false }
-    return x >= model.panelFrame.x && x <= model.panelFrame.maxX &&
-        y >= model.panelFrame.y && y <= model.panelFrame.maxY
-}
 
 /// Returns only fully visible semantic elements and uses reverse draw order for overlap safety.
 public func rpgScreenDescriptor(atX x: Double, y: Double,
@@ -300,11 +278,6 @@ public func rpgReduceScreenInteraction(_ current: RPGScreenInteractionState,
         effects.append(.cancelMouse(pending.capture))
         state.pendingMouseActivation = nil
     }
-    if let pending = state.pendingClassDrag,
-       pending.screenInstanceID != context.screenInstanceID ||
-       pending.semanticRevision != context.semanticRevision {
-        state.pendingClassDrag = nil
-    }
 
     let newOrder = rpgInteractionFocusOrder(context.model)
     if state.focusedID != nil {
@@ -340,66 +313,6 @@ public func rpgReduceScreenInteraction(_ current: RPGScreenInteractionState,
     }
 
     switch event {
-    case .beginClassDrag(let x, let y):
-        guard state.creation.step == .path,
-              validClassDragPoint(x: x, y: y, model: context.model),
-              let card = context.model.descriptors.first(where: {
-                  $0.id.rawValue == "creation:path:card"
-              }), x >= card.frame.x, x < card.frame.maxX,
-              y >= card.frame.y, y < card.frame.maxY,
-              !context.model.descriptors.contains(where: { descriptor in
-                  descriptor.role == .button && descriptor.frame.width > 0 &&
-                  x >= descriptor.frame.x && x < descriptor.frame.maxX &&
-                  y >= descriptor.frame.y && y < descriptor.frame.maxY
-              }) else {
-            state.pendingClassDrag = nil
-            return RPGScreenInteractionTransition(state: state, effects: effects, handled: false)
-        }
-        state.pendingClassDrag = RPGClassDrag(originX: x, originY: y, currentX: x, currentY: y,
-            screenInstanceID: context.screenInstanceID, semanticRevision: context.semanticRevision)
-        return RPGScreenInteractionTransition(state: state, effects: effects, handled: true)
-
-    case .updateClassDrag(let x, let y):
-        guard var drag = state.pendingClassDrag else {
-            return RPGScreenInteractionTransition(state: state, effects: effects, handled: false)
-        }
-        guard validClassDragPoint(x: x, y: y, model: context.model) else {
-            state.pendingClassDrag = nil
-            return RPGScreenInteractionTransition(state: state, effects: effects, handled: true)
-        }
-        drag.currentX = x
-        drag.currentY = y
-        state.pendingClassDrag = drag
-        return RPGScreenInteractionTransition(state: state, effects: effects, handled: true)
-
-    case .endClassDrag(let x, let y):
-        guard let drag = state.pendingClassDrag else {
-            return RPGScreenInteractionTransition(state: state, effects: effects, handled: false)
-        }
-        state.pendingClassDrag = nil
-        guard validClassDragPoint(x: x, y: y, model: context.model) else {
-            return RPGScreenInteractionTransition(state: state, effects: effects, handled: true)
-        }
-        let dx = x - drag.originX
-        let dy = y - drag.originY
-        guard dx.isFinite, dy.isFinite, abs(dx) >= RPG_CLASS_SWIPE_THRESHOLD,
-              abs(dx) > abs(dy) else {
-            return RPGScreenInteractionTransition(state: state, effects: effects, handled: true)
-        }
-        switch rpgReduceCreationSession(state.creation, command: .cyclePath(dx < 0 ? 1 : -1)) {
-        case .success(let creation): state.creation = creation
-        case .failure(let error):
-            return RPGScreenInteractionTransition(state: state, effects: effects,
-                                                  handled: true, creationError: error)
-        }
-        state.scrollOffset = 0
-        return RPGScreenInteractionTransition(state: state, effects: effects, handled: true)
-
-    case .cancelClassDrag:
-        let handled = state.pendingClassDrag != nil
-        state.pendingClassDrag = nil
-        return RPGScreenInteractionTransition(state: state, effects: effects, handled: handled)
-
     case .focusElement(let id):
         guard let descriptor = context.model.descriptors.first(where: {
             $0.id == id && $0.isFocusable
@@ -525,7 +438,6 @@ public func rpgReduceScreenInteraction(_ current: RPGScreenInteractionState,
             effects.append(.cancelMouse(pending.capture))
             state.pendingMouseActivation = nil
         }
-        if state.pendingClassDrag != nil { state.pendingClassDrag = nil }
         return RPGScreenInteractionTransition(state: state, effects: effects,
                                               handled: !effects.isEmpty)
 
@@ -564,20 +476,21 @@ private func rpgApplyScreenPresentationCommand(
         // The app re-seeds this from the post-dispatch runtime only when creation committed.
         state.tutorial = RPGTutorialState()
         return RPGScreenInteractionTransition(state: state, effects: effects, handled: true)
-    case .choosePath(let id): return creation(.selectPath(id))
-    case .previousClass: return creation(.cyclePath(-1))
-    case .nextClass: return creation(.cyclePath(1))
-    case .chooseBranch(let id): return creation(.selectBranch(id))
-    case .adjustAttribute(let attribute, let delta):
-        return creation(.adjustAttribute(attribute, delta))
-    case .resetAttributes: return creation(.resetToPreset)
-    case .creationNext: return creation(.next)
+    case .choosePath(let id): return creation(.choosePath(id))
+    case .chooseBranch(let id): return creation(.chooseBranch(id))
+    case .toggleStartingSkill(let id): return creation(.toggleStartingSkill(id))
+    case .creationNext: return creation(.confirmStartingSkills)
     case .creationBack:
         if state.creation.step == .path {
             effects.append(.close)
             return RPGScreenInteractionTransition(state: state, effects: effects, handled: true)
         }
         return creation(.back)
+    case .creationReject:
+        state.creation = rpgInitialCreationSession()
+        state.scrollOffset = 0
+        effects.append(.close)
+        return RPGScreenInteractionTransition(state: state, effects: effects, handled: true)
 
     case .selectTab(let tab):
         state.tab = tab

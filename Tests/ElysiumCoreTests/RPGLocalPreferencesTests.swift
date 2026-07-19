@@ -30,7 +30,7 @@ final class RPGLocalPreferencesTests: XCTestCase {
         database.putWorld(record)
         let player = Player(world: World(dim: .overworld, seed: UInt32(bitPattern: seed)))
         player.rpg = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "arcanist", attributes: .defaultCreation,
+            pathID: "arcanist",
             starterSkillID: "spell_formula", starterSpellIDs: ["ignite"])).get()
         var playerJSON = player.save()
         var rpg = try XCTUnwrap(playerJSON["rpg"] as? [String: Any])
@@ -155,7 +155,7 @@ final class RPGLocalPreferencesTests: XCTestCase {
         game.createWorld(name: "Defaults", seedText: "991", mode: GameMode.survival,
                          difficulty: 1)
         let draft = RPGCreationDraft(
-            pathID: "arcanist", attributes: .defaultCreation,
+            pathID: "arcanist",
             starterSkillID: "spell_formula", starterSpellIDs: ["ignite"])
         XCTAssertTrue(game.requestRPGCreateCharacter(draft).hasPrefix("Created"))
         waitUntil { game.rpgLocalPreferenceRevision == 1 }
@@ -207,7 +207,7 @@ final class RPGLocalPreferencesTests: XCTestCase {
         game.createWorld(name: "Delayed Default", seedText: "992",
                          mode: GameMode.survival, difficulty: 1)
         XCTAssertTrue(game.requestRPGCreateCharacter(RPGCreationDraft(
-            pathID: "arcanist", attributes: .defaultCreation,
+            pathID: "arcanist",
             starterSkillID: "spell_formula", starterSpellIDs: ["ignite"])
         ).hasPrefix("Created"))
         wait(for: [entered], timeout: 2)
@@ -225,7 +225,7 @@ final class RPGLocalPreferencesTests: XCTestCase {
                                  gameMode: GameMode.survival, difficulty: 1)
         database.putWorld(record)
         let state = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "arcanist", attributes: .defaultCreation,
+            pathID: "arcanist",
             starterSkillID: "spell_formula", starterSpellIDs: ["ignite"])).get()
         let player = Player(world: World(dim: .overworld, seed: 41))
         player.rpg = state
@@ -260,7 +260,7 @@ final class RPGLocalPreferencesTests: XCTestCase {
                                  gameMode: GameMode.survival, difficulty: 1)
         database.putWorld(record)
         let state = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "arcanist", attributes: .defaultCreation,
+            pathID: "arcanist",
             starterSkillID: "spell_formula", starterSpellIDs: ["ignite"])).get()
         let player = Player(world: World(dim: .overworld, seed: 42)); player.rpg = state
         var playerJSON = player.save()
@@ -316,7 +316,7 @@ final class RPGLocalPreferencesTests: XCTestCase {
         database.putWorld(record)
         let player = Player(world: World(dim: .overworld, seed: 43))
         player.rpg = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "arcanist", attributes: .defaultCreation,
+            pathID: "arcanist",
             starterSkillID: "spell_formula", starterSpellIDs: ["ignite"])).get()
         var playerJSON = player.save()
         var rpgJSON = try XCTUnwrap(playerJSON["rpg"] as? [String: Any])
@@ -351,7 +351,7 @@ final class RPGLocalPreferencesTests: XCTestCase {
         database.putWorld(record)
         let player = Player(world: World(dim: .overworld, seed: 44))
         player.rpg = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "arcanist", attributes: .defaultCreation,
+            pathID: "arcanist",
             starterSkillID: "spell_formula", starterSpellIDs: ["ignite"])).get()
         var durableLegacyPlayer = player.save()
         var rpgJSON = try XCTUnwrap(durableLegacyPlayer["rpg"] as? [String: Any])

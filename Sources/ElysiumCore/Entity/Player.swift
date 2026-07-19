@@ -77,6 +77,13 @@ public final class Player: LivingEntity {
     public var portalTicks = 0
     public var insidePortalKind: String? = nil   // nether | end | nil
     public var rpg = RPGCharacterState.uncreated()
+    /// Security amendment S2 (forward guard): transient, never persisted. True only immediately
+    /// after `load(_:)` decoded an `rpg` payload whose `version` exceeds
+    /// `RPG_STATE_CURRENT_VERSION` -- i.e. this build cannot yet understand that save. Callers
+    /// that would otherwise persist `repairRPGCharacterState(rpg)` (which fails closed to
+    /// `.uncreated()` for a future version) must check this flag first so a future-version
+    /// payload never overwrites a local resume cache's last-known-good snapshot.
+    public private(set) var rpgDecodedVersionExceedsCurrent = false
     /// Compatibility copy of the pre-local-preferences quick-slot field. LAN/protocol-5 sessions
     /// deliberately retain it; only an exact local-world migration receipt can make it omittable.
     public private(set) var rpgLegacyQuickSlotEnvelope: RPGLegacyQuickSlotEnvelope?
@@ -949,11 +956,13 @@ public final class Player: LivingEntity {
         xpProgress = dnum(d["xpProgress"])
         health = (d["health"] as? NSNumber)?.doubleValue ?? 20
         _gameMode = inum(d["gameMode"])
+        rpgDecodedVersionExceedsCurrent = false
         if let rawRPG = d["rpg"], JSONSerialization.isValidJSONObject(rawRPG),
            let bytes = try? JSONSerialization.data(withJSONObject: rawRPG, options: [.fragmentsAllowed]),
            bytes.count <= RPG_MAX_PERSISTED_PAYLOAD_BYTES,
            let decoded = try? JSONDecoder().decode(RPGCharacterState.self, from: bytes) {
             rpg = decoded
+            rpgDecodedVersionExceedsCurrent = decoded.version > RPG_STATE_CURRENT_VERSION
             if let object = rawRPG as? [String: Any], object.keys.contains("actionQuickSlots") {
                 let next = rpgLegacyEnvelopeVersion.addingReportingOverflow(1)
                 if !next.overflow, next.partialValue > 0 {

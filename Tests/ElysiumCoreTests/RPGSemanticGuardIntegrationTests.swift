@@ -35,8 +35,7 @@ final class RPGSemanticGuardIntegrationTests: XCTestCase {
     }
 
     private var arcanistDraft: RPGCreationDraft {
-        RPGCreationDraft(pathID: "arcanist", attributes: .defaultCreation,
-                         starterSkillID: "spell_formula", starterSpellIDs: [])
+        RPGCreationDraft(pathID: "arcanist", starterSkillID: "spell_formula")
     }
 
     func testAuthorityAndPreferenceScopeProjectOnlyForExactLocalWorld() throws {
@@ -109,8 +108,12 @@ final class RPGSemanticGuardIntegrationTests: XCTestCase {
     func testCommittedActionableSnapshotBindsModelToExactRuntimeInputs() throws {
         let game = try localGame("committed-model")
         let runtime = try XCTUnwrap(game.rpgScreenRuntimeSnapshot())
+        // A complete, valid draft (path + sub-class + 3 default starting skills) so the Review
+        // step's Accept button carries a real .create command.
         var creation = rpgInitialCreationSession()
-        creation.step = .review
+        creation = try rpgReduceCreationSession(creation, command: .choosePath("warden")).get()
+        creation = try rpgReduceCreationSession(creation, command: .chooseBranch("warden_guardian")).get()
+        creation = try rpgReduceCreationSession(creation, command: .confirmStartingSkills).get()
         let model = rpgBuildScreenModel(runtime.modelInput(
             viewportWidth: 700, viewportHeight: 420, creation: creation))
         let snapshot = try XCTUnwrap(RPGCommittedSemanticSnapshot(
@@ -310,7 +313,6 @@ final class RPGSemanticGuardIntegrationTests: XCTestCase {
         _ = game.requestRPGAssignPreparedActionToQuickSlot(kind: .skill,
                                                             id: "spell_formula", slot: 0)
         _ = game.requestRPGClearActionQuickSlot(0)
-        _ = game.requestRPGSpendAttributePoint(.intelligence)
         _ = game.requestRPGCyclePreparedSpell()
         _ = game.requestRPGCyclePreparedAction()
         _ = game.requestRPGCastSelectedSpell()

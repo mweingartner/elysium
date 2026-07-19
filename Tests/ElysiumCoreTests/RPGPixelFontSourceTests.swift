@@ -257,14 +257,14 @@ final class RPGPixelFontSourceTests: XCTestCase {
         }
     }
 
-    func testClassCarouselNeverRoutesUnsupportedChevronTextThroughPixelFont() throws {
+    /// The class carousel (and its chevron adornments) was retired by the Path -> Sub-class ->
+    /// Starting Skills -> Review rebuild; single-click card activation replaced swipe/arrow
+    /// navigation entirely, so no chevron text ever needs pixel-font routing.
+    func testCreationCardsNeverRouteUnsupportedChevronTextThroughPixelFont() throws {
         let model = try source("Sources/ElysiumCore/Game/RPGScreenModel.swift")
-        let renderer = try source("Sources/Elysium/RPGScreensM.swift")
         XCTAssertFalse(model.contains("visualLines: [\"‹\"]"))
         XCTAssertFalse(model.contains("visualLines: [\"›\"]"))
-        XCTAssertTrue(model.contains("adornment: .carouselPrevious"))
-        XCTAssertTrue(model.contains("adornment: .carouselNext"))
-        XCTAssertTrue(renderer.contains("descriptor.adornment == .carouselPrevious"))
-        XCTAssertTrue(renderer.contains("descriptor.adornment == .carouselNext"))
+        XCTAssertFalse(model.contains("carouselPrevious"))
+        XCTAssertFalse(model.contains("carouselNext"))
     }
 }

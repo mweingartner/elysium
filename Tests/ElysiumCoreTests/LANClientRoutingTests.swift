@@ -394,8 +394,8 @@ final class LANClientRoutingTests: XCTestCase {
     func testProtocol5RPGSubmissionDeniesBeforeLegacyIntentOrLocalMutation() {
         let game = makeLANClientGame()
         XCTAssertNil(game.player.createRPGCharacter(RPGCreationDraft(
-            pathID: "arcanist", attributes: .defaultCreation,
-            starterSkillID: "spell_formula", starterSpellIDs: []
+            pathID: "arcanist", branchID: "arcanist_elementalist",
+            startingSkillIDs: rpgBranchDefinition("arcanist_elementalist")!.skillIDs
         )))
         let beforeRPG = game.player.rpg
         let beforeInventory = game.player.inventory

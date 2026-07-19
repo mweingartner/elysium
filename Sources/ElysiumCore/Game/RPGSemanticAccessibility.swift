@@ -98,9 +98,7 @@ public struct RPGAccessibilityElementSnapshot: Equatable {
         } else {
             var values: [String] = []
             if !descriptor.value.isEmpty { values.append(descriptor.value) }
-            if descriptor.role == .rankCell,
-               let rank = descriptor.id.rawValue.components(separatedBy: ":rank:").last,
-               Int(rank) != nil { values.append("Rank \(rank)") }
+            if let pips = descriptor.rankPips { values.append("Rank \(pips.filled) of \(pips.total)") }
             if descriptor.selected { values.append("Selected") }
             if descriptor.prepared { values.append("Prepared") }
             if descriptor.slotted { values.append("Slotted") }
@@ -138,13 +136,13 @@ public struct RPGAccessibilityTreeSnapshot: Equatable {
                 layoutGeneration: layoutGeneration, viewport: viewport) else { return nil }
             values.append(element)
         }
-        let rankCount = committed.model.descriptors.filter { $0.role == .rankCell }.count
-        if rankCount == 27, let projection = committed.model.projection,
+        let skillCardCount = committed.model.descriptors.filter { $0.rankPips != nil && $0.role == .row }.count
+        if skillCardCount == 9, let projection = committed.model.projection,
            let rootID = RPGUIElementID(rawValue: "accessibility:skills-root") {
             let root = RPGSemanticDescriptor(
                 id: rootID, role: .scrollArea,
                 label: "\(projection.pathID.capitalized) Skills",
-                value: "3 branches, 9 skills, 27 ranks",
+                value: "3 sub-classes, 9 skills, 5 ranks each",
                 help: "Current character path skill ranks.", enabled: true,
                 isFocusable: false, frame: committed.model.contentFrame,
                 visibleFrame: committed.model.contentFrame)
@@ -222,6 +220,22 @@ public func rpgAccessibilityAuthorityAnnouncement(
     return rpgSanitizeStatusText(
         currentAuthority.descriptor.value + separator + currentAuthority.accessibilityHelp,
         byteLimit: 512)
+}
+
+/// The creation step-indicator title ("Path · Step 1 of 4", etc.) to announce when the creation
+/// flow advances or steps back, or when the creation sheet first appears (D4). Returns nil when the
+/// step is unchanged, so a focus/scroll rebuild does not re-announce the same step.
+public func rpgAccessibilityCreationStepAnnouncement(
+    previous: RPGAccessibilityTreeSnapshot?,
+    current: RPGAccessibilityTreeSnapshot
+) -> String? {
+    func step(_ tree: RPGAccessibilityTreeSnapshot) -> RPGAccessibilityElementSnapshot? {
+        tree.elements.first { $0.descriptor.id.rawValue.hasPrefix("creation-step:") }
+    }
+    guard let currentStep = step(current), !currentStep.descriptor.value.isEmpty else { return nil }
+    if let previous, let old = step(previous),
+       old.descriptor.value == currentStep.descriptor.value { return nil }
+    return rpgSanitizeStatusText(currentStep.descriptor.value, byteLimit: 512)
 }
 
 public func rpgAccessibilityNotificationIntents(

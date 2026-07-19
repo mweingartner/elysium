@@ -262,7 +262,7 @@ final class LANMultiplayerManager {
                                              in game: GameCore) -> RPGSemanticActivationResult? {
         guard game.isLANClientWorld else { return nil }
         switch command {
-        case .create, .rankUp, .spendAttribute, .prepareSkill, .unprepareSkill,
+        case .create, .rankUp, .prepareSkill, .unprepareSkill,
              .prepareSpell, .unprepareSpell, .selectSkill, .selectSpell,
              .cyclePreparedAction, .useSelectedAction, .useQuickSlot,
              .assignSlot, .moveSlot, .clearSlot:
@@ -2139,15 +2139,10 @@ final class LANMultiplayerManager {
                 }
                 publish(state)
             case .spendAttribute:
-                guard let attribute = intent.attribute else {
-                    reject("missing attribute")
-                    return
-                }
-                if let error = rpgSpendAttributePoint(attribute, in: &state) {
-                    reject(error.description)
-                    return
-                }
-                publish(state)
+                // The attribute system was retired in state v3. LANRPGIntentAction is a frozen
+                // wire enum (Condition 1), so this case is never removed; it is now an
+                // unconditional reject that never mutates state or consumes an authority revision.
+                reject("Attribute points are retired")
             case .prepareSpell:
                 guard let spellID = intent.spellID else {
                     reject("missing spell")

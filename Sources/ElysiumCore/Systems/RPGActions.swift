@@ -10,7 +10,6 @@ public enum RPGActionFailure: Error, Equatable, CustomStringConvertible {
     case skillNotPrepared(String)
     case spellNotPrepared(String)
     case skillNotActive(String)
-    case insufficientIntelligence(required: Int)
     case insufficientFatigue(required: Double, available: Double)
     case skillOnCooldown(String)
     case spellOnCooldown(String)
@@ -41,7 +40,6 @@ public enum RPGActionFailure: Error, Equatable, CustomStringConvertible {
         case .skillNotPrepared(let id): return "Skill is not prepared: \(id)"
         case .spellNotPrepared(let id): return "Spell is not prepared: \(id)"
         case .skillNotActive(let id): return "Skill is passive: \(id)"
-        case .insufficientIntelligence(let value): return "Requires INT \(value)"
         case .insufficientFatigue(let required, let available):
             return "Requires \(formatRPGNumber(required)) fatigue; \(formatRPGNumber(available)) available"
         case .skillOnCooldown(let id): return "Skill is on cooldown: \(id)"
@@ -243,9 +241,6 @@ public func rpgPrepareAction(_ player: Player,
         guard let spell = rpgSpellDefinition(id) else { return .failure(.unknownSpell(id)) }
         guard state.knownSpellIDs.contains(id), state.preparedSpellIDs.contains(id) else {
             return .failure(.spellNotPrepared(id))
-        }
-        guard state.attributes.intelligence >= spell.minimumIntelligence else {
-            return .failure(.insufficientIntelligence(required: spell.minimumIntelligence))
         }
         if state.activeCooldowns.contains(where: { $0.id == id && $0.remainingTicks > 0 }) {
             return .failure(.spellOnCooldown(id))
@@ -590,8 +585,11 @@ private func makeActionResult(_ prepared: RPGPreparedMutation,
             return RPGActionResult(actionID: id, sequence: player.rpg.actionSequence,
                                    message: "Container is empty", blockPosition: position)
         }
-        let selection = occupied[min(occupied.count - 1,
-                                     max(0, player.rpg.attributes.luck - RPGAttributes.minimum) % occupied.count)]
+        // Ranks 4-5 reveal two/three items instead of one (registry benefit text: "Reveal two
+        // items and exact fill" / "Reveal three items and exact fill"); ranks 1-3 stay at one.
+        let revealCount = precision <= 3 ? 1 : min(occupied.count, precision - 2)
+        let anchor = min(occupied.count - 1, max(0, player.rpg.level) % occupied.count)
+        let selections = (0..<revealCount).map { occupied[(anchor + $0) % occupied.count] }
         let fill: String
         if precision <= 1 {
             let fraction = Double(occupied.count) / Double(max(1, items.count))
@@ -601,8 +599,10 @@ private func makeActionResult(_ prepared: RPGPreparedMutation,
         } else {
             fill = "\(occupied.count)/\(items.count) slots filled"
         }
+        let itemsText = selections.map { "\(itemDef($0.1.id).displayName) ×\($0.1.count)" }
+            .joined(separator: ", ")
         return RPGActionResult(actionID: id, sequence: player.rpg.actionSequence,
-                               message: "\(itemDef(selection.1.id).displayName) ×\(selection.1.count); \(fill)",
+                               message: "\(itemsText); \(fill)",
                                blockPosition: position)
     }
 }
@@ -656,8 +656,10 @@ private func effectiveRPGFatigueCost(_ base: Double,
         }
         cost *= derived.focusCostMultiplier
     }
-    let floor = if case .spell = identity { 1.0 } else { 0.5 }
-    return max(floor, (cost * 10).rounded(.up) / 10)
+    // Single application site for the final fatigue-cost floor. spark_weave
+    // ranks 4-5 can discount a spell's cost toward zero; every action (skill
+    // or spell) is floored at 0.5 fatigue here.
+    return max(0.5, (cost * 10).rounded(.up) / 10)
 }
 
 private func effectiveRPGSpellDuration(_ spell: RPGSpellDefinition, state: RPGCharacterState) -> Int {
@@ -851,7 +853,7 @@ private func prepareSkillEffect(_ effect: RPGSkillEffectID,
                                            creative: player.gameMode == GameMode.creative) else {
             return .failure(.missingMaterial(id))
         }
-        let damage = 4 + Double(max(0, state.attributes.dexterity - 10)) * 0.25
+        let damage = 4 + Double(state.level) * 0.1
         var plan = damagePlan(id: id, name: "Crippling Shot", player: player, target: target,
                               damage: damage, source: RPG_DAMAGE_SOURCE_RANGER_PROJECTILE)
         plan.nextItems = nextItems

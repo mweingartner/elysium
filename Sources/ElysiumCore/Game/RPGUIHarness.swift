@@ -160,7 +160,7 @@ public struct RPGUIHarnessBootstrap: Equatable {
         switch family {
         case "creation" where p.count == 5:
             guard let step = RPGCreationStep(rawValue: p[1]), validPathBranch(p[2], p[3]),
-                  ["preset", "editedValid", "underBudget", "unmetRequirement", "inventoryFull"].contains(p[4]) else { return nil }
+                  ["default", "partial", "custom", "overflowHelp", "inventoryFull"].contains(p[4]) else { return nil }
             return .creation(step, pathID: p[2], branchID: p[3], profile: p[4])
         case "tutorial" where p.count == 4:
             guard let page = parseCanonicalDecimal(p[1], range: 1...4),
@@ -171,7 +171,7 @@ public struct RPGUIHarnessBootstrap: Equatable {
             return .tab(pathID: p[1], branchID: p[2], tab: tab)
         case "skill" where p.count == 4:
             guard rpgSkillDefinition(p[1]) != nil,
-                  let rank = parseCanonicalDecimal(p[2], range: 1...3),
+                  let rank = parseCanonicalDecimal(p[2], range: 1...RPG_SKILL_RANK_CAP),
                   validSkillRankPresentation(skillID: p[1], rank: rank, state: p[3]) else { return nil }
             return .skill(skillID: p[1], rank: rank, state: p[3])
         case "active" where p.count == 3:
@@ -217,24 +217,24 @@ public struct RPGUIHarnessBootstrap: Equatable {
         return branch.pathID == pathID && path.branchIDs.contains(branchID)
     }
 
-    /// Closed grammar for rank states that can exist in a repaired character. Rank three cannot be
-    /// purchased-but-not-current, rank one cannot be future, and a foundation rank cannot precede
-    /// the valid rank-one starter state.
+    /// Closed grammar for rank states that can exist in a repaired character. The maximum rank
+    /// cannot be purchased-but-not-current, and rank one is always attainable so it cannot be
+    /// future.
     private static func validSkillRankPresentation(skillID: String, rank: Int,
                                                     state: String) -> Bool {
-        guard let node = rpgSkillNodeIndex(skillID), (1...3).contains(rank) else { return false }
+        guard rpgSkillDefinition(skillID) != nil, (1...RPG_SKILL_RANK_CAP).contains(rank) else { return false }
         switch state {
-        case "purchased": return rank < 3
+        case "purchased": return rank < RPG_SKILL_RANK_CAP
         case "current": return true
-        case "nextLegal", "locked": return node > 0 || rank > 1
-        case "future": return rank > 1 && (node > 0 || rank > 2)
+        case "nextLegal", "locked": return true
+        case "future": return rank > 1
         default: return false
         }
     }
 
     private static func validStatusTarget(_ value: String) -> Bool {
         if value == "character" { return true }
-        if rpgSkillDefinition(value) != nil || rpgSpellDefinition(value) != nil || RPGAttributeID(rawValue: value) != nil { return true }
+        if rpgSkillDefinition(value) != nil || rpgSpellDefinition(value) != nil { return true }
         if statusSlotIndex(value) != nil { return true }
         let equipment = ["apprenticeFocus", "heldMeleeWeapon", "heldBowAndArrow", "heldPickaxe", "heldTool"]
         let permissions = ["build", "container", "buildOnlyForBlockTarget"]
@@ -244,12 +244,11 @@ public struct RPGUIHarnessBootstrap: Equatable {
     private static func validStatusCombination(operation: String, target: String) -> Bool {
         let isSkill = rpgSkillDefinition(target) != nil
         let isSpell = rpgSpellDefinition(target) != nil
-        let isAttribute = RPGAttributeID(rawValue: target) != nil
         let isSlot = statusSlotIndex(target) != nil
         let isEquipment = ["apprenticeFocus", "heldMeleeWeapon", "heldBowAndArrow", "heldPickaxe", "heldTool"].contains(target)
         let isPermission = ["build", "container", "buildOnlyForBlockTarget"].contains(target)
         switch operation {
-        case "sheet": return target == "character" || isSkill || isSpell || isAttribute
+        case "sheet": return target == "character" || isSkill || isSpell
         case "saveSlots": return target == "character" || isSlot
         case "cycle": return target == "character" || isSkill || isSpell
         case "useSelected": return target == "character" || isSkill || isSpell || isEquipment || isPermission
@@ -306,7 +305,6 @@ public struct RPGUIHarnessFixture: Equatable {
         if value == "character" { return .character }
         if rpgSkillDefinition(value) != nil { return .skill(value) }
         if rpgSpellDefinition(value) != nil { return .spell(value) }
-        if let attribute = RPGAttributeID(rawValue: value) { return .attribute(attribute) }
         if value.hasPrefix("slot"), let slot = Int(value.dropFirst(4)),
            value == "slot" + String(slot), (0...8).contains(slot) {
             return .slot(slot)
@@ -326,15 +324,13 @@ public struct RPGUIHarnessFixture: Equatable {
             switch target {
             case .skill(let id): return .sheet(.rankUp(skillID: id))
             case .spell(let id): return .sheet(.prepareSpell(id))
-            case .attribute(let id): return .sheet(.spendAttribute(id))
             case .character:
                 guard let path = RPG_PATH_DEFINITIONS.first,
-                      let branchID = path.branchIDs.first,
-                      let starterSkillID = rpgBranchDefinition(branchID)?.skillIDs.first,
-                      let attributes = rpgCreationPreset(pathID: path.id) else { return nil }
+                      let branchID = path.branchIDs.first else { return nil }
+                let skills = rpgDefaultStartingSkillIDs(pathID: path.id)
+                guard skills.count == RPG_STARTING_SKILL_COUNT else { return nil }
                 return .sheet(.create(RPGCreationDraft(
-                    pathID: path.id, attributes: attributes,
-                    starterSkillID: starterSkillID, starterSpellIDs: [])))
+                    pathID: path.id, branchID: branchID, startingSkillIDs: skills)))
             default: return nil
             }
         case "saveSlots": return .saveQuickSlots
@@ -353,7 +349,6 @@ public struct RPGUIHarnessFixture: Equatable {
             switch sheet {
             case .create: return .create
             case .rankUp: return .rankUp
-            case .spendAttribute: return .spendAttribute
             case .prepareSkill: return .prepareSkill
             case .unprepareSkill: return .unprepareSkill
             case .prepareSpell: return .prepareSpell
@@ -365,6 +360,7 @@ public struct RPGUIHarnessFixture: Equatable {
         case .cyclePreparedAction: return .cyclePreparedAction
         case .usePreparedAction: return .usePreparedAction
         case .useQuickSlot: return .useQuickSlot
+        case .migrationNotice: return .migrationNotice
         }
     }
 
@@ -455,6 +451,7 @@ public struct RPGUIHarnessFixture: Equatable {
         case .cyclePreparedAction: return "Cycle prepared action"
         case .usePreparedAction: return "Use selected action"
         case .useQuickSlot: return "Use quick slot"
+        case .migrationNotice: return "Migration notice"
         }
     }
 
@@ -463,14 +460,6 @@ public struct RPGUIHarnessFixture: Equatable {
         case .character: return "Character"
         case .skill(let id): return rpgSkillDefinition(id)?.displayName ?? "Registered skill"
         case .spell(let id): return rpgSpellDefinition(id)?.displayName ?? "Registered spell"
-        case .attribute(let id):
-            switch id {
-            case .strength: return "Strength"
-            case .dexterity: return "Dexterity"
-            case .endurance: return "Endurance"
-            case .intelligence: return "Intelligence"
-            case .luck: return "Luck"
-            }
         case .slot(let slot): return "Quick slot " + String(slot + 1)
         case .equipment(let id):
             switch id {
@@ -512,33 +501,14 @@ public struct RPGUIHarnessFixture: Equatable {
     private static func repairedRankState(skillID: String, rank: Int,
                                           presentation: String) -> RPGCharacterState? {
         guard let skill = rpgSkillDefinition(skillID),
-              var state = rpgScreenFixture(pathID: skill.pathID, branchID: skill.branchID),
-              let node = rpgSkillNodeIndex(skillID),
-              let branch = rpgBranchDefinition(skill.branchID) else { return nil }
+              var state = rpgScreenFixture(pathID: skill.pathID, branchID: skill.branchID) else { return nil }
         state.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
         state = repairRPGCharacterState(state)
         guard state.created, state.level == RPG_LEVEL_CAP else { return nil }
 
-        func raiseRequirements(for definition: RPGSkillDefinition,
-                               in state: inout RPGCharacterState) -> Bool {
-            for requirement in definition.requirements {
-                while state.attributes.value(requirement.attribute) < requirement.minimum {
-                    guard rpgSpendAttributePoint(requirement.attribute, in: &state) == nil else {
-                        return false
-                    }
-                }
-            }
-            return true
-        }
-        func learn(_ id: String, through targetRank: Int,
-                   in state: inout RPGCharacterState) -> Bool {
-            guard let definition = rpgSkillDefinition(id),
-                  raiseRequirements(for: definition, in: &state) else { return false }
-            if let skillNode = rpgSkillNodeIndex(id), skillNode > 0,
-               let skillBranch = rpgBranchDefinition(definition.branchID),
-               !learn(skillBranch.skillIDs[skillNode - 1], through: 2, in: &state) {
-                return false
-            }
+        // Prerequisite-skill gating is removed entirely (interpretation flag A7); only the level
+        // gate and point budget govern eligibility, both already checked by rpgLearnSkill.
+        func learn(_ id: String, through targetRank: Int, in state: inout RPGCharacterState) -> Bool {
             while (state.skillRanks[id] ?? 0) < targetRank {
                 guard rpgLearnSkill(id, in: &state) == nil else { return false }
             }
@@ -553,21 +523,18 @@ public struct RPGUIHarnessFixture: Equatable {
         case "future": currentRank = rank - 2
         default: return nil
         }
-        if node > 0, presentation == "nextLegal" {
-            guard learn(branch.skillIDs[node - 1], through: 2, in: &state) else { return nil }
-        }
         if currentRank > 0, !learn(skillID, through: currentRank, in: &state) { return nil }
         if presentation == "locked" {
             state.authorityRevision = RPG_MAX_NORMAL_AUTHORITY_REVISION
             state = repairRPGCharacterState(state)
         }
-        let projected = rpgPathProjection(pathID: skill.pathID, state: state)?.ranks.first {
-            $0.skillID == skillID && $0.rank == rank
+        let projected = rpgPathProjection(pathID: skill.pathID, state: state)?.skillCards.first {
+            $0.skillID == skillID
         }
-        let actual = projected.map { value -> String in
-            if value.current { return "current" }
-            if value.purchased { return "purchased" }
-            if let evaluation = value.nextEvaluation {
+        let actual = projected.map { card -> String in
+            if card.currentRank == rank { return "current" }
+            if card.currentRank > rank { return "purchased" }
+            if let evaluation = card.nextEvaluation, evaluation.targetRank == rank {
                 return evaluation.permitted ? "nextLegal" : "locked"
             }
             return "future"
@@ -610,23 +577,9 @@ public struct RPGUIHarnessFixture: Equatable {
         func attain(_ candidate: PreparedCandidate,
                     from initial: RPGCharacterState) -> RPGCharacterState? {
             var state = initial
-            func meetRequirements(_ skill: RPGSkillDefinition) -> Bool {
-                for requirement in skill.requirements {
-                    while state.attributes.value(requirement.attribute) < requirement.minimum {
-                        guard rpgSpendAttributePoint(requirement.attribute, in: &state) == nil else {
-                            return false
-                        }
-                    }
-                }
-                return true
-            }
+            // Prerequisite-skill gating is removed entirely (interpretation flag A7); only the
+            // level gate and point budget govern eligibility, both checked by rpgLearnSkill.
             func learn(_ skillID: String, through rank: Int) -> Bool {
-                guard let skill = rpgSkillDefinition(skillID), meetRequirements(skill) else {
-                    return false
-                }
-                if let node = rpgSkillNodeIndex(skillID), node > 0,
-                   let branch = rpgBranchDefinition(skill.branchID),
-                   !learn(branch.skillIDs[node - 1], through: 2) { return false }
                 while (state.skillRanks[skillID] ?? 0) < rank {
                     guard rpgLearnSkill(skillID, in: &state) == nil else { return false }
                 }
@@ -646,21 +599,19 @@ public struct RPGUIHarnessFixture: Equatable {
 
         // Deterministic inclusion-maximal search: at most 16 registry-stable candidates and 256
         // legal-transition simulations. The stable score prefers lower spent skill points, then
-        // fewer attribute increases, then the canonical token. This does not claim globally
-        // maximum cardinality; it proves no remaining candidate is attainable when it stops below
-        // the nine-slot capacity.
+        // the canonical token. This does not claim globally maximum cardinality; it proves no
+        // remaining candidate is attainable when it stops below the nine-slot capacity.
         var state = base
         var tokens: [String] = []
         var remaining = candidates
         var attempts = 0
         var stoppedWithoutAttainableCandidate = false
         while tokens.count < 9, !remaining.isEmpty {
-            var best: (index: Int, state: RPGCharacterState, score: (Int, Int, String))?
+            var best: (index: Int, state: RPGCharacterState, score: (Int, String))?
             for (index, candidate) in remaining.enumerated() {
                 attempts += 1
                 guard attempts <= 256, let next = attain(candidate, from: state) else { continue }
-                let attributeIncrease = next.attributes.total - base.attributes.total
-                let score = (rpgSpentSkillPoints(next), attributeIncrease, candidate.token)
+                let score = (rpgSpentSkillPoints(next), candidate.token)
                 if best == nil || score < best!.score {
                     best = (index, next, score)
                 }
@@ -710,46 +661,41 @@ public struct RPGUIHarnessFixture: Equatable {
         }
         switch bootstrap.selector {
         case .creation(let step, let pathID, let branchID, let profile):
-            guard case .success(let selected) = rpgReduceCreationSession(creation, command: .selectPath(pathID)),
-                  case .success(let branched) = rpgReduceCreationSession(selected, command: .selectBranch(branchID)) else { return nil }
+            guard case .success(let selected) = rpgReduceCreationSession(creation, command: .choosePath(pathID)),
+                  case .success(let branched) = rpgReduceCreationSession(selected, command: .chooseBranch(branchID)) else { return nil }
             creation = branched
-            creation.step = step
-            if let index = creation.pathDrafts.firstIndex(where: { $0.pathID == pathID }) {
-                switch profile {
-                case "editedValid":
-                    guard let starterID = rpgBranchDefinition(branchID)?.skillIDs.first,
-                          let starter = rpgSkillDefinition(starterID) else { return nil }
-                    var attributes = creation.pathDrafts[index].attributes
-                    let minimums = Dictionary(uniqueKeysWithValues:
-                        starter.requirements.map { ($0.attribute, $0.minimum) })
-                    guard let donor = RPG_ATTRIBUTE_DISPLAY_ORDER.reversed().first(where: {
-                        attributes.value($0) - 1 >= max(
-                            RPGAttributes.minimum, minimums[$0] ?? RPGAttributes.minimum)
-                    }), let recipient = RPG_ATTRIBUTE_DISPLAY_ORDER.first(where: {
-                        $0 != donor && attributes.value($0) < RPGAttributes.maximumAtCreation
-                    }) else { return nil }
-                    attributes.set(donor, attributes.value(donor) - 1)
-                    attributes.set(recipient, attributes.value(recipient) + 1)
-                    creation.pathDrafts[index].attributes = attributes
-                case "underBudget": creation.pathDrafts[index].attributes.luck -= 1
-                case "unmetRequirement":
-                    if let starterID = rpgBranchDefinition(branchID)?.skillIDs.first,
-                       let requirement = rpgSkillDefinition(starterID)?.requirements.first {
-                        var attributes = creation.pathDrafts[index].attributes
-                        let oldValue = attributes.value(requirement.attribute)
-                        let newValue = max(RPGAttributes.minimum, requirement.minimum - 1)
-                        attributes.set(requirement.attribute, newValue)
-                        let delta = oldValue - newValue
-                        if let compensation = RPG_ATTRIBUTE_DISPLAY_ORDER.first(where: {
-                            $0 != requirement.attribute && attributes.value($0) + delta <= RPGAttributes.maximumAtCreation
-                        }) {
-                            attributes.set(compensation, attributes.value(compensation) + delta)
-                        }
-                        creation.pathDrafts[index].attributes = attributes
-                    }
-                default: break
-                }
+            // chooseBranch already advanced to .skills with the default (3-signature)
+            // preselection; every profile below starts from that baseline.
+            guard let branch = rpgBranchDefinition(branchID) else { return nil }
+            let pool = rpgStartingSkillPool(pathID: pathID, branchID: branchID)
+            switch profile {
+            case "default":
+                break
+            case "partial":
+                guard let draft = creation.selectedDraft, let dropped = draft.startingSkillIDs.first,
+                      case .success(let toggled) = rpgReduceCreationSession(
+                        creation, command: .toggleStartingSkill(dropped)) else { return nil }
+                creation = toggled
+            case "custom":
+                guard let draft = creation.selectedDraft,
+                      let swapIn = branch.skillIDs.dropFirst().first(where: { !draft.startingSkillIDs.contains($0) }),
+                      let swapOut = draft.startingSkillIDs.first(where: { $0 != swapIn }) else { return nil }
+                guard case .success(let removed) = rpgReduceCreationSession(
+                        creation, command: .toggleStartingSkill(swapOut)),
+                      case .success(let added) = rpgReduceCreationSession(
+                        removed, command: .toggleStartingSkill(swapIn)) else { return nil }
+                creation = added
+            case "overflowHelp":
+                guard let draft = creation.selectedDraft,
+                      let extra = pool.first(where: { !draft.startingSkillIDs.contains($0) }),
+                      case .success(let noOp) = rpgReduceCreationSession(
+                        creation, command: .toggleStartingSkill(extra)) else { return nil }
+                creation = noOp
+            case "inventoryFull":
+                break
+            default: return nil
             }
+            creation.step = step
             if profile == "inventoryFull" {
                 caseMetadata += ":starter inventory full"
                 let reason = "Inventory is full; the starter kit does not fit."
@@ -769,7 +715,7 @@ public struct RPGUIHarnessFixture: Equatable {
             guard let repaired = repairedRankState(
                 skillID: skillID, rank: rank, presentation: rankState) else { return nil }
             state = repaired
-            tab = .skills; focus = .rank(skillID: skillID, rank: rank)
+            tab = .skills; focus = .skill(skillID)
         case .active(let skillID, let actionState):
             guard let skill = rpgSkillDefinition(skillID) else { return nil }
             if actionState == "unknown" {

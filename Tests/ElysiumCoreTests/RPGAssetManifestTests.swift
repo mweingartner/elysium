@@ -60,16 +60,13 @@ final class RPGAssetManifestTests: XCTestCase {
         }
 
         for skill in RPG_SKILL_DEFINITIONS {
-            XCTAssertEqual(skill.rankValues.count, 3, skill.id)
-            XCTAssertEqual(skill.rankBenefits.count, 3, skill.id)
+            XCTAssertEqual(skill.rankValues.count, RPG_SKILL_RANK_CAP, skill.id)
+            XCTAssertEqual(skill.rankBenefits.count, RPG_SKILL_RANK_CAP, skill.id)
             XCTAssertTrue(skill.rankBenefits.allSatisfy { skill.summary.contains($0) }, skill.id)
             XCTAssertEqual(skill.effectID.rawValue, skill.id)
             XCTAssertTrue(skill.rankBenefits.allSatisfy { !$0.isEmpty }, skill.id)
             XCTAssertTrue(pathIDs.contains(skill.pathID), "\(skill.id) references missing path \(skill.pathID)")
             XCTAssertTrue(branchIDs.contains(skill.branchID), "\(skill.id) references missing branch \(skill.branchID)")
-            for prereq in skill.prerequisiteSkillIDs {
-                XCTAssertTrue(skillIDs.contains(prereq), "\(skill.id) references missing prerequisite \(prereq)")
-            }
             for unlock in skill.spellUnlocks {
                 XCTAssertTrue((1...3).contains(unlock.rank), skill.id)
                 XCTAssertTrue(spellIDs.contains(unlock.spellID), skill.id)

@@ -1,9 +1,20 @@
 import CryptoKit
 import Foundation
 
-public enum RPGCreationStep: String, CaseIterable, Codable { case path, branch, attributes, review }
+public enum RPGCreationStep: String, CaseIterable, Codable { case path, branch, skills, review }
 public enum RPGCharacterTab: String, CaseIterable, Codable { case character, skills, actives, spells, progression }
 public enum RPGFocusDirection: String, Codable { case up, down, left, right }
+
+/// Composed step-indicator strings. Design Review hard condition C1: exact wording, also driving
+/// the accessibility step-change announcement.
+public func rpgCreationStepTitle(_ step: RPGCreationStep) -> String {
+    switch step {
+    case .path: return "Path · Step 1 of 4"
+    case .branch: return "Sub-class · Step 2 of 4"
+    case .skills: return "Starting Skills · Step 3 of 4"
+    case .review: return "Review · Step 4 of 4"
+    }
+}
 
 public enum RPGSemanticCommand: Equatable {
     case moveFocus(RPGFocusDirection)
@@ -19,18 +30,15 @@ public enum RPGSemanticCommand: Equatable {
     case useSelectedAction
     case useQuickSlot(Int)
     case choosePath(String)
-    case previousClass
-    case nextClass
     case chooseBranch(String)
+    case toggleStartingSkill(String)
     case creationBack
     case creationNext
-    case resetAttributes
-    case adjustAttribute(RPGAttributeID, Int)
+    case creationReject
     case selectTab(RPGCharacterTab)
     case selectElement(RPGUIElementID)
     case create(RPGCreationDraft)
     case rankUp(String)
-    case spendAttribute(RPGAttributeID)
     case prepareSkill(String)
     case unprepareSkill(String)
     case prepareSpell(String)
@@ -88,16 +96,16 @@ public struct RPGUIElementID: RawRepresentable, Hashable, Codable, Comparable {
     public static func action(kind: String, id: String) -> RPGUIElementID {
         RPGUIElementID(rawValue: "action:\(kind):\(id)")!
     }
-    public static func attribute(_ attribute: RPGAttributeID) -> RPGUIElementID {
-        RPGUIElementID(rawValue: "attribute:\(attribute.rawValue)")!
-    }
     public static func spell(_ id: String) -> RPGUIElementID { RPGUIElementID(rawValue: "spell:\(id)")! }
 }
 
+/// One path's in-progress creation choices. Per-path drafts persist across navigation (amendment
+/// A1): returning to a previously configured path restores its draft; only changing SUB-CLASS
+/// resets Step 3 to that sub-class's default preselection.
 public struct RPGCreationPathDraft: Equatable {
     public let pathID: String
-    public var branchID: String
-    public var attributes: RPGAttributes
+    public var branchID: String?
+    public var startingSkillIDs: [String]
 }
 
 public struct RPGCreationSession: Equatable {
@@ -111,41 +119,29 @@ public struct RPGCreationSession: Equatable {
 }
 
 public enum RPGCreationSessionCommand: Equatable {
-    case selectPath(String)
-    case cyclePath(Int)
-    case selectBranch(String)
-    case adjustAttribute(RPGAttributeID, Int)
-    case resetToPreset
+    case choosePath(String)
+    case chooseBranch(String)
+    case toggleStartingSkill(String)
+    case confirmStartingSkills
     case back
-    case next
 }
 
 public enum RPGCreationSessionError: Error, Equatable {
     case unknownPath(String)
     case branchDoesNotBelongToPath(String)
     case starterRegistryMismatch
-    case invalidAttributeValue(RPGAttributeID, Int)
-    case invalidAttributeBudget(Int)
-    case unmetStarterRequirement(RPGAttributeID, required: Int)
+    case unknownStartingSkill(String)
+    case invalidStartingSkillCount(Int)
     case cannotAdvance
 }
 
 public func rpgInitialCreationSession() -> RPGCreationSession {
     let drafts = RPG_PATH_DEFINITIONS.map { path -> RPGCreationPathDraft in
-        RPGCreationPathDraft(pathID: path.id,
-                             branchID: path.branchIDs.first ?? "",
-                             attributes: rpgCreationPreset(pathID: path.id) ?? .defaultCreation)
+        RPGCreationPathDraft(pathID: path.id, branchID: nil, startingSkillIDs: [])
     }
     return RPGCreationSession(step: .path,
                               selectedPathID: RPG_PATH_DEFINITIONS.first?.id ?? "warden",
                               pathDrafts: drafts)
-}
-
-private func validatedStarter(pathID: String, branchID: String) -> String? {
-    guard let path = rpgPathDefinition(pathID), path.branchIDs.contains(branchID),
-          let branch = rpgBranchDefinition(branchID), branch.pathID == pathID,
-          let starter = branch.skillIDs.first, path.starterSkillIDs.contains(starter) else { return nil }
-    return starter
 }
 
 private func validatedCreationDrafts(_ session: RPGCreationSession) -> Bool {
@@ -154,77 +150,37 @@ private func validatedCreationDrafts(_ session: RPGCreationSession) -> Bool {
     var seen: Set<String> = []
     for draft in session.pathDrafts {
         guard seen.insert(draft.pathID).inserted,
-              let path = RPG_PATH_DEFINITIONS.first(where: { $0.id == draft.pathID }),
-              path.branchIDs.contains(draft.branchID),
-              validatedStarter(pathID: draft.pathID, branchID: draft.branchID) != nil else {
+              RPG_PATH_DEFINITIONS.first(where: { $0.id == draft.pathID }) != nil else {
             return false
         }
     }
-    return RPG_PATH_DEFINITIONS.allSatisfy { path in
-        seen.contains(path.id)
-    }
+    return RPG_PATH_DEFINITIONS.allSatisfy { path in seen.contains(path.id) }
 }
 
-private func checkedCreationAttributeTotal(_ attributes: RPGAttributes) -> Int? {
-    var total = 0
-    for attribute in RPG_ATTRIBUTE_DISPLAY_ORDER {
-        let addition = total.addingReportingOverflow(attributes.value(attribute))
-        guard !addition.overflow else { return nil }
-        total = addition.partialValue
-    }
-    return total
-}
-
-private func invalidBudgetTotal(_ attributes: RPGAttributes) -> Int {
-    checkedCreationAttributeTotal(attributes) ?? Int.max
-}
-
-public func rpgCreationPointsRemaining(_ session: RPGCreationSession) -> Int? {
-    guard validatedCreationDrafts(session), let draft = session.selectedDraft else { return nil }
-    guard let total = checkedCreationAttributeTotal(draft.attributes) else { return nil }
-    let subtraction = RPGAttributes.creationBudget.subtractingReportingOverflow(total)
-    guard !subtraction.overflow else { return nil }
-    return subtraction.partialValue
-}
-
-private func creationFoundationAllows(_ attributes: RPGAttributes,
-                                      pathID: String, branchID: String) -> Bool {
-    guard let starter = validatedStarter(pathID: pathID, branchID: branchID),
-          let skill = rpgSkillDefinition(starter) else { return false }
-    return skill.requirements.allSatisfy { attributes.value($0.attribute) >= $0.minimum }
+/// The exactly-3, unique, pool-valid starting-skill draft for `draft`, or the path's default
+/// preselection (the three sub-class signatures) when the draft has not chosen a sub-class yet.
+private func effectiveStartingSkillIDs(_ draft: RPGCreationPathDraft) -> [String] {
+    guard let branchID = draft.branchID else { return rpgDefaultStartingSkillIDs(pathID: draft.pathID) }
+    let pool = rpgStartingSkillPool(pathID: draft.pathID, branchID: branchID)
+    guard !pool.isEmpty else { return [] }
+    if draft.startingSkillIDs.isEmpty { return rpgDefaultStartingSkillIDs(pathID: draft.pathID) }
+    return pool.filter(draft.startingSkillIDs.contains)
 }
 
 public func rpgCreationDraft(from session: RPGCreationSession) -> Result<RPGCreationDraft, RPGCreationSessionError> {
     guard validatedCreationDrafts(session) else { return .failure(.starterRegistryMismatch) }
     guard let draft = session.selectedDraft else { return .failure(.unknownPath(session.selectedPathID)) }
-    guard let starter = validatedStarter(pathID: draft.pathID, branchID: draft.branchID) else {
+    guard let branchID = draft.branchID, let branch = rpgBranchDefinition(branchID),
+          branch.pathID == draft.pathID else {
         return .failure(.starterRegistryMismatch)
     }
-    var total = 0
-    for attribute in RPG_ATTRIBUTE_DISPLAY_ORDER {
-        let addition = total.addingReportingOverflow(draft.attributes.value(attribute))
-        guard !addition.overflow else { return .failure(.invalidAttributeBudget(Int.max)) }
-        total = addition.partialValue
+    let skills = effectiveStartingSkillIDs(draft)
+    guard skills.count == RPG_STARTING_SKILL_COUNT else {
+        return .failure(.invalidStartingSkillCount(skills.count))
     }
-    guard total == RPGAttributes.creationBudget else {
-        return .failure(.invalidAttributeBudget(total))
-    }
-    for attribute in RPG_ATTRIBUTE_DISPLAY_ORDER {
-        let value = draft.attributes.value(attribute)
-        guard (RPGAttributes.minimum...RPGAttributes.maximumAtCreation).contains(value) else {
-            return .failure(.invalidAttributeValue(attribute, value))
-        }
-    }
-    guard let starterDefinition = rpgSkillDefinition(starter) else {
-        return .failure(.starterRegistryMismatch)
-    }
-    if let unmet = starterDefinition.requirements.first(where: {
-        draft.attributes.value($0.attribute) < $0.minimum
-    }) {
-        return .failure(.unmetStarterRequirement(unmet.attribute, required: unmet.minimum))
-    }
-    return .success(RPGCreationDraft(pathID: draft.pathID, attributes: draft.attributes,
-                                     starterSkillID: starter, starterSpellIDs: []))
+    return .success(RPGCreationDraft(pathID: draft.pathID, branchID: branchID,
+                                     startingSkillIDs: skills, starterSkillID: branch.skillIDs.first,
+                                     starterSpellIDs: []))
 }
 
 public func rpgReduceCreationSession(_ session: RPGCreationSession,
@@ -233,107 +189,75 @@ public func rpgReduceCreationSession(_ session: RPGCreationSession,
     var next = session
     guard validatedCreationDrafts(session) else { return .failure(.starterRegistryMismatch) }
     switch command {
-    case .selectPath(let pathID):
+    case .choosePath(let pathID):
         guard rpgPathDefinition(pathID) != nil, next.pathDrafts.contains(where: { $0.pathID == pathID }) else {
             return .failure(.unknownPath(pathID))
         }
+        guard next.step == .path else { return .failure(.cannotAdvance) }
         next.selectedPathID = pathID
-    case .cyclePath(let delta):
-        guard delta == -1 || delta == 1,
-              let index = RPG_PATH_DEFINITIONS.firstIndex(where: { $0.id == next.selectedPathID }) else {
-            return .failure(.unknownPath(next.selectedPathID))
-        }
-        let count = RPG_PATH_DEFINITIONS.count
-        let destination = delta < 0 ? (index == 0 ? count - 1 : index - 1)
-            : (index + 1 == count ? 0 : index + 1)
-        next.selectedPathID = RPG_PATH_DEFINITIONS[destination].id
-    case .selectBranch(let branchID):
+        next.step = .branch
+    case .chooseBranch(let branchID):
+        guard next.step == .branch else { return .failure(.cannotAdvance) }
         guard let path = rpgPathDefinition(next.selectedPathID), path.branchIDs.contains(branchID),
-              validatedStarter(pathID: path.id, branchID: branchID) != nil else {
+              let branch = rpgBranchDefinition(branchID), branch.pathID == path.id else {
             return .failure(.branchDoesNotBelongToPath(branchID))
         }
         guard let index = next.pathDrafts.firstIndex(where: { $0.pathID == path.id }) else {
             return .failure(.unknownPath(path.id))
         }
-        next.pathDrafts[index].branchID = branchID
-    case .adjustAttribute(let attribute, let delta):
-        guard let index = next.pathDrafts.firstIndex(where: { $0.pathID == next.selectedPathID }) else {
-            return .failure(.unknownPath(next.selectedPathID))
+        // Changing sub-class always resets Step 3 to that sub-class's defaults; choosing the SAME
+        // sub-class again (returning via Back) preserves any in-progress selection (amendment A1).
+        // The default is stored in the SAME pool order that .toggleStartingSkill normalizes to, so
+        // a subsequent no-op toggle (amendment A5) is byte-identical, not just set-equivalent.
+        if next.pathDrafts[index].branchID != branchID {
+            next.pathDrafts[index].branchID = branchID
+            let pool = rpgStartingSkillPool(pathID: path.id, branchID: branchID)
+            let defaults = Set(rpgDefaultStartingSkillIDs(pathID: path.id))
+            next.pathDrafts[index].startingSkillIDs = pool.filter(defaults.contains)
         }
-        let currentValue = next.pathDrafts[index].attributes.value(attribute)
-        let addition = currentValue.addingReportingOverflow(delta)
-        guard !addition.overflow else { return .failure(.invalidAttributeValue(attribute, currentValue)) }
-        let value = addition.partialValue
-        guard (RPGAttributes.minimum...RPGAttributes.maximumAtCreation).contains(value) else {
-            return .failure(.invalidAttributeValue(attribute, value))
+        next.step = .skills
+    case .toggleStartingSkill(let skillID):
+        guard next.step == .skills else { return .failure(.cannotAdvance) }
+        guard let index = next.pathDrafts.firstIndex(where: { $0.pathID == next.selectedPathID }),
+              let branchID = next.pathDrafts[index].branchID else {
+            return .failure(.starterRegistryMismatch)
         }
-        if delta > 0 {
-            guard let remaining = rpgCreationPointsRemaining(next), remaining >= delta else {
-                return .failure(.invalidAttributeBudget(
-                    invalidBudgetTotal(next.pathDrafts[index].attributes)))
-            }
+        let pool = rpgStartingSkillPool(pathID: next.selectedPathID, branchID: branchID)
+        guard pool.contains(skillID) else { return .failure(.unknownStartingSkill(skillID)) }
+        var current = effectiveStartingSkillIDs(next.pathDrafts[index])
+        if let existingIndex = current.firstIndex(of: skillID) {
+            current.remove(at: existingIndex)
+        } else if current.count < RPG_STARTING_SKILL_COUNT {
+            current.append(skillID)
         }
-        var attributes = next.pathDrafts[index].attributes
-        attributes.set(attribute, value)
-        guard creationFoundationAllows(attributes, pathID: next.pathDrafts[index].pathID,
-                                       branchID: next.pathDrafts[index].branchID) else {
-            let starter = validatedStarter(pathID: next.pathDrafts[index].pathID,
-                                           branchID: next.pathDrafts[index].branchID)
-            let requirement = starter.flatMap(rpgSkillDefinition)?.requirements.first {
-                attributes.value($0.attribute) < $0.minimum
-            }
-            return .failure(.unmetStarterRequirement(requirement?.attribute ?? attribute,
-                                                      required: requirement?.minimum ?? value))
+        // A 4th-click while 3 are already chosen is an actionable no-op (amendment A5): the
+        // command still succeeds, but the draft is unchanged.
+        next.pathDrafts[index].startingSkillIDs = pool.filter(current.contains)
+    case .confirmStartingSkills:
+        guard next.step == .skills else { return .failure(.cannotAdvance) }
+        guard let draft = next.selectedDraft else { return .failure(.unknownPath(next.selectedPathID)) }
+        let skills = effectiveStartingSkillIDs(draft)
+        guard skills.count == RPG_STARTING_SKILL_COUNT else {
+            return .failure(.invalidStartingSkillCount(skills.count))
         }
-        next.pathDrafts[index].attributes = attributes
-    case .resetToPreset:
-        guard let preset = rpgCreationPreset(pathID: next.selectedPathID),
-              let index = next.pathDrafts.firstIndex(where: { $0.pathID == next.selectedPathID }) else {
-            return .failure(.unknownPath(next.selectedPathID))
-        }
-        next.pathDrafts[index].attributes = preset
+        next.step = .review
     case .back:
         switch next.step {
         case .path: return .failure(.cannotAdvance)
         case .branch: next.step = .path
-        case .attributes: next.step = .branch
-        case .review: next.step = .branch
-        }
-    case .next:
-        switch next.step {
-        case .path:
-            switch rpgCreationDraft(from: next) {
-            case .success: break
-            case .failure(let error): return .failure(error)
-            }
-            next.step = .branch
-        case .branch:
-            guard let draft = next.selectedDraft,
-                  validatedStarter(pathID: draft.pathID, branchID: draft.branchID) != nil else {
-                return .failure(.starterRegistryMismatch)
-            }
-            next.step = .review
-        case .attributes:
-            switch rpgCreationDraft(from: next) {
-            case .success: next.step = .review
-            case .failure(let error): return .failure(error)
-            }
-        case .review:
-            return .failure(.cannotAdvance)
+        case .skills: next.step = .branch
+        case .review: next.step = .skills
         }
     }
     return .success(next)
 }
-
-public let RPG_ATTRIBUTE_DISPLAY_ORDER: [RPGAttributeID] = [.strength, .dexterity, .endurance, .intelligence, .luck]
 
 public struct RPGPathCardModel: Equatable {
     public let pathID: String
     public let iconAssetID: String
     public let displayName: String
     public let roleText: String
-    public let primaryText: String
-    public let presetText: String
+    public let growthText: String
     public let selected: Bool
     public let accessibilityLabel: String
     public let accessibilityHelp: String
@@ -342,45 +266,33 @@ public struct RPGPathCardModel: Equatable {
     public let chooseCommand: RPGSemanticCommand?
 }
 
-private func shortAttribute(_ id: RPGAttributeID) -> String {
-    switch id {
-    case .strength: return "STR"
-    case .dexterity: return "DEX"
-    case .endurance: return "END"
-    case .intelligence: return "INT"
-    case .luck: return "LUCK"
-    }
+public func rpgPathGrowthLine(_ pathID: String) -> String {
+    let profile = rpgPathGrowthProfile(pathID)
+    return "Health \(Int(profile.healthBase)) +\(Int(profile.healthPerLevel))/level · " +
+        "Fatigue \(Int(profile.fatigueBase)) +\(Int(profile.fatiguePerLevel))/level"
 }
 
 public func rpgPathCardModels(session: RPGCreationSession) -> [RPGPathCardModel] {
     RPG_PATH_DEFINITIONS.compactMap { path in
         let iconAssetID = rpgAssetIDForPath(path.id)
-        guard let preset = rpgCreationPreset(pathID: path.id),
-              rpgIconPixels(assetID: iconAssetID) != nil else { return nil }
-        let primary = path.primaryAttributes.map(shortAttribute).joined(separator: " + ")
-        let presetText = RPG_ATTRIBUTE_DISPLAY_ORDER
-            .map { "\(shortAttribute($0)) \(preset.value($0))" }.joined(separator: " · ")
+        guard rpgIconPixels(assetID: iconAssetID) != nil else { return nil }
+        let growthText = rpgPathGrowthLine(path.id)
         let selected = path.id == session.selectedPathID
-        let roleText = "Role: \(path.summary)"
-        let primaryText = "Primary: \(primary)"
-        let presetLine = "Preset: \(presetText)"
+        let roleText = path.summary
         let choose = selected ? "" : "; Choose \(path.displayName)"
         return RPGPathCardModel(pathID: path.id, iconAssetID: iconAssetID,
-            displayName: path.displayName, roleText: roleText, primaryText: primaryText,
-            presetText: presetLine, selected: selected,
+            displayName: path.displayName, roleText: roleText, growthText: growthText, selected: selected,
             accessibilityLabel: "\(path.displayName), \(selected ? "selected" : "not selected")",
-            accessibilityHelp: "\(roleText); \(primaryText); \(presetLine)\(choose)",
-            wrappedVisualLines: [path.displayName, roleText, primaryText, presetLine,
-                                 selected ? "Selected" : "Choose \(path.displayName)"],
+            accessibilityHelp: "\(roleText); \(growthText)\(choose)",
+            wrappedVisualLines: [path.displayName, roleText, growthText],
             focusSelection: RPGScreenSelection(selectedSemanticID: .path(path.id)),
-            chooseCommand: selected ? nil : .choosePath(path.id))
+            chooseCommand: .choosePath(path.id))
     }
 }
 
 public enum RPGSheetAuthoritativeOperation: Equatable {
     case create(RPGCreationDraft)
     case rankUp(skillID: String)
-    case spendAttribute(RPGAttributeID)
     case prepareSkill(String), unprepareSkill(String), prepareSpell(String), unprepareSpell(String)
     case selectSkill(String), selectSpell(String)
 }
@@ -465,13 +377,13 @@ public enum RPGStatusOperation: Equatable {
     case cyclePreparedAction
     case usePreparedAction
     case useQuickSlot(Int)
+    case migrationNotice
 }
 
 public enum RPGStatusTarget: Equatable {
     case character
     case skill(String)
     case spell(String)
-    case attribute(RPGAttributeID)
     case slot(Int)
     case equipment(String)
     case permission(String)
@@ -531,8 +443,9 @@ public struct RPGDurableNoticePayload: Equatable {
 }
 
 public enum RPGStatusOperationTag: String, CaseIterable, Codable {
-    case create, rankUp, spendAttribute, prepareSkill, unprepareSkill, prepareSpell, unprepareSpell
+    case create, rankUp, prepareSkill, unprepareSkill, prepareSpell, unprepareSpell
     case selectSkill, selectSpell, saveQuickSlots, cyclePreparedAction, usePreparedAction, useQuickSlot
+    case migrationNotice
 }
 
 public enum RPGStatusIdentity: Equatable {
@@ -612,7 +525,6 @@ private func rpgStatusOperationTag(_ operation: RPGStatusOperation) -> RPGStatus
         switch sheet {
         case .create: return .create
         case .rankUp: return .rankUp
-        case .spendAttribute: return .spendAttribute
         case .prepareSkill: return .prepareSkill
         case .unprepareSkill: return .unprepareSkill
         case .prepareSpell: return .prepareSpell
@@ -624,6 +536,7 @@ private func rpgStatusOperationTag(_ operation: RPGStatusOperation) -> RPGStatus
     case .cyclePreparedAction: return .cyclePreparedAction
     case .usePreparedAction: return .usePreparedAction
     case .useQuickSlot: return .useQuickSlot
+    case .migrationNotice: return .migrationNotice
     }
 }
 
@@ -640,8 +553,6 @@ private func rpgStatusOperationTargetIsCompatible(_ operation: RPGStatusOperatio
              (.prepareSpell(let operationID), .spell(let targetID)),
              (.unprepareSpell(let operationID), .spell(let targetID)),
              (.selectSpell(let operationID), .spell(let targetID)):
-            return operationID == targetID
-        case (.spendAttribute(let operationID), .attribute(let targetID)):
             return operationID == targetID
         default: return false
         }
@@ -663,6 +574,8 @@ private func rpgStatusOperationTargetIsCompatible(_ operation: RPGStatusOperatio
     case .useQuickSlot(let operationSlot):
         guard case .slot(let targetSlot) = target else { return false }
         return operationSlot == targetSlot
+    case .migrationNotice:
+        return target == .character
     }
 }
 
@@ -715,7 +628,7 @@ private func rpgStatusSymbolIsValid(_ value: String) -> Bool {
 
 private func rpgStatusOperationIsValid(_ operation: RPGStatusOperation) -> Bool {
     switch operation {
-    case .saveQuickSlots, .cyclePreparedAction, .usePreparedAction:
+    case .saveQuickSlots, .cyclePreparedAction, .usePreparedAction, .migrationNotice:
         return true
     case .useQuickSlot(let slot):
         return (0..<RPG_ACTION_QUICK_SLOT_COUNT).contains(slot)
@@ -731,15 +644,13 @@ private func rpgStatusOperationIsValid(_ operation: RPGStatusOperation) -> Bool 
             return rpgStatusSymbolIsValid(skillID)
         case .prepareSpell(let spellID), .unprepareSpell(let spellID), .selectSpell(let spellID):
             return rpgStatusSymbolIsValid(spellID)
-        case .spendAttribute:
-            return true
         }
     }
 }
 
 private func rpgStatusTargetIsValid(_ target: RPGStatusTarget) -> Bool {
     switch target {
-    case .character, .attribute:
+    case .character:
         return true
     case .slot(let slot):
         return (0..<RPG_ACTION_QUICK_SLOT_COUNT).contains(slot)
@@ -873,7 +784,7 @@ public struct RPGLogicalRect: Equatable {
     }
 }
 
-public enum RPGSemanticRole: String, Codable { case button, staticText, tab, group, row, scrollArea, rankCell }
+public enum RPGSemanticRole: String, Codable { case button, staticText, tab, group, row, scrollArea }
 
 public enum RPGSemanticLayoutRegion: String, Codable {
     case fixed
@@ -885,9 +796,24 @@ public enum RPGDescriptorAdornment: String, Codable {
     case selectedCheckDoubleBorder
     case moveLeft
     case moveRight
-    case carouselPrevious
-    case carouselNext
 }
+
+/// Five rank pips (earned / next-purchasable / future) rendered at a card's bottom-left. `total`
+/// is always RPG_SKILL_RANK_CAP; `filled` is the currently earned rank (0...5).
+public struct RPGRankPips: Equatable {
+    public let filled: Int
+    public let total: Int
+
+    public init(_ filled: Int, _ total: Int = RPG_SKILL_RANK_CAP) {
+        self.filled = max(0, min(total, filled))
+        self.total = total
+    }
+}
+
+/// Vertical band a skill card reserves at its bottom for the rank pips: a 6px pip plus 4px above
+/// and below. The card height adds this band and rpgDescriptorVisualLinesFit keeps the text above
+/// it, so the bottom-left pips never strike the last text line (D2).
+public let RPG_RANK_PIP_BAND_HEIGHT = 14.0
 
 public struct RPGScreenLayout: Equatable {
     public let panelFrame: RPGLogicalRect
@@ -972,6 +898,11 @@ public struct RPGSemanticDescriptor: Equatable {
     public let frame: RPGLogicalRect
     public let visibleFrame: RPGLogicalRect?
     public let actionCommand: RPGSemanticCommand?
+    /// Five-rank pip state for a skill card/row. `nil` for non-skill descriptors.
+    public let rankPips: RPGRankPips?
+    /// True when a missing icon asset must still render a blank 24x24 cell (and indent text)
+    /// rather than silently skip the card.
+    public let reservesIconCell: Bool
     public var isActionable: Bool { actionCommand != nil && enabled }
 
     public init(id: RPGUIElementID, role: RPGSemanticRole, groupID: RPGUIElementID? = nil,
@@ -982,7 +913,8 @@ public struct RPGSemanticDescriptor: Equatable {
                 iconAssetID: String? = nil, visualLines: [String] = [],
                 adornment: RPGDescriptorAdornment = .none,
                 frame: RPGLogicalRect, visibleFrame: RPGLogicalRect? = nil,
-                actionCommand: RPGSemanticCommand? = nil) {
+                actionCommand: RPGSemanticCommand? = nil,
+                rankPips: RPGRankPips? = nil, reservesIconCell: Bool = false) {
         self.id = id
         self.role = role
         self.groupID = groupID
@@ -1003,6 +935,8 @@ public struct RPGSemanticDescriptor: Equatable {
         self.frame = frame
         self.visibleFrame = visibleFrame
         self.actionCommand = actionCommand
+        self.rankPips = rankPips
+        self.reservesIconCell = reservesIconCell
     }
 }
 
@@ -1148,29 +1082,22 @@ private func canonicalSemanticCommand(_ command: RPGSemanticCommand) -> [String]
     case .useSelectedAction: return ["useSelectedAction"]
     case .useQuickSlot(let slot): return ["useQuickSlot", String(slot)]
     case .choosePath(let id): return ["choosePath", id]
-    case .previousClass: return ["previousClass"]
-    case .nextClass: return ["nextClass"]
     case .chooseBranch(let id): return ["chooseBranch", id]
+    case .toggleStartingSkill(let id): return ["toggleStartingSkill", id]
     case .creationBack: return ["creationBack"]
     case .creationNext: return ["creationNext"]
-    case .resetAttributes: return ["resetAttributes"]
-    case .adjustAttribute(let attribute, let delta):
-        return ["adjustAttribute", attribute.rawValue, String(delta)]
+    case .creationReject: return ["creationReject"]
     case .selectTab(let tab): return ["selectTab", tab.rawValue]
     case .selectElement(let id): return ["selectElement", id.rawValue]
     case .create(let draft):
-        var components = ["create", draft.pathID, draft.starterSkillID ?? "",
-                          String(draft.attributes.strength), String(draft.attributes.dexterity),
-                          String(draft.attributes.endurance), String(draft.attributes.intelligence),
-                          String(draft.attributes.luck), "starterSpellCount",
-                          String(draft.starterSpellIDs.count)]
-        for spellID in draft.starterSpellIDs {
-            components.append("starterSpell")
-            components.append(spellID)
+        var components = ["create", draft.pathID, draft.branchID ?? "",
+                          "startingSkillCount", String(draft.startingSkillIDs.count)]
+        for skillID in draft.startingSkillIDs {
+            components.append("startingSkill")
+            components.append(skillID)
         }
         return components
     case .rankUp(let skillID): return ["rankUp", skillID]
-    case .spendAttribute(let attribute): return ["spendAttribute", attribute.rawValue]
     case .prepareSkill(let id): return ["prepareSkill", id]
     case .unprepareSkill(let id): return ["unprepareSkill", id]
     case .prepareSpell(let id): return ["prepareSpell", id]
@@ -1407,11 +1334,14 @@ public final class RPGSemanticActivationBoundary {
 extension RPGSemanticCommand {
     var requiresAuthority: Bool {
         switch self {
-        case .create, .rankUp, .spendAttribute, .prepareSkill, .unprepareSkill,
+        case .create, .rankUp, .prepareSkill, .unprepareSkill,
              .prepareSpell, .unprepareSpell, .selectSkill, .selectSpell,
              .cyclePreparedAction, .useSelectedAction, .useQuickSlot:
             return true
         default:
+            // Presentation-only session commands (choosePath, chooseBranch,
+            // toggleStartingSkill, creationBack, creationNext, creationReject)
+            // never touch GameCore authority state (Condition 8).
             return false
         }
     }
@@ -1429,12 +1359,15 @@ extension RPGSemanticCommand {
     }
 }
 
-public struct RPGSkillRankProjection: Equatable {
+/// One skill card on the Skills tab. Cards are grouped by sub-class, chosen sub-class first, then
+/// registry order within each sub-class.
+public struct RPGSkillCardProjection: Equatable {
     public let id: RPGUIElementID
     public let skillID: String
-    public let rank: Int
-    public let purchased: Bool
-    public let current: Bool
+    public let subClassDisplayName: String
+    public let currentRank: Int
+    public let mastered: Bool
+    public let currentBenefit: String?
     public let nextEvaluation: RPGSkillPurchaseEvaluation?
 }
 
@@ -1442,7 +1375,7 @@ public struct RPGPathProjection: Equatable {
     public let pathID: String
     public let branchIDs: [String]
     public let skillIDs: [String]
-    public let ranks: [RPGSkillRankProjection]
+    public let skillCards: [RPGSkillCardProjection]
     public let activeSkillIDs: [String]
     public let reachableSpellIDs: [String]
 }
@@ -1456,46 +1389,36 @@ public struct RPGProgressionLevelProjection: Equatable {
     public let level: Int
     public let absoluteXPThreshold: Int
     public let earnedSkillPoints: Int
-    public let earnedAttributePoints: Int
+    public let milestoneBonusPoint: Bool
     public let roadmapMilestones: [RPGSpecializationMilestone]
     public let completedMilestones: [RPGSpecializationMilestone]
 }
 
 public struct RPGCharacterSummaryProjection: Equatable {
     public let path: String
-    public let specialization: String
+    public let subClass: String
     public let level: Int
     public let absoluteXP: Int
     public let nextLevelXPThreshold: Int?
     public let fatigue: Double
-    public let attributes: [(RPGAttributeID, Int)]
     public let derivedStats: RPGDerivedStats
     public let availableSkillPoints: Int
-    public let availableAttributePoints: Int
+    /// "+<h> health · +<f> fatigue per level"
+    public let growthLine: String
+    /// "Health <n> (<base> + <perLevel> per level)" (amendment C9)
+    public let healthLine: String
+    /// "Fatigue <n> (<base> + <perLevel> per level)" (amendment C9)
+    public let fatigueLine: String
     public let equipmentSummary: String
     public let focusSummary: String
     public let nextActionableMilestone: String
     public let levelOneGuidance: String?
-
-    public static func == (lhs: RPGCharacterSummaryProjection,
-                           rhs: RPGCharacterSummaryProjection) -> Bool {
-        lhs.path == rhs.path && lhs.specialization == rhs.specialization && lhs.level == rhs.level &&
-            lhs.absoluteXP == rhs.absoluteXP && lhs.nextLevelXPThreshold == rhs.nextLevelXPThreshold &&
-            lhs.fatigue == rhs.fatigue && lhs.attributes.map { "\($0.0.rawValue):\($0.1)" } ==
-            rhs.attributes.map { "\($0.0.rawValue):\($0.1)" } && lhs.derivedStats == rhs.derivedStats &&
-            lhs.availableSkillPoints == rhs.availableSkillPoints &&
-            lhs.availableAttributePoints == rhs.availableAttributePoints &&
-            lhs.equipmentSummary == rhs.equipmentSummary && lhs.focusSummary == rhs.focusSummary &&
-            lhs.nextActionableMilestone == rhs.nextActionableMilestone &&
-            lhs.levelOneGuidance == rhs.levelOneGuidance
-    }
 }
 
 public struct RPGProgressionSummaryProjection: Equatable {
     public let plan: RPGProgressionPlanProjection
     public let levels: [RPGProgressionLevelProjection]
     public let bankedSkillPoints: Int
-    public let bankedAttributePoints: Int
     public let nextLegalPurchase: String?
     public let specializationRemainingCost: Int
     public let specializationCanComplete: Bool
@@ -1523,14 +1446,20 @@ public struct RPGCreationReviewChordProjection: Equatable {
     public let chord: String
 }
 
+public struct RPGCreationReviewSkillProjection: Equatable {
+    public let displayName: String
+    public let rank: Int
+    public let maxRank: Int
+}
+
 public struct RPGCreationReviewProjection: Equatable {
     public let path: String
-    public let branch: String
-    public let attributes: [(RPGAttributeID, Int)]
-    public let starterSkill: String
+    public let subClass: String
+    public let startingSkills: [RPGCreationReviewSkillProjection]
     public let starterKit: [String]
     public let starterKitItems: [RPGCreationReviewItemProjection]
     public let automaticSpells: [String]
+    public let growthLine: String
     public let focusRequirement: String
     public let levelOneGuidance: String
     public let configuredChords: [String]
@@ -1538,21 +1467,6 @@ public struct RPGCreationReviewProjection: Equatable {
     public let controllerScope: String
     public let inventoryCapacityCaveat: String
     public let authorityCaveat: String
-
-    public static func == (lhs: RPGCreationReviewProjection,
-                           rhs: RPGCreationReviewProjection) -> Bool {
-        lhs.path == rhs.path && lhs.branch == rhs.branch &&
-            lhs.attributes.map { "\($0.0.rawValue):\($0.1)" } ==
-            rhs.attributes.map { "\($0.0.rawValue):\($0.1)" } &&
-            lhs.starterSkill == rhs.starterSkill && lhs.starterKit == rhs.starterKit &&
-            lhs.starterKitItems == rhs.starterKitItems &&
-            lhs.automaticSpells == rhs.automaticSpells && lhs.focusRequirement == rhs.focusRequirement &&
-            lhs.levelOneGuidance == rhs.levelOneGuidance && lhs.configuredChords == rhs.configuredChords &&
-            lhs.configuredChordProjections == rhs.configuredChordProjections &&
-            lhs.controllerScope == rhs.controllerScope &&
-            lhs.inventoryCapacityCaveat == rhs.inventoryCapacityCaveat &&
-            lhs.authorityCaveat == rhs.authorityCaveat
-    }
 }
 
 public func rpgCharacterSummaryProjection(_ state: RPGCharacterState,
@@ -1560,18 +1474,23 @@ public func rpgCharacterSummaryProjection(_ state: RPGCharacterState,
                                           focusSummary: String) -> RPGCharacterSummaryProjection? {
     guard state.created, let path = rpgPathDefinition(state.pathID),
           let branch = rpgBranchDefinition(state.specializationBranchID) else { return nil }
+    let profile = rpgPathGrowthProfile(state.pathID)
+    let derived = rpgDerivedStats(state)
     let roadmap = rpgSpecializationRoadmap(branchID: state.specializationBranchID, in: state)?.milestones ?? []
     let nextMilestone = roadmap.first { (state.skillRanks[$0.skillID] ?? 0) < $0.rank }
     let nextText = nextMilestone.map {
         "Level \($0.level): \(rpgSkillDefinition($0.skillID)?.displayName ?? "Unavailable skill") rank \($0.rank)"
-    } ?? "Selected specialization complete"
-    return RPGCharacterSummaryProjection(path: path.displayName, specialization: branch.displayName,
+    } ?? "Selected sub-class complete"
+    let healthBase = Int(profile.healthBase), healthPerLevel = Int(profile.healthPerLevel)
+    let fatigueBase = Int(profile.fatigueBase), fatiguePerLevel = Int(profile.fatiguePerLevel)
+    return RPGCharacterSummaryProjection(path: path.displayName, subClass: branch.displayName,
         level: state.level, absoluteXP: state.xp,
         nextLevelXPThreshold: state.level < RPG_LEVEL_CAP ? rpgXPRequiredForLevel(state.level + 1) : nil,
-        fatigue: state.fatigue,
-        attributes: RPG_ATTRIBUTE_DISPLAY_ORDER.map { ($0, state.attributes.value($0)) },
-        derivedStats: rpgDerivedStats(state), availableSkillPoints: rpgAvailableSkillPoints(state),
-        availableAttributePoints: rpgAvailableAttributePoints(state),
+        fatigue: state.fatigue, derivedStats: derived,
+        availableSkillPoints: rpgAvailableSkillPoints(state),
+        growthLine: "+\(healthPerLevel) health · +\(fatiguePerLevel) fatigue per level",
+        healthLine: "Health \(Int(derived.maxHealth.rounded())) (\(healthBase) + \(healthPerLevel) per level)",
+        fatigueLine: "Fatigue \(Int(derived.maxFatigue.rounded())) (\(fatigueBase) + \(fatiguePerLevel) per level)",
         equipmentSummary: rpgSanitizeStatusText(equipmentSummary, byteLimit: 160),
         focusSummary: rpgSanitizeStatusText(focusSummary, byteLimit: 160),
         nextActionableMilestone: nextText,
@@ -1603,7 +1522,7 @@ public func rpgProgressionSummaryProjection(_ state: RPGCharacterState) -> RPGPr
     let earnedAtCap = rpgEarnedSkillPoints(level: RPG_LEVEL_CAP)
     let utilityAllowance = max(0, earnedAtCap - completionCost)
     let branchName = rpgBranchDefinition(state.specializationBranchID)?.displayName ??
-        "Unavailable specialization"
+        "Unavailable sub-class"
     let impact = canComplete
         ? "Current purchases leave \(remaining) SP of selected-branch milestones; completion remains possible by level 20."
         : "Current purchases leave \(remaining) SP of selected-branch milestones; completion is no longer possible by level 20."
@@ -1612,28 +1531,29 @@ public func rpgProgressionSummaryProjection(_ state: RPGCharacterState) -> RPGPr
         completionCost: completionCost, levelCapEarnedSkillPoints: earnedAtCap,
         utilityAllowance: utilityAllowance, completionImpactText: impact,
         crossBranchCapstoneText:
-            "Cross-branch Mastery III requires level 22; the level cap is 20, so it is unreachable.")
+            "Off-sub-class Rank 5 of a third-position skill requires level 22; the level cap is 20, so it is unreachable.")
     return RPGProgressionSummaryProjection(plan: plan, levels: levels,
-        bankedSkillPoints: rpgAvailableSkillPoints(state),
-        bankedAttributePoints: rpgAvailableAttributePoints(state), nextLegalPurchase: nextLegal,
+        bankedSkillPoints: rpgAvailableSkillPoints(state), nextLegalPurchase: nextLegal,
         specializationRemainingCost: remaining, specializationCanComplete: canComplete,
-        divergenceWarning: canComplete ? nil : "Current purchases prevent completing the selected specialization by level 20.")
+        divergenceWarning: canComplete ? nil : "Current purchases prevent completing the selected sub-class by level 20.")
 }
 
 public func rpgCreationReviewProjection(session: RPGCreationSession,
                                         chordBindings: [String: String],
                                         authority: RPGAuthorityPresentation,
                                         inventoryCapacitySummary: String) -> RPGCreationReviewProjection? {
-    guard let selected = session.selectedDraft,
-          case .success(let draft) = rpgCreationDraft(from: session),
+    guard case .success(let draft) = rpgCreationDraft(from: session),
           let path = rpgPathDefinition(draft.pathID),
-          let branch = rpgBranchDefinition(selected.branchID),
-          let starterID = draft.starterSkillID,
-          let starter = rpgSkillDefinition(starterID),
+          let branchID = draft.branchID, let branch = rpgBranchDefinition(branchID),
           let kit = rpgStarterKit(pathID: draft.pathID) else { return nil }
-    let spells = starter.spellUnlocks.filter { $0.rank == 1 }.compactMap {
-        rpgSpellDefinition($0.spellID)?.displayName
+    let startingSkillProjections = draft.startingSkillIDs.compactMap { skillID -> RPGCreationReviewSkillProjection? in
+        guard let def = rpgSkillDefinition(skillID) else { return nil }
+        return RPGCreationReviewSkillProjection(displayName: def.displayName, rank: 1, maxRank: RPG_SKILL_RANK_CAP)
     }
+    guard startingSkillProjections.count == RPG_STARTING_SKILL_COUNT else { return nil }
+    var startingRanks: [String: Int] = [:]
+    for skillID in draft.startingSkillIDs { startingRanks[skillID] = 1 }
+    let spells = rpgUnlockedSpellIDs(for: startingRanks).compactMap { rpgSpellDefinition($0)?.displayName }
     let chordIDs = ["rpgCharacter", "rpgCycleAction", "rpgUseAction"] +
         (1...9).map { "rpgQuickSlot\($0)" }
     let sanitizedBindings = rpgSanitizedChordBindings(chordBindings)
@@ -1674,10 +1594,10 @@ public func rpgCreationReviewProjection(session: RPGCreationSession,
         "\($0.displayName) x\($0.count)" +
             ($0.displayNameDetail.map { " (\($0))" } ?? "")
     }
-    return RPGCreationReviewProjection(path: path.displayName, branch: branch.displayName,
-        attributes: RPG_ATTRIBUTE_DISPLAY_ORDER.map { ($0, draft.attributes.value($0)) },
-        starterSkill: starter.displayName, starterKit: kitLines,
+    return RPGCreationReviewProjection(path: path.displayName, subClass: branch.displayName,
+        startingSkills: startingSkillProjections, starterKit: kitLines,
         starterKitItems: kitItems, automaticSpells: spells,
+        growthLine: rpgPathGrowthLine(draft.pathID),
         focusRequirement: spells.isEmpty ? "No starter spell focus requirement." :
             "Starter spells require an Apprentice Focus in either hand.",
         levelOneGuidance: rpgLevelOneProgressionGuidance(pathID: draft.pathID)?.visibleText ?? "",
@@ -1720,32 +1640,39 @@ public func rpgProgressionProjection(_ state: RPGCharacterState) -> [RPGProgress
             level: level,
             absoluteXPThreshold: rpgXPRequiredForLevel(level),
             earnedSkillPoints: rpgEarnedSkillPoints(level: level),
-            earnedAttributePoints: rpgEarnedAttributePoints(level: level),
+            milestoneBonusPoint: RPG_MILESTONE_LEVELS.contains(level),
             roadmapMilestones: levelMilestones,
             completedMilestones: levelMilestones.filter { (state.skillRanks[$0.skillID] ?? 0) >= $0.rank }
         )
     }
 }
 
+/// Skills tab data: cards grouped by sub-class, chosen sub-class first, registry order within
+/// each sub-class (plan section 7.5).
 public func rpgPathProjection(pathID: String, state: RPGCharacterState) -> RPGPathProjection? {
     guard let path = rpgPathDefinition(pathID), path.branchIDs.count == 3 else { return nil }
-    let skillIDs = path.branchIDs.flatMap { rpgBranchDefinition($0)?.skillIDs ?? [] }
+    let orderedBranchIDs = [state.specializationBranchID] +
+        path.branchIDs.filter { $0 != state.specializationBranchID }
+    guard orderedBranchIDs.count == 3, Set(orderedBranchIDs) == Set(path.branchIDs) else { return nil }
+    let skillIDs = orderedBranchIDs.flatMap { rpgBranchDefinition($0)?.skillIDs ?? [] }
     guard skillIDs.count == 9 else { return nil }
-    let ranks = skillIDs.flatMap { skillID -> [RPGSkillRankProjection] in
-        let current = max(0, min(3, state.skillRanks[skillID] ?? 0))
-        return (1...3).map { rank in
-            return RPGSkillRankProjection(
-                id: .rank(skillID: skillID, rank: rank), skillID: skillID,
-                rank: rank, purchased: rank <= current, current: rank == current,
-                nextEvaluation: rank == current + 1 ? rpgEvaluateSkillPurchase(skillID, in: state) : nil)
-        }
+    let skillCards = skillIDs.compactMap { skillID -> RPGSkillCardProjection? in
+        guard let def = rpgSkillDefinition(skillID), let branch = rpgBranchDefinition(def.branchID) else { return nil }
+        let currentRank = max(0, min(RPG_SKILL_RANK_CAP, state.skillRanks[skillID] ?? 0))
+        let mastered = currentRank >= RPG_SKILL_RANK_CAP
+        let benefit = currentRank > 0 ? rpgSkillRankBenefit(skillID, rank: currentRank) : nil
+        let evaluation = mastered ? nil : rpgEvaluateSkillPurchase(skillID, in: state)
+        return RPGSkillCardProjection(id: .skill(skillID), skillID: skillID,
+            subClassDisplayName: branch.displayName, currentRank: currentRank,
+            mastered: mastered, currentBenefit: benefit, nextEvaluation: evaluation)
     }
+    guard skillCards.count == 9 else { return nil }
     let active = RPG_SKILL_DEFINITIONS.filter { $0.pathID == pathID && $0.kind == .active }.map(\.id)
     let reachable = RPG_SPELL_DEFINITIONS.filter { spell in
         skillIDs.contains { rpgSkillDefinition($0)?.spellUnlocks.contains(where: { $0.spellID == spell.id }) == true }
     }.map(\.id)
-    return RPGPathProjection(pathID: pathID, branchIDs: path.branchIDs, skillIDs: skillIDs,
-                             ranks: ranks, activeSkillIDs: active, reachableSpellIDs: reachable)
+    return RPGPathProjection(pathID: pathID, branchIDs: orderedBranchIDs, skillIDs: skillIDs,
+                             skillCards: skillCards, activeSkillIDs: active, reachableSpellIDs: reachable)
 }
 
 public let RPG_TUTORIAL_VERSION = 1
@@ -1760,7 +1687,7 @@ public struct RPGTutorialState: Equatable {
 }
 
 public let RPG_TUTORIAL_PAGES: [String] = [
-    "Rank Foundation, Technique, and Mastery skills in your branch.",
+    "Rank your sub-class skills through five ranks; other sub-classes cost more points.",
     "Prepare actions, then explicitly select the action you want to use.",
     "Choose a prepared action and assign it to a local quick slot.",
     "Close the sheet and use your configured keyboard or RPG controller chords.",
@@ -1791,6 +1718,10 @@ public struct RPGScreenModelInput: Equatable {
     public let localPreferenceRevision: UInt64
     public let localPreferenceWritable: Bool
     public let localPreferenceStatus: RPGStatusPresentation?
+    /// One-time notice surfaced immediately after a legacy save is repaired into v3 (character
+    /// tab). Lower priority than a local persistence failure, higher than the ordinary authority
+    /// status.
+    public let migrationNotice: RPGStatusPresentation?
     public var localPreferencePersistenceFailed: Bool {
         localPreferenceStatus?.kind == .persistenceFailure
     }
@@ -1819,6 +1750,7 @@ public struct RPGScreenModelInput: Equatable {
                 localPreferenceScope: RPGLocalPreferenceScope? = nil,
                 localPreferenceRevision: UInt64 = 0, localPreferenceWritable: Bool = false,
                 localPreferenceStatus: RPGStatusPresentation? = nil,
+                migrationNotice: RPGStatusPresentation? = nil,
                 worldEntryGeneration: UInt64 = 0,
                 authority: RPGAuthorityPresentation = .localReady,
                 rulesGeneration: UInt64 = 0, inventoryRevision: UInt64 = 0,
@@ -1838,6 +1770,7 @@ public struct RPGScreenModelInput: Equatable {
         self.localPreferenceRevision = localPreferenceRevision
         self.localPreferenceWritable = localPreferenceWritable
         self.localPreferenceStatus = localPreferenceStatus
+        self.migrationNotice = migrationNotice
         self.worldEntryGeneration = worldEntryGeneration
         self.authority = authority
         self.rulesGeneration = rulesGeneration
@@ -1861,6 +1794,7 @@ public struct RPGScreenModelInput: Equatable {
             localPreferenceRevision: localPreferenceRevision,
             localPreferenceWritable: localPreferenceWritable,
             localPreferenceStatus: localPreferenceStatus,
+            migrationNotice: migrationNotice,
             worldEntryGeneration: worldEntryGeneration, authority: authority,
             rulesGeneration: rulesGeneration, inventoryRevision: inventoryRevision,
             equipmentFocusRevision: equipmentFocusRevision,
@@ -1885,6 +1819,7 @@ public struct RPGScreenRuntimeSnapshot: Equatable {
     public let localPreferenceRevision: UInt64
     public let localPreferenceWritable: Bool
     public let localPreferenceStatus: RPGStatusPresentation?
+    public let migrationNotice: RPGStatusPresentation?
     public var localPreferencePersistenceFailed: Bool {
         localPreferenceStatus?.kind == .persistenceFailure
     }
@@ -1909,6 +1844,7 @@ public struct RPGScreenRuntimeSnapshot: Equatable {
                 localPreferenceScope: RPGLocalPreferenceScope?, localPreferenceRevision: UInt64,
                 localPreferenceWritable: Bool, worldEntryGeneration: UInt64,
                 localPreferenceStatus: RPGStatusPresentation?,
+                migrationNotice: RPGStatusPresentation? = nil,
                 authority: RPGAuthorityPresentation, rulesGeneration: UInt64,
                 inventoryRevision: UInt64, equipmentFocusRevision: UInt64,
                 inventoryDigest: String, equipmentFocusDigest: String, settingsRevision: UInt64,
@@ -1921,6 +1857,7 @@ public struct RPGScreenRuntimeSnapshot: Equatable {
         self.localPreferenceRevision = localPreferenceRevision
         self.localPreferenceWritable = localPreferenceWritable
         self.localPreferenceStatus = localPreferenceStatus
+        self.migrationNotice = migrationNotice
         self.worldEntryGeneration = worldEntryGeneration
         self.authority = authority; self.rulesGeneration = rulesGeneration
         self.inventoryRevision = inventoryRevision
@@ -1951,6 +1888,7 @@ public struct RPGScreenRuntimeSnapshot: Equatable {
             localPreferenceRevision: localPreferenceRevision,
             localPreferenceWritable: localPreferenceWritable,
             localPreferenceStatus: localPreferenceStatus,
+            migrationNotice: migrationNotice,
             worldEntryGeneration: worldEntryGeneration, authority: authority,
             rulesGeneration: rulesGeneration, inventoryRevision: inventoryRevision,
             equipmentFocusRevision: equipmentFocusRevision,
@@ -2104,7 +2042,9 @@ private func descriptor(id: RPGUIElementID, role: RPGSemanticRole, label: String
                         focusSelection: RPGScreenSelection? = nil,
                         layoutRegion: RPGSemanticLayoutRegion = .scrollingContent,
                         iconAssetID: String? = nil, visualLines: [String]? = nil,
-                        adornment: RPGDescriptorAdornment = .none) -> RPGSemanticDescriptor {
+                        adornment: RPGDescriptorAdornment = .none,
+                        rankPips: RPGRankPips? = nil,
+                        reservesIconCell: Bool = false) -> RPGSemanticDescriptor {
     let resolvedLines: [String]
     if let visualLines {
         resolvedLines = visualLines
@@ -2114,7 +2054,8 @@ private func descriptor(id: RPGUIElementID, role: RPGSemanticRole, label: String
             (value.isEmpty ? [] : rpgWrappedPresentationLines(value, width: textWidth))
     }
     let presentationFits = rpgDescriptorVisualLinesFit(
-        frame: frame, iconAssetID: iconAssetID, visualLines: resolvedLines)
+        frame: frame, iconAssetID: iconAssetID ?? (reservesIconCell ? "" : nil),
+        visualLines: resolvedLines, reservesRankPipBand: rankPips != nil)
     // An enabled command whose complete visible label cannot fit would create an activation
     // surface without a truthful visible description. Fail closed by retaining the semantic row
     // for inspection while removing its command and enabled hit capability.
@@ -2128,7 +2069,7 @@ private func descriptor(id: RPGUIElementID, role: RPGSemanticRole, label: String
         layoutRegion: layoutRegion, iconAssetID: iconAssetID,
         visualLines: resolvedLines, adornment: adornment,
         frame: frame, visibleFrame: content.contains(frame) ? frame : nil,
-        actionCommand: resolvedCommand)
+        actionCommand: resolvedCommand, rankPips: rankPips, reservesIconCell: reservesIconCell)
 }
 
 private func shiftedContentDescriptor(_ value: RPGSemanticDescriptor, deltaY: Double,
@@ -2144,7 +2085,8 @@ private func shiftedContentDescriptor(_ value: RPGSemanticDescriptor, deltaY: Do
         isFocusable: value.isFocusable, focusSelection: value.focusSelection,
         layoutRegion: value.layoutRegion, iconAssetID: value.iconAssetID,
         visualLines: value.visualLines, adornment: value.adornment, frame: frame,
-        visibleFrame: content.contains(frame) ? frame : nil, actionCommand: value.actionCommand)
+        visibleFrame: content.contains(frame) ? frame : nil, actionCommand: value.actionCommand,
+        rankPips: value.rankPips, reservesIconCell: value.reservesIconCell)
 }
 
 public func rpgWrappedPresentationLines(_ text: String, width: Double) -> [String] {
@@ -2234,13 +2176,16 @@ public func rpgControlHeight(lines: [String]) -> Double {
 /// Shared production/harness contract for complete descriptor-line rendering. The production
 /// renderer's four-point top inset is the stricter of the two renderers and therefore canonical.
 public func rpgDescriptorVisualLinesFit(frame: RPGLogicalRect, iconAssetID: String?,
-                                        visualLines: [String]) -> Bool {
+                                        visualLines: [String],
+                                        reservesRankPipBand: Bool = false) -> Bool {
     guard frame.isFinite, frame.width > 0, frame.height > 0 else { return false }
     guard !visualLines.isEmpty else { return true }
     let width = frame.width - 8 - (iconAssetID == nil ? 0 : 28)
     guard width > 0 else { return false }
     let lastBaseline = frame.y + 4 + Double(visualLines.count - 1) * 9
-    guard lastBaseline + 8 <= frame.maxY else { return false }
+    // A rank-pip card reserves a bottom band; the last text line must clear it (D2).
+    let pipBand = reservesRankPipBand ? RPG_RANK_PIP_BAND_HEIGHT : 0
+    guard lastBaseline + 8 + pipBand <= frame.maxY else { return false }
     return visualLines.allSatisfy { line in
         Double(line.utf8.count) * 6.5 <= width
     }
@@ -2254,9 +2199,10 @@ private func rpgWrappedCardLines(_ lines: [String], width: Double) -> [String] {
     lines.flatMap { rpgWrappedPresentationLines($0, width: width) }
 }
 
-private func rpgCardHeight(visualLines: [String], hasOperation: Bool) -> Double {
+private func rpgCardHeight(visualLines: [String], hasOperation: Bool, hasPips: Bool = false) -> Double {
     let completeTextHeight = Double(max(1, visualLines.count)) * 9 + 3
     return max(28, completeTextHeight) + (hasOperation ? 24 : 0)
+        + (hasPips ? RPG_RANK_PIP_BAND_HEIGHT : 0)
 }
 
 private func rpgAuthorityEnabled(_ authority: RPGAuthorityPresentation) -> Bool {
@@ -2271,9 +2217,12 @@ public let RPG_AUTHORITY_FOCUS_STROKE_CLEARANCE = 2.0
 private func rpgContextualDetailText(resolvedFocus: RPGSemanticDescriptor,
                                      input: RPGScreenModelInput,
                                      effectiveStatus: RPGStatusPresentation?) -> String? {
-    // The compact integrated creator reserves every vertical point for its five bounded
-    // attribute controls; descriptor help remains available through accessibility semantics.
     if !input.state.created, input.creation.step == .path { return nil }
+    // Amendment C10: Step 2 shows "<Path> · choose a sub-class".
+    if !input.state.created, input.creation.step == .branch,
+       let path = rpgPathDefinition(input.creation.selectedPathID) {
+        return "\(path.displayName) · choose a sub-class"
+    }
     if resolvedFocus.id.rawValue == "status:current", let effectiveStatus {
         return effectiveStatus.accessibilityText
     }
@@ -2306,7 +2255,7 @@ private func rpgBoundedCommandFreeScreenModel(_ input: RPGScreenModelInput,
 }
 
 public func rpgBuildScreenModel(_ input: RPGScreenModelInput) -> RPGScreenModel {
-    let effectiveStatus = input.localPreferenceStatus ?? input.authority.status
+    let effectiveStatus = input.localPreferenceStatus ?? input.migrationNotice ?? input.authority.status
     let candidate = rpgBuildScreenModelPass(
         input, contextualDetailText: nil, resolvedFocusID: nil)
     guard candidate.panelFrame.width > 0, candidate.panelFrame.height > 0 else {
@@ -2347,7 +2296,7 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
     // A local disk failure is the immediate actionable condition and therefore atomically wins
     // over a concurrent authority-phase status. Text, icon, identity, and accessibility all use
     // this one effective value; clearing the local status reveals the authority status again.
-    let effectiveStatus = input.localPreferenceStatus ?? input.authority.status
+    let effectiveStatus = input.localPreferenceStatus ?? input.migrationNotice ?? input.authority.status
     guard let layout = rpgScreenLayout(viewportWidth: input.viewportWidth,
                                        viewportHeight: input.viewportHeight,
                                        hasStatus: effectiveStatus != nil,
@@ -2399,8 +2348,7 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
     }
     let stepText: String = {
         if !input.state.created {
-            return input.creation.step == .path
-                ? "Choose Class" : input.creation.step.rawValue.capitalized
+            return rpgCreationStepTitle(input.creation.step)
         }
         if let page = input.tutorial.page, input.tutorial.seenVersion < RPG_TUTORIAL_VERSION {
             return "Tutorial \(min(4, max(1, page))) of 4"
@@ -2424,132 +2372,42 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
     if !input.state.created {
         switch input.creation.step {
         case .path:
-            guard let selectedIndex = RPG_PATH_DEFINITIONS.firstIndex(where: {
-                      $0.id == input.creation.selectedPathID
-                  }), let draft = input.creation.selectedDraft,
-                  validatedCreationDrafts(input.creation),
-                  let remaining = rpgCreationPointsRemaining(input.creation) else {
-                let unavailableID = RPGUIElementID(rawValue: "creation:path:unavailable")!
-                descriptors.append(descriptor(id: unavailableID, role: .group,
-                    label: "Classes unavailable", value: "Creation registry mismatch",
-                    help: "Class creation is unavailable until its registry is repaired.",
-                    enabled: false, locked: true, frame: content, visibleIn: content,
-                    visualLines: ["Classes unavailable", "Creation registry mismatch"]))
-                y = content.maxY
-                break
+            let large = input.viewportWidth >= 520 && input.viewportHeight >= 330
+            let columns = large ? 3 : 1
+            let gap = 6.0
+            let cardWidth = (content.width - gap * Double(columns - 1)) / Double(columns)
+            let cardModels = rpgPathCardModels(session: input.creation)
+            let cardLines = cardModels.map {
+                rpgWrappedCardLines($0.wrappedVisualLines, width: max(1, cardWidth - 36))
             }
-            let path = RPG_PATH_DEFINITIONS[selectedIndex]
-            let previousIndex = selectedIndex == 0 ? RPG_PATH_DEFINITIONS.count - 1 : selectedIndex - 1
-            let nextIndex = selectedIndex + 1 == RPG_PATH_DEFINITIONS.count ? 0 : selectedIndex + 1
-            let previous = RPG_PATH_DEFINITIONS[previousIndex]
-            let next = RPG_PATH_DEFINITIONS[nextIndex]
-            let cardID = RPGUIElementID(rawValue: "creation:path:card")!
-            let arrowWidth = 30.0
-            let cardFrame = RPGLogicalRect(x: content.x + arrowWidth + 4, y: content.y,
-                width: max(1, content.width - (arrowWidth + 4) * 2), height: content.height)
-            let summary = rpgPathCardModels(session: input.creation).first { $0.pathID == path.id }
-            let cardTextWidth = max(1, cardFrame.width - 36)
-            let visibleRole = summary.flatMap {
-                rpgWrappedPresentationLines($0.roleText, width: cardTextWidth).first
-            } ?? "Class role unavailable"
-            let visiblePrimary = summary.flatMap {
-                rpgWrappedPresentationLines($0.primaryText, width: cardTextWidth).first
-            } ?? "Primary attribute unavailable"
-            descriptors.append(descriptor(id: cardID, role: .group,
-                label: "\(path.displayName), class \(selectedIndex + 1) of \(RPG_PATH_DEFINITIONS.count)",
-                value: summary?.roleText ?? path.displayName,
-                help: summary?.accessibilityHelp ?? "Edit this class's attributes.",
-                selected: true, frame: cardFrame, visibleIn: content,
-                iconAssetID: summary?.iconAssetID,
-                visualLines: ["\(path.displayName) · Class \(selectedIndex + 1) of \(RPG_PATH_DEFINITIONS.count)",
-                    visibleRole, visiblePrimary],
-                adornment: .selectedCheckDoubleBorder))
-            let previousID = RPGUIElementID(rawValue: "creation:path:previous-class")!
-            let nextID = RPGUIElementID(rawValue: "creation:path:next-class")!
-            descriptors.append(descriptor(id: previousID, role: .button,
-                label: "Previous class, \(previous.displayName)",
-                help: "Show \(previous.displayName). Wraps through classes in registry order.",
-                frame: RPGLogicalRect(x: content.x, y: content.y + 24,
-                                      width: arrowWidth, height: 30),
-                visibleIn: content, command: .previousClass, visualLines: [],
-                adornment: .carouselPrevious))
-            descriptors.append(descriptor(id: nextID, role: .button,
-                label: "Next class, \(next.displayName)",
-                help: "Show \(next.displayName). Wraps through classes in registry order.",
-                frame: RPGLogicalRect(x: content.maxX - arrowWidth, y: content.y + 24,
-                                      width: arrowWidth, height: 30),
-                visibleIn: content, command: .nextClass, visualLines: [],
-                adornment: .carouselNext))
-            let attributeGap = 4.0
-            let attributeWidth = (cardFrame.width - 8 - attributeGap) / 2
-            for (attributeIndex, attribute) in RPG_ATTRIBUTE_DISPLAY_ORDER.enumerated() {
-                let id = RPGUIElementID.attribute(attribute)
-                let value = draft.attributes.value(attribute)
-                let column = attributeIndex % 2
-                let row = attributeIndex / 2
-                let rowY = content.y + 40 + Double(row) * 20
-                let rowFrame = RPGLogicalRect(
-                    x: cardFrame.x + 4 + Double(column) * (attributeWidth + attributeGap),
-                    y: rowY, width: attributeWidth, height: 20)
-                let decrementID = RPGUIElementID.operation(owner: id, name: "decrement")
-                let incrementID = RPGUIElementID.operation(owner: id, name: "increment")
-                var decremented = draft.attributes
-                decremented.set(attribute, value - 1)
-                let decrementEnabled = value > RPGAttributes.minimum &&
-                    creationFoundationAllows(decremented, pathID: draft.pathID, branchID: draft.branchID)
-                let incrementEnabled = value < RPGAttributes.maximumAtCreation && remaining > 0
-                let valueHelp = "Creation range 6 through 14; current \(value); \(remaining) points remaining."
-                descriptors.append(descriptor(id: id, role: .row,
-                    label: shortAttribute(attribute), value: String(value), help: valueHelp,
-                    frame: rowFrame, visibleIn: content,
-                    focusSelection: RPGScreenSelection(selectedSemanticID: id),
-                    visualLines: ["\(shortAttribute(attribute))  \(value)"]))
-                descriptors.append(descriptor(id: decrementID, role: .button,
-                    label: "Decrease \(shortAttribute(attribute))", help: decrementEnabled
-                        ? "Return one point; \(remaining) currently remain."
-                        : (value <= RPGAttributes.minimum ? "Already at the creation minimum."
-                           : "The selected Foundation requires this value."),
-                    enabled: decrementEnabled, locked: !decrementEnabled,
-                    frame: RPGLogicalRect(x: rowFrame.maxX - 52, y: rowY,
-                                          width: 22, height: 20), visibleIn: content,
-                    command: decrementEnabled ? .adjustAttribute(attribute, -1) : nil,
-                    visualLines: ["-"]))
-                descriptors.append(descriptor(id: incrementID, role: .button,
-                    label: "Increase \(shortAttribute(attribute))", help: incrementEnabled
-                        ? "Spend one point; \(remaining) currently remain."
-                        : (remaining <= 0 ? "No attribute points remain."
-                           : "Already at the creation maximum."),
-                    enabled: incrementEnabled, locked: !incrementEnabled,
-                    frame: RPGLogicalRect(x: rowFrame.maxX - 24, y: rowY,
-                                          width: 22, height: 20), visibleIn: content,
-                    command: incrementEnabled ? .adjustAttribute(attribute, 1) : nil,
-                    visualLines: ["+"]))
+            let cardHeights = cardLines.map { max(52, rpgCardHeight(visualLines: $0, hasOperation: false)) }
+            let cardHeight = max(72, cardHeights.max() ?? (large ? 96 : 72))
+            var compactY = y
+            for (index, model) in cardModels.enumerated() {
+                let column = index % columns
+                let row = index / columns
+                let height = columns == 1 ? cardHeights[index] : cardHeight
+                let frame = RPGLogicalRect(x: content.x + Double(column) * (cardWidth + gap),
+                    y: columns == 1 ? compactY : y + Double(row) * (cardHeight + gap),
+                    width: cardWidth, height: height)
+                descriptors.append(descriptor(id: .path(model.pathID), role: .button,
+                    label: "\(model.displayName), path \(index + 1) of \(cardModels.count)",
+                    help: model.selected ? "This path is selected." : "Choose the \(model.displayName) path.",
+                    selected: model.selected, frame: frame, visibleIn: content,
+                    command: model.chooseCommand,
+                    focusSelection: RPGScreenSelection(selectedSemanticID: .path(model.pathID)),
+                    iconAssetID: rpgAssetIDForPath(model.pathID), visualLines: cardLines[index],
+                    adornment: model.selected ? .selectedCheckDoubleBorder : .none,
+                    reservesIconCell: true))
+                if columns == 1 { compactY = frame.maxY + gap }
             }
-            let rowY = content.y + 80
-            let resetID = RPGUIElementID(rawValue: "creation:path:operation:reset")!
-            descriptors.append(descriptor(id: resetID, role: .button, label: "Reset to Preset",
-                help: "Reset only \(path.displayName)'s attribute draft.",
-                frame: RPGLogicalRect(x: cardFrame.x + 4 + attributeWidth + attributeGap,
-                                      y: rowY, width: attributeWidth, height: 20), visibleIn: content,
-                command: .resetAttributes, visualLines: ["Reset to Preset"]))
-            let pointsID = RPGUIElementID(rawValue: "creation:path:points-remaining")!
-            descriptors.append(descriptor(id: pointsID, role: .staticText,
-                label: "Points remaining", value: String(remaining),
-                help: "Allocate all points before continuing.",
-                frame: RPGLogicalRect(x: cardFrame.maxX - 140, y: content.y + 27,
-                                      width: 136, height: 12), visibleIn: content,
-                visualLines: ["Points remaining: \(remaining)"]))
-            y = rowY + 20
+            y = columns == 1 ? compactY
+                : y + Double((cardModels.count + columns - 1) / columns) * (cardHeight + gap)
         case .branch:
             if let path = rpgPathDefinition(input.creation.selectedPathID) {
                 let selectedBranchID = input.creation.selectedDraft?.branchID
-                let branchIDs = path.branchIDs.sorted { lhs, rhs in
-                    if (lhs == selectedBranchID) != (rhs == selectedBranchID) {
-                        return lhs == selectedBranchID
-                    }
-                    return (path.branchIDs.firstIndex(of: lhs) ?? Int.max) <
-                        (path.branchIDs.firstIndex(of: rhs) ?? Int.max)
-                }
+                // Registry order -- never selected-first (cards must not jump under the pointer).
+                let branchIDs = path.branchIDs
                 let large = input.viewportWidth >= 520 && input.viewportHeight >= 330
                 let columns = large ? 3 : 1
                 let gap = 6.0
@@ -2557,109 +2415,135 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                 var branchLines: [[String]] = []
                 for branchID in branchIDs {
                     guard let branch = rpgBranchDefinition(branchID),
-                          let starter = branch.skillIDs.first,
-                          let skill = rpgSkillDefinition(starter) else {
+                          let signature = branch.skillIDs.first,
+                          let skill = rpgSkillDefinition(signature) else {
                         branchLines.append([])
                         continue
                     }
-                    let benefit = rpgSkillRankBenefit(starter, rank: 1) ?? ""
+                    // C2: the Skills line (all three skill names) takes priority over the
+                    // Signature line when the descriptor visual-lines budget is tight.
+                    let skillNames = branch.skillIDs.compactMap { rpgSkillDefinition($0)?.displayName }
                     let unlockNames = skill.spellUnlocks.filter { $0.rank == 1 }.compactMap {
                         rpgSpellDefinition($0.spellID)?.displayName
                     }
-                    let selected = selectedBranchID == branchID
-                    branchLines.append(rpgWrappedCardLines([
-                        branch.displayName,
-                        skill.kind == .active ? "Active Foundation" : "Passive Foundation",
-                        benefit,
-                        "Automatic unlocks: \(unlockNames.isEmpty ? "None" : unlockNames.joined(separator: ", "))",
-                        selected ? "Selected" : "Choose \(branch.displayName)",
-                    ], width: max(1, cardWidth - 42)))
+                    var lines = [branch.displayName, branch.summary,
+                                 "Skills: \(skillNames.joined(separator: " · "))"]
+                    if let firstUnlock = unlockNames.first { lines.append("Grants spell: \(firstUnlock)") }
+                    branchLines.append(rpgWrappedCardLines(lines, width: max(1, cardWidth - 36)))
                 }
-                let cardHeights = branchLines.enumerated().map { index, lines in
-                    let selected = selectedBranchID == branchIDs[index]
-                    return max(52, rpgCardHeight(
-                        visualLines: lines, hasOperation: !selected))
-                }
+                let cardHeights = branchLines.map { max(52, rpgCardHeight(visualLines: $0, hasOperation: false)) }
                 let cardHeight = max(72, cardHeights.max() ?? (large ? 112 : 84))
                 var compactY = y
                 for (index, branchID) in branchIDs.enumerated() {
-                    guard let branch = rpgBranchDefinition(branchID), let starter = branch.skillIDs.first,
-                          let skill = rpgSkillDefinition(starter),
-                          rpgIconPixels(assetID: rpgAssetIDForSkill(starter)) != nil else { continue }
+                    guard let branch = rpgBranchDefinition(branchID), let signature = branch.skillIDs.first else {
+                        continue
+                    }
                     let column = index % columns
                     let row = index / columns
                     let height = columns == 1 ? cardHeights[index] : cardHeight
                     let frame = RPGLogicalRect(x: content.x + Double(column) * (cardWidth + gap),
                         y: columns == 1 ? compactY : y + Double(row) * (cardHeight + gap),
                         width: cardWidth, height: height)
-                    let unlocks = skill.spellUnlocks.filter { $0.rank == 1 }.compactMap {
-                        rpgSpellDefinition($0.spellID)?.displayName
-                    }
-                    let benefit = rpgSkillRankBenefit(starter, rank: 1) ?? ""
-                    let unlockHelp = "; Automatic unlocks: \(unlocks.isEmpty ? "None" : unlocks.joined(separator: ", "))"
-                    let selected = input.creation.selectedDraft?.branchID == branchID
-                    descriptors.append(descriptor(id: .branch(branchID), role: .group,
-                        label: branch.displayName, value: skill.kind == .active ? "Active Foundation" : "Passive Foundation",
-                        help: "\(benefit)\(unlockHelp)", selected: selected,
-                        frame: frame, visibleIn: content,
+                    let selected = selectedBranchID == branchID
+                    descriptors.append(descriptor(id: .branch(branchID), role: .button,
+                        label: "\(branch.displayName), sub-class \(index + 1) of \(branchIDs.count)",
+                        help: selected ? "This sub-class is selected." : "Choose the \(branch.displayName) sub-class.",
+                        selected: selected, frame: frame, visibleIn: content,
+                        command: .chooseBranch(branchID),
                         focusSelection: RPGScreenSelection(selectedSemanticID: .branch(branchID)),
-                        iconAssetID: rpgAssetIDForSkill(starter), visualLines: branchLines[index],
-                        adornment: selected ? .selectedCheckDoubleBorder : .none))
-                    if !selected {
-                        let chooseID = RPGUIElementID.operation(owner: .branch(branchID), name: "choose")
-                        let chooseFrame = RPGLogicalRect(x: frame.x + 6, y: frame.maxY - 24,
-                            width: frame.width - 12, height: 18)
-                        descriptors.append(descriptor(id: chooseID, role: .button,
-                            label: "Choose \(branch.displayName)", frame: chooseFrame, visibleIn: content,
-                            command: .chooseBranch(branchID),
-                            visualLines: ["Choose \(branch.displayName)"]))
-                    }
+                        iconAssetID: rpgAssetIDForSkill(signature), visualLines: branchLines[index],
+                        adornment: selected ? .selectedCheckDoubleBorder : .none,
+                        reservesIconCell: true))
                     if columns == 1 { compactY = frame.maxY + gap }
                 }
                 y = columns == 1 ? compactY
-                    : y + Double((path.branchIDs.count + columns - 1) / columns) *
-                        (cardHeight + gap)
+                    : y + Double((branchIDs.count + columns - 1) / columns) * (cardHeight + gap)
             }
-        case .attributes:
-            for attribute in RPG_ATTRIBUTE_DISPLAY_ORDER {
-                let id = RPGUIElementID.attribute(attribute)
-                let value = input.creation.selectedDraft?.attributes.value(attribute) ?? 0
-                let frame = RPGLogicalRect(x: content.x, y: y, width: content.width, height: 28)
-                descriptors.append(descriptor(id: id, role: .row, label: shortAttribute(attribute),
-                    value: String(value), help: "Creation range 6 through 14; total must be 42.",
-                    frame: frame, visibleIn: content,
-                    focusSelection: RPGScreenSelection(selectedSemanticID: id)))
-                let decrementID = RPGUIElementID.operation(owner: id, name: "decrement")
-                let incrementID = RPGUIElementID.operation(owner: id, name: "increment")
-                descriptors.append(descriptor(id: decrementID, role: .button, label: "Decrease \(shortAttribute(attribute))",
-                    enabled: value > RPGAttributes.minimum,
-                    frame: RPGLogicalRect(x: frame.maxX - 54, y: frame.y + 4, width: 22, height: 20),
-                    visibleIn: content, command: .adjustAttribute(attribute, -1),
-                    visualLines: ["-"]))
-                descriptors.append(descriptor(id: incrementID, role: .button, label: "Increase \(shortAttribute(attribute))",
-                    enabled: value < RPGAttributes.maximumAtCreation,
-                    frame: RPGLogicalRect(x: frame.maxX - 26, y: frame.y + 4, width: 22, height: 20),
-                    visibleIn: content, command: .adjustAttribute(attribute, 1),
-                    visualLines: ["+"]))
-                y += 28
+        case .skills:
+            guard let draft = input.creation.selectedDraft, let branchID = draft.branchID,
+                  let branch = rpgBranchDefinition(branchID) else { break }
+            let pool = rpgStartingSkillPool(pathID: input.creation.selectedPathID, branchID: branchID)
+            let chosen = effectiveStartingSkillIDs(draft)
+            // C4: exact counter copy, plus a visible second line at exactly 3 chosen.
+            let counterID = RPGUIElementID(rawValue: "creation:skills:count")!
+            let atLimit = chosen.count >= RPG_STARTING_SKILL_COUNT
+            let counterLines = atLimit
+                ? ["Starting skills: \(chosen.count) of \(RPG_STARTING_SKILL_COUNT) chosen",
+                   "3 of 3 chosen. Unchoose a skill first."]
+                : ["Starting skills: \(chosen.count) of \(RPG_STARTING_SKILL_COUNT) chosen"]
+            let counterFrame = RPGLogicalRect(x: content.x, y: y, width: content.width,
+                                              height: atLimit ? 32 : 18)
+            descriptors.append(descriptor(id: counterID, role: .staticText,
+                label: "Starting skills chosen", value: "\(chosen.count) of \(RPG_STARTING_SKILL_COUNT)",
+                frame: counterFrame, visibleIn: content, visualLines: counterLines))
+            y += counterFrame.height
+            let large = input.viewportWidth >= 520 && input.viewportHeight >= 330
+            let columns = large ? 3 : 1
+            let gap = 6.0
+            let cardWidth = (content.width - gap * Double(columns - 1)) / Double(columns)
+            var cardLines: [[String]] = []
+            for skillID in pool {
+                guard let def = rpgSkillDefinition(skillID) else { cardLines.append([]); continue }
+                let node = rpgSkillNodeIndex(skillID) ?? 0
+                let ownerBranchName = rpgBranchDefinition(def.branchID)?.displayName ?? ""
+                let subClassTag = def.branchID == branchID
+                    ? "\(branch.displayName) skill"
+                    : node == 0 ? "\(ownerBranchName) skill · Signature" : "\(ownerBranchName) skill"
+                let benefit = rpgSkillRankBenefit(skillID, rank: 1) ?? ""
+                let spellNames = def.spellUnlocks.filter { $0.rank == 1 }.compactMap {
+                    rpgSpellDefinition($0.spellID)?.displayName
+                }
+                let spellLine = spellNames.isEmpty ? "Spells at Rank 1: None"
+                    : "Spells at Rank 1: \(spellNames.joined(separator: ", "))"
+                cardLines.append(rpgWrappedCardLines(
+                    [def.displayName, subClassTag, benefit, spellLine], width: max(1, cardWidth - 36)))
             }
-            let resetID = RPGUIElementID(rawValue: "creation:attributes:operation:reset")!
-            descriptors.append(descriptor(id: resetID, role: .button, label: "Reset to Preset",
-                frame: RPGLogicalRect(x: content.x, y: y, width: 132, height: 22), visibleIn: content,
-                command: .resetAttributes))
-            y += 28
+            // Step-3 pool cards carry rank pips, so reserve the bottom pip band in their height (D2).
+            let cardHeights = cardLines.map {
+                max(52, rpgCardHeight(visualLines: $0, hasOperation: false, hasPips: true))
+            }
+            let cardHeight = max(72, cardHeights.max() ?? (large ? 96 : 76))
+            var compactY = y
+            for (index, skillID) in pool.enumerated() {
+                let column = index % columns
+                let row = index / columns
+                let height = columns == 1 ? cardHeights[index] : cardHeight
+                let frame = RPGLogicalRect(x: content.x + Double(column) * (cardWidth + gap),
+                    y: columns == 1 ? compactY : y + Double(row) * (cardHeight + gap),
+                    width: cardWidth, height: height)
+                let isChosen = chosen.contains(skillID)
+                let displayName = rpgSkillDefinition(skillID)?.displayName ?? skillID
+                let help = isChosen
+                    ? "Selected. Choose a different skill to swap it out."
+                    : (atLimit ? "3 of 3 chosen. Unchoose a skill first."
+                                : "Choose \(displayName) as a starting skill.")
+                descriptors.append(descriptor(id: .skill(skillID), role: .button,
+                    label: "\(displayName), skill \(index + 1) of \(pool.count)", help: help,
+                    selected: isChosen, frame: frame, visibleIn: content,
+                    command: .toggleStartingSkill(skillID),
+                    focusSelection: RPGScreenSelection(selectedSemanticID: .skill(skillID)),
+                    iconAssetID: rpgAssetIDForSkill(skillID), visualLines: cardLines[index],
+                    adornment: isChosen ? .selectedCheckDoubleBorder : .none,
+                    rankPips: RPGRankPips(1), reservesIconCell: true))
+                if columns == 1 { compactY = frame.maxY + gap }
+            }
+            y = columns == 1 ? compactY
+                : y + Double((pool.count + columns - 1) / columns) * (cardHeight + gap)
         case .review:
             let result = rpgCreationDraft(from: input.creation)
             let id = RPGUIElementID(rawValue: "creation:review")!
             let reviewLines: [(String, String)]
             if let review = creationReview {
-                let attributes = review.attributes.map { "\(shortAttribute($0.0)) \($0.1)" }.joined(separator: " · ")
+                let skillsSummary = review.startingSkills
+                    .map { "\($0.displayName) (Rank \($0.rank) of \($0.maxRank))" }
+                    .joined(separator: ", ")
                 reviewLines = [
-                    ("Path and specialization", "\(review.path) · \(review.branch)"),
-                    ("Attributes", attributes),
-                    ("Foundation", review.starterSkill),
+                    ("Path", review.path),
+                    ("Sub-class", review.subClass),
+                    ("Starting skills", skillsSummary),
+                    ("Spells granted", review.automaticSpells.isEmpty ? "None" : review.automaticSpells.joined(separator: ", ")),
+                    ("Health and fatigue", review.growthLine),
                     ("Starter kit", review.starterKit.joined(separator: ", ")),
-                    ("Automatic spells", review.automaticSpells.isEmpty ? "None" : review.automaticSpells.joined(separator: ", ")),
                     ("Focus requirement", review.focusRequirement),
                     ("Level-one progression", review.levelOneGuidance),
                     ("Configured RPG chords", review.configuredChords.joined(separator: "; ")),
@@ -2669,12 +2553,9 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                 ]
             } else {
                 switch result {
-                case .failure(.invalidAttributeBudget(let total)):
-                    reviewLines = [("Attributes",
-                        "Current total is \(total); required total is 42.")]
-                case .failure(.unmetStarterRequirement):
-                    reviewLines = [("Foundation",
-                        "The selected Foundation attribute requirement is not met.")]
+                case .failure(.invalidStartingSkillCount(let count)):
+                    reviewLines = [("Starting skills",
+                        "Choose exactly \(RPG_STARTING_SKILL_COUNT) starting skills; \(count) chosen.")]
                 case .failure:
                     reviewLines = [("Review", "Creation draft is invalid.")]
                 case .success:
@@ -2697,9 +2578,13 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
         let commandY = layout.commandFrame.y + 3
         let leftFrame = RPGLogicalRect(x: layout.commandFrame.x + 4, y: commandY,
                                        width: 84, height: 20)
-        if input.creation.step == .review {
+        switch input.creation.step {
+        case .review:
+            // Reject / Back / Accept -- Accept keeps element id "...operation:create" (amendment A4).
             let reviewID = RPGUIElementID(rawValue: "creation:review")!
             let createID = RPGUIElementID.operation(owner: reviewID, name: "create")
+            let rejectID = RPGUIElementID.operation(owner: reviewID, name: "reject")
+            let backID = RPGUIElementID(rawValue: "creation:review:operation:back")!
             let result = rpgCreationDraft(from: input.creation)
             let authorityReady = rpgAuthorityEnabled(input.authority)
             let enabled: Bool
@@ -2713,67 +2598,58 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                     : authorityReady ? "Creates this character and starter kit atomically." :
                         rpgAuthorityPhasePresentation(input.authority.phase).visibleHelp
                 command = input.inventoryCapacityAvailable ? .create(draft) : nil
-            case .failure(.invalidAttributeBudget(let total)):
+            case .failure(.invalidStartingSkillCount):
                 enabled = false
-                help = "Attributes must total 42; current total is \(total)."
-                command = nil
-            case .failure(.unmetStarterRequirement):
-                enabled = false
-                help = "Resolve the Foundation attribute requirement before continuing."
+                help = "Choose exactly \(RPG_STARTING_SKILL_COUNT) starting skills before continuing."
                 command = nil
             case .failure:
                 enabled = false
                 help = "Resolve the creation requirements before continuing."
                 command = nil
             }
-            let frame = RPGLogicalRect(x: layout.commandFrame.maxX - 158, y: commandY,
-                                       width: 154, height: 20)
+            let acceptFrame = RPGLogicalRect(x: layout.commandFrame.maxX - 84, y: commandY,
+                                             width: 80, height: 20)
             descriptors.append(descriptor(id: createID, role: .button,
-                label: "Create Character", help: help, enabled: enabled, locked: !enabled,
-                frame: frame, visibleIn: layout.commandFrame, command: command,
-                layoutRegion: .fixed, visualLines: ["Create Character"]))
-        } else {
-            let nextID = RPGUIElementID(rawValue: "creation:\(input.creation.step.rawValue):operation:next")!
-            let nextValidation: (Bool, String) = {
-                switch input.creation.step {
-                case .path:
-                    switch rpgCreationDraft(from: input.creation) {
-                    case .success: return (true, "Continue to specialization.")
-                    case .failure(.invalidAttributeBudget(let total)):
-                        return (false, "Attributes must total 42; current total is \(total).")
-                    case .failure(.unmetStarterRequirement):
-                        return (false, "The selected Foundation attribute requirement is not met.")
-                    case .failure: return (false, "Class creation data is unavailable.")
-                    }
-                case .branch:
-                    guard let draft = input.creation.selectedDraft,
-                          validatedStarter(pathID: draft.pathID, branchID: draft.branchID) != nil else {
-                        return (false, "Starter registry mismatch")
-                    }
-                    return (true, "Continue to review.")
-                case .attributes:
-                    switch rpgCreationDraft(from: input.creation) {
-                    case .success: return (true, "Continue to review.")
-                    case .failure(.invalidAttributeBudget(let total)):
-                        return (false, "Attributes must total 42; current total is \(total).")
-                    case .failure: return (false, "Resolve the creation requirements before continuing.")
-                    }
-                case .review: return (false, "")
-                }
-            }()
+                label: "Accept", help: help, enabled: enabled, locked: !enabled,
+                frame: acceptFrame, visibleIn: layout.commandFrame, command: command,
+                layoutRegion: .fixed, visualLines: ["Accept"]))
+            // Reject occupies leftFrame (x+4 .. x+88); Back sits clear of it at x+92 so the three
+            // command-row buttons never overlap (a Reject/Back overlap zone routed discard-clicks
+            // to Reject under reverse-order hit-testing -- D1).
+            let backFrame = RPGLogicalRect(x: layout.commandFrame.x + 92, y: commandY,
+                                           width: 60, height: 20)
+            descriptors.append(descriptor(id: backID, role: .button, label: "Back",
+                help: "Returns to Step 3, choices intact.",
+                frame: backFrame, visibleIn: layout.commandFrame, command: .creationBack,
+                layoutRegion: .fixed, visualLines: ["Back"]))
+            descriptors.append(descriptor(id: rejectID, role: .button, label: "Reject",
+                help: "Discard this draft and close.",
+                frame: leftFrame, visibleIn: layout.commandFrame, command: .creationReject,
+                layoutRegion: .fixed, visualLines: ["Reject"]))
+        case .skills:
+            let nextID = RPGUIElementID(rawValue: "creation:skills:operation:next")!
+            let chosenCount = input.creation.selectedDraft.map { effectiveStartingSkillIDs($0).count } ?? 0
+            let ready = chosenCount == RPG_STARTING_SKILL_COUNT
             descriptors.append(descriptor(id: nextID, role: .button, label: "Continue",
-                help: nextValidation.1, enabled: nextValidation.0, locked: !nextValidation.0,
+                help: ready ? "Continue to review." : "Choose 3 starting skills to continue.",
+                enabled: ready, locked: !ready,
                 frame: RPGLogicalRect(x: layout.commandFrame.maxX - 70, y: commandY,
                                       width: 66, height: 20),
-                visibleIn: layout.commandFrame, command: nextValidation.0 ? .creationNext : nil,
+                visibleIn: layout.commandFrame, command: ready ? .creationNext : nil,
                 layoutRegion: .fixed, visualLines: ["Continue"]))
+            let backID = RPGUIElementID(rawValue: "creation:skills:operation:back")!
+            descriptors.append(descriptor(id: backID, role: .button, label: "Back",
+                frame: leftFrame, visibleIn: layout.commandFrame, command: .creationBack,
+                layoutRegion: .fixed, visualLines: ["Back"]))
+        case .path, .branch:
+            // Steps 1-2 have no Continue button: choosing a card both selects AND advances.
+            let backID = RPGUIElementID(rawValue: "creation:\(input.creation.step.rawValue):operation:back")!
+            descriptors.append(descriptor(id: backID, role: .button,
+                label: input.creation.step == .path ? "Close" : "Back",
+                frame: leftFrame, visibleIn: layout.commandFrame, command: .creationBack,
+                layoutRegion: .fixed,
+                visualLines: [input.creation.step == .path ? "Close" : "Back"]))
         }
-        let backID = RPGUIElementID(rawValue: "creation:\(input.creation.step.rawValue):operation:back")!
-        descriptors.append(descriptor(id: backID, role: .button,
-            label: input.creation.step == .path ? "Close" : "Back",
-            frame: leftFrame, visibleIn: layout.commandFrame, command: .creationBack,
-            layoutRegion: .fixed,
-            visualLines: [input.creation.step == .path ? "Close" : "Back"]))
     } else if let page = input.tutorial.page, input.tutorial.seenVersion < RPG_TUTORIAL_VERSION {
         let page = min(4, max(1, page))
         let id = RPGUIElementID.tutorial(page, pathID: input.state.pathID,
@@ -2838,36 +2714,61 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
             layoutRegion: .fixed, visualLines: ["Close"]))
         switch input.tab {
         case .skills:
-            for rank in projection.ranks {
-                let evaluation = rank.nextEvaluation
-                let locked = !rank.purchased && evaluation?.permitted != true
-                let reason = evaluation.flatMap { purchaseFailureText($0.failure) } ?? ""
-                let skillDisplayName = rpgSkillDefinition(rank.skillID)?.displayName ?? "Unavailable skill"
+            // C3: header staticText above the sub-class groups.
+            let pointsID = RPGUIElementID(rawValue: "skills:points")!
+            let availablePoints = characterSummary?.availableSkillPoints ?? 0
+            let pointsFrame = RPGLogicalRect(x: content.x, y: y, width: content.width, height: 18)
+            descriptors.append(descriptor(id: pointsID, role: .staticText,
+                label: "Skill Points", value: String(availablePoints),
+                frame: pointsFrame, visibleIn: content,
+                visualLines: ["Skill Points: \(availablePoints)"]))
+            y += pointsFrame.height
+            var currentHeading: String?
+            for card in projection.skillCards {
+                if currentHeading != card.subClassDisplayName {
+                    currentHeading = card.subClassDisplayName
+                    let headingID = RPGUIElementID(rawValue: "skills:heading:\(card.subClassDisplayName)")!
+                    let headingFrame = RPGLogicalRect(x: content.x, y: y, width: content.width, height: 18)
+                    descriptors.append(descriptor(id: headingID, role: .staticText,
+                        label: card.subClassDisplayName, frame: headingFrame, visibleIn: content,
+                        visualLines: [card.subClassDisplayName]))
+                    y += headingFrame.height
+                }
+                let skillDisplayName = rpgSkillDefinition(card.skillID)?.displayName ?? "Unavailable skill"
+                let evaluation = card.nextEvaluation
+                let benefitLine = card.currentBenefit.map { "Rank \(card.currentRank): \($0)" } ?? "Rank 1 not learned"
+                let spellUnlockLine = rpgSkillDefinition(card.skillID)?.spellUnlocks
+                    .first(where: { $0.rank == card.currentRank + 1 })
+                    .flatMap { unlock in rpgSpellDefinition(unlock.spellID).map { "Rank \(unlock.rank) unlocks \($0.displayName)" } }
+                let nextLine: String
+                if card.mastered {
+                    nextLine = "Mastered"
+                } else if let evaluation, evaluation.permitted, let cost = evaluation.cost, let gate = evaluation.levelGate {
+                    nextLine = "Next: \(rpgSkillRankBenefit(card.skillID, rank: evaluation.targetRank) ?? "") · " +
+                        "\(cost) pt\(cost == 1 ? "" : "s") · Level \(gate)"
+                } else {
+                    nextLine = evaluation.flatMap { purchaseFailureText($0.failure) } ?? "Unavailable"
+                }
+                var lines = ["\(skillDisplayName) · \(card.subClassDisplayName)", benefitLine, nextLine]
+                if let spellUnlockLine { lines.append(spellUnlockLine) }
+                let hasOperation = !card.mastered && evaluation != nil
                 let operationLabel = "Rank Up \(skillDisplayName)"
-                let operationLines = evaluation == nil ? [] :
-                    rpgWrappedControlLines(operationLabel, width: 102)
-                let operationHeight = evaluation == nil ? 0 : rpgControlHeight(lines: operationLines)
-                let rankValue = rank.current ? "Current rank" :
-                    rank.purchased ? "Purchased" :
-                    rank.nextEvaluation != nil ? (locked ? "Locked next rank" : "Next rank") :
-                    "Future rank"
-                let rankLines = rpgWrappedPresentationLines(
-                    "\(skillDisplayName), rank \(rank.rank)", width: content.width - 8) +
-                    rpgWrappedPresentationLines(rankValue, width: content.width - 8)
-                let rankHeight = rpgControlHeight(lines: rankLines)
-                let rowHeight = max(20, rankHeight,
-                    operationHeight + (evaluation == nil ? 0 : 2))
-                let frame = RPGLogicalRect(x: content.x, y: y,
-                                           width: content.width, height: rowHeight)
-                descriptors.append(descriptor(id: rank.id, role: .rankCell,
-                    label: "\(skillDisplayName), rank \(rank.rank)",
-                    value: rankValue,
-                    help: reason, enabled: true, locked: locked, frame: frame, visibleIn: content,
-                    focusSelection: RPGScreenSelection(
-                        selectedSemanticID: rank.id, inspectorItemID: rank.id),
-                    visualLines: rankLines))
-                if let evaluation {
-                    let operationID = RPGUIElementID.operation(owner: rank.id, name: "rank-up")
+                let operationLines = hasOperation ? rpgWrappedControlLines(operationLabel, width: 102) : []
+                let operationHeight = hasOperation ? rpgControlHeight(lines: operationLines) : 0
+                let wrapped = rpgWrappedCardLines(lines, width: content.width - 8 - 28)
+                let cardTextHeight = rpgControlHeight(lines: wrapped)
+                // Reserve a bottom band for the rank pips so they never strike the last text line (D2).
+                let rowHeight = max(28, cardTextHeight, operationHeight + 4) + RPG_RANK_PIP_BAND_HEIGHT
+                let frame = RPGLogicalRect(x: content.x, y: y, width: content.width, height: rowHeight)
+                descriptors.append(descriptor(id: card.id, role: .row,
+                    label: "\(skillDisplayName), \(card.subClassDisplayName)",
+                    value: card.mastered ? "Mastered" : "Rank \(card.currentRank) of \(RPG_SKILL_RANK_CAP)",
+                    help: nextLine, frame: frame, visibleIn: content,
+                    focusSelection: RPGScreenSelection(selectedSemanticID: card.id, inspectorItemID: card.id),
+                    iconAssetID: rpgAssetIDForSkill(card.skillID), visualLines: wrapped,
+                    rankPips: RPGRankPips(card.currentRank), reservesIconCell: true))
+                if let evaluation, !card.mastered {
+                    let operationID = RPGUIElementID.operation(owner: card.id, name: "rank-up")
                     let authorityReady = rpgAuthorityEnabled(input.authority)
                     let enabled = evaluation.permitted && authorityReady
                     let help = authorityReady ? (purchaseFailureText(evaluation.failure) ??
@@ -2879,7 +2780,7 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                         frame: RPGLogicalRect(x: frame.maxX - 104, y: frame.y + 1,
                                               width: 102, height: operationHeight),
                         visibleIn: content,
-                        command: evaluation.permitted ? .rankUp(rank.skillID) : nil,
+                        command: evaluation.permitted ? .rankUp(card.skillID) : nil,
                         visualLines: operationLines))
                 }
                 y += rowHeight
@@ -3133,23 +3034,22 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
             }
         case .character:
             if let summary = characterSummary {
-                let attributes = summary.attributes.map { "\(shortAttribute($0.0)) \($0.1)" }.joined(separator: " · ")
                 let derived = summary.derivedStats
                 let nextThreshold = summary.nextLevelXPThreshold.map { " · next at \($0)" } ?? " · level cap"
                 let levelAndXP = "Level \(summary.level) · \(summary.absoluteXP) XP" + nextThreshold
-                let fatigue = String(format: "%.2f / %.2f", summary.fatigue, derived.maxFatigue)
                 let recovery = String(format: "fatigue %.4f/tick · action x%.3f",
                                       derived.fatigueRegenPerTick, derived.actionRecoveryMultiplier)
                 let offense = String(format: "melee +%.2f · accuracy +%.3f · spell +%.2f",
                                      derived.meleeDamageBonus, derived.actionAccuracyBonus,
                                      derived.spellPotencyBonus)
                 var rows: [(String, String)] = [
-                    ("Path", summary.path), ("Specialization", summary.specialization),
-                    ("Level and XP", levelAndXP), ("Fatigue", fatigue),
-                    ("Attributes", attributes),
-                    ("Derived health", String(format: "%.2f", derived.maxHealth)),
+                    ("Path", summary.path), ("Sub-class", summary.subClass),
+                    ("Level and XP", levelAndXP),
+                    ("Fatigue", "\(summary.fatigueLine) · current \(String(format: "%.2f", summary.fatigue))"),
+                    ("Health", summary.healthLine),
+                    ("Growth", summary.growthLine),
                     ("Derived recovery", recovery), ("Derived offense", offense),
-                    ("Banked points", "SP \(summary.availableSkillPoints) · AP \(summary.availableAttributePoints)"),
+                    ("Banked points", "SP \(summary.availableSkillPoints)"),
                     ("Equipment", summary.equipmentSummary), ("Focus", summary.focusSummary),
                     ("Next milestone", summary.nextActionableMilestone),
                 ]
@@ -3159,29 +3059,6 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                     let frame = RPGLogicalRect(x: content.x, y: y, width: content.width, height: 28)
                     descriptors.append(descriptor(id: id, role: .row, label: row.0, value: row.1,
                         help: row.1, frame: frame, visibleIn: content))
-                    y += 28
-                }
-                for attribute in RPG_ATTRIBUTE_DISPLAY_ORDER {
-                    let owner = RPGUIElementID.attribute(attribute)
-                    let authorityReady = rpgAuthorityEnabled(input.authority)
-                    let enabled = summary.availableAttributePoints > 0 && authorityReady
-                    let frame = RPGLogicalRect(x: content.x, y: y,
-                                               width: content.width, height: 28)
-                    descriptors.append(descriptor(id: owner, role: .row,
-                        label: "Spend Attribute: \(shortAttribute(attribute))",
-                        value: "Current \(summary.attributes.first(where: { $0.0 == attribute })?.1 ?? 0)",
-                        enabled: true, frame: frame, visibleIn: content,
-                        focusSelection: RPGScreenSelection(selectedSemanticID: owner)))
-                    descriptors.append(descriptor(id: .operation(owner: owner, name: "spend"),
-                        role: .button, label: "Spend +1 \(shortAttribute(attribute))",
-                        help: enabled ? "Spend one attribute point." :
-                            (authorityReady ? "No attribute points available." :
-                                rpgAuthorityPhasePresentation(input.authority.phase).visibleHelp),
-                        enabled: enabled, locked: !enabled,
-                        frame: RPGLogicalRect(x: frame.maxX - 112, y: frame.y + 4,
-                                              width: 108, height: 20), visibleIn: content,
-                        command: summary.availableAttributePoints > 0
-                            ? .spendAttribute(attribute) : nil))
                     y += 28
                 }
             }
@@ -3200,7 +3077,7 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                 }
                 appendProgressionRow(
                     id: RPGUIElementID(rawValue: "progression:plan:selected-branch")!,
-                    label: "Selected Branch",
+                    label: "Selected Sub-class",
                     value: summary.plan.selectedBranchDisplayName)
                 for (index, milestone) in summary.plan.routeMilestones.enumerated() {
                     let name = rpgSkillDefinition(milestone.skillID)?.displayName ??
@@ -3213,11 +3090,11 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                 appendProgressionRow(
                     id: RPGUIElementID(rawValue: "progression:plan:completion-cost")!,
                     label: "Completion Cost",
-                    value: "\(summary.plan.completionCost) SP completes all nine selected-branch milestones; \(summary.plan.levelCapEarnedSkillPoints) SP are earned by level 20.")
+                    value: "\(summary.plan.completionCost) SP completes all fifteen selected-branch milestones; \(summary.plan.levelCapEarnedSkillPoints) SP are earned by level 20.")
                 appendProgressionRow(
                     id: RPGUIElementID(rawValue: "progression:plan:utility")!,
                     label: "Utility Allowance",
-                    value: "\(summary.plan.utilityAllowance) SP remain for one cross-branch Foundation I.")
+                    value: "\(summary.plan.utilityAllowance) SP remain for one cross-sub-class rank 1.")
                 appendProgressionRow(
                     id: RPGUIElementID(rawValue: "progression:plan:impact")!,
                     label: "Completion Impact",
@@ -3232,17 +3109,18 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                         let complete = level.completedMilestones.contains(milestone) ? "complete" : "planned"
                         return "\(name) \(milestone.rank) (\(complete), \(milestone.cost) SP)"
                     }.joined(separator: "; ")
-                    let value = "\(level.absoluteXPThreshold) XP · earned SP \(level.earnedSkillPoints) · earned AP \(level.earnedAttributePoints)" +
+                    let milestoneSuffix = level.milestoneBonusPoint ? " · milestone bonus point" : ""
+                    let value = "\(level.absoluteXPThreshold) XP · earned SP \(level.earnedSkillPoints)\(milestoneSuffix)" +
                         (roadmap.isEmpty ? "" : " · \(roadmap)")
                     let id = RPGUIElementID(rawValue: "progression:level:\(level.level)")!
                     appendProgressionRow(id: id, label: "Level \(level.level)", value: value)
                 }
                 let summaries: [(String, String)] = [
-                    ("Banked points", "SP \(summary.bankedSkillPoints) · AP \(summary.bankedAttributePoints)"),
+                    ("Banked points", "SP \(summary.bankedSkillPoints)"),
                     ("Next legal purchase", summary.nextLegalPurchase ?? "No legal skill purchase now"),
-                    ("Specialization completion", "\(summary.specializationRemainingCost) SP remaining · " +
+                    ("Sub-class completion", "\(summary.specializationRemainingCost) SP remaining · " +
                         (summary.specializationCanComplete ? "completion remains possible" : "completion is no longer possible")),
-                    ("Divergence", summary.divergenceWarning ?? "No specialization divergence warning"),
+                    ("Divergence", summary.divergenceWarning ?? "No sub-class divergence warning"),
                 ]
                 for (index, row) in summaries.enumerated() {
                     let id = RPGUIElementID(rawValue: "progression:summary:\(index)")!
@@ -3279,11 +3157,8 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
     let modelErrorText: String? = {
         guard !input.state.created, input.creation.step == .review else { return nil }
         if !input.inventoryCapacityAvailable { return input.inventoryCapacitySummary }
-        if case .failure(.unmetStarterRequirement) = rpgCreationDraft(from: input.creation) {
-            return "Resolve the Foundation attribute requirement before continuing."
-        }
-        if case .failure(.invalidAttributeBudget(let total)) = rpgCreationDraft(from: input.creation) {
-            return "Current attribute total is \(total); required total is 42."
+        if case .failure(.invalidStartingSkillCount(let count)) = rpgCreationDraft(from: input.creation) {
+            return "Choose exactly \(RPG_STARTING_SKILL_COUNT) starting skills; \(count) chosen."
         }
         return nil
     }()
@@ -3317,7 +3192,8 @@ public func rpgBuildPassiveScreenModel(_ input: RPGScreenModelInput) -> RPGScree
             focusSelection: value.focusSelection, layoutRegion: value.layoutRegion,
             iconAssetID: value.iconAssetID, visualLines: value.visualLines,
             adornment: value.adornment, frame: value.frame,
-            visibleFrame: value.visibleFrame, actionCommand: nil)
+            visibleFrame: value.visibleFrame, actionCommand: nil,
+            rankPips: value.rankPips, reservesIconCell: value.reservesIconCell)
     }
     return RPGScreenModel(
         layout: model.layout, panelFrame: model.panelFrame, contentFrame: model.contentFrame,
@@ -3431,9 +3307,8 @@ private func purchaseFailureText(_ failure: RPGSkillPurchaseFailure?) -> String?
     case .authorityRevisionExhausted: return "Authority exhausted"
     case .alreadyAtMaximumRank: return "Maximum rank"
     case .insufficientLevel(let required): return "Requires level \(required)"
-    case .insufficientAttribute(let id, let required): return "Requires \(shortAttribute(id)) \(required)"
-    case .missingPrerequisite(let id):
-        return "Requires \(rpgSkillDefinition(id)?.displayName ?? "Unavailable skill") rank 2"
+    case .insufficientSkillPoints(_, let available) where available <= 0:
+        return "No skill points available. Earn levels to continue."
     case .insufficientSkillPoints(let required, let available):
         return "Requires \(required) skill points; \(available) available"
     }
@@ -3498,9 +3373,9 @@ public func rpgSpatialFocusableID(in descriptors: [RPGSemanticDescriptor],
 }
 
 public func rpgScreenFixture(pathID: String, branchID: String) -> RPGCharacterState? {
-    guard let preset = rpgCreationPreset(pathID: pathID),
-          let starter = validatedStarter(pathID: pathID, branchID: branchID),
+    let defaults = rpgDefaultStartingSkillIDs(pathID: pathID)
+    guard defaults.count == RPG_STARTING_SKILL_COUNT,
           case .success(let state) = rpgCreateCharacter(RPGCreationDraft(
-            pathID: pathID, attributes: preset, starterSkillID: starter, starterSpellIDs: [])) else { return nil }
+            pathID: pathID, branchID: branchID, startingSkillIDs: defaults)) else { return nil }
     return state
 }

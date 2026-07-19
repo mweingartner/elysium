@@ -1021,9 +1021,10 @@ final class RPGActionHardeningTests: XCTestCase {
     }
 
     private func makeState(pathID: String, starter: String) -> RPGCharacterState {
-        try! rpgCreateCharacter(RPGCreationDraft(pathID: pathID,
-                                                 attributes: rpgCreationPreset(pathID: pathID)!,
-                                                 starterSkillID: starter)).get()
+        let branchID = rpgSkillDefinition(starter)!.branchID
+        return try! rpgCreateCharacter(RPGCreationDraft(
+            pathID: pathID, branchID: branchID,
+            startingSkillIDs: rpgBranchDefinition(branchID)!.skillIDs)).get()
     }
 
     private func makeMasteredPlayer(in world: World,
@@ -1032,24 +1033,15 @@ final class RPGActionHardeningTests: XCTestCase {
                                     preparedSkill: String? = nil,
                                     preparedSpell: String? = nil) -> Player {
         let player = Player(world: world)
-        let starterSpell: [String]
-        switch (pathID, starter) {
-        case ("arcanist", "spell_formula"): starterSpell = ["ignite"]
-        case ("arcanist", "minor_glamour"): starterSpell = ["blur"]
-        case ("arcanist", "ritual_circle"): starterSpell = ["mage_light"]
-        case ("mender", "field_dressing"): starterSpell = ["mend_wounds"]
-        case ("mender", "herbal_lore"): starterSpell = ["purify"]
-        case ("mender", "safe_haven"): starterSpell = ["ward"]
-        default: starterSpell = []
-        }
+        let branchID = rpgSkillDefinition(starter)!.branchID
         XCTAssertNil(player.createRPGCharacter(RPGCreationDraft(
-            pathID: pathID, attributes: rpgCreationPreset(pathID: pathID)!,
-            starterSkillID: starter, starterSpellIDs: starterSpell)))
+            pathID: pathID, branchID: branchID,
+            startingSkillIDs: rpgBranchDefinition(branchID)!.skillIDs)))
         var state = player.rpg
         state.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
         state.level = RPG_LEVEL_CAP
         if let branch = rpgBranchDefinition(state.specializationBranchID) {
-            for skill in branch.skillIDs { state.skillRanks[skill] = 3 }
+            for skill in branch.skillIDs { state.skillRanks[skill] = RPG_SKILL_RANK_CAP }
         }
         state = repairRPGCharacterState(state)
         if let preparedSkill {
@@ -1093,9 +1085,9 @@ final class RPGActionHardeningTests: XCTestCase {
         var state = makeState(pathID: "mender", starter: "field_dressing")
         state.xp = rpgXPRequiredForLevel(10)
         state.level = 10
-        state.attributes.intelligence += 1
         state.skillRanks["field_dressing"] = 2
-        state.skillRanks["triage"] = 2
+        // Restore unlocks at Triage rank 3 (node-1 rank-3 gate is level 10).
+        state.skillRanks["triage"] = 3
         state = repairRPGCharacterState(state)
         state.preparedSpellIDs = ["restore"]
         state.selectedPreparedSpellID = "restore"

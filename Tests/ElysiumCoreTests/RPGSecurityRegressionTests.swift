@@ -425,13 +425,13 @@ final class RPGSecurityRegressionTests: XCTestCase {
 
     private func configureRitualist(_ player: Player, preparedSpell: String) {
         XCTAssertNil(player.createRPGCharacter(RPGCreationDraft(
-            pathID: "arcanist", attributes: rpgCreationPreset(pathID: "arcanist")!,
+            pathID: "arcanist",
             starterSkillID: "ritual_circle", starterSpellIDs: ["mage_light"])))
         var state = player.rpg
         state.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
         state.level = RPG_LEVEL_CAP
         for skill in rpgBranchDefinition("arcanist_ritualist")!.skillIDs {
-            state.skillRanks[skill] = 3
+            state.skillRanks[skill] = RPG_SKILL_RANK_CAP
         }
         state = repairRPGCharacterState(state)
         state.preparedSpellIDs = [preparedSpell]
@@ -468,13 +468,13 @@ final class RPGSecurityRegressionTests: XCTestCase {
         default: starterSpells = []
         }
         XCTAssertNil(player.createRPGCharacter(RPGCreationDraft(
-            pathID: pathID, attributes: rpgCreationPreset(pathID: pathID)!,
+            pathID: pathID,
             starterSkillID: starter, starterSpellIDs: starterSpells)))
         var state = player.rpg
         state.xp = rpgXPRequiredForLevel(belowCap ? 19 : RPG_LEVEL_CAP)
         state.level = belowCap ? 19 : RPG_LEVEL_CAP
         if let branch = rpgBranchDefinition(state.specializationBranchID) {
-            for skill in branch.skillIDs { state.skillRanks[skill] = 3 }
+            for skill in branch.skillIDs { state.skillRanks[skill] = RPG_SKILL_RANK_CAP }
         }
         state = repairRPGCharacterState(state)
         if let preparedSkill {

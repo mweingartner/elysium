@@ -193,26 +193,39 @@ private final class RPGUIHarnessView: NSView {
             path.line(to: NSPoint(x: x + direction * 6, y: frame.midY + 4))
             path.lineWidth = 1
             path.stroke()
-        } else if descriptor.adornment == .carouselPrevious ||
-                    descriptor.adornment == .carouselNext {
-            let centerX = floor(frame.midX) + 0.5
-            let centerY = floor(frame.midY) + 0.5
-            let direction = descriptor.adornment == .carouselPrevious ? -1.0 : 1.0
-            let tipX = centerX + direction * 3
-            let wingX = centerX - direction * 3
-            let path = NSBezierPath()
-            path.move(to: NSPoint(x: tipX, y: centerY))
-            path.line(to: NSPoint(x: wingX, y: centerY - 5))
-            path.move(to: NSPoint(x: tipX, y: centerY))
-            path.line(to: NSPoint(x: wingX, y: centerY + 5))
-            path.lineWidth = 1
-            path.stroke()
+        }
+        if let pips = descriptor.rankPips {
+            // Rank pips in a reserved bottom-left band (D2): the card reserves RPG_RANK_PIP_BAND_HEIGHT
+            // and the fit check keeps text above it, so pips never strike the last text line and stay
+            // clear of the top-right Rank Up button and corner check adornment.
+            let pipSize = 6.0, gap = 2.0
+            var pipX = frame.minX + 4
+            let pipY = frame.maxY - 4 - pipSize
+            for index in 0..<pips.total {
+                let pipRect = NSRect(x: pipX, y: pipY, width: pipSize, height: pipSize)
+                if index < pips.filled {
+                    (highContrast ? NSColor.black : NSColor(calibratedRed: 0.153, green: 0.365, blue: 0.125, alpha: 1)).setFill()
+                    NSBezierPath(rect: pipRect).fill()
+                } else {
+                    (highContrast ? NSColor.black : NSColor.gray).setStroke()
+                    let outline = NSBezierPath(rect: pipRect)
+                    outline.lineWidth = 1
+                    outline.stroke()
+                }
+                pipX += pipSize + gap
+            }
         }
         var textX = frame.minX + 4
         if let icon = descriptor.iconAssetID {
             drawRPGIconPixels(icon, in: NSRect(x: frame.minX + 4,
                                                y: frame.minY + 4,
                                                width: 24, height: 24))
+            textX += 28
+        } else if descriptor.reservesIconCell {
+            (highContrast ? NSColor.black : NSColor.gray).setStroke()
+            let blank = NSBezierPath(rect: NSRect(x: frame.minX + 4, y: frame.minY + 4, width: 24, height: 24))
+            blank.lineWidth = 1
+            blank.stroke()
             textX += 28
         }
         for (index, line) in descriptor.visualLines.enumerated() {
@@ -443,7 +456,6 @@ private final class RPGUIHarnessView: NSView {
         case .group: return .group
         case .row: return .row
         case .scrollArea: return .scrollArea
-        case .rankCell: return .cell
         }
     }
 
@@ -454,9 +466,7 @@ private final class RPGUIHarnessView: NSView {
         }
         var values: [String] = []
         if !descriptor.value.isEmpty { values.append(descriptor.value) }
-        if descriptor.role == .rankCell,
-           let rank = descriptor.id.rawValue.components(separatedBy: ":rank:").last,
-           Int(rank) != nil { values.append("Rank " + rank) }
+        if let pips = descriptor.rankPips { values.append("Rank \(pips.filled) of \(pips.total)") }
         if descriptor.selected { values.append("Selected") }
         if descriptor.prepared { values.append("Prepared") }
         if descriptor.slotted { values.append("Slotted") }

@@ -600,9 +600,8 @@ final class CraftingPlanTests: XCTestCase {
         let world = makeWorld()
         let player = Player(world: world)
         player.rpg = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "mender",
-            attributes: try XCTUnwrap(rpgCreationPreset(pathID: "mender")),
-            starterSkillID: "herbal_lore"
+            pathID: "mender", branchID: "mender_harvest",
+            startingSkillIDs: rpgBranchDefinition("mender_harvest")!.skillIDs
         )).get()
         var resources: [ItemStack?] = [
             stack("brown_mushroom", 3), stack("red_mushroom", 3), stack("bowl", 3),
@@ -641,9 +640,8 @@ final class CraftingPlanTests: XCTestCase {
         let world = makeWorld()
         let player = Player(world: world)
         player.rpg = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "tinker",
-            attributes: try XCTUnwrap(rpgCreationPreset(pathID: "tinker")),
-            starterSkillID: "circuit_sense"
+            pathID: "tinker", branchID: "tinker_redstone",
+            startingSkillIDs: rpgBranchDefinition("tinker_redstone")!.skillIDs
         )).get()
         var resources: [ItemStack?] = [
             stack("redstone_torch", 8), stack("redstone", 4), stack("stone", 12),

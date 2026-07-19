@@ -6,8 +6,6 @@ public enum RPGSkillPurchaseFailure: Equatable {
     case authorityRevisionExhausted
     case alreadyAtMaximumRank(String)
     case insufficientLevel(required: Int)
-    case insufficientAttribute(RPGAttributeID, required: Int)
-    case missingPrerequisite(String)
     case insufficientSkillPoints(required: Int, available: Int)
 }
 
@@ -58,8 +56,6 @@ public struct RPGSkillPurchaseEvaluation: Equatable {
     public let targetRank: Int
     public let cost: Int?
     public let levelGate: Int?
-    public let attributeRequirements: [RPGAttributeRequirement]
-    public let prerequisiteSkillID: String?
     public let availableSkillPoints: Int
     public let failure: RPGSkillPurchaseFailure?
     public let effectText: String?
@@ -68,13 +64,15 @@ public struct RPGSkillPurchaseEvaluation: Equatable {
     public var permitted: Bool { failure == nil }
 }
 
-private let specializationRanksByNode: [[Int]] = [[1, 2, 3], [1, 2, 3], [1, 2, 3]]
+private let specializationRanksByNode: [[Int]] = [
+    Array(1...RPG_SKILL_RANK_CAP), Array(1...RPG_SKILL_RANK_CAP), Array(1...RPG_SKILL_RANK_CAP),
+]
 
 public func rpgSpecializationRoadmap(branchID: String,
                                      in state: RPGCharacterState) -> RPGSpecializationRoadmap? {
     guard let branch = rpgBranchDefinition(branchID), branch.skillIDs.count == 3 else { return nil }
     var milestones: [RPGSpecializationMilestone] = []
-    milestones.reserveCapacity(9)
+    milestones.reserveCapacity(3 * RPG_SKILL_RANK_CAP)
     for (node, skillID) in branch.skillIDs.enumerated() {
         for rank in specializationRanksByNode[node] {
             guard let level = rpgMinimumLevel(for: skillID, targetRank: rank,
@@ -126,20 +124,15 @@ private func specializationImpact(_ state: RPGCharacterState) -> RPGSpecializati
 public func rpgEvaluateSkillPurchase(_ skillID: String,
                                      in repairedState: RPGCharacterState) -> RPGSkillPurchaseEvaluation {
     let state = repairedState
-    let currentRank = max(0, min(3, state.skillRanks[skillID] ?? 0))
-    let targetRank = min(4, currentRank + 1)
+    let currentRank = max(0, min(RPG_SKILL_RANK_CAP, state.skillRanks[skillID] ?? 0))
+    let targetRank = min(RPG_SKILL_RANK_CAP + 1, currentRank + 1)
     let definition = rpgSkillDefinition(skillID)
     let available = rpgAvailableSkillPoints(state)
-    let cost = targetRank <= 3 ? rpgSkillPointCost(skillID, targetRank: targetRank, in: state) : nil
-    let levelGate = targetRank <= 3
+    let cost = targetRank <= RPG_SKILL_RANK_CAP ? rpgSkillPointCost(skillID, targetRank: targetRank, in: state) : nil
+    let levelGate = targetRank <= RPG_SKILL_RANK_CAP
         ? rpgMinimumLevel(for: skillID, targetRank: targetRank,
                           specializationBranchID: state.specializationBranchID)
         : nil
-    let prerequisite: String? = {
-        guard let definition, let node = rpgSkillNodeIndex(skillID), node > 0,
-              let branch = rpgBranchDefinition(definition.branchID), node < branch.skillIDs.count else { return nil }
-        return branch.skillIDs[node - 1]
-    }()
 
     let failure: RPGSkillPurchaseFailure?
     if !state.created {
@@ -148,16 +141,10 @@ public func rpgEvaluateSkillPurchase(_ skillID: String,
         failure = .unknownOrCrossPathSkill(skillID)
     } else if state.authorityRevision >= RPG_MAX_NORMAL_AUTHORITY_REVISION {
         failure = .authorityRevisionExhausted
-    } else if currentRank >= 3 {
+    } else if currentRank >= RPG_SKILL_RANK_CAP {
         failure = .alreadyAtMaximumRank(skillID)
     } else if let levelGate, state.level < levelGate {
         failure = .insufficientLevel(required: levelGate)
-    } else if let unmet = definition?.requirements.first(where: {
-        state.attributes.value($0.attribute) < $0.minimum
-    }) {
-        failure = .insufficientAttribute(unmet.attribute, required: unmet.minimum)
-    } else if let prerequisite, (state.skillRanks[prerequisite] ?? 0) < 2 {
-        failure = .missingPrerequisite(prerequisite)
     } else if let cost, available < cost {
         failure = .insufficientSkillPoints(required: cost, available: available)
     } else {
@@ -165,7 +152,7 @@ public func rpgEvaluateSkillPurchase(_ skillID: String,
     }
 
     var proposedState = state
-    if failure == nil, targetRank <= 3 {
+    if failure == nil, targetRank <= RPG_SKILL_RANK_CAP {
         proposedState.skillRanks[skillID] = targetRank
     }
 
@@ -175,11 +162,9 @@ public func rpgEvaluateSkillPurchase(_ skillID: String,
         targetRank: targetRank,
         cost: cost,
         levelGate: levelGate,
-        attributeRequirements: definition?.requirements ?? [],
-        prerequisiteSkillID: prerequisite,
         availableSkillPoints: available,
         failure: failure,
-        effectText: targetRank <= 3 ? rpgSkillRankBenefit(skillID, rank: targetRank) : nil,
+        effectText: targetRank <= RPG_SKILL_RANK_CAP ? rpgSkillRankBenefit(skillID, rank: targetRank) : nil,
         specializationImpact: specializationImpact(proposedState)
     )
 }

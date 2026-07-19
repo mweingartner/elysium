@@ -17,7 +17,7 @@ final class RPGCoreV2Tests: XCTestCase {
         registerAllSystems()
     }
 
-    func testAllPresetsAreValidAndAllSixKitsGrantExactlyOnce() {
+    func testAllStartingSkillDraftsAreValidAndAllSixKitsGrantExactlyOnce() throws {
         let expected: [String: [String: Int]] = [
             "warden": ["stone_sword": 1, "shield": 1, "bread": 4],
             "ranger": ["bow": 1, "arrow": 24, "stone_sword": 1, "bread": 4],
@@ -27,28 +27,29 @@ final class RPGCoreV2Tests: XCTestCase {
             "tinker": ["stone_pickaxe": 1, "redstone": 12, "torch": 4, "bread": 4],
         ]
         for path in RPG_PATH_DEFINITIONS {
-            guard let preset = rpgCreationPreset(pathID: path.id) else { return XCTFail(path.id) }
-            XCTAssertEqual(preset.total, RPGAttributes.creationBudget, path.id)
-            for starter in path.starterSkillIDs {
-                XCTAssertNoThrow(try rpgCreateCharacter(RPGCreationDraft(pathID: path.id,
-                                                                         attributes: preset,
-                                                                         starterSkillID: starter)).get(), path.id)
+            for branchID in path.branchIDs {
+                let branch = try XCTUnwrap(rpgBranchDefinition(branchID), path.id)
+                XCTAssertNoThrow(try rpgCreateCharacter(RPGCreationDraft(
+                    pathID: path.id, branchID: branchID, startingSkillIDs: branch.skillIDs
+                )).get(), branchID)
             }
 
+            let firstBranchID = path.branchIDs[0]
+            let firstBranch = try XCTUnwrap(rpgBranchDefinition(firstBranchID), path.id)
             let world = World(dim: .overworld, seed: 100)
             let player = Player(world: world)
-            XCTAssertNil(player.createRPGCharacter(RPGCreationDraft(pathID: path.id,
-                                                                    attributes: preset,
-                                                                    starterSkillID: path.starterSkillIDs[0])))
+            XCTAssertNil(player.createRPGCharacter(RPGCreationDraft(
+                pathID: path.id, branchID: firstBranchID, startingSkillIDs: firstBranch.skillIDs)))
             for (item, count) in expected[path.id] ?? [:] {
                 XCTAssertEqual(player.countItem(iid(item)), count, "\(path.id):\(item)")
             }
+            // The kit-grant preimage is frozen on the chosen sub-class's node-0 signature skill,
+            // exactly as it was on the legacy single-starter identity.
             XCTAssertEqual(player.rpg.kitGrantID,
-                           rpgStarterKitGrantID(pathID: path.id, starterSkillID: path.starterSkillIDs[0]))
+                           rpgStarterKitGrantID(pathID: path.id, starterSkillID: firstBranch.skillIDs[0]))
             let before = inventorySignature(player.inventory)
-            XCTAssertEqual(player.createRPGCharacter(RPGCreationDraft(pathID: path.id,
-                                                                       attributes: preset,
-                                                                       starterSkillID: path.starterSkillIDs[0])),
+            XCTAssertEqual(player.createRPGCharacter(RPGCreationDraft(
+                pathID: path.id, branchID: firstBranchID, startingSkillIDs: firstBranch.skillIDs)),
                            .alreadyCreated)
             XCTAssertEqual(inventorySignature(player.inventory), before)
             if path.id == "mender" {
@@ -75,8 +76,7 @@ final class RPGCoreV2Tests: XCTestCase {
                                      height: world.info.height))
                 let player = Player(world: world)
                 XCTAssertNil(player.createRPGCharacter(RPGCreationDraft(
-                    pathID: path.id, attributes: rpgCreationPreset(pathID: path.id)!,
-                    starterSkillID: starter
+                    pathID: path.id, starterSkillID: starter
                 )))
                 player.setPos(0.5, 64, 0.5)
                 player.yaw = 0
@@ -291,9 +291,8 @@ final class RPGCoreV2Tests: XCTestCase {
         player.inventory = (0..<36).map { _ in ItemStack(iid("shield"), 1) }
         let before = inventorySignature(player.inventory)
 
-        let error = player.createRPGCharacter(RPGCreationDraft(pathID: "warden",
-                                                                attributes: rpgCreationPreset(pathID: "warden")!,
-                                                                starterSkillID: "guard_stance"))
+        let error = player.createRPGCharacter(RPGCreationDraft(
+            pathID: "warden", starterSkillID: "guard_stance"))
 
         XCTAssertEqual(error, .insufficientInventoryForStarterKit)
         XCTAssertFalse(player.rpg.created)
@@ -303,9 +302,8 @@ final class RPGCoreV2Tests: XCTestCase {
     func testFocusMustBeInEitherHand() {
         let world = World(dim: .overworld, seed: 102)
         let player = Player(world: world)
-        XCTAssertNil(player.createRPGCharacter(RPGCreationDraft(pathID: "arcanist",
-                                                                attributes: rpgCreationPreset(pathID: "arcanist")!,
-                                                                starterSkillID: "spell_formula")))
+        XCTAssertNil(player.createRPGCharacter(RPGCreationDraft(
+            pathID: "arcanist", starterSkillID: "spell_formula")))
         XCTAssertTrue(rpgPlayerHasSpellFocus(player))
         player.selectedSlot = 1
         XCTAssertFalse(rpgPlayerHasSpellFocus(player), "carried but unready focus must not satisfy casting")
@@ -318,41 +316,99 @@ final class RPGCoreV2Tests: XCTestCase {
         var state = RPGCharacterState(
             created: true, pathID: "tinker", starterSkillID: "circuit_sense",
             specializationBranchID: "tinker_redstone",
-            attributes: RPGAttributes(strength: 18, dexterity: 18, intelligence: 18,
-                                      endurance: 18, luck: 18),
+            startingSkillIDs: ["circuit_sense", "compact_gate", "remote_trigger"],
             xp: 0, level: 1, skillRanks: [:], preparedSkillIDs: [],
             knownSpellIDs: [], preparedSpellIDs: [], fatigue: 0
         )
+        let profile = rpgPathGrowthProfile("tinker")
         let derived = rpgDerivedStats(state)
-        XCTAssertEqual(derived.maxHealth, 39)
-        XCTAssertEqual(derived.meleeDamageBonus, 1.2, accuracy: 0.000_001)
-        XCTAssertEqual(derived.exhaustionMultiplier, 0.88, accuracy: 0.000_001)
-        XCTAssertEqual(derived.actionAccuracyBonus, 0.12, accuracy: 0.000_001)
-        XCTAssertEqual(derived.actionRecoveryMultiplier, 0.82, accuracy: 0.000_001)
-        XCTAssertEqual(derived.spellPotencyBonus, 2, accuracy: 0.000_001)
-        XCTAssertEqual(derived.focusCostMultiplier, 0.70, accuracy: 0.000_001)
-        XCTAssertEqual(derived.luckProcChance, 0.12, accuracy: 0.000_001)
+        XCTAssertEqual(derived.maxHealth, profile.healthBase, accuracy: 0.000_001)
+        XCTAssertEqual(derived.maxFatigue, profile.fatigueBase, accuracy: 0.000_001)
+        XCTAssertEqual(derived.fatigueRegenPerTick, profile.regenBase, accuracy: 0.000_001)
+        XCTAssertEqual(derived.focusCostMultiplier, profile.focusCostBase, accuracy: 0.000_001)
+        XCTAssertEqual(derived.actionRecoveryMultiplier, profile.recoveryBase, accuracy: 0.000_001)
+        XCTAssertEqual(derived.exhaustionMultiplier, profile.exhaustionBase, accuracy: 0.000_001)
+        XCTAssertEqual(derived.luckProcChance, profile.luckBase, accuracy: 0.000_001)
+        // guard_stance is off-path here; its skill-effect value still stacks additively onto the
+        // canonical per-level growth base, exactly as it would for a warden of its own.
         state.skillRanks["guard_stance"] = 3
-        XCTAssertEqual(rpgDerivedStats(state).maxHealth, 42,
-                       "typed Guard Stance is additive after the canonical attribute base")
+        XCTAssertEqual(rpgDerivedStats(state).maxHealth, profile.healthBase + 3, accuracy: 0.000_001,
+                       "typed Guard Stance is additive after the canonical per-level growth base")
 
-        XCTAssertEqual(rpgPathDefinition("delver")?.primaryAttributes, [.strength, .endurance])
         let passiveUnlocks: Set<String> = ["storm_focus", "mirror_work", "bound_servant",
                                            "ward_scribe", "sanctuary_bell"]
         for skill in RPG_SKILL_DEFINITIONS {
-            XCTAssertEqual(skill.rankValues.count, 3, skill.id)
-            XCTAssertEqual(skill.rankBenefits.count, 3, skill.id)
+            XCTAssertEqual(skill.rankValues.count, RPG_SKILL_RANK_CAP, skill.id)
+            XCTAssertEqual(skill.rankBenefits.count, RPG_SKILL_RANK_CAP, skill.id)
             XCTAssertTrue(skill.rankBenefits.allSatisfy { skill.summary.contains($0) }, skill.id)
             if passiveUnlocks.contains(skill.id) { XCTAssertEqual(skill.kind, .passive, skill.id) }
         }
-        for branch in RPG_BRANCH_DEFINITIONS {
-            for (index, skillID) in branch.skillIDs.enumerated() {
-                let expected = index == 0 ? [] : [branch.skillIDs[index - 1]]
-                XCTAssertEqual(rpgSkillDefinition(skillID)?.prerequisiteSkillIDs, expected, skillID)
-            }
-        }
         XCTAssertEqual(rpgSpellDefinition("aegis")?.upkeepCostPerSecond, 0)
         XCTAssertTrue(rpgSpellDefinition("aegis")?.summary.contains("no upkeep") == true)
+    }
+
+    /// Finish-line derived-stats coverage: every path's growth at every level 1...20 (a full
+    /// sweep, not just the L1/L10/L20 spot-checks) follows the registry's own
+    /// `RPGPathGrowthProfile` formula exactly, health/fatigue/regen/melee/accuracy/potency/luck
+    /// are monotone non-decreasing with level, the cost/recovery/exhaustion multipliers are
+    /// monotone non-increasing, and every multiplier stays inside its declared floor/cap. An
+    /// uncreated character always fails closed to the vanilla baseline rather than a partial
+    /// formula.
+    func testDerivedStatsFollowPerLevelGrowthProfileAcrossFullOneToTwentySweepWithMonotoneFloorsAndCaps() {
+        func state(pathID: String, level: Int) -> RPGCharacterState {
+            RPGCharacterState(created: true, pathID: pathID, xp: 0, level: level,
+                              skillRanks: [:], preparedSkillIDs: [], knownSpellIDs: [],
+                              preparedSpellIDs: [], fatigue: 0)
+        }
+        for path in RPG_PATH_DEFINITIONS {
+            let profile = rpgPathGrowthProfile(path.id)
+            var previous: RPGDerivedStats?
+            for level in 1...RPG_LEVEL_CAP {
+                let n = Double(level - 1)
+                let derived = rpgDerivedStats(state(pathID: path.id, level: level))
+                let label = "\(path.id) L\(level)"
+                XCTAssertEqual(derived.maxHealth, profile.healthBase + profile.healthPerLevel * n,
+                               accuracy: 0.000_001, label)
+                XCTAssertEqual(derived.maxFatigue, profile.fatigueBase + profile.fatiguePerLevel * n,
+                               accuracy: 0.000_001, label)
+                XCTAssertEqual(derived.fatigueRegenPerTick, profile.regenBase + profile.regenPerLevel * n,
+                               accuracy: 0.000_001, label)
+                XCTAssertEqual(derived.meleeDamageBonus, profile.meleePerLevel * n,
+                               accuracy: 0.000_001, label)
+                XCTAssertEqual(derived.actionAccuracyBonus, profile.accuracyPerLevel * n,
+                               accuracy: 0.000_001, label)
+                XCTAssertEqual(derived.spellPotencyBonus, profile.potencyPerLevel * n,
+                               accuracy: 0.000_001, label)
+                XCTAssertEqual(derived.focusCostMultiplier,
+                               max(profile.focusCostFloor, profile.focusCostBase - profile.focusCostPerLevel * n),
+                               accuracy: 0.000_001, label)
+                XCTAssertEqual(derived.actionRecoveryMultiplier,
+                               max(profile.recoveryFloor, profile.recoveryBase - profile.recoveryPerLevel * n),
+                               accuracy: 0.000_001, label)
+                XCTAssertEqual(derived.exhaustionMultiplier,
+                               max(profile.exhaustionFloor, profile.exhaustionBase - profile.exhaustionPerLevel * n),
+                               accuracy: 0.000_001, label)
+                XCTAssertEqual(derived.luckProcChance,
+                               min(profile.luckCap, profile.luckBase + profile.luckPerLevel * n),
+                               accuracy: 0.000_001, label)
+                XCTAssertGreaterThanOrEqual(derived.focusCostMultiplier, profile.focusCostFloor - 0.000_001, label)
+                XCTAssertGreaterThanOrEqual(derived.actionRecoveryMultiplier, profile.recoveryFloor - 0.000_001, label)
+                XCTAssertGreaterThanOrEqual(derived.exhaustionMultiplier, profile.exhaustionFloor - 0.000_001, label)
+                XCTAssertLessThanOrEqual(derived.luckProcChance, profile.luckCap + 0.000_001, label)
+                if let previous {
+                    XCTAssertGreaterThanOrEqual(derived.maxHealth, previous.maxHealth, "\(label) monotone health")
+                    XCTAssertGreaterThanOrEqual(derived.maxFatigue, previous.maxFatigue, "\(label) monotone fatigue")
+                    XCTAssertGreaterThanOrEqual(derived.fatigueRegenPerTick, previous.fatigueRegenPerTick,
+                                                "\(label) monotone regen")
+                    XCTAssertLessThanOrEqual(derived.focusCostMultiplier, previous.focusCostMultiplier,
+                                             "\(label) monotone focus cost")
+                    XCTAssertLessThanOrEqual(derived.exhaustionMultiplier, previous.exhaustionMultiplier,
+                                             "\(label) monotone exhaustion")
+                }
+                previous = derived
+            }
+        }
+        XCTAssertEqual(rpgDerivedStats(.uncreated()), .vanilla)
     }
 
     func testBoundedDecodeEncodingPayloadAndNumericEdges() throws {
@@ -437,13 +493,8 @@ final class RPGCoreV2Tests: XCTestCase {
         for seed in 0..<32 {
             var state = mastered(pathID: seed.isMultiple(of: 2) ? "arcanist" : "tinker",
                                  starter: seed.isMultiple(of: 2) ? "spell_formula" : "field_mod")
-            state.attributes = RPGAttributes(
-                strength: seed.isMultiple(of: 3) ? .min : 100 + seed,
-                dexterity: seed.isMultiple(of: 5) ? .max : -seed,
-                intelligence: 1_000 - seed,
-                endurance: seed * 100,
-                luck: -1_000
-            )
+            state.startingSkillIDs = seed.isMultiple(of: 3)
+                ? [] : ["not-a-real-skill", state.startingSkillIDs.first ?? ""]
             state.actionSequence = seed.isMultiple(of: 2) ? .max : .min
             state.authorityRevision = seed.isMultiple(of: 3) ? .max : .min
             state.preparedSpellIDs += [String(repeating: "z", count: 65), "unknown:\(seed)"]
@@ -453,21 +504,110 @@ final class RPGCoreV2Tests: XCTestCase {
         }
     }
 
+    /// Extends the malformed-repair fuzz over the v3 *JSON codec* surface (the prior test only
+    /// mutates the decoded Swift struct directly): junk `startingSkillIDs` (oversized/duplicate/
+    /// non-pool/64-vs-65-byte-boundary/type-confused), `migrationNoticePending` type confusion,
+    /// and out-of-range `skillRanks` (huge/negative/>5). Every case either fails the decode closed
+    /// (a thrown `DecodingError`, never a crash) or repair normalizes it: a created result always
+    /// has exactly three pool-member `startingSkillIDs`, every rank in 0...5, version 3, and
+    /// repair is a fixed point. Seed is fixed (sfc32, same machine-independent sequence every run)
+    /// so a failure reproduces byte-for-byte from the printed seed.
+    func testSeededFuzzedV3JSONDecodeNeverCrashesAndRepairedResultAlwaysSatisfiesContract() throws {
+        let baseline = mastered(pathID: "warden", starter: "guard_stance")
+        let baselineObject = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(baseline)) as? [String: Any])
+        var rng = RandomX(0x525a_5a31)
+
+        func assertContract(_ repaired: RPGCharacterState, seed: Int) {
+            XCTAssertEqual(repaired.version, RPG_STATE_CURRENT_VERSION, "seed \(seed)")
+            XCTAssertTrue(repaired.skillRanks.values.allSatisfy { (0...RPG_SKILL_RANK_CAP).contains($0) },
+                          "seed \(seed) rank out of 0...5: \(repaired.skillRanks)")
+            if repaired.created {
+                XCTAssertEqual(repaired.startingSkillIDs.count, RPG_STARTING_SKILL_COUNT, "seed \(seed)")
+                XCTAssertEqual(Set(repaired.startingSkillIDs).count, RPG_STARTING_SKILL_COUNT,
+                               "seed \(seed) startingSkillIDs are not unique")
+                if let branch = rpgBranchDefinition(repaired.specializationBranchID) {
+                    let pool = rpgStartingSkillPool(pathID: repaired.pathID, branchID: branch.id)
+                    XCTAssertTrue(repaired.startingSkillIDs.allSatisfy(pool.contains),
+                                  "seed \(seed) startingSkillIDs escaped the pool")
+                }
+            }
+            XCTAssertEqual(repairRPGCharacterState(repaired), repaired, "seed \(seed) repair is not a fixed point")
+        }
+
+        for seed in 0..<48 {
+            var object = baselineObject
+            switch seed % 6 {
+            case 0: // oversized: six distinct real skills spanning multiple paths/branches
+                object["startingSkillIDs"] = ["guard_stance", "quick_draw", "vein_reader",
+                                              "spell_formula", "field_dressing", "circuit_sense"]
+            case 1: // duplicate entries only
+                object["startingSkillIDs"] = ["guard_stance", "guard_stance", "guard_stance"]
+            case 2: // type confusion mid-array (a JSON number where a string ID is expected)
+                object["startingSkillIDs"] = ["guard_stance", NSNumber(value: 7), "heavy_cut"]
+            case 3: // exactly-64-byte ID (kept, but not a real skill) then a 65-byte ID (dropped,
+                    // yet still consumes one of the three decode slots) ahead of two real IDs
+                let sixtyFour = String(repeating: "a", count: RPG_MAX_ID_UTF8_BYTES)
+                let sixtyFive = String(repeating: "b", count: RPG_MAX_ID_UTF8_BYTES + 1)
+                object["startingSkillIDs"] = [sixtyFive, sixtyFour, "guard_stance", "heavy_cut"]
+            case 4: // non-pool junk strings, including an empty string
+                object["startingSkillIDs"] = ["not-a-skill-\(seed)", "", "also-not-\(seed)"]
+            default: // empty array
+                object["startingSkillIDs"] = []
+            }
+
+            switch (seed / 6) % 4 {
+            case 0: object["migrationNoticePending"] = "yes" // string, not a bool
+            case 1: object["migrationNoticePending"] = NSNumber(value: 1) // number, not a bool
+            case 2: object["migrationNoticePending"] = NSNull() // explicit null (legal: -> false)
+            default: break // leave the valid encoded value alone
+            }
+
+            var ranks = (object["skillRanks"] as? [String: Any]) ?? [:]
+            switch rng.nextInt(4) {
+            case 0: ranks["guard_stance"] = NSNumber(value: Int.max)
+            case 1: ranks["heavy_cut"] = NSNumber(value: -1_000)
+            case 2: ranks["shield_bind"] = NSNumber(value: 6)
+            default: break
+            }
+            object["skillRanks"] = ranks
+
+            let data = try XCTUnwrap(try? JSONSerialization.data(withJSONObject: object), "seed \(seed)")
+            guard let decoded = try? JSONDecoder().decode(RPGCharacterState.self, from: data) else {
+                continue // a thrown decode is an acceptable fail-closed outcome, not a crash
+            }
+            assertContract(repairRPGCharacterState(decoded), seed: seed)
+        }
+    }
+
     func testRepairMigratesV1DeterministicallyAndFutureVersionFailsClosed() {
         var legacy = RPGCharacterState(version: 1, created: true, pathID: "arcanist",
-                                       attributes: .defaultCreation, xp: 37_050, level: 99,
+                                       xp: 37_050, level: 99,
                                        skillRanks: ["spell_formula": 1, "minor_glamour": 3, "false_step": 2],
                                        preparedSkillIDs: ["minor_glamour"], knownSpellIDs: ["blur"],
                                        preparedSpellIDs: ["blur"], fatigue: 10,
                                        kitGrantVersion: 99, kitGrantID: "forged")
         legacy = repairRPGCharacterState(legacy)
-        XCTAssertEqual(legacy.version, 2)
+        XCTAssertEqual(legacy.version, RPG_STATE_CURRENT_VERSION)
         XCTAssertEqual(legacy.starterSkillID, "spell_formula",
                        "equally legal inferred candidates tie in frozen registry order")
         XCTAssertEqual(legacy.specializationBranchID, "arcanist_elementalist")
         XCTAssertEqual(legacy.kitGrantVersion, 0)
         XCTAssertNil(legacy.kitGrantID)
-        XCTAssertEqual(repairRPGCharacterState(legacy), legacy)
+        // Migration never drops a rank the pre-v3 save legally held.
+        XCTAssertEqual(legacy.skillRanks["spell_formula"], 1)
+        XCTAssertEqual(legacy.skillRanks["minor_glamour"], 3)
+        XCTAssertEqual(legacy.skillRanks["false_step"], 2)
+        // A legacy (v1) migration sets migrationNoticePending; the notice is a one-shot flag that a
+        // v3 round-trip clears (amendment S3). So re-repair is a fixed point on everything EXCEPT
+        // that flag, which drops to false because the re-repair input is already v3.
+        XCTAssertTrue(legacy.migrationNoticePending)
+        var expectedReRepair = legacy
+        expectedReRepair.migrationNoticePending = false
+        XCTAssertEqual(repairRPGCharacterState(legacy), expectedReRepair,
+                       "repair is idempotent modulo the one-shot migration notice")
+        XCTAssertEqual(repairRPGCharacterState(expectedReRepair), expectedReRepair,
+                       "a cleared, already-v3 state is a strict repair fixed point")
 
         var future = legacy
         future.version = RPG_STATE_CURRENT_VERSION + 1
@@ -519,27 +659,20 @@ final class RPGCoreV2Tests: XCTestCase {
         unique.skillRanks = ["minor_glamour": 1, "spark_weave": 3, "storm_focus": 3]
         XCTAssertEqual(repairRPGCharacterState(unique).starterSkillID, "minor_glamour")
 
-        var grandfathered = makeState(pathID: "ranger", starter: "trail_sense")
-        grandfathered.version = 1
-        grandfathered.xp = 500
-        grandfathered.attributes = .defaultCreation // Luck 6 misses Trail Sense's current Luck 7 gate.
-        grandfathered.skillRanks = ["trail_sense": 2]
-        let migratedGrandfather = repairRPGCharacterState(grandfathered)
-        XCTAssertEqual(migratedGrandfather.attributes, .defaultCreation)
-        XCTAssertEqual(migratedGrandfather.starterSkillID, "trail_sense")
-        XCTAssertEqual(migratedGrandfather.skillRanks["trail_sense"], 1,
-                       "only inferred Foundation rank 1 is grandfathered")
-
-        var ordered = makeState(pathID: "arcanist", starter: "ritual_circle")
-        ordered.version = 1
-        ordered.xp = 8_550 // old level 10, nine earned skill points
-        ordered.skillRanks = ["spell_formula": 1, "ritual_circle": 3, "bound_servant": 2]
-        let replayed = repairRPGCharacterState(ordered)
-        XCTAssertEqual(replayed.starterSkillID, "ritual_circle")
-        XCTAssertEqual(replayed.skillRanks["spell_formula"], 1,
-                       "the frozen global registry replays Elementalist before Ritualist")
-        XCTAssertEqual(replayed.skillRanks["ritual_circle"], 3)
-        XCTAssertEqual(replayed.skillRanks["bound_servant"], 1)
+        // A pre-v3 save whose only recorded rank belongs to a non-signature skill (no branch
+        // signature has a positive rank) falls to the scoring loop; all three candidates in this
+        // fixture tie, so the frozen branch registry order (Marksman first) decides.
+        var offSignatureTie = makeState(pathID: "ranger", starter: "trail_sense")
+        offSignatureTie.version = 1
+        offSignatureTie.xp = 500 // old level 3
+        offSignatureTie.skillRanks = ["steady_aim": 2]
+        let migratedOffSignature = repairRPGCharacterState(offSignatureTie)
+        XCTAssertEqual(migratedOffSignature.level, 3)
+        XCTAssertEqual(migratedOffSignature.starterSkillID, "quick_draw",
+                       "an all-tied inference falls back to frozen branch registry order")
+        XCTAssertEqual(migratedOffSignature.specializationBranchID, "ranger_marksman")
+        XCTAssertGreaterThanOrEqual(migratedOffSignature.skillRanks["steady_aim"] ?? 0, 1,
+                                    "migration preserves at least the inferred candidate's replayed rank")
 
         var wardenTie = makeState(pathID: "warden", starter: "guard_stance")
         wardenTie.version = 1
@@ -550,20 +683,17 @@ final class RPGCoreV2Tests: XCTestCase {
         XCTAssertEqual(migratedTie.starterSkillID, "heavy_cut",
                        "ties use frozen path branch order, not UI starter order")
 
+        // Step 2's non-legacy guard: a v2/v3 save whose declared specializationBranchID does not
+        // actually own its declared starterSkillID fails RPG state closed rather than silently
+        // repairing an inconsistent identity.
         var malformedV2 = makeState(pathID: "ranger", starter: "trail_sense")
-        malformedV2.attributes = RPGAttributes(strength: 12, dexterity: 9, intelligence: 9,
-                                                endurance: 6, luck: 6)
+        malformedV2.specializationBranchID = "ranger_marksman"
         XCTAssertFalse(repairRPGCharacterState(malformedV2).created,
-                       "a v2 starter that fails its creation requirement fails only RPG state closed")
+                       "a v2 starter/sub-class mismatch fails RPG state closed")
         malformedV2 = makeState(pathID: "ranger", starter: "trail_sense")
-        malformedV2.skillRanks["trail_sense"] = 0
-        XCTAssertFalse(repairRPGCharacterState(malformedV2).created)
-        malformedV2 = makeState(pathID: "warden", starter: "guard_stance")
-        malformedV2.attributes = RPGAttributes(strength: 8, dexterity: 6, intelligence: 6,
-                                                endurance: 8, luck: 6)
-        XCTAssertLessThan(malformedV2.attributes.total, RPGAttributes.creationBudget)
+        malformedV2.starterSkillID = "steady_aim"
         XCTAssertFalse(repairRPGCharacterState(malformedV2).created,
-                       "v2 cannot silently replace an under-budget persisted build")
+                       "a v2 starter that is not one of the path's three signatures fails closed")
     }
 
     func testRecipeMilestonesPreserveBeforeRegistrationAndMaskAfterExactCount() {
@@ -725,10 +855,12 @@ final class RPGCoreV2Tests: XCTestCase {
 
         let delver = Player(world: ranger.world)
         delver.rpg = mastered(pathID: "delver", starter: "vein_reader")
-        XCTAssertEqual(rpgMiningSpeedMultiplier(delver, blockID: Int(B.stone)), 1.3, accuracy: 0.0001)
+        // Vein Reader mastered (rank 5) = +50% stone/ore mining speed.
+        XCTAssertEqual(rpgMiningSpeedMultiplier(delver, blockID: Int(B.stone)), 1.5, accuracy: 0.0001)
 
         delver.rpg = mastered(pathID: "delver", starter: "trap_probe")
-        XCTAssertEqual(rpgIncomingDamageMultiplier(delver, source: "explosion", attacker: nil), 0.55, accuracy: 0.0001)
+        // Tripwire Mind mastered (rank 5) = -75% explosion/trap damage -> x0.25.
+        XCTAssertEqual(rpgIncomingDamageMultiplier(delver, source: "explosion", attacker: nil), 0.25, accuracy: 0.0001)
 
         let normal = Player(world: ranger.world)
         let beforeNormal = normal.exhaustion
@@ -739,8 +871,9 @@ final class RPGCoreV2Tests: XCTestCase {
 
         let tuned = Player(world: ranger.world)
         tuned.rpg = mastered(pathID: "tinker", starter: "field_mod")
+        // Tool Tune mastered (rank 5) preserves every 2nd durability event.
         XCTAssertFalse(tuned.shouldPreserveRPGToolDurability())
-        XCTAssertFalse(tuned.shouldPreserveRPGToolDurability())
+        XCTAssertTrue(tuned.shouldPreserveRPGToolDurability())
         XCTAssertFalse(tuned.shouldPreserveRPGToolDurability())
         XCTAssertTrue(tuned.shouldPreserveRPGToolDurability())
 
@@ -784,8 +917,7 @@ final class RPGCoreV2Tests: XCTestCase {
         let creationState = uncreated.rpg
         let creationInventory = inventorySignature(uncreated.inventory)
         XCTAssertEqual(uncreated.createRPGCharacter(RPGCreationDraft(
-            pathID: "warden", attributes: rpgCreationPreset(pathID: "warden")!,
-            starterSkillID: "guard_stance"
+            pathID: "warden", starterSkillID: "guard_stance"
         )), .classesDisabled)
         XCTAssertEqual(uncreated.rpg, creationState)
         XCTAssertEqual(inventorySignature(uncreated.inventory), creationInventory)
@@ -822,7 +954,6 @@ final class RPGCoreV2Tests: XCTestCase {
             { game.requestRPGSelectPreparedSpell("ignite") },
             { game.requestRPGAssignPreparedActionToQuickSlot(kind: .spell, id: "ignite", slot: 0) },
             { game.requestRPGClearActionQuickSlot(0) },
-            { game.requestRPGSpendAttributePoint(.strength) },
             { game.requestRPGCyclePreparedSpell() },
             { game.requestRPGCyclePreparedAction() },
             { game.requestRPGCastSelectedSpell() },
@@ -979,7 +1110,8 @@ final class RPGCoreV2Tests: XCTestCase {
 
         let mender = Player(world: world)
         mender.rpg = mastered(pathID: "mender", starter: "herbal_lore")
-        XCTAssertEqual(rpgCleanBrewDuration(mender, effectID: "speed", baseDuration: 101), 131)
+        // Clean Brew mastered (rank 5) = x1.50 beneficial-effect duration -> 101 * 1.5 = 151.
+        XCTAssertEqual(rpgCleanBrewDuration(mender, effectID: "speed", baseDuration: 101), 151)
         XCTAssertEqual(rpgCleanBrewDuration(mender, effectID: "poison", baseDuration: 101), 101)
         XCTAssertEqual(rpgCleanBrewDuration(mender, effectID: "instant_health", baseDuration: 1), 1)
         XCTAssertEqual(rpgCleanBrewDuration(mender, effectID: "speed",
@@ -1130,13 +1262,15 @@ final class RPGCoreV2Tests: XCTestCase {
         soft.rpg = mastered(pathID: "ranger", starter: "trail_sense")
         XCTAssertEqual(rpgSneakingMovementMultiplier(baseline, swiftSneakLevel: 0), 0.3,
                        accuracy: 0.000_001)
-        XCTAssertEqual(rpgSneakingMovementMultiplier(soft, swiftSneakLevel: 0), 0.345,
+        // Soft Step mastered (rank 5) = +25% sneaking movement -> 0.3 * 1.25 = 0.375.
+        XCTAssertEqual(rpgSneakingMovementMultiplier(soft, swiftSneakLevel: 0), 0.375,
                        accuracy: 0.000_001)
 
         let tuned = Player(world: world)
         tuned.rpg = mastered(pathID: "tinker", starter: "field_mod")
+        // Tool Tune mastered (rank 5) preserves every 2nd durability event.
         XCTAssertEqual((1...4).map { _ in tuned.shouldPreserveRPGToolDurability() },
-                       [false, false, false, true])
+                       [false, true, false, true])
         XCTAssertNil(tuned.stats["rpg.salvageCounter"], "tool and salvage counters are independent")
         let saved = tuned.save()
         let restored = Player(world: world)
@@ -1147,7 +1281,7 @@ final class RPGCoreV2Tests: XCTestCase {
         let salvager = Player(world: world)
         salvager.rpg = mastered(pathID: "delver", starter: "salvage_eye")
         let results = (1...5).map { _ in salvager.shouldPreserveRPGSalvageDurability() }
-        XCTAssertTrue(results[4], "rank-three Salvage Eye always preserves the fifth event")
+        XCTAssertTrue(results[1], "rank-five Salvage Eye preserves every 2nd crafted-block break")
         XCTAssertNil(salvager.stats["rpg.toolTuneCounter"])
     }
 
@@ -1442,9 +1576,7 @@ final class RPGCoreV2Tests: XCTestCase {
     }
 
     private func makeState(pathID: String, starter: String) -> RPGCharacterState {
-        try! rpgCreateCharacter(RPGCreationDraft(pathID: pathID,
-                                                 attributes: rpgCreationPreset(pathID: pathID)!,
-                                                 starterSkillID: starter)).get()
+        try! rpgCreateCharacter(RPGCreationDraft(pathID: pathID, starterSkillID: starter)).get()
     }
 
     private func mastered(pathID: String, starter: String) -> RPGCharacterState {
@@ -1452,7 +1584,7 @@ final class RPGCoreV2Tests: XCTestCase {
         state.xp = rpgXPRequiredForLevel(20)
         state.level = 20
         if let branch = rpgBranchDefinition(state.specializationBranchID) {
-            for skill in branch.skillIDs { state.skillRanks[skill] = 3 }
+            for skill in branch.skillIDs { state.skillRanks[skill] = RPG_SKILL_RANK_CAP }
         }
         return repairRPGCharacterState(state)
     }

@@ -7,6 +7,9 @@ final class RPGCharacterScreen: Screen {
     private var interaction: RPGScreenInteractionState
     private var highContrast: Bool
     private var lastSemanticDispatchAccepted = false
+    /// Pointer-only hover tracking. Presentation-only: never touches the semantic model, the
+    /// interaction reducer, or any activation fingerprint (Condition 6).
+    private var hoveredID: RPGUIElementID?
 
     override init() {
         interaction = RPGScreenInteractionState()
@@ -125,17 +128,12 @@ final class RPGCharacterScreen: Screen {
         let capture = descriptor.isActionable ? MainActor.assumeIsolated {
             ui.captureRPGSemanticActivation(id: descriptor.id, on: self)
         } : nil
-        if !descriptor.isActionable {
-            return reduceInteraction(.beginClassDrag(x: mx, y: my), ui: ui, game: game,
-                                     rebuild: false)
-        }
         let handled = reduceInteraction(
             .mouseDown(elementID: descriptor.id, capture: capture),
             ui: ui, game: game, rebuild: !descriptor.isActionable)
         return handled
     }
     override func onMouseUp(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) {
-        if reduceInteraction(.endClassDrag(x: mx, y: my), ui: ui, game: game) { return }
         let releasedID: RPGUIElementID?
         if let model = rpgCommittedSemanticSnapshot?.model {
             releasedID = rpgScreenDescriptor(atX: mx, y: my, in: model)?.id
@@ -146,8 +144,12 @@ final class RPGCharacterScreen: Screen {
                               ui: ui, game: game, rebuild: false)
     }
     override func onMouseMove(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) {
-        _ = reduceInteraction(.updateClassDrag(x: mx, y: my), ui: ui, game: game,
-                              rebuild: false)
+        guard let model = rpgCommittedSemanticSnapshot?.model else {
+            hoveredID = nil
+            return
+        }
+        let descriptor = rpgScreenDescriptor(atX: mx, y: my, in: model)
+        hoveredID = (descriptor?.isActionable == true) ? descriptor?.id : nil
     }
     override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
         reduceInteraction(.scrollRows(dy >= 0 ? 1 : -1), ui: ui, game: game)
@@ -171,10 +173,30 @@ final class RPGCharacterScreen: Screen {
             return reduceInteraction(.activateFocused, ui: ui, game: game, rebuild: false)
         case "PageUp": return reduceInteraction(.scrollRows(-1), ui: ui, game: game)
         case "PageDown": return reduceInteraction(.scrollRows(1), ui: ui, game: game)
+        case "Escape":
+            // Mid-creation (uncreated, past step 1), Escape steps the flow back with the draft
+            // intact instead of closing the sheet and silently discarding it (D3). At step 1 and for
+            // a created character it returns false, so the router's closeOnEsc closes as before.
+            guard creationStepBackApplies(game) else { return false }
+            return reduceInteraction(.applyCommand(
+                .creationBack, tutorialCompletionPublished:
+                    game.settings.rpgTutorialVersion == RPG_TUTORIAL_VERSION),
+                ui: ui, game: game)
         default: return false
         }
     }
     override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool { false }
+
+    /// True while the local character is still being created and the flow has advanced past step 1,
+    /// so a back gesture (Escape / controller B) steps the creation flow back (draft intact) rather
+    /// than closing the sheet and discarding the draft. Step 1 and a created character close as usual.
+    private func creationStepBackApplies(_ game: GameCore) -> Bool {
+        guard interaction.creation.step != .path else { return false }
+        let created = MainActor.assumeIsolated {
+            game.rpgScreenRuntimeSnapshot()?.state.created ?? false
+        }
+        return !created
+    }
 
     /// Physical controller ingress reuses the same pure interaction reducer and semantic capture
     /// boundary as keyboard input. No controller callback owns an independent screen mutation path.
@@ -188,7 +210,15 @@ final class RPGCharacterScreen: Screen {
             let handled = reduceInteraction(.activateFocused, ui: ui, game: game,
                                             rebuild: false, activationSource: .controller)
             return handled && lastSemanticDispatchAccepted
-        case .back, .previousTab, .nextTab:
+        case .back:
+            // Controller B mid-creation steps the flow back (draft intact); otherwise it closes,
+            // matching Escape (D3).
+            let effective: RPGSemanticCommand = creationStepBackApplies(game) ? .creationBack : .back
+            return reduceInteraction(
+                .applyCommand(effective, tutorialCompletionPublished:
+                    game.settings.rpgTutorialVersion == RPG_TUTORIAL_VERSION),
+                ui: ui, game: game)
+        case .previousTab, .nextTab:
             return reduceInteraction(
                 .applyCommand(command, tutorialCompletionPublished:
                     game.settings.rpgTutorialVersion == RPG_TUTORIAL_VERSION),
@@ -303,12 +333,13 @@ final class RPGCharacterScreen: Screen {
         ui.cv.fillRect(model.contentFrame.x, model.contentFrame.y - 2,
                        model.contentFrame.width, 1)
 
+        let pressedID = interaction.pendingMouseActivation?.elementID
         for descriptor in model.visibleDescriptors {
             if descriptor.id.rawValue == "authority:phase" ||
                 descriptor.id.rawValue == "status:current" ||
                 descriptor.id.rawValue == "contextual-detail" { continue }
-            drawDescriptor(descriptor, focusedID: model.focusedID, ui: ui,
-                           highContrast: highContrast)
+            drawDescriptor(descriptor, focusedID: model.focusedID, hoveredID: hoveredID,
+                           pressedID: pressedID, ui: ui, highContrast: highContrast)
         }
         if model.focusedID?.rawValue == "authority:phase" {
             let frame = model.descriptors.first { $0.id.rawValue == "authority:phase" }?.frame
@@ -335,17 +366,22 @@ final class RPGCharacterScreen: Screen {
     }
 
     private func drawDescriptor(_ descriptor: RPGSemanticDescriptor,
-                                focusedID: RPGUIElementID?, ui: UIManager,
+                                focusedID: RPGUIElementID?, hoveredID: RPGUIElementID?,
+                                pressedID: RPGUIElementID?, ui: UIManager,
                                 highContrast: Bool) {
         guard let frame = descriptor.visibleFrame, frame.width > 0, frame.height > 0 else { return }
         guard rpgDescriptorVisualLinesFit(
             frame: descriptor.frame, iconAssetID: descriptor.iconAssetID,
             visualLines: descriptor.visualLines) else { return }
         let focused = descriptor.id == focusedID
+        let pressed = descriptor.id == pressedID
+        let hovered = !pressed && descriptor.id == hoveredID && descriptor.isActionable
         let selected = descriptor.selected || descriptor.prepared || descriptor.slotted
         let background: String
         if descriptor.locked || !descriptor.enabled {
             background = highContrast ? "#d0d0d0" : "#a6a6a6"
+        } else if pressed {
+            background = highContrast ? "#d0d0d0" : "#d9e9c4"
         } else if selected {
             background = highContrast ? "#ffffff" : "#d9e9c4"
         } else {
@@ -370,15 +406,30 @@ final class RPGCharacterScreen: Screen {
                        frame.maxX - 9, frame.y + frame.height / 2 - 4, 1)
             ui.cv.line(frame.maxX - 3, frame.y + frame.height / 2,
                        frame.maxX - 9, frame.y + frame.height / 2 + 4, 1)
-        } else if descriptor.adornment == .carouselPrevious ||
-                    descriptor.adornment == .carouselNext {
-            let centerX = floor(frame.x + frame.width / 2) + 0.5
-            let centerY = floor(frame.y + frame.height / 2) + 0.5
-            let direction = descriptor.adornment == .carouselPrevious ? -1.0 : 1.0
-            let tipX = centerX + direction * 3
-            let wingX = centerX - direction * 3
-            ui.cv.line(tipX, centerY, wingX, centerY - 5, 1)
-            ui.cv.line(tipX, centerY, wingX, centerY + 5, 1)
+        }
+        if hovered {
+            ui.cv.setStroke(highContrast ? "#000000" : "#777777")
+            ui.cv.strokeRect(frame.x + 2, frame.y + 2,
+                             max(1, frame.width - 4), max(1, frame.height - 4), 1)
+        }
+        if let pips = descriptor.rankPips {
+            // Rank pips sit in a reserved band at the card's bottom-left (D2): the card height adds
+            // RPG_RANK_PIP_BAND_HEIGHT and rpgDescriptorVisualLinesFit keeps the text above it, so the
+            // pips never strike through the last text line, and the bottom-left keeps them clear of the
+            // top-right Rank Up button and the corner check adornment.
+            let pipSize = 6.0, gap = 2.0
+            var pipX = frame.x + 4
+            let pipY = frame.maxY - 4 - pipSize
+            for index in 0..<pips.total {
+                if index < pips.filled {
+                    ui.cv.setFill(highContrast ? "#000000" : "#275d20")
+                    ui.cv.fillRect(pipX, pipY, pipSize, pipSize)
+                } else {
+                    ui.cv.setStroke(highContrast ? "#000000" : "#777777")
+                    ui.cv.strokeRect(pipX, pipY, pipSize, pipSize, 1)
+                }
+                pipX += pipSize + gap
+            }
         }
 
         let inset = 4.0
@@ -386,6 +437,10 @@ final class RPGCharacterScreen: Screen {
         var textX = frame.x + inset
         if let icon = descriptor.iconAssetID {
             ui.cv.drawRPGIcon(icon, frame.x + 4, frame.y + 4, 24, 24)
+            textX += 28
+        } else if descriptor.reservesIconCell {
+            ui.cv.setStroke(highContrast ? "#000000" : "#777777")
+            ui.cv.strokeRect(frame.x + 4, frame.y + 4, 24, 24, 1)
             textX += 28
         }
         for (index, line) in descriptor.visualLines.enumerated() {

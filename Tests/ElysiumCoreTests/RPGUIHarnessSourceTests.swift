@@ -116,8 +116,8 @@ final class RPGUIHarnessSourceTests: XCTestCase {
         XCTAssertTrue(core.contains("attempts <= 256"))
         XCTAssertFalse(core.contains("1 << candidates.count"))
         XCTAssertTrue(core.contains("inventoryCapacityAvailable: inventoryCapacityAvailable"))
-        XCTAssertTrue(model.contains("unmetStarterRequirement"))
-        XCTAssertTrue(model.contains("rank.current ? \"Current rank\""))
+        XCTAssertTrue(model.contains("invalidStartingSkillCount"))
+        XCTAssertTrue(model.contains("card.mastered ? \"Mastered\""))
         XCTAssertTrue(core.contains("rpgRevealScrollOffset("))
         let candidate = try XCTUnwrap(core.range(of: "let candidateModel ="))
         let final = try XCTUnwrap(core.range(of: "let finalModel ="))
@@ -148,19 +148,16 @@ final class RPGUIHarnessSourceTests: XCTestCase {
         XCTAssertFalse(harness.contains("guard y + 8 <= frame.maxY else { break }"))
     }
 
-    func testBothRenderersMirrorCenteredPixelAlignedCarouselChevrons() throws {
+    /// The class carousel was retired; both renderers must have dropped its chevron adornments
+    /// entirely in favor of single-click card activation.
+    func testBothRenderersDroppedCarouselChevronsEntirely() throws {
         let harness = try source("Sources/Elysium/RPGUIHarnessM.swift")
         let production = try source("Sources/Elysium/RPGScreensM.swift")
-        for value in [harness, production] {
-            for required in [".carouselPrevious", ".carouselNext",
-                             "floor(", "+ 0.5", "direction * 3",
-                             "centerY - 5", "centerY + 5"] {
-                XCTAssertTrue(value.contains(required), required)
-            }
-        }
         let model = try source("Sources/ElysiumCore/Game/RPGScreenModel.swift")
-        XCTAssertTrue(model.contains("adornment: .carouselPrevious"))
-        XCTAssertTrue(model.contains("adornment: .carouselNext"))
+        for value in [harness, production, model] {
+            XCTAssertFalse(value.contains("carouselPrevious"))
+            XCTAssertFalse(value.contains("carouselNext"))
+        }
         XCTAssertFalse(model.contains("visualLines: [\"‹\"]"))
         XCTAssertFalse(model.contains("visualLines: [\"›\"]"))
     }

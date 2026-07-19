@@ -559,29 +559,15 @@ final class RPGActionTransactionTests: XCTestCase {
                                     preparedSkill: String? = nil,
                                     preparedSpell: String? = nil) -> Player {
         let player = Player(world: world)
-        let starterSpells: [String]
-        switch (pathID, starter) {
-        case ("arcanist", "spell_formula"): starterSpells = ["ignite"]
-        case ("arcanist", "minor_glamour"): starterSpells = ["blur"]
-        case ("arcanist", "ritual_circle"): starterSpells = ["mage_light"]
-        case ("mender", "field_dressing"): starterSpells = ["mend_wounds"]
-        case ("mender", "herbal_lore"): starterSpells = ["purify"]
-        case ("mender", "safe_haven"): starterSpells = ["ward"]
-        default: starterSpells = []
-        }
+        let branchID = rpgSkillDefinition(starter)!.branchID
         XCTAssertNil(player.createRPGCharacter(RPGCreationDraft(
-            pathID: pathID,
-            attributes: rpgCreationPreset(pathID: pathID)!,
-            starterSkillID: starter,
-            starterSpellIDs: starterSpells)))
+            pathID: pathID, branchID: branchID,
+            startingSkillIDs: rpgBranchDefinition(branchID)!.skillIDs)))
         var state = player.rpg
         state.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
         state.level = RPG_LEVEL_CAP
-        if pathID == "arcanist" || pathID == "mender" {
-            state.attributes.intelligence = max(13, state.attributes.intelligence)
-        }
         if let branch = rpgBranchDefinition(state.specializationBranchID) {
-            for skillID in branch.skillIDs { state.skillRanks[skillID] = 3 }
+            for skillID in branch.skillIDs { state.skillRanks[skillID] = RPG_SKILL_RANK_CAP }
         }
         state = repairRPGCharacterState(state)
         if let preparedSkill {

@@ -7,8 +7,8 @@ import XCTest
 @MainActor
 final class RPGClassesToggleTests: XCTestCase {
     private var arcanistDraft: RPGCreationDraft {
-        RPGCreationDraft(pathID: "arcanist", attributes: .defaultCreation,
-                         starterSkillID: "spell_formula", starterSpellIDs: [])
+        RPGCreationDraft(pathID: "arcanist", branchID: "arcanist_elementalist",
+                         startingSkillIDs: rpgBranchDefinition("arcanist_elementalist")!.skillIDs)
     }
 
     // MARK: - createWorld(rpgClassesEnabled:)

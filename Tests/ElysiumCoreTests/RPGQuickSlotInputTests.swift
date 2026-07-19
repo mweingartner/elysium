@@ -17,9 +17,8 @@ final class RPGQuickSlotInputTests: XCTestCase {
         ))
         XCTAssertNil(game.player.createRPGCharacter(RPGCreationDraft(
             pathID: "arcanist",
-            attributes: .defaultCreation,
-            starterSkillID: "spell_formula",
-            starterSpellIDs: ["ignite"]
+            branchID: "arcanist_elementalist",
+            startingSkillIDs: rpgDefaultStartingSkillIDs(pathID: "arcanist")
         )))
         game.player.selectedSlot = 4
         var captured: [LANRPGIntent] = []

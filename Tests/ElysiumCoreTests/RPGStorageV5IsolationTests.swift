@@ -98,8 +98,7 @@ final class RPGStorageV5IsolationTests: XCTestCase {
             gameMode: GameMode.survival, difficulty: 2, dimension: 0,
             playerCount: 2, rpgClassesEnabled: true
         ))
-        let draft = RPGCreationDraft(pathID: "arcanist", attributes: .defaultCreation,
-                                     starterSkillID: "spell_formula", starterSpellIDs: [])
+        let draft = RPGCreationDraft(pathID: "arcanist", starterSkillID: "spell_formula")
         XCTAssertNil(game.player.createRPGCharacter(draft))
         let before = game.player.rpg
         var intents: [LANRPGIntent] = []

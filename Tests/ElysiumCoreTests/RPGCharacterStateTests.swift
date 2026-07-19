@@ -13,9 +13,8 @@ final class RPGCharacterStateTests: XCTestCase {
     func testCharacterCreationBuildsPreparedArcanistWithFullFatigue() {
         let draft = RPGCreationDraft(
             pathID: "arcanist",
-            attributes: .defaultCreation,
-            starterSkillID: "spell_formula",
-            starterSpellIDs: ["ignite"]
+            branchID: "arcanist_elementalist",
+            startingSkillIDs: rpgDefaultStartingSkillIDs(pathID: "arcanist")
         )
 
         let result = rpgCreateCharacter(draft)
@@ -27,40 +26,62 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertEqual(state.pathID, "arcanist")
         XCTAssertEqual(state.level, 1)
         XCTAssertEqual(state.skillRanks["spell_formula"], 1)
+        XCTAssertEqual(state.skillRanks["minor_glamour"], 1)
+        XCTAssertEqual(state.skillRanks["ritual_circle"], 1)
         XCTAssertEqual(state.starterSkillID, "spell_formula")
         XCTAssertEqual(state.specializationBranchID, "arcanist_elementalist")
-        XCTAssertEqual(state.knownSpellIDs, ["ignite"])
-        XCTAssertEqual(state.preparedSpellIDs, ["ignite"])
+        XCTAssertEqual(Set(state.startingSkillIDs), ["spell_formula", "minor_glamour", "ritual_circle"])
+        // The single rule "spells come only from skill ranks" reproduces the legacy auto-grant.
+        XCTAssertEqual(Set(state.knownSpellIDs), ["ignite", "blur", "mage_light"])
+        XCTAssertEqual(Set(state.preparedSpellIDs), ["ignite", "blur", "mage_light"])
         XCTAssertNil(state.selectedPreparedActionID)
-        XCTAssertEqual(rpgDefaultQuickSlotPreferences(for: state).tokens[0],
-                       rpgPreparedActionToken(kind: .spell, id: "ignite"))
+        XCTAssertFalse(state.migrationNoticePending)
         XCTAssertEqual(state.fatigue, rpgDerivedStats(state).maxFatigue, accuracy: 0.0001)
     }
 
-    func testCharacterCreationRejectsBadBudgetAndInvalidStarterSpell() {
-        let badBudget = RPGCreationDraft(
-            pathID: "arcanist",
-            attributes: RPGAttributes(strength: 8, dexterity: 8, intelligence: 9, endurance: 9, luck: 6),
-            starterSkillID: "spell_formula"
-        )
-        XCTAssertEqual(tryFailure(rpgCreateCharacter(badBudget)),
-                       .invalidAttributeBudget(total: 40, expected: RPGAttributes.creationBudget))
+    func testCharacterCreationRejectsInvalidStartingSkillSelection() {
+        let tooFew = RPGCreationDraft(
+            pathID: "arcanist", branchID: "arcanist_elementalist",
+            startingSkillIDs: ["spell_formula"])
+        XCTAssertEqual(tryFailure(rpgCreateCharacter(tooFew)),
+                       .invalidStartingSkillSelection(["spell_formula"]))
 
-        let badSpell = RPGCreationDraft(
-            pathID: "arcanist",
-            attributes: .defaultCreation,
-            starterSkillID: "spell_formula",
-            starterSpellIDs: ["mend_wounds"]
-        )
-        XCTAssertEqual(tryFailure(rpgCreateCharacter(badSpell)), .invalidStarterSpell("mend_wounds"))
+        let outsidePool = RPGCreationDraft(
+            pathID: "arcanist", branchID: "arcanist_elementalist",
+            startingSkillIDs: ["spell_formula", "minor_glamour", "guard_stance"])
+        XCTAssertEqual(tryFailure(rpgCreateCharacter(outsidePool)),
+                       .invalidStartingSkillSelection(["spell_formula", "minor_glamour", "guard_stance"]))
+
+        let duplicated = RPGCreationDraft(
+            pathID: "arcanist", branchID: "arcanist_elementalist",
+            startingSkillIDs: ["spell_formula", "spell_formula", "minor_glamour"])
+        XCTAssertEqual(tryFailure(rpgCreateCharacter(duplicated)),
+                       .invalidStartingSkillSelection(["spell_formula", "spell_formula", "minor_glamour"]))
     }
 
-    func testRepairDropsUnknownAndCrossPathStateWithoutDroppingCharacter() {
+    /// A custom (non-default) selection is honored verbatim as long as it is a legal pool subset,
+    /// and `starterSkillID` stays the branch signature regardless of whether it was chosen.
+    func testCharacterCreationHonorsCustomStartingSkillSelection() {
+        let draft = RPGCreationDraft(
+            pathID: "warden", branchID: "warden_guardian",
+            startingSkillIDs: ["interpose", "anchor_line", "heavy_cut"])
+        guard case .success(let state) = rpgCreateCharacter(draft) else {
+            return XCTFail("expected character creation to succeed")
+        }
+        XCTAssertEqual(Set(state.startingSkillIDs), ["interpose", "anchor_line", "heavy_cut"])
+        XCTAssertEqual(state.skillRanks["interpose"], 1)
+        XCTAssertEqual(state.skillRanks["anchor_line"], 1)
+        XCTAssertEqual(state.skillRanks["heavy_cut"], 1)
+        // The chosen branch's own signature was NOT picked; starterSkillID is still its identity.
+        XCTAssertEqual(state.starterSkillID, "guard_stance")
+        XCTAssertNil(state.skillRanks["guard_stance"])
+    }
+
+    func testRepairDropsUnknownAndCrossPathStateButKeepsSynthesizedStartingSkills() {
         let raw = RPGCharacterState(
             version: 0,
             created: true,
             pathID: "arcanist",
-            attributes: RPGAttributes(strength: 100, dexterity: 3, intelligence: 16, endurance: 9, luck: 6),
             xp: -40,
             level: 99,
             skillRanks: [
@@ -91,14 +112,20 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertEqual(repaired.pathID, "arcanist")
         XCTAssertEqual(repaired.xp, 0)
         XCTAssertEqual(repaired.level, 1)
-        XCTAssertEqual(repaired.attributes.total, RPGAttributes.creationBudget)
+        XCTAssertEqual(repaired.starterSkillID, "spell_formula")
+        XCTAssertEqual(repaired.specializationBranchID, "arcanist_elementalist")
+        // Legacy saves never recorded startingSkillIDs; repair fails open to the path defaults
+        // (the three sub-class signatures), then backfills rank 1 for any not already learned.
+        XCTAssertEqual(Set(repaired.startingSkillIDs), ["spell_formula", "minor_glamour", "ritual_circle"])
         XCTAssertEqual(repaired.skillRanks["spell_formula"], 1)
-        XCTAssertNil(repaired.skillRanks["minor_glamour"])
+        XCTAssertEqual(repaired.skillRanks["minor_glamour"], 1)
+        XCTAssertEqual(repaired.skillRanks["ritual_circle"], 1)
         XCTAssertNil(repaired.skillRanks["guard_stance"])
         XCTAssertNil(repaired.skillRanks["not_real"])
         XCTAssertTrue(repaired.preparedSkillIDs.isEmpty)
         XCTAssertTrue(repaired.knownSpellIDs.contains("ignite"))
-        XCTAssertFalse(repaired.knownSpellIDs.contains("blur"))
+        XCTAssertTrue(repaired.knownSpellIDs.contains("blur"))
+        XCTAssertTrue(repaired.knownSpellIDs.contains("mage_light"))
         XCTAssertFalse(repaired.knownSpellIDs.contains("mend_wounds"))
         XCTAssertEqual(repaired.preparedSpellIDs, ["ignite"])
         XCTAssertNil(repaired.selectedPreparedActionID)
@@ -108,6 +135,7 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertEqual(repaired.activeCooldowns, [RPGCooldown(id: "ignite", remainingTicks: 12)])
         XCTAssertTrue(repaired.activeUpkeeps.isEmpty)
         XCTAssertEqual(rpgSpentSkillPoints(repaired), rpgEarnedSkillPoints(level: repaired.level))
+        XCTAssertTrue(repaired.migrationNoticePending)
     }
 
     func testPlayerSaveLoadPersistsRPGStateAndKeepsOldPlayersVanilla() {
@@ -122,10 +150,8 @@ final class RPGCharacterStateTests: XCTestCase {
 
         let player = Player(world: world)
         let error = player.createRPGCharacter(RPGCreationDraft(
-            pathID: "warden",
-            attributes: .defaultCreation,
-            starterSkillID: "guard_stance"
-        ))
+            pathID: "warden", branchID: "warden_guardian",
+            startingSkillIDs: rpgDefaultStartingSkillIDs(pathID: "warden")))
         XCTAssertNil(error)
         player.health = player.maxHealth
         let saved = player.save()
@@ -147,11 +173,8 @@ final class RPGCharacterStateTests: XCTestCase {
         let world = World(dim: .overworld, seed: 4321)
         let player = Player(world: world)
         XCTAssertNil(player.createRPGCharacter(RPGCreationDraft(
-            pathID: "arcanist",
-            attributes: .defaultCreation,
-            starterSkillID: "spell_formula",
-            starterSpellIDs: ["ignite"]
-        )))
+            pathID: "arcanist", branchID: "arcanist_elementalist",
+            startingSkillIDs: rpgDefaultStartingSkillIDs(pathID: "arcanist"))))
 
         let loaded = Player(world: world)
         var legacy = player.save()
@@ -172,8 +195,8 @@ final class RPGCharacterStateTests: XCTestCase {
         let world = World(dim: .overworld, seed: 4_322)
         let source = Player(world: world)
         source.rpg = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "arcanist", attributes: .defaultCreation,
-            starterSkillID: "spell_formula", starterSpellIDs: ["ignite"])).get()
+            pathID: "arcanist", branchID: "arcanist_elementalist",
+            startingSkillIDs: rpgDefaultStartingSkillIDs(pathID: "arcanist"))).get()
         var legacy = source.save()
         var rpg = try XCTUnwrap(legacy["rpg"] as? [String: Any])
         rpg["actionQuickSlots"] = ["spell:ignite"]
@@ -216,6 +239,7 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertNil(repaired.selectedPreparedActionID)
         XCTAssertEqual(repaired.kitGrantVersion, 0)
         XCTAssertNil(repaired.kitGrantID)
+        XCTAssertTrue(repaired.migrationNoticePending)
     }
 
     private func tryFailure(_ result: Result<RPGCharacterState, RPGCreationError>) -> RPGCreationError? {

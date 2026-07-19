@@ -345,6 +345,13 @@ public final class GameCore {
     }
     public private(set) var rpgLocalPreferenceFailureCount: UInt64 = 0
     private var rpgLocalPreferenceStatusCounterExhausted = false
+    /// One-time notice surfaced immediately after a legacy (pre-v3) save is repaired at world
+    /// entry: attributes are retired. Cleared (but left in place for the current session's
+    /// screen model) once surfaced; `player.rpg.migrationNoticePending` is what actually gates
+    /// re-arming across saves.
+    public private(set) var rpgMigrationNoticeStatus: RPGStatusPresentation?
+    private var rpgMigrationNoticeCounter: UInt64 = 0
+    private var rpgMigrationNoticeCounterExhausted = false
     public var rpgLocalPreferenceRevision: UInt64? {
         rpgLocalPreferenceStorageSnapshot?.revision
     }
@@ -753,6 +760,7 @@ public final class GameCore {
             localPreferenceWritable: rpgLocalPreferenceWritable,
             worldEntryGeneration: rpgWorldEntryGeneration,
             localPreferenceStatus: rpgLocalPreferenceStatus,
+            migrationNotice: rpgMigrationNoticeStatus,
             authority: rpgAuthorityPresentation,
             rulesGeneration: rpgRulesGenerationExhausted ? 0 : rpgRulesGeneration,
             inventoryRevision: rpgPassiveRevision(fromDigest: inventoryDigest),
@@ -847,7 +855,6 @@ public final class GameCore {
         switch command {
         case .create(let draft): message = requestRPGCreateCharacter(draft)
         case .rankUp(let id): message = requestRPGLearnSkill(id)
-        case .spendAttribute(let attribute): message = requestRPGSpendAttributePoint(attribute)
         case .prepareSkill(let id):
             message = player?.rpg.preparedSkillIDs.contains(id) == false
                 ? requestRPGTogglePreparedSkill(id) : nil
@@ -1938,6 +1945,11 @@ public final class GameCore {
             hookWorld(w)
             worlds[d] = w
         }
+        // Weather ticks only in the overworld; a rank-5 Weather Eye senses that surface weather from
+        // the Nether/End, so point the non-overworld worlds at the authoritative overworld world.
+        for (d, w) in worlds where d != .overworld {
+            w.overworldWeatherSource = worlds[.overworld]
+        }
         savedChunkKeys = db.getChunkKeys(rec.id)
         dim = Dim(rawValue: (playerData?["dim"] as? NSNumber)?.intValue ?? 0) ?? .overworld
         let w = world
@@ -1956,6 +1968,27 @@ public final class GameCore {
             // starter nothing — vanilla survival starts empty-handed
         }
         w.addEntity(player)
+
+        // One-time RPG attribute-retirement notice: repairRPGCharacterState (via player.load)
+        // already normalized migrationNoticePending for this session's repaired state. Surfacing
+        // clears the flag; a crash before the next save simply repeats the notice next entry.
+        rpgMigrationNoticeStatus = nil
+        if player.rpg.created, player.rpg.migrationNoticePending {
+            let text = "Your character was updated: attributes are retired. Health and fatigue " +
+                "now grow with your level. Unspent skill points are ready on the Skills tab."
+            let next = rpgMigrationNoticeCounter.addingReportingOverflow(1)
+            if !rpgMigrationNoticeCounterExhausted, !next.overflow, next.partialValue > 0 {
+                rpgMigrationNoticeCounter = next.partialValue
+                rpgMigrationNoticeStatus = RPGStatusPresentation(
+                    identity: .local(counter: next.partialValue, operationTag: .migrationNotice),
+                    operation: .migrationNotice, target: .character, kind: .success,
+                    rawDetail: text, persistence: .localUntilReplaced, acknowledgement: .never)
+            } else {
+                rpgMigrationNoticeCounterExhausted = true
+            }
+            host?.showActionBar(text, 80)
+            player.rpg.migrationNoticePending = false
+        }
 
         // spawn area must exist before the first tick — saved copies are read so
         // edits near spawn aren't shadowed by fresh generation
@@ -2149,6 +2182,13 @@ public final class GameCore {
               let summary = lanClientWorldSummary,
               let player
         else { return }
+        // Security amendment S2 (forward guard): a v4+ rpg payload from a newer host would make
+        // `player.save()` -> repairRPGCharacterState fail closed to `.uncreated()`. Skip this
+        // write entirely so the prior resume row (the last snapshot this build understood)
+        // survives; this build cannot be retro-patched to understand a payload from a future
+        // version, so simply preserving the last-known-good cache is the safe behavior. A future
+        // v4-aware build resumes correctly from the untouched cache once it decodes this session.
+        guard !player.rpgDecodedVersionExceedsCurrent else { return }
         db.putLANClientResume(key, [
             "worldID": summary.worldID,
             "worldName": summary.worldName,

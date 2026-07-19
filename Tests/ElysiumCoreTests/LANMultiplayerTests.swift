@@ -292,6 +292,91 @@ final class LANMultiplayerTests: XCTestCase {
         XCTAssertEqual(intent.actionSequence, 0)
     }
 
+    /// LAN Condition 1: `LANRPGIntentAction` is a frozen wire enum -- cases are never added,
+    /// removed, or renumbered, so an old peer's serialized action byte still decodes to the same
+    /// case on a new build.
+    func testLANRPGIntentActionIsFrozenWithExactRawValues() {
+        let frozen: [(LANRPGIntentAction, String)] = [
+            (.createCharacter, "createCharacter"), (.learnSkill, "learnSkill"),
+            (.prepareSkill, "prepareSkill"), (.unprepareSkill, "unprepareSkill"),
+            (.spendAttribute, "spendAttribute"), (.prepareSpell, "prepareSpell"),
+            (.unprepareSpell, "unprepareSpell"), (.selectSkill, "selectSkill"),
+            (.selectSpell, "selectSpell"), (.useSkill, "useSkill"), (.castSpell, "castSpell"),
+        ]
+        for (action, raw) in frozen {
+            XCTAssertEqual(action.rawValue, raw)
+            XCTAssertEqual(LANRPGIntentAction(rawValue: raw), action)
+        }
+        // The gameplay handler now unconditionally rejects .spendAttribute (the attribute system
+        // was retired in state v3), but the wire case itself must never be removed.
+        XCTAssertNotNil(LANRPGIntentAction(rawValue: "spendAttribute"))
+    }
+
+    /// Old-shape `RPGCreationDraft` (no `branchID`, no `startingSkillIDs` -- the pre-refactor
+    /// single-starter shape, with the "attributes" object present) is still fully accepted:
+    /// legacy synthesis recovers the sub-class from `starterSkillID` and `rpgCreateCharacter`
+    /// produces a valid character, exactly as an old client's draft would against this new host.
+    func testOldShapeCreationDraftJSONWithAttributesIsStillAcceptedByTheNewHost() throws {
+        let legacyJSON = """
+        {"pathID":"warden","starterSkillID":"guard_stance",
+         "starterSpellIDs":[],
+         "attributes":{"strength":8,"dexterity":6,"intelligence":6,"endurance":8,"luck":6}}
+        """.data(using: .utf8)!
+
+        let draft = try JSONDecoder().decode(RPGCreationDraft.self, from: legacyJSON)
+        XCTAssertNil(draft.branchID, "the pre-refactor shape never carried a branchID")
+        XCTAssertTrue(draft.startingSkillIDs.isEmpty)
+        XCTAssertEqual(draft.starterSkillID, "guard_stance")
+
+        guard case .success(let created) = rpgCreateCharacter(draft) else {
+            return XCTFail("an old-shape draft must still create a valid character")
+        }
+        XCTAssertEqual(created.pathID, "warden")
+        XCTAssertEqual(created.starterSkillID, "guard_stance")
+        XCTAssertEqual(created.specializationBranchID, "warden_guardian")
+        XCTAssertEqual(created.startingSkillIDs.count, RPG_STARTING_SKILL_COUNT)
+        XCTAssertTrue(created.startingSkillIDs.contains("guard_stance"))
+    }
+
+    /// v3 `RPGCharacterState` key-subset tolerance: an old (pre-refactor) client's Codable shape
+    /// -- which has no `startingSkillIDs` or `migrationNoticePending` keys at all -- still decodes
+    /// a v3-encoded state cleanly, silently ignoring the two new keys, and recovers every field it
+    /// still understands (a keyed-container decode never errors on an unrecognized key).
+    func testV3StateDecodesThroughAnOldShapeStructSimulationIgnoringNewKeys() throws {
+        struct OldShapeStateProbe: Decodable {
+            var version: Int
+            var created: Bool
+            var pathID: String
+            var starterSkillID: String
+            var specializationBranchID: String
+            var xp: Int
+            var level: Int
+            var skillRanks: [String: Int]?
+            var fatigue: Double?
+            var kitGrantID: String?
+            // Deliberately no startingSkillIDs / migrationNoticePending properties: this mirrors
+            // the pre-refactor (v2) client's Codable shape, which predates both fields.
+        }
+
+        guard case .success(var state) = rpgCreateCharacter(RPGCreationDraft(
+            pathID: "mender", branchID: "mender_physic",
+            startingSkillIDs: rpgBranchDefinition("mender_physic")!.skillIDs)) else {
+            return XCTFail("failed to create the mender fixture")
+        }
+        state.migrationNoticePending = true
+        let data = try JSONEncoder().encode(state)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertNotNil(object["startingSkillIDs"], "sanity: the v3 payload really carries the new key")
+        XCTAssertNotNil(object["migrationNoticePending"], "sanity: and the one-shot notice flag")
+
+        let probe = try JSONDecoder().decode(OldShapeStateProbe.self, from: data)
+        XCTAssertEqual(probe.version, RPG_STATE_CURRENT_VERSION)
+        XCTAssertEqual(probe.pathID, "mender")
+        XCTAssertEqual(probe.specializationBranchID, "mender_physic")
+        XCTAssertEqual(probe.starterSkillID, state.starterSkillID)
+        XCTAssertEqual(probe.kitGrantID, state.kitGrantID)
+    }
+
     func testWorldSummaryDecodesLegacyPayloadWithRPGClassesEnabled() throws {
         let data = """
         {"worldID":"world-1","worldName":"LAN World","seed":7,"gameMode":0,"difficulty":2,"dimension":0,"playerCount":1}

@@ -44,7 +44,7 @@ requirements and installation, start with the [Elysium project overview](README.
 7. Set **Dungeons** to **None**, **Normal**, **More**, **Plentiful**, or **Many**. **None** disables new
    dungeon placement; each later setting increases the number of placement attempts during generation.
 8. Leave **Character Classes: On** if you want the optional RPG character system in this world. Turn it
-   off for the base survival experience without class creation or class abilities.
+   off for the base survival experience without character creation or character abilities.
 9. Choose **Create World**. **Generating world...**, **Loading world…**, and **Building terrain** mean
    Elysium is working. Wait for the world to open; do not repeatedly submit creation.
 
@@ -166,7 +166,7 @@ live map or renaming a saved world.
 ## Understand the HUD and maps
 
 The HUD keeps the crosshair, hotbar, health, hunger, armor, experience, status information, and compact
-live map visible during play. It also shows air while submerged, class quick slots when available, and
+live map visible during play. It also shows air while submerged, RPG quick slots when available, and
 the health of a living mount while you ride it. Your inventory exposes the equipped armor and offhand
 slots. Use `F1` when you want an unobstructed view and `F3` when you need the debug overlay.
 
@@ -248,47 +248,70 @@ between old and newly generated terrain can therefore remain visible.
 
 Character classes add a second, optional progression layer to a world. They are available only when
 **Character Classes: On** was selected during world creation. Ordinary experience and **Advancements**
-continue to track the base survival journey; class levels, points, skills, prepared actions, fatigue, and
-cooldowns belong to the RPG layer.
+continue to track the base survival journey; character levels, skill points, skills, prepared actions,
+fatigue, and cooldowns belong to the RPG layer. There are no attributes in this system — a character's
+health and fatigue grow automatically with level, at a fixed rate set by its path.
 
-### Choose a class and a path
+### Choose a path and a sub-class
 
-- **Warden** focuses on armor, shield timing, threat, and protection. Branches: Guardian, Vanguard, and
-  Bulwark. Progress through melee victories and protecting or mitigating damage.
-- **Ranger** focuses on bows, scouting, terrain movement, and survival. Branches: Marksman, Scout, and
-  Survivalist. Progress through ranged victories and field discoveries.
-- **Delver** focuses on mining, traps, underground travel, and treasure. Branches: Miner, Trapper, and
-  Treasure-Seeker. Progress through deep exploration, dungeons, and excavation.
-- **Arcanist** focuses on spellcasting, illusions, wards, and rituals. Branches: Elementalist,
-  Illusionist, and Ritualist. Progress through spell practice and spell victories.
-- **Mender** focuses on healing, food, antidotes, and rescue. Branches: Physic, Harvest, and Sanctuary.
-  Progress through healing, cleansing, rescues, and provision crafting.
-- **Tinker** focuses on redstone, automation, gear, and explosives. Branches: Redstone, Artificer, and
-  Sapper. Progress through new recipes, mechanisms, and engineering crafts.
+- **Warden** focuses on armor, shield timing, threat, and protection. Sub-classes: Guardian, Vanguard, and
+  Bulwark. Health 26 (+2 per level), Fatigue 10 (+1 per level). Progress through melee victories and
+  protecting or mitigating damage.
+- **Ranger** focuses on bows, scouting, terrain movement, and survival. Sub-classes: Marksman, Scout, and
+  Survivalist. Health 20 (+1 per level), Fatigue 14 (+2 per level). Progress through ranged victories and
+  field discoveries.
+- **Delver** focuses on mining, traps, underground travel, and treasure. Sub-classes: Miner, Trapper, and
+  Treasure-Seeker. Health 24 (+2 per level), Fatigue 12 (+1 per level). Progress through deep exploration,
+  dungeons, and excavation.
+- **Arcanist** focuses on spellcasting, illusions, wards, and rituals. Sub-classes: Elementalist,
+  Illusionist, and Ritualist. Health 16 (+1 per level), Fatigue 20 (+3 per level). Progress through spell
+  practice and spell victories.
+- **Mender** focuses on healing, food, antidotes, and rescue. Sub-classes: Physic, Harvest, and Sanctuary.
+  Health 18 (+1 per level), Fatigue 18 (+2 per level). Progress through healing, cleansing, rescues, and
+  provision crafting.
+- **Tinker** focuses on redstone, automation, gear, and explosives. Sub-classes: Redstone, Artificer, and
+  Sapper. Health 20 (+1 per level), Fatigue 16 (+2 per level). Progress through new recipes, mechanisms,
+  and engineering crafts.
 
-Each class provides a clear route through Foundation, Technique, and Mastery ranks. Skills in your chosen
-specialization branch cost less than crossing into another branch, so a focused build reaches its defining
-abilities sooner. You gain a skill point for every class level after level 1. Attribute points arrive at
-levels 4, 7, 10, 13, 16, and 19.
+Each sub-class defines a three-skill tree, and every skill has 5 ranks. Skills in your chosen sub-class
+cost 1 skill point per rank; skills that belong to one of the path's other two sub-classes cost 2 skill
+points per rank. Each skill also has its own level requirement per rank, so a focused build reaches its
+defining abilities sooner. You gain a skill point for every level after level 1, plus a bonus skill point
+at levels 4, 7, 10, 13, 16, and 19.
 
 ### Create the character
 
-1. Open the Character interface and use the left and right class controls to browse all six choices.
-2. Adjust the visible class's attributes while watching **Points remaining**. Each class keeps its own
-   draft while you browse, so trying another class does not erase the first draft.
-3. Use **Reset to Preset** to restore the currently visible class's starting allocation.
-4. **Continue** stays disabled until the point budget is exact and the required Foundation choice is
-   valid. Read the visible reason, correct the current step, and continue to **Review**.
-5. On **Review**, inspect the class, attributes, and Foundation choice. **Create Character** can remain
-   disabled when the draft is invalid, the current player is not allowed to make the change, or required
-   inventory capacity is unavailable. Follow the visible explanation, return to the affected step, and
-   retry.
+Character creation is four steps — **Path → Sub-class → Starting Skills → Review** — and every card is a
+single click: clicking a card both selects it and advances to the next step (or, on Starting Skills,
+toggles it).
+
+1. **Path** — click one of the six path cards. Each card shows the path's focus and its health/fatigue
+   growth.
+2. **Sub-class** — click one of the chosen path's three sub-class cards. Each card lists its three skills
+   and any spell its signature skill grants.
+3. **Starting Skills** — click to choose exactly 3 starting skills, each granted at rank 1, from a pool of
+   5: your sub-class's 3 skills plus the signature (first) skill of each of the path's other two
+   sub-classes. The pool's three signature skills are preselected by default — choosing them reproduces
+   the path's classic starting skills, including its starter spells, if any. The screen tracks your choice
+   with "Starting skills: *n* of 3 chosen"; a 4th click is blocked once you have 3 until you unchoose one
+   first.
+4. **Review** — check the path, sub-class, chosen starting skills, any spells granted, the health/fatigue
+   growth line, and the starter kit. **Reject** discards the draft and closes without confirmation,
+   **Back** returns to Starting Skills with your choices intact, and **Accept** creates the character and
+   starter kit together. **Accept** can remain disabled when the current player is not allowed to make the
+   change or required inventory capacity is unavailable; follow the visible explanation and retry.
+
+Every step also has a keyboard/controller path: Tab or the arrow keys move focus, Enter/Space/A activates
+the focused card or button, and Escape/B steps back (or closes, on the first step).
 
 After creation, the interface has five tabs:
 
-- **Character** summarizes the character, attributes, level, points, fatigue, and current selections.
-- **Skills** shows purchased and available skill ranks. Passive skills are always on once learned; they
-  never consume a prepared slot.
+- **Character** summarizes the character's path, sub-class, level, and current selections, along with
+  Health and Fatigue shown as base plus per-level growth (for example, "Health 38 (26 + 2 per level)").
+- **Skills** shows a **Skill Points** total and one card per skill, grouped by sub-class (your chosen
+  sub-class first). Each skill's progress is five pips — filled for earned ranks, hollow for the next
+  purchasable rank or a rank you don't yet qualify for. A skill at rank 5 is labeled **Mastered**. Passive
+  skills are always on once learned; they never consume a prepared slot.
 - **Actives** prepares learned active skills. Up to four active skills can be prepared, then assigned to
   the RPG quick slots.
 - **Spells** prepares learned spells. Up to six spells can be prepared, then assigned to quick slots.
@@ -297,6 +320,13 @@ After creation, the interface has five tabs:
 Cycle or activate prepared active skills and spells with the configurable RPG bindings. Fatigue and
 cooldowns can temporarily prevent an otherwise prepared action; the interface shows the current reason.
 Some character operations remain unavailable to LAN clients because the host owns the world simulation.
+
+If you open a character created before this system was simplified, Elysium migrates it automatically the
+first time you load it: the character keeps its path, sub-class, level, and skill ranks; health and
+fatigue are recalculated from the level-growth table above; any points freed by the retirement of
+attributes become available to spend on the Skills tab; and you see a one-time notice — "Your character
+was updated: attributes are retired. Health and fatigue now grow with your level. Unspent skill points are
+ready on the Skills tab."
 
 ## Trade with villagers
 
@@ -454,7 +484,7 @@ can fail, produce no usable action, or be rejected without changing the world.
 | Recipe list says **No craftable items** | Gather the missing resources or use the correct crafting grid or workstation. |
 | Recipe list says **No matching recipes** | Shorten or clear the active search text. |
 | **Trade** is disabled | Read its visible reason; check payment, stock, level, workstation, distance, line of sight, inventory room, and whether you are a LAN client. |
-| Character controls are missing or disabled | Confirm the world was created with **Character Classes: On**. Read the visible creation/action reason; fix the point budget, Foundation, preparation, fatigue, cooldown, authority, or inventory issue it identifies. |
+| Character controls are missing or disabled | Confirm the world was created with **Character Classes: On**. Read the visible creation/action reason; fix the starting-skill selection, preparation, fatigue, cooldown, authority, or inventory issue it identifies. |
 | No LAN world appears | Confirm both Macs are on the same trusted LAN, choose **Browse LAN**, or use the host's direct address, port, and code. Do not weaken security or expose the port publicly. |
 | Ollama is unavailable | Confirm the independent local service is running, choose **Refresh Models**, select a local model, and retry. Core play does not require AI. |
 | Saved-world selection changed or reload is required | Review the current checked list. Use **Try Again** only after review; use the read-only reload when **Saved Worlds Need Reloading** appears. |

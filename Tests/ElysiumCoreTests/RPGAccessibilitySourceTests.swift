@@ -42,8 +42,10 @@ final class RPGAccessibilitySourceTests: XCTestCase {
 
     func testGameViewGroupRolesCoordinatesAndNonactionablePressContract() throws {
         let bridge = try source("Sources/Elysium/RPGAccessibilityM.swift")
+        // The retired .rankCell semantic role was the only source of the AppKit .cell role; skill
+        // ranks now ride on .row descriptors (with rankPips), so .cell is no longer produced.
         for role in [".button", ".staticText", ".radioButton", ".tabGroup", ".group", ".row",
-                     ".scrollArea", ".cell"] {
+                     ".scrollArea"] {
             XCTAssertTrue(bridge.contains("return \(role)"), "missing role \(role)")
         }
         XCTAssertTrue(bridge.contains("nestChildren(parentID: \"accessibility:tab-group\""))
@@ -59,6 +61,12 @@ final class RPGAccessibilitySourceTests: XCTestCase {
         XCTAssertTrue(main.contains("setAccessibilityChildren(textEntryAccessibilityBridge.children +"))
         XCTAssertFalse(main.contains("override func accessibilityChildren()"))
         XCTAssertTrue(main.contains("Elysium menus and actions"))
+        // D4: the bridge posts the creation step title as an accessibility announcement, alongside
+        // the authority-phase announcement, on each committed tree.
+        XCTAssertTrue(bridge.contains("rpgAccessibilityCreationStepAnnouncement("),
+                      "RPGAccessibilityM must post the creation-step announcement")
+        XCTAssertEqual(bridge.components(separatedBy: ".announcementRequested").count - 1, 2,
+                       "both authority and creation-step announcements are posted")
     }
 
     func testCachePublishesOnlyAtExplicitCommitAndFailureInvalidates() throws {
