@@ -5,6 +5,10 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- The pinned bundled graphics layer is upgraded from Faithful 32x to hash-pinned Faithful 64x
+  Release 12. Video options now has a Resource Packs child screen for the separately bundled Ore
+  Borders 64x and Static Lanterns add-ons; both are independently selectable and off by default.
+  Packaging, runtime self-healing, attribution, and release checks cover all three exact archives.
 - Template placement (`Command-V`) wireframes can now be steered with the arrow
   keys before clicking to place: Left/Right rotate the wireframe (same as the
   scroll wheel), Up pushes it away from you, and Down pulls it closer, with the

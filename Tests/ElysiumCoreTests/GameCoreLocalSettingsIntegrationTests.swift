@@ -260,6 +260,154 @@ final class GameCoreLocalSettingsIntegrationTests: XCTestCase {
         }
     }
 
+    func testCommitAwareSettingsPublicationReconcilesPostRenameCandidate() throws {
+        let store = makeStore("commit-aware-candidate")
+        let game = try makeGame("commit-aware-candidate", store: store)
+        store.faultInjector = { stage in
+            stage == .directorySync ? InjectedLocalSettingsFailure(stage: stage) : nil
+        }
+        var candidate = game.settings
+        candidate.bundledResourcePackAddOns = ["static-lanterns"]
+        let priorRevision = game.settingsRevision
+        let disposition = onMain {
+            game.persistAndPublishSettingsCandidateCommitAware(
+                candidate, expectedLiveRevision: priorRevision)
+        }
+        guard case .committedWithDurabilityWarning(priorRevision + 1) = disposition else {
+            return XCTFail("complete candidate reread must publish with a durability warning")
+        }
+        XCTAssertEqual(game.settings.bundledResourcePackAddOns, ["static-lanterns"])
+        XCTAssertFalse(game.settingsRecoveryRequired)
+    }
+
+    func testCommitAwareSettingsPublicationRejectsPreRenameFailureWithoutMutation() throws {
+        let store = makeStore("commit-aware-rejected")
+        let game = try makeGame("commit-aware-rejected", store: store)
+        store.faultInjector = { stage in
+            stage == .fileSync ? InjectedLocalSettingsFailure(stage: stage) : nil
+        }
+        let before = try snapshot(game)
+        var candidate = game.settings
+        candidate.bundledResourcePackAddOns = ["ore-borders-64x"]
+        guard case .retainedPrior(.writeFailed(.settings, .fileSync, _)) = onMain({
+            game.persistAndPublishSettingsCandidateCommitAware(
+                candidate, expectedLiveRevision: game.settingsRevision)
+        }) else { return XCTFail("pre-rename failure must retain the prior document") }
+        XCTAssertEqual(try snapshot(game), before)
+        XCTAssertFalse(game.settingsRecoveryRequired)
+    }
+
+    func testCommitAwareSettingsPublicationReconcilesExactPriorAfterRenameUncertainty() throws {
+        let store = makeStore("commit-aware-prior")
+        let game = try makeGame("commit-aware-prior", store: store)
+        let prior = game.settings
+        let before = try snapshot(game)
+        store.faultInjector = { stage in
+            stage == .directorySync ? InjectedLocalSettingsFailure(stage: stage) : nil
+        }
+        let priorDocument = try store.canonicalSettingsDocument(prior).get()
+        store.commitAwareCanonicalRereadOverride = { .success(priorDocument) }
+        var candidate = prior
+        candidate.bundledResourcePackAddOns = ["ore-borders-64x"]
+        guard case .retainedPrior(.writeFailed(.settings, .directorySync, _)) = onMain({
+            game.persistAndPublishSettingsCandidateCommitAware(
+                candidate, expectedLiveRevision: game.settingsRevision,
+                recoveryRequestedResourcePackID: "ore-borders-64x")
+        }) else { return XCTFail("exact-prior reread must retain the live document") }
+        XCTAssertEqual(try snapshot(game), before)
+        XCTAssertFalse(game.settingsRecoveryRequired)
+    }
+
+    func testCommitAwareThirdStateEntersProcessRecoveryAndAnnouncesOnce() throws {
+        let store = makeStore("commit-aware-third")
+        let game = try makeGame("commit-aware-third", store: store)
+        let before = try snapshot(game)
+        store.faultInjector = { stage in
+            stage == .directorySync ? InjectedLocalSettingsFailure(stage: stage) : nil
+        }
+        var third = game.settings
+        third.fov = 109
+        let thirdDocument = try store.canonicalSettingsDocument(third).get()
+        store.commitAwareCanonicalRereadOverride = { .success(thirdDocument) }
+        var candidate = game.settings
+        candidate.bundledResourcePackAddOns = ["static-lanterns"]
+        guard case .recoveryRequired(.some(.invalidJSON(.settings, _))) = onMain({
+            game.persistAndPublishSettingsCandidateCommitAware(
+                candidate, expectedLiveRevision: game.settingsRevision,
+                recoveryRequestedResourcePackID: "static-lanterns")
+        }) else { return XCTFail("third document must enter recovery-required") }
+        XCTAssertEqual(try snapshot(game), before)
+        XCTAssertTrue(game.settingsRecoveryRequired)
+        XCTAssertEqual(game.settingsRecoveryRequestedResourcePackID, "static-lanterns")
+        XCTAssertEqual(game.settingsRecoveryNoticeSerial, 1)
+        XCTAssertEqual(game.consumeSettingsRecoveryAnnouncement(),
+                       "Could not confirm the saved resource pack choice; restart Elysium before changing it again.")
+        XCTAssertNil(game.consumeSettingsRecoveryAnnouncement())
+        game.acknowledgeSettingsRecoveryNotice()
+        XCTAssertTrue(game.settingsRecoveryRequired)
+        XCTAssertTrue(game.settingsRecoveryTransientAcknowledged)
+        guard case .failure(.invalidSettings(let reason)) = onMain({
+            game.persistAndPublishKeybindCandidate(
+                game.keybinds, expectedLiveRevision: game.keybindRevision)
+        }) else { return XCTFail("recovery must freeze keybind persistence") }
+        XCTAssertTrue(reason.contains("restart Elysium"))
+    }
+
+    func testCommitAwareUnreadableRereadEntersSameRecoveryState() throws {
+        let store = makeStore("commit-aware-unreadable")
+        let game = try makeGame("commit-aware-unreadable", store: store)
+        store.faultInjector = { stage in
+            stage == .directorySync ? InjectedLocalSettingsFailure(stage: stage) : nil
+        }
+        let rereadError = LocalSettingsStoreError.invalidJSON(.settings, "injected unreadable")
+        store.commitAwareCanonicalRereadOverride = { .failure(rereadError) }
+        var candidate = game.settings
+        candidate.bundledResourcePackAddOns = ["ore-borders-64x"]
+        guard case .recoveryRequired(.some(rereadError)) = onMain({
+            game.persistAndPublishSettingsCandidateCommitAware(
+                candidate, expectedLiveRevision: game.settingsRevision,
+                recoveryRequestedResourcePackID: "ore-borders-64x")
+        }) else { return XCTFail("unreadable canonical reread must enter recovery") }
+        XCTAssertTrue(game.settingsRecoveryRequired)
+        XCTAssertEqual(game.settingsRecoveryRequestedResourcePackID, "ore-borders-64x")
+    }
+
+    func testCommitAwareSameDecodedValueWithNoncanonicalBytesRequiresRecovery() throws {
+        for (label, transform) in [
+            ("reformatted", { (data: Data) -> Data in
+                var bytes = Data(" \n".utf8); bytes.append(data); return bytes
+            }),
+            ("unknown-field", { (data: Data) -> Data in
+                guard var text = String(data: data, encoding: .utf8), text.last == "}" else {
+                    return Data()
+                }
+                text.removeLast()
+                text += ",\"unknownResourcePackState\":true}"
+                return Data(text.utf8)
+            })
+        ] {
+            let store = makeStore("commit-aware-\(label)")
+            let game = try makeGame("commit-aware-\(label)", store: store)
+            let priorAddOns = game.settings.bundledResourcePackAddOns
+            store.faultInjector = { stage in
+                stage == .directorySync ? InjectedLocalSettingsFailure(stage: stage) : nil
+            }
+            let canonical = try store.canonicalSettingsDocument(game.settings).get()
+            let thirdDocument = transform(canonical)
+            XCTAssertFalse(thirdDocument.isEmpty)
+            store.commitAwareCanonicalRereadOverride = { .success(thirdDocument) }
+            var candidate = game.settings
+            candidate.bundledResourcePackAddOns = ["static-lanterns"]
+            guard case .recoveryRequired(.some(.invalidJSON(.settings, _))) = onMain({
+                game.persistAndPublishSettingsCandidateCommitAware(
+                    candidate, expectedLiveRevision: game.settingsRevision,
+                    recoveryRequestedResourcePackID: "static-lanterns")
+            }) else { return XCTFail("\(label) bytes must not equal an exact canonical document") }
+            XCTAssertTrue(game.settingsRecoveryRequired)
+            XCTAssertEqual(game.settings.bundledResourcePackAddOns, priorAddOns)
+        }
+    }
+
     func testDelayedCapturedSettingsCandidateCannotOverwriteInterveningPublication() throws {
         let store = makeStore("delayed-capture")
         let game = try makeGame("delayed-capture", store: store)

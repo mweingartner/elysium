@@ -607,7 +607,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         // applyResourcePacks, so this always runs, even with no user packs.
         // older settings that listed the default explicitly migrate cleanly
         // (withDefaultPack dedupes it to the base slot).
-        applyResourcePacks(game.settings.resourcePacks ?? [], game: game, renderer: renderer, ui: ui)
+        applyResourcePacks(
+            game.settings.resourcePacks ?? [],
+            bundledAddOns: sanitizedBundledResourcePackAddOnIDs(game.settings.bundledResourcePackAddOns),
+            game: game, renderer: renderer, ui: ui)
 
         ui.titlePhoto = renderer.titleBgTex != nil
         ui.titleLogo = renderer.titleBgTex != nil || renderer.titleLogoTex != nil
@@ -979,6 +982,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
 
         enc.endEncoding()
         cmd.present(drawable)
+        let presentedFrameCallback = elysiumMainActorSync {
+            ui.takeAfterNextPresentedFrameCallback()
+        }
+        if let presentedFrameCallback {
+            cmd.addCompletedHandler { _ in
+                DispatchQueue.main.async(execute: presentedFrameCallback)
+            }
+        }
         cmd.commit()
     }
 }

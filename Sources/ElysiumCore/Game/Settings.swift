@@ -5,7 +5,7 @@
 
 import Foundation
 
-public struct Settings: Codable {
+public struct Settings: Codable, Equatable {
     // video
     public var renderDistance = 8
     public var fov = 70
@@ -40,6 +40,8 @@ public struct Settings: Codable {
     /// enabled resource pack file names, index 0 = highest priority.
     /// optional so settings.json files written before this field still decode
     public var resourcePacks: [String]? = nil
+    /// Explicit consent for reviewed bundled Faithful 64x add-ons. Nil/empty = none.
+    public var bundledResourcePackAddOns: [String]? = nil
     /// nil = off, "ultra" = built-in ultra preset, anything else = shader pack file name
     public var shader: String? = nil
     /// Local Ollama model name used by the in-game /ai command. Empty = unset.
@@ -100,6 +102,8 @@ func sanitizedSettings(_ input: Settings) -> Settings {
             !$0.isEmpty && $0.count <= 255 && !$0.contains("/") && !$0.contains("\\")
         }.prefix(64))
     }
+    s.bundledResourcePackAddOns = sanitizedBundledResourcePackAddOnIDs(
+        s.bundledResourcePackAddOns).map(\.rawValue)
     s.aiOllamaModel = sanitizedOllamaModelName(s.aiOllamaModel)
     let tutorialVersion = s.rpgTutorialVersion ?? 0
     s.rpgTutorialVersion = (0...RPG_TUTORIAL_VERSION).contains(tutorialVersion)

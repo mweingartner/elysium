@@ -1,0 +1,38 @@
+Elysium bundled Faithful 64x assets
+===================================
+
+Faithful 64x — December 2025 Release (Release 12)
+Official page: https://faithfulpack.net/faithful64x
+Release: https://modrinth.com/resourcepack/faithful-64x/version/Release-12
+Archive: Faithful 64x - December 2025 Release.zip
+SHA-256: a136d9101a4748558587980dace3cd7447b758fb72c4684d15fb805d0a812dac
+Copyright: Faithful Resource Pack and contributors
+License: Faithful License v3, preserved in FAITHFUL-LICENSE.txt and LICENSE.txt inside the archive.
+
+Ore Borders 64x
+Official page: https://faithfulpack.net/addons/OreBorders64x
+Archive: Faithful 64x - Ore Borders 64x.zip
+SHA-256: 232b8a64d745dc08b958c3c4c07167bd3f38eebdc4cd682da9d1016b2ed190f8
+License: Faithful License v3, preserved inside the archive.
+Credits, preserved verbatim from the archive:
+
+Vanilla Tweaks Team
+    Original Ore Borders resource pack.
+
+Aerod
+    Ore Borders add-on.
+
+Hedreon
+    64x port.
+
+Scutoel
+    Textured border idea.
+
+Static Lanterns
+Official page: https://faithfulpack.net/addons/ClearerLanterns
+Archive: Faithful 64x - Static Lanterns.zip
+SHA-256: d0165130d505da8996354c21090a47fd6def87f4c2a96442f1a4282b1bf2cbc8
+License: Faithful License v3, preserved inside the archive.
+
+These are the only optional Faithful 64x add-ons bundled by Elysium. They are
+kept as separate archives and are disabled by default.

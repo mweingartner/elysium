@@ -491,6 +491,8 @@ can fail, produce no usable action, or be rejected without changing the world.
 | No LAN world appears | Confirm both Macs are on the same trusted LAN, choose **Browse LAN**, or use the host's direct address, port, and code. Do not weaken security or expose the port publicly. |
 | Ollama is unavailable | Confirm the independent local service is running, choose **Refresh Models**, select a local model, and retry. Core play does not require AI. |
 | Saved-world selection changed or reload is required | Review the current checked list. Use **Try Again** only after review; use the read-only reload when **Saved Worlds Need Reloading** appears. |
+| Resource Packs says settings recovery is required | Stop changing settings and restart Elysium. The saved choice is unknown; the current-session pack generation remains on the prior selection, and further persisted settings changes are blocked until restart. |
+| Resource Packs reports that disk durability was not confirmed | The selected pack generation was applied from exact reread settings bytes, but the directory-sync durability could not be confirmed. The recovery latch is not active; restart before relying on the choice surviving a system failure. |
 | Performance or effects are uncomfortable | Reduce render distance, particles, shaders, or frame-rate demand; enable the relevant **Access** options. |
 
 Current beta boundaries to keep in mind:
@@ -500,8 +502,9 @@ Current beta boundaries to keep in mind:
 - Controller support is limited to RPG and trading surfaces rather than complete game control.
 - Multiplayer is LAN-only, join codes do not make a hostile LAN safe, LAN clients cannot trade, and some
   character operations remain host-only.
-- Resource packs can be loaded by Elysium, but there is no discoverable in-game resource-pack management
-  screen in the current beta.
+- Faithful 64x is the pinned baseline. Open **Options... → Video → Resource Packs...** to enable or
+  disable Ore Borders 64x and Static Lanterns independently. Both optional add-ons start off; a named
+  validation/load error leaves the prior selection active rather than silently applying a partial stack.
 - Existing saved full chunks are not regenerated to receive newer terrain-placement guarantees.
 - Local AI is optional and depends on an independently running Ollama service.
 

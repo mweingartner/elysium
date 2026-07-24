@@ -144,6 +144,7 @@ done
 [ -n "$EXECUTABLE" ] && [ -n "$OUTPUT" ] && [ "$MANIFEST_STDOUT" = true ] || \
     die "usage: package-app.sh --executable PATH --output APP --manifest-stdout [--expected-hash SHA256]"
 [ -f "$EXECUTABLE" ] && [ ! -L "$EXECUTABLE" ] || die "release executable must be a regular non-symlink file"
+bash "$ROOT/scripts/verify-pack-assets.sh" >/dev/null || die "managed pack asset verification failed"
 EXECUTABLE="$(canonical_file "$EXECUTABLE")" || die "cannot resolve release executable"
 INPUT_HASH="$(sha256 "$EXECUTABLE")"
 [ -z "$EXPECTED_HASH" ] || [ "$INPUT_HASH" = "$EXPECTED_HASH" ] || die "release executable hash changed"
@@ -154,8 +155,17 @@ cp "$ROOT/packaging/Info.plist" "$OUTPUT/Contents/Info.plist"
 cp "$ROOT/packaging/AppIcon.icns" "$OUTPUT/Contents/Resources/"
 cp "$ROOT/packaging/logo.png" "$OUTPUT/Contents/Resources/"
 cp "$ROOT/packaging/title-bg.png" "$OUTPUT/Contents/Resources/"
-for asset in "$ROOT"/packaging/*.zip "$ROOT"/packaging/FAITHFUL-LICENSE.txt; do
-    [ ! -e "$asset" ] || cp "$asset" "$OUTPUT/Contents/Resources/"
+PACK_ASSETS=(
+    "Faithful 64x - December 2025 Release.zip"
+    "Faithful 64x - Ore Borders 64x.zip"
+    "Faithful 64x - Static Lanterns.zip"
+    "FAITHFUL-LICENSE.txt"
+    "FAITHFUL-ADDONS-CREDITS.txt"
+)
+for name in "${PACK_ASSETS[@]}"; do
+    asset="$ROOT/packaging/$name"
+    [ -f "$asset" ] && [ ! -L "$asset" ] || die "missing managed pack asset: $name"
+    cp "$asset" "$OUTPUT/Contents/Resources/$name"
 done
 cp "$EXECUTABLE" "$OUTPUT/Contents/MacOS/Elysium"
 STAGED="$OUTPUT/Contents/MacOS/Elysium"

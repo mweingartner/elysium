@@ -162,11 +162,19 @@ final class TextEntrySourceTests: XCTestCase {
         XCTAssertFalse(main.contains("override func accessibilityChildren()"))
     }
 
-    func testPackageTopologyHasNormalNonProductSupportTargetAndNoExecutableTestImport() throws {
+    func testPackageTopologyKeepsTextInputTestsIndependentFromExecutableImport() throws {
         let package = try source("Package.swift")
         XCTAssertTrue(package.contains("name: \"ElysiumTextInput\""))
         XCTAssertFalse(package.contains(".library(name: \"ElysiumTextInput\""))
-        XCTAssertFalse(package.contains("dependencies: [\"Elysium\"]"))
+        let textInputTests = try XCTUnwrap(package.range(of: "name: \"ElysiumTextInputTests\""))
+        let appSupportTests = try XCTUnwrap(package.range(
+            of: "name: \"ElysiumAppSupportTests\"", range: textInputTests.upperBound..<package.endIndex))
+        let textInputTestTarget = package[textInputTests.lowerBound..<appSupportTests.lowerBound]
+        XCTAssertTrue(textInputTestTarget.contains("dependencies: [\"ElysiumTextInput\"]"))
+        XCTAssertFalse(textInputTestTarget.contains("dependencies: [\"Elysium\"]"))
+        XCTAssertTrue(package.contains(
+            "name: \"ElysiumResourcePackTests\",\n            dependencies: [\"Elysium\"]"),
+            "resource-pack integration legitimately imports the executable target")
         let sources = try source("Sources/ElysiumTextInput/ElysiumTextInput.swift")
         XCTAssertFalse(sources.contains("XCTest"))
         XCTAssertFalse(sources.contains("@testable"))

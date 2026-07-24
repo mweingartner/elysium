@@ -59,6 +59,12 @@ public enum LocalSettingsStoreError: Error, Equatable, CustomStringConvertible {
     }
 }
 
+public enum LocalSettingsCommitAwareWrite {
+    case committed
+    case rejected(LocalSettingsStoreError)
+    case durabilityUncertain(Result<Settings, LocalSettingsStoreError>)
+}
+
 public struct LocalSettingsDiagnostic: Equatable {
     public let field: String
     public let reason: String
@@ -497,6 +503,7 @@ public final class LocalSettingsStore {
 #if DEBUG
     var faultInjector: FaultInjector?
     var encodeFaultInjector: ((LocalSettingsDocument) -> Error?)?
+    var commitAwareCanonicalRereadOverride: (() -> Result<Data, LocalSettingsStoreError>)?
     private let systemWriteCutBox: LocalSettingsSystemWriteCutBox
     var systemWriteCut: LocalSettingsSystemWriteCut? {
         get { systemWriteCutBox.value }
@@ -521,6 +528,7 @@ public final class LocalSettingsStore {
         systemWriteCutBox = writeCutBox
         faultInjector = nil
         encodeFaultInjector = nil
+        commitAwareCanonicalRereadOverride = nil
         io = SystemLocalSettingsFiles(currentSystemWriteCut: { writeCutBox.value })
 #else
         io = SystemLocalSettingsFiles()
@@ -534,6 +542,7 @@ public final class LocalSettingsStore {
         systemWriteCutBox = writeCutBox
         self.faultInjector = faultInjector
         encodeFaultInjector = nil
+        commitAwareCanonicalRereadOverride = nil
         io = SystemLocalSettingsFiles(currentSystemWriteCut: { writeCutBox.value })
     }
 #endif
@@ -572,6 +581,8 @@ public final class LocalSettingsStore {
                 decodeField("darknessPulse", from: object, into: &value.darknessPulse, diagnostics: &diagnostics)
                 decodeField("simpleMesh", from: object, into: &value.simpleMesh, diagnostics: &diagnostics)
                 decodeOptionalField("resourcePacks", from: object, into: &value.resourcePacks, diagnostics: &diagnostics)
+                decodeOptionalField("bundledResourcePackAddOns", from: object,
+                                    into: &value.bundledResourcePackAddOns, diagnostics: &diagnostics)
                 decodeOptionalField("shader", from: object, into: &value.shader, diagnostics: &diagnostics)
                 decodeField("aiOllamaModel", from: object, into: &value.aiOllamaModel, diagnostics: &diagnostics)
                 decodeOptionalField("rpgTutorialVersion", from: object, into: &value.rpgTutorialVersion, diagnostics: &diagnostics)
@@ -588,6 +599,76 @@ public final class LocalSettingsStore {
     public func persistSettings(_ candidate: Settings) -> Result<Void, LocalSettingsStoreError> {
         encodeAndPersist(sanitizedSettings(candidate), document: .settings,
                          name: "settings.json", cap: LOCAL_SETTINGS_MAX_BYTES)
+    }
+
+    /// The byte identity used at the post-rename uncertainty boundary. This is
+    /// deliberately the same sorted-key encoding written by `persistSettings`.
+    func canonicalSettingsDocument(_ candidate: Settings) -> Result<Data, LocalSettingsStoreError> {
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let data = try encoder.encode(sanitizedSettings(candidate))
+            guard data.count <= LOCAL_SETTINGS_MAX_BYTES else {
+                return .failure(.documentTooLarge(.settings, limit: LOCAL_SETTINGS_MAX_BYTES))
+            }
+            return .success(data)
+        } catch {
+            return .failure(.encodeFailed(.settings, boundedReason(error)))
+        }
+    }
+
+    private func readSettingsDocumentBytes() -> Result<Data, LocalSettingsStoreError> {
+        switch readDocument(.settings, name: "settings.json", cap: LOCAL_SETTINGS_MAX_BYTES) {
+        case .failure(let error):
+            return .failure(error)
+        case .success(nil):
+            return .failure(.readFailed(.settings, "document missing after rename"))
+        case .success(.some(let data)):
+            return .success(data)
+        }
+    }
+
+    /// Directory fsync happens after rename, so its failure cannot honestly be
+    /// reported as an unchanged document. Re-read the canonical bounded file.
+    public func persistSettingsCommitAware(_ candidate: Settings) -> LocalSettingsCommitAwareWrite {
+        let canonicalCandidate = sanitizedSettings(candidate)
+        let prior = loadSettings()
+        let priorDocument = prior.flatMap(canonicalSettingsDocument)
+        let candidateDocument = canonicalSettingsDocument(canonicalCandidate)
+        switch persistSettings(canonicalCandidate) {
+        case .success:
+            return .committed
+        case .failure(let error):
+            if case .writeFailed(.settings, .directorySync, _) = error {
+                let reread: Result<Data, LocalSettingsStoreError>
+#if DEBUG
+                if let override = commitAwareCanonicalRereadOverride {
+                    reread = override()
+                } else {
+                    reread = readSettingsDocumentBytes()
+                }
+#else
+                reread = readSettingsDocumentBytes()
+#endif
+                switch reread {
+                case .failure(let rereadError):
+                    return .durabilityUncertain(.failure(rereadError))
+                case .success(let observed):
+                    if case .success(let expectedCandidate) = candidateDocument,
+                       observed == expectedCandidate {
+                        return .durabilityUncertain(.success(canonicalCandidate))
+                    }
+                    if case .success(let expectedPrior) = priorDocument,
+                       case .success(let priorSettings) = prior,
+                       observed == expectedPrior {
+                        return .durabilityUncertain(.success(priorSettings))
+                    }
+                    return .durabilityUncertain(.failure(.invalidJSON(
+                        .settings, "canonical document identity mismatch after rename")))
+                }
+            }
+            return .rejected(error)
+        }
     }
 
     public func loadKeybinds() -> Result<[String: String], LocalSettingsStoreError> {

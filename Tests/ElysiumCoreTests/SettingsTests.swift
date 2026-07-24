@@ -15,6 +15,8 @@ final class SettingsTests: XCTestCase {
         s.darknessPulse = 9
         s.volumes = ["master": -2, "music": 4, "blocks": .nan]
         s.resourcePacks = ["", "../bad.zip", "ok.zip", String(repeating: "x", count: 300)]
+        s.bundledResourcePackAddOns = ["static-lanterns", "unknown", "ore-borders-64x",
+                                         "static-lanterns"]
         s.aiOllamaModel = " llama3.1:8b\nbad chars <> "
 
         let out = sanitizedSettings(s)
@@ -32,6 +34,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(out.volumes["music"], 1)
         XCTAssertEqual(out.volumes["blocks"], Settings().volumes["blocks"])
         XCTAssertEqual(out.resourcePacks, ["ok.zip"])
+        XCTAssertEqual(out.bundledResourcePackAddOns, ["ore-borders-64x", "static-lanterns"])
         XCTAssertEqual(out.aiOllamaModel, "llama3.1:8bbadchars")
     }
 

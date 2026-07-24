@@ -80,5 +80,11 @@ let package = Package(
             path: "Tests/ElysiumAppSupportTests",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .testTarget(
+            name: "ElysiumResourcePackTests",
+            dependencies: ["Elysium"],
+            path: "Tests/ElysiumResourcePackTests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )

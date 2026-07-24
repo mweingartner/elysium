@@ -76,6 +76,112 @@ final class AutomatedReleaseSourceTests: XCTestCase {
             root.appendingPathComponent(".githooks/post-commit").path))
     }
 
+    func testFaithful64xPackagingIsExplicitAndInstalledHashesAreChecked() throws {
+        let package = try source("scripts/package-app.sh")
+        let pipeline = try source("scripts/pipeline.sh")
+        let verifier = try source("scripts/verify-pack-assets.sh")
+        let expected: [(String, String)] = [
+            ("Faithful 64x - December 2025 Release.zip",
+             "a136d9101a4748558587980dace3cd7447b758fb72c4684d15fb805d0a812dac"),
+            ("Faithful 64x - Ore Borders 64x.zip",
+             "232b8a64d745dc08b958c3c4c07167bd3f38eebdc4cd682da9d1016b2ed190f8"),
+            ("Faithful 64x - Static Lanterns.zip",
+             "d0165130d505da8996354c21090a47fd6def87f4c2a96442f1a4282b1bf2cbc8"),
+        ]
+        XCTAssertFalse(package.contains("packaging/*.zip"))
+        XCTAssertTrue(package.contains("FAITHFUL-LICENSE.txt"))
+        XCTAssertTrue(package.contains("FAITHFUL-ADDONS-CREDITS.txt"))
+        XCTAssertTrue(package.contains("verify-pack-assets.sh"))
+        XCTAssertTrue(pipeline.contains("verify_pack_set \"$INSTALLED_APP/Contents/Resources\""))
+        for (name, hash) in expected {
+            XCTAssertTrue(package.contains(name), name)
+            XCTAssertTrue(verifier.contains(name), name)
+            XCTAssertTrue(verifier.contains(hash), hash)
+            XCTAssertTrue(pipeline.contains(name), name)
+            XCTAssertTrue(pipeline.contains(hash), hash)
+        }
+    }
+
+    func testResourcePackPublicationTruthIsInTheProductionAccessibilityTree() throws {
+        let menus = try source("Sources/Elysium/MenusM.swift")
+        let screen = try source("Sources/Elysium/ResourcePackScreenM.swift")
+        let packs = try source("Sources/Elysium/ResourcePacks.swift")
+
+        for marker in [
+            "id: \"title:texture-generation\", role: .staticText, label: \"Textures\"",
+            "focusable: false, actionable: false",
+            "MainActor.assumeIsolated { consumeResourcePackPresentationNotice() }",
+        ] { XCTAssertTrue(menus.contains(marker), marker) }
+        for marker in [
+            "id: \"resource-pack.baseline\", role: .staticText",
+            "id: \"resource-pack.status\", role: .staticText",
+            "var result: [TextEntryAccessibilityDescriptor] = [",
+            "focusable: false, actionable: false",
+        ] { XCTAssertTrue(screen.contains(marker), marker) }
+        for marker in [
+            "@MainActor private var consumedResourcePackPresentationNoticeSerial: UInt64 = 0",
+            "func consumeResourcePackPresentationNotice() -> String?",
+            "guard case .proceduralFallback(let failedPackDisplayName) = snapshot.generation",
+            "failedPackDisplayName == \"Faithful 64x\"",
+            "snapshot.noticeSerial != 0",
+            "snapshot.noticeSerial != consumedResourcePackPresentationNoticeSerial",
+            "notice == RESOURCE_PACK_FALLBACK_NOTICE",
+            "func resourcePackPresentationAfterActivePublication(",
+            "func resourcePackPresentationAfterFallbackPublication(",
+        ] { XCTAssertTrue(packs.contains(marker), marker) }
+        XCTAssertEqual(packs.components(separatedBy:
+            "RESOURCE_PACK_PRESENTATION = resourcePackPresentationAfterActivePublication(").count - 1, 2,
+            "both successful active publication writers must use the reviewed transition")
+        XCTAssertEqual(packs.components(separatedBy:
+            "RESOURCE_PACK_PRESENTATION = resourcePackPresentationAfterFallbackPublication(").count - 1, 1,
+            "exactly one fallback writer must use the reviewed transition")
+        let legacyDirectWriter = "RESOURCE_PACK_PRESENTATION = ResourcePackPresentationSnapshot("
+        XCTAssertEqual(packs.components(separatedBy: legacyDirectWriter).count - 1, 1,
+                       "only the process-initial snapshot may use direct construction")
+        let liveApply = try XCTUnwrap(packs.range(of: "func applyResourcePacks("))
+        let liveBody = String(packs[liveApply.lowerBound...])
+        let injectedFailure = try XCTUnwrap(liveBody.range(
+            of: "if failNextIconPackPublicationBeforeMutation"))
+        let fallbackFailure = try XCTUnwrap(liveBody.range(
+            of: "if failNextIconPackPublicationBeforeMutation", options: .backwards))
+        let activeWriter = try XCTUnwrap(liveBody.range(
+            of: "RESOURCE_PACK_PRESENTATION = resourcePackPresentationAfterActivePublication("))
+        let fallbackWriter = try XCTUnwrap(liveBody.range(
+            of: "RESOURCE_PACK_PRESENTATION = resourcePackPresentationAfterFallbackPublication("))
+        XCTAssertLessThan(injectedFailure.lowerBound, activeWriter.lowerBound,
+                          "injected active failure must retain the entire prior snapshot")
+        XCTAssertEqual(liveBody.components(separatedBy:
+            "if failNextIconPackPublicationBeforeMutation").count - 1, 2)
+        XCTAssertLessThan(fallbackFailure.lowerBound, fallbackWriter.lowerBound,
+                          "injected fallback failure must retain the entire prior snapshot")
+        XCTAssertEqual(menus.components(separatedBy: "consumeResourcePackPresentationNotice()").count - 1, 1)
+        XCTAssertFalse([menus, screen, packs].joined().contains("ELYSIUM_RESOURCE_PACK_FAILURE"))
+    }
+
+    func testResourcePackConflictAndFailureRehearsalsAreAbsentFromSignedApp() throws {
+        let package = try source("scripts/package-app.sh")
+        let integration = try source("scripts/appkit-text-entry-integration.sh")
+        let driver = try source("Tests/ElysiumAppKitIntegration/Driver.swift")
+        let production = try [
+            "Sources/Elysium/ResourcePackScreenM.swift",
+            "Sources/Elysium/ResourcePacks.swift",
+            "Sources/Elysium/main.swift",
+            "Sources/ElysiumCore/Game/ResourcePackSelection.swift",
+        ].map(source).joined(separator: "\n")
+
+        XCTAssertTrue(driver.contains("--resource-pack-attestation-child"))
+        XCTAssertTrue(driver.contains("Synthetic") == false,
+                      "the executable Driver rehearsal is filesystem-only")
+        XCTAssertTrue(integration.contains("Tests/ElysiumAppKitIntegration/Driver.swift"))
+        XCTAssertFalse(package.contains("Tests/ElysiumAppKitIntegration"))
+        XCTAssertFalse(package.contains("Driver.swift"))
+        XCTAssertFalse(package.contains("resource-pack-attestation"))
+        for forbidden in ["--resource-pack-attestation-child", "Synthetic Ore",
+                          "Synthetic Lantern", "restore-failure"] {
+            XCTAssertFalse(production.contains(forbidden), forbidden)
+        }
+    }
+
     func testSourceSnapshotBindsNonignoredUntrackedInputsAndExcludesIgnoredOutput() throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("elysium-source-snapshot-\(UUID().uuidString)")

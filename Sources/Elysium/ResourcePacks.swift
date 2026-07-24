@@ -8,17 +8,139 @@
 import AppKit
 import Compression
 import CoreGraphics
+import CryptoKit
+import Darwin
 import Foundation
 import ImageIO
 import ElysiumCore
 
-private let MAX_PACK_ARCHIVE_BYTES = 512 << 20
-private let MAX_PACK_FILE_BYTES = 64 << 20
-private let MAX_PACK_ENTRIES = 100_000
+struct ResourcePackPreparationLimits: Sendable {
+    var archiveBytes = 512 << 20
+    var fileBytes = 64 << 20
+    var entries = 100_000
+    var pathBytes = 1_024
+    var aggregatePathBytes = 16 << 20
+    var advertisedBytes = 512 << 20
+    var inflatedBytes = 512 << 20
+    var decodedRGBABytes = 512 << 20
+    var metadataBytes = 64 << 10
+    var framesPerTexture = 256
+    var framesPerGeneration = 4_096
+    var minimumFrameDuration = 1
+    var maximumFrameDuration = 1_200
 
-private func safePackPath(_ path: String) -> Bool {
-    if path.isEmpty || path.hasPrefix("/") || path.hasPrefix("\\") || path.contains("\0") { return false }
-    return !path.split(separator: "/", omittingEmptySubsequences: false).contains("..")
+    static let production = ResourcePackPreparationLimits()
+}
+
+private let MAX_PACK_ARCHIVE_BYTES = ResourcePackPreparationLimits.production.archiveBytes
+private let MAX_PACK_PATH_BYTES = ResourcePackPreparationLimits.production.pathBytes
+
+final class ResourcePackCancellationToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+}
+
+final class ResourcePackPreparationBudget {
+    let limits: ResourcePackPreparationLimits
+    let cancellation: ResourcePackCancellationToken?
+    private(set) var entryCount = 0
+    private(set) var pathBytes = 0
+    private(set) var advertisedBytes = 0
+    private(set) var inflatedBytes = 0
+    private(set) var decodedRGBABytes = 0
+    private(set) var metadataBytes = 0
+    private(set) var animationFrames = 0
+    private(set) var isValid = true
+
+    init(limits: ResourcePackPreparationLimits = .production,
+         cancellation: ResourcePackCancellationToken? = nil) {
+        self.limits = limits
+        self.cancellation = cancellation
+    }
+
+    var shouldContinue: Bool { isValid && cancellation?.isCancelled != true }
+
+    @discardableResult
+    func reject() -> Bool {
+        isValid = false
+        return false
+    }
+
+    private func add(_ amount: Int, to value: inout Int, maximum: Int) -> Bool {
+        guard shouldContinue, amount >= 0, amount <= maximum,
+              value <= maximum - amount else { return reject() }
+        value += amount
+        return true
+    }
+
+    func chargeEntry(pathByteCount: Int, advertisedByteCount: Int) -> Bool {
+        guard pathByteCount > 0, pathByteCount <= limits.pathBytes,
+              entryCount < limits.entries,
+              add(pathByteCount, to: &pathBytes, maximum: limits.aggregatePathBytes),
+              add(advertisedByteCount, to: &advertisedBytes, maximum: limits.advertisedBytes)
+        else { return reject() }
+        entryCount += 1
+        return true
+    }
+
+    func chargeInflated(_ amount: Int) -> Bool {
+        add(amount, to: &inflatedBytes, maximum: limits.inflatedBytes)
+    }
+
+    func chargeDecodedRGBA(width: Int, height: Int) -> Bool {
+        guard width > 0, height > 0, width <= Int.max / height,
+              width * height <= Int.max / 4 else { return reject() }
+        return add(width * height * 4, to: &decodedRGBABytes,
+                   maximum: limits.decodedRGBABytes)
+    }
+
+    func chargeMetadata(_ amount: Int) -> Bool {
+        guard amount <= limits.metadataBytes else { return reject() }
+        return add(amount, to: &metadataBytes, maximum: limits.metadataBytes)
+    }
+
+    func chargeAnimationFrames(_ amount: Int) -> Bool {
+        guard amount >= 0, amount <= limits.framesPerTexture else { return reject() }
+        return add(amount, to: &animationFrames, maximum: limits.framesPerGeneration)
+    }
+
+    func validDuration(_ duration: Int) -> Bool {
+        guard duration >= limits.minimumFrameDuration &&
+                duration <= limits.maximumFrameDuration else { return reject() }
+        return true
+    }
+}
+
+private func safePackPath(_ path: String, maximumBytes: Int = MAX_PACK_PATH_BYTES) -> Bool {
+    if path.isEmpty || path.utf8.count > maximumBytes || path.hasPrefix("/") ||
+        path.hasPrefix("\\") || path.contains("\0") || path.contains("\\") { return false }
+    let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+    guard !parts.isEmpty else { return false }
+    let contentParts = path.hasSuffix("/") ? parts.dropLast() : parts[...]
+    guard !contentParts.isEmpty else { return false }
+    return !contentParts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) &&
+        !(contentParts.first?.contains(":") ?? false)
+}
+
+private func packCRC32(_ data: Data) -> UInt32 {
+    var crc: UInt32 = 0xffff_ffff
+    for byte in data {
+        crc ^= UInt32(byte)
+        for _ in 0..<8 { crc = (crc >> 1) ^ ((crc & 1) == 0 ? 0 : 0xedb8_8320) }
+    }
+    return crc ^ 0xffff_ffff
 }
 
 private func preferredTextureRoot(from paths: Dictionary<String, String>.Keys) -> String {
@@ -40,7 +162,10 @@ private func preferredTextureRoot(from paths: Dictionary<String, String>.Keys) -
 // =============================================================================
 final class MiniZip {
     struct Entry {
+        let name: String
+        let flags: UInt16
         let method: UInt16
+        let crc32: UInt32
         let compSize: Int
         let uncompSize: Int
         let localOffset: Int
@@ -48,14 +173,12 @@ final class MiniZip {
 
     private let data: Data
     private(set) var entries: [String: Entry] = [:]
+    private var inflatedFiles: [String: Data] = [:]
 
-    init?(url: URL) {
-        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-              values.isRegularFile == true,
-              (values.fileSize ?? 0) <= MAX_PACK_ARCHIVE_BYTES else { return nil }
-        guard let d = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
-        data = d
-        guard parseCentralDirectory() else { return nil }
+    init?(data: Data, budget: ResourcePackPreparationBudget = ResourcePackPreparationBudget()) {
+        guard data.count <= budget.limits.archiveBytes, budget.shouldContinue else { return nil }
+        self.data = data
+        guard parseCentralDirectory(budget: budget) else { return nil }
     }
 
     private func u16(_ o: Int) -> Int { Int(data[o]) | (Int(data[o + 1]) << 8) }
@@ -63,79 +186,163 @@ final class MiniZip {
         Int(data[o]) | (Int(data[o + 1]) << 8) | (Int(data[o + 2]) << 16) | (Int(data[o + 3]) << 24)
     }
 
-    private func parseCentralDirectory() -> Bool {
+    private func validExtraFields(start: Int, length: Int) -> Bool {
+        guard start >= 0, length >= 0, start <= data.count - length else { return false }
+        var cursor = start
+        let end = start + length
+        while cursor < end {
+            guard cursor <= end - 4 else { return false }
+            let identifier = u16(cursor)
+            let size = u16(cursor + 2)
+            cursor += 4
+            guard cursor <= end - size, identifier != 0x0001 else { return false }
+            cursor += size
+        }
+        return cursor == end
+    }
+
+    private func inflated(_ entry: Entry, compressedRange: Range<Int>) -> Data? {
+        let raw = data.subdata(in: compressedRange)
+        if entry.method == 0 {
+            guard entry.uncompSize == entry.compSize else { return nil }
+            return packCRC32(raw) == entry.crc32 ? raw : nil
+        }
+        guard entry.method == 8 else { return nil }
+        if entry.uncompSize == 0 { return raw.isEmpty && entry.crc32 == 0 ? Data() : nil }
+        guard !raw.isEmpty else { return nil }
+        var out = Data(count: entry.uncompSize)
+        let written = out.withUnsafeMutableBytes { dst in
+            raw.withUnsafeBytes { src in
+                guard let dstBase = dst.bindMemory(to: UInt8.self).baseAddress,
+                      let srcBase = src.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                return compression_decode_buffer(
+                    dstBase, entry.uncompSize,
+                    srcBase, raw.count,
+                    nil, COMPRESSION_ZLIB)
+            }
+        }
+        guard written == entry.uncompSize, packCRC32(out) == entry.crc32 else { return nil }
+        return out
+    }
+
+    private func parseCentralDirectory(budget: ResourcePackPreparationBudget) -> Bool {
         // EOCD signature scan from the tail (comment can pad up to 64KB)
         let n = data.count
-        guard n > 22 else { return false }
+        guard n >= 22 else { return false }
         var eocd = -1
         var i = n - 22
         let stop = max(0, n - 22 - 65535)
         while i >= stop {
-            if data[i] == 0x50, data[i + 1] == 0x4b, data[i + 2] == 0x05, data[i + 3] == 0x06 {
+            if data[i] == 0x50, data[i + 1] == 0x4b, data[i + 2] == 0x05, data[i + 3] == 0x06,
+               i + 22 + u16(i + 20) == n {
                 eocd = i
                 break
             }
             i -= 1
         }
-        guard eocd >= 0 else { return false }
+        guard eocd >= 0, budget.shouldContinue else { return false }
+        guard u16(eocd + 4) == 0, u16(eocd + 6) == 0 else { return false }
         let count = u16(eocd + 10)
-        guard count <= MAX_PACK_ENTRIES else { return false }
+        guard u16(eocd + 8) == count, count <= budget.limits.entries,
+              u32(eocd + 12) != Int(UInt32.max), u32(eocd + 16) != Int(UInt32.max) else { return false }
         var off = u32(eocd + 16)
+        let centralEnd = off + u32(eocd + 12)
+        guard off >= 0, centralEnd <= eocd else { return false }
+        let centralStart = off
+        var pending: [(entry: Entry, pathBytes: Int, compressed: Range<Int>, occupied: Range<Int>)] = []
+        var normalizedNames: Set<String> = []
         for _ in 0..<count {
-            guard off + 46 <= n, u32(off) == 0x02014b50 else { return false }
+            guard budget.shouldContinue, off <= centralEnd - 46, u32(off) == 0x02014b50 else { return false }
+            let creatorSystem = u16(off + 4) >> 8
+            let neededVersion = u16(off + 6)
+            let flags = UInt16(u16(off + 8))
             let method = UInt16(u16(off + 10))
+            let crc = UInt32(u32(off + 16))
             let compSize = u32(off + 20)
             let uncompSize = u32(off + 24)
             let nameLen = u16(off + 28)
             let extraLen = u16(off + 30)
             let commentLen = u16(off + 32)
             let localOffset = u32(off + 42)
-            guard off + 46 + nameLen <= n,
-                  off + 46 + nameLen + extraLen + commentLen <= n else { return false }
-            if let name = String(data: data.subdata(in: (off + 46)..<(off + 46 + nameLen)), encoding: .utf8),
-               safePackPath(name),
-               !name.hasSuffix("/") {
-                entries[name] = Entry(method: method, compSize: compSize,
-                                      uncompSize: uncompSize, localOffset: localOffset)
+            guard neededVersion <= 20,
+                  off + 46 + nameLen <= centralEnd,
+                  off + 46 + nameLen + extraLen + commentLen <= centralEnd,
+                  compSize != Int(UInt32.max), uncompSize != Int(UInt32.max),
+                  localOffset != Int(UInt32.max), flags & ~UInt16(0x0808) == 0,
+                  method == 0 || method == 8 else { return false }
+            let nameData = data.subdata(in: (off + 46)..<(off + 46 + nameLen))
+            guard let name = String(data: nameData, encoding: .utf8),
+                  safePackPath(name, maximumBytes: budget.limits.pathBytes),
+                  validExtraFields(start: off + 46 + nameLen, length: extraLen) else { return false }
+            let normalized = name.lowercased()
+            guard normalizedNames.insert(normalized).inserted else { return false }
+            let external = UInt32(u32(off + 38))
+            let mode = (external >> 16) & 0xffff
+            let kind = mode & UInt32(S_IFMT)
+            let isDirectory = name.hasSuffix("/")
+            if creatorSystem == 3 || mode != 0 {
+                guard (isDirectory && kind == UInt32(S_IFDIR)) ||
+                        (!isDirectory && kind == UInt32(S_IFREG)) else { return false }
             }
+            guard !isDirectory || (compSize == 0 && uncompSize == 0),
+                  localOffset >= 0, localOffset <= centralStart - 30,
+                  u32(localOffset) == 0x04034b50 else { return false }
+            let localFlags = UInt16(u16(localOffset + 6))
+            let localMethod = UInt16(u16(localOffset + 8))
+            let localNameLength = u16(localOffset + 26)
+            let localExtraLength = u16(localOffset + 28)
+            let localNameStart = localOffset + 30
+            let payloadStart = localNameStart + localNameLength + localExtraLength
+            guard localNameStart <= centralStart - localNameLength,
+                  payloadStart <= centralStart - compSize,
+                  data.subdata(in: localNameStart..<(localNameStart + localNameLength)) == nameData,
+                  localFlags == flags, localMethod == method,
+                  validExtraFields(start: localNameStart + localNameLength, length: localExtraLength)
+            else { return false }
+            var payloadEnd = payloadStart + compSize
+            if flags & 0x0008 == 0 {
+                guard u32(localOffset + 14) == Int(crc),
+                      u32(localOffset + 18) == compSize,
+                      u32(localOffset + 22) == uncompSize else { return false }
+            } else {
+                guard u32(localOffset + 14) == 0, u32(localOffset + 18) == 0,
+                      u32(localOffset + 22) == 0 else { return false }
+                let descriptorStart = payloadEnd
+                let hasSignature = descriptorStart <= centralStart - 16 &&
+                    u32(descriptorStart) == 0x08074b50
+                let values = descriptorStart + (hasSignature ? 4 : 0)
+                guard values <= centralStart - 12, u32(values) == Int(crc),
+                      u32(values + 4) == compSize, u32(values + 8) == uncompSize else { return false }
+                payloadEnd = values + 12
+            }
+            let entry = Entry(name: name, flags: flags, method: method, crc32: crc,
+                              compSize: compSize, uncompSize: uncompSize,
+                              localOffset: localOffset)
+            pending.append((entry, nameData.count, payloadStart..<(payloadStart + compSize),
+                            localOffset..<payloadEnd))
             off += 46 + nameLen + extraLen + commentLen
+        }
+        guard off == centralEnd else { return false }
+        let occupied = pending.map(\.occupied).sorted { $0.lowerBound < $1.lowerBound }
+        for pair in zip(occupied, occupied.dropFirst()) where pair.0.upperBound > pair.1.lowerBound {
+            return false
+        }
+        for row in pending {
+            guard budget.chargeEntry(pathByteCount: row.pathBytes,
+                                     advertisedByteCount: row.entry.uncompSize) else { return false }
+            if !row.entry.name.hasSuffix("/") {
+                guard row.entry.uncompSize <= budget.limits.fileBytes,
+                      budget.chargeInflated(row.entry.uncompSize),
+                      let bytes = inflated(row.entry, compressedRange: row.compressed) else { return false }
+                entries[row.entry.name] = row.entry
+                inflatedFiles[row.entry.name] = bytes
+            }
         }
         return true
     }
 
     func file(_ name: String) -> Data? {
-        guard let e = entries[name] else { return nil }
-        let lo = e.localOffset
-        guard lo + 30 <= data.count, u32(lo) == 0x04034b50 else { return nil }
-        // local header name/extra lengths can differ from the central record
-        let nameLen = u16(lo + 26)
-        let extraLen = u16(lo + 28)
-        let start = lo + 30 + nameLen + extraLen
-        guard start + e.compSize <= data.count else { return nil }
-        let raw = data.subdata(in: start..<(start + e.compSize))
-        if e.method == 0 {
-            guard e.uncompSize == e.compSize, e.uncompSize <= MAX_PACK_FILE_BYTES else { return nil }
-            return raw
-        }
-        guard e.method == 8 else { return nil }
-        // uncompSize is an untrusted u32 from the central directory — cap it
-        // so a tiny crafted zip can't force a multi-GB allocation
-        guard e.uncompSize <= MAX_PACK_FILE_BYTES else { return nil }
-        if e.uncompSize == 0 { return Data() }
-        guard !raw.isEmpty else { return nil }
-        var out = Data(count: e.uncompSize)
-        let written = out.withUnsafeMutableBytes { dst in
-            raw.withUnsafeBytes { src in
-                guard let dstBase = dst.bindMemory(to: UInt8.self).baseAddress,
-                      let srcBase = src.bindMemory(to: UInt8.self).baseAddress else { return 0 }
-                return compression_decode_buffer(
-                    dstBase, e.uncompSize,
-                    srcBase, raw.count,
-                    nil, COMPRESSION_ZLIB)
-            }
-        }
-        guard written == e.uncompSize else { return nil }
-        return out
+        inflatedFiles[name]
     }
 }
 
@@ -148,11 +355,13 @@ struct RGBAImage {
     var pixels: [UInt8]   // straight RGBA, width*height*4
 }
 
-func decodePNG(_ data: Data) -> RGBAImage? {
+func decodePNG(_ data: Data, budget: ResourcePackPreparationBudget? = nil) -> RGBAImage? {
+    guard budget?.shouldContinue != false else { return nil }
     guard let src = CGImageSourceCreateWithData(data as CFData, nil),
           let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
     let w = img.width, h = img.height
-    guard w > 0, h > 0, w <= 4096, h <= 8192 else { return nil }
+    guard w > 0, h > 0, w <= 4096, h <= 8192,
+          budget?.chargeDecodedRGBA(width: w, height: h) != false else { return nil }
     var px = [UInt8](repeating: 0, count: w * h * 4)
     let info = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
     let ok = px.withUnsafeMutableBytes { raw -> Bool in
@@ -167,6 +376,7 @@ func decodePNG(_ data: Data) -> RGBAImage? {
     // un-premultiply back to straight alpha (atlas + UI expect straight RGBA)
     var i = 0
     while i < px.count {
+        if i & 0x3ffff == 0, budget?.shouldContinue == false { return nil }
         let a = Int(px[i + 3])
         if a > 0 && a < 255 {
             px[i] = UInt8(min(255, Int(px[i]) * 255 / a))
@@ -247,51 +457,240 @@ func bakeTint(_ px: inout [UInt8], _ rgb: Int) {
 // =============================================================================
 // pack handle (zip or folder) + discovery
 // =============================================================================
+private struct ResourcePackFileIdentity: Equatable {
+    let device: dev_t
+    let inode: ino_t
+    let mode: mode_t
+    let links: nlink_t
+    let size: off_t
+
+    init(_ value: stat) {
+        device = value.st_dev
+        inode = value.st_ino
+        mode = value.st_mode
+        links = value.st_nlink
+        size = value.st_size
+    }
+}
+
+/// A path-free, immutable source image. Resolution and TOCTOU-safe byte capture happen on main;
+/// preparation workers receive only these owned values and can never reopen the filesystem.
+enum ResourcePackSourcePayload: Sendable {
+    case archive(Data)
+    case folder([String: Data])
+}
+
+struct ResourcePackSourceSnapshot: Sendable {
+    let fileName: String
+    let displayName: String
+    let payload: ResourcePackSourcePayload
+}
+
+struct ResourcePackStackSourceSnapshot: Sendable {
+    let enabledNames: [String]
+    let sources: [ResourcePackSourceSnapshot]
+    let bundledAddOns: [BundledResourcePackAddOnID]
+}
+
+private func resourcePackDirectoryNames(_ directoryFD: Int32) -> [String]? {
+    let fresh = Darwin.openat(directoryFD, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    guard fresh >= 0, let directory = fdopendir(fresh) else {
+        if fresh >= 0 { _ = Darwin.close(fresh) }
+        return nil
+    }
+    defer { closedir(directory) }
+    var names: [String] = []
+    errno = 0
+    while let entry = readdir(directory) {
+        let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer -> String? in
+            pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+                String(validatingUTF8: $0)
+            }
+        }
+        guard let name else { return nil }
+        if name == "." || name == ".." { continue }
+        guard !name.isEmpty, !name.contains("/"), !name.contains("\0") else { return nil }
+        names.append(name)
+    }
+    guard errno == 0 else { return nil }
+    return names.sorted { Array($0.utf8).lexicographicallyPrecedes(Array($1.utf8)) }
+}
+
+private func readResourcePackDescriptor(_ fd: Int32, expected: ResourcePackFileIdentity,
+                                        maximum: Int) -> Data? {
+    guard expected.size >= 0, expected.size <= maximum else { return nil }
+    var result = Data()
+    result.reserveCapacity(Int(expected.size))
+    var offset: off_t = 0
+    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    while offset < expected.size {
+        let requested = min(buffer.count, Int(expected.size - offset))
+        let count = buffer.withUnsafeMutableBytes {
+            Darwin.pread(fd, $0.baseAddress, requested, offset)
+        }
+        if count > 0 {
+            result.append(buffer, count: count)
+            offset += off_t(count)
+        } else if count < 0 && errno == EINTR {
+            continue
+        } else {
+            return nil
+        }
+    }
+    var after = stat()
+    guard fstat(fd, &after) == 0, ResourcePackFileIdentity(after) == expected,
+          result.count == Int(expected.size) else { return nil }
+    return result
+}
+
+private func snapshotResourcePackFolder(
+    directoryFD: Int32, prefix: String = "", budget: ResourcePackPreparationBudget,
+    into files: inout [String: Data], normalizedNames: inout Set<String>
+) -> Bool {
+    guard budget.shouldContinue, let names = resourcePackDirectoryNames(directoryFD) else { return false }
+    for name in names {
+        guard budget.shouldContinue else { return false }
+        let relative = prefix.isEmpty ? name : "\(prefix)/\(name)"
+        guard safePackPath(relative, maximumBytes: budget.limits.pathBytes) else { return false }
+        var linkStatus = stat()
+        guard fstatat(directoryFD, name, &linkStatus, AT_SYMLINK_NOFOLLOW) == 0 else { return false }
+        let linkIdentity = ResourcePackFileIdentity(linkStatus)
+        let kind = linkStatus.st_mode & S_IFMT
+        if kind == S_IFDIR {
+            guard budget.chargeEntry(pathByteCount: relative.utf8.count + 1,
+                                     advertisedByteCount: 0) else { return false }
+            let child = Darwin.openat(directoryFD, name,
+                                      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+            guard child >= 0 else { return false }
+            var opened = stat()
+            let valid = fstat(child, &opened) == 0 &&
+                ResourcePackFileIdentity(opened) == linkIdentity &&
+                snapshotResourcePackFolder(directoryFD: child, prefix: relative,
+                                           budget: budget, into: &files,
+                                           normalizedNames: &normalizedNames)
+            _ = Darwin.close(child)
+            guard valid else { return false }
+        } else if kind == S_IFREG {
+            let normalized = relative.lowercased()
+            guard normalizedNames.insert(normalized).inserted,
+                  linkStatus.st_nlink == 1, linkStatus.st_size >= 0,
+                  linkStatus.st_size <= budget.limits.fileBytes,
+                  budget.chargeEntry(pathByteCount: relative.utf8.count,
+                                     advertisedByteCount: Int(linkStatus.st_size)),
+                  budget.chargeInflated(Int(linkStatus.st_size)) else { return false }
+            let fileFD = Darwin.openat(directoryFD, name,
+                                       O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)
+            guard fileFD >= 0 else { return false }
+            var opened = stat()
+            let bytes = fstat(fileFD, &opened) == 0 && ResourcePackFileIdentity(opened) == linkIdentity
+                ? readResourcePackDescriptor(fileFD, expected: linkIdentity,
+                                             maximum: budget.limits.fileBytes) : nil
+            _ = Darwin.close(fileFD)
+            guard let bytes else { return false }
+            files[relative] = bytes
+        } else {
+            return false
+        }
+    }
+    return true
+}
+
 final class ResourcePack {
-    let fileName: String          // what settings stores ("Faithful 32x - 1.20.1.zip")
+    let fileName: String          // exact user or managed archive filename
     let displayName: String
     private(set) var description = ""
     private(set) var packFormat = 0
-    private let zip: MiniZip?
-    private let folderURL: URL?
+    private let files: [String: Data]
     /// lowercased path → exact path (zips from Windows tools vary in case)
     private var pathIndex: [String: String] = [:]
     /// the pack's texture root, detected from its own folder layout
     /// ("assets/<namespace>/textures/") — Java packs declare the namespace
     private(set) var texRoot = ""
 
-    init?(url: URL) {
-        fileName = url.lastPathComponent
-        var isDir: ObjCBool = false
-        FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-        if isDir.boolValue {
-            guard let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
-                  values.isSymbolicLink != true else { return nil }
-            zip = nil
-            folderURL = url
+    convenience init?(url: URL, budget: ResourcePackPreparationBudget = ResourcePackPreparationBudget()) {
+        let parent = Darwin.open(url.deletingLastPathComponent().path,
+                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        guard parent >= 0 else { return nil }
+        defer { _ = Darwin.close(parent) }
+        self.init(directoryFD: parent, fileName: url.lastPathComponent, budget: budget)
+    }
+
+    convenience init?(snapshot: ResourcePackSourceSnapshot,
+                      budget: ResourcePackPreparationBudget = ResourcePackPreparationBudget()) {
+        let files: [String: Data]
+        switch snapshot.payload {
+        case .archive(let data):
+            guard let archive = MiniZip(data: data, budget: budget) else { return nil }
+            var values: [String: Data] = [:]
+            for key in archive.entries.keys { values[key] = archive.file(key) }
+            files = values
+        case .folder(let values):
+            files = values
+        }
+        self.init(fileName: snapshot.fileName, displayName: snapshot.displayName,
+                  snapshottedFiles: files, budget: budget)
+    }
+
+    private init?(fileName: String, displayName: String, snapshottedFiles: [String: Data],
+                  budget: ResourcePackPreparationBudget) {
+        guard !fileName.isEmpty, fileName.count <= 255, !fileName.contains("/"),
+              !fileName.contains("\0"), budget.shouldContinue else { return nil }
+        self.fileName = fileName
+        self.displayName = displayName
+        files = snapshottedFiles
+        for key in files.keys {
+            let normalized = key.lowercased()
+            guard pathIndex[normalized] == nil else { return nil }
+            pathIndex[normalized] = key
+        }
+        guard pathIndex.keys.contains(where: { $0.hasSuffix("pack.mcmeta") }) else { return nil }
+        texRoot = preferredTextureRoot(from: pathIndex.keys)
+        parseMeta(budget: budget)
+        guard budget.isValid else { return nil }
+    }
+
+    init?(directoryFD parent: Int32, fileName: String,
+          budget: ResourcePackPreparationBudget = ResourcePackPreparationBudget()) {
+        guard !fileName.isEmpty, !fileName.contains("/"), !fileName.contains("\0") else { return nil }
+        self.fileName = fileName
+        var linkStatus = stat()
+        guard fstatat(parent, fileName, &linkStatus, AT_SYMLINK_NOFOLLOW) == 0 else { return nil }
+        let identity = ResourcePackFileIdentity(linkStatus)
+        let kind = linkStatus.st_mode & S_IFMT
+        var snapshot: [String: Data] = [:]
+        if kind == S_IFDIR {
             displayName = fileName
-            let root = url.standardizedFileURL.path
-            if let e = FileManager.default.enumerator(
-                at: url,
-                includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey],
-                options: [.skipsHiddenFiles]
-            ) {
-                for case let f as URL in e where f.pathExtension != "" {
-                    if pathIndex.count >= MAX_PACK_ENTRIES { return nil }
-                    let full = f.standardizedFileURL.path
-                    guard full.hasPrefix(root + "/") else { continue }
-                    let rel = String(full.dropFirst(root.count + 1))
-                    guard safePackPath(rel) else { continue }
-                    pathIndex[rel.lowercased()] = rel
-                }
-            }
-        } else if url.pathExtension.lowercased() == "zip", let z = MiniZip(url: url) {
-            zip = z
-            folderURL = nil
+            let directoryFD = Darwin.openat(parent, fileName,
+                                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+            guard directoryFD >= 0 else { return nil }
+            defer { _ = Darwin.close(directoryFD) }
+            var opened = stat()
+            var normalized: Set<String> = []
+            guard fstat(directoryFD, &opened) == 0, ResourcePackFileIdentity(opened) == identity,
+                  snapshotResourcePackFolder(directoryFD: directoryFD, budget: budget,
+                                             into: &snapshot, normalizedNames: &normalized)
+            else { return nil }
+        } else if kind == S_IFREG, (fileName as NSString).pathExtension.lowercased() == "zip" {
             displayName = String(fileName.dropLast(4))
-            for k in z.entries.keys { pathIndex[k.lowercased()] = k }
+            guard linkStatus.st_nlink == 1, linkStatus.st_size <= budget.limits.archiveBytes else { return nil }
+            let fileFD = Darwin.openat(parent, fileName,
+                                       O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)
+            guard fileFD >= 0 else { return nil }
+            defer { _ = Darwin.close(fileFD) }
+            var opened = stat()
+            guard fstat(fileFD, &opened) == 0, ResourcePackFileIdentity(opened) == identity,
+                  let bytes = readResourcePackDescriptor(fileFD, expected: identity,
+                                                         maximum: budget.limits.archiveBytes),
+                  let archive = MiniZip(data: bytes, budget: budget) else { return nil }
+            for key in archive.entries.keys { snapshot[key] = archive.file(key) }
         } else {
             return nil
+        }
+        files = snapshot
+        for key in files.keys {
+            let normalized = key.lowercased()
+            guard pathIndex[normalized] == nil else { return nil }
+            pathIndex[normalized] = key
         }
         guard pathIndex.keys.contains(where: { $0.hasSuffix("pack.mcmeta") }) else { return nil }
         // Texture packs often include helper namespaces (forge/fabric/realms).
@@ -299,7 +698,27 @@ final class ResourcePack {
         // dictionary iteration here made launches randomly fall back to the
         // procedural atlas. Prefer minecraft and keep fallback deterministic.
         texRoot = preferredTextureRoot(from: pathIndex.keys)
-        parseMeta()
+        parseMeta(budget: budget)
+        guard budget.isValid else { return nil }
+    }
+
+    init?(data: Data, fileName: String,
+          budget: ResourcePackPreparationBudget = ResourcePackPreparationBudget()) {
+        guard fileName.count <= 255, let archive = MiniZip(data: data, budget: budget) else { return nil }
+        self.fileName = fileName
+        displayName = fileName.hasSuffix(".zip") ? String(fileName.dropLast(4)) : fileName
+        var snapshot: [String: Data] = [:]
+        for key in archive.entries.keys {
+            let normalized = key.lowercased()
+            guard pathIndex[normalized] == nil else { return nil }
+            pathIndex[normalized] = key
+            snapshot[key] = archive.file(key)
+        }
+        files = snapshot
+        guard pathIndex.keys.contains(where: { $0.hasSuffix("pack.mcmeta") }) else { return nil }
+        texRoot = preferredTextureRoot(from: pathIndex.keys)
+        parseMeta(budget: budget)
+        guard budget.isValid else { return nil }
     }
 
     /// raw bytes for an in-pack path ("assets/<ns>/textures/block/stone.png")
@@ -307,15 +726,7 @@ final class ResourcePack {
         // some packs nest everything one folder deep inside the zip
         for candidate in [path, prefixedPath(path)] {
             guard let c = candidate, let exact = pathIndex[c.lowercased()] else { continue }
-            if let z = zip { return z.file(exact) }
-            if let dir = folderURL {
-                let url = dir.appendingPathComponent(exact)
-                guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
-                      values.isRegularFile == true,
-                      values.isSymbolicLink != true,
-                      (values.fileSize ?? 0) <= MAX_PACK_FILE_BYTES else { continue }
-                return try? Data(contentsOf: url, options: .mappedIfSafe)
-            }
+            if let bytes = files[exact] { return bytes }
         }
         return nil
     }
@@ -355,10 +766,14 @@ final class ResourcePack {
         return nestedPrefix?.lowercased()
     }
 
-    private func parseMeta() {
-        guard let d = file("pack.mcmeta"),
+    private func parseMeta(budget: ResourcePackPreparationBudget) {
+        guard let d = file("pack.mcmeta"), d.count <= budget.limits.metadataBytes,
+              budget.chargeMetadata(d.count),
               let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-              let pack = json["pack"] as? [String: Any] else { return }
+              let pack = json["pack"] as? [String: Any] else {
+            _ = budget.reject()
+            return
+        }
         packFormat = pack["pack_format"] as? Int ?? 0
         if let s = pack["description"] as? String {
             description = s
@@ -382,44 +797,172 @@ func resourcePacksDir() -> URL {
 }
 
 // =============================================================================
-// the default pack — behaves like built-in textures: always present (re-copied
-// from the app bundle if deleted), always applied as the base layer under any
-// user packs, shown in the pack list as a pinned "Default" entry. The
-// procedural atlas remains the last-resort fallback if the bundle itself is
-// damaged. Faithful 32x is third-party art — credit and license travel with
-// it (packaging/FAITHFUL-LICENSE.txt, in-game credits, README).
+// Reviewed managed Faithful assets. These exact hashes are the runtime and
+// packaging authority; managed files are never selected by ambient discovery.
 // =============================================================================
-let DEFAULT_PACK_FILE = "Faithful 32x - 1.20.1.zip"
-let DEFAULT_PACK_LABEL = "Default (Faithful 32x)"
+enum BundledResourcePackAssetRole { case base, addOn(BundledResourcePackAddOnID) }
+struct BundledResourcePackAsset {
+    let role: BundledResourcePackAssetRole
+    let fileName: String
+    let displayName: String
+    let sha256: String
+    let requiredPaths: [String]
+}
 
-private func sameFileContents(_ lhs: String, _ rhs: String) -> Bool {
-    let lhsURL = URL(fileURLWithPath: lhs)
-    let rhsURL = URL(fileURLWithPath: rhs)
-    guard let lhsValues = try? lhsURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-          let rhsValues = try? rhsURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-          lhsValues.isRegularFile == true,
-          rhsValues.isRegularFile == true,
-          lhsValues.fileSize == rhsValues.fileSize,
-          let lhsData = try? Data(contentsOf: lhsURL, options: .mappedIfSafe),
-          let rhsData = try? Data(contentsOf: rhsURL, options: .mappedIfSafe) else { return false }
-    return lhsData == rhsData
+let BUNDLED_RESOURCE_PACK_ASSETS: [BundledResourcePackAsset] = [
+    .init(role: .base, fileName: "Faithful 64x - December 2025 Release.zip",
+          displayName: "Faithful 64x",
+          sha256: "a136d9101a4748558587980dace3cd7447b758fb72c4684d15fb805d0a812dac",
+          requiredPaths: ["pack.mcmeta", "LICENSE.txt",
+            "assets/minecraft/textures/block/stone.png",
+            "assets/minecraft/textures/item/diamond.png",
+            "assets/minecraft/textures/gui/container/inventory.png",
+            "assets/minecraft/textures/font/ascii.png"]),
+    .init(role: .addOn(.oreBorders64x), fileName: "Faithful 64x - Ore Borders 64x.zip",
+          displayName: "Ore Borders 64x",
+          sha256: "232b8a64d745dc08b958c3c4c07167bd3f38eebdc4cd682da9d1016b2ed190f8",
+          requiredPaths: ["pack.mcmeta", "LICENSE.txt", "CREDITS.txt",
+            "assets/minecraft/textures/block/ancient_debris_side.png",
+            "assets/minecraft/textures/block/ancient_debris_top.png",
+            "assets/minecraft/textures/block/coal_ore.png",
+            "assets/minecraft/textures/block/copper_ore.png",
+            "assets/minecraft/textures/block/deepslate_coal_ore.png",
+            "assets/minecraft/textures/block/deepslate_copper_ore.png",
+            "assets/minecraft/textures/block/deepslate_diamond_ore.png",
+            "assets/minecraft/textures/block/deepslate_emerald_ore.png",
+            "assets/minecraft/textures/block/deepslate_gold_ore.png",
+            "assets/minecraft/textures/block/deepslate_iron_ore.png",
+            "assets/minecraft/textures/block/deepslate_lapis_ore.png",
+            "assets/minecraft/textures/block/deepslate_redstone_ore.png",
+            "assets/minecraft/textures/block/diamond_ore.png",
+            "assets/minecraft/textures/block/emerald_ore.png",
+            "assets/minecraft/textures/block/gilded_blackstone.png",
+            "assets/minecraft/textures/block/gold_ore.png",
+            "assets/minecraft/textures/block/iron_ore.png",
+            "assets/minecraft/textures/block/lapis_ore.png",
+            "assets/minecraft/textures/block/nether_gold_ore.png",
+            "assets/minecraft/textures/block/nether_quartz_ore.png",
+            "assets/minecraft/textures/block/redstone_ore.png"]),
+    .init(role: .addOn(.staticLanterns), fileName: "Faithful 64x - Static Lanterns.zip",
+          displayName: "Static Lanterns",
+          sha256: "d0165130d505da8996354c21090a47fd6def87f4c2a96442f1a4282b1bf2cbc8",
+          requiredPaths: ["pack.mcmeta", "LICENSE.txt",
+            "assets/minecraft/textures/block/sea_lantern.png"]),
+]
+
+let DEFAULT_PACK_FILE = BUNDLED_RESOURCE_PACK_ASSETS[0].fileName
+let DEFAULT_PACK_LABEL = "Default (Faithful 64x)"
+let LEGACY_DEFAULT_PACK_FILES: Set<String> = ["Faithful 32x - 1.20.1.zip"]
+
+private func sha256Hex(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
+private func readRegularFileNoFollow(directoryFD: Int32, name: String,
+                                     maximum: Int = MAX_PACK_ARCHIVE_BYTES) -> Data? {
+    guard !name.isEmpty, !name.contains("/"), !name.contains("\0") else { return nil }
+    let fd = Darwin.openat(directoryFD, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)
+    guard fd >= 0 else { return nil }
+    defer { _ = Darwin.close(fd) }
+    var before = stat()
+    guard fstat(fd, &before) == 0, (before.st_mode & S_IFMT) == S_IFREG,
+          before.st_nlink == 1, before.st_size >= 0, before.st_size <= maximum
+    else { return nil }
+    return readResourcePackDescriptor(fd, expected: ResourcePackFileIdentity(before),
+                                      maximum: maximum)
+}
+
+private func verifiedBundledBytes(_ asset: BundledResourcePackAsset) -> Data? {
+    guard let path = bundleResourcePath(asset.fileName) else { return nil }
+    let url = URL(fileURLWithPath: path)
+    let parentFD = Darwin.open(url.deletingLastPathComponent().path,
+                               O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    guard parentFD >= 0 else { return nil }
+    defer { _ = Darwin.close(parentFD) }
+    let budget = ResourcePackPreparationBudget()
+    guard let bytes = readRegularFileNoFollow(directoryFD: parentFD, name: url.lastPathComponent),
+          sha256Hex(bytes) == asset.sha256, let zip = MiniZip(data: bytes, budget: budget),
+          asset.requiredPaths.allSatisfy({ zip.file($0) != nil }) else { return nil }
+    return bytes
+}
+
+private func atomicInstallManagedBytes(_ bytes: Data, asset: BundledResourcePackAsset,
+                                       directoryFD: Int32) -> Bool {
+    let temporary = ".\(asset.fileName).\(UUID().uuidString).tmp"
+    let fd = Darwin.openat(directoryFD, temporary,
+                           O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o600)
+    guard fd >= 0 else { return false }
+    var fileOpen = true
+    var renamed = false
+    defer {
+        if fileOpen { _ = Darwin.close(fd) }
+        if !renamed { _ = Darwin.unlinkat(directoryFD, temporary, 0) }
+    }
+    let wrote = bytes.withUnsafeBytes { raw -> Bool in
+        guard let base = raw.baseAddress else { return bytes.isEmpty }
+        var offset = 0
+        while offset < raw.count {
+            let count = Darwin.write(fd, base.advanced(by: offset), raw.count - offset)
+            if count > 0 { offset += count }
+            else if count < 0 && errno == EINTR { continue }
+            else { return false }
+        }
+        return true
+    }
+    guard wrote else { return false }
+    while fsync(fd) != 0 { if errno != EINTR { return false } }
+    guard Darwin.close(fd) == 0 else { fileOpen = false; return false }
+    fileOpen = false
+    guard renameat(directoryFD, temporary, directoryFD, asset.fileName) == 0 else { return false }
+    renamed = true
+    while fsync(directoryFD) != 0 { if errno != EINTR { return false } }
+    return readRegularFileNoFollow(directoryFD: directoryFD, name: asset.fileName)
+        .map(sha256Hex) == asset.sha256
 }
 
 /// restore the bundled default pack if the app-support copy is missing or stale
-func ensureDefaultPack() {
-    let dest = resourcePacksDir().appendingPathComponent(DEFAULT_PACK_FILE)
-    guard let bundled = bundleResourcePath(DEFAULT_PACK_FILE),
-          !sameFileContents(dest.path, bundled) else { return }
-    try? FileManager.default.removeItem(at: dest)
-    if (try? FileManager.default.copyItem(atPath: bundled, toPath: dest.path)) != nil {
-        print("[packs] default pack restored from app bundle")
+@discardableResult
+func ensureBundledResourcePackAssets() -> [String: Data] {
+    let directory = resourcePacksDir()
+    let directoryFD = Darwin.open(directory.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    guard directoryFD >= 0 else { return [:] }
+    defer { _ = Darwin.close(directoryFD) }
+    var result: [String: Data] = [:]
+    for asset in BUNDLED_RESOURCE_PACK_ASSETS {
+        guard let source = verifiedBundledBytes(asset) else {
+            print("[packs] bundled \(asset.displayName) failed verification")
+            continue
+        }
+        if readRegularFileNoFollow(directoryFD: directoryFD, name: asset.fileName).map(sha256Hex) != asset.sha256,
+           !atomicInstallManagedBytes(source, asset: asset, directoryFD: directoryFD) {
+            print("[packs] could not restore \(asset.displayName)")
+            continue
+        }
+        guard let installed = readRegularFileNoFollow(directoryFD: directoryFD, name: asset.fileName),
+              sha256Hex(installed) == asset.sha256 else { continue }
+        // Hash, parse, copy, and generation preparation all retain the exact
+        // immutable bundle snapshot. The post-copy descriptor read above is
+        // only a destination attestation, never a second source of truth.
+        result[asset.fileName] = source
     }
+    return result
+}
+
+func ensureDefaultPack() {
+    _ = ensureBundledResourcePackAssets()
 }
 
 /// user pack list → applied list: default pack force-appended at the END
 /// (lowest priority — user packs override it, like vanilla's layering)
-func withDefaultPack(_ userPacks: [String]) -> [String] {
-    var list = userPacks.filter { $0 != DEFAULT_PACK_FILE }
+func withDefaultPack(_ userPacks: [String], addOns: [BundledResourcePackAddOnID] = []) -> [String] {
+    let managed = Set(BUNDLED_RESOURCE_PACK_ASSETS.map(\.fileName)).union(LEGACY_DEFAULT_PACK_FILES)
+    var list = userPacks.filter { !managed.contains($0) }
+    for id in BUNDLED_RESOURCE_PACK_ADD_ONS.map(\.id) where addOns.contains(id) {
+        if let asset = BUNDLED_RESOURCE_PACK_ASSETS.first(where: {
+            if case .addOn(let candidate) = $0.role { return candidate == id }
+            return false
+        }) { list.append(asset.fileName) }
+    }
     let dest = resourcePacksDir().appendingPathComponent(DEFAULT_PACK_FILE)
     if FileManager.default.fileExists(atPath: dest.path) { list.append(DEFAULT_PACK_FILE) }
     return list
@@ -629,11 +1172,13 @@ private func entityTileCrop(_ tile: String) -> EntityTileCrop? {
     }
 }
 
-private func cropEntityTile(_ packs: [ResourcePack], _ crop: EntityTileCrop) -> RGBAImage? {
-    guard let tex = loadTexture(packs, crop.path) else { return nil }
+private func cropEntityTile(_ packs: [ResourcePack], _ crop: EntityTileCrop,
+                            budget: ResourcePackPreparationBudget) -> RGBAImage? {
+    guard let tex = loadTexture(packs, crop.path, budget: budget) else { return nil }
     let img = tex.image
     var pieces: [RGBAImage] = []
     for r in crop.rects {
+        guard budget.shouldContinue else { return nil }
         let x0 = Int(r.x * Double(img.width)), y0 = Int(r.y * Double(img.height))
         let w = max(1, Int(r.w * Double(img.width))), h = max(1, Int(r.h * Double(img.height)))
         guard x0 + w <= img.width, y0 + h <= img.height else { return nil }
@@ -680,33 +1225,52 @@ private func cropEntityTile(_ packs: [ResourcePack], _ crop: EntityTileCrop) -> 
     return out
 }
 
-private func loadTexture(_ packs: [ResourcePack], _ relPath: String) -> LoadedTexture? {
+private func loadTexture(_ packs: [ResourcePack], _ relPath: String,
+                         budget: ResourcePackPreparationBudget) -> LoadedTexture? {
     for p in packs {
+        guard budget.shouldContinue else { return nil }
         let full = "\(p.texRoot)\(relPath).png"
-        guard let d = p.file(full), let img = decodePNG(d) else { continue }
+        guard let d = p.file(full) else { continue }
+        guard let img = decodePNG(d, budget: budget) else {
+            _ = budget.reject()
+            return nil
+        }
         var anim: (frames: [(Int, Int)], interpolate: Bool)?
         if img.height > img.width, img.height % img.width == 0 {
             // animated strip; .mcmeta refines timing/order
             var frametime = 1
             var interpolate = false
             var frames: [(Int, Int)] = []
-            if let md = p.file(full + ".mcmeta"),
-               let json = try? JSONSerialization.jsonObject(with: md) as? [String: Any],
-               let a = json["animation"] as? [String: Any] {
-                frametime = max(1, a["frametime"] as? Int ?? 1)
+            if let md = p.file(full + ".mcmeta") {
+                guard md.count <= budget.limits.metadataBytes, budget.chargeMetadata(md.count),
+                      let json = try? JSONSerialization.jsonObject(with: md) as? [String: Any],
+                      let a = json["animation"] as? [String: Any] else {
+                    _ = budget.reject()
+                    return nil
+                }
+                frametime = a["frametime"] as? Int ?? 1
+                guard budget.validDuration(frametime) else { return nil }
                 interpolate = a["interpolate"] as? Bool ?? false
                 if let list = a["frames"] as? [Any] {
+                    guard list.count <= budget.limits.framesPerTexture else {
+                        _ = budget.reject()
+                        return nil
+                    }
                     for f in list {
                         if let i = f as? Int { frames.append((i, frametime)) }
                         else if let o = f as? [String: Any], let i = o["index"] as? Int {
-                            frames.append((i, max(1, o["time"] as? Int ?? frametime)))
-                        }
+                            let duration = o["time"] as? Int ?? frametime
+                            guard budget.validDuration(duration) else { return nil }
+                            frames.append((i, duration))
+                        } else { _ = budget.reject(); return nil }
                     }
                 }
             }
             let count = img.height / img.width
+            guard count <= budget.limits.framesPerTexture else { _ = budget.reject(); return nil }
             if frames.isEmpty { frames = (0..<count).map { ($0, frametime) } }
-            frames = frames.filter { $0.0 >= 0 && $0.0 < count }
+            guard frames.allSatisfy({ $0.0 >= 0 && $0.0 < count }),
+                  budget.chargeAnimationFrames(frames.count) else { _ = budget.reject(); return nil }
             if frames.count > 1 { anim = (frames, interpolate) }
         }
         return LoadedTexture(image: img, animation: anim)
@@ -722,9 +1286,15 @@ private func stripFrame(_ img: RGBAImage, _ i: Int) -> RGBAImage {
 }
 
 func buildPackAtlas(enabledFileNames: [String]) -> PackAtlasResult? {
+    let budget = ResourcePackPreparationBudget()
     let all = discoverResourcePacks()
     let packs = enabledFileNames.compactMap { name in all.first { $0.fileName == name } }
-    guard !packs.isEmpty else { return nil }
+    return buildPackAtlas(packs: packs, budget: budget)
+}
+
+func buildPackAtlas(packs: [ResourcePack],
+                    budget: ResourcePackPreparationBudget = ResourcePackPreparationBudget()) -> PackAtlasResult? {
+    guard !packs.isEmpty, budget.shouldContinue else { return nil }
 
     let base = ElysiumCore.buildAtlas()
     let names = allTileNames()
@@ -734,8 +1304,10 @@ func buildPackAtlas(enabledFileNames: [String]) -> PackAtlasResult? {
     var compositeSrcs: [Int: (RGBAImage, RGBAImage)] = [:]
     var entityTiles: [Int: RGBAImage] = [:]
     for (i, name) in names.enumerated() {
+        guard budget.shouldContinue else { return nil }
         if let halves = compositeHalves(name) {
-            if var t = loadTexture(packs, halves.top)?.image, var b = loadTexture(packs, halves.bottom)?.image {
+            if var t = loadTexture(packs, halves.top, budget: budget)?.image,
+               var b = loadTexture(packs, halves.bottom, budget: budget)?.image {
                 if t.height > t.width { t = stripFrame(t, 0) }
                 if b.height > b.width { b = stripFrame(b, 0) }
                 compositeSrcs[i] = (t, b)
@@ -743,9 +1315,10 @@ func buildPackAtlas(enabledFileNames: [String]) -> PackAtlasResult? {
             continue
         }
         for c in candidates(name) {
-            if let t = loadTexture(packs, c) { resolved[i] = t; break }
+            if let t = loadTexture(packs, c, budget: budget) { resolved[i] = t; break }
         }
-        if resolved[i] == nil, let ec = entityTileCrop(name), let img = cropEntityTile(packs, ec) {
+        if resolved[i] == nil, let ec = entityTileCrop(name),
+           let img = cropEntityTile(packs, ec, budget: budget) {
             entityTiles[i] = img
         }
     }
@@ -765,6 +1338,7 @@ func buildPackAtlas(enabledFileNames: [String]) -> PackAtlasResult? {
     var applied = 0
 
     for (i, name) in names.enumerated() {
+        guard budget.shouldContinue else { return nil }
         var px: [UInt8]
         if let t = resolved[i] {
             applied += 1
@@ -832,10 +1406,13 @@ func buildPackAtlas(enabledFileNames: [String]) -> PackAtlasResult? {
 
     // item icons: every textures/item/*.png in the stack, 16× for the icon cache
     var itemIcons: [String: [UInt8]] = [:]
+    let registeredItemImages = Set(itemDefs.flatMap { [$0.name, $0.icon] })
     for p in packs.reversed() {   // walk lowest→highest so highest priority wins
         for path in p.list(prefix: p.texRoot + "item/") where path.hasSuffix(".png") {
+            guard budget.shouldContinue else { return nil }
             let base = String(path.components(separatedBy: "/").last!.dropLast(4))
-            guard let d = p.file(path), var img = decodePNG(d) else { continue }
+            guard registeredItemImages.contains(base) else { continue }
+            guard let d = p.file(path), var img = decodePNG(d, budget: budget) else { continue }
             if img.height > img.width, img.height % img.width == 0 {
                 img = stripFrame(img, 0)
             }
@@ -856,14 +1433,57 @@ func buildPackAtlas(enabledFileNames: [String]) -> PackAtlasResult? {
 // =============================================================================
 /// the enabled pack stack, highest priority first — entity skins resolve here
 var ACTIVE_PACKS: [ResourcePack] = []
+private let RESOURCE_PACK_FALLBACK_NOTICE =
+    "Faithful 64x is unavailable; built-in fallback active."
+
+func resourcePackPresentationAfterActivePublication(
+    _ current: ResourcePackPresentationSnapshot,
+    activeAddOns: [BundledResourcePackAddOnID]
+) -> ResourcePackPresentationSnapshot {
+    ResourcePackPresentationSnapshot(
+        generation: .faithful64x(activeAddOns: activeAddOns),
+        noticeSerial: current.noticeSerial)
+}
+
+func resourcePackPresentationAfterFallbackPublication(
+    _ current: ResourcePackPresentationSnapshot
+) -> ResourcePackPresentationSnapshot {
+    ResourcePackPresentationSnapshot(
+        generation: .proceduralFallback(failedPackDisplayName: "Faithful 64x"),
+        noticeSerial: current.noticeSerial == UInt64.max ? 1 : current.noticeSerial + 1,
+        pendingNotice: RESOURCE_PACK_FALLBACK_NOTICE)
+}
+
+var RESOURCE_PACK_PRESENTATION = ResourcePackPresentationSnapshot(
+    generation: .proceduralFallback(failedPackDisplayName: "Faithful 64x"),
+    pendingNotice: RESOURCE_PACK_FALLBACK_NOTICE)
+@MainActor private var consumedResourcePackPresentationNoticeSerial: UInt64 = 0
+
+@MainActor
+func consumeResourcePackPresentationNotice() -> String? {
+    let snapshot = RESOURCE_PACK_PRESENTATION
+    guard case .proceduralFallback(let failedPackDisplayName) = snapshot.generation,
+          failedPackDisplayName == "Faithful 64x",
+          snapshot.noticeSerial != 0,
+          snapshot.noticeSerial != consumedResourcePackPresentationNoticeSerial,
+          let notice = snapshot.pendingNotice,
+          notice == RESOURCE_PACK_FALLBACK_NOTICE else { return nil }
+    consumedResourcePackPresentationNoticeSerial = snapshot.noticeSerial
+    return notice
+}
 
 /// load + composite a vanilla entity texture from the active packs
 /// (base + overlays alpha-blended in order, or stacked vertically); nil when absent
 func packEntityImage(_ rels: [String], stack: Bool = false, tints: [Int] = []) -> RGBAImage? {
-    guard !rels.isEmpty, !ACTIVE_PACKS.isEmpty else { return nil }
+    packEntityImage(rels, packs: ACTIVE_PACKS, stack: stack, tints: tints, budget: nil)
+}
+
+private func packEntityImage(_ rels: [String], packs: [ResourcePack], stack: Bool = false,
+                             tints: [Int] = [], budget: ResourcePackPreparationBudget?) -> RGBAImage? {
+    guard !rels.isEmpty, !packs.isEmpty, budget?.shouldContinue != false else { return nil }
     func load(_ rel: String) -> RGBAImage? {
-        for p in ACTIVE_PACKS {
-            if let d = p.file(p.texRoot + rel), var img = decodePNG(d) {
+        for p in packs {
+            if let d = p.file(p.texRoot + rel), var img = decodePNG(d, budget: budget) {
                 // vanilla ships some entity art grayscale for render-time
                 // tinting (tropical fish, sheep wool) — bake the tint here
                 if let i = rels.firstIndex(of: rel), i < tints.count, tints[i] != 0xFFFFFF {
@@ -885,6 +1505,7 @@ func packEntityImage(_ rels: [String], stack: Bool = false, tints: [Int] = []) -
         return base
     }
     for rel in rels.dropFirst() {
+        guard budget?.shouldContinue != false else { return nil }
         guard let over = load(rel), over.width == base.width, over.height == base.height else { continue }
         for i in stride(from: 0, to: base.pixels.count, by: 4) {
             let a = Int(over.pixels[i + 3])
@@ -904,33 +1525,287 @@ enum IconPackPublicationBoundary { case staged, retired, uiWorldInstalled, coreC
 var iconPackPublicationHook: ((IconPackPublicationBoundary) -> Void)?
 var failNextIconPackPublicationBeforeMutation = false
 
-func applyResourcePacks(_ userPacks: [String], game: GameCore, renderer: WorldRenderer, ui: UIManager) {
+private func resolvedResourcePackStack(
+    _ userPacks: [String], bundledAddOns: [BundledResourcePackAddOnID],
+    budget: ResourcePackPreparationBudget
+) -> (names: [String], packs: [ResourcePack])? {
+    let managedBytes = ensureBundledResourcePackAssets()
+    let enabled = withDefaultPack(userPacks, addOns: bundledAddOns)
+    guard budget.shouldContinue, Set(enabled).count == enabled.count else { return nil }
+    let managedNames = Set(BUNDLED_RESOURCE_PACK_ASSETS.map(\.fileName))
+    let directory = resourcePacksDir()
+    let directoryFD = Darwin.open(directory.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    guard directoryFD >= 0 else { return nil }
+    defer { _ = Darwin.close(directoryFD) }
+    let packs = enabled.compactMap { name -> ResourcePack? in
+        guard budget.shouldContinue else { return nil }
+        if managedNames.contains(name), let bytes = managedBytes[name] {
+            return ResourcePack(data: bytes, fileName: name, budget: budget)
+        }
+        guard !managedNames.contains(name) else { return nil }
+        return ResourcePack(directoryFD: directoryFD, fileName: name, budget: budget)
+    }
+    guard packs.count == enabled.count, budget.isValid else { return nil }
+    return (enabled, packs)
+}
+
+/// Resolve names and capture every byte exactly once on main. The returned value has no URL,
+/// descriptor, file descriptor, or resolver closure that a worker could use to touch live state.
+func snapshotResourcePackStack(
+    _ userPacks: [String], bundledAddOns: [BundledResourcePackAddOnID]
+) -> ResourcePackStackSourceSnapshot? {
+    guard Thread.isMainThread else { return nil }
+    let managedBytes = ensureBundledResourcePackAssets()
+    let enabled = withDefaultPack(userPacks, addOns: bundledAddOns)
+    guard Set(enabled).count == enabled.count else { return nil }
+    let managedNames = Set(BUNDLED_RESOURCE_PACK_ASSETS.map(\.fileName))
+    let directory = resourcePacksDir()
+    let directoryFD = Darwin.open(directory.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    guard directoryFD >= 0 else { return nil }
+    defer { _ = Darwin.close(directoryFD) }
+    let budget = ResourcePackPreparationBudget()
+    var sources: [ResourcePackSourceSnapshot] = []
+    sources.reserveCapacity(enabled.count)
+    for name in enabled {
+        guard budget.shouldContinue else { return nil }
+        if managedNames.contains(name) {
+            guard let data = managedBytes[name] else { return nil }
+            sources.append(ResourcePackSourceSnapshot(
+                fileName: name, displayName: String(name.dropLast(4)), payload: .archive(data)))
+            continue
+        }
+        var linkStatus = stat()
+        guard fstatat(directoryFD, name, &linkStatus, AT_SYMLINK_NOFOLLOW) == 0 else { return nil }
+        let identity = ResourcePackFileIdentity(linkStatus)
+        switch linkStatus.st_mode & S_IFMT {
+        case S_IFREG:
+            guard (name as NSString).pathExtension.lowercased() == "zip",
+                  linkStatus.st_nlink == 1, linkStatus.st_size >= 0,
+                  linkStatus.st_size <= budget.limits.archiveBytes,
+                  budget.chargeEntry(pathByteCount: name.utf8.count,
+                                     advertisedByteCount: Int(linkStatus.st_size)),
+                  budget.chargeInflated(Int(linkStatus.st_size)) else { return nil }
+            let fd = Darwin.openat(directoryFD, name,
+                                   O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)
+            guard fd >= 0 else { return nil }
+            var opened = stat()
+            let data = fstat(fd, &opened) == 0 && ResourcePackFileIdentity(opened) == identity
+                ? readResourcePackDescriptor(fd, expected: identity,
+                                             maximum: budget.limits.archiveBytes) : nil
+            _ = Darwin.close(fd)
+            guard let data else { return nil }
+            sources.append(ResourcePackSourceSnapshot(
+                fileName: name, displayName: String(name.dropLast(4)), payload: .archive(data)))
+        case S_IFDIR:
+            let fd = Darwin.openat(directoryFD, name,
+                                   O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+            guard fd >= 0 else { return nil }
+            var opened = stat()
+            var files: [String: Data] = [:]
+            var normalized: Set<String> = []
+            let captured = fstat(fd, &opened) == 0 && ResourcePackFileIdentity(opened) == identity &&
+                snapshotResourcePackFolder(directoryFD: fd, budget: budget, into: &files,
+                                           normalizedNames: &normalized)
+            _ = Darwin.close(fd)
+            guard captured else { return nil }
+            sources.append(ResourcePackSourceSnapshot(
+                fileName: name, displayName: name, payload: .folder(files)))
+        default:
+            return nil
+        }
+    }
+    return ResourcePackStackSourceSnapshot(
+        enabledNames: enabled, sources: sources, bundledAddOns: bundledAddOns)
+}
+
+/// Owned CPU result. Its input snapshot contains no path API, and `stage` claims this value once.
+final class PreparedResourcePackTransaction: @unchecked Sendable {
+    fileprivate let enabledNames: [String]
+    fileprivate let bundledAddOns: [BundledResourcePackAddOnID]
+    fileprivate let packs: [ResourcePack]
+    fileprivate let atlas: PackAtlasResult
+    fileprivate let packUI: PreparedPackUI
+    fileprivate let sunImage: RGBAImage?
+    fileprivate let moonImage: RGBAImage?
+    private var stagingClaimed = false
+
+    fileprivate init(enabledNames: [String], bundledAddOns: [BundledResourcePackAddOnID],
+                     packs: [ResourcePack], atlas: PackAtlasResult, packUI: PreparedPackUI,
+                     sunImage: RGBAImage?, moonImage: RGBAImage?) {
+        self.enabledNames = enabledNames
+        self.bundledAddOns = bundledAddOns
+        self.packs = packs
+        self.atlas = atlas
+        self.packUI = packUI
+        self.sunImage = sunImage
+        self.moonImage = moonImage
+    }
+
+    /// Main-only and fallible. Claiming occurs before any GPU allocation, preventing retries that
+    /// could accidentally stage a different A/B mix from the same logical transaction.
+    func stage(renderer: WorldRenderer) -> StagedResourcePackPublication? {
+        precondition(Thread.isMainThread)
+        guard !stagingClaimed else { return nil }
+        stagingClaimed = true
+        guard let candidate = IconSourceCandidate(atlas: atlas.icon16,
+                                                   itemOverrides: atlas.itemIcons),
+              let stagedWorld = renderer.stagePackAtlas(atlas),
+              let stagedPackUI = PackUI(prepared: packUI, device: renderer.device) else { return nil }
+        let stagedSun = sunImage.flatMap(renderer.makeImageTexture)
+        let stagedMoon = moonImage.flatMap(renderer.makeImageTexture)
+        guard (sunImage == nil || stagedSun != nil), (moonImage == nil || stagedMoon != nil) else {
+            return nil
+        }
+        iconPackPublicationHook?(.staged)
+        if failNextIconPackPublicationBeforeMutation {
+            failNextIconPackPublicationBeforeMutation = false
+            return nil
+        }
+        return StagedResourcePackPublication(
+            enabledNames: enabledNames, bundledAddOns: bundledAddOns, packs: packs,
+            atlas: atlas, candidate: candidate, world: stagedWorld, packUI: stagedPackUI,
+            sun: stagedSun, moon: stagedMoon)
+    }
+}
+
+/// Parse/decode/compose exclusively from owned snapshots. Cancellation is checked by the shared
+/// budget throughout archive inflation, image decode, atlas generation, and GUI composition.
+func prepareResourcePackTransaction(
+    snapshot: ResourcePackStackSourceSnapshot, cancellation: ResourcePackCancellationToken
+) -> PreparedResourcePackTransaction? {
+    let budget = ResourcePackPreparationBudget(cancellation: cancellation)
+    let packs = snapshot.sources.compactMap { ResourcePack(snapshot: $0, budget: budget) }
+    guard packs.count == snapshot.sources.count, budget.shouldContinue,
+          let atlas = buildPackAtlas(packs: packs, budget: budget),
+          let preparedUI = PackUI.prepare(packs: packs, budget: budget) else { return nil }
+    let sun = packEntityImage(["environment/sun.png"], packs: packs, budget: budget)
+    let moon = packEntityImage(["environment/moon_phases.png"], packs: packs, budget: budget)
+    guard budget.shouldContinue else { return nil }
+    return PreparedResourcePackTransaction(
+        enabledNames: snapshot.enabledNames, bundledAddOns: snapshot.bundledAddOns,
+        packs: packs, atlas: atlas, packUI: preparedUI, sunImage: sun, moonImage: moon)
+}
+
+/// Fully staged publication. After successful staging and persistence, this operation has no
+/// recoverable failure branch: it consumes exactly once and commits every A/B generation together.
+final class StagedResourcePackPublication {
+    private let enabledNames: [String]
+    private let bundledAddOns: [BundledResourcePackAddOnID]
+    private let packs: [ResourcePack]
+    private let atlas: PackAtlasResult
+    private let candidate: IconSourceCandidate
+    private let world: WorldRenderer.StagedWorldAtlas
+    private let packUI: PackUI
+    private let sun: MTLTexture?
+    private let moon: MTLTexture?
+    private var consumed = false
+
+    fileprivate init(enabledNames: [String], bundledAddOns: [BundledResourcePackAddOnID],
+                     packs: [ResourcePack], atlas: PackAtlasResult,
+                     candidate: IconSourceCandidate, world: WorldRenderer.StagedWorldAtlas,
+                     packUI: PackUI, sun: MTLTexture?, moon: MTLTexture?) {
+        self.enabledNames = enabledNames
+        self.bundledAddOns = bundledAddOns
+        self.packs = packs
+        self.atlas = atlas
+        self.candidate = candidate
+        self.world = world
+        self.packUI = packUI
+        self.sun = sun
+        self.moon = moon
+    }
+
+    func publish(game: GameCore, renderer: WorldRenderer, ui: UIManager) {
+        precondition(Thread.isMainThread && !consumed && !iconPackPublicationActive)
+        consumed = true
+        iconPackPublicationActive = true
+        defer { iconPackPublicationActive = false }
+        ui.cv.resetIconSlots()
+        renderer.resetSpriteSlots()
+        iconPackPublicationHook?(.retired)
+        installUIAtlas(atlas.icon16)
+        renderer.installStagedWorldAtlas(world)
+        iconPackPublicationHook?(.uiWorldInstalled)
+        // Install every main-confined B component while background Core icon readers remain on A.
+        // The atomic Core icon swap below is the final source commit for the complete generation.
+        PACK_TINT_GATE = atlas.tintGate
+        ACTIVE_PACKS = packs
+        RESOURCE_PACK_PRESENTATION = resourcePackPresentationAfterActivePublication(
+            RESOURCE_PACK_PRESENTATION, activeAddOns: bundledAddOns)
+        renderer.sunTex = sun
+        renderer.moonTex = moon
+        ui.packUI = packUI
+        ui.cv.guiTexture = packUI.texture
+        packFontWidths = packUI.fontWidths
+        renderer.entityRenderer.resetSkins()
+        let generation = publishIconSourceSnapshot(candidate)
+        recordUIIconGeneration(generation)
+        renderer.recordWorldIconGeneration(generation)
+        precondition(currentIconSourceGeneration() == generation &&
+                     currentUIIconGeneration() == generation &&
+                     renderer.currentWorldIconGeneration() == generation)
+        game.remeshAllLoaded()
+        iconPackPublicationHook?(.coreCommitted)
+        print("[packs] \(enabledNames.joined(separator: " + ")) published as one generation")
+        fflush(stdout)
+    }
+}
+
+func validateResourcePackStack(_ userPacks: [String],
+                               bundledAddOns: [BundledResourcePackAddOnID],
+                               cancellation: ResourcePackCancellationToken? = nil) -> Bool {
+    let budget = ResourcePackPreparationBudget(cancellation: cancellation)
+    guard let stack = resolvedResourcePackStack(userPacks, bundledAddOns: bundledAddOns,
+                                                budget: budget) else {
+        return false
+    }
+    return buildPackAtlas(packs: stack.packs, budget: budget) != nil && budget.isValid
+}
+
+@discardableResult
+func applyResourcePacks(_ userPacks: [String],
+                        bundledAddOns: [BundledResourcePackAddOnID] = [],
+                        game: GameCore, renderer: WorldRenderer, ui: UIManager) -> Bool {
     guard Thread.isMainThread, !iconPackPublicationActive else {
         print("[packs] rejected off-main or re-entrant pack publication")
-        return
+        return false
     }
     iconPackPublicationActive = true
     defer { iconPackPublicationActive = false }
     let t0 = CFAbsoluteTimeGetCurrent()
-    ensureDefaultPack()
-    let enabled = withDefaultPack(userPacks)
-    if let result = buildPackAtlas(enabledFileNames: enabled) {
+    let budget = ResourcePackPreparationBudget()
+    let resolved = resolvedResourcePackStack(userPacks, bundledAddOns: bundledAddOns,
+                                             budget: budget)
+    if resolved == nil {
+        print("[packs] requested resource-pack layer unavailable; retaining prior pack")
+    }
+    let enabled = resolved?.names ?? []
+    let packs = resolved?.packs ?? []
+    if let result = buildPackAtlas(packs: packs, budget: budget) {
         let items = result.itemIcons
         guard let candidate = IconSourceCandidate(
             atlas: result.icon16,
             itemOverrides: items
-        ), let stagedWorld = renderer.stagePackAtlas(result) else {
+        ), let stagedWorld = renderer.stagePackAtlas(result),
+              let stagedPackUI = PackUI(packs: packs, device: renderer.device, budget: budget),
+              budget.shouldContinue else {
             print("[packs] rejected invalid icon generation; retaining prior pack")
-            return
+            return false
         }
-        // GUI sheets + bitmap font from the same pack stack
-        let all = discoverResourcePacks()
-        let packs = enabled.compactMap { name in all.first { $0.fileName == name } }
+        // Every fallible CPU/AppKit/Metal candidate is complete before the
+        // first live-generation mutation.
+        let stagedSunImage = packEntityImage(["environment/sun.png"], packs: packs,
+                                             budget: budget)
+        let stagedMoonImage = packEntityImage(["environment/moon_phases.png"], packs: packs,
+                                              budget: budget)
+        guard budget.shouldContinue else { return false }
+        let stagedSun = stagedSunImage.flatMap { renderer.makeImageTexture($0) }
+        let stagedMoon = stagedMoonImage.flatMap { renderer.makeImageTexture($0) }
         iconPackPublicationHook?(.staged)
         if failNextIconPackPublicationBeforeMutation {
             failNextIconPackPublicationBeforeMutation = false
             print("[packs] injected pre-commit failure; retaining prior pack")
-            return
+            return false
         }
         ui.cv.resetIconSlots()
         renderer.resetSpriteSlots()
@@ -948,28 +1823,29 @@ func applyResourcePacks(_ userPacks: [String], game: GameCore, renderer: WorldRe
         iconPackPublicationHook?(.coreCommitted)
         PACK_TINT_GATE = result.tintGate
         ACTIVE_PACKS = packs
-        renderer.sunTex = packEntityImage(["environment/sun.png"]).flatMap { renderer.makeImageTexture($0) }
-        renderer.moonTex = packEntityImage(["environment/moon_phases.png"]).flatMap { renderer.makeImageTexture($0) }
-        let pui = PackUI(packs: packs, device: renderer.device)
-        ui.packUI = pui
-        ui.cv.guiTexture = pui?.texture
-        packFontWidths = pui?.fontWidths
+        RESOURCE_PACK_PRESENTATION = resourcePackPresentationAfterActivePublication(
+            RESOURCE_PACK_PRESENTATION, activeAddOns: bundledAddOns)
+        renderer.sunTex = stagedSun
+        renderer.moonTex = stagedMoon
+        ui.packUI = stagedPackUI
+        ui.cv.guiTexture = stagedPackUI.texture
+        packFontWidths = stagedPackUI.fontWidths
         print(String(format: "[packs] %@ → %d/%d tiles, %d item icons, %d animated, %d× atlas, %d GUI sheets (%.0fms)",
                      enabled.joined(separator: " + "), result.appliedTiles, result.slices.count,
-                     result.appliedItems, result.animations.count, result.res, pui?.sheets.count ?? 0,
+                     result.appliedItems, result.animations.count, result.res, stagedPackUI.sheets.count,
                      (CFAbsoluteTimeGetCurrent() - t0) * 1000))
     } else {
         let atlas = ElysiumCore.buildAtlas()
         guard let candidate = IconSourceCandidate(atlas: atlas),
               let stagedWorld = renderer.stageProceduralAtlas(atlas) else {
             print("[packs] procedural icon generation failed; retaining prior pack")
-            return
+            return false
         }
         iconPackPublicationHook?(.staged)
         if failNextIconPackPublicationBeforeMutation {
             failNextIconPackPublicationBeforeMutation = false
             print("[packs] injected procedural pre-commit failure; retaining prior pack")
-            return
+            return false
         }
         ui.cv.resetIconSlots()
         renderer.resetSpriteSlots()
@@ -986,6 +1862,8 @@ func applyResourcePacks(_ userPacks: [String], game: GameCore, renderer: WorldRe
         iconPackPublicationHook?(.coreCommitted)
         PACK_TINT_GATE = nil
         ACTIVE_PACKS = []
+        RESOURCE_PACK_PRESENTATION = resourcePackPresentationAfterFallbackPublication(
+            RESOURCE_PACK_PRESENTATION)
         renderer.sunTex = nil
         renderer.moonTex = nil
         ui.packUI = nil
@@ -996,6 +1874,7 @@ func applyResourcePacks(_ userPacks: [String], game: GameCore, renderer: WorldRe
     fflush(stdout)
     renderer.entityRenderer.resetSkins()   // entity textures re-resolve vs the new stack
     game.remeshAllLoaded()   // vertex tints depend on the gate — rebuild meshes
+    return true
 }
 
 // =============================================================================
@@ -1004,6 +1883,12 @@ func applyResourcePacks(_ userPacks: [String], game: GameCore, renderer: WorldRe
 // Sheets live in fixed 512×512 cells at exactly 2× base-GUI scale (16px-per-
 // 8px-glyph); packs at other resolutions are rescaled on load.
 // =============================================================================
+struct PreparedPackUI: Sendable {
+    let pixels: [UInt8]
+    let sheets: Set<String>
+    let fontWidths: [Double]?
+}
+
 final class PackUI {
     let texture: MTLTexture
     private(set) var sheets: Set<String> = []
@@ -1019,13 +1904,17 @@ final class PackUI {
         "smithing": (0, 2048), "cartography_table": (512, 2048), "beacon": (1024, 2048), "horse": (1536, 2048),
     ]
 
-    init?(packs: [ResourcePack], device: MTLDevice) {
+    static func prepare(packs: [ResourcePack],
+                        budget: ResourcePackPreparationBudget? = nil) -> PreparedPackUI? {
         let W = 2048, H = 2560
         var pixels = [UInt8](repeating: 0, count: W * H * 4)
+        var sheets: Set<String> = []
+        var fontWidths: [Double]?
 
         func load(_ rel: String) -> RGBAImage? {
             for p in packs {
-                if let d = p.file(p.texRoot + "\(rel).png"), let img = decodePNG(d) {
+                if let d = p.file(p.texRoot + "\(rel).png"),
+                   let img = decodePNG(d, budget: budget) {
                     return img
                 }
             }
@@ -1064,6 +1953,7 @@ final class PackUI {
             ("horse", "gui/container/horse", 256),
         ]
         for (key, rel, base) in sources {
+            guard budget?.shouldContinue != false else { return nil }
             if let img = load(rel) {
                 let cell = PackUI.CELLS[key]!
                 blit(img, cell.0, cell.1, baseSize: base)
@@ -1093,15 +1983,28 @@ final class PackUI {
             widths[32] = 4   // space
             fontWidths = widths
         }
-        guard !sheets.isEmpty else { return nil }
+        guard !sheets.isEmpty, budget?.shouldContinue != false else { return nil }
+        return PreparedPackUI(pixels: pixels, sheets: sheets, fontWidths: fontWidths)
+    }
 
+    init?(prepared: PreparedPackUI, device: MTLDevice) {
+        let W = 2048, H = 2560
+        guard prepared.pixels.count == W * H * 4 else { return nil }
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: W, height: H, mipmapped: false)
         td.usage = .shaderRead
         guard let tex = device.makeTexture(descriptor: td) else { return nil }
-        pixels.withUnsafeBytes { raw in
+        prepared.pixels.withUnsafeBytes { raw in
             tex.replace(region: MTLRegionMake2D(0, 0, W, H), mipmapLevel: 0,
                         withBytes: raw.baseAddress!, bytesPerRow: W * 4)
         }
         texture = tex
+        sheets = prepared.sheets
+        fontWidths = prepared.fontWidths
+    }
+
+    convenience init?(packs: [ResourcePack], device: MTLDevice,
+                      budget: ResourcePackPreparationBudget? = nil) {
+        guard let prepared = Self.prepare(packs: packs, budget: budget) else { return nil }
+        self.init(prepared: prepared, device: device)
     }
 }

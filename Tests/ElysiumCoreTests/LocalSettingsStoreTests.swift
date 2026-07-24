@@ -119,6 +119,19 @@ final class LocalSettingsStoreTests: XCTestCase {
         XCTAssertEqual(settings.rpgTutorialVersion, 0)
     }
 
+    func testBundledResourcePackConsentDecodesClosedAndDefaultsOff() throws {
+        let defaultStore = try makeStore()
+        XCTAssertEqual(try value(defaultStore.loadSettings()).bundledResourcePackAddOns, [])
+
+        let store = try makeStore()
+        let json = #"{"bundledResourcePackAddOns":["static-lanterns","unknown","ore-borders-64x","static-lanterns"],"resourcePacks":["custom.zip"]}"#
+        try write(Data(json.utf8), named: "settings.json", to: store)
+        let settings = try value(store.loadSettings())
+        XCTAssertEqual(settings.bundledResourcePackAddOns,
+                       ["ore-borders-64x", "static-lanterns"])
+        XCTAssertEqual(settings.resourcePacks, ["custom.zip"])
+    }
+
     func testTutorialVersionNormalizesIndependentlyAndPreservesValidPeers() throws {
         let cases = [
             "{}",

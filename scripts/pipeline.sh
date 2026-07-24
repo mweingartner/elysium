@@ -66,6 +66,18 @@ stage_surface() {
     release_unchanged && scripts/verify-elysium-storage-release-surface.sh &&
         scripts/security-check-binary.sh "$(sed -n '1p' "$TMP/release.path")" && release_unchanged
 }
+verify_pack_set() {
+    local resources="$1"
+    [ "$(shasum -a 256 "$resources/Faithful 64x - December 2025 Release.zip" | awk '{print $1}')" = \
+      a136d9101a4748558587980dace3cd7447b758fb72c4684d15fb805d0a812dac ] &&
+    [ "$(shasum -a 256 "$resources/Faithful 64x - Ore Borders 64x.zip" | awk '{print $1}')" = \
+      232b8a64d745dc08b958c3c4c07167bd3f38eebdc4cd682da9d1016b2ed190f8 ] &&
+    [ "$(shasum -a 256 "$resources/Faithful 64x - Static Lanterns.zip" | awk '{print $1}')" = \
+      d0165130d505da8996354c21090a47fd6def87f4c2a96442f1a4282b1bf2cbc8 ] &&
+    cmp -s "$ROOT/packaging/FAITHFUL-LICENSE.txt" "$resources/FAITHFUL-LICENSE.txt" &&
+    cmp -s "$ROOT/packaging/FAITHFUL-ADDONS-CREDITS.txt" \
+        "$resources/FAITHFUL-ADDONS-CREDITS.txt"
+}
 stage_xctest() {
     swift test 2>&1 | tee "$TMP/xctest.log"
     local status=${PIPESTATUS[0]}
@@ -87,7 +99,8 @@ stage_package() {
     [[ "$PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] || return 1
     printf '%s\n' "$PACKAGE_SHA256" > "$TMP/package.sha"
     [ -f "$DIST_EXECUTABLE" ] && [ ! -L "$DIST_EXECUTABLE" ] &&
-        [ "$(shasum -a 256 "$DIST_EXECUTABLE" | awk '{print $1}')" = "$PACKAGE_SHA256" ] || return 1
+        [ "$(shasum -a 256 "$DIST_EXECUTABLE" | awk '{print $1}')" = "$PACKAGE_SHA256" ] &&
+        verify_pack_set "$DIST_APP/Contents/Resources" || return 1
     stat -f '%d:%i:%z:%m:%c' "$DIST_EXECUTABLE" > "$TMP/package.identity"
     release_unchanged
 }
@@ -129,6 +142,7 @@ codesign_requirement() {
 stage_installed_identity() {
     release_unchanged && package_unchanged || return 1
     [ "$(shasum -a 256 "$INSTALLED_EXECUTABLE" | awk '{print $1}')" = "$(sed -n '1p' "$TMP/package.sha")" ] || return 1
+    verify_pack_set "$INSTALLED_APP/Contents/Resources" || return 1
     /usr/bin/codesign --verify --deep --strict "$INSTALLED_APP" || return 1
     local installed_codesign_details="$TMP/installed-codesign-details.txt"
     /usr/bin/codesign -d --verbose=4 "$INSTALLED_APP" >"$installed_codesign_details" 2>&1 || return 1

@@ -25,7 +25,7 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 - **Optional local AI assistant** — `/ai <request>` sends context to a configured Ollama endpoint at `http://localhost:11434`. Model output is treated as untrusted and reduced to registered, validated, count- and distance-bounded game actions. Elysium does not control what an independently configured Ollama installation or model provider does beyond that interface.
 - **Maps and controls** — compact and expanded live maps, configurable controls, keyboard and controller input, text-entry accessibility, fullscreen support, and debug/automation surfaces used by the verification suite.
 - **Synthesized audio** — music and sound effects are produced at runtime rather than shipped as conventional audio recordings.
-- **Resource-pack support** — Java Edition-style resource packs are read through Elysium's bounded archive and metadata loaders. The bundled default visual layer is Faithful 32x, credited under [Credits and licenses](#credits-and-licenses).
+- **Resource-pack support** — Java Edition-style resource packs are read through Elysium's bounded archive and metadata loaders. The pinned default is [Faithful 64x](https://faithfulpack.net/faithful64x) Release 12; **Options... → Video → Resource Packs...** offers the reviewed Ore Borders 64x and Static Lanterns add-ons independently, both off by default.
 
 For the subsystem boundaries and determinism rules, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -228,7 +228,7 @@ Report suspected security vulnerabilities privately using [SECURITY.md](SECURITY
 ## Credits and licenses
 
 - **Starting point:** Elysium began from [thebriangao/pebble](https://github.com/thebriangao/pebble), created by Brian Gao. Its open-source Swift and Metal codebase provided the foundation from which Elysium evolved. The inherited MIT copyright and permission notice are preserved in [LICENSE](LICENSE).
-- **Textures:** the bundled [Faithful 32x](https://faithfulpack.net/) texture set is the work of the Faithful team and its contributors. It is distributed under the separate [Faithful License](packaging/FAITHFUL-LICENSE.txt) and is not covered by Elysium's MIT license.
+- **Textures:** the bundled [Faithful 64x](https://faithfulpack.net/faithful64x) texture set is the work of the Faithful team and its contributors. The reviewed [Ore Borders 64x](https://faithfulpack.net/addons/OreBorders64x) and [Static Lanterns](https://faithfulpack.net/addons/ClearerLanterns) add-ons remain separate, optional layers. They are distributed under the separate [Faithful License](packaging/FAITHFUL-LICENSE.txt), with archive hashes and exact add-on attribution in [FAITHFUL-ADDONS-CREDITS.txt](packaging/FAITHFUL-ADDONS-CREDITS.txt), and are not covered by Elysium's MIT license.
 - **Deterministic math:** the fdlibm-derived math implementation retains its upstream notice in source.
 - **Elysium hero artwork:** `packaging/title-bg.png` was newly generated for Elysium and serves as both this README's hero and the in-game title-menu background. It is not derived from Pebble's README artwork or an in-game Faithful texture capture.
 

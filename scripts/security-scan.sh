@@ -201,4 +201,14 @@ if grep -RInE 'AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-
     fail "secret-looking material found"
 fi
 
+asset_verifier="scripts/verify-pack-assets.sh"
+[ -f "$asset_verifier" ] || fail "missing $asset_verifier"
+if grep -E '(--(fixture|scenario|fault|alternate-executable|caller-evidence)|case "(fixture|scenario|fault))' \
+    "$asset_verifier" >/dev/null; then
+    fail "test/fault-control option found in the production asset verifier"
+fi
+asset_verifier_mode="$(stat -f '%Lp' "$asset_verifier")"
+[ "$asset_verifier_mode" = "755" ] || fail "$asset_verifier must be mode 755 (found $asset_verifier_mode)"
+bash scripts/verify-pack-assets.sh
+
 echo "==> security: passed"

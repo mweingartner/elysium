@@ -131,9 +131,17 @@ final class IconTests: XCTestCase {
         XCTAssertTrue(source.contains("failNextIconPackPublicationBeforeMutation"))
         XCTAssertTrue(source.contains("iconPackPublicationHook?(.uiWorldInstalled)"))
         XCTAssertTrue(source.contains("iconPackPublicationHook?(.coreCommitted)"))
-        let install = try XCTUnwrap(source.range(of: "renderer.installStagedWorldAtlas(stagedWorld)"))
-        let commit = try XCTUnwrap(source.range(of: "let generation = publishIconSourceSnapshot(candidate)"))
-        let record = try XCTUnwrap(source.range(of: "recordUIIconGeneration(generation)"))
+        let publicationStart = try XCTUnwrap(
+            source.range(of: "final class StagedResourcePackPublication"))
+        let publicationEnd = try XCTUnwrap(
+            source.range(of: "func validateResourcePackStack", range: publicationStart.upperBound..<source.endIndex))
+        let publication = publicationStart.lowerBound..<publicationEnd.lowerBound
+        let install = try XCTUnwrap(
+            source.range(of: "renderer.installStagedWorldAtlas(world)", range: publication))
+        let commit = try XCTUnwrap(
+            source.range(of: "let generation = publishIconSourceSnapshot(candidate)", range: publication))
+        let record = try XCTUnwrap(
+            source.range(of: "recordUIIconGeneration(generation)", range: publication))
         XCTAssertLessThan(install.lowerBound, commit.lowerBound,
                           "UI/world B must install while Core readers still see A")
         XCTAssertLessThan(commit.lowerBound, record.lowerBound,

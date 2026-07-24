@@ -273,6 +273,11 @@ private func axString(_ element: AXUIElement, _ attribute: CFString) -> String? 
 private func axBool(_ element: AXUIElement, _ attribute: CFString) -> Bool? {
     axValue(element, attribute) as? Bool
 }
+private func axActionNames(_ element: AXUIElement) -> [String] {
+    var names: CFArray?
+    guard AXUIElementCopyActionNames(element, &names) == .success else { return [] }
+    return names as? [String] ?? []
+}
 private func axElement(_ element: AXUIElement, _ attribute: CFString) -> AXUIElement? {
     guard let raw = axValue(element, attribute), CFGetTypeID(raw) == AXUIElementGetTypeID() else {
         return nil
@@ -629,6 +634,14 @@ private let expectedOneShotActionIDs = [
     "title.activate.repeat", "title.activate.credits", "title.credits.escape",
     "title.tab.reverse.1", "title.tab.reverse.2", "title.tab.reverse.3",
     "title.tab.reverse.4", "title.tab.reverse.5",
+    "resource-packs.title-tab.1", "resource-packs.title-tab.2",
+    "resource-packs.title-tab.3", "resource-packs.open-settings",
+    "resource-packs.settings-shift-tab", "resource-packs.settings-tab",
+    "resource-packs.open-enter", "resource-packs.down", "resource-packs.up",
+    "resource-packs.shift-tab", "resource-packs.tab", "resource-packs.escape-return",
+    "resource-packs.open-space", "resource-packs.escape-second",
+    "resource-packs.settings-escape", "resource-packs.title-shift-tab.1",
+    "resource-packs.title-shift-tab.2", "resource-packs.title-shift-tab.3",
     "navigation.singleplayer.click", "navigation.create-world.click",
     "world-name.click", "world-name.key.a",
     "finder.activate", "elysium.reactivate", "world-name.reactivation-focus",
@@ -3918,7 +3931,245 @@ private func rawDriverForegroundSample(
         runningApplicationActive: NSRunningApplication.current.isActive)
 }
 
+// Test-only rehearsal for the installed resource-pack failure attestation. This code is compiled
+// into the disposable integration Driver, never Elysium.app. The parent process starts a fresh
+// child for each checkpoint, waits until mutation is complete, and delivers a real SIGINT. The
+// child's already-installed DispatchSource cleanup either restores the exact managed bytes and
+// parent mode or deliberately preserves the only verified backup and exits nonzero.
+private enum ResourcePackAttestationCheckpoint: String {
+    case parentMode = "parent-mode"
+    case archiveReplacement = "archive-replacement"
+    case restoreFailure = "restore-failure"
+}
+
+private func attestationWriteAll(_ fd: Int32, _ data: Data) -> Bool {
+    data.withUnsafeBytes { raw in
+        var offset = 0
+        while offset < raw.count {
+            let count = Darwin.write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+            if count > 0 { offset += count }
+            else if count < 0 && errno == EINTR { continue }
+            else { return false }
+        }
+        return true
+    }
+}
+
+private func attestationReadAll(_ fd: Int32, maximum: Int = 1 << 20) -> Data? {
+    guard lseek(fd, 0, SEEK_SET) >= 0 else { return nil }
+    var result = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+    while result.count <= maximum {
+        let count = Darwin.read(fd, &buffer, buffer.count)
+        if count > 0 { result.append(buffer, count: count) }
+        else if count == 0 { return result }
+        else if errno != EINTR { return nil }
+    }
+    return nil
+}
+
+private final class ResourcePackAttestationChild {
+    static let managedName = "Faithful 64x - December 2025 Release.zip"
+    static let original = Data("verified-faithful-64x-rehearsal-bytes\n".utf8)
+    static let invalid = Data("invalid-resource-pack-fixture\n".utf8)
+
+    let root: URL
+    let parent: URL
+    let backupDirectory: URL
+    let backup: URL
+    let ready: URL
+    private let parentFD: Int32
+    private let backupFD: Int32
+    private let originalMode: mode_t = 0o750
+    private var cleanupStarted = false
+
+    init(root: URL) throws {
+        self.root = root
+        parent = root.appendingPathComponent("resourcepacks", isDirectory: true)
+        backupDirectory = root.appendingPathComponent("backup", isDirectory: true)
+        backup = backupDirectory.appendingPathComponent("managed.backup")
+        ready = root.appendingPathComponent("ready")
+        let oldMask = umask(0o077); defer { umask(oldMask) }
+        guard mkdir(root.path, 0o700) == 0,
+              mkdir(parent.path, originalMode) == 0,
+              mkdir(backupDirectory.path, 0o700) == 0 else {
+            throw GateError.failed("attestation rehearsal directory creation")
+        }
+        parentFD = open(parent.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        backupFD = open(backupDirectory.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        guard parentFD >= 0, backupFD >= 0 else {
+            if parentFD >= 0 { close(parentFD) }
+            if backupFD >= 0 { close(backupFD) }
+            throw GateError.failed("attestation rehearsal directory authority")
+        }
+        guard Self.createFile(parentFD, name: Self.managedName, bytes: Self.original),
+              Self.createFile(backupFD, name: "managed.backup", bytes: Self.original) else {
+            throw GateError.failed("attestation rehearsal initial files")
+        }
+        var status = stat()
+        let descriptor = openat(backupFD, "managed.backup", O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw GateError.failed("attestation rehearsal backup open") }
+        defer { close(descriptor) }
+        guard fstat(descriptor, &status) == 0,
+              (status.st_mode & S_IFMT) == S_IFREG,
+              status.st_uid == geteuid(), status.st_nlink == 1,
+              status.st_mode & 0o777 == 0o600,
+              attestationReadAll(descriptor) == Self.original else {
+            throw GateError.failed("attestation rehearsal backup identity")
+        }
+    }
+
+    deinit { close(parentFD); close(backupFD) }
+
+    private static func createFile(_ directoryFD: Int32, name: String, bytes: Data) -> Bool {
+        let fd = openat(directoryFD, name,
+                        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        return attestationWriteAll(fd, bytes) && fsync(fd) == 0
+    }
+
+    func mutate(_ checkpoint: ResourcePackAttestationCheckpoint) throws {
+        // The caller installs and resumes the SIGINT source before this first mutation.
+        guard fchmod(parentFD, 0o500) == 0 else {
+            throw GateError.failed("attestation rehearsal parent mode mutation")
+        }
+        if checkpoint != .parentMode {
+            guard fchmod(parentFD, originalMode) == 0,
+                  Self.createFile(parentFD, name: ".invalid", bytes: Self.invalid),
+                  renameat(parentFD, ".invalid", parentFD, Self.managedName) == 0,
+                  fsync(parentFD) == 0,
+                  fchmod(parentFD, 0o500) == 0 else {
+                throw GateError.failed("attestation rehearsal archive replacement")
+            }
+        }
+        guard Self.createFileAtPath(ready, bytes: Data("ready\n".utf8)) else {
+            throw GateError.failed("attestation rehearsal ready publication")
+        }
+    }
+
+    private static func createFileAtPath(_ url: URL, bytes: Data) -> Bool {
+        let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        return attestationWriteAll(fd, bytes) && fsync(fd) == 0
+    }
+
+    func restore(injectFailure: Bool) -> Bool {
+        guard !cleanupStarted else { return false }
+        cleanupStarted = true
+        if injectFailure {
+            let report = root.appendingPathComponent("restore-failure")
+            let payload = Data((backup.path + "\n").utf8)
+            return !Self.createFileAtPath(report, bytes: payload)
+        }
+        guard fchmod(parentFD, originalMode) == 0 else { return false }
+        _ = unlinkat(parentFD, ".restore", 0)
+        guard Self.createFile(parentFD, name: ".restore", bytes: Self.original),
+              renameat(parentFD, ".restore", parentFD, Self.managedName) == 0,
+              fsync(parentFD) == 0,
+              fchmod(parentFD, originalMode) == 0 else { return false }
+        let fd = openat(parentFD, Self.managedName, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var status = stat(), parentStatus = stat()
+        return fstat(fd, &status) == 0 && fstat(parentFD, &parentStatus) == 0 &&
+            (status.st_mode & S_IFMT) == S_IFREG && status.st_nlink == 1 &&
+            status.st_uid == geteuid() && status.st_mode & 0o777 == 0o600 &&
+            parentStatus.st_mode & 0o777 == originalMode &&
+            attestationReadAll(fd) == Self.original
+    }
+}
+
+private func runResourcePackAttestationChild(_ arguments: [String]) -> Never {
+    guard arguments.count == 4,
+          let checkpoint = ResourcePackAttestationCheckpoint(rawValue: arguments[2]) else {
+        exit(64)
+    }
+    do {
+        let child = try ResourcePackAttestationChild(root: URL(fileURLWithPath: arguments[3]))
+        signal(SIGINT, SIG_IGN)
+        signal(SIGTERM, SIG_IGN)
+        let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        let terminate = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        let handler = {
+            let restored = child.restore(injectFailure: checkpoint == .restoreFailure)
+            exit(restored ? 0 : 75)
+        }
+        interrupt.setEventHandler(handler: handler)
+        terminate.setEventHandler(handler: handler)
+        interrupt.resume(); terminate.resume()
+        try child.mutate(checkpoint)
+        dispatchMain()
+    } catch {
+        exit(70)
+    }
+}
+
+private func runResourcePackAttestationRehearsal(executable: URL) -> Bool {
+    for checkpoint in [ResourcePackAttestationCheckpoint.parentMode,
+                       .archiveReplacement, .restoreFailure] {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elysium-pack-attestation-\(UUID().uuidString)")
+        let process = Process(), output = Pipe()
+        process.executableURL = executable
+        process.arguments = ["--resource-pack-attestation-child", checkpoint.rawValue, root.path]
+        process.standardOutput = output; process.standardError = output
+        do { try process.run() } catch { return false }
+        let ready = root.appendingPathComponent("ready")
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        while !FileManager.default.fileExists(atPath: ready.path),
+              process.isRunning, ProcessInfo.processInfo.systemUptime < deadline {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        }
+        guard process.isRunning, FileManager.default.fileExists(atPath: ready.path),
+              kill(process.processIdentifier, SIGINT) == 0 else {
+            if process.isRunning { process.terminate() }
+            process.waitUntilExit()
+            try? FileManager.default.removeItem(at: root)
+            return false
+        }
+        process.waitUntilExit()
+        let archive = root.appendingPathComponent("resourcepacks")
+            .appendingPathComponent(ResourcePackAttestationChild.managedName)
+        let backup = root.appendingPathComponent("backup/managed.backup")
+        let archiveBytes = try? Data(contentsOf: archive)
+        let backupBytes = try? Data(contentsOf: backup)
+        let directoryMode = (try? FileManager.default.attributesOfItem(
+            atPath: archive.deletingLastPathComponent().path)[.posixPermissions] as? NSNumber)?.intValue
+        if checkpoint == .restoreFailure {
+            let report = root.appendingPathComponent("restore-failure")
+            let reportValue = try? String(contentsOf: report, encoding: .utf8)
+            guard process.terminationStatus == 75,
+                  backupBytes == ResourcePackAttestationChild.original,
+                  reportValue == backup.path + "\n" else {
+                try? FileManager.default.removeItem(at: root); return false
+            }
+        } else {
+            guard process.terminationStatus == 0,
+                  archiveBytes == ResourcePackAttestationChild.original,
+                  backupBytes == ResourcePackAttestationChild.original,
+                  directoryMode == 0o750 else {
+                try? FileManager.default.removeItem(at: root); return false
+            }
+        }
+        // Test owner cleanup occurs only after assertions prove either exact restoration or the
+        // deliberately retained backup. The production/manual helper never deletes a sole backup.
+        try? FileManager.default.removeItem(at: root)
+    }
+    return true
+}
+
 let arguments = CommandLine.arguments
+if arguments.count >= 2, arguments[1] == "--resource-pack-attestation-child" {
+    runResourcePackAttestationChild(arguments)
+}
+if arguments == [arguments[0], "--self-test-resource-pack-attestation-v1"] {
+    guard runResourcePackAttestationRehearsal(executable: canonicalURL(arguments[0])) else {
+        fail("resource-pack attestation rehearsal self-test")
+    }
+    print("Resource-pack attestation rehearsal: PASS interrupts=2 restore_failure=retained")
+    exit(0)
+}
 if arguments == [arguments[0], "--self-test-conditional-denial-action-v1"] {
     guard runConditionalDenialActionSelfTest(), runLaunchPresentationTimingBudgetSelfTest() else {
         fail("conditional action and presentation budget self-test")
@@ -3938,6 +4189,9 @@ guard let rawDriverStart = ProcessStartIdentity.capture(getpid()),
       let rawDriverHash = try? hash(rawDriverExecutable),
       AXIsProcessTrusted(), CGPreflightPostEventAccess() else {
     fail("raw Driver identity or TCC preflight")
+}
+guard runResourcePackAttestationRehearsal(executable: rawDriverExecutable) else {
+    fail("resource-pack attestation rehearsal")
 }
 let rawDriverApplication = NSApplication.shared
 guard rawDriverApplication.setActivationPolicy(.accessory) else {
@@ -4228,10 +4482,16 @@ do {
             immutableLaunchAuthority.exactWithoutRehash()
     }
     let axApp = AXUIElementCreateApplication(app.processIdentifier)
-    guard wait(3, until: {
+    // Faithful 64x performs materially more bounded startup decoding than the former 32x pack.
+    // Unified logs from the failed gate showed AppKit still reporting "No windows open yet" at
+    // 3.435 seconds, after the previous three-second deadline had expired. Keep the identical exact
+    // AX role assertion, but allow the app's existing 15-second launch budget to publish it.
+    let axApplicationPublicationStarted = ProcessInfo.processInfo.systemUptime
+    guard wait(15, until: {
         axString(axApp, kAXRoleAttribute as CFString) == (kAXApplicationRole as String)
     }) else {
-        throw GateError.failed("launch AX application publication")
+        let elapsed = ProcessInfo.processInfo.systemUptime - axApplicationPublicationStarted
+        throw GateError.failed("launch AX application publication elapsed=\(elapsed)")
     }
     let launchAXInvalidation = TargetAXInvalidationLedger()
     try launchAXInvalidation.install(pid: boundAppIdentity.pid, application: axApp)
@@ -4863,6 +5123,57 @@ do {
           titleButtons.filter({ axBool($0, kAXFocusedAttribute as CFString) == true }).count == 1 else {
         throw GateError.failed("title production accessibility publication")
     }
+    let titleSemanticIDs = descendants(try currentGroup()).compactMap {
+        axString($0, kAXIdentifierAttribute as CFString)
+    }.filter { $0.hasPrefix("text:title:") }
+    let titleFocusedBefore = titleButtons.first {
+        axBool($0, kAXFocusedAttribute as CFString) == true
+    }
+    guard titleSemanticIDs == expectedTitleIDs + ["text:title:texture-generation"],
+          let titleTexture = descendants(try currentGroup()).first(where: {
+              axString($0, kAXIdentifierAttribute as CFString) ==
+                  "text:title:texture-generation"
+          }) else {
+        throw GateError.failed("title texture Accessibility identity and order")
+    }
+    guard axString(titleTexture, kAXRoleAttribute as CFString) == kAXStaticTextRole,
+          axString(titleTexture, kAXDescriptionAttribute as CFString) == "Textures",
+          axString(titleTexture, kAXValueAttribute as CFString) ==
+              "Faithful 64x (faithfulpack.net)",
+          axString(titleTexture, kAXHelpAttribute as CFString) ==
+              "Faithful 64x is the active texture baseline.",
+          axBool(titleTexture, kAXEnabledAttribute as CFString) == true,
+          !axActionNames(titleTexture).contains(kAXPressAction as String),
+          axBool(titleTexture, kAXFocusedAttribute as CFString) == false else {
+        throw GateError.failed("title texture Accessibility semantics")
+    }
+    guard let titleTexturePosition = axPoint(titleTexture, kAXPositionAttribute as CFString),
+          let titleTextureExtent = axSize(titleTexture, kAXSizeAttribute as CFString),
+          let titleWindowPosition = axPoint(window, kAXPositionAttribute as CFString),
+          let titleWindowExtent = axSize(window, kAXSizeAttribute as CFString),
+          titleTexturePosition.x.isFinite, titleTexturePosition.y.isFinite,
+          titleTextureExtent.width.isFinite, titleTextureExtent.height.isFinite,
+          titleWindowPosition.x.isFinite, titleWindowPosition.y.isFinite,
+          titleWindowExtent.width.isFinite, titleWindowExtent.height.isFinite,
+          titleTextureExtent.width > 0, titleTextureExtent.height > 0,
+          titleWindowExtent.width > 0, titleWindowExtent.height > 0,
+          CGRect(origin: titleWindowPosition, size: titleWindowExtent).contains(
+              CGRect(origin: titleTexturePosition, size: titleTextureExtent)) else {
+        throw GateError.failed("title texture Accessibility frame")
+    }
+    _ = AXUIElementSetAttributeValue(titleTexture,
+        kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    guard axBool(titleTexture, kAXFocusedAttribute as CFString) == false,
+          let titleFocusedAfter = titleButtons.first(where: {
+              axBool($0, kAXFocusedAttribute as CFString) == true
+          }),
+          let titleFocusedBefore,
+          CFEqual(titleFocusedAfter, titleFocusedBefore),
+          titleButtons.filter({
+              axBool($0, kAXFocusedAttribute as CFString) == true
+          }).count == 1 else {
+        throw GateError.failed("title texture static focus isolation")
+    }
     func currentTitleButtons() throws -> [AXUIElement] {
         let values = descendants(try currentGroup()).filter {
             axString($0, kAXRoleAttribute as CFString) == kAXButtonRole &&
@@ -4911,6 +5222,150 @@ do {
     try postRepeatingKeyOnce("title.activate.repeat", 36, ledger: actionLedger,
                              finalCheck: { try requireLaunchPresentation("title repeat adjacent") })
     try requireTitleFocus("text:title:singleplayer", "repeat activation rejected")
+
+    // Traverse the real packaged Title -> Video -> Resource Packs route using only physical
+    // keyboard events before any semantic inspection. The test is intentionally non-mutating:
+    // independent/both toggles, synthetic conflict, and persistence dispositions are exercised by
+    // production-reducer/Core fixtures so this packaged gate never writes the user's settings.
+    gateStage = "resource-pack-keyboard-and-accessibility"
+    for (index, expectedID) in ["text:title:multiplayer", "text:title:credits",
+                                "text:title:options"].enumerated() {
+        try postKeyOnce("resource-packs.title-tab.\(index + 1)", 48, ledger: actionLedger,
+                        finalCheck: { try requireLaunchPresentation("resource packs title tab") })
+        try requireTitleFocus(expectedID, "resource packs title tab \(index + 1)")
+    }
+    try postKeyOnce("resource-packs.open-settings", 36, ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("resource packs open settings") })
+
+    func currentElement(_ identifier: String) -> AXUIElement? {
+        let publishedIdentifier = identifier.hasPrefix("text:") ? identifier : "text:\(identifier)"
+        return descendants((try? currentGroup()) ?? AXUIElementCreateSystemWide()).filter {
+            axString($0, kAXIdentifierAttribute as CFString) == publishedIdentifier
+        }.first
+    }
+    func requireElementFocus(_ identifier: String, _ stage: String) throws {
+        guard try waitFailFast(3, until: {
+            guard let element = currentElement(identifier) else { return false }
+            return axBool(element, kAXFocusedAttribute as CFString) == true
+        }) else { throw GateError.failed("\(stage) focus=\(identifier)") }
+    }
+    try requireElementFocus("video.resource-packs", "settings initial resource packs")
+    guard let settingsEntry = currentElement("video.resource-packs"),
+          axString(settingsEntry, kAXRoleAttribute as CFString) == kAXButtonRole,
+          axString(settingsEntry, kAXDescriptionAttribute as CFString) == "Resource Packs...",
+          axBool(settingsEntry, kAXEnabledAttribute as CFString) == true else {
+        throw GateError.failed("resource packs settings Accessibility entry")
+    }
+    try postKeyOnce("resource-packs.settings-shift-tab", 48, flags: .maskShift,
+                    ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("resource packs settings reverse") })
+    try requireElementFocus("video.shaders", "settings physical Shift-Tab")
+    try postKeyOnce("resource-packs.settings-tab", 48, ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("resource packs settings forward") })
+    try requireElementFocus("video.resource-packs", "settings physical Tab")
+    try postKeyOnce("resource-packs.open-enter", 36, ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("resource packs physical Enter") })
+
+    let oreID = "resource-pack.ore-borders-64x"
+    let lanternID = "resource-pack.static-lanterns"
+    let doneID = "resource-pack.done"
+    try requireElementFocus(oreID, "resource packs initial row")
+    guard let baseline = currentElement("resource-pack.baseline"),
+          let packStatus = currentElement("resource-pack.status"),
+          let ore = currentElement(oreID), let lantern = currentElement(lanternID),
+          let packDone = currentElement(doneID),
+          axString(baseline, kAXRoleAttribute as CFString) == kAXStaticTextRole,
+          axString(baseline, kAXDescriptionAttribute as CFString) == "Faithful 64x baseline",
+          axString(baseline, kAXValueAttribute as CFString) == "Active (always selected)",
+          axString(baseline, kAXHelpAttribute as CFString)?.contains("always selected") == true,
+          axString(packStatus, kAXRoleAttribute as CFString) == kAXStaticTextRole,
+          axString(packStatus, kAXDescriptionAttribute as CFString) == "Resource pack status",
+          axString(packStatus, kAXValueAttribute as CFString) ==
+              "Optional add-ons are OFF until you select them.",
+          axBool(baseline, kAXEnabledAttribute as CFString) == true,
+          axBool(packStatus, kAXEnabledAttribute as CFString) == true,
+          axBool(baseline, kAXFocusedAttribute as CFString) == false,
+          axBool(packStatus, kAXFocusedAttribute as CFString) == false,
+          !axActionNames(baseline).contains(kAXPressAction as String),
+          !axActionNames(packStatus).contains(kAXPressAction as String),
+          axString(ore, kAXRoleAttribute as CFString) == kAXCheckBoxRole,
+          axString(lantern, kAXRoleAttribute as CFString) == kAXCheckBoxRole,
+          axString(ore, kAXDescriptionAttribute as CFString) == "Ore Borders 64x",
+          axString(lantern, kAXDescriptionAttribute as CFString) == "Static Lanterns",
+          axString(ore, kAXValueAttribute as CFString) == "OFF",
+          axString(lantern, kAXValueAttribute as CFString) == "OFF",
+          axString(ore, kAXHelpAttribute as CFString)?.contains("Ore Borders 64x") == true,
+          axString(lantern, kAXHelpAttribute as CFString)?.contains("Static Lanterns") == true,
+          axBool(ore, kAXEnabledAttribute as CFString) == true,
+          axBool(lantern, kAXEnabledAttribute as CFString) == true,
+          axString(packDone, kAXRoleAttribute as CFString) == kAXButtonRole else {
+        throw GateError.failed("resource packs default-OFF Accessibility truth")
+    }
+    let resourcePackSemanticIDs = descendants(try currentGroup()).compactMap {
+        axString($0, kAXIdentifierAttribute as CFString)
+    }.filter { $0.hasPrefix("text:resource-pack.") }
+    guard resourcePackSemanticIDs == [
+        "text:resource-pack.baseline", "text:resource-pack.status",
+        "text:\(oreID)", "text:\(lanternID)", "text:\(doneID)",
+    ] else { throw GateError.failed("resource packs Accessibility tree order") }
+    for element in [baseline, packStatus, ore, lantern] {
+        guard let position = axPoint(element, kAXPositionAttribute as CFString),
+              let extent = axSize(element, kAXSizeAttribute as CFString),
+              let windowPosition = axPoint(window, kAXPositionAttribute as CFString),
+              let windowSize = axSize(window, kAXSizeAttribute as CFString),
+              position.x.isFinite, position.y.isFinite,
+              extent.width.isFinite, extent.height.isFinite,
+              windowPosition.x.isFinite, windowPosition.y.isFinite,
+              windowSize.width.isFinite, windowSize.height.isFinite,
+              extent.width > 0, extent.height > 0,
+              windowSize.width > 0, windowSize.height > 0,
+              CGRect(origin: windowPosition, size: windowSize).contains(
+                CGRect(origin: position, size: extent)) else {
+            throw GateError.failed("resource packs focused-row reveal geometry")
+        }
+    }
+    for (element, label) in [(baseline, "baseline"), (packStatus, "status")] {
+        _ = AXUIElementSetAttributeValue(element,
+            kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        guard axBool(element, kAXFocusedAttribute as CFString) == false,
+              axBool(ore, kAXFocusedAttribute as CFString) == true,
+              axBool(lantern, kAXFocusedAttribute as CFString) == false,
+              axBool(packDone, kAXFocusedAttribute as CFString) == false else {
+            throw GateError.failed("resource packs \(label) static focus isolation")
+        }
+    }
+    try postKeyOnce("resource-packs.down", 125, ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("resource packs ArrowDown") })
+    try requireElementFocus(lanternID, "resource packs ArrowDown")
+    try postKeyOnce("resource-packs.up", 126, ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("resource packs ArrowUp") })
+    try requireElementFocus(oreID, "resource packs ArrowUp")
+    try postKeyOnce("resource-packs.shift-tab", 48, flags: .maskShift,
+                    ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("resource packs Shift-Tab") })
+    try requireElementFocus(doneID, "resource packs Shift-Tab")
+    try postKeyOnce("resource-packs.tab", 48, ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("resource packs Tab") })
+    try requireElementFocus(oreID, "resource packs Tab")
+    try postKeyOnce("resource-packs.escape-return", 53, ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("resource packs Escape") })
+    try requireElementFocus("video.resource-packs", "resource packs exact return focus")
+    try postKeyOnce("resource-packs.open-space", 49, ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("resource packs physical Space") })
+    try requireElementFocus(oreID, "resource packs reopen")
+    try postKeyOnce("resource-packs.escape-second", 53, ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("resource packs second Escape") })
+    try requireElementFocus("video.resource-packs", "resource packs second return focus")
+    try postKeyOnce("resource-packs.settings-escape", 53, ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("settings Escape") })
+    try requireTitleFocus("text:title:options", "settings return to title")
+    for (index, expectedID) in ["text:title:credits", "text:title:multiplayer",
+                                "text:title:singleplayer"].enumerated() {
+        try postKeyOnce("resource-packs.title-shift-tab.\(index + 1)", 48, flags: .maskShift,
+                        ledger: actionLedger,
+                        finalCheck: { try requireLaunchPresentation("resource packs title return") })
+        try requireTitleFocus(expectedID, "resource packs title reverse \(index + 1)")
+    }
     let imageAspect = 1_672.0 / 941.0, viewportAspect = uiWidth / uiHeight
     let protectedBottom: Double
     if imageAspect > viewportAspect {
@@ -5563,7 +6018,10 @@ do {
 } catch GateError.failed(let stage) {
     cleanup.run()
     fail("\(gateStage): \(stage)")
+} catch CoordinatorProtocolError.invalid(let detail) {
+    cleanup.run()
+    fail("\(gateStage): coordinator protocol \(detail)")
 } catch {
     cleanup.run()
-    fail("\(gateStage): unexpected error")
+    fail("\(gateStage): unexpected error type=\(String(reflecting: type(of: error)))")
 }

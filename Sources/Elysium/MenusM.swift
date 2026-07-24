@@ -21,6 +21,12 @@ private func savedWorldCanvasName(_ raw: String, maximumAdvance: Int) -> String 
 
 // =============================================================================
 final class TitleScreen: Screen {
+    private struct TexturePresentation {
+        let canvas: String
+        let value: String
+        let help: String
+    }
+
     private enum Action: String, CaseIterable {
         case singleplayer = "title:singleplayer"
         case multiplayer = "title:multiplayer"
@@ -54,6 +60,21 @@ final class TitleScreen: Screen {
     override init() {
         super.init()
         closeOnEsc = false
+    }
+
+    private func texturePresentation() -> TexturePresentation {
+        switch RESOURCE_PACK_PRESENTATION.generation {
+        case .faithful64x:
+            return TexturePresentation(
+                canvas: "Textures: Faithful 64x (faithfulpack.net)",
+                value: "Faithful 64x (faithfulpack.net)",
+                help: "Faithful 64x is the active texture baseline.")
+        case .proceduralFallback:
+            return TexturePresentation(
+                canvas: "Textures: Built-in fallback — Faithful 64x unavailable",
+                value: "Built-in fallback — Faithful 64x unavailable",
+                help: "Faithful 64x could not be loaded; built-in textures are active.")
+        }
     }
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         if splash.isEmpty { splash = TitleScreen.SPLASHES[Int.random(in: 0..<TitleScreen.SPLASHES.count)] }
@@ -179,7 +200,8 @@ final class TitleScreen: Screen {
             cv.restore()
         }
         cv.drawText("Elysium \(ELYSIUM_VERSION)", 2, ui.height - 10, 1, "#c8c8c8")
-        cv.drawText("Textures: Faithful 32x (faithfulpack.net)", 2, ui.height - 20, 1, "#909090")
+        let textureCredit = texturePresentation().canvas
+        cv.drawText(textureCredit, 2, ui.height - 20, 1, "#909090")
         let credit = "LAN multiplayer"
         cv.drawText(credit, ui.width - Double(textWidth(credit)) - 2, ui.height - 10, 1, "#c8c8c8")
         ui.drawButtons(self)
@@ -197,13 +219,26 @@ final class TitleScreen: Screen {
     override func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore)
         -> [TextEntryAccessibilityDescriptor] {
         guard ui.current() === self, let mapped = actionButtons() else { return [] }
-        return mapped.map { action, button in
+        var descriptors = mapped.map { action, button in
             TextEntryAccessibilityDescriptor(
                 id: action.rawValue, role: .button, label: button.label, value: "",
                 help: "Open \(button.label).", frame: (button.x, button.y, button.w, button.h),
                 enabled: button.visible && button.enabled, focused: focusedAction == action,
                 insertionUTF16Offset: nil, focusable: true, actionable: true)
         }
+        let texture = texturePresentation()
+        descriptors.append(TextEntryAccessibilityDescriptor(
+            id: "title:texture-generation", role: .staticText, label: "Textures",
+            value: texture.value, help: texture.help,
+            frame: (2, ui.height - 22,
+                    max(1, min(ui.width - 4, Double(textWidth(texture.canvas)))), 12),
+            enabled: true, focused: false, insertionUTF16Offset: nil,
+            focusable: false, actionable: false))
+        return descriptors
+    }
+
+    override func consumeTextAccessibilityStatusAnnouncement() -> String? {
+        MainActor.assumeIsolated { consumeResourcePackPresentationNotice() }
     }
 
     override func focusTextAccessibilityElement(_ id: String, _ ui: UIManager,
@@ -1776,6 +1811,9 @@ final class SettingsScreen: Screen {
     var aiModelChoices: [String] = []
     var aiStatus = ""
     var hasActiveControlsCapture: Bool { bindingKey != nil }
+    private var recoveryNavigationButtons: Set<ObjectIdentifier> = []
+    private var settingsFocusID = "video.resource-packs"
+    private var settingsFocusControls: [String: Button] = [:]
 
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         rebuild(ui, game)
@@ -1785,6 +1823,7 @@ final class SettingsScreen: Screen {
     private func persistSettingsMutation(
         _ game: GameCore, _ mutation: (inout Settings) -> Void
     ) -> Bool {
+        guard !game.settingsRecoveryRequired else { return false }
         var candidate = game.settings
         mutation(&candidate)
         return persistSettingsCandidate(
@@ -1795,6 +1834,7 @@ final class SettingsScreen: Screen {
     private func persistSettingsCandidate(
         _ game: GameCore, candidate: Settings, expectedRevision: UInt64
     ) -> Bool {
+        guard !game.settingsRecoveryRequired else { return false }
         return MainActor.assumeIsolated {
             if case .success = game.persistAndPublishSettingsCandidate(
                 candidate, expectedLiveRevision: expectedRevision) { return true }
@@ -1807,6 +1847,10 @@ final class SettingsScreen: Screen {
         _ game: GameCore, candidate: [String: String], expectedRevision: UInt64,
         successMessage: String
     ) -> Bool {
+        guard !game.settingsRecoveryRequired else {
+            controlsStatus = "Settings recovery required — Restart Elysium"
+            return false
+        }
         let result = MainActor.assumeIsolated {
             game.persistAndPublishKeybindCandidate(
                 candidate, expectedLiveRevision: expectedRevision)
@@ -1827,6 +1871,7 @@ final class SettingsScreen: Screen {
         fields = []
         aiModelField = nil
         controlsLayout = nil
+        recoveryNavigationButtons = []
         let cx = (ui.width / 2).rounded(.down)
         // tabs
         let tabs = ["video", "audio", "controls", "accessibility", "ai"]
@@ -1837,6 +1882,7 @@ final class SettingsScreen: Screen {
             let b = Button(tabStart + Double(i) * tabW, 20, tabW - 2, 16, label, { [weak self, weak ui, weak game] in
                 guard let self, let ui, let game else { return }
                 guard self.saveAIModelIfNeeded(game) else { return }
+                self.settingsFocusID = "settings.tab.\(t)"
                 self.tab = t
                 self.bindingKey = nil
                 self.pendingKeybindConflict = nil
@@ -1845,6 +1891,7 @@ final class SettingsScreen: Screen {
                 self.rebuild(ui, game)
             })
             buttons.append(b)
+            recoveryNavigationButtons.insert(ObjectIdentifier(b))
         }
         var y = 46.0
         let W = 150.0, GAP = 158.0
@@ -1919,7 +1966,12 @@ final class SettingsScreen: Screen {
                 "Fullscreen: \((gAppDelegate?.window?.styleMask.contains(.fullScreen) ?? false) ? "ON" : "OFF")", {
                     gAppDelegate?.window?.toggleFullScreen(nil)
                 })
+            fullscreen.onClick = { [weak self] in
+                self?.settingsFocusID = "video.fullscreen"
+                gAppDelegate?.window?.toggleFullScreen(nil)
+            }
             buttons.append(fullscreen)
+            recoveryNavigationButtons.insert(ObjectIdentifier(fullscreen))
             y += 22
             sliders.append(Slider(cx - 160, y, W, 18,
                 { [weak game] in "Particles: \(["Minimal", "Decreased", "All"][min(2, game?.settings.particles ?? 2)])" },
@@ -1956,6 +2008,17 @@ final class SettingsScreen: Screen {
                 shaderB.label = shaderLabel()
             }
             buttons.append(shaderB)
+            let packsB = Button(cx - 2, y, W, 18, "Resource Packs...", { [weak ui, weak game] in
+                guard let ui, let game else { return }
+                ui.open(ResourcePackScreen(), game)
+            })
+            packsB.onClick = { [weak self, weak ui, weak game] in
+                guard let self, let ui, let game else { return }
+                self.settingsFocusID = "video.resource-packs"
+                ui.open(ResourcePackScreen(), game)
+            }
+            buttons.append(packsB)
+            recoveryNavigationButtons.insert(ObjectIdentifier(packsB))
         } else if tab == "audio" {
             let cats: [(String, String)] = [
                 ("master", "Master Volume"), ("music", "Music"), ("blocks", "Blocks"),
@@ -2114,11 +2177,100 @@ final class SettingsScreen: Screen {
                 self.aiStatus = "Model cleared"
             }))
         }
-        buttons.append(Button(cx - 100, ui.height - 30, 200, 20, "Done", { [weak self, weak ui, weak game] in
+        let done = Button(cx - 100, ui.height - 30, 200, 20, "Done", { [weak self, weak ui, weak game] in
             guard let self, let ui, let game else { return }
             guard self.saveAIModelIfNeeded(game) else { return }
             ui.closeTop(game)
-        }))
+        })
+        buttons.append(done)
+        recoveryNavigationButtons.insert(ObjectIdentifier(done))
+        if game.settingsRecoveryRequired {
+            bindingKey = nil
+            pendingKeybindConflict = nil
+            pendingKeybindExpectedRevision = nil
+            for button in buttons where !recoveryNavigationButtons.contains(ObjectIdentifier(button)) {
+                button.enabled = false
+            }
+            for slider in sliders { slider.enabled = false; slider.dragging = false }
+            for field in fields { field.enabled = false; field.focused = false }
+        }
+        indexSettingsFocusControls()
+    }
+
+    private func indexSettingsFocusControls() {
+        settingsFocusControls = [:]
+        let tabs = ["video", "audio", "controls", "accessibility", "ai"]
+        for (index, name) in tabs.enumerated() where index < buttons.count {
+            settingsFocusControls["settings.tab.\(name)"] = buttons[index]
+        }
+        func button(_ prefix: String, _ id: String) {
+            if let value = buttons.first(where: { $0.label.hasPrefix(prefix) }) {
+                settingsFocusControls[id] = value
+            }
+        }
+        func slider(_ prefix: String, _ id: String) {
+            if let value = sliders.first(where: { $0.getLabel().hasPrefix(prefix) }) {
+                settingsFocusControls[id] = value
+            }
+        }
+        if tab == "video" {
+            slider("Render Distance:", "video.render-distance")
+            slider("FOV:", "video.fov")
+            slider("Brightness:", "video.brightness")
+            slider("GUI Scale:", "video.gui-scale")
+            button("Fancy Graphics:", "video.fancy")
+            button("Smooth Lighting:", "video.smooth-lighting")
+            button("Bloom:", "video.bloom")
+            button("Soft Shadows:", "video.soft-shadows")
+            button("Clouds:", "video.clouds")
+            button("View Bobbing:", "video.view-bobbing")
+            button("Fullscreen:", "video.fullscreen")
+            slider("Particles:", "video.particles")
+            slider("Max FPS:", "video.max-fps")
+            button("Shaders:", "video.shaders")
+            button("Resource Packs...", "video.resource-packs")
+        }
+        button("Done", "settings.done")
+
+        // Keep every visible control in the accessibility reading order, including controls
+        // which recovery deliberately makes non-actionable. Semantic IDs above remain stable
+        // for the Video contract; these deterministic per-tab fallbacks cover the other tabs.
+        var indexedObjects = Set(settingsFocusControls.values.map(ObjectIdentifier.init))
+        for (index, value) in buttons.enumerated()
+            where !indexedObjects.contains(ObjectIdentifier(value)) {
+            settingsFocusControls["settings.\(tab).button.\(index)"] = value
+            indexedObjects.insert(ObjectIdentifier(value))
+        }
+        for (index, value) in sliders.enumerated()
+            where !indexedObjects.contains(ObjectIdentifier(value)) {
+            settingsFocusControls["settings.\(tab).slider.\(index)"] = value
+            indexedObjects.insert(ObjectIdentifier(value))
+        }
+        if settingsFocusControls[settingsFocusID] == nil {
+            settingsFocusID = tab == "video" ? "video.resource-packs" : "settings.tab.\(tab)"
+        }
+    }
+
+    private func settingsFocusGraph(_ recovery: Bool) -> [String] {
+        let tabs = ["settings.tab.video", "settings.tab.audio", "settings.tab.controls",
+                    "settings.tab.accessibility", "settings.tab.ai"]
+        if recovery {
+            if tab == "video" {
+                return tabs + ["video.fullscreen", "video.resource-packs", "settings.done"]
+            }
+            return tabs + ["settings.done"]
+        }
+        guard tab == "video" else {
+            return tabs + settingsFocusControls.keys.filter {
+                !$0.hasPrefix("settings.tab.") && $0 != "settings.done"
+            }.sorted() + ["settings.done"]
+        }
+        return tabs + [
+            "video.render-distance", "video.fov", "video.brightness", "video.gui-scale",
+            "video.fancy", "video.smooth-lighting", "video.bloom", "video.soft-shadows",
+            "video.clouds", "video.view-bobbing", "video.fullscreen", "video.particles",
+            "video.max-fps", "video.shaders", "video.resource-packs", "settings.done",
+        ]
     }
 
     /// Shared capture seam for the AppKit router: validation is pure and the live label remains
@@ -2162,6 +2314,7 @@ final class SettingsScreen: Screen {
     @discardableResult
     func handleControlsKeyEvent(_ event: ElysiumKeyEvent,
                                 ui: UIManager, game: GameCore) -> Bool {
+        if game.settingsRecoveryRequired { return bindingKey != nil }
         guard let binding = bindingKey else { return false }
         if event.terminal.rawValue == "Escape" { return cancelControlsCapture(ui, game) }
         guard !event.isRepeat, let chord = event.chord else {
@@ -2175,6 +2328,7 @@ final class SettingsScreen: Screen {
 
     @discardableResult
     func saveAIModelIfNeeded(_ game: GameCore) -> Bool {
+        if game.settingsRecoveryRequired { return true }
         guard tab == "ai", let field = aiModelField else { return true }
         var model = sanitizedOllamaModelName(field.text)
         if !model.isEmpty && !isAllowedLocalOllamaModelName(model) {
@@ -2186,6 +2340,71 @@ final class SettingsScreen: Screen {
         field.caret = min(field.caret, field.text.count)
         return true
     }
+    override func onKeyEvent(_ ui: UIManager, _ game: GameCore,
+                             _ event: ElysiumKeyEvent) -> Bool {
+        if event.isRepeat { return true }
+        let key = event.terminal.rawValue
+        let graph = settingsFocusGraph(game.settingsRecoveryRequired).filter {
+            settingsFocusControls[$0]?.enabled == true
+        }
+        if key == "Tab", !graph.isEmpty {
+            let index = graph.firstIndex(of: settingsFocusID) ?? 0
+            settingsFocusID = graph[(index + (event.modifiers.contains(.shift)
+                ? graph.count - 1 : 1)) % graph.count]
+            ui.renewTextAccessibilityPresentation(screen: self, game: game)
+            return true
+        }
+        if ["Enter", "NumpadEnter", "Space"].contains(key),
+           let button = settingsFocusControls[settingsFocusID], button.enabled {
+            button.onClick()
+            return true
+        }
+        return onKey(ui, game, key)
+    }
+
+    override func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore)
+        -> [TextEntryAccessibilityDescriptor] {
+        guard ui.current() === self else { return [] }
+        var result: [TextEntryAccessibilityDescriptor] = []
+        for (id, control) in settingsFocusControls.sorted(by: { $0.key < $1.key }) {
+            let label = control is Slider ? (control as! Slider).getLabel() : control.label
+            let blocked = game.settingsRecoveryRequired && !control.enabled
+            result.append(TextEntryAccessibilityDescriptor(
+                id: id, role: control is Slider ? .listItem : .button,
+                label: label, value: blocked ? "Unavailable until restart" : "",
+                help: blocked ? "Restart Elysium before changing settings" : label,
+                frame: (control.x, control.y, control.w, control.h), enabled: control.enabled,
+                focused: settingsFocusID == id, insertionUTF16Offset: nil,
+                focusable: control.enabled, actionable: control.enabled && !(control is Slider)))
+        }
+        for field in fields {
+            result.append(TextEntryAccessibilityDescriptor(
+                id: field.id, role: .textField, label: field.accessibilityLabel,
+                value: field.enabled ? field.text : "Unavailable until restart",
+                help: field.enabled ? field.placeholder : "Restart Elysium before changing settings",
+                frame: (field.x, field.y, field.w, field.h), enabled: field.enabled,
+                focused: field.focused, insertionUTF16Offset: nil,
+                focusable: field.enabled, actionable: field.enabled))
+        }
+        return result
+    }
+
+    override func focusTextAccessibilityElement(_ id: String, _ ui: UIManager,
+                                                _ game: GameCore) -> Bool {
+        guard settingsFocusControls[id]?.enabled == true else { return false }
+        settingsFocusID = id
+        return true
+    }
+
+    override func performTextAccessibilityAction(_ id: String, _ ui: UIManager,
+                                                 _ game: GameCore) -> Bool {
+        guard let control = settingsFocusControls[id], control.enabled,
+              !(control is Slider) else { return false }
+        settingsFocusID = id
+        control.onClick()
+        return true
+    }
+
     override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
         if tab == "ai", key == "Enter" {
             guard saveAIModelIfNeeded(game) else { return true }
@@ -2212,6 +2431,10 @@ final class SettingsScreen: Screen {
             ui.drawDirtBg()
         }
         ui.cv.drawTextCentered("Options", ui.width / 2, 6, 1)
+        if game.settingsRecoveryRequired {
+            ui.cv.drawTextCentered("Settings recovery required — Restart Elysium",
+                                   ui.width / 2, ui.height - 44, 0.8, "#ffaaaa")
+        }
         if tab == "controls", let layout = controlsLayout {
             for row in layout.visibleRows {
                 let definition = KEYBIND_DEFINITIONS[row.definitionIndex]
@@ -2268,6 +2491,13 @@ final class SettingsScreen: Screen {
             }
         }
         ui.drawButtons(self)
+        if let control = settingsFocusControls[settingsFocusID] {
+            let light = game.settings.highContrast ? "#ffff00" : "#ffffff"
+            ui.cv.setStroke("#000000")
+            ui.cv.strokeRect(control.x + 1, control.y + 1, control.w - 2, control.h - 2)
+            ui.cv.setStroke(light)
+            ui.cv.strokeRect(control.x + 2, control.y + 2, control.w - 4, control.h - 4)
+        }
     }
 
     private func controlsClipped(_ text: String, maximumPixels: Double,
@@ -2413,8 +2643,12 @@ final class CreditsScreen: Screen {
         "§ethebriangao/pebble",
         "§egithub.com/thebriangao/pebble",
         "",
-        "§fAll textures: Faithful 32x,",
+        "§fBase textures: Faithful 64x,",
         "§funmodified, by the Faithful Team.",
+        "§fOptional: Ore Borders 64x",
+        "§fand Static Lanterns.",
+        "§fOre Borders credits: Vanilla Tweaks,",
+        "§fAerod, Hedreon, and Scutoel.",
         "§efaithfulpack.net",
     ]
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {

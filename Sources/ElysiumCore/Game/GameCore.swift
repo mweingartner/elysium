@@ -911,6 +911,10 @@ public final class GameCore {
     public func persistAndPublishSettingsCandidate(
         _ candidate: Settings, expectedLiveRevision: UInt64
     ) -> Result<UInt64, LocalSettingsStoreError> {
+        guard !settingsRecoveryRequired else {
+            return failLocalSettingsPublication(.invalidSettings(
+                "settings recovery required; restart Elysium"))
+        }
         guard expectedLiveRevision == settingsRevision else {
             return failLocalSettingsPublication(.staleLiveRevision(
                 expected: expectedLiveRevision, actual: settingsRevision))
@@ -933,10 +937,101 @@ public final class GameCore {
         }
     }
 
+    public enum CommitAwareSettingsDisposition {
+        case committed(UInt64)
+        case retainedPrior(LocalSettingsStoreError)
+        case committedWithDurabilityWarning(UInt64)
+        case recoveryRequired(LocalSettingsStoreError?)
+    }
+
+    public private(set) var settingsRecoveryRequired = false
+    public private(set) var settingsRecoveryNoticeSerial: UInt64 = 0
+    public private(set) var settingsRecoveryRequestedResourcePackID: String?
+    public private(set) var settingsRecoveryTransientAcknowledged = false
+    private var consumedSettingsRecoveryNoticeSerial: UInt64 = 0
+
+    private func enterSettingsRecovery(requestedResourcePackID: String?) {
+        guard !settingsRecoveryRequired else { return }
+        settingsRecoveryRequired = true
+        settingsRecoveryRequestedResourcePackID = requestedResourcePackID.flatMap {
+            BundledResourcePackAddOnID(rawValue: $0)?.rawValue
+        }
+        settingsRecoveryNoticeSerial = settingsRecoveryNoticeSerial == UInt64.max
+            ? 1 : settingsRecoveryNoticeSerial + 1
+        settingsRecoveryTransientAcknowledged = false
+    }
+
+    public func acknowledgeSettingsRecoveryNotice() {
+        settingsRecoveryTransientAcknowledged = true
+    }
+
+    public func consumeSettingsRecoveryAnnouncement() -> String? {
+        guard settingsRecoveryRequired,
+              consumedSettingsRecoveryNoticeSerial != settingsRecoveryNoticeSerial else { return nil }
+        consumedSettingsRecoveryNoticeSerial = settingsRecoveryNoticeSerial
+        return "Could not confirm the saved resource pack choice; restart Elysium before changing it again."
+    }
+
+    @MainActor
+    public func persistAndPublishSettingsCandidateCommitAware(
+        _ candidate: Settings, expectedLiveRevision: UInt64,
+        recoveryRequestedResourcePackID: String? = nil
+    ) -> CommitAwareSettingsDisposition {
+        guard !settingsRecoveryRequired else { return .recoveryRequired(nil) }
+        guard expectedLiveRevision == settingsRevision else {
+            return .retainedPrior(.staleLiveRevision(
+                expected: expectedLiveRevision, actual: settingsRevision))
+        }
+        guard settingsRevision > 0, settingsRevision < UInt64.max else {
+            return .retainedPrior(.revisionExhausted)
+        }
+        let prior = sanitizedSettings(settings)
+        var persisted = sanitizedSettings(candidate)
+        persisted.rpgTutorialVersion = settings.rpgTutorialVersion ?? 0
+        persisted = sanitizedSettings(persisted)
+        let nextRevision = settingsRevision + 1
+
+        func publish() {
+            settings = persisted
+            settingsRevision = nextRevision
+            completeLocalSettingsPublication(.settings, revision: nextRevision)
+        }
+
+        switch localSettingsStore.persistSettingsCommitAware(persisted) {
+        case .committed:
+            publish()
+            return .committed(nextRevision)
+        case .rejected(let error):
+            let _: Result<UInt64, LocalSettingsStoreError> = failLocalSettingsPublication(error)
+            return .retainedPrior(error)
+        case .durabilityUncertain(.success(let canonical)):
+            let repaired = sanitizedSettings(canonical)
+            if repaired == prior {
+                let error = LocalSettingsStoreError.writeFailed(
+                    .settings, .directorySync, "canonical document retained prior value")
+                let _: Result<UInt64, LocalSettingsStoreError> = failLocalSettingsPublication(error)
+                return .retainedPrior(error)
+            }
+            if repaired == persisted {
+                publish()
+                return .committedWithDurabilityWarning(nextRevision)
+            }
+            enterSettingsRecovery(requestedResourcePackID: recoveryRequestedResourcePackID)
+            return .recoveryRequired(nil)
+        case .durabilityUncertain(.failure(let error)):
+            enterSettingsRecovery(requestedResourcePackID: recoveryRequestedResourcePackID)
+            return .recoveryRequired(error)
+        }
+    }
+
     @MainActor
     public func persistAndPublishKeybindCandidate(
         _ candidate: [String: String], expectedLiveRevision: UInt64
     ) -> Result<UInt64, LocalSettingsStoreError> {
+        guard !settingsRecoveryRequired else {
+            return failLocalSettingsPublication(.invalidSettings(
+                "settings recovery required; restart Elysium"))
+        }
         guard expectedLiveRevision == keybindRevision else {
             return failLocalSettingsPublication(.staleLiveRevision(
                 expected: expectedLiveRevision, actual: keybindRevision))
@@ -959,6 +1054,10 @@ public final class GameCore {
     public func persistAndPublishTutorialVersionCandidate(
         _ candidateVersion: Int, expectedLiveRevision: UInt64
     ) -> Result<UInt64, LocalSettingsStoreError> {
+        guard !settingsRecoveryRequired else {
+            return failLocalSettingsPublication(.invalidSettings(
+                "settings recovery required; restart Elysium"))
+        }
         guard expectedLiveRevision == settingsRevision else {
             return failLocalSettingsPublication(.staleLiveRevision(
                 expected: expectedLiveRevision, actual: settingsRevision))

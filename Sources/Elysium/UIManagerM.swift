@@ -117,6 +117,7 @@ final class TextField {
         set { _ = replaceText(newValue, caret: newValue.count) }
     }
     var focused = false
+    var enabled = true
     var caret = 0
     private(set) var visibleStart = 0
     var maxLength = 64
@@ -133,7 +134,7 @@ final class TextField {
             maximumCharacters: 64, maximumUTF8Bytes: 4_096))
     }
     func contains(_ mx: Double, _ my: Double) -> Bool {
-        mx >= x && mx < x + w && my >= y && my < y + h
+        enabled && mx >= x && mx < x + w && my >= y && my < y + h
     }
     private var limit: ElysiumTextLimit {
         ElysiumTextLimit(maximumCharacters: maxLength, maximumUTF8Bytes: 4_096)
@@ -151,6 +152,7 @@ final class TextField {
 
     @discardableResult
     func insert(_ proposal: String) -> Bool {
+        guard enabled else { return false }
         guard case .accepted(let characterCount, _) = buffer.insertWholeProposalAtomically(
             proposal, atCharacterOffset: caret, limit: limit) else { return false }
         caret += characterCount
@@ -158,6 +160,7 @@ final class TextField {
     }
     @discardableResult
     func insertPastePrefix(_ proposal: String) -> Bool {
+        guard enabled else { return false }
         guard case .accepted(let characterCount, _) = buffer.insertValidPrefixAtomically(
             proposal, atCharacterOffset: caret, limit: limit) else { return false }
         caret += characterCount
@@ -402,9 +405,9 @@ class Screen {
                 help: field.placeholder.isEmpty
                     ? "Editable text. Use Left, Right, and Backspace."
                     : "\(field.placeholder). Editable text. Use Left, Right, and Backspace.",
-                frame: (field.x, field.y, field.w, field.h), enabled: true,
-                focused: field.focused, insertionUTF16Offset: insertion,
-                focusable: true)
+                frame: (field.x, field.y, field.w, field.h), enabled: field.enabled,
+                focused: field.focused && field.enabled, insertionUTF16Offset: insertion,
+                focusable: field.enabled)
         }
     }
 
@@ -516,6 +519,7 @@ final class UIManager {
     private var textFocusTransaction = ElysiumTextFocusTransactionAdapter()
     private weak var activeTextAuthorization: TextFocusAuthorization?
     private var savedWorldMaintenanceOperationOwner: AnyObject?
+    private var afterNextPresentedFrameCallback: (() -> Void)?
     weak var textInputView: GameView?
     /// The sole RPG activation-receipt owner shared by mouse, keyboard, and the RPG controller.
     /// Accessibility joins this same boundary in its separately gated build step.
@@ -538,6 +542,23 @@ final class UIManager {
 
     init(cv: UICanvas) {
         self.cv = cv
+    }
+
+    /// Registers one continuation for the first GPU-completed frame scheduled
+    /// after this call. The caller publishes visible state before registering.
+    func afterNextPresentedFrame(_ callback: @escaping () -> Void) -> Bool {
+        guard afterNextPresentedFrameCallback == nil else { return false }
+        afterNextPresentedFrameCallback = callback
+        return true
+    }
+
+    func cancelAfterNextPresentedFrame() {
+        afterNextPresentedFrameCallback = nil
+    }
+
+    func takeAfterNextPresentedFrameCallback() -> (() -> Void)? {
+        defer { afterNextPresentedFrameCallback = nil }
+        return afterNextPresentedFrameCallback
     }
 
     @MainActor

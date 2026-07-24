@@ -24,13 +24,17 @@ SOFTWARE.
 
 Scope note: this license covers the source code and original assets in this
 repository. It does NOT cover third-party content distributed alongside it —
-in particular "packaging/Faithful 32x - 1.20.1.zip", which belongs to the
-Faithful team and its contributors under their own terms
-(https://faithfulpack.net), and the in-game screenshots in packaging/
-(homepage.png, title-bg.png) to the extent they depict Faithful 32x artwork.
+in particular the Faithful 64x and reviewed add-on archives listed in
+"packaging/FAITHFUL-ADDONS-CREDITS.txt", which belong to the Faithful team,
+add-on contributors, and their contributors under their own terms
+(https://faithfulpack.net), and `packaging/homepage.png` to the extent that
+in-game screenshot depicts Faithful artwork. `packaging/title-bg.png` is
+original Elysium hero artwork, not an in-game Faithful texture capture, and is
+covered by this license to the extent it is copyrightable and owned by the
+Elysium contributors.
 The fdlibm-derived trigonometry in Sources/ElysiumCore/Core/DetMath.swift
 carries Sun Microsystems' permissive notice at the top of that file.
-See the Disclaimer section of README.md.
+See the Credits and licenses and Independence statement sections of README.md.
 
 "Minecraft" is a trademark of Mojang Synergies AB / Microsoft. This project is
 not affiliated with, endorsed by, or connected to Mojang Studios or Microsoft.
