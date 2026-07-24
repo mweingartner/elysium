@@ -6,6 +6,108 @@ import XCTest
 @testable import ElysiumCore
 
 final class ResourcePackHardeningTests: XCTestCase {
+    private func asymmetricPNG() throws -> Data {
+        // Literal PNG scanlines, independent of Core Graphics: authored top is
+        // red/green and authored bottom is blue/yellow (PNG filter byte 0).
+        try XCTUnwrap(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR42mP4z8DwHwyBNBAw/AcAR8oI+FuapL4AAAAASUVORK5CYII="))
+    }
+
+    func testDecodePNGNormalizesVisualTopRowOnce() throws {
+        let limits = ResourcePackPreparationLimits(
+            archiveBytes: 512 << 20, fileBytes: 64 << 20, entries: 100_000,
+            pathBytes: 1_024, aggregatePathBytes: 16 << 20,
+            advertisedBytes: 512 << 20, inflatedBytes: 512 << 20,
+            decodedRGBABytes: 16, metadataBytes: 64 << 10,
+            framesPerTexture: 256, framesPerGeneration: 4_096,
+            minimumFrameDuration: 1, maximumFrameDuration: 1_200)
+        let exactBudget = ResourcePackPreparationBudget(limits: limits)
+        let image = decodePNG(try asymmetricPNG(), budget: exactBudget)
+        XCTAssertEqual(image?.width, 2)
+        XCTAssertEqual(image?.height, 2)
+        XCTAssertEqual(image?.pixels, [
+            255, 0, 0, 255, 0, 255, 0, 255,
+            0, 0, 255, 255, 255, 255, 0, 255,
+        ], "row zero must be authored red/green top; row one blue/yellow bottom")
+        XCTAssertEqual(exactBudget.decodedRGBABytes, 16)
+
+        var shortLimits = limits
+        shortLimits.decodedRGBABytes = 15
+        XCTAssertNil(decodePNG(try asymmetricPNG(),
+                               budget: ResourcePackPreparationBudget(limits: shortLimits)))
+        let token = ResourcePackCancellationToken()
+        token.cancel()
+        XCTAssertNil(decodePNG(try asymmetricPNG(),
+                               budget: ResourcePackPreparationBudget(cancellation: token)))
+
+        let alphaPNG = try XCTUnwrap(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNwaDjQAAAEhQIBHAk9JgAAAABJRU5ErkJggg=="))
+        let alpha = try XCTUnwrap(decodePNG(alphaPNG))
+        XCTAssertEqual(alpha.pixels[0], 63, accuracy: 1)
+        XCTAssertEqual(alpha.pixels[1], 127, accuracy: 1)
+        XCTAssertEqual(alpha.pixels[2], 191, accuracy: 1)
+        XCTAssertEqual(alpha.pixels[3], 128)
+    }
+
+    func testRainbowAndHeldOverlayPlansClampAndStayDeterministic() throws {
+        XCTAssertEqual(xpRainbowSegments(progress: -1, width: 182), [])
+        XCTAssertEqual(xpRainbowSegments(progress: .nan, width: 182), [])
+        let full = xpRainbowSegments(progress: 2, width: 182)
+        XCTAssertEqual(full.map(\.color),
+                       ["#ff4040", "#ff9b32", "#ffe84d", "#6eea58",
+                        "#43d6c5", "#3978ff", "#9b70f5"])
+        XCTAssertEqual(full.reduce(0) { $0 + $1.width }, 182)
+        for boundary in 1...7 {
+            let segments = xpRainbowSegments(progress: Double(boundary) / 7, width: 182)
+            XCTAssertEqual(segments.count, boundary)
+            XCTAssertEqual(segments.reduce(0) { $0 + $1.width },
+                           (Double(boundary) * 182 / 7).rounded(), accuracy: 0.001)
+        }
+
+        XCTAssertNil(heldOverlayPlan(viewWidth: 320, viewHeight: 180,
+                                     hasMainHand: false, guiVisible: true,
+                                     firstPerson: true, screenOpen: false,
+                                     attack: 1, usingItem: true, useTicks: 30))
+        XCTAssertNil(heldOverlayPlan(viewWidth: 320, viewHeight: 180,
+                                     hasMainHand: true, guiVisible: false,
+                                     firstPerson: true, screenOpen: false,
+                                     attack: 1, usingItem: true, useTicks: 30))
+        XCTAssertNil(heldOverlayPlan(viewWidth: 320, viewHeight: 180,
+                                     hasMainHand: true, guiVisible: true,
+                                     firstPerson: false, screenOpen: false,
+                                     attack: 1, usingItem: true, useTicks: 30))
+        XCTAssertNil(heldOverlayPlan(viewWidth: 320, viewHeight: 180,
+                                     hasMainHand: true, guiVisible: true,
+                                     firstPerson: true, screenOpen: true,
+                                     attack: 1, usingItem: true, useTicks: 30))
+        let idle = heldOverlayPlan(viewWidth: 320, viewHeight: 180,
+                                   hasMainHand: true, guiVisible: true,
+                                   firstPerson: true, screenOpen: false,
+                                   attack: 0, usingItem: false, useTicks: 0)
+        let use = heldOverlayPlan(viewWidth: 320, viewHeight: 180,
+                                  hasMainHand: true, guiVisible: true,
+                                  firstPerson: true, screenOpen: false,
+                                  attack: 1, usingItem: true, useTicks: 99)
+        XCTAssertEqual(idle, heldOverlayPlan(viewWidth: 320, viewHeight: 180,
+                                              hasMainHand: true, guiVisible: true,
+                                              firstPerson: true, screenOpen: false,
+                                              attack: 0, usingItem: false, useTicks: 0))
+        let unwrappedUse = try XCTUnwrap(use)
+        XCTAssertLessThanOrEqual(unwrappedUse.swing, 1)
+        XCTAssertLessThan(unwrappedUse.iconX, 320)
+        XCTAssertLessThan(unwrappedUse.iconY, 180)
+    }
+
+    func testTemplateDeleteRequestCapturesNormalizedNameAndClaimsOnce() throws {
+        var request = try XCTUnwrap(TemplateDeleteConfirmationRequest(rawName: "  Mixed  Name  "))
+        XCTAssertEqual(request.displayName, "  Mixed  Name  ")
+        XCTAssertEqual(request.storageKey, "mixed name")
+        XCTAssertFalse(request.claimed)
+        XCTAssertEqual(request.claim(), "mixed name")
+        XCTAssertTrue(request.claimed)
+        XCTAssertNil(request.claim(), "one confirmation cannot execute twice")
+        XCTAssertNil(TemplateDeleteConfirmationRequest(rawName: "../not-a-template"))
+    }
     /// Test-only AppKit interaction host. It deliberately reuses the two closed production IDs
     /// with a synthetic shared conflict group, so no conflicting descriptor or fault selector is
     /// introduced into Elysium.app. Settings/live tokens are spies for forbidden side effects.

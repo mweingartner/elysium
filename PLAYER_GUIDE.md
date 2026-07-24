@@ -169,7 +169,10 @@ live map or renaming a saved world.
 The HUD keeps the crosshair, hotbar, health, hunger, armor, experience, status information, and compact
 live map visible during play. It also shows air while submerged, RPG quick slots when available, and
 the health of a living mount while you ride it. Your inventory exposes the equipped armor and offhand
-slots. Use `F1` when you want an unobstructed view and `F3` when you need the debug overlay.
+slots. In first person, the selected main-hand item appears with your lower-right arm. The earned part
+of the experience bar reveals a fixed red-to-violet rainbow as it fills; its length and centered level
+number remain the non-color progress cues. Use `F1` when you want an unobstructed view and `F3` when you
+need the debug overlay.
 
 Use `M` to open the expanded live map. Drag or use the arrow keys to pan, and use `,` / `.` to zoom.
 Use `-` / `=` to resize the compact HUD map. The map reflects explored, loaded world data and does not
@@ -443,7 +446,9 @@ Object templates let you reuse a connected build:
 5. Press `Command-Z` to undo the most recent template placement.
 
 Template placement is previewed and validated before it changes the world. Undo applies to the most recent
-template placement, not to every ordinary building action.
+template placement, not to every ordinary building action. In either saved-template browser, **Delete**
+or Delete/Backspace while the template list is focused opens a confirmation naming the exact template.
+**Cancel** has initial focus, Escape cancels, and only **Delete Template** performs the deletion.
 
 ## Options, accessibility, and local AI
 

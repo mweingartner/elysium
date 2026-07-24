@@ -363,7 +363,7 @@ final class ResourcePackScreen: Screen {
             status = "Could not apply \(transaction.descriptor.displayName): renderer unavailable."
             return
         }
-        guard let staged = prepared.stage(renderer: renderer) else {
+        guard let staged = prepared.stage(renderer: renderer, game: game) else {
             status = "Could not apply \(transaction.descriptor.displayName): staging failed."
             return
         }

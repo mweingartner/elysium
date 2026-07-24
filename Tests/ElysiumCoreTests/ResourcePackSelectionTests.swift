@@ -130,6 +130,7 @@ final class ResourcePackSelectionTests: XCTestCase {
                                                   range: persist.upperBound..<screen.endIndex))
         XCTAssertLessThan(stage.lowerBound, persist.lowerBound)
         XCTAssertLessThan(persist.lowerBound, publish.lowerBound)
+        XCTAssertTrue(screen.contains("prepared.stage(renderer: renderer, game: game)"))
         let retire = try XCTUnwrap(packs.range(of: "iconPackPublicationHook?(.retired)",
                                                range: packs.range(of: "final class StagedResourcePackPublication")!.upperBound..<packs.endIndex))
         let uiWorld = try XCTUnwrap(packs.range(of: "iconPackPublicationHook?(.uiWorldInstalled)",
@@ -138,6 +139,19 @@ final class ResourcePackSelectionTests: XCTestCase {
                                              range: uiWorld.upperBound..<packs.endIndex))
         XCTAssertLessThan(retire.lowerBound, uiWorld.lowerBound)
         XCTAssertLessThan(uiWorld.lowerBound, core.lowerBound)
+        let stagedClass = try XCTUnwrap(packs.range(of: "final class StagedResourcePackPublication"))
+        let iconCommit = try XCTUnwrap(packs.range(of: "publishIconSourceSnapshot(candidate)",
+                                                  range: stagedClass.upperBound..<packs.endIndex))
+        let meshInstall = try XCTUnwrap(packs.range(of: "game.installMeshRenderContext(meshContext)",
+                                                   range: iconCommit.upperBound..<packs.endIndex))
+        let remesh = try XCTUnwrap(packs.range(of: "game.remeshAllLoaded()",
+                                              range: meshInstall.upperBound..<packs.endIndex))
+        XCTAssertLessThan(iconCommit.lowerBound, meshInstall.lowerBound)
+        XCTAssertLessThan(meshInstall.lowerBound, remesh.lowerBound)
+        XCTAssertEqual(packs.components(separatedBy: "prepareNextMeshRenderContext(").count - 1, 3)
+        XCTAssertEqual(packs.components(separatedBy: "installMeshRenderContext(meshContext)").count - 1, 3)
+        XCTAssertFalse(packs.contains("PACK_TINT_GATE"))
+        XCTAssertFalse(packs.contains("PACK_TEXTURE_GATE"))
         XCTAssertTrue(packs.contains("currentIconSourceGeneration() == generation"))
         XCTAssertTrue(screen.contains("guard !cancelled, ui.current() === self"))
         XCTAssertTrue(screen.contains("transaction.id == transactionID"))

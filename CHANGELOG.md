@@ -5,6 +5,13 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Faithful graphics now use one upright PNG convention across world and UI
+  consumers, with facing-aware upper/lower door art, head/foot bed art, and
+  coherent left/right double-chest fronts. First-person play shows the selected
+  item with a lower-right arm, and earned XP reveals a fixed seven-color rainbow
+  from left to right while keeping the dark track, fill length, and level number.
+  Saved-template deletion now requires an exact-name, Cancel-first confirmation;
+  storage failures retain the row and show only bounded player-facing feedback.
 - The pinned bundled graphics layer is upgraded from Faithful 32x to hash-pinned Faithful 64x
   Release 12. Video options now has a Resource Packs child screen for the separately bundled Ore
   Borders 64x and Static Lanterns add-ons; both are independently selectable and off by default.

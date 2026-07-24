@@ -6,6 +6,59 @@ import Foundation
 import QuartzCore
 import ElysiumCore
 
+/// A fixed spatial spectrum for the earned XP prefix.  It deliberately has no
+/// clock input: progress changes colour only by growing into the next band.
+struct XPRainbowSegment: Equatable {
+    let x: Double
+    let width: Double
+    let color: String
+}
+
+func xpRainbowSegments(progress: Double, width: Double) -> [XPRainbowSegment] {
+    guard width.isFinite, width > 0 else { return [] }
+    let clampedProgress = progress.isNaN ? 0 : max(0, min(1, progress))
+    let earned = min(width, (clampedProgress * width).rounded())
+    guard earned > 0 else { return [] }
+    let colors = [
+        "#ff4040", "#ff9b32", "#ffe84d", "#6eea58",
+        "#43d6c5", "#3978ff", "#9b70f5",
+    ]
+    var result: [XPRainbowSegment] = []
+    for index in colors.indices {
+        let start = (Double(index) * width / Double(colors.count)).rounded(.down)
+        let end = (Double(index + 1) * width / Double(colors.count)).rounded(.down)
+        let clippedEnd = min(earned, end)
+        if clippedEnd > start {
+            result.append(XPRainbowSegment(x: start, width: clippedEnd - start, color: colors[index]))
+        }
+    }
+    return result
+}
+
+struct HeldOverlayPlan: Equatable {
+    let armX: Double
+    let armY: Double
+    let iconX: Double
+    let iconY: Double
+    let swing: Double
+}
+
+func heldOverlayPlan(viewWidth: Double, viewHeight: Double,
+                     hasMainHand: Bool, guiVisible: Bool, firstPerson: Bool, screenOpen: Bool,
+                     attack: Double, usingItem: Bool, useTicks: Int) -> HeldOverlayPlan? {
+    guard hasMainHand, guiVisible, firstPerson, !screenOpen,
+          viewWidth.isFinite, viewHeight.isFinite,
+          viewWidth >= 64, viewHeight >= 64 else { return nil }
+    let swing = attack.isNaN ? 0 : max(0, min(1, attack))
+    let use = usingItem ? min(1, Double(max(0, useTicks)) / 12) : 0
+    // Keep the whole overlay inside a lower-right envelope and away from the hotbar.
+    let offsetX = -swing * 13 - use * 5
+    let offsetY = swing * 9 - use * 7
+    return HeldOverlayPlan(armX: viewWidth - 43 + offsetX, armY: viewHeight - 76 + offsetY,
+                           iconX: viewWidth - 31 + offsetX, iconY: viewHeight - 62 + offsetY,
+                           swing: swing)
+}
+
 struct SubtitleInfo {
     var text: String
     var time: Int
@@ -92,6 +145,26 @@ final class HUD {
             }
         }
 
+        // A small first-person forearm anchors the selected item.  This is drawn
+        // before the hotbar so the conventional controls remain readable.
+        let held = player.inventory[player.selectedSlot]
+        if let held, let hand = heldOverlayPlan(viewWidth: W, viewHeight: H,
+                                                 hasMainHand: true,
+                                                 guiVisible: !hideGui,
+                                                 firstPerson: game.perspective == 0,
+                                                 screenOpen: screenOpen,
+                                                 attack: player.attackAnim,
+                                                 usingItem: player.usingItem,
+                                                 useTicks: player.useItemTicks) {
+            cv.setFill("#c98d68")
+            cv.fillQuad(hand.armX, hand.armY + 13, hand.armX + 15, hand.armY + 8,
+                        hand.armX + 29, hand.armY + 39, hand.armX + 8, hand.armY + 44)
+            cv.setFill("#9b6049")
+            cv.fillQuad(hand.armX + 8, hand.armY + 44, hand.armX + 29, hand.armY + 39,
+                        hand.armX + 33, hand.armY + 48, hand.armX + 12, hand.armY + 53)
+            cv.drawItemIcon(held.id, held.data, hand.iconX, hand.iconY, 24, 24)
+        }
+
         // hotbar
         let hbX = cx - 91
         let hbY = packHud ? H - 22 : H - 23
@@ -124,7 +197,6 @@ final class HUD {
             }
         }
         // held item name
-        let held = player.inventory[player.selectedSlot]
         if let held, actionBarTime <= 0, game.heldNameTime > 0 {
             let name = held.label ?? itemDef(held.id).displayName
             cv.globalAlpha = Float(min(1, Double(game.heldNameTime) / 20))
@@ -234,8 +306,12 @@ final class HUD {
             if packHud {
                 let xpY = H - 29 - rpgHudLift
                 ui.blitSheet("icons", 0, 64, 182, 5, hbX, xpY)
-                let fill = (Double(182) * player.xpProgress).rounded()
-                if fill > 0 { ui.blitSheet("icons", 0, 69, fill, 5, hbX, xpY) }
+                // Keep the original track/frame and numeric level; the earned
+                // prefix adds a fixed rainbow as a supplemental cue.
+                for segment in xpRainbowSegments(progress: player.xpProgress, width: 182) {
+                    cv.setFill(segment.color)
+                    cv.fillRect(hbX + segment.x, xpY + 1, segment.width, 3)
+                }
                 if player.xpLevel > 0 {
                     cv.drawTextCentered(String(player.xpLevel), cx, xpY - 6, 1, "#80ff20")
                 }
@@ -243,8 +319,10 @@ final class HUD {
                 let xpY = hbY - 4 - rpgHudLift
                 cv.setFill("#1c1c1c")
                 cv.fillRect(hbX, xpY, 182, 3)
-                cv.setFill("#80ff20")
-                cv.fillRect(hbX, xpY, (182 * player.xpProgress).rounded(), 3)
+                for segment in xpRainbowSegments(progress: player.xpProgress, width: 182) {
+                    cv.setFill(segment.color)
+                    cv.fillRect(hbX + segment.x, xpY, segment.width, 3)
+                }
                 if player.xpLevel > 0 {
                     cv.drawTextCentered(String(player.xpLevel), cx, xpY - 10, 1, "#80ff20")
                 }

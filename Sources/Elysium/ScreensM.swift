@@ -2900,6 +2900,24 @@ enum TemplateBrowserMode {
     case place
 }
 
+struct TemplateDeleteConfirmationRequest: Equatable {
+    let displayName: String
+    let storageKey: String
+    private(set) var claimed = false
+
+    init?(rawName: String) {
+        guard let storageKey = normalizedTemplateName(rawName) else { return nil }
+        displayName = rawName
+        self.storageKey = storageKey
+    }
+
+    mutating func claim() -> String? {
+        guard !claimed else { return nil }
+        claimed = true
+        return storageKey
+    }
+}
+
 final class TemplateBrowserScreen: Screen {
     private let mode: TemplateBrowserMode
     private var entries: [TemplateBrowserEntry] = []
@@ -2916,6 +2934,11 @@ final class TemplateBrowserScreen: Screen {
     private weak var leftButton: Button?
     private weak var rightButton: Button?
     private weak var closeButton: Button?
+    /// The name is captured before confirmation so changing selection cannot
+    /// retarget a destructive request.
+    private var pendingDelete: TemplateDeleteConfirmationRequest?
+    private var deleteConfirmFocus = 0 // Cancel is the safe initial action.
+    private var listHasKeyboardFocus = true
 
     override convenience init() {
         self.init(mode: .browse)
@@ -2931,7 +2954,7 @@ final class TemplateBrowserScreen: Screen {
         refreshEntries(game)
         let delete = Button(0, 0, 90, 20, "Delete", { [weak self, weak game] in
             guard let self, let game else { return }
-            self.deleteSelected(game)
+            self.beginDelete(game)
         })
         let place = Button(0, 0, 60, 20, "Place", { [weak self, weak ui, weak game] in
             guard let self, let ui, let game else { return }
@@ -3063,6 +3086,9 @@ final class TemplateBrowserScreen: Screen {
         drawTemplateList(ui, rect: l)
         drawTemplateDetails(ui, rect: p)
         ui.drawButtons(self)
+        if let request = pendingDelete {
+            drawDeleteConfirmation(ui, name: request.displayName)
+        }
     }
 
     private func drawTemplateList(_ ui: UIManager, rect: (x: Double, y: Double, w: Double, h: Double)) {
@@ -3153,31 +3179,76 @@ final class TemplateBrowserScreen: Screen {
         }
     }
 
-    private func deleteSelected(_ game: GameCore) {
+    private func beginDelete(_ game: GameCore) {
         guard let entry = selectedEntry else {
             game.host?.showActionBar("Select a saved template to delete", 60)
             return
         }
+        guard pendingDelete == nil else { return }
+        guard let request = TemplateDeleteConfirmationRequest(rawName: entry.name) else {
+            game.host?.showActionBar("Template cannot be deleted", 60)
+            return
+        }
+        pendingDelete = request
+        deleteConfirmFocus = 0
+    }
+
+    private func confirmationRect(_ ui: UIManager) -> (x: Double, y: Double, w: Double, h: Double) {
+        let w = min(300.0, max(220, ui.width - 40))
+        return ((ui.width - w) / 2, (ui.height - 104) / 2, w, 104)
+    }
+
+    private func drawDeleteConfirmation(_ ui: UIManager, name: String) {
+        let r = confirmationRect(ui), cv = ui.cv
+        cv.setFill("rgba(0,0,0,0.72)")
+        cv.fillRect(0, 0, ui.width, ui.height)
+        ui.drawPanel(r.x, r.y, r.w, r.h)
+        cv.drawTextCentered("Delete template?", r.x + r.w / 2, r.y + 10, 1)
+        cv.drawTextCentered(fitTemplateText(name, maxWidth: Int(r.w - 18)), r.x + r.w / 2, r.y + 28, 1, "#ffb0b0")
+        cv.drawTextCentered("This cannot be undone.", r.x + r.w / 2, r.y + 42, 1, "#d0d0d0")
+        let cancel = (x: r.x + 18, y: r.y + r.h - 28, w: (r.w - 42) / 2, h: 20.0)
+        let confirm = (x: cancel.x + cancel.w + 6, y: cancel.y, w: cancel.w, h: cancel.h)
+        cv.setFill(deleteConfirmFocus == 0 ? "#8b8b8b" : "#666666")
+        cv.fillRect(cancel.x, cancel.y, cancel.w, cancel.h)
+        cv.setFill(deleteConfirmFocus == 1 ? "#a34242" : "#803030")
+        cv.fillRect(confirm.x, confirm.y, confirm.w, confirm.h)
+        cv.drawTextCentered("Cancel", cancel.x + cancel.w / 2, cancel.y + 6, 1)
+        cv.drawTextCentered("Delete Template", confirm.x + confirm.w / 2, confirm.y + 6, 1)
+    }
+
+    private func cancelDelete() {
+        pendingDelete = nil
+        deleteConfirmFocus = 0
+    }
+
+    private func confirmDelete(_ game: GameCore) {
+        guard var request = pendingDelete, let storageKey = request.claim() else { return }
+        let displayName = request.displayName
+        pendingDelete = request
         do {
-            guard try game.db.deleteTemplate(named: entry.name) else {
-                game.host?.showActionBar("Template was already gone", 60)
+            guard try game.db.deleteTemplate(named: storageKey) else {
+                game.host?.showActionBar("\"\(displayName)\" was already gone", 60)
                 refreshEntries(game)
+                cancelDelete()
                 return
             }
-            game.host?.pushChat("§7Deleted object \"\(entry.name)\"")
-            game.host?.showActionBar("Deleted \"\(entry.name)\"", 60)
+            game.host?.pushChat("§7Deleted saved template \"\(displayName)\"")
+            game.host?.showActionBar("Deleted \"\(displayName)\"", 60)
             let nextIndex = min(selectedIndex, max(0, entries.count - 2))
             selectedIndex = nextIndex
             refreshEntries(game)
             yaw = 0.7
             pitch = 0.45
-        } catch let error as TemplateError {
-            game.host?.pushChat("§c" + error.description)
-            game.host?.showActionBar(error.description, 70)
         } catch {
-            game.host?.pushChat("§cDelete failed: \(error)")
+            // Storage error descriptions can include local paths/SQL/payloads.
+            // Close this one-shot request; the retained row can open a fresh
+            // confirmation for retry, but this request can never execute twice.
+            cancelDelete()
+            game.host?.pushChat("§cDelete failed")
             game.host?.showActionBar("Delete failed", 70)
+            return
         }
+        cancelDelete()
     }
 
     private func placeSelected(_ ui: UIManager, _ game: GameCore) {
@@ -3312,15 +3383,75 @@ final class TemplateBrowserScreen: Screen {
         "hsl(\(Int(h)), \(Int(s)), \(Int(l)))"
     }
 
+    override func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore)
+        -> [TextEntryAccessibilityDescriptor] {
+        let list = listRect(ui)
+        if let request = pendingDelete {
+            let name = request.displayName
+            let r = confirmationRect(ui)
+            let cancel = (x: r.x + 18, y: r.y + r.h - 28, width: (r.w - 42) / 2, height: 20.0)
+            let confirm = (x: cancel.x + cancel.width + 6, y: cancel.y, width: cancel.width, height: cancel.height)
+            return [
+                TextEntryAccessibilityDescriptor(id: "templates.delete.warning", role: .staticText,
+                    label: "Delete template \(name)? This cannot be undone.", value: "", help: "",
+                    frame: (r.x, r.y, r.w, r.h), enabled: true, focused: false,
+                    insertionUTF16Offset: nil, focusable: false),
+                TextEntryAccessibilityDescriptor(id: "templates.delete.cancel", role: .button,
+                    label: "Cancel", value: "", help: "", frame: cancel, enabled: true,
+                    focused: deleteConfirmFocus == 0, insertionUTF16Offset: nil,
+                    focusable: true, actionable: true),
+                TextEntryAccessibilityDescriptor(id: "templates.delete.confirm", role: .button,
+                    label: "Delete Template", value: "", help: "", frame: confirm, enabled: !request.claimed,
+                    focused: deleteConfirmFocus == 1, insertionUTF16Offset: nil,
+                    focusable: true, actionable: true),
+            ]
+        }
+        return [TextEntryAccessibilityDescriptor(id: "templates.list", role: .list,
+            label: "Saved templates", value: selectedEntry?.name ?? "No template selected", help: "",
+            frame: (list.x, list.y, list.w, list.h), enabled: true, focused: listHasKeyboardFocus,
+            insertionUTF16Offset: nil, focusable: true, actionable: true)]
+    }
+
+    override func focusTextAccessibilityElement(_ id: String, _ ui: UIManager,
+                                                _ game: GameCore) -> Bool {
+        if id == "templates.list" { listHasKeyboardFocus = true; return true }
+        if pendingDelete != nil, id == "templates.delete.cancel" { deleteConfirmFocus = 0; return true }
+        if pendingDelete != nil, id == "templates.delete.confirm" { deleteConfirmFocus = 1; return true }
+        return false
+    }
+
+    override func performTextAccessibilityAction(_ id: String, _ ui: UIManager,
+                                                 _ game: GameCore) -> Bool {
+        if id == "templates.list" { listHasKeyboardFocus = true; return true }
+        if pendingDelete != nil, id == "templates.delete.cancel" { cancelDelete(); return true }
+        if pendingDelete != nil, id == "templates.delete.confirm" { confirmDelete(game); return true }
+        return false
+    }
+
     override func onMouseDown(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double, _ btn: Int) -> Bool {
+        if pendingDelete != nil {
+            let r = confirmationRect(ui)
+            let cancel = (x: r.x + 18, y: r.y + r.h - 28, w: (r.w - 42) / 2, h: 20.0)
+            let confirm = (x: cancel.x + cancel.w + 6, y: cancel.y, w: cancel.w, h: cancel.h)
+            if mx >= cancel.x && mx < cancel.x + cancel.w && my >= cancel.y && my < cancel.y + cancel.h {
+                cancelDelete(); return true
+            }
+            if mx >= confirm.x && mx < confirm.x + confirm.w && my >= confirm.y && my < confirm.y + confirm.h {
+                confirmDelete(game); return true
+            }
+            return true // modal consumes background activation
+        }
         layoutButtons(ui)
-        if super.onMouseDown(ui, game, mx, my, btn) { return true }
         let l = listRect(ui)
+        let clickedList = mx >= l.x && mx < l.x + l.w && my >= l.y && my < l.y + l.h
+        if !clickedList { listHasKeyboardFocus = false }
+        if super.onMouseDown(ui, game, mx, my, btn) { return true }
         let rowH = 22.0
-        if mx >= l.x && mx < l.x + l.w && my >= l.y && my < l.y + l.h {
+        if clickedList {
             let idx = scroll + Int((my - l.y - 1) / rowH)
             if entries.indices.contains(idx) {
                 selectEntry(idx)
+                listHasKeyboardFocus = true
                 return true
             }
         }
@@ -3354,7 +3485,20 @@ final class TemplateBrowserScreen: Screen {
     }
 
     override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
+        if pendingDelete != nil {
+            switch key {
+            case "Escape": cancelDelete()
+            case "ArrowLeft", "ArrowRight", "Tab": deleteConfirmFocus = 1 - deleteConfirmFocus
+            case "Enter", "NumpadEnter":
+                if deleteConfirmFocus == 0 { cancelDelete() } else { confirmDelete(game) }
+            default: break
+            }
+            return true
+        }
         switch key {
+        case "Delete", "Backspace":
+            if listHasKeyboardFocus { beginDelete(game) }
+            return listHasKeyboardFocus
         case "Enter", "NumpadEnter":
             if mode == .place {
                 placeSelected(ui, game)

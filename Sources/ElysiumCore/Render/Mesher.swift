@@ -11,22 +11,52 @@
 
 import Foundation
 
-public struct MeshInput {
+public struct MeshRenderContext: Sendable, Equatable {
+    public let tintGate: [UInt8]?
+    public let textureGate: [UInt8]?
+    public let generation: UInt64
+
+    public static let procedural = MeshRenderContext(
+        tintGate: nil, textureGate: nil, generation: 1)!
+
+    public init?(tintGate: [UInt8]?, textureGate: [UInt8]?, generation: UInt64) {
+        guard generation > 0 else { return nil }
+        self.tintGate = tintGate
+        self.textureGate = textureGate
+        self.generation = generation
+    }
+
+    @inline(__always) func removesBiomeTint(from tile: Int) -> Bool {
+        guard let tintGate, tintGate.indices.contains(tile) else { return false }
+        return tintGate[tile] == 0
+    }
+
+    @inline(__always) func isPackBacked(_ tile: Int) -> Bool {
+        guard let textureGate, textureGate.indices.contains(tile) else { return false }
+        return textureGate[tile] == 1
+    }
+}
+
+public struct MeshInput: Sendable {
     /// 18×18×18 padded cells: idx = ((y+1)*18 + (z+1))*18 + (x+1)
     public var blocks: [UInt16]
     public var skyLight: [UInt8]
     public var blockLight: [UInt8]
     /// per-column biome for 18×18 (padded)
     public var biomes: [UInt8]
+    /// Immutable atlas provenance captured before this mesh job is dispatched.
+    public let renderContext: MeshRenderContext
     /// emit one quad per face instead of greedy-merged spans
     public var noMerge = false
 
-    public init(blocks: [UInt16], skyLight: [UInt8], blockLight: [UInt8], biomes: [UInt8], noMerge: Bool = false) {
+    public init(blocks: [UInt16], skyLight: [UInt8], blockLight: [UInt8], biomes: [UInt8],
+                noMerge: Bool = false, renderContext: MeshRenderContext = .procedural) {
         self.blocks = blocks
         self.skyLight = skyLight
         self.blockLight = blockLight
         self.biomes = biomes
         self.noMerge = noMerge
+        self.renderContext = renderContext
     }
 }
 
@@ -55,10 +85,15 @@ private let FACE_OFF: [(Int, Int, Int)] = [
 ]
 
 final class MeshBuilder {
+    let renderContext: MeshRenderContext
     var verts: [Float] = []   // 5 per vertex
     var uints: [UInt32] = []  // 2 per vertex (A, B)
     var idx: [UInt32] = []
     var vcount = 0
+
+    init(renderContext: MeshRenderContext) {
+        self.renderContext = renderContext
+    }
 
     // swiftlint:disable:next function_parameter_count
     func quad(
@@ -73,7 +108,12 @@ final class MeshBuilder {
     ) {
         let base = UInt32(vcount)
         let xs = [x0, x1, x2, x3], ys = [y0, y1, y2, y3], zs = [z0, z1, z2, z3]
-        let us = [u0, u1, u2, u3], vs = [v0, v1, v2, v3]
+        let us = [u0, u1, u2, u3]
+        // Imported PNG row zero is the visual top, while the historical mesh
+        // convention addresses V from the opposite edge. Normalize exactly
+        // once at the shared emitter used by cubes and shaped blocks.
+        let vs = [meshedTextureV(renderContext, layer, v0), meshedTextureV(renderContext, layer, v1),
+                  meshedTextureV(renderContext, layer, v2), meshedTextureV(renderContext, layer, v3)]
         let aos = [ao0, ao1, ao2, ao3], skys = [sky0, sky1, sky2, sky3], blks = [blk0, blk1, blk2, blk3]
         for c in 0..<4 {
             verts.append(Float(xs[c])); verts.append(Float(ys[c])); verts.append(Float(zs[c]))
@@ -110,11 +150,76 @@ final class MeshBuilder {
 private let WHITE = 0xffffff
 private let GRASS_FALLBACK = 0x91bd59
 
-/// per-tile biome-tint gate installed by the app when a resource pack is
-/// active (1 = tile keeps its tint, 0 = render untinted because the imported
-/// art is pre-colored). nil — the always-tint vanilla-parity path elysmoke
-/// goldens exercise — costs nothing in the hot loop.
-public var PACK_TINT_GATE: [UInt8]? = nil
+@inline(__always) private func meshedTextureV(
+    _ context: MeshRenderContext, _ tile: Int, _ v: Double
+) -> Double {
+    context.isPackBacked(tile) ? 1 - v : v
+}
+
+@inline(__always) private func packedMeshV(_ start: Double, _ scale: Double, _ v: Double) -> Double {
+    // MeshBuilder performs the one shared imported-texture V normalization.
+    // Feed its complement so the post-normalization coordinate remains inside
+    // the requested semantic band without a second caller-side flip.
+    1 - (start + v * scale)
+}
+
+/// Rotate a top-face texture whose authored top edge points north so that it
+/// points toward the block's facing. Inputs and outputs stay in [0, 1].
+@inline(__always) func facingTopUV(_ facing: Int, _ u: Double, _ v: Double) -> (Double, Double) {
+    switch facing & 3 {
+    case 1: return (1 - u, 1 - v)
+    case 2: return (1 - v, u)
+    case 3: return (v, 1 - u)
+    default: return (u, v)
+    }
+}
+
+/// Convert a side-face U into foot-to-head distance for a bed. Only the two
+/// longitudinal faces have such a coordinate; end faces retain their stable
+/// fallback mapping because Elysium has no dedicated end crop.
+@inline(__always) private func bedSideU(_ facing: Int, _ face: Int, _ u: Double) -> Double {
+    guard face == leftOf(facing) + 2 || face == rightOf(facing) + 2 else { return u }
+    let x: Double
+    let z: Double
+    switch face {
+    case 2: x = 1 - u; z = 0
+    case 3: x = u; z = 1
+    case 4: x = 0; z = u
+    default: x = 1; z = 1 - u
+    }
+    let towardHead: Double
+    switch facing & 3 {
+    case 0: towardHead = 1 - z
+    case 1: towardHead = z
+    case 2: towardHead = 1 - x
+    default: towardHead = x
+    }
+    // Entity-sheet strips run outer-head -> seam, then seam -> outer-foot.
+    return 1 - towardHead
+}
+
+@inline(__always) private func normalizedBoxUV(
+    _ face: Int, _ u: Double, _ v: Double, _ box: AABB
+) -> (Double, Double) {
+    let uBounds: (Double, Double)
+    let vBounds: (Double, Double)
+    switch face {
+    case 0, 1:
+        uBounds = (box.x0, box.x1); vBounds = (box.z0, box.z1)
+    case 2:
+        uBounds = (1 - box.x1, 1 - box.x0); vBounds = (1 - box.y1, 1 - box.y0)
+    case 3:
+        uBounds = (box.x0, box.x1); vBounds = (1 - box.y1, 1 - box.y0)
+    case 4:
+        uBounds = (box.z0, box.z1); vBounds = (1 - box.y1, 1 - box.y0)
+    default:
+        uBounds = (1 - box.z1, 1 - box.z0); vBounds = (1 - box.y1, 1 - box.y0)
+    }
+    let du = uBounds.1 - uBounds.0, dv = vBounds.1 - vBounds.0
+    guard du > 0, dv > 0 else { return (0, 0) }
+    return (max(0, min(1, (u - uBounds.0) / du)),
+            max(0, min(1, (v - vBounds.0) / dv)))
+}
 
 let TILE_WIRE_DOT = tileId("redstone_dust_dot")
 let TILE_WIRE_LINE = tileId("redstone_dust_line")
@@ -126,12 +231,15 @@ public func buildSectionMesh(_ input: MeshInput) -> MeshOutput {
 
 final class SectionMesher {
     let input: MeshInput
-    let opaque = MeshBuilder()
-    let cutout = MeshBuilder()
-    let translucent = MeshBuilder()
+    let opaque: MeshBuilder
+    let cutout: MeshBuilder
+    let translucent: MeshBuilder
 
     init(_ input: MeshInput) {
         self.input = input
+        opaque = MeshBuilder(renderContext: input.renderContext)
+        cutout = MeshBuilder(renderContext: input.renderContext)
+        translucent = MeshBuilder(renderContext: input.renderContext)
     }
 
     @inline(__always) func cellAt(_ x: Int, _ y: Int, _ z: Int) -> Int { Int(input.blocks[idxOf(x, y, z)]) }
@@ -258,7 +366,7 @@ final class SectionMesher {
                         }
                         let tile = Int(TILE_TABLE[(Int(cell) << 3) | dir])
                         var tint = tintFor(cell, x, z)
-                        if let gate = PACK_TINT_GATE, gate[tile] == 0 { tint = WHITE }
+                        if input.renderContext.removesBiomeTint(from: tile) { tint = WHITE }
                         maskCell[mi] = cell | 0x10000 // mark filled
                         maskKeyA[mi] = (tile << 8) | (ao[0] << 0) | (ao[1] << 2) | (ao[2] << 4) | (ao[3] << 6) | (id << 20)
                         maskKeyB[mi] = Double(sky[0]) + Double(sky[1]) * 16 + Double(sky[2]) * 256 + Double(sky[3]) * 4096
@@ -356,14 +464,16 @@ final class SectionMesher {
                     let s4 = max(sky, skyUp), b4 = max(blk, blkUp)
                     let tileOf: (Int) -> Int = { face in Int(TILE_TABLE[(Int(cell) << 3) | face]) }
                     var tint = tintFor(cell, x, z)
-                    if let gate = PACK_TINT_GATE {
+                    if input.renderContext.tintGate != nil {
                         let crossLike = shape == .cross || shape == .crop || shape == .tallCross ||
                             shape == .rootsShape || shape == .netherWart || shape == .web ||
                             shape == .fire || shape == .sweetBerry || shape == .bambooSapling ||
                             shape == .caveVinesShape || shape == .hangingRoots ||
                             shape == .smallDripleafShape || shape == .pitcherCropShape ||
                             shape == .vine || shape == .glowLichen || shape == .sculkVein
-                        if gate[tileOf(crossLike ? 2 : 1)] == 0 { tint = WHITE }
+                        if input.renderContext.removesBiomeTint(from: tileOf(crossLike ? 2 : 1)) {
+                            tint = WHITE
+                        }
                     }
 
                     if shape == .liquid {
@@ -409,8 +519,76 @@ final class SectionMesher {
                     // generic: render the outline boxes with per-face culling
                     boxes.removeAll(keepingCapacity: true)
                     shapeBoxes(cell, { dx, dy, dz in self.cellAt(x + dx, y + dy, z + dz) }, &boxes, false)
+                    let doorState: (upper: Bool, side: Int, hingeRight: Bool)? = {
+                        guard shape == .door else { return nil }
+                        let upper = (meta & 8) != 0
+                        let lowerCell = upper ? self.cellAt(x, y - 1, z) : cell
+                        let upperCell = upper ? cell : self.cellAt(x, y + 1, z)
+                        guard lowerCell >> 4 == id, upperCell >> 4 == id,
+                              lowerCell & 8 == 0, upperCell & 8 != 0 else { return nil }
+                        let lower = lowerCell & 15, upperMeta = upperCell & 15
+                        let facing = lower & 3
+                        let hingeRight = (upperMeta & 1) != 0
+                        let side = (lower & 4) == 0
+                            ? facing
+                            : (hingeRight ? leftOf(facing) : rightOf(facing))
+                        return (upper, side, hingeRight)
+                    }()
+                    let chestPieceStart: Double? = {
+                        guard shape == .chest,
+                              id == Int(B.chest) || id == Int(B.trapped_chest) else { return nil }
+                        let facing = meta & 3
+                        let sameFacingChest: (Int) -> Bool = { direction in
+                            guard direction >= 0 && direction < FACE_DX.count else { return false }
+                            let other = self.cellAt(x + FACE_DX[direction], y, z + FACE_DZ[direction])
+                            return other >> 4 == id && (other & 15) == meta
+                        }
+                        let hasLeft = sameFacingChest(leftOf(facing))
+                        let hasRight = sameFacingChest(rightOf(facing))
+                        guard hasLeft != hasRight else { return 0 }
+                        // Packed regions are single, left, right.
+                        return hasRight ? 1.0 / 3.0 : 2.0 / 3.0
+                    }()
+                    let multipartUV: (Int, Double, Double, AABB) -> (Double, Double) = { face, u, v, box in
+                        let tile = tileOf(face)
+                        // Semantic packed pieces are present only for pack-backed
+                        // slices.  Procedural tiles retain their historical full
+                        // tile mapping as a deterministic fallback.
+                        guard self.input.renderContext.isPackBacked(tile) else { return (u, v) }
+                        let name = tileName(tile)
+                        let semantic = normalizedBoxUV(face, u, v, box)
+                        if name.hasSuffix("_door") {
+                            let upper = (meta & 8) != 0
+                            let doorU: Double
+                            if let doorState,
+                               face == doorState.side + 2 || face == FACE_OPP[doorState.side] + 2 {
+                                doorU = doorState.hingeRight ? 1 - semantic.0 : semantic.0
+                            } else {
+                                doorU = semantic.0
+                            }
+                            return (doorU, packedMeshV(upper ? 0 : 0.5, 0.5, semantic.1))
+                        }
+                        if name.hasSuffix("_bed_top") {
+                            let head = (meta & 4) != 0
+                            let rotated = face == 1
+                                ? facingTopUV(meta & 3, semantic.0, semantic.1)
+                                : semantic
+                            return (rotated.0, packedMeshV(head ? 0 : 0.5, 0.5, rotated.1))
+                        }
+                        if name.hasSuffix("_bed_side") {
+                            let head = (meta & 4) != 0
+                            return (bedSideU(meta & 3, face, semantic.0),
+                                    packedMeshV(head ? 0 : 0.5, 0.5, semantic.1))
+                        }
+                        guard name == "chest_side", let chestPieceStart else {
+                            return (u, v)
+                        }
+                        let chestU = face == (meta & 3) + 2 ? 1 - semantic.0 : semantic.0
+                        return (chestU,
+                                packedMeshV(chestPieceStart, 1.0 / 3.0, semantic.1))
+                    }
                     for bx in boxes {
-                        emitBox(target, x, y, z, bx, tileOf, s4, b4, tint, anim, Int(EMISSIVE[id]))
+                        emitBox(target, x, y, z, bx, tileOf, s4, b4, tint, anim, Int(EMISSIVE[id]), multipartUV)
                     }
                 }
             }
@@ -829,7 +1007,8 @@ final class SectionMesher {
 
     private func emitBox(
         _ b: MeshBuilder, _ x: Int, _ y: Int, _ z: Int, _ box: AABB,
-        _ tileOf: (Int) -> Int, _ sky: Int, _ blk: Int, _ tint: Int, _ anim: Int, _ emissive: Int
+        _ tileOf: (Int) -> Int, _ sky: Int, _ blk: Int, _ tint: Int, _ anim: Int, _ emissive: Int,
+        _ transformUV: (Int, Double, Double, AABB) -> (Double, Double) = { _, u, v, _ in (u, v) }
     ) {
         let x0 = Double(x) + box.x0, y0 = Double(y) + box.y0, z0 = Double(z) + box.z0
         let x1 = Double(x) + box.x1, y1 = Double(y) + box.y1, z1 = Double(z) + box.z1
@@ -837,38 +1016,50 @@ final class SectionMesher {
         @inline(__always) func fullHigh(_ v: Double) -> Bool { v >= 0.999 }
         // bottom (0)
         if !(fullLow(box.y0) && OPAQUE[cellAt(x, y - 1, z) >> 4] == 1) {
+            let a = transformUV(0, box.x0, box.z0, box), c = transformUV(0, box.x0, box.z1, box)
+            let d = transformUV(0, box.x1, box.z1, box), e = transformUV(0, box.x1, box.z0, box)
             b.quad(x0, y0, z0, x0, y0, z1, x1, y0, z1, x1, y0, z0,
-                   box.x0, box.z0, box.x0, box.z1, box.x1, box.z1, box.x1, box.z0,
+                   a.0, a.1, c.0, c.1, d.0, d.1, e.0, e.1,
                    tileOf(0), 0, 3, 3, 3, 3, sky, sky, sky, sky, blk, blk, blk, blk, emissive, tint, anim)
         }
         // top (1)
         if !(fullHigh(box.y1) && OPAQUE[cellAt(x, y + 1, z) >> 4] == 1) {
+            let a = transformUV(1, box.x0, box.z0, box), c = transformUV(1, box.x1, box.z0, box)
+            let d = transformUV(1, box.x1, box.z1, box), e = transformUV(1, box.x0, box.z1, box)
             b.quad(x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z1,
-                   box.x0, box.z0, box.x1, box.z0, box.x1, box.z1, box.x0, box.z1,
+                   a.0, a.1, c.0, c.1, d.0, d.1, e.0, e.1,
                    tileOf(1), 1, 3, 3, 3, 3, sky, sky, sky, sky, blk, blk, blk, blk, emissive, tint, anim)
         }
         // north -z (2) — vertex order matches the greedy cube winding (back-culled)
         if !(fullLow(box.z0) && OPAQUE[cellAt(x, y, z - 1) >> 4] == 1) {
+            let a = transformUV(2, 1 - box.x0, 1 - box.y0, box), c = transformUV(2, 1 - box.x1, 1 - box.y0, box)
+            let d = transformUV(2, 1 - box.x1, 1 - box.y1, box), e = transformUV(2, 1 - box.x0, 1 - box.y1, box)
             b.quad(x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y1, z0,
-                   1 - box.x0, 1 - box.y0, 1 - box.x1, 1 - box.y0, 1 - box.x1, 1 - box.y1, 1 - box.x0, 1 - box.y1,
+                   a.0, a.1, c.0, c.1, d.0, d.1, e.0, e.1,
                    tileOf(2), 2, 3, 3, 3, 3, sky, sky, sky, sky, blk, blk, blk, blk, emissive, tint, anim)
         }
         // south +z (3)
         if !(fullHigh(box.z1) && OPAQUE[cellAt(x, y, z + 1) >> 4] == 1) {
+            let a = transformUV(3, box.x1, 1 - box.y0, box), c = transformUV(3, box.x0, 1 - box.y0, box)
+            let d = transformUV(3, box.x0, 1 - box.y1, box), e = transformUV(3, box.x1, 1 - box.y1, box)
             b.quad(x1, y0, z1, x0, y0, z1, x0, y1, z1, x1, y1, z1,
-                   box.x1, 1 - box.y0, box.x0, 1 - box.y0, box.x0, 1 - box.y1, box.x1, 1 - box.y1,
+                   a.0, a.1, c.0, c.1, d.0, d.1, e.0, e.1,
                    tileOf(3), 3, 3, 3, 3, 3, sky, sky, sky, sky, blk, blk, blk, blk, emissive, tint, anim)
         }
         // west -x (4)
         if !(fullLow(box.x0) && OPAQUE[cellAt(x - 1, y, z) >> 4] == 1) {
+            let a = transformUV(4, box.z1, 1 - box.y0, box), c = transformUV(4, box.z0, 1 - box.y0, box)
+            let d = transformUV(4, box.z0, 1 - box.y1, box), e = transformUV(4, box.z1, 1 - box.y1, box)
             b.quad(x0, y0, z1, x0, y0, z0, x0, y1, z0, x0, y1, z1,
-                   box.z1, 1 - box.y0, box.z0, 1 - box.y0, box.z0, 1 - box.y1, box.z1, 1 - box.y1,
+                   a.0, a.1, c.0, c.1, d.0, d.1, e.0, e.1,
                    tileOf(4), 4, 3, 3, 3, 3, sky, sky, sky, sky, blk, blk, blk, blk, emissive, tint, anim)
         }
         // east +x (5)
         if !(fullHigh(box.x1) && OPAQUE[cellAt(x + 1, y, z) >> 4] == 1) {
+            let a = transformUV(5, 1 - box.z0, 1 - box.y0, box), c = transformUV(5, 1 - box.z1, 1 - box.y0, box)
+            let d = transformUV(5, 1 - box.z1, 1 - box.y1, box), e = transformUV(5, 1 - box.z0, 1 - box.y1, box)
             b.quad(x1, y0, z0, x1, y0, z1, x1, y1, z1, x1, y1, z0,
-                   1 - box.z0, 1 - box.y0, 1 - box.z1, 1 - box.y0, 1 - box.z1, 1 - box.y1, 1 - box.z0, 1 - box.y1,
+                   a.0, a.1, c.0, c.1, d.0, d.1, e.0, e.1,
                    tileOf(5), 5, 3, 3, 3, 3, sky, sky, sky, sky, blk, blk, blk, blk, emissive, tint, anim)
         }
     }

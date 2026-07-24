@@ -1251,8 +1251,7 @@ public final class SaveDB {
     @discardableResult
     public func deleteTemplate(named rawName: String) throws -> Bool {
         guard let name = normalizedTemplateName(rawName) else { throw TemplateError.invalidName }
-        guard let changed = try? withStorageRank({ try storage.deleteTemplateRow(name: name) })
-        else { return false }
+        let changed = try withStorageRank { try storage.deleteTemplateRow(name: name) }
         return changed > 0
     }
 }

@@ -231,8 +231,46 @@ struct DimChunk: Hashable {
     let dim: Int
     let key: Int64
 }
+struct MeshRenderContextClock {
+    private(set) var live: MeshRenderContext
+
+    init(live: MeshRenderContext = .procedural) {
+        self.live = live
+    }
+
+    func prepare(tintGate: [UInt8]?, textureGate: [UInt8]?) -> MeshRenderContext? {
+        let (generation, overflow) = live.generation.addingReportingOverflow(1)
+        guard !overflow else { return nil }
+        return MeshRenderContext(tintGate: tintGate, textureGate: textureGate,
+                                 generation: generation)
+    }
+
+    mutating func install(_ context: MeshRenderContext) -> Bool {
+        let (expected, overflow) = live.generation.addingReportingOverflow(1)
+        guard !overflow, context.generation == expected else { return false }
+        live = context
+        return true
+    }
+}
+
 final class MeshJobState {
+    let generation: UInt64
     var dirtyAgain = false
+
+    init(generation: UInt64) {
+        self.generation = generation
+    }
+}
+
+@discardableResult
+func withAdmittedMeshCompletion(
+    liveGeneration: UInt64, liveState: MeshJobState?, completedState: MeshJobState,
+    _ effects: () -> Void
+) -> Bool {
+    guard liveGeneration == completedState.generation,
+          liveState === completedState else { return false }
+    effects()
+    return true
 }
 
 private struct RPGSemanticEquipmentFocusState: Encodable {
@@ -500,6 +538,11 @@ public final class GameCore {
     /// scan doesn't rescan the streaming frontier forever; retried once per second
     private var stalledSections: [Dim: Set<SectionPos>] = [:]
     private var meshJobs: [DimSection: MeshJobState] = [:]
+    private var meshRenderContextClock = MeshRenderContextClock()
+    public var liveMeshRenderContext: MeshRenderContext {
+        precondition(Thread.isMainThread)
+        return meshRenderContextClock.live
+    }
     public private(set) var meshedThisSecond = 0
     public var lastChunkUpdates = 0
     /// unload records awaiting the once-per-second batched write
@@ -3112,7 +3155,7 @@ public final class GameCore {
             return
         }
         snap.noMerge = settings.simpleMesh
-        let state = MeshJobState()
+        let state = MeshJobState(generation: snap.renderContext.generation)
         meshJobs[jobKey] = state
         let d = w.dim
         let minY = w.info.minY
@@ -3120,13 +3163,18 @@ public final class GameCore {
             let mesh = LoadProf.shared.time("mesh") { buildSectionMesh(snap) }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.meshJobs.removeValue(forKey: jobKey)
-                guard self.inWorld, self.worlds[d] === w else { return }
-                if d == self.dim {
-                    self.host?.uploadMesh(pos.cx, pos.sy, pos.cz, minY, mesh)
-                    self.meshedThisSecond += 1
+                withAdmittedMeshCompletion(
+                    liveGeneration: self.liveMeshRenderContext.generation,
+                    liveState: self.meshJobs[jobKey], completedState: state
+                ) {
+                    self.meshJobs.removeValue(forKey: jobKey)
+                    guard self.inWorld, self.worlds[d] === w else { return }
+                    if d == self.dim {
+                        self.host?.uploadMesh(pos.cx, pos.sy, pos.cz, minY, mesh)
+                        self.meshedThisSecond += 1
+                    }
+                    if state.dirtyAgain { self.dirtySections[d]!.insert(pos) }
                 }
-                if state.dirtyAgain { self.dirtySections[d]!.insert(pos) }
             }
         }
     }
@@ -3169,7 +3217,23 @@ public final class GameCore {
                 }
             }
         }
-        return MeshInput(blocks: blocks, skyLight: skyLight, blockLight: blockLight, biomes: biomes)
+        return MeshInput(blocks: blocks, skyLight: skyLight, blockLight: blockLight,
+                         biomes: biomes, renderContext: liveMeshRenderContext)
+    }
+
+    /// Main-thread staging seam. Preparing is fallible but does not mutate the live generation.
+    public func prepareNextMeshRenderContext(
+        tintGate: [UInt8]?, textureGate: [UInt8]?
+    ) -> MeshRenderContext? {
+        precondition(Thread.isMainThread)
+        return meshRenderContextClock.prepare(tintGate: tintGate, textureGate: textureGate)
+    }
+
+    /// Publication installs only the exact checked successor prepared before live atlas mutation.
+    public func installMeshRenderContext(_ context: MeshRenderContext) {
+        precondition(Thread.isMainThread)
+        let installed = meshRenderContextClock.install(context)
+        precondition(installed)
     }
 
     /// drop every GPU mesh and re-mesh all lit chunks in the current dimension —

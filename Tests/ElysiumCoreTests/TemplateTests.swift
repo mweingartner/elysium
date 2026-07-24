@@ -754,6 +754,27 @@ final class TemplateTests: XCTestCase {
         XCTAssertFalse(try db.deleteTemplate(named: "first object"))
     }
 
+    func testTemplateStorePropagatesDeleteFailureWithoutRemovingRow() throws {
+        let world = makeWorld()
+        makeFurnishedObject(in: world)
+        let result = try cloneObjectTemplate(named: "Retained Object", from: world,
+                                             targetX: 1, targetY: 64, targetZ: 1)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "elysium-template-delete-failure-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("elysium.db")
+        let database = try SaveDB.open(databaseURL: url, migrateLegacy: false)
+        XCTAssertTrue(try database.putTemplate(result.template))
+        try database.close()
+
+        XCTAssertThrowsError(try database.deleteTemplate(named: "retained object"))
+
+        let reopened = try SaveDB.open(databaseURL: url, migrateLegacy: false)
+        defer { try? reopened.close() }
+        XCTAssertNotNil(try reopened.getTemplate(named: "retained object"))
+    }
+
     func testObjectTemplateSummaryReportsBrowserMetadata() throws {
         let world = makeWorld()
         makeFurnishedObject(in: world)

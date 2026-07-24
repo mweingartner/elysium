@@ -369,6 +369,10 @@ func decodePNG(_ data: Data, budget: ResourcePackPreparationBudget? = nil) -> RG
                                   bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: info) else { return false }
         ctx.interpolationQuality = .none
+        // This bitmap context's untransformed CGImage draw writes the authored
+        // PNG top scanline to buffer row zero. A translate/negative-scale here
+        // would invert it. The literal-scanline fixture locks that contract
+        // independently of Core Graphics image encoding.
         ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
         return true
     }
@@ -1110,6 +1114,7 @@ struct PackAtlasResult {
     var animations: [TileAnimation]
     var itemIcons: [String: [UInt8]]
     var tintGate: [UInt8]
+    var textureGate: [UInt8]
     var fluidAnimated: Bool
     var appliedTiles: Int
     var appliedItems: Int
@@ -1146,10 +1151,11 @@ private func entityTileCrop(_ tile: String) -> EntityTileCrop? {
     }
     if tile.hasSuffix("_bed_side") {
         let c = String(tile.dropLast("_bed_side".count))
-        // long side strip of the head piece; column nearest the top face
-        // (x=22) becomes the tile's top row after rotation
+        // Head and foot side strips are independently rotated then stacked so
+        // the mesher can select the semantic half without stretching either.
         return EntityTileCrop(path: "entity/bed/\(c)",
-                              rects: [(22 / 64, 6 / 64, 6 / 64, 16 / 64)], rotate: true)
+                              rects: [(22 / 64, 6 / 64, 6 / 64, 16 / 64),
+                                      (22 / 64, 28 / 64, 6 / 64, 16 / 64)], rotate: true)
     }
     switch tile {
     case "chest_side":
@@ -1190,7 +1196,21 @@ private func cropEntityTile(_ packs: [ResourcePack], _ crop: EntityTileCrop,
                 px[d + 2] = img.pixels[s + 2]; px[d + 3] = img.pixels[s + 3]
             }
         }
-        pieces.append(RGBAImage(width: w, height: h, pixels: px))
+        var piece = RGBAImage(width: w, height: h, pixels: px)
+        if crop.rotate {
+            // Rotate each strip before stacking; rotating the combined image
+            // would turn semantic head/foot rows into left/right columns.
+            var rotated = [UInt8](repeating: 0, count: piece.width * piece.height * 4)
+            for r in 0..<piece.width {
+                for c in 0..<piece.height {
+                    let s = (c * piece.width + r) * 4, d = (r * piece.height + c) * 4
+                    rotated[d] = piece.pixels[s]; rotated[d + 1] = piece.pixels[s + 1]
+                    rotated[d + 2] = piece.pixels[s + 2]; rotated[d + 3] = piece.pixels[s + 3]
+                }
+            }
+            piece = RGBAImage(width: piece.height, height: piece.width, pixels: rotated)
+        }
+        pieces.append(piece)
     }
     var out: RGBAImage
     if pieces.count == 1 {
@@ -1210,19 +1230,38 @@ private func cropEntityTile(_ packs: [ResourcePack], _ crop: EntityTileCrop,
         }
         out = RGBAImage(width: w, height: h, pixels: px)
     }
-    if crop.rotate {
-        // dst(row r, col c) = src(col r, row c): strip column 0 → tile row 0
-        var px = [UInt8](repeating: 0, count: out.width * out.height * 4)
-        for r in 0..<out.width {
-            for c in 0..<out.height {
-                let s = (c * out.width + r) * 4, d = (r * out.height + c) * 4
-                px[d] = out.pixels[s]; px[d + 1] = out.pixels[s + 1]
-                px[d + 2] = out.pixels[s + 2]; px[d + 3] = out.pixels[s + 3]
-            }
-        }
-        out = RGBAImage(width: out.height, height: out.width, pixels: px)
-    }
     return out
+}
+
+/// A packed chest slice has a full single chest followed by its two double
+/// chest parts.  Missing pack parts use the single image, keeping malformed or
+/// older packs valid while still giving a deterministic semantic layout.
+private func cropSemanticChestTile(_ packs: [ResourcePack],
+                                   budget: ResourcePackPreparationBudget) -> RGBAImage? {
+    let rects: [(x: Double, y: Double, w: Double, h: Double)] = [
+        (14.0 / 64, 14.0 / 64, 14.0 / 64, 5.0 / 64),
+        (14.0 / 64, 33.0 / 64, 14.0 / 64, 10.0 / 64),
+    ]
+    let normal = EntityTileCrop(path: "entity/chest/normal", rects: rects, rotate: false)
+    guard let single = cropEntityTile(packs, normal, budget: budget) else { return nil }
+    let left = cropEntityTile(packs, EntityTileCrop(path: "entity/chest/normal_left", rects: rects, rotate: false), budget: budget) ?? single
+    let right = cropEntityTile(packs, EntityTileCrop(path: "entity/chest/normal_right", rects: rects, rotate: false), budget: budget) ?? single
+    guard single.width == left.width, single.width == right.width,
+          single.height == left.height, single.height == right.height else { return single }
+    let height = single.height + left.height + right.height
+    var pixels = [UInt8](repeating: 0, count: single.width * height * 4)
+    var offset = 0
+    for image in [single, left, right] {
+        guard image.width == single.width else { return single }
+        for y in 0..<image.height {
+            let source = y * image.width * 4
+            let destination = (offset + y) * single.width * 4
+            pixels.replaceSubrange(destination..<(destination + image.width * 4),
+                                   with: image.pixels[source..<(source + image.width * 4)])
+        }
+        offset += image.height
+    }
+    return RGBAImage(width: single.width, height: height, pixels: pixels)
 }
 
 private func loadTexture(_ packs: [ResourcePack], _ relPath: String,
@@ -1317,9 +1356,12 @@ func buildPackAtlas(packs: [ResourcePack],
         for c in candidates(name) {
             if let t = loadTexture(packs, c, budget: budget) { resolved[i] = t; break }
         }
-        if resolved[i] == nil, let ec = entityTileCrop(name),
-           let img = cropEntityTile(packs, ec, budget: budget) {
-            entityTiles[i] = img
+        if resolved[i] == nil {
+            if name == "chest_side", let img = cropSemanticChestTile(packs, budget: budget) {
+                entityTiles[i] = img
+            } else if let ec = entityTileCrop(name), let img = cropEntityTile(packs, ec, budget: budget) {
+                entityTiles[i] = img
+            }
         }
     }
 
@@ -1334,6 +1376,7 @@ func buildPackAtlas(packs: [ResourcePack],
     icon16.reserveCapacity(names.count)
     var animations: [TileAnimation] = []
     var tintGate = [UInt8](repeating: 1, count: names.count)
+    var textureGate = [UInt8](repeating: 0, count: names.count)
     var fluidAnimated = false
     var applied = 0
 
@@ -1342,6 +1385,7 @@ func buildPackAtlas(packs: [ResourcePack],
         var px: [UInt8]
         if let t = resolved[i] {
             applied += 1
+            textureGate[i] = 1
             if !TINT_EXPECTED.contains(name) { tintGate[i] = 0 }
             if let anim = t.animation {
                 // frame 0 of the play order into the slice; full set to the animator
@@ -1376,10 +1420,12 @@ func buildPackAtlas(packs: [ResourcePack],
             }
         } else if let img = entityTiles[i] {
             applied += 1
+            textureGate[i] = 1
             tintGate[i] = 0
             px = scaleTo(img, res)
         } else if let (top, bottom) = compositeSrcs[i] {
             applied += 1
+            textureGate[i] = 1
             tintGate[i] = TINT_EXPECTED.contains(name) ? 1 : 0
             // squash both halves into one square (each block half repeats the tile)
             px = [UInt8](repeating: 0, count: res * res * 4)
@@ -1424,7 +1470,7 @@ func buildPackAtlas(packs: [ResourcePack],
     return PackAtlasResult(
         res: res, slices: slices,
         icon16: BuiltAtlas(count: names.count, pixels: icon16, missing: []),
-        animations: animations, itemIcons: itemIcons, tintGate: tintGate,
+        animations: animations, itemIcons: itemIcons, tintGate: tintGate, textureGate: textureGate,
         fluidAnimated: fluidAnimated, appliedTiles: applied, appliedItems: itemIcons.count)
 }
 
@@ -1643,7 +1689,7 @@ final class PreparedResourcePackTransaction: @unchecked Sendable {
 
     /// Main-only and fallible. Claiming occurs before any GPU allocation, preventing retries that
     /// could accidentally stage a different A/B mix from the same logical transaction.
-    func stage(renderer: WorldRenderer) -> StagedResourcePackPublication? {
+    func stage(renderer: WorldRenderer, game: GameCore) -> StagedResourcePackPublication? {
         precondition(Thread.isMainThread)
         guard !stagingClaimed else { return nil }
         stagingClaimed = true
@@ -1661,10 +1707,12 @@ final class PreparedResourcePackTransaction: @unchecked Sendable {
             failNextIconPackPublicationBeforeMutation = false
             return nil
         }
+        guard let meshContext = game.prepareNextMeshRenderContext(
+            tintGate: atlas.tintGate, textureGate: atlas.textureGate) else { return nil }
         return StagedResourcePackPublication(
             enabledNames: enabledNames, bundledAddOns: bundledAddOns, packs: packs,
             atlas: atlas, candidate: candidate, world: stagedWorld, packUI: stagedPackUI,
-            sun: stagedSun, moon: stagedMoon)
+            sun: stagedSun, moon: stagedMoon, meshContext: meshContext)
     }
 }
 
@@ -1698,12 +1746,14 @@ final class StagedResourcePackPublication {
     private let packUI: PackUI
     private let sun: MTLTexture?
     private let moon: MTLTexture?
+    private let meshContext: MeshRenderContext
     private var consumed = false
 
     fileprivate init(enabledNames: [String], bundledAddOns: [BundledResourcePackAddOnID],
                      packs: [ResourcePack], atlas: PackAtlasResult,
                      candidate: IconSourceCandidate, world: WorldRenderer.StagedWorldAtlas,
-                     packUI: PackUI, sun: MTLTexture?, moon: MTLTexture?) {
+                     packUI: PackUI, sun: MTLTexture?, moon: MTLTexture?,
+                     meshContext: MeshRenderContext) {
         self.enabledNames = enabledNames
         self.bundledAddOns = bundledAddOns
         self.packs = packs
@@ -1713,6 +1763,7 @@ final class StagedResourcePackPublication {
         self.packUI = packUI
         self.sun = sun
         self.moon = moon
+        self.meshContext = meshContext
     }
 
     func publish(game: GameCore, renderer: WorldRenderer, ui: UIManager) {
@@ -1728,7 +1779,6 @@ final class StagedResourcePackPublication {
         iconPackPublicationHook?(.uiWorldInstalled)
         // Install every main-confined B component while background Core icon readers remain on A.
         // The atomic Core icon swap below is the final source commit for the complete generation.
-        PACK_TINT_GATE = atlas.tintGate
         ACTIVE_PACKS = packs
         RESOURCE_PACK_PRESENTATION = resourcePackPresentationAfterActivePublication(
             RESOURCE_PACK_PRESENTATION, activeAddOns: bundledAddOns)
@@ -1744,8 +1794,9 @@ final class StagedResourcePackPublication {
         precondition(currentIconSourceGeneration() == generation &&
                      currentUIIconGeneration() == generation &&
                      renderer.currentWorldIconGeneration() == generation)
-        game.remeshAllLoaded()
+        game.installMeshRenderContext(meshContext)
         iconPackPublicationHook?(.coreCommitted)
+        game.remeshAllLoaded()
         print("[packs] \(enabledNames.joined(separator: " + ")) published as one generation")
         fflush(stdout)
     }
@@ -1807,6 +1858,11 @@ func applyResourcePacks(_ userPacks: [String],
             print("[packs] injected pre-commit failure; retaining prior pack")
             return false
         }
+        guard let meshContext = game.prepareNextMeshRenderContext(
+            tintGate: result.tintGate, textureGate: result.textureGate) else {
+            print("[packs] mesh generation exhausted; retaining prior pack")
+            return false
+        }
         ui.cv.resetIconSlots()
         renderer.resetSpriteSlots()
         iconPackPublicationHook?(.retired)
@@ -1820,8 +1876,8 @@ func applyResourcePacks(_ userPacks: [String],
         precondition(currentIconSourceGeneration() == generation &&
                      currentUIIconGeneration() == generation &&
                      renderer.currentWorldIconGeneration() == generation)
+        game.installMeshRenderContext(meshContext)
         iconPackPublicationHook?(.coreCommitted)
-        PACK_TINT_GATE = result.tintGate
         ACTIVE_PACKS = packs
         RESOURCE_PACK_PRESENTATION = resourcePackPresentationAfterActivePublication(
             RESOURCE_PACK_PRESENTATION, activeAddOns: bundledAddOns)
@@ -1847,6 +1903,11 @@ func applyResourcePacks(_ userPacks: [String],
             print("[packs] injected procedural pre-commit failure; retaining prior pack")
             return false
         }
+        guard let meshContext = game.prepareNextMeshRenderContext(
+            tintGate: nil, textureGate: nil) else {
+            print("[packs] mesh generation exhausted; retaining prior pack")
+            return false
+        }
         ui.cv.resetIconSlots()
         renderer.resetSpriteSlots()
         iconPackPublicationHook?(.retired)
@@ -1859,8 +1920,8 @@ func applyResourcePacks(_ userPacks: [String],
         precondition(currentIconSourceGeneration() == generation &&
                      currentUIIconGeneration() == generation &&
                      renderer.currentWorldIconGeneration() == generation)
+        game.installMeshRenderContext(meshContext)
         iconPackPublicationHook?(.coreCommitted)
-        PACK_TINT_GATE = nil
         ACTIVE_PACKS = []
         RESOURCE_PACK_PRESENTATION = resourcePackPresentationAfterFallbackPublication(
             RESOURCE_PACK_PRESENTATION)
