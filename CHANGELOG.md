@@ -5,6 +5,9 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Faithful 64x fonts, HUD images, buttons, and container panels now retain their
+  native 4x raster detail instead of being reduced to 2x and enlarged again on
+  Retina displays. Their logical layout and glyph spacing are unchanged.
 - Faithful graphics now use one upright PNG convention across world and UI
   consumers, with facing-aware upper/lower door art, head/foot bed art, and
   coherent left/right double-chest fronts. First-person play shows the selected

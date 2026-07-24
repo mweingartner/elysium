@@ -1401,14 +1401,15 @@ final class UIManager {
     // ---- pack GUI sheets ----------------------------------------------------------
     func hasSheet(_ s: String) -> Bool { packUI?.sheets.contains(s) ?? false }
 
-    /// blit a base-px region of a pack GUI sheet (sheet content is stored at 2×);
-    /// returns false when the sheet isn't loaded so callers can fall back
+    /// Blit a base-px region of a pack GUI sheet. Composite coordinates are
+    /// logical, so callers are independent of the prepared pack's raster scale.
+    /// Returns false when the sheet isn't loaded so callers can fall back.
     @discardableResult
     func blitSheet(_ sheet: String, _ sx: Double, _ sy: Double, _ sw: Double, _ sh: Double,
                    _ dx: Double, _ dy: Double, _ dw: Double? = nil, _ dh: Double? = nil,
                    tint: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)) -> Bool {
         guard let p = packUI, p.sheets.contains(sheet), let cell = PackUI.CELLS[sheet] else { return false }
-        cv.guiQuad(Double(cell.0) + sx * 2, Double(cell.1) + sy * 2, sw * 2, sh * 2,
+        cv.guiQuad(Double(cell.0) + sx, Double(cell.1) + sy, sw, sh,
                    dx, dy, dw ?? sw, dh ?? sh, tint)
         return true
     }

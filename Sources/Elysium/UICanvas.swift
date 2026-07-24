@@ -148,14 +148,25 @@ final class UICanvas {
         }
     }
 
-    /// blit from the pack GUI composite (atlas pixel coords, 2048×2560)
+    static let guiLogicalWidth = Double(PackUI.logicalWidth)
+    static let guiLogicalHeight = Double(PackUI.logicalHeight)
+
+    static func guiUVRect(_ x: Double, _ y: Double, _ width: Double,
+                          _ height: Double) -> SIMD4<Float> {
+        SIMD4<Float>(Float(x / guiLogicalWidth), Float(y / guiLogicalHeight),
+                     Float((x + width) / guiLogicalWidth),
+                     Float((y + height) / guiLogicalHeight))
+    }
+
+    /// Blit from the pack GUI composite using logical base-GUI coordinates.
     func guiQuad(_ ax: Double, _ ay: Double, _ aw: Double, _ ah: Double,
                  _ dx: Double, _ dy: Double, _ dw: Double, _ dh: Double,
                  _ tint: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)) {
         guard guiTexture != nil else { return }
         mark(true)
+        let uv = Self.guiUVRect(ax, ay, aw, ah)
         emitQuad(Float(dx), Float(dy), Float(dw), Float(dh),
-                 Float(ax / 2048), Float(ay / 2560), Float((ax + aw) / 2048), Float((ay + ah) / 2560),
+                 uv.x, uv.y, uv.z, uv.w,
                  tint, tint)
     }
 
@@ -322,17 +333,18 @@ final class UICanvas {
                     continue
                 }
             }
-            // pack bitmap font: ASCII via the composite ascii.png cell (8×8 glyphs at 2×)
+            // Pack bitmap font: logical 8×8 cells remain stable while the
+            // backing composite preserves the active pack's native scale.
             if let pf = guiTexture != nil ? packFontWidths : nil,
                ch.unicodeScalars.count == 1, let code = ch.unicodeScalars.first?.value,
                code >= 32, code < 127 {
                 let c = Int(code)
                 if c != 32 {
-                    let ax = 1024.0 + Double(c % 16) * 16, ay = Double(c / 16) * 16
+                    let ax = 512.0 + Double(c % 16) * 8, ay = Double(c / 16) * 8
                     if shadow {
-                        guiQuad(ax, ay, 16, 16, cx + s, y + s, 8 * s, 8 * s, curShadow)
+                        guiQuad(ax, ay, 8, 8, cx + s, y + s, 8 * s, 8 * s, curShadow)
                     }
-                    guiQuad(ax, ay, 16, 16, cx, y, 8 * s, 8 * s, curColor)
+                    guiQuad(ax, ay, 8, 8, cx, y, 8 * s, 8 * s, curColor)
                 }
                 cx += pf[c] * s
                 i = text.index(after: i)

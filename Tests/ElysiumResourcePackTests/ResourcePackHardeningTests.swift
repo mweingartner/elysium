@@ -49,6 +49,45 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertEqual(alpha.pixels[3], 128)
     }
 
+    func testPackUIRasterScalePreservesNativeDetailWithBoundedLogicalMapping() throws {
+        XCTAssertEqual(PackUI.preferredRasterScale([
+            (width: 256, height: 256, logicalSize: 256),
+        ]), 1)
+        XCTAssertEqual(PackUI.preferredRasterScale([
+            (width: 512, height: 512, logicalSize: 256),
+            (width: 384, height: 384, logicalSize: 128),
+        ]), 3)
+        XCTAssertEqual(PackUI.preferredRasterScale([
+            (width: 1024, height: 1024, logicalSize: 256),
+            (width: 512, height: 512, logicalSize: 128),
+        ]), 4, "Faithful 64x GUI and ASCII sources must retain their native 4x raster")
+        XCTAssertEqual(PackUI.preferredRasterScale([
+            (width: 2048, height: 2048, logicalSize: 256),
+        ]), 4, "higher source scales must clamp to the bounded 4x composite")
+        XCTAssertEqual(PackUI.preferredRasterScale([
+            (width: 1024, height: 512, logicalSize: 256),
+            (width: 513, height: 513, logicalSize: 128),
+        ]), 1, "non-square and non-integral sources cannot define the composite scale")
+
+        let dimensions = try XCTUnwrap(PackUI.compositeDimensions(rasterScale: 4))
+        XCTAssertEqual(dimensions.width, 4096)
+        XCTAssertEqual(dimensions.height, 5120)
+        XCTAssertEqual(dimensions.width * dimensions.height * 4, 80 << 20)
+        XCTAssertNil(PackUI.compositeDimensions(rasterScale: 0))
+        XCTAssertNil(PackUI.compositeDimensions(rasterScale: 5))
+
+        XCTAssertEqual(PackUI.CELLS["ascii"]?.0, 512)
+        XCTAssertEqual(PackUI.CELLS["ascii"]?.1, 0)
+        XCTAssertEqual(PackUI.CELLS["horse"]?.0, 768)
+        XCTAssertEqual(PackUI.CELLS["horse"]?.1, 1024)
+
+        let logicalGlyph = UICanvas.guiUVRect(512 + 15 * 8, 15 * 8, 8, 8)
+        XCTAssertEqual(logicalGlyph.x, Float((1024.0 + 15 * 16) / 2048.0), accuracy: 0.000_001)
+        XCTAssertEqual(logicalGlyph.y, Float((15.0 * 16) / 2560.0), accuracy: 0.000_001)
+        XCTAssertEqual(logicalGlyph.z, Float((1024.0 + 16 * 16) / 2048.0), accuracy: 0.000_001)
+        XCTAssertEqual(logicalGlyph.w, Float((16.0 * 16) / 2560.0), accuracy: 0.000_001)
+    }
+
     func testRainbowAndHeldOverlayPlansClampAndStayDeterministic() throws {
         XCTAssertEqual(xpRainbowSegments(progress: -1, width: 182), [])
         XCTAssertEqual(xpRainbowSegments(progress: .nan, width: 182), [])

@@ -1886,9 +1886,10 @@ func applyResourcePacks(_ userPacks: [String],
         ui.packUI = stagedPackUI
         ui.cv.guiTexture = stagedPackUI.texture
         packFontWidths = stagedPackUI.fontWidths
-        print(String(format: "[packs] %@ → %d/%d tiles, %d item icons, %d animated, %d× atlas, %d GUI sheets (%.0fms)",
+        print(String(format: "[packs] %@ → %d/%d tiles, %d item icons, %d animated, %d× atlas, %d GUI sheets @ %d× (%.0fms)",
                      enabled.joined(separator: " + "), result.appliedTiles, result.slices.count,
-                     result.appliedItems, result.animations.count, result.res, stagedPackUI.sheets.count,
+                     result.appliedItems, result.animations.count, result.res,
+                     stagedPackUI.sheets.count, stagedPackUI.rasterScale,
                      (CFAbsoluteTimeGetCurrent() - t0) * 1000))
     } else {
         let atlas = ElysiumCore.buildAtlas()
@@ -1941,13 +1942,16 @@ func applyResourcePacks(_ userPacks: [String],
 // =============================================================================
 // PACK GUI — imports the pack's interface art (HUD icons, widgets, container
 // backgrounds, bitmap font, dirt background) into one composited texture.
-// Sheets live in fixed 512×512 cells at exactly 2× base-GUI scale (16px-per-
-// 8px-glyph); packs at other resolutions are rescaled on load.
+// Source rectangles stay in logical base-GUI coordinates while the backing
+// composite preserves the highest supported integral source scale.
 // =============================================================================
 struct PreparedPackUI: Sendable {
     let pixels: [UInt8]
     let sheets: Set<String>
     let fontWidths: [Double]?
+    let rasterScale: Int
+    let width: Int
+    let height: Int
 }
 
 final class PackUI {
@@ -1955,23 +1959,46 @@ final class PackUI {
     private(set) var sheets: Set<String> = []
     /// per-character advance in base px (8px grid), from ascii.png; nil = no pack font
     private(set) var fontWidths: [Double]?
+    private(set) var rasterScale = 1
 
-    /// cell origins in the composite texture (each 512×512; content = base×2)
+    static let logicalCellSize = 256
+    static let logicalWidth = logicalCellSize * 4
+    static let logicalHeight = logicalCellSize * 5
+    static let maximumRasterScale = 4
+
+    /// Cell origins in logical base-GUI pixels. Physical pixels are multiplied by
+    /// the prepared generation's one shared raster scale.
     static let CELLS: [String: (Int, Int)] = [
-        "icons": (0, 0), "widgets": (512, 0), "ascii": (1024, 0), "bg": (1536, 0),
-        "inventory": (0, 512), "generic_54": (512, 512), "crafting_table": (1024, 512), "furnace": (1536, 512),
-        "brewing_stand": (0, 1024), "enchanting_table": (512, 1024), "anvil": (1024, 1024), "hopper": (1536, 1024),
-        "dispenser": (0, 1536), "shulker_box": (512, 1536), "grindstone": (1024, 1536), "stonecutter": (1536, 1536),
-        "smithing": (0, 2048), "cartography_table": (512, 2048), "beacon": (1024, 2048), "horse": (1536, 2048),
+        "icons": (0, 0), "widgets": (256, 0), "ascii": (512, 0), "bg": (768, 0),
+        "inventory": (0, 256), "generic_54": (256, 256), "crafting_table": (512, 256), "furnace": (768, 256),
+        "brewing_stand": (0, 512), "enchanting_table": (256, 512), "anvil": (512, 512), "hopper": (768, 512),
+        "dispenser": (0, 768), "shulker_box": (256, 768), "grindstone": (512, 768), "stonecutter": (768, 768),
+        "smithing": (0, 1024), "cartography_table": (256, 1024), "beacon": (512, 1024), "horse": (768, 1024),
     ]
+
+    static func supportedRasterScale(width: Int, height: Int, logicalSize: Int) -> Int? {
+        guard logicalSize > 0, width == height, width >= logicalSize,
+              width % logicalSize == 0 else { return nil }
+        let scale = width / logicalSize
+        return min(scale, maximumRasterScale)
+    }
+
+    static func preferredRasterScale(
+        _ candidates: [(width: Int, height: Int, logicalSize: Int)]
+    ) -> Int {
+        candidates.compactMap {
+            supportedRasterScale(width: $0.width, height: $0.height,
+                                 logicalSize: $0.logicalSize)
+        }.max() ?? 1
+    }
+
+    static func compositeDimensions(rasterScale: Int) -> (width: Int, height: Int)? {
+        guard (1...maximumRasterScale).contains(rasterScale) else { return nil }
+        return (logicalWidth * rasterScale, logicalHeight * rasterScale)
+    }
 
     static func prepare(packs: [ResourcePack],
                         budget: ResourcePackPreparationBudget? = nil) -> PreparedPackUI? {
-        let W = 2048, H = 2560
-        var pixels = [UInt8](repeating: 0, count: W * H * 4)
-        var sheets: Set<String> = []
-        var fontWidths: [Double]?
-
         func load(_ rel: String) -> RGBAImage? {
             for p in packs {
                 if let d = p.file(p.texRoot + "\(rel).png"),
@@ -1980,17 +2007,6 @@ final class PackUI {
                 }
             }
             return nil
-        }
-        func blit(_ img: RGBAImage, _ cellX: Int, _ cellY: Int, baseSize: Int) {
-            // rescale so content occupies baseSize*2 px in the cell
-            let target = baseSize * 2
-            let scaled = img.width == target ? img.pixels : scaleTo(img, target)
-            for y in 0..<min(target, 512) {
-                let dst = ((cellY + y) * W + cellX) * 4
-                let src = y * target * 4
-                pixels.replaceSubrange(dst..<(dst + min(target, 512) * 4),
-                                       with: scaled[src..<(src + min(target, 512) * 4)])
-            }
         }
 
         let sources: [(String, String, Int)] = [
@@ -2013,18 +2029,54 @@ final class PackUI {
             ("beacon", "gui/container/beacon", 256),
             ("horse", "gui/container/horse", 256),
         ]
+        var decoded: [(key: String, logicalSize: Int, image: RGBAImage)] = []
         for (key, rel, base) in sources {
             guard budget?.shouldContinue != false else { return nil }
             if let img = load(rel) {
-                let cell = PackUI.CELLS[key]!
-                blit(img, cell.0, cell.1, baseSize: base)
-                sheets.insert(key)
+                decoded.append((key, base, img))
             }
         }
+        let ascii = load("font/ascii")
+        var scaleCandidates = decoded.map {
+            (width: $0.image.width, height: $0.image.height, logicalSize: $0.logicalSize)
+        }
+        if let ascii {
+            scaleCandidates.append((ascii.width, ascii.height, 128))
+        }
+        let rasterScale = preferredRasterScale(scaleCandidates)
+        guard let dimensions = compositeDimensions(rasterScale: rasterScale),
+              budget?.chargeDecodedRGBA(width: dimensions.width,
+                                        height: dimensions.height) != false else { return nil }
+        let W = dimensions.width, H = dimensions.height
+        var pixels = [UInt8](repeating: 0, count: W * H * 4)
+        var sheets: Set<String> = []
+        var fontWidths: [Double]?
+
+        func blit(_ img: RGBAImage, _ logicalCellX: Int, _ logicalCellY: Int,
+                  logicalSize: Int) {
+            let target = logicalSize * rasterScale
+            let cellX = logicalCellX * rasterScale
+            let cellY = logicalCellY * rasterScale
+            let scaled = img.width == target && img.height == target
+                ? img.pixels : scaleTo(img, target)
+            for y in 0..<target {
+                let dst = ((cellY + y) * W + cellX) * 4
+                let src = y * target * 4
+                pixels.replaceSubrange(dst..<(dst + target * 4),
+                                       with: scaled[src..<(src + target * 4)])
+            }
+        }
+
+        for source in decoded {
+            let cell = PackUI.CELLS[source.key]!
+            blit(source.image, cell.0, cell.1, logicalSize: source.logicalSize)
+            sheets.insert(source.key)
+        }
         // bitmap font: 16×16 grid of 8×8 glyphs; advance = trailing edge + 1
-        if let ascii = load("font/ascii") {
+        if let ascii, ascii.width == ascii.height, ascii.width >= 16,
+           ascii.width % 16 == 0 {
             let cell = PackUI.CELLS["ascii"]!
-            blit(ascii, cell.0, cell.1, baseSize: 128)
+            blit(ascii, cell.0, cell.1, logicalSize: 128)
             sheets.insert("ascii")
             let g = ascii.width / 16    // native glyph cell size
             var widths = [Double](repeating: 6, count: 256)
@@ -2045,12 +2097,17 @@ final class PackUI {
             fontWidths = widths
         }
         guard !sheets.isEmpty, budget?.shouldContinue != false else { return nil }
-        return PreparedPackUI(pixels: pixels, sheets: sheets, fontWidths: fontWidths)
+        return PreparedPackUI(pixels: pixels, sheets: sheets, fontWidths: fontWidths,
+                              rasterScale: rasterScale, width: W, height: H)
     }
 
     init?(prepared: PreparedPackUI, device: MTLDevice) {
-        let W = 2048, H = 2560
-        guard prepared.pixels.count == W * H * 4 else { return nil }
+        guard let dimensions = Self.compositeDimensions(rasterScale: prepared.rasterScale),
+              prepared.width == dimensions.width, prepared.height == dimensions.height,
+              prepared.width <= Int.max / prepared.height,
+              prepared.width * prepared.height <= Int.max / 4,
+              prepared.pixels.count == prepared.width * prepared.height * 4 else { return nil }
+        let W = prepared.width, H = prepared.height
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: W, height: H, mipmapped: false)
         td.usage = .shaderRead
         guard let tex = device.makeTexture(descriptor: td) else { return nil }
@@ -2061,6 +2118,7 @@ final class PackUI {
         texture = tex
         sheets = prepared.sheets
         fontWidths = prepared.fontWidths
+        rasterScale = prepared.rasterScale
     }
 
     convenience init?(packs: [ResourcePack], device: MTLDevice,
