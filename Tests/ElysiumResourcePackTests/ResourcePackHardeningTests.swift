@@ -49,6 +49,23 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertEqual(alpha.pixels[3], 128)
     }
 
+    func testFaithfulDoubleChestCropKeepsAuthoredSeamColumn() throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let archive = repository.appendingPathComponent(
+            "packaging/Faithful 64x - December 2025 Release.zip")
+        let pack = try XCTUnwrap(ResourcePack(url: archive))
+        let image = try XCTUnwrap(cropSemanticChestTile(
+            [pack], budget: ResourcePackPreparationBudget()))
+
+        XCTAssertEqual(image.width, 60,
+                       "double-chest fronts are fifteen base texels at Faithful's 4x scale")
+        XCTAssertEqual(image.height, 180,
+                       "single, left, and right semantic pieces must remain equal bands")
+    }
+
     func testPackUIRasterScalePreservesNativeDetailWithBoundedLogicalMapping() throws {
         XCTAssertEqual(PackUI.preferredRasterScale([
             (width: 256, height: 256, logicalSize: 256),

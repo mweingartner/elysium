@@ -123,7 +123,7 @@ These inputs are routed separately and do not appear as configurable gameplay bi
 | Input | Action |
 | --- | --- |
 | Mouse movement | Look around. |
-| Left click | Attack or break; use a held consumable; confirm template placement. |
+| Left click | Attack or break; use a held consumable; confirm template placement. With a bed held, select its head position, then its adjacent foot position. |
 | Right click | Use or place; cancel template placement. |
 | Middle click | Pick the targeted block. |
 | `1` through `9` | Select a hotbar slot. |

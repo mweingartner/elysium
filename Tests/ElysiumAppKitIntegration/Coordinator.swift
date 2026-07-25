@@ -97,11 +97,18 @@ private func connectSocket(_ path: String) throws -> Int32 {
 }
 
 let args = CommandLine.arguments
-guard args.count == 8, args[1] == "1", let nonce = hex(args[3]), let rawPID = pid_t(args[4]),
+guard args.count == 9, args[1] == "1", let nonce = hex(args[3]), let rawPID = pid_t(args[4]),
       rawPID > 0, args[5].count == 64, args[7].count == 64 else { exit(64) }
 let socketPath = args[2]
 let targetBundle = URL(fileURLWithPath: args[6]).resolvingSymlinksInPath().standardizedFileURL
+let isolatedHome = URL(fileURLWithPath: args[8]).resolvingSymlinksInPath().standardizedFileURL
+let expectedHome = targetBundle.deletingLastPathComponent()
+    .appendingPathComponent("profile", isDirectory: true).standardizedFileURL
+var homeStat = stat()
 guard targetBundle.path == args[6],
+      isolatedHome.path == args[8], isolatedHome.path == expectedHome.path,
+      lstat(isolatedHome.path, &homeStat) == 0, (homeStat.st_mode & S_IFMT) == S_IFDIR,
+      homeStat.st_uid == getuid(), (homeStat.st_mode & 0o077) == 0,
       let targetExecutable = Bundle(url: targetBundle)?.executableURL?.resolvingSymlinksInPath(),
       (try? sha256(targetExecutable)) == args[7] else { exit(65) }
 
@@ -138,6 +145,10 @@ do {
     let configuration = NSWorkspace.OpenConfiguration(); configuration.activates = true
     configuration.createsNewApplicationInstance = false
     configuration.allowsRunningApplicationSubstitution = false
+    configuration.environment = [
+        "HOME": isolatedHome.path,
+        "CFFIXED_USER_HOME": isolatedHome.path,
+    ]
     let state = DispatchSemaphore(value: 0); var launched: NSRunningApplication?; var launchError: Error?
     NSWorkspace.shared.openApplication(at: targetBundle, configuration: configuration) {
         launched = $0; launchError = $1; state.signal()

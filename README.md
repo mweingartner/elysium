@@ -86,7 +86,7 @@ All gameplay bindings can be changed in Options → Controls.
 | Input | Default action |
 |---|---|
 | W A S D | Move |
-| Mouse | Look; attack/break; use/place |
+| Mouse | Look; attack/break; use/place. With a bed held, left-click its head position, then an adjacent foot position. |
 | Space | Jump |
 | Shift | Sneak |
 | Control or double-tap forward | Sprint |

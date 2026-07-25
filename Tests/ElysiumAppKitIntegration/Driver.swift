@@ -4276,6 +4276,16 @@ do {
     }
     let coordinatorSession = try CoordinatorSession(root: coordinatorBundle.deletingLastPathComponent())
     try coordinatorSession.validateNamespace(expectSocket: true)
+    let isolatedHome = bundleURL.deletingLastPathComponent()
+        .appendingPathComponent("profile", isDirectory: true)
+    try FileManager.default.createDirectory(at: isolatedHome,
+                                            withIntermediateDirectories: true)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700],
+                                          ofItemAtPath: isolatedHome.path)
+    guard canonicalURL(isolatedHome.path) == isolatedHome,
+          isolatedHome.deletingLastPathComponent() == bundleURL.deletingLastPathComponent() else {
+        throw GateError.failed("isolated profile identity")
+    }
     guard let coordinatorForeground = CoordinatorForegroundLedger() else {
         throw GateError.failed("Coordinator predecessor identity")
     }
@@ -4287,7 +4297,7 @@ do {
     coordinatorConfiguration.allowsRunningApplicationSubstitution = false
     coordinatorConfiguration.arguments = [
         "1", coordinatorSession.socketURL.path, hexString(coordinatorSession.nonce), "\(getpid())",
-        rawDriverHash, bundleURL.path, measuredStagedHash,
+        rawDriverHash, bundleURL.path, measuredStagedHash, isolatedHome.path,
     ]
     coordinatorConfiguration.environment = [:]
     let coordinatorLaunch = LaunchCompletionState()
@@ -4379,8 +4389,6 @@ do {
         requiredPredecessor: coordinatorApplication)
     coordinatorForeground.close()
 
-    let home = bundleURL.deletingLastPathComponent().appendingPathComponent("profile").path
-    try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
     let launchCompletion = LaunchCompletionState()
     try actionLedger.perform("launch.application") {
         guard !launchCompletion.isComplete() else {

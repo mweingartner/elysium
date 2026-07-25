@@ -5,6 +5,11 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Paired chests now meet at one continuous visual seam and retain the complete
+  left/right Faithful texture crops instead of losing the seam column.
+- Beds can now be positioned explicitly: while holding a bed, left-click its
+  head location and then an adjacent foot location. Both halves are validated
+  before either is placed, and one bed item is consumed only on success.
 - Pack-backed world textures now preserve the atlas's top-origin row order, so
   vegetation, block faces, and shaped objects render upright instead of being
   vertically inverted. Multipart door, bed, and chest subregions stay aligned.

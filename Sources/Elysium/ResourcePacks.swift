@@ -1236,32 +1236,58 @@ private func cropEntityTile(_ packs: [ResourcePack], _ crop: EntityTileCrop,
 /// A packed chest slice has a full single chest followed by its two double
 /// chest parts.  Missing pack parts use the single image, keeping malformed or
 /// older packs valid while still giving a deterministic semantic layout.
-private func cropSemanticChestTile(_ packs: [ResourcePack],
-                                   budget: ResourcePackPreparationBudget) -> RGBAImage? {
-    let rects: [(x: Double, y: Double, w: Double, h: Double)] = [
+private func resizedEntityCrop(_ image: RGBAImage, width: Int, height: Int) -> RGBAImage {
+    guard image.width != width || image.height != height else { return image }
+    var pixels = [UInt8](repeating: 0, count: width * height * 4)
+    for y in 0..<height {
+        let sourceY = y * image.height / height
+        for x in 0..<width {
+            let sourceX = x * image.width / width
+            let source = (sourceY * image.width + sourceX) * 4
+            let destination = (y * width + x) * 4
+            pixels[destination] = image.pixels[source]
+            pixels[destination + 1] = image.pixels[source + 1]
+            pixels[destination + 2] = image.pixels[source + 2]
+            pixels[destination + 3] = image.pixels[source + 3]
+        }
+    }
+    return RGBAImage(width: width, height: height, pixels: pixels)
+}
+
+func cropSemanticChestTile(_ packs: [ResourcePack],
+                           budget: ResourcePackPreparationBudget) -> RGBAImage? {
+    let singleRects: [(x: Double, y: Double, w: Double, h: Double)] = [
         (14.0 / 64, 14.0 / 64, 14.0 / 64, 5.0 / 64),
         (14.0 / 64, 33.0 / 64, 14.0 / 64, 10.0 / 64),
     ]
-    let normal = EntityTileCrop(path: "entity/chest/normal", rects: rects, rotate: false)
-    guard let single = cropEntityTile(packs, normal, budget: budget) else { return nil }
-    let left = cropEntityTile(packs, EntityTileCrop(path: "entity/chest/normal_left", rects: rects, rotate: false), budget: budget) ?? single
-    let right = cropEntityTile(packs, EntityTileCrop(path: "entity/chest/normal_right", rects: rects, rotate: false), budget: budget) ?? single
-    guard single.width == left.width, single.width == right.width,
-          single.height == left.height, single.height == right.height else { return single }
-    let height = single.height + left.height + right.height
-    var pixels = [UInt8](repeating: 0, count: single.width * height * 4)
+    // Double-chest unwraps are fifteen texels wide per half; using the
+    // single chest's fourteen-texel rectangle dropped the authored seam column.
+    let doubleRects: [(x: Double, y: Double, w: Double, h: Double)] = [
+        (14.0 / 64, 14.0 / 64, 15.0 / 64, 5.0 / 64),
+        (14.0 / 64, 33.0 / 64, 15.0 / 64, 10.0 / 64),
+    ]
+    let normal = EntityTileCrop(path: "entity/chest/normal", rects: singleRects, rotate: false)
+    guard let rawSingle = cropEntityTile(packs, normal, budget: budget) else { return nil }
+    let rawLeft = cropEntityTile(packs, EntityTileCrop(path: "entity/chest/normal_left", rects: doubleRects, rotate: false), budget: budget)
+    let rawRight = cropEntityTile(packs, EntityTileCrop(path: "entity/chest/normal_right", rects: doubleRects, rotate: false), budget: budget)
+    let width = [rawSingle.width, rawLeft?.width ?? 0, rawRight?.width ?? 0].max()!
+    let heightPerPiece = [rawSingle.height, rawLeft?.height ?? 0, rawRight?.height ?? 0].max()!
+    let single = resizedEntityCrop(rawSingle, width: width, height: heightPerPiece)
+    let left = resizedEntityCrop(rawLeft ?? rawSingle, width: width, height: heightPerPiece)
+    let right = resizedEntityCrop(rawRight ?? rawSingle, width: width, height: heightPerPiece)
+    let height = heightPerPiece * 3
+    var pixels = [UInt8](repeating: 0, count: width * height * 4)
     var offset = 0
     for image in [single, left, right] {
-        guard image.width == single.width else { return single }
         for y in 0..<image.height {
             let source = y * image.width * 4
-            let destination = (offset + y) * single.width * 4
+            let destination = (offset + y) * width * 4
             pixels.replaceSubrange(destination..<(destination + image.width * 4),
                                    with: image.pixels[source..<(source + image.width * 4)])
         }
         offset += image.height
     }
-    return RGBAImage(width: single.width, height: height, pixels: pixels)
+    return RGBAImage(width: width, height: height, pixels: pixels)
 }
 
 private func loadTexture(_ packs: [ResourcePack], _ relPath: String,

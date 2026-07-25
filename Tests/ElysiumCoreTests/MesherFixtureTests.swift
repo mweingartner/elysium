@@ -282,6 +282,20 @@ final class MesherFixtureTests: XCTestCase {
             }
             XCTAssertEqual(centerSeam?.u ?? -1, 1, accuracy: 0.001, "left part seam facing \(facing)")
             XCTAssertEqual(rightSeam?.u ?? -1, 0, accuracy: 0.001, "right part seam facing \(facing)")
+            let centerSeamPosition = centerVertices.map {
+                horizontalProjection($0, direction: right)
+            }.max() ?? -1
+            let rightSeamPosition = rightVertices.map {
+                horizontalProjection($0, direction: right)
+            }.min() ?? -2
+            XCTAssertEqual(centerSeamPosition, rightSeamPosition, accuracy: 0.0001,
+                           "paired chest geometry must meet without a gap facing \(facing)")
+            let outsideSpan = (rightVertices + centerVertices).map {
+                horizontalProjection($0, direction: right)
+            }
+            XCTAssertEqual((outsideSpan.max() ?? 0) - (outsideSpan.min() ?? 0),
+                           30.0 / 16.0, accuracy: 0.0001,
+                           "paired chest must preserve two authored fifteen-texel halves")
         }
 
         let single = meshFor(B.chest, meta: 0, renderContext: packedContext).cutout

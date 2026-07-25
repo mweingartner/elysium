@@ -326,7 +326,24 @@ public func shapeBoxes(_ cell: Int, _ get: CellGetter, _ out: inout [AABB], _ fo
     case .repeater, .comparator, .daylightSensor:
         out.append(aabb(0, 0, 0, 1, shape == .daylightSensor ? 6.0 / 16 : 2.0 / 16, 1))
     case .chest:
-        out.append(aabb(1 / 16, 0, 1 / 16, 15 / 16, 14 / 16, 15 / 16))
+        var x0 = 1.0 / 16, z0 = 1.0 / 16
+        var x1 = 15.0 / 16, z1 = 15.0 / 16
+        if id == Int(B.chest) || id == Int(B.trapped_chest) {
+            let facing = meta & 3
+            let left = leftOf(facing), right = rightOf(facing)
+            let leftCell = get(FACE_DX[left], 0, FACE_DZ[left])
+            let rightCell = get(FACE_DX[right], 0, FACE_DZ[right])
+            let hasLeft = leftCell >> 4 == id && (leftCell & 15) == meta
+            let hasRight = rightCell >> 4 == id && (rightCell & 15) == meta
+            if hasLeft != hasRight {
+                let seam = hasLeft ? left : right
+                if FACE_DX[seam] < 0 { x0 = 0 }
+                if FACE_DX[seam] > 0 { x1 = 1 }
+                if FACE_DZ[seam] < 0 { z0 = 0 }
+                if FACE_DZ[seam] > 0 { z1 = 1 }
+            }
+        }
+        out.append(aabb(x0, 0, z0, x1, 14 / 16, z1))
     case .ladder:
         let f = meta & 3
         switch f {

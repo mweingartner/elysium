@@ -38,6 +38,74 @@ public struct InteractCtx {
     }
 }
 
+public struct BedPlacementPoint: Equatable, Sendable {
+    public let x: Int
+    public let y: Int
+    public let z: Int
+
+    public init(x: Int, y: Int, z: Int) {
+        self.x = x
+        self.y = y
+        self.z = z
+    }
+}
+
+public enum BedPlacementSelectionResult: Equatable, Sendable {
+    case headSelected(BedPlacementPoint)
+    case footMustBeAdjacent(BedPlacementPoint)
+    case ready(head: BedPlacementPoint, foot: BedPlacementPoint, facing: Int)
+}
+
+/// Two-click bed selection. The first click owns the head position; the second
+/// click must be a horizontally adjacent foot position at the same height.
+public struct BedPlacementSelection: Equatable, Sendable {
+    public private(set) var head: BedPlacementPoint?
+
+    public init() {}
+
+    public mutating func reset() { head = nil }
+
+    public mutating func select(_ point: BedPlacementPoint) -> BedPlacementSelectionResult {
+        guard let head else {
+            self.head = point
+            return .headSelected(point)
+        }
+        guard let facing = bedFacing(head: head, foot: point) else {
+            return .footMustBeAdjacent(head)
+        }
+        return .ready(head: head, foot: point, facing: facing)
+    }
+}
+
+public enum BedPlacementResult: Equatable, Sendable {
+    case placed
+    case invalidBed
+    case notAdjacent
+    case blocked
+}
+
+public func bedPlacementPoint(in world: World, from hit: RaycastHit) -> BedPlacementPoint {
+    let target = world.getBlock(hit.x, hit.y, hit.z)
+    if REPLACEABLE[target >> 4] == 1 {
+        return BedPlacementPoint(x: hit.x, y: hit.y, z: hit.z)
+    }
+    return BedPlacementPoint(x: hit.x + DIR_X[hit.face],
+                             y: hit.y + DIR_Y[hit.face],
+                             z: hit.z + DIR_Z[hit.face])
+}
+
+@inline(__always) public func bedFacing(head: BedPlacementPoint,
+                                        foot: BedPlacementPoint) -> Int? {
+    guard head.y == foot.y else { return nil }
+    switch (head.x - foot.x, head.z - foot.z) {
+    case (0, -1): return 0
+    case (0, 1): return 1
+    case (-1, 0): return 2
+    case (1, 0): return 3
+    default: return nil
+    }
+}
+
 private func dirFacingMeta(_ player: Player) -> Int {
     // horizontal facing meta (0=N 1=S 2=W 3=E) — direction the PLAYER faces
     let d = yawToDir(player.yaw * 180 / .pi)
@@ -1067,6 +1135,45 @@ private func waxedCopper(_ id: Int) -> Int {
 // =============================================================================
 // PLACEMENT
 // =============================================================================
+@discardableResult
+public func placeBed(_ ctx: InteractCtx, head: BedPlacementPoint,
+                     foot: BedPlacementPoint, blockId: Int,
+                     held: ItemStack) -> BedPlacementResult {
+    let world = ctx.world, player = ctx.player
+    guard blockId >= 0, blockId < blockDefs.count,
+          shapeOf(blockId) == .bed,
+          itemDef(held.id).block.map(Int.init) == blockId else {
+        return .invalidBed
+    }
+    guard let facing = bedFacing(head: head, foot: foot) else { return .notAdjacent }
+
+    for point in [head, foot] {
+        let current = world.getBlock(point.x, point.y, point.z)
+        if current != 0 && REPLACEABLE[current >> 4] == 0 { return .blocked }
+        if blockDefs[blockId].solid {
+            let box = AABB(Double(point.x) + 0.05, Double(point.y) + 0.05,
+                           Double(point.z) + 0.05, Double(point.x) + 0.95,
+                           Double(point.y) + 0.6, Double(point.z) + 0.95)
+            if !world.getEntitiesInBox(box, except: nil,
+                                       filter: { $0 is LivingEntity }).isEmpty {
+                return .blocked
+            }
+        }
+    }
+
+    // Every fallible check is complete before either half is published.
+    world.setBlock(foot.x, foot.y, foot.z, Int(cell(UInt16(blockId), facing)))
+    world.setBlock(head.x, head.y, head.z, Int(cell(UInt16(blockId), facing | 4)))
+    if let handler = onPlacedHandlers[blockId] {
+        handler(world, foot.x, foot.y, foot.z, Int(cell(UInt16(blockId), facing)))
+    }
+    placeEffects(world, blockId, foot.x, foot.y, foot.z)
+    player.consumeHeld(1)
+    player.stats["blocksPlaced"] = (player.stats["blocksPlaced"] ?? 0) + 1
+    world.emitVibration(Double(foot.x), Double(foot.y), Double(foot.z), 13, player)
+    return .placed
+}
+
 public func placeBlock(_ ctx: InteractCtx, _ hit: RaycastHit, _ blockId: Int, _ held: ItemStack) -> Bool {
     let world = ctx.world, player = ctx.player
     let targetCell = world.getBlock(hit.x, hit.y, hit.z)

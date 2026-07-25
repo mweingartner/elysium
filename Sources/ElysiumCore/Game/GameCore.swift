@@ -575,6 +575,8 @@ public final class GameCore {
     private var breakCooldown = 0
     private var lastLightHealTick = -1
     private var lastSlot = 0
+    private var bedPlacementSelection = BedPlacementSelection()
+    private var bedPlacementBinding: (blockId: Int, itemId: Int, slot: Int)?
     public var heldNameTime = 0
     public var targetedBlock: (x: Int, y: Int, z: Int, cell: Int)?
     public var lastCursorHit: RaycastHit?
@@ -1211,6 +1213,8 @@ public final class GameCore {
             finalizeAndSave(synchronous: true)
         }
         inWorld = false
+        bedPlacementSelection.reset()
+        bedPlacementBinding = nil
         isLANClientWorld = false
         lanClientResumeStorageKey = nil
         lanClientWorldSummary = nil
@@ -3715,6 +3719,8 @@ public final class GameCore {
     private func tickHotbarAndCooldowns(_ p: Player) {
         if p.selectedSlot != lastSlot {
             lastSlot = p.selectedSlot
+            bedPlacementSelection.reset()
+            bedPlacementBinding = nil
             heldNameTime = 60
         } else if heldNameTime > 0 {
             heldNameTime -= 1
@@ -4817,6 +4823,60 @@ public final class GameCore {
     // ===========================================================================
     // Input — the app forwards events here when no screen is open
     // ===========================================================================
+    private func handleBedPlacementClick() -> Bool {
+        guard let p = player, let held = p.mainHand,
+              let rawBlock = itemDef(held.id).block else {
+            bedPlacementSelection.reset()
+            bedPlacementBinding = nil
+            return false
+        }
+        let blockId = Int(rawBlock)
+        guard SHAPE_OF[blockId] == Shape.bed.rawValue else {
+            bedPlacementSelection.reset()
+            bedPlacementBinding = nil
+            return false
+        }
+        guard !isLANClientWorld else {
+            host?.showActionBar("Two-click bed placement is available to the world host", 70)
+            return true
+        }
+        let binding = (blockId: blockId, itemId: held.id, slot: p.selectedSlot)
+        if let prior = bedPlacementBinding,
+           prior.blockId != binding.blockId || prior.itemId != binding.itemId || prior.slot != binding.slot {
+            bedPlacementSelection.reset()
+        }
+        bedPlacementBinding = binding
+        guard let hit = crosshairBlock() else {
+            host?.showActionBar("Aim at a block to select the bed head", 50)
+            return true
+        }
+        let point = bedPlacementPoint(in: world, from: hit)
+        switch bedPlacementSelection.select(point) {
+        case .headSelected:
+            host?.showActionBar("Bed head selected - left-click an adjacent block for the foot", 100)
+        case .footMustBeAdjacent:
+            host?.showActionBar("Bed foot must be directly adjacent to the selected head", 70)
+        case .ready(let head, let foot, _):
+            switch placeBed(interactCtx(), head: head, foot: foot,
+                            blockId: blockId, held: held) {
+            case .placed:
+                bedPlacementSelection.reset()
+                bedPlacementBinding = nil
+                p.attackAnim = 0.6
+                host?.showActionBar("Bed placed", 45)
+            case .blocked:
+                host?.showActionBar("Bed needs two clear adjacent spaces", 70)
+            case .notAdjacent:
+                host?.showActionBar("Bed foot must be directly adjacent to the selected head", 70)
+            case .invalidBed:
+                bedPlacementSelection.reset()
+                bedPlacementBinding = nil
+                host?.showActionBar("Bed selection was canceled", 50)
+            }
+        }
+        return true
+    }
+
     public func mouseDown(_ button: Int) {
         guard inWorld, !(host?.hasScreen() ?? false) else { return }
         if let job = templatePlacementJob {
@@ -4841,6 +4901,11 @@ public final class GameCore {
             return
         }
         if button == 0 {
+            if handleBedPlacementClick() {
+                leftDown = false
+                player?.breakingProgress = -1
+                return
+            }
             if consumeSelectedFoodNow(interactCtx()) {
                 leftDown = false
                 player?.breakingProgress = -1
@@ -4894,6 +4959,12 @@ public final class GameCore {
         keys.insert(code)
         let p = player!
         if code == "Escape" {
+            if bedPlacementSelection.head != nil {
+                bedPlacementSelection.reset()
+                bedPlacementBinding = nil
+                host?.showActionBar("Bed placement canceled", 45)
+                return
+            }
             if let job = templatePlacementJob {
                 let progress = job.progress
                 host?.showActionBar("Placing \"\(progress.templateName)\" \(progress.percent)% - \(progress.phase)", 45)
