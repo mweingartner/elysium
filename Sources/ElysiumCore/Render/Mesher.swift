@@ -85,15 +85,10 @@ private let FACE_OFF: [(Int, Int, Int)] = [
 ]
 
 final class MeshBuilder {
-    let renderContext: MeshRenderContext
     var verts: [Float] = []   // 5 per vertex
     var uints: [UInt32] = []  // 2 per vertex (A, B)
     var idx: [UInt32] = []
     var vcount = 0
-
-    init(renderContext: MeshRenderContext) {
-        self.renderContext = renderContext
-    }
 
     // swiftlint:disable:next function_parameter_count
     func quad(
@@ -109,11 +104,9 @@ final class MeshBuilder {
         let base = UInt32(vcount)
         let xs = [x0, x1, x2, x3], ys = [y0, y1, y2, y3], zs = [z0, z1, z2, z3]
         let us = [u0, u1, u2, u3]
-        // Imported PNG row zero is the visual top, while the historical mesh
-        // convention addresses V from the opposite edge. Normalize exactly
-        // once at the shared emitter used by cubes and shaped blocks.
-        let vs = [meshedTextureV(renderContext, layer, v0), meshedTextureV(renderContext, layer, v1),
-                  meshedTextureV(renderContext, layer, v2), meshedTextureV(renderContext, layer, v3)]
+        // Both generated and imported atlas bytes store the visual top in row
+        // zero. Metal uploads those rows unchanged, so V=0 must remain the top.
+        let vs = [v0, v1, v2, v3]
         let aos = [ao0, ao1, ao2, ao3], skys = [sky0, sky1, sky2, sky3], blks = [blk0, blk1, blk2, blk3]
         for c in 0..<4 {
             verts.append(Float(xs[c])); verts.append(Float(ys[c])); verts.append(Float(zs[c]))
@@ -150,17 +143,10 @@ final class MeshBuilder {
 private let WHITE = 0xffffff
 private let GRASS_FALLBACK = 0x91bd59
 
-@inline(__always) private func meshedTextureV(
-    _ context: MeshRenderContext, _ tile: Int, _ v: Double
-) -> Double {
-    context.isPackBacked(tile) ? 1 - v : v
-}
-
 @inline(__always) private func packedMeshV(_ start: Double, _ scale: Double, _ v: Double) -> Double {
-    // MeshBuilder performs the one shared imported-texture V normalization.
-    // Feed its complement so the post-normalization coordinate remains inside
-    // the requested semantic band without a second caller-side flip.
-    1 - (start + v * scale)
+    // Select the semantic subregion directly in the same top-origin space as
+    // the uploaded atlas. Callers provide normalized top-origin V coordinates.
+    start + v * scale
 }
 
 /// Rotate a top-face texture whose authored top edge points north so that it
@@ -237,9 +223,9 @@ final class SectionMesher {
 
     init(_ input: MeshInput) {
         self.input = input
-        opaque = MeshBuilder(renderContext: input.renderContext)
-        cutout = MeshBuilder(renderContext: input.renderContext)
-        translucent = MeshBuilder(renderContext: input.renderContext)
+        opaque = MeshBuilder()
+        cutout = MeshBuilder()
+        translucent = MeshBuilder()
     }
 
     @inline(__always) func cellAt(_ x: Int, _ y: Int, _ z: Int) -> Int { Int(input.blocks[idxOf(x, y, z)]) }
@@ -421,14 +407,17 @@ final class SectionMesher {
                         let skyO = flip ? [d.sky[0], d.sky[3], d.sky[2], d.sky[1]] : d.sky
                         let blkO = flip ? [d.blk[0], d.blk[3], d.blk[2], d.blk[1]] : d.blk
                         let uvO = flip ? [cuv[0], cuv[3], cuv[2], cuv[1]] : cuv
+                        let packBackedVerticalSide = dir >= 2 && input.renderContext.isPackBacked(d.layer)
+                        let sourceV = uvO.map { Double($0.1 - v) }
+                        let atlasV = sourceV.map { packBackedVerticalSide ? 1 - $0 : $0 }
                         let target = TRANSLUCENT[id] == 1 ? translucent : (TRANSPARENT_RENDER[id] == 1 ? cutout : opaque)
                         target.quad(
                             corners[ord[0]].0, corners[ord[0]].1, corners[ord[0]].2,
                             corners[ord[1]].0, corners[ord[1]].1, corners[ord[1]].2,
                             corners[ord[2]].0, corners[ord[2]].1, corners[ord[2]].2,
                             corners[ord[3]].0, corners[ord[3]].1, corners[ord[3]].2,
-                            Double(uvO[0].0 - u), Double(uvO[0].1 - v), Double(uvO[1].0 - u), Double(uvO[1].1 - v),
-                            Double(uvO[2].0 - u), Double(uvO[2].1 - v), Double(uvO[3].0 - u), Double(uvO[3].1 - v),
+                            Double(uvO[0].0 - u), atlasV[0], Double(uvO[1].0 - u), atlasV[1],
+                            Double(uvO[2].0 - u), atlasV[2], Double(uvO[3].0 - u), atlasV[3],
                             d.layer, dir,
                             aoO[0], aoO[1], aoO[2], aoO[3],
                             skyO[0], skyO[1], skyO[2], skyO[3],
@@ -579,6 +568,9 @@ final class SectionMesher {
                             let head = (meta & 4) != 0
                             return (bedSideU(meta & 3, face, semantic.0),
                                     packedMeshV(head ? 0 : 0.5, 0.5, semantic.1))
+                        }
+                        if name == "ender_chest_side" {
+                            return semantic
                         }
                         guard name == "chest_side", let chestPieceStart else {
                             return (u, v)

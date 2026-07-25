@@ -5,6 +5,9 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Pack-backed world textures now preserve the atlas's top-origin row order, so
+  vegetation, block faces, and shaped objects render upright instead of being
+  vertically inverted. Multipart door, bed, and chest subregions stay aligned.
 - Faithful 64x fonts, HUD images, buttons, and container panels now retain their
   native 4x raster detail instead of being reduced to 2x and enlarged again on
   Retina displays. Their logical layout and glyph spacing are unchanged.

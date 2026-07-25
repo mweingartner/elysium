@@ -289,7 +289,7 @@ final class MesherFixtureTests: XCTestCase {
         XCTAssertEqual(vRange(single, matchingTileName: "chest_side").1, 1.0 / 3.0, accuracy: 0.001)
         let ender = meshFor(B.ender_chest, meta: 0, renderContext: packedContext).cutout
         XCTAssertEqual(vRange(ender, matchingTileName: "ender_chest_side").0, 0, accuracy: 0.001)
-        XCTAssertEqual(vRange(ender, matchingTileName: "ender_chest_side").1, 15.0 / 16.0, accuracy: 0.001)
+        XCTAssertEqual(vRange(ender, matchingTileName: "ender_chest_side").1, 1, accuracy: 0.001)
         // A front/back neighbour is not a legal double-chest pair and cannot
         // select a left/right image; mismatched metadata likewise falls back.
         let frontOrphan = meshForCells(
@@ -304,7 +304,7 @@ final class MesherFixtureTests: XCTestCase {
                        1.0 / 3.0, accuracy: 0.001)
     }
 
-    func testPackBackedGreedyCubeFlipsVAtSharedMeshBoundary() {
+    func testPackBackedAtlasKeepsAuthoredTopAtSpatialTop() {
         registerCoreIfNeeded()
         let procedural = vertexVByPosition(meshFor(B.oak_planks).opaque)
         let shortContext = MeshRenderContext(tintGate: [], textureGate: [], generation: 2)!
@@ -318,12 +318,25 @@ final class MesherFixtureTests: XCTestCase {
         let packed = vertexVByPosition(meshFor(
             B.oak_planks, renderContext: packedContext).opaque)
 
-        XCTAssertEqual(procedural.keys, packed.keys)
-        XCTAssertFalse(procedural.isEmpty)
-        for (position, before) in procedural {
-            guard let after = packed[position] else { return XCTFail("missing packed cube vertex") }
-            XCTAssertEqual(after, 1 - before, accuracy: 0.0001,
-                           "pack-backed greedy cube V must use the shared visual-top transform")
+        XCTAssertEqual(packed.keys, procedural.keys)
+        XCTAssertFalse(packed.isEmpty)
+
+        let cubeSide = quads(meshFor(B.oak_planks, renderContext: packedContext).opaque,
+                             tileName: "oak_planks", normal: 2,
+                             blockX: 8, blockY: 8, blockZ: 8).flatMap { $0 }
+        XCTAssertFalse(cubeSide.isEmpty)
+        for vertex in cubeSide {
+            XCTAssertEqual(vertex.v, vertex.y > 8.5 ? 0 : 1, accuracy: 0.0001,
+                           "a cube's spatial top must sample the authored top row")
+        }
+
+        let grass = quads(meshFor(B.short_grass, renderContext: packedContext).cutout,
+                          tileName: "short_grass", normal: 3,
+                          blockX: 8, blockY: 8, blockZ: 8).flatMap { $0 }
+        XCTAssertFalse(grass.isEmpty)
+        for vertex in grass {
+            XCTAssertEqual(vertex.v, vertex.y > 8.5 ? 0 : 1, accuracy: 0.0001,
+                           "cutout vegetation must grow from the authored bottom row")
         }
     }
 }
