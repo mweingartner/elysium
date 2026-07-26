@@ -17,13 +17,13 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 - **Survival across three dimensions** — procedural overworld, nether, and end terrain; caves and structures; mining, farming, crafting, smelting, brewing, enchanting, combat, hunger, experience, sleep, death, respawn, bosses, and advancements.
 - **Living worlds** — animals, monsters, villagers, projectiles, vehicles, dropped items, raids, pathfinding, fluids, portals, redstone, block entities, containers, and host-owned simulation state. Hostile monsters react consistently to direct daylight: ordinary monsters ignite, while creepers latch a short fuse and stop chasing.
 - **Villager trading** — profession-specific villagers and wandering traders advertise the resources they want, expose their complete ordered offer catalog, and show both costs, stock, level locks, restock state, and affordability before an atomic trade. The trade sheet supports pointer, keyboard, controller, and macOS Accessibility navigation.
-- **World creation choices** — Default, Superflat, Large Biomes, Amplified, Single Biome, Debug, and Elysium's Rich Resources preset, plus configurable dungeon density and an optional Character Classes rule.
+- **World creation choices** — Default, Superflat, Large Biomes, Amplified, Single Biome, Debug, Elysium's Rich Resources preset, and **Nether World**, plus **Reality Derived** maps built from a player-selected real-world area through the bundled Arnis generator. Nether World begins in a safe active-portal chamber with two iron pickaxes, an iron sword, an iron shovel, and 64 oak logs; active gateways recur throughout its Nether. Every type offers Small (1 km), Medium (4 km), Large (8 km), Extra-Large (12 km), and Max (15.811 km) playable widths with lazy terrain generation; Reality Derived Max reaches the local Arnis 250 km² envelope. Procedural worlds also offer configurable dungeon density; every world can enable or disable Character Classes.
 - **Playable structure sites** — new village plans are moved to validated dry, supported terrain or omitted; ordinary dungeons stay dry, cave-connected, and wholly inside their origin chunk, while a region-budgeted minority may generate as intentionally sealed underwater rooms. Existing saved/modified chunks are never migrated or rewritten; mixed old/new generation seams are supported.
 - **RPG progression** — six character paths, each with three sub-classes, levels, five-rank skills with a skill-point economy, always-on passive skills, prepared active skills and spells, fatigue, cooldowns, and a second quick-slot bar activated with Shift+1 through Shift+9. Character progression is optional per world; some character operations remain local-world-only while LAN authority continues to be hardened.
 - **Object templates** — copy connected builds with Command-C, browse and preview saved templates with Command-V, steer the wireframe with the arrow keys (Left/Right rotate, Up/Down push/pull) or scroll wheel, place them, and undo the most recent placement with Command-Z. Template parsing and placement are bounded and validated before world mutation.
 - **Local-network multiplayer** — host, discover, join, or directly connect to LAN worlds with join codes and host-authoritative replication. Elysium has no public matchmaking, cloud relay, or built-in NAT traversal; a join code is an access gate, not protection from an already hostile local network.
 - **Optional local AI assistant** — `/ai <request>` sends context to a configured Ollama endpoint at `http://localhost:11434`. Model output is treated as untrusted and reduced to registered, validated, count- and distance-bounded game actions. Elysium does not control what an independently configured Ollama installation or model provider does beyond that interface.
-- **Maps and controls** — compact and expanded live maps, configurable controls, keyboard and controller input, text-entry accessibility, fullscreen support, and debug/automation surfaces used by the verification suite.
+- **Maps and controls** — compact and expanded live maps, including player-level cavern mapping in the Nether, configurable controls, keyboard and controller input, text-entry accessibility, fullscreen support, and debug/automation surfaces used by the verification suite. The compact minimap is shown by default and can be hidden under **Options... → Video → Show Minimap** without disabling the `M` expanded map.
 - **Synthesized audio** — music and sound effects are produced at runtime rather than shipped as conventional audio recordings.
 - **Resource-pack support** — Java Edition-style resource packs are read through Elysium's bounded archive and metadata loaders. The pinned default is [Faithful 64x](https://faithfulpack.net/faithful64x) Release 12; **Options... → Video → Resource Packs...** offers the reviewed Ore Borders 64x and Static Lanterns add-ons independently, both off by default.
 
@@ -55,6 +55,7 @@ Requirements:
 
 - macOS 14 or later
 - Xcode command-line tools (`xcode-select --install`)
+- Rust and Cargo (only when building Elysium from source; the installed app bundles its pinned Arnis helper)
 - Apple silicon recommended
 
 ```bash
@@ -91,6 +92,7 @@ All gameplay bindings can be changed in Options → Controls.
 | Shift | Sneak |
 | Control or double-tap forward | Sprint |
 | E | Inventory |
+| Command-S | Sort the open player inventory or local/host chest A-Z |
 | T | Chat and commands |
 | M | Expand or collapse the map |
 | `-` / `=` | Change compact map size |
@@ -99,6 +101,19 @@ All gameplay bindings can be changed in Options → Controls.
 | Shift+1 … Shift+9 | Use a prepared RPG action |
 | F1 / F3 / F11 | Toggle HUD, debug overlay, or fullscreen |
 | Escape | Pause or close the current screen |
+
+The compact lower-right minimap follows the open cavern around you in the Nether instead of the
+sealed ceiling. To reclaim that HUD space, turn off **Options... → Video → Show Minimap**; the
+expanded map opened with `M` remains available.
+
+The first-person arm remains visibly connected to the lower screen edge even with an empty hand;
+selected tools and weapons render at a readable scale under the hand's grip, and attack/use
+poses provide clear feedback for swings and tool actions. Inventory and chest
+screens include a **Sort A-Z** button; sorting orders complete stacks by item
+name and type without merging them or moving equipment, crafting, cursor, or
+other non-storage slots. Chest sorting is disabled for LAN clients until the
+host-authoritative container protocol carries the item metadata required to
+produce the same deterministic order.
 
 ### Trading with NPCs
 
@@ -211,6 +226,7 @@ Sources/ElysiumStorage/    Typed SQLite persistence boundary
 Sources/ElysiumTextInput/  Shared text-ingress validation
 Sources/ElysiumAppSupport/ Shared AppKit support kernels
 Sources/elysmoke/          Golden-contract executable
+Vendor/Arnis/              Pinned Apache-2.0 Arnis source and map-selection assets
 Tests/                     Unit, integration, boundary, property, and regression tests
 goldens/                   Frozen deterministic baselines
 packaging/                 App metadata, branding, icons, and licensed texture assets
@@ -219,7 +235,7 @@ scripts/                   Build, scan, package, test, install, and automated re
 
 ## Contributing and reporting problems
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing implementation code. It documents deterministic registration order, RNG rules, test expectations, golden updates, and the Model-Paired Development gates used by this repository.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing implementation code. It documents deterministic registration order, RNG rules, test expectations, golden updates, and the direct build/test/release checks used by this repository.
 
 Use [GitHub issues](https://github.com/mweingartner/elysium/issues) for reproducible gameplay and development bugs. Before sharing crash logs, screenshots, saves, or world databases publicly, inspect them for usernames, filesystem paths, world names, chat, or other personal content.
 
@@ -231,6 +247,7 @@ Report suspected security vulnerabilities privately using [SECURITY.md](SECURITY
 - **Textures:** the bundled [Faithful 64x](https://faithfulpack.net/faithful64x) texture set is the work of the Faithful team and its contributors. The reviewed [Ore Borders 64x](https://faithfulpack.net/addons/OreBorders64x) and [Static Lanterns](https://faithfulpack.net/addons/ClearerLanterns) add-ons remain separate, optional layers. They are distributed under the separate [Faithful License](packaging/FAITHFUL-LICENSE.txt), with archive hashes and exact add-on attribution in [FAITHFUL-ADDONS-CREDITS.txt](packaging/FAITHFUL-ADDONS-CREDITS.txt), and are not covered by Elysium's MIT license.
 - **Deterministic math:** the fdlibm-derived math implementation retains its upstream notice in source.
 - **Elysium hero artwork:** `packaging/title-bg.png` was newly generated for Elysium and serves as both this README's hero and the in-game title-menu background. It is not derived from Pebble's README artwork or an in-game Faithful texture capture.
+- **Reality Derived maps:** the bundled [Arnis](https://github.com/louis-e/arnis) generator is by Louis Eriguchi and contributors and is redistributed under its [Apache-2.0 license](Vendor/Arnis/LICENSE). It uses OpenStreetMap and elevation/land-cover sources identified in the Arnis interface; map attribution remains visible in that interface.
 
 Except for separately identified third-party material, source code is available under the [MIT License](LICENSE).
 

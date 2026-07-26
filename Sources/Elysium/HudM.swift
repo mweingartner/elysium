@@ -36,27 +36,106 @@ func xpRainbowSegments(progress: Double, width: Double) -> [XPRainbowSegment] {
 }
 
 struct HeldOverlayPlan: Equatable {
+    /// Grip point shared by the hand and the lower-left handle region of held-item art.
     let armX: Double
     let armY: Double
+    /// The sleeve terminates on a screen edge so the arm never appears to float.
+    let armBaseX: Double
+    let armBaseY: Double
     let iconX: Double
     let iconY: Double
-    let swing: Double
+    let iconSize: Double
+    let scale: Double
+    /// `attack` is remaining attack progress: 1 and 0 are both rest.
+    let attack: Double
+    let use: Double
+    let rotation: Double
+    /// Conservative envelope of the transformed arm and optional icon.
+    let minX: Double
+    let minY: Double
+    let maxX: Double
+    let maxY: Double
 }
 
 func heldOverlayPlan(viewWidth: Double, viewHeight: Double,
-                     hasMainHand: Bool, guiVisible: Bool, firstPerson: Bool, screenOpen: Bool,
-                     attack: Double, usingItem: Bool, useTicks: Int) -> HeldOverlayPlan? {
-    guard hasMainHand, guiVisible, firstPerson, !screenOpen,
+                     guiVisible: Bool, firstPerson: Bool, screenOpen: Bool,
+                     attack: Double, usingItem: Bool, useTicks: Int,
+                     hasHeldItem: Bool = true,
+                     rightObstruction: MapOverlayRect? = nil) -> HeldOverlayPlan? {
+    guard guiVisible, firstPerson, !screenOpen,
           viewWidth.isFinite, viewHeight.isFinite,
-          viewWidth >= 64, viewHeight >= 64 else { return nil }
-    let swing = attack.isNaN ? 0 : max(0, min(1, attack))
+          viewWidth >= 160, viewHeight >= 120 else { return nil }
+    let remaining = attack.isFinite ? max(0, min(1, attack)) : 0
+    let attackArc = Foundation.sin((1 - remaining) * .pi)
     let use = usingItem ? min(1, Double(max(0, useTicks)) / 12) : 0
-    // Keep the whole overlay inside a lower-right envelope and away from the hotbar.
-    let offsetX = -swing * 13 - use * 5
-    let offsetY = swing * 9 - use * 7
-    return HeldOverlayPlan(armX: viewWidth - 43 + offsetX, armY: viewHeight - 76 + offsetY,
-                           iconX: viewWidth - 31 + offsetX, iconY: viewHeight - 62 + offsetY,
-                           swing: swing)
+    let scale = min(1.15, max(0.72, min(viewWidth / 320, viewHeight / 180)))
+    let iconSize = 48 * scale
+    let motionScale = min(1, max(0.2, (viewWidth - 128) / 192))
+
+    // The hand follows a broad up/left attack arc. The held sprite's lower-left handle
+    // region lands under the grip instead of being placed as a separate icon beside it.
+    var armX = viewWidth - 52 * scale
+        - attackArc * 44 * scale * motionScale - use * 22 * scale * motionScale
+    let armY = viewHeight - 48 * scale
+        - attackArc * 40 * scale * motionScale - use * 24 * scale * motionScale
+    let rotationScale = 0.4 + 0.6 * motionScale
+    let rotation = usingItem ? use * 0.55 * rotationScale : attackArc * 0.85 * rotationScale
+    var armBaseX = viewWidth
+    let armBaseY = viewHeight
+
+    // The minimap keeps its normal lower-right home. When present, connect the sleeve to
+    // the bottom edge immediately to its left and keep the complete held sprite clear.
+    if let obstruction = rightObstruction,
+       obstruction.x.isFinite, obstruction.y.isFinite, obstruction.size.isFinite,
+       obstruction.size > 0, obstruction.y < viewHeight,
+       obstruction.x + obstruction.size > 0 {
+        armBaseX = max(0, min(viewWidth, obstruction.x - 4))
+        if hasHeldItem {
+            armX = min(armX, obstruction.x - 4 - iconSize * 0.75)
+        } else {
+            armX = min(armX, obstruction.x - 4 - 22 * scale)
+        }
+    }
+    let iconX = armX - iconSize * 0.25
+    let iconY = armY - iconSize * 0.83
+
+    func transformed(_ x: Double, _ y: Double) -> (Double, Double) {
+        let dx = x - armX, dy = y - armY
+        let c = Foundation.cos(rotation), s = Foundation.sin(rotation)
+        return (armX + dx * c - dy * s, armY + dx * s + dy * c)
+    }
+    func envelope() -> [(Double, Double)] {
+        var result = [
+            (armBaseX, armBaseY), (armBaseX, max(0, armBaseY - 20 * scale)),
+            (armX - 9 * scale, armY - 6 * scale),
+            (armX + 22 * scale, armY + 30 * scale),
+        ]
+        if hasHeldItem {
+            result.append(contentsOf: [
+                transformed(iconX, iconY), transformed(iconX + iconSize, iconY),
+                transformed(iconX + iconSize, iconY + iconSize),
+                transformed(iconX, iconY + iconSize),
+            ])
+        }
+        return result
+    }
+    let vertices = envelope()
+    let minX = vertices.map(\.0).min() ?? armX
+    let minY = vertices.map(\.1).min() ?? armY
+    let maxX = vertices.map(\.0).max() ?? armX
+    let maxY = vertices.map(\.1).max() ?? armY
+    guard minX >= 0, minY >= 0, maxX <= viewWidth, maxY <= viewHeight,
+          !(maxX > viewWidth / 2 - 24 && minX < viewWidth / 2 + 24 &&
+            maxY > viewHeight / 2 - 24 && minY < viewHeight / 2 + 24),
+          rightObstruction.map({
+              maxX <= $0.x || minX >= $0.x + $0.size ||
+              maxY <= $0.y || minY >= $0.y + $0.size
+          }) ?? true else { return nil }
+    return HeldOverlayPlan(armX: armX, armY: armY,
+                           armBaseX: armBaseX, armBaseY: armBaseY,
+                           iconX: iconX, iconY: iconY, iconSize: iconSize, scale: scale,
+                           attack: remaining, use: use, rotation: rotation,
+                           minX: minX, minY: minY, maxX: maxX, maxY: maxY)
 }
 
 struct SubtitleInfo {
@@ -145,29 +224,67 @@ final class HUD {
             }
         }
 
-        // A small first-person forearm anchors the selected item.  This is drawn
-        // before the hotbar so the conventional controls remain readable.
+        let hbX = cx - 91
+        let hbY = packHud ? H - 22 : H - 23
+        let showMinimap = shouldDrawMinimap(
+            showPreference: game.settings.showMinimap,
+            isExpandedMapScreen: ui.current() is MapScreen)
+        let minimapRect = showMinimap
+            ? mapMinimapRect(screenWidth: W, screenHeight: H,
+                             hotbarCenterX: cx, hotbarHalfWidth: 91,
+                             hotbarTopY: hbY,
+                             sizeMode: game.mapMinimapSizeMode)
+            : nil
+
+        // A connected first-person forearm holds a large item sprite by its handle.
+        // It is drawn before the hotbar so conventional controls remain readable.
         let held = player.inventory[player.selectedSlot]
-        if let held, let hand = heldOverlayPlan(viewWidth: W, viewHeight: H,
-                                                 hasMainHand: true,
-                                                 guiVisible: !hideGui,
-                                                 firstPerson: game.perspective == 0,
-                                                 screenOpen: screenOpen,
-                                                 attack: player.attackAnim,
-                                                 usingItem: player.usingItem,
-                                                 useTicks: player.useItemTicks) {
+        if let hand = heldOverlayPlan(viewWidth: W, viewHeight: H,
+                                      guiVisible: !hideGui,
+                                      firstPerson: game.perspective == 0,
+                                      screenOpen: screenOpen,
+                                      attack: player.attackAnim,
+                                      usingItem: player.usingItem,
+                                      useTicks: player.useItemTicks,
+                                      hasHeldItem: held != nil,
+                                      rightObstruction: minimapRect) {
+            let s = hand.scale
+            // Sleeve and forearm reach the screen edge; the dark side facets give the
+            // otherwise pixel-flat HUD geometry enough volume to read as one limb.
+            cv.setFill("#263d55")
+            cv.fillQuad(hand.armX + 6 * s, hand.armY + 25 * s,
+                        hand.armX + 22 * s, hand.armY + 17 * s,
+                        hand.armBaseX, hand.armBaseY - 20 * s,
+                        hand.armBaseX, hand.armBaseY)
             cv.setFill("#c98d68")
-            cv.fillQuad(hand.armX, hand.armY + 13, hand.armX + 15, hand.armY + 8,
-                        hand.armX + 29, hand.armY + 39, hand.armX + 8, hand.armY + 44)
+            cv.fillQuad(hand.armX - 9 * s, hand.armY + 2 * s,
+                        hand.armX + 8 * s, hand.armY - 6 * s,
+                        hand.armX + 22 * s, hand.armY + 17 * s,
+                        hand.armX + 6 * s, hand.armY + 25 * s)
             cv.setFill("#9b6049")
-            cv.fillQuad(hand.armX + 8, hand.armY + 44, hand.armX + 29, hand.armY + 39,
-                        hand.armX + 33, hand.armY + 48, hand.armX + 12, hand.armY + 53)
-            cv.drawItemIcon(held.id, held.data, hand.iconX, hand.iconY, 24, 24)
+            cv.fillQuad(hand.armX + 6 * s, hand.armY + 25 * s,
+                        hand.armX + 22 * s, hand.armY + 17 * s,
+                        hand.armX + 18 * s, hand.armY + 24 * s,
+                        hand.armX + 8 * s, hand.armY + 30 * s)
+            if let held {
+                cv.save()
+                cv.translate(hand.armX, hand.armY)
+                cv.rotate(hand.rotation)
+                cv.translate(-hand.armX, -hand.armY)
+                cv.drawItemIcon(held.id, held.data, hand.iconX, hand.iconY,
+                                hand.iconSize, hand.iconSize)
+                cv.restore()
+            }
+            // The hand is intentionally last: it visibly wraps the sprite's handle and
+            // prevents transparent item pixels from making the tool appear detached.
+            cv.setFill("#d69a72")
+            cv.fillQuad(hand.armX - 7 * s, hand.armY + 3 * s,
+                        hand.armX + 7 * s, hand.armY - 4 * s,
+                        hand.armX + 10 * s, hand.armY + 7 * s,
+                        hand.armX - 4 * s, hand.armY + 12 * s)
         }
 
         // hotbar
-        let hbX = cx - 91
-        let hbY = packHud ? H - 22 : H - 23
         if packHud {
             ui.blitSheet("widgets", 0, 0, 182, 22, hbX, hbY)
             ui.blitSheet("widgets", 0, 22, 24, 23, hbX - 1 + Double(player.selectedSlot) * 20, hbY - 1)
@@ -210,11 +327,7 @@ final class HUD {
             cv.globalAlpha = 1
         }
 
-        if !(ui.current() is MapScreen) {
-            let mapRect = mapMinimapRect(screenWidth: W, screenHeight: H,
-                                         hotbarCenterX: cx, hotbarHalfWidth: 91,
-                                         hotbarTopY: hbY,
-                                         sizeMode: game.mapMinimapSizeMode)
+        if showMinimap, let mapRect = minimapRect {
             let bounds = game.loadedMapBounds()
             let view = mapViewportCenteredOnPlayer(playerX: player.x, playerZ: player.z,
                                                    span: game.mapSpanBlocks,

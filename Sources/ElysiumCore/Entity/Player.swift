@@ -542,6 +542,25 @@ public final class Player: LivingEntity {
                 dz = abs(dz) <= step ? 0 : dz - (dz > 0 ? step : -step)
             }
         }
+        // Keep the player's collision box inside the selected finite map without constructing
+        // visible edge walls. Generation remains lazy and may render a small terrain horizon
+        // beyond this line, but travel cannot silently expand the selected world.
+        if let minX = world.playableMinX, let maxX = world.playableMaxX {
+            let target = min(max(x + dx, Double(minX) + width * 0.5),
+                             Double(maxX + 1) - width * 0.5)
+            dx = target - x
+            if target == Double(minX) + width * 0.5 || target == Double(maxX + 1) - width * 0.5 {
+                vx = 0
+            }
+        }
+        if let minZ = world.playableMinZ, let maxZ = world.playableMaxZ {
+            let target = min(max(z + dz, Double(minZ) + width * 0.5),
+                             Double(maxZ + 1) - width * 0.5)
+            dz = target - z
+            if target == Double(minZ) + width * 0.5 || target == Double(maxZ + 1) - width * 0.5 {
+                vz = 0
+            }
+        }
         super.move(dx, dyIn, dz)
     }
     private func maxUpStep() -> Double { stepHeight }

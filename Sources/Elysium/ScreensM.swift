@@ -31,6 +31,102 @@ private enum CraftAmountStepperLayout {
     }
 }
 
+struct ContainerSortRect: Equatable {
+    let x: Double
+    let y: Double
+    let w: Double
+    let h: Double
+    func intersects(_ other: ContainerSortRect) -> Bool {
+        x < other.x + other.w && x + w > other.x && y < other.y + other.h && y + h > other.y
+    }
+    func inside(_ width: Double, _ height: Double, margin: Double = 0) -> Bool {
+        x >= margin && y >= margin && x + w <= width - margin && y + h <= height - margin
+    }
+}
+
+struct ContainerSortPlacement: Equatable {
+    let panelX: Double
+    let panelY: Double
+    let button: ContainerSortRect?
+    let hint: ContainerSortRect?
+    var supported: Bool { button != nil }
+}
+
+enum ContainerSortPointerRoute: Equatable {
+    case miss
+    case delegatePrimary
+    case consume
+}
+
+/// Classifies pointer input at the sort-control boundary without changing the legacy Button
+/// contract used by every other screen.  A sort rectangle is exclusive even when disabled.
+func containerSortPointerRoute(frame: ContainerSortRect?, x: Double, y: Double,
+                               event: ScreenPointerEvent) -> ContainerSortPointerRoute {
+    guard let frame, x >= frame.x, x < frame.x + frame.w, y >= frame.y, y < frame.y + frame.h else {
+        return .miss
+    }
+    return event.eventType == .leftMouseDown && event.button == 0 && event.appKitButtonNumber == 0
+        ? .delegatePrimary : .consume
+}
+
+/// Keeps the fixed-size container panel and the sort affordance from sharing pixels.  The
+/// left/top rails deliberately move the whole panel, so slot coordinates are rebuilt from the
+/// returned origin rather than patched individually after construction.
+func containerSortPlacement(viewWidth: Double, viewHeight: Double,
+                            panelWidth: Double, panelHeight: Double) -> ContainerSortPlacement {
+    guard viewWidth.isFinite, viewHeight.isFinite, panelWidth == 176,
+          viewWidth >= panelWidth + 8, viewHeight >= panelHeight + 8 else {
+        return ContainerSortPlacement(panelX: 0, panelY: 0, button: nil, hint: nil)
+    }
+    let centeredX = ((viewWidth - panelWidth) / 2).rounded(.down)
+    let centeredY = ((viewHeight - panelHeight) / 2).rounded(.down)
+    let buttonW = 68.0, buttonH = 20.0, hintW = 32.0
+    if viewWidth >= 328 {
+        // Right side is preferred.  A 100px group fits at 480px, while a 380px viewport keeps
+        // the button and intentionally omits the hint.
+        let rightX = centeredX + panelWidth + 4
+        if rightX + buttonW <= viewWidth - 4 {
+            let y = min(max(4, centeredY), viewHeight - buttonH - 4)
+            let hint = rightX + buttonW + 4 + hintW <= viewWidth - 4
+                ? ContainerSortRect(x: rightX + buttonW + 4, y: y, w: hintW, h: buttonH) : nil
+            return ContainerSortPlacement(panelX: centeredX, panelY: centeredY,
+                                          button: ContainerSortRect(x: rightX, y: y, w: buttonW, h: buttonH), hint: hint)
+        }
+    }
+    if viewWidth >= 256 {
+        // Exact narrow left rail: x=4...72, then four pixels before x=76 panel origin.
+        let panelX = min(viewWidth - panelWidth - 4, 76.0)
+        let y = viewHeight - buttonH - 4
+        return ContainerSortPlacement(panelX: panelX, panelY: centeredY,
+                                      button: ContainerSortRect(x: 4, y: y, w: buttonW, h: buttonH), hint: nil)
+    }
+    if viewHeight >= panelHeight + 28 {
+        return ContainerSortPlacement(panelX: centeredX, panelY: 28,
+                                      button: ContainerSortRect(x: 4, y: 4, w: buttonW, h: buttonH), hint: nil)
+    }
+    return ContainerSortPlacement(panelX: centeredX, panelY: centeredY, button: nil, hint: nil)
+}
+
+/// The inventory owner is intentionally exact: armor, offhand, craft slots and cursor state are
+/// not representable by this 36-slot transaction.
+func commitPlayerInventorySort(_ inventory: inout [ItemStack?]) -> Bool {
+    guard inventory.count == 36, let ordered = sortedInventoryStacks(inventory) else { return false }
+    inventory = ordered
+    return true
+}
+
+/// Allows screen code and focused tests to share the all-before-any read/write boundary.  The
+/// capability guard precedes the getter so LAN guests and read-only screens emit neither a slot
+/// read nor a setter write as part of sorting.
+func commitContainerSort(readOnly: Bool, isLANClientWorld: Bool, slotCount: Int,
+                         snapshot: () -> [ItemStack?], set: (Int, ItemStack?) -> Void) -> Bool {
+    guard !readOnly, !isLANClientWorld else { return false }
+    let values = snapshot()
+    guard values.count == slotCount, let ordered = sortedInventoryStacks(values) else { return false }
+    for (index, stack) in ordered.enumerated() { set(index, stack) }
+    return true
+}
+
 // =============================================================================
 // Base container screen with player inventory
 // =============================================================================
@@ -345,6 +441,10 @@ final class InventoryScreen: ContainerScreen {
     /// and the recipe-popup refresh share one scan instead of re-running it (Design D2). Reset
     /// to `nil` at the end of every `draw()`; outside draw(), callers get a fresh scan.
     private var drawResourcesCache: [ItemStack?]?
+    private weak var sortButton: Button?
+    private var sortHintFrame: ContainerSortRect?
+    private var sortSupported = false
+    private var sortAccessibilityFocused = false
 
     override init() {
         super.init()
@@ -353,6 +453,37 @@ final class InventoryScreen: ContainerScreen {
         titleY = 8
         showInvLabel = false
         sheet = "inventory"
+    }
+    override func initScreen(_ ui: UIManager, _ game: GameCore) {
+        let placement = containerSortPlacement(viewWidth: ui.width, viewHeight: ui.height,
+                                               panelWidth: panelW, panelHeight: panelH)
+        panelX = placement.panelX
+        panelY = placement.panelY
+        buttons.removeAll()
+        sortButton = nil
+        containerSlots.removeAll()
+        playerSlots = playerInvSlots(game.player, panelX + 7, panelY + playerInvY)
+        buildSlots(ui, game)
+        slots = containerSlots + playerSlots
+        installSortControl(placement, game)
+    }
+    private var sortEnabled: Bool { sortSupported && !readOnlySlots }
+    private func installSortControl(_ placement: ContainerSortPlacement, _ game: GameCore) {
+        sortSupported = placement.supported
+        sortHintFrame = placement.hint
+        sortAccessibilityFocused = false
+        guard let frame = placement.button else { return }
+        let button = Button(frame.x, frame.y, frame.w, frame.h, "Sort A-Z") { [weak self, weak game] in
+            guard let self, let game else { return }
+            self.sortPlayerInventory(game)
+        }
+        button.enabled = sortEnabled
+        sortButton = button
+        buttons.append(button)
+    }
+    private func sortPlayerInventory(_ game: GameCore) {
+        guard sortSupported, !readOnlySlots else { return }
+        _ = commitPlayerInventorySort(&game.player.inventory)
     }
     override func buildSlots(_ ui: UIManager, _ game: GameCore) {
         let p = game.player!
@@ -630,7 +761,15 @@ final class InventoryScreen: ContainerScreen {
         updateCraftRoundButtons(game)
         let resources = creativeCrafting ? nil : availableRecipeResources(game)
         recipeMenu.refresh(game, craftGrid: craftGrid, creative: creativeCrafting, resources: resources)
+        sortButton?.enabled = sortEnabled
         super.draw(ui, game, partial)
+        if let hint = sortHintFrame, sortSupported {
+            ui.cv.drawText("Cmd-S", hint.x, hint.y + 6, 1, "#ffffff", shadow: true)
+        }
+        if sortAccessibilityFocused && sortEnabled, let button = sortButton {
+            ui.cv.setStroke("#ffffff")
+            ui.cv.strokeRect(button.x - 1, button.y - 1, button.w + 2, button.h + 2)
+        }
         recipeMenu.draw(ui)
         drawResourcesCache = nil
     }
@@ -680,6 +819,22 @@ final class InventoryScreen: ContainerScreen {
         }
         return super.onMouseDown(ui, game, mx, my, btn)
     }
+    override func onPointerDown(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double,
+                                _ event: ScreenPointerEvent) -> Bool {
+        switch containerSortPointerRoute(frame: sortButton.map {
+            ContainerSortRect(x: $0.x, y: $0.y, w: $0.w, h: $0.h)
+        }, x: mx, y: my, event: event) {
+        case .consume:
+            return true
+        case .delegatePrimary:
+            // Keep the established generic Button accepted-click sound path for left clicks.
+            // Disabled controls are still consumed here, never forwarded to a slot/control below.
+            guard sortEnabled, sortButton?.enabled == true else { return true }
+            return super.onPointerDown(ui, game, mx, my, event)
+        case .miss:
+            return super.onPointerDown(ui, game, mx, my, event)
+        }
+    }
     override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
         recipeMenu.onWheel(dy)
     }
@@ -727,7 +882,7 @@ final class InventoryScreen: ContainerScreen {
     }
     override func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore)
         -> [TextEntryAccessibilityDescriptor] {
-        guard recipeMenu.isOpen else { return super.textAccessibilityDescriptors(ui, game) }
+        guard recipeMenu.isOpen else { return sortAccessibilityDescriptors(super.textAccessibilityDescriptors(ui, game)) }
         let frame = recipeMenu.accessibilityFrame
         var descriptors = [TextEntryAccessibilityDescriptor(
             id: "inventory.recipeQuery", role: .searchField, label: "Recipe Search",
@@ -742,7 +897,44 @@ final class InventoryScreen: ContainerScreen {
                 frame: recipeMenu.accessibilityNoMatchesFrame, enabled: false, focused: false,
                 insertionUTF16Offset: nil, focusable: false, actionable: false))
         }
-        return descriptors
+        return sortAccessibilityDescriptors(descriptors)
+    }
+    private func sortAccessibilityDescriptors(_ descriptors: [TextEntryAccessibilityDescriptor])
+        -> [TextEntryAccessibilityDescriptor] {
+        guard let button = sortButton else {
+            return descriptors + [TextEntryAccessibilityDescriptor(
+                id: "inventory.sort", role: .button, label: "Sort A-Z", value: "",
+                help: "Sort the 36 player inventory slots A-Z with Command-S.",
+                frame: (0, 0, 0, 0), enabled: false, focused: false,
+                insertionUTF16Offset: nil, focusable: false, actionable: false)]
+        }
+        let enabled = sortEnabled
+        return descriptors + [TextEntryAccessibilityDescriptor(
+            id: "inventory.sort", role: .button, label: "Sort A-Z", value: "",
+            help: "Sort the 36 player inventory slots A-Z with Command-S.",
+            frame: (button.x, button.y, button.w, button.h), enabled: enabled,
+            focused: sortAccessibilityFocused && enabled, insertionUTF16Offset: nil,
+            focusable: enabled, actionable: enabled)]
+    }
+    override func focusTextAccessibilityElement(_ id: String, _ ui: UIManager,
+                                                _ game: GameCore) -> Bool {
+        guard id == "inventory.sort", sortEnabled, sortButton != nil else { return false }
+        sortAccessibilityFocused = true
+        return true
+    }
+    override func performTextAccessibilityAction(_ id: String, _ ui: UIManager,
+                                                 _ game: GameCore) -> Bool {
+        guard id == "inventory.sort", focusTextAccessibilityElement(id, ui, game) else { return false }
+        sortPlayerInventory(game)
+        return true
+    }
+    override func onKeyEvent(_ ui: UIManager, _ game: GameCore, _ event: ElysiumKeyEvent) -> Bool {
+        guard event.terminal.rawValue == "KeyS", event.modifiers == [.command], !event.isRepeat else {
+            return super.onKeyEvent(ui, game, event)
+        }
+        if ownsTextInput(ui, game) { return super.onKeyEvent(ui, game, event) }
+        if sortEnabled { sortPlayerInventory(game) }
+        return true
     }
     override func onClose(_ ui: UIManager, _ game: GameCore) {
         guard !returnCraftGridToInventory(game) else { return }
@@ -1261,6 +1453,10 @@ final class ChestScreen: ContainerScreen {
     private let setItem: (Int, ItemStack?) -> Void
     private let count: Int
     private let other: BlockEntityData?
+    private weak var sortButton: Button?
+    private var sortHintFrame: ContainerSortRect?
+    private var sortSupported = false
+    private var sortAccessibilityFocused = false
 
     /// items live in a BlockEntityData or a vehicle — accessors close over the owner
     init(_ be: BlockEntityData, _ title: String, _ other: BlockEntityData? = nil, readOnly: Bool = false) {
@@ -1307,6 +1503,45 @@ final class ChestScreen: ContainerScreen {
     /// vanilla generic_54 player grid sits at imageHeight−84 (one px above the 166-panel layouts)
     override var playerInvY: Double { panelH - 84 }
 
+    override func initScreen(_ ui: UIManager, _ game: GameCore) {
+        let placement = containerSortPlacement(viewWidth: ui.width, viewHeight: ui.height,
+                                               panelWidth: panelW, panelHeight: panelH)
+        panelX = placement.panelX
+        panelY = placement.panelY
+        buttons.removeAll()
+        sortButton = nil
+        containerSlots.removeAll()
+        playerSlots = playerInvSlots(game.player, panelX + 7, panelY + playerInvY)
+        buildSlots(ui, game)
+        slots = containerSlots + playerSlots
+        installSortControl(placement, game)
+    }
+    private func sortEnabled(_ game: GameCore) -> Bool {
+        sortSupported && !readOnlySlots && !game.isLANClientWorld
+    }
+    private func installSortControl(_ placement: ContainerSortPlacement, _ game: GameCore) {
+        sortSupported = placement.supported
+        sortHintFrame = placement.hint
+        sortAccessibilityFocused = false
+        guard let frame = placement.button else { return }
+        let button = Button(frame.x, frame.y, frame.w, frame.h, "Sort A-Z") { [weak self, weak game] in
+            guard let self, let game else { return }
+            self.sortContainer(game)
+        }
+        button.enabled = sortEnabled(game)
+        sortButton = button
+        buttons.append(button)
+    }
+    private func sortContainer(_ game: GameCore) {
+        // This is deliberately before even a slot getter: a LAN client must never create a
+        // guest-edit snapshot/fingerprint as a side effect of a sorting attempt.
+        guard sortSupported, !readOnlySlots, !game.isLANClientWorld else { return }
+        _ = commitContainerSort(readOnly: readOnlySlots, isLANClientWorld: game.isLANClientWorld,
+                                slotCount: containerSlots.count,
+                                snapshot: { [weak self] in self?.containerSlots.map { $0.get() } ?? [] },
+                                set: { [weak self] index, stack in self?.containerSlots[index].set(stack) })
+    }
+
     /// generic_54.png is sliced vanilla-style: header+rows piece, then the
     /// player-inventory piece from y=126 — works for any 1–6 row container
     override func drawSheetPanel(_ ui: UIManager) -> Bool {
@@ -1341,6 +1576,69 @@ final class ChestScreen: ContainerScreen {
                 i += 1
             }
         }
+    }
+    override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
+        sortButton?.enabled = sortEnabled(game)
+        super.draw(ui, game, partial)
+        if let hint = sortHintFrame, sortSupported {
+            ui.cv.drawText("Cmd-S", hint.x, hint.y + 6, 1, "#ffffff", shadow: true)
+        }
+        if sortAccessibilityFocused && sortEnabled(game), let button = sortButton {
+            ui.cv.setStroke("#ffffff")
+            ui.cv.strokeRect(button.x - 1, button.y - 1, button.w + 2, button.h + 2)
+        }
+    }
+    override func onPointerDown(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double,
+                                _ event: ScreenPointerEvent) -> Bool {
+        switch containerSortPointerRoute(frame: sortButton.map {
+            ContainerSortRect(x: $0.x, y: $0.y, w: $0.w, h: $0.h)
+        }, x: mx, y: my, event: event) {
+        case .consume:
+            return true
+        case .delegatePrimary:
+            guard sortEnabled(game), sortButton?.enabled == true else { return true }
+            return super.onPointerDown(ui, game, mx, my, event)
+        case .miss:
+            return super.onPointerDown(ui, game, mx, my, event)
+        }
+    }
+    override func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore)
+        -> [TextEntryAccessibilityDescriptor] {
+        let enabled = sortEnabled(game)
+        let help = game.isLANClientWorld
+            ? "Sort container slots A-Z with Command-S. Sorting is available to the host"
+            : "Sort all container slots A-Z with Command-S. Player rows are not included."
+        guard let button = sortButton else {
+            return super.textAccessibilityDescriptors(ui, game) + [TextEntryAccessibilityDescriptor(
+                id: "chest.sort", role: .button, label: "Sort A-Z", value: "", help: help,
+                frame: (0, 0, 0, 0), enabled: false, focused: false,
+                insertionUTF16Offset: nil, focusable: false, actionable: false)]
+        }
+        return super.textAccessibilityDescriptors(ui, game) + [TextEntryAccessibilityDescriptor(
+            id: "chest.sort", role: .button, label: "Sort A-Z", value: "", help: help,
+            frame: (button.x, button.y, button.w, button.h), enabled: enabled,
+            focused: sortAccessibilityFocused && enabled, insertionUTF16Offset: nil,
+            focusable: enabled, actionable: enabled)]
+    }
+    override func focusTextAccessibilityElement(_ id: String, _ ui: UIManager,
+                                                _ game: GameCore) -> Bool {
+        guard id == "chest.sort", sortEnabled(game), sortButton != nil else { return false }
+        sortAccessibilityFocused = true
+        return true
+    }
+    override func performTextAccessibilityAction(_ id: String, _ ui: UIManager,
+                                                 _ game: GameCore) -> Bool {
+        guard id == "chest.sort", focusTextAccessibilityElement(id, ui, game) else { return false }
+        sortContainer(game)
+        return true
+    }
+    override func onKeyEvent(_ ui: UIManager, _ game: GameCore, _ event: ElysiumKeyEvent) -> Bool {
+        guard event.terminal.rawValue == "KeyS", event.modifiers == [.command], !event.isRepeat else {
+            return super.onKeyEvent(ui, game, event)
+        }
+        if ownsTextInput(ui, game) { return super.onKeyEvent(ui, game, event) }
+        if sortEnabled(game) { sortContainer(game) }
+        return true
     }
 }
 

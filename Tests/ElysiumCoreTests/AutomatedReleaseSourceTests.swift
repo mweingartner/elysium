@@ -59,7 +59,10 @@ final class AutomatedReleaseSourceTests: XCTestCase {
 
     func testHooksSeparateFastCommitFromExactOutgoingPushAuthority() throws {
         let commit = try source(".githooks/pre-commit")
-        XCTAssertTrue(commit.contains("mpd check --staged --quiet"))
+        XCTAssertTrue(commit.contains("git diff --cached --check"))
+        XCTAssertTrue(commit.contains("secret-looking material found in staged additions"))
+        XCTAssertTrue(commit.contains("secret-bearing filename is staged"))
+        XCTAssertFalse(commit.contains("mpd "))
         XCTAssertFalse(commit.contains("pipeline.sh"))
         let push = try source(".githooks/pre-push")
         for marker in ["exactly one outgoing ref", "local_sha\" = \"$HEAD_SHA",

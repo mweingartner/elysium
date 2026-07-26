@@ -435,6 +435,9 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
                 }
             }
         }
+        if settings.preset == .netherWorld {
+            placeNetherWorldGateway(seed: seed, cx: cx, cz: cz, generator: gen, sink: sink)
+        }
         return GenOutput(blocks: sink.blocks, biomes: biomes,
                          blockEntities: sink.blockEntities, entities: sink.entities, structRefs: structRefs)
     }
@@ -473,6 +476,61 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
     }
     return GenOutput(blocks: sink.blocks, biomes: biomes,
                      blockEntities: sink.blockEntities, entities: sink.entities, structRefs: structRefs)
+}
+
+private let netherWorldGatewayRegionChunks = 8
+
+/// One deterministic, active gateway per 8x8-chunk region. The origin gateway is pinned to
+/// chunk 0,0 so a new Nether-first player always has a visible route to the Overworld; all other
+/// regions use seed-jittered chunk positions to avoid an artificial-looking global grid.
+public func isNetherWorldGatewayChunk(seed: UInt32, cx: Int, cz: Int) -> Bool {
+    let rx = floorDiv(cx, netherWorldGatewayRegionChunks)
+    let rz = floorDiv(cz, netherWorldGatewayRegionChunks)
+    if rx == 0 && rz == 0 { return cx == 0 && cz == 0 }
+    let mixed = hash2(seed ^ 0x4E57_4741, rx, rz, 0x5941)
+    let ox = Int(mixed & 7)
+    let oz = Int((mixed >> 8) & 7)
+    return cx == rx * netherWorldGatewayRegionChunks + ox
+        && cz == rz * netherWorldGatewayRegionChunks + oz
+}
+
+/// Stable floor used by both world generation and fresh-player spawn selection.
+public func netherWorldGatewayFloorY(seed: UInt32, cx: Int, cz: Int) -> Int {
+    let gen = netherGen(seed)
+    let x = cx * 16 + 6
+    let z = cz * 16 + 7
+    return max(36, min(96, gen.heightEstimate(Double(x), Double(z))))
+}
+
+private func placeNetherWorldGateway(seed: UInt32, cx: Int, cz: Int,
+                                     generator: NetherGen, sink: ArraySink) {
+    guard isNetherWorldGatewayChunk(seed: seed, cx: cx, cz: cz) else { return }
+    let x = cx * 16 + 5
+    let z = cz * 16 + 7
+    let y = max(36, min(96, generator.heightEstimate(Double(x + 1), Double(z))))
+    let air = UInt16(0)
+    let floor = cell(B.blackstone)
+    let obsidian = cell(B.obsidian)
+    let portal = cell(B.nether_portal, 0)
+    let light = cell(B.shroomlight)
+
+    // A compact, fully excavated chamber keeps the route usable even when the density sampler
+    // selects a floor beside solid terrain. Everything stays inside one chunk, preserving the
+    // generator's chunk-local deterministic write contract.
+    for pz in (z - 2)...(z + 2) {
+        for px in (x - 2)...(x + 5) {
+            sink.set(px, y - 1, pz, floor)
+            for py in y...(y + 5) { sink.set(px, py, pz, air) }
+        }
+    }
+    for dy in 0...4 {
+        for dx in 0...3 {
+            let frame = dy == 0 || dy == 4 || dx == 0 || dx == 3
+            sink.set(x + dx, y + dy, z, frame ? obsidian : portal)
+        }
+    }
+    sink.set(x - 2, y, z - 2, light)
+    sink.set(x + 5, y, z + 2, light)
 }
 
 /// back-compat shim for callers built against the pre-structures pipeline

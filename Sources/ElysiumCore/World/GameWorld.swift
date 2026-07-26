@@ -117,6 +117,12 @@ public final class World {
     public weak var overworldWeatherSource: World?
     public var rng: RandomX
     public var spawnX = 0.0, spawnY = 80.0, spawnZ = 0.0
+    /// Inclusive player-travel boundary. Chunks just beyond it may still be generated for a
+    /// seamless horizon; the boundary itself is invisible and never creates an artificial wall.
+    public var playableMinX: Int?
+    public var playableMaxX: Int?
+    public var playableMinZ: Int?
+    public var playableMaxZ: Int?
     public private(set) var light: LightEngine!
     public var difficulty = 2
     public var hooks = WorldHooks()

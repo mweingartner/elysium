@@ -1184,10 +1184,12 @@ public final class GameCore {
             }
         }
         if dest == nil {
-            destDim = .overworld
-            let w = worlds[.overworld]!
+            destDim = worldRec?.generationSettings.preset.startingDimension ?? .overworld
+            let w = worlds[destDim]!
             ensureChunksLoaded(w, floorDiv(Int(w.spawnX), 16), floorDiv(Int(w.spawnZ), 16), 1)
-            dest = (w.spawnX + 0.5, Double(w.surfaceY(Int(w.spawnX), Int(w.spawnZ))), w.spawnZ + 0.5)
+            let spawnY = worldRec?.generationSettings.preset == .netherWorld && destDim == .nether
+                ? w.spawnY : Double(w.surfaceY(Int(w.spawnX), Int(w.spawnZ)))
+            dest = (w.spawnX + 0.5, spawnY, w.spawnZ + 0.5)
         }
         if destDim != dim { moveToDimension(destDim) }
         p.respawn()
@@ -1343,28 +1345,17 @@ public final class GameCore {
     public func createWorld(name: String, seedText: String, mode: Int, difficulty: Int,
                             worldPreset: WorldPreset = .normal, singleBiome: Biome = .plains,
                             dungeonDensity: DungeonDensity = .normal,
+                            mapSize: WorldMapSize = .medium,
                             rpgClassesEnabled: Bool = true) {
         guard savedWorldMaintenanceAllowsTransitions() else { return }
         lanClientResumeStorageKey = nil
         lanClientWorldSummary = nil
-        let trimmed = seedText.trimmingCharacters(in: .whitespaces)
-        var seed: Int32
-        if trimmed.isEmpty {
-            seed = Int32.random(in: 0..<0x7fffffff)
-        } else if trimmed.range(of: "^-?\\d+$", options: .regularExpression) != nil {
-            seed = wrapToInt32(Double(trimmed) ?? 0)
-        } else {
-            // (seed * 31 + ch.charCodeAt(0)) | 0 over code points
-            seed = 0
-            for unit in trimmed.utf16 {
-                seed = seed &* 31 &+ Int32(unit)
-            }
-        }
+        let seed = Self.worldSeed(from: seedText)
         let ms = Int(Date().timeIntervalSince1970 * 1000)
         let id = "w" + String(ms, radix: 36) + String(Int.random(in: 0..<1_000_000), radix: 36)
         var rec = WorldRecord(id: id, name: name, seed: seed, gameMode: mode, difficulty: difficulty,
                               worldPreset: worldPreset, singleBiome: singleBiome,
-                              dungeonDensity: dungeonDensity)
+                              dungeonDensity: dungeonDensity, mapSize: mapSize)
         rec.gameRules[RPG_CLASSES_GAME_RULE] = rpgClassesEnabled ? 1 : 0
         let spawn = defaultWorldSpawn(seed: seed, settings: rec.generationSettings)
         rec.spawnX = spawn.x
@@ -1372,6 +1363,60 @@ public final class GameCore {
         rec.spawnZ = spawn.z
         db.putWorld(rec)
         enterWorld(rec, nil, nil)
+    }
+
+    public func persistRealityDerivedWorld(
+        id: String, name: String, seedText: String, mode: Int, difficulty: Int,
+        rpgClassesEnabled: Bool, mapSize: WorldMapSize,
+        plan: RealityDerivedImportPlan,
+        progress: @escaping (Int, Int) -> Void = { _, _ in },
+        cancelled: @escaping () -> Bool = { false }
+    ) throws -> WorldRecord {
+        guard plan.worldID == id,
+              plan.importedChunkCount > 0,
+              plan.source.scale.isFinite,
+              plan.source.scale >= 0.5, plan.source.scale <= 3,
+              plan.importedWidthBlocks <= mapSize.sideBlocks + 15,
+              plan.importedDepthBlocks <= mapSize.sideBlocks + 15,
+              plan.totalChunkCount <= REALITY_DERIVED_MAX_TOTAL_CHUNKS else {
+            throw RealityDerivedImportError.invalidManifest
+        }
+        var rec = WorldRecord(
+            id: id, name: name.isEmpty ? "New World" : name,
+            seed: Self.worldSeed(from: seedText), gameMode: mode, difficulty: difficulty,
+            mapSize: mapSize)
+        rec.gameRules[RPG_CLASSES_GAME_RULE] = rpgClassesEnabled ? 1 : 0
+        rec.spawnX = plan.spawnX
+        rec.spawnY = plan.spawnY
+        rec.spawnZ = plan.spawnZ
+        rec.mapCenterX = plan.mapCenterX
+        rec.mapCenterZ = plan.mapCenterZ
+        rec.realityDerivedSource = plan.source
+        _ = try db.putRealityDerivedWorldStreaming(
+            rec, plan: plan, progress: progress, cancelled: cancelled)
+        return rec
+    }
+
+    static func worldSeed(from text: String) -> Int32 {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            return Int32.random(in: 0..<0x7fffffff)
+        }
+        if trimmed.range(of: "^-?\\d+$", options: .regularExpression) != nil {
+            return wrapToInt32(Double(trimmed) ?? 0)
+        }
+        // Match Elysium's established Java-style text-seed contract over UTF-16 code units.
+        return trimmed.utf16.reduce(into: Int32(0)) { seed, unit in
+            seed = seed &* 31 &+ Int32(unit)
+        }
+    }
+
+    @MainActor
+    public func enterPersistedRealityDerivedWorld(_ record: WorldRecord) {
+        guard savedWorldMaintenanceAllowsTransitions(), db.getWorld(record.id) != nil else { return }
+        lanClientResumeStorageKey = nil
+        lanClientWorldSummary = nil
+        enterWorld(record, nil, nil)
     }
 
     @MainActor
@@ -1427,6 +1472,10 @@ public final class GameCore {
     // World lifecycle
     // ===========================================================================
     private func defaultWorldSpawn(seed: Int32, settings: WorldGenerationSettings = .normal) -> (x: Int, y: Int, z: Int) {
+        if settings.preset == .netherWorld {
+            let unsignedSeed = UInt32(bitPattern: seed)
+            return (9, netherWorldGatewayFloorY(seed: unsignedSeed, cx: 0, cz: 0), 7)
+        }
         if settings.preset == .flat {
             return (8, GEN_MIN_Y + 4, 8)
         }
@@ -2088,6 +2137,31 @@ public final class GameCore {
             w.spawnX = Double(rec.spawnX)
             w.spawnY = Double(rec.spawnY)
             w.spawnZ = Double(rec.spawnZ)
+            let netherFirst = rec.generationSettings.preset == .netherWorld
+            let coordinateScale = d == .nether ? 8 : 1
+            let playableSide: Int
+            let playableCenterX: Int
+            let playableCenterZ: Int
+            if netherFirst && d == .overworld {
+                // In a Nether-first world the selected width describes the starting Nether.
+                // Preserve the 8:1 travel contract by giving its paired Overworld matching reach.
+                playableSide = rec.mapSize.sideBlocks * 8
+                playableCenterX = rec.mapCenterX * 8
+                playableCenterZ = rec.mapCenterZ * 8
+            } else if netherFirst {
+                playableSide = rec.mapSize.sideBlocks
+                playableCenterX = rec.mapCenterX
+                playableCenterZ = rec.mapCenterZ
+            } else {
+                playableSide = max(32, rec.mapSize.sideBlocks / coordinateScale)
+                playableCenterX = floorDiv(rec.mapCenterX, coordinateScale)
+                playableCenterZ = floorDiv(rec.mapCenterZ, coordinateScale)
+            }
+            let half = playableSide / 2
+            w.playableMinX = playableCenterX - half
+            w.playableMaxX = w.playableMinX! + playableSide - 1
+            w.playableMinZ = playableCenterZ - half
+            w.playableMaxZ = w.playableMinZ! + playableSide - 1
             hookWorld(w)
             worlds[d] = w
         }
@@ -2097,7 +2171,9 @@ public final class GameCore {
             w.overworldWeatherSource = worlds[.overworld]
         }
         savedChunkKeys = db.getChunkKeys(rec.id)
-        dim = Dim(rawValue: (playerData?["dim"] as? NSNumber)?.intValue ?? 0) ?? .overworld
+        let startingDimension = rec.generationSettings.preset.startingDimension
+        dim = Dim(rawValue: (playerData?["dim"] as? NSNumber)?.intValue
+                  ?? startingDimension.rawValue) ?? startingDimension
         let w = world
         player = Player(world: w)
         player.setGameMode(rec.gameMode)
@@ -2111,7 +2187,10 @@ public final class GameCore {
             }
         } else {
             player.setPos(Double(rec.spawnX) + 0.5, Double(rec.spawnY + 1), Double(rec.spawnZ) + 0.5)
-            // starter nothing — vanilla survival starts empty-handed
+            player.spawnDim = startingDimension.rawValue
+            if rec.generationSettings.preset == .netherWorld {
+                installNetherWorldStarterKit(on: player)
+            }
         }
         w.addEntity(player)
 
@@ -2141,7 +2220,8 @@ public final class GameCore {
         let pcx = floorDiv(ifloor(player.x), 16), pcz = floorDiv(ifloor(player.z), 16)
         ensureChunksLoaded(w, pcx, pcz, 1)
         if playerData == nil && !transientLANClient {
-            let sy = w.surfaceY(rec.spawnX, rec.spawnZ)
+            let sy = rec.generationSettings.preset == .netherWorld && dim == .nether
+                ? rec.spawnY : w.surfaceY(rec.spawnX, rec.spawnZ)
             player.setPos(Double(rec.spawnX) + 0.5, Double(sy), Double(rec.spawnZ) + 0.5)
         }
         // if loading into the End with a living fight, re-arm the dragon hook
@@ -2173,6 +2253,16 @@ public final class GameCore {
             host?.pushChat("§eYou are deep underground. Type §f/surface§e to climb out.")
             host?.showActionBar("§eDeep underground — press T, type §f/surface", 400)
         }
+    }
+
+    private func installNetherWorldStarterKit(on player: Player) {
+        // A new player inventory is empty here. Assign fixed hotbar slots so the grant is atomic,
+        // deterministic, and cannot merge into or duplicate a persisted inventory.
+        player.inventory[0] = ItemStack(iid("iron_pickaxe"), 1)
+        player.inventory[1] = ItemStack(iid("iron_pickaxe"), 1)
+        player.inventory[2] = ItemStack(iid("iron_sword"), 1)
+        player.inventory[3] = ItemStack(iid("iron_shovel"), 1)
+        player.inventory[4] = ItemStack(iid("oak_log"), 64)
     }
 
     private func hookWorld(_ w: World) {

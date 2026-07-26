@@ -2,6 +2,57 @@ import XCTest
 @testable import ElysiumCore
 
 final class MapOverlayTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        registerAllBlocks()
+    }
+
+    func testMinimapVisibilityDefaultsOnAndExpandedMapNeverDuplicatesIt() {
+        XCTAssertTrue(Settings().showMinimap)
+        XCTAssertTrue(shouldDrawMinimap(showPreference: true, isExpandedMapScreen: false))
+        XCTAssertFalse(shouldDrawMinimap(showPreference: false, isExpandedMapScreen: false))
+        XCTAssertFalse(shouldDrawMinimap(showPreference: true, isExpandedMapScreen: true))
+    }
+
+    func testOverworldMapSampleKeepsUsingSkyFacingHeightmap() {
+        let world = World(dim: .overworld, seed: 1)
+        let chunk = Chunk(cx: 0, cz: 0, minY: world.info.minY, height: world.info.height)
+        chunk.set(3, 70, 4, cell(B.grass_block))
+        chunk.buildHeightmap()
+        world.setChunk(chunk)
+
+        let sample = mapColumnSample(world, x: 3, z: 4, referenceY: 20)
+
+        XCTAssertEqual(sample, MapColumnSample(cell: Int(cell(B.grass_block)), y: 70))
+    }
+
+    func testNetherMapSamplesPlayerCavernInsteadOfCeiling() {
+        let world = World(dim: .nether, seed: 2)
+        let chunk = Chunk(cx: 0, cz: 0, minY: world.info.minY, height: world.info.height)
+        chunk.set(5, 60, 6, cell(B.soul_sand))
+        chunk.set(5, 127, 6, cell(B.bedrock))
+        chunk.buildHeightmap()
+        world.setChunk(chunk)
+
+        XCTAssertEqual(world.heightAt(5, 6), 127, "fixture must expose the old ceiling-only behavior")
+        XCTAssertEqual(mapColumnSample(world, x: 5, z: 6, referenceY: 64),
+                       MapColumnSample(cell: Int(cell(B.soul_sand)), y: 60))
+    }
+
+    func testNetherMapShowsNearbyWallsAndBoundsDeepVoidWork() {
+        let world = World(dim: .nether, seed: 3)
+        let chunk = Chunk(cx: 0, cz: 0, minY: world.info.minY, height: world.info.height)
+        chunk.set(1, 65, 1, cell(B.netherrack))
+        chunk.set(2, 32, 2, cell(B.basalt))
+        chunk.set(3, 31, 3, cell(B.basalt))
+        world.setChunk(chunk)
+
+        XCTAssertEqual(mapColumnSample(world, x: 1, z: 1, referenceY: 64)?.y, 65)
+        XCTAssertEqual(mapColumnSample(world, x: 2, z: 2, referenceY: 64)?.y, 32)
+        XCTAssertNil(mapColumnSample(world, x: 3, z: 3, referenceY: 64))
+        XCTAssertNil(mapColumnSample(world, x: 16, z: 16, referenceY: 64))
+    }
+
     func testDefaultMinimapSizeModeIsMediumAndCyclesThroughThreeSizes() {
         XCTAssertEqual(MAP_DEFAULT_MINIMAP_SIZE_MODE, .medium)
         XCTAssertEqual(cycledMapMinimapSizeMode(.medium, larger: true), .large)

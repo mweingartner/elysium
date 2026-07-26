@@ -18,6 +18,7 @@ final class SettingsTests: XCTestCase {
         s.bundledResourcePackAddOns = ["static-lanterns", "unknown", "ore-borders-64x",
                                          "static-lanterns"]
         s.aiOllamaModel = " llama3.1:8b\nbad chars <> "
+        s.showMinimap = false
 
         let out = sanitizedSettings(s)
 
@@ -36,6 +37,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(out.resourcePacks, ["ok.zip"])
         XCTAssertEqual(out.bundledResourcePackAddOns, ["ore-borders-64x", "static-lanterns"])
         XCTAssertEqual(out.aiOllamaModel, "llama3.1:8bbadchars")
+        XCTAssertFalse(out.showMinimap)
     }
 
     func testKeybindSanitizationDropsUnknownAndInvalidValues() {

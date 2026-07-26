@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <link rel="stylesheet" href="./css/styles.css" />
+  <link rel="stylesheet" href="./css/preview3d.css" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Arnis</title>
+  <script src="./js/preview3d.js" defer></script>
+  <script type="module" src="./js/main.js" defer></script>
+  <script type="module" src="./js/license.js" defer></script>
+  <script type="module" src="./js/language-selector.js" defer></script>
+</head>
+
+<body>
+  <main class="container">
+    <div class="row">
+      <a href="https://arnismc.com" target="_blank" rel="noopener noreferrer">
+        <img src="./images/logo.png" id="arnis-logo" class="logo arnis" alt="Arnis Logo" style="width: 30%; height: auto;">
+      </a>
+    </div>
+
+    <div class="flex-container">
+      <!-- Left Box: Map -->
+      <section class="section map-box">
+        <iframe src="maps.html" width="100%" height="100%" class="map-container" title="Map Picker"></iframe>
+      </section>
+
+      <!-- Right Box: Directory Selection, Start Button, and Progress Bar -->
+      <section class="section controls-box">
+        <div class="controls-content">
+          <div class="controls-top">
+            <!-- Combined Button Block -->
+            <div class="button-block">
+              <div class="button-block-row">
+                <button type="button" id="start-button" class="start-button" onclick="startGeneration()">
+                  <span data-localize="start_generation">Start Generation</span>
+                  <span id="world-name-label" class="world-name-label" data-placeholder="true">No world generated yet</span>
+                </button>
+                <button type="button" class="settings-button" onclick="openSettings()" aria-label="Settings">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                </button>
+              </div>
+              <div class="button-block-row">
+                <button type="button" id="format-java" class="format-toggle-btn format-active" onclick="setWorldFormat('java')">
+                  Java
+                </button>
+                <button type="button" id="format-bedrock" class="format-toggle-btn" onclick="setWorldFormat('bedrock')">
+                  Bedrock
+                </button>
+                <button type="button" id="format-luanti" class="format-toggle-btn" onclick="setWorldFormat('luanti')" style="display: none;">
+                  Luanti
+                </button>
+              </div>
+            </div>
+            <span id="bbox-selection-info" class="bbox-selection-text" data-localize="select_area_prompt">Select an area on the map using the tools.</span>
+
+            <!-- Mini 3D terrain preview (rendered via the map's terrain button, click to expand) -->
+            <div id="preview3d-mini" class="preview3d-mini" style="display: none;" title="Click to expand 3D preview">
+              <div id="preview3d-mini-map"></div>
+              <div id="preview3d-mini-loader" class="preview3d-mini-loader" style="display: none;">
+                <span id="preview3d-mini-loader-text">Rendering terrain preview…</span>
+                <div class="preview3d-mini-loader-bar"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="progress-section">
+            <img src="" alt="" class="secret-parrot" id="secret-parrot">
+            <span id="progress-info" class="progress-info-text"></span>
+            <div class="progress-row">
+              <div class="progress-bar-container">
+                <div class="progress-bar" id="progress-bar"></div>
+                <span id="progress-eta" class="progress-eta-overlay" dir="ltr"></span>
+              </div>
+              <span id="progress-detail">0%</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal" style="display: none;">
+      <div class="modal-content">
+        <div class="settings-header">
+          <h2 data-localize="customization_settings">Settings</h2>
+          <span class="close-button" onclick="closeSettings()">&times;</span>
+        </div>
+
+        <div class="settings-scrollable">
+        <!-- Section: Generation -->
+        <div class="settings-section-header" data-localize="settings_section_generation">Generation</div>
+
+        <!-- Generation Mode Dropdown -->
+        <div class="settings-row">
+          <label for="generation-mode-select">
+            <span data-localize="generation_mode">Generation Mode</span>
+            <span class="tooltip-icon" data-tooltip="Choose what to generate: buildings/roads with terrain, just objects, or terrain only">?</span>
+          </label>
+          <div class="settings-control">
+            <select id="generation-mode-select" name="generation-mode-select" class="generation-mode-dropdown">
+              <option value="geo-terrain" data-localize="mode_geo_terrain">Objects + Terrain</option>
+              <option value="geo-only" data-localize="mode_geo_only">Objects only</option>
+              <option value="terrain-only" data-localize="mode_terrain_only">Terrain only</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Additional Buildings Toggle (Overture Maps ML-derived footprints) -->
+        <div class="settings-row">
+          <label for="overture-toggle">
+            <span data-localize="overture">Additional Buildings</span>
+            <span class="tooltip-icon" data-tooltip="Adds buildings that are missing from OpenStreetMap, using footprints from Overture Maps. Most useful in rural areas with little mapping. Since these are detected from satellite imagery, a few buildings may be placed where none exist.">?</span>
+          </label>
+          <div class="settings-control">
+            <input type="checkbox" id="overture-toggle" name="overture-toggle" checked>
+          </div>
+        </div>
+
+        <!-- 3D Models & Props Toggle (3DMR + Wikimedia Commons via Wikidata, plus bundled schematic props) -->
+        <div class="settings-row">
+          <label for="use-3d-toggle">
+            <span data-localize="three_dmr">3D Models &amp; Props</span>
+            <span class="tooltip-icon" data-tooltip="Adds detailed 3D content: community-contributed models (from the OpenStreetMap 3D Model Repository and Wikimedia Commons) for famous landmarks such as the Eiffel Tower, plus bundled schematic props like cars, boats, cranes and wind turbines. Turn off to disable all of them.">?</span>
+          </label>
+          <div class="settings-control">
+            <input type="checkbox" id="use-3d-toggle" name="use-3d-toggle" checked>
+          </div>
+        </div>
+
+        <!-- Interior Toggle Button -->
+        <div class="settings-row">
+          <label for="interior-toggle">
+            <span data-localize="interior">Interior Generation</span>
+            <span class="tooltip-icon" data-tooltip="Adds rooms, furniture and occasional loot chests with survival supplies inside buildings. Experimental and slows generation.">?</span>
+          </label>
+          <div class="settings-control">
+            <input type="checkbox" id="interior-toggle" name="interior-toggle">
+          </div>
+        </div>
+
+        <!-- Fill ground Toggle Button -->
+        <div class="settings-row">
+          <label for="fillground-toggle">
+            <span data-localize="fillground">Fill Ground</span>
+            <span class="tooltip-icon" data-tooltip="Fills stone and ore veins under the surface for survival mining. Slower to generate, larger worlds.">?</span>
+          </label>
+          <div class="settings-control">
+            <input type="checkbox" id="fillground-toggle" name="fillground-toggle">
+          </div>
+        </div>
+
+        <!-- Legacy Trees Toggle -->
+        <div class="settings-row">
+          <label for="legacy-trees-toggle">
+            <span data-localize="legacy_trees">Legacy trees</span>
+            <span class="tooltip-icon" data-tooltip="Use the simple procedural trees instead of the detailed region-aware schematic tree models.">?</span>
+          </label>
+          <div class="settings-control">
+            <input type="checkbox" id="legacy-trees-toggle" name="legacy-trees-toggle">
+          </div>
+        </div>
+
+        <!-- Section: World -->
+        <div class="settings-section-header" data-localize="settings_section_world">World</div>
+
+        <!-- Game Mode -->
+        <div class="settings-row">
+          <label>
+            <span data-localize="gamemode">Game Mode</span>
+            <span class="tooltip-icon" data-tooltip="Player game mode for the generated world. Spectator maps to Creative on Luanti.">?</span>
+          </label>
+          <div class="settings-control">
+            <div class="segmented-control" id="gamemode-group">
+              <button type="button" class="segment" data-gamemode="survival" data-localize="gamemode_survival">Survival</button>
+              <button type="button" class="segment active" data-gamemode="creative" data-localize="gamemode_creative">Creative</button>
+              <button type="button" class="segment" data-gamemode="spectator" data-localize="gamemode_spectator">Spectator</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- World Time Slider -->
+        <div class="settings-row">
+          <label for="world-time-slider">
+            <span data-localize="world_time">World Time</span>
+            <span class="tooltip-icon" data-tooltip="Time of day the world starts at.">?</span>
+          </label>
+          <div class="settings-control">
+            <input type="range" id="world-time-slider" name="world-time-slider" min="0" max="1440" step="10" value="720">
+            <span id="world-time-value">12:00</span>
+          </div>
+        </div>
+
+        <!-- World Map Item Toggle -->
+        <div class="settings-row">
+          <label for="map-item-toggle">
+            <span data-localize="map_item">World Map Item</span>
+            <span class="tooltip-icon" data-tooltip="Give the player a locked map item showing the entire generated world (Java only)">?</span>
+          </label>
+          <div class="settings-control">
+            <input type="checkbox" id="map-item-toggle" name="map-item-toggle" checked>
+          </div>
+        </div>
+
+        <!-- Extend Build Height Toggle -->
+        <div class="settings-row">
+          <label for="disable-height-limit-toggle">
+            <span data-localize="disable_height_limit">Extend build height</span>
+            <span class="tooltip-icon" data-tooltip="Bundles a pack that raises the build height for 1:1 terrain. Works on Java 1.21.4+ and Bedrock 1.21.40+ (experimental; not Realms-compatible).">?</span>
+          </label>
+          <div class="settings-control">
+            <input type="checkbox" id="disable-height-limit-toggle" name="disable-height-limit-toggle">
+          </div>
+        </div>
+
+        <!-- AWS-only Elevation Toggle -->
+        <div class="settings-row">
+          <label for="aws-only-elevation-toggle">
+            <span data-localize="aws_only_elevation">Legacy Terrain</span>
+            <span class="tooltip-icon" data-tooltip="Use the legacy AWS Terrain Tiles source (~30m) instead of the high-resolution Mapterhorn terrain. Escape hatch if the primary elevation sources are unreachable; lower terrain detail.">?</span>
+          </label>
+          <div class="settings-control">
+            <input type="checkbox" id="aws-only-elevation-toggle" name="aws-only-elevation-toggle">
+          </div>
+        </div>
+
+        <!-- Bake Lighting Toggle -->
+        <div class="settings-row">
+          <label for="bake-lighting-toggle">
+            <span data-localize="bake_lighting">Bake lighting</span>
+            <span class="tooltip-icon" data-tooltip="Precompute lighting so distant chunks render lit in LOD mods (Voxy/Chunky) without visiting them. Not needed for vanilla; slower generation.">?</span>
+          </label>
+          <div class="settings-control">
+            <input type="checkbox" id="bake-lighting-toggle" name="bake-lighting-toggle">
+          </div>
+        </div>
+
+        <!-- World Scale Slider -->
+        <div class="settings-row">
+          <label for="scale-value-slider">
+            <span data-localize="world_scale">World Scale</span>
+            <span class="tooltip-icon" data-tooltip="Scale factor for the generated world (1.0 = real-world scale)">?</span>
+          </label>
+          <div class="settings-control">
+            <input type="range" id="scale-value-slider" name="scale-value-slider" min="0.30" max="2.5" step="0.1" value="1">
+            <span id="slider-value">1.00</span>
+          </div>
+        </div>
+
+        <!-- Rotation Angle -->
+        <div class="settings-row">
+          <label for="rotation-angle-input">
+            <span data-localize="rotation_angle">Rotation Angle</span>
+            <span class="tooltip-icon" data-tooltip="Rotate the map to align roads/buildings with Minecraft's coordinate system. Use the line tool to draw a reference line.">?</span>
+          </label>
+          <div class="settings-control rotation-control">
+            <input type="number" id="rotation-angle-input" min="-90" max="90" step="0.01" value="0">
+            <span class="rotation-unit">&deg;</span>
+          </div>
+        </div>
+
+        <!-- Enable Luanti (experimental) -->
+        <div class="settings-row">
+          <label for="enable-luanti-toggle">
+            <span>Luanti (experimental)</span>
+            <span class="tooltip-icon" data-tooltip="Show Luanti (Mineclonia) as an output format. Experimental: block mappings and lighting may be imperfect.">?</span>
+          </label>
+          <div class="settings-control">
+            <input type="checkbox" id="enable-luanti-toggle" name="enable-luanti-toggle">
+          </div>
+        </div>
+
+        <!-- Section: Map & Input -->
+        <div class="settings-section-header" data-localize="settings_section_map">Map & Input</div>
+
+        <!-- Bounding Box Input -->
+        <div class="settings-row">
+          <label for="bbox-coords">
+            <span data-localize="custom_bounding_box">Bounding Box</span>
+            <span class="tooltip-icon" data-tooltip="Manually enter coordinates (lat,lng,lat,lng) or use map selection">?</span>
+          </label>
+          <div class="settings-control">
+            <input type="text" id="bbox-coords" name="bbox-coords" maxlength="55" placeholder="Format: lat,lng,lat,lng">
+          </div>
+        </div>
+
+        <!-- Map Theme Selector -->
+        <div class="settings-row">
+          <label for="tile-theme-select">
+            <span data-localize="map_theme">Map Theme</span>
+            <span class="tooltip-icon" data-tooltip="Visual style of the map picker">?</span>
+          </label>
+          <div class="settings-control">
+            <select id="tile-theme-select" name="tile-theme-select" class="theme-dropdown">
+              <option value="osm">Standard</option>
+              <option value="esri-imagery">Satellite</option>
+              <option value="opentopomap">Topographic</option>
+              <option value="stadia-bright">Smooth Bright</option>
+              <option value="stadia-dark">Smooth Dark</option>
+              <option value="openfreemap-liberty">Modern</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Section: Application -->
+        <div class="settings-section-header" data-localize="settings_section_application">Application</div>
+
+        <!-- Save Path -->
+        <div class="settings-row">
+          <label for="save-path-input">
+            <span data-localize="save_path">Save Path</span>
+            <span class="tooltip-icon" data-tooltip="Directory where new Minecraft Java worlds are created">?</span>
+          </label>
+          <div class="settings-control save-path-control">
+            <input type="text" id="save-path-input" name="save-path-input" class="save-path-input" placeholder="Minecraft saves directory">
+            <button type="button" id="save-path-browse" class="save-path-browse" title="Browse...">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Language Selector -->
+        <div class="settings-row">
+          <label for="language-select">
+            <span data-localize="language">Language</span>
+            <span class="tooltip-icon" data-tooltip="Interface language">?</span>
+          </label>
+          <div class="settings-control">
+            <select id="language-select" name="language-select" class="language-dropdown">
+              <option value="en">English</option>
+              <option value="de">Deutsch</option>
+              <option value="es">Español</option>
+              <option value="fr-FR">Français</option>
+              <option value="ru">Русский</option>
+              <option value="zh-CN">中文 (简体)</option>
+              <option value="ko">한국어</option>
+              <option value="pt-BR">Português (Brasil)</option>
+              <option value="pl">Polski</option>
+              <option value="sl">Slovenščina</option>
+              <option value="lv">Latviešu</option>
+              <option value="sv">Svenska</option>
+              <option value="ar">العربية</option>
+              <option value="fi">Suomi</option>
+              <option value="hu">Magyar</option>
+              <option value="lt">Lietuvių</option>
+              <option value="ua">Українська</option>
+              <option value="ja">日本語</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Telemetry Consent Toggle -->
+        <div class="settings-row">
+          <label for="telemetry-toggle" style="white-space: nowrap;">
+            <span data-localize="anonymous_crash_reports">Anonymous Crash Reports</span>
+            <span class="tooltip-icon" data-tooltip="Send anonymous crash data to help improve Arnis">?</span>
+          </label>
+          <div class="settings-control">
+            <input type="checkbox" id="telemetry-toggle" name="telemetry-toggle">
+          </div>
+        </div>
+
+        <!-- Tile Cache Cleaner -->
+        <div class="settings-row">
+          <label for="clear-cache-button">
+            <span data-localize="clear_tile_cache">Clear Tile Cache</span>
+            <span class="tooltip-icon" data-tooltip="Delete every cached elevation and land-cover tile. Frees disk space; next generation re-downloads from source.">?</span>
+          </label>
+          <div class="settings-control">
+            <button type="button" id="clear-cache-button" class="clear-cache-button" data-localize="clear_tile_cache_button">Clear</button>
+          </div>
+        </div>
+
+        </div>
+        <!-- end settings-scrollable -->
+
+        <div class="settings-footer">
+          <!-- License and Credits + Version Info buttons -->
+          <div class="settings-row license-button-row">
+            <button type="button" id="license-button" class="license-button" onclick="openLicense()" data-localize="license_and_credits">License and Credits</button>
+            <button type="button" id="version-info-button" class="license-button" onclick="openVersionInfoModal()" data-localize="version_info">Version Info</button>
+          </div>
+
+          <!-- GitHub, Buy Me a Coffee and Discord -->
+          <div class="settings-row buymeacoffee-row">
+            <a href="https://github.com/louis-e/arnis" target="_blank" rel="noopener noreferrer" class="github-link">
+              <img src="./images/github.png" alt="GitHub" class="github-logo">
+            </a>
+            <a href="https://buymeacoffee.com/louisdev" target="_blank" rel="noopener noreferrer" class="buymeacoffee-link">
+              <img src="./images/buymeacoffee.png" alt="Buy Me a Coffee" class="buymeacoffee-logo">
+            </a>
+            <a href="https://discord.gg/mA2g69Fhxq" target="_blank" rel="noopener noreferrer" class="discord-link">
+              <img src="./images/discord.png" alt="Discord" class="discord-logo">
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3D Terrain Preview Modal -->
+    <div id="preview3d-modal" class="modal" style="display: none;">
+      <div class="preview3d-content">
+        <div class="preview3d-header">
+          <h2>3D Terrain Preview</h2>
+          <div class="preview3d-controls">
+            <label class="preview3d-ctl">
+              Exaggeration
+              <input type="range" id="preview3d-exaggeration" min="0.2" max="3" step="0.1" value="1.2">
+              <span id="preview3d-exaggeration-value">1.2×</span>
+            </label>
+            <label class="preview3d-ctl">
+              <input type="checkbox" id="preview3d-landcover" checked>
+              Land cover
+            </label>
+            <label class="preview3d-ctl">
+              <input type="checkbox" id="preview3d-buildings" checked>
+              Buildings
+            </label>
+          </div>
+          <span class="close-button" onclick="closePreview3D()">&times;</span>
+        </div>
+        <div id="preview3d-map">
+          <div id="preview3d-status" class="preview3d-status" style="display: none;"></div>
+        </div>
+        <div class="preview3d-footer">
+          <span id="preview3d-meta"></span>
+          <span>Drag to pan · right-drag to rotate/tilt · Land cover © ESA WorldCover 2021</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Telemetry Consent Modal (first run) -->
+    <div id="telemetry-modal" class="modal" style="display: none;">
+      <div class="modal-content">
+        <div class="settings-header">
+          <h2>Help improve Arnis</h2>
+          <span class="close-button" onclick="rejectTelemetry()">&times;</span>
+        </div>
+        <p style="text-align:left; margin-top:12px; margin-bottom: -5px;color:#ececec;">
+          We’d like to collect anonymous usage data like crashes and performance to make Arnis more stable and faster.
+          <a href="https://arnismc.com/privacypolicy.html" style="color: inherit;" target="_blank" rel="noopener noreferrer">No personal data or world contents are collected.</a>
+        </p>
+        <div class="modal-actions" style="margin-top:14px;">
+          <button type="button" class="btn-secondary" onclick="rejectTelemetry()">No thanks</button>
+          <button type="button" class="btn-primary" onclick="acceptTelemetry()">Allow anonymous data</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- License Modal -->
+    <div id="license-modal" class="modal" style="display: none;">
+      <div class="modal-content">
+        <div class="settings-header">
+          <h2 data-localize="license_and_credits">License and Credits</h2>
+          <span class="close-button" onclick="closeLicense()">&times;</span>
+        </div>
+        <div id="license-content" class="license-scrollable" style="font-size: 0.85em; line-height: 1.3; padding: 10px; border: 1px solid #ccc; border-radius: 4px;">
+          Loading...
+        </div>
+      </div>
+    </div>
+
+    <!-- Update / Release Notes Modal -->
+    <div id="update-modal" class="modal" style="display: none;">
+      <div class="modal-content update-modal-content">
+        <div class="settings-header">
+          <h2 id="update-modal-title" data-localize="update_modal_title">What's new in Arnis</h2>
+          <span class="close-button" onclick="closeUpdateModal()">&times;</span>
+        </div>
+        <div id="update-modal-body" class="update-modal-body license-scrollable">
+          <span data-localize="loading">Loading...</span>
+        </div>
+        <div id="update-modal-download-note" class="update-modal-download-note" data-localize="update_modal_download_note">
+          Download opens in your browser. Close Arnis before running the new version.
+        </div>
+        <div class="modal-actions update-modal-actions">
+          <button type="button" id="update-download-button" class="btn-primary" onclick="downloadLatestRelease()" data-localize="update_download">Download</button>
+          <button type="button" class="btn-secondary" onclick="openUpdateInBrowser()" data-localize="update_view_on_github">View on GitHub</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <a href="https://github.com/louis-e/arnis" target="_blank" rel="noopener noreferrer" class="footer-link" data-localize="footer_text">
+        © {year} Arnis v{version} by louis-e
+      </a>
+    </footer>
+  </main>
+</body>
+
+</html>

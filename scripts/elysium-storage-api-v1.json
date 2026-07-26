@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "module": "ElysiumStorage",
-  "symbolGraphSHA256": "d3be5dc974c7a38ccdce026138470ffc906aed3b4973b885ef0c37b20c22c763",
+  "symbolGraphSHA256": "883f0daab2db898e64a8be39161316ac05751660f4f96afd5fa038ba23c8adc3",
   "owner": "Sources/ElysiumStorage/StorageEngine.swift",
   "checkedPlayerCASPublicDeclarations": [
     "ElysiumPlayerJSONRowDigest",
@@ -20,6 +20,9 @@
     "ElysiumLegacyCoreStorage.checkedWorldSnapshot()",
     "ElysiumLegacyCoreStorage.deleteWorldsChecked(_:)",
     "ElysiumLegacyCoreStorage.recoverWorldsChecked(_:)"
+  ],
+  "realityDerivedStreamingPublicDeclarations": [
+    "ElysiumLegacyCoreStorage.importRealityDerivedWorldStreaming(world:expectedChunkCount:nextChunk:)"
   ],
   "frozenExistentialCarriers": [
     "ElysiumStorageTransactionFailure.primary",

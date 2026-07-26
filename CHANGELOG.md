@@ -5,6 +5,39 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Nether maps now draw the traversable cavern around the player's current height instead of the
+  sealed bedrock ceiling, with distinct colors for major Nether materials. A default-on **Show
+  Minimap** Video preference can hide the compact gameplay map while leaving the `M` expanded map
+  available.
+
+- Fixed missing geometry for Soul Sand and every other visible cube whose gameplay `fullCube`
+  property is false, eliminating transparent holes through Nether terrain. Rebuilt the first-person
+  hand composition with an edge-connected sleeve and forearm, a visible grip over the held item's
+  handle, a substantially larger tool/weapon sprite, and bounded attack/use motion beside the minimap.
+
+- Added **Nether World** creation with Nether-first spawn and fallback respawn, the full existing world
+  option set, a one-time iron-tool and oak-log starter kit, direct selected-size Nether bounds with
+  portal-compatible Overworld reach, and deterministic active gateways throughout the Nether.
+
+- New World now includes **Reality Derived**. It opens the bundled, pinned Arnis map interface for
+  place search and bounded rectangle selection, offers an **Include buildings** checkbox, and generates real terrain in a signed
+  Rust helper, validates the complete versioned exchange, and atomically saves the imported chunks as
+  a normal Elysium world. A bounded 64-block seeded-terrain transition replaces abrupt walls at the
+  selected boundary. Cancellation and failures leave no partially listed world; generated files,
+  block palettes, properties, coordinates, counts, and sizes are all bounded before persistence.
+  The Arnis adapter now emits one canonical chunk stream and Elysium translates it directly into
+  compact section-compressed chunks inside an atomic streaming SQLite import, removing the former
+  per-file and whole-world memory ceilings. All world types now share Small, Medium, Large,
+  Extra-Large, and Max playable extents; Max is 15,811 blocks per side and Reality Derived supports
+  the local Arnis limit of 250 km² subject to scale/projected-column capacity. Terrain remains lazy,
+  legacy worlds retain the largest extent, and map edges use an invisible travel boundary rather
+  than generated walls.
+- The first-person arm now remains visible with an empty hand and uses clearer,
+  distinct attack and use motion. Player inventory and chest screens add a
+  **Sort A-Z** action with `Command-S`: complete stacks sort deterministically
+  by name and type without merging or disturbing equipment, crafting, cursor,
+  or the player rows beneath a chest. Large chests sort across both halves;
+  LAN-client chest sorting stays disabled until remote item metadata is complete.
 - Paired chests now meet at one continuous visual seam and retain the complete
   left/right Faithful texture crops instead of losing the seam column.
 - Beds can now be positioned explicitly: while holding a bed, left-click its

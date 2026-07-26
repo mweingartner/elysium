@@ -8,9 +8,12 @@ fail() { echo "binary security check failed: $*" >&2; exit 1; }
 if [ -d "$TARGET" ]; then
     APP="$TARGET"
     BIN="$APP/Contents/MacOS/Elysium"
+    HELPER="$APP/Contents/Resources/Helpers/arnis-elysium"
     PLIST="$APP/Contents/Info.plist"
     [ -x "$BIN" ] || fail "missing executable at $BIN"
+    [ -x "$HELPER" ] && [ ! -L "$HELPER" ] || fail "missing regular Arnis helper"
     /usr/bin/codesign --verify --deep --strict "$APP" || fail "codesign verification failed"
+    /usr/bin/codesign --verify --strict "$HELPER" || fail "Arnis helper signature verification failed"
     /usr/bin/plutil -lint "$PLIST" >/dev/null || fail "Info.plist is invalid"
     BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")
     [ "$BID" = "com.briangao.elysium" ] || fail "unexpected bundle id: $BID"
@@ -32,6 +35,11 @@ fi
 echo "==> binary: linked libraries"
 if /usr/bin/otool -L "$BIN" | tail -n +2 | awk '{print $1}' | grep -Ev '^(/System/Library/|/usr/lib/|@rpath/libswift|@executable_path/|$)'; then
     fail "non-system linked library found"
+fi
+if [ -n "${HELPER:-}" ] && \
+   /usr/bin/otool -L "$HELPER" | tail -n +2 | awk '{print $1}' \
+       | grep -Ev '^(/System/Library/|/usr/lib/|@rpath/libswift|@executable_path/|$)'; then
+    fail "non-system Arnis helper library found"
 fi
 
 echo "==> binary: network symbol scan"

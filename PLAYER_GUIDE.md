@@ -38,14 +38,30 @@ requirements and installation, start with the [Elysium project overview](README.
    - **Amplified** exaggerates terrain height.
    - **Rich Resources** increases the world's resource emphasis.
    - **Single Biome** adds a separate **Biome** choice.
+   - **Reality Derived** opens an interactive Arnis map. Search for a location, draw or resize a
+     rectangle, leave **Include buildings** checked to import OpenStreetMap and supplemental Overture
+     buildings or clear it to omit buildings, then choose **Generate Map**. Real terrain and other mapped
+     features such as roads and waterways remain in both cases. Keep the selection
+     within the size message shown by the dialog; higher Scale values require a smaller rectangle.
 
    **Debug Mode** is an advanced diagnostic preset, not part of the normal cycle. Hold Option while
    activating **World Type** only if you deliberately want to expose that extra choice.
-7. Set **Dungeons** to **None**, **Normal**, **More**, **Plentiful**, or **Many**. **None** disables new
+   Reality Derived generation downloads OpenStreetMap, elevation, and land-cover data and can take
+   several minutes. The dialog remains cancellable. Elysium imports the completed selected area as
+   ordinary authoritative chunks. A smooth 64-block transition outside the selected boundary joins the
+   imported elevation to terrain from the Seed; exploration beyond it uses the standard generator.
+   A failed or cancelled generation does not add a partial world to Saved Worlds.
+7. Choose **Size**: **Small** is 1,000 blocks wide, **Medium** 4,000, **Large** 8,000,
+   **Extra-Large** 12,000, and **Max** 15,811. Terrain is generated as you explore, so a larger
+   choice does not allocate the whole map at creation. The edge is an invisible travel boundary with
+   ordinary terrain continuing into the horizon, not a wall. Reality Derived applies the tier to the
+   selectable real-world area; at 1×, Max reaches just under 250 km², while higher scales require a
+   proportionally smaller selection.
+8. For procedural world types, set **Dungeons** to **None**, **Normal**, **More**, **Plentiful**, or **Many**. **None** disables new
    dungeon placement; each later setting increases the number of placement attempts during generation.
-8. Leave **Character Classes: On** if you want the optional RPG character system in this world. Turn it
+9. Leave **Classes: On** if you want the optional RPG character system in this world. Turn it
    off for the base survival experience without character creation or character abilities.
-9. Choose **Create World**. **Generating world...**, **Loading world…**, and **Building terrain** mean
+10. Choose **Create World**. **Generating world...**, **Loading world…**, and **Building terrain** mean
    Elysium is working. Wait for the world to open; do not repeatedly submit creation.
 
 ### A practical first day
@@ -169,7 +185,9 @@ live map or renaming a saved world.
 The HUD keeps the crosshair, hotbar, health, hunger, armor, experience, status information, and compact
 live map visible during play. It also shows air while submerged, RPG quick slots when available, and
 the health of a living mount while you ride it. Your inventory exposes the equipped armor and offhand
-slots. In first person, the selected main-hand item appears with your lower-right arm. The earned part
+slots. In first person, your lower-right arm remains connected to the bottom edge with an empty hand;
+a selected main-hand item is shown at a readable size with its handle under the hand's grip, and distinct
+attack/use poses make swings and tool actions easier to recognize. The earned part
 of the experience bar reveals a fixed red-to-violet rainbow as it fills; its length and centered level
 number remain the non-color progress cues. Use `F1` when you want an unobstructed view and `F3` when you
 need the debug overlay.
@@ -187,6 +205,13 @@ Break blocks and collect dropped items, then open the inventory to equip gear, a
 craft. The inventory provides a 2×2 crafting grid. Place and use a crafting table for the full 3×3 grid.
 Furnaces, brewing stands, enchanting tables, anvils, and other workstations extend the items and upgrades
 you can make. Containers hold resources outside your carried inventory.
+
+Choose **Sort A-Z** or press `Command-S` in an open player inventory or chest to order its storage slots
+by item name and type. Sorting moves complete stacks without merging or changing them. Player sorting
+includes the 27 carried slots and nine hotbar slots, but leaves armor, offhand, crafting, result, and cursor
+slots untouched. Chest sorting covers the complete chest, including both halves of a large chest, but
+does not rearrange the player rows shown below it. Chest sorting is unavailable while playing as a LAN
+client because the current host snapshot does not include enough item metadata for identical ordering.
 
 In Survival, the recipe popup lists recipes you can currently craft from available ingredients. Both
 grids — the inventory's 2×2 and a crafting table's 3×3 — pool ingredients from your carried inventory
@@ -234,6 +259,13 @@ Elysium has three dimensions:
 - The Nether is reached through a lit Nether portal and supplies materials used in later progression.
 - The End is reached through an activated stronghold portal and contains the Ender Dragon and outer-End
   exploration.
+
+You can instead choose **World Type: Nether World** when creating a world. All the usual size, game-mode,
+difficulty, dungeon-density, and Character Classes choices remain available, but your first entry and
+fallback respawn are in the Nether. You begin beside a lit portal with two iron pickaxes, an iron sword,
+an iron shovel, and 64 oak logs. Additional lit gateway chambers occur throughout the Nether, so an
+Overworld route is never dependent on finding and completing a rare ruined frame. The chosen map size is
+the Nether's playable width; its paired Overworld is eight times wider to preserve normal portal scaling.
 
 Weather changes as the world runs. Rain and thunder affect visibility and direct-daylight conditions;
 rain can also interrupt applicable burning. Elysium includes boats, minecarts, chest-carrying variants,
@@ -455,7 +487,10 @@ or Delete/Backspace while the template list is focused opens a confirmation nami
 **Options...** contains five tabs:
 
 - **Video** controls render distance, field of view, brightness, GUI scale, graphics effects, fullscreen,
-  particles, frame-rate limit, and optional Ultra shaders.
+  particles, frame-rate limit, optional Ultra shaders, and the default-on **Show Minimap** setting.
+  Turning the compact minimap off clears it from the gameplay HUD but does not disable the expanded
+  map opened with `M`. In the Nether, both map views follow the open cavern around your current
+  height instead of drawing the sealed ceiling.
 - **Audio** controls the master level and categories such as music, blocks, creatures, players, ambient,
   jukebox, and UI.
 - **Controls** manages sensitivity, inverted Y, and configurable gameplay bindings.

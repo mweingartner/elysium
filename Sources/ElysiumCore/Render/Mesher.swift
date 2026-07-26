@@ -329,7 +329,10 @@ final class SectionMesher {
                         let cell = cellAt(x, y, z)
                         if cell == 0 { continue }
                         let id = cell >> 4
-                        if FULL_CUBE[id] == 0 || SHAPE_OF[id] != Shape.cube.rawValue { continue }
+                        // `Shape.cube` is the geometry contract. `fullCube` is a gameplay/
+                        // occlusion property and is deliberately false for visible cubes such as
+                        // soul sand and honey. Requiring both silently dropped their complete mesh.
+                        if SHAPE_OF[id] != Shape.cube.rawValue { continue }
                         // neighbor cull
                         let ncell = cellAt(x + nx, y + ny, z + nz)
                         let nid = ncell >> 4

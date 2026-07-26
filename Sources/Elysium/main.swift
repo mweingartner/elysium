@@ -497,6 +497,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     let hud = HUD()
     let audio = AudioEngineM()
     private var rpgControllerAdapter: RPGControllerAdapter!
+    lazy var realityDerivedCoordinator = RealityDerivedCoordinator(owner: self)
     private var lastFrame = CACurrentMediaTime()
     private var startTime = CACurrentMediaTime()
     private var fpsCounter = 0

@@ -441,7 +441,9 @@ func verifySymbolGraph(root: URL) throws -> Set<String> {
           let manifestPlayerCASDeclarations =
             manifest["checkedPlayerCASPublicDeclarations"] as? [String],
           let manifestWorldDeleteDeclarations =
-            manifest["checkedWorldBatchDeletePublicDeclarations"] as? [String] else {
+            manifest["checkedWorldBatchDeletePublicDeclarations"] as? [String],
+          let manifestRealityStreamingDeclarations =
+            manifest["realityDerivedStreamingPublicDeclarations"] as? [String] else {
         throw ScanFailure(description: "invalid ElysiumStorage API manifest")
     }
     let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -510,6 +512,23 @@ func verifySymbolGraph(root: URL) throws -> Set<String> {
     ]
     guard manifestWorldDeleteDeclarations == requiredWorldDeleteDeclarations else {
         throw ScanFailure(description: "checked world batch-delete API manifest declaration drift")
+    }
+    let requiredRealityStreamingDeclarations = [
+        "ElysiumLegacyCoreStorage.importRealityDerivedWorldStreaming(world:expectedChunkCount:nextChunk:)",
+    ]
+    guard manifestRealityStreamingDeclarations == requiredRealityStreamingDeclarations else {
+        throw ScanFailure(description: "Reality Derived streaming API manifest declaration drift")
+    }
+    let realityStreamingSurface = symbols.filter { symbol in
+        guard let path = symbol["pathComponents"] as? [String] else { return false }
+        return path == ["ElysiumLegacyCoreStorage",
+                        "importRealityDerivedWorldStreaming(world:expectedChunkCount:nextChunk:)"]
+    }
+    guard realityStreamingSurface.count == 1,
+          realityStreamingSurface[0]["accessLevel"] as? String == "public",
+          (realityStreamingSurface[0]["kind"] as? [String: Any])?["identifier"] as? String
+            == "swift.method" else {
+        throw ScanFailure(description: "Reality Derived streaming public surface drift")
     }
     let requiredWorldDeleteKinds: [String: String] = [
         "ElysiumCheckedWorldStorageRow": "swift.struct",

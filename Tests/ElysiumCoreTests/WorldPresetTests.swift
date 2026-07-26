@@ -19,6 +19,8 @@ final class WorldPresetTests: XCTestCase {
         XCTAssertEqual(normalizedWorldPreset("Moderate Hills - Resource Rich"), .moderateHillsResourceRich)
         XCTAssertEqual(normalizedWorldPreset("Noderate Hills - Resource Rich"), .moderateHillsResourceRich)
         XCTAssertEqual(normalizedWorldPreset("single biome"), .singleBiomeSurface)
+        XCTAssertEqual(normalizedWorldPreset("nether"), .netherWorld)
+        XCTAssertEqual(normalizedWorldPreset("Nether World"), .netherWorld)
         XCTAssertEqual(normalizedWorldPreset("debug"), .debugAllBlockStates)
         XCTAssertEqual(normalizedWorldPreset("not-real"), .normal)
     }
@@ -39,6 +41,44 @@ final class WorldPresetTests: XCTestCase {
         for preset in WorldPreset.allCases {
             XCTAssertFalse(preset.displayName.isEmpty, "\(preset) has no display name")
         }
+    }
+
+    func testNetherWorldIsAVisibleStandardPresetWithNetherStartSemantics() {
+        XCTAssertTrue(WorldPreset.normalCycle.contains(.netherWorld))
+        XCTAssertEqual(WorldPreset.netherWorld.displayName, "Nether World")
+        XCTAssertEqual(WorldPreset.netherWorld.rawValue, "elysium:nether_world")
+        XCTAssertEqual(WorldPreset.netherWorld.startingDimension, .nether)
+        XCTAssertEqual(WorldPreset.normal.startingDimension, .overworld)
+    }
+
+    func testNetherWorldGatewayPlacementIsDeterministicAndOnePerRegion() {
+        let seed: UInt32 = 0x1020_3040
+        XCTAssertTrue(isNetherWorldGatewayChunk(seed: seed, cx: 0, cz: 0),
+                      "the origin portal is the guaranteed new-world escape route")
+        for rz in -2...2 {
+            for rx in -2...2 {
+                var matches = 0
+                for cz in (rz * 8)..<(rz * 8 + 8) {
+                    for cx in (rx * 8)..<(rx * 8 + 8) {
+                        if isNetherWorldGatewayChunk(seed: seed, cx: cx, cz: cz) { matches += 1 }
+                    }
+                }
+                XCTAssertEqual(matches, 1, "region \(rx),\(rz) must contain exactly one gateway")
+            }
+        }
+    }
+
+    func testNetherWorldOriginChunkContainsACompleteActivePortalOnlyForThatPreset() {
+        let seed: UInt32 = 424_242
+        let settings = WorldGenerationSettings(preset: .netherWorld, dungeonDensity: .many)
+        let generated = generateChunk(.nether, seed, 0, 0, settings: settings)
+        let portalID = B.nether_portal
+        XCTAssertEqual(generated.blocks.count { $0 >> 4 == portalID }, 6,
+                       "the two-wide, three-high portal interior must be fully active")
+
+        let ordinary = generateChunk(.nether, seed, 0, 0)
+        XCTAssertEqual(ordinary.blocks.count { $0 >> 4 == portalID }, 0,
+                       "ordinary worlds retain the established Nether generator")
     }
 
     func testDungeonDensityAliasesNormalizeToKnownLevels() {
@@ -353,6 +393,66 @@ final class WorldPresetTests: XCTestCase {
             Int(B.diamond_ore): "diamond", Int(B.deepslate_diamond_ore): "diamond",
             Int(B.emerald_ore): "emerald", Int(B.deepslate_emerald_ore): "emerald",
         ]
+    }
+}
+
+@MainActor
+final class NetherWorldCreationTests: XCTestCase {
+    override class func setUp() {
+        super.setUp()
+        registerAllBlocks()
+        registerAllItems()
+        registerAllBiomes()
+        registerAllEntities()
+    }
+
+    func testNetherWorldCreationPreservesOptionsAndGrantsStarterKitOnce() throws {
+        let database = try PersistenceTestSupport.makeDatabase(owner: self, label: "nether-world")
+        let game = GameCore(db: database)
+        game.createWorld(name: "Nether Start", seedText: "424242",
+                         mode: GameMode.creative, difficulty: 3,
+                         worldPreset: .netherWorld, singleBiome: .desert,
+                         dungeonDensity: .many, mapSize: .small,
+                         rpgClassesEnabled: false)
+
+        XCTAssertEqual(game.dim, .nether)
+        XCTAssertEqual(game.worldRec?.worldPreset, WorldPreset.netherWorld.rawValue)
+        XCTAssertEqual(game.worldRec?.gameMode, GameMode.creative)
+        XCTAssertEqual(game.worldRec?.difficulty, 3)
+        XCTAssertEqual(game.worldRec?.dungeonDensity, DungeonDensity.many.rawValue)
+        XCTAssertEqual(game.worldRec?.mapSize, .small)
+        XCTAssertEqual(game.worldRec?.gameRules[RPG_CLASSES_GAME_RULE], 0)
+
+        let inventory = game.player.inventory.compactMap { $0 }
+        XCTAssertEqual(inventory.count, 5)
+        XCTAssertEqual(inventory.filter { itemName($0.id) == "iron_pickaxe" }.map(\.count), [1, 1])
+        XCTAssertEqual(inventory.first { itemName($0.id) == "iron_sword" }?.count, 1)
+        XCTAssertEqual(inventory.first { itemName($0.id) == "iron_shovel" }?.count, 1)
+        XCTAssertEqual(inventory.first { itemName($0.id) == "oak_log" }?.count, 64)
+
+        let nether = try XCTUnwrap(game.worlds[.nether])
+        let overworld = try XCTUnwrap(game.worlds[.overworld])
+        XCTAssertEqual(try XCTUnwrap(nether.playableMaxX) - XCTUnwrap(nether.playableMinX) + 1,
+                       WorldMapSize.small.sideBlocks)
+        XCTAssertEqual(try XCTUnwrap(overworld.playableMaxX) - XCTUnwrap(overworld.playableMinX) + 1,
+                       WorldMapSize.small.sideBlocks * 8)
+        XCTAssertNotNil(nether.findPortalNear(ifloor(game.player.x), ifloor(game.player.y),
+                                              ifloor(game.player.z), 1, Int(B.nether_portal)))
+        XCTAssertTrue(blockDefs[nether.getBlockId(ifloor(game.player.x), ifloor(game.player.y) - 1,
+                                                  ifloor(game.player.z))].solid)
+
+        let worldID = try XCTUnwrap(game.worldRec?.id)
+        game.saveAndFlush(synchronous: true)
+        let relaunched = GameCore(db: database)
+        relaunched.loadWorld(worldID)
+        XCTAssertEqual(relaunched.dim, .nether)
+        XCTAssertEqual(relaunched.player.inventory.compactMap { $0 }.count, 5,
+                       "loading persisted player data must not grant a second starter kit")
+
+        relaunched.player.dead = true
+        relaunched.respawnPlayer()
+        XCTAssertEqual(relaunched.dim, .nether,
+                       "without a bed or anchor, Nether-first worlds respawn in the Nether")
     }
 }
 

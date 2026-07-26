@@ -1,0 +1,3 @@
+# Preserve the pinned third-party Arnis source byte-for-byte. Its upstream tree contains
+# intentional trailing whitespace that is outside Elysium's first-party whitespace policy.
+Vendor/Arnis/** -whitespace
