@@ -37,6 +37,11 @@ There is no `.xcodeproj` and there never will be — the whole workflow is Swift
 5. For saved-world browser or batch-deletion changes, run
    `swift test --filter SavedWorldBatchDeleteTests` before the full suite. Preserve checked collection
    authority, the atomic six-scope transaction, read-only recovery, and installed Accessibility proof.
+6. For Reality Derived changes, run the Swift import/UI suites plus the pinned headless Arnis slice.
+   Packaging performs the same locked helper build automatically:
+   `swift test --filter RealityDerived`,
+   `cargo test --locked --no-default-features --manifest-path Vendor/Arnis/Cargo.toml`, and
+   `scripts/build-arnis-helper.sh /tmp/arnis-elysium`.
 
 The zero-argument release command is `bash scripts/pipeline.sh`. It runs exactly nine automated
 stages in order and fails closed: (1) source security scan, (2) warning-free release build,
@@ -61,10 +66,10 @@ Keep the evidence categories distinct:
 The pre-commit hook must remain fast and staged-only. The pre-push hook runs the heavier source scan,
 release build, binary checks, AppKit integration, XCTest, and `elysmoke`; it does not package or
 install. Run the zero-argument pipeline for the complete real-target release gate.
-6. For RPG/LAN-v6 storage changes, run `swift test --filter 'RPGLocalPreferenceStorageTests|RPGLocalPreferencesTests|LANV6ClientAuthorityCheckpointStorageTests|LANV6HostOwnerCheckpointStorageTests'` before the full suite. These named suites are the minimum persistence-contract gate, not a replacement for `swift test`.
-7. For RPG UI/harness changes, run `swift test --filter 'RPGUIHarnessTests|RPGUIHarnessSourceTests|RPGScreenModelTests|RPGSemanticAccessibilityTests'`, then exercise the built executable with a semantic-summary case, a mixed-environment rejection, and an exclusive screenshot case. The harness must leave a fresh support home unchanged when `ELYSIUM_SHOT` is absent.
-8. If goldens changed, your PR description must justify **every** changed value (see below).
-9. Keep diffs surgical. Match the style of the file you're in — this codebase has a consistent voice (compact, comment-where-it-matters), and drive-by reformatting makes review impossible.
+7. For RPG/LAN-v6 storage changes, run `swift test --filter 'RPGLocalPreferenceStorageTests|RPGLocalPreferencesTests|LANV6ClientAuthorityCheckpointStorageTests|LANV6HostOwnerCheckpointStorageTests'` before the full suite. These named suites are the minimum persistence-contract gate, not a replacement for `swift test`.
+8. For RPG UI/harness changes, run `swift test --filter 'RPGUIHarnessTests|RPGUIHarnessSourceTests|RPGScreenModelTests|RPGSemanticAccessibilityTests'`, then exercise the built executable with a semantic-summary case, a mixed-environment rejection, and an exclusive screenshot case. The harness must leave a fresh support home unchanged when `ELYSIUM_SHOT` is absent.
+9. If goldens changed, your PR description must justify **every** changed value (see below).
+10. Keep diffs surgical. Match the style of the file you're in — this codebase has a consistent voice (compact, comment-where-it-matters), and drive-by reformatting makes review impossible.
 
 For authoritative local release verification, run `bash scripts/pipeline.sh` and require all nine
 stages to pass. Report that result separately from commit, push, CI, publication, and subjective
@@ -112,7 +117,7 @@ These are not style preferences. Violating them corrupts worlds or breaks determ
 
 ## Scope & conduct
 
-Elysium's approved in-app network surfaces are the loopback-only Ollama agent and the local-network LAN transport tracked in [LAN_MULTIPLAYER_PLAN.md](LAN_MULTIPLAYER_PLAN.md). LAN work must preserve the split where `ElysiumCore/Net` owns bounded protocol models/validation and `Sources/Elysium/LANTransport.swift` owns Network.framework. New networking beyond that, including NAT traversal, relay servers, account systems, raw sockets, or cloud services, needs an issue and security plan first. Performance work is welcome but must keep goldens green and come with before/after numbers. Be a normal, decent person in issues and reviews; that's the whole code of conduct.
+Elysium's approved in-app network surfaces are the loopback-only Ollama agent, the local-network LAN transport tracked in [LAN_MULTIPLAYER_PLAN.md](LAN_MULTIPLAYER_PLAN.md), and player-initiated Reality Derived map generation through the pinned Arnis UI/helper. LAN work must preserve the split where `ElysiumCore/Net` owns bounded protocol models/validation and `Sources/Elysium/LANTransport.swift` owns Network.framework. New networking beyond those surfaces, including NAT traversal, relay servers, account systems, raw sockets, or cloud services, needs an issue and security plan first. Performance work is welcome but must keep goldens green and come with before/after numbers. Be a normal, decent person in issues and reviews; that's the whole code of conduct.
 
 By contributing you agree your contributions are licensed under the repository's MIT license.
 

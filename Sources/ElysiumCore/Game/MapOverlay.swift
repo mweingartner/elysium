@@ -8,6 +8,58 @@ public let MAP_MARGIN = 6.0
 public let MAP_MINIMAP_MAX_GUI_SIZE = 128.0
 public let MAP_MINIMAP_MIN_GUI_SIZE = 32.0
 public let MAP_EXPANDED_MIN_GUI_SIZE = 64.0
+/// No-sky maps show the traversable cavern around the player, not the sealed ceiling.
+/// The downward bound keeps expanded-map work finite even over deep voids.
+public let MAP_UNDERGROUND_SCAN_DEPTH = 32
+
+public struct MapColumnSample: Equatable {
+    public let cell: Int
+    public let y: Int
+
+    public init(cell: Int, y: Int) {
+        self.cell = cell
+        self.y = y
+    }
+}
+
+public func shouldDrawMinimap(showPreference: Bool,
+                              isExpandedMapScreen: Bool) -> Bool {
+    showPreference && !isExpandedMapScreen
+}
+
+/// Returns the block represented by one map column. Sky dimensions preserve the
+/// conventional surface heightmap. In sealed/no-sky dimensions, the heightmap is
+/// the ceiling, so sample the player's current cavern from one block above their
+/// feet down through a fixed-depth slice instead.
+public func mapColumnSample(_ world: World, x: Int, z: Int,
+                            referenceY: Int) -> MapColumnSample? {
+    guard let chunk = world.getChunkAt(x, z) else { return nil }
+    let localX = posMod(x, CHUNK_W)
+    let localZ = posMod(z, CHUNK_W)
+    let minY = world.info.minY
+    let maxY = minY + world.info.height - 1
+
+    if world.info.hasSky {
+        let y = chunk.heightAt(localX, localZ)
+        guard y >= minY, y <= maxY else { return nil }
+        let value = Int(chunk.get(localX, y, localZ))
+        let id = value >> 4
+        guard id > 0, id < blockDefs.count else { return nil }
+        return MapColumnSample(cell: value, y: y)
+    }
+
+    let cleanReference = min(maxY, max(minY, referenceY))
+    let startY = min(maxY, cleanReference + 1)
+    let endY = max(minY, cleanReference - MAP_UNDERGROUND_SCAN_DEPTH)
+    for y in stride(from: startY, through: endY, by: -1) {
+        let value = Int(chunk.get(localX, y, localZ))
+        let id = value >> 4
+        if id > 0, id < blockDefs.count {
+            return MapColumnSample(cell: value, y: y)
+        }
+    }
+    return nil
+}
 
 public enum MapMinimapSizeMode: Int, CaseIterable, Equatable {
     case small = 0

@@ -16,13 +16,13 @@ private func shadedMapColor(_ rgb: Int, height y: Int, sea: Int) -> SIMD4<Float>
     return SIMD4<Float>(min(1, c.x * shade), min(1, c.y * shade), min(1, c.z * shade), 1)
 }
 
-private func mapColorForBlock(_ world: World, _ x: Int, _ z: Int) -> SIMD4<Float> {
-    guard world.isLoadedAt(x, z) else { return mapUnknownColor }
-    let y = world.heightAt(x, z)
-    guard y >= world.info.minY, y < world.info.minY + world.info.height else {
-        return SIMD4<Float>(0.04, 0.05, 0.06, 1)
+private func mapColorForBlock(_ world: World, _ x: Int, _ z: Int,
+                              referenceY: Int) -> SIMD4<Float> {
+    guard let sample = mapColumnSample(world, x: x, z: z, referenceY: referenceY) else {
+        return mapUnknownColor
     }
-    let cell = world.getBlock(x, y, z)
+    let y = sample.y
+    let cell = sample.cell
     let id = cell >> 4
     guard id > 0, id < blockDefs.count else {
         return SIMD4<Float>(0.04, 0.05, 0.06, 1)
@@ -39,6 +39,15 @@ private func mapColorForBlock(_ world: World, _ x: Int, _ z: Int) -> SIMD4<Float
     if name.contains("leaves") || name.contains("azalea") {
         return shadedMapColor(Int(biome?.foliageColor ?? 0x77ab2f), height: y, sea: world.info.seaLevel)
     }
+    // Dimension-specific materials must win over generic substrings such as
+    // "sand", "stone", and "stem" so Nether biomes remain distinguishable.
+    if name == "soul_sand" || name == "soul_soil" { return shadedMapColor(0x5b4b3b, height: y, sea: world.info.seaLevel) }
+    if name.contains("netherrack") || name.contains("crimson") { return shadedMapColor(0x8a3030, height: y, sea: world.info.seaLevel) }
+    if name.contains("warped") { return shadedMapColor(0x2f8f82, height: y, sea: world.info.seaLevel) }
+    if name.contains("basalt") || name.contains("blackstone") { return shadedMapColor(0x3b3b42, height: y, sea: world.info.seaLevel) }
+    if name.contains("nether_brick") { return shadedMapColor(0x4b1f28, height: y, sea: world.info.seaLevel) }
+    if name.contains("quartz") { return shadedMapColor(0xd8d1c5, height: y, sea: world.info.seaLevel) }
+    if name.contains("end_stone") { return shadedMapColor(0xdbd88a, height: y, sea: world.info.seaLevel) }
     if name.contains("sand") || name.contains("sandstone") { return shadedMapColor(0xd8c878, height: y, sea: world.info.seaLevel) }
     if name.contains("snow") { return shadedMapColor(0xf0f4f7, height: y, sea: world.info.seaLevel) }
     if name.contains("ice") { return shadedMapColor(0x9fd8f5, height: y, sea: world.info.seaLevel) }
@@ -53,9 +62,6 @@ private func mapColorForBlock(_ world: World, _ x: Int, _ z: Int) -> SIMD4<Float
         name.contains("hyphae") || name.contains("bamboo") {
         return shadedMapColor(0x8a6236, height: y, sea: world.info.seaLevel)
     }
-    if name.contains("netherrack") || name.contains("crimson") { return shadedMapColor(0x8a3030, height: y, sea: world.info.seaLevel) }
-    if name.contains("warped") { return shadedMapColor(0x2f8f82, height: y, sea: world.info.seaLevel) }
-    if name.contains("end_stone") { return shadedMapColor(0xdbd88a, height: y, sea: world.info.seaLevel) }
     if name.contains("wool") || name.contains("concrete") || name.contains("terracotta") {
         for c in COLORS where name.hasPrefix(c + "_") {
             return shadedMapColor(Int(COLOR_RGB[c] ?? 0xa0a0a0), height: y, sea: world.info.seaLevel)
@@ -89,13 +95,19 @@ func drawMapOverlay(_ ui: UIManager, _ game: GameCore,
     let worldMinX = viewport.centerX - viewport.spanBlocks / 2
     let worldMinZ = viewport.centerZ - viewport.spanBlocks / 2
     let step = viewport.spanBlocks / Double(samples)
+    let worldMinY = game.world.info.minY
+    let worldMaxY = worldMinY + game.world.info.height - 1
+    let boundedPlayerY = player.y.isFinite
+        ? min(Double(worldMaxY), max(Double(worldMinY), player.y))
+        : Double(game.world.info.seaLevel)
+    let referenceY = Int(boundedPlayerY.rounded(.down))
 
     for row in 0..<samples {
         let z = Int((worldMinZ + (Double(row) + 0.5) * step).rounded(.down))
         let y = innerY + Double(row) * cellSize
         for col in 0..<samples {
             let x = Int((worldMinX + (Double(col) + 0.5) * step).rounded(.down))
-            cv.fillStyle = mapColorForBlock(game.world, x, z)
+            cv.fillStyle = mapColorForBlock(game.world, x, z, referenceY: referenceY)
             cv.fillRect(innerX + Double(col) * cellSize, y, cellSize + 0.15, cellSize + 0.15)
         }
     }

@@ -7588,6 +7588,87 @@ public final class ElysiumLegacyCoreStorage {
         }
     }
 
+    /// Commits one newly generated Reality Derived world and all of its authoritative
+    /// overworld chunks in a single SQLite transaction. A collision or malformed aggregate
+    /// rolls the whole operation back; callers never observe a world without its map.
+    @discardableResult
+    public func importRealityDerivedWorld(
+        world: ElysiumWorldStorageRow,
+        chunks: [ElysiumChunkStorageRow]
+    ) throws -> Int {
+        guard !chunks.isEmpty, chunks.count <= StorageBounds.chunkRows,
+              chunks.allSatisfy({ $0.key.world == world.id }) else {
+            throw ElysiumStorageError.invalidValue
+        }
+        return try executor.mutate(tables: ["worlds", "chunks"]) { context in
+            var changes = try executeMutation(context, """
+                INSERT INTO worlds(id,json,lastPlayed) VALUES(?,?,?)
+                """) { statement in
+                try statement.bindText(1, world.id)
+                try statement.bindText(2, world.json)
+                try statement.bindDouble(3, world.lastPlayed)
+            }
+            for row in chunks {
+                changes += try executeMutation(context, """
+                    INSERT INTO chunks(world,dim,cx,cz,data) VALUES(?,?,?,?,?)
+                    """) { statement in
+                    try bindChunkKey(statement, row.key)
+                    try statement.bindData(5, row.data)
+                }
+            }
+            guard changes == chunks.count + 1 else {
+                throw ElysiumStorageError.schemaIntegrity
+            }
+            return changes
+        }
+    }
+
+    /// Pulls a fixed, bounded Reality Derived row stream through one transaction.
+    /// The producer is invoked only on the storage executor and must return exactly
+    /// `expectedChunkCount` rows followed by nil. Any producer, validation, SQLite,
+    /// or cardinality failure rolls the world and every inserted chunk back together.
+    @discardableResult
+    public func importRealityDerivedWorldStreaming(
+        world: ElysiumWorldStorageRow,
+        expectedChunkCount: Int,
+        nextChunk: () throws -> ElysiumChunkStorageRow?
+    ) throws -> Int {
+        guard expectedChunkCount > 0, expectedChunkCount <= StorageBounds.chunkRows else {
+            throw ElysiumStorageError.limitExceeded
+        }
+        return try executor.mutate(tables: ["worlds", "chunks"]) { context in
+            var changes = try executeMutation(context, """
+                INSERT INTO worlds(id,json,lastPlayed) VALUES(?,?,?)
+                """) { statement in
+                try statement.bindText(1, world.id)
+                try statement.bindText(2, world.json)
+                try statement.bindDouble(3, world.lastPlayed)
+            }
+            let statement = try context.prepare("""
+                INSERT INTO chunks(world,dim,cx,cz,data) VALUES(?,?,?,?,?)
+                """)
+            for _ in 0..<expectedChunkCount {
+                guard let row = try nextChunk(), row.key.world == world.id else {
+                    throw ElysiumStorageError.invalidValue
+                }
+                try bindChunkKey(statement, row.key)
+                try statement.bindData(5, row.data)
+                guard try statement.step() == .done, try context.changes() == 1 else {
+                    throw ElysiumStorageError.schemaIntegrity
+                }
+                changes += 1
+                try statement.resetForReuse()
+                try statement.clearBindingsForReuse()
+            }
+            guard try nextChunk() == nil else { throw ElysiumStorageError.invalidValue }
+            try statement.finalize()
+            guard changes == expectedChunkCount + 1 else {
+                throw ElysiumStorageError.schemaIntegrity
+            }
+            return changes
+        }
+    }
+
     // MARK: Player, LAN v5, and advancements
 
     public func getPlayerJSON(world: String) throws -> ElysiumPlayerJSONStorageRow? {

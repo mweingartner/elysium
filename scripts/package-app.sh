@@ -155,6 +155,13 @@ cp "$ROOT/packaging/Info.plist" "$OUTPUT/Contents/Info.plist"
 cp "$ROOT/packaging/AppIcon.icns" "$OUTPUT/Contents/Resources/"
 cp "$ROOT/packaging/logo.png" "$OUTPUT/Contents/Resources/"
 cp "$ROOT/packaging/title-bg.png" "$OUTPUT/Contents/Resources/"
+mkdir -p "$OUTPUT/Contents/Resources/Helpers" "$OUTPUT/Contents/Resources/ArnisLegal"
+bash "$ROOT/scripts/build-arnis-helper.sh" \
+    "$OUTPUT/Contents/Resources/Helpers/arnis-elysium" >&2
+cp -R "$ROOT/Vendor/Arnis/src/gui" "$OUTPUT/Contents/Resources/ArnisUI"
+cp "$ROOT/Vendor/Arnis/LICENSE" "$OUTPUT/Contents/Resources/ArnisLegal/LICENSE"
+cp "$ROOT/Vendor/Arnis/ELYSIUM_PINNED_COMMIT" \
+    "$OUTPUT/Contents/Resources/ArnisLegal/ELYSIUM_PINNED_COMMIT"
 PACK_ASSETS=(
     "Faithful 64x - December 2025 Release.zip"
     "Faithful 64x - Ore Borders 64x.zip"
@@ -173,7 +180,11 @@ STAGED="$OUTPUT/Contents/MacOS/Elysium"
 cmp -s "$EXECUTABLE" "$STAGED" || die "staged executable differs before signing"
 STAGED_PRE_HASH="$(sha256 "$STAGED")"
 [ "$INPUT_HASH" = "$STAGED_PRE_HASH" ] || die "pre-sign hashes differ"
+ARNIS_HELPER="$OUTPUT/Contents/Resources/Helpers/arnis-elysium"
+ARNIS_HELPER_HASH="$(sha256 "$ARNIS_HELPER")"
 
+/usr/bin/codesign --force --sign - --identifier com.briangao.elysium.arnis-helper \
+    "$ARNIS_HELPER" >/dev/null
 /usr/bin/codesign --force --sign - --identifier com.briangao.elysium "$OUTPUT" >/dev/null
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$OUTPUT" >/dev/null 2>&1 || die "strict signature verification failed"
 DETAILS="$(/usr/bin/codesign -d --verbose=4 "$OUTPUT" 2>&1)"
@@ -206,9 +217,9 @@ CAPTURE_DIR=""
 # The package producer's stdout is a closed value channel. This audited emitter is the
 # only writer: it bounds and validates the already-composed canonical bytes, handles
 # EINTR/short writes, rejects zero/errors, and closes stdout exactly once.
-MANIFEST_DATA="$(printf 'release_path=%s\nbundle_path=%s\nexecutable_path=%s\npre_sign_input_sha256=%s\npre_sign_staged_sha256=%s\npost_sign_executable_sha256=%s\nbundle_id=%s\ncdhash=%s\ndesignated_requirement=%s\nsealed_resources=true\n' \
+MANIFEST_DATA="$(printf 'release_path=%s\nbundle_path=%s\nexecutable_path=%s\npre_sign_input_sha256=%s\npre_sign_staged_sha256=%s\npost_sign_executable_sha256=%s\narnis_helper_pre_sign_sha256=%s\nbundle_id=%s\ncdhash=%s\ndesignated_requirement=%s\nsealed_resources=true\n' \
     "$EXECUTABLE" "$OUTPUT_CANON" "$STAGED_CANON" "$INPUT_HASH" "$STAGED_PRE_HASH" \
-    "$POST_HASH" "$BUNDLE_ID" "$CDHASH" "$REQUIREMENT")"
+    "$POST_HASH" "$ARNIS_HELPER_HASH" "$BUNDLE_ID" "$CDHASH" "$REQUIREMENT")"
 MANIFEST_DATA="${MANIFEST_DATA}"$'\n'
 export MANIFEST_DATA
 /usr/bin/perl -e 'use strict; use warnings; use bytes; use POSIX ();

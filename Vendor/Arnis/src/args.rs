@@ -1,0 +1,620 @@
+use crate::coordinate_system::geographic::LLBBox;
+use clap::{ArgAction, Parser};
+use std::path::PathBuf;
+use std::time::Duration;
+
+/// Command-line arguments parser
+#[derive(Parser, Debug)]
+#[command(author, version, about)]
+pub struct Args {
+    /// Bounding box of the area (min_lat,min_lng,max_lat,max_lng) (required)
+    #[arg(long, allow_hyphen_values = true, value_parser = LLBBox::from_str)]
+    pub bbox: LLBBox,
+
+    /// JSON file containing OSM data (optional)
+    #[arg(long, group = "location")]
+    pub file: Option<String>,
+
+    /// JSON file to save OSM data to (optional)
+    #[arg(long, group = "location")]
+    pub save_json_file: Option<String>,
+
+    /// Output directory for the generated world (required for Java, optional for Bedrock).
+    /// Use --output-dir (or the deprecated --path alias) to specify where the world is created.
+    #[arg(long = "output-dir", alias = "path")]
+    pub path: Option<PathBuf>,
+
+    /// Generate a Bedrock Edition world (.mcworld) instead of Java Edition
+    #[arg(long)]
+    pub bedrock: bool,
+
+    /// Generate a Luanti/Minetest world (map.sqlite) instead of Java Edition
+    #[arg(long)]
+    pub luanti: bool,
+
+    /// Generate the bounded Elysium exchange directory used by the bundled Elysium importer.
+    #[arg(long, hide = true)]
+    pub elysium: bool,
+
+    /// Downloader method (requests/curl/wget) (optional)
+    #[arg(long, default_value = "requests")]
+    pub downloader: String,
+
+    /// World scale to use, in blocks per meter
+    #[arg(long, default_value_t = 1.0)]
+    pub scale: f64,
+
+    /// Projection mode for coordinate mapping
+    /// local: each generation starts at Minecraft (0,0) (default)
+    /// web_mercator: global projection for multi-generation worlds
+    #[arg(long, default_value = "local")]
+    pub projection: crate::projection::ProjectionKind,
+
+    /// Ground level to use in the Minecraft world
+    #[arg(long, default_value_t = -62)]
+    pub ground_level: i32,
+
+    /// What to generate, mirroring the GUI's generation mode dropdown:
+    /// geo-terrain: OSM objects on real elevation terrain (default)
+    /// geo-only: OSM objects on flat ground
+    /// terrain-only: real elevation terrain, no OSM or Overture objects (--overture has no effect)
+    #[arg(long, value_enum, default_value_t = GenerationMode::GeoTerrain)]
+    pub mode: GenerationMode,
+
+    /// Include OSM and Overture building footprints while preserving all other mapped objects.
+    #[arg(long, hide = true, default_value_t = true, action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub include_buildings: bool,
+
+    /// Deprecated: terrain is on by default, use --mode geo-only for flat ground.
+    /// Accepted as a no-op so existing scripts keep working.
+    #[arg(long = "terrain", hide = true)]
+    pub legacy_terrain: bool,
+
+    /// Enable interior generation (optional, off unless requested)
+    #[arg(long, default_value_t = false, action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub interior: bool,
+
+    /// Enable filling ground (optional)
+    #[arg(long, default_value_t = false)]
+    pub fillground: bool,
+
+    /// Use the legacy procedural trees instead of the bundled schematic tree pack.
+    /// Schematic trees are on by default; this flag opts out.
+    #[arg(long, default_value_t = false)]
+    pub legacy_trees: bool,
+
+    /// Add building footprints from Overture Maps that are missing in OpenStreetMap.
+    /// Helps sparsely mapped areas; may occasionally add a satellite-detected false positive.
+    #[arg(long = "overture", default_value_t = true, action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub overture: bool,
+
+    /// Disable both external 3D models (3DMR + Wikimedia) and bundled schematic
+    /// props (cars, boats, cranes, ...) with a single toggle.
+    #[arg(long = "no-3d", default_value_t = true, action = ArgAction::SetFalse)]
+    pub use_3d: bool,
+
+    /// Enable debug mode (optional)
+    #[arg(long)]
+    pub debug: bool,
+
+    /// Set floodfill timeout (seconds) (optional)
+    #[arg(long, value_parser = parse_duration)]
+    pub timeout: Option<Duration>,
+
+    /// Spawn point latitude (optional, must be within bbox)
+    #[arg(long, allow_hyphen_values = true)]
+    pub spawn_lat: Option<f64>,
+
+    /// Spawn point longitude (optional, must be within bbox)
+    #[arg(long, allow_hyphen_values = true)]
+    pub spawn_lng: Option<f64>,
+
+    /// Clockwise rotation angle in degrees (optional, range: -90 to 90)
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    pub rotation: f64,
+
+    /// Extend build height via a bundled pack (Java 1.21.4+: Y=-2032..2031;
+    /// Bedrock 1.21.40+: Y=-512..512). Both are experimental.
+    #[arg(long, default_value_t = false)]
+    pub disable_height_limit: bool,
+
+    /// Use only the legacy AWS Terrain Tiles source (~30m) instead of
+    /// Mapterhorn and the regional high-resolution providers.
+    #[arg(long, default_value_t = false)]
+    pub aws_only_elevation: bool,
+
+    /// Print generation-only timing to stderr (excludes data fetching)
+    #[arg(long, hide = true)]
+    pub benchmark: bool,
+
+    /// Bake per-chunk lighting so distant chunks render lit in LOD mods
+    /// (Voxy/Chunky) without visiting them. Slower; off by default.
+    #[arg(long, default_value_t = false)]
+    pub bake_lighting: bool,
+
+    /// Render a top-down PNG map preview of the generated world (Java and Bedrock)
+    #[arg(long, default_value_t = false)]
+    pub map_preview: bool,
+
+    /// Give the player a locked map item showing the whole world (Java only)
+    #[arg(long = "map-item", default_value_t = true, action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub map_item: bool,
+
+    /// Player game mode for the generated world
+    #[arg(long, value_enum, default_value_t = GameMode::Creative)]
+    pub gamemode: GameMode,
+
+    /// Initial time of day in ticks (0 = dawn, 6000 = noon, 18000 = midnight)
+    #[arg(long, default_value_t = 6000, value_parser = clap::value_parser!(i64).range(0..24000))]
+    pub world_time: i64,
+}
+
+/// Generation mode, matching the GUI's dropdown (src/gui/js/main.js).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub enum GenerationMode {
+    /// OSM objects on real elevation terrain
+    #[default]
+    GeoTerrain,
+    /// OSM objects on flat ground
+    GeoOnly,
+    /// Real elevation terrain without any OSM or Overture objects
+    TerrainOnly,
+}
+
+impl GenerationMode {
+    /// Whether real elevation is fetched and applied instead of flat ground.
+    pub fn terrain(self) -> bool {
+        !matches!(self, GenerationMode::GeoOnly)
+    }
+
+    /// Whether OSM and Overture objects are skipped entirely.
+    pub fn skip_objects(self) -> bool {
+        matches!(self, GenerationMode::TerrainOnly)
+    }
+}
+
+impl Args {
+    /// Whether this run uses real elevation terrain rather than flat ground.
+    pub fn terrain(&self) -> bool {
+        self.mode.terrain()
+    }
+
+    /// Whether this run skips OSM/Overture objects (terrain-only).
+    pub fn skip_objects(&self) -> bool {
+        self.mode.skip_objects()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+pub enum GameMode {
+    Survival,
+    Creative,
+    Spectator,
+}
+
+impl GameMode {
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s {
+            "survival" => GameMode::Survival,
+            "spectator" => GameMode::Spectator,
+            _ => GameMode::Creative,
+        }
+    }
+
+    pub fn java_game_type(self) -> i32 {
+        match self {
+            GameMode::Survival => 0,
+            GameMode::Creative => 1,
+            GameMode::Spectator => 3,
+        }
+    }
+
+    pub fn bedrock_game_type(self) -> i32 {
+        match self {
+            GameMode::Survival => 0,
+            GameMode::Creative => 1,
+            GameMode::Spectator => 6,
+        }
+    }
+}
+
+/// Validates CLI arguments after parsing.
+/// For Java Edition: `--path` is required. If the directory doesn't exist, it will be created.
+/// For Bedrock Edition (`--bedrock`): `--path` is optional (defaults to Desktop output).
+pub fn validate_args(args: &Args) -> Result<(), String> {
+    if [args.bedrock, args.luanti, args.elysium]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count()
+        > 1
+    {
+        return Err("Choose only one of --bedrock, --luanti, or --elysium.".to_string());
+    }
+
+    // The legacy --terrain flag is redundant now that terrain is the default, but it must
+    // not silently lose against a mode that asks for flat ground.
+    if args.legacy_terrain && args.mode == GenerationMode::GeoOnly {
+        return Err(
+            "--terrain contradicts --mode geo-only (flat ground). Drop --terrain, or use --mode geo-terrain."
+                .to_string(),
+        );
+    }
+
+    if args.map_preview && args.luanti {
+        return Err("--map-preview is not supported for Luanti worlds.".to_string());
+    }
+
+    if args.bedrock {
+        // Bedrock: path is optional; if provided, it must be an existing directory
+        if let Some(ref path) = args.path {
+            if !path.exists() {
+                return Err(format!("Path does not exist: {}", path.display()));
+            }
+            if !path.is_dir() {
+                return Err(format!("Path is not a directory: {}", path.display()));
+            }
+        }
+    } else if args.luanti {
+        // Luanti: path optional, defaults to OS Luanti worlds dir
+        if let Some(ref path) = args.path {
+            if !path.exists() {
+                return Err(format!("Path does not exist: {}", path.display()));
+            }
+            if !path.is_dir() {
+                return Err(format!("Path is not a directory: {}", path.display()));
+            }
+        }
+    } else {
+        // Java: path is required. If it exists, it must be a directory.
+        // If it doesn't exist, create_new_world will create it.
+        match &args.path {
+            None => {
+                return Err(
+                    "The --output-dir argument is required. Provide the directory where the world should be created. Use --bedrock for Bedrock Edition output."
+                        .to_string(),
+                );
+            }
+            Some(ref path) => {
+                if path.exists() && !path.is_dir() {
+                    return Err(format!(
+                        "Path exists but is not a directory: {}",
+                        path.display()
+                    ));
+                }
+                // If path doesn't exist, that's OK - create_new_world will create it
+            }
+        }
+    }
+
+    // Validate spawn point: both or neither must be provided
+    match (args.spawn_lat, args.spawn_lng) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err("Both --spawn-lat and --spawn-lng must be provided together.".to_string());
+        }
+        (Some(lat), Some(lng)) => {
+            // Validate coordinates are valid lat/lng (rejects NaN, inf, out-of-range)
+            use crate::coordinate_system::geographic::LLPoint;
+            let llpoint =
+                LLPoint::new(lat, lng).map_err(|e| format!("Invalid spawn coordinates: {e}"))?;
+
+            // Validate that spawn point is within the bounding box
+            if !args.bbox.contains(&llpoint) {
+                return Err(
+                    "Spawn point (--spawn-lat, --spawn-lng) must be within the bounding box."
+                        .to_string(),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    // Validate rotation angle range (also rejects NaN and infinity)
+    if !args.rotation.is_finite() || args.rotation < -90.0 || args.rotation > 90.0 {
+        return Err("Rotation angle must be between -90 and 90 degrees.".to_string());
+    }
+
+    Ok(())
+}
+
+fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntError> {
+    let seconds = arg.parse()?;
+    Ok(std::time::Duration::from_secs(seconds))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generation_mode() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tmp_path = tmpdir.path().to_str().unwrap();
+        let base = ["arnis", "--output-dir", tmp_path, "--bbox", "1,2,3,4"];
+
+        let parse = |extra: &[&str]| {
+            let mut cmd: Vec<&str> = base.to_vec();
+            cmd.extend_from_slice(extra);
+            Args::parse_from(cmd.iter())
+        };
+
+        // geo-terrain: objects on real elevation (the default)
+        let args = parse(&["--mode", "geo-terrain"]);
+        assert_eq!(args.mode, GenerationMode::GeoTerrain);
+        assert!(args.terrain());
+        assert!(!args.skip_objects());
+        assert!(validate_args(&args).is_ok());
+
+        // geo-only: objects on flat ground
+        let args = parse(&["--mode", "geo-only"]);
+        assert!(!args.terrain());
+        assert!(!args.skip_objects());
+        assert!(validate_args(&args).is_ok());
+
+        // terrain-only: elevation, no objects
+        let args = parse(&["--mode", "terrain-only"]);
+        assert!(args.terrain());
+        assert!(args.skip_objects());
+        assert!(validate_args(&args).is_ok());
+
+        // The legacy --terrain flag contradicts flat ground, so it must not pass silently
+        let args = parse(&["--mode", "geo-only", "--terrain"]);
+        assert!(validate_args(&args).is_err());
+
+        // Unknown modes are rejected by clap
+        let mut cmd: Vec<&str> = base.to_vec();
+        cmd.extend_from_slice(&["--mode", "objects"]);
+        assert!(Args::try_parse_from(cmd.iter()).is_err());
+    }
+
+    #[test]
+    fn test_flags() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tmp_path = tmpdir.path().to_str().unwrap();
+
+        // The legacy --terrain flag still parses and still yields terrain (now the default)
+        let cmd = [
+            "arnis",
+            "--output-dir",
+            tmp_path,
+            "--bbox",
+            "1,2,3,4",
+            "--terrain",
+            "--debug",
+        ];
+        let args = Args::parse_from(cmd.iter());
+        assert!(args.debug);
+        assert!(args.legacy_terrain);
+        assert!(args.terrain());
+        assert!(validate_args(&args).is_ok());
+
+        let cmd = ["arnis", "--output-dir", tmp_path, "--bbox", "1,2,3,4"];
+        let args = Args::parse_from(cmd.iter());
+        assert!(!args.debug);
+        // Terrain is on by default, matching the GUI's "Objects + Terrain" mode
+        assert_eq!(args.mode, GenerationMode::GeoTerrain);
+        assert!(args.terrain());
+        assert!(!args.skip_objects());
+        assert!(!args.legacy_terrain);
+        assert!(!args.bedrock);
+        assert!(!args.disable_height_limit);
+        assert!(!args.bake_lighting);
+        assert!(!args.map_preview);
+        // interior is opt-in (off by default); overture defaults to true
+        assert!(!args.interior);
+        assert!(args.overture);
+        assert!(args.include_buildings);
+    }
+
+    #[test]
+    fn test_bool_flags_can_be_disabled() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tmp_path = tmpdir.path().to_str().unwrap();
+
+        // Test disabling bool options with =false
+        let cmd = [
+            "arnis",
+            "--output-dir",
+            tmp_path,
+            "--bbox",
+            "1,2,3,4",
+            "--interior=false",
+            "--overture=false",
+            "--include-buildings=false",
+        ];
+        let args = Args::parse_from(cmd.iter());
+        assert!(!args.interior);
+        assert!(!args.overture);
+        assert!(!args.include_buildings);
+
+        // Test enabling with bare flag (no value)
+        let cmd = [
+            "arnis",
+            "--output-dir",
+            tmp_path,
+            "--bbox",
+            "1,2,3,4",
+            "--interior",
+            "--overture",
+            "--include-buildings",
+        ];
+        let args = Args::parse_from(cmd.iter());
+        assert!(args.interior);
+        assert!(args.overture);
+        assert!(args.include_buildings);
+    }
+
+    #[test]
+    fn test_bedrock_flag() {
+        // Bedrock mode doesn't require --output-dir
+        let cmd = ["arnis", "--bedrock", "--bbox", "1,2,3,4"];
+        let args = Args::parse_from(cmd.iter());
+        assert!(args.bedrock);
+        assert!(args.path.is_none());
+        assert!(validate_args(&args).is_ok());
+    }
+
+    #[test]
+    fn test_disable_height_limit_flag() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tmp_path = tmpdir.path().to_str().unwrap();
+
+        // Default is false
+        let cmd = ["arnis", "--output-dir", tmp_path, "--bbox", "1,2,3,4"];
+        let args = Args::parse_from(cmd.iter());
+        assert!(!args.disable_height_limit);
+
+        // Flag enables it
+        let cmd = [
+            "arnis",
+            "--output-dir",
+            tmp_path,
+            "--bbox",
+            "1,2,3,4",
+            "--disable-height-limit",
+        ];
+        let args = Args::parse_from(cmd.iter());
+        assert!(args.disable_height_limit);
+    }
+
+    #[test]
+    fn test_java_requires_path() {
+        let cmd = ["arnis", "--bbox", "1,2,3,4"];
+        let args = Args::parse_from(cmd.iter());
+        assert!(!args.bedrock);
+        assert!(args.path.is_none());
+        assert!(validate_args(&args).is_err());
+    }
+
+    #[test]
+    fn test_java_nonexistent_path_is_ok() {
+        // Java: nonexistent paths are OK - create_new_world will create them
+        let tmp = tempfile::tempdir().unwrap();
+        let nonexistent = tmp.path().join("does_not_exist");
+        let cmd = [
+            "arnis",
+            "--output-dir",
+            nonexistent.to_str().unwrap(),
+            "--bbox",
+            "1,2,3,4",
+        ];
+        let args = Args::parse_from(cmd.iter());
+        let result = validate_args(&args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_java_path_exists_but_is_file_fails() {
+        // Java: if path exists but is a file, fail
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let tmp_path = tmpfile.path().to_str().unwrap();
+
+        let cmd = ["arnis", "--output-dir", tmp_path, "--bbox", "1,2,3,4"];
+        let args = Args::parse_from(cmd.iter());
+        let result = validate_args(&args);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a directory"));
+    }
+
+    #[test]
+    fn test_bedrock_path_must_exist() {
+        let cmd = [
+            "arnis",
+            "--bedrock",
+            "--output-dir",
+            "/nonexistent/path",
+            "--bbox",
+            "1,2,3,4",
+        ];
+        let args = Args::parse_from(cmd.iter());
+        let result = validate_args(&args);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[test]
+    fn test_required_options() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tmp_path = tmpdir.path().to_str().unwrap();
+
+        let cmd = ["arnis"];
+        assert!(Args::try_parse_from(cmd.iter()).is_err());
+
+        let cmd = ["arnis", "--output-dir", tmp_path, "--bbox", "1,2,3,4"];
+        let args = Args::try_parse_from(cmd.iter()).unwrap();
+        assert!(validate_args(&args).is_ok());
+
+        // Verify --path still works as a deprecated alias
+        let cmd = ["arnis", "--path", tmp_path, "--bbox", "1,2,3,4"];
+        let args = Args::try_parse_from(cmd.iter()).unwrap();
+        assert!(validate_args(&args).is_ok());
+
+        let cmd = ["arnis", "--output-dir", tmp_path, "--file", ""];
+        assert!(Args::try_parse_from(cmd.iter()).is_err());
+
+        // The --gui flag isn't used here, ugh. TODO clean up main.rs and its argparse usage.
+        // let cmd = ["arnis", "--gui"];
+        // assert!(Args::try_parse_from(cmd.iter()).is_ok());
+    }
+
+    #[test]
+    fn test_spawn_point_both_required() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tmp_path = tmpdir.path().to_str().unwrap();
+
+        // Only spawn-lat without spawn-lng should fail validation
+        let cmd = [
+            "arnis",
+            "--output-dir",
+            tmp_path,
+            "--bbox",
+            "1,2,3,4",
+            "--spawn-lat",
+            "2.0",
+        ];
+        let args = Args::parse_from(cmd.iter());
+        assert!(validate_args(&args).is_err());
+
+        // Only spawn-lng without spawn-lat should fail validation
+        let cmd = [
+            "arnis",
+            "--output-dir",
+            tmp_path,
+            "--bbox",
+            "1,2,3,4",
+            "--spawn-lng",
+            "3.0",
+        ];
+        let args = Args::parse_from(cmd.iter());
+        assert!(validate_args(&args).is_err());
+
+        // Both provided and within bbox should pass
+        let cmd = [
+            "arnis",
+            "--output-dir",
+            tmp_path,
+            "--bbox",
+            "1,2,3,4",
+            "--spawn-lat",
+            "2.0",
+            "--spawn-lng",
+            "3.0",
+        ];
+        let args = Args::parse_from(cmd.iter());
+        assert!(validate_args(&args).is_ok());
+
+        // Spawn point outside bbox should fail
+        let cmd = [
+            "arnis",
+            "--output-dir",
+            tmp_path,
+            "--bbox",
+            "1,2,3,4",
+            "--spawn-lat",
+            "5.0",
+            "--spawn-lng",
+            "3.0",
+        ];
+        let args = Args::parse_from(cmd.iter());
+        assert!(validate_args(&args).is_err());
+    }
+}

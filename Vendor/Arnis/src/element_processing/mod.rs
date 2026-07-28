@@ -1,0 +1,177 @@
+pub mod advertising;
+pub mod amenities;
+pub mod barriers;
+pub mod bridge_modules;
+pub mod bridge_styles;
+pub mod bridges;
+pub mod buildings;
+pub mod doors;
+pub mod emergency;
+pub mod highways;
+pub mod historic;
+pub mod landuse;
+pub mod leisure;
+pub mod man_made;
+pub mod natural;
+pub mod power;
+pub mod railways;
+pub mod sport_pitches;
+pub mod subprocessor;
+mod surfaces;
+pub mod tourisms;
+pub mod tree;
+pub mod water_areas;
+pub mod waterways;
+
+use crate::floodfill_cache::RoadMaskBitmap;
+use crate::osm_parser::ProcessedNode;
+
+/// Merges way segments that share endpoints into closed rings.
+/// Used by water_areas.rs and boundaries.rs for assembling relation members.
+pub fn merge_way_segments(rings: &mut Vec<Vec<ProcessedNode>>) {
+    let mut removed: Vec<usize> = vec![];
+    let mut merged: Vec<Vec<ProcessedNode>> = vec![];
+
+    // Match nodes by ID or proximity (handles synthetic nodes from bbox clipping)
+    let nodes_match = |a: &ProcessedNode, b: &ProcessedNode| -> bool {
+        if a.id == b.id {
+            return true;
+        }
+        let dx = (a.x - b.x).abs();
+        let dz = (a.z - b.z).abs();
+        dx <= 1 && dz <= 1
+    };
+
+    for i in 0..rings.len() {
+        for j in 0..rings.len() {
+            if i == j {
+                continue;
+            }
+
+            if removed.contains(&i) || removed.contains(&j) {
+                continue;
+            }
+
+            let x: &Vec<ProcessedNode> = &rings[i];
+            let y: &Vec<ProcessedNode> = &rings[j];
+
+            // Skip empty rings (can happen after clipping)
+            if x.is_empty() || y.is_empty() {
+                continue;
+            }
+
+            let x_first = &x[0];
+            let x_last = x.last().unwrap();
+            let y_first = &y[0];
+            let y_last = y.last().unwrap();
+
+            // Skip already-closed rings
+            if nodes_match(x_first, x_last) {
+                continue;
+            }
+
+            if nodes_match(y_first, y_last) {
+                continue;
+            }
+
+            if nodes_match(x_first, y_first) {
+                removed.push(i);
+                removed.push(j);
+
+                let mut x: Vec<ProcessedNode> = x.clone();
+                x.reverse();
+                x.extend(y.iter().skip(1).cloned());
+                merged.push(x);
+            } else if nodes_match(x_last, y_last) {
+                removed.push(i);
+                removed.push(j);
+
+                let mut x: Vec<ProcessedNode> = x.clone();
+                x.extend(y.iter().rev().skip(1).cloned());
+
+                merged.push(x);
+            } else if nodes_match(x_first, y_last) {
+                removed.push(i);
+                removed.push(j);
+
+                let mut y: Vec<ProcessedNode> = y.clone();
+                y.extend(x.iter().skip(1).cloned());
+
+                merged.push(y);
+            } else if nodes_match(x_last, y_first) {
+                removed.push(i);
+                removed.push(j);
+
+                let mut x: Vec<ProcessedNode> = x.clone();
+                x.extend(y.iter().skip(1).cloned());
+
+                merged.push(x);
+            }
+        }
+    }
+
+    removed.sort();
+
+    for r in removed.iter().rev() {
+        rings.remove(*r);
+    }
+
+    let merged_len: usize = merged.len();
+    for m in merged {
+        rings.push(m);
+    }
+
+    if merged_len > 0 {
+        merge_way_segments(rings);
+    }
+}
+
+/// Searches outward from (x, z) in the four cardinal directions and four
+/// diagonals stepping by 2 up to max_radius blocks away, and returns the
+/// (x, z) position of the nearest block that satisfies predicate
+///
+/// Returns None if no matching block is found within range.
+fn get_nearest_block_matching(
+    x: i32,
+    z: i32,
+    max_radius: i32,
+    road_mask: &RoadMaskBitmap,
+    predicate: impl Fn(bool) -> bool,
+) -> Option<(i32, i32)> {
+    for dist in (2..=max_radius).step_by(2) {
+        let candidates = [
+            (x, z - dist),
+            (x, z + dist),
+            (x - dist, z),
+            (x + dist, z),
+            (x - dist, z - dist),
+            (x + dist, z + dist),
+            (x - dist, z + dist),
+            (x + dist, z - dist),
+        ];
+        for (cx, cz) in candidates {
+            if predicate(road_mask.contains(cx, cz)) {
+                return Some((cx, cz));
+            }
+        }
+    }
+    None
+}
+
+pub fn get_nearest_road_block(
+    x: i32,
+    z: i32,
+    max_radius: i32,
+    road_mask: &RoadMaskBitmap,
+) -> Option<(i32, i32)> {
+    get_nearest_block_matching(x, z, max_radius, road_mask, |on_road| on_road)
+}
+
+pub fn get_nearest_non_road_block(
+    x: i32,
+    z: i32,
+    max_radius: i32,
+    road_mask: &RoadMaskBitmap,
+) -> Option<(i32, i32)> {
+    get_nearest_block_matching(x, z, max_radius, road_mask, |on_road| !on_road)
+}

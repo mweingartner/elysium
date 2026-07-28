@@ -7,10 +7,12 @@ public enum WorldPreset: String, CaseIterable, Equatable {
     case amplified = "minecraft:amplified"
     case moderateHillsResourceRich = "elysium:moderate_hills_resource_rich"
     case singleBiomeSurface = "minecraft:single_biome_surface"
+    case netherWorld = "elysium:nether_world"
     case debugAllBlockStates = "minecraft:debug_all_block_states"
 
     public static let normalCycle: [WorldPreset] = [
         .normal, .flat, .largeBiomes, .amplified, .moderateHillsResourceRich, .singleBiomeSurface,
+        .netherWorld,
     ]
 
     public static let extendedCycle: [WorldPreset] = normalCycle + [.debugAllBlockStates]
@@ -23,8 +25,15 @@ public enum WorldPreset: String, CaseIterable, Equatable {
         case .amplified: return "Amplified"
         case .moderateHillsResourceRich: return "Rich Resources"
         case .singleBiomeSurface: return "Single Biome"
+        case .netherWorld: return "Nether World"
         case .debugAllBlockStates: return "Debug Mode"
         }
+    }
+
+    /// The dimension used for a player record that does not yet exist. Persisted player data
+    /// always wins, so adding this case cannot move an established world between dimensions.
+    public var startingDimension: Dim {
+        self == .netherWorld ? .nether : .overworld
     }
 }
 
@@ -54,6 +63,8 @@ public func normalizedWorldPreset(_ raw: String?) -> WorldPreset {
         return .moderateHillsResourceRich
     case "single_biome", "single_biome_surface", "single biome":
         return .singleBiomeSurface
+    case "nether", "nether_world", "nether world":
+        return .netherWorld
     case "debug", "debug_mode", "debug_all_block_states", "debug all block states":
         return .debugAllBlockStates
     default:

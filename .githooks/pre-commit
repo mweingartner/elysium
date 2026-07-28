@@ -2,8 +2,28 @@
 set -eu
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
-# mpd pre-commit gate: fast staged secret and policy checks.
-mpd check --staged --quiet || {
-    echo "pre-commit blocked: mpd staged checks failed." >&2
+
+# Fast, repository-local staged checks. The full build/test/security suite remains pre-push.
+git diff --cached --check || {
+    echo "pre-commit blocked: staged whitespace or conflict-marker check failed." >&2
     exit 1
 }
+
+TMP="$(mktemp /tmp/elysium-pre-commit.XXXXXX)"
+trap 'rm -f -- "$TMP"' EXIT INT TERM
+git diff --cached --no-ext-diff --unified=0 -- . \
+    ':!*.png' ':!*.icns' ':!*.zip' \
+    | awk '/^\+\+\+ / { next } /^\+/ { print substr($0, 2) }' > "$TMP"
+if grep -Eq 'AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|github_pat_[0-9A-Za-z_]{20,}|gh[pousr]_[0-9A-Za-z]{20,}|xox[baprs]-[0-9A-Za-z-]+|-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----' "$TMP"; then
+    echo "pre-commit blocked: secret-looking material found in staged additions." >&2
+    exit 1
+fi
+
+git diff --cached --name-only --diff-filter=ACMR \
+    | grep -Ev '(^|/)\.env\.(example|sample)$' \
+    | grep -Eq '(^|/)\.env($|\.)|(^|/)(id_rsa|id_ed25519)$|\.(pem|p12|pfx)$' && {
+        echo "pre-commit blocked: secret-bearing filename is staged." >&2
+        exit 1
+    }
+
+exit 0

@@ -7,13 +7,15 @@ if rg -n 'event\.eventNumber|NSEvent[^\n]*\.eventNumber' Sources/Elysium/AppInpu
 fi
 for required in scripts/pipeline.sh scripts/release-source-snapshot.py \
                 scripts/package-app.sh scripts/appkit-text-entry-integration.sh \
+                scripts/build-arnis-helper.sh \
                 Tests/ElysiumAppKitIntegration/Driver.swift \
                 scripts/prepush-release-build.sh .githooks/pre-commit .githooks/pre-push; do
     [ -f "$required" ] || { echo "security scan failed: missing $required" >&2; exit 1; }
 done
 PRODUCTION_RELEASE_SURFACES=(
     scripts/pipeline.sh scripts/release-source-snapshot.py scripts/package-app.sh
-    scripts/appkit-text-entry-integration.sh .githooks/pre-commit .githooks/pre-push
+    scripts/appkit-text-entry-integration.sh scripts/build-arnis-helper.sh
+    .githooks/pre-commit .githooks/pre-push
 )
 if grep -E '(--(fixture|scenario|fault|alternate-executable|caller-evidence)|case "(fixture|scenario|fault))' \
     "${PRODUCTION_RELEASE_SURFACES[@]}" >/dev/null; then
@@ -22,7 +24,8 @@ if grep -E '(--(fixture|scenario|fault|alternate-executable|caller-evidence)|cas
 fi
 EXECUTABLE_RELEASE_SURFACES=(
     scripts/pipeline.sh scripts/release-source-snapshot.py scripts/package-app.sh
-    scripts/appkit-text-entry-integration.sh .githooks/pre-commit .githooks/pre-push
+    scripts/appkit-text-entry-integration.sh scripts/build-arnis-helper.sh
+    .githooks/pre-commit .githooks/pre-push
 )
 CURRENT_UID="$(id -u)"
 for surface in "${EXECUTABLE_RELEASE_SURFACES[@]}"; do
@@ -192,8 +195,12 @@ if [ -n "$UNAPPROVED_URL_REFS" ]; then
     fail "URL literal found outside approved local Ollama endpoint"
 fi
 
-if grep -RInE 'Process\(|NSTask|system\(|popen\(|dlopen\(|dlsym\(' Sources; then
-    fail "dynamic process/loading API reference found in Swift source"
+PROCESS_REFS="$(grep -RInE 'Process\(|NSTask|system\(|popen\(|dlopen\(|dlsym\(' Sources || true)"
+UNAPPROVED_PROCESS_REFS="$(printf '%s\n' "$PROCESS_REFS" \
+    | grep -v '^Sources/Elysium/RealityDerivedM.swift:.*Process()' || true)"
+if [ -n "$UNAPPROVED_PROCESS_REFS" ]; then
+    printf '%s\n' "$UNAPPROVED_PROCESS_REFS"
+    fail "dynamic process/loading API reference found outside the fixed Arnis adapter"
 fi
 
 if grep -RInE 'AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----|xox[baprs]-[0-9A-Za-z-]+' . \

@@ -1,16 +1,79 @@
 import Darwin
+import AppKit
 import CryptoKit
 import Foundation
+import Metal
 import XCTest
 @testable import Elysium
 @testable import ElysiumCore
 
 final class ResourcePackHardeningTests: XCTestCase {
+    private final class SortInteractionHost: GameHost {
+        var uiSounds = 0
+        func hasScreen() -> Bool { false }; func screenPausesGame() -> Bool { false }
+        func openScreen(_ kind: String, _ data: ScreenData?) {}; func openTrading(_ villager: Mob) {}
+        func openVehicleChest(_ kind: String, _ vehicle: Entity) {}; func openChat(_ prefix: String) {}
+        func openDeathScreen(_ message: String) {}; func openPauseScreen() {}; func openTitleScreen() {}
+        func closeAllScreens() {}; func releasePointer() {}; func capturePointer() {}
+        func showActionBar(_ text: String, _ time: Int) {}; func pushChat(_ line: String) {}
+        func pushToast(_ adv: AdvancementDef) {}; func setBossBars(_ bars: [BossBarInfo]) {}
+        func playSound(_ name: String, _ x: Double, _ y: Double, _ z: Double, _ volume: Double, _ pitch: Double) {}
+        func playUI(_ name: String) { uiSounds += 1 }
+        func setAudioEnvironment(_ underwater: Bool, _ caveFactor: Double) {}
+        func setAudioListener(_ x: Double, _ y: Double, _ z: Double, _ yaw: Double) {}
+        func tickMusic(_ mood: String, _ enabled: Bool) {}; func stopDisc() {}
+        func addParticles(_ type: String, _ x: Double, _ y: Double, _ z: Double, _ count: Int, _ spread: Double, _ cell: Int) {}
+        func spawnPrecipitation(_ kind: String, _ x: Double, _ y: Double, _ z: Double, _ groundY: Double) {}
+        func uploadMesh(_ cx: Int, _ sy: Int, _ cz: Int, _ minY: Int, _ mesh: MeshOutput) {}
+        func removeChunkMeshes(_ cx: Int, _ cz: Int, _ sections: Int) {}; func clearAllSections() {}
+    }
     private func asymmetricPNG() throws -> Data {
         // Literal PNG scanlines, independent of Core Graphics: authored top is
         // red/green and authored bottom is blue/yellow (PNG filter byte 0).
         try XCTUnwrap(Data(base64Encoded:
             "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR42mP4z8DwHwyBNBAw/AcAR8oI+FuapL4AAAAASUVORK5CYII="))
+    }
+
+    @MainActor
+    func testShowMinimapPreferenceIsKeyboardAndAccessibilityReachable() throws {
+        if blockDefs.isEmpty { registerAllBlocks() }
+        if itemDefs.isEmpty { registerAllItems() }
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let ui = UIManager(cv: UICanvas(device: device))
+        ui.resize(480, 270, 1)
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elysium-minimap-settings-\(UUID().uuidString).sqlite")
+        let settingsDirectory = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("elysium-minimap-settings-\(UUID().uuidString)",
+                                   isDirectory: true)
+        let game = GameCore(
+            db: try SaveDB.open(databaseURL: databaseURL, migrateLegacy: false),
+            localSettingsStore: LocalSettingsStore(directoryURL: settingsDirectory))
+        defer {
+            try? FileManager.default.removeItem(at: databaseURL)
+            try? FileManager.default.removeItem(at: settingsDirectory)
+        }
+        let screen = SettingsScreen()
+        ui.open(screen, game)
+
+        let descriptor = try XCTUnwrap(screen.textAccessibilityDescriptors(ui, game)
+            .first { $0.id == "video.show-minimap" })
+        XCTAssertEqual(descriptor.label, "Show Minimap: ON")
+        XCTAssertTrue(descriptor.enabled)
+        XCTAssertTrue(descriptor.actionable)
+
+        XCTAssertTrue(screen.focusTextAccessibilityElement("video.fullscreen", ui, game))
+        let tab = ElysiumKeyEvent(
+            terminal: try XCTUnwrap(ElysiumTerminalKey(rawValue: "Tab")),
+            modifiers: [], isRepeat: false, routingSerial: 1)
+        XCTAssertTrue(screen.onKeyEvent(ui, game, tab))
+        XCTAssertEqual(screen.textAccessibilityDescriptors(ui, game)
+            .first(where: { $0.focused })?.id, "video.show-minimap")
+
+        XCTAssertTrue(screen.performTextAccessibilityAction("video.show-minimap", ui, game))
+        XCTAssertFalse(game.settings.showMinimap)
+        XCTAssertEqual(screen.textAccessibilityDescriptors(ui, game)
+            .first(where: { $0.id == "video.show-minimap" })?.label, "Show Minimap: OFF")
     }
 
     func testDecodePNGNormalizesVisualTopRowOnce() throws {
@@ -120,38 +183,632 @@ final class ResourcePackHardeningTests: XCTestCase {
                            (Double(boundary) * 182 / 7).rounded(), accuracy: 0.001)
         }
 
+        XCTAssertNil(heldOverlayPlan(viewWidth: 159, viewHeight: 120,
+                                     guiVisible: true, firstPerson: true, screenOpen: false,
+                                     attack: 1, usingItem: false, useTicks: 0))
+        XCTAssertNil(heldOverlayPlan(viewWidth: 160, viewHeight: 119,
+                                     guiVisible: true, firstPerson: true, screenOpen: false,
+                                     attack: 1, usingItem: false, useTicks: 0))
+        for dimension in [Double.nan, Double.infinity, -Double.infinity] {
+            XCTAssertNil(heldOverlayPlan(viewWidth: dimension, viewHeight: 180,
+                                         guiVisible: true, firstPerson: true, screenOpen: false,
+                                         attack: 1, usingItem: false, useTicks: 0))
+            XCTAssertNil(heldOverlayPlan(viewWidth: 320, viewHeight: dimension,
+                                         guiVisible: true, firstPerson: true, screenOpen: false,
+                                         attack: 1, usingItem: false, useTicks: 0))
+        }
         XCTAssertNil(heldOverlayPlan(viewWidth: 320, viewHeight: 180,
-                                     hasMainHand: false, guiVisible: true,
+                                     guiVisible: false,
                                      firstPerson: true, screenOpen: false,
                                      attack: 1, usingItem: true, useTicks: 30))
         XCTAssertNil(heldOverlayPlan(viewWidth: 320, viewHeight: 180,
-                                     hasMainHand: true, guiVisible: false,
-                                     firstPerson: true, screenOpen: false,
-                                     attack: 1, usingItem: true, useTicks: 30))
-        XCTAssertNil(heldOverlayPlan(viewWidth: 320, viewHeight: 180,
-                                     hasMainHand: true, guiVisible: true,
+                                     guiVisible: true,
                                      firstPerson: false, screenOpen: false,
                                      attack: 1, usingItem: true, useTicks: 30))
         XCTAssertNil(heldOverlayPlan(viewWidth: 320, viewHeight: 180,
-                                     hasMainHand: true, guiVisible: true,
+                                     guiVisible: true,
                                      firstPerson: true, screenOpen: true,
                                      attack: 1, usingItem: true, useTicks: 30))
-        let idle = heldOverlayPlan(viewWidth: 320, viewHeight: 180,
-                                   hasMainHand: true, guiVisible: true,
+        let idle = try XCTUnwrap(heldOverlayPlan(viewWidth: 320, viewHeight: 180,
+                                   guiVisible: true,
                                    firstPerson: true, screenOpen: false,
-                                   attack: 0, usingItem: false, useTicks: 0)
-        let use = heldOverlayPlan(viewWidth: 320, viewHeight: 180,
-                                  hasMainHand: true, guiVisible: true,
+                                   attack: 1, usingItem: false, useTicks: 0))
+        let midAttack = try XCTUnwrap(heldOverlayPlan(viewWidth: 320, viewHeight: 180,
+                                                        guiVisible: true, firstPerson: true, screenOpen: false,
+                                                        attack: 0.34, usingItem: false, useTicks: 0))
+        let returned = try XCTUnwrap(heldOverlayPlan(viewWidth: 320, viewHeight: 180,
+                                                      guiVisible: true, firstPerson: true, screenOpen: false,
+                                                      attack: 0, usingItem: false, useTicks: 0))
+        let use = try XCTUnwrap(heldOverlayPlan(viewWidth: 320, viewHeight: 180,
+                                  guiVisible: true,
                                   firstPerson: true, screenOpen: false,
-                                  attack: 1, usingItem: true, useTicks: 99)
+                                  attack: 1, usingItem: true, useTicks: 6))
         XCTAssertEqual(idle, heldOverlayPlan(viewWidth: 320, viewHeight: 180,
-                                              hasMainHand: true, guiVisible: true,
+                                              guiVisible: true,
                                               firstPerson: true, screenOpen: false,
-                                              attack: 0, usingItem: false, useTicks: 0))
-        let unwrappedUse = try XCTUnwrap(use)
-        XCTAssertLessThanOrEqual(unwrappedUse.swing, 1)
-        XCTAssertLessThan(unwrappedUse.iconX, 320)
-        XCTAssertLessThan(unwrappedUse.iconY, 180)
+                                              attack: 1, usingItem: false, useTicks: 0))
+        XCTAssertEqual(idle.armX, returned.armX, accuracy: 0.0001)
+        XCTAssertEqual(idle.armY, returned.armY, accuracy: 0.0001)
+        XCTAssertEqual(idle.rotation, returned.rotation, accuracy: 0.0001)
+        XCTAssertEqual(idle.armBaseX, 320, accuracy: 0.0001)
+        XCTAssertEqual(idle.armBaseY, 180, accuracy: 0.0001)
+        XCTAssertEqual(idle.iconSize, 48, accuracy: 0.0001)
+        XCTAssertEqual(idle.armAssetSize, 160, accuracy: 0.0001)
+        XCTAssertEqual(idle.armX - idle.armAssetX,
+                       idle.armAssetSize * 0.361328125, accuracy: 0.0001)
+        XCTAssertEqual(idle.armY - idle.armAssetY,
+                       idle.armAssetSize * 0.498046875, accuracy: 0.0001)
+        XCTAssertEqual(idle.armX - idle.iconX, idle.iconSize * 0.50, accuracy: 0.0001)
+        XCTAssertEqual(idle.armY - idle.iconY, idle.iconSize * 0.68, accuracy: 0.0001)
+        if blockDefs.isEmpty { registerAllBlocks() }
+        if itemDefs.isEmpty { registerAllItems() }
+        let detailedPresentation = heldItemPresentation(
+            for: itemDef(iid("iron_pickaxe")), hasDetailedVisual: true)
+        let detailed = try XCTUnwrap(heldOverlayPlan(
+            viewWidth: 320, viewHeight: 180,
+            guiVisible: true, firstPerson: true, screenOpen: false,
+            attack: 1, usingItem: false, useTicks: 0,
+            presentation: detailedPresentation))
+        XCTAssertEqual(detailed.iconSize, 124.8, accuracy: 0.0001)
+        XCTAssertGreaterThan(detailed.iconSize, idle.iconSize)
+        XCTAssertGreaterThanOrEqual(detailed.iconSize,
+                                    detailed.armAssetSize * 0.75)
+        XCTAssertEqual(detailed.armX - detailed.iconX,
+                       detailed.iconSize * 0.14, accuracy: 0.0001)
+        XCTAssertEqual(detailed.armY - detailed.iconY,
+                       detailed.iconSize * 0.88, accuracy: 0.0001)
+        XCTAssertEqual(detailed.toolPivotX, detailed.iconX + detailed.iconSize / 2,
+                       accuracy: 0.0001)
+        XCTAssertEqual(detailed.toolPivotY, detailed.iconY + detailed.iconSize / 2,
+                       accuracy: 0.0001)
+        let halfSpin = try XCTUnwrap(heldOverlayPlan(
+            viewWidth: 320, viewHeight: 180,
+            guiVisible: true, firstPerson: true, screenOpen: false,
+            attack: 1, usingItem: false, useTicks: 0,
+            presentation: detailedPresentation,
+            equipFlipProgress: 0.5))
+        XCTAssertEqual(halfSpin.toolRotation, .pi, accuracy: 0.0001)
+        XCTAssertNotEqual(halfSpin.armY, detailed.armY, accuracy: 1)
+        XCTAssertGreaterThanOrEqual(detailed.minX, 0)
+        XCTAssertLessThanOrEqual(detailed.maxX, 320)
+        func renderedGrip(_ plan: HeldOverlayPlan) -> (Double, Double) {
+            let dx = plan.armX - plan.assemblyPivotX
+            let dy = plan.armY - plan.assemblyPivotY
+            let c = Foundation.cos(plan.rotation)
+            let s = Foundation.sin(plan.rotation)
+            return (plan.assemblyPivotX + dx * c - dy * s,
+                    plan.assemblyPivotY + dx * s + dy * c)
+        }
+        let idleGrip = renderedGrip(idle)
+        let attackGrip = renderedGrip(midAttack)
+        XCTAssertGreaterThanOrEqual(hypot(attackGrip.0 - idleGrip.0,
+                                         attackGrip.1 - idleGrip.1), 20)
+        XCTAssertGreaterThanOrEqual(abs(midAttack.rotation - idle.rotation), 0.25)
+        XCTAssertLessThan(midAttack.toolScaleY, 0.75)
+        XCTAssertGreaterThanOrEqual(hypot(use.armX - midAttack.armX, use.armY - midAttack.armY), 12)
+        XCTAssertGreaterThanOrEqual(abs(use.rotation - midAttack.rotation), 0.25)
+        XCTAssertGreaterThanOrEqual(hypot(use.armX - idle.armX, use.armY - idle.armY), 12)
+        XCTAssertGreaterThanOrEqual(abs(use.rotation - idle.rotation), 0.25)
+        for (width, height) in [(160.0, 120.0), (320.0, 180.0), (480.0, 270.0)] {
+            for sample in [(1.0, false, 0), (0.5, false, 0), (0.0, false, 0), (1.0, true, 6)] {
+                let candidate = try XCTUnwrap(heldOverlayPlan(
+                    viewWidth: width, viewHeight: height, guiVisible: true, firstPerson: true,
+                    screenOpen: false, attack: sample.0, usingItem: sample.1, useTicks: sample.2),
+                    "missing plan for \(width)x\(height) sample \(sample)")
+                XCTAssertGreaterThanOrEqual(candidate.minX, 0)
+                XCTAssertGreaterThanOrEqual(candidate.minY, 0)
+                XCTAssertLessThanOrEqual(candidate.maxX, width)
+                XCTAssertLessThanOrEqual(candidate.maxY, height)
+                let isResting = !sample.1 && (sample.0 == 0 || sample.0 == 1)
+                if isResting {
+                    XCTAssertFalse(candidate.obscuresCrosshair)
+                }
+                XCTAssertEqual(candidate.armBaseY, height, accuracy: 0.001)
+                XCTAssertGreaterThanOrEqual(candidate.iconSize, 34)
+            }
+        }
+        XCTAssertNotNil(heldOverlayPlan(viewWidth: 160, viewHeight: 120,
+                                        guiVisible: true, firstPerson: true, screenOpen: false,
+                                        attack: .nan, usingItem: false, useTicks: 0,
+                                        presentation: heldItemPresentation(
+                                            for: nil, hasDetailedVisual: false)))
+        let minimap = mapMinimapRect(screenWidth: 776, screenHeight: 475,
+                                     hotbarCenterX: 388, hotbarHalfWidth: 91,
+                                     hotbarTopY: 453)
+        let unobscured = try XCTUnwrap(heldOverlayPlan(
+            viewWidth: 776, viewHeight: 475, guiVisible: true, firstPerson: true,
+            screenOpen: false, attack: 1, usingItem: false, useTicks: 0,
+            rightObstruction: minimap))
+        XCTAssertTrue(unobscured.maxX <= minimap.x || unobscured.minX >= minimap.x + minimap.size ||
+                      unobscured.maxY <= minimap.y || unobscured.minY >= minimap.y + minimap.size)
+        XCTAssertEqual(unobscured.armBaseX, minimap.x - 4, accuracy: 0.001)
+        XCTAssertEqual(unobscured.armBaseY, 475, accuracy: 0.001)
+
+        let hotbarAnchored = try XCTUnwrap(heldOverlayPlan(
+            viewWidth: 776, viewHeight: 475,
+            guiVisible: true, firstPerson: true, screenOpen: false,
+            attack: 1, usingItem: false, useTicks: 0,
+            presentation: detailedPresentation,
+            hotbarRightX: 388 + 91,
+            rightObstruction: minimap))
+        XCTAssertGreaterThan(hotbarAnchored.armX, 388 + 91)
+        XCTAssertFalse(hotbarAnchored.obscuresCrosshair)
+        XCTAssertEqual(hotbarAnchored.wristRotation, -0.42, accuracy: 0.0001)
+        XCTAssertEqual(hotbarAnchored.toolScaleX, 1, accuracy: 0.0001)
+        XCTAssertEqual(hotbarAnchored.toolScaleY, 1, accuracy: 0.0001)
+
+        let installedScaleMinimap = mapMinimapRect(
+            screenWidth: 480, screenHeight: 270,
+            hotbarCenterX: 240, hotbarHalfWidth: 91, hotbarTopY: 248)
+        let installedScaleDetailed = try XCTUnwrap(heldOverlayPlan(
+            viewWidth: 480, viewHeight: 270,
+            guiVisible: true, firstPerson: true, screenOpen: false,
+            attack: 1, usingItem: false, useTicks: 0,
+            presentation: detailedPresentation,
+            rightObstruction: installedScaleMinimap))
+        XCTAssertLessThanOrEqual(installedScaleDetailed.maxX, installedScaleMinimap.x)
+        XCTAssertFalse(installedScaleDetailed.obscuresCrosshair)
+        for phase in stride(from: 0.0, through: 0.9, by: 0.1) {
+            let animated = try XCTUnwrap(heldOverlayPlan(
+                viewWidth: 480, viewHeight: 270,
+                guiVisible: true, firstPerson: true, screenOpen: false,
+                attack: 1, usingItem: false, useTicks: 0,
+                presentation: detailedPresentation,
+                primaryActionProgress: phase,
+                rightObstruction: installedScaleMinimap),
+                "held overlay disappeared at primary-action phase \(phase)")
+            XCTAssertLessThanOrEqual(animated.maxX, installedScaleMinimap.x)
+        }
+    }
+
+    func testHeldPickaxeMaterialAssetsShareOneBoundedDecodableShape() throws {
+        let hashes = [
+            "wooden": "afed6517bcebba4e15eb25ad06ac735f6b2ed5c27cde0a37fd37050f600260d1",
+            "stone": "70cd6b14736c5edda1ba7ddb923da55db83879415e1a504fa33f288c04df7512",
+            "copper": "678aa81424d015268167ed29d5a925966c3369d76c8176c7eba4c3936457e6b5",
+            "iron": "baa468b50ae7a8ca62675f0b50fdbca8add32f9c5e1e1d4f0c81eb9e5156d6f4",
+            "golden": "51252cbc82cb2b60829e4101b1b8f58e38e5d67d095229584660ab863c7c63b6",
+            "diamond": "c33551b610cf3d4e401c9d92953bc1bc69c2886acc6fa107ad886afcfbfa6aa5",
+            "netherite": "89a7778bdf60d0416b6292570524c3ef16cab07ba030fc6cb4026ebbc3cec295",
+        ]
+        var referenceAlpha: [UInt8]?
+        var referenceHandleSamples: [[UInt8]]?
+        var headColors = Set<[UInt8]>()
+        for material in ["wooden", "stone", "copper", "iron", "golden", "diamond", "netherite"] {
+            let itemName = "\(material)_pickaxe"
+            let asset = try XCTUnwrap(heldItemVisualAsset(for: itemName))
+            XCTAssertEqual(asset.itemName, itemName)
+            XCTAssertEqual(asset.provider, "Elysium original procedural voxel art")
+            XCTAssertEqual(asset.modelTaskID, "elysium-diagonal-pickaxe-v1")
+            XCTAssertEqual(asset.sourceSHA256, hashes[material])
+            XCTAssertEqual(asset.width, 96)
+            XCTAssertEqual(asset.height, 96)
+
+            let image = try XCTUnwrap(heldItemVisualImage(for: itemName))
+            XCTAssertEqual(image.width, 96)
+            XCTAssertEqual(image.height, 96)
+            XCTAssertEqual(image.pixels.count, 96 * 96 * 4)
+            let alpha = stride(from: 3, to: image.pixels.count, by: 4)
+                .map { image.pixels[$0] }
+            if let referenceAlpha {
+                XCTAssertEqual(alpha, referenceAlpha,
+                               "\(material) must preserve the shared pickaxe silhouette")
+            } else {
+                referenceAlpha = alpha
+            }
+            let visiblePixels = alpha.count(where: { $0 > 0 })
+            XCTAssertGreaterThan(visiblePixels, 500)
+            XCTAssertLessThan(visiblePixels, 96 * 96)
+
+            func rgbaAt(x: Int, y: Int) -> [UInt8] {
+                let offset = (y * image.width + x) * 4
+                return Array(image.pixels[offset..<(offset + 4)])
+            }
+            let handleSamples = [
+                rgbaAt(x: 5 * 6 + 3, y: 9 * 6 + 3),
+                rgbaAt(x: 2 * 6 + 3, y: 12 * 6 + 3),
+            ]
+            if let referenceHandleSamples {
+                XCTAssertEqual(handleSamples, referenceHandleSamples,
+                               "\(material) must preserve the shared wooden handle")
+            } else {
+                referenceHandleSamples = handleSamples
+            }
+            headColors.insert(rgbaAt(x: 8 * 6 + 3, y: 3 * 6 + 3))
+        }
+        XCTAssertEqual(headColors.count, hashes.count)
+        XCTAssertNil(heldItemVisualAsset(for: "iron_axe"))
+        XCTAssertNil(heldItemVisualImage(for: "iron_axe"))
+    }
+
+    func testHeldItemPresentationProfilesSeparateEmptyToolsFoodAndBlocks() {
+        if blockDefs.isEmpty { registerAllBlocks() }
+        if itemDefs.isEmpty { registerAllItems() }
+
+        let empty = heldItemPresentation(for: nil, hasDetailedVisual: false)
+        XCTAssertEqual(empty.kind, .empty)
+        XCTAssertEqual(empty.armLayer, .empty)
+        XCTAssertFalse(empty.hasItem)
+        XCTAssertFalse(empty.drawsGrip)
+        XCTAssertFalse(empty.performsEquipFlip)
+
+        let tool = heldItemPresentation(
+            for: itemDef(iid("iron_pickaxe")), hasDetailedVisual: true)
+        XCTAssertEqual(tool.kind, .tool)
+        XCTAssertEqual(tool.armLayer, .back)
+        XCTAssertTrue(tool.drawsGrip)
+        XCTAssertTrue(tool.performsEquipFlip)
+        XCTAssertEqual(tool.iconBaseSize, 124.8)
+        XCTAssertEqual(tool.gripAnchorX, 0.14)
+        XCTAssertEqual(tool.gripAnchorY, 0.88)
+        XCTAssertEqual(tool.restRotation, -0.42)
+        XCTAssertLessThan(tool.alphaBounds.minX, tool.alphaBounds.maxX)
+
+        let food = heldItemPresentation(
+            for: itemDef(iid("bread")), hasDetailedVisual: false)
+        XCTAssertEqual(food.kind, .food)
+        XCTAssertTrue(food.drawsGrip)
+        XCTAssertFalse(food.performsEquipFlip)
+
+        let block = heldItemPresentation(
+            for: itemDef(iid("bricks")), hasDetailedVisual: false)
+        XCTAssertEqual(block.kind, .block)
+        XCTAssertTrue(block.drawsGrip)
+
+        let generic = heldItemPresentation(
+            for: itemDef(iid("stick")), hasDetailedVisual: false)
+        XCTAssertEqual(generic.kind, .generic)
+        XCTAssertTrue(generic.drawsGrip)
+    }
+
+    func testPrimaryActionAnimationRepeatsOnlyDuringContinuousHold() throws {
+        var animation = HeldPrimaryActionAnimationState()
+        XCTAssertNil(animation.observe(isHeld: false, at: 2, eligible: true))
+        XCTAssertEqual(animation.observe(isHeld: true, at: 3, eligible: true), 0)
+        XCTAssertEqual(try XCTUnwrap(animation.observe(
+            isHeld: true, at: 3 + HELD_PRIMARY_ACTION_CYCLE_DURATION / 2,
+            eligible: true)), 0.5, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(animation.observe(
+            isHeld: true, at: 3 + HELD_PRIMARY_ACTION_CYCLE_DURATION,
+            eligible: true)), 0, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(animation.observe(
+            isHeld: true, at: 3 + HELD_PRIMARY_ACTION_CYCLE_DURATION * 1.5,
+            eligible: true)), 0.5, accuracy: 0.0001)
+        XCTAssertNil(animation.observe(isHeld: false, at: 4, eligible: true))
+        XCTAssertNil(animation.startedAt)
+        XCTAssertEqual(animation.observe(isHeld: true, at: 5, eligible: true), 0)
+        XCTAssertNil(animation.observe(isHeld: true, at: 5.1, eligible: false))
+        XCTAssertNil(animation.observe(isHeld: true, at: .nan, eligible: true))
+    }
+
+    func testHeldEquipmentFlipTriggersOnceForNewVisibleTool() {
+        var animation = HeldEquipmentAnimationState()
+        XCTAssertEqual(animation.observe(itemID: 4, at: 10, eligible: true), 1)
+        XCTAssertEqual(animation.itemID, 4)
+        XCTAssertNil(animation.flipStartedAt)
+        XCTAssertEqual(animation.observe(itemID: 4, at: 10.1, eligible: true), 1)
+
+        XCTAssertEqual(animation.observe(itemID: 5, at: 11, eligible: true), 0)
+        XCTAssertEqual(animation.observe(itemID: 5,
+                                         at: 11 + HELD_EQUIP_FLIP_DURATION / 2,
+                                         eligible: true), 0.5, accuracy: 0.0001)
+        XCTAssertEqual(animation.observe(itemID: 5,
+                                         at: 11 + HELD_EQUIP_FLIP_DURATION,
+                                         eligible: true), 1, accuracy: 0.0001)
+        XCTAssertNil(animation.flipStartedAt)
+
+        XCTAssertEqual(animation.observe(itemID: nil, at: 12, eligible: true), 1)
+        XCTAssertNil(animation.flipStartedAt)
+        XCTAssertEqual(animation.observe(itemID: 7, at: 13, eligible: false), 1)
+        XCTAssertNil(animation.itemID)
+        XCTAssertEqual(animation.observe(itemID: 7, at: 13.1, eligible: true), 0)
+        XCTAssertEqual(animation.itemID, 7)
+        XCTAssertEqual(animation.observe(itemID: 8, at: 13.2, eligible: true), 0)
+        XCTAssertEqual(animation.itemID, 8)
+        XCTAssertEqual(animation.observe(itemID: 8, at: .nan, eligible: true), 1)
+    }
+
+    func testHeldMotionUsesAsymmetricStrikeAndExactEquipTurn() {
+        let restAtStart = heldMotionPose(attack: 1, usingItem: false, useTicks: 0,
+                                         equipFlipProgress: 1)
+        let restAtEnd = heldMotionPose(attack: 0, usingItem: false, useTicks: 0,
+                                       equipFlipProgress: 1)
+        XCTAssertEqual(restAtStart, restAtEnd)
+        XCTAssertEqual(restAtStart, HeldMotionPose(x: 0, y: 0,
+                                                   armRotation: 0, wristRotation: 0,
+                                                   toolScaleX: 1, toolScaleY: 1,
+                                                   toolRotation: 0))
+
+        let anticipation = heldMotionPose(attack: 0.9, usingItem: false, useTicks: 0,
+                                           equipFlipProgress: 1)
+        let strike = heldMotionPose(attack: 0.34, usingItem: false, useTicks: 0,
+                                    equipFlipProgress: 1)
+        let recovery = heldMotionPose(attack: 0.1, usingItem: false, useTicks: 0,
+                                      equipFlipProgress: 1)
+        XCTAssertGreaterThan(anticipation.x, 0)
+        XCTAssertLessThan(anticipation.y, 0)
+        XCTAssertGreaterThan(anticipation.armRotation, 0)
+        XCTAssertGreaterThan(anticipation.wristRotation, 0)
+        XCTAssertLessThan(strike.x, -6)
+        XCTAssertGreaterThan(strike.y, 4)
+        XCTAssertLessThan(strike.armRotation, -0.25)
+        XCTAssertLessThan(strike.wristRotation, -0.13)
+        XCTAssertGreaterThan(strike.toolScaleX, 1)
+        XCTAssertLessThan(strike.toolScaleY, 0.75)
+        XCTAssertLessThan(abs(recovery.x), abs(strike.x))
+        XCTAssertLessThan(abs(recovery.y), abs(strike.y))
+        XCTAssertLessThan(abs(recovery.armRotation), abs(strike.armRotation))
+        XCTAssertLessThan(abs(recovery.wristRotation), abs(strike.wristRotation))
+        XCTAssertGreaterThan(recovery.toolScaleY, strike.toolScaleY)
+
+        let halfFlip = heldMotionPose(attack: 1, usingItem: false, useTicks: 0,
+                                      equipFlipProgress: 0.5)
+        XCTAssertEqual(halfFlip.toolRotation, .pi, accuracy: 0.0001)
+        XCTAssertEqual(halfFlip.wristRotation, 0, accuracy: 0.0001)
+        XCTAssertEqual(halfFlip.toolScaleX, 1, accuracy: 0.0001)
+        XCTAssertEqual(halfFlip.toolScaleY, 1, accuracy: 0.0001)
+        XCTAssertGreaterThan(halfFlip.y, 5.9)
+        let completedFlip = heldMotionPose(attack: 1, usingItem: false, useTicks: 0,
+                                           equipFlipProgress: 1)
+        XCTAssertEqual(completedFlip.toolRotation, 0, accuracy: 0.0001)
+        let repeatedStrike = heldMotionPose(
+            attack: 1, usingItem: false, useTicks: 0,
+            equipFlipProgress: 1, primaryActionProgress: 0.66)
+        XCTAssertLessThan(repeatedStrike.x, -6)
+        XCTAssertGreaterThan(repeatedStrike.y, 4)
+        XCTAssertLessThan(repeatedStrike.armRotation, -0.25)
+        XCTAssertLessThan(repeatedStrike.wristRotation, -0.13)
+        XCTAssertLessThan(repeatedStrike.toolScaleY, 0.75)
+        let invalid = heldMotionPose(attack: .nan, usingItem: false, useTicks: 0,
+                                     equipFlipProgress: .nan)
+        XCTAssertTrue(invalid.x.isFinite)
+        XCTAssertTrue(invalid.y.isFinite)
+        XCTAssertTrue(invalid.armRotation.isFinite)
+        XCTAssertTrue(invalid.wristRotation.isFinite)
+        XCTAssertTrue(invalid.toolScaleX.isFinite)
+        XCTAssertTrue(invalid.toolScaleY.isFinite)
+        XCTAssertTrue(invalid.toolRotation.isFinite)
+    }
+
+    func testMeshyFirstPersonArmLayersAreBoundedAlignedAndDecodable() throws {
+        let expectedHashes: [FirstPersonArmLayer: String] = [
+            .empty: "d0de00e98d902ef816c3ae8e2e1255ee195ce744ab7be287b1963ed083001157",
+            .back: "999cfb7f5363fc38401bba9c1d314f93f7aaae747451748508ab2d393c4e1feb",
+            .grip: "8eaaefb92e313c8764551ada7423ff594e40e297319b121b19907f1bf1baddea",
+        ]
+        for layer in FirstPersonArmLayer.allCases {
+            let asset = try XCTUnwrap(firstPersonArmVisualAsset(layer))
+            XCTAssertEqual(asset.layer, layer)
+            if layer == .empty {
+                XCTAssertEqual(asset.provider, "OpenAI image generation from Meshy reference")
+            } else {
+                XCTAssertEqual(asset.provider, "Meshy")
+            }
+            XCTAssertEqual(asset.modelTaskID, "019f9cba-3f87-7b50-925b-ff839ba94493")
+            XCTAssertEqual(asset.sourceSHA256, expectedHashes[layer])
+            XCTAssertEqual(asset.width, 256)
+            XCTAssertEqual(asset.height, 256)
+
+            let image = try XCTUnwrap(firstPersonArmVisualImage(layer))
+            XCTAssertEqual(image.width, 256)
+            XCTAssertEqual(image.height, 256)
+            XCTAssertEqual(image.pixels.count, 256 * 256 * 4)
+            let visible = stride(from: 3, to: image.pixels.count, by: 4)
+                .filter { image.pixels[$0] > 0 }.count
+            let minimumVisible = layer == .back ? 4_000 : (layer == .empty ? 5_000 : 300)
+            XCTAssertGreaterThan(visible, minimumVisible)
+            XCTAssertLessThan(visible, 256 * 256)
+        }
+    }
+
+    func testContainerSortLayoutAndCommitGuards() throws {
+        let normal = containerSortPlacement(viewWidth: 480, viewHeight: 270, panelWidth: 176, panelHeight: 166)
+        let normalButton = try XCTUnwrap(normal.button)
+        let normalHint = try XCTUnwrap(normal.hint)
+        XCTAssertEqual(normalButton.w, 68); XCTAssertEqual(normalButton.h, 20)
+        XCTAssertEqual(normalHint.w, 32); XCTAssertEqual(normalHint.h, 20)
+        XCTAssertTrue(normalButton.inside(480, 270, margin: 4))
+        XCTAssertTrue(normalHint.inside(480, 270, margin: 4))
+        XCTAssertFalse(normalButton.intersects(ContainerSortRect(x: normal.panelX, y: normal.panelY, w: 176, h: 166)))
+        XCTAssertFalse(normalHint.intersects(ContainerSortRect(x: normal.panelX, y: normal.panelY, w: 176, h: 166)))
+        let narrow = containerSortPlacement(viewWidth: 380, viewHeight: 240, panelWidth: 176, panelHeight: 222)
+        XCTAssertNotNil(narrow.button); XCTAssertNil(narrow.hint)
+        let rail = containerSortPlacement(viewWidth: 256, viewHeight: 270, panelWidth: 176, panelHeight: 166)
+        XCTAssertEqual(rail.panelX, 76); XCTAssertEqual(rail.button?.x, 4); XCTAssertNil(rail.hint)
+        let top = containerSortPlacement(viewWidth: 255, viewHeight: 194, panelWidth: 176, panelHeight: 166)
+        XCTAssertEqual(top.panelY, 28); XCTAssertEqual(top.button?.y, 4)
+        let unsupported = containerSortPlacement(viewWidth: 255, viewHeight: 193, panelWidth: 176, panelHeight: 166)
+        XCTAssertFalse(unsupported.supported); XCTAssertNil(unsupported.button); XCTAssertNil(unsupported.hint)
+
+        if blockDefs.isEmpty { registerAllBlocks() }
+        if itemDefs.isEmpty { registerAllItems() }
+        let stone = try XCTUnwrap(iidOpt("stone"))
+        var exact36 = Array(repeating: ItemStack?(nil), count: 36)
+        exact36[0] = ItemStack(stone, 1)
+        XCTAssertTrue(commitPlayerInventorySort(&exact36))
+        var invalidPlayer = exact36
+        invalidPlayer[0] = ItemStack(-1, 1)
+        let invalidReference = invalidPlayer[0]
+        XCTAssertFalse(commitPlayerInventorySort(&invalidPlayer))
+        XCTAssertTrue(invalidPlayer[0] === invalidReference)
+        var wrongCount = Array(repeating: ItemStack?(nil), count: 35)
+        XCTAssertFalse(commitPlayerInventorySort(&wrongCount))
+
+        var gets = 0, writes = 0
+        let invalid: [ItemStack?] = [ItemStack(-1, 1)]
+        XCTAssertFalse(commitContainerSort(readOnly: false, isLANClientWorld: true, slotCount: 1,
+                                           snapshot: { gets += 1; return invalid }, set: { _, _ in writes += 1 }))
+        XCTAssertEqual(gets, 0); XCTAssertEqual(writes, 0)
+        XCTAssertFalse(commitContainerSort(readOnly: true, isLANClientWorld: false, slotCount: 1,
+                                           snapshot: { gets += 1; return invalid }, set: { _, _ in writes += 1 }))
+        XCTAssertEqual(gets, 0); XCTAssertEqual(writes, 0)
+        XCTAssertFalse(commitContainerSort(readOnly: false, isLANClientWorld: false, slotCount: 1,
+                                           snapshot: { gets += 1; return invalid }, set: { _, _ in writes += 1 }))
+        XCTAssertEqual(gets, 1); XCTAssertEqual(writes, 0)
+
+        let apple = try XCTUnwrap(iidOpt("apple"))
+        var local: [ItemStack?] = [ItemStack(stone, 1), ItemStack(apple, 2), nil]
+        var localWrites = 0
+        XCTAssertTrue(commitContainerSort(readOnly: false, isLANClientWorld: false, slotCount: 3,
+                                          snapshot: { local }, set: { index, stack in
+                                              localWrites += 1; local[index] = stack
+                                          }))
+        XCTAssertEqual(localWrites, 3)
+        XCTAssertEqual(local[0]?.id, apple)
+        XCTAssertEqual(local[1]?.id, stone)
+        XCTAssertNil(local[2])
+        localWrites = 0
+        XCTAssertFalse(commitContainerSort(readOnly: false, isLANClientWorld: false, slotCount: 2,
+                                           snapshot: { local }, set: { _, _ in localWrites += 1 }))
+        XCTAssertEqual(localWrites, 0)
+    }
+
+    func testSortPointerBoundaryAndPairedContainerCommit() throws {
+        let frame = ContainerSortRect(x: 10, y: 20, w: 68, h: 20)
+        func pointer(_ type: NSEvent.EventType, _ button: Int, _ appKitButton: Int) -> ScreenPointerEvent {
+            ScreenPointerEvent(eventType: type, button: button, appKitButtonNumber: appKitButton,
+                               clickCount: 1, windowNumber: 1, eventNumber: 1, modifierFlags: [])
+        }
+        XCTAssertEqual(containerSortPointerRoute(frame: frame, x: 12, y: 22,
+                                                 event: pointer(.leftMouseDown, 0, 0)), .delegatePrimary)
+        XCTAssertEqual(containerSortPointerRoute(frame: frame, x: 12, y: 22,
+                                                 event: pointer(.rightMouseDown, 2, 1)), .consume)
+        XCTAssertEqual(containerSortPointerRoute(frame: frame, x: 12, y: 22,
+                                                 event: pointer(.otherMouseDown, 1, 2)), .consume)
+        XCTAssertEqual(containerSortPointerRoute(frame: frame, x: 9, y: 22,
+                                                 event: pointer(.leftMouseDown, 0, 0)), .miss)
+
+        if blockDefs.isEmpty { registerAllBlocks() }
+        if itemDefs.isEmpty { registerAllItems() }
+        let stone = try XCTUnwrap(iidOpt("stone"))
+        let apple = try XCTUnwrap(iidOpt("apple"))
+        var firstHalf: [ItemStack?] = [ItemStack(stone, 1), nil]
+        var secondHalf: [ItemStack?] = [ItemStack(apple, 2), nil]
+        let playerRows: [ItemStack?] = [ItemStack(stone, 9)]
+        var writes = 0
+        XCTAssertTrue(commitContainerSort(readOnly: false, isLANClientWorld: false, slotCount: 4,
+                                          snapshot: { firstHalf + secondHalf }, set: { index, stack in
+                                              writes += 1
+                                              if index < 2 { firstHalf[index] = stack } else { secondHalf[index - 2] = stack }
+                                          }))
+        XCTAssertEqual(writes, 4)
+        XCTAssertEqual(firstHalf[0]?.id, apple, "paired halves sort as one logical region")
+        XCTAssertEqual(firstHalf[1]?.id, stone)
+        XCTAssertNil(secondHalf[0]); XCTAssertNil(secondHalf[1])
+        XCTAssertEqual(playerRows[0]?.count, 9, "displayed player rows are excluded")
+
+        secondHalf = [ItemStack(-1, 1), nil]
+        writes = 0
+        XCTAssertFalse(commitContainerSort(readOnly: false, isLANClientWorld: false, slotCount: 4,
+                                           snapshot: { firstHalf + secondHalf }, set: { _, _ in writes += 1 }))
+        XCTAssertEqual(writes, 0, "an invalid stack in the paired second half rejects before writes")
+    }
+
+    func testInventoryScreenSortRoutesPointerKeyAndAccessibility() throws {
+        if blockDefs.isEmpty { registerAllBlocks() }
+        if itemDefs.isEmpty { registerAllItems() }
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let ui = UIManager(cv: UICanvas(device: device))
+        ui.resize(480, 270, 1)
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elysium-sort-ui-\(UUID().uuidString).sqlite")
+        let game = GameCore(db: try SaveDB.open(databaseURL: databaseURL, migrateLegacy: false))
+        defer { try? FileManager.default.removeItem(at: databaseURL) }
+        let world = World(dim: .overworld, seed: 91)
+        game.player = Player(world: world)
+        let apple = try XCTUnwrap(iidOpt("apple")), stone = try XCTUnwrap(iidOpt("stone"))
+        game.player.inventory[0] = ItemStack(stone, 1)
+        game.player.inventory[1] = ItemStack(apple, 1)
+        game.player.selectedSlot = 5
+        game.player.xp = 37; game.player.xpLevel = 4; game.player.xpProgress = 0.25
+        game.player.armor[0] = ItemStack(stone, 7)
+        game.player.offHand = ItemStack(stone, 8)
+        let host = SortInteractionHost(); game.host = host
+        let screen = InventoryScreen(); screen.craftGrid[0] = ItemStack(stone, 6); screen.craftResult = ItemStack(apple, 4)
+        ui.cursorStack = ItemStack(stone, 3)
+        ui.open(screen, game)
+        let descriptor = try XCTUnwrap(screen.textAccessibilityDescriptors(ui, game).first { $0.id == "inventory.sort" })
+        func pointer(_ type: NSEvent.EventType, _ button: Int, _ appKitButton: Int) -> ScreenPointerEvent {
+            ScreenPointerEvent(eventType: type, button: button, appKitButtonNumber: appKitButton,
+                               clickCount: 1, windowNumber: 1, eventNumber: 17, modifierFlags: [])
+        }
+        XCTAssertTrue(screen.onPointerDown(ui, game, descriptor.frame.x + 1, descriptor.frame.y + 1,
+                                           pointer(.leftMouseDown, 0, 0)))
+        XCTAssertEqual(game.player.inventory[0]?.id, apple); XCTAssertEqual(host.uiSounds, 1)
+        XCTAssertEqual(game.player.armor[0]?.count, 7); XCTAssertEqual(game.player.offHand?.count, 8)
+        XCTAssertEqual(screen.craftGrid[0]?.count, 6); XCTAssertEqual(screen.craftResult?.count, 4)
+        XCTAssertEqual(ui.cursorStack?.count, 3); XCTAssertEqual(game.player.selectedSlot, 5)
+        XCTAssertEqual(game.player.xp, 37); XCTAssertEqual(game.player.xpLevel, 4); XCTAssertEqual(game.player.xpProgress, 0.25)
+        let sorted = game.player.inventory
+        XCTAssertTrue(screen.onPointerDown(ui, game, descriptor.frame.x + 1, descriptor.frame.y + 1,
+                                           pointer(.rightMouseDown, 2, 1)))
+        XCTAssertTrue(screen.onPointerDown(ui, game, descriptor.frame.x + 1, descriptor.frame.y + 1,
+                                           pointer(.otherMouseDown, 1, 2)))
+        XCTAssertEqual(game.player.inventory.map { $0?.id }, sorted.map { $0?.id }); XCTAssertEqual(host.uiSounds, 1)
+        game.player.inventory.swapAt(0, 1)
+        let commandS = ElysiumKeyEvent(terminal: try XCTUnwrap(ElysiumTerminalKey(rawValue: "KeyS")),
+                                       modifiers: [.command], isRepeat: false, routingSerial: 1)
+        XCTAssertTrue(screen.onKeyEvent(ui, game, commandS)); XCTAssertEqual(game.player.inventory[0]?.id, apple)
+        XCTAssertEqual(host.uiSounds, 1)
+        game.player.inventory.swapAt(0, 1)
+        XCTAssertFalse(screen.onKeyEvent(ui, game, ElysiumKeyEvent(terminal: try XCTUnwrap(ElysiumTerminalKey(rawValue: "KeyS")), modifiers: [.command, .shift], isRepeat: false, routingSerial: 2)))
+        XCTAssertFalse(screen.onKeyEvent(ui, game, ElysiumKeyEvent(terminal: try XCTUnwrap(ElysiumTerminalKey(rawValue: "KeyS")), modifiers: [.command], isRepeat: true, routingSerial: 3)))
+        XCTAssertEqual(game.player.inventory[0]?.id, stone)
+        let textOwner = TextField(0, 0, 20, 10)
+        textOwner.focused = true; screen.fields.append(textOwner)
+        XCTAssertFalse(screen.onKeyEvent(ui, game, commandS))
+        XCTAssertEqual(game.player.inventory[0]?.id, stone, "text ownership keeps Command-S out of sorting")
+        screen.fields.removeAll()
+        XCTAssertTrue(screen.focusTextAccessibilityElement("inventory.sort", ui, game))
+        XCTAssertTrue(screen.performTextAccessibilityAction("inventory.sort", ui, game))
+        XCTAssertEqual(game.player.inventory[0]?.id, apple); XCTAssertEqual(host.uiSounds, 1)
+        screen.readOnlySlots = true
+        game.player.inventory.swapAt(0, 1)
+        XCTAssertTrue(screen.onPointerDown(ui, game, descriptor.frame.x + 1, descriptor.frame.y + 1,
+                                           pointer(.leftMouseDown, 0, 0)))
+        XCTAssertFalse(screen.focusTextAccessibilityElement("inventory.sort", ui, game))
+        XCTAssertFalse(screen.performTextAccessibilityAction("inventory.sort", ui, game))
+        XCTAssertEqual(game.player.inventory[0]?.id, stone); XCTAssertEqual(host.uiSounds, 1)
+    }
+
+    @MainActor
+    func testLANClientChestScreenSortRoutesAreSilentNoOps() throws {
+        if blockDefs.isEmpty { registerAllBlocks() }
+        if itemDefs.isEmpty { registerAllItems() }
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let ui = UIManager(cv: UICanvas(device: device)); ui.resize(480, 270, 1)
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elysium-lan-chest-sort-\(UUID().uuidString).sqlite")
+        let game = GameCore(db: try SaveDB.open(databaseURL: databaseURL, migrateLegacy: false))
+        defer { try? FileManager.default.removeItem(at: databaseURL) }
+        game.enterLANClientWorld(LANWorldSummary(worldID: "sort-host", worldName: "Sort Host", seed: 97,
+                                                  gameMode: GameMode.survival, difficulty: 2,
+                                                  dimension: Dim.overworld.rawValue, playerCount: 2))
+        let host = SortInteractionHost(); game.host = host
+        var captures = 0; game.lanContainerEditHandler = { _ in captures += 1 }
+        let stone = try XCTUnwrap(iidOpt("stone")), apple = try XCTUnwrap(iidOpt("apple"))
+        let chest = makeContainerBE(2, 64, 2, 27)
+        let stoneStack = ItemStack(stone, 1), appleStack = ItemStack(apple, 2)
+        chest.items?[0] = stoneStack; chest.items?[1] = appleStack
+        let screen = ChestScreen(chest, "Chest"); ui.open(screen, game)
+        let descriptor = try XCTUnwrap(screen.textAccessibilityDescriptors(ui, game).first { $0.id == "chest.sort" })
+        XCTAssertFalse(descriptor.enabled); XCTAssertFalse(descriptor.actionable)
+        XCTAssertTrue(descriptor.help.contains("Sorting is available to the host"))
+        func pointer(_ type: NSEvent.EventType, _ button: Int, _ appKitButton: Int) -> ScreenPointerEvent {
+            ScreenPointerEvent(eventType: type, button: button, appKitButtonNumber: appKitButton,
+                               clickCount: 1, windowNumber: 1, eventNumber: 22, modifierFlags: [])
+        }
+        for event in [pointer(.leftMouseDown, 0, 0), pointer(.rightMouseDown, 2, 1), pointer(.otherMouseDown, 1, 2)] {
+            XCTAssertTrue(screen.onPointerDown(ui, game, descriptor.frame.x + 1, descriptor.frame.y + 1, event))
+        }
+        let keyS = try XCTUnwrap(ElysiumTerminalKey(rawValue: "KeyS"))
+        XCTAssertTrue(screen.onKeyEvent(ui, game, ElysiumKeyEvent(terminal: keyS, modifiers: [.command], isRepeat: false, routingSerial: 21)))
+        XCTAssertFalse(screen.onKeyEvent(ui, game, ElysiumKeyEvent(terminal: keyS, modifiers: [.command, .shift], isRepeat: false, routingSerial: 22)))
+        XCTAssertFalse(screen.onKeyEvent(ui, game, ElysiumKeyEvent(terminal: keyS, modifiers: [.command], isRepeat: true, routingSerial: 23)))
+        XCTAssertFalse(screen.focusTextAccessibilityElement("chest.sort", ui, game))
+        XCTAssertFalse(screen.performTextAccessibilityAction("chest.sort", ui, game))
+        XCTAssertTrue(chest.items?[0] === stoneStack); XCTAssertTrue(chest.items?[1] === appleStack)
+        XCTAssertEqual(host.uiSounds, 0); XCTAssertEqual(captures, 0)
     }
 
     func testTemplateDeleteRequestCapturesNormalizedNameAndClaimsOnce() throws {

@@ -37,6 +37,7 @@ final class LocalSettingsStoreTests: XCTestCase {
         let settings = try value(store.loadSettings())
         XCTAssertEqual(settings.renderDistance, Settings().renderDistance)
         XCTAssertEqual(settings.rpgTutorialVersion, 0)
+        XCTAssertTrue(settings.showMinimap)
 
         let keybinds = try value(store.loadKeybinds())
         XCTAssertEqual(keybinds.count, 25)
@@ -106,6 +107,16 @@ final class LocalSettingsStoreTests: XCTestCase {
         XCTAssertEqual(settings.gamma, 0.75)
         XCTAssertEqual(settings.rpgTutorialVersion, RPG_TUTORIAL_VERSION)
         XCTAssertEqual(store.lastDiagnostics, [LocalSettingsDiagnostic(field: "fov", reason: "invalid value")])
+    }
+
+    func testShowMinimapDefaultsOnAndRoundTripsExplicitOff() throws {
+        let legacyStore = try makeStore()
+        try write(Data("{}".utf8), named: "settings.json", to: legacyStore)
+        XCTAssertTrue(try value(legacyStore.loadSettings()).showMinimap)
+
+        let store = try makeStore()
+        try write(Data(#"{"showMinimap":false}"#.utf8), named: "settings.json", to: store)
+        XCTAssertFalse(try value(store.loadSettings()).showMinimap)
     }
 
     func testSettingsSanitizationStillAppliesAfterTolerantDecode() throws {

@@ -1,0 +1,41 @@
+name: CI Build
+
+# Trigger CI on pull requests when relevant files change, and pushes to main
+on:
+  pull_request:
+    paths:
+      - '.github/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-arnis-linux
+        with:
+          rust-components: clippy,rustfmt
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Check clippy lints
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-arnis-linux
+
+      - name: Build (all targets, all features)
+        run: cargo build --all-targets --all-features --release
+
+      - name: Run unit tests
+        run: cargo test --all-targets --all-features

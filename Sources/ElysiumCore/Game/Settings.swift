@@ -20,6 +20,8 @@ public struct Settings: Codable, Equatable {
     public var guiScale = 0         // 0 auto
     public var maxFps = 120         // 250 = unlimited/vsync-off; opt-in, not the default
     public var entityDistance = 64.0
+    /// Show the always-on compact HUD minimap. The explicit full-map screen remains available.
+    public var showMinimap = true
     // audio
     public var volumes: [String: Double] = [
         "master": 0.8, "music": 0.5, "blocks": 1, "hostile": 1, "friendly": 1,

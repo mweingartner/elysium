@@ -53,6 +53,7 @@ let package = Package(
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("Network"),
                 .linkedFramework("GameController"),
+                .linkedFramework("WebKit"),
             ]
         ),
         // headless smoke tests against the frozen golden baselines

@@ -80,6 +80,53 @@ public struct DimState: Codable {
 /// at packaging time)
 public let ELYSIUM_VERSION = "1.1.0"
 
+/// Finite playable extents offered by the world creator. Terrain is still generated lazily,
+/// so choosing a larger map does not front-load generation or memory use. The maximum is the
+/// largest square whose area stays below Arnis' supported local 250 km² envelope.
+public enum WorldMapSize: String, Codable, CaseIterable, Sendable {
+    case small
+    case medium
+    case large
+    case extraLarge = "extra-large"
+    case max
+
+    public var displayName: String {
+        switch self {
+        case .small: return "Small"
+        case .medium: return "Medium"
+        case .large: return "Large"
+        case .extraLarge: return "Extra-Large"
+        case .max: return "Max"
+        }
+    }
+
+    /// Side length in blocks/metres at Reality Derived scale 1.
+    public var sideBlocks: Int {
+        switch self {
+        case .small: return 1_000
+        case .medium: return 4_000
+        case .large: return 8_000
+        case .extraLarge: return 12_000
+        case .max: return 15_811
+        }
+    }
+
+    public var maximumAreaSquareMetres: Double {
+        switch self {
+        case .small: return 1_000_000
+        case .medium: return 16_000_000
+        case .large: return 64_000_000
+        case .extraLarge: return 144_000_000
+        case .max: return 250_000_000
+        }
+    }
+
+    public var next: WorldMapSize {
+        let values = Self.allCases
+        return values[((values.firstIndex(of: self) ?? 0) + 1) % values.count]
+    }
+}
+
 /// WorldMeta + the global-state extension (baseline WorldRecord extends WorldMeta)
 public struct WorldRecord: Codable {
     public var id: String
@@ -103,6 +150,10 @@ public struct WorldRecord: Codable {
     public var gatewaysSpawned: Int
     public var nextEntityId: Int
     public var rpgSimulationTick: Int
+    public var realityDerivedSource: RealityDerivedWorldSource?
+    public var mapSize: WorldMapSize
+    public var mapCenterX: Int
+    public var mapCenterZ: Int
 
     public var generationSettings: WorldGenerationSettings {
         WorldGenerationSettings(presetID: worldPreset, singleBiomeID: singleBiome,
@@ -111,7 +162,8 @@ public struct WorldRecord: Codable {
 
     public init(id: String, name: String, seed: Int32, gameMode: Int, difficulty: Int,
                 worldPreset: WorldPreset = .normal, singleBiome: Biome = .plains,
-                dungeonDensity: DungeonDensity = .normal) {
+                dungeonDensity: DungeonDensity = .normal,
+                mapSize: WorldMapSize = .medium) {
         self.id = id
         self.name = name
         self.seed = seed
@@ -131,12 +183,17 @@ public struct WorldRecord: Codable {
         gatewaysSpawned = 0
         nextEntityId = 1
         rpgSimulationTick = 0
+        realityDerivedSource = nil
+        self.mapSize = mapSize
+        mapCenterX = 0
+        mapCenterZ = 0
     }
 
     enum CodingKeys: String, CodingKey {
         case id, name, seed, gameMode, difficulty, lastPlayed, version, dims
         case spawnX, spawnY, spawnZ, worldPreset, singleBiome, dungeonDensity, gameRules
-        case dragonKilled, gatewaysSpawned, nextEntityId, rpgSimulationTick
+        case dragonKilled, gatewaysSpawned, nextEntityId, rpgSimulationTick, realityDerivedSource
+        case mapSize, mapCenterX, mapCenterZ
     }
 
     public init(from decoder: Decoder) throws {
@@ -165,6 +222,11 @@ public struct WorldRecord: Codable {
         } else {
             rpgSimulationTick = max(0, min(RPG_MAX_COUNTER, dims.values.map(\.time).max() ?? 0))
         }
+        realityDerivedSource = try c.decodeIfPresent(
+            RealityDerivedWorldSource.self, forKey: .realityDerivedSource)
+        mapSize = try c.decodeIfPresent(WorldMapSize.self, forKey: .mapSize) ?? .max
+        mapCenterX = try c.decodeIfPresent(Int.self, forKey: .mapCenterX) ?? 0
+        mapCenterZ = try c.decodeIfPresent(Int.self, forKey: .mapCenterZ) ?? 0
     }
 
     private static func decodeDungeonDensity(from c: KeyedDecodingContainer<CodingKeys>) -> DungeonDensity {
@@ -198,6 +260,10 @@ public struct WorldRecord: Codable {
         try c.encode(gatewaysSpawned, forKey: .gatewaysSpawned)
         try c.encode(nextEntityId, forKey: .nextEntityId)
         try c.encode(max(0, min(RPG_MAX_COUNTER, rpgSimulationTick)), forKey: .rpgSimulationTick)
+        try c.encodeIfPresent(realityDerivedSource, forKey: .realityDerivedSource)
+        try c.encode(mapSize, forKey: .mapSize)
+        try c.encode(mapCenterX, forKey: .mapCenterX)
+        try c.encode(mapCenterZ, forKey: .mapCenterZ)
     }
 }
 
@@ -283,6 +349,276 @@ func encodeLegacyVCK(_ record: ChunkRecord) -> Data? {
     return data
 }
 
+struct CompactChunkRunV2 {
+    var length: UInt16
+    var value: UInt16
+}
+
+struct CompactChunkSectionV2 {
+    var y: Int8
+    var runs: [CompactChunkRunV2]
+}
+
+private func chunkTailJSON(blockEntities: [BlockEntityData]?, entities: [[String: Any]]) -> Data? {
+    var tail: [String: Any] = ["entities": entities.map(sanitizeJSON)]
+    if let blockEntities,
+       let encoded = try? JSONEncoder().encode(blockEntities),
+       let object = try? JSONSerialization.jsonObject(with: encoded) {
+        tail["blockEntities"] = object
+    }
+    return try? JSONSerialization.data(withJSONObject: tail)
+}
+
+/// Section-compressed chunk container used by large Reality Derived imports.
+/// VCK1 remains readable and continues to be used by ordinary incremental saves.
+///
+/// Layout: "VCK2" | flags | sectionCount | sections | biomeEncoding | biomePayload | JSON.
+/// Each section is independently uniform, RLE, or raw, so hostile or unusually noisy data
+/// can never make compression expand without bound.
+func encodeCompactVCK2(
+    dimension: Int,
+    sections: [CompactChunkSectionV2],
+    biomes: [UInt8],
+    blockEntities: [BlockEntityData]? = nil,
+    entities: [[String: Any]] = []
+) -> Data? {
+    guard let dim = Dim(rawValue: dimension) else { return nil }
+    let info = dimInfo(dim)
+    let minimumSection = Int8(clamping: floorDiv(info.minY, 16))
+    let maximumSection = Int8(clamping: floorDiv(info.minY + info.height - 1, 16))
+    let expectedBiomes = 4 * 4 * ((info.height + 3) / 4)
+    guard sections.count <= Int(UInt8.max), biomes.count == expectedBiomes,
+          let json = chunkTailJSON(blockEntities: blockEntities, entities: entities) else { return nil }
+
+    var data = Data("VCK2".utf8)
+    data.append(1)
+    func appendU16(_ value: UInt16) {
+        var little = value.littleEndian
+        withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
+    }
+    func appendU32(_ value: Int) -> Bool {
+        guard let exact = UInt32(exactly: value) else { return false }
+        var little = exact.littleEndian
+        withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
+        return true
+    }
+
+    data.append(UInt8(sections.count))
+    var priorSection: Int8?
+    for section in sections {
+        guard section.y >= minimumSection, section.y <= maximumSection,
+              priorSection.map({ $0 < section.y }) ?? true,
+              !section.runs.isEmpty else { return nil }
+        priorSection = section.y
+        var total = 0
+        for run in section.runs {
+            guard run.length > 0, total <= 4096 - Int(run.length),
+                  Int(run.value >> 4) < blockDefs.count else { return nil }
+            total += Int(run.length)
+        }
+        guard total == 4096 else { return nil }
+        data.append(UInt8(bitPattern: section.y))
+        if section.runs.count == 1 {
+            data.append(0)
+            guard appendU32(2) else { return nil }
+            appendU16(section.runs[0].value)
+        } else if 2 + section.runs.count * 4 < 8_192 {
+            data.append(1)
+            guard appendU32(2 + section.runs.count * 4),
+                  let runCount = UInt16(exactly: section.runs.count) else { return nil }
+            appendU16(runCount)
+            for run in section.runs {
+                appendU16(run.length)
+                appendU16(run.value)
+            }
+        } else {
+            data.append(2)
+            guard appendU32(8_192) else { return nil }
+            for run in section.runs {
+                for _ in 0..<run.length { appendU16(run.value) }
+            }
+        }
+    }
+
+    var biomeRuns: [(UInt16, UInt8)] = []
+    for biome in biomes {
+        if let last = biomeRuns.last, last.1 == biome, last.0 < UInt16.max {
+            biomeRuns[biomeRuns.count - 1].0 += 1
+        } else {
+            biomeRuns.append((1, biome))
+        }
+    }
+    if biomeRuns.count == 1 {
+        data.append(0)
+        guard appendU32(1) else { return nil }
+        data.append(biomeRuns[0].1)
+    } else if 2 + biomeRuns.count * 3 < biomes.count {
+        data.append(1)
+        guard appendU32(2 + biomeRuns.count * 3),
+              let runCount = UInt16(exactly: biomeRuns.count) else { return nil }
+        appendU16(runCount)
+        for run in biomeRuns {
+            appendU16(run.0)
+            data.append(run.1)
+        }
+    } else {
+        data.append(2)
+        guard appendU32(biomes.count) else { return nil }
+        data.append(contentsOf: biomes)
+    }
+    guard appendU32(json.count) else { return nil }
+    data.append(json)
+    return data
+}
+
+func encodeCompactVCK2(_ record: ChunkRecord) -> Data? {
+    guard let dim = Dim(rawValue: record.dim) else { return nil }
+    guard let blocks = record.blocks, let biomes = record.biomes else {
+        // Entity-only records remain in the established compact VCK1 form.
+        return encodeLegacyVCK(record)
+    }
+    let info = dimInfo(dim)
+    guard blocks.count == CHUNK_W * CHUNK_W * info.height else { return nil }
+    var sections: [CompactChunkSectionV2] = []
+    sections.reserveCapacity((info.height + 15) / 16)
+    for sectionIndex in 0..<((info.height + 15) / 16) {
+        let start = sectionIndex * 4096
+        let end = min(start + 4096, blocks.count)
+        guard end - start == 4096 else { return nil }
+        var runs: [CompactChunkRunV2] = []
+        var current = blocks[start]
+        var length = 1
+        for index in (start + 1)..<end {
+            let value = blocks[index]
+            if value == current, length < Int(UInt16.max) {
+                length += 1
+            } else {
+                runs.append(CompactChunkRunV2(length: UInt16(length), value: current))
+                current = value
+                length = 1
+            }
+        }
+        runs.append(CompactChunkRunV2(length: UInt16(length), value: current))
+        if runs.count == 1, runs[0].value == 0 { continue }
+        sections.append(CompactChunkSectionV2(
+            y: Int8(clamping: floorDiv(info.minY, 16) + sectionIndex), runs: runs))
+    }
+    return encodeCompactVCK2(
+        dimension: record.dim, sections: sections, biomes: biomes,
+        blockEntities: record.blockEntities, entities: record.entities)
+}
+
+private func decodeCompactVCK2(
+    _ data: Data, key: String, worldId: String, dimension: Int, chunkX: Int, chunkZ: Int
+) -> ChunkRecord? {
+    guard data.count >= 15, data.prefix(4) == Data("VCK2".utf8),
+          let dim = Dim(rawValue: dimension) else { return nil }
+    let info = dimInfo(dim)
+    var offset = 4
+    func readU8() -> UInt8? {
+        guard offset < data.count else { return nil }
+        defer { offset += 1 }
+        return data[offset]
+    }
+    func readU16() -> UInt16? {
+        guard offset <= data.count - 2 else { return nil }
+        defer { offset += 2 }
+        return UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
+    }
+    func readU32() -> Int? {
+        guard offset <= data.count - 4 else { return nil }
+        defer { offset += 4 }
+        return Int(data[offset]) | (Int(data[offset + 1]) << 8)
+            | (Int(data[offset + 2]) << 16) | (Int(data[offset + 3]) << 24)
+    }
+    guard let flags = readU8(), flags == 1, let sectionCountByte = readU8() else { return nil }
+    let sectionCount = Int(sectionCountByte)
+    guard sectionCount <= (info.height + 15) / 16 else { return nil }
+    var blocks = [UInt16](repeating: 0, count: CHUNK_W * CHUNK_W * info.height)
+    let minimumSection = floorDiv(info.minY, 16)
+    let maximumSection = floorDiv(info.minY + info.height - 1, 16)
+    var priorSection: Int?
+    let maximumBlockID = UInt16(clamping: blockDefs.count)
+    for _ in 0..<sectionCount {
+        guard let rawY = readU8(), let encoding = readU8(), let payloadLength = readU32() else { return nil }
+        let sectionY = Int(Int8(bitPattern: rawY))
+        guard sectionY >= minimumSection, sectionY <= maximumSection,
+              priorSection.map({ $0 < sectionY }) ?? true,
+              payloadLength >= 0, payloadLength <= data.count - offset else { return nil }
+        priorSection = sectionY
+        let payloadEnd = offset + payloadLength
+        var flat = 0
+        func write(_ length: Int, _ rawValue: UInt16) -> Bool {
+            guard length > 0, flat <= 4096 - length else { return false }
+            let value = (rawValue >> 4) < maximumBlockID ? rawValue : 0
+            let base = (sectionY * 16 - info.minY) * 256
+            for index in flat..<(flat + length) { blocks[base + index] = value }
+            flat += length
+            return true
+        }
+        switch encoding {
+        case 0:
+            guard payloadLength == 2, let value = readU16(), write(4096, value) else { return nil }
+        case 1:
+            guard let runCountValue = readU16() else { return nil }
+            let runCount = Int(runCountValue)
+            guard runCount > 0, runCount <= 4096, payloadLength == 2 + runCount * 4 else { return nil }
+            for _ in 0..<runCount {
+                guard let length = readU16(), let value = readU16(), write(Int(length), value) else { return nil }
+            }
+        case 2:
+            guard payloadLength == 8_192 else { return nil }
+            for _ in 0..<4096 {
+                guard let value = readU16(), write(1, value) else { return nil }
+            }
+        default: return nil
+        }
+        guard offset == payloadEnd, flat == 4096 else { return nil }
+    }
+
+    let expectedBiomes = 4 * 4 * ((info.height + 3) / 4)
+    guard let biomeEncoding = readU8(), let biomePayloadLength = readU32(),
+          biomePayloadLength >= 0, biomePayloadLength <= data.count - offset else { return nil }
+    let biomeEnd = offset + biomePayloadLength
+    var biomes: [UInt8] = []
+    biomes.reserveCapacity(expectedBiomes)
+    switch biomeEncoding {
+    case 0:
+        guard biomePayloadLength == 1, let value = readU8() else { return nil }
+        biomes = [UInt8](repeating: value, count: expectedBiomes)
+    case 1:
+        guard let runCountValue = readU16() else { return nil }
+        let runCount = Int(runCountValue)
+        guard runCount > 0, runCount <= expectedBiomes,
+              biomePayloadLength == 2 + runCount * 3 else { return nil }
+        for _ in 0..<runCount {
+            guard let length = readU16(), let value = readU8(),
+                  Int(length) > 0, biomes.count <= expectedBiomes - Int(length) else { return nil }
+            biomes.append(contentsOf: repeatElement(value, count: Int(length)))
+        }
+    case 2:
+        guard biomePayloadLength == expectedBiomes, offset <= data.count - expectedBiomes else { return nil }
+        biomes = Array(data[offset..<(offset + expectedBiomes)])
+        offset += expectedBiomes
+    default: return nil
+    }
+    guard offset == biomeEnd, biomes.count == expectedBiomes,
+          let jsonLength = readU32(), jsonLength >= 0,
+          jsonLength == data.count - offset else { return nil }
+    let json = data.subdata(in: offset..<data.count)
+    guard let tail = try? JSONSerialization.jsonObject(with: json) as? [String: Any] else { return nil }
+    var record = ChunkRecord(
+        key: key, worldId: worldId, dim: dimension, cx: chunkX, cz: chunkZ,
+        blocks: blocks, biomes: biomes)
+    record.entities = tail["entities"] as? [[String: Any]] ?? []
+    if let raw = tail["blockEntities"],
+       let encoded = try? JSONSerialization.data(withJSONObject: raw),
+       let decoded = try? JSONDecoder().decode([BlockEntityData].self, from: encoded) {
+        record.blockEntities = decoded
+    }
+    return record
+}
+
 private func legacyVCKLayout(_ data: Data, dimension: Int) -> (flags: UInt8, json: Range<Int>)? {
     guard data.count >= 9, data.prefix(4) == Data("VCK1".utf8),
           let dim = Dim(rawValue: dimension) else { return nil }
@@ -325,6 +661,11 @@ func validateLegacyVCKStructure(_ data: Data, dimension: Int) -> Bool {
 
 func decodeLegacyVCK(_ data: Data, key: String, worldId: String,
                      dimension: Int, chunkX: Int, chunkZ: Int) -> ChunkRecord? {
+    if data.prefix(4) == Data("VCK2".utf8) {
+        return decodeCompactVCK2(
+            data, key: key, worldId: worldId, dimension: dimension,
+            chunkX: chunkX, chunkZ: chunkZ)
+    }
     guard let layout = legacyVCKLayout(data, dimension: dimension) else { return nil }
     var record = ChunkRecord(key: key, worldId: worldId, dim: dimension,
                              cx: chunkX, cz: chunkZ)
@@ -759,6 +1100,76 @@ public final class SaveDB {
               let row = try? ElysiumWorldStorageRow(id: record.id, json: json,
                                                    lastPlayed: record.lastPlayed) else { return }
         try? withStorageRank { try storage.putWorldRow(row) }
+    }
+
+    @discardableResult
+    public func putRealityDerivedWorld(_ record: WorldRecord, chunks: [ChunkRecord]) -> Bool {
+        guard let encoded = encodeWorldRecordJSON(record),
+              let json = String(data: encoded, encoding: .utf8),
+              let worldRow = try? ElysiumWorldStorageRow(
+                id: record.id, json: json, lastPlayed: record.lastPlayed) else { return false }
+        var rows: [ElysiumChunkStorageRow] = []
+        rows.reserveCapacity(chunks.count)
+        for chunk in chunks {
+            guard chunk.worldId == record.id,
+                  let dimension = Int32(exactly: chunk.dim),
+                  let chunkX = Int32(exactly: chunk.cx),
+                  let chunkZ = Int32(exactly: chunk.cz),
+                  let data = encodeLegacyVCK(chunk),
+                  let key = try? ElysiumChunkStorageKey(
+                    world: record.id, dimension: dimension, chunkX: chunkX, chunkZ: chunkZ),
+                  let row = try? ElysiumChunkStorageRow(key: key, data: data) else { return false }
+            rows.append(row)
+        }
+        return (try? withStorageRank {
+            try storage.importRealityDerivedWorld(world: worldRow, chunks: rows)
+        }) == rows.count + 1
+    }
+
+    /// Streams a validated Arnis exchange directly into one atomic storage transaction.
+    /// At most one source payload and one encoded chunk are resident at a time.
+    @discardableResult
+    public func putRealityDerivedWorldStreaming(
+        _ record: WorldRecord,
+        plan: RealityDerivedImportPlan,
+        progress: @escaping (Int, Int) -> Void = { _, _ in },
+        cancelled: @escaping () -> Bool = { false }
+    ) throws -> Int {
+        guard record.id == plan.worldID,
+              let encoded = encodeWorldRecordJSON(record),
+              let json = String(data: encoded, encoding: .utf8) else {
+            throw RealityDerivedImportError.invalidManifest
+        }
+        let worldRow: ElysiumWorldStorageRow
+        do {
+            worldRow = try ElysiumWorldStorageRow(
+                id: record.id, json: json, lastPlayed: record.lastPlayed)
+        } catch {
+            throw RealityDerivedImportError.storageFailed
+        }
+        let stream = try RealityDerivedChunkStream(
+            plan: plan, seed: UInt32(bitPattern: record.seed),
+            settings: record.generationSettings, progress: progress, cancelled: cancelled)
+        do {
+            return try withStorageRank {
+                try storage.importRealityDerivedWorldStreaming(
+                    world: worldRow, expectedChunkCount: plan.totalChunkCount
+                ) {
+                    guard let blob = try stream.next(),
+                          let x = Int32(exactly: blob.cx), let z = Int32(exactly: blob.cz) else {
+                        return nil
+                    }
+                    let key = try ElysiumChunkStorageKey(
+                        world: record.id, dimension: Int32(Dim.overworld.rawValue),
+                        chunkX: x, chunkZ: z)
+                    return try ElysiumChunkStorageRow(key: key, data: blob.data)
+                }
+            }
+        } catch let error as RealityDerivedImportError {
+            throw error
+        } catch {
+            throw RealityDerivedImportError.storageFailed
+        }
     }
 
     public func deleteWorld(_ id: String) {

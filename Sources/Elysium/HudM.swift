@@ -36,27 +36,484 @@ func xpRainbowSegments(progress: Double, width: Double) -> [XPRainbowSegment] {
 }
 
 struct HeldOverlayPlan: Equatable {
+    let armLayer: FirstPersonArmLayer
+    let drawsGrip: Bool
+    /// Grip point shared by the arm, foreground fingers, and held-item handle.
     let armX: Double
     let armY: Double
+    let armAssetX: Double
+    let armAssetY: Double
+    let armAssetSize: Double
+    /// The sleeve terminates on a screen edge so the arm never appears to float.
+    let armBaseX: Double
+    let armBaseY: Double
+    /// Off-screen shoulder/sleeve pivot for the complete mining arc.
+    let assemblyPivotX: Double
+    let assemblyPivotY: Double
     let iconX: Double
     let iconY: Double
-    let swing: Double
+    let iconSize: Double
+    let toolPivotX: Double
+    let toolPivotY: Double
+    let scale: Double
+    /// `attack` is remaining attack progress: 1 and 0 are both rest.
+    let attack: Double
+    let use: Double
+    let rotation: Double
+    /// Late tool rotation around the fixed hand grip during a strike.
+    let wristRotation: Double
+    /// Perspective compression as the tool swings toward the camera.
+    let toolScaleX: Double
+    let toolScaleY: Double
+    /// One-shot tool-only flourish around the fixed hand grip.
+    let toolRotation: Double
+    /// Conservative envelope of the transformed arm and optional icon.
+    let minX: Double
+    let minY: Double
+    let maxX: Double
+    let maxY: Double
+    /// True only when an opaque arm or item envelope covers the aim region.
+    let obscuresCrosshair: Bool
+}
+
+let HELD_EQUIP_FLIP_DURATION = 0.62
+let HELD_PRIMARY_ACTION_CYCLE_DURATION = 0.64
+
+enum HeldItemPresentationKind: Equatable {
+    case empty
+    case tool
+    case food
+    case block
+    case generic
+}
+
+struct HeldItemAlphaBounds: Equatable {
+    let minX: Double
+    let minY: Double
+    let maxX: Double
+    let maxY: Double
+}
+
+/// Rendering contract for a held-item family. New Meshy bakes plug into the item
+/// asset registry; this profile supplies a stable pose even before bespoke art exists.
+struct HeldItemPresentation: Equatable {
+    let kind: HeldItemPresentationKind
+    let armLayer: FirstPersonArmLayer
+    let drawsGrip: Bool
+    let iconBaseSize: Double
+    let gripAnchorX: Double
+    let gripAnchorY: Double
+    let alphaBounds: HeldItemAlphaBounds
+    let restRotation: Double
+    let performsEquipFlip: Bool
+
+    var hasItem: Bool { kind != .empty }
+}
+
+let GENERIC_HELD_ITEM_PRESENTATION = HeldItemPresentation(
+    kind: .generic, armLayer: .back, drawsGrip: true,
+    iconBaseSize: 48, gripAnchorX: 0.50, gripAnchorY: 0.68,
+    alphaBounds: HeldItemAlphaBounds(minX: 0, minY: 0, maxX: 1, maxY: 1),
+    restRotation: 0,
+    performsEquipFlip: false)
+
+func heldItemPresentation(for definition: ItemDef?, hasDetailedVisual: Bool) -> HeldItemPresentation {
+    guard let definition else {
+        return HeldItemPresentation(
+            kind: .empty, armLayer: .empty, drawsGrip: false,
+            iconBaseSize: 0, gripAnchorX: 0, gripAnchorY: 0,
+            alphaBounds: HeldItemAlphaBounds(minX: 0, minY: 0, maxX: 0, maxY: 0),
+            restRotation: 0,
+            performsEquipFlip: false)
+    }
+
+    let full = HeldItemAlphaBounds(minX: 0, minY: 0, maxX: 1, maxY: 1)
+    if definition.tool != nil {
+        let isDetailedPickaxe = definition.tool?.type == "pickaxe" && hasDetailedVisual
+        return HeldItemPresentation(
+            kind: .tool, armLayer: .back, drawsGrip: true,
+            iconBaseSize: hasDetailedVisual ? 124.8 : 72,
+            gripAnchorX: isDetailedPickaxe ? 0.14 : (hasDetailedVisual ? 0.52 : 0.50),
+            gripAnchorY: isDetailedPickaxe ? 0.88 : (hasDetailedVisual ? 0.70 : 0.66),
+            alphaBounds: isDetailedPickaxe
+                ? HeldItemAlphaBounds(minX: 6 / 96, minY: 12 / 96,
+                                      maxX: 90 / 96, maxY: 90 / 96)
+                : hasDetailedVisual
+                    ? HeldItemAlphaBounds(minX: 18 / 96, minY: 4 / 96,
+                                          maxX: 78 / 96, maxY: 92 / 96)
+                : full,
+            restRotation: isDetailedPickaxe ? -0.42 : -0.18,
+            performsEquipFlip: true)
+    }
+    if definition.food != nil {
+        return HeldItemPresentation(
+            kind: .food, armLayer: .back, drawsGrip: true,
+            iconBaseSize: 54, gripAnchorX: 0.50, gripAnchorY: 0.54,
+            alphaBounds: full, restRotation: 0, performsEquipFlip: false)
+    }
+    if definition.block != nil {
+        return HeldItemPresentation(
+            kind: .block, armLayer: .back, drawsGrip: true,
+            iconBaseSize: 58, gripAnchorX: 0.50, gripAnchorY: 0.56,
+            alphaBounds: full, restRotation: 0, performsEquipFlip: false)
+    }
+    return GENERIC_HELD_ITEM_PRESENTATION
+}
+
+struct HeldPrimaryActionAnimationState: Equatable {
+    private(set) var startedAt: Double?
+
+    /// Returns a normalized repeating cycle while the primary button is held.
+    /// Releasing, obscuring gameplay, or invalid time stops the cycle immediately.
+    mutating func observe(isHeld: Bool, at now: Double, eligible: Bool) -> Double? {
+        guard isHeld, eligible, now.isFinite else {
+            startedAt = nil
+            return nil
+        }
+        if startedAt == nil { startedAt = now }
+        let elapsed = max(0, now - (startedAt ?? now))
+        return elapsed.truncatingRemainder(dividingBy: HELD_PRIMARY_ACTION_CYCLE_DURATION)
+            / HELD_PRIMARY_ACTION_CYCLE_DURATION
+    }
+}
+
+struct HeldEquipmentAnimationState: Equatable {
+    private(set) var itemID: Int?
+    private(set) var flipStartedAt: Double?
+    private(set) var initialized = false
+
+    mutating func reset(to itemID: Int?) {
+        self.itemID = itemID
+        flipStartedAt = nil
+        initialized = true
+    }
+
+    /// Returns 0...1 while a newly visible item performs its one-shot flip; 1 is rest.
+    /// Hidden screens do not consume the transition, so an inventory equip is celebrated
+    /// when gameplay becomes visible again rather than expiring behind the menu.
+    mutating func observe(itemID newItemID: Int?, at now: Double,
+                          eligible: Bool) -> Double {
+        guard now.isFinite else { return 1 }
+        guard eligible else { return 1 }
+        if !initialized {
+            reset(to: newItemID)
+            return 1
+        }
+        if newItemID != itemID {
+            itemID = newItemID
+            flipStartedAt = newItemID == nil ? nil : now
+        }
+        guard let start = flipStartedAt else { return 1 }
+        let elapsed = max(0, now - start)
+        if elapsed + 1e-9 >= HELD_EQUIP_FLIP_DURATION {
+            flipStartedAt = nil
+            return 1
+        }
+        return min(1, elapsed / HELD_EQUIP_FLIP_DURATION)
+    }
+}
+
+struct HeldMotionPose: Equatable {
+    let x: Double
+    let y: Double
+    let armRotation: Double
+    let wristRotation: Double
+    let toolScaleX: Double
+    let toolScaleY: Double
+    let toolRotation: Double
+}
+
+private func smoothStep(_ value: Double) -> Double {
+    let t = max(0, min(1, value))
+    return t * t * (3 - 2 * t)
+}
+
+/// A first-person mining stroke derived from Minecraft's attack transform. The
+/// square-root sine supplies the broad hand arc while non-uniform tool scaling
+/// approximates its missing camera-depth rotation in this 2D overlay.
+/// Attack progress is the engine's remaining value (1 -> 0); both endpoints are at rest.
+func heldMotionPose(attack: Double, usingItem: Bool, useTicks: Int,
+                    equipFlipProgress: Double,
+                    primaryActionProgress: Double? = nil) -> HeldMotionPose {
+    let engineRemaining = attack.isFinite ? max(0, min(1, attack)) : 0
+    let remaining: Double
+    if let progress = primaryActionProgress, progress.isFinite {
+        remaining = 1 - max(0, min(1, progress))
+    } else {
+        remaining = engineRemaining
+    }
+    let use = usingItem ? min(1, Double(max(0, useTicks)) / 12) : 0
+    let t = 1 - remaining
+    let x: Double
+    let y: Double
+    let rotation: Double
+    let wristRotation: Double
+    let toolScaleX: Double
+    let toolScaleY: Double
+    if usingItem {
+        let raised = smoothStep(use)
+        x = -22 * raised
+        y = -24 * raised
+        rotation = 0.55 * raised
+        wristRotation = 0
+        toolScaleX = 1
+        toolScaleY = 1
+    } else if t <= 0 || t >= 1 {
+        x = 0
+        y = 0
+        rotation = 0
+        wristRotation = 0
+        toolScaleX = 1
+        toolScaleY = 1
+    } else if t < 0.12 {
+        // Brief shoulder-led wind-up before the tool accelerates toward the target.
+        let p = smoothStep(t / 0.12)
+        x = 4 * p
+        y = -3 * p
+        rotation = 0.10 * p
+        wristRotation = 0.05 * p
+        toolScaleX = 1
+        toolScaleY = 1
+    } else {
+        let strike = (t - 0.12) / 0.88
+        let rootArc = Foundation.sin(Foundation.sqrt(strike) * .pi)
+        let strikeArc = Foundation.sin(strike * .pi)
+        let verticalWave = Foundation.sin(Foundation.sqrt(strike) * .pi * 2)
+        let unwind = 1 - strike
+        x = 4 * unwind - 22 * rootArc
+        y = -3 * unwind + 6 * verticalWave + 18 * strikeArc
+        rotation = 0.10 * unwind - 0.34 * rootArc - 0.10 * strikeArc
+        wristRotation = 0.05 * unwind - 0.20 * strikeArc
+        // Minecraft's large X-axis item rotation is depth motion. Compressing the
+        // handle toward the grip makes that approach/recede motion readable in 2D.
+        toolScaleX = 1 + 0.06 * rootArc
+        toolScaleY = 1 - 0.46 * rootArc
+    }
+
+    let flip = equipFlipProgress.isFinite ? max(0, min(1, equipFlipProgress)) : 1
+    if flip >= 1 {
+        return HeldMotionPose(x: x, y: y, armRotation: rotation,
+                              wristRotation: wristRotation,
+                              toolScaleX: toolScaleX, toolScaleY: toolScaleY,
+                              toolRotation: 0)
+    }
+    let easedFlip = smoothStep(flip)
+    let handDip = Foundation.sin(flip * .pi) * 6
+    let wristFollow = Foundation.sin(flip * .pi * 2) * 0.08
+    return HeldMotionPose(x: x, y: y + handDip,
+                          armRotation: rotation + wristFollow,
+                          wristRotation: wristRotation,
+                          toolScaleX: toolScaleX, toolScaleY: toolScaleY,
+                          toolRotation: easedFlip * .pi * 2)
 }
 
 func heldOverlayPlan(viewWidth: Double, viewHeight: Double,
-                     hasMainHand: Bool, guiVisible: Bool, firstPerson: Bool, screenOpen: Bool,
-                     attack: Double, usingItem: Bool, useTicks: Int) -> HeldOverlayPlan? {
-    guard hasMainHand, guiVisible, firstPerson, !screenOpen,
+                     guiVisible: Bool, firstPerson: Bool, screenOpen: Bool,
+                     attack: Double, usingItem: Bool, useTicks: Int,
+                     presentation: HeldItemPresentation = GENERIC_HELD_ITEM_PRESENTATION,
+                     equipFlipProgress: Double = 1,
+                     primaryActionProgress: Double? = nil,
+                     hotbarRightX: Double? = nil,
+                     rightObstruction: MapOverlayRect? = nil) -> HeldOverlayPlan? {
+    guard guiVisible, firstPerson, !screenOpen,
           viewWidth.isFinite, viewHeight.isFinite,
-          viewWidth >= 64, viewHeight >= 64 else { return nil }
-    let swing = attack.isNaN ? 0 : max(0, min(1, attack))
+          viewWidth >= 160, viewHeight >= 120 else { return nil }
+    let remaining = attack.isFinite ? max(0, min(1, attack)) : 0
     let use = usingItem ? min(1, Double(max(0, useTicks)) / 12) : 0
-    // Keep the whole overlay inside a lower-right envelope and away from the hotbar.
-    let offsetX = -swing * 13 - use * 5
-    let offsetY = swing * 9 - use * 7
-    return HeldOverlayPlan(armX: viewWidth - 43 + offsetX, armY: viewHeight - 76 + offsetY,
-                           iconX: viewWidth - 31 + offsetX, iconY: viewHeight - 62 + offsetY,
-                           swing: swing)
+    let pose = heldMotionPose(attack: remaining, usingItem: usingItem,
+                              useTicks: useTicks,
+                              equipFlipProgress: equipFlipProgress,
+                              primaryActionProgress: primaryActionProgress)
+    let scale = min(1.15, max(0.72, min(viewWidth / 320, viewHeight / 180)))
+    let iconSize = presentation.iconBaseSize * scale
+    let armAssetSize = 160 * scale
+    let motionScale = min(1, max(0.2, (viewWidth - 128) / 192))
+
+    // Every layer starts from one rest grip. Motion offsets the grip while the
+    // complete assembly rotates about the fixed shoulder/sleeve pivot below it.
+    let anchoredHotbarRight = hotbarRightX.flatMap {
+        $0.isFinite ? max(0, min(viewWidth, $0)) : nil
+    }
+    var restArmX = anchoredHotbarRight.map {
+        min(viewWidth - 12 * scale, $0 + 18 * scale)
+    } ?? (viewWidth - 52 * scale)
+    let restArmY = viewHeight - 48 * scale
+    let rotationScale = 0.4 + 0.6 * motionScale
+    let rotation = pose.armRotation * rotationScale
+    let toolRotation = pose.toolRotation
+    var armBaseX = viewWidth
+    let armBaseY = viewHeight
+
+    // The Meshy arm's visible right edge is 58.4% of its canvas beyond the grip.
+    // Keep that opaque edge left of a lower-right obstruction while allowing the
+    // transparent canvas and offscreen sleeve tail to clip normally.
+    let armRightOfGrip = (0.9453125 - 0.361328125) * armAssetSize
+    // Reserve the full animated wrist/tool sweep, not merely the rest pose.
+    // Without this margin the raised wind-up can touch the minimap and
+    // make the entire first-person assembly disappear for one frame.
+    let animatedRightClearance = 24 * scale
+    if let obstruction = rightObstruction,
+       obstruction.x.isFinite, obstruction.y.isFinite, obstruction.size.isFinite,
+       obstruction.size > 0, obstruction.y < viewHeight,
+       obstruction.x + obstruction.size > 0 {
+        armBaseX = max(0, min(viewWidth, obstruction.x - 4))
+        if anchoredHotbarRight == nil {
+            restArmX = min(restArmX,
+                           obstruction.x - 4 - armRightOfGrip - animatedRightClearance)
+        }
+    }
+    // On compact viewports a correctly sized long-handled tool can otherwise sit
+    // across the aim point. Prefer moving the rest grip left; the shoulder pivot
+    // and all animation phases follow that correction as one assembly.
+    if presentation.hasItem {
+        let restIconMinY = restArmY - iconSize * presentation.gripAnchorY
+            + iconSize * presentation.alphaBounds.minY
+        let restIconMaxY = restArmY - iconSize * presentation.gripAnchorY
+            + iconSize * presentation.alphaBounds.maxY
+        if restIconMaxY > viewHeight / 2 - 24 && restIconMinY < viewHeight / 2 + 24 {
+            let restIconMinX = restArmX - iconSize * presentation.gripAnchorX
+                + iconSize * presentation.alphaBounds.minX
+            let restIconMaxX = restArmX - iconSize * presentation.gripAnchorX
+                + iconSize * presentation.alphaBounds.maxX
+            if anchoredHotbarRight != nil {
+                restArmX += max(0, (viewWidth / 2 + 25) - restIconMinX)
+            } else {
+                // One extra logical pixel avoids floating-point contact being treated
+                // as overlap by the conservative crosshair envelope below.
+                restArmX -= max(0, restIconMaxX - (viewWidth / 2 - 25))
+            }
+        }
+    }
+    let restArmMinY = restArmY + (0.38671875 - 0.498046875) * armAssetSize
+    let restArmMaxY = restArmY + (1 - 0.498046875) * armAssetSize
+    if restArmMaxY > viewHeight / 2 - 24 && restArmMinY < viewHeight / 2 + 24 {
+        let restArmMinX = restArmX - (0.361328125 - 0.28515625) * armAssetSize
+        let restArmMaxX = restArmX + armRightOfGrip
+        if anchoredHotbarRight != nil {
+            restArmX += max(0, (viewWidth / 2 + 25) - restArmMinX)
+        } else {
+            restArmX -= max(0, restArmMaxX - (viewWidth / 2 - 25))
+        }
+    }
+    let baseArmX = restArmX + pose.x * scale * motionScale
+    let baseArmY = restArmY + pose.y * scale * motionScale
+    // The opaque sleeve exits below/right of the hand. Pivoting there produces the
+    // broad shoulder/elbow arc of a striking tool instead of rotating the forearm
+    // around a stationary wrist.
+    let shoulderPivotX = restArmX + 0.38 * armAssetSize
+    let shoulderPivotY = restArmY + 0.45 * armAssetSize
+    let iconX = baseArmX - iconSize * presentation.gripAnchorX
+    let iconY = baseArmY - iconSize * presentation.gripAnchorY
+    let toolPivotX = iconX + iconSize / 2
+    let toolPivotY = iconY + iconSize / 2
+    let restWristRotation = anchoredHotbarRight != nil ? presentation.restRotation : 0
+    let wristRotation = restWristRotation + pose.wristRotation
+
+    // The item spins as one complete object around its own visual center. The
+    // hand follows the rotated handle contact point, so head, handle, and grip
+    // remain one physical assembly throughout the equip flourish.
+    let gripDX = baseArmX - toolPivotX
+    let gripDY = baseArmY - toolPivotY
+    let toolCos = Foundation.cos(toolRotation)
+    let toolSin = Foundation.sin(toolRotation)
+    let armX = toolPivotX + gripDX * toolCos - gripDY * toolSin
+    let armY = toolPivotY + gripDX * toolSin + gripDY * toolCos
+    // Eating and the equip flourish retain their close wrist pivot; mining and
+    // punching use the off-screen shoulder pivot for the complete assembly.
+    let usesClosePivot = usingItem || abs(toolRotation) > 0.0001
+    let assemblyPivotX = usesClosePivot ? armX : shoulderPivotX
+    let assemblyPivotY = usesClosePivot ? armY : shoulderPivotY
+    let armAssetX = armX - 0.361328125 * armAssetSize
+    let armAssetY = armY - 0.498046875 * armAssetSize
+
+    func transformed(_ x: Double, _ y: Double) -> (Double, Double) {
+        let dx = x - assemblyPivotX, dy = y - assemblyPivotY
+        let c = Foundation.cos(rotation), s = Foundation.sin(rotation)
+        return (assemblyPivotX + dx * c - dy * s,
+                assemblyPivotY + dx * s + dy * c)
+    }
+    func transformedTool(_ x: Double, _ y: Double) -> (Double, Double) {
+        let dx = x - toolPivotX, dy = y - toolPivotY
+        let c = Foundation.cos(toolRotation), s = Foundation.sin(toolRotation)
+        let equippedX = toolPivotX + dx * c - dy * s
+        let equippedY = toolPivotY + dx * s + dy * c
+        let wristDX = equippedX - armX, wristDY = equippedY - armY
+        let scaledDX = wristDX * pose.toolScaleX
+        let scaledDY = wristDY * pose.toolScaleY
+        let wristCos = Foundation.cos(wristRotation)
+        let wristSin = Foundation.sin(wristRotation)
+        return transformed(armX + scaledDX * wristCos - scaledDY * wristSin,
+                           armY + scaledDX * wristSin + scaledDY * wristCos)
+    }
+    // Opaque bounds of the generated layers, excluding transparent canvas. Keep
+    // arm and item envelopes separate: their combined AABB can cover empty space
+    // between them and falsely report that the aim point is obscured.
+    let armMinX = armAssetX + 0.28515625 * armAssetSize
+    let armMaxX = armAssetX + 0.9453125 * armAssetSize
+    let armMinY = armAssetY + 0.38671875 * armAssetSize
+    let armMaxY = armAssetY + armAssetSize
+    let armEnvelope = [
+        transformed(armMinX, armMinY), transformed(armMaxX, armMinY),
+        transformed(armMaxX, armMaxY), transformed(armMinX, armMaxY),
+    ]
+    var toolEnvelope: [(Double, Double)] = []
+    if presentation.hasItem {
+        let toolMinX = iconX + iconSize * presentation.alphaBounds.minX
+        let toolMaxX = iconX + iconSize * presentation.alphaBounds.maxX
+        let toolMinY = iconY + iconSize * presentation.alphaBounds.minY
+        let toolMaxY = iconY + iconSize * presentation.alphaBounds.maxY
+        toolEnvelope = [
+            transformedTool(toolMinX, toolMinY), transformedTool(toolMaxX, toolMinY),
+            transformedTool(toolMaxX, toolMaxY), transformedTool(toolMinX, toolMaxY),
+        ]
+    }
+    let vertices = armEnvelope + toolEnvelope
+    let rawMinX = vertices.map(\.0).min() ?? armX
+    let rawMinY = vertices.map(\.1).min() ?? armY
+    let rawMaxX = vertices.map(\.0).max() ?? armX
+    let rawMaxY = vertices.map(\.1).max() ?? armY
+    guard rawMaxX > 0, rawMaxY > 0, rawMinX < viewWidth, rawMinY < viewHeight else { return nil }
+    let minX = max(0, rawMinX)
+    let minY = max(0, rawMinY)
+    let maxX = min(viewWidth, rawMaxX)
+    let maxY = min(viewHeight, rawMaxY)
+    func overlapsCrosshair(_ envelope: [(Double, Double)]) -> Bool {
+        guard let envelopeMinX = envelope.map(\.0).min(),
+              let envelopeMinY = envelope.map(\.1).min(),
+              let envelopeMaxX = envelope.map(\.0).max(),
+              let envelopeMaxY = envelope.map(\.1).max() else { return false }
+        return envelopeMaxX > viewWidth / 2 - 24 && envelopeMinX < viewWidth / 2 + 24 &&
+            envelopeMaxY > viewHeight / 2 - 24 && envelopeMinY < viewHeight / 2 + 24
+    }
+    let crossesCrosshair = overlapsCrosshair(armEnvelope) || overlapsCrosshair(toolEnvelope)
+    // The resting hand must never cover the aim point. A deliberate attack/use arc may
+    // briefly pass through it; suppressing the whole arm mid-swing creates a visible pop.
+    let isResting = abs(pose.x) < 0.0001 && abs(pose.y) < 0.0001 &&
+        abs(pose.armRotation) < 0.0001 && abs(pose.wristRotation) < 0.0001 &&
+        abs(toolRotation) < 0.0001 && use < 0.0001
+    guard !(isResting && crossesCrosshair),
+          anchoredHotbarRight != nil || rightObstruction.map({
+              maxX <= $0.x || minX >= $0.x + $0.size ||
+              maxY <= $0.y || minY >= $0.y + $0.size
+          }) ?? true else { return nil }
+    return HeldOverlayPlan(armLayer: presentation.armLayer,
+                           drawsGrip: presentation.drawsGrip,
+                           armX: armX, armY: armY,
+                           armAssetX: armAssetX, armAssetY: armAssetY,
+                           armAssetSize: armAssetSize,
+                           armBaseX: armBaseX, armBaseY: armBaseY,
+                           assemblyPivotX: assemblyPivotX,
+                           assemblyPivotY: assemblyPivotY,
+                           iconX: iconX, iconY: iconY, iconSize: iconSize,
+                           toolPivotX: toolPivotX, toolPivotY: toolPivotY,
+                           scale: scale,
+                           attack: remaining, use: use, rotation: rotation,
+                           wristRotation: wristRotation,
+                           toolScaleX: pose.toolScaleX,
+                           toolScaleY: pose.toolScaleY,
+                           toolRotation: toolRotation,
+                           minX: minX, minY: minY, maxX: maxX, maxY: maxY,
+                           obscuresCrosshair: crossesCrosshair)
 }
 
 struct SubtitleInfo {
@@ -80,6 +537,9 @@ final class HUD {
     private var timerAccum = 0.0
     private var tickSteps = 0
     private var rpgInsightCache = RPGHUDInsightCache()
+    private var heldEquipmentAnimation = HeldEquipmentAnimationState()
+    private var heldPrimaryActionAnimation = HeldPrimaryActionAnimationState()
+    private var heldAnimationPlayer: ObjectIdentifier?
 
     func showActionBar(_ text: String) {
         actionBarText = text
@@ -145,29 +605,90 @@ final class HUD {
             }
         }
 
-        // A small first-person forearm anchors the selected item.  This is drawn
-        // before the hotbar so the conventional controls remain readable.
+        let hbX = cx - 91
+        let hbY = packHud ? H - 22 : H - 23
+        let showMinimap = shouldDrawMinimap(
+            showPreference: game.settings.showMinimap,
+            isExpandedMapScreen: ui.current() is MapScreen)
+        let minimapRect = showMinimap
+            ? mapMinimapRect(screenWidth: W, screenHeight: H,
+                             hotbarCenterX: cx, hotbarHalfWidth: 91,
+                             hotbarTopY: hbY,
+                             sizeMode: game.mapMinimapSizeMode)
+            : nil
+
+        // A connected first-person forearm holds a large item sprite by its handle.
+        // It is drawn before the hotbar so conventional controls remain readable.
         let held = player.inventory[player.selectedSlot]
-        if let held, let hand = heldOverlayPlan(viewWidth: W, viewHeight: H,
-                                                 hasMainHand: true,
-                                                 guiVisible: !hideGui,
-                                                 firstPerson: game.perspective == 0,
-                                                 screenOpen: screenOpen,
-                                                 attack: player.attackAnim,
-                                                 usingItem: player.usingItem,
-                                                 useTicks: player.useItemTicks) {
-            cv.setFill("#c98d68")
-            cv.fillQuad(hand.armX, hand.armY + 13, hand.armX + 15, hand.armY + 8,
-                        hand.armX + 29, hand.armY + 39, hand.armX + 8, hand.armY + 44)
-            cv.setFill("#9b6049")
-            cv.fillQuad(hand.armX + 8, hand.armY + 44, hand.armX + 29, hand.armY + 39,
-                        hand.armX + 33, hand.armY + 48, hand.armX + 12, hand.armY + 53)
-            cv.drawItemIcon(held.id, held.data, hand.iconX, hand.iconY, 24, 24)
+        let heldDefinition = held.map { itemDef($0.id) }
+        let heldName = heldDefinition?.name
+        let hasDetailedHeldAsset = heldName.flatMap(heldItemVisualAsset(for:)) != nil
+        let heldPresentation = heldItemPresentation(
+            for: heldDefinition, hasDetailedVisual: hasDetailedHeldAsset)
+        let playerIdentity = ObjectIdentifier(player)
+        if heldAnimationPlayer != playerIdentity {
+            heldAnimationPlayer = playerIdentity
+            heldEquipmentAnimation.reset(to: held?.id)
+            heldPrimaryActionAnimation = HeldPrimaryActionAnimationState()
+        }
+        let equipFlipProgress = heldEquipmentAnimation.observe(
+            itemID: heldPresentation.performsEquipFlip ? held?.id : nil,
+            at: nowT,
+            eligible: game.perspective == 0 && !screenOpen)
+        let primaryActionProgress = heldPrimaryActionAnimation.observe(
+            isHeld: game.primaryActionHeld,
+            at: nowT,
+            eligible: game.perspective == 0 && !screenOpen)
+        if let hand = heldOverlayPlan(viewWidth: W, viewHeight: H,
+                                      guiVisible: !hideGui,
+                                      firstPerson: game.perspective == 0,
+                                      screenOpen: screenOpen,
+                                      attack: player.attackAnim,
+                                      usingItem: player.usingItem,
+                                      useTicks: player.useItemTicks,
+                                      presentation: heldPresentation,
+                                      equipFlipProgress: equipFlipProgress,
+                                      primaryActionProgress: primaryActionProgress,
+                                      hotbarRightX: hbX + 182,
+                                      rightObstruction: minimapRect) {
+            // One transform moves every layer around the physical grip. The arm-back
+            // renders first, the tool enters the palm, and the Meshy-derived fingers
+            // return in front to close around its handle.
+            cv.save()
+            cv.translate(hand.assemblyPivotX, hand.assemblyPivotY)
+            cv.rotate(hand.rotation)
+            cv.translate(-hand.assemblyPivotX, -hand.assemblyPivotY)
+            cv.drawFirstPersonArm(hand.armLayer,
+                                  hand.armAssetX, hand.armAssetY,
+                                  hand.armAssetSize, hand.armAssetSize)
+            if let held {
+                cv.save()
+                cv.translate(hand.armX, hand.armY)
+                cv.rotate(hand.wristRotation)
+                cv.scale(hand.toolScaleX, hand.toolScaleY)
+                cv.translate(-hand.armX, -hand.armY)
+                cv.translate(hand.toolPivotX, hand.toolPivotY)
+                cv.rotate(hand.toolRotation)
+                cv.translate(-hand.toolPivotX, -hand.toolPivotY)
+                let drewDetailedAsset = heldName.map {
+                    cv.drawHeldItemVisual($0, hand.iconX, hand.iconY,
+                                          hand.iconSize, hand.iconSize)
+                } ?? false
+                if !drewDetailedAsset {
+                    cv.drawItemIcon(held.id, held.data, hand.iconX, hand.iconY,
+                                    hand.iconSize, hand.iconSize)
+                }
+                cv.restore()
+            }
+            if hand.drawsGrip {
+                cv.drawFirstPersonArm(.grip,
+                                      hand.armAssetX, hand.armAssetY,
+                                      hand.armAssetSize, hand.armAssetSize)
+            }
+            cv.restore()
         }
 
         // hotbar
-        let hbX = cx - 91
-        let hbY = packHud ? H - 22 : H - 23
         if packHud {
             ui.blitSheet("widgets", 0, 0, 182, 22, hbX, hbY)
             ui.blitSheet("widgets", 0, 22, 24, 23, hbX - 1 + Double(player.selectedSlot) * 20, hbY - 1)
@@ -210,11 +731,9 @@ final class HUD {
             cv.globalAlpha = 1
         }
 
-        if !(ui.current() is MapScreen) {
-            let mapRect = mapMinimapRect(screenWidth: W, screenHeight: H,
-                                         hotbarCenterX: cx, hotbarHalfWidth: 91,
-                                         hotbarTopY: hbY,
-                                         sizeMode: game.mapMinimapSizeMode)
+        // Deliberately paint the minimap after the arm, held item, and hotbar.
+        // At compact sizes it is the topmost HUD surface and occludes any overlap.
+        if showMinimap, let mapRect = minimapRect {
             let bounds = game.loadedMapBounds()
             let view = mapViewportCenteredOnPlayer(playerX: player.x, playerZ: player.z,
                                                    span: game.mapSpanBlocks,

@@ -1563,11 +1563,14 @@ final class WorldCreateScreen: Screen {
     var mode = GameMode.survival
     var difficulty = 2
     var worldPreset = WorldPreset.normal
+    var realityDerived = false
     var singleBiome = Biome.plains
     var dungeonDensity = DungeonDensity.normal
+    var mapSize = WorldMapSize.medium
     var rpgClasses = true
     var creating = false
     private var classesBtn: Button!
+    private var mapSizeBtn: Button!
     private var worldTypeBtn: Button!
     private var biomeBtn: Button!
     private var dungeonBtn: Button!
@@ -1604,19 +1607,30 @@ final class WorldCreateScreen: Screen {
         }
         buttons.append(modeBtn)
         buttons.append(diffBtn)
-        classesBtn = Button(cx - 100, layout.classesY, 200, 20, "", {})
+        classesBtn = Button(cx - 100, layout.classesY, 78, 20, "", {})
         classesBtn.onClick = { [weak self] in
             guard let self else { return }
             self.rpgClasses.toggle()
             self.updateWorldTypeLabels()
         }
         buttons.append(classesBtn)
+        mapSizeBtn = Button(cx - 18, layout.classesY, 118, 20, "", {})
+        mapSizeBtn.onClick = { [weak self] in
+            guard let self else { return }
+            self.mapSize = self.mapSize.next
+            self.updateWorldTypeLabels()
+        }
+        buttons.append(mapSizeBtn)
         worldTypeBtn = Button(cx - 100, layout.worldTypeY, 200, 20, "", {})
         worldTypeBtn.onClick = { [weak self, weak ui] in
             guard let self, let ui else { return }
             let cycle = ui.optionDown ? WorldPreset.extendedCycle : WorldPreset.normalCycle
-            let current = cycle.firstIndex(of: self.worldPreset) ?? -1
-            self.worldPreset = cycle[(current + 1) % cycle.count]
+            let current = self.realityDerived
+                ? cycle.count
+                : (cycle.firstIndex(of: self.worldPreset) ?? -1)
+            let next = (current + 1) % (cycle.count + 1)
+            self.realityDerived = next == cycle.count
+            if !self.realityDerived { self.worldPreset = cycle[next] }
             self.updateWorldTypeLabels()
         }
         biomeBtn = Button(cx - 100, layout.biomeY, 200, 20, "", {})
@@ -1641,6 +1655,21 @@ final class WorldCreateScreen: Screen {
         let create = Button(cx - 100, layout.actionY(showsBiome: false), 98, 20, lanHostRequest == nil ? "Create World" : "Create & Host", { [weak self, weak ui, weak game] in
             guard let self, let ui, let game, !self.creating else { return }
             self.creating = true
+            if self.realityDerived, let coordinator = gAppDelegate?.realityDerivedCoordinator {
+                let options = RealityDerivedGenerationOptions(
+                    worldName: self.nameField.text.isEmpty ? "New World" : self.nameField.text,
+                    seedText: self.seedField.text,
+                    gameMode: self.mode, difficulty: self.difficulty,
+                    rpgClassesEnabled: self.rpgClasses, mapSize: self.mapSize)
+                coordinator.present(options: options, completion: { [weak self, weak ui, weak game] _ in
+                    guard let self, let ui, let game else { return }
+                    self.startPendingLANHost(game)
+                    ui.open(LoadingScreen(), game)
+                }, cancellation: { [weak self] in
+                    self?.creating = false
+                })
+                return
+            }
             elysiumMainActorSync {
                 game.createWorld(
                     name: self.nameField.text.isEmpty ? "New World" : self.nameField.text,
@@ -1648,6 +1677,7 @@ final class WorldCreateScreen: Screen {
                     difficulty: self.difficulty, worldPreset: self.worldPreset,
                     singleBiome: self.singleBiome,
                     dungeonDensity: self.dungeonDensity,
+                    mapSize: self.mapSize,
                     rpgClassesEnabled: self.rpgClasses)
             }
             self.startPendingLANHost(game)
@@ -1670,7 +1700,8 @@ final class WorldCreateScreen: Screen {
         ui.drawDirtBg()
         ui.cv.drawTextCentered(lanHostRequest == nil ? "Create New World" : "Create World to Host", ui.width / 2, 10, 1)
         ui.cv.drawText("World Name", nameField.x, nameField.y - 10, 1, "#a0a0a0")
-        ui.cv.drawText("Seed", seedField.x, seedField.y - 10, 1, "#a0a0a0")
+        ui.cv.drawText(realityDerived ? "Seed (outside selected area)" : "Seed",
+                       seedField.x, seedField.y - 10, 1, "#a0a0a0")
         if creating {
             ui.cv.drawTextCentered("Generating world...", ui.width / 2, layout.statusY(showsBiome: showsBiome), 1, "#ffff55")
         }
@@ -1678,10 +1709,11 @@ final class WorldCreateScreen: Screen {
     }
 
     private func updateWorldTypeLabels() {
-        classesBtn?.label = "Character Classes: \(rpgClasses ? "On" : "Off")"
-        worldTypeBtn?.label = "World Type: \(worldPreset.displayName)"
+        classesBtn?.label = "Classes: \(rpgClasses ? "On" : "Off")"
+        mapSizeBtn?.label = "Size: \(mapSize.displayName)"
+        worldTypeBtn?.label = "World Type: \(realityDerived ? "Reality Derived" : worldPreset.displayName)"
         biomeBtn?.label = "Biome: \(singleBiomeDisplayName(singleBiome))"
-        let showsBiome = worldPreset == .singleBiomeSurface
+        let showsBiome = !realityDerived && worldPreset == .singleBiomeSurface
         biomeBtn?.visible = showsBiome
         let layout = Layout(uiHeight: lastUIHeight)
         biomeBtn?.y = layout.biomeY
@@ -1689,6 +1721,7 @@ final class WorldCreateScreen: Screen {
         createBtn?.y = layout.actionY(showsBiome: showsBiome)
         cancelBtn?.y = layout.actionY(showsBiome: showsBiome)
         dungeonBtn?.label = "Dungeons: \(dungeonDensity.displayName)"
+        dungeonBtn?.visible = !realityDerived
     }
 
     private func startPendingLANHost(_ game: GameCore) {
@@ -1972,6 +2005,7 @@ final class SettingsScreen: Screen {
             }
             buttons.append(fullscreen)
             recoveryNavigationButtons.insert(ObjectIdentifier(fullscreen))
+            toggle("Show Minimap", { $0.showMinimap }, { $0.showMinimap = $1 }, 1)
             y += 22
             sliders.append(Slider(cx - 160, y, W, 18,
                 { [weak game] in "Particles: \(["Minimal", "Decreased", "All"][min(2, game?.settings.particles ?? 2)])" },
@@ -2225,6 +2259,7 @@ final class SettingsScreen: Screen {
             button("Clouds:", "video.clouds")
             button("View Bobbing:", "video.view-bobbing")
             button("Fullscreen:", "video.fullscreen")
+            button("Show Minimap:", "video.show-minimap")
             slider("Particles:", "video.particles")
             slider("Max FPS:", "video.max-fps")
             button("Shaders:", "video.shaders")
@@ -2268,8 +2303,9 @@ final class SettingsScreen: Screen {
         return tabs + [
             "video.render-distance", "video.fov", "video.brightness", "video.gui-scale",
             "video.fancy", "video.smooth-lighting", "video.bloom", "video.soft-shadows",
-            "video.clouds", "video.view-bobbing", "video.fullscreen", "video.particles",
-            "video.max-fps", "video.shaders", "video.resource-packs", "settings.done",
+            "video.clouds", "video.view-bobbing", "video.fullscreen", "video.show-minimap",
+            "video.particles", "video.max-fps", "video.shaders", "video.resource-packs",
+            "settings.done",
         ]
     }
 
@@ -2650,6 +2686,11 @@ final class CreditsScreen: Screen {
         "§fOre Borders credits: Vanilla Tweaks,",
         "§fAerod, Hedreon, and Scutoel.",
         "§efaithfulpack.net",
+        "",
+        "§fReality Derived generation: Arnis",
+        "§fby Louis Eriguchi and contributors.",
+        "§fApache-2.0 · github.com/louis-e/arnis",
+        "§fMap data © OpenStreetMap contributors.",
     ]
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         ui.cv.setFill("#000000")

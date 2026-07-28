@@ -177,6 +177,43 @@ final class MesherFixtureTests: XCTestCase {
         XCTAssertFalse(tiles.contains("soul_lantern"))
     }
 
+    func testEverySolidNetherTerrainBlockProducesVisibleGeometry() {
+        registerCoreIfNeeded()
+
+        // These are the solid materials emitted by Nether base terrain, biome surfaces,
+        // ore placement, vegetation structures, delta features, and the Nether World
+        // gateway chamber. A solid generated cell with no vertices exposes all terrain
+        // behind it and creates the appearance of a hole through the world.
+        let generatedSolids: [UInt16] = [
+            B.bedrock, B.netherrack, B.crimson_nylium, B.warped_nylium,
+            B.soul_sand, B.soul_soil, B.magma_block, B.glowstone,
+            B.shroomlight, B.nether_wart_block, B.warped_wart_block,
+            B.basalt, B.blackstone, B.bone_block, B.nether_gold_ore,
+            B.nether_quartz_ore, B.ancient_debris, B.lava,
+            B.obsidian,
+        ]
+
+        for block in generatedSolids {
+            let definition = blockDefs[Int(block)]
+            XCTAssertTrue(definition.solid || block == B.lava,
+                          "fixture drifted away from generated solid/fluid coverage: \(definition.name)")
+            let mesh = meshFor(block)
+            let vertices = mesh.opaque.count + mesh.cutout.count + mesh.translucent.count
+            XCTAssertGreaterThan(vertices, 0, "generated Nether block has no mesh: \(definition.name)")
+        }
+    }
+
+    func testEveryRegisteredCubeShapeProducesVisibleGeometryRegardlessOfFullCubeFlag() {
+        registerCoreIfNeeded()
+
+        for definition in blockDefs where definition.shape == .cube {
+            let mesh = meshFor(UInt16(definition.id))
+            let vertices = mesh.opaque.count + mesh.cutout.count + mesh.translucent.count
+            XCTAssertGreaterThan(vertices, 0,
+                                 "registered cube has no visible geometry: \(definition.name)")
+        }
+    }
+
     func testPackMultipartUVsSelectDoorBedAndDoubleChestPartsDeterministically() {
         registerCoreIfNeeded()
         let packedContext = MeshRenderContext(

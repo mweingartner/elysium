@@ -2,6 +2,8 @@
 .swiftpm/
 dist/
 .DS_Store
+.env
+meshy_output/
 *.zip
 !packaging/*.zip
 .claude/
