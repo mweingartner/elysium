@@ -12,6 +12,13 @@ struct UIUniforms {
 }
 
 final class UICanvas {
+    private enum TextureSource: Equatable {
+        case atlas
+        case gui
+        case heldItem(String)
+        case firstPersonArm(FirstPersonArmLayer)
+    }
+
     private let device: MTLDevice
     private var verts: [Float] = []          // pos2 uv2 color4
     private var atlas: MTLTexture            // 1024×1024 RGBA: white texel + icon/tile slots
@@ -138,13 +145,15 @@ final class UICanvas {
     // the pack GUI sheet composite — flush switches textures per segment so
     // draw order (panel under items under text) is preserved
     var guiTexture: MTLTexture?
-    private var segments: [(gui: Bool, start: Int)] = []
-    private var curGui = false
+    private var segments: [(source: TextureSource, start: Int)] = []
+    private var currentTextureSource: TextureSource = .atlas
+    private var heldItemTextures: [String: MTLTexture] = [:]
+    private var firstPersonArmTextures: [FirstPersonArmLayer: MTLTexture] = [:]
 
-    @inline(__always) private func mark(_ gui: Bool) {
-        if segments.isEmpty || curGui != gui {
-            segments.append((gui, verts.count))
-            curGui = gui
+    @inline(__always) private func mark(_ source: TextureSource) {
+        if segments.isEmpty || currentTextureSource != source {
+            segments.append((source, verts.count))
+            currentTextureSource = source
         }
     }
 
@@ -163,7 +172,7 @@ final class UICanvas {
                  _ dx: Double, _ dy: Double, _ dw: Double, _ dh: Double,
                  _ tint: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)) {
         guard guiTexture != nil else { return }
-        mark(true)
+        mark(.gui)
         let uv = Self.guiUVRect(ax, ay, aw, ah)
         emitQuad(Float(dx), Float(dy), Float(dw), Float(dh),
                  uv.x, uv.y, uv.z, uv.w,
@@ -173,7 +182,7 @@ final class UICanvas {
     private func quad(_ x: Float, _ y: Float, _ w: Float, _ h: Float,
                       _ u0: Float, _ v0: Float, _ u1: Float, _ v1: Float,
                       _ cTop: SIMD4<Float>, _ cBot: SIMD4<Float>) {
-        mark(false)
+        mark(.atlas)
         emitQuad(x, y, w, h, u0, v0, u1, v1, cTop, cBot)
     }
 
@@ -218,7 +227,7 @@ final class UICanvas {
         let len = (dx * dx + dy * dy).squareRoot()
         if len < 0.001 { return }
         let nx = -dy / len * width / 2, ny = dx / len * width / 2
-        mark(false)
+        mark(.atlas)
         let c = strokeStyle * SIMD4<Float>(1, 1, 1, globalAlpha)
         func push(_ px: Double, _ py: Double) {
             let p = xf(Float(px), Float(py))
@@ -229,7 +238,7 @@ final class UICanvas {
     }
     func fillQuad(_ x0: Double, _ y0: Double, _ x1: Double, _ y1: Double,
                   _ x2: Double, _ y2: Double, _ x3: Double, _ y3: Double) {
-        mark(false)
+        mark(.atlas)
         let c = fillStyle * SIMD4<Float>(1, 1, 1, globalAlpha)
         func push(_ px: Double, _ py: Double) {
             let p = xf(Float(px), Float(py))
@@ -278,6 +287,73 @@ final class UICanvas {
              Float(origin.0) / 1024, Float(origin.1) / 1024,
              Float(origin.0 + 16) / 1024, Float(origin.1 + 16) / 1024,
              SIMD4<Float>(1, 1, 1, 1), SIMD4<Float>(1, 1, 1, 1))
+    }
+
+    private func heldItemTexture(_ itemName: String) -> MTLTexture? {
+        if let texture = heldItemTextures[itemName] { return texture }
+        guard let image = heldItemVisualImage(for: itemName) else { return nil }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: image.width,
+            height: image.height,
+            mipmapped: false)
+        descriptor.usage = .shaderRead
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+        image.pixels.withUnsafeBytes { raw in
+            texture.replace(region: MTLRegionMake2D(0, 0, image.width, image.height),
+                            mipmapLevel: 0,
+                            withBytes: raw.baseAddress!,
+                            bytesPerRow: image.width * 4)
+        }
+        heldItemTextures[itemName] = texture
+        return texture
+    }
+
+    /// Draws Meshy-derived art only in the first-person held-item layer. Inventory and
+    /// recipe icons intentionally remain the active resource pack's canonical sprites.
+    @discardableResult
+    func drawHeldItemVisual(_ itemName: String, _ x: Double, _ y: Double,
+                            _ width: Double, _ height: Double) -> Bool {
+        guard heldItemTexture(itemName) != nil else { return false }
+        mark(.heldItem(itemName))
+        emitQuad(Float(x), Float(y), Float(width), Float(height),
+                 0, 0, 1, 1,
+                 SIMD4<Float>(1, 1, 1, 1), SIMD4<Float>(1, 1, 1, 1))
+        return true
+    }
+
+    private func firstPersonArmTexture(_ layer: FirstPersonArmLayer) -> MTLTexture? {
+        if let texture = firstPersonArmTextures[layer] { return texture }
+        guard let image = firstPersonArmVisualImage(layer) else { return nil }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: image.width,
+            height: image.height,
+            mipmapped: false)
+        descriptor.usage = .shaderRead
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+        image.pixels.withUnsafeBytes { raw in
+            texture.replace(region: MTLRegionMake2D(0, 0, image.width, image.height),
+                            mipmapLevel: 0,
+                            withBytes: raw.baseAddress!,
+                            bytesPerRow: image.width * 4)
+        }
+        firstPersonArmTextures[layer] = texture
+        return texture
+    }
+
+    /// The selected tool is rendered between `.back` and `.grip`, so the handle
+    /// enters the palm and is occluded by the camera-facing fingers and thumb.
+    @discardableResult
+    func drawFirstPersonArm(_ layer: FirstPersonArmLayer,
+                            _ x: Double, _ y: Double,
+                            _ width: Double, _ height: Double) -> Bool {
+        guard firstPersonArmTexture(layer) != nil else { return false }
+        mark(.firstPersonArm(layer))
+        emitQuad(Float(x), Float(y), Float(width), Float(height),
+                 0, 0, 1, 1,
+                 SIMD4<Float>(1, 1, 1, 1), SIMD4<Float>(1, 1, 1, 1))
+        return true
     }
 
     func drawRPGIcon(_ assetID: String, _ x: Double, _ y: Double, _ w: Double = 16, _ h: Double = 16) {
@@ -383,7 +459,7 @@ final class UICanvas {
         height = h
         verts.removeAll(keepingCapacity: true)
         segments.removeAll(keepingCapacity: true)
-        curGui = false
+        currentTextureSource = .atlas
         resetTransform()
     }
 
@@ -413,12 +489,23 @@ final class UICanvas {
         }
         enc.setVertexBytes(&u, length: MemoryLayout<UIUniforms>.stride, index: 1)
         enc.setFragmentSamplerState(sampler, index: 0)
-        let segs = segments.isEmpty ? [(gui: false, start: 0)] : segments
+        let segs = segments.isEmpty ? [(source: TextureSource.atlas, start: 0)] : segments
         for (i, seg) in segs.enumerated() {
             let end = i + 1 < segs.count ? segs[i + 1].start : verts.count
             let count = (end - seg.start) / 8
             if count == 0 { continue }
-            enc.setFragmentTexture(seg.gui ? (guiTexture ?? atlas) : atlas, index: 0)
+            let texture: MTLTexture
+            switch seg.source {
+            case .atlas:
+                texture = atlas
+            case .gui:
+                texture = guiTexture ?? atlas
+            case let .heldItem(itemName):
+                texture = heldItemTextures[itemName] ?? atlas
+            case let .firstPersonArm(layer):
+                texture = firstPersonArmTextures[layer] ?? atlas
+            }
+            enc.setFragmentTexture(texture, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: seg.start / 8, vertexCount: count)
         }
     }

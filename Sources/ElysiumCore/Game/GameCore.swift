@@ -573,6 +573,9 @@ public final class GameCore {
     private var rightDown = false
     private var useCooldown = 0
     private var breakCooldown = 0
+    /// Exact primary-button state for presentation layers. Gameplay remains the
+    /// sole owner of input; renderers receive only this read-only fact.
+    public var primaryActionHeld: Bool { leftDown }
     private var lastLightHealTick = -1
     private var lastSlot = 0
     private var bedPlacementSelection = BedPlacementSelection()
