@@ -444,15 +444,45 @@ func verifySymbolGraph(root: URL) throws -> Set<String> {
             manifest["checkedWorldBatchDeletePublicDeclarations"] as? [String] else {
         throw ScanFailure(description: "invalid ElysiumStorage API manifest")
     }
-    let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    guard actual == expected else {
-        throw ScanFailure(description: "ElysiumStorage externally reachable API drift")
-    }
-    guard let graph = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+    guard var graph = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let symbols = graph["symbols"] as? [[String: Any]] else {
         throw ScanFailure(description: "invalid ElysiumStorage symbol graph")
     }
-    guard let symbols = graph["symbols"] as? [[String: Any]] else {
-        throw ScanFailure(description: "ElysiumStorage symbol list missing")
+    let repositoryPrefix = root.standardizedFileURL.path + "/"
+    let normalizedSymbols = try symbols.map { source -> [String: Any] in
+        var symbol = source
+        if var location = symbol["location"] as? [String: Any],
+           let uri = location["uri"] as? String {
+            guard let path = URL(string: uri)?.standardizedFileURL.path,
+                  path.hasPrefix(repositoryPrefix) else {
+                throw ScanFailure(description: "symbol graph source escaped repository")
+            }
+            location["uri"] = "repository:///" + path.dropFirst(repositoryPrefix.count)
+            symbol["location"] = location
+        }
+        return symbol
+    }
+    func stableJSONKey(_ object: [String: Any]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        guard let value = String(data: data, encoding: .utf8) else {
+            throw ScanFailure(description: "symbol graph canonicalization failed")
+        }
+        return value
+    }
+    graph["symbols"] = try normalizedSymbols
+        .map { (try stableJSONKey($0), $0) }
+        .sorted { $0.0 < $1.0 }
+        .map(\.1)
+    if let relationships = graph["relationships"] as? [[String: Any]] {
+        graph["relationships"] = try relationships
+            .map { (try stableJSONKey($0), $0) }
+            .sorted { $0.0 < $1.0 }
+            .map(\.1)
+    }
+    let canonicalData = try JSONSerialization.data(withJSONObject: graph, options: [.sortedKeys])
+    let actual = SHA256.hash(data: canonicalData).map { String(format: "%02x", $0) }.joined()
+    guard actual == expected else {
+        throw ScanFailure(description: "ElysiumStorage externally reachable API drift (actual \(actual))")
     }
     let requiredPlayerCASDeclarations = [
         "ElysiumPlayerJSONRowDigest",

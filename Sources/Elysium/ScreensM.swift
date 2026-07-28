@@ -7,6 +7,14 @@ import QuartzCore
 import ElysiumCore
 import ElysiumTextInput
 
+/// Returns a transient UI stack to the player without deleting a partially merged remainder.
+/// Dropping is the same lossless fallback used for ordinary cursor cleanup on disconnect.
+func returnOrDropScreenStack(_ stack: ItemStack, game: GameCore) {
+    if !game.player.give(stack), stack.count > 0 {
+        game.player.dropStack(stack)
+    }
+}
+
 /// Player-centered pooling origin shared by the 3×3 crafting-table and 2×2 personal-inventory
 /// grids. `nil` (LAN client) means pooling is disabled and callers must fall back to
 /// inventory/grid-only resources — see `craftingContainerPoolCenter` for the correctness
@@ -3950,3 +3958,55 @@ func drawChatOverlay(_ ui: UIManager) {
         i -= 1
     }
 }
+
+#if ELYSIUM_DEBUG_CONTROL
+// Read-only projections for the authenticated debug surface. Keeping these next to the private
+// production fields makes the semantic API consume exactly the state and hit geometry the real
+// screens use, while compiling no debug accessors into the shipping app.
+extension FurnaceScreen {
+    var debugControlKind: String { be.kind ?? "furnace" }
+    var debugControlBurnTime: Int { be.burnTime ?? 0 }
+    var debugControlBurnTotal: Int { be.burnTotal ?? 0 }
+    var debugControlCookTime: Int { be.cookTime ?? 0 }
+    var debugControlCookTotal: Int { be.cookTotal ?? 200 }
+    var debugControlXPBank: Double { be.xpBank ?? 0 }
+}
+
+extension BrewingScreen {
+    var debugControlBrewTime: Int { be.brewTime ?? 0 }
+    var debugControlBrewTotal: Int { 400 }
+    var debugControlFuel: Int { be.fuel ?? 0 }
+}
+
+extension StonecutterScreen {
+    func debugControlRecipeActivationPoint(_ index: Int) -> (x: Double, y: Double) {
+        (gridX + Double(index % 4) * cellW + cellW / 2,
+         gridY + Double(index / 4) * 18 + 9)
+    }
+}
+
+extension BeaconScreen {
+    var debugControlLevels: Int { be.levels ?? 0 }
+
+    func debugControlPowerEnabled(_ power: String) -> Bool {
+        let minimumLevel = [
+            "speed": 1, "haste": 1, "resistance": 2,
+            "jump_boost": 2, "strength": 3,
+        ][power]
+        return minimumLevel.map { debugControlLevels >= $0 } ?? false
+    }
+
+    var debugControlCanConfirm: Bool {
+        pendingPrimary != nil && payment != nil && debugControlLevels > 0
+    }
+
+    func debugControlPowerActivationPoint(_ index: Int) -> (x: Double, y: Double) {
+        (panelX + 10 + Double(index % 2) * 92 + 44,
+         panelY + 20 + Double(index / 2) * 22 + 9)
+    }
+
+    var debugControlConfirmActivationPoint: (x: Double, y: Double) {
+        (panelX + 40, panelY + 100)
+    }
+}
+#endif

@@ -21,8 +21,11 @@ let MAX_MESH_INFLIGHT = 26
 let LIGHT_BUDGET_MS = 4.0               // seam-stitch time budget per frame
 /// how long a LAN client waits for a requested chunk section before retrying the request
 let LAN_CHUNK_REQUEST_EXPIRY_TICKS = 60
-/// background full-column completion requests issued per LAN client tick (bounded)
-let LAN_COLUMN_COMPLETION_REQUESTS_PER_TICK = 2
+/// Background full-column completion is deliberately below the host's shared chunk-request
+/// bucket. One request every two 20 Hz simulation ticks leaves headroom for the latency-critical
+/// visible-band requests instead of guaranteeing completion traffic will be throttled.
+let LAN_COLUMN_COMPLETION_REQUESTS_PER_TICK = 1
+let LAN_COLUMN_COMPLETION_INTERVAL_TICKS = 2
 /// radius (in chunks) around the player scanned for incomplete columns to background-fill
 let LAN_COLUMN_COMPLETION_RADIUS = 2
 
@@ -590,6 +593,12 @@ public final class GameCore {
 
     // loop
     private var accumulator = 0.0
+#if ELYSIUM_DEBUG_CONTROL
+    /// Development-control clock. Rendering/streaming continue while realtime simulation is
+    /// stopped; explicit steps run the same fixed-tick body as ordinary gameplay.
+    private var debugManualClockEnabled = false
+    private var debugSteppingSimulation = false
+#endif
     private var ticksSinceSave = 0
 
     // bookkeeping for vanilla feel — bob advances per TICK (frame-rate
@@ -1932,13 +1941,14 @@ public final class GameCore {
         }
     }
 
+    @discardableResult
     private func persistCheckedPlayerCandidate(
         worldID: String, candidate: [String: Any],
         retainedEnvelope: RPGLegacyPlayerOmissionIdentity?, synchronous: Bool
-    ) {
+    ) -> Bool {
         let database = RPGUncheckedSendable(value: db)
         let owner = RPGUncheckedSendable(value: self)
-        let write = {
+        let write = { () -> Bool in
             let ownerValue = owner.value
             var effective = candidate
             if let retainedEnvelope,
@@ -1953,16 +1963,19 @@ public final class GameCore {
                 } ?? .absent
                 _ = try database.value.compareAndSwapPlayerChecked(
                     worldID, expected: expected, candidate: effective)
+                return true
             } catch {
                 // Ordinary saves historically fail closed without mutating live state. A checked
                 // conflict deliberately preserves the newer durable row instead of retrying stale
                 // player data over it.
+                return false
             }
         }
         if synchronous {
-            withRPGPlayerPersistenceQueueSync(write)
+            return withRPGPlayerPersistenceQueueSync(write)
         } else {
-            rpgPlayerPersistenceQueue.async(execute: write)
+            rpgPlayerPersistenceQueue.async { _ = write() }
+            return true
         }
     }
 
@@ -2236,12 +2249,23 @@ public final class GameCore {
 #endif
 
     public func saveAndFlush(synchronous: Bool = false) {
-        guard inWorld else { return }
+        _ = saveAndFlushResult(synchronous: synchronous)
+    }
+
+    /// Synchronous persistence contract for automation and other callers that must distinguish
+    /// a committed save from the ordinary best-effort autosave path.
+    @discardableResult
+    public func saveAndFlushChecked() -> Bool {
+        saveAndFlushResult(synchronous: true)
+    }
+
+    private func saveAndFlushResult(synchronous: Bool) -> Bool {
+        guard inWorld else { return false }
         if isLANClientWorld {
             // A10: once the connection is known lost, stop overwriting the last-good resume
             // snapshot with drifting offline state
             if !lanConnectionLost { saveLANClientResume() }
-            return
+            return !lanConnectionLost
         }
         // A graceful termination (Cmd-Q), Save & Quit from the pause menu, or the
         // interactive path (applicationDidResignActive -> PauseScreen -> Save & Quit)
@@ -2261,7 +2285,7 @@ public final class GameCore {
         // stepped from LANTransport.tickReplication), so it must be settled explicitly here too —
         // otherwise a graceful host quit could persist a guest's half-placed/half-undone object.
         lanSettleTemplateJobsHandler?()
-        guard var rec = worldRec else { return }
+        guard var rec = worldRec else { return false }
         rec.lastPlayed = Date().timeIntervalSince1970 * 1000
         rec.gameMode = player.gameMode
         rec.nextEntityId = peekNextEntityId()
@@ -2280,6 +2304,8 @@ public final class GameCore {
         }
         worldRec = rec
         db.putWorld(rec)
+        let worldSaved = !synchronous || db.getWorld(rec.id).flatMap(encodeWorldRecordJSON)
+            == encodeWorldRecordJSON(rec)
         let retainedEnvelope = player.rpgLegacyQuickSlotEnvelope.flatMap { envelope in
             envelope.omissionEligible || rpgWorldEntryGeneration == 0
                 || rpgWorldEntryGenerationExhausted ? nil : RPGLegacyPlayerOmissionIdentity(
@@ -2288,10 +2314,12 @@ public final class GameCore {
                     sourceDigest: envelope.sourceDigest)
         }
         let playerCandidate = ["dim": dim.rawValue, "data": player.save()] as [String: Any]
-        persistCheckedPlayerCandidate(
+        let playerSaved = persistCheckedPlayerCandidate(
             worldID: rec.id, candidate: playerCandidate,
             retainedEnvelope: retainedEnvelope, synchronous: synchronous)
-        db.putAdvancements(rec.id, advancements.save())
+        let advancementIDs = advancements.save()
+        db.putAdvancements(rec.id, advancementIDs)
+        let advancementsSaved = !synchronous || db.getAdvancements(rec.id) == advancementIDs
         // all modified chunks across all dims
         var records: [ChunkRecord] = []
         for (d, w) in worlds {
@@ -2303,14 +2331,31 @@ public final class GameCore {
         for r in pendingChunkSaves.values { records.append(r) }
         pendingChunkSaves.removeAll()
         for r in records { savedChunkKeys.insert(r.key) }
+        let chunksSaved: Bool
         if synchronous {
-            withSaveQueueSync { self.writeChunkBatch(records) }
+            chunksSaved = withSaveQueueSync { self.writeChunkBatch(records) }
+            if !chunksSaved {
+                // Keep both live and already-unloaded records eligible for a retry. The async
+                // recovery scheduled by writeChunkBatch is intentionally redundant here.
+                for record in records {
+                    if let dimension = Dim(rawValue: record.dim),
+                       let chunk = worlds[dimension]?.chunks[chunkKey(record.cx, record.cz)] {
+                        chunk.modified = true
+                    } else {
+                        pendingChunkSaves[record.key] = record
+                    }
+                }
+            }
         } else {
-            withSaveQueueAsync { [weak self] in self?.writeChunkBatch(records) }
+            chunksSaved = true
+            withSaveQueueAsync { [weak self] in _ = self?.writeChunkBatch(records) }
         }
-        for w in worlds.values {
-            for c in w.chunks.values { c.modified = false }
+        if chunksSaved {
+            for w in worlds.values {
+                for c in w.chunks.values { c.modified = false }
+            }
         }
+        return worldSaved && playerSaved && advancementsSaved && chunksSaved
     }
 
     /// Idempotent terminal save. Ordinary autosaves and explicit player-state
@@ -2359,8 +2404,9 @@ public final class GameCore {
 
     /// runs ON the save queue; on failure re-marks the chunks dirty (on main)
     /// so the next autosave retries instead of silently losing the edits
-    private func writeChunkBatch(_ records: [ChunkRecord]) {
-        if db.putChunks(records) { return }
+    @discardableResult
+    private func writeChunkBatch(_ records: [ChunkRecord]) -> Bool {
+        if db.putChunks(records) { return true }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             print("[saves] chunk batch failed — re-marking \(records.count) chunks dirty for retry")
@@ -2374,6 +2420,7 @@ public final class GameCore {
                 }
             }
         }
+        return false
     }
 
     /// Difficulty is world-global: apply to every dimension so the value can't
@@ -2615,11 +2662,25 @@ public final class GameCore {
     }
 
     public func markLANChunkSectionsApplied(_ sections: [LANChunkSectionSnapshot]) {
+        markLANChunkSectionPositionsApplied(sections.map {
+            LANChunkSectionPosition(
+                dimension: $0.dimension,
+                cx: $0.cx,
+                cz: $0.cz,
+                sectionY: $0.sectionY
+            )
+        })
+    }
+
+    private func markLANChunkSectionPositionsApplied(_ sections: [LANChunkSectionPosition]) {
         guard isLANClientWorld, !sections.isEmpty else { return }
         var dirtiedChunks: [DimChunk: (dim: Int, cx: Int, cz: Int)] = [:]
         for section in sections {
             let key = chunkKey(section.cx, section.cz)
-            let dimSection = DimSection(dim: section.dimension, pos: SectionPos(cx: section.cx, sy: section.sectionY, cz: section.cz))
+            let dimSection = DimSection(
+                dim: section.dimension,
+                pos: SectionPos(cx: section.cx, sy: section.sectionY, cz: section.cz)
+            )
             lanAppliedChunkSections.insert(dimSection)
             lanSectionRequestsInFlight.removeValue(forKey: dimSection)
             dirtiedChunks[DimChunk(dim: section.dimension, key: key)] = (section.dimension, section.cx, section.cz)
@@ -2647,7 +2708,9 @@ public final class GameCore {
         worldRec?.rpgSimulationTick = acceptedTick
         for loadedWorld in worlds.values { loadedWorld.rpgSimulationTick = acceptedTick }
         lanDeferredReplication = deferred ?? LANDeferredReplicationBuffer()
-        markLANChunkSectionsApplied(batch.chunkSections)
+        // Only validated, actually-written sections retire an in-flight request. A malformed or
+        // mismatched snapshot stays requestable after the ordinary expiry window.
+        markLANChunkSectionPositionsApplied(report.appliedChunkSectionPositions)
         return report
     }
 
@@ -2658,6 +2721,7 @@ public final class GameCore {
     /// requested at most once per expiry window.
     private func tickLANClientColumnCompletion() {
         guard isLANClientWorld else { return }
+        guard lanClientTickCounter % LAN_COLUMN_COMPLETION_INTERVAL_TICKS == 0 else { return }
         let w = world
         expireLANSectionRequests()
         let pcx = floorDiv(ifloor(player.x), 16)
@@ -3506,6 +3570,9 @@ public final class GameCore {
         let w = world
         let p = player!
         paused = (host?.screenPausesGame() ?? false) && !lanHostKeepsSimulationRunning
+#if ELYSIUM_DEBUG_CONTROL
+        if debugSteppingSimulation { paused = false }
+#endif
         if paused { return }
 
         if !isLANClientWorld {
@@ -3705,7 +3772,7 @@ public final class GameCore {
         if !pendingChunkSaves.isEmpty && w.time % 20 == 0 {
             let batch = Array(pendingChunkSaves.values)
             pendingChunkSaves.removeAll()
-            withSaveQueueAsync { [weak self] in self?.writeChunkBatch(batch) }
+            withSaveQueueAsync { [weak self] in _ = self?.writeChunkBatch(batch) }
         }
 
         // autosave
@@ -4823,7 +4890,7 @@ public final class GameCore {
     // ===========================================================================
     // Input — the app forwards events here when no screen is open
     // ===========================================================================
-    private func handleBedPlacementClick() -> Bool {
+    private func handleBedPlacementClick(at explicitHit: RaycastHit? = nil) -> Bool {
         guard let p = player, let held = p.mainHand,
               let rawBlock = itemDef(held.id).block else {
             bedPlacementSelection.reset()
@@ -4846,7 +4913,7 @@ public final class GameCore {
             bedPlacementSelection.reset()
         }
         bedPlacementBinding = binding
-        guard let hit = crosshairBlock() else {
+        guard let hit = explicitHit ?? crosshairBlock() else {
             host?.showActionBar("Aim at a block to select the bed head", 50)
             return true
         }
@@ -4876,6 +4943,22 @@ public final class GameCore {
         }
         return true
     }
+
+#if ELYSIUM_DEBUG_CONTROL
+    /// Drives the same two-click bed-selection path as a player's left click, but with an
+    /// authenticated, validated ray hit so an automated test does not depend on camera pixels.
+    @discardableResult
+    public func debugBedPlacementClick(at hit: RaycastHit) -> Bool {
+        guard inWorld, !(host?.hasScreen() ?? false), templatePlacementJob == nil,
+              templatePlacement == nil else { return false }
+        let handled = handleBedPlacementClick(at: hit)
+        if handled {
+            leftDown = false
+            player?.breakingProgress = -1
+        }
+        return handled
+    }
+#endif
 
     public func mouseDown(_ button: Int) {
         guard inWorld, !(host?.hasScreen() ?? false) else { return }
@@ -5112,10 +5195,46 @@ public final class GameCore {
     // ===========================================================================
     // Frame pump — the app's render loop calls this once per frame
     // ===========================================================================
+#if ELYSIUM_DEBUG_CONTROL
+    /// Stops or resumes realtime fixed-step accumulation without freezing rendering.
+    public func setDebugManualClock(_ enabled: Bool) {
+        debugManualClockEnabled = enabled
+        accumulator = 0
+    }
+
+    public var isDebugManualClockEnabled: Bool { debugManualClockEnabled }
+
+    /// Runs a small, exact slice of production simulation ticks while the manual clock is on.
+    /// The control plane can issue additional slices, but one request cannot monopolize the
+    /// AppKit main actor. LAN clients remain host-authoritative and cannot be stepped locally.
+    @discardableResult
+    public func debugStepSimulation(_ requestedTicks: Int) -> Int {
+        guard inWorld, !isLANClientWorld else { return 0 }
+        let ticks = max(0, min(20, requestedTicks))
+        guard ticks > 0 else { return 0 }
+        debugManualClockEnabled = true
+        debugSteppingSimulation = true
+        defer {
+            debugSteppingSimulation = false
+            accumulator = 0
+        }
+        for _ in 0..<ticks { tick() }
+        return ticks
+    }
+#endif
+
     /// Runs fixed-step sim ticks, then the budgeted light/mesh streamers.
     /// Returns the interpolation partial for rendering.
     public func frame(dtMs: Double) -> Double {
         guard inWorld else { return 0 }
+#if ELYSIUM_DEBUG_CONTROL
+        if debugManualClockEnabled {
+            LoadProf.shared.time("lightQ") { processLightQueue() }
+            LoadProf.shared.time("streamMesh") { streamMeshes() }
+            LoadProf.shared.tickPrint()
+            return 1
+        }
+#endif
         accumulator += min(dtMs, 250)
         var steps = 0
         while accumulator >= TICK_MS && steps < 10 {

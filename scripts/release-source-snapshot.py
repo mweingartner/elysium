@@ -34,7 +34,16 @@ def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: release-source-snapshot.py REPOSITORY")
     root = os.path.realpath(sys.argv[1])
-    if not os.path.isdir(os.path.join(root, ".git")):
+    repository = subprocess.run(
+        ["/usr/bin/git", "-C", root, "rev-parse", "--show-toplevel", "--is-inside-work-tree"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    repository_lines = repository.stdout.splitlines()
+    if (repository.returncode or len(repository_lines) != 2
+            or os.path.realpath(repository_lines[0]) != root
+            or repository_lines[1] != "true"):
         fail("repository root is invalid")
     raw = git_paths(root, ["ls-files", "-z"]) + git_paths(
         root, ["ls-files", "--others", "--exclude-standard", "-z"]

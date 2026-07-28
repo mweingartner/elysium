@@ -33,6 +33,7 @@ final class LANLiveProbe {
     private enum Mode: String {
         case hostRig = "host-rig"
         case clientDoor = "client-door"
+        case clientObserver = "client-observer"
         case clientResume = "client-resume"
     }
 
@@ -49,6 +50,7 @@ final class LANLiveProbe {
     private let timeoutFrames: Int
     private let hostJoinCode: String
     private let hostPort: UInt16
+    private let expectedHostClients: Int
 
     init?(environment: [String: String]) {
         guard let rawMode = environment["ELYSIUM_LAN_PROBE"],
@@ -58,6 +60,10 @@ final class LANLiveProbe {
         self.timeoutFrames = environment["ELYSIUM_LAN_PROBE_TIMEOUT_FRAMES"].flatMap(Int.init) ?? 2400
         self.hostJoinCode = environment["ELYSIUM_LAN_PROBE_JOIN_CODE"] ?? "TST42A"
         self.hostPort = environment["ELYSIUM_LAN_PROBE_PORT"].flatMap(UInt16.init) ?? LAN_MULTIPLAYER_DEFAULT_PORT
+        self.expectedHostClients = max(1, min(
+            LAN_MULTIPLAYER_MAX_CLIENTS,
+            environment["ELYSIUM_LAN_PROBE_EXPECTED_CLIENTS"].flatMap(Int.init) ?? 1
+        ))
         elysiumLANProbeLog("start mode=\(mode.rawValue)")
     }
 
@@ -73,7 +79,9 @@ final class LANLiveProbe {
         case .hostRig:
             tickHostRig(game: app.game)
         case .clientDoor:
-            tickClientDoor(game: app.game)
+            tickClientSharedState(game: app.game, sendsDoorIntent: true)
+        case .clientObserver:
+            tickClientSharedState(game: app.game, sendsDoorIntent: false)
         case .clientResume:
             tickClientResume(game: app.game)
         }
@@ -126,7 +134,7 @@ final class LANLiveProbe {
                     requestedPort: hostPort
                 )
                 hostStarted = true
-                elysiumLANProbeLog("host_started port=\(hostPort) joinCode=\(hostJoinCode)")
+                elysiumLANProbeLog("host_started port=\(hostPort)")
             } catch {
                 fail(app: nil, "host_start_failed error=\(error)")
                 return
@@ -134,8 +142,10 @@ final class LANLiveProbe {
         }
         let d = door(in: game)
         let cell = game.world.getBlock(d.x, d.y, d.z)
-        if (cell >> 4) == Int(B.oak_door), isDoorOpen(cell) {
-            pass("host remote-use door=\(d.x),\(d.y),\(d.z) cell=\(cell) frame=\(frames)")
+        let acceptedPeers = LANMultiplayerManager.shared.acceptedHostPeerCountForProbe()
+        if (cell >> 4) == Int(B.oak_door), isDoorOpen(cell),
+           acceptedPeers == expectedHostClients {
+            pass("host remote-use peers=\(acceptedPeers) door=\(d.x),\(d.y),\(d.z) cell=\(cell) frame=\(frames)")
         }
     }
 
@@ -179,7 +189,7 @@ final class LANLiveProbe {
         )
     }
 
-    private func tickClientDoor(game: GameCore) {
+    private func tickClientSharedState(game: GameCore, sendsDoorIntent: Bool) {
         guard game.hasWorld(), game.isLANClientWorld, let player = game.player else { return }
         if clientWorldFrame == nil {
             clientWorldFrame = frames
@@ -212,9 +222,12 @@ final class LANLiveProbe {
         if isDoorOpen(lower), hasChestItem {
             game.saveAndFlush(synchronous: true)
             let latencyFrames = clientUseSentFrame.map { frames - $0 } ?? -1
-            pass("client shared-state door_open=true chest_item=stick:7 latencyFrames=\(latencyFrames)")
+            let result = sendsDoorIntent ? "shared-state" : "observed-state"
+            pass("client \(result) door_open=true chest_item=stick:7 latencyFrames=\(latencyFrames)")
             return
         }
+
+        guard sendsDoorIntent else { return }
 
         if clientPositionedFrame == nil {
             position(player, toUseDoorAt: d)

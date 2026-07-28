@@ -1,23 +1,48 @@
 #!/bin/bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TARGET="${1:-/Applications/Elysium.app}"
+DEBUG_CONTROL_MARKER="elysium_debug_control_build_marker_v1"
 
 fail() { echo "binary security check failed: $*" >&2; exit 1; }
+binary_contains_debug_marker() {
+    local binary="$1"
+    if /usr/bin/nm "$binary" 2>/dev/null | /usr/bin/awk -v marker="$DEBUG_CONTROL_MARKER" '
+        index($0, marker) { found = 1 }
+        END { exit(found ? 0 : 1) }
+    '; then
+        return 0
+    fi
+    /usr/bin/strings "$binary" | /usr/bin/awk -v marker="$DEBUG_CONTROL_MARKER" '
+        index($0, marker) { found = 1 }
+        END { exit(found ? 0 : 1) }
+    '
+}
+
+[ "$#" -le 1 ] || fail "usage: scripts/security-check-binary.sh [EXECUTABLE_OR_APP]"
 
 if [ -d "$TARGET" ]; then
     APP="$TARGET"
     BIN="$APP/Contents/MacOS/Elysium"
     PLIST="$APP/Contents/Info.plist"
-    [ -x "$BIN" ] || fail "missing executable at $BIN"
+    [ -f "$BIN" ] && [ ! -L "$BIN" ] && [ -x "$BIN" ] || fail "missing executable at $BIN"
     /usr/bin/codesign --verify --deep --strict "$APP" || fail "codesign verification failed"
     /usr/bin/plutil -lint "$PLIST" >/dev/null || fail "Info.plist is invalid"
     BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")
     [ "$BID" = "com.briangao.elysium" ] || fail "unexpected bundle id: $BID"
 else
     BIN="$TARGET"
-    PLIST="packaging/Info.plist"
-    [ -x "$BIN" ] || fail "missing executable at $BIN"
+    PLIST="$ROOT/packaging/Info.plist"
+    [ -f "$BIN" ] && [ ! -L "$BIN" ] && [ -x "$BIN" ] || fail "missing executable at $BIN"
+fi
+
+if binary_contains_debug_marker "$BIN"; then
+    fail "production executable contains forbidden debug-control marker: $DEBUG_CONTROL_MARKER"
+fi
+if /usr/bin/nm "$BIN" 2>/dev/null | /usr/bin/grep -F 'ElysiumDebugProtocol' >/dev/null \
+    || /usr/bin/strings "$BIN" | /usr/bin/grep -F 'ElysiumDebugProtocol' >/dev/null; then
+    fail "production executable contains the debug-control protocol module"
 fi
 
 LAN_ALLOWED=0

@@ -6,9 +6,14 @@ if rg -n 'event\.eventNumber|NSEvent[^\n]*\.eventNumber' Sources/Elysium/AppInpu
     exit 1
 fi
 for required in scripts/pipeline.sh scripts/release-source-snapshot.py \
-                scripts/package-app.sh scripts/appkit-text-entry-integration.sh \
+                scripts/package-app.sh scripts/package-debug-app.sh \
+                scripts/security-check-binary.sh scripts/appkit-text-entry-integration.sh \
+                scripts/test-lan-automation.sh scripts/lan-automation-lib.sh \
                 Tests/ElysiumAppKitIntegration/Driver.swift \
-                scripts/prepush-release-build.sh .githooks/pre-commit .githooks/pre-push; do
+                scripts/prepush-release-build.sh .githooks/pre-commit .githooks/pre-push \
+                packaging/DebugInfo.plist Sources/Elysium/DebugControlRuntime.swift \
+                Sources/Elysium/DebugControlServer.swift Sources/Elysium/DebugScreenSemantics.swift \
+                Sources/elydebug/DebugClient.swift; do
     [ -f "$required" ] || { echo "security scan failed: missing $required" >&2; exit 1; }
 done
 PRODUCTION_RELEASE_SURFACES=(
@@ -22,6 +27,7 @@ if grep -E '(--(fixture|scenario|fault|alternate-executable|caller-evidence)|cas
 fi
 EXECUTABLE_RELEASE_SURFACES=(
     scripts/pipeline.sh scripts/release-source-snapshot.py scripts/package-app.sh
+    scripts/package-debug-app.sh scripts/security-check-binary.sh
     scripts/appkit-text-entry-integration.sh .githooks/pre-commit .githooks/pre-push
 )
 CURRENT_UID="$(id -u)"
@@ -65,6 +71,38 @@ awk '
 ' "$DRIVER" || fail "AppKit Command-key rejection probe contract changed"
 
 echo "==> security: source scans"
+
+scripts/test-lan-automation.sh >/dev/null \
+    || fail "LAN automation quoting/rollback/binary-isolation contract failed"
+
+DEBUG_CONTROL_MARKER='elysium_debug_control_build_marker_v1'
+DEBUG_CONTROL_GUARDED_SOURCES=(
+    Sources/Elysium/DebugControlRuntime.swift
+    Sources/Elysium/DebugControlServer.swift
+    Sources/Elysium/DebugScreenSemantics.swift
+)
+for source in "${DEBUG_CONTROL_GUARDED_SOURCES[@]}"; do
+    first_nonempty="$(awk 'NF { print; exit }' "$source")"
+    last_nonempty="$(awk 'NF { line = $0 } END { print line }' "$source")"
+    [ "$first_nonempty" = '#if ELYSIUM_DEBUG_CONTROL' ] && [ "$last_nonempty" = '#endif' ] \
+        || fail "$source must remain wholly compile-time guarded by ELYSIUM_DEBUG_CONTROL"
+done
+MARKER_SOURCE_FILES="$(grep -RFl "$DEBUG_CONTROL_MARKER" Sources/Elysium Sources/ElysiumCore || true)"
+[ "$MARKER_SOURCE_FILES" = 'Sources/Elysium/DebugControlServer.swift' ] \
+    || fail "debug-control build marker must have exactly one guarded app-source owner"
+[ "$(grep -Fc 'bash "$ROOT/scripts/security-check-binary.sh"' scripts/package-app.sh)" -eq 2 ] \
+    || fail "production packaging must inspect both input and staged executables"
+grep -F "$DEBUG_CONTROL_MARKER" scripts/security-check-binary.sh >/dev/null \
+    || fail "production binary security scan does not reject the debug-control marker"
+if grep -F 'ELYSIUM_DEBUG_CONTROL' scripts/package-app.sh >/dev/null; then
+    fail "production packager must not enable debug control"
+fi
+/usr/bin/plutil -lint packaging/DebugInfo.plist >/dev/null \
+    || fail "DebugInfo.plist is invalid"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' packaging/DebugInfo.plist)" = \
+    'ElysiumDebug' ] || fail "DebugInfo.plist executable identity changed"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' packaging/DebugInfo.plist)" = \
+    'com.briangao.elysium.debug' ] || fail "DebugInfo.plist bundle identity changed"
 
 if grep -RInE 'XCTest|@testable|TextInputTestHook|InjectedPasteboard|probeLaunchMarker' \
     Sources/ElysiumTextInput Sources/Elysium Sources/ElysiumCore; then
@@ -179,10 +217,12 @@ swift scripts/sqlite-boundary-scan.swift --root "$ROOT" --self-test
 NETWORK_REFS="$(grep -RInE 'URLSession|NSURLConnection|NWConnection|NWListener|NWBrowser|import Network|Network\.|CFSocket|GCDAsyncSocket' Sources || true)"
 UNAPPROVED_NETWORK_REFS="$(printf '%s\n' "$NETWORK_REFS" \
     | grep -v '^Sources/Elysium/OllamaAgent.swift:' \
-    | grep -v '^Sources/Elysium/LANTransport.swift:' || true)"
+    | grep -v '^Sources/Elysium/LANTransport.swift:' \
+    | grep -v '^Sources/Elysium/DebugControlServer.swift:' \
+    | grep -v '^Sources/elydebug/DebugClient.swift:' || true)"
 if [ -n "$UNAPPROVED_NETWORK_REFS" ]; then
     printf '%s\n' "$UNAPPROVED_NETWORK_REFS"
-    fail "network API reference found outside approved local Ollama client or LAN transport"
+    fail "network API reference found outside reviewed local transports"
 fi
 
 URL_REFS="$(grep -RInE 'https?://' Sources || true)"

@@ -4,6 +4,144 @@ import XCTest
 
 @MainActor
 final class LANMultiplayerTests: XCTestCase {
+    func testProtocol5InboundAdmissionIsClosedByRoleAndPhase() {
+        XCTAssertEqual(
+            LANMultiplayerMessageKind.allCases.filter {
+                lanMultiplayerAllowsInbound($0, localRole: .host, phase: .awaitingHandshake)
+            },
+            [.clientHello]
+        )
+        XCTAssertEqual(
+            LANMultiplayerMessageKind.allCases.filter {
+                lanMultiplayerAllowsInbound($0, localRole: .client, phase: .awaitingHandshake)
+            },
+            [.serverAccept, .serverReject]
+        )
+        XCTAssertFalse(lanMultiplayerAllowsInbound(
+            .clientHello, localRole: .host, phase: .authenticated
+        ))
+        XCTAssertFalse(lanMultiplayerAllowsInbound(
+            .serverAccept, localRole: .client, phase: .authenticated
+        ))
+        XCTAssertTrue(lanMultiplayerAllowsInbound(
+            .blockIntent, localRole: .host, phase: .authenticated
+        ))
+        XCTAssertTrue(lanMultiplayerAllowsInbound(
+            .replicationBatch, localRole: .client, phase: .authenticated
+        ))
+    }
+
+    func testProtocol5SequenceRejectsGapDuplicateAndWrap() throws {
+        var inbound = LANMultiplayerSequenceState()
+        try inbound.consume(1)
+        XCTAssertThrowsError(try inbound.consume(1)) { error in
+            XCTAssertEqual(error as? LANMultiplayerSequenceError, .invalid(expected: 2, actual: 1))
+        }
+        XCTAssertThrowsError(try inbound.consume(3)) { error in
+            XCTAssertEqual(error as? LANMultiplayerSequenceError, .invalid(expected: 2, actual: 3))
+        }
+        try inbound.consume(2)
+
+        var boundary = LANMultiplayerSequenceState(next: UInt32.max)
+        XCTAssertEqual(try boundary.reserve(), UInt32.max)
+        XCTAssertNil(boundary.next)
+        XCTAssertThrowsError(try boundary.reserve()) { error in
+            XCTAssertEqual(error as? LANMultiplayerSequenceError, .exhausted)
+        }
+    }
+
+    func testProtocol5HostSocketCapsAreExactAndIndependent() {
+        XCTAssertTrue(lanMultiplayerAllowsNewHostSocket(
+            totalOpenSockets: LAN_MULTIPLAYER_MAX_OPEN_HOST_SOCKETS - 1,
+            handshakingSockets: LAN_MULTIPLAYER_MAX_HANDSHAKING_HOST_SOCKETS - 1
+        ))
+        XCTAssertFalse(lanMultiplayerAllowsNewHostSocket(
+            totalOpenSockets: LAN_MULTIPLAYER_MAX_OPEN_HOST_SOCKETS,
+            handshakingSockets: 0
+        ))
+        XCTAssertFalse(lanMultiplayerAllowsNewHostSocket(
+            totalOpenSockets: 1,
+            handshakingSockets: LAN_MULTIPLAYER_MAX_HANDSHAKING_HOST_SOCKETS
+        ))
+        XCTAssertFalse(lanMultiplayerAllowsNewHostSocket(totalOpenSockets: -1, handshakingSockets: 0))
+    }
+
+    func testProtocol5ClientHelloDeclarationIsCappedBeforePayloadArrival() {
+        var header = Data([0x50, 0x42, 0x4c, 0x4e, 0, UInt8(LAN_MULTIPLAYER_PROTOCOL_VERSION)])
+        header.append(contentsOf: [0, UInt8(LANMultiplayerMessageKind.clientHello.rawValue)])
+        header.append(contentsOf: [0, 0, 0, 1])
+        let oversized = UInt32(LAN_MULTIPLAYER_MAX_CLIENT_HELLO_BYTES + 1)
+        header.append(contentsOf: [
+            UInt8((oversized >> 24) & 0xff), UInt8((oversized >> 16) & 0xff),
+            UInt8((oversized >> 8) & 0xff), UInt8(oversized & 0xff),
+        ])
+        var buffer = header
+
+        XCTAssertThrowsError(try LANMultiplayerFrameCodec.decodeFrames(from: &buffer)) { error in
+            XCTAssertEqual(
+                error as? LANMultiplayerCodecError,
+                .oversizedFrame(LAN_MULTIPLAYER_MAX_CLIENT_HELLO_BYTES + 1)
+            )
+        }
+        XCTAssertEqual(buffer, header)
+    }
+
+    func testProtocol5PreAuthenticationPrefixRejectsGameplayDeclarationBeforePayloadArrival() {
+        var header = Data([0x50, 0x42, 0x4c, 0x4e, 0, UInt8(LAN_MULTIPLAYER_PROTOCOL_VERSION)])
+        header.append(contentsOf: [0, UInt8(LANMultiplayerMessageKind.replicationBatch.rawValue)])
+        header.append(contentsOf: [0, 0, 0, 1])
+        let legalAuthenticatedLength = UInt32(LAN_MULTIPLAYER_MAX_FRAME_BYTES)
+        header.append(contentsOf: [
+            UInt8((legalAuthenticatedLength >> 24) & 0xff),
+            UInt8((legalAuthenticatedLength >> 16) & 0xff),
+            UInt8((legalAuthenticatedLength >> 8) & 0xff),
+            UInt8(legalAuthenticatedLength & 0xff),
+        ])
+
+        XCTAssertEqual(header.count, LANMultiplayerFrameCodec.headerByteCount)
+        XCTAssertThrowsError(
+            try LANMultiplayerFrameCodec.validateHostPreAuthenticationPrefix(header)
+        ) { error in
+            XCTAssertEqual(
+                error as? LANMultiplayerCodecError,
+                .unexpectedPreAuthenticationMessage(.replicationBatch)
+            )
+        }
+    }
+
+    func testProtocol5EveryRepeatableAuthenticatedGuestKindHasARateLimitCategory() {
+        let admitted = LANMultiplayerMessageKind.allCases.filter {
+            lanMultiplayerAllowsInbound($0, localRole: .host, phase: .authenticated)
+        }
+        let terminalUnbucketed: Set<LANMultiplayerMessageKind> = [.disconnect]
+        let missing = admitted.filter {
+            !terminalUnbucketed.contains($0) && lanMultiplayerHostRateLimitCategory(for: $0) == nil
+        }
+
+        XCTAssertTrue(missing.isEmpty, "unbucketed repeatable guest kinds: \(missing)")
+        XCTAssertNil(lanMultiplayerHostRateLimitCategory(for: .disconnect))
+        XCTAssertEqual(lanMultiplayerHostRateLimitCategory(for: .inputIntent), .playerState)
+        XCTAssertEqual(lanMultiplayerHostRateLimitCategory(for: .replicationAck), .replicationAck)
+        XCTAssertEqual(lanMultiplayerHostRateLimitCategory(for: .ping), .heartbeat)
+    }
+
+    func testProtocol5PeerIdentityIsCanonicalAndGuestClaimsAreExposedForBinding() {
+        let peerID = "123E4567-E89B-12D3-A456-426614174000"
+        XCTAssertEqual(canonicalLANPeerID(peerID), peerID)
+        XCTAssertNil(canonicalLANPeerID(peerID.lowercased()))
+        XCTAssertNil(canonicalLANPeerID(""))
+
+        let request = LANChunkRequest(
+            dimension: Dim.overworld.rawValue, cx: 0, cz: 0, radius: 0
+        )
+        XCTAssertEqual(
+            LANMultiplayerMessage.chunkRequest(playerID: peerID, request: request)
+                .guestClaimedPlayerID,
+            peerID
+        )
+        XCTAssertNil(LANMultiplayerMessage.chat(sender: "spoof", text: "hello").guestClaimedPlayerID)
+    }
+
     func testRPGClockCatchUpClassifierCoversEveryGuestMutationKindExactly() {
         let expected: [LANMultiplayerMessageKind] = [
             .playerState, .inputIntent, .blockIntent, .containerIntent,
@@ -18,6 +156,7 @@ final class LANMultiplayerTests: XCTestCase {
     }
 
     func testFrameCodecRoundTripsAllHandshakeAndGameplayMessageKinds() throws {
+        let resumeToken = try LANV6Token256(bytes: Array(repeating: 0x5a, count: 32))
         let world = LANWorldSummary(
             worldID: "world-1",
             worldName: "LAN World",
@@ -49,8 +188,14 @@ final class LANMultiplayerTests: XCTestCase {
         )
         let event = LANGameplayEvent(playerID: "peer-a", kind: .peerReconnected, message: "Alex reconnected", tick: 8)
         let messages: [LANMultiplayerMessage] = [
-            .clientHello(playerID: "peer-a", playerName: "Alex", joinCode: "ABCD42", elysiumVersion: ELYSIUM_VERSION),
-            .serverAccept(peerID: "peer-a", world: world),
+            .clientHello(
+                playerID: "peer-a",
+                playerName: "Alex",
+                joinCode: "ABCD42",
+                elysiumVersion: ELYSIUM_VERSION,
+                resumeToken: resumeToken
+            ),
+            .serverAccept(peerID: "peer-a", world: world, resumeToken: resumeToken),
             .serverReject(reason: "bad join code"),
             .chat(sender: "Alex", text: "hello"),
             .playerState(player),
@@ -544,11 +689,13 @@ final class LANMultiplayerTests: XCTestCase {
     func testRLERoundTripsAllAirAllOneValueAndAlternatingWorstCase() {
         let allAir = [UInt16](repeating: 0, count: LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT)
         let allAirEncoded = lanEncodeChunkSectionRLE(allAir)
+        XCTAssertTrue(lanValidateChunkSectionRLE(allAirEncoded))
         XCTAssertEqual(lanDecodeChunkSectionRLE(allAirEncoded), allAir)
         XCTAssertLessThanOrEqual(allAirEncoded.count, LAN_MULTIPLAYER_MAX_CELLS_DATA_BYTES)
 
         let allOne = [UInt16](repeating: 42, count: LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT)
         let allOneEncoded = lanEncodeChunkSectionRLE(allOne)
+        XCTAssertTrue(lanValidateChunkSectionRLE(allOneEncoded))
         XCTAssertEqual(lanDecodeChunkSectionRLE(allOneEncoded), allOne)
         XCTAssertLessThanOrEqual(allOneEncoded.count, LAN_MULTIPLAYER_MAX_CELLS_DATA_BYTES)
 
@@ -558,6 +705,7 @@ final class LANMultiplayerTests: XCTestCase {
             alternating.append(i % 2 == 0 ? 1 : 2)
         }
         let alternatingEncoded = lanEncodeChunkSectionRLE(alternating)
+        XCTAssertTrue(lanValidateChunkSectionRLE(alternatingEncoded))
         XCTAssertEqual(lanDecodeChunkSectionRLE(alternatingEncoded), alternating)
         XCTAssertLessThanOrEqual(alternatingEncoded.count, LAN_MULTIPLAYER_MAX_CELLS_DATA_BYTES)
     }
@@ -574,6 +722,7 @@ final class LANMultiplayerTests: XCTestCase {
     func testRLEDecodeNeverTrapsAndReturnsNilForMalformedBuffers() {
         // Truncated (not a multiple of 4).
         XCTAssertNil(lanDecodeChunkSectionRLE(Data([0x00, 0x01, 0x00])))
+        XCTAssertFalse(lanValidateChunkSectionRLE(Data([0x00, 0x01, 0x00])))
         // Odd length.
         XCTAssertNil(lanDecodeChunkSectionRLE(Data([0x00])))
         // Empty.

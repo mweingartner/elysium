@@ -171,6 +171,18 @@ struct CompositeUniforms {
     var params2: SIMD4<Float> = .zero   // ultraOn, aoStrength, volStrength
 }
 
+struct RendererCullingStats {
+    var totalSections = 0
+    var emptySections = 0
+    var distanceCulledSections = 0
+    var frustumCulledSections = 0
+    var visibleSections = 0
+    var shadowCandidates = 0
+    var shadowRangeCulledSections = 0
+    var shadowFrustumCulledSections = 0
+    var shadowVisibleSections = 0
+}
+
 final class WorldRenderer {
     let device: MTLDevice
     let queue: MTLCommandQueue
@@ -257,6 +269,10 @@ final class WorldRenderer {
     private var shadowSizeNow = 0   // rebuilt when the ultra preset changes it
 
     var sections: [SectionKey: SectionGPU] = [:]
+    /// Reused every frame to avoid allocating one tuple buffer per camera pass. The ordering and
+    /// culling decisions remain identical; only the scratch storage lifetime changes.
+    private var visibleSections: [(gpu: SectionGPU, rel: SIMD3<Float>, dist: Float)] = []
+    private(set) var cullingStats = RendererCullingStats()
     var arena: MeshArena!
     var drawCalls = 0
 
@@ -526,41 +542,131 @@ final class WorldRenderer {
     func recordWorldIconGeneration(_ generation: UInt64) { spriteIconGeneration = generation }
     func currentWorldIconGeneration() -> UInt64 { spriteIconGeneration }
 
-    // ---- frame capture (photo booth) ---------------------------------------------
-    private var pendingCapture: String?
+    // ---- frame capture (photo booth + authenticated debug control) ----------------
+    struct CaptureResult {
+        let path: String
+        let width: Int
+        let height: Int
+        let succeeded: Bool
+    }
+
+    private struct CaptureRequest {
+        let path: String
+        let includeUI: Bool
+        let completion: ((CaptureResult) -> Void)?
+    }
+
+    private var pendingCaptures: [CaptureRequest] = []
+    private let maximumPendingCaptures = 8
+
+#if ELYSIUM_DEBUG_CONTROL
+    /// True while a queued capture still needs a rendered frame. AppKit may stop driving an
+    /// MTKView when its application is inactive or its window is covered, so the authenticated
+    /// debug controller uses this to request a bounded explicit draw without activating Elysium.
+    var hasPendingCapture: Bool { !pendingCaptures.isEmpty }
+#endif
+
     func requestCapture(path: String) {
-        pendingCapture = path
+        requestCapture(path: path, includeUI: false, completion: nil)
+    }
+
+    @discardableResult
+    func requestCapture(path: String, includeUI: Bool,
+                        completion: ((CaptureResult) -> Void)?) -> Bool {
+        guard pendingCaptures.count < maximumPendingCaptures else { return false }
+        pendingCaptures.append(CaptureRequest(path: path, includeUI: includeUI,
+                                              completion: completion))
+        return true
+    }
+
+    @discardableResult
+    func cancelCapture(path: String) -> Bool {
+        guard let index = pendingCaptures.firstIndex(where: { $0.path == path }) else {
+            return false
+        }
+        let request = pendingCaptures.remove(at: index)
+        DispatchQueue.main.async {
+            request.completion?(CaptureResult(path: request.path, width: 0, height: 0,
+                                              succeeded: false))
+        }
+        return true
     }
 
     /// encode a texture→buffer blit + async PNG write; call with the final
     /// composited image so captures include the full post stack
-    private func encodeCapture(_ cmd: MTLCommandBuffer, from tex: MTLTexture) {
-        guard let path = pendingCapture else { return }
-        pendingCapture = nil
+    private func encodeCapture(_ cmd: MTLCommandBuffer, from tex: MTLTexture,
+                               request: CaptureRequest) {
+        let path = request.path
         let w = tex.width, h = tex.height
-        let bpr = w * 4
-        guard let buf = device.makeBuffer(length: bpr * h, options: .storageModeShared),
-              let blit = cmd.makeBlitCommandEncoder() else { return }
+        let rawBPR = w.multipliedReportingOverflow(by: 4)
+        let alignment = max(1, device.minimumLinearTextureAlignment(for: tex.pixelFormat))
+        let paddedBPR = rawBPR.partialValue.addingReportingOverflow(alignment - 1)
+        guard !rawBPR.overflow, !paddedBPR.overflow else {
+            request.completion?(CaptureResult(path: path, width: w, height: h,
+                                              succeeded: false))
+            return
+        }
+        let bpr = (paddedBPR.partialValue / alignment) * alignment
+        let byteCount = bpr.multipliedReportingOverflow(by: h)
+        guard !byteCount.overflow,
+              let buf = device.makeBuffer(length: byteCount.partialValue,
+                                          options: .storageModeShared),
+              let blit = cmd.makeBlitCommandEncoder() else {
+            request.completion?(CaptureResult(path: path, width: w, height: h,
+                                              succeeded: false))
+            return
+        }
         blit.copy(from: tex, sourceSlice: 0, sourceLevel: 0,
                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                   sourceSize: MTLSize(width: w, height: h, depth: 1),
                   to: buf, destinationOffset: 0,
-                  destinationBytesPerRow: bpr, destinationBytesPerImage: bpr * h)
+                  destinationBytesPerRow: bpr, destinationBytesPerImage: byteCount.partialValue)
         blit.endEncoding()
-        cmd.addCompletedHandler { _ in
-            let data = Data(bytes: buf.contents(), count: bpr * h)
-            guard let provider = CGDataProvider(data: data as CFData),
-                  let img = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32,
-                                    bytesPerRow: bpr, space: CGColorSpaceCreateDeviceRGB(),
-                                    bitmapInfo: CGBitmapInfo(rawValue: CGBitmapInfo.byteOrder32Little.rawValue
-                                        | CGImageAlphaInfo.noneSkipFirst.rawValue),
-                                    provider: provider, decode: nil, shouldInterpolate: false,
-                                    intent: .defaultIntent),
-                  let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL,
-                                                             "public.png" as CFString, 1, nil) else { return }
-            CGImageDestinationAddImage(dest, img, nil)
-            CGImageDestinationFinalize(dest)
+        cmd.addCompletedHandler { completed in
+            guard completed.status == .completed else {
+                DispatchQueue.main.async {
+                    request.completion?(CaptureResult(path: path, width: w, height: h,
+                                                      succeeded: false))
+                }
+                return
+            }
+            let data = Data(bytes: buf.contents(), count: byteCount.partialValue)
+            let succeeded: Bool
+            if let provider = CGDataProvider(data: data as CFData),
+               let img = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32,
+                                 bytesPerRow: bpr, space: CGColorSpaceCreateDeviceRGB(),
+                                 bitmapInfo: CGBitmapInfo(rawValue: CGBitmapInfo.byteOrder32Little.rawValue
+                                     | CGImageAlphaInfo.noneSkipFirst.rawValue),
+                                 provider: provider, decode: nil, shouldInterpolate: false,
+                                 intent: .defaultIntent),
+               let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL,
+                                                          "public.png" as CFString, 1, nil) {
+                CGImageDestinationAddImage(dest, img, nil)
+                succeeded = CGImageDestinationFinalize(dest)
+            } else {
+                succeeded = false
+            }
+            let result = CaptureResult(path: path, width: w, height: h,
+                                       succeeded: succeeded)
+            DispatchQueue.main.async { request.completion?(result) }
         }
+    }
+
+    /// Called after the UI encoder closes so the captured drawable includes HUD/screens.
+    func encodePendingCompositedCapture(_ cmd: MTLCommandBuffer, from texture: MTLTexture) {
+        guard let request = pendingCaptures.first else { return }
+        guard request.includeUI else {
+            // A world-only capture that reaches the title renderer lost its source world. Fail it
+            // instead of wedging every later capture behind an impossible queue head.
+            pendingCaptures.removeFirst()
+            DispatchQueue.main.async {
+                request.completion?(CaptureResult(path: request.path, width: 0, height: 0,
+                                                  succeeded: false))
+            }
+            return
+        }
+        pendingCaptures.removeFirst()
+        encodeCapture(cmd, from: texture, request: request)
     }
 
     /// advance .mcmeta frame animations at 20Hz, blitting changed slices
@@ -828,6 +934,7 @@ final class WorldRenderer {
     func render(cmd: MTLCommandBuffer, rpd: MTLRenderPassDescriptor,
                 game: GameCore, cam: CamState, partial: Double, timeSec: Double) -> MTLRenderCommandEncoder {
         drawCalls = 0
+        cullingStats = RendererCullingStats(totalSections: sections.count)
         arena.tick()
         let world = game.world
         let settings = game.settings
@@ -907,13 +1014,24 @@ final class WorldRenderer {
             var su = ChunkSharedU(viewProj: shadowMat, shadowMat: shadowMat,
                                   light: .zero, fog: .zero, fogColor: .zero, misc: .zero)
             senc.setVertexBytes(&su, length: MemoryLayout<ChunkSharedU>.stride, index: 1)
+            var shadowFrustum = Frustum()
+            shadowFrustum.setFromMatrix(shadowMat)
             var boundPage = -1
             for gpu in sections.values {
                 guard let buf = gpu.opaque else { continue }
+                cullingStats.shadowCandidates += 1
                 let ox = Float(Double(gpu.key.cx * 16) - cam.x)
                 let oy = Float(Double(gpu.minY + gpu.key.sy * 16) - cam.y)
                 let oz = Float(Double(gpu.key.cz * 16) - cam.z)
-                if abs(ox + 8) > r + 24 || abs(oz + 8) > r + 24 { continue }
+                if abs(ox + 8) > r + 24 || abs(oz + 8) > r + 24 {
+                    cullingStats.shadowRangeCulledSections += 1
+                    continue
+                }
+                if !shadowFrustum.intersectsBox(ox, oy, oz, ox + 16, oy + 16, oz + 16) {
+                    cullingStats.shadowFrustumCulledSections += 1
+                    continue
+                }
+                cullingStats.shadowVisibleSections += 1
                 var origin = SIMD4<Float>(ox, oy, oz, 0)
                 senc.setVertexBytes(&origin, length: 16, index: 2)
                 if buf.page != boundPage {
@@ -1010,19 +1128,30 @@ final class WorldRenderer {
         enc.setFragmentSamplerState(shadowSampler, index: 1)
 
         let rd = Float(settings.renderDistance) * 16
-        var visible: [(gpu: SectionGPU, rel: SIMD3<Float>, dist: Float)] = []
-        visible.reserveCapacity(sections.count)
+        visibleSections.removeAll(keepingCapacity: true)
+        visibleSections.reserveCapacity(sections.count)
         for gpu in sections.values {
+            guard gpu.opaque != nil || gpu.cutout != nil || gpu.translucent != nil else {
+                cullingStats.emptySections += 1
+                continue
+            }
             let ox = Float(Double(gpu.key.cx * 16) - cam.x)
             let oy = Float(Double(gpu.minY + gpu.key.sy * 16) - cam.y)
             let oz = Float(Double(gpu.key.cz * 16) - cam.z)
             let dx = ox + 8, dz = oz + 8, dy = oy + 8
             let distSq = dx * dx + dz * dz
-            if distSq > (rd + 16) * (rd + 16) { continue }
-            if !frustum.intersectsBox(ox, oy, oz, ox + 16, oy + 16, oz + 16) { continue }
-            visible.append((gpu, SIMD3<Float>(ox, oy, oz), distSq + dy * dy * 0.25))
+            if distSq > (rd + 16) * (rd + 16) {
+                cullingStats.distanceCulledSections += 1
+                continue
+            }
+            if !frustum.intersectsBox(ox, oy, oz, ox + 16, oy + 16, oz + 16) {
+                cullingStats.frustumCulledSections += 1
+                continue
+            }
+            visibleSections.append((gpu, SIMD3<Float>(ox, oy, oz), distSq + dy * dy * 0.25))
         }
-        visible.sort { $0.dist < $1.dist }
+        cullingStats.visibleSections = visibleSections.count
+        visibleSections.sort { $0.dist < $1.dist }
 
         func drawLayer(_ pipeline: MTLRenderPipelineState,
                        _ pick: (SectionGPU) -> MeshBlock?,
@@ -1052,12 +1181,12 @@ final class WorldRenderer {
         // opaque front-to-back
         uni.fog.z = 0
         uni.fog.w = 1
-        drawLayer(opaquePipeline, { $0.opaque }, visible, cull: true)
+        drawLayer(opaquePipeline, { $0.opaque }, visibleSections, cull: true)
         // cutout: alpha test, back-cull — the mesher emits explicit two-sided
         // pairs for crosses/vines, and culling kills the coincident interior
         // leaf faces that z-fight (sway-displaced) when both rasterize
         uni.fog.z = 0.35
-        drawLayer(cutoutPipeline, { $0.cutout }, visible, cull: true)
+        drawLayer(cutoutPipeline, { $0.cutout }, visibleSections, cull: true)
         enc.setCullMode(.back)
 
         // entities + sprites + cubes + crack + selection + particles
@@ -1082,7 +1211,7 @@ final class WorldRenderer {
         uni.fog.w = 0.82
         enc.setFragmentTexture(atlasTexture, index: 0)
         enc.setFragmentSamplerState(atlasSampler, index: 0)
-        drawLayer(translucentPipeline, { $0.translucent }, visible.reversed(), cull: true)
+        drawLayer(translucentPipeline, { $0.translucent }, visibleSections.reversed(), cull: true)
         uni.fog.w = 1
 
         // clouds
@@ -1181,10 +1310,12 @@ final class WorldRenderer {
         fenc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         // pending capture: grab the composited drawable (ultra/bloom/ACES applied,
         // no UI), then reopen the pass for the UI overlay
-        if pendingCapture != nil, let drawableTex = rpd.colorAttachments[0].texture,
+        if let request = pendingCaptures.first, !request.includeUI,
+           let drawableTex = rpd.colorAttachments[0].texture,
            !drawableTex.isFramebufferOnly {
+            pendingCaptures.removeFirst()
             fenc.endEncoding()
-            encodeCapture(cmd, from: drawableTex)
+            encodeCapture(cmd, from: drawableTex, request: request)
             rpd.colorAttachments[0].loadAction = .load
             return cmd.makeRenderCommandEncoder(descriptor: rpd)!
         }

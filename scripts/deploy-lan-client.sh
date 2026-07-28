@@ -6,42 +6,46 @@ DEFAULT_HOST="neo.localdomain"
 REMOTE_HOST="${ELYSIUM_LAN_CLIENT_HOST:-$DEFAULT_HOST}"
 REMOTE_USER="${ELYSIUM_LAN_CLIENT_USER:-${USER:-}}"
 REMOTE_TARGET="${ELYSIUM_LAN_CLIENT_TARGET:-}"
-REMOTE_APP="${ELYSIUM_LAN_CLIENT_APP:-/Applications/Elysium.app}"
 SOURCE_APP="${ELYSIUM_LAN_CLIENT_SOURCE_APP:-/Applications/Elysium.app}"
 IDENTITY_FILE="${ELYSIUM_LAN_CLIENT_IDENTITY:-$HOME/.ssh/elysium_neo_ed25519}"
+KNOWN_HOSTS_FILE="${ELYSIUM_LAN_KNOWN_HOSTS:-$HOME/.ssh/elysium_lan_known_hosts}"
+EXPECTED_BUNDLE_ID="com.briangao.elysium"
+REMOTE_APP_REL="Applications/Elysium.app"
 BUILD_FIRST=1
 LAUNCH_AFTER=1
 CHECK_ONLY=0
-REMOTE_STAGE_REL="Library/Caches/ElysiumRemoteClient"
-SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2)
-if [ -f "$IDENTITY_FILE" ]; then
-    SSH_OPTS+=(-i "$IDENTITY_FILE")
-fi
-ARCHIVE_TO_CLEAN=""
-trap 'if [ -n "${ARCHIVE_TO_CLEAN:-}" ]; then rm -rf "$ARCHIVE_TO_CLEAN"; fi' EXIT
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+LOCAL_TEMP=""
+
+cleanup() {
+    if [ -n "$LOCAL_TEMP" ] && [ -d "$LOCAL_TEMP" ]; then
+        rm -rf "$LOCAL_TEMP"
+    fi
+}
+trap cleanup EXIT INT TERM
 
 usage() {
     cat <<EOF
 Usage: scripts/deploy-lan-client.sh [options]
 
-Builds Elysium locally, copies Elysium.app to a LAN client Mac, installs it in
-/Applications, and launches it.
+Stages one already-signed Elysium.app, verifies its archive, executable, bundle
+identity, and code signature on the remote Mac, then atomically activates it at
+~/Applications/Elysium.app with rollback on failure.
 
 Options:
-  --host HOST       Remote host name or address (default: ${DEFAULT_HOST})
-  --user USER       SSH user (default: current local user)
-  --target TARGET   Full SSH target, e.g. user@neo.local (overrides host/user)
-  --app PATH        Remote app path (default: /Applications/Elysium.app)
-  --source-app PATH Local app bundle to copy (default: /Applications/Elysium.app)
-  --no-build        Copy the existing local app instead of running ./elysium install
-  --no-launch       Install on the client but do not open it
-  --check           Only verify SSH reachability and remote write prerequisites
-  -h, --help        Show this help
+  --host HOST          Remote host name/address (default: ${DEFAULT_HOST})
+  --user USER          SSH user (default: current local user)
+  --target TARGET      Full SSH target; overrides host/user
+  --identity PATH      Dedicated node private key
+  --known-hosts PATH   Dedicated, pre-pinned known_hosts file
+  --source-app PATH    Local app bundle (default: /Applications/Elysium.app)
+  --no-build           Do not run ./elysium install first
+  --no-launch          Activate but do not launch the remote app
+  --check              Verify the pinned SSH/GUI prerequisites only
+  -h, --help           Show this help
 
-Environment overrides:
-  ELYSIUM_LAN_CLIENT_HOST, ELYSIUM_LAN_CLIENT_USER, ELYSIUM_LAN_CLIENT_TARGET,
-  ELYSIUM_LAN_CLIENT_APP, ELYSIUM_LAN_CLIENT_SOURCE_APP,
-  ELYSIUM_LAN_CLIENT_IDENTITY
+Host keys are never accepted on first use. Bootstrap and verify each node with
+scripts/setup-lan-test-node.sh before deploying.
 EOF
 }
 
@@ -50,52 +54,17 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --host)
-            [ "$#" -ge 2 ] || die "--host needs a value"
-            REMOTE_HOST="$2"
-            shift 2
-            ;;
-        --user)
-            [ "$#" -ge 2 ] || die "--user needs a value"
-            REMOTE_USER="$2"
-            shift 2
-            ;;
-        --target)
-            [ "$#" -ge 2 ] || die "--target needs a value"
-            REMOTE_TARGET="$2"
-            shift 2
-            ;;
-        --app)
-            [ "$#" -ge 2 ] || die "--app needs a value"
-            REMOTE_APP="$2"
-            shift 2
-            ;;
-        --source-app)
-            [ "$#" -ge 2 ] || die "--source-app needs a value"
-            SOURCE_APP="$2"
-            shift 2
-            ;;
-        --no-build)
-            BUILD_FIRST=0
-            shift
-            ;;
-        --no-launch)
-            LAUNCH_AFTER=0
-            shift
-            ;;
-        --check)
-            CHECK_ONLY=1
-            BUILD_FIRST=0
-            LAUNCH_AFTER=0
-            shift
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            die "unknown option: $1"
-            ;;
+        --host) [ "$#" -ge 2 ] || die "--host needs a value"; REMOTE_HOST="$2"; shift 2 ;;
+        --user) [ "$#" -ge 2 ] || die "--user needs a value"; REMOTE_USER="$2"; shift 2 ;;
+        --target) [ "$#" -ge 2 ] || die "--target needs a value"; REMOTE_TARGET="$2"; shift 2 ;;
+        --identity) [ "$#" -ge 2 ] || die "--identity needs a value"; IDENTITY_FILE="$2"; shift 2 ;;
+        --known-hosts) [ "$#" -ge 2 ] || die "--known-hosts needs a value"; KNOWN_HOSTS_FILE="$2"; shift 2 ;;
+        --source-app) [ "$#" -ge 2 ] || die "--source-app needs a value"; SOURCE_APP="$2"; shift 2 ;;
+        --no-build) BUILD_FIRST=0; shift ;;
+        --no-launch) LAUNCH_AFTER=0; shift ;;
+        --check) CHECK_ONLY=1; BUILD_FIRST=0; LAUNCH_AFTER=0; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown option: $1" ;;
     esac
 done
 
@@ -107,125 +76,157 @@ if [ -z "$REMOTE_TARGET" ]; then
     fi
 fi
 
-remote() {
-    ssh "${SSH_OPTS[@]}" "$REMOTE_TARGET" "$@"
-}
+[ -f "$IDENTITY_FILE" ] || die "dedicated SSH identity is missing: $IDENTITY_FILE"
+[ -f "$KNOWN_HOSTS_FILE" ] || die "pinned known_hosts file is missing: $KNOWN_HOSTS_FILE"
+[ "$(stat -f '%Lp' "$IDENTITY_FILE")" = "600" ] || die "SSH private key must have mode 0600: $IDENTITY_FILE"
+
+SSH_OPTS=(
+    -o BatchMode=yes
+    -o IdentitiesOnly=yes
+    -o StrictHostKeyChecking=yes
+    -o UserKnownHostsFile="$KNOWN_HOSTS_FILE"
+    -o ConnectTimeout=10
+    -o ServerAliveInterval=5
+    -o ServerAliveCountMax=2
+    -i "$IDENTITY_FILE"
+)
+
+remote() { ssh "${SSH_OPTS[@]}" "$REMOTE_TARGET" "$@"; }
 
 check_remote() {
-    local probe output
-    probe='
-set -e
-printf "host=%s\n" "$(hostname)"
-printf "user=%s\n" "$(whoami)"
-printf "home=%s\n" "$HOME"
-printf "macos=%s\n" "$(sw_vers -productVersion 2>/dev/null || echo unknown)"
-if [ -w /Applications ]; then
-    echo "applications_writable=yes"
-else
-    echo "applications_writable=no"
-fi
-mkdir -p "$HOME/Library/Caches/ElysiumRemoteClient"
-test -w "$HOME/Library/Caches/ElysiumRemoteClient"
-'
-    if ! output="$(remote "$probe" 2>&1)"; then
-        if printf '%s\n' "$output" | grep -qi 'permission denied'; then
-            cat >&2 <<EOF
-error: ${REMOTE_TARGET} is reachable, but SSH authentication failed.
-
-Add this Mac's Elysium LAN client key to the Neo account's authorized_keys:
-  ${IDENTITY_FILE}.pub
-
-If the account name differs, rerun with:
-  ELYSIUM_LAN_CLIENT_USER=<neo-user> scripts/deploy-lan-client.sh --check
-EOF
-        else
-            cat >&2 <<EOF
-error: cannot reach ${REMOTE_TARGET} over SSH.
-
-Neo is visible on the LAN only after macOS Remote Login is enabled for this user.
-On Neo, enable:
-  System Settings -> General -> Sharing -> Remote Login
-
-Then verify from this Mac:
-  ssh ${REMOTE_TARGET} hostname
-
-If the account name differs, rerun with:
-  ELYSIUM_LAN_CLIENT_USER=<neo-user> scripts/deploy-lan-client.sh --check
-
-If the key has not been authorized yet, add this public key to the Neo account:
-  ${IDENTITY_FILE}.pub
-EOF
-        fi
-        printf '\nssh output:\n%s\n' "$output" >&2
-        exit 1
+    local output
+    if ! output="$(remote 'set -eu
+console_user="$(/usr/bin/stat -f %Su /dev/console)"
+printf "host=%s\n" "$(/bin/hostname)"
+printf "user=%s\n" "$(/usr/bin/whoami)"
+printf "console_user=%s\n" "$console_user"
+printf "uid=%s\n" "$(/usr/bin/id -u)"
+printf "arch=%s\n" "$(/usr/bin/uname -m)"
+printf "macos=%s\n" "$(/usr/bin/sw_vers -productVersion)"
+[ "$console_user" = "$(/usr/bin/whoami)" ]
+/bin/mkdir -p "$HOME/Applications" "$HOME/Library/Caches/ElysiumRemoteClient"
+/bin/test -w "$HOME/Applications"
+/bin/test -w "$HOME/Library/Caches/ElysiumRemoteClient"' 2>&1)"; then
+        printf '%s\n' "$output" >&2
+        die "pinned SSH or logged-in GUI-user preflight failed for $REMOTE_TARGET"
     fi
     printf '%s\n' "$output"
-    if printf '%s\n' "$output" | grep -q '^applications_writable=no$'; then
-        die "${REMOTE_TARGET} can SSH, but /Applications is not writable by that account"
-    fi
 }
 
-install_remote() {
-    local archive temp_dir
-    temp_dir="$(mktemp -d /tmp/elysium-lan-client.XXXXXX)"
-    ARCHIVE_TO_CLEAN="$temp_dir"
-    archive="$temp_dir/Elysium.app.zip"
-
-    say "Packaging ${SOURCE_APP}"
-    /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$SOURCE_APP" "$archive"
-
-    say "Copying Elysium.app archive to ${REMOTE_TARGET}"
-    remote "mkdir -p '$REMOTE_STAGE_REL'"
-    scp "${SSH_OPTS[@]}" "$archive" "${REMOTE_TARGET}:${REMOTE_STAGE_REL}/Elysium.app.zip" >/dev/null
-
-    say "Installing and launching on ${REMOTE_TARGET}"
-    ssh "${SSH_OPTS[@]}" "$REMOTE_TARGET" 'bash -s' -- "$REMOTE_APP" "$REMOTE_STAGE_REL" "$LAUNCH_AFTER" <<'REMOTE_SCRIPT'
-set -euo pipefail
-REMOTE_APP="$1"
-REMOTE_STAGE_REL="$2"
-LAUNCH_AFTER="$3"
-STAGE="$HOME/$REMOTE_STAGE_REL"
-ARCHIVE="$STAGE/Elysium.app.zip"
-UNPACK="$STAGE/unpack"
-
-/usr/bin/osascript -e 'tell application "Elysium" to quit' >/dev/null 2>&1 || true
-/usr/bin/pkill -x Elysium >/dev/null 2>&1 || true
-rm -rf "$UNPACK"
-mkdir -p "$UNPACK"
-/usr/bin/ditto -x -k "$ARCHIVE" "$UNPACK"
-test -d "$UNPACK/Elysium.app"
-rm -rf "$REMOTE_APP"
-/usr/bin/ditto "$UNPACK/Elysium.app" "$REMOTE_APP"
-/usr/bin/xattr -dr com.apple.quarantine "$REMOTE_APP" >/dev/null 2>&1 || true
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$REMOTE_APP/Contents/Info.plist" 2>/dev/null || echo unknown)"
-echo "installed=${REMOTE_APP}"
-echo "version=${VERSION}"
-if [ "$LAUNCH_AFTER" = "1" ]; then
-    /usr/bin/open -n "$REMOTE_APP"
-    sleep 2
-    if /usr/bin/pgrep -x Elysium >/dev/null; then
-        echo "launched=yes"
-    else
-        echo "launched=no"
-        exit 1
-    fi
-fi
-REMOTE_SCRIPT
-}
-
-say "Checking ${REMOTE_TARGET}"
+say "Checking pinned SSH and GUI session on ${REMOTE_TARGET}"
 check_remote
-
-if [ "$CHECK_ONLY" = "1" ]; then
-    say "Remote LAN client check passed"
-    exit 0
-fi
+[ "$CHECK_ONLY" = "0" ] || { say "Remote client check passed"; exit 0; }
 
 if [ "$BUILD_FIRST" = "1" ]; then
-    say "Building and installing local Elysium.app"
+    say "Building and installing the local candidate"
     (cd "$ROOT" && ./elysium install)
 fi
 
-[ -d "$SOURCE_APP" ] || die "source app does not exist: ${SOURCE_APP}"
-install_remote
+[ -d "$SOURCE_APP" ] || die "source app does not exist: $SOURCE_APP"
+SOURCE_EXECUTABLE="$SOURCE_APP/Contents/MacOS/Elysium"
+SOURCE_INFO="$SOURCE_APP/Contents/Info.plist"
+[ -x "$SOURCE_EXECUTABLE" ] || die "source executable is missing: $SOURCE_EXECUTABLE"
+[ -f "$SOURCE_INFO" ] || die "source Info.plist is missing: $SOURCE_INFO"
+/usr/bin/codesign --verify --deep --strict "$SOURCE_APP" || die "source app signature is invalid"
+"$ROOT/scripts/security-check-binary.sh" "$SOURCE_EXECUTABLE" \
+    || die "source executable contains a forbidden production/debug-control surface"
+LOCAL_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SOURCE_INFO")"
+[ "$LOCAL_BUNDLE_ID" = "$EXPECTED_BUNDLE_ID" ] || die "unexpected source bundle id: $LOCAL_BUNDLE_ID"
+LOCAL_EXEC_SHA="$(/usr/bin/shasum -a 256 "$SOURCE_EXECUTABLE" | /usr/bin/awk '{print $1}')"
+
+LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/elysium-deploy.XXXXXX")"
+ARCHIVE="$LOCAL_TEMP/Elysium.app.zip"
+say "Packaging candidate"
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$SOURCE_APP" "$ARCHIVE"
+ARCHIVE_SHA="$(/usr/bin/shasum -a 256 "$ARCHIVE" | /usr/bin/awk '{print $1}')"
+REMOTE_STAGE_REL="Library/Caches/ElysiumRemoteClient/$RUN_ID"
+
+say "Uploading verified archive to ${REMOTE_TARGET}"
+remote "/bin/mkdir -p '$REMOTE_STAGE_REL'"
+scp "${SSH_OPTS[@]}" "$ARCHIVE" "${REMOTE_TARGET}:${REMOTE_STAGE_REL}/Elysium.app.zip" >/dev/null
+
+say "Verifying, activating, and attesting remote candidate"
+ssh "${SSH_OPTS[@]}" "$REMOTE_TARGET" /bin/bash -s -- \
+    "$REMOTE_STAGE_REL" "$REMOTE_APP_REL" "$ARCHIVE_SHA" "$LOCAL_EXEC_SHA" \
+    "$EXPECTED_BUNDLE_ID" "$LAUNCH_AFTER" <<'REMOTE_SCRIPT'
+set -euo pipefail
+STAGE_REL="$1"
+APP_REL="$2"
+EXPECTED_ARCHIVE_SHA="$3"
+EXPECTED_EXEC_SHA="$4"
+EXPECTED_BUNDLE_ID="$5"
+LAUNCH_AFTER="$6"
+
+STAGE="$HOME/$STAGE_REL"
+ARCHIVE="$STAGE/Elysium.app.zip"
+UNPACK="$STAGE/unpack"
+CANDIDATE="$UNPACK/Elysium.app"
+TARGET="$HOME/$APP_REL"
+BACKUP="$STAGE/previous.app"
+ACTIVATED=0
+BACKUP_MOVED=0
+
+rollback() {
+    status=$?
+    if [ "$status" -ne 0 ] && { [ "$ACTIVATED" = "1" ] || [ "$BACKUP_MOVED" = "1" ]; }; then
+        /bin/rm -rf "$TARGET"
+        if [ "$BACKUP_MOVED" = "1" ] && [ -d "$BACKUP" ]; then
+            /bin/mv "$BACKUP" "$TARGET"
+        fi
+        printf 'rollback=restored_previous\n' >&2
+    fi
+    exit "$status"
+}
+trap rollback EXIT INT TERM
+
+actual_archive_sha="$(/usr/bin/shasum -a 256 "$ARCHIVE" | /usr/bin/awk '{print $1}')"
+[ "$actual_archive_sha" = "$EXPECTED_ARCHIVE_SHA" ]
+/bin/rm -rf "$UNPACK"
+/bin/mkdir -p "$UNPACK"
+/usr/bin/ditto -x -k "$ARCHIVE" "$UNPACK"
+[ -x "$CANDIDATE/Contents/MacOS/Elysium" ]
+
+bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$CANDIDATE/Contents/Info.plist")"
+[ "$bundle_id" = "$EXPECTED_BUNDLE_ID" ]
+candidate_exec_sha="$(/usr/bin/shasum -a 256 "$CANDIDATE/Contents/MacOS/Elysium" | /usr/bin/awk '{print $1}')"
+[ "$candidate_exec_sha" = "$EXPECTED_EXEC_SHA" ]
+/usr/bin/codesign --verify --deep --strict "$CANDIDATE"
+
+/bin/mkdir -p "$(/usr/bin/dirname "$TARGET")"
+target_executable="$TARGET/Contents/MacOS/Elysium"
+old_pids="$(/bin/ps -axo pid=,command= | /usr/bin/awk -v exe="$target_executable" '$2 == exe {print $1}')"
+for pid in $old_pids; do /bin/kill -TERM "$pid" 2>/dev/null || true; done
+if [ -n "$old_pids" ]; then /bin/sleep 2; fi
+
+/bin/rm -rf "$BACKUP"
+if [ -e "$TARGET" ]; then
+    /bin/mv "$TARGET" "$BACKUP"
+    BACKUP_MOVED=1
+fi
+/bin/mv "$CANDIDATE" "$TARGET"
+ACTIVATED=1
+
+/usr/bin/codesign --verify --deep --strict "$TARGET"
+installed_exec_sha="$(/usr/bin/shasum -a 256 "$target_executable" | /usr/bin/awk '{print $1}')"
+[ "$installed_exec_sha" = "$EXPECTED_EXEC_SHA" ]
+installed_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$TARGET/Contents/Info.plist")"
+[ "$installed_bundle_id" = "$EXPECTED_BUNDLE_ID" ]
+
+if [ "$LAUNCH_AFTER" = "1" ]; then
+    /bin/launchctl asuser "$(/usr/bin/id -u)" /usr/bin/open -n "$TARGET"
+    /bin/sleep 2
+    launched_pid="$(/bin/ps -axo pid=,command= | /usr/bin/awk -v exe="$target_executable" '$2 == exe {print $1; exit}')"
+    [ -n "$launched_pid" ]
+    printf 'launched_pid=%s\n' "$launched_pid"
+fi
+
+/bin/rm -rf "$BACKUP"
+BACKUP_MOVED=0
+ACTIVATED=0
+printf 'installed=%s\n' "$TARGET"
+printf 'bundle_id=%s\n' "$installed_bundle_id"
+printf 'archive_sha256=%s\n' "$actual_archive_sha"
+printf 'executable_sha256=%s\n' "$installed_exec_sha"
+REMOTE_SCRIPT
+
 say "Remote LAN client deploy complete"

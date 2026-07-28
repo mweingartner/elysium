@@ -28,6 +28,18 @@ struct LANDiscoveredHost {
     let endpointDescription: String
 }
 
+#if ELYSIUM_DEBUG_CONTROL
+/// Redacted transport state for the authenticated, loopback-only debug controller. Deliberately
+/// excludes join codes, peer identities, addresses, and status strings (which may contain them).
+struct LANDebugControlStatus {
+    let state: LANMultiplayerConnectionState
+    let role: String
+    let acceptedClientCount: Int
+    let discoveredHostCount: Int
+    let listeningPort: UInt16?
+}
+#endif
+
 private enum LANPeerMode {
     case hostPeer
     case clientServer
@@ -38,7 +50,10 @@ private enum LANReplicationSendPriority {
     case background
 }
 
-private let LAN_MAX_SYNC_CHUNK_GENERATIONS_PER_REQUEST = 4
+/// Request handling runs on the main actor. Bound the legacy synchronous miss path to one chunk;
+/// the ordinary host streamer asynchronously fills the rest around replicated guest positions.
+/// This prevents a single radius-one request from generating four full chunks in one frame.
+private let LAN_MAX_SYNC_CHUNK_GENERATIONS_PER_REQUEST = 1
 
 private struct LANHostReplicationContent {
     var includeWorldSummary = false
@@ -115,6 +130,9 @@ private struct LANPeerRateLimiter {
     var chat: LANTokenBucket
     var chunkRequest: LANTokenBucket
     var gameplayIntent: LANTokenBucket
+    var playerState: LANTokenBucket
+    var heartbeat: LANTokenBucket
+    var replicationAck: LANTokenBucket
     var inventoryUpdate: LANTokenBucket
     var containerEditIntent: LANTokenBucket
 
@@ -122,6 +140,9 @@ private struct LANPeerRateLimiter {
         chat = LANTokenBucket(capacity: 8, refillPerSecond: 8.0 / 10.0, now: now)
         chunkRequest = LANTokenBucket(capacity: 30, refillPerSecond: 30, now: now)
         gameplayIntent = LANTokenBucket(capacity: 60, refillPerSecond: 60, now: now)
+        playerState = LANTokenBucket(capacity: 60, refillPerSecond: 60, now: now)
+        heartbeat = LANTokenBucket(capacity: 8, refillPerSecond: 4, now: now)
+        replicationAck = LANTokenBucket(capacity: 60, refillPerSecond: 60, now: now)
         inventoryUpdate = LANTokenBucket(capacity: 25, refillPerSecond: 25, now: now)
         containerEditIntent = LANTokenBucket(capacity: 20, refillPerSecond: 20, now: now)
     }
@@ -151,7 +172,8 @@ private final class LANWirePeer {
     var accepted = false
     var playerID = ""
     var playerName = "Player"
-    var nextSequence: UInt32 = 1
+    var inboundSequence = LANMultiplayerSequenceState()
+    var outboundSequence = LANMultiplayerSequenceState()
     /// set on the socket being replaced by a newer accepted connection for the same playerID
     /// (A5 reconnect-supersede) so its cancel/disconnect handler skips lifecycle cleanup —
     /// the NEW socket already ran (or will run) that cleanup exactly once.
@@ -237,6 +259,11 @@ final class LANMultiplayerManager {
     /// every playerID this host session has accepted since `startHost` — used to persist peer
     /// records on disconnect/stop even after the live `LANWirePeer` socket is gone.
     private var knownHostPeerIDs = Set<String>()
+    /// Queue-owned 256-bit capabilities for every durable protocol-5 guest identity. These are
+    /// plaintext on the v5 wire and in the existing encrypted-at-rest OS account boundary, so they
+    /// are a trusted-LAN takeover defense rather than a replacement for protocol-v6 AEAD/PAKE.
+    private var hostResumeTokens: [String: LANV6Token256] = [:]
+    private var clientResumeDefaultsKey: String?
     private var localPeerID: String {
         let key = "ElysiumLANPeerID"
         if let existing = UserDefaults.standard.string(forKey: key), !existing.isEmpty {
@@ -247,6 +274,15 @@ final class LANMultiplayerManager {
         return created
     }
 
+    private func resumeDefaultsKey(for label: String) -> String {
+        let material = Data("\(localPeerID)\u{0}\(label)".utf8)
+        return "ElysiumLANResumeToken.\(LANV6Crypto.sha256(material).hex)"
+    }
+
+    private func persistedHostResumeToken(for playerID: String) -> LANV6Token256? {
+        queue.sync { hostResumeTokens[playerID] }
+    }
+
     private(set) var state: LANMultiplayerConnectionState = .idle
     private(set) var discoveredHosts: [LANDiscoveredHost] = []
     private(set) var statusLines: [String] = ["LAN multiplayer idle."]
@@ -254,6 +290,35 @@ final class LANMultiplayerManager {
     private(set) var protocol5RPGSemanticRejectionCounterExhausted = false
 
     private init() {}
+
+    /// Bounded live-test diagnostic. It exposes only a count, never peer identifiers, addresses,
+    /// join codes, or credentials. The transport queue owns `hostPeers`.
+    func acceptedHostPeerCountForProbe() -> Int {
+        queue.sync { hostPeers.values.reduce(into: 0) { count, peer in
+            if peer.accepted { count += 1 }
+        } }
+    }
+
+#if ELYSIUM_DEBUG_CONTROL
+    @MainActor
+    func debugControlStatus() -> LANDebugControlStatus {
+        let transport = queue.sync { () -> (role: String, accepted: Int, isListening: Bool) in
+            let accepted = hostPeers.values.reduce(into: 0) { count, peer in
+                if peer.accepted { count += 1 }
+            }
+            if listener != nil { return ("host", accepted, true) }
+            if clientPeer != nil { return ("client", 0, false) }
+            return ("none", 0, false)
+        }
+        return LANDebugControlStatus(
+            state: state,
+            role: transport.role,
+            acceptedClientCount: transport.accepted,
+            discoveredHostCount: discoveredHosts.count,
+            listeningPort: transport.isListening ? hostPort : nil
+        )
+    }
+#endif
 
     /// Track-B protocol-5 zero-fallback seam. New RPG semantic operations are terminally rejected
     /// here and are never translated into the legacy `LANRPGIntent` callback below. The reviewed v6
@@ -439,6 +504,7 @@ final class LANMultiplayerManager {
         clientReplicationSession = LANMultiplayerClientSession()
         hostGhostRegistry = LANHostGhostRegistry()
         knownHostPeerIDs.removeAll()
+        var loadedResumeTokens: [String: LANV6Token256] = [:]
         lastHostReplicationPublish = 0
         lastHostEntityPublish = 0
         lastHostCompleteEntityPublish = 0
@@ -454,11 +520,14 @@ final class LANMultiplayerManager {
         // reconnects to a freshly (re)started host still resumes where it left off.
         if let worldID = rec?.id {
             for row in game.db.listLANPlayers(world: worldID) {
-                if let record = lanPeerRecordSnapshot(fromStoredJSON: row.data, playerID: row.playerID) {
+                if let record = lanPeerRecordSnapshot(fromStoredJSON: row.data, playerID: row.playerID),
+                   let token = lanResumeToken(fromStoredJSON: row.data) {
                     hostReplicationSession.seedPeerRecord(record)
+                    loadedResumeTokens[row.playerID] = token
                 }
             }
         }
+        queue.sync { hostResumeTokens = loadedResumeTokens }
         handleHostedRPGRuleTransition(
             enabled: game.world.rule(RPG_CLASSES_GAME_RULE), in: game
         )
@@ -616,6 +685,8 @@ final class LANMultiplayerManager {
             joinCode = ""
             hostPort = LAN_MULTIPLAYER_DEFAULT_PORT
             hostedWorldName = ""
+            hostResumeTokens.removeAll()
+            clientResumeDefaultsKey = nil
         }
         clearReplicationHooks(for: activeGame)
         activeGame?.handleLANConnectionLost(reason: "")
@@ -650,7 +721,11 @@ final class LANMultiplayerManager {
         guard let game = activeGame, listener != nil, let worldID = game.worldRec?.id else { return }
         for playerID in knownHostPeerIDs {
             guard let record = hostReplicationSession.peerRecord(playerID: playerID) else { continue }
-            game.db.putLANPlayer(world: worldID, playerID: record.playerID, lanPeerRecordJSON(record))
+            game.db.putLANPlayer(
+                world: worldID,
+                playerID: record.playerID,
+                lanPeerRecordJSON(record, resumeToken: persistedHostResumeToken(for: playerID))
+            )
         }
     }
 
@@ -669,7 +744,10 @@ final class LANMultiplayerManager {
         if let worldID = game.worldRec?.id,
            let record = hostReplicationSession.peerRecord(playerID: playerID) {
             game.db.putLANPlayer(world: worldID, playerID: record.playerID,
-                                 lanPeerRecordJSON(record))
+                                 lanPeerRecordJSON(
+                                    record,
+                                    resumeToken: persistedHostResumeToken(for: playerID)
+                                 ))
         }
         if publish, let state = termination?.playerState,
            termination?.stateChanged == true {
@@ -1014,6 +1092,8 @@ final class LANMultiplayerManager {
     private func connect(_ connection: NWConnection, playerName: String, joinCode code: String, label: String) {
         let peer = LANWirePeer(connection: connection)
         clientPeer = peer
+        let resumeKey = resumeDefaultsKey(for: label)
+        clientResumeDefaultsKey = resumeKey
         clientReplicationSession = LANMultiplayerClientSession()
         let now = Date.timeIntervalSinceReferenceDate
         clientConnectDeadline = now + clientConnectHandshakeTimeout
@@ -1026,11 +1106,15 @@ final class LANMultiplayerManager {
             case .ready:
                 self.clientWaitingSince = nil
                 self.appendStatus("Connected transport to \(label); sending join request.")
+                let resumeToken = UserDefaults.standard.string(forKey: resumeKey).flatMap {
+                    try? LANV6Token256(base64URL: $0)
+                }
                 let hello = LANMultiplayerMessage.clientHello(
                     playerID: self.localPeerID,
                     playerName: sanitizedLANPlayerName(playerName),
                     joinCode: code,
-                    elysiumVersion: ELYSIUM_VERSION
+                    elysiumVersion: ELYSIUM_VERSION,
+                    resumeToken: resumeToken
                 )
                 self.send(hello, to: peer)
             case .waiting(let error):
@@ -1068,6 +1152,17 @@ final class LANMultiplayerManager {
     }
 
     private func acceptHostConnection(_ connection: NWConnection) {
+        let handshakingSockets = hostPeers.values.reduce(into: 0) { count, peer in
+            if !peer.accepted { count += 1 }
+        }
+        guard lanMultiplayerAllowsNewHostSocket(
+            totalOpenSockets: hostPeers.count,
+            handshakingSockets: handshakingSockets
+        ) else {
+            appendStatus("Rejected LAN connection: pre-auth socket capacity reached.")
+            connection.cancel()
+            return
+        }
         let peer = LANWirePeer(connection: connection)
         hostPeers[peer.id] = peer
         appendStatus("Incoming LAN connection from \(connection.endpoint).")
@@ -1123,7 +1218,7 @@ final class LANMultiplayerManager {
     private func receiveLoop(_ peer: LANWirePeer, mode: LANPeerMode) {
         peer.connection.receive(
             minimumIncompleteLength: 1,
-            maximumLength: LANMultiplayerFrameCodec.headerByteCount + LAN_MULTIPLAYER_MAX_FRAME_BYTES
+            maximumLength: LAN_MULTIPLAYER_RECEIVE_CHUNK_BYTES
         ) { [weak self, weak peer] data, _, isComplete, error in
             guard let self, let peer else { return }
             if let data, !data.isEmpty {
@@ -1132,9 +1227,12 @@ final class LANMultiplayerManager {
                 peer.lastReceiveTime = Date.timeIntervalSinceReferenceDate
                 peer.buffer.append(data)
                 do {
+                    if case .hostPeer = mode, !peer.accepted {
+                        try LANMultiplayerFrameCodec.validateHostPreAuthenticationPrefix(peer.buffer)
+                    }
                     let frames = try LANMultiplayerFrameCodec.decodeFrames(from: &peer.buffer)
                     for frame in frames {
-                        self.handle(frame, from: peer, mode: mode)
+                        guard self.handle(frame, from: peer, mode: mode) else { return }
                     }
                 } catch {
                     // A6: a malformed frame runs the SAME lifecycle cleanup as any other
@@ -1182,15 +1280,78 @@ final class LANMultiplayerManager {
         }
     }
 
-    private func handle(_ frame: LANMultiplayerFrame, from peer: LANWirePeer, mode: LANPeerMode) {
+    @discardableResult
+    private func handle(_ frame: LANMultiplayerFrame, from peer: LANWirePeer,
+                        mode: LANPeerMode) -> Bool {
+        do {
+            try peer.inboundSequence.consume(frame.sequence)
+        } catch {
+            return dropProtocolViolatingPeer(
+                peer, mode: mode,
+                reason: "invalid inbound sequence \(frame.sequence)"
+            )
+        }
+
+        let localRole: LANMultiplayerLocalRole
+        switch mode {
+        case .hostPeer: localRole = .host
+        case .clientServer: localRole = .client
+        }
+        let phase: LANMultiplayerPeerPhase = peer.accepted ? .authenticated : .awaitingHandshake
+        guard lanMultiplayerAllowsInbound(frame.kind, localRole: localRole, phase: phase) else {
+            return dropProtocolViolatingPeer(
+                peer, mode: mode,
+                reason: "\(frame.kind) is not admitted during \(phase)"
+            )
+        }
+
+        if case .hostPeer = mode, peer.accepted {
+            if let claimedPlayerID = frame.message.guestClaimedPlayerID,
+               claimedPlayerID != peer.playerID {
+                return dropProtocolViolatingPeer(
+                    peer, mode: mode,
+                    reason: "guest identity did not match the authenticated socket"
+                )
+            }
+        }
+
+        if case .clientServer = mode, !peer.accepted,
+           case .serverAccept(let assignedPeerID, _, _) = frame.message,
+           assignedPeerID != localPeerID {
+            return dropProtocolViolatingPeer(
+                peer, mode: mode,
+                reason: "host assigned a different client identity"
+            )
+        }
+
         switch mode {
         case .hostPeer:
-            guard !isHostRateLimited(frame.message, from: peer) else { return }
+            guard !isHostRateLimited(frame.message, from: peer) else { return true }
             handleHostMessage(frame.message, from: peer)
         case .clientServer:
             if case .pong = frame.message { peer.pendingPingNonce = nil }
             handleClientMessage(frame.message, receivedSequence: frame.sequence, from: peer)
         }
+        return true
+    }
+
+    @discardableResult
+    private func dropProtocolViolatingPeer(
+        _ peer: LANWirePeer,
+        mode: LANPeerMode,
+        reason: String
+    ) -> Bool {
+        appendStatus("Dropping LAN peer for protocol violation: \(reason).")
+        peer.connection.cancel()
+        switch mode {
+        case .hostPeer:
+            finishHostPeerTeardown(peer)
+        case .clientServer:
+            if clientPeer === peer {
+                disconnectClientDueToLoss(reason: "The LAN peer violated the wire protocol.")
+            }
+        }
+        return false
     }
 
     /// §7.6/A12 rate limiting: every guest→host message category the host trusts a peer to send
@@ -1198,33 +1359,33 @@ final class LANMultiplayerManager {
     /// bucketed. Over-limit messages are dropped with a throttled (not per-drop) status line.
     private func isHostRateLimited(_ message: LANMultiplayerMessage, from peer: LANWirePeer) -> Bool {
         let now = Date.timeIntervalSinceReferenceDate
-        let category: String
-        let allowed: Bool
-        switch message {
-        case .chat:
-            category = "chat"
-            allowed = peer.rateLimiter.chat.tryConsume(now: now)
-        case .chunkRequest:
-            category = "chunkRequest"
-            allowed = peer.rateLimiter.chunkRequest.tryConsume(now: now)
-        case .blockIntent, .attackIntent, .tossIntent, .rpgIntent:
-            category = "gameplayIntent"
-            allowed = peer.rateLimiter.gameplayIntent.tryConsume(now: now)
-        case .inventoryUpdate:
-            category = "inventoryUpdate"
-            allowed = peer.rateLimiter.inventoryUpdate.tryConsume(now: now)
-        case .containerEditIntent:
-            category = "containerEditIntent"
-            allowed = peer.rateLimiter.containerEditIntent.tryConsume(now: now)
-        case .pong:
-            peer.pendingPingNonce = nil
-            return false
-        default:
+        if case .pong = message { peer.pendingPingNonce = nil }
+        guard let category = lanMultiplayerHostRateLimitCategory(for: message.kind) else {
             return false
         }
+        let categoryName = category.rawValue
+        let allowed: Bool
+        switch category {
+        case .chat:
+            allowed = peer.rateLimiter.chat.tryConsume(now: now)
+        case .playerState:
+            allowed = peer.rateLimiter.playerState.tryConsume(now: now)
+        case .heartbeat:
+            allowed = peer.rateLimiter.heartbeat.tryConsume(now: now)
+        case .chunkRequest:
+            allowed = peer.rateLimiter.chunkRequest.tryConsume(now: now)
+        case .gameplayIntent:
+            allowed = peer.rateLimiter.gameplayIntent.tryConsume(now: now)
+        case .inventoryUpdate:
+            allowed = peer.rateLimiter.inventoryUpdate.tryConsume(now: now)
+        case .containerEditIntent:
+            allowed = peer.rateLimiter.containerEditIntent.tryConsume(now: now)
+        case .replicationAck:
+            allowed = peer.rateLimiter.replicationAck.tryConsume(now: now)
+        }
         guard !allowed else { return false }
-        if peer.shouldLogThrottle(category, now: now) {
-            appendStatus("Throttling \(category) from \(peer.playerName.isEmpty ? "a peer" : peer.playerName): rate limit exceeded.")
+        if peer.shouldLogThrottle(categoryName, now: now) {
+            appendStatus("Throttling \(categoryName) from \(peer.playerName.isEmpty ? "a peer" : peer.playerName): rate limit exceeded.")
         }
         return true
     }
@@ -1237,7 +1398,13 @@ final class LANMultiplayerManager {
             return
         }
         switch message {
-        case .clientHello(let playerID, let playerName, let rawJoinCode, let elysiumVersion):
+        case .clientHello(
+            let playerID,
+            let playerName,
+            let rawJoinCode,
+            let elysiumVersion,
+            let presentedResumeToken
+        ):
             let name = sanitizedLANPlayerName(playerName)
             guard normalizedLANJoinCode(rawJoinCode) == joinCode else {
                 send(.serverReject(reason: "Join code rejected."), to: peer)
@@ -1259,15 +1426,39 @@ final class LANMultiplayerManager {
                 appendStatus("Rejected LAN join from \(name): server full.")
                 return
             }
-            let cleanPlayerID = String(playerID.prefix(128))
-            // A5: a reconnecting playerID may still have a live (stale) accepted socket from a
-            // connection the host hasn't noticed dropped yet — supersede it BEFORE registering the
-            // new one so its eventual teardown does not mark the just-reconnected player as
-            // disconnected.
-            for existing in hostPeers.values where existing.id != peer.id && existing.accepted && existing.playerID == cleanPlayerID {
-                existing.superseded = true
-                existing.connection.cancel()
-                hostPeers.removeValue(forKey: existing.id)
+            guard let cleanPlayerID = canonicalLANPeerID(playerID) else {
+                send(.serverReject(reason: "Peer identity rejected."), to: peer)
+                peer.connection.cancel()
+                appendStatus("Rejected LAN join from \(name): invalid peer identity.")
+                return
+            }
+            guard !hostPeers.values.contains(where: {
+                $0.id != peer.id && $0.accepted && $0.playerID == cleanPlayerID
+            }) else {
+                send(.serverReject(reason: "That player is already connected."), to: peer)
+                peer.connection.cancel()
+                appendStatus("Rejected duplicate live LAN identity for \(name).")
+                return
+            }
+            let resumeToken: LANV6Token256
+            if let expected = hostResumeTokens[cleanPlayerID] {
+                guard let presentedResumeToken,
+                      LANV6Crypto.constantTimeEqual(expected, presentedResumeToken) else {
+                    send(.serverReject(reason: "Reconnect identity proof rejected."), to: peer)
+                    peer.connection.cancel()
+                    appendStatus("Rejected LAN reconnect for \(name): identity proof did not match.")
+                    return
+                }
+                resumeToken = expected
+            } else {
+                guard let generated = try? LANV6Crypto.randomToken256() else {
+                    send(.serverReject(reason: "Could not establish a reconnect identity."), to: peer)
+                    peer.connection.cancel()
+                    appendStatus("Rejected LAN join for \(name): secure identity generation failed.")
+                    return
+                }
+                resumeToken = generated
+                hostResumeTokens[cleanPlayerID] = generated
             }
             peer.accepted = true
             peer.playerID = cleanPlayerID
@@ -1275,7 +1466,11 @@ final class LANMultiplayerManager {
             peer.lastReceiveTime = Date.timeIntervalSinceReferenceDate
             knownHostPeerIDs.insert(cleanPlayerID)
             let summary = makeWorldSummary(playerCount: hostPeers.values.filter { $0.accepted }.count)
-            send(.serverAccept(peerID: peer.playerID, world: summary), to: peer)
+            send(.serverAccept(
+                peerID: peer.playerID,
+                world: summary,
+                resumeToken: resumeToken
+            ), to: peer)
             DispatchQueue.main.async { [weak self, weak peer] in
                 guard let self, let peer else { return }
                 let tick = self.activeGame?.rpgSimulationTick ?? 0
@@ -1305,7 +1500,8 @@ final class LANMultiplayerManager {
             postChat("§b[LAN] \(name) joined.")
         case .chat(let sender, let text):
             guard peer.accepted else { return }
-            let cleanSender = sanitizedLANPlayerName(sender)
+            _ = sender // display identity is bound to the accepted socket, never the wire claim.
+            let cleanSender = peer.playerName
             let cleanText = sanitizedLANChatText(text)
             guard !cleanText.isEmpty else { return }
             let chat = LANMultiplayerMessage.chat(sender: cleanSender, text: cleanText)
@@ -1455,9 +1651,13 @@ final class LANMultiplayerManager {
 
     private func handleClientMessage(_ message: LANMultiplayerMessage, receivedSequence: UInt32, from peer: LANWirePeer) {
         switch message {
-        case .serverAccept(_, let world):
+        case .serverAccept(_, let world, let resumeToken):
+            peer.accepted = true
             clientConnectDeadline = nil
             clientWaitingSince = nil
+            if let resumeToken, let key = clientResumeDefaultsKey {
+                UserDefaults.standard.set(resumeToken.base64URL, forKey: key)
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.setState(.connected)
@@ -1559,8 +1759,20 @@ final class LANMultiplayerManager {
     /// Wraps an already-encoded payload with `peer`'s next sequence number and hands it to the
     /// connection, tracking in-flight depth for backpressure accounting.
     private func sendFramedPayload(kind: LANMultiplayerMessageKind, payload: Data, to peer: LANWirePeer) {
-        let frame = LANMultiplayerFrameCodec.frame(kind: kind, payload: payload, sequence: peer.nextSequence)
-        peer.nextSequence &+= 1
+        let sequence: UInt32
+        do {
+            sequence = try peer.outboundSequence.reserve()
+        } catch {
+            appendStatus("LAN send sequence exhausted; closing peer.")
+            peer.connection.cancel()
+            if clientPeer === peer {
+                disconnectClientDueToLoss(reason: "The LAN connection exhausted its wire sequence.")
+            } else {
+                finishHostPeerTeardown(peer)
+            }
+            return
+        }
+        let frame = LANMultiplayerFrameCodec.frame(kind: kind, payload: payload, sequence: sequence)
         peer.inFlightSendCount += 1
         peer.inFlightSendBytes += frame.count
         peer.connection.send(content: frame, completion: .contentProcessed { [weak self, weak peer] error in
@@ -2358,14 +2570,21 @@ final class LANMultiplayerManager {
                   let requestWorld = game.worldFor(dimension: request.dimension)
             else { return }
             var syncGenerations = 0
+            var deferredMissingGenerations = 0
             for coord in orderedLANChunkRequestCoordinates(cx: request.cx, cz: request.cz, radius: request.radius) {
                 let missing = requestWorld.getChunk(coord.cx, coord.cz) == nil
-                if missing, syncGenerations >= LAN_MAX_SYNC_CHUNK_GENERATIONS_PER_REQUEST { continue }
+                if missing, syncGenerations >= LAN_MAX_SYNC_CHUNK_GENERATIONS_PER_REQUEST {
+                    deferredMissingGenerations += 1
+                    continue
+                }
                 if missing { syncGenerations += 1 }
                 _ = game.ensureAuthoritativeLANChunkLoaded(dimension: request.dimension, cx: coord.cx, cz: coord.cz)
             }
-            if syncGenerations >= LAN_MAX_SYNC_CHUNK_GENERATIONS_PER_REQUEST {
-                self.appendStatus("LAN chunk request forced \(syncGenerations) synchronous generations (dimension \(request.dimension)).")
+            if deferredMissingGenerations > 0 {
+                self.appendStatus(
+                    "LAN chunk request bounded synchronous generation to \(syncGenerations); " +
+                    "deferred \(deferredMissingGenerations) missing chunks to host streaming."
+                )
             }
             let snapshots = makeLANChunkSectionSnapshots(for: request, in: requestWorld)
             let blockEntities = makeLANBlockEntitySnapshots(for: request, in: requestWorld, maxCount: 16)
@@ -2435,6 +2654,7 @@ final class LANMultiplayerManager {
         guard peer.accepted, !peer.playerID.isEmpty else { return }
         let playerID = peer.playerID
         let name = peer.playerName
+        let resumeToken = hostResumeTokens[playerID]
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             let tick = self.activeGame?.rpgSimulationTick ?? 0
@@ -2449,7 +2669,14 @@ final class LANMultiplayerManager {
             // periodic/stop() persistence passes run.
             if let game = self.activeGame, let worldID = game.worldRec?.id,
                let record = self.hostReplicationSession.peerRecord(playerID: playerID) {
-                game.db.putLANPlayer(world: worldID, playerID: playerID, lanPeerRecordJSON(record))
+                game.db.putLANPlayer(
+                    world: worldID,
+                    playerID: playerID,
+                    lanPeerRecordJSON(
+                        record,
+                        resumeToken: resumeToken
+                    )
+                )
             }
             let event = LANGameplayEvent(playerID: playerID, kind: .peerDisconnected, message: "\(name) disconnected.", tick: tick)
             self.queue.async { [weak self] in
@@ -2521,7 +2748,8 @@ final class LANMultiplayerManager {
 // §5/§7.3 persistence: LANPeerRecordSnapshot <-> lan_players JSON bridging.
 //
 // SaveDB's LAN player rows store a `[String: Any]` blob (JSONSerialization, matching every other
-// SaveDB table) with the schema `{ state, rpg, inventory, revision, permissions, displayName, updated }`.
+// SaveDB table) with the schema
+// `{ state, rpg, inventory, revision, permissions, displayName, resumeToken, updated }`.
 // `LANPeerRecordSnapshot`'s sub-fields (`LANPlayerState`, `LANPlayerInventorySnapshot`,
 // `LANPeerPermissions`) are all `Codable`, so each is bridged individually through `JSONEncoder`/
 // `JSONDecoder` and re-nested into the `[String: Any]` shape SaveDB expects. Fails closed: any
@@ -2543,7 +2771,10 @@ private func lanDecode<T: Decodable>(_ type: T.Type, from object: Any?) -> T? {
 }
 
 /// Serializes a host peer record into the `[String: Any]` JSON blob `SaveDB.putLANPlayer` stores.
-func lanPeerRecordJSON(_ record: LANPeerRecordSnapshot) -> [String: Any] {
+func lanPeerRecordJSON(
+    _ record: LANPeerRecordSnapshot,
+    resumeToken: LANV6Token256? = nil
+) -> [String: Any] {
     var out: [String: Any] = [
         "displayName": record.displayName,
         "revision": record.inventoryRevision,
@@ -2561,7 +2792,15 @@ func lanPeerRecordJSON(_ record: LANPeerRecordSnapshot) -> [String: Any] {
     if let permissionsJSON = lanJSONObject(record.permissions) {
         out["permissions"] = permissionsJSON
     }
+    if let resumeToken {
+        out["resumeToken"] = resumeToken.base64URL
+    }
     return out
+}
+
+func lanResumeToken(fromStoredJSON data: [String: Any]) -> LANV6Token256? {
+    guard let raw = data["resumeToken"] as? String else { return nil }
+    return try? LANV6Token256(base64URL: raw)
 }
 
 /// Reconstructs a `LANPeerRecordSnapshot` from a stored `lan_players` JSON blob (as read back by

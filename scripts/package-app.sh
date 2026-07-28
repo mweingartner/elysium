@@ -146,6 +146,8 @@ done
 [ -f "$EXECUTABLE" ] && [ ! -L "$EXECUTABLE" ] || die "release executable must be a regular non-symlink file"
 bash "$ROOT/scripts/verify-pack-assets.sh" >/dev/null || die "managed pack asset verification failed"
 EXECUTABLE="$(canonical_file "$EXECUTABLE")" || die "cannot resolve release executable"
+bash "$ROOT/scripts/security-check-binary.sh" "$EXECUTABLE" >/dev/null \
+    || die "production input executable failed security inspection"
 INPUT_HASH="$(sha256 "$EXECUTABLE")"
 [ -z "$EXPECTED_HASH" ] || [ "$INPUT_HASH" = "$EXPECTED_HASH" ] || die "release executable hash changed"
 
@@ -173,6 +175,8 @@ STAGED="$OUTPUT/Contents/MacOS/Elysium"
 cmp -s "$EXECUTABLE" "$STAGED" || die "staged executable differs before signing"
 STAGED_PRE_HASH="$(sha256 "$STAGED")"
 [ "$INPUT_HASH" = "$STAGED_PRE_HASH" ] || die "pre-sign hashes differ"
+bash "$ROOT/scripts/security-check-binary.sh" "$STAGED" >/dev/null \
+    || die "staged production executable failed security inspection"
 
 /usr/bin/codesign --force --sign - --identifier com.briangao.elysium "$OUTPUT" >/dev/null
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$OUTPUT" >/dev/null 2>&1 || die "strict signature verification failed"
