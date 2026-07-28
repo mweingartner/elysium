@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "module": "ElysiumStorage",
-  "symbolGraphSHA256": "883f0daab2db898e64a8be39161316ac05751660f4f96afd5fa038ba23c8adc3",
+  "symbolGraphSHA256": "42ff6f81fb554fb659bbedf4d2cd42c799c123981ad27d51b460428a0d7bb4fc",
   "owner": "Sources/ElysiumStorage/StorageEngine.swift",
   "checkedPlayerCASPublicDeclarations": [
     "ElysiumPlayerJSONRowDigest",

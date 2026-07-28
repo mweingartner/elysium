@@ -105,6 +105,69 @@ final class AutomatedReleaseSourceTests: XCTestCase {
         }
     }
 
+    func testDebugPackagingIsIsolatedAndProductionRejectsItsMarker() throws {
+        let debugPackage = try source("scripts/package-debug-app.sh")
+        let productionPackage = try source("scripts/package-app.sh")
+        let binaryScan = try source("scripts/security-check-binary.sh")
+        let marker = "elysium_debug_control_build_marker_v1"
+
+        for required in [
+            "[ \"$#\" -eq 0 ]", ".build/debug-app", "-c release",
+            "-Xswiftc -DELYSIUM_DEBUG_CONTROL", "build_product Elysium",
+            "build_product elydebug", "dist/Elysium Debug.app",
+            "Contents/MacOS/ElysiumDebug", "Contents/Helpers/elydebug",
+            "--identifier com.briangao.elysium.debug", marker,
+            "install=not_performed",
+        ] {
+            XCTAssertTrue(debugPackage.contains(required), required)
+        }
+        XCTAssertFalse(debugPackage.contains("/Applications/"))
+        XCTAssertFalse(productionPackage.contains("ELYSIUM_DEBUG_CONTROL"))
+        XCTAssertFalse(productionPackage.contains(marker))
+        XCTAssertTrue(debugPackage.contains("ELYSIUM_DEBUG_CONTROL_BUILD=1"))
+        XCTAssertEqual(
+            productionPackage.components(
+                separatedBy: "bash \"$ROOT/scripts/security-check-binary.sh\""
+            ).count - 1,
+            2,
+            "production packaging must inspect input and staged executables"
+        )
+        XCTAssertTrue(binaryScan.contains(marker))
+        XCTAssertTrue(binaryScan.contains("binary_contains_debug_marker \"$BIN\""))
+        XCTAssertTrue(binaryScan.contains(
+            "production executable contains the debug-control protocol module"
+        ))
+
+        let manifest = try source("Package.swift")
+        XCTAssertTrue(manifest.contains(
+            "Context.environment[\"ELYSIUM_DEBUG_CONTROL_BUILD\"] == \"1\""
+        ))
+        XCTAssertTrue(manifest.contains(
+            "(debugControlBuild ? [\"ElysiumDebugProtocol\"] : [])"
+        ))
+
+        let plistData = try Data(contentsOf: root.appendingPathComponent("packaging/DebugInfo.plist"))
+        let value = try PropertyListSerialization.propertyList(
+            from: plistData, options: [], format: nil
+        )
+        let plist = try XCTUnwrap(value as? [String: Any])
+        XCTAssertEqual(plist["CFBundleExecutable"] as? String, "ElysiumDebug")
+        XCTAssertEqual(plist["CFBundleIdentifier"] as? String, "com.briangao.elysium.debug")
+    }
+
+    func testDebugControlAppSourcesRemainEntirelyCompileTimeGuarded() throws {
+        for path in [
+            "Sources/Elysium/DebugControlRuntime.swift",
+            "Sources/Elysium/DebugControlServer.swift",
+            "Sources/Elysium/DebugScreenSemantics.swift",
+        ] {
+            let lines = try source(path).components(separatedBy: .newlines)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            XCTAssertEqual(lines.first, "#if ELYSIUM_DEBUG_CONTROL", path)
+            XCTAssertEqual(lines.last, "#endif", path)
+        }
+    }
+
     func testResourcePackPublicationTruthIsInTheProductionAccessibilityTree() throws {
         let menus = try source("Sources/Elysium/MenusM.swift")
         let screen = try source("Sources/Elysium/ResourcePackScreenM.swift")

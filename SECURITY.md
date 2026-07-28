@@ -4,6 +4,15 @@
 
 Elysium is a local macOS game with player-started LAN multiplayer session support. Local-network multiplayer is deliberately scoped to Bonjour discovery, Direct Connect, bounded handshakes, peer status, LAN chat, host-authoritative replication batches, and host-authorized gameplay intents. Clients can request actions with typed intents, but they cannot send raw save data, arbitrary commands, authoritative RPG state, or authoritative world state; the remote-player gameplay layer enforces permissions for build, container, crafting, template, command, AI, creative, dimension, respawn, death, and reconnect flows.
 
+Protocol 5 is a trusted-private-LAN transport, not a hostile-network boundary. Its strict frame
+sequences, closed phase/direction policy, pre-authentication 4 KiB header cap, socket caps,
+per-category guest rate limits, and host-bound identity claims prevent accidental and many active
+misuses, but frames remain plaintext. Durable reconnect state additionally requires a host-issued
+256-bit capability; UUID possession alone is insufficient and legacy capability-less records are
+not restored. Because that capability is visible to a LAN sniffer and stored in user defaults,
+protocol 6 still requires authenticated encryption, authenticated host ownership, and Keychain
+credential storage before internet or hostile-LAN use.
+
 Current release properties:
 
 - **No background service access or telemetry.** The app has no analytics, account service, NAT traversal, relay, cloud multiplayer, or automatic update check. Network access occurs only after an explicit player action: player-started LAN multiplayer, optional `/ai` calls to local Ollama at `http://localhost:11434`, or the Reality Derived dialog/generator fetching map, search, elevation, and land-cover data from the providers identified by Arnis. The `elysium update` shell command separately runs `git pull` on your own checkout.

@@ -15,9 +15,10 @@ XCRUN="$(command -v xcrun)" || fail "xcrun not found"
 [ -x "$XCRUN" ] || fail "xcrun is not executable"
 NM="$($XCRUN --find nm)" || fail "nm not found through xcrun"
 STRINGS="$($XCRUN --find strings)" || fail "strings not found through xcrun"
+STRIP="$($XCRUN --find strip)" || fail "strip not found through xcrun"
 SWIFT_DEMANGLE="$($XCRUN --find swift-demangle)" || fail "swift-demangle not found through xcrun"
 SHASUM="$(command -v shasum)" || fail "shasum not found"
-for tool in "$NM" "$STRINGS" "$SWIFT_DEMANGLE" "$SHASUM"; do
+for tool in "$NM" "$STRINGS" "$STRIP" "$SWIFT_DEMANGLE" "$SHASUM"; do
     [ -n "$tool" ] && [ -x "$tool" ] || fail "required artifact tool is unavailable"
 done
 
@@ -25,20 +26,38 @@ file_sha256() {
     "$SHASUM" -a 256 "$1" | awk '{print $1}'
 }
 
+TMP_ROOT="${TMPDIR:-/tmp}"
+TMP_DIR="$(mktemp -d "$TMP_ROOT/elysium-storage-release-surface.XXXXXX")" \
+    || fail "could not create a temporary directory"
+trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+
+artifact_sha256() {
+    local source="$1" label="$2" normalized
+    normalized="$TMP_DIR/$label"
+    /bin/cp "$source" "$normalized" || fail "could not copy $label for hashing"
+    /bin/chmod u+w "$normalized" || fail "could not make hash copy writable: $label"
+    "$STRIP" -S -x "$normalized" || fail "could not normalize debug/local symbols: $label"
+    file_sha256 "$normalized"
+}
+
 # These reviewed hashes bind the release artifact gate to the exact storage
 # implementation and externally reachable API admitted by the source scanner.
+# Artifact hashes are taken from disposable copies with DWARF and local symbols
+# removed so the reviewed gate is independent of the physical worktree path.
+# SwiftPM's package identity remains intentionally significant because it is an
+# ABI input for package-access declarations.
 EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
-EXPECTED_STORAGE_API_SHA256='e9263917c9ca570644df74b82d9d83edaa3710737d0b82a8cac9e2f17e5a827e'
-EXPECTED_STORAGE_OBJECT_SHA256='aa49c3adce30b1207e6b2f14aa02280db5a52f1d170408fe237d2b47bf040eb6'
+EXPECTED_STORAGE_API_SHA256='3d46c501ca420f6f23eaedf2d7c8d7ee56cb36c249d47fdae55b84a5918bbac7'
+EXPECTED_STORAGE_OBJECT_SHA256='fbab9b78dcbe5eb1f8a2af259dd427f4872046ba17959745c797b5d0f7e204c9'
 EXPECTED_SAVES_SOURCE_SHA256='51b7ca8c93284df8e57b2c268f87404a493aa0bb8ce8b009fee9b00a09a327de'
-EXPECTED_GAME_CORE_SOURCE_SHA256='84057a30d424a9f8db3f130e1e9ccef3ab53c15e52face3142379713f25bb438'
+EXPECTED_GAME_CORE_SOURCE_SHA256='d46c5c4b9351a428e0e2e34912c766e0282f1edd087148ec77c845e26b580c79'
 EXPECTED_PLAYER_SOURCE_SHA256='f0dab28819ac01b05993b8ac015e383a7be7f654ecb862d728b42b3c5ba6bb40'
 EXPECTED_CORE_CAPABILITY_SHA256='d33c0b345cc0b2d5338cacd1e6f0fec645e47d787803de106322f3776600891f'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
-EXPECTED_TEXT_INPUT_OBJECT_SHA256='119d5131fac5ae47bc2741d70cb7344f0df22244cb8a3dba1ed1d3840ea5d273'
-EXPECTED_CORE_OBJECT_SHA256='84cd678c54488f4dd2ddfd15ea98e9da03b89e52ccb44715d85c875dfea1c3d9'
-EXPECTED_ELYSIUM_PRODUCT_SHA256='eeef31203cf239988181d46bdf2fe93e69d72f31cea642f23e071ab98e54af6d'
-EXPECTED_SMOKE_PRODUCT_SHA256='b4d6f76c33dc47b892ffb46d8202353f4dada447717a00fa62d0727f060a99d1'
+EXPECTED_TEXT_INPUT_OBJECT_SHA256='ca500f11c671c45b6a0648962bed37881a9adff2a6491632e7d655a50ed80efc'
+EXPECTED_CORE_OBJECT_SHA256='04820a3ec4bd9a2f8ce9ca5a1f5d6bb6b38242d62b06a7f3b84688ce2e9ffe0f'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='ecb9a4285acc9a796df2dd345296f91c6ffc89362eed53cf23d02340de526fb9'
+EXPECTED_SMOKE_PRODUCT_SHA256='e307f47b588a4e6876ac6d3846113ac7e5138cdebc294cecb76d2e64df4dfaf1'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'
@@ -165,24 +184,19 @@ for artifact in "$CORE_OBJECT" "$TEXT_INPUT_OBJECT" "${ARTIFACTS[@]}"; do
     [ -r "$artifact" ] || fail "artifact is unreadable: $artifact"
     [ -s "$artifact" ] || fail "artifact is empty: $artifact"
 done
-[ "$(file_sha256 "$STORAGE_OBJECT")" = "$EXPECTED_STORAGE_OBJECT_SHA256" ] \
+[ "$(artifact_sha256 "$STORAGE_OBJECT" ElysiumStorage.o)" = "$EXPECTED_STORAGE_OBJECT_SHA256" ] \
     || fail "reviewed ElysiumStorage.o hash drift"
-[ "$(file_sha256 "$CORE_OBJECT")" = "$EXPECTED_CORE_OBJECT_SHA256" ] \
+[ "$(artifact_sha256 "$CORE_OBJECT" ElysiumCore.o)" = "$EXPECTED_CORE_OBJECT_SHA256" ] \
     || fail "reviewed ElysiumCore.o hash drift"
-[ "$(file_sha256 "$TEXT_INPUT_OBJECT")" = "$EXPECTED_TEXT_INPUT_OBJECT_SHA256" ] \
+[ "$(artifact_sha256 "$TEXT_INPUT_OBJECT" ElysiumTextInput.o)" = "$EXPECTED_TEXT_INPUT_OBJECT_SHA256" ] \
     || fail "reviewed ElysiumTextInput.o hash drift"
-[ "$(file_sha256 "$ELYSIUM_PRODUCT")" = "$EXPECTED_ELYSIUM_PRODUCT_SHA256" ] \
+[ "$(artifact_sha256 "$ELYSIUM_PRODUCT" Elysium)" = "$EXPECTED_ELYSIUM_PRODUCT_SHA256" ] \
     || fail "reviewed Elysium product hash drift"
-[ "$(file_sha256 "$SMOKE_PRODUCT")" = "$EXPECTED_SMOKE_PRODUCT_SHA256" ] \
+[ "$(artifact_sha256 "$SMOKE_PRODUCT" elysmoke)" = "$EXPECTED_SMOKE_PRODUCT_SHA256" ] \
     || fail "reviewed elysmoke product hash drift"
 
 [ ! "$STORAGE_OBJECT" -ot Package.swift ] \
     || fail "ElysiumStorage.o is older than Package.swift"
-TMP_ROOT="${TMPDIR:-/tmp}"
-TMP_DIR="$(mktemp -d "$TMP_ROOT/elysium-storage-release-surface.XXXXXX")" \
-    || fail "could not create a temporary directory"
-trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
-
 SOURCE_LIST="$TMP_DIR/storage-sources"
 find Sources/ElysiumStorage -type f -print0 > "$SOURCE_LIST" \
     || fail "could not enumerate ElysiumStorage sources"

@@ -117,11 +117,24 @@ func sanitizedKeybinds(_ input: [String: String]) -> [String: String] {
     rpgSanitizedChordBindings(input)
 }
 
+func elysiumSupportDirectoryComponent() -> String {
+#if ELYSIUM_DEBUG_CONTROL
+    // Debug-control builds are intentionally incapable of selecting the production profile.
+    // This compile-time split is frozen before any persistence object can be constructed.
+    return "Elysium Debug"
+#else
+    return "Elysium"
+#endif
+}
+
 /// ~/Library/Application Support/Elysium — created on first touch
 public func vcSupportDir() -> URL {
-    _ = LegacyBrandMigration.runOnce // fold any former "Pebble" data across before first use
+    let component = elysiumSupportDirectoryComponent()
+    if component == "Elysium" {
+        _ = LegacyBrandMigration.runOnce // fold any former "Pebble" data across before first use
+    }
     let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-    let dir = base.appendingPathComponent("Elysium", isDirectory: true)
+    let dir = base.appendingPathComponent(component, isDirectory: true)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir
 }

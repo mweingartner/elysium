@@ -852,9 +852,12 @@ public final class LocalSettingsStore {
     }
 
     private static func defaultDirectoryURL() -> URL {
-        _ = LegacyBrandMigration.runOnce // fold any former "Pebble" data across before first use
+        let component = elysiumSupportDirectoryComponent()
+        if component == "Elysium" {
+            _ = LegacyBrandMigration.runOnce // fold any former "Pebble" data across before first use
+        }
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Elysium", isDirectory: true)
+            .appendingPathComponent(component, isDirectory: true)
     }
 }
 

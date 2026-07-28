@@ -4,6 +4,15 @@
 
 import PackageDescription
 
+// The privileged debug app is built in its own scratch tree by package-debug-app.sh. Keep its
+// protocol dependency out of the ordinary product graph so Elysium.app cannot accidentally link
+// even transport-only debug-control types. The packager supplies both this manifest-time opt-in
+// and the matching compile-time ELYSIUM_DEBUG_CONTROL definition.
+let debugControlBuild = Context.environment["ELYSIUM_DEBUG_CONTROL_BUILD"] == "1"
+let elysiumDependencies: [Target.Dependency] = [
+    "ElysiumCore", "ElysiumTextInput", "ElysiumAppSupport",
+] + (debugControlBuild ? ["ElysiumDebugProtocol"] : [])
+
 let package = Package(
     name: "Elysium",
     platforms: [.macOS(.v14)],
@@ -28,6 +37,12 @@ let package = Package(
                 .swiftLanguageMode(.v5),
             ]
         ),
+        // authenticated, transport-independent localhost debug-control protocol
+        .target(
+            name: "ElysiumDebugProtocol",
+            path: "Sources/ElysiumDebugProtocol",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         // the engine: headless-testable, no AppKit dependencies
         .target(
             name: "ElysiumCore",
@@ -40,7 +55,7 @@ let package = Package(
         // the app: AppKit + MTKView shell
         .executableTarget(
             name: "Elysium",
-            dependencies: ["ElysiumCore", "ElysiumTextInput", "ElysiumAppSupport"],
+            dependencies: elysiumDependencies,
             path: "Sources/Elysium",
             swiftSettings: [
                 .swiftLanguageMode(.v5),
@@ -55,6 +70,14 @@ let package = Package(
                 .linkedFramework("GameController"),
                 .linkedFramework("WebKit"),
             ]
+        ),
+        // local CLI/controller for the opt-in Elysium Debug.app control plane
+        .executableTarget(
+            name: "elydebug",
+            dependencies: ["ElysiumDebugProtocol"],
+            path: "Sources/elydebug",
+            swiftSettings: [.swiftLanguageMode(.v5)],
+            linkerSettings: [.linkedFramework("Network")]
         ),
         // headless smoke tests against the frozen golden baselines
         .executableTarget(
@@ -79,6 +102,12 @@ let package = Package(
             name: "ElysiumAppSupportTests",
             dependencies: ["ElysiumAppSupport"],
             path: "Tests/ElysiumAppSupportTests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "ElysiumDebugProtocolTests",
+            dependencies: ["ElysiumDebugProtocol"],
+            path: "Tests/ElysiumDebugProtocolTests",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(

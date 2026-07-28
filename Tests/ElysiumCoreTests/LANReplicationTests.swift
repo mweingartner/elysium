@@ -811,6 +811,9 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(report.appliedBlockChanges, 1)
         XCTAssertEqual(report.ignoredInvalidCells, 1)
         XCTAssertEqual(report.appliedChunkSections, 1)
+        XCTAssertEqual(report.appliedChunkSectionPositions, [
+            LANChunkSectionPosition(dimension: 0, cx: 0, cz: 0, sectionY: 8),
+        ])
         XCTAssertEqual(report.ignoredInvalidSections, 1)
         XCTAssertEqual(client.latestTick, 12)
         XCTAssertEqual(client.players["peer-a"], player)

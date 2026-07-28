@@ -45,6 +45,9 @@ public struct LANChunkSectionPosition: Hashable, Equatable, Comparable {
 public struct LANReplicationApplyReport: Equatable {
     public var appliedBlockChanges = 0
     public var appliedChunkSections = 0
+    /// Exact section identities that were validated and written. Callers must use this list,
+    /// rather than the untrusted request envelope, when retiring in-flight section requests.
+    public var appliedChunkSectionPositions: [LANChunkSectionPosition] = []
     public var appliedEntitySnapshots = 0
     public var removedEntitySnapshots = 0
     public var ignoredInvalidCells = 0
@@ -61,6 +64,7 @@ public struct LANReplicationApplyReport: Equatable {
     public mutating func merge(_ other: LANReplicationApplyReport) {
         appliedBlockChanges += other.appliedBlockChanges
         appliedChunkSections += other.appliedChunkSections
+        appliedChunkSectionPositions.append(contentsOf: other.appliedChunkSectionPositions)
         appliedEntitySnapshots += other.appliedEntitySnapshots
         removedEntitySnapshots += other.removedEntitySnapshots
         ignoredInvalidCells += other.ignoredInvalidCells
@@ -1544,7 +1548,7 @@ public final class LANMultiplayerClientSession {
             players[player.playerID] = player
         }
         for section in batch.chunkSections.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS) {
-            guard section.hasExpectedCellCount, section.cells.allSatisfy({ isValidLANReplicatedCell(Int($0)) }) else {
+            guard section.isValidRLE else {
                 report.ignoredInvalidSections += 1
                 continue
             }
@@ -1556,6 +1560,7 @@ public final class LANMultiplayerClientSession {
             )
             chunkSections[key] = section
             report.appliedChunkSections += 1
+            report.appliedChunkSectionPositions.append(key)
         }
         for change in batch.blockChanges.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES) {
             guard isValidLANReplicatedCell(change.cell) else {
@@ -2800,6 +2805,12 @@ public func applyLANReplicationBatch(
     for section in batch.chunkSections.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS) {
         if applyLANChunkSectionSnapshot(section, to: world) {
             report.appliedChunkSections += 1
+            report.appliedChunkSectionPositions.append(LANChunkSectionPosition(
+                dimension: section.dimension,
+                cx: section.cx,
+                cz: section.cz,
+                sectionY: section.sectionY
+            ))
         } else {
             report.ignoredInvalidSections += 1
         }
@@ -2873,8 +2884,8 @@ public func applyLANWorldStateSnapshot(_ snapshot: LANWorldStateSnapshot, to wor
 @discardableResult
 public func applyLANChunkSectionSnapshot(_ snapshot: LANChunkSectionSnapshot, to world: World) -> Bool {
     guard snapshot.dimension == world.dim.rawValue,
-          snapshot.hasExpectedCellCount,
-          snapshot.cells.allSatisfy({ isValidLANReplicatedCell(Int($0)) }),
+          let cells = lanDecodeChunkSectionRLE(snapshot.cellsData),
+          cells.allSatisfy({ isValidLANReplicatedCell(Int($0)) }),
           snapshot.minY >= world.info.minY,
           snapshot.minY + SECTION_H <= world.info.minY + world.info.height,
           (snapshot.minY - world.info.minY) % SECTION_H == 0
@@ -2888,7 +2899,7 @@ public func applyLANChunkSectionSnapshot(_ snapshot: LANChunkSectionSnapshot, to
         let y = snapshot.minY + localY
         for z in 0..<CHUNK_W {
             for x in 0..<CHUNK_W {
-                chunk.set(x, y, z, snapshot.cells[index])
+                chunk.set(x, y, z, cells[index])
                 index += 1
             }
         }

@@ -1,0 +1,17 @@
+{
+  "knownHosts": "~/.ssh/elysium_lan_known_hosts",
+  "nodes": [
+    {
+      "name": "neo",
+      "target": "mweingar@neo.localdomain",
+      "identity": "~/.ssh/elysium_neo_ed25519",
+      "app": "~/Applications/Elysium.app"
+    },
+    {
+      "name": "air",
+      "target": "mweingar@michaels-air.localdomain",
+      "identity": "~/.ssh/elysium_air_ed25519",
+      "app": "~/Applications/Elysium.app"
+    }
+  ]
+}

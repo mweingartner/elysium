@@ -1107,8 +1107,10 @@ final class UIManager {
         }
         if stack.isEmpty, let c = cursorStack {
             // drop the cursor stack back into player inventory
-            _ = game.player?.give(c)
-            cursorStack = nil
+            if game.player != nil {
+                returnOrDropScreenStack(c, game: game)
+                cursorStack = nil
+            }
         }
         if let revealed = stack.last as? RPGCharacterScreen {
             revealed.initScreen(self, game)

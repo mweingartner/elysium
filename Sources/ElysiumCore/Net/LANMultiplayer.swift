@@ -5,6 +5,16 @@ public let LAN_MULTIPLAYER_SERVICE_TYPE = "_elysium-lan._tcp"
 public let LAN_MULTIPLAYER_DEFAULT_PORT: UInt16 = 41337
 public let LAN_MULTIPLAYER_MAX_CLIENTS = 8
 public let LAN_MULTIPLAYER_MAX_FRAME_BYTES = 1_048_576
+/// A client hello is the only frame admitted before a host authenticates a socket. Keep its
+/// payload far below the gameplay-frame ceiling so an unauthenticated peer cannot make every
+/// pending socket retain a megabyte before the join code is even checked.
+public let LAN_MULTIPLAYER_MAX_CLIENT_HELLO_BYTES = 4_096
+/// Transport receive calls are deliberately chunked. Large authenticated replication
+/// frames are assembled across calls, while an oversized pre-auth header is rejected after at
+/// most this much newly delivered data.
+public let LAN_MULTIPLAYER_RECEIVE_CHUNK_BYTES = 65_536
+public let LAN_MULTIPLAYER_MAX_OPEN_HOST_SOCKETS = LAN_MULTIPLAYER_MAX_CLIENTS * 2
+public let LAN_MULTIPLAYER_MAX_HANDSHAKING_HOST_SOCKETS = LAN_MULTIPLAYER_MAX_CLIENTS
 public let LAN_MULTIPLAYER_MAX_PLAYER_NAME_CHARS = 32
 public let LAN_MULTIPLAYER_MAX_CHAT_BYTES = 512
 public let LAN_MULTIPLAYER_MAX_WORLD_NAME_CHARS = 64
@@ -100,6 +110,138 @@ public enum LANMultiplayerMessageKind: UInt16, Codable, Equatable, CaseIterable 
              .damageEvent, .keepalive:
             return false
         }
+    }
+}
+
+public enum LANMultiplayerLocalRole: Equatable {
+    case host
+    case client
+}
+
+public enum LANMultiplayerPeerPhase: Equatable {
+    case awaitingHandshake
+    case authenticated
+}
+
+/// Closed inbound policy for protocol 5. This does not make the plaintext protocol suitable for
+/// a hostile network, but it prevents pre-auth gameplay and direction-confused message handling.
+public func lanMultiplayerAllowsInbound(
+    _ kind: LANMultiplayerMessageKind,
+    localRole: LANMultiplayerLocalRole,
+    phase: LANMultiplayerPeerPhase
+) -> Bool {
+    switch (localRole, phase) {
+    case (.host, .awaitingHandshake):
+        return kind == .clientHello
+    case (.client, .awaitingHandshake):
+        return kind == .serverAccept || kind == .serverReject
+    case (.host, .authenticated):
+        switch kind {
+        case .chat, .playerState, .ping, .pong, .disconnect, .inputIntent,
+             .blockIntent, .containerIntent, .templateIntent, .chunkRequest,
+             .replicationAck, .attackIntent, .tossIntent, .containerEditIntent,
+             .inventoryUpdate, .keepalive, .rpgIntent:
+            return true
+        case .clientHello, .serverAccept, .serverReject, .worldSummary,
+             .replicationBatch, .gameplayEvent, .inventoryGrant, .restoreState,
+             .damageEvent:
+            return false
+        }
+    case (.client, .authenticated):
+        switch kind {
+        case .chat, .playerState, .worldSummary, .ping, .pong, .disconnect,
+             .replicationBatch, .gameplayEvent, .inventoryGrant, .restoreState,
+             .damageEvent, .keepalive:
+            return true
+        case .clientHello, .serverAccept, .serverReject, .inputIntent,
+             .blockIntent, .containerIntent, .templateIntent, .chunkRequest,
+             .replicationAck, .attackIntent, .tossIntent, .containerEditIntent,
+             .inventoryUpdate, .rpgIntent:
+            return false
+        }
+    }
+}
+
+/// Every repeatable message admitted from an authenticated guest is assigned an explicit host
+/// rate-limit category. `disconnect` is the sole admitted terminal message without a bucket.
+/// Keeping this classifier in ElysiumCore makes exhaustiveness independently testable without
+/// importing the app transport target.
+public enum LANMultiplayerHostRateLimitCategory: String, Equatable, CaseIterable {
+    case chat
+    case playerState
+    case heartbeat
+    case chunkRequest
+    case gameplayIntent
+    case inventoryUpdate
+    case containerEditIntent
+    case replicationAck
+}
+
+public func lanMultiplayerHostRateLimitCategory(
+    for kind: LANMultiplayerMessageKind
+) -> LANMultiplayerHostRateLimitCategory? {
+    switch kind {
+    case .chat:
+        return .chat
+    case .playerState, .inputIntent:
+        return .playerState
+    case .ping, .pong, .keepalive:
+        return .heartbeat
+    case .chunkRequest:
+        return .chunkRequest
+    case .blockIntent, .containerIntent, .templateIntent, .attackIntent, .tossIntent, .rpgIntent:
+        return .gameplayIntent
+    case .inventoryUpdate:
+        return .inventoryUpdate
+    case .containerEditIntent:
+        return .containerEditIntent
+    case .replicationAck:
+        return .replicationAck
+    case .disconnect, .clientHello, .serverAccept, .serverReject, .worldSummary,
+         .replicationBatch, .gameplayEvent, .inventoryGrant, .restoreState, .damageEvent:
+        return nil
+    }
+}
+
+public func lanMultiplayerAllowsNewHostSocket(
+    totalOpenSockets: Int,
+    handshakingSockets: Int
+) -> Bool {
+    totalOpenSockets >= 0 && handshakingSockets >= 0 &&
+        totalOpenSockets < LAN_MULTIPLAYER_MAX_OPEN_HOST_SOCKETS &&
+        handshakingSockets < LAN_MULTIPLAYER_MAX_HANDSHAKING_HOST_SOCKETS
+}
+
+public enum LANMultiplayerSequenceError: Error, Equatable {
+    case invalid(expected: UInt32, actual: UInt32)
+    case exhausted
+}
+
+/// Strict per-direction protocol-5 sequence state. Unlike the former unchecked UInt32 counter,
+/// this accepts UInt32.max once and then becomes terminal instead of wrapping to zero.
+public struct LANMultiplayerSequenceState: Equatable {
+    public private(set) var next: UInt32?
+
+    public init() {
+        next = 1
+    }
+
+    init(next: UInt32?) {
+        self.next = next
+    }
+
+    public mutating func consume(_ actual: UInt32) throws {
+        guard let expected = next else { throw LANMultiplayerSequenceError.exhausted }
+        guard actual == expected else {
+            throw LANMultiplayerSequenceError.invalid(expected: expected, actual: actual)
+        }
+        next = actual == UInt32.max ? nil : actual + 1
+    }
+
+    public mutating func reserve() throws -> UInt32 {
+        guard let reserved = next else { throw LANMultiplayerSequenceError.exhausted }
+        next = reserved == UInt32.max ? nil : reserved + 1
+        return reserved
     }
 }
 
@@ -521,6 +663,30 @@ public func lanDecodeChunkSectionRLE(_ data: Data) -> [UInt16]? {
     return cells
 }
 
+/// Validates the same exact RLE contract without materializing a 4,096-cell array. Frame and
+/// mirror admission use this bounded scan; only the world application path pays to decode cells.
+public func lanValidateChunkSectionRLE(_ data: Data) -> Bool {
+    guard !data.isEmpty, data.count % 4 == 0,
+          data.count <= LAN_MULTIPLAYER_MAX_CELLS_DATA_BYTES else { return false }
+    return data.withUnsafeBytes { raw -> Bool in
+        let bytes = raw.bindMemory(to: UInt8.self)
+        guard let base = bytes.baseAddress else { return false }
+        var decodedCount = 0
+        var offset = 0
+        while offset < bytes.count {
+            let count = (UInt16(base[offset]) << 8) | UInt16(base[offset + 1])
+            let cell = (UInt16(base[offset + 2]) << 8) | UInt16(base[offset + 3])
+            guard count > 0,
+                  isValidLANReplicatedCell(Int(cell)),
+                  Int(count) <= LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT - decodedCount
+            else { return false }
+            decodedCount += Int(count)
+            offset += 4
+        }
+        return decodedCount == LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT
+    }
+}
+
 public struct LANChunkSectionSnapshot: Codable, Equatable {
     public var dimension: Int
     public var cx: Int
@@ -551,10 +717,7 @@ public struct LANChunkSectionSnapshot: Codable, Equatable {
     /// True iff `cellsData` decodes to exactly `LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT` valid
     /// replicated cells within the byte-size cap.
     public var isValidRLE: Bool {
-        guard cellsData.count <= LAN_MULTIPLAYER_MAX_CELLS_DATA_BYTES else { return false }
-        guard let decoded = lanDecodeChunkSectionRLE(cellsData) else { return false }
-        guard decoded.count == LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT else { return false }
-        return decoded.allSatisfy { isValidLANReplicatedCell(Int($0)) }
+        lanValidateChunkSectionRLE(cellsData)
     }
 }
 
@@ -1456,8 +1619,21 @@ public struct LANDamageEvent: Codable, Equatable {
 }
 
 public enum LANMultiplayerMessage: Codable, Equatable {
-    case clientHello(playerID: String, playerName: String, joinCode: String, elysiumVersion: String)
-    case serverAccept(peerID: String, world: LANWorldSummary)
+    /// Protocol-5 reconnect capability is optional for a first join and mandatory when the host
+    /// already has durable state for `playerID`. It is still transmitted over plaintext protocol 5,
+    /// so this prevents casual identity takeover on a trusted LAN but is not hostile-LAN security.
+    case clientHello(
+        playerID: String,
+        playerName: String,
+        joinCode: String,
+        elysiumVersion: String,
+        resumeToken: LANV6Token256? = nil
+    )
+    case serverAccept(
+        peerID: String,
+        world: LANWorldSummary,
+        resumeToken: LANV6Token256? = nil
+    )
     case serverReject(reason: String)
     case chat(sender: String, text: String)
     case playerState(LANPlayerState)
@@ -1513,6 +1689,26 @@ public enum LANMultiplayerMessage: Codable, Equatable {
         case .rpgIntent: return .rpgIntent
         }
     }
+
+    /// Identity asserted by a post-handshake guest message. The host transport compares this to
+    /// the authenticated socket identity before dispatch; chat is intentionally excluded because
+    /// its display sender is replaced by the accepted peer name instead of trusted from the wire.
+    public var guestClaimedPlayerID: String? {
+        switch self {
+        case .playerState(let state): return state.playerID
+        case .inputIntent(let playerID, _), .blockIntent(let playerID, _),
+             .containerIntent(let playerID, _), .templateIntent(let playerID, _),
+             .chunkRequest(let playerID, _), .replicationAck(let playerID, _),
+             .attackIntent(let playerID, _), .tossIntent(let playerID, _),
+             .containerEditIntent(let playerID, _), .rpgIntent(let playerID, _):
+            return playerID
+        case .inventoryUpdate(let update): return update.playerID
+        case .clientHello, .serverAccept, .serverReject, .chat, .worldSummary,
+             .ping, .pong, .disconnect, .replicationBatch, .gameplayEvent,
+             .inventoryGrant, .restoreState, .damageEvent, .keepalive:
+            return nil
+        }
+    }
 }
 
 public struct LANMultiplayerFrame: Equatable {
@@ -1533,6 +1729,7 @@ public enum LANMultiplayerCodecError: Error, Equatable, CustomStringConvertible 
     case unsupportedVersion(UInt16)
     case unknownMessageType(UInt16)
     case oversizedFrame(Int)
+    case unexpectedPreAuthenticationMessage(LANMultiplayerMessageKind)
     case payloadTypeMismatch(expected: LANMultiplayerMessageKind, actual: LANMultiplayerMessageKind)
     case decodeFailed(String)
 
@@ -1543,6 +1740,8 @@ public enum LANMultiplayerCodecError: Error, Equatable, CustomStringConvertible 
         case .unsupportedVersion(let version): return "Unsupported LAN protocol version \(version)"
         case .unknownMessageType(let type): return "Unknown LAN message type \(type)"
         case .oversizedFrame(let count): return "LAN frame is too large (\(count) bytes)"
+        case .unexpectedPreAuthenticationMessage(let kind):
+            return "LAN pre-authentication frame type is not clientHello: \(kind)"
         case .payloadTypeMismatch(let expected, let actual):
             return "LAN payload type mismatch: expected \(expected), got \(actual)"
         case .decodeFailed(let message): return "LAN payload decode failed: \(message)"
@@ -1561,6 +1760,9 @@ public struct LANMultiplayerFrameCodec {
         encoder.outputFormatting = [.sortedKeys]
         let payload = try encoder.encode(message)
         if payload.count > LAN_MULTIPLAYER_MAX_FRAME_BYTES {
+            throw LANMultiplayerCodecError.oversizedFrame(payload.count)
+        }
+        if message.kind == .clientHello, payload.count > LAN_MULTIPLAYER_MAX_CLIENT_HELLO_BYTES {
             throw LANMultiplayerCodecError.oversizedFrame(payload.count)
         }
         return (message.kind, payload)
@@ -1584,6 +1786,31 @@ public struct LANMultiplayerFrameCodec {
         return frame(kind: kind, payload: payload, sequence: sequence)
     }
 
+    /// Validates a host-side unauthenticated socket as soon as one complete 16-byte header is
+    /// buffered. This rejects a gameplay-kind declaration before the peer can make the transport
+    /// retain its (otherwise legal) 1 MiB payload.
+    public static func validateHostPreAuthenticationPrefix(_ data: Data) throws {
+        guard data.count >= headerByteCount else { return }
+        for i in 0..<LANFrameMagic.count where data[i] != LANFrameMagic[i] {
+            throw LANMultiplayerCodecError.invalidMagic
+        }
+        let version = readUInt16(data, offset: 4)
+        guard version == LAN_MULTIPLAYER_PROTOCOL_VERSION else {
+            throw LANMultiplayerCodecError.unsupportedVersion(version)
+        }
+        let rawType = readUInt16(data, offset: 6)
+        guard let kind = LANMultiplayerMessageKind(rawValue: rawType) else {
+            throw LANMultiplayerCodecError.unknownMessageType(rawType)
+        }
+        guard kind == .clientHello else {
+            throw LANMultiplayerCodecError.unexpectedPreAuthenticationMessage(kind)
+        }
+        let length = Int(readUInt32(data, offset: 12))
+        guard length <= LAN_MULTIPLAYER_MAX_CLIENT_HELLO_BYTES else {
+            throw LANMultiplayerCodecError.oversizedFrame(length)
+        }
+    }
+
     public static func decode(_ data: Data) throws -> LANMultiplayerFrame {
         guard data.count >= headerByteCount else { throw LANMultiplayerCodecError.truncated }
         for i in 0..<LANFrameMagic.count where data[i] != LANFrameMagic[i] {
@@ -1600,6 +1827,9 @@ public struct LANMultiplayerFrameCodec {
         let sequence = readUInt32(data, offset: 8)
         let length = Int(readUInt32(data, offset: 12))
         guard length <= LAN_MULTIPLAYER_MAX_FRAME_BYTES else {
+            throw LANMultiplayerCodecError.oversizedFrame(length)
+        }
+        if kind == .clientHello, length > LAN_MULTIPLAYER_MAX_CLIENT_HELLO_BYTES {
             throw LANMultiplayerCodecError.oversizedFrame(length)
         }
         guard data.count >= headerByteCount + length else {
@@ -1630,11 +1860,14 @@ public struct LANMultiplayerFrameCodec {
                 throw LANMultiplayerCodecError.unsupportedVersion(version)
             }
             let rawType = readUInt16(buffer, offset: 6)
-            guard LANMultiplayerMessageKind(rawValue: rawType) != nil else {
+            guard let kind = LANMultiplayerMessageKind(rawValue: rawType) else {
                 throw LANMultiplayerCodecError.unknownMessageType(rawType)
             }
             let length = Int(readUInt32(buffer, offset: 12))
             guard length <= LAN_MULTIPLAYER_MAX_FRAME_BYTES else {
+                throw LANMultiplayerCodecError.oversizedFrame(length)
+            }
+            if kind == .clientHello, length > LAN_MULTIPLAYER_MAX_CLIENT_HELLO_BYTES {
                 throw LANMultiplayerCodecError.oversizedFrame(length)
             }
             let total = headerByteCount + length
@@ -1713,6 +1946,14 @@ public func sanitizedLANPlayerName(_ raw: String) -> String {
     let cleaned = cleanSingleLine(raw.trimmingCharacters(in: .whitespacesAndNewlines))
     let clipped = prefixByUTF8Bytes(String(cleaned.prefix(LAN_MULTIPLAYER_MAX_PLAYER_NAME_CHARS)), maxBytes: 96)
     return clipped.isEmpty ? "Player" : clipped
+}
+
+/// Protocol-5 installations generate and persist Foundation UUID strings. Refuse empty, truncated,
+/// or alternate spellings at the handshake boundary so two wire values cannot alias one peer.
+public func canonicalLANPeerID(_ raw: String) -> String? {
+    guard raw.utf8.count == 36, let uuid = UUID(uuidString: raw) else { return nil }
+    let canonical = uuid.uuidString
+    return raw == canonical ? canonical : nil
 }
 
 public func sanitizedLANWorldName(_ raw: String) -> String {

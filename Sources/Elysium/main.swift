@@ -7,10 +7,22 @@ import MetalKit
 import ElysiumCore
 import ElysiumTextInput
 import ElysiumAppSupport
+#if ELYSIUM_DEBUG_CONTROL
+import ElysiumDebugProtocol
+#endif
 
 // The bounded, pure harness parse is intentionally the first bootstrap decision.
 private let elysiumBootstrapDecision =
     RPGUIHarnessBootstrap.parseIfPresent(ProcessInfo.processInfo.environment)
+
+#if ELYSIUM_DEBUG_CONTROL
+private let elysiumDebugControlRequested = CommandLine.arguments.dropFirst().contains("--debug-control")
+private enum DebugControlPresentationState {
+    case starting
+    case active
+    case failed
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // NSEvent keyCode (kVK_*) → internal key-code strings (GameCore keybinds)
@@ -531,6 +543,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     private var activationEpoch: UInt64 = 0
     private var publishedAccessibilityFocusEpoch: UInt64 = 0
     private var activationEpochOpen = false
+#if ELYSIUM_DEBUG_CONTROL
+    private var debugControlServer: DebugControlServer?
+    private var debugControlPresentationState: DebugControlPresentationState = .starting
+    private var debugCaptureDrawScheduled = false
+#endif
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         gAppDelegate = self
@@ -552,7 +569,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
                           backing: .buffered, defer: false)
         launchActivationAtReveal = LaunchActivationAtRevealCoordinator(
             window: window, generation: launchRevealGeneration)
-        window.title = "Elysium"
+        updateWindowTitle()
         window.center()
         gameView = GameView(frame: rect, device: device)
         gameView.appd = self
@@ -563,7 +580,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         gameView.preferredFramesPerSecond = 120
         // capture hooks blit from the drawable, which framebufferOnly forbids
         let env = ProcessInfo.processInfo.environment
-        if env["ELYSIUM_SHOT"] != nil || env["ELYSIUM_PHOTOBOOTH"] != nil {
+        var drawableCaptureEnabled = env["ELYSIUM_SHOT"] != nil
+            || env["ELYSIUM_PHOTOBOOTH"] != nil
+#if ELYSIUM_DEBUG_CONTROL
+        drawableCaptureEnabled = drawableCaptureEnabled || elysiumDebugControlRequested
+#endif
+        if drawableCaptureEnabled {
             gameView.framebufferOnly = false
         }
         window.contentView = gameView
@@ -645,14 +667,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         }
         revealLaunchWindowed()
         startLANAutomationTimerIfNeeded()
+#if ELYSIUM_DEBUG_CONTROL
+        startDebugControlIfRequested()
+#endif
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+#if ELYSIUM_DEBUG_CONTROL
+        debugControlServer?.stop()
+        debugControlServer = nil
+#endif
         rpgControllerAdapter?.stop()
-        if game.hasWorld() { game.finalizeAndSave(synchronous: true) }
+        if game.hasWorld() {
+            ui.closeAll(game)
+            if let cursor = ui.cursorStack {
+                returnOrDropScreenStack(cursor, game: game)
+                ui.cursorStack = nil
+            }
+            game.finalizeAndSave(synchronous: true)
+        }
         try? game.db.close()
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    private func updateWindowTitle() {
+        var title = "Elysium"
+#if ELYSIUM_DEBUG_CONTROL
+        if elysiumDebugControlRequested {
+            switch debugControlPresentationState {
+            case .starting: title = "Elysium Debug — CONTROL STARTING"
+            case .active: title = "Elysium Debug — CONTROL ACTIVE"
+            case .failed: title = "Elysium Debug — CONTROL FAILED"
+            }
+        }
+#endif
+        if game?.hasWorld() == true, let p = game.player, renderer != nil, fps > 0 {
+            title += String(format: " — %d fps · %d sections · (%.0f, %.0f, %.0f)",
+                            fps, renderer.sections.count, p.x, p.y, p.z)
+        }
+        window?.title = title
+    }
+
+#if ELYSIUM_DEBUG_CONTROL
+    /// MTKView's display link is suspended when this application is inactive or fully covered.
+    /// A debug capture must still observe the actual rendered surface, so request one explicit
+    /// draw without activating Elysium or changing the user's frontmost application.
+    func scheduleDebugCaptureDraw() {
+        guard elysiumDebugControlRequested, renderer?.hasPendingCapture == true,
+              !debugCaptureDrawScheduled else { return }
+        debugCaptureDrawScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+            guard let self else { return }
+            self.debugCaptureDrawScheduled = false
+            guard self.renderer?.hasPendingCapture == true else { return }
+            self.gameView.draw()
+        }
+    }
+
+    private func startDebugControlIfRequested() {
+        print("[debug-control] build enabled marker=\(elysiumDebugControlBuildMarkerV1) requested=\(elysiumDebugControlRequested)")
+        guard elysiumDebugControlRequested else { return }
+        do {
+            let server = try MainActor.assumeIsolated {
+                try DebugControlServer(app: self)
+            }
+            debugControlServer = server
+            server.start { [weak self, weak server] result in
+                guard let self, self.debugControlServer === server else { return }
+                switch result {
+                case .success(let manifest):
+                    self.debugControlPresentationState = .active
+                    self.updateWindowTitle()
+                    self.hud.showActionBar("Debug control active on localhost:\(manifest.port)")
+                    print("[debug-control] ready manifest=\(server?.manifestURL.path ?? "") port=\(manifest.port)")
+                case .failure(let error):
+                    self.debugControlServer = nil
+                    self.debugControlPresentationState = .failed
+                    self.updateWindowTitle()
+                    self.hud.showActionBar("Debug control failed to start")
+                    FileHandle.standardError.write(Data("[debug-control] startup failed: \(error)\n".utf8))
+                }
+            }
+        } catch {
+            debugControlPresentationState = .failed
+            updateWindowTitle()
+            hud.showActionBar("Debug control failed to initialize")
+            FileHandle.standardError.write(Data("[debug-control] initialization failed: \(error)\n".utf8))
+        }
+    }
+#endif
 
     /// Edit→Paste (Cmd-V): route pasteboard text into the focused screen field
     /// — the UI fields are canvas-drawn, so the standard NSText paste path
@@ -851,8 +954,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         // CAMetalLayer.nextDrawable may block the main thread before AppKit has attached the
         // launch window to a visible display surface. Keep the display link harmless until
         // AppKit grants drawable authority; this also preserves Accessibility publication.
+#if ELYSIUM_DEBUG_CONTROL
+        let pendingDebugCapture = elysiumDebugControlRequested && renderer.hasPendingCapture
+        guard window.isVisible,
+              pendingDebugCapture || (NSApp.isActive && window.occlusionState.contains(.visible))
+        else { return }
+#else
         guard NSApp.isActive, window.isVisible,
               window.occlusionState.contains(.visible) else { return }
+#endif
         rpgControllerAdapter?.synchronizeContext()
         let now = CACurrentMediaTime()
         let dt = (now - lastFrame) * 1000
@@ -873,19 +983,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
             hud.debugInfo["mem"] = "n/a"
             audio.applyVolumes(game.settings.volumes)
             applyFpsMode()
-            if game.hasWorld(), let p = game.player {
-                window.title = String(format: "Elysium — %d fps · %d sections · (%.0f, %.0f, %.0f)",
-                                      fps, renderer.sections.count, p.x, p.y, p.z)
-            } else {
-                window.title = "Elysium"
-            }
+            updateWindowTitle()
         }
 
         tickLANAutomation()
 
         guard let drawable = view.currentDrawable,
               let rpd = view.currentRenderPassDescriptor,
-              let cmd = renderer.queue.makeCommandBuffer() else { return }
+              let cmd = renderer.queue.makeCommandBuffer() else {
+#if ELYSIUM_DEBUG_CONTROL
+            if pendingDebugCapture { scheduleDebugCaptureDraw() }
+#endif
+            return
+        }
         lastDrawableTime = now
 
         if renderer.fbWidth == 0 {
@@ -982,6 +1092,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         ui.cv.flush(enc, pipeline: renderer.uiPipeline)
 
         enc.endEncoding()
+        renderer.encodePendingCompositedCapture(cmd, from: drawable.texture)
         cmd.present(drawable)
         let presentedFrameCallback = elysiumMainActorSync {
             ui.takeAfterNextPresentedFrameCallback()
@@ -1051,6 +1162,19 @@ private func runOrdinaryElysiumApplication() {
     app.windowsMenu = winMenu
     app.run()
 }
+
+#if ELYSIUM_DEBUG_CONTROL
+if elysiumDebugControlRequested {
+    switch elysiumBootstrapDecision {
+    case .ordinary:
+        break
+    case .harness, .rejected:
+        FileHandle.standardError.write(Data(
+            "Debug control and the RPG UI harness cannot be enabled together.\n".utf8))
+        exit(64)
+    }
+}
+#endif
 
 switch elysiumBootstrapDecision {
 case .ordinary:

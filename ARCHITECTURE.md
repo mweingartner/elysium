@@ -211,6 +211,13 @@ Loose-file migration is fd-relative and no-follow beneath a retained canonical p
 
 Hosts persist per-guest reconnect records (position, inventory, RPG state, permissions, lifecycle) in `lan_players`, keyed by world id and peer id, so a returning guest resumes without depending on the host process's in-memory session state. Chunk blobs are a small binary container (`VCK1`: flags, u16 block array, biome array, JSON tail for block entities + entities). `WorldRecord` stores the normalized world preset id, Single Biome registry name, and dungeon-density level; Java-style ids and Elysium custom ids are both accepted for presets, while missing or unknown preset/biome/dungeon-density values decode as Default/Plains/Normal so legacy worlds still list and load. Object templates are versioned bounded records with relative block coordinates and relative block-entity coordinates; new writes use the compact `PBT2` binary blob in `templates.data`, while legacy JSON rows remain readable and summary columns let browsers/AI list large templates without decoding every block. Unmodified chunks save as entity-only stubs and regenerate from seed plus the saved world preset and dungeon density; once a chunk has block data on disk, every rewrite keeps it (tracked via `savedFullKeys`). Player spawn selection through beds and respawn anchors synchronously flushes the existing player save record so a newly set spawn point is durable before autosave or app termination. Player JSON stores a repaired nested RPG character state when present. LAN client resume records store only the local player's serialized state for a specific host world id plus seed; they do not create local worlds or persist host chunks/entities. Failed batches log and re-mark chunks dirty for retry. Corrupt blobs, corrupt RPG state, and corrupt templates are rejected, repaired, or clamped before hot paths can index unchecked registries.
 
+Protocol-5 host records now include a host-issued 256-bit reconnect capability. A durable record is
+seeded only when that capability is present, and a reconnect proves it with a constant-time
+comparison before any position, inventory, RPG state, or permissions are restored. Legacy rows
+without a capability are intentionally treated as fresh identities. The capability remains
+plaintext on the v5 wire and in user defaults; authenticated encryption, authenticated host
+ownership, and Keychain storage remain protocol-v6 requirements.
+
 ## The test harness (elysmoke)
 
 457 checks across 16 suites, run with `elysium test`:
