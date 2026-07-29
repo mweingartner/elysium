@@ -76,8 +76,118 @@ struct HeldOverlayPlan: Equatable {
     let obscuresCrosshair: Bool
 }
 
+struct LeftHandItemOverlayPlan: Equatable {
+    let itemName: String
+    let armAssetX: Double
+    let armAssetY: Double
+    let armAssetSize: Double
+    let gripX: Double
+    let gripY: Double
+    let itemX: Double
+    let itemY: Double
+    let itemSize: Double
+    let itemRotation: Double
+}
+
+struct BowOverlayPlan: Equatable {
+    let frameName: String
+    let drawProgress: Double
+    let bow: LeftHandItemOverlayPlan
+    let rightArmAssetX: Double?
+    let rightArmAssetY: Double?
+}
+
 let HELD_EQUIP_FLIP_DURATION = 0.62
 let HELD_PRIMARY_ACTION_CYCLE_DURATION = 0.64
+
+private func armAssetOrigin(gripX: Double, gripY: Double,
+                            size: Double, mirrored: Bool) -> (Double, Double) {
+    let normalizedGripX = mirrored ? (1 - 0.361328125) : 0.361328125
+    return (gripX - normalizedGripX * size,
+            gripY - 0.498046875 * size)
+}
+
+func leftHandShieldOverlayPlan(viewWidth: Double, viewHeight: Double,
+                               guiVisible: Bool, firstPerson: Bool,
+                               screenOpen: Bool, hotbarLeftX: Double) -> LeftHandItemOverlayPlan? {
+    guard guiVisible, firstPerson, !screenOpen,
+          viewWidth.isFinite, viewHeight.isFinite, hotbarLeftX.isFinite,
+          viewWidth >= 160, viewHeight >= 120 else { return nil }
+    let scale = min(1.15, max(0.72, min(viewWidth / 320, viewHeight / 180)))
+    let armSize = 160 * scale
+    let itemSize = 142 * scale
+    let gripX = max(12 * scale, hotbarLeftX - 18 * scale)
+    let gripY = viewHeight - 48 * scale
+    let armOrigin = armAssetOrigin(
+        gripX: gripX, gripY: gripY, size: armSize, mirrored: true)
+    return LeftHandItemOverlayPlan(
+        itemName: "shield",
+        armAssetX: armOrigin.0, armAssetY: armOrigin.1, armAssetSize: armSize,
+        gripX: gripX, gripY: gripY,
+        itemX: gripX - itemSize * 0.68,
+        itemY: gripY - itemSize * 0.72,
+        itemSize: itemSize, itemRotation: 0)
+}
+
+func bowOverlayPlan(viewWidth: Double, viewHeight: Double,
+                    guiVisible: Bool, firstPerson: Bool, screenOpen: Bool,
+                    usingItem: Bool, useTicks: Int,
+                    hotbarLeftX: Double) -> BowOverlayPlan? {
+    guard guiVisible, firstPerson, !screenOpen,
+          viewWidth.isFinite, viewHeight.isFinite, hotbarLeftX.isFinite,
+          viewWidth >= 160, viewHeight >= 120 else { return nil }
+    let scale = min(1.15, max(0.72, min(viewWidth / 320, viewHeight / 180)))
+    let armSize = 160 * scale
+    let bowSize = 138 * scale
+    let ticks = max(0, useTicks)
+    let progress = usingItem ? min(1, Double(ticks) / 20) : 0
+    let raise = usingItem ? smoothStep(min(1, Double(ticks + 1) / 6)) : 0
+    let leftRestX = max(12 * scale, hotbarLeftX - 18 * scale)
+    let leftRestY = viewHeight - 48 * scale
+    let leftRaisedX = max(armSize * 0.48, viewWidth * 0.34)
+    let leftRaisedY = viewHeight * 0.60
+    let gripX = leftRestX + (leftRaisedX - leftRestX) * raise
+    let gripY = leftRestY + (leftRaisedY - leftRestY) * raise
+    let bowRotation = -0.40 + (-0.78 + 0.40) * raise
+    let armOrigin = armAssetOrigin(
+        gripX: gripX, gripY: gripY, size: armSize, mirrored: true)
+    let frameName: String
+    switch ticks {
+    case ..<6: frameName = usingItem ? "bow_pulling_0" : "bow"
+    case ..<13: frameName = "bow_pulling_1"
+    default: frameName = "bow_pulling_2"
+    }
+    let bowPlan = LeftHandItemOverlayPlan(
+        itemName: frameName,
+        armAssetX: armOrigin.0, armAssetY: armOrigin.1, armAssetSize: armSize,
+        gripX: gripX, gripY: gripY,
+        itemX: gripX - bowSize * 0.33,
+        itemY: gripY - bowSize * 0.42,
+        itemSize: bowSize, itemRotation: bowRotation)
+
+    guard usingItem else {
+        return BowOverlayPlan(frameName: frameName, drawProgress: 0, bow: bowPlan,
+                              rightArmAssetX: nil, rightArmAssetY: nil)
+    }
+    // The right hand reaches the string during the raise, then travels toward
+    // the player's cheek as projectile charge approaches full power.
+    let reach = smoothStep(min(1, Double(ticks + 1) / 5))
+    let stringX = gripX + 34 * scale
+    let stringY = gripY - 8 * scale
+    let restRightX = viewWidth - 52 * scale
+    let restRightY = viewHeight - 48 * scale
+    let reachedX = restRightX + (stringX - restRightX) * reach
+    let reachedY = restRightY + (stringY - restRightY) * reach
+    let pulledX = viewWidth * 0.63
+    let pulledY = viewHeight * 0.48
+    let rightGripX = reachedX + (pulledX - reachedX) * progress
+    let rightGripY = reachedY + (pulledY - reachedY) * progress
+    let rightOrigin = armAssetOrigin(
+        gripX: rightGripX, gripY: rightGripY, size: armSize, mirrored: false)
+    return BowOverlayPlan(frameName: frameName, drawProgress: progress, bow: bowPlan,
+                          rightArmAssetX: rightOrigin.0,
+                          rightArmAssetY: rightOrigin.1)
+}
 
 enum HeldItemPresentationKind: Equatable {
     case empty
@@ -112,7 +222,7 @@ struct HeldItemPresentation: Equatable {
 
 let GENERIC_HELD_ITEM_PRESENTATION = HeldItemPresentation(
     kind: .generic, armLayer: .back, drawsGrip: true,
-    iconBaseSize: 48, gripAnchorX: 0.50, gripAnchorY: 0.68,
+    iconBaseSize: 60, gripAnchorX: 0.44, gripAnchorY: 0.70,
     alphaBounds: HeldItemAlphaBounds(minX: 0, minY: 0, maxX: 1, maxY: 1),
     restRotation: 0,
     performsEquipFlip: false)
@@ -128,34 +238,62 @@ func heldItemPresentation(for definition: ItemDef?, hasDetailedVisual: Bool) -> 
     }
 
     let full = HeldItemAlphaBounds(minX: 0, minY: 0, maxX: 1, maxY: 1)
-    if definition.tool != nil {
-        let isDetailedPickaxe = definition.tool?.type == "pickaxe" && hasDetailedVisual
+    if let tool = definition.tool {
+        let detailedBounds = HeldItemAlphaBounds(
+            minX: 2 / 128, minY: 2 / 128, maxX: 126 / 128, maxY: 126 / 128)
+        let isDetailedPickaxe = tool.type == "pickaxe" && hasDetailedVisual
+        let isBow = definition.name == "bow"
+        let isCrossbow = definition.name == "crossbow"
+        let isCompact = definition.name == "shears" || definition.name == "flint_and_steel"
+        let iconSize = isDetailedPickaxe ? 124.8
+            : hasDetailedVisual ? (isCompact ? 96 : (isBow ? 112 : (isCrossbow ? 132 : 118)))
+            : 82
+        let gripX = isDetailedPickaxe ? 0.14
+            : isBow ? 0.34
+            : isCrossbow ? 0.78
+            : isCompact ? 0.27
+            : 0.16
+        let gripY = isDetailedPickaxe ? 0.88
+            : isBow ? 0.55
+            : isCrossbow ? 0.87
+            : isCompact ? 0.74
+            : 0.86
+        let restRotation = isDetailedPickaxe ? 0
+            : isBow ? -0.08
+            : isCrossbow ? 0
+            : isCompact ? -0.16
+            : 0
         return HeldItemPresentation(
             kind: .tool, armLayer: .back, drawsGrip: true,
-            iconBaseSize: hasDetailedVisual ? 124.8 : 72,
-            gripAnchorX: isDetailedPickaxe ? 0.14 : (hasDetailedVisual ? 0.52 : 0.50),
-            gripAnchorY: isDetailedPickaxe ? 0.88 : (hasDetailedVisual ? 0.70 : 0.66),
+            iconBaseSize: iconSize,
+            gripAnchorX: gripX,
+            gripAnchorY: gripY,
             alphaBounds: isDetailedPickaxe
                 ? HeldItemAlphaBounds(minX: 6 / 96, minY: 12 / 96,
                                       maxX: 90 / 96, maxY: 90 / 96)
-                : hasDetailedVisual
-                    ? HeldItemAlphaBounds(minX: 18 / 96, minY: 4 / 96,
-                                          maxX: 78 / 96, maxY: 92 / 96)
-                : full,
-            restRotation: isDetailedPickaxe ? -0.42 : -0.18,
+                : hasDetailedVisual ? detailedBounds : full,
+            restRotation: restRotation,
             performsEquipFlip: true)
     }
     if definition.food != nil {
         return HeldItemPresentation(
             kind: .food, armLayer: .back, drawsGrip: true,
-            iconBaseSize: 54, gripAnchorX: 0.50, gripAnchorY: 0.54,
+            iconBaseSize: 66, gripAnchorX: 0.44, gripAnchorY: 0.66,
             alphaBounds: full, restRotation: 0, performsEquipFlip: false)
     }
     if definition.block != nil {
         return HeldItemPresentation(
-            kind: .block, armLayer: .back, drawsGrip: true,
-            iconBaseSize: 58, gripAnchorX: 0.50, gripAnchorY: 0.56,
-            alphaBounds: full, restRotation: 0, performsEquipFlip: false)
+            kind: .block, armLayer: .back, drawsGrip: false,
+            iconBaseSize: 70, gripAnchorX: 0.34, gripAnchorY: 0.72,
+            alphaBounds: full, restRotation: -0.08, performsEquipFlip: false)
+    }
+    if definition.name == "shield", hasDetailedVisual {
+        return HeldItemPresentation(
+            kind: .generic, armLayer: .back, drawsGrip: false,
+            iconBaseSize: 132, gripAnchorX: 0.46, gripAnchorY: 0.76,
+            alphaBounds: HeldItemAlphaBounds(
+                minX: 38 / 128, minY: 20 / 128, maxX: 90 / 128, maxY: 108 / 128),
+            restRotation: -0.10, performsEquipFlip: false)
     }
     return GENERIC_HELD_ITEM_PRESENTATION
 }
@@ -316,6 +454,7 @@ func heldOverlayPlan(viewWidth: Double, viewHeight: Double,
                      hotbarRightX: Double? = nil,
                      rightObstruction: MapOverlayRect? = nil) -> HeldOverlayPlan? {
     guard guiVisible, firstPerson, !screenOpen,
+          presentation.hasItem,
           viewWidth.isFinite, viewHeight.isFinite,
           viewWidth >= 160, viewHeight >= 120 else { return nil }
     let remaining = attack.isFinite ? max(0, min(1, attack)) : 0
@@ -622,6 +761,9 @@ final class HUD {
         let held = player.inventory[player.selectedSlot]
         let heldDefinition = held.map { itemDef($0.id) }
         let heldName = heldDefinition?.name
+        let offHandName = player.offHand.map { itemDef($0.id).name }
+        let mainHandIsBow = heldName == "bow"
+        let mainHandIsShield = heldName == "shield"
         let hasDetailedHeldAsset = heldName.flatMap(heldItemVisualAsset(for:)) != nil
         let heldPresentation = heldItemPresentation(
             for: heldDefinition, hasDetailedVisual: hasDetailedHeldAsset)
@@ -639,7 +781,59 @@ final class HUD {
             isHeld: game.primaryActionHeld,
             at: nowT,
             eligible: game.perspective == 0 && !screenOpen)
-        if let hand = heldOverlayPlan(viewWidth: W, viewHeight: H,
+
+        // Shields are visually equipped in the left hand whether selected or in
+        // the offhand slot. A bow owns that same hand while it is selected.
+        if !mainHandIsBow, (mainHandIsShield || offHandName == "shield"),
+           let shield = leftHandShieldOverlayPlan(
+               viewWidth: W, viewHeight: H,
+               guiVisible: !hideGui, firstPerson: game.perspective == 0,
+               screenOpen: screenOpen, hotbarLeftX: hbX) {
+            cv.drawFirstPersonArm(.back,
+                                  shield.armAssetX, shield.armAssetY,
+                                  shield.armAssetSize, shield.armAssetSize,
+                                  mirrored: true)
+            _ = cv.drawHeldItemVisual(
+                shield.itemName, shield.itemX, shield.itemY,
+                shield.itemSize, shield.itemSize)
+        }
+
+        if mainHandIsBow,
+           let bow = bowOverlayPlan(
+               viewWidth: W, viewHeight: H,
+               guiVisible: !hideGui, firstPerson: game.perspective == 0,
+               screenOpen: screenOpen,
+               usingItem: player.usingItem && player.useItemHand == "main",
+               useTicks: player.useItemTicks,
+               hotbarLeftX: hbX) {
+            let left = bow.bow
+            cv.drawFirstPersonArm(.back,
+                                  left.armAssetX, left.armAssetY,
+                                  left.armAssetSize, left.armAssetSize,
+                                  mirrored: true)
+            cv.save()
+            cv.translate(left.gripX, left.gripY)
+            cv.rotate(left.itemRotation)
+            cv.translate(-left.gripX, -left.gripY)
+            _ = cv.drawHeldItemVisual(
+                bow.frameName, left.itemX, left.itemY,
+                left.itemSize, left.itemSize)
+            cv.restore()
+            cv.drawFirstPersonArm(.grip,
+                                  left.armAssetX, left.armAssetY,
+                                  left.armAssetSize, left.armAssetSize,
+                                  mirrored: true)
+            if let rightX = bow.rightArmAssetX,
+               let rightY = bow.rightArmAssetY {
+                cv.drawFirstPersonArm(.back, rightX, rightY,
+                                      left.armAssetSize, left.armAssetSize)
+                cv.drawFirstPersonArm(.grip, rightX, rightY,
+                                      left.armAssetSize, left.armAssetSize)
+            }
+        }
+
+        if !mainHandIsBow, !mainHandIsShield,
+           let hand = heldOverlayPlan(viewWidth: W, viewHeight: H,
                                       guiVisible: !hideGui,
                                       firstPerson: game.perspective == 0,
                                       screenOpen: screenOpen,
@@ -652,8 +846,8 @@ final class HUD {
                                       hotbarRightX: hbX + 182,
                                       rightObstruction: minimapRect) {
             // One transform moves every layer around the physical grip. The arm-back
-            // renders first, the tool enters the palm, and the Meshy-derived fingers
-            // return in front to close around its handle.
+            // renders first, the item enters the palm, and handle-shaped items receive
+            // the foreground finger layer. Empty slots produce no overlay at all.
             cv.save()
             cv.translate(hand.assemblyPivotX, hand.assemblyPivotY)
             cv.rotate(hand.rotation)

@@ -24,6 +24,9 @@ final class UICanvas {
     private var atlas: MTLTexture            // 1024×1024 RGBA: white texel + icon/tile slots
     private var slots: [String: (Int, Int)] = [:]   // key → cell origin (16×16 grid cells)
     private var nextSlot = 1                 // 0 reserved for white
+    /// Active resource-pack images retained at up to 64×64 for the selected item.
+    /// Custom Blender-authored tool assets take precedence in heldItemTexture().
+    private var heldPackItemImages: [String: RGBAImage] = [:]
     let sampler: MTLSamplerState
 
     // canvas state
@@ -257,6 +260,16 @@ final class UICanvas {
         slots.removeAll()
     }
 
+    func installHeldPackItemImages(_ images: [String: RGBAImage]) {
+        precondition(Thread.isMainThread)
+        heldPackItemImages = images.filter {
+            $0.value.width > 0 && $0.value.height > 0 &&
+                $0.value.width <= 64 && $0.value.height <= 64 &&
+                $0.value.pixels.count == $0.value.width * $0.value.height * 4
+        }
+        heldItemTextures.removeAll(keepingCapacity: true)
+    }
+
     private func allocSlot(_ key: String, _ pixels: [UInt8]) -> (Int, Int)? {
         guard pixels.count == 1024 else { return nil }
         if let s = slots[key] { return s }
@@ -291,7 +304,9 @@ final class UICanvas {
 
     private func heldItemTexture(_ itemName: String) -> MTLTexture? {
         if let texture = heldItemTextures[itemName] { return texture }
-        guard let image = heldItemVisualImage(for: itemName) else { return nil }
+        guard let image = heldItemVisualImage(for: itemName) ?? heldPackItemImages[itemName] else {
+            return nil
+        }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba8Unorm,
             width: image.width,
@@ -309,8 +324,8 @@ final class UICanvas {
         return texture
     }
 
-    /// Draws Meshy-derived art only in the first-person held-item layer. Inventory and
-    /// recipe icons intentionally remain the active resource pack's canonical sprites.
+    /// Draws a Blender-authored tool or high-resolution active-pack sprite only in
+    /// the first-person layer. Inventory and recipe icons retain their 16×16 contract.
     @discardableResult
     func drawHeldItemVisual(_ itemName: String, _ x: Double, _ y: Double,
                             _ width: Double, _ height: Double) -> Bool {
@@ -347,11 +362,14 @@ final class UICanvas {
     @discardableResult
     func drawFirstPersonArm(_ layer: FirstPersonArmLayer,
                             _ x: Double, _ y: Double,
-                            _ width: Double, _ height: Double) -> Bool {
+                            _ width: Double, _ height: Double,
+                            mirrored: Bool = false) -> Bool {
         guard firstPersonArmTexture(layer) != nil else { return false }
         mark(.firstPersonArm(layer))
+        let u0: Float = mirrored ? 1 : 0
+        let u1: Float = mirrored ? 0 : 1
         emitQuad(Float(x), Float(y), Float(width), Float(height),
-                 0, 0, 1, 1,
+                 u0, 0, u1, 1,
                  SIMD4<Float>(1, 1, 1, 1), SIMD4<Float>(1, 1, 1, 1))
         return true
     }

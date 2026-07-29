@@ -232,14 +232,14 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertEqual(idle.rotation, returned.rotation, accuracy: 0.0001)
         XCTAssertEqual(idle.armBaseX, 320, accuracy: 0.0001)
         XCTAssertEqual(idle.armBaseY, 180, accuracy: 0.0001)
-        XCTAssertEqual(idle.iconSize, 48, accuracy: 0.0001)
+        XCTAssertEqual(idle.iconSize, 60, accuracy: 0.0001)
         XCTAssertEqual(idle.armAssetSize, 160, accuracy: 0.0001)
         XCTAssertEqual(idle.armX - idle.armAssetX,
                        idle.armAssetSize * 0.361328125, accuracy: 0.0001)
         XCTAssertEqual(idle.armY - idle.armAssetY,
                        idle.armAssetSize * 0.498046875, accuracy: 0.0001)
-        XCTAssertEqual(idle.armX - idle.iconX, idle.iconSize * 0.50, accuracy: 0.0001)
-        XCTAssertEqual(idle.armY - idle.iconY, idle.iconSize * 0.68, accuracy: 0.0001)
+        XCTAssertEqual(idle.armX - idle.iconX, idle.iconSize * 0.44, accuracy: 0.0001)
+        XCTAssertEqual(idle.armY - idle.iconY, idle.iconSize * 0.70, accuracy: 0.0001)
         if blockDefs.isEmpty { registerAllBlocks() }
         if itemDefs.isEmpty { registerAllItems() }
         let detailedPresentation = heldItemPresentation(
@@ -307,11 +307,11 @@ final class ResourcePackHardeningTests: XCTestCase {
                 XCTAssertGreaterThanOrEqual(candidate.iconSize, 34)
             }
         }
-        XCTAssertNotNil(heldOverlayPlan(viewWidth: 160, viewHeight: 120,
-                                        guiVisible: true, firstPerson: true, screenOpen: false,
-                                        attack: .nan, usingItem: false, useTicks: 0,
-                                        presentation: heldItemPresentation(
-                                            for: nil, hasDetailedVisual: false)))
+        XCTAssertNil(heldOverlayPlan(viewWidth: 160, viewHeight: 120,
+                                     guiVisible: true, firstPerson: true, screenOpen: false,
+                                     attack: .nan, usingItem: false, useTicks: 0,
+                                     presentation: heldItemPresentation(
+                                         for: nil, hasDetailedVisual: false)))
         let minimap = mapMinimapRect(screenWidth: 776, screenHeight: 475,
                                      hotbarCenterX: 388, hotbarHalfWidth: 91,
                                      hotbarTopY: 453)
@@ -333,7 +333,7 @@ final class ResourcePackHardeningTests: XCTestCase {
             rightObstruction: minimap))
         XCTAssertGreaterThan(hotbarAnchored.armX, 388 + 91)
         XCTAssertFalse(hotbarAnchored.obscuresCrosshair)
-        XCTAssertEqual(hotbarAnchored.wristRotation, -0.42, accuracy: 0.0001)
+        XCTAssertEqual(hotbarAnchored.wristRotation, 0, accuracy: 0.0001)
         XCTAssertEqual(hotbarAnchored.toolScaleX, 1, accuracy: 0.0001)
         XCTAssertEqual(hotbarAnchored.toolScaleY, 1, accuracy: 0.0001)
 
@@ -417,8 +417,56 @@ final class ResourcePackHardeningTests: XCTestCase {
             headColors.insert(rgbaAt(x: 8 * 6 + 3, y: 3 * 6 + 3))
         }
         XCTAssertEqual(headColors.count, hashes.count)
-        XCTAssertNil(heldItemVisualAsset(for: "iron_axe"))
-        XCTAssertNil(heldItemVisualImage(for: "iron_axe"))
+    }
+
+    func testEveryRegisteredToolHasABoundedMaterialCorrectHeldAsset() throws {
+        if blockDefs.isEmpty { registerAllBlocks() }
+        if itemDefs.isEmpty { registerAllItems() }
+        let toolNames = itemDefs.filter { $0.tool != nil }.map(\.name)
+        XCTAssertEqual(toolNames.count, 43)
+
+        for itemName in toolNames {
+            let asset = try XCTUnwrap(heldItemVisualAsset(for: itemName), itemName)
+            let image = try XCTUnwrap(heldItemVisualImage(for: itemName), itemName)
+            XCTAssertEqual(asset.itemName, itemName)
+            XCTAssertEqual(image.width, asset.width)
+            XCTAssertEqual(image.height, asset.height)
+            XCTAssertEqual(image.pixels.count, asset.width * asset.height * 4)
+            let visible = stride(from: 3, to: image.pixels.count, by: 4)
+                .count(where: { image.pixels[$0] > 0 })
+            XCTAssertGreaterThan(visible, 250, itemName)
+            XCTAssertLessThan(visible, asset.width * asset.height, itemName)
+            if itemName.hasSuffix("_pickaxe") {
+                XCTAssertEqual(asset.provider, "Elysium original procedural voxel art")
+                XCTAssertEqual(asset.width, 96)
+            } else {
+                XCTAssertEqual(asset.provider, "Faithful 64x normalized through Blender 5.1")
+                XCTAssertEqual(asset.modelTaskID, "blender-held-tools-v1")
+                XCTAssertEqual(asset.width, 128)
+                XCTAssertNotNil(asset.sourceEntry)
+                XCTAssertEqual(asset.sourceEntrySHA256?.count, 64)
+                XCTAssertEqual(asset.sourceSHA256.count, 64)
+            }
+        }
+
+        for family in ["sword", "axe", "shovel", "hoe"] {
+            var referenceAlpha: [UInt8]?
+            for material in ["wooden", "stone", "copper", "iron", "golden", "diamond", "netherite"] {
+                let image = try XCTUnwrap(heldItemVisualImage(for: "\(material)_\(family)"))
+                let alpha = stride(from: 3, to: image.pixels.count, by: 4)
+                    .map { image.pixels[$0] }
+                if let referenceAlpha {
+                    XCTAssertEqual(alpha, referenceAlpha,
+                                   "\(family) material variants must share one silhouette")
+                } else {
+                    referenceAlpha = alpha
+                }
+            }
+        }
+        let shield = try XCTUnwrap(heldItemVisualAsset(for: "shield"))
+        XCTAssertEqual(shield.width, 128)
+        XCTAssertEqual(shield.sourceEntry,
+                       "assets/minecraft/textures/entity/shield_base_nopattern.png")
     }
 
     func testHeldItemPresentationProfilesSeparateEmptyToolsFoodAndBlocks() {
@@ -441,7 +489,7 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertEqual(tool.iconBaseSize, 124.8)
         XCTAssertEqual(tool.gripAnchorX, 0.14)
         XCTAssertEqual(tool.gripAnchorY, 0.88)
-        XCTAssertEqual(tool.restRotation, -0.42)
+        XCTAssertEqual(tool.restRotation, 0)
         XCTAssertLessThan(tool.alphaBounds.minX, tool.alphaBounds.maxX)
 
         let food = heldItemPresentation(
@@ -453,12 +501,83 @@ final class ResourcePackHardeningTests: XCTestCase {
         let block = heldItemPresentation(
             for: itemDef(iid("bricks")), hasDetailedVisual: false)
         XCTAssertEqual(block.kind, .block)
-        XCTAssertTrue(block.drawsGrip)
+        XCTAssertFalse(block.drawsGrip)
+        XCTAssertEqual(block.iconBaseSize, 70)
 
         let generic = heldItemPresentation(
             for: itemDef(iid("stick")), hasDetailedVisual: false)
         XCTAssertEqual(generic.kind, .generic)
         XCTAssertTrue(generic.drawsGrip)
+
+        let sword = heldItemPresentation(
+            for: itemDef(iid("iron_sword")), hasDetailedVisual: true)
+        XCTAssertEqual(sword.iconBaseSize, 118)
+        XCTAssertEqual(sword.gripAnchorX, 0.16)
+        XCTAssertEqual(sword.gripAnchorY, 0.86)
+        XCTAssertEqual(sword.restRotation, 0)
+
+        let bow = heldItemPresentation(for: itemDef(iid("bow")), hasDetailedVisual: true)
+        let crossbow = heldItemPresentation(for: itemDef(iid("crossbow")), hasDetailedVisual: true)
+        XCTAssertEqual(bow.gripAnchorX, 0.34)
+        XCTAssertEqual(bow.gripAnchorY, 0.55)
+        XCTAssertEqual(crossbow.iconBaseSize, 132)
+        XCTAssertEqual(crossbow.gripAnchorX, 0.78)
+        XCTAssertEqual(crossbow.gripAnchorY, 0.87)
+        XCTAssertEqual(crossbow.restRotation, 0)
+    }
+
+    func testLeftHandBowAndShieldPlansAreBoundedAndTrackAuthoritativeChargeTicks() throws {
+        XCTAssertNil(bowOverlayPlan(
+            viewWidth: 159, viewHeight: 180, guiVisible: true,
+            firstPerson: true, screenOpen: false,
+            usingItem: false, useTicks: 0, hotbarLeftX: 69))
+        XCTAssertNil(leftHandShieldOverlayPlan(
+            viewWidth: 320, viewHeight: 180, guiVisible: false,
+            firstPerson: true, screenOpen: false, hotbarLeftX: 69))
+
+        let idle = try XCTUnwrap(bowOverlayPlan(
+            viewWidth: 320, viewHeight: 180, guiVisible: true,
+            firstPerson: true, screenOpen: false,
+            usingItem: false, useTicks: 0, hotbarLeftX: 69))
+        XCTAssertEqual(idle.frameName, "bow")
+        XCTAssertEqual(idle.drawProgress, 0)
+        XCTAssertNil(idle.rightArmAssetX)
+        XCTAssertNil(idle.rightArmAssetY)
+
+        let early = try XCTUnwrap(bowOverlayPlan(
+            viewWidth: 320, viewHeight: 180, guiVisible: true,
+            firstPerson: true, screenOpen: false,
+            usingItem: true, useTicks: 2, hotbarLeftX: 69))
+        let middle = try XCTUnwrap(bowOverlayPlan(
+            viewWidth: 320, viewHeight: 180, guiVisible: true,
+            firstPerson: true, screenOpen: false,
+            usingItem: true, useTicks: 9, hotbarLeftX: 69))
+        let full = try XCTUnwrap(bowOverlayPlan(
+            viewWidth: 320, viewHeight: 180, guiVisible: true,
+            firstPerson: true, screenOpen: false,
+            usingItem: true, useTicks: 20, hotbarLeftX: 69))
+        XCTAssertEqual(early.frameName, "bow_pulling_0")
+        XCTAssertEqual(middle.frameName, "bow_pulling_1")
+        XCTAssertEqual(full.frameName, "bow_pulling_2")
+        XCTAssertEqual(full.drawProgress, 1, accuracy: 0.0001)
+        XCTAssertNotNil(early.rightArmAssetX)
+        XCTAssertNotNil(full.rightArmAssetY)
+        XCTAssertLessThan(full.bow.gripY, idle.bow.gripY)
+
+        for frame in ["bow", "bow_pulling_0", "bow_pulling_1", "bow_pulling_2"] {
+            let asset = try XCTUnwrap(heldItemVisualAsset(for: frame))
+            XCTAssertEqual(asset.width, 128)
+            XCTAssertEqual(asset.height, 128)
+            XCTAssertNotNil(heldItemVisualImage(for: frame))
+        }
+
+        let shield = try XCTUnwrap(leftHandShieldOverlayPlan(
+            viewWidth: 320, viewHeight: 180, guiVisible: true,
+            firstPerson: true, screenOpen: false, hotbarLeftX: 69))
+        XCTAssertEqual(shield.itemName, "shield")
+        XCTAssertLessThan(shield.itemX, shield.gripX)
+        XCTAssertEqual(shield.gripX - shield.armAssetX,
+                       shield.armAssetSize * (1 - 0.361328125), accuracy: 0.0001)
     }
 
     func testPrimaryActionAnimationRepeatsOnlyDuringContinuousHold() throws {
@@ -1067,7 +1186,14 @@ final class ResourcePackHardeningTests: XCTestCase {
             parsed.append(pack)
         }
         XCTAssertEqual(parsed.count, 3)
-        XCTAssertNotNil(buildPackAtlas(packs: parsed, budget: budget))
+        let atlas = try XCTUnwrap(buildPackAtlas(packs: parsed, budget: budget))
+        for itemName in ["iron_sword", "bread", "brick", "bucket"] {
+            let held = try XCTUnwrap(atlas.heldItemIcons[itemName], itemName)
+            XCTAssertGreaterThanOrEqual(held.width, 16)
+            XCTAssertLessThanOrEqual(held.width, 64)
+            XCTAssertEqual(held.width, held.height)
+            XCTAssertEqual(held.pixels.count, held.width * held.height * 4)
+        }
         XCTAssertTrue(budget.isValid)
         XCTAssertLessThanOrEqual(budget.pathBytes, budget.limits.aggregatePathBytes)
         XCTAssertLessThanOrEqual(budget.inflatedBytes, budget.limits.inflatedBytes)

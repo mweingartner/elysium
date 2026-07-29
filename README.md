@@ -106,9 +106,14 @@ The compact lower-right minimap follows the open cavern around you in the Nether
 sealed ceiling. To reclaim that HUD space, turn off **Options... → Video → Show Minimap**; the
 expanded map opened with `M` remains available.
 
-The first-person arm remains visibly connected to the lower screen edge even with an empty hand;
-selected tools and weapons render at a readable scale under the hand's grip, and attack/use
-poses provide clear feedback for swings and tool actions. Inventory and chest
+An empty selected slot leaves the first-person view completely clear. Selected tools and weapons
+use material-correct, Blender-authored Faithful silhouettes at a readable scale under the hand's
+grip; blocks retain their three-dimensional voxel preview, while foods and other objects retain
+high-resolution Faithful item art. Attack/use poses provide clear feedback for swings and tool
+actions. Bows and shields render in the left hand. Holding use with a bow raises it, brings the
+right hand to the string, advances through the charge frames, and fires on release using the same
+charge duration that determines arrow power; shields also remain left-handed when placed in the
+offhand slot. Inventory and chest
 screens include a **Sort A-Z** button; sorting orders complete stacks by item
 name and type without merging them or moving equipment, crafting, cursor, or
 other non-storage slots. Chest sorting is disabled for LAN clients until the

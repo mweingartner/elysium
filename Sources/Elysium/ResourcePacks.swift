@@ -1113,6 +1113,9 @@ struct PackAtlasResult {
     var icon16: BuiltAtlas
     var animations: [TileAnimation]
     var itemIcons: [String: [UInt8]]
+    /// Bounded source-resolution sprites used only by the first-person overlay.
+    /// Inventory, recipes, dropped items, and goldens retain their 16×16 contract.
+    var heldItemIcons: [String: RGBAImage]
     var tintGate: [UInt8]
     var textureGate: [UInt8]
     var fluidAnimated: Bool
@@ -1476,8 +1479,11 @@ func buildPackAtlas(packs: [ResourcePack],
         icon16.append(scaleBox(RGBAImage(width: res, height: res, pixels: px), to: 16))
     }
 
-    // item icons: every textures/item/*.png in the stack, 16× for the icon cache
+    // Item icons: every textures/item/*.png in the stack. The long-standing 16×16
+    // cache remains authoritative outside the first-person overlay; a separately
+    // bounded copy retains up to 64×64 Faithful detail for a selected held item.
     var itemIcons: [String: [UInt8]] = [:]
+    var heldItemIcons: [String: RGBAImage] = [:]
     let registeredItemImages = Set(itemDefs.flatMap { [$0.name, $0.icon] })
     for p in packs.reversed() {   // walk lowest→highest so highest priority wins
         for path in p.list(prefix: p.texRoot + "item/") where path.hasSuffix(".png") {
@@ -1490,13 +1496,20 @@ func buildPackAtlas(packs: [ResourcePack],
             }
             guard img.width == img.height else { continue }
             itemIcons[base] = scaleBox(img, to: 16)
+            let heldResolution = min(64, img.width)
+            heldItemIcons[base] = RGBAImage(
+                width: heldResolution, height: heldResolution,
+                pixels: img.width == heldResolution
+                    ? img.pixels
+                    : scaleBox(img, to: heldResolution))
         }
     }
 
     return PackAtlasResult(
         res: res, slices: slices,
         icon16: BuiltAtlas(count: names.count, pixels: icon16, missing: []),
-        animations: animations, itemIcons: itemIcons, tintGate: tintGate, textureGate: textureGate,
+        animations: animations, itemIcons: itemIcons, heldItemIcons: heldItemIcons,
+        tintGate: tintGate, textureGate: textureGate,
         fluidAnimated: fluidAnimated, appliedTiles: applied, appliedItems: itemIcons.count)
 }
 
@@ -1798,6 +1811,7 @@ final class StagedResourcePackPublication {
         iconPackPublicationActive = true
         defer { iconPackPublicationActive = false }
         ui.cv.resetIconSlots()
+        ui.cv.installHeldPackItemImages(atlas.heldItemIcons)
         renderer.resetSpriteSlots()
         iconPackPublicationHook?(.retired)
         installUIAtlas(atlas.icon16)
@@ -1890,6 +1904,7 @@ func applyResourcePacks(_ userPacks: [String],
             return false
         }
         ui.cv.resetIconSlots()
+        ui.cv.installHeldPackItemImages(result.heldItemIcons)
         renderer.resetSpriteSlots()
         iconPackPublicationHook?(.retired)
         installUIAtlas(result.icon16)
@@ -1936,6 +1951,7 @@ func applyResourcePacks(_ userPacks: [String],
             return false
         }
         ui.cv.resetIconSlots()
+        ui.cv.installHeldPackItemImages([:])
         renderer.resetSpriteSlots()
         iconPackPublicationHook?(.retired)
         installUIAtlas(atlas)

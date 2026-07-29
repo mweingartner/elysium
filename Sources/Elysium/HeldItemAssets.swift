@@ -6,16 +6,21 @@
 
 import Foundation
 
-fileprivate struct HeldItemRGB: Equatable {
+struct HeldItemRGB: Equatable {
     let red: UInt8
     let green: UInt8
     let blue: UInt8
 }
 
-fileprivate struct HeldPickaxePalette: Equatable {
+struct HeldPickaxePalette: Equatable {
     let dark: HeldItemRGB
     let middle: HeldItemRGB
     let light: HeldItemRGB
+}
+
+enum HeldItemPixelSource: Equatable {
+    case pickaxe(HeldPickaxePalette)
+    case pngBase64(String)
 }
 
 struct HeldItemVisualAsset: Equatable {
@@ -25,7 +30,9 @@ struct HeldItemVisualAsset: Equatable {
     let sourceSHA256: String
     let width: Int
     let height: Int
-    fileprivate let pickaxePalette: HeldPickaxePalette
+    let sourceEntry: String?
+    let sourceEntrySHA256: String?
+    let pixelSource: HeldItemPixelSource
 }
 
 private func heldPickaxeAsset(
@@ -42,10 +49,12 @@ private func heldPickaxeAsset(
         sourceSHA256: sha256,
         width: 96,
         height: 96,
-        pickaxePalette: HeldPickaxePalette(dark: dark, middle: middle, light: light))
+        sourceEntry: nil,
+        sourceEntrySHA256: nil,
+        pixelSource: .pickaxe(HeldPickaxePalette(dark: dark, middle: middle, light: light)))
 }
 
-private let heldItemVisualAssets: [String: HeldItemVisualAsset] = [
+private let heldPickaxeVisualAssets: [String: HeldItemVisualAsset] = [
     "wooden_pickaxe": heldPickaxeAsset(
         "wooden", sha256: "afed6517bcebba4e15eb25ad06ac735f6b2ed5c27cde0a37fd37050f600260d1",
         dark: HeldItemRGB(red: 82, green: 48, blue: 22),
@@ -111,15 +120,32 @@ private let heldPickaxeHandle: [Character: HeldItemRGB] = [
 ]
 
 func heldItemVisualAsset(for itemName: String) -> HeldItemVisualAsset? {
-    heldItemVisualAssets[itemName]
+    heldPickaxeVisualAssets[itemName] ?? blenderHeldToolVisualAssets[itemName]
 }
 
 func heldItemVisualImage(for itemName: String) -> RGBAImage? {
     guard let asset = heldItemVisualAsset(for: itemName) else { return nil }
+    switch asset.pixelSource {
+    case let .pngBase64(encoded):
+        guard let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters),
+              data.count <= 256 * 1024,
+              let image = decodePNG(data),
+              image.width == asset.width, image.height == asset.height,
+              image.pixels.count == asset.width * asset.height * 4 else { return nil }
+        return image
+    case let .pickaxe(palette):
+        return heldPickaxeVisualImage(asset: asset, palette: palette)
+    }
+}
+
+private func heldPickaxeVisualImage(
+    asset: HeldItemVisualAsset,
+    palette: HeldPickaxePalette
+) -> RGBAImage? {
     let head: [Character: HeldItemRGB] = [
-        "d": asset.pickaxePalette.dark,
-        "m": asset.pickaxePalette.middle,
-        "l": asset.pickaxePalette.light,
+        "d": palette.dark,
+        "m": palette.middle,
+        "l": palette.light,
     ]
     let logicalSize = 16
     let pixelScale = 6
