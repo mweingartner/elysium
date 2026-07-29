@@ -256,6 +256,15 @@ final class AutomatedReleaseSourceTests: XCTestCase {
         func run(_ executable: URL, _ arguments: [String]) throws -> String {
             let process = Process(), pipe = Pipe()
             process.executableURL = executable; process.arguments = arguments
+            var environment = ProcessInfo.processInfo.environment
+            for name in [
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_DIR",
+                "GIT_INDEX_FILE", "GIT_NAMESPACE", "GIT_OBJECT_DIRECTORY",
+                "GIT_PREFIX", "GIT_QUARANTINE_PATH", "GIT_WORK_TREE",
+            ] {
+                environment.removeValue(forKey: name)
+            }
+            process.environment = environment
             process.currentDirectoryURL = temporary; process.standardOutput = pipe
             process.standardError = pipe; try process.run(); process.waitUntilExit()
             let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
