@@ -11,6 +11,49 @@ private var nextEntityId = 1
 public func resetEntityIds(_ start: Int) { nextEntityId = start }
 public func peekNextEntityId() -> Int { nextEntityId }
 
+// MARK: - uid hi/lo reservation (object-graph-attributes change 1a, design.md
+// Decision 3 / Condition 7). `reservedEntityIdLimit` is the durable
+// high-water mark a `GameCore` installs for the world it currently owns; the
+// hook fires *before* an id at or past that mark is minted so the caller can
+// synchronously reserve the next block first. No `GameCore` (elysmoke,
+// headless `World` tests) means no hook is ever installed, so id sequences
+// are byte-for-byte unchanged from before this change (design.md §13).
+private var reservedEntityIdLimit = Int.max
+private var entityIdReservationHook: ((Int) -> Void)?
+
+/// Installs the reservation hook for the world a `GameCore` is about to own
+/// (non-LAN-client worlds only). `hook` is called with the id about to be
+/// minted whenever `nextEntityId >= limit`; it is expected to raise the limit
+/// (via `raiseEntityIdReservationLimit(to:)`) on success and simply return
+/// (leaving the limit where it is, so it fires again next time) on failure.
+public func installEntityIdReservation(limit: Int, hook: @escaping (Int) -> Void) {
+    reservedEntityIdLimit = limit
+    entityIdReservationHook = hook
+}
+
+/// Removes the reservation hook — called on world exit so a stale hook never
+/// outlives the `GameCore` that installed it (a same-process automated-test
+/// run that skips `exitToTitle` is a known, harmless exception:
+/// `SaveDB.putWorld`'s `try?` degrades the resulting write to a no-op —
+/// design.md note D3).
+public func clearEntityIdReservation() {
+    reservedEntityIdLimit = Int.max
+    entityIdReservationHook = nil
+}
+
+/// Raises the durable mark after a successful reservation write. Never
+/// lowers it (a concurrent/out-of-order call can never regress the mark).
+public func raiseEntityIdReservationLimit(to newLimit: Int) {
+    reservedEntityIdLimit = max(reservedEntityIdLimit, newLimit)
+}
+
+/// The durable reservation mark installed for the current world (`Int.max`
+/// when none is installed — headless/LAN-client contexts). `saveAndFlush`
+/// writes `max(peekNextEntityId(), peekReservedEntityIdLimit())` so a mark
+/// already raised ahead of the live counter never regresses on an ordinary
+/// save (design.md Condition 7).
+public func peekReservedEntityIdLimit() -> Int { reservedEntityIdLimit }
+
 /// generic per-entity data bag (variant, color, tame owner id, …) — closed
 /// field set surveyed from the baseline `data: Record<string, any>` usage.
 public struct EntityData: Codable, Equatable {
@@ -47,7 +90,16 @@ public struct EntityData: Codable, Equatable {
 }
 
 open class Entity: EntityRef {
-    public let id: Int
+    /// The uid of `entity:<uid>` refs and `LANEntitySnapshot.entityID`
+    /// (object-graph-attributes change 1a, design.md Decision 3). Settable
+    /// only through `adoptPersistedId(_:)` (module-internal — only
+    /// `EntityRegistry.loadEntity` calls it, before the entity is added to a
+    /// world); every other reader sees a plain, immutable-looking `Int`.
+    public private(set) var id: Int
+    /// The extensible attribute bag for this entity (object-graph-attributes
+    /// change 1a, design.md Decision 5/9). Empty for almost every entity;
+    /// `AttributeStore` is the only writer.
+    public var objectRecord = ObjectRecord()
     open var type: String { "entity" }
     public var x = 0.0, y = 0.0, z = 0.0
     public var prevX = 0.0, prevY = 0.0, prevZ = 0.0
@@ -91,9 +143,39 @@ open class Entity: EntityRef {
     public unowned var world: World
 
     public init(world: World) {
+        if nextEntityId >= reservedEntityIdLimit, let hook = entityIdReservationHook {
+            hook(nextEntityId)
+        }
         self.id = nextEntityId
         nextEntityId += 1
         self.world = world
+    }
+
+    /// Adopts a persisted id (`EntityRegistry.loadEntity`, before the entity
+    /// is added to a world). Module-internal: the only setter of `id`.
+    func adoptPersistedId(_ persistedId: Int) {
+        id = persistedId
+    }
+
+    /// Undoes a mint that turned out to be unnecessary because the entity's
+    /// persisted id was adopted instead — but only when it was the *most
+    /// recent* mint (`nextEntityId == minted + 1`), so loading never burns an
+    /// id another entity already claimed in between.
+    func reclaimEntityId(_ minted: Int) {
+        if nextEntityId == minted + 1 { nextEntityId = minted }
+    }
+
+    /// Bumps the live counter past an adopted id (Security (plan) C26:
+    /// overflow-safe, and re-enters the reservation hook when the bumped
+    /// counter reaches or passes the durable mark — a persisted id can never
+    /// leave the live counter, and therefore the mark, behind it).
+    func bumpEntityIdCounter(past adoptedId: Int) {
+        let (bumped, overflowed) = adoptedId.addingReportingOverflow(1)
+        let candidate = overflowed ? Int.max : bumped
+        if candidate > nextEntityId { nextEntityId = candidate }
+        if nextEntityId >= reservedEntityIdLimit, let hook = entityIdReservationHook {
+            hook(nextEntityId)
+        }
     }
 
     public func bb() -> AABB {
@@ -347,10 +429,17 @@ open class Entity: EntityRef {
             "vx": vx, "vy": vy, "vz": vz,
             "yaw": yaw, "pitch": pitch, "age": age,
             "fire": fireTicks, "persistent": persistent,
+            // object-graph-attributes change 1a, design.md Decision 9/Condition 8:
+            // "id" is always written (the persisted uid); "object" only when the
+            // attribute bag is non-empty (zero-record chunks stay byte-identical).
+            "id": id,
         ]
         if let enc = try? JSONEncoder().encode(data),
            let obj = try? JSONSerialization.jsonObject(with: enc) {
             d["data"] = obj
+        }
+        if !objectRecord.isEmpty {
+            d["object"] = ObjectRecordCodec.encode(objectRecord)
         }
         return d
     }
@@ -367,6 +456,15 @@ open class Entity: EntityRef {
             data = EntityData()
         }
         persistent = (d["persistent"] as? Bool) ?? false
+        // "id" is adopted by `EntityRegistry.loadEntity` (needs `World.entityById`
+        // for the collision rule), not here. "object" is tolerant: any decode
+        // failure just leaves the bag empty rather than failing the whole entity.
+        if let text = d["object"] as? String,
+           let record = ObjectRecordCodec.decode(text, caps: .defaults) {
+            objectRecord = record
+        } else {
+            objectRecord = ObjectRecord()
+        }
     }
 }
 

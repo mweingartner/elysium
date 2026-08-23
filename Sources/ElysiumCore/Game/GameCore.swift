@@ -362,6 +362,9 @@ public final class GameCore {
 
     // world state
     public var worlds: [Dim: World] = [:]
+    /// object-graph-attributes change 1a (design.md Decision 2/9): the
+    /// scripting subsystem's session state (`Scripting/GameCore+Scripting.swift`).
+    public let scripting = GameScriptingState()
     public var dim: Dim = .overworld
     public var player: Player!
     public var worldRec: WorldRecord?
@@ -1226,6 +1229,9 @@ public final class GameCore {
 #endif
             finalizeAndSave(synchronous: true)
         }
+        // object-graph-attributes change 1a, design.md Decision 3: a stale
+        // hook must never outlive the `GameCore` that installed it.
+        clearEntityIdReservation()
         inWorld = false
         bedPlacementSelection.reset()
         bedPlacementBinding = nil
@@ -1373,6 +1379,10 @@ public final class GameCore {
         rec.spawnX = spawn.x
         rec.spawnY = spawn.y
         rec.spawnZ = spawn.z
+        // DEF-1 fix: the only construction path that trusts a world's scripts —
+        // a genuinely new, locally-created world, never an import or a transient
+        // LAN-client record (design.md Decision 11 / Condition 8).
+        rec.scriptsEnabled = true
         db.putWorld(rec)
         enterWorld(rec, nil, nil)
     }
@@ -2136,6 +2146,20 @@ public final class GameCore {
         dragonSpawned = false
         worlds.removeAll()
         resetEntityIds(max(1, rec.nextEntityId))
+        // object-graph-attributes change 1a, design.md Decision 3/Condition 7:
+        // install the durable id-reservation hook for a real (non-LAN-client)
+        // world only — a transient LAN client world never writes a world
+        // record for this. design.md Decision 9: load the world/dimension
+        // attribute bags alongside it.
+        scripting.reservationFailureLogged = false
+        if transientLANClient {
+            clearEntityIdReservation()
+        } else {
+            installEntityIdReservation(limit: rec.nextEntityId) { [weak self] needed in
+                self?.reserveEntityIds(upTo: needed)
+            }
+        }
+        loadWorldObjectRecords(from: rec)
         for d in [Dim.overworld, .nether, .end] {
             let w = World(dim: d, seed: UInt32(bitPattern: rec.seed), generationSettings: rec.generationSettings)
             if let ds = rec.dims["\(d.rawValue)"] {
@@ -2381,7 +2405,12 @@ public final class GameCore {
         guard var rec = worldRec else { return false }
         rec.lastPlayed = Date().timeIntervalSince1970 * 1000
         rec.gameMode = player.gameMode
-        rec.nextEntityId = peekNextEntityId()
+        // object-graph-attributes change 1a, design.md Condition 7: write
+        // `max(reservedMark, liveCounter)` — the reservation write may have
+        // already raised the durable mark ahead of the live counter (a block
+        // reserved but not yet fully consumed), and that mark must never
+        // regress on an ordinary save.
+        rec.nextEntityId = max(peekNextEntityId(), peekReservedEntityIdLimit())
         for (d, w) in worlds {
             rec.dims["\(d.rawValue)"] = DimState(
                 time: w.time, dayTime: w.dayTime,
@@ -2395,6 +2424,10 @@ public final class GameCore {
             rec.difficulty = cur.difficulty
             rec.gameRules = cur.gameRules
         }
+        // object-graph-attributes change 1a, design.md Decision 9: store the
+        // world/dimension attribute bags alongside every other world-global
+        // field this function already writes back into `rec`.
+        storeWorldObjectRecords(into: &rec)
         worldRec = rec
         db.putWorld(rec)
         let worldSaved = !synchronous || db.getWorld(rec.id).flatMap(encodeWorldRecordJSON)
@@ -2473,13 +2506,19 @@ public final class GameCore {
         // version, so simply preserving the last-known-good cache is the safe behavior. A future
         // v4-aware build resumes correctly from the untouched cache once it decodes this session.
         guard !player.rpgDecodedVersionExceedsCurrent else { return }
+        // object-graph-attributes change 1a, design.md Decision 9: LAN
+        // clients never persist host attribute data — strip "object" (and
+        // "id", which a resumed guest re-mints anyway) from the cached
+        // resume snapshot.
+        var playerData = player.save()
+        playerData.removeValue(forKey: "object")
         db.putLANClientResume(key, [
             "worldID": summary.worldID,
             "worldName": summary.worldName,
             "seed": summary.seed,
             "dim": dim.rawValue,
             "updated": Date().timeIntervalSince1970 * 1000,
-            "data": player.save(),
+            "data": playerData,
         ])
     }
 
@@ -2564,7 +2603,12 @@ public final class GameCore {
             ents.append(ent.save())
         }
         let key = db.chunkKey(worldId, d.rawValue, c.cx, c.cz)
-        if !c.modified && !savedFullKeys.contains(key) {
+        // object-graph-attributes change 1a: a chunk carrying object records
+        // must take the full path even when otherwise unmodified — the
+        // entity-only path below has no "objects" field, and would silently
+        // drop pre-existing records adopted from disk but never re-touched
+        // this session.
+        if !c.modified && !savedFullKeys.contains(key) && c.objectRecords.isEmpty {
             // entity-only record (~KBs): the blocks regenerate from seed
             return ChunkRecord(key: key, worldId: worldId, dim: d.rawValue, cx: c.cx, cz: c.cz, entities: ents)
         }
@@ -2578,10 +2622,16 @@ public final class GameCore {
         if let data = try? JSONEncoder().encode(besLive) {
             besCopy = try? JSONDecoder().decode([BlockEntityData].self, from: data)
         }
+        // design.md Decision 9: opaque cell-index -> canonical record text,
+        // passed through by `Saves.swift` without knowing the schema.
+        var objectTexts: [Int: String] = [:]
+        for (cellIndex, record) in c.objectRecords where !record.isEmpty {
+            objectTexts[cellIndex] = ObjectRecordCodec.encode(record)
+        }
         return ChunkRecord(
             key: key, worldId: worldId, dim: d.rawValue, cx: c.cx, cz: c.cz,
             blocks: w.rpgBlocksForPersistence(in: c), biomes: c.biomes,
-            blockEntities: besCopy ?? besLive, entities: ents)
+            blockEntities: besCopy ?? besLive, entities: ents, objects: objectTexts)
     }
 
     // ===========================================================================
@@ -2887,6 +2937,20 @@ public final class GameCore {
         }
         w.adoptChunkBlockEntities(c)
         if isLANClientWorld { return }
+        // object-graph-attributes change 1a, design.md Decision 9: restore
+        // block object records (non-LAN-client only — a LAN client world
+        // never adopts host attribute data, matching the entity skip below).
+        if let saved {
+            for (cellIndex, text) in saved.objects {
+                guard let record = ObjectRecordCodec.decode(text, caps: .defaults), !record.isEmpty else {
+                    if !text.isEmpty {
+                        print("[scripting] dropped corrupt object record for chunk (\(cx),\(cz)) cell \(cellIndex)")
+                    }
+                    continue
+                }
+                c.objectRecords[cellIndex] = record
+            }
+        }
         // entities: any saved record (full or entity-only) overrides worldgen spawns
         if let saved {
             for ed in saved.entities {
@@ -4716,7 +4780,11 @@ public final class GameCore {
     }
 
     /// nearest entity under the crosshair within attack reach
-    private func crosshairEntity(_ maxDist: Double) -> Entity? {
+    // object-graph-attributes change 1a: made internal (was private) so
+    // `Scripting/GameCore+Scripting.swift`'s `cursorObjectRef()` can reuse it
+    // (design.md Decision 3's file-by-file plan: "uses `crosshairEntity`
+    // made internal").
+    func crosshairEntity(_ maxDist: Double) -> Entity? {
         let p = player!
         let dx = -detSin(p.yaw) * detCos(p.pitch)
         let dy = -detSin(p.pitch)

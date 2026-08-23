@@ -25,6 +25,22 @@ import Foundation
 /// graph by definition (Builder fix, found while writing that test).
 typealias LuaStatePointer = OpaquePointer
 
+/// object-graph-attributes change 1a carry-forward N4-2 (design.md Decision 12):
+/// single clamped helper for the transient checkstack headroom every marshaling
+/// site (`LuaState.pushHostResult`'s `.values`/`.yield` cases, `Coroutines.swift`'s
+/// `resume`/`call`) reserves beyond the top-level argument/result count. Replaces
+/// four separate `Int32(2 * valueLimits.depth + 4)` computations, each of which
+/// could trap for a pathological `ScriptBudgets.valueDepth` (e.g. `Int.max`) before
+/// this fix — `2 * depth` alone overflows `Int` at that extreme, and the later
+/// `Int32(...)` truncating conversion was undefined for an out-of-range `Int`.
+/// Clamping `depth` to `1 << 20` first keeps the arithmetic entirely within `Int32`
+/// range while remaining far larger than any reachable `ScriptValueLimits.depth`
+/// (whose own default and every test override stay in the single digits).
+@inline(__always)
+func checkstackSlack(for depth: Int) -> Int32 {
+    Int32(clamping: 2 * min(max(depth, 0), 1 << 20) + 4)
+}
+
 /// Errors `LuaState` itself throws — construction and lifecycle refusals, distinct from
 /// `ScriptFault` (which represents a *script's* abnormal stop, not a host-API misuse).
 public enum LuaRuntimeError: Error, Equatable, Sendable {
@@ -428,7 +444,7 @@ public final class LuaState {
             // LOW note (Security (code) attempt 3): sized by the marshaler's
             // transient depth, not just values.count — see the matching comment
             // in Coroutines.swift's call/resume.
-            if !values.isEmpty, lua_checkstack(L, Int32(values.count) + Int32(2 * valueLimits.depth + 4)) == 0 {
+            if !values.isEmpty, lua_checkstack(L, Int32(values.count) + checkstackSlack(for: valueLimits.depth)) == 0 {
                 return pushInternalError("stack overflow: cannot return \(values.count) values", on: L)
             }
             // F1 (test.md defect): record the top before pushing so a failing value
@@ -459,7 +475,7 @@ public final class LuaState {
         case .yield(let values, let reason):
             // LOW note (Security (code) attempt 3): same transient-depth sizing
             // as the .values case above.
-            if !values.isEmpty, lua_checkstack(L, Int32(values.count) + Int32(2 * valueLimits.depth + 4)) == 0 {
+            if !values.isEmpty, lua_checkstack(L, Int32(values.count) + checkstackSlack(for: valueLimits.depth)) == 0 {
                 return pushInternalError("stack overflow: cannot yield \(values.count) values", on: L)
             }
             let savedTop = lua_gettop(L)

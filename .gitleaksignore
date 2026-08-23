@@ -7,3 +7,9 @@ scripts/verify-elysium-storage-release-surface.sh:generic-api-key:31
 # Reviewed false positive: Swift LAN admission policy type name, not a credential.
 58fe3d89b369334c4695cadd7e2118087b11c6a7:Sources/ElysiumCore/Net/LANV6HandshakeMessages.swift:generic-api-key:557
 Sources/ElysiumCore/Net/LANV6HandshakeMessages.swift:generic-api-key:557
+
+# Reviewed false positives (2026-08-22, embed-lua-runtime): SHA-256 content hashes, not credentials.
+# gitleaks' generic-api-key matches "lapi.c"/"lapi.h" (substring "api") and EXPECTED_STORAGE_API_SHA256.
+scripts/clua/upstream-manifest.json:generic-api-key:8
+scripts/clua/upstream-manifest.json:generic-api-key:9
+scripts/verify-elysium-storage-release-surface.sh:generic-api-key:50

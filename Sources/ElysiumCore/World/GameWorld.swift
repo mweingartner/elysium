@@ -147,6 +147,17 @@ public final class World {
     /// Bounded, session-only RPG effects. These are deliberately not encoded;
     /// lifecycle and persistence paths restore guarded cells before saving.
     public internal(set) var rpgTemporaryEffects: [RPGTemporaryEffect] = []
+    /// object-graph-attributes change 1a, design.md Decision 8 (amended by
+    /// Security (plan) C24): cells a guarded-temporary restore is actively
+    /// putting back to their original id, consulted by
+    /// `isRPGGuardedTemporaryCell` alongside the live `rpgTemporaryEffects`
+    /// array. `cleanupRPGTemporaryEffect` inserts the position before its
+    /// restoring `setBlock` and removes it after, so the exemption still
+    /// holds on every path that removes the effect from the array *before*
+    /// restoring (`cancelRPGTemporaryEffects(where:)`,
+    /// `terminateRPGTemporaryEffects(ownerID:)`) — not only natural tick
+    /// expiry, which restores before reassigning the array.
+    var rpgRestoringGuardedCells: Set<RPGBlockPosition> = []
     public var simCenterX = 0, simCenterZ = 0
     public var simDistance = 6
     public var randomTickSpeed = 3
@@ -225,6 +236,29 @@ public final class World {
                 untrackTickingBE(be)
                 c.removeBlockEntity(lx, y, lz)
             }
+        }
+
+        // object-graph-attributes change 1a, design.md Decision 8/Condition 9:
+        // a block's scripted attribute record survives meta-only changes and
+        // same-family id swaps (lit pairs, soil/sapling-log families); any
+        // other id change clears it, unless the cell is under a live RPG
+        // guarded-temporary effect (the temporary swap and its eventual
+        // restore are not a "real" identity change). Zero-record cost is one
+        // `isEmpty` test. This is the single site 1b will need to change to
+        // defer clearing until after event delivery — deliberately not
+        // duplicated anywhere else.
+        //
+        // Note (design.md D5): LAN chunk-section replication
+        // (`applyLANChunkSectionSnapshot`, LANReplication.swift — outside
+        // this change's manifest) bulk-writes `Chunk.set()` directly and
+        // bypasses this check entirely. That is safe only because a
+        // LAN-client world never holds object records (`adoptChunk` skips
+        // restoring them, `saveLANClientResume` strips `"object"`, every
+        // mutating scripting command is refused by `lanClientRefusal`) — a
+        // future guest-attribute change (phase 4) must reconsider this bypass.
+        if oldId != newId && !c.objectRecords.isEmpty && !BlockStateCodec.sameFamily(oldId, newId)
+            && !isRPGGuardedTemporaryCell(x, y, z) {
+            c.objectRecords.removeValue(forKey: c.index(lx, y, lz))
         }
 
         // heightmap

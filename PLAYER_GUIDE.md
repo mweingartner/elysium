@@ -16,6 +16,7 @@ requirements and installation, start with the [Elysium project overview](README.
 - [Save, manage, and recover worlds](#save-manage-and-recover-worlds)
 - [Local-network multiplayer](#local-network-multiplayer)
 - [Object templates](#object-templates)
+- [Object attributes (preview)](#object-attributes-preview)
 - [Options, accessibility, and local AI](#options-accessibility-and-local-ai)
 - [Troubleshooting and current limitations](#troubleshooting-and-current-limitations)
 
@@ -481,6 +482,39 @@ Template placement is previewed and validated before it changes the world. Undo 
 template placement, not to every ordinary building action. In either saved-template browser, **Delete**
 or Delete/Backspace while the template list is focused opens a confirmation naming the exact template.
 **Cancel** has initial focus, Escape cancels, and only **Delete Template** performs the deletion.
+
+## Object attributes (preview)
+
+This is an early preview of the scripting foundation: three chat commands let you read and set small,
+named pieces of data on a block or entity — nothing here runs a script yet, and there is no in-game
+scripting language available in this build. Everything is host-only: on a joined LAN world these
+commands are refused outright, not merely restricted.
+
+- `/attr set <target> <name> <value>` — set an attribute. `<target>` is always required: `self`,
+  `looking` (whatever is under your crosshair), or a canonical reference such as `entity:12` or
+  `block:overworld:10,64,3`.
+- `/attr get <target> <name>` — read one attribute.
+- `/attr list <target>` — list every attribute currently set on the target.
+- `/attr define <target> <name> <value> [readonly] [--force]` — declare a custom attribute name by
+  giving it an initial value, which fixes its type; add `readonly` to make it read-only from then on,
+  or `--force` to redefine an existing readonly attribute.
+- `/attr remove <target> <name>` — clear one attribute.
+- `/inspect [target]` — a readable dump of a target's built-in fields (block state such as facing,
+  half, or open/closed) plus every attribute set on it. Unlike `/attr`, `/inspect`'s target is
+  optional: omit it to default to `looking`, then `self` if nothing is under your crosshair.
+- `/objects near [radius]` — lists nearby entities and attributed blocks, closest first (default radius
+  if omitted).
+
+Values are typed: a bare number (`3`, `-1.5`), `true`/`false`, a quoted string (`"like this"`), or a
+reference to another object — written with a `ref:` prefix plus the target grammar (`ref:entity:12`,
+`ref:block:overworld:10,64,3`, `ref:player`). The `ref:` prefix is required; without it, the text is
+stored as a plain string instead. Some built-in fields are read-only (for example a door's
+`waterlogged` state) and refuse a `/attr set`.
+
+Setting an attribute never bypasses the game's own rules for that block or entity — the engine stays
+authoritative. For example, `/attr set` can flip a door's `open` field, but the same redstone logic that
+governs every other door still applies afterward: an unsupported door still breaks, and a door wired to
+power still swings shut or open on the next power transition regardless of what a command just set.
 
 ## Options, accessibility, and local AI
 

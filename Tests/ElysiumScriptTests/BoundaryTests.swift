@@ -604,4 +604,206 @@ final class BoundaryTests: XCTestCase {
         }
         XCTAssertEqual(values, [.int(40), .int(99)])
     }
+
+    // MARK: - object-graph-attributes change 1a carry-forward (design.md
+    // Decision 12, N4-1/N4-2, Security (plan) C25/C28)
+
+    /// Spec `embedded-script-runtime` "Many resume arguments on a fresh
+    /// coroutine": 64 and then 200 arguments on separate fresh coroutines
+    /// both complete, and memory returns to its pre-test baseline after
+    /// `collectFull()` — no leaked stack growth from either resume.
+    func testManyResumeArgumentsOnFreshCoroutineComplete() throws {
+        let state = try ScriptTestSupport.makeState()
+        let environment = state.makeEnvironment(
+            name: "manyArgsFresh", hostBindings: [], random: ScriptTestSupport.randomStream()
+        )
+        // Compile both chunks before the baseline is captured — compiling
+        // retains bytecode in the environment for the rest of its life (by
+        // design: a `ScriptFunction` stays callable again later), so that is
+        // a one-time cost, not something a "resuming must not leak" test
+        // should charge against the resume/pool cycle itself.
+        let function64 = try environment.compile(
+            source: "return select('#', ...)", chunkName: "manyArgsFresh64"
+        ).get()
+        let function200 = try environment.compile(
+            source: "return select('#', ...)", chunkName: "manyArgsFresh200"
+        ).get()
+
+        func resumeOnce(_ function: ScriptFunction, _ count: Int) throws {
+            guard let coroutine = try state.makeCoroutine(function: function) else {
+                return XCTFail("expected a coroutine")
+            }
+            let args = (0..<count).map { ScriptValue.int(Int64($0)) }
+            let outcome = try state.resume(coroutine, args: args, slice: 1_000_000)
+            guard case .completed(let values) = outcome else {
+                return XCTFail("expected .completed for \(count) arguments, got \(outcome)")
+            }
+            XCTAssertEqual(values, [.int(Int64(count))])
+        }
+
+        // Warm the pool first: a completed coroutine's thread is closed and
+        // pooled (design.md Decision 7), but a pooled thread's own Lua stack
+        // capacity is a high-water mark that reuse never shrinks back down —
+        // the first push of 200 arguments onto a freshly pooled thread grows
+        // it once, permanently, by design. Do that growth here, before the
+        // baseline, so the loop below is checking for an actual per-cycle
+        // leak rather than this one-time, intentional retention.
+        try resumeOnce(function64, 64)
+        try resumeOnce(function200, 200)
+
+        state.collectFull()
+        let baseline = state.memoryStatus.bytesInUse
+        for _ in 0..<20 {
+            try resumeOnce(function64, 64)
+            try resumeOnce(function200, 200)
+        }
+        state.collectFull()
+        // A small fixed residual across 20 more warm/pooled complete cycles
+        // (allocator/pool-reuse granularity, not a per-cycle leak) is
+        // expected; `baseline / 20` bounds it to 5%.
+        let tolerance = max(baseline / 20, 4_096)
+        let after = state.memoryStatus.bytesInUse
+        let growth = after > baseline ? after - baseline : 0
+        XCTAssertLessThanOrEqual(growth, tolerance, "resuming with many arguments must not leak (baseline \(baseline), after \(after))")
+    }
+
+    /// Spec `embedded-script-runtime` "Absurd value depth does not trap": a
+    /// `LuaState` built with `ScriptBudgets.valueDepth = Int.max` still
+    /// returns a definite outcome for an ordinary call (N4-2's clamped
+    /// `checkstackSlack` helper is what makes this safe — `2 * Int.max`
+    /// alone overflows `Int` before any clamp).
+    func testAbsurdValueDepthDoesNotTrap() throws {
+        var budgets = ScriptTestSupport.tinyBudgets
+        budgets.valueDepth = Int.max
+        let state = try ScriptTestSupport.makeState(budgets: budgets)
+        let environment = state.makeEnvironment(
+            name: "absurdDepth", hostBindings: [], random: ScriptTestSupport.randomStream()
+        )
+        let function = try environment.compile(source: "return ...", chunkName: "absurdDepthChunk").get()
+        // Any definite outcome (success or a host/fault failure) satisfies
+        // "does not trap"; only a crash would fail this test.
+        _ = try state.call(function, args: [.int(1)], slice: 100_000)
+    }
+
+    /// Spec `embedded-script-runtime` "Refused resume leaves the caller's
+    /// stack balanced" (Security (plan) C25, amended by C28): drives a
+    /// coroutine's own stack to the point where `lua_checkstack(co, nargs)`
+    /// fails on a nonzero-argument resume by resuming a *different*, already
+    /// large coroutine first (which grows the shared main thread's stack —
+    /// permanent capacity, not reclaimed by pooling) under a tight memory
+    /// cap, then resuming a fresh, still-small coroutine with the same
+    /// argument count: the fresh coroutine's own stack has nowhere left to
+    /// grow. Every refusal must leave `lua_gettop` on the main thread
+    /// unchanged and must not abort, repeated several times.
+    func testRefusedResumeLeavesCallerStackBalanced() throws {
+        // Test N5: the prior budget (a 256 KiB memory cap and `tinyBudgets`' 64 KiB
+        // per-slice allocation-rate cap) made this test skip 100% of the time — the
+        // warm-up's 4,000-argument push always tripped the allocation-*rate* cap
+        // first, so the N4-1/C25/C28 refusal branch this test exists to exercise had
+        // never actually fired in-repo. Recipe below (matching the Tester's out-of-
+        // repo probe2, which drove the real branch 6/6 times): raise the rate cap so
+        // pushes themselves never trip it, grow the main thread's stack while memory
+        // is plentiful, pin the pool's one idle thread with an unresumed coroutine so
+        // every later `makeCoroutine` must allocate a genuinely fresh, small-stack
+        // thread, then fill the state with live (GC-rooted) data near the memory cap
+        // so that fresh thread's own stack has no headroom left to grow into a
+        // 4,000-argument push.
+        var budgets = ScriptTestSupport.tinyBudgets
+        budgets.memoryCapBytes = 512 * 1024
+        budgets.hostOverCapDiagnosticBytes = 64 * 1024
+        budgets.handlerTotalInstructions = 5_000_000
+        budgets.allocationRatePerSliceBytes = 8 * 1024 * 1024
+        budgets.threadPoolMax = 1
+        let state = try ScriptTestSupport.makeState(budgets: budgets)
+        let environment = state.makeEnvironment(
+            name: "refusedResume", hostBindings: [], random: ScriptTestSupport.randomStream()
+        )
+        let function = try environment.compile(
+            source: "return select('#', ...)", chunkName: "refusedResumeChunk"
+        ).get()
+        let bigArgs = (0..<4_000).map { ScriptValue.int(Int64($0)) }
+
+        // Warm the main thread's stack to `bigArgs.count` capacity (this
+        // capacity is never released) while memory is plentiful.
+        guard let warm = try state.makeCoroutine(function: function) else { return XCTFail() }
+        let warmOutcome = try state.resume(warm, args: bigArgs, slice: 1_000_000)
+        guard case .completed(let warmValues) = warmOutcome, warmValues == [.int(4_000)] else {
+            throw XCTSkip("warm-up resume did not complete as expected under this budget: \(warmOutcome)")
+        }
+
+        // Pin the pool's one idle thread: create a coroutine and deliberately never
+        // resume it to completion and never close it, so it is never returned to the
+        // pool. `threadPoolMax == 1` means the pool now has zero idle slots, so every
+        // `makeCoroutine` call below must allocate a genuinely fresh thread rather
+        // than reuse the warmed one's already-grown stack.
+        guard let pinned = try state.makeCoroutine(function: function) else { return XCTFail() }
+        withExtendedLifetime(pinned) {} // kept alive; never resumed or closed
+
+        // Fill the state with live, GC-rooted data close to the memory cap — an
+        // ordinary global assignment (writable: it is the script's own `_ENV`, not a
+        // library table) keeps the string reachable for the rest of the test, unlike
+        // a value merely returned and popped off the stack. `string.rep`'s own
+        // result cap is 65,536 bytes per call (design.md's library caps), so the
+        // fill is spread across several smaller calls rather than one big one.
+        // Self-calibrating rather than a fixed byte target: measure the actual
+        // headroom left after warm-up (which varies with `bigArgs.count`'s own
+        // marshaling overhead) and fill to within one chunk of the cap, stopping
+        // as soon as a chunk is refused rather than assuming an exact budget.
+        state.collectFull()
+        let afterWarmup = state.memoryStatus.bytesInUse
+        let headroom = budgets.memoryCapBytes > Int(afterWarmup) ? budgets.memoryCapBytes - Int(afterWarmup) : 0
+        let chunkBytes = 40_000
+        var filled = 0
+        var fillIndex = 0
+        while filled + chunkBytes < headroom - 8_000 { // leave a small margin below the cap
+            fillIndex += 1
+            let fillFunction = try environment.compile(
+                source: "fillData\(fillIndex) = string.rep('x', \(chunkBytes)); return true",
+                chunkName: "fillChunk\(fillIndex)"
+            ).get()
+            let outcome = try state.call(fillFunction, args: [], slice: 1_000_000)
+            guard case .success = outcome else { break } // hit the cap sooner than estimated; stop here
+            filled += chunkBytes
+        }
+        guard filled > 0 else {
+            throw XCTSkip("could not fill any data near the memory cap on this toolchain (headroom after warm-up: \(headroom) bytes)")
+        }
+
+        // `OpaquePointer`/`lua_gettop` are deliberately spellable only inside
+        // `LuaState.swift` itself (design.md Condition 3) — this test has no
+        // direct way to read the main thread's stack top, so it uses
+        // `memoryStatus.bytesInUse` staying flat across repeated refusals as
+        // the observable proxy: a leaking `nargs` push on every refusal
+        // would grow the main stack's backing storage and show up here.
+        var sawRefusal = false
+        var bytesAfterFirstRefusal: UInt64?
+        for _ in 0..<5 {
+            guard let coroutine = try state.makeCoroutine(function: function) else { return XCTFail() }
+            let outcome = try state.resume(coroutine, args: bigArgs, slice: 1_000_000)
+            switch outcome {
+            case .completed(let values):
+                // This budget could not be driven to a refusal on this
+                // machine/toolchain — accept the success case rather than
+                // assert a specific failure is reachable (design.md's own
+                // "Refused resume" scenario is about safety *when* it fires,
+                // not a guarantee that a fixed budget always reaches it).
+                XCTAssertEqual(values, [.int(4_000)])
+            case .faulted(let fault):
+                sawRefusal = true
+                XCTAssertEqual(fault.kind, .hostAbort)
+                XCTAssertTrue(fault.message.contains("stack overflow"), "unexpected message: \(fault.message)")
+                let bytesNow = state.memoryStatus.bytesInUse
+                if let baseline = bytesAfterFirstRefusal {
+                    XCTAssertEqual(bytesNow, baseline, "a refused resume must not leak main-stack growth on repetition")
+                } else {
+                    bytesAfterFirstRefusal = bytesNow
+                }
+            case .yielded:
+                XCTFail("refusedResumeChunk never yields")
+            }
+        }
+        if !sawRefusal {
+            throw XCTSkip("this budget never drove a refusal on this toolchain — the safety property is exercised only when it does")
+        }
+    }
 }

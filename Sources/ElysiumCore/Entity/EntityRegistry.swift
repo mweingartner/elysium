@@ -1,5 +1,6 @@
 // Entity factory registry + natural spawning rules — Registration order mirrors baseline (it feeds entityTypes()).
 
+import CoreFoundation
 import Foundation
 
 public typealias EntityFactory = (World) -> Entity
@@ -103,9 +104,44 @@ public func spawnMob(_ world: World, _ type: String, _ x: Double, _ y: Double, _
     return e
 }
 
+/// The inclusive range a persisted entity `"id"` must fall in to be adopted
+/// (object-graph-attributes change 1a, design.md Decision 3, amended by
+/// Security (plan) C26): the same durable bound as
+/// `WorldRecord.nextEntityId`'s own decode-time clamp, so an id at the very
+/// edge of the reservable range can never itself become unreservable.
+let entityIdAdoptionRange: ClosedRange<Int> = 1...(Int.max - 1_000_000)
+
+/// `true` only when `v` is a JSON *integer* token (never a float/bool/string)
+/// bridged through `JSONSerialization`, in `entityIdAdoptionRange` — a
+/// non-integer, out-of-range, or absent `"id"` makes the row "legacy"
+/// (Security (plan) C26: "adopts 'id' only as an integer-typed JSON number").
+private func integerEntityId(_ v: Any?) -> Int? {
+    guard let number = v as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+          !CFNumberIsFloatType(number)
+    else { return nil }
+    let value = number.int64Value
+    guard Double(value) == number.doubleValue else { return nil } // precision-loss guard
+    guard value >= 1, value <= Int64(entityIdAdoptionRange.upperBound) else { return nil }
+    return Int(value)
+}
+
 public func loadEntity(_ world: World, _ d: [String: Any]) -> Entity? {
     guard let type = d["type"] as? String, let e = createEntity(type, world) else { return nil }
     e.load(d)
+    let mintedId = e.id
+    if let persistedId = integerEntityId(d["id"]) {
+        if world.entityById[persistedId] != nil {
+            // Live collision (corrupt/hand-edited record): keep the freshly
+            // minted id and log a diagnostic — never double-assign one.
+            print("[scripting] entity id \(persistedId) is already live; keeping minted id \(mintedId)")
+        } else {
+            e.adoptPersistedId(persistedId)
+            e.reclaimEntityId(mintedId)
+            e.bumpEntityIdCounter(past: persistedId)
+        }
+    }
+    // Legacy rows (no "id") keep their adoption-order id; the record carries
+    // "id" after the chunk's next save.
     return e
 }
 

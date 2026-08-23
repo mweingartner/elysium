@@ -154,6 +154,17 @@ public struct WorldRecord: Codable {
     public var mapSize: WorldMapSize
     public var mapCenterX: Int
     public var mapCenterZ: Int
+    /// World/dimension attribute bags (object-graph-attributes change 1a,
+    /// design.md Decision 9), keyed `"world"`, `"dim:overworld"`,
+    /// `"dim:nether"`, `"dim:end"` — each value is an opaque
+    /// `ObjectRecordCodec` text, exactly like the chunk-tail `"objects"` map.
+    /// Encoded only when non-empty.
+    public var objects: [String: String]
+    /// The persisted half of the 1c scripting trust gate (design.md Decision
+    /// 11): `true` for every world created or imported by this install
+    /// (`init`), `false` when the key is absent on decode (every pre-1a
+    /// world). Read-only in this change.
+    public var scriptsEnabled: Bool
 
     public var generationSettings: WorldGenerationSettings {
         WorldGenerationSettings(presetID: worldPreset, singleBiomeID: singleBiome,
@@ -187,6 +198,12 @@ public struct WorldRecord: Codable {
         self.mapSize = mapSize
         mapCenterX = 0
         mapCenterZ = 0
+        objects = [:]
+        // DEF-1 fix: init defaults false — only GameCore.createWorld sets true,
+        // right before its own db.putWorld, so every other construction path (Reality
+        // Derived imports, LAN-client transient records, and plain decode-absent) stays
+        // untrusted by default (design.md Decision 11 / Condition 8 trust gate).
+        scriptsEnabled = false
     }
 
     enum CodingKeys: String, CodingKey {
@@ -194,6 +211,7 @@ public struct WorldRecord: Codable {
         case spawnX, spawnY, spawnZ, worldPreset, singleBiome, dungeonDensity, gameRules
         case dragonKilled, gatewaysSpawned, nextEntityId, rpgSimulationTick, realityDerivedSource
         case mapSize, mapCenterX, mapCenterZ
+        case objects, scriptsEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -216,7 +234,16 @@ public struct WorldRecord: Codable {
         gameRules = try c.decodeIfPresent([String: Double].self, forKey: .gameRules) ?? [:]
         dragonKilled = try c.decodeIfPresent(Bool.self, forKey: .dragonKilled) ?? false
         gatewaysSpawned = try c.decodeIfPresent(Int.self, forKey: .gatewaysSpawned) ?? 0
-        nextEntityId = try c.decodeIfPresent(Int.self, forKey: .nextEntityId) ?? 1
+        if let persisted = try c.decodeIfPresent(Int.self, forKey: .nextEntityId) {
+            if persisted < 1 || persisted > WorldRecord.maxReservableEntityId {
+                print("[saves] corrupt nextEntityId \(persisted) clamped to the reservable range")
+                nextEntityId = persisted < 1 ? 1 : WorldRecord.maxReservableEntityId
+            } else {
+                nextEntityId = persisted
+            }
+        } else {
+            nextEntityId = 1
+        }
         if let persisted = try c.decodeIfPresent(Int.self, forKey: .rpgSimulationTick) {
             rpgSimulationTick = max(0, min(RPG_MAX_COUNTER, persisted))
         } else {
@@ -227,7 +254,19 @@ public struct WorldRecord: Codable {
         mapSize = try c.decodeIfPresent(WorldMapSize.self, forKey: .mapSize) ?? .max
         mapCenterX = try c.decodeIfPresent(Int.self, forKey: .mapCenterX) ?? 0
         mapCenterZ = try c.decodeIfPresent(Int.self, forKey: .mapCenterZ) ?? 0
+        objects = try c.decodeIfPresent([String: String].self, forKey: .objects) ?? [:]
+        // Absent on every pre-1a world (design.md Decision 11): only a world
+        // this install created or imported carries the key at all.
+        scriptsEnabled = try c.decodeIfPresent(Bool.self, forKey: .scriptsEnabled) ?? false
     }
+
+    /// Decode-time clamp for `nextEntityId` (design.md Decision 3, Security
+    /// (plan) C20): more than 244 reservation blocks of 4,096 below `Int.max`
+    /// (== `Int64.max` on every platform this package targets), so
+    /// `reserveEntityIds(upTo:)`'s `needed + 4096` write can never trap even
+    /// starting from this bound. An out-of-range persisted value is corrected
+    /// to the nearer bound and logged as corrupt, never accepted as-is.
+    public static let maxReservableEntityId = Int.max - 1_000_000
 
     private static func decodeDungeonDensity(from c: KeyedDecodingContainer<CodingKeys>) -> DungeonDensity {
         if let raw = try? c.decodeIfPresent(Int.self, forKey: .dungeonDensity) {
@@ -262,6 +301,8 @@ public struct WorldRecord: Codable {
         try c.encode(max(0, min(RPG_MAX_COUNTER, rpgSimulationTick)), forKey: .rpgSimulationTick)
         try c.encodeIfPresent(realityDerivedSource, forKey: .realityDerivedSource)
         try c.encode(mapSize, forKey: .mapSize)
+        if !objects.isEmpty { try c.encode(objects, forKey: .objects) }
+        try c.encode(scriptsEnabled, forKey: .scriptsEnabled)
         try c.encode(mapCenterX, forKey: .mapCenterX)
         try c.encode(mapCenterZ, forKey: .mapCenterZ)
     }
@@ -278,10 +319,15 @@ public struct ChunkRecord {
     public var biomes: [UInt8]?
     public var blockEntities: [BlockEntityData]?
     public var entities: [[String: Any]]
+    /// Cell index -> canonical `ObjectRecordCodec` text (object-graph-attributes
+    /// change 1a, design.md Decision 9). Passed through opaquely: this file
+    /// never decodes the text, only bounds and stores it.
+    public var objects: [Int: String]
 
     public init(key: String, worldId: String, dim: Int, cx: Int, cz: Int,
                 blocks: [UInt16]? = nil, biomes: [UInt8]? = nil,
-                blockEntities: [BlockEntityData]? = nil, entities: [[String: Any]] = []) {
+                blockEntities: [BlockEntityData]? = nil, entities: [[String: Any]] = [],
+                objects: [Int: String] = [:]) {
         self.key = key
         self.worldId = worldId
         self.dim = dim
@@ -291,6 +337,7 @@ public struct ChunkRecord {
         self.biomes = biomes
         self.blockEntities = blockEntities
         self.entities = entities
+        self.objects = objects
     }
 }
 
@@ -337,14 +384,9 @@ func encodeLegacyVCK(_ record: ChunkRecord) -> Data? {
         guard appendU32(biomes.count) else { return nil }
         data.append(contentsOf: biomes)
     }
-    var tail: [String: Any] = ["entities": record.entities.map(sanitizeJSON)]
-    if let blockEntities = record.blockEntities,
-       let encoded = try? JSONEncoder().encode(blockEntities),
-       let object = try? JSONSerialization.jsonObject(with: encoded) {
-        tail["blockEntities"] = object
-    }
-    guard let json = try? JSONSerialization.data(withJSONObject: tail),
-          appendU32(json.count) else { return nil }
+    guard let json = chunkTailJSON(
+        blockEntities: record.blockEntities, entities: record.entities, objects: record.objects
+    ), appendU32(json.count) else { return nil }
     data.append(json)
     return data
 }
@@ -359,14 +401,75 @@ struct CompactChunkSectionV2 {
     var runs: [CompactChunkRunV2]
 }
 
-private func chunkTailJSON(blockEntities: [BlockEntityData]?, entities: [[String: Any]]) -> Data? {
+/// Shared by both VCK1 (`encodeLegacyVCK`) and VCK2 (`encodeCompactVCK2`)
+/// encoders (design.md Decision 9/Condition 8) so they always emit the same
+/// tail keys. `"objects"` is added only when non-empty — the existing
+/// `"entities"`/`"blockEntities"` construction and byte layout are completely
+/// unchanged either way, so a chunk with zero object records is byte-identical
+/// to what this file produced before this change. Security (plan) note:
+/// Swift `Dictionary` bridging order through `JSONSerialization` is
+/// per-process, so `"objects"` — the one section whose key set can grow past
+/// a couple of entries — is serialized on its own with `.sortedKeys` and
+/// spliced onto the (still order-as-before) rest of the tail, rather than
+/// folded into one dictionary passed through a single unsorted-by-default
+/// `JSONSerialization` call.
+private func chunkTailJSON(
+    blockEntities: [BlockEntityData]?, entities: [[String: Any]], objects: [Int: String] = [:]
+) -> Data? {
     var tail: [String: Any] = ["entities": entities.map(sanitizeJSON)]
     if let blockEntities,
        let encoded = try? JSONEncoder().encode(blockEntities),
        let object = try? JSONSerialization.jsonObject(with: encoded) {
         tail["blockEntities"] = object
     }
-    return try? JSONSerialization.data(withJSONObject: tail)
+    guard var data = try? JSONSerialization.data(withJSONObject: tail) else { return nil }
+    guard !objects.isEmpty, data.last == UInt8(ascii: "}") else { return data }
+    var objectsDict: [String: String] = [:]
+    for (cellIndex, text) in objects { objectsDict[String(cellIndex)] = text }
+    guard let objectsData = try? JSONSerialization.data(withJSONObject: objectsDict, options: [.sortedKeys]),
+          let objectsText = String(data: objectsData, encoding: .utf8)
+    else { return nil }
+    data.removeLast()
+    data.append(contentsOf: Array(",\"objects\":".utf8))
+    data.append(contentsOf: Array(objectsText.utf8))
+    data.append(UInt8(ascii: "}"))
+    return data
+}
+
+/// Shared by both VCK1 and VCK2 decoders (Security (plan) C21). A cell-index
+/// key is accepted only when its string is *exactly* `ObjectRef`'s canonical
+/// decimal-integer grammar (`isCanonicalUnsignedDecimal`) and in
+/// `0..<CHUNK_W*CHUNK_W*height`; because that grammar is a bijection onto its
+/// integer values, no two accepted keys can ever collide, and a non-canonical
+/// spelling (`"007"`, `"+7"`) is dropped before it is ever compared to
+/// anything — so the decoded map is a pure function of the tail regardless of
+/// dictionary walk order. A text over 64 KiB, or one that would push the
+/// chunk's summed object bytes over 1 MiB, is dropped too — the chunk itself,
+/// and every other entry, still loads.
+private func decodeChunkTailObjects(_ tail: [String: Any], height: Int) -> [Int: String] {
+    guard let raw = tail["objects"] as? [String: Any] else { return [:] }
+    let limit = CHUNK_W * CHUNK_W * height
+    var accepted: [Int: String] = [:]
+    var totalBytes = 0
+    for (key, value) in raw {
+        guard isCanonicalUnsignedDecimal(key), let cellIndex = parseCanonicalUnsignedDecimal(key),
+              cellIndex >= 0, cellIndex < limit
+        else {
+            print("[saves] dropped non-canonical or out-of-range chunk-tail objects key '\(key)'")
+            continue
+        }
+        guard let text = value as? String, text.utf8.count <= 65_536 else {
+            print("[saves] dropped chunk-tail objects entry for cell \(cellIndex): not a bounded string")
+            continue
+        }
+        guard totalBytes + text.utf8.count <= 1_048_576 else {
+            print("[saves] dropped chunk-tail objects entry for cell \(cellIndex): chunk sum would exceed 1 MiB")
+            continue
+        }
+        accepted[cellIndex] = text
+        totalBytes += text.utf8.count
+    }
+    return accepted
 }
 
 /// Section-compressed chunk container used by large Reality Derived imports.
@@ -380,7 +483,8 @@ func encodeCompactVCK2(
     sections: [CompactChunkSectionV2],
     biomes: [UInt8],
     blockEntities: [BlockEntityData]? = nil,
-    entities: [[String: Any]] = []
+    entities: [[String: Any]] = [],
+    objects: [Int: String] = [:]
 ) -> Data? {
     guard let dim = Dim(rawValue: dimension) else { return nil }
     let info = dimInfo(dim)
@@ -388,7 +492,8 @@ func encodeCompactVCK2(
     let maximumSection = Int8(clamping: floorDiv(info.minY + info.height - 1, 16))
     let expectedBiomes = 4 * 4 * ((info.height + 3) / 4)
     guard sections.count <= Int(UInt8.max), biomes.count == expectedBiomes,
-          let json = chunkTailJSON(blockEntities: blockEntities, entities: entities) else { return nil }
+          let json = chunkTailJSON(blockEntities: blockEntities, entities: entities, objects: objects)
+    else { return nil }
 
     var data = Data("VCK2".utf8)
     data.append(1)
@@ -505,7 +610,7 @@ func encodeCompactVCK2(_ record: ChunkRecord) -> Data? {
     }
     return encodeCompactVCK2(
         dimension: record.dim, sections: sections, biomes: biomes,
-        blockEntities: record.blockEntities, entities: record.entities)
+        blockEntities: record.blockEntities, entities: record.entities, objects: record.objects)
 }
 
 private func decodeCompactVCK2(
@@ -616,6 +721,7 @@ private func decodeCompactVCK2(
        let decoded = try? JSONDecoder().decode([BlockEntityData].self, from: encoded) {
         record.blockEntities = decoded
     }
+    record.objects = decodeChunkTailObjects(tail, height: info.height)
     return record
 }
 
@@ -698,6 +804,9 @@ func decodeLegacyVCK(_ data: Data, key: String, worldId: String,
        let encoded = try? JSONSerialization.data(withJSONObject: raw),
        let blockEntities = try? JSONDecoder().decode([BlockEntityData].self, from: encoded) {
         record.blockEntities = blockEntities
+    }
+    if let dim = Dim(rawValue: dimension) {
+        record.objects = decodeChunkTailObjects(tail, height: dimInfo(dim).height)
     }
     return record
 }

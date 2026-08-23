@@ -214,7 +214,7 @@ Persistence lock order is migration source/namespace rank 10, GameCore save queu
 
 Loose-file migration is fd-relative and no-follow beneath a retained canonical parent descriptor. It holds a persistent parent migration lock plus an exclusive source/backup lease, fingerprints every retained regular file with SHA-256 and complete stat identity, enforces bounded counts/bytes, imports one replace-complete world at a time, runs the storage durability barrier before exclusive rename, syncs the parent namespace, restarts the coordinator, and proves exact row/BLOB equivalence before publishing durable v2 provenance. An unmarked backup-only state is never inferred as successful: it creates a fixed recovery-required record before SQLite open and requires a non-destructive external backup/restore of the original source before a fresh import. Source and backup content are never automatically deleted or overwritten.
 
-Hosts persist per-guest reconnect records (position, inventory, RPG state, permissions, lifecycle) in `lan_players`, keyed by world id and peer id, so a returning guest resumes without depending on the host process's in-memory session state. Chunk blobs are a small binary container (`VCK1`: flags, u16 block array, biome array, JSON tail for block entities + entities). `WorldRecord` stores the normalized world preset id, Single Biome registry name, and dungeon-density level; Java-style ids and Elysium custom ids are both accepted for presets, while missing or unknown preset/biome/dungeon-density values decode as Default/Plains/Normal so legacy worlds still list and load. Object templates are versioned bounded records with relative block coordinates and relative block-entity coordinates; new writes use the compact `PBT2` binary blob in `templates.data`, while legacy JSON rows remain readable and summary columns let browsers/AI list large templates without decoding every block. Unmodified chunks save as entity-only stubs and regenerate from seed plus the saved world preset and dungeon density; once a chunk has block data on disk, every rewrite keeps it (tracked via `savedFullKeys`). Player spawn selection through beds and respawn anchors synchronously flushes the existing player save record so a newly set spawn point is durable before autosave or app termination. Player JSON stores a repaired nested RPG character state when present. LAN client resume records store only the local player's serialized state for a specific host world id plus seed; they do not create local worlds or persist host chunks/entities. Failed batches log and re-mark chunks dirty for retry. Corrupt blobs, corrupt RPG state, and corrupt templates are rejected, repaired, or clamped before hot paths can index unchecked registries.
+Hosts persist per-guest reconnect records (position, inventory, RPG state, permissions, lifecycle) in `lan_players`, keyed by world id and peer id, so a returning guest resumes without depending on the host process's in-memory session state. Chunk blobs are a small binary container (`VCK1`: flags, u16 block array, biome array, JSON tail for block entities + entities + per-cell scripted attribute records — see "Object graph and attributes" below). `WorldRecord` stores the normalized world preset id, Single Biome registry name, and dungeon-density level; Java-style ids and Elysium custom ids are both accepted for presets, while missing or unknown preset/biome/dungeon-density values decode as Default/Plains/Normal so legacy worlds still list and load. Object templates are versioned bounded records with relative block coordinates and relative block-entity coordinates; new writes use the compact `PBT2` binary blob in `templates.data`, while legacy JSON rows remain readable and summary columns let browsers/AI list large templates without decoding every block. Unmodified chunks save as entity-only stubs and regenerate from seed plus the saved world preset and dungeon density; once a chunk has block data on disk, every rewrite keeps it (tracked via `savedFullKeys`). Player spawn selection through beds and respawn anchors synchronously flushes the existing player save record so a newly set spawn point is durable before autosave or app termination. Player JSON stores a repaired nested RPG character state when present. LAN client resume records store only the local player's serialized state for a specific host world id plus seed; they do not create local worlds or persist host chunks/entities. Failed batches log and re-mark chunks dirty for retry. Corrupt blobs, corrupt RPG state, and corrupt templates are rejected, repaired, or clamped before hot paths can index unchecked registries.
 
 Protocol-5 host records now include a host-issued 256-bit reconnect capability. A durable record is
 seeded only when that capability is present, and a reconnect proves it with a constant-time
@@ -289,10 +289,63 @@ copy changes. `detExp`/`detLog`/`detPow` are pinned the same way against an inde
 netlib fdlibm reference (`scripts/fdlibm-reference/`, `goldens/fmath-explog-goldens.json`, frozen
 and never regenerated).
 
-None of this changes engine behaviour today: the app never constructs a `LuaState`; `ObjectGraph`,
-`EventBus`, the Lua API verb surface, and every command/UI/persistence integration are later
-changes in the scripting programme. This change lands only the runtime, its determinism/sandbox/
-budget guarantees, and the gates that keep them pinned.
+This change alone still never constructs a `LuaState`: object-graph-attributes (below) adds real
+command, persistence, and world-mutation surface (`/attr`, `/inspect`, `/objects`, persisted
+per-block attribute bags, reserved entity uids) on top of `AttrValue = ScriptValue`, but none of it
+runs a script — the Lua API verb surface, `EventBus`, and actual script execution against this data
+are later changes in the scripting programme. This change lands the runtime itself (determinism/
+sandbox/budget guarantees, the gates that keep them pinned) plus the data/command layer scripts will
+eventually read and write.
+
+## Object graph and attributes
+
+`Sources/ElysiumCore/Scripting/` also carries a data/command layer with no script execution of its
+own — the vocabulary later scripting changes will read and write, exercised today only through
+chat commands and persistence. `ObjectRef` (`ObjectRef.swift`) is a strict value type over a
+canonical string grammar (`entity:<uid>`, `block:<dim>:x,y,z`, plus the `self`/`looking` aliases a
+command target resolves before parsing) — never round-tripped through a looser parser. `ObjectGraph`
+(`ObjectGraph.swift`) resolves a ref to a live object side-effect-free over a small
+`ObjectGraphHost` protocol (`localPlayer`, `currentTick`, world/entity lookups) that `GameCore`
+conforms to via `GameCore+Scripting.swift`; nothing in this layer mutates the world or holds engine
+state of its own.
+
+`AttrValue` is `ScriptValue` reused directly (`AttrValueCodec.swift`) rather than a second value
+type at this seam — the same currency the embedded Lua runtime already marshals. Its canonical JSON
+codec is a hand-rolled recursive-descent parser (never `JSONSerialization`, which cannot preserve
+the `Int64`/`Double` distinction or reject duplicate keys) with sorted UTF-8-byte-order keys,
+strict integer/float grammar (`-0` is int `0`, `e+` exponents accepted as float, Int64-overflow
+integer tokens refused), and only `true`/`false` boolean literals. `ObjectRecord`/`AttributeEntry`/
+`Provenance` (`ObjectRecord.swift`) are the persisted attribute bag a block or entity carries;
+`AttributeRegistry` (`AttributeRegistry.swift`) is a pure-data table of built-in descriptors
+(kind, mutability, applicability, `didYouMean` suggestions), and `BuiltInAttributes` funnels typed
+get/set through it. `BlockStateCodec` (`BlockStateCodec.swift`) is a verified meta-bit codec per
+block shape/id (door `open`/`hinge` redirect to the half the engine actually stores them on, lit
+swaps are id changes not meta writes) plus the block-family table that implements the identity
+rule: a block's scripted attribute record survives a meta-only change or a same-family id swap
+(lit pairs, soil/sapling-log families, an RPG guarded-temporary swap and its eventual restore) and
+is cleared on any other id change — the single site in `World.setBlock` that owns this decision.
+
+`AttributeStore` (`AttributeStore.swift`) is the sole mutation executor (`get`/`list`/`set`/
+`define`/`remove`/`record`) and the sole place attribute writes bump a per-record revision counter
+and enforce entry/value-size/record-size caps; `ScriptingCommands` (`ScriptingCommands.swift`)
+implements `/attr`, `/inspect`, and `/objects` against it and against `ObjectGraph`, capping output
+at 40 lines and truncating display strings on Character boundaries. Host authority is enforced at
+this layer today, ahead of any script-eventing change: every `AttributeStore` mutator and
+`ScriptingCommands.run` refuse outright when the caller is a LAN client, and `CommandsM.swift`'s
+dispatch consults the same pure `lanClientRefusal(command:)` decision function before ever reaching
+the command implementation, so a guest cannot mutate host-authoritative attribute state through
+`/attr`, `/inspect`, `/objects`, or `/ai` and its `/agent` alias.
+
+Entity identity is now durable across saves: `Entity.id` is `private(set)`, persisted as `"id"` in
+save JSON, and reserved through a hi/lo block protocol (`installEntityIdReservation`/
+`raiseEntityIdReservationLimit`, 4,096-id blocks, a synchronous read-back-verified `db.putWorld`)
+so a crash between minting an id and flushing the world record can never hand out a uid a prior
+session already used. `EntityRegistry.loadEntity` adopts a saved `"id"` only when it decodes as a
+genuine integer-typed JSON number in range; a non-canonical or out-of-range value is discarded and
+a fresh id is minted instead. Chunk blobs gained a parallel `objects` tail (keyed by cell index,
+`.sortedKeys`-serialized so Dictionary bridging order never leaks into the byte stream) alongside
+the existing block-entity tail, and `WorldRecord.scriptsEnabled` is the trust gate later scripting
+changes will read before ever compiling a world-authored script.
 
 ## The test harness (elysmoke)
 

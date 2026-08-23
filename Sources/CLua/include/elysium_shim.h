@@ -239,6 +239,31 @@ typedef struct elysium_memory_status {
 
 void elysium_memory_status_get (lua_State *L, elysium_memory_status *out);
 
+/* Additive (Builder, object-graph-attributes change 1a carry-forward N4-2 /
+** design.md Decision 12): the sandbox's numeric library caps
+** (elysium_sandbox.c's string/table/utf8 wrappers) are compile-time literals
+** with no Swift-visible name of their own; ScriptBudgets used to duplicate
+** them as ten mutable fields nothing ever read. This getter is their one
+** source of truth on the Swift side (ScriptLibraryCaps.current mirrors it
+** read-only) — the values themselves are unchanged, only how Swift observes
+** them.
+*/
+typedef struct elysium_library_caps_t {
+  int patternSubjectBytes;   /* string.find/match/gmatch/gsub subject cap */
+  int patternBytes;          /* string.find/match/gmatch/gsub pattern cap */
+  int matchSteps;            /* ELYSIUM_MATCH_STEPS, luaconf.h */
+  int resultBytes;           /* gsub/format/pack/rep/concat result cap */
+  int byteRangeBytes;        /* string.byte requested range cap */
+  int sortElements;          /* table.sort element-count cap */
+  int unpackResults;         /* table.unpack result-count cap */
+  int moveElements;          /* table.move element-count cap */
+  int utf8SubjectBytes;      /* utf8.codepoint/len/offset/codes subject cap */
+  int formatConversions;     /* string.format conversion-count cap */
+  int maxStringBytes;        /* ELYSIUM_MAX_STRING, luaconf.h */
+} elysium_library_caps_t;
+
+elysium_library_caps_t elysium_library_caps (void);
+
 /* Clears the state-wide diagnostic trip flags (tripped/rateTripped/overCapHost);
 ** does not affect any coroutine's totalUsed/budgetTripped.
 */

@@ -227,6 +227,9 @@ git config core.hooksPath .githooks
 
 ```text
 Sources/ElysiumCore/       Deterministic engine, world, entities, systems, saves, and LAN model
+Sources/ElysiumCore/Scripting/  Object graph, canonical AttrValue JSON, persisted attribute
+                            bags, and the /attr /inspect /objects command layer (data and
+                            commands only — no script execution yet)
 Sources/Elysium/           AppKit and Metal application, UI, renderer, audio, input, and transport
 Sources/ElysiumStorage/    Typed SQLite persistence boundary
 Sources/ElysiumTextInput/  Shared text-ingress validation

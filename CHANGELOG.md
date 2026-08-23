@@ -5,6 +5,8 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Added an **object graph and attribute system** on top of the embedded script runtime: three new chat commands, `/attr` (`set`/`get`/`list`/`define`/`remove`), `/inspect`, and `/objects near`, let a player read and set small, named attributes on a block or entity, backed by a canonical JSON codec (`AttrValue = ScriptValue`), a persisted per-record revision counter, and durable entity uid reservation so a crash between minting an id and saving can never reuse one. Every command is host-only — a LAN client is refused outright, including through `/ai` and its `/agent` alias. Scripted attribute writes never bypass the engine's own rules for a block: a door's `open` field can be set directly, but the same redstone/support logic that governs it during normal play still applies afterward. This still lands no script-execution surface: there is no in-game scripting language yet, and nothing in the shipped game creates a `LuaState`.
+
 - Added an embedded, deterministic **Lua 5.4.8** script runtime (`CLua` + `ElysiumScript`): a
   vendored, SHA-256-pinned interpreter with a checked-in determinism patch (fixed hash seed,
   ordinal key iteration, locale/decimal-point pin, FP-contraction off), a per-environment stdlib

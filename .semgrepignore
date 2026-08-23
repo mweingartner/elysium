@@ -1,0 +1,4 @@
+# Third-party vendored trees are excluded from semgrep (reviewed false positives in Vendor/Arnis GitHub-actions/JS templates).
+Vendor/
+.build/
+dist/

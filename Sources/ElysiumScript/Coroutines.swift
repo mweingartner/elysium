@@ -146,7 +146,7 @@ extension LuaState {
         // container itself and the leaf value. Not script-reachable in phase 0
         // (no host binding exists to call through), but sized correctly here
         // rather than relying on that.
-        if !args.isEmpty, lua_checkstack(pointer, Int32(args.count) + Int32(2 * valueLimits.depth + 4)) == 0 {
+        if !args.isEmpty, lua_checkstack(pointer, Int32(args.count) + checkstackSlack(for: valueLimits.depth)) == 0 {
             return .faulted(ScriptFault(kind: .hostAbort, message: "stack overflow: cannot push \(args.count) arguments", traceback: ""))
         }
         for arg in args {
@@ -224,7 +224,18 @@ extension LuaState {
             // Swift side for every fault, not only a deferred-close one, so a
             // naturally faulted coroutine's thread actually returns to the pool
             // instead of leaking (Builder fix, found while writing FaultTests).
-            let fault = faultFromTopOfStack(on: co, faultKindCode: result.faultKind, defaultingTo: .runtime)
+            // N4-1/C28: a refused resume whose target thread had no room even
+            // for a one-slot error message (checkstack(co, nargs) *and*
+            // checkstack(co, 1) both failed) leaves 'co' completely untouched
+            // rather than risk a push past elysium_resume's unprotected
+            // frame — recognizable as faultKind == HOST_ABORT with nres == 0
+            // (every other FAULT/ERRRUN path leaves a real message on 'co').
+            let fault: ScriptFault
+            if result.faultKind == ELYSIUM_FAULT_HOST_ABORT, result.nres == 0 {
+                fault = ScriptFault(kind: .hostAbort, message: "stack overflow", traceback: "")
+            } else {
+                fault = faultFromTopOfStack(on: co, faultKindCode: result.faultKind, defaultingTo: .runtime)
+            }
             elysium_closethread(pointer, co)
             invalidateCoroutine(coroutine)
             return .faulted(fault)
@@ -298,7 +309,7 @@ extension LuaState {
         // design.md Condition 3: same stack-growth discipline as resume(_:args:slice:).
         // LOW note (Security (code) attempt 3): sized by the marshaler's transient
         // depth, not just args.count — see the matching comment in resume(_:args:slice:).
-        if !args.isEmpty, lua_checkstack(pointer, Int32(args.count) + Int32(2 * valueLimits.depth + 4)) == 0 {
+        if !args.isEmpty, lua_checkstack(pointer, Int32(args.count) + checkstackSlack(for: valueLimits.depth)) == 0 {
             elysium_settop(pointer, savedTop) // drop the function pushed above
             return .failure(ScriptFault(kind: .hostAbort, message: "stack overflow: cannot push \(args.count) arguments", traceback: ""))
         }

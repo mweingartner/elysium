@@ -7,7 +7,7 @@ import Foundation
 public let CHUNK_W = 16
 public let SECTION_H = 16
 
-public enum Dim: Int, Codable {
+public enum Dim: Int, Codable, Sendable {
     case overworld = 0, nether = 1, end = 2
 }
 
@@ -63,6 +63,11 @@ public final class Chunk {
     public var modified = false
     /// keyed by cell index
     public var blockEntities: [Int: BlockEntityData] = [:]
+    /// keyed by cell index — extensible attribute bags for scripted blocks
+    /// (object-graph-attributes change 1a, design.md Decision 5/9).
+    /// `AttributeStore` is the only writer; `World.setBlock` clears an entry
+    /// when its cell's id changes to a different family.
+    public var objectRecords: [Int: ObjectRecord] = [:]
     public var portalBlocks = Set<Int>()
     public var sculkSensors = Set<Int>()
 

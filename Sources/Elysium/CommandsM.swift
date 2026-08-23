@@ -16,6 +16,20 @@ func runCommand(_ game: GameCore, _ raw: String) {
         elysiumMainActorSync { runLANCommand(game, args) }
         return
     }
+    // object-graph-attributes change 1a, design.md Decision 10/Condition 11
+    // (amended by Security (plan) C27): the Core-owned refusal decision is
+    // consulted here — before any other work, including `guard let p =
+    // game.player` below — for every scripting command and `ai`/`agent`
+    // (closing the pre-existing guest `/ai` hole).
+    if game.isLANClientWorld, let refusal = ScriptingCommands.lanClientRefusal(command: cmd) {
+        pushChat("§c" + refusal)
+        return
+    }
+    if cmd == "attr" || cmd == "inspect" || cmd == "objects" {
+        let result = ScriptingCommands.run(command: cmd, arguments: args, context: game.scriptingCommandContext())
+        for line in result.lines { pushChat((result.ok ? "§7" : "§c") + line) }
+        return
+    }
     guard let p = game.player else { return }
     let world = game.world
     func fail(_ msg: String) { pushChat("§c" + msg) }
@@ -38,7 +52,7 @@ func runCommand(_ game: GameCore, _ raw: String) {
 
     switch cmd {
     case "help":
-        ok("Commands: ai, lan, clone, place, listTemplates, templates, give, tp, time, weather, gamemode, seed, kill, summon, effect, enchant, xp, setblock, fill, locate, difficulty, gamerule, clear, spawnpoint, heal")
+        ok("Commands: ai, attr, inspect, objects, lan, clone, place, listTemplates, templates, give, tp, time, weather, gamemode, seed, kill, summon, effect, enchant, xp, setblock, fill, locate, difficulty, gamerule, clear, spawnpoint, heal")
     case "ai", "agent":
         let prompt = args.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return fail("Usage: /ai <request>") }

@@ -342,7 +342,30 @@ public extension World {
               isLoadedAt(guardBlock.position.x, guardBlock.position.z),
               getBlock(guardBlock.position.x, guardBlock.position.y, guardBlock.position.z) == guardBlock.temporaryCell
         else { return }
+        // object-graph-attributes change 1a, Security (plan) C24: every
+        // caller of this function (`removeRPGTemporaryEffect`,
+        // `cancelRPGTemporaryEffects(where:)`, `terminateRPGTemporaryEffects`)
+        // has already removed `effect` from `rpgTemporaryEffects` by this
+        // point, so a live-array-based guarded-cell check would already see
+        // it as unguarded. Thread the fact through this restoring `setBlock`
+        // explicitly instead of re-deriving it from the (already-mutated)
+        // array.
+        rpgRestoringGuardedCells.insert(guardBlock.position)
         setBlock(guardBlock.position.x, guardBlock.position.y, guardBlock.position.z, guardBlock.originalCell)
+        rpgRestoringGuardedCells.remove(guardBlock.position)
+    }
+
+    /// True when `(x,y,z)` is under a live RPG guarded-temporary effect *or*
+    /// is actively being restored by one right now (Security (plan) C24) —
+    /// consulted by `World.setBlock`'s object-record clearing check so a
+    /// temporary swap (and its eventual restore) is never mistaken for a
+    /// "real" block identity change.
+    func isRPGGuardedTemporaryCell(_ x: Int, _ y: Int, _ z: Int) -> Bool {
+        let position = RPGBlockPosition(x, y, z)
+        if rpgRestoringGuardedCells.contains(position) { return true }
+        return rpgTemporaryEffects.contains {
+            $0.dimension == dim.rawValue && $0.draft.guardedBlock?.position == position
+        }
     }
 
     func tickRPGTemporaryEffects() {

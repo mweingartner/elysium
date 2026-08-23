@@ -768,6 +768,43 @@ int elysium_resume (lua_State *L, lua_State *co, int nargs, long long slice,
   e->hostDepth = 0;
   st->entryTop++;
 
+  /* N4-1 (design.md Decision 12 / Condition 14, amended by Security (plan)
+  ** C25 and C28): the caller already validated and pushed 'nargs' values onto
+  ** L's own stack (the Swift side's lua_checkstack(pointer, ...) before this
+  ** call), but that says nothing about 'co' — the *target* thread lua_xmove
+  ** is about to move them onto. A near-full or memory-capped 'co' can fail to
+  ** grow for the move; check non-raising here rather than let lua_xmove's
+  ** internal growth trap. On failure: unwind exactly the frame just pushed
+  ** (entryTop--) and pop the caller's still-unmoved 'nargs' values from L
+  ** (mirroring the ELYSIUM_ERR_REENTRANT/DEAD/NESTING early returns above),
+  ** so lua_gettop(L) is unchanged by this failure branch, in every case.
+  */
+  if (nargs > 0 && !lua_checkstack(co, nargs)) {
+    st->entryTop--;
+    lua_pop(L, nargs);
+    /* C28: only report the message on 'co' when 'co' provably has room for
+    ** it — checked separately from the 'nargs' growth that just failed,
+    ** since a coroutine that cannot grow by 'nargs' may still have a single
+    ** slot free. If even that fails ('co' is exhausted at LUAI_MAXSTACK or
+    ** the allocator's cap admits not one more slot), leave 'co' completely
+    ** untouched rather than risk lua_pushstring's own internal growth
+    ** raising past this unprotected frame — report the outcome with nothing
+    ** on 'co's stack (nres = 0) and let the Swift side (Coroutines.swift,
+    ** recognizing faultKind == ELYSIUM_FAULT_HOST_ABORT with nres == 0)
+    ** synthesize the message itself instead of reading a stack that was
+    ** never written.
+    */
+    if (lua_checkstack(co, 1)) {
+      lua_pushstring(co, "stack overflow");
+      out->faultKind = ELYSIUM_FAULT_HOST_ABORT;
+      out->nres = 1;
+      return ELYSIUM_ERRRUN;
+    }
+    out->faultKind = ELYSIUM_FAULT_HOST_ABORT;
+    out->nres = 0;
+    return ELYSIUM_FAULT;
+  }
+
   if (nargs > 0)
     lua_xmove(L, co, nargs);
 
@@ -916,6 +953,29 @@ void elysium_reset_trips (lua_State *L) {
   st->tripped = 0;
   st->rateTripped = 0;
   st->overCapHost = 0;
+}
+
+/* object-graph-attributes change 1a carry-forward N4-2: single source of truth
+** for the sandbox's numeric library caps (elysium_sandbox.c's literals,
+** mirrored here rather than duplicated as mutable ScriptBudgets fields).
+** These numbers are the ones elysium_sandbox.c's string/table/utf8 wrappers
+** already enforce; this getter takes no lua_State because the caps are
+** compile-time constants, not per-state configuration.
+*/
+elysium_library_caps_t elysium_library_caps (void) {
+  elysium_library_caps_t caps;
+  caps.patternSubjectBytes = 8192;
+  caps.patternBytes = 256;
+  caps.matchSteps = ELYSIUM_MATCH_STEPS;
+  caps.resultBytes = 65536;
+  caps.byteRangeBytes = 4096;
+  caps.sortElements = 4096;
+  caps.unpackResults = 256;
+  caps.moveElements = 65536;
+  caps.utf8SubjectBytes = 65536;
+  caps.formatConversions = 32;
+  caps.maxStringBytes = ELYSIUM_MAX_STRING;
+  return caps;
 }
 
 unsigned long long elysium_thread_instructions_used (lua_State *co) {

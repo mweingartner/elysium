@@ -10,6 +10,9 @@
 // the numbers that matter for a fast, deterministic trip (memory cap, allocation
 // rate, instruction totals) without touching production code. `.defaults` reproduces
 // the numbers from design.md Decision 6 / the programme design's §8.4 defaults.
+
+import CLua
+
 public struct ScriptBudgets: Sendable, Equatable {
     /// Instructions charged to a coroutine's slice before it preempts (or, with no
     /// enclosing coroutine, hard-faults — design.md Condition 35).
@@ -52,37 +55,6 @@ public struct ScriptBudgets: Sendable, Equatable {
     /// Lines a slice may `print` before "print budget exceeded" (design.md Condition 33).
     public var logLinesPerSlice: Int
 
-    /// `string.find`/`match`/`gmatch`/`gsub` subject length cap, in bytes.
-    public var patternSubjectBytes: Int
-
-    /// `string.find`/`match`/`gmatch`/`gsub` pattern length cap, in bytes.
-    public var patternBytes: Int
-
-    /// `string.rep` result length cap, in bytes.
-    public var stringRepBytes: Int
-
-    /// `string.byte` requested range cap, in bytes.
-    public var stringByteRangeBytes: Int
-
-    /// `string.format` conversion-count cap.
-    public var formatArgs: Int
-
-    /// `table.sort` element-count cap.
-    public var tableSortElements: Int
-
-    /// `table.concat` result length cap, in bytes (element-count cap is the same
-    /// numeric value per design.md Condition 22 and is not separately configurable).
-    public var tableConcatBytes: Int
-
-    /// `table.unpack` result-count cap.
-    public var tableUnpackResults: Int
-
-    /// `table.move` element-count cap.
-    public var tableMoveElements: Int
-
-    /// `utf8.codepoint`/`len`/`offset`/`codes` subject length cap, in bytes.
-    public var utf8SubjectBytes: Int
-
     /// `ScriptValue.string` length cap, in bytes (design.md Decision 10).
     public var valueStringBytes: Int
 
@@ -122,16 +94,6 @@ public struct ScriptBudgets: Sendable, Equatable {
         threadPoolMax: Int,
         logLineBytes: Int,
         logLinesPerSlice: Int,
-        patternSubjectBytes: Int,
-        patternBytes: Int,
-        stringRepBytes: Int,
-        stringByteRangeBytes: Int,
-        formatArgs: Int,
-        tableSortElements: Int,
-        tableConcatBytes: Int,
-        tableUnpackResults: Int,
-        tableMoveElements: Int,
-        utf8SubjectBytes: Int,
         valueStringBytes: Int,
         valueListElements: Int,
         valueMapKeys: Int,
@@ -153,16 +115,6 @@ public struct ScriptBudgets: Sendable, Equatable {
         self.threadPoolMax = threadPoolMax
         self.logLineBytes = logLineBytes
         self.logLinesPerSlice = logLinesPerSlice
-        self.patternSubjectBytes = patternSubjectBytes
-        self.patternBytes = patternBytes
-        self.stringRepBytes = stringRepBytes
-        self.stringByteRangeBytes = stringByteRangeBytes
-        self.formatArgs = formatArgs
-        self.tableSortElements = tableSortElements
-        self.tableConcatBytes = tableConcatBytes
-        self.tableUnpackResults = tableUnpackResults
-        self.tableMoveElements = tableMoveElements
-        self.utf8SubjectBytes = utf8SubjectBytes
         self.valueStringBytes = valueStringBytes
         self.valueListElements = valueListElements
         self.valueMapKeys = valueMapKeys
@@ -187,16 +139,6 @@ public struct ScriptBudgets: Sendable, Equatable {
         threadPoolMax: 256,
         logLineBytes: 512,
         logLinesPerSlice: 256,
-        patternSubjectBytes: 8 * 1024,
-        patternBytes: 256,
-        stringRepBytes: 64 * 1024,
-        stringByteRangeBytes: 4 * 1024,
-        formatArgs: 32,
-        tableSortElements: 4_096,
-        tableConcatBytes: 64 * 1024,
-        tableUnpackResults: 256,
-        tableMoveElements: 65_536,
-        utf8SubjectBytes: 64 * 1024,
         valueStringBytes: 4 * 1024,
         valueListElements: 256,
         valueMapKeys: 64,
@@ -207,4 +149,56 @@ public struct ScriptBudgets: Sendable, Equatable {
         faultMessageBytes: 512,
         tracebackBytes: 2 * 1024
     )
+}
+
+/// Read-only mirror of the sandbox's compile-time numeric library caps
+/// (object-graph-attributes change 1a carry-forward, N4-2 / design.md Decision
+/// 12). These used to be duplicated as ten mutable `ScriptBudgets` fields that
+/// nothing read and that could silently drift from `elysium_sandbox.c`'s own
+/// literals; `.current` calls the C shim's `elysium_library_caps()` getter, so
+/// the C constants stay the single source of truth and docs/tests read the
+/// same numbers the sandbox actually enforces.
+public struct ScriptLibraryCaps: Sendable, Equatable {
+    /// `string.find`/`match`/`gmatch`/`gsub` subject length cap, in bytes.
+    public var patternSubjectBytes: Int
+    /// `string.find`/`match`/`gmatch`/`gsub` pattern length cap, in bytes.
+    public var patternBytes: Int
+    /// `string.find`/`match`/`gmatch`/`gsub` matcher step budget per call.
+    public var matchSteps: Int
+    /// `gsub`/`format`/`pack`/`rep`/`concat` result length cap, in bytes.
+    public var resultBytes: Int
+    /// `string.byte` requested range cap, in bytes.
+    public var byteRangeBytes: Int
+    /// `table.sort` element-count cap.
+    public var sortElements: Int
+    /// `table.unpack` result-count cap.
+    public var unpackResults: Int
+    /// `table.move` element-count cap.
+    public var moveElements: Int
+    /// `utf8.codepoint`/`len`/`offset`/`codes` subject length cap, in bytes.
+    public var utf8SubjectBytes: Int
+    /// `string.format` conversion-count cap.
+    public var formatConversions: Int
+    /// Maximum string length the sandbox's C string helpers will build, in bytes.
+    public var maxStringBytes: Int
+
+    /// Reads `elysium_library_caps()` fresh each call — the values are
+    /// compile-time constants in `elysium_shim.c`, so this is cheap and always
+    /// current; nothing caches a stale copy.
+    public static var current: ScriptLibraryCaps {
+        let raw = elysium_library_caps()
+        return ScriptLibraryCaps(
+            patternSubjectBytes: Int(raw.patternSubjectBytes),
+            patternBytes: Int(raw.patternBytes),
+            matchSteps: Int(raw.matchSteps),
+            resultBytes: Int(raw.resultBytes),
+            byteRangeBytes: Int(raw.byteRangeBytes),
+            sortElements: Int(raw.sortElements),
+            unpackResults: Int(raw.unpackResults),
+            moveElements: Int(raw.moveElements),
+            utf8SubjectBytes: Int(raw.utf8SubjectBytes),
+            formatConversions: Int(raw.formatConversions),
+            maxStringBytes: Int(raw.maxStringBytes)
+        )
+    }
 }
