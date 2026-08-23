@@ -108,7 +108,7 @@ fi
     'com.briangao.elysium.debug' ] || fail "DebugInfo.plist bundle identity changed"
 
 if grep -RInE 'XCTest|@testable|TextInputTestHook|InjectedPasteboard|probeLaunchMarker' \
-    Sources/ElysiumTextInput Sources/Elysium Sources/ElysiumCore; then
+    Sources/ElysiumTextInput Sources/Elysium Sources/ElysiumCore Sources/ElysiumScript Sources/CLua; then
     fail "test-only text-input symbol escaped into production sources"
 fi
 if grep -RInE 'LANSignEdit(Intent|Result)|signEditRequestResult|Saving sign…' Sources; then
@@ -229,10 +229,36 @@ if [ -n "$UNAPPROVED_NETWORK_REFS" ]; then
 fi
 
 URL_REFS="$(grep -RInE 'https?://' Sources || true)"
-UNAPPROVED_URL_REFS="$(printf '%s\n' "$URL_REFS" | grep -v '^Sources/Elysium/OllamaAgent.swift:.*http://localhost:11434' || true)"
+UNAPPROVED_URL_REFS="$(printf '%s\n' "$URL_REFS" \
+    | grep -v '^Sources/Elysium/OllamaAgent.swift:.*http://localhost:11434' \
+    | grep -v '^Sources/CLua/include/lua.h:' || true)"
 if [ -n "$UNAPPROVED_URL_REFS" ]; then
     printf '%s\n' "$UNAPPROVED_URL_REFS"
     fail "URL literal found outside approved local Ollama endpoint"
+fi
+
+# design.md Decision 16 / spec "security-scan.sh allowlist and bans": library opening
+# and locale mutation are refused everywhere in Sources — the sandbox opens exactly
+# base/string/table/math/utf8 once, in elysium_sandbox.c, under the pinned "C" locale
+# (design.md Decision 8/9); io/os/package/debug/coroutine and setlocale would defeat
+# the sandbox and the determinism invariants (Condition 8) if they ever appeared.
+# `lcorolib.c`'s own function definition is the one allowed exception: Decision 1
+# keeps `coroutine`'s C source vendored (upstream Lua 5.4.8's file list) but it is
+# never opened — `luaL_requiref` is never called with it (verified: `luaopen_coroutine`
+# appears only in that definition and its `lualib.h` declaration, never as a call
+# argument), so this is the function existing, not the library being opened.
+LUAOPEN_BANNED_REFS="$(grep -RInE 'luaopen_(io|os|package|debug|coroutine)[[:space:]]*\(' Sources || true)"
+UNAPPROVED_LUAOPEN_BANNED_REFS="$(printf '%s\n' "$LUAOPEN_BANNED_REFS" \
+    | grep -v '^Sources/CLua/lcorolib.c:.*LUAMOD_API int luaopen_coroutine (lua_State \*L) {$' || true)"
+if [ -n "$UNAPPROVED_LUAOPEN_BANNED_REFS" ]; then
+    printf '%s\n' "$UNAPPROVED_LUAOPEN_BANNED_REFS"
+    fail "banned Lua library opener call site under Sources"
+fi
+if grep -RInE 'luaL_openlibs[[:space:]]*\(' Sources; then
+    fail "luaL_openlibs call site under Sources (library opening is sandbox-only)"
+fi
+if grep -RInE 'setlocale[[:space:]]*\(' Sources; then
+    fail "setlocale call site under Sources (locale is pinned, never mutated)"
 fi
 
 PROCESS_REFS="$(grep -RInE 'Process\(|NSTask|system\(|popen\(|dlopen\(|dlsym\(' Sources || true)"

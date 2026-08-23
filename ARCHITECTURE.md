@@ -30,13 +30,18 @@ This is the technical tour. The one-paragraph version: **ElysiumCore** is a head
 ┌──────────────────────────────────────────────────────────────────┐
 │ ElysiumStorage — sole SQLite owner, serial executor + authorizer  │
 └──────────────────────────────────────────────────────────────────┘
+                   sandboxed Lua calls only (no engine caller yet)
+┌──────────────────────────────────────────────────────────────────┐
+│ ElysiumScript — sole Lua owner → CLua (vendored Lua 5.4.8 + C     │
+│ boundary/sandbox/budgets; script.* engine API is a later change)  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## The determinism layer (Core/)
 
 Elysium's engine is fully deterministic — identical seeds produce identical worlds on any machine, across releases — and everything downstream depends on this layer:
 
-- **`DetMath.swift`** — fdlibm 5.3c `sin`/`cos`/`atan`/`atan2` implemented with only IEEE-754 primitive operations, so trig results never depend on the platform math library. Also `detRound` (well-defined `.5` boundary behavior) and hypot helpers.
+- **`DetMath.swift`** — fdlibm 5.3c `sin`/`cos`/`atan`/`atan2` implemented with only IEEE-754 primitive operations, so trig results never depend on the platform math library; `detExp`/`detLog`/`detPow` (fdlibm `e_exp.c`/`e_log.c`/`e_pow.c` ports, same word-level style) were added for the embedded script runtime's `math.exp`/`math.log`/`^` and are pinned against an independently rebuilt fdlibm reference golden (see "Script runtime" below). Also `detRound` (well-defined `.5` boundary behavior) and hypot helpers.
 - **`RandomX.swift`** — sfc32-style seeded RNG plus `hashString`, `mix32` (murmur3 finalizer), and `hash2`/`hash3` position hashes. All arithmetic uses explicit 32-bit wrapping, so hashes are identical everywhere. Position hashing is what makes features/structures reproducible per-coordinate rather than per-generation-order.
 - **`Noise.swift`** — simplex 2D/3D with a seeded permutation shuffle, FBM stacks, spline interpolation.
 
@@ -218,11 +223,82 @@ without a capability are intentionally treated as fresh identities. The capabili
 plaintext on the v5 wire and in user defaults; authenticated encryption, authenticated host
 ownership, and Keychain storage remain protocol-v6 requirements.
 
+## Script runtime (ElysiumScript + CLua)
+
+`Sources/CLua` vendors Lua 5.4.8 (54 upstream files, SHA-256-and-byte-size-pinned tarball,
+`scripts/clua/rederive.sh` re-derivation, `scripts/clua/elysium.patch` applied on top; `lundump.c`
+is stubbed to refuse any binary chunk) plus the Elysium-authored C boundary
+(`elysium_shim.c`/`elysium_sandbox.c`) that is the *sole* owner of every `lua_error`/`lua_yield`/
+`lua_resume`/`lua_pcall`/`lua_load` call in the process — Swift never raises, yields, resumes,
+pcalls, or loads Lua directly, and the only synchronous host→Lua call is `elysium_pcall` against
+the function already on the interpreter's own stack. `Sources/ElysiumScript` is the sole Swift
+target that depends on `CLua`, and `LuaState.swift` is the only file that spells `OpaquePointer`
+for a `lua_State*` (mirroring `StorageEngine.swift`'s pre-existing SQLite pattern). Every
+raise/yield boundary is governed by a per-state `hostDepth` counter (baseline 1; saved and zeroed
+for the duration of a protected `pcall`/`resume`, restored after) so a hook can raise or yield only
+when no Swift frame lies between it and the nearest protected entry, and the allocator never
+returns `NULL` while a Swift frame is active. `scripts/sqlite-boundary-scan.swift` and
+`scripts/security-scan.sh` enforce the boundary mechanically: no `import CLua` or `lua_`/`luaL_`/
+`LUA_`-prefixed token outside `Sources/ElysiumScript/`, no raising API inside it, and
+`luaopen_*`/`luaL_openlibs`/`setlocale` banned under `Sources/` entirely.
+
+Every script environment sees a fixed stdlib allowlist — `base string table math utf8`, never
+`coroutine os io package debug` — where every library and host-binding table reachable from a
+fresh environment is a per-environment, `__metatable`-locked, read-only proxy over a hidden deep
+copy; nothing is writable except the script's own `_ENV` and tables it creates itself, and every
+C function reachable by scripts (including the string metatable's arithmetic metamethods) is a
+closure carrying at least one upvalue, so no address-hashable light C function or light userdata
+ever reaches script code. Budgets are exact and host-recorded, never trusted to Lua's own state: a
+`LUA_MASKCOUNT` instruction hook fires every 1,000 VM instructions against a per-resume slice
+(default 5,000, yielding `.preempted` and re-executing the interrupted instruction on resume) and a
+per-coroutine total (100,000; a top-level `call()` with no enclosing coroutine treats its slice as
+hard); an allocation-rate budget (2 MiB/slice) and a hard 16 MiB per-state memory cap trip the same
+way; the vendored pattern matcher counts its own steps (`ELYSIUM_MATCH_STEPS`, 100,000/call), and
+every library wrapper caps its input/output size (`rep`/`concat`/`format`/`pack`/`gsub` results
+≤ 65,536 bytes, `..` concatenation ≤ `ELYSIUM_MAX_STRING` 262,144 bytes, positional
+`table.insert`/`table.remove` refuse `#t > 65,536`). Any trip is recorded host-side and forces
+`.faulted` + thread close on the coroutine's next resume regardless of Lua's own status, so a
+`pcall` loop cannot revive a budget-exhausted script; faults are always per-script and never
+engine-fatal.
+
+The interpreter is patched for determinism, not just sandboxed: a fixed hash seed plus per-object
+creation-ordinal hashing (`CommonHeader` gains an ordinal; `mainpositionTV`'s default case hashes
+it instead of the pointer) makes `pairs`/`next` order a pure function of operation history for
+every key type; `l_strcmp` is `strcmp` rather than locale-dependent `strcoll`; the decimal point is
+pinned to `'.'`; `#pragma STDC FP_CONTRACT OFF` removes FMA-driven divergence; `luaL_tolstring`
+never prints an address (`%p` is rejected by the `format` wrapper's conversion-grammar parser and
+`lua_topointer` is unreachable from Swift); `math.sin`/`cos`/`atan`/`exp`/`log` and the `^` operator
+route through the state's `ScriptMath` table, which `Sources/ElysiumCore/Scripting/
+ScriptHostBindings.swift` wires to `DetMath`'s `detSin`/`detCos`/`detAtan2`/`detExp`/`detLog`/
+`detPow` (the `sin`/`cos` wrappers pre-reduce with `fmod(x, 2π)` so no script input can reach
+`DetMath`'s `remPio2` trap range); `math.random`/`randomseed` draw from a per-environment
+`ScriptRandomStream` (`RandomX`), never libm or the wall clock; and state creation refuses unless
+the process locale probes as `C` (decimal point, `strcoll`/`strcmp` agreement, and an `LC_CTYPE`
+behavioral check) — there is no `setlocale` call anywhere under `Sources/`. The one
+architecture-specific caveat is NaN sign formatting: `tostring(0/0)` and `%q` of NaN are pinned by
+`goldens/script-runtime-goldens.json` as observed on arm64, and cross-architecture reproduction of
+that one bit is a stated assumption, not yet verified on another architecture.
+
+Provenance is re-derivable and hermetically tested: the tarball is SHA-256-and-size-pinned,
+`scripts/clua/elysium.patch` is the entire, checked-in deviation from upstream (eleven files),
+`scripts/clua/rederive.sh` reconstructs `Sources/CLua` from a fresh HTTPS-only fetch (or a local
+tarball) and fails on any byte drift, and `Tests/ElysiumScriptTests/CLuaSourceTests.swift`
+reverse-applies the patch against `scripts/clua/upstream-manifest.json`'s per-file hashes with no
+network access, so provenance is checked on every `swift test` run, not only when the vendored
+copy changes. `detExp`/`detLog`/`detPow` are pinned the same way against an independently rebuilt
+netlib fdlibm reference (`scripts/fdlibm-reference/`, `goldens/fmath-explog-goldens.json`, frozen
+and never regenerated).
+
+None of this changes engine behaviour today: the app never constructs a `LuaState`; `ObjectGraph`,
+`EventBus`, the Lua API verb surface, and every command/UI/persistence integration are later
+changes in the scripting programme. This change lands only the runtime, its determinism/sandbox/
+budget guarantees, and the gates that keep them pinned.
+
 ## The test harness (elysmoke)
 
-457 checks across 16 suites, run with `elysium test`:
+469 checks across 17 suites, run with `elysium test`:
 
-random/noise/math → block & item registries (counts + id spot checks) → biomes (all 63 defs + 2,000 biome selections) → terrain (full pipeline hashes on 2 seeds) → features (whole-chunk generation across all three dimensions) → atlas (pixel-identical tiles) → mesher (vertex/index hashes) → world sim (light, fluids over hundreds of ticks, RNG lockstep) → items (recipes/enchants/potions/loot rolls) → fdlibm (911 probes) → entities (55-mob zoo × 200 ticks, combat, scripted player physics, trades, pathfinding, spawning) → systems (crafting probes, BE timelines, a full redstone contraption, explosion crater, interactions, portals) → and a final suite that *independently derives* vanilla physics constants instead of trusting goldens.
+random/noise/math → block & item registries (counts + id spot checks) → biomes (all 63 defs + 2,000 biome selections) → terrain (full pipeline hashes on 2 seeds) → features (whole-chunk generation across all three dimensions) → atlas (pixel-identical tiles) → mesher (vertex/index hashes) → world sim (light, fluids over hundreds of ticks, RNG lockstep) → items (recipes/enchants/potions/loot rolls) → fdlibm (911 sin/cos/atan2 probes, 927 exp/log probes, 653 pow probes) → script runtime (embedded Lua sandbox/determinism corpus: sandbox surface, iteration order, ordinal keys, math/pow/random, strings/format/errors, address-free output, instruction/allocation budget trips, two-state reproducibility — `openspec/changes/embed-lua-runtime/design.md` Decision 13) → entities (55-mob zoo × 200 ticks, combat, scripted player physics, trades, pathfinding, spawning) → systems (crafting probes, BE timelines, a full redstone contraption, explosion crater, interactions, portals) → and a final suite that *independently derives* vanilla physics constants instead of trusting goldens.
 
 Golden discipline: reference goldens are frozen (they have no generator); behavior-change goldens (`ELYSIUM_REGOLD=1`) are regenerated only deliberately, with each diff justified. Content added after the baseline was frozen (e.g. appended vines, the Flying Wand, and copper tools) is excluded from reference hashes via fixed prefix ranges, never by regenerating reference baselines.
 

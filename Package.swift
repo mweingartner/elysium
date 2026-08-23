@@ -23,6 +23,23 @@ let package = Package(
             path: "Sources/ElysiumTextInput",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        // vendored Lua 5.4.8 + the Elysium patch/shim/sandbox; owned exclusively by
+        // ElysiumScript (see openspec/changes/embed-lua-runtime/design.md Decision 1-4).
+        .target(
+            name: "CLua",
+            path: "Sources/CLua",
+            cSettings: [
+                .define("LUA_USE_POSIX"),
+                .define("LUAI_ASSERT", .when(configuration: .debug)),
+            ]
+        ),
+        // the sandboxed embedded script runtime's Swift surface; the sole owner of CLua.
+        .target(
+            name: "ElysiumScript",
+            dependencies: ["CLua", "ElysiumTextInput"],
+            path: "Sources/ElysiumScript",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         // shared production AppKit disposition/retention kernels; no standalone product
         .target(
             name: "ElysiumAppSupport",
@@ -46,7 +63,7 @@ let package = Package(
         // the engine: headless-testable, no AppKit dependencies
         .target(
             name: "ElysiumCore",
-            dependencies: ["ElysiumStorage", "ElysiumTextInput"],
+            dependencies: ["ElysiumStorage", "ElysiumTextInput", "ElysiumScript"],
             path: "Sources/ElysiumCore",
             swiftSettings: [
                 .swiftLanguageMode(.v5),
@@ -82,8 +99,14 @@ let package = Package(
         // headless smoke tests against the frozen golden baselines
         .executableTarget(
             name: "elysmoke",
-            dependencies: ["ElysiumCore"],
+            dependencies: ["ElysiumCore", "ElysiumScript"],
             path: "Sources/elysmoke",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "ElysiumScriptTests",
+            dependencies: ["ElysiumScript", "ElysiumCore", "ElysiumTextInput"],
+            path: "Tests/ElysiumScriptTests",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(

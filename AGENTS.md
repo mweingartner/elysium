@@ -49,7 +49,7 @@ bash scripts/pipeline.sh
 For UI/gameplay/world-state/LAN changes, verify the real built or installed app when the needed state
 is observable there. If product code changes afterward, renew affected proof.
 
-The release build must be warning-free. `elysmoke` is the golden contract and must report the expected 457 checks passing unless the project deliberately changes that count in the same reviewed change.
+The release build must be warning-free. `elysmoke` is the golden contract and must report the expected 469 checks passing unless the project deliberately changes that count in the same reviewed change.
 
 For behavior changes that move goldens, read each failure, justify every changed value, regold only deliberate behavior changes with `ELYSIUM_REGOLD=1 swift run -c release elysmoke`, then rerun the suite. Never blanket-regold to make red go green.
 
@@ -61,6 +61,7 @@ For deterministic engine code, preserve these load-bearing contracts:
 - Structure-piece RNG draws before chunk-relative checks.
 - Chunks publish through `adoptChunk` on main; renderer/AppKit state stays main-thread-only; saves use the serial save queue.
 - CPU-rewritten GPU buffers must be ring-buffered or staged.
+- `ElysiumScript` is the sole Lua owner (`CLua` is never imported elsewhere, no `lua_`/`luaL_`/`LUA_` identifier outside it); every script-visible math and RNG call routes through `ScriptMath`/`ScriptRandomStream` to `DetMath`/`RandomX`, never libm or `Foundation` directly.
 
 ## Machine-Enforced Gate
 

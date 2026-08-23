@@ -1,3 +1,17 @@
 # Preserve the pinned third-party Arnis source byte-for-byte. Its upstream tree contains
 # intentional trailing whitespace that is outside Elysium's first-party whitespace policy.
 Vendor/Arnis/** -whitespace
+
+# Pinned upstream Lua 5.4.8 sources under Sources/CLua (re-derived byte-for-byte by
+# scripts/clua/rederive.sh; several upstream files end with a blank line) and the checked-in
+# Elysium patch whose context lines reproduce upstream whitespace. First-party shim files
+# (elysium_*) stay under the normal whitespace policy.
+Sources/CLua/** -whitespace
+Sources/CLua/elysium_*.c !whitespace
+Sources/CLua/elysium_*.h !whitespace
+Sources/CLua/include/elysium_*.h !whitespace
+Sources/CLua/include/module.modulemap !whitespace
+scripts/clua/elysium.patch -whitespace
+# Pinned netlib fdlibm reference sources (scripts/fdlibm-reference/MANIFEST.sha256) carry
+# upstream trailing whitespace; the generator must reproduce the golden byte-for-byte.
+scripts/fdlibm-reference/upstream/** -whitespace

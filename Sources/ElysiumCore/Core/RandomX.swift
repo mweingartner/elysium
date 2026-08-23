@@ -75,6 +75,19 @@ public struct RandomX {
         for _ in 0..<8 { _ = next() }
     }
 
+    /// Restores the sfc32 state exactly (no reseed/warm-up), so a stream captured mid-sequence
+    /// via `stateWords` continues identically from a fresh `RandomX` built with this
+    /// initializer. Used by the script runtime to persist per-script RNG streams.
+    public init(stateWords: (UInt32, UInt32, UInt32, UInt32)) {
+        a = stateWords.0
+        b = stateWords.1
+        c = stateWords.2
+        d = stateWords.3
+    }
+
+    /// Captures the sfc32 state exactly, for round-tripping through `init(stateWords:)`.
+    public var stateWords: (UInt32, UInt32, UInt32, UInt32) { (a, b, c, d) }
+
     @inline(__always)
     public mutating func next() -> UInt32 {
         let t = a &+ b &+ d

@@ -25,6 +25,14 @@ func checkD(_ name: String, _ got: Double, _ want: Double, tol: Double = 1e-12) 
 
 func section(_ name: String) { print("\n— \(name)") }
 
+// task 5.1/5.3: `--bench-scripts` runs only the script-runtime benchmark rows
+// (Sources/elysmoke/ScriptRuntimeBench.swift) and exits — none of its numbers are
+// counted checks, so this branch must come before any check() call below.
+if CommandLine.arguments.contains("--bench-scripts") {
+    runScriptRuntimeBench()
+    exit(0)
+}
+
 // ---------------------------------------------------------------------------
 section("random (vs goldens)")
 check("hashString abc", hashString("abc") == 440920331, "got \(hashString("abc"))")
@@ -1188,6 +1196,63 @@ if let g = loadJSON("fmath-goldens.json") {
 } else {
     check("fmath-goldens.json loadable", false, "not found")
 }
+
+// task 5.1: exp/log and pow probes from the independent fdlibm reference
+// (scripts/fdlibm-reference/, goldens/fmath-explog-goldens.json) — same hex-word
+// format as fmath-goldens.json above, "NaN compared as NaN" per design.md
+// Decision 13.
+if let g2 = loadJSON("fmath-explog-goldens.json") {
+    func hexD(_ x: Double) -> String {
+        String(x.bitPattern >> 32, radix: 16) + "-" + String(x.bitPattern & 0xffff_ffff, radix: 16)
+    }
+    func parseHex(_ s: Substring) -> Double {
+        let parts = s.split(separator: "-")
+        let h = UInt64(parts[0], radix: 16)!
+        let l = UInt64(parts[1], radix: 16)!
+        return Double(bitPattern: (h << 32) | l)
+    }
+    func bitsMatch(_ a: Double, _ b: Double) -> Bool {
+        (a.isNaN && b.isNaN) || a.bitPattern == b.bitPattern
+    }
+
+    let expLogProbes = g2["expLog"] as! [String]
+    var expLogBad = 0
+    for p in expLogProbes {
+        let io = p.split(separator: ":")
+        let x = parseHex(io[0])
+        let outs = io[1].split(separator: ",")
+        let wantExp = parseHex(outs[0]), wantLog = parseHex(outs[1])
+        let gotExp = detExp(x), gotLog = detLog(x)
+        if bitsMatch(gotExp, wantExp) && bitsMatch(gotLog, wantLog) { /* ok */ } else {
+            expLogBad += 1
+            if expLogBad <= 3 {
+                print("    exp/log(\(x)): got \(hexD(gotExp)),\(hexD(gotLog)) want \(outs)")
+            }
+        }
+    }
+    check("\(expLogProbes.count) fdlibm exp/log probes bit-identical", expLogBad == 0, "\(expLogBad) mismatches")
+
+    let powProbes = g2["pow"] as! [String]
+    var powBad = 0
+    for p in powProbes {
+        let io = p.split(separator: ":")
+        let ins = io[0].split(separator: ",")
+        let x = parseHex(ins[0]), y = parseHex(ins[1])
+        let want = parseHex(io[1])
+        let got = detPow(x, y)
+        if bitsMatch(got, want) { /* ok */ } else {
+            powBad += 1
+            if powBad <= 3 { print("    pow(\(x),\(y)): got \(hexD(got)) want \(io[1])") }
+        }
+    }
+    check("\(powProbes.count) fdlibm pow probes bit-identical", powBad == 0, "\(powBad) mismatches")
+} else {
+    check("fmath-explog-goldens.json loadable", false, "not found")
+}
+
+// task 5.1/5.2: the script-runtime section (design.md Decision 13) runs
+// immediately after the fdlibm section.
+runScriptRuntimeSmoke()
 
 // ---------------------------------------------------------------------------
 section("entities: zoo/combat/physics/trades/pathfinding/spawning (vs goldens)")

@@ -200,7 +200,8 @@ func productionInventory(root: URL) throws -> (files: [URL], description: [Strin
           let targets = description["targets"] as? [[String: Any]] else {
         throw ScanFailure(description: "swift package describe failed")
     }
-    let productionNames: Set<String> = ["ElysiumStorage", "ElysiumCore", "Elysium", "elysmoke"]
+    let productionNames: Set<String> = ["ElysiumStorage", "ElysiumCore", "Elysium", "elysmoke",
+                                        "ElysiumScript", "CLua"]
     var described = Set<String>()
     var discovered = Set<String>()
     let manager = FileManager.default
@@ -249,9 +250,39 @@ func storageIdentifiers(graph: [String: Any]) -> Set<String> {
     return output
 }
 
+/// Identifiers design.md Decision 4 Rule 1 reserves to C alone (`elysium_shim.c`/
+/// `elysium_sandbox.c`): every raise/yield/resume/pcall/load entry point, plus the
+/// state/close/panic constructors the shim wraps. Spec "embedded-script-runtime",
+/// scenario "Swift source denylist"; amended by C25 (`lua_topointer` added).
+let luaRaisingAPIDenylist: Set<String> = [
+    "lua_error", "luaL_error", "lua_yield", "lua_yieldk", "lua_call",
+    "lua_callk", "lua_pcall", "lua_pcallk", "lua_resume", "lua_load",
+    "luaL_loadbufferx", "luaL_loadbuffer", "luaL_loadstring", "luaL_dostring",
+    "luaL_dofile", "luaL_loadfile", "luaL_loadfilex", "lua_gettable",
+    "lua_getfield", "lua_geti", "lua_getglobal", "lua_settable", "lua_setfield",
+    "lua_seti", "lua_setglobal", "lua_concat", "lua_arith", "lua_compare",
+    "lua_len", "luaL_len", "luaL_tolstring", "luaL_checkstack",
+    "luaL_newstate", "luaL_openlibs", "luaL_requiref", "luaL_setfuncs",
+    "luaL_newmetatable", "luaL_setmetatable", "luaL_traceback", "luaL_where",
+    "luaL_gsub", "lua_newstate", "lua_atpanic", "lua_close", "lua_topointer",
+]
+/// Prefixes joining the same denylist inside the owner (`luaL_check*`/`opt*`/`arg*`/
+/// `type*`/`newlib*` wrap raising `luaL_` helpers; `luaopen_*` opens a library —
+/// C25: library opening happens only in `elysium_sandbox.c`, never from Swift).
+let luaRaisingAPIPrefixes = ["luaL_check", "luaL_opt", "luaL_arg", "luaL_type",
+                             "luaL_newlib", "luaopen_"]
+/// `public` declaration signatures may not spell a raw Lua pointer type anywhere in
+/// `ElysiumScript`'s externally reachable surface (C25's symbol-graph assertion,
+/// implemented here as a conservative source-level check alongside the authoritative
+/// `SoleLuaOwnerSourceTests.testPublicSurfaceHasNoRawLuaTypes` symbol-graph test).
+let luaPublicSurfaceBanned = ["OpaquePointer", "LuaStatePointer", "UnsafeMutableRawPointer"]
+
 func scanSource(relative: String, source: String,
                 storageTypeNames: Set<String>) throws {
     let owner = "Sources/ElysiumStorage/StorageEngine.swift"
+    let luaOwner = "Sources/ElysiumScript/LuaState.swift"
+    let elysiumScriptPrefix = "Sources/ElysiumScript/"
+    let insideElysiumScript = relative.hasPrefix(elysiumScriptPrefix)
     let adapterOwners: Set<String> = [
         "Sources/ElysiumCore/Game/Saves.swift",
         "Sources/ElysiumCore/Game/LegacySaveMigration.swift",
@@ -277,9 +308,15 @@ func scanSource(relative: String, source: String,
         }
     } else {
         if tokenSet.contains("SQLite3") || tokens.contains(where: {
-            $0.hasPrefix("sqlite3_") || $0.hasPrefix("SQLITE_") || $0 == "OpaquePointer"
+            $0.hasPrefix("sqlite3_") || $0.hasPrefix("SQLITE_")
         }) {
             throw ScanFailure(description: "SQLite capability outside owner: \(relative)")
+        }
+        // design.md Decision 16(c) / Condition 3: OpaquePointer is confined to the
+        // SQLite owner above and the sole Lua owner (LuaState.swift is its own file,
+        // never the SQL owner, so this is a second, independent allowance).
+        if tokenSet.contains("OpaquePointer"), relative != luaOwner {
+            throw ScanFailure(description: "OpaquePointer outside owner: \(relative)")
         }
         if lexed.literals.contains(where: {
             $0.text.contains("sqlite3_") || $0.text.contains("SQLITE_")
@@ -292,6 +329,53 @@ func scanSource(relative: String, source: String,
         }
         if interpolatedCapability {
             throw ScanFailure(description: "interpolated storage capability outside owner: \(relative)")
+        }
+    }
+
+    // design.md Decision 16(a)/(b), Condition 3, spec "Sole-Lua-owner scanner rules
+    // with fixtures" and its C25 amendment: CLua (vendored Lua) is owned exclusively
+    // by ElysiumScript (Decision 1-4, Rule 1 — only C raises/yields/resumes/pcalls/
+    // loads).
+    if !insideElysiumScript {
+        if importLines.contains(where: { $0.contains("CLua") }) {
+            throw ScanFailure(description: "CLua import outside sole owner: \(relative)")
+        }
+        if tokens.contains(where: {
+            $0.hasPrefix("lua_") || $0.hasPrefix("luaL_") || $0.hasPrefix("LUA_")
+                || $0.hasPrefix("luaopen_")
+        }) {
+            throw ScanFailure(description: "Lua symbol outside sole owner: \(relative)")
+        }
+    } else {
+        if tokens.contains(where: {
+            luaRaisingAPIDenylist.contains($0) || luaRaisingAPIPrefixes.contains(where: $0.hasPrefix)
+        }) {
+            throw ScanFailure(description: "raising Lua API used inside ElysiumScript: \(relative)")
+        }
+        // C25's symbol-graph assertion (source-level approximation): a `public`
+        // declaration signature (one spanning a parameter list or return-type arrow)
+        // must never spell a raw pointer type. A bare `public typealias
+        // LuaStatePointer = OpaquePointer` line has neither `(` nor `->` and is
+        // intentionally exempt — LuaStatePointer's own definition lives in exactly
+        // one such line (design.md Condition 3).
+        // Per physical line, not a multi-line span: a `public` property line with no
+        // body of its own (e.g. `public internal(set) var x: Int`) has no brace to
+        // bound a wider window, and reading ahead to the next `public`/`{` would risk
+        // sweeping in the next, unrelated (often non-public) declaration — a false
+        // positive that fails the build on legitimate code. Restricting to one line
+        // catches every single-line `public func`/`public init`/`public var` signature
+        // (the shape every current declaration in this target uses) at the cost of
+        // missing a signature deliberately split across lines — an accepted gap this
+        // conservative pass leaves to the authoritative symbol-graph test.
+        for line in lexed.code.split(separator: "\n", omittingEmptySubsequences: false) {
+            guard line.range(of: "\\bpublic\\b", options: .regularExpression) != nil,
+                  line.contains("(") || line.contains("->") else { continue }
+            if luaPublicSurfaceBanned.contains(where: { banned in
+                line.range(of: "\\b\(banned)\\b", options: .regularExpression) != nil
+            }) {
+                throw ScanFailure(description:
+                    "public ElysiumScript declaration spells a raw Lua pointer type: \(relative)")
+            }
         }
     }
 
@@ -420,6 +504,26 @@ func verifyPackageEdges(_ description: [String: Any]) throws {
           dependencies("ElysiumCore")?.contains("ElysiumStorage") == true else {
         throw ScanFailure(description: "ElysiumCore/ElysiumStorage dependency direction drift")
     }
+    // design.md Decision 16 / spec "Sole-Lua-owner scanner rules with fixtures": CLua is
+    // vendored Lua owned exclusively by ElysiumScript (Decision 1-4).
+    guard dependencies("CLua") == [] else {
+        throw ScanFailure(description: "CLua gained a dependency")
+    }
+    let otherCLuaClaimants = targets.compactMap { target -> String? in
+        guard let name = target["name"] as? String, name != "ElysiumScript" else { return nil }
+        let deps = Set(target["target_dependencies"] as? [String] ?? [])
+        return deps.contains("CLua") ? name : nil
+    }
+    guard otherCLuaClaimants.isEmpty else {
+        throw ScanFailure(description:
+            "CLua depended on outside ElysiumScript: \(otherCLuaClaimants.sorted().joined(separator: ", "))")
+    }
+    guard dependencies("ElysiumScript") == ["CLua", "ElysiumTextInput"] else {
+        throw ScanFailure(description: "ElysiumScript dependency set drift")
+    }
+    guard dependencies("ElysiumCore")?.contains("ElysiumScript") == true else {
+        throw ScanFailure(description: "ElysiumCore does not depend on ElysiumScript")
+    }
 }
 
 func verifySymbolGraph(root: URL) throws -> Set<String> {
@@ -451,18 +555,39 @@ func verifySymbolGraph(root: URL) throws -> Set<String> {
         throw ScanFailure(description: "invalid ElysiumStorage symbol graph")
     }
     let repositoryPrefix = root.standardizedFileURL.path + "/"
-    let normalizedSymbols = try symbols.map { source -> [String: Any] in
-        var symbol = source
-        if var location = symbol["location"] as? [String: Any],
-           let uri = location["uri"] as? String {
-            guard let path = URL(string: uri)?.standardizedFileURL.path,
-                  path.hasPrefix(repositoryPrefix) else {
-                throw ScanFailure(description: "symbol graph source escaped repository")
+    // Path-independence fix: the symbol graph carries "uri" strings in more than one
+    // place — `location.uri` (what this originally normalized) and, for any symbol
+    // with a doc comment, `docComment.uri` too (observed on StorageEngine.swift
+    // symbols). An absolute-path `docComment.uri` left un-normalized makes the pinned
+    // hash a function of the checkout's filesystem path, not of the API surface —
+    // recurse through every dictionary/array in the value and normalize *every* "uri"
+    // string the same way `location.uri` already was, wherever it is nested.
+    func normalizingURIs(_ value: Any) throws -> Any {
+        if let dict = value as? [String: Any] {
+            var normalized = [String: Any]()
+            for (key, sub) in dict {
+                if key == "uri", let uri = sub as? String {
+                    guard let path = URL(string: uri)?.standardizedFileURL.path,
+                          path.hasPrefix(repositoryPrefix) else {
+                        throw ScanFailure(description: "symbol graph source escaped repository")
+                    }
+                    normalized[key] = "repository:///" + path.dropFirst(repositoryPrefix.count)
+                } else {
+                    normalized[key] = try normalizingURIs(sub)
+                }
             }
-            location["uri"] = "repository:///" + path.dropFirst(repositoryPrefix.count)
-            symbol["location"] = location
+            return normalized
         }
-        return symbol
+        if let array = value as? [Any] {
+            return try array.map { try normalizingURIs($0) }
+        }
+        return value
+    }
+    let normalizedSymbols = try symbols.map { source -> [String: Any] in
+        guard let normalized = try normalizingURIs(source) as? [String: Any] else {
+            throw ScanFailure(description: "symbol graph canonicalization failed")
+        }
+        return normalized
     }
     func stableJSONKey(_ object: [String: Any]) throws -> String {
         let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
@@ -476,7 +601,13 @@ func verifySymbolGraph(root: URL) throws -> Set<String> {
         .sorted { $0.0 < $1.0 }
         .map(\.1)
     if let relationships = graph["relationships"] as? [[String: Any]] {
-        graph["relationships"] = try relationships
+        let normalizedRelationships = try relationships.map { source -> [String: Any] in
+            guard let normalized = try normalizingURIs(source) as? [String: Any] else {
+                throw ScanFailure(description: "symbol graph canonicalization failed")
+            }
+            return normalized
+        }
+        graph["relationships"] = try normalizedRelationships
             .map { (try stableJSONKey($0), $0) }
             .sorted { $0.0 < $1.0 }
             .map(\.1)
@@ -596,11 +727,18 @@ func verifySymbolGraph(root: URL) throws -> Set<String> {
 
 func runSelfTests(root: URL, storageNames: Set<String>) throws {
     let fixtures = root.appendingPathComponent("Tests/SecurityScanFixtures", isDirectory: true)
-    let positives = ["PositiveDarwinFD.swift", "PositiveUnrelatedLiteralsAndPlus.swift"]
-    for name in positives {
+    func defaultRelative(_ name: String) -> String { "Sources/ElysiumCore/Game/\(name)" }
+
+    let positives: [(name: String, relativePath: String)] = [
+        ("PositiveDarwinFD.swift", defaultRelative("PositiveDarwinFD.swift")),
+        ("PositiveUnrelatedLiteralsAndPlus.swift", defaultRelative("PositiveUnrelatedLiteralsAndPlus.swift")),
+        // spec "Sole-Lua-owner scanner rules with fixtures", scenario "Positive fixture":
+        // scanned as the sole Lua owner itself.
+        ("PositiveLuaOwnerFile.swift", "Sources/ElysiumScript/LuaState.swift"),
+    ]
+    for (name, relativePath) in positives {
         let source = try String(contentsOf: fixtures.appendingPathComponent(name), encoding: .utf8)
-        try scanSource(relative: "Sources/ElysiumCore/Game/\(name)",
-                       source: source, storageTypeNames: storageNames)
+        try scanSource(relative: relativePath, source: source, storageTypeNames: storageNames)
         if name == "PositiveUnrelatedLiteralsAndPlus.swift" {
             let lexed = try lexSwift(source)
             guard lexed.code.contains("+"),
@@ -613,16 +751,31 @@ func runSelfTests(root: URL, storageNames: Set<String>) throws {
             }
         }
     }
-    let negatives = ["NegativeSQLiteImport.swift", "NegativeScopedSQLiteImport.swift",
+    let negativeNames = ["NegativeSQLiteImport.swift", "NegativeScopedSQLiteImport.swift",
                      "NegativeSQLiteSymbol.swift", "NegativeStorageImport.swift",
                      "NegativeSQLLiteral.swift", "NegativeConcatenatedSQL.swift",
                      "NegativeRawSQL.swift", "NegativeInterpolatedStorage.swift",
                      "NegativeForeignLinkage.swift", "NegativeUnderscoredAttribute.swift",
                      "NegativeCountPreservingCapability.swift",
                      "NegativeRPGFacadeEscape.swift", "NegativeClientSlotOnlyWrapper.swift",
-                     "NegativeStorageAnyCarrier.swift", "NegativeStorageGenericAlias.swift"]
-    let playerCASNegative = "NegativePlayerCASCarrier.swift"
-    let allNegatives = negatives + [playerCASNegative]
+                     "NegativeStorageAnyCarrier.swift", "NegativeStorageGenericAlias.swift",
+                     "NegativePlayerCASCarrier.swift"]
+    // spec "Sole-Lua-owner scanner rules with fixtures", scenario "Negative fixtures"
+    // (plus the two added by the C25 amendment). The "OutsideOwner" pair are scanned
+    // as ordinary ElysiumCore production files; the "InOwner"/"InsideOwner" pair are
+    // scanned as a second file inside the sole Lua owner (never LuaState.swift itself,
+    // so they cannot be confused with the positive fixture above).
+    let luaNegatives: [(name: String, relativePath: String)] = [
+        ("NegativeLuaImportOutsideOwner.swift", defaultRelative("NegativeLuaImportOutsideOwner.swift")),
+        ("NegativeLuaSymbolOutsideOwner.swift", defaultRelative("NegativeLuaSymbolOutsideOwner.swift")),
+        ("NegativeScopedCLuaImportOutsideOwner.swift",
+         defaultRelative("NegativeScopedCLuaImportOutsideOwner.swift")),
+        ("NegativeLuaRaisingAPIInOwner.swift", "Sources/ElysiumScript/Other.swift"),
+        ("NegativeOpaquePointerInScriptNonOwner.swift", "Sources/ElysiumScript/Other.swift"),
+        ("NegativeLuaopenInsideOwner.swift", "Sources/ElysiumScript/Other.swift"),
+    ]
+    let allNegatives: [(name: String, relativePath: String)] =
+        negativeNames.map { ($0, defaultRelative($0)) } + luaNegatives
     let concatenatedSource = try String(contentsOf:
         fixtures.appendingPathComponent("NegativeConcatenatedSQL.swift"), encoding: .utf8)
     let concatenatedLexed = try lexSwift(concatenatedSource)
@@ -632,12 +785,11 @@ func runSelfTests(root: URL, storageNames: Set<String>) throws {
           }) else {
         throw ScanFailure(description: "concatenated SQL negative fixture lost its chain shape")
     }
-    for name in allNegatives {
+    for (name, relativePath) in allNegatives {
         let source = try String(contentsOf: fixtures.appendingPathComponent(name), encoding: .utf8)
         var rejected = false
         do {
-            try scanSource(relative: "Sources/ElysiumCore/Game/\(name)",
-                           source: source, storageTypeNames: storageNames)
+            try scanSource(relative: relativePath, source: source, storageTypeNames: storageNames)
         } catch is ScanFailure {
             rejected = true
         }
@@ -646,9 +798,10 @@ func runSelfTests(root: URL, storageNames: Set<String>) throws {
         }
     }
     let moduleSearch = root.appendingPathComponent(".build/out/Products/Debug").path
-    for name in positives + allNegatives {
+    let cluaInclude = root.appendingPathComponent("Sources/CLua/include").path
+    for (name, _) in positives + allNegatives {
         let (compileOutput, compileStatus) = try run("/usr/bin/xcrun", [
-            "swiftc", "-typecheck", "-I", moduleSearch,
+            "swiftc", "-typecheck", "-I", moduleSearch, "-I", cluaInclude,
             fixtures.appendingPathComponent(name).path,
         ], root: root)
         guard compileStatus == 0 else {

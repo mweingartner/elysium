@@ -1,0 +1,12 @@
+# Netlib fdlibm reference sources, pinned by SHA-256.
+# Each file below is fetched from https://www.netlib.org/fdlibm/<name> (HTTPS only; see
+# gen-explog-goldens.sh) and copied byte-for-byte into upstream/ — never edited. Verified
+# 2026-08-22.
+04c96195b7ced914d659b5fd204724c182f091af8631fe42016ad6e27cb302ef  e_exp.c
+a2b1bd1b367026a35f36da53425cd618386c3bf69d23ac224a40791aa9855ac9  e_log.c
+763b86baa63eb3518b43f7f3e44e5ed10992b62650f4a45c3a2ea6015e6d5122  e_pow.c
+2a6e784d1089eb6351df7e59037de4240d11a5c61967611732f81ad96fe869ce  e_sqrt.c
+64113c472c2676499288bc35a821b0867916552930bc52c7445d2c50dddf0e71  fdlibm.h
+459c18858c944a4e7062d38ab4dfb596edbe76706d24029c2dac766dcd2be3fd  s_copysign.c
+c6389f3e0472ec0157d648b3e4e80b405038acfaf3e85b961363ea483e3259f1  s_fabs.c
+9ad1bb374fc2951ec086474c82373b45bccfdecd34d631974dccf8633f40d99e  s_scalbn.c

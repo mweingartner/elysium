@@ -1,0 +1,7 @@
+module CLua {
+    header "lua.h"
+    header "lauxlib.h"
+    header "lualib.h"
+    header "elysium_shim.h"
+    export *
+}

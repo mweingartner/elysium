@@ -5,6 +5,16 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Added an embedded, deterministic **Lua 5.4.8** script runtime (`CLua` + `ElysiumScript`): a
+  vendored, SHA-256-pinned interpreter with a checked-in determinism patch (fixed hash seed,
+  ordinal key iteration, locale/decimal-point pin, FP-contraction off), a per-environment stdlib
+  sandbox with frozen API proxies, and exact instruction/allocation-rate/memory budgets that fault
+  a script — never the engine — on exhaustion. `DetMath` gains `detExp`/`detLog`/`detPow` fdlibm
+  ports pinned against an independently rebuilt reference golden, and `elysmoke` gains a
+  script-runtime golden section (469 checks total, up from 457). This lands only the runtime and
+  its gates: no gameplay, save, LAN, or UI change, and nothing in the shipped game creates a
+  script yet.
+
 - Nether maps now draw the traversable cavern around the player's current height instead of the
   sealed bedrock ceiling, with distinct colors for major Nether materials. A default-on **Show
   Minimap** Video preference can hide the compact gameplay map while leaving the `M` expanded map

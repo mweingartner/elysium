@@ -26,6 +26,7 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 - **Maps and controls** — compact and expanded live maps, including player-level cavern mapping in the Nether, configurable controls, keyboard and controller input, text-entry accessibility, fullscreen support, and debug/automation surfaces used by the verification suite. The compact minimap is shown by default and can be hidden under **Options... → Video → Show Minimap** without disabling the `M` expanded map.
 - **Synthesized audio** — music and sound effects are produced at runtime rather than shipped as conventional audio recordings.
 - **Resource-pack support** — Java Edition-style resource packs are read through Elysium's bounded archive and metadata loaders. The pinned default is [Faithful 64x](https://faithfulpack.net/faithful64x) Release 12; **Options... → Video → Resource Packs...** offers the reviewed Ore Borders 64x and Static Lanterns add-ons independently, both off by default.
+- **Embedded deterministic script runtime (engine infrastructure, no player-facing scripting yet)** — a sandboxed, budgeted Lua 5.4.8 interpreter (`CLua` + `ElysiumScript`) is vendored and tested as the foundation for a future scripting/events/AI programme; nothing in the shipped game creates or runs a script today.
 
 For the subsystem boundaries and determinism rules, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -174,7 +175,7 @@ swift test
 swift run -c release elysmoke
 ```
 
-`elysmoke` is the deterministic golden contract and is expected to report 457 passing checks unless a reviewed behavior change deliberately updates that contract.
+`elysmoke` is the deterministic golden contract and is expected to report 469 passing checks unless a reviewed behavior change deliberately updates that contract.
 
 Security-sensitive changes also run:
 
@@ -194,7 +195,7 @@ It runs these nine automated stages, in order, and stops at the first failure:
 2. Warning-free release build.
 3. Release-surface and binary security checks.
 4. Full XCTest.
-5. The 457-check `elysmoke` golden suite.
+5. The 469-check `elysmoke` golden suite.
 6. Application packaging.
 7. Packaged AppKit keyboard and Accessibility integration.
 8. Installation at `/Applications/Elysium.app`.

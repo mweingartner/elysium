@@ -1,9 +1,9 @@
 // Portable deterministic float math — bit-reproducible reference implementation
-// (fdlibm 5.3c sin/cos/atan/atan2). Simulation code calls these instead of
-// Foundation trig so results are bit-identical with the golden baselines: only
+// (fdlibm 5.3c sin/cos/atan/atan2, exp/log/pow). Simulation code calls these instead of
+// Foundation trig/math so results are bit-identical with the golden baselines: only
 // IEEE-exact operations (+ - * / sqrt) are used.
 //
-// The sin/cos/atan/atan2 kernels below are ported from fdlibm 5.3c:
+// The sin/cos/atan/atan2/exp/log/pow kernels below are ported from fdlibm 5.3c:
 //
 //   Copyright (C) 1993, 2004 by Sun Microsystems, Inc. All rights reserved.
 //
@@ -332,6 +332,442 @@ public func detAtan2(_ y: Double, _ x: Double) -> Double {
     case 2: return m_pi - (z - pi_lo)           /* atan(+,-) */
     default: return (z - pi_lo) - m_pi          /* atan(-,-) */
     }
+}
+
+// ---------------------------------------------------------------------------
+// setLO — the __LO(x) = ... write-side companion to setHI, used by the exp/log/pow ports.
+// ---------------------------------------------------------------------------
+@inline(__always) private func setLO(_ x: Double, _ l: UInt32) -> Double {
+    Double(bitPattern: (x.bitPattern & 0xffff_ffff_0000_0000) | UInt64(l))
+}
+
+/// Truncating double→Int32 conversion equivalent to C's `(int)x` cast, implemented through
+/// bit decomposition so it can never trap: Swift's `Int32(_: Double)` initializer traps for
+/// NaN, infinities and magnitudes outside `Int32`'s range, which fdlibm's own `(int)` casts
+/// never guard against syntactically (they rely on the caller having already bounded the
+/// argument). Every call site below is reached only after fdlibm's own domain filtering has
+/// bounded the argument to a small range, so the saturate/NaN-to-zero paths here are a
+/// defensive backstop, never the expected path.
+@inline(__always) private func truncToInt32(_ x: Double) -> Int32 {
+    if x.isNaN { return 0 }
+    if x >= 2147483648.0 { return Int32.max }
+    if x <= -2147483649.0 { return Int32.min }
+    let bits = x.bitPattern
+    let negative = (bits >> 63) != 0
+    let biasedExponent = Int32(truncatingIfNeeded: (bits >> 52) & 0x7ff)
+    let exponent = biasedExponent &- 1023
+    if exponent < 0 { return 0 }
+    let fraction = bits & 0x000f_ffff_ffff_ffff
+    let mantissa = biasedExponent == 0 ? fraction : (fraction | 0x0010_0000_0000_0000)
+    // |x| < 2^31 here (range-checked above), so exponent <= 30 and the shift below is always
+    // a right shift by 22...52 — never negative, never >= 64.
+    let shift = UInt64(52 &- exponent)
+    let magnitude = mantissa &>> shift
+    let signedMagnitude = Int32(truncatingIfNeeded: magnitude)
+    return negative ? (0 &- signedMagnitude) : signedMagnitude
+}
+
+// ---------------------------------------------------------------------------
+// exp — __ieee754_exp (fdlibm e_exp.c)
+// ---------------------------------------------------------------------------
+private let expOne = 1.0
+private let expHalf: [Double] = [0.5, -0.5]
+private let expHugeVal = 1.0e300
+private let expTwom1000 = fromWords(0x01700000, 0)                          /* 2**-1000 */
+private let expOThreshold = fromWords(0x40862E42, 0xFEFA39EF)               /* overflow */
+private let expUThreshold = fromWords(0xc0874910, 0xD52D3051)               /* underflow */
+private let expLn2HI: [Double] = [
+    fromWords(0x3fe62e42, 0xfee00000), fromWords(0xbfe62e42, 0xfee00000),
+]
+private let expLn2LO: [Double] = [
+    fromWords(0x3dea39ef, 0x35793c76), fromWords(0xbdea39ef, 0x35793c76),
+]
+private let expInvln2 = fromWords(0x3ff71547, 0x652b82fe)
+private let expP1 = fromWords(0x3FC55555, 0x5555553E)
+private let expP2 = fromWords(0xBF66C16C, 0x16BEBD93)
+private let expP3 = fromWords(0x3F11566A, 0xAF25DE2C)
+private let expP4 = fromWords(0xBEBBBD41, 0xC5D26BF1)
+private let expP5 = fromWords(0x3E663769, 0x72BEA4D0)
+
+public func detExp(_ xIn: Double) -> Double {
+    var x = xIn
+    let hxFull = HI(x)
+    let xsb = Int((hxFull >> 31) & 1)
+    let hx = hxFull & 0x7fffffff
+
+    if hx >= 0x40862E42 {
+        if hx >= 0x7ff00000 {
+            if (hx & 0xfffff) | LO(x) != 0 { return x + x }            /* NaN */
+            return xsb == 0 ? x : 0.0                                   /* exp(+-inf) */
+        }
+        if x > expOThreshold { return expHugeVal * expHugeVal }        /* overflow */
+        if x < expUThreshold { return expTwom1000 * expTwom1000 }      /* underflow */
+    }
+
+    var k: Int32 = 0
+    var hi = 0.0, lo = 0.0
+    if hx > 0x3fd62e42 {                          /* |x| > 0.5 ln2 */
+        if hx < 0x3FF0A2B2 {                       /* and |x| < 1.5 ln2 */
+            hi = x - expLn2HI[xsb]
+            lo = expLn2LO[xsb]
+            k = Int32(1 - xsb - xsb)
+        } else {
+            k = truncToInt32(expInvln2 * x + expHalf[xsb])
+            let t = Double(k)
+            hi = x - t * expLn2HI[0]                /* t*ln2HI is exact here */
+            lo = t * expLn2LO[0]
+        }
+        x = hi - lo
+    } else if hx < 0x3e300000 {                    /* when |x| < 2**-28 */
+        if expHugeVal + x > expOne { return expOne + x }  /* trigger inexact */
+    }
+    /* else: 0x3e300000 <= hx <= 0x3fd62e42 -> k stays 0, x unchanged (primary range) */
+
+    let t2 = x * x
+    let c = x - t2 * (expP1 + t2 * (expP2 + t2 * (expP3 + t2 * (expP4 + t2 * expP5))))
+    if k == 0 { return expOne - ((x * c) / (c - 2.0) - x) }
+    var y = expOne - ((lo - (x * c) / (2.0 - c)) - hi)
+    if k >= -1021 {
+        y = setHI(y, UInt32(bitPattern: HI(y) &+ (k << 20)))    /* add k to y's exponent */
+        return y
+    } else {
+        y = setHI(y, UInt32(bitPattern: HI(y) &+ ((k &+ 1000) << 20)))
+        return y * expTwom1000
+    }
+}
+
+// ---------------------------------------------------------------------------
+// log — __ieee754_log (fdlibm e_log.c)
+// ---------------------------------------------------------------------------
+private let logLn2HI = fromWords(0x3fe62e42, 0xfee00000)
+private let logLn2LO = fromWords(0x3dea39ef, 0x35793c76)
+private let logTwo54 = fromWords(0x43500000, 0)
+private let logLg1 = fromWords(0x3FE55555, 0x55555593)
+private let logLg2 = fromWords(0x3FD99999, 0x9997FA04)
+private let logLg3 = fromWords(0x3FD24924, 0x94229359)
+private let logLg4 = fromWords(0x3FCC71C5, 0x1D8E78AF)
+private let logLg5 = fromWords(0x3FC74664, 0x96CB03DE)
+private let logLg6 = fromWords(0x3FC39A09, 0xD078C69F)
+private let logLg7 = fromWords(0x3FC2F112, 0xDF3E5244)
+private let logZero = 0.0
+
+public func detLog(_ xIn: Double) -> Double {
+    var x = xIn
+    var hx = HI(x)
+    let lx = LO(x)
+
+    var k: Int32 = 0
+    if hx < 0x00100000 {                            /* x < 2**-1022 */
+        if ((hx & 0x7fffffff) | lx) == 0 { return -logTwo54 / logZero }  /* log(+-0)=-inf */
+        if hx < 0 { return (x - x) / logZero }                            /* log(-#) = NaN */
+        k &-= 54
+        x *= logTwo54                                /* subnormal number, scale up x */
+        hx = HI(x)
+    }
+    if hx >= 0x7ff00000 { return x + x }
+    k &+= (hx >> 20) &- 1023
+    hx &= 0x000fffff
+    let i = (hx &+ 0x95f64) & 0x100000
+    x = setHI(x, UInt32(bitPattern: hx | (i ^ 0x3ff00000)))   /* normalize x or x/2 */
+    k &+= (i >> 20)
+    let f = x - 1.0
+    if (0x000fffff & (2 &+ hx)) < 3 {                /* |f| < 2**-20 */
+        if f == logZero {
+            if k == 0 { return logZero }
+            let dk = Double(k)
+            return dk * logLn2HI + dk * logLn2LO
+        }
+        let r = f * f * (0.5 - 0.33333333333333333 * f)
+        if k == 0 { return f - r }
+        let dk = Double(k)
+        return dk * logLn2HI - ((r - dk * logLn2LO) - f)
+    }
+    let s = f / (2.0 + f)
+    let dk = Double(k)
+    let z = s * s
+    var i2 = hx &- 0x6147a
+    let w = z * z
+    let j = 0x6b851 &- hx
+    let t1 = w * (logLg2 + w * (logLg4 + w * logLg6))
+    let t2 = z * (logLg1 + w * (logLg3 + w * (logLg5 + w * logLg7)))
+    i2 |= j
+    let r = t2 + t1
+    if i2 > 0 {
+        let hfsq = 0.5 * f * f
+        if k == 0 { return f - (hfsq - s * (hfsq + r)) }
+        return dk * logLn2HI - ((hfsq - (s * (hfsq + r) + dk * logLn2LO)) - f)
+    } else {
+        if k == 0 { return f - s * (f - r) }
+        return dk * logLn2HI - ((s * (f - r) - dk * logLn2LO) - f)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// scalbn — scalbn(x, n) (fdlibm s_scalbn.c); private, used only by detPow
+// ---------------------------------------------------------------------------
+private let scalbnTwo54 = fromWords(0x43500000, 0)
+private let scalbnTwom54 = fromWords(0x3C900000, 0)
+private let scalbnHuge = 1.0e+300
+private let scalbnTiny = 1.0e-300
+
+private func detScalbn(_ xIn: Double, _ nIn: Int32) -> Double {
+    var x = xIn
+    let n = nIn
+    var hx = HI(x)
+    let lx = LO(x)
+    var k = (hx & 0x7ff00000) >> 20                 /* extract exponent */
+    if k == 0 {                                      /* 0 or subnormal x */
+        if (lx | (hx & 0x7fffffff)) == 0 { return x }  /* +-0 */
+        x *= scalbnTwo54
+        hx = HI(x)
+        k = ((hx & 0x7ff00000) >> 20) &- 54
+        if n < -50000 { return scalbnTiny * x }        /* underflow */
+    }
+    if k == 0x7ff { return x + x }                   /* NaN or Inf */
+    k = k &+ n
+    if k > 0x7fe { return scalbnHuge * (x < 0 ? -scalbnHuge : scalbnHuge) }  /* overflow */
+    if k > 0 {                                        /* normal result */
+        x = setHI(x, UInt32(bitPattern: (hx & Int32(bitPattern: 0x800fffff)) | (k << 20)))
+        return x
+    }
+    if k <= -54 {
+        if n > 50000 { return scalbnHuge * (x < 0 ? -scalbnHuge : scalbnHuge) }   /* overflow */
+        return scalbnTiny * (x < 0 ? -scalbnTiny : scalbnTiny)                     /* underflow */
+    }
+    k &+= 54                                          /* subnormal result */
+    x = setHI(x, UInt32(bitPattern: (hx & Int32(bitPattern: 0x800fffff)) | (k << 20)))
+    return x * scalbnTwom54
+}
+
+// ---------------------------------------------------------------------------
+// pow — __ieee754_pow (fdlibm e_pow.c)
+// ---------------------------------------------------------------------------
+private let powBp: [Double] = [1.0, 1.5]
+private let powDpH: [Double] = [0.0, fromWords(0x3FE2B803, 0x40000000)]
+private let powDpL: [Double] = [0.0, fromWords(0x3E4CFDEB, 0x43CFD006)]
+private let powZero = 0.0
+private let powOne = 1.0
+private let powTwo = 2.0
+private let powTwo53 = fromWords(0x43400000, 0)
+private let powHuge = 1.0e300
+private let powTiny = 1.0e-300
+private let powL1 = fromWords(0x3FE33333, 0x33333303)
+private let powL2 = fromWords(0x3FDB6DB6, 0xDB6FABFF)
+private let powL3 = fromWords(0x3FD55555, 0x518F264D)
+private let powL4 = fromWords(0x3FD17460, 0xA91D4101)
+private let powL5 = fromWords(0x3FCD864A, 0x93C9DB65)
+private let powL6 = fromWords(0x3FCA7E28, 0x4A454EEF)
+private let powP1 = fromWords(0x3FC55555, 0x5555553E)
+private let powP2 = fromWords(0xBF66C16C, 0x16BEBD93)
+private let powP3 = fromWords(0x3F11566A, 0xAF25DE2C)
+private let powP4 = fromWords(0xBEBBBD41, 0xC5D26BF1)
+private let powP5 = fromWords(0x3E663769, 0x72BEA4D0)
+private let powLg2 = fromWords(0x3FE62E42, 0xFEFA39EF)
+private let powLg2H = fromWords(0x3FE62E43, 0x00000000)
+private let powLg2L = fromWords(0xBE205C61, 0x0CA86C39)
+private let powOvt = fromWords(0x3C971547, 0x652b82fe)                     /* 8.0085662595372944372e-17 */
+private let powCp = fromWords(0x3FEEC709, 0xDC3A03FD)
+private let powCpH = fromWords(0x3FEEC709, 0xE0000000)
+private let powCpL = fromWords(0xBE3E2FE0, 0x145B01F5)
+private let powIvln2 = fromWords(0x3FF71547, 0x652B82FE)
+private let powIvln2H = fromWords(0x3FF71547, 0x60000000)
+private let powIvln2L = fromWords(0x3E54AE0B, 0xF85DDF44)
+
+public func detPow(_ x: Double, _ y: Double) -> Double {
+    // i0/i1 in the upstream source (an endianness probe reading `*(int*)&one`) are computed
+    // but never used anywhere else in __ieee754_pow; omitted here as dead code.
+    let hx = HI(x), lx = LO(x)
+    let hy = HI(y), ly = LO(y)
+    let ix = hx & 0x7fffffff
+    let iy = hy & 0x7fffffff
+
+    if (iy | ly) == 0 { return powOne }                          /* x**0 = 1 */
+
+    if ix > 0x7ff00000 || (ix == 0x7ff00000 && lx != 0)
+        || iy > 0x7ff00000 || (iy == 0x7ff00000 && ly != 0) {
+        return x + y                                              /* +-NaN */
+    }
+
+    /* yisint: 0 = not integer, 1 = odd integer, 2 = even integer (only computed when x<0) */
+    var yisint: Int32 = 0
+    if hx < 0 {
+        if iy >= 0x43400000 {
+            yisint = 2
+        } else if iy >= 0x3ff00000 {
+            let k = (iy >> 20) &- 0x3ff
+            if k > 20 {
+                // ly>>(52-k)/(j<<(52-k)) mirror an unsigned shift by a runtime amount that the
+                // upstream C leaves formally undefined for k > 52 (huge |y|); done here with
+                // masking shifts so it can never trap, matching the hardware's usual
+                // mod-bitwidth shift behaviour. The golden this is checked against (Decision
+                // 14) never exercises |y| this huge, so this path is covered only by the
+                // no-trap sweep, not by a bit-exact match requirement.
+                let shiftAmount = UInt32(bitPattern: 52 &- k)
+                let lyU = UInt32(bitPattern: ly)
+                let jU = lyU &>> shiftAmount
+                if (jU &<< shiftAmount) == lyU { yisint = 2 &- Int32(bitPattern: jU & 1) }
+            } else if ly == 0 {
+                let shiftAmount = UInt32(bitPattern: 20 &- k)      /* 0...20, always in range */
+                let iyU = UInt32(bitPattern: iy)
+                let jU = iyU &>> shiftAmount
+                if (jU &<< shiftAmount) == iyU { yisint = 2 &- Int32(bitPattern: jU & 1) }
+            }
+        }
+    }
+
+    if ly == 0 {
+        if iy == 0x7ff00000 {                                     /* y is +-inf */
+            if ((ix &- 0x3ff00000) | lx) == 0 { return y - y }     /* inf**+-1 is NaN */
+            if ix >= 0x3ff00000 { return hy >= 0 ? y : powZero }   /* (|x|>1)**+-inf */
+            return hy < 0 ? -y : powZero                            /* (|x|<1)**-,+inf */
+        }
+        if iy == 0x3ff00000 {                                      /* y is +-1 */
+            return hy < 0 ? powOne / x : x
+        }
+        if hy == 0x40000000 { return x * x }                       /* y is 2 */
+        if hy == 0x3fe00000 {                                       /* y is 0.5 */
+            if hx >= 0 { return x.squareRoot() }                    /* x >= +0 */
+        }
+    }
+
+    let ax = abs(x)
+    if lx == 0 {
+        if ix == 0x7ff00000 || ix == 0 || ix == 0x3ff00000 {       /* x is +-0,+-inf,+-1 */
+            var z = ax
+            if hy < 0 { z = powOne / z }
+            if hx < 0 {
+                if ((ix &- 0x3ff00000) | yisint) == 0 {
+                    z = (z - z) / (z - z)                            /* (-1)**non-int is NaN */
+                } else if yisint == 1 {
+                    z = -z                                            /* (x<0)**odd = -(|x|**odd) */
+                }
+            }
+            return z
+        }
+    }
+
+    var n = (hx >> 31) &+ 1
+
+    if (n | yisint) == 0 { return (x - x) / (x - x) }               /* (x<0)**(non-int) is NaN */
+
+    var s = powOne
+    if (n | (yisint &- 1)) == 0 { s = -powOne }                     /* (-ve)**(odd int) */
+
+    var t1 = 0.0, t2 = 0.0
+
+    if iy > 0x41e00000 {                                             /* |y| > 2**31 */
+        if iy > 0x43f00000 {                                         /* |y| > 2**64 */
+            if ix <= 0x3fefffff { return hy < 0 ? powHuge * powHuge : powTiny * powTiny }
+            if ix >= 0x3ff00000 { return hy > 0 ? powHuge * powHuge : powTiny * powTiny }
+        }
+        if ix < 0x3fefffff { return hy < 0 ? s * powHuge * powHuge : s * powTiny * powTiny }
+        if ix > 0x3ff00000 { return hy > 0 ? s * powHuge * powHuge : s * powTiny * powTiny }
+        /* now |1-x| is tiny <= 2**-20 */
+        let t = ax - powOne
+        let w = (t * t) * (0.5 - t * (0.3333333333333333333333 - t * 0.25))
+        let u = powIvln2H * t
+        let v = t * powIvln2L - w * powIvln2
+        var t1a = u + v
+        t1a = setLO(t1a, 0)
+        t2 = v - (t1a - u)
+        t1 = t1a
+    } else {
+        var ss = 0.0, s2 = 0.0, sH = 0.0, sL = 0.0, tH = 0.0, tL = 0.0
+        n = 0
+        var axv = ax
+        var ixv = ix
+        if ixv < 0x00100000 {                                        /* subnormal x */
+            axv *= powTwo53
+            n &-= 53
+            ixv = HI(axv)
+        }
+        n &+= (ixv >> 20) &- 0x3ff
+        let j = ixv & 0x000fffff
+        ixv = j | 0x3ff00000
+        var k: Int32
+        if j <= 0x3988E {
+            k = 0
+        } else if j < 0xBB67A {
+            k = 1
+        } else {
+            k = 0
+            n &+= 1
+            ixv &-= 0x00100000
+        }
+        axv = setHI(axv, UInt32(bitPattern: ixv))
+
+        let u = axv - powBp[Int(k)]
+        let v = powOne / (axv + powBp[Int(k)])
+        ss = u * v
+        sH = setLO(ss, 0)
+        tH = setHI(powZero, UInt32(bitPattern: ((ixv >> 1) | 0x20000000) &+ 0x00080000 &+ (k << 18)))
+        tL = axv - (tH - powBp[Int(k)])
+        sL = v * ((u - sH * tH) - sH * tL)
+        s2 = ss * ss
+        var r = s2 * s2 * (powL1 + s2 * (powL2 + s2 * (powL3 + s2 * (powL4 + s2 * (powL5 + s2 * powL6)))))
+        r += sL * (sH + ss)
+        s2 = sH * sH
+        tH = 3.0 + s2 + r
+        tH = setLO(tH, 0)
+        tL = r - ((tH - 3.0) - s2)
+        let u2 = sH * tH
+        let v2 = sL * tH + tL * ss
+        var pH = u2 + v2
+        pH = setLO(pH, 0)
+        let pL = v2 - (pH - u2)
+        let zH = powCpH * pH
+        let zL = powCpL * pH + pL * powCp + powDpL[Int(k)]
+        let t = Double(n)
+        var t1b = ((zH + zL) + powDpH[Int(k)]) + t
+        t1b = setLO(t1b, 0)
+        t2 = zL - (((t1b - t) - powDpH[Int(k)]) - zH)
+        t1 = t1b
+    }
+
+    let y1 = setLO(y, 0)
+    let pL = (y - y1) * t1 + y * t2
+    var pH = y1 * t1
+    var z = pL + pH
+    var j = HI(z)
+    var i = LO(z)
+    if j >= 0x40900000 {                                             /* z >= 1024 */
+        if ((j &- 0x40900000) | i) != 0 { return s * powHuge * powHuge }  /* z > 1024 */
+        if pL + powOvt > z - pH { return s * powHuge * powHuge }
+    } else if (j & 0x7fffffff) >= 0x4090cc00 {                        /* z <= -1075 */
+        if ((j &- Int32(bitPattern: 0xc090cc00)) | i) != 0 { return s * powTiny * powTiny }
+        if pL <= z - pH { return s * powTiny * powTiny }
+    }
+
+    i = j & 0x7fffffff
+    var k = (i >> 20) &- 0x3ff
+    n = 0
+    if i > 0x3fe00000 {                                                /* |z| > 0.5 */
+        n = j &+ (0x00100000 >> (k &+ 1))
+        k = ((n & 0x7fffffff) >> 20) &- 0x3ff
+        var t = powZero
+        t = setHI(t, UInt32(bitPattern: n & ~(0x000fffff >> k)))
+        n = ((n & 0x000fffff) | 0x00100000) >> (20 &- k)
+        if j < 0 { n = -n }
+        pH -= t
+    }
+    var t = pL + pH
+    t = setLO(t, 0)
+    let u = t * powLg2H
+    let v = (pL - (t - pH)) * powLg2 + t * powLg2L
+    z = u + v
+    let w = v - (z - u)
+    t = z * z
+    t1 = z - t * (powP1 + t * (powP2 + t * (powP3 + t * (powP4 + t * powP5))))
+    let r2 = (z * t1) / (t1 - powTwo) - (w + z * w)
+    z = powOne - (r2 - z)
+    j = HI(z)
+    j &+= (n << 20)
+    if (j >> 20) <= 0 {
+        z = detScalbn(z, n)
+    } else {
+        z = setHI(z, UInt32(bitPattern: HI(z) &+ (n << 20)))
+    }
+    return s * z
 }
 
 // ---------------------------------------------------------------------------
