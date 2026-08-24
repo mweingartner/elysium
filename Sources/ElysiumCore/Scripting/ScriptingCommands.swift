@@ -38,12 +38,20 @@ public struct ScriptingCommandContext {
     /// change and never exercises those two subcommands (they refuse
     /// cleanly with "no AI journal this session" rather than trapping).
     public let aiJournal: AIJournal?
+    /// lan-client-parity (change 4): the provenance every mutating executor
+    /// this context reaches (`store.set/define/remove`, `scriptStore.attach`,
+    /// `eventBus.subscribe`/`.raise`) records. `.player` for every context
+    /// built before this change (the host's own commands); `.lan(peer:)` for
+    /// a guest `scriptIntent` executed through `GameCore.scriptingCommandContext
+    /// (guestPeerID:)`.
+    public let author: Provenance.Author
 
     public init(
         graph: ObjectGraph, store: AttributeStore, target: ObjectTargetContext, isLANClient: Bool, tick: Int64,
         eventBus: EventBus, scriptStore: ScriptStore, scriptRuntime: ScriptRuntime?, scriptsTrusted: Bool,
         killSwitchOn: Bool, trustWorld: @escaping () -> Void, setKillSwitch: @escaping (Bool) -> Void,
-        markScriptAttached: @escaping () -> Void = {}, aiJournal: AIJournal? = nil
+        markScriptAttached: @escaping () -> Void = {}, aiJournal: AIJournal? = nil,
+        author: Provenance.Author = .player
     ) {
         self.graph = graph
         self.store = store
@@ -59,6 +67,7 @@ public struct ScriptingCommandContext {
         self.setKillSwitch = setKillSwitch
         self.markScriptAttached = markScriptAttached
         self.aiJournal = aiJournal
+        self.author = author
     }
 }
 
@@ -94,6 +103,38 @@ public enum ScriptingCommands {
     }
 
     public static func helpSummary() -> String { "attr, inspect, objects, on, unsubscribe, events, script" }
+
+    /// lan-client-parity (change 4), design.md §11: the guest `scriptIntent`
+    /// family — "author/attach/detach/run-script, attr set/define/remove,
+    /// subscribe/unsubscribe". Read commands (`inspect`, `objects`,
+    /// `events recent`) and world-level settings (`script trust|off|on`,
+    /// `script journal|undo-ai|list|show`) stay host-only always — a guest
+    /// reads through the replicated mirror, never a live host query, and
+    /// never touches the trust/kill-switch gate. Shared by both sides of the
+    /// wire: `CommandsM` (client) calls it to decide whether a normally-
+    /// refused command should instead be sent as a `scriptIntent`, and the
+    /// host re-validates the exact same predicate before dispatch — a
+    /// `scriptIntent` is never trusted to only ever carry an allowed shape.
+    public static func lanForwardableCommand(_ command: String, _ arguments: [String]) -> Bool {
+        switch command.lowercased() {
+        case "attr":
+            switch arguments.first?.lowercased() {
+            case "set", "define", "remove": return true
+            default: return false
+            }
+        case "script":
+            switch arguments.first?.lowercased() {
+            case "attach", "detach", "run": return true
+            default: return false
+            }
+        case "on", "unsubscribe":
+            return true
+        case "events":
+            return arguments.first?.lowercased() == "emit"
+        default:
+            return false
+        }
+    }
 
     public static func run(command: String, arguments: [String], context: ScriptingCommandContext) -> ScriptingCommandResult {
         let cmd = command.lowercased()
@@ -281,7 +322,7 @@ public enum ScriptingCommands {
                 case .outOfRange(let range): return fail("\(name) must be in \(range)")
                 }
             }
-            switch context.store.set(ref, name, value) {
+            switch context.store.set(ref, name, value, by: context.author) {
             case .success(let v): return ok(["\(ref.canonical).\(name) = \(AttrValueCodec.encode(v))"])
             case .failure(let err): return fail(message(for: err, ref: ref, name: name))
             }
@@ -304,7 +345,7 @@ public enum ScriptingCommands {
             guard let value = parseValueTokens(tokens, context: context) else {
                 return fail("could not parse value '\(tokens.joined(separator: " "))'")
             }
-            switch context.store.define(ref, nameAndRest, value, readonly: readonly, force: force) {
+            switch context.store.define(ref, nameAndRest, value, readonly: readonly, force: force, by: context.author) {
             case .success(let result):
                 var line = "\(ref.canonical).\(nameAndRest) = \(AttrValueCodec.encode(result.value))"
                 if readonly { line += " (readonly)" }
@@ -323,7 +364,7 @@ public enum ScriptingCommands {
         case .failure(let msg): return fail(msg.text)
         case .success(let (ref, _)):
             let force = rest.contains("--force")
-            switch context.store.remove(ref, name, force: force) {
+            switch context.store.remove(ref, name, force: force, by: context.author) {
             case .success(let result):
                 guard result.existed else { return fail("\(name) is not set on \(ref.canonical)") }
                 return ok([result.forced ? "removed \(name) (forced)" : "removed \(name)"])
@@ -595,8 +636,8 @@ public enum ScriptingCommands {
             return fail("'\(handlerToken)' is not a valid '<script>.<handler>'")
         }
         switch context.eventBus.subscribe(
-            subscriber: .player, scriptName: scriptName, handler: handler, target: target, event: event,
-            attribute: attribute, createdBy: .player, tick: context.tick
+            subscriber: context.target.selfRef, scriptName: scriptName, handler: handler, target: target, event: event,
+            attribute: attribute, createdBy: context.author, tick: context.tick
         ) {
         case .success(let sub):
             return ok(["subscribed #\(sub.id): \(event.rawValue) on \(target.displayText) -> \(scriptName).\(handler)"])
@@ -631,7 +672,7 @@ public enum ScriptingCommands {
             guard rest.count >= 2 else { return fail("Usage: /events emit <target> <event>") }
             guard let ref = context.target.resolve(alias: rest[0]) else { return fail("no such object '\(rest[0])'") }
             guard let event = EventKind.parse(rest[1]) else { return fail("'\(rest[1])' is not a valid event name") }
-            switch context.eventBus.raise(kind: event, subject: ref, source: .player, tick: context.tick) {
+            switch context.eventBus.raise(kind: event, subject: ref, source: eventSource(for: context.author), tick: context.tick) {
             case .enqueued, .coalesced:
                 return ok(["emitted \(event.rawValue) on \(ref.canonical)"])
             case .droppedQueueFull:
@@ -740,6 +781,22 @@ public enum ScriptingCommands {
         case .player: return "player"
         case .ai(let model): return "ai:\(model)"
         case .script(let owner, let name): return "script:\(owner.canonical):\(name)"
+        case .lan(let peer): return "lan:\(peer)"
+        }
+    }
+
+    /// lan-client-parity (change 4): `/events emit`'s `EventSource` — mirrors
+    /// the identical `Provenance.Author` -> `EventSource` mapping duplicated
+    /// in `GameCore+Scripting.swift`/`ScriptRuntime.swift` (attribute-change
+    /// funnels), so a guest-forwarded `/events emit` records `.lan(peerID:)`
+    /// on the raised event exactly like a guest-forwarded `/attr set`
+    /// records `.lan(peer:)` on the attribute write.
+    private static func eventSource(for author: Provenance.Author) -> EventSource {
+        switch author {
+        case .player: return .player
+        case .ai(let model): return .ai(model: model)
+        case .script(let owner, let name): return .script(owner: owner, name: name)
+        case .lan(let peer): return .lan(peerID: peer)
         }
     }
 
@@ -771,7 +828,7 @@ public enum ScriptingCommands {
             guard !sourceTokens.isEmpty else { return fail(usageScript) }
             let source = sourceTokens.joined(separator: " ")
             switch context.scriptStore.attach(
-                ref, name: name, source: source, mode: mode, triggers: triggers, by: .player, tick: context.tick
+                ref, name: name, source: source, mode: mode, triggers: triggers, by: context.author, tick: context.tick
             ) {
             case .success:
                 context.markScriptAttached()

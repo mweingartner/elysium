@@ -21,19 +21,90 @@ func runCommand(_ game: GameCore, _ raw: String) {
     // consulted here — before any other work, including `guard let p =
     // game.player` below — for every scripting command and `ai`/`agent`
     // (closing the pre-existing guest `/ai` hole).
-    if game.isLANClientWorld, let refusal = ScriptingCommands.lanClientRefusal(command: cmd) {
+    //
+    // lan-client-parity (change 4), design.md §11 phase 4: parity now exists
+    // for a bounded set of mutating commands and `/ai` — those are forwarded
+    // as a `scriptIntent` instead of refused locally. The host is the one
+    // that grants or refuses (`canScript`/`canUseAI`); this is an optimistic
+    // send exactly like every other guest intent (block/attack/toss/…) —
+    // "everything unGranted keeps the refusal" happens over the wire as a
+    // `scriptIntentRefused`/`permissionDenied` receipt, not here. Everything
+    // else (`inspect`, `objects`, `events recent`, `script list|show|
+    // journal|undo-ai|trust|off|on`) has no intent path and keeps the local
+    // refusal below.
+    // `/script edit` never mutates anything itself — it only opens the local
+    // `ScriptEditorScreen` (a UI action). It is neither forwarded nor
+    // refused here; it falls through to the same open-screen handling below
+    // for a host and a guest alike, and the screen itself (in guest mode)
+    // is what sends an intent, on Save/Run.
+    let isScriptEdit = cmd == "script" && args.first?.lowercased() == "edit"
+    if game.isLANClientWorld, !isScriptEdit,
+       (cmd == "ai" || cmd == "agent" || ScriptingCommands.lanForwardableCommand(cmd, args)) {
+        // A world in `isLANClientWorld` is, in production, always backed by a live connection —
+        // this check only ever bites in a test/edge case where the two have drifted apart (e.g.
+        // a connection that dropped between typing and dispatch). Report it exactly like every
+        // other "nothing to send this to" LAN action does, rather than silently swallowing the
+        // command (`sendScriptIntent`'s own no-clientPeer guard is otherwise silent by design,
+        // matching every other guest intent send-helper in this file).
+        guard LANMultiplayerManager.shared.state == .connected else {
+            pushChat("§cNo active LAN connection.")
+            return
+        }
+        if cmd == "ai" || cmd == "agent" {
+            let prompt = args.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            if prompt.lowercased() == "cancel" {
+                pushChat("§7a forwarded AI request cannot be cancelled from a guest yet")
+                return
+            }
+            guard !prompt.isEmpty else { return pushChat("§cUsage: /ai <request>") }
+            LANMultiplayerManager.shared.sendScriptIntent(.aiPrompt(prompt))
+            return
+        }
+        LANMultiplayerManager.shared.sendScriptIntent(.command(cmd, args))
+        return
+    }
+    if game.isLANClientWorld, !isScriptEdit, let refusal = ScriptingCommands.lanClientRefusal(command: cmd) {
         pushChat("§c" + refusal)
         return
     }
     if cmd == "attr" || cmd == "inspect" || cmd == "objects" || cmd == "on" || cmd == "unsubscribe" || cmd == "events" || cmd == "script" {
+        // lan-client-parity (change 4), design.md §11/§12: "a host `/script trust`-style
+        // per-peer grant" — `/script trust <peer>` (bare) is the existing world-level trust
+        // gate (`ScriptingCommands.scriptTrust`, unchanged, no target argument); adding a
+        // target argument here is a *different* grant (a connected peer's `canScript`/
+        // `canUseAI`), so it is intercepted before reaching the Core executor — Core has (and
+        // should have) no notion of a LAN peer at all, only `ScriptingCommandContext.
+        // scriptsTrusted` (the world gate). `off` revokes; `ai` targets `canUseAI` instead.
+        if cmd == "script", args.count > 1, args[0].lowercased() == "trust" {
+            let peerToken = args[1]
+            let rest = Set(args.dropFirst(2).map { $0.lowercased() })
+            let result = elysiumMainActorSync {
+                LANMultiplayerManager.shared.grantPeerScript(
+                    peerToken: peerToken, ai: rest.contains("ai"), revoke: rest.contains("off")
+                )
+            }
+            switch result {
+            case .success(let message): pushChat("§7" + message)
+            case .failure(let reason): pushChat("§c" + reason.text)
+            }
+            return
+        }
         // script-runtime (change 1c): `/script edit [target] [name]` opens
         // the paste-only `ScriptEditorScreen` — a UI action, so it is
         // handled here (app layer) rather than in `ScriptingCommands` (pure
         // Core, no screens). Every other `/script` subcommand goes through
         // the same Core executor as `/attr`/`/on`/etc.
-        if cmd == "script", args.first == "edit" {
+        if isScriptEdit {
             let targetToken = args.count > 1 ? args[1] : "self"
-            guard let ref = game.scriptingCommandContext().target.resolve(alias: targetToken) else {
+            // lan-client-parity (change 4): a guest has no cursor/looking
+            // resolution (`scriptingCommandContext(guestPeerID:)` disables
+            // it) and no world-authoritative alias resolution to speak of
+            // beyond `self`/`world`/`dim`/an explicit ref — this reuses the
+            // exact same target grammar a host's own `/script edit` does.
+            let resolverContext = game.isLANClientWorld
+                ? game.scriptingCommandContext(guestPeerID: LANMultiplayerManager.shared.localGuestPeerID)
+                : game.scriptingCommandContext()
+            guard let ref = resolverContext.target.resolve(alias: targetToken) else {
                 pushChat("§cno such object '\(targetToken)'")
                 return
             }

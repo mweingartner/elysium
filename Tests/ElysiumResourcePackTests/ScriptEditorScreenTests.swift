@@ -196,6 +196,73 @@ final class ScriptEditorScreenTests: XCTestCase {
         XCTAssertEqual(game.scriptingCommandContext().scriptStore.list(.player).count, 0,
                        "Run is ephemeral (§9.3) — it must never attach anything")
     }
+
+    // MARK: - lan-client-parity (change 4): guest mode
+
+    private func makeLANClientGameAndUI() throws -> (GameCore, UIManager) {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let ui = UIManager(cv: UICanvas(device: device))
+        ui.resize(480, 270, 1)
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elysium-script-editor-guest-\(UUID().uuidString).sqlite")
+        addTeardownBlock { try? FileManager.default.removeItem(at: databaseURL) }
+        let game = GameCore(db: try SaveDB.open(databaseURL: databaseURL, migrateLegacy: false))
+        game.enterLANClientWorld(LANWorldSummary(
+            worldID: "guest-editor-host", worldName: "Guest Editor Host", seed: 4242,
+            gameMode: GameMode.survival, difficulty: 2, dimension: Dim.overworld.rawValue, playerCount: 2
+        ))
+        XCTAssertTrue(game.isLANClientWorld)
+        return (game, ui)
+    }
+
+    /// design.md §11 phase 4: Save on a guest never calls `ScriptStore.attach` directly (it
+    /// would refuse with `.lanClient` immediately, same as every other direct guest write) — it
+    /// sends a `scriptIntent` instead and reports doing so, rather than either silently failing
+    /// or attaching locally.
+    func testGuestSaveNeverAttachesLocallyAndReportsSendingToHost() throws {
+        let (game, ui) = try makeLANClientGameAndUI()
+        let screen = ScriptEditorScreen(target: .player, existingName: nil)
+        ui.open(screen, game)
+        let nameField = try XCTUnwrap(screen.fields.first { $0.id == "script.name" })
+        nameField.text = "greet"
+        type("log('hi')", into: screen, ui, game)
+
+        chatLog.removeAll()
+        try click("Save", on: screen)
+
+        XCTAssertTrue(chatLog.contains { $0.text.contains("sent") && $0.text.contains("host") },
+                      "expected a 'sent ... to the host' chat line; got: \(chatLog.map(\.text))")
+        // Never attached anything through the guest's own (inert) executor — resolving `.player`
+        // built-ins doesn't need a live world at all here, so this is a meaningful assertion, not
+        // a vacuous one: the guest's local `scriptingCommandContext()` executor was never called.
+        XCTAssertEqual(game.scriptingCommandContext().scriptStore.list(.player).count, 0)
+    }
+
+    /// Re-opening the editor on an existing script name never shows source — only the
+    /// replicated name/mode, and a note explaining why.
+    func testGuestEditorPrefillsOnlyReplicatedMetadataNeverSource() throws {
+        let (game, ui) = try makeLANClientGameAndUI()
+        let manager = LANMultiplayerManager.shared
+        manager.attachGame(game)
+        let ref = ObjectRef.player
+        _ = manager.applyReplicationBatchForTesting(LANReplicationBatch(
+            tick: 1, fullSnapshot: false,
+            objectAttributes: [LANObjectAttributeSnapshot(
+                ref: ref.canonical, revision: 1, attrsJSON: "{}",
+                scriptsJSON: LANObjectAttributeSnapshot.encodeScripts([
+                    LANScriptMetadata(name: "greet", mode: "handler", enabled: true),
+                ])
+            )]
+        ))
+
+        let screen = ScriptEditorScreen(target: .player, existingName: "greet")
+        ui.open(screen, game)
+
+        XCTAssertEqual(screen.lines, [""], "source must never be prefilled for a guest")
+        XCTAssertTrue(screen.handlerMode, "mode must come from replicated metadata")
+        XCTAssertTrue(screen.statusMessage?.contains("greet") == true, "expected a status note naming the script")
+        XCTAssertFalse(screen.statusIsError)
+    }
 }
 
 @MainActor
@@ -235,5 +302,39 @@ final class InspectorDataProviderTests: XCTestCase {
         let rows = inspectorRows(target: .player, game: game)
         XCTAssertEqual(rows.filter { $0.contains("(none)") }.count, 3,
                        "attributes, scripts, and subscriptions all report emptiness explicitly")
+    }
+
+    /// lan-client-parity (change 4): the guest Scripts section now surfaces replicated
+    /// name/mode/enabled metadata (marked read-only) instead of the old "not available to
+    /// guests" note — Subscriptions is unaffected (design.md §11 scopes guest parity to
+    /// attrs/scripts, not subscriptions).
+    func testGuestRowsShowReplicatedScriptMetadataButNotSubscriptions() throws {
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elysium-inspector-guest-\(UUID().uuidString).sqlite")
+        addTeardownBlock { try? FileManager.default.removeItem(at: databaseURL) }
+        let game = GameCore(db: try SaveDB.open(databaseURL: databaseURL, migrateLegacy: false))
+        game.enterLANClientWorld(LANWorldSummary(
+            worldID: "guest-inspector-host", worldName: "Guest Inspector Host", seed: 4242,
+            gameMode: GameMode.survival, difficulty: 2, dimension: Dim.overworld.rawValue, playerCount: 2
+        ))
+
+        let manager = LANMultiplayerManager.shared
+        manager.attachGame(game)
+        let ref = ObjectRef.player
+        _ = manager.applyReplicationBatchForTesting(LANReplicationBatch(
+            tick: 1, fullSnapshot: false,
+            objectAttributes: [LANObjectAttributeSnapshot(
+                ref: ref.canonical, revision: 1, attrsJSON: "{}",
+                scriptsJSON: LANObjectAttributeSnapshot.encodeScripts([
+                    LANScriptMetadata(name: "greet", mode: "module", enabled: true),
+                ])
+            )]
+        ))
+
+        let rows = inspectorRows(target: ref, game: game)
+        XCTAssertTrue(rows.contains { $0.contains("greet") && $0.contains("module") && $0.contains("replicated, read-only") },
+                      "got: \(rows)")
+        XCTAssertTrue(rows.contains { $0.contains("not available to guests") },
+                      "subscriptions must still say unavailable; got: \(rows)")
     }
 }

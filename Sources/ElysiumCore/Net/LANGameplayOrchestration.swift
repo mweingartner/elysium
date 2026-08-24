@@ -48,6 +48,16 @@ public struct LANPeerRecordSnapshot: Equatable {
     public var lastAckTick: Int
     public var lastSeenTick: Int
     public var disconnectedTick: Int?
+    /// lan-client-parity (change 4), design.md §11: the guest's own
+    /// `player:lan:<peerID>` object's `ObjectRecord` (attrs *and* scripts —
+    /// one document, exactly like every other object kind's persistence),
+    /// `ObjectRecordCodec`-encoded. `nil` when never populated (a peer that
+    /// predates this change, or one with an empty record). Seeded from
+    /// `lan_players` on reconnect (`seedPeerRecord`); the *live* value while
+    /// connected lives on the `LANRemotePlayerEntity.objectRecord` in
+    /// `World.entities`, not here — this field is the persistence round-trip
+    /// only (see `persistAllHostPeerRecords` in `LANTransport.swift`).
+    public var objectRecordText: String?
 
     public init(
         playerID: String,
@@ -60,7 +70,8 @@ public struct LANPeerRecordSnapshot: Equatable {
         inventoryRevision: Int = 0,
         lastAckTick: Int,
         lastSeenTick: Int,
-        disconnectedTick: Int?
+        disconnectedTick: Int?,
+        objectRecordText: String? = nil
     ) {
         self.playerID = playerID
         self.displayName = displayName
@@ -73,6 +84,7 @@ public struct LANPeerRecordSnapshot: Equatable {
         self.lastAckTick = lastAckTick
         self.lastSeenTick = lastSeenTick
         self.disconnectedTick = disconnectedTick
+        self.objectRecordText = objectRecordText
     }
 }
 
@@ -384,6 +396,20 @@ public func lanRemotePlayerRenderYaw(fromPlayerYaw yaw: Double) -> Double {
     return value
 }
 
+/// lan-client-parity (change 4): the live `LANRemotePlayerEntity` mirroring a
+/// connected guest in `world`, if any — the lookup `ObjectGraphHost.
+/// lanRemotePlayer(peerID:)` delegates to on the host. `world` is always the
+/// *current* dimension's world (mirroring `removeLANRemotePlayer`'s own
+/// scope); `applyLANRemotePlayers` never materializes a ghost entity in a
+/// dimension the host isn't currently in, so a peer connected but elsewhere
+/// simply has none to find here.
+public func lanRemotePlayerEntity(peerID: String, in world: World) -> LANRemotePlayerEntity? {
+    let cleanID = String(peerID.prefix(128))
+    return world.entities.first(where: {
+        ($0 as? LANRemotePlayerEntity)?.multiplayerPlayerID == cleanID
+    }) as? LANRemotePlayerEntity
+}
+
 @discardableResult
 public func removeLANRemotePlayer(_ playerID: String, from world: World) -> Bool {
     let cleanID = String(playerID.prefix(128))
@@ -415,7 +441,12 @@ public func applyLANRemotePlayers(
     to world: World,
     localPlayerID: String?,
     removeMissing: Bool = true,
-    inventorySnapshots: [String: LANPlayerInventorySnapshot] = [:]
+    inventorySnapshots: [String: LANPlayerInventorySnapshot] = [:],
+    /// lan-client-parity (change 4): applied once, only when a *new*
+    /// `LANRemotePlayerEntity` is created — a live entity's `objectRecord`
+    /// is its own source of truth afterward (an update never overwrites it,
+    /// exactly like inventory snapshots are only ever applied on creation).
+    objectRecordTexts: [String: String] = [:]
 ) -> LANRemotePlayerApplyReport {
     var report = LANRemotePlayerApplyReport()
     let local = localPlayerID.map { String($0.prefix(128)) }
@@ -439,6 +470,10 @@ public func applyLANRemotePlayers(
             let remote = LANRemotePlayerEntity(world: world, state: state)
             if let inventory = inventorySnapshots[state.playerID] {
                 _ = applyLANInventorySnapshot(inventory, to: remote)
+            }
+            if let text = objectRecordTexts[state.playerID],
+               let record = ObjectRecordCodec.decode(text, caps: .defaults) {
+                remote.objectRecord = record
             }
             world.addEntity(remote)
             report.spawned += 1

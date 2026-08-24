@@ -88,6 +88,18 @@ extension GameCore: ObjectGraphHost {
     // `GameCore` itself (Game/GameCore.swift) with the exact signatures this
     // protocol declares — no forwarding needed here.
 
+    /// lan-client-parity (change 4): `nil` on a guest (`isLANClientWorld`) —
+    /// a guest never resolves another peer's `player:lan:*` object, only the
+    /// host does. On the host, looks up the live mirror in the *current*
+    /// dimension's world only (a peer connected but elsewhere is `.dormant`,
+    /// handled by `ObjectGraph.resolve` itself, not here).
+    public func lanRemotePlayer(peerID: String) -> (entity: LANRemotePlayerEntity, world: World)? {
+        guard !isLANClientWorld, let w = worlds[dim],
+              let entity = lanRemotePlayerEntity(peerID: peerID, in: w)
+        else { return nil }
+        return (entity, w)
+    }
+
     // MARK: - graph / store / command context
 
     /// event-bus (change 1b). One `EventBus` per open world session — see
@@ -116,6 +128,7 @@ extension GameCore: ObjectGraphHost {
             case .player: source = .player
             case .ai(let model): source = .ai(model: model)
             case .script(let owner, let scriptName): source = .script(owner: owner, name: scriptName)
+            case .lan(let peer): source = .lan(peerID: peer)
             }
             self.eventBus.raise(
                 kind: .attributeChanged, subject: ref,
@@ -145,10 +158,23 @@ extension GameCore: ObjectGraphHost {
     /// Builds the context `ScriptingCommands.run` needs — a fresh `ObjectGraph`/
     /// `AttributeStore` pair over `self`, the target-alias context, LAN-client
     /// state and the current tick.
-    public func scriptingCommandContext() -> ScriptingCommandContext {
+    ///
+    /// lan-client-parity (change 4): `guestPeerID` builds the context a
+    /// validated `scriptIntent` executes through — every executor stays
+    /// identical (same `store`/`scriptStore`/`eventBus`/trust gate/kill
+    /// switch as the host's own commands, per design.md §11 "same executors
+    /// as the player"), but `author` becomes `.lan(peer:)`, `self` resolves
+    /// to the guest's own `player:lan:<peerID>` (not the host's `.player`),
+    /// and `looking`/`cursor` are disabled (`nil`) — the host has no
+    /// structured notion of a *guest's* crosshair target, so a forwarded
+    /// command must name an explicit ref or `self`/`world`/`dim`.
+    public func scriptingCommandContext(guestPeerID: String? = nil) -> ScriptingCommandContext {
         let graph = ObjectGraph(host: self)
         let store = makeAttributeStore(graph: graph)
-        let targetContext = ObjectTargetContext(currentDimension: dim, cursor: { [weak self] in self?.cursorObjectRef() })
+        let author: Provenance.Author = guestPeerID.map { .lan(peer: $0) } ?? .player
+        let selfRef: ObjectRef = guestPeerID.map { .lanPlayer(peerID: $0) } ?? .player
+        let cursorResolver: () -> ObjectRef? = guestPeerID == nil ? { [weak self] in self?.cursorObjectRef() } : { nil }
+        let targetContext = ObjectTargetContext(currentDimension: dim, cursor: cursorResolver, selfRef: selfRef)
         return ScriptingCommandContext(
             graph: graph, store: store, target: targetContext, isLANClient: isLANClientWorld,
             tick: Int64(world.time), eventBus: eventBus,
@@ -163,7 +189,7 @@ extension GameCore: ObjectGraphHost {
             },
             setKillSwitch: { [weak self] on in self?.setGameRule("doScripts", on ? 1 : 0) },
             markScriptAttached: { [weak self] in self?.scripting.anyScriptsAttached = true },
-            aiJournal: scripting.aiJournal
+            aiJournal: scripting.aiJournal, author: author
         )
     }
 

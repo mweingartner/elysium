@@ -27,6 +27,12 @@ public struct Provenance: Equatable, Sendable {
         case ai(model: String)
         /// Reserved for 1c script writes.
         case script(owner: ObjectRef, name: String)
+        /// lan-client-parity (change 4): a validated `scriptIntent` from a
+        /// connected guest, executed on the host through the same executors
+        /// as `.player`. `peer` is the socket-bound `peer.playerID` (never a
+        /// wire-claimed value), ≤ 128 bytes — the same identity the LAN
+        /// transport already trusts everywhere else.
+        case lan(peer: String)
     }
 
     public var createdBy: Author
@@ -378,6 +384,7 @@ public enum ObjectRecordCodec {
         case .player: return "player"
         case .ai(let model): return "ai:\(model)"
         case .script(let owner, let name): return "script:\(owner.canonical):\(name)"
+        case .lan(let peer): return "lan:\(peer)"
         }
     }
 
@@ -395,6 +402,11 @@ public enum ObjectRecordCodec {
             let name = String(rest[rest.index(after: lastColon)...])
             guard let ref = ObjectRef.parse(refText), isValidAttributeName(name) else { return nil }
             return .script(owner: ref, name: name)
+        }
+        if s.hasPrefix("lan:") {
+            let peer = String(s.dropFirst(4))
+            guard !peer.isEmpty, peer.utf8.count <= 128 else { return nil }
+            return .lan(peer: peer)
         }
         return nil
     }

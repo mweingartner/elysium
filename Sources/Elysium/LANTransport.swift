@@ -143,6 +143,11 @@ private struct LANPeerRateLimiter {
     var replicationAck: LANTokenBucket
     var inventoryUpdate: LANTokenBucket
     var containerEditIntent: LANTokenBucket
+    /// lan-client-parity (change 4): deliberately far tighter than
+    /// `gameplayIntent` — a `scriptIntent` can trigger host-side script
+    /// compilation or an outbound AI request, so a guest gets a handful per
+    /// second, not sixty.
+    var scriptIntent: LANTokenBucket
 
     init(now: Double = Date.timeIntervalSinceReferenceDate) {
         chat = LANTokenBucket(capacity: 8, refillPerSecond: 8.0 / 10.0, now: now)
@@ -153,6 +158,7 @@ private struct LANPeerRateLimiter {
         replicationAck = LANTokenBucket(capacity: 60, refillPerSecond: 60, now: now)
         inventoryUpdate = LANTokenBucket(capacity: 25, refillPerSecond: 25, now: now)
         containerEditIntent = LANTokenBucket(capacity: 20, refillPerSecond: 20, now: now)
+        scriptIntent = LANTokenBucket(capacity: 6, refillPerSecond: 6.0 / 10.0, now: now)
     }
 }
 
@@ -372,6 +378,16 @@ final class LANMultiplayerManager {
             return nil
         }
         return attrs
+    }
+
+    /// lan-client-parity (change 4): the guest editor/inspector's read path into a connected
+    /// guest's replicated *script metadata* mirror — same seam as `mirroredAttributes`, same
+    /// "never `ScriptStore`, no write counterpart" contract. `nil` when nothing has been
+    /// mirrored for `ref` yet; an empty array means "mirrored, no scripts".
+    func mirroredScripts(for ref: ObjectRef) -> [LANScriptMetadata]? {
+        precondition(Thread.isMainThread)
+        guard let snapshot = clientReplicationSession.objectAttributes[ref.canonical] else { return nil }
+        return snapshot.scripts()
     }
 
     /// Test seam only (`LANGuestCommandGateTests`): applies `batch` straight into
@@ -674,6 +690,66 @@ final class LANMultiplayerManager {
         connect(connection, playerName: playerName, joinCode: code, label: "\(target.host):\(target.port)")
     }
 
+    /// A plain user-facing refusal for `grantPeerScript` — wrapped so it can flow through
+    /// `Result` (`String` alone does not conform to `Error`), matching `ScriptingCommands`'
+    /// own `TargetMessage` shape.
+    struct LANPeerGrantError: Error {
+        let text: String
+        init(_ text: String) { self.text = text }
+    }
+
+    /// lan-client-parity (change 4), design.md §11/§12: the host-side command surface for the
+    /// `canScript`/`canUseAI` per-peer grants — "a host `/script trust`-style per-peer grant".
+    /// `peerToken` matches an *accepted* peer's playerID exactly or its display name
+    /// case-insensitively (a human host types a name, not a UUID); `nil`/ambiguous/unknown all
+    /// refuse with a plain reason. Grants take effect immediately (the live `Peer.permissions`,
+    /// not just the next periodic persist) and are durable from the very next
+    /// `persistAllHostPeerRecords` tick like every other peer field.
+    @MainActor
+    func grantPeerScript(peerToken: String, ai: Bool, revoke: Bool) -> Result<String, LANPeerGrantError> {
+        guard listener != nil else { return .failure(LANPeerGrantError("not hosting a LAN world")) }
+        let matches = queue.sync {
+            hostPeers.values.filter {
+                $0.accepted && ($0.playerID == peerToken || $0.playerName.caseInsensitiveCompare(peerToken) == .orderedSame)
+            }
+        }
+        guard matches.count == 1, let peer = matches.first else {
+            let reason = matches.isEmpty
+                ? "no connected peer named '\(peerToken)'"
+                : "'\(peerToken)' matches more than one connected peer"
+            return .failure(LANPeerGrantError(reason))
+        }
+        let granted = !revoke
+        let ok = ai
+            ? hostReplicationSession.setCanUseAI(granted, for: peer.playerID)
+            : hostReplicationSession.setCanScript(granted, for: peer.playerID)
+        guard ok else { return .failure(LANPeerGrantError("no permission record for '\(peer.playerName)'")) }
+        persistAllHostPeerRecords()
+        let what = ai ? "AI" : "scripting"
+        return .success("\(granted ? "granted" : "revoked") \(what) \(granted ? "to" : "from") \(peer.playerName)")
+    }
+
+    /// lan-client-parity (change 4): the persistent local identity a guest
+    /// connects with (`clientHello.playerID`) — the same string the host
+    /// then binds to the accepted socket as `peer.playerID` and echoes back
+    /// on every `LANGameplayEvent`/`.chat` this session's guest UI reads.
+    /// `CommandsM`'s `/script edit` uses this to resolve `self` to this
+    /// guest's own `player:lan:<peerID>` ref, exactly what the host resolves
+    /// it to when a forwarded `scriptIntent` from this same peer arrives.
+    var localGuestPeerID: String { localPeerID }
+
+    /// lan-client-parity (change 4): the client-side send half of a guest
+    /// `scriptIntent` — no-ops when not connected as a client (mirrors every
+    /// other client-only send helper in this file). The host never calls
+    /// this; a host's own `/attr`/`/script`/`/on`/`/ai` already runs locally
+    /// through `CommandsM`'s normal (non-LAN-client) path.
+    func sendScriptIntent(_ intent: LANScriptIntent) {
+        queue.async { [weak self] in
+            guard let self, let peer = self.clientPeer else { return }
+            self.send(.scriptIntent(playerID: self.localPeerID, intent: intent), to: peer)
+        }
+    }
+
     func sendChat(_ rawText: String, sender rawSender: String? = nil) {
         let text = sanitizedLANChatText(rawText)
         guard !text.isEmpty else { return }
@@ -752,13 +828,31 @@ final class LANMultiplayerManager {
     /// private by design), so the transport tracks accepted playerIDs itself and re-reads each
     /// current record via the existing public `peerRecord(playerID:)` accessor.
     private func persistAllHostPeerRecords() {
+        precondition(Thread.isMainThread)
         guard let game = activeGame, listener != nil, let worldID = game.worldRec?.id else { return }
         for playerID in knownHostPeerIDs {
             guard let record = hostReplicationSession.peerRecord(playerID: playerID) else { continue }
+            // lan-client-parity (change 4): a *connected* peer's live `player:lan:*`
+            // ObjectRecord (attrs + scripts) lives on its `LANRemotePlayerEntity` in
+            // `World.entities`, not on `record` (which only ever carries the seed applied at
+            // entity creation — see `Peer.objectRecordText`'s own comment). A disconnected/
+            // never-live-this-session peer has no such entity to read, so `record.
+            // objectRecordText` (the last known value, round-tripped unchanged) is the correct
+            // fallback — never silently drop a guest's attrs/scripts because they briefly
+            // stepped away.
+            let objectRecordText: String?
+            if let w = game.worlds[game.dim], let entity = lanRemotePlayerEntity(peerID: playerID, in: w) {
+                objectRecordText = entity.objectRecord.isEmpty ? nil : ObjectRecordCodec.encode(entity.objectRecord)
+            } else {
+                objectRecordText = record.objectRecordText
+            }
             game.db.putLANPlayer(
                 world: worldID,
                 playerID: record.playerID,
-                lanPeerRecordJSON(record, resumeToken: persistedHostResumeToken(for: playerID))
+                lanPeerRecordJSON(
+                    record, resumeToken: persistedHostResumeToken(for: playerID),
+                    objectRecordText: objectRecordText
+                )
             )
         }
     }
@@ -1416,6 +1510,8 @@ final class LANMultiplayerManager {
             allowed = peer.rateLimiter.containerEditIntent.tryConsume(now: now)
         case .replicationAck:
             allowed = peer.rateLimiter.replicationAck.tryConsume(now: now)
+        case .scriptIntent:
+            allowed = peer.rateLimiter.scriptIntent.tryConsume(now: now)
         }
         guard !allowed else { return false }
         if peer.shouldLogThrottle(categoryName, now: now) {
@@ -1581,7 +1677,8 @@ final class LANMultiplayerManager {
                     hostReplicationSession.peerPlayerStates(),
                     to: game.world,
                     localPlayerID: localPeerID,
-                    inventorySnapshots: hostReplicationSession.peerInventorySnapshotsByPlayerID()
+                    inventorySnapshots: hostReplicationSession.peerInventorySnapshotsByPlayerID(),
+                    objectRecordTexts: hostReplicationSession.peerObjectRecordTextsByPlayerID()
                 )
             }
             guard let sanitized else { return }
@@ -1609,6 +1706,9 @@ final class LANMultiplayerManager {
         case .rpgIntent(_, let intent):
             guard peer.accepted else { return }
             applyHostRPGIntent(intent, from: peer.playerID, peerID: peer.id, peerName: peer.playerName)
+        case .scriptIntent(_, let intent):
+            guard peer.accepted else { return }
+            applyHostScriptIntent(intent, from: peer.playerID, peerID: peer.id, peerName: peer.playerName)
         case .containerEditIntent(_, let intent):
             guard peer.accepted else { return }
             applyHostContainerEditIntent(intent, from: peer.playerID, peerName: peer.playerName)
@@ -2002,7 +2102,8 @@ final class LANMultiplayerManager {
             hostReplicationSession.peerPlayerStates(),
             to: game.world,
             localPlayerID: localPeerID,
-            inventorySnapshots: hostReplicationSession.peerInventorySnapshotsByPlayerID()
+            inventorySnapshots: hostReplicationSession.peerInventorySnapshotsByPlayerID(),
+            objectRecordTexts: hostReplicationSession.peerObjectRecordTextsByPlayerID()
         )
         let localState = makeLANPlayerState(player, playerID: localPeerID, displayName: NSFullUserName(), dimension: game.dim.rawValue, includeRPG: false)
         let peerStates = hostReplicationSession.peerPlayerStates()
@@ -2059,7 +2160,10 @@ final class LANMultiplayerManager {
         // peer's chunk-request window, so there is no per-peer focus/radius filter here the way
         // entities and block entities have one.
         let objectAttributes = content.includeObjectAttributes
-            ? makeLANObjectAttributeSnapshots(host: game, store: game.scriptingCommandContext().store)
+            ? makeLANObjectAttributeSnapshots(
+                host: game, store: game.scriptingCommandContext().store,
+                scriptStore: game.scriptingCommandContext().scriptStore
+            )
             : []
         if ProcessInfo.processInfo.environment["ELYSIUM_LAN_PROBE_LOG"] != nil, !objectAttributes.isEmpty {
             elysiumLANProbeLog("host_object_attributes_batch count=\(objectAttributes.count)")
@@ -2331,7 +2435,8 @@ final class LANMultiplayerManager {
                     hostReplicationSession.peerPlayerStates(),
                     to: world,
                     localPlayerID: localPeerID,
-                    inventorySnapshots: hostReplicationSession.peerInventorySnapshotsByPlayerID()
+                    inventorySnapshots: hostReplicationSession.peerInventorySnapshotsByPlayerID(),
+                    objectRecordTexts: hostReplicationSession.peerObjectRecordTextsByPlayerID()
                 )
                 let changes = hostReplicationSession.drainBlockChanges()
                 let entities = makeLANEntitySnapshots(in: world, aroundX: ghost.x, aroundZ: ghost.z, radius: 48, maxCount: 64)
@@ -2558,6 +2663,81 @@ final class LANMultiplayerManager {
         }
     }
 
+    /// lan-client-parity (change 4), design.md §11: HOST-AUTHORITATIVE
+    /// VALIDATION of a guest's `scriptIntent`. `.command` re-validates
+    /// `ScriptingCommands.lanForwardableCommand` (never trusts the wire
+    /// framing alone), checks the `canScript` grant, applies a reach check
+    /// for a block target (dimension is already enforced by `ObjectGraph`
+    /// resolution itself — a different-dimension block resolves `.dormant`
+    /// inside `ScriptingCommands.run`), then dispatches through the exact
+    /// same executor a local `/attr`/`/script`/`/on`/`/unsubscribe`/`/events
+    /// emit` command uses (`game.scriptingCommandContext(guestPeerID:)`),
+    /// with `author: .lan(peer:)` recorded by that context. `.aiPrompt`
+    /// checks `canUseAI` (independent of `canScript`) and forwards to the
+    /// same tool loop `/ai` uses, relaying every status/result line back to
+    /// the sender as chat instead of the host's own. Every path returns a
+    /// `LANGameplayEvent` receipt or a `.chat` reply — malformed/oversized/
+    /// unauthorized input is refused, never allowed to reach a `fatalError`
+    /// or an unwrapped optional.
+    private func applyHostScriptIntent(_ intent: LANScriptIntent, from playerID: String, peerID: UUID, peerName: String) {
+        precondition(Thread.isMainThread)
+        guard let game = activeGame, game.hasWorld() else { return }
+        func receipt(_ kind: LANGameplayEventKind, _ message: String) {
+            let event = LANGameplayEvent(playerID: playerID, kind: kind, message: message, tick: game.rpgSimulationTick)
+            queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
+        }
+        switch intent.verb {
+        case .aiPrompt:
+            switch hostReplicationSession.authorize(.ai, from: playerID) {
+            case .rejected(let reason):
+                receipt(.scriptIntentRefused, reason)
+                return
+            case .accepted:
+                break
+            }
+            guard !intent.prompt.isEmpty else {
+                receipt(.scriptIntentRefused, "empty AI prompt")
+                return
+            }
+            elysiumOllamaAgent.runToolLoop(prompt: intent.prompt, game: game) { [weak self] line in
+                guard let self else { return }
+                self.queue.async { [weak self] in
+                    guard let self, let peer = self.hostPeers[peerID], peer.accepted else { return }
+                    self.send(.chat(sender: "AI", text: sanitizedLANChatText(line)), to: peer)
+                }
+            }
+        case .command:
+            switch hostReplicationSession.authorize(.script, from: playerID) {
+            case .rejected(let reason):
+                receipt(.scriptIntentRefused, reason)
+                return
+            case .accepted:
+                break
+            }
+            guard ScriptingCommands.lanForwardableCommand(intent.command, intent.arguments) else {
+                receipt(.scriptIntentRefused, "'\(intent.command)' is not a guest-forwardable command")
+                return
+            }
+            let context = game.scriptingCommandContext(guestPeerID: playerID)
+            if intent.command != "unsubscribe", let targetToken = intent.arguments.first,
+               let ref = context.target.resolve(alias: targetToken),
+               case .block(let dim, let x, let y, let z) = ref, dim == game.dim {
+                guard let record = hostReplicationSession.peerRecord(playerID: playerID),
+                      let playerState = record.playerState,
+                      isWithinLANReach(playerState, x: x, y: y, z: z) else {
+                    receipt(.scriptIntentRefused, "target out of reach")
+                    return
+                }
+            }
+            let result = ScriptingCommands.run(command: intent.command, arguments: intent.arguments, context: context)
+            let text = result.lines.joined(separator: " | ")
+            receipt(
+                result.ok ? .scriptIntentAccepted : .scriptIntentRefused,
+                text.isEmpty ? (result.ok ? "ok" : "refused") : text
+            )
+        }
+    }
+
     private func applyHostContainerIntent(_ intent: LANContainerIntent, from playerID: String, peerID: UUID, peerName: String) {
         precondition(Thread.isMainThread)
         guard let game = activeGame, game.hasWorld() else { return }
@@ -2756,6 +2936,13 @@ final class LANMultiplayerManager {
                 guard let self, let game = self.activeGame, game.hasWorld() else { return }
                 _ = removeLANRemotePlayer(event.playerID, from: game.world)
             }
+        case .scriptIntentAccepted:
+            // lan-client-parity (change 4): the receipt for a guest's own forwarded
+            // `/attr`/`/script`/`/on`/`/unsubscribe`/`/events emit` — surfaced in chat exactly
+            // like the same command's local result text would be for a host.
+            postChat("§7" + event.message)
+        case .scriptIntentRefused:
+            postChat("§c" + event.message)
         default:
             break
         }
@@ -2827,7 +3014,15 @@ private func lanDecode<T: Decodable>(_ type: T.Type, from object: Any?) -> T? {
 /// Serializes a host peer record into the `[String: Any]` JSON blob `SaveDB.putLANPlayer` stores.
 func lanPeerRecordJSON(
     _ record: LANPeerRecordSnapshot,
-    resumeToken: LANV6Token256? = nil
+    resumeToken: LANV6Token256? = nil,
+    /// lan-client-parity (change 4): the guest's `player:lan:*` ObjectRecord
+    /// text (attrs + scripts), computed by the caller (`persistAllHostPeer
+    /// Records`) — a *live* entity's current record when connected, or the
+    /// last-known value preserved unchanged when not. Defaulted `nil` (not
+    /// `record.objectRecordText`) so a caller that never passes it — every
+    /// call site before this change — writes no `attrs` key at all, exactly
+    /// as before.
+    objectRecordText: String? = nil
 ) -> [String: Any] {
     var out: [String: Any] = [
         "displayName": record.displayName,
@@ -2849,6 +3044,9 @@ func lanPeerRecordJSON(
     if let resumeToken {
         out["resumeToken"] = resumeToken.base64URL
     }
+    if let objectRecordText {
+        out["attrs"] = objectRecordText
+    }
     return out
 }
 
@@ -2868,6 +3066,10 @@ func lanPeerRecordSnapshot(fromStoredJSON data: [String: Any], playerID: String)
     let permissions = lanDecode(LANPeerPermissions.self, from: data["permissions"]) ?? LANPeerPermissions()
     let displayName = (data["displayName"] as? String) ?? "Player"
     let revision = (data["revision"] as? Int) ?? Int((data["revision"] as? NSNumber)?.intValue ?? 0)
+    // lan-client-parity (change 4): stored as plain text, not run through `lanDecode` (it isn't
+    // a `Codable` sub-object — it's `ObjectRecordCodec`'s own JSON text, decoded lazily only
+    // when actually needed, by `applyLANRemotePlayers`/`ObjectGraph`'s live resolution).
+    let objectRecordText = data["attrs"] as? String
     return LANPeerRecordSnapshot(
         playerID: playerID,
         displayName: displayName,
@@ -2879,7 +3081,8 @@ func lanPeerRecordSnapshot(fromStoredJSON data: [String: Any], playerID: String)
         inventoryRevision: max(0, revision),
         lastAckTick: 0,
         lastSeenTick: 0,
-        disconnectedTick: nil
+        disconnectedTick: nil,
+        objectRecordText: objectRecordText
     )
 }
 

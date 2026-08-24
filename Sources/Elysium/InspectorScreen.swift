@@ -1,12 +1,12 @@
-// InspectorScreen.swift — scripting-ui-and-replication (change 3). design.md §12: "the Object
-// Inspector (F3 summary now; `/inspect` screen modeled on `TemplateBrowserScreen`)". A
-// read-only object browser — attributes, scripts, and event subscriptions of one target — with
-// jump-to-editor for an attached script. Host and LAN-client worlds share this one screen: a
-// guest's attributes come from the read-only replicated mirror
-// (`LANMultiplayerManager.shared.mirroredAttributes(for:)`, this change's own §11 replication),
-// never `AttributeStore`; a guest's scripts/subscriptions sections say so plainly rather than
-// pretending to have host-only data this change does not replicate (design.md phasing: guest
-// script/subscription visibility is `lan-client-parity`, change 4).
+// InspectorScreen.swift — scripting-ui-and-replication (change 3), extended by
+// lan-client-parity (change 4). design.md §12: "the Object Inspector (F3 summary now;
+// `/inspect` screen modeled on `TemplateBrowserScreen`)". A read-only object browser —
+// attributes, scripts, and event subscriptions of one target — with jump-to-editor for an
+// attached script. Host and LAN-client worlds share this one screen: a guest's attributes and
+// script metadata (name/mode/enabled, never source) come from the read-only replicated mirror
+// (`LANMultiplayerManager.shared.mirroredAttributes(for:)`/`.mirroredScripts(for:)`), never
+// `AttributeStore`/`ScriptStore` directly. Subscriptions are not replicated (design.md §11 scopes
+// guest parity to attrs/scripts) — that section still says so plainly for a guest.
 
 import ElysiumCore
 
@@ -67,7 +67,18 @@ private func inspectorRowsDetailed(target: ObjectRef, game: GameCore) -> [Inspec
 
     rows.append(.header("Scripts"))
     if game.isLANClientWorld {
-        rows.append(.note("  (not available to guests until LAN client parity)"))
+        // lan-client-parity (change 4), design.md §11: replicated script *metadata* only
+        // (name/mode/enabled) — never source; `.script(name:, text:)` still carries the name so
+        // clicking a row still jumps to the editor (which itself reads only the same metadata
+        // for a guest — see `ScriptEditorScreen.initScreen`).
+        if let scripts = LANMultiplayerManager.shared.mirroredScripts(for: target), !scripts.isEmpty {
+            for s in scripts.sorted(by: { $0.name < $1.name }) {
+                let text = "  \(s.name) [\(s.mode)]\(s.enabled ? "" : " (disabled)") (replicated, read-only)"
+                rows.append(.script(name: s.name, text: text))
+            }
+        } else {
+            rows.append(.note("  (nothing replicated for this object yet)"))
+        }
     } else {
         let scripts = context.scriptStore.list(target)
         if scripts.isEmpty {

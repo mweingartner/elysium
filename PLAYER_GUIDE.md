@@ -551,8 +551,12 @@ as a specific block, never as a filter named `overworld:10,64,3`).
 
 Objects can carry small Lua scripts now — up to 8 per object, attached with `/script attach`, pasted
 in through a minimal in-game editor, or authored by the local AI through `/ai` (see "Optional local
-AI" below). Host-only, like every command above; a joined LAN world refuses every `/script`
-subcommand outright.
+AI" below). Execution always happens on the host — a guest never runs a script itself, even its own.
+Reading (`/script list|show`), the world trust gate, the kill switch, and the AI journal/undo commands
+below stay host-only outright. The commands that actually change something — `/attr set|define|
+remove`, `/script attach|detach|run`, `/on`, `/unsubscribe`, `/events emit`, and `/ai` — now work for
+a joined guest too, once the host grants it (see "Guest scripting" below); until then they're refused
+exactly as before.
 
 - `/script list [target]` — lists the scripts on a target (default `self`), with their mode and
   whether they're currently disabled or faulted.
@@ -571,6 +575,14 @@ subcommand outright.
 - `/script trust` — trust the current world to run scripts. A world you created yourself is already
   trusted; a world imported or migrated from elsewhere starts untrusted (no script on it runs, even
   if it has scripts attached) until you trust it here.
+- `/script trust <peer> [ai] [off]` — **hosting a LAN world only**: grant (or, with `off`, revoke) a
+  connected guest permission to author/attach/detach/run scripts, set/define/remove attributes,
+  subscribe/unsubscribe, and emit events through you. `<peer>` matches a connected player's name.
+  Add `ai` to also let that guest use `/ai` (a separate grant — scripting permission doesn't imply AI
+  access, and vice versa): `/script trust Alice` grants scripting; `/script trust Alice ai` grants AI
+  too; `/script trust Alice off` / `/script trust Alice ai off` revoke either one. This is a different
+  command from the bare `/script trust` above (that one trusts the *world*, not a *guest* — the two
+  never conflict).
 - `/script off` / `/script on` — the scripting kill switch (the `doScripts` game rule under the hood).
   Instant, and independent of trust: `/script off` stops every script this tick regardless of how
   hostile a world's scripts might be.
@@ -593,15 +605,23 @@ subcommand outright.
   the same trigger `/script attach ... handler <event> ...` takes), then **Save** (attaches it) or
   **Run** (a one-off, nothing saved) — both mirror the chat commands above and run your script through
   the exact same validator: a compile or syntax error highlights the offending line right in the
-  editor and refuses to save or run until it's fixed.
+  editor and refuses to save or run until it's fixed. On a joined LAN world (once the host has granted
+  you scripting), the editor works the same way, with one difference: re-opening it on a script that
+  already exists never shows its source (only guests' own metadata is ever sent to them, never
+  another author's script text) — the name/mode are filled in and a note says so, but the body starts
+  blank; Save still replaces whatever was there. Save and Run both send your script to the host
+  instead of running locally (you never run Lua yourself) and close the editor right away; watch chat
+  for the host's reply.
 - `/inspector` opens the **Object Inspector** — a read-only window onto whatever you're looking at
   (or `self`/`player`/`world`; click **Retarget** to cycle) showing its attributes, its attached
   scripts, and its event subscriptions. Select a script row and click **Edit Script** to jump straight
   into the editor for it. On a joined LAN world, the Inspector still opens — the attributes section
-  shows whatever the host has replicated to you so far, marked "replicated, read-only"; scripts and
-  subscriptions aren't visible to guests yet (a later build adds that). `/inspector` itself is not
-  refused for guests — reading is fine; every *write* (`/attr set`, `/script attach`, and the rest)
-  still is.
+  and now the scripts section (name, mode, enabled — never the source itself) show whatever the host
+  has replicated to you so far, marked "replicated, read-only"; subscriptions still aren't visible to
+  guests. `/inspector` itself is never refused for guests — reading is always fine. Writes (`/attr
+  set`, `/script attach`, and the rest) are sent to the host and applied there once granted (see
+  "Guest scripting" below); until then they're refused exactly like every other unsupported guest
+  command.
 - Press **F3** for the debug overlay; while a world has any scripts, one extra line reports how many
   are currently live, how many are waiting on a timer or `wait()`, how many durable timers exist, and
   how many events are pending/faulted this window — a quick health check without opening `/script
@@ -621,6 +641,24 @@ guest's own copy of the world could see, since guests never run scripts at all):
 the object in question, or `F3`, to check what's arrived so far. This is display-only — nothing about
 who's authoritative on a LAN world has changed; the host still runs every script and owns every
 attribute write.
+
+### Guest scripting
+
+Once your host runs `/script trust <yourName>` (see above), you can author and manage scripts and
+attributes yourself while playing on their world — `/attr set|define|remove`, `/script attach|
+detach|run`, `/on`, `/unsubscribe`, and `/events emit` all work for you now, exactly as documented
+above. Nothing you send runs on your own machine: it's sent to the host, validated and executed there
+(the same way the host's own commands are), and the result — accepted or refused, and why — shows up
+in your chat a moment later. `self` in any command you send means *your own* player object
+(`player:lan:<you>`), not the host's; you can still name the host's own `player` object explicitly if
+you want to (and the host trusted you enough to grant scripting at all). Your own scripts and
+attributes persist with the host's save of that world — if you reconnect later, they're still there;
+if the host deletes that world, they're deleted too. If your host also adds `ai` to your grant,
+`/ai <request>` works too — your prompt is sent to the host, which asks its own configured local model
+and relays the reply back to your chat (prefixed `<AI>`); you never talk to Ollama yourself, and `/ai
+cancel` isn't available to a guest yet. Everything not in this list — reading with `/inspect`/
+`/objects`, the world trust gate, the kill switch, and the AI journal/undo commands — stays host-only
+regardless of any grant.
 
 ## Options, accessibility, and local AI
 

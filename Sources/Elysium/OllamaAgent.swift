@@ -132,22 +132,36 @@ final class OllamaAgentService {
     /// `URLSession` round trip — never blocks the tick) whose completions
     /// are always dispatched back to main before `AIToolLoop` touches game
     /// state again, per `AIChatTransport`'s own contract.
-    func runToolLoop(prompt: String, game: GameCore) {
+    ///
+    /// lan-client-parity (change 4), design.md §11 "`/ai` (prompt forwarded,
+    /// run on the host under `canUseAI`)": `reportLine`, when non-nil,
+    /// receives every line this call would otherwise `pushChat` locally
+    /// (busy/no-world/no-model refusals, the "thinking..." status, and the
+    /// final reply) — `applyHostScriptIntent` passes one that relays each
+    /// line to the forwarding guest instead. `nil` (every pre-existing call
+    /// site) keeps the exact original host-local-chat behavior. The single
+    /// `toolLoopInFlight`/`currentToolLoopGeneration` gate is shared by both
+    /// paths, so "one `/ai` in flight per world" (§9.1) already covers a
+    /// guest's forwarded prompt racing the host's own.
+    func runToolLoop(prompt: String, game: GameCore, reportLine: ((String) -> Void)? = nil) {
+        func report(_ line: String) {
+            if let reportLine { reportLine(line) } else { pushChat(line) }
+        }
         guard !toolLoopInFlight else {
-            pushChat("§cAn AI request is already in progress — use /ai cancel first.")
+            report("§cAn AI request is already in progress — use /ai cancel first.")
             return
         }
         guard game.hasWorld() else {
-            pushChat("§cThe AI agent needs an active world.")
+            report("§cThe AI agent needs an active world.")
             return
         }
         let model = sanitizedOllamaModelName(game.settings.aiOllamaModel)
         guard !model.isEmpty else {
-            pushChat("§cChoose a local Ollama model in Options > AI before using /ai.")
+            report("§cChoose a local Ollama model in Options > AI before using /ai.")
             return
         }
         guard isAllowedLocalOllamaModelName(model) else {
-            pushChat("§cElysium AI requires a local Ollama model; cloud-tagged models are not allowed.")
+            report("§cElysium AI requires a local Ollama model; cloud-tagged models are not allowed.")
             return
         }
         let requestID = game.scripting.aiJournal.beginRequest()
@@ -158,7 +172,7 @@ final class OllamaAgentService {
         currentToolLoopGeneration = generation
         toolLoopInFlight = true
         let deadline = Date().addingTimeInterval(90)
-        pushChat("§7<Elysium AI> thinking with \(model)...")
+        report("§7<Elysium AI> thinking with \(model)...")
 
         let transport: AIChatTransport = { [weak self] messages, tools, completion in
             guard let self else { completion(nil); return }
@@ -178,7 +192,7 @@ final class OllamaAgentService {
             self.toolLoopInFlight = false
             self.currentToolLoopTask = nil
             guard let game, game.hasWorld() else { return }
-            pushChat("§d<Elysium AI> §r\(result.finalMessage)")
+            report("§d<Elysium AI> §r\(result.finalMessage)")
         }
     }
 

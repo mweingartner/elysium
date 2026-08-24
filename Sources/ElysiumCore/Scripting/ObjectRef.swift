@@ -227,10 +227,20 @@ public struct ObjectTargetContext {
     /// interaction reach if one is closer than the block hit, else the block
     /// under the crosshair, else `nil` ("nothing under the cursor").
     public var cursor: () -> ObjectRef?
+    /// What `self` resolves to. `.player` (the default) for every context
+    /// built before lan-client-parity (change 4) — a host's own commands.
+    /// A guest-forwarded `scriptIntent` context sets this to the guest's own
+    /// `player:lan:<peerID>` ref, so `self` in a forwarded `/attr`/`/script`/
+    /// `/on` command means "the guest issuing it", never the host's `player`.
+    /// `player` (the literal alias) always resolves to `.player` regardless
+    /// — the two are kept distinct so a guest command can still address the
+    /// host's own player object by name.
+    public var selfRef: ObjectRef
 
-    public init(currentDimension: Dim, cursor: @escaping () -> ObjectRef?) {
+    public init(currentDimension: Dim, cursor: @escaping () -> ObjectRef?, selfRef: ObjectRef = .player) {
         self.currentDimension = currentDimension
         self.cursor = cursor
+        self.selfRef = selfRef
     }
 
     /// Resolves a target token to a ref. Recognizes `looking`/`cursor`,
@@ -241,7 +251,8 @@ public struct ObjectTargetContext {
     public func resolve(alias: String) -> ObjectRef? {
         switch alias {
         case "looking", "cursor": return cursor()
-        case "self", "player": return .player
+        case "self": return selfRef
+        case "player": return .player
         case "world": return .world
         case "dim": return .dimension(currentDimension)
         default: break

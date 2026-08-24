@@ -743,6 +743,7 @@ extension ScriptRuntime {
         case .player: return "player"
         case .ai(let m): return "ai:\(m)"
         case .script(let owner, let name): return "script:\(owner.canonical):\(name)"
+        case .lan(let peer): return "lan:\(peer)"
         }
     }
 

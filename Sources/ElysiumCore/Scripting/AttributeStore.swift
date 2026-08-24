@@ -133,7 +133,9 @@ public struct AttributeStore {
     /// Removes a custom entry. `force` is required for a readonly entry and
     /// is reported back as `forced`. Removing an absent entry is a no-op
     /// (`existed == false`, not an error).
-    public func remove(_ ref: ObjectRef, _ name: String, force: Bool = false) -> Result<(existed: Bool, forced: Bool), AttributeError> {
+    public func remove(
+        _ ref: ObjectRef, _ name: String, force: Bool = false, by author: Provenance.Author = .player
+    ) -> Result<(existed: Bool, forced: Bool), AttributeError> {
         if graph.host.isLANClient { return .failure(.lanClient) } // Security (plan) C27
         guard case .live(let live) = graph.resolve(ref) else { return .failure(liveFailure(ref)) }
         var record = Self.readRecord(live, host: graph.host)
@@ -145,7 +147,7 @@ public struct AttributeStore {
         record.entries.removeValue(forKey: name)
         record.revision = newRevision
         Self.writeRecord(record, to: live, host: graph.host)
-        onChange?(ref, name, oldValue, nil, record.revision, .player)
+        onChange?(ref, name, oldValue, nil, record.revision, author)
         return .success((existed: true, forced: readonly && force))
     }
 

@@ -40,6 +40,23 @@ public protocol ObjectGraphHost: AnyObject {
     /// `world.gamerule.<name>` (getSet, existing rules only, Decision 7) —
     /// same reasoning: `GameCore.setGameRule` is world-global.
     func setGameRule(_ name: String, _ value: Double)
+    /// lan-client-parity (change 4): the live `LANRemotePlayerEntity` for a
+    /// connected guest, if the host currently mirrors one *in the current
+    /// dimension* — `nil` when the peer isn't connected, or is connected but
+    /// currently in a different dimension (matches every other kind's
+    /// "objects in inactive dimensions are dormant" rule: no ghost entity is
+    /// ever materialized outside the host's current dimension, so there is
+    /// nothing live to resolve there either). `GameCore`'s own default
+    /// implementation is `nil` when `isLANClient` (a guest never resolves
+    /// another guest's `player:lan:*` object — only the host does).
+    func lanRemotePlayer(peerID: String) -> (entity: LANRemotePlayerEntity, world: World)?
+}
+
+extension ObjectGraphHost {
+    /// Default: no LAN peers. Test fakes and `elysmoke`'s script host never
+    /// mirror a LAN peer, so they get this for free instead of each having
+    /// to implement a method they'd only ever return `nil` from.
+    public func lanRemotePlayer(peerID: String) -> (entity: LANRemotePlayerEntity, world: World)? { nil }
 }
 
 /// The outcome of resolving an `ObjectRef`.
@@ -136,8 +153,21 @@ public struct ObjectGraph {
             guard isWorldOpen, let p = host.localPlayer, let w = host.world(for: host.currentDimension) else { return .unknown }
             return .live(.player(p, w))
 
-        case .lanPlayer:
-            return .unsupported
+        case .lanPlayer(let peerID):
+            // lan-client-parity (change 4): live only on the host, for a
+            // currently-connected peer whose `LANRemotePlayerEntity` mirror
+            // exists in the *current* dimension (see `lanRemotePlayer`'s doc
+            // comment on why a different-dimension peer is `.dormant`, not
+            // `.unknown` — the ref names a real, known peer; the object is
+            // just not loaded here right now, exactly like an unloaded
+            // block/entity). A guest never resolves this (its own
+            // `ObjectGraphHost.isLANClient` is true) — guests read their own
+            // `player:lan:*` object only through the replicated mirror.
+            guard isWorldOpen, !host.isLANClient else { return .unsupported }
+            if let (entity, w) = host.lanRemotePlayer(peerID: peerID) {
+                return .live(.entity(entity, w))
+            }
+            return .dormant
         }
     }
 
@@ -166,6 +196,9 @@ public struct ObjectGraph {
         case .player:
             return "Player"
         case .lanPlayer:
+            if case .live(.entity(let entity, _)) = resolve(ref), let remote = entity as? LANRemotePlayerEntity {
+                return remote.displayName
+            }
             return "LAN Player"
         }
     }
@@ -191,8 +224,9 @@ public struct ObjectGraph {
                 guard let ent = e as? Entity, !ent.dead else { continue }
                 if host.isLANClient && ent.lanReplicatedMirror { continue }
                 // Security (code) SC-1 / Test DEF-2 fix: a `LANRemotePlayerEntity` is not a
-                // plain entity (see `resolve`'s matching comment) and never appears in the
-                // enumeration under any ref shape in this change.
+                // plain entity (see `resolve`'s matching comment) and never appears under an
+                // `entity:<uid>` ref — lan-client-parity (change 4) lists it separately below,
+                // under its own `player:lan:<peerID>` ref, kind `.player` not `.entity`.
                 if ent is LANRemotePlayerEntity { continue }
                 let dx = ent.x - x, dy = ent.y - y, dz = ent.z - z
                 let d2 = dx * dx + dy * dy + dz * dz
@@ -202,6 +236,25 @@ public struct ObjectGraph {
                 } else {
                     entries.append(NearbyObjectEntry(ref: .entity(uid: ent.id), liveObject: .entity(ent, w), distanceSq: d2))
                 }
+            }
+        }
+
+        // lan-client-parity (change 4): connected guests are discoverable as
+        // `player:lan:<peerID>` objects — host-only (a guest never enumerates
+        // another peer, matching its own object graph never resolving one
+        // either) and only kind `.player` (their canonical ref kind, §5.1),
+        // never `.entity` (SC-1's guard above stays exactly as strict as it
+        // was — this is a second, deliberate listing under a different ref).
+        if !host.isLANClient, kinds == nil || kinds!.contains(.player) {
+            for e in w.entities {
+                guard let remote = e as? LANRemotePlayerEntity, !remote.dead else { continue }
+                let dx = remote.x - x, dy = remote.y - y, dz = remote.z - z
+                let d2 = dx * dx + dy * dy + dz * dz
+                guard d2 <= r2 else { continue }
+                entries.append(NearbyObjectEntry(
+                    ref: .lanPlayer(peerID: remote.multiplayerPlayerID),
+                    liveObject: .entity(remote, w), distanceSq: d2
+                ))
             }
         }
 

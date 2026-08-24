@@ -41,6 +41,11 @@ public enum LANV6MessageKind: UInt16, CaseIterable, Codable, Equatable, Hashable
     case ownerManifest = 27
     case ownerChunk = 28
     case clientReady = 29
+    /// lan-client-parity (change 4): mirrors `LANMultiplayerMessageKind.scriptIntent`
+    /// (`LANMultiplayer.swift`) — this parallel v6 manifest is not the live dispatch
+    /// path (see the file header), so the case exists here only to keep the two raw-
+    /// value spaces in lockstep per design.md §11's "mirrored into the v6 manifest".
+    case scriptIntent = 30
 
     public var payloadLimit: Int {
         switch self {

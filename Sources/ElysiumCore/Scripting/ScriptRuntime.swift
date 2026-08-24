@@ -249,6 +249,7 @@ public final class ScriptRuntime {
         case .player: source = .player
         case .ai(let model): source = .ai(model: model)
         case .script(let owner, let scriptName): source = .script(owner: owner, name: scriptName)
+        case .lan(let peer): source = .lan(peerID: peer)
         }
         state.eventBus.raise(
             kind: .attributeChanged, subject: ref,

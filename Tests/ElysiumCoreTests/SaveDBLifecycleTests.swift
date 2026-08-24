@@ -220,6 +220,10 @@ final class SaveDBLifecycleTests: XCTestCase {
         let compatibility = "public convenience init(db: SaveDB = SaveDB())"
         XCTAssertEqual(gameCore.components(separatedBy: compatibility).count - 1, 1)
         XCTAssertEqual(saves.components(separatedBy: "public convenience init()").count - 1, 1)
-        XCTAssertTrue(saves.contains("fatalError(\"Elysium save database initialization failed\")"))
+        // lan-client-parity (change 4): the fatalError message now includes the mapped
+        // `SaveDBOpenError` stage/result (a launch-time crash log otherwise named only
+        // "initialization failed" with no further diagnostic) — the fixed prefix stays, the
+        // interpolated suffix is new.
+        XCTAssertTrue(saves.contains("fatalError(\"Elysium save database initialization failed: \\("))
     }
 }

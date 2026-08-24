@@ -173,6 +173,7 @@ public enum ScriptRecordCodec {
         case .player: return "player"
         case .ai(let model): return "ai:\(model)"
         case .script(let owner, let name): return "script:\(owner.canonical):\(name)"
+        case .lan(let peer): return "lan:\(peer)"
         }
     }
 
@@ -190,6 +191,11 @@ public enum ScriptRecordCodec {
             let name = String(rest[rest.index(after: lastColon)...])
             guard let ref = ObjectRef.parse(refText), isValidAttributeName(name) else { return nil }
             return .script(owner: ref, name: name)
+        }
+        if s.hasPrefix("lan:") {
+            let peer = String(s.dropFirst(4))
+            guard !peer.isEmpty, peer.utf8.count <= 128 else { return nil }
+            return .lan(peer: peer)
         }
         return nil
     }

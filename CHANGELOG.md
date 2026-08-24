@@ -5,6 +5,19 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Added **LAN guest scripting parity**: a host can now run `/script trust <peer>` (and
+  `/script trust <peer> ai`) to let a connected guest author/attach/detach/run scripts, set/
+  define/remove attributes, subscribe/unsubscribe, emit events, and (with the `ai` grant) use
+  `/ai` — all validated and executed on the host through the exact same executors a host's own
+  commands use, never on the guest's own machine. Guest `/script edit`/`/inspector` now read
+  replicated script metadata (name/mode/enabled — never source) alongside the existing replicated
+  attributes; Save/Run in the editor send the guest's work to the host instead of refusing
+  outright. A connected guest's own `player:lan:<peerID>` object is now a live, scriptable object
+  on the host (readable position/health, attrs/scripts persisted with the world and swept on world
+  delete) instead of resolving unsupported. New protocol-5 `scriptIntent` message kind carries the
+  guest → host requests, rate-limited and reach/dimension-checked like every other guest intent.
+  Also: `SaveDB`'s save-database-open `fatalError` now names the failed stage/result instead of a
+  bare "initialization failed".
 - Added the **full in-game script editor, Object Inspector, F3 script summary, LAN attribute
   replication, debug-control `script.*` ops, and the remaining fdlibm math ports**:
   `/script edit` now opens a real multi-line editor (type or paste, Enter/Backspace/arrow keys,

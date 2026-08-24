@@ -1,4 +1,5 @@
 import Foundation
+import ElysiumScript
 
 public let LAN_MULTIPLAYER_PROTOCOL_VERSION: UInt16 = 5
 public let LAN_MULTIPLAYER_SERVICE_TYPE = "_elysium-lan._tcp"
@@ -31,6 +32,11 @@ public let LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITY_SLOTS = 64
 /// (`LANObjectAttributeSnapshot.init`), matching "<= 4 KiB per object".
 public let LAN_MULTIPLAYER_MAX_REPLICATION_OBJECT_ATTRIBUTES = 64
 public let LAN_MULTIPLAYER_MAX_OBJECT_ATTRIBUTES_JSON_BYTES = 4_096
+/// lan-client-parity (change 4): `LANObjectAttributeSnapshot.scriptsJSON` —
+/// up to `maxScriptsPerObject` (8) `{name,mode,enabled}` triples comfortably
+/// fit well under 1 KiB; capped higher to leave slack for the encoding
+/// overhead without inviting abuse.
+public let LAN_MULTIPLAYER_MAX_OBJECT_SCRIPTS_JSON_BYTES = 2_048
 public let LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT = CHUNK_W * SECTION_H * CHUNK_W
 public let LAN_MULTIPLAYER_MAX_CHUNK_REQUEST_RADIUS = 1
 public let LAN_MULTIPLAYER_DEFAULT_CHUNK_REQUEST_RADIUS = 1
@@ -52,6 +58,15 @@ public let LAN_MULTIPLAYER_TEMPLATE_JOB_STEP_BUDGET = 2_048
 /// indefinitely — safe because a dropped section resyncs via the normal section-snapshot path
 /// the next time the host visits that dimension.
 public let LAN_MULTIPLAYER_MAX_REQUEUED_DIRTY_CHUNK_SECTIONS = 4096
+/// lan-client-parity (change 4): `LANScriptIntent.arguments` caps. A script
+/// source argument (`/script attach <target> <name> module <source...>`) is
+/// one element — `LAN_MULTIPLAYER_MAX_SCRIPT_INTENT_ARGUMENT_BYTES` mirrors
+/// `ScriptStore`'s own 16 KiB source ceiling with headroom for the target/
+/// name/mode tokens ahead of it in the same argument list.
+public let LAN_MULTIPLAYER_MAX_SCRIPT_INTENT_ARGUMENTS = 8
+public let LAN_MULTIPLAYER_MAX_SCRIPT_INTENT_ARGUMENT_BYTES = 16_640
+/// design.md §9.1 "prompt <= 4 KiB".
+public let LAN_MULTIPLAYER_MAX_SCRIPT_INTENT_PROMPT_BYTES = 4_096
 
 private let LANFrameMagic: [UInt8] = [0x50, 0x42, 0x4c, 0x4e] // PBLN
 
@@ -97,6 +112,13 @@ public enum LANMultiplayerMessageKind: UInt16, Codable, Equatable, CaseIterable 
     case damageEvent = 24
     case keepalive = 25
     case rpgIntent = 26
+    /// lan-client-parity (change 4), design.md §11: "scriptIntent kind uses raw
+    /// value >= 30, mirrored into the v6 manifest" — the guest->host
+    /// `scriptIntent` family (author/attach/detach/run-script, attr
+    /// set/define/remove, subscribe/unsubscribe, `/ai` forwarding). Kept 4
+    /// past `rpgIntent` (26) so the gap itself documents "reserved, do not
+    /// reuse" for any protocol-5 kind that never shipped.
+    case scriptIntent = 30
 
     /// Guest-originated messages whose authoritative handling can mutate gameplay state.
     /// The LAN transport holds these messages while the bounded RPG authority clock is
@@ -107,7 +129,7 @@ public enum LANMultiplayerMessageKind: UInt16, Codable, Equatable, CaseIterable 
         switch self {
         case .playerState, .inputIntent, .blockIntent, .containerIntent,
              .templateIntent, .attackIntent, .tossIntent, .containerEditIntent,
-             .inventoryUpdate, .rpgIntent:
+             .inventoryUpdate, .rpgIntent, .scriptIntent:
             return true
         case .clientHello, .serverAccept, .serverReject, .chat, .worldSummary,
              .ping, .pong, .disconnect, .replicationBatch, .chunkRequest,
@@ -145,7 +167,7 @@ public func lanMultiplayerAllowsInbound(
         case .chat, .playerState, .ping, .pong, .disconnect, .inputIntent,
              .blockIntent, .containerIntent, .templateIntent, .chunkRequest,
              .replicationAck, .attackIntent, .tossIntent, .containerEditIntent,
-             .inventoryUpdate, .keepalive, .rpgIntent:
+             .inventoryUpdate, .keepalive, .rpgIntent, .scriptIntent:
             return true
         case .clientHello, .serverAccept, .serverReject, .worldSummary,
              .replicationBatch, .gameplayEvent, .inventoryGrant, .restoreState,
@@ -161,7 +183,7 @@ public func lanMultiplayerAllowsInbound(
         case .clientHello, .serverAccept, .serverReject, .inputIntent,
              .blockIntent, .containerIntent, .templateIntent, .chunkRequest,
              .replicationAck, .attackIntent, .tossIntent, .containerEditIntent,
-             .inventoryUpdate, .rpgIntent:
+             .inventoryUpdate, .rpgIntent, .scriptIntent:
             return false
         }
     }
@@ -180,6 +202,11 @@ public enum LANMultiplayerHostRateLimitCategory: String, Equatable, CaseIterable
     case inventoryUpdate
     case containerEditIntent
     case replicationAck
+    /// lan-client-parity (change 4): its own (tighter) bucket rather than
+    /// sharing `gameplayIntent` — a `scriptIntent` can trigger host-side
+    /// compilation/validation work (script attach) or an outbound AI request,
+    /// materially more expensive per message than a movement/block intent.
+    case scriptIntent
 }
 
 public func lanMultiplayerHostRateLimitCategory(
@@ -202,6 +229,8 @@ public func lanMultiplayerHostRateLimitCategory(
         return .containerEditIntent
     case .replicationAck:
         return .replicationAck
+    case .scriptIntent:
+        return .scriptIntent
     case .disconnect, .clientHello, .serverAccept, .serverReject, .worldSummary,
          .replicationBatch, .gameplayEvent, .inventoryGrant, .restoreState, .damageEvent:
         return nil
@@ -267,6 +296,12 @@ public enum LANGameplayPermission: String, Codable, Equatable, CaseIterable {
     case dimension
     case respawn
     case creative
+    /// lan-client-parity (change 4), design.md §11/§12: the per-peer grant
+    /// gating every guest `scriptIntent` (author/attach/detach/run-script,
+    /// attr set/define/remove, subscribe/unsubscribe). Default off — a host
+    /// opts a peer in explicitly (the `/script trust <peer>`-style command
+    /// surface), mirroring `canUseAI`'s own default-off shape.
+    case script
 }
 
 public struct LANPeerPermissions: Codable, Equatable {
@@ -279,6 +314,10 @@ public struct LANPeerPermissions: Codable, Equatable {
     public var canChangeDimensions: Bool
     public var canRespawn: Bool
     public var canUseCreative: Bool
+    /// lan-client-parity (change 4): grants the `scriptIntent` family
+    /// (§11 phase 4). Does not imply `canUseAI` — a guest's `/ai` forwarding
+    /// is gated separately, matching the design's two distinct grants.
+    public var canScript: Bool
 
     public init(
         canBuild: Bool = true,
@@ -289,7 +328,8 @@ public struct LANPeerPermissions: Codable, Equatable {
         canUseAI: Bool = false,
         canChangeDimensions: Bool = false,
         canRespawn: Bool = true,
-        canUseCreative: Bool = false
+        canUseCreative: Bool = false,
+        canScript: Bool = false
     ) {
         self.canBuild = canBuild
         self.canUseContainers = canUseContainers
@@ -300,6 +340,23 @@ public struct LANPeerPermissions: Codable, Equatable {
         self.canChangeDimensions = canChangeDimensions
         self.canRespawn = canRespawn
         self.canUseCreative = canUseCreative
+        self.canScript = canScript
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            canBuild: try c.decodeIfPresent(Bool.self, forKey: .canBuild) ?? true,
+            canUseContainers: try c.decodeIfPresent(Bool.self, forKey: .canUseContainers) ?? true,
+            canCraft: try c.decodeIfPresent(Bool.self, forKey: .canCraft) ?? true,
+            canUseTemplates: try c.decodeIfPresent(Bool.self, forKey: .canUseTemplates) ?? true,
+            canUseCommands: try c.decodeIfPresent(Bool.self, forKey: .canUseCommands) ?? false,
+            canUseAI: try c.decodeIfPresent(Bool.self, forKey: .canUseAI) ?? false,
+            canChangeDimensions: try c.decodeIfPresent(Bool.self, forKey: .canChangeDimensions) ?? false,
+            canRespawn: try c.decodeIfPresent(Bool.self, forKey: .canRespawn) ?? true,
+            canUseCreative: try c.decodeIfPresent(Bool.self, forKey: .canUseCreative) ?? false,
+            canScript: try c.decodeIfPresent(Bool.self, forKey: .canScript) ?? false
+        )
     }
 
     public func allows(_ permission: LANGameplayPermission) -> Bool {
@@ -313,6 +370,7 @@ public struct LANPeerPermissions: Codable, Equatable {
         case .dimension: return canChangeDimensions
         case .respawn: return canRespawn
         case .creative: return canUseCreative
+        case .script: return canScript
         }
     }
 }
@@ -326,6 +384,15 @@ public enum LANGameplayEventKind: String, Codable, Equatable {
     case death
     case respawn
     case dimensionChanged
+    /// lan-client-parity (change 4): a guest `scriptIntent` was validated and
+    /// executed by the same host executor a local `/attr`/`/script`/`/on`
+    /// command uses — the receipt the design's §11 phase-4 bullet calls for
+    /// ("receipts/refusals return as gameplay events").
+    case scriptIntentAccepted
+    /// The `scriptIntent` counterpart of `permissionDenied` — kept distinct
+    /// so a guest client can style/route the two differently later without a
+    /// protocol change (today both just render `message` in chat).
+    case scriptIntentRefused
 }
 
 public struct LANGameplayEvent: Codable, Equatable {
@@ -1113,11 +1180,29 @@ public struct LANWorldStateSnapshot: Codable, Equatable {
 /// .value`, unchanged; a whole record's encoded text is additionally capped at 4 KiB here
 /// (design.md's own "<= 4 KiB per object"). Applied display-only on guests, never
 /// `AttributeStore` and never re-broadcast (`LANMultiplayerClientSession.objectAttributes`).
+/// lan-client-parity (change 4), design.md §11: one script's replicated
+/// metadata — name/mode/enabled only, **never source** (a guest's editor
+/// reads this to know what exists; it authors/edits source only through a
+/// validated `scriptIntent`, never by reading another script's text off the
+/// wire).
+public struct LANScriptMetadata: Codable, Equatable {
+    public var name: String
+    public var mode: String
+    public var enabled: Bool
+
+    public init(name: String, mode: String, enabled: Bool) {
+        self.name = prefixByUTF8Bytes(cleanSingleLine(name), maxBytes: 32)
+        self.mode = prefixByUTF8Bytes(cleanSingleLine(mode), maxBytes: 16)
+        self.enabled = enabled
+    }
+}
+
 public struct LANObjectAttributeSnapshot: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case ref
         case revision
         case attrsJSON
+        case scriptsJSON
     }
 
     /// `ObjectRef.canonical` — re-parsed and validated again on apply (`ObjectRef.parse`); an
@@ -1133,12 +1218,20 @@ public struct LANObjectAttributeSnapshot: Codable, Equatable {
     /// of caller behavior (matching `LANBlockEntitySnapshot.init`'s clamp-at-construction
     /// discipline).
     public var attrsJSON: String
+    /// lan-client-parity (change 4): `JSONEncoder`-produced `[LANScriptMetadata]`, capped at
+    /// `LAN_MULTIPLAYER_MAX_OBJECT_SCRIPTS_JSON_BYTES` (well over `maxScriptsPerObject` (8)
+    /// entries' worth) — replaced with `"[]"` when oversized or when decode fails, same
+    /// clamp-at-construction/fail-closed discipline as `attrsJSON`. Additive field: an older
+    /// snapshot (or a peer that predates this change) decodes as `"[]"`.
+    public var scriptsJSON: String
 
-    public init(ref: String, revision: UInt64, attrsJSON: String) {
+    public init(ref: String, revision: UInt64, attrsJSON: String, scriptsJSON: String = "[]") {
         self.ref = prefixByUTF8Bytes(cleanSingleLine(ref), maxBytes: 96)
         self.revision = revision
         self.attrsJSON = attrsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_ATTRIBUTES_JSON_BYTES
             ? attrsJSON : "{}"
+        self.scriptsJSON = scriptsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_SCRIPTS_JSON_BYTES
+            ? scriptsJSON : "[]"
     }
 
     public init(from decoder: Decoder) throws {
@@ -1146,8 +1239,28 @@ public struct LANObjectAttributeSnapshot: Codable, Equatable {
         self.init(
             ref: try c.decode(String.self, forKey: .ref),
             revision: try c.decode(UInt64.self, forKey: .revision),
-            attrsJSON: try c.decode(String.self, forKey: .attrsJSON)
+            attrsJSON: try c.decode(String.self, forKey: .attrsJSON),
+            scriptsJSON: try c.decodeIfPresent(String.self, forKey: .scriptsJSON) ?? "[]"
         )
+    }
+
+    /// Decodes `scriptsJSON`, dropping the whole (malformed or oversized) list rather than a
+    /// partial/best-effort parse — mirrors `AttrValueCodec.decode`'s own whole-document refusal.
+    public func scripts() -> [LANScriptMetadata] {
+        guard let data = scriptsJSON.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([LANScriptMetadata].self, from: data)
+        else { return [] }
+        return Array(decoded.prefix(maxScriptsPerObject))
+    }
+
+    /// Canonical encoding for the producer side (`makeLANObjectAttributeSnapshots`) — sorted,
+    /// capped, and `nil`-safe (never throws): a `JSONEncoder` failure degrades to `"[]"`.
+    public static func encodeScripts(_ scripts: [LANScriptMetadata]) -> String {
+        let capped = Array(scripts.prefix(maxScriptsPerObject))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(capped), let text = String(data: data, encoding: .utf8) else { return "[]" }
+        return text
     }
 }
 
@@ -1633,6 +1746,76 @@ public struct LANRPGIntent: Codable, Equatable {
     }
 }
 
+/// lan-client-parity (change 4), design.md §11: the guest->host `scriptIntent`
+/// payload. `.command` reuses the exact grammar `/attr`/`/script`/`/on`/
+/// `/unsubscribe`/`/events emit` already validate (`ScriptingCommands.run`) —
+/// `command` is the top-level command word, `arguments` its tokens, both
+/// re-validated against `ScriptingCommands.lanForwardableCommand` on the host
+/// before dispatch (never trusted from the wire framing alone). `.aiPrompt`
+/// forwards free text to the host's `/ai` tool loop under `canUseAI`
+/// (independent of `canScript`). Every field is capped at construction —
+/// hostile-bytes discipline, same as every other LAN intent payload.
+public struct LANScriptIntent: Codable, Equatable {
+    public enum Verb: String, Codable, Equatable {
+        case command
+        case aiPrompt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case verb
+        case command
+        case arguments
+        case prompt
+    }
+
+    public var verb: Verb
+    /// `.command` only: the top-level word (`"attr"`, `"script"`, `"on"`,
+    /// `"unsubscribe"`, `"events"`) — never a full command line.
+    public var command: String
+    /// `.command` only: the command's own tokens, exactly as
+    /// `ScriptingCommands.run(command:arguments:)` expects. Capped to
+    /// `LAN_MULTIPLAYER_MAX_SCRIPT_INTENT_ARGUMENTS` entries, each
+    /// `LAN_MULTIPLAYER_MAX_SCRIPT_INTENT_ARGUMENT_BYTES` — a script's
+    /// *source* text is one such argument, so this cap tracks
+    /// `ScriptStore`'s own 16 KiB source ceiling with a little room for the
+    /// surrounding target/name/mode tokens.
+    public var arguments: [String]
+    /// `.aiPrompt` only: the free-text prompt, capped like the host's own
+    /// `/ai` (design.md §9.1 "prompt <= 4 KiB").
+    public var prompt: String
+
+    public init(verb: Verb, command: String = "", arguments: [String] = [], prompt: String = "") {
+        self.verb = verb
+        self.command = prefixByUTF8Bytes(cleanSingleLine(command), maxBytes: 16)
+        // `ScriptTextHygiene.sanitize` (not `cleanSingleLine`): an argument can be
+        // multi-line script source (`\n`/`\t` are legitimate there), so hygiene
+        // replaces only C0/C1/bidi/format-control bytes with U+FFFD rather than
+        // collapsing the whole argument to one line.
+        self.arguments = arguments
+            .prefix(LAN_MULTIPLAYER_MAX_SCRIPT_INTENT_ARGUMENTS)
+            .map { prefixByUTF8Bytes(ScriptTextHygiene.sanitize($0), maxBytes: LAN_MULTIPLAYER_MAX_SCRIPT_INTENT_ARGUMENT_BYTES) }
+        self.prompt = prefixByUTF8Bytes(ScriptTextHygiene.sanitize(prompt), maxBytes: LAN_MULTIPLAYER_MAX_SCRIPT_INTENT_PROMPT_BYTES)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            verb: try c.decode(Verb.self, forKey: .verb),
+            command: try c.decodeIfPresent(String.self, forKey: .command) ?? "",
+            arguments: try c.decodeIfPresent([String].self, forKey: .arguments) ?? [],
+            prompt: try c.decodeIfPresent(String.self, forKey: .prompt) ?? ""
+        )
+    }
+
+    public static func command(_ command: String, _ arguments: [String]) -> LANScriptIntent {
+        LANScriptIntent(verb: .command, command: command, arguments: arguments)
+    }
+
+    public static func aiPrompt(_ prompt: String) -> LANScriptIntent {
+        LANScriptIntent(verb: .aiPrompt, prompt: prompt)
+    }
+}
+
 public struct LANDamageEvent: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case playerID
@@ -1719,6 +1902,7 @@ public enum LANMultiplayerMessage: Codable, Equatable {
     case damageEvent(LANDamageEvent)
     case keepalive
     case rpgIntent(playerID: String, intent: LANRPGIntent)
+    case scriptIntent(playerID: String, intent: LANScriptIntent)
 
     public var kind: LANMultiplayerMessageKind {
         switch self {
@@ -1748,6 +1932,7 @@ public enum LANMultiplayerMessage: Codable, Equatable {
         case .damageEvent: return .damageEvent
         case .keepalive: return .keepalive
         case .rpgIntent: return .rpgIntent
+        case .scriptIntent: return .scriptIntent
         }
     }
 
@@ -1761,7 +1946,8 @@ public enum LANMultiplayerMessage: Codable, Equatable {
              .containerIntent(let playerID, _), .templateIntent(let playerID, _),
              .chunkRequest(let playerID, _), .replicationAck(let playerID, _),
              .attackIntent(let playerID, _), .tossIntent(let playerID, _),
-             .containerEditIntent(let playerID, _), .rpgIntent(let playerID, _):
+             .containerEditIntent(let playerID, _), .rpgIntent(let playerID, _),
+             .scriptIntent(let playerID, _):
             return playerID
         case .inventoryUpdate(let update): return update.playerID
         case .clientHello, .serverAccept, .serverReject, .chat, .worldSummary,

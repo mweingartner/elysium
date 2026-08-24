@@ -1006,7 +1006,12 @@ public final class SaveDB {
         do {
             return try openComponents(databaseURL: databaseURL, migrateLegacy: migrateLegacy)
         } catch {
-            fatalError("Elysium save database initialization failed")
+            // lan-client-parity (change 4): the caught `error` is a thrown `SaveDBOpenError`
+            // from every throw site in `openComponents`'s own call chain (`SaveDBOpenError`
+            // already conforms to `CustomStringConvertible`, "stage/result" — see its own
+            // `.description`); include it so a launch-time crash log names the actual failure
+            // mode instead of just "initialization failed" with no further diagnostic.
+            fatalError("Elysium save database initialization failed: \((error as? SaveDBOpenError)?.description ?? "\(error)")")
         }
     }
 

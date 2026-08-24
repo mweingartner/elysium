@@ -612,6 +612,115 @@ about guest authority changed. A live two-process (or two-Mac) soak of this path
 pending in the change-3 report; `Tests/ElysiumCoreTests/LANReplicationTests.swift`'s
 `LANObjectAttributeReplicationTests` cover the codec/apply/reconciliation logic headlessly.
 
+## LAN client parity (guest scriptIntent authoring)
+
+lan-client-parity (change 4), design.md §11 phase 4: the guest half of the scripting story —
+"a guest can author, attach, inspect and interact with scripts through the host." Execution stays
+host-authoritative throughout (guests still never run a `lua_State`); a guest's `/attr`, `/script`,
+`/on`, `/unsubscribe`, `/events emit`, and `/ai` now reach the host through a new message kind
+instead of being refused outright.
+
+**Wire.** `LANMultiplayerMessageKind.scriptIntent = 30` (`LANMultiplayer.swift`), mirrored as
+`LANV6MessageKind.scriptIntent = 30` in the parallel (dormant) v6 manifest per the file's own
+"mirrored into the v6 manifest" convention — added to every exhaustive switch a new mutating kind
+touches (`isHostMutationBlockedByRPGClockCatchUp` = `true`, `lanMultiplayerAllowsInbound`,
+`lanMultiplayerHostRateLimitCategory` = its own `.scriptIntent` bucket, deliberately tighter than
+`.gameplayIntent` — a script attach can trigger host-side compilation, an AI prompt an outbound
+HTTP call). The payload, `LANScriptIntent`, has two shapes: `.command(command, arguments)` reuses
+`ScriptingCommands.run(command:arguments:)`'s own grammar verbatim (`arguments[0]` is the
+`/attr`/`/on` target token, etc.) so the host never re-implements a second parser for the same
+commands; `.aiPrompt(text)` forwards free text to the tool loop. Every field is capped at
+construction (`ScriptTextHygiene.sanitize` — not `cleanSingleLine`, since a script-source argument
+is legitimately multi-line).
+
+**Host-side validation and forwarding allowlist.** `ScriptingCommands.lanForwardableCommand(_:_:)`
+is the single source of truth for which `(command, subcommand)` pairs a guest may ever reach —
+`attr {set,define,remove}`, `script {attach,detach,run}`, `on`, `unsubscribe`, `events emit`. Reads
+(`inspect`, `objects`, `events recent`) and world-level settings (`script trust|off|on|journal|
+undo-ai|list|show`) have no intent path and stay refused by the pre-existing `lanClientRefusal`
+gate — a guest reads through the replicated mirror, never a live host query, and never touches the
+world trust/kill-switch gate. Both sides of the wire call the same predicate: `CommandsM` (client)
+uses it to decide whether to forward instead of refuse; `LANTransport.applyHostScriptIntent` (host)
+re-validates it independently before dispatch — a `scriptIntent`'s shape is never trusted from the
+wire framing alone. `.command` intents are then authorized (`LANMultiplayerHostSession.authorize
+(.script, from:)`), reach-checked for a block target (`isWithinLANReach`, the same function
+block/attack/toss intents use — dimension is already enforced for free by `ObjectGraph` resolution
+itself, since a different-dimension block resolves `.dormant`), and finally executed through
+`GameCore.scriptingCommandContext(guestPeerID:)` — **the exact same executors** (`AttributeStore`,
+`ScriptStore`, `EventBus`) a local `/attr`/`/script`/`/on` command uses, with `Provenance.Author
+.lan(peer:)`/`EventSource.lan(peerID:)` recorded instead of `.player`. `.aiPrompt` intents check
+`canUseAI` instead (independent of `canScript`) and forward into `OllamaAgentService.runToolLoop`'s
+existing tool loop (the design's "one `/ai` in flight per world" gate is shared automatically —
+it's the same `toolLoopInFlight` flag); every status/result line that call would otherwise
+`pushChat` locally is instead relayed to the forwarding peer as `.chat(sender: "AI", …)`.
+Accept/refuse for `.command` intents returns as a `LANGameplayEvent` receipt
+(`.scriptIntentAccepted`/`.scriptIntentRefused`), rendered in the guest's chat exactly like a local
+command's own result text would be.
+
+**`self` becomes context-relative.** `ObjectTargetContext` gained a `selfRef` field (default
+`.player`, unchanged for every host command); a guest-forwarded context sets it to the sender's own
+`player:lan:<peerID>` ref, so `self` in a forwarded `/attr`/`/on` means "the guest issuing it," never
+the host's own player — `player` (the literal alias) still always resolves to `.player` regardless,
+so a trusted guest can still name the host's player object explicitly. `/script edit` (a pure local
+UI action — it only opens `ScriptEditorScreen`) is neither forwarded nor refused; it resolves its
+target through the same guest-aware context so the editor opens against the right ref.
+
+**`canScript`/`canUseAI` grants.** A tenth `LANPeerPermissions` field, `canScript` (default `false`,
+same shape as the pre-existing but previously-unwired `canUseAI`), gates every `.command` intent;
+`canUseAI` (now finally consulted) gates `.aiPrompt`. Both are toggled by a host-only command
+surface, `/script trust <peer> [ai] [off]` — a different grant from the pre-existing zero-argument
+`/script trust` (the world-level trust gate, unchanged): adding a peer argument is intercepted in
+`CommandsM.swift` before it ever reaches `ScriptingCommands` (Core has, and should have, no notion
+of a LAN peer), resolves `<peer>` against a connected socket's playerID or display name, flips the
+live `Peer.permissions` via `LANMultiplayerHostSession.setCanScript`/`.setCanUseAI`, and persists
+immediately rather than waiting for the next periodic peer-record flush.
+
+**`player:lan:<peerID>` becomes live.** `ObjectRef.lanPlayer` resolved unconditionally to
+`.unsupported` since 1a. `ObjectGraph.resolve` now asks `ObjectGraphHost.lanRemotePlayer(peerID:)`
+(a new protocol method with a `nil`-returning default extension, so test fakes and `elysmoke`'s
+script host need no changes) — on the host, for a peer whose `LANRemotePlayerEntity` mirror exists
+in the *current* dimension's `World.entities`, it resolves as `.live(.entity(remote, world))` —
+deliberately reusing the `.entity` `LiveObject` case rather than adding a new one: `LANRemotePlayerEntity`
+already *is* an `Entity` subclass, so every existing built-in getter (position, health — exactly the
+"client self-reports" the design scopes guest player attributes to), `AttributeStore.readRecord`/
+`writeRecord` (already dispatches `.entity` through `entity.objectRecord`), and `ScriptStore`'s reuse
+of the same functions all work with zero further plumbing and zero new exhaustive-switch cases to
+maintain elsewhere. A peer known but currently in a different dimension resolves `.dormant` (matching
+every other kind's "not loaded here right now" rule); a guest never resolves this at all (its own
+`isLANClient` is `true`) — it reads only its own `player:lan:*` object through the replicated mirror,
+same as everything else. `ObjectGraph.objectsNear`/`AttributeStore.displayName(of:)` and the host-side
+`makeLANObjectAttributeSnapshots` producer all list a connected guest's own object under this ref too
+(host-only; `entity:<uid>` still never exposes a `LANRemotePlayerEntity`, unchanged since the change-3
+SC-1 guard).
+
+**Guest editor/inspector over replicated metadata.** `LANObjectAttributeSnapshot` gained an additive
+`scriptsJSON` field — `[LANScriptMetadata]` (`name`/`mode`/`enabled`, **never source**) — decoded
+fail-closed to `[]` on anything malformed/oversized, mirrored by `LANMultiplayerManager
+.mirroredScripts(for:)` alongside the existing `.mirroredAttributes(for:)`. `InspectorScreen`'s guest
+branch (previously "not available to guests until LAN client parity") now lists this metadata;
+`ScriptEditorScreen`, in guest mode, reads only the same metadata to prefill mode/status (never
+source — re-editing an existing script starts from a blank body, with a status line explaining why),
+and Save/Run send a `scriptIntent` instead of calling `ScriptStore`/`ScriptRuntime` directly (which
+would refuse with `.lanClient` immediately anyway) — both close the screen optimistically, matching
+every other guest intent (block/attack/…); the actual accept/refuse surfaces a moment later as the
+chat receipt above.
+
+**`player:lan:*` persistence.** `LANPeerRecordSnapshot`/the internal `LANMultiplayerHostSession.Peer`
+gained `objectRecordText: String?` — `ObjectRecordCodec`-encoded (one document, attrs *and* scripts
+together, exactly like every other object kind). `persistAllHostPeerRecords` (`LANTransport.swift`)
+reads the *live* `LANRemotePlayerEntity.objectRecord` when the peer is currently connected in the
+current dimension, and otherwise preserves whatever was last known (a peer stepping into another
+dimension, or briefly disconnecting, never silently loses their scripts) — written into the existing
+`lan_players` row's opaque JSON blob under a new `"attrs"` key via the existing `SaveDB.putLANPlayer`
+surface (`Sources/ElysiumStorage` itself is untouched — this is exactly the boundary that surface
+exists for). `applyLANRemotePlayers` applies a seeded record once, only when it creates a brand-new
+`LANRemotePlayerEntity` (never on an update — a live entity's record is its own source of truth from
+then on). `GameCore.deleteWorld` gained the delete hook design.md §10 flagged as owed:
+`lan_players` was never in `StorageEngine.deleteWorld`'s cascade (`ElysiumStorage` stays untouched by
+this change too — the hook lives in the app-facing `GameCore` layer, alongside that function's other
+existing post-delete cleanup, not in the storage engine), so a deleted world's guest rows are now
+swept via the same `SaveDB` accessors rather than surviving forever.
+
 ## AI object graph tool loop
 
 design.md §9. `/ai` (`Sources/Elysium/CommandsM.swift` → `OllamaAgentService.run`) now classifies

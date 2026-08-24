@@ -1517,6 +1517,17 @@ public final class GameCore {
         db.deleteWorld(id)
         if db.getWorld(id) == nil {
             retireRPGCommittedPlayerOmission(worldID: id, worldEntryGeneration: nil)
+            // lan-client-parity (change 4), design.md §11: `lan_players` was never in
+            // `StorageEngine.deleteWorld`'s own cascade (design.md §10's "not cascaded today" —
+            // by design, `ElysiumStorage` stays untouched by this change too), so a guest's
+            // persisted `player:lan:*` attrs/scripts/permissions/position rows would otherwise
+            // survive a deleted world forever. Delete every row for `id` through the existing
+            // `SaveDB` surface (`getLANPlayer`/`putLANPlayer`'s own table accessors), the same
+            // "hook lives in the app-facing layer, not the storage engine" shape as the rest of
+            // `deleteWorld`'s own post-delete cleanup here.
+            for row in db.listLANPlayers(world: id) {
+                db.deleteLANPlayer(world: id, playerID: row.playerID)
+            }
         }
     }
 

@@ -146,7 +146,7 @@ final class LANMultiplayerTests: XCTestCase {
         let expected: [LANMultiplayerMessageKind] = [
             .playerState, .inputIntent, .blockIntent, .containerIntent,
             .templateIntent, .attackIntent, .tossIntent, .containerEditIntent,
-            .inventoryUpdate, .rpgIntent,
+            .inventoryUpdate, .rpgIntent, .scriptIntent,
         ]
         let classified = LANMultiplayerMessageKind.allCases.filter {
             $0.isHostMutationBlockedByRPGClockCatchUp

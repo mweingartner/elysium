@@ -288,6 +288,12 @@ public final class LANMultiplayerHostSession {
         /// This transient boundary is reset only on join/reconnect and prevents a
         /// peer admitted during bounded catch-up from consuming historical ticks.
         var rpgConnectedAfterTick = 0
+        /// lan-client-parity (change 4): the *persisted* seed only (what `seedPeerRecord`
+        /// loaded from `lan_players`), applied once to a freshly-created
+        /// `LANRemotePlayerEntity`. The live value while connected lives on that entity's
+        /// `objectRecord`, not here — `persistAllHostPeerRecords` reads the entity directly,
+        /// never this field, so it can never go stale mid-session.
+        var objectRecordText: String?
     }
 
     /// snapshot captured once per epoch by `consumeDeathDrops(for:)`; keyed by playerID for deterministic lookup.
@@ -719,6 +725,34 @@ public final class LANMultiplayerHostSession {
         peers[String(rawPlayerID.prefix(128))]?.permissions
     }
 
+    /// lan-client-parity (change 4), design.md §11/§12: the host-side half of the `/script
+    /// trust <peer>`-style per-peer grant — flips `canScript` for a known (connected or
+    /// reconnecting) peer. Returns `false` (no-op) for an unknown playerID, never traps; the
+    /// caller (`ScriptingCommands`/`CommandsM`) is responsible for persisting the flip
+    /// (`LANTransport.persistAllHostPeerRecords` already round-trips `permissions` every
+    /// interval, but a grant should be visible immediately, not after the next tick).
+    @discardableResult
+    public func setCanScript(_ granted: Bool, for rawPlayerID: String) -> Bool {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard var peer = peers[playerID] else { return false }
+        peer.permissions.canScript = granted
+        peers[playerID] = peer
+        return true
+    }
+
+    /// The matching per-peer grant for guest `/ai` forwarding (`canUseAI`) —
+    /// same shape, kept alongside `setCanScript` since both are toggled by
+    /// the same command surface (design.md §11: "canScript... and use `/ai`
+    /// forwarded to the host under `canUseAI`").
+    @discardableResult
+    public func setCanUseAI(_ granted: Bool, for rawPlayerID: String) -> Bool {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard var peer = peers[playerID] else { return false }
+        peer.permissions.canUseAI = granted
+        peers[playerID] = peer
+        return true
+    }
+
     public func peerRecord(playerID rawPlayerID: String) -> LANPeerRecordSnapshot? {
         let playerID = String(rawPlayerID.prefix(128))
         guard let peer = peers[playerID] else { return nil }
@@ -733,7 +767,8 @@ public final class LANMultiplayerHostSession {
             inventoryRevision: peer.inventoryRevision,
             lastAckTick: peer.lastAckTick,
             lastSeenTick: peer.lastSeenTick,
-            disconnectedTick: peer.disconnectedTick
+            disconnectedTick: peer.disconnectedTick,
+            objectRecordText: peer.objectRecordText
         )
     }
 
@@ -761,7 +796,8 @@ public final class LANMultiplayerHostSession {
             lastAckSequence: 0,
             lastSeenTick: max(0, record.lastSeenTick),
             disconnectedTick: record.disconnectedTick,
-            rpgConnectedAfterTick: 0
+            rpgConnectedAfterTick: 0,
+            objectRecordText: record.objectRecordText
         )
         nextOrdinal += 1
     }
@@ -799,6 +835,20 @@ public final class LANMultiplayerHostSession {
         var out: [String: LANPlayerInventorySnapshot] = [:]
         for snapshot in peerInventorySnapshots() {
             out[snapshot.playerID] = snapshot
+        }
+        return out
+    }
+
+    /// lan-client-parity (change 4): the *seeded* (persisted-on-reconnect) `objectRecordText`
+    /// per connected/reconnecting peer — `applyLANRemotePlayers` applies one of these only when
+    /// it creates a brand-new `LANRemotePlayerEntity` (never on an update; a live entity's
+    /// record is its own source of truth from then on), the same "seed once at creation" shape
+    /// `inventorySnapshots` already has.
+    public func peerObjectRecordTextsByPlayerID() -> [String: String] {
+        var out: [String: String] = [:]
+        for (playerID, peer) in peers {
+            guard let text = peer.objectRecordText, !text.isEmpty else { continue }
+            out[playerID] = text
         }
         return out
     }
@@ -2422,6 +2472,7 @@ public func makeLANWorldStateSnapshot(in world: World) -> LANWorldStateSnapshot 
 public func makeLANObjectAttributeSnapshots(
     host: ObjectGraphHost,
     store: AttributeStore,
+    scriptStore: ScriptStore? = nil,
     maxCount: Int = LAN_MULTIPLAYER_MAX_REPLICATION_OBJECT_ATTRIBUTES
 ) -> [LANObjectAttributeSnapshot] {
     let cappedCount = max(0, min(maxCount, LAN_MULTIPLAYER_MAX_REPLICATION_OBJECT_ATTRIBUTES))
@@ -2432,6 +2483,12 @@ public func makeLANObjectAttributeSnapshots(
         for e in w.entities {
             guard let ent = e as? Entity, !ent.dead else { continue }
             refs.append(.entity(uid: ent.id))
+            // lan-client-parity (change 4): a connected guest's own object is
+            // discoverable/replicable under its `player:lan:<peerID>` ref too
+            // (never `entity:<uid>` — SC-1's guard on that path is untouched).
+            if let remote = ent as? LANRemotePlayerEntity {
+                refs.append(.lanPlayer(peerID: remote.multiplayerPlayerID))
+            }
         }
         for chunk in w.chunks.values where !chunk.objectRecords.isEmpty {
             for cellIndex in chunk.objectRecords.keys.sorted() {
@@ -2441,19 +2498,25 @@ public func makeLANObjectAttributeSnapshots(
         }
     }
 
-    var out: [(ref: ObjectRef, revision: UInt64, attrs: [String: AttrValue])] = []
+    var out: [(ref: ObjectRef, revision: UInt64, attrs: [String: AttrValue], scripts: [LANScriptMetadata])] = []
     for ref in refs {
         let attrs = store.list(ref)
-        guard !attrs.isEmpty else { continue }
+        // script-only records for a scripted-but-attribute-free object (e.g.
+        // a freshly attached script with no custom attrs yet) still need a
+        // snapshot — never require attrs to be non-empty.
+        let scripts = (scriptStore?.list(ref) ?? [])
+            .map { LANScriptMetadata(name: $0.name, mode: $0.mode.rawValue, enabled: $0.enabled) }
+        guard !attrs.isEmpty || !scripts.isEmpty else { continue }
         guard case .live(let live) = store.graph.resolve(ref) else { continue }
         let record = AttributeStore.readRecord(live, host: host)
-        out.append((ref, record.revision, Dictionary(uniqueKeysWithValues: attrs.map { ($0.name, $0.value) })))
+        out.append((ref, record.revision, Dictionary(uniqueKeysWithValues: attrs.map { ($0.name, $0.value) }), scripts))
     }
     out.sort { $0.ref.canonical < $1.ref.canonical }
     return out.prefix(cappedCount).map { entry in
         LANObjectAttributeSnapshot(
             ref: entry.ref.canonical, revision: entry.revision,
-            attrsJSON: AttrValueCodec.encode(.map(entry.attrs))
+            attrsJSON: AttrValueCodec.encode(.map(entry.attrs)),
+            scriptsJSON: LANObjectAttributeSnapshot.encodeScripts(entry.scripts)
         )
     }
 }

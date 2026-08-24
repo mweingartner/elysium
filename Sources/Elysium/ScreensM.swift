@@ -3148,7 +3148,17 @@ final class ScriptEditorScreen: Screen {
         var initialTriggerEvent: String?
         if let existingName {
             field.text = existingName
-            if let existing = game.scriptingCommandContext().scriptStore.get(target, existingName) {
+            if game.isLANClientWorld {
+                // lan-client-parity (change 4), design.md §11: a guest reads only replicated
+                // *metadata* (name/mode/enabled) — never source, so re-editing an existing
+                // script starts from a blank body; Save still works, it just replaces the
+                // source (the host, not this screen, is authoritative over what was there).
+                if let meta = LANMultiplayerManager.shared.mirroredScripts(for: target)?.first(where: { $0.name == existingName }) {
+                    handlerMode = meta.mode == ScriptMode.handler.rawValue
+                    statusMessage = "editing \"\(existingName)\" — source isn't visible to guests; Save replaces it"
+                    statusIsError = false
+                }
+            } else if let existing = game.scriptingCommandContext().scriptStore.get(target, existingName) {
                 let split = existing.source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
                 lines = split.isEmpty ? [""] : split
                 handlerMode = existing.mode == .handler
@@ -3417,18 +3427,37 @@ final class ScriptEditorScreen: Screen {
             statusIsError = true
             return
         }
-        let context = game.scriptingCommandContext()
-        guard validateBeforeAction(context, chunkName: name) else { return }
-        var triggers: [Trigger] = []
+        var eventText: String?
+        var parsedEvent: EventKind?
         if handlerMode {
-            let eventText = (eventField?.text ?? "").trimmingCharacters(in: .whitespaces)
-            guard let event = EventKind.parse(eventText) else {
-                statusMessage = "'\(eventText)' is not a valid event name."
+            let text = (eventField?.text ?? "").trimmingCharacters(in: .whitespaces)
+            guard let event = EventKind.parse(text) else {
+                statusMessage = "'\(text)' is not a valid event name."
                 statusIsError = true
                 return
             }
-            triggers = [Trigger(event: event, attribute: nil, target: .object(target))]
+            eventText = text
+            parsedEvent = event
         }
+        // lan-client-parity (change 4), design.md §11: a guest submits through the same
+        // `scriptIntent` `CommandsM` builds for `/script attach` — never calls `scriptStore`
+        // directly (it would refuse with `.lanClient` anyway). The host runs the exact same
+        // validator this screen's own `validateBeforeAction` mirrors; accept/refuse arrives
+        // as a `scriptIntentAccepted`/`scriptIntentRefused` chat receipt after this screen has
+        // already closed, matching every other optimistic guest intent (block/attack/…).
+        if game.isLANClientWorld {
+            var args = ["attach", target.canonical, name, handlerMode ? "handler" : "module"]
+            if let eventText { args.append(eventText) }
+            args.append(sourceText)
+            LANMultiplayerManager.shared.sendScriptIntent(.command("script", args))
+            pushChat("§7sent \"\(name)\" to the host...")
+            ui.closeTop(game)
+            game.host?.capturePointer()
+            return
+        }
+        let context = game.scriptingCommandContext()
+        guard validateBeforeAction(context, chunkName: name) else { return }
+        let triggers: [Trigger] = parsedEvent.map { [Trigger(event: $0, attribute: nil, target: .object(target))] } ?? []
         switch context.scriptStore.attach(
             target, name: name, source: sourceText, mode: handlerMode ? .handler : .module,
             triggers: triggers, by: .player, tick: context.tick
@@ -3448,6 +3477,15 @@ final class ScriptEditorScreen: Screen {
         guard !sourceText.isEmpty else {
             statusMessage = "Source is empty."
             statusIsError = true
+            return
+        }
+        // lan-client-parity (change 4): `/script run` (ephemeral) forwarded the same way as
+        // Save — a guest has no `scriptRuntime` (`context.scriptRuntime` is `nil` on a LAN
+        // client by construction) to run it locally against even if it wanted to.
+        if game.isLANClientWorld {
+            LANMultiplayerManager.shared.sendScriptIntent(.command("script", ["run", target.canonical, sourceText]))
+            statusMessage = "sent to the host..."
+            statusIsError = false
             return
         }
         let context = game.scriptingCommandContext()
