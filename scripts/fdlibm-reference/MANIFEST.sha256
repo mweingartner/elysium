@@ -1,12 +1,22 @@
 # Netlib fdlibm reference sources, pinned by SHA-256.
 # Each file below is fetched from https://www.netlib.org/fdlibm/<name> (HTTPS only; see
-# gen-explog-goldens.sh) and copied byte-for-byte into upstream/ — never edited. Verified
-# 2026-08-22.
+# gen-explog-goldens.sh / gen-trig-goldens.sh) and copied byte-for-byte into upstream/ — never
+# edited. exp/log/pow set verified 2026-08-22; tan/asin/acos/log10 set added and verified
+# 2026-08-23 (change 3, deterministic-math). Classic netlib fdlibm has no e_log2.c (confirmed:
+# https://www.netlib.org/fdlibm/e_log2.c returns HTTP 404) — detLog2 is derived, not pinned;
+# see the provenance note on `detLog2` in Sources/ElysiumCore/Core/DetMath.swift.
+bc9fbb24c214030604c0df4c811370f37d511e0c72580767d8c81bd68b0c3a5a  e_acos.c
+4ec96c4c7747df94911404b1577e404e13efc51e104f1934e72b536b61adc911  e_asin.c
 04c96195b7ced914d659b5fd204724c182f091af8631fe42016ad6e27cb302ef  e_exp.c
 a2b1bd1b367026a35f36da53425cd618386c3bf69d23ac224a40791aa9855ac9  e_log.c
+0d636f23e0e70430344cfb003aebce3317260e28c716bbfb8c0839117e533efc  e_log10.c
 763b86baa63eb3518b43f7f3e44e5ed10992b62650f4a45c3a2ea6015e6d5122  e_pow.c
+3a08dd4a38f9f9fc9478a33ca05cb81a6566f1010ab14412e97cae091bede16b  e_rem_pio2.c
 2a6e784d1089eb6351df7e59037de4240d11a5c61967611732f81ad96fe869ce  e_sqrt.c
 64113c472c2676499288bc35a821b0867916552930bc52c7445d2c50dddf0e71  fdlibm.h
+5796209ea3fe1af88e22badeaed0f6a6aa923914e097e227c410527cb5815740  k_rem_pio2.c
+9dfd4c84f7930da3184a6c425ce7901979c84088cf231c33a7edefc3e0f487c0  k_tan.c
 459c18858c944a4e7062d38ab4dfb596edbe76706d24029c2dac766dcd2be3fd  s_copysign.c
 c6389f3e0472ec0157d648b3e4e80b405038acfaf3e85b961363ea483e3259f1  s_fabs.c
 9ad1bb374fc2951ec086474c82373b45bccfdecd34d631974dccf8633f40d99e  s_scalbn.c
+f86caed50cf19150e0be229469785ce937d8d9b37046541408bce146180ba685  s_tan.c

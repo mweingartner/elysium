@@ -771,6 +771,665 @@ public func detPow(_ x: Double, _ y: Double) -> Double {
 }
 
 // ---------------------------------------------------------------------------
+// asin / acos — __ieee754_asin / __ieee754_acos (fdlibm e_asin.c / e_acos.c)
+// ---------------------------------------------------------------------------
+private let asinOne = 1.0
+private let asinPio2Hi = fromWords(0x3FF921FB, 0x54442D18)
+private let asinPio2Lo = fromWords(0x3C91A626, 0x33145C07)
+private let asinPio4Hi = fromWords(0x3FE921FB, 0x54442D18)
+private let asinPS0 = fromWords(0x3FC55555, 0x55555555)
+private let asinPS1 = fromWords(0xBFD4D612, 0x03EB6F7D)
+private let asinPS2 = fromWords(0x3FC9C155, 0x0E884455)
+private let asinPS3 = fromWords(0xBFA48228, 0xB5688F3B)
+private let asinPS4 = fromWords(0x3F49EFE0, 0x7501B288)
+private let asinPS5 = fromWords(0x3F023DE1, 0x0DFDF709)
+private let asinQS1 = fromWords(0xC0033A27, 0x1C8A2D4B)
+private let asinQS2 = fromWords(0x40002AE5, 0x9C598AC8)
+private let asinQS3 = fromWords(0xBFE6066C, 0x1B8D0159)
+private let asinQS4 = fromWords(0x3FB3B8C5, 0xB12E9282)
+
+/// `detAsin(x)` for `|x| > 1` returns NaN (never traps); `detAsin(NaN)` returns NaN.
+/// Upstream's tiny-`|x|` fast path (`if (huge+x>one) return x;`) is unconditionally true for
+/// every finite `x` reachable there (`huge=1e300` swallows any addend with `|x| < 2**-27` at
+/// double precision) — the C's dangling-else-free but still-vacuous `else` arm is dead code,
+/// so it is translated as an unconditional `return x`, matching upstream's actual behavior.
+public func detAsin(_ xIn: Double) -> Double {
+    let x = xIn
+    let hx = HI(x)
+    let ix = hx & 0x7fffffff
+    if ix >= 0x3ff00000 {                     // |x| >= 1
+        if ((ix &- 0x3ff00000) | LO(x)) == 0 {
+            return x * asinPio2Hi + x * asinPio2Lo   // asin(+-1) = +-pi/2
+        }
+        return (x - x) / (x - x)              // asin(|x|>1) is NaN
+    }
+    if ix < 0x3fe00000 {                      // |x| < 0.5
+        if ix < 0x3e400000 { return x }       // |x| < 2**-27 (see doc comment above)
+        let t = x * x
+        let p = t * (asinPS0 + t * (asinPS1 + t * (asinPS2 + t * (asinPS3 + t * (asinPS4 + t * asinPS5)))))
+        let q = asinOne + t * (asinQS1 + t * (asinQS2 + t * (asinQS3 + t * asinQS4)))
+        let w = p / q
+        return x + x * w
+    }
+    // 1 > |x| >= 0.5
+    let w0 = asinOne - abs(x)
+    let t = w0 * 0.5
+    let p = t * (asinPS0 + t * (asinPS1 + t * (asinPS2 + t * (asinPS3 + t * (asinPS4 + t * asinPS5)))))
+    let q = asinOne + t * (asinQS1 + t * (asinQS2 + t * (asinQS3 + t * asinQS4)))
+    let s = t.squareRoot()
+    let result: Double
+    if ix >= 0x3FEF3333 {                     // |x| > 0.975
+        let w = p / q
+        result = asinPio2Hi - (2.0 * (s + s * w) - asinPio2Lo)
+    } else {
+        var wLow = s
+        wLow = setLO(wLow, 0)
+        let c = (t - wLow * wLow) / (s + wLow)
+        let r = p / q
+        let p2 = 2.0 * s * r - (asinPio2Lo - 2.0 * c)
+        let q2 = asinPio4Hi - 2.0 * wLow
+        result = asinPio4Hi - (p2 - q2)
+    }
+    return hx > 0 ? result : -result
+}
+
+private let acosOne = 1.0
+private let acosPi = fromWords(0x400921FB, 0x54442D18)
+private let acosPio2Hi = fromWords(0x3FF921FB, 0x54442D18)
+private let acosPio2Lo = fromWords(0x3C91A626, 0x33145C07)
+private let acosPS0 = fromWords(0x3FC55555, 0x55555555)
+private let acosPS1 = fromWords(0xBFD4D612, 0x03EB6F7D)
+private let acosPS2 = fromWords(0x3FC9C155, 0x0E884455)
+private let acosPS3 = fromWords(0xBFA48228, 0xB5688F3B)
+private let acosPS4 = fromWords(0x3F49EFE0, 0x7501B288)
+private let acosPS5 = fromWords(0x3F023DE1, 0x0DFDF709)
+private let acosQS1 = fromWords(0xC0033A27, 0x1C8A2D4B)
+private let acosQS2 = fromWords(0x40002AE5, 0x9C598AC8)
+private let acosQS3 = fromWords(0xBFE6066C, 0x1B8D0159)
+private let acosQS4 = fromWords(0x3FB3B8C5, 0xB12E9282)
+
+/// `detAcos(x)` for `|x| > 1` returns NaN (never traps); `detAcos(NaN)` returns NaN.
+public func detAcos(_ xIn: Double) -> Double {
+    let x = xIn
+    let hx = HI(x)
+    let ix = hx & 0x7fffffff
+    if ix >= 0x3ff00000 {                     // |x| >= 1
+        if ((ix &- 0x3ff00000) | LO(x)) == 0 {
+            return hx > 0 ? 0.0 : acosPi + 2.0 * acosPio2Lo   // acos(1)=0, acos(-1)=pi
+        }
+        return (x - x) / (x - x)              // acos(|x|>1) is NaN
+    }
+    if ix < 0x3fe00000 {                      // |x| < 0.5
+        if ix <= 0x3c600000 { return acosPio2Hi + acosPio2Lo }   // |x| < 2**-57
+        let z = x * x
+        let p = z * (acosPS0 + z * (acosPS1 + z * (acosPS2 + z * (acosPS3 + z * (acosPS4 + z * acosPS5)))))
+        let q = acosOne + z * (acosQS1 + z * (acosQS2 + z * (acosQS3 + z * acosQS4)))
+        let r = p / q
+        return acosPio2Hi - (x - (acosPio2Lo - x * r))
+    }
+    if hx < 0 {                               // x < -0.5
+        let z = (acosOne + x) * 0.5
+        let p = z * (acosPS0 + z * (acosPS1 + z * (acosPS2 + z * (acosPS3 + z * (acosPS4 + z * acosPS5)))))
+        let q = acosOne + z * (acosQS1 + z * (acosQS2 + z * (acosQS3 + z * acosQS4)))
+        let s = z.squareRoot()
+        let r = p / q
+        let w = r * s - acosPio2Lo
+        return acosPi - 2.0 * (s + w)
+    }
+    // x > 0.5
+    let z = (acosOne - x) * 0.5
+    let s = z.squareRoot()
+    var df = s
+    df = setLO(df, 0)
+    let c = (z - df * df) / (s + df)
+    let p = z * (acosPS0 + z * (acosPS1 + z * (acosPS2 + z * (acosPS3 + z * (acosPS4 + z * acosPS5)))))
+    let q = acosOne + z * (acosQS1 + z * (acosQS2 + z * (acosQS3 + z * acosQS4)))
+    let r = p / q
+    let w = r * s + c
+    return 2.0 * (df + w)
+}
+
+// ---------------------------------------------------------------------------
+// log10 — __ieee754_log10 (fdlibm e_log10.c); reduces to a call into detLog.
+// ---------------------------------------------------------------------------
+private let log10Two54 = fromWords(0x43500000, 0)
+private let log10Ivln10 = fromWords(0x3FDBCB7B, 0x1526E50E)
+private let log10Log10_2hi = fromWords(0x3FD34413, 0x509F6000)
+private let log10Log10_2lo = fromWords(0x3D59FEF3, 0x11F12B36)
+private let log10Zero = 0.0
+
+/// `detLog10(0)` is -infinity, `detLog10(x<0)` is NaN, `detLog10(NaN)` is NaN — never traps.
+public func detLog10(_ xIn: Double) -> Double {
+    var x = xIn
+    var hx = HI(x)
+    let lx = LO(x)
+    var k: Int32 = 0
+    if hx < 0x00100000 {                      // x < 2**-1022
+        if ((hx & 0x7fffffff) | lx) == 0 { return -log10Two54 / log10Zero }  // log10(+-0)=-inf
+        if hx < 0 { return (x - x) / log10Zero }                              // log10(-#)=NaN
+        k &-= 54
+        x *= log10Two54                       // subnormal number, scale up x
+        hx = HI(x)
+    }
+    if hx >= 0x7ff00000 { return x + x }
+    k &+= (hx >> 20) &- 1023
+    // upstream: `i = ((unsigned)k&0x80000000)>>31;` — reinterpreting k's sign bit as unsigned
+    // and shifting it down to bit 0 is exactly "is k negative", written directly below.
+    let i: Int32 = k < 0 ? 1 : 0
+    hx = (hx & 0x000fffff) | ((0x3ff &- i) << 20)
+    let y = Double(k &+ i)
+    x = setHI(x, UInt32(bitPattern: hx))
+    let z = y * log10Log10_2lo + log10Ivln10 * detLog(x)
+    return z + y * log10Log10_2hi
+}
+
+// ---------------------------------------------------------------------------
+// log2 — derived, not upstream fdlibm (see the provenance note below).
+// ---------------------------------------------------------------------------
+// Classic netlib fdlibm has no e_log2.c (confirmed 2026-08-23: the upstream host serves
+// every other file this port needs but returns HTTP 404 for that path — see
+// scripts/fdlibm-reference/MANIFEST.sha256). The other Sun-derived libm family member that does ship
+// one (FreeBSD msun's lib/msun/src/e_log2.c) reduces through a different kernel (`k_log1p`,
+// from k_log.h) than netlib's own e_log.c/detLog, so pinning it as "upstream" would mean
+// porting and maintaining a second, independent log algorithm alongside the first — for one
+// function, that cost is not worth paying, and the two kernels disagreeing in their last bit
+// would be a second source of drift to track forever.
+//
+// Instead `detLog2` is derived exactly the way netlib's own e_log10.c derives log10 from log:
+// reduce x to the same (k, mantissa-in-[~0.7,1.4)) split detLog already uses, call the
+// already-ported, bit-exact detLog on the reduced mantissa, and recombine in extra-precision
+// hi/lo form. The only change from the log10 recipe is that log2(2) is exactly 1 (unlike
+// log10(2), which is irrational) — so the "hi" combining term is exactly 1.0 and the "lo" term
+// is exactly 0.0, with 1/ln2 taking log10's ivln10 role. This guarantees `detLog2(2**n) == n`
+// exactly for every representable power of two (mirroring the exactness property netlib's own
+// e_log10.c documents for itself), which the "exact powers of two" probe band in
+// goldens/fmath-trig-goldens.json checks directly. The reference build's own independent C
+// implementation of this same recipe lives in scripts/fdlibm-reference/gen-trig-goldens.c
+// (`elysium_log2`, calling the pinned `__ieee754_log`) — not in scripts/fdlibm-reference/
+// upstream/, precisely because it is Elysium-authored, not a netlib file.
+private let log2Ivln2 = fromWords(0x3FF71547, 0x652B82FE)
+private let log2Two54 = fromWords(0x43500000, 0)
+private let log2Hi = 1.0
+private let log2Lo = 0.0
+private let log2Zero = 0.0
+
+/// `detLog2(0)` is -infinity, `detLog2(x<0)` is NaN, `detLog2(NaN)` is NaN — never traps.
+public func detLog2(_ xIn: Double) -> Double {
+    var x = xIn
+    var hx = HI(x)
+    let lx = LO(x)
+    var k: Int32 = 0
+    if hx < 0x00100000 {                      // x < 2**-1022
+        if ((hx & 0x7fffffff) | lx) == 0 { return -log2Two54 / log2Zero }   // log2(+-0)=-inf
+        if hx < 0 { return (x - x) / log2Zero }                              // log2(-#)=NaN
+        k &-= 54
+        x *= log2Two54                        // subnormal number, scale up x
+        hx = HI(x)
+    }
+    if hx >= 0x7ff00000 { return x + x }
+    k &+= (hx >> 20) &- 1023
+    let i: Int32 = k < 0 ? 1 : 0
+    hx = (hx & 0x000fffff) | ((0x3ff &- i) << 20)
+    let y = Double(k &+ i)
+    x = setHI(x, UInt32(bitPattern: hx))
+    let z = y * log2Lo + log2Ivln2 * detLog(x)
+    return z + y * log2Hi
+}
+
+// ---------------------------------------------------------------------------
+// tan — __kernel_tan (fdlibm k_tan.c)
+// ---------------------------------------------------------------------------
+private let tanT: [Double] = [
+    fromWords(0x3FD55555, 0x55555563), fromWords(0x3FC11111, 0x1110FE7A),
+    fromWords(0x3FABA1BA, 0x1BB341FE), fromWords(0x3F9664F4, 0x8406D637),
+    fromWords(0x3F8226E3, 0xE96E8493), fromWords(0x3F6D6D22, 0xC9560328),
+    fromWords(0x3F57DBC8, 0xFEE08315), fromWords(0x3F4344D8, 0xF2F26501),
+    fromWords(0x3F3026F7, 0x1A8D1068), fromWords(0x3F147E88, 0xA03792A6),
+    fromWords(0x3F12B80F, 0x32F0A7E9), fromWords(0xBEF375CB, 0xDB605373),
+    fromWords(0x3EFB2A70, 0x74BF7AD4),
+]
+private let tanOne = 1.0
+private let tanPio4 = fromWords(0x3FE921FB, 0x54442D18)
+private let tanPio4Lo = fromWords(0x3C81A626, 0x33145C07)
+
+/// Kernel tan on `[-pi/4, pi/4]`; `iy == 1` returns `tan(x+y)`, `iy == -1` returns
+/// `-1/tan(x+y)`. Upstream's `t = a = -1.0/w; __LO(t) = 0;` idiom assigns the SAME
+/// full-precision value to both `t` and `a`, then truncates only `t`'s low word — `a` keeps
+/// full precision. Translated below by binding `a` first (full precision) and deriving `t`
+/// from it before truncating `t` alone; binding both from an already-truncated value (as a
+/// naive "`t = a`, then truncate `t`" reading would do) silently truncates `a` too and was
+/// caught by cross-checking against the independent C reference during development.
+private func kernelTan(_ xIn: Double, _ yIn: Double, _ iy: Int32) -> Double {
+    var x = xIn
+    var y = yIn
+    let hx = HI(x)
+    let ix = hx & 0x7fffffff
+    if ix < 0x3e300000 {                      // |x| < 2**-28
+        if truncToInt32(x) == 0 {             // generate inexact
+            if ((ix | LO(x)) | (iy &+ 1)) == 0 {
+                return tanOne / abs(x)
+            }
+            if iy == 1 {
+                return x
+            }
+            // compute -1/(x+y) carefully
+            var z = x + y
+            let w = z
+            z = setLO(z, 0)
+            let v = y - (z - x)
+            let a = -tanOne / w
+            var t = a
+            t = setLO(t, 0)
+            let s = tanOne + t * z
+            return t + a * (s + t * v)
+        }
+    }
+    if ix >= 0x3FE59428 {                     // |x| >= 0.6744
+        if hx < 0 {
+            x = -x
+            y = -y
+        }
+        let z0 = tanPio4 - x
+        let w0 = tanPio4Lo - y
+        x = z0 + w0
+        y = 0.0
+    }
+    let z = x * x
+    let w = z * z
+    let r0 = tanT[1] + w * (tanT[3] + w * (tanT[5] + w * (tanT[7] + w * (tanT[9] + w * tanT[11]))))
+    let v0 = z * (tanT[2] + w * (tanT[4] + w * (tanT[6] + w * (tanT[8] + w * (tanT[10] + w * tanT[12])))))
+    let s0 = z * x
+    var r = y + z * (s0 * (r0 + v0) + y)
+    r += tanT[0] * s0
+    let wSum = x + r
+    if ix >= 0x3FE59428 {
+        let vIy = Double(iy)
+        return Double(1 - ((hx >> 30) & 2)) * (vIy - 2.0 * (x - (wSum * wSum / (wSum + vIy) - r)))
+    }
+    if iy == 1 {
+        return wSum
+    }
+    // compute -1.0/(x+r) accurately
+    var zz = wSum
+    zz = setLO(zz, 0)
+    let vv = r - (zz - x)
+    let aa = -tanOne / wSum
+    var tt = aa
+    tt = setLO(tt, 0)
+    let ss = tanOne + tt * zz
+    return tt + aa * (ss + tt * vv)
+}
+
+// ---------------------------------------------------------------------------
+// tan: full-range argument reduction — __ieee754_rem_pio2 / __kernel_rem_pio2
+// (fdlibm e_rem_pio2.c / k_rem_pio2.c), detTan-only.
+// ---------------------------------------------------------------------------
+// detSin/detCos (above) keep their existing, capped `remPio2` untouched — this is a
+// self-contained duplicate (same convention as the rest of this file: e.g. `powP1...P5`
+// already duplicate `expP1...P5` bit-for-bit rather than sharing across sections), covering
+// the huge-argument Payne-Hanek path that `remPio2` deliberately does not (design: gameplay
+// never exceeds 2^19*pi/2). `detTan` needs the full reduction because the golden's "huge
+// argument" probe band exercises it directly.
+private let tanInvpio2 = fromWords(0x3fe45f30, 0x6dc9c883)
+private let tanPio2_1 = fromWords(0x3ff921fb, 0x54400000)
+private let tanPio2_1t = fromWords(0x3dd0b461, 0x1a626331)
+private let tanPio2_2 = fromWords(0x3dd0b461, 0x1a600000)
+private let tanPio2_2t = fromWords(0x3ba3198a, 0x2e037073)
+private let tanPio2_3 = fromWords(0x3ba3198a, 0x2e000000)
+private let tanPio2_3t = fromWords(0x397b839a, 0x252049c1)
+private let tanRemHalf = 0.5
+private let tanRemZero = 0.0
+private let tanRemTwo24 = fromWords(0x41700000, 0)
+private let tanRemTwon24 = fromWords(0x3E700000, 0)
+
+private let tanNpio2Hw: [Int32] = [
+    0x3ff921fb, 0x400921fb, 0x4012d97c, 0x401921fb, 0x401f6a7a, 0x4022d97c,
+    0x4025fdbb, 0x402921fb, 0x402c463a, 0x402f6a7a, 0x4031475c, 0x4032d97c,
+    0x40346b9c, 0x4035fdbb, 0x40378fdb, 0x403921fb, 0x403ab41b, 0x403c463a,
+    0x403dd85a, 0x403f6a7a, 0x40407e4c, 0x4041475c, 0x4042106c, 0x4042d97c,
+    0x4043a28c, 0x40446b9c, 0x404534ac, 0x4045fdbb, 0x4046c6cb, 0x40478fdb,
+    0x404858eb, 0x404921fb,
+]
+
+/// 2/pi, 396 hex digits, as 24-bit chunks (`two_over_pi[]` in k_rem_pio2.c).
+private let tanTwoOverPi: [Int32] = [
+    0xA2F983, 0x6E4E44, 0x1529FC, 0x2757D1, 0xF534DD, 0xC0DB62,
+    0x95993C, 0x439041, 0xFE5163, 0xABDEBB, 0xC561B7, 0x246E3A,
+    0x424DD2, 0xE00649, 0x2EEA09, 0xD1921C, 0xFE1DEB, 0x1CB129,
+    0xA73EE8, 0x8235F5, 0x2EBB44, 0x84E99C, 0x7026B4, 0x5F7E41,
+    0x3991D6, 0x398353, 0x39F49C, 0x845F8B, 0xBDF928, 0x3B1FF8,
+    0x97FFDE, 0x05980F, 0xEF2F11, 0x8B5A0A, 0x6D1F6D, 0x367ECF,
+    0x27CB09, 0xB74F46, 0x3F669E, 0x5FEA2D, 0x7527BA, 0xC7EBE5,
+    0xF17B3D, 0x0739F7, 0x8A5292, 0xEA6BFB, 0x5FB11F, 0x8D5D08,
+    0x560330, 0x46FC7B, 0x6BABF0, 0xCFBC20, 0x9AF436, 0x1DA9E3,
+    0x91615E, 0xE61B08, 0x659985, 0x5F14A0, 0x68408D, 0xFFD880,
+    0x4D7327, 0x310606, 0x1556CA, 0x73A8C9, 0x60E27B, 0xC08C6B,
+]
+
+/// pi/2 cut into 24-bit chunks (`PIo2[]` in k_rem_pio2.c).
+private let tanPIo2: [Double] = [
+    fromWords(0x3FF921FB, 0x40000000), fromWords(0x3E74442D, 0x00000000),
+    fromWords(0x3CF84698, 0x80000000), fromWords(0x3B78CC51, 0x60000000),
+    fromWords(0x39F01B83, 0x80000000), fromWords(0x387A2520, 0x40000000),
+    fromWords(0x36E38222, 0x80000000), fromWords(0x3569F31D, 0x00000000),
+]
+
+/// `ipio2[j]` with the bounds guard upstream's own callers never need (every reachable `j`
+/// for a finite double stays in range) — a defensive backstop only, same spirit as
+/// `truncToInt32`'s doc comment, so an index slip can never become a Swift array-bounds trap.
+@inline(__always) private func tanIpio2At(_ j: Int32) -> Double {
+    guard j >= 0, Int(j) < tanTwoOverPi.count else { return 0 }
+    return Double(tanTwoOverPi[Int(j)])
+}
+
+/// `__kernel_rem_pio2`, fixed to `prec == 2` (matching upstream/e_rem_pio2.c's own call site:
+/// extended precision, two accumulated output words `y0`/`y1`) and to `jk == init_jk[2] == 4`.
+/// Scratch arrays (`f`/`q`/`fq`/`iq`) use the same fixed capacity (20) as the upstream C source
+/// — proven sufficient there for the whole IEEE double domain at this precision — via stack
+/// allocation (`withUnsafeTemporaryAllocation`) so this stays allocation-free. The `goto
+/// recompute` in the original is a `while true { ...; continue }` here: everything up to the
+/// first `break` matches upstream's `recompute:` label and its jump back to it.
+private func kernelRemPio2(_ x0: Double, _ x1: Double, _ x2: Double, _ e0: Int32, _ nx: Int32) -> (n: Int32, y0: Double, y1: Double) {
+    func xAt(_ j: Int32) -> Double {
+        switch j {
+        case 0: return x0
+        case 1: return x1
+        default: return x2
+        }
+    }
+
+    return withUnsafeTemporaryAllocation(of: Double.self, capacity: 20) { f in
+    withUnsafeTemporaryAllocation(of: Double.self, capacity: 20) { q in
+    withUnsafeTemporaryAllocation(of: Double.self, capacity: 20) { fq in
+    withUnsafeTemporaryAllocation(of: Int32.self, capacity: 20) { iq in
+        f.initialize(repeating: 0)
+        q.initialize(repeating: 0)
+        fq.initialize(repeating: 0)
+        iq.initialize(repeating: 0)
+
+        let jk: Int32 = 4
+        let jp: Int32 = jk
+        let jx = nx &- 1
+        var jv = (e0 &- 3) / 24
+        if jv < 0 { jv = 0 }
+        var q0 = e0 &- 24 &* (jv &+ 1)
+
+        var jIdx = jv &- jx
+        let m = jx &+ jk
+        var i: Int32 = 0
+        while i <= m {
+            f[Int(i)] = jIdx < 0 ? tanRemZero : tanIpio2At(jIdx)
+            i &+= 1
+            jIdx &+= 1
+        }
+
+        i = 0
+        while i <= jk {
+            var fw = 0.0
+            var j: Int32 = 0
+            while j <= jx {
+                fw += xAt(j) * f[Int(jx &+ i &- j)]
+                j &+= 1
+            }
+            q[Int(i)] = fw
+            i &+= 1
+        }
+
+        var jz = jk
+        var n: Int32 = 0
+        var ih: Int32 = 0
+        var z = 0.0
+
+        while true {
+            // distill q[] into iq[] reversingly
+            i = 0
+            var j = jz
+            z = q[Int(jz)]
+            while j > 0 {
+                let fw = Double(truncToInt32(tanRemTwon24 * z))
+                iq[Int(i)] = truncToInt32(z - tanRemTwo24 * fw)
+                z = q[Int(j &- 1)] + fw
+                i &+= 1
+                j &-= 1
+            }
+
+            z = detScalbn(z, q0)
+            z -= 8.0 * (z * 0.125).rounded(.down)   // trim off integer >= 8
+            n = truncToInt32(z)
+            z -= Double(n)
+            ih = 0
+            if q0 > 0 {                              // need iq[jz-1] to determine n
+                let iqJz1 = iq[Int(jz &- 1)]
+                let iAdj = iqJz1 >> (24 &- q0)
+                n &+= iAdj
+                iq[Int(jz &- 1)] = iqJz1 &- (iAdj << (24 &- q0))
+                ih = iq[Int(jz &- 1)] >> (23 &- q0)
+            } else if q0 == 0 {
+                ih = iq[Int(jz &- 1)] >> 23
+            } else if z >= 0.5 {
+                ih = 2
+            }
+
+            if ih > 0 {                               // q > 0.5
+                n &+= 1
+                var carry: Int32 = 0
+                i = 0
+                while i < jz {                         // compute 1-q
+                    let j2 = iq[Int(i)]
+                    if carry == 0 {
+                        if j2 != 0 {
+                            carry = 1
+                            iq[Int(i)] = 0x1000000 &- j2
+                        }
+                    } else {
+                        iq[Int(i)] = 0xffffff &- j2
+                    }
+                    i &+= 1
+                }
+                if q0 > 0 {                            // rare case: chance is 1 in 12
+                    switch q0 {
+                    case 1: iq[Int(jz &- 1)] &= 0x7fffff
+                    case 2: iq[Int(jz &- 1)] &= 0x3fffff
+                    default: break
+                    }
+                }
+                if ih == 2 {
+                    z = 1.0 - z
+                    if carry != 0 { z -= detScalbn(1.0, q0) }
+                }
+            }
+
+            // check if recomputation is needed
+            if z == 0 {
+                var jOr: Int32 = 0
+                var ii = jz &- 1
+                while ii >= jk {
+                    jOr |= iq[Int(ii)]
+                    ii &-= 1
+                }
+                if jOr == 0 {                          // need recomputation
+                    var k: Int32 = 1
+                    while iq[Int(jk &- k)] == 0 { k &+= 1 }   // k = no. of terms needed
+                    var addI = jz &+ 1
+                    while addI <= jz &+ k {            // add q[jz+1] to q[jz+k]
+                        f[Int(jx &+ addI)] = tanIpio2At(jv &+ addI)
+                        var fw = 0.0
+                        var j2: Int32 = 0
+                        while j2 <= jx {
+                            fw += xAt(j2) * f[Int(jx &+ addI &- j2)]
+                            j2 &+= 1
+                        }
+                        q[Int(addI)] = fw
+                        addI &+= 1
+                    }
+                    jz &+= k
+                    continue                           // goto recompute
+                }
+            }
+            break
+        }
+
+        // chop off zero terms / break z into a 24-bit digit if necessary
+        if z == 0 {
+            jz &-= 1
+            q0 &-= 24
+            while iq[Int(jz)] == 0 {
+                jz &-= 1
+                q0 &-= 24
+            }
+        } else {
+            z = detScalbn(z, -q0)
+            if z >= tanRemTwo24 {
+                let fw = Double(truncToInt32(tanRemTwon24 * z))
+                iq[Int(jz)] = truncToInt32(z - tanRemTwo24 * fw)
+                jz &+= 1
+                q0 &+= 24
+                iq[Int(jz)] = truncToInt32(fw)
+            } else {
+                iq[Int(jz)] = truncToInt32(z)
+            }
+        }
+
+        // convert integer "bit" chunk to floating-point value
+        var fw = detScalbn(1.0, q0)
+        i = jz
+        while i >= 0 {
+            q[Int(i)] = fw * Double(iq[Int(i)])
+            fw *= tanRemTwon24
+            i &-= 1
+        }
+
+        // compute PIo2[0,...,jp]*q[jz,...,0]
+        i = jz
+        while i >= 0 {
+            var fwSum = 0.0
+            var k: Int32 = 0
+            while k <= jp && k <= jz &- i {
+                fwSum += tanPIo2[Int(k)] * q[Int(i &+ k)]
+                k &+= 1
+            }
+            fq[Int(jz &- i)] = fwSum
+            i &-= 1
+        }
+
+        // compress fq[] into (y0, y1) — prec fixed at 2, same combining as upstream's prec 1
+        var fwOut = 0.0
+        i = jz
+        while i >= 0 { fwOut += fq[Int(i)]; i &-= 1 }
+        let y0 = ih == 0 ? fwOut : -fwOut
+        fwOut = fq[0] - fwOut
+        i = 1
+        while i <= jz { fwOut += fq[Int(i)]; i &+= 1 }
+        let y1 = ih == 0 ? fwOut : -fwOut
+
+        return (n & 7, y0, y1)
+    }}}}
+}
+
+/// `__ieee754_rem_pio2`, full range (small / medium / huge-argument via `kernelRemPio2`).
+/// The small and medium-range branches below intentionally duplicate `remPio2` above
+/// bit-for-bit (same reasoning as the section doc comment) rather than sharing it, so this
+/// function is a fully self-contained, independently auditable port and `remPio2` truly stays
+/// untouched.
+private func tanRemPio2(_ x: Double) -> (n: Int32, y0: Double, y1: Double) {
+    let hx = HI(x)
+    let ix = hx & 0x7fffffff
+    if ix <= 0x3fe921fb { return (0, x, 0) }           // |x| ~<= pi/4, no reduction needed
+    if ix < 0x4002d97c {                                 // |x| < 3pi/4, special case n=+-1
+        if hx > 0 {
+            var z = x - tanPio2_1
+            let y0: Double, y1: Double
+            if ix != 0x3ff921fb {
+                y0 = z - tanPio2_1t
+                y1 = (z - y0) - tanPio2_1t
+            } else {
+                z -= tanPio2_2
+                y0 = z - tanPio2_2t
+                y1 = (z - y0) - tanPio2_2t
+            }
+            return (1, y0, y1)
+        } else {
+            var z = x + tanPio2_1
+            let y0: Double, y1: Double
+            if ix != 0x3ff921fb {
+                y0 = z + tanPio2_1t
+                y1 = (z - y0) + tanPio2_1t
+            } else {
+                z += tanPio2_2
+                y0 = z + tanPio2_2t
+                y1 = (z - y0) + tanPio2_2t
+            }
+            return (-1, y0, y1)
+        }
+    }
+    if ix <= 0x413921fb {                                // |x| ~<= 2^19*(pi/2), medium size
+        let t = abs(x)
+        let n = truncToInt32(t * tanInvpio2 + tanRemHalf)
+        let fn = Double(n)
+        var r = t - fn * tanPio2_1
+        var w = fn * tanPio2_1t
+        var y0: Double
+        if n < 32 && ix != tanNpio2Hw[Int(n - 1)] {
+            y0 = r - w
+        } else {
+            let j = ix >> 20
+            y0 = r - w
+            var high = HI(y0)
+            var i = j - ((high >> 20) & 0x7ff)
+            if i > 16 {
+                var t2 = r
+                w = fn * tanPio2_2
+                r = t2 - w
+                w = fn * tanPio2_2t - ((t2 - r) - w)
+                y0 = r - w
+                high = HI(y0)
+                i = j - ((high >> 20) & 0x7ff)
+                if i > 49 {
+                    t2 = r
+                    w = fn * tanPio2_3
+                    r = t2 - w
+                    w = fn * tanPio2_3t - ((t2 - r) - w)
+                    y0 = r - w
+                }
+            }
+        }
+        let y1 = (r - y0) - w
+        if hx < 0 { return (-n, -y0, -y1) }
+        return (n, y0, y1)
+    }
+    if ix >= 0x7ff00000 {                                 // x is inf or NaN
+        let nanVal = x - x
+        return (0, nanVal, nanVal)
+    }
+    // huge argument: set z = scalbn(|x|, ilogb(x)-23), split into three 24-bit digits
+    let e0 = (ix >> 20) &- 1046
+    var z = fromWords(UInt32(bitPattern: ix &- (e0 << 20)), UInt32(bitPattern: LO(x)))
+    let tx0 = Double(truncToInt32(z)); z = (z - tx0) * tanRemTwo24
+    let tx1 = Double(truncToInt32(z)); z = (z - tx1) * tanRemTwo24
+    let tx2 = z
+    var nx: Int32 = 3
+    if tx2 == 0 {
+        nx = 2
+        if tx1 == 0 { nx = 1 }   // tx0 is never exactly 0 for any |x| that reaches this branch
+    }
+    let (nBig, yy0, yy1) = kernelRemPio2(tx0, tx1, tx2, e0, nx)
+    if hx < 0 { return (-nBig, -yy0, -yy1) }
+    return (nBig, yy0, yy1)
+}
+
+/// `detTan(+-inf)` and `detTan(NaN)` are NaN — never traps. Unlike `detSin`/`detCos`, which
+/// keep their existing cap at `|x| < 2^19*pi/2` (see `remPio2` above), `detTan` reduces every
+/// finite argument via `tanRemPio2`, including magnitudes needing the full Payne-Hanek
+/// reduction (`kernelRemPio2`).
+public func detTan(_ x: Double) -> Double {
+    let ix = HI(x) & 0x7fffffff
+    if ix <= 0x3fe921fb { return kernelTan(x, 0, 1) }     // |x| ~< pi/4
+    if ix >= 0x7ff00000 { return x - x }                   // tan(Inf or NaN) is NaN
+    let (n, y0, y1) = tanRemPio2(x)
+    return kernelTan(y0, y1, 1 &- ((n & 1) << 1))          //  1 -- n even, -1 -- n odd
+}
+
+// ---------------------------------------------------------------------------
 // Seeded gameplay RNG — reference implementation. All state-affecting
 // randomness draws from this stream in frozen call order; cosmetic-only
 // randomness stays off-stream so golden hashes never see it.
