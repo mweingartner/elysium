@@ -171,6 +171,14 @@ public struct WorldRecord: Codable {
     /// non-empty" discipline as `objects`. Empty string means "no persisted
     /// subscriptions", exactly like an absent key on decode.
     public var scriptRegistry: String
+    /// script-runtime (change 1c), design.md §8.6: durable named timers
+    /// (`after(n,"name")`/`every(n,"name")`), one opaque
+    /// `DurableTimerRegistryCodec` document — same "opaque, encoded only
+    /// when non-empty" discipline as `scriptRegistry`. Kept as a field of
+    /// its own rather than folded into `scriptRegistry`'s own JSON shape so
+    /// 1b's `SubscriptionRegistryCodec` stays untouched (see
+    /// `ScriptTimers.swift`'s header comment).
+    public var scriptTimers: String
 
     public var generationSettings: WorldGenerationSettings {
         WorldGenerationSettings(presetID: worldPreset, singleBiomeID: singleBiome,
@@ -206,6 +214,7 @@ public struct WorldRecord: Codable {
         mapCenterZ = 0
         objects = [:]
         scriptRegistry = ""
+        scriptTimers = ""
         // DEF-1 fix: init defaults false — only GameCore.createWorld sets true,
         // right before its own db.putWorld, so every other construction path (Reality
         // Derived imports, LAN-client transient records, and plain decode-absent) stays
@@ -218,7 +227,7 @@ public struct WorldRecord: Codable {
         case spawnX, spawnY, spawnZ, worldPreset, singleBiome, dungeonDensity, gameRules
         case dragonKilled, gatewaysSpawned, nextEntityId, rpgSimulationTick, realityDerivedSource
         case mapSize, mapCenterX, mapCenterZ
-        case objects, scriptsEnabled, scriptRegistry
+        case objects, scriptsEnabled, scriptRegistry, scriptTimers
     }
 
     public init(from decoder: Decoder) throws {
@@ -268,6 +277,9 @@ public struct WorldRecord: Codable {
         // event-bus (change 1b): absent on every pre-1b world, exactly like
         // `objects` was absent on every pre-1a world.
         scriptRegistry = try c.decodeIfPresent(String.self, forKey: .scriptRegistry) ?? ""
+        // script-runtime (change 1c): absent on every pre-1c world, exactly
+        // like `scriptRegistry` was absent on every pre-1b world.
+        scriptTimers = try c.decodeIfPresent(String.self, forKey: .scriptTimers) ?? ""
     }
 
     /// Decode-time clamp for `nextEntityId` (design.md Decision 3, Security
@@ -314,6 +326,7 @@ public struct WorldRecord: Codable {
         if !objects.isEmpty { try c.encode(objects, forKey: .objects) }
         try c.encode(scriptsEnabled, forKey: .scriptsEnabled)
         if !scriptRegistry.isEmpty { try c.encode(scriptRegistry, forKey: .scriptRegistry) }
+        if !scriptTimers.isEmpty { try c.encode(scriptTimers, forKey: .scriptTimers) }
         try c.encode(mapCenterX, forKey: .mapCenterX)
         try c.encode(mapCenterZ, forKey: .mapCenterZ)
     }

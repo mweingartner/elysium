@@ -1258,9 +1258,15 @@ runScriptRuntimeSmoke()
 // section runs immediately after the script-runtime section.
 runEventBusSmoke()
 
+registerAllEntities()
+
+// script-runtime (change 1c), design.md §16 row 1c exit criteria: "the
+// appendix scripts run headlessly" — runs once entities are registered
+// (Appendix A script 2's gatekeeper is a mob).
+runScriptingSuiteSmoke()
+
 // ---------------------------------------------------------------------------
 section("entities: zoo/combat/physics/trades/pathfinding/spawning (vs goldens)")
-registerAllEntities()
 
 if let g = loadJSON("entity-goldens.json") {
     func hex(_ x: Double) -> String {

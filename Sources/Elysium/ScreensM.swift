@@ -3067,6 +3067,196 @@ final class DeathScreen: Screen {
 }
 
 // =============================================================================
+// Script editor (script-runtime, change 1c) — design.md §12: "a minimal
+// ScriptEditorScreen whose buffer owner admits newlines". The name field is
+// an ordinary `TextField` (script names are short, single-line identifiers);
+// the source itself is paste-only — this screen deliberately never creates a
+// multi-line `TextField` (every `TextField` buffer rejects `\n` outright,
+// `ElysiumTextInput.swift:113-150`) and instead overrides `pasteText` to
+// capture the whole clipboard string directly, validated by
+// `ScriptTextHygiene` (which *does* accept `\n`/`\t`) rather than the
+// per-character UI-field gate. Module-mode authoring only — handler-mode
+// triggers and the full multi-line editing/syntax-colouring experience are
+// phase 3's "full editor" (design.md §16 row 3).
+// =============================================================================
+final class ScriptEditorScreen: Screen {
+    private let target: ObjectRef
+    private let existingName: String?
+    private weak var nameField: TextField?
+    private var pastedSource: String = ""
+    private var statusMessage: String?
+    private var statusIsError = false
+
+    init(target: ObjectRef, existingName: String?) {
+        self.target = target
+        self.existingName = existingName
+        super.init()
+        pausesGame = true
+    }
+
+    private func frame(_ ui: UIManager) -> (x: Double, y: Double, w: Double, h: Double) {
+        let w = max(320, min(480, ui.width - 28))
+        let h = min(220.0, ui.height - 40)
+        return (((ui.width - w) / 2).rounded(.down), ((ui.height - h) / 2).rounded(.down), w, h)
+    }
+
+    override func initScreen(_ ui: UIManager, _ game: GameCore) {
+        let f = frame(ui)
+        let field = TextField(f.x + 96, f.y + 12, f.w - 116, 20, "name", id: "script.name", accessibilityLabel: "Script Name")
+        field.maxLength = 32
+        if let existingName {
+            field.text = existingName
+            if let existing = game.scriptingCommandContext().scriptStore.get(target, existingName) {
+                pastedSource = existing.source
+            }
+        }
+        nameField = field
+        fields.append(field)
+        buttons.append(Button(f.x + f.w - 224, f.y + f.h - 30, 64, 20, "Save", { [weak self, weak ui, weak game] in
+            guard let self, let ui, let game else { return }
+            self.save(ui, game)
+        }))
+        buttons.append(Button(f.x + f.w - 152, f.y + f.h - 30, 64, 20, "Run", { [weak self, weak ui, weak game] in
+            guard let self, let ui, let game else { return }
+            self.run(ui, game)
+        }))
+        buttons.append(Button(f.x + f.w - 74, f.y + f.h - 30, 60, 20, "Cancel", { [weak ui, weak game] in
+            guard let ui, let game else { return }
+            ui.closeTop(game)
+            game.host?.capturePointer()
+        }))
+    }
+
+    override func textActivationDescriptorID(_ ui: UIManager, _ game: GameCore) -> String? {
+        "script.name"
+    }
+
+    override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
+        let f = frame(ui)
+        ui.drawDarkBg(0.58)
+        ui.drawPanel(f.x, f.y, f.w, f.h)
+        ui.cv.drawText("Script Editor", f.x + 16, f.y + 2, 1, "#3f3f3f", shadow: false)
+        ui.cv.drawText("Target: \(target.canonical)", f.x + 16, f.y + 28, 1, "#606060", shadow: false)
+        ui.cv.drawText("Name", f.x + 16, f.y + 16, 1, "#606060", shadow: false)
+        let sourceStatus = pastedSource.isEmpty
+            ? "Paste a Lua module (Cmd-V) — up to 16 KiB, module mode."
+            : "\(pastedSource.utf8.count) bytes pasted."
+        ui.cv.drawText(fitDialogText(sourceStatus, maxWidth: Int(f.w - 32)), f.x + 16, f.y + 46, 1, "#606060", shadow: false)
+        var previewY = f.y + 60
+        for line in pastedSource.split(separator: "\n", omittingEmptySubsequences: false).prefix(6) {
+            ui.cv.drawText(fitDialogText(String(line), maxWidth: Int(f.w - 32)), f.x + 16, previewY, 1, "#808080", shadow: false)
+            previewY += 10
+        }
+        if let statusMessage {
+            ui.cv.drawText(
+                fitDialogText(statusMessage, maxWidth: Int(f.w - 32)), f.x + 16, f.y + f.h - 44, 1,
+                statusIsError ? "#a02020" : "#207020", shadow: false
+            )
+        }
+        ui.drawButtons(self)
+    }
+
+    override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
+        if super.onKey(ui, game, key) {
+            statusMessage = nil
+            return true
+        }
+        return false
+    }
+
+    override func insertText(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
+        if super.insertText(ui, game, ch) {
+            statusMessage = nil
+            return true
+        }
+        return false
+    }
+
+    /// The one place this screen departs from the base `Screen.pasteText`
+    /// (which only ever routes into a focused `TextField`): when the name
+    /// field is focused, a paste still goes there as usual (renaming); any
+    /// other time — the common case, since nothing about "paste your
+    /// script" requires focusing a field first — the whole clipboard string
+    /// becomes the script source, validated by `ScriptTextHygiene`
+    /// (`\n`/`\t` accepted, matching the validator's own stage 0) rather
+    /// than the single-line UI-field gate.
+    override func pasteText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
+        if nameField?.focused == true {
+            let accepted = super.pasteText(ui, game, proposal)
+            if accepted { statusMessage = nil }
+            return accepted
+        }
+        guard proposal.utf8.count <= 16_384 else {
+            statusMessage = "Pasted text exceeds 16 KiB."
+            statusIsError = true
+            return false
+        }
+        guard ScriptingDisplayText.isValidScriptSource(proposal) else {
+            statusMessage = "Pasted text contains an invalid character."
+            statusIsError = true
+            return false
+        }
+        pastedSource = proposal
+        statusMessage = "Pasted \(proposal.utf8.count) bytes."
+        statusIsError = false
+        return true
+    }
+
+    private func validatedInputs() -> (name: String, source: String)? {
+        let name = (nameField?.text ?? "").trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, !pastedSource.isEmpty else {
+            statusMessage = name.isEmpty ? "Enter a script name." : "Paste a script first."
+            statusIsError = true
+            return nil
+        }
+        return (name, pastedSource)
+    }
+
+    private func save(_ ui: UIManager, _ game: GameCore) {
+        guard let (name, source) = validatedInputs() else { return }
+        let context = game.scriptingCommandContext()
+        switch context.scriptStore.attach(
+            target, name: name, source: source, mode: .module, triggers: [], by: .player, tick: context.tick
+        ) {
+        case .success:
+            game.scripting.anyScriptsAttached = true
+            game.host?.pushChat("§7Attached script \"\(name)\" to \(target.canonical)")
+            ui.closeTop(game)
+            game.host?.capturePointer()
+        case .failure(let err):
+            statusMessage = scriptStoreErrorText(err)
+            statusIsError = true
+        }
+    }
+
+    private func run(_ ui: UIManager, _ game: GameCore) {
+        guard let (_, source) = validatedInputs() else { return }
+        let context = game.scriptingCommandContext()
+        guard let runtime = context.scriptRuntime else {
+            statusMessage = "No script runtime this session."
+            statusIsError = true
+            return
+        }
+        switch runtime.runEphemeral(source: source, owner: target) {
+        case .success(let message):
+            statusMessage = message
+            statusIsError = false
+        case .failure(let message):
+            statusMessage = message
+            statusIsError = true
+        }
+    }
+
+    private func fitDialogText(_ text: String, maxWidth: Int) -> String {
+        var out = text
+        while textWidth(out) > maxWidth, out.count > 3 {
+            out.removeLast()
+        }
+        return out.count < text.count && out.count > 3 ? out + "." : out
+    }
+}
+
+// =============================================================================
 // Saved construction templates
 // =============================================================================
 final class TemplateNameScreen: Screen {

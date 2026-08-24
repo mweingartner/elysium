@@ -122,6 +122,14 @@ final class HostBridge: GameHost {
             if let be = data?.be { ui.open(BeaconScreen(be), game) }
         case "sign":
             ui.open(SignScreen(data?.be, (data?.x ?? 0, data?.y ?? 0, data?.z ?? 0)), game)
+        case "scriptEditor":
+            // script-runtime (change 1c): `data.text` carries the target
+            // ref's canonical string, `data.title` an existing script name
+            // to edit (nil for a fresh script) — `ScreenData`'s two free
+            // string fields, reused rather than adding new ones.
+            if let refText = data?.text, let ref = ObjectRef.parse(refText) {
+                ui.open(ScriptEditorScreen(target: ref, existingName: data?.title), game)
+            }
         case "toast":
             hud.showActionBar(data?.text ?? "")
         default:

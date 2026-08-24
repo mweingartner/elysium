@@ -1250,6 +1250,13 @@ public final class GameCore {
 #if DEBUG
             _testRPGWorldTeardownDidInvalidate?()
 #endif
+            // script-runtime (change 1c), §7.5/§8.2: "`exitToTitle` runs
+            // `unload` synchronously against the same facade before
+            // `finalizeAndSave`, then destroys the `lua_State`" — must run
+            // before the save pipeline captures object records/`scriptRegistry`
+            // below, so an unload handler's final attribute write and the
+            // durable-timer snapshot are both included.
+            teardownScriptRuntimeForSession()
             finalizeAndSave(synchronous: true)
         }
         // object-graph-attributes change 1a, design.md Decision 3: a stale
@@ -2229,6 +2236,12 @@ public final class GameCore {
             hookWorld(w)
             worlds[d] = w
         }
+        // script-runtime (change 1c), design.md §7.5: the `lua_State` is
+        // created only after `hookWorld` has run for every dimension (so its
+        // block-change funnel is already wired) and never for a LAN-client
+        // world (`createScriptRuntimeForSession` re-checks `isLANClientWorld`
+        // itself, matching every other host-only entry point in this file).
+        createScriptRuntimeForSession()
         // Weather ticks only in the overworld; a rank-5 Weather Eye senses that surface weather from
         // the Nether/End, so point the non-overworld worlds at the authoritative overworld world.
         for (d, w) in worlds where d != .overworld {

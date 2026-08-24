@@ -413,11 +413,116 @@ object leaving scope, in the sorted order the caller already computed.
 `/events recent|emit` — host-only via the same `lanGatedCommands` set and `CommandsM` choke point as
 `/attr`/`/inspect`/`/objects`/`/ai`.
 
+## Script lifecycle (ScriptRuntime)
+
+`ScriptRuntime` (`Scripting/ScriptRuntime.swift` + `ScriptRuntimeAPI.swift`) is the one `LuaState`-
+owning object per open (host-only) world session — `GameScriptingState.scriptRuntime`, created in
+`enterWorld` right after `hookWorld` runs for every dimension, destroyed in `exitToTitle` after every
+live script's `unload` has run. It plugs into `EventBus.delivery` (1b's reserved seam) and owns the
+whole §7.5 phase order inside the renamed-in-place `GameCore.runEventBusPhase()`: loads → the
+existing observable-built-in diff → AI inbox → resumptions (preempted/`wait`-suspended coroutines,
+then durable timers due this tick) → `EventBus.runDeliveryPhase` (now dispatching into
+`ScriptRuntime.deliver`) → RNG-state persistence. A single boolean,
+`GameScriptingState.anyScriptsAttached`, is the zero-cost fast path every step checks first; it is
+set by `ScriptStore.attach`'s callers (`/script attach`, the editor's Save, a script's own
+`h:attach`) and, as a backstop for scripts already on disk that never went through one of those
+paths, re-checked every 20th tick even while still `false` (a scan that finds nothing changes no
+state, so it cannot affect determinism).
+
+**Records and storage.** `ScriptRecord` (module/handler mode, triggers, author, RNG words) is a new
+`AttributeEntry.script` payload living in the *same* `ObjectRecord.entries` bag as `.value` entries
+(§6.0's unified model) — `ObjectRecordCodec` gained a sibling `"scripts"` JSON section (1a reserved
+the key; this change is the first to write it), decoded with the same per-entry tolerance as
+`"attrs"`. `ScriptStore` is `AttributeStore`'s twin for the script half of the bag: same caps/
+provenance/LAN-client discipline, same `ObjectRecord` storage, persistence-only (attaching never
+compiles or runs — that happens the next time `runLoads()` sees it pending). Durable named timers
+(`after(n,"name")`/`every(n,"name")`) persist in a new `WorldRecord.scriptTimers` field — kept
+separate from `scriptRegistry` rather than folded into 1b's `SubscriptionRegistryCodec` shape, so
+that already-reviewed codec stays untouched.
+
+**Lifecycle.** A pending script is compiled into its own `ScriptEnvironment` (frozen host-binding
+tree, per-script `RandomX` seeded from `(ref, name, createdTick)` — not `worldSeed`, a deliberate
+simplification since the stream only needs to be unique *within* one world) and, for module mode,
+run once via a pooled coroutine; completing marks it live and raises `load`. Handler-mode scripts are
+**not** run at load — only compiled (to catch syntax errors) and indexed as script-owned
+subscriptions per their persisted `triggers`; the chunk is recompiled fresh against a wrapped
+`local self, world, player, ev = ...` preamble and resumed on every matching delivery (§8.1: "the
+chunk *is* the handler" only once a real event exists — running it earlier against a synthetic empty
+`ev` would only ever fault on `ev.subject`/`ev.<field>`). Module-mode `on`/`subscribe` closures
+capture `self`/`world`/`player` lexically from the enclosing chunk and are invoked later with just
+`ev`. `wait(n)` and `ai.await(...)` yield the coroutine (`.wait`/`.await` reasons); `runResumptions()`
+wakes them in ascending `(wakeTick, ordinal)`. `ai.ask`/`ai.await` are served by an injected,
+synchronous stub responder (`ScriptRuntime.aiResponder`, `nil` by default — every request times out
+until change 2's real Ollama pump exists); `ai.ask` never suspends (an `ai.replied` event follows
+one phase later), `ai.await` genuinely yields on `.await(token)` and is resumed from the AI-inbox
+step. Unload (chunk eviction, `exitToTitle`) runs any `on("unload")` closure registered via
+`register(name, fn)` (see below) and destroys the environment.
+
+**Lua API v1** (`ScriptRuntimeAPI.swift`) is one handle kind ("object": every world/dim/block/
+entity/player ref, uniform dispatch keyed by the ref string alone — not five separate kinds) plus a
+second ("attrs": the live `h.attrs` proxy, a synthetic `"attrs:<ref>"` identity). `self`/`world`/
+`player` are not `HostBinding` constants (the shipped API has no such node) — they are pushed as the
+compiled chunk's *arguments* via the wrapping preamble above, exactly like handler `ev`. Three
+adaptations were necessary because `ElysiumScript`'s shipped surface (change 0/1a) has no way to read
+an arbitrary Lua global by name or iterate a userdata's fields from Swift:
+- **Named-handler resolution** (`/on`, `after`/`every` with a string name): a module script calls
+  `register(name, fn)` (a small addition beyond §8.5's literal text) to make `fn` resolvable by name;
+  `on(event, {name=...}, fn)` does the same implicitly. Durable timers and persisted `/on`
+  subscriptions both resolve through this same table, re-populated fresh every load.
+- **`pairs(h.attrs)`** is not supported (no `__pairs`/`call` hook on a handle) — `h.attrs.x` get/set
+  work exactly as documented; enumeration is not available in 1c.
+- **camelCase built-ins**: §8.5's own examples (`ev.subject.maxHealth`) spell built-ins camelCase
+  while the registry's canonical names are snake_case (`max_health`). Reads/writes try the given
+  name first, then a snake_case fold, so both spellings work.
+Custom attribute names written through `h.attrs.<name>` / `h:define` are normalized the same
+lenient way §6.1 already normalizes AI-supplied names (`lastHealth` → `lasthealth`) rather than
+refused — extended here to every script author, not only the AI tool loop.
+`objects.find{kind="block", type=..., near=, radius=, limit=}` with a `type` filter does its own
+bounded raw-block scan (not `ObjectGraph.objectsNear`, which only enumerates blocks that already
+carry a record) so a script can equip a plain, never-before-scripted block — Appendix A script 4's
+own requirement. `block:setBlock`/`breakBlock` are the only bespoke block verbs; every other
+built-in field (including entity/player "verbs" like position or health) goes through the same
+generic `h:get`/`h:set`/property sugar that `/attr` already used, since design.md itself frames most
+verbs as sugar over the funnels `BuiltInAttributes` already implements. `say`/`sound`/`particles` are
+accepted but `sound`/`particles` are no-ops in 1c (not wired to the renderer/audio layer).
+`/script run` and the AI's future `run_script` share `ScriptRuntime.runEphemeral`: synchronous
+(`LuaState.call`, never yieldable — an attempted `wait`/`ai.await` correctly faults, matching §9.3's
+"no subscribe, no timers, no `ai.*`"), run once immediately rather than queued to "the next phase".
+
+**Kill switch and trust gate.** `scriptsEffectivelyEnabled(host:)` is the single predicate every
+phase step and verb consults: the persisted trust gate (`WorldRecord.scriptsEnabled`, already shipped
+by 1a — `true` only for a world this install created, `false` for every imported/migrated one until
+`/script trust`) **and** a `doScripts` gamerule (absent == enabled, flipped instantly and
+losslessly by `/script off|on` through the existing `GameCore.setGameRule` — no new mechanism).
+Either being off makes scripts behave as if none were attached, session-wide, immediately.
+
+**Commands and UI.** `ScriptingCommands` gained `/script list|show|attach|detach|run|trust|off|on`,
+host-only via the same `lanGatedCommands`/`CommandsM` choke point as `/attr`/`/on`. `/script edit
+[target] [name]` (app layer, `CommandsM.swift`) opens `ScreensM.swift`'s new `ScriptEditorScreen` — a
+paste-only, module-mode-only editor following `TemplateNameScreen`'s exact structure. Its one
+departure from every other screen's `pasteText` override: rather than routing into a focused
+`TextField` (whose `ElysiumBoundedTextBuffer` rejects `\n` outright), an unfocused paste captures the
+whole clipboard string as the pending source, validated by `ScriptTextHygiene`'s own stage-0 check
+(which *does* accept `\n`/`\t`) via a small `ScriptingDisplayText.isValidScriptSource` re-export —
+`Sources/Elysium` never imports `ElysiumScript` directly. Full multi-line editing, syntax colouring,
+handler-mode authoring from the UI, and the Object Inspector are phase 3's "full editor" (design.md
+§16 row 3).
+
+**Known gaps, all documented rather than silently absent:** `/script`'s AI journal/undo/stats/log
+subcommands are phase 2 (no journal exists yet); the §7.4 "subject's own scripts delivered first"
+tie-break is not distinguished from ordinary script-owned subscriptions (both share one ascending-id
+order — a rare same-tick ordering nuance, not a functional gap); `after`/`every` given a Lua closure
+(rather than a name) behave as one-shot regardless of which was called — true closure repetition
+isn't implemented; the world-wide half of the `attach`/`detach` per-tick verb cap (§8.4: "world
+<= 32") is not enforced, only the per-script half; a handler-mode script recompiles its source fresh
+on every delivery rather than caching a `ScriptFunction` (fine at v1 scale, worth revisiting for
+high-frequency events later).
+
 ## The test harness (elysmoke)
 
-478 checks across 18 suites, run with `elysium test`:
+488 checks across 19 suites, run with `elysium test`:
 
-random/noise/math → block & item registries (counts + id spot checks) → biomes (all 63 defs + 2,000 biome selections) → terrain (full pipeline hashes on 2 seeds) → features (whole-chunk generation across all three dimensions) → atlas (pixel-identical tiles) → mesher (vertex/index hashes) → world sim (light, fluids over hundreds of ticks, RNG lockstep) → items (recipes/enchants/potions/loot rolls) → fdlibm (911 sin/cos/atan2 probes, 927 exp/log probes, 653 pow probes) → script runtime (embedded Lua sandbox/determinism corpus: sandbox surface, iteration order, ordinal keys, math/pow/random, strings/format/errors, address-free output, instruction/allocation budget trips, two-state reproducibility — `openspec/changes/embed-lua-runtime/design.md` Decision 13) → event bus (delivery order, coalescing, queue/cascade/handler-budget cap trips, persisted-subscription round trip, the pre-filtered `block.changed` funnel — design.md §7) → entities (55-mob zoo × 200 ticks, combat, scripted player physics, trades, pathfinding, spawning) → systems (crafting probes, BE timelines, a full redstone contraption, explosion crater, interactions, portals) → and a final suite that *independently derives* vanilla physics constants instead of trusting goldens.
+random/noise/math → block & item registries (counts + id spot checks) → biomes (all 63 defs + 2,000 biome selections) → terrain (full pipeline hashes on 2 seeds) → features (whole-chunk generation across all three dimensions) → atlas (pixel-identical tiles) → mesher (vertex/index hashes) → world sim (light, fluids over hundreds of ticks, RNG lockstep) → items (recipes/enchants/potions/loot rolls) → fdlibm (911 sin/cos/atan2 probes, 927 exp/log probes, 653 pow probes) → script runtime (embedded Lua sandbox/determinism corpus: sandbox surface, iteration order, ordinal keys, math/pow/random, strings/format/errors, address-free output, instruction/allocation budget trips, two-state reproducibility — `openspec/changes/embed-lua-runtime/design.md` Decision 13) → event bus (delivery order, coalescing, queue/cascade/handler-budget cap trips, persisted-subscription round trip, the pre-filtered `block.changed` funnel — design.md §7) → scripting (the four Appendix A scripts run headlessly end to end — a handler-mode beacon lamp, its module-mode equivalent, an `ai.await` gatekeeper against a stub responder, world-wide log counting via `subscribe{kind=}`, and scripts attaching scripts to nearby blocks — plus the kill switch, the trust gate, and fault isolation, hashed for two-process determinism — design.md §16 row 1c) → entities (55-mob zoo × 200 ticks, combat, scripted player physics, trades, pathfinding, spawning) → systems (crafting probes, BE timelines, a full redstone contraption, explosion crater, interactions, portals) → and a final suite that *independently derives* vanilla physics constants instead of trusting goldens.
 
 Golden discipline: reference goldens are frozen (they have no generator); behavior-change goldens (`ELYSIUM_REGOLD=1`) are regenerated only deliberately, with each diff justified. Content added after the baseline was frozen (e.g. appended vines, the Flying Wand, and copper tools) is excluded from reference hashes via fixed prefix ranges, never by regenerating reference baselines.
 

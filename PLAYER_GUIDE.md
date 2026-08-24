@@ -485,9 +485,8 @@ or Delete/Backspace while the template list is focused opens a confirmation nami
 
 ## Object attributes (preview)
 
-This is an early preview of the scripting foundation: three chat commands let you read and set small,
-named pieces of data on a block or entity — nothing here runs a script yet, and there is no in-game
-scripting language available in this build. Everything is host-only: on a joined LAN world these
+This is an early preview of the scripting foundation: chat commands let you read and set small,
+named pieces of data on a block or entity. Everything is host-only: on a joined LAN world these
 commands are refused outright, not merely restricted.
 
 - `/attr set <target> <name> <value>` — set an attribute. `<target>` is always required: `self`,
@@ -518,20 +517,26 @@ power still swings shut or open on the next power transition regardless of what 
 
 ## Events and subscriptions (preview)
 
-The same preview also lets you register interest in things that happen in the world — again, nothing
-runs yet: a subscription is stored and matched, but the script it names doesn't execute until a later
-build ships the in-game scripting language. Host-only, like every command above.
+The same preview also lets you register interest in things that happen in the world. A subscription
+names a script and a handler function inside it (`<script>.<handler>`) — that handler runs whenever a
+matching event fires, exactly like a script's own `on(...)`/`subscribe(...)` calls (see "Scripting"
+below), except `/on` lets you wire up a handler in an *existing* script from chat rather than from
+inside the script's own source. Host-only, like every command above.
 
 - `/on <target> <event> [attr] <script>.<handler>` — subscribe. `<target>` is what to watch: `self`,
   `looking`, a canonical reference (`entity:12`, `block:overworld:10,64,3`), a bare kind name
   (`entity`, `player`, `block`, `world`, `dim` — every object of that kind), a kind with a type filter
   (`entity:zombie`, `block:furnace`), or `any` (every object — not accepted for `attribute.changed` or
   `block.changed`, which need a narrower target). `<event>` is a dotted event name from the catalog
-  (`block.broken`, `entity.damaged`, `player.joined`, …) or a custom name a script defines later
+  (`block.broken`, `entity.damaged`, `player.joined`, …) or a custom name a script defines
   (`lumber.milestone`). `[attr]` narrows an `attribute.changed` subscription to one attribute name
   (e.g. `health`); omit it to match every attribute change on the target. `<script>.<handler>` names
-  the script and handler function that will run once scripts exist — both parts follow the same
-  attribute-name grammar (lowercase letters, digits, underscore). Subscribing survives save and reload.
+  the script (attached with `/script attach`, see below) and the handler function inside it — both
+  parts follow the same attribute-name grammar (lowercase letters, digits, underscore). A handler
+  name only resolves once the named script's module body has called `register("<handler>", fn)` (or
+  `on(event, {name="<handler>"}, fn)`) at load — an `/on` naming a handler that never registered
+  itself stays dormant (no error, it simply never fires) rather than refusing the subscription.
+  Subscribing survives save and reload.
 - `/unsubscribe <id>` — remove a subscription by the numeric id `/on` printed when you created it.
 - `/events recent [limit]` — lists the most recent events the bus has seen (default limit if omitted).
 - `/events emit <target> <event>` — raise an event by hand. `<target>` here is a normal object
@@ -541,6 +546,44 @@ build ships the in-game scripting language. Host-only, like every command above.
 `block:<name>`/`entity:<type>` in an `/on` target is a type filter, not a coordinate or an id — it
 only reads as a filter when there's no second `:` after it (`block:overworld:10,64,3` still resolves
 as a specific block, never as a filter named `overworld:10,64,3`).
+
+## Scripting (preview)
+
+Objects can carry small Lua scripts now — up to 8 per object, attached with `/script attach`, pasted
+in through a minimal in-game editor, or (in a later build) authored by the local AI. Host-only, like
+every command above; a joined LAN world refuses every `/script` subcommand outright.
+
+- `/script list [target]` — lists the scripts on a target (default `self`), with their mode and
+  whether they're currently disabled or faulted.
+- `/script show <target> <name>` — the full source, mode, author, trigger(s), and last error (if any)
+  of one script.
+- `/script attach <target> <name> module <source...>` — attach a **module**-mode script: the source
+  runs once when the script loads and typically calls `on(...)`/`subscribe(...)`/`every(...)`/
+  `after(...)` to register its own handlers.
+- `/script attach <target> <name> handler <event> <source...>` — attach a **handler**-mode script:
+  the source *is* the handler, triggered on `self` by `<event>` (an `ev` table is bound automatically
+  — no `on(...)` needed). Attaching from chat always targets the trigger at `self`; a script's own
+  `h:attach(name, source, {on=..., attr=..., target=...})` call (see below) can target any object.
+- `/script detach <target> <name>` — remove a script.
+- `/script run <target> <source...>` — run a one-off script against a target immediately; nothing is
+  saved, and it can't subscribe, set timers, or call the AI.
+- `/script trust` — trust the current world to run scripts. A world you created yourself is already
+  trusted; a world imported or migrated from elsewhere starts untrusted (no script on it runs, even
+  if it has scripts attached) until you trust it here.
+- `/script off` / `/script on` — the scripting kill switch (the `doScripts` game rule under the hood).
+  Instant, and independent of trust: `/script off` stops every script this tick regardless of how
+  hostile a world's scripts might be.
+- Chat command source is one line — for anything longer, use `/script edit [target] [name]` to open
+  the in-game script editor. It's paste-only in this build: write your script in a text editor
+  elsewhere, copy it, open the editor, and paste (⌘V) to load the whole thing (up to 16 KiB) in one
+  step. Give it a name, then Save (attaches a module-mode script) or Run (a one-off, nothing saved) —
+  both mirror the chat commands above. Multi-line typing, syntax colouring, and attaching a
+  handler-mode script from the editor arrive in a later build.
+
+A script's own Lua reference — the object model, event names, attribute access, timers, and what the
+embedded AI will let a script do once that ships — lives with the scripting design document, not
+here; this section only covers the chat/editor surface for attaching and managing scripts you (or
+another script) already have the source for.
 
 ## Options, accessibility, and local AI
 

@@ -25,11 +25,27 @@ public final class GameScriptingState {
     /// id reservation hook (design.md Decision 3's own comment on that
     /// point) — `loadEventSubscriptions(from:)` is the single place that
     /// does the replacement.
-    var eventBus = EventBus()
+    public var eventBus = EventBus()
     /// The diff phase's per-object baseline (§6.6 point 3: "the baseline
     /// taken at load emits nothing"), keyed by `ObjectRef.canonical`. Reset
     /// alongside `eventBus`.
     var diffBaselines: [String: [String: AttrValue]] = [:]
+    /// script-runtime (change 1c). One `LuaState`-owning runtime per open
+    /// world session (host-only — `nil` for a LAN-client world, or a world
+    /// where `ScriptRuntime`'s own `LuaState` construction failed). Created
+    /// in `enterWorld` after `hookWorld` runs for every dimension (§7.5
+    /// step 6's own comment on `lua_State` lifetime), destroyed in
+    /// `exitToTitle` after every script's `unload` runs.
+    public var scriptRuntime: ScriptRuntime?
+    /// design.md §15's zero-cost invariant: the single boolean every phase
+    /// step checks before doing any scripted-object discovery work. Set by
+    /// `ScriptStore.attach`/a script's own `h:attach` (via `ScriptRuntime`)
+    /// and by the one-time scan `enterWorld` does when a world is opened;
+    /// never cleared back to `false` once set this session (a false
+    /// positive costs one extra bounded scan per tick; a false negative
+    /// would silently stop scripts from loading — the safe direction to
+    /// err in).
+    public var anyScriptsAttached = false
 
     public init() {}
 }
@@ -130,7 +146,18 @@ extension GameCore: ObjectGraphHost {
         let targetContext = ObjectTargetContext(currentDimension: dim, cursor: { [weak self] in self?.cursorObjectRef() })
         return ScriptingCommandContext(
             graph: graph, store: store, target: targetContext, isLANClient: isLANClientWorld,
-            tick: Int64(world.time), eventBus: eventBus
+            tick: Int64(world.time), eventBus: eventBus,
+            // script-runtime (change 1c): `/script`'s own executors.
+            scriptStore: ScriptStore(graph: graph), scriptRuntime: scripting.scriptRuntime,
+            scriptsTrusted: worldRec?.scriptsEnabled ?? false, killSwitchOn: (world.gameRules["doScripts"] ?? 1) != 0,
+            trustWorld: { [weak self] in
+                guard var rec = self?.worldRec else { return }
+                rec.scriptsEnabled = true
+                self?.worldRec = rec
+                self?.db.putWorld(rec)
+            },
+            setKillSwitch: { [weak self] on in self?.setGameRule("doScripts", on ? 1 : 0) },
+            markScriptAttached: { [weak self] in self?.scripting.anyScriptsAttached = true }
         )
     }
 
@@ -197,9 +224,22 @@ extension GameCore: ObjectGraphHost {
     func loadEventSubscriptions(from rec: WorldRecord) {
         scripting.eventBus = EventBus()
         scripting.diffBaselines.removeAll()
-        guard !rec.scriptRegistry.isEmpty else { return }
-        scripting.eventBus.loadPersistedSubscriptions(from: rec.scriptRegistry, storageCaps: .defaults) { message in
-            print("[scripting] \(message)")
+        if !rec.scriptRegistry.isEmpty {
+            scripting.eventBus.loadPersistedSubscriptions(from: rec.scriptRegistry, storageCaps: .defaults) { message in
+                print("[scripting] \(message)")
+            }
+        }
+        // script-runtime (change 1c): durable timers ride a field of their
+        // own (`scriptTimers`, not `scriptRegistry` — see `ScriptTimers.swift`'s
+        // header) but load at the same point, for the same reason.
+        if !rec.scriptTimers.isEmpty, let runtime = scripting.scriptRuntime {
+            if let timers = DurableTimerRegistryCodec.decode(rec.scriptTimers, diagnostic: { message in
+                print("[scripting] \(message)")
+            }) {
+                runtime.timers = timers
+            } else {
+                print("[scripting] dropped corrupt durable timer registry")
+            }
         }
     }
 
@@ -209,20 +249,82 @@ extension GameCore: ObjectGraphHost {
     func storeEventSubscriptions(into rec: inout WorldRecord) {
         rec.scriptRegistry = scripting.eventBus.hasPersistedSubscriptions
             ? scripting.eventBus.encodePersistedSubscriptions() : ""
+        let timers = scripting.scriptRuntime?.timers ?? []
+        rec.scriptTimers = timers.isEmpty ? "" : DurableTimerRegistryCodec.encode(timers)
     }
 
-    // MARK: - event bus tick phase (design.md §7.5)
+    // MARK: - script runtime session lifecycle (design.md §7.5's "the
+    // lua_State... created in enterWorld after hookWorld... never created
+    // for LAN-client worlds")
+
+    /// Called from `enterWorld` right after `hookWorld` has run for every
+    /// dimension. Construction failure (design.md Decision 9/`LuaRuntimeError`
+    /// — locale not pinned, sandbox construction failed, ...) is logged once
+    /// and leaves `scripting.scriptRuntime` `nil`: the kill switch/trust gate
+    /// already make "no runtime" behaviorally identical to "scripts off", so
+    /// the world still loads and plays normally, just without scripting.
+    func createScriptRuntimeForSession() {
+        guard !isLANClientWorld else { return }
+        do {
+            scripting.scriptRuntime = try ScriptRuntime(
+                host: self, state: scripting,
+                say: { [weak self] line in self?.host?.pushChat(line) }
+            )
+        } catch {
+            print("[scripting] script runtime construction failed (\(error)); scripting disabled this session")
+            scripting.scriptRuntime = nil
+        }
+        scripting.eventBus.delivery = { [weak self] event, targets in
+            self?.scripting.scriptRuntime?.deliver(event, targets)
+        }
+        // Decision 9 / §8.2: a world that already has scripts on disk must
+        // still discover them at open even though `anyScriptsAttached`
+        // starts `false` every session — one bounded scan at entry, not a
+        // per-tick cost.
+        scripting.anyScriptsAttached = worldLikelyHasScripts(rec: worldRec)
+    }
+
+    /// A one-time, world-open-only heuristic for the zero-cost flag's
+    /// initial value: `true` when the world/dimension bags (the cheapest
+    /// thing to check — already decoded into `scripting.worldRecords` by
+    /// `loadWorldObjectRecords`, called just before this in `enterWorld`)
+    /// carry any entry at all. Entity/block-only scripts on a freshly
+    /// (re)opened world are picked up the first time any command/script
+    /// sets the flag some other way — a documented gap (ARCHITECTURE.md):
+    /// a world whose *only* scripts live on blocks/entities needs one
+    /// `/script trust`/`/script attach` touch after import before those
+    /// scripts resume running. Low risk because the trust gate already
+    /// keeps every imported world's scripting fully off until that same
+    /// `/script trust` moment.
+    private func worldLikelyHasScripts(rec: WorldRecord?) -> Bool {
+        guard rec != nil else { return false }
+        return !scripting.worldRecords.isEmpty
+    }
+
+    /// Called from `exitToTitle`, before `finalizeAndSave` captures the
+    /// world/chunk/entity records — runs every live script's `unload`
+    /// synchronously (§8.2), then drops the `LuaState`.
+    func teardownScriptRuntimeForSession() {
+        scripting.scriptRuntime?.unloadAllForShutdown()
+        scripting.scriptRuntime?.persistRNGState()
+        scripting.scriptRuntime = nil
+        scripting.eventBus.delivery = nil
+    }
+
+    // MARK: - script phase (design.md §7.5)
 
     /// Placed in `GameCore.tick()` after the dead-entity sweep and before
     /// `tickEntityTriggers` (§7.5), host-only (the caller already returns
     /// before reaching this point on a LAN client, same as the sweep it
-    /// follows). This change implements the steps that don't need a script
-    /// runtime: the observable-built-in diff (§7.5 step 2, narrowed to §6.6
-    /// point 3's named fields), `EventBus.runDeliveryPhase` (§7.5 step 5),
-    /// and the deferred object-record drop (§6.7) right after it. Loads/AI-
-    /// inbox/resumptions/host-effects are 1c/phase 2 — there is nothing for
-    /// them to do yet (no script records exist), so this function goes
-    /// straight from the diff to delivery.
+    /// follows). Implements the full §7.5 step order: loads (1) -> diff (2)
+    /// -> AI inbox (3) -> resumptions incl. durable timers (4) -> deliveries
+    /// (5, `EventBus.runDeliveryPhase`, dispatching into `ScriptRuntime
+    /// .deliver` via the `delivery` seam) -> the deferred object-record drop
+    /// (part of §6.7/step 6) -> RNG-state persistence (this change's own
+    /// bookkeeping, not a numbered §7.5 step). Kept named `runEventBusPhase`
+    /// for source-compat with 1b's own doc comments/tests that already call
+    /// it by this name; it is the same function 1b shipped, extended in
+    /// place rather than renamed.
     func runEventBusPhase() {
         // Defense in depth (like `ScriptingCommands.run`'s own re-check):
         // `GameCore.tick()` already never reaches this call for a LAN client
@@ -231,10 +333,22 @@ extension GameCore: ObjectGraphHost {
         guard !isLANClientWorld else { return }
         let w = world
         let tick = Int64(rpgSimulationTick)
-        if eventBus.hasAnySubscription {
-            runObservableBuiltInDiff(w, tick: tick)
+        if let runtime = scripting.scriptRuntime, scriptsEffectivelyEnabled(host: self) {
+            runtime.resetPerTickCounters()
+            runtime.runLoads()
+            if eventBus.hasAnySubscription {
+                runObservableBuiltInDiff(w, tick: tick)
+            }
+            runtime.runAIInbox()
+            runtime.runResumptions()
+            eventBus.runDeliveryPhase(tick: tick)
+            runtime.persistRNGState()
+        } else {
+            if eventBus.hasAnySubscription {
+                runObservableBuiltInDiff(w, tick: tick)
+            }
+            eventBus.runDeliveryPhase(tick: tick)
         }
-        eventBus.runDeliveryPhase(tick: tick)
         w.drainPendingObjectRecordDrops()
     }
 
@@ -358,6 +472,14 @@ extension GameCore: ObjectGraphHost {
                 refs.append(.block(dim: w.dim, x: wx, y: wy, z: wz))
             }
         }
+        // script-runtime (change 1c), §7.5 step 6: run `unload` for every
+        // live script rooted at one of `refs` (against an attrs-only facade
+        // — `ScriptRuntime.unloadScripts` never opens a world write path)
+        // and drop its compiled environment, *before* the script-owned
+        // subscriptions those instances registered are bulk-dropped below —
+        // matches §8.2's own ordering ("unload handlers run... then
+        // handlers, timers, suspended threads and the handle are dropped").
+        scripting.scriptRuntime?.unloadScripts(for: refs)
         eventBus.dropScriptOwnedSubscriptions(ownedBy: refs)
         // A block-id-change drop queued earlier this tick for a cell in this
         // chunk (§6.7) must be applied now, before `chunkRecord()` snapshots

@@ -5,6 +5,27 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Added the **script runtime application layer**: objects can now carry up to 8 attached Lua
+  scripts each (module-mode, running at load and registering their own handlers, or handler-mode,
+  where the script body *is* the handler for its declared triggers), persisted alongside
+  attributes and loaded/run/unloaded at a fixed point of every tick. The full Lua API v1 from the
+  scripting design lands: `self`/`world`/`player`/`dim(name)`, `objects.get`/`find`/`block`,
+  `on`/`subscribe`/`emit`/`wait`/`tick`/`rng`/`say`, durable named timers (`after`/`every` with a
+  name — survive unload, reload, and a restart) alongside live closure timers, `h:get`/`h:set`/
+  `h.attrs`/`h:define`/`h:attach`/`h:detach`/`h:scripts`, and `ai.ask`/`ai.await` served by a
+  stub responder ahead of the real AI tool loop (a later change). Scripts can attach scripts to
+  other objects, with the same caps/validation/provenance as a player or the (future) AI. Two
+  independent switches gate every script, checked fresh every tick: the trust gate
+  (`WorldRecord.scriptsEnabled`, already shipped — untrusted for every imported/migrated world
+  until `/script trust`) and a `doScripts` game-rule kill switch (`/script off`\|`on`, instant).
+  New commands: `/script list|show|attach|detach|run|trust|off|on`, all host-only, plus
+  `/script edit` opening a minimal paste-only in-game script editor. `elysmoke` gains a
+  `scripting` golden section that runs the scripting design document's four Appendix A example
+  scripts headlessly end to end — a health-reactive beacon lamp (both handler- and module-mode),
+  an AI-gatekeeper mob using `ai.await`, world-wide event counting, and scripts equipping nearby
+  blocks with scripts — plus the kill switch, trust gate, and fault isolation (488 checks total,
+  up from 478).
+
 - Added the **event bus** underneath the object graph and script runtime: a typed, ordered event
   catalog (`attribute.changed`, `block.placed/broken/replaced/changed/used/neighborChanged`,
   entity/player lifecycle and combat events, `explosion`, world/dimension changes, plus

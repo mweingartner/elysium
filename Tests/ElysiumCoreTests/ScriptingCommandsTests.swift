@@ -31,7 +31,9 @@ final class ScriptingCommandsTests: XCTestCase {
         let store = AttributeStore(graph: graph)
         let target = ObjectTargetContext(currentDimension: .overworld, cursor: { .block(dim: .overworld, x: 3, y: 64, z: 5) })
         let context = ScriptingCommandContext(
-            graph: graph, store: store, target: target, isLANClient: isLANClient, tick: 0, eventBus: EventBus()
+            graph: graph, store: store, target: target, isLANClient: isLANClient, tick: 0, eventBus: EventBus(),
+            scriptStore: ScriptStore(graph: graph), scriptRuntime: nil, scriptsTrusted: true, killSwitchOn: true,
+            trustWorld: {}, setKillSwitch: { _ in }
         )
         return (host, world, context)
     }
@@ -184,8 +186,9 @@ final class ScriptingCommandsTests: XCTestCase {
     }
 
     func testHelpListsAttrInspectObjects() {
-        // event-bus (change 1b) extended the summary with /on, /unsubscribe, /events.
-        XCTAssertEqual(ScriptingCommands.helpSummary(), "attr, inspect, objects, on, unsubscribe, events")
+        // event-bus (change 1b) extended the summary with /on, /unsubscribe, /events;
+        // script-runtime (change 1c) adds /script.
+        XCTAssertEqual(ScriptingCommands.helpSummary(), "attr, inspect, objects, on, unsubscribe, events, script")
     }
 
     // MARK: - not-live messages
@@ -209,7 +212,9 @@ final class ScriptingCommandsTests: XCTestCase {
         let store = AttributeStore(graph: graph)
         let target = ObjectTargetContext(currentDimension: .overworld, cursor: { nil })
         let context = ScriptingCommandContext(
-            graph: graph, store: store, target: target, isLANClient: false, tick: 0, eventBus: EventBus()
+            graph: graph, store: store, target: target, isLANClient: false, tick: 0, eventBus: EventBus(),
+            scriptStore: ScriptStore(graph: graph), scriptRuntime: nil, scriptsTrusted: true, killSwitchOn: true,
+            trustWorld: {}, setKillSwitch: { _ in }
         )
         let result = ScriptingCommands.run(command: "inspect", arguments: ["looking"], context: context)
         XCTAssertEqual(result.lines, ["nothing under the cursor"])

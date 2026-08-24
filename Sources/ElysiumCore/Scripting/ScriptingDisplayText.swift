@@ -7,6 +7,17 @@
 import ElysiumScript
 
 public enum ScriptingDisplayText {
+    /// script-runtime (change 1c): the `ScriptEditorScreen`'s paste path
+    /// needs stage 0's exact hygiene check (`\n`/`\t` accepted, everything
+    /// `elysiumValidateTextCharacter` itself would reject refused) — this
+    /// thin re-export keeps `Sources/Elysium` from importing `ElysiumScript`
+    /// directly just for one predicate (`ElysiumScript` stays an
+    /// `ElysiumCore`-internal implementation detail, not a second public
+    /// surface the app target reaches into).
+    public static func isValidScriptSource(_ text: String) -> Bool {
+        ScriptTextHygiene.isClean(text)
+    }
+
     /// `ScriptTextHygiene.sanitize` (strips C0/C1 and Unicode format/bidi
     /// controls), then `\n`/`\r`/`\t` folded to a single space (a display
     /// line is always exactly one physical line), then `§` replaced by a

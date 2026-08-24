@@ -8,11 +8,14 @@
 
 import ElysiumScript
 
-/// One entry in an `ObjectRecord`'s bag. `.script` is reserved (1c) — nothing
-/// in this change ever constructs or persists one.
+/// One entry in an `ObjectRecord`'s bag. `.script` carries a `ScriptRecord`
+/// (script-runtime, change 1c) — 1a never constructed one, but the case
+/// shape (and this file's decode tolerance for a "scripts" section) has been
+/// here since 1a so this change adds no new document shape, only a
+/// non-empty one.
 public enum AttributeEntry {
     case value(AttrValue, readonly: Bool, provenance: Provenance)
-    case script
+    case script(ScriptRecord)
 }
 
 /// Who created an attribute entry and when, for diagnostics and (later) trust
@@ -121,7 +124,30 @@ public enum ObjectRecordCodec {
             out += AttrValueCodec.encode(value)
             out += "}"
         }
-        out += "},\"rev\":\(record.revision),\"v\":1}"
+        out += "}"
+        // script-runtime (change 1c), §6.7: "scripts' name/source/enabled/
+        // author/createdTick" persist in a section of their own, sibling to
+        // "attrs" — omitted entirely when there are none, matching every
+        // other optional section this document uses.
+        let scriptNames = names.filter { name in
+            if case .script? = record.entries[name] { return true }
+            return false
+        }
+        if !scriptNames.isEmpty {
+            out += ",\"scripts\":{"
+            var firstScript = true
+            for name in scriptNames {
+                guard case .script(let scriptRecord)? = record.entries[name] else { continue }
+                if !firstScript { out += "," }
+                firstScript = false
+                out += "\""
+                out += name
+                out += "\":"
+                out += ScriptRecordCodec.encode(scriptRecord)
+            }
+            out += "}"
+        }
+        out += ",\"rev\":\(record.revision),\"v\":1}"
         return out
     }
 
@@ -144,6 +170,7 @@ public enum ObjectRecordCodec {
         var i = 0
         guard consume(bytes, &i, "{") else { return nil }
         var attrsText: (Int, Int)? = nil // byte range of the "attrs" object, parsed after the whole shell is walked
+        var scriptsText: (Int, Int)? = nil // byte range of the "scripts" object (change 1c)
         var revision: UInt64?
         var version: Int?
         if peek(bytes, i) == UInt8(ascii: "}") {
@@ -160,9 +187,13 @@ public enum ObjectRecordCodec {
                     attrsText = (start, after)
                     i = after
                 case "scripts":
-                    // Reserved (1c). Tolerated as empty: skip its shape without
-                    // interpreting it — 1a never produces `.script` entries.
+                    // script-runtime (change 1c): the byte range is walked
+                    // (never interpreted) here so the outer shell parse stays
+                    // in one pass; `decodeScriptsObject` below does the real
+                    // per-entry work, exactly like "attrs".
+                    let start = i
                     guard let after = skipValue(bytes, i) else { return nil }
+                    scriptsText = (start, after)
                     i = after
                 case "rev":
                     // Security (plan) C26: strict token, clamped to
@@ -187,12 +218,60 @@ public enum ObjectRecordCodec {
         guard i == bytes.count else { return nil }
         guard version == 1 else { return nil }
         var record = ObjectRecord(entries: [:], revision: revision ?? 0)
-        guard let (attrsStart, attrsEnd) = attrsText else { return record }
-        guard let entries = decodeAttrsObject(bytes, attrsStart, attrsEnd, caps: caps, diagnostic: diagnostic) else {
-            return record
+        var entries: [String: AttributeEntry] = [:]
+        if let (attrsStart, attrsEnd) = attrsText,
+            let decoded = decodeAttrsObject(bytes, attrsStart, attrsEnd, caps: caps, diagnostic: diagnostic) {
+            entries = decoded
+        }
+        // script-runtime (change 1c): scripts share the same name namespace
+        // as attrs (§6.0) but live in the sibling "scripts" section — merge
+        // them in, never overwriting a name already claimed by an attr
+        // (a name collision between the two sections is itself malformed
+        // input; the attr wins and the script entry is dropped with a
+        // diagnostic, same tolerance discipline as every other bad entry).
+        if let (scriptsStart, scriptsEnd) = scriptsText {
+            let scripts = decodeScriptsObject(bytes, scriptsStart, scriptsEnd, caps: caps, diagnostic: diagnostic)
+            for (name, scriptRecord) in scripts {
+                if entries[name] != nil {
+                    diagnostic("dropped script '\(name)': name already used by an attribute")
+                    continue
+                }
+                entries[name] = .script(scriptRecord)
+            }
         }
         record.entries = entries
         return record
+    }
+
+    /// script-runtime (change 1c). Tolerant per-entry decode matching
+    /// `decodeAttrsObject`'s discipline exactly: a malformed script entry (or
+    /// an invalid/duplicate name) is dropped with a diagnostic, never the
+    /// whole "scripts" section.
+    private static func decodeScriptsObject(
+        _ bytes: [UInt8], _ start: Int, _ end: Int, caps: ScriptingStorageCaps, diagnostic: (String) -> Void
+    ) -> [String: ScriptRecord] {
+        var i = start
+        guard consume(bytes, &i, "{") else { return [:] }
+        var result: [String: ScriptRecord] = [:]
+        if peek(bytes, i) == UInt8(ascii: "}") { return result }
+        while true {
+            guard let (name, afterName) = parseKeyString(bytes, i) else { return result }
+            i = afterName
+            guard consume(bytes, &i, ":") else { return result }
+            let entryStart = i
+            guard let entryEnd = skipValue(bytes, i) else { return result }
+            i = entryEnd
+            if isValidAttributeName(name), result[name] == nil,
+                let record = ScriptRecordCodec.decode(bytes, entryStart, entryEnd, name: name) {
+                result[name] = record
+            } else {
+                diagnostic("dropped script '\(name)': invalid name, duplicate, or malformed entry")
+            }
+            if peek(bytes, i) == UInt8(ascii: ",") { i += 1; continue }
+            if peek(bytes, i) == UInt8(ascii: "}") { i += 1; break }
+            return result
+        }
+        return result
     }
 
     private static func decodeAttrsObject(

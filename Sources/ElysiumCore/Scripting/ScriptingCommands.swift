@@ -14,10 +14,31 @@ public struct ScriptingCommandContext {
     public let tick: Int64
     /// event-bus (change 1b): `/on`, `/unsubscribe`, `/events`.
     public let eventBus: EventBus
+    /// script-runtime (change 1c): `/script`'s own executors.
+    public let scriptStore: ScriptStore
+    /// `nil` when no `LuaState` exists this session (LAN client, or
+    /// construction failed) — `/script run` refuses cleanly in that case.
+    public let scriptRuntime: ScriptRuntime?
+    /// `WorldRecord.scriptsEnabled` — the trust gate `/script trust` flips.
+    public let scriptsTrusted: Bool
+    /// The `doScripts` gamerule read fresh — the kill switch `/script off|on`
+    /// flips.
+    public let killSwitchOn: Bool
+    public let trustWorld: () -> Void
+    public let setKillSwitch: (Bool) -> Void
+    /// design.md §15's zero-cost flag (`GameScriptingState.anyScriptsAttached`)
+    /// — `/script attach` must set it too, exactly like a script's own
+    /// `h:attach` does (`ScriptRuntimeAPI.methodAttach`), or a command-line-
+    /// authored script on an object `ScriptRuntime.runLoads()`'s fast path
+    /// hasn't already flagged would silently wait up to ~1s (the amortized
+    /// scan interval) before its first load.
+    public let markScriptAttached: () -> Void
 
     public init(
         graph: ObjectGraph, store: AttributeStore, target: ObjectTargetContext, isLANClient: Bool, tick: Int64,
-        eventBus: EventBus
+        eventBus: EventBus, scriptStore: ScriptStore, scriptRuntime: ScriptRuntime?, scriptsTrusted: Bool,
+        killSwitchOn: Bool, trustWorld: @escaping () -> Void, setKillSwitch: @escaping (Bool) -> Void,
+        markScriptAttached: @escaping () -> Void = {}
     ) {
         self.graph = graph
         self.store = store
@@ -25,6 +46,13 @@ public struct ScriptingCommandContext {
         self.isLANClient = isLANClient
         self.tick = tick
         self.eventBus = eventBus
+        self.scriptStore = scriptStore
+        self.scriptRuntime = scriptRuntime
+        self.scriptsTrusted = scriptsTrusted
+        self.killSwitchOn = killSwitchOn
+        self.trustWorld = trustWorld
+        self.setKillSwitch = setKillSwitch
+        self.markScriptAttached = markScriptAttached
     }
 }
 
@@ -49,7 +77,9 @@ public enum ScriptingCommands {
     // host-only gate the same way `/attr`/`/inspect`/`/objects` did in 1a —
     // every one of them mutates or reads world/subscription state that a LAN
     // client never authoritatively holds.
-    private static let lanGatedCommands: Set<String> = ["attr", "inspect", "objects", "ai", "agent", "on", "unsubscribe", "events"]
+    private static let lanGatedCommands: Set<String> = [
+        "attr", "inspect", "objects", "ai", "agent", "on", "unsubscribe", "events", "script",
+    ]
 
     /// Decision 10's Core-owned refusal decision — `CommandsM` consults this
     /// before any other work; `nil` for a command this change does not gate.
@@ -57,7 +87,7 @@ public enum ScriptingCommands {
         lanGatedCommands.contains(command.lowercased()) ? refusal : nil
     }
 
-    public static func helpSummary() -> String { "attr, inspect, objects, on, unsubscribe, events" }
+    public static func helpSummary() -> String { "attr, inspect, objects, on, unsubscribe, events, script" }
 
     public static func run(command: String, arguments: [String], context: ScriptingCommandContext) -> ScriptingCommandResult {
         let cmd = command.lowercased()
@@ -74,6 +104,7 @@ public enum ScriptingCommands {
         case "on": return capResult(runOn(arguments, context))
         case "unsubscribe": return capResult(runUnsubscribe(arguments, context))
         case "events": return capResult(runEvents(arguments, context))
+        case "script": return capResult(runScript(arguments, context))
         default: return ScriptingCommandResult(lines: ["unknown scripting command '\(command)'"], ok: false)
         }
     }
@@ -609,6 +640,163 @@ public enum ScriptingCommands {
 
     private static func eventLine(_ e: ScriptEvent) -> String {
         "#\(e.seq) t\(e.tick) \(e.kind.rawValue) \(e.subject.canonical)"
+    }
+
+    // MARK: - /script (script-runtime, change 1c, §12)
+
+    private static let usageScript =
+        "Usage: /script list [target] | show <target> <name> | attach <target> <name> module <source...> "
+            + "| attach <target> <name> handler <event> <source...> | detach <target> <name> | run <target> <source...> "
+            + "| trust | off | on"
+
+    private static func runScript(_ args: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
+        guard let sub = args.first else { return fail(usageScript) }
+        let rest = Array(args.dropFirst())
+        switch sub {
+        case "list": return scriptList(rest, context)
+        case "show": return scriptShow(rest, context)
+        case "attach": return scriptAttach(rest, context)
+        case "detach": return scriptDetach(rest, context)
+        case "run": return scriptRun(rest, context)
+        case "trust": return scriptTrust(context)
+        case "off": return scriptKillSwitch(false, context)
+        case "on": return scriptKillSwitch(true, context)
+        default: return fail(usageScript)
+        }
+    }
+
+    private static func scriptTargetToken(_ rest: [String]) -> (token: String, remainder: [String]) {
+        guard let first = rest.first else { return ("looking", rest) }
+        return (first, Array(rest.dropFirst()))
+    }
+
+    private static func scriptList(_ rest: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
+        let (token, _) = rest.isEmpty ? ("self", rest) : scriptTargetToken(rest)
+        switch resolveTarget(token, context) {
+        case .failure(let msg): return fail(msg.text)
+        case .success(let (ref, _)):
+            let scripts = context.scriptStore.list(ref)
+            guard !scripts.isEmpty else { return ok(["no scripts on \(ref.canonical)"]) }
+            return ok(scripts.map { s in
+                "\(s.name) [\(s.mode.rawValue)]\(s.enabled ? "" : " (disabled)")"
+                    + (s.lastError.map { " — \($0)" } ?? "")
+            })
+        }
+    }
+
+    private static func scriptShow(_ rest: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
+        guard rest.count >= 2 else { return fail(usageScript) }
+        switch resolveTarget(rest[0], context) {
+        case .failure(let msg): return fail(msg.text)
+        case .success(let (ref, _)):
+            guard let s = context.scriptStore.get(ref, rest[1]) else { return fail("no script '\(rest[1])' on \(ref.canonical)") }
+            var lines = [
+                "\(ref.canonical).\(s.name) [\(s.mode.rawValue)]\(s.enabled ? "" : " (disabled)")",
+                "author: \(authorLine(s.author))  created: t\(s.createdTick)  api: \(s.apiVersion)",
+            ]
+            if !s.triggers.isEmpty {
+                lines.append(contentsOf: s.triggers.map { t in
+                    "trigger: \(t.event.rawValue)" + (t.attribute.map { " attr=\($0)" } ?? "") + " on \(t.target.displayText)"
+                })
+            }
+            if let lastError = s.lastError { lines.append("lastError: \(lastError)") }
+            lines.append("source (\(s.source.utf8.count) bytes):")
+            lines.append(contentsOf: s.source.split(separator: "\n", omittingEmptySubsequences: false).prefix(30).map(String.init))
+            return ok(lines)
+        }
+    }
+
+    private static func authorLine(_ a: Provenance.Author) -> String {
+        switch a {
+        case .player: return "player"
+        case .ai(let model): return "ai:\(model)"
+        case .script(let owner, let name): return "script:\(owner.canonical):\(name)"
+        }
+    }
+
+    private static func scriptAttach(_ rest: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
+        guard rest.count >= 4 else { return fail(usageScript) }
+        let targetToken = rest[0]
+        let name = rest[1]
+        let modeToken = rest[2]
+        switch resolveTarget(targetToken, context) {
+        case .failure(let msg): return fail(msg.text)
+        case .success(let (ref, _)):
+            let mode: ScriptMode
+            var triggers: [Trigger] = []
+            var sourceTokens: [String]
+            switch modeToken {
+            case "module":
+                mode = .module
+                sourceTokens = Array(rest.dropFirst(3))
+            case "handler":
+                mode = .handler
+                guard rest.count >= 5, let event = EventKind.parse(rest[3]) else {
+                    return fail("'\(rest.count >= 4 ? rest[3] : "")' is not a valid event name")
+                }
+                triggers = [Trigger(event: event, attribute: nil, target: .object(ref))]
+                sourceTokens = Array(rest.dropFirst(4))
+            default:
+                return fail(usageScript)
+            }
+            guard !sourceTokens.isEmpty else { return fail(usageScript) }
+            let source = sourceTokens.joined(separator: " ")
+            switch context.scriptStore.attach(
+                ref, name: name, source: source, mode: mode, triggers: triggers, by: .player, tick: context.tick
+            ) {
+            case .success:
+                context.markScriptAttached()
+                return ok(["attached \(name) [\(mode.rawValue)] to \(ref.canonical) — takes effect next script phase"])
+            case .failure(let err):
+                return fail(scriptStoreErrorMessage(err, name: name))
+            }
+        }
+    }
+
+    private static func scriptDetach(_ rest: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
+        guard rest.count >= 2 else { return fail(usageScript) }
+        switch resolveTarget(rest[0], context) {
+        case .failure(let msg): return fail(msg.text)
+        case .success(let (ref, _)):
+            switch context.scriptStore.detach(ref, rest[1]) {
+            case .success(let existed):
+                guard existed else { return fail("no script '\(rest[1])' on \(ref.canonical)") }
+                return ok(["detached \(rest[1]) from \(ref.canonical)"])
+            case .failure(let err):
+                return fail(scriptStoreErrorMessage(err, name: rest[1]))
+            }
+        }
+    }
+
+    /// §9.3's `run_script`: ephemeral, runs once immediately (this change's
+    /// documented simplification of "next phase" — see ARCHITECTURE.md).
+    private static func scriptRun(_ rest: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
+        guard rest.count >= 2 else { return fail(usageScript) }
+        guard let runtime = context.scriptRuntime else { return fail("no script runtime this session") }
+        switch resolveTarget(rest[0], context) {
+        case .failure(let msg): return fail(msg.text)
+        case .success(let (ref, _)):
+            let source = rest.dropFirst().joined(separator: " ")
+            switch runtime.runEphemeral(source: source, owner: ref) {
+            case .success(let outcome): return ok([outcome])
+            case .failure(let message): return fail(message)
+            }
+        }
+    }
+
+    private static func scriptTrust(_ context: ScriptingCommandContext) -> ScriptingCommandResult {
+        guard !context.scriptsTrusted else { return ok(["this world is already trusted to run scripts"]) }
+        context.trustWorld()
+        return ok(["scripting trusted for this world"])
+    }
+
+    private static func scriptKillSwitch(_ on: Bool, _ context: ScriptingCommandContext) -> ScriptingCommandResult {
+        context.setKillSwitch(on)
+        return ok([on ? "scripting enabled (doScripts on)" : "scripting disabled (doScripts off)"])
+    }
+
+    private static func scriptStoreErrorMessage(_ err: ScriptStoreError, name: String) -> String {
+        "'\(name)' " + scriptStoreErrorText(err)
     }
 }
 

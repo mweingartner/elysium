@@ -25,7 +25,25 @@ func runCommand(_ game: GameCore, _ raw: String) {
         pushChat("§c" + refusal)
         return
     }
-    if cmd == "attr" || cmd == "inspect" || cmd == "objects" || cmd == "on" || cmd == "unsubscribe" || cmd == "events" {
+    if cmd == "attr" || cmd == "inspect" || cmd == "objects" || cmd == "on" || cmd == "unsubscribe" || cmd == "events" || cmd == "script" {
+        // script-runtime (change 1c): `/script edit [target] [name]` opens
+        // the paste-only `ScriptEditorScreen` — a UI action, so it is
+        // handled here (app layer) rather than in `ScriptingCommands` (pure
+        // Core, no screens). Every other `/script` subcommand goes through
+        // the same Core executor as `/attr`/`/on`/etc.
+        if cmd == "script", args.first == "edit" {
+            let targetToken = args.count > 1 ? args[1] : "self"
+            guard let ref = game.scriptingCommandContext().target.resolve(alias: targetToken) else {
+                pushChat("§cno such object '\(targetToken)'")
+                return
+            }
+            let name = args.count > 2 ? args[2] : nil
+            var data = ScreenData()
+            data.text = ref.canonical
+            data.title = name
+            game.openScreen("scriptEditor", data)
+            return
+        }
         let result = ScriptingCommands.run(command: cmd, arguments: args, context: game.scriptingCommandContext())
         for line in result.lines { pushChat((result.ok ? "§7" : "§c") + line) }
         return
