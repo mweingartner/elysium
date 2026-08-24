@@ -33,12 +33,17 @@ public struct ScriptingCommandContext {
     /// hasn't already flagged would silently wait up to ~1s (the amortized
     /// scan interval) before its first load.
     public let markScriptAttached: () -> Void
+    /// ai-object-graph (change 2), design.md §9.5/§12: `/script journal` and
+    /// `/script undo-ai`. `nil` only in a test/context that predates this
+    /// change and never exercises those two subcommands (they refuse
+    /// cleanly with "no AI journal this session" rather than trapping).
+    public let aiJournal: AIJournal?
 
     public init(
         graph: ObjectGraph, store: AttributeStore, target: ObjectTargetContext, isLANClient: Bool, tick: Int64,
         eventBus: EventBus, scriptStore: ScriptStore, scriptRuntime: ScriptRuntime?, scriptsTrusted: Bool,
         killSwitchOn: Bool, trustWorld: @escaping () -> Void, setKillSwitch: @escaping (Bool) -> Void,
-        markScriptAttached: @escaping () -> Void = {}
+        markScriptAttached: @escaping () -> Void = {}, aiJournal: AIJournal? = nil
     ) {
         self.graph = graph
         self.store = store
@@ -53,6 +58,7 @@ public struct ScriptingCommandContext {
         self.trustWorld = trustWorld
         self.setKillSwitch = setKillSwitch
         self.markScriptAttached = markScriptAttached
+        self.aiJournal = aiJournal
     }
 }
 
@@ -647,7 +653,7 @@ public enum ScriptingCommands {
     private static let usageScript =
         "Usage: /script list [target] | show <target> <name> | attach <target> <name> module <source...> "
             + "| attach <target> <name> handler <event> <source...> | detach <target> <name> | run <target> <source...> "
-            + "| trust | off | on"
+            + "| journal | undo-ai [n] | trust | off | on"
 
     private static func runScript(_ args: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
         guard let sub = args.first else { return fail(usageScript) }
@@ -658,11 +664,34 @@ public enum ScriptingCommands {
         case "attach": return scriptAttach(rest, context)
         case "detach": return scriptDetach(rest, context)
         case "run": return scriptRun(rest, context)
+        case "journal": return scriptJournal(rest, context)
+        case "undo-ai": return scriptUndoAI(rest, context)
         case "trust": return scriptTrust(context)
         case "off": return scriptKillSwitch(false, context)
         case "on": return scriptKillSwitch(true, context)
         default: return fail(usageScript)
         }
+    }
+
+    // MARK: - /script journal, /script undo-ai (ai-object-graph, change 2, §9.5/§12)
+
+    private static func scriptJournal(_ rest: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
+        guard let journal = context.aiJournal else { return fail("no AI journal this session") }
+        let limit = rest.first.flatMap(Int.init) ?? 32
+        let entries = journal.list(limit: limit)
+        guard !entries.isEmpty else { return ok(["AI journal is empty"]) }
+        return ok(entries.map { e in
+            "req#\(e.requestID) entry#\(e.id) t\(e.tick) \(e.tool) \(e.refText) \(e.name) [\(e.undo.kindText)] (\(e.model))"
+        })
+    }
+
+    private static func scriptUndoAI(_ rest: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
+        guard let journal = context.aiJournal else { return fail("no AI journal this session") }
+        let n = rest.first.flatMap(Int.init) ?? 1
+        guard n > 0 else { return fail("Usage: /script undo-ai [n]") }
+        let undoContext = AIUndoContext(graph: context.graph, store: context.store, scriptStore: context.scriptStore, eventBus: context.eventBus, tick: context.tick)
+        let lines = journal.undo(groups: n, context: undoContext)
+        return ok(lines)
     }
 
     private static func scriptTargetToken(_ rest: [String]) -> (token: String, remainder: [String]) {

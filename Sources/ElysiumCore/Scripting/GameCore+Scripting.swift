@@ -46,6 +46,11 @@ public final class GameScriptingState {
     /// would silently stop scripts from loading — the safe direction to
     /// err in).
     public var anyScriptsAttached = false
+    /// ai-object-graph (change 2), design.md §9.5. Replaced (never mutated
+    /// in place) at every `enterWorld`, exactly like `eventBus` — a stale
+    /// journal entry (or a subscription-undo id from a previous session)
+    /// must never outlive the world it belonged to.
+    public var aiJournal = AIJournal()
 
     public init() {}
 }
@@ -157,7 +162,37 @@ extension GameCore: ObjectGraphHost {
                 self?.db.putWorld(rec)
             },
             setKillSwitch: { [weak self] on in self?.setGameRule("doScripts", on ? 1 : 0) },
-            markScriptAttached: { [weak self] in self?.scripting.anyScriptsAttached = true }
+            markScriptAttached: { [weak self] in self?.scripting.anyScriptsAttached = true },
+            aiJournal: scripting.aiJournal
+        )
+    }
+
+    // MARK: - AI tool loop context builders (ai-object-graph, change 2)
+
+    /// The read-only bundle `AIObjectGraphQueryTools` needs — mirrors
+    /// `scriptingCommandContext()`'s own "fresh `ObjectGraph`/`AttributeStore`
+    /// pair over `self`" construction.
+    public func aiQueryContext() -> AIQueryContext {
+        let graph = ObjectGraph(host: self)
+        let targetContext = ObjectTargetContext(currentDimension: dim, cursor: { [weak self] in self?.cursorObjectRef() })
+        return AIQueryContext(
+            graph: graph, store: makeAttributeStore(graph: graph), scriptStore: ScriptStore(graph: graph),
+            eventBus: eventBus, target: targetContext, scriptRuntime: scripting.scriptRuntime
+        )
+    }
+
+    /// The mutable bundle `AIObjectGraphMutationTools` needs — `requestID`
+    /// must come from `scripting.aiJournal.beginRequest()`, called once per
+    /// `/ai` tool-loop invocation before any of its tool calls run (so every
+    /// mutation that invocation makes shares one undo group, §9.1/§9.5).
+    public func aiMutationContext(model: String, requestID: UInt64) -> AIMutationContext {
+        let graph = ObjectGraph(host: self)
+        let targetContext = ObjectTargetContext(currentDimension: dim, cursor: { [weak self] in self?.cursorObjectRef() })
+        return AIMutationContext(
+            graph: graph, store: makeAttributeStore(graph: graph), scriptStore: ScriptStore(graph: graph),
+            eventBus: eventBus, scriptRuntime: scripting.scriptRuntime, target: targetContext,
+            tick: Int64(world.time), model: model, isLANClient: isLANClientWorld, journal: scripting.aiJournal,
+            requestID: requestID
         )
     }
 
@@ -229,6 +264,16 @@ extension GameCore: ObjectGraphHost {
                 print("[scripting] \(message)")
             }
         }
+        // ai-object-graph (change 2), design.md §9.5: the journal rides the
+        // same load point as everything else scripting persists — a fresh
+        // `AIJournal()` per session (§9.5's own ring semantics don't survive
+        // a stale prior session any more than subscriptions do).
+        scripting.aiJournal = AIJournal()
+        if !rec.aiJournal.isEmpty {
+            scripting.aiJournal.loadPersisted(from: rec.aiJournal) { message in
+                print("[scripting] \(message)")
+            }
+        }
         // script-runtime (change 1c): durable timers ride a field of their
         // own (`scriptTimers`, not `scriptRegistry` — see `ScriptTimers.swift`'s
         // header) but load at the same point, for the same reason.
@@ -251,6 +296,7 @@ extension GameCore: ObjectGraphHost {
             ? scripting.eventBus.encodePersistedSubscriptions() : ""
         let timers = scripting.scriptRuntime?.timers ?? []
         rec.scriptTimers = timers.isEmpty ? "" : DurableTimerRegistryCodec.encode(timers)
+        rec.aiJournal = scripting.aiJournal.encodePersisted()
     }
 
     // MARK: - script runtime session lifecycle (design.md §7.5's "the

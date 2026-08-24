@@ -5,6 +5,21 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Added the **AI object graph tool loop**: `/ai` now recognizes a scripting-flavored request (attach
+  a script, set an attribute, subscribe to an event, and the like) and hands it to a bounded tool
+  loop instead of the single-action path — up to 8 turns, up to 4 mutations per request, with 10
+  read-only query tools (list/inspect objects, attributes, scripts, subscriptions, recent events,
+  search the block/item/entity/effect registries, check a script's validity, see who would receive
+  an event) and 10 mutation tools (set/define/remove an attribute; attach/detach/enable a script;
+  subscribe/unsubscribe; emit a custom event; run a one-off script) that all go through the exact
+  same validated `/attr`/`/script`/`/on` executors a player's own commands use, refused outright on a
+  joined LAN world. Every AI-authored script attach compiles, lints, checks its event-name literals,
+  and is tried out on a scratch copy before it's saved for real — a failure there is a warning, not a
+  refusal. Every successful AI mutation is journaled with the model's name and can be undone:
+  `/script journal` lists what the AI has changed, `/script undo-ai [n]` reverts the most recent `n`
+  requests (refusing, never overwriting, if you've since edited a script the AI touched). A script's
+  `ai.ask`/`ai.await` now reach a real local Ollama model asynchronously — the tick never waits on
+  the network — capped at 2 requests in flight and 30/minute per world. New command: `/ai cancel`.
 - Added the **script runtime application layer**: objects can now carry up to 8 attached Lua
   scripts each (module-mode, running at load and registering their own handlers, or handler-mode,
   where the script body *is* the handler for its declared triggers), persisted alongside

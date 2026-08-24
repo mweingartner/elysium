@@ -51,6 +51,10 @@ final class LANGuestCommandGateTests: XCTestCase {
         let commands = [
             "/attr list self", "/inspect", "/objects near", "/ai hello", "/agent hello",
             "/on self player.joined s.h", "/unsubscribe 1", "/events recent",
+            // ai-object-graph (change 2): the AI tool loop's own `/script`
+            // subcommands (journal/undo-ai) and `/ai cancel` join the exact
+            // same gate — nothing about the loop weakens it.
+            "/script journal", "/script undo-ai", "/ai cancel",
         ]
 
         for command in commands {
@@ -130,6 +134,37 @@ final class LANGuestCommandGateTests: XCTestCase {
         let game = try makeLANClientGame()
         chatLog.removeAll()
         runCommand(game, "/events recent")
+        XCTAssertEqual(chatLog.count, 1)
+        XCTAssertTrue(chatLog.first?.text.contains("LAN host only") == true)
+    }
+
+    /// ai-object-graph (change 2): `/script journal`/`/script undo-ai` (the
+    /// AI provenance/undo surface) are refused at the same real call site as
+    /// every other scripting command, not only via `ScriptingCommands`'s own
+    /// pure decision function.
+    func testScriptJournalIsRefused() throws {
+        let game = try makeLANClientGame()
+        chatLog.removeAll()
+        runCommand(game, "/script journal")
+        XCTAssertEqual(chatLog.count, 1)
+        XCTAssertTrue(chatLog.first?.text.contains("LAN host only") == true)
+    }
+
+    func testScriptUndoAiIsRefused() throws {
+        let game = try makeLANClientGame()
+        chatLog.removeAll()
+        runCommand(game, "/script undo-ai")
+        XCTAssertEqual(chatLog.count, 1)
+        XCTAssertTrue(chatLog.first?.text.contains("LAN host only") == true)
+    }
+
+    /// `/ai cancel` is intercepted by `CommandsM` before it ever reaches
+    /// `OllamaAgentService.cancelToolLoop` — a guest can neither start nor
+    /// cancel a tool-loop request.
+    func testAiCancelIsRefused() throws {
+        let game = try makeLANClientGame()
+        chatLog.removeAll()
+        runCommand(game, "/ai cancel")
         XCTAssertEqual(chatLog.count, 1)
         XCTAssertTrue(chatLog.first?.text.contains("LAN host only") == true)
     }

@@ -550,8 +550,9 @@ as a specific block, never as a filter named `overworld:10,64,3`).
 ## Scripting (preview)
 
 Objects can carry small Lua scripts now — up to 8 per object, attached with `/script attach`, pasted
-in through a minimal in-game editor, or (in a later build) authored by the local AI. Host-only, like
-every command above; a joined LAN world refuses every `/script` subcommand outright.
+in through a minimal in-game editor, or authored by the local AI through `/ai` (see "Optional local
+AI" below). Host-only, like every command above; a joined LAN world refuses every `/script`
+subcommand outright.
 
 - `/script list [target]` — lists the scripts on a target (default `self`), with their mode and
   whether they're currently disabled or faulted.
@@ -573,6 +574,17 @@ every command above; a joined LAN world refuses every `/script` subcommand outri
 - `/script off` / `/script on` — the scripting kill switch (the `doScripts` game rule under the hood).
   Instant, and independent of trust: `/script off` stops every script this tick regardless of how
   hostile a world's scripts might be.
+- `/script journal [limit]` — lists what the AI has done to this world through `/ai` (attributes it
+  set, scripts it attached/detached/enabled, subscriptions it created, events it emitted), most recent
+  first: which request, which tool, which object, which model. Nothing you or another script does
+  appears here — only AI mutations are journaled.
+- `/script undo-ai [n]` — reverts the `n` most recent `/ai` requests' worth of mutations (default 1),
+  most recent first. An attribute the AI set goes back to its previous value (or disappears, if the AI
+  created it); a script the AI attached is detached (if it was new) or restored to what it replaced
+  (if the AI edited an existing script) — unless you've edited that script yourself since, in which
+  case undo refuses rather than overwrite your edit and tells you so. Emitting an event or running a
+  one-off script can't be undone (whatever it already did in the world stays done); undo-ai still logs
+  that it tried, so the journal stays a complete record either way.
 - Chat command source is one line — for anything longer, use `/script edit [target] [name]` to open
   the in-game script editor. It's paste-only in this build: write your script in a text editor
   elsewhere, copy it, open the editor, and paste (⌘V) to load the whole thing (up to 16 KiB) in one
@@ -580,10 +592,10 @@ every command above; a joined LAN world refuses every `/script` subcommand outri
   both mirror the chat commands above. Multi-line typing, syntax colouring, and attaching a
   handler-mode script from the editor arrive in a later build.
 
-A script's own Lua reference — the object model, event names, attribute access, timers, and what the
-embedded AI will let a script do once that ships — lives with the scripting design document, not
-here; this section only covers the chat/editor surface for attaching and managing scripts you (or
-another script) already have the source for.
+A script's own Lua reference — the object model, event names, attribute access, timers, and
+`ai.ask`/`ai.await` — lives with the scripting design document, not here; this section only covers
+the chat/editor surface for attaching and managing scripts you (or another script, or the AI) already
+have the source for.
 
 ## Options, accessibility, and local AI
 
@@ -610,7 +622,8 @@ problem. Use **Reduce Motion** and **Reduced Flashes** when camera movement or e
 AI is not required to play Elysium. To use it, independently install and run a local Ollama service, then
 open **Options... → Ai**, enter or select an **Ollama Model**, and save it. **Refresh Models** discovers
 models from the configured loopback service. Cloud-tagged model names are rejected on this Elysium
-surface. Use `/ai <request>` in command input after a model is available.
+surface. Use `/ai <request>` in command input after a model is available; `/ai cancel` stops a request
+that's still thinking.
 
 Before you use `/ai`, understand the data flow: Elysium sends your request together with current game
 context—including the world seed, player position and state, inventory, nearby state, and saved template
@@ -620,6 +633,25 @@ configured Ollama installation or model provider's retention or onward handling.
 
 Model output is treated as untrusted and reduced to a limited set of validated in-game actions. A request
 can fail, produce no usable action, or be rejected without changing the world.
+
+**What the AI can see and do with objects, attributes, scripts, and events.** A request that sounds
+like it's about scripting (mentions a script, an attribute, an event, subscribing, attaching, and
+similar words) is handled differently from an ordinary building/world request: instead of picking one
+action, the AI can look around and make a short sequence of changes in the same request (up to four),
+narrating what it's doing as chat lines. It can list and inspect nearby objects and their attributes
+and scripts, look up what attributes and events exist and what a candidate script would do before
+committing to it, set or remove a custom attribute, attach or detach a script (every AI-authored
+script is checked the same way `/script attach` checks a script you paste in, plus one extra pass
+that tries the script out on a scratch copy first and reports anything that looks wrong before it's
+saved for real), enable or disable a script, subscribe or unsubscribe to an event, raise a custom
+event, or run a one-off script. Every one of these goes through the exact same validated path as the
+matching `/attr`/`/script`/`/on`/`/events` command — the AI has no shortcut around any check a command
+would hit, and everything it changes is refused outright on a joined LAN world exactly like those
+commands are. Anything the AI sets or attaches is undoable with `/script undo-ai`, and `/script
+journal` shows exactly what it's touched (see "Scripting" above). Inside a script, `ai.ask(prompt)`
+and `local reply, err = ai.await(prompt)` now reach the same local Ollama model configured here
+(text only, no tools) — `ai.await` pauses that script's handler until the reply arrives (or times out,
+or is refused for being over budget) without pausing the rest of the game.
 
 ## Troubleshooting and current limitations
 

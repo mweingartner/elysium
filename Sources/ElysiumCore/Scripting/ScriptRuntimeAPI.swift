@@ -118,6 +118,14 @@ extension ScriptRuntime {
     }
 
     func performSet(ref: ObjectRef, name rawName: String, value: ScriptValue) -> HostResult {
+        // ai-object-graph (change 2), design.md §9.4 stage 6: a dry run's
+        // "read-only facade" — every write this call would otherwise make
+        // is skipped, and it reports success so the script's own control
+        // flow (an `if not ok then ...` after `h:set`) runs the same way it
+        // would for real, which is what makes the dry run's *other*
+        // failures (a later `nil` dereference, a bad argument count) mean
+        // something.
+        guard !dryRunActive else { return .values([]) }
         guard case .live(let live) = graph.resolve(ref) else { return .error("\(ref.canonical) is not loaded") }
         let name = AttributeRegistry.resolve(kind: ref.kind, name: rawName) != nil
             ? rawName : camelToSnakeAttributeName(rawName)
@@ -188,6 +196,7 @@ extension ScriptRuntime {
             let ref = ObjectRef.parse(handle.ref) else {
             return .error("define(name, value[, opts])")
         }
+        guard !dryRunActive else { return .values([]) }
         let name = normalizedCustomAttributeName(rawName)
         guard let value = scriptValueArg(call.arguments[1]) else { return .error("unsupported value type") }
         var readonly = false
@@ -205,11 +214,20 @@ extension ScriptRuntime {
 
     func methodAttach(_ handle: HandleRef, _ call: HostCall) -> HostResult {
         guard let ctx = currentScript else { return .error("attach() outside script context") }
-        guard incrementAttachDetach(ctx) else { return .error("attach/detach budget exceeded this tick") }
         guard call.arguments.count >= 2, case .value(.string(let name)) = call.arguments[0],
             case .value(.string(let source)) = call.arguments[1], let ref = ObjectRef.parse(handle.ref) else {
             return .error("attach(name, source[, opts])")
         }
+        // A dry run still validates a nested attach's source (useful
+        // signal) but never actually attaches it or spends the real
+        // attach/detach budget.
+        guard !dryRunActive else {
+            guard case .accepted = ScriptValidator.validate(source: source, chunkName: name, using: lua) else {
+                return .error("script source failed validation")
+            }
+            return .values([.bool(true)])
+        }
+        guard incrementAttachDetach(ctx) else { return .error("attach/detach budget exceeded this tick") }
         var triggers: [Trigger] = []
         var isModule = true
         if call.arguments.count >= 3, case .value(.map(let opts)) = call.arguments[2] {
@@ -244,10 +262,11 @@ extension ScriptRuntime {
 
     func methodDetach(_ handle: HandleRef, _ call: HostCall) -> HostResult {
         guard let ctx = currentScript else { return .error("detach() outside script context") }
-        guard incrementAttachDetach(ctx) else { return .error("attach/detach budget exceeded this tick") }
         guard case .value(.string(let name))? = call.arguments.first, let ref = ObjectRef.parse(handle.ref) else {
             return .error("detach(name)")
         }
+        guard !dryRunActive else { return .values([.bool(false)]) }
+        guard incrementAttachDetach(ctx) else { return .error("attach/detach budget exceeded this tick") }
         switch scriptStore.detach(ref, name) {
         case .success(let existed):
             if existed { unloadScripts(for: [ref]) }
@@ -261,6 +280,7 @@ extension ScriptRuntime {
             case .block(let dim, let x, let y, let z) = ref else {
             return .error("setBlock(name[, opts]) is only valid on a block handle")
         }
+        guard !dryRunActive else { return .values([.bool(true)]) }
         guard let w = host.world(for: dim) else { return .error("dimension not loaded") }
         guard let id = name == "air" ? UInt16(0) : bidOpt(name) else { return .error("unknown block '\(name)'") }
         _ = w.setBlock(x, y, z, id == 0 ? 0 : Int(cell(id, 0)), SET_DEFAULT)
@@ -278,6 +298,7 @@ extension ScriptRuntime {
             let w = host.world(for: dim) else {
             return .error("breakBlock() is only valid on a block handle")
         }
+        guard !dryRunActive else { return .values([.bool(true)]) }
         w.breakBlockNaturally(x, y, z)
         return .values([.bool(true)])
     }
@@ -294,6 +315,7 @@ extension ScriptRuntime {
         guard case .string(let rawName) = key, let owner = ownerRef(fromAttrsRef: handle.ref) else {
             return .error("invalid attrs key")
         }
+        guard !dryRunActive else { return .values([]) }
         let name = normalizedCustomAttributeName(rawName)
         guard let author = currentAuthor() else { return .error("no script context") }
         if case .null = value {
@@ -327,6 +349,9 @@ extension ScriptRuntime {
         }
         guard let event = EventKind.parse(eventName) else { return .error("'\(eventName)' is not a valid event name") }
         guard case .function(let fn)? = call.arguments.last else { return .error("on() requires a function") }
+        // A dry run's closure dies with its throwaway environment — never
+        // register it on the real (persistent) event bus.
+        guard !dryRunActive else { return .values([]) }
         var attribute: String?
         var targetRef = ctx.owner
         if call.arguments.count == 3, case .value(.map(let opts)) = call.arguments[1] {
@@ -353,6 +378,7 @@ extension ScriptRuntime {
         guard case .value(.string(let eventName)) = call.arguments[1], let event = EventKind.parse(eventName) else {
             return .error("subscribe() requires a valid event name")
         }
+        guard !dryRunActive else { return .values([]) }
         var attribute: String?
         if call.arguments.count == 4, case .value(.map(let opts)) = call.arguments[2] {
             if case .string(let a)? = opts["attr"] { attribute = a }
@@ -385,6 +411,10 @@ extension ScriptRuntime {
         guard call.arguments.count >= 2, let n = intArg(call.arguments[0]), n > 0 else {
             return .error("after/every(n, handler) requires a positive tick count")
         }
+        // A dry run must never leave a durable timer, or a live scheduled
+        // coroutine referencing its throwaway (about-to-be-destroyed)
+        // environment, behind — both branches below are no-ops here.
+        guard !dryRunActive else { return .values([]) }
         switch call.arguments[1] {
         case .value(.string(let name)):
             guard isValidAttributeName(name) else { return .error("invalid timer handler name") }
@@ -419,6 +449,7 @@ extension ScriptRuntime {
         guard case .value(.string(let name))? = call.arguments.first, let kind = EventKind.parse(name) else {
             return .error("emit(name[, payload][, target])")
         }
+        guard !dryRunActive else { return .values([.bool(true)]) }
         var payload: [String: AttrValue] = [:]
         var target = ctx.owner
         if call.arguments.count >= 2, case .value(.map(let m)) = call.arguments[1] { payload = m }
@@ -458,6 +489,7 @@ extension ScriptRuntime {
 
     func hostSay(_ call: HostCall) -> HostResult {
         guard case .value(.string(let text))? = call.arguments.first else { return .error("say(text)") }
+        guard !dryRunActive else { return .values([]) }
         sayFn(ScriptingDisplayText.line(text))
         return .values([])
     }
@@ -477,6 +509,11 @@ extension ScriptRuntime {
         guard case .function(let fn)? = call.arguments.dropFirst().first else {
             return .error("register(name, fn) requires a function")
         }
+        // A dry run's registered function is tied to a throwaway
+        // environment that is destroyed the instant `dryRun` returns —
+        // never remember it (nothing durable would ever be able to call it
+        // anyway; `after`/`every`/`/on` are themselves no-ops here).
+        guard !dryRunActive else { return .values([]) }
         namedHandlers[ctx.owner.canonical + "#" + ctx.name + "#" + name] = fn
         return .values([])
     }
@@ -600,6 +637,20 @@ extension ScriptRuntime {
         guard case .value(.string(let prompt))? = call.arguments.first, prompt.utf8.count <= 4_096 else {
             return .error("ai.ask(prompt[, opts])")
         }
+        // design.md §9.4 stage 6: "no AI" during a dry run.
+        guard !dryRunActive else { return .values([.int(0)]) }
+        // design.md §8.4: over budget -> `ai.replied{error="budget"}`,
+        // delivered the same way a timed-out reply would be (no request is
+        // ever actually made) — `ai.ask` is fire-and-forget, so this fires
+        // immediately rather than waiting for a phase to drain anything.
+        guard aiBudgetAvailable() else {
+            state.eventBus.raise(
+                kind: .aiReplied, subject: .world,
+                payload: ["requestId": .int(0), "text": .null, "error": .string("budget")],
+                source: .engine, tick: host.currentTick
+            )
+            return .values([.int(0)])
+        }
         return .values([.int(Int64(enqueueAIRequest(prompt: prompt)))])
     }
 
@@ -607,6 +658,8 @@ extension ScriptRuntime {
         guard case .value(.string(let prompt))? = call.arguments.first, prompt.utf8.count <= 4_096 else {
             return .error("ai.await(prompt[, opts])")
         }
+        guard !dryRunActive else { return .error("ai is not available during validation") }
+        guard aiBudgetAvailable() else { return .values([.null, .string("budget")]) }
         let id = enqueueAIRequest(prompt: prompt)
         return .yield([], .await(id))
     }

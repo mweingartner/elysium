@@ -73,6 +73,11 @@ func runCommand(_ game: GameCore, _ raw: String) {
         ok("Commands: ai, attr, inspect, objects, lan, clone, place, listTemplates, templates, give, tp, time, weather, gamemode, seed, kill, summon, effect, enchant, xp, setblock, fill, locate, difficulty, gamerule, clear, spawnpoint, heal")
     case "ai", "agent":
         let prompt = args.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        // ai-object-graph (change 2), design.md §12: "/ai cancel".
+        if prompt.lowercased() == "cancel" {
+            elysiumOllamaAgent.cancelToolLoop()
+            return
+        }
         guard !prompt.isEmpty else { return fail("Usage: /ai <request>") }
         elysiumOllamaAgent.run(prompt: prompt, game: game)
     case "clone":

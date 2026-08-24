@@ -28,7 +28,7 @@ public let AIAgentMaxEffectDurationSeconds = 3_600
 public let AIAgentMaxEffectAmplifier = 4
 public let AIAgentMaxXPAmount = 100_000
 
-public struct AIAgentSkillParameter: Equatable {
+public struct AIAgentSkillParameter: Equatable, Sendable {
     public let name: String
     public let type: String
     public let summary: String

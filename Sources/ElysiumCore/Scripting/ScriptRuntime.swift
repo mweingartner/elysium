@@ -122,6 +122,38 @@ public final class ScriptRuntime {
     /// per-1200-ticks (20 Hz * 60 s), reset opportunistically.
     private var aiRequestsThisWindow = 0
     private var aiWindowStartTick: Int64 = 0
+    /// design.md §8.4: "<= 2 in flight per world" — a local constant
+    /// (not `ScriptBudgets`, matching this file's own `aiRequestsThisWindow`/
+    /// `aiWindowStartTick` precedent for AI-specific numbers change 1c
+    /// already kept out of that struct). This is also this subsystem's
+    /// "per-tick pump budget": the broker handoff (`outboxHandoff`) only
+    /// ever sees requests that already passed this gate, so it can never be
+    /// asked to fire more than `aiMaxInFlightPerWorld` concurrent network
+    /// requests for one world session.
+    static let aiMaxInFlightPerWorld = 2
+    private(set) var aiInFlightCount = 0
+
+    /// ai-object-graph (change 2), design.md §9.6: the async production
+    /// broker seam. `nil` (default, and every 1c test) means "no broker
+    /// attached" — `runAIInbox()` falls back to the synchronous `aiResponder`
+    /// stub seam unchanged, so every 1c test keeps passing untouched. When
+    /// set (production only, wired by the app layer's per-frame pump), each
+    /// newly enqueued `(requestID, prompt)` is handed off here instead of
+    /// being answered synchronously; the real reply arrives later via
+    /// `submitAIReply`, off the game loop's own call stack, and is drained
+    /// into `ai.replied` events / `ai.await` resumptions at the next script
+    /// phase — the tick never blocks on the model.
+    public var outboxHandoff: ((UInt64, String) -> Void)?
+    private var incomingAIReplies: [(id: UInt64, text: String?, error: String?)] = []
+
+    /// ai-object-graph (change 2), design.md §9.4 stage 6: set for the
+    /// duration of `dryRun` only. Every mutating verb dispatch
+    /// (`ScriptRuntimeAPI.swift`) checks this first and turns itself into a
+    /// harmless no-op while it is `true` — the "read-only facade" the design
+    /// calls for, implemented as a flag rather than a second execution path
+    /// so dry-run and real execution can never drift apart on anything but
+    /// the flag itself.
+    var dryRunActive = false
 
     let budgets: ScriptBudgets
 
@@ -507,44 +539,98 @@ public final class ScriptRuntime {
 
     // MARK: - AI outbox/inbox (design.md §9.6, this change's stub-broker seam)
 
+    /// design.md §8.4's two AI request budgets, checked together before a
+    /// request is ever enqueued: the in-flight cap (never queued past it —
+    /// refused immediately) and the per-world-per-minute window (reset
+    /// opportunistically every ~1200 ticks).
+    func aiBudgetAvailable() -> Bool {
+        let tick = host.currentTick
+        if tick - aiWindowStartTick >= 1_200 {
+            aiWindowStartTick = tick
+            aiRequestsThisWindow = 0
+        }
+        return aiInFlightCount < Self.aiMaxInFlightPerWorld && aiRequestsThisWindow < 30
+    }
+
     func enqueueAIRequest(prompt: String) -> UInt64 {
         let id = nextAIRequestID
         nextAIRequestID += 1
         aiOutbox.append(AIOutboxEntry(id: id, prompt: prompt))
+        aiInFlightCount += 1
+        aiRequestsThisWindow += 1
         return id
     }
 
-    /// §7.5 step 3 ("AI inbox"): drains the outbox synchronously against the
-    /// injected stub responder and delivers replies as `ai.replied` events
-    /// (`ai.ask`) or direct coroutine resumes (`ai.await`'s `.await(token)`).
+    /// §7.5 step 3 ("AI inbox"). Two modes, chosen by whether a production
+    /// broker is attached (`outboxHandoff != nil`):
+    ///   - **No broker** (default; every 1c test): drains the outbox
+    ///     synchronously against the injected `aiResponder` stub, exactly as
+    ///     1c shipped it — unchanged behavior, unchanged tests.
+    ///   - **Broker attached** (production, change 2, §9.6): hands each
+    ///     freshly enqueued `(id, prompt)` to the broker (which dispatches
+    ///     an async, cancellable Ollama request off the tick's call stack)
+    ///     instead of answering it here, then drains whatever real replies
+    ///     `submitAIReply` has queued up since the last phase — in
+    ///     `requestId` order, per §9.6's own wording.
     public func runAIInbox() {
+        if let handoff = outboxHandoff {
+            if !aiOutbox.isEmpty {
+                let batch = aiOutbox
+                aiOutbox.removeAll()
+                for entry in batch { handoff(entry.id, entry.prompt) }
+            }
+            guard !incomingAIReplies.isEmpty else { return }
+            let replies = incomingAIReplies.sorted { $0.id < $1.id }
+            incomingAIReplies.removeAll()
+            for reply in replies { deliverAIReply(id: reply.id, text: reply.text, errorText: reply.error) }
+            return
+        }
         guard !aiOutbox.isEmpty else { return }
         let batch = aiOutbox
         aiOutbox.removeAll()
         for entry in batch {
             let reply = aiResponder(entry.prompt)
-            let waiting = scheduled.filter { $0.awaitToken == entry.id }
-            if waiting.isEmpty {
-                // `ai.ask` path: deliver as an event to the requester. The
-                // requester ref/script name is not tracked in the outbox in
-                // this change (ask is fire-and-forget to `world`, matching
-                // the "requesting object" wording loosely) — a documented
-                // simplification; `ai.await` is the fully-wired path.
-                state.eventBus.raise(
-                    kind: .aiReplied, subject: .world,
-                    payload: ["requestId": .int(Int64(entry.id)), "text": reply.map { .string($0) } ?? .null,
-                              "error": reply == nil ? .string("timeout") : .null],
-                    source: .engine, tick: host.currentTick
-                )
-            } else {
-                for run in waiting {
-                    scheduled.removeAll { $0.key == run.key && $0.ordinal == run.ordinal }
-                    let args: [ScriptValue] = reply != nil
-                        ? [.string(reply!), .null] : [.null, .string("timeout")]
-                    _ = resumeAndSchedule(key: run.key, coroutine: run.coroutine, args: args, isLoad: false, context: nil)
-                }
+            deliverAIReply(id: entry.id, text: reply, errorText: reply == nil ? "timeout" : nil)
+        }
+    }
+
+    private func deliverAIReply(id: UInt64, text: String?, errorText: String?) {
+        aiInFlightCount = max(0, aiInFlightCount - 1)
+        let waiting = scheduled.filter { $0.awaitToken == id }
+        if waiting.isEmpty {
+            // `ai.ask` path: deliver as an event to the requester. The
+            // requester ref/script name is not tracked in the outbox in
+            // this change (ask is fire-and-forget to `world`, matching
+            // the "requesting object" wording loosely) — a documented
+            // simplification; `ai.await` is the fully-wired path.
+            state.eventBus.raise(
+                kind: .aiReplied, subject: .world,
+                payload: ["requestId": .int(Int64(id)), "text": text.map { .string($0) } ?? .null,
+                          "error": errorText.map { .string($0) } ?? .null],
+                source: .engine, tick: host.currentTick
+            )
+        } else {
+            for run in waiting {
+                scheduled.removeAll { $0.key == run.key && $0.ordinal == run.ordinal }
+                let args: [ScriptValue] = text != nil
+                    ? [.string(text!), .null] : [.null, .string(errorText ?? "timeout")]
+                _ = resumeAndSchedule(key: run.key, coroutine: run.coroutine, args: args, isLoad: false, context: nil)
             }
         }
+    }
+
+    /// ai-object-graph (change 2): the broker calls this — from any thread
+    /// that ultimately serializes onto the main/game-loop thread before this
+    /// call (the app layer's network completion handlers already dispatch
+    /// back to main, matching every other network callback in this codebase)
+    /// — once a real reply (or a definitive failure) for `id` is known.
+    /// Queued, not applied immediately: delivery only ever happens inside
+    /// `runAIInbox`, at the fixed script-phase point, so a reply that lands
+    /// mid-tick from the app's per-frame pump still only ever mutates
+    /// scripting state at the one deterministic phase this whole subsystem
+    /// promises.
+    public func submitAIReply(id: UInt64, text: String?, error: String?) {
+        incomingAIReplies.append((id, text, error))
     }
 
     // MARK: - unload (§7.5 step 6, §8.2)
@@ -634,6 +720,68 @@ public final class ScriptRuntime {
             switch outcome {
             case .success: return .success("ran '\(owner.canonical)' script (ephemeral, not saved)")
             case .failure(let fault): return .failure("runtime error: \(fault.message)")
+            }
+        }
+    }
+
+    // MARK: - validation / dry-run (ai-object-graph, change 2, design.md §9.4)
+
+    /// Stages 0-3 of `ScriptValidator` against this session's `LuaState` —
+    /// the same compile-time gate `h:attach`/`/script attach`/`runEphemeral`
+    /// already use, exposed for the AI tool loop's `check_script` query tool
+    /// and as the first half of `AIScriptValidationGate.validate` (which
+    /// adds stage 5 on top). `lua` itself stays un-exposed; this is the one
+    /// operation callers outside this file need from it.
+    public func validateSource(_ source: String, chunkName: String) -> ScriptValidation {
+        ScriptValidator.validate(source: source, chunkName: chunkName, using: lua)
+    }
+
+    /// design.md §9.4 stage 6: "run the chunk in a scratch env over a
+    /// read-only facade (throwaway RNG, no AI, no attrs writes) and invoke
+    /// each registered handler once with a synthetic event; failures are
+    /// *warnings* in the tool result." Compiles and runs `source` once
+    /// against `owner`'s real handles (so reads/attribute lookups behave
+    /// normally — useful signal) with `dryRunActive` set for the duration,
+    /// which turns every mutating verb in `ScriptRuntimeAPI.swift` into a
+    /// no-op: nothing this call does is ever persisted, emits an event,
+    /// writes a block, sends chat, or reaches the AI outbox. Returns a
+    /// human-readable failure line, or `nil` on success. Never throws; any
+    /// internal failure (including an over-budget slice) becomes a message,
+    /// not a Swift error — the caller treats this as advisory.
+    public func dryRun(source: String, owner: ObjectRef, mode: ScriptMode) -> String? {
+        guard scriptsEffectivelyEnabled(host: host) else { return "scripting is disabled" }
+        guard case .live = graph.resolve(owner) else { return "\(owner.canonical) is not loaded" }
+        let wasDryRun = dryRunActive
+        dryRunActive = true
+        defer { dryRunActive = wasDryRun }
+        let env = lua.makeEnvironment(
+            name: "dryrun#\(nextOrdinal)", hostBindings: buildHostBindings(),
+            random: RandomStreamBoxAdapter(RandomX(0xD8A1_1D8A))
+        )
+        nextOrdinal += 1
+        defer { env.destroy() }
+        let wrapped = mode == .module
+            ? "local self, world, player = ...\n" + source
+            : "local self, world, player, ev = ...\n" + source
+        switch env.compile(source: wrapped, chunkName: "dryrun") {
+        case .failure(let fault):
+            return fault.message
+        case .success(let fn):
+            let previous = currentScript
+            currentScript = (owner, "dryrun")
+            defer { currentScript = previous }
+            let args: [ScriptValue] = mode == .module
+                ? [handleValue(for: owner), handleValue(for: .world), handleValue(for: .player)]
+                : [
+                    handleValue(for: owner), handleValue(for: .world), handleValue(for: .player),
+                    .map(["kind": .string("dryrun"), "tick": .int(host.currentTick), "subject": handleValue(for: owner)]),
+                ]
+            do {
+                let outcome = try lua.call(fn, args: args, slice: budgets.handlerSliceInstructions)
+                if case .failure(let fault) = outcome { return fault.message }
+                return nil
+            } catch {
+                return "dry run failed to execute"
             }
         }
     }

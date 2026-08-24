@@ -931,6 +931,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         if game.hasWorld() {
             _ = game.frame(dtMs: TICK_MS)
             LANMultiplayerManager.shared.tickReplication(game: game)
+            AIScriptBroker.pump(game: game)
         }
     }
 
@@ -1079,6 +1080,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         if game.hasWorld() {
             let partial = game.frame(dtMs: dt)
             LANMultiplayerManager.shared.tickReplication(game: game)
+            AIScriptBroker.pump(game: game)
             bot?.tick()
             booth?.tickBooth()
             renderer.particles.tick(game.world)

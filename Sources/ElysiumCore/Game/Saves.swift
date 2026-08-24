@@ -179,6 +179,10 @@ public struct WorldRecord: Codable {
     /// 1b's `SubscriptionRegistryCodec` stays untouched (see
     /// `ScriptTimers.swift`'s header comment).
     public var scriptTimers: String
+    /// ai-object-graph (change 2), design.md §9.5: the AI provenance/undo
+    /// ring (`AIJournalCodec`), one opaque document, empty when there is
+    /// nothing to save — same discipline as `scriptRegistry`/`scriptTimers`.
+    public var aiJournal: String
 
     public var generationSettings: WorldGenerationSettings {
         WorldGenerationSettings(presetID: worldPreset, singleBiomeID: singleBiome,
@@ -215,6 +219,7 @@ public struct WorldRecord: Codable {
         objects = [:]
         scriptRegistry = ""
         scriptTimers = ""
+        aiJournal = ""
         // DEF-1 fix: init defaults false — only GameCore.createWorld sets true,
         // right before its own db.putWorld, so every other construction path (Reality
         // Derived imports, LAN-client transient records, and plain decode-absent) stays
@@ -227,7 +232,7 @@ public struct WorldRecord: Codable {
         case spawnX, spawnY, spawnZ, worldPreset, singleBiome, dungeonDensity, gameRules
         case dragonKilled, gatewaysSpawned, nextEntityId, rpgSimulationTick, realityDerivedSource
         case mapSize, mapCenterX, mapCenterZ
-        case objects, scriptsEnabled, scriptRegistry, scriptTimers
+        case objects, scriptsEnabled, scriptRegistry, scriptTimers, aiJournal
     }
 
     public init(from decoder: Decoder) throws {
@@ -280,6 +285,9 @@ public struct WorldRecord: Codable {
         // script-runtime (change 1c): absent on every pre-1c world, exactly
         // like `scriptRegistry` was absent on every pre-1b world.
         scriptTimers = try c.decodeIfPresent(String.self, forKey: .scriptTimers) ?? ""
+        // ai-object-graph (change 2): absent on every pre-change-2 world,
+        // exactly like `scriptTimers` was absent on every pre-1c world.
+        aiJournal = try c.decodeIfPresent(String.self, forKey: .aiJournal) ?? ""
     }
 
     /// Decode-time clamp for `nextEntityId` (design.md Decision 3, Security
@@ -327,6 +335,7 @@ public struct WorldRecord: Codable {
         try c.encode(scriptsEnabled, forKey: .scriptsEnabled)
         if !scriptRegistry.isEmpty { try c.encode(scriptRegistry, forKey: .scriptRegistry) }
         if !scriptTimers.isEmpty { try c.encode(scriptTimers, forKey: .scriptTimers) }
+        if !aiJournal.isEmpty { try c.encode(aiJournal, forKey: .aiJournal) }
         try c.encode(mapCenterX, forKey: .mapCenterX)
         try c.encode(mapCenterZ, forKey: .mapCenterZ)
     }
