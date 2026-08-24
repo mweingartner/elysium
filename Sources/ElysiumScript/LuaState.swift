@@ -203,6 +203,11 @@ public final class LuaState {
         mathTable.log = math.log
         mathTable.atan2 = math.atan2
         mathTable.pow = math.pow
+        mathTable.tan = math.tan
+        mathTable.asin = math.asin
+        mathTable.acos = math.acos
+        mathTable.log2 = math.log2
+        mathTable.log10 = math.log10
 
         var config = elysium_config()
         config.math = mathTable

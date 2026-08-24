@@ -267,11 +267,16 @@ it instead of the pointer) makes `pairs`/`next` order a pure function of operati
 every key type; `l_strcmp` is `strcmp` rather than locale-dependent `strcoll`; the decimal point is
 pinned to `'.'`; `#pragma STDC FP_CONTRACT OFF` removes FMA-driven divergence; `luaL_tolstring`
 never prints an address (`%p` is rejected by the `format` wrapper's conversion-grammar parser and
-`lua_topointer` is unreachable from Swift); `math.sin`/`cos`/`atan`/`exp`/`log` and the `^` operator
-route through the state's `ScriptMath` table, which `Sources/ElysiumCore/Scripting/
-ScriptHostBindings.swift` wires to `DetMath`'s `detSin`/`detCos`/`detAtan2`/`detExp`/`detLog`/
-`detPow` (the `sin`/`cos` wrappers pre-reduce with `fmod(x, 2π)` so no script input can reach
-`DetMath`'s `remPio2` trap range); `math.random`/`randomseed` draw from a per-environment
+`lua_topointer` is unreachable from Swift); `math.sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`exp`/
+`log`/`log2`/`log10` and the `^` operator route through the state's `ScriptMath` table, which
+`Sources/ElysiumCore/Scripting/ScriptHostBindings.swift` wires to `DetMath`'s `detSin`/`detCos`/
+`detAtan2`/`detExp`/`detLog`/`detPow`/`detTan`/`detAsin`/`detAcos`/`detLog2`/`detLog10` (the
+`sin`/`cos` wrappers pre-reduce with `fmod(x, 2π)` so no script input can reach `DetMath`'s
+`remPio2` trap range; `detTan`'s own Payne-Hanek reduction and the domain-restricted
+`detAsin`/`detAcos`/`detLog2`/`detLog10` need no such guard — `scripting-ui-and-replication`,
+change 3, restored `tan`/`asin`/`acos` as shim wrappers and added `log2`/`log10` as new,
+additive `math` entries; `math.log(x[, b])` itself is unchanged, still `log(x)/log(b)` for
+every base); `math.random`/`randomseed` draw from a per-environment
 `ScriptRandomStream` (`RandomX`), never libm or the wall clock; and state creation refuses unless
 the process locale probes as `C` (decimal point, `strcoll`/`strcmp` agreement, and an `LC_CTYPE`
 behavioral check) — there is no `setlocale` call anywhere under `Sources/`. The one
@@ -524,6 +529,89 @@ closure repetition isn't implemented; the world-wide half of the `attach`/`detac
 source fresh on every delivery rather than caching a `ScriptFunction` (fine at v1 scale, worth
 revisiting for high-frequency events later).
 
+## In-game script editor, Inspector, and F3 summary
+
+scripting-ui-and-replication (change 3), design.md §12/§16 row 3. `Sources/Elysium/ScreensM.swift`'s
+`ScriptEditorScreen` (paste-only since script-runtime, change 1c) grows into a full multi-line editor.
+Source is `[String]` — one entry per line, never containing `\n` — because the hardened
+`ElysiumTextInput` buffers this screen's Name/Event `TextField`s use reject `\n` outright
+(`ElysiumTextInput.swift:113-150`, deliberately untouched); typing, Enter/Backspace, the four arrow
+keys, and paste all operate directly on that line array through the screen's own "implicit text
+owner" seam (`ownsTextInput`/`textOwnerDescriptorID`/`activateImplicitTextDescriptor`/
+`clearTextFocus`, plus a screen-owned `onMouseDown` override for click-to-position) — the same pattern
+`SignScreen` already established for editing without `ElysiumBoundedTextBuffer`. Every inserted/pasted
+character still goes through `ScriptTextHygiene` (`ScriptingDisplayText.isValidScriptSource`, which
+accepts `\n`/`\t`) and the whole source stays under the 16 KiB cap. `Sources/Elysium/
+LuaSyntaxColoring.swift` is a small, deterministic, UI-side-only Lua lexer (keywords/strings/
+comments/numbers, `--[[ ]]`/`[=[ ]=]` long brackets threaded across lines via `LuaSyntaxLineState`) —
+not a reuse of `ElysiumScript`'s internal `LuaTokenizer` (that type never represents comments or
+whitespace, correct for a linter, wrong for a "paint every character" highlighter, and `Elysium`
+does not depend on `ElysiumScript` regardless). The error line comes from `ScriptRuntime
+.validateSourceForEditor`, a new `ElysiumCore`-native mirror of `ElysiumScript.ScriptValidation`
+(`ScriptValidationResult`) — the same anticorruption-translation pattern `ScriptingDisplayText
+.isValidScriptSource` already established for `ScriptTextHygiene.isClean` — run before both Save and
+Run, so a compile/validate fault highlights its 1-based line and neither attaches nor executes a bad
+script. Save attaches through the exact `ScriptStore.attach` executor `/script attach` uses (module or
+handler mode, the latter via an Event `TextField` and `EventKind.parse`); Run calls the exact
+`ScriptRuntime.runEphemeral` `/script run` uses (never persists, §9.3).
+
+`Sources/Elysium/InspectorScreen.swift` is the Object Inspector (design.md §12: "modeled on
+`TemplateBrowserScreen`") — a read-only object browser (attributes/scripts/subscriptions of one
+target, cycling the same `looking`/`self`/`player`/`world` aliases `/inspect` uses) with jump-to-editor
+for an attached script. Its data provider, `inspectorRows(target:game:)`, is a free function
+deliberately kept pure/testable: on a host it reads `AttributeStore.list`/`ScriptStore.list`/
+`EventBus.listSubscriptions` directly; on a LAN client it reads only the replicated attribute mirror
+(below) and reports the Scripts/Subscriptions sections as not yet available to guests (that gap is
+`lan-client-parity`, change 4) rather than showing stale or fabricated data. `/inspector` (distinct
+from the pre-existing, LAN-gated `/inspect` text command) opens it for both host and guest worlds —
+opening the screen is not itself a mutation, and the screen decides what it can show.
+
+The F3 debug overlay (`Sources/Elysium/HudM.swift`) gains one line — script counts, event/tick stats,
+budget trips — sourced from `ScriptRuntime.summary` (`ScriptRuntimeSummary`: live scripts, suspended
+coroutines, durable timers — a cheap read over already-in-memory collections, no scan) plus
+`EventBus.pendingCount` and a `.scriptFaulted` count over `EventBus.recentEvents()`; the line is
+omitted entirely (not zeroed) when no script runtime exists this session, keeping §15's zero-cost
+invariant.
+
+## LAN `objectAttributes` replication (guest attribute mirror)
+
+scripting-ui-and-replication (change 3), design.md §11. Additive: `LANReplicationBatch.objectAttributes:
+[LANObjectAttributeSnapshot]` (`ref`, `revision`, `attrsJSON`), capped at 64 objects/batch. Unlike the
+`LANAttrValue` the design sketch named, `attrsJSON` reuses `AttrValueCodec`'s existing canonical,
+hostile-bytes-safe JSON text and caps (`ScriptingStorageCaps.defaults.value`: depth <= 4, <= 64 keys,
+strings <= 4 KiB) — the exact codec `AttributeStore` persistence already uses — rather than a second,
+parallel bounded value type with its own bug surface; a whole snapshot's encoded text is additionally
+capped at 4 KiB. `makeLANObjectAttributeSnapshots` (`LANReplication.swift`) mirrors `ScriptRuntime`'s
+own (private) `forEachScriptedObject` traversal — world, the three dimension bags, live entities and
+loaded chunks' objects in the current dimension — reading `AttributeStore.list` instead of
+`ScriptStore.list` (the two enumerations visit the same `ObjectRecord`s, §6.0's unified model), sorted
+by `ref.canonical` for determinism; beyond the 64-object cap, objects sorting after it wait for a later
+batch (no dirty-tracking/round-robin fill — a scoped-down "sorted, bounded, deterministic" replacement
+for entity replication's fuller scheme). The host attaches it to the existing ~1s world-state
+replication cadence (`LANHostReplicationContent.includeObjectAttributes`) rather than adding a new
+interval knob.
+
+On the client, `LANMultiplayerClientSession.objectAttributes` (keyed by `ref.canonical`) is a
+display-only mirror — never `AttributeStore`, never re-broadcast. `apply(_:)` drops an unparseable ref
+or JSON that fails `AttrValueCodec.decode` under the same caps (hostile bytes, always untrusted from a
+guest's perspective too), and rejects a snapshot whose `revision` regresses what is already mirrored
+(so a stale replay, or a batch from a host that has since restarted onto an older save, can never win).
+It also reconciles a gap 1a's `applyLANChunkSectionSnapshot` left open: that function bulk-overwrites
+every cell in a replicated section directly, without running the single-block "does this replace clear
+the object's entries" identity check §17 Decision 5 relies on elsewhere — so after applying
+`objectAttributes` for a batch, `apply(_:)` purges any mirrored `.block` entry whose position falls
+inside a chunk section replaced by that same batch and was not itself refreshed by it.
+
+`LANMultiplayerManager.mirroredAttributes(for:)` (`LANTransport.swift`) is the one read accessor onto
+this mirror — the Inspector screen's and `inspectorRows`'s guest-side data source, with no write
+counterpart. `Tests/ElysiumResourcePackTests/LANGuestCommandGateTests
+.testInspectorScreenReadsReplicatedAttributesOnAGuestWhileWritesStayRefused` proves a guest can read a
+replicated attribute end to end while every mutation path (`/attr set` and the rest of that file's
+suite) stays refused at the real `CommandsM.runCommand` call site — attributes are readable, nothing
+about guest authority changed. A live two-process (or two-Mac) soak of this path is documented as
+pending in the change-3 report; `Tests/ElysiumCoreTests/LANReplicationTests.swift`'s
+`LANObjectAttributeReplicationTests` cover the codec/apply/reconciliation logic headlessly.
+
 ## AI object graph tool loop
 
 design.md §9. `/ai` (`Sources/Elysium/CommandsM.swift` → `OllamaAgentService.run`) now classifies
@@ -655,9 +743,9 @@ supports native Ollama tool calling; a tool-less model's plain-text tool call is
 
 ## The test harness (elysmoke)
 
-488 checks across 19 suites, run with `elysium test`:
+491 checks across 19 suites, run with `elysium test`:
 
-random/noise/math → block & item registries (counts + id spot checks) → biomes (all 63 defs + 2,000 biome selections) → terrain (full pipeline hashes on 2 seeds) → features (whole-chunk generation across all three dimensions) → atlas (pixel-identical tiles) → mesher (vertex/index hashes) → world sim (light, fluids over hundreds of ticks, RNG lockstep) → items (recipes/enchants/potions/loot rolls) → fdlibm (911 sin/cos/atan2 probes, 927 exp/log probes, 653 pow probes) → script runtime (embedded Lua sandbox/determinism corpus: sandbox surface, iteration order, ordinal keys, math/pow/random, strings/format/errors, address-free output, instruction/allocation budget trips, two-state reproducibility — `openspec/changes/embed-lua-runtime/design.md` Decision 13) → event bus (delivery order, coalescing, queue/cascade/handler-budget cap trips, persisted-subscription round trip, the pre-filtered `block.changed` funnel — design.md §7) → scripting (the four Appendix A scripts run headlessly end to end — a handler-mode beacon lamp, its module-mode equivalent, an `ai.await` gatekeeper against a stub responder, world-wide log counting via `subscribe{kind=}`, and scripts attaching scripts to nearby blocks — plus the kill switch, the trust gate, and fault isolation, hashed for two-process determinism — design.md §16 row 1c) → entities (55-mob zoo × 200 ticks, combat, scripted player physics, trades, pathfinding, spawning) → systems (crafting probes, BE timelines, a full redstone contraption, explosion crater, interactions, portals) → and a final suite that *independently derives* vanilla physics constants instead of trusting goldens.
+random/noise/math → block & item registries (counts + id spot checks) → biomes (all 63 defs + 2,000 biome selections) → terrain (full pipeline hashes on 2 seeds) → features (whole-chunk generation across all three dimensions) → atlas (pixel-identical tiles) → mesher (vertex/index hashes) → world sim (light, fluids over hundreds of ticks, RNG lockstep) → items (recipes/enchants/potions/loot rolls) → fdlibm (911 sin/cos/atan2 probes, 927 exp/log probes, 653 pow probes, 973 tan probes, 921 asin/acos probes, 840 log2/log10 probes) → script runtime (embedded Lua sandbox/determinism corpus: sandbox surface, iteration order, ordinal keys, math/pow/random, strings/format/errors, address-free output, instruction/allocation budget trips, two-state reproducibility — `openspec/changes/embed-lua-runtime/design.md` Decision 13) → event bus (delivery order, coalescing, queue/cascade/handler-budget cap trips, persisted-subscription round trip, the pre-filtered `block.changed` funnel — design.md §7) → scripting (the four Appendix A scripts run headlessly end to end — a handler-mode beacon lamp, its module-mode equivalent, an `ai.await` gatekeeper against a stub responder, world-wide log counting via `subscribe{kind=}`, and scripts attaching scripts to nearby blocks — plus the kill switch, the trust gate, and fault isolation, hashed for two-process determinism — design.md §16 row 1c) → entities (55-mob zoo × 200 ticks, combat, scripted player physics, trades, pathfinding, spawning) → systems (crafting probes, BE timelines, a full redstone contraption, explosion crater, interactions, portals) → and a final suite that *independently derives* vanilla physics constants instead of trusting goldens.
 
 Golden discipline: reference goldens are frozen (they have no generator); behavior-change goldens (`ELYSIUM_REGOLD=1`) are regenerated only deliberately, with each diff justified. Content added after the baseline was frozen (e.g. appended vines, the Flying Wand, and copper tools) is excluded from reference hashes via fixed prefix ranges, never by regenerating reference baselines.
 

@@ -1250,6 +1250,77 @@ if let g2 = loadJSON("fmath-explog-goldens.json") {
     check("fmath-explog-goldens.json loadable", false, "not found")
 }
 
+// scripting-ui-and-replication (change 3), design.md §16 row 3 / Decision 10: tan/asin/
+// acos/log2/log10 probes from the independent fdlibm reference (scripts/fdlibm-reference/
+// gen-trig-goldens.c, goldens/fmath-trig-goldens.json) — same hex-word format as the two
+// fdlibm sections above, "NaN compared as NaN". `de4e78c` landed the goldens and the
+// generator; this section is the first thing that actually checks `detTan`/`detAsin`/
+// `detAcos`/`detLog2`/`detLog10` against them.
+if let g3 = loadJSON("fmath-trig-goldens.json") {
+    func hexD(_ x: Double) -> String {
+        String(x.bitPattern >> 32, radix: 16) + "-" + String(x.bitPattern & 0xffff_ffff, radix: 16)
+    }
+    func parseHex(_ s: Substring) -> Double {
+        let parts = s.split(separator: "-")
+        let h = UInt64(parts[0], radix: 16)!
+        let l = UInt64(parts[1], radix: 16)!
+        return Double(bitPattern: (h << 32) | l)
+    }
+    func bitsMatch(_ a: Double, _ b: Double) -> Bool {
+        (a.isNaN && b.isNaN) || a.bitPattern == b.bitPattern
+    }
+
+    let tanProbes = g3["tan"] as! [String]
+    var tanBad = 0
+    for p in tanProbes {
+        let io = p.split(separator: ":")
+        let x = parseHex(io[0])
+        let want = parseHex(io[1])
+        let got = detTan(x)
+        if bitsMatch(got, want) { /* ok */ } else {
+            tanBad += 1
+            if tanBad <= 3 { print("    tan(\(x)): got \(hexD(got)) want \(io[1])") }
+        }
+    }
+    check("\(tanProbes.count) fdlibm tan probes bit-identical", tanBad == 0, "\(tanBad) mismatches")
+
+    let asinAcosProbes = g3["asinAcos"] as! [String]
+    var asinAcosBad = 0
+    for p in asinAcosProbes {
+        let io = p.split(separator: ":")
+        let x = parseHex(io[0])
+        let outs = io[1].split(separator: ",")
+        let wantAsin = parseHex(outs[0]), wantAcos = parseHex(outs[1])
+        let gotAsin = detAsin(x), gotAcos = detAcos(x)
+        if bitsMatch(gotAsin, wantAsin) && bitsMatch(gotAcos, wantAcos) { /* ok */ } else {
+            asinAcosBad += 1
+            if asinAcosBad <= 3 {
+                print("    asin/acos(\(x)): got \(hexD(gotAsin)),\(hexD(gotAcos)) want \(outs)")
+            }
+        }
+    }
+    check("\(asinAcosProbes.count) fdlibm asin/acos probes bit-identical", asinAcosBad == 0, "\(asinAcosBad) mismatches")
+
+    let log2Log10Probes = g3["log2Log10"] as! [String]
+    var log2Log10Bad = 0
+    for p in log2Log10Probes {
+        let io = p.split(separator: ":")
+        let x = parseHex(io[0])
+        let outs = io[1].split(separator: ",")
+        let wantLog2 = parseHex(outs[0]), wantLog10 = parseHex(outs[1])
+        let gotLog2 = detLog2(x), gotLog10 = detLog10(x)
+        if bitsMatch(gotLog2, wantLog2) && bitsMatch(gotLog10, wantLog10) { /* ok */ } else {
+            log2Log10Bad += 1
+            if log2Log10Bad <= 3 {
+                print("    log2/log10(\(x)): got \(hexD(gotLog2)),\(hexD(gotLog10)) want \(outs)")
+            }
+        }
+    }
+    check("\(log2Log10Probes.count) fdlibm log2/log10 probes bit-identical", log2Log10Bad == 0, "\(log2Log10Bad) mismatches")
+} else {
+    check("fmath-trig-goldens.json loadable", false, "not found")
+}
+
 // task 5.1/5.2: the script-runtime section (design.md Decision 13) runs
 // immediately after the fdlibm section.
 runScriptRuntimeSmoke()

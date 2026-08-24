@@ -5,6 +5,28 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Added the **full in-game script editor, Object Inspector, F3 script summary, LAN attribute
+  replication, debug-control `script.*` ops, and the remaining fdlibm math ports**:
+  `/script edit` now opens a real multi-line editor (type or paste, Enter/Backspace/arrow keys,
+  Lua syntax colouring, a module/handler mode toggle with an Event field, up to 16 KiB) instead of
+  the previous paste-only field; Save and Run both validate first and highlight the offending
+  line on a compile/syntax error rather than silently failing. New `/inspector` command opens the
+  Object Inspector — attributes, attached scripts, and event subscriptions of whatever you're
+  looking at (or `self`/`player`/`world`), with jump-to-editor for a selected script; unlike the
+  pre-existing `/inspect` text command it is not refused on a joined LAN world, since it only
+  reads. F3's debug overlay gains one line (live script count, waiting/timers, pending/faulted
+  events) whenever a world has any scripts. LAN hosts now replicate script- and AI-set custom
+  attributes to connected guests (`LANReplicationBatch.objectAttributes`, capped at 64 objects and
+  4 KiB per object, on the existing ~1s world-state cadence) into a read-only guest-side mirror —
+  visible through `/inspector`/F3, never through `AttributeStore`, and every mutation path stays
+  refused exactly as before. `math.tan`/`asin`/`acos` (removed since the scripting runtime first
+  landed) are restored, and `math.log2`/`math.log10` are new — all five now route through the
+  fdlibm ports already vendored for `math.sin`/`cos`/`exp`/`log`; `math.log(x, b)` itself is
+  unchanged for every base. Debug-control (opt-in `elydebug`/`ElysiumDebug.app` builds only)
+  gains `script.list|show|attach|run|journal` ops, routed through the exact same `/script`
+  executors. `elysmoke` gains three new fdlibm probe checks (tan/asin+acos/log2+log10 against an
+  independently rebuilt reference), 491 checks total, up from 488.
+
 - Added the **AI object graph tool loop**: `/ai` now recognizes a scripting-flavored request (attach
   a script, set an attribute, subscribe to an event, and the like) and hands it to a bounded tool
   loop instead of the single-action path — up to 8 turns, up to 4 mutations per request, with 10

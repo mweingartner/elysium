@@ -449,8 +449,9 @@ final class BoundaryTests: XCTestCase {
 
     func testStateConstructionFailureIsReported() throws {
         // design.md Condition 27 / F8: elysium_newstate refuses (NULL + errcode)
-        // rather than aborting when a precondition is unmet. `ScriptMath`'s six
-        // fields are non-optional `@convention(c)` closures, so "math incomplete"
+        // rather than aborting when a precondition is unmet. `ScriptMath`'s eleven
+        // fields (sin/cos/exp/log/atan2/pow plus change 3's tan/asin/acos/log2/log10)
+        // are non-optional `@convention(c)` closures, so "math incomplete"
         // is structurally unrepresentable from Swift — the type system, not a
         // runtime check, is the enforcement for that half (design.md Decision 11:
         // "there is no default and no libm fallback anywhere in the runtime"). The

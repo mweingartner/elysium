@@ -577,6 +577,40 @@ static int elysium_math_log (lua_State *L) {
   return 1;
 }
 
+/* scripting-ui-and-replication (change 3): tan/asin/acos restore the three math
+** functions change 0 removed (design.md §8.3 "Removed: tan asin acos (v1)"),
+** wrapped exactly like sin/cos/exp/log above so they route through the state's
+** ScriptMath table (DetMath's fdlibm ports) instead of libm. log2/log10 are new,
+** additive entries — math.log(x, b) above is untouched (design.md Appendix E
+** point 4: "log(x, b) = log(x)/log(b) for every base", pinned by
+** MathTests.testLogBaseRatio).
+*/
+static int elysium_math_tan (lua_State *L) {
+  elysium_state *st = elysium_state_of(L);
+  lua_pushnumber(L, (lua_Number)st->math.tan((double)luaL_checknumber(L, 1)));
+  return 1;
+}
+static int elysium_math_asin (lua_State *L) {
+  elysium_state *st = elysium_state_of(L);
+  lua_pushnumber(L, (lua_Number)st->math.asin((double)luaL_checknumber(L, 1)));
+  return 1;
+}
+static int elysium_math_acos (lua_State *L) {
+  elysium_state *st = elysium_state_of(L);
+  lua_pushnumber(L, (lua_Number)st->math.acos((double)luaL_checknumber(L, 1)));
+  return 1;
+}
+static int elysium_math_log2 (lua_State *L) {
+  elysium_state *st = elysium_state_of(L);
+  lua_pushnumber(L, (lua_Number)st->math.log2((double)luaL_checknumber(L, 1)));
+  return 1;
+}
+static int elysium_math_log10 (lua_State *L) {
+  elysium_state *st = elysium_state_of(L);
+  lua_pushnumber(L, (lua_Number)st->math.log10((double)luaL_checknumber(L, 1)));
+  return 1;
+}
+
 /* ==========================================================================
 ** Deep copy / frozen proxy machinery for per-environment tables (D8).
 ** ======================================================================= */
@@ -715,9 +749,6 @@ int elysium_openlibs (lua_State *L) {
   elysium_remove_field(L, gidx, "_G");
   elysium_remove_field(L, gidx, "print");       /* installed per-environment */
   elysium_remove_field(L, sidx, "dump");
-  elysium_remove_field(L, midx, "tan");
-  elysium_remove_field(L, midx, "asin");
-  elysium_remove_field(L, midx, "acos");
   elysium_remove_field(L, midx, "random");      /* installed per-environment */
   elysium_remove_field(L, midx, "randomseed");  /* installed per-environment */
 
@@ -757,6 +788,17 @@ int elysium_openlibs (lua_State *L) {
   elysium_wrap_field(L, midx, "atan", elysium_math_atan);
   elysium_wrap_field(L, midx, "exp", elysium_math_exp);
   elysium_wrap_field(L, midx, "log", elysium_math_log);
+  elysium_wrap_field(L, midx, "tan", elysium_math_tan);
+  elysium_wrap_field(L, midx, "asin", elysium_math_asin);
+  elysium_wrap_field(L, midx, "acos", elysium_math_acos);
+  /* log2/log10 have no native lmathlib entry to wrap (D8's allowlist table never
+  ** listed them) — added directly, matching the "add a brand-new field" idiom
+  ** elysium_make_environment already uses for random/randomseed/print below.
+  */
+  lua_pushcfunction(L, elysium_math_log2);
+  lua_setfield(L, midx, "log2");
+  lua_pushcfunction(L, elysium_math_log10);
+  lua_setfield(L, midx, "log10");
 
   elysium_wrap_field(L, uidx, "codepoint", elysium_utf8_checked);
   elysium_wrap_field(L, uidx, "len", elysium_utf8_checked);

@@ -586,16 +586,41 @@ subcommand outright.
   one-off script can't be undone (whatever it already did in the world stays done); undo-ai still logs
   that it tried, so the journal stays a complete record either way.
 - Chat command source is one line — for anything longer, use `/script edit [target] [name]` to open
-  the in-game script editor. It's paste-only in this build: write your script in a text editor
-  elsewhere, copy it, open the editor, and paste (⌘V) to load the whole thing (up to 16 KiB) in one
-  step. Give it a name, then Save (attaches a module-mode script) or Run (a one-off, nothing saved) —
-  both mirror the chat commands above. Multi-line typing, syntax colouring, and attaching a
-  handler-mode script from the editor arrive in a later build.
+  the in-game script editor: a full multi-line editor now. Type directly (Enter for a new line,
+  Backspace, the four arrow keys) or paste (⌘V) a whole script at once — either way, up to 16 KiB,
+  with Lua syntax colouring (keywords, strings, comments, numbers) as you go. Give it a name, choose
+  **module** or **handler** mode with the toggle in the corner (handler mode adds an Event field —
+  the same trigger `/script attach ... handler <event> ...` takes), then **Save** (attaches it) or
+  **Run** (a one-off, nothing saved) — both mirror the chat commands above and run your script through
+  the exact same validator: a compile or syntax error highlights the offending line right in the
+  editor and refuses to save or run until it's fixed.
+- `/inspector` opens the **Object Inspector** — a read-only window onto whatever you're looking at
+  (or `self`/`player`/`world`; click **Retarget** to cycle) showing its attributes, its attached
+  scripts, and its event subscriptions. Select a script row and click **Edit Script** to jump straight
+  into the editor for it. On a joined LAN world, the Inspector still opens — the attributes section
+  shows whatever the host has replicated to you so far, marked "replicated, read-only"; scripts and
+  subscriptions aren't visible to guests yet (a later build adds that). `/inspector` itself is not
+  refused for guests — reading is fine; every *write* (`/attr set`, `/script attach`, and the rest)
+  still is.
+- Press **F3** for the debug overlay; while a world has any scripts, one extra line reports how many
+  are currently live, how many are waiting on a timer or `wait()`, how many durable timers exist, and
+  how many events are pending/faulted this window — a quick health check without opening `/script
+  list` on every object.
 
 A script's own Lua reference — the object model, event names, attribute access, timers, and
 `ai.ask`/`ai.await` — lives with the scripting design document, not here; this section only covers
 the chat/editor surface for attaching and managing scripts you (or another script, or the AI) already
 have the source for.
+
+### Attribute replication on a joined LAN world
+
+The host's script-set and AI-set attributes on any object now reach connected guests automatically —
+no command needed. What a guest sees is always a read-only snapshot (never more than a couple of
+seconds behind the host, and never something the guest can edit or that any script running on the
+guest's own copy of the world could see, since guests never run scripts at all): open `/inspector` on
+the object in question, or `F3`, to check what's arrived so far. This is display-only — nothing about
+who's authoritative on a LAN world has changed; the host still runs every script and owns every
+attribute write.
 
 ## Options, accessibility, and local AI
 

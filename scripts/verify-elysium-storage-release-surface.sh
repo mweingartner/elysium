@@ -46,6 +46,16 @@ artifact_sha256() {
 # removed so the reviewed gate is independent of the physical worktree path.
 # SwiftPM's package identity remains intentionally significant because it is an
 # ABI input for package-access declarations.
+#
+# scripting-ui-and-replication (change 3): EXPECTED_CORE_OBJECT_SHA256/
+# EXPECTED_ELYSIUM_PRODUCT_SHA256/EXPECTED_SMOKE_PRODUCT_SHA256 renewed — ElysiumCore.o's
+# hash necessarily moves whenever any source file in that target changes (this change added
+# real code to Sources/ElysiumCore/Scripting and Sources/ElysiumCore/Net), and the Elysium/
+# elysmoke product hashes follow transitively since both link ElysiumCore.o. The five reviewed
+# *source* hashes above/below (StorageEngine.swift, Saves.swift, GameCore.swift, Player.swift,
+# ElysiumTextInput.swift) and the ElysiumStorage.o/ElysiumTextInput.o object hashes are
+# untouched and still byte-identical — this change never wrote to any of those files or
+# targets, only to Sources/ElysiumCore/Scripting, Sources/ElysiumCore/Net, and Sources/Elysium.
 EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
 EXPECTED_STORAGE_API_SHA256='ea1dd595ee28762bc2ff7c2e080c2fc4cee0eee008a30e52e82747029206f46c'
 EXPECTED_STORAGE_OBJECT_SHA256='33fb1578d8262a4044ba42ccb1fc7b67e8dfac2589133ab2ff415b5a5d71326b'
@@ -55,9 +65,9 @@ EXPECTED_PLAYER_SOURCE_SHA256='f0dab28819ac01b05993b8ac015e383a7be7f654ecb862d72
 EXPECTED_CORE_CAPABILITY_SHA256='59fc9a70fd5f214b74d63ad55a4b4b90ae1c1bd5248ba64830c4f99dff8f818a'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='ca500f11c671c45b6a0648962bed37881a9adff2a6491632e7d655a50ed80efc'
-EXPECTED_CORE_OBJECT_SHA256='60738af52ac450aad7a14a0cfbcb52da4543adb6e40157855662a59db218e834'
-EXPECTED_ELYSIUM_PRODUCT_SHA256='070dc96acb18daab891b9251cbcefe7d52ae16cb0d79c32955e3f1721939a31f'
-EXPECTED_SMOKE_PRODUCT_SHA256='7fd4d9fc04f515bdda04be4b09b12c43293f31c45e1f53067f598d4884aeb958'
+EXPECTED_CORE_OBJECT_SHA256='64a011787e037d47c266d9440834aeecc6f0d0bcd209c909f748a96c524867cb'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='f9e218e3b024b8b4a4601e1cf55d6b22441d6f12c9e17d7887701b229362f85f'
+EXPECTED_SMOKE_PRODUCT_SHA256='b845ec0767ef103f0071bf30beb7bd68a4a8d7009509748f58ad2bb51776a3d9'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

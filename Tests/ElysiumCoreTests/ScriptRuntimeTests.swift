@@ -294,4 +294,39 @@ final class ScriptRuntimeTests: XCTestCase {
         let result = store.attach(.world, name: "Bad Name!", source: "", mode: .module, triggers: [], by: .player, tick: 0)
         guard case .failure(.invalidName) = result else { return XCTFail("expected .invalidName, got \(result)") }
     }
+
+    // MARK: - `summary` (F3 line, scripting-ui-and-replication change 3)
+
+    /// design.md §12's "F3 summary" reads `ScriptRuntime.summary` fresh every frame — this pins
+    /// it as a pure function of session state (attach two live module scripts, a durable timer,
+    /// and a suspended coroutine; the counts must match exactly, and reading it twice with no
+    /// state change in between must produce byte-identical results).
+    func testSummaryReflectsLiveScriptsTimersAndSuspendedCoroutinesDeterministically() throws {
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "script-summary")
+        game.createWorld(name: "ScriptSummary", seedText: "5", mode: GameMode.survival, difficulty: 2)
+        let store = ScriptStore(graph: ObjectGraph(host: game))
+
+        guard case .success = store.attach(
+            .world, name: "counter", source: "world.attrs.n = 1", mode: .module, triggers: [], by: .player, tick: 0
+        ) else { return XCTFail("attach failed") }
+        // A *named* timer (design.md §8.6: "after(n, 'handler'), every(n, 'handler') are
+        // persisted in the registry... durable"), as opposed to a closure timer (live-only,
+        // tracked as a suspended coroutine instead — this distinction is exactly what
+        // `durableTimers` vs `suspendedCoroutines` must tell apart.
+        guard case .success = store.attach(
+            .dimension(.overworld), name: "waiter", source: "every(1000, 'tick')",
+            mode: .module, triggers: [], by: .player, tick: 0
+        ) else { return XCTFail("attach failed") }
+        game.scripting.anyScriptsAttached = true
+        game.runEventBusPhase()
+
+        guard let runtime = game.scripting.scriptRuntime else { return XCTFail("no script runtime this session") }
+        let first = runtime.summary
+        XCTAssertEqual(first.liveScripts, 2)
+        XCTAssertEqual(first.durableTimers, 1, "the named `every(...)` timer must be registered as durable")
+        XCTAssertEqual(first.suspendedCoroutines, 0)
+
+        let second = runtime.summary
+        XCTAssertEqual(first, second, "reading the summary twice with no intervening state change must be byte-identical")
+    }
 }

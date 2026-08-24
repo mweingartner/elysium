@@ -169,6 +169,50 @@ final class LANGuestCommandGateTests: XCTestCase {
         XCTAssertTrue(chatLog.first?.text.contains("LAN host only") == true)
     }
 
+    /// scripting-ui-and-replication (change 3), design.md §11/§12: `/inspector` (distinct from
+    /// `/inspect`) opens the Object Inspector screen for a guest too, and that screen's
+    /// attribute section reads only the replicated mirror
+    /// (`LANMultiplayerManager.shared.mirroredAttributes(for:)`) — never `AttributeStore`. This
+    /// proves a guest CAN read a replicated attribute end to end (host mirror populated ->
+    /// `inspectorRows` surfaces it) while every mutation path stays refused exactly as the rest
+    /// of this file proves: `/attr set` (and every other scripting command) still hits the same
+    /// real `CommandsM.runCommand` refusal, and there is no write method on the mirror at all —
+    /// `LANMultiplayerClientSession.objectAttributes` is `private(set)`, and
+    /// `LANMultiplayerManager.mirroredAttributes(for:)` is a read accessor with no counterpart.
+    func testInspectorScreenReadsReplicatedAttributesOnAGuestWhileWritesStayRefused() throws {
+        let game = try makeLANClientGame()
+        XCTAssertTrue(game.isLANClientWorld)
+
+        // Simulate what a real host->guest replication batch delivers: populate the guest's own
+        // mirror the same way `LANMultiplayerClientSession.apply(_:)` does (the actual transport
+        // plumbing — `LANMultiplayerManager`'s socket/queue machinery — is exercised by the LAN
+        // test lab probe, not by this headless unit test).
+        let ref = ObjectRef.player
+        let manager = LANMultiplayerManager.shared
+        manager.attachGame(game)
+        _ = manager.applyReplicationBatchForTesting(LANReplicationBatch(
+            tick: 1, fullSnapshot: false,
+            objectAttributes: [LANObjectAttributeSnapshot(
+                ref: ref.canonical, revision: 1,
+                attrsJSON: AttrValueCodec.encode(.map(["mood": .string("curious")]))
+            )]
+        ))
+
+        let mirrored = manager.mirroredAttributes(for: ref)
+        XCTAssertEqual(mirrored?["mood"], .string("curious"), "the mirror itself must hold what was replicated")
+
+        let rows = inspectorRows(target: ref, game: game)
+        XCTAssertTrue(rows.contains { $0.contains("mood = \"curious\"") && $0.contains("replicated, read-only") },
+                      "Inspector's attribute section must surface the mirrored value as read-only; got: \(rows)")
+
+        // The write side of the exact same feature stays refused at the real call site, same as
+        // every other command this file proves.
+        chatLog.removeAll()
+        runCommand(game, "/attr set self mood happy")
+        XCTAssertEqual(chatLog.count, 1)
+        XCTAssertTrue(chatLog.first?.text.contains("LAN host only") == true)
+    }
+
     /// A host (non-LAN-client) world is unaffected by the gate — `/attr`
     /// reaches `ScriptingCommands.run` and produces its own (non-refusal)
     /// output.

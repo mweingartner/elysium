@@ -25,6 +25,17 @@ public struct ScriptMath: Sendable {
     /// Backs both `^`/`elysium_numpow` (via `luai_numpow`'s `b == 2` fast path staying
     /// in C) and `math.pow`... (v1 does not expose `math.pow`; `^` only).
     public var pow: @convention(c) (Double, Double) -> Double
+    /// scripting-ui-and-replication (change 3), design.md §16 row 3 / Decision 10:
+    /// `tan`/`asin`/`acos` restore the three functions change 0 removed (§8.3 "Removed:
+    /// tan asin acos (v1)") — `elysium_sandbox.c` now wraps the native lmathlib entries
+    /// with these instead of nilling them out. `log2`/`log10` are new, additive
+    /// `math.log2`/`math.log10` entries; `math.log(x, b)` itself is untouched (Appendix E
+    /// point 4 keeps `log(x)/log(b)` for every base, pinned by `MathTests.testLogBaseRatio`).
+    public var tan: @convention(c) (Double) -> Double
+    public var asin: @convention(c) (Double) -> Double
+    public var acos: @convention(c) (Double) -> Double
+    public var log2: @convention(c) (Double) -> Double
+    public var log10: @convention(c) (Double) -> Double
 
     public init(
         sin: @escaping @convention(c) (Double) -> Double,
@@ -32,7 +43,12 @@ public struct ScriptMath: Sendable {
         exp: @escaping @convention(c) (Double) -> Double,
         log: @escaping @convention(c) (Double) -> Double,
         atan2: @escaping @convention(c) (Double, Double) -> Double,
-        pow: @escaping @convention(c) (Double, Double) -> Double
+        pow: @escaping @convention(c) (Double, Double) -> Double,
+        tan: @escaping @convention(c) (Double) -> Double,
+        asin: @escaping @convention(c) (Double) -> Double,
+        acos: @escaping @convention(c) (Double) -> Double,
+        log2: @escaping @convention(c) (Double) -> Double,
+        log10: @escaping @convention(c) (Double) -> Double
     ) {
         self.sin = sin
         self.cos = cos
@@ -40,5 +56,10 @@ public struct ScriptMath: Sendable {
         self.log = log
         self.atan2 = atan2
         self.pow = pow
+        self.tan = tan
+        self.asin = asin
+        self.acos = acos
+        self.log2 = log2
+        self.log10 = log10
     }
 }

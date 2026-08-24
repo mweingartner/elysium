@@ -1281,6 +1281,19 @@ final class HUD {
             "E: \(world.entities.count)  Sections: \(debugInfo["sections"] ?? "?")  Draw: \(debugInfo["drawCalls"] ?? "?")",
             "Mem: \(debugInfo["mem"] ?? "?")  Seed: \(world.seed)",
         ]
+        // scripting-ui-and-replication (change 3), design.md §12: "F3 summary" — script counts,
+        // event/tick stats, budget trips, one line, only while a script runtime actually exists
+        // this session (§15's zero-cost invariant: no line at all for a world with scripting
+        // off/untrusted/absent, not an empty/zero line).
+        if let runtime = game.scripting.scriptRuntime {
+            let summary = runtime.summary
+            let faultsThisWindow = game.eventBus.recentEvents().filter { $0.kind == .scriptFaulted }.count
+            lines.append(
+                "Scripts: \(summary.liveScripts) live, \(summary.suspendedCoroutines) waiting, "
+                    + "\(summary.durableTimers) timers  Events: \(game.eventBus.pendingCount) pending, "
+                    + "\(faultsThisWindow) faulted"
+            )
+        }
         if let t = game.targetedBlock {
             let def = blockDefs[t.cell >> 4]
             lines.append("Looking at: \(t.x) \(t.y) \(t.z) = \(def.name)#\(t.cell & 15)")

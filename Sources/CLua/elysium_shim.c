@@ -414,7 +414,9 @@ lua_State *elysium_newstate (const elysium_config *config, int *errcode) {
 
   if (config == NULL || config->math.sin == NULL || config->math.cos == NULL ||
       config->math.exp == NULL || config->math.log == NULL ||
-      config->math.atan2 == NULL || config->math.pow == NULL || config->logFn == NULL) {
+      config->math.atan2 == NULL || config->math.pow == NULL ||
+      config->math.tan == NULL || config->math.asin == NULL || config->math.acos == NULL ||
+      config->math.log2 == NULL || config->math.log10 == NULL || config->logFn == NULL) {
     if (errcode) *errcode = ELYSIUM_ERR_MATH;
     return NULL;
   }

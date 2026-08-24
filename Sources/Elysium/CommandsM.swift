@@ -70,7 +70,7 @@ func runCommand(_ game: GameCore, _ raw: String) {
 
     switch cmd {
     case "help":
-        ok("Commands: ai, attr, inspect, objects, lan, clone, place, listTemplates, templates, give, tp, time, weather, gamemode, seed, kill, summon, effect, enchant, xp, setblock, fill, locate, difficulty, gamerule, clear, spawnpoint, heal")
+        ok("Commands: ai, attr, inspect, inspector, objects, lan, clone, place, listTemplates, templates, give, tp, time, weather, gamemode, seed, kill, summon, effect, enchant, xp, setblock, fill, locate, difficulty, gamerule, clear, spawnpoint, heal")
     case "ai", "agent":
         let prompt = args.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         // ai-object-graph (change 2), design.md §12: "/ai cancel".
@@ -111,6 +111,13 @@ func runCommand(_ game: GameCore, _ raw: String) {
         } catch {
             fail("Place failed: \(error)")
         }
+    case "inspector":
+        // scripting-ui-and-replication (change 3), design.md §12: a distinct command from the
+        // pre-existing, LAN-gated `/inspect` text command (`ScriptingCommands.lanClientRefusal`
+        // refuses "inspect" outright) — `/inspector` opens the Object Inspector *screen* for
+        // both host and LAN-client worlds; the screen itself decides what it can show (design.md
+        // §11: a guest reads only the replicated attribute mirror, never `AttributeStore`).
+        game.openScreen("inspector", nil)
     case "listtemplates", "templates":
         let names = game.db.listTemplates()
         ok(names.isEmpty ? "No templates saved." : "Opening \(names.count) saved template\(names.count == 1 ? "" : "s").")

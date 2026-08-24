@@ -120,6 +120,24 @@ final class DebugMessageTests: XCTestCase {
         ))
     }
 
+    /// scripting-ui-and-replication (change 3), design.md §12: `DebugControlRuntime`
+    /// (`Sources/Elysium/DebugControlRuntime.swift`, debug build only — outside this
+    /// target's dependency graph, so its `script.*` op logic is exercised through
+    /// `ScriptingCommandsTests`/`ScriptRuntimeTests`'s existing coverage of the same
+    /// `ScriptingCommands.run` executor those ops call) advertises `.scriptControl`
+    /// alongside every other family — this pins the identifier and its negotiation
+    /// round-trip the same way `testCapabilitiesAreCanonicalAndExtensible` pins
+    /// `.rpgControl`.
+    func testScriptControlCapabilityRoundTrips() throws {
+        XCTAssertEqual(DebugCapabilityID.scriptControl.rawValue, "script.control")
+        let capabilities = try DebugCapabilities(capabilities: [.scriptControl, .worldLifecycle])
+        XCTAssertTrue(capabilities.supports(.scriptControl))
+        XCTAssertEqual(
+            try JSONDecoder().decode(DebugCapabilities.self, from: JSONEncoder().encode(capabilities)),
+            capabilities
+        )
+    }
+
     func testHandshakeMessagesShareABoundedSchema() throws {
         let sessionID = UUID()
         let client = try DebugClientHello(

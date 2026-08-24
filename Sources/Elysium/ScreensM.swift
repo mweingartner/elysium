@@ -3067,25 +3067,52 @@ final class DeathScreen: Screen {
 }
 
 // =============================================================================
-// Script editor (script-runtime, change 1c) — design.md §12: "a minimal
-// ScriptEditorScreen whose buffer owner admits newlines". The name field is
-// an ordinary `TextField` (script names are short, single-line identifiers);
-// the source itself is paste-only — this screen deliberately never creates a
+// Script editor. Landed paste-only in script-runtime (change 1c — design.md §12:
+// "a minimal ScriptEditorScreen whose buffer owner admits newlines"); grown into
+// the full multi-line editor here in scripting-ui-and-replication (change 3 —
+// design.md §16 row 3: "full in-game script editor (multi-line, syntax colouring,
+// error line, save/run)"). The Name/Event fields are ordinary `TextField`s
+// (short, single-line identifiers); the source itself is `[String]`, one entry
+// per line, never containing `\n` — this screen still never creates a
 // multi-line `TextField` (every `TextField` buffer rejects `\n` outright,
-// `ElysiumTextInput.swift:113-150`) and instead overrides `pasteText` to
-// capture the whole clipboard string directly, validated by
-// `ScriptTextHygiene` (which *does* accept `\n`/`\t`) rather than the
-// per-character UI-field gate. Module-mode authoring only — handler-mode
-// triggers and the full multi-line editing/syntax-colouring experience are
-// phase 3's "full editor" (design.md §16 row 3).
+// `ElysiumTextInput.swift:113-150`, and that hardened module is deliberately
+// untouched by this change). Typing/Enter/Backspace/arrows/paste all operate
+// directly on the line array through this screen's own "implicit text owner"
+// seam (`ownsTextInput`/`activateImplicitTextDescriptor`/`clearTextFocus` —
+// the same pattern `SignScreen` already established for multi-line-ish text
+// without `ElysiumBoundedTextBuffer`); every inserted/pasted character is still
+// validated through `ScriptTextHygiene` (`ScriptingDisplayText
+// .isValidScriptSource`, which accepts `\n`/`\t`) and the whole source stays
+// under the 16 KiB cap. Syntax colouring is `LuaSyntaxColoring` (this file's
+// own small, UI-side, deterministic tokenizer — see its header for why it is
+// not a reuse of `ElysiumScript`'s internal, comment-and-whitespace-blind
+// `LuaTokenizer`). The error line comes from `ScriptRuntime
+// .validateSourceForEditor`, run before both Save and Run so a bad script
+// never silently attaches or executes — the same validator `/script attach`/
+// `/script run` themselves use.
 // =============================================================================
 final class ScriptEditorScreen: Screen {
     private let target: ObjectRef
     private let existingName: String?
     private weak var nameField: TextField?
-    private var pastedSource: String = ""
-    private var statusMessage: String?
-    private var statusIsError = false
+    private weak var eventField: TextField?
+    private weak var modeButton: Button?
+    /// One entry per line, never containing `\n` (design.md §12's own constraint: the hardened
+    /// `ElysiumTextInput` buffers reject `\n` outright — see this class's header comment).
+    var lines: [String] = [""]
+    var caretLine = 0
+    var caretCol = 0
+    private var scrollLine = 0
+    /// True when the multi-line source body — not the Name/Event `TextField`s — owns keyboard
+    /// input (this screen's own "implicit text owner", the same seam `SignScreen` uses).
+    var textFocused = true
+    var handlerMode = false
+    var statusMessage: String?
+    var statusIsError = false
+    /// 1-based; set from a validator/compile fault, cleared on any edit.
+    var errorLine: Int?
+    private static let lineHeight = 9.0
+    private static let gutterWidth = 22.0
 
     init(target: ObjectRef, existingName: String?) {
         self.target = target
@@ -3094,129 +3121,317 @@ final class ScriptEditorScreen: Screen {
         pausesGame = true
     }
 
+    private var sourceText: String { lines.joined(separator: "\n") }
+
     private func frame(_ ui: UIManager) -> (x: Double, y: Double, w: Double, h: Double) {
-        let w = max(320, min(480, ui.width - 28))
-        let h = min(220.0, ui.height - 40)
+        let w = max(360, min(560, ui.width - 20))
+        let h = max(220, min(340, ui.height - 20))
         return (((ui.width - w) / 2).rounded(.down), ((ui.height - h) / 2).rounded(.down), w, h)
+    }
+
+    private func headerHeight() -> Double { handlerMode ? 58 : 36 }
+
+    private func sourceRect(_ f: (x: Double, y: Double, w: Double, h: Double)) -> (x: Double, y: Double, w: Double, h: Double) {
+        let y = f.y + headerHeight()
+        let h = max(40, f.h - headerHeight() - 40)
+        return (f.x + 8, y, f.w - 16, h)
+    }
+
+    private func visibleRows(_ f: (x: Double, y: Double, w: Double, h: Double)) -> Int {
+        max(1, Int(sourceRect(f).h / Self.lineHeight))
     }
 
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         let f = frame(ui)
-        let field = TextField(f.x + 96, f.y + 12, f.w - 116, 20, "name", id: "script.name", accessibilityLabel: "Script Name")
+        let field = TextField(f.x + 96, f.y + 12, f.w - 190, 20, "name", id: "script.name", accessibilityLabel: "Script Name")
         field.maxLength = 32
+        var initialTriggerEvent: String?
         if let existingName {
             field.text = existingName
             if let existing = game.scriptingCommandContext().scriptStore.get(target, existingName) {
-                pastedSource = existing.source
+                let split = existing.source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+                lines = split.isEmpty ? [""] : split
+                handlerMode = existing.mode == .handler
+                initialTriggerEvent = existing.triggers.first?.event.rawValue
             }
         }
         nameField = field
         fields.append(field)
-        buttons.append(Button(f.x + f.w - 224, f.y + f.h - 30, 64, 20, "Save", { [weak self, weak ui, weak game] in
+
+        let event = TextField(f.x + 96, f.y + 34, f.w - 116, 18, "event", id: "script.event", accessibilityLabel: "Event Name")
+        event.maxLength = 48
+        if let initialTriggerEvent { event.text = initialTriggerEvent }
+        eventField = event
+        fields.append(event)
+
+        let mode = Button(f.x + f.w - 86, f.y + 12, 78, 18, handlerMode ? "handler" : "module", { [weak self] in
+            guard let self else { return }
+            self.handlerMode.toggle()
+            self.modeButton?.label = self.handlerMode ? "handler" : "module"
+        })
+        modeButton = mode
+        buttons.append(mode)
+
+        buttons.append(Button(f.x + f.w - 224, f.y + f.h - 26, 64, 20, "Save", { [weak self, weak ui, weak game] in
             guard let self, let ui, let game else { return }
             self.save(ui, game)
         }))
-        buttons.append(Button(f.x + f.w - 152, f.y + f.h - 30, 64, 20, "Run", { [weak self, weak ui, weak game] in
-            guard let self, let ui, let game else { return }
-            self.run(ui, game)
+        buttons.append(Button(f.x + f.w - 152, f.y + f.h - 26, 64, 20, "Run", { [weak self, weak game] in
+            guard let self, let game else { return }
+            self.run(game)
         }))
-        buttons.append(Button(f.x + f.w - 74, f.y + f.h - 30, 60, 20, "Cancel", { [weak ui, weak game] in
+        buttons.append(Button(f.x + f.w - 74, f.y + f.h - 26, 60, 20, "Cancel", { [weak ui, weak game] in
             guard let ui, let game else { return }
             ui.closeTop(game)
             game.host?.capturePointer()
         }))
     }
 
+    // MARK: - text ownership (this screen's own implicit-owner seam, `SignScreen`'s pattern)
+
+    override func ownsTextInput(_ ui: UIManager, _ game: GameCore) -> Bool {
+        textFocused || super.ownsTextInput(ui, game)
+    }
+    override func textOwnerDescriptorID(_ ui: UIManager, _ game: GameCore) -> String? {
+        textFocused ? "script.source" : super.textOwnerDescriptorID(ui, game)
+    }
     override func textActivationDescriptorID(_ ui: UIManager, _ game: GameCore) -> String? {
-        "script.name"
+        textFocused ? "script.source" : super.textActivationDescriptorID(ui, game)
+    }
+    override func activateImplicitTextDescriptor(_ id: String) -> Bool {
+        guard id == "script.source" else { return false }
+        for field in fields { field.focused = false }
+        textFocused = true
+        return true
+    }
+    override func clearTextFocus() {
+        textFocused = false
+        for field in fields { field.focused = false }
     }
 
-    override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
+    private func rectContains(_ r: (x: Double, y: Double, w: Double, h: Double), _ mx: Double, _ my: Double) -> Bool {
+        mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h
+    }
+
+    override func onMouseDown(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double, _ btn: Int) -> Bool {
         let f = frame(ui)
-        ui.drawDarkBg(0.58)
-        ui.drawPanel(f.x, f.y, f.w, f.h)
-        ui.cv.drawText("Script Editor", f.x + 16, f.y + 2, 1, "#3f3f3f", shadow: false)
-        ui.cv.drawText("Target: \(target.canonical)", f.x + 16, f.y + 28, 1, "#606060", shadow: false)
-        ui.cv.drawText("Name", f.x + 16, f.y + 16, 1, "#606060", shadow: false)
-        let sourceStatus = pastedSource.isEmpty
-            ? "Paste a Lua module (Cmd-V) — up to 16 KiB, module mode."
-            : "\(pastedSource.utf8.count) bytes pasted."
-        ui.cv.drawText(fitDialogText(sourceStatus, maxWidth: Int(f.w - 32)), f.x + 16, f.y + 46, 1, "#606060", shadow: false)
-        var previewY = f.y + 60
-        for line in pastedSource.split(separator: "\n", omittingEmptySubsequences: false).prefix(6) {
-            ui.cv.drawText(fitDialogText(String(line), maxWidth: Int(f.w - 32)), f.x + 16, previewY, 1, "#808080", shadow: false)
-            previewY += 10
-        }
-        if let statusMessage {
-            ui.cv.drawText(
-                fitDialogText(statusMessage, maxWidth: Int(f.w - 32)), f.x + 16, f.y + f.h - 44, 1,
-                statusIsError ? "#a02020" : "#207020", shadow: false
-            )
-        }
-        ui.drawButtons(self)
-    }
-
-    override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
-        if super.onKey(ui, game, key) {
+        let source = sourceRect(f)
+        if btn == 0, rectContains(source, mx, my), !fields.contains(where: { $0.contains(mx, my) }) {
+            for field in fields { field.focused = false }
+            textFocused = true
+            let row = Int((my - source.y) / Self.lineHeight) + scrollLine
+            caretLine = max(0, min(lines.count - 1, row))
+            caretCol = lines[caretLine].count
             statusMessage = nil
             return true
         }
-        return false
+        let handled = super.onMouseDown(ui, game, mx, my, btn)
+        if fields.contains(where: \.focused) { textFocused = false }
+        return handled
     }
 
-    override func insertText(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
-        if super.insertText(ui, game, ch) {
-            statusMessage = nil
-            return true
+    // MARK: - typing
+
+    override func insertText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
+        if fields.contains(where: \.focused) {
+            let r = super.insertText(ui, game, proposal)
+            if r { statusMessage = nil }
+            return r
         }
-        return false
+        guard textFocused else { return false }
+        return insertIntoSource(proposal)
     }
 
-    /// The one place this screen departs from the base `Screen.pasteText`
-    /// (which only ever routes into a focused `TextField`): when the name
-    /// field is focused, a paste still goes there as usual (renaming); any
-    /// other time — the common case, since nothing about "paste your
-    /// script" requires focusing a field first — the whole clipboard string
-    /// becomes the script source, validated by `ScriptTextHygiene`
-    /// (`\n`/`\t` accepted, matching the validator's own stage 0) rather
-    /// than the single-line UI-field gate.
     override func pasteText(_ ui: UIManager, _ game: GameCore, _ proposal: String) -> Bool {
-        if nameField?.focused == true {
-            let accepted = super.pasteText(ui, game, proposal)
-            if accepted { statusMessage = nil }
-            return accepted
+        if fields.contains(where: \.focused) {
+            let r = super.pasteText(ui, game, proposal)
+            if r { statusMessage = nil }
+            return r
         }
-        guard proposal.utf8.count <= 16_384 else {
-            statusMessage = "Pasted text exceeds 16 KiB."
-            statusIsError = true
-            return false
-        }
+        guard textFocused else { return false }
+        return insertIntoSource(proposal)
+    }
+
+    @discardableResult
+    private func insertIntoSource(_ proposal: String) -> Bool {
+        guard !proposal.isEmpty else { return false }
         guard ScriptingDisplayText.isValidScriptSource(proposal) else {
             statusMessage = "Pasted text contains an invalid character."
             statusIsError = true
             return false
         }
-        pastedSource = proposal
-        statusMessage = "Pasted \(proposal.utf8.count) bytes."
-        statusIsError = false
+        guard sourceText.utf8.count + proposal.utf8.count <= 16_384 else {
+            statusMessage = "Script would exceed 16 KiB."
+            statusIsError = true
+            return false
+        }
+        let parts = proposal.components(separatedBy: "\n")
+        let current = lines[caretLine]
+        let headEnd = current.index(current.startIndex, offsetBy: caretCol)
+        let head = String(current[current.startIndex..<headEnd])
+        let tail = String(current[headEnd...])
+        if parts.count == 1 {
+            lines[caretLine] = head + parts[0] + tail
+            caretCol += parts[0].count
+        } else {
+            var newLines: [String] = [head + parts[0]]
+            if parts.count > 2 { newLines.append(contentsOf: parts[1..<(parts.count - 1)]) }
+            newLines.append(parts[parts.count - 1] + tail)
+            lines.replaceSubrange(caretLine...caretLine, with: newLines)
+            caretLine += parts.count - 1
+            caretCol = parts[parts.count - 1].count
+        }
+        statusMessage = nil
+        errorLine = nil
         return true
     }
 
-    private func validatedInputs() -> (name: String, source: String)? {
+    override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
+        if fields.contains(where: \.focused) {
+            if super.onKey(ui, game, key) {
+                statusMessage = nil
+                return true
+            }
+            return false
+        }
+        guard textFocused else { return false }
+        switch key {
+        case "Enter", "NumpadEnter":
+            let current = lines[caretLine]
+            let splitAt = current.index(current.startIndex, offsetBy: caretCol)
+            let head = String(current[current.startIndex..<splitAt])
+            let tail = String(current[splitAt...])
+            lines[caretLine] = head
+            lines.insert(tail, at: caretLine + 1)
+            caretLine += 1
+            caretCol = 0
+            statusMessage = nil
+            errorLine = nil
+            return true
+        case "Backspace":
+            if caretCol > 0 {
+                var line = lines[caretLine]
+                line.remove(at: line.index(line.startIndex, offsetBy: caretCol - 1))
+                lines[caretLine] = line
+                caretCol -= 1
+                statusMessage = nil
+                errorLine = nil
+            } else if caretLine > 0 {
+                let joined = lines[caretLine - 1] + lines[caretLine]
+                caretCol = lines[caretLine - 1].count
+                lines[caretLine - 1] = joined
+                lines.remove(at: caretLine)
+                caretLine -= 1
+                statusMessage = nil
+                errorLine = nil
+            }
+            return true
+        case "ArrowLeft":
+            if caretCol > 0 {
+                caretCol -= 1
+            } else if caretLine > 0 {
+                caretLine -= 1
+                caretCol = lines[caretLine].count
+            }
+            return true
+        case "ArrowRight":
+            if caretCol < lines[caretLine].count {
+                caretCol += 1
+            } else if caretLine < lines.count - 1 {
+                caretLine += 1
+                caretCol = 0
+            }
+            return true
+        case "ArrowUp":
+            if caretLine > 0 {
+                caretLine -= 1
+                caretCol = min(caretCol, lines[caretLine].count)
+            }
+            return true
+        case "ArrowDown":
+            if caretLine < lines.count - 1 {
+                caretLine += 1
+                caretCol = min(caretCol, lines[caretLine].count)
+            }
+            return true
+        case "Tab":
+            return insertIntoSource("  ")
+        default:
+            return false
+        }
+    }
+
+    // MARK: - accessibility (minimal: the two real fields already get the base implementation;
+    // this adds one more descriptor for the multi-line body so VoiceOver has something to name).
+
+    override func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore) -> [TextEntryAccessibilityDescriptor] {
+        let f = frame(ui)
+        let source = sourceRect(f)
+        let base = super.textAccessibilityDescriptors(ui, game)
+        let sourceDescriptor = TextEntryAccessibilityDescriptor(
+            id: "script.source", role: .textField, label: "Script Source", value: sourceText,
+            help: "Multi-line Lua source. Arrow keys move the caret, Enter inserts a newline.",
+            frame: (source.x, source.y, source.w, source.h), enabled: true, focused: textFocused,
+            insertionUTF16Offset: nil, focusable: true
+        )
+        return base + [sourceDescriptor]
+    }
+
+    // MARK: - save / run
+
+    private func validatedName() -> String? {
         let name = (nameField?.text ?? "").trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty, !pastedSource.isEmpty else {
-            statusMessage = name.isEmpty ? "Enter a script name." : "Paste a script first."
+        guard !name.isEmpty else {
+            statusMessage = "Enter a script name."
             statusIsError = true
             return nil
         }
-        return (name, pastedSource)
+        return name
+    }
+
+    /// Shared by Save and Run — the exact same validator `/script attach`/`/script run` use
+    /// (`ScriptRuntime.validateSourceForEditor`, itself a thin mirror of
+    /// `ScriptValidator.validate`), so the editor never accepts something the runtime would
+    /// then refuse. Sets `errorLine`/`statusMessage` and returns `false` on refusal.
+    private func validateBeforeAction(_ context: ScriptingCommandContext, chunkName: String) -> Bool {
+        guard let runtime = context.scriptRuntime else {
+            errorLine = nil
+            return true // no session runtime (e.g. a test context) — let the caller's own error surface
+        }
+        switch runtime.validateSourceForEditor(sourceText, chunkName: chunkName).outcome {
+        case .accepted:
+            errorLine = nil
+            return true
+        case .refused(let stage, let message, let hint, let line):
+            errorLine = line > 0 ? line : nil
+            statusMessage = "stage \(stage) line \(line > 0 ? String(line) : "-"): \(message) — \(hint)"
+            statusIsError = true
+            return false
+        }
     }
 
     private func save(_ ui: UIManager, _ game: GameCore) {
-        guard let (name, source) = validatedInputs() else { return }
+        guard let name = validatedName() else { return }
+        guard !sourceText.isEmpty else {
+            statusMessage = "Source is empty."
+            statusIsError = true
+            return
+        }
         let context = game.scriptingCommandContext()
+        guard validateBeforeAction(context, chunkName: name) else { return }
+        var triggers: [Trigger] = []
+        if handlerMode {
+            let eventText = (eventField?.text ?? "").trimmingCharacters(in: .whitespaces)
+            guard let event = EventKind.parse(eventText) else {
+                statusMessage = "'\(eventText)' is not a valid event name."
+                statusIsError = true
+                return
+            }
+            triggers = [Trigger(event: event, attribute: nil, target: .object(target))]
+        }
         switch context.scriptStore.attach(
-            target, name: name, source: source, mode: .module, triggers: [], by: .player, tick: context.tick
+            target, name: name, source: sourceText, mode: handlerMode ? .handler : .module,
+            triggers: triggers, by: .player, tick: context.tick
         ) {
         case .success:
             game.scripting.anyScriptsAttached = true
@@ -3229,15 +3444,20 @@ final class ScriptEditorScreen: Screen {
         }
     }
 
-    private func run(_ ui: UIManager, _ game: GameCore) {
-        guard let (_, source) = validatedInputs() else { return }
+    private func run(_ game: GameCore) {
+        guard !sourceText.isEmpty else {
+            statusMessage = "Source is empty."
+            statusIsError = true
+            return
+        }
         let context = game.scriptingCommandContext()
         guard let runtime = context.scriptRuntime else {
             statusMessage = "No script runtime this session."
             statusIsError = true
             return
         }
-        switch runtime.runEphemeral(source: source, owner: target) {
+        guard validateBeforeAction(context, chunkName: "run") else { return }
+        switch runtime.runEphemeral(source: sourceText, owner: target) {
         case .success(let message):
             statusMessage = message
             statusIsError = false
@@ -3245,6 +3465,87 @@ final class ScriptEditorScreen: Screen {
             statusMessage = message
             statusIsError = true
         }
+    }
+
+    // MARK: - draw
+
+    private func colorFor(_ kind: LuaSyntaxSpanKind) -> String {
+        switch kind {
+        case .plain: return "#303030"
+        case .keyword: return "#8a3fa0"
+        case .string: return "#2f7a3f"
+        case .comment: return "#909090"
+        case .number: return "#a05a1f"
+        }
+    }
+
+    override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
+        let f = frame(ui)
+        ui.drawDarkBg(0.58)
+        ui.drawPanel(f.x, f.y, f.w, f.h)
+        let cv = ui.cv
+        cv.drawText("Script Editor", f.x + 16, f.y + 2, 1, "#3f3f3f", shadow: false)
+        cv.drawText("Name", f.x + 16, f.y + 16, 1, "#606060", shadow: false)
+        if handlerMode {
+            cv.drawText("Event", f.x + 16, f.y + 38, 1, "#606060", shadow: false)
+        }
+        cv.drawText(fitDialogText("Target: \(target.canonical)", maxWidth: Int(f.w - 100)),
+                    f.x + 16, f.y + (handlerMode ? 58 : 36) - 10, 1, "#808080", shadow: false)
+
+        let source = sourceRect(f)
+        cv.setFill("rgba(0,0,0,0.05)")
+        cv.fillRect(source.x, source.y, source.w, source.h)
+        let visible = visibleRows(f)
+        if caretLine < scrollLine { scrollLine = caretLine }
+        if caretLine >= scrollLine + visible { scrollLine = caretLine - visible + 1 }
+        scrollLine = max(0, min(scrollLine, max(0, lines.count - visible)))
+
+        let allSpans = LuaSyntaxColoring.colorLines(lines)
+        var y = source.y
+        for row in scrollLine..<min(lines.count, scrollLine + visible) {
+            if errorLine == row + 1 {
+                cv.setFill("rgba(160,32,32,0.20)")
+                cv.fillRect(source.x, y, source.w, Self.lineHeight)
+            } else if row == caretLine, textFocused {
+                cv.setFill("rgba(40,110,190,0.10)")
+                cv.fillRect(source.x, y, source.w, Self.lineHeight)
+            }
+            let gutterText = String(row + 1)
+            cv.drawText(gutterText, source.x + Self.gutterWidth - 4 - Double(textWidth(gutterText)), y, 1, "#a0a0a0", shadow: false)
+            let chars = Array(lines[row])
+            var x = source.x + Self.gutterWidth
+            var lastEnd = 0
+            for span in allSpans[row] {
+                if span.range.lowerBound > lastEnd {
+                    let gap = String(chars[lastEnd..<span.range.lowerBound])
+                    x += cv.drawText(gap, x, y, 1, colorFor(.plain), shadow: false)
+                }
+                let text = String(chars[span.range])
+                x += cv.drawText(text, x, y, 1, colorFor(span.kind), shadow: false)
+                lastEnd = span.range.upperBound
+            }
+            if lastEnd < chars.count {
+                _ = cv.drawText(String(chars[lastEnd...]), x, y, 1, colorFor(.plain), shadow: false)
+            }
+            y += Self.lineHeight
+        }
+        if textFocused, caretLine >= scrollLine, caretLine < scrollLine + visible,
+           Int(CACurrentMediaTime() * 1000 / 400) % 2 == 0 {
+            let caretX = source.x + Self.gutterWidth + Double(textWidth(String(lines[caretLine].prefix(caretCol))))
+            let caretY = source.y + Double(caretLine - scrollLine) * Self.lineHeight
+            cv.setFill("#202020")
+            cv.fillRect(caretX, caretY, 1, Self.lineHeight - 1)
+        }
+
+        let statusY = f.y + f.h - 34
+        if let statusMessage {
+            cv.drawText(fitDialogText(statusMessage, maxWidth: Int(f.w - 32)), f.x + 16, statusY, 1,
+                        statusIsError ? "#a02020" : "#207020", shadow: false)
+        } else {
+            cv.drawText("\(sourceText.utf8.count)/16384 bytes, line \(caretLine + 1)/\(lines.count)",
+                        f.x + 16, statusY, 1, "#808080", shadow: false)
+        }
+        ui.drawButtons(self)
     }
 
     private func fitDialogText(_ text: String, maxWidth: Int) -> String {
@@ -3255,7 +3556,6 @@ final class ScriptEditorScreen: Screen {
         return out.count < text.count && out.count > 3 ? out + "." : out
     }
 }
-
 // =============================================================================
 // Saved construction templates
 // =============================================================================

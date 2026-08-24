@@ -44,6 +44,7 @@ final class LANLiveProbe {
     private var clientPositionedFrame: Int?
     private var clientUseSent = false
     private var clientUseSentFrame: Int?
+    private var clientAttributeMirrorSeen = false
     private var clientUseAttempts = 0
     private var hostStarted = false
     private var completed = false
@@ -184,6 +185,25 @@ final class LANLiveProbe {
         tableBE.items?[0] = ItemStack(iid("oak_planks"), 1)
         world.setBlockEntity(tableBE)
 
+        // scripting-ui-and-replication (change 3), design.md §11: reuses this already-reviewed
+        // single-machine host+client lab for the object-attribute replication probe rather than
+        // adding a second scenario/harness — one custom attribute on `.world` (no coordinates
+        // needed, so it needs no companion "where is it" logic on the client side) attached
+        // through the exact same `ScriptStore`/`ScriptingCommandContext` the editor and `/script`
+        // use. `client-observer`/`client-door` check for it via `LANMultiplayerManager
+        // .mirroredAttributes(for:)` — the same read path the Inspector screen uses — in
+        // `tickClientSharedState` below.
+        let context = game.scriptingCommandContext()
+        if case .success = context.scriptStore.attach(
+            .world, name: "probe_attr", source: "world.attrs.probe = \"replicated\"",
+            mode: .module, triggers: [], by: .player, tick: context.tick
+        ) {
+            game.scripting.anyScriptsAttached = true
+            elysiumLANProbeLog("host_rig_attribute_attached ref=world name=probe")
+        } else {
+            elysiumLANProbeLog("host_rig_attribute_attach_failed")
+        }
+
         elysiumLANProbeLog(
             "host_rig_ready base=\(b.x),\(b.y),\(b.z) door=\(d.x),\(d.y),\(d.z) chest=\(c.x),\(c.y),\(c.z) crafting=\(t.x),\(t.y),\(t.z)"
         )
@@ -200,6 +220,12 @@ final class LANLiveProbe {
             game.host?.capturePointer()
             elysiumLANProbeLog("client_closed_screen_for_probe frame=\(frames)")
             return
+        }
+
+        if !clientAttributeMirrorSeen,
+           LANMultiplayerManager.shared.mirroredAttributes(for: .world)?["probe"] == .string("replicated") {
+            clientAttributeMirrorSeen = true
+            elysiumLANProbeLog("client_object_attribute_mirrored ref=world name=probe value=replicated frame=\(frames)")
         }
 
         let d = door(in: game)

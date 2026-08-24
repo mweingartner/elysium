@@ -42,13 +42,27 @@ private func elysiumScriptDetCos(_ x: Double) -> Double { detCos(elysiumReduceFo
 /// The deterministic `ScriptMath` every `LuaState` in the shipped app uses (design.md
 /// Decision 11).
 public enum ScriptHostMath {
+    /// scripting-ui-and-replication (change 3), design.md §16 row 3 / Decision 10:
+    /// `tan`/`asin`/`acos`/`log2`/`log10` route to the fdlibm ports `de4e78c` already
+    /// landed in `DetMath.swift` — this is the wiring, not the port. Unlike `sin`/`cos`,
+    /// none of the five need `elysiumReduceForTrig`'s guard: `detTan`'s own doc comment
+    /// says it "reduces every finite argument via `tanRemPio2`, including magnitudes
+    /// needing the full Payne-Hanek reduction" (never hits `remPio2`'s trap), and
+    /// `detAsin`/`detAcos`/`detLog2`/`detLog10` are domain-restricted, not periodic —
+    /// each returns NaN/-inf outside its domain rather than trapping (their own doc
+    /// comments: "never traps").
     public static let deterministic = ScriptMath(
         sin: elysiumScriptDetSin,
         cos: elysiumScriptDetCos,
         exp: detExp,
         log: detLog,
         atan2: detAtan2,
-        pow: detPow
+        pow: detPow,
+        tan: detTan,
+        asin: detAsin,
+        acos: detAcos,
+        log2: detLog2,
+        log10: detLog10
     )
 }
 

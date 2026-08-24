@@ -58,6 +58,13 @@ public struct LANReplicationApplyReport: Equatable {
     public var appliedBlockEntities = 0
     public var ignoredInvalidBlockEntities = 0
     public var deferredBlockEntities = 0
+    /// scripting-ui-and-replication (change 3): `LANMultiplayerClientSession.apply(_:)`'s own
+    /// mirror-store bookkeeping — never touches `World`, so it has no analogue in
+    /// `LANReplicationApplyReport`'s `World`-mutating counterparts above.
+    public var appliedObjectAttributes = 0
+    public var ignoredStaleObjectAttributes = 0
+    public var ignoredInvalidObjectAttributes = 0
+    public var reconciledObjectAttributes = 0
 
     public init() {}
 
@@ -75,6 +82,10 @@ public struct LANReplicationApplyReport: Equatable {
         appliedBlockEntities += other.appliedBlockEntities
         ignoredInvalidBlockEntities += other.ignoredInvalidBlockEntities
         deferredBlockEntities += other.deferredBlockEntities
+        appliedObjectAttributes += other.appliedObjectAttributes
+        ignoredStaleObjectAttributes += other.ignoredStaleObjectAttributes
+        ignoredInvalidObjectAttributes += other.ignoredInvalidObjectAttributes
+        reconciledObjectAttributes += other.reconciledObjectAttributes
     }
 }
 
@@ -1470,6 +1481,7 @@ public final class LANMultiplayerHostSession {
         entitySnapshotsComplete: Bool,
         inventorySnapshots: [LANPlayerInventorySnapshot],
         blockEntitySnapshots: [LANBlockEntitySnapshot] = [],
+        objectAttributeSnapshots: [LANObjectAttributeSnapshot] = [],
         includePeerInventories: Bool = true
     ) -> LANReplicationBatch {
         var players = peerPlayerStates()
@@ -1490,7 +1502,8 @@ public final class LANMultiplayerHostSession {
             entities: entitySnapshots,
             entitySnapshotsComplete: entitySnapshotsComplete,
             inventories: inventories,
-            blockEntities: blockEntitySnapshots
+            blockEntities: blockEntitySnapshots,
+            objectAttributes: objectAttributeSnapshots
         )
     }
 }
@@ -1505,6 +1518,12 @@ public final class LANMultiplayerClientSession {
     public private(set) var entities: [Int: LANEntitySnapshot] = [:]
     public private(set) var inventories: [String: LANPlayerInventorySnapshot] = [:]
     public private(set) var blockEntities: [LANBlockPosition: LANBlockEntitySnapshot] = [:]
+    /// scripting-ui-and-replication (change 3), design.md §11: "applied display-only into a
+    /// mirror store on guests (never `AttributeStore`, never re-broadcast)". Keyed by
+    /// `ObjectRef.canonical`; never written to except from `apply(_:)`, never consulted by any
+    /// mutation/gameplay path — the Inspector screen and `LANMultiplayerManager.mirroredAttributes
+    /// (for:)` are its only readers.
+    public private(set) var objectAttributes: [String: LANObjectAttributeSnapshot] = [:]
     /// Baseline tracking for client-authoritative inventory (D-A): the last host grant this client
     /// has merged, and the client's own published inventory revision. `apply(_:)` never mutates
     /// local player inventory from a normal batch — only `applyRestore(_:)` / grant merges do.
@@ -1547,6 +1566,36 @@ public final class LANMultiplayerClientSession {
         for player in batch.players.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_PLAYERS) {
             players[player.playerID] = player
         }
+        // scripting-ui-and-replication (change 3), design.md §11: applied before chunk sections
+        // so the reconciliation pass below (1a's D5-adjacent note: `applyLANChunkSectionSnapshot`
+        // bulk-overwrites a whole section's blocks without running the single-block "does this
+        // replace clear the object's entries" identity check §17 Decision 5 relies on) can tell
+        // "refreshed by this very batch" apart from "stale, left behind by a bulk block swap".
+        // Hostile bytes: an unparseable `ref` or an `attrsJSON` that fails `AttrValueCodec.decode`
+        // under the exact same caps `AttributeStore` persistence enforces is dropped, never
+        // trusted; a `revision` that regresses what is already mirrored (a stale replay, or a
+        // batch from a host that has since restarted onto an older save) is dropped too.
+        var refreshedAttributeRefs = Set<String>()
+        for snapshot in batch.objectAttributes.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_OBJECT_ATTRIBUTES) {
+            guard snapshot.attrsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_ATTRIBUTES_JSON_BYTES,
+                  ObjectRef.parse(snapshot.ref) != nil
+            else {
+                report.ignoredInvalidObjectAttributes += 1
+                continue
+            }
+            if let existing = objectAttributes[snapshot.ref], snapshot.revision < existing.revision {
+                report.ignoredStaleObjectAttributes += 1
+                continue
+            }
+            guard case .success(.map) = AttrValueCodec.decode(snapshot.attrsJSON, caps: .defaults) else {
+                report.ignoredInvalidObjectAttributes += 1
+                continue
+            }
+            objectAttributes[snapshot.ref] = snapshot
+            refreshedAttributeRefs.insert(snapshot.ref)
+            report.appliedObjectAttributes += 1
+        }
+
         for section in batch.chunkSections.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS) {
             guard section.isValidRLE else {
                 report.ignoredInvalidSections += 1
@@ -1561,6 +1610,21 @@ public final class LANMultiplayerClientSession {
             chunkSections[key] = section
             report.appliedChunkSections += 1
             report.appliedChunkSectionPositions.append(key)
+
+            let minX = section.cx * CHUNK_W, maxX = minX + CHUNK_W - 1
+            let minZ = section.cz * CHUNK_W, maxZ = minZ + CHUNK_W - 1
+            let minY = section.minY, maxY = minY + SECTION_H - 1
+            let staleKeys = objectAttributes.keys.filter { key in
+                guard let parsed = ObjectRef.parse(key), case .block(let dim, let x, let y, let z) = parsed
+                else { return false }
+                return dim.rawValue == section.dimension &&
+                    (minX...maxX).contains(x) && (minY...maxY).contains(y) && (minZ...maxZ).contains(z) &&
+                    !refreshedAttributeRefs.contains(key)
+            }
+            for staleKey in staleKeys.sorted() {
+                objectAttributes.removeValue(forKey: staleKey)
+                report.reconciledObjectAttributes += 1
+            }
         }
         for change in batch.blockChanges.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES) {
             guard isValidLANReplicatedCell(change.cell) else {
@@ -2342,6 +2406,56 @@ public func makeLANWorldStateSnapshot(in world: World) -> LANWorldStateSnapshot 
         thunderLevel: world.thunderLevel,
         weatherTimer: world.weatherTimer
     )
+}
+
+/// scripting-ui-and-replication (change 3), design.md §11. Mirrors `ScriptRuntime`'s own
+/// (private) `forEachScriptedObject` traversal — world, the three dimension bags, live
+/// entities and loaded chunks' objects in the *current* dimension — but reads
+/// `AttributeStore.list` instead of `ScriptStore.list`. The two enumerations visit the
+/// same `ObjectRecord`s (design.md §6.0's unified extensible attribute model stores
+/// attributes and scripts side by side in one record), so nothing here diverges from
+/// that traversal's own loaded/current-dimension scope. Sorted by `ref.canonical` for
+/// determinism; bounded to `maxCount` (design.md "64 objects/batch") — beyond that many
+/// simultaneously-attributed objects, the ones sorting after the cap simply wait for a
+/// later batch once an earlier one's attributes are removed (a full dirty-tracking/
+/// round-robin fill scheme, like entity replication's, is out of this change's scope).
+public func makeLANObjectAttributeSnapshots(
+    host: ObjectGraphHost,
+    store: AttributeStore,
+    maxCount: Int = LAN_MULTIPLAYER_MAX_REPLICATION_OBJECT_ATTRIBUTES
+) -> [LANObjectAttributeSnapshot] {
+    let cappedCount = max(0, min(maxCount, LAN_MULTIPLAYER_MAX_REPLICATION_OBJECT_ATTRIBUTES))
+    guard cappedCount > 0 else { return [] }
+
+    var refs: [ObjectRef] = [.world, .dimension(.overworld), .dimension(.nether), .dimension(.end)]
+    if let w = host.world(for: host.currentDimension) {
+        for e in w.entities {
+            guard let ent = e as? Entity, !ent.dead else { continue }
+            refs.append(.entity(uid: ent.id))
+        }
+        for chunk in w.chunks.values where !chunk.objectRecords.isEmpty {
+            for cellIndex in chunk.objectRecords.keys.sorted() {
+                let (x, y, z) = chunk.idxToWorld(cellIndex)
+                refs.append(.block(dim: w.dim, x: x, y: y, z: z))
+            }
+        }
+    }
+
+    var out: [(ref: ObjectRef, revision: UInt64, attrs: [String: AttrValue])] = []
+    for ref in refs {
+        let attrs = store.list(ref)
+        guard !attrs.isEmpty else { continue }
+        guard case .live(let live) = store.graph.resolve(ref) else { continue }
+        let record = AttributeStore.readRecord(live, host: host)
+        out.append((ref, record.revision, Dictionary(uniqueKeysWithValues: attrs.map { ($0.name, $0.value) })))
+    }
+    out.sort { $0.ref.canonical < $1.ref.canonical }
+    return out.prefix(cappedCount).map { entry in
+        LANObjectAttributeSnapshot(
+            ref: entry.ref.canonical, revision: entry.revision,
+            attrsJSON: AttrValueCodec.encode(.map(entry.attrs))
+        )
+    }
 }
 
 public func makeLANEntitySnapshots(

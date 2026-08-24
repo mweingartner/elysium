@@ -327,6 +327,28 @@ test-LAN capability, not an internet-facing security boundary.
 | `player.flying` | Authority | `{"enabled":true}` | Changes flight; enabling requires creative mode. |
 | `inventory.select` | Authority | `{"slot":0}` | Selects hotbar slot `0...8`. |
 
+### Scripting
+
+`script.*` calls straight into the same Core `ScriptingCommands.run(command: "script", ...)`
+executors `/script` uses (`docs/scripting-and-eventing-design.md` §12) — never a second
+implementation, so the validator, the 8-scripts-per-object cap, the trust gate, and the kill
+switch all apply exactly as they do in chat. Every `script.*` op is **Authority**-gated (a LAN
+client is refused, matching `/script` itself, which does not yet distinguish read from write —
+that split is `lan-client-parity`'s job). The response always has the shape `{"ok": bool,
+"lines": [string, ...]}`: `ok: false` means the *script* operation was refused (bad name, no
+such script, a validation/compile error) while the request itself still succeeded — a protocol
+error (missing world, wrong arguments) is a normal `error` response instead. `target` defaults
+to `"looking"` (the crosshair) when omitted, matching the `/script` CLI default; `source` is
+carried as one JSON string, never split, so multi-line Lua survives byte-exact.
+
+| Operation | Context | Example arguments | Result/effect |
+|---|---|---|---|
+| `script.list` | Authority | `{"target":"self"}` | `lines`: one summary per attached script (`name [mode] (disabled)? — lastError?`). |
+| `script.show` | Authority | `{"target":"self","name":"greet"}` | `lines`: the full record — header, author/created/api, triggers, `lastError`, and up to 30 lines of source. |
+| `script.attach` | Authority | `{"target":"self","name":"greet","mode":"module","source":"log('hi')"}` | Validates and attaches (or replaces) a script; takes effect next script phase. `mode:"handler"` additionally requires `"event":"<event name>"`. |
+| `script.run` | Authority | `{"target":"self","source":"log('hi')"}` | Runs `source` once, ephemerally (never persisted, never subscribed — §9.3's capability-reduced `run_script`). |
+| `script.journal` | Authority | `{"limit":32}` | `lines`: the most recent AI journal entries (`limit` `1...256`, default 32); `ok:false` with an explanatory line when no AI journal exists this session. |
+
 ### Interaction, environment, and entities
 
 | Operation | Context | Example arguments | Result/effect |

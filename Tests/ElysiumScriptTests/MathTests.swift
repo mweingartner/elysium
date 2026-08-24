@@ -52,6 +52,65 @@ final class MathTests: XCTestCase {
         XCTAssertEqual(number(runtimeValues.first)?.bitPattern, expectedPow.bitPattern)
     }
 
+    // MARK: - tan/asin/acos/log2/log10 route through ScriptMath (change 3 wiring)
+
+    /// design.md §16 row 3 / Decision 10: `tan`/`asin`/`acos` were removed outright
+    /// through change 0-2 (§8.3) and are restored here as shim wrappers over the
+    /// fdlibm ports `de4e78c` landed; `log2`/`log10` are new, additive `math` entries.
+    func testTanAsinAcosLog2Log10RouteToScriptMath() throws {
+        let state = try ScriptTestSupport.makeState()
+        let outcome = try ScriptTestSupport.run(
+            """
+            return math.tan(0.6), math.asin(0.3), math.acos(0.3), math.log2(8), math.log10(1000)
+            """, on: state
+        )
+        guard case .success(let values) = outcome else { return XCTFail("expected success, got \(outcome)") }
+        XCTAssertEqual(values.count, 5)
+        XCTAssertEqual(number(values[0])?.bitPattern, detTan(0.6).bitPattern, "math.tan must be bit-identical to detTan")
+        XCTAssertEqual(number(values[1])?.bitPattern, detAsin(0.3).bitPattern, "math.asin must be bit-identical to detAsin")
+        XCTAssertEqual(number(values[2])?.bitPattern, detAcos(0.3).bitPattern, "math.acos must be bit-identical to detAcos")
+        XCTAssertEqual(number(values[3])?.bitPattern, detLog2(8.0).bitPattern, "math.log2 must be bit-identical to detLog2")
+        XCTAssertEqual(number(values[4])?.bitPattern, detLog10(1000.0).bitPattern, "math.log10 must be bit-identical to detLog10")
+    }
+
+    /// `math.log(x, b)` itself must stay untouched by the log2/log10 wiring
+    /// (Appendix E point 4 / `testLogBaseRatio` above) — restated here with base 2
+    /// and base 10 specifically, since those are exactly the bases a naive
+    /// "special-case log2/log10" implementation would have diverted.
+    func testLogBaseTwoAndTenStillUseRatio() throws {
+        let state = try ScriptTestSupport.makeState()
+        let outcome = try ScriptTestSupport.run("return math.log(8, 2), math.log(1000, 10)", on: state)
+        guard case .success(let values) = outcome else { return XCTFail("expected success, got \(outcome)") }
+        let expectedLog2Ratio = detLog(8.0) / detLog(2.0)
+        let expectedLog10Ratio = detLog(1000.0) / detLog(10.0)
+        XCTAssertEqual(number(values[0])?.bitPattern, expectedLog2Ratio.bitPattern)
+        XCTAssertEqual(number(values[1])?.bitPattern, expectedLog10Ratio.bitPattern)
+    }
+
+    /// `detAsin`/`detAcos` never trap outside [-1, 1]; `math.log2`/`log10` never
+    /// trap for x <= 0 — all four return NaN/-inf, matching their own doc comments
+    /// ("never traps"), so no `ScriptHostBindings` guard is needed for them (unlike
+    /// `sin`/`cos`). NaN/infinite doubles cannot cross back to Swift as a return
+    /// value (`ScriptValue.notFinite` — `Coroutines.swift`'s `readResultValues`
+    /// turns them into `.null`, the same "cannot represent" path a bare function/
+    /// thread return takes; this is pre-existing marshaling behavior, not something
+    /// this change touches), so this proves the NaN-ness and the non-trapping
+    /// entirely inside Lua, `x ~= x` being the standard Lua NaN test.
+    func testDomainRestrictedMathNeverTraps() throws {
+        let state = try ScriptTestSupport.makeState()
+        let outcome = try ScriptTestSupport.run(
+            """
+            return math.asin(2.0) ~= math.asin(2.0), math.acos(-2.0) ~= math.acos(-2.0),
+                   math.log2(-1.0) ~= math.log2(-1.0), math.log2(0.0) == -math.huge,
+                   math.log10(-1.0) ~= math.log10(-1.0)
+            """, on: state
+        )
+        guard case .success(let values) = outcome else { return XCTFail("expected success, got \(outcome)") }
+        XCTAssertEqual(values, [.bool(true), .bool(true), .bool(true), .bool(true), .bool(true)],
+                        "asin/acos outside [-1,1] and log2/log10 of a non-positive must be NaN/-inf, never trap")
+        XCTAssertFalse(state.isDead)
+    }
+
     // MARK: - math.random matches RandomX directly
 
     func testRandomMatchesRandomX() throws {

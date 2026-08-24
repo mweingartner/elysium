@@ -33,6 +33,32 @@ public enum ScriptRunOutcome {
     case failure(String)
 }
 
+/// scripting-ui-and-replication (change 3): an `ElysiumCore`-native mirror of
+/// `ElysiumScript.ScriptValidation` (see `ScriptRuntime.validateSourceForEditor`'s own comment
+/// on why a mirror, not a re-export). `stage` is 0-3, `line` is 1-based (0 when the stage has
+/// no single-line locus) — exactly `ScriptValidation.refused`'s own documented shape.
+/// scripting-ui-and-replication (change 3), design.md §12: "F3 summary". `faultsThisTick`/
+/// `eventsPendingThisTick` are read fresh from `EventBus` by the HUD (they are that type's own
+/// state, not duplicated here) — this struct carries only what `ScriptRuntime` itself owns.
+public struct ScriptRuntimeSummary: Equatable {
+    public let liveScripts: Int
+    public let suspendedCoroutines: Int
+    public let durableTimers: Int
+}
+
+public struct ScriptValidationResult: Equatable {
+    public enum Outcome: Equatable {
+        case accepted
+        case refused(stage: Int, message: String, hint: String, line: Int)
+    }
+
+    public let outcome: Outcome
+
+    public init(outcome: Outcome) {
+        self.outcome = outcome
+    }
+}
+
 /// The opaque payload carried by a `ScriptOwnedSubscription.token` (event-bus,
 /// change 1b reserved the field; this change is the only thing that ever
 /// constructs one).
@@ -732,8 +758,37 @@ public final class ScriptRuntime {
     /// and as the first half of `AIScriptValidationGate.validate` (which
     /// adds stage 5 on top). `lua` itself stays un-exposed; this is the one
     /// operation callers outside this file need from it.
+    /// scripting-ui-and-replication (change 3), design.md §12: the F3 debug-summary line's own
+    /// data source. Cheap (a count over the already-in-memory `instances`/`scheduled`/`timers`
+    /// collections, no scan) — safe to read every frame the overlay is on, matching §15's
+    /// zero-cost invariant (a world with no scripts has empty collections here, so this is
+    /// effectively free even when F3 is showing).
+    public var summary: ScriptRuntimeSummary {
+        ScriptRuntimeSummary(
+            liveScripts: instances.values.filter(\.live).count,
+            suspendedCoroutines: scheduled.count,
+            durableTimers: timers.count
+        )
+    }
+
     public func validateSource(_ source: String, chunkName: String) -> ScriptValidation {
         ScriptValidator.validate(source: source, chunkName: chunkName, using: lua)
+    }
+
+    /// scripting-ui-and-replication (change 3): the app target (`Sources/Elysium`, the full
+    /// `ScriptEditorScreen`) does not depend on `ElysiumScript` (design.md §4's own module
+    /// diagram — only `ElysiumCore` is allowed to see it), so it cannot spell `ScriptValidation`
+    /// by name. This is the anticorruption translation at that seam — the same pattern
+    /// `ScriptingDisplayText.isValidScriptSource` already established for
+    /// `ScriptTextHygiene.isClean` — re-expressed as an `ElysiumCore`-native type the editor can
+    /// use directly for its error-line highlight.
+    public func validateSourceForEditor(_ source: String, chunkName: String) -> ScriptValidationResult {
+        switch validateSource(source, chunkName: chunkName) {
+        case .accepted:
+            return ScriptValidationResult(outcome: .accepted)
+        case .refused(let stage, let message, let hint, let line):
+            return ScriptValidationResult(outcome: .refused(stage: stage, message: message, hint: hint, line: line))
+        }
     }
 
     /// design.md §9.4 stage 6: "run the chunk in a scratch env over a

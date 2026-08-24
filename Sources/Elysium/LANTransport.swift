@@ -66,6 +66,12 @@ private struct LANHostReplicationContent {
     var includeBlockEntityFill = false
     var blockEntityFillCap = 0
     var entityRadius = 160.0
+    /// scripting-ui-and-replication (change 3), design.md §11. Reuses the existing world-state
+    /// ~1s cadence (`LANHostReplicationBackgroundSelection.includeWorldState`) rather than adding
+    /// a dedicated interval/last-sent-timestamp knob — a mirror store's freshness bar is "well
+    /// under a couple of seconds," which this already meets, and it keeps the cadence surface
+    /// this change touches to the minimum needed for "guests see replicated attributes."
+    var includeObjectAttributes = false
 
     static let foregroundDelta = LANHostReplicationContent(includeDirtyBlockEntities: true, includeDirtyChunkSections: true)
 
@@ -78,7 +84,8 @@ private struct LANHostReplicationContent {
         includeDirtyBlockEntities: true,
         includeDirtyChunkSections: true,
         includeBlockEntityFill: true,
-        blockEntityFillCap: 16
+        blockEntityFillCap: 16,
+        includeObjectAttributes: true
     )
 
     static func background(_ selection: LANHostReplicationBackgroundSelection) -> LANHostReplicationContent {
@@ -91,7 +98,8 @@ private struct LANHostReplicationContent {
             includeDirtyBlockEntities: false,
             includeDirtyChunkSections: false,
             includeBlockEntityFill: selection.includeBlockEntityFill,
-            blockEntityFillCap: 8
+            blockEntityFillCap: 8,
+            includeObjectAttributes: selection.includeWorldState
         )
     }
 }
@@ -347,6 +355,32 @@ final class LANMultiplayerManager {
 
     func attachGame(_ game: GameCore) {
         activeGame = game
+    }
+
+    /// scripting-ui-and-replication (change 3), design.md §11/§12: the Inspector screen's and
+    /// the app-target gate test's read path into a connected guest's replicated attribute
+    /// mirror (`LANMultiplayerClientSession.objectAttributes` — never `AttributeStore`, and
+    /// there is no write counterpart: design.md "guests still refused for every mutation").
+    /// `nil` when nothing has been mirrored for `ref` yet. Read directly, unguarded, because
+    /// `clientReplicationSession` is only ever mutated from the main thread (`apply(_:)` is
+    /// always invoked inside a `DispatchQueue.main.async` block — see
+    /// `handleClientReplicationBatch`), the same thread every screen draws from.
+    func mirroredAttributes(for ref: ObjectRef) -> [String: AttrValue]? {
+        precondition(Thread.isMainThread)
+        guard let snapshot = clientReplicationSession.objectAttributes[ref.canonical] else { return nil }
+        guard case .success(.map(let attrs)) = AttrValueCodec.decode(snapshot.attrsJSON, caps: .defaults) else {
+            return nil
+        }
+        return attrs
+    }
+
+    /// Test seam only (`LANGuestCommandGateTests`): applies `batch` straight into
+    /// `clientReplicationSession`, the same in-memory mirror the real socket path feeds
+    /// (`handleClientReplicationBatch`), without needing a live transport connection — headless
+    /// proof that a guest's Inspector reads what got replicated. Never called from production
+    /// code (the real path is always a batch received over the wire).
+    func applyReplicationBatchForTesting(_ batch: LANReplicationBatch) -> LANReplicationApplyReport {
+        clientReplicationSession.apply(batch)
     }
 
     private func configureHostReplicationHooks(for game: GameCore) {
@@ -2019,6 +2053,17 @@ final class LANMultiplayerManager {
         }
         let summary = content.includeWorldSummary ? makeWorldSummary(playerCount: acceptedCount) : nil
         let worldState = content.includeWorldState ? makeLANWorldStateSnapshot(in: game.world) : nil
+        // scripting-ui-and-replication (change 3), design.md §11: object attributes are
+        // world-scoped (world/dim bags, loaded-chunk blocks, live entities in the current
+        // dimension — `makeLANObjectAttributeSnapshots`'s own traversal), not tied to any one
+        // peer's chunk-request window, so there is no per-peer focus/radius filter here the way
+        // entities and block entities have one.
+        let objectAttributes = content.includeObjectAttributes
+            ? makeLANObjectAttributeSnapshots(host: game, store: game.scriptingCommandContext().store)
+            : []
+        if ProcessInfo.processInfo.environment["ELYSIUM_LAN_PROBE_LOG"] != nil, !objectAttributes.isEmpty {
+            elysiumLANProbeLog("host_object_attributes_batch count=\(objectAttributes.count)")
+        }
         return hostReplicationSession.makeBatch(
             tick: game.rpgSimulationTick,
             fullSnapshot: fullSnapshot,
@@ -2030,6 +2075,7 @@ final class LANMultiplayerManager {
             entitySnapshotsComplete: content.entitySnapshotsComplete && entities.count < LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES,
             inventorySnapshots: inventories,
             blockEntitySnapshots: blockEntities,
+            objectAttributeSnapshots: objectAttributes,
             includePeerInventories: content.includeInventories
         )
     }
@@ -2615,6 +2661,14 @@ final class LANMultiplayerManager {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             let mirrorReport = self.clientReplicationSession.apply(batch)
+            if ProcessInfo.processInfo.environment["ELYSIUM_LAN_PROBE_LOG"] != nil,
+               mirrorReport.appliedObjectAttributes > 0 || mirrorReport.reconciledObjectAttributes > 0 {
+                elysiumLANProbeLog(
+                    "guest_object_attributes_applied applied=\(mirrorReport.appliedObjectAttributes) " +
+                    "reconciled=\(mirrorReport.reconciledObjectAttributes) " +
+                    "mirrored_total=\(self.clientReplicationSession.objectAttributes.count)"
+                )
+            }
             var worldReport: LANReplicationApplyReport?
             if let game = self.activeGame, game.hasWorld() {
                 // D-A: normal batches never overwrite the client-owned local inventory anymore —

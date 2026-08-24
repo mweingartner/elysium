@@ -122,6 +122,13 @@ final class HostBridge: GameHost {
             if let be = data?.be { ui.open(BeaconScreen(be), game) }
         case "sign":
             ui.open(SignScreen(data?.be, (data?.x ?? 0, data?.y ?? 0, data?.z ?? 0)), game)
+        case "inspector":
+            // scripting-ui-and-replication (change 3), design.md §12: `/inspector` (distinct
+            // from the pre-existing, LAN-gated `/inspect` text command) opens the Object
+            // Inspector screen for BOTH host and LAN-client worlds — the screen itself, not
+            // this command, decides what it can show (a guest reads only the replicated
+            // attribute mirror; §11).
+            ui.open(InspectorScreen(), game)
         case "scriptEditor":
             // script-runtime (change 1c): `data.text` carries the target
             // ref's canonical string, `data.title` an existing script name

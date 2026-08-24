@@ -133,11 +133,16 @@ yield.
 light C function in `_G`, `string`, `table`, `math`, `utf8` and the string metatable is
 rewrapped as a one-upvalue C closure so no light C function or light userdata is ever
 reachable from script code (either would otherwise be hashed by address, breaking
-determinism). `load loadfile dofile collectgarbage rawset rawget warn _G string.dump
-math.tan math.asin math.acos` and the stock `math.random`/`randomseed` are removed
-outright; `print`, `setmetatable`, `pairs`/`ipairs`, the capped `string`/`table`/`utf8`
-verbs, and `math.sin/cos/atan/exp/log`/`random`/`randomseed` are shim wrappers that cap
-inputs and route transcendentals/RNG through the host. `setmetatable` silently drops
+determinism). `load loadfile dofile collectgarbage rawset rawget warn _G string.dump` and the stock
+`math.random`/`randomseed` are removed outright; `print`, `setmetatable`, `pairs`/
+`ipairs`, the capped `string`/`table`/`utf8` verbs, and
+`math.sin/cos/tan/asin/acos/atan/exp/log/log2/log10`/`random`/`randomseed` are shim
+wrappers that cap inputs and route transcendentals/RNG through the host.
+`math.tan`/`asin`/`acos` were removed outright through change 0-2 (design.md §8.3
+"Removed: tan asin acos (v1)") and restored as shim wrappers in
+`scripting-ui-and-replication` (change 3) once the fdlibm ports existed to back them;
+`math.log2`/`log10` are new in change 3, additive entries alongside the unchanged
+`math.log(x[, b])`. `setmetatable` silently drops
 `__gc`/`__mode`/`__close` from the copy it installs (the call succeeds without them, so no
 finalizer, weak table or to-be-closed variable can ever exist) and installs that frozen
 copy; a target whose current metatable the host owns (a frozen proxy's, `_ENV`'s, the
@@ -160,7 +165,8 @@ case address-free, removes `luaL_testudata`/`luaL_checkudata` (their `_test` sub
 is on the release-surface denylist), pins the locale decimal point and `strcmp` (not
 `strcoll`), turns off FP contraction, adds the matcher step budget, and stubs
 `lundump.c` against bytecode.
-`math.sin/cos/atan/exp/log` and `^` route through `ScriptMath` (never libm);
+`math.sin/cos/tan/asin/acos/atan/exp/log/log2/log10` and `^` route through `ScriptMath`
+(never libm; change 3 added tan/asin/acos/log2/log10 to the table);
 `math.random`/`randomseed` draw from the environment's `ScriptRandomStream`; a state
 refuses construction unless the process locale is pinned. The `elysmoke` `script runtime
 (vs script-runtime goldens)` section runs a fixed corpus through ten checks — state

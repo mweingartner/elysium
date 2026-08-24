@@ -68,6 +68,18 @@ typedef struct elysium_math_table {
   elysium_math_unary_fn log;
   elysium_math_binary_fn atan2;
   elysium_math_binary_fn pow;
+  /* scripting-ui-and-replication (change 3): design.md §16 row 3 / Decision 10
+  ** ("tan/asin/acos/log2/log10 completed in phase 3"). tan/asin/acos replace the
+  ** native lmathlib functions change 0 removed (elysium_sandbox.c no longer nils
+  ** them out — it wraps them exactly like sin/cos/exp/log); log2/log10 are new,
+  ** additive math table entries (design.md Appendix E point 4 keeps math.log(x,b)
+  ** == log(x)/log(b) for every base unchanged — log2/log10 never feed that path).
+  */
+  elysium_math_unary_fn tan;
+  elysium_math_unary_fn asin;
+  elysium_math_unary_fn acos;
+  elysium_math_unary_fn log2;
+  elysium_math_unary_fn log10;
 } elysium_math_table;
 
 /* Host log sink (print, panic diagnostics). 'envId' identifies the environment that

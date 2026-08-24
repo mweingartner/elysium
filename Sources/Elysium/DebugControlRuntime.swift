@@ -48,7 +48,7 @@ final class DebugControlRuntime {
             .readSnapshots, .replayEvents, .captureFrames, .worldLifecycle,
             .simulationControl, .playerControl, .environmentMutation, .entityControl,
             .interactionControl, .screenControl, .templateControl, .rpgControl,
-            .lanControl,
+            .lanControl, .scriptControl,
         ], maximumRequestPayloadBytes: 64 * 1_024,
            maximumSnapshotPayloadBytes: DebugFrameLimits.absoluteMaximumPayloadBytes,
            maximumEventReplayCount: Self.maximumEvents)
@@ -443,6 +443,59 @@ final class DebugControlRuntime {
             app.game.player.selectedSlot = slot
             mutate("inventory.selected")
             return ["slot": .integer(Int64(slot))]
+
+        // scripting-ui-and-replication (change 3), design.md §12: `script.*` routes
+        // straight through `ScriptingCommands.run(command: "script", ...)` — the same
+        // pure, validator/trust/kill-switch-gated executors `/script` uses (never a
+        // second implementation) — so every existing `/script` invariant (LAN-client
+        // refusal, the 8-scripts-per-object cap, the validator, the trust gate)
+        // applies unchanged. `ScriptingCommands.run` reconstructs multi-line `source`
+        // by `.joined(separator: " ")`-ing everything after the fixed-position
+        // arguments, so the source is always passed as exactly one trailing array
+        // element (never word-split) to keep embedded newlines byte-exact.
+        case "script.list":
+            try requireWorld(authoritative: true)
+            let target = (try optionalString(a, "target", maximumBytes: 128)) ?? "looking"
+            return scriptCommandResponse(["list", target])
+        case "script.show":
+            try requireWorld(authoritative: true)
+            let target = (try optionalString(a, "target", maximumBytes: 128)) ?? "looking"
+            let name = try boundedString(a, "name", maximumBytes: 32)
+            return scriptCommandResponse(["show", target, name])
+        case "script.attach":
+            try requireWorld(authoritative: true)
+            let target = (try optionalString(a, "target", maximumBytes: 128)) ?? "looking"
+            let name = try boundedString(a, "name", maximumBytes: 32)
+            let source = try boundedString(a, "source", maximumBytes: 16_384)
+            let mode = (try optionalString(a, "mode", maximumBytes: 16)) ?? "module"
+            guard mode == "module" || mode == "handler" else {
+                throw RuntimeError(.invalidArguments, "mode must be 'module' or 'handler'")
+            }
+            var arguments = ["attach", target, name, mode]
+            if mode == "handler" {
+                arguments.append(try boundedString(a, "event", maximumBytes: 64))
+            }
+            arguments.append(source)
+            let response = scriptCommandResponse(arguments)
+            if case .bool(true)? = response["ok"] {
+                mutate("script.attached", payload: ["target": .string(target), "name": .string(name)])
+            }
+            return response
+        case "script.run":
+            try requireWorld(authoritative: true)
+            let target = (try optionalString(a, "target", maximumBytes: 128)) ?? "looking"
+            let source = try boundedString(a, "source", maximumBytes: 16_384)
+            return scriptCommandResponse(["run", target, source])
+        case "script.journal":
+            try requireWorld(authoritative: true)
+            var arguments = ["journal"]
+            if let limit = try optionalInt(a, "limit") {
+                guard (1...256).contains(limit) else {
+                    throw RuntimeError(.invalidArguments, "limit must be 1...256")
+                }
+                arguments.append(String(limit))
+            }
+            return scriptCommandResponse(arguments)
         case "interaction.action":
             try requireWorld(authoritative: true)
             let action = try decodeAIAgentAction(a)
@@ -1443,6 +1496,17 @@ final class DebugControlRuntime {
     private func mutate(_ name: String, payload: [String: JSONValue] = [:]) {
         if revision < UInt64.max { revision += 1 }
         emit(name, payload: payload)
+    }
+
+    /// `script.*` ops share this one call site into `ScriptingCommands.run` — the
+    /// design.md §12 Core-side executors — so every `script.*` op returns the exact
+    /// same shape (`ok`, `lines`) and can never drift from what `/script` itself
+    /// would have done for the same arguments.
+    private func scriptCommandResponse(_ arguments: [String]) -> [String: JSONValue] {
+        let result = ScriptingCommands.run(
+            command: "script", arguments: arguments, context: app.game.scriptingCommandContext()
+        )
+        return ["ok": .bool(result.ok), "lines": .array(result.lines.map(JSONValue.string))]
     }
 
     private func currentWorldIdentity() -> RuntimeWorldIdentity {

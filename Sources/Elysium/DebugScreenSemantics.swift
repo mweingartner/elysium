@@ -163,6 +163,7 @@ struct DebugScreenSemantics {
         case is TradingScreen: return "trading"
         case is CreativeScreen: return "creative"
         case is TemplateBrowserScreen: return "templates"
+        case is InspectorScreen: return "inspector"
         case is RPGCharacterScreen: return "rpg"
         case is MapScreen: return "map"
         case is ChatScreen: return "chat"

@@ -26,6 +26,11 @@ public let LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES = LAN_MULTIPLAYER_MAX_CLI
 public let LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS = 64
 public let LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES = 64
 public let LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITY_SLOTS = 64
+/// scripting-ui-and-replication (change 3), design.md §11: "64 objects/batch". A whole
+/// snapshot's canonical `AttrValueCodec` JSON text is additionally capped at 4 KiB
+/// (`LANObjectAttributeSnapshot.init`), matching "<= 4 KiB per object".
+public let LAN_MULTIPLAYER_MAX_REPLICATION_OBJECT_ATTRIBUTES = 64
+public let LAN_MULTIPLAYER_MAX_OBJECT_ATTRIBUTES_JSON_BYTES = 4_096
 public let LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT = CHUNK_W * SECTION_H * CHUNK_W
 public let LAN_MULTIPLAYER_MAX_CHUNK_REQUEST_RADIUS = 1
 public let LAN_MULTIPLAYER_DEFAULT_CHUNK_REQUEST_RADIUS = 1
@@ -1100,6 +1105,52 @@ public struct LANWorldStateSnapshot: Codable, Equatable {
     }
 }
 
+/// scripting-ui-and-replication (change 3), design.md §11: "`LANReplicationBatch.objectAttributes:
+/// [LANObjectAttributeSnapshot{ref, revision, attrs}]`". `attrsJSON` reuses `AttrValueCodec`'s
+/// existing canonical, hostile-bytes-safe JSON text (the same codec/caps `AttributeStore`
+/// persistence already uses) instead of a second, parallel bounded value type — the per-value
+/// caps (depth <= 4, <= 64 keys, strings <= 4 KiB) are exactly `ScriptingStorageCaps.defaults
+/// .value`, unchanged; a whole record's encoded text is additionally capped at 4 KiB here
+/// (design.md's own "<= 4 KiB per object"). Applied display-only on guests, never
+/// `AttributeStore` and never re-broadcast (`LANMultiplayerClientSession.objectAttributes`).
+public struct LANObjectAttributeSnapshot: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case ref
+        case revision
+        case attrsJSON
+    }
+
+    /// `ObjectRef.canonical` — re-parsed and validated again on apply (`ObjectRef.parse`); an
+    /// unparseable ref is dropped there, never trusted from the wire.
+    public var ref: String
+    /// `ObjectRecord.revision` — a guest rejects a snapshot whose revision is not strictly newer
+    /// than what it already mirrors, so a stale batch (including one replayed after a host
+    /// restart) can never regress the mirror (design.md §11).
+    public var revision: UInt64
+    /// Canonical `AttrValueCodec.encode(.map(attrs))` text, capped at
+    /// `LAN_MULTIPLAYER_MAX_OBJECT_ATTRIBUTES_JSON_BYTES`; replaced with the empty-map encoding
+    /// when the source exceeds the cap, so this type is always a valid, bounded value regardless
+    /// of caller behavior (matching `LANBlockEntitySnapshot.init`'s clamp-at-construction
+    /// discipline).
+    public var attrsJSON: String
+
+    public init(ref: String, revision: UInt64, attrsJSON: String) {
+        self.ref = prefixByUTF8Bytes(cleanSingleLine(ref), maxBytes: 96)
+        self.revision = revision
+        self.attrsJSON = attrsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_ATTRIBUTES_JSON_BYTES
+            ? attrsJSON : "{}"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            ref: try c.decode(String.self, forKey: .ref),
+            revision: try c.decode(UInt64.self, forKey: .revision),
+            attrsJSON: try c.decode(String.self, forKey: .attrsJSON)
+        )
+    }
+}
+
 public struct LANReplicationBatch: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case tick
@@ -1113,6 +1164,7 @@ public struct LANReplicationBatch: Codable, Equatable {
         case entitySnapshotsComplete
         case inventories
         case blockEntities
+        case objectAttributes
     }
 
     public var tick: Int
@@ -1126,6 +1178,10 @@ public struct LANReplicationBatch: Codable, Equatable {
     public var entitySnapshotsComplete: Bool
     public var inventories: [LANPlayerInventorySnapshot]
     public var blockEntities: [LANBlockEntitySnapshot]
+    /// scripting-ui-and-replication (change 3), design.md §11. Additive — absent on the wire
+    /// (an older peer, or a batch that carries none this tick) decodes as `[]`, same discipline
+    /// as every other optional-on-the-wire array field here.
+    public var objectAttributes: [LANObjectAttributeSnapshot]
 
     public init(
         tick: Int,
@@ -1138,7 +1194,8 @@ public struct LANReplicationBatch: Codable, Equatable {
         entities: [LANEntitySnapshot] = [],
         entitySnapshotsComplete: Bool = false,
         inventories: [LANPlayerInventorySnapshot] = [],
-        blockEntities: [LANBlockEntitySnapshot] = []
+        blockEntities: [LANBlockEntitySnapshot] = [],
+        objectAttributes: [LANObjectAttributeSnapshot] = []
     ) {
         self.tick = tick
         self.fullSnapshot = fullSnapshot
@@ -1151,6 +1208,7 @@ public struct LANReplicationBatch: Codable, Equatable {
         self.entitySnapshotsComplete = entitySnapshotsComplete
         self.inventories = Array(inventories.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES))
         self.blockEntities = Array(blockEntities.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES))
+        self.objectAttributes = Array(objectAttributes.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_OBJECT_ATTRIBUTES))
     }
 
     public init(from decoder: Decoder) throws {
@@ -1166,7 +1224,8 @@ public struct LANReplicationBatch: Codable, Equatable {
             entities: try c.decodeIfPresent([LANEntitySnapshot].self, forKey: .entities) ?? [],
             entitySnapshotsComplete: try c.decodeIfPresent(Bool.self, forKey: .entitySnapshotsComplete) ?? false,
             inventories: try c.decodeIfPresent([LANPlayerInventorySnapshot].self, forKey: .inventories) ?? [],
-            blockEntities: try c.decodeIfPresent([LANBlockEntitySnapshot].self, forKey: .blockEntities) ?? []
+            blockEntities: try c.decodeIfPresent([LANBlockEntitySnapshot].self, forKey: .blockEntities) ?? [],
+            objectAttributes: try c.decodeIfPresent([LANObjectAttributeSnapshot].self, forKey: .objectAttributes) ?? []
         )
     }
 
@@ -1177,9 +1236,11 @@ public struct LANReplicationBatch: Codable, Equatable {
             entities.count <= LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES &&
             inventories.count <= LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORIES &&
             blockEntities.count <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITIES &&
+            objectAttributes.count <= LAN_MULTIPLAYER_MAX_REPLICATION_OBJECT_ATTRIBUTES &&
             chunkSections.allSatisfy(\.isValidRLE) &&
             inventories.allSatisfy { $0.slots.count <= LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS } &&
-            blockEntities.allSatisfy { $0.slots.count <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITY_SLOTS }
+            blockEntities.allSatisfy { $0.slots.count <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITY_SLOTS } &&
+            objectAttributes.allSatisfy { $0.attrsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_ATTRIBUTES_JSON_BYTES }
     }
 }
 

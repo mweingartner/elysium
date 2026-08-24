@@ -3826,3 +3826,165 @@ final class LANReplicationTests: XCTestCase {
         }
     }
 }
+
+// =============================================================================
+// scripting-ui-and-replication (change 3), design.md §11: `LANObjectAttributeSnapshot`,
+// `makeLANObjectAttributeSnapshots`, and the guest-side mirror in
+// `LANMultiplayerClientSession.apply(_:)` (hostile bytes, stale-revision rejection, and the
+// chunk-section-replace reconciliation the master brief calls out against 1a's D5-adjacent
+// note on `applyLANChunkSectionSnapshot`).
+// =============================================================================
+final class LANObjectAttributeReplicationTests: XCTestCase {
+    override class func setUp() {
+        super.setUp()
+        registerAllBlocks()
+        registerAllEntities()
+    }
+
+    // MARK: - LANObjectAttributeSnapshot bounds itself at construction
+
+    func testSnapshotClampsRefLengthAndOversizedJSON() {
+        let longRef = String(repeating: "x", count: 500)
+        let hugeJSON = "{\"k\":\"" + String(repeating: "y", count: 5_000) + "\"}"
+        let snapshot = LANObjectAttributeSnapshot(ref: longRef, revision: 1, attrsJSON: hugeJSON)
+        XCTAssertLessThanOrEqual(snapshot.ref.utf8.count, 96)
+        XCTAssertEqual(snapshot.attrsJSON, "{}", "oversized JSON is replaced with the empty-map encoding, never truncated mid-token")
+
+        let roundTrip = try! JSONDecoder().decode(
+            LANObjectAttributeSnapshot.self, from: JSONEncoder().encode(snapshot)
+        )
+        XCTAssertEqual(roundTrip, snapshot)
+    }
+
+    // MARK: - makeLANObjectAttributeSnapshots: sorted, bounded, revision-tagged
+
+    func testMakeSnapshotsIsSortedAndCarriesRevision() {
+        let host = FakeObjectGraphHost()
+        let world = World(dim: .overworld, seed: 3)
+        let chunk = Chunk(cx: 0, cz: 0, minY: world.info.minY, height: world.info.height)
+        chunk.status = .generated
+        world.setChunk(chunk)
+        host.worldsByDim[.overworld] = world
+        _ = world.setBlock(1, 64, 1, Int(cell(B.chest)))
+        _ = world.setBlock(2, 64, 2, Int(cell(B.chest)))
+        let graph = ObjectGraph(host: host)
+        let store = AttributeStore(graph: graph)
+        let refA = ObjectRef.block(dim: .overworld, x: 1, y: 64, z: 1)
+        let refB = ObjectRef.block(dim: .overworld, x: 2, y: 64, z: 2)
+        XCTAssertEqual(store.set(refB, "mood", .string("angry")), .success(.string("angry")))
+        XCTAssertEqual(store.set(refA, "mood", .string("calm")), .success(.string("calm")))
+
+        let snapshots = makeLANObjectAttributeSnapshots(host: host, store: store)
+        XCTAssertEqual(snapshots.map(\.ref), [refA.canonical, refB.canonical].sorted(),
+                        "sorted by ref.canonical for determinism")
+        for snapshot in snapshots {
+            XCTAssertGreaterThan(snapshot.revision, 0)
+            guard case .success(.map(let attrs)) = AttrValueCodec.decode(snapshot.attrsJSON, caps: .defaults) else {
+                return XCTFail("expected a decodable map")
+            }
+            XCTAssertNotNil(attrs["mood"])
+        }
+    }
+
+    func testMakeSnapshotsIsBoundedToMaxCount() {
+        let host = FakeObjectGraphHost()
+        let world = World(dim: .overworld, seed: 5)
+        let chunk = Chunk(cx: 0, cz: 0, minY: world.info.minY, height: world.info.height)
+        chunk.status = .generated
+        world.setChunk(chunk)
+        host.worldsByDim[.overworld] = world
+        let graph = ObjectGraph(host: host)
+        let store = AttributeStore(graph: graph)
+        for i in 0..<10 {
+            _ = world.setBlock(i, 64, 0, Int(cell(B.chest)))
+            _ = store.set(.block(dim: .overworld, x: i, y: 64, z: 0), "n", .int(Int64(i)))
+        }
+        let snapshots = makeLANObjectAttributeSnapshots(host: host, store: store, maxCount: 3)
+        XCTAssertEqual(snapshots.count, 3)
+    }
+
+    // MARK: - client-side apply: hostile bytes, stale revision
+
+    func testClientRejectsUnparseableRefAndMalformedJSON() {
+        let client = LANMultiplayerClientSession()
+        let batch = LANReplicationBatch(
+            tick: 1, fullSnapshot: false,
+            objectAttributes: [
+                LANObjectAttributeSnapshot(ref: "not a valid ref!!", revision: 1, attrsJSON: "{}"),
+                LANObjectAttributeSnapshot(ref: ObjectRef.world.canonical, revision: 1, attrsJSON: "not json"),
+            ]
+        )
+        let report = client.apply(batch)
+        XCTAssertEqual(report.appliedObjectAttributes, 0)
+        XCTAssertEqual(report.ignoredInvalidObjectAttributes, 2)
+        XCTAssertTrue(client.objectAttributes.isEmpty)
+    }
+
+    func testClientAppliesValidAttributesAndRejectsStaleRevision() {
+        let client = LANMultiplayerClientSession()
+        let ref = ObjectRef.block(dim: .overworld, x: 5, y: 64, z: 5)
+        let fresh = LANReplicationBatch(
+            tick: 1, fullSnapshot: false,
+            objectAttributes: [LANObjectAttributeSnapshot(
+                ref: ref.canonical, revision: 5, attrsJSON: AttrValueCodec.encode(.map(["mood": .string("angry")]))
+            )]
+        )
+        var report = client.apply(fresh)
+        XCTAssertEqual(report.appliedObjectAttributes, 1)
+        XCTAssertEqual(client.objectAttributes[ref.canonical]?.revision, 5)
+
+        // A strictly older revision (a stale replay, or a host that has since restarted onto an
+        // older save) never regresses the mirror.
+        let stale = LANReplicationBatch(
+            tick: 2, fullSnapshot: false,
+            objectAttributes: [LANObjectAttributeSnapshot(
+                ref: ref.canonical, revision: 2, attrsJSON: AttrValueCodec.encode(.map(["mood": .string("stale")]))
+            )]
+        )
+        report = client.apply(stale)
+        XCTAssertEqual(report.appliedObjectAttributes, 0)
+        XCTAssertEqual(report.ignoredStaleObjectAttributes, 1)
+        XCTAssertEqual(client.objectAttributes[ref.canonical]?.revision, 5, "the newer, already-mirrored revision must survive")
+    }
+
+    // MARK: - reconciliation: a bulk chunk-section replace purges stale mirrored block attrs
+
+    /// 1a's own note on `applyLANChunkSectionSnapshot`: it bulk-overwrites every cell in a whole
+    /// section directly, without running the single-block "does this replace clear the object's
+    /// entries" identity check design.md §17 Decision 5 relies on elsewhere. A guest's attribute
+    /// mirror must not keep showing a now-stale record for a position whose block just changed
+    /// out from under it via that path — unless the very same batch also refreshed it.
+    func testChunkSectionReplaceReconcilesStaleMirroredBlockAttributes() {
+        let client = LANMultiplayerClientSession()
+        let staleRef = ObjectRef.block(dim: .overworld, x: 3, y: 64, z: 3)
+        let refreshedRef = ObjectRef.block(dim: .overworld, x: 5, y: 64, z: 5)
+        let outsideRef = ObjectRef.block(dim: .overworld, x: 100, y: 64, z: 100)
+
+        let seed = LANReplicationBatch(
+            tick: 1, fullSnapshot: false,
+            objectAttributes: [
+                LANObjectAttributeSnapshot(ref: staleRef.canonical, revision: 1, attrsJSON: "{}"),
+                LANObjectAttributeSnapshot(ref: outsideRef.canonical, revision: 1, attrsJSON: "{}"),
+            ]
+        )
+        XCTAssertEqual(client.apply(seed).appliedObjectAttributes, 2)
+
+        let section = LANChunkSectionSnapshot(
+            dimension: 0, cx: 0, cz: 0, sectionY: 4, minY: 64,
+            cells: Array(repeating: UInt16(Int(B.dirt) << 4), count: LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT)
+        )
+        let replaceBatch = LANReplicationBatch(
+            tick: 2, fullSnapshot: false,
+            chunkSections: [section],
+            objectAttributes: [
+                LANObjectAttributeSnapshot(ref: refreshedRef.canonical, revision: 2, attrsJSON: "{}"),
+            ]
+        )
+        let report = client.apply(replaceBatch)
+
+        XCTAssertNil(client.objectAttributes[staleRef.canonical], "stale mirrored entry inside the replaced section must be purged")
+        XCTAssertNotNil(client.objectAttributes[refreshedRef.canonical], "an entry refreshed by the SAME batch survives even though its section also replaced")
+        XCTAssertNotNil(client.objectAttributes[outsideRef.canonical], "an entry outside the replaced section's bounds is untouched")
+        XCTAssertEqual(report.reconciledObjectAttributes, 1)
+    }
+}

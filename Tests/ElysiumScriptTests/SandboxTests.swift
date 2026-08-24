@@ -568,6 +568,10 @@ final class SandboxTests: XCTestCase {
 
     // MARK: - Exact allowlist surface (spec "Exact standard-library allowlist")
 
+    /// scripting-ui-and-replication (change 3): `tan`/`asin`/`acos` move from `mathRemoved`
+    /// to `mathMembers` (restored — design.md §8.3 "Removed: tan asin acos (v1)", completed
+    /// per §16 row 3/Decision 10) and `log2`/`log10` are new `mathMembers` entries (additive;
+    /// `math.log(x, b)` itself is unchanged for every base).
     func testAllowlistSurfaceHash() throws {
         let state = try ScriptTestSupport.makeState()
         let outcome = try ScriptTestSupport.run(
@@ -606,8 +610,9 @@ final class SandboxTests: XCTestCase {
                 'abs', 'ceil', 'deg', 'floor', 'fmod', 'huge', 'maxinteger', 'mininteger', 'modf',
                 'pi', 'rad', 'sqrt', 'tointeger', 'type', 'ult', 'min', 'max',
                 'random', 'randomseed', 'sin', 'cos', 'atan', 'exp', 'log',
+                'tan', 'asin', 'acos', 'log2', 'log10',
             }
-            local mathRemoved = { 'tan', 'asin', 'acos', 'pow', 'cosh', 'sinh', 'tanh', 'frexp', 'ldexp', 'log10' }
+            local mathRemoved = { 'pow', 'cosh', 'sinh', 'tanh', 'frexp', 'ldexp' }
             local utf8Members = { 'char', 'charpattern', 'codepoint', 'len', 'offset', 'codes' }
 
             local problems = {}

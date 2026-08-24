@@ -38,6 +38,12 @@ public struct DebugCapabilityID: RawRepresentable, Codable, Hashable, Sendable, 
     public static let templateControl = Self(rawValue: "template.control")
     public static let rpgControl = Self(rawValue: "rpg.control")
     public static let lanControl = Self(rawValue: "lan.control")
+    /// scripting-ui-and-replication (change 3), design.md §12: `DebugControlRuntime`
+    /// (debug build only) is one of the four documented `ScriptingCommands` callers
+    /// (alongside `CommandsM.runCommand`, `ELYSIUM_CMD`, and tests) — `script.*` ops
+    /// route straight through the same host-only, validator-gated executors `/script`
+    /// uses, never a second implementation.
+    public static let scriptControl = Self(rawValue: "script.control")
 }
 
 public struct DebugCapabilities: Codable, Equatable, Sendable {
