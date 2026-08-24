@@ -16,6 +16,11 @@ public func playerAttack(_ player: Player, _ target: Entity) {
     player.resetAttackCooldown()
     player.attackAnim = 1
     player.lastHurtTarget = target
+    // event-bus (change 1b): `player.attacked` (design.md §7.2, "playerAttack").
+    player.world.hooks.raiseScriptEvent(
+        .playerAttacked, .player, ["target": .ref(scriptRef(for: target).canonical)],
+        .player, target.type
+    )
 
     let held = player.mainHand
     let tool = held.map { itemDef($0.id).tool } ?? nil

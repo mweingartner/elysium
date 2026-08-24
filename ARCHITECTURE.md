@@ -322,8 +322,10 @@ get/set through it. `BlockStateCodec` (`BlockStateCodec.swift`) is a verified me
 block shape/id (door `open`/`hinge` redirect to the half the engine actually stores them on, lit
 swaps are id changes not meta writes) plus the block-family table that implements the identity
 rule: a block's scripted attribute record survives a meta-only change or a same-family id swap
-(lit pairs, soil/sapling-log families, an RPG guarded-temporary swap and its eventual restore) and
-is cleared on any other id change — the single site in `World.setBlock` that owns this decision.
+(lit pairs, soil/sapling-log families, an RPG guarded-temporary swap and its eventual restore); any
+other id change queues the record for removal in `World.pendingObjectRecordDrops` rather than
+clearing it immediately — the single site in `World.setBlock` that owns this decision, and the
+event bus's own seam into it (below).
 
 `AttributeStore` (`AttributeStore.swift`) is the sole mutation executor (`get`/`list`/`set`/
 `define`/`remove`/`record`) and the sole place attribute writes bump a per-record revision counter
@@ -347,11 +349,75 @@ a fresh id is minted instead. Chunk blobs gained a parallel `objects` tail (keye
 the existing block-entity tail, and `WorldRecord.scriptsEnabled` is the trust gate later scripting
 changes will read before ever compiling a world-authored script.
 
+## Event bus
+
+`EventBus` (`Scripting/EventBus.swift`) is the eventing substrate later scripting changes execute
+handlers against — this change delivers the substrate with no script execution of its own (no
+`LuaState` involved anywhere in this layer). `EventKind` (`EventKind.swift`) is a validated string,
+not a closed enum — the v1 catalog (`"attribute.changed"`, `"block.broken"`, …) and a script/
+player-defined custom kind (`"lumber.milestone"`) are structurally indistinguishable, matching
+design.md §7.1's own typing. `ScriptEvent` carries `seq` (assigned at enqueue, the sort key for
+delivery order), `tick` (`rpgSimulationTick`, not `world.time` — the one clock the Lua API will
+expose), `subject`, `payload`, `source`, and an internal `cascadeDepth`/`subjectType` the bus alone
+uses for cap enforcement and kind-wildcard type-filter matching.
+
+Subscriptions come in two flavors sharing one matching shape (`SubscriptionTarget` — `.object(ref)`,
+`.kind(kind, typeFilter)`, `.any`): **persisted** (`Subscription`, `/on`/`/unsubscribe`, natural-key
+upsert, stored in `WorldRecord.scriptRegistry` via `SubscriptionRegistryCodec` — the same "opaque
+document, tolerant per-entry decode, encoded only when non-empty" discipline as `ObjectRecordCodec`
+and `objects`) and **script-owned** (`ScriptOwnedSubscription`, in-memory only, an opaque `token`
+1c will populate with a real Lua closure identity — this change owns only the data shape and the
+load/unload bookkeeping). Both share one ascending id space so §7.4's "persisted and script-owned
+subscriptions in ascending id" delivery order is unambiguous without a secondary sort key.
+
+Delivery (`EventBus.runDeliveryPhase`) drains the pending queue in `seq` order — always sorted by
+construction (append-only; a coalesce removes the stale entry and re-appends with a fresh seq,
+never mutates in place) — up to 2,048 deliveries and 8 cascade-depth levels per tick, computing each
+event's ordered recipient list and handing it to a `delivery` closure that is `nil` in this change
+(no handler runtime exists yet — 1c plugs a real dispatcher in without any other API change).
+Coalescing merges undelivered `attribute.changed` (per subject+key) and `block.changed` (per
+position) entries, keeping the first `old`/last `new`/last `seq`; a full queue or an exhausted
+per-handler budget (`EventBus.withHandlerContext`) drops the excess deterministically and raises
+exactly one `script.overBudget` per tick.
+
+Funnels reach the bus through two seams: a new `WorldHooks.raiseScriptEvent` closure (mirroring
+`onBlockChanged`/`playSound`'s own "the engine calls a hook, the host wires it" shape) that
+`GameCore.hookWorld` wires host-only — used by `World.addEntity/removeEntity`, `notifyBlock`,
+`LivingEntity.hurt/die/heal`, `Mob.setTarget`, `Interact.placeBlock/finishBreaking/useBed`,
+`Combat.playerAttack`, and `Explosion.explode` — and a pre-filtered `EventBus.recordBlockChange`
+called directly from `hookWorld`'s extended `onBlockChanged` closure (the one funnel that gates on
+an existing `ObjectRecord` or a matching kind-wildcard subscription *before* decoding block state
+through `BlockStateCodec`, per design.md §6.6's zero-scripts fast path). `AttributeStore.onChange`
+(now carrying the mutation's `Provenance.Author` so `attribute.changed`'s `source` is accurate)
+feeds custom-attribute writes in; a per-tick observable-built-in diff (`GameCore+Scripting.swift`,
+gated on `EventBus.hasAnySubscription`/`hasAttributeChangedInterest` so an unobserved world pays
+nothing) feeds `health`/`max_health`/`on_fire`/`target`/`hunger`/`xp_level`/`dimension`/
+`held_item`/`sitting`/`baby`/`tamed` and world/dimension `difficulty`/`day_phase`/`raining`/
+`thundering`, plus the position-quantized-to-1/10-block special case that is excluded from
+unfiltered subscriptions and `/events recent` alike. Two funnels (`player.pickedUp`/`player.dropped`)
+are a before/after inventory diff around their real call sites in `GameCore.swift` rather than an
+instrumented call inside `Player.swift`, which this change never touches; `player.leveled` is
+likewise derived from the `xp_level` diff rather than a direct `Player.addXP` hook, for the same
+reason.
+
+The event-bus tick phase (`GameCore.runEventBusPhase`) sits after the dead-entity sweep and before
+`tickEntityTriggers`, host-only and pause-aware like the sweep it follows: diff, then
+`EventBus.runDeliveryPhase`, then `World.drainPendingObjectRecordDrops` (so a `block.replaced`
+delivery always sees the record it describes, and the record is dropped only *after* delivery — the
+seam the previous section's `World.setBlock` comment points to). `GameCore.unloadChunk` calls
+`handleScriptedChunkUnload` before capturing the chunk record for persistence: it finalizes any
+pending record drop for a cell in that chunk and drops every script-owned subscription rooted at an
+object leaving scope, in the sorted order the caller already computed.
+
+`ScriptingCommands` gained `/on <target> <event> [attr] <script.handler>`, `/unsubscribe <id>`, and
+`/events recent|emit` — host-only via the same `lanGatedCommands` set and `CommandsM` choke point as
+`/attr`/`/inspect`/`/objects`/`/ai`.
+
 ## The test harness (elysmoke)
 
-469 checks across 17 suites, run with `elysium test`:
+478 checks across 18 suites, run with `elysium test`:
 
-random/noise/math → block & item registries (counts + id spot checks) → biomes (all 63 defs + 2,000 biome selections) → terrain (full pipeline hashes on 2 seeds) → features (whole-chunk generation across all three dimensions) → atlas (pixel-identical tiles) → mesher (vertex/index hashes) → world sim (light, fluids over hundreds of ticks, RNG lockstep) → items (recipes/enchants/potions/loot rolls) → fdlibm (911 sin/cos/atan2 probes, 927 exp/log probes, 653 pow probes) → script runtime (embedded Lua sandbox/determinism corpus: sandbox surface, iteration order, ordinal keys, math/pow/random, strings/format/errors, address-free output, instruction/allocation budget trips, two-state reproducibility — `openspec/changes/embed-lua-runtime/design.md` Decision 13) → entities (55-mob zoo × 200 ticks, combat, scripted player physics, trades, pathfinding, spawning) → systems (crafting probes, BE timelines, a full redstone contraption, explosion crater, interactions, portals) → and a final suite that *independently derives* vanilla physics constants instead of trusting goldens.
+random/noise/math → block & item registries (counts + id spot checks) → biomes (all 63 defs + 2,000 biome selections) → terrain (full pipeline hashes on 2 seeds) → features (whole-chunk generation across all three dimensions) → atlas (pixel-identical tiles) → mesher (vertex/index hashes) → world sim (light, fluids over hundreds of ticks, RNG lockstep) → items (recipes/enchants/potions/loot rolls) → fdlibm (911 sin/cos/atan2 probes, 927 exp/log probes, 653 pow probes) → script runtime (embedded Lua sandbox/determinism corpus: sandbox surface, iteration order, ordinal keys, math/pow/random, strings/format/errors, address-free output, instruction/allocation budget trips, two-state reproducibility — `openspec/changes/embed-lua-runtime/design.md` Decision 13) → event bus (delivery order, coalescing, queue/cascade/handler-budget cap trips, persisted-subscription round trip, the pre-filtered `block.changed` funnel — design.md §7) → entities (55-mob zoo × 200 ticks, combat, scripted player physics, trades, pathfinding, spawning) → systems (crafting probes, BE timelines, a full redstone contraption, explosion crater, interactions, portals) → and a final suite that *independently derives* vanilla physics constants instead of trusting goldens.
 
 Golden discipline: reference goldens are frozen (they have no generator); behavior-change goldens (`ELYSIUM_REGOLD=1`) are regenerated only deliberately, with each diff justified. Content added after the baseline was frozen (e.g. appended vines, the Flying Wand, and copper tools) is excluded from reference hashes via fixed prefix ranges, never by regenerating reference baselines.
 

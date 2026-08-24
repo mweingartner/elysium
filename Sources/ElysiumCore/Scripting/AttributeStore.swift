@@ -36,14 +36,17 @@ public enum AttributeError: Error, Equatable {
 public struct AttributeStore {
     public let graph: ObjectGraph
     public let caps: ScriptingStorageCaps
-    /// The 1b `attribute.changed` seam — `nil` in this change. Called with
-    /// `(ref, name, oldValue, newValue, revision)` after every successful
-    /// mutation; `newValue == nil` on `remove`.
-    public var onChange: ((ObjectRef, String, AttrValue?, AttrValue?, UInt64) -> Void)?
+    /// The event-bus `attribute.changed` seam (change 1b). Called with
+    /// `(ref, name, oldValue, newValue, revision, author)` after every
+    /// successful mutation; `newValue == nil` on `remove`. `author` is the
+    /// same `Provenance.Author` recorded on the entry — 1b's caller maps it
+    /// to an `EventSource` so `attribute.changed`'s `source` is accurate once
+    /// scripts/the AI (1c/phase 2) also write through this store.
+    public var onChange: ((ObjectRef, String, AttrValue?, AttrValue?, UInt64, Provenance.Author) -> Void)?
 
     public init(
         graph: ObjectGraph, caps: ScriptingStorageCaps = .defaults,
-        onChange: ((ObjectRef, String, AttrValue?, AttrValue?, UInt64) -> Void)? = nil
+        onChange: ((ObjectRef, String, AttrValue?, AttrValue?, UInt64, Provenance.Author) -> Void)? = nil
     ) {
         self.graph = graph
         self.caps = caps
@@ -93,7 +96,7 @@ public struct AttributeStore {
         let old = Self.extractValue(record.entries[name])
         record = candidate
         Self.writeRecord(record, to: live, host: graph.host)
-        onChange?(ref, name, old, value, record.revision)
+        onChange?(ref, name, old, value, record.revision, author)
         return .success(value)
     }
 
@@ -123,7 +126,7 @@ public struct AttributeStore {
         let old = Self.extractValue(record.entries[name])
         record = candidate
         Self.writeRecord(record, to: live, host: graph.host)
-        onChange?(ref, name, old, value, record.revision)
+        onChange?(ref, name, old, value, record.revision, author)
         return .success((value, forced))
     }
 
@@ -142,7 +145,7 @@ public struct AttributeStore {
         record.entries.removeValue(forKey: name)
         record.revision = newRevision
         Self.writeRecord(record, to: live, host: graph.host)
-        onChange?(ref, name, oldValue, nil, record.revision)
+        onChange?(ref, name, oldValue, nil, record.revision, .player)
         return .success((existed: true, forced: readonly && force))
     }
 

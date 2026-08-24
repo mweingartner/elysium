@@ -688,6 +688,9 @@ private func useBed(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int, _ c: Int) 
     player.sleepTicks = 1
     player.bedPos = (x, y, z)
     player.setPos(Double(x) + 0.5, Double(y) + 0.6, Double(z) + 0.5)
+    // event-bus (change 1b): `player.slept` (design.md §7.2, "useBed") —
+    // only the actual sleep path, not the explode/refusal returns above.
+    world.hooks.raiseScriptEvent(.playerSlept, .player, [:], .player, nil)
     return true
 }
 
@@ -1262,6 +1265,15 @@ public func placeBlock(_ ctx: InteractCtx, _ hit: RaycastHit, _ blockId: Int, _ 
     player.stats["blocksPlaced"] = (player.stats["blocksPlaced"] ?? 0) + 1
     world.emitVibration(Double(px), Double(py), Double(pz), 13, player)
     rpgAwardPoweredMechanismPlacement(player, blockID: blockId, x: px, y: py, z: pz)
+    // event-bus (change 1b): `block.placed` (design.md §7.2,
+    // "Interact.placeBlock"). `world.hooks.raiseScriptEvent` is already a
+    // host-only no-op on a LAN client (wired in `GameCore.hookWorld`) — no
+    // extra guard needed here.
+    world.hooks.raiseScriptEvent(
+        .blockPlaced, .block(dim: world.dim, x: px, y: py, z: pz),
+        ["by": .ref(scriptRef(for: player).canonical), "item": .string(blockDefs[blockId].name)],
+        .player, blockDefs[blockId].name
+    )
     return true
 }
 
@@ -1568,6 +1580,14 @@ public func finishBreaking(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int) {
     world.hooks.playSound("block." + def.sound + ".break", Double(x) + 0.5, Double(y) + 0.5, Double(z) + 0.5, 1, 0.9)
     world.hooks.addParticles("block", Double(x) + 0.5, Double(y) + 0.5, Double(z) + 0.5, 18, 0.4, c)
     world.emitVibration(Double(x), Double(y), Double(z), 12, player)
+    // event-bus (change 1b): `block.broken` (design.md §7.2,
+    // "finishBreaking"). Every exit path below still removes this same
+    // cell, so one raise here — before any of them run — covers all of them.
+    world.hooks.raiseScriptEvent(
+        .blockBroken, .block(dim: world.dim, x: x, y: y, z: z),
+        ["by": .ref(scriptRef(for: player).canonical), "item": player.mainHand.map { .string(itemDef($0.id).name) } ?? .null],
+        .player, def.name
+    )
 
     // container contents spill
     if let be = world.getBlockEntity(x, y, z) {

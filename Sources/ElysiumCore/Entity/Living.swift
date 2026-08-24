@@ -206,6 +206,11 @@ open class LivingEntity: Entity {
         let before = health
         health = min(maxHealth, health + amount)
         let effective = max(0, health - before)
+        if effective > 0 {
+            world.hooks.raiseScriptEvent(
+                .entityHealed, scriptRef(for: self), ["amount": .number(effective)], .engine, type
+            )
+        }
         // Hostile injury provenance represents outstanding harm, not lifetime
         // history. Every actual heal consumes that outstanding amount, even
         // when no RPG XP is involved; otherwise regen followed by unrelated
@@ -482,6 +487,14 @@ open class LivingEntity: Entity {
         health -= dmg
         let actualHealthLoss = max(0, healthBeforeDamage - max(0, health))
         recordRPGMenderHostileInjury(actualHealthLoss, attacker: attacker)
+        world.hooks.raiseScriptEvent(
+            .entityDamaged, scriptRef(for: self),
+            [
+                "amount": .number(actualHealthLoss), "source": .string(source),
+                "attacker": attacker.map { .ref(scriptRef(for: $0).canonical) } ?? .null,
+            ],
+            attacker is Player ? .player : .engine, type
+        )
         hurtTime = 10
         invulnTicks = 10
         if let attacker {
@@ -523,6 +536,11 @@ open class LivingEntity: Entity {
         health = 0
         deathTime = 1
         catalystBloomPending = true
+        world.hooks.raiseScriptEvent(
+            .entityDied, scriptRef(for: self),
+            ["source": .string(source), "attacker": attacker.map { .ref(scriptRef(for: $0).canonical) } ?? .null],
+            attacker is Player ? .player : .engine, type
+        )
         world.hooks.playSound(deathSound(), x, y, z, 1, 1)
         if world.rule("doMobLoot") {
             let looting = (attacker as? LivingEntity)?.mainHand.map { enchLevel($0, "looting") } ?? 0

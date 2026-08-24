@@ -175,7 +175,7 @@ swift test
 swift run -c release elysmoke
 ```
 
-`elysmoke` is the deterministic golden contract and is expected to report 469 passing checks unless a reviewed behavior change deliberately updates that contract.
+`elysmoke` is the deterministic golden contract and is expected to report 478 passing checks unless a reviewed behavior change deliberately updates that contract.
 
 Security-sensitive changes also run:
 
@@ -195,7 +195,7 @@ It runs these nine automated stages, in order, and stops at the first failure:
 2. Warning-free release build.
 3. Release-surface and binary security checks.
 4. Full XCTest.
-5. The 469-check `elysmoke` golden suite.
+5. The 478-check `elysmoke` golden suite.
 6. Application packaging.
 7. Packaged AppKit keyboard and Accessibility integration.
 8. Installation at `/Applications/Elysium.app`.

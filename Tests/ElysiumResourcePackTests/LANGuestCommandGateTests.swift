@@ -45,7 +45,13 @@ final class LANGuestCommandGateTests: XCTestCase {
         XCTAssertNotNil(game.player)
 
         let refusal = "This command runs on the LAN host only (guests get access in a later update)."
-        let commands = ["/attr list self", "/inspect", "/objects near", "/ai hello", "/agent hello"]
+        // event-bus (change 1b): `/on`, `/unsubscribe`, `/events` join the
+        // same host-only gate `/attr`/`/inspect`/`/objects`/`/ai`/`/agent`
+        // proved in 1a.
+        let commands = [
+            "/attr list self", "/inspect", "/objects near", "/ai hello", "/agent hello",
+            "/on self player.joined s.h", "/unsubscribe 1", "/events recent",
+        ]
 
         for command in commands {
             chatLog.removeAll()
@@ -100,6 +106,30 @@ final class LANGuestCommandGateTests: XCTestCase {
         let game = try makeLANClientGame()
         chatLog.removeAll()
         runCommand(game, "/agent hello")
+        XCTAssertEqual(chatLog.count, 1)
+        XCTAssertTrue(chatLog.first?.text.contains("LAN host only") == true)
+    }
+
+    func testOnIsRefused() throws {
+        let game = try makeLANClientGame()
+        chatLog.removeAll()
+        runCommand(game, "/on self player.joined s.h")
+        XCTAssertEqual(chatLog.count, 1)
+        XCTAssertTrue(chatLog.first?.text.contains("LAN host only") == true)
+    }
+
+    func testUnsubscribeIsRefused() throws {
+        let game = try makeLANClientGame()
+        chatLog.removeAll()
+        runCommand(game, "/unsubscribe 1")
+        XCTAssertEqual(chatLog.count, 1)
+        XCTAssertTrue(chatLog.first?.text.contains("LAN host only") == true)
+    }
+
+    func testEventsIsRefused() throws {
+        let game = try makeLANClientGame()
+        chatLog.removeAll()
+        runCommand(game, "/events recent")
         XCTAssertEqual(chatLog.count, 1)
         XCTAssertTrue(chatLog.first?.text.contains("LAN host only") == true)
     }

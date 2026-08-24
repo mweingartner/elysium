@@ -1,0 +1,9 @@
+{
+  "cascadeDepthAllowedCount" : 9,
+  "coalescingHash" : 1905599875,
+  "deliveryOrderHash" : 232656174,
+  "handlerBudgetAllowedCount" : 256,
+  "queueFullDropCount" : 24,
+  "queueFullOverBudgetCount" : 1,
+  "subscriptionRoundTripHash" : 1309209725
+}

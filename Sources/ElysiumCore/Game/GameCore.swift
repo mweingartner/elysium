@@ -960,6 +960,14 @@ public final class GameCore {
         if !inWorld { return }
         if advancements.grant(id) {
             playUISound("ui.toast.challenge_complete")
+            // event-bus (change 1b): `player.advancement` (design.md §7.2,
+            // "AdvancementTracker.grant"). Host-only.
+            if !isLANClientWorld {
+                eventBus.raise(
+                    kind: .playerAdvancement, subject: .player, payload: ["id": .string(id)],
+                    source: .player, tick: Int64(rpgSimulationTick)
+                )
+            }
         }
     }
     /// queue an advancement next runloop turn (screens may open before tracker updates)
@@ -1211,10 +1219,25 @@ public final class GameCore {
         p.setPos(dest!.0, dest!.1, dest!.2)
         p.insidePortalKind = nil
         p.portalTicks = 0
+        // event-bus (change 1b): `player.respawned` (design.md §7.2,
+        // "respawnPlayer"). Host-only.
+        if !isLANClientWorld {
+            eventBus.raise(
+                kind: .playerRespawned, subject: .player, source: .player, tick: Int64(rpgSimulationTick)
+            )
+        }
     }
 
     public func exitToTitle() {
         if inWorld {
+            // event-bus (change 1b): `player.left` (design.md §7.2,
+            // "exitToTitle"). Host-only, before any teardown so `self.player`/
+            // `self.dim` are still the ones the event names.
+            if !isLANClientWorld {
+                eventBus.raise(
+                    kind: .playerLeft, subject: .player, source: .player, tick: Int64(rpgSimulationTick)
+                )
+            }
             let retiringWorldID = worldRec?.id
             let retiringWorldEntryGeneration = rpgWorldEntryGeneration
             _ = advanceRPGWorldEntryGeneration()
@@ -2160,6 +2183,7 @@ public final class GameCore {
             }
         }
         loadWorldObjectRecords(from: rec)
+        loadEventSubscriptions(from: rec)
         for d in [Dim.overworld, .nether, .end] {
             let w = World(dim: d, seed: UInt32(bitPattern: rec.seed), generationSettings: rec.generationSettings)
             if let ds = rec.dims["\(d.rawValue)"] {
@@ -2270,6 +2294,13 @@ public final class GameCore {
         }
 
         inWorld = true
+        // event-bus (change 1b): `player.joined` (design.md §7.2, "enterWorld").
+        // Host-only — a transient LAN-client world never raises events.
+        if !transientLANClient {
+            eventBus.raise(
+                kind: .playerJoined, subject: .player, source: .player, tick: Int64(rpgSimulationTick)
+            )
+        }
         beginRPGLocalPreferenceLifecycle()
         deathScreenShown = false
         templatePlacement = nil
@@ -2311,9 +2342,21 @@ public final class GameCore {
             guard let self, let w else { return }
             self.dirtySections[w.dim]!.insert(SectionPos(cx: cx, sy: sy, cz: cz))
         }
-        hooks.onBlockChanged = { [weak self, weak w] x, y, z, _, newCell, _ in
+        hooks.onBlockChanged = { [weak self, weak w] x, y, z, oldCell, newCell, _ in
             guard let self, let w, !self.isLANClientWorld else { return }
             self.onWorldBlockChanged?(w, x, y, z, newCell)
+            // event-bus (change 1b), design.md §6.6 point 2: the pre-filtered
+            // `block.changed` funnel — `EventBus.recordBlockChange` itself
+            // gates on an existing `ObjectRecord` or a matching kind-wildcard
+            // subscription before doing any decode work.
+            let cx = floorDiv(x, CHUNK_W), cz = floorDiv(z, CHUNK_W)
+            let hasRecord = w.chunks[chunkKey(cx, cz)].map { c in
+                c.inYRange(y) && c.objectRecords[c.index(posMod(x, CHUNK_W), y, posMod(z, CHUNK_W))] != nil
+            } ?? false
+            self.eventBus.recordBlockChange(
+                dim: w.dim, x: x, y: y, z: z, oldId: oldCell >> 4, newId: newCell >> 4,
+                hasObjectRecord: hasRecord, tick: Int64(self.rpgSimulationTick)
+            )
         }
         hooks.playSound = { [weak self, weak w] name, x, y, z, volume, pitch in
             guard let self, let w, w === self.worlds[self.dim] else { return }
@@ -2335,6 +2378,16 @@ public final class GameCore {
         hooks.requestChunk = { [weak self, weak w] cx, cz in
             guard let self, let w else { return }
             self.requestChunk(w, cx, cz)
+        }
+        // event-bus (change 1b): the generic engine-funnel seam (entity
+        // spawn/remove, hurt/die/heal, target changes, block-neighbor
+        // changes with a record, …) — host-only, like every other hook here.
+        hooks.raiseScriptEvent = { [weak self] kind, subject, payload, source, subjectType in
+            guard let self, !self.isLANClientWorld else { return }
+            self.eventBus.raise(
+                kind: kind, subject: subject, payload: payload, source: source,
+                tick: Int64(self.rpgSimulationTick), subjectType: subjectType
+            )
         }
         w.hooks = hooks
     }
@@ -2428,6 +2481,7 @@ public final class GameCore {
         // world/dimension attribute bags alongside every other world-global
         // field this function already writes back into `rec`.
         storeWorldObjectRecords(into: &rec)
+        storeEventSubscriptions(into: &rec)
         worldRec = rec
         db.putWorld(rec)
         let worldSaved = !synchronous || db.getWorld(rec.id).flatMap(encodeWorldRecordJSON)
@@ -2558,12 +2612,32 @@ public final class GameCore {
     /// Difficulty is world-global: apply to every dimension so the value can't
     /// drift (and can't depend on which dim happens to save last).
     public func setDifficulty(_ d: Int) {
+        let old = worldRec?.difficulty ?? world.difficulty
         for w in worlds.values { w.difficulty = d }
         worldRec?.difficulty = d
+        // event-bus (change 1b): `world.difficultyChanged` (design.md §7.2,
+        // "`setDifficulty` callback") — host-only, on an actual change.
+        if old != d, !isLANClientWorld {
+            eventBus.raise(
+                kind: .worldDifficultyChanged, subject: .world,
+                payload: ["old": .int(Int64(old)), "new": .int(Int64(d))],
+                source: .player, tick: Int64(rpgSimulationTick)
+            )
+        }
     }
 
     /// Game rules are world-global: apply to every dimension.
     public func setGameRule(_ rule: String, _ value: Double) {
+        let oldRuleValue = worldRec?.gameRules[rule] ?? 0
+        if oldRuleValue != value, !isLANClientWorld {
+            // event-bus (change 1b): `world.gameruleChanged` (design.md §7.2,
+            // "`setGameRule` callback") — host-only, on an actual change.
+            eventBus.raise(
+                kind: .worldGameruleChanged, subject: .world,
+                payload: ["key": .string(rule), "old": .number(oldRuleValue), "new": .number(value)],
+                source: .player, tick: Int64(rpgSimulationTick)
+            )
+        }
         if rule == RPG_CLASSES_GAME_RULE {
             let wasEnabled = worlds[dim]?.rule(rule)
                 ?? ((worldRec?.gameRules[rule] ?? 0) != 0)
@@ -3261,12 +3335,20 @@ public final class GameCore {
         w.cancelRPGTemporaryEffects(inChunkX: c.cx, z: c.cz)
         // persist if edited, if live entities stand in it, or if a stale record exists
         var hasEntities = false
+        var entitiesInChunk: [Entity] = []
         for e in w.entities {
             guard let ent = e as? Entity, !ent.isPlayer, !ent.dead else { continue }
             if floorDiv(ifloor(ent.x), 16) == c.cx && floorDiv(ifloor(ent.z), 16) == c.cz {
                 hasEntities = true
-                break
+                entitiesInChunk.append(ent)
             }
+        }
+        // event-bus (change 1b), design.md §7.3 "dropped at unload" / §7.5
+        // step 6: finalize the deferred object-record drop (§6.7) and drop
+        // script-owned subscriptions rooted here, *before* `chunkRecord`
+        // snapshots `objectRecords` a few lines down.
+        if !isLANClientWorld {
+            handleScriptedChunkUnload(w, c, entityRefs: entitiesInChunk.map(scriptRef(for:)))
         }
         // A8: LAN client mirror chunks are never persisted (the host owns world save
         // authority) — queuing them here would grow pendingChunkSaves unboundedly since
@@ -3480,6 +3562,7 @@ public final class GameCore {
     // ===========================================================================
     private func moveToDimension(_ dest: Dim) {
         let from = world
+        let fromDimForEvent = dim
         from.cancelRPGTemporaryEffects(ownerID: player.effectiveRPGAuthorityID)
         _ = from.removeRPGWardenMitigationLayers(
             ownerAuthorityID: player.effectiveRPGAuthorityID
@@ -3490,6 +3573,18 @@ public final class GameCore {
         let w = world
         player.world = w
         w.addEntity(player)
+        // event-bus (change 1b): `player.dimensionChanged` (design.md §7.2,
+        // "moveToDimension"). Host-only. `from.removeEntity`/`w.addEntity`
+        // above already raised `entity.removed`/`entity.spawned` for the
+        // player too (§7.2's own funnel for those) — this is the
+        // semantically-named companion event, not a replacement.
+        if !isLANClientWorld {
+            eventBus.raise(
+                kind: .playerDimensionChanged, subject: .player,
+                payload: ["old": .string(dimCanonicalName(fromDimForEvent)), "new": .string(dimCanonicalName(dest))],
+                source: .player, tick: Int64(rpgSimulationTick)
+            )
+        }
         host?.clearAllSections()
         meshJobs.removeAll()
         // re-mesh everything already loaded in the destination
@@ -3815,9 +3910,24 @@ public final class GameCore {
                     p.setPos(p.x, Double(w.surfaceY(bx, bz)), p.z)
                 }
             }
+            // event-bus (change 1b): `player.pickedUp` (design.md §7.2,
+            // "Player.tickPlayer magnet"). `Player.swift` itself is untouched
+            // by this change — the magnet loop lives inside
+            // `tickFromGameCore` and cannot be instrumented directly, so this
+            // is a before/after inventory diff around the real call site
+            // instead: the funnel is still driven by the actual magnet
+            // effect, just observed rather than instrumented in place.
+            // Host-only; a LAN client's own optimistic pickup never raises
+            // (the host's copy of this same code, ticking the *authoritative*
+            // player, is what raises for a guest's pickup once phase 4 wires
+            // guest players through this path).
+            let inventoryBeforeMagnet = isLANClientWorld ? nil : p.inventory.map { $0.map { ($0.id, $0.count) } }
             p.tickFromGameCore(
                 authoritativeRPG: !isLANClientWorld && rpgClockAdvancedThisTick
             )
+            if let before = inventoryBeforeMagnet {
+                raisePlayerPickedUpEvents(before: before, after: p.inventory)
+            }
             if let v = p.vehicle {
                 p.setPos(v.x, v.y + v.height * 0.6, v.z)
                 p.fallDistance = 0
@@ -3884,6 +3994,12 @@ public final class GameCore {
         for e in Array(w.entities) where e.dead {
             w.removeEntity(e)
         }
+
+        // event-bus (change 1b), design.md §7.5: placed after the dead-entity
+        // sweep and before `tickEntityTriggers`, host-only (this whole branch
+        // already returned early for a LAN client above) and pause-aware
+        // (the `paused` guard at the top of `tick()` already returned).
+        runEventBusPhase()
 
         // ---- per-tick systems ----
         tickEntityTriggers(w)
@@ -4888,6 +5004,17 @@ public final class GameCore {
         if let target, !p.sneaking {
             if target.interact(p, p.mainHand) {
                 p.attackAnim = 0.6
+                // event-bus (change 1b): `entity.interacted` (design.md §7.2,
+                // "Entity.interact (GameCore.doUse)"). Host-only (LAN clients
+                // never reach `doUse` for a real interact — they mirror
+                // through the intent path).
+                if !isLANClientWorld {
+                    eventBus.raise(
+                        kind: .entityInteracted, subject: scriptRef(for: target),
+                        payload: ["by": .ref(ObjectRef.player.canonical), "item": p.mainHand.map { .string(itemDef($0.id).name) } ?? .null],
+                        source: .player, tick: Int64(rpgSimulationTick), subjectType: target.type
+                    )
+                }
                 return
             }
         }
@@ -4895,12 +5022,58 @@ public final class GameCore {
         if let hit, !p.sneaking || p.mainHand == nil {
             if useBlock(ctx, hit) {
                 p.attackAnim = 0.6
+                // event-bus (change 1b): `block.used` (design.md §7.2, "a
+                // wrapper at the `useBlock` call site"). Host-only.
+                if !isLANClientWorld {
+                    eventBus.raise(
+                        kind: .blockUsed, subject: .block(dim: dim, x: hit.x, y: hit.y, z: hit.z),
+                        payload: ["by": .ref(ObjectRef.player.canonical), "item": p.mainHand.map { .string(itemDef($0.id).name) } ?? .null],
+                        source: .player, tick: Int64(rpgSimulationTick),
+                        subjectType: blockDefs[world.getBlockId(hit.x, hit.y, hit.z)].name
+                    )
+                }
                 return
             }
         }
         if useItem(ctx, hit) {
             p.attackAnim = 0.6
         }
+    }
+
+    /// event-bus (change 1b): the before/after inventory diff behind
+    /// `player.pickedUp` (see the call site's own comment). One event per
+    /// slot whose (id, count) grew or newly appeared, sorted by slot index
+    /// for determinism — a magnet tick can pick up several stacks at once.
+    private func raisePlayerPickedUpEvents(before: [(Int, Int)?], after: [ItemStack?]) {
+        guard before.count == after.count else { return }
+        let tick = Int64(rpgSimulationTick)
+        for i in 0..<after.count {
+            guard let stack = after[i] else { continue }
+            let priorCount = before[i].flatMap { $0.0 == stack.id ? $0.1 : nil } ?? 0
+            let gained = stack.count - priorCount
+            guard gained > 0 else { continue }
+            eventBus.raise(
+                kind: .playerPickedUp, subject: .player,
+                payload: ["item": .string(itemDef(stack.id).name), "count": .int(Int64(gained))],
+                source: .player, tick: tick
+            )
+        }
+    }
+
+    /// event-bus (change 1b): `player.dropped` (design.md §7.2,
+    /// "dropSelected"). `Player.dropSelected` itself is in the untouched
+    /// `Player.swift` — same before/after-diff approach as
+    /// `raisePlayerPickedUpEvents`, around its two call sites (`keyDown`'s
+    /// `drop` binding, both spellings).
+    private func raisePlayerDroppedEvent(before: ItemStack?, after: ItemStack?) {
+        guard let before else { return }
+        let droppedCount = before.count - (after?.id == before.id ? after!.count : 0)
+        guard droppedCount > 0 else { return }
+        eventBus.raise(
+            kind: .playerDropped, subject: .player,
+            payload: ["item": .string(itemDef(before.id).name), "count": .int(Int64(droppedCount))],
+            source: .player, tick: Int64(rpgSimulationTick)
+        )
     }
 
     private func pickBlock() {
@@ -5236,7 +5409,9 @@ public final class GameCore {
             if isLANClientWorld {
                 performLANClientToss(all: ctrlOrCmd)
             } else {
+                let selectedBeforeDrop = p.mainHand
                 p.dropSelected(ctrlOrCmd)
+                raisePlayerDroppedEvent(before: selectedBeforeDrop, after: p.mainHand)
             }
         } else if code == keybinds["swapOffhand"] {
             let tmp = p.offHand
@@ -5284,7 +5459,9 @@ public final class GameCore {
             if isLANClientWorld {
                 performLANClientToss(all: dropAll)
             } else {
+                let selectedBeforeDrop = p.mainHand
                 p.dropSelected(dropAll)
+                raisePlayerDroppedEvent(before: selectedBeforeDrop, after: p.mainHand)
             }
         case .swapOffhand:
             let tmp = p.offHand

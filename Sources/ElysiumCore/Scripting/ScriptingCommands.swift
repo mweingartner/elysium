@@ -12,13 +12,19 @@ public struct ScriptingCommandContext {
     public let target: ObjectTargetContext
     public let isLANClient: Bool
     public let tick: Int64
+    /// event-bus (change 1b): `/on`, `/unsubscribe`, `/events`.
+    public let eventBus: EventBus
 
-    public init(graph: ObjectGraph, store: AttributeStore, target: ObjectTargetContext, isLANClient: Bool, tick: Int64) {
+    public init(
+        graph: ObjectGraph, store: AttributeStore, target: ObjectTargetContext, isLANClient: Bool, tick: Int64,
+        eventBus: EventBus
+    ) {
         self.graph = graph
         self.store = store
         self.target = target
         self.isLANClient = isLANClient
         self.tick = tick
+        self.eventBus = eventBus
     }
 }
 
@@ -35,8 +41,15 @@ private struct TargetMessage: Error {
 
 public enum ScriptingCommands {
     private static let usageAttr = "Usage: /attr list|get|set|define|remove <target> [name] [value] [readonly] [--force]"
+    private static let usageOn = "Usage: /on <target> <event> [attr] <script.handler>"
+    private static let usageUnsubscribe = "Usage: /unsubscribe <id>"
+    private static let usageEvents = "Usage: /events recent [limit] | emit <target> <event>"
     private static let refusal = "This command runs on the LAN host only (guests get access in a later update)."
-    private static let lanGatedCommands: Set<String> = ["attr", "inspect", "objects", "ai", "agent"]
+    // event-bus (change 1b): `/on`, `/unsubscribe`, `/events` join the
+    // host-only gate the same way `/attr`/`/inspect`/`/objects` did in 1a —
+    // every one of them mutates or reads world/subscription state that a LAN
+    // client never authoritatively holds.
+    private static let lanGatedCommands: Set<String> = ["attr", "inspect", "objects", "ai", "agent", "on", "unsubscribe", "events"]
 
     /// Decision 10's Core-owned refusal decision — `CommandsM` consults this
     /// before any other work; `nil` for a command this change does not gate.
@@ -44,7 +57,7 @@ public enum ScriptingCommands {
         lanGatedCommands.contains(command.lowercased()) ? refusal : nil
     }
 
-    public static func helpSummary() -> String { "attr, inspect, objects" }
+    public static func helpSummary() -> String { "attr, inspect, objects, on, unsubscribe, events" }
 
     public static func run(command: String, arguments: [String], context: ScriptingCommandContext) -> ScriptingCommandResult {
         let cmd = command.lowercased()
@@ -58,6 +71,9 @@ public enum ScriptingCommands {
         case "attr": return capResult(runAttr(arguments, context))
         case "inspect": return capResult(runInspect(arguments, context))
         case "objects": return capResult(runObjects(arguments, context))
+        case "on": return capResult(runOn(arguments, context))
+        case "unsubscribe": return capResult(runUnsubscribe(arguments, context))
+        case "events": return capResult(runEvents(arguments, context))
         default: return ScriptingCommandResult(lines: ["unknown scripting command '\(command)'"], ok: false)
         }
     }
@@ -473,6 +489,126 @@ public enum ScriptingCommands {
     private static func oneDecimal(_ d: Double) -> String {
         let scaled = (d * 10).rounded() / 10
         return String(format: "%.1f", scaled)
+    }
+
+    // MARK: - /on, /unsubscribe (event-bus, change 1b)
+
+    /// A `/on`/subscription-tool target token: `any`; a bare kind name
+    /// (`entity`/`player`/`block`/`world`/`dim`, matching `ObjectKind`'s own
+    /// spelling — a kind-wildcard with no type filter); `entity:<type>` /
+    /// `block:<name>` (a kind-wildcard with a type filter — checked for a
+    /// *second* colon first so a canonical `block:<dim>:<x>,<y>,<z>` ref, or
+    /// a numeric `entity:<uid>`, always falls through to ordinary ref/alias
+    /// resolution below instead); everything else resolves exactly like
+    /// `/attr`'s target token (`looking`/`self`/`player`/`world`/`dim`/a
+    /// canonical ref) as `.object(ref)`. Design.md §7.3 fixes the shapes
+    /// (`self | ref | {kind, type?}` / `.any`); this change owns the exact
+    /// command spelling, matching `ObjectTargetContext`'s own "one parser"
+    /// discipline for the object-ref half.
+    static func parseSubscriptionTarget(_ token: String, context: ScriptingCommandContext) -> SubscriptionTarget? {
+        if token == "any" { return .any }
+        if let kind = ObjectKind(rawValue: token) { return .kind(kind, typeFilter: nil) }
+        if token.hasPrefix("entity:") {
+            let rest = String(token.dropFirst(7))
+            if Int(rest) == nil, !rest.isEmpty, rest.utf8.count <= 32, !rest.contains(":") {
+                return .kind(.entity, typeFilter: rest)
+            }
+        }
+        if token.hasPrefix("block:") {
+            let rest = String(token.dropFirst(6))
+            if !rest.isEmpty, rest.utf8.count <= 32, !rest.contains(":") {
+                return .kind(.block, typeFilter: rest)
+            }
+        }
+        if let ref = context.target.resolve(alias: token) { return .object(ref) }
+        return nil
+    }
+
+    /// `/on <target> <event> [attr] <script.handler>` (§12). The subscriber
+    /// is always `self` (`.player`) — the command is issued by the player and
+    /// registers the subscription on the player's own script record (a
+    /// grammar reading forced by the command having only one target token;
+    /// §7.3's `Subscription.subscriber`/`.target` are deliberately distinct
+    /// fields, and `<target>` here is unambiguously the *watch* target per
+    /// its own worked shapes). 1c is what makes `<script.handler>` resolve to
+    /// a real handler function — this change only validates its grammar and
+    /// stores it.
+    private static func runOn(_ args: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
+        guard args.count == 3 || args.count == 4 else { return fail(usageOn) }
+        guard let target = parseSubscriptionTarget(args[0], context: context) else {
+            return fail("no such object or target kind '\(args[0])'")
+        }
+        guard let event = EventKind.parse(args[1]) else { return fail("'\(args[1])' is not a valid event name") }
+        let attribute: String?
+        let handlerToken: String
+        if args.count == 4 {
+            guard isValidAttributeName(args[2]) else { return fail("'\(args[2])' is not a valid attribute name") }
+            attribute = args[2]
+            handlerToken = args[3]
+        } else {
+            attribute = nil
+            handlerToken = args[2]
+        }
+        guard let dot = handlerToken.lastIndex(of: "."), dot != handlerToken.startIndex else {
+            return fail("expected '<script>.<handler>', got '\(handlerToken)'")
+        }
+        let scriptName = String(handlerToken[handlerToken.startIndex..<dot])
+        let handler = String(handlerToken[handlerToken.index(after: dot)...])
+        guard isValidAttributeName(scriptName), isValidAttributeName(handler) else {
+            return fail("'\(handlerToken)' is not a valid '<script>.<handler>'")
+        }
+        switch context.eventBus.subscribe(
+            subscriber: .player, scriptName: scriptName, handler: handler, target: target, event: event,
+            attribute: attribute, createdBy: .player, tick: context.tick
+        ) {
+        case .success(let sub):
+            return ok(["subscribed #\(sub.id): \(event.rawValue) on \(target.displayText) -> \(scriptName).\(handler)"])
+        case .failure(let err):
+            switch err {
+            case .tooManyForWorld: return fail("too many subscriptions in this world (limit \(context.eventBus.caps.maxSubscriptionsPerWorld))")
+            case .tooManyForObject: return fail("too many subscriptions on self (limit \(context.eventBus.caps.maxSubscriptionsPerObject))")
+            case .targetRequiresTypeFilter: return fail("'\(args[1])' on a block target requires a type filter (block:<name>)")
+            case .anyNotAllowedForThisEvent: return fail("'any' is not a valid target for '\(args[1])'")
+            }
+        }
+    }
+
+    private static func runUnsubscribe(_ args: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
+        guard let idText = args.first, let id = UInt64(idText) else { return fail(usageUnsubscribe) }
+        guard context.eventBus.unsubscribe(id: id) else { return fail("no subscription #\(id)") }
+        return ok(["unsubscribed #\(id)"])
+    }
+
+    // MARK: - /events (event-bus, change 1b)
+
+    private static func runEvents(_ args: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
+        guard let sub = args.first else { return fail(usageEvents) }
+        switch sub {
+        case "recent":
+            let limit = args.count > 1 ? Int(args[1]) : nil
+            let events = context.eventBus.recentEvents(limit: limit)
+            guard !events.isEmpty else { return ok(["no recent events"]) }
+            return ok(events.map(eventLine))
+        case "emit":
+            let rest = Array(args.dropFirst())
+            guard rest.count >= 2 else { return fail("Usage: /events emit <target> <event>") }
+            guard let ref = context.target.resolve(alias: rest[0]) else { return fail("no such object '\(rest[0])'") }
+            guard let event = EventKind.parse(rest[1]) else { return fail("'\(rest[1])' is not a valid event name") }
+            switch context.eventBus.raise(kind: event, subject: ref, source: .player, tick: context.tick) {
+            case .enqueued, .coalesced:
+                return ok(["emitted \(event.rawValue) on \(ref.canonical)"])
+            case .droppedQueueFull:
+                return fail("event queue is full — \(event.rawValue) was dropped")
+            case .droppedCascadeDepth, .droppedHandlerBudget:
+                return fail("\(event.rawValue) was dropped (budget exceeded)")
+            }
+        default:
+            return fail(usageEvents)
+        }
+    }
+
+    private static func eventLine(_ e: ScriptEvent) -> String {
+        "#\(e.seq) t\(e.tick) \(e.kind.rawValue) \(e.subject.canonical)"
     }
 }
 

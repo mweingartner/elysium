@@ -25,7 +25,7 @@ func runCommand(_ game: GameCore, _ raw: String) {
         pushChat("§c" + refusal)
         return
     }
-    if cmd == "attr" || cmd == "inspect" || cmd == "objects" {
+    if cmd == "attr" || cmd == "inspect" || cmd == "objects" || cmd == "on" || cmd == "unsubscribe" || cmd == "events" {
         let result = ScriptingCommands.run(command: cmd, arguments: args, context: game.scriptingCommandContext())
         for line in result.lines { pushChat((result.ok ? "§7" : "§c") + line) }
         return

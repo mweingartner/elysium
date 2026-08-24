@@ -145,9 +145,17 @@ final class BlockStateCodecTests: XCTestCase {
         _ = world.setBlock(4, 64, 4, Int(cell(B.furnace_lit, 3)))
         XCTAssertNotNil(chunk.objectRecords[cellIndex], "record should survive a meta-only change")
 
-        // different family: record cleared
+        // different family: record survives until event delivery, then is
+        // cleared — event-bus (change 1b), design.md §6.7 "Block identity
+        // rule": `World.setBlock` now *defers* the clear into
+        // `pendingObjectRecordDrops` so `block.replaced` is delivered against
+        // an intact record; `GameCore`'s event-bus tick phase (or, in a bare
+        // `World` test like this one, a direct `drainPendingObjectRecordDrops`
+        // call) is what actually removes it.
         _ = world.setBlock(4, 64, 4, Int(cell(B.stone, 0)))
-        XCTAssertNil(chunk.objectRecords[cellIndex], "record should be cleared on a real identity change")
+        XCTAssertNotNil(chunk.objectRecords[cellIndex], "record should survive a real identity change until after delivery")
+        world.drainPendingObjectRecordDrops()
+        XCTAssertNil(chunk.objectRecords[cellIndex], "record should be cleared once delivery has run")
     }
 
     // MARK: - RPG guarded-temporary exemption (Security (plan) C24)

@@ -410,7 +410,25 @@ open class Mob: LivingEntity {
         return adjustedSkyLight >= 8
     }
 
-    public func setTarget(_ t: LivingEntity?) { target = t }
+    public func setTarget(_ t: LivingEntity?) {
+        // event-bus (change 1b): `entity.targetChanged` (design.md §7.2,
+        // "`Mob.setTarget` (`AI.swift:413`)") — only on an actual change;
+        // `setTarget` is called every AI-goal tick even to reassert the same
+        // target, and a per-tick flood is exactly what §6.6's "only observed
+        // objects pay" and §7.6's caps exist to avoid causing in the first
+        // place.
+        guard t !== target else { return }
+        let old = target
+        target = t
+        world.hooks.raiseScriptEvent(
+            .entityTargetChanged, scriptRef(for: self),
+            [
+                "old": old.map { .ref(scriptRef(for: $0).canonical) } ?? .null,
+                "new": t.map { .ref(scriptRef(for: $0).canonical) } ?? .null,
+            ],
+            .engine, type
+        )
+    }
 
     open func doMeleeAttack(_ target: LivingEntity) {
         attackAnim = 1

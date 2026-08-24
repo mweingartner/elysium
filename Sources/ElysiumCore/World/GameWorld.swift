@@ -59,6 +59,18 @@ public struct WorldHooks {
     public var addParticles: (String, Double, Double, Double, Int, Double, Int) -> Void = { _, _, _, _, _, _, _ in }
     public var onVibration: ((Double, Double, Double, Int, EntityRef?) -> Void)?
     public var requestChunk: ((Int, Int) -> Void)?
+    /// event-bus (change 1b). The one funnel point every engine call site
+    /// that isn't already a `World`/`GameCore` chokepoint (entity hurt/die/
+    /// heal, target changes, neighbor updates, …) uses to reach the
+    /// `EventBus` without a direct dependency on it — mirrors `playSound`/
+    /// `addParticles`'s own "the host wires it, the engine just calls it"
+    /// shape. `GameCore.hookWorld` wires this to `EventBus.raise` (host-only,
+    /// like every other hook here); a LAN-client world's hooks leave it a
+    /// no-op, same as `onBlockChanged`.
+    public var raiseScriptEvent: (
+        _ kind: EventKind, _ subject: ObjectRef, _ payload: [String: AttrValue],
+        _ source: EventSource, _ subjectType: String?
+    ) -> Void = { _, _, _, _, _ in }
 
     public init() {}
 }
@@ -75,6 +87,17 @@ public struct OpenablePos: Hashable {
 
 private struct TickKey: Hashable {
     let x: Int, y: Int, z: Int, id: Int
+}
+
+/// event-bus (change 1b). One cell's deferred object-record removal
+/// (`World.pendingObjectRecordDrops`). `expectedRevision` guards against
+/// dropping a record a later mutation, within the same tick, has already
+/// legitimately replaced (compared before removal; a mismatch means the
+/// cell's record moved on and this drop is stale — skipped, never forced).
+public struct PendingObjectRecordDrop {
+    let chunk: Chunk
+    let cellIndex: Int
+    let expectedRevision: UInt64
 }
 
 public final class World {
@@ -126,6 +149,12 @@ public final class World {
     public private(set) var light: LightEngine!
     public var difficulty = 2
     public var hooks = WorldHooks()
+    /// event-bus (change 1b), design.md §6.7 "Block identity rule": block
+    /// records `setBlock` marked for removal on an id change, deferred until
+    /// after `block.replaced` is delivered. Drained once per tick by
+    /// `GameCore`'s event-bus phase (`World.drainPendingObjectRecordDrops`).
+    /// Session-only, like `rpgTemporaryEffects` — never persisted itself.
+    public var pendingObjectRecordDrops: [PendingObjectRecordDrop] = []
     private var tickQueue: [ScheduledTick] = []
     private var scheduledSet = Set<TickKey>()
     /// block entities needing per-tick updates — insertion-ordered array like
@@ -244,9 +273,15 @@ public final class World {
         // other id change clears it, unless the cell is under a live RPG
         // guarded-temporary effect (the temporary swap and its eventual
         // restore are not a "real" identity change). Zero-record cost is one
-        // `isEmpty` test. This is the single site 1b will need to change to
-        // defer clearing until after event delivery — deliberately not
-        // duplicated anywhere else.
+        // `isEmpty` test.
+        //
+        // event-bus (change 1b), design.md §6.7 "Block identity rule": the
+        // record survives an id change until *after* `block.replaced` is
+        // delivered (the exemption for "the block's own scripts" only
+        // applies once scripts exist — 1c). Clearing is therefore deferred
+        // to `pendingObjectRecordDrops`, drained by `GameCore`'s event-bus
+        // tick phase right after `EventBus.runDeliveryPhase` — the record
+        // stays fully readable (`/attr`, `AttributeStore`) until then.
         //
         // Note (design.md D5): LAN chunk-section replication
         // (`applyLANChunkSectionSnapshot`, LANReplication.swift — outside
@@ -256,9 +291,14 @@ public final class World {
         // restoring them, `saveLANClientResume` strips `"object"`, every
         // mutating scripting command is refused by `lanClientRefusal`) — a
         // future guest-attribute change (phase 4) must reconsider this bypass.
+        let cellIndexForRecord = c.index(lx, y, lz)
         if oldId != newId && !c.objectRecords.isEmpty && !BlockStateCodec.sameFamily(oldId, newId)
             && !isRPGGuardedTemporaryCell(x, y, z) {
-            c.objectRecords.removeValue(forKey: c.index(lx, y, lz))
+            if let record = c.objectRecords[cellIndexForRecord] {
+                pendingObjectRecordDrops.append(
+                    PendingObjectRecordDrop(chunk: c, cellIndex: cellIndexForRecord, expectedRevision: record.revision)
+                )
+            }
         }
 
         // heightmap
@@ -294,6 +334,22 @@ public final class World {
         }
     }
 
+    /// event-bus (change 1b), design.md §6.7: drains
+    /// `pendingObjectRecordDrops` — called once per tick by `GameCore`'s
+    /// event-bus phase, *after* `EventBus.runDeliveryPhase` so `block.replaced`
+    /// has already been delivered against a still-intact record. A record
+    /// whose revision moved on since the drop was queued (a later write in
+    /// the same tick genuinely changed it) is left alone.
+    public func drainPendingObjectRecordDrops() {
+        guard !pendingObjectRecordDrops.isEmpty else { return }
+        for drop in pendingObjectRecordDrops {
+            guard let current = drop.chunk.objectRecords[drop.cellIndex], current.revision == drop.expectedRevision
+            else { continue }
+            drop.chunk.objectRecords.removeValue(forKey: drop.cellIndex)
+        }
+        pendingObjectRecordDrops.removeAll()
+    }
+
     /// notify the 6 neighbors that (x,y,z) changed
     public func updateNeighbors(_ x: Int, _ y: Int, _ z: Int) {
         notifyBlock(x - 1, y, z, x, y, z)
@@ -311,6 +367,20 @@ public final class World {
         // gravity blocks fall when support vanishes
         if HAS_GRAVITY[cell >> 4] == 1 && fromY == y - 1 {
             scheduleTick(x, y, z, cell >> 4, 2)
+        }
+        // event-bus (change 1b): `block.neighborChanged` (design.md §7.2,
+        // "only for cells with records") — an `objectRecords` presence check
+        // before anything else, so the overwhelmingly common case (no scripted
+        // block anywhere near this update) costs one dictionary probe.
+        if let c = chunks[chunkKey(floorDiv(x, CHUNK_W), floorDiv(z, CHUNK_W))], c.inYRange(y) {
+            let cellIndex = c.index(posMod(x, CHUNK_W), y, posMod(z, CHUNK_W))
+            if c.objectRecords[cellIndex] != nil {
+                hooks.raiseScriptEvent(
+                    .blockNeighborChanged, .block(dim: dim, x: x, y: y, z: z),
+                    ["from": .ref(ObjectRef.block(dim: dim, x: fromX, y: fromY, z: fromZ).canonical)],
+                    .engine, blockDefs[cell >> 4].name
+                )
+            }
         }
     }
 
@@ -570,12 +640,25 @@ public final class World {
     public func addEntity(_ e: EntityRef) {
         entities.append(e)
         entityById[e.id] = e
+        raiseEntityLifecycleEvent(.entitySpawned, e)
     }
     public func removeEntity(_ e: EntityRef) {
         if let i = entities.firstIndex(where: { $0 === e }) {
             entities.remove(at: i)
         }
         entityById.removeValue(forKey: e.id)
+        raiseEntityLifecycleEvent(.entityRemoved, e)
+    }
+
+    /// event-bus (change 1b). `entity.spawned`/`entity.removed` (design.md
+    /// §7.2: "`World.addEntity/removeEntity`"). Skips anything that isn't a
+    /// real `Entity` (the `EntityRef` structural-view protocol admits test
+    /// doubles) and every LAN mirror (`lanReplicatedMirror` host ghosts,
+    /// `LANRemotePlayerEntity`) — neither is a scriptable object (`ObjectGraph`
+    /// excludes them the same way; Security (code) SC-1's fix).
+    private func raiseEntityLifecycleEvent(_ kind: EventKind, _ e: EntityRef) {
+        guard let ent = e as? Entity, !ent.lanReplicatedMirror, !(ent is LANRemotePlayerEntity) else { return }
+        hooks.raiseScriptEvent(kind, scriptRef(for: ent), [:], .engine, ent.type)
     }
     public func getEntitiesInBox(_ box: AABB, except: EntityRef? = nil, filter: ((EntityRef) -> Bool)? = nil) -> [EntityRef] {
         var out: [EntityRef] = []

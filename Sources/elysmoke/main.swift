@@ -1254,6 +1254,10 @@ if let g2 = loadJSON("fmath-explog-goldens.json") {
 // immediately after the fdlibm section.
 runScriptRuntimeSmoke()
 
+// event-bus (change 1b), design.md §16 row 1b exit criteria: the event-bus
+// section runs immediately after the script-runtime section.
+runEventBusSmoke()
+
 // ---------------------------------------------------------------------------
 section("entities: zoo/combat/physics/trades/pathfinding/spawning (vs goldens)")
 registerAllEntities()

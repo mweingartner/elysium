@@ -5,6 +5,15 @@
 import Foundation
 
 public func explode(_ world: World, _ x: Double, _ y: Double, _ z: Double, _ power: Double, _ fire: Bool, _ source: Entity?) {
+    // event-bus (change 1b): `explosion` (design.md §7.2, "Explosion.explode").
+    world.hooks.raiseScriptEvent(
+        .explosion, .dimension(world.dim),
+        [
+            "x": .number(x), "y": .number(y), "z": .number(z), "power": .number(power),
+            "by": source.map { .ref(scriptRef(for: $0).canonical) } ?? .null,
+        ],
+        source is Player ? .player : .engine, nil
+    )
     world.hooks.playSound("entity.generic.explode", x, y, z, 4, (1 + (Double.random(in: 0..<1) - Double.random(in: 0..<1)) * 0.2) * 0.7)
     world.hooks.addParticles("explosion", x, y, z, Int(min(40, power * 8)), power * 0.6, 0)
 

@@ -165,7 +165,7 @@ final class AttributeStoreTests: XCTestCase {
         var (host, store) = makeStore()
         _ = host.worldsByDim[.overworld]?.setBlock(3, 64, 5, Int(cell(B.chest)))
         var changes: [(ObjectRef, String, AttrValue?, AttrValue?, UInt64)] = []
-        store.onChange = { ref, name, old, new, rev in changes.append((ref, name, old, new, rev)) }
+        store.onChange = { ref, name, old, new, rev, _ in changes.append((ref, name, old, new, rev)) }
         _ = store.set(blockRef, "a", .int(1))
         _ = store.set(blockRef, "a", .int(2))
         _ = store.remove(blockRef, "a")

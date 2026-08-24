@@ -30,7 +30,9 @@ final class ScriptingCommandsTests: XCTestCase {
         let graph = ObjectGraph(host: host)
         let store = AttributeStore(graph: graph)
         let target = ObjectTargetContext(currentDimension: .overworld, cursor: { .block(dim: .overworld, x: 3, y: 64, z: 5) })
-        let context = ScriptingCommandContext(graph: graph, store: store, target: target, isLANClient: isLANClient, tick: 0)
+        let context = ScriptingCommandContext(
+            graph: graph, store: store, target: target, isLANClient: isLANClient, tick: 0, eventBus: EventBus()
+        )
         return (host, world, context)
     }
 
@@ -182,7 +184,8 @@ final class ScriptingCommandsTests: XCTestCase {
     }
 
     func testHelpListsAttrInspectObjects() {
-        XCTAssertEqual(ScriptingCommands.helpSummary(), "attr, inspect, objects")
+        // event-bus (change 1b) extended the summary with /on, /unsubscribe, /events.
+        XCTAssertEqual(ScriptingCommands.helpSummary(), "attr, inspect, objects, on, unsubscribe, events")
     }
 
     // MARK: - not-live messages
@@ -205,7 +208,9 @@ final class ScriptingCommandsTests: XCTestCase {
         let graph = ObjectGraph(host: host)
         let store = AttributeStore(graph: graph)
         let target = ObjectTargetContext(currentDimension: .overworld, cursor: { nil })
-        let context = ScriptingCommandContext(graph: graph, store: store, target: target, isLANClient: false, tick: 0)
+        let context = ScriptingCommandContext(
+            graph: graph, store: store, target: target, isLANClient: false, tick: 0, eventBus: EventBus()
+        )
         let result = ScriptingCommands.run(command: "inspect", arguments: ["looking"], context: context)
         XCTAssertEqual(result.lines, ["nothing under the cursor"])
     }

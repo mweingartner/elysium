@@ -516,6 +516,32 @@ authoritative. For example, `/attr set` can flip a door's `open` field, but the 
 governs every other door still applies afterward: an unsupported door still breaks, and a door wired to
 power still swings shut or open on the next power transition regardless of what a command just set.
 
+## Events and subscriptions (preview)
+
+The same preview also lets you register interest in things that happen in the world — again, nothing
+runs yet: a subscription is stored and matched, but the script it names doesn't execute until a later
+build ships the in-game scripting language. Host-only, like every command above.
+
+- `/on <target> <event> [attr] <script>.<handler>` — subscribe. `<target>` is what to watch: `self`,
+  `looking`, a canonical reference (`entity:12`, `block:overworld:10,64,3`), a bare kind name
+  (`entity`, `player`, `block`, `world`, `dim` — every object of that kind), a kind with a type filter
+  (`entity:zombie`, `block:furnace`), or `any` (every object — not accepted for `attribute.changed` or
+  `block.changed`, which need a narrower target). `<event>` is a dotted event name from the catalog
+  (`block.broken`, `entity.damaged`, `player.joined`, …) or a custom name a script defines later
+  (`lumber.milestone`). `[attr]` narrows an `attribute.changed` subscription to one attribute name
+  (e.g. `health`); omit it to match every attribute change on the target. `<script>.<handler>` names
+  the script and handler function that will run once scripts exist — both parts follow the same
+  attribute-name grammar (lowercase letters, digits, underscore). Subscribing survives save and reload.
+- `/unsubscribe <id>` — remove a subscription by the numeric id `/on` printed when you created it.
+- `/events recent [limit]` — lists the most recent events the bus has seen (default limit if omitted).
+- `/events emit <target> <event>` — raise an event by hand. `<target>` here is a normal object
+  reference (the same grammar as `/attr`'s target, not `/on`'s kind-wildcard forms), and `<event>` is
+  the event name to raise on it.
+
+`block:<name>`/`entity:<type>` in an `/on` target is a type filter, not a coordinate or an id — it
+only reads as a filter when there's no second `:` after it (`block:overworld:10,64,3` still resolves
+as a specific block, never as a filter named `overworld:10,64,3`).
+
 ## Options, accessibility, and local AI
 
 **Options...** contains five tabs:

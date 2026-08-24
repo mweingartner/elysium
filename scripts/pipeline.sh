@@ -88,7 +88,7 @@ stage_xctest() {
 stage_smoke() {
     swift run -c release elysmoke 2>&1 | tee "$TMP/elysmoke.log"
     local status=${PIPESTATUS[0]}
-    [ "$status" -eq 0 ] && grep -Fxq '469 passed, 0 failed' "$TMP/elysmoke.log" && release_unchanged
+    [ "$status" -eq 0 ] && grep -Fxq '478 passed, 0 failed' "$TMP/elysmoke.log" && release_unchanged
 }
 stage_package() {
     release_unchanged || return 1
@@ -165,7 +165,7 @@ run_stage 3 release-surface-binary 'Release surface and binary' '' stage_surface
 stage_xctest; status=$?; [ "$status" -eq 0 ] || fail full-xctest "$status"
 revalidate_source || fail full-xctest 98
 echo "[4/9] Full XCTest ... PASS tests=$XCTEST_COUNT"
-run_stage 5 elysmoke 'Elysmoke' ' checks=469 failures=0' stage_smoke
+run_stage 5 elysmoke 'Elysmoke' ' checks=478 failures=0' stage_smoke
 run_stage 6 package 'Package signed application' '' stage_package
 run_stage 7 packaged-appkit 'Packaged AppKit text entry' ' fields=2 clipboard_access=0' stage_appkit
 run_stage 8 install 'Install /Applications/Elysium.app' '' stage_install

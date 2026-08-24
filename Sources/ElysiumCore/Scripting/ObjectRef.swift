@@ -115,6 +115,17 @@ public enum ObjectRef: Hashable, Sendable {
     }
 }
 
+// MARK: - entity ref helper (event-bus, change 1b)
+
+/// The `ObjectRef` a live `Entity` names itself with everywhere the object
+/// graph is concerned: the local player is always `.player`, never
+/// `.entity(uid:)` (Decision 2 / Security (code) SC-1 — `ObjectGraph.resolve`
+/// applies the identical rule). Shared by every engine-level event funnel
+/// (`GameWorld`, `Living`, `AI`, `Combat`, …) so the mapping is defined once.
+public func scriptRef(for entity: Entity) -> ObjectRef {
+    entity is Player ? .player : .entity(uid: entity.id)
+}
+
 // MARK: - dimension name mapping
 
 /// Canonical dimension name used inside refs and every user-facing surface

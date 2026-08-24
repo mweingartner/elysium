@@ -11,7 +11,7 @@ Bug reports mean the world to us. [Open an issue](https://github.com/mweingartne
 3. **Steps**: what you did, what happened, what you expected
 4. **World context** for in-world bugs: seed, dimension, coordinates (all on the F3 overlay)
 5. **Settings**: render distance, ultra graphics on/off
-6. **Evidence**: screenshots/video for visual bugs; `~/Library/Logs/DiagnosticReports` for crashes; the tail of `elysium test` if the engine seems wrong (expected: `469 passed, 0 failed`)
+6. **Evidence**: screenshots/video for visual bugs; `~/Library/Logs/DiagnosticReports` for crashes; the tail of `elysium test` if the engine seems wrong (expected: `478 passed, 0 failed`)
 
 Even better than a report is a PR with the fix — the rest of this file tells you how to make one that lands.
 
@@ -22,7 +22,7 @@ xcode-select --install        # Swift toolchain (Swift 6, macOS 14+ SDK)
 git clone https://github.com/mweingartner/elysium.git && cd elysium
 swift build                   # debug build, ~35s clean
 swift test                    # focused unit/security regression tests
-swift run -c release elysmoke # the golden suite — must print "469 passed, 0 failed"
+swift run -c release elysmoke # the golden suite — must print "478 passed, 0 failed"
 ./elysium install              # optional: build + install the real app
 ```
 
@@ -32,7 +32,7 @@ There is no `.xcodeproj` and there never will be — the whole workflow is Swift
 
 1. `swift build -c release` — clean, **zero warnings**. The codebase is warning-free and stays that way.
 2. `swift test` — all focused unit/security regression tests pass.
-3. `swift run -c release elysmoke` (or `elysium test`) — **469/469**, from the repo root (goldens are found relative to cwd).
+3. `swift run -c release elysmoke` (or `elysium test`) — **478/478**, from the repo root (goldens are found relative to cwd).
 4. `swift scripts/sqlite-boundary-scan.swift --root "$PWD" --self-test` after any persistence, package, or source-inventory change. A manifest update requires a reviewed semantic API/capability diff; never regenerate it merely to turn the gate green.
 5. For saved-world browser or batch-deletion changes, run
    `swift test --filter SavedWorldBatchDeleteTests` before the full suite. Preserve checked collection
@@ -45,7 +45,7 @@ There is no `.xcodeproj` and there never will be — the whole workflow is Swift
 
 The zero-argument release command is `bash scripts/pipeline.sh`. It runs exactly nine automated
 stages in order and fails closed: (1) source security scan, (2) warning-free release build,
-(3) release-surface and binary security checks, (4) full XCTest, (5) the 469-check `elysmoke`
+(3) release-surface and binary security checks, (4) full XCTest, (5) the 478-check `elysmoke`
 golden suite, (6) application packaging, (7) packaged AppKit keyboard and Accessibility integration,
 (8) installation at `/Applications/Elysium.app`, and (9) installed-app identity and code-signature
 verification against the packaged candidate.
@@ -80,7 +80,7 @@ human review.
 `goldens/*.json` pin the engine's behavior. Two categories:
 
 - **Frozen reference goldens** — `atlas`, `fmath`, `fmath-explog`, `items`. These are immutable reference baselines that `elysmoke`/`ELYSIUM_REGOLD` **never** regenerate. `fmath-explog` is the one category with its own generator (`scripts/fdlibm-reference/gen-explog-goldens.sh`, an independent netlib fdlibm C build): it was produced once, committed, and is never regenerated again — if your change breaks it, your change is wrong, not the golden.
-- **Native baselines** — `biome`, `terrain`, `feature`, `mesh`, `worldsim`, `entity`, `systems`, `script-runtime`. Regenerable with `ELYSIUM_REGOLD=1 swift run -c release elysmoke`, but only for *deliberate* behavior changes. `script-runtime` (the embedded Lua sandbox/determinism corpus) is regenerated the same way and only for a justified, reviewed change to the runtime's observable behavior.
+- **Native baselines** — `biome`, `terrain`, `feature`, `mesh`, `worldsim`, `entity`, `systems`, `script-runtime`, `event-bus`. Regenerable with `ELYSIUM_REGOLD=1 swift run -c release elysmoke`, but only for *deliberate* behavior changes. `script-runtime` (the embedded Lua sandbox/determinism corpus) and `event-bus` (delivery order, coalescing, cap trips, persisted-subscription round trip) are regenerated the same way and only for a justified, reviewed change to that layer's observable behavior. `ELYSIUM_REGOLD=1` regenerates **every** native-baseline category in one pass, not just the one you're working on — after regolding, `git status`/`git diff --stat` the `goldens/` directory and revert any file you didn't mean to touch before committing (this bit a reviewer during 1b: a single elysmoke run under `ELYSIUM_REGOLD=1` silently rewrote seven unrelated categories).
 
 The required procedure for a behavior change:
 

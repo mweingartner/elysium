@@ -165,6 +165,12 @@ public struct WorldRecord: Codable {
     /// (`init`), `false` when the key is absent on decode (every pre-1a
     /// world). Read-only in this change.
     public var scriptsEnabled: Bool
+    /// event-bus (change 1b), design.md §7.3: the world's persisted
+    /// subscriptions (`/on`, phase 2 AI `subscribe` tool), one opaque
+    /// `SubscriptionRegistryCodec` document — same "opaque, encoded only when
+    /// non-empty" discipline as `objects`. Empty string means "no persisted
+    /// subscriptions", exactly like an absent key on decode.
+    public var scriptRegistry: String
 
     public var generationSettings: WorldGenerationSettings {
         WorldGenerationSettings(presetID: worldPreset, singleBiomeID: singleBiome,
@@ -199,6 +205,7 @@ public struct WorldRecord: Codable {
         mapCenterX = 0
         mapCenterZ = 0
         objects = [:]
+        scriptRegistry = ""
         // DEF-1 fix: init defaults false — only GameCore.createWorld sets true,
         // right before its own db.putWorld, so every other construction path (Reality
         // Derived imports, LAN-client transient records, and plain decode-absent) stays
@@ -211,7 +218,7 @@ public struct WorldRecord: Codable {
         case spawnX, spawnY, spawnZ, worldPreset, singleBiome, dungeonDensity, gameRules
         case dragonKilled, gatewaysSpawned, nextEntityId, rpgSimulationTick, realityDerivedSource
         case mapSize, mapCenterX, mapCenterZ
-        case objects, scriptsEnabled
+        case objects, scriptsEnabled, scriptRegistry
     }
 
     public init(from decoder: Decoder) throws {
@@ -258,6 +265,9 @@ public struct WorldRecord: Codable {
         // Absent on every pre-1a world (design.md Decision 11): only a world
         // this install created or imported carries the key at all.
         scriptsEnabled = try c.decodeIfPresent(Bool.self, forKey: .scriptsEnabled) ?? false
+        // event-bus (change 1b): absent on every pre-1b world, exactly like
+        // `objects` was absent on every pre-1a world.
+        scriptRegistry = try c.decodeIfPresent(String.self, forKey: .scriptRegistry) ?? ""
     }
 
     /// Decode-time clamp for `nextEntityId` (design.md Decision 3, Security
@@ -303,6 +313,7 @@ public struct WorldRecord: Codable {
         try c.encode(mapSize, forKey: .mapSize)
         if !objects.isEmpty { try c.encode(objects, forKey: .objects) }
         try c.encode(scriptsEnabled, forKey: .scriptsEnabled)
+        if !scriptRegistry.isEmpty { try c.encode(scriptRegistry, forKey: .scriptRegistry) }
         try c.encode(mapCenterX, forKey: .mapCenterX)
         try c.encode(mapCenterZ, forKey: .mapCenterZ)
     }

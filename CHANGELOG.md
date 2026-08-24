@@ -5,6 +5,22 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Added the **event bus** underneath the object graph and script runtime: a typed, ordered event
+  catalog (`attribute.changed`, `block.placed/broken/replaced/changed/used/neighborChanged`,
+  entity/player lifecycle and combat events, `explosion`, world/dimension changes, plus
+  script/player-defined custom events) raised from the real engine call sites — block writes,
+  entity hurt/die/heal, AI target changes, combat, placement/breaking, world/dimension travel,
+  advancements, explosions — and delivered in deterministic `seq` order with coalescing
+  (`attribute.changed`/`block.changed` collapse to one delivery per subject), bounded queues, an
+  8-level cascade-depth cap, and a 256-event-per-handler budget, each capped excess dropped
+  deterministically with exactly one `script.overBudget` diagnostic. Two new commands, `/on
+  <target> <event> [attr] <script.handler>` and `/unsubscribe <id>`, register and remove persisted
+  subscriptions (saved in the world record, surviving save/load); `/events recent|emit` shows
+  recent activity or raises a custom event by hand. Every command is host-only, matching `/attr`'s
+  own LAN gate. This still lands no script *execution*: subscriptions are stored and matched, but
+  the handler function they name doesn't run yet — that arrives with the script runtime's in-game
+  API. `elysmoke` gains an event-bus golden section (478 checks total, up from 469).
+
 - Added an **object graph and attribute system** on top of the embedded script runtime: three new chat commands, `/attr` (`set`/`get`/`list`/`define`/`remove`), `/inspect`, and `/objects near`, let a player read and set small, named attributes on a block or entity, backed by a canonical JSON codec (`AttrValue = ScriptValue`), a persisted per-record revision counter, and durable entity uid reservation so a crash between minting an id and saving can never reuse one. Every command is host-only — a LAN client is refused outright, including through `/ai` and its `/agent` alias. Scripted attribute writes never bypass the engine's own rules for a block: a door's `open` field can be set directly, but the same redstone/support logic that governs it during normal play still applies afterward. This still lands no script-execution surface: there is no in-game scripting language yet, and nothing in the shipped game creates a `LuaState`.
 
 - Added an embedded, deterministic **Lua 5.4.8** script runtime (`CLua` + `ElysiumScript`): a
