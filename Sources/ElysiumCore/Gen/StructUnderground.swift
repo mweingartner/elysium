@@ -6,7 +6,17 @@ import Foundation
 private let AIR = 0
 
 private var strongholdCache: (seed: UInt32, positions: [(Int, Int)])?
+/// Guards `strongholdCache`: `strongholdChunks` runs on every concurrent
+/// chunk-generation GCD thread, and an unsynchronized seed-change
+/// reassignment released the old positions array out from under a reader
+/// (SIGSEGV in swift_release via `registerUndergroundStructures`'s check
+/// closure — the recurring RPGCoreV2 multi-world test crash). NSLock is the
+/// repo convention (Icons.swift's `iconSourceLock` etc.); determinism is
+/// untouched — the cached value is a pure function of the seed.
+private let strongholdCacheLock = NSLock()
 private func strongholdChunks(_ seed: UInt32) -> [(Int, Int)] {
+    strongholdCacheLock.lock()
+    defer { strongholdCacheLock.unlock() }
     if strongholdCache == nil || strongholdCache!.seed != seed {
         strongholdCache = (seed, strongholdPositions(seed))
     }
