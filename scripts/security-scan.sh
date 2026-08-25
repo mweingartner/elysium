@@ -261,7 +261,9 @@ if grep -RInE 'setlocale[[:space:]]*\(' Sources; then
     fail "setlocale call site under Sources (locale is pinned, never mutated)"
 fi
 
-PROCESS_REFS="$(grep -RInE 'Process\(|NSTask|system\(|popen\(|dlopen\(|dlsym\(' Sources || true)"
+# `system\(` is anchored to a bare libc call: a leading `.`/word char (e.g. SwiftUI
+# `Font.system(size:)`) is NOT the C `system()` process API and must not trip this gate.
+PROCESS_REFS="$(grep -RInE 'Process\(|NSTask|(^|[^._[:alnum:]])system\(|popen\(|dlopen\(|dlsym\(' Sources || true)"
 UNAPPROVED_PROCESS_REFS="$(printf '%s\n' "$PROCESS_REFS" \
     | grep -v '^Sources/Elysium/RealityDerivedM.swift:.*Process()' || true)"
 if [ -n "$UNAPPROVED_PROCESS_REFS" ]; then
