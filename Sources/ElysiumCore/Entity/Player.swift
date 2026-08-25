@@ -568,7 +568,7 @@ public final class Player: LivingEntity {
     private func attackSpeedPerTick() -> Double {
         let t = mainHand.map { itemDef($0.id).tool } ?? nil
         let speed = t?.attackSpeed ?? 4
-        return speed * 5 // reaches 100 in 20/speed ticks
+        return speed * 10 // doubled strike speed — reaches full charge in 10/speed ticks
     }
 
     public func advanceAttackStrengthRecovery(ticks: Int) {

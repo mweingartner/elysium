@@ -718,7 +718,7 @@ open class LivingEntity: Entity {
         baseTick()
         if hurtTime > 0 { hurtTime -= 1 }
         if lastHurtByPlayerTime > 0 { lastHurtByPlayerTime -= 1 }
-        if attackAnim > 0 { attackAnim = max(0, attackAnim - 0.125) }
+        if attackAnim > 0 { attackAnim = max(0, attackAnim - 0.25) } // faster swing to match doubled strike speed
         tickEffects()
         if deathTime > 0 { tickDeath(); return }
         // drowning

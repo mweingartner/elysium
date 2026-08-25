@@ -98,7 +98,7 @@ struct BowOverlayPlan: Equatable {
 }
 
 let HELD_EQUIP_FLIP_DURATION = 0.62
-let HELD_PRIMARY_ACTION_CYCLE_DURATION = 0.64
+let HELD_PRIMARY_ACTION_CYCLE_DURATION = 0.32
 
 private func armAssetOrigin(gripX: Double, gripY: Double,
                             size: Double, mirrored: Bool) -> (Double, Double) {
@@ -220,6 +220,17 @@ struct HeldItemPresentation: Equatable {
     var hasItem: Bool { kind != .empty }
 }
 
+/// Swords ship as a 45° bottom-left→top-right sprite, but the first-person grip layer
+/// bakes a *vertical* handle into the fist (it was authored for the pickaxe). Left at rest
+/// rotation 0 the blade floated up-right of a vertical haft the hand appeared to hold —
+/// two handles at two angles. Rotating the sword ~34° counter-clockwise about its pommel
+/// (which the 0.16/0.86 grip anchor pins into the fist) stands the blade up near-vertical so
+/// its handle merges with the baked haft. It stops short of dead-vertical on purpose: at the
+/// game's 480×270 canvas a fully upright blade swings into the centre crosshair envelope and
+/// the whole arm self-hides (heldOverlayPlan's resting-aim guard). −0.60 rad keeps the blade
+/// clear of that band with margin. Axe/shovel/hoe already ship vertical, so they stay 0.
+let SWORD_REST_ROTATION = -0.60
+
 let GENERIC_HELD_ITEM_PRESENTATION = HeldItemPresentation(
     kind: .generic, armLayer: .back, drawsGrip: true,
     iconBaseSize: 60, gripAnchorX: 0.44, gripAnchorY: 0.70,
@@ -245,6 +256,7 @@ func heldItemPresentation(for definition: ItemDef?, hasDetailedVisual: Bool) -> 
         let isBow = definition.name == "bow"
         let isCrossbow = definition.name == "crossbow"
         let isCompact = definition.name == "shears" || definition.name == "flint_and_steel"
+        let isSword = tool.type == "sword"
         let iconSize = isDetailedPickaxe ? 124.8
             : hasDetailedVisual ? (isCompact ? 96 : (isBow ? 112 : (isCrossbow ? 132 : 118)))
             : 82
@@ -262,6 +274,7 @@ func heldItemPresentation(for definition: ItemDef?, hasDetailedVisual: Bool) -> 
             : isBow ? -0.08
             : isCrossbow ? 0
             : isCompact ? -0.16
+            : isSword ? SWORD_REST_ROTATION
             : 0
         return HeldItemPresentation(
             kind: .tool, armLayer: .back, drawsGrip: true,
@@ -954,8 +967,10 @@ final class HUD {
                 "absorb": (160, 169), "frozen": (178, 187),
             ]
             for i in 0..<hearts {
-                let hx = hbX + Double(i) * 8
-                let hy = healthY + (player.hurtTime > 0 && i % 2 == 0 ? shake : 0)
+                // Wrap into rows of 10 stacking upward (like the absorption row below) so a player
+                // with more than 20 max health never runs the hearts rightward into the hunger row.
+                let hx = hbX + Double(i % 10) * 8
+                let hy = healthY - Double(i / 10) * 10 + (player.hurtTime > 0 && i % 2 == 0 ? shake : 0)
                 let v = hp - Double(i * 2)
                 if packHud {
                     icon9(16, 0, hx, hy)

@@ -514,7 +514,14 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertEqual(sword.iconBaseSize, 118)
         XCTAssertEqual(sword.gripAnchorX, 0.16)
         XCTAssertEqual(sword.gripAnchorY, 0.86)
-        XCTAssertEqual(sword.restRotation, 0)
+        // The sword stands upright in the fist (its 45° sprite would otherwise float off the
+        // vertical baked haft). Only the sword rotates; the other long-handled tools ship vertical.
+        XCTAssertEqual(sword.restRotation, SWORD_REST_ROTATION)
+        XCTAssertLessThan(sword.restRotation, 0)
+        for family in ["axe", "shovel", "hoe"] {
+            let t = heldItemPresentation(for: itemDef(iid("iron_\(family)")), hasDetailedVisual: true)
+            XCTAssertEqual(t.restRotation, 0, "\(family) already ships vertical; must not rotate")
+        }
 
         let bow = heldItemPresentation(for: itemDef(iid("bow")), hasDetailedVisual: true)
         let crossbow = heldItemPresentation(for: itemDef(iid("crossbow")), hasDetailedVisual: true)
@@ -587,9 +594,14 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(animation.observe(
             isHeld: true, at: 3 + HELD_PRIMARY_ACTION_CYCLE_DURATION / 2,
             eligible: true)), 0.5, accuracy: 0.0001)
-        XCTAssertEqual(try XCTUnwrap(animation.observe(
-            isHeld: true, at: 3 + HELD_PRIMARY_ACTION_CYCLE_DURATION,
-            eligible: true)), 0, accuracy: 0.0001)
+        // At an exact full cycle the phase wraps back to the start. Because the cycle
+        // constant is not float-exact, (start + CYCLE) - start lands a hair under or over
+        // CYCLE, so the wrapped phase reads as ~0 or ~1 — the same animation frame either
+        // way. Assert cyclic proximity to the start (0 ≡ 1) rather than one arbitrary end.
+        let atFullCycle = try XCTUnwrap(animation.observe(
+            isHeld: true, at: 3 + HELD_PRIMARY_ACTION_CYCLE_DURATION, eligible: true))
+        XCTAssertLessThan(min(atFullCycle, 1 - atFullCycle), 0.0001,
+                          "one full cycle must return to the start phase (0 ≡ 1)")
         XCTAssertEqual(try XCTUnwrap(animation.observe(
             isHeld: true, at: 3 + HELD_PRIMARY_ACTION_CYCLE_DURATION * 1.5,
             eligible: true)), 0.5, accuracy: 0.0001)
