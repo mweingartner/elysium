@@ -25,6 +25,7 @@ struct ChunkShared {
     float4 fog;        // start, end, alphaTest, globalAlpha
     float4 fogColor;
     float4 misc;       // x = time
+    float4 heldLight;  // rgb = torch color * intensity, w = radius in blocks (w<=0 disables)
 };
 struct SkyU {
     float4x4 invViewProj;
@@ -238,6 +239,19 @@ fragment float4 chunk_fs(ChunkVOut in [[stage_in]],
     }
 
     float3 col = tex.rgb * in.color * shadow;
+
+    // Held torch: a moving point light at the player. Rendering is camera-relative so the
+    // player sits at the origin and in.worldPos is already the offset from the eye — the
+    // torch is just a smooth radial falloff of distance, added like a warm block light. No
+    // voxel-light re-propagation. A gentle flicker keeps the flame alive.
+    if (u.heldLight.w > 0.0) {
+        float d = length(in.worldPos);
+        float t = clamp(1.0 - d / u.heldLight.w, 0.0, 1.0);
+        t *= t;
+        float flicker = 0.9 + 0.1 * sin(u.misc.x * 11.0) * sin(u.misc.x * 4.3 + 1.7);
+        col += tex.rgb * u.heldLight.rgb * (t * flicker);
+    }
+
     float alpha = tex.a * u.fog.w;
 
     // ultra: specular sun glint + fresnel on water (anim 1)

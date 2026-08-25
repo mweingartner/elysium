@@ -48,38 +48,42 @@
     {
       "height": 128,
       "item": "copper_axe",
-      "output": "held_copper_axe_128.png",
-      "output_sha256": "b034962a89722970c4ab5cf7cc4ae2bfcb2760d2d4372ecf9cc81ac5cb999e72",
+      "output": "held_copper_axe_upright_128.png",
+      "output_sha256": "aec65d16bfa3113ab76a859ba305747f0c65d30ae5e037a3d273003f20a248ea",
       "source": "assets/minecraft/textures/item/copper_axe.png",
       "source_sha256": "bbe4307eac076f6629226855c37cb08e02cf31c8d54a2fa37b263536aca9b33a",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "copper_hoe",
-      "output": "held_copper_hoe_128.png",
-      "output_sha256": "db6662cc6e19157a45d85d4506eac299e2a87d15f13566c8f8793c17374438b1",
+      "output": "held_copper_hoe_upright_128.png",
+      "output_sha256": "ec9c597c8ae07918414b0bb49280b249d693a8aea36b6159149c95a4b9b38555",
       "source": "assets/minecraft/textures/item/copper_hoe.png",
       "source_sha256": "5a4ba65dd723b8499b461d62ea68a6d1e0a7731a98898b5b7b79dc98d7747a4b",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "copper_shovel",
-      "output": "held_copper_shovel_128.png",
-      "output_sha256": "c1a039736383a1d6832bbcc3d95cd9c5d65ccc89384e3f1acbe296c9d2e890c0",
+      "output": "held_copper_shovel_upright_128.png",
+      "output_sha256": "57053c7d1965b4ada435b185c2bf04b4cc328fa701c89d2380d1af02ec0bb983",
       "source": "assets/minecraft/textures/item/copper_shovel.png",
       "source_sha256": "5d1ad65a60fa7446dc56796fe6c0c2ec3c62a127a844c7636096f9540eaf8756",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "copper_sword",
-      "output": "held_copper_sword_128.png",
-      "output_sha256": "8e59b652ea3857db74564f1d5243cee7b62658699372b2add77ad68339be602d",
+      "output": "held_copper_sword_upright_128.png",
+      "output_sha256": "3c846eb7a0ab3476c357571bb2a149ffbbfb843f6c6319ab0e93ac8d1bfc5332",
       "source": "assets/minecraft/textures/item/copper_sword.png",
       "source_sha256": "d28b4943379e55edfa465bcd08f683c745512d2a02a748c56f4cc461a551e986",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
@@ -93,38 +97,42 @@
     {
       "height": 128,
       "item": "diamond_axe",
-      "output": "held_diamond_axe_128.png",
-      "output_sha256": "1f296896a13080637706b3d04823bae1359a0b401f5a2b755d2196c48599fd85",
+      "output": "held_diamond_axe_upright_128.png",
+      "output_sha256": "7d118d59dcfc1f387fc5a48742a1563fa2ffcebc855c08c9a67f269ae582b002",
       "source": "assets/minecraft/textures/item/diamond_axe.png",
       "source_sha256": "84c0cd16539a2616295168c268ac2784c6148d1b29aea2faac76ca8272b898d2",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "diamond_hoe",
-      "output": "held_diamond_hoe_128.png",
-      "output_sha256": "794313fef305bc5ce0fff9919afff6b2872ba3e82f7a23d57bfac56c3855fac4",
+      "output": "held_diamond_hoe_upright_128.png",
+      "output_sha256": "7832ed02c937c9aa0057812a979b6cf504b309a91368c61d62702dee79fe512b",
       "source": "assets/minecraft/textures/item/diamond_hoe.png",
       "source_sha256": "6deb9d21820b01eced0ebf5a6d8869d1d0719d160c3ff4fb9d057c111f8bc40a",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "diamond_shovel",
-      "output": "held_diamond_shovel_128.png",
-      "output_sha256": "129f831a9a57b05aefd363d42fb55e6c60f5135d79071a8c44159160c48227ad",
+      "output": "held_diamond_shovel_upright_128.png",
+      "output_sha256": "946d587f1776c0521a144b5e0ce54145bce02b23bdc61ce92b2321e850c0a879",
       "source": "assets/minecraft/textures/item/diamond_shovel.png",
       "source_sha256": "2291cf816027617e6314279b203b3f8b277a98ccdb5856abf98b3f3b3d86d0b8",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "diamond_sword",
-      "output": "held_diamond_sword_128.png",
-      "output_sha256": "71bfa346f7cf4bab6c51c6a0da150505c70f576cdb323093d917b686bfc8782f",
+      "output": "held_diamond_sword_upright_128.png",
+      "output_sha256": "ec3ce9ec527434dd0bc5e2255ab7199b329db2ec7c9b7cd3df0570401667da77",
       "source": "assets/minecraft/textures/item/diamond_sword.png",
       "source_sha256": "692f681dd0295d270e7e073abc7cfa3bb765e3c5e276aa27094cda5257972a48",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
@@ -156,110 +164,122 @@
     {
       "height": 128,
       "item": "golden_axe",
-      "output": "held_golden_axe_128.png",
-      "output_sha256": "bb31c4a09b65bc08603a0a90f0500b7de5a9ade086796fa7b2c9e2efbeb56745",
+      "output": "held_golden_axe_upright_128.png",
+      "output_sha256": "f917ea23486b11f7519167ada1c825d992498de70863beb82d4ad3781303b939",
       "source": "assets/minecraft/textures/item/golden_axe.png",
       "source_sha256": "17da1d0653492bda6f9887ccc9b551b1c9c47b0c8d059db364521c71387bd752",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "golden_hoe",
-      "output": "held_golden_hoe_128.png",
-      "output_sha256": "c04fd43029772fdaa25c0198c2ad67f5af96c4143553bfe9473780868d7739e8",
+      "output": "held_golden_hoe_upright_128.png",
+      "output_sha256": "6a6b8fab9d5a987bea384014b422ee32be2d76c4e45f349352c0de5c0fe0f6f6",
       "source": "assets/minecraft/textures/item/golden_hoe.png",
       "source_sha256": "7ea38780efb890f496ece6aff4a45ce95d5d6ef3a8e03a48dd9ae8dd99a05678",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "golden_shovel",
-      "output": "held_golden_shovel_128.png",
-      "output_sha256": "eeb4e6cca35d008d33caec55583806024c1c61c895b208c9acafb0a406a3823a",
+      "output": "held_golden_shovel_upright_128.png",
+      "output_sha256": "60e35a61c552db9e3a1c1870606ff2196fc62db2f3cd26ead5f26292fb7c9698",
       "source": "assets/minecraft/textures/item/golden_shovel.png",
       "source_sha256": "75f3b28be9d48ff18170c583610b1461e7d670550a9faeec04b31da0523ff659",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "golden_sword",
-      "output": "held_golden_sword_128.png",
-      "output_sha256": "debb85f441bc5af42ef0c475562970ac1d8f0f310d23dd4cef632d10cbea3b24",
+      "output": "held_golden_sword_upright_128.png",
+      "output_sha256": "47318317241d258b683679c5764d1d126fb9001f0826e4bb0341b3a081f65dd1",
       "source": "assets/minecraft/textures/item/golden_sword.png",
       "source_sha256": "28c87d277097807c9a37d5ac742d36bb699fde2bc595951f207f3ab01c090735",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "iron_axe",
-      "output": "held_iron_axe_128.png",
-      "output_sha256": "cb03dbe0dbe8f81eaedbed04ebcfb2595bdcf6bc0d1eb08ec2779794c7cf8cae",
+      "output": "held_iron_axe_upright_128.png",
+      "output_sha256": "9783c567b2086261ade251e5855f34322a1b733b7614244bd01a1e6578229ab5",
       "source": "assets/minecraft/textures/item/iron_axe.png",
       "source_sha256": "5e80c7214d68d3d91289c8f6f828216ec68c0bb05866fb4ac44de57713239cf9",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "iron_hoe",
-      "output": "held_iron_hoe_128.png",
-      "output_sha256": "435b2c97eaec9deef1ecc396325e244e4d025a822bf604e5666ba801374d9247",
+      "output": "held_iron_hoe_upright_128.png",
+      "output_sha256": "a82dcb00e4e5ba47d2a7a7d2d68f8c6282e1f31a0fb312db93bc7d9047335c1d",
       "source": "assets/minecraft/textures/item/iron_hoe.png",
       "source_sha256": "0196d4d557db43f4e6bf99b3c240efbc8e9f26b841511a47ae71024695ce950b",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "iron_shovel",
-      "output": "held_iron_shovel_128.png",
-      "output_sha256": "823447b8cbabb3deb599c1b09a73e132fef747ca113a42a4954f852c77ad4438",
+      "output": "held_iron_shovel_upright_128.png",
+      "output_sha256": "bafdf23e897eaefccd204803164f934734e4c1a10ad6d2c6de2b2e9b3a6ee436",
       "source": "assets/minecraft/textures/item/iron_shovel.png",
       "source_sha256": "e645f163338ad48028a9c2357dca7f9990d44ef2606885dccc0371f63942e4c8",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "iron_sword",
-      "output": "held_iron_sword_128.png",
-      "output_sha256": "41b5504cbd10db3539828ed9e99fd7801d311eb11ca68a6b77b8b4fdbd4786c9",
+      "output": "held_iron_sword_upright_128.png",
+      "output_sha256": "2c031a19c88edbbac1a3c7bf094379ccd74791382728ae0d4c29d7983f3afe5d",
       "source": "assets/minecraft/textures/item/iron_sword.png",
       "source_sha256": "052c24f68b4bedd3c5fcc9842b1fb9899ab253a0a849a44bb978bf3c26e692ba",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "netherite_axe",
-      "output": "held_netherite_axe_128.png",
-      "output_sha256": "64399915d3b473890e60c30bfd8f444e9262093289eff61a0817707102d459b9",
+      "output": "held_netherite_axe_upright_128.png",
+      "output_sha256": "0a09a15f5ea3c03bf4947e68e101a5ab1e79cc777823b3109e0acfa2f35ef367",
       "source": "assets/minecraft/textures/item/netherite_axe.png",
       "source_sha256": "42da943154aff654fdbe3377eed828de2ecb3bcb985d14ec7e866f096c4d5953",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "netherite_hoe",
-      "output": "held_netherite_hoe_128.png",
-      "output_sha256": "f41dcaf67d89160089392a0bd6da2bd38fbb26a216cb54978ee4aa4396e1d84c",
+      "output": "held_netherite_hoe_upright_128.png",
+      "output_sha256": "15bb73007580836c2e0b3ed585b20d1157b201309dfba59f5de97c1d970d6b93",
       "source": "assets/minecraft/textures/item/netherite_hoe.png",
       "source_sha256": "dee655a4313a2389a8bbd7c61c116667d849b6bb039eb0ea311ac9f991639062",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "netherite_shovel",
-      "output": "held_netherite_shovel_128.png",
-      "output_sha256": "6f5b667c0c529b8785508c8c0d33536a768512b3c9dd1c869b8d15cc7e61f2d3",
+      "output": "held_netherite_shovel_upright_128.png",
+      "output_sha256": "72b0b7bd756c14e1e2589bd4f2bdb4e1ddbea27c62f7d43a293ca30617cc608a",
       "source": "assets/minecraft/textures/item/netherite_shovel.png",
       "source_sha256": "d6c57905dc418dcff13fc97e61febbdfec6a65f095fb724d662b0bc80d120108",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "netherite_sword",
-      "output": "held_netherite_sword_128.png",
-      "output_sha256": "9fade0a67963037d9768395558d5cb4e2782ba93f894028e4efa40d67763ff57",
+      "output": "held_netherite_sword_upright_128.png",
+      "output_sha256": "4a42850dc41c61fb9311830e76b074e9b874b7fdd025620ea3dc5836f20930dc",
       "source": "assets/minecraft/textures/item/netherite_sword.png",
       "source_sha256": "213b9c245334ef503e0f0bedf2ec0dbe0f31c14fd1eae3d7678d0122e060fd43",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
@@ -282,38 +302,42 @@
     {
       "height": 128,
       "item": "stone_axe",
-      "output": "held_stone_axe_128.png",
-      "output_sha256": "2eb9c74185f73a4df37f43a0f002bed64581ad3510d23401f1333d463b1eb4be",
+      "output": "held_stone_axe_upright_128.png",
+      "output_sha256": "bc4e08ce7b9d1398c4acb7cf1d8ee4e23607281e69770d41105a3004159d7736",
       "source": "assets/minecraft/textures/item/stone_axe.png",
       "source_sha256": "e85e3a419256fba81b5344cd0dc015796140598bff99df4330241fbd97e6c1dd",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "stone_hoe",
-      "output": "held_stone_hoe_128.png",
-      "output_sha256": "9b992c25596832c86299edcc561fcb59b5c36980f5063d09b54457d102c1ab63",
+      "output": "held_stone_hoe_upright_128.png",
+      "output_sha256": "1e4a0f7e4f4e3d3b95fa94e4732749dd6f710ceac8c4e132b69e18d0d8605943",
       "source": "assets/minecraft/textures/item/stone_hoe.png",
       "source_sha256": "d25dc896c1618bd42169f62b2c58858652b4c827e86ca1e5383be154c6e014a7",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "stone_shovel",
-      "output": "held_stone_shovel_128.png",
-      "output_sha256": "eec9978febcb7c783324b79b99a60c47dc54debed9328ebfc952d8cef19ee39d",
+      "output": "held_stone_shovel_upright_128.png",
+      "output_sha256": "a83ba625f5e797f38200c2027a3d3c98d845796667b5a8339a279cac2b7fa9af",
       "source": "assets/minecraft/textures/item/stone_shovel.png",
       "source_sha256": "bde79eb9570998fddfab9d3107ef1de39699337b5eed0f7ce1318d13245e96b5",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "stone_sword",
-      "output": "held_stone_sword_128.png",
-      "output_sha256": "6cba806b834807bb47e348c83988df3a07603aabde450f49ff3b006b1a9364db",
+      "output": "held_stone_sword_upright_128.png",
+      "output_sha256": "e8f8ee516f959819ccf4135aa8f761a10e6beeabcb1949dc18431d9973d0bab8",
       "source": "assets/minecraft/textures/item/stone_sword.png",
       "source_sha256": "ac3c50b8cfdff0636df11a6fad845d9710fb12acbc353f45f1a0f751f2622ce2",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
@@ -327,43 +351,48 @@
     {
       "height": 128,
       "item": "wooden_axe",
-      "output": "held_wooden_axe_128.png",
-      "output_sha256": "325226d566dfa14f1d4e99cc11228c757fed04942514ea2fd4ec5c11b1bca48e",
+      "output": "held_wooden_axe_upright_128.png",
+      "output_sha256": "539b78d44433f9f8a0d6d4628ac9bfc0df37219c3d96c1d3ad3585d8c7492723",
       "source": "assets/minecraft/textures/item/wooden_axe.png",
       "source_sha256": "158639bd26ea5fdc074b658fe64c37ea443600ddd5fbec2a51fa1a0e3895b126",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "wooden_hoe",
-      "output": "held_wooden_hoe_128.png",
-      "output_sha256": "85cc409309433c6266de5908be2c63016e1d01d5cc44a41117c9e4db28d96f6e",
+      "output": "held_wooden_hoe_upright_128.png",
+      "output_sha256": "da5ef55732cdc6d9601565518351e60cb433457b8cdc9429a7c1390172e674cf",
       "source": "assets/minecraft/textures/item/wooden_hoe.png",
       "source_sha256": "1b31c5a66093a5017435ea1f6caf0aa87186a9980ed3e55f72fbd3afc749bb12",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "wooden_shovel",
-      "output": "held_wooden_shovel_128.png",
-      "output_sha256": "96733d92239d9a464844ab858ff043e34fc6a5937d1e5a0821bbfd8217cbeded",
+      "output": "held_wooden_shovel_upright_128.png",
+      "output_sha256": "fc8f7fce0a9b0f5609fe8b61daa5a3e0a3d2e12611ab2ebcce7bdd21839ba3c4",
       "source": "assets/minecraft/textures/item/wooden_shovel.png",
       "source_sha256": "3206c1431260b1be7cc2474d5e4112fd0fc611852a94fb6e02051cd617bcb3e5",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     },
     {
       "height": 128,
       "item": "wooden_sword",
-      "output": "held_wooden_sword_128.png",
-      "output_sha256": "8b36a4d897a923d40fbb7a532682c99e5a614061d723c5d58f02ac494f25899c",
+      "output": "held_wooden_sword_upright_128.png",
+      "output_sha256": "38f32e09df5f925d12ab6fc78a4f338d5cca8661d266989511a55d42c757b3f2",
       "source": "assets/minecraft/textures/item/wooden_sword.png",
       "source_sha256": "b0e6d07267b29cba99b848e96caf9241eb8f0ea72d0df75402bf27dc2978e723",
-      "width": 128
+      "width": 128,
+      "orientation": "upright"
     }
   ],
   "generator": "Blender 5.1 bpy image pipeline",
   "pickaxes": "Excluded; Elysium diagonal pickaxe silhouette remains authoritative",
   "pixel_filter": "2x nearest-neighbour",
   "source_license": "Faithful License v3; see packaging/FAITHFUL-LICENSE.txt",
-  "source_pack": "Faithful 64x - December 2025 Release.zip"
+  "source_pack": "Faithful 64x - December 2025 Release.zip",
+  "tool_orientation": "melee/mining tools (sword/axe/shovel/hoe) stood upright by scripts/align-held-tools-upright.py so the handle aligns to the fist grip; the diagonal held_<item>_128.png remains the Faithful-derived source"
 }

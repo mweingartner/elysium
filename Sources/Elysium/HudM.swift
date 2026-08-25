@@ -109,23 +109,55 @@ private func armAssetOrigin(gripX: Double, gripY: Double,
 
 func leftHandShieldOverlayPlan(viewWidth: Double, viewHeight: Double,
                                guiVisible: Bool, firstPerson: Bool,
-                               screenOpen: Bool, hotbarLeftX: Double) -> LeftHandItemOverlayPlan? {
+                               screenOpen: Bool, hotbarLeftX: Double,
+                               raised: Bool = false) -> LeftHandItemOverlayPlan? {
     guard guiVisible, firstPerson, !screenOpen,
           viewWidth.isFinite, viewHeight.isFinite, hotbarLeftX.isFinite,
           viewWidth >= 160, viewHeight >= 120 else { return nil }
     let scale = min(1.15, max(0.72, min(viewWidth / 320, viewHeight / 180)))
     let armSize = 160 * scale
-    let itemSize = 142 * scale
-    let gripX = max(12 * scale, hotbarLeftX - 18 * scale)
-    let gripY = viewHeight - 48 * scale
+    // The angled "held_shield" sprite has transparent margin around a 3D-posed shield, so it is
+    // framed a touch larger than the old flat sprite and offset to sit over the fist. When the
+    // shield is actively raised to block it rises up and swings inward toward the crosshair to
+    // cover the centre — the same motion Minecraft's shield makes going idle → blocking.
+    let itemSize = (raised ? 168 : 156) * scale
+    let raiseUp = raised ? 40 * scale : 0
+    let raiseIn = raised ? 34 * scale : 0
+    let gripX = max(12 * scale, hotbarLeftX - 18 * scale) + raiseIn
+    let gripY = viewHeight - 48 * scale - raiseUp
     let armOrigin = armAssetOrigin(
         gripX: gripX, gripY: gripY, size: armSize, mirrored: true)
     return LeftHandItemOverlayPlan(
-        itemName: "shield",
+        itemName: "held_shield",
         armAssetX: armOrigin.0, armAssetY: armOrigin.1, armAssetSize: armSize,
         gripX: gripX, gripY: gripY,
-        itemX: gripX - itemSize * 0.68,
-        itemY: gripY - itemSize * 0.72,
+        itemX: gripX - itemSize * 0.58,
+        itemY: gripY - itemSize * 0.64,
+        itemSize: itemSize, itemRotation: 0)
+}
+
+/// A torch carried in the left (off) hand: stood upright in the fist with the flame up, held a
+/// little in from the screen edge so it lights the way without blocking the view. The grip
+/// fingers are drawn over the stick, same as a right-hand tool.
+func leftHandTorchOverlayPlan(viewWidth: Double, viewHeight: Double,
+                              guiVisible: Bool, firstPerson: Bool,
+                              screenOpen: Bool, hotbarLeftX: Double) -> LeftHandItemOverlayPlan? {
+    guard guiVisible, firstPerson, !screenOpen,
+          viewWidth.isFinite, viewHeight.isFinite, hotbarLeftX.isFinite,
+          viewWidth >= 160, viewHeight >= 120 else { return nil }
+    let scale = min(1.15, max(0.72, min(viewWidth / 320, viewHeight / 180)))
+    let armSize = 160 * scale
+    let itemSize = 108 * scale
+    let gripX = max(16 * scale, hotbarLeftX - 10 * scale)
+    let gripY = viewHeight - 46 * scale
+    let armOrigin = armAssetOrigin(
+        gripX: gripX, gripY: gripY, size: armSize, mirrored: true)
+    return LeftHandItemOverlayPlan(
+        itemName: "held_torch",
+        armAssetX: armOrigin.0, armAssetY: armOrigin.1, armAssetSize: armSize,
+        gripX: gripX, gripY: gripY,
+        itemX: gripX - itemSize * 0.5,
+        itemY: gripY - itemSize * 0.86,
         itemSize: itemSize, itemRotation: 0)
 }
 
@@ -220,17 +252,6 @@ struct HeldItemPresentation: Equatable {
     var hasItem: Bool { kind != .empty }
 }
 
-/// Swords ship as a 45° bottom-left→top-right sprite, but the first-person grip layer
-/// bakes a *vertical* handle into the fist (it was authored for the pickaxe). Left at rest
-/// rotation 0 the blade floated up-right of a vertical haft the hand appeared to hold —
-/// two handles at two angles. Rotating the sword ~34° counter-clockwise about its pommel
-/// (which the 0.16/0.86 grip anchor pins into the fist) stands the blade up near-vertical so
-/// its handle merges with the baked haft. It stops short of dead-vertical on purpose: at the
-/// game's 480×270 canvas a fully upright blade swings into the centre crosshair envelope and
-/// the whole arm self-hides (heldOverlayPlan's resting-aim guard). −0.60 rad keeps the blade
-/// clear of that band with margin. Axe/shovel/hoe already ship vertical, so they stay 0.
-let SWORD_REST_ROTATION = -0.60
-
 let GENERIC_HELD_ITEM_PRESENTATION = HeldItemPresentation(
     kind: .generic, armLayer: .back, drawsGrip: true,
     iconBaseSize: 60, gripAnchorX: 0.44, gripAnchorY: 0.70,
@@ -256,34 +277,43 @@ func heldItemPresentation(for definition: ItemDef?, hasDetailedVisual: Bool) -> 
         let isBow = definition.name == "bow"
         let isCrossbow = definition.name == "crossbow"
         let isCompact = definition.name == "shears" || definition.name == "flint_and_steel"
-        let isSword = tool.type == "sword"
+        // Melee/mining tools whose sprite is now stood upright (align-held-tools-upright.py):
+        // the handle is a vertical column the fist grips directly — no baked haft, no runtime
+        // counter-rotation. Grip anchor is the pommel at the bottom-centre of the frame.
+        let isUprightTool = hasDetailedVisual
+            && ["sword", "axe", "shovel", "hoe"].contains(tool.type)
         let iconSize = isDetailedPickaxe ? 124.8
+            : isUprightTool ? 98
             : hasDetailedVisual ? (isCompact ? 96 : (isBow ? 112 : (isCrossbow ? 132 : 118)))
             : 82
-        let gripX = isDetailedPickaxe ? 0.14
+        let gripX = isDetailedPickaxe ? 0.47
+            : isUprightTool ? 0.50
             : isBow ? 0.34
             : isCrossbow ? 0.78
             : isCompact ? 0.27
             : 0.16
-        let gripY = isDetailedPickaxe ? 0.88
+        let gripY = isDetailedPickaxe ? 0.90
+            : isUprightTool ? 0.88
             : isBow ? 0.55
             : isCrossbow ? 0.87
             : isCompact ? 0.74
             : 0.86
-        let restRotation = isDetailedPickaxe ? 0
-            : isBow ? -0.08
-            : isCrossbow ? 0
+        // Upright tools need no counter-rotation; the sprite is already vertical.
+        let restRotation = isBow ? -0.08
             : isCompact ? -0.16
-            : isSword ? SWORD_REST_ROTATION
             : 0
+        // Opaque envelope of the upright sprites (union of sword/axe/shovel/hoe): a narrow
+        // vertical column, bottom-anchored — used by the crosshair-obscure and clamp math.
+        let uprightBounds = HeldItemAlphaBounds(minX: 0.21, minY: 0, maxX: 0.75, maxY: 0.97)
         return HeldItemPresentation(
             kind: .tool, armLayer: .back, drawsGrip: true,
             iconBaseSize: iconSize,
             gripAnchorX: gripX,
             gripAnchorY: gripY,
             alphaBounds: isDetailedPickaxe
-                ? HeldItemAlphaBounds(minX: 6 / 96, minY: 12 / 96,
-                                      maxX: 90 / 96, maxY: 90 / 96)
+                ? HeldItemAlphaBounds(minX: 12 / 96, minY: 18 / 96,
+                                      maxX: 84 / 96, maxY: 90 / 96)
+                : isUprightTool ? uprightBounds
                 : hasDetailedVisual ? detailedBounds : full,
             restRotation: restRotation,
             performsEquipFlip: true)
@@ -801,7 +831,8 @@ final class HUD {
            let shield = leftHandShieldOverlayPlan(
                viewWidth: W, viewHeight: H,
                guiVisible: !hideGui, firstPerson: game.perspective == 0,
-               screenOpen: screenOpen, hotbarLeftX: hbX) {
+               screenOpen: screenOpen, hotbarLeftX: hbX,
+               raised: player.shieldRaised) {
             cv.drawFirstPersonArm(.back,
                                   shield.armAssetX, shield.armAssetY,
                                   shield.armAssetSize, shield.armAssetSize,
@@ -809,6 +840,27 @@ final class HUD {
             _ = cv.drawHeldItemVisual(
                 shield.itemName, shield.itemX, shield.itemY,
                 shield.itemSize, shield.itemSize)
+        }
+
+        // A torch carried in the off-hand renders upright in the left fist (and lights the
+        // world via the dynamic held-light in the shader). Yields the left hand to a bow or
+        // a shield if one is active there.
+        if !mainHandIsBow, !mainHandIsShield, offHandName == "torch",
+           let torch = leftHandTorchOverlayPlan(
+               viewWidth: W, viewHeight: H,
+               guiVisible: !hideGui, firstPerson: game.perspective == 0,
+               screenOpen: screenOpen, hotbarLeftX: hbX) {
+            cv.drawFirstPersonArm(.back,
+                                  torch.armAssetX, torch.armAssetY,
+                                  torch.armAssetSize, torch.armAssetSize,
+                                  mirrored: true)
+            _ = cv.drawHeldItemVisual(
+                torch.itemName, torch.itemX, torch.itemY,
+                torch.itemSize, torch.itemSize)
+            cv.drawFirstPersonArm(.grip,
+                                  torch.armAssetX, torch.armAssetY,
+                                  torch.armAssetSize, torch.armAssetSize,
+                                  mirrored: true)
         }
 
         if mainHandIsBow,

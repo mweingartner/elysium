@@ -29,3 +29,21 @@ python3 ~/dev/blender-bridge/bb.py file scripts/generate-held-tools-blender.py
 
 `held_tools_blender_contact.png` is a generated review sheet in manifest order;
 it is not loaded by the game.
+
+## Upright alignment stage
+
+The melee/mining tools (sword, axe, shovel, hoe) ship a Minecraft-item diagonal
+silhouette, but the first-person fist grips a *vertical* handle. After the Blender
+step, `scripts/align-held-tools-upright.py` stands each of those tools upright and
+writes `held_<item>_upright_128.png`, then repoints the manifest `output` (and
+`output_sha256`) at the upright file — the diagonal `held_<item>_128.png` remains the
+Faithful-derived source. Run it before the embed step, and re-run it whenever the
+Blender step regenerates the diagonal sources:
+
+```sh
+python3 scripts/align-held-tools-upright.py
+swift scripts/embed-held-tool-assets.swift
+```
+
+The pickaxe is procedural (not in this pipeline) — its upright silhouette lives in
+`Sources/Elysium/HeldItemAssets.swift`.

@@ -254,9 +254,9 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(detailed.iconSize,
                                     detailed.armAssetSize * 0.75)
         XCTAssertEqual(detailed.armX - detailed.iconX,
-                       detailed.iconSize * 0.14, accuracy: 0.0001)
+                       detailed.iconSize * 0.47, accuracy: 0.0001)
         XCTAssertEqual(detailed.armY - detailed.iconY,
-                       detailed.iconSize * 0.88, accuracy: 0.0001)
+                       detailed.iconSize * 0.90, accuracy: 0.0001)
         XCTAssertEqual(detailed.toolPivotX, detailed.iconX + detailed.iconSize / 2,
                        accuracy: 0.0001)
         XCTAssertEqual(detailed.toolPivotY, detailed.iconY + detailed.iconSize / 2,
@@ -405,8 +405,8 @@ final class ResourcePackHardeningTests: XCTestCase {
                 return Array(image.pixels[offset..<(offset + 4)])
             }
             let handleSamples = [
-                rgbaAt(x: 5 * 6 + 3, y: 9 * 6 + 3),
-                rgbaAt(x: 2 * 6 + 3, y: 12 * 6 + 3),
+                rgbaAt(x: 7 * 6 + 3, y: 10 * 6 + 3),
+                rgbaAt(x: 6 * 6 + 3, y: 12 * 6 + 3),
             ]
             if let referenceHandleSamples {
                 XCTAssertEqual(handleSamples, referenceHandleSamples,
@@ -414,7 +414,7 @@ final class ResourcePackHardeningTests: XCTestCase {
             } else {
                 referenceHandleSamples = handleSamples
             }
-            headColors.insert(rgbaAt(x: 8 * 6 + 3, y: 3 * 6 + 3))
+            headColors.insert(rgbaAt(x: 4 * 6 + 3, y: 5 * 6 + 3))
         }
         XCTAssertEqual(headColors.count, hashes.count)
     }
@@ -487,8 +487,9 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertTrue(tool.drawsGrip)
         XCTAssertTrue(tool.performsEquipFlip)
         XCTAssertEqual(tool.iconBaseSize, 124.8)
-        XCTAssertEqual(tool.gripAnchorX, 0.14)
-        XCTAssertEqual(tool.gripAnchorY, 0.88)
+        // Upright pickaxe: gripped at the vertical handle centre near the pommel.
+        XCTAssertEqual(tool.gripAnchorX, 0.47)
+        XCTAssertEqual(tool.gripAnchorY, 0.90)
         XCTAssertEqual(tool.restRotation, 0)
         XCTAssertLessThan(tool.alphaBounds.minX, tool.alphaBounds.maxX)
 
@@ -509,18 +510,15 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertEqual(generic.kind, .generic)
         XCTAssertTrue(generic.drawsGrip)
 
-        let sword = heldItemPresentation(
-            for: itemDef(iid("iron_sword")), hasDetailedVisual: true)
-        XCTAssertEqual(sword.iconBaseSize, 118)
-        XCTAssertEqual(sword.gripAnchorX, 0.16)
-        XCTAssertEqual(sword.gripAnchorY, 0.86)
-        // The sword stands upright in the fist (its 45° sprite would otherwise float off the
-        // vertical baked haft). Only the sword rotates; the other long-handled tools ship vertical.
-        XCTAssertEqual(sword.restRotation, SWORD_REST_ROTATION)
-        XCTAssertLessThan(sword.restRotation, 0)
-        for family in ["axe", "shovel", "hoe"] {
+        // Melee/mining tools now ship an upright sprite (align-held-tools-upright.py) gripped by
+        // the pommel at the bottom-centre, with no runtime counter-rotation — the alignment to the
+        // fist's vertical grip is baked into the art, and the baked haft is gone from the arm.
+        for family in ["sword", "axe", "shovel", "hoe"] {
             let t = heldItemPresentation(for: itemDef(iid("iron_\(family)")), hasDetailedVisual: true)
-            XCTAssertEqual(t.restRotation, 0, "\(family) already ships vertical; must not rotate")
+            XCTAssertEqual(t.iconBaseSize, 98, "\(family) upright icon size")
+            XCTAssertEqual(t.gripAnchorX, 0.50, "\(family) grips at the handle centre")
+            XCTAssertEqual(t.gripAnchorY, 0.88, "\(family) grips near the pommel")
+            XCTAssertEqual(t.restRotation, 0, "\(family) sprite is pre-aligned; no counter-rotation")
         }
 
         let bow = heldItemPresentation(for: itemDef(iid("bow")), hasDetailedVisual: true)
@@ -581,7 +579,7 @@ final class ResourcePackHardeningTests: XCTestCase {
         let shield = try XCTUnwrap(leftHandShieldOverlayPlan(
             viewWidth: 320, viewHeight: 180, guiVisible: true,
             firstPerson: true, screenOpen: false, hotbarLeftX: 69))
-        XCTAssertEqual(shield.itemName, "shield")
+        XCTAssertEqual(shield.itemName, "held_shield")
         XCTAssertLessThan(shield.itemX, shield.gripX)
         XCTAssertEqual(shield.gripX - shield.armAssetX,
                        shield.armAssetSize * (1 - 0.361328125), accuracy: 0.0001)
@@ -704,8 +702,8 @@ final class ResourcePackHardeningTests: XCTestCase {
     func testMeshyFirstPersonArmLayersAreBoundedAlignedAndDecodable() throws {
         let expectedHashes: [FirstPersonArmLayer: String] = [
             .empty: "d0de00e98d902ef816c3ae8e2e1255ee195ce744ab7be287b1963ed083001157",
-            .back: "999cfb7f5363fc38401bba9c1d314f93f7aaae747451748508ab2d393c4e1feb",
-            .grip: "8eaaefb92e313c8764551ada7423ff594e40e297319b121b19907f1bf1baddea",
+            .back: "910018b9df5c645cd8d8101f85682c0dc412142c8848217125b1656119068f57",
+            .grip: "57616f72f9ac71183e35913d7ce6ba176003c9b0440cf0f21a9a13220c022f27",
         ]
         for layer in FirstPersonArmLayer.allCases {
             let asset = try XCTUnwrap(firstPersonArmVisualAsset(layer))

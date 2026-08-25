@@ -121,6 +121,7 @@ struct ChunkSharedU {
     var fog: SIMD4<Float>
     var fogColor: SIMD4<Float>
     var misc: SIMD4<Float>      // time, packFluidDamp, ultraOn, shadowTexel
+    var heldLight: SIMD4<Float> // rgb = torch color * intensity, w = radius (blocks)
 }
 struct UltraUniforms {
     var invViewProj: simd_float4x4
@@ -929,6 +930,24 @@ final class WorldRenderer {
     }
 
     // ---- frame --------------------------------------------------------------------
+    /// The dynamic "torch you carry" light: a warm point light at the player driven by the
+    /// brightest light-emitting block held in either hand (torch, lantern, glowstone, …).
+    /// Returns rgb = colour × intensity and w = radius in blocks for `ChunkShared.heldLight`;
+    /// a zero vector (radius 0) disables it. The shader turns this into a smooth radial glow
+    /// around the camera without touching the static voxel light — see `chunk_fs`.
+    private func heldTorchLightVector(for player: Player?) -> SIMD4<Float> {
+        func emit(_ stack: ItemStack?) -> Int {
+            guard let stack, let block = itemDef(stack.id).block else { return 0 }
+            return lightEmitOf(block)
+        }
+        guard let player else { return SIMD4<Float>(repeating: 0) }
+        let level = max(emit(player.mainHand), emit(player.offHand))
+        guard level > 0 else { return SIMD4<Float>(repeating: 0) }
+        // Warm flame tint; intensity scales with the block's own light level (torch = 14/15).
+        let intensity = Float(level) / 15 * 0.9
+        return SIMD4<Float>(1.0 * intensity, 0.80 * intensity, 0.52 * intensity, Float(level))
+    }
+
     /// renders the world into the offscreen scene target, then composites into
     /// `rpd` (the drawable's pass). Returns the open encoder for the UI pass.
     func render(cmd: MTLCommandBuffer, rpd: MTLRenderPassDescriptor,
@@ -1012,7 +1031,8 @@ final class WorldRenderer {
             senc.setDepthStencilState(depthWrite)
             senc.setDepthBias(6, slopeScale: 8, clamp: 0.02)
             var su = ChunkSharedU(viewProj: shadowMat, shadowMat: shadowMat,
-                                  light: .zero, fog: .zero, fogColor: .zero, misc: .zero)
+                                  light: .zero, fog: .zero, fogColor: .zero, misc: .zero,
+                                  heldLight: .zero)
             senc.setVertexBytes(&su, length: MemoryLayout<ChunkSharedU>.stride, index: 1)
             var shadowFrustum = Frustum()
             shadowFrustum.setFromMatrix(shadowMat)
@@ -1121,7 +1141,8 @@ final class WorldRenderer {
                                 Float(Double(world.info.ambientLight) / 15), shadowOK ? 1 : 0),
             fog: SIMD4<Float>(fogStart, fogEnd, 0, 1),
             fogColor: SIMD4<Float>(fogColor, 1),
-            misc: SIMD4<Float>(Float(timeSec), packFluidDamp, ultraOn ? 1 : 0, 1 / Float(shadowSizeNow)))
+            misc: SIMD4<Float>(Float(timeSec), packFluidDamp, ultraOn ? 1 : 0, 1 / Float(shadowSizeNow)),
+            heldLight: heldTorchLightVector(for: game.player))
         enc.setFragmentTexture(atlasTexture, index: 0)
         enc.setFragmentTexture(shadowTexture, index: 1)
         enc.setFragmentSamplerState(atlasSampler, index: 0)
