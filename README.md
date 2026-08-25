@@ -26,7 +26,7 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 - **Maps and controls** — compact and expanded live maps, including player-level cavern mapping in the Nether, configurable controls, keyboard and controller input, text-entry accessibility, fullscreen support, and debug/automation surfaces used by the verification suite. The compact minimap is shown by default and can be hidden under **Options... → Video → Show Minimap** without disabling the `M` expanded map.
 - **Synthesized audio** — music and sound effects are produced at runtime rather than shipped as conventional audio recordings.
 - **Resource-pack support** — Java Edition-style resource packs are read through Elysium's bounded archive and metadata loaders. The pinned default is [Faithful 64x](https://faithfulpack.net/faithful64x) Release 12; **Options... → Video → Resource Packs...** offers the reviewed Ore Borders 64x and Static Lanterns add-ons independently, both off by default.
-- **Embedded deterministic script runtime (engine infrastructure, no player-facing scripting yet)** — a sandboxed, budgeted Lua 5.4.8 interpreter (`CLua` + `ElysiumScript`) is vendored and tested as the foundation for a future scripting/events/AI programme; nothing in the shipped game creates or runs a script today.
+- **Scripting, events, and the AI object graph** — objects (blocks, entities, players, dimensions, the world) carry extensible attributes and up to 8 attached Lua scripts each, run on a sandboxed, deterministic, budgeted Lua 5.4.8 interpreter (`CLua` + `ElysiumScript`). Scripts subscribe to a typed event bus (`block.broken`, `attribute.changed`, `entity.interacted`, and more, plus custom events), schedule named durable timers, and can ask the same local AI for a text reply (`ai.ask`/`ai.await`). Players drive all of this from chat (`/attr`, `/script`, `/on`, `/events`) or an in-game multi-line script editor and read-only Inspector; the embedded-AI tool loop can author and manage scripts and attributes too, through the same validated, budgeted, journaled path, undoable with `/script undo-ai`. Everything runs host-only, gated by a per-world trust switch and a `doScripts` kill switch; a granted LAN guest can author scripts and attributes on the host through the same checks. See [docs/SCRIPTING_GUIDE.md](docs/SCRIPTING_GUIDE.md) for the full command and Lua API reference.
 
 For the subsystem boundaries and determinism rules, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -228,8 +228,11 @@ git config core.hooksPath .githooks
 ```text
 Sources/ElysiumCore/       Deterministic engine, world, entities, systems, saves, and LAN model
 Sources/ElysiumCore/Scripting/  Object graph, canonical AttrValue JSON, persisted attribute
-                            bags, and the /attr /inspect /objects command layer (data and
-                            commands only — no script execution yet)
+                            bags and scripts, the event bus, the sandboxed Lua script
+                            runtime, the AI object-graph tool loop, and the /attr /inspect
+                            /objects /on /unsubscribe /events /script /ai command layer
+Sources/ElysiumScript/     The embedded Lua 5.4.8 runtime's Swift-facing API (LuaState,
+                            handles, sandboxed environments) over the vendored CLua/Lua C core
 Sources/Elysium/           AppKit and Metal application, UI, renderer, audio, input, and transport
 Sources/ElysiumStorage/    Typed SQLite persistence boundary
 Sources/ElysiumTextInput/  Shared text-ingress validation

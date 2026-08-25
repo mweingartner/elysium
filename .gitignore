@@ -11,3 +11,6 @@ meshy_output/
 openspec/
 .elysium/
 .artifacts/
+
+# Michael's private scripting/eventing design working doc — kept local, never published.
+docs/scripting-and-eventing-design.md

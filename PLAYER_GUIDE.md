@@ -16,7 +16,7 @@ requirements and installation, start with the [Elysium project overview](README.
 - [Save, manage, and recover worlds](#save-manage-and-recover-worlds)
 - [Local-network multiplayer](#local-network-multiplayer)
 - [Object templates](#object-templates)
-- [Object attributes (preview)](#object-attributes-preview)
+- [Scripting, attributes, events, and AI](#scripting-attributes-events-and-ai)
 - [Options, accessibility, and local AI](#options-accessibility-and-local-ai)
 - [Troubleshooting and current limitations](#troubleshooting-and-current-limitations)
 
@@ -483,11 +483,25 @@ template placement, not to every ordinary building action. In either saved-templ
 or Delete/Backspace while the template list is focused opens a confirmation naming the exact template.
 **Cancel** has initial focus, Escape cancels, and only **Delete Template** performs the deletion.
 
-## Object attributes (preview)
+## Scripting, attributes, events, and AI
 
-This is an early preview of the scripting foundation: chat commands let you read and set small,
-named pieces of data on a block or entity. Everything is host-only: on a joined LAN world these
-commands are refused outright, not merely restricted.
+Elysium has a full player- and AI-facing scripting system: objects (blocks, entities, players,
+dimensions, the world) carry named custom attributes and up to 8 attached Lua scripts each,
+running on a sandboxed, deterministic Lua 5.4.8 runtime. Scripts react to a typed event bus,
+schedule named timers that survive a save/reload, and can ask the local AI for a reply. You drive
+all of this from chat commands, an in-game multi-line script editor, and a read-only Inspector; the
+`/ai` assistant can author and manage scripts and attributes too, through the exact same checks.
+Everything below is host-only: execution always happens on the host, gated by a per-world trust
+switch and a kill switch, and every command is refused outright on a joined LAN world — until the
+host grants you scripting (see "Guest scripting" below), after which the commands that change
+something work for you too, forwarded to and executed by the host. This section covers the
+chat/editor surface; for the complete Lua API reference, the ref and value grammars, and more
+worked examples, see [docs/SCRIPTING_GUIDE.md](docs/SCRIPTING_GUIDE.md).
+
+### Attributes
+
+Chat commands let you read and set small, named pieces of data on a block, entity, player,
+dimension, or the world itself.
 
 - `/attr set <target> <name> <value>` — set an attribute. `<target>` is always required: `self`,
   `looking` (whatever is under your crosshair), or a canonical reference such as `entity:12` or
@@ -515,11 +529,34 @@ authoritative. For example, `/attr set` can flip a door's `open` field, but the 
 governs every other door still applies afterward: an unsupported door still breaks, and a door wired to
 power still swings shut or open on the next power transition regardless of what a command just set.
 
-## Events and subscriptions (preview)
+**Worked example** — label a chest without touching anything else about it, then read it back:
 
-The same preview also lets you register interest in things that happen in the world. A subscription
+```
+/attr define looking label Ships Locker
+/attr get looking label
+"Ships Locker"
+/attr list looking
+label = "Ships Locker"
+1 attributes, N bytes, revision 1
+```
+
+(`/attr list` always ends with a byte-size and revision summary line; the exact byte count depends
+on the world tick the attribute was written at, so it isn't reproduced here.)
+
+Add `readonly` to lock a definition against a later plain `/attr set` (an `/attr define ... --force`
+is still allowed, and overwrites it):
+
+```
+/attr define self favorite_color blue readonly
+/attr set self favorite_color green
+favorite_color is readonly — use /attr define --force
+```
+
+### Events and subscriptions
+
+You can also register interest in things that happen in the world from chat. A subscription
 names a script and a handler function inside it (`<script>.<handler>`) — that handler runs whenever a
-matching event fires, exactly like a script's own `on(...)`/`subscribe(...)` calls (see "Scripting"
+matching event fires, exactly like a script's own `on(...)`/`subscribe(...)` calls (see "Scripts"
 below), except `/on` lets you wire up a handler in an *existing* script from chat rather than from
 inside the script's own source. Host-only, like every command above.
 
@@ -547,9 +584,22 @@ inside the script's own source. Host-only, like every command above.
 only reads as a filter when there's no second `:` after it (`block:overworld:10,64,3` still resolves
 as a specific block, never as a filter named `overworld:10,64,3`).
 
-## Scripting (preview)
+**Worked example** — raise an event by hand and see it land in the recent-events feed (no script
+needed for this part):
 
-Objects can carry small Lua scripts now — up to 8 per object, attached with `/script attach`, pasted
+```
+/events emit self player.leveled
+emitted player.leveled on player
+/events recent 3
+#413 t118 player.leveled player
+```
+
+A more useful worked example — one that actually attaches a handler and reacts to a real event —
+follows in "Scripts" just below, since attaching a handler is a `/script` command.
+
+### Scripts
+
+Objects can carry small Lua scripts — up to 8 per object, attached with `/script attach`, pasted
 in through a minimal in-game editor, or authored by the local AI through `/ai` (see "Optional local
 AI" below). Execution always happens on the host — a guest never runs a script itself, even its own.
 Reading (`/script list|show`), the world trust gate, the kill switch, and the AI journal/undo commands
@@ -627,10 +677,34 @@ exactly as before.
   how many events are pending/faulted this window — a quick health check without opening `/script
   list` on every object.
 
+**Worked example** — attach a use-counter to a lever, door, or sign without leaving chat. Handler
+mode needs no `on(...)` call: the source *is* the handler, and `self.attrs.<name>` reads and writes
+a custom attribute directly.
+
+```
+/script attach looking counter handler block.used self.attrs.uses = (self.attrs.uses or 0) + 1
+attached counter [handler] to block:overworld:5,64,2 — takes effect next script phase
+```
+
+Now use that block (right-click it) a couple of times, then read the count back:
+
+```
+/attr get looking uses
+2
+/script list looking
+counter [handler]
+```
+
+A one-line chat script has one gotcha worth knowing: the command line is parsed the same way as
+every other command, so a bare `"` or `'` in your source is consumed as chat-style quoting, not
+kept as a Lua string delimiter — write `\"` to get a literal quote through (`say(\"hi\")`), or use
+`/script edit` for anything with string literals in it, which pastes your script in untouched. The
+example above needs no quotes at all, which is why it works as a single chat line.
+
 A script's own Lua reference — the object model, event names, attribute access, timers, and
-`ai.ask`/`ai.await` — lives with the scripting design document, not here; this section only covers
-the chat/editor surface for attaching and managing scripts you (or another script, or the AI) already
-have the source for.
+`ai.ask`/`ai.await` — lives in [docs/SCRIPTING_GUIDE.md](docs/SCRIPTING_GUIDE.md), not here; this
+section only covers the chat/editor surface for attaching and managing scripts you (or another
+script, or the AI) already have the source for.
 
 ### Attribute replication on a joined LAN world
 
