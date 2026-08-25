@@ -70,7 +70,7 @@ private func inspectorRowsDetailed(target: ObjectRef, game: GameCore) -> [Inspec
         // lan-client-parity (change 4), design.md §11: replicated script *metadata* only
         // (name/mode/enabled) — never source; `.script(name:, text:)` still carries the name so
         // clicking a row still jumps to the editor (which itself reads only the same metadata
-        // for a guest — see `ScriptEditorScreen.initScreen`).
+        // for a guest — see `ScriptEditorModel.switchTo`).
         if let scripts = LANMultiplayerManager.shared.mirroredScripts(for: target), !scripts.isEmpty {
             for s in scripts.sorted(by: { $0.name < $1.name }) {
                 let text = "  \(s.name) [\(s.mode)]\(s.enabled ? "" : " (disabled)") (replicated, read-only)"
@@ -170,8 +170,13 @@ final class InspectorScreen: Screen {
                   self.rows.indices.contains(self.selected), let name = self.rows[self.selected].scriptName
             else { return }
             ui.closeTop(game)
-            ui.open(ScriptEditorScreen(target: target, existingName: name), game)
-            game.host?.capturePointer()
+            // native SwiftUI script editor (Stage A): opens the native editor window instead of
+            // the retired game-canvas `ScriptEditorScreen`. No `game.host?.capturePointer()`
+            // here — the window controller releases the mouse on open and recaptures it itself
+            // once every editor window has closed (`ScriptEditorWindowController`).
+            if let appDelegate = gAppDelegate {
+                elysiumMainActorSync { appDelegate.editScripts(target: target, existingName: name, game: game) }
+            }
         })
         edit.enabled = rows.indices.contains(selected) && rows[selected].scriptName != nil
         editButton = edit

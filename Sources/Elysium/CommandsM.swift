@@ -32,10 +32,10 @@ func runCommand(_ game: GameCore, _ raw: String) {
     // else (`inspect`, `objects`, `events recent`, `script list|show|
     // journal|undo-ai|trust|off|on`) has no intent path and keeps the local
     // refusal below.
-    // `/script edit` never mutates anything itself — it only opens the local
-    // `ScriptEditorScreen` (a UI action). It is neither forwarded nor
-    // refused here; it falls through to the same open-screen handling below
-    // for a host and a guest alike, and the screen itself (in guest mode)
+    // `/script edit` never mutates anything itself — it only opens the native
+    // script editor window (a UI action). It is neither forwarded nor
+    // refused here; it falls through to the same open-window handling below
+    // for a host and a guest alike, and the editor itself (in guest mode)
     // is what sends an intent, on Save/Run.
     let isScriptEdit = cmd == "script" && args.first?.lowercased() == "edit"
     if game.isLANClientWorld, !isScriptEdit,
@@ -89,11 +89,13 @@ func runCommand(_ game: GameCore, _ raw: String) {
             }
             return
         }
-        // script-runtime (change 1c): `/script edit [target] [name]` opens
-        // the paste-only `ScriptEditorScreen` — a UI action, so it is
-        // handled here (app layer) rather than in `ScriptingCommands` (pure
-        // Core, no screens). Every other `/script` subcommand goes through
-        // the same Core executor as `/attr`/`/on`/etc.
+        // native SwiftUI script editor (Stage A): `/script edit [target] [name]` opens the
+        // native editor window — a UI action, so it is handled here (app layer) rather than in
+        // `ScriptingCommands` (pure Core, no windows). Every other `/script` subcommand goes
+        // through the same Core executor as `/attr`/`/on`/etc. Previously routed through the
+        // retired game-canvas `ScriptEditorScreen`; now opens
+        // `AppDelegate.scriptEditorController` directly via the shared `gAppDelegate` weak
+        // global (`main.swift`) every other AppDelegate-reaching app-layer call already uses.
         if isScriptEdit {
             let targetToken = args.count > 1 ? args[1] : "self"
             // lan-client-parity (change 4): a guest has no cursor/looking
@@ -109,10 +111,11 @@ func runCommand(_ game: GameCore, _ raw: String) {
                 return
             }
             let name = args.count > 2 ? args[2] : nil
-            var data = ScreenData()
-            data.text = ref.canonical
-            data.title = name
-            game.openScreen("scriptEditor", data)
+            guard let appDelegate = gAppDelegate else {
+                pushChat("§cScript editor unavailable.")
+                return
+            }
+            elysiumMainActorSync { appDelegate.editScripts(target: ref, existingName: name, game: game) }
             return
         }
         let result = ScriptingCommands.run(command: cmd, arguments: args, context: game.scriptingCommandContext())

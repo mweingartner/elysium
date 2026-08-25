@@ -34,7 +34,11 @@ enum LuaSyntaxLineState: Equatable {
 }
 
 enum LuaSyntaxColoring {
-    private static let keywords: Set<String> = [
+    /// scripting-editor-ui: internal (not `private`) so `LuaCompletion.swift` (the native
+    /// SwiftUI editor's autocomplete engine, same module) can reuse this exact keyword set as
+    /// one of its completion corpora — one list, matching the architecture doc's "Lua keywords
+    /// = `LuaSyntaxColoring.keywords`" rather than a second, driftable copy.
+    static let keywords: Set<String> = [
         "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto",
         "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
     ]

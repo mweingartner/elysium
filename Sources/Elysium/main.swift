@@ -74,7 +74,13 @@ final class HostBridge: GameHost {
     var game: GameCore { app!.game }
 
     func hasScreen() -> Bool { app?.ui.hasScreen() ?? false }
-    func screenPausesGame() -> Bool { app?.ui.current()?.pausesGame ?? false }
+    // scripting-editor-ui (native SwiftUI script editor): the editor window is not a `Screen`,
+    // so it never shows up in `ui.current()` — `GameCore.scriptEditorWindowOpen`
+    // (`ScriptEditorWindowController`'s own flag) is ORed in here so the world still pauses
+    // while any editor window is open, exactly as if it were a pausing `Screen`.
+    func screenPausesGame() -> Bool {
+        (app?.ui.current()?.pausesGame ?? false) || (app?.game.scriptEditorWindowOpen ?? false)
+    }
     func rpgLocalPreferenceDidRefresh(_ refresh: RPGLocalPreferenceUIRefresh) {
         guard let app else { return }
         app.ui.refreshCurrentRPGScreen(refresh, game: app.game)
@@ -129,14 +135,6 @@ final class HostBridge: GameHost {
             // this command, decides what it can show (a guest reads only the replicated
             // attribute mirror; §11).
             ui.open(InspectorScreen(), game)
-        case "scriptEditor":
-            // script-runtime (change 1c): `data.text` carries the target
-            // ref's canonical string, `data.title` an existing script name
-            // to edit (nil for a fresh script) — `ScreenData`'s two free
-            // string fields, reused rather than adding new ones.
-            if let refText = data?.text, let ref = ObjectRef.parse(refText) {
-                ui.open(ScriptEditorScreen(target: ref, existingName: data?.title), game)
-            }
         case "toast":
             hud.showActionBar(data?.text ?? "")
         default:
@@ -525,6 +523,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     let audio = AudioEngineM()
     private var rpgControllerAdapter: RPGControllerAdapter!
     lazy var realityDerivedCoordinator = RealityDerivedCoordinator(owner: self)
+    // native SwiftUI script editor (Stage A): lazy, `RealityDerivedCoordinator`'s own ownership
+    // precedent — a detached-window coordinator owned by `AppDelegate` for the app's lifetime.
+    // `@MainActor` because `ScriptEditorWindowController.init` is.
+    @MainActor lazy var scriptEditorController = ScriptEditorWindowController(owner: self)
     private var lastFrame = CACurrentMediaTime()
     private var startTime = CACurrentMediaTime()
     private var fpsCounter = 0
@@ -809,6 +811,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         }
         if gameView.performObjectTemplateShortcut(.placeObject) { return }
         pasteText(sender)
+    }
+
+    // MARK: - native SwiftUI script editor (Stage A)
+
+    /// Cmd-E: opens the native editor for whatever `game.cursorObjectRef()` resolves to (the
+    /// entity under the crosshair within reach, else the block under the crosshair). No target
+    /// under the cursor is not an error — it is the ordinary "not currently pointing at
+    /// anything scriptable" case, so this is a brief chat hint, not a refusal banner.
+    @objc @MainActor func editScriptsUnderCursor(_ sender: Any?) {
+        guard game.hasWorld() else { return }
+        guard let ref = game.cursorObjectRef() else {
+            pushChat("§7Point at an object to edit its scripts.")
+            return
+        }
+        editScripts(target: ref, existingName: nil, game: game)
+    }
+
+    /// Shared entry point for every path that opens the native script editor — Cmd-E
+    /// (`editScriptsUnderCursor`), `/script edit` (`CommandsM.swift`), and the Inspector's
+    /// "Edit Script" button (`InspectorScreen.swift`) all funnel through here so there is exactly
+    /// one place that constructs the window controller call. `@MainActor` because
+    /// `ScriptEditorWindowController.open` is (it constructs `@MainActor`-isolated
+    /// `ScriptEditorModel`); callers outside a `@MainActor` context use `elysiumMainActorSync`.
+    @MainActor func editScripts(target: ObjectRef, existingName: String?, game: GameCore) {
+        scriptEditorController.open(target: target, existingName: existingName, game: game)
     }
 
     @MainActor private func revealLaunchWindowed() {
@@ -1175,6 +1202,17 @@ private func runOrdinaryElysiumApplication() {
                                       action: #selector(AppDelegate.copyObjectTemplate(_:))))
     editMenu.addItem(shippingMenuItem(commandID: "placeObjectTemplate", title: "Paste",
                                       action: #selector(AppDelegate.pasteOrPlaceTemplate(_:))))
+    editMenu.addItem(NSMenuItem.separator())
+    // native SwiftUI script editor (Stage A): not in the `SHIPPING_MENU_COMMANDS` chord catalog
+    // (`ElysiumCore/Game/InputChords.swift`, out of scope for this change) — built directly like
+    // every other ad hoc `NSMenuItem`, target `nil` so it resolves through the responder chain to
+    // `AppDelegate` (`NSApp.delegate`) exactly like `copyObjectTemplate`/`pasteOrPlaceTemplate`
+    // above. Cmd-E is unbound in the keybind catalog (bare `E` is "Inventory"), so this cannot
+    // collide with a gameplay chord.
+    let editScriptsItem = NSMenuItem(
+        title: "Edit Scripts…", action: #selector(AppDelegate.editScriptsUnderCursor(_:)), keyEquivalent: "e")
+    editScriptsItem.keyEquivalentModifierMask = [.command]
+    editMenu.addItem(editScriptsItem)
     editItem.submenu = editMenu
     mainMenu.addItem(editItem)
     let winItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")

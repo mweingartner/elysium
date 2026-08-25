@@ -1,12 +1,14 @@
-// ScriptEditorScreenTests.swift — scripting-ui-and-replication (change 3). design.md §16 row 3:
-// "full in-game script editor (multi-line, syntax colouring, error line, save/run)". Model-
-// level coverage: `LuaSyntaxColoring`'s tokenizer spans (pure, no UI dependency), the Inspector
-// data provider (`inspectorRows`), and — the "editor proof" the Builder brief asks for — the
-// real `ScriptEditorScreen` driven headlessly through its actual `Screen` surface
-// (`insertText`/`onKey`/button `onClick()`) exactly the way
-// `ResourcePackHardeningTests.testShowMinimapPreferenceIsKeyboardAndAccessibilityReachable`
-// already proved out for another screen: a real `MTLDevice`/`UICanvas`/`UIManager`, `ui.open`,
-// then synthetic input — no live window, no AppKit event loop.
+// ScriptEditorScreenTests.swift — native SwiftUI script editor (Stage A). design.md §16 row 3:
+// "full in-game script editor (multi-line, syntax colouring, error line, save/run)", now served by
+// a native window instead of the retired game-canvas `ScriptEditorScreen`. Model-level coverage:
+// `LuaSyntaxColoring`'s tokenizer spans (pure, no UI dependency — unchanged from before), the
+// Inspector data provider (`inspectorRows` — unchanged from before), and the editor's real
+// controller, `ScriptEditorModel`, driven headlessly: no `Screen`, no `UIManager`, no `MTLDevice`,
+// no `NSWindow` — the whole point of splitting a thin SwiftUI view over a testable model. The Core
+// assertions the old screen-driven suite proved carry over unchanged in substance: multiline
+// type+Save round-trips byte-exact via `scriptStore.get(...).source`; invalid syntax never
+// attaches and reports the right error line; Run/ephemeral never persists; a LAN guest's Save
+// sends a `scriptIntent` and never attaches locally.
 
 import XCTest
 @testable import Elysium
@@ -68,7 +70,7 @@ final class LuaSyntaxColoringTests: XCTestCase {
 }
 
 @MainActor
-final class ScriptEditorScreenTests: XCTestCase {
+final class ScriptEditorModelTests: XCTestCase {
     override class func setUp() {
         super.setUp()
         if blockDefs.isEmpty { registerAllBlocks() }
@@ -76,133 +78,17 @@ final class ScriptEditorScreenTests: XCTestCase {
         if entityTypes().isEmpty { registerAllEntities() }
     }
 
-    private func makeTrustedGameAndUI() throws -> (GameCore, UIManager) {
-        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
-        let ui = UIManager(cv: UICanvas(device: device))
-        ui.resize(480, 270, 1)
+    private func makeTrustedGame() throws -> GameCore {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("elysium-script-editor-\(UUID().uuidString).sqlite")
         addTeardownBlock { try? FileManager.default.removeItem(at: databaseURL) }
         let game = GameCore(db: try SaveDB.open(databaseURL: databaseURL, migrateLegacy: false))
         game.createWorld(name: "Script Editor Test", seedText: "9001", mode: GameMode.creative, difficulty: 2)
         XCTAssertTrue(game.hasWorld())
-        return (game, ui)
+        return game
     }
 
-    /// Types `text` character by character through the screen's real `insertText`, and turns
-    /// every `\n` into a real `onKey(ui, game, "Enter")` — the exact two entry points a live
-    /// keystroke stream reaches (`AppInputRouterM.swift`'s dispatch to `screen.insertText`, and
-    /// `onKeyEvent` -> `onKey` for named keys).
-    private func type(_ text: String, into screen: ScriptEditorScreen, _ ui: UIManager, _ game: GameCore) {
-        for ch in text {
-            if ch == "\n" {
-                _ = screen.onKey(ui, game, "Enter")
-            } else {
-                _ = screen.insertText(ui, game, String(ch))
-            }
-        }
-    }
-
-    private func click(_ label: String, on screen: Screen) throws {
-        let button = try XCTUnwrap(screen.buttons.first { $0.label == label }, "no '\(label)' button")
-        XCTAssertTrue(button.enabled, "'\(label)' button must be enabled")
-        button.onClick()
-    }
-
-    func testTypingMultilineModuleSourceAndSavingAttachesItByteExact() throws {
-        let (game, ui) = try makeTrustedGameAndUI()
-        let screen = ScriptEditorScreen(target: .player, existingName: nil)
-        ui.open(screen, game)
-
-        let nameField = try XCTUnwrap(screen.fields.first { $0.id == "script.name" })
-        nameField.text = "greet"
-
-        XCTAssertTrue(screen.textFocused, "the source body owns keyboard input as soon as the screen opens")
-        let source = "local n = 0\nfunction onLoad()\n  n = n + 1\nend"
-        type(source, into: screen, ui, game)
-        XCTAssertEqual(screen.lines, ["local n = 0", "function onLoad()", "  n = n + 1", "end"],
-                        "typed Enter must split into new array entries, never an embedded \\n")
-
-        try click("Save", on: screen)
-
-        let saved = try XCTUnwrap(game.scriptingCommandContext().scriptStore.get(.player, "greet"))
-        XCTAssertEqual(saved.source, source, "the reconstructed (lines joined by \\n) source must round-trip byte-exact")
-        XCTAssertEqual(saved.mode, .module)
-        XCTAssertNil(screen.errorLine)
-    }
-
-    func testBackspaceAtColumnZeroJoinsWithThePreviousLine() throws {
-        let (game, ui) = try makeTrustedGameAndUI()
-        let screen = ScriptEditorScreen(target: .player, existingName: nil)
-        ui.open(screen, game)
-        type("ab\ncd", into: screen, ui, game)
-        XCTAssertEqual(screen.lines, ["ab", "cd"])
-        XCTAssertEqual(screen.caretLine, 1)
-        XCTAssertEqual(screen.caretCol, 2)
-
-        screen.caretCol = 0
-        _ = screen.onKey(ui, game, "Backspace")
-        XCTAssertEqual(screen.lines, ["abcd"], "joining must concatenate, not drop, the second line's text")
-        XCTAssertEqual(screen.caretLine, 0)
-        XCTAssertEqual(screen.caretCol, 2, "caret lands exactly at the old join point")
-    }
-
-    func testInvalidSyntaxSetsTheErrorLineAndNeverAttaches() throws {
-        let (game, ui) = try makeTrustedGameAndUI()
-        let screen = ScriptEditorScreen(target: .player, existingName: nil)
-        ui.open(screen, game)
-        let nameField = try XCTUnwrap(screen.fields.first { $0.id == "script.name" })
-        nameField.text = "broken"
-
-        // Line 1 is a harmless comment so the fault must be reported on line 2, proving the
-        // validator's line number — not just "some error happened" — reaches the editor.
-        type("-- comment\nif true then", into: screen, ui, game)
-        try click("Save", on: screen)
-
-        XCTAssertEqual(screen.errorLine, 2, "the compile fault's own line number must surface, not line 1")
-        XCTAssertNotNil(screen.statusMessage)
-        XCTAssertTrue(screen.statusIsError)
-        XCTAssertNil(game.scriptingCommandContext().scriptStore.get(.player, "broken"),
-                     "a script that fails validation must never be attached")
-    }
-
-    func testHandlerModeAttachesATriggerForTheChosenEvent() throws {
-        let (game, ui) = try makeTrustedGameAndUI()
-        let screen = ScriptEditorScreen(target: .player, existingName: nil)
-        ui.open(screen, game)
-        let nameField = try XCTUnwrap(screen.fields.first { $0.id == "script.name" })
-        nameField.text = "onload_handler"
-        let eventField = try XCTUnwrap(screen.fields.first { $0.id == "script.event" })
-
-        try click("module", on: screen) // the mode toggle button starts labeled "module"; clicking flips it to "handler"
-        XCTAssertTrue(screen.handlerMode)
-        eventField.text = "load"
-        type("log('loaded')", into: screen, ui, game)
-        try click("Save", on: screen)
-
-        let saved = try XCTUnwrap(game.scriptingCommandContext().scriptStore.get(.player, "onload_handler"))
-        XCTAssertEqual(saved.mode, .handler)
-        XCTAssertEqual(saved.triggers.first?.event, .load)
-    }
-
-    func testRunEphemeralNeverPersistsAScript() throws {
-        let (game, ui) = try makeTrustedGameAndUI()
-        let screen = ScriptEditorScreen(target: .player, existingName: nil)
-        ui.open(screen, game)
-        type("log('hello from run')", into: screen, ui, game)
-        try click("Run", on: screen)
-
-        XCTAssertNil(screen.errorLine)
-        XCTAssertEqual(game.scriptingCommandContext().scriptStore.list(.player).count, 0,
-                       "Run is ephemeral (§9.3) — it must never attach anything")
-    }
-
-    // MARK: - lan-client-parity (change 4): guest mode
-
-    private func makeLANClientGameAndUI() throws -> (GameCore, UIManager) {
-        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
-        let ui = UIManager(cv: UICanvas(device: device))
-        ui.resize(480, 270, 1)
+    private func makeLANClientGame() throws -> GameCore {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("elysium-script-editor-guest-\(UUID().uuidString).sqlite")
         addTeardownBlock { try? FileManager.default.removeItem(at: databaseURL) }
@@ -212,36 +98,142 @@ final class ScriptEditorScreenTests: XCTestCase {
             gameMode: GameMode.survival, difficulty: 2, dimension: Dim.overworld.rawValue, playerCount: 2
         ))
         XCTAssertTrue(game.isLANClientWorld)
-        return (game, ui)
+        return game
     }
 
-    /// design.md §11 phase 4: Save on a guest never calls `ScriptStore.attach` directly (it
-    /// would refuse with `.lanClient` immediately, same as every other direct guest write) — it
-    /// sends a `scriptIntent` instead and reports doing so, rather than either silently failing
-    /// or attaching locally.
+    // MARK: - host: type + Save round-trips byte-exact
+
+    func testTypingMultilineModuleSourceAndSavingAttachesItByteExact() throws {
+        let game = try makeTrustedGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        XCTAssertTrue(model.isNewScript)
+
+        model.currentName = "greet"
+        let source = "local n = 0\nfunction onLoad()\n  n = n + 1\nend"
+        model.source = source
+
+        model.save()
+
+        let saved = try XCTUnwrap(game.scriptingCommandContext().scriptStore.get(.player, "greet"))
+        XCTAssertEqual(saved.source, source, "the source must round-trip byte-exact through Save")
+        XCTAssertEqual(saved.mode, .module)
+        XCTAssertNil(model.errorLine)
+        XCTAssertFalse(model.statusIsError)
+        XCTAssertFalse(model.isNewScript, "Save must clear the 'authoring something new' flag")
+    }
+
+    // MARK: - host: invalid syntax never attaches, reports the right error line
+
+    func testInvalidSyntaxSetsTheErrorLineAndNeverAttaches() throws {
+        let game = try makeTrustedGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.currentName = "broken"
+        // Line 1 is a harmless comment so the fault must be reported on line 2, proving the
+        // validator's line number — not just "some error happened" — reaches the model.
+        model.source = "-- comment\nif true then"
+
+        model.save()
+
+        XCTAssertEqual(model.errorLine, 2, "the compile fault's own line number must surface, not line 1")
+        XCTAssertNotNil(model.status)
+        XCTAssertTrue(model.statusIsError)
+        XCTAssertNil(game.scriptingCommandContext().scriptStore.get(.player, "broken"),
+                     "a script that fails validation must never be attached")
+    }
+
+    // MARK: - host: handler mode attaches a trigger for the chosen event
+
+    func testHandlerModeAttachesATriggerForTheChosenEvent() throws {
+        let game = try makeTrustedGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.currentName = "onload_handler"
+        model.mode = .handler
+        model.handlerEvent = "load"
+        model.source = "log('loaded')"
+
+        model.save()
+
+        let saved = try XCTUnwrap(game.scriptingCommandContext().scriptStore.get(.player, "onload_handler"))
+        XCTAssertEqual(saved.mode, .handler)
+        XCTAssertEqual(saved.triggers.first?.event, .load)
+        XCTAssertFalse(model.statusIsError)
+    }
+
+    // MARK: - host: Run is ephemeral, never persists
+
+    func testRunEphemeralNeverPersistsAScript() throws {
+        let game = try makeTrustedGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.source = "log('hello from run')"
+
+        model.run()
+
+        XCTAssertNil(model.errorLine)
+        XCTAssertEqual(game.scriptingCommandContext().scriptStore.list(.player).count, 0,
+                       "Run is ephemeral (§9.3) — it must never attach anything")
+    }
+
+    // MARK: - host: switching between scripts on the target reloads source/mode
+
+    func testSwitchToLoadsAnExistingScriptsSourceAndMode() throws {
+        let game = try makeTrustedGame()
+        let context = game.scriptingCommandContext()
+        guard case .success = context.scriptStore.attach(
+            .player, name: "already_there", source: "return 1", mode: .module, triggers: [],
+            by: .player, tick: 0
+        ) else { return XCTFail("expected attach to succeed") }
+
+        let model = ScriptEditorModel(target: .player, game: game)
+        XCTAssertTrue(model.scripts.contains { $0.name == "already_there" })
+
+        model.switchTo("already_there")
+        XCTAssertEqual(model.source, "return 1")
+        XCTAssertEqual(model.mode, .module)
+        XCTAssertFalse(model.isNewScript)
+    }
+
+    // MARK: - insertAtCursor inserts at the caret, not appended to the end
+
+    func testInsertAtCursorInsertsAtTheSelectionNotTheEnd() throws {
+        let game = try makeTrustedGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.source = "local x = 1\nlocal y = 2"
+        // Place the caret right after "local x = 1\n" (position 12), not at the end.
+        model.selectedRange = NSRange(location: 12, length: 0)
+
+        model.insertAtCursor("-- inserted\n")
+
+        XCTAssertEqual(model.source, "local x = 1\n-- inserted\nlocal y = 2",
+                       "the palette must insert at the cursor, never append to the end")
+        XCTAssertEqual(model.selectedRange.location, 12 + ("-- inserted\n" as NSString).length)
+    }
+
+    // MARK: - lan-client-parity: guest mode
+
+    /// design.md §11 phase 4: Save on a guest never calls `ScriptStore.attach` directly (it would
+    /// refuse with `.lanClient` immediately, same as every other direct guest write) — it sends a
+    /// `scriptIntent` instead and reports doing so, rather than either silently failing or
+    /// attaching locally.
     func testGuestSaveNeverAttachesLocallyAndReportsSendingToHost() throws {
-        let (game, ui) = try makeLANClientGameAndUI()
-        let screen = ScriptEditorScreen(target: .player, existingName: nil)
-        ui.open(screen, game)
-        let nameField = try XCTUnwrap(screen.fields.first { $0.id == "script.name" })
-        nameField.text = "greet"
-        type("log('hi')", into: screen, ui, game)
+        let game = try makeLANClientGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.currentName = "greet"
+        model.source = "log('hi')"
 
         chatLog.removeAll()
-        try click("Save", on: screen)
+        model.save()
 
-        XCTAssertTrue(chatLog.contains { $0.text.contains("sent") && $0.text.contains("host") },
-                      "expected a 'sent ... to the host' chat line; got: \(chatLog.map(\.text))")
-        // Never attached anything through the guest's own (inert) executor — resolving `.player`
-        // built-ins doesn't need a live world at all here, so this is a meaningful assertion, not
-        // a vacuous one: the guest's local `scriptingCommandContext()` executor was never called.
+        XCTAssertTrue(model.status?.contains("sent") == true && model.status?.contains("host") == true,
+                      "expected a 'sent ... to the host' status; got: \(model.status ?? "nil")")
+        XCTAssertFalse(model.statusIsError)
+        // Never attached anything through the guest's own (inert) executor.
         XCTAssertEqual(game.scriptingCommandContext().scriptStore.list(.player).count, 0)
     }
 
-    /// Re-opening the editor on an existing script name never shows source — only the
-    /// replicated name/mode, and a note explaining why.
-    func testGuestEditorPrefillsOnlyReplicatedMetadataNeverSource() throws {
-        let (game, ui) = try makeLANClientGameAndUI()
+    /// Re-opening the editor on an existing script name never shows source — only the replicated
+    /// name/mode, and a status note explaining why.
+    func testGuestSwitchToPrefillsOnlyReplicatedMetadataNeverSource() throws {
+        let game = try makeLANClientGame()
         let manager = LANMultiplayerManager.shared
         manager.attachGame(game)
         let ref = ObjectRef.player
@@ -255,13 +247,24 @@ final class ScriptEditorScreenTests: XCTestCase {
             )]
         ))
 
-        let screen = ScriptEditorScreen(target: .player, existingName: "greet")
-        ui.open(screen, game)
+        let model = ScriptEditorModel(target: .player, game: game, existingName: "greet")
 
-        XCTAssertEqual(screen.lines, [""], "source must never be prefilled for a guest")
-        XCTAssertTrue(screen.handlerMode, "mode must come from replicated metadata")
-        XCTAssertTrue(screen.statusMessage?.contains("greet") == true, "expected a status note naming the script")
-        XCTAssertFalse(screen.statusIsError)
+        XCTAssertEqual(model.source, "", "source must never be prefilled for a guest")
+        XCTAssertEqual(model.mode, .handler, "mode must come from replicated metadata")
+        XCTAssertTrue(model.status?.contains("greet") == true, "expected a status note naming the script")
+        XCTAssertFalse(model.statusIsError)
+    }
+
+    /// `detach` is a forwardable `/script` verb (design.md §11) — a guest's delete must send a
+    /// `scriptIntent`, not attempt a local (inert) detach.
+    func testGuestDeleteSendsDetachIntent() throws {
+        let game = try makeLANClientGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+
+        model.deleteScript("greet")
+
+        XCTAssertTrue(model.status?.contains("sent") == true, "expected a 'sent detach...' status; got: \(model.status ?? "nil")")
+        XCTAssertFalse(model.statusIsError)
     }
 }
 

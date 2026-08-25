@@ -445,6 +445,13 @@ public final class GameCore {
     private var lanClientResumeStorageKey: String?
     private var lanClientWorldSummary: LANWorldSummary?
     public private(set) var paused = false
+    /// scripting-editor-ui (native SwiftUI script editor): the native editor window is not a
+    /// `Screen` (it lives outside `UIManager`'s stack entirely, in its own `NSWindow`), so it
+    /// never auto-pauses the world the way opening a `Screen` does. `ScriptEditorWindowController`
+    /// sets this `true` while at least one editor window is open and `false` once every editor
+    /// window for the session has closed; `HostBridge.screenPausesGame()` (`main.swift`) ORs it
+    /// into the same decision `GameCore.tick()` already makes from `screenPausesGame()`.
+    public var scriptEditorWindowOpen = false
     public var rpgSimulationTick: Int {
         max(0, min(RPG_MAX_COUNTER,
                    worldRec?.rpgSimulationTick ?? worlds[dim]?.rpgSimulationTick ?? 0))
