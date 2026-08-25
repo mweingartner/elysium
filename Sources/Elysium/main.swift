@@ -1027,9 +1027,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
             if pendingCmdDelay > 90 {
                 if p.dead { game.respawnPlayer() }
                 for c in cmds.components(separatedBy: ";") where !c.isEmpty {
-                    runCommand(game, c.trimmingCharacters(in: .whitespaces))
+                    let one = c.trimmingCharacters(in: .whitespaces)
+                    print("[ELYSIUM_CMD] run: \(one)")
+                    runCommand(game, one)
                 }
                 pendingCmds = nil
+                // test-hook observability: echo the resulting chat lines to
+                // stdout so scripted ELYSIUM_CMD runs are diagnosable without
+                // screenshots (the chat overlay is invisible to window
+                // captures and fades after 8s).
+                for m in chatLog.suffix(12) { print("[ELYSIUM_CMD] chat: \(m.text)") }
+                fflush(stdout)
             }
         }
         if let screen = pendingOpenScreen, game.hasWorld(), pendingCmds == nil {
