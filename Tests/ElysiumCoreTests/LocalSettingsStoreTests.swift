@@ -40,7 +40,7 @@ final class LocalSettingsStoreTests: XCTestCase {
         XCTAssertTrue(settings.showMinimap)
 
         let keybinds = try value(store.loadKeybinds())
-        XCTAssertEqual(keybinds.count, 25)
+        XCTAssertEqual(keybinds.count, 27)
         XCTAssertEqual(keybinds, rpgDefaultChordBindings())
     }
 
@@ -262,7 +262,7 @@ final class LocalSettingsStoreTests: XCTestCase {
         let json = #"{"forward":"KeyZ","back":"Command+KeyQ","left":42,"future":"KeyP"}"#
         try write(Data(json.utf8), named: "keybinds.json", to: store)
         let bindings = try value(store.loadKeybinds())
-        XCTAssertEqual(bindings.count, 25)
+        XCTAssertEqual(bindings.count, 27)
         XCTAssertEqual(bindings["forward"], "KeyZ")
         XCTAssertEqual(bindings["back"], rpgDefaultChordBindings()["back"])
         XCTAssertEqual(bindings["left"], rpgDefaultChordBindings()["left"])

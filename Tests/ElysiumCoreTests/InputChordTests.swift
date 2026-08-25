@@ -76,8 +76,8 @@ final class InputChordTests: XCTestCase {
         XCTAssertEqual(ledger.pressed.count, 1)
     }
     func testCanonicalParserDefaultsAndProtection() throws {
-        XCTAssertEqual(KEYBIND_DEFINITIONS.count, 25)
-        XCTAssertEqual(rpgDefaultChordBindings().count, 25)
+        XCTAssertEqual(KEYBIND_DEFINITIONS.count, 27)
+        XCTAssertEqual(rpgDefaultChordBindings().count, 27)
         XCTAssertEqual(try ElysiumKeyChord(parsing: "Command+Control+Option+Shift+KeyK").description,
                        "Command+Control+Option+Shift+KeyK")
         for invalid in ["", "Shift", "Shift+Shift", "Shift+", "Shift+Command+KeyK",
@@ -332,8 +332,8 @@ final class InputChordTests: XCTestCase {
         XCTAssertTrue(exhausted.update(.control).isEmpty, "exhaustion must remain latched")
     }
 
-    func testPairwiseTwentyFiveDefinitionContextConflictMatrixAndCommandZ() throws {
-        XCTAssertEqual(KEYBIND_DEFINITIONS.count, 25)
+    func testPairwiseDefinitionContextConflictMatrixAndCommandZ() throws {
+        XCTAssertEqual(KEYBIND_DEFINITIONS.count, 27)
         var pairCount = 0
         for left in 0..<KEYBIND_DEFINITIONS.count {
             for right in (left + 1)..<KEYBIND_DEFINITIONS.count {
@@ -358,7 +358,7 @@ final class InputChordTests: XCTestCase {
                 pairCount += 1
             }
         }
-        XCTAssertEqual(pairCount, 300)
+        XCTAssertEqual(pairCount, 351)
 
         let undoChord = try ElysiumKeyChord(parsing: "Command+KeyZ")
         XCTAssertTrue(isProtectedAppChord(undoChord))

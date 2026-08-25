@@ -61,13 +61,13 @@ final class GameCoreLocalSettingsIntegrationTests: XCTestCase {
             notificationIntentCount: game._testLocalSettingsNotificationIntentCount)
     }
 
-    func testMissingDocumentsLoadCanonicalTwentyFiveDefaultsAndCheckedRevisions() throws {
+    func testMissingDocumentsLoadCanonicalDefaultsAndCheckedRevisions() throws {
         let game = try makeGame("defaults", store: makeStore("defaults"))
         XCTAssertEqual(game.settings.rpgTutorialVersion, 0)
         XCTAssertEqual(game.settingsRevision, 1)
         XCTAssertEqual(game.keybindRevision, 1)
-        XCTAssertEqual(KEYBIND_DEFINITIONS.count, 25)
-        XCTAssertEqual(DEFAULT_KEYBINDS.count, 25)
+        XCTAssertEqual(KEYBIND_DEFINITIONS.count, 27)
+        XCTAssertEqual(DEFAULT_KEYBINDS.count, 27)
         XCTAssertEqual(game.keybinds, rpgDefaultChordBindings())
         XCTAssertFalse(game.localSettingsPersistenceFailed)
         XCTAssertEqual(game.localSettingsPersistenceFailureCount, 0)

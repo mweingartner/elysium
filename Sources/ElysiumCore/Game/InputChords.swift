@@ -175,6 +175,10 @@ public enum ResolvedKeyCommand: Equatable {
 public enum ElysiumGameBindingAction: String, CaseIterable, Codable, Equatable, Hashable, Sendable {
     case forward, back, left, right, jump, sneak, sprint
     case inventory, drop, chat, command, perspective, swapOffhand
+    // Dedicated left-hand (off-hand) utility toggles: press to equip the named item from the
+    // inventory into the off-hand, press again to return it. Distinct from `swapOffhand`, which
+    // trades the off-hand with the selected hotbar slot regardless of item.
+    case equipTorch, equipShield
 }
 
 public struct ElysiumConfiguredBindingPress: Equatable {
@@ -251,6 +255,10 @@ private func makeKeybindDefinitions() -> [ElysiumKeybindDefinition] {
         ("rpgCharacter", "RPG Character", "KeyK", .rpgWorldAction),
         ("rpgCycleAction", "Cycle RPG Action", "KeyO", .rpgWorldAction),
         ("rpgUseAction", "Use RPG Action", "KeyL", .rpgWorldAction),
+        // Kept at the end of `bases` so the fixed definitions[13/14/15] RPG overrides below
+        // keep their indices. These resolve to .binding(.equipTorch/.equipShield) automatically.
+        ("equipTorch", "Equip Torch (off-hand)", "KeyG", .appHUD),
+        ("equipShield", "Equip Shield (off-hand)", "KeyH", .appHUD),
     ]
     var definitions = bases.map { value in
         let command = ElysiumGameBindingAction(rawValue: value.0).map {

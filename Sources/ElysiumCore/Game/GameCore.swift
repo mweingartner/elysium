@@ -4211,6 +4211,10 @@ public final class GameCore {
             doUse()
             useCooldown = 4
         }
+        // Raise/lower an off-hand shield from the same secondary-action hold. Evaluated after
+        // main-hand use so a sword+shield raises the guard while a usable main-hand item keeps
+        // its own action.
+        p.updateShieldRaise(rightHeld: rightDown)
         // brushing suspicious blocks
         let held = p.mainHand
         if rightDown, let held, itemDef(held.id).name == "brush", !p.usingItem {
@@ -5498,6 +5502,12 @@ public final class GameCore {
             let tmp = p.offHand
             p.offHand = p.mainHand
             p.mainHand = tmp
+        case .equipTorch:
+            // Toggle a torch into the left hand for light while the right hand keeps mining.
+            _ = p.toggleOffhandItem(named: "torch")
+        case .equipShield:
+            // Toggle a shield into the left hand to raise a guard with a weapon in the right.
+            _ = p.toggleOffhandItem(named: "shield")
         case .jump:
             _ = p.creativeJumpPressed(now: now)
         case .sprint:

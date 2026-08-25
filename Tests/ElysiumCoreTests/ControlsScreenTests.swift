@@ -3,15 +3,16 @@ import XCTest
 @testable import ElysiumCore
 
 final class ControlsScreenTests: XCTestCase {
-    func testDefinitionsExposeAllTwentyFiveActionsInStableOrder() {
+    func testDefinitionsExposeAllActionsInStableOrder() {
         XCTAssertEqual(KEYBIND_DEFINITIONS.map(\.actionID), [
             "forward", "back", "left", "right", "jump", "sneak", "sprint", "inventory",
             "drop", "chat", "command", "perspective", "swapOffhand", "rpgCharacter",
-            "rpgCycleAction", "rpgUseAction", "rpgQuickSlot1", "rpgQuickSlot2",
+            "rpgCycleAction", "rpgUseAction", "equipTorch", "equipShield",
+            "rpgQuickSlot1", "rpgQuickSlot2",
             "rpgQuickSlot3", "rpgQuickSlot4", "rpgQuickSlot5", "rpgQuickSlot6",
             "rpgQuickSlot7", "rpgQuickSlot8", "rpgQuickSlot9",
         ])
-        XCTAssertEqual(Set(KEYBIND_DEFINITIONS.map(\.displayName)).count, 25)
+        XCTAssertEqual(Set(KEYBIND_DEFINITIONS.map(\.displayName)).count, 27)
         XCTAssertTrue(KEYBIND_DEFINITIONS.allSatisfy { !$0.displayName.isEmpty })
     }
 
@@ -29,7 +30,7 @@ final class ControlsScreenTests: XCTestCase {
             viewportWidth: 360, contentTop: 72, contentBottom: 172,
             requestedScrollOffset: .greatestFiniteMagnitude, bindings: bindings)
         XCTAssertEqual(last.clampedScrollOffset, last.maximumScrollOffset)
-        XCTAssertEqual(last.visibleRows.last?.definitionIndex, 24)
+        XCTAssertEqual(last.visibleRows.last?.definitionIndex, 26)
         XCTAssertTrue(last.visibleRows.allSatisfy { $0.y + $0.height > 72 && $0.y < 172 })
     }
 
@@ -108,7 +109,7 @@ final class ControlsScreenTests: XCTestCase {
         XCTAssertEqual(live["rpgCharacter"], "KeyK")
     }
 
-    func testConflictDisclosureIsBoundedAndIncludesAllTwentyFiveActions() throws {
+    func testConflictDisclosureIsBoundedAndIncludesAllActions() throws {
         var live = rpgDefaultChordBindings()
         for definition in KEYBIND_DEFINITIONS {
             live[definition.actionID] = "Option+F12"
@@ -118,7 +119,7 @@ final class ControlsScreenTests: XCTestCase {
             chord: try ElysiumKeyChord(parsing: "Option+F12")) else {
             return XCTFail("shared chord should disclose the complete conflict")
         }
-        XCTAssertEqual(pending.conflictingActionIDs.count, 25)
+        XCTAssertEqual(pending.conflictingActionIDs.count, 27)
         XCTAssertEqual(Set(pending.conflictingActionIDs), Set(KEYBIND_DEFINITIONS.map(\.actionID)))
         XCTAssertEqual(pending.winnerActionID, "inventory")
     }

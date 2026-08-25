@@ -179,6 +179,50 @@ public final class Player: LivingEntity {
         useItemItemId = -1
     }
 
+    // MARK: - Off-hand shield blocking
+
+    /// True while the player is actively raising a shield held in the off-hand, and how many
+    /// ticks it has been raised (a short lift precedes full protection).
+    public internal(set) var shieldRaised = false
+    public internal(set) var shieldRaiseTicks = 0
+
+    /// The shield is fully raised and blocking (after a brief lift). Drives both the raised
+    /// render pose and the damage block.
+    public var isBlocking: Bool { shieldRaised && shieldRaiseTicks >= 5 }
+
+    /// Whether holding the secondary (right) action should raise the off-hand shield: it holds a
+    /// shield, no main-hand use is in progress, and the main hand is empty or a pure melee weapon
+    /// (a sword or mace). Tools and usable items keep their own right-click action instead.
+    public func canRaiseOffhandShield() -> Bool {
+        guard !usingItem, let off = offHand, itemDef(off.id).name == "shield" else { return false }
+        guard let main = mainHand else { return true }
+        let def = itemDef(main.id)
+        return def.tool?.type == "sword" || def.name == "mace"
+    }
+
+    /// Updates the raised-shield state from the current secondary-action state; call once per tick.
+    public func updateShieldRaise(rightHeld: Bool) {
+        let raising = rightHeld && canRaiseOffhandShield()
+        shieldRaised = raising
+        shieldRaiseTicks = raising ? min(shieldRaiseTicks + 1, 1_000_000) : 0
+    }
+
+    /// Whether a raised shield blocks this incoming hit — a frontal melee or projectile strike.
+    /// Environmental and armor-bypassing damage (fall, fire, magic, drown, wither, …) is never
+    /// blocked; nor is anything coming from outside the shield's frontal arc.
+    public func shieldBlocks(source: String, attacker: Entity?) -> Bool {
+        guard isBlocking else { return false }
+        let blockableSources: Set<String> = ["arrow", "trident", "fireball", "thrown", "sting", "player", "mob"]
+        guard attacker != nil || blockableSources.contains(source) else { return false }
+        guard let attacker else { return true }  // sourced projectile without an entity — frontal
+        let dx = attacker.x - x, dz = attacker.z - z
+        let d = (dx * dx + dz * dz).squareRoot()
+        guard d > 0.0001 else { return true }
+        // Player facing (horizontal) is (-sin(yaw), cos(yaw)); block within ~78° of straight ahead.
+        let dot = (dx / d) * (-detSin(yaw)) + (dz / d) * detCos(yaw)
+        return dot > 0.20
+    }
+
     public func usingMainHandStack() -> ItemStack? {
         guard useItemHand == "main",
               useItemSlot >= 0,
@@ -768,6 +812,48 @@ public final class Player: LivingEntity {
         }
         return true
     }
+
+    /// Toggles a stackable off-hand utility (torch, shield, …) in the left hand.
+    ///
+    /// Pressing when the named item already occupies the off-hand returns it to the inventory
+    /// (unequip); otherwise it pulls a single unit from the inventory into the off-hand (equip),
+    /// stowing whatever the off-hand previously held. Torches keep the rest of the stack in the
+    /// inventory so the main hand can still place them while the off-hand one lights the way.
+    ///
+    /// No-op (returns false, no mutation) when the item is not in the inventory to equip, when an
+    /// unequip cannot fit back into a full inventory, or when a replaced off-hand item cannot be
+    /// stowed. Returns whether the off-hand changed.
+    @discardableResult
+    public func toggleOffhandItem(named name: String) -> Bool {
+        guard let id = iidOpt(name) else { return false }
+        if let off = offHand, off.id == id {
+            guard give(off) else { return false }  // inventory full — stay equipped
+            offHand = nil
+            return true
+        }
+        guard let slot = inventory.firstIndex(where: { $0?.id == id }),
+              let source = inventory[slot] else { return false }
+        // Pull one unit out, freeing the slot only if it was the last of the stack.
+        let taken: ItemStack
+        if source.count > 1 {
+            taken = source.copy()
+            taken.count = 1
+            source.count -= 1
+        } else {
+            taken = source
+            inventory[slot] = nil
+        }
+        // Stow whatever the off-hand holds before committing; undo the pull if it will not fit.
+        if let previous = offHand,
+           inventoryInsertionCapacity(for: previous, into: inventory) < previous.count {
+            if source.count > 0 { source.count += 1 } else { inventory[slot] = taken }
+            return false
+        }
+        let previous = offHand
+        offHand = taken
+        if let previous { _ = give(previous) }
+        return true
+    }
     public override func consumeHeld(_ n: Int) {
         if gameMode == GameMode.creative { return }
         guard let s = mainHand else { return }
@@ -827,6 +913,15 @@ public final class Player: LivingEntity {
     @discardableResult
     public override func hurt(_ amount: Double, _ source: String, _ attacker: Entity? = nil) -> Bool {
         if gameMode == GameMode.creative { return false }
+        // A raised off-hand shield negates a frontal melee or projectile hit — damage and its
+        // knockback both — turning a sword+shield loadout into a real guard. The attack still
+        // costs the attacker their swing; it simply does not land.
+        if shieldBlocks(source: source, attacker: attacker) {
+            world.hooks.playSound("item.shield.block", x, y, z, 0.9, 0.8 + Double.random(in: 0..<0.2))
+            invulnTicks = max(invulnTicks, 5)
+            lastAttacker = attacker ?? lastAttacker
+            return false
+        }
         let r = super.hurt(amount, source, attacker)
         if r {
             addExhaustion(0.1)
