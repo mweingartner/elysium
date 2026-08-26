@@ -273,27 +273,25 @@ func heldItemPresentation(for definition: ItemDef?, hasDetailedVisual: Bool) -> 
     if let tool = definition.tool {
         let detailedBounds = HeldItemAlphaBounds(
             minX: 2 / 128, minY: 2 / 128, maxX: 126 / 128, maxY: 126 / 128)
-        let isDetailedPickaxe = tool.type == "pickaxe" && hasDetailedVisual
         let isBow = definition.name == "bow"
         let isCrossbow = definition.name == "crossbow"
         let isCompact = definition.name == "shears" || definition.name == "flint_and_steel"
-        // Melee/mining tools whose sprite is now stood upright (align-held-tools-upright.py):
-        // the handle is a vertical column the fist grips directly — no baked haft, no runtime
-        // counter-rotation. Grip anchor is the pommel at the bottom-centre of the frame.
+        // Melee/mining tools whose sprite is now stood upright (align-held-tools-upright.py and
+        // generate-held-pickaxes-upright.py): the handle is a vertical column the fist grips
+        // directly — no baked haft, no runtime counter-rotation. Grip anchor is the pommel at
+        // the bottom-centre of the frame. The pickaxe shares this profile (its head is wider,
+        // which only widens the shared envelope below).
         let isUprightTool = hasDetailedVisual
-            && ["sword", "axe", "shovel", "hoe"].contains(tool.type)
-        let iconSize = isDetailedPickaxe ? 124.8
-            : isUprightTool ? 98
+            && ["sword", "axe", "shovel", "hoe", "pickaxe"].contains(tool.type)
+        let iconSize: Double = isUprightTool ? 98
             : hasDetailedVisual ? (isCompact ? 96 : (isBow ? 112 : (isCrossbow ? 132 : 118)))
             : 82
-        let gripX = isDetailedPickaxe ? 0.47
-            : isUprightTool ? 0.50
+        let gripX = isUprightTool ? 0.50
             : isBow ? 0.34
             : isCrossbow ? 0.78
             : isCompact ? 0.27
             : 0.16
-        let gripY = isDetailedPickaxe ? 0.90
-            : isUprightTool ? 0.88
+        let gripY = isUprightTool ? 0.88
             : isBow ? 0.55
             : isCrossbow ? 0.87
             : isCompact ? 0.74
@@ -302,18 +300,16 @@ func heldItemPresentation(for definition: ItemDef?, hasDetailedVisual: Bool) -> 
         let restRotation = isBow ? -0.08
             : isCompact ? -0.16
             : 0
-        // Opaque envelope of the upright sprites (union of sword/axe/shovel/hoe): a narrow
-        // vertical column, bottom-anchored — used by the crosshair-obscure and clamp math.
-        let uprightBounds = HeldItemAlphaBounds(minX: 0.21, minY: 0, maxX: 0.75, maxY: 0.97)
+        // Opaque envelope of the upright sprites (union of sword/axe/shovel/hoe/pickaxe): a
+        // bottom-anchored vertical column, widened to admit the pickaxe head — used by the
+        // crosshair-obscure and clamp math.
+        let uprightBounds = HeldItemAlphaBounds(minX: 0.18, minY: 0, maxX: 0.86, maxY: 0.97)
         return HeldItemPresentation(
             kind: .tool, armLayer: .back, drawsGrip: true,
             iconBaseSize: iconSize,
             gripAnchorX: gripX,
             gripAnchorY: gripY,
-            alphaBounds: isDetailedPickaxe
-                ? HeldItemAlphaBounds(minX: 12 / 96, minY: 18 / 96,
-                                      maxX: 84 / 96, maxY: 90 / 96)
-                : isUprightTool ? uprightBounds
+            alphaBounds: isUprightTool ? uprightBounds
                 : hasDetailedVisual ? detailedBounds : full,
             restRotation: restRotation,
             performsEquipFlip: true)

@@ -249,14 +249,14 @@ final class ResourcePackHardeningTests: XCTestCase {
             guiVisible: true, firstPerson: true, screenOpen: false,
             attack: 1, usingItem: false, useTicks: 0,
             presentation: detailedPresentation))
-        XCTAssertEqual(detailed.iconSize, 124.8, accuracy: 0.0001)
+        XCTAssertEqual(detailed.iconSize, 98, accuracy: 0.0001)
         XCTAssertGreaterThan(detailed.iconSize, idle.iconSize)
         XCTAssertGreaterThanOrEqual(detailed.iconSize,
-                                    detailed.armAssetSize * 0.75)
+                                    detailed.armAssetSize * 0.55)
         XCTAssertEqual(detailed.armX - detailed.iconX,
-                       detailed.iconSize * 0.47, accuracy: 0.0001)
+                       detailed.iconSize * 0.50, accuracy: 0.0001)
         XCTAssertEqual(detailed.armY - detailed.iconY,
-                       detailed.iconSize * 0.90, accuracy: 0.0001)
+                       detailed.iconSize * 0.88, accuracy: 0.0001)
         XCTAssertEqual(detailed.toolPivotX, detailed.iconX + detailed.iconSize / 2,
                        accuracy: 0.0001)
         XCTAssertEqual(detailed.toolPivotY, detailed.iconY + detailed.iconSize / 2,
@@ -362,34 +362,24 @@ final class ResourcePackHardeningTests: XCTestCase {
     }
 
     func testHeldPickaxeMaterialAssetsShareOneBoundedDecodableShape() throws {
-        let hashes = [
-            "wooden": "afed6517bcebba4e15eb25ad06ac735f6b2ed5c27cde0a37fd37050f600260d1",
-            "stone": "70cd6b14736c5edda1ba7ddb923da55db83879415e1a504fa33f288c04df7512",
-            "copper": "678aa81424d015268167ed29d5a925966c3369d76c8176c7eba4c3936457e6b5",
-            "iron": "baa468b50ae7a8ca62675f0b50fdbca8add32f9c5e1e1d4f0c81eb9e5156d6f4",
-            "golden": "51252cbc82cb2b60829e4101b1b8f58e38e5d67d095229584660ab863c7c63b6",
-            "diamond": "c33551b610cf3d4e401c9d92953bc1bc69c2886acc6fa107ad886afcfbfa6aa5",
-            "netherite": "89a7778bdf60d0416b6292570524c3ef16cab07ba030fc6cb4026ebbc3cec295",
-        ]
+        if itemDefs.isEmpty { registerAllItems() }
         var referenceAlpha: [UInt8]?
-        var referenceHandleSamples: [[UInt8]]?
-        var headColors = Set<[UInt8]>()
+        var colourways = Set<[UInt8]>()
         for material in ["wooden", "stone", "copper", "iron", "golden", "diamond", "netherite"] {
             let itemName = "\(material)_pickaxe"
             let asset = try XCTUnwrap(heldItemVisualAsset(for: itemName))
             XCTAssertEqual(asset.itemName, itemName)
-            XCTAssertEqual(asset.provider, "Elysium original procedural voxel art")
-            XCTAssertEqual(asset.modelTaskID, "elysium-diagonal-pickaxe-v1")
-            XCTAssertEqual(asset.sourceSHA256, hashes[material])
-            XCTAssertEqual(asset.width, 96)
-            XCTAssertEqual(asset.height, 96)
+            XCTAssertEqual(asset.provider, "Elysium original upright voxel pickaxe")
+            XCTAssertEqual(asset.modelTaskID, "elysium-upright-pickaxe-v1")
+            XCTAssertEqual(asset.width, 128)
+            XCTAssertEqual(asset.height, 128)
 
             let image = try XCTUnwrap(heldItemVisualImage(for: itemName))
-            XCTAssertEqual(image.width, 96)
-            XCTAssertEqual(image.height, 96)
-            XCTAssertEqual(image.pixels.count, 96 * 96 * 4)
-            let alpha = stride(from: 3, to: image.pixels.count, by: 4)
-                .map { image.pixels[$0] }
+            XCTAssertEqual(image.width, 128)
+            XCTAssertEqual(image.height, 128)
+            XCTAssertEqual(image.pixels.count, 128 * 128 * 4)
+            let alpha = stride(from: 3, to: image.pixels.count, by: 4).map { image.pixels[$0] }
+            // Every material shares one upright silhouette (identical alpha channel).
             if let referenceAlpha {
                 XCTAssertEqual(alpha, referenceAlpha,
                                "\(material) must preserve the shared pickaxe silhouette")
@@ -398,25 +388,11 @@ final class ResourcePackHardeningTests: XCTestCase {
             }
             let visiblePixels = alpha.count(where: { $0 > 0 })
             XCTAssertGreaterThan(visiblePixels, 500)
-            XCTAssertLessThan(visiblePixels, 96 * 96)
-
-            func rgbaAt(x: Int, y: Int) -> [UInt8] {
-                let offset = (y * image.width + x) * 4
-                return Array(image.pixels[offset..<(offset + 4)])
-            }
-            let handleSamples = [
-                rgbaAt(x: 7 * 6 + 3, y: 10 * 6 + 3),
-                rgbaAt(x: 6 * 6 + 3, y: 12 * 6 + 3),
-            ]
-            if let referenceHandleSamples {
-                XCTAssertEqual(handleSamples, referenceHandleSamples,
-                               "\(material) must preserve the shared wooden handle")
-            } else {
-                referenceHandleSamples = handleSamples
-            }
-            headColors.insert(rgbaAt(x: 4 * 6 + 3, y: 5 * 6 + 3))
+            XCTAssertLessThan(visiblePixels, 128 * 128)
+            // ...but the coloured content differs per material (distinct metal palette).
+            colourways.insert(image.pixels)
         }
-        XCTAssertEqual(headColors.count, hashes.count)
+        XCTAssertEqual(colourways.count, 7, "each material is a distinct colourway")
     }
 
     func testEveryRegisteredToolHasABoundedMaterialCorrectHeldAsset() throws {
@@ -437,8 +413,8 @@ final class ResourcePackHardeningTests: XCTestCase {
             XCTAssertGreaterThan(visible, 250, itemName)
             XCTAssertLessThan(visible, asset.width * asset.height, itemName)
             if itemName.hasSuffix("_pickaxe") {
-                XCTAssertEqual(asset.provider, "Elysium original procedural voxel art")
-                XCTAssertEqual(asset.width, 96)
+                XCTAssertEqual(asset.provider, "Elysium original upright voxel pickaxe")
+                XCTAssertEqual(asset.width, 128)
             } else {
                 XCTAssertEqual(asset.provider, "Faithful 64x normalized through Blender 5.1")
                 XCTAssertEqual(asset.modelTaskID, "blender-held-tools-v1")
@@ -486,10 +462,10 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertEqual(tool.armLayer, .back)
         XCTAssertTrue(tool.drawsGrip)
         XCTAssertTrue(tool.performsEquipFlip)
-        XCTAssertEqual(tool.iconBaseSize, 124.8)
-        // Upright pickaxe: gripped at the vertical handle centre near the pommel.
-        XCTAssertEqual(tool.gripAnchorX, 0.47)
-        XCTAssertEqual(tool.gripAnchorY, 0.90)
+        XCTAssertEqual(tool.iconBaseSize, 98)
+        // Upright pickaxe: shares the stood-up tool profile, gripped at the handle centre.
+        XCTAssertEqual(tool.gripAnchorX, 0.50)
+        XCTAssertEqual(tool.gripAnchorY, 0.88)
         XCTAssertEqual(tool.restRotation, 0)
         XCTAssertLessThan(tool.alphaBounds.minX, tool.alphaBounds.maxX)
 
