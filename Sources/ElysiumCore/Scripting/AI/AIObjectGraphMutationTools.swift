@@ -305,8 +305,17 @@ public enum AIObjectGraphMutationTools {
                 return .refuse(stage: "validate", message: result.message, hint: result.hint)
             case .accepted(let sha):
                 var warnings: [String] = []
-                if let dryRunFailure = runtime.dryRun(source: source, owner: ref, mode: mode) {
-                    warnings.append("dry run: \(dryRunFailure)")
+                switch runtime.dryRunOutcome(
+                    source: source, owner: ref, mode: mode, handlerEvent: triggers.first?.event
+                ) {
+                case .completed:
+                    break
+                case .suspended(let boundary):
+                    warnings.append("dry run stopped at \(boundary); later code was not executed")
+                case .compiledOnly(let reason):
+                    warnings.append("dry run compiled only: \(reason)")
+                case .failure(let message):
+                    warnings.append("dry run: \(message)")
                 }
                 let previousRecord = context.scriptStore.get(ref, name)
                 switch context.scriptStore.attach(

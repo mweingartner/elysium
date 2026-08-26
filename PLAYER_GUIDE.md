@@ -647,21 +647,23 @@ exactly as before.
   case undo refuses rather than overwrite your edit and tells you so. Emitting an event or running a
   one-off script can't be undone (whatever it already did in the world stays done); undo-ai still logs
   that it tried, so the journal stays a complete record either way.
-- Chat command source is one line — for anything longer, use `/script edit [target] [name]` to open
-  the in-game script editor: a full multi-line editor now. Type directly (Enter for a new line,
-  Backspace, the four arrow keys) or paste (⌘V) a whole script at once — either way, up to 16 KiB,
-  with Lua syntax colouring (keywords, strings, comments, numbers) as you go. Give it a name, choose
-  **module** or **handler** mode with the toggle in the corner (handler mode adds an Event field —
-  the same trigger `/script attach ... handler <event> ...` takes), then **Save** (attaches it) or
-  **Run** (a one-off, nothing saved) — both mirror the chat commands above and run your script through
-  the exact same validator: a compile or syntax error highlights the offending line right in the
-  editor and refuses to save or run until it's fixed. On a joined LAN world (once the host has granted
-  you scripting), the editor works the same way, with one difference: re-opening it on a script that
-  already exists never shows its source (only guests' own metadata is ever sent to them, never
-  another author's script text) — the name/mode are filled in and a note says so, but the body starts
-  blank; Save still replaces whatever was there. Save and Run both send your script to the host
-  instead of running locally (you never run Lua yourself) and close the editor right away; watch chat
-  for the host's reply.
+- Chat command source is one line — for anything longer, use `/script edit [target] [name]` or
+  Command-E to open the native Lua editor. It provides semantic colouring; completion for locals,
+  engine globals, inferred tables, methods, properties, event payloads, and live custom attributes;
+  signatures and diagnostics; validated snippets; and a searchable **World Objects** list that can
+  insert stable canonical references. Typing `.` or `:` opens member completion immediately, and
+  Control-Space requests it anywhere. **Save** attaches, **Check** performs a mutation-free dry run,
+  and **Run** executes once without saving; all three retain the runtime's authoritative validation.
+  Run cannot suspend, so `wait`/`ai.await` are highlighted with guidance to Save for attached execution;
+  Check accepts a valid attached-script suspension without scheduling it or contacting AI.
+  Unsaved source is protected when switching, closing, or quitting Elysium. Optional editor AI is **Manual** by default:
+  Option-Command-/ asks the selected local Ollama model for one ghost-text proposal, Tab accepts it,
+  and Escape dismisses it. Set editor AI to **Off** for no Ollama requests or explicitly choose
+  **On Idle** for automatic requests after a pause; this explicit mode choice persists across app
+  sessions until changed. AI proposals have no tools and cannot save, run,
+  or mutate the world. On a joined LAN world, existing source remains hidden; replacing it requires
+  an explicit warning and the host still performs every validation and execution step. The complete
+  controls and privacy boundary are in the [Lua Editor reference](docs/LUA_EDITOR.md).
 - `/inspector` opens the **Object Inspector** — a read-only window onto whatever you're looking at
   (or `self`/`player`/`world`; click **Retarget** to cycle) showing its attributes, its attached
   scripts, and its event subscriptions. Select a script row and click **Edit Script** to jump straight

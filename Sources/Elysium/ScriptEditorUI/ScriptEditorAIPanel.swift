@@ -1,11 +1,11 @@
 // ScriptEditorAIPanel.swift — native SwiftUI script editor (Stage A). The collapsible right-hand
-// AI chat column: transcript bubbles + auto-scroll + "Working…" (ported from Hype's
-// `Hype/Views/ScriptEditorAIView.swift`), wired to Elysium's own agent
-// (`elysiumOllamaAgent.runToolLoop(prompt:game:reportLine:)` / `.cancelToolLoop()`) instead of
-// Hype's `HypeAIConfiguration` client. Shows the currently selected model
+// AI help column: transcript bubbles + auto-scroll + "Working…" (ported from Hype's
+// `Hype/Views/ScriptEditorAIView.swift`), wired only to the editor's bounded proposal service.
+// Unlike `/ai`, this panel receives no world query/mutation tools and cannot execute, save, or run
+// a script. It shows the currently selected model
 // (`game.settings.aiOllamaModel`) with a picker (`elysiumOllamaAgent.fetchModels`), prompt
 // history via ↑/↓ (`AIChatPromptHistory`), and an auto-growing input (`AutoGrowingTextInput`).
-// Detects a fenced ```lua block in the final reply and offers "Insert into editor".
+// A successful response can be inserted explicitly after the user has reviewed it.
 
 import SwiftUI
 import ElysiumCore
@@ -28,6 +28,11 @@ struct ScriptEditorAIPanel: View {
     @State private var historyIndex = -1
     @State private var availableModels: [String] = []
     @State private var isFetchingModels = false
+    @State private var modelDiscoveryTask: Task<Void, Never>?
+    @State private var modelDiscoveryGeneration: UInt64 = 0
+    @State private var requestTask: Task<Void, Never>?
+    @State private var lastAssistantInsertion: String?
+    @State private var requestGeneration: UInt64 = 0
     @FocusState private var isPromptFocused: Bool
 
     var body: some View {
@@ -35,14 +40,15 @@ struct ScriptEditorAIPanel: View {
             header
             Divider()
             transcript
-            if let luaBlock = lastAssistantLuaBlock {
+            if let insertion = lastAssistantInsertion {
                 HStack {
                     SwiftUI.Button {
-                        model.insertAtCursor(luaBlock)
+                        model.insertAtCursor(insertion)
+                        lastAssistantInsertion = nil
                     } label: {
-                        Label("Insert into editor", systemImage: "arrow.down.doc")
+                        Label("Insert response at cursor", systemImage: "arrow.down.doc")
                     }
-                    .font(.system(size: 11))
+                    .font(.caption)
                     Spacer()
                 }
                 .padding(.horizontal, theme.spacing)
@@ -52,6 +58,18 @@ struct ScriptEditorAIPanel: View {
             inputArea
         }
         .background(theme.panelBackground.color)
+        .onAppear {
+            model.refreshAIConfiguration()
+        }
+        .onChange(of: model.aiCompletionMode) { _, mode in
+            if mode == .off { stop() }
+        }
+        .onChange(of: model.isWorldSessionActive) { _, active in
+            if !active { stop() }
+        }
+        .onDisappear {
+            stop()
+        }
     }
 
     // MARK: - header
@@ -61,11 +79,14 @@ struct ScriptEditorAIPanel: View {
             Image(systemName: "wand.and.sparkles")
                 .foregroundColor(.secondary)
             Text("Script AI")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.headline)
             Spacer(minLength: 4)
             Menu {
                 if availableModels.isEmpty {
-                    Text(isFetchingModels ? "Loading…" : "No local models found")
+                    SwiftUI.Button(isFetchingModels ? "Loading local models…" : "Load local models") {
+                        refreshModels()
+                    }
+                    .disabled(isFetchingModels || model.aiCompletionMode == .off || !model.isWorldSessionActive)
                 } else {
                     ForEach(availableModels, id: \.self) { name in
                         SwiftUI.Button {
@@ -78,24 +99,32 @@ struct ScriptEditorAIPanel: View {
                             }
                         }
                     }
+                    Divider()
+                    SwiftUI.Button("Refresh local models") {
+                        availableModels = []
+                        refreshModels()
+                    }
                 }
             } label: {
                 Text(model.aiModelName.isEmpty ? "Choose model" : model.aiModelName)
-                    .font(.system(size: 11))
+                    .font(.caption)
                     .lineLimit(1)
             }
             .menuStyle(.borderlessButton)
-            .fixedSize()
-            .onAppear(perform: refreshModels)
+            .frame(maxWidth: 150)
+            .accessibilityLabel("AI model")
 
             if !messages.isEmpty {
                 SwiftUI.Button {
                     messages.removeAll()
+                    lastAssistantInsertion = nil
                 } label: {
-                    Image(systemName: "trash")
+                    Label("Clear AI conversation", systemImage: "trash")
+                        .labelStyle(.iconOnly)
                 }
                 .buttonStyle(.plain)
                 .help("Clear chat")
+                .accessibilityLabel("Clear AI conversation")
             }
         }
         .padding(.horizontal, theme.spacing)
@@ -104,12 +133,28 @@ struct ScriptEditorAIPanel: View {
     }
 
     private func refreshModels() {
-        guard availableModels.isEmpty, !isFetchingModels else { return }
+        guard model.aiCompletionMode != .off, model.isWorldSessionActive,
+              availableModels.isEmpty, !isFetchingModels else { return }
         isFetchingModels = true
-        elysiumOllamaAgent.fetchModels { result in
-            isFetchingModels = false
-            if case .success(let names) = result {
+        modelDiscoveryGeneration &+= 1
+        let generation = modelDiscoveryGeneration
+        modelDiscoveryTask = Task { @MainActor in
+            defer {
+                if modelDiscoveryGeneration == generation {
+                    isFetchingModels = false
+                    modelDiscoveryTask = nil
+                }
+            }
+            do {
+                let names = try await elysiumOllamaAgent.fetchModels()
+                guard !Task.isCancelled, modelDiscoveryGeneration == generation,
+                      model.aiCompletionMode != .off,
+                      model.isWorldSessionActive else { return }
                 availableModels = names
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
             }
         }
     }
@@ -121,8 +166,11 @@ struct ScriptEditorAIPanel: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: theme.spacing) {
                     if messages.isEmpty {
-                        Text("Ask about \(model.targetDisplayName)'s scripts, or request one.")
-                            .font(.system(size: 11))
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Ask about \(model.targetDisplayName)'s script, request a rewrite, or ask for Lua to insert.")
+                            Label("Read-only proposal service · no world tools", systemImage: "lock.shield")
+                        }
+                            .font(.callout)
                             .foregroundColor(.secondary)
                             .padding(theme.spacing)
                     }
@@ -134,7 +182,7 @@ struct ScriptEditorAIPanel: View {
                         HStack(spacing: 6) {
                             ProgressView().scaleEffect(0.7)
                             Text("Working…")
-                                .font(.system(size: 11))
+                                .font(.caption)
                                 .foregroundColor(.secondary)
                             Spacer()
                         }
@@ -155,10 +203,10 @@ struct ScriptEditorAIPanel: View {
     private func bubble(for message: Bubble) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(message.role == "user" ? "You" : "Elysium AI")
-                .font(.system(size: 9, weight: .semibold))
+                .font(.caption.weight(.semibold))
                 .foregroundColor(.secondary)
             Text(message.content)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.body.monospaced())
                 .textSelection(.enabled)
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -168,44 +216,22 @@ struct ScriptEditorAIPanel: View {
         .padding(.horizontal, theme.spacing)
     }
 
-    /// Fenced ```lua (or a bare ```) block in the most recent assistant message, if any — used to
-    /// show "Insert into editor".
-    private var lastAssistantLuaBlock: String? {
-        guard let last = messages.last(where: { $0.role == "assistant" }) else { return nil }
-        return Self.extractFencedCode(last.content)
-    }
-
-    static func extractFencedCode(_ text: String) -> String? {
-        guard let openRange = text.range(of: "```") else { return nil }
-        var rest = text[openRange.upperBound...]
-        if let firstNewline = rest.firstIndex(of: "\n") {
-            let langTag = rest[rest.startIndex..<firstNewline].trimmingCharacters(in: .whitespaces)
-            if langTag.isEmpty || langTag.lowercased() == "lua" {
-                rest = rest[rest.index(after: firstNewline)...]
-            }
-        }
-        guard let closeRange = rest.range(of: "```") else { return nil }
-        let body = String(rest[rest.startIndex..<closeRange.lowerBound])
-        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
     // MARK: - input
 
     private var inputArea: some View {
         HStack(alignment: .bottom, spacing: 6) {
             ZStack(alignment: .topLeading) {
                 if prompt.isEmpty {
-                    Text("Ask Script AI…")
+                    Text(model.aiCompletionMode == .off ? "Editor AI is Off" : "Ask Script AI…")
                         .foregroundColor(.secondary)
-                        .font(.system(size: 12))
+                        .font(.body)
                         .padding(8)
                         .allowsHitTesting(false)
                 }
                 AutoGrowingTextInput(
                     text: $prompt,
                     contentHeight: $promptContentHeight,
-                    isEnabled: !isProcessing,
+                    isEnabled: !isProcessing && model.aiCompletionMode != .off && model.isWorldSessionActive,
                     onSubmit: send,
                     onHistoryUp: { recallHistory(.up) },
                     onHistoryDown: { recallHistory(.down) }
@@ -224,7 +250,11 @@ struct ScriptEditorAIPanel: View {
                     .foregroundColor(.red)
             } else {
                 SwiftUI.Button("Send") { send() }
-                    .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(
+                        model.aiCompletionMode == .off ||
+                            !model.isWorldSessionActive ||
+                            prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
                     .keyboardShortcut(.return, modifiers: [])
             }
         }
@@ -233,24 +263,48 @@ struct ScriptEditorAIPanel: View {
 
     private func send() {
         let request = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !request.isEmpty, !isProcessing else { return }
+        guard model.aiCompletionMode != .off, model.isWorldSessionActive,
+              !request.isEmpty, !isProcessing else { return }
         history = AIChatPromptHistory.appending(request, to: history)
         historyIndex = -1
         messages.append(Bubble(role: "user", content: request))
+        lastAssistantInsertion = nil
         prompt = ""
         isProcessing = true
-        elysiumOllamaAgent.runToolLoop(prompt: request, game: model.game) { line in
-            // `reportLine` fires once with the "thinking…" status and once with the final
-            // "<Elysium AI> …" reply (or a refusal) — every line is meaningful transcript
-            // content, so it is appended verbatim rather than filtered.
-            messages.append(Bubble(role: "assistant", content: Self.stripChatColorCodes(line)))
-            isProcessing = false
+        requestGeneration &+= 1
+        let generation = requestGeneration
+        requestTask = Task { @MainActor in
+            defer {
+                if requestGeneration == generation {
+                    isProcessing = false
+                    requestTask = nil
+                }
+            }
+            do {
+                let reply = try await model.requestEditorAIReply(instruction: request)
+                guard !Task.isCancelled, requestGeneration == generation else { return }
+                messages.append(Bubble(role: "assistant", content: reply))
+                lastAssistantInsertion = reply
+            } catch let error as OllamaCodeCompletionError
+                where error == .cancelled || error == .stale {
+                return
+            } catch {
+                guard !Task.isCancelled, requestGeneration == generation else { return }
+                lastAssistantInsertion = nil
+                messages.append(Bubble(role: "assistant", content: error.localizedDescription))
+            }
         }
     }
 
     private func stop() {
-        elysiumOllamaAgent.cancelToolLoop()
+        requestGeneration &+= 1
+        modelDiscoveryGeneration &+= 1
+        requestTask?.cancel()
+        requestTask = nil
+        modelDiscoveryTask?.cancel()
+        modelDiscoveryTask = nil
         isProcessing = false
+        isFetchingModels = false
     }
 
     private func recallHistory(_ direction: AIChatPromptHistoryDirection) {
@@ -259,16 +313,4 @@ struct ScriptEditorAIPanel: View {
         }
     }
 
-    /// `reportLine` carries Elysium's `§`-prefixed chat color codes (`§7`, `§c`, `§d`, …) meant
-    /// for the in-world chat overlay — stripped here so the AI panel's plain-text bubbles don't
-    /// show raw section-sign codes.
-    private static func stripChatColorCodes(_ text: String) -> String {
-        var out = ""
-        var iterator = text.makeIterator()
-        while let ch = iterator.next() {
-            if ch == "\u{00A7}" { _ = iterator.next(); continue }
-            out.append(ch)
-        }
-        return out
-    }
 }

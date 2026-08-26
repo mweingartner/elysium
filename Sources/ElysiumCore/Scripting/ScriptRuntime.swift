@@ -33,6 +33,17 @@ public enum ScriptRunOutcome {
     case failure(String)
 }
 
+/// Detailed advisory result for editor Check and AI attach preflight. A suspension is valid for an
+/// attached script, but explicitly means only the prefix through its first wait was exercised.
+public enum ScriptDryRunOutcome: Equatable {
+    case completed
+    case suspended(String)
+    /// The source compiled, but execution was intentionally skipped because a custom event has no
+    /// authoritative payload descriptor from which Check can build a representative `ev` value.
+    case compiledOnly(String)
+    case failure(String)
+}
+
 /// scripting-ui-and-replication (change 3): an `ElysiumCore`-native mirror of
 /// `ElysiumScript.ScriptValidation` (see `ScriptRuntime.validateSourceForEditor`'s own comment
 /// on why a mirror, not a re-export). `stage` is 0-3, `line` is 1-based (0 when the stage has
@@ -180,6 +191,12 @@ public final class ScriptRuntime {
     /// so dry-run and real execution can never drift apart on anything but
     /// the flag itself.
     var dryRunActive = false
+    /// True only while `/script run` / editor Run / AI `run_script` executes its one-shot
+    /// chunk. Durable script-lifecycle APIs reject in this scope so the destroyed throwaway
+    /// environment can never leave handlers, timers, child scripts, or AI work behind.
+    var ephemeralRunActive = false
+    /// Throwaway RNG owned by Run/Check. Attached scripts instead use their persisted Instance RNG.
+    var transientExecutionRandom: RandomStreamBoxAdapter?
 
     let budgets: ScriptBudgets
 
@@ -188,10 +205,7 @@ public final class ScriptRuntime {
     /// ARCHITECTURE.md); reset every tick by `resetPerTickCounters()`.
     var attachDetachCounts: [String: Int] = [:]
 
-    /// design.md §7.2: `"script.attached"` fits the custom event grammar
-    /// (`[a-z][a-z0-9_]{0,31}` segments, 1-4 of them) — parsed once, not a
-    /// v1 catalog constant (`EventKind.swift` is 1b's file).
-    static let scriptAttachedEventKind = EventKind.parse("script.attached")!
+    static let scriptAttachedEventKind = EventKind.scriptAttached
 
     public init(
         host: ObjectGraphHost, state: GameScriptingState, budgets: ScriptBudgets = .defaults,
@@ -345,12 +359,12 @@ public final class ScriptRuntime {
     }
 
     func eventValue(_ event: ScriptEvent) -> ScriptValue {
-        var map: [String: ScriptValue] = [
-            "kind": .string(event.kind.rawValue),
-            "tick": .int(event.tick),
-            "subject": handleValue(for: event.subject),
-        ]
-        for (k, v) in event.payload { map[k] = v }
+        var map: [String: ScriptValue] = event.payload
+        // Envelope fields are authoritative. A custom payload may use the same keys, but it must
+        // never spoof the delivered event kind, tick, subject, or provenance seen by Lua.
+        map["kind"] = .string(event.kind.rawValue)
+        map["tick"] = .int(event.tick)
+        map["subject"] = handleValue(for: event.subject)
         if case .script(let owner, _) = event.source { map["source"] = .string("script:" + owner.canonical) }
         else if case .player = event.source { map["source"] = .string("player") }
         else if case .ai = event.source { map["source"] = .string("ai") }
@@ -721,9 +735,12 @@ public final class ScriptRuntime {
         ) {
             return .failure("validation stage \(stage) line \(line): \(message)")
         }
+        let transientRandom = RandomStreamBoxAdapter(
+            RandomX(mix32(UInt32(truncatingIfNeeded: nextOrdinal)))
+        )
         let env = lua.makeEnvironment(
             name: "run#\(nextOrdinal)", hostBindings: buildHostBindings(),
-            random: RandomStreamBoxAdapter(RandomX(mix32(UInt32(truncatingIfNeeded: nextOrdinal))))
+            random: transientRandom
         )
         nextOrdinal += 1
         defer { env.destroy() }
@@ -733,8 +750,16 @@ public final class ScriptRuntime {
             return .failure("compile error: \(fault.message)")
         case .success(let fn):
             let previous = currentScript
+            let previousEphemeralRun = ephemeralRunActive
+            let previousTransientRandom = transientExecutionRandom
             currentScript = (owner, "run")
-            defer { currentScript = previous }
+            ephemeralRunActive = true
+            transientExecutionRandom = transientRandom
+            defer {
+                transientExecutionRandom = previousTransientRandom
+                ephemeralRunActive = previousEphemeralRun
+                currentScript = previous
+            }
             let outcome: ScriptCallOutcome
             do {
                 outcome = try lua.call(
@@ -792,27 +817,26 @@ public final class ScriptRuntime {
         }
     }
 
-    /// design.md §9.4 stage 6: "run the chunk in a scratch env over a
-    /// read-only facade (throwaway RNG, no AI, no attrs writes) and invoke
-    /// each registered handler once with a synthetic event; failures are
-    /// *warnings* in the tool result." Compiles and runs `source` once
-    /// against `owner`'s real handles (so reads/attribute lookups behave
-    /// normally — useful signal) with `dryRunActive` set for the duration,
-    /// which turns every mutating verb in `ScriptRuntimeAPI.swift` into a
-    /// no-op: nothing this call does is ever persisted, emits an event,
-    /// writes a block, sends chat, or reaches the AI outbox. Returns a
-    /// human-readable failure line, or `nil` on success. Never throws; any
-    /// internal failure (including an over-budget slice) becomes a message,
-    /// not a Swift error — the caller treats this as advisory.
-    public func dryRun(source: String, owner: ObjectRef, mode: ScriptMode) -> String? {
-        guard scriptsEffectivelyEnabled(host: host) else { return "scripting is disabled" }
-        guard case .live = graph.resolve(owner) else { return "\(owner.canonical) is not loaded" }
+    /// Stage-6 advisory execution: compile and resume `source` once in a scratch environment over
+    /// a read-only facade (throwaway RNG, no AI, no attribute/world writes). Reads still use the
+    /// owner's real handles. A normal completion passes; a first `wait`/`ai.await` is reported as
+    /// a valid but prefix-limited suspension and its coroutine is closed without scheduling;
+    /// faults and slice preemption are failures. Registered handler closures are not invoked in
+    /// this bounded pass. Nothing is persisted, emitted, sent to chat/AI, or allowed to escape the
+    /// throwaway environment. The method never throws; callers decide whether a failure is
+    /// blocking (editor Check) or an advisory warning (AI attach validation).
+    public func dryRunOutcome(
+        source: String, owner: ObjectRef, mode: ScriptMode, handlerEvent: EventKind? = nil
+    ) -> ScriptDryRunOutcome {
+        guard scriptsEffectivelyEnabled(host: host) else { return .failure("scripting is disabled") }
+        guard case .live = graph.resolve(owner) else { return .failure("\(owner.canonical) is not loaded") }
         let wasDryRun = dryRunActive
         dryRunActive = true
         defer { dryRunActive = wasDryRun }
+        let transientRandom = RandomStreamBoxAdapter(RandomX(0xD8A1_1D8A))
         let env = lua.makeEnvironment(
             name: "dryrun#\(nextOrdinal)", hostBindings: buildHostBindings(),
-            random: RandomStreamBoxAdapter(RandomX(0xD8A1_1D8A))
+            random: transientRandom
         )
         nextOrdinal += 1
         defer { env.destroy() }
@@ -821,24 +845,126 @@ public final class ScriptRuntime {
             : "local self, world, player, ev = ...\n" + source
         switch env.compile(source: wrapped, chunkName: "dryrun") {
         case .failure(let fault):
-            return fault.message
+            return .failure(fault.message)
         case .success(let fn):
-            let previous = currentScript
-            currentScript = (owner, "dryrun")
-            defer { currentScript = previous }
-            let args: [ScriptValue] = mode == .module
-                ? [handleValue(for: owner), handleValue(for: .world), handleValue(for: .player)]
-                : [
-                    handleValue(for: owner), handleValue(for: .world), handleValue(for: .player),
-                    .map(["kind": .string("dryrun"), "tick": .int(host.currentTick), "subject": handleValue(for: owner)]),
-                ]
-            do {
-                let outcome = try lua.call(fn, args: args, slice: budgets.handlerSliceInstructions)
-                if case .failure(let fault) = outcome { return fault.message }
-                return nil
-            } catch {
-                return "dry run failed to execute"
+            let selectedEvent = handlerEvent ?? EventKind.parse("dryrun") ?? .load
+            if mode == .handler, EventDescriptorRegistry.descriptor(for: selectedEvent) == nil {
+                return .compiledOnly(
+                    "custom event '\(selectedEvent.rawValue)' has no declared payload schema, so its handler was not executed"
+                )
             }
+            let previous = currentScript
+            let previousTransientRandom = transientExecutionRandom
+            currentScript = (owner, "dryrun")
+            transientExecutionRandom = transientRandom
+            defer {
+                transientExecutionRandom = previousTransientRandom
+                currentScript = previous
+            }
+            let args: [ScriptValue]
+            if mode == .module {
+                args = [handleValue(for: owner), handleValue(for: .world), handleValue(for: .player)]
+            } else {
+                // The editor and AI attach flow pass the handler's selected trigger. The custom
+                // fallback returned `compiledOnly` above, so only a registry-described event is
+                // ever executed with representative payload data.
+                let event = syntheticDryRunEvent(kind: selectedEvent, subject: owner)
+                args = [
+                    handleValue(for: owner), handleValue(for: .world), handleValue(for: .player),
+                    eventValue(event),
+                ]
+            }
+            do {
+                guard let coroutine = try lua.makeCoroutine(function: fn) else {
+                    return .failure("dry run failed to create a coroutine")
+                }
+                defer { try? lua.close(coroutine) }
+                switch try lua.resume(coroutine, args: args, slice: budgets.handlerSliceInstructions) {
+                case .completed:
+                    return .completed
+                case .yielded(.wait(_)):
+                    // Attached module/handler execution is yieldable. A first suspension proves
+                    // this prefix reached a legal boundary; never schedule the throwaway
+                    // coroutine or continue into a later tick from Check/dry-run.
+                    return .suspended("wait()")
+                case .yielded(.await(_)):
+                    return .suspended("ai.await()")
+                case .yielded(.preempted):
+                    return .failure("dry run reached its instruction slice without completing or yielding")
+                case .faulted(let fault):
+                    return .failure(fault.message)
+                }
+            } catch {
+                return .failure("dry run failed to execute")
+            }
+        }
+    }
+
+    /// Compatibility helper for existing validation callers: suspension is legal attached-script
+    /// behavior, while actual dry-run failures retain the historical optional-message shape.
+    public func dryRun(
+        source: String, owner: ObjectRef, mode: ScriptMode, handlerEvent: EventKind? = nil
+    ) -> String? {
+        if case .failure(let message) = dryRunOutcome(
+            source: source, owner: owner, mode: mode, handlerEvent: handlerEvent
+        ) {
+            return message
+        }
+        return nil
+    }
+
+    /// Builds the same event shape handler delivery uses, without enqueueing anything. Registry
+    /// order and fixed non-null values make this deterministic. Nullable fields intentionally use
+    /// one valid typed value so Check can exercise guarded and direct payload access without a
+    /// missing live event becoming a false runtime fault.
+    private func syntheticDryRunEvent(kind: EventKind, subject: ObjectRef) -> ScriptEvent {
+        var payload: [String: AttrValue] = [:]
+        if let descriptor = EventDescriptorRegistry.descriptor(for: kind) {
+            for field in descriptor.payload {
+                payload[field.name] = representativeDryRunValue(for: field, subject: subject)
+            }
+        }
+        return ScriptEvent(
+            seq: 0, tick: host.currentTick, kind: kind, subject: subject,
+            payload: payload, source: .engine
+        )
+    }
+
+    private func representativeDryRunValue(
+        for field: ScriptEventFieldDescriptor, subject: ObjectRef
+    ) -> AttrValue {
+        switch field.type {
+        case .any:
+            return .string("dryrun")
+        case .boolean:
+            return .bool(true)
+        case .integer:
+            return .int(1)
+        case .number:
+            return .number(1)
+        case .string:
+            return .string("dryrun")
+        case .function:
+            // Functions cannot cross the ScriptValue boundary. Event descriptors do not
+            // currently expose one; nil remains the only safe forward-compatible stand-in.
+            return .null
+        case .table, .map:
+            return .map([:])
+        case .objectHandle:
+            return handleValue(for: subject)
+        case .attributeProxy:
+            return attrsHandleValue(for: subject)
+        case .event:
+            return .map([
+                "kind": .string("dryrun"), "subject": handleValue(for: subject),
+                "tick": .int(host.currentTick), "source": .string("engine"),
+            ])
+        case .item:
+            return .map(["item": .string("dryrun"), "count": .int(1), "damage": .int(0)])
+        case .effectList, .list:
+            return .list([])
+        case .enumeration(let values):
+            return .string(values.first ?? "dryrun")
         }
     }
 

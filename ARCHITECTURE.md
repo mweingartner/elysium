@@ -190,7 +190,7 @@ No samples. `Audio.swift` is a synthesizer: each sound effect is a recipe that s
 
 ## Local AI agent
 
-The in-game `/ai` command is split across the app and core boundary on purpose. `Sources/Elysium/OllamaAgent.swift` is the only HTTP surface: it talks to the standard local Ollama port (`http://localhost:11434`) for model discovery, `/api/chat` tool calls, and the older `/api/generate` structured-output fallback. `Sources/ElysiumCore/Systems/AIAgent.swift` contains the deterministic, testable side: snapshot construction, skill catalog/schema metadata, natural-name resolution against the registered item/block/entity/effect registries, saved-template palette summaries, JSON/tool-call action parsing, and whitelisted execution. Model output is treated as untrusted data; it can choose only symbolic skills from `allAIAgentSkills`, including chat replies, registered inventory gives, cursor block placement/replacement/break/use, bounded cursor-region fills, dirt-rimmed hole filling, current-biome rework, time/weather/difficulty/gamerule changes, registered cursor mob spawning, nearby non-player entity removal, local player state changes, saved-template block replacement, and bounded generated-template creation. The model never supplies raw coordinate arrays for general mutation; block/world skills are cursor-, front-, current-biome-, nearby-radius-, or surface-targeted with fixed caps and loaded-height preflights. Terrain-leveling requests such as `/ai fill the hole in front of me with dirt` are handled deterministically before Ollama: the resolver searches in the player's horizontal view for a ground-level replaceable top cell adjacent to dirt-like terrain, flood-fills only the connected top opening, then fills each column downward to solid ground within fixed distance, radius, depth, and block-count caps. Biome rework requests such as `/ai change the current biome to rolling hills with rich resources` are also deterministic: the model can name only the `rolling_hills_resource_rich` profile, while the engine derives the loaded contiguous biome patch around the player, rewrites that patch's quart biome metadata to a meadow-like biome, blends natural columns into capped rolling hills through `World.setBlock`, preserves non-natural/block-entity columns, and enriches only existing natural underground stone/deepslate with registered ore blocks under fixed column/write caps. The biome rework action never accepts coordinates or raw block arrays and does not carve caves. Cursor placement uses `placeBlock`; cursor breaking uses `finishBreaking`; cursor use uses `useBlock`; selected food uses `consumeSelectedFoodNow`; global difficulty/gamerule changes route through `GameCore` callbacks so all dimensions and the save record stay aligned. Entity spawning is cursor-only, limited to registered `spawnableMobs()` names, requires a loaded in-height placement cell, and caps count before calling the normal spawn registry; entity removal is radius/count-capped, deterministic by distance/id, and never removes players. Template actions load and save through `SaveDB` closures, operate only on validated `ObjectTemplate` records, and never accept raw model-supplied coordinate arrays. Direct parsers handle unambiguous requests such as adding a stack of coal, filling a dirt-rimmed hole in front of the player, reworking the current loaded biome into rolling resource-rich hills, setting time/weather/difficulty, switching game mode, healing/eating, using or breaking the cursor block, teleporting to the surface, spawning named mobs at the cursor, changing all wood-family blocks in a named template to another block, or generating a named pirate-ship template before invoking Ollama.
+The in-game `/ai` command is split across the app and core boundary on purpose. `Sources/Elysium/OllamaAgent.swift` is the only HTTP surface: it talks to the standard local Ollama port (`http://127.0.0.1:11434`) for model discovery, `/api/chat` tool calls, and the older `/api/generate` structured-output fallback. `Sources/ElysiumCore/Systems/AIAgent.swift` contains the deterministic, testable side: snapshot construction, skill catalog/schema metadata, natural-name resolution against the registered item/block/entity/effect registries, saved-template palette summaries, JSON/tool-call action parsing, and whitelisted execution. Model output is treated as untrusted data; it can choose only symbolic skills from `allAIAgentSkills`, including chat replies, registered inventory gives, cursor block placement/replacement/break/use, bounded cursor-region fills, dirt-rimmed hole filling, current-biome rework, time/weather/difficulty/gamerule changes, registered cursor mob spawning, nearby non-player entity removal, local player state changes, saved-template block replacement, and bounded generated-template creation. The model never supplies raw coordinate arrays for general mutation; block/world skills are cursor-, front-, current-biome-, nearby-radius-, or surface-targeted with fixed caps and loaded-height preflights. Terrain-leveling requests such as `/ai fill the hole in front of me with dirt` are handled deterministically before Ollama: the resolver searches in the player's horizontal view for a ground-level replaceable top cell adjacent to dirt-like terrain, flood-fills only the connected top opening, then fills each column downward to solid ground within fixed distance, radius, depth, and block-count caps. Biome rework requests such as `/ai change the current biome to rolling hills with rich resources` are also deterministic: the model can name only the `rolling_hills_resource_rich` profile, while the engine derives the loaded contiguous biome patch around the player, rewrites that patch's quart biome metadata to a meadow-like biome, blends natural columns into capped rolling hills through `World.setBlock`, preserves non-natural/block-entity columns, and enriches only existing natural underground stone/deepslate with registered ore blocks under fixed column/write caps. The biome rework action never accepts coordinates or raw block arrays and does not carve caves. Cursor placement uses `placeBlock`; cursor breaking uses `finishBreaking`; cursor use uses `useBlock`; selected food uses `consumeSelectedFoodNow`; global difficulty/gamerule changes route through `GameCore` callbacks so all dimensions and the save record stay aligned. Entity spawning is cursor-only, limited to registered `spawnableMobs()` names, requires a loaded in-height placement cell, and caps count before calling the normal spawn registry; entity removal is radius/count-capped, deterministic by distance/id, and never removes players. Template actions load and save through `SaveDB` closures, operate only on validated `ObjectTemplate` records, and never accept raw model-supplied coordinate arrays. Direct parsers handle unambiguous requests such as adding a stack of coal, filling a dirt-rimmed hole in front of the player, reworking the current loaded biome into rolling resource-rich hills, setting time/weather/difficulty, switching game mode, healing/eating, using or breaking the cursor block, teleporting to the surface, spawning named mobs at the cursor, changing all wood-family blocks in a named template to another block, or generating a named pirate-ship template before invoking Ollama.
 
 ## LAN multiplayer
 
@@ -497,8 +497,10 @@ accepted but `sound`/`particles` are no-ops in 1c (not wired to the renderer/aud
 `/script run` and the AI's `run_script` tool share `ScriptRuntime.runEphemeral`: synchronous
 (`LuaState.call`, never yieldable — an attempted `wait`/`ai.await` correctly faults, matching §9.3's
 "no subscribe, no timers, no `ai.*`"), run once immediately rather than queued to "the next phase".
-`ScriptRuntime.dryRun` (change 2) is a sibling non-yieldable entry point used only by the AI tool
-loop's `attach_script` gate — see "AI object graph tool loop" below.
+`ScriptRuntime.dryRun` (change 2) is a sibling read-only entry point used by the AI tool loop's
+`attach_script` gate and the native editor's Check action. It resumes one throwaway coroutine: a
+completed prefix passes, a fault is reported, and a first legal `wait`/`ai.await` yield passes then
+closes without scheduling or contacting AI. See "AI object graph tool loop" below.
 
 **Kill switch and trust gate.** `scriptsEffectivelyEnabled(host:)` is the single predicate every
 phase step and verb consults: the persisted trust gate (`WorldRecord.scriptsEnabled`, already shipped
@@ -507,17 +509,12 @@ by 1a — `true` only for a world this install created, `false` for every import
 losslessly by `/script off|on` through the existing `GameCore.setGameRule` — no new mechanism).
 Either being off makes scripts behave as if none were attached, session-wide, immediately.
 
-**Commands and UI.** `ScriptingCommands` gained `/script list|show|attach|detach|run|trust|off|on`,
-host-only via the same `lanGatedCommands`/`CommandsM` choke point as `/attr`/`/on`. `/script edit
-[target] [name]` (app layer, `CommandsM.swift`) opens `ScreensM.swift`'s new `ScriptEditorScreen` — a
-paste-only, module-mode-only editor following `TemplateNameScreen`'s exact structure. Its one
-departure from every other screen's `pasteText` override: rather than routing into a focused
-`TextField` (whose `ElysiumBoundedTextBuffer` rejects `\n` outright), an unfocused paste captures the
-whole clipboard string as the pending source, validated by `ScriptTextHygiene`'s own stage-0 check
-(which *does* accept `\n`/`\t`) via a small `ScriptingDisplayText.isValidScriptSource` re-export —
-`Sources/Elysium` never imports `ElysiumScript` directly. Full multi-line editing, syntax colouring,
-handler-mode authoring from the UI, and the Object Inspector are phase 3's "full editor" (design.md
-§16 row 3).
+**Commands and UI.** `ScriptingCommands` provides `/script
+list|show|attach|detach|run|trust|off|on`; `/script edit [target] [name]` is an app-layer command in
+`CommandsM.swift`. The original change landed a paste-only canvas screen as a narrow bridge. It has
+since been replaced by `Sources/Elysium/ScriptEditorUI/`'s native editor described in **Native Lua
+editor and authoring intelligence** below. Both generations deliberately kept source validation in
+Core and never imported `ElysiumScript` into the application target.
 
 **Known gaps, all documented rather than silently absent:** `/script`'s `stats`/`log` subcommands are
 still unimplemented (`journal`/`undo-ai` shipped in change 2 — see below); the §7.4 "subject's own
@@ -529,7 +526,42 @@ closure repetition isn't implemented; the world-wide half of the `attach`/`detac
 source fresh on every delivery rather than caching a `ScriptFunction` (fine at v1 scale, worth
 revisiting for high-frequency events later).
 
-## In-game script editor, Inspector, and F3 summary
+## Native Lua editor and authoring intelligence
+
+The current `/script edit` surface is a detached native SwiftUI/AppKit window under
+`Sources/Elysium/ScriptEditorUI/`, not a game-canvas `Screen`. `ScriptEditorModel` is the
+main-actor orchestration boundary: it owns editor/document state and calls the same
+`ScriptStore`/`ScriptRuntime`/LAN intent executors as chat. `LuaCodeTextView` owns TextKit editing,
+UTF-16 selection/range conversion, undo, find, highlighting, member completion, inline proposal
+presentation, and the synchronized line gutter. SwiftUI views render immutable/published
+projections; they never query live game state from `body`.
+
+Authoring intelligence has two separate planes. The deterministic plane consumes
+`ScriptLanguageSchema`, `AttributeRegistry`, `EventDescriptorRegistry`, a small error-tolerant Lua
+scanner/parser, and an immutable `ObjectGraph` snapshot. It owns semantic tokens, receiver/type
+inference, factual completion, signature help, documentation, diagnostics, validated snippets, and
+the World Objects palette. The optional Ollama plane accepts a bounded document/caret/schema/
+diagnostics/authorized-object request and returns insertion text only. It receives no tool
+definitions or query/mutation context and cannot execute, Save, attach, emit, or otherwise change
+world state. Manual Option-Command-/ is the default; automatic idle requests require explicit
+opt-in, and all responses are revision/source-hash/caret/model/context bound and cancellable.
+
+The World Objects projection is captured on main from the same side-effect-free `ObjectGraph`,
+`AttributeStore`, and `ScriptStore` reads as scripting commands. Default discovery is radius 16,
+limit 32, with current target/player/world/dimension/cursor anchors plus nearby entities and blocks
+that already have object records. The UI filters and pins the immutable projection and inserts exact
+canonical refs; it never scans arbitrary terrain per keystroke or treats display names as identity.
+
+Dirty-document protection covers script switching, window close, and application termination. LAN guests still receive only
+replicated metadata, never existing source; a replacement is explicitly disclosed and is forwarded
+to the host, where the same validation/execution boundary remains authoritative. See
+`docs/LUA_EDITOR.md` for the complete interaction, accessibility, and verification contract.
+
+## Inspector, F3 summary, and historical canvas-editor implementation
+
+The first editor implementation notes below record the retired game-canvas surface. They are kept
+as change history; the native architecture immediately above is current. Inspector, F3, and LAN
+replication descriptions remain current unless a later paragraph says otherwise.
 
 scripting-ui-and-replication (change 3), design.md §12/§16 row 3. `Sources/Elysium/ScreensM.swift`'s
 `ScriptEditorScreen` (paste-only since script-runtime, change 1c) grows into a full multi-line editor.
@@ -662,7 +694,7 @@ command's own result text would be.
 `player:lan:<peerID>` ref, so `self` in a forwarded `/attr`/`/on` means "the guest issuing it," never
 the host's own player — `player` (the literal alias) still always resolves to `.player` regardless,
 so a trusted guest can still name the host's player object explicitly. `/script edit` (a pure local
-UI action — it only opens `ScriptEditorScreen`) is neither forwarded nor refused; it resolves its
+UI action — it only opens the native `ScriptEditorWindowController`) is neither forwarded nor refused; it resolves its
 target through the same guest-aware context so the editor opens against the right ref.
 
 **`canScript`/`canUseAI` grants.** A tenth `LANPeerPermissions` field, `canScript` (default `false`,
@@ -698,12 +730,12 @@ SC-1 guard).
 fail-closed to `[]` on anything malformed/oversized, mirrored by `LANMultiplayerManager
 .mirroredScripts(for:)` alongside the existing `.mirroredAttributes(for:)`. `InspectorScreen`'s guest
 branch (previously "not available to guests until LAN client parity") now lists this metadata;
-`ScriptEditorScreen`, in guest mode, reads only the same metadata to prefill mode/status (never
-source — re-editing an existing script starts from a blank body, with a status line explaining why),
-and Save/Run send a `scriptIntent` instead of calling `ScriptStore`/`ScriptRuntime` directly (which
-would refuse with `.lanClient` immediately anyway) — both close the screen optimistically, matching
-every other guest intent (block/attack/…); the actual accept/refuse surfaces a moment later as the
-chat receipt above.
+`ScriptEditorModel`, in guest mode, reads only the same metadata to prefill mode/status (never
+source — re-editing an existing script starts from a blank body, with a status line and destructive
+replacement warning), and Save/Run send a `scriptIntent` instead of calling
+`ScriptStore`/`ScriptRuntime` directly (which would refuse with `.lanClient` immediately anyway).
+The actual accept/refuse surfaces later as the chat receipt above; the native window remains open so
+the guest does not lose their local authoring draft.
 
 **`player:lan:*` persistence.** `LANPeerRecordSnapshot`/the internal `LANMultiplayerHostSession.Peer`
 gained `objectRecordText: String?` — `ObjectRecordCodec`-encoded (one document, attrs *and* scripts
@@ -829,7 +861,7 @@ events / `ai.await` resumptions — always at the fixed phase point, never mid-t
 network latency can never stall the simulation. `outboxHandoff` itself calls
 `OllamaAgentService.generateScriptReply` (text generation only, no tools, model/prompt capped exactly
 per §9.6/§8.4, 4 KiB prompt / 8 KiB reply), which is the only place beyond `runToolLoop` that ever
-touches `http://localhost:11434` — every network call in this whole subsystem still lives in the one
+touches `http://127.0.0.1:11434` — every network call in this whole subsystem still lives in the one
 file `scripts/security-scan.sh` allowlists. Budgets: `ScriptRuntime.aiBudgetAvailable()` refuses (not
 queues) a new `ai.ask`/`ai.await` past 2 concurrently in flight per world or 30/minute — the "per-tick
 pump budget" the design calls for is this cap, checked before a request is ever hooked up to the
@@ -874,5 +906,6 @@ tracked and nonignored-untracked regular file and is revalidated after every sta
 executable identity and SHA are retained through package creation, packaged AppKit verification,
 installation, and final path/hash/signature checks. Expected bundle identifier, CDHash, designated
 requirement, and resource sealing come from the validated package rather than the installed candidate.
-Pre-commit is staged MPD policy only; pre-push binds its full automated suite to one clean outgoing
-SHA equal to stable `HEAD` and its local ref. There is no persistent release state or post-commit hook.
+Pre-commit performs staged whitespace, conflict-marker, and secret checks; pre-push binds its full
+automated suite to one clean outgoing SHA equal to stable `HEAD` and its local ref. There is no
+persistent release state or post-commit hook.

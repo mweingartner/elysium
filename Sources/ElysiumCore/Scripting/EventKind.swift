@@ -9,10 +9,10 @@
 import Foundation
 
 /// A typed event kind: either one of the v1 catalog's fixed names or a
-/// custom, script/player-defined name (`"lumber.milestone"`). Grammar (own,
-/// slightly looser than `isValidAttributeName` to admit the catalog's own
-/// dotted names): one or more `[a-z][a-z0-9_]{0,31}` segments joined by `.`,
-/// ≤ 64 bytes total. Never traps; construction from untrusted text goes
+/// custom, script/player-defined name (`"lumber.milestone"`). Custom-name grammar is one or more
+/// `[a-z][a-z0-9_]{0,31}` segments joined by `.`, ≤ 64 bytes total. Ten frozen v1 catalog names
+/// predate that grammar and contain camel-case suffixes; `parse` accepts those exact ABI names but
+/// does not broaden the custom namespace. Never traps; construction from untrusted text goes
 /// through `EventKind.parse(_:)`, which returns `nil` on anything malformed.
 public struct EventKind: Hashable, Sendable, Codable, CustomStringConvertible {
     public let rawValue: String
@@ -34,6 +34,7 @@ public struct EventKind: Hashable, Sendable, Codable, CustomStringConvertible {
     /// `\"lumber.milestone\"`…").
     public static func parse(_ s: String) -> EventKind? {
         guard s.utf8.count <= 64, !s.isEmpty else { return nil }
+        if camelCaseCatalogNames.contains(s) { return EventKind(s) }
         let segments = s.split(separator: ".", omittingEmptySubsequences: false)
         guard segments.count >= 1, segments.count <= 4 else { return nil }
         for segment in segments {
@@ -48,6 +49,22 @@ public struct EventKind: Hashable, Sendable, Codable, CustomStringConvertible {
         }
         return EventKind(s)
     }
+
+    /// Frozen spellings emitted and persisted by the v1 engine. They are exact exceptions to the
+    /// lowercase custom-event grammar; accepting arbitrary uppercase custom names would silently
+    /// expand the script API and weaken typo detection.
+    private static let camelCaseCatalogNames: Set<String> = [
+        "block.neighborChanged",
+        "block.scheduledTick",
+        "entity.targetChanged",
+        "player.dimensionChanged",
+        "player.pickedUp",
+        "dim.dayPhaseChanged",
+        "dim.weatherChanged",
+        "world.gameruleChanged",
+        "world.difficultyChanged",
+        "script.overBudget",
+    ]
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
@@ -128,6 +145,7 @@ public struct EventKind: Hashable, Sendable, Codable, CustomStringConvertible {
     public static let aiReplied = EventKind("ai.replied")
 
     public static let scriptFaulted = EventKind("script.faulted")
+    public static let scriptAttached = EventKind("script.attached")
     /// Also raised by `EventBus` itself (§7.6: "excess is dropped
     /// deterministically with one `script.overBudget`") when a cap trips.
     public static let scriptOverBudget = EventKind("script.overBudget")

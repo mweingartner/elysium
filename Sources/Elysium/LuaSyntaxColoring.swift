@@ -14,7 +14,9 @@
 // small `LuaSyntaxLineState` across lines for constructs that span more than one (`--[[ ]]`
 // long comments, `[[ ]]`/`[=[ ]=]` long strings).
 
-enum LuaSyntaxSpanKind: Equatable {
+import Foundation
+
+enum LuaSyntaxSpanKind: Equatable, Sendable {
     case plain
     case keyword
     case string
@@ -25,6 +27,14 @@ enum LuaSyntaxSpanKind: Equatable {
 struct LuaSyntaxSpan: Equatable {
     let kind: LuaSyntaxSpanKind
     let range: Range<Int>
+}
+
+/// AppKit/TextKit ranges are UTF-16 offsets. `LuaSyntaxSpan` intentionally keeps the historical
+/// character-offset API used by the pure line lexer tests, while this is the only range shape the
+/// editor is allowed to apply to `NSTextStorage`.
+struct LuaSyntaxUTF16Span: Equatable, Sendable {
+    let kind: LuaSyntaxSpanKind
+    let range: NSRange
 }
 
 enum LuaSyntaxLineState: Equatable {
@@ -169,6 +179,33 @@ enum LuaSyntaxColoring {
             state = next
         }
         return out
+    }
+
+    /// Colors an entire source and converts every character range to the UTF-16 coordinate space
+    /// required by `NSTextView`. This prevents an emoji or other composed character in a string or
+    /// comment from shifting all colors and replacement ranges that follow it.
+    static func colorSource(_ source: String) -> [LuaSyntaxUTF16Span] {
+        let lines = source.components(separatedBy: "\n")
+        let coloredLines = colorLines(lines)
+        var lineStart = 0
+        var result: [LuaSyntaxUTF16Span] = []
+
+        for (lineIndex, line) in lines.enumerated() {
+            for span in coloredLines[lineIndex] {
+                guard
+                    let lower = line.index(line.startIndex, offsetBy: span.range.lowerBound, limitedBy: line.endIndex),
+                    let upper = line.index(line.startIndex, offsetBy: span.range.upperBound, limitedBy: line.endIndex)
+                else { continue }
+                let localRange = NSRange(lower..<upper, in: line)
+                result.append(LuaSyntaxUTF16Span(
+                    kind: span.kind,
+                    range: NSRange(location: lineStart + localRange.location, length: localRange.length)
+                ))
+            }
+            lineStart += (line as NSString).length
+            if lineIndex < lines.count - 1 { lineStart += 1 }
+        }
+        return result
     }
 
     private static func matchLongBracketOpen(_ chars: [Character], at index: Int) -> Int? {

@@ -378,6 +378,10 @@ public final class GameCore {
     /// re-entering the same world record cannot make an old activation current again.
     private var rpgWorldEntryGeneration: UInt64 = 0
     private var rpgWorldEntryGenerationExhausted = false
+    /// Monotonic identity for the currently entered world session. Editors capture this value so
+    /// an old draft can never save or run against a later session, even when reopening the same
+    /// world record.
+    public var worldSessionGeneration: UInt64 { rpgWorldEntryGeneration }
     private var rpgLocalPreferenceOperationID: UInt64 = 0
     private var rpgLocalPreferenceOperationExhausted = false
     private var rpgActiveLocalPreferenceOperationID: UInt64?
@@ -1237,6 +1241,7 @@ public final class GameCore {
 
     public func exitToTitle() {
         if inWorld {
+            NotificationCenter.default.post(name: .elysiumWorldSessionWillEnd, object: self)
             // event-bus (change 1b): `player.left` (design.md §7.2,
             // "exitToTitle"). Host-only, before any teardown so `self.player`/
             // `self.dim` are still the ones the event names.
@@ -2171,6 +2176,7 @@ public final class GameCore {
 
     private func enterWorld(_ rec: WorldRecord, _ playerData: [String: Any]?, _ adv: [String]?, transientLANClient: Bool = false) {
         if inWorld {
+            NotificationCenter.default.post(name: .elysiumWorldSessionWillEnd, object: self)
             let retiringWorldID = worldRec?.id
             let retiringWorldEntryGeneration = rpgWorldEntryGeneration
             _ = advanceRPGWorldEntryGeneration()
@@ -5769,4 +5775,9 @@ func wrapToInt32(_ d: Double) -> Int32 {
     let m = d.truncatingRemainder(dividingBy: 4294967296)
     let u = UInt32(truncatingIfNeeded: Int64(m))
     return Int32(bitPattern: u)
+}
+public extension Notification.Name {
+    /// Posted synchronously on the main thread before a live world session is torn down. Native
+    /// authoring windows use it to retain dirty drafts while severing every runtime mutation path.
+    static let elysiumWorldSessionWillEnd = Notification.Name("ElysiumWorldSessionWillEnd")
 }

@@ -331,19 +331,9 @@ public enum AIObjectGraphQueryTools {
 
     // MARK: - describe_events
 
-    private static let eventCatalog: [String] = [
-        "attribute.changed", "block.placed", "block.broken", "block.replaced", "block.changed", "block.used",
-        "block.neighborChanged", "block.scheduledTick", "entity.spawned", "entity.removed", "entity.damaged",
-        "entity.died", "entity.healed", "entity.interacted", "entity.targetChanged", "player.joined", "player.left",
-        "player.respawned", "player.dimensionChanged", "player.pickedUp", "player.dropped", "player.attacked",
-        "player.slept", "player.leveled", "player.advancement", "dim.dayPhaseChanged", "dim.weatherChanged",
-        "world.gameruleChanged", "world.difficultyChanged", "explosion", "load", "unload", "timer.fired",
-        "ai.replied", "script.faulted", "script.overBudget",
-    ]
-
     private static func describeEvents(_ args: AIToolArguments, _ context: AIQueryContext) -> AIToolOutcome {
         let prefix = args.string("kind")
-        let matches = eventCatalog.filter { prefix == nil || $0.hasPrefix(prefix!) }
+        let matches = EventDescriptorRegistry.names.filter { prefix == nil || $0.hasPrefix(prefix!) }
         var out = "{\"events\":["
         out += matches.map(jsonString).joined(separator: ",")
         out += "]}"

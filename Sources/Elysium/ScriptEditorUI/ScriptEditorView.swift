@@ -15,10 +15,14 @@ struct ScriptEditorView: View {
     @Environment(\.colorScheme) private var systemColorScheme
     @AppStorage("elysiumScriptEditorAIPanelOpen") private var aiPanelOpen = false
     @State private var theme: ScriptEditorTheme = ScriptEditorTheme.currentSystem()
+    @State private var problemsExpanded = false
+    @State private var showingGuestReplacementWarning = false
+    @State private var showingOverwriteWarning = false
+    @State private var pendingSaveCollision: ScriptEditorSaveCollision?
 
     var body: some View {
         HSplitView {
-            leftColumn
+            ScriptEditorSidebar(model: model)
                 .frame(minWidth: 200, idealWidth: 220, maxWidth: 300)
 
             editorColumn
@@ -32,26 +36,43 @@ struct ScriptEditorView: View {
         .frame(minWidth: 720, minHeight: 480)
         .environment(\.scriptEditorTheme, theme)
         .environment(\.colorScheme, theme.chromeColorScheme)
-        .onAppear { theme = ScriptEditorTheme.resolved(for: systemColorScheme) }
+        .onAppear {
+            theme = ScriptEditorTheme.resolved(for: systemColorScheme)
+            model.refreshAIConfiguration()
+        }
         .onChange(of: systemColorScheme) { _, newValue in theme = ScriptEditorTheme.resolved(for: newValue) }
         .background(theme.background.color)
-    }
-
-    // MARK: - left column: script list + palette
-
-    private var leftColumn: some View {
-        VStack(spacing: 0) {
-            ScriptListSidebar(model: model)
-            ScriptCommandPalette(model: model)
+        .alert("Replace source hidden by the host?", isPresented: $showingGuestReplacementWarning) {
+            SwiftUI.Button("Cancel", role: .cancel) { pendingSaveCollision = nil }
+            SwiftUI.Button("Send Full Replacement", role: .destructive) {
+                _ = model.save(confirming: pendingSaveCollision)
+                pendingSaveCollision = nil
+            }
+        } message: {
+            Text("The host does not reveal this script's existing source. Saving sends the complete text shown here as a replacement. Keep this draft until the host confirms it in chat.")
         }
-        .background(theme.panelBackground.color)
+        .alert("Replace an existing script?", isPresented: $showingOverwriteWarning) {
+            SwiftUI.Button("Cancel", role: .cancel) { pendingSaveCollision = nil }
+            SwiftUI.Button("Replace Script", role: .destructive) {
+                requestGuestConfirmationOrSave(confirming: pendingSaveCollision)
+            }
+        } message: {
+            Text((pendingSaveCollision?.description ?? "An existing script would be replaced.") + " This is destructive and cannot be undone from the editor after saving.")
+        }
     }
 
     // MARK: - center column: toolbar + editor + status banner
 
     private var editorColumn: some View {
         VStack(spacing: 0) {
-            toolbar
+            NativeScriptEditorToolbar(
+                model: model,
+                theme: theme,
+                aiPanelOpen: aiPanelOpen,
+                onSave: requestSave,
+                onToggleAI: { aiPanelOpen.toggle() }
+            )
+            .fixedSize(horizontal: false, vertical: true)
             Divider()
             LuaCodeTextView(
                 text: $model.source,
@@ -59,10 +80,25 @@ struct ScriptEditorView: View {
                 errorLine: model.errorLine,
                 targetKind: model.target.kind,
                 theme: theme,
+                targetApplicableBuiltInAttributes: model.languageEnvironment.targetApplicableBuiltInAttributes,
+                targetCustomAttributes: model.languageEnvironment.targetCustomAttributes,
+                objectReferences: model.languageEnvironment.objectReferences,
+                handlerEvent: model.languageEnvironment.handlerEvent,
+                isYieldable: model.languageEnvironment.isYieldable,
+                inlineSuggestion: model.inlineAISuggestion,
+                isRequestingAISuggestion: model.isRequestingAISuggestion,
+                externalEdit: model.externalEditorEdit,
+                documentIdentity: model.documentIdentity,
                 onTextChange: {
                     model.errorLine = nil
                     if model.statusIsError { model.status = nil }
-                }
+                },
+                onRequestAISuggestion: model.requestAISuggestion,
+                onAcceptAISuggestion: model.didAcceptAISuggestionInTextView,
+                onAcceptNextAISuggestionWord: model.acceptNextAIWord,
+                onAcceptNextAISuggestionLine: model.acceptNextAILine,
+                onDismissAISuggestion: model.dismissAISuggestion,
+                onAnalysisChange: model.updateLanguageAnalysis
             )
             .background(theme.background.color)
             .overlay(
@@ -70,82 +106,74 @@ struct ScriptEditorView: View {
             )
             .padding(theme.spacing)
 
+            languageStatusBar
+
+            if problemsExpanded, !model.editorDiagnostics.isEmpty {
+                Divider()
+                ScriptEditorProblemsView(
+                    diagnostics: model.editorDiagnostics,
+                    source: model.source,
+                    select: { model.selectedRange = $0.range },
+                    applyFix: model.applyQuickFix
+                )
+            }
+
             if let status = model.status {
                 statusBanner(status)
-            } else {
-                Text("\(model.sourceByteCount)/16384 bytes")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, theme.spacing)
-                    .padding(.bottom, theme.spacing)
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
 
-    private var isHandlerMode: Binding<Bool> {
-        Binding(get: { model.mode == .handler }, set: { model.mode = $0 ? .handler : .module })
-    }
-
-    private var toolbar: some View {
-        HStack(alignment: .center, spacing: theme.spacing) {
-            VStack(alignment: .leading, spacing: 1) {
-                SwiftUI.TextField("script name", text: $model.currentName)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13, weight: .semibold))
-                Text(model.isLANGuest ? "\(model.target.canonical) (guest)" : model.target.canonical)
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
+    private var languageStatusBar: some View {
+        HStack(spacing: 8) {
+            if let signature = model.signatureHelp {
+                Label(signature.label, systemImage: "function")
+                    .font(.caption.monospaced())
                     .lineLimit(1)
+                    .help("Active parameter \(signature.activeParameter + 1). \(signature.documentation)")
+            } else if model.isRequestingAISuggestion {
+                Label("Asking \(model.aiModelName)…", systemImage: "wand.and.sparkles")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let error = model.aiSuggestionError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+                    .help(error)
+            } else if model.inlineAISuggestion != nil {
+                Label("AI proposal from \(model.aiModelName) — Tab accepts, Escape dismisses", systemImage: "wand.and.sparkles")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Text("Lua 5.4.8 sandbox")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .frame(minWidth: 110, idealWidth: 160, maxWidth: 190, alignment: .leading)
-            .layoutPriority(0)
 
-            Picker("", selection: isHandlerMode) {
-                Text("module").tag(false)
-                Text("handler").tag(true)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 150)
+            Spacer(minLength: 8)
 
-            if model.mode == .handler {
-                SwiftUI.TextField("event name", text: $model.handlerEvent)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12))
-                    .frame(width: 170)
+            if !model.editorDiagnostics.isEmpty {
+                SwiftUI.Button {
+                    problemsExpanded.toggle()
+                } label: {
+                    Label(
+                        "\(model.editorDiagnostics.count) problem\(model.editorDiagnostics.count == 1 ? "" : "s")",
+                        systemImage: problemsExpanded ? "chevron.down.circle" : "exclamationmark.circle"
+                    )
+                }
+                .buttonStyle(.plain)
+                .help(problemsExpanded ? "Hide Lua problems" : "Show Lua problems")
             }
 
-            Spacer(minLength: theme.spacing)
-
-            HStack(spacing: 6) {
-                SwiftUI.Button("Check") { model.check() }
-                    .disabled(model.isLANGuest)
-                    .help(model.isLANGuest ? "Check is not available for guests yet" : "Compile and dry-run without persisting")
-                SwiftUI.Button("Run") { model.run() }
-                    .help("Run once, ephemeral — never saved")
-                SwiftUI.Button("Save") { model.save() }
-                    .keyboardShortcut("s", modifiers: .command)
-                    .buttonStyle(.borderedProminent)
-                    .help("Attach this script to \(model.target.canonical)")
-            }
-            // Never let the action buttons compress below their label width — the name field
-            // (layoutPriority 0) truncates first when the toolbar is tight.
-            .fixedSize()
-            .layoutPriority(1)
-
-            Divider().frame(height: 20)
-
-            SwiftUI.Button {
-                aiPanelOpen.toggle()
-            } label: {
-                Image(systemName: aiPanelOpen ? "sidebar.trailing" : "sidebar.leading")
-            }
-            .help(aiPanelOpen ? "Hide AI panel" : "Show AI panel")
-            .accessibilityLabel("Toggle AI panel")
+            Text("\(model.sourceByteCount)/16384 bytes")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(model.sourceByteCount > 16_384 ? theme.error.color : Color.secondary)
+                .accessibilityLabel("\(model.sourceByteCount) of 16384 source bytes")
         }
-        .padding(theme.spacing)
-        .background(theme.toolbarBackground.color)
+        .padding(.horizontal, theme.spacing)
+        .padding(.bottom, theme.spacing)
     }
 
     private func statusBanner(_ text: String) -> some View {
@@ -153,7 +181,7 @@ struct ScriptEditorView: View {
             Image(systemName: model.statusIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                 .foregroundColor(model.statusIsError ? theme.error.color : .green)
             Text(text)
-                .font(.system(size: 11))
+                .font(.caption)
                 .foregroundColor(model.statusIsError ? theme.error.color : .green)
                 .lineLimit(2)
             Spacer()
@@ -161,5 +189,24 @@ struct ScriptEditorView: View {
         .padding(.horizontal, theme.spacing)
         .padding(.vertical, 6)
         .background((model.statusIsError ? theme.error.color : Color.green).opacity(0.12))
+    }
+
+    private func requestSave() {
+        if let collision = model.saveCollision {
+            pendingSaveCollision = collision
+            showingOverwriteWarning = true
+            return
+        }
+        requestGuestConfirmationOrSave(confirming: nil)
+    }
+
+    private func requestGuestConfirmationOrSave(confirming collision: ScriptEditorSaveCollision?) {
+        if model.isLANGuest, !model.isNewScript {
+            pendingSaveCollision = collision
+            showingGuestReplacementWarning = true
+        } else {
+            _ = model.save(confirming: collision)
+            pendingSaveCollision = nil
+        }
     }
 }

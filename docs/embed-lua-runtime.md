@@ -1,5 +1,10 @@
 # Embed the Lua 5.4.8 Script Runtime (`CLua` + `ElysiumScript`)
 
+> **Historical change record:** this document describes the foundational runtime-only change and
+> its statement that no gameplay/UI existed was true for that change. The shipped scripting API is
+> now documented in `docs/SCRIPTING_GUIDE.md`; the current native authoring surface is documented in
+> `docs/LUA_EDITOR.md`.
+
 ## Purpose
 
 Elysium's scripting, events and AI object-graph programme

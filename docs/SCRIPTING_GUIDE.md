@@ -238,14 +238,35 @@ Sends `<request>` to the configured local Ollama model. §9 covers this in depth
 
 ## 6. The in-game script editor
 
-`/script edit [target] [name]` opens a full multi-line editor: type directly or paste (⌘V) up to
-16 KiB, with Lua syntax colouring, a name field, and a **module**/**handler** mode toggle (handler
-mode adds an event field). **Save** attaches it; **Run** runs it once, unsaved — both go through
-the exact same validator as the chat commands, highlighting a compile/syntax error on its own line.
-On a joined LAN world (once granted), reopening the editor on an existing script never shows its
-source — only your own scripts' text is ever sent to you — but Save still replaces whatever was
-there, sent to and executed by the host (`Sources/Elysium/ScreensM.swift`, `ScriptEditorScreen`,
-16 KiB cap at line 3273/4520).
+`/script edit [target] [name]` opens the native multi-line editor: type directly or paste (⌘V) up
+to 16 KiB, choose **module** or **handler** mode, and use **Save**, **Check**, or **Run**. Save
+attaches through `ScriptStore`; Check performs a mutation-free dry run; Run executes once without
+persisting. Run is synchronous, so the editor highlights `wait`/`ai.await` and directs you to Save
+the script for attached, yieldable execution. Check uses a throwaway coroutine and treats its first
+legal yield as a successful validation boundary without scheduling it or contacting AI. The runtime
+validator remains authoritative and reports the offending line. In handler mode, Check supplies the
+selected built-in event kind and deterministic, non-null representative values for its registry-
+documented payload fields. A valid custom event has no authoritative payload schema, so Check
+reports compile-only success and deliberately does not execute that handler.
+
+The editor's local language service adds semantic styling, receiver-correct completion and
+documentation, signature help, diagnostics, validated snippets, and a searchable **World Objects**
+browser. Typing `.` or `:` opens the member list immediately; Control-Space requests completion
+elsewhere. `self.attrs.` includes the current object's live custom attributes, while `objects.`,
+`ai.`, `ev.`, the sandbox libraries, and locally inferred Lua tables each receive their own factual
+members. These features never execute Lua and do not require Ollama.
+
+Ollama editor proposals are optional and separate from factual completion. **Manual** is the
+default: Option-Command-/ requests one insertion from the exact selected local model, Tab accepts,
+and Escape dismisses/cancels. **Off** prevents editor requests, while **On Idle** is an explicit
+opt-in that persists across application sessions. The editor provider is text-only and receives no world-mutation tools; Save/Check/Run are
+still required to validate or execute accepted text. See [`LUA_EDITOR.md`](LUA_EDITOR.md) for the
+complete UI, key, data-sharing, accessibility, and cancellation contract.
+
+Unsaved changes are protected when switching scripts, closing the window, or quitting Elysium. On a joined LAN world
+(once granted), reopening an existing script still never reveals its source: the name/mode are
+replicated, the body starts blank, and an explicit warning precedes a full replacement sent to and
+executed by the host.
 
 **One-line chat commands have a quoting gotcha worth knowing.** `/script attach`/`run`/`/on`'s
 `<source...>` is parsed by the *same* chat-line tokenizer as every other command argument
@@ -279,7 +300,7 @@ world.gameruleChanged  world.difficultyChanged
 explosion
 load  unload
 timer.fired  ai.replied
-script.faulted  script.overBudget
+script.faulted  script.attached  script.overBudget
 ```
 
 Custom names (`emit("lumber.milestone", ...)`) share the exact same grammar: 1-4 dot-separated

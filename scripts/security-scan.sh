@@ -230,7 +230,7 @@ fi
 
 URL_REFS="$(grep -RInE 'https?://' Sources || true)"
 UNAPPROVED_URL_REFS="$(printf '%s\n' "$URL_REFS" \
-    | grep -v '^Sources/Elysium/OllamaAgent.swift:.*http://localhost:11434' \
+    | grep -v '^Sources/Elysium/OllamaAgent.swift:.*http://127\.0\.0\.1:11434' \
     | grep -v '^Sources/CLua/include/lua.h:' || true)"
 if [ -n "$UNAPPROVED_URL_REFS" ]; then
     printf '%s\n' "$UNAPPROVED_URL_REFS"

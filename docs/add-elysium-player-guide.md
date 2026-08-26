@@ -1,5 +1,11 @@
 # Elysium Player Guide
 
+> **Historical delivery record.** This file preserves the evidence and document shape from the
+> original player-guide change; its mutable section/test counts are not the current release
+> contract. Use the root [`PLAYER_GUIDE.md`](../PLAYER_GUIDE.md) for current player guidance and
+> [`manual-installed-attestation.md`](manual-installed-attestation.md) for the current 491-check
+> release workflow.
+
 ## Purpose
 
 Provide one canonical, player-facing reference for Elysium's current beta instead of requiring players

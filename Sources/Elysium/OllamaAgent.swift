@@ -6,9 +6,69 @@ import Foundation
 import ElysiumCore
 
 let elysiumOllamaAgent = OllamaAgentService()
+let elysiumOllamaCodeCompletion = elysiumOllamaAgent.makeCodeCompletionService()
+
+/// Ollama requests carry source code and bounded world metadata. Even a loopback listener must
+/// not redirect that POST body to another origin, so production sessions reject every HTTP
+/// redirect and let the caller handle the original 3xx as an error.
+final class OllamaLoopbackSessionDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        _ = session
+        _ = task
+        _ = response
+        _ = request
+        completionHandler(nil)
+    }
+}
+
+enum OllamaBoundedResponseError: Error, Equatable {
+    case responseTooLarge
+}
+
+struct OllamaBoundedResponseBuffer {
+    private let maximumBytes: Int
+    private(set) var data = Data()
+
+    init(maximumBytes: Int, expectedContentLength: Int64 = -1) throws {
+        guard maximumBytes > 0,
+              expectedContentLength < 0 || expectedContentLength <= Int64(maximumBytes) else {
+            throw OllamaBoundedResponseError.responseTooLarge
+        }
+        self.maximumBytes = maximumBytes
+        if expectedContentLength > 0 {
+            data.reserveCapacity(Int(expectedContentLength))
+        }
+    }
+
+    mutating func append(_ byte: UInt8) throws {
+        guard data.count < maximumBytes else { throw OllamaBoundedResponseError.responseTooLarge }
+        data.append(byte)
+    }
+}
+
+private func boundedOllamaData(
+    session: URLSession, request: URLRequest, maximumBytes: Int
+) async throws -> (Data, URLResponse) {
+    let (bytes, response) = try await session.bytes(for: request)
+    var buffer = try OllamaBoundedResponseBuffer(
+        maximumBytes: maximumBytes,
+        expectedContentLength: response.expectedContentLength
+    )
+    for try await byte in bytes {
+        try Task.checkCancellation()
+        try buffer.append(byte)
+    }
+    return (buffer.data, response)
+}
 
 final class OllamaAgentService {
-    private let baseURL = URL(string: "http://localhost:11434")!
+    private let baseURL = URL(string: "http://127.0.0.1:11434")!
     private let session: URLSession
 
     // ai-object-graph (change 2), design.md §9.1: "one /ai in flight per
@@ -27,10 +87,40 @@ final class OllamaAgentService {
     private var scriptBrokerTasks: [UInt64: URLSessionDataTask] = [:]
 
     init(session: URLSession? = nil) {
-        let config = URLSessionConfiguration.default
+        if let session {
+            self.session = session
+        } else {
+            self.session = URLSession(
+                configuration: Self.loopbackSessionConfiguration(),
+                delegate: OllamaLoopbackSessionDelegate(),
+                delegateQueue: nil
+            )
+        }
+    }
+
+    /// Source-bearing Ollama requests must not inherit system proxy, cache, cookie, credential,
+    /// or persistent-session state. A numeric loopback endpoint plus this configuration and the
+    /// redirect-rejecting delegate keeps the production transport local and fail-closed.
+    static func loopbackSessionConfiguration() -> URLSessionConfiguration {
+        let config = URLSessionConfiguration.ephemeral
+        config.connectionProxyDictionary = [:]
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.urlCache = nil
+        config.httpCookieStorage = nil
+        config.httpShouldSetCookies = false
+        config.urlCredentialStorage = nil
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 45
-        self.session = session ?? URLSession(configuration: config)
+        return config
+    }
+
+    /// Creates the editor's independent, read-only proposal service over the reviewed localhost
+    /// transport. The completion service has no `GameCore`, tool definitions, or mutation context.
+    func makeCodeCompletionService() -> OllamaCodeCompletionService {
+        OllamaCodeCompletionService(
+            baseURL: baseURL,
+            transport: OllamaCodeCompletionURLSessionTransport(session: session)
+        )
     }
 
     func run(prompt userPrompt: String, game: GameCore) {
@@ -387,34 +477,22 @@ final class OllamaAgentService {
         scriptBrokerTasks.removeAll()
     }
 
-    func fetchModels(_ completion: @escaping (Result<[String], Error>) -> Void) {
+    func fetchModels() async throws -> [String] {
         let request = URLRequest(url: baseURL.appendingPathComponent("api/tags"), timeoutInterval: 8)
-        session.dataTask(with: request) { data, response, error in
-            if let error {
-                DispatchQueue.main.async { completion(.failure(error)) }
-                return
-            }
-            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                DispatchQueue.main.async { completion(.failure(OllamaAgentTransportError.http(http.statusCode))) }
-                return
-            }
-            guard let data else {
-                DispatchQueue.main.async { completion(.success([])) }
-                return
-            }
-            do {
-                let decoded = try JSONDecoder().decode(OllamaTagsResponse.self, from: data)
-                let names = decoded.models
-                    .filter { ($0.remoteHost ?? "").isEmpty }
-                    .map(\.name)
-                    .map(sanitizedOllamaModelName)
-                    .filter(isAllowedLocalOllamaModelName)
-                    .sorted()
-                DispatchQueue.main.async { completion(.success(names)) }
-            } catch {
-                DispatchQueue.main.async { completion(.failure(error)) }
-            }
-        }.resume()
+        let (data, response) = try await boundedOllamaData(
+            session: session, request: request, maximumBytes: 1_048_576
+        )
+        try Task.checkCancellation()
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw OllamaAgentTransportError.http(http.statusCode)
+        }
+        let decoded = try JSONDecoder().decode(OllamaTagsResponse.self, from: data)
+        return decoded.models
+            .filter { ($0.remoteHost ?? "").isEmpty }
+            .map(\.name)
+            .map(sanitizedOllamaModelName)
+            .filter(isAllowedLocalOllamaModelName)
+            .sorted()
     }
 
     private func requestAction(model: String, prompt: String,
@@ -625,6 +703,24 @@ final class OllamaAgentService {
             schema["maximum"] = maximum
         }
         return schema
+    }
+}
+
+/// The security scan intentionally permits network APIs only in this file and the LAN transports.
+/// Keeping this tiny adapter here lets the completion service remain fully injectable and
+/// network-free while preserving that fail-closed boundary.
+private struct OllamaCodeCompletionURLSessionTransport: OllamaCodeCompletionTransport {
+    let session: URLSession
+
+    func send(_ request: URLRequest) async throws -> OllamaCodeCompletionHTTPResponse {
+        let maximumBytes = request.url?.path.hasSuffix("/api/show") == true ? 1_048_576 : 262_144
+        let (data, response) = try await boundedOllamaData(
+            session: session, request: request, maximumBytes: maximumBytes
+        )
+        guard let http = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        return OllamaCodeCompletionHTTPResponse(statusCode: http.statusCode, body: data)
     }
 }
 

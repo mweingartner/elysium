@@ -34,7 +34,7 @@ struct AutoGrowingTextInput: NSViewRepresentable {
         textView.allowsUndo = true
         textView.drawsBackground = false
         textView.backgroundColor = .clear
-        textView.font = NSFont.systemFont(ofSize: 13)
+        textView.font = NSFont.preferredFont(forTextStyle: .body)
         textView.textColor = NSColor.labelColor
         textView.insertionPointColor = NSColor.labelColor
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -87,6 +87,14 @@ struct AutoGrowingTextInput: NSViewRepresentable {
         }
         if textView.isEditable != isEnabled {
             textView.isEditable = isEnabled
+        }
+        let preferredFont = NSFont.preferredFont(forTextStyle: .body)
+        if textView.font?.fontName != preferredFont.fontName ||
+            textView.font?.pointSize != preferredFont.pointSize {
+            textView.font = preferredFont
+            DispatchQueue.main.async {
+                context.coordinator.publishContentHeight()
+            }
         }
         textView.setAccessibilityIdentifier(accessibilityIdentifier)
         textView.setAccessibilityLabel(accessibilityLabel)

@@ -2173,7 +2173,13 @@ final class SettingsScreen: Screen {
                 let refreshCandidate = game.settings
                 let refreshExpectedRevision = game.settingsRevision
                 self.aiStatus = "Refreshing..."
-                elysiumOllamaAgent.fetchModels { [weak self, weak ui, weak game] result in
+                Task { @MainActor [weak self, weak ui, weak game] in
+                    let result: Result<[String], Error>
+                    do {
+                        result = .success(try await elysiumOllamaAgent.fetchModels())
+                    } catch {
+                        result = .failure(error)
+                    }
                     guard let self, let ui, let game else { return }
                     switch result {
                     case .success(let names):

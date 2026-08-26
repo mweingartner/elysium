@@ -75,18 +75,36 @@ artifact_sha256() {
 # manifests, ElysiumStorage.o/ElysiumTextInput.o and TEXT_INPUT source) is untouched and still
 # byte-identical: the checked-player getter/CAS declarations, caller counts, and approved-owner
 # set below all still hold — these edits are gameplay/UI only, never storage-reachable.
+#
+# lua-editor-2: EXPECTED_GAME_CORE_SOURCE_SHA256 renewed after GameCore gained only a read-only
+# world-session generation accessor plus synchronous pre-teardown notifications used to fence
+# native editor drafts. The checked-player getter/CAS declarations, both caller spans, counts, and
+# approved-owner set below remain unchanged. EXPECTED_CORE_OBJECT_SHA256 moves for those additions
+# and the scripting schema/runtime work in ElysiumCore; the Elysium and elysmoke product hashes
+# follow transitively. StorageEngine.swift, Saves.swift, both storage manifests,
+# ElysiumStorage.o, ElysiumTextInput.swift, and ElysiumTextInput.o remain byte-identical.
+#
+# lua-editor-native-toolbar: EXPECTED_ELYSIUM_PRODUCT_SHA256 renewed after the native AppKit
+# toolbar, completion-panel lifecycle, and injectable editor proposal boundary changed only the
+# Elysium application target. ElysiumCore.o, elysmoke, and every reviewed storage/text-input source
+# and object pin remain byte-identical.
+#
+# lua-editor-handler-check: EXPECTED_CORE_OBJECT_SHA256 renewed after dry-run Check began creating
+# registry-shaped synthetic events for known handler triggers; the Elysium and elysmoke products
+# follow transitively. This changes only scripting validation in ElysiumCore. GameCore.swift and
+# every reviewed storage/text-input source, manifest, and object pin remain byte-identical.
 EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
 EXPECTED_STORAGE_API_SHA256='ea1dd595ee28762bc2ff7c2e080c2fc4cee0eee008a30e52e82747029206f46c'
 EXPECTED_STORAGE_OBJECT_SHA256='33fb1578d8262a4044ba42ccb1fc7b67e8dfac2589133ab2ff415b5a5d71326b'
 EXPECTED_SAVES_SOURCE_SHA256='104564ee02dd009085cc5bf2f1d09fb6e893915283bef1cc09a3e5f7ab884dec'
-EXPECTED_GAME_CORE_SOURCE_SHA256='a767e1ab45ebf52614c290543aeddde401d7dc8ce5d39f5a06ba437b1de86569'
+EXPECTED_GAME_CORE_SOURCE_SHA256='ddc3cff991bd611386909d309514189887b923a969470a5cf6e8ed7cf2b82312'
 EXPECTED_PLAYER_SOURCE_SHA256='3f364dcd4ff040ed8dd0ef7e1eae25abad8de6780c2877a5228eda432df6b3c9'
 EXPECTED_CORE_CAPABILITY_SHA256='67dbb84929eeda6bea6acec70567a6b8c3711521ae2c1f93fdfc6a2e957b8118'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='ca500f11c671c45b6a0648962bed37881a9adff2a6491632e7d655a50ed80efc'
-EXPECTED_CORE_OBJECT_SHA256='89b6689b29a4450b341db9f70b975c0ea4827d3d5e0b56300d7c2b3d4dff5410'
-EXPECTED_ELYSIUM_PRODUCT_SHA256='43c0a16693855e7fba06399108c60b1f78a7108180b050fdb1034f4fca138957'
-EXPECTED_SMOKE_PRODUCT_SHA256='0507fb998ac3dae17f5edb027446830066c05bf64ad9b157e8e40989c90c6886'
+EXPECTED_CORE_OBJECT_SHA256='79d520435f9221c6462f360aaf9df1e6d3a7e48f731cb9414017c415f82e7be5'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='bf67591da69f4974fd6c37c3cfa90cf8ebdab7256194e929bb234fccab922f8a'
+EXPECTED_SMOKE_PRODUCT_SHA256='71fc4a0089a74e7b71f6bbc02b47ac1c7dc652c15dac4cce02e689a972a638e1'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

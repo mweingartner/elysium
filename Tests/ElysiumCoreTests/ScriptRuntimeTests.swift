@@ -23,6 +23,30 @@ final class ScriptRuntimeTests: XCTestCase {
         registerAllEntities()
     }
 
+    func testEventEnvelopeFieldsCannotBeSpoofedByPayload() throws {
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "script-event-envelope")
+        game.createWorld(name: "EventEnvelope", seedText: "29", mode: GameMode.creative, difficulty: 2)
+        let runtime = try XCTUnwrap(game.scriptingCommandContext().scriptRuntime)
+        let value = runtime.eventValue(ScriptEvent(
+            seq: 1,
+            tick: 42,
+            kind: .blockChanged,
+            subject: .world,
+            payload: [
+                "kind": .string("spoofed"),
+                "tick": .int(-1),
+                "subject": .string("spoofed"),
+                "source": .string("spoofed"),
+            ],
+            source: .player
+        ))
+        guard case .map(let event) = value else { return XCTFail("expected event map") }
+        XCTAssertEqual(event["kind"], .string(EventKind.blockChanged.rawValue))
+        XCTAssertEqual(event["tick"], .int(42))
+        XCTAssertEqual(event["source"], .string("player"))
+        XCTAssertEqual(event["subject"], .ref(ObjectRef.world.canonical))
+    }
+
     // MARK: - GameCore integration: a handler-mode script fires through a real tick()
 
     func testHandlerModeScriptFiresThroughRealGameCoreTick() throws {
@@ -267,6 +291,66 @@ final class ScriptRuntimeTests: XCTestCase {
 
     // MARK: - ScriptStore caps
 
+    func testEphemeralRunCannotLeaveLifecycleOrAIWorkBehind() throws {
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "ephemeral-capabilities")
+        game.createWorld(name: "Ephemeral", seedText: "41", mode: GameMode.creative, difficulty: 2)
+        let context = game.scriptingCommandContext()
+        let runtime = try XCTUnwrap(context.scriptRuntime)
+        let blocked: [(String, String)] = [
+            ("on(\"load\", function() end)", "on() is not available"),
+            ("subscribe(self, \"load\", function() end)", "subscribe() is not available"),
+            ("every(2, \"pulse\")", "timers are not available"),
+            ("register(\"pulse\", function() end)", "register() is not available"),
+            ("ai.ask(\"hello\")", "ai.ask() is not available"),
+            ("self:attach(\"child\", \"say('hi')\")", "attach() is not available"),
+        ]
+
+        for (source, expected) in blocked {
+            guard case .failure(let message) = runtime.runEphemeral(source: source, owner: .player) else {
+                return XCTFail("ephemeral run unexpectedly accepted: \(source)")
+            }
+            XCTAssertTrue(message.contains(expected), "\(source): \(message)")
+        }
+        XCTAssertNil(context.scriptStore.get(.player, "child"))
+        XCTAssertEqual(runtime.summary.suspendedCoroutines, 0)
+        XCTAssertEqual(runtime.summary.durableTimers, 0)
+    }
+
+    func testEphemeralRunAndDryRunUseTheirThrowawayRNGStreams() throws {
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "transient-rng")
+        game.createWorld(name: "Transient RNG", seedText: "43", mode: GameMode.creative, difficulty: 2)
+        let runtime = try XCTUnwrap(game.scriptingCommandContext().scriptRuntime)
+        let source = "local value = rng()\nassert(value >= 0 and value < 1)"
+
+        guard case .success = runtime.runEphemeral(source: source, owner: .player) else {
+            return XCTFail("ephemeral rng should use its throwaway stream")
+        }
+        XCTAssertEqual(
+            runtime.dryRunOutcome(source: source, owner: .player, mode: .module),
+            .completed
+        )
+    }
+
+    func testHandlerDryRunCompilesButDoesNotExecuteUnknownCustomEventPayloads() throws {
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "custom-event-dryrun")
+        game.createWorld(name: "Custom Event Dry Run", seedText: "47", mode: GameMode.creative, difficulty: 2)
+        let runtime = try XCTUnwrap(game.scriptingCommandContext().scriptRuntime)
+        let custom = try XCTUnwrap(EventKind.parse("quest.updated"))
+        let source = """
+        assert(ev.kind == "quest.updated")
+        assert(ev.quest ~= nil, "a real custom payload may provide this field")
+        """
+
+        let outcome = runtime.dryRunOutcome(
+            source: source, owner: .player, mode: .handler, handlerEvent: custom
+        )
+        guard case .compiledOnly(let reason) = outcome else {
+            return XCTFail("unknown custom payload should compile without speculative execution: \(outcome)")
+        }
+        XCTAssertTrue(reason.contains("quest.updated"))
+        XCTAssertTrue(reason.contains("payload schema"))
+    }
+
     func testScriptStoreEnforcesEightScriptCap() {
         let host = FakeObjectGraphHost()
         let world = World(dim: .overworld, seed: 1)
@@ -293,6 +377,34 @@ final class ScriptRuntimeTests: XCTestCase {
         let store = ScriptStore(graph: ObjectGraph(host: host))
         let result = store.attach(.world, name: "Bad Name!", source: "", mode: .module, triggers: [], by: .player, tick: 0)
         guard case .failure(.invalidName) = result else { return XCTFail("expected .invalidName, got \(result)") }
+    }
+
+    func testScriptStoreReattachPreservesDisabledStateUnlessExplicitlyChanged() throws {
+        let host = FakeObjectGraphHost()
+        let world = World(dim: .overworld, seed: 1)
+        let chunk = Chunk(cx: 0, cz: 0, minY: world.info.minY, height: world.info.height)
+        chunk.status = .generated
+        world.setChunk(chunk)
+        host.worldsByDim[.overworld] = world
+        let store = ScriptStore(graph: ObjectGraph(host: host))
+        _ = try store.attach(
+            .world, name: "guard", source: "return 1", mode: .module, triggers: [],
+            by: .player, tick: 1
+        ).get()
+        _ = try store.setEnabled(.world, "guard", false).get()
+
+        let edited = try store.attach(
+            .world, name: "guard", source: "return 2", mode: .module, triggers: [],
+            by: .player, tick: 2
+        ).get()
+        XCTAssertFalse(edited.enabled, "editing source must not silently enable a disabled script")
+        XCTAssertEqual(edited.createdTick, 1)
+
+        let explicitlyEnabled = try store.attach(
+            .world, name: "guard", source: "return 3", mode: .module, triggers: [],
+            enabled: true, by: .player, tick: 3
+        ).get()
+        XCTAssertTrue(explicitlyEnabled.enabled)
     }
 
     // MARK: - `summary` (F3 line, scripting-ui-and-replication change 3)

@@ -705,6 +705,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         }
         try? game.db.close()
     }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        scriptEditorController.shouldTerminateApplication() ? .terminateNow : .terminateCancel
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     private func updateWindowTitle() {
@@ -801,16 +804,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     }
 
     @objc func copyObjectTemplate(_ sender: Any?) {
+        if let textView = NSApp.keyWindow?.firstResponder as? NSTextView {
+            textView.copy(sender)
+            return
+        }
         _ = gameView.performObjectTemplateShortcut(.copyObject)
     }
 
     @objc func pasteOrPlaceTemplate(_ sender: Any?) {
+        if let textView = NSApp.keyWindow?.firstResponder as? NSTextView {
+            textView.paste(sender)
+            return
+        }
         if ui?.hasScreen() == true {
             pasteText(sender)
             return
         }
         if gameView.performObjectTemplateShortcut(.placeObject) { return }
         pasteText(sender)
+    }
+
+    /// Command-Z remains the world template undo chord while the game view owns focus, but native
+    /// editor/text-field focus receives the ordinary AppKit undo stack instead.
+    @objc func undoTextOrObjectPlacement(_ sender: Any?) {
+        if let textView = NSApp.keyWindow?.firstResponder as? NSTextView {
+            textView.undoManager?.undo()
+            return
+        }
+        _ = gameView.performObjectTemplateShortcut(.undoObjectPlacement)
+    }
+
+    @objc func redoText(_ sender: Any?) {
+        guard let textView = NSApp.keyWindow?.firstResponder as? NSTextView else { return }
+        textView.undoManager?.redo()
     }
 
     // MARK: - native SwiftUI script editor (Stage A)
@@ -836,6 +862,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     /// `ScriptEditorModel`); callers outside a `@MainActor` context use `elysiumMainActorSync`.
     @MainActor func editScripts(target: ObjectRef, existingName: String?, game: GameCore) {
         scriptEditorController.open(target: target, existingName: existingName, game: game)
+    }
+
+    /// Window-scoped route so Option-Command-/ works from metadata fields, sidebars, Problems,
+    /// and the AI panel as well as from the source NSTextView itself.
+    @objc @MainActor func requestActiveScriptEditorAISuggestion(_ sender: Any?) {
+        _ = sender
+        _ = scriptEditorController.requestAISuggestionInKeyWindow()
     }
 
     @MainActor private func revealLaunchWindowed() {
@@ -1184,8 +1217,8 @@ private func runOrdinaryElysiumApplication() {
     app.delegate = delegate
     app.setActivationPolicy(.regular)
 
-    // minimal main menu: Cmd-Q quits; Cmd-C/Cmd-V route object templates in
-    // world mode, while Cmd-V remains Paste for focused UI fields
+    // Cmd-C/Cmd-V retain the world object-template chords when the game owns focus, while native
+    // text responders receive the standard macOS editing commands.
     let mainMenu = NSMenu()
     let appItem = NSMenuItem()
     let appMenu = NSMenu()
@@ -1198,10 +1231,25 @@ private func runOrdinaryElysiumApplication() {
     mainMenu.addItem(appItem)
     let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
     let editMenu = NSMenu(title: "Edit")
-    editMenu.addItem(shippingMenuItem(commandID: "copyObjectTemplate", title: "Copy Object",
+    let undoItem = NSMenuItem(
+        title: "Undo", action: #selector(AppDelegate.undoTextOrObjectPlacement(_:)), keyEquivalent: "z")
+    undoItem.target = delegate
+    editMenu.addItem(undoItem)
+    let redoItem = NSMenuItem(title: "Redo", action: #selector(AppDelegate.redoText(_:)), keyEquivalent: "Z")
+    redoItem.keyEquivalentModifierMask = [.command, .shift]
+    redoItem.target = delegate
+    editMenu.addItem(redoItem)
+    editMenu.addItem(NSMenuItem.separator())
+    editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    editMenu.addItem(shippingMenuItem(commandID: "copyObjectTemplate", title: "Copy",
                                       action: #selector(AppDelegate.copyObjectTemplate(_:))))
     editMenu.addItem(shippingMenuItem(commandID: "placeObjectTemplate", title: "Paste",
                                       action: #selector(AppDelegate.pasteOrPlaceTemplate(_:))))
+    editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    editMenu.addItem(NSMenuItem.separator())
+    let findItem = editMenu.addItem(
+        withTitle: "Find…", action: #selector(NSTextView.performFindPanelAction(_:)), keyEquivalent: "f")
+    findItem.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
     editMenu.addItem(NSMenuItem.separator())
     // native SwiftUI script editor (Stage A): not in the `SHIPPING_MENU_COMMANDS` chord catalog
     // (`ElysiumCore/Game/InputChords.swift`, out of scope for this change) — built directly like
@@ -1213,6 +1261,15 @@ private func runOrdinaryElysiumApplication() {
         title: "Edit Scripts…", action: #selector(AppDelegate.editScriptsUnderCursor(_:)), keyEquivalent: "e")
     editScriptsItem.keyEquivalentModifierMask = [.command]
     editMenu.addItem(editScriptsItem)
+    let requestAISuggestionItem = NSMenuItem(
+        title: "Request AI Suggestion",
+        action: #selector(AppDelegate.requestActiveScriptEditorAISuggestion(_:)),
+        keyEquivalent: "/"
+    )
+    requestAISuggestionItem.keyEquivalentModifierMask = [.command, .option]
+    requestAISuggestionItem.target = delegate
+    requestAISuggestionItem.toolTip = "Ask the selected local Ollama model for one read-only editor proposal"
+    editMenu.addItem(requestAISuggestionItem)
     editItem.submenu = editMenu
     mainMenu.addItem(editItem)
     let winItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")

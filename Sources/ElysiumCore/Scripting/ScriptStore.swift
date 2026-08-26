@@ -83,11 +83,13 @@ public struct ScriptStore {
 
     /// Attaches (creates or re-attaches) a script. Re-attaching an existing
     /// name replaces its source/mode/triggers but keeps the original
-    /// `createdTick` (stable ordering across edits, §8.2 "editing a script
-    /// replaces the record and re-runs the lifecycle").
+    /// `createdTick` and enabled state (stable ordering and user intent across
+    /// edits, §8.2 "editing a script replaces the record and re-runs the
+    /// lifecycle"). Callers creating a record may explicitly choose its
+    /// initial enabled state; otherwise new records default to enabled.
     public func attach(
         _ ref: ObjectRef, name: String, source: String, mode: ScriptMode, triggers: [Trigger],
-        by author: Provenance.Author, tick: Int64
+        enabled requestedEnabled: Bool? = nil, by author: Provenance.Author, tick: Int64
     ) -> Result<ScriptRecord, ScriptStoreError> {
         if graph.host.isLANClient { return .failure(.lanClient) }
         guard case .live(let live) = graph.resolve(ref) else { return .failure(liveFailure(ref)) }
@@ -99,19 +101,22 @@ public struct ScriptStore {
         let existingScriptCount = record.entries.values.filter { if case .script = $0 { return true }; return false }.count
         let isNew: Bool
         let createdTick: Int64
+        let enabled: Bool
         if case .script(let existing)? = record.entries[name] {
             isNew = false
             createdTick = existing.createdTick
+            enabled = requestedEnabled ?? existing.enabled
         } else {
             isNew = true
             createdTick = tick
+            enabled = requestedEnabled ?? true
         }
         if isNew, existingScriptCount >= maxScriptsPerObject {
             return .failure(.tooManyScripts(limit: maxScriptsPerObject))
         }
         guard let newRevision = bumpedRevision(record.revision) else { return .failure(.revisionOverflow) }
         let newScript = ScriptRecord(
-            name: name, source: source, enabled: true, mode: mode, triggers: triggers,
+            name: name, source: source, enabled: enabled, mode: mode, triggers: triggers,
             author: author, createdTick: createdTick
         )
         var candidate = record

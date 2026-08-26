@@ -214,6 +214,7 @@ extension ScriptRuntime {
 
     func methodAttach(_ handle: HandleRef, _ call: HostCall) -> HostResult {
         guard let ctx = currentScript else { return .error("attach() outside script context") }
+        guard !ephemeralRunActive else { return .error("attach() is not available during ephemeral run") }
         guard call.arguments.count >= 2, case .value(.string(let name)) = call.arguments[0],
             case .value(.string(let source)) = call.arguments[1], let ref = ObjectRef.parse(handle.ref) else {
             return .error("attach(name, source[, opts])")
@@ -262,6 +263,7 @@ extension ScriptRuntime {
 
     func methodDetach(_ handle: HandleRef, _ call: HostCall) -> HostResult {
         guard let ctx = currentScript else { return .error("detach() outside script context") }
+        guard !ephemeralRunActive else { return .error("detach() is not available during ephemeral run") }
         guard case .value(.string(let name))? = call.arguments.first, let ref = ObjectRef.parse(handle.ref) else {
             return .error("detach(name)")
         }
@@ -344,6 +346,7 @@ extension ScriptRuntime {
 
     func hostOn(_ call: HostCall) -> HostResult {
         guard let ctx = currentScript else { return .error("on() outside script context") }
+        guard !ephemeralRunActive else { return .error("on() is not available during ephemeral run") }
         guard call.arguments.count >= 2, case .value(.string(let eventName)) = call.arguments[0] else {
             return .error("on(event[, opts], fn)")
         }
@@ -371,6 +374,7 @@ extension ScriptRuntime {
 
     func hostSubscribe(_ call: HostCall) -> HostResult {
         guard let ctx = currentScript else { return .error("subscribe() outside script context") }
+        guard !ephemeralRunActive else { return .error("subscribe() is not available during ephemeral run") }
         guard call.arguments.count >= 3, case .function(let fn)? = call.arguments.last else {
             return .error("subscribe(target, event[, opts], fn)")
         }
@@ -408,6 +412,7 @@ extension ScriptRuntime {
 
     private func scheduleTimer(_ call: HostCall, repeating: Bool) -> HostResult {
         guard let ctx = currentScript else { return .error("timer outside script context") }
+        guard !ephemeralRunActive else { return .error("timers are not available during ephemeral run") }
         guard call.arguments.count >= 2, let n = intArg(call.arguments[0]), n > 0 else {
             return .error("after/every(n, handler) requires a positive tick count")
         }
@@ -440,6 +445,7 @@ extension ScriptRuntime {
     }
 
     func hostWait(_ call: HostCall) -> HostResult {
+        guard !ephemeralRunActive else { return .error("wait() is not available during ephemeral run") }
         let n = call.arguments.first.flatMap(intArg) ?? 0
         return .yield([], .wait(max(0, n)))
     }
@@ -468,10 +474,17 @@ extension ScriptRuntime {
     }
 
     func hostRng(_ call: HostCall) -> HostResult {
-        guard let ctx = currentScript, let instance = instances[ctx.owner.canonical + "#" + ctx.name] else {
+        guard let ctx = currentScript else {
             return .error("rng() outside script context")
         }
-        let adapter = instance.randomAdapter
+        let adapter: RandomStreamBoxAdapter
+        if let transientExecutionRandom {
+            adapter = transientExecutionRandom
+        } else if let instance = instances[ctx.owner.canonical + "#" + ctx.name] {
+            adapter = instance.randomAdapter
+        } else {
+            return .error("rng() outside script context")
+        }
         func draw01() -> Double { Double(adapter.inner.next()) / 4_294_967_296.0 }
         switch call.arguments.count {
         case 0:
@@ -503,6 +516,7 @@ extension ScriptRuntime {
 
     func hostRegister(_ call: HostCall) -> HostResult {
         guard let ctx = currentScript else { return .error("register() outside script context") }
+        guard !ephemeralRunActive else { return .error("register() is not available during ephemeral run") }
         guard case .value(.string(let name))? = call.arguments.first, isValidAttributeName(name) else {
             return .error("register(name, fn)")
         }
@@ -634,6 +648,7 @@ extension ScriptRuntime {
     // MARK: - ai.ask / ai.await
 
     func hostAIAsk(_ call: HostCall) -> HostResult {
+        guard !ephemeralRunActive else { return .error("ai.ask() is not available during ephemeral run") }
         guard case .value(.string(let prompt))? = call.arguments.first, prompt.utf8.count <= 4_096 else {
             return .error("ai.ask(prompt[, opts])")
         }
@@ -655,10 +670,13 @@ extension ScriptRuntime {
     }
 
     func hostAIAwait(_ call: HostCall) -> HostResult {
+        guard !ephemeralRunActive else { return .error("ai.await() is not available during ephemeral run") }
         guard case .value(.string(let prompt))? = call.arguments.first, prompt.utf8.count <= 4_096 else {
             return .error("ai.await(prompt[, opts])")
         }
-        guard !dryRunActive else { return .error("ai is not available during validation") }
+        // Never contact AI from validation. Yield a synthetic token so dryRun can recognize the
+        // attached script's legal suspension point and close its throwaway coroutine immediately.
+        guard !dryRunActive else { return .yield([], .await(0)) }
         guard aiBudgetAvailable() else { return .values([.null, .string("budget")]) }
         let id = enqueueAIRequest(prompt: prompt)
         return .yield([], .await(id))

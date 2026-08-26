@@ -83,7 +83,7 @@ if [ -n "$NETWORK_SYMBOLS" ]; then
 fi
 
 URL_STRINGS="$(/usr/bin/strings "$BIN" | grep -Eo 'https?://[^[:space:]")<]+' | sort -u || true)"
-BAD_URL_STRINGS="$(printf '%s\n' "$URL_STRINGS" | grep -v '^http://localhost:11434' || true)"
+BAD_URL_STRINGS="$(printf '%s\n' "$URL_STRINGS" | grep -v '^http://127\.0\.0\.1:11434' || true)"
 if [ -n "$BAD_URL_STRINGS" ]; then
     printf '%s\n' "$BAD_URL_STRINGS"
     fail "unapproved URL string found"
@@ -103,7 +103,7 @@ if [ -n "$NETWORK_STRINGS" ]; then
 fi
 
 if /usr/bin/strings "$BIN" | grep -Ei 'URLSession' >/dev/null; then
-    if ! /usr/bin/strings "$BIN" | grep -F 'http://localhost:11434' >/dev/null; then
+    if ! /usr/bin/strings "$BIN" | grep -F 'http://127.0.0.1:11434' >/dev/null; then
         fail "URLSession string found without approved local Ollama endpoint"
     fi
 fi

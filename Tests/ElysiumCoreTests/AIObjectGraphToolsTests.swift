@@ -65,6 +65,19 @@ final class AIObjectGraphToolsTests: XCTestCase {
         XCTAssertEqual(outcome.stage, "args")
     }
 
+    func testDescribeEventsIsDerivedFromTheEventDescriptorRegistry() throws {
+        let game = makeGameWithWorld("ai-describe-events")
+        let outcome = AIObjectGraphQueryTools.run(
+            "describe_events", args: args(["kind": "script."]), context: game.aiQueryContext()
+        )
+
+        XCTAssertFalse(outcome.refused)
+        XCTAssertTrue(outcome.data?.contains("script.attached") == true)
+        for name in EventDescriptorRegistry.names where name.hasPrefix("script.") {
+            XCTAssertTrue(outcome.data?.contains(name) == true, "missing registry event \(name)")
+        }
+    }
+
     func testCheckScriptReportsCompileErrorWithRealRuntime() throws {
         let game = makeGameWithWorld("ai-check-script")
         let outcome = AIObjectGraphQueryTools.run("check_script", args: args(["source": "this is not lua("]), context: game.aiQueryContext())

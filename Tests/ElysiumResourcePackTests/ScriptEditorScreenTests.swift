@@ -112,13 +112,15 @@ final class ScriptEditorModelTests: XCTestCase {
         let source = "local n = 0\nfunction onLoad()\n  n = n + 1\nend"
         model.source = source
 
-        model.save()
+        let confirmed = model.save()
 
         let saved = try XCTUnwrap(game.scriptingCommandContext().scriptStore.get(.player, "greet"))
         XCTAssertEqual(saved.source, source, "the source must round-trip byte-exact through Save")
         XCTAssertEqual(saved.mode, .module)
         XCTAssertNil(model.errorLine)
         XCTAssertFalse(model.statusIsError)
+        XCTAssertTrue(confirmed)
+        XCTAssertFalse(model.isDirty)
         XCTAssertFalse(model.isNewScript, "Save must clear the 'authoring something new' flag")
     }
 
@@ -149,7 +151,7 @@ final class ScriptEditorModelTests: XCTestCase {
         model.currentName = "onload_handler"
         model.mode = .handler
         model.handlerEvent = "load"
-        model.source = "log('loaded')"
+        model.source = "say(\"loaded\")"
 
         model.save()
 
@@ -164,13 +166,248 @@ final class ScriptEditorModelTests: XCTestCase {
     func testRunEphemeralNeverPersistsAScript() throws {
         let game = try makeTrustedGame()
         let model = ScriptEditorModel(target: .player, game: game)
-        model.source = "log('hello from run')"
+        model.source = "say(\"hello from run\")"
 
         model.run()
 
         XCTAssertNil(model.errorLine)
         XCTAssertEqual(game.scriptingCommandContext().scriptStore.list(.player).count, 0,
                        "Run is ephemeral (§9.3) — it must never attach anything")
+    }
+
+    func testRunExplainsNonYieldableBoundaryBeforeExecuting() throws {
+        let game = try makeTrustedGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.source = "say(\"before\")\nwait(2)\nsay(\"after\")"
+
+        model.run()
+
+        XCTAssertTrue(model.statusIsError)
+        XCTAssertTrue(model.status?.contains("Run is immediate") == true)
+        XCTAssertTrue(model.status?.contains("Save the script") == true)
+        XCTAssertEqual(model.errorLine, 2)
+        XCTAssertEqual(model.selectedRange.location, ("say(\"before\")\n" as NSString).length)
+    }
+
+    func testRunDoesNotMistakeShadowedWaitOrAITableForEngineYieldCalls() throws {
+        let game = try makeTrustedGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.source = """
+        local wait = function() return 1 end
+        local ai = { await = function() return 2 end }
+        assert(wait() == 1)
+        assert(ai.await() == 2)
+        """
+
+        model.run()
+
+        XCTAssertFalse(model.statusIsError, model.status ?? "missing status")
+        XCTAssertTrue(model.status?.contains("ephemeral, not saved") == true)
+    }
+
+    func testCheckAcceptsAttachedYieldPointsWithoutSchedulingOrCallingAI() throws {
+        let game = try makeTrustedGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.source = "while true do wait(2) end"
+        let runtime = try XCTUnwrap(game.scriptingCommandContext().scriptRuntime)
+        let before = runtime.summary
+
+        model.check()
+
+        XCTAssertFalse(model.statusIsError, model.status ?? "missing status")
+        XCTAssertTrue(model.status?.contains("valid wait() suspension") == true)
+        XCTAssertTrue(model.status?.contains("code after that point was not executed") == true)
+        XCTAssertEqual(runtime.summary, before, "dry-run yield points must leave no suspended work")
+
+        model.source = "local reply, err = ai.await(\"explain\")\nif reply then say(reply) end"
+        model.check()
+        XCTAssertFalse(model.statusIsError, model.status ?? "missing status")
+        XCTAssertTrue(model.status?.contains("valid ai.await() suspension") == true)
+        XCTAssertEqual(runtime.summary, before, "dry-run ai.await must not enqueue or suspend real work")
+    }
+
+    func testHandlerCheckUsesSelectedEventKindAndRegistryPayloadWithoutPersisting() throws {
+        let game = try makeTrustedGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.mode = .handler
+        model.handlerEvent = "entity.damaged"
+        model.source = """
+        assert(ev.kind == "entity.damaged", "selected event kind was not supplied")
+        assert(type(ev.amount) == "number" and ev.amount > 0, "documented amount payload is missing")
+        assert(ev.attacker ~= nil and ev.attacker:exists(), "nullable attacker should have a safe typed representative")
+        assert(ev.subject == self, "common subject should be the checked owner")
+        assert(ev.source == "engine", "synthetic event provenance should be explicit")
+        assert(type(ev.tick) == "number", "common tick should be present")
+        """
+        let runtime = try XCTUnwrap(game.scriptingCommandContext().scriptRuntime)
+        let before = runtime.summary
+
+        model.check()
+
+        XCTAssertFalse(model.statusIsError, model.status ?? "missing status")
+        XCTAssertEqual(model.status, "Check passed — no issues found.")
+        XCTAssertEqual(runtime.summary, before)
+        XCTAssertTrue(game.scriptingCommandContext().scriptStore.list(.player).isEmpty,
+                      "Check must not attach the handler it executes")
+    }
+
+    func testNewScriptCannotReplaceExistingNameWithoutExplicitConfirmation() throws {
+        let game = try makeTrustedGame()
+        let context = game.scriptingCommandContext()
+        let model = ScriptEditorModel(target: .player, game: game)
+        _ = try context.scriptStore.attach(
+            .player, name: "existing", source: "say(\"old\")", mode: .module,
+            triggers: [], by: .player, tick: context.tick
+        ).get()
+        model.currentName = "existing"
+        model.source = "say(\"new\")"
+
+        XCTAssertTrue(model.saveRequiresOverwriteConfirmation)
+        let collision = try XCTUnwrap(model.saveCollision)
+        XCTAssertFalse(model.save())
+        XCTAssertEqual(context.scriptStore.get(.player, "existing")?.source, "say(\"old\")")
+        XCTAssertTrue(model.status?.contains("Confirm replacement") == true)
+
+        XCTAssertTrue(model.save(confirming: collision))
+        XCTAssertEqual(context.scriptStore.get(.player, "existing")?.source, "say(\"new\")")
+    }
+
+    func testSameNameExternalEditRequiresExplicitReplacement() throws {
+        let game = try makeTrustedGame()
+        let context = game.scriptingCommandContext()
+        _ = try context.scriptStore.attach(
+            .player, name: "shared", source: "say(\"initial\")", mode: .module,
+            triggers: [], by: .player, tick: context.tick
+        ).get()
+        let model = ScriptEditorModel(target: .player, game: game, existingName: "shared")
+        _ = try context.scriptStore.attach(
+            .player, name: "shared", source: "say(\"external\")", mode: .module,
+            triggers: [], by: .player, tick: context.tick + 1
+        ).get()
+        model.source = "say(\"local\")"
+
+        XCTAssertTrue(model.saveRequiresOverwriteConfirmation)
+        let collision = try XCTUnwrap(model.saveCollision)
+        XCTAssertFalse(model.save())
+        XCTAssertEqual(context.scriptStore.get(.player, "shared")?.source, "say(\"external\")")
+
+        XCTAssertTrue(model.save(confirming: collision))
+        XCTAssertEqual(context.scriptStore.get(.player, "shared")?.source, "say(\"local\")")
+    }
+
+    func testSourceSavePreservesDisabledStateAndAllExistingTriggerMetadata() throws {
+        let game = try makeTrustedGame()
+        let context = game.scriptingCommandContext()
+        let originalTriggers = [
+            Trigger(event: .attributeChanged, attribute: "health", target: .object(.player)),
+            Trigger(event: .playerAttacked, attribute: nil, target: .any),
+        ]
+        _ = try context.scriptStore.attach(
+            .player, name: "guard", source: "say(\"initial\")", mode: .handler,
+            triggers: originalTriggers, by: .player, tick: context.tick
+        ).get()
+        _ = try context.scriptStore.setEnabled(.player, "guard", false).get()
+        let model = ScriptEditorModel(target: .player, game: game, existingName: "guard")
+        model.source = "say(\"edited\")"
+
+        XCTAssertTrue(model.save())
+        let saved = try XCTUnwrap(context.scriptStore.get(.player, "guard"))
+        XCTAssertFalse(saved.enabled, "source editing must never enable a disabled script")
+        XCTAssertEqual(saved.triggers, originalTriggers, "filters, targets, and secondary triggers must round-trip")
+    }
+
+    func testExternallyDeletedLoadedScriptRequiresExplicitRecreateConfirmation() throws {
+        let game = try makeTrustedGame()
+        let context = game.scriptingCommandContext()
+        _ = try context.scriptStore.attach(
+            .player, name: "draft", source: "say(\"initial\")", mode: .module,
+            triggers: [], enabled: false, by: .player, tick: context.tick
+        ).get()
+        let model = ScriptEditorModel(target: .player, game: game, existingName: "draft")
+        _ = try context.scriptStore.detach(.player, "draft").get()
+        model.source = "say(\"recreated\")"
+
+        XCTAssertTrue(model.saveRequiresOverwriteConfirmation)
+        let collision = try XCTUnwrap(model.saveCollision)
+        XCTAssertFalse(model.save())
+        XCTAssertNil(context.scriptStore.get(.player, "draft"))
+
+        XCTAssertTrue(model.save(confirming: collision))
+        let recreated = try XCTUnwrap(context.scriptStore.get(.player, "draft"))
+        XCTAssertEqual(recreated.source, "say(\"recreated\")")
+        XCTAssertFalse(recreated.enabled, "explicit recreation retains the loaded document's disabled state")
+    }
+
+    func testRenameCannotReplaceAnotherScriptWithoutExplicitConfirmation() throws {
+        let game = try makeTrustedGame()
+        let context = game.scriptingCommandContext()
+        _ = try context.scriptStore.attach(
+            .player, name: "alpha", source: "say(\"alpha\")", mode: .module,
+            triggers: [], by: .player, tick: context.tick
+        ).get()
+        _ = try context.scriptStore.attach(
+            .player, name: "beta", source: "say(\"beta\")", mode: .module,
+            triggers: [], by: .player, tick: context.tick
+        ).get()
+        let model = ScriptEditorModel(target: .player, game: game, existingName: "alpha")
+        model.currentName = "beta"
+        model.source = "say(\"replacement\")"
+
+        let collision = try XCTUnwrap(model.saveCollision)
+        XCTAssertFalse(model.save())
+        XCTAssertEqual(context.scriptStore.get(.player, "alpha")?.source, "say(\"alpha\")")
+        XCTAssertEqual(context.scriptStore.get(.player, "beta")?.source, "say(\"beta\")")
+
+        XCTAssertTrue(model.save(confirming: collision))
+        XCTAssertEqual(context.scriptStore.get(.player, "alpha")?.source, "say(\"alpha\")")
+        XCTAssertEqual(context.scriptStore.get(.player, "beta")?.source, "say(\"replacement\")")
+    }
+
+    func testCollisionConfirmationCannotOverwriteARecordThatChangesWhileModalIsOpen() throws {
+        let game = try makeTrustedGame()
+        let context = game.scriptingCommandContext()
+        _ = try context.scriptStore.attach(
+            .player, name: "shared", source: "say(\"initial\")", mode: .module,
+            triggers: [], by: .player, tick: context.tick
+        ).get()
+        let model = ScriptEditorModel(target: .player, game: game, existingName: "shared")
+        _ = try context.scriptStore.attach(
+            .player, name: "shared", source: "say(\"collision-a\")", mode: .module,
+            triggers: [], by: .player, tick: context.tick + 1
+        ).get()
+        model.source = "say(\"local\")"
+        let collisionA = try XCTUnwrap(model.saveCollision)
+
+        _ = try context.scriptStore.attach(
+            .player, name: "shared", source: "say(\"collision-b\")", mode: .module,
+            triggers: [], by: .player, tick: context.tick + 2
+        ).get()
+
+        XCTAssertFalse(model.save(confirming: collisionA))
+        XCTAssertEqual(context.scriptStore.get(.player, "shared")?.source, "say(\"collision-b\")")
+        XCTAssertTrue(model.status?.contains("changed again") == true)
+        XCTAssertNotEqual(model.saveCollision, collisionA)
+    }
+
+    func testEndedWorldDraftCannotRunOrSaveIntoLaterWorldSession() throws {
+        let game = try makeTrustedGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.currentName = "retained_draft"
+        model.source = "say(\"old world\")"
+        XCTAssertTrue(model.isDirty)
+
+        game.exitToTitle()
+        XCTAssertFalse(model.isWorldSessionActive)
+        XCTAssertTrue(model.isDirty, "world exit must retain the unsaved source")
+
+        game.createWorld(
+            name: "Later World \(UUID().uuidString)", seedText: "91",
+            mode: GameMode.creative, difficulty: 2
+        )
+        XCTAssertFalse(model.save())
+        model.run()
+        XCTAssertNil(game.scriptingCommandContext().scriptStore.get(.player, "retained_draft"))
+        XCTAssertTrue(model.status?.contains("world session") == true || model.status?.contains("World session") == true)
     }
 
     // MARK: - host: switching between scripts on the target reloads source/mode
@@ -208,6 +445,126 @@ final class ScriptEditorModelTests: XCTestCase {
         XCTAssertEqual(model.selectedRange.location, 12 + ("-- inserted\n" as NSString).length)
     }
 
+    // MARK: - schema-backed palette conformance
+
+    func testEveryPaletteSnippetValidatesInsideTheRuntimeWrapperForItsOwnerKind() throws {
+        let game = try makeTrustedGame()
+        let runtime = try XCTUnwrap(game.scriptingCommandContext().scriptRuntime)
+
+        for kind in ObjectKind.allCases {
+            let categories = ScriptPalette.categories(for: kind)
+            let items = categories.flatMap(\.items)
+            XCTAssertFalse(items.isEmpty, "expected snippets for \(kind.rawValue)")
+            XCTAssertEqual(Set(items.map(\.id)).count, items.count, "snippet ids must remain stable and unique")
+            for item in items {
+                let wrapped = "local self, world, player, ev = ...\n" + item.code
+                switch runtime.validateSourceForEditor(wrapped, chunkName: item.id).outcome {
+                case .accepted:
+                    break
+                case .refused(let stage, let message, let hint, let line):
+                    XCTFail("\(kind.rawValue)/\(item.id) refused at stage \(stage), line \(line): \(message) — \(hint)")
+                }
+            }
+        }
+    }
+
+    func testPaletteUsesShippedSignaturesInsteadOfHistoricalInvalidExamples() {
+        let source = ObjectKind.allCases
+            .flatMap { ScriptPalette.categories(for: $0) }
+            .flatMap(\.items)
+            .map(\.code)
+            .joined(separator: "\n")
+
+        XCTAssertFalse(source.contains("function(self, world, player, ev)"))
+        XCTAssertFalse(source.contains("emit(self,"))
+        XCTAssertFalse(source.contains("self:attach(\"name\", \"module\""))
+        XCTAssertFalse(source.contains("self:setBlock(x"))
+        XCTAssertFalse(source.contains("self:breakBlock(x"))
+        XCTAssertFalse(source.contains("objects.find(\"entity\")"))
+        XCTAssertFalse(source.contains("objects.block(x"))
+        XCTAssertFalse(source.contains("log("))
+        XCTAssertTrue(source.contains("every(20, \"on_interval\")"))
+
+        let playerObjectCode = ScriptPalette.categories(for: .player)
+            .first(where: { $0.title == "Objects" })?.items.map(\.code) ?? []
+        let blockObjectCode = ScriptPalette.categories(for: .block)
+            .first(where: { $0.title == "Objects" })?.items.map(\.code) ?? []
+        XCTAssertFalse(playerObjectCode.contains("self:setBlock(\"stone\")"))
+        XCTAssertFalse(playerObjectCode.contains("self:breakBlock()"))
+        XCTAssertTrue(blockObjectCode.contains("self:setBlock(\"stone\")"))
+        XCTAssertTrue(blockObjectCode.contains("self:breakBlock()"))
+    }
+
+    func testEditorAIModesKeepManualAndOffQuietAndDebounceOnIdle() async throws {
+        let defaults = UserDefaults.standard
+        let previousMode = defaults.object(forKey: ScriptEditorAICompletionMode.defaultsKey)
+        defaults.set(ScriptEditorAICompletionMode.manual.rawValue,
+                     forKey: ScriptEditorAICompletionMode.defaultsKey)
+        defer {
+            if let previousMode {
+                defaults.set(previousMode, forKey: ScriptEditorAICompletionMode.defaultsKey)
+            } else {
+                defaults.removeObject(forKey: ScriptEditorAICompletionMode.defaultsKey)
+            }
+        }
+
+        let game = try makeTrustedGame()
+        let completer = RecordingScriptEditorAICompleter()
+        let model = ScriptEditorModel(target: .player, game: game, aiCompleter: completer)
+
+        model.source = "local manual = true"
+        model.selectedRange = NSRange(location: (model.source as NSString).length, length: 0)
+        try await ContinuousClock().sleep(for: .milliseconds(750))
+        var requests = await completer.recordedRequests()
+        XCTAssertTrue(requests.isEmpty, "Manual must never contact Ollama merely because source changed")
+
+        model.requestAISuggestion()
+        try await waitForEditorAIRequestCount(1, from: completer)
+        requests = await completer.recordedRequests()
+        XCTAssertEqual(requests.count, 1, "an explicit Manual request should contact the selected completer once")
+        XCTAssertEqual(requests[0].identity.model, game.settings.aiOllamaModel)
+        model.dismissAISuggestion()
+
+        model.setAICompletionMode(.off)
+        model.source = "local disabled = true"
+        model.selectedRange = NSRange(location: (model.source as NSString).length, length: 0)
+        model.requestAISuggestion()
+        try await ContinuousClock().sleep(for: .milliseconds(750))
+        requests = await completer.recordedRequests()
+        XCTAssertEqual(requests.count, 1, "Off must block both idle and explicit editor requests")
+        XCTAssertTrue(model.aiSuggestionError?.contains("Off") == true)
+
+        model.setAICompletionMode(.onIdle)
+        model.source = "local first = 1"
+        model.selectedRange = NSRange(location: (model.source as NSString).length, length: 0)
+        try await ContinuousClock().sleep(for: .milliseconds(200))
+        model.source = "local final = 2"
+        model.selectedRange = NSRange(location: (model.source as NSString).length, length: 0)
+        try await waitForEditorAIRequestCount(2, from: completer, timeout: .seconds(2))
+
+        requests = await completer.recordedRequests()
+        XCTAssertEqual(requests.count, 2, "continued typing must cancel earlier idle work")
+        let finalRequest = try XCTUnwrap(requests.last)
+        XCTAssertEqual(
+            finalRequest.prefix + finalRequest.selectedText + finalRequest.suffix,
+            "local final = 2"
+        )
+    }
+
+    private func waitForEditorAIRequestCount(
+        _ expected: Int,
+        from completer: RecordingScriptEditorAICompleter,
+        timeout: Duration = .seconds(1)
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if await completer.recordedRequests().count >= expected { return }
+            try await clock.sleep(for: .milliseconds(20))
+        }
+        XCTFail("Timed out waiting for \(expected) editor AI request(s)")
+    }
+
     // MARK: - lan-client-parity: guest mode
 
     /// design.md §11 phase 4: Save on a guest never calls `ScriptStore.attach` directly (it would
@@ -218,14 +575,16 @@ final class ScriptEditorModelTests: XCTestCase {
         let game = try makeLANClientGame()
         let model = ScriptEditorModel(target: .player, game: game)
         model.currentName = "greet"
-        model.source = "log('hi')"
+        model.source = "say(\"hi\")"
 
         chatLog.removeAll()
-        model.save()
+        let confirmed = model.save()
 
         XCTAssertTrue(model.status?.contains("sent") == true && model.status?.contains("host") == true,
                       "expected a 'sent ... to the host' status; got: \(model.status ?? "nil")")
         XCTAssertFalse(model.statusIsError)
+        XCTAssertFalse(confirmed, "a queued guest intent is not a confirmed save")
+        XCTAssertTrue(model.isDirty, "the only guest-side source copy must remain protected until confirmation")
         // Never attached anything through the guest's own (inert) executor.
         XCTAssertEqual(game.scriptingCommandContext().scriptStore.list(.player).count, 0)
     }
@@ -268,6 +627,24 @@ final class ScriptEditorModelTests: XCTestCase {
     }
 }
 
+private actor RecordingScriptEditorAICompleter: ScriptEditorAICompleting {
+    private var requests: [OllamaCodeCompletionRequest] = []
+
+    func completeEditorRequest(
+        _ request: OllamaCodeCompletionRequest
+    ) async throws -> OllamaCodeCompletionResponse {
+        requests.append(request)
+        return OllamaCodeCompletionResponse(
+            identity: request.identity,
+            insertion: " -- suggested",
+            strategy: .safePrompt,
+            modelHints: nil
+        )
+    }
+
+    func recordedRequests() -> [OllamaCodeCompletionRequest] { requests }
+}
+
 @MainActor
 final class InspectorDataProviderTests: XCTestCase {
     override class func setUp() {
@@ -290,7 +667,7 @@ final class InspectorDataProviderTests: XCTestCase {
         let context = game.scriptingCommandContext()
         XCTAssertEqual(context.store.set(.player, "mood", .string("focused")), .success(.string("focused")))
         guard case .success = context.scriptStore.attach(
-            .player, name: "greet", source: "log('hi')", mode: .module, triggers: [], by: .player, tick: 0
+            .player, name: "greet", source: "say(\"hi\")", mode: .module, triggers: [], by: .player, tick: 0
         ) else {
             return XCTFail("expected attach to succeed")
         }

@@ -6,12 +6,12 @@ Replace Elysium's interactive installed-signoff receipt, screenshot, Observer, D
 
 ## Value
 
-The workflow removes repetitive manual ceremony while preserving the checks that establish practical release readiness: security scanning, a warning-free release build, release-surface validation, XCTest, the 457-check golden contract, packaged AppKit text entry, installation, executable identity, and strict codesign verification.
+The workflow removes repetitive manual ceremony while preserving the checks that establish practical release readiness: security scanning, a warning-free release build, release-surface validation, XCTest, the 491-check golden contract, packaged AppKit text entry, installation, executable identity, and strict codesign verification.
 
 ## Scope
 
 - `bash scripts/pipeline.sh` is the authoritative zero-argument local release pipeline.
-- `.githooks/pre-commit` runs staged MPD policy and secret checks.
+- `.githooks/pre-commit` runs staged whitespace, conflict-marker, and secret checks.
 - `.githooks/pre-push` accepts exactly one non-deletion outgoing SHA, requires it to equal the clean stable checkout's `HEAD` and local ref, then runs the automated pre-push source/build/test gate.
 - The retired installed-signoff receipt, screenshot, Keychain, Observer, Designer-action, finalizer, resume, and post-commit machinery is removed.
 - Subjective visual quality is deliberately outside automated authority.
@@ -24,7 +24,7 @@ The pipeline runs nine ordered stages and stops at the first failure:
 2. Warning-free release build
 3. Release surface and binary checks
 4. Full XCTest
-5. `elysmoke` with 457 passing checks and zero failures
+5. `elysmoke` with 491 passing checks and zero failures
 6. Signed application packaging
 7. Packaged AppKit text-entry integration
 8. Installation to `/Applications/Elysium.app`

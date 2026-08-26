@@ -5,6 +5,33 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Rebuilt the native **Lua script editor as a language-aware authoring environment**. A shared
+  `ScriptLanguageSchema` supplies the editor's engine bindings, handle members, attribute/event
+  metadata, real callable parameters/returns/overloads, snippets, documentation, and tooling-only
+  LuaCATS text; the runtime remains authoritative. The editor adds UTF-16-correct lexical/semantic
+  ranges, receiver-aware completion after `.` or `:`, live applicability filtering for the current
+  host target, handler/local-only `ev`, shallow local/table inference, advisory diagnostics and
+  signature help, accessible completion documentation, line indent/outdent, native-undo external
+  insertions, an event picker, a visible Unsaved marker, guarded navigation, and a synchronized line
+  gutter. Check now recognizes a legal attached-script yield without scheduling work or contacting
+  AI; immediate Run highlights engine `wait`/`ai.await` calls (while respecting local shadows) and
+  directs the author to Save for yieldable execution. A searchable **World Objects** browser inserts only live canonical refs from the current
+  target, cursor, and bounded nearby snapshot; stale pinned rows remain visible but noninsertable. Saves
+  refuse stale world sessions, require snapshot-bound confirmation for external or rename collisions and hidden LAN
+  source replacement, and preserve the enabled state plus existing handler filter/target/additional
+  triggers when editing an existing host record. Optional Ollama inline completion is Manual by
+  default (Option-Command-/), can be disabled or explicitly enabled On Idle, uses the exact selected
+  local model, keeps FIM disabled, and runs through a bounded, no-tools, no-mutation proposal service;
+  Escape cancels inline work and the panel can explicitly insert any reviewed reply. Model discovery
+  is explicit and cancellable, Off performs no editor-AI network request, and the numeric-loopback
+  transport disables system proxies and persistent URL state, rejects redirects, and byte-bounds
+  replies before decoding. AI text remains untrusted, may invent invalid Lua despite its prompt, and
+  still requires Check/Save validation.
+  Corrected the legacy command-palette examples for callback arguments, `emit`, `attach`, block
+  methods, timer/log semantics, and `objects.find`/`objects.block`. Regression tests compare the
+  runtime binding tree, sandbox surface, attribute/event projections, LuaCATS prefix, and every
+  palette snippet against the shipped validator while rejecting the historical invalid forms.
+
 - Added **LAN guest scripting parity**: a host can now run `/script trust <peer>` (and
   `/script trust <peer> ai`) to let a connected guest author/attach/detach/run scripts, set/
   define/remove attributes, subscribe/unsubscribe, emit events, and (with the `ai` grant) use
