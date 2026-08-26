@@ -57,6 +57,10 @@ artifact_sha256() {
 # untouched and still byte-identical — this change never wrote to any of those files or
 # targets, only to Sources/ElysiumCore/Scripting, Sources/ElysiumCore/Net, and Sources/Elysium.
 #
+# pickaxe-uprighting: the pickaxe moved from the retired procedural rasteriser to a baked
+# upright PNG in Sources/Elysium (HeldItemAssets.swift), so only EXPECTED_ELYSIUM_PRODUCT_SHA256
+# moves — ElysiumCore.o, the smoke product, and every source/storage pin are byte-identical.
+#
 # off-hand/tool-hand polish: GameCore gained the shield-raise tick + off-hand toggle handlers
 # and Player gained toggleOffhandItem + the shield-block logic, moving their reviewed source
 # pins; ElysiumCore.o and the Elysium/elysmoke products follow. The storage surface
@@ -81,7 +85,7 @@ EXPECTED_CORE_CAPABILITY_SHA256='67dbb84929eeda6bea6acec70567a6b8c3711521ae2c1f9
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='ca500f11c671c45b6a0648962bed37881a9adff2a6491632e7d655a50ed80efc'
 EXPECTED_CORE_OBJECT_SHA256='89b6689b29a4450b341db9f70b975c0ea4827d3d5e0b56300d7c2b3d4dff5410'
-EXPECTED_ELYSIUM_PRODUCT_SHA256='b7527fb868012209bcbb27a9649f03be5d9f80fa75f371fa3349e799eead90b4'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='43c0a16693855e7fba06399108c60b1f78a7108180b050fdb1034f4fca138957'
 EXPECTED_SMOKE_PRODUCT_SHA256='0507fb998ac3dae17f5edb027446830066c05bf64ad9b157e8e40989c90c6886'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
