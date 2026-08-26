@@ -5,6 +5,12 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Replaced every held pickaxe's flat procedural silhouette with a material-correct Blender render of
+  the pinned CC0 tfwa.games voxel mesh. Removed the per-axis strike-scaling mechanism that visibly
+  deformed held art during use, leaving only translation and rigid rotation. Added deterministic
+  generation under the pinned Blender 5.1.2 toolchain, fail-closed SHA-256 provenance checks, and regression coverage for the asset bytes and
+  rigid animation transforms.
+
 - Rebuilt the native **Lua script editor as a language-aware authoring environment**. A shared
   `ScriptLanguageSchema` supplies the editor's engine bindings, handle members, attribute/event
   metadata, real callable parameters/returns/overloads, snippets, documentation, and tooling-only

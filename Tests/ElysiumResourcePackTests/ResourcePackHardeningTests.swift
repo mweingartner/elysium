@@ -284,7 +284,6 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(hypot(attackGrip.0 - idleGrip.0,
                                          attackGrip.1 - idleGrip.1), 20)
         XCTAssertGreaterThanOrEqual(abs(midAttack.rotation - idle.rotation), 0.25)
-        XCTAssertLessThan(midAttack.toolScaleY, 0.75)
         XCTAssertGreaterThanOrEqual(hypot(use.armX - midAttack.armX, use.armY - midAttack.armY), 12)
         XCTAssertGreaterThanOrEqual(abs(use.rotation - midAttack.rotation), 0.25)
         XCTAssertGreaterThanOrEqual(hypot(use.armX - idle.armX, use.armY - idle.armY), 12)
@@ -334,8 +333,6 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertGreaterThan(hotbarAnchored.armX, 388 + 91)
         XCTAssertFalse(hotbarAnchored.obscuresCrosshair)
         XCTAssertEqual(hotbarAnchored.wristRotation, 0, accuracy: 0.0001)
-        XCTAssertEqual(hotbarAnchored.toolScaleX, 1, accuracy: 0.0001)
-        XCTAssertEqual(hotbarAnchored.toolScaleY, 1, accuracy: 0.0001)
 
         let installedScaleMinimap = mapMinimapRect(
             screenWidth: 480, screenHeight: 270,
@@ -363,16 +360,46 @@ final class ResourcePackHardeningTests: XCTestCase {
 
     func testHeldPickaxeMaterialAssetsShareOneBoundedDecodableShape() throws {
         if itemDefs.isEmpty { registerAllItems() }
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let geometryData = try Data(contentsOf: repositoryRoot.appending(
+            path: "Assets/Meshy/IronPickaxe/tfwa_pickaxe_cc0_source.glb"))
+        let geometryDigest = SHA256.hash(data: geometryData)
+            .map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(geometryDigest,
+                       "3d3c188a832b80518f405f7ab95c7982d88cd482ac81fe9be4eb535e39269f1d")
+
         var referenceAlpha: [UInt8]?
         var colourways = Set<[UInt8]>()
         for material in ["wooden", "stone", "copper", "iron", "golden", "diamond", "netherite"] {
             let itemName = "\(material)_pickaxe"
             let asset = try XCTUnwrap(heldItemVisualAsset(for: itemName))
             XCTAssertEqual(asset.itemName, itemName)
-            XCTAssertEqual(asset.provider, "Elysium original upright voxel pickaxe")
-            XCTAssertEqual(asset.modelTaskID, "elysium-upright-pickaxe-v1")
+            XCTAssertEqual(asset.provider, "tfwa.games Voxel Tools")
+            XCTAssertEqual(asset.modelTaskID, "blender-cc0-pickaxe-3d-v1")
+            XCTAssertEqual(asset.sourceEntry,
+                           "Assets/Meshy/IronPickaxe/tfwa_pickaxe_cc0_source.glb")
+            XCTAssertEqual(asset.sourceEntrySHA256,
+                           "3d3c188a832b80518f405f7ab95c7982d88cd482ac81fe9be4eb535e39269f1d")
             XCTAssertEqual(asset.width, 128)
             XCTAssertEqual(asset.height, 128)
+
+            let pngData: Data
+            switch asset.pixelSource {
+            case let .pngBase64(encoded):
+                pngData = try XCTUnwrap(
+                    Data(base64Encoded: encoded, options: .ignoreUnknownCharacters))
+            }
+            let pngDigest = SHA256.hash(data: pngData)
+                .map { String(format: "%02x", $0) }.joined()
+            XCTAssertEqual(pngDigest, asset.sourceSHA256,
+                           "\(material) embedded bytes must match their manifest hash")
+            let diskPNG = try Data(contentsOf: repositoryRoot.appending(
+                path: "Assets/Elysium/HeldPickaxe3D/held_\(itemName)_3d_128.png"))
+            XCTAssertEqual(diskPNG, pngData,
+                           "\(material) generated and embedded PNG bytes must match")
 
             let image = try XCTUnwrap(heldItemVisualImage(for: itemName))
             XCTAssertEqual(image.width, 128)
@@ -413,11 +440,12 @@ final class ResourcePackHardeningTests: XCTestCase {
             XCTAssertGreaterThan(visible, 250, itemName)
             XCTAssertLessThan(visible, asset.width * asset.height, itemName)
             if itemName.hasSuffix("_pickaxe") {
-                XCTAssertEqual(asset.provider, "Elysium original upright voxel pickaxe")
+                XCTAssertEqual(asset.provider, "tfwa.games Voxel Tools")
+                XCTAssertEqual(asset.modelTaskID, "blender-cc0-pickaxe-3d-v1")
                 XCTAssertEqual(asset.width, 128)
             } else {
-                XCTAssertEqual(asset.provider, "Faithful 64x normalized through Blender 5.1")
-                XCTAssertEqual(asset.modelTaskID, "blender-held-tools-v1")
+                XCTAssertEqual(asset.provider, "Faithful 64x pack-derived sprite")
+                XCTAssertEqual(asset.modelTaskID, "pack-derived-held-tools-v1")
                 XCTAssertEqual(asset.width, 128)
                 XCTAssertNotNil(asset.sourceEntry)
                 XCTAssertEqual(asset.sourceEntrySHA256?.count, 64)
@@ -463,7 +491,7 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertTrue(tool.drawsGrip)
         XCTAssertTrue(tool.performsEquipFlip)
         XCTAssertEqual(tool.iconBaseSize, 98)
-        // Upright pickaxe: shares the stood-up tool profile, gripped at the handle centre.
+        // Model-rendered pickaxe: upright and gripped at the handle centre.
         XCTAssertEqual(tool.gripAnchorX, 0.50)
         XCTAssertEqual(tool.gripAnchorY, 0.88)
         XCTAssertEqual(tool.restRotation, 0)
@@ -621,7 +649,6 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertEqual(restAtStart, restAtEnd)
         XCTAssertEqual(restAtStart, HeldMotionPose(x: 0, y: 0,
                                                    armRotation: 0, wristRotation: 0,
-                                                   toolScaleX: 1, toolScaleY: 1,
                                                    toolRotation: 0))
 
         let anticipation = heldMotionPose(attack: 0.9, usingItem: false, useTicks: 0,
@@ -638,20 +665,15 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertGreaterThan(strike.y, 4)
         XCTAssertLessThan(strike.armRotation, -0.25)
         XCTAssertLessThan(strike.wristRotation, -0.13)
-        XCTAssertGreaterThan(strike.toolScaleX, 1)
-        XCTAssertLessThan(strike.toolScaleY, 0.75)
         XCTAssertLessThan(abs(recovery.x), abs(strike.x))
         XCTAssertLessThan(abs(recovery.y), abs(strike.y))
         XCTAssertLessThan(abs(recovery.armRotation), abs(strike.armRotation))
         XCTAssertLessThan(abs(recovery.wristRotation), abs(strike.wristRotation))
-        XCTAssertGreaterThan(recovery.toolScaleY, strike.toolScaleY)
 
         let halfFlip = heldMotionPose(attack: 1, usingItem: false, useTicks: 0,
                                       equipFlipProgress: 0.5)
         XCTAssertEqual(halfFlip.toolRotation, .pi, accuracy: 0.0001)
         XCTAssertEqual(halfFlip.wristRotation, 0, accuracy: 0.0001)
-        XCTAssertEqual(halfFlip.toolScaleX, 1, accuracy: 0.0001)
-        XCTAssertEqual(halfFlip.toolScaleY, 1, accuracy: 0.0001)
         XCTAssertGreaterThan(halfFlip.y, 5.9)
         let completedFlip = heldMotionPose(attack: 1, usingItem: false, useTicks: 0,
                                            equipFlipProgress: 1)
@@ -663,15 +685,12 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertGreaterThan(repeatedStrike.y, 4)
         XCTAssertLessThan(repeatedStrike.armRotation, -0.25)
         XCTAssertLessThan(repeatedStrike.wristRotation, -0.13)
-        XCTAssertLessThan(repeatedStrike.toolScaleY, 0.75)
         let invalid = heldMotionPose(attack: .nan, usingItem: false, useTicks: 0,
                                      equipFlipProgress: .nan)
         XCTAssertTrue(invalid.x.isFinite)
         XCTAssertTrue(invalid.y.isFinite)
         XCTAssertTrue(invalid.armRotation.isFinite)
         XCTAssertTrue(invalid.wristRotation.isFinite)
-        XCTAssertTrue(invalid.toolScaleX.isFinite)
-        XCTAssertTrue(invalid.toolScaleY.isFinite)
         XCTAssertTrue(invalid.toolRotation.isFinite)
     }
 

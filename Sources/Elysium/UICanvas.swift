@@ -25,7 +25,7 @@ final class UICanvas {
     private var slots: [String: (Int, Int)] = [:]   // key → cell origin (16×16 grid cells)
     private var nextSlot = 1                 // 0 reserved for white
     /// Active resource-pack images retained at up to 64×64 for the selected item.
-    /// Custom Blender-authored tool assets take precedence in heldItemTexture().
+    /// Custom held-tool assets take precedence in heldItemTexture().
     private var heldPackItemImages: [String: RGBAImage] = [:]
     let sampler: MTLSamplerState
 
@@ -324,7 +324,7 @@ final class UICanvas {
         return texture
     }
 
-    /// Draws a Blender-authored tool or high-resolution active-pack sprite only in
+    /// Draws a custom held-tool visual or high-resolution active-pack sprite only in
     /// the first-person layer. Inventory and recipe icons retain their 16×16 contract.
     @discardableResult
     func drawHeldItemVisual(_ itemName: String, _ x: Double, _ y: Double,

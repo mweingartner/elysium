@@ -93,6 +93,14 @@ artifact_sha256() {
 # registry-shaped synthetic events for known handler triggers; the Elysium and elysmoke products
 # follow transitively. This changes only scripting validation in ElysiumCore. GameCore.swift and
 # every reviewed storage/text-input source, manifest, and object pin remain byte-identical.
+#
+# model-rendered-pickaxes: EXPECTED_ELYSIUM_PRODUCT_SHA256 renewed from
+# bf67591da69f4974fd6c37c3cfa90cf8ebdab7256194e929bb234fccab922f8a to
+# b46cda7a0cc807b04c61a555ed64ad5588bfe4a25b33c9d4acf9fd97953869bf after the
+# Elysium application target gained manifest-bound CC0 pickaxe renders and rigid held-item
+# animation. ElysiumCore.o, elysmoke, and every reviewed storage/text-input source, manifest,
+# and object pin remain byte-identical. Assets/Elysium/HeldPickaxe3D/build.md records the
+# normalization command and complete renewal evidence.
 EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
 EXPECTED_STORAGE_API_SHA256='ea1dd595ee28762bc2ff7c2e080c2fc4cee0eee008a30e52e82747029206f46c'
 EXPECTED_STORAGE_OBJECT_SHA256='33fb1578d8262a4044ba42ccb1fc7b67e8dfac2589133ab2ff415b5a5d71326b'
@@ -103,7 +111,7 @@ EXPECTED_CORE_CAPABILITY_SHA256='67dbb84929eeda6bea6acec70567a6b8c3711521ae2c1f9
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='ca500f11c671c45b6a0648962bed37881a9adff2a6491632e7d655a50ed80efc'
 EXPECTED_CORE_OBJECT_SHA256='79d520435f9221c6462f360aaf9df1e6d3a7e48f731cb9414017c415f82e7be5'
-EXPECTED_ELYSIUM_PRODUCT_SHA256='bf67591da69f4974fd6c37c3cfa90cf8ebdab7256194e929bb234fccab922f8a'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='b46cda7a0cc807b04c61a555ed64ad5588bfe4a25b33c9d4acf9fd97953869bf'
 EXPECTED_SMOKE_PRODUCT_SHA256='71fc4a0089a74e7b71f6bbc02b47ac1c7dc652c15dac4cce02e689a972a638e1'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'

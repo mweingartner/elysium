@@ -1,10 +1,15 @@
-# Meshy iron pickaxe source asset
+# Iron pickaxe source assets
 
-This directory preserves the source GLB and the compact held-item render used by Elysium.
-The runtime render is embedded in `Sources/Elysium/HeldToolAssets.swift` so development,
-packaged, and installed builds use identical bytes without a dynamic model-loader dependency.
+This directory preserves the tfwa.games CC0 source GLB, an earlier Meshy retexture
+experiment, and its earlier compact render. The current runtime images are reproducible
+Blender renders of the CC0 source mesh under `Assets/Elysium/HeldPickaxe3D`; they are
+embedded in `Sources/Elysium/HeldPickaxe3DGeneratedAssets.swift`, so development,
+packaged, and installed builds use identical immutable bytes without a dynamic model
+loader.
 
-- Provider: Meshy
+- Current geometry provider: [tfwa.games Voxel Tools](https://tfwagames.itch.io/voxel-tools)
+- Current geometry license: [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/)
+- Experimental retexture provider: Meshy
 - Meshy retexture task: `019f9c99-5ab2-74f3-a545-35662cc2cf75`
 - Accepted model generated: 2026-07-26 UTC
 - Accepted GLB SHA-256: `6658c735483beef91680ee865308fd4a6f15fe3136a7ddcf2c694ed7c1ad1300`
@@ -21,6 +26,6 @@ one-pixel strip. PBR and baked lighting were disabled to retain crisp pixel-art 
 earlier prompt-only and single-reference results were rejected during visual review and are
 not shipped.
 
-`held_iron_pickaxe_96.png` is a transparent, nearest-neighbor 96×96 gameplay bake from the
-accepted Meshy model thumbnail. The source geometry is retained as
-`tfwa_pickaxe_cc0_source.glb`; the retextured result is `iron_pickaxe_textured.glb`.
+`held_iron_pickaxe_96.png` is retained as provenance for the superseded Meshy path and is
+not selected at runtime. The source geometry is `tfwa_pickaxe_cc0_source.glb`; the
+retextured experiment is `iron_pickaxe_textured.glb`.

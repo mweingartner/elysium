@@ -1,0 +1,60 @@
+{
+  "assets": [
+    {
+      "height": 128,
+      "item": "wooden_pickaxe",
+      "output": "held_wooden_pickaxe_3d_128.png",
+      "output_sha256": "1458f13918b2231e0db581612dced08a8f3ca10dff27f556049f076e29a506d6",
+      "width": 128
+    },
+    {
+      "height": 128,
+      "item": "stone_pickaxe",
+      "output": "held_stone_pickaxe_3d_128.png",
+      "output_sha256": "e39e893b62700a92619b0e31927d4c1bffb3db02fd9403a3b88399b79629a924",
+      "width": 128
+    },
+    {
+      "height": 128,
+      "item": "copper_pickaxe",
+      "output": "held_copper_pickaxe_3d_128.png",
+      "output_sha256": "eae95d2d26022b61e0b0be7eb52e13ee6f6a6a45182549f8b192705659ea3e2f",
+      "width": 128
+    },
+    {
+      "height": 128,
+      "item": "iron_pickaxe",
+      "output": "held_iron_pickaxe_3d_128.png",
+      "output_sha256": "9a53e7eea3b763006c8c3e4716e3212798d55c8f5531db230e25e88f279a77f6",
+      "width": 128
+    },
+    {
+      "height": 128,
+      "item": "golden_pickaxe",
+      "output": "held_golden_pickaxe_3d_128.png",
+      "output_sha256": "422edfdfdbe642b29a4cb4a751254d38930e0898a7fd49e92d058919b5781fdc",
+      "width": 128
+    },
+    {
+      "height": 128,
+      "item": "diamond_pickaxe",
+      "output": "held_diamond_pickaxe_3d_128.png",
+      "output_sha256": "2d00d631fa617ae4eb4859f03e29c907ebaa1e7c1f95313de25951e03399f127",
+      "width": 128
+    },
+    {
+      "height": 128,
+      "item": "netherite_pickaxe",
+      "output": "held_netherite_pickaxe_3d_128.png",
+      "output_sha256": "8318caefbf1887e1c4b48463f0dff508c8b069f4263c453537f4e7b8b20e6ab4",
+      "width": 128
+    }
+  ],
+  "camera": "orthographic three-quarter view; immutable runtime pixels",
+  "generator": "Blender 5.1.2 EEVEE model render",
+  "geometry_license": "CC0-1.0",
+  "geometry_provider": "tfwa.games Voxel Tools",
+  "geometry_source": "Assets/Meshy/IronPickaxe/tfwa_pickaxe_cc0_source.glb",
+  "geometry_source_sha256": "3d3c188a832b80518f405f7ab95c7982d88cd482ac81fe9be4eb535e39269f1d",
+  "geometry_url": "https://tfwagames.itch.io/voxel-tools"
+}

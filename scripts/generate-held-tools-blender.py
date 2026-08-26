@@ -220,7 +220,7 @@ def main():
         "source_pack": PACK.name,
         "source_license": "Faithful License v3; see packaging/FAITHFUL-LICENSE.txt",
         "pixel_filter": "2x nearest-neighbour",
-        "pickaxes": "Excluded; Elysium diagonal pickaxe silhouette remains authoritative",
+        "pickaxes": "Excluded; Assets/Elysium/HeldPickaxe3D model renders are authoritative",
         "assets": records,
     }
     (OUTPUT / "manifest.json").write_text(

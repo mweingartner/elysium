@@ -62,9 +62,6 @@ struct HeldOverlayPlan: Equatable {
     let rotation: Double
     /// Late tool rotation around the fixed hand grip during a strike.
     let wristRotation: Double
-    /// Perspective compression as the tool swings toward the camera.
-    let toolScaleX: Double
-    let toolScaleY: Double
     /// One-shot tool-only flourish around the fixed hand grip.
     let toolRotation: Double
     /// Conservative envelope of the transformed arm and optional icon.
@@ -276,11 +273,10 @@ func heldItemPresentation(for definition: ItemDef?, hasDetailedVisual: Bool) -> 
         let isBow = definition.name == "bow"
         let isCrossbow = definition.name == "crossbow"
         let isCompact = definition.name == "shears" || definition.name == "flint_and_steel"
-        // Melee/mining tools whose sprite is now stood upright (align-held-tools-upright.py and
-        // generate-held-pickaxes-upright.py): the handle is a vertical column the fist grips
-        // directly — no baked haft, no runtime counter-rotation. Grip anchor is the pommel at
-        // the bottom-centre of the frame. The pickaxe shares this profile (its head is wider,
-        // which only widens the shared envelope below).
+        // Melee/mining tools whose authored image is upright: pickaxes use model renders and the
+        // remaining families currently use aligned Faithful sprites. In both cases the handle is
+        // a vertical column the fist grips directly, with no runtime counter-rotation. Grip anchor
+        // is the pommel at the bottom-centre of the frame.
         let isUprightTool = hasDetailedVisual
             && ["sword", "axe", "shovel", "hoe", "pickaxe"].contains(tool.type)
         let iconSize: Double = isUprightTool ? 98
@@ -395,8 +391,6 @@ struct HeldMotionPose: Equatable {
     let y: Double
     let armRotation: Double
     let wristRotation: Double
-    let toolScaleX: Double
-    let toolScaleY: Double
     let toolRotation: Double
 }
 
@@ -405,9 +399,9 @@ private func smoothStep(_ value: Double) -> Double {
     return t * t * (3 - 2 * t)
 }
 
-/// A first-person mining stroke derived from Minecraft's attack transform. The
-/// square-root sine supplies the broad hand arc while non-uniform tool scaling
-/// approximates its missing camera-depth rotation in this 2D overlay.
+/// A first-person mining stroke driven by translation and rigid rotation. Held
+/// model renders are never non-uniformly scaled: that used to visibly shear the
+/// pickaxe during a strike. The per-axis scaling path is intentionally absent.
 /// Attack progress is the engine's remaining value (1 -> 0); both endpoints are at rest.
 func heldMotionPose(attack: Double, usingItem: Bool, useTicks: Int,
                     equipFlipProgress: Double,
@@ -425,23 +419,17 @@ func heldMotionPose(attack: Double, usingItem: Bool, useTicks: Int,
     let y: Double
     let rotation: Double
     let wristRotation: Double
-    let toolScaleX: Double
-    let toolScaleY: Double
     if usingItem {
         let raised = smoothStep(use)
         x = -22 * raised
         y = -24 * raised
         rotation = 0.55 * raised
         wristRotation = 0
-        toolScaleX = 1
-        toolScaleY = 1
     } else if t <= 0 || t >= 1 {
         x = 0
         y = 0
         rotation = 0
         wristRotation = 0
-        toolScaleX = 1
-        toolScaleY = 1
     } else if t < 0.12 {
         // Brief shoulder-led wind-up before the tool accelerates toward the target.
         let p = smoothStep(t / 0.12)
@@ -449,8 +437,6 @@ func heldMotionPose(attack: Double, usingItem: Bool, useTicks: Int,
         y = -3 * p
         rotation = 0.10 * p
         wristRotation = 0.05 * p
-        toolScaleX = 1
-        toolScaleY = 1
     } else {
         let strike = (t - 0.12) / 0.88
         let rootArc = Foundation.sin(Foundation.sqrt(strike) * .pi)
@@ -461,17 +447,12 @@ func heldMotionPose(attack: Double, usingItem: Bool, useTicks: Int,
         y = -3 * unwind + 6 * verticalWave + 18 * strikeArc
         rotation = 0.10 * unwind - 0.34 * rootArc - 0.10 * strikeArc
         wristRotation = 0.05 * unwind - 0.20 * strikeArc
-        // Minecraft's large X-axis item rotation is depth motion. Compressing the
-        // handle toward the grip makes that approach/recede motion readable in 2D.
-        toolScaleX = 1 + 0.06 * rootArc
-        toolScaleY = 1 - 0.46 * rootArc
     }
 
     let flip = equipFlipProgress.isFinite ? max(0, min(1, equipFlipProgress)) : 1
     if flip >= 1 {
         return HeldMotionPose(x: x, y: y, armRotation: rotation,
                               wristRotation: wristRotation,
-                              toolScaleX: toolScaleX, toolScaleY: toolScaleY,
                               toolRotation: 0)
     }
     let easedFlip = smoothStep(flip)
@@ -480,7 +461,6 @@ func heldMotionPose(attack: Double, usingItem: Bool, useTicks: Int,
     return HeldMotionPose(x: x, y: y + handDip,
                           armRotation: rotation + wristFollow,
                           wristRotation: wristRotation,
-                          toolScaleX: toolScaleX, toolScaleY: toolScaleY,
                           toolRotation: easedFlip * .pi * 2)
 }
 
@@ -616,12 +596,10 @@ func heldOverlayPlan(viewWidth: Double, viewHeight: Double,
         let equippedX = toolPivotX + dx * c - dy * s
         let equippedY = toolPivotY + dx * s + dy * c
         let wristDX = equippedX - armX, wristDY = equippedY - armY
-        let scaledDX = wristDX * pose.toolScaleX
-        let scaledDY = wristDY * pose.toolScaleY
         let wristCos = Foundation.cos(wristRotation)
         let wristSin = Foundation.sin(wristRotation)
-        return transformed(armX + scaledDX * wristCos - scaledDY * wristSin,
-                           armY + scaledDX * wristSin + scaledDY * wristCos)
+        return transformed(armX + wristDX * wristCos - wristDY * wristSin,
+                           armY + wristDX * wristSin + wristDY * wristCos)
     }
     // Opaque bounds of the generated layers, excluding transparent canvas. Keep
     // arm and item envelopes separate: their combined AABB can cover empty space
@@ -687,8 +665,6 @@ func heldOverlayPlan(viewWidth: Double, viewHeight: Double,
                            scale: scale,
                            attack: remaining, use: use, rotation: rotation,
                            wristRotation: wristRotation,
-                           toolScaleX: pose.toolScaleX,
-                           toolScaleY: pose.toolScaleY,
                            toolRotation: toolRotation,
                            minX: minX, minY: minY, maxX: maxX, maxY: maxY,
                            obscuresCrosshair: crossesCrosshair)
@@ -920,7 +896,6 @@ final class HUD {
                 cv.save()
                 cv.translate(hand.armX, hand.armY)
                 cv.rotate(hand.wristRotation)
-                cv.scale(hand.toolScaleX, hand.toolScaleY)
                 cv.translate(-hand.armX, -hand.armY)
                 cv.translate(hand.toolPivotX, hand.toolPivotY)
                 cv.rotate(hand.toolRotation)

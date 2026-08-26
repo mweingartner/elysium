@@ -107,10 +107,11 @@ The compact lower-right minimap follows the open cavern around you in the Nether
 sealed ceiling. To reclaim that HUD space, turn off **Options... → Video → Show Minimap**; the
 expanded map opened with `M` remains available.
 
-An empty selected slot leaves the first-person view completely clear. Selected tools and weapons
-use material-correct, Blender-authored Faithful silhouettes at a readable scale under the hand's
-grip; blocks retain their three-dimensional voxel preview, while foods and other objects retain
-high-resolution Faithful item art. Attack/use poses provide clear feedback for swings and tool
+An empty selected slot leaves the first-person view completely clear. Selected pickaxes use
+material-correct three-quarter Blender renders of a pinned CC0 voxel mesh, held at a readable
+scale without deforming the image during a strike. Other tools currently retain their reviewed
+Faithful silhouettes; blocks retain their three-dimensional voxel preview, while foods and other
+objects retain high-resolution Faithful item art. Attack/use poses provide clear feedback for swings and tool
 actions. Bows and shields render in the left hand. Holding use with a bow raises it, brings the
 right hand to the string, advances through the charge frames, and fires on release using the same
 charge duration that determines arrow power; shields also remain left-handed when placed in the
@@ -257,6 +258,7 @@ Report suspected security vulnerabilities privately using [SECURITY.md](SECURITY
 
 - **Starting point:** Elysium began from [thebriangao/pebble](https://github.com/thebriangao/pebble), created by Brian Gao. Its open-source Swift and Metal codebase provided the foundation from which Elysium evolved. The inherited MIT copyright and permission notice are preserved in [LICENSE](LICENSE).
 - **Textures:** the bundled [Faithful 64x](https://faithfulpack.net/faithful64x) texture set is the work of the Faithful team and its contributors. The reviewed [Ore Borders 64x](https://faithfulpack.net/addons/OreBorders64x) and [Static Lanterns](https://faithfulpack.net/addons/ClearerLanterns) add-ons remain separate, optional layers. They are distributed under the separate [Faithful License](packaging/FAITHFUL-LICENSE.txt), with archive hashes and exact add-on attribution in [FAITHFUL-ADDONS-CREDITS.txt](packaging/FAITHFUL-ADDONS-CREDITS.txt), and are not covered by Elysium's MIT license.
+- **Held pickaxe geometry:** the model-rendered pickaxe family derives from [tfwa.games Voxel Tools](https://tfwagames.itch.io/voxel-tools), distributed under [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/). Elysium pins the source geometry and every generated render by SHA-256; details and reproducible commands are in [Assets/Elysium/HeldPickaxe3D/README.md](Assets/Elysium/HeldPickaxe3D/README.md).
 - **Deterministic math:** the fdlibm-derived math implementation retains its upstream notice in source.
 - **Elysium hero artwork:** `packaging/title-bg.png` was newly generated for Elysium and serves as both this README's hero and the in-game title-menu background. It is not derived from Pebble's README artwork or an in-game Faithful texture capture.
 - **Reality Derived maps:** the bundled [Arnis](https://github.com/louis-e/arnis) generator is by Louis Eriguchi and contributors and is redistributed under its [Apache-2.0 license](Vendor/Arnis/LICENSE). It uses OpenStreetMap and elevation/land-cover sources identified in the Arnis interface; map attribution remains visible in that interface.

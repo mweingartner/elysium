@@ -1174,8 +1174,9 @@ private let heldExtraVisualAssets: [String: HeldItemVisualAsset] = [
 ]
 
 func heldItemVisualAsset(for itemName: String) -> HeldItemVisualAsset? {
-    heldExtraVisualAssets[itemName]
-        ?? blenderHeldToolVisualAssets[itemName]
+    modelRenderedPickaxeVisualAssets[itemName]
+        ?? heldExtraVisualAssets[itemName]
+        ?? packDerivedHeldToolVisualAssets[itemName]
 }
 
 func heldItemVisualImage(for itemName: String) -> RGBAImage? {

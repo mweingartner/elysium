@@ -390,7 +390,7 @@
     }
   ],
   "generator": "Blender 5.1 bpy image pipeline",
-  "pickaxes": "Excluded; Elysium diagonal pickaxe silhouette remains authoritative",
+  "pickaxes": "Excluded; Assets/Elysium/HeldPickaxe3D model renders are authoritative",
   "pixel_filter": "2x nearest-neighbour",
   "source_license": "Faithful License v3; see packaging/FAITHFUL-LICENSE.txt",
   "source_pack": "Faithful 64x - December 2025 Release.zip",

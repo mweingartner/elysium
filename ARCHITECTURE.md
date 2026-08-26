@@ -108,10 +108,13 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
 
 ## Rendering
 
-First-person hand presentation is planned as viewport-constrained overlay geometry in `HudM.swift`.
-The arm is independent of main-hand occupancy, while held-item drawing remains conditional; attack and
-use poses are deterministic projections of the current action state and keep both arm and item clear of
-the crosshair and hotbar.
+First-person hand presentation is implemented as viewport-constrained overlay geometry in `HudM.swift`.
+The arm is independent of main-hand occupancy, while held-item drawing remains conditional. Pickaxes
+resolve first to immutable, manifest-bound Blender renders of the bundled CC0 tfwa.games voxel mesh;
+other tools currently use bounded pack-derived sprites. Attack and use poses translate and rigidly
+rotate the complete authored image. They never rewrite its texture or apply non-uniform scale, and keep
+both arm and item clear of the crosshair and hotbar. A future all-tool runtime-mesh renderer can replace
+the remaining sprite family without changing the deterministic engine boundary.
 
 `InventorySorting.swift` is the deterministic core boundary for inventory ordering. It validates every
 registered item identifier before mutation, compares an ASCII-folded display name, item category,
