@@ -605,7 +605,14 @@ compatibility before persistence, and the editor clears a retained filter when c
 `objects.find{kind="block", type=..., near=, radius=, limit=}` with a `type` filter does its own
 bounded raw-block scan (not `ObjectGraph.objectsNear`, which only enumerates blocks that already
 carry a record) so a script can equip a plain, never-before-scripted block — Appendix A script 4's
-own requirement. `block:setBlock`/`breakBlock` are the only bespoke block verbs. `setBlock`
+own requirement. `block:setBlock`/`breakBlock` and the narrower
+`furnace:setFurnaceOutput(item)` are the bespoke block verbs. The furnace verb registers one
+controller on the attached script's own furnace only. `ScriptRuntime` owns that transient
+registration, `WorldHooks.scriptedFurnaceOutput` exposes it to the deterministic furnace ticker,
+and edit/disable/detach/fault/chunk unload/session shutdown removes or immediately masks it. It
+converts an existing output-slot stack on the next furnace tick and redirects future recipe output
+while active, keeps the recipe's input and XP accounting, and produces the typed engine fact
+`furnace.smeltCompleted`; it is never persisted in `BlockEntityData` and Run Once cannot retain it. `setBlock`
 constructs a prospective replacement and applies every option in sorted key order to an in-memory
 cell plan, validating the block/field name, applicability, mutability, type/enum, and bounded range
 before the first world write. A refusal leaves the original cells untouched; an accepted plan has

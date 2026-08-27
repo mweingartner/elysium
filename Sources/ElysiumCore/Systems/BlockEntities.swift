@@ -66,9 +66,20 @@ public func registerBlockEntityHandlers() {
         let speed = kind == "furnace" ? 1 : 2
         var items = be.items ?? [nil, nil, nil]
         defer { be.items = items }
+        let subject = ObjectRef.block(dim: world.dim, x: be.x, y: be.y, z: be.z)
+        let scriptedOutput = world.hooks.scriptedFurnaceOutput(subject)
+        if let scriptedOutput, let scriptedID = iidOpt(scriptedOutput),
+           let existing = items[2], existing.id != scriptedID,
+           existing.count <= itemDef(scriptedID).maxStack {
+            items[2] = ItemStack(scriptedID, existing.count)
+            world.getChunkAt(be.x, be.z)?.modified = true
+        }
         let wasBurning = (be.burnTime ?? 0) > 0
         if (be.burnTime ?? 0) > 0 { be.burnTime = (be.burnTime ?? 0) - speed }
-        let result = smeltResultFor(items[0], kind)
+        let recipeResult = smeltResultFor(items[0], kind)
+        let result = recipeResult.map { result in
+            (output: scriptedOutput ?? result.output, xp: result.xp)
+        }
         let out = items[2]
         let canOutput = result != nil && (out == nil || (itemDef(out!.id).name == result!.output && out!.count < maxStackOf(out!)))
 
@@ -91,11 +102,29 @@ public func registerBlockEntityHandlers() {
             if (be.cookTime ?? 0) >= (be.cookTotal ?? 200) {
                 be.cookTime = 0
                 let input = items[0]!
+                let inputName = itemDef(input.id).name
                 input.count -= 1
                 if input.count <= 0 { items[0] = nil }
                 if let out { out.count += 1 }
                 else { items[2] = ItemStack(iid(result!.output), 1) }
                 be.xpBank = (be.xpBank ?? 0) + result!.xp
+                world.getChunkAt(be.x, be.z)?.modified = true
+                let cell = world.getBlock(be.x, be.y, be.z)
+                let blockID = cell >> 4
+                let subjectType = blockID >= 0 && blockID < blockDefs.count
+                    ? blockDefs[blockID].name : "block"
+                world.hooks.raiseScriptEvent(
+                    .furnaceSmeltCompleted, subject,
+                    [
+                        "input": .string(inputName),
+                        "recipeOutput": .string(recipeResult!.output),
+                        "output": .string(result!.output),
+                        "count": .int(1),
+                        "xp": .number(result!.xp),
+                        "furnaceKind": .string(kind),
+                    ],
+                    .engine, subjectType
+                )
             }
         } else {
             be.cookTime = max(0, (be.cookTime ?? 0) - 2)

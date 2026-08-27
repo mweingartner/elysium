@@ -144,9 +144,9 @@ enum ScriptEditorAuthoringContract {
     static func modeHelp(_ mode: ScriptMode) -> String {
         switch mode {
         case .module:
-            "Module source runs once when loaded. Register EventBus callbacks as on(\"event.name\", function(ev) ... end), target:on(\"event.name\", function(ev) ... end), target:onAttribute(\"name\", function(ev) ... end), or subscribe(target, \"event.name\", function(ev) ... end). Each callback receives exactly one ev; there is no top-level ev. register(\"unload\", fn) is a separate synchronous, no-ev, custom-attribute-only finalizer."
+            "Module source runs once when loaded. Register EventBus callbacks as on(\"event.name\", function(ev) ... end), self:on(\"event.name\", function(ev) ... end), self:onAttribute(\"name\", function(ev) ... end), or subscribe(other_handle, \"event.name\", function(ev) ... end). Each callback receives exactly one ev; there is no top-level ev. register(\"unload\", fn) is a separate synchronous, no-ev, custom-attribute-only finalizer."
         case .handler:
-            "Handler source is already the selected event body. Use implicit ev directly; the runtime supplies exactly one event value. Do not wrap the source in on(...), target:on(...), target:onAttribute(...), subscribe(...), or function(ev)."
+            "Handler source is already the selected event body. Use implicit ev directly; the runtime supplies exactly one event value. Do not wrap the source in on(...), self:on(...), self:onAttribute(...), subscribe(...), or function(ev)."
         }
     }
 

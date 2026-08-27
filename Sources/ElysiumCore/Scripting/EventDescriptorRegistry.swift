@@ -96,6 +96,18 @@ public enum EventDescriptorRegistry {
             .blockScheduledTick, [.block], availability: .reserved("The name is reserved, but no script scheduling API or producer is shipped."),
             "Reserved block scheduled-tick event."
         ),
+        event(
+            .furnaceSmeltCompleted, [.block],
+            [
+                field("input", .string, "Registered input item consumed."),
+                field("recipeOutput", .string, "Registered output item from the matched recipe."),
+                field("output", .string, "Registered item actually added to the output slot."),
+                field("count", .integer, "Number of output items added by this operation."),
+                field("xp", .number, "Recipe experience credited to the furnace."),
+                field("furnaceKind", .string, "furnace, blast, or smoker."),
+            ],
+            "A furnace-family block completed one smelting operation."
+        ),
 
         event(.entitySpawned, [.entity, .player], summary: "A scriptable entity or canonical LAN-player proxy entered a world."),
         event(.entityRemoved, [.entity, .player], summary: "A scriptable entity or canonical LAN-player proxy left a world."),

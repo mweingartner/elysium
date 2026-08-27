@@ -26,15 +26,22 @@ final class OllamaCodeCompletionTests: XCTestCase {
                     OllamaCodeCompletionAuthoringEvent(
                         name: "player.interacted",
                         source: "built_in",
-                        payloadFields: ["item:string?"]
+                        payloadFields: ["item:string?"],
+                        summary: "A player interacted with an entity."
                     ),
                     OllamaCodeCompletionAuthoringEvent(
                         name: "player.quest_ready",
                         source: "declared_custom",
                         payloadFields: ["quest:string"]
                     ),
+                    OllamaCodeCompletionAuthoringEvent(
+                        name: "block.changed",
+                        source: "built_in",
+                        payloadFields: ["oldName:string", "newName:string"],
+                        summary: "A non-silent block cell write changed name or metadata."
+                    ),
                 ],
-                targetMembers: ["method h:set(name, value)", "attribute health:number:writable"]
+                targetMembers: ["method self:set(name, value)", "attribute health:number:writable"]
             ),
             diagnostics: ["line 2: method expected"],
             nearby: [
@@ -93,7 +100,11 @@ final class OllamaCodeCompletionTests: XCTestCase {
         XCTAssertTrue(system.contains("value:number"))
         XCTAssertTrue(system.contains("<ELY_AUTHORING_CONTEXT>"))
         XCTAssertTrue(system.contains("player.quest_ready [declared_custom]"))
-        XCTAssertTrue(system.contains("method h:set(name, value)"))
+        XCTAssertTrue(system.contains("block.changed [built_in]"))
+        XCTAssertTrue(system.contains("A non-silent block cell write changed name or metadata."))
+        XCTAssertTrue(system.contains("method self:set(name, value)"))
+        XCTAssertTrue(system.contains("There is no h, block, target, or furnace global"))
+        XCTAssertFalse(system.contains("h:emit()"))
         XCTAssertTrue(system.contains("ev exists only inside callback functions"))
         XCTAssertTrue(system.contains("cannot be emitted manually"))
         XCTAssertTrue(system.contains("custom event names only"))
@@ -457,7 +468,7 @@ final class OllamaCodeCompletionTests: XCTestCase {
                         payloadContract: "open_custom_unknown_envelope_only"
                     ),
                 ],
-                targetMembers: ["property ref:string", "method h:get(name)"]
+                targetMembers: ["property ref:string", "method self:get(name)"]
             )
         )
 

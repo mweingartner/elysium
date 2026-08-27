@@ -17,7 +17,7 @@ final class ScriptLanguageSchemaTests: XCTestCase {
         XCTAssertEqual(ScriptLanguageSchema.moduleMembers(named: "ai").map(\.name), ["ask", "await"])
         XCTAssertEqual(
             ScriptLanguageSchema.handleMethods.filter { $0.receiverKinds == [.block] }.map(\.name),
-            ["setBlock", "breakBlock"]
+            ["setFurnaceOutput", "setBlock", "breakBlock"]
         )
         XCTAssertEqual(ScriptLanguageSchema.unsupportedSymbols.map(\.name), ["log"])
         XCTAssertFalse(ScriptLanguageSchema.unsupportedSymbols[0].availability.isCompletable)
@@ -126,6 +126,7 @@ final class ScriptLanguageSchemaTests: XCTestCase {
             .attributeChanged,
             .blockPlaced, .blockToolStrike, .blockBroken, .blockReplaced, .blockChanged, .blockUsed,
             .blockNeighborChanged, .blockScheduledTick,
+            .furnaceSmeltCompleted,
             .entitySpawned, .entityRemoved, .entityDamaged, .entityDied, .entityHealed,
             .entityInteracted, .entityTargetChanged,
             .playerJoined, .playerLeft, .playerRespawned, .playerDimensionChanged,
@@ -156,6 +157,12 @@ final class ScriptLanguageSchemaTests: XCTestCase {
             XCTAssertEqual(Set(descriptor.payload.map(\.name)).count, descriptor.payload.count)
             XCTAssertFalse(descriptor.summary.isEmpty)
         }
+        XCTAssertEqual(EventKind.parse("furnace.smeltCompleted"), .furnaceSmeltCompleted)
+        XCTAssertEqual(EventKind.parse("furnace.output")?.rawValue, "furnace.output")
+        XCTAssertNil(
+            EventDescriptorRegistry.descriptor(named: "furnace.output"),
+            "the pre-existing custom-event spelling must not be claimed as a built-in"
+        )
     }
 
     func testLuaCATSOutputIsStableToolingOnlyAndCoversEngineAPI() {
@@ -165,11 +172,16 @@ final class ScriptLanguageSchemaTests: XCTestCase {
         XCTAssertTrue(first.hasPrefix("---@meta\n"))
         XCTAssertTrue(first.contains("---@class ElysiumObject"))
         XCTAssertTrue(first.contains("function ElysiumObject:setBlock(name, opts) end"))
+        XCTAssertTrue(first.contains("function ElysiumObject:setFurnaceOutput(item) end"))
         XCTAssertTrue(first.contains("function objects.find(options) end"))
         XCTAssertTrue(first.contains("function ai.await(prompt, opts) end"))
-        let aiPrefix = String(first.prefix(6_000))
+        let aiPrefix = String(first.prefix(ScriptLanguageSchema.editorAIPrefixCharacterLimit))
         XCTAssertTrue(aiPrefix.contains("function on("), "bounded AI schema must include event registration")
         XCTAssertTrue(aiPrefix.contains("function objects.get("), "bounded AI schema must include object lookup")
+        XCTAssertTrue(
+            aiPrefix.contains("function ElysiumObject:setFurnaceOutput(item)"),
+            "bounded AI schema must include the furnace output contract"
+        )
         XCTAssertFalse(first.contains("function log("))
         XCTAssertFalse(first.contains("function load("))
         XCTAssertEqual(

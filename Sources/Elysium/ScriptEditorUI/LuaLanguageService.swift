@@ -479,7 +479,7 @@ enum LuaLanguageService {
     // MARK: - diagnostics
 
     private static let unavailableGlobals: Set<String> = [
-        "_G", "collectgarbage", "coroutine", "debug", "dofile", "io", "load", "loadfile", "log", "os", "package",
+        "_G", "collectgarbage", "coroutine", "debug", "dofile", "h", "io", "load", "loadfile", "log", "os", "package",
         "rawget", "rawset", "require", "warn",
     ]
 
@@ -496,6 +496,8 @@ enum LuaLanguageService {
                 var fixes: [LuaQuickFix] = []
                 if token.text == "log" {
                     fixes.append(.init(title: "Replace log with say", replacementRange: token.range, replacementText: "say"))
+                } else if token.text == "h" {
+                    fixes.append(.init(title: "Replace h with self", replacementRange: token.range, replacementText: "self"))
                 }
                 result.append(.init(
                     id: "unavailable:\(token.range.location):\(token.text)", severity: .error,

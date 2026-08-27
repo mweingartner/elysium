@@ -46,6 +46,7 @@ extension ScriptRuntime {
                 "emit": { [weak runtime] handle, call in runtime?.methodEmit(handle, call) ?? .error("runtime unavailable") },
                 "attach": { [weak runtime] handle, call in runtime?.methodAttach(handle, call) ?? .error("runtime unavailable") },
                 "detach": { [weak runtime] handle, call in runtime?.methodDetach(handle, call) ?? .error("runtime unavailable") },
+                "setFurnaceOutput": { [weak runtime] handle, call in runtime?.methodSetFurnaceOutput(handle, call) ?? .error("runtime unavailable") },
                 "setBlock": { [weak runtime] handle, call in runtime?.methodSetBlock(handle, call) ?? .error("runtime unavailable") },
                 "breakBlock": { [weak runtime] handle, call in runtime?.methodBreakBlock(handle, call) ?? .error("runtime unavailable") },
             ],
@@ -764,6 +765,54 @@ extension ScriptRuntime {
             host.commitPrevalidatedScriptBlockCell(
                 w, x: x, y: mutation.y, z: z, cell: mutation.cell, author: author
             )
+        }
+        return .values([.bool(true)])
+    }
+
+    /// Installs a future-smelt override owned by the currently attached script. This is a
+    /// lifecycle registration, not a one-shot inventory mutation: Check validates without
+    /// retaining it, Run Once is refused, and `unloadInstance` removes it automatically.
+    func methodSetFurnaceOutput(_ handle: HandleRef, _ call: HostCall) -> HostResult {
+        guard call.arguments.count == 1,
+              case .value(.string(let itemName)) = call.arguments[0],
+              let ref = ObjectRef.parse(handle.ref), case .block = ref else {
+            return .error("setFurnaceOutput(item) is only valid on a furnace block handle")
+        }
+        guard let ctx = currentScript, ctx.owner == ref else {
+            return .error("setFurnaceOutput(item) may control only the attached script's own furnace")
+        }
+        guard !unloadActive else {
+            return .error("setFurnaceOutput() is not available during unload")
+        }
+        guard !ephemeralRunActive else {
+            return .error("setFurnaceOutput() requires an attached script; Run Once cannot retain it")
+        }
+        guard case .live(.block(let world, _, _, let x, let y, let z)) = graph.resolve(ref),
+              let blockEntity = world.getBlockEntity(x, y, z), blockEntity.type == "furnace",
+              ["furnace", "blast", "smoker"].contains(blockEntity.kind ?? "furnace"),
+              [
+                  Int(B.furnace), Int(B.furnace_lit), Int(B.blast_furnace),
+                  Int(B.blast_furnace_lit), Int(B.smoker), Int(B.smoker_lit),
+              ].contains(world.getBlockId(x, y, z)) else {
+            return .error("setFurnaceOutput(item) requires a loaded furnace, blast furnace, or smoker")
+        }
+
+        if itemName == "default" {
+            guard !dryRunActive else { return .values([.bool(true)]) }
+            return .values([.bool(clearFurnaceOutputOverride(for: ref, scriptName: ctx.name))])
+        }
+        guard let itemID = iidOpt(itemName) else {
+            return .error("unknown item '\(itemName)'")
+        }
+        if let items = blockEntity.items, items.indices.contains(2), let output = items[2],
+           output.count > itemDef(itemID).maxStack {
+            return .error(
+                "existing furnace output count \(output.count) exceeds '\(itemName)' stack limit \(itemDef(itemID).maxStack)"
+            )
+        }
+        guard !dryRunActive else { return .values([.bool(true)]) }
+        if let refusal = registerFurnaceOutputOverride(itemName, for: ref, scriptName: ctx.name) {
+            return .error(refusal)
         }
         return .values([.bool(true)])
     }

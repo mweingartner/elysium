@@ -719,7 +719,13 @@ final class ScriptEditorModel: ObservableObject {
                 ($0.receiverKinds.isEmpty || $0.receiverKinds.contains(target.kind))
                     && $0.availability.isCompletable
             }
-            .map { "method \($0.signatures.first?.label ?? $0.name)" })
+            .map { symbol in
+                let label = symbol.signatures.first?.label ?? symbol.name
+                guard let receiverEnd = label.firstIndex(of: ":") else {
+                    return "method \(label)"
+                }
+                return "method self\(label[receiverEnd...])"
+            })
         members.append(contentsOf: applicableBuiltIns.map {
             "attribute \($0.name):\($0.type.displayName):\($0.mutability == .readOnly ? "read_only" : "writable")"
         })
@@ -744,6 +750,7 @@ final class ScriptEditorModel: ObservableObject {
                     name: eventName,
                     source: "open_custom_selected",
                     payloadFields: [],
+                    summary: "Valid undeclared custom event on the current target; only the common envelope is known.",
                     payloadContract: "open_custom_unknown_envelope_only"
                 ),
                 at: 0
@@ -768,7 +775,8 @@ final class ScriptEditorModel: ObservableObject {
             source: event.source.rawValue,
             payloadFields: event.payload.map {
                 $0.name + ":" + $0.type.displayName + ($0.isNullable ? "?" : "")
-            }
+            },
+            summary: event.summary
         )
     }
 
@@ -792,6 +800,7 @@ final class ScriptEditorModel: ObservableObject {
         if let violation = diagnostics.first(where: {
             $0.id.hasPrefix("handler-subscription-wrapper:")
                 || $0.id.hasPrefix("module-top-level-ev:")
+                || ($0.id.hasPrefix("unavailable:") && $0.message.contains("'h'"))
         }) {
             return "AI proposal refused: \(violation.message)"
         }

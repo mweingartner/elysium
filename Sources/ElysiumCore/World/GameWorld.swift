@@ -76,6 +76,10 @@ public struct WorldHooks {
     public var hasScriptEventInterest: (
         _ kind: EventKind, _ subject: ObjectRef, _ subjectType: String?
     ) -> Bool = { _, _, _ in false }
+    /// Host-only lookup for an attached script's lifecycle-scoped furnace output override. The
+    /// bare engine and LAN-client worlds return `nil`, so ordinary recipe output remains the
+    /// authority unless a trusted, currently live script explicitly controls this furnace.
+    public var scriptedFurnaceOutput: (_ subject: ObjectRef) -> String? = { _ in nil }
     /// Script-definition discovery ingress/egress. The host wires these after ordinary world hooks
     /// and records exact refs in its bounded deterministic dirty queue.
     public var onScriptObjectHydrated: (_ ref: ObjectRef, _ record: ObjectRecord) -> Void = { _, _ in }

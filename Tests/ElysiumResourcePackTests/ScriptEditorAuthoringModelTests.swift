@@ -188,6 +188,10 @@ final class ScriptEditorAuthoringModelTests: XCTestCase {
 
         model.mode = .module
         XCTAssertTrue(model.aiInsertionPreflightFailure("say(ev.amount)")?.contains("no top-level ev") == true)
+        XCTAssertTrue(
+            model.aiInsertionPreflightFailure("h:setFurnaceOutput(\"iron_ingot\")")?.contains("'h'") == true
+        )
+        XCTAssertNil(model.aiInsertionPreflightFailure("local h = self\nh:exists()"))
         XCTAssertNil(model.aiInsertionPreflightFailure(
             "on(\"entity.damaged\", function(ev) say(ev.amount) end)"
         ))
@@ -197,11 +201,13 @@ final class ScriptEditorAuthoringModelTests: XCTestCase {
         let moduleHelp = ScriptEditorAuthoringContract.modeHelp(.module)
         XCTAssertTrue(moduleHelp.contains("function(ev)"))
         XCTAssertTrue(moduleHelp.contains("receives exactly one ev"))
-        XCTAssertTrue(moduleHelp.contains("target:onAttribute"))
+        XCTAssertTrue(moduleHelp.contains("self:onAttribute"))
+        XCTAssertFalse(moduleHelp.contains("target:onAttribute"))
 
         let handlerHelp = ScriptEditorAuthoringContract.modeHelp(.handler)
         XCTAssertTrue(handlerHelp.contains("supplies exactly one event value"))
-        XCTAssertTrue(handlerHelp.contains("target:onAttribute"))
+        XCTAssertTrue(handlerHelp.contains("self:onAttribute"))
+        XCTAssertFalse(handlerHelp.contains("target:onAttribute"))
 
         let setSnippet = try XCTUnwrap(ScriptLanguageSchema.snippets.first {
             $0.id == "object.set"
@@ -219,8 +225,12 @@ final class ScriptEditorAuthoringModelTests: XCTestCase {
         let guide = ScriptAIAuthoringGuide.text
         XCTAssertTrue(guide.contains("attributes and attached scripts share one name namespace"))
         XCTAssertTrue(guide.contains("There is no mode option"))
-        XCTAssertTrue(guide.contains("only block-specific handle methods"))
+        XCTAssertTrue(guide.contains("Block-specific handle methods"))
         XCTAssertTrue(guide.contains("engine, player, ai, lan, or script:<owner-ref>"))
+        XCTAssertTrue(guide.contains("self:setFurnaceOutput(\"iron_ingot\")"))
+        XCTAssertTrue(guide.contains("A declaration defines schema and discovery only"))
+        XCTAssertFalse(guide.contains("h:"))
+        XCTAssertFalse(guide.contains("target:on"))
         XCTAssertFalse(guide.contains("{mode="))
     }
 

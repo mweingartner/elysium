@@ -59,6 +59,7 @@ public struct EventKind: Hashable, Sendable, Codable, CustomStringConvertible {
         "block.scheduledTick",
         "block.toolStrike",
         "entity.targetChanged",
+        "furnace.smeltCompleted",
         "player.dimensionChanged",
         "player.pickedUp",
         "dim.dayPhaseChanged",
@@ -109,6 +110,10 @@ public struct EventKind: Hashable, Sendable, Codable, CustomStringConvertible {
     public static let blockUsed = EventKind("block.used")
     public static let blockNeighborChanged = EventKind("block.neighborChanged")
     public static let blockScheduledTick = EventKind("block.scheduledTick")
+
+    /// A furnace, blast furnace, or smoker completed one recipe operation. The recipe output and
+    /// effective output are separate so a lifecycle-scoped script override remains observable.
+    public static let furnaceSmeltCompleted = EventKind("furnace.smeltCompleted")
 
     public static let entitySpawned = EventKind("entity.spawned")
     public static let entityRemoved = EventKind("entity.removed")

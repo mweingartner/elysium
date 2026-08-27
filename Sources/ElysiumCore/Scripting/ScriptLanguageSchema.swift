@@ -217,7 +217,7 @@ public struct ScriptLanguageAttribute: Sendable, Equatable, Identifiable {
         let fixedHandleMembers: Set<String> = [
             "ref", "kind", "name", "attrs", "exists", "get", "set", "scripts", "define",
             "events", "declareEvent", "undeclareEvent", "on", "onAttribute", "emit",
-            "attach", "detach", "setBlock", "breakBlock",
+            "attach", "detach", "setFurnaceOutput", "setBlock", "breakBlock",
         ]
         guard !fixedHandleMembers.contains(candidate) else { return false }
         guard let first = candidate.utf8.first,
@@ -305,6 +305,11 @@ public struct ScriptSnippetSection: Sendable, Equatable, Identifiable {
 }
 
 public enum ScriptLanguageSchema {
+    /// Character budget used when the editor supplies this generated reference to its local AI.
+    /// Keep this bounded, but large enough to include the executable globals and object lookup
+    /// surface that follow the object-handle methods.
+    public static let editorAIPrefixCharacterLimit = 6_500
+
     public static let keywords = [
         "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto",
         "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
@@ -544,6 +549,7 @@ public enum ScriptLanguageSchema {
         method("emit", signatures: [signature("h:emit(name[, payload])", [p("name", .string), p("payload", .map, optional: true)], returns: [r(.boolean)])], summary: "Emit a custom event on this object (1–2 args); built-ins are rejected."),
         method("attach", signatures: [signature("h:attach(name, source[, opts])", [p("name", .string), p("source", .string), p("opts", .table, optional: true)], returns: [r(.boolean)])], summary: "Attach module source when options are omitted, or a handler when a valid opts.on is supplied; opts.attr filters attribute.changed and opts.target is a handle. There is no opts.mode option."),
         method("detach", signatures: [signature("h:detach(name)", [p("name", .string)], returns: [r(.boolean)])], summary: "Detach a named script."),
+        method("setFurnaceOutput", signatures: [signature("furnace:setFurnaceOutput(item)", [p("item", .string)], returns: [r(.boolean)])], receiverKinds: [.block], summary: "While this attached script is live, replace this furnace family's existing and future recipe output with a registered item; use default to clear."),
         method("setBlock", signatures: [signature("block:setBlock(name[, opts])", [p("name", .string), p("opts", .table, optional: true)], returns: [r(.boolean)])], receiverKinds: [.block], summary: "Replace this block and optionally apply built-in block attributes."),
         method("breakBlock", signatures: [signature("block:breakBlock()", returns: [r(.boolean)])], receiverKinds: [.block], summary: "Break this block naturally, including normal drops."),
     ]
@@ -607,6 +613,7 @@ public enum ScriptLanguageSchema {
         snippet("object.define", .objects, "self:define(name, value)", "self:define(\"custom_state\", \"active\")", "Define a custom attribute."),
         snippet("object.attach", .objects, "self:attach(name, source)", "self:attach(\"name\", \"return\")", "Attach module source; use opts.on for handler mode."),
         snippet("object.detach", .objects, "self:detach(name)", "self:detach(\"name\")", "Detach a script."),
+        snippet("object.furnace_output", .objects, "self:setFurnaceOutput(item)", "self:setFurnaceOutput(\"iron_ingot\")", "Override this furnace's output while the attached script is live.", ownerKinds: [.block]),
         snippet("object.set_block", .objects, "self:setBlock(name)", "self:setBlock(\"stone\")", "Replace this block.", ownerKinds: [.block]),
         snippet("object.break_block", .objects, "self:breakBlock()", "self:breakBlock()", "Break this block naturally.", ownerKinds: [.block]),
         snippet("object.attrs", .objects, "self.attrs", "local attrs = self.attrs", "Access named custom attributes."),

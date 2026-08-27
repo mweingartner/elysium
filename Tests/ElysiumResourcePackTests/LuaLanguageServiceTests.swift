@@ -413,9 +413,12 @@ final class LuaLanguageServiceTests: XCTestCase {
     }
 
     func testDiagnosticsCoverUnavailableAndUnsafeConstructsWithQuickFixes() {
-        let source = "log(\"x\")\nself.exists()\npairs(self.attrs)\nwait(20)"
+        let source = "log(\"x\")\nh:set(\"state\", true)\nself.exists()\npairs(self.attrs)\nwait(20)"
         let analysis = LuaLanguageService.analyze(source: source, environment: environment(isYieldable: false))
         XCTAssertTrue(analysis.diagnostics.contains { $0.id.hasPrefix("unavailable:") && $0.quickFixes.first?.replacementText == "say" })
+        XCTAssertTrue(analysis.diagnostics.contains {
+            $0.id.hasPrefix("unavailable:") && $0.quickFixes.first?.replacementText == "self"
+        })
         XCTAssertTrue(analysis.diagnostics.contains { $0.id.hasPrefix("member-access:") })
         XCTAssertTrue(analysis.diagnostics.contains { $0.id.hasPrefix("pairs-attrs:") })
         XCTAssertTrue(analysis.diagnostics.contains { $0.id.hasPrefix("wait-mode:") })
@@ -437,11 +440,14 @@ final class LuaLanguageServiceTests: XCTestCase {
     }
 
     func testSandboxGlobalNamesMayBeShadowedByDocumentLocals() {
-        let source = "local log = function(value) return value end\nreturn log(\"ok\")"
+        let source = "local log = function(value) return value end\nlocal h = self\nh:exists()\nreturn log(\"ok\")"
         let analysis = LuaLanguageService.analyze(source: source, environment: environment())
         XCTAssertFalse(analysis.diagnostics.contains { $0.id.hasPrefix("unavailable:") })
         XCTAssertFalse(analysis.semanticTokens.contains { token in
             token.role == .unavailable && (source as NSString).substring(with: token.range) == "log"
+        })
+        XCTAssertFalse(analysis.semanticTokens.contains { token in
+            token.role == .unavailable && (source as NSString).substring(with: token.range) == "h"
         })
     }
 

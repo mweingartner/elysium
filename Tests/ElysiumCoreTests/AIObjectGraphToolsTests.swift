@@ -107,13 +107,16 @@ final class AIObjectGraphToolsTests: XCTestCase {
     func testAIAuthoringGuideNamesExactObjectEventAPIsAndEveryAvailableEvent() {
         let guide = ScriptAIAuthoringGuide.text
         for fragment in [
-            "target:onAttribute(attribute, fn)", "h:declareEvent(name, fields[, summary])",
-            "h:events()", "h:undeclareEvent(name)", "h:emit(name[, payload])",
-            "block.toolStrike", "unload is not an EventBus event",
+            "self:onAttribute(attribute, fn)", "self:declareEvent(name, fields[, summary])",
+            "self:events()", "self:undeclareEvent(name)", "self:emit(name[, payload])",
+            "self:setFurnaceOutput(\"iron_ingot\")", "furnace.smeltCompleted", "block.toolStrike",
+            "A declaration defines schema and discovery only", "unload is not an EventBus event",
             "register(\"unload\", fn)", "It receives no ev",
         ] {
             XCTAssertTrue(guide.contains(fragment), "AI guide is missing \(fragment)")
         }
+        XCTAssertFalse(guide.contains("h:"))
+        XCTAssertFalse(guide.contains("target:on"))
         XCTAssertFalse(guide.contains("- unload ["), "unload finalization must not be listed as an event")
         for descriptor in EventDescriptorRegistry.available {
             XCTAssertTrue(

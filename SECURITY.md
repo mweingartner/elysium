@@ -71,6 +71,15 @@ or script mutation, world or built-in mutation, RNG, and player/audio/particle o
 is instruction-bounded, its failure cannot stop environment destruction, and a stale callback cannot
 overwrite a replacement script's diagnostic.
 
+Furnace output control is likewise an attached-script capability, not ambient persisted block
+state. `self:setFurnaceOutput(item)` accepts only a registered item on the calling script's own
+loaded furnace-family block, admits one current controller per furnace, performs validation without
+registration during Check, and is refused by Run Once and unload. The override exists only in
+`ScriptRuntime`; the furnace ticker rechecks both execution gates and the controller's current
+definition, so editing, disabling, detaching, faulting, unloading, or ending the session removes or
+immediately masks that authority. Recipe input and XP remain engine-owned, and `furnace.smeltCompleted` is
+an engine-produced fact that manual emit paths cannot forge.
+
 `block.toolStrike` is emitted only on a new real-tool mining-target transition, not continuously while
 the same target remains held. Its payload is exactly `by`, `item`, `blockName`, `face`, `toolType`,
 `tier`, and `instant`; first contact with an unbreakable block is still an event, with `instant=false`.

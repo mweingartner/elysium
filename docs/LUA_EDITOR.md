@@ -116,7 +116,13 @@ in the bounded authorized snapshot. Nearby custom events are likewise included o
 contracts, with per-object and snapshot omission metadata; the model is told never to infer an
 omitted schema. A selected open custom Handler event is identified as envelope-only with unknown
 event-specific fields. These facts remain truthful even when either bounded section clips less
-relevant entries. Tests compare the runtime binding tree with the schema, probe completable symbols in
+relevant entries. Current-target method facts rewrite generic documentation receivers to the real
+`self` local, and the prompt explicitly states that `h`, `target`, `block`, and `furnace` are not
+globals. An unresolved `h` is also a deterministic editor error with a `self` quick fix, and an AI
+proposal containing it is refused before insertion. Furnace targets are taught the lifecycle-scoped
+`self:setFurnaceOutput(item)` capability and the engine-produced `furnace.smeltCompleted` payload instead of
+being encouraged to write read-only `be.items[2]` or treat `block.changed` as smelt completion.
+Tests compare the runtime binding tree with the schema, probe completable symbols in
 the shipped sandbox, project attribute and event registries, check representative LuaCATS signatures,
 validate every palette snippet, and reject historical bad spellings. The palette now uses the shipped
 callback parameter (`ev`), global/object `emit`, `h:attach`, `block:setBlock`/`breakBlock`, and

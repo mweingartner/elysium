@@ -2454,6 +2454,10 @@ public final class GameCore {
             guard let self, !self.isLANClientWorld else { return false }
             return self.eventBus.hasEventInterest(kind, subject: subject, subjectType: subjectType)
         }
+        hooks.scriptedFurnaceOutput = { [weak self] subject in
+            guard let self, !self.isLANClientWorld else { return nil }
+            return self.scripting.scriptRuntime?.effectiveFurnaceOutput(for: subject)
+        }
         w.hooks = hooks
     }
 

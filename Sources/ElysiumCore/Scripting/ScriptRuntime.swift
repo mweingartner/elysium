@@ -159,6 +159,14 @@ public final class ScriptRuntime {
         var randomAdapter: RandomStreamBoxAdapter
     }
     var instances: [String: Instance] = [:]
+    /// One lifecycle-scoped controller per furnace. This is deliberately runtime state rather
+    /// than `BlockEntityData`: disabling, editing, detaching, faulting, unloading, or shutting
+    /// down the owning script must stop future conversion without leaving a hidden persisted rule.
+    struct FurnaceOutputOverride: Equatable {
+        let itemName: String
+        let scriptName: String
+    }
+    private var furnaceOutputOverrides: [String: FurnaceOutputOverride] = [:]
     /// A compile/load failure is retried only after the persisted definition changes. This keeps a
     /// bad module from faulting every tick and, more importantly, prevents a partially executed
     /// load from repeatedly accumulating subscriptions or timers.
@@ -806,6 +814,10 @@ public final class ScriptRuntime {
 
     private func recordRuntimeFault(_ message: String) {
         guard let ctx = currentScript else { return }
+        // A callback/timer fault does not unload the otherwise-live module, so explicitly revoke
+        // any lifecycle capability it registered. Load-time faults also flow through here and are
+        // cleared again harmlessly when the failed instance is destroyed.
+        _ = clearFurnaceOutputOverride(for: ctx.owner, scriptName: ctx.name)
         scriptStore.storeLastError(ctx.owner, ctx.name, message)
         state.eventBus.raise(
             kind: .scriptFaulted, subject: ctx.owner,
@@ -921,6 +933,41 @@ public final class ScriptRuntime {
     private func definitionIsCurrent(_ instance: Instance) -> Bool {
         guard let record = scriptStore.get(instance.ref, instance.name), record.enabled else { return false }
         return sourceUnchanged(instance, record)
+    }
+
+    /// O(1) simulation-hot-path lookup used by `WorldHooks.scriptedFurnaceOutput`. A definition
+    /// edit/disable becomes ineffective immediately, even before the bounded reconciliation phase
+    /// reaches it, and both execution gates are re-read rather than cached.
+    func effectiveFurnaceOutput(for ref: ObjectRef) -> String? {
+        guard scriptsEffectivelyEnabled(host: host),
+              let override = furnaceOutputOverrides[ref.canonical]
+        else { return nil }
+        let key = ref.canonical + "#" + override.scriptName
+        guard let instance = instances[key], instance.live, definitionIsCurrent(instance) else {
+            return nil
+        }
+        return override.itemName
+    }
+
+    func registerFurnaceOutputOverride(
+        _ itemName: String, for ref: ObjectRef, scriptName: String
+    ) -> String? {
+        if let existing = furnaceOutputOverrides[ref.canonical], existing.scriptName != scriptName {
+            let existingKey = ref.canonical + "#" + existing.scriptName
+            if let instance = instances[existingKey], definitionIsCurrent(instance) {
+                return "furnace output is already controlled by attached script '\(existing.scriptName)'"
+            }
+        }
+        furnaceOutputOverrides[ref.canonical] = FurnaceOutputOverride(
+            itemName: itemName, scriptName: scriptName
+        )
+        return nil
+    }
+
+    func clearFurnaceOutputOverride(for ref: ObjectRef, scriptName: String) -> Bool {
+        guard furnaceOutputOverrides[ref.canonical]?.scriptName == scriptName else { return false }
+        furnaceOutputOverrides.removeValue(forKey: ref.canonical)
+        return true
     }
 
     private func load(ref: ObjectRef, record: ScriptRecord) {
@@ -1451,6 +1498,7 @@ public final class ScriptRuntime {
                 instance.ref, instance.name, [words.0, words.1, words.2, words.3]
             )
         }
+        _ = clearFurnaceOutputOverride(for: instance.ref, scriptName: instance.name)
         instance.environment.destroy()
         instances.removeValue(forKey: key)
         _ = removeScheduledRuns { $0.key == key || $0.key.hasPrefix(key + "#") }

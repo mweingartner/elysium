@@ -642,6 +642,7 @@ Every object (`self`, `world`, `player`, anything from `objects.get`/`.find`/`.b
 | `h:attach(name, source[, opts])` | attach a script. Omitting `opts` or passing `{}` attaches module mode. A nonempty options table attaches handler mode and must contain a valid `opts.on = "<event>"`; its only other fields are `opts.attr` and `opts.target`. `opts.attr` is a string filter valid only for `attribute.changed`. `opts.target` must be a *handle value* (for example `player`, not a ref string) and defaults to `h` when omitted. Unknown fields (including `opts.mode`), malformed values, unavailable built-ins, and incompatible event/target/filter combinations are errors. Grammatically valid undeclared custom events remain legal under the open custom-event contract. Check/dry-run validates this same complete shape plus the nested source without attaching anything (`ScriptRuntimeAPI.swift` and `ScriptMarshaling.swift`) |
 | `h:detach(name)` | remove a script; requires exactly one argument |
 | `h:scripts()` | `{name, mode, author, enabled, lastError}` for each script on `h` |
+| `furnace:setFurnaceOutput(item)` | on the attached script's own loaded furnace, blast furnace, or smoker, replace the existing output-slot stack on the next furnace tick and redirect future matched-recipe output to a registered item while that script remains live. `"default"` clears the caller's registration. The recipe still consumes its original input and credits its original XP. Check performs the same target/item/stack-limit validation without registering; Run Once and unload refuse this lifecycle capability; another current script cannot silently take control |
 | `block:setBlock(name[, opts])` | replace the block; extra `opts` keys (besides the accepted-but-unused `notify`) are planned in deterministic key order as built-in attribute writes, e.g. `{facing="north"}`. The block name and complete options table are preflighted for field name, applicability, mutability, value type/enum, and range before any cell changes. CamelCase built-ins are canonicalized, and the first invalid option is reported with the original block left byte-for-byte unchanged. A valid plan is then committed with no fallible validation remaining; Check/dry-run runs the same preflight without committing it |
 | `block:breakBlock()` | break it naturally (drops items); takes no arguments |
 
@@ -659,6 +660,35 @@ Every mutating call above (attribute and declaration writes, `attach`/`detach`,
 `setBlock`/`breakBlock`, `emit`, timers) is a no-op during a read-only Check/AI dry run — never
 during ordinary attached execution. Declaration creation/removal is also unavailable in an
 ephemeral Run Once because it is durable authoring state, not a one-off world verb.
+
+`setFurnaceOutput` is intentionally an attached-lifecycle registration rather than a persisted
+block-entity attribute. Put it in a Module script on the furnace itself. Disabling scripts with
+either execution gate, editing/disabling/detaching/faulting the controlling script, unloading the
+furnace chunk, or ending the world session stops future conversion. Items already converted are
+ordinary output and are not rolled back. Clearing the override while a converted stack remains can
+therefore block a different recipe output until that stack is extracted. Each completed operation
+raises the engine-produced `furnace.smeltCompleted` event on that exact block with `input`, `recipeOutput`,
+`output`, `count`, `xp`, and `furnaceKind` fields:
+
+```lua
+self:setFurnaceOutput("iron_ingot")
+self:declareEvent("furnace.output_converted", {
+  item = "string",
+  recipe_item = "string",
+  count = "integer",
+}, "This furnace converted one recipe output")
+self:on("furnace.smeltCompleted", function(ev)
+  self:emit("furnace.output_converted", {
+    item = ev.output,
+    recipe_item = ev.recipeOutput,
+    count = ev.count,
+  })
+end)
+```
+
+Changing `ev.output`, emitting an item name, writing read-only `be.items[2]`, or using `setBlock`
+as an inventory API does not mutate furnace output. `h`, `block`, and `furnace` in generic API
+signatures are documentation receiver placeholders, not globals; the current target is `self`.
 
 Object-first handlers and declarations make cross-object behaviour explicit and readable:
 

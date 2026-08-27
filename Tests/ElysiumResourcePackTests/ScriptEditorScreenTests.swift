@@ -792,8 +792,10 @@ final class ScriptEditorModelTests: XCTestCase {
             .first(where: { $0.title == "Objects" })?.items.map(\.code) ?? []
         XCTAssertFalse(playerObjectCode.contains("self:setBlock(\"stone\")"))
         XCTAssertFalse(playerObjectCode.contains("self:breakBlock()"))
+        XCTAssertFalse(playerObjectCode.contains("self:setFurnaceOutput(\"iron_ingot\")"))
         XCTAssertTrue(blockObjectCode.contains("self:setBlock(\"stone\")"))
         XCTAssertTrue(blockObjectCode.contains("self:breakBlock()"))
+        XCTAssertTrue(blockObjectCode.contains("self:setFurnaceOutput(\"iron_ingot\")"))
     }
 
     func testEditorAIModesKeepManualAndOffQuietAndDebounceOnIdle() async throws {
@@ -935,7 +937,12 @@ final class ScriptEditorModelTests: XCTestCase {
             $0.name == "player.quest_ready" && $0.source == "declared_custom"
         })
         XCTAssertFalse(request.authoringContext.compatibleEvents.contains { $0.name == "block.used" })
-        XCTAssertTrue(request.authoringContext.targetMembers.contains { $0.contains("method h:set") })
+        XCTAssertTrue(request.authoringContext.compatibleEvents.contains {
+            $0.name == "entity.damaged" && !$0.summary.isEmpty
+        })
+        XCTAssertTrue(request.authoringContext.targetMembers.contains { $0.contains("method self:set") })
+        XCTAssertFalse(request.authoringContext.targetMembers.contains { $0.contains("method h:") })
+        XCTAssertFalse(request.authoringContext.targetMembers.contains { $0.contains("method block:") })
         let world = try XCTUnwrap(request.authorizedNearbyObjects.first {
             $0.reference == ObjectRef.world.canonical
         })
@@ -978,6 +985,56 @@ final class ScriptEditorModelTests: XCTestCase {
             $0.name == "player.quest_ready"
         })
         XCTAssertEqual(nearbyDeclaration.payloadFields, ["quest:string"])
+    }
+
+    func testFurnaceAIContextUsesRealSelfReceiverAndSmeltContract() async throws {
+        let defaults = UserDefaults.standard
+        let previousMode = defaults.object(forKey: ScriptEditorAICompletionMode.defaultsKey)
+        defaults.set(
+            ScriptEditorAICompletionMode.manual.rawValue,
+            forKey: ScriptEditorAICompletionMode.defaultsKey
+        )
+        defer {
+            if let previousMode {
+                defaults.set(previousMode, forKey: ScriptEditorAICompletionMode.defaultsKey)
+            } else {
+                defaults.removeObject(forKey: ScriptEditorAICompletionMode.defaultsKey)
+            }
+        }
+
+        let game = try makeTrustedGame()
+        let x = Int(game.player.x.rounded(.down))
+        let y = Int(game.player.y.rounded(.down))
+        let z = Int(game.player.z.rounded(.down))
+        guard game.world.getChunkAt(x, z) != nil else { return XCTFail("spawn chunk must be loaded") }
+        _ = game.world.setBlock(x, y, z, Int(cell(B.furnace)))
+        game.world.setBlockEntity(makeFurnaceBE(x, y, z, "furnace"))
+        let target = ObjectRef.block(dim: game.dim, x: x, y: y, z: z)
+        let completer = RecordingScriptEditorAICompleter()
+        let model = ScriptEditorModel(target: target, game: game, aiCompleter: completer)
+        model.source = "-- convert every output to iron"
+        model.selectedRange = NSRange(location: (model.source as NSString).length, length: 0)
+
+        model.requestAISuggestion()
+        try await waitForEditorAIRequestCount(1, from: completer)
+        let recordedRequests = await completer.recordedRequests()
+        let request = try XCTUnwrap(recordedRequests.first)
+
+        XCTAssertTrue(request.authoringContext.targetMembers.contains {
+            $0 == "method self:setFurnaceOutput(item)"
+        })
+        XCTAssertTrue(request.authoringContext.targetMembers.contains {
+            $0.hasPrefix("method self:setBlock(")
+        })
+        XCTAssertFalse(request.authoringContext.targetMembers.contains {
+            $0.contains("method h:") || $0.contains("method block:") || $0.contains("method furnace:")
+        })
+        let event = try XCTUnwrap(request.authoringContext.compatibleEvents.first {
+            $0.name == "furnace.smeltCompleted"
+        })
+        XCTAssertTrue(event.payloadFields.contains("recipeOutput:string"))
+        XCTAssertTrue(event.payloadFields.contains("output:string"))
+        XCTAssertTrue(event.summary.contains("completed one smelting operation"))
     }
 
     private func waitForEditorAIRequestCount(
