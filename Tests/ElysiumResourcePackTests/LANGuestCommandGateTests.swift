@@ -32,7 +32,86 @@ final class LANGuestCommandGateTests: XCTestCase {
             worldID: "guest-gate-host", worldName: "Guest Gate Host", seed: 4242,
             gameMode: GameMode.survival, difficulty: 2, dimension: Dim.overworld.rawValue, playerCount: 2
         ))
+        LANMultiplayerManager.shared.attachGame(game)
         return game
+    }
+
+    func testClientReplicationMirrorIsScopedToAttachedGameIdentity() throws {
+        let manager = LANMultiplayerManager.shared
+        let firstGame = try makeLANClientGame()
+        let ref = ObjectRef.player
+        let firstReport = manager.applyReplicationBatchForTesting(LANReplicationBatch(
+            tick: 9, fullSnapshot: false,
+            objectAttributes: [LANObjectAttributeSnapshot(
+                ref: ref.canonical, revision: 9,
+                attrsJSON: AttrValueCodec.encode(.map(["session": .string("first")])),
+                scriptsJSON: LANObjectAttributeSnapshot.encodeScripts([
+                    LANScriptMetadata(name: "greet", mode: "module", enabled: true),
+                ])
+            )]
+        ))
+        XCTAssertEqual(firstReport.appliedObjectAttributes, 1)
+
+        manager.attachGame(firstGame)
+        XCTAssertEqual(manager.mirroredAttributes(for: ref)?["session"], .string("first"))
+        XCTAssertEqual(manager.mirroredScripts(for: ref)?.first?.mode, "module")
+
+        let secondGame = try makeLANClientGame()
+        XCTAssertTrue(secondGame.isLANClientWorld)
+        XCTAssertNil(manager.mirroredAttributes(for: ref))
+        XCTAssertNil(manager.mirroredScripts(for: ref))
+
+        let secondReport = manager.applyReplicationBatchForTesting(LANReplicationBatch(
+            tick: 1, fullSnapshot: false,
+            objectAttributes: [LANObjectAttributeSnapshot(
+                ref: ref.canonical, revision: 1,
+                attrsJSON: AttrValueCodec.encode(.map(["session": .string("second")])),
+                scriptsJSON: LANObjectAttributeSnapshot.encodeScripts([
+                    LANScriptMetadata(name: "greet", mode: "handler", enabled: true),
+                ])
+            )]
+        ))
+        XCTAssertEqual(secondReport.appliedObjectAttributes, 1,
+                       "a new attached game must also reset the prior session's revision floor")
+        XCTAssertEqual(manager.mirroredAttributes(for: ref)?["session"], .string("second"))
+        XCTAssertEqual(manager.mirroredScripts(for: ref)?.first?.mode, "handler")
+    }
+
+    func testDeferredOldGenerationBatchCannotMutateNewGameMirrorOrWorld() throws {
+        let manager = LANMultiplayerManager.shared
+        let originalGame = try makeLANClientGame()
+        XCTAssertTrue(originalGame.isLANClientWorld)
+        let ref = ObjectRef.player
+        let deferredCommit = manager.deferredReplicationBatchCommitForTesting(LANReplicationBatch(
+            tick: 9,
+            fullSnapshot: false,
+            worldState: LANWorldStateSnapshot(
+                dimension: Dim.overworld.rawValue,
+                time: 42_000,
+                dayTime: 6_000,
+                difficulty: 3,
+                raining: true,
+                thundering: true,
+                rainLevel: 1,
+                thunderLevel: 1,
+                weatherTimer: 99
+            ),
+            objectAttributes: [LANObjectAttributeSnapshot(
+                ref: ref.canonical,
+                revision: 9,
+                attrsJSON: AttrValueCodec.encode(.map(["stale": .bool(true)]))
+            )]
+        ))
+
+        let replacementGame = try makeLANClientGame()
+        replacementGame.world.time = 7
+        replacementGame.world.dayTime = 11
+
+        XCTAssertFalse(deferredCommit(), "an old generation must fail before either commit path")
+        XCTAssertNil(manager.mirroredAttributes(for: ref))
+        XCTAssertEqual(replacementGame.world.time, 7)
+        XCTAssertEqual(replacementGame.world.dayTime, 11)
+        XCTAssertFalse(replacementGame.world.raining)
     }
 
     /// Spec `scripting-commands` "Refusal is enforced at the CommandsM call

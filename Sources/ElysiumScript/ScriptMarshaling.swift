@@ -65,6 +65,9 @@ extension LuaState {
             let tableIdx = lua_gettop(L)
             // design.md Decision 10 / spec: maps are pushed in sorted key order.
             for key in dict.keys.sorted() {
+                guard key.utf8.count <= valueLimits.stringBytes else {
+                    throw ScriptValueError.stringTooLong(limit: valueLimits.stringBytes)
+                }
                 withLuaBytes(key) { ptr, len in _ = lua_pushlstring(L, ptr, len) }
                 try pushScriptValue(dict[key]!, on: L, depth: depth + 1, nodeCount: &nodeCount)
                 lua_rawset(L, tableIdx)
@@ -147,6 +150,9 @@ extension LuaState {
                 if keyType == LUA_TSTRING {
                     var len = 0
                     let cstr = lua_tolstring(L, -2, &len)
+                    guard len <= valueLimits.stringBytes else {
+                        throw ScriptValueError.stringTooLong(limit: valueLimits.stringBytes)
+                    }
                     stringEntries[decodeLuaBytes(cstr, len)] = value
                 } else if keyType == LUA_TNUMBER, lua_isinteger(L, -2) != 0 {
                     intEntries[Int64(elysium_tointeger(L, -2))] = value

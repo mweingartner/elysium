@@ -1,16 +1,17 @@
 // EventKind.swift — event-bus (change 1b). design.md §7.1/§7.2. `EventKind` is a
 // validated string, not a closed Swift enum — the catalog table in §7.2 fixes a set
 // of well-known kinds (`"attribute.changed"`, `"block.broken"`, …) but custom events
-// (`emit()`/AI `emit_event`/`/events emit`, e.g. `"lumber.milestone"`) are
-// script/player-defined names in the same namespace, "bare names, namespaced by
-// convention". One type, one grammar, so a catalog kind and a custom kind are
+// are script/player-defined names in the same namespace, "bare names, namespaced by
+// convention"; the manual `emit()`/AI `emit_event`/`/events emit` funnels can produce
+// those custom names (e.g. `"lumber.milestone"`) but reject engine-produced built-ins.
+// One type, one grammar, so a catalog kind and a custom kind are
 // indistinguishable to anything downstream (subscriptions, delivery, persistence).
 
 import Foundation
 
 /// A typed event kind: either one of the v1 catalog's fixed names or a
 /// custom, script/player-defined name (`"lumber.milestone"`). Custom-name grammar is one or more
-/// `[a-z][a-z0-9_]{0,31}` segments joined by `.`, ≤ 64 bytes total. Ten frozen v1 catalog names
+/// `[a-z][a-z0-9_]{0,31}` segments joined by `.`, ≤ 64 bytes total. Frozen catalog names
 /// predate that grammar and contain camel-case suffixes; `parse` accepts those exact ABI names but
 /// does not broaden the custom namespace. Never traps; construction from untrusted text goes
 /// through `EventKind.parse(_:)`, which returns `nil` on anything malformed.
@@ -56,6 +57,7 @@ public struct EventKind: Hashable, Sendable, Codable, CustomStringConvertible {
     private static let camelCaseCatalogNames: Set<String> = [
         "block.neighborChanged",
         "block.scheduledTick",
+        "block.toolStrike",
         "entity.targetChanged",
         "player.dimensionChanged",
         "player.pickedUp",
@@ -100,6 +102,7 @@ public struct EventKind: Hashable, Sendable, Codable, CustomStringConvertible {
     public static let attributeChanged = EventKind("attribute.changed")
 
     public static let blockPlaced = EventKind("block.placed")
+    public static let blockToolStrike = EventKind("block.toolStrike")
     public static let blockBroken = EventKind("block.broken")
     public static let blockReplaced = EventKind("block.replaced")
     public static let blockChanged = EventKind("block.changed")

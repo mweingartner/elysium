@@ -37,11 +37,17 @@ enum ScriptEditorAICompletionMode: String, CaseIterable, Identifiable {
 
 enum ScriptEditorAIRequestError: LocalizedError {
     case disabled
+    case handlerEventRequired
+    case invalidHandlerEvent(String)
 
     var errorDescription: String? {
         switch self {
         case .disabled:
             "Editor AI is Off. Choose Manual or On Idle before contacting Ollama."
+        case .handlerEventRequired:
+            ScriptEditorAuthoringContract.handlerEventRequired
+        case .invalidHandlerEvent(let reason):
+            "\(reason) Correct the handler event before asking AI; no request was sent to Ollama."
         }
     }
 }

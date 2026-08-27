@@ -111,7 +111,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ElysiumCoreTests",
-            dependencies: ["ElysiumCore", "ElysiumStorage", "ElysiumTextInput"],
+            dependencies: ["ElysiumCore", "ElysiumScript", "ElysiumStorage", "ElysiumTextInput"],
             path: "Tests/ElysiumCoreTests",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),

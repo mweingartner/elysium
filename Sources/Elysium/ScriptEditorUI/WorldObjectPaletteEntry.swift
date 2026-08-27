@@ -14,8 +14,37 @@ struct WorldObjectPaletteEntry: Identifiable, Equatable {
     let isTarget: Bool
     let isCursorTarget: Bool
     let attributeNames: [String]
+    /// Typed, mutability-aware metadata captured from the same immutable refresh as `attributeNames`.
+    /// The names remain as a presentation convenience; deterministic completion consumes this
+    /// richer projection so a nearby object's readonly attribute is never advertised as writable.
+    let attributeCompletions: [LuaCustomAttributeCompletion]
     let scriptNames: [String]
     let capabilities: [String]
+
+    init(
+        ref: ObjectRef,
+        displayName: String,
+        distance: Double?,
+        isLive: Bool,
+        isTarget: Bool,
+        isCursorTarget: Bool,
+        attributeNames: [String],
+        scriptNames: [String],
+        capabilities: [String],
+        attributeCompletions: [LuaCustomAttributeCompletion]? = nil
+    ) {
+        self.ref = ref
+        self.displayName = displayName
+        self.distance = distance
+        self.isLive = isLive
+        self.isTarget = isTarget
+        self.isCursorTarget = isCursorTarget
+        self.attributeNames = attributeNames
+        self.attributeCompletions = attributeCompletions
+            ?? attributeNames.map { LuaCustomAttributeCompletion(name: $0) }
+        self.scriptNames = scriptNames
+        self.capabilities = capabilities
+    }
 
     var id: String { ref.canonical }
 

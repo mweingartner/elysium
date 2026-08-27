@@ -111,9 +111,11 @@ status maps to Lua results (`r >= 0`), an error (`r == -1`), or a yield (`r <= -
 thread-pool fields reach the shim through `elysium_config` and the value, source,
 chunk-name and fault-text caps are enforced Swift-side — all of those test-overridable):
 instruction slice `handlerSliceInstructions` 5,000, coroutine-lifetime total
-`handlerTotalInstructions` 100,000, per-tick bookkeeping `perTickInstructions` 50,000 /
-`perTickBucket` 250,000 and `maxConsecutivePreemptions` 20 (exposed as counters, not
-enforced until the scheduler change); allocation-rate `allocationRatePerSliceBytes`
+`handlerTotalInstructions` 100,000, scheduler-enforced `perTickInstructions` 50,000 /
+`perTickBucket` 250,000 and `maxConsecutivePreemptions` 20. The Core scheduler charges at least one
+1,000-instruction hook quantum per resume, retains overrun debt, backpressures the event recipient
+cursor when empty, reserves one quantum for each downstream phase lane, and caps suspended
+coroutines at 64 per script and 1,024 per world; allocation-rate `allocationRatePerSliceBytes`
 2 MiB per slice; hard `memoryCapBytes` 16 MiB with `hostOverCapDiagnosticBytes` 1 MiB
 slack; `threadPoolMax` 256 pooled threads; `logLineBytes` 512 / `logLinesPerSlice` 256
 for `print`. Every standard-library verb that can do unbounded work is capped: pattern
@@ -125,7 +127,8 @@ exceeds 256 KiB (the full per-verb table is in `specs/script-sandbox-and-budgets
 Those per-verb caps are compile-time constants in `elysium_sandbox.c`; the matching
 `ScriptBudgets` fields (`patternSubjectBytes` … `utf8SubjectBytes`) mirror them for
 reference and are not read by the runtime. `ScriptValueLimits.defaults` (derived from the
-same budgets): string 4 KiB, list 256 elements, map 64 keys, depth 4, nodes 1,024; and on
+same budgets): string 4 KiB, list 256 elements, map 64 keys (each key also ≤ 4 KiB in both
+marshal directions), depth 4, nodes 1,024; and on
 `ScriptBudgets` itself, source 16 KiB, chunk name 64 B, fault message 512 B, traceback
 2 KiB. A slice is soft inside a non-yieldable region (a `table.sort` comparator, a `gsub`
 callback, a nested `call` body inside a coroutine's host function); the coroutine total

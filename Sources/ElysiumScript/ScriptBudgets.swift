@@ -22,16 +22,20 @@ public struct ScriptBudgets: Sendable, Equatable {
     /// faults with `.instructionBudget`, regardless of `pcall` (design.md Decision 6).
     public var handlerTotalInstructions: Int
 
-    /// Instructions budgeted for one scheduler tick (bookkeeping only in this
-    /// change; the scheduler that spends it lands in a later change).
+    /// Instructions replenished into the world-wide attached-script scheduler each tick.
     public var perTickInstructions: Int
 
-    /// The rolling bucket `perTickInstructions` refills into (bookkeeping only).
+    /// Maximum accumulated credit in the world-wide attached-script scheduler.
     public var perTickBucket: Int
 
-    /// Consecutive preemptions after which the scheduler should deprioritize a
-    /// coroutine (counter exposed on `ScriptCoroutine`; not enforced in this change).
+    /// Consecutive preemptions after which a non-terminating coroutine is faulted.
     public var maxConsecutivePreemptions: Int
+
+    /// Maximum suspended/preempted/awaiting Lua coroutines retained by one attached script.
+    public var maxSuspendedCoroutinesPerScript: Int
+
+    /// Maximum suspended/preempted/awaiting Lua coroutines retained by the entire world.
+    public var maxSuspendedCoroutinesPerWorld: Int
 
     /// Bytes a script frame may request from the allocator within one slice before
     /// `.allocationRate` trips (design.md Decision 5).
@@ -88,6 +92,8 @@ public struct ScriptBudgets: Sendable, Equatable {
         perTickInstructions: Int,
         perTickBucket: Int,
         maxConsecutivePreemptions: Int,
+        maxSuspendedCoroutinesPerScript: Int,
+        maxSuspendedCoroutinesPerWorld: Int,
         allocationRatePerSliceBytes: Int,
         memoryCapBytes: Int,
         hostOverCapDiagnosticBytes: Int,
@@ -109,6 +115,8 @@ public struct ScriptBudgets: Sendable, Equatable {
         self.perTickInstructions = perTickInstructions
         self.perTickBucket = perTickBucket
         self.maxConsecutivePreemptions = maxConsecutivePreemptions
+        self.maxSuspendedCoroutinesPerScript = maxSuspendedCoroutinesPerScript
+        self.maxSuspendedCoroutinesPerWorld = maxSuspendedCoroutinesPerWorld
         self.allocationRatePerSliceBytes = allocationRatePerSliceBytes
         self.memoryCapBytes = memoryCapBytes
         self.hostOverCapDiagnosticBytes = hostOverCapDiagnosticBytes
@@ -133,6 +141,8 @@ public struct ScriptBudgets: Sendable, Equatable {
         perTickInstructions: 50_000,
         perTickBucket: 250_000,
         maxConsecutivePreemptions: 20,
+        maxSuspendedCoroutinesPerScript: 64,
+        maxSuspendedCoroutinesPerWorld: 1_024,
         allocationRatePerSliceBytes: 2 * 1024 * 1024,
         memoryCapBytes: 16 * 1024 * 1024,
         hostOverCapDiagnosticBytes: 1 * 1024 * 1024,

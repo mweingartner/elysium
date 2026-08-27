@@ -28,6 +28,8 @@ final class ElysmokeScriptHost: ObjectGraphHost {
     var currentTick: Int64 = 0
     var scriptsEnabled = true
     var worldRecords: [String: ObjectRecord] = [:]
+    var scriptDefinitionGeneration: UInt64 = 0
+    var scriptDefinitionChanges = ScriptDefinitionChangeIndex()
 
     func world(for dim: Dim) -> World? { worldsByDim[dim] }
     func worldObjectRecord(for ref: ObjectRef) -> ObjectRecord { worldRecords[ref.canonical] ?? ObjectRecord() }
@@ -36,6 +38,13 @@ final class ElysmokeScriptHost: ObjectGraphHost {
     }
     func setDifficulty(_ d: Int) {}
     func setGameRule(_ name: String, _ value: Double) { worldsByDim[currentDimension]?.gameRules[name] = value }
+    func scriptDefinitionsDidChange(for ref: ObjectRef, hasScripts: Bool) {
+        scriptDefinitionGeneration &+= 1
+        scriptDefinitionChanges.record(ref, hasScripts: hasScripts)
+    }
+    func drainDirtyScriptDefinitionRefs(limit: Int) -> [ObjectRef] {
+        scriptDefinitionChanges.drain(limit: limit)
+    }
 }
 
 private func elysmokeMakeWorld(seed: UInt32 = 7) -> World {
@@ -82,11 +91,9 @@ private func elysmokeMakeRuntime(
 /// by anything in this corpus.
 private func elysmokeStepScriptPhase(_ runtime: ScriptRuntime, _ state: GameScriptingState, host: ElysmokeScriptHost, tick: Int64) {
     host.currentTick = tick
-    // This corpus attaches scripts directly through `ScriptStore` (never
-    // through a command/UI path that would flip the flag itself, per
-    // `ScriptingCommandContext.markScriptAttached`'s own doc comment) — force
-    // it so every scenario's bounded scan actually runs; the zero-cost fast
-    // path itself is exercised separately (nothing in this file measures it).
+    // This corpus attaches scripts directly through `ScriptStore`. Keep the session summary hint
+    // aligned with production while the exact definition work itself arrives through the host's
+    // bounded dirty-ref queue.
     state.anyScriptsAttached = true
     runtime.resetPerTickCounters()
     runtime.runLoads()
@@ -143,11 +150,10 @@ private func elysmokeAppendixOneHandler() -> (ok: Bool, trace: String) {
     let idAfter = cellAfter >> 4
     let nameAfter = (idAfter >= 0 && idAfter < blockDefs.count) ? blockDefs[idAfter].name : "?"
     let lastHealth = store.get(lamp, "pulse")?.lastError ?? ""
-    // `self.attrs.lastHealth` is normalized to "lasthealth" (§6.1's
-    // AI-normalization leniency, extended to every script author — see
-    // `ScriptRuntimeAPI.normalizedCustomAttributeName`) since "lastHealth"
-    // itself does not fit the `[a-z][a-z0-9_]{0,31}` custom-name grammar.
-    let attr = AttributeStore(graph: ObjectGraph(host: host)).get(lamp, "lasthealth")
+    // `self.attrs.lastHealth` is normalized to the canonical snake-case
+    // `last_health` (§6.1's AI-normalization leniency, extended to every
+    // script author — see `ScriptRuntimeAPI.normalizedCustomAttributeName`).
+    let attr = AttributeStore(graph: ObjectGraph(host: host)).get(lamp, "last_health")
     let ok = nameAfter == "glowstone" && attr == .number(5)
     return (ok, "block=\(nameAfter) attr=\(String(describing: attr)) err=\(lastHealth)")
 }
@@ -217,12 +223,11 @@ private func elysmokeAppendixTwo(reply: String) -> (ok: Bool, trace: String) {
     """
     let store = ScriptStore(graph: ObjectGraph(host: host))
     let attrStore = AttributeStore(graph: ObjectGraph(host: host))
-    // "doorref" (not "doorRef" — camelCase does not fit the custom-name
-    // grammar; the Lua side's `self.attrs.doorRef` read normalizes to this
-    // same lowercase key, same as the write here does going through the
-    // player/`/attr define` path in real play).
-    let doorDefine = attrStore.define(gateRef, "doorref", .string(door.canonical), readonly: false, by: .player)
-    guard case .success = doorDefine else { return (false, "doorref define failed: \(doorDefine)") }
+    // CamelCase does not fit the persisted custom-name grammar. The Lua-side
+    // `self.attrs.doorRef` read normalizes to the canonical `door_ref`, which
+    // is also what a player or `/attr define` call persists.
+    let doorDefine = attrStore.define(gateRef, "door_ref", .string(door.canonical), readonly: false, by: .player)
+    guard case .success = doorDefine else { return (false, "door_ref define failed: \(doorDefine)") }
     guard case .success = store.attach(gateRef, name: "gate", source: source, mode: .module, triggers: [], by: .player, tick: 0)
     else { return (false, "attach failed") }
 
@@ -253,7 +258,7 @@ private func elysmokeAppendixThree() -> (ok: Bool, trace: String) {
 
     let source = """
     subscribe({kind = "block"}, "block.broken", {}, function(ev)
-      if ev.oldName:find("_log", 1, true) then
+      if ev.blockName:find("_log", 1, true) then
         world.attrs.logsBroken = (world.attrs.logsBroken or 0) + 1
         if world.attrs.logsBroken % 64 == 0 then emit("lumber.milestone", {count = world.attrs.logsBroken}) end
       end
@@ -266,7 +271,7 @@ private func elysmokeAppendixThree() -> (ok: Bool, trace: String) {
 
     // Count deliveries directly rather than through `recentEvents()`'s
     // capped ring (130 `block.broken` + 130 cascaded `attribute.changed`
-    // writes to `world.attrs.logsbroken` alone exceed the ring's 128-entry
+    // writes to `world.attrs.logs_broken` alone exceed the ring's 128-entry
     // cap well before the run ends — the ring is a bounded diagnostic feed,
     // not an event log; wrapping the same `delivery` seam
     // `ScriptRuntime.deliver` is already plugged into is the honest way to
@@ -282,12 +287,13 @@ private func elysmokeAppendixThree() -> (ok: Bool, trace: String) {
         let tick = Int64(2 + i)
         state.eventBus.raise(
             kind: .blockBroken, subject: .block(dim: .overworld, x: i, y: 65, z: 0),
-            payload: ["oldName": .string("oak_log"), "newName": .string("air")], source: .player, tick: tick
+            payload: ["by": .ref(ObjectRef.player.canonical), "item": .null, "blockName": .string("oak_log")],
+            source: .player, tick: tick
         )
         elysmokeStepScriptPhase(runtime, state, host: host, tick: tick)
     }
-    // "logsbroken" — the same camelCase normalization as `doorref` above.
-    let count = AttributeStore(graph: ObjectGraph(host: host)).get(.world, "logsbroken")
+    // `logs_broken` is the same canonical camelCase normalization as `door_ref` above.
+    let count = AttributeStore(graph: ObjectGraph(host: host)).get(.world, "logs_broken")
     let ok = count == .int(130) && milestones.value == 2 // milestones at 64 and 128
     return (ok, "count=\(String(describing: count)) milestones=\(milestones.value)")
 }
@@ -308,7 +314,11 @@ private func elysmokeAppendixFour() -> (ok: Bool, trace: String) {
 
     let source = """
     for _, b in ipairs(objects.find{kind = "block", type = "\(blockDefs[Int(signID)].name)", near = self, radius = 8, limit = 8}) do
-      if not b.attrs.greeter then
+      local hasGreeter = false
+      for _, attached in ipairs(b:scripts()) do
+        if attached.name == "greeter" then hasGreeter = true; break end
+      end
+      if not hasGreeter then
         b:define("owner", self.ref, {readonly = true})
         b:attach("greeter", [[ say("Hello, " .. ev.by.name) ]], {on = "block.used"})
       end

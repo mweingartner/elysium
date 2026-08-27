@@ -40,6 +40,91 @@ final class ObjectRecordCodecTests: XCTestCase {
         XCTAssertEqual(decoded.revision, 0)
     }
 
+    func testCustomEventDeclarationsRoundTripInCanonicalOrder() throws {
+        let kind = try XCTUnwrap(EventKind.parse("furnace.output_ready"))
+        let declaration = CustomEventDeclaration(
+            kind: kind,
+            fields: [
+                CustomEventField(name: "recipe", type: .string, isNullable: true),
+                CustomEventField(name: "count", type: .integer),
+            ],
+            summary: "A smelted stack is ready.",
+            provenance: Provenance(createdBy: .script(owner: .world, name: "smelter"), createdTick: 9)
+        )
+        let record = ObjectRecord(
+            eventDeclarations: [kind.rawValue: declaration], revision: 3
+        )
+
+        let text = ObjectRecordCodec.encode(record)
+        XCTAssertEqual(
+            text,
+            "{\"attrs\":{},\"events\":{\"furnace.output_ready\":{\"by\":\"script:world:smelter\","
+                + "\"fields\":{\"count\":\"integer\",\"recipe\":\"string?\"},"
+                + "\"summary\":\"A smelted stack is ready.\",\"t\":9}},\"rev\":3,\"v\":1}"
+        )
+        let decoded = try XCTUnwrap(ObjectRecordCodec.decode(text, caps: caps))
+        XCTAssertTrue(decoded.entries.isEmpty)
+        XCTAssertFalse(decoded.isEmpty)
+        XCTAssertEqual(decoded.storageEntryCount, 1)
+        XCTAssertEqual(decoded.eventDeclarations[kind.rawValue], declaration)
+
+        let descriptor = try XCTUnwrap(
+            EventDescriptorRegistry.descriptor(for: kind, declaredOn: .world, in: decoded)
+        )
+        XCTAssertEqual(descriptor.payload.map(\.name), ["count", "recipe"])
+        XCTAssertEqual(descriptor.payload.map(\.isNullable), [false, true])
+        XCTAssertEqual(descriptor.summary, "A smelted stack is ready.")
+    }
+
+    func testMalformedCustomEventIsDroppedButSiblingAndRecordSurvive() throws {
+        let text = "{\"attrs\":{},\"events\":{" +
+            "\"block.broken\":{\"by\":\"player\",\"fields\":{},\"t\":1}," +
+            "\"quest.updated\":{\"by\":\"player\",\"fields\":{\"count\":\"integer\"},\"t\":2}," +
+            "\"quest.bad\":{\"by\":\"player\",\"fields\":{\"source\":\"string\"},\"t\":3}" +
+            "},\"rev\":4,\"v\":1}"
+        var diagnostics: [String] = []
+        let decoded = try XCTUnwrap(
+            ObjectRecordCodec.decode(text, caps: caps, diagnostic: { diagnostics.append($0) })
+        )
+
+        XCTAssertEqual(decoded.eventDeclarations.keys.sorted(), ["quest.updated"])
+        XCTAssertEqual(decoded.revision, 4)
+        XCTAssertEqual(diagnostics.count, 2)
+    }
+
+    func testDecodeEnforcesCombinedAttributeScriptEventEntryCapDeterministically() throws {
+        var record = ObjectRecord(entries: [
+            "attr": .value(
+                .int(1), readonly: false,
+                provenance: Provenance(createdBy: .player, createdTick: 0)
+            ),
+        ])
+        let script = ScriptRecord(
+            name: "script", source: "", enabled: true, mode: .module,
+            author: .player, createdTick: 0
+        )
+        record.entries["script"] = .script(script)
+        for name in ["zeta.event", "alpha.event"] {
+            let kind = try XCTUnwrap(EventKind.parse(name))
+            record.eventDeclarations[name] = CustomEventDeclaration(
+                kind: kind, fields: [],
+                provenance: Provenance(createdBy: .player, createdTick: 0)
+            )
+        }
+        var smallCaps = caps
+        smallCaps.maxEntriesPerObject = 3
+        var diagnostics: [String] = []
+
+        let decoded = try XCTUnwrap(ObjectRecordCodec.decode(
+            ObjectRecordCodec.encode(record), caps: smallCaps,
+            diagnostic: { diagnostics.append($0) }
+        ))
+        XCTAssertEqual(decoded.entries.count, 2)
+        XCTAssertEqual(decoded.eventDeclarations.keys.sorted(), ["alpha.event"])
+        XCTAssertEqual(decoded.storageEntryCount, 3)
+        XCTAssertTrue(diagnostics.contains { $0.contains("zeta.event") && $0.contains("too many entries") })
+    }
+
     func testBadEntriesAreDroppedRecordSurvives() {
         let text = """
         {"attrs":{\

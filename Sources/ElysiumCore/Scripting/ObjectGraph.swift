@@ -40,6 +40,26 @@ public protocol ObjectGraphHost: AnyObject {
     /// `world.gamerule.<name>` (getSet, existing rules only, Decision 7) —
     /// same reasoning: `GameCore.setGameRule` is world-global.
     func setGameRule(_ name: String, _ value: Double)
+    /// Authoritative built-in mutation seam. GameCore records event provenance and updates its
+    /// observable baseline around the same engine setter; lightweight test hosts may use the
+    /// default implementation when they do not own an EventBus.
+    func setScriptBuiltInAttribute(
+        _ live: LiveObject, ref: ObjectRef, name: String, value: AttrValue,
+        author: Provenance.Author
+    ) -> BuiltInSetOutcome
+    /// Commits one cell from an already-complete, non-fallible `block:setBlock` plan. GameCore
+    /// scopes the synchronous world hooks to `author`; the default keeps lightweight hosts simple.
+    func commitPrevalidatedScriptBlockCell(
+        _ world: World, x: Int, y: Int, z: Int, cell: Int,
+        author: Provenance.Author
+    )
+    /// Monotonic session-local definition generation. Every mutation/hydration/unload notification
+    /// advances it, while the bounded dirty-ref queue carries the exact work that generation names.
+    var scriptDefinitionGeneration: UInt64 { get }
+    func scriptDefinitionsDidChange(for ref: ObjectRef, hasScripts: Bool)
+    /// Removes at most `limit` canonically ordered dirty refs. Implementations retain every suffix
+    /// entry for a later phase; the runtime never needs to census the live world.
+    func drainDirtyScriptDefinitionRefs(limit: Int) -> [ObjectRef]
     /// lan-client-parity (change 4): the live `LANRemotePlayerEntity` for a
     /// connected guest, if the host currently mirrors one *in the current
     /// dimension* — `nil` when the peer isn't connected, or is connected but
@@ -57,6 +77,109 @@ extension ObjectGraphHost {
     /// mirror a LAN peer, so they get this for free instead of each having
     /// to implement a method they'd only ever return `nil` from.
     public func lanRemotePlayer(peerID: String) -> (entity: LANRemotePlayerEntity, world: World)? { nil }
+
+    public func setScriptBuiltInAttribute(
+        _ live: LiveObject, ref _: ObjectRef, name: String, value: AttrValue,
+        author _: Provenance.Author
+    ) -> BuiltInSetOutcome {
+        BuiltInAttributes.set(live, name: name, value: value, host: self)
+    }
+
+    public func commitPrevalidatedScriptBlockCell(
+        _ world: World, x: Int, y: Int, z: Int, cell: Int,
+        author _: Provenance.Author
+    ) {
+        world.setBlock(x, y, z, cell, SET_DEFAULT)
+    }
+
+    public var scriptDefinitionGeneration: UInt64 { 0 }
+    public func scriptDefinitionsDidChange(for _: ObjectRef, hasScripts _: Bool) {}
+    public func drainDirtyScriptDefinitionRefs(limit _: Int) -> [ObjectRef] { [] }
+}
+
+/// A deterministic deduplicating min-heap used for bounded script-definition work. Canonical UTF-8
+/// order makes continuation independent of Dictionary/Set hashing and insertion order.
+struct DeterministicStringWorkQueue {
+    private var heap: [String] = []
+    private var members = Set<String>()
+
+    var count: Int { heap.count }
+    var isEmpty: Bool { heap.isEmpty }
+
+    mutating func removeAll(keepingCapacity: Bool = false) {
+        heap.removeAll(keepingCapacity: keepingCapacity)
+        members.removeAll(keepingCapacity: keepingCapacity)
+    }
+
+    mutating func insert(_ value: String) {
+        guard members.insert(value).inserted else { return }
+        heap.append(value)
+        var child = heap.count - 1
+        while child > 0 {
+            let parent = (child - 1) / 2
+            guard utf8Less(heap[child], heap[parent]) else { break }
+            heap.swapAt(child, parent)
+            child = parent
+        }
+    }
+
+    mutating func popFirst() -> String? {
+        guard !heap.isEmpty else { return nil }
+        let first = heap[0]
+        members.remove(first)
+        if heap.count == 1 {
+            heap.removeLast()
+            return first
+        }
+        heap[0] = heap.removeLast()
+        var parent = 0
+        while true {
+            let left = parent * 2 + 1
+            guard left < heap.count else { break }
+            let right = left + 1
+            var child = left
+            if right < heap.count, utf8Less(heap[right], heap[left]) { child = right }
+            guard utf8Less(heap[child], heap[parent]) else { break }
+            heap.swapAt(parent, child)
+            parent = child
+        }
+        return first
+    }
+}
+
+/// Host-owned live-definition index plus its bounded deterministic dirty queue. `hasScripts`
+/// updates the index eagerly; the runtime still re-reads the live record when it drains a ref, so a
+/// rapid remove/recreate sequence collapses safely to the latest authoritative definition.
+public struct ScriptDefinitionChangeIndex {
+    private var scriptedRefs = Set<String>()
+    private var dirtyRefs = DeterministicStringWorkQueue()
+
+    public init() {}
+
+    public var scriptedRefCount: Int { scriptedRefs.count }
+    public var pendingRefCount: Int { dirtyRefs.count }
+
+    public mutating func reset() {
+        scriptedRefs.removeAll(keepingCapacity: false)
+        dirtyRefs.removeAll(keepingCapacity: false)
+    }
+
+    public mutating func record(_ ref: ObjectRef, hasScripts: Bool) {
+        let canonical = ref.canonical
+        if hasScripts { scriptedRefs.insert(canonical) }
+        else { scriptedRefs.remove(canonical) }
+        dirtyRefs.insert(canonical)
+    }
+
+    public mutating func drain(limit: Int) -> [ObjectRef] {
+        guard limit > 0 else { return [] }
+        var result: [ObjectRef] = []
+        result.reserveCapacity(min(limit, dirtyRefs.count))
+        while result.count < limit, let canonical = dirtyRefs.popFirst() {
+            if let ref = ObjectRef.parse(canonical) { result.append(ref) }
+        }
+        return result
+    }
 }
 
 /// The outcome of resolving an `ObjectRef`.
@@ -85,6 +208,26 @@ public enum LiveObject {
     case block(world: World, chunk: Chunk, cellIndex: Int, x: Int, y: Int, z: Int)
     case entity(Entity, World)
     case player(Player, World)
+}
+
+/// Canonical family name used by subscription `type=` filters and event `subjectType` metadata.
+/// Keep this beside `LiveObject` so custom-attribute, observable-built-in, position, command, AI,
+/// and Lua funnels can share the exact same block/entity/player/dimension spelling.
+public func scriptSubjectType(for live: LiveObject) -> String {
+    switch live {
+    case .world:
+        return "world"
+    case .dimension(let world):
+        return dimCanonicalName(world.dim)
+    case .block(_, let chunk, _, let x, let y, let z):
+        let cell = Int(chunk.get(posMod(x, CHUNK_W), y, posMod(z, CHUNK_W)))
+        let id = cell >> 4
+        return id >= 0 && id < blockDefs.count ? blockDefs[id].name : "block"
+    case .entity(let entity, _):
+        return entity.type
+    case .player:
+        return "player"
+    }
 }
 
 /// One entry in a deterministic nearby-objects listing (`objectsNear`).
@@ -273,7 +416,7 @@ public struct ObjectGraph {
             for (cx, cz) in chunkKeys {
                 guard let chunk = w.getChunk(cx, cz), !chunk.objectRecords.isEmpty else { continue }
                 for cellIndex in chunk.objectRecords.keys.sorted() {
-                    guard let record = chunk.objectRecords[cellIndex], !record.entries.isEmpty else { continue }
+                    guard let record = chunk.objectRecords[cellIndex], !record.isEmpty else { continue }
                     let (wx, wy, wz) = chunk.idxToWorld(cellIndex)
                     let dx = Double(wx) + 0.5 - x, dy = Double(wy) + 0.5 - y, dz = Double(wz) + 0.5 - z
                     let d2 = dx * dx + dy * dy + dz * dz

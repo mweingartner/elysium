@@ -32,6 +32,7 @@ struct ScriptEditorView: View {
 
             if aiPanelOpen {
                 ScriptEditorAIPanel(model: model)
+                    .id(model.documentIdentity)
                     .frame(minWidth: 280, idealWidth: 320, maxWidth: 440)
             }
         }
@@ -105,11 +106,14 @@ struct ScriptEditorView: View {
                 selectedRange: $model.selectedRange,
                 errorLine: model.errorLine,
                 targetKind: model.target.kind,
+                targetCanonicalRef: model.target.canonical,
                 theme: theme,
                 targetApplicableBuiltInAttributes: model.languageEnvironment.targetApplicableBuiltInAttributes,
                 targetCustomAttributes: model.languageEnvironment.targetCustomAttributes,
                 objectReferences: model.languageEnvironment.objectReferences,
+                scriptMode: model.languageEnvironment.scriptMode,
                 handlerEvent: model.languageEnvironment.handlerEvent,
+                eventCandidates: model.languageEnvironment.eventCandidates,
                 isYieldable: model.languageEnvironment.isYieldable,
                 inlineSuggestion: model.inlineAISuggestion,
                 isRequestingAISuggestion: model.isRequestingAISuggestion,

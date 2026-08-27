@@ -38,6 +38,11 @@ enum LuaCompletion {
                 .filter { kind.map($0.receiverKinds.contains) ?? true }
                 .map(item(for:))
 
+        case (.exactObject(let kind, _), .colon):
+            return ScriptLanguageSchema.handleMethods
+                .filter { kind.map($0.receiverKinds.contains) ?? true }
+                .map(item(for:))
+
         case (.object(let kind), .dot):
             var result = ScriptLanguageSchema.handleProperties.map(item(for:))
             if let kind {
@@ -62,37 +67,51 @@ enum LuaCompletion {
             }
             return result
 
+        case (.exactObject(let kind, let canonicalRef), .dot):
+            var result = ScriptLanguageSchema.handleProperties.map(item(for:))
+            if let kind {
+                let isExactTarget = canonicalRef == environment.targetCanonicalRef
+                let attributes = ScriptLanguageSchema.attributes(for: kind).filter { attribute in
+                    guard !attribute.dotAccessNames.isEmpty else { return false }
+                    guard isExactTarget,
+                          let applicable = environment.targetApplicableBuiltInAttributes else {
+                        return true
+                    }
+                    return applicable.contains(attribute.name)
+                }
+                result.append(contentsOf: attributes.flatMap { attribute in
+                    attribute.dotAccessNames.map { spelling in
+                        item(
+                            for: attribute,
+                            spelling: spelling,
+                            applicabilityIsCertain: isExactTarget
+                                && environment.targetApplicableBuiltInAttributes != nil
+                        )
+                    }
+                })
+            }
+            return result
+
         case (.attributes(let kind), .dot):
             // The current editor owns only the target object's live snapshot. Do not pretend those
             // custom names apply to a different same-kind handle.
             let compactReceiver = receiverText.replacingOccurrences(of: " ", with: "")
             guard kind == environment.targetKind, compactReceiver == "self.attrs" else { return [] }
-            let keywords = Set(ScriptLanguageSchema.keywords)
-            return environment.targetCustomAttributes.filter { attribute in
-                guard !keywords.contains(attribute.name), let first = attribute.name.utf8.first else { return false }
-                guard (first >= UInt8(ascii: "a") && first <= UInt8(ascii: "z")) || first == UInt8(ascii: "_") else {
-                    return false
-                }
-                return attribute.name.utf8.dropFirst().allSatisfy { byte in
-                    (byte >= UInt8(ascii: "a") && byte <= UInt8(ascii: "z"))
-                        || (byte >= UInt8(ascii: "0") && byte <= UInt8(ascii: "9"))
-                        || byte == UInt8(ascii: "_")
-                }
-            }.map { attribute in
-                LuaCompletionItem(
-                    label: attribute.name,
-                    insertionText: attribute.name,
-                    kind: .attribute,
-                    detail: attribute.typeName,
-                    documentation: attribute.summary,
-                    source: .liveObject,
-                    isReadOnly: attribute.isReadOnly,
-                    sortPriority: 0
-                )
+            return customAttributeItems(environment.targetCustomAttributes)
+
+        case (.exactAttributes(_, let canonicalRef), .dot):
+            let attributes: [LuaCustomAttributeCompletion]
+            if canonicalRef == environment.targetCanonicalRef {
+                attributes = environment.targetCustomAttributes
+            } else {
+                attributes = environment.objectReferences.first {
+                    $0.canonicalRef == canonicalRef && $0.isLive
+                }?.customAttributes ?? []
             }
+            return customAttributeItems(attributes)
 
         case (.event(let eventName), .dot):
-            return eventFieldItems(eventName: eventName)
+            return eventFieldItems(eventName: eventName, environment: environment)
 
         case (.table(let fields), .dot):
             return fields.keys.sorted().map { name in
@@ -113,21 +132,21 @@ enum LuaCompletion {
         }
     }
 
-    static func eventItems(quoted: Bool) -> [LuaCompletionItem] {
-        ScriptLanguageSchema.eventDescriptors
-            .filter { $0.availability.isCompletable }
-            .map { event in
-                LuaCompletionItem(
-                    label: event.kind.rawValue,
-                    insertionText: quoted ? event.kind.rawValue : "\"\(event.kind.rawValue)\"",
-                    kind: .event,
-                    detail: availabilityLabel(event.availability),
-                    documentation: event.summary,
-                    source: .elysium,
-                    isReadOnly: true,
-                    sortPriority: 0
-                )
-            }
+    static func eventItems(
+        quoted: Bool, candidates: [ScriptEditorEventCandidate]
+    ) -> [LuaCompletionItem] {
+        candidates.map { event in
+            LuaCompletionItem(
+                label: event.name,
+                insertionText: quoted ? event.name : "\"\(event.name)\"",
+                kind: .event,
+                detail: event.detail,
+                documentation: event.summary,
+                source: event.source == .builtIn ? .elysium : .liveObject,
+                isReadOnly: true,
+                sortPriority: 0
+            )
+        }
     }
 
     static func objectReferenceItems(
@@ -179,9 +198,14 @@ enum LuaCompletion {
         return inferredType(symbol.signatures.first?.returns.first?.type ?? symbol.valueType)
     }
 
-    static func returnType(forHandleMember member: String, kind: ObjectKind?) -> LuaInferredType {
+    static func returnType(
+        forHandleMember member: String, kind: ObjectKind?, canonicalRef: String? = nil
+    ) -> LuaInferredType {
         if let property = ScriptLanguageSchema.handleProperties.first(where: { $0.name == member }) {
-            if property.name == "attrs" { return .attributes(kind) }
+            if property.name == "attrs" {
+                return canonicalRef.map { .exactAttributes(kind, canonicalRef: $0) }
+                    ?? .attributes(kind)
+            }
             return inferredType(property.valueType)
         }
         if let kind, let attribute = ScriptLanguageSchema.attributes(for: kind).first(where: {
@@ -192,14 +216,23 @@ enum LuaCompletion {
         return .unknown
     }
 
-    static func typeOfEventField(_ field: String, eventName: String? = nil) -> LuaInferredType {
+    static func typeOfEventField(
+        _ field: String,
+        eventName: String? = nil,
+        environment: LuaLanguageEnvironment? = nil
+    ) -> LuaInferredType {
         switch field {
         case "kind", "source": return .string
         case "tick": return .integer
         case "subject": return .object(nil)
         default:
-            if let eventName,
-               let fieldDescriptor = ScriptLanguageSchema.event(named: eventName)?.payload.first(where: { $0.name == field }) {
+            let contextualDescriptor = environment?.eventCandidates
+                .first(where: { $0.name == eventName })?.payload
+                .first(where: { $0.name == field })
+            let staticDescriptor = eventName.flatMap { name in
+                ScriptLanguageSchema.event(named: name)?.payload.first(where: { $0.name == field })
+            }
+            if let fieldDescriptor = contextualDescriptor ?? staticDescriptor {
                 return inferredType(fieldDescriptor.type)
             }
             return .unknown
@@ -327,9 +360,45 @@ enum LuaCompletion {
         )
     }
 
-    private static func eventFieldItems(eventName: String?) -> [LuaCompletionItem] {
+    private static func customAttributeItems(
+        _ attributes: [LuaCustomAttributeCompletion]
+    ) -> [LuaCompletionItem] {
+        let keywords = Set(ScriptLanguageSchema.keywords)
+        return attributes.filter { attribute in
+            guard !keywords.contains(attribute.name), let first = attribute.name.utf8.first else {
+                return false
+            }
+            guard (first >= UInt8(ascii: "a") && first <= UInt8(ascii: "z"))
+                    || first == UInt8(ascii: "_") else {
+                return false
+            }
+            return attribute.name.utf8.dropFirst().allSatisfy { byte in
+                (byte >= UInt8(ascii: "a") && byte <= UInt8(ascii: "z"))
+                    || (byte >= UInt8(ascii: "0") && byte <= UInt8(ascii: "9"))
+                    || byte == UInt8(ascii: "_")
+            }
+        }.map { attribute in
+            LuaCompletionItem(
+                label: attribute.name,
+                insertionText: attribute.name,
+                kind: .attribute,
+                detail: attribute.typeName,
+                documentation: attribute.summary,
+                source: .liveObject,
+                isReadOnly: attribute.isReadOnly,
+                sortPriority: 0
+            )
+        }
+    }
+
+    private static func eventFieldItems(
+        eventName: String?, environment: LuaLanguageEnvironment
+    ) -> [LuaCompletionItem] {
         var fields = EventDescriptorRegistry.commonFields
-        if let eventName, let event = ScriptLanguageSchema.event(named: eventName) {
+        if let eventName,
+           let event = environment.eventCandidates.first(where: { $0.name == eventName }) {
+            fields.append(contentsOf: event.payload)
+        } else if let eventName, let event = ScriptLanguageSchema.event(named: eventName) {
             fields.append(contentsOf: event.payload)
         }
         var seen: Set<String> = []
@@ -361,15 +430,6 @@ enum LuaCompletion {
             if let replacement { parts.append("Use \(replacement) instead.") }
         }
         return parts.joined(separator: "\n\n")
-    }
-
-    private static func availabilityLabel(_ availability: ScriptLanguageAvailability) -> String {
-        switch availability {
-        case .available: "built-in event"
-        case .acceptedNoOp: "accepted; no effect"
-        case .reserved: "reserved"
-        case .unavailable: "unavailable"
-        }
     }
 
     private static func inferredType(_ type: ScriptLanguageValueType) -> LuaInferredType {

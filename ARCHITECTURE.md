@@ -30,10 +30,10 @@ This is the technical tour. The one-paragraph version: **ElysiumCore** is a head
 ┌──────────────────────────────────────────────────────────────────┐
 │ ElysiumStorage — sole SQLite owner, serial executor + authorizer  │
 └──────────────────────────────────────────────────────────────────┘
-                   sandboxed Lua calls only (no engine caller yet)
+                   sandboxed Lua calls through ScriptRuntime only
 ┌──────────────────────────────────────────────────────────────────┐
 │ ElysiumScript — sole Lua owner → CLua (vendored Lua 5.4.8 + C     │
-│ boundary/sandbox/budgets; script.* engine API is a later change)  │
+│ boundary/sandbox/budgets); Core owns object/event host bindings   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -201,6 +201,8 @@ LAN support follows the same core/app split as rendering and AI. `Sources/Elysiu
 
 `Sources/ElysiumCore/Net/LANReplication.swift` adds the core-only replication and authority layer. The host session tracks accepted peers, reconnect-preserved peer records, last player states, host-owned RPG state, inventory/XP snapshots, permissions, lifecycle state, replication acknowledgments, per-peer template undo snapshots, dirty chunk-section queues, and a deterministic coalescing block-change log. It clamps untrusted client player state through host permissions before publishing it and never trusts client-sent RPG snapshots in high-frequency player state; `recordRPGState` is the host-owned path that merges full RPG state only into direct RPG-change/restore snapshots, while normal periodic peer states stay lean. It rejects dead/disconnected/unknown players before mutation, enforces build/container/crafting/template/command/AI/creative/dimension/respawn permissions, and executes object-template copy/place/undo through the same validated template store and placement routines as local play, with place and undo sliced across host ticks through per-peer placement/undo jobs while copy stays synchronous. Host-side block intents check the peer's current dimension and reach before mutating the active world; remote `.useBlock` is intentionally limited to non-iron doors, non-iron trapdoors, and fence gates, where the host produces the same block delta as local play without running the full screen/item/sleep interaction path. Container-edit intents carry the peer inventory snapshot, a deterministic host block-entity revision, and up to two block-entity snapshots so linked large chests are validated and applied as one transaction; stale revisions, duplicate positions, incompatible blocks, out-of-reach targets, non-conservative item deltas, and invalid crafting transforms fail closed. Replication batches carry capped world-state snapshots, lean player states, chunk-section snapshots, block deltas, complete-list entity snapshots, player inventory snapshots, and item-bearing block-entity snapshots for containers and crafting stations. Template place/undo streams per-block deltas through the same `onWorldBlockChanged` change log as every other block mutation while the job steps, and marks affected chunk sections dirty once on completion so large object mutations still receive authoritative section snapshots without overflowing the delta log. Block-entity snapshots carry slot counts plus sparse item slots for `container`, `hopper`, `furnace`, `brewing`, `shelf`, `campfire`, and `crafting` entities; clients validate dimensions, chunk/block readiness, block compatibility, slot ranges, item ids, and stack counts before mutating an existing `BlockEntityData` in place or creating a compatible mirror. LAN client worlds keep a bounded deferred replication buffer for block changes and block-entity snapshots that arrive before their chunk; replay runs after authoritative sections and block changes so container contents are not lost during chunk-stream timing gaps. World-state snapshots carry host time, day time, weather, difficulty, and dimension so clients do not run an independent clock. Entity snapshots include bounded dropped-item stack payloads and XP-orb amounts; clients validate entity type/item id/count/XP fields, materialize non-persistent LAN mirror entities in `World`, skip normal ticks for those mirrors, and remove stale mirrors only when the batch explicitly marks its entity list complete. Transient LAN client worlds also suppress saved/worldgen entity adoption and purge any non-authoritative local entity that is not the local player, a remote-player proxy, or a host-published mirror, keeping spawned mobs/drops/XP host-owned. Client-side apply stores a bounded mirror and drops malformed world-state dimensions, chunk sections, registry-invalid block cells, invalid block-entity payloads, or invalid entity payloads before anything can reach `World`. Chunk-section application calls the normal dirty-section hook so replicated sections remesh through the same path as local block edits.
 
+The event-only `.toolStrike` block action never mutates the world. A guest sends only its observed target, face, selected slot, and a positive monotone client-world sequence; the host validates build authorization, player lifecycle, dimension, reach, current block/cell, selected inventory slot, and usable registered tool before reconstructing and raising the standard `block.toolStrike` event from authoritative state. The host checks both a connection-local sequence high-water mark and the last valid target: gaps are accepted, stale/replayed sequences and fresh sequences for the same target are ignored, semantic rejection consumes the sequence without resetting the target, and a valid move to another block permits a later return to the first. Reconnect begins a new sequence/target epoch so either a continuing or reset client counter remains valid.
+
 `Sources/ElysiumCore/Net/LANGameplayOrchestration.swift` owns the runtime remote-player integration: transient `LANRemotePlayerEntity` instances render with the normal player model but are not saved as chunk entities, convert network player yaw into the player-model facing convention, and helper functions spawn/update/remove them from host/client worlds based on replicated player snapshots, death state, dimension, and local-player id. On the host, those proxies carry the peer's authoritative LAN-session inventory/XP and run the bounded item/XP pickup path for host-owned dropped entities; clients still cannot pick up mirrored dropped items locally, and instead apply only the host inventory snapshot addressed to their own peer id. Remote-player rendering uses a render-only presentation pose that eases toward the latest authoritative snapshot and snaps across teleport-scale deltas, so local render partial resets never move a watched player back to an older network position. The renderer hides only the local player in first-person mode, so remote players remain visible while the camera is first-person.
 
 `Sources/Elysium/LANTransport.swift` is the only local-network adapter. It imports Network.framework, advertises and browses `_elysium-lan._tcp` with Bonjour, hosts a TCP listener on the player-selected port, Direct Connects to an explicit host/port, performs join-code handshakes, routes accepted LAN chat/status messages, sends initial and periodic host replication batches with bounded entity and block-entity snapshots, applies client batches on the main game thread, applies remote player and mirrored world entities to the live world, preserves host peer records on disconnect for reconnect, and routes block/container/template/RPG intents only through host-validated requests. RPG creation, skill learning, preparation, attribute spending, spell/skill selection, spell casting, and active-skill use are typed `LANRPGIntent` messages. The host applies non-world RPG progression to its peer record after registry validation, and resolves remote spell casts and active-skill uses through `LANHostGhostRegistry` so fatigue, cooldowns, XP awards, block changes, entity damage, summons, repairs, redstone toggles, and teleport-scale movement all go through the same host-authoritative world routines as local play; cast/use intents require an exact-next action sequence to reject duplicates and future-skipping replays. Host foreground replication publishes lean player state plus drained block deltas, dirty chunk sections, and dirty block-entity contents at 20 Hz with interactive priority. Lower-rate background replication publishes world time/weather summaries, inventory display snapshots, relevance-filtered entity snapshots around connected players, and small block-entity fill snapshots; background-only deltas are skippable under per-peer send-count or send-byte backpressure, but block deltas, chunk sections, and block-entity contents are not treated as stale and dirty block-entity positions are requeued when encoding or send eligibility prevents delivery. Host block mutations from plants, fluids, redstone, weather effects, templates, RPG actions, and other runtime systems are captured through `WorldHooks.onBlockChanged` into the coalescing block-change log; completed interactive template placements also mark their undo snapshot's affected chunk sections dirty so large local placements reach all clients. Initial and chunk-request snapshots include chunk sections plus a smaller block-entity item set so the combined frame stays under the `PBLN` cap; periodic ticks send chunk sections only when a dirty-section queue exists. When a title-screen client is accepted, `GameCore.enterLANClientWorld(_:)` opens a transient renderable world from the host summary, restores a local per-host-world LAN resume player snapshot when one exists, otherwise keeps the local player at the advertised spawn height until authoritative chunks arrive, and requests host chunk-section snapshots instead of generating local seed chunks; the first missing-chunk request is center-first and asks for a bounded 3x3 visible neighborhood. The host centers the initial chunk snapshot on the peer's restored host record when it is in the active dimension, otherwise on spawn, and caps synchronous chunk generation per request so one guest cannot stall the host frame. LAN clients open host-published container, furnace, brewing, and crafting-table block entities as mirrored interactive screens whose edits are submitted back as revision-gated host-validated container-edit intents, and send typed host-authoritative use intents for openable doors, trapdoors, and fence gates. `saveAndFlush` refuses to persist that LAN client world as a local singleplayer save, but it does update the local `lan_player_resume` player snapshot keyed by the host world id and seed so reconnecting to the same hosted map resumes at the client's last local position. The current host authority rule remains conservative: clients may send player state, chunk requests, acknowledgments, and typed intents, but arbitrary remote command execution, direct world/save writes, client-authored RPG authority, and client-authored container state are not accepted. Remaining LAN hardening is tracked in [LAN_MULTIPLAYER_PLAN.md](LAN_MULTIPLAYER_PLAN.md), primarily longer two-Mac installed-app soak around combat, death/respawn, reconnect, and contention.
@@ -255,7 +257,10 @@ ever reaches script code. Budgets are exact and host-recorded, never trusted to 
 `LUA_MASKCOUNT` instruction hook fires every 1,000 VM instructions against a per-resume slice
 (default 5,000, yielding `.preempted` and re-executing the interrupted instruction on resume) and a
 per-coroutine total (100,000; a top-level `call()` with no enclosing coroutine treats its slice as
-hard); an allocation-rate budget (2 MiB/slice) and a hard 16 MiB per-state memory cap trip the same
+hard). Core's attached-script scheduler adds the global 50,000-per-tick/250,000-bucket limit,
+conservative one-quantum minimum charging, debt repayment, consecutive-preemption fault, and
+64-suspended-coroutines-per-script/1,024-per-world caps. An allocation-rate budget (2 MiB/slice) and a hard 16 MiB
+per-state memory cap trip the same
 way; the vendored pattern matcher counts its own steps (`ELYSIUM_MATCH_STEPS`, 100,000/call), and
 every library wrapper caps its input/output size (`rep`/`concat`/`format`/`pack`/`gsub` results
 ≤ 65,536 bytes, `..` concatenation ≤ `ELYSIUM_MAX_STRING` 262,144 bytes, positional
@@ -297,25 +302,23 @@ copy changes. `detExp`/`detLog`/`detPow` are pinned the same way against an inde
 netlib fdlibm reference (`scripts/fdlibm-reference/`, `goldens/fmath-explog-goldens.json`, frozen
 and never regenerated).
 
-This change alone still never constructs a `LuaState`: object-graph-attributes (below) adds real
-command, persistence, and world-mutation surface (`/attr`, `/inspect`, `/objects`, persisted
-per-block attribute bags, reserved entity uids) on top of `AttrValue = ScriptValue`, but none of it
-runs a script — the Lua API verb surface, `EventBus`, and actual script execution against this data
-are later changes in the scripting programme. This change lands the runtime itself (determinism/
-sandbox/budget guarantees, the gates that keep them pinned) plus the data/command layer scripts will
-eventually read and write.
+`ScriptRuntime` now constructs one isolated `LuaState` environment per loaded script in an open,
+host-authoritative world session. Core exposes the object graph, typed attributes, event declarations,
+subscriptions, timers, and bounded world verbs through `ScriptRuntimeAPI`; the interpreter remains a
+sandboxed execution component and never receives direct engine ownership. The sections below describe
+that application layer and its persistence and LAN boundaries.
 
 ## Object graph and attributes
 
-`Sources/ElysiumCore/Scripting/` also carries a data/command layer with no script execution of its
-own — the vocabulary later scripting changes will read and write, exercised today only through
-chat commands and persistence. `ObjectRef` (`ObjectRef.swift`) is a strict value type over a
+`Sources/ElysiumCore/Scripting/` carries the object vocabulary shared by chat commands, the native
+editor, AI tools, persisted scripts, and live Lua execution. `ObjectRef` (`ObjectRef.swift`) is a
+strict value type over a
 canonical string grammar (`entity:<uid>`, `block:<dim>:x,y,z`, plus the `self`/`looking` aliases a
 command target resolves before parsing) — never round-tripped through a looser parser. `ObjectGraph`
 (`ObjectGraph.swift`) resolves a ref to a live object side-effect-free over a small
 `ObjectGraphHost` protocol (`localPlayer`, `currentTick`, world/entity lookups) that `GameCore`
-conforms to via `GameCore+Scripting.swift`; nothing in this layer mutates the world or holds engine
-state of its own.
+conforms to via `GameCore+Scripting.swift`; resolution itself is side-effect-free, while all writes
+flow through the stores and host bindings described below.
 
 `AttrValue` is `ScriptValue` reused directly (`AttrValueCodec.swift`) rather than a second value
 type at this seam — the same currency the embedded Lua runtime already marshals. Its canonical JSON
@@ -323,7 +326,14 @@ codec is a hand-rolled recursive-descent parser (never `JSONSerialization`, whic
 the `Int64`/`Double` distinction or reject duplicate keys) with sorted UTF-8-byte-order keys,
 strict integer/float grammar (`-0` is int `0`, `e+` exponents accepted as float, Int64-overflow
 integer tokens refused), and only `true`/`false` boolean literals. `ObjectRecord`/`AttributeEntry`/
-`Provenance` (`ObjectRecord.swift`) are the persisted attribute bag a block or entity carries;
+`Provenance` (`ObjectRecord.swift`) are the persisted attribute and script bag a block or entity
+carries. Typed custom event declarations are deliberately separate object-scoped metadata in
+`ObjectRecord.eventDeclarations`, encoded as a sibling section rather than masquerading as mutable
+attributes or scripts. `CustomEventStore` is their sole mutation path. Each declaration has a name,
+optional summary, and up to 32 named payload fields whose types are `any`, `boolean`, `integer`,
+`number`, `string`, `object`, `list`, or `map`, optionally nullable with `?`; each object may declare
+at most 16 events and a summary is capped at 256 bytes. Declarations also consume the shared bounded
+object/chunk/world record budgets, so metadata cannot bypass the existing persistence caps.
 `AttributeRegistry` (`AttributeRegistry.swift`) is a pure-data table of built-in descriptors
 (kind, mutability, applicability, `didYouMean` suggestions), and `BuiltInAttributes` funnels typed
 get/set through it. `BlockStateCodec` (`BlockStateCodec.swift`) is a verified meta-bit codec per
@@ -340,11 +350,11 @@ event bus's own seam into it (below).
 and enforce entry/value-size/record-size caps; `ScriptingCommands` (`ScriptingCommands.swift`)
 implements `/attr`, `/inspect`, and `/objects` against it and against `ObjectGraph`, capping output
 at 40 lines and truncating display strings on Character boundaries. Host authority is enforced at
-this layer today, ahead of any script-eventing change: every `AttributeStore` mutator and
-`ScriptingCommands.run` refuse outright when the caller is a LAN client, and `CommandsM.swift`'s
-dispatch consults the same pure `lanClientRefusal(command:)` decision function before ever reaching
-the command implementation, so a guest cannot mutate host-authoritative attribute state through
-`/attr`, `/inspect`, `/objects`, or `/ai` and its `/agent` alias.
+this layer: a guest never mutates its mirror. With an explicit host grant, forwardable `/attr`,
+`/events`, `/on`, `/unsubscribe`, `/script`, and AI intents are revalidated and executed by the host
+through the same stores and runtime used locally. Lua uses the same boundary: any script may obtain
+any live handle and operate on it, but cannot manufacture a live object or bypass liveness,
+applicability, mutability, record caps, trust, or provenance checks.
 
 Entity identity is now durable across saves: `Entity.id` is `private(set)`, persisted as `"id"` in
 save JSON, and reserved through a hi/lo block protocol (`installEntityIdReservation`/
@@ -354,36 +364,56 @@ session already used. `EntityRegistry.loadEntity` adopts a saved `"id"` only whe
 genuine integer-typed JSON number in range; a non-canonical or out-of-range value is discarded and
 a fresh id is minted instead. Chunk blobs gained a parallel `objects` tail (keyed by cell index,
 `.sortedKeys`-serialized so Dictionary bridging order never leaks into the byte stream) alongside
-the existing block-entity tail, and `WorldRecord.scriptsEnabled` is the trust gate later scripting
-changes will read before ever compiling a world-authored script.
+the existing block-entity tail. Object records preserve attributes, scripts, and custom event
+declarations together across save/load; `WorldRecord.scriptsEnabled` remains the independent trust
+gate checked before compiling world-authored scripts.
 
 ## Event bus
 
-`EventBus` (`Scripting/EventBus.swift`) is the eventing substrate later scripting changes execute
-handlers against — this change delivers the substrate with no script execution of its own (no
-`LuaState` involved anywhere in this layer). `EventKind` (`EventKind.swift`) is a validated string,
-not a closed enum — the v1 catalog (`"attribute.changed"`, `"block.broken"`, …) and a script/
-player-defined custom kind (`"lumber.milestone"`) are structurally indistinguishable, matching
-design.md §7.1's own typing. `ScriptEvent` carries `seq` (assigned at enqueue, the sort key for
+`EventBus` (`Scripting/EventBus.swift`) is the host-authoritative substrate used by persisted and
+script-owned handlers. `EventKind` (`EventKind.swift`) is a validated string, not a closed enum: a
+produced standard event (`"attribute.changed"`, `"block.broken"`, …) and a custom event
+(`"lumber.milestone"`) are structurally indistinguishable. `EventDescriptorRegistry` is the
+canonical authoring catalog, with universal attribute/lifecycle events plus kind-specific world,
+dimension, block, entity, and player events, including living-entity and mob interactions. A matching object declaration adds
+payload documentation and strict field validation; an undeclared, grammatically valid custom event
+remains legal for compatibility and is delivered without declaration-based validation. Standard
+events are engine-produced facts: untrusted manual funnels (`emit`, `h:emit`, `/events emit`, LAN,
+and AI) reject every built-in name, while concrete engine producers raise them directly. `ScriptEvent`
+carries `seq` (assigned at enqueue, the sort key for
 delivery order), `tick` (`rpgSimulationTick`, not `world.time` — the one clock the Lua API will
-expose), `subject`, `payload`, `source`, and an internal `cascadeDepth`/`subjectType` the bus alone
-uses for cap enforcement and kind-wildcard type-filter matching.
+expose), `subject`, `payload`, `source`, and internal delivery metadata the bus alone uses for cap
+enforcement and kind-wildcard type-filter matching. A dedicated `isSyntheticPositionChange` bit
+distinguishes quantized movement from a legal custom attribute whose physical key is also `pos`;
+it participates in coalescing identity and never enters the Lua payload.
 
 Subscriptions come in two flavors sharing one matching shape (`SubscriptionTarget` — `.object(ref)`,
 `.kind(kind, typeFilter)`, `.any`): **persisted** (`Subscription`, `/on`/`/unsubscribe`, natural-key
 upsert, stored in `WorldRecord.scriptRegistry` via `SubscriptionRegistryCodec` — the same "opaque
 document, tolerant per-entry decode, encoded only when non-empty" discipline as `ObjectRecordCodec`
-and `objects`) and **script-owned** (`ScriptOwnedSubscription`, in-memory only, an opaque `token`
-1c will populate with a real Lua closure identity — this change owns only the data shape and the
-load/unload bookkeeping). Both share one ascending id space so §7.4's "persisted and script-owned
-subscriptions in ascending id" delivery order is unambiguous without a secondary sort key.
+and `objects`) and **script-owned** (`ScriptOwnedSubscription`, in-memory only, with an opaque token
+bound to the Lua closure or handler that registered it). Both share one ascending id space so §7.4's
+"persisted and script-owned subscriptions in ascending id" delivery order is unambiguous without a
+secondary sort key. Registrations are capped at 32 per owner and 512 per world across both flavors.
+Exact-event buckets, object/kind interest indexes, and constant-time registration lookup keep the
+no-listener and unrelated-event hot paths O(1); delivery scans only the bounded bucket that can match
+the event, rather than every subscription in the world.
 
 Delivery (`EventBus.runDeliveryPhase`) drains the pending queue in `seq` order — always sorted by
 construction (append-only; a coalesce removes the stale entry and re-appends with a fresh seq,
 never mutates in place) — up to 2,048 deliveries and 8 cascade-depth levels per tick, computing each
-event's ordered recipient list and handing it to a `delivery` closure that is `nil` in this change
-(no handler runtime exists yet — 1c plugs a real dispatcher in without any other API change).
-Coalescing merges undelivered `attribute.changed` (per subject+key) and `block.changed` (per
+event's ordered recipient list and handing it to `ScriptRuntime.deliver`. Runtime admission is
+one ordered recipient at a time: when the global Lua instruction bucket is empty, the bus retains
+the exact cursor without advancing or claiming delivery. Recipient-free events consume a bounded
+phase work unit too, so an 8,192-event no-listener burst cannot be scanned without limit in one tick.
+Retention is bounded by bytes as well as counts: one canonical payload is at most 16 KiB, the pending
+queue plus an in-progress delivery cursor and the sole deferred over-budget diagnostic retain at most
+4 MiB, and the recent-event ring retains at most 512 KiB in addition to its 128-entry ceiling. Payload
+sizing walks the value tree without constructing an encoded copy, reapplies bounded map/list/depth/node
+shapes and 256-byte map keys, and stops at the first byte overflow. Coalescing preflights the replacement
+transactionally, so a refused larger merge leaves the old event and its byte charge intact; transfers
+between the sparse queue, a stalled cursor, and the deferred diagnostic preserve exactly one charge.
+Coalescing merges undelivered `attribute.changed` (per subject+key+ordinary/synthetic lane) and `block.changed` (per
 position) entries, keeping the first `old`/last `new`/last `seq`; a full queue or an exhausted
 per-handler budget (`EventBus.withHandlerContext`) drops the excess deterministically and raises
 exactly one `script.overBudget` per tick.
@@ -394,48 +424,77 @@ Funnels reach the bus through two seams: a new `WorldHooks.raiseScriptEvent` clo
 `LivingEntity.hurt/die/heal`, `Mob.setTarget`, `Interact.placeBlock/finishBreaking/useBed`,
 `Combat.playerAttack`, and `Explosion.explode` — and a pre-filtered `EventBus.recordBlockChange`
 called directly from `hookWorld`'s extended `onBlockChanged` closure (the one funnel that gates on
-an existing `ObjectRecord` or a matching kind-wildcard subscription *before* decoding block state
-through `BlockStateCodec`, per design.md §6.6's zero-scripts fast path). `AttributeStore.onChange`
+an existing `ObjectRecord` or a matching indexed exact-object/block-kind subscription *before*
+constructing an event payload, per design.md §6.6's zero-scripts fast path). It receives the complete
+old/new cells, so an id-stable metadata write still emits and `oldMeta`/`newMeta` are the actual low
+nibbles rather than bits from the registry id. `AttributeStore.onChange`
 (now carrying the mutation's `Provenance.Author` so `attribute.changed`'s `source` is accurate)
-feeds custom-attribute writes in; a per-tick observable-built-in diff (`GameCore+Scripting.swift`,
-gated on `EventBus.hasAnySubscription`/`hasAttributeChangedInterest` so an unobserved world pays
-nothing) feeds `health`/`max_health`/`on_fire`/`target`/`hunger`/`xp_level`/`dimension`/
-`held_item`/`sitting`/`baby`/`tamed` and world/dimension `difficulty`/`day_phase`/`raining`/
-`thundering`, plus the position-quantized-to-1/10-block special case that is excluded from
-unfiltered subscriptions and `/events recent` alike. Two funnels (`player.pickedUp`/`player.dropped`)
+feeds custom-attribute writes in. Scripting writes to built-ins use the host's
+`setScriptBuiltInAttribute` seam, which preserves writer provenance; block cell fields publish from
+the synchronous `World.setBlock` hook, while other object families publish the setter's exact
+before/after pair. Engine-driven built-ins use a per-tick observable diff
+(`GameCore+Scripting.swift`) over only the names selected by the event bus's bounded attribute-interest
+index; an unobserved object pays no field-read cost, and the first polled value establishes a baseline
+without fabricating a startup change. Exact block observers additionally poll dynamic light and
+block-entity fields that do not pass through `World.setBlock`; metadata-backed block fields publish
+from the cell hook for exact and type-filtered observers. Synthetic position is the
+quantized-to-1/10-block special case excluded from unfiltered subscriptions and `/events recent`
+alike; an ordinary custom `pos` attribute remains visible to unfiltered subscriptions and cannot
+coalesce with movement. Two funnels
+(`player.pickedUp`/`player.dropped`)
 are a before/after inventory diff around their real call sites in `GameCore.swift` rather than an
 instrumented call inside `Player.swift`, which this change never touches; `player.leveled` is
 likewise derived from the `xp_level` diff rather than a direct `Player.addXP` hook, for the same
 reason.
 
+`block.toolStrike` is raised at the real mining-input boundary, once when a player first strikes a
+new block target while holding an item with tool metadata; continued mining of that same target does
+not repeat the event. A survival strike on an unbreakable block still fires—the event describes the
+tool contact, not successful break progress. Its exact payload is `by: object`, `item: string`, `blockName: string`,
+`face: string`, `toolType: string`, `tier: integer`, and `instant: boolean`. LAN guests send only a
+sequenced strike intent: the host re-derives the names and tool properties from its current player,
+inventory, reach, dimension, face, and block state before raising the event. Damage and death events
+carry the canonical `cause` field, and `block.broken` carries `blockName`, so runtime payloads,
+editor completion, and AI authoring share the same names.
+
 The event-bus tick phase (`GameCore.runEventBusPhase`) sits after the dead-entity sweep and before
 `tickEntityTriggers`, host-only and pause-aware like the sweep it follows: diff, then
-`EventBus.runDeliveryPhase`, then `World.drainPendingObjectRecordDrops` (so a `block.replaced`
-delivery always sees the record it describes, and the record is dropped only *after* delivery — the
-seam the previous section's `World.setBlock` comment points to). `GameCore.unloadChunk` calls
+`EventBus.runDeliveryPhase`, then `World.drainPendingObjectRecordDrops`, so the record is dropped
+only after deliveries caused by the final mutation. `block.replaced` remains a reserved name with no
+shipped producer. `GameCore.unloadChunk` calls
 `handleScriptedChunkUnload` before capturing the chunk record for persistence: it finalizes any
 pending record drop for a cell in that chunk and drops every script-owned subscription rooted at an
 object leaving scope, in the sorted order the caller already computed.
 
-`ScriptingCommands` gained `/on <target> <event> [attr] <script.handler>`, `/unsubscribe <id>`, and
-`/events recent|emit` — host-only via the same `lanGatedCommands` set and `CommandsM` choke point as
-`/attr`/`/inspect`/`/objects`/`/ai`.
+`ScriptingCommands` exposes `/on <target> <event> [attr] <script.handler>`, `/unsubscribe <id>`,
+`/events recent [n]`, `/events list <target>`,
+`/events define <target> <event> [field:type ...] [--summary text]`,
+`/events remove <target> <event>`, and `/events emit <target> <custom-event> [payload-json]`. Define,
+remove, and custom-event emission are host-executed mutations; list and recent are
+read paths. A granted LAN guest may forward define/remove/emit, but never executes them locally.
 
 ## Script lifecycle (ScriptRuntime)
 
 `ScriptRuntime` (`Scripting/ScriptRuntime.swift` + `ScriptRuntimeAPI.swift`) is the one `LuaState`-
 owning object per open (host-only) world session — `GameScriptingState.scriptRuntime`, created in
-`enterWorld` right after `hookWorld` runs for every dimension, destroyed in `exitToTitle` after every
-live script's `unload` has run. It plugs into `EventBus.delivery` (1b's reserved seam) and owns the
+`enterWorld` right after `hookWorld` runs for every dimension, destroyed in `exitToTitle` after live
+environments and their subscriptions are closed. It plugs into `EventBus.delivery` (1b's reserved seam) and owns the
 whole §7.5 phase order inside the renamed-in-place `GameCore.runEventBusPhase()`: loads → the
 existing observable-built-in diff → AI inbox → resumptions (preempted/`wait`-suspended coroutines,
 then durable timers due this tick) → `EventBus.runDeliveryPhase` (now dispatching into
-`ScriptRuntime.deliver`) → RNG-state persistence. A single boolean,
-`GameScriptingState.anyScriptsAttached`, is the zero-cost fast path every step checks first; it is
-set by `ScriptStore.attach`'s callers (`/script attach`, the editor's Save, a script's own
-`h:attach`) and, as a backstop for scripts already on disk that never went through one of those
-paths, re-checked every 20th tick even while still `false` (a scan that finds nothing changes no
-state, so it cannot affect determinism).
+`ScriptRuntime.deliver`) → RNG-state persistence. `GameScriptingState.anyScriptsAttached` is a
+session summary hint, not a discovery gate. Exact definition work lives in the host-owned
+`ScriptDefinitionChangeIndex`: `ScriptStore` enqueues the canonical ref after attach, detach,
+enable, or disable; world/dimension record decode and every entity/chunk persistence hydration or
+unload seam enqueue the same ref. An active-dimension transition requeues only the old and new
+dimension bags, so a persisted dormant bag is reconciled when it becomes live without a census.
+The index deduplicates refs in a canonical UTF-8 min-heap and
+retains every unconsumed suffix. Each script phase reconciles at most 64 refs, then examines and
+starts at most 64 canonically ordered script loads; edits replace only their own pending value, so
+a later generation change cannot discard an older backlog. Live records are re-read before compile
+to reject stale queued snapshots. There is no periodic whole-world script-definition census: an
+unchanged world pays only constant-time empty-queue checks, while a large hydration burst makes
+deterministic bounded progress over later phases.
 
 **Records and storage.** `ScriptRecord` (module/handler mode, triggers, author, RNG words) is a new
 `AttributeEntry.script` payload living in the *same* `ObjectRecord.entries` bag as `.value` entries
@@ -448,18 +507,34 @@ compiles or runs — that happens the next time `runLoads()` sees it pending). D
 separate from `scriptRegistry` rather than folded into 1b's `SubscriptionRegistryCodec` shape, so
 that already-reviewed codec stays untouched.
 
+Attributes and scripts share one entry-name namespace inside an `ObjectRecord`, but neither API may
+replace the other entry kind. `AttributeStore.set`/`define`/`remove` refuse a script name and
+`ScriptStore.attach`/`detach`/`setEnabled` refuse an attribute name without changing the record
+revision or lifecycle queue. The caller must explicitly detach the script or remove the attribute
+first, preserving unload/reconciliation and lifecycle-budget boundaries.
+
 **Lifecycle.** A pending script is compiled into its own `ScriptEnvironment` (frozen host-binding
 tree, per-script `RandomX` seeded from `(ref, name, createdTick)` — not `worldSeed`, a deliberate
 simplification since the stream only needs to be unique *within* one world) and, for module mode,
 run once via a pooled coroutine; completing marks it live and raises `load`. Handler-mode scripts are
-**not** run at load — only compiled (to catch syntax errors) and indexed as script-owned
-subscriptions per their persisted `triggers`; the chunk is recompiled fresh against a wrapped
-`local self, world, player, ev = ...` preamble and resumed on every matching delivery (§8.1: "the
-chunk *is* the handler" only once a real event exists — running it earlier against a synthetic empty
-`ev` would only ever fault on `ev.subject`/`ev.<field>`). Module-mode `on`/`subscribe` closures
+**not** run at load — their wrapped `local self, world, player, ev = ...` chunk is compiled once (to
+catch syntax errors), cached on the live script instance, and indexed as script-owned subscriptions
+per their persisted `triggers`. Every matching delivery starts a fresh coroutine from that cached
+function (§8.1: "the chunk *is* the handler" only once a real event exists — running it earlier
+against a synthetic empty `ev` would only ever fault on `ev.subject`/`ev.<field>`). Module-mode
+`on`/`subscribe` closures
 capture `self`/`world`/`player` lexically from the enclosing chunk and are invoked later with just
 `ev`. `wait(n)` and `ai.await(...)` yield the coroutine (`.wait`/`.await` reasons); `runResumptions()`
-wakes them in ascending `(wakeTick, ordinal)`. `ai.ask`/`ai.await` are served by one of two seams on
+wakes them in ascending `(wakeTick, ordinal)`. All attached loads, resumptions, due timers, AI-await
+replies, and event recipients share the scheduler's 50,000-instruction-per-tick token refill and
+250,000-token bucket. Every resume is charged at least the pinned 1,000-instruction hook quantum;
+overrun remains signed debt, rather than disappearing at zero. Preemption re-appends with a fresh
+ordinal for deterministic FIFO fairness; 20 consecutive preemptions or a 65th suspended coroutine
+for one script faults that invocation, and a second 1,024-coroutine cap bounds the world. Loads, AI,
+resumptions, and timers reserve four, three, two, and one downstream hook quanta respectively; with
+the production budget this prevents any earlier lane from starving a later one while retaining the
+fixed phase order. `/script stats` and F3 expose the live counts and token state.
+`ai.ask`/`ai.await` are served by one of two seams on
 `ScriptRuntime`, chosen at `runAIInbox()` time: the original 1c synchronous stub responder
 (`aiResponder`, still exactly what every 1c/elysmoke test injects and still the production default
 when nothing else is attached — every request times out) or, when the app layer's per-frame pump has
@@ -467,8 +542,16 @@ attached one (production, since change 2), the real async broker seam (`outboxHa
 `submitAIReply` — see "AI object graph tool loop" below for the full path). Either way `ai.ask` never
 suspends (an `ai.replied` event follows once a reply — real or stub — is known), `ai.await` genuinely
 yields on `.await(token)` and is resumed from the AI-inbox step, always at the fixed phase point, never
-mid-tick. Unload (chunk eviction, `exitToTitle`) runs any `on("unload")` closure registered via
-`register(name, fn)` (see below) and destroys the environment.
+mid-tick. Reply consumption is transactional: if no instruction slice is available, the ordered
+reply suffix, request mode, in-flight slot, and exact suspended coroutine remain intact for the next
+tick. Script edit, disable, detach, chunk eviction, and `exitToTitle` tear down the old
+environment and its live subscriptions/coroutines. Before destroying a live module environment,
+`ScriptRuntime` synchronously invokes the closure named by `register("unload", fn)`, if present. This
+is a separate no-argument finalizer, not an EventBus event: `on("unload")`, `subscribe`, handler mode,
+the event picker, and `/events list` do not offer a delivery path. While the finalizer runs, the only
+persistent side effects permitted are custom-attribute writes on live handles; yielding, timers, AI,
+emission/subscription/registration, declaration or script mutation, world/built-in mutation, RNG,
+and player/audio/particle output are refused.
 
 **Lua API v1** (`ScriptRuntimeAPI.swift`) is one handle kind ("object": every world/dim/block/
 entity/player ref, uniform dispatch keyed by the ref string alone — not five separate kinds) plus a
@@ -477,22 +560,57 @@ second ("attrs": the live `h.attrs` proxy, a synthetic `"attrs:<ref>"` identity)
 compiled chunk's *arguments* via the wrapping preamble above, exactly like handler `ev`. Three
 adaptations were necessary because `ElysiumScript`'s shipped surface (change 0/1a) has no way to read
 an arbitrary Lua global by name or iterate a userdata's fields from Swift:
+
+Every live object handle exposes `h:events()`, `h:declareEvent(name[, fields][, summary])`,
+`h:undeclareEvent(name)`, `h:on(event[, opts], fn)`, `h:onAttribute(name, fn)`, and
+`h:emit(customEvent[, payload])`. This object-first form makes cross-object behavior explicit: a script can
+resolve a nearby door, sensor, mob, or player and register or emit a custom event directly on that handle. The
+global `on`, `subscribe`, and `emit` functions remain compatibility/convenience forms and route into
+the same indexed bus and declaration validator; they do not have a wider authority surface and
+cannot forge engine-produced built-ins. Global `on` and `subscribe` use one fail-closed options
+parser and `EventBus.validateSubscriptionShape` boundary before either Check/dry-run discards its
+throwaway closure or live execution registers it, so malformed tables and impossible
+event/target/filter combinations cannot pass Check and fail only after attachment.
+
 - **Named-handler resolution** (`/on`, `after`/`every` with a string name): a module script calls
   `register(name, fn)` (a small addition beyond §8.5's literal text) to make `fn` resolvable by name;
   `on(event, {name=...}, fn)` does the same implicitly. Durable timers and persisted `/on`
-  subscriptions both resolve through this same table, re-populated fresh every load.
+  subscriptions both resolve through this same table, re-populated fresh every load. The reserved
+  registered name `unload` is consumed directly by lifecycle teardown under the reduced finalizer
+  capability set above; it is never routed through `EventBus`.
 - **`pairs(h.attrs)`** is not supported (no `__pairs`/`call` hook on a handle) — `h.attrs.x` get/set
   work exactly as documented; enumeration is not available in 1c.
 - **camelCase built-ins**: §8.5's own examples (`ev.subject.maxHealth`) spell built-ins camelCase
   while the registry's canonical names are snake_case (`max_health`). Reads/writes try the given
   name first, then a snake_case fold, so both spellings work.
-Custom attribute names written through `h.attrs.<name>` / `h:define` are normalized the same
-lenient way §6.1 already normalizes AI-supplied names (`lastHealth` → `lasthealth`) rather than
-refused — extended here to every script author, not only the AI tool loop.
+Custom attribute names written through `h.attrs.<name>` / `h:define` use Lua-side ergonomic
+normalization (`lastHealth` → `last_health`) before the strict store. Command and AI-tool writes keep
+the canonical name grammar and return a normalized-name suggestion rather than silently choosing a
+different key. For persisted compatibility, an unchanged camelCase Lua access falls back to the
+earlier collapsed-lowercase spelling only when no canonical value exists, and writes continue using
+the already-existing spelling; the first occupied canonical/legacy namespace slot wins even when it
+is a script record, so read/write/filter resolution cannot disagree. Exact-object attribute filters
+follow that stored spelling. A canonical custom filter matches the legacy collapsed key inside the
+bounded delivery predicate, so kind-wide compatibility consumes one subscription/index slot and
+requires no world census. One fail-closed `h:attach` options parser runs before both Check/dry-run's
+no-op return and live lifecycle accounting: omitted or empty options mean module mode, while a
+nonempty table requires a valid `on` and accepts only `on`/`attr`/`target`; malformed values,
+unknown fields, unavailable built-ins, and incompatible event/target/filter shapes are refused
+instead of silently degrading to a module or the receiver target. Handler-mode `h:attach` persists
+a validated canonical-or-existing filter; the codecs upgrade historical plain-camel saved filters,
+preserve registry punctuation such as `be.name`/`inventory[0]`, and reject hostile punctuation.
+`ScriptStore` validates event/target/filter
+compatibility before persistence, and the editor clears a retained filter when changing away from
+`attribute.changed`.
 `objects.find{kind="block", type=..., near=, radius=, limit=}` with a `type` filter does its own
 bounded raw-block scan (not `ObjectGraph.objectsNear`, which only enumerates blocks that already
 carry a record) so a script can equip a plain, never-before-scripted block — Appendix A script 4's
-own requirement. `block:setBlock`/`breakBlock` are the only bespoke block verbs; every other
+own requirement. `block:setBlock`/`breakBlock` are the only bespoke block verbs. `setBlock`
+constructs a prospective replacement and applies every option in sorted key order to an in-memory
+cell plan, validating the block/field name, applicability, mutability, type/enum, and bounded range
+before the first world write. A refusal leaves the original cells untouched; an accepted plan has
+no fallible validation left during its author-scoped world-cell commit, so synchronous block events
+retain script provenance. Check/dry-run performs the same preflight without committing. Every other
 built-in field (including entity/player "verbs" like position or health) goes through the same
 generic `h:get`/`h:set`/property sugar that `/attr` already used, since design.md itself frames most
 verbs as sugar over the funnels `BuiltInAttributes` already implements. `say`/`sound`/`particles` are
@@ -523,21 +641,21 @@ execution; its explicit Run Once has the narrow trust-only exception described a
 kill switch.
 
 **Commands and UI.** `ScriptingCommands` provides `/script
-list|show|attach|detach|run|trust|off|on`; `/script edit [target] [name]` is an app-layer command in
-`CommandsM.swift`. The original change landed a paste-only canvas screen as a narrow bridge. It has
+list|show|attach|detach|run|stats|journal|undo-ai|trust|off|on`; `/script edit [target] [name]` is an
+app-layer command in `CommandsM.swift`. The original change landed a paste-only canvas screen as a
+narrow bridge. It has
 since been replaced by `Sources/Elysium/ScriptEditorUI/`'s native editor described in **Native Lua
 editor and authoring intelligence** below. Both generations deliberately kept source validation in
 Core and never imported `ElysiumScript` into the application target.
 
-**Known gaps, all documented rather than silently absent:** `/script`'s `stats`/`log` subcommands are
-still unimplemented (`journal`/`undo-ai` shipped in change 2 — see below); the §7.4 "subject's own
+**Known gaps, all documented rather than silently absent:** `/script log` remains unimplemented
+(`/script stats` and `journal`/`undo-ai` are shipped); the §7.4 "subject's own
 scripts delivered first" tie-break is not distinguished from ordinary script-owned subscriptions (both
 share one ascending-id order — a rare same-tick ordering nuance, not a functional gap); `after`/`every`
 given a Lua closure (rather than a name) behave as one-shot regardless of which was called — true
-closure repetition isn't implemented; the world-wide half of the `attach`/`detach` per-tick verb cap
-(§8.4: "world <= 32") is not enforced, only the per-script half; a handler-mode script recompiles its
-source fresh on every delivery rather than caching a `ScriptFunction` (fine at v1 scale, worth
-revisiting for high-frequency events later).
+closure repetition isn't implemented. The `attach`/`detach` per-tick verb caps are both enforced
+(§8.4: at most 2 per script and 32 per world). Handler-mode source is compiled once
+when its script instance loads and that `ScriptFunction` is reused for later deliveries.
 
 ## Native Lua editor and authoring intelligence
 
@@ -553,8 +671,15 @@ Authoring intelligence has two separate planes. The deterministic plane consumes
 `ScriptLanguageSchema`, `AttributeRegistry`, `EventDescriptorRegistry`, a small error-tolerant Lua
 scanner/parser, and an immutable `ObjectGraph` snapshot. It owns semantic tokens, receiver/type
 inference, factual completion, signature help, documentation, diagnostics, validated snippets, and
-the World Objects palette. The optional Ollama plane accepts a bounded document/caret/schema/
-diagnostics/authorized-object request and returns insertion text only. It receives no tool
+the World Objects palette. Event and handler completion is target-aware: it combines compatible
+produced standard events with the selected object's persisted custom declarations, and completing
+`ev.` uses that event's exact payload-field schema. The optional Ollama plane accepts a bounded
+document/caret/schema/diagnostics/bounded-object request and returns insertion text only. Its
+Handler contract includes the current target's compatible events; its Module contract adds every
+produced built-in payload and, for each authorized object in the bounded snapshot, kind-compatible
+built-in names plus that exact object's declared custom names and typed fields. A valid undeclared Handler selection is
+represented explicitly as envelope-only with unknown event-specific payload. The contract also
+includes applicable target members. It receives no tool
 definitions or query/mutation context and cannot execute, Save, attach, emit, or otherwise change
 world state. Manual Option-Command-/ is the default; automatic idle requests require explicit
 opt-in, and all responses are revision/source-hash/caret/model/context bound and cancellable.
@@ -626,56 +751,69 @@ opening the screen is not itself a mutation, and the screen decides what it can 
 
 The F3 debug overlay (`Sources/Elysium/HudM.swift`) gains one line — script counts, event/tick stats,
 budget trips — sourced from `ScriptRuntime.summary` (`ScriptRuntimeSummary`: live scripts, suspended
-coroutines, durable timers — a cheap read over already-in-memory collections, no scan) plus
+coroutines, durable timers, charged instructions, remaining tokens, and bucket capacity — a cheap
+read over already-in-memory collections, no scan) plus
 `EventBus.pendingCount` and a `.scriptFaulted` count over `EventBus.recentEvents()`; the line is
 omitted entirely (not zeroed) when no script runtime exists this session, keeping §15's zero-cost
 invariant.
 
-## LAN `objectAttributes` replication (guest attribute mirror)
+## LAN `objectAttributes` replication (guest authoring-metadata mirror)
 
 scripting-ui-and-replication (change 3), design.md §11. Additive: `LANReplicationBatch.objectAttributes:
-[LANObjectAttributeSnapshot]` (`ref`, `revision`, `attrsJSON`), capped at 64 objects/batch. Unlike the
-`LANAttrValue` the design sketch named, `attrsJSON` reuses `AttrValueCodec`'s existing canonical,
+[LANObjectAttributeSnapshot]` (`ref`, `revision`, `attrsJSON`, `scriptsJSON`, `eventsJSON`, `removed`), capped at
+64 objects/batch. Unlike the `LANAttrValue` the design sketch named, `attrsJSON` reuses
+`AttrValueCodec`'s existing canonical,
 hostile-bytes-safe JSON text and caps (`ScriptingStorageCaps.defaults.value`: depth <= 4, <= 64 keys,
 strings <= 4 KiB) — the exact codec `AttributeStore` persistence already uses — rather than a second,
-parallel bounded value type with its own bug surface; a whole snapshot's encoded text is additionally
-capped at 4 KiB. `makeLANObjectAttributeSnapshots` (`LANReplication.swift`) mirrors `ScriptRuntime`'s
-own (private) `forEachScriptedObject` traversal — world, the three dimension bags, live entities and
-loaded chunks' objects in the current dimension — reading `AttributeStore.list` instead of
-`ScriptStore.list` (the two enumerations visit the same `ObjectRecord`s, §6.0's unified model), sorted
-by `ref.canonical` for determinism; beyond the 64-object cap, objects sorting after it wait for a later
-batch (no dirty-tracking/round-robin fill — a scoped-down "sorted, bounded, deterministic" replacement
-for entity replication's fuller scheme). The host attaches it to the existing ~1s world-state
+parallel bounded value type with its own bug surface. Attribute JSON is capped at 4 KiB and script
+metadata at 2 KiB. The custom-event metadata ceiling is derived from the complete accepted declaration
+contract (16 events, 32 fields each, 64-byte names, and 256-byte summaries), so a valid maximum contract
+cannot silently collapse to an empty list. `makeLANObjectAttributeSnapshots` (`LANReplication.swift`)
+enumerates the metadata-bearing domains — world, the three dimension bags, live entities, and
+loaded chunks' objects in the current dimension — reading the shared `ObjectRecord`s and sorting
+by `ref.canonical` for determinism. `makeLANObjectAttributeSnapshotPage` advances a lexical cursor
+through that sorted census, wrapping at the end, so refs beyond the 64-object cap are published on
+later batches instead of being permanently starved. Consecutive censuses retain the last revision
+for each ref and produce an explicit, revisioned `removed` tombstone after its final attribute,
+script, or declaration disappears. Pending tombstones precede live entries and remain bounded by
+the same per-batch cap. Exact encoded snapshot sizes additionally share a half-frame page budget, so
+several maximum event contracts cannot overrun the 1 MiB authenticated frame. A census still scans and
+sorts the loaded metadata-bearing refs at the existing ~1s cadence, but only refs selected for the bounded
+page are encoded. The host attaches this page to the existing ~1s world-state
 replication cadence (`LANHostReplicationContent.includeObjectAttributes`) rather than adding a new
-interval knob.
+interval knob. Attribute-free records with only scripts or custom event declarations are included.
+`scriptsJSON` contains name/mode/enabled metadata but never source. `eventsJSON` contains only each
+declaration's name, bounded type-token map, and optional summary; provenance and implementation stay
+host-only.
 
 On the client, `LANMultiplayerClientSession.objectAttributes` (keyed by `ref.canonical`) is a
-display-only mirror — never `AttributeStore`, never re-broadcast. `apply(_:)` drops an unparseable ref
-or JSON that fails `AttrValueCodec.decode` under the same caps (hostile bytes, always untrusted from a
-guest's perspective too), and rejects a snapshot whose `revision` regresses what is already mirrored
+display-only mirror — never `AttributeStore`, `ScriptStore`, or `CustomEventStore`, and never
+re-broadcast. `apply(_:)` drops an unparseable ref or malformed/oversized metadata, and rejects a
+snapshot whose `revision` regresses what is already mirrored
 (so a stale replay, or a batch from a host that has since restarted onto an older save, can never win).
-It also reconciles a gap 1a's `applyLANChunkSectionSnapshot` left open: that function bulk-overwrites
-every cell in a replicated section directly, without running the single-block "does this replace clear
-the object's entries" identity check §17 Decision 5 relies on elsewhere — so after applying
-`objectAttributes` for a batch, `apply(_:)` purges any mirrored `.block` entry whose position falls
-inside a chunk section replaced by that same batch and was not itself refreshed by it.
+An accepted tombstone removes the mirror entry; an older tombstone cannot erase a newer live
+snapshot. Tombstone-bearing background batches are not eligible for delta backpressure skipping,
+and a failed/no-recipient broadcast requeues their tombstones, so deletions are not silently
+consumed by the host. Live display-metadata pages remain skippable and rotate back around after
+pressure clears. Directed
+initial snapshots neither consume pending broadcast tombstones nor advance the shared page cursor.
+Chunk sections and display metadata are independently paged. A section snapshot is authoritative for
+its block cells but cannot imply deletion of metadata omitted from the same batch; otherwise a live
+entry can disappear while its unchanged, equal-revision page is rejected as a replay. Only the host's
+explicit, revisioned `removed` tombstone deletes a mirrored entry. This keeps block replacement
+eventually consistent with the host census without confusing bounded page omission with absence.
 
-`LANMultiplayerManager.mirroredAttributes(for:)` (`LANTransport.swift`) is the one read accessor onto
-this mirror — the Inspector screen's and `inspectorRows`'s guest-side data source, with no write
-counterpart. `Tests/ElysiumResourcePackTests/LANGuestCommandGateTests
-.testInspectorScreenReadsReplicatedAttributesOnAGuestWhileWritesStayRefused` proves a guest can read a
-replicated attribute end to end while every mutation path (`/attr set` and the rest of that file's
-suite) stays refused at the real `CommandsM.runCommand` call site — attributes are readable, nothing
-about guest authority changed. A live two-process (or two-Mac) soak of this path is documented as
-pending in the change-3 report; `Tests/ElysiumCoreTests/LANReplicationTests.swift`'s
-`LANObjectAttributeReplicationTests` cover the codec/apply/reconciliation logic headlessly.
+`LANMultiplayerManager.mirroredAttributes(for:)`, `mirroredScripts(for:)`, and
+`mirroredEvents(for:)` (`LANTransport.swift`) are the read accessors used by guest Inspector/editor
+surfaces. They have no write counterpart. A granted guest's authoring mutation is a separate
+`scriptIntent`; the host revalidates and applies it, then later refreshes this metadata mirror.
 
 ## LAN client parity (guest scriptIntent authoring)
 
 lan-client-parity (change 4), design.md §11 phase 4: the guest half of the scripting story —
 "a guest can author, attach, inspect and interact with scripts through the host." Execution stays
 host-authoritative throughout (guests still never run a `lua_State`); a guest's `/attr`, `/script`,
-`/on`, `/unsubscribe`, `/events emit`, and `/ai` now reach the host through a new message kind
+`/on`, `/unsubscribe`, `/events define|remove|emit`, and `/ai` now reach the host through a new message kind
 instead of being refused outright.
 
 **Wire.** `LANMultiplayerMessageKind.scriptIntent = 30` (`LANMultiplayer.swift`), mirrored as
@@ -685,16 +823,19 @@ touches (`isHostMutationBlockedByRPGClockCatchUp` = `true`, `lanMultiplayerAllow
 `lanMultiplayerHostRateLimitCategory` = its own `.scriptIntent` bucket, deliberately tighter than
 `.gameplayIntent` — a script attach can trigger host-side compilation, an AI prompt an outbound
 HTTP call). The payload, `LANScriptIntent`, has two shapes: `.command(command, arguments)` reuses
-`ScriptingCommands.run(command:arguments:)`'s own grammar verbatim (`arguments[0]` is the
-`/attr`/`/on` target token, etc.) so the host never re-implements a second parser for the same
-commands; `.aiPrompt(text)` forwards free text to the tool loop. Every field is capped at
+`ScriptingCommands.run(command:arguments:)`'s own grammar verbatim (`/attr`, `/script`, and
+`/events emit` put their target at `arguments[1]`; `/on` puts it at `arguments[0]`; and
+`/unsubscribe` has no object target). `ScriptingCommands.lanForwardedObjectTargetToken` is the
+shared parser seam used for host reach checks, so the transport never re-implements a second
+parser for the same commands. `.aiPrompt(text)` forwards free text to the tool loop. Every field is
+capped at
 construction (`ScriptTextHygiene.sanitize` — not `cleanSingleLine`, since a script-source argument
 is legitimately multi-line).
 
 **Host-side validation and forwarding allowlist.** `ScriptingCommands.lanForwardableCommand(_:_:)`
 is the single source of truth for which `(command, subcommand)` pairs a guest may ever reach —
-`attr {set,define,remove}`, `script {attach,detach,run}`, `on`, `unsubscribe`, `events emit`. Reads
-(`inspect`, `objects`, `events recent`) and world-level settings (`script trust|off|on|journal|
+`attr {set,define,remove}`, `script {attach,detach,run}`, `on`, `unsubscribe`, and
+`events {define,remove,emit}`. Reads (`inspect`, `objects`, `events recent|list`) and world-level settings (`script trust|off|on|journal|
 undo-ai|list|show`) have no intent path and stay refused by the pre-existing `lanClientRefusal`
 gate — a guest reads through the replicated mirror, never a live host query, and never touches the
 world trust/kill-switch gate. Both sides of the wire call the same predicate: `CommandsM` (client)
@@ -706,7 +847,9 @@ block/attack/toss intents use — dimension is already enforced for free by `Obj
 itself, since a different-dimension block resolves `.dormant`), and finally executed through
 `GameCore.scriptingCommandContext(guestPeerID:)` — **the exact same executors** (`AttributeStore`,
 `ScriptStore`, `EventBus`) a local `/attr`/`/script`/`/on` command uses, with `Provenance.Author
-.lan(peer:)`/`EventSource.lan(peerID:)` recorded instead of `.player`. `.aiPrompt` intents check
+.lan(peer:)`/`EventSource.lan(peerID:)` recorded instead of `.player`. Guest `/unsubscribe` is
+ownership-scoped to subscriptions whose subscriber is that peer's `player:lan:<peerID>` object; a
+missing id and a foreign id have the same refusal result. `.aiPrompt` intents check
 `canUseAI` instead (independent of `canScript`) and forward into `OllamaAgentService.runToolLoop`'s
 existing tool loop (the design's "one `/ai` in flight per world" gate is shared automatically —
 it's the same `toolLoopInFlight` flag); every status/result line that call would otherwise
@@ -738,12 +881,15 @@ immediately rather than waiting for the next periodic peer-record flush.
 (a new protocol method with a `nil`-returning default extension, so test fakes and `elysmoke`'s
 script host need no changes) — on the host, for a peer whose `LANRemotePlayerEntity` mirror exists
 in the *current* dimension's `World.entities`, it resolves as `.live(.entity(remote, world))` —
-deliberately reusing the `.entity` `LiveObject` case rather than adding a new one: `LANRemotePlayerEntity`
-already *is* an `Entity` subclass, so every existing built-in getter (position, health — exactly the
-"client self-reports" the design scopes guest player attributes to), `AttributeStore.readRecord`/
+deliberately reusing the `.entity` `LiveObject` case rather than adding a new one. `BuiltInAttributes`
+recognizes that concrete subtype as player-kind for the authoritative fields carried by the LAN
+snapshot (including position, health, hunger, XP, selected slot/item, game mode, and dimension) and
+keeps those base fields read-only to scripts; custom attributes remain extensible through the normal
+store. Indexed attribute observation uses the canonical `player:lan:<peerID>` ref, and entity
+spawn/removal lifecycle events use that same ref rather than the transient entity id.
+`AttributeStore.readRecord`/
 `writeRecord` (already dispatches `.entity` through `entity.objectRecord`), and `ScriptStore`'s reuse
-of the same functions all work with zero further plumbing and zero new exhaustive-switch cases to
-maintain elsewhere. A peer known but currently in a different dimension resolves `.dormant` (matching
+of the same functions preserve the shared object record. A peer known but currently in a different dimension resolves `.dormant` (matching
 every other kind's "not loaded here right now" rule); a guest never resolves this at all (its own
 `isLANClient` is `true`) — it reads only its own `player:lan:*` object through the replicated mirror,
 same as everything else. `ObjectGraph.objectsNear`/`AttributeStore.displayName(of:)` and the host-side
@@ -831,6 +977,21 @@ tool-table shorthand `attrs?` denotes; a separate bundled attribute-set convenie
 `attach_script` was not implemented — `set_attribute` is its own call, matching the §16 exit-criteria
 eval's own step order (attach, *then* set an attribute).
 
+`describe_events` accepts an optional object `ref`. Without one it returns the canonical standard
+catalog; with one it filters built-ins to that subject kind and merges the object's custom
+declarations, including payload field types and summaries. `emit_event` keeps the 20-tool surface
+bounded by multiplexing an `action` of `emit`, `declare`, or `remove` (default `emit`) rather than
+adding privileged side channels. All three actions are custom-event-only, so `emit` cannot forge an
+engine-produced built-in. Declare and remove use `CustomEventStore`; emit uses the same matching-
+declaration payload validator and `EventBus` path as Lua and `/events`.
+
+The scripting system prompt includes `ScriptAIAuthoringGuide.text`: compact, explicitly maintained
+object-first Lua rules followed by a built-in event section generated at request time from
+`EventDescriptorRegistry.available`. Reserved but unproduced names are omitted, and payload names
+come from the same descriptors used by the runtime and editor; the event list is not a separately
+maintained copy that can drift. The remaining Lua API prose is not generated from
+`ScriptLanguageSchema` and must stay aligned through review and focused contract tests.
+
 **The `attach_script` gate (§9.4).** `AIScriptValidationGate.validate` runs `ScriptValidator`'s
 stages 0-3 (`ScriptRuntime.validateSource`, the exact gate every script — player, AI, or script-
 authored — already passes through) and adds stage 5: a literal-only, best-effort regex scan for an
@@ -886,7 +1047,8 @@ replies `submitAIReply` has queued since the last phase, in request-id order, in
 events / `ai.await` resumptions — always at the fixed phase point, never mid-tick, so the model's real
 network latency can never stall the simulation. `outboxHandoff` itself calls
 `OllamaAgentService.generateScriptReply` (text generation only, no tools, model/prompt capped exactly
-per §9.6/§8.4, 4 KiB prompt / 8 KiB reply), which is the only place beyond `runToolLoop` that ever
+per §9.6/§8.4, 4,096 prompt characters / 4,096 decoded reply UTF-8 bytes, with the encoded response
+stream rejected past 64 KiB before JSON decoding), which is the only place beyond `runToolLoop` that ever
 touches `http://127.0.0.1:11434` — every network call in this whole subsystem still lives in the one
 file `scripts/security-scan.sh` allowlists. Budgets: `ScriptRuntime.aiBudgetAvailable()` refuses (not
 queues) a new `ai.ask`/`ai.await` past 2 concurrently in flight per world or 30/minute — the "per-tick

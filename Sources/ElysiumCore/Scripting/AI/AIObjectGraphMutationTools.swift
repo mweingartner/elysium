@@ -115,11 +115,15 @@ public enum AIObjectGraphMutationTools {
             parameters: [.init(name: "id", type: "integer", summary: "Subscription id.")], required: ["id"]
         ),
         AIToolDefinition(
-            name: "emit_event", kind: .mutation, summary: "Raise a custom event on an object.",
+            name: "emit_event", kind: .mutation,
+            summary: "Emit, declare, or remove an object-scoped custom event. Built-in events are engine-produced and cannot be emitted manually. Omit action for backward-compatible custom emit.",
             parameters: [
                 .init(name: "ref", type: "string", summary: "Object ref or alias."),
                 .init(name: "name", type: "string", summary: "Event name (e.g. 'lumber.milestone')."),
+                .init(name: "action", type: "string", summary: "emit | declare | remove (default emit).", enumValues: ["emit", "declare", "remove"]),
                 .init(name: "payload", type: "string", summary: "JSON object payload."),
+                .init(name: "fields", type: "string", summary: "For declare: JSON object mapping field names to type tokens such as string, integer, or object?."),
+                .init(name: "summary", type: "string", summary: "For declare: short human-readable meaning."),
             ], required: ["ref", "name"]
         ),
         AIToolDefinition(
@@ -174,6 +178,7 @@ public enum AIObjectGraphMutationTools {
         case .invalidName(let hint):
             return .refuse(stage: "execute", message: "'\(name)' is not a valid attribute name", hint: hint ?? "")
         case .nameIsBuiltIn: return .refuse(stage: "execute", message: "'\(name)' is a built-in attribute — set it directly")
+        case .nameIsScript: return .refuse(stage: "execute", message: "'\(name)' is an attached script — detach it first")
         case .invalidValue(let e): return .refuse(stage: "execute", message: "value rejected (\(e.message))")
         case .readonly: return .refuse(stage: "execute", message: "'\(name)' is readonly", hint: "pass force:true to define_attribute to overwrite it")
         case .tooManyEntries(let limit): return .refuse(stage: "execute", message: "too many attributes (limit \(limit))")
@@ -187,28 +192,74 @@ public enum AIObjectGraphMutationTools {
         .refuse(stage: "execute", message: "'\(name)' " + scriptStoreErrorText(err))
     }
 
+    /// AI-authored camelCase creates canonical snake_case, but an existing pre-upgrade collapsed
+    /// key remains the mutation target so a tool call cannot silently fork one logical value.
+    private static func customAttributeKey(
+        _ raw: String, ref: ObjectRef, context: AIMutationContext
+    ) -> String {
+        let canonical = normalizedScriptCustomAttributeName(raw)
+        let entries = context.store.record(ref)?.entries ?? [:]
+        if entries[canonical] != nil { return canonical }
+        if let legacy = normalizedAttributeNameHint(raw), entries[legacy] != nil { return legacy }
+        return canonical
+    }
+
+    private static func attributeFilter(
+        _ raw: String, target: SubscriptionTarget, context: AIMutationContext
+    ) -> String? {
+        if let builtIn = ergonomicBuiltInAttribute(raw, target: target) {
+            return builtIn.canonical
+        }
+        let normalized: String
+        if case .object(let ref) = target {
+            normalized = customAttributeKey(raw, ref: ref, context: context)
+        } else {
+            normalized = normalizedScriptCustomAttributeName(raw)
+        }
+        return canonicalEventBusAttributeFilter(normalized, target: target)
+    }
+
     // MARK: - set_attribute
 
     private static func setAttribute(_ args: AIToolArguments, _ context: AIMutationContext) -> AIToolOutcome {
         switch resolveRefArg(args, "ref", context) {
         case .failure(let outcome): return outcome
         case .success(let (ref, live)):
-            guard let key = args.string("key") else { return .refuse(stage: "args", message: "'key' is required") }
+            guard let rawKey = args.string("key") else { return .refuse(stage: "args", message: "'key' is required") }
             guard let value = args.attrValue("value", caps: .defaults) else {
                 return .refuse(stage: "args", message: "'value' could not be parsed")
             }
-            if AttributeRegistry.resolve(kind: ref.kind, name: key) != nil {
-                switch BuiltInAttributes.set(live, name: key, value: value, host: context.graph.host) {
+            let normalizedKey = normalizedScriptCustomAttributeName(rawKey)
+            if let descriptor = AttributeRegistry.resolve(kind: ref.kind, name: rawKey)
+                ?? AttributeRegistry.resolve(kind: ref.kind, name: normalizedKey) {
+                let canonical = descriptor.canonical
+                guard case .value(let before) = BuiltInAttributes.get(
+                    live, name: canonical, host: context.graph.host
+                ) else {
+                    return .refuse(stage: "execute", message: "'\(canonical)' is not an attribute here")
+                }
+                switch context.graph.host.setScriptBuiltInAttribute(
+                    live, ref: ref, name: canonical, value: value, author: .ai(model: context.model)
+                ) {
                 case .ok(let v):
-                    return .ok("{\"ref\":\(jsonString(ref.canonical)),\"key\":\(jsonString(key)),\"value\":\(AttrValueCodec.encode(v))}")
+                    if before != v {
+                        context.journal.record(
+                            requestID: context.requestID, tool: "set_attribute", ref: ref,
+                            name: canonical, tick: context.tick, model: context.model,
+                            afterHash: sha256Hex(AttrValueCodec.encode(v)),
+                            undo: .builtInAttributeValue(ref: ref, name: canonical, before: before)
+                        )
+                    }
+                    return .ok("{\"ref\":\(jsonString(ref.canonical)),\"key\":\(jsonString(canonical)),\"value\":\(AttrValueCodec.encode(v))}")
                 case .unknownName(let suggestions):
-                    return .refuse(stage: "execute", message: "unknown built-in attribute '\(key)'", didYouMean: suggestions)
-                case .notApplicable: return .refuse(stage: "execute", message: "'\(key)' is not an attribute here")
-                case .readOnly: return .refuse(stage: "execute", message: "'\(key)' is readonly")
-                case .wrongValueKind: return .refuse(stage: "execute", message: "'\(key)' does not accept that value")
-                case .outOfRange(let range): return .refuse(stage: "execute", message: "'\(key)' must be in \(range)")
+                    return .refuse(stage: "execute", message: "unknown built-in attribute '\(rawKey)'", didYouMean: suggestions)
+                case .notApplicable: return .refuse(stage: "execute", message: "'\(rawKey)' is not an attribute here")
+                case .readOnly: return .refuse(stage: "execute", message: "'\(rawKey)' is readonly")
+                case .wrongValueKind: return .refuse(stage: "execute", message: "'\(rawKey)' does not accept that value")
+                case .outOfRange(let range): return .refuse(stage: "execute", message: "'\(rawKey)' must be in \(range)")
                 }
             }
+            let key = customAttributeKey(rawKey, ref: ref, context: context)
             let before = context.store.list(ref).first { $0.name == key }
             switch context.store.set(ref, key, value, by: .ai(model: context.model)) {
             case .success(let v):
@@ -230,10 +281,11 @@ public enum AIObjectGraphMutationTools {
         switch resolveRefArg(args, "ref", context) {
         case .failure(let outcome): return outcome
         case .success(let (ref, _)):
-            guard let key = args.string("key") else { return .refuse(stage: "args", message: "'key' is required") }
+            guard let rawKey = args.string("key") else { return .refuse(stage: "args", message: "'key' is required") }
             guard let value = args.attrValue("value", caps: .defaults) else {
                 return .refuse(stage: "args", message: "'value' could not be parsed")
             }
+            let key = customAttributeKey(rawKey, ref: ref, context: context)
             let readonly = args.bool("readonly") ?? false
             let force = args.bool("force") ?? false
             let before = context.store.list(ref).first { $0.name == key }
@@ -260,9 +312,10 @@ public enum AIObjectGraphMutationTools {
         switch resolveRefArg(args, "ref", context) {
         case .failure(let outcome): return outcome
         case .success(let (ref, _)):
-            guard let key = args.string("key") else { return .refuse(stage: "args", message: "'key' is required") }
+            guard let rawKey = args.string("key") else { return .refuse(stage: "args", message: "'key' is required") }
+            let key = customAttributeKey(rawKey, ref: ref, context: context)
             let before = context.store.list(ref).first { $0.name == key }
-            switch context.store.remove(ref, key, force: true) {
+            switch context.store.remove(ref, key, force: true, by: .ai(model: context.model)) {
             case .success(let result):
                 guard result.existed else { return .refuse(stage: "execute", message: "'\(key)' is not set on \(ref.canonical)") }
                 if let before {
@@ -295,7 +348,9 @@ public enum AIObjectGraphMutationTools {
             }
             var triggers: [Trigger] = []
             if mode == .handler {
-                guard let triggersText = args.string("triggers"), let parsed = parseTriggers(triggersText, defaultTarget: ref) else {
+                guard let triggersText = args.string("triggers"), let parsed = parseTriggers(
+                    triggersText, defaultTarget: ref, context: context
+                ) else {
                     return .refuse(stage: "args", message: "handler mode requires 'triggers': a JSON array of {event, attr?, target?}")
                 }
                 triggers = parsed
@@ -305,8 +360,18 @@ public enum AIObjectGraphMutationTools {
                 return .refuse(stage: "validate", message: result.message, hint: result.hint)
             case .accepted(let sha):
                 var warnings: [String] = []
+                let dryRunSubject: ObjectRef?
+                let dryRunSubjectIsExact: Bool
+                if mode == .handler, case .object(let subject)? = triggers.first?.target {
+                    dryRunSubject = subject
+                    dryRunSubjectIsExact = true
+                } else {
+                    dryRunSubject = nil
+                    dryRunSubjectIsExact = mode != .handler
+                }
                 switch runtime.dryRunOutcome(
-                    source: source, owner: ref, mode: mode, handlerEvent: triggers.first?.event
+                    source: source, owner: ref, mode: mode, handlerEvent: triggers.first?.event,
+                    handlerSubject: dryRunSubject, handlerSubjectIsExact: dryRunSubjectIsExact
                 ) {
                 case .completed:
                     break
@@ -342,24 +407,28 @@ public enum AIObjectGraphMutationTools {
         }
     }
 
-    private static func parseTriggers(_ json: String, defaultTarget: ObjectRef) -> [Trigger]? {
+    private static func parseTriggers(
+        _ json: String, defaultTarget: ObjectRef, context: AIMutationContext
+    ) -> [Trigger]? {
         guard let data = json.data(using: .utf8), let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             return nil
         }
         var out: [Trigger] = []
         for entry in raw {
             guard let eventText = entry["event"] as? String, let event = EventKind.parse(eventText) else { return nil }
-            var attribute: String?
-            if let a = entry["attr"] as? String {
-                guard isValidAttributeName(a) else { return nil }
-                attribute = a
-            }
             var target: SubscriptionTarget = .object(defaultTarget)
             if let t = entry["target"] as? String {
                 if t == "any" { target = .any }
                 else if let ref = ObjectRef.parse(t) { target = .object(ref) }
                 else if let kind = ObjectKind(rawValue: t) { target = .kind(kind, typeFilter: nil) }
                 else { return nil }
+            }
+            var attribute: String?
+            if let rawAttribute = entry["attr"] as? String {
+                guard let canonical = attributeFilter(
+                    rawAttribute, target: target, context: context
+                ) else { return nil }
+                attribute = canonical
             }
             out.append(Trigger(event: event, attribute: attribute, target: target))
         }
@@ -438,7 +507,17 @@ public enum AIObjectGraphMutationTools {
         guard isValidAttributeName(scriptName), isValidAttributeName(handler) else {
             return .refuse(stage: "args", message: "'\(handlerToken)' is not a valid '<script>.<handler>'")
         }
-        let attribute = args.string("attr")
+        let attribute: String?
+        if let rawAttribute = args.string("attr") {
+            guard let canonical = attributeFilter(
+                rawAttribute, target: target, context: context
+            ) else {
+                return .refuse(stage: "args", message: "'attr' is not a valid attribute filter")
+            }
+            attribute = canonical
+        } else {
+            attribute = nil
+        }
         let before = context.eventBus.listSubscriptions().count
         switch context.eventBus.subscribe(
             subscriber: subscriber, scriptName: scriptName, handler: handler, target: target, event: event,
@@ -459,6 +538,10 @@ public enum AIObjectGraphMutationTools {
             case .tooManyForObject: return .refuse(stage: "execute", message: "too many subscriptions on \(subscriber.canonical)")
             case .targetRequiresTypeFilter: return .refuse(stage: "execute", message: "'\(eventText)' on a block target requires a type filter")
             case .anyNotAllowedForThisEvent: return .refuse(stage: "execute", message: "'any' is not a valid target for '\(eventText)'")
+            case .attributeFilterNotAllowed: return .refuse(stage: "execute", message: "an attribute filter is valid only for 'attribute.changed'")
+            case .invalidAttributeFilter: return .refuse(stage: "execute", message: "'attr' is not a valid attribute filter")
+            case .eventNotApplicable: return .refuse(stage: "execute", message: "'\(eventText)' does not apply to that target kind")
+            case .eventNotAvailable: return .refuse(stage: "execute", message: "'\(eventText)' is reserved and has no event producer")
             }
         }
     }
@@ -499,15 +582,74 @@ public enum AIObjectGraphMutationTools {
     private static func emitEvent(_ args: AIToolArguments, _ context: AIMutationContext) -> AIToolOutcome {
         switch resolveRefArg(args, "ref", context) {
         case .failure(let outcome): return outcome
-        case .success(let (ref, _)):
+        case .success(let (ref, live)):
             guard let name = args.string("name"), let kind = EventKind.parse(name) else {
                 return .refuse(stage: "args", message: "'name' is required and must be a valid event name")
             }
-            var payload: [String: AttrValue] = [:]
-            if let payloadText = args.string("payload"), case .success(.map(let m)) = AttrValueCodec.decode(payloadText, caps: .defaults) {
-                payload = m
+            let action = args.string("action") ?? "emit"
+            let declarations = CustomEventStore(graph: context.graph)
+            switch action {
+            case "declare":
+                var fields: [CustomEventField] = []
+                if let fieldsText = args.string("fields") {
+                    guard case .success(.map(let schema)) = AttrValueCodec.decode(fieldsText, caps: .defaults) else {
+                        return .refuse(stage: "args", message: "'fields' must be a JSON object mapping field names to type tokens")
+                    }
+                    for fieldName in schema.keys.sorted(by: utf8Less) {
+                        guard case .string(let token)? = schema[fieldName],
+                              let field = CustomEventField(name: fieldName, typeToken: token) else {
+                            return .refuse(stage: "args", message: "event field '\(fieldName)' has an invalid type token")
+                        }
+                        fields.append(field)
+                    }
+                }
+                switch declarations.declare(
+                    ref, name: name, fields: fields, summary: args.string("summary"),
+                    by: .ai(model: context.model)
+                ) {
+                case .failure(let error): return customEventOutcome(error, name: name)
+                case .success(let declaration):
+                    context.journal.record(
+                        requestID: context.requestID, tool: "emit_event", ref: ref,
+                        name: "declare:\(name)", tick: context.tick, model: context.model,
+                        afterHash: sha256Hex(declaration.kind.rawValue + declaration.fields.map(\.typeToken).joined()),
+                        undo: .none
+                    )
+                    return .ok("{\"ref\":\(jsonString(ref.canonical)),\"name\":\(jsonString(name)),\"declared\":true}")
+                }
+            case "remove":
+                switch declarations.undeclare(ref, name) {
+                case .failure(let error): return customEventOutcome(error, name: name)
+                case .success(let existed):
+                    context.journal.record(
+                        requestID: context.requestID, tool: "emit_event", ref: ref,
+                        name: "remove:\(name)", tick: context.tick, model: context.model,
+                        afterHash: existed ? "removed" : "absent", undo: .none
+                    )
+                    return .ok("{\"ref\":\(jsonString(ref.canonical)),\"name\":\(jsonString(name)),\"removed\":\(existed)}")
+                }
+            case "emit": break
+            default:
+                return .refuse(stage: "args", message: "'action' must be emit, declare, or remove")
             }
-            let outcome = context.eventBus.raise(kind: kind, subject: ref, payload: payload, source: .ai(model: context.model), tick: context.tick)
+            var payload: [String: AttrValue] = [:]
+            if let payloadText = args.string("payload") {
+                guard case .success(.map(let map)) = AttrValueCodec.decode(payloadText, caps: .defaults) else {
+                    return .refuse(stage: "args", message: "'payload' must be a valid JSON object")
+                }
+                payload = map
+            }
+            if let refusal = ScriptEventEmissionValidator.refusal(
+                kind: kind, subject: ref, payload: payload,
+                declaration: declarations.get(ref, name)
+            ) {
+                return .refuse(stage: "validate", message: refusal)
+            }
+            let outcome = context.eventBus.raise(
+                kind: kind, subject: ref, payload: payload,
+                source: .ai(model: context.model), tick: context.tick,
+                subjectType: eventSubjectType(live)
+            )
             switch outcome {
             case .enqueued(let seq), .coalesced(let seq):
                 context.journal.record(
@@ -520,6 +662,45 @@ public enum AIObjectGraphMutationTools {
             case .droppedCascadeDepth, .droppedHandlerBudget:
                 return .refuse(stage: "execute", message: "dropped (budget exceeded)")
             }
+        }
+    }
+
+    private static func customEventOutcome(
+        _ error: CustomEventStoreError, name: String
+    ) -> AIToolOutcome {
+        let message: String
+        switch error {
+        case .objectNotLive: message = "object is not loaded"
+        case .dormant: message = "object's dimension is not loaded"
+        case .unsupported: message = "unsupported object"
+        case .lanClient: message = "event declarations are host-authoritative"
+        case .invalidEventName: message = "'\(name)' is not a valid custom event name"
+        case .builtInEventName: message = "'\(name)' is a built-in event and cannot be redeclared"
+        case .tooManyDeclarations(let limit): message = "too many event declarations (limit \(limit))"
+        case .tooManyFields(let limit): message = "event schema exceeds \(limit) fields"
+        case .invalidFieldName(let field): message = "'\(field)' is not a valid event field name"
+        case .reservedFieldName(let field): message = "'\(field)' is a reserved event envelope field"
+        case .duplicateFieldName(let field): message = "event field '\(field)' is duplicated"
+        case .summaryTooLarge(let limit): message = "event summary exceeds \(limit) UTF-8 bytes"
+        case .invalidSummary: message = "event summary contains unsupported text"
+        case .tooManyEntries(let limit): message = "object scripting storage exceeds \(limit) entries"
+        case .recordTooLarge, .chunkTooLarge, .documentTooLarge:
+            message = "event declaration storage limit exceeded"
+        case .revisionOverflow: message = "revision limit reached"
+        }
+        return .refuse(stage: "execute", message: message)
+    }
+
+    private static func eventSubjectType(_ live: LiveObject) -> String? {
+        switch live {
+        case .world: return nil
+        case .dimension: return nil
+        case .block(_, let chunk, _, let x, let y, let z):
+            let cell = Int(chunk.get(posMod(x, CHUNK_W), y, posMod(z, CHUNK_W)))
+            let id = cell >> 4
+            return (id >= 0 && id < blockDefs.count) ? blockDefs[id].name : nil
+        case .entity(let entity, _): return entity.type
+        case .player: return nil
         }
     }
 

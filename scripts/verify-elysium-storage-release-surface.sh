@@ -101,18 +101,30 @@ artifact_sha256() {
 # animation. ElysiumCore.o, elysmoke, and every reviewed storage/text-input source, manifest,
 # and object pin remain byte-identical. Assets/Elysium/HeldPickaxe3D/build.md records the
 # normalization command and complete renewal evidence.
+#
+# extensible-object-events: EXPECTED_GAME_CORE_SOURCE_SHA256 and
+# EXPECTED_PLAYER_SOURCE_SHA256 renewed for the reviewed standard-event producer funnels,
+# tool-strike/LAN gesture routing, object-record hydration, lifecycle delivery, and canonical
+# actor provenance. EXPECTED_CORE_OBJECT_SHA256 follows those changes plus the bounded custom
+# event/attribute runtime; the Elysium and elysmoke products follow transitively, with Elysium
+# also containing the schema-driven editor and optional Ollama UI. The smoke product additionally
+# carries the reviewed Appendix A fixture update that verifies camelCase Lua attribute sugar is
+# persisted and queried through its canonical snake_case spelling. StorageEngine.swift,
+# Saves.swift, both capability manifests, ElysiumStorage.o, ElysiumTextInput.swift, and
+# ElysiumTextInput.o remain byte-identical. docs/extensible-object-events/build.md records every
+# old/new pin and the clean-build normalization evidence.
 EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
 EXPECTED_STORAGE_API_SHA256='ea1dd595ee28762bc2ff7c2e080c2fc4cee0eee008a30e52e82747029206f46c'
 EXPECTED_STORAGE_OBJECT_SHA256='33fb1578d8262a4044ba42ccb1fc7b67e8dfac2589133ab2ff415b5a5d71326b'
 EXPECTED_SAVES_SOURCE_SHA256='104564ee02dd009085cc5bf2f1d09fb6e893915283bef1cc09a3e5f7ab884dec'
-EXPECTED_GAME_CORE_SOURCE_SHA256='ddc3cff991bd611386909d309514189887b923a969470a5cf6e8ed7cf2b82312'
-EXPECTED_PLAYER_SOURCE_SHA256='3f364dcd4ff040ed8dd0ef7e1eae25abad8de6780c2877a5228eda432df6b3c9'
+EXPECTED_GAME_CORE_SOURCE_SHA256='23d2f5a04f2c5e1cd5981a2cf8394159c40e86670b4ffb7e3348cdb12f71e574'
+EXPECTED_PLAYER_SOURCE_SHA256='79dbd2e132f8e65f2a9857f763c263fea0a1b8cd86fc7db6388fc77129373e10'
 EXPECTED_CORE_CAPABILITY_SHA256='67dbb84929eeda6bea6acec70567a6b8c3711521ae2c1f93fdfc6a2e957b8118'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='ca500f11c671c45b6a0648962bed37881a9adff2a6491632e7d655a50ed80efc'
-EXPECTED_CORE_OBJECT_SHA256='79d520435f9221c6462f360aaf9df1e6d3a7e48f731cb9414017c415f82e7be5'
-EXPECTED_ELYSIUM_PRODUCT_SHA256='b46cda7a0cc807b04c61a555ed64ad5588bfe4a25b33c9d4acf9fd97953869bf'
-EXPECTED_SMOKE_PRODUCT_SHA256='71fc4a0089a74e7b71f6bbc02b47ac1c7dc652c15dac4cce02e689a972a638e1'
+EXPECTED_CORE_OBJECT_SHA256='b62b17e26f7edb876771a70a45008e51ed725e3176a869ead4eba75e25cf6f4f'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='9f84be3823ec9cc8b658ee0cd74d99ab81c5fa6f051fb58da0ad596f5d39eaea'
+EXPECTED_SMOKE_PRODUCT_SHA256='0bc8236305b9619cfdd3e1e1dd95362ec3a1b93b37ec20c7469684466b5c22d0'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

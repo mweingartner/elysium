@@ -152,9 +152,18 @@ public enum ScriptRecordCodec {
                 guard let tgtText = raw["tgt"] as? String, let target = SubscriptionTarget.parse(tgtText) else { return nil }
                 var attribute: String?
                 if let attrText = raw["attr"] as? String {
-                    guard isValidAttributeName(attrText) else { return nil }
-                    attribute = attrText
+                    guard let canonical = migratedPersistedAttributeFilter(
+                        attrText, target: target
+                    ) else { return nil }
+                    attribute = canonical
                 }
+                // Older editor builds retained the previous attribute filter when the user
+                // changed a handler to a non-attribute event. Preserve the script and repair the
+                // impossible trigger instead of faulting (or dropping) the entire saved script.
+                if event != .attributeChanged { attribute = nil }
+                guard EventBus.validateSubscriptionShape(
+                    target, event: event, attribute: attribute
+                ) == nil else { continue }
                 triggers.append(Trigger(event: event, attribute: attribute, target: target))
             }
         }

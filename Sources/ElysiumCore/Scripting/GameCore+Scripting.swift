@@ -7,6 +7,15 @@
 
 import Foundation
 
+func scriptEventSource(for author: Provenance.Author) -> EventSource {
+    switch author {
+    case .player: return .player
+    case .ai(let model): return .ai(model: model)
+    case .script(let owner, let name): return .script(owner: owner, name: name)
+    case .lan(let peer): return .lan(peerID: peer)
+    }
+}
+
 /// Session-scoped scripting state a `GameCore` owns for the lifetime of one
 /// open world. Reset (by simply replacing its contents) on every
 /// `enterWorld`; nothing here is itself persisted directly — it mirrors what
@@ -30,6 +39,10 @@ public final class GameScriptingState {
     /// taken at load emits nothing"), keyed by `ObjectRef.canonical`. Reset
     /// alongside `eventBus`.
     var diffBaselines: [String: [String: AttrValue]] = [:]
+    /// Non-nil only while a command, Lua script, LAN guest, or AI tool is inside one authoritative
+    /// built-in setter. World hooks read it synchronously so semantic/block events retain the true
+    /// provenance instead of being mislabeled as generic engine/player work.
+    var activeBuiltInMutationAuthor: Provenance.Author?
     /// script-runtime (change 1c). One `LuaState`-owning runtime per open
     /// world session (host-only — `nil` for a LAN-client world, or a world
     /// where `ScriptRuntime`'s own `LuaState` construction failed). Created
@@ -37,15 +50,18 @@ public final class GameScriptingState {
     /// step 6's own comment on `lua_State` lifetime), destroyed in
     /// `exitToTitle` after every script's `unload` runs.
     public var scriptRuntime: ScriptRuntime?
-    /// design.md §15's zero-cost invariant: the fast-path boolean
-    /// `ScriptRuntime.runLoads()` checks before scripted-object discovery. Set by
-    /// `ScriptStore.attach`/a script's own `h:attach` (via `ScriptRuntime`)
-    /// and by the one-time scan `enterWorld` does when a world is opened;
-    /// never cleared back to `false` once set this session (a false
-    /// positive costs one extra bounded scan per tick; a false negative
-    /// costs at most the deterministic 20-tick backstop interval before
-    /// discovery).
+    /// Durable timer registry decoded before the Lua runtime exists and retained after runtime
+    /// teardown long enough for the final save to serialize it. While a runtime is live, that
+    /// runtime's `timers` array is authoritative.
+    var durableTimers: [DurableTimer] = []
+    /// Session summary/fast-path hint. Exact lifecycle work is carried by
+    /// `scriptDefinitionChanges`; this flag is never used as a discovery substitute.
     public var anyScriptsAttached = false
+    /// Advanced by every definition mutation, persistence hydration, and unload notification.
+    var scriptDefinitionGeneration: UInt64 = 0
+    /// Live scripted-ref index plus canonically ordered dirty work. A phase drains only a fixed
+    /// prefix, so a large save hydration cannot turn into a periodic main-thread world census.
+    var scriptDefinitionChanges = ScriptDefinitionChangeIndex()
     /// ai-object-graph (change 2), design.md §9.5. Replaced (never mutated
     /// in place) at every `enterWorld`, exactly like `eventBus` — a stale
     /// journal entry (or a subscription-undo id from a previous session)
@@ -68,9 +84,24 @@ extension GameCore: ObjectGraphHost {
 
     public var isLANClient: Bool { isLANClientWorld }
 
-    public var currentTick: Int64 { Int64(world.time) }
+    /// The scripting/event contract exposes the dimension-independent deterministic simulation
+    /// clock. World day time can jump or differ by dimension and must never drive waits, timers,
+    /// provenance, or event ordering.
+    public var currentTick: Int64 { Int64(rpgSimulationTick) }
 
     public var scriptsEnabled: Bool { worldRec?.scriptsEnabled ?? false }
+
+    public var scriptDefinitionGeneration: UInt64 { scripting.scriptDefinitionGeneration }
+
+    public func scriptDefinitionsDidChange(for ref: ObjectRef, hasScripts: Bool) {
+        scripting.scriptDefinitionGeneration &+= 1
+        scripting.scriptDefinitionChanges.record(ref, hasScripts: hasScripts)
+        if hasScripts { scripting.anyScriptsAttached = true }
+    }
+
+    public func drainDirtyScriptDefinitionRefs(limit: Int) -> [ObjectRef] {
+        scripting.scriptDefinitionChanges.drain(limit: limit)
+    }
 
     public func worldObjectRecord(for ref: ObjectRef) -> ObjectRecord {
         scripting.worldRecords[ref.canonical] ?? ObjectRecord()
@@ -82,6 +113,48 @@ extension GameCore: ObjectGraphHost {
         } else {
             scripting.worldRecords[ref.canonical] = record
         }
+    }
+
+    public func setScriptBuiltInAttribute(
+        _ live: LiveObject, ref: ObjectRef, name: String, value: AttrValue,
+        author: Provenance.Author
+    ) -> BuiltInSetOutcome {
+        let canonical = AttributeRegistry.resolve(kind: ref.kind, name: name)?.canonical ?? name
+        let before: AttrValue? = if case .value(let value) = BuiltInAttributes.get(
+            live, name: canonical, host: self
+        ) { value } else { nil }
+        let previousAuthor = scripting.activeBuiltInMutationAuthor
+        scripting.activeBuiltInMutationAuthor = author
+        defer { scripting.activeBuiltInMutationAuthor = previousAuthor }
+        let outcome = BuiltInAttributes.set(live, name: canonical, value: value, host: self)
+        guard case .ok(let after) = outcome, before != after else { return outcome }
+
+        // Block setters use World.setBlock, whose synchronous hook compares every observed cell
+        // field and emits with `activeBuiltInMutationAuthor`. Other object families have no common
+        // mutation hook, so publish their exact before/after pair here.
+        if case .block = live {
+            return outcome
+        }
+        eventBus.raise(
+            kind: .attributeChanged, subject: ref,
+            payload: ["key": .string(canonical), "old": before ?? .null, "new": after],
+            source: scriptEventSource(for: author), tick: currentTick,
+            subjectType: scriptSubjectType(for: live)
+        )
+        var baseline = scripting.diffBaselines[ref.canonical] ?? [:]
+        baseline[canonical] = after
+        scripting.diffBaselines[ref.canonical] = baseline
+        return outcome
+    }
+
+    public func commitPrevalidatedScriptBlockCell(
+        _ world: World, x: Int, y: Int, z: Int, cell: Int,
+        author: Provenance.Author
+    ) {
+        let previousAuthor = scripting.activeBuiltInMutationAuthor
+        scripting.activeBuiltInMutationAuthor = author
+        defer { scripting.activeBuiltInMutationAuthor = previousAuthor }
+        world.setBlock(x, y, z, cell, SET_DEFAULT)
     }
 
     // `setDifficulty(_:)` and `setGameRule(_:_:)` are already implemented by
@@ -133,7 +206,11 @@ extension GameCore: ObjectGraphHost {
             self.eventBus.raise(
                 kind: .attributeChanged, subject: ref,
                 payload: ["key": .string(name), "old": old ?? .null, "new": new ?? .null],
-                source: source, tick: Int64(self.rpgSimulationTick)
+                source: source, tick: Int64(self.rpgSimulationTick),
+                subjectType: {
+                    guard case .live(let live) = graph.resolve(ref) else { return nil }
+                    return scriptSubjectType(for: live)
+                }()
             )
         })
     }
@@ -147,7 +224,7 @@ extension GameCore: ObjectGraphHost {
         guard let p = player else { return nil }
         let reach = p.gameMode == GameMode.creative ? REACH_CREATIVE : REACH_SURVIVAL
         if let entity = crosshairEntity(reach) {
-            return .entity(uid: entity.id)
+            return scriptRef(for: entity)
         }
         if let hit = crosshairBlock() {
             return .block(dim: dim, x: hit.x, y: hit.y, z: hit.z)
@@ -177,7 +254,7 @@ extension GameCore: ObjectGraphHost {
         let targetContext = ObjectTargetContext(currentDimension: dim, cursor: cursorResolver, selfRef: selfRef)
         return ScriptingCommandContext(
             graph: graph, store: store, target: targetContext, isLANClient: isLANClientWorld,
-            tick: Int64(world.time), eventBus: eventBus,
+            tick: Int64(rpgSimulationTick), eventBus: eventBus,
             // script-runtime (change 1c): `/script`'s own executors.
             scriptStore: ScriptStore(graph: graph), scriptRuntime: scripting.scriptRuntime,
             scriptsTrusted: worldRec?.scriptsEnabled ?? false, killSwitchOn: (world.gameRules["doScripts"] ?? 1) != 0,
@@ -217,7 +294,7 @@ extension GameCore: ObjectGraphHost {
         return AIMutationContext(
             graph: graph, store: makeAttributeStore(graph: graph), scriptStore: ScriptStore(graph: graph),
             eventBus: eventBus, scriptRuntime: scripting.scriptRuntime, target: targetContext,
-            tick: Int64(world.time), model: model, isLANClient: isLANClientWorld, journal: scripting.aiJournal,
+            tick: Int64(rpgSimulationTick), model: model, isLANClient: isLANClientWorld, journal: scripting.aiJournal,
             requestID: requestID
         )
     }
@@ -257,12 +334,19 @@ extension GameCore: ObjectGraphHost {
     /// world still loads.
     func loadWorldObjectRecords(from rec: WorldRecord) {
         scripting.worldRecords.removeAll()
-        for (key, text) in rec.objects {
+        scripting.scriptDefinitionGeneration = 0
+        scripting.scriptDefinitionChanges.reset()
+        scripting.anyScriptsAttached = false
+        for key in rec.objects.keys.sorted(by: utf8Less) {
+            guard let text = rec.objects[key] else { continue }
             guard let record = ObjectRecordCodec.decode(text, caps: .defaults) else {
                 print("[scripting] dropped corrupt world/dimension object record for '\(key)'")
                 continue
             }
             scripting.worldRecords[key] = record
+            if record.hasScriptDefinitions, let ref = ObjectRef.parse(key) {
+                scriptDefinitionsDidChange(for: ref, hasScripts: true)
+            }
         }
     }
 
@@ -300,14 +384,14 @@ extension GameCore: ObjectGraphHost {
                 print("[scripting] \(message)")
             }
         }
-        // script-runtime (change 1c): durable timers ride a field of their
-        // own (`scriptTimers`, not `scriptRegistry` — see `ScriptTimers.swift`'s
-        // header) but load at the same point, for the same reason.
-        if !rec.scriptTimers.isEmpty, let runtime = scripting.scriptRuntime {
+        // Decode before `createScriptRuntimeForSession`: enterWorld intentionally constructs Lua
+        // only after every World has been hooked. The session snapshot bridges that ordering.
+        scripting.durableTimers = []
+        if !rec.scriptTimers.isEmpty {
             if let timers = DurableTimerRegistryCodec.decode(rec.scriptTimers, diagnostic: { message in
                 print("[scripting] \(message)")
             }) {
-                runtime.timers = timers
+                scripting.durableTimers = timers
             } else {
                 print("[scripting] dropped corrupt durable timer registry")
             }
@@ -320,7 +404,7 @@ extension GameCore: ObjectGraphHost {
     func storeEventSubscriptions(into rec: inout WorldRecord) {
         rec.scriptRegistry = scripting.eventBus.hasPersistedSubscriptions
             ? scripting.eventBus.encodePersistedSubscriptions() : ""
-        let timers = scripting.scriptRuntime?.timers ?? []
+        let timers = scripting.scriptRuntime?.timers ?? scripting.durableTimers
         rec.scriptTimers = timers.isEmpty ? "" : DurableTimerRegistryCodec.encode(timers)
         rec.aiJournal = scripting.aiJournal.encodePersisted()
     }
@@ -337,11 +421,24 @@ extension GameCore: ObjectGraphHost {
     /// the world still loads and plays normally, just without scripting.
     func createScriptRuntimeForSession() {
         guard !isLANClientWorld else { return }
+        // World/dimension records were indexed before the worlds existed. Entity and block records
+        // arrive later, through these host-only lifecycle hooks, so no periodic world census is
+        // needed. `World` calls the hydration hook only for records that actually contain scripts.
+        for w in worlds.values {
+            w.hooks.onScriptObjectHydrated = { [weak self] ref, record in
+                guard record.hasScriptDefinitions else { return }
+                self?.scriptDefinitionsDidChange(for: ref, hasScripts: true)
+            }
+            w.hooks.onScriptObjectUnloaded = { [weak self] ref in
+                self?.scriptDefinitionsDidChange(for: ref, hasScripts: false)
+            }
+        }
         do {
             scripting.scriptRuntime = try ScriptRuntime(
                 host: self, state: scripting,
                 say: { [weak self] line in self?.host?.pushChat(line) }
             )
+            scripting.scriptRuntime?.restoreDurableTimers(scripting.durableTimers)
         } catch {
             print("[scripting] script runtime construction failed (\(error)); scripting disabled this session")
             scripting.scriptRuntime = nil
@@ -349,25 +446,10 @@ extension GameCore: ObjectGraphHost {
         scripting.eventBus.delivery = { [weak self] event, targets in
             self?.scripting.scriptRuntime?.deliver(event, targets)
         }
-        // Decision 9 / §8.2: a world that already has scripts on disk must
-        // still discover them at open even though `anyScriptsAttached`
-        // starts `false` every session — one bounded scan at entry, not a
-        // per-tick cost.
-        scripting.anyScriptsAttached = worldLikelyHasScripts(rec: worldRec)
-    }
-
-    /// A one-time, world-open-only heuristic for the zero-cost flag's
-    /// initial value: `true` when the world/dimension bags (the cheapest
-    /// thing to check — already decoded into `scripting.worldRecords` by
-    /// `loadWorldObjectRecords`, called just before this in `enterWorld`)
-    /// carry any entry at all. This is only an eager optimization. If the
-    /// world's scripts live exclusively on blocks/entities, `ScriptRuntime
-    /// .runLoads()` still performs its deterministic every-20th-tick
-    /// backstop scan and discovers them within about one second once the
-    /// trust gate and kill switch allow execution.
-    private func worldLikelyHasScripts(rec: WorldRecord?) -> Bool {
-        guard rec != nil else { return false }
-        return !scripting.worldRecords.isEmpty
+        scripting.eventBus.deliveryAdmission = { [weak self] event, targets in
+            guard let runtime = self?.scripting.scriptRuntime else { return targets.count }
+            return runtime.admittedDeliveryCount(for: event, targets: targets)
+        }
     }
 
     /// Called from `exitToTitle`, before `finalizeAndSave` captures the
@@ -376,8 +458,10 @@ extension GameCore: ObjectGraphHost {
     func teardownScriptRuntimeForSession() {
         scripting.scriptRuntime?.unloadAllForShutdown()
         scripting.scriptRuntime?.persistRNGState()
+        scripting.durableTimers = scripting.scriptRuntime?.timers ?? scripting.durableTimers
         scripting.scriptRuntime = nil
         scripting.eventBus.delivery = nil
+        scripting.eventBus.deliveryAdmission = nil
     }
 
     // MARK: - script phase (design.md §7.5)
@@ -431,59 +515,157 @@ extension GameCore: ObjectGraphHost {
         let worldDimRefs: [ObjectRef] = [.world, .dimension(.overworld), .dimension(.nether), .dimension(.end)]
         for ref in worldDimRefs {
             guard case .live(let live) = attributeStoreGraph.resolve(ref) else { continue }
-            diffFields(worldDiffFieldsFor(ref), live: live, ref: ref, tick: tick)
+            let observation = eventBus.attributeObservation(
+                in: ref, subjectType: scriptSubjectType(for: live)
+            )
+            var fields = Set(observableFields(for: observation, live: live))
+            if case .dimension = ref {
+                if eventBus.hasEventInterest(.dimDayPhaseChanged, subject: ref) { fields.insert("day_phase") }
+                if eventBus.hasEventInterest(.dimWeatherChanged, subject: ref) {
+                    fields.formUnion(["raining", "thundering"])
+                }
+            }
+            diffFields(
+                fields.sorted(by: utf8Less), live: live, ref: ref, tick: tick,
+                observation: observation
+            )
         }
         for e in w.entities {
-            guard let ent = e as? Entity, !ent.dead, !ent.lanReplicatedMirror, !(ent is LANRemotePlayerEntity) else { continue }
-            let ref = scriptRef(for: ent)
-            guard eventBus.hasAttributeChangedInterest(in: ref) else { continue }
+            guard let ent = e as? Entity, !ent.dead, !ent.lanReplicatedMirror else { continue }
+            let ref: ObjectRef = if let remote = ent as? LANRemotePlayerEntity {
+                .lanPlayer(peerID: remote.multiplayerPlayerID)
+            } else {
+                scriptRef(for: ent)
+            }
+            let observation = eventBus.attributeObservation(in: ref, subjectType: ent.type)
+            let observesLevel = ent is Player && eventBus.hasEventInterest(.playerLeveled, subject: ref)
+            guard !observation.isEmpty || observesLevel else { continue }
             guard case .live(let live) = attributeStoreGraph.resolve(ref) else { continue }
-            var fields = Self.entityDiffFields
-            if ent is Player { fields += Self.playerOnlyDiffFields }
-            diffFields(fields, live: live, ref: ref, tick: tick)
-            diffPosition(live: live, ref: ref, entity: ent, tick: tick)
+            var fields = Set(observableFields(for: observation, live: live))
+            if observesLevel { fields.insert("xp_level") }
+            diffFields(
+                fields.sorted(by: utf8Less), live: live, ref: ref, tick: tick,
+                observation: observation
+            )
+            if observation.explicitlyObserves("pos") {
+                diffPosition(live: live, ref: ref, entity: ent, tick: tick)
+            }
+        }
+
+        // Exact block observers also see dynamic light and block-entity fields that do not pass
+        // through World.setBlock. Kind-filtered block cell state remains hook-driven, avoiding an
+        // unbounded scan of every loaded voxel.
+        for ref in eventBus.exactAttributeObservedObjects(of: .block) {
+            guard case .live(let live) = attributeStoreGraph.resolve(ref) else { continue }
+            let observation = eventBus.attributeObservation(
+                in: ref, subjectType: scriptSubjectType(for: live)
+            )
+            diffFields(
+                observableFields(for: observation, live: live), live: live, ref: ref, tick: tick,
+                observation: observation
+            )
         }
     }
 
     private var attributeStoreGraph: ObjectGraph { ObjectGraph(host: self) }
 
-    private static let entityDiffFields = ["health", "max_health", "on_fire", "dead", "target", "sitting", "baby", "tamed"]
-    private static let playerOnlyDiffFields = ["hunger", "xp_level", "game_mode", "dimension", "held_item"]
-
-    private func worldDiffFieldsFor(_ ref: ObjectRef) -> [String] {
-        switch ref {
-        case .world: return ["difficulty"]
-        case .dimension: return ["day_phase", "raining", "thundering"]
-        default: return []
+    private func observableFields(
+        for observation: EventBus.AttributeObservation, live: LiveObject
+    ) -> [String] {
+        var names = observation.names
+        if observation.observesAll {
+            names.formUnion(BuiltInAttributes.applicableObservableNames(for: live))
         }
+        return names.sorted(by: utf8Less)
     }
 
-    private func diffFields(_ fields: [String], live: LiveObject, ref: ObjectRef, tick: Int64) {
+    /// Synchronous World.setBlock funnel for block base attributes. It compares only fields that
+    /// at least one exact/type-filtered subscription can receive, so the ordinary no-script path
+    /// remains four bounded index lookups and no descriptor/value construction.
+    func recordObservableBlockAttributeChanges(
+        world: World, x: Int, y: Int, z: Int, oldCell: Int, newCell: Int,
+        source: EventSource
+    ) {
+        guard oldCell != newCell else { return }
+        let ref = ObjectRef.block(dim: world.dim, x: x, y: y, z: z)
+        let oldType = blockTypeName(for: oldCell)
+        let newType = blockTypeName(for: newCell)
+        var observation = eventBus.attributeObservation(in: ref, subjectType: newType)
+        if oldType != newType {
+            observation.formUnion(eventBus.attributeObservation(in: ref, subjectType: oldType))
+        }
+        guard !observation.isEmpty else { return }
+
+        let oldValues = Self.blockCellAttributeValues(oldCell)
+        let newValues = Self.blockCellAttributeValues(newCell)
+        var names = observation.names
+        if observation.observesAll {
+            names.formUnion(oldValues.keys)
+            names.formUnion(newValues.keys)
+        }
+        var baseline = scripting.diffBaselines[ref.canonical] ?? [:]
+        for name in names.sorted(by: utf8Less) {
+            let old = oldValues[name]
+            let new = newValues[name]
+            guard old != new else { continue }
+            eventBus.raise(
+                kind: .attributeChanged, subject: ref,
+                payload: ["key": .string(name), "old": old ?? .null, "new": new ?? .null],
+                source: source, tick: currentTick, subjectType: newType,
+                priorSubjectType: oldType
+            )
+            baseline[name] = new ?? .null
+        }
+        scripting.diffBaselines[ref.canonical] = baseline
+    }
+
+    private static func blockCellAttributeValues(_ cell: Int) -> [String: AttrValue] {
+        let id = cell >> 4
+        guard id >= 0, id < blockDefs.count else { return [:] }
+        let definition = blockDefs[id]
+        var values = BlockStateCodec.decode(cell)
+        values["name"] = .string(definition.name)
+        values["shape"] = .string(String(describing: definition.shape))
+        values["hardness"] = .number(definition.hardness)
+        values["light"] = .int(Int64(lightEmitOf(UInt16(cell))))
+        return values
+    }
+
+    private func blockTypeName(for cell: Int) -> String {
+        let id = cell >> 4
+        return id >= 0 && id < blockDefs.count ? blockDefs[id].name : "block"
+    }
+
+    private func diffFields(
+        _ fields: [String], live: LiveObject, ref: ObjectRef, tick: Int64,
+        observation: EventBus.AttributeObservation
+    ) {
         guard !fields.isEmpty else { return }
         var baseline = scripting.diffBaselines[ref.canonical] ?? [:]
-        let hadBaseline = scripting.diffBaselines[ref.canonical] != nil
         for name in fields {
             guard case .value(let current) = BuiltInAttributes.get(live, name: name, host: self) else { continue }
             let previous = baseline[name]
             baseline[name] = current
-            guard hadBaseline, previous != current else { continue }
-            eventBus.raise(
-                kind: .attributeChanged, subject: ref,
-                payload: ["key": .string(name), "old": previous ?? .null, "new": current],
-                source: .engine, tick: tick
-            )
+            guard let previous, previous != current else { continue }
+            if observation.observes(name) {
+                eventBus.raise(
+                    kind: .attributeChanged, subject: ref,
+                    payload: ["key": .string(name), "old": previous, "new": current],
+                    source: .engine, tick: tick, subjectType: scriptSubjectType(for: live)
+                )
+            }
             if name == "day_phase" {
                 eventBus.raise(
                     kind: .dimDayPhaseChanged, subject: ref,
-                    payload: ["old": previous ?? .null, "new": current], source: .engine, tick: tick
+                    payload: ["old": previous, "new": current], source: .engine, tick: tick
                 )
             } else if name == "raining" || name == "thundering" {
                 eventBus.raise(
                     kind: .dimWeatherChanged, subject: ref,
-                    payload: ["key": .string(name), "old": previous ?? .null, "new": current],
+                    payload: ["key": .string(name), "old": previous, "new": current],
                     source: .engine, tick: tick
                 )
-            } else if name == "xp_level", case (.int(let oldLevel)?, .int(let newLevel)) = (previous, current),
+            } else if name == "xp_level", case (.int(let oldLevel), .int(let newLevel)) = (previous, current),
                       newLevel > oldLevel {
                 // event-bus (change 1b): `player.leveled` (design.md §7.2,
                 // "addXP"). `Player.swift`'s `addXP` is untouched by this
@@ -493,7 +675,7 @@ extension GameCore: ObjectGraphHost {
                 // an actual increase costs nothing extra to compute).
                 eventBus.raise(
                     kind: .playerLeveled, subject: ref,
-                    payload: ["old": previous ?? .null, "new": current], source: .engine, tick: tick
+                    payload: ["old": previous, "new": current], source: .engine, tick: tick
                 )
             }
         }
@@ -519,7 +701,8 @@ extension GameCore: ObjectGraphHost {
         eventBus.raise(
             kind: .attributeChanged, subject: ref,
             payload: ["key": .string("pos"), "old": previous ?? .null, "new": quantized],
-            source: .engine, tick: tick, excludeFromRecent: true
+            source: .engine, tick: tick, subjectType: scriptSubjectType(for: live),
+            excludeFromRecent: true, isSyntheticPositionChange: true
         )
     }
 
@@ -557,6 +740,10 @@ extension GameCore: ObjectGraphHost {
         for drop in w.pendingObjectRecordDrops where drop.chunk === chunk {
             if let current = chunk.objectRecords[drop.cellIndex], current.revision == drop.expectedRevision {
                 chunk.objectRecords.removeValue(forKey: drop.cellIndex)
+                if current.hasScriptDefinitions {
+                    let (x, y, z) = chunk.idxToWorld(drop.cellIndex)
+                    w.hooks.onScriptObjectUnloaded(.block(dim: w.dim, x: x, y: y, z: z))
+                }
             }
         }
         w.pendingObjectRecordDrops.removeAll { $0.chunk === chunk }

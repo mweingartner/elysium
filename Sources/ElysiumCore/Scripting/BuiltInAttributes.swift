@@ -32,11 +32,23 @@ public enum BuiltInAttributes {
     public static func get(_ live: LiveObject, name: String, host: ObjectGraphHost) -> BuiltInGetOutcome {
         let kind = kindOf(live)
         guard let descriptor = AttributeRegistry.resolve(kind: kind, name: name) else { return .unknownName }
-        guard AttributeRegistry.applies(descriptor, in: applicabilityContext(for: live)) else { return .notApplicable }
+        // A missing block entity is the observable null state of every `be.*` field, not the
+        // absence of the field itself. Keeping that state readable lets the diff publish
+        // null -> value and value -> null when a block entity is created, removed, or recreated.
+        // Other applicability predicates remain strict.
+        let missingBlockEntityValue = descriptor.applicability == .blockEntityAny
+            && blockEntityIsMissing(in: live)
+        guard missingBlockEntityValue
+                || AttributeRegistry.applies(descriptor, in: applicabilityContext(for: live))
+        else { return .notApplicable }
         switch live {
         case .block(_, let chunk, let cellIndex, let x, let y, let z):
             return getBlock(chunk: chunk, cellIndex: cellIndex, x: x, y: y, z: z, name: name)
-        case .entity(let entity, _):
+        case .entity(let entity, let world):
+            if let remote = entity as? LANRemotePlayerEntity {
+                return getRemotePlayer(remote, world: world, name: name)
+                    ?? getEntityCommon(remote, name: name) ?? .notApplicable
+            }
             return getEntityCommon(entity, name: name) ?? .unknownName
         case .player(let player, let world):
             return getPlayer(player, world: world, name: name) ?? getEntityCommon(player, name: name) ?? .unknownName
@@ -47,13 +59,70 @@ public enum BuiltInAttributes {
         }
     }
 
-    public static func set(_ live: LiveObject, name: String, value: AttrValue, host: ObjectGraphHost) -> BuiltInSetOutcome {
+    /// Performs the complete live setter admission check without changing engine state. The live
+    /// `set` path calls this first, and Script Check/dry-run calls it directly, so applicability,
+    /// mutability, value-kind, concrete block encoding, enum, and range refusals cannot drift.
+    public static func validateSet(
+        _ live: LiveObject, name: String, value: AttrValue, host: ObjectGraphHost
+    ) -> BuiltInSetOutcome {
         let kind = kindOf(live)
         guard let descriptor = AttributeRegistry.resolve(kind: kind, name: name) else {
             return .unknownName(didYouMean: AttributeRegistry.didYouMean(kind: kind, name: name))
         }
         guard AttributeRegistry.applies(descriptor, in: applicabilityContext(for: live)) else { return .notApplicable }
+        // A connected peer's built-ins are authoritative network observations. Scripts may add
+        // custom attributes/handlers to that object, but may not spoof its replicated base state.
+        if case .entity(let entity, _) = live, entity is LANRemotePlayerEntity { return .readOnly }
         guard descriptor.mutability == .getSet else { return .readOnly }
+
+        if case .block(let world, _, _, let x, let y, let z) = live {
+            guard BlockStateCodec.preflightWrite(
+                world, x, y, z, field: name, value: value
+            ) != nil else { return .wrongValueKind }
+            return .ok(value)
+        }
+
+        switch live {
+        case .player:
+            switch name {
+            case "hunger":
+                guard let parsed = integerValue(value) else { return .wrongValueKind }
+                guard (0...20).contains(parsed) else { return .outOfRange("0...20") }
+            case "xp_level":
+                guard let parsed = integerValue(value) else { return .wrongValueKind }
+                guard (0...100_000).contains(parsed) else {
+                    return .outOfRange("0...100000")
+                }
+            case "held_slot":
+                guard let parsed = integerValue(value) else { return .wrongValueKind }
+                guard (0...8).contains(parsed) else { return .outOfRange("0...8") }
+            default:
+                break
+            }
+        case .dimension:
+            if name == "day_time" {
+                guard let parsed = integerValue(value) else { return .wrongValueKind }
+                guard (0...23_999).contains(parsed) else {
+                    return .outOfRange("0...23999")
+                }
+            }
+        case .world:
+            if name.hasPrefix("gamerule.") {
+                let ruleName = String(name.dropFirst("gamerule.".count))
+                guard let world = host.world(for: host.currentDimension),
+                      world.gameRules[ruleName] != nil else { return .notApplicable }
+            }
+        default:
+            break
+        }
+
+        guard valueMatches(descriptor.valueKind, value) else { return .wrongValueKind }
+        return .ok(value)
+    }
+
+    public static func set(_ live: LiveObject, name: String, value: AttrValue, host: ObjectGraphHost) -> BuiltInSetOutcome {
+        let validation = validateSet(live, name: name, value: value, host: host)
+        guard case .ok = validation else { return validation }
         switch live {
         case .block(let world, _, _, let x, let y, let z):
             guard BlockStateCodec.write(world, x, y, z, field: name, value: value) else { return .wrongValueKind }
@@ -71,6 +140,29 @@ public enum BuiltInAttributes {
         }
     }
 
+    /// Canonical scalar fields that an unfiltered `attribute.changed` handler can observe on this
+    /// concrete object. Indexed/keyed families are added when explicitly named by a subscription;
+    /// they cannot be expanded safely without a live inventory/rule key list.
+    static func applicableObservableNames(for live: LiveObject) -> [String] {
+        if case .entity(let entity, _) = live, entity is LANRemotePlayerEntity {
+            return remotePlayerObservableNames
+        }
+        return AttributeRegistry.descriptors(for: kindOf(live)).compactMap { descriptor in
+            let missingBlockEntityValue = descriptor.applicability == .blockEntityAny
+                && blockEntityIsMissing(in: live)
+            guard descriptor.observable,
+                  missingBlockEntityValue
+                    || AttributeRegistry.applies(descriptor, in: applicabilityContext(for: live))
+            else { return nil }
+            return descriptor.canonical
+        }
+    }
+
+    private static func blockEntityIsMissing(in live: LiveObject) -> Bool {
+        guard case .block(_, let chunk, _, let x, let y, let z) = live else { return false }
+        return chunk.getBlockEntity(posMod(x, CHUNK_W), y, posMod(z, CHUNK_W)) == nil
+    }
+
     // MARK: - kind / applicability
 
     static func kindOf(_ live: LiveObject) -> ObjectKind {
@@ -78,7 +170,7 @@ public enum BuiltInAttributes {
         case .world: return .world
         case .dimension: return .dim
         case .block: return .block
-        case .entity: return .entity
+        case .entity(let entity, _): return entity is LANRemotePlayerEntity ? .player : .entity
         case .player: return .player
         }
     }
@@ -118,6 +210,28 @@ public enum BuiltInAttributes {
         case .number(let d): return (d.isFinite && d == d.rounded()) ? Int(exactly: d) : nil
         default: return nil
         }
+    }
+
+    private static func valueMatches(_ kind: AttrKind, _ value: AttrValue) -> Bool {
+        switch kind {
+        case .bool:
+            if case .bool = value { return true }
+        case .int:
+            return integerValue(value) != nil
+        case .number:
+            return numericValue(value) != nil
+        case .string:
+            if case .string = value { return true }
+        case .ref:
+            if case .ref = value { return true }
+        case .list, .effectList:
+            if case .list = value { return true }
+        case .map, .item:
+            if case .map = value { return true }
+        case .enumeration(let allowed):
+            if case .string(let candidate) = value { return allowed.contains(candidate) }
+        }
+        return false
     }
 
     // MARK: - block
@@ -197,11 +311,15 @@ public enum BuiltInAttributes {
         }
         if let mob = entity as? Mob {
             switch name {
-            case "target": return .value(mob.target.map { .ref(ObjectRef.entity(uid: $0.id).canonical) } ?? .null)
+            case "target": return .value(mob.target.map { .ref(scriptRef(for: $0).canonical) } ?? .null)
             case "baby": return .value(.bool(mob.baby))
             case "sitting": return .value(.bool(mob.sitting))
             case "tamed": return .value(.bool(mob.ownerId != nil))
-            case "owner": return .value(mob.ownerId.map { .ref(ObjectRef.entity(uid: $0).canonical) } ?? .null)
+            case "owner":
+                guard let ownerID = mob.ownerId,
+                      let owner = mob.world.entityById[ownerID] as? Entity
+                else { return .value(.null) }
+                return .value(.ref(scriptRef(for: owner).canonical))
             default: break
             }
         }
@@ -317,6 +435,32 @@ public enum BuiltInAttributes {
             return nil
         }
     }
+
+    /// Base player fields represented by the host's authoritative LAN mirror. Fields absent from
+    /// the wire snapshot (saturation, sleep/spawn, local movement flags, statistics, RPG state)
+    /// intentionally remain inapplicable rather than returning invented values.
+    private static func getRemotePlayer(
+        _ player: LANRemotePlayerEntity, world: World, name: String
+    ) -> BuiltInGetOutcome? {
+        switch name {
+        case "hunger": return .value(.int(Int64(player.hunger)))
+        case "xp_level": return .value(.int(Int64(player.xpLevel)))
+        case "xp_progress": return .value(.number(player.xpProgress))
+        case "game_mode":
+            return .value(.string(player.gameMode == GameMode.creative ? "creative" : "survival"))
+        case "dimension": return .value(.string(dimCanonicalName(world.dim)))
+        case "held_slot": return .value(.int(Int64(player.selectedSlot)))
+        case "held_item": return .value(itemValue(player.mainHand))
+        default: return nil
+        }
+    }
+
+    private static let remotePlayerObservableNames: [String] = [
+        "type", "x", "y", "z", "yaw", "pitch", "vx", "vy", "vz", "on_ground",
+        "in_water", "on_fire", "age", "dead", "persistent", "health", "max_health",
+        "absorption", "effects", "armor", "main_hand", "off_hand", "hunger", "xp_level",
+        "xp_progress", "game_mode", "dimension", "held_slot", "held_item",
+    ]
 
     private static func setPlayer(_ player: Player, world: World, name: String, value: AttrValue) -> BuiltInSetOutcome? {
         switch name {

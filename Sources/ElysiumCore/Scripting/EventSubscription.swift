@@ -13,7 +13,29 @@
 //     represents the data shape and the load/unload bookkeeping (`EventBus`'s
 //     unload API) so 1c only has to plug in Lua execution.
 
+import CoreFoundation
 import Foundation
+
+/// Numeric fields in scripting registries are untrusted JSON. `NSNumber.int64Value` saturates or
+/// truncates floats (for example `1e100` becomes `Int64.max`), which can turn a malformed saved id
+/// into a trapping `max + 1` during restore. Accept only a genuine integer-typed JSON token whose
+/// exact decimal representation fits `Int64`; booleans, floats, and exponents are rejected.
+func strictScriptingRegistryInteger(_ raw: Any?) -> Int64? {
+    guard let number = raw as? NSNumber,
+          CFGetTypeID(number) != CFBooleanGetTypeID(),
+          !CFNumberIsFloatType(number)
+    else { return nil }
+    return Int64(number.stringValue)
+}
+
+/// Persisted scripting identifiers intentionally share the strict signed-JSON domain above. Keep
+/// every allocator inside that domain so a valid restored `Int64.max` identifier cannot make the
+/// next locally-created record encode a value that the same codec rejects on the following load.
+let maxScriptingRegistryIdentifier = UInt64(Int64.max)
+
+func scriptingRegistryIdentifierSuccessor(_ id: UInt64) -> UInt64 {
+    id >= maxScriptingRegistryIdentifier ? 1 : id + 1
+}
 
 /// What a subscription matches against (design.md §7.3). `.kind(.block, _)`
 /// requires a non-nil `typeFilter` when the event kind itself requires one
@@ -67,6 +89,88 @@ public enum SubscriptionTarget: Hashable, Sendable {
         case .any: return "any"
         }
     }
+}
+
+func subscriptionTargetKind(_ target: SubscriptionTarget) -> ObjectKind? {
+    switch target {
+    case .object(let ref): return ref.kind
+    case .kind(let kind, _): return kind
+    case .any: return nil
+    }
+}
+
+/// Resolves a registry spelling exactly first, then accepts the camelCase Lua/editor spelling for
+/// a canonical snake_case built-in (`maxHealth` -> `max_health`). Custom names are intentionally
+/// not handled here: a custom `maxhealth` saved by an older build must never shadow `max_health`.
+func ergonomicBuiltInAttribute(
+    _ raw: String, target: SubscriptionTarget
+) -> AttributeDescriptor? {
+    guard let kind = subscriptionTargetKind(target) else { return nil }
+    if let descriptor = AttributeRegistry.resolve(kind: kind, name: raw) { return descriptor }
+    let normalized = normalizedScriptCustomAttributeName(raw)
+    guard normalized != raw else { return nil }
+    return AttributeRegistry.resolve(kind: kind, name: normalized)
+}
+
+/// Strict EventBus boundary. Runtime/editor/AI callers normalize ergonomic custom input before
+/// reaching it; registry aliases and camelCase built-ins are canonicalized here so an admitted
+/// filter is immediately live rather than only becoming live after a save/reload cycle.
+func canonicalEventBusAttributeFilter(
+    _ raw: String, target: SubscriptionTarget
+) -> String? {
+    if let descriptor = ergonomicBuiltInAttribute(raw, target: target) {
+        return descriptor.canonical
+    }
+    return isValidAttributeName(raw) ? raw : nil
+}
+
+/// New authored trigger spelling. Built-ins retain their registry punctuation; custom names use
+/// the same ergonomic snake_case normalization as Lua attributes and the bounded AI tools.
+func canonicalAuthoredAttributeFilter(
+    _ raw: String, target: SubscriptionTarget
+) -> String? {
+    if let descriptor = ergonomicBuiltInAttribute(raw, target: target) {
+        return descriptor.canonical
+    }
+    let normalized = normalizedScriptCustomAttributeName(raw)
+    return isValidAttributeName(normalized) ? normalized : nil
+}
+
+/// Upgrades the one historical bad persisted shape: older `h:attach` saved a camelCase filter
+/// verbatim even though the old Lua attribute path folded that same spelling to collapsed
+/// lowercase. Recover only plain ASCII camelCase (never arbitrary punctuation), while built-in
+/// camelCase always migrates to its registry canonical spelling.
+func migratedPersistedAttributeFilter(
+    _ raw: String, target: SubscriptionTarget
+) -> String? {
+    if let descriptor = ergonomicBuiltInAttribute(raw, target: target) {
+        return descriptor.canonical
+    }
+    if isValidAttributeName(raw) { return raw }
+    let bytes = Array(raw.utf8)
+    guard !bytes.isEmpty, bytes.count <= 32,
+          bytes.allSatisfy({ byte in
+              (byte >= UInt8(ascii: "a") && byte <= UInt8(ascii: "z"))
+                  || (byte >= UInt8(ascii: "A") && byte <= UInt8(ascii: "Z"))
+                  || (byte >= UInt8(ascii: "0") && byte <= UInt8(ascii: "9"))
+          }),
+          bytes.contains(where: { $0 >= UInt8(ascii: "A") && $0 <= UInt8(ascii: "Z") }),
+          let legacy = normalizedAttributeNameHint(raw), isValidAttributeName(legacy)
+    else { return nil }
+    return legacy
+}
+
+/// A new canonical snake_case custom filter also observes the legacy collapsed spelling that a
+/// pre-upgrade Lua script could have persisted (`door_ref` observes `doorref`). This is evaluated
+/// at delivery, so a kind-wide compatibility filter consumes one bounded subscription/index slot
+/// rather than registering an alias pair. Registry built-ins never use this compatibility lane.
+func attributeFilterMatches(
+    _ filter: String, eventKey: String, target: SubscriptionTarget
+) -> Bool {
+    if filter == eventKey { return true }
+    guard ergonomicBuiltInAttribute(filter, target: target) == nil,
+          filter.contains("_") else { return false }
+    return filter.replacingOccurrences(of: "_", with: "") == eventKey
 }
 
 /// A persisted subscription (design.md §7.3): `Subscription{id, subscriber,
@@ -191,7 +295,7 @@ public enum SubscriptionRegistryCodec {
     ) -> [Subscription]? {
         guard text.utf8.count <= caps.maxWorldDocumentBytes else { return nil }
         guard let root = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { return nil }
-        guard (root["v"] as? NSNumber)?.intValue == 1 else { return nil }
+        guard strictScriptingRegistryInteger(root["v"]) == 1 else { return nil }
         guard let rawSubs = root["subs"] as? [[String: Any]] else { return [] }
         var result: [Subscription] = []
         var seenIDs = Set<UInt64>()
@@ -207,8 +311,8 @@ public enum SubscriptionRegistryCodec {
     }
 
     private static func decodeOne(_ raw: [String: Any]) -> Subscription? {
-        guard let idNumber = raw["id"] as? NSNumber, idNumber.int64Value >= 0 else { return nil }
-        let id = UInt64(idNumber.uint64Value)
+        guard let idValue = strictScriptingRegistryInteger(raw["id"]), idValue >= 0 else { return nil }
+        let id = UInt64(idValue)
         guard let whoText = raw["who"] as? String, let subscriber = ObjectRef.parse(whoText) else { return nil }
         guard let scriptName = raw["script"] as? String, isValidAttributeName(scriptName) else { return nil }
         guard let handler = raw["handler"] as? String, isValidAttributeName(handler) else { return nil }
@@ -216,15 +320,17 @@ public enum SubscriptionRegistryCodec {
         guard let evText = raw["ev"] as? String, let event = EventKind.parse(evText) else { return nil }
         var attribute: String?
         if let attrText = raw["attr"] as? String {
-            guard isValidAttributeName(attrText) else { return nil }
-            attribute = attrText
+            guard let canonical = migratedPersistedAttributeFilter(
+                attrText, target: target
+            ) else { return nil }
+            attribute = canonical
         }
         guard let byText = raw["by"] as? String, let createdBy = decodeAuthor(byText) else { return nil }
-        guard let tickNumber = raw["t"] as? NSNumber, tickNumber.int64Value >= 0 else { return nil }
+        guard let createdTick = strictScriptingRegistryInteger(raw["t"]), createdTick >= 0 else { return nil }
         return Subscription(
             id: id, subscriber: subscriber, scriptName: scriptName, handler: handler,
             target: target, event: event, attribute: attribute, createdBy: createdBy,
-            createdTick: tickNumber.int64Value
+            createdTick: createdTick
         )
     }
 

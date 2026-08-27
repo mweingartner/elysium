@@ -125,6 +125,73 @@ final class LANReplicationTests: XCTestCase {
         )
     }
 
+    func testHostSessionAppliedUseBlockRaisesExactGuestBlockUsedEvent() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 2.5, y: 64, z: 1.5)
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("stick"), count: 1),
+            ]),
+            from: "peer-a"
+        )
+        forceSetBlock(world, x: 2, y: 63, z: 1, cell: Int(cell(B.stone, 0)))
+        forceSetBlock(world, x: 2, y: 64, z: 1, cell: Int(cell(B.oak_door, 0)))
+        forceSetBlock(world, x: 2, y: 65, z: 1, cell: Int(cell(B.oak_door, 8)))
+        var events: [(
+            subject: ObjectRef,
+            payload: [String: AttrValue],
+            source: EventSource,
+            subjectType: String?
+        )] = []
+        world.hooks.raiseScriptEvent = { kind, subject, payload, source, subjectType in
+            if kind == .blockUsed {
+                events.append((subject, payload, source, subjectType))
+            }
+        }
+
+        XCTAssertEqual(
+            session.applyBlockIntent(
+                LANBlockIntent(
+                    action: .useBlock, x: 2, y: 64, z: 1,
+                    face: Dir.up, selectedHotbarSlot: 0
+                ),
+                from: "peer-a",
+                to: world
+            ),
+            .applied([
+                LANBlockChange(
+                    dimension: Dim.overworld.rawValue,
+                    x: 2, y: 64, z: 1,
+                    cell: Int(cell(B.oak_door, 4))
+                ),
+            ])
+        )
+
+        let event = try XCTUnwrap(events.first)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(event.subject, .block(dim: .overworld, x: 2, y: 64, z: 1))
+        XCTAssertEqual(event.payload, [
+            "by": .ref(ObjectRef.lanPlayer(peerID: "peer-a").canonical),
+            "item": .string("stick"),
+        ])
+        XCTAssertEqual(event.source, .lan(peerID: "peer-a"))
+        XCTAssertEqual(event.subjectType, "oak_door")
+
+        forceSetBlock(world, x: 3, y: 64, z: 1, cell: Int(cell(B.stone, 0)))
+        XCTAssertEqual(
+            session.applyBlockIntent(
+                LANBlockIntent(
+                    action: .useBlock, x: 3, y: 64, z: 1,
+                    face: Dir.up, selectedHotbarSlot: 0
+                ),
+                from: "peer-a",
+                to: world
+            ),
+            .ignored("unsupported use target")
+        )
+        XCTAssertEqual(events.count, 1, "an ignored use must not raise block.used")
+    }
+
     func testHostSessionRejectsOrIgnoresUnsupportedUseBlockIntentTargets() {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession()
@@ -1481,7 +1548,7 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(mirroredB.z, hostItem.z, accuracy: 0.000_001)
     }
 
-    func testLANRemotePlayerPicksUpHostAuthoritativeDroppedItemsAndPublishesInventory() throws {
+    func testLANRemotePlayerPickupCommitsNarrowOwningGrantAndHostSnapshot() throws {
         let hostWorld = makeLoadedWorld()
         let session = LANMultiplayerHostSession()
         session.acceptPeer(playerID: "peer-a", displayName: "Alex")
@@ -1499,6 +1566,12 @@ final class LANReplicationTests: XCTestCase {
             gameMode: GameMode.survival,
             dimension: Dim.overworld.rawValue
         ))
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 5, itemID: iid("stick"), count: 2),
+            ]),
+            from: "peer-a"
+        )
         XCTAssertEqual(
             applyLANRemotePlayers(
                 session.peerPlayerStates(),
@@ -1509,17 +1582,45 @@ final class LANReplicationTests: XCTestCase {
             1
         )
         let remote = try XCTUnwrap(hostWorld.entities.compactMap { $0 as? LANRemotePlayerEntity }.first)
+        // This proxy-only slot must never flow back into peer authority with the pickup delta.
+        remote.inventory[10] = ItemStack(iid("diamond"), 9)
         let item = spawnItem(hostWorld, 1.5, 65.5, 1.5, ItemStack(iid("coal"), 4))
         item.pickupDelay = 0
+        let orb = XPOrb(world: hostWorld)
+        orb.setPos(1.5, 65.5, 1.5)
+        orb.amount = 10
+        hostWorld.addEntity(orb)
 
         remote.age = 1
         remote.tick()
 
         XCTAssertTrue(item.dead)
+        XCTAssertTrue(orb.dead)
         XCTAssertEqual(remote.inventory[0], ItemStack(iid("coal"), 4))
+        XCTAssertEqual(drainLANAuthoritativePickupMutations(in: hostWorld, into: session), 1)
 
-        let remoteInventory = makeLANInventorySnapshot(remote)
-        session.recordInventorySnapshot(remoteInventory, from: "peer-a")
+        let peerInventory = try XCTUnwrap(session.peerRecord(playerID: "peer-a")?.inventory)
+        XCTAssertEqual(peerInventory.slots, [
+            LANInventorySlotSnapshot(slot: 0, itemID: iid("coal"), count: 4),
+            LANInventorySlotSnapshot(slot: 5, itemID: iid("stick"), count: 2),
+        ])
+        XCTAssertFalse(peerInventory.slots.contains { $0.itemID == iid("diamond") })
+        XCTAssertEqual(peerInventory.xp, 10)
+        XCTAssertEqual(peerInventory.xpLevel, 1)
+        XCTAssertEqual(peerInventory.xpProgress, 1.0 / 3.0, accuracy: 0.000_001)
+
+        let grant = try XCTUnwrap(session.drainGrants(for: "peer-a").first)
+        XCTAssertEqual(grant.playerID, "peer-a")
+        XCTAssertEqual(grant.items, [
+            LANInventorySlotSnapshot(slot: 0, itemID: iid("coal"), count: 4),
+        ])
+        XCTAssertEqual(grant.xp, 10)
+        XCTAssertFalse(grant.clearAll)
+        XCTAssertTrue(grant.slots.isEmpty)
+        XCTAssertTrue(grant.clearedSlots.isEmpty)
+        XCTAssertEqual(drainLANAuthoritativePickupMutations(in: hostWorld, into: session), 0)
+        XCTAssertTrue(session.drainGrants(for: "peer-a").isEmpty, "a drained pickup must not grant twice")
+
         let batch = session.makeBatch(
             tick: 12,
             fullSnapshot: false,
@@ -1535,8 +1636,116 @@ final class LANReplicationTests: XCTestCase {
         let publishedInventory = try XCTUnwrap(batch.inventories.first { $0.playerID == "peer-a" })
         XCTAssertEqual(publishedInventory.slots, [
             LANInventorySlotSnapshot(slot: 0, itemID: iid("coal"), count: 4),
+            LANInventorySlotSnapshot(slot: 5, itemID: iid("stick"), count: 2),
         ])
+        XCTAssertEqual(publishedInventory.xp, 10)
+        XCTAssertEqual(publishedInventory.xpLevel, 1)
+        XCTAssertEqual(publishedInventory.xpProgress, 1.0 / 3.0, accuracy: 0.000_001)
         XCTAssertTrue(batch.entities.contains { $0.entityID == item.id && $0.dead })
+    }
+
+    func testLANRemotePlayerPickupRefreshesCapacityAndRefusesWhenPeerInventoryIsFull() throws {
+        let hostWorld = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 1.5, y: 65, z: 1.5)
+        XCTAssertEqual(
+            applyLANRemotePlayers(
+                session.peerPlayerStates(),
+                to: hostWorld,
+                localPlayerID: "host",
+                inventorySnapshots: session.peerInventorySnapshotsByPlayerID()
+            ).spawned,
+            1
+        )
+        let remote = try XCTUnwrap(hostWorld.entities.compactMap { $0 as? LANRemotePlayerEntity }.first)
+        XCTAssertTrue(remote.inventory.allSatisfy { $0 == nil })
+
+        let fullSlots = (0..<36).map {
+            LANInventorySlotSnapshot(slot: $0, itemID: iid("stone"), count: 64)
+        }
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(
+                playerID: "peer-a", selectedHotbarSlot: 0, slots: fullSlots
+            ),
+            from: "peer-a"
+        )
+        XCTAssertEqual(
+            applyLANRemotePlayers(
+                session.peerPlayerStates(),
+                to: hostWorld,
+                localPlayerID: "host",
+                inventorySnapshots: session.peerInventorySnapshotsByPlayerID()
+            ).updated,
+            1
+        )
+        XCTAssertEqual(remote.inventory.compactMap { $0 }.count, 36)
+
+        let item = spawnItem(hostWorld, 1.5, 65.5, 1.5, ItemStack(iid("coal"), 1))
+        item.pickupDelay = 0
+        var pickupEvents = 0
+        hostWorld.hooks.raiseScriptEvent = { kind, _, _, _, _ in
+            if kind == .playerPickedUp { pickupEvents += 1 }
+        }
+        remote.age = 1
+        remote.tick()
+
+        XCTAssertFalse(item.dead, "an item must remain when the current peer baseline has no capacity")
+        XCTAssertEqual(pickupEvents, 0)
+        XCTAssertEqual(drainLANAuthoritativePickupMutations(in: hostWorld, into: session), 0)
+        XCTAssertTrue(session.drainGrants(for: "peer-a").isEmpty)
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots, fullSlots)
+    }
+
+    func testLANRemotePlayerPickupCommitRetriesLosslesslyAfterUnexpectedCapacityMismatch() throws {
+        let hostWorld = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 1.5, y: 65, z: 1.5)
+        _ = applyLANRemotePlayers(
+            session.peerPlayerStates(),
+            to: hostWorld,
+            localPlayerID: "host",
+            inventorySnapshots: session.peerInventorySnapshotsByPlayerID()
+        )
+        let remote = try XCTUnwrap(hostWorld.entities.compactMap { $0 as? LANRemotePlayerEntity }.first)
+
+        // Deliberately bypass the production refresh once to model an unexpected stale-capacity
+        // mismatch at commit time. The pending delta must survive until the peer has room.
+        let fullSlots = (0..<36).map {
+            LANInventorySlotSnapshot(slot: $0, itemID: iid("stone"), count: 64)
+        }
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(
+                playerID: "peer-a", selectedHotbarSlot: 0, slots: fullSlots
+            ),
+            from: "peer-a"
+        )
+        let item = spawnItem(hostWorld, 1.5, 65.5, 1.5, ItemStack(iid("coal"), 1))
+        item.pickupDelay = 0
+        var pickupEvents = 0
+        hostWorld.hooks.raiseScriptEvent = { kind, _, _, _, _ in
+            if kind == .playerPickedUp { pickupEvents += 1 }
+        }
+        remote.age = 1
+        remote.tick()
+
+        XCTAssertTrue(item.dead)
+        XCTAssertEqual(pickupEvents, 1)
+        XCTAssertEqual(drainLANAuthoritativePickupMutations(in: hostWorld, into: session), 0)
+        XCTAssertTrue(session.drainGrants(for: "peer-a").isEmpty)
+
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(
+                playerID: "peer-a", selectedHotbarSlot: 0, slots: Array(fullSlots.dropLast())
+            ),
+            from: "peer-a"
+        )
+        XCTAssertEqual(drainLANAuthoritativePickupMutations(in: hostWorld, into: session), 1)
+        let grant = try XCTUnwrap(session.drainGrants(for: "peer-a").first)
+        XCTAssertEqual(grant.items, [
+            LANInventorySlotSnapshot(slot: 0, itemID: iid("coal"), count: 1),
+        ])
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.last,
+                       LANInventorySlotSnapshot(slot: 35, itemID: iid("coal"), count: 1))
+        XCTAssertEqual(pickupEvents, 1, "retrying the commit must not re-emit the pickup event")
+        XCTAssertEqual(drainLANAuthoritativePickupMutations(in: hostWorld, into: session), 0)
     }
 
     func testHostSessionMakeBatchCarriesProvidedBlockEntitySnapshots() throws {
@@ -2816,6 +3025,17 @@ final class LANReplicationTests: XCTestCase {
     func testGhostBreakSpawnsDropsConsumesToolDurabilityAndRecordsBlockChange() throws {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession()
+        var brokenEvent: (
+            subject: ObjectRef,
+            payload: [String: AttrValue],
+            source: EventSource,
+            subjectType: String?
+        )?
+        world.hooks.raiseScriptEvent = { kind, subject, payload, source, subjectType in
+            if kind == .blockBroken {
+                brokenEvent = (subject, payload, source, subjectType)
+            }
+        }
         world.hooks.onBlockChanged = { [weak session] x, y, z, _, newCell, _ in
             _ = session?.recordBlockChange(dimension: world.dim.rawValue, x: x, y: y, z: z, cell: newCell)
         }
@@ -2844,6 +3064,60 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(session.drainBlockChanges(), [
             LANBlockChange(dimension: Dim.overworld.rawValue, x: 2, y: 64, z: 1, cell: 0),
         ])
+        let event = try XCTUnwrap(brokenEvent)
+        XCTAssertEqual(event.subject, .block(dim: .overworld, x: 2, y: 64, z: 1))
+        XCTAssertEqual(event.payload, [
+            "by": .ref(ObjectRef.lanPlayer(peerID: "peer-a").canonical),
+            "item": .string("iron_pickaxe"),
+            "blockName": .string("stone"),
+        ])
+        XCTAssertEqual(event.source, .lan(peerID: "peer-a"))
+        XCTAssertEqual(event.subjectType, "stone")
+    }
+
+    func testGhostPlaceRaisesAuthoritativeBlockPlacedEventAndConsumesItem() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+        _ = world.setBlock(2, 63, 1, Int(cell(B.stone)))
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("dirt"), count: 1),
+            ]),
+            from: "peer-a"
+        )
+        var placedEvent: (
+            subject: ObjectRef,
+            payload: [String: AttrValue],
+            source: EventSource,
+            subjectType: String?
+        )?
+        world.hooks.raiseScriptEvent = { kind, subject, payload, source, subjectType in
+            if kind == .blockPlaced {
+                placedEvent = (subject, payload, source, subjectType)
+            }
+        }
+
+        let outcome = LANHostGhostRegistry().applyPlace(
+            for: "peer-a",
+            intent: LANBlockIntent(
+                action: .placeBlock, x: 2, y: 63, z: 1, face: Dir.up,
+                selectedHotbarSlot: 0, cell: Int(cell(B.dirt))
+            ),
+            world: world,
+            session: session
+        )
+
+        XCTAssertTrue(outcome.placed)
+        XCTAssertEqual(world.getBlock(2, 64, 1), Int(cell(B.dirt)))
+        XCTAssertTrue(outcome.inventory.slots.isEmpty)
+        let event = try XCTUnwrap(placedEvent)
+        XCTAssertEqual(event.subject, .block(dim: .overworld, x: 2, y: 64, z: 1))
+        XCTAssertEqual(event.payload, [
+            "by": .ref(ObjectRef.lanPlayer(peerID: "peer-a").canonical),
+            "item": .string("dirt"),
+        ])
+        XCTAssertEqual(event.source, .lan(peerID: "peer-a"))
+        XCTAssertEqual(event.subjectType, "dirt")
     }
 
     func testGhostBreakSpillsContainerContentsAndMarksDirtyBlockEntity() throws {
@@ -2868,6 +3142,18 @@ final class LANReplicationTests: XCTestCase {
     func testGhostAttackHurtsRealMobRejectsProxyTargetsAndReturnsDurabilityDelta() throws {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession()
+        var attackEvents: [(
+            kind: EventKind,
+            subject: ObjectRef,
+            payload: [String: AttrValue],
+            source: EventSource,
+            subjectType: String?
+        )] = []
+        world.hooks.raiseScriptEvent = { kind, subject, payload, source, subjectType in
+            if kind == .playerAttacked || kind == .entityDamaged {
+                attackEvents.append((kind, subject, payload, source, subjectType))
+            }
+        }
         session.recordInventorySnapshot(
             LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
                 LANInventorySlotSnapshot(slot: 0, itemID: iid("iron_sword"), count: 1, damage: 0),
@@ -2886,6 +3172,22 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertLessThan(zombie.health, 20)
         XCTAssertEqual(outcome.inventory.slots.first?.itemID, iid("iron_sword"))
 
+        let attacked = try XCTUnwrap(attackEvents.first { $0.kind == .playerAttacked })
+        XCTAssertEqual(attacked.subject, .lanPlayer(peerID: "peer-a"))
+        XCTAssertEqual(attacked.payload, [
+            "target": .ref(ObjectRef.entity(uid: zombie.id).canonical),
+        ])
+        XCTAssertEqual(attacked.source, .lan(peerID: "peer-a"))
+        XCTAssertNil(attacked.subjectType)
+
+        let damaged = try XCTUnwrap(attackEvents.first { $0.kind == .entityDamaged })
+        XCTAssertEqual(damaged.subject, .entity(uid: zombie.id))
+        XCTAssertEqual(damaged.payload["attacker"],
+                       .ref(ObjectRef.lanPlayer(peerID: "peer-a").canonical))
+        XCTAssertEqual(damaged.payload["cause"], .string("mob"))
+        XCTAssertEqual(damaged.source, .lan(peerID: "peer-a"))
+        XCTAssertEqual(damaged.subjectType, "zombie")
+
         // Attacking a proxy (PvE only, D-K) must be rejected.
         let proxy = LANRemotePlayerEntity(world: world, state: LANPlayerState(
             playerID: "peer-b", displayName: "Bea", x: 3, y: 64, z: 1.5, yaw: 0, pitch: 0,
@@ -2895,6 +3197,260 @@ final class LANReplicationTests: XCTestCase {
         let rejected = registry.applyAttack(for: "peer-a", targetEntityID: proxy.id, world: world, session: session)
         XCTAssertFalse(rejected.attacked)
         XCTAssertEqual(rejected.reason, "PvP not supported")
+    }
+
+    func testLANRemotePlayerAuthoritativePickupsRaiseStandardPlayerEvents() throws {
+        let world = makeLoadedWorld()
+        let proxy = LANRemotePlayerEntity(world: world, state: LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1.5, y: 64, z: 1.5,
+            yaw: 0, pitch: 0, health: 20, hunger: 20, selectedHotbarSlot: 0,
+            gameMode: GameMode.survival
+        ))
+        world.addEntity(proxy)
+
+        let item = ItemEntity(world: world)
+        item.setPos(1.5, 64.5, 1.5)
+        item.stack = ItemStack(iid("diamond"), 3)
+        item.pickupDelay = 0
+        world.addEntity(item)
+
+        let orb = XPOrb(world: world)
+        orb.setPos(1.5, 64.5, 1.5)
+        orb.amount = proxy.xpForLevel(0)
+        world.addEntity(orb)
+
+        var events: [(
+            kind: EventKind,
+            subject: ObjectRef,
+            payload: [String: AttrValue],
+            source: EventSource,
+            subjectType: String?
+        )] = []
+        world.hooks.raiseScriptEvent = { kind, subject, payload, source, subjectType in
+            if kind == .playerPickedUp || kind == .playerLeveled {
+                events.append((kind, subject, payload, source, subjectType))
+            }
+        }
+
+        proxy.tick()
+        XCTAssertTrue(events.isEmpty, "the authoritative pickup cadence runs every second tick")
+        proxy.tick()
+
+        XCTAssertTrue(item.dead)
+        XCTAssertTrue(orb.dead)
+        XCTAssertEqual(
+            proxy.inventory.compactMap { $0 }.filter { $0.id == iid("diamond") }.reduce(0) { $0 + $1.count },
+            3
+        )
+        XCTAssertEqual(proxy.xpLevel, 1)
+        XCTAssertEqual(events.map(\.kind), [.playerPickedUp, .playerLeveled])
+
+        let pickedUp = try XCTUnwrap(events.first { $0.kind == .playerPickedUp })
+        XCTAssertEqual(pickedUp.subject, .lanPlayer(peerID: "peer-a"))
+        XCTAssertEqual(pickedUp.payload, [
+            "item": .string("diamond"),
+            "count": .int(3),
+        ])
+        XCTAssertEqual(pickedUp.source, .lan(peerID: "peer-a"))
+        XCTAssertNil(pickedUp.subjectType)
+
+        let leveled = try XCTUnwrap(events.first { $0.kind == .playerLeveled })
+        XCTAssertEqual(leveled.subject, .lanPlayer(peerID: "peer-a"))
+        XCTAssertEqual(leveled.payload, [
+            "old": .int(0),
+            "new": .int(1),
+        ])
+        XCTAssertEqual(leveled.source, .engine)
+        XCTAssertNil(leveled.subjectType)
+    }
+
+    func testGhostTossRaisesAuthoritativePlayerDroppedEvent() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 4),
+            ]),
+            from: "peer-a"
+        )
+        var droppedEvents: [(
+            subject: ObjectRef,
+            payload: [String: AttrValue],
+            source: EventSource,
+            subjectType: String?
+        )] = []
+        world.hooks.raiseScriptEvent = { kind, subject, payload, source, subjectType in
+            if kind == .playerDropped {
+                droppedEvents.append((subject, payload, source, subjectType))
+            }
+        }
+
+        let outcome = LANHostGhostRegistry().applyToss(
+            for: "peer-a",
+            intent: LANTossIntent(slot: 0, count: 2, all: false),
+            world: world,
+            session: session
+        )
+
+        XCTAssertTrue(outcome.tossed)
+        XCTAssertEqual(outcome.inventory.slots, [
+            LANInventorySlotSnapshot(slot: 0, itemID: iid("diamond"), count: 2),
+        ])
+        let thrown = try XCTUnwrap(world.entities.compactMap { $0 as? ItemEntity }.first)
+        XCTAssertEqual(thrown.stack, ItemStack(iid("diamond"), 2))
+        XCTAssertEqual(thrown.pickupDelay, 40)
+
+        XCTAssertEqual(droppedEvents.count, 1)
+        let dropped = try XCTUnwrap(droppedEvents.first)
+        XCTAssertEqual(dropped.subject, .lanPlayer(peerID: "peer-a"))
+        XCTAssertEqual(dropped.payload, [
+            "item": .string("diamond"),
+            "count": .int(2),
+        ])
+        XCTAssertEqual(dropped.source, .lan(peerID: "peer-a"))
+        XCTAssertNil(dropped.subjectType)
+    }
+
+    func testAcceptedLANPlayerLifecycleEdgesRaiseExactGuestEventsWithoutDuplicates() throws {
+        let world = makeLoadedWorld()
+        let session = LANMultiplayerHostSession()
+        session.acceptPeer(playerID: "peer-a", displayName: "Alex")
+        let initial = try XCTUnwrap(session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1, y: 64, z: 1,
+            yaw: 0, pitch: 0, health: 20, hunger: 20,
+            selectedHotbarSlot: 0, gameMode: GameMode.survival
+        )))
+        var events: [(
+            kind: EventKind,
+            subject: ObjectRef,
+            payload: [String: AttrValue],
+            source: EventSource,
+            subjectType: String?
+        )] = []
+        world.hooks.raiseScriptEvent = { kind, subject, payload, source, subjectType in
+            if kind == .playerDimensionChanged || kind == .playerRespawned {
+                events.append((kind, subject, payload, source, subjectType))
+            }
+        }
+
+        session.setPermissions(
+            LANPeerPermissions(canChangeDimensions: false, canRespawn: false),
+            for: "peer-a"
+        )
+        var requestedDimension = initial
+        requestedDimension.dimension = Dim.nether.rawValue
+        let deniedDimension = try XCTUnwrap(session.updatePlayerState(requestedDimension))
+        raiseLANAcceptedPlayerLifecycleEvents(
+            previous: initial, accepted: deniedDimension, in: world
+        )
+        XCTAssertTrue(events.isEmpty, "a clamped dimension request must not raise an event")
+
+        session.setPermissions(
+            LANPeerPermissions(canChangeDimensions: true, canRespawn: false),
+            for: "peer-a"
+        )
+        let acceptedDimension = try XCTUnwrap(session.updatePlayerState(requestedDimension))
+        raiseLANAcceptedPlayerLifecycleEvents(
+            previous: deniedDimension, accepted: acceptedDimension, in: world
+        )
+
+        var deadRequest = acceptedDimension
+        deadRequest.health = 0
+        deadRequest.dead = true
+        let dead = try XCTUnwrap(session.updatePlayerState(deadRequest))
+        raiseLANAcceptedPlayerLifecycleEvents(
+            previous: acceptedDimension, accepted: dead, in: world
+        )
+        var respawnRequest = dead
+        respawnRequest.health = 20
+        respawnRequest.dead = false
+        let deniedRespawn = try XCTUnwrap(session.updatePlayerState(respawnRequest))
+        raiseLANAcceptedPlayerLifecycleEvents(
+            previous: dead, accepted: deniedRespawn, in: world
+        )
+        XCTAssertEqual(events.count, 1, "a denied respawn must not raise an event")
+
+        session.setPermissions(
+            LANPeerPermissions(canChangeDimensions: true, canRespawn: true),
+            for: "peer-a"
+        )
+        let acceptedRespawn = try XCTUnwrap(session.updatePlayerState(respawnRequest))
+        raiseLANAcceptedPlayerLifecycleEvents(
+            previous: deniedRespawn, accepted: acceptedRespawn, in: world
+        )
+        raiseLANAcceptedPlayerLifecycleEvents(
+            previous: acceptedRespawn, accepted: acceptedRespawn, in: world
+        )
+
+        XCTAssertEqual(events.map(\.kind), [.playerDimensionChanged, .playerRespawned])
+        XCTAssertEqual(events[0].subject, .lanPlayer(peerID: "peer-a"))
+        XCTAssertEqual(events[0].payload, [
+            "old": .string("overworld"),
+            "new": .string("nether"),
+        ])
+        XCTAssertEqual(events[0].source, .lan(peerID: "peer-a"))
+        XCTAssertNil(events[0].subjectType)
+        XCTAssertEqual(events[1].subject, .lanPlayer(peerID: "peer-a"))
+        XCTAssertEqual(events[1].payload, [:])
+        XCTAssertEqual(events[1].source, .lan(peerID: "peer-a"))
+        XCTAssertNil(events[1].subjectType)
+    }
+
+    func testAcceptedLANProxyHealthEdgesRaiseExactDamageHealAndDeathEvents() throws {
+        let world = makeLoadedWorld()
+        var state = LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1, y: 64, z: 1,
+            yaw: 0, pitch: 0, health: 20, hunger: 20,
+            selectedHotbarSlot: 0, gameMode: GameMode.survival
+        )
+        _ = applyLANRemotePlayers([state], to: world, localPlayerID: nil)
+        var events: [(
+            kind: EventKind,
+            subject: ObjectRef,
+            payload: [String: AttrValue],
+            source: EventSource,
+            subjectType: String?
+        )] = []
+        world.hooks.raiseScriptEvent = { kind, subject, payload, source, subjectType in
+            if kind == .entityDamaged || kind == .entityHealed || kind == .entityDied {
+                events.append((kind, subject, payload, source, subjectType))
+            }
+        }
+
+        state.health = 12
+        _ = applyLANRemotePlayers([state], to: world, localPlayerID: nil)
+        _ = applyLANRemotePlayers([state], to: world, localPlayerID: nil)
+        state.health = 16
+        _ = applyLANRemotePlayers([state], to: world, localPlayerID: nil)
+        state.health = 0
+        state.dead = true
+        _ = applyLANRemotePlayers([state], to: world, localPlayerID: nil)
+        _ = applyLANRemotePlayers([state], to: world, localPlayerID: nil)
+
+        XCTAssertEqual(events.map(\.kind), [
+            .entityDamaged, .entityHealed, .entityDamaged, .entityDied,
+        ])
+        XCTAssertEqual(events[0].payload, [
+            "amount": .number(8),
+            "cause": .string("lan_state"),
+            "attacker": .null,
+        ])
+        XCTAssertEqual(events[1].payload, ["amount": .number(4)])
+        XCTAssertEqual(events[2].payload, [
+            "amount": .number(16),
+            "cause": .string("lan_state"),
+            "attacker": .null,
+        ])
+        XCTAssertEqual(events[3].payload, [
+            "cause": .string("lan_state"),
+            "attacker": .null,
+        ])
+        for event in events {
+            XCTAssertEqual(event.subject, .lanPlayer(peerID: "peer-a"))
+            XCTAssertEqual(event.source, .lan(peerID: "peer-a"))
+            XCTAssertEqual(event.subjectType, "player")
+        }
+        XCTAssertNil(lanRemotePlayerEntity(peerID: "peer-a", in: world))
     }
 
     func testProxyHurtRecordsDamageEventLeavesHealthUnchangedAndReturnsFalse() {
@@ -3831,8 +4387,8 @@ final class LANReplicationTests: XCTestCase {
 // scripting-ui-and-replication (change 3), design.md §11: `LANObjectAttributeSnapshot`,
 // `makeLANObjectAttributeSnapshots`, and the guest-side mirror in
 // `LANMultiplayerClientSession.apply(_:)` (hostile bytes, stale-revision rejection, and the
-// chunk-section-replace reconciliation the master brief calls out against 1a's D5-adjacent
-// note on `applyLANChunkSectionSnapshot`).
+// revisioned tombstone reconciliation. Chunk-section pages and object-metadata pages are
+// independent, so omission from a section batch can never stand in for a deletion tombstone.
 // =============================================================================
 final class LANObjectAttributeReplicationTests: XCTestCase {
     override class func setUp() {
@@ -3854,6 +4410,76 @@ final class LANObjectAttributeReplicationTests: XCTestCase {
             LANObjectAttributeSnapshot.self, from: JSONEncoder().encode(snapshot)
         )
         XCTAssertEqual(roundTrip, snapshot)
+
+        let legacyJSON = #"{"ref":"world","revision":1,"attrsJSON":"{}"}"#.data(using: .utf8)!
+        let legacy = try! JSONDecoder().decode(LANObjectAttributeSnapshot.self, from: legacyJSON)
+        XCTAssertFalse(legacy.removed, "the additive tombstone field must default off for older peers")
+
+        let tombstone = LANObjectAttributeSnapshot(
+            ref: ObjectRef.world.canonical, revision: 2, attrsJSON: "not retained", removed: true
+        )
+        XCTAssertEqual(tombstone.attrsJSON, "{}")
+        XCTAssertEqual(
+            try! JSONDecoder().decode(
+                LANObjectAttributeSnapshot.self, from: JSONEncoder().encode(tombstone)
+            ),
+            tombstone
+        )
+    }
+
+    func testMaximumValidCustomEventContractRoundTripsWithoutSilentMetadataLoss() throws {
+        let fields = (0..<ScriptingStorageCaps.defaults.maxEventFieldsPerDeclaration).map { index in
+            let digits = index < 10 ? "0\(index)" : "\(index)"
+            return CustomEventField(
+                name: "f\(digits)" + String(repeating: "x", count: 29),
+                type: .boolean,
+                isNullable: true
+            )
+        }
+        let summary = String(repeating: "\"", count: ScriptingStorageCaps.defaults.maxEventSummaryBytes)
+        var declarations: [CustomEventDeclaration] = []
+        for index in 0..<ScriptingStorageCaps.defaults.maxEventDeclarationsPerObject {
+            let digits = index < 10 ? "0\(index)" : "\(index)"
+            let name = String(repeating: "a", count: 32) + ".b"
+                + String(repeating: "b", count: 28) + digits
+            let kind = try XCTUnwrap(EventKind.parse(name))
+            guard case .success = validateCustomEventDeclaration(
+                name: name, fields: fields, summary: summary, caps: .defaults
+            ) else { return XCTFail("maximum contract should be valid for \(name)") }
+            declarations.append(CustomEventDeclaration(
+                kind: kind,
+                fields: fields,
+                summary: summary,
+                provenance: Provenance(createdBy: .player, createdTick: Int64(index))
+            ))
+        }
+
+        let eventsJSON = LANObjectAttributeSnapshot.encodeEvents(declarations)
+        XCTAssertNotEqual(eventsJSON, "[]")
+        XCTAssertGreaterThan(eventsJSON.utf8.count, 8_192, "regression must exercise the old lossy ceiling")
+        XCTAssertLessThanOrEqual(eventsJSON.utf8.count, LAN_MULTIPLAYER_MAX_OBJECT_EVENTS_JSON_BYTES)
+
+        let snapshot = LANObjectAttributeSnapshot(
+            ref: ObjectRef.player.canonical,
+            revision: 1,
+            attrsJSON: "{}",
+            eventsJSON: eventsJSON
+        )
+        let roundTrip = try JSONDecoder().decode(
+            LANObjectAttributeSnapshot.self, from: JSONEncoder().encode(snapshot)
+        )
+        let metadata = roundTrip.events()
+        XCTAssertEqual(metadata.count, ScriptingStorageCaps.defaults.maxEventDeclarationsPerObject)
+        XCTAssertTrue(metadata.allSatisfy {
+            $0.fields.count == ScriptingStorageCaps.defaults.maxEventFieldsPerDeclaration
+                && $0.summary == summary
+        })
+        XCTAssertEqual(roundTrip, snapshot)
+        XCTAssertLessThanOrEqual(
+            try JSONEncoder().encode(snapshot).count,
+            LAN_MULTIPLAYER_MAX_OBJECT_METADATA_PAGE_BYTES,
+            "one maximum valid contract must always fit on a bounded metadata page"
+        )
     }
 
     // MARK: - makeLANObjectAttributeSnapshots: sorted, bounded, revision-tagged
@@ -3903,6 +4529,263 @@ final class LANObjectAttributeReplicationTests: XCTestCase {
         XCTAssertEqual(snapshots.count, 3)
     }
 
+    func testSnapshotPagesRotatePastThePerBatchCap() {
+        let host = FakeObjectGraphHost()
+        let world = World(dim: .overworld, seed: 6)
+        let chunk = Chunk(cx: 0, cz: 0, minY: world.info.minY, height: world.info.height)
+        chunk.status = .generated
+        world.setChunk(chunk)
+        host.worldsByDim[.overworld] = world
+        let graph = ObjectGraph(host: host)
+        let store = AttributeStore(graph: graph)
+        for i in 0..<5 {
+            _ = world.setBlock(i, 64, 0, Int(cell(B.chest)))
+            _ = store.set(.block(dim: .overworld, x: i, y: 64, z: 0), "n", .int(Int64(i)))
+        }
+
+        let first = makeLANObjectAttributeSnapshotPage(
+            host: host, store: store, maxCount: 3
+        )
+        let second = makeLANObjectAttributeSnapshotPage(
+            host: host,
+            store: store,
+            afterRef: first.nextRef,
+            previousRevisions: first.currentRevisions,
+            previousRawRevisions: first.currentRawRevisions,
+            previousRecordDigests: first.currentRecordDigests,
+            previousWireRevisionClock: first.wireRevisionClock,
+            pendingTombstones: first.remainingTombstones,
+            maxCount: 3
+        )
+
+        XCTAssertEqual(first.snapshots.count, 3)
+        XCTAssertEqual(second.snapshots.count, 3)
+        XCTAssertEqual(first.currentRevisions.count, 5)
+        XCTAssertEqual(
+            Set(first.snapshots.map(\.ref) + second.snapshots.map(\.ref)),
+            Set(first.currentRevisions.keys),
+            "the rotating cursor must make refs sorting beyond the first bounded page visible"
+        )
+        XCTAssertTrue(first.emittedTombstoneRefs.isEmpty)
+        XCTAssertTrue(second.emittedTombstoneRefs.isEmpty)
+    }
+
+    func testFinalMetadataRemovalProducesATombstoneThatClearsTheGuestMirror() {
+        let host = FakeObjectGraphHost()
+        let world = World(dim: .overworld, seed: 7)
+        let chunk = Chunk(cx: 0, cz: 0, minY: world.info.minY, height: world.info.height)
+        chunk.status = .generated
+        world.setChunk(chunk)
+        host.worldsByDim[.overworld] = world
+        let graph = ObjectGraph(host: host)
+        let store = AttributeStore(graph: graph)
+        let ref = ObjectRef.block(dim: .overworld, x: 1, y: 64, z: 1)
+        _ = world.setBlock(1, 64, 1, Int(cell(B.chest)))
+        XCTAssertEqual(store.set(ref, "mood", .string("calm")), .success(.string("calm")))
+
+        let first = makeLANObjectAttributeSnapshotPage(host: host, store: store)
+        let client = LANMultiplayerClientSession()
+        XCTAssertEqual(client.apply(LANReplicationBatch(
+            tick: 1, fullSnapshot: false, objectAttributes: first.snapshots
+        )).appliedObjectAttributes, 1)
+        XCTAssertNotNil(client.objectAttributes[ref.canonical])
+
+        guard case .success(let removal) = store.remove(ref, "mood") else {
+            return XCTFail("expected the final attribute removal to succeed")
+        }
+        XCTAssertTrue(removal.existed)
+        let second = makeLANObjectAttributeSnapshotPage(
+            host: host,
+            store: store,
+            afterRef: first.nextRef,
+            previousRevisions: first.currentRevisions,
+            previousRawRevisions: first.currentRawRevisions,
+            previousRecordDigests: first.currentRecordDigests,
+            previousWireRevisionClock: first.wireRevisionClock,
+            pendingTombstones: first.remainingTombstones
+        )
+
+        XCTAssertEqual(second.snapshots.count, 1)
+        XCTAssertEqual(second.snapshots.first?.ref, ref.canonical)
+        XCTAssertEqual(second.snapshots.first?.removed, true)
+        XCTAssertEqual(second.snapshots.first?.attrsJSON, "{}")
+        XCTAssertEqual(second.snapshots.first?.scriptsJSON, "[]")
+        XCTAssertEqual(second.snapshots.first?.eventsJSON, "[]")
+        XCTAssertEqual(second.emittedTombstoneRefs, [ref.canonical])
+        XCTAssertTrue(second.remainingTombstones.isEmpty)
+
+        let report = client.apply(LANReplicationBatch(
+            tick: 2, fullSnapshot: false, objectAttributes: second.snapshots
+        ))
+        XCTAssertNil(client.objectAttributes[ref.canonical])
+        XCTAssertEqual(report.reconciledObjectAttributes, 1)
+    }
+
+    func testDeleteAndRecreateBetweenCensusesAdvancesTheWireRevision() {
+        let host = FakeObjectGraphHost()
+        let world = World(dim: .overworld, seed: 71)
+        let chunk = Chunk(cx: 0, cz: 0, minY: world.info.minY, height: world.info.height)
+        chunk.status = .generated
+        world.setChunk(chunk)
+        host.worldsByDim[.overworld] = world
+        let ref = ObjectRef.block(dim: .overworld, x: 1, y: 64, z: 1)
+        _ = world.setBlock(1, 64, 1, Int(cell(B.chest)))
+        let store = AttributeStore(graph: ObjectGraph(host: host))
+        _ = store.set(ref, "mood", .string("first"))
+        _ = store.set(ref, "mood", .string("second"))
+        let first = makeLANObjectAttributeSnapshotPage(host: host, store: store)
+        let client = LANMultiplayerClientSession()
+        _ = client.apply(LANReplicationBatch(
+            tick: 1, fullSnapshot: false, objectAttributes: first.snapshots
+        ))
+        let firstRevision = try? XCTUnwrap(first.snapshots.first?.revision)
+
+        _ = store.remove(ref, "mood")
+        _ = store.set(ref, "mood", .string("recreated"))
+        let second = makeLANObjectAttributeSnapshotPage(
+            host: host, store: store,
+            previousRevisions: first.currentRevisions,
+            previousRawRevisions: first.currentRawRevisions,
+            previousRecordDigests: first.currentRecordDigests,
+            previousWireRevisionClock: first.wireRevisionClock
+        )
+        let recreated = second.snapshots.first { $0.ref == ref.canonical }
+        XCTAssertGreaterThan(recreated?.revision ?? 0, firstRevision ?? 0)
+        let report = client.apply(LANReplicationBatch(
+            tick: 2, fullSnapshot: false, objectAttributes: second.snapshots
+        ))
+        XCTAssertEqual(report.appliedObjectAttributes, 1)
+        XCTAssertEqual(client.objectAttributes[ref.canonical]?.attrsJSON, recreated?.attrsJSON)
+        XCTAssertTrue(recreated?.attrsJSON.contains("recreated") == true)
+    }
+
+    func testDeleteAndRecreateAtEqualRawRevisionAdvancesTheWireRevision() throws {
+        let host = FakeObjectGraphHost()
+        let world = World(dim: .overworld, seed: 72)
+        let chunk = Chunk(cx: 0, cz: 0, minY: world.info.minY, height: world.info.height)
+        chunk.status = .generated
+        world.setChunk(chunk)
+        host.worldsByDim[.overworld] = world
+        let ref = ObjectRef.block(dim: .overworld, x: 2, y: 64, z: 2)
+        _ = world.setBlock(2, 64, 2, Int(cell(B.chest)))
+        let store = AttributeStore(graph: ObjectGraph(host: host))
+
+        XCTAssertEqual(store.set(ref, "mood", .string("first")), .success(.string("first")))
+        let first = makeLANObjectAttributeSnapshotPage(host: host, store: store)
+        let firstSnapshot = try XCTUnwrap(first.snapshots.first { $0.ref == ref.canonical })
+        XCTAssertEqual(first.currentRawRevisions[ref.canonical], 1)
+
+        guard case .success(let removal) = store.remove(ref, "mood") else {
+            return XCTFail("expected final metadata removal")
+        }
+        XCTAssertTrue(removal.existed)
+        XCTAssertEqual(store.set(ref, "mood", .string("recreated")), .success(.string("recreated")))
+
+        let second = makeLANObjectAttributeSnapshotPage(
+            host: host,
+            store: store,
+            previousRevisions: first.currentRevisions,
+            previousRawRevisions: first.currentRawRevisions,
+            previousRecordDigests: first.currentRecordDigests,
+            previousWireRevisionClock: first.wireRevisionClock
+        )
+        let secondSnapshot = try XCTUnwrap(second.snapshots.first { $0.ref == ref.canonical })
+
+        XCTAssertEqual(second.currentRawRevisions[ref.canonical], 1)
+        XCTAssertGreaterThan(secondSnapshot.revision, firstSnapshot.revision)
+        XCTAssertNotEqual(
+            second.currentRecordDigests[ref.canonical],
+            first.currentRecordDigests[ref.canonical]
+        )
+
+        let client = LANMultiplayerClientSession()
+        XCTAssertEqual(client.apply(LANReplicationBatch(
+            tick: 1, fullSnapshot: false, objectAttributes: [firstSnapshot]
+        )).appliedObjectAttributes, 1)
+        XCTAssertEqual(client.apply(LANReplicationBatch(
+            tick: 2, fullSnapshot: false, objectAttributes: [secondSnapshot]
+        )).appliedObjectAttributes, 1)
+        XCTAssertEqual(client.objectAttributes[ref.canonical]?.attrsJSON, secondSnapshot.attrsJSON)
+    }
+
+    func testRecreateAfterEmittedTombstoneAdvancesBeyondTheGuestRevisionFloor() throws {
+        let host = FakeObjectGraphHost()
+        let world = World(dim: .overworld, seed: 73)
+        let chunk = Chunk(cx: 0, cz: 0, minY: world.info.minY, height: world.info.height)
+        chunk.status = .generated
+        world.setChunk(chunk)
+        host.worldsByDim[.overworld] = world
+        let ref = ObjectRef.block(dim: .overworld, x: 3, y: 64, z: 3)
+        _ = world.setBlock(3, 64, 3, Int(cell(B.chest)))
+        let store = AttributeStore(graph: ObjectGraph(host: host))
+        let client = LANMultiplayerClientSession()
+
+        _ = store.set(ref, "mood", .string("first"))
+        let first = makeLANObjectAttributeSnapshotPage(host: host, store: store)
+        XCTAssertEqual(client.apply(LANReplicationBatch(
+            tick: 1, fullSnapshot: false, objectAttributes: first.snapshots
+        )).appliedObjectAttributes, 1)
+
+        _ = store.remove(ref, "mood")
+        let deletion = makeLANObjectAttributeSnapshotPage(
+            host: host,
+            store: store,
+            previousRevisions: first.currentRevisions,
+            previousRawRevisions: first.currentRawRevisions,
+            previousRecordDigests: first.currentRecordDigests,
+            previousWireRevisionClock: first.wireRevisionClock
+        )
+        let tombstone = try XCTUnwrap(deletion.snapshots.first { $0.ref == ref.canonical })
+        XCTAssertTrue(tombstone.removed)
+        XCTAssertGreaterThanOrEqual(deletion.wireRevisionClock, tombstone.revision)
+        XCTAssertNil(deletion.currentRawRevisions[ref.canonical])
+        XCTAssertTrue(deletion.remainingTombstones.isEmpty)
+        XCTAssertEqual(client.apply(LANReplicationBatch(
+            tick: 2, fullSnapshot: false, objectAttributes: deletion.snapshots
+        )).reconciledObjectAttributes, 1)
+
+        _ = store.set(ref, "mood", .string("recreated"))
+        let recreation = makeLANObjectAttributeSnapshotPage(
+            host: host,
+            store: store,
+            previousRevisions: deletion.currentRevisions,
+            previousRawRevisions: deletion.currentRawRevisions,
+            previousRecordDigests: deletion.currentRecordDigests,
+            previousWireRevisionClock: deletion.wireRevisionClock,
+            pendingTombstones: deletion.remainingTombstones
+        )
+        let recreated = try XCTUnwrap(recreation.snapshots.first { $0.ref == ref.canonical })
+        XCTAssertGreaterThan(recreated.revision, tombstone.revision)
+        XCTAssertEqual(client.apply(LANReplicationBatch(
+            tick: 3, fullSnapshot: false, objectAttributes: [recreated]
+        )).appliedObjectAttributes, 1)
+        XCTAssertEqual(client.objectAttributes[ref.canonical]?.attrsJSON, recreated.attrsJSON)
+    }
+
+    func testStaleTombstoneCannotDeleteANewerGuestMirror() {
+        let client = LANMultiplayerClientSession()
+        let ref = ObjectRef.world
+        _ = client.apply(LANReplicationBatch(
+            tick: 1,
+            fullSnapshot: false,
+            objectAttributes: [LANObjectAttributeSnapshot(
+                ref: ref.canonical,
+                revision: 5,
+                attrsJSON: AttrValueCodec.encode(.map(["mood": .string("new")]))
+            )]
+        ))
+        let report = client.apply(LANReplicationBatch(
+            tick: 2,
+            fullSnapshot: false,
+            objectAttributes: [LANObjectAttributeSnapshot(
+                ref: ref.canonical, revision: 4, attrsJSON: "{}", removed: true
+            )]
+        ))
+
+        XCTAssertEqual(report.ignoredStaleObjectAttributes, 1)
+        XCTAssertEqual(client.objectAttributes[ref.canonical]?.revision, 5)
+    }
+
     // MARK: - client-side apply: hostile bytes, stale revision
 
     func testClientRejectsUnparseableRefAndMalformedJSON() {
@@ -3947,23 +4830,80 @@ final class LANObjectAttributeReplicationTests: XCTestCase {
         XCTAssertEqual(client.objectAttributes[ref.canonical]?.revision, 5, "the newer, already-mirrored revision must survive")
     }
 
-    // MARK: - reconciliation: a bulk chunk-section replace purges stale mirrored block attrs
-
-    /// 1a's own note on `applyLANChunkSectionSnapshot`: it bulk-overwrites every cell in a whole
-    /// section directly, without running the single-block "does this replace clear the object's
-    /// entries" identity check design.md §17 Decision 5 relies on elsewhere. A guest's attribute
-    /// mirror must not keep showing a now-stale record for a position whose block just changed
-    /// out from under it via that path — unless the very same batch also refreshed it.
-    func testChunkSectionReplaceReconcilesStaleMirroredBlockAttributes() {
+    func testClientRejectsEqualRevisionConflictAndEqualRevisionResurrection() {
         let client = LANMultiplayerClientSession()
-        let staleRef = ObjectRef.block(dim: .overworld, x: 3, y: 64, z: 3)
+        let ref = ObjectRef.world
+        let initial = LANObjectAttributeSnapshot(
+            ref: ref.canonical,
+            revision: 5,
+            attrsJSON: AttrValueCodec.encode(.map(["mood": .string("initial")]))
+        )
+        XCTAssertEqual(client.apply(LANReplicationBatch(
+            tick: 1, fullSnapshot: false, objectAttributes: [initial]
+        )).appliedObjectAttributes, 1)
+
+        let equalConflict = LANObjectAttributeSnapshot(
+            ref: ref.canonical,
+            revision: 5,
+            attrsJSON: AttrValueCodec.encode(.map(["mood": .string("conflict")]))
+        )
+        var report = client.apply(LANReplicationBatch(
+            tick: 2, fullSnapshot: false, objectAttributes: [equalConflict]
+        ))
+        XCTAssertEqual(report.appliedObjectAttributes, 0)
+        XCTAssertEqual(report.ignoredStaleObjectAttributes, 1)
+        XCTAssertEqual(client.objectAttributes[ref.canonical]?.attrsJSON, initial.attrsJSON)
+
+        let tombstone = LANObjectAttributeSnapshot(
+            ref: ref.canonical,
+            revision: 6,
+            attrsJSON: "{}",
+            removed: true
+        )
+        report = client.apply(LANReplicationBatch(
+            tick: 3, fullSnapshot: false, objectAttributes: [tombstone]
+        ))
+        XCTAssertEqual(report.reconciledObjectAttributes, 1)
+        XCTAssertNil(client.objectAttributes[ref.canonical])
+
+        let equalResurrection = LANObjectAttributeSnapshot(
+            ref: ref.canonical,
+            revision: 6,
+            attrsJSON: AttrValueCodec.encode(.map(["mood": .string("resurrected")]))
+        )
+        report = client.apply(LANReplicationBatch(
+            tick: 4, fullSnapshot: false, objectAttributes: [equalResurrection]
+        ))
+        XCTAssertEqual(report.appliedObjectAttributes, 0)
+        XCTAssertEqual(report.ignoredStaleObjectAttributes, 1)
+        XCTAssertNil(client.objectAttributes[ref.canonical])
+
+        let newerResurrection = LANObjectAttributeSnapshot(
+            ref: ref.canonical,
+            revision: 7,
+            attrsJSON: AttrValueCodec.encode(.map(["mood": .string("newer")]))
+        )
+        XCTAssertEqual(client.apply(LANReplicationBatch(
+            tick: 5, fullSnapshot: false, objectAttributes: [newerResurrection]
+        )).appliedObjectAttributes, 1)
+        XCTAssertEqual(client.objectAttributes[ref.canonical]?.revision, 7)
+    }
+
+    // MARK: - independent chunk and metadata paging
+
+    /// A section snapshot is authoritative for block cells, not for the independently paged
+    /// metadata stream. Omitting an object from the same batch must preserve its mirror and
+    /// revision floor; the host's explicit tombstone is the only deletion signal.
+    func testChunkSectionReplacePreservesMirroredBlockAttributesUntilTombstone() {
+        let client = LANMultiplayerClientSession()
+        let liveRef = ObjectRef.block(dim: .overworld, x: 3, y: 64, z: 3)
         let refreshedRef = ObjectRef.block(dim: .overworld, x: 5, y: 64, z: 5)
         let outsideRef = ObjectRef.block(dim: .overworld, x: 100, y: 64, z: 100)
 
         let seed = LANReplicationBatch(
             tick: 1, fullSnapshot: false,
             objectAttributes: [
-                LANObjectAttributeSnapshot(ref: staleRef.canonical, revision: 1, attrsJSON: "{}"),
+                LANObjectAttributeSnapshot(ref: liveRef.canonical, revision: 5, attrsJSON: "{}"),
                 LANObjectAttributeSnapshot(ref: outsideRef.canonical, revision: 1, attrsJSON: "{}"),
             ]
         )
@@ -3982,9 +4922,27 @@ final class LANObjectAttributeReplicationTests: XCTestCase {
         )
         let report = client.apply(replaceBatch)
 
-        XCTAssertNil(client.objectAttributes[staleRef.canonical], "stale mirrored entry inside the replaced section must be purged")
+        XCTAssertEqual(client.objectAttributes[liveRef.canonical]?.revision, 5, "metadata omitted from an independently paged section batch remains live")
         XCTAssertNotNil(client.objectAttributes[refreshedRef.canonical], "an entry refreshed by the SAME batch survives even though its section also replaced")
         XCTAssertNotNil(client.objectAttributes[outsideRef.canonical], "an entry outside the replaced section's bounds is untouched")
-        XCTAssertEqual(report.reconciledObjectAttributes, 1)
+        XCTAssertEqual(report.reconciledObjectAttributes, 0)
+
+        let equalLivePage = LANObjectAttributeSnapshot(
+            ref: liveRef.canonical, revision: 5, attrsJSON: "{}"
+        )
+        let equalReport = client.apply(LANReplicationBatch(
+            tick: 3, fullSnapshot: false, objectAttributes: [equalLivePage]
+        ))
+        XCTAssertEqual(equalReport.ignoredStaleObjectAttributes, 1)
+        XCTAssertEqual(client.objectAttributes[liveRef.canonical]?.revision, 5)
+
+        let tombstone = LANObjectAttributeSnapshot(
+            ref: liveRef.canonical, revision: 6, attrsJSON: "{}", removed: true
+        )
+        let tombstoneReport = client.apply(LANReplicationBatch(
+            tick: 4, fullSnapshot: false, objectAttributes: [tombstone]
+        ))
+        XCTAssertEqual(tombstoneReport.reconciledObjectAttributes, 1)
+        XCTAssertNil(client.objectAttributes[liveRef.canonical])
     }
 }

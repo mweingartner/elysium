@@ -116,12 +116,11 @@ final class EnvironmentRecord {
     var envRef: Int32
     let randomBox: RandomStreamBox
     var destroyed = false
-    /// F3 (test.md defect, `ScriptEnvironment.destroy()` reclamation): every
-    /// registry ref `compile(in:...)` anchored for this environment (each compiled
-    /// chunk's `ScriptFunction.ref`). `_ENV`'s own upvalue keeps a compiled chunk's
-    /// `_ENV` reachable even after `envRef` itself is released, so these must be
-    /// released individually on destroy too.
-    var compiledRefs: [Int32] = []
+    /// Every registry ref owned by this environment: compiled chunks and Lua
+    /// callbacks marshaled across a host-call boundary. Each function keeps its
+    /// `_ENV` reachable through an upvalue even after `envRef` is released, so all
+    /// of these refs must be released individually on destroy.
+    var functionRefs: [Int32] = []
     /// F3 / note N4: every `fid` `installHostBindings` registered in `fidTable` for
     /// this environment's `HostBinding` functions — removed on destroy so the
     /// `HostFunction`/`ScriptEnvironment` they retain are not kept alive forever.
@@ -175,6 +174,11 @@ public final class LuaState {
     var handleResolver: [String: (kind: HandleKind, id: UInt64)] = [:]
     var environments: [UInt64: EnvironmentRecord] = [:]
     var nextEnvId: UInt64 = 1
+    /// The environment whose Lua entry is currently executing. Callback arguments
+    /// are marshaled from state-wide handle methods as well as environment-specific
+    /// host bindings, so the executing entry (not `HostCall.environment`) is the
+    /// authoritative ownership boundary for their registry refs.
+    var activeEnvironmentID: UInt64?
 
     // MARK: - Construction / lifecycle
 

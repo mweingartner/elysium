@@ -153,6 +153,23 @@ final class NativeScriptEditorToolbarTests: XCTestCase {
 
         model.mode = .handler
         toolbar.update(model: model, theme: .defaultDark, aiPanelOpen: true)
+        let handlerRunButton = try XCTUnwrap(
+            allSubviews(of: toolbar).first {
+                $0.accessibilityIdentifier() == "scriptEditor.run"
+            } as? NSButton
+        )
+        XCTAssertFalse(handlerRunButton.isEnabled)
+        XCTAssertEqual(
+            handlerRunButton.accessibilityHelp(),
+            ScriptEditorAuthoringContract.handlerRunOnceUnavailable
+        )
+        let invalidHandlerAIButton = try XCTUnwrap(
+            allSubviews(of: toolbar).first {
+                $0.accessibilityIdentifier() == "scriptEditor.requestAI"
+            } as? NSButton
+        )
+        XCTAssertFalse(invalidHandlerAIButton.isEnabled)
+        XCTAssertTrue(invalidHandlerAIButton.accessibilityHelp()?.contains("Choose or enter") == true)
         let narrowVisibleIdentifiers = [
             "scriptEditor.scriptName",
             "scriptEditor.mode",
@@ -368,6 +385,90 @@ final class NativeScriptEditorToolbarTests: XCTestCase {
         XCTAssertFalse(checkButton.isEnabled)
         XCTAssertFalse(runOnceButton.isEnabled)
         XCTAssertFalse(saveButton.isEnabled)
+    }
+
+    func testHandlerEventPickerIsTargetFilteredDeclaredAndAccessible() throws {
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elysium-toolbar-events-\(UUID().uuidString).sqlite")
+        addTeardownBlock { try? FileManager.default.removeItem(at: databaseURL) }
+        let game = GameCore(db: try SaveDB.open(databaseURL: databaseURL, migrateLegacy: false))
+        game.createWorld(
+            name: "Toolbar Event Picker Test",
+            seedText: "6161",
+            mode: GameMode.creative,
+            difficulty: 2
+        )
+        let context = game.scriptingCommandContext()
+        guard case .success = CustomEventStore(graph: context.graph).declare(
+            .player,
+            name: "player.quest_ready",
+            fields: [
+                CustomEventField(name: "quest", type: .string),
+                CustomEventField(name: "reward", type: .integer, isNullable: true),
+            ],
+            summary: "A quest reward is ready."
+        ) else {
+            return XCTFail("expected custom event declaration to succeed")
+        }
+
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.mode = .handler
+        let bridge = NativeScriptEditorToolbar(
+            model: model,
+            theme: .defaultDark,
+            aiPanelOpen: false,
+            onSave: {},
+            onToggleAI: {},
+            onRequestScriptingActivation: { _ in }
+        )
+        let coordinator = bridge.makeCoordinator()
+        let toolbar = NativeScriptEditorToolbarView(theme: .defaultDark)
+        toolbar.connect(to: coordinator)
+        defer { toolbar.disconnect() }
+        coordinator.toolbarView = toolbar
+        toolbar.update(model: model, theme: .defaultDark, aiPanelOpen: false)
+
+        let modeControl = try XCTUnwrap(
+            allSubviews(of: toolbar).first {
+                $0.accessibilityIdentifier() == "scriptEditor.mode"
+            } as? NSSegmentedControl
+        )
+        XCTAssertEqual(modeControl.accessibilityValue() as? String, "Handler")
+        XCTAssertTrue(modeControl.accessibilityHelp()?.contains("implicit ev") == true)
+
+        let eventField = try XCTUnwrap(
+            allSubviews(of: toolbar).first {
+                $0.accessibilityIdentifier() == "scriptEditor.handlerEvent"
+            } as? NSTextField
+        )
+        XCTAssertTrue(eventField.accessibilityHelp()?.contains("Required for Handler mode") == true)
+
+        let eventMenu = try XCTUnwrap(
+            allSubviews(of: toolbar).first {
+                $0.accessibilityIdentifier() == "scriptEditor.handlerEventMenu"
+            } as? NSPopUpButton
+        )
+        XCTAssertEqual(eventMenu.accessibilityLabel(), "Choose a handler event for Player")
+        XCTAssertTrue(eventMenu.accessibilityHelp()?.contains("only events compatible") == true)
+        let titles = eventMenu.itemTitles
+        XCTAssertTrue(titles.contains("Compatible Built-in Events"))
+        XCTAssertTrue(titles.contains("entity.damaged"))
+        XCTAssertFalse(titles.contains("block.used"))
+        XCTAssertTrue(titles.contains("Declared on player"))
+
+        let customItem = try XCTUnwrap(eventMenu.itemArray.first {
+            $0.title == "player.quest_ready"
+        })
+        XCTAssertTrue(customItem.toolTip?.contains("quest: string") == true)
+        XCTAssertTrue(customItem.toolTip?.contains("reward: integer?") == true)
+        XCTAssertEqual(customItem.representedObject as? String, "player.quest_ready")
+
+        coordinator.eventSelected(customItem)
+        toolbar.update(model: model, theme: .defaultDark, aiPanelOpen: false)
+        XCTAssertEqual(model.handlerEvent, "player.quest_ready")
+        XCTAssertEqual(eventField.stringValue, "player.quest_ready")
+        XCTAssertTrue(eventField.accessibilityHelp()?.contains("Declared custom event") == true)
+        XCTAssertTrue(eventField.accessibilityHelp()?.contains("A quest reward is ready") == true)
     }
 
     private func allSubviews(of view: NSView) -> [NSView] {

@@ -11,8 +11,8 @@ import CLua
 /// argument (`ScriptArgument.function`).
 public final class ScriptFunction {
     let stateIdentity: UInt64
-    /// The environment that compiled this chunk, or `nil` for a function extracted
-    /// from a script argument (not tied to any one environment's lifetime).
+    /// The environment that compiled this chunk or supplied this function as a host
+    /// call argument. `nil` is reserved for genuinely state-wide host-created values.
     let envId: UInt64?
     let ref: Int32
     fileprivate(set) var invalidated = false
@@ -69,7 +69,11 @@ extension LuaState {
     func makeScriptFunction(fromStackIndex idx: Int32, on L: LuaStatePointer) -> ScriptFunction {
         lua_pushvalue(L, idx)
         let ref = luaL_ref(L, elysium_registryindex())
-        return ScriptFunction(stateIdentity: identity, envId: nil, ref: ref)
+        let environmentID = activeEnvironmentID
+        if let environmentID {
+            environments[environmentID]?.functionRefs.append(ref)
+        }
+        return ScriptFunction(stateIdentity: identity, envId: environmentID, ref: ref)
     }
 
     // MARK: - Coroutines
@@ -161,6 +165,9 @@ extension LuaState {
         }
 
         var result = elysium_resume_result()
+        let previousEnvironmentID = activeEnvironmentID
+        activeEnvironmentID = coroutine.envId
+        defer { activeEnvironmentID = previousEnvironmentID }
         let rc = elysium_resume(pointer, co, Int32(args.count), Int64(slice), &result)
         // Read before a fault path might close+pool the thread underneath us.
         coroutine.instructionsUsed = elysium_thread_instructions_used(co)
@@ -325,6 +332,9 @@ extension LuaState {
         }
 
         var result = elysium_resume_result()
+        let previousEnvironmentID = activeEnvironmentID
+        activeEnvironmentID = function.envId
+        defer { activeEnvironmentID = previousEnvironmentID }
         let rc = elysium_pcall(pointer, Int32(args.count), -1, Int64(slice), &result)
 
         switch rc {

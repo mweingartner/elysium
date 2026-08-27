@@ -78,6 +78,51 @@ final class AIObjectGraphToolsTests: XCTestCase {
         }
     }
 
+    func testDescribeEventsOmitsReservedEventsWithAndWithoutObjectRef() throws {
+        let game = makeGameWithWorld("ai-describe-produced-events")
+
+        let blockEvents = AIObjectGraphQueryTools.run(
+            "describe_events", args: args(["kind": "block."]), context: game.aiQueryContext()
+        )
+        XCTAssertFalse(blockEvents.refused)
+        XCTAssertTrue(blockEvents.data?.contains("\"name\":\"block.used\"") == true)
+        XCTAssertFalse(blockEvents.data?.contains("\"name\":\"block.replaced\"") == true)
+        XCTAssertFalse(blockEvents.data?.contains("\"name\":\"block.scheduledTick\"") == true)
+
+        let playerLoad = AIObjectGraphQueryTools.run(
+            "describe_events", args: args(["ref": "player", "kind": "load"]),
+            context: game.aiQueryContext()
+        )
+        XCTAssertFalse(playerLoad.refused)
+        XCTAssertTrue(playerLoad.data?.contains("\"name\":\"load\"") == true)
+
+        let playerUnload = AIObjectGraphQueryTools.run(
+            "describe_events", args: args(["ref": "player", "kind": "unload"]),
+            context: game.aiQueryContext()
+        )
+        XCTAssertFalse(playerUnload.refused)
+        XCTAssertEqual(playerUnload.data, "{\"events\":[]}")
+    }
+
+    func testAIAuthoringGuideNamesExactObjectEventAPIsAndEveryAvailableEvent() {
+        let guide = ScriptAIAuthoringGuide.text
+        for fragment in [
+            "target:onAttribute(attribute, fn)", "h:declareEvent(name, fields[, summary])",
+            "h:events()", "h:undeclareEvent(name)", "h:emit(name[, payload])",
+            "block.toolStrike", "unload is not an EventBus event",
+            "register(\"unload\", fn)", "It receives no ev",
+        ] {
+            XCTAssertTrue(guide.contains(fragment), "AI guide is missing \(fragment)")
+        }
+        XCTAssertFalse(guide.contains("- unload ["), "unload finalization must not be listed as an event")
+        for descriptor in EventDescriptorRegistry.available {
+            XCTAssertTrue(
+                guide.contains("- \(descriptor.kind.rawValue) ["),
+                "AI guide is missing available event \(descriptor.kind.rawValue)"
+            )
+        }
+    }
+
     func testCheckScriptReportsCompileErrorWithRealRuntime() throws {
         let game = makeGameWithWorld("ai-check-script")
         let outcome = AIObjectGraphQueryTools.run("check_script", args: args(["source": "this is not lua("]), context: game.aiQueryContext())
@@ -131,6 +176,168 @@ final class AIObjectGraphToolsTests: XCTestCase {
         XCTAssertTrue(game.scripting.aiJournal.isEmpty)
     }
 
+    func testAIUsesCanonicalCamelCaseAttributesAndReusesLegacyCollapsedKeys() throws {
+        let game = makeGameWithWorld("ai-camel-attr-compat")
+        _ = try game.attributeStore.define(
+            .player, "doorref", .string("legacy"), readonly: false, by: .player
+        ).get()
+        let requestID = game.scripting.aiJournal.beginRequest()
+        let context = game.aiMutationContext(model: "test-model", requestID: requestID)
+
+        let fresh = AIObjectGraphMutationTools.run(
+            "set_attribute",
+            args: args(["ref": "player", "key": "favoriteColor", "value": "blue"]),
+            context: context
+        )
+        let legacy = AIObjectGraphMutationTools.run(
+            "set_attribute",
+            args: args(["ref": "player", "key": "doorRef", "value": "updated"]),
+            context: context
+        )
+
+        XCTAssertFalse(fresh.refused)
+        XCTAssertFalse(legacy.refused)
+        XCTAssertEqual(game.attributeStore.get(.player, "favorite_color"), .string("blue"))
+        XCTAssertNil(game.attributeStore.get(.player, "favoritecolor"))
+        XCTAssertEqual(game.attributeStore.get(.player, "doorref"), .string("updated"))
+        XCTAssertNil(game.attributeStore.get(.player, "door_ref"))
+    }
+
+    func testAICanonicalizesCamelCaseSubscriptionAndHandlerTriggerFilters() throws {
+        let game = makeGameWithWorld("ai-camel-filter-compat")
+        let store = ScriptStore(graph: game.aiQueryContext().graph)
+        _ = try store.attach(
+            .player, name: "brain", source: "register('changed', function(ev) end)",
+            mode: .module, triggers: [], by: .player, tick: 0
+        ).get()
+        let requestID = game.scripting.aiJournal.beginRequest()
+        let context = game.aiMutationContext(model: "test-model", requestID: requestID)
+
+        let subscription = AIObjectGraphMutationTools.run(
+            "subscribe", args: args([
+                "subscriber": "player", "target": "player", "event": "attribute.changed",
+                "attr": "favoriteColor", "handler": "brain.changed",
+            ]), context: context
+        )
+        let handler = AIObjectGraphMutationTools.run(
+            "attach_script", args: args([
+                "ref": "world", "name": "watcher", "source": "world.attrs.seen = ev.new",
+                "mode": "handler",
+                "triggers": "[{\"event\":\"attribute.changed\",\"attr\":\"favoriteColor\",\"target\":\"player\"}]",
+            ]), context: context
+        )
+
+        XCTAssertFalse(subscription.refused, subscription.message ?? "")
+        XCTAssertFalse(handler.refused, handler.message ?? "")
+        XCTAssertEqual(game.eventBus.listSubscriptions().first?.attribute, "favorite_color")
+        XCTAssertEqual(store.get(.world, "watcher")?.triggers.first?.attribute, "favorite_color")
+    }
+
+    func testSetBuiltInAttributePublishesAIProvenanceAndUndoRestoresThroughHostSetter() throws {
+        let game = makeGameWithWorld("ai-set-built-in")
+        let before = game.player.health
+        _ = game.eventBus.subscribe(
+            subscriber: .player, scriptName: "health_watch", handler: "changed",
+            target: .object(.player), event: .attributeChanged, attribute: "health",
+            createdBy: .player, tick: 0
+        )
+        var delivered: [ScriptEvent] = []
+        game.eventBus.delivery = { event, targets in
+            if !targets.isEmpty { delivered.append(event) }
+        }
+        let requestID = game.scripting.aiJournal.beginRequest()
+        let ctx = game.aiMutationContext(model: "test-model", requestID: requestID)
+
+        let outcome = AIObjectGraphMutationTools.run(
+            "set_attribute", args: args(["ref": "player", "key": "health", "value": 7]),
+            context: ctx
+        )
+        XCTAssertFalse(outcome.refused)
+        XCTAssertEqual(game.player.health, 7)
+        XCTAssertEqual(game.scripting.aiJournal.list().count, 1)
+        game.eventBus.runDeliveryPhase(tick: 0)
+        XCTAssertEqual(delivered.last?.source, .ai(model: "test-model"))
+        XCTAssertEqual(delivered.last?.payload["old"], .number(before))
+        XCTAssertEqual(delivered.last?.payload["new"], .number(7))
+
+        let persisted = game.scripting.aiJournal.encodePersisted()
+        let reloaded = AIJournal()
+        reloaded.loadPersisted(from: persisted)
+        let undoLines = reloaded.undo(groups: 1, context: undoContext(game))
+        XCTAssertTrue(undoLines.contains { $0.contains("restored") })
+        XCTAssertEqual(game.player.health, before)
+        game.eventBus.runDeliveryPhase(tick: 0)
+        XCTAssertEqual(delivered.last?.source, .player)
+        XCTAssertEqual(delivered.last?.payload["old"], .number(7))
+        XCTAssertEqual(delivered.last?.payload["new"], .number(before))
+    }
+
+    func testAIJournalRejectsCoercedFloatingPointIdentifiersWithoutPoisoningAllocator() {
+        let text = """
+        {"entries":[{"id":1e100,"req":1,"tool":"set_attribute","ref":"player",\
+        "name":"mood","t":0,"model":"test","after":"hash","undo":{"k":"none"}}],"src":{},"v":1}
+        """
+        let journal = AIJournal()
+        var diagnostics: [String] = []
+        journal.loadPersisted(from: text) { diagnostics.append($0) }
+        XCTAssertTrue(journal.isEmpty)
+        XCTAssertEqual(diagnostics.count, 1)
+        XCTAssertEqual(journal.beginRequest(), 1)
+    }
+
+    func testAIJournalAllocatorsWrapInsideTheirStrictCodecDomain() {
+        let maximum = Int64.max
+        let text = """
+        {"entries":[{"id":\(maximum),"req":\(maximum),"tool":"set_attribute","ref":"player",\
+        "name":"mood","t":0,"model":"test","after":"hash","undo":{"k":"none"}}],"src":{},"v":1}
+        """
+        let journal = AIJournal()
+        journal.loadPersisted(from: text)
+        let requestID = journal.beginRequest()
+        XCTAssertEqual(requestID, 1)
+        XCTAssertEqual(
+            journal.record(
+                requestID: requestID, tool: "set_attribute", ref: .player, name: "mood",
+                tick: 1, model: "test", afterHash: "hash2", undo: .none
+            ),
+            1
+        )
+
+        let reloaded = AIJournal()
+        reloaded.loadPersisted(from: journal.encodePersisted())
+        XCTAssertEqual(reloaded.entries.map(\.id), [UInt64(maximum), 1])
+        XCTAssertEqual(reloaded.entries.map(\.requestID), [UInt64(maximum), 1])
+    }
+
+    func testAIJournalRestoreReappliesRingAndSourceSideListCaps() throws {
+        let entries = (1...70).map { id in
+            "{\"id\":\(id),\"req\":\(id),\"tool\":\"set_attribute\",\"ref\":\"player\","
+                + "\"name\":\"mood\",\"t\":\(id),\"model\":\"test\",\"after\":\"hash\","
+                + "\"undo\":{\"k\":\"none\"}}"
+        }.joined(separator: ",")
+        let sources = (65...70).map { id in
+            "\"\(id)\":\"source-\(id)\""
+        }.joined(separator: ",")
+        let persisted = "{\"entries\":[\(entries)],\"src\":{\(sources)},\"v\":1}"
+        var diagnostics: [String] = []
+        let journal = AIJournal()
+
+        journal.loadPersisted(from: persisted) { diagnostics.append($0) }
+
+        XCTAssertEqual(journal.entries.count, AIJournal.maxEntries)
+        XCTAssertEqual(journal.entries.first?.id, 7, "restore keeps the newest valid ring suffix")
+        XCTAssertEqual(journal.entries.last?.id, 70)
+        XCTAssertEqual(journal.previousScriptSources.count, AIJournal.maxSourceSideListEntries)
+        XCTAssertEqual(Set(journal.previousScriptSources.keys), Set([67, 68, 69, 70]))
+        XCTAssertLessThanOrEqual(
+            journal.previousScriptSources.values.reduce(0) { $0 + $1.utf8.count },
+            AIJournal.maxSourceSideListBytes
+        )
+        XCTAssertLessThanOrEqual(journal.encodePersisted().utf8.count, AIJournal.maxTotalBytes)
+        XCTAssertTrue(diagnostics.contains("trimmed over-cap AI journal persistence"))
+        XCTAssertEqual(journal.beginRequest(), 71)
+    }
+
     func testDefineAttributeReadonlyRequiresForce() throws {
         let game = makeGameWithWorld("ai-define-attr")
         let requestID = game.scripting.aiJournal.beginRequest()
@@ -152,11 +359,22 @@ final class AIObjectGraphToolsTests: XCTestCase {
     func testRemoveAttributeJournalsAndUndoRestores() throws {
         let game = makeGameWithWorld("ai-remove-attr")
         _ = game.attributeStore.set(.player, "note", .string("hi"), by: .player)
+        _ = game.eventBus.subscribe(
+            subscriber: .player, scriptName: "note_watch", handler: "changed",
+            target: .object(.player), event: .attributeChanged, attribute: "note",
+            createdBy: .player, tick: 0
+        )
+        var delivered: ScriptEvent?
+        game.eventBus.delivery = { event, targets in
+            if !targets.isEmpty { delivered = event }
+        }
         let requestID = game.scripting.aiJournal.beginRequest()
         let ctx = game.aiMutationContext(model: "test-model", requestID: requestID)
         let outcome = AIObjectGraphMutationTools.run("remove_attribute", args: args(["ref": "player", "key": "note"]), context: ctx)
         XCTAssertFalse(outcome.refused)
         XCTAssertNil(game.attributeStore.get(.player, "note"))
+        game.eventBus.runDeliveryPhase(tick: 0)
+        XCTAssertEqual(delivered?.source, .ai(model: "test-model"))
         let undoLines = game.scripting.aiJournal.undo(groups: 1, context: undoContext(game))
         XCTAssertTrue(undoLines.contains { $0.contains("restored") })
         XCTAssertEqual(game.attributeStore.get(.player, "note"), .string("hi"))
@@ -301,6 +519,48 @@ final class AIObjectGraphToolsTests: XCTestCase {
         XCTAssertFalse(outcome.refused)
         let undoLines = game.scripting.aiJournal.undo(groups: 1, context: undoContext(game))
         XCTAssertTrue(undoLines.contains { $0.contains("nothing to revert") })
+    }
+
+    func testAIEventDeclarationIsDiscoverableAndValidatesEmits() throws {
+        let game = makeGameWithWorld("ai-custom-event")
+        let requestID = game.scripting.aiJournal.beginRequest()
+        let ctx = game.aiMutationContext(model: "test-model", requestID: requestID)
+
+        let declare = AIObjectGraphMutationTools.run(
+            "emit_event",
+            args: args([
+                "ref": "player", "name": "machine.ready", "action": "declare",
+                "fields": "{\"count\":\"integer\",\"note\":\"string?\"}",
+                "summary": "A machine became ready",
+            ]),
+            context: ctx
+        )
+        XCTAssertFalse(declare.refused, declare.message ?? "")
+
+        let described = AIObjectGraphQueryTools.run(
+            "describe_events", args: args(["ref": "player", "kind": "machine."]),
+            context: game.aiQueryContext()
+        )
+        XCTAssertFalse(described.refused, described.message ?? "")
+        XCTAssertTrue(described.data?.contains("\"name\":\"machine.ready\"") == true)
+        XCTAssertTrue(described.data?.contains("\"source\":\"custom\"") == true)
+        XCTAssertTrue(described.data?.contains("\"type\":\"integer\"") == true)
+
+        let invalid = AIObjectGraphMutationTools.run(
+            "emit_event",
+            args: args(["ref": "player", "name": "machine.ready", "payload": "{\"count\":\"three\"}"]),
+            context: ctx
+        )
+        XCTAssertTrue(invalid.refused)
+        XCTAssertEqual(invalid.stage, "validate")
+
+        let valid = AIObjectGraphMutationTools.run(
+            "emit_event",
+            args: args(["ref": "player", "name": "machine.ready", "payload": "{\"count\":3}"]),
+            context: ctx
+        )
+        XCTAssertFalse(valid.refused, valid.message ?? "")
+        XCTAssertEqual(game.eventBus.recentEvents().last?.payload["count"], .int(3))
     }
 
     func testRunScriptEphemeralExecutesOnceAndIsNotPersisted() throws {
@@ -502,6 +762,32 @@ final class AIObjectGraphToolsTests: XCTestCase {
         XCTAssertEqual(game.attributeStore.get(.player, "reply"), .string("hello back"))
     }
 
+    func testAiAskPublishesThePositiveAIRepliedEventEnvelope() throws {
+        let game = makeGameWithWorld("ai-ask-event")
+        let runtime = try XCTUnwrap(game.scripting.scriptRuntime)
+        let store = ScriptStore(graph: game.aiQueryContext().graph)
+        _ = try store.attach(
+            .world, name: "asker", source: "world.attrs.request_id = ai.ask('hello')",
+            mode: .module, triggers: [], by: .player, tick: 0
+        ).get()
+        game.scripting.anyScriptsAttached = true
+        var request: (UInt64, String)?
+        runtime.outboxHandoff = { request = ($0, $1) }
+
+        game.runEventBusPhase()
+        let sent = try XCTUnwrap(request)
+        XCTAssertEqual(sent.1, "hello")
+        runtime.submitAIReply(id: sent.0, text: "world", error: nil)
+        game.runEventBusPhase()
+
+        let event = try XCTUnwrap(game.eventBus.recentEvents().last { $0.kind == .aiReplied })
+        XCTAssertEqual(event.subject, .world)
+        XCTAssertEqual(event.payload["requestId"], .int(Int64(sent.0)))
+        XCTAssertEqual(event.payload["text"], .string("world"))
+        XCTAssertEqual(event.payload["error"], .null)
+        XCTAssertEqual(event.source, .engine)
+    }
+
     func testAiInFlightBudgetRefusesThirdConcurrentRequest() throws {
         let game = makeGameWithWorld("ai-inflight-budget")
         guard let runtime = game.scripting.scriptRuntime else { return XCTFail("no script runtime") }
@@ -521,6 +807,95 @@ final class AIObjectGraphToolsTests: XCTestCase {
         game.runEventBusPhase()
         XCTAssertEqual(handoffCount, ScriptRuntime.aiMaxInFlightPerWorld, "the pump must never see more than the in-flight cap")
         XCTAssertEqual(game.attributeStore.get(.player, "third"), .int(0), "the third ai.ask over budget returns id 0, never enqueued")
+    }
+
+    func testSortedAIRepliesCannotResumeAWaiterDetachedByAnEarlierReply() throws {
+        let game = makeGameWithWorld("ai-await-stale-batch")
+        let runtime = try XCTUnwrap(game.scripting.scriptRuntime)
+        let scripts = ScriptStore(graph: game.aiQueryContext().graph)
+        _ = try scripts.attach(
+            .world, name: "a_controller", source: """
+            local text = ai.await('first')
+            self:detach('b_waiter')
+            self.attrs.first_reply = text
+            """, mode: .module, triggers: [], by: .player, tick: 0
+        ).get()
+        _ = try scripts.attach(
+            .world, name: "b_waiter", source: """
+            local text = ai.await('second')
+            self.attrs.stale_reply_ran = text
+            """, mode: .module, triggers: [], by: .player, tick: 0
+        ).get()
+        game.scripting.anyScriptsAttached = true
+        var requests: [(UInt64, String)] = []
+        runtime.outboxHandoff = { requests.append(($0, $1)) }
+        game.runEventBusPhase()
+        XCTAssertEqual(requests.map(\.1), ["first", "second"])
+
+        runtime.submitAIReply(id: requests[0].0, text: "one", error: nil)
+        runtime.submitAIReply(id: requests[1].0, text: "two", error: nil)
+        game.runEventBusPhase()
+
+        XCTAssertNil(scripts.get(.world, "b_waiter"))
+        XCTAssertEqual(game.attributeStore.get(.world, "first_reply"), .string("one"))
+        XCTAssertNil(game.attributeStore.get(.world, "stale_reply_ran"))
+        XCTAssertEqual(runtime.aiInFlightCount, 0)
+        XCTAssertFalse(game.eventBus.recentEvents().contains { $0.kind == .aiReplied })
+    }
+
+    func testDetachedAwaitCancelsBudgetAndDropsLateBrokerReply() throws {
+        let game = makeGameWithWorld("ai-await-cancel")
+        let runtime = try XCTUnwrap(game.scripting.scriptRuntime)
+        let scripts = ScriptStore(graph: game.aiQueryContext().graph)
+        _ = try scripts.attach(
+            .world, name: "waiter", source: """
+            local text = ai.await('late')
+            self.attrs.late_reply_ran = text
+            """, mode: .module, triggers: [], by: .player, tick: 0
+        ).get()
+        game.scripting.anyScriptsAttached = true
+        var requestID: UInt64?
+        var canceledRequestIDs: [UInt64] = []
+        runtime.outboxHandoff = { requestID = $0; _ = $1 }
+        runtime.aiCancellationHandoff = { canceledRequestIDs.append($0) }
+        game.runEventBusPhase()
+        XCTAssertEqual(runtime.aiInFlightCount, 1)
+
+        XCTAssertTrue(try scripts.detach(.world, "waiter").get())
+        game.runEventBusPhase()
+        XCTAssertEqual(runtime.aiInFlightCount, 0)
+        XCTAssertEqual(canceledRequestIDs, [try XCTUnwrap(requestID)])
+        let recentReplies = game.eventBus.recentEvents().filter { $0.kind == .aiReplied }.count
+
+        runtime.submitAIReply(id: try XCTUnwrap(requestID), text: "too late", error: nil)
+        game.runEventBusPhase()
+        XCTAssertNil(game.attributeStore.get(.world, "late_reply_ran"))
+        XCTAssertEqual(
+            game.eventBus.recentEvents().filter { $0.kind == .aiReplied }.count,
+            recentReplies
+        )
+    }
+
+    func testAIEmitCannotForgeBuiltInEngineEvents() {
+        let game = makeGameWithWorld("ai-built-in-emit-validation")
+        let ctx = game.aiMutationContext(
+            model: "test-model", requestID: game.scripting.aiJournal.beginRequest()
+        )
+        let wrongSubject = AIObjectGraphMutationTools.run(
+            "emit_event", args: args([
+                "ref": "player", "name": "block.toolStrike", "payload": "{}",
+            ]), context: ctx
+        )
+        XCTAssertTrue(wrongSubject.refused)
+        XCTAssertTrue(wrongSubject.message?.contains("engine-produced") == true)
+
+        let missingPayload = AIObjectGraphMutationTools.run(
+            "emit_event", args: args([
+                "ref": "player", "name": "player.pickedUp", "payload": "{}",
+            ]), context: ctx
+        )
+        XCTAssertTrue(missingPayload.refused)
+        XCTAssertTrue(missingPayload.message?.contains("engine-produced") == true)
     }
 
     func testBrokerFallbackUsesSynchronousStubWhenNoHandoffAttached() throws {

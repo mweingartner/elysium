@@ -30,6 +30,10 @@ public enum AIJournalUndo: Equatable, Sendable {
     /// `beforeReadonly` via `AttributeStore.define(..., force: true)` (so a
     /// readonly entry the AI itself just created can always be reverted).
     case attributeValue(ref: ObjectRef, name: String, before: AttrValue?, beforeReadonly: Bool)
+    /// A writable engine-backed attribute changed through `set_attribute`.
+    /// Unlike custom values, undo must route through the authoritative host setter so the
+    /// engine state, semantic events, and `attribute.changed` provenance stay coherent.
+    case builtInAttributeValue(ref: ObjectRef, name: String, before: AttrValue)
     /// `attach_script`/`detach_script`. `wasDetach == false` (an attach):
     /// `hadPrevious == false` means it created a brand-new script — undo
     /// detaches it; `hadPrevious == true` means it replaced an existing one
@@ -60,7 +64,7 @@ public enum AIJournalUndo: Equatable, Sendable {
 
     var kindText: String {
         switch self {
-        case .attributeValue: return "attribute"
+        case .attributeValue, .builtInAttributeValue: return "attribute"
         case .scriptRecord, .scriptEnabled: return "script"
         case .subscriptionCreated: return "subscription"
         case .none: return "none"
@@ -114,8 +118,9 @@ public final class AIJournal {
     /// run — every entry that invocation's mutation tools record shares the
     /// returned id.
     public func beginRequest() -> UInt64 {
-        defer { nextRequestID += 1 }
-        return nextRequestID
+        let id = allocateIdentifier(startingAt: nextRequestID, occupied: Set(entries.map(\.requestID)))
+        nextRequestID = scriptingRegistryIdentifierSuccessor(id)
+        return id
     }
 
     @discardableResult
@@ -123,8 +128,8 @@ public final class AIJournal {
         requestID: UInt64, tool: String, ref: ObjectRef, name: String, tick: Int64, model: String,
         afterHash: String, undo: AIJournalUndo, previousSource: String? = nil
     ) -> UInt64 {
-        let id = nextEntryID
-        nextEntryID += 1
+        let id = allocateIdentifier(startingAt: nextEntryID, occupied: Set(entries.map(\.id)))
+        nextEntryID = scriptingRegistryIdentifierSuccessor(id)
         entries.append(AIJournalEntry(
             id: id, requestID: requestID, tool: tool, refText: ref.canonical, name: name,
             tick: tick, model: model, afterHash: afterHash, undo: undo
@@ -134,6 +139,16 @@ public final class AIJournal {
         }
         trim()
         return id
+    }
+
+    /// The journal ring is capped at 64 entries, so wrap/collision recovery is bounded to at most
+    /// 65 probes even for a hostile but structurally valid restored registry.
+    private func allocateIdentifier(startingAt start: UInt64, occupied: Set<UInt64>) -> UInt64 {
+        var candidate = start == 0 || start > maxScriptingRegistryIdentifier ? 1 : start
+        while occupied.contains(candidate) {
+            candidate = scriptingRegistryIdentifierSuccessor(candidate)
+        }
+        return candidate
     }
 
     /// Enforces both the ring's entry-count cap and its total-byte cap
@@ -217,6 +232,26 @@ public final class AIJournal {
                 _ = context.store.remove(ref, name, force: true)
                 return ("\(ref.canonical).\(name) removed (was newly created by the AI)", true)
             }
+        case .builtInAttributeValue(let ref, let name, let before):
+            guard case .live(let live) = context.graph.resolve(ref) else {
+                return ("\(ref.canonical).\(name): object is not loaded — skipped", false)
+            }
+            switch context.graph.host.setScriptBuiltInAttribute(
+                live, ref: ref, name: name, value: before, author: .player
+            ) {
+            case .ok:
+                return ("\(ref.canonical).\(name) restored to its previous value", true)
+            case .unknownName:
+                return ("\(ref.canonical).\(name): attribute no longer exists — skipped", false)
+            case .notApplicable:
+                return ("\(ref.canonical).\(name): attribute no longer applies — skipped", false)
+            case .readOnly:
+                return ("\(ref.canonical).\(name): attribute is now readonly — skipped", false)
+            case .wrongValueKind:
+                return ("\(ref.canonical).\(name): previous value is no longer accepted — skipped", false)
+            case .outOfRange(let range):
+                return ("\(ref.canonical).\(name): previous value is outside \(range) — skipped", false)
+            }
         case .scriptRecord(let ref, let name, let hadPrevious, let wasDetach):
             guard case .live = context.graph.resolve(ref) else {
                 return ("\(ref.canonical).\(name): object is not loaded — skipped", false)
@@ -296,8 +331,20 @@ public final class AIJournal {
         }
         entries = decoded.entries
         previousScriptSources = decoded.previousScriptSources
-        nextEntryID = (entries.map(\.id).max() ?? 0) + 1
-        nextRequestID = (entries.map(\.requestID).max() ?? 0) + 1
+        let decodedEntryCount = entries.count
+        let decodedSourceCount = previousScriptSources.count
+        // A save is untrusted input. Reapply the same count/encoded-byte/side-list caps used for
+        // live recording before exposing list/undo or allocating the next identifiers. The codec's
+        // 128 KiB pre-decode ceiling bounds temporary parsing; `trim` restores the durable 64-entry
+        // and 64 KiB invariants while retaining the newest valid suffix.
+        trim()
+        if entries.count != decodedEntryCount || previousScriptSources.count != decodedSourceCount {
+            diagnostic("trimmed over-cap AI journal persistence")
+        }
+        let maxEntryID = entries.map(\.id).max() ?? 0
+        let maxRequestID = entries.map(\.requestID).max() ?? 0
+        nextEntryID = scriptingRegistryIdentifierSuccessor(maxEntryID)
+        nextRequestID = scriptingRegistryIdentifierSuccessor(maxRequestID)
     }
 
     public func encodePersisted() -> String {
@@ -371,6 +418,10 @@ enum AIJournalCodec {
             if let before { out += ",\"before\":" + AttrValueCodec.encode(before) }
             out += "}"
             return out
+        case .builtInAttributeValue(let ref, let name, let before):
+            return "{\"k\":\"builtin\",\"ref\":" + jsonString(ref.canonical)
+                + ",\"name\":" + jsonString(name)
+                + ",\"before\":" + AttrValueCodec.encode(before) + "}"
         case .scriptRecord(let ref, let name, let hadPrevious, let wasDetach):
             var out = "{\"k\":\"script\",\"ref\":" + jsonString(ref.canonical) + ",\"name\":" + jsonString(name)
             out += ",\"had\":" + (hadPrevious ? "true" : "false")
@@ -390,7 +441,7 @@ enum AIJournalCodec {
     static func decode(_ text: String, diagnostic: (String) -> Void) -> (entries: [AIJournalEntry], previousScriptSources: [UInt64: String])? {
         guard text.utf8.count <= AIJournal.maxTotalBytes * 2 else { return nil } // generous pre-decode backstop
         guard let root = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { return nil }
-        guard (root["v"] as? NSNumber)?.intValue == 1 else { return nil }
+        guard strictScriptingRegistryInteger(root["v"]) == 1 else { return nil }
         guard let rawEntries = root["entries"] as? [[String: Any]] else { return nil }
         var entries: [AIJournalEntry] = []
         var seenIDs = Set<UInt64>()
@@ -413,18 +464,18 @@ enum AIJournalCodec {
     }
 
     private static func decodeEntry(_ raw: [String: Any]) -> AIJournalEntry? {
-        guard let idNumber = raw["id"] as? NSNumber, idNumber.int64Value >= 0 else { return nil }
-        guard let reqNumber = raw["req"] as? NSNumber, reqNumber.int64Value >= 0 else { return nil }
+        guard let idValue = strictScriptingRegistryInteger(raw["id"]), idValue >= 0 else { return nil }
+        guard let requestValue = strictScriptingRegistryInteger(raw["req"]), requestValue >= 0 else { return nil }
         guard let tool = raw["tool"] as? String, !tool.isEmpty, tool.utf8.count <= 64 else { return nil }
         guard let refText = raw["ref"] as? String, ObjectRef.parse(refText) != nil else { return nil }
         guard let name = raw["name"] as? String, name.utf8.count <= 64 else { return nil }
-        guard let tickNumber = raw["t"] as? NSNumber, tickNumber.int64Value >= 0 else { return nil }
+        guard let tick = strictScriptingRegistryInteger(raw["t"]), tick >= 0 else { return nil }
         guard let model = raw["model"] as? String, model.utf8.count <= 64 else { return nil }
         guard let after = raw["after"] as? String, after.utf8.count <= 128 else { return nil }
         guard let rawUndo = raw["undo"] as? [String: Any], let undo = decodeUndo(rawUndo) else { return nil }
         return AIJournalEntry(
-            id: UInt64(idNumber.uint64Value), requestID: UInt64(reqNumber.uint64Value), tool: tool,
-            refText: refText, name: name, tick: tickNumber.int64Value, model: model, afterHash: after, undo: undo
+            id: UInt64(idValue), requestID: UInt64(requestValue), tool: tool,
+            refText: refText, name: name, tick: tick, model: model, afterHash: after, undo: undo
         )
     }
 
@@ -439,7 +490,9 @@ enum AIJournalCodec {
             guard let readonly = raw["ro"] as? Bool else { return nil }
             var before: AttrValue?
             if let beforeRaw = raw["before"] {
-                let text = (try? JSONSerialization.data(withJSONObject: beforeRaw)).flatMap { String(data: $0, encoding: .utf8) }
+                let text = (try? JSONSerialization.data(
+                    withJSONObject: beforeRaw, options: [.fragmentsAllowed]
+                )).flatMap { String(data: $0, encoding: .utf8) }
                 // The value was originally produced by `AttrValueCodec.encode`, so
                 // re-encode via `JSONSerialization` round-trip only as a bridge —
                 // decode strictly through the canonical codec, never trust the bridge.
@@ -447,6 +500,20 @@ enum AIJournalCodec {
                 before = v
             }
             return .attributeValue(ref: ref, name: name, before: before, beforeReadonly: readonly)
+        case "builtin":
+            guard let refText = raw["ref"] as? String, let ref = ObjectRef.parse(refText) else { return nil }
+            guard let name = raw["name"] as? String,
+                  let descriptor = AttributeRegistry.resolve(kind: ref.kind, name: name),
+                  descriptor.canonical == name
+            else { return nil }
+            guard let beforeRaw = raw["before"],
+                  let data = try? JSONSerialization.data(
+                      withJSONObject: beforeRaw, options: [.fragmentsAllowed]
+                  ),
+                  let text = String(data: data, encoding: .utf8),
+                  case .success(let before) = AttrValueCodec.decode(text, caps: .defaults)
+            else { return nil }
+            return .builtInAttributeValue(ref: ref, name: name, before: before)
         case "script":
             guard let refText = raw["ref"] as? String, let ref = ObjectRef.parse(refText) else { return nil }
             guard let name = raw["name"] as? String, isValidAttributeName(name) else { return nil }
@@ -459,8 +526,8 @@ enum AIJournalCodec {
             guard let before = raw["before"] as? Bool else { return nil }
             return .scriptEnabled(ref: ref, name: name, before: before)
         case "sub":
-            guard let idNumber = raw["id"] as? NSNumber, idNumber.int64Value >= 0 else { return nil }
-            return .subscriptionCreated(id: UInt64(idNumber.uint64Value))
+            guard let idValue = strictScriptingRegistryInteger(raw["id"]), idValue >= 0 else { return nil }
+            return .subscriptionCreated(id: UInt64(idValue))
         default:
             return nil
         }

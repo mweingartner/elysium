@@ -172,6 +172,43 @@ final class MarshalingTests: XCTestCase {
         XCTAssertTrue(message2.contains("4096"), message2)
     }
 
+    func testMapKeysCannotBypassTheStringByteCapOnPushOrPull() throws {
+        var budgets = ScriptBudgets.defaults
+        budgets.valueStringBytes = 64
+        let state = try ScriptTestSupport.makeState(budgets: budgets)
+
+        var hostWasCalled = false
+        let pullOutcome = try ScriptTestSupport.run(
+            "local k = ('x'):rep(65); local ok, err = pcall(take, {[k] = 1}); return ok, tostring(err)",
+            on: state,
+            hostBindings: [.function(name: "take", HostFunction { _ in
+                hostWasCalled = true
+                return .values([])
+            })]
+        )
+        guard case .success(let pullValues) = pullOutcome else {
+            return XCTFail("expected caught pull failure, got \(pullOutcome)")
+        }
+        XCTAssertEqual(pullValues[0], .bool(false))
+        guard case .string(let pullMessage) = pullValues[1] else { return XCTFail() }
+        XCTAssertTrue(pullMessage.contains("64"), pullMessage)
+        XCTAssertFalse(hostWasCalled, "an oversized map key must be refused before host dispatch")
+
+        let oversizedKey = String(repeating: "y", count: 65)
+        let pushOutcome = try ScriptTestSupport.run(
+            "local ok, err = pcall(giveMap); return ok, tostring(err)", on: state,
+            hostBindings: [.function(name: "giveMap", HostFunction { _ in
+                .values([.map([oversizedKey: .int(1)])])
+            })]
+        )
+        guard case .success(let pushValues) = pushOutcome else {
+            return XCTFail("expected caught push failure, got \(pushOutcome)")
+        }
+        XCTAssertEqual(pushValues[0], .bool(false))
+        guard case .string(let pushMessage) = pushValues[1] else { return XCTFail() }
+        XCTAssertTrue(pushMessage.contains("64"), pushMessage)
+    }
+
     // MARK: - Invalid UTF-8 is decoded with repair, never crashes or throws
 
     func testInvalidUTF8DecodedWithRepair() throws {

@@ -38,11 +38,63 @@ public struct LANGhostTossOutcome: Equatable {
     public var reason: String?
 }
 
+public enum LANHostToolStrikeRouteResult: Equatable {
+    case raised
+    case ignored(String)
+    case rejected(String)
+}
+
 /// Reach used to validate ghost-driven attacks against the peer's last known position, mirroring
 /// `isWithinLANReach`'s block-break/place reach (attacks use the same trust model: host validates
 /// against the peer's last-published state, not a live raycast).
 private let LAN_GHOST_ATTACK_REACH_SURVIVAL = 6.0
 private let LAN_GHOST_ATTACK_REACH_CREATIVE = 8.0
+
+/// Routes one guest mining-start signal through host authority and the exact event producer used
+/// by local mining. The guest contributes only target coordinates, face, observed cell, selected
+/// slot, and a dedup sequence; player/tool/block metadata and `instant` are rebuilt on the host.
+@discardableResult
+public func routeLANHostToolStrikeIntent(
+    _ intent: LANBlockIntent,
+    from rawPlayerID: String,
+    game: GameCore,
+    session: LANMultiplayerHostSession,
+    ghostRegistry: LANHostGhostRegistry
+) -> LANHostToolStrikeRouteResult {
+    guard game.hasWorld() else { return .rejected("world unavailable") }
+    let playerID = String(rawPlayerID.prefix(128))
+    switch session.authorizeToolStrikeIntent(intent, from: playerID, in: game.world) {
+    case .ignored(let reason):
+        return .ignored(reason)
+    case .rejected(let reason):
+        return .rejected(reason)
+    case .accepted(let authorized):
+        guard let record = session.peerRecord(playerID: playerID) else {
+            return .rejected("player state unavailable")
+        }
+        let ghost = ghostRegistry.ghost(for: playerID, record: record, in: game.world)
+        guard ghost.selectedSlot == intent.selectedHotbarSlot,
+              let held = ghost.mainHand, held.id == authorized.itemID else {
+            return .rejected("authoritative tool changed")
+        }
+        let hit = RaycastHit(
+            x: intent.x, y: intent.y, z: intent.z, face: intent.face,
+            cell: authorized.blockCell, t: 0,
+            px: Double(intent.x) + 0.5,
+            py: Double(intent.y) + 0.5,
+            pz: Double(intent.z) + 0.5
+        )
+        guard game.raiseBlockToolStrike(
+            player: ghost,
+            hit: hit,
+            by: .lanPlayer(peerID: playerID),
+            source: .lan(peerID: playerID)
+        ) != nil else {
+            return .rejected("authoritative strike state changed")
+        }
+        return .raised
+    }
+}
 
 /// Current-protocol LAN spell removal is host-authoritative in the peer's
 /// recorded dimension. Keeping state mutation and exact transient cleanup in
@@ -101,14 +153,20 @@ public final class LANHostGhostRegistry {
             ghosts[cleanID] = created
             player = created
         }
-        hydrate(player, from: record, in: world)
+        hydrate(player, peerID: cleanID, from: record, in: world)
         return player
     }
 
-    private func hydrate(_ player: Player, from record: LANPeerRecordSnapshot, in world: World) {
+    private func hydrate(
+        _ player: Player,
+        peerID: String,
+        from record: LANPeerRecordSnapshot,
+        in world: World
+    ) {
         player.persistent = false
         player.world = world
         player.rpgAuthorityID = "lan:\(record.playerID)"
+        player.scriptEventActorIdentity = .lanPlayer(peerID: peerID)
         if let state = record.playerState {
             player.rpg = repairRPGCharacterState(record.rpg ?? state.rpg ?? .uncreated())
             player.applyRPGDerivedStats()
@@ -321,6 +379,12 @@ public final class LANHostGhostRegistry {
         let forwardZ = detCos(playerState.yaw) * 0.3
         let thrown = spawnItem(world, playerState.x, eyeY - 0.3, playerState.z, stack, forwardX, 0.1, forwardZ)
         thrown.pickupDelay = 40
+        let actor = ScriptEventActorIdentity.lanPlayer(peerID: cleanID)
+        world.hooks.raiseScriptEvent(
+            .playerDropped, actor.ref,
+            ["item": .string(itemDef(existingSlot.itemID).name), "count": .int(Int64(tossCount))],
+            actor.source, nil
+        )
 
         return LANGhostTossOutcome(tossed: true, inventory: updated)
     }

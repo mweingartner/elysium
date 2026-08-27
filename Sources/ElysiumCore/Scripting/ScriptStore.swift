@@ -15,8 +15,14 @@ public enum ScriptStoreError: Error, Equatable {
     case unsupported
     case lanClient
     case invalidName(hint: String?)
+    case invalidTriggerAttribute(hint: String?)
+    case invalidTrigger(String)
+    /// The shared ObjectRecord namespace already contains an attribute with this name. Script APIs
+    /// never replace it; callers must remove the attribute explicitly first.
+    case nameIsAttribute
     case sourceTooLarge(limit: Int)
     case tooManyScripts(limit: Int)
+    case tooManyEntries(limit: Int)
     case recordTooLarge(limit: Int)
     case chunkTooLarge(limit: Int)
     case documentTooLarge(limit: Int)
@@ -40,10 +46,16 @@ public func scriptStoreErrorText(_ err: ScriptStoreError) -> String {
     case .dormant: return "target's dimension is not loaded"
     case .unsupported: return "unsupported target"
     case .lanClient: return "scripts do not run on LAN clients"
-    case .invalidName(let hint):
-        return hint.map { "not a valid script name — try '\($0)'" } ?? "not a valid script name"
+        case .invalidName(let hint):
+            return hint.map { "not a valid script name — try '\($0)'" } ?? "not a valid script name"
+        case .invalidTriggerAttribute(let hint):
+            return hint.map { "not a valid trigger attribute — try '\($0)'" }
+                ?? "not a valid trigger attribute"
+        case .invalidTrigger(let reason): return "invalid trigger — \(reason)"
+        case .nameIsAttribute: return "name is already used by an attribute — remove it before attaching a script"
     case .sourceTooLarge(let limit): return "script source exceeds \(limit) bytes"
     case .tooManyScripts(let limit): return "too many scripts on this object (limit \(limit))"
+    case .tooManyEntries(let limit): return "too many stored attributes, scripts, and event declarations on this object (limit \(limit))"
     case .recordTooLarge, .chunkTooLarge, .documentTooLarge: return "script storage limit exceeded"
     case .revisionOverflow: return "revision limit reached"
     case .verbBudgetExceeded: return "attach/detach budget exceeded"
@@ -96,8 +108,28 @@ public struct ScriptStore {
         guard isValidAttributeName(name) else {
             return .failure(.invalidName(hint: normalizedAttributeNameHint(name)))
         }
+        var persistedTriggers = triggers
+        for index in persistedTriggers.indices {
+            guard let attribute = persistedTriggers[index].attribute else { continue }
+            guard let canonical = canonicalAuthoredAttributeFilter(
+                attribute, target: persistedTriggers[index].target
+            ) else {
+                return .failure(.invalidTriggerAttribute(
+                    hint: normalizedAttributeNameHint(attribute)
+                ))
+            }
+            persistedTriggers[index].attribute = canonical
+        }
+        for trigger in persistedTriggers {
+            if let error = EventBus.validateSubscriptionShape(
+                trigger.target, event: trigger.event, attribute: trigger.attribute
+            ) {
+                return .failure(.invalidTrigger(Self.triggerErrorText(error)))
+            }
+        }
         guard source.utf8.count <= 16_384 else { return .failure(.sourceTooLarge(limit: 16_384)) }
         var record = AttributeStore.readRecord(live, host: graph.host)
+        if case .value? = record.entries[name] { return .failure(.nameIsAttribute) }
         let existingScriptCount = record.entries.values.filter { if case .script = $0 { return true }; return false }.count
         let isNew: Bool
         let createdTick: Int64
@@ -116,7 +148,7 @@ public struct ScriptStore {
         }
         guard let newRevision = bumpedRevision(record.revision) else { return .failure(.revisionOverflow) }
         let newScript = ScriptRecord(
-            name: name, source: source, enabled: enabled, mode: mode, triggers: triggers,
+            name: name, source: source, enabled: enabled, mode: mode, triggers: persistedTriggers,
             author: author, createdTick: createdTick
         )
         var candidate = record
@@ -125,6 +157,7 @@ public struct ScriptStore {
         if let err = checkCaps(candidate, live: live, ref: ref) { return .failure(err) }
         record = candidate
         AttributeStore.writeRecord(record, to: live, host: graph.host)
+        graph.host.scriptDefinitionsDidChange(for: ref, hasScripts: record.hasScriptDefinitions)
         return .success(newScript)
     }
 
@@ -134,11 +167,13 @@ public struct ScriptStore {
         if graph.host.isLANClient { return .failure(.lanClient) }
         guard case .live(let live) = graph.resolve(ref) else { return .failure(liveFailure(ref)) }
         var record = AttributeStore.readRecord(live, host: graph.host)
+        if case .value? = record.entries[name] { return .failure(.nameIsAttribute) }
         guard case .script? = record.entries[name] else { return .success(false) }
         guard let newRevision = bumpedRevision(record.revision) else { return .failure(.revisionOverflow) }
         record.entries.removeValue(forKey: name)
         record.revision = newRevision
         AttributeStore.writeRecord(record, to: live, host: graph.host)
+        graph.host.scriptDefinitionsDidChange(for: ref, hasScripts: record.hasScriptDefinitions)
         return .success(true)
     }
 
@@ -147,12 +182,14 @@ public struct ScriptStore {
         if graph.host.isLANClient { return .failure(.lanClient) }
         guard case .live(let live) = graph.resolve(ref) else { return .failure(liveFailure(ref)) }
         var record = AttributeStore.readRecord(live, host: graph.host)
+        if case .value? = record.entries[name] { return .failure(.nameIsAttribute) }
         guard case .script(var s)? = record.entries[name] else { return .failure(.invalidName(hint: nil)) }
         s.enabled = enabled
         guard let newRevision = bumpedRevision(record.revision) else { return .failure(.revisionOverflow) }
         record.entries[name] = .script(s)
         record.revision = newRevision
         AttributeStore.writeRecord(record, to: live, host: graph.host)
+        graph.host.scriptDefinitionsDidChange(for: ref, hasScripts: record.hasScriptDefinitions)
         return .success(s)
     }
 
@@ -185,14 +222,27 @@ public struct ScriptStore {
 
     // MARK: - helpers
 
+    private static func triggerErrorText(_ error: EventBus.SubscribeError) -> String {
+        switch error {
+        case .targetRequiresTypeFilter: return "block targets require a block type"
+        case .anyNotAllowedForThisEvent: return "this event cannot target every object"
+        case .attributeFilterNotAllowed: return "attribute filters require attribute.changed"
+        case .invalidAttributeFilter: return "attribute filter is invalid"
+        case .eventNotApplicable: return "event does not apply to the target kind"
+        case .eventNotAvailable: return "event has no producer"
+        case .tooManyForWorld, .tooManyForObject:
+            return "subscription capacity is unavailable"
+        }
+    }
+
     private func bumpedRevision(_ rev: UInt64) -> UInt64? {
         let (bumped, overflow) = rev.addingReportingOverflow(1)
         return overflow ? nil : bumped
     }
 
     private func checkCaps(_ candidate: ObjectRecord, live: LiveObject, ref: ObjectRef) -> ScriptStoreError? {
-        guard candidate.entries.count <= caps.maxEntriesPerObject else {
-            return .tooManyScripts(limit: maxScriptsPerObject)
+        guard candidate.storageEntryCount <= caps.maxEntriesPerObject else {
+            return .tooManyEntries(limit: caps.maxEntriesPerObject)
         }
         let text = ObjectRecordCodec.encode(candidate)
         let isWorldOrDim = ref.kind == .world || ref.kind == .dim

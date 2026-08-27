@@ -17,6 +17,8 @@ final class FakeObjectGraphHost: ObjectGraphHost {
     var gameRules: [String: Double] = [:]
     var difficultyWrites: [Int] = []
     var gameRuleWrites: [(String, Double)] = []
+    var scriptDefinitionGeneration: UInt64 = 0
+    var scriptDefinitionChanges = ScriptDefinitionChangeIndex()
 
     func world(for dim: Dim) -> World? { worldsByDim[dim] }
 
@@ -26,6 +28,13 @@ final class FakeObjectGraphHost: ObjectGraphHost {
     }
     func setDifficulty(_ d: Int) { difficultyWrites.append(d) }
     func setGameRule(_ name: String, _ value: Double) { gameRuleWrites.append((name, value)) }
+    func scriptDefinitionsDidChange(for ref: ObjectRef, hasScripts: Bool) {
+        scriptDefinitionGeneration &+= 1
+        scriptDefinitionChanges.record(ref, hasScripts: hasScripts)
+    }
+    func drainDirtyScriptDefinitionRefs(limit: Int) -> [ObjectRef] {
+        scriptDefinitionChanges.drain(limit: limit)
+    }
 }
 
 final class ObjectGraphTests: XCTestCase {
@@ -41,6 +50,44 @@ final class ObjectGraphTests: XCTestCase {
         chunk.status = .generated
         world.setChunk(chunk)
         return world
+    }
+
+    func testWorldPublishesScriptDefinitionHydrationAndUnloadForEntitiesAndChunks() {
+        let world = World(dim: .overworld, seed: 7)
+        let scriptRecord = ObjectRecord(
+            entries: [
+                "persisted": .script(ScriptRecord(
+                    name: "persisted", source: "", enabled: true, mode: .module,
+                    author: .player, createdTick: 0
+                )),
+            ],
+            revision: 1
+        )
+        var hydrated: [ObjectRef] = []
+        var unloaded: [ObjectRef] = []
+        world.hooks.onScriptObjectHydrated = { ref, record in
+            XCTAssertTrue(record.hasScriptDefinitions)
+            hydrated.append(ref)
+        }
+        world.hooks.onScriptObjectUnloaded = { unloaded.append($0) }
+
+        let cow = Cow(world: world)
+        cow.objectRecord = scriptRecord
+        let entityRef = ObjectRef.entity(uid: cow.id)
+        world.addEntity(cow)
+
+        let chunk = Chunk(cx: 2, cz: -1, minY: world.info.minY, height: world.info.height)
+        chunk.status = .generated
+        let cellIndex = chunk.index(3, 64, 4)
+        chunk.objectRecords[cellIndex] = scriptRecord
+        let blockRef = ObjectRef.block(dim: .overworld, x: 35, y: 64, z: -12)
+        world.setChunk(chunk)
+
+        XCTAssertEqual(hydrated, [entityRef, blockRef])
+
+        world.removeEntity(cow)
+        world.removeChunk(chunk.cx, chunk.cz)
+        XCTAssertEqual(unloaded, [entityRef, blockRef])
     }
 
     // MARK: - liveness
@@ -148,12 +195,19 @@ final class ObjectGraphTests: XCTestCase {
         guard case .unsupported = graph.resolve(.entity(uid: remote.id)) else {
             return XCTFail("expected a LANRemotePlayerEntity to resolve .unsupported")
         }
+        XCTAssertEqual(scriptRef(for: player), .player)
+        XCTAssertEqual(scriptRef(for: cow), .entity(uid: cow.id))
+        XCTAssertEqual(
+            scriptRef(for: remote),
+            .lanPlayer(peerID: remote.multiplayerPlayerID),
+            "engine events and script discovery must never expose a LAN player as entity:<uid>"
+        )
     }
 
     /// The same scenario's `objectsNear` half: the local player, when in range, is listed
     /// as `player` (canonical ref `player`), never `entity:<n>`, and a `LANRemotePlayerEntity`
-    /// never appears in the enumeration under any ref shape in this change.
-    func testObjectsNearListsTheLocalPlayerAsPlayerAndOmitsLANRemotePlayers() {
+    /// appears exactly once under its canonical `player:lan:<peerID>` ref.
+    func testObjectsNearUsesCanonicalLocalAndLANPlayerRefs() {
         let host = FakeObjectGraphHost()
         let world = makeLoadedWorld()
         host.worldsByDim[.overworld] = world
@@ -177,6 +231,11 @@ final class ObjectGraphTests: XCTestCase {
         XCTAssertTrue(entries.contains { $0.ref == .player }, "the local player must be listed as .player")
         XCTAssertFalse(entries.contains { $0.ref == .entity(uid: player.id) }, "the local player must never be listed as .entity")
         XCTAssertFalse(entries.contains { $0.ref == .entity(uid: remote.id) }, "a LANRemotePlayerEntity must never appear")
+        XCTAssertEqual(
+            entries.filter { $0.ref == .lanPlayer(peerID: "peer-a") }.count,
+            1,
+            "a host must expose one stable LAN player traversal key"
+        )
         XCTAssertTrue(entries.contains { $0.ref == .entity(uid: cow.id) }, "an ordinary entity is unaffected")
     }
 

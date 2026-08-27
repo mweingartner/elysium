@@ -71,6 +71,15 @@ public struct WorldHooks {
         _ kind: EventKind, _ subject: ObjectRef, _ payload: [String: AttrValue],
         _ source: EventSource, _ subjectType: String?
     ) -> Void = { _, _, _, _, _ in }
+    /// O(1) host-side interest probe for hot funnels that otherwise have no object record to
+    /// identify them as scripted. A bare/client world leaves this false.
+    public var hasScriptEventInterest: (
+        _ kind: EventKind, _ subject: ObjectRef, _ subjectType: String?
+    ) -> Bool = { _, _, _ in false }
+    /// Script-definition discovery ingress/egress. The host wires these after ordinary world hooks
+    /// and records exact refs in its bounded deterministic dirty queue.
+    public var onScriptObjectHydrated: (_ ref: ObjectRef, _ record: ObjectRecord) -> Void = { _, _ in }
+    public var onScriptObjectUnloaded: (_ ref: ObjectRef) -> Void = { _ in }
 
     public init() {}
 }
@@ -217,9 +226,32 @@ public final class World {
     }
     public func setChunk(_ c: Chunk) {
         chunks[chunkKey(c.cx, c.cz)] = c
+        // Some tests/tools publish an already-populated chunk. Production saved-chunk adoption
+        // restores records just after `setChunk` and calls the same helper for each decoded entry.
+        for cellIndex in c.objectRecords.keys.sorted() {
+            guard let record = c.objectRecords[cellIndex] else { continue }
+            publishScriptObjectRecordHydration(c, cellIndex: cellIndex, record: record)
+        }
     }
     public func removeChunk(_ cx: Int, _ cz: Int) {
-        chunks.removeValue(forKey: chunkKey(cx, cz))
+        guard let chunk = chunks.removeValue(forKey: chunkKey(cx, cz)) else { return }
+        for cellIndex in chunk.objectRecords.keys.sorted() {
+            guard chunk.objectRecords[cellIndex]?.hasScriptDefinitions == true else { continue }
+            let (x, y, z) = chunk.idxToWorld(cellIndex)
+            hooks.onScriptObjectUnloaded(.block(dim: dim, x: x, y: y, z: z))
+        }
+    }
+
+    /// Publishes one decoded block record after persistence hydration. Kept separate from
+    /// `setChunk` because production restores the record dictionary immediately after publishing
+    /// the otherwise-assembled chunk on main.
+    public func publishScriptObjectRecordHydration(
+        _ chunk: Chunk, cellIndex: Int, record: ObjectRecord
+    ) {
+        guard record.hasScriptDefinitions else { return }
+        let (x, y, z) = chunk.idxToWorld(cellIndex)
+        guard chunk.inYRange(y) else { return }
+        hooks.onScriptObjectHydrated(.block(dim: dim, x: x, y: y, z: z), record)
     }
     public func isChunkReady(_ cx: Int, _ cz: Int) -> Bool {
         guard let c = getChunk(cx, cz) else { return false }
@@ -346,6 +378,10 @@ public final class World {
             guard let current = drop.chunk.objectRecords[drop.cellIndex], current.revision == drop.expectedRevision
             else { continue }
             drop.chunk.objectRecords.removeValue(forKey: drop.cellIndex)
+            if current.hasScriptDefinitions {
+                let (x, y, z) = drop.chunk.idxToWorld(drop.cellIndex)
+                hooks.onScriptObjectUnloaded(.block(dim: dim, x: x, y: y, z: z))
+            }
         }
         pendingObjectRecordDrops.removeAll()
     }
@@ -368,17 +404,19 @@ public final class World {
         if HAS_GRAVITY[cell >> 4] == 1 && fromY == y - 1 {
             scheduleTick(x, y, z, cell >> 4, 2)
         }
-        // event-bus (change 1b): `block.neighborChanged` (design.md §7.2,
-        // "only for cells with records") — an `objectRecords` presence check
-        // before anything else, so the overwhelmingly common case (no scripted
-        // block anywhere near this update) costs one dictionary probe.
+        // `block.neighborChanged` is observable both for record-backed cells and plain cells with
+        // an exact/kind/any subscription. The interest closure is an indexed O(1) lookup, so the
+        // overwhelmingly common unobserved case remains constant-time and allocation-free.
         if let c = chunks[chunkKey(floorDiv(x, CHUNK_W), floorDiv(z, CHUNK_W))], c.inYRange(y) {
             let cellIndex = c.index(posMod(x, CHUNK_W), y, posMod(z, CHUNK_W))
-            if c.objectRecords[cellIndex] != nil {
+            let subject = ObjectRef.block(dim: dim, x: x, y: y, z: z)
+            let subjectType = blockDefs[cell >> 4].name
+            if c.objectRecords[cellIndex] != nil
+                || hooks.hasScriptEventInterest(.blockNeighborChanged, subject, subjectType) {
                 hooks.raiseScriptEvent(
-                    .blockNeighborChanged, .block(dim: dim, x: x, y: y, z: z),
+                    .blockNeighborChanged, subject,
                     ["from": .ref(ObjectRef.block(dim: dim, x: fromX, y: fromY, z: fromZ).canonical)],
-                    .engine, blockDefs[cell >> 4].name
+                    .engine, subjectType
                 )
             }
         }
@@ -640,25 +678,39 @@ public final class World {
     public func addEntity(_ e: EntityRef) {
         entities.append(e)
         entityById[e.id] = e
+        if let entity = e as? Entity, entity.objectRecord.hasScriptDefinitions {
+            hooks.onScriptObjectHydrated(scriptRef(for: entity), entity.objectRecord)
+        }
         raiseEntityLifecycleEvent(.entitySpawned, e)
     }
     public func removeEntity(_ e: EntityRef) {
+        let scriptedRef: ObjectRef? = if let entity = e as? Entity,
+                                         entity.objectRecord.hasScriptDefinitions {
+            scriptRef(for: entity)
+        } else {
+            nil
+        }
         if let i = entities.firstIndex(where: { $0 === e }) {
             entities.remove(at: i)
         }
         entityById.removeValue(forKey: e.id)
         raiseEntityLifecycleEvent(.entityRemoved, e)
+        if let scriptedRef { hooks.onScriptObjectUnloaded(scriptedRef) }
     }
 
     /// event-bus (change 1b). `entity.spawned`/`entity.removed` (design.md
     /// §7.2: "`World.addEntity/removeEntity`"). Skips anything that isn't a
-    /// real `Entity` (the `EntityRef` structural-view protocol admits test
-    /// doubles) and every LAN mirror (`lanReplicatedMirror` host ghosts,
-    /// `LANRemotePlayerEntity`) — neither is a scriptable object (`ObjectGraph`
-    /// excludes them the same way; Security (code) SC-1's fix).
+    /// real `Entity` (the `EntityRef` structural-view protocol admits test doubles) and anonymous
+    /// replication mirrors. A host LAN player is scriptable under its canonical
+    /// `player:lan:<peer>` ref, never its transient entity id.
     private func raiseEntityLifecycleEvent(_ kind: EventKind, _ e: EntityRef) {
-        guard let ent = e as? Entity, !ent.lanReplicatedMirror, !(ent is LANRemotePlayerEntity) else { return }
-        hooks.raiseScriptEvent(kind, scriptRef(for: ent), [:], .engine, ent.type)
+        guard let ent = e as? Entity, !ent.lanReplicatedMirror else { return }
+        let ref: ObjectRef = if let remote = ent as? LANRemotePlayerEntity {
+            .lanPlayer(peerID: remote.multiplayerPlayerID)
+        } else {
+            scriptRef(for: ent)
+        }
+        hooks.raiseScriptEvent(kind, ref, [:], .engine, ent.type)
     }
     public func getEntitiesInBox(_ box: AABB, except: EntityRef? = nil, filter: ((EntityRef) -> Bool)? = nil) -> [EntityRef] {
         var out: [EntityRef] = []

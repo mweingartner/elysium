@@ -490,10 +490,10 @@ open class LivingEntity: Entity {
         world.hooks.raiseScriptEvent(
             .entityDamaged, scriptRef(for: self),
             [
-                "amount": .number(actualHealthLoss), "source": .string(source),
+                "amount": .number(actualHealthLoss), "cause": .string(source),
                 "attacker": attacker.map { .ref(scriptRef(for: $0).canonical) } ?? .null,
             ],
-            attacker is Player ? .player : .engine, type
+            (attacker as? Player)?.scriptEventActorIdentity.source ?? .engine, type
         )
         hurtTime = 10
         invulnTicks = 10
@@ -538,8 +538,8 @@ open class LivingEntity: Entity {
         catalystBloomPending = true
         world.hooks.raiseScriptEvent(
             .entityDied, scriptRef(for: self),
-            ["source": .string(source), "attacker": attacker.map { .ref(scriptRef(for: $0).canonical) } ?? .null],
-            attacker is Player ? .player : .engine, type
+            ["cause": .string(source), "attacker": attacker.map { .ref(scriptRef(for: $0).canonical) } ?? .null],
+            (attacker as? Player)?.scriptEventActorIdentity.source ?? .engine, type
         )
         world.hooks.playSound(deathSound(), x, y, z, 1, 1)
         if world.rule("doMobLoot") {

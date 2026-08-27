@@ -47,6 +47,24 @@ final class BuiltInAttributeAccessTests: XCTestCase {
         XCTAssertEqual(hunger, 20)
     }
 
+    func testMobOwnerUsesCanonicalPlayerReferenceAndDoesNotExposeDanglingEntityID() {
+        let (world, host) = makeWorldAndHost()
+        let player = Player(world: world)
+        world.addEntity(player)
+        let wolf = Wolf(world: world)
+        wolf.ownerId = player.id
+        world.addEntity(wolf)
+        let live = LiveObject.entity(wolf, world)
+
+        guard case .value(.ref(let owner)) = BuiltInAttributes.get(live, name: "owner", host: host)
+        else { return XCTFail("expected a canonical owner ref") }
+        XCTAssertEqual(owner, ObjectRef.player.canonical)
+
+        world.removeEntity(player)
+        guard case .value(.null) = BuiltInAttributes.get(live, name: "owner", host: host)
+        else { return XCTFail("an unloaded owner must not become a dangling entity ref") }
+    }
+
     func testGetDimensionAndWorldFields() {
         let (world, host) = makeWorldAndHost()
         world.dayTime = 500

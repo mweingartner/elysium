@@ -199,6 +199,7 @@ final class ScriptEditorModel: ObservableObject {
     @Published private(set) var targetApplicableBuiltInAttributes: Set<String>?
     @Published private(set) var targetCustomAttributes: [String] = []
     @Published private(set) var targetCustomAttributeCompletions: [LuaCustomAttributeCompletion] = []
+    @Published private(set) var handlerEventCandidates: [ScriptEditorEventCandidate] = []
     @Published private(set) var editorDiagnostics: [LuaDiagnostic] = []
     @Published private(set) var signatureHelp: LuaSignatureHelp?
     @Published private(set) var inlineAISuggestion: String?
@@ -256,6 +257,14 @@ final class ScriptEditorModel: ObservableObject {
         let name = currentName.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return nil }
         return authoritativeSaveCollision(for: name)
+    }
+
+    var handlerEventValidationError: String? {
+        guard mode == .handler else { return nil }
+        return ScriptEditorAuthoringContract.handlerEventValidationError(
+            eventName: handlerEvent,
+            targetKind: target.kind
+        )
     }
 
     /// Persists a new default AI model choice through the same public settings-publish path the
@@ -341,6 +350,7 @@ final class ScriptEditorModel: ObservableObject {
         targetApplicableBuiltInAttributes = nil
         targetCustomAttributes = []
         targetCustomAttributeCompletions = []
+        handlerEventCandidates = ScriptEditorEventCatalog.candidates(targetKind: target.kind)
         status = "World session ended. This draft is retained read-only from the game; copy it into a new editor to continue."
         statusIsError = true
     }
@@ -415,17 +425,21 @@ final class ScriptEditorModel: ObservableObject {
     var languageEnvironment: LuaLanguageEnvironment {
         LuaLanguageEnvironment(
             targetKind: target.kind,
+            targetCanonicalRef: target.canonical,
             targetApplicableBuiltInAttributes: targetApplicableBuiltInAttributes,
             targetCustomAttributes: targetCustomAttributeCompletions,
-            objectReferences: worldObjects.map {
+            objectReferences: worldObjects.map { entry in
                 LuaObjectReferenceCompletion(
-                    canonicalRef: $0.ref.canonical,
-                    displayName: $0.displayName,
-                    kind: $0.ref.kind,
-                    isLive: $0.isLive
+                    canonicalRef: entry.ref.canonical,
+                    displayName: entry.displayName,
+                    kind: entry.ref.kind,
+                    isLive: entry.isLive,
+                    customAttributes: entry.attributeCompletions
                 )
             },
+            scriptMode: mode,
             handlerEvent: mode == .handler ? handlerEvent : nil,
+            eventCandidates: handlerEventCandidates,
             isYieldable: true
         )
     }
@@ -494,6 +508,10 @@ final class ScriptEditorModel: ObservableObject {
             aiSuggestionError = "Collapse the selection to a caret before requesting inline completion. Use Script AI for a selected rewrite."
             return
         }
+        if let authoringError = editorAIRequestPreflightError {
+            aiSuggestionError = authoringError.localizedDescription
+            return
+        }
         cancelAIWork(clearSuggestion: true)
         let requestGeneration = aiRequestGeneration
         aiSuggestionError = nil
@@ -504,8 +522,8 @@ final class ScriptEditorModel: ObservableObject {
             do {
                 let response = try await self.performEditorAIRequest(instruction: nil)
                 guard !Task.isCancelled, self.aiRequestGeneration == requestGeneration else { return }
-                guard self.isSafeAIInsertion(response.insertion) else {
-                    self.aiSuggestionError = "Ollama returned text that cannot be inserted safely."
+                if let refusal = self.aiInsertionPreflightFailure(response.insertion) {
+                    self.aiSuggestionError = refusal
                     self.isRequestingAISuggestion = false
                     return
                 }
@@ -532,6 +550,7 @@ final class ScriptEditorModel: ObservableObject {
     func requestEditorAIReply(instruction: String) async throws -> String {
         synchronizeSharedAIConfiguration()
         guard aiCompletionMode != .off else { throw ScriptEditorAIRequestError.disabled }
+        if let authoringError = editorAIRequestPreflightError { throw authoringError }
         let response = try await performEditorAIRequest(instruction: instruction)
         return response.text
     }
@@ -578,7 +597,6 @@ final class ScriptEditorModel: ObservableObject {
         authoringContextRevision &+= 1
         cancelAIWork(clearSuggestion: true)
         aiSuggestionError = nil
-        scheduleIdleAISuggestionIfNeeded()
     }
 
     private func scheduleIdleAISuggestionIfNeeded() {
@@ -603,6 +621,7 @@ final class ScriptEditorModel: ObservableObject {
         }
         let contextKey = currentAIContextKey
         let scriptingContext = game.scriptingCommandContext()
+        let includeCrossObjectEvents = mode == .module
         let nearbyObjects = worldObjects.filter(\.isLive).map { entry in
             let attributes = customAttributes(for: entry.ref, context: scriptingContext)
             return OllamaCodeCompletionNearbyObject(
@@ -618,7 +637,17 @@ final class ScriptEditorModel: ObservableObject {
                         mutability: $0.readonly.map { $0 ? "read_only" : "writable" }
                             ?? "host_authoritative_unknown"
                     )
-                }
+                },
+                builtInEvents: includeCrossObjectEvents
+                    ? EventDescriptorRegistry.available.compactMap { descriptor in
+                        descriptor.subjectKinds.contains(entry.ref.kind)
+                            ? descriptor.kind.rawValue
+                            : nil
+                    }
+                    : nil,
+                customEvents: includeCrossObjectEvents
+                    ? customEventCandidates(for: entry.ref, context: scriptingContext).map(aiEvent)
+                    : nil
             )
         }
         let request = try OllamaCodeCompletionRequest(
@@ -626,9 +655,11 @@ final class ScriptEditorModel: ObservableObject {
             caretUTF16: selectedRange.location,
             selectionLengthUTF16: selectedRange.length,
             documentRevision: documentRevision,
+            documentIdentity: documentIdentity,
             contextKey: contextKey,
             model: aiModelName,
             languageSchema: ScriptLanguageSchema.luaCATSDefinitions,
+            authoringContext: currentAIAuthoringContext,
             diagnostics: editorDiagnostics.map(\.message),
             authorizedNearbyObjects: nearbyObjects,
             fillInMiddlePolicy: .disabled,
@@ -640,6 +671,7 @@ final class ScriptEditorModel: ObservableObject {
         let response = try await aiCompleter.completeEditorRequest(request)
         guard isCurrentWorldSession, response.isCurrent(
             documentRevision: documentRevision,
+            documentIdentity: documentIdentity,
             source: source,
             caretUTF16: selectedRange.location,
             selectionLengthUTF16: selectedRange.length,
@@ -661,13 +693,109 @@ final class ScriptEditorModel: ObservableObject {
         )
     }
 
-    private func isSafeAIInsertion(_ insertion: String) -> Bool {
-        guard !insertion.isEmpty, ScriptingDisplayText.isValidScriptSource(insertion) else { return false }
+    private var editorAIRequestPreflightError: ScriptEditorAIRequestError? {
+        guard mode == .handler else { return nil }
+        let eventName = handlerEvent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !eventName.isEmpty else { return .handlerEventRequired }
+        if let error = ScriptEditorAuthoringContract.handlerEventValidationError(
+            eventName: eventName,
+            targetKind: target.kind
+        ) {
+            return .invalidHandlerEvent(error)
+        }
+        return nil
+    }
+
+    private var currentAIAuthoringContext: OllamaCodeCompletionAuthoringContext {
+        let applicableBuiltIns = ScriptLanguageSchema.attributes(for: target.kind).filter { attribute in
+            guard let targetApplicableBuiltInAttributes else { return true }
+            return targetApplicableBuiltInAttributes.contains(attribute.name)
+        }
+        var members = ScriptLanguageSchema.handleProperties
+            .filter { $0.receiverKinds.isEmpty || $0.receiverKinds.contains(target.kind) }
+            .map { "property \($0.name):\($0.valueType.displayName)" }
+        members.append(contentsOf: ScriptLanguageSchema.handleMethods
+            .filter {
+                ($0.receiverKinds.isEmpty || $0.receiverKinds.contains(target.kind))
+                    && $0.availability.isCompletable
+            }
+            .map { "method \($0.signatures.first?.label ?? $0.name)" })
+        members.append(contentsOf: applicableBuiltIns.map {
+            "attribute \($0.name):\($0.type.displayName):\($0.mutability == .readOnly ? "read_only" : "writable")"
+        })
+        members.append(contentsOf: targetCustomAttributeCompletions.map {
+            "custom_attribute \($0.name):\($0.typeName):\($0.isReadOnly ? "read_only" : "writable")"
+        })
+        let eventName = mode == .handler
+            ? handlerEvent.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+        let eventCandidates = mode == .module
+            ? ScriptEditorEventCatalog.broadlyAvailableCandidates(
+                including: handlerEventCandidates
+            )
+            : handlerEventCandidates
+        var compatibleEvents = eventCandidates.map(aiEvent)
+        if mode == .handler,
+           let eventName, !eventName.isEmpty,
+           handlerEventValidationError == nil,
+           !eventCandidates.contains(where: { $0.name == eventName }) {
+            compatibleEvents.insert(
+                OllamaCodeCompletionAuthoringEvent(
+                    name: eventName,
+                    source: "open_custom_selected",
+                    payloadFields: [],
+                    payloadContract: "open_custom_unknown_envelope_only"
+                ),
+                at: 0
+            )
+        }
+        return OllamaCodeCompletionAuthoringContext(
+            targetReference: target.canonical,
+            targetKind: target.kind.rawValue,
+            scriptMode: mode.rawValue,
+            modeContract: ScriptEditorAuthoringContract.modeHelp(mode),
+            selectedEvent: eventName?.isEmpty == false ? eventName : nil,
+            compatibleEvents: compatibleEvents,
+            targetMembers: members
+        )
+    }
+
+    private func aiEvent(
+        _ event: ScriptEditorEventCandidate
+    ) -> OllamaCodeCompletionAuthoringEvent {
+        OllamaCodeCompletionAuthoringEvent(
+            name: event.name,
+            source: event.source.rawValue,
+            payloadFields: event.payload.map {
+                $0.name + ":" + $0.type.displayName + ($0.isNullable ? "?" : "")
+            }
+        )
+    }
+
+    func aiInsertionPreflightFailure(_ insertion: String) -> String? {
+        guard !insertion.isEmpty, ScriptingDisplayText.isValidScriptSource(insertion) else {
+            return "AI proposal refused: Ollama returned text that cannot be inserted safely."
+        }
         let current = source as NSString
         guard selectedRange.location >= 0,
-              selectedRange.location + selectedRange.length <= current.length else { return false }
+              selectedRange.location + selectedRange.length <= current.length else {
+            return "AI proposal refused: the editor selection changed before insertion."
+        }
         let merged = current.replacingCharacters(in: selectedRange, with: insertion)
-        return merged.utf8.count <= 16_384 && ScriptingDisplayText.isValidScriptSource(merged)
+        guard merged.utf8.count <= 16_384, ScriptingDisplayText.isValidScriptSource(merged) else {
+            return "AI proposal refused: the resulting script would exceed the source limit or contain invalid text."
+        }
+        let diagnostics = LuaLanguageService.analyze(
+            source: merged,
+            environment: languageEnvironment
+        ).diagnostics
+        if let violation = diagnostics.first(where: {
+            $0.id.hasPrefix("handler-subscription-wrapper:")
+                || $0.id.hasPrefix("module-top-level-ev:")
+        }) {
+            return "AI proposal refused: \(violation.message)"
+        }
+        return nil
     }
 
     private func acceptAIFragment(_ split: (String) -> (accepted: String, remainder: String)) {
@@ -706,6 +834,12 @@ final class ScriptEditorModel: ObservableObject {
 
     // MARK: - list / switch / new
 
+    private func beginDocumentTransition() {
+        documentIdentity &+= 1
+        cancelAIWork(clearSuggestion: true)
+        aiSuggestionError = nil
+    }
+
     /// Refreshes `scripts` from either the live `ScriptStore` (host) or the replicated metadata
     /// mirror (guest — name/mode/enabled only, source always empty).
     func reload() {
@@ -738,7 +872,7 @@ final class ScriptEditorModel: ObservableObject {
                 statusIsError = true
                 return
             }
-            documentIdentity &+= 1
+            beginDocumentTransition()
             currentName = name
             source = ""
             selectedRange = NSRange(location: 0, length: 0)
@@ -756,7 +890,7 @@ final class ScriptEditorModel: ObservableObject {
             statusIsError = true
             return
         }
-        documentIdentity &+= 1
+        beginDocumentTransition()
         currentName = name
         source = record.source
         selectedRange = NSRange(location: 0, length: 0)
@@ -773,7 +907,7 @@ final class ScriptEditorModel: ObservableObject {
     /// insert into `source` as usual; Save is what actually creates the record.
     func newScript() {
         guard requireCurrentWorldSession(for: "start another script") else { return }
-        documentIdentity &+= 1
+        beginDocumentTransition()
         currentName = ""
         source = ""
         selectedRange = NSRange(location: 0, length: 0)
@@ -845,11 +979,20 @@ final class ScriptEditorModel: ObservableObject {
             targetApplicableBuiltInAttributes = nil
             targetCustomAttributes = []
             targetCustomAttributeCompletions = []
+            handlerEventCandidates = ScriptEditorEventCatalog.candidates(targetKind: target.kind)
             authoringContextDidChange()
             return
         }
         let context = game.scriptingCommandContext()
         let graph = context.graph
+        if game.isLANClientWorld {
+            handlerEventCandidates = ScriptEditorEventCatalog.candidates(
+                targetKind: target.kind,
+                mirroredDeclarations: LANMultiplayerManager.shared.mirroredEvents(for: target) ?? []
+            )
+        } else {
+            handlerEventCandidates = ScriptEditorEventCatalog.candidates(target: target, graph: graph)
+        }
         let cursor = game.cursorObjectRef()
         var candidates: [(ref: ObjectRef, distance: Double?)] = []
         var seen = Set<String>()
@@ -876,7 +1019,9 @@ final class ScriptEditorModel: ObservableObject {
         }
 
         worldObjects = candidates.map { candidate in
-            let customAttributes = customAttributes(for: candidate.ref, context: context)
+            let customAttributes = customAttributeCompletions(
+                for: candidate.ref, context: context
+            )
             let isLive = isWorldObjectAvailable(candidate.ref, graph: graph)
             return WorldObjectPaletteEntry(
                 ref: candidate.ref,
@@ -887,11 +1032,22 @@ final class ScriptEditorModel: ObservableObject {
                 isCursorTarget: candidate.ref == cursor,
                 attributeNames: customAttributes.map(\.name),
                 scriptNames: scriptNames(for: candidate.ref, context: context),
-                capabilities: authoringCapabilities(for: candidate.ref, isLive: isLive)
+                capabilities: authoringCapabilities(for: candidate.ref, isLive: isLive),
+                attributeCompletions: customAttributes
             )
         }
         targetApplicableBuiltInAttributes = applicableBuiltInAttributeNames(for: target, graph: graph)
-        targetCustomAttributeCompletions = customAttributes(for: target, context: context).map {
+        targetCustomAttributeCompletions = customAttributeCompletions(
+            for: target, context: context
+        )
+        targetCustomAttributes = targetCustomAttributeCompletions.map(\.name)
+        authoringContextDidChange()
+    }
+
+    private func customAttributeCompletions(
+        for ref: ObjectRef, context: ScriptingCommandContext
+    ) -> [LuaCustomAttributeCompletion] {
+        customAttributes(for: ref, context: context).map {
             LuaCustomAttributeCompletion(
                 name: $0.name,
                 typeName: Self.luaTypeName(for: $0.value),
@@ -899,12 +1055,10 @@ final class ScriptEditorModel: ObservableObject {
                 // read-only in authoring UI; the host remains the final authority.
                 isReadOnly: $0.readonly ?? true,
                 summary: game.isLANClientWorld
-                    ? "Replicated custom attribute on \(target.canonical); mutability is unknown and the host remains authoritative."
-                    : "Live custom attribute on \(target.canonical)."
+                    ? "Replicated custom attribute on \(ref.canonical); mutability is unknown and the host remains authoritative."
+                    : "Live custom attribute on \(ref.canonical)."
             )
         }
-        targetCustomAttributes = targetCustomAttributeCompletions.map(\.name)
-        authoringContextDidChange()
     }
 
     private func canInsertWorldObject(_ entry: WorldObjectPaletteEntry) -> Bool {
@@ -945,6 +1099,21 @@ final class ScriptEditorModel: ObservableObject {
             }
         }
         return context.store.list(ref).map { (name: $0.name, value: $0.value, readonly: Optional($0.readonly)) }
+    }
+
+    private func customEventCandidates(
+        for ref: ObjectRef, context: ScriptingCommandContext
+    ) -> [ScriptEditorEventCandidate] {
+        let candidates: [ScriptEditorEventCandidate]
+        if game.isLANClientWorld {
+            candidates = ScriptEditorEventCatalog.candidates(
+                targetKind: ref.kind,
+                mirroredDeclarations: LANMultiplayerManager.shared.mirroredEvents(for: ref) ?? []
+            )
+        } else {
+            candidates = ScriptEditorEventCatalog.candidates(target: ref, graph: context.graph)
+        }
+        return candidates.filter { $0.source == .declaredCustom }
     }
 
     private func applicableBuiltInAttributeNames(
@@ -1117,12 +1286,16 @@ final class ScriptEditorModel: ObservableObject {
         var eventText: String?
         var parsedEvent: EventKind?
         if mode == .handler {
-            let text = handlerEvent.trimmingCharacters(in: .whitespaces)
-            guard let event = EventKind.parse(text) else {
-                status = "'\(text)' is not a valid event name."
+            let text = handlerEvent.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let error = ScriptEditorAuthoringContract.handlerEventValidationError(
+                eventName: text,
+                targetKind: target.kind
+            ) {
+                status = error
                 statusIsError = true
                 return false
             }
+            guard let event = EventKind.parse(text) else { return false }
             eventText = text
             parsedEvent = event
         }
@@ -1149,7 +1322,11 @@ final class ScriptEditorModel: ObservableObject {
             // filter/target plus all additional triggers so a source-only save is lossless.
             var retained = cleanTriggers
             let first = retained[0]
-            retained[0] = Trigger(event: parsedEvent, attribute: first.attribute, target: first.target)
+            retained[0] = Trigger(
+                event: parsedEvent,
+                attribute: parsedEvent == .attributeChanged ? first.attribute : nil,
+                target: first.target
+            )
             triggers = retained
         } else {
             triggers = parsedEvent.map {
@@ -1195,6 +1372,11 @@ final class ScriptEditorModel: ObservableObject {
         refreshScriptingAvailability()
         guard !source.isEmpty else {
             status = "Source is empty."
+            statusIsError = true
+            return
+        }
+        guard mode == .module else {
+            status = ScriptEditorAuthoringContract.handlerRunOnceUnavailable
             statusIsError = true
             return
         }
@@ -1260,12 +1442,16 @@ final class ScriptEditorModel: ObservableObject {
         }
         var selectedEvent: EventKind?
         if mode == .handler {
-            let text = handlerEvent.trimmingCharacters(in: .whitespaces)
-            guard let event = EventKind.parse(text) else {
-                status = "'\(text)' is not a valid event name."
+            let text = handlerEvent.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let error = ScriptEditorAuthoringContract.handlerEventValidationError(
+                eventName: text,
+                targetKind: target.kind
+            ) {
+                status = error
                 statusIsError = true
                 return
             }
+            guard let event = EventKind.parse(text) else { return }
             selectedEvent = event
         }
         guard validate() else { return }

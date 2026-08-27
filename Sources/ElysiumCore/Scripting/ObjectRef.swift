@@ -117,13 +117,43 @@ public enum ObjectRef: Hashable, Sendable {
 
 // MARK: - entity ref helper (event-bus, change 1b)
 
+/// Canonical identity and provenance used when a `Player` instance raises a script event.
+/// Ordinary players retain the local `.player` pair; host-side LAN ghosts opt into the stable
+/// peer-scoped pair when they are hydrated. Keeping the pair together prevents a producer from
+/// fixing the subject while accidentally continuing to attribute the event to the local player.
+public struct ScriptEventActorIdentity: Hashable, Sendable {
+    public let ref: ObjectRef
+    public let source: EventSource
+
+    private init(ref: ObjectRef, source: EventSource) {
+        self.ref = ref
+        self.source = source
+    }
+
+    public static let localPlayer = ScriptEventActorIdentity(ref: .player, source: .player)
+
+    public static func lanPlayer(peerID: String) -> ScriptEventActorIdentity {
+        ScriptEventActorIdentity(
+            ref: .lanPlayer(peerID: peerID),
+            source: .lan(peerID: peerID)
+        )
+    }
+}
+
 /// The `ObjectRef` a live `Entity` names itself with everywhere the object
-/// graph is concerned: the local player is always `.player`, never
+/// graph is concerned: the local player is always `.player`, a host-side LAN
+/// player is always `.lanPlayer(peerID:)`, and neither is exposed as
 /// `.entity(uid:)` (Decision 2 / Security (code) SC-1 — `ObjectGraph.resolve`
 /// applies the identical rule). Shared by every engine-level event funnel
 /// (`GameWorld`, `Living`, `AI`, `Combat`, …) so the mapping is defined once.
 public func scriptRef(for entity: Entity) -> ObjectRef {
-    entity is Player ? .player : .entity(uid: entity.id)
+    if let remote = entity as? LANRemotePlayerEntity {
+        return .lanPlayer(peerID: remote.multiplayerPlayerID)
+    }
+    if let player = entity as? Player {
+        return player.scriptEventActorIdentity.ref
+    }
+    return .entity(uid: entity.id)
 }
 
 // MARK: - dimension name mapping

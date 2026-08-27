@@ -67,8 +67,12 @@ public enum AIObjectGraphQueryTools {
             ]
         ),
         AIToolDefinition(
-            name: "describe_events", kind: .query, summary: "List the v1 event catalog, optionally filtered by prefix.",
-            parameters: [.init(name: "kind", type: "string", summary: "Prefix filter, e.g. 'block' or 'player'.")]
+            name: "describe_events", kind: .query,
+            summary: "List typed built-in events and, for an optional object, its custom event declarations.",
+            parameters: [
+                .init(name: "kind", type: "string", summary: "Event-name prefix filter, e.g. 'block' or 'player'."),
+                .init(name: "ref", type: "string", summary: "Optional object ref or alias; filters built-ins by object kind and includes its custom declarations."),
+            ]
         ),
         // design.md §9.1's tool-lane budget ("<= 20 tools"): `list_scripts`
         // and `get_script` are one tool here (matching the design's own
@@ -264,6 +268,14 @@ public enum AIObjectGraphQueryTools {
                     ",\"enabled\":\(s.enabled),\"author\":\(jsonString(authorText(s.author)))" +
                     ",\"lastError\":\(s.lastError.map(jsonString) ?? "null")}"
             }.joined(separator: ",")
+            out += "],\"events\":["
+            out += CustomEventStore(graph: context.graph).list(ref).map { declaration in
+                let fields = declaration.fields.map {
+                    "\(jsonString($0.name)):\(jsonString($0.typeToken))"
+                }.joined(separator: ",")
+                return "{\"name\":\(jsonString(declaration.kind.rawValue)),\"fields\":{\(fields)}" +
+                    ",\"summary\":\(declaration.summary.map(jsonString) ?? "null")}"
+            }.joined(separator: ",")
             out += "],\"subscriptions\":\(context.eventBus.listSubscriptions(for: ref).count)}"
             return .ok(bounded(out, cap: byteCap))
         }
@@ -333,9 +345,39 @@ public enum AIObjectGraphQueryTools {
 
     private static func describeEvents(_ args: AIToolArguments, _ context: AIQueryContext) -> AIToolOutcome {
         let prefix = args.string("kind")
-        let matches = EventDescriptorRegistry.names.filter { prefix == nil || $0.hasPrefix(prefix!) }
+        let owner: ObjectRef?
+        let descriptors: [ScriptEventDescriptor]
+        let customNames: Set<String>
+        if args.string("ref") != nil {
+            switch resolveRefArg(args, "ref", context) {
+            case .failure(let outcome): return outcome
+            case .success(let (ref, live)):
+                owner = ref
+                let record = AttributeStore.readRecord(live, host: context.graph.host)
+                customNames = Set(record.eventDeclarations.keys)
+                descriptors = EventDescriptorRegistry.descriptors(declaredOn: ref, in: record)
+                    .filter { $0.availability.isCompletable && $0.subjectKinds.contains(ref.kind) }
+            }
+        } else {
+            owner = nil
+            customNames = []
+            descriptors = EventDescriptorRegistry.available
+        }
+        let matches = descriptors.filter {
+            prefix == nil || $0.kind.rawValue.hasPrefix(prefix!)
+        }
         var out = "{\"events\":["
-        out += matches.map(jsonString).joined(separator: ",")
+        out += matches.map { descriptor in
+            let custom = owner != nil && customNames.contains(descriptor.kind.rawValue)
+            let fields = descriptor.payload.map { field in
+                "{\"name\":\(jsonString(field.name)),\"type\":\(jsonString(field.type.displayName))" +
+                    ",\"nullable\":\(field.isNullable)}"
+            }.joined(separator: ",")
+            let kinds = descriptor.subjectKinds.map(\.rawValue).sorted(by: utf8Less).map(jsonString)
+                .joined(separator: ",")
+            return "{\"name\":\(jsonString(descriptor.kind.rawValue)),\"source\":\(jsonString(custom ? "custom" : "built_in"))" +
+                ",\"subjectKinds\":[\(kinds)],\"fields\":[\(fields)],\"summary\":\(jsonString(descriptor.summary))}"
+        }.joined(separator: ",")
         out += "]}"
         return .ok(bounded(out, cap: byteCap))
     }

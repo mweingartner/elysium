@@ -26,12 +26,8 @@ public struct ScriptingCommandContext {
     public let killSwitchOn: Bool
     public let trustWorld: () -> Void
     public let setKillSwitch: (Bool) -> Void
-    /// design.md §15's zero-cost flag (`GameScriptingState.anyScriptsAttached`)
-    /// — `/script attach` must set it too, exactly like a script's own
-    /// `h:attach` does (`ScriptRuntimeAPI.methodAttach`), or a command-line-
-    /// authored script on an object `ScriptRuntime.runLoads()`'s fast path
-    /// hasn't already flagged would silently wait up to ~1s (the amortized
-    /// scan interval) before its first load.
+    /// Session summary hint (`GameScriptingState.anyScriptsAttached`). Exact lifecycle discovery is
+    /// independent: `ScriptStore` records the mutated ref in the host's bounded dirty queue.
     public let markScriptAttached: () -> Void
     /// ai-object-graph (change 2), design.md §9.5/§12: `/script journal` and
     /// `/script undo-ai`. `nil` only in a test/context that predates this
@@ -86,7 +82,8 @@ public enum ScriptingCommands {
     private static let usageAttr = "Usage: /attr list|get|set|define|remove <target> [name] [value] [readonly] [--force]"
     private static let usageOn = "Usage: /on <target> <event> [attr] <script.handler>"
     private static let usageUnsubscribe = "Usage: /unsubscribe <id>"
-    private static let usageEvents = "Usage: /events recent [limit] | emit <target> <event>"
+    private static let usageEvents =
+        "Usage: /events recent [limit] | list <target> | define <target> <event> [field:type ...] [--summary text] | remove <target> <event> | emit <target> <event> [payload-json]"
     private static let refusal = "This command runs on the LAN host only (guests get access in a later update)."
     // event-bus (change 1b): `/on`, `/unsubscribe`, `/events` join the
     // host-only gate the same way `/attr`/`/inspect`/`/objects` did in 1a —
@@ -130,9 +127,29 @@ public enum ScriptingCommands {
         case "on", "unsubscribe":
             return true
         case "events":
-            return arguments.first?.lowercased() == "emit"
+            switch arguments.first?.lowercased() {
+            case "emit", "define", "remove": return true
+            default: return false
+            }
         default:
             return false
+        }
+    }
+
+    /// Returns the object-target token in a guest-forwardable command's real grammar. Commands
+    /// with a subcommand put the target at `arguments[1]`; `/on` puts it at `arguments[0]`, and
+    /// `/unsubscribe` has no object target. The host transport uses this same parser seam before
+    /// dispatch so a block mutation cannot evade its reach check by hiding behind a subcommand.
+    public static func lanForwardedObjectTargetToken(
+        command: String, arguments: [String]
+    ) -> String? {
+        switch command.lowercased() {
+        case "attr", "script", "events":
+            return arguments.count > 1 ? arguments[1] : nil
+        case "on":
+            return arguments.first
+        default:
+            return nil
         }
     }
 
@@ -312,7 +329,9 @@ public enum ScriptingCommands {
                 return fail("could not parse value '\(valueTokens.joined(separator: " "))'")
             }
             if AttributeRegistry.resolve(kind: ref.kind, name: name) != nil {
-                switch BuiltInAttributes.set(live, name: name, value: value, host: context.graph.host) {
+                switch context.graph.host.setScriptBuiltInAttribute(
+                    live, ref: ref, name: name, value: value, author: context.author
+                ) {
                 case .ok(let v): return ok(["\(ref.canonical).\(name) = \(AttrValueCodec.encode(v))"])
                 case .unknownName(let suggestions):
                     return fail(unknownBuiltinMessage(name: name, kind: ref.kind, suggestions: suggestions))
@@ -389,6 +408,7 @@ public enum ScriptingCommands {
             return hint.map { "'\(name)' is not a valid attribute name — try '\($0)'" }
                 ?? "'\(name)' is not a valid attribute name"
         case .nameIsBuiltIn: return "\(name) is a built-in attribute of \(ref.kind.rawValue) — use /attr set \(ref.canonical) \(name)"
+        case .nameIsScript: return "\(name) is an attached script — detach it before creating an attribute with that name"
         case .invalidValue(let attrErr): return "value too large (\(attrErr.message))"
         case .readonly: return "\(name) is readonly — use /attr define --force"
         case .tooManyEntries(let limit): return "too many attributes on \(ref.canonical) (limit \(limit))"
@@ -620,8 +640,10 @@ public enum ScriptingCommands {
         let attribute: String?
         let handlerToken: String
         if args.count == 4 {
-            guard isValidAttributeName(args[2]) else { return fail("'\(args[2])' is not a valid attribute name") }
-            attribute = args[2]
+            guard let canonical = canonicalAuthoredAttributeFilter(
+                args[2], target: target
+            ) else { return fail("'\(args[2])' is not a valid attribute name") }
+            attribute = canonical
             handlerToken = args[3]
         } else {
             attribute = nil
@@ -647,13 +669,23 @@ public enum ScriptingCommands {
             case .tooManyForObject: return fail("too many subscriptions on self (limit \(context.eventBus.caps.maxSubscriptionsPerObject))")
             case .targetRequiresTypeFilter: return fail("'\(args[1])' on a block target requires a type filter (block:<name>)")
             case .anyNotAllowedForThisEvent: return fail("'any' is not a valid target for '\(args[1])'")
+            case .attributeFilterNotAllowed: return fail("an attribute filter is valid only for 'attribute.changed'")
+            case .invalidAttributeFilter: return fail("'\(args.count == 4 ? args[2] : "")' is not a valid attribute filter")
+            case .eventNotApplicable: return fail("'\(args[1])' does not apply to that target kind")
+            case .eventNotAvailable: return fail("'\(args[1])' is reserved and has no event producer")
             }
         }
     }
 
     private static func runUnsubscribe(_ args: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
         guard let idText = args.first, let id = UInt64(idText) else { return fail(usageUnsubscribe) }
-        guard context.eventBus.unsubscribe(id: id) else { return fail("no subscription #\(id)") }
+        let removed: Bool
+        if case .lan(let peer) = context.author {
+            removed = context.eventBus.unsubscribe(id: id, ownedBy: .lanPlayer(peerID: peer))
+        } else {
+            removed = context.eventBus.unsubscribe(id: id)
+        }
+        guard removed else { return fail("no subscription #\(id)") }
         return ok(["unsubscribed #\(id)"])
     }
 
@@ -663,16 +695,125 @@ public enum ScriptingCommands {
         guard let sub = args.first else { return fail(usageEvents) }
         switch sub {
         case "recent":
-            let limit = args.count > 1 ? Int(args[1]) : nil
+            guard args.count <= 2 else { return fail("Usage: /events recent [nonnegative-limit]") }
+            let limit: Int?
+            if args.count == 2 {
+                guard let parsed = Int(args[1]), parsed >= 0 else {
+                    return fail("event limit must be a nonnegative integer")
+                }
+                limit = parsed
+            } else {
+                limit = nil
+            }
             let events = context.eventBus.recentEvents(limit: limit)
             guard !events.isEmpty else { return ok(["no recent events"]) }
             return ok(events.map(eventLine))
+        case "list":
+            guard args.count == 2 else { return fail("Usage: /events list <target>") }
+            switch resolveTarget(args[1], context) {
+            case .failure(let message): return fail(message.text)
+            case .success(let (ref, live)):
+                var lines = EventDescriptorRegistry.available
+                    .filter { $0.subjectKinds.contains(ref.kind) }
+                    .map { descriptor in
+                        let fields = descriptor.payload.map {
+                            "\($0.name):\($0.type.displayName)\($0.isNullable ? "?" : "")"
+                        }.joined(separator: ", ")
+                        return "built-in \(descriptor.kind.rawValue)" + (fields.isEmpty ? "" : " {\(fields)}")
+                    }
+                let declarations = CustomEventStore(graph: context.graph).list(ref)
+                lines += declarations.map { declaration in
+                    let fields = declaration.fields.map { "\($0.name):\($0.typeToken)" }.joined(separator: ", ")
+                    let summary = declaration.summary.map { " — \($0)" } ?? ""
+                    return "custom \(declaration.kind.rawValue)" + (fields.isEmpty ? " {}" : " {\(fields)}") + summary
+                }
+                _ = live
+                return ok(lines.isEmpty ? ["no events available on \(ref.canonical)"] : lines)
+            }
+        case "define":
+            guard args.count >= 3 else {
+                return fail("Usage: /events define <target> <event> [field:type ...] [--summary text]")
+            }
+            let ref: ObjectRef
+            switch resolveTarget(args[1], context) {
+            case .failure(let message): return fail(message.text)
+            case .success(let resolved): ref = resolved.0
+            }
+            let name = args[2]
+            var fields: [CustomEventField] = []
+            var summary: String?
+            var index = 3
+            while index < args.count {
+                if args[index] == "--summary" {
+                    guard index + 1 < args.count, index + 2 == args.count else {
+                        return fail("--summary requires one quoted argument at the end")
+                    }
+                    summary = args[index + 1]
+                    index += 2
+                    continue
+                }
+                let token = args[index]
+                guard let colon = token.firstIndex(of: ":"), colon != token.startIndex else {
+                    return fail("expected field:type, got '\(token)'")
+                }
+                let fieldName = String(token[..<colon])
+                let typeToken = String(token[token.index(after: colon)...])
+                guard let field = CustomEventField(name: fieldName, typeToken: typeToken) else {
+                    return fail("'\(typeToken)' is not a valid event field type")
+                }
+                fields.append(field)
+                index += 1
+            }
+            switch CustomEventStore(graph: context.graph).declare(
+                ref, name: name, fields: fields, summary: summary, by: context.author
+            ) {
+            case .success(let declaration):
+                return ok(["declared \(declaration.kind.rawValue) on \(ref.canonical)"])
+            case .failure(let error):
+                return fail(customEventErrorText(error, name: name))
+            }
+        case "remove":
+            guard args.count == 3 else { return fail("Usage: /events remove <target> <event>") }
+            let ref: ObjectRef
+            switch resolveTarget(args[1], context) {
+            case .failure(let message): return fail(message.text)
+            case .success(let resolved): ref = resolved.0
+            }
+            switch CustomEventStore(graph: context.graph).undeclare(ref, args[2]) {
+            case .success(true): return ok(["removed event declaration \(args[2]) from \(ref.canonical)"])
+            case .success(false): return ok(["no event declaration \(args[2]) on \(ref.canonical)"])
+            case .failure(let error): return fail(customEventErrorText(error, name: args[2]))
+            }
         case "emit":
             let rest = Array(args.dropFirst())
-            guard rest.count >= 2 else { return fail("Usage: /events emit <target> <event>") }
-            guard let ref = context.target.resolve(alias: rest[0]) else { return fail("no such object '\(rest[0])'") }
+            guard rest.count == 2 || rest.count == 3 else {
+                return fail("Usage: /events emit <target> <custom-event> [payload-json]")
+            }
+            let ref: ObjectRef
+            let live: LiveObject
+            switch resolveTarget(rest[0], context) {
+            case .failure(let message): return fail(message.text)
+            case .success(let resolved): (ref, live) = resolved
+            }
             guard let event = EventKind.parse(rest[1]) else { return fail("'\(rest[1])' is not a valid event name") }
-            switch context.eventBus.raise(kind: event, subject: ref, source: eventSource(for: context.author), tick: context.tick) {
+            var payload: [String: AttrValue] = [:]
+            if rest.count == 3 {
+                guard case .success(.map(let decoded)) = AttrValueCodec.decode(rest[2], caps: .defaults) else {
+                    return fail("event payload must be a valid JSON object")
+                }
+                payload = decoded
+            }
+            let declaration = CustomEventStore(graph: context.graph).get(ref, event.rawValue)
+            if let refusal = ScriptEventEmissionValidator.refusal(
+                kind: event, subject: ref, payload: payload, declaration: declaration
+            ) {
+                return fail(refusal)
+            }
+            switch context.eventBus.raise(
+                kind: event, subject: ref, payload: payload,
+                source: eventSource(for: context.author), tick: context.tick,
+                subjectType: familyName(live)
+            ) {
             case .enqueued, .coalesced:
                 return ok(["emitted \(event.rawValue) on \(ref.canonical)"])
             case .droppedQueueFull:
@@ -689,12 +830,34 @@ public enum ScriptingCommands {
         "#\(e.seq) t\(e.tick) \(e.kind.rawValue) \(e.subject.canonical)"
     }
 
+    private static func customEventErrorText(_ error: CustomEventStoreError, name: String) -> String {
+        switch error {
+        case .objectNotLive: return "object is not loaded"
+        case .dormant: return "object's dimension is not loaded"
+        case .unsupported: return "unsupported object"
+        case .lanClient: return "event declarations are host-authoritative"
+        case .invalidEventName: return "'\(name)' is not a valid custom event name"
+        case .builtInEventName: return "'\(name)' is a built-in event and cannot be redeclared"
+        case .tooManyDeclarations(let limit): return "too many event declarations (limit \(limit))"
+        case .tooManyFields(let limit): return "event schema exceeds \(limit) fields"
+        case .invalidFieldName(let field): return "'\(field)' is not a valid event field name"
+        case .reservedFieldName(let field): return "'\(field)' is a reserved event envelope field"
+        case .duplicateFieldName(let field): return "event field '\(field)' is duplicated"
+        case .summaryTooLarge(let limit): return "event summary exceeds \(limit) UTF-8 bytes"
+        case .invalidSummary: return "event summary contains unsupported text"
+        case .tooManyEntries(let limit): return "object scripting storage exceeds \(limit) entries"
+        case .recordTooLarge, .chunkTooLarge, .documentTooLarge:
+            return "event declaration storage limit exceeded"
+        case .revisionOverflow: return "revision limit reached"
+        }
+    }
+
     // MARK: - /script (script-runtime, change 1c, §12)
 
     private static let usageScript =
         "Usage: /script list [target] | show <target> <name> | attach <target> <name> module <source...> "
             + "| attach <target> <name> handler <event> <source...> | detach <target> <name> | run <target> <source...> "
-            + "| journal | undo-ai [n] | trust | off | on"
+            + "| stats | journal | undo-ai [n] | trust | off | on"
 
     private static func runScript(_ args: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
         guard let sub = args.first else { return fail(usageScript) }
@@ -705,6 +868,7 @@ public enum ScriptingCommands {
         case "attach": return scriptAttach(rest, context)
         case "detach": return scriptDetach(rest, context)
         case "run": return scriptRun(rest, context)
+        case "stats": return scriptStats(rest, context)
         case "journal": return scriptJournal(rest, context)
         case "undo-ai": return scriptUndoAI(rest, context)
         case "trust": return scriptTrust(context)
@@ -715,6 +879,19 @@ public enum ScriptingCommands {
     }
 
     // MARK: - /script journal, /script undo-ai (ai-object-graph, change 2, §9.5/§12)
+
+    private static func scriptStats(
+        _ rest: [String], _ context: ScriptingCommandContext
+    ) -> ScriptingCommandResult {
+        guard rest.isEmpty else { return fail("Usage: /script stats") }
+        guard let runtime = context.scriptRuntime else { return fail("no script runtime this session") }
+        let summary = runtime.summary
+        return ok([
+            "scripts: \(summary.liveScripts) live, \(summary.suspendedCoroutines) suspended, \(summary.durableTimers) durable timers",
+            "instructions: \(summary.instructionsUsedThisTick) charged this tick, \(summary.instructionBudgetRemaining)/\(summary.instructionBucketCapacity) tokens available",
+            "events: \(context.eventBus.pendingCount) pending",
+        ])
+    }
 
     private static func scriptJournal(_ rest: [String], _ context: ScriptingCommandContext) -> ScriptingCommandResult {
         guard let journal = context.aiJournal else { return fail("no AI journal this session") }

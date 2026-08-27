@@ -522,6 +522,13 @@ public final class GameCore {
     private var lanLastPublishedInventory: LANPlayerInventorySnapshot?
     public private(set) var lanApplyingReplication = false
     private var lanContainerEditSeq = 0
+    private var lanToolStrikeSequence: UInt32 = 0
+    /// Monotone left-button gesture id paired with tool-strike target transitions. Unlike the
+    /// per-intent sequence, it changes only after release and a new accepted primary press.
+    private var lanToolStrikeGesture: UInt32 = 0
+    /// Last block this uninterrupted left-button hold began striking. Kept separate from
+    /// `breakingProgress`, which resets after a completed break before the host echo arrives.
+    private var lanToolStrikeTarget: (x: Int, y: Int, z: Int)?
     private var lanLastAppliedGrantID = 0
     public private(set) var lanConnectionLost = false
     private var lanDeferredReplication = LANDeferredReplicationBuffer()
@@ -1246,9 +1253,17 @@ public final class GameCore {
             // "exitToTitle"). Host-only, before any teardown so `self.player`/
             // `self.dim` are still the ones the event names.
             if !isLANClientWorld {
+                // Give newly attached modules one final ordinary phase to become live. Any
+                // gameplay backlog left beyond the bounded phase would otherwise be discarded by
+                // teardown anyway; remove it so the lifecycle event cannot sit behind thousands
+                // of unrelated recipients. The world subscription cap guarantees player.left
+                // itself fits in one bounded delivery phase.
+                runEventBusPhase()
+                eventBus.discardPendingForShutdownLifecycleEvent()
                 eventBus.raise(
                     kind: .playerLeft, subject: .player, source: .player, tick: Int64(rpgSimulationTick)
                 )
+                eventBus.runDeliveryPhase(tick: Int64(rpgSimulationTick))
             }
             let retiringWorldID = worldRec?.id
             let retiringWorldEntryGeneration = rpgWorldEntryGeneration
@@ -1309,6 +1324,9 @@ public final class GameCore {
         lanLastPublishedInventory = nil
         lanApplyingReplication = false
         lanContainerEditSeq = 0
+        lanToolStrikeSequence = 0
+        lanToolStrikeGesture = 0
+        lanToolStrikeTarget = nil
         lanLastAppliedGrantID = 0
         lanConnectionLost = false
         lanDeferredReplication.removeAll()
@@ -2391,8 +2409,14 @@ public final class GameCore {
                 c.inYRange(y) && c.objectRecords[c.index(posMod(x, CHUNK_W), y, posMod(z, CHUNK_W))] != nil
             } ?? false
             self.eventBus.recordBlockChange(
-                dim: w.dim, x: x, y: y, z: z, oldId: oldCell >> 4, newId: newCell >> 4,
-                hasObjectRecord: hasRecord, tick: Int64(self.rpgSimulationTick)
+                dim: w.dim, x: x, y: y, z: z, oldCell: oldCell, newCell: newCell,
+                hasObjectRecord: hasRecord,
+                source: self.scripting.activeBuiltInMutationAuthor.map { scriptEventSource(for: $0) } ?? .engine,
+                tick: Int64(self.rpgSimulationTick)
+            )
+            self.recordObservableBlockAttributeChanges(
+                world: w, x: x, y: y, z: z, oldCell: oldCell, newCell: newCell,
+                source: self.scripting.activeBuiltInMutationAuthor.map { scriptEventSource(for: $0) } ?? .engine
             )
         }
         hooks.playSound = { [weak self, weak w] name, x, y, z, volume, pitch in
@@ -2425,6 +2449,10 @@ public final class GameCore {
                 kind: kind, subject: subject, payload: payload, source: source,
                 tick: Int64(self.rpgSimulationTick), subjectType: subjectType
             )
+        }
+        hooks.hasScriptEventInterest = { [weak self] kind, subject, subjectType in
+            guard let self, !self.isLANClientWorld else { return false }
+            return self.eventBus.hasEventInterest(kind, subject: subject, subjectType: subjectType)
         }
         w.hooks = hooks
     }
@@ -2658,7 +2686,8 @@ public final class GameCore {
             eventBus.raise(
                 kind: .worldDifficultyChanged, subject: .world,
                 payload: ["old": .int(Int64(old)), "new": .int(Int64(d))],
-                source: .player, tick: Int64(rpgSimulationTick)
+                source: scripting.activeBuiltInMutationAuthor.map { scriptEventSource(for: $0) } ?? .player,
+                tick: Int64(rpgSimulationTick)
             )
         }
     }
@@ -2672,7 +2701,8 @@ public final class GameCore {
             eventBus.raise(
                 kind: .worldGameruleChanged, subject: .world,
                 payload: ["key": .string(rule), "old": .number(oldRuleValue), "new": .number(value)],
-                source: .player, tick: Int64(rpgSimulationTick)
+                source: scripting.activeBuiltInMutationAuthor.map { scriptEventSource(for: $0) } ?? .player,
+                tick: Int64(rpgSimulationTick)
             )
         }
         if rule == RPG_CLASSES_GAME_RULE {
@@ -3060,6 +3090,7 @@ public final class GameCore {
                     continue
                 }
                 c.objectRecords[cellIndex] = record
+                w.publishScriptObjectRecordHydration(c, cellIndex: cellIndex, record: record)
             }
         }
         // entities: any saved record (full or entity-only) overrides worldgen spawns
@@ -4279,11 +4310,17 @@ public final class GameCore {
         let w = world
         let def = blockDefs[hit.cell >> 4]
         if def.hardness < 0 && p.gameMode != GameMode.creative {
-            p.breakingProgress = -1
+            if p.breakingProgress < 0 || p.breakingX != hit.x || p.breakingY != hit.y || p.breakingZ != hit.z {
+                p.breakingX = hit.x; p.breakingY = hit.y; p.breakingZ = hit.z
+                p.breakingProgress = 0
+                _ = raiseBlockToolStrike(player: p, hit: hit)
+            }
+            p.attackAnim = 1
             return
         }
         if p.gameMode == GameMode.creative {
             if breakCooldown <= 0 {
+                _ = raiseBlockToolStrike(player: p, hit: hit)
                 finishBreaking(interactCtx(), hit.x, hit.y, hit.z)
                 breakCooldown = 5
             }
@@ -4293,11 +4330,13 @@ public final class GameCore {
             p.breakingProgress = -1
             return
         }
+        let speed = breakSpeed(p, hit.cell)
         if p.breakingProgress < 0 || p.breakingX != hit.x || p.breakingY != hit.y || p.breakingZ != hit.z {
             p.breakingX = hit.x; p.breakingY = hit.y; p.breakingZ = hit.z
             p.breakingProgress = 0
+            _ = raiseBlockToolStrike(player: p, hit: hit)
         }
-        p.breakingProgress += breakSpeed(p, hit.cell)
+        p.breakingProgress += speed
         p.attackAnim = 1
         if w.time % 4 == 0 {
             host?.playSound("block.\(def.sound).hit", Double(hit.x) + 0.5, Double(hit.y) + 0.5, Double(hit.z) + 0.5, 0.25, 0.6)
@@ -4310,6 +4349,39 @@ public final class GameCore {
             breakCooldown = 3
             p.addExhaustion(0.005)
         }
+    }
+
+    /// One semantic mining-start event per target transition. Presentation hit sounds repeat
+    /// while the button is held, so they are deliberately not the producer. An empty hand (or
+    /// any registered non-tool item) starts normal mining without claiming a tool strike.
+    @discardableResult
+    public func raiseBlockToolStrike(
+        player: Player,
+        hit: RaycastHit,
+        by: ObjectRef? = nil,
+        source: EventSource = .player
+    ) -> EventBus.RaiseOutcome? {
+        guard player.world === world,
+              world.getBlock(hit.x, hit.y, hit.z) == hit.cell,
+              hit.cell != 0, isValidLANReplicatedCell(hit.cell),
+              let held = player.mainHand, held.id >= 0, held.id < itemDefs.count,
+              let tool = itemDef(held.id).tool,
+              DIR_NAMES.indices.contains(hit.face) else { return nil }
+        let block = blockDefs[hit.cell >> 4]
+        return eventBus.raise(
+            kind: .blockToolStrike,
+            subject: .block(dim: world.dim, x: hit.x, y: hit.y, z: hit.z),
+            payload: [
+                "by": .ref((by ?? scriptRef(for: player)).canonical),
+                "item": .string(itemDef(held.id).name),
+                "blockName": .string(block.name),
+                "face": .string(DIR_NAMES[hit.face]),
+                "toolType": .string(tool.type),
+                "tier": .int(Int64(tool.tier)),
+                "instant": .bool(player.gameMode == GameMode.creative || breakSpeed(player, hit.cell) >= 1),
+            ],
+            source: source, tick: Int64(rpgSimulationTick), subjectType: block.name
+        )
     }
 
     private func trackBreakAdvancements(_ id: Int) {
@@ -4327,22 +4399,34 @@ public final class GameCore {
         let p = player!
         if !leftDown || p.dead || p.deathTime > 0 || (host?.hasScreen() ?? false) {
             p.breakingProgress = -1
+            lanToolStrikeTarget = nil
             return
         }
         let hitOpt = crosshairBlock()
         targetedBlock = hitOpt.map { ($0.x, $0.y, $0.z, $0.cell) }
         guard let hit = hitOpt else {
             p.breakingProgress = -1
+            lanToolStrikeTarget = nil
             return
         }
         let w = world
         let def = blockDefs[hit.cell >> 4]
         if def.hardness < 0 && p.gameMode != GameMode.creative {
-            p.breakingProgress = -1
+            if p.breakingProgress < 0 || p.breakingX != hit.x || p.breakingY != hit.y || p.breakingZ != hit.z {
+                p.breakingX = hit.x; p.breakingY = hit.y; p.breakingZ = hit.z
+                p.breakingProgress = 0
+            }
+            beginLANToolStrikeIfNeeded(hit)
+            p.attackAnim = 1
             return
         }
         if p.gameMode == GameMode.creative {
             if breakCooldown <= 0 {
+                beginLANToolStrikeIfNeeded(hit)
+                if p.breakingProgress < 0 || p.breakingX != hit.x || p.breakingY != hit.y || p.breakingZ != hit.z {
+                    p.breakingX = hit.x; p.breakingY = hit.y; p.breakingZ = hit.z
+                    p.breakingProgress = 0
+                }
                 emitLANBreakBlockIntent(hit)
                 breakCooldown = 5
             }
@@ -4356,6 +4440,7 @@ public final class GameCore {
             p.breakingX = hit.x; p.breakingY = hit.y; p.breakingZ = hit.z
             p.breakingProgress = 0
         }
+        beginLANToolStrikeIfNeeded(hit)
         p.breakingProgress += breakSpeed(p, hit.cell)
         p.attackAnim = 1
         if lanClientTickCounter % 4 == 0 {
@@ -4380,6 +4465,33 @@ public final class GameCore {
             selectedHotbarSlot: player?.selectedSlot ?? 0,
             cell: hit.cell
         ))
+    }
+
+    private func emitLANToolStrikeIntent(_ hit: RaycastHit) {
+        guard let handler = lanBlockIntentHandler, let p = player,
+              let held = p.mainHand, held.id >= 0, held.id < itemDefs.count,
+              itemDef(held.id).tool != nil,
+              lanToolStrikeSequence < UInt32.max,
+              lanToolStrikeGesture > 0 else { return }
+        lanToolStrikeSequence += 1
+        handler(LANBlockIntent(
+            action: .toolStrike,
+            x: hit.x,
+            y: hit.y,
+            z: hit.z,
+            face: hit.face,
+            selectedHotbarSlot: p.selectedSlot,
+            cell: hit.cell,
+            toolStrikeSequence: lanToolStrikeSequence,
+            toolStrikeGesture: lanToolStrikeGesture
+        ))
+    }
+
+    private func beginLANToolStrikeIfNeeded(_ hit: RaycastHit) {
+        if let target = lanToolStrikeTarget,
+           target.x == hit.x, target.y == hit.y, target.z == hit.z { return }
+        lanToolStrikeTarget = (hit.x, hit.y, hit.z)
+        emitLANToolStrikeIntent(hit)
     }
 
     private func tickLANClientMirroredUse() {
@@ -4786,7 +4898,7 @@ public final class GameCore {
             guard slot.itemID >= 0, slot.itemID < itemDefs.count, slot.count > 0 else { continue }
             _ = p.give(ItemStack(slot.itemID, slot.count, damage: slot.damage, label: slot.label))
         }
-        if grant.xp > 0 { p.xp += grant.xp }
+        if grant.xp > 0 { p.addXP(grant.xp) }
         lanLocalInventoryRevision += 1
         lanLastPublishedInventory = makeLANInventorySnapshot(p, playerID: "")
     }
@@ -5043,6 +5155,9 @@ public final class GameCore {
         // entities first
         let target = crosshairEntity(REACH_SURVIVAL - 1)
         if let target, !p.sneaking {
+            let targetRef = scriptRef(for: target)
+            let targetType = target.type
+            let heldItemName = p.mainHand.map { itemDef($0.id).name }
             if target.interact(p, p.mainHand) {
                 p.attackAnim = 0.6
                 // event-bus (change 1b): `entity.interacted` (design.md §7.2,
@@ -5051,9 +5166,9 @@ public final class GameCore {
                 // through the intent path).
                 if !isLANClientWorld {
                     eventBus.raise(
-                        kind: .entityInteracted, subject: scriptRef(for: target),
-                        payload: ["by": .ref(ObjectRef.player.canonical), "item": p.mainHand.map { .string(itemDef($0.id).name) } ?? .null],
-                        source: .player, tick: Int64(rpgSimulationTick), subjectType: target.type
+                        kind: .entityInteracted, subject: targetRef,
+                        payload: ["by": .ref(ObjectRef.player.canonical), "item": heldItemName.map(AttrValue.string) ?? .null],
+                        source: .player, tick: Int64(rpgSimulationTick), subjectType: targetType
                     )
                 }
                 return
@@ -5061,6 +5176,8 @@ public final class GameCore {
         }
         let hit = crosshairBlock()
         if let hit, !p.sneaking || p.mainHand == nil {
+            let blockName = blockDefs[hit.cell >> 4].name
+            let heldItemName = p.mainHand.map { itemDef($0.id).name }
             if useBlock(ctx, hit) {
                 p.attackAnim = 0.6
                 // event-bus (change 1b): `block.used` (design.md §7.2, "a
@@ -5068,9 +5185,9 @@ public final class GameCore {
                 if !isLANClientWorld {
                     eventBus.raise(
                         kind: .blockUsed, subject: .block(dim: dim, x: hit.x, y: hit.y, z: hit.z),
-                        payload: ["by": .ref(ObjectRef.player.canonical), "item": p.mainHand.map { .string(itemDef($0.id).name) } ?? .null],
+                        payload: ["by": .ref(ObjectRef.player.canonical), "item": heldItemName.map(AttrValue.string) ?? .null],
                         source: .player, tick: Int64(rpgSimulationTick),
-                        subjectType: blockDefs[world.getBlockId(hit.x, hit.y, hit.z)].name
+                        subjectType: blockName
                     )
                 }
                 return
@@ -5106,7 +5223,7 @@ public final class GameCore {
     /// `Player.swift` — same before/after-diff approach as
     /// `raisePlayerPickedUpEvents`, around its two call sites (`keyDown`'s
     /// `drop` binding, both spellings).
-    private func raisePlayerDroppedEvent(before: ItemStack?, after: ItemStack?) {
+    private func raisePlayerDroppedEvent(before: (id: Int, count: Int)?, after: ItemStack?) {
         guard let before else { return }
         let droppedCount = before.count - (after?.id == before.id ? after!.count : 0)
         guard droppedCount > 0 else { return }
@@ -5369,6 +5486,9 @@ public final class GameCore {
                 player?.breakingProgress = -1
                 return
             }
+            if isLANClientWorld, !leftDown, lanToolStrikeGesture < UInt32.max {
+                lanToolStrikeGesture += 1
+            }
             leftDown = true
             if isLANClientWorld {
                 performLANClientAttackOrMine()
@@ -5389,7 +5509,10 @@ public final class GameCore {
     }
 
     public func mouseUp(_ button: Int) {
-        if button == 0 { leftDown = false }
+        if button == 0 {
+            leftDown = false
+            if isLANClientWorld { lanToolStrikeTarget = nil }
+        }
         if button == 2 {
             rightDown = false
             if player?.usingItem == true { releaseUsingItem(interactCtx()) }
@@ -5450,7 +5573,7 @@ public final class GameCore {
             if isLANClientWorld {
                 performLANClientToss(all: ctrlOrCmd)
             } else {
-                let selectedBeforeDrop = p.mainHand
+                let selectedBeforeDrop = p.mainHand.map { (id: $0.id, count: $0.count) }
                 p.dropSelected(ctrlOrCmd)
                 raisePlayerDroppedEvent(before: selectedBeforeDrop, after: p.mainHand)
             }
@@ -5500,7 +5623,7 @@ public final class GameCore {
             if isLANClientWorld {
                 performLANClientToss(all: dropAll)
             } else {
-                let selectedBeforeDrop = p.mainHand
+                let selectedBeforeDrop = p.mainHand.map { (id: $0.id, count: $0.count) }
                 p.dropSelected(dropAll)
                 raisePlayerDroppedEvent(before: selectedBeforeDrop, after: p.mainHand)
             }

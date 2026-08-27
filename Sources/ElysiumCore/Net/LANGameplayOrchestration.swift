@@ -103,6 +103,12 @@ public struct LANRemotePlayerApplyReport: Equatable {
 private let LAN_REMOTE_PLAYER_PRESENTATION_RESPONSE = 12.0
 private let LAN_REMOTE_PLAYER_TELEPORT_DISTANCE_SQUARED = 16.0 * 16.0
 
+func lanXPRequiredForLevel(_ level: Int) -> Int {
+    if level >= 30 { return 112 + (level - 30) * 9 }
+    if level >= 15 { return 37 + (level - 15) * 5 }
+    return 7 + level * 2
+}
+
 private func wrapLANRemoteAngle(_ angle: Double) -> Double {
     let turn = Double.pi * 2
     var value = angle.truncatingRemainder(dividingBy: turn)
@@ -150,6 +156,12 @@ public final class LANRemotePlayerEntity: LivingEntity {
     public var xpLevel = 0
     public var xpProgress = 0.0
     private var pendingDamage: [LANDamageEvent] = []
+    private var pendingAuthoritativePickupItems: [LANInventorySlotSnapshot] = []
+    private var pendingAuthoritativePickupXP = 0
+
+    var hasPendingAuthoritativePickupMutation: Bool {
+        !pendingAuthoritativePickupItems.isEmpty || pendingAuthoritativePickupXP > 0
+    }
 
     public override var type: String { "player" }
     public override var isPlayer: Bool { true }
@@ -336,30 +348,80 @@ public final class LANRemotePlayerEntity: LivingEntity {
     }
 
     public func xpForLevel(_ level: Int) -> Int {
-        if level >= 30 { return 112 + (level - 30) * 9 }
-        if level >= 15 { return 37 + (level - 15) * 5 }
-        return 7 + level * 2
+        lanXPRequiredForLevel(level)
     }
 
     private func tickAuthoritativePickups() {
         guard age % 2 == 0 else { return }
+        let actor = ScriptEventActorIdentity.lanPlayer(peerID: multiplayerPlayerID)
         for ref in world.getEntitiesNear(x, y + 0.5, z, 1.6).sorted(by: { $0.id < $1.id }) {
             if ref === self { continue }
             if (ref as? Entity)?.lanReplicatedMirror == true { continue }
             if let item = ref as? ItemEntity, item.pickupDelay <= 0 {
+                let itemID = item.stack.id
+                guard itemID >= 0, itemID < itemDefs.count else { continue }
                 let before = item.stack.count
+                let maxStack = max(1, maxStackOf(item.stack))
+                let maximumMutationEntries = before > 0 ? (before - 1) / maxStack + 1 : 0
+                guard maximumMutationEntries <= LAN_MULTIPLAYER_MAX_GRANT_ITEMS
+                        - pendingAuthoritativePickupItems.count else { continue }
                 if give(item.stack) {
                     world.hooks.playSound("entity.item.pickup", x, y, z, 0.3, 1.4 + Double.random(in: 0..<1) * 0.6)
                     item.remove()
                 } else if item.stack.count != before {
                     world.hooks.playSound("entity.item.pickup", x, y, z, 0.3, 1.4)
                 }
+                let pickedUp = before - item.stack.count
+                if pickedUp > 0 {
+                    var remaining = pickedUp
+                    while remaining > 0 {
+                        let count = min(remaining, maxStack)
+                        pendingAuthoritativePickupItems.append(LANInventorySlotSnapshot(
+                            slot: 0,
+                            itemID: itemID,
+                            count: count,
+                            damage: item.stack.damage,
+                            label: item.stack.label
+                        ))
+                        remaining -= count
+                    }
+                    world.hooks.raiseScriptEvent(
+                        .playerPickedUp, actor.ref,
+                        ["item": .string(itemDef(itemID).name), "count": .int(Int64(pickedUp))],
+                        actor.source, nil
+                    )
+                }
             } else if let orb = ref as? XPOrb {
+                let grantedXP = max(0, min(100_000, orb.amount))
+                guard grantedXP == 0
+                        || pendingAuthoritativePickupXP <= 1_000_000_000 - grantedXP else { continue }
+                let oldLevel = xpLevel
                 addXP(orb.amount)
                 world.hooks.playSound("entity.experience_orb.pickup", x, y, z, 0.4, 0.8 + Double.random(in: 0..<1) * 0.6)
                 orb.remove()
+                pendingAuthoritativePickupXP += grantedXP
+                if xpLevel > oldLevel {
+                    world.hooks.raiseScriptEvent(
+                        .playerLeveled, actor.ref,
+                        ["old": .int(Int64(oldLevel)), "new": .int(Int64(xpLevel))],
+                        .engine, nil
+                    )
+                }
             }
         }
+    }
+
+    func authoritativePickupMutation() -> LANAuthoritativePickupMutation? {
+        guard hasPendingAuthoritativePickupMutation else { return nil }
+        return LANAuthoritativePickupMutation(
+            items: pendingAuthoritativePickupItems,
+            xp: pendingAuthoritativePickupXP
+        )
+    }
+
+    func clearAuthoritativePickupMutation() {
+        pendingAuthoritativePickupItems.removeAll(keepingCapacity: true)
+        pendingAuthoritativePickupXP = 0
     }
 
     /// Records the hit as a `LANDamageEvent` for the transport to relay to the owning guest, who
@@ -386,6 +448,38 @@ public final class LANRemotePlayerEntity: LivingEntity {
         pendingDamage.removeAll()
         return out
     }
+}
+
+struct LANAuthoritativePickupMutation: Equatable {
+    let items: [LANInventorySlotSnapshot]
+    let xp: Int
+}
+
+/// Commits only the bounded item/XP deltas produced by authoritative guest pickups. The peer's
+/// current client-published inventory remains the baseline; unrelated proxy slots never flow back
+/// into session authority. Each successful commit also queues the existing idempotent owning-peer
+/// additive grant, which the transport drains later in the same tick.
+@discardableResult
+public func drainLANAuthoritativePickupMutations(
+    in world: World,
+    into session: LANMultiplayerHostSession
+) -> Int {
+    let players = world.entities.compactMap { $0 as? LANRemotePlayerEntity }.sorted {
+        if $0.multiplayerPlayerID != $1.multiplayerPlayerID {
+            return $0.multiplayerPlayerID < $1.multiplayerPlayerID
+        }
+        return $0.id < $1.id
+    }
+    var committed = 0
+    for player in players {
+        guard let mutation = player.authoritativePickupMutation(),
+              session.applyAuthoritativePickupMutation(
+                mutation, for: player.multiplayerPlayerID
+              ) != nil else { continue }
+        player.clearAuthoritativePickupMutation()
+        committed += 1
+    }
+    return committed
 }
 
 public func lanRemotePlayerRenderYaw(fromPlayerYaw yaw: Double) -> Double {
@@ -420,6 +514,75 @@ public func removeLANRemotePlayer(_ playerID: String, from world: World) -> Bool
     return true
 }
 
+/// Raises semantic player lifecycle events only for transitions the host session already accepted.
+/// The caller supplies the pre-update session state, so rejected dimension changes/respawns collapse
+/// to equal states and cannot produce an event. Dimension precedes respawn, matching `respawnPlayer`
+/// when a local player respawns in a different dimension.
+public func raiseLANAcceptedPlayerLifecycleEvents(
+    previous: LANPlayerState?,
+    accepted: LANPlayerState,
+    in world: World
+) {
+    guard let previous,
+          previous.playerID == accepted.playerID,
+          let oldDimension = Dim(rawValue: previous.dimension),
+          let newDimension = Dim(rawValue: accepted.dimension)
+    else { return }
+    let actor = ScriptEventActorIdentity.lanPlayer(peerID: accepted.playerID)
+    if oldDimension != newDimension {
+        world.hooks.raiseScriptEvent(
+            .playerDimensionChanged, actor.ref,
+            [
+                "old": .string(dimCanonicalName(oldDimension)),
+                "new": .string(dimCanonicalName(newDimension)),
+            ],
+            actor.source, nil
+        )
+    }
+    if previous.dead && !accepted.dead {
+        world.hooks.raiseScriptEvent(
+            .playerRespawned, actor.ref, [:], actor.source, nil
+        )
+    }
+}
+
+/// A `LANPlayerState` intentionally carries no client-claimed damage cause or attacker. Health
+/// deltas therefore use an explicit synchronization cause and LAN provenance rather than inventing
+/// an engine attacker. The accepted before/after health values still provide the exact loss/heal.
+private func raiseLANRemotePlayerHealthEvents(
+    for player: LANRemotePlayerEntity,
+    accepting state: LANPlayerState
+) {
+    guard !player.dead else { return }
+    let actor = ScriptEventActorIdentity.lanPlayer(peerID: player.multiplayerPlayerID)
+    let oldHealth = max(0, min(player.maxHealth, player.health))
+    let newHealth = max(0, min(player.maxHealth, state.health))
+    if newHealth < oldHealth {
+        player.world.hooks.raiseScriptEvent(
+            .entityDamaged, actor.ref,
+            [
+                "amount": .number(oldHealth - newHealth),
+                "cause": .string("lan_state"),
+                "attacker": .null,
+            ],
+            actor.source, player.type
+        )
+    } else if newHealth > oldHealth, !state.dead {
+        player.world.hooks.raiseScriptEvent(
+            .entityHealed, actor.ref,
+            ["amount": .number(newHealth - oldHealth)],
+            actor.source, player.type
+        )
+    }
+    if state.dead {
+        player.world.hooks.raiseScriptEvent(
+            .entityDied, actor.ref,
+            ["cause": .string("lan_state"), "attacker": .null],
+            actor.source, player.type
+        )
+    }
+}
+
 @discardableResult
 public func removeLANClientNonAuthoritativeEntities(from world: World, localPlayer: Player?) -> Int {
     var removed = 0
@@ -442,10 +605,11 @@ public func applyLANRemotePlayers(
     localPlayerID: String?,
     removeMissing: Bool = true,
     inventorySnapshots: [String: LANPlayerInventorySnapshot] = [:],
-    /// lan-client-parity (change 4): applied once, only when a *new*
-    /// `LANRemotePlayerEntity` is created — a live entity's `objectRecord`
-    /// is its own source of truth afterward (an update never overwrites it,
-    /// exactly like inventory snapshots are only ever applied on creation).
+    /// lan-client-parity (change 4): `objectRecordTexts` are applied once, only when a *new*
+    /// `LANRemotePlayerEntity` is created — a live entity's `objectRecord` is its own source of
+    /// truth afterward. Client-published inventory snapshots may refresh an existing proxy in the
+    /// authority-safe peer -> proxy direction, except while an exact host pickup delta awaits its
+    /// same-tick session/grant commit.
     objectRecordTexts: [String: String] = [:]
 ) -> LANRemotePlayerApplyReport {
     var report = LANRemotePlayerApplyReport()
@@ -454,17 +618,25 @@ public func applyLANRemotePlayers(
 
     for state in states.sorted(by: { $0.playerID < $1.playerID }) {
         if state.playerID == local { continue }
+        let existing = world.entities.first(where: {
+            ($0 as? LANRemotePlayerEntity)?.multiplayerPlayerID == state.playerID
+        }) as? LANRemotePlayerEntity
         if state.dead || state.dimension != world.dim.rawValue {
-            if removeLANRemotePlayer(state.playerID, from: world) {
+            if let existing {
+                raiseLANRemotePlayerHealthEvents(for: existing, accepting: state)
+                world.removeEntity(existing)
                 report.removed += 1
             }
             continue
         }
         wanted.insert(state.playerID)
-        if let existing = world.entities.first(where: {
-            ($0 as? LANRemotePlayerEntity)?.multiplayerPlayerID == state.playerID
-        }) as? LANRemotePlayerEntity {
+        if let existing {
+            raiseLANRemotePlayerHealthEvents(for: existing, accepting: state)
             existing.apply(state)
+            if !existing.hasPendingAuthoritativePickupMutation,
+               let inventory = inventorySnapshots[state.playerID] {
+                _ = applyLANInventorySnapshot(inventory, to: existing)
+            }
             report.updated += 1
         } else {
             let remote = LANRemotePlayerEntity(world: world, state: state)

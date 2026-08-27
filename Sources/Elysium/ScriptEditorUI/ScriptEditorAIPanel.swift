@@ -32,6 +32,7 @@ struct ScriptEditorAIPanel: View {
     @State private var modelDiscoveryGeneration: UInt64 = 0
     @State private var requestTask: Task<Void, Never>?
     @State private var lastAssistantInsertion: String?
+    @State private var lastAssistantInsertionRefusal: String?
     @State private var requestGeneration: UInt64 = 0
     @FocusState private var isPromptFocused: Bool
 
@@ -43,8 +44,14 @@ struct ScriptEditorAIPanel: View {
             if let insertion = lastAssistantInsertion {
                 HStack {
                     SwiftUI.Button {
-                        model.insertAtCursor(insertion)
-                        lastAssistantInsertion = nil
+                        if let refusal = model.aiInsertionPreflightFailure(insertion) {
+                            lastAssistantInsertionRefusal = refusal
+                            lastAssistantInsertion = nil
+                        } else {
+                            model.insertAtCursor(insertion)
+                            lastAssistantInsertion = nil
+                            lastAssistantInsertionRefusal = nil
+                        }
                     } label: {
                         Label("Insert response at cursor", systemImage: "arrow.down.doc")
                     }
@@ -53,6 +60,14 @@ struct ScriptEditorAIPanel: View {
                 }
                 .padding(.horizontal, theme.spacing)
                 .padding(.top, 4)
+            }
+            if let refusal = lastAssistantInsertionRefusal {
+                Label(refusal, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, theme.spacing)
+                    .padding(.top, 4)
+                    .accessibilityLabel(refusal)
             }
             Divider()
             inputArea
@@ -66,6 +81,9 @@ struct ScriptEditorAIPanel: View {
         }
         .onChange(of: model.isWorldSessionActive) { _, active in
             if !active { stop() }
+        }
+        .onChange(of: model.documentIdentity) { _, _ in
+            clearConversation()
         }
         .onDisappear {
             stop()
@@ -116,8 +134,7 @@ struct ScriptEditorAIPanel: View {
 
             if !messages.isEmpty {
                 SwiftUI.Button {
-                    messages.removeAll()
-                    lastAssistantInsertion = nil
+                    clearConversation()
                 } label: {
                     Label("Clear AI conversation", systemImage: "trash")
                         .labelStyle(.iconOnly)
@@ -269,6 +286,7 @@ struct ScriptEditorAIPanel: View {
         historyIndex = -1
         messages.append(Bubble(role: "user", content: request))
         lastAssistantInsertion = nil
+        lastAssistantInsertionRefusal = nil
         prompt = ""
         isProcessing = true
         requestGeneration &+= 1
@@ -284,27 +302,48 @@ struct ScriptEditorAIPanel: View {
                 let reply = try await model.requestEditorAIReply(instruction: request)
                 guard !Task.isCancelled, requestGeneration == generation else { return }
                 messages.append(Bubble(role: "assistant", content: reply))
-                lastAssistantInsertion = reply
+                if let refusal = model.aiInsertionPreflightFailure(reply) {
+                    lastAssistantInsertion = nil
+                    lastAssistantInsertionRefusal = refusal
+                } else {
+                    lastAssistantInsertion = reply
+                    lastAssistantInsertionRefusal = nil
+                }
             } catch let error as OllamaCodeCompletionError
                 where error == .cancelled || error == .stale {
                 return
             } catch {
                 guard !Task.isCancelled, requestGeneration == generation else { return }
                 lastAssistantInsertion = nil
+                lastAssistantInsertionRefusal = nil
                 messages.append(Bubble(role: "assistant", content: error.localizedDescription))
             }
         }
     }
 
     private func stop() {
-        requestGeneration &+= 1
+        stopRequest()
         modelDiscoveryGeneration &+= 1
-        requestTask?.cancel()
-        requestTask = nil
         modelDiscoveryTask?.cancel()
         modelDiscoveryTask = nil
-        isProcessing = false
         isFetchingModels = false
+    }
+
+    private func stopRequest() {
+        requestGeneration &+= 1
+        requestTask?.cancel()
+        requestTask = nil
+        isProcessing = false
+    }
+
+    private func clearConversation() {
+        stopRequest()
+        messages.removeAll()
+        prompt = ""
+        history.removeAll()
+        historyIndex = -1
+        lastAssistantInsertion = nil
+        lastAssistantInsertionRefusal = nil
     }
 
     private func recallHistory(_ direction: AIChatPromptHistoryDirection) {

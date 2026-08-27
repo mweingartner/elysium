@@ -26,9 +26,53 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 - **Maps and controls** — compact and expanded live maps, including player-level cavern mapping in the Nether, configurable controls, keyboard and controller input, text-entry accessibility, fullscreen support, and debug/automation surfaces used by the verification suite. The compact minimap is shown by default and can be hidden under **Options... → Video → Show Minimap** without disabling the `M` expanded map.
 - **Synthesized audio** — music and sound effects are produced at runtime rather than shipped as conventional audio recordings.
 - **Resource-pack support** — Java Edition-style resource packs are read through Elysium's bounded archive and metadata loaders. The pinned default is [Faithful 64x](https://faithfulpack.net/faithful64x) Release 12; **Options... → Video → Resource Packs...** offers the reviewed Ore Borders 64x and Static Lanterns add-ons independently, both off by default.
-- **Scripting, events, and the AI object graph** — objects (blocks, entities, players, dimensions, the world) carry extensible attributes and up to 8 attached Lua scripts each, run on a sandboxed, deterministic, budgeted Lua 5.4.8 interpreter (`CLua` + `ElysiumScript`). Scripts subscribe to a typed event bus (`block.broken`, `attribute.changed`, `entity.interacted`, and more, plus custom events), schedule named durable timers, and can ask the same local AI for a text reply (`ai.ask`/`ai.await`). Players drive all of this from chat (`/attr`, `/script`, `/on`, `/events`) or a native language-aware editor with semantic styling, receiver-correct completion, diagnostics, validated snippets, a nearby World Objects browser, and optional manual Ollama proposals. The embedded-AI world tool loop can separately author and manage scripts and attributes through the same validated, budgeted, journaled path, undoable with `/script undo-ai`. Everything runs host-only, gated by a per-world trust switch and a `doScripts` kill switch; a granted LAN guest can author scripts and attributes on the host through the same checks. See [docs/SCRIPTING_GUIDE.md](docs/SCRIPTING_GUIDE.md) for the Lua API and [docs/LUA_EDITOR.md](docs/LUA_EDITOR.md) for editor behavior and controls.
+- **Scripting, extensible events, and the AI object graph** — every block, entity, player, dimension, and world can carry typed custom attributes, object-scoped custom event declarations, event handlers, and up to 8 attached Lua scripts on a sandboxed, deterministic, budgeted Lua 5.4.8 interpreter (`CLua` + `ElysiumScript`). Scripts can observe another live object directly (`target:on(...)`, `target:onAttribute(...)`), publish a discoverable payload contract (`target:declareEvent(...)`), and emit either declared or open custom events. A broad built-in catalog covers attribute/lifecycle, block, entity, player, dimension, and world interaction; `block.toolStrike`, for example, fires once when a player first begins striking a block with a real tool and describes the tool, block, face, tier, and whether the strike is instant. Built-in events are engine-produced facts and cannot be emitted manually. Players can inspect, define, remove, and emit custom events through `/events`, or use the native editor's target-aware event picker, payload-field completion, validated snippets, diagnostics, and nearby World Objects browser. Deterministic completion never needs AI; editor Ollama suggestions remain a separate, optional manual action by default. The embedded-AI world tool loop receives a compact Lua authoring contract whose built-in event catalog and payloads come from the live canonical registry, and can inspect or manage declarations, scripts, attributes, subscriptions, and events through the same validated, budgeted, journaled path, undoable where supported with `/script undo-ai`. Execution remains host-only, gated by per-world trust and the `doScripts` kill switch; authorized LAN guests receive source-free event metadata for accurate authoring and send mutations to the host for validation. See [docs/SCRIPTING_GUIDE.md](docs/SCRIPTING_GUIDE.md) for the command/Lua API and [docs/LUA_EDITOR.md](docs/LUA_EDITOR.md) for editor behavior and controls.
 
 For the subsystem boundaries and determinism rules, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Scripting quick start
+
+Open the Lua editor with Command-E (or `/script edit looking ore_reaction`), target an object, and
+choose **Module** when the source should register one or more callbacks. This complete example gives
+the targeted block a persistent custom attribute, observes the engine-produced first-tool-strike
+event, and publishes a typed custom event after the third strike:
+
+```lua
+if self:get("strike_count") == nil then
+  self:define("strike_count", 0)
+end
+self:declareEvent("ore.awakened", {
+  count = "integer",
+  player = "object",
+}, "This ore was struck three times")
+
+self:on("block.toolStrike", function(ev)
+  local count = (self:get("strike_count") or 0) + 1
+  self:set("strike_count", count)
+  if count == 3 then
+    self:emit("ore.awakened", {count = count, player = ev.by})
+  end
+end)
+```
+
+Every handle—world, dimension, block, entity, or player—supports custom attributes and object-scoped
+event declarations. A script can observe a different live object directly:
+
+```lua
+local gate = objects.get("block:overworld:10,64,3")
+gate:onAttribute("open", function(ev)
+  say("Gate changed from " .. tostring(ev.old) .. " to " .. tostring(ev.new))
+end)
+```
+
+Typing `gate:` opens the target-aware member flyout; Handler mode similarly offers only compatible
+produced events plus that target's declarations, and `ev.` completes the selected event's payload.
+The nearby **World Objects** browser inserts canonical references so they do not need to be guessed.
+Deterministic completion and diagnostics are always local. Ollama completion is separate and Manual
+by default: Option-Command-/ explicitly requests one proposal from the model selected in Options,
+Tab accepts it, and Escape dismisses it. See the [Scripting Guide](docs/SCRIPTING_GUIDE.md) for the
+complete attribute, handler, declaration, payload, command, limits, persistence, and LAN contracts,
+and the [Lua Editor reference](docs/LUA_EDITOR.md) for editor controls and privacy behavior.
 
 ### Character paths and sub-classes
 
@@ -229,12 +273,13 @@ git config core.hooksPath .githooks
 ```text
 Sources/ElysiumCore/       Deterministic engine, world, entities, systems, saves, and LAN model
 Sources/ElysiumCore/Scripting/  Object graph, canonical AttrValue JSON, persisted attribute
-                            bags and scripts, the event bus, the sandboxed Lua script
+                            bags/scripts/custom-event declarations, the indexed event bus, the sandboxed Lua script
                             runtime, the AI object-graph tool loop, and the /attr /inspect
                             /objects /on /unsubscribe /events /script /ai command layer
 Sources/ElysiumScript/     The embedded Lua 5.4.8 runtime's Swift-facing API (LuaState,
                             handles, sandboxed environments) over the vendored CLua/Lua C core
-Sources/Elysium/           AppKit and Metal application, UI, renderer, audio, input, and transport
+Sources/Elysium/           AppKit and Metal application, UI/native Lua editor, renderer, audio,
+                            input, LAN transport, and loopback Ollama client
 Sources/ElysiumStorage/    Typed SQLite persistence boundary
 Sources/ElysiumTextInput/  Shared text-ingress validation
 Sources/ElysiumAppSupport/ Shared AppKit support kernels

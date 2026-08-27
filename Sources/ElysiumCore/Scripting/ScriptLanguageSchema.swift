@@ -216,6 +216,7 @@ public struct ScriptLanguageAttribute: Sendable, Equatable, Identifiable {
     public func supportsDotAccess(_ candidate: String) -> Bool {
         let fixedHandleMembers: Set<String> = [
             "ref", "kind", "name", "attrs", "exists", "get", "set", "scripts", "define",
+            "events", "declareEvent", "undeclareEvent", "on", "onAttribute", "emit",
             "attach", "detach", "setBlock", "breakBlock",
         ]
         guard !fixedHandleMembers.contains(candidate) else { return false }
@@ -363,7 +364,7 @@ public enum ScriptLanguageSchema {
                 [p("name", .string), p("payload", .map, optional: true), p("target", .objectHandle, optional: true)],
                 returns: [r(.boolean, "Whether the event was enqueued.")]
             )],
-            summary: "Emit a validated custom event; target defaults to self."
+            summary: "Emit a custom event (1–3 args); target defaults to self and, if supplied, must be a handle."
         ),
         function(
             .globalFunction, "tick",
@@ -400,7 +401,7 @@ public enum ScriptLanguageSchema {
             )],
             summary: "Create a dimension handle from a canonical dimension name."
         ),
-        function(.globalFunction, "register", signatures: [signature("register(name, fn)", [p("name", .string), p("fn", .function)])], summary: "Register a callback name for durable timers or persisted subscriptions."),
+        function(.globalFunction, "register", signatures: [signature("register(name, fn)", [p("name", .string), p("fn", .function)])], summary: "Name a callback for durable timers or persisted subscriptions. The reserved name unload installs a synchronous, no-ev, custom-attribute-only finalizer; unload is not an EventBus event."),
     ]
 
     /// Sandboxed Lua base globals that remain reachable in every environment. Deliberately absent:
@@ -532,10 +533,16 @@ public enum ScriptLanguageSchema {
     public static let handleMethods: [ScriptLanguageSymbol] = [
         method("exists", signatures: [signature("h:exists()", returns: [r(.boolean)])], summary: "Whether the handle currently resolves live."),
         method("get", signatures: [signature("h:get(name)", [p("name", .string)], returns: [r(.any, "Attribute value, or nil.", nullable: true)])], summary: "Read a built-in or custom attribute by name; unknown reads return nil."),
-        method("set", signatures: [signature("h:set(name, value)", [p("name", .string), p("value", .any)])], summary: "Write a mutable built-in or existing custom attribute."),
+        method("set", signatures: [signature("h:set(name, value)", [p("name", .string), p("value", .any)])], summary: "Write a mutable built-in attribute, or create/update a mutable custom attribute."),
         method("scripts", signatures: [signature("h:scripts()", returns: [r(.list)])], summary: "List scripts attached to this object."),
-        method("define", signatures: [signature("h:define(name, value[, opts])", [p("name", .string), p("value", .any), p("opts", .table, optional: true)])], summary: "Define a typed custom attribute; opts supports readonly and force."),
-        method("attach", signatures: [signature("h:attach(name, source[, opts])", [p("name", .string), p("source", .string), p("opts", .table, optional: true)], returns: [r(.boolean)])], summary: "Attach module source, or a handler when opts.on is supplied."),
+        method("define", signatures: [signature("h:define(name, value[, opts])", [p("name", .string), p("value", .any), p("opts", .table, optional: true)])], summary: "Define an attribute; opts accepts only boolean readonly and force fields."),
+        method("events", signatures: [signature("h:events()", returns: [r(.list)])], summary: "List custom event declarations owned by this object, including typed payload fields."),
+        method("declareEvent", signatures: [signature("h:declareEvent(name[, fields][, summary])", [p("name", .string), p("fields", .table, optional: true), p("summary", .string, optional: true)], returns: [r(.boolean)])], summary: "Declare or update this object's custom event schema. Field values are any, boolean, integer, number, string, object, list, or map, with ? for nullable."),
+        method("undeclareEvent", signatures: [signature("h:undeclareEvent(name)", [p("name", .string)], returns: [r(.boolean)])], summary: "Remove this object's custom event declaration; existing open-name subscriptions continue to work."),
+        method("on", signatures: [signature("h:on(event[, opts], fn)", [p("event", .string), p("opts", .table, optional: true), p("fn", .function)])], summary: "Subscribe on this exact object; opts accepts only attr and name."),
+        method("onAttribute", signatures: [signature("h:onAttribute(name, fn)", [p("name", .string), p("fn", .function)])], summary: "Subscribe the current module to attribute.changed for one attribute on this object."),
+        method("emit", signatures: [signature("h:emit(name[, payload])", [p("name", .string), p("payload", .map, optional: true)], returns: [r(.boolean)])], summary: "Emit a custom event on this object (1–2 args); built-ins are rejected."),
+        method("attach", signatures: [signature("h:attach(name, source[, opts])", [p("name", .string), p("source", .string), p("opts", .table, optional: true)], returns: [r(.boolean)])], summary: "Attach module source when options are omitted, or a handler when a valid opts.on is supplied; opts.attr filters attribute.changed and opts.target is a handle. There is no opts.mode option."),
         method("detach", signatures: [signature("h:detach(name)", [p("name", .string)], returns: [r(.boolean)])], summary: "Detach a named script."),
         method("setBlock", signatures: [signature("block:setBlock(name[, opts])", [p("name", .string), p("opts", .table, optional: true)], returns: [r(.boolean)])], receiverKinds: [.block], summary: "Replace this block and optionally apply built-in block attributes."),
         method("breakBlock", signatures: [signature("block:breakBlock()", returns: [r(.boolean)])], receiverKinds: [.block], summary: "Break this block naturally, including normal drops."),
@@ -579,6 +586,11 @@ public enum ScriptLanguageSchema {
         snippet("event.subscribe", .events, "subscribe(target, event, fn)", "subscribe(self, \"attribute.changed\", function(ev)\n  \nend)", "Subscribe to an explicit target."),
         snippet("event.emit", .events, "emit(name, payload, target)", "emit(\"custom.event\", {}, self)", "Emit a custom event; target is the third argument."),
         snippet("event.register", .events, "register(name, fn)", "register(\"on_loaded\", function(ev)\n  \nend)", "Name a callback for timers or persisted subscriptions."),
+        snippet("lifecycle.unload", .events, "register(\"unload\", fn)", "register(\"unload\", function()\n  self.attrs.last_state = \"stopped\"\nend)", "Install the synchronous no-ev unload finalizer. Only final custom-attribute writes are allowed."),
+        snippet("event.object_on", .events, "self:on(event, fn)", "self:on(\"attribute.changed\", function(ev)\n  \nend)", "Subscribe this module to one object's event."),
+        snippet("event.object_attribute", .events, "self:onAttribute(name, fn)", "self:onAttribute(\"state\", function(ev)\n  local new_value = ev.new\nend)", "React when one custom or observable built-in attribute changes."),
+        snippet("event.declare", .events, "self:declareEvent(name, fields)", "self:declareEvent(\"machine.ready\", { item = \"string\", count = \"integer\" }, \"A machine finished its work\")", "Publish a typed, discoverable custom event contract on this object."),
+        snippet("event.object_emit", .events, "self:emit(name, payload)", "self:emit(\"machine.ready\", { item = \"iron_ingot\", count = 1 })", "Emit a custom event on this object with declaration-aware payload checking."),
 
         snippet("control.if", .control, "if / then / end", "if condition then\n  \nend", "Conditional block."),
         snippet("control.if_else", .control, "if / else / end", "if condition then\n  \nelse\n  \nend", "Conditional block with an alternate branch."),
@@ -588,10 +600,11 @@ public enum ScriptLanguageSchema {
         snippet("control.function", .control, "function", "local function name(ev)\n  \nend", "Local function declaration."),
 
         snippet("object.get", .objects, "self:get(name)", "self:get(\"name\")", "Read a built-in or custom attribute."),
-        snippet("object.set", .objects, "self:set(name, value)", "self:set(\"name\", value)", "Write a mutable built-in or custom attribute."),
+        snippet("object.set", .objects, "self:set(name, value)", "self:set(\"custom_state\", \"active\")", "Write a mutable built-in or custom attribute."),
         snippet("object.exists", .objects, "self:exists()", "self:exists()", "Test liveness."),
         snippet("object.scripts", .objects, "self:scripts()", "self:scripts()", "List attached scripts."),
-        snippet("object.define", .objects, "self:define(name, value)", "self:define(\"name\", value)", "Define a custom attribute."),
+        snippet("object.events", .objects, "self:events()", "self:events()", "List typed custom events declared by this object."),
+        snippet("object.define", .objects, "self:define(name, value)", "self:define(\"custom_state\", \"active\")", "Define a custom attribute."),
         snippet("object.attach", .objects, "self:attach(name, source)", "self:attach(\"name\", \"return\")", "Attach module source; use opts.on for handler mode."),
         snippet("object.detach", .objects, "self:detach(name)", "self:detach(\"name\")", "Detach a script."),
         snippet("object.set_block", .objects, "self:setBlock(name)", "self:setBlock(\"stone\")", "Replace this block.", ownerKinds: [.block]),

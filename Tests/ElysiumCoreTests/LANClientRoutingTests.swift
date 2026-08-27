@@ -112,6 +112,38 @@ final class LANClientRoutingTests: XCTestCase {
         XCTAssertEqual(game.world.getBlock(8, 66, 10), originalCell)
     }
 
+    func testToolStrikeIntentEmitsOncePerMiningStartOnlyForARealTool() {
+        let game = makeLANClientGame()
+        game.player.mainHand = ItemStack(iid("wooden_pickaxe"), 1)
+        var captured: [LANBlockIntent] = []
+        game.lanBlockIntentHandler = { captured.append($0) }
+
+        game.mouseDown(0)
+        stepOneTick(game)
+        for _ in 0..<8 { stepOneTick(game) }
+
+        var strikes = captured.filter { $0.action == .toolStrike }
+        XCTAssertEqual(strikes.count, 1, "held-button mining must not repeat the start intent")
+        XCTAssertEqual(strikes.first?.toolStrikeSequence, 1)
+        XCTAssertEqual(strikes.first?.toolStrikeGesture, 1)
+        XCTAssertEqual(strikes.first?.cell, game.world.getBlock(8, 66, 10))
+
+        game.mouseUp(0)
+        stepOneTick(game)
+        game.mouseDown(0)
+        stepOneTick(game)
+        strikes = captured.filter { $0.action == .toolStrike }
+        XCTAssertEqual(strikes.map(\.toolStrikeSequence), [1, 2])
+        XCTAssertEqual(strikes.map(\.toolStrikeGesture), [1, 2])
+
+        game.mouseUp(0)
+        stepOneTick(game)
+        game.player.mainHand = ItemStack(iid("dirt"), 1)
+        game.mouseDown(0)
+        stepOneTick(game)
+        XCTAssertEqual(captured.filter { $0.action == .toolStrike }.count, 2)
+    }
+
     // MARK: - placement
 
     func testRightClickWithBlockHeldEmitsPlaceBlockIntentWithoutMutatingWorld() {
@@ -236,6 +268,20 @@ final class LANClientRoutingTests: XCTestCase {
         game.applyLANGrant(grant)
 
         XCTAssertEqual(game.player.countItem(iid("dirt")), 14)
+    }
+
+    func testApplyLANPickupGrantAdvancesCanonicalExperienceState() {
+        let game = makeLANClientGame()
+        let grant = LANInventoryGrant(
+            playerID: "peer", grantID: 1,
+            items: [], xp: 10, clearAll: false
+        )
+
+        game.applyLANGrant(grant)
+
+        XCTAssertEqual(game.player.xp, 10)
+        XCTAssertEqual(game.player.xpLevel, 1)
+        XCTAssertEqual(game.player.xpProgress, 1.0 / 3.0, accuracy: 0.000_001)
     }
 
     // MARK: - restore

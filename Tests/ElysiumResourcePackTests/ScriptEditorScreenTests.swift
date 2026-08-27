@@ -99,6 +99,7 @@ final class ScriptEditorModelTests: XCTestCase {
             gameMode: GameMode.survival, difficulty: 2, dimension: Dim.overworld.rawValue, playerCount: 2
         ))
         XCTAssertTrue(game.isLANClientWorld)
+        LANMultiplayerManager.shared.attachGame(game)
         return game
     }
 
@@ -162,6 +163,25 @@ final class ScriptEditorModelTests: XCTestCase {
         XCTAssertFalse(model.statusIsError)
     }
 
+    func testInvalidHandlerEventsAreRejectedConsistentlyBySaveAndCheck() throws {
+        let game = try makeTrustedGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.currentName = "invalid_handler"
+        model.mode = .handler
+        model.source = "say(ev.kind)"
+
+        model.handlerEvent = "unload"
+        XCTAssertFalse(model.save())
+        XCTAssertTrue(model.statusIsError)
+        XCTAssertTrue(model.status?.contains("not an EventBus handler") == true)
+        XCTAssertNil(game.scriptingCommandContext().scriptStore.get(.player, "invalid_handler"))
+
+        model.handlerEvent = "block.used"
+        model.check()
+        XCTAssertTrue(model.statusIsError)
+        XCTAssertTrue(model.status?.contains("not raised for player") == true)
+    }
+
     // MARK: - host: Run is ephemeral and never persists its draft as a script
 
     func testRunEphemeralNeverPersistsAScript() throws {
@@ -174,6 +194,20 @@ final class ScriptEditorModelTests: XCTestCase {
         XCTAssertNil(model.errorLine)
         XCTAssertEqual(game.scriptingCommandContext().scriptStore.list(.player).count, 0,
                        "Run is ephemeral (§9.3) — it must never attach anything")
+    }
+
+    func testHandlerRunOnceIsRefusedBecauseNoRepresentativeEventWouldExist() throws {
+        let game = try makeTrustedGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.mode = .handler
+        model.handlerEvent = "entity.damaged"
+        model.source = "self.attrs.accidentally_ran = ev.amount"
+
+        model.run()
+
+        XCTAssertTrue(model.statusIsError)
+        XCTAssertEqual(model.status, ScriptEditorAuthoringContract.handlerRunOnceUnavailable)
+        XCTAssertNil(game.scriptingCommandContext().store.get(.player, "accidentally_ran"))
     }
 
     func testRunExplainsNonYieldableBoundaryBeforeExecuting() throws {
@@ -639,6 +673,63 @@ final class ScriptEditorModelTests: XCTestCase {
         XCTAssertFalse(model.isNewScript)
     }
 
+    func testSwitchingByteIdenticalDocumentsClearsAIStateAndScopesTheNextRequest() async throws {
+        let defaults = UserDefaults.standard
+        let previousMode = defaults.object(forKey: ScriptEditorAICompletionMode.defaultsKey)
+        defaults.set(
+            ScriptEditorAICompletionMode.manual.rawValue,
+            forKey: ScriptEditorAICompletionMode.defaultsKey
+        )
+        defer {
+            if let previousMode {
+                defaults.set(previousMode, forKey: ScriptEditorAICompletionMode.defaultsKey)
+            } else {
+                defaults.removeObject(forKey: ScriptEditorAICompletionMode.defaultsKey)
+            }
+        }
+
+        let game = try makeTrustedGame()
+        let context = game.scriptingCommandContext()
+        let identicalSource = "local answer = 42"
+        for name in ["first", "second"] {
+            guard case .success = context.scriptStore.attach(
+                .player, name: name, source: identicalSource, mode: .module, triggers: [],
+                by: .player, tick: 0
+            ) else {
+                return XCTFail("expected \(name) to attach")
+            }
+        }
+        let completer = RecordingScriptEditorAICompleter()
+        let model = ScriptEditorModel(
+            target: .player, game: game, existingName: "first", aiCompleter: completer
+        )
+        model.selectedRange = NSRange(location: (identicalSource as NSString).length, length: 0)
+        model.requestAISuggestion()
+        try await waitForEditorAIRequestCount(1, from: completer)
+        try await waitForInlineAISuggestion(in: model)
+        let firstRequests = await completer.recordedRequests()
+        let firstRequest = try XCTUnwrap(firstRequests.first)
+        let firstIdentity = model.documentIdentity
+        XCTAssertEqual(firstRequest.identity.documentIdentity, firstIdentity)
+        XCTAssertNotNil(model.inlineAISuggestion)
+
+        model.switchTo("second")
+
+        XCTAssertEqual(model.source, identicalSource)
+        XCTAssertGreaterThan(model.documentIdentity, firstIdentity)
+        XCTAssertNil(model.inlineAISuggestion)
+        XCTAssertFalse(model.isRequestingAISuggestion)
+        XCTAssertNil(model.aiSuggestionError)
+
+        model.selectedRange = NSRange(location: (identicalSource as NSString).length, length: 0)
+        model.requestAISuggestion()
+        try await waitForEditorAIRequestCount(2, from: completer)
+        let secondRequests = await completer.recordedRequests()
+        let secondRequest = try XCTUnwrap(secondRequests.last)
+        XCTAssertEqual(secondRequest.identity.documentIdentity, model.documentIdentity)
+        XCTAssertNotEqual(secondRequest.identity.documentIdentity, firstRequest.identity.documentIdentity)
+    }
+
     // MARK: - insertAtCursor inserts at the caret, not appended to the end
 
     func testInsertAtCursorInsertsAtTheSelectionNotTheEnd() throws {
@@ -761,6 +852,134 @@ final class ScriptEditorModelTests: XCTestCase {
         )
     }
 
+    func testHandlerAIPreflightRequiresEventAndAuthoringChangesStayOffline() async throws {
+        let defaults = UserDefaults.standard
+        let previousMode = defaults.object(forKey: ScriptEditorAICompletionMode.defaultsKey)
+        defaults.set(
+            ScriptEditorAICompletionMode.manual.rawValue,
+            forKey: ScriptEditorAICompletionMode.defaultsKey
+        )
+        defer {
+            if let previousMode {
+                defaults.set(previousMode, forKey: ScriptEditorAICompletionMode.defaultsKey)
+            } else {
+                defaults.removeObject(forKey: ScriptEditorAICompletionMode.defaultsKey)
+            }
+        }
+
+        let game = try makeTrustedGame()
+        let scriptingContext = game.scriptingCommandContext()
+        guard case .success = scriptingContext.store.define(
+            .world, "season_name", .string("summer"), readonly: true
+        ) else {
+            return XCTFail("expected nearby metadata fixture to succeed")
+        }
+        let eventStore = CustomEventStore(graph: scriptingContext.graph)
+        guard case .success = eventStore.declare(
+            .player,
+            name: "player.quest_ready",
+            fields: [CustomEventField(name: "quest", type: .string)]
+        ) else {
+            return XCTFail("expected custom event declaration to succeed")
+        }
+        let completer = RecordingScriptEditorAICompleter()
+        let model = ScriptEditorModel(target: .player, game: game, aiCompleter: completer)
+        model.source = "say(ev.amount)"
+        model.selectedRange = NSRange(location: (model.source as NSString).length, length: 0)
+        model.mode = .handler
+
+        model.requestAISuggestion()
+        try await ContinuousClock().sleep(for: .milliseconds(100))
+        var requests = await completer.recordedRequests()
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertTrue(model.aiSuggestionError?.contains("No request was sent") == true)
+
+        model.handlerEvent = "unload"
+        model.requestAISuggestion()
+        try await ContinuousClock().sleep(for: .milliseconds(100))
+        requests = await completer.recordedRequests()
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertTrue(model.aiSuggestionError?.contains("not an EventBus handler") == true)
+
+        model.handlerEvent = "block.used"
+        model.requestAISuggestion()
+        try await ContinuousClock().sleep(for: .milliseconds(100))
+        requests = await completer.recordedRequests()
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertTrue(model.aiSuggestionError?.contains("not raised for player") == true)
+
+        model.setAICompletionMode(.onIdle)
+        model.handlerEvent = "entity.damaged"
+        try await ContinuousClock().sleep(for: .milliseconds(750))
+        requests = await completer.recordedRequests()
+        XCTAssertTrue(
+            requests.isEmpty,
+            "changing the script mode/event must cancel stale idle work without starting another request"
+        )
+        model.mode = .module
+        try await ContinuousClock().sleep(for: .milliseconds(750))
+        requests = await completer.recordedRequests()
+        XCTAssertTrue(requests.isEmpty)
+
+        model.mode = .handler
+        model.requestAISuggestion()
+        try await waitForEditorAIRequestCount(1, from: completer)
+        requests = await completer.recordedRequests()
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request.authoringContext.targetReference, ObjectRef.player.canonical)
+        XCTAssertEqual(request.authoringContext.targetKind, ObjectKind.player.rawValue)
+        XCTAssertEqual(request.authoringContext.scriptMode, ScriptMode.handler.rawValue)
+        XCTAssertEqual(request.authoringContext.selectedEvent, "entity.damaged")
+        XCTAssertTrue(request.authoringContext.modeContract.contains("Use implicit ev directly"))
+        XCTAssertTrue(request.authoringContext.compatibleEvents.contains {
+            $0.name == "player.quest_ready" && $0.source == "declared_custom"
+        })
+        XCTAssertFalse(request.authoringContext.compatibleEvents.contains { $0.name == "block.used" })
+        XCTAssertTrue(request.authoringContext.targetMembers.contains { $0.contains("method h:set") })
+        let world = try XCTUnwrap(request.authorizedNearbyObjects.first {
+            $0.reference == ObjectRef.world.canonical
+        })
+        let worldAttribute = try XCTUnwrap(world.customAttributes.first {
+            $0.name == "season_name"
+        })
+        XCTAssertEqual(worldAttribute.type, "string")
+        XCTAssertEqual(worldAttribute.mutability, "read_only")
+
+        model.handlerEvent = "player.open_signal"
+        model.requestAISuggestion()
+        try await waitForEditorAIRequestCount(2, from: completer)
+        requests = await completer.recordedRequests()
+        let openRequest = try XCTUnwrap(requests.last)
+        let openEvent = try XCTUnwrap(openRequest.authoringContext.compatibleEvents.first {
+            $0.name == "player.open_signal"
+        })
+        XCTAssertEqual(openEvent.source, "open_custom_selected")
+        XCTAssertEqual(openEvent.payloadContract, "open_custom_unknown_envelope_only")
+        XCTAssertTrue(openEvent.payloadFields.isEmpty)
+
+        let moduleCompleter = RecordingScriptEditorAICompleter()
+        let moduleModel = ScriptEditorModel(target: .world, game: game, aiCompleter: moduleCompleter)
+        moduleModel.source = "local observed_player = objects.get(\"player\")"
+        moduleModel.selectedRange = NSRange(
+            location: (moduleModel.source as NSString).length, length: 0
+        )
+        moduleModel.requestAISuggestion()
+        try await waitForEditorAIRequestCount(1, from: moduleCompleter)
+        let moduleRequests = await moduleCompleter.recordedRequests()
+        let moduleRequest = try XCTUnwrap(moduleRequests.first)
+        XCTAssertTrue(moduleRequest.authoringContext.compatibleEvents.contains {
+            $0.name == "block.used" && $0.source == "built_in"
+        }, "module authoring must retain cross-kind built-in payload contracts")
+        let nearbyPlayer = try XCTUnwrap(moduleRequest.authorizedNearbyObjects.first {
+            $0.reference == ObjectRef.player.canonical
+        })
+        XCTAssertTrue(nearbyPlayer.builtInEvents?.contains("player.attacked") == true)
+        let nearbyDeclaration = try XCTUnwrap(nearbyPlayer.customEvents?.first {
+            $0.name == "player.quest_ready"
+        })
+        XCTAssertEqual(nearbyDeclaration.payloadFields, ["quest:string"])
+    }
+
     private func waitForEditorAIRequestCount(
         _ expected: Int,
         from completer: RecordingScriptEditorAICompleter,
@@ -773,6 +992,19 @@ final class ScriptEditorModelTests: XCTestCase {
             try await clock.sleep(for: .milliseconds(20))
         }
         XCTFail("Timed out waiting for \(expected) editor AI request(s)")
+    }
+
+    private func waitForInlineAISuggestion(
+        in model: ScriptEditorModel,
+        timeout: Duration = .seconds(1)
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if model.inlineAISuggestion != nil { return }
+            try await clock.sleep(for: .milliseconds(20))
+        }
+        XCTFail("Timed out waiting for an inline AI suggestion")
     }
 
     // MARK: - lan-client-parity: guest mode

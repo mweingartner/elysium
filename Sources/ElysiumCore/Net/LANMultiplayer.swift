@@ -37,6 +37,35 @@ public let LAN_MULTIPLAYER_MAX_OBJECT_ATTRIBUTES_JSON_BYTES = 4_096
 /// fit well under 1 KiB; capped higher to leave slack for the encoding
 /// overhead without inviting abuse.
 public let LAN_MULTIPLAYER_MAX_OBJECT_SCRIPTS_JSON_BYTES = 2_048
+/// A declaration mirror must be able to represent every contract accepted by
+/// `ScriptingStorageCaps.defaults`: 16 event names (64 bytes), each with 32 field names (32
+/// bytes), compact type tokens (bounded to 16 bytes on the wire), and a 256-byte summary. JSON
+/// string escaping can at most double these clean UTF-8 inputs; the per-declaration envelope
+/// allowance covers keys, quotes, separators, braces, and commas. Deriving the ceiling from the
+/// authoring contract prevents a valid maximum-size declaration set from silently collapsing to
+/// `[]` while retaining a finite hostile-wire bound.
+private let LAN_MULTIPLAYER_CUSTOM_EVENT_NAME_BYTES = 64
+private let LAN_MULTIPLAYER_CUSTOM_EVENT_FIELD_NAME_BYTES = 32
+private let LAN_MULTIPLAYER_CUSTOM_EVENT_FIELD_TYPE_BYTES = 16
+private let LAN_MULTIPLAYER_JSON_STRING_ESCAPE_FACTOR = 2
+private let LAN_MULTIPLAYER_CUSTOM_EVENT_ENVELOPE_BYTES = 256
+public let LAN_MULTIPLAYER_MAX_OBJECT_EVENTS_JSON_BYTES: Int = {
+    let caps = ScriptingStorageCaps.defaults
+    let fieldBytes = caps.maxEventFieldsPerDeclaration * (
+        LAN_MULTIPLAYER_CUSTOM_EVENT_FIELD_NAME_BYTES
+            + LAN_MULTIPLAYER_CUSTOM_EVENT_FIELD_TYPE_BYTES
+            + 8 // JSON quotes, colon, and comma allowance.
+    )
+    let declarationBytes = LAN_MULTIPLAYER_CUSTOM_EVENT_ENVELOPE_BYTES
+        + LAN_MULTIPLAYER_CUSTOM_EVENT_NAME_BYTES
+        + caps.maxEventSummaryBytes * LAN_MULTIPLAYER_JSON_STRING_ESCAPE_FACTOR
+        + fieldBytes
+    return 2 + caps.maxEventDeclarationsPerObject * declarationBytes
+}()
+/// Object metadata shares a frame with world/entity state. Exact JSON-encoded snapshot sizes are
+/// accumulated against half of the authenticated frame ceiling so a page containing several
+/// maximum-size declaration contracts cannot make the entire replication frame unsendable.
+public let LAN_MULTIPLAYER_MAX_OBJECT_METADATA_PAGE_BYTES = LAN_MULTIPLAYER_MAX_FRAME_BYTES / 2
 public let LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT = CHUNK_W * SECTION_H * CHUNK_W
 public let LAN_MULTIPLAYER_MAX_CHUNK_REQUEST_RADIUS = 1
 public let LAN_MULTIPLAYER_DEFAULT_CHUNK_REQUEST_RADIUS = 1
@@ -624,6 +653,9 @@ public struct LANBlockIntent: Codable, Equatable {
         case breakBlock
         case placeBlock
         case useBlock
+        /// Event-only mining-start intent. The host validates current state and raises
+        /// `block.toolStrike`; this action never mutates a block.
+        case toolStrike
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -634,6 +666,8 @@ public struct LANBlockIntent: Codable, Equatable {
         case face
         case selectedHotbarSlot
         case cell
+        case toolStrikeSequence
+        case toolStrikeGesture
     }
 
     public var action: Action
@@ -643,8 +677,18 @@ public struct LANBlockIntent: Codable, Equatable {
     public var face: Int
     public var selectedHotbarSlot: Int
     public var cell: Int
+    /// Per-client-world monotone sequence for event-only tool strikes. Optional so every
+    /// pre-existing protocol-5 block intent retains its original wire shape.
+    public var toolStrikeSequence: UInt32?
+    /// Monotone left-button gesture id. All target transitions during one uninterrupted hold use
+    /// the same id; releasing and pressing again advances it. This lets the host distinguish a
+    /// legitimate A-release-A strike from duplicate fresh-sequence packets within one gesture.
+    public var toolStrikeGesture: UInt32?
 
-    public init(action: Action, x: Int, y: Int, z: Int, face: Int, selectedHotbarSlot: Int, cell: Int = 0) {
+    public init(
+        action: Action, x: Int, y: Int, z: Int, face: Int, selectedHotbarSlot: Int,
+        cell: Int = 0, toolStrikeSequence: UInt32? = nil, toolStrikeGesture: UInt32? = nil
+    ) {
         self.action = action
         self.x = x
         self.y = y
@@ -652,18 +696,46 @@ public struct LANBlockIntent: Codable, Equatable {
         self.face = max(0, min(5, face))
         self.selectedHotbarSlot = max(0, min(8, selectedHotbarSlot))
         self.cell = max(0, min(Int(UInt16.max), cell))
+        self.toolStrikeSequence = action == .toolStrike ? toolStrikeSequence : nil
+        self.toolStrikeGesture = action == .toolStrike ? toolStrikeGesture : nil
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let face = try c.decode(Int.self, forKey: .face)
+        guard (0...5).contains(face) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .face,
+                in: c,
+                debugDescription: "Block-intent face must be in 0...5"
+            )
+        }
+        let selectedHotbarSlot = try c.decode(Int.self, forKey: .selectedHotbarSlot)
+        guard (0...8).contains(selectedHotbarSlot) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .selectedHotbarSlot,
+                in: c,
+                debugDescription: "Block-intent hotbar slot must be in 0...8"
+            )
+        }
+        let cell = try c.decodeIfPresent(Int.self, forKey: .cell) ?? 0
+        guard (0...Int(UInt16.max)).contains(cell) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .cell,
+                in: c,
+                debugDescription: "Block-intent cell must be in 0...65535"
+            )
+        }
         self.init(
             action: try c.decode(Action.self, forKey: .action),
             x: try c.decode(Int.self, forKey: .x),
             y: try c.decode(Int.self, forKey: .y),
             z: try c.decode(Int.self, forKey: .z),
-            face: try c.decode(Int.self, forKey: .face),
-            selectedHotbarSlot: try c.decode(Int.self, forKey: .selectedHotbarSlot),
-            cell: try c.decodeIfPresent(Int.self, forKey: .cell) ?? 0
+            face: face,
+            selectedHotbarSlot: selectedHotbarSlot,
+            cell: cell,
+            toolStrikeSequence: try c.decodeIfPresent(UInt32.self, forKey: .toolStrikeSequence),
+            toolStrikeGesture: try c.decodeIfPresent(UInt32.self, forKey: .toolStrikeGesture)
         )
     }
 }
@@ -1197,12 +1269,36 @@ public struct LANScriptMetadata: Codable, Equatable {
     }
 }
 
+/// Source-free, value-free custom event authoring metadata mirrored to LAN guests. Only the
+/// declared name/schema/summary crosses the wire; provenance and script source remain host-only.
+public struct LANCustomEventMetadata: Codable, Equatable {
+    public var name: String
+    public var fields: [String: String]
+    public var summary: String?
+
+    public init(name: String, fields: [String: String], summary: String? = nil) {
+        self.name = prefixByUTF8Bytes(cleanSingleLine(name), maxBytes: 64)
+        var bounded: [String: String] = [:]
+        for key in fields.keys.sorted(by: utf8Less).prefix(ScriptingStorageCaps.defaults.maxEventFieldsPerDeclaration) {
+            guard let value = fields[key] else { continue }
+            bounded[prefixByUTF8Bytes(cleanSingleLine(key), maxBytes: 32)] =
+                prefixByUTF8Bytes(cleanSingleLine(value), maxBytes: 16)
+        }
+        self.fields = bounded
+        self.summary = summary.map {
+            prefixByUTF8Bytes(cleanSingleLine($0), maxBytes: ScriptingStorageCaps.defaults.maxEventSummaryBytes)
+        }
+    }
+}
+
 public struct LANObjectAttributeSnapshot: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case ref
         case revision
         case attrsJSON
         case scriptsJSON
+        case eventsJSON
+        case removed
     }
 
     /// `ObjectRef.canonical` — re-parsed and validated again on apply (`ObjectRef.parse`); an
@@ -1224,14 +1320,28 @@ public struct LANObjectAttributeSnapshot: Codable, Equatable {
     /// clamp-at-construction/fail-closed discipline as `attrsJSON`. Additive field: an older
     /// snapshot (or a peer that predates this change) decodes as `"[]"`.
     public var scriptsJSON: String
+    /// Additive, bounded `[LANCustomEventMetadata]` authoring mirror. It never grants permission
+    /// to emit or mutate on a guest and decodes to an empty list for older peers.
+    public var eventsJSON: String
+    /// Additive tombstone marker. A host sends this when an object that was present in an earlier
+    /// metadata census no longer has attributes, scripts, or custom-event declarations. Keeping
+    /// this explicit avoids treating a legitimate empty encoding (or a clamped oversized value)
+    /// as deletion. Older peers decode snapshots without this field as live metadata.
+    public var removed: Bool
 
-    public init(ref: String, revision: UInt64, attrsJSON: String, scriptsJSON: String = "[]") {
+    public init(
+        ref: String, revision: UInt64, attrsJSON: String, scriptsJSON: String = "[]",
+        eventsJSON: String = "[]", removed: Bool = false
+    ) {
         self.ref = prefixByUTF8Bytes(cleanSingleLine(ref), maxBytes: 96)
         self.revision = revision
-        self.attrsJSON = attrsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_ATTRIBUTES_JSON_BYTES
+        self.removed = removed
+        self.attrsJSON = !removed && attrsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_ATTRIBUTES_JSON_BYTES
             ? attrsJSON : "{}"
-        self.scriptsJSON = scriptsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_SCRIPTS_JSON_BYTES
+        self.scriptsJSON = !removed && scriptsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_SCRIPTS_JSON_BYTES
             ? scriptsJSON : "[]"
+        self.eventsJSON = !removed && eventsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_EVENTS_JSON_BYTES
+            ? eventsJSON : "[]"
     }
 
     public init(from decoder: Decoder) throws {
@@ -1240,7 +1350,9 @@ public struct LANObjectAttributeSnapshot: Codable, Equatable {
             ref: try c.decode(String.self, forKey: .ref),
             revision: try c.decode(UInt64.self, forKey: .revision),
             attrsJSON: try c.decode(String.self, forKey: .attrsJSON),
-            scriptsJSON: try c.decodeIfPresent(String.self, forKey: .scriptsJSON) ?? "[]"
+            scriptsJSON: try c.decodeIfPresent(String.self, forKey: .scriptsJSON) ?? "[]",
+            eventsJSON: try c.decodeIfPresent(String.self, forKey: .eventsJSON) ?? "[]",
+            removed: try c.decodeIfPresent(Bool.self, forKey: .removed) ?? false
         )
     }
 
@@ -1260,6 +1372,33 @@ public struct LANObjectAttributeSnapshot: Codable, Equatable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         guard let data = try? encoder.encode(capped), let text = String(data: data, encoding: .utf8) else { return "[]" }
+        return text
+    }
+
+    public func events() -> [LANCustomEventMetadata] {
+        guard eventsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_EVENTS_JSON_BYTES,
+              let data = eventsJSON.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([LANCustomEventMetadata].self, from: data)
+        else { return [] }
+        return Array(decoded.prefix(ScriptingStorageCaps.defaults.maxEventDeclarationsPerObject))
+    }
+
+    public static func encodeEvents(_ declarations: [CustomEventDeclaration]) -> String {
+        let metadata = declarations
+            .sorted { utf8Less($0.kind.rawValue, $1.kind.rawValue) }
+            .prefix(ScriptingStorageCaps.defaults.maxEventDeclarationsPerObject)
+            .map { declaration in
+                LANCustomEventMetadata(
+                    name: declaration.kind.rawValue,
+                    fields: Dictionary(uniqueKeysWithValues: declaration.fields.map { ($0.name, $0.typeToken) }),
+                    summary: declaration.summary
+                )
+            }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(metadata),
+              data.count <= LAN_MULTIPLAYER_MAX_OBJECT_EVENTS_JSON_BYTES,
+              let text = String(data: data, encoding: .utf8) else { return "[]" }
         return text
     }
 }
@@ -1353,7 +1492,11 @@ public struct LANReplicationBatch: Codable, Equatable {
             chunkSections.allSatisfy(\.isValidRLE) &&
             inventories.allSatisfy { $0.slots.count <= LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS } &&
             blockEntities.allSatisfy { $0.slots.count <= LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITY_SLOTS } &&
-            objectAttributes.allSatisfy { $0.attrsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_ATTRIBUTES_JSON_BYTES }
+            objectAttributes.allSatisfy {
+                $0.attrsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_ATTRIBUTES_JSON_BYTES &&
+                    $0.scriptsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_SCRIPTS_JSON_BYTES &&
+                    $0.eventsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_EVENTS_JSON_BYTES
+            }
     }
 }
 

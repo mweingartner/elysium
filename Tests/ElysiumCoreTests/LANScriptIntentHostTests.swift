@@ -128,6 +128,44 @@ final class LANScriptIntentHostTests: XCTestCase {
         }
     }
 
+    func testLanForwardedObjectTargetTokenFollowsEachCommandGrammar() {
+        let block = "block:overworld:120,64,120"
+        XCTAssertEqual(
+            ScriptingCommands.lanForwardedObjectTargetToken(
+                command: "attr", arguments: ["set", block, "mood", "ready"]
+            ),
+            block
+        )
+        XCTAssertEqual(
+            ScriptingCommands.lanForwardedObjectTargetToken(
+                command: "script", arguments: ["attach", block, "guard", "module", "x=1"]
+            ),
+            block
+        )
+        XCTAssertEqual(
+            ScriptingCommands.lanForwardedObjectTargetToken(
+                command: "events", arguments: ["emit", block, "custom.ready"]
+            ),
+            block
+        )
+        XCTAssertEqual(
+            ScriptingCommands.lanForwardedObjectTargetToken(
+                command: "on", arguments: [block, "block.used", "s.h"]
+            ),
+            block
+        )
+        XCTAssertNil(
+            ScriptingCommands.lanForwardedObjectTargetToken(
+                command: "unsubscribe", arguments: ["1"]
+            )
+        )
+        XCTAssertNil(
+            ScriptingCommands.lanForwardedObjectTargetToken(
+                command: "attr", arguments: ["set"]
+            )
+        )
+    }
+
     // MARK: - LANScriptIntent hostile-bytes codec discipline
 
     func testLANScriptIntentCapsArgumentCountAndBytes() {
@@ -283,6 +321,36 @@ final class LANScriptIntentHostTests: XCTestCase {
         XCTAssertEqual(peer, "guest1")
     }
 
+    func testGuestCanUnsubscribeOnlyItsOwnPersistedSubscription() throws {
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "lanplayer-unsubscribe")
+        game.createWorld(name: "W", seedText: "1", mode: GameMode.survival, difficulty: 2)
+        addConnectedGuest(peerID: "guest1", to: game)
+
+        let hostSubscription = try game.eventBus.subscribe(
+            subscriber: .player, scriptName: "host", handler: "joined", target: .any,
+            event: .playerJoined, attribute: nil, createdBy: .player, tick: 0
+        ).get()
+        let guestSubscription = try game.eventBus.subscribe(
+            subscriber: .lanPlayer(peerID: "guest1"), scriptName: "guest", handler: "joined",
+            target: .any, event: .playerJoined, attribute: nil,
+            createdBy: .lan(peer: "guest1"), tick: 0
+        ).get()
+        let context = game.scriptingCommandContext(guestPeerID: "guest1")
+
+        let denied = ScriptingCommands.run(
+            command: "unsubscribe", arguments: [String(hostSubscription.id)], context: context
+        )
+        XCTAssertFalse(denied.ok)
+        XCTAssertNotNil(game.eventBus.subscription(id: hostSubscription.id))
+
+        let own = ScriptingCommands.run(
+            command: "unsubscribe", arguments: [String(guestSubscription.id)], context: context
+        )
+        XCTAssertTrue(own.ok, "expected guest-owned deletion, got: \(own.lines)")
+        XCTAssertNil(game.eventBus.subscription(id: guestSubscription.id))
+        XCTAssertNotNil(game.eventBus.subscription(id: hostSubscription.id))
+    }
+
     func testGuestContextSelfDoesNotResolveToTheHostsOwnPlayer() {
         let game = PersistenceTestSupport.makeGame(owner: self, label: "lanplayer-self")
         game.createWorld(name: "W", seedText: "1", mode: GameMode.survival, difficulty: 2)
@@ -326,7 +394,7 @@ final class LANScriptIntentHostTests: XCTestCase {
         XCTAssertEqual(snapshot.scriptsJSON, "[]")
     }
 
-    func testMakeLANObjectAttributeSnapshotsIncludesConnectedGuestsAndScriptMetadata() {
+    func testMakeLANObjectAttributeSnapshotsUsesStableLocalAndLANPlayerKeys() {
         let game = PersistenceTestSupport.makeGame(owner: self, label: "lanplayer-snapshot")
         game.createWorld(name: "W", seedText: "1", mode: GameMode.survival, difficulty: 2)
         addConnectedGuest(peerID: "guest1", to: game)
@@ -337,8 +405,10 @@ final class LANScriptIntentHostTests: XCTestCase {
             command: "script", arguments: ["attach", "self", "greet", "module", "log(\"hi\")"], context: context
         )
 
-        let hostStore = game.scriptingCommandContext().store
-        let hostScriptStore = game.scriptingCommandContext().scriptStore
+        let hostContext = game.scriptingCommandContext()
+        _ = hostContext.store.set(.player, "host_note", .string("local"))
+        let hostStore = hostContext.store
+        let hostScriptStore = hostContext.scriptStore
         let snapshots = makeLANObjectAttributeSnapshots(host: game, store: hostStore, scriptStore: hostScriptStore)
         guard let guestSnapshot = snapshots.first(where: { $0.ref == "player:lan:guest1" }) else {
             return XCTFail("expected a snapshot for the connected guest's own object; got refs: \(snapshots.map(\.ref))")
@@ -350,6 +420,19 @@ final class LANScriptIntentHostTests: XCTestCase {
             return XCTFail("expected a decodable attrs map")
         }
         XCTAssertEqual(attrs["mood"], .string("happy"))
+        guard let localSnapshot = snapshots.first(where: { $0.ref == ObjectRef.player.canonical }) else {
+            return XCTFail("expected local player metadata under the stable `player` ref")
+        }
+        guard case .success(.map(let localAttrs)) = AttrValueCodec.decode(
+            localSnapshot.attrsJSON, caps: .defaults
+        ) else { return XCTFail("expected decodable local-player attrs") }
+        XCTAssertEqual(localAttrs["host_note"], .string("local"))
+        XCTAssertFalse(snapshots.contains { $0.ref == "entity:\(game.player.id)" })
+        let remoteID = game.world.entities.compactMap { $0 as? LANRemotePlayerEntity }.first?.id
+        if let remoteID {
+            XCTAssertFalse(snapshots.contains { $0.ref == "entity:\(remoteID)" })
+        }
+        XCTAssertEqual(Set(snapshots.map(\.ref)).count, snapshots.count)
     }
 
     // MARK: - world-delete hook (lan_players)

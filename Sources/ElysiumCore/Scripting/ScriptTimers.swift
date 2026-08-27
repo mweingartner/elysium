@@ -70,7 +70,7 @@ public enum DurableTimerRegistryCodec {
     ) -> [DurableTimer]? {
         guard text.utf8.count <= 131_072 else { return nil }
         guard let root = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { return nil }
-        guard (root["v"] as? NSNumber)?.intValue == 1 else { return nil }
+        guard strictScriptingRegistryInteger(root["v"]) == 1 else { return nil }
         guard let raw = root["timers"] as? [[String: Any]] else { return [] }
         var result: [DurableTimer] = []
         var seenIDs = Set<UInt64>()
@@ -86,19 +86,19 @@ public enum DurableTimerRegistryCodec {
     }
 
     private static func decodeOne(_ raw: [String: Any]) -> DurableTimer? {
-        guard let idNumber = raw["id"] as? NSNumber, idNumber.int64Value >= 0 else { return nil }
+        guard let idValue = strictScriptingRegistryInteger(raw["id"]), idValue >= 0 else { return nil }
         guard let whoText = raw["who"] as? String, let owner = ObjectRef.parse(whoText) else { return nil }
         guard let scriptName = raw["script"] as? String, isValidAttributeName(scriptName) else { return nil }
         guard let handlerName = raw["handler"] as? String, isValidAttributeName(handlerName) else { return nil }
-        guard let wakeNumber = raw["wake"] as? NSNumber else { return nil }
+        guard let wakeTick = strictScriptingRegistryInteger(raw["wake"]) else { return nil }
         var interval: Int64?
-        if let intervalNumber = raw["every"] as? NSNumber {
-            guard intervalNumber.int64Value > 0 else { return nil }
-            interval = intervalNumber.int64Value
+        if let rawInterval = raw["every"] {
+            guard let intervalTicks = strictScriptingRegistryInteger(rawInterval), intervalTicks > 0 else { return nil }
+            interval = intervalTicks
         }
         return DurableTimer(
-            id: UInt64(idNumber.uint64Value), owner: owner, scriptName: scriptName, handlerName: handlerName,
-            wakeTick: wakeNumber.int64Value, intervalTicks: interval
+            id: UInt64(idValue), owner: owner, scriptName: scriptName, handlerName: handlerName,
+            wakeTick: wakeTick, intervalTicks: interval
         )
     }
 

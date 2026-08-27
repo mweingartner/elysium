@@ -37,7 +37,26 @@ enum LuaLanguageService {
         let symbolTable = Dictionary(visibleSymbols.map { ($0.name, $0.type) }, uniquingKeysWith: { _, latest in latest })
 
         if let eventContext = eventArgumentContext(source: source, tokens: tokens, cursor: cursor) {
-            let items = LuaCompletion.eventItems(quoted: eventContext.insideString)
+            let candidates: [ScriptEditorEventCandidate]
+            switch eventContext.operation {
+            case .subscription:
+                candidates = eventContext.usesCurrentTargetCatalog
+                    ? environment.eventCandidates
+                    : ScriptEditorEventCatalog.broadlyAvailableCandidates(
+                        including: environment.eventCandidates
+                    )
+            case .emission:
+                // Engine-produced events are facts, never script-emittable suggestions. The editor
+                // currently owns declaration metadata only for its exact target; an explicit other
+                // receiver therefore gets no speculative event names rather than the wrong target's.
+                candidates = eventContext.usesCurrentTargetCatalog
+                    ? environment.eventCandidates.filter { $0.source == .declaredCustom }
+                    : []
+            }
+            let items = LuaCompletion.eventItems(
+                quoted: eventContext.insideString,
+                candidates: candidates
+            )
             return LuaCompletionResult(
                 context: .eventName,
                 prefix: eventContext.prefix,
@@ -91,7 +110,8 @@ enum LuaLanguageService {
         }
 
         var items = LuaCompletion.globalItems
-        if environment.handlerEvent == nil, !visibleSymbols.contains(where: { $0.name == "ev" }) {
+        if environment.scriptMode != .handler,
+           !visibleSymbols.contains(where: { $0.name == "ev" }) {
             items.removeAll { $0.label == "ev" }
         }
         // Nearest declarations come first so equal-priority shadowed names resolve to the latest
@@ -166,9 +186,15 @@ enum LuaLanguageService {
                             tokens: tokens, at: valueIndex, symbolTable: known, environment: environment
                         )
                         if tokenText(tokens, valueIndex + 1) == ".",
-                           tokenText(tokens, valueIndex + 2) == "attrs",
-                           case .object(let kind) = inferred {
-                            inferred = .attributes(kind)
+                           tokenText(tokens, valueIndex + 2) == "attrs" {
+                            switch inferred {
+                            case .object(let kind):
+                                inferred = .attributes(kind)
+                            case .exactObject(let kind, let canonicalRef):
+                                inferred = .exactAttributes(kind, canonicalRef: canonicalRef)
+                            default:
+                                break
+                            }
                         }
                     }
                     symbols.append(.init(name: nameToken.text, kind: .variable, type: inferred, declarationRange: nameToken.range))
@@ -215,9 +241,11 @@ enum LuaLanguageService {
 
     private static func implicitTypes(environment: LuaLanguageEnvironment) -> [String: LuaInferredType] {
         var result: [String: LuaInferredType] = [
-            "self": .object(environment.targetKind),
-            "world": .object(.world),
-            "player": .object(.player),
+            "self": environment.targetCanonicalRef.map {
+                .exactObject(environment.targetKind, canonicalRef: $0)
+            } ?? .object(environment.targetKind),
+            "world": .exactObject(.world, canonicalRef: ObjectRef.world.canonical),
+            "player": .exactObject(.player, canonicalRef: ObjectRef.player.canonical),
             "objects": .module("objects"),
             "ai": .module("ai"),
             "math": .module("math"),
@@ -225,7 +253,10 @@ enum LuaLanguageService {
             "table": .module("table"),
             "utf8": .module("utf8"),
         ]
-        if let handlerEvent = environment.handlerEvent { result["ev"] = .event(handlerEvent) }
+        if environment.scriptMode == .handler {
+            let eventName = environment.handlerEvent?.trimmingCharacters(in: .whitespacesAndNewlines)
+            result["ev"] = .event(eventName?.isEmpty == false ? eventName : nil)
+        }
         return result
     }
 
@@ -245,15 +276,30 @@ enum LuaLanguageService {
             if token.text == "nil" { return .nilValue }
             if token.text == "function" { return .function(signature: "function") }
         case .identifier:
-            if token.text == "dim", tokenText(tokens, index + 1) == "(" { return .object(.dim) }
+            if token.text == "dim", tokenText(tokens, index + 1) == "(" {
+                if let literal = firstStringArgument(tokens: tokens, openingParenIndex: index + 1),
+                   let ref = ObjectRef.parse("dim:\(literal)"), ref.kind == .dim {
+                    return .exactObject(.dim, canonicalRef: ref.canonical)
+                }
+                return .object(.dim)
+            }
             if token.text == "objects", tokenText(tokens, index + 1) == "." {
                 switch tokenText(tokens, index + 2) {
                 case "block": return .object(.block)
                 case "get":
                     if let literal = firstStringArgument(tokens: tokens, openingParenIndex: index + 3) {
-                        if literal == "self" || literal == "player" { return .object(.player) }
-                        if literal == "world" { return .object(.world) }
-                        if let ref = ObjectRef.parse(literal) { return .object(ref.kind) }
+                        if literal == "self", let target = environment.targetCanonicalRef {
+                            return .exactObject(environment.targetKind, canonicalRef: target)
+                        }
+                        if literal == "player" {
+                            return .exactObject(.player, canonicalRef: ObjectRef.player.canonical)
+                        }
+                        if literal == "world" {
+                            return .exactObject(.world, canonicalRef: ObjectRef.world.canonical)
+                        }
+                        if let ref = ObjectRef.parse(literal) {
+                            return .exactObject(ref.kind, canonicalRef: ref.canonical)
+                        }
                     }
                     return .object(nil)
                 case "find":
@@ -284,14 +330,24 @@ enum LuaLanguageService {
                 switch (type, member.text) {
                 case (.object(let kind), "attrs"):
                     type = .attributes(kind)
+                case (.exactObject(let kind, let canonicalRef), "attrs"):
+                    type = .exactAttributes(kind, canonicalRef: canonicalRef)
                 case (.table(let fields), _):
                     type = fields[member.text] ?? .unknown
                 case (.event(let eventName), _):
-                    type = LuaCompletion.typeOfEventField(member.text, eventName: eventName)
+                    type = LuaCompletion.typeOfEventField(
+                        member.text,
+                        eventName: eventName,
+                        environment: environment
+                    )
                 case (.module, _):
                     type = LuaCompletion.returnType(moduleOrReceiver: receiverBaseName(tokens: tokens), member: member.text)
                 case (.object(let kind), _):
                     type = LuaCompletion.returnType(forHandleMember: member.text, kind: kind)
+                case (.exactObject(let kind, let canonicalRef), _):
+                    type = LuaCompletion.returnType(
+                        forHandleMember: member.text, kind: kind, canonicalRef: canonicalRef
+                    )
                 default:
                     type = .unknown
                 }
@@ -432,6 +488,7 @@ enum LuaLanguageService {
         environment: LuaLanguageEnvironment
     ) -> [LuaDiagnostic] {
         var result = delimiterDiagnostics(tokens: tokens, sourceLength: (source as NSString).length)
+        result.append(contentsOf: authoringContractDiagnostics(tokens: tokens, environment: environment))
 
         for (index, token) in tokens.enumerated() {
             if token.kind == .identifier, unavailableGlobals.contains(token.text),
@@ -455,11 +512,34 @@ enum LuaLanguageService {
                         id: "invalid-event:\(token.range.location)", severity: .error,
                         message: "'\(value)' is not a valid event name.", range: token.range, quickFixes: []
                     ))
+                } else if eventArgumentOperation(call) == .emission,
+                          EventDescriptorRegistry.descriptor(named: value) != nil {
+                    result.append(.init(
+                        id: "manual-built-in-event:\(token.range.location)", severity: .error,
+                        message: "'\(value)' is engine-produced and cannot be emitted manually.",
+                        range: token.range, quickFixes: []
+                    ))
                 } else if let descriptor = ScriptLanguageSchema.event(named: value),
                           case .reserved(let reason) = descriptor.availability {
                     result.append(.init(
                         id: "reserved-event:\(token.range.location)", severity: .warning,
                         message: "'\(value)' is reserved but has no shipped producer. \(reason)",
+                        range: token.range, quickFixes: []
+                    ))
+                } else if let descriptor = EventDescriptorRegistry.descriptor(named: value),
+                          eventUsesCurrentTarget(call),
+                          !descriptor.subjectKinds.contains(environment.targetKind) {
+                    result.append(.init(
+                        id: "target-event:\(token.range.location)", severity: .warning,
+                        message: "'\(value)' is not raised for \(environment.targetKind.rawValue) targets.",
+                        range: token.range, quickFixes: []
+                    ))
+                } else if EventDescriptorRegistry.descriptor(named: value) == nil,
+                          eventUsesCurrentTarget(call),
+                          !environment.eventCandidates.contains(where: { $0.name == value }) {
+                    result.append(.init(
+                        id: "undeclared-event:\(token.range.location)", severity: .warning,
+                        message: "'\(value)' is a valid custom event, but it is not declared on this target; payload completion is unavailable.",
                         range: token.range, quickFixes: []
                     ))
                 }
@@ -556,16 +636,115 @@ enum LuaLanguageService {
         }
     }
 
+    private enum AuthoringBlock {
+        case function
+        case conditional
+        case loop
+        case scopedDo
+        case repeatBlock
+    }
+
+    /// Enforces the two source-shape rules that differ by persisted script mode. This is a
+    /// conservative editor diagnostic, not a replacement for the runtime validator: handler
+    /// source is already invoked as the callback body, while module-level `ev` has no value until a
+    /// callback function is entered.
+    private static func authoringContractDiagnostics(
+        tokens: [LuaSourceToken], environment: LuaLanguageEnvironment
+    ) -> [LuaDiagnostic] {
+        var result: [LuaDiagnostic] = []
+        var blocks: [AuthoringBlock] = []
+        var topLevelLocals: Set<String> = []
+
+        for (index, token) in tokens.enumerated() {
+            let isInsideFunction = blocks.contains(.function)
+
+            if token.text == "local", !isInsideFunction {
+                var cursor = index + 1
+                if tokenText(tokens, cursor) == "function" { cursor += 1 }
+                while cursor < tokens.count {
+                    let candidate = tokens[cursor]
+                    if candidate.kind == .newline || candidate.text == "=" { break }
+                    if candidate.kind == .identifier { topLevelLocals.insert(candidate.text) }
+                    cursor += 1
+                }
+            }
+
+            if !isInsideFunction,
+               environment.scriptMode == .handler,
+               token.kind == .identifier,
+               (token.text == "on" || token.text == "subscribe"),
+               tokenText(tokens, index + 1) == "(" {
+                let isMemberCall = tokenText(tokens, index - 1) == "." || tokenText(tokens, index - 1) == ":"
+                if isMemberCall || !topLevelLocals.contains(token.text) {
+                    result.append(.init(
+                        id: "handler-subscription-wrapper:\(token.range.location)",
+                        severity: .error,
+                        message: "Handler source is already the selected event body. Use implicit ev directly instead of wrapping it in \(token.text)(...).",
+                        range: token.range,
+                        quickFixes: []
+                    ))
+                }
+            }
+
+            if !isInsideFunction,
+               environment.scriptMode == .module,
+               token.kind == .identifier,
+               token.text == "ev",
+               !topLevelLocals.contains("ev"),
+               tokenText(tokens, index - 1) != ".",
+               tokenText(tokens, index - 1) != ":",
+               !isTableFieldName(index: index, tokens: tokens) {
+                result.append(.init(
+                    id: "module-top-level-ev:\(token.range.location)",
+                    severity: .error,
+                    message: "Module source has no top-level ev. Use ev only inside an event callback function.",
+                    range: token.range,
+                    quickFixes: []
+                ))
+            }
+
+            switch token.text {
+            case "function":
+                blocks.append(.function)
+            case "if":
+                blocks.append(.conditional)
+            case "for", "while":
+                blocks.append(.loop)
+            case "repeat":
+                blocks.append(.repeatBlock)
+            case "do":
+                if blocks.last != .loop { blocks.append(.scopedDo) }
+            case "end":
+                if !blocks.isEmpty { blocks.removeLast() }
+            case "until":
+                if blocks.last == .repeatBlock { blocks.removeLast() }
+            default:
+                break
+            }
+        }
+        return result
+    }
+
+    private static func isTableFieldName(index: Int, tokens: [LuaSourceToken]) -> Bool {
+        var previous = index - 1
+        while previous >= 0, tokens[previous].kind == .newline { previous -= 1 }
+        var next = index + 1
+        while next < tokens.count, tokens[next].kind == .newline { next += 1 }
+        guard tokenText(tokens, next) == "=", let separator = tokenText(tokens, previous)
+        else { return false }
+        return ["{", ",", ";"].contains(separator)
+    }
+
     private static func isOpenDynamicReceiver(_ receiver: LuaInferredType, access: LuaMemberAccess) -> Bool {
         switch receiver {
-        case .attributes:
+        case .attributes, .exactAttributes:
             return true
         case .event(let name):
             guard let name else { return true }
             return ScriptLanguageSchema.event(named: name) == nil
         case .table(let fields):
             return fields.isEmpty
-        case .object(nil):
+        case .object(nil), .exactObject(nil, _):
             return access == .dot
         default:
             return false
@@ -620,6 +799,13 @@ enum LuaLanguageService {
         let prefix: String
         let replacementRange: NSRange
         let insideString: Bool
+        let usesCurrentTargetCatalog: Bool
+        let operation: EventArgumentOperation
+    }
+
+    private enum EventArgumentOperation {
+        case subscription
+        case emission
     }
 
     private struct ObjectReferenceArgumentContext {
@@ -698,19 +884,42 @@ enum LuaLanguageService {
             let quoteLength = stringToken.text.hasPrefix("[[") ? 2 : 1
             let start = min(cursor, stringToken.range.location + quoteLength)
             let range = NSRange(location: start, length: max(0, cursor - start))
-            return EventArgumentContext(prefix: text.substring(with: range), replacementRange: range, insideString: true)
+            return EventArgumentContext(
+                prefix: text.substring(with: range),
+                replacementRange: range,
+                insideString: true,
+                usesCurrentTargetCatalog: eventUsesCurrentTarget(call),
+                operation: eventArgumentOperation(call)
+            )
         }
         if tokens.last(where: { NSMaxRange($0.range) <= cursor && $0.kind != .newline })?.kind == .string {
             return nil
         }
         let prefix = identifierPrefix(in: source, cursor: cursor)
-        return EventArgumentContext(prefix: prefix.text, replacementRange: prefix.range, insideString: false)
+        return EventArgumentContext(
+            prefix: prefix.text,
+            replacementRange: prefix.range,
+            insideString: false,
+            usesCurrentTargetCatalog: eventUsesCurrentTarget(call),
+            operation: eventArgumentOperation(call)
+        )
     }
 
     private static func isEventArgument(_ call: ActiveCall) -> Bool {
         (call.callee == "on" && call.argumentIndex == 0)
+            || (call.callee.hasSuffix(":on") && call.argumentIndex == 0)
             || (call.callee == "emit" && call.argumentIndex == 0)
+            || (call.callee.hasSuffix(":emit") && call.argumentIndex == 0)
             || (call.callee == "subscribe" && call.argumentIndex == 1)
+    }
+
+    private static func eventUsesCurrentTarget(_ call: ActiveCall) -> Bool {
+        call.callee == "on" || call.callee == "emit"
+            || call.callee == "self:on" || call.callee == "self:emit"
+    }
+
+    private static func eventArgumentOperation(_ call: ActiveCall) -> EventArgumentOperation {
+        call.callee == "emit" || call.callee.hasSuffix(":emit") ? .emission : .subscription
     }
 
     private static func objectReferenceArgumentContext(
@@ -888,7 +1097,8 @@ enum LuaLanguageService {
 
     private static func eventNameForAnonymousFunction(tokens: [LuaSourceToken], functionIndex: Int) -> String? {
         guard let call = activeCall(tokens: tokens, cursor: tokens[functionIndex].range.location),
-              call.callee == "on" || call.callee == "subscribe" else { return nil }
+              (call.callee == "on" || call.callee.hasSuffix(":on")
+                || call.callee == "subscribe") else { return nil }
         let desiredArgument = call.callee == "subscribe" ? 1 : 0
         var argument = 0
         var depth = 0

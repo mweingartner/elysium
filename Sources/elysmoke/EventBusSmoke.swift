@@ -214,7 +214,9 @@ func runEventBusCorpus() -> EventBusCorpusResult {
     // ---- Check 7: a zero-subscription block-changed funnel call is a no-op ----
     let zeroBus = EventBus()
     zeroBus.recordBlockChange(
-        dim: .overworld, x: 0, y: 0, z: 0, oldId: 1, newId: 2, hasObjectRecord: false, tick: 0
+        dim: .overworld, x: 0, y: 0, z: 0,
+        oldCell: Int(cell(B.stone)), newCell: Int(cell(B.dirt)),
+        hasObjectRecord: false, tick: 0
     )
 
     return EventBusCorpusResult(

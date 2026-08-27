@@ -30,6 +30,12 @@ public struct ScriptingStorageCaps: Sendable, Equatable {
     /// Maximum length (bytes == chars, names are `[a-z][a-z0-9_]{0,31}`) of a
     /// custom attribute name.
     public var maxNameBytes: Int
+    /// Maximum persistent custom-event declarations on one object.
+    public var maxEventDeclarationsPerObject: Int
+    /// Maximum declared payload fields on one custom event.
+    public var maxEventFieldsPerDeclaration: Int
+    /// Maximum UTF-8 bytes in an optional custom-event summary.
+    public var maxEventSummaryBytes: Int
 
     public init(
         maxEntriesPerObject: Int,
@@ -39,7 +45,10 @@ public struct ScriptingStorageCaps: Sendable, Equatable {
         maxWorldDocumentBytes: Int,
         value: ScriptValueLimits,
         maxMapKeyBytes: Int,
-        maxNameBytes: Int
+        maxNameBytes: Int,
+        maxEventDeclarationsPerObject: Int = 16,
+        maxEventFieldsPerDeclaration: Int = 32,
+        maxEventSummaryBytes: Int = 256
     ) {
         self.maxEntriesPerObject = maxEntriesPerObject
         self.maxRecordTextBytes = maxRecordTextBytes
@@ -49,11 +58,15 @@ public struct ScriptingStorageCaps: Sendable, Equatable {
         self.value = value
         self.maxMapKeyBytes = maxMapKeyBytes
         self.maxNameBytes = maxNameBytes
+        self.maxEventDeclarationsPerObject = maxEventDeclarationsPerObject
+        self.maxEventFieldsPerDeclaration = maxEventFieldsPerDeclaration
+        self.maxEventSummaryBytes = maxEventSummaryBytes
     }
 
     /// design.md Decision 6's defaults: 64 entries/object, 65,536 B record text
     /// (16,384 B for world/dimension bags), 1,048,576 B/chunk, 524,288 B world
-    /// document, `ScriptValueLimits.defaults`, 256 B map keys, 32-char names.
+    /// document, `ScriptValueLimits.defaults`, 256 B map keys, 32-char names,
+    /// 16 event declarations/object, 32 fields/declaration, and 256 B summaries.
     public static let defaults = ScriptingStorageCaps(
         maxEntriesPerObject: 64,
         maxRecordTextBytes: 65_536,
@@ -62,6 +75,9 @@ public struct ScriptingStorageCaps: Sendable, Equatable {
         maxWorldDocumentBytes: 524_288,
         value: .defaults,
         maxMapKeyBytes: 256,
-        maxNameBytes: 32
+        maxNameBytes: 32,
+        maxEventDeclarationsPerObject: 16,
+        maxEventFieldsPerDeclaration: 32,
+        maxEventSummaryBytes: 256
     )
 }

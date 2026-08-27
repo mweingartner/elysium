@@ -7,15 +7,16 @@ scripts themselves. It assumes you've read the "Scripting, attributes, events, a
 [PLAYER_GUIDE.md](../PLAYER_GUIDE.md) for the first-run picture; this document is the full
 reference.
 
-Every command and API call below is verified against the shipped source, cited by file. If a shown
-example's exact byte-for-byte source is exercised by an automated test, that's noted too.
+The commands, method names, payloads, and limits below follow the shipped registries and execution
+boundaries. File references point to the canonical implementation; the generated editor/AI schema
+uses those same registries so it does not maintain a second handwritten API.
 
 ## 1. Overview and trust model
 
-Every mutation — an attribute write, a script attach, a subscription, an emitted event — runs
-through the same three executors regardless of who initiated it (you, another script, or the AI):
-`AttributeStore`, `ScriptStore`, and `EventBus`. Two independent gates govern script execution,
-re-checked every phase, never cached:
+Every mutation — an attribute write, a script attach, a declaration, a subscription, or an emitted
+event — runs through the same executors regardless of who initiated it (you, another script, or the
+AI): `AttributeStore`, `ScriptStore`, `CustomEventStore`, and `EventBus`. Two independent gates
+govern script execution, re-checked every phase, never cached:
 
 - **The trust gate** — `WorldRecord.scriptsEnabled`. A world you create yourself starts trusted.
   A world you imported or migrated from elsewhere starts untrusted: no script on it runs, even one
@@ -29,12 +30,14 @@ re-checked every phase, never cached:
 With an active local runtime, the editor stays useful on an untrusted or paused world without
 weakening those runtime gates. **Check** is read-only and ignores both switches. **Save** may persist
 a validated attached script while either switch is off, but does not run it. An explicit
-local-editor **Run Once** may execute only the visible draft once while the world is untrusted; it
+local-editor **Run Once** may execute only the visible module draft once while the world is untrusted; it
 does not save or attach that draft, trust the world, or load other scripts, but its permitted
 live-world mutations may persist. It still refuses when `doScripts` is off. If no local runtime
 exists, Check, Save, and Run Once are unavailable because authoritative validation cannot be
-performed. Attached scripts, `/script run`, AI `run_script`, and LAN-forwarded runs remain fully
-gated. The editor never auto-trusts a world.
+performed. Handler Run Once is disabled because there is no real event from which to construct
+`ev`; use Check for representative payload validation or Save and trigger the event. Attached
+scripts, `/script run`, AI `run_script`, and LAN-forwarded runs remain fully gated. The editor never
+auto-trusts a world.
 
 Execution is **host-only**, always. A LAN guest never runs a script on their own machine, even
 their own — every scripting command is refused outright on a joined LAN world unless the host has
@@ -69,14 +72,39 @@ Every object can carry:
   `ObjectRecord`. A name is `[a-z][a-z0-9_]{0,31}` — lowercase letters, digits, underscore, up to
   32 bytes, first character a letter
   (`Sources/ElysiumCore/Scripting/ObjectRecord.swift:64-76`, `isValidAttributeName`). A name outside
-  that grammar (say, AI- or script-supplied camelCase like `doorRef`) is silently normalized —
-  lowercased, invalid bytes folded to `_` — rather than refused
-  (`normalizedAttributeNameHint`, same file; `ScriptRuntimeAPI.normalizedCustomAttributeName`
-  extends this leniency to every custom attribute write a script makes, not only the AI's).
+  that grammar is refused by commands and tools with a normalized-name suggestion. Lua handle access
+  is more ergonomic: script-supplied camelCase such as `doorRef` is folded to `door_ref`, then other
+  invalid bytes are normalized when possible (`ScriptRuntimeAPI.normalizedCustomAttributeName`).
+  Existing worlds written by the earlier collapsed-lowercase rule remain compatible: unchanged
+  camelCase Lua first prefers `door_ref`, then falls back to an existing `doorref`, and keeps
+  updating whichever entry already exists. If both exist, the canonical snake_case entry wins.
+  Attribute-handler filters use the same resolution before registration and persistence, so
+  `attr="doorRef"` becomes the codec-safe `door_ref`. A canonical custom filter also recognizes
+  the old collapsed event key at delivery, using one bounded subscription/index slot rather than
+  duplicating kind-wide registrations. If both physical keys are independently changed, they are
+  distinct changes and the compatibility filter receives both. Saved camelCase filters from the
+  earlier broken `h:attach` shape are upgraded deterministically (`doorRef` -> `doorref`, while a
+  camelCase built-in such as `maxHealth` -> `max_health`). Registry built-ins with punctuation,
+  including `be.name`, `inventory[0]`, `stats.<id>`, and `gamerule.<name>`, remain valid filters.
   A custom attribute can be declared `readonly` (locked against a plain `/attr set` /
   `h:set`, only a `--force`d `/attr define` or `h:define(..., {force=true})` can overwrite it).
 - **Up to 8 attached scripts** — Lua chunks in **module** or **handler** mode (§4). Source is
   capped at 16 KiB (`Sources/ElysiumCore/Scripting/ScriptStore.swift:31-32,97`).
+- **Object-scoped custom event declarations** — discoverable payload contracts for that object's
+  custom events. A declaration is metadata separate from attributes and scripts: it does not
+  subscribe a handler or make the event fire by itself. It lets chat, Lua, the editor, LAN guest
+  authoring, validation, and the AI agree on the event's exact fields. Up to 16 declarations may
+  live on one object, with up to 32 fields per declaration and a 256-byte optional summary. They
+  share the containing object's 64-entry and record/chunk/world persistence budgets.
+
+Custom attributes and attached scripts share one name namespace on an object. Neither API silently
+changes an entry into the other kind: attribute set/define/remove refuses an attached-script name,
+and script attach/detach/enable refuses a custom-attribute name. Explicitly detach the script or
+remove the attribute first; a refusal does not change the object revision or queue lifecycle work.
+
+Any running script may read or mutate attributes, declarations, handlers, and scripts on any
+**live handle** it can resolve; these capabilities are not restricted to the object that owns the
+script. Liveness, host authority, storage, event, and per-tick lifecycle budgets still apply.
 
 ## 3. Ref grammar
 
@@ -152,10 +180,10 @@ otherwise.
 - `/attr set <target> <name> <value...>` — write a value. Refuses on a readonly attribute or a
   wrong-shaped built-in. *(yes)*
 - `/attr define <target> <name> <value...> [readonly] [--force]` — declare a *custom* attribute,
-  fixing its type at this initial value; `readonly` locks it, `--force` overwrites an existing
-  readonly one. Trailing `readonly`/`--force` tokens are stripped from the end before the value is
-  parsed — only `define` does this; `set`/`remove` don't strip anything, so an extra token there
-  becomes part of the value (or is simply not accepted by `remove`, which takes no value). *(yes)*
+  setting its initial value. Later writes may use a different supported value type. `readonly`
+  locks it, while `--force` overwrites an existing readonly value. Trailing `readonly`/`--force`
+  tokens are stripped from the end before the value is parsed. `set` instead treats all remaining
+  text as the value; `remove` accepts only its documented optional trailing `--force`. *(yes)*
 - `/attr remove <target> <name> [--force]` — clear one custom attribute. *(yes)*
 
 ### `/inspect [target] [--all]`
@@ -199,12 +227,38 @@ created, and simply never fires until (if ever) that name gets registered. *(yes
 
 Removes a subscription by the numeric id `/on` printed. *(yes)*
 
-### `/events recent [limit] | emit <target> <event>` — `Usage: /events recent [limit] | emit <target> <event>`
+### `/events` — inspect standard events; declare, remove, and emit custom events
 
-`recent` lists the most recent events the bus has seen. `emit` raises one by hand — any valid event
-name, catalog or custom — payload-free. *(emit only, yes)*
+- `/events recent [limit]` — list the most recent events the bus has seen. *(guest-forwardable: no)*
+- `/events list <target>` — list every compatible produced built-in event plus the typed custom
+  declarations owned by the target. Reserved built-in names with no producer are omitted. *(no)*
+- `/events define <target> <event> [field:type ...] [--summary "text"]` — create or replace an
+  object-scoped custom event declaration. An identical redeclaration is an idempotent no-op. Each
+  field name follows the custom-attribute name grammar; `kind`, `subject`, `tick`, and `source` are
+  reserved because the runtime adds those envelope fields to every `ev`. Field types are `any`,
+  `boolean`, `integer`, `number`, `string`, `object`, `list`, or `map`; append `?` when a field is
+  nullable and therefore optional, such as `actor:object?`. A built-in event name cannot be
+  redeclared. *(yes)*
+- `/events remove <target> <event>` — remove that target's custom event declaration. This removes
+  discovery and strict payload validation, not subscriptions or the open event name itself. *(yes)*
+- `/events emit <target> <custom-event> [payload-json]` — raise a custom event by hand. The optional payload must
+  be a JSON object. If the target declares that event, the payload must contain every required field,
+  no undeclared field, and values of the declared types. With no matching declaration, a valid custom
+  event remains legal and open for compatibility. Built-in events are engine-produced facts and are
+  rejected by every manual emission path. *(yes)*
 
-### `/script ...` — `Usage: /script list [target] | show <target> <name> | attach <target> <name> module <source...> | attach <target> <name> handler <event> <source...> | detach <target> <name> | run <target> <source...> | journal | undo-ai [n] | trust | off | on`
+For example:
+
+```text
+/events define looking machine.ready item:string count:integer --summary "A machine completed a batch"
+/events list looking
+/events emit looking machine.ready {\"item\":\"iron_ingot\",\"count\":4}
+```
+
+The backslashes preserve JSON's quote characters through the one-line command tokenizer. In Lua,
+payloads are ordinary string-keyed tables and need no JSON escaping.
+
+### `/script ...` — `Usage: /script list [target] | show <target> <name> | attach <target> <name> module <source...> | attach <target> <name> handler <event> <source...> | detach <target> <name> | run <target> <source...> | stats | journal | undo-ai [n] | trust | off | on`
 
 - `list [target]` (default `self`) — each script's mode, and `(disabled)`/last-error if any. *(no)*
 - `show <target> <name>` — full source (first 30 lines), mode, author, trigger(s), last error. *(no)*
@@ -220,6 +274,9 @@ name, catalog or custom — payload-free. *(emit only, yes)*
   timers all fail rather than hang. Unlike the local editor's
   explicit Run button, this command requires both a trusted world and `doScripts` on
   (`ScriptRuntime.runEphemeral`). *(yes)*
+- `stats` — live/suspended script counts, durable timers, pending events, and global Lua instruction
+  tokens charged/remaining this simulation tick. Ordered work that exceeds the current token budget
+  remains pending for a later tick. *(no)*
 - `journal [limit]` (default 32) — what `/ai` has done to this world, most recent first: request,
   entry, tick, tool, object, name, kind of change, model. Only AI mutations appear here. *(no)*
 - `undo-ai [n]` (default 1) — reverts the `n` most recent `/ai` requests' worth of mutations, most
@@ -229,6 +286,35 @@ name, catalog or custom — payload-free. *(emit only, yes)*
 - `trust <peer> [ai] [off]` — **host-only, LAN**: grants/revokes a connected guest's scripting
   and/or AI permission (§10). Intercepted at the app layer before reaching this Core command set
   (`Sources/Elysium/CommandsM.swift:70-91`) — a different thing from the bare `/script trust` above.
+
+#### Runtime budgets and backpressure
+
+Attached scripts share a deterministic token bucket: 50,000 instructions refill per simulation
+tick, with up to 250,000 banked after idle ticks. A single callback runs for at most 5,000
+instructions before preemption and 100,000 across its lifetime. Because CLua counts at a pinned
+1,000-instruction hook quantum, a shorter resume is conservatively charged 1,000 and a sub-quantum
+overrun becomes signed debt repaid by later refills. Twenty consecutive preemptions fault a busy
+loop. Each script may retain at most 64 suspended callbacks and the world may retain at most 1,024;
+an already-running callback that would exceed either limit is closed and faulted without growing the
+scheduler. A new closure timer refused at capacity instead returns the normal catchable host-call
+error, so the current callback may recover with `pcall`.
+
+Event delivery is backpressured against this bucket one ordered recipient at a time. When tokens run
+out, `EventBus` keeps the exact event/recipient cursor, so no later subscriber overtakes it and no
+unrun handler is counted as delivered. Due resumptions, AI replies, timers, loads, and event handlers
+all use the same budget. Loads reserve one 1,000-instruction quantum for each downstream lane; AI
+replies, resumptions, and timers release their reservation in phase order, guaranteeing progress for
+all five lanes under the production budget. An awaited AI reply is not consumed—and does not release
+its in-flight slot—until its exact coroutine has instruction credit to resume. Use events, `wait`,
+and named `after`/`every` handlers instead of polling.
+
+Definition discovery is bounded separately from Lua instructions. Attach, detach, enable/disable,
+save hydration, and object unload enqueue the exact canonical object ref; the runtime never performs
+a periodic whole-world definition scan. Dimension travel requeues only the old and new dimension
+bags. One script phase reconciles at most 64 dirty refs and starts
+at most 64 pending definitions. Larger hydration bursts and later edits retain their canonical
+continuation for following phases, so loading may be delayed under a burst but no queued suffix is
+forgotten.
 
 `/script edit [target] [name]` (default target `self`) is not a Core command at all — it's an
 app-layer action (`Sources/Elysium/CommandsM.swift:92-117`) that opens the in-game script editor
@@ -255,7 +341,7 @@ to 16 KiB, choose **module** or **handler** mode, and use **Save**, **Check**, o
 local host with an active script runtime, Check stays available regardless of world trust or
 `doScripts` and performs a mutation-free dry run. Save attaches through `ScriptStore` even while
 scripting is paused, but saving never runs the record; an untrusted or kill-switched world leaves it
-dormant. The explicit editor Run Once executes only the visible draft once without saving or
+dormant. The explicit editor Run Once executes only the visible module draft once without saving or
 attaching that draft. It can do that while the world remains untrusted, but it is not read-only and
 its permitted one-off verbs can change live game state; those changes may persist with the world. It
 still refuses when `doScripts` is off. If no local runtime exists, Check, Save, and Run Once are
@@ -264,10 +350,12 @@ copy. Run is synchronous, so the editor highlights
 `wait`/`ai.await` and directs you to Save the script for attached, yieldable execution. Check uses a
 throwaway coroutine and treats its first legal yield as a successful validation boundary without
 scheduling it or contacting AI. The runtime validator remains authoritative and reports the
-offending line. In handler mode, Check supplies the selected built-in event kind and deterministic,
-non-null representative values for its registry-documented payload fields. A valid custom event has
-no authoritative payload schema, so Check reports compile-only success and deliberately does not
-execute that handler.
+offending line. In handler mode, Check supplies the selected event kind and deterministic
+representative values from the target-aware catalog. That means it executes both a compatible
+built-in handler and a custom-event handler whose payload contract is declared on the current
+target. A valid but undeclared custom event still reports compile-only success because there is no
+authoritative payload shape to invent. Handler mode disables Run Once rather than executing with a
+missing or invented `ev`.
 
 When attached execution is paused, the editor's persistent status banner offers the applicable
 **Trust World**, **Turn On Scripts**, or **Trust & Turn On** action. Its confirmation warns that all
@@ -279,17 +367,28 @@ continue to require both gates.
 
 The editor's local language service adds semantic styling, receiver-correct completion and
 documentation, signature help, diagnostics, validated snippets, and a searchable **World Objects**
-browser. Typing `.` or `:` opens the member list immediately; Control-Space requests completion
-elsewhere. `self.attrs.` includes the current object's live custom attributes, while `objects.`,
-`ai.`, `ev.`, the sandbox libraries, and locally inferred Lua tables each receive their own factual
-members. These features never execute Lua and do not require Ollama.
+browser. Its handler-event picker is target-aware: it shows only compatible produced built-ins,
+followed by custom events declared on that exact object, with typed payload details. Typing `.` or
+`:` opens the member list immediately; Control-Space requests completion elsewhere. `self.attrs.`
+includes the current object's live custom attributes, and `ev.` includes the selected built-in or
+declared-custom payload fields; `objects.`, `ai.`, the sandbox libraries, and locally inferred Lua
+tables each receive their own factual members. Event-name completion separates subscription from
+emission: `on` offers compatible built-ins and target declarations, while `emit` offers only custom
+events declared on the current target because engine events cannot be forged. These features never
+execute Lua and do not require Ollama.
 
 Ollama editor proposals are optional and separate from factual completion. **Manual** is the
 default: Option-Command-/ requests one insertion from the exact selected local model, Tab accepts,
 and Escape dismisses/cancels. **Off** prevents editor requests, while **On Idle** is an explicit
-opt-in that persists across application sessions. The editor provider is text-only and receives no world-mutation tools; Save/Check/Run are
-still required to validate or execute accepted text. See [`LUA_EDITOR.md`](LUA_EDITOR.md) for the
-complete UI, key, data-sharing, accessibility, and cancellation contract.
+opt-in that persists across application sessions. In Handler mode, the bounded text-only prompt
+includes the current target's compatible catalog. In Module mode it includes every produced
+built-in payload plus, for each explicitly authorized nearby object, its kind-compatible built-in
+names and declared custom event payload fields. A valid selected but undeclared Handler event is labeled
+envelope-only with unknown event-specific payload rather than omitted. The request also includes
+target members and diagnostics; it receives no world-mutation tools.
+Save/Check/Run are still required to validate or execute accepted text. See
+[`LUA_EDITOR.md`](LUA_EDITOR.md) for the complete UI, key, data-sharing, accessibility, and
+cancellation contract.
 
 Unsaved changes are protected when switching scripts, closing the window, or quitting Elysium. On a joined LAN world
 (once granted), reopening an existing script still never reveals its source: the name/mode are
@@ -311,41 +410,109 @@ unmodified.
 An event has a `kind`, a `subject` (an object handle), a `tick`, a `source`, and a payload of extra
 fields merged in directly — so a handler reads `ev.kind`, `ev.subject`, `ev.tick`, `ev.source`
 ("player"/"ai"/"lan"/`"script:<owner>"`/"engine"), plus whatever payload keys that event kind
-carries (`Sources/ElysiumCore/Scripting/ScriptRuntime.swift:347-360`, `eventValue`).
+carries (`ScriptRuntime.eventValue`).
 
-The v1 catalog (`Sources/ElysiumCore/Scripting/EventKind.swift:83-133`):
+### Standard event catalog
 
-```
-attribute.changed
-block.placed  block.broken  block.replaced  block.changed  block.used
-block.neighborChanged  block.scheduledTick
-entity.spawned  entity.removed  entity.damaged  entity.died  entity.healed
-entity.interacted  entity.targetChanged
-player.joined  player.left  player.respawned  player.dimensionChanged
-player.pickedUp  player.dropped  player.attacked  player.slept
-player.leveled  player.advancement
-dim.dayPhaseChanged  dim.weatherChanged
-world.gameruleChanged  world.difficultyChanged
-explosion
-load  unload
-timer.fired  ai.replied
-script.faulted  script.attached  script.overBudget
-```
+`EventDescriptorRegistry` is the canonical produced-event catalog shared by the runtime, editor,
+commands, and AI prompt. Every payload below is merged with the common `kind`, `subject`, `tick`,
+and `source` fields. `?` means nullable.
 
-Custom names (`emit("lumber.milestone", ...)`) share the exact same grammar: 1-4 dot-separated
-segments, each `[a-z][a-z0-9_]{0,31}`, ≤ 64 bytes total (`EventKind.parse`). `attribute.changed`
-and `block.changed` require a narrower subscription than `any`/a bare kind (a specific ref or a
-type filter) — every other kind accepts a wildcard.
+| Subject kind | Produced event | Event-specific payload |
+|---|---|---|
+| every object | `attribute.changed` | `key:string`, `old:any?`, `new:any?` |
+| every object | `load` | `name:string` |
+| every object | `timer.fired` | `name:string` |
+| every object | `script.faulted` | `name:string`, `message:string` |
+| every object | `script.attached` | `name:string` |
+| block | `block.placed` | `by:object`, `item:string` |
+| block | `block.toolStrike` | `by:object`, `item:string`, `blockName:string`, `face:string`, `toolType:string`, `tier:integer`, `instant:boolean` |
+| block | `block.broken` | `by:object`, `item:string?`, `blockName:string` |
+| block | `block.changed` | `oldName:string`, `newName:string`, `oldMeta:integer`, `newMeta:integer` |
+| block | `block.used` | `by:object`, `item:string?` |
+| block | `block.neighborChanged` | `from:object` |
+| entity and player | `entity.spawned`, `entity.removed` | none |
+| entity and player | `entity.damaged` | `amount:number`, `cause:string`, `attacker:object?` |
+| entity and player | `entity.died` | `cause:string`, `attacker:object?` |
+| entity and player | `entity.healed` | `amount:number` |
+| entity | `entity.interacted` | `by:object`, `item:string?` |
+| entity | `entity.targetChanged` | `old:object?`, `new:object?` |
+| player | `player.joined`, `player.left`, `player.respawned`, `player.slept` | none |
+| player | `player.dimensionChanged` | `old:string`, `new:string` |
+| player | `player.pickedUp`, `player.dropped` | `item:string`, `count:integer` |
+| player | `player.attacked` | `target:object` |
+| player | `player.leveled` | `old:integer`, `new:integer` |
+| player | `player.advancement` | `id:string` |
+| dimension | `dim.dayPhaseChanged` | `old:string`, `new:string` |
+| dimension | `dim.weatherChanged` | `key:string`, `old:boolean`, `new:boolean` |
+| dimension | `explosion` | `x:number`, `y:number`, `z:number`, `power:number`, `by:object?` |
+| world | `world.gameruleChanged` | `key:string`, `old:number`, `new:number` |
+| world | `world.difficultyChanged` | `old:integer`, `new:integer` |
+| world | `ai.replied` | `requestId:integer`, `text:string?`, `error:string?` |
+| world | `script.overBudget` | `message:string` |
 
-Payloads for events raised by the engine itself are fixed by their call site — a few verified ones:
+`block.toolStrike` is a semantic first-strike event, not a repeated swing/hit-sound event. It fires
+once when mining first transitions to a new block target, and only when the held registered item is
+an actual tool. An unbreakable block still receives this first-contact event. Holding the button on
+that same target does not re-fire it. `instant` is true for a
+Creative strike or when the current tool/block combination can finish in one mining step. This makes
+it suitable for alarms, durability displays, reactive blocks, and other “a tool first touched me”
+behaviour without a per-frame event storm.
 
-| Event | Payload |
-|---|---|
-| `attribute.changed` | `key`, `old`, `new` (`GameCore+Scripting.swift`, `ScriptRuntime.swift:244-259`) |
-| `block.broken` | `by` (ref), `item` (string or null) — **not** the broken block's name (`Sources/ElysiumCore/Systems/Interact.swift:1586-1588`) |
-| `block.changed` | `oldName`, `newName`, `oldMeta`, `newMeta` — raised for *every* non-silent block write (placement, breaking, redstone, growth, …), not only player-initiated breaks, and only delivered when the cell already carries custom data or some subscription filters by that exact type name (`Sources/ElysiumCore/Scripting/EventBus.swift:403-419`) |
-| `block.used` | `by` (ref), `item` (string or null) (`Sources/ElysiumCore/Game/GameCore.swift:5049-5057`) |
-| `entity.interacted` | `by` (ref), `item` (string or null) (`GameCore.swift:5030-5039`) |
+`block.changed` covers every observed non-silent cell write, including redstone, growth, placement,
+and breaking, including metadata-only writes for which `oldName == newName` but `oldMeta != newMeta`;
+its hot path is skipped unless the block already has an object record or an indexed subscription could
+match it. `block.neighborChanged` follows the same fast-path principle: it is produced for a notified
+block that has an object record or matches an exact-object, block-kind (optionally type-filtered), or
+all-object subscription.
+Consequently, `target:on("block.neighborChanged", fn)` can observe a plain block even if the target has
+no attribute, declaration, or attached script of its own. Entity
+damage/death events use `cause` for the engine damage identifier; `ev.source` remains event
+provenance. `block.broken.blockName` is the registered block name before removal.
+
+A successful scripting-API write that changes a built-in or custom value publishes
+`attribute.changed` with the writer's provenance. Engine-driven built-in fields are read only while a
+matching indexed subscription exists. Their first polled value establishes a baseline and emits no
+synthetic event; later differences publish `key`, `old`, and `new`. Exact block observers also poll
+dynamic light and block-entity fields, while metadata-backed block fields publish from the same
+`World.setBlock` hook as `block.changed`. Entity/player movement is exposed as an explicitly filtered
+synthetic `pos` change, quantized to one tenth of a block and omitted from the recent-event feed. A
+real custom attribute also named `pos` remains ordinary extensible state: it reaches unfiltered
+handlers and uses a separate coalescing lane, so movement can never merge with or hide that value.
+
+`block.replaced`, `block.scheduledTick`, and `unload` are reserved EventBus names but have no shipped
+producer; the editor, AI discovery, and `/events list` omit them. Do not build an `on`, `subscribe`,
+or handler-mode script that depends on them firing. Module scripts do have a separate synchronous
+`register("unload", fn)` finalizer, documented below; it is not an event and receives no `ev`.
+
+### Custom event declarations
+
+Custom names (`machine.ready`, `lumber.milestone`) share the event grammar: 1-4 dot-separated
+segments, each `[a-z][a-z0-9_]{0,31}`, at most 64 bytes total. An object may publish a typed contract
+for one with `/events define` or `h:declareEvent`. Declarations persist beside that object's
+attributes and scripts, carry provenance, and are included in the target-aware editor/AI/LAN
+authoring metadata. They are not a global registry: `machine.ready` may be declared differently on
+two objects, and emission is validated against the declaration on the **event subject**.
+
+A matching declaration makes emission strict: required fields must exist; nullable fields may be
+absent or `nil`; extra fields and wrong types are rejected. The `number` type accepts Lua integers
+or numbers, while `integer` requires an integer. Removing or never creating a declaration leaves the
+open custom event legal, preserving existing scripts and subscriptions. Prefer declarations for any
+event intended for reuse so the editor, another author, and AI can discover its payload accurately.
+
+Event payloads have hard shape and memory limits even when the custom event is undeclared. Lua values
+retain the ordinary limits (4,096 UTF-8 bytes per string, 256 entries per list, 64 keys per map, depth
+4, and 1,024 total nodes); every map key is checked in both marshal directions and custom emission
+further limits it to 256 UTF-8 bytes. The EventBus accepts at most 16 KiB of canonical payload per
+event, 4 MiB across pending events plus a stalled delivery cursor and its single deferred diagnostic,
+and 512 KiB in the recent-event feed (also capped at 128 events). Invalid Lua value shapes are host
+errors. An otherwise-valid payload or coalesced replacement that would cross an EventBus byte limit is
+refused without replacing the older queued event; `emit`/`h:emit` returns `false`, and one bounded
+`script.overBudget` diagnostic is published for that tick.
+
+`attribute.changed` and `block.changed` require a narrower subscription than `any`/a bare block kind
+(an exact object, or a block type filter where applicable); every other produced event accepts the
+broader targets documented by `subscribe`.
 
 A script reacts to events one of two ways:
 
@@ -370,10 +537,47 @@ A script reacts to events one of two ways:
   subscribe({kind = "block"}, "block.broken", {}, function(ev)
     -- ...
   end)
+
+  -- object-first helpers are easiest when you already have the handle
+  local door = objects.get("block:overworld:10,64,3")
+  door:on("block.used", function(ev)
+    say("Door used by " .. ev.by.name)
+  end)
+
+  player:onAttribute("health", function(ev)
+    say("Health is now " .. tostring(ev.new))
+  end)
   ```
-  `subscribe`'s target is the same shape `/on` and a script's `h:attach{target=...}` opt use: a
-  handle, a canonical ref string, `{kind=..., type=...}`, or `"any"`
-  (`Sources/ElysiumCore/Scripting/ScriptRuntimeAPI.swift:393-404`).
+  `h:on` watches exactly `h`; `h:onAttribute(name, fn)` is shorthand for that object's
+  `attribute.changed` event filtered to one built-in or custom attribute. `subscribe` is the
+  compatibility/general form whose target may be a handle, `{kind=..., type=...}`, or `"any"`.
+
+Persisted and script-owned subscriptions share firm limits: at most 32 registrations per owning
+object and 512 per world. The bus indexes exact event names and object/kind interest, so raising an
+event with no matching listeners and checking an unrelated observable event are O(1) hot paths;
+delivery examines only the bounded bucket for that event rather than scanning the world's scripts.
+
+### Unload finalizer (not an EventBus event)
+
+A module can reserve one named callback for deterministic cleanup:
+
+```lua
+register("unload", function()
+  self.attrs.last_state = "stopped"
+  world:define("last_controller", self.ref)
+end)
+```
+
+The runtime invokes it synchronously when that live script is edited, disabled, detached, its object
+unloads, or the world session shuts down. It receives no arguments and is not available in handler
+mode. Its only permitted persistent side effects are final custom-attribute writes on live handles,
+including `h:set`, `h:define`, direct custom fields, and `h.attrs`; custom reads and ordinary local
+computation remain available. It cannot yield or wait, schedule timers, call AI, emit or subscribe,
+register another callback, alter event declarations or scripts, mutate blocks or built-in fields,
+draw RNG, call `say`, `sound`, or `particles`, or otherwise turn teardown into more gameplay. A
+finalizer is instruction-bounded, and teardown still destroys the old environment after failure. A
+failure on a still-current unload is recorded as `script.faulted`; a stale callback being replaced
+cannot overwrite the replacement script's diagnostic.
 
 ## 8. Lua API reference
 
@@ -393,18 +597,18 @@ produce visible output — see the note right after the table on `log`/`print`, 
 
 | Call | Does |
 |---|---|
-| `on(event, fn)` / `on(event, opts, fn)` | subscribe on `self`. `opts.attr`, `opts.target` narrow it; `opts.name = "foo"` also registers `fn` under that name (equivalent to calling `register("foo", fn)`) |
-| `subscribe(target, event[, opts], fn)` | subscribe anywhere; `opts.attr` narrows |
+| `on(event, fn)` / `on(event, opts, fn)` | compatibility helper that subscribes on `self`, or on `opts.target` when that is a handle. The only option fields are `target`, `attr`, and `name`; `opts.attr` narrows `attribute.changed`, while `opts.name = "foo"` also registers `fn` under that valid handler name (equivalent to calling `register("foo", fn)`). Non-table options, unknown fields, wrong value types, unavailable events, and incompatible event/target/filter shapes are errors. Check/dry-run performs the same validation without retaining the closure |
+| `subscribe(target, event[, opts], fn)` | subscribe anywhere; the optional table accepts only string `opts.attr`, which may narrow `attribute.changed`. Non-table options, unknown fields, wrong value types, unavailable events, and incompatible target/event/filter shapes are errors in both Check/dry-run and live execution |
 | `every(n, handlerOrName)` / `after(n, handlerOrName)` | schedule after `n` ticks (§9). A **string** name schedules a durable, persisted timer that survives reload — only `every` with a name truly repeats. A **function** schedules a live, one-shot run — `every(n, fn)` behaves exactly like `after(n, fn)`, once only, not repeating (documented simplification; `ScriptRuntimeAPI.swift:429-436`) |
 | `wait(n)` | yield the current handler for `n` ticks |
-| `emit(name[, payload][, target])` | raise a custom event; default target is `self` |
+| `emit(name[, payload][, target])` | emit a custom event with exactly 1–3 arguments; default target is `self`, and an explicit target must be an object handle (a string/ref-shaped table is an error, never a silent fallback to `self`). A declaration on the target strictly validates the payload; otherwise valid custom names remain open. Engine-produced built-ins are rejected |
 | `tick()` | the current world tick |
 | `rng()` / `rng(n)` / `rng(a,b)` | this script's own deterministic `RandomX` stream: `[0,1)`, `[1,n]`, or `[a,b]` |
 | `say(text)` | a chat line from this object — the way to produce visible output; host-only, rate-limited, text-hygiene filtered |
 | `sound(...)` / `particles(...)` | accepted (arguments loosely checked) but currently no-ops — not wired to audio/renderer yet |
 | `dim(name)` | `"overworld"`/`"nether"`/`"end"` → that dimension's handle |
-| `register(name, fn)` | name a function so `/on`, a durable `after`/`every`, or another `on(event, {name=...})` call can find it later |
-| `objects.get(ref)` | a handle, or `nil`. Accepts a handle, a canonical ref string, or the aliases `"player"`/`"self"` (**both** resolve to your player — `objects.get("self")` is *not* the calling script's own object; use the `self` local for that) / `"world"` |
+| `register(name, fn)` | name a function so `/on`, a durable `after`/`every`, or another `on(event, {name=...})` call can find it later. The reserved name `unload` installs the separate synchronous finalizer above; it is not an EventBus handler |
+| `objects.get(ref)` | a handle, or `nil`. Accepts a handle, a canonical ref string, or the aliases `"player"` (the local/host player), `"self"` (the calling script's owner), and `"world"` |
 | `objects.find{kind=, type=, near=, radius=, limit=}` | handles sorted by distance then ref; `near` defaults to `self`'s position, `radius` defaults to 16, `limit` to 32 |
 | `objects.block(dim, x, y, z)` | a block handle at that position (bounds-checked) |
 | `ai.ask(prompt[, opts])` → `requestId` | fire-and-forget; reply arrives as an `ai.replied` event on `world` |
@@ -413,9 +617,9 @@ produce visible output — see the note right after the table on `log`/`print`, 
 There is no bare `log(...)` global — calling it errors ("attempt to call a nil value"). There *is* a
 `print(...)`, but it is not a player-facing print: it's wired to the sandbox's own log sink, which
 writes to the host application's own console/stdout only (`[script] <line>`), never to chat, and
-there is currently no `/script log` command to read it back in-game (`Sources/CLua/elysium_sandbox.c`,
-the per-environment `print` closure; `Sources/ElysiumCore/Scripting/ScriptRuntime.swift:868-875`,
-`ScriptRuntimeLogSink`). Use `say(text)` for anything a player should actually see.
+there is currently no `/script log` command to read it back in-game (`Sources/CLua/elysium_sandbox.c`'s
+per-environment `print` closure and `ScriptRuntime.swift`'s `ScriptRuntimeLogSink`). Use `say(text)`
+for anything a player should actually see.
 
 ### Handle properties and methods
 
@@ -426,17 +630,57 @@ Every object (`self`, `world`, `player`, anything from `objects.get`/`.find`/`.b
 | `h.ref`, `h.kind`, `h.name` | canonical ref text, kind string, display name |
 | `h:exists()` | whether it currently resolves live |
 | `h.<builtIn>` / `h.<builtIn> = v` | read/write a built-in field by dot-sugar; unknown/inapplicable reads as `nil`, an unknown write errors with a did-you-mean. Built-ins are matched snake_case-first, camelCase retried on a miss (`ev.subject.maxHealth` and `ev.subject.max_health` both work) |
-| `h:get(name)` / `h:set(name, value)` | same read/write, by call instead of dot-sugar — works for both built-ins and custom attributes |
+| `h:get(name)` / `h:set(name, value)` | same read/write, by call instead of dot-sugar — works for both built-ins and custom attributes. `h:set` requires exactly two arguments; Check validates the same liveness, protected-name, applicability, mutability, value, collision, and storage-cap rules as live execution without writing |
 | `h.attrs.<name>` / `h.attrs.<name> = v` | a custom attribute directly; `= nil` removes it. **`pairs(h.attrs)` is not supported** (no iteration hook) — read/write named custom attributes individually with `:get`/`:set`/`h.attrs.<name>` |
-| `h:define(name, value[, opts])` | declare a custom attribute; `opts = {readonly=true, force=true}` |
-| `h:attach(name, source[, opts])` | attach a script. **No `opts.mode` field exists** — omitting `opts`, or omitting `opts.on`, always attaches module mode; supplying `opts.on = "<event>"` (plus optional `opts.attr`, and `opts.target = <a handle>` — a *handle value*, e.g. `player`, not a string; a plain string there is silently ignored) attaches handler mode, triggered on `opts.target` or `h` itself if omitted (`ScriptRuntimeAPI.swift:215-261`, `ScriptMarshaling.swift:114-118` for why it must be a handle) |
-| `h:detach(name)` | remove a script |
+| `h:define(name, value[, opts])` | declare a custom attribute with an initial value; later writes may change its supported value type. The optional table accepts only boolean `readonly` and `force` fields. Non-table options, unknown fields/typos, wrong types, and extra arguments are errors. Check also runs the same liveness, protected-name, value, script-collision, readonly/force, revision, and storage-cap admission as live execution without writing |
+| `h:events()` | list the custom event declarations owned by `h` as `{name, fields, summary, author, createdTick}` records; each field has `name`, canonical `type`, and `nullable`. The call takes no arguments |
+| `h:declareEvent(name[, fields][, summary])` | declare or replace `h`'s custom event contract with exactly 1–3 arguments. `fields` is a string-keyed table of type tokens, for example `{item="string", count="integer", actor="object?"}`, and `summary` must be a string. Identical redeclarations are no-ops |
+| `h:undeclareEvent(name)` | remove `h`'s custom event declaration and return whether one existed; it requires exactly one valid event-name string. The open event name and existing subscriptions remain valid |
+| `h:on(event[, opts], fn)` | subscribe this module's closure to `event` on exactly `h`, with exactly 2–3 arguments. The optional table accepts only `attr` (a string filter valid for `attribute.changed`) and `name` (a valid handler name); `target` is not accepted because the receiver fixes it. Non-table options, unknown fields/typos, wrong types/names, unavailable built-ins, and incompatible target/event/filter shapes are errors in both Check and live execution |
+| `h:onAttribute(name, fn)` | subscribe to `attribute.changed` on exactly `h`, filtered to the canonical built-in or normalized custom attribute name |
+| `h:emit(name[, payload])` | emit a custom event with exactly 1–2 arguments whose subject is fixed to `h`, validating against `h`'s declaration when present; engine-produced built-ins cannot be emitted manually |
+| `h:attach(name, source[, opts])` | attach a script. Omitting `opts` or passing `{}` attaches module mode. A nonempty options table attaches handler mode and must contain a valid `opts.on = "<event>"`; its only other fields are `opts.attr` and `opts.target`. `opts.attr` is a string filter valid only for `attribute.changed`. `opts.target` must be a *handle value* (for example `player`, not a ref string) and defaults to `h` when omitted. Unknown fields (including `opts.mode`), malformed values, unavailable built-ins, and incompatible event/target/filter combinations are errors. Grammatically valid undeclared custom events remain legal under the open custom-event contract. Check/dry-run validates this same complete shape plus the nested source without attaching anything (`ScriptRuntimeAPI.swift` and `ScriptMarshaling.swift`) |
+| `h:detach(name)` | remove a script; requires exactly one argument |
 | `h:scripts()` | `{name, mode, author, enabled, lastError}` for each script on `h` |
-| `block:setBlock(name[, opts])` | replace the block; extra `opts` keys (besides the accepted-but-unused `notify`) are applied as built-in attribute writes, e.g. `{facing="north"}` |
-| `block:breakBlock()` | break it naturally (drops items) |
+| `block:setBlock(name[, opts])` | replace the block; extra `opts` keys (besides the accepted-but-unused `notify`) are planned in deterministic key order as built-in attribute writes, e.g. `{facing="north"}`. The block name and complete options table are preflighted for field name, applicability, mutability, value type/enum, and range before any cell changes. CamelCase built-ins are canonicalized, and the first invalid option is reported with the original block left byte-for-byte unchanged. A valid plan is then committed with no fallible validation remaining; Check/dry-run runs the same preflight without committing it |
+| `block:breakBlock()` | break it naturally (drops items); takes no arguments |
 
-Every mutating call above (attribute writes, `attach`/`detach`, `setBlock`/`breakBlock`, `emit`,
-timers) is a no-op during the AI's dry-run validation pass (§9) — never during ordinary play.
+Script-created lifecycle churn is bounded as well as validated: one originating script may perform
+at most 2 combined `h:attach`/`h:detach` operations per simulation tick, and all scripts together may
+perform at most 32 across the world in that tick. A refused operation returns the ordinary Lua error
+instead of partially changing the target; both allowances reset on the next tick.
+
+An attribute filter is legal only on `attribute.changed`. New handler records are refused if their
+event/target/filter combination is impossible; when an existing editor document changes to another
+event, its old attribute filter is cleared. This keeps Save-time validation, persisted records, and
+runtime registration in the same state rather than storing a handler that can only fault at load.
+
+Every mutating call above (attribute and declaration writes, `attach`/`detach`,
+`setBlock`/`breakBlock`, `emit`, timers) is a no-op during a read-only Check/AI dry run — never
+during ordinary attached execution. Declaration creation/removal is also unavailable in an
+ephemeral Run Once because it is durable authoring state, not a one-off world verb.
+
+Object-first handlers and declarations make cross-object behaviour explicit and readable:
+
+```lua
+local sensor = objects.get("block:overworld:10,64,3")
+local lamp = objects.get("block:overworld:12,64,3")
+
+sensor:declareEvent("sensor.threshold", {
+  value = "number",
+  unit = "string?",
+}, "The sensor crossed its configured threshold")
+
+sensor:on("sensor.threshold", function(ev)
+  lamp.attrs.last_value = ev.value
+  lamp:setBlock("glowstone")
+end)
+
+sensor:emit("sensor.threshold", {value = 12.5, unit = "C"})
+```
+
+The script may own neither `sensor` nor `lamp`; resolving live handles is enough. The declaration is
+stored on `sensor`, the handler observes `sensor`, and `sensor` is the emitted event subject.
 
 ### `math`
 
@@ -492,7 +736,18 @@ to **4 mutations** per request, **8 turns**, **3 retries** per tool, a **90 s** 
 `enable_script`, `subscribe`, `unsubscribe`, `emit_event`, `run_script`) runs through the exact same
 executors as the matching command; `attach_script` additionally runs a dry run first (compiles and
 executes the candidate once against a real handle with every mutating verb turned into a no-op,
-reporting anything that looks wrong as a warning before it's ever saved for real).
+reporting anything that looks wrong as a warning before it's ever saved for real). The fixed
+20-tool budget is preserved by giving `emit_event` an `action` of `emit`, `declare`, or `remove`;
+all three actions apply only to custom events, and `emit` cannot forge a built-in engine event.
+Declaration fields are passed as a JSON object of the same type tokens documented in §7.
+
+The tool-loop system prompt includes `ScriptAIAuthoringGuide`'s compact, explicitly maintained Lua
+rules. Its built-in event section alone is generated from `EventDescriptorRegistry.available`, so
+currently produced payload names do not come from a manually copied event list. The remaining
+module-vs-handler, object-method, and declaration guidance is not generated from
+`ScriptLanguageSchema`; it stays aligned through implementation review and focused contract tests.
+`describe_events` accepts an optional object `ref`; with one it filters built-ins to that object's
+kind and includes that object's custom declarations. `get_object` includes declaration metadata too.
 
 Every successful AI mutation is journaled with `.ai(model)` provenance:
 
@@ -505,8 +760,11 @@ req#7 entry#12 t9041 attach_script block:overworld:10,64,3 lamp [script] (llama3
 goes back to its previous value (or disappears if the AI created it), an attached script is
 detached or restored — refusing instead of clobbering if you've edited that script yourself since.
 
-Inside a script, `ai.ask`/`ai.await` (§8) reach the same local model, text-only, no tools, capped at
-2 requests in flight and 30 per world per minute; over budget, `ai.ask` fires an
+Inside a script, `ai.ask`/`ai.await` (§8) reach the same local model, text-only, no tools. Prompts are
+capped at 4,096 characters; decoded replies are truncated on a complete character boundary to at most
+4,096 UTF-8 bytes so both `ai.await` resume values and `ai.replied.text` always fit the Lua value
+boundary. The encoded HTTP response is rejected while streaming past 64 KiB. Requests are capped at
+2 in flight and 30 per world per minute; over budget, `ai.ask` fires an
 `ai.replied{error="budget"}` event immediately (no request is made) and `ai.await` returns
 `nil, "budget"` the same way — never silently queued.
 
@@ -515,7 +773,7 @@ Inside a script, `ai.ask`/`ai.await` (§8) reach the same local model, text-only
 on("entity.interacted", function(ev)
   if ev.by.kind ~= "player" then return end
   local text, err = ai.await(("A player with %d health asks to pass. Answer YES or NO.")
-                              :format(math.floor(ev.by.health)), {maxChars = 8})
+                              :format(math.floor(ev.by.health)))
   if not err and text:upper():find("YES", 1, true) then
     objects.get(self.attrs.doorRef):set("open", true)
     say("Pass, friend.")
@@ -531,16 +789,27 @@ A guest is refused every scripting command outright until the host runs `/script
 (scripting) and/or `/script trust <guestName> ai` (AI, a separate grant — neither implies the
 other); `off` on either revokes it (`Sources/Elysium/LANTransport.swift:709-730`,
 `grantPeerScript`). Once granted, `attr {set,define,remove}`, `script {attach,detach,run}`, `on`,
-`unsubscribe`, `events emit`, and `/ai`/`/agent` are sent as a `scriptIntent` message instead of
+`unsubscribe`, `events {define,remove,emit}`, and `/ai`/`/agent` are sent as a `scriptIntent` message instead of
 running locally — the guest never runs Lua themselves, ever
 (`Sources/ElysiumCore/Scripting/ScriptingCommands.swift:118-137`, `lanForwardableCommand`); the host
 re-validates the exact same predicate plus the peer's grant before dispatching through its own
-`AttributeStore`/`ScriptStore`/`EventBus`, recording `Provenance.Author.lan(peer:)` instead of
+`AttributeStore`/`ScriptStore`/`CustomEventStore`/`EventBus`, recording `Provenance.Author.lan(peer:)` instead of
 `.player` so the write's origin stays distinguishable. Everything read-only (`inspect`, `objects`,
-`events recent`) and every world-level `/script` subcommand (`trust`/`off`/`on`/`journal`/`undo-ai`/
+`events recent|list`) and every world-level `/script` subcommand (`trust`/`off`/`on`/`journal`/`undo-ai`/
 `list`/`show`) stays host-only regardless of any grant — a guest reads only the host's replicated
-attribute/script mirror (`/inspector`, F3), never a live query. `self` in a guest's own forwarded
-command resolves to their own `player:lan:<peerID>`, never the host's `player`. `/ai` forwarding
+attribute/script/event-declaration mirror (`/inspector`, editor, F3), never a live query. Custom
+event metadata contains only the name, fields, and summary: no script source, declaration provenance,
+or authority crosses to the guest. `/events list` remains a host-side live query, while the guest
+editor uses the mirrored target catalog. That mirror is paged on the host's roughly one-second
+metadata cadence: a rotating cursor eventually covers every loaded scripted object even when more
+than 64 exist, and an explicit tombstone removes a guest entry after its last attribute, script, or
+custom event declaration is deleted. Tombstone-bearing pages are not dropped as stale background
+traffic and are requeued if a broadcast cannot be encoded or has no recipient; ordinary live
+metadata pages remain low-priority and rotate back around after backpressure clears.
+Wire revisions remain monotonic even if an object's final metadata is deleted and recreated at the
+same canonical ref between censuses, so a guest cannot retain the old higher-revision mirror forever.
+`self` in a guest's own forwarded command resolves to their
+own `player:lan:<peerID>`, never the host's `player`. `/ai` forwarding
 never lets a guest talk to Ollama directly: their prompt is relayed to the host's own tool loop,
 sharing its one-in-flight-per-world gate, and only the final text comes back.
 
@@ -581,44 +850,57 @@ end)
 
 The full `ai.await` script from §10 above — proven at `ScriptingSuiteSmoke.swift:187-245`, attached
 to an entity as a module script (`on("entity.interacted", ...)`), with `self.attrs.doorRef` set
-beforehand (via `/attr define <golem> doorRef ref:block:overworld:4,65,4` or an `h:define` call) to
+beforehand (via `/attr define <golem> door_ref ref:block:overworld:4,65,4` or an `h:define` call) to
 point at the door it guards.
 
-### Counting broken blocks world-wide
+### Counting broken logs and publishing a typed milestone
 
 ```lua
--- /script attach world lumber module <this body> — proven at ScriptingSuiteSmoke.swift:249-293
+-- /script attach world lumber module <this body>
+world:declareEvent("lumber.milestone", {
+  count = "integer",
+  blockName = "string",
+}, "The world-wide broken-log count reached a milestone")
+
 subscribe({kind = "block"}, "block.broken", {}, function(ev)
-  world.attrs.blocksBroken = (world.attrs.blocksBroken or 0) + 1
-  if world.attrs.blocksBroken % 64 == 0 then
-    emit("lumber.milestone", {count = world.attrs.blocksBroken})
+  if not ev.blockName:find("_log", 1, true) then return end
+  world.attrs.logs_broken = (world.attrs.logs_broken or 0) + 1
+  if world.attrs.logs_broken % 64 == 0 then
+    world:emit("lumber.milestone", {
+      count = world.attrs.logs_broken,
+      blockName = ev.blockName,
+    })
   end
+end)
+
+world:on("lumber.milestone", function(ev)
+  say(("Milestone: %d logs (last: %s)"):format(ev.count, ev.blockName))
 end)
 ```
 
-**A deviation from the original design sketch, verified and corrected here:** the design document
-this script was drawn from (and the golden-suite test that proves the mechanics above) filters on
-`ev.oldName:find("_log", 1, true)` to count specifically broken logs. That relies on `block.broken`
-carrying an `oldName` field — it doesn't, in the shipped game: the event's real payload is `{by,
-item}` (§7's table), and by the time any handler observes `ev.subject`, the block has already been
-replaced with air, so there is currently no reliable way for a `block.broken` handler alone to learn
-what type the broken block *was*. The script above is corrected to count every broken block instead
-of only logs, which the shipped payload genuinely supports; a script wanting to react to one
-specific block type should filter at the *subscription* level today (`{kind="block", type="oak_log"}`
-in `subscribe`/`objects.find`), not by reading a name field off `ev` for `block.broken`.
+`block.broken.blockName` is the pre-removal registered block name, so the filter no longer needs to
+guess from an air subject or rely on `block.changed.oldName`. The declaration makes the milestone
+payload discoverable and strict; the handler can therefore complete and validate `ev.count` and
+`ev.blockName` from the same contract.
 
 ### Scripts attaching scripts
 
 ```lua
--- /script attach player equip module <this body> — proven at ScriptingSuiteSmoke.swift:297-330
+-- /script attach player equip module <this body> — proven by ScriptingSuiteSmoke.swift
 for _, b in ipairs(objects.find{kind = "block", type = "oak_sign", near = self, radius = 8, limit = 8}) do
-  if not b.attrs.greeter then
+  local has_greeter = false
+  for _, attached in ipairs(b:scripts()) do
+    if attached.name == "greeter" then has_greeter = true; break end
+  end
+  if not has_greeter then
     b:define("owner", self.ref, {readonly = true})
     b:attach("greeter", [[ say("Hello, " .. ev.by.name) ]], {on = "block.used"})
   end
 end
 ```
 
+`h.attrs` exposes custom attribute values, not attached script records. Use `h:scripts()` when the
+decision depends on whether a script name is already attached; this keeps module reloads idempotent.
 `h:attach`'s `source` argument is a normal Lua *string value* here (not a one-line chat command), so
 it's written with Lua's `[[ ... ]]` long-bracket syntax — no escaping needed, and no chat-tokenizer
 quoting rules apply once you're inside another script's own source (or the in-game editor).

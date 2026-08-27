@@ -5,18 +5,24 @@ import XCTest
 final class LuaLanguageServiceTests: XCTestCase {
     private func environment(
         kind: ObjectKind = .player,
+        targetCanonicalRef: String? = nil,
         applicableBuiltIns: Set<String>? = nil,
         customAttributes: [LuaCustomAttributeCompletion] = [],
         references: [LuaObjectReferenceCompletion] = [],
+        scriptMode: ScriptMode = .module,
         handlerEvent: String? = nil,
+        eventCandidates: [ScriptEditorEventCandidate]? = nil,
         isYieldable: Bool = true
     ) -> LuaLanguageEnvironment {
         LuaLanguageEnvironment(
             targetKind: kind,
+            targetCanonicalRef: targetCanonicalRef,
             targetApplicableBuiltInAttributes: applicableBuiltIns,
             targetCustomAttributes: customAttributes,
             objectReferences: references,
+            scriptMode: scriptMode,
             handlerEvent: handlerEvent,
+            eventCandidates: eventCandidates,
             isYieldable: isYieldable
         )
     }
@@ -134,7 +140,64 @@ final class LuaLanguageServiceTests: XCTestCase {
         XCTAssertEqual(result.prefix, "entity.da")
         XCTAssertEqual((source as NSString).substring(with: result.replacementRange), "entity.da")
         XCTAssertTrue(result.items.contains { $0.label == "entity.damaged" && $0.insertionText == "entity.damaged" })
+        XCTAssertFalse(result.items.contains { $0.label == "block.used" }, "player targets must not offer block-only events")
         XCTAssertFalse(result.items.contains { $0.label == "block.replaced" }, "reserved events are documented but not offered")
+
+        let explicitOtherTarget = completion(
+            "subscribe(objects.block(\"overworld\", 1, 64, 2), \"block.u"
+        )
+        XCTAssertTrue(
+            explicitOtherTarget.items.contains { $0.label == "block.used" },
+            "an explicit subscription target may differ from the editor target"
+        )
+        let explicitAnalysis = LuaLanguageService.analyze(
+            source: "subscribe(objects.block(\"overworld\", 1, 64, 2), \"block.used\", function(ev) end)",
+            environment: environment(kind: .player)
+        )
+        XCTAssertFalse(explicitAnalysis.diagnostics.contains { $0.id.hasPrefix("target-event:") })
+    }
+
+    func testManualEmitCompletionOffersOnlyDeclaredCustomEventsOnCurrentTarget() throws {
+        let declaration = CustomEventDeclaration(
+            kind: try XCTUnwrap(EventKind.parse("machine.ready")),
+            fields: [CustomEventField(name: "count", type: .integer)],
+            summary: "A machine is ready.",
+            provenance: Provenance(createdBy: .player, createdTick: 1)
+        )
+        let env = environment(
+            kind: .player,
+            eventCandidates: ScriptEditorEventCatalog.candidates(
+                targetKind: .player,
+                declarations: [declaration]
+            )
+        )
+
+        for source in ["emit(\"", "self:emit(\""] {
+            let names = completion(source, environment: env).items.map(\.label)
+            XCTAssertEqual(names, ["machine.ready"])
+            XCTAssertFalse(names.contains("load"))
+            XCTAssertFalse(names.contains("entity.damaged"))
+        }
+        XCTAssertTrue(
+            completion("player:emit(\"", environment: env).items.isEmpty,
+            "declarations from the editor target must not leak onto another explicit receiver"
+        )
+        XCTAssertTrue(
+            completion("on(\"", environment: env).items.contains { $0.label == "load" },
+            "subscription completion must continue to offer compatible engine events"
+        )
+
+        let analysis = LuaLanguageService.analyze(
+            source: "emit(\"load\", {})\nself:emit(\"entity.damaged\", {})",
+            environment: env
+        )
+        XCTAssertEqual(
+            analysis.diagnostics.filter { $0.id.hasPrefix("manual-built-in-event:") }.count,
+            2
+        )
+        XCTAssertTrue(analysis.diagnostics.filter {
+            $0.id.hasPrefix("manual-built-in-event:")
+        }.allSatisfy { $0.severity == .error })
     }
 
     func testOrdinaryStringsCommentsAndCompletedArgumentsDoNotOpenCompletion() {
@@ -155,6 +218,9 @@ final class LuaLanguageServiceTests: XCTestCase {
         let withOptions = "on(\"entity.damaged\", { name = \"handler_name\" }, function(ev)\n  ev."
         XCTAssertTrue(completion(withOptions).items.contains { $0.label == "amount" },
                       "an option string must not replace the call's event type")
+
+        let handleMethod = "self:on(\"entity.damaged\", function(ev)\n  ev."
+        XCTAssertTrue(completion(handleMethod).items.contains { $0.label == "amount" })
     }
 
     func testNearbyObjectReferencesAreOfferedOnlyInReferenceArguments() {
@@ -177,11 +243,151 @@ final class LuaLanguageServiceTests: XCTestCase {
         XCTAssertEqual(("subscribe(\"block:o" as NSString).substring(with: subscribe.replacementRange), "\"block:o")
     }
 
+    func testExactNearbyBindingOffersOnlyThatObjectsCustomAttributesAndMethods() {
+        let canonical = "block:overworld:4,65,-2"
+        let reference = LuaObjectReferenceCompletion(
+            canonicalRef: canonical,
+            displayName: "Oak Door",
+            kind: .block,
+            customAttributes: [
+                LuaCustomAttributeCompletion(
+                    name: "lock_code", typeName: "string", isReadOnly: true,
+                    summary: "Live lock code on this exact door."
+                ),
+            ]
+        )
+        let env = environment(
+            kind: .world,
+            targetCanonicalRef: ObjectRef.world.canonical,
+            customAttributes: [LuaCustomAttributeCompletion(name: "world_state")],
+            references: [reference]
+        )
+
+        let source = "local door = objects.get(\"\(canonical)\")\ndoor.attrs."
+        let attributes = completion(source, environment: env).items
+        XCTAssertEqual(attributes.map(\.label), ["lock_code"])
+        XCTAssertEqual(attributes.first?.isReadOnly, true)
+
+        let methods = completion(
+            "local door = objects.get(\"\(canonical)\")\ndoor:", environment: env
+        ).items
+        XCTAssertTrue(methods.contains { $0.label == "setBlock" })
+        XCTAssertFalse(methods.contains { $0.label == "health" })
+    }
+
     func testLocalsShadowGlobalsAndEvIsOnlyImplicitInHandlerMode() {
         let shadowed = completion("local say = 1\nsa")
         XCTAssertEqual(shadowed.items.first(where: { $0.label == "say" })?.source, .local)
         XCTAssertFalse(completion("e").items.contains { $0.label == "ev" })
-        XCTAssertTrue(completion("e", environment: environment(handlerEvent: "load")).items.contains { $0.label == "ev" })
+        XCTAssertTrue(completion(
+            "e",
+            environment: environment(scriptMode: .handler, handlerEvent: "load")
+        ).items.contains { $0.label == "ev" })
+    }
+
+    func testDeclaredCustomEventsAreDiscoverableWithPayloadCompletion() throws {
+        let kind = try XCTUnwrap(EventKind.parse("machine.ready"))
+        let declaration = CustomEventDeclaration(
+            kind: kind,
+            fields: [
+                CustomEventField(name: "count", type: .integer),
+                CustomEventField(name: "item", type: .string, isNullable: true),
+            ],
+            summary: "Machine output is ready.",
+            provenance: Provenance(createdBy: .player, createdTick: 9)
+        )
+        let events = ScriptEditorEventCatalog.candidates(
+            targetKind: .block,
+            declarations: [declaration]
+        )
+        let env = environment(kind: .block, eventCandidates: events)
+
+        let eventNames = completion("on(\"machine.", environment: env).items
+        XCTAssertTrue(eventNames.contains {
+            $0.label == "machine.ready" && $0.source == .liveObject
+        })
+
+        let payloadSource = "on(\"machine.ready\", function(ev)\n  ev."
+        let payload = completion(payloadSource, environment: env).items
+        XCTAssertTrue(payload.contains { $0.label == "count" && $0.detail == "integer" })
+        XCTAssertTrue(payload.contains { $0.label == "item" && $0.detail == "string?" })
+        XCTAssertTrue(payload.contains { $0.label == "subject" })
+
+        let analysis = LuaLanguageService.analyze(
+            source: "on(\"machine.ready\", function(ev) say(ev.count) end)",
+            environment: env
+        )
+        XCTAssertFalse(analysis.diagnostics.contains { $0.id.hasPrefix("undeclared-event:") })
+    }
+
+    func testModeContractDiagnosticsRejectWrongSourceShapes() {
+        let handler = environment(
+            scriptMode: .handler,
+            handlerEvent: "entity.damaged"
+        )
+        for source in [
+            "subscribe(self, \"entity.damaged\", function(ev) say(ev.amount) end)",
+            "self:on(\"entity.damaged\", function(ev) say(ev.amount) end)",
+        ] {
+            let analysis = LuaLanguageService.analyze(source: source, environment: handler)
+            XCTAssertTrue(analysis.diagnostics.contains {
+                $0.id.hasPrefix("handler-subscription-wrapper:") && $0.severity == .error
+            }, source)
+        }
+        let directHandler = LuaLanguageService.analyze(
+            source: "say(ev.amount)",
+            environment: handler
+        )
+        XCTAssertFalse(directHandler.diagnostics.contains {
+            $0.id.hasPrefix("handler-subscription-wrapper:")
+        })
+
+        let module = environment(scriptMode: .module)
+        let invalidModule = LuaLanguageService.analyze(
+            source: "say(ev.amount)",
+            environment: module
+        )
+        XCTAssertTrue(invalidModule.diagnostics.contains {
+            $0.id.hasPrefix("module-top-level-ev:") && $0.severity == .error
+        })
+        let callbackModule = LuaLanguageService.analyze(
+            source: "on(\"entity.damaged\", function(ev) say(ev.amount) end)",
+            environment: module
+        )
+        XCTAssertFalse(callbackModule.diagnostics.contains {
+            $0.id.hasPrefix("module-top-level-ev:")
+        })
+        let tableFieldModule = LuaLanguageService.analyze(
+            source: "local values = {\n  ev\n  = 1; ev = 2\n}",
+            environment: module
+        )
+        XCTAssertFalse(tableFieldModule.diagnostics.contains {
+            $0.id.hasPrefix("module-top-level-ev:")
+        })
+    }
+
+    func testUnloadFinalizerGuidanceIsSeparateFromEventHandlers() {
+        let candidates = ScriptEditorEventCatalog.candidates(targetKind: .player)
+        XCTAssertFalse(candidates.contains { $0.name == "unload" })
+
+        let moduleHelp = ScriptEditorAuthoringContract.modeHelp(.module)
+        XCTAssertTrue(moduleHelp.contains("register(\"unload\", fn)"))
+        XCTAssertTrue(moduleHelp.contains("no-ev"))
+
+        let unloadHelp = ScriptEditorAuthoringContract.handlerEventHelp(
+            eventName: "unload", candidates: candidates, targetKind: .player
+        )
+        XCTAssertTrue(unloadHelp.contains("not an EventBus handler event"))
+        XCTAssertTrue(unloadHelp.contains("register(\"unload\""))
+    }
+
+    func testUndeclaredAndTargetIncompatibleEventsProduceGuidance() {
+        let analysis = LuaLanguageService.analyze(
+            source: "on(\"machine.unknown\", function(ev) end)\non(\"block.used\", function(ev) end)",
+            environment: environment(kind: .player)
+        )
+        XCTAssertTrue(analysis.diagnostics.contains { $0.id.hasPrefix("undeclared-event:") })
+        XCTAssertTrue(analysis.diagnostics.contains { $0.id.hasPrefix("target-event:") })
     }
 
     func testCamelCaseAndSubsequenceFilteringAreDeterministic() {

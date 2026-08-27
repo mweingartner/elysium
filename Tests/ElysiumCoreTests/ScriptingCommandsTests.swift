@@ -191,6 +191,50 @@ final class ScriptingCommandsTests: XCTestCase {
         XCTAssertEqual(ScriptingCommands.helpSummary(), "attr, inspect, objects, on, unsubscribe, events, script")
     }
 
+    func testEventsCommandsDefineListValidateEmitAndRemove() {
+        let (_, _, context) = makeContext()
+        let define = ScriptingCommands.run(
+            command: "events",
+            arguments: [
+                "define", "player", "machine.ready", "count:integer", "note:string?",
+                "--summary", "A machine became ready",
+            ],
+            context: context
+        )
+        XCTAssertTrue(define.ok, define.lines.joined(separator: "\n"))
+
+        let list = ScriptingCommands.run(
+            command: "events", arguments: ["list", "player"], context: context
+        )
+        XCTAssertTrue(list.ok)
+        XCTAssertTrue(list.lines.contains { line in
+            line.contains("custom machine.ready") && line.contains("count:integer")
+                && line.contains("note:string?") && line.contains("A machine became ready")
+        })
+
+        let invalid = ScriptingCommands.run(
+            command: "events",
+            arguments: ["emit", "player", "machine.ready", "{\"count\":\"three\"}"],
+            context: context
+        )
+        XCTAssertFalse(invalid.ok)
+        XCTAssertTrue(invalid.lines.first?.contains("must be integer") == true)
+
+        let valid = ScriptingCommands.run(
+            command: "events",
+            arguments: ["emit", "player", "machine.ready", "{\"count\":3}"],
+            context: context
+        )
+        XCTAssertTrue(valid.ok, valid.lines.joined(separator: "\n"))
+        XCTAssertEqual(context.eventBus.recentEvents().last?.payload["count"], .int(3))
+
+        let remove = ScriptingCommands.run(
+            command: "events", arguments: ["remove", "player", "machine.ready"], context: context
+        )
+        XCTAssertTrue(remove.ok, remove.lines.joined(separator: "\n"))
+        XCTAssertNil(CustomEventStore(graph: context.graph).get(.player, "machine.ready"))
+    }
+
     // MARK: - not-live messages
 
     func testDormantDimensionMessage() {

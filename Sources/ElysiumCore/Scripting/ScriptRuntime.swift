@@ -6,10 +6,9 @@
 // v1 host-binding tree and handle metamethod bodies live in
 // `ScriptRuntimeAPI.swift` — this file is lifecycle/scheduling only.
 //
-// Invariant (design.md §15): zero cost with no scripts. `GameScriptingState
-// .anyScriptsAttached` is the single boolean every phase step checks before
-// doing anything else; `ScriptStore.attach`/`.detach` keep it current via
-// `GameCore+Scripting.swift`'s wrappers.
+// Invariant (design.md §15): no work proportional to the loaded world when no
+// script definition changed. The host carries exact changed refs in a bounded,
+// deterministic queue; an empty phase performs only constant-time checks.
 
 import ElysiumScript
 import Foundation
@@ -58,6 +57,9 @@ public struct ScriptRuntimeSummary: Equatable {
     public let liveScripts: Int
     public let suspendedCoroutines: Int
     public let durableTimers: Int
+    public let instructionsUsedThisTick: Int
+    public let instructionBudgetRemaining: Int
+    public let instructionBucketCapacity: Int
 }
 
 public struct ScriptValidationResult: Equatable {
@@ -135,7 +137,19 @@ public final class ScriptRuntime {
         var ref: ObjectRef
         var name: String
         var mode: ScriptMode
+        /// The persisted, behavior-defining shape compiled into this environment. `ScriptRecord`
+        /// equality deliberately ignores runtime error/RNG bookkeeping, so comparing this value
+        /// detects source, mode, trigger, enablement, provenance, and API edits without treating a
+        /// deterministic RNG-state writeback as a source edit.
+        var definition: ScriptRecord
+        /// Timer ids that existed before this load began. A fault rolls back timers created by the
+        /// partial module body while preserving restored overdue timers from an earlier session.
+        var timerIDsAtLoadStart: Set<UInt64>
         var environment: ScriptEnvironment
+        /// Handler-mode chunks compile once when the instance loads. The immutable Lua function
+        /// can seed any number of independent coroutines, including overlapping yielded
+        /// invocations, and its registry ref is reclaimed with this environment on unload.
+        var handlerFunction: ScriptFunction?
         var live: Bool = false
         /// The SAME reference-type adapter handed to `makeEnvironment` —
         /// `math.random`/`randomseed` mutate it in place inside
@@ -145,6 +159,10 @@ public final class ScriptRuntime {
         var randomAdapter: RandomStreamBoxAdapter
     }
     var instances: [String: Instance] = [:]
+    /// A compile/load failure is retried only after the persisted definition changes. This keeps a
+    /// bad module from faulting every tick and, more importantly, prevents a partially executed
+    /// load from repeatedly accumulating subscriptions or timers.
+    private var failedDefinitions: [String: ScriptRecord] = [:]
 
     struct ScheduledRun {
         var key: String
@@ -155,9 +173,33 @@ public final class ScriptRuntime {
         /// `.preempted` (those are woken by tick alone).
         var awaitToken: UInt64?
         var isLoad: Bool
+        /// The event whose handler created this coroutine. Retained across yields so later
+        /// resumptions preserve cascade depth instead of becoming new depth-zero roots.
+        var causedBy: ScriptEvent?
+        /// Cumulative events emitted by this logical handler invocation. Yielding must not reset
+        /// the per-handler budget and thereby allow an unbounded slow-motion flood.
+        var handlerEventCount: Int
     }
     var scheduled: [ScheduledRun] = []
+    private var scheduledCountByScript: [String: Int] = [:]
     private var nextOrdinal: UInt64 = 0
+    static let maxScriptLoadsPerTick = 64
+    /// CLua's pinned count-hook quantum (`ELYSIUM_HOOK_GRANULARITY`). The exposed cumulative
+    /// counter advances only at these boundaries, so a resume that returns before its first hook
+    /// is conservatively charged one quantum instead of appearing free.
+    static let instructionAccountingQuantum = 1_000
+
+    /// Deterministic global instruction token bucket. It starts with one tick's allowance, refills
+    /// once per simulation tick, and never exceeds `perTickBucket`. Every attached-script resume
+    /// charges its exact cumulative-instruction delta; editor Run/Check and unload are separate,
+    /// explicitly synchronous operations and retain their own fixed slice.
+    private var instructionTokens = 0
+    private var instructionBudgetTick: Int64?
+    private var instructionsUsedThisTick = 0
+    /// Earlier scheduler lanes reserve one accounting quantum for each downstream lane. This
+    /// prevents a large load backlog from starving AI replies, resumptions, timers, or event
+    /// delivery while preserving the documented deterministic phase order.
+    private var downstreamInstructionReserve = 0
 
     var timers: [DurableTimer] = []
     private var nextTimerId: UInt64 = 1
@@ -169,8 +211,16 @@ public final class ScriptRuntime {
     /// restart).
     var namedHandlers: [String: ScriptFunction] = [:]
 
+    enum AIRequestMode {
+        /// Fire-and-forget requests publish the documented world-scoped `ai.replied` event.
+        case ask
+        /// Awaited replies resume only their still-current coroutine and never fall back to an
+        /// unrelated fire-and-forget event if that coroutine is later edited or detached.
+        case await
+    }
     struct AIOutboxEntry { var id: UInt64; var prompt: String }
     private var aiOutbox: [AIOutboxEntry] = []
+    private var aiRequestModes: [UInt64: AIRequestMode] = [:]
     private var nextAIRequestID: UInt64 = 1
     /// design.md §8.4: "<= 30 per world per minute" — approximated here as
     /// per-1200-ticks (20 Hz * 60 s), reset opportunistically.
@@ -198,6 +248,10 @@ public final class ScriptRuntime {
     /// into `ai.replied` events / `ai.await` resumptions at the next script
     /// phase — the tick never blocks on the model.
     public var outboxHandoff: ((UInt64, String) -> Void)?
+    /// Optional app-layer cancellation endpoint paired with `outboxHandoff`. Core owns the
+    /// coroutine/request lifecycle but not the network transport, so detach/edit/unload asks the broker to
+    /// cancel the exact session-qualified network task before releasing the in-flight slot.
+    public var aiCancellationHandoff: ((UInt64) -> Void)?
     private var incomingAIReplies: [(id: UInt64, text: String?, error: String?)] = []
 
     /// ai-object-graph (change 2), design.md §9.4 stage 6: set for the
@@ -212,15 +266,42 @@ public final class ScriptRuntime {
     /// chunk. Durable script-lifecycle APIs reject in this scope so the destroyed throwaway
     /// environment can never leave handlers, timers, child scripts, or AI work behind.
     var ephemeralRunActive = false
+    /// True only during a module's synchronous unload callback. Unload is a finalization
+    /// boundary: scripts may read state and write custom attributes, but every other
+    /// lifecycle, world, presentation, timer, event, RNG, and AI capability is refused.
+    var unloadActive = false
     /// Throwaway RNG owned by Run/Check. Attached scripts instead use their persisted Instance RNG.
     var transientExecutionRandom: RandomStreamBoxAdapter?
 
     let budgets: ScriptBudgets
 
-    /// §8.4: "attach/detach <= 2 (world <= 32)" — this change enforces the
-    /// per-script half (world-wide accounting is a documented gap, noted in
-    /// ARCHITECTURE.md); reset every tick by `resetPerTickCounters()`.
+    /// §8.4: "attach/detach <= 2 (world <= 32)". Both counters are charged before a
+    /// lifecycle mutation and reset together at the deterministic tick boundary.
+    private var attachDetachBudgetTick: Int64?
     var attachDetachCounts: [String: Int] = [:]
+    var attachDetachWorldCount = 0
+    /// Declarations are a separate metadata operation from script attach/detach. A module can
+    /// publish the full per-object contract (16 events) in one load without partially faulting,
+    /// while repeated cross-object churn remains bounded per script and tick.
+    private var eventDeclarationBudgetTick: Int64?
+    var eventDeclarationCounts: [String: Int] = [:]
+    /// One phase reconciles only a fixed canonical prefix of the host's exact dirty-ref queue.
+    /// Hydration/mutation bursts retain their suffix at the host; no periodic whole-world census is
+    /// required. Loading has a separate fixed budget because one ref may own up to eight scripts.
+    static let maxDefinitionRefsPerTick = 64
+    private(set) var definitionReconciliationCount = 0
+    /// Names seen on the last reconciliation of each ref let a removal retire old instances and
+    /// failures without scanning the runtime's complete instance dictionaries.
+    private var knownDefinitionNamesByRef: [String: Set<String>] = [:]
+    /// Newly discovered definitions use their own canonical deduplicating heap. An edit replaces
+    /// the value for an already-queued key; unrelated backlog is never discarded by a generation
+    /// change, and stale heap entries consume only the fixed candidate budget below.
+    private var pendingDefinitionLoads: [String: (ref: ObjectRef, record: ScriptRecord)] = [:]
+    private var pendingDefinitionLoadOrder = DeterministicStringWorkQueue()
+    /// Dimension bags are hydrated together but only the current one is live. Remember the
+    /// dimension observed at runtime construction so a later portal transition requeues the old
+    /// and new bags without scanning any chunk/entity collection.
+    private var definitionDimension: Dim
 
     static let scriptAttachedEventKind = EventKind.scriptAttached
 
@@ -233,6 +314,7 @@ public final class ScriptRuntime {
         self.budgets = budgets
         self.sayFn = say
         self.aiResponder = aiResponder
+        self.definitionDimension = host.currentDimension
         self.lua = try LuaState(budgets: budgets, math: ScriptHostMath.deterministic, log: ScriptRuntimeLogSink())
         // `self` is fully constructed from here (every other stored property
         // has a value); the dispatch closures built in `ScriptRuntimeAPI.swift`
@@ -271,6 +353,7 @@ public final class ScriptRuntime {
         })
     }
     var scriptStore: ScriptStore { ScriptStore(graph: graph) }
+    var customEventStore: CustomEventStore { CustomEventStore(graph: graph) }
 
     private func raiseAttributeChanged(
         ref: ObjectRef, name: String, old: AttrValue?, new: AttrValue?, revision: UInt64, author: Provenance.Author
@@ -282,17 +365,45 @@ public final class ScriptRuntime {
         case .script(let owner, let scriptName): source = .script(owner: owner, name: scriptName)
         case .lan(let peer): source = .lan(peerID: peer)
         }
+        let subjectType: String?
+        if case .live(let live) = graph.resolve(ref) {
+            subjectType = familyName(live)
+        } else {
+            subjectType = nil
+        }
         state.eventBus.raise(
             kind: .attributeChanged, subject: ref,
             payload: ["key": .string(name), "old": old ?? .null, "new": new ?? .null],
-            source: source, tick: host.currentTick
+            source: source, tick: host.currentTick, subjectType: subjectType
         )
     }
 
     // MARK: - per-tick verb budget reset
 
     public func resetPerTickCounters() {
+        refreshInstructionBudget()
+        refreshAttachDetachBudget()
+        refreshEventDeclarationBudget()
+    }
+
+    /// Tick-key the lifecycle budget at the mutation boundary as well as the ordinary phase entry.
+    /// This covers direct/test calls and the extra shutdown phase `exitToTitle` may run without
+    /// advancing the simulation clock.
+    func refreshAttachDetachBudget() {
+        let tick = host.currentTick
+        guard attachDetachBudgetTick != tick else { return }
+        attachDetachBudgetTick = tick
         attachDetachCounts.removeAll()
+        attachDetachWorldCount = 0
+    }
+
+    /// Declaration mutations are also a per-tick budget. Keep their clock independent from the
+    /// lifecycle counters so either API remains safe when called directly outside phase entry.
+    func refreshEventDeclarationBudget() {
+        let tick = host.currentTick
+        guard eventDeclarationBudgetTick != tick else { return }
+        eventDeclarationBudgetTick = tick
+        eventDeclarationCounts.removeAll()
     }
 
     // MARK: - scheduler helpers (shared with ScriptRuntimeAPI.swift)
@@ -303,80 +414,268 @@ public final class ScriptRuntime {
     }
 
     func allocateTimerID() -> UInt64 {
-        defer { nextTimerId += 1 }
-        return nextTimerId
+        // The durable-timer cap bounds this search to at most 257 probes. Never rely on a
+        // trapping increment: a hostile restore seam or an eventually exhausted counter wraps to
+        // one and skips ids that are still live.
+        let occupied = Set(timers.map(\.id))
+        var candidate = nextTimerId == 0 || nextTimerId > maxScriptingRegistryIdentifier
+            ? 1 : nextTimerId
+        while occupied.contains(candidate) {
+            candidate = scriptingRegistryIdentifierSuccessor(candidate)
+        }
+        nextTimerId = scriptingRegistryIdentifierSuccessor(candidate)
+        return candidate
     }
 
-    func appendScheduled(key: String, coroutine: ScriptCoroutine, wakeTick: Int64) {
-        scheduled.append(ScheduledRun(
-            key: key, coroutine: coroutine, wakeTick: wakeTick, ordinal: scheduleOrdinal(), awaitToken: nil, isLoad: false
-        ))
+    /// Script waits and durable timers share one overflow-safe tick arithmetic rule. Extremely
+    /// large imported intervals become "at the end of time" rather than trapping the game loop.
+    func scheduledTick(after positiveDelta: Int64) -> Int64 {
+        let (value, overflow) = host.currentTick.addingReportingOverflow(positiveDelta)
+        return overflow ? Int64.max : value
+    }
+
+    func restoreDurableTimers(_ restored: [DurableTimer]) {
+        timers = restored.sorted { $0.id < $1.id }
+        let maxID = timers.map(\.id).max() ?? 0
+        nextTimerId = scriptingRegistryIdentifierSuccessor(maxID)
+    }
+
+    @discardableResult
+    func appendScheduled(key: String, coroutine: ScriptCoroutine, wakeTick: Int64) -> Bool {
+        let run = ScheduledRun(
+            key: key, coroutine: coroutine, wakeTick: wakeTick, ordinal: scheduleOrdinal(),
+            awaitToken: nil, isLoad: false, causedBy: nil, handlerEventCount: 0
+        )
+        if let refusal = appendSuspendedRun(run) {
+            try? lua.close(coroutine)
+            signalSchedulerOverBudget(refusal)
+            return false
+        }
+        return true
+    }
+
+    /// Refill is tick-keyed so tests or callers that invoke more than one phase at the same
+    /// simulation tick cannot mint extra work. A forward jump accrues idle capacity, capped by the
+    /// bucket; a backward/reset clock starts a fresh one-tick allowance rather than overflowing.
+    private func refreshInstructionBudget() {
+        let tick = host.currentTick
+        let refill = max(0, budgets.perTickInstructions)
+        let capacity = max(0, budgets.perTickBucket)
+        guard refill > 0, capacity > 0 else {
+            instructionTokens = 0
+            instructionsUsedThisTick = 0
+            instructionBudgetTick = tick
+            return
+        }
+        guard let previous = instructionBudgetTick else {
+            instructionTokens = min(refill, capacity)
+            instructionsUsedThisTick = 0
+            instructionBudgetTick = tick
+            return
+        }
+        guard tick != previous else { return }
+        instructionsUsedThisTick = 0
+        if tick < previous {
+            instructionTokens = min(refill, capacity)
+        } else {
+            let elapsed = tick - previous
+            let (rawMissing, missingOverflow) = capacity.subtractingReportingOverflow(instructionTokens)
+            let missing = missingOverflow ? Int.max : max(0, rawMissing)
+            let ticksToFill = missing / refill + (missing % refill == 0 ? 0 : 1)
+            if ticksToFill != Int.max && elapsed >= Int64(ticksToFill) {
+                instructionTokens = capacity
+            } else {
+                let elapsedInt = Int(elapsed)
+                let (credit, creditOverflow) = elapsedInt.multipliedReportingOverflow(by: refill)
+                if creditOverflow {
+                    instructionTokens = capacity
+                } else {
+                    let (refilled, refillOverflow) = instructionTokens.addingReportingOverflow(credit)
+                    instructionTokens = refillOverflow ? capacity : min(capacity, refilled)
+                }
+            }
+        }
+        instructionBudgetTick = tick
+    }
+
+    private var nextInstructionSlice: Int {
+        refreshInstructionBudget()
+        // Custom/test budgets smaller than five hook quanta cannot reserve one quantum for all
+        // five lanes simultaneously. Clamp the reservation so the current lane can still make
+        // progress; production defaults have ample capacity for the full reservation.
+        let configuredCredit = min(max(0, budgets.perTickInstructions), max(0, budgets.perTickBucket))
+        let maximumReserve = max(0, configuredCredit - Self.instructionAccountingQuantum)
+        let effectiveReserve = min(maximumReserve, max(0, downstreamInstructionReserve))
+        let (rawAvailable, overflow) = instructionTokens.subtractingReportingOverflow(effectiveReserve)
+        let available = overflow ? 0 : max(0, rawAvailable)
+        return min(max(0, budgets.handlerSliceInstructions), available)
+    }
+
+    private func chargeInstructions(_ coroutine: ScriptCoroutine, from before: UInt64) {
+        let after = coroutine.instructionsUsed
+        let delta = after >= before ? after - before : after
+        let observed = delta > UInt64(Int.max) ? Int.max : Int(delta)
+        let charged = max(Self.instructionAccountingQuantum, observed)
+        // Keep overrun debt: with a sub-quantum remaining slice, CLua may execute through the
+        // next 1,000-instruction hook. A signed balance makes later refills repay that debt.
+        let (remaining, underflow) = instructionTokens.subtractingReportingOverflow(charged)
+        instructionTokens = underflow ? Int.min : remaining
+        let (total, overflow) = instructionsUsedThisTick.addingReportingOverflow(charged)
+        instructionsUsedThisTick = overflow ? Int.max : total
+    }
+
+    private func baseScriptKey(for runKey: String) -> String? {
+        guard let parsed = parseKey(runKey) else { return nil }
+        return parsed.owner.canonical + "#" + parsed.name
+    }
+
+    /// Returns a refusal message, or `nil` after accepting the run. Closure timers surface a
+    /// refusal as a catchable host-call error; a coroutine that has already yielded is terminally
+    /// faulted because it cannot be safely resumed without retaining it.
+    private func appendSuspendedRun(_ run: ScheduledRun) -> String? {
+        guard let base = baseScriptKey(for: run.key) else { return "invalid suspended coroutine owner" }
+        guard scheduled.count < max(0, budgets.maxSuspendedCoroutinesPerWorld) else {
+            return "world suspended coroutine limit exceeded"
+        }
+        let count = scheduledCountByScript[base, default: 0]
+        guard count < max(0, budgets.maxSuspendedCoroutinesPerScript) else {
+            return "script suspended coroutine limit exceeded"
+        }
+        scheduled.append(run)
+        scheduledCountByScript[base] = count + 1
+        return nil
+    }
+
+    @discardableResult
+    private func removeScheduledRun(key: String, ordinal: UInt64) -> ScheduledRun? {
+        guard let index = scheduled.firstIndex(where: { $0.key == key && $0.ordinal == ordinal }) else {
+            return nil
+        }
+        let run = scheduled.remove(at: index)
+        decrementScheduledCount(for: run)
+        return run
+    }
+
+    @discardableResult
+    private func removeScheduledRuns(where shouldRemove: (ScheduledRun) -> Bool) -> [ScheduledRun] {
+        var removed: [ScheduledRun] = []
+        scheduled.removeAll { run in
+            guard shouldRemove(run) else { return false }
+            removed.append(run)
+            return true
+        }
+        for run in removed { decrementScheduledCount(for: run) }
+        return removed
+    }
+
+    private func decrementScheduledCount(for run: ScheduledRun) {
+        guard let base = baseScriptKey(for: run.key), let count = scheduledCountByScript[base] else {
+            return
+        }
+        if count <= 1 { scheduledCountByScript.removeValue(forKey: base) }
+        else { scheduledCountByScript[base] = count - 1 }
+    }
+
+    private func signalSchedulerOverBudget(_ message: String) {
+        state.eventBus.signalOverBudget(reason: message, tick: host.currentTick)
     }
 
     // MARK: - dispatcher (plugged into `EventBus.delivery` by `GameCore
     // +Scripting.swift`)
 
+    /// EventBus asks before advancing its ordered recipient cursor. One-at-a-time admission lets
+    /// the exact instruction charge of the preceding handler decide whether another may start;
+    /// returning zero retains the untouched recipient and every suffix entry for the next tick.
+    public func admittedDeliveryCount(
+        for _: ScriptEvent, targets: [EventDeliveryTarget]
+    ) -> Int {
+        guard !targets.isEmpty else { return 0 }
+        // A disabled/untrusted runtime intentionally drains and discards deliveries, preserving
+        // the pre-backpressure kill-switch contract: events observed while scripts are off do not
+        // replay later. `deliver` itself remains a no-op under the same gate.
+        guard scriptsEffectivelyEnabled(host: host) else { return targets.count }
+        guard nextInstructionSlice > 0 else { return 0 }
+        return 1
+    }
+
     public func deliver(_ event: ScriptEvent, _ targets: [EventDeliveryTarget]) {
-        guard scriptsEffectivelyEnabled(host: host) else { return }
+        guard scriptsEffectivelyEnabled(host: host), !targets.isEmpty else { return }
+        guard nextInstructionSlice > 0 else { return }
+        // Materialization walks nested payloads and registers previously unseen refs. Do it once
+        // per event, then share the immutable value across every recipient in this delivery slice.
+        let marshaledEvent = eventValue(event)
         for target in targets {
+            guard nextInstructionSlice > 0 else { break }
             switch target.kind {
             case .persisted(let sub):
-                invokeNamed(owner: sub.subscriber, scriptName: sub.scriptName, handlerName: sub.handler, event: event)
+                invokeNamed(
+                    owner: sub.subscriber, scriptName: sub.scriptName, handlerName: sub.handler,
+                    event: event, marshaledEvent: marshaledEvent
+                )
             case .scriptOwned(let sub):
                 guard let token = sub.token as? ScriptHandlerToken else { continue }
                 switch token.body {
                 case .handlerChunk(let ref, let name):
-                    invokeHandlerChunk(ref: ref, name: name, event: event)
+                    invokeHandlerChunk(ref: ref, name: name, event: event, marshaledEvent: marshaledEvent)
                 case .closure(let fn, let owner, let scriptName):
-                    invokeClosure(fn, owner: owner, scriptName: scriptName, event: event)
+                    invokeClosure(
+                        fn, owner: owner, scriptName: scriptName,
+                        event: event, marshaledEvent: marshaledEvent
+                    )
                 }
             }
         }
     }
 
-    private func invokeNamed(owner: ObjectRef, scriptName: String, handlerName: String, event: ScriptEvent) {
+    private func invokeNamed(
+        owner: ObjectRef, scriptName: String, handlerName: String,
+        event: ScriptEvent, marshaledEvent: ScriptValue
+    ) {
         let key = owner.canonical + "#" + scriptName + "#" + handlerName
         guard let fn = namedHandlers[key] else { return } // pruned silently (§7.3: dormant, not fatal)
-        invokeClosure(fn, owner: owner, scriptName: scriptName, event: event)
-    }
-
-    private func invokeHandlerChunk(ref: ObjectRef, name: String, event: ScriptEvent) {
-        let key = ref.canonical + "#" + name
-        guard var instance = instances[key], instance.live, instance.mode == .handler else { return }
-        guard case .live = graph.resolve(ref) else { return }
-        guard let compiled = compileForRun(instance: &instance) else { instances[key] = instance; return }
-        instances[key] = instance
-        runNew(
-            key: key, function: compiled, args: [handleValue(for: ref), handleValue(for: .world), handleValue(for: .player), eventValue(event)],
-            isLoad: false
+        invokeClosure(
+            fn, owner: owner, scriptName: scriptName,
+            event: event, marshaledEvent: marshaledEvent
         )
     }
 
-    private func invokeClosure(_ fn: ScriptFunction, owner: ObjectRef, scriptName: String, event: ScriptEvent) {
-        guard case .live = graph.resolve(owner) else { return }
-        let key = owner.canonical + "#" + scriptName + "#closure#" + String(nextOrdinal)
-        runNew(key: key, function: fn, args: [eventValue(event)], isLoad: false, contextOverride: (owner, scriptName))
+    private func invokeHandlerChunk(
+        ref: ObjectRef, name: String, event: ScriptEvent, marshaledEvent: ScriptValue
+    ) {
+        let key = ref.canonical + "#" + name
+        guard let instance = instances[key], instance.live, instance.mode == .handler else { return }
+        guard definitionIsCurrent(instance) else { return }
+        guard case .live = graph.resolve(ref) else { return }
+        guard let compiled = instance.handlerFunction else { return }
+        runNew(
+            key: key, function: compiled,
+            args: [
+                handleValue(for: ref), handleValue(for: .world), handleValue(for: .player),
+                marshaledEvent,
+            ],
+            isLoad: false, causedBy: event
+        )
     }
 
-    /// Re-compiles a handler-mode chunk fresh for each firing (its whole
-    /// body IS the handler, so there is no persistent closure to reuse —
-    /// matches the "chunk runs" framing of §8.1 exactly, at the cost of a
-    /// recompile per delivery; acceptable at v1 scale, notable in
-    /// ARCHITECTURE.md as a place to optimize later with a cached
-    /// `ScriptFunction`).
-    private func compileForRun(instance: inout Instance) -> ScriptFunction? {
-        guard let record = scriptStore.get(instance.ref, instance.name) else { return nil }
-        let wrapped = "local self, world, player, ev = ...\n" + record.source
-        switch instance.environment.compile(source: wrapped, chunkName: instance.name) {
-        case .success(let fn): return fn
-        case .failure(let fault):
-            scriptStore.storeLastError(instance.ref, instance.name, fault.message)
-            return nil
-        }
+    private func invokeClosure(
+        _ fn: ScriptFunction, owner: ObjectRef, scriptName: String,
+        event: ScriptEvent, marshaledEvent: ScriptValue
+    ) {
+        let scriptKey = owner.canonical + "#" + scriptName
+        guard let instance = instances[scriptKey], instance.live, definitionIsCurrent(instance) else { return }
+        guard case .live = graph.resolve(owner) else { return }
+        let key = owner.canonical + "#" + scriptName + "#closure#" + String(nextOrdinal)
+        runNew(
+            key: key, function: fn, args: [marshaledEvent], isLoad: false,
+            contextOverride: (owner, scriptName), causedBy: event
+        )
     }
 
     func eventValue(_ event: ScriptEvent) -> ScriptValue {
-        var map: [String: ScriptValue] = event.payload
+        var map: [String: ScriptValue] = [:]
+        for key in event.payload.keys.sorted() {
+            map[key] = materializeEventHandles(in: event.payload[key]!, depth: 1)
+        }
         // Envelope fields are authoritative. A custom payload may use the same keys, but it must
         // never spoof the delivered event kind, tick, subject, or provenance seen by Lua.
         map["kind"] = .string(event.kind.rawValue)
@@ -390,58 +689,130 @@ public final class ScriptRuntime {
         return .map(map)
     }
 
+    /// `ScriptValue.ref` is intentionally just a canonical name until its owning `LuaState` has
+    /// registered a handle kind for that name. Engine/LAN event producers can introduce refs that
+    /// no prior script has touched (attackers, actors, nested custom payloads), so recursively
+    /// materialize every valid object ref before the value marshaler pushes the event table.
+    private func materializeEventHandles(in value: ScriptValue, depth: Int) -> ScriptValue {
+        guard depth <= budgets.valueDepth else { return value }
+        switch value {
+        case .ref(let canonical):
+            guard let ref = ObjectRef.parse(canonical) else { return value }
+            return handleValue(for: ref)
+        case .list(let values):
+            return .list(values.map { materializeEventHandles(in: $0, depth: depth + 1) })
+        case .map(let values):
+            var result: [String: ScriptValue] = [:]
+            for key in values.keys.sorted() {
+                result[key] = materializeEventHandles(in: values[key]!, depth: depth + 1)
+            }
+            return .map(result)
+        default:
+            return value
+        }
+    }
+
     // MARK: - running a fresh coroutine (load, handler, timer, closure)
 
+    private enum RunResult {
+        case completed
+        case yielded
+        /// No global instruction token was available. Callers retain the authoritative source
+        /// (persisted script, event cursor, timer, or scheduled run) and retry next tick.
+        case deferred
+        case faulted
+    }
+
     @discardableResult
-    func runNew(
+    private func runNew(
         key: String, function: ScriptFunction, args: [ScriptValue], isLoad: Bool,
-        contextOverride: (owner: ObjectRef, name: String)? = nil
-    ) -> Bool {
-        guard let coroutine = try? lua.makeCoroutine(function: function) else { return false }
-        return resumeAndSchedule(key: key, coroutine: coroutine, args: args, isLoad: isLoad, context: contextOverride)
+        contextOverride: (owner: ObjectRef, name: String)? = nil,
+        causedBy: ScriptEvent? = nil
+    ) -> RunResult {
+        guard nextInstructionSlice > 0 else { return .deferred }
+        guard let coroutine = try? lua.makeCoroutine(function: function) else { return .faulted }
+        return resumeAndSchedule(
+            key: key, coroutine: coroutine, args: args, isLoad: isLoad,
+            context: contextOverride, causedBy: causedBy
+        )
     }
 
     private func resumeAndSchedule(
         key: String, coroutine: ScriptCoroutine, args: [ScriptValue], isLoad: Bool,
-        context: (owner: ObjectRef, name: String)?
-    ) -> Bool {
+        context: (owner: ObjectRef, name: String)?, causedBy: ScriptEvent?,
+        handlerEventCount initialHandlerEventCount: Int = 0
+    ) -> RunResult {
+        let slice = nextInstructionSlice
+        guard slice > 0 else { return .deferred }
         let previous = currentScript
         currentScript = context ?? parseKey(key)
         defer { currentScript = previous }
         let outcome: ScriptResumeOutcome
+        var handlerEventCount = initialHandlerEventCount
+        let instructionsBefore = coroutine.instructionsUsed
         do {
-            outcome = try lua.resume(coroutine, args: args, slice: budgets.handlerSliceInstructions)
+            let resume = {
+                try self.lua.resume(coroutine, args: args, slice: slice)
+            }
+            if isLoad {
+                outcome = try resume()
+            } else {
+                outcome = try state.eventBus.withHandlerContext(
+                    causedBy: causedBy, eventCount: &handlerEventCount, resume
+                )
+            }
         } catch {
-            return false
+            chargeInstructions(coroutine, from: instructionsBefore)
+            recordRuntimeFault("script runtime could not resume")
+            return .faulted
         }
+        chargeInstructions(coroutine, from: instructionsBefore)
         switch outcome {
         case .completed:
-            return true
+            return .completed
         case .yielded(let reason):
+            if case .preempted = reason,
+               coroutine.consecutivePreemptions >= max(1, budgets.maxConsecutivePreemptions) {
+                try? lua.close(coroutine)
+                recordRuntimeFault("consecutive instruction-slice limit exceeded")
+                signalSchedulerOverBudget("consecutive instruction-slice limit exceeded")
+                return .faulted
+            }
             let wakeTick: Int64
             var awaitToken: UInt64?
             switch reason {
-            case .preempted: wakeTick = host.currentTick + 1
-            case .wait(let n): wakeTick = host.currentTick + Int64(max(0, n))
+            case .preempted: wakeTick = scheduledTick(after: 1)
+            case .wait(let n): wakeTick = scheduledTick(after: Int64(max(0, n)))
             case .await(let token): wakeTick = host.currentTick; awaitToken = token
             }
-            scheduled.append(ScheduledRun(
+            let run = ScheduledRun(
                 key: key, coroutine: coroutine, wakeTick: wakeTick, ordinal: nextOrdinal, awaitToken: awaitToken,
-                isLoad: isLoad
-            ))
+                isLoad: isLoad, causedBy: causedBy, handlerEventCount: handlerEventCount
+            )
             nextOrdinal += 1
-            return false
-        case .faulted(let fault):
-            if let ctx = currentScript {
-                scriptStore.storeLastError(ctx.owner, ctx.name, fault.message)
-                state.eventBus.raise(
-                    kind: .scriptFaulted, subject: ctx.owner,
-                    payload: ["name": .string(ctx.name), "message": .string(fault.message)],
-                    source: .engine, tick: host.currentTick
-                )
+            if let refusal = appendSuspendedRun(run) {
+                if let awaitToken { cancelAIRequest(awaitToken) }
+                try? lua.close(coroutine)
+                recordRuntimeFault(refusal)
+                signalSchedulerOverBudget(refusal)
+                return .faulted
             }
-            return false
+            return .yielded
+        case .faulted(let fault):
+            recordRuntimeFault(fault.message)
+            return .faulted
         }
+    }
+
+    private func recordRuntimeFault(_ message: String) {
+        guard let ctx = currentScript else { return }
+        scriptStore.storeLastError(ctx.owner, ctx.name, message)
+        state.eventBus.raise(
+            kind: .scriptFaulted, subject: ctx.owner,
+            payload: ["name": .string(ctx.name), "message": .string(message)],
+            source: .engine, tick: host.currentTick,
+            subjectType: eventSubjectType(for: ctx.owner)
+        )
     }
 
     private func parseKey(_ key: String) -> (owner: ObjectRef, name: String)? {
@@ -457,44 +828,113 @@ public final class ScriptRuntime {
     /// determinism.
     public func runLoads() {
         guard scriptsEffectivelyEnabled(host: host) else { return }
-        // §15's zero-cost invariant, amortized: `state.anyScriptsAttached`
-        // is the fast path (one boolean) for the overwhelming majority of
-        // ticks; every 20th tick (~1s at 20 Hz) this also runs when the flag
-        // is still `false`, so scripts already on disk for a chunk/entity
-        // that has not yet triggered the flag through any other path
-        // (world/dim bag at open, or `h:attach` at runtime) are discovered
-        // within about a second of load rather than never — a scan that
-        // finds nothing changes no game state and cannot affect determinism.
-        guard state.anyScriptsAttached || host.currentTick % 20 == 0 else { return }
-        var pending: [(ObjectRef, ScriptRecord)] = []
-        forEachScriptedObject { ref, record in
-            let key = ref.canonical + "#" + record.name
-            if let existing = instances[key], existing.live, sourceUnchanged(existing, record) { return }
-            pending.append((ref, record))
+        let currentDimension = host.currentDimension
+        if currentDimension != definitionDimension {
+            host.scriptDefinitionsDidChange(
+                for: .dimension(definitionDimension), hasScripts: false
+            )
+            let currentRef = ObjectRef.dimension(currentDimension)
+            host.scriptDefinitionsDidChange(
+                for: currentRef,
+                hasScripts: host.worldObjectRecord(for: currentRef).hasScriptDefinitions
+            )
+            definitionDimension = currentDimension
         }
-        pending.sort { a, b in a.0.canonical == b.0.canonical ? a.1.name < b.1.name : a.0.canonical < b.0.canonical }
-        for (ref, record) in pending {
-            guard record.enabled else { continue }
+        let previousReserve = downstreamInstructionReserve
+        downstreamInstructionReserve = 4 * Self.instructionAccountingQuantum
+        defer { downstreamInstructionReserve = previousReserve }
+        refreshInstructionBudget()
+        let dirtyRefs = host.drainDirtyScriptDefinitionRefs(limit: Self.maxDefinitionRefsPerTick)
+        for ref in dirtyRefs {
+            reconcileDefinitionRef(ref)
+            definitionReconciliationCount += 1
+        }
+        guard !pendingDefinitionLoadOrder.isEmpty else { return }
+
+        var candidatesExamined = 0
+        var loadsStarted = 0
+        while candidatesExamined < Self.maxScriptLoadsPerTick,
+              loadsStarted < Self.maxScriptLoadsPerTick,
+              nextInstructionSlice > 0,
+              let key = pendingDefinitionLoadOrder.popFirst() {
+            candidatesExamined += 1
+            guard let pending = pendingDefinitionLoads.removeValue(forKey: key) else { continue }
+            let ref = pending.ref
+            let record = pending.record
+            // A module loaded earlier in this same phase may attach, edit, or detach a later
+            // record. Never compile the stale discovery snapshot after that mutation.
+            guard let current = scriptStore.get(ref, record.name), current.enabled, current == record else {
+                continue
+            }
+            loadsStarted += 1
             load(ref: ref, record: record)
         }
     }
 
+    private func reconcileDefinitionRef(_ ref: ObjectRef) {
+        let refKey = ref.canonical
+        let records = scriptStore.list(ref)
+        let currentByName = Dictionary(uniqueKeysWithValues: records.map { ($0.name, $0) })
+        var names = knownDefinitionNamesByRef[refKey] ?? []
+        names.formUnion(currentByName.keys)
+
+        for name in names.sorted(by: utf8Less) {
+            let key = refKey + "#" + name
+            let current = currentByName[name]
+            pendingDefinitionLoads.removeValue(forKey: key)
+
+            if let instance = instances[key],
+               current == nil || current?.enabled != true
+                || current.map({ !sourceUnchanged(instance, $0) }) == true {
+                unloadInstance(
+                    key: key, runUnloadHandler: instance.live, removeDurableTimers: true,
+                    dropSubscriptions: true
+                )
+            }
+
+            if let failed = failedDefinitions[key],
+               current == nil || current?.enabled != true || current != failed {
+                timers.removeAll { $0.owner == ref && $0.scriptName == name }
+                failedDefinitions.removeValue(forKey: key)
+            }
+
+            guard let current, current.enabled else { continue }
+            if let instance = instances[key], sourceUnchanged(instance, current) { continue }
+            if failedDefinitions[key] == current { continue }
+            enqueuePendingDefinitionLoad(ref: ref, record: current)
+        }
+
+        if currentByName.isEmpty { knownDefinitionNamesByRef.removeValue(forKey: refKey) }
+        else { knownDefinitionNamesByRef[refKey] = Set(currentByName.keys) }
+    }
+
+    private func enqueuePendingDefinitionLoad(ref: ObjectRef, record: ScriptRecord) {
+        let key = ref.canonical + "#" + record.name
+        pendingDefinitionLoads[key] = (ref: ref, record: record)
+        pendingDefinitionLoadOrder.insert(key)
+    }
+
     private func sourceUnchanged(_ instance: Instance, _ record: ScriptRecord) -> Bool {
-        // We do not cache the source on `Instance`; a live instance is only
-        // ever re-queued for reload by `ScriptStore.attach` clearing its
-        // `live` flag via `markEdited`, so simply trusting `live` here is
-        // correct and avoids keeping a second copy of the source text.
-        true
+        instance.definition == record
+    }
+
+    private func definitionIsCurrent(_ instance: Instance) -> Bool {
+        guard let record = scriptStore.get(instance.ref, instance.name), record.enabled else { return false }
+        return sourceUnchanged(instance, record)
     }
 
     private func load(ref: ObjectRef, record: ScriptRecord) {
         let key = ref.canonical + "#" + record.name
         let seed = record.rngWords.map { RandomX(stateWords: ($0[0], $0[1], $0[2], $0[3])) }
-            ?? RandomX(mix32(UInt32(truncatingIfNeeded: (ref.canonical + record.name).hashValue))
+            ?? RandomX(mix32(hashString(ref.canonical + "#" + record.name))
                 ^ UInt32(truncatingIfNeeded: record.createdTick))
         let adapter = RandomStreamBoxAdapter(seed)
         let env = lua.makeEnvironment(name: key, hostBindings: buildHostBindings(), random: adapter)
-        var instance = Instance(ref: ref, name: record.name, mode: record.mode, environment: env, randomAdapter: adapter)
+        var instance = Instance(
+            ref: ref, name: record.name, mode: record.mode, definition: record,
+            timerIDsAtLoadStart: Set(timers.map(\.id)), environment: env,
+            handlerFunction: nil, randomAdapter: adapter
+        )
         instances[key] = instance
         let wrapped = record.mode == .module
             ? "local self, world, player = ...\n" + record.source
@@ -505,40 +945,88 @@ public final class ScriptRuntime {
             state.eventBus.raise(
                 kind: .scriptFaulted, subject: ref,
                 payload: ["name": .string(record.name), "message": .string(fault.message)],
-                source: .engine, tick: host.currentTick
+                source: .engine, tick: host.currentTick,
+                subjectType: eventSubjectType(for: ref)
             )
-            instances.removeValue(forKey: key)
+            failLoad(key: key, definition: record)
             return
         case .success(let compiled):
             if record.mode == .handler {
                 // §8.1: "handler-mode bodies run with ev bound" — only when
-                // an actual matching event arrives (`invokeHandlerChunk`
-                // recompiles and runs it fresh per delivery). Unlike module
-                // mode, "load" for a handler-mode script is compile-and-index
-                // only: this compile already proved the source is valid;
+                // an actual matching event arrives. Unlike module mode, "load" for a
+                // handler-mode script is compile-and-index only: this cached function proved the
+                // source is valid and seeds a fresh coroutine for each later delivery;
                 // running it now (against a synthetic empty `ev`) would only
                 // ever fault on `ev.subject`/`ev.<payload field>` being nil.
-                instance.live = true
-                instances[key] = instance
-                scriptStore.storeLastError(ref, record.name, nil)
+                var registeredSubscriptionIDs: [UInt64] = []
                 for trigger in record.triggers {
                     let token = ScriptHandlerToken(.handlerChunk(ref: ref, name: record.name))
-                    state.eventBus.registerScriptOwned(
+                    switch state.eventBus.registerScriptOwnedChecked(
                         owner: ref, scriptName: record.name, target: trigger.target, event: trigger.event,
                         attribute: trigger.attribute, token: token
-                    )
+                    ) {
+                    case .success(let subscription):
+                        registeredSubscriptionIDs.append(subscription.id)
+                    case .failure(let error):
+                        for id in registeredSubscriptionIDs {
+                            state.eventBus.unregisterScriptOwned(id: id)
+                        }
+                        let message = scriptOwnedSubscriptionErrorMessage(error, owner: ref)
+                        scriptStore.storeLastError(ref, record.name, message)
+                        state.eventBus.raise(
+                            kind: .scriptFaulted, subject: ref,
+                            payload: ["name": .string(record.name), "message": .string(message)],
+                            source: .engine, tick: host.currentTick,
+                            subjectType: eventSubjectType(for: ref)
+                        )
+                        failLoad(key: key, definition: record)
+                        return
+                    }
                 }
-                state.eventBus.raise(kind: .load, subject: ref, payload: ["name": .string(record.name)], source: .engine, tick: host.currentTick)
+                instance.handlerFunction = compiled
+                instance.live = true
+                instances[key] = instance
+                failedDefinitions.removeValue(forKey: key)
+                scriptStore.storeLastError(ref, record.name, nil)
+                state.eventBus.raise(
+                    kind: .load, subject: ref, payload: ["name": .string(record.name)],
+                    source: .engine, tick: host.currentTick,
+                    subjectType: eventSubjectType(for: ref)
+                )
                 return
             }
             let args: [ScriptValue] = [handleValue(for: ref), handleValue(for: .world), handleValue(for: .player)]
-            let completed = runNew(key: key, function: compiled, args: args, isLoad: true)
+            let result = runNew(key: key, function: compiled, args: args, isLoad: true)
             instance = instances[key] ?? instance
-            if completed {
+            switch result {
+            case .completed:
+                guard definitionIsCurrent(instance) else {
+                    unloadInstance(
+                        key: key, runUnloadHandler: false, removeDurableTimers: true,
+                        dropSubscriptions: true
+                    )
+                    return
+                }
                 instance.live = true
                 instances[key] = instance
+                failedDefinitions.removeValue(forKey: key)
                 scriptStore.storeLastError(ref, record.name, nil)
-                state.eventBus.raise(kind: .load, subject: ref, payload: ["name": .string(record.name)], source: .engine, tick: host.currentTick)
+                state.eventBus.raise(
+                    kind: .load, subject: ref, payload: ["name": .string(record.name)],
+                    source: .engine, tick: host.currentTick,
+                    subjectType: eventSubjectType(for: ref)
+                )
+            case .yielded:
+                break
+            case .deferred:
+                // The persisted definition remains pending and will compile afresh next tick.
+                unloadInstance(
+                    key: key, runUnloadHandler: false, removeDurableTimers: false,
+                    dropSubscriptions: true
+                )
+                enqueuePendingDefinitionLoad(ref: ref, record: record)
+            case .faulted:
+                failLoad(key: key, definition: record)
             }
             // If not completed (yielded/faulted), the instance stays
             // non-live; a yielded load is already tracked in `scheduled`
@@ -551,21 +1039,35 @@ public final class ScriptRuntime {
     /// in ascending `(wakeTick, timerId)`.
     public func runResumptions() {
         guard scriptsEffectivelyEnabled(host: host) else { return }
+        let previousReserve = downstreamInstructionReserve
+        downstreamInstructionReserve = 2 * Self.instructionAccountingQuantum
+        defer { downstreamInstructionReserve = previousReserve }
+        refreshInstructionBudget()
         let tick = host.currentTick
         let runnable = scheduled.filter { $0.awaitToken == nil && $0.wakeTick <= tick }
             .sorted { $0.wakeTick == $1.wakeTick ? $0.ordinal < $1.ordinal : $0.wakeTick < $1.wakeTick }
         for run in runnable {
-            scheduled.removeAll { $0.key == run.key && $0.ordinal == run.ordinal }
-            let completed = resumeAndSchedule(key: run.key, coroutine: run.coroutine, args: [], isLoad: run.isLoad, context: nil)
-            if completed, run.isLoad, var instance = instances[run.key] {
-                instance.live = true
-                instances[run.key] = instance
-                if let (ref, name) = parseKey(run.key) {
-                    scriptStore.storeLastError(ref, name, nil)
-                    state.eventBus.raise(kind: .load, subject: ref, payload: ["name": .string(name)], source: .engine, tick: tick)
+            guard nextInstructionSlice > 0 else { break }
+            _ = removeScheduledRun(key: run.key, ordinal: run.ordinal)
+            guard scheduledRunIsCurrent(run) else {
+                try? lua.close(run.coroutine)
+                if run.isLoad, instances[run.key] != nil {
+                    unloadInstance(
+                        key: run.key, runUnloadHandler: false, removeDurableTimers: true,
+                        dropSubscriptions: true
+                    )
+                    failedDefinitions.removeValue(forKey: run.key)
                 }
+                continue
             }
+            let result = resumeScheduledRun(run, args: [])
+            if case .deferred = result {
+                _ = appendSuspendedRun(run)
+                break
+            }
+            if run.isLoad { finishResumedLoad(key: run.key, result: result, tick: tick) }
         }
+        downstreamInstructionReserve = Self.instructionAccountingQuantum
         runDueTimers(tick: tick)
     }
 
@@ -574,20 +1076,49 @@ public final class ScriptRuntime {
         let due = timers.filter { $0.wakeTick <= tick }.sorted { $0.wakeTick == $1.wakeTick ? $0.id < $1.id : $0.wakeTick < $1.wakeTick }
         for timer in due {
             let handlerKey = timer.owner.canonical + "#" + timer.scriptName + "#" + timer.handlerName
-            if case .live = graph.resolve(timer.owner), let fn = namedHandlers[handlerKey] {
-                let key = timer.owner.canonical + "#" + timer.scriptName + "#timer#\(timer.id)#\(tick)"
-                runNew(
-                    key: key, function: fn, args: [.map(["kind": .string("timer.fired"), "name": .string(timer.handlerName)])],
-                    isLoad: false, contextOverride: (timer.owner, timer.scriptName)
-                )
-                state.eventBus.raise(
-                    kind: .timerFired, subject: timer.owner, payload: ["name": .string(timer.handlerName)],
-                    source: .engine, tick: tick
-                )
+            let scriptKey = timer.owner.canonical + "#" + timer.scriptName
+            guard case .live = graph.resolve(timer.owner) else {
+                // Unloaded blocks/entities and disconnected LAN players may become live again;
+                // their durable timers remain overdue without consuming CPU beyond this bounded
+                // 256-entry scan.
+                continue
             }
+            guard let record = scriptStore.get(timer.owner, timer.scriptName), record.enabled else {
+                timers.removeAll { $0.id == timer.id }
+                continue
+            }
+            guard let instance = instances[scriptKey], instance.live, definitionIsCurrent(instance) else {
+                // A present enabled script may still be loading or waiting for a retry after an
+                // edit; keep its timer until the lifecycle reconciliation reaches a terminal
+                // live/absent state.
+                continue
+            }
+            guard let fn = namedHandlers[handlerKey] else {
+                // A completed live module that did not register the persisted handler can never
+                // satisfy this timer without an edit, and that edit will install a fresh timer.
+                timers.removeAll { $0.id == timer.id }
+                continue
+            }
+            guard nextInstructionSlice > 0 else { break }
+            let key = timer.owner.canonical + "#" + timer.scriptName + "#timer#\(timer.id)#\(tick)"
+            let timerEvent = ScriptEvent(
+                seq: 0, tick: tick, kind: .timerFired, subject: timer.owner,
+                payload: ["name": .string(timer.handlerName)], source: .engine
+            )
+            let result = runNew(
+                key: key, function: fn, args: [eventValue(timerEvent)], isLoad: false,
+                contextOverride: (timer.owner, timer.scriptName), causedBy: timerEvent
+            )
+            if case .deferred = result { break }
+            state.eventBus.raise(
+                kind: .timerFired, subject: timer.owner, payload: ["name": .string(timer.handlerName)],
+                source: .engine, tick: tick,
+                subjectType: eventSubjectType(for: timer.owner)
+            )
             if let interval = timer.intervalTicks {
                 if let idx = timers.firstIndex(where: { $0.id == timer.id }) {
-                    timers[idx].wakeTick = tick + interval
+                    let (next, overflow) = tick.addingReportingOverflow(interval)
+                    timers[idx].wakeTick = overflow ? Int64.max : next
                 }
             } else {
                 timers.removeAll { $0.id == timer.id }
@@ -610,10 +1141,11 @@ public final class ScriptRuntime {
         return aiInFlightCount < Self.aiMaxInFlightPerWorld && aiRequestsThisWindow < 30
     }
 
-    func enqueueAIRequest(prompt: String) -> UInt64 {
+    func enqueueAIRequest(prompt: String, mode: AIRequestMode) -> UInt64 {
         let id = nextAIRequestID
         nextAIRequestID += 1
         aiOutbox.append(AIOutboxEntry(id: id, prompt: prompt))
+        aiRequestModes[id] = mode
         aiInFlightCount += 1
         aiRequestsThisWindow += 1
         return id
@@ -631,50 +1163,182 @@ public final class ScriptRuntime {
     ///     `submitAIReply` has queued up since the last phase — in
     ///     `requestId` order, per §9.6's own wording.
     public func runAIInbox() {
+        let previousReserve = downstreamInstructionReserve
+        downstreamInstructionReserve = 3 * Self.instructionAccountingQuantum
+        defer { downstreamInstructionReserve = previousReserve }
+        refreshInstructionBudget()
         if let handoff = outboxHandoff {
             if !aiOutbox.isEmpty {
                 let batch = aiOutbox
                 aiOutbox.removeAll()
-                for entry in batch { handoff(entry.id, entry.prompt) }
+                for entry in batch where aiRequestModes[entry.id] != nil {
+                    handoff(entry.id, entry.prompt)
+                }
             }
-            guard !incomingAIReplies.isEmpty else { return }
-            let replies = incomingAIReplies.sorted { $0.id < $1.id }
-            incomingAIReplies.removeAll()
-            for reply in replies { deliverAIReply(id: reply.id, text: reply.text, errorText: reply.error) }
-            return
+        } else if !aiOutbox.isEmpty {
+            let batch = aiOutbox
+            aiOutbox.removeAll()
+            for entry in batch where aiRequestModes[entry.id] != nil {
+                let reply = aiResponder(entry.prompt)
+                incomingAIReplies.append((
+                    id: entry.id, text: reply, error: reply == nil ? "timeout" : nil
+                ))
+            }
         }
-        guard !aiOutbox.isEmpty else { return }
-        let batch = aiOutbox
-        aiOutbox.removeAll()
-        for entry in batch {
-            let reply = aiResponder(entry.prompt)
-            deliverAIReply(id: entry.id, text: reply, errorText: reply == nil ? "timeout" : nil)
+
+        guard !incomingAIReplies.isEmpty else { return }
+        let replies = incomingAIReplies.sorted { $0.id < $1.id }
+        incomingAIReplies.removeAll()
+        for (index, reply) in replies.enumerated() {
+            if !deliverAIReply(id: reply.id, text: reply.text, errorText: reply.error) {
+                // Request-id order is part of the deterministic inbox contract. Retain the whole
+                // suffix rather than letting a later fire-and-forget reply overtake this waiter.
+                incomingAIReplies.append(contentsOf: replies[index...])
+                break
+            }
         }
     }
 
-    private func deliverAIReply(id: UInt64, text: String?, errorText: String?) {
-        aiInFlightCount = max(0, aiInFlightCount - 1)
-        let waiting = scheduled.filter { $0.awaitToken == id }
-        if waiting.isEmpty {
-            // `ai.ask` path: deliver as an event to the requester. The
-            // requester ref/script name is not tracked in the outbox in
-            // this change (ask is fire-and-forget to `world`, matching
-            // the "requesting object" wording loosely) — a documented
-            // simplification; `ai.await` is the fully-wired path.
+    /// Returns `true` only after the reply has been consumed. An awaited reply whose coroutine
+    /// cannot receive an instruction slice remains completely transactional: the ordered inbox
+    /// entry, request mode, in-flight slot, and suspended coroutine all survive until a later tick.
+    private func deliverAIReply(id: UInt64, text: String?, errorText: String?) -> Bool {
+        let boundedText = text.map(boundedScriptVisibleAIText)
+        let boundedError = errorText.map(boundedScriptVisibleAIText)
+        guard let mode = aiRequestModes[id] else {
+            // The owning script/session canceled this request. A broker reply can still arrive,
+            // but it no longer owns a coroutine or an event destination in this runtime.
+            return true
+        }
+        switch mode {
+        case .ask:
+            aiRequestModes.removeValue(forKey: id)
+            aiInFlightCount = max(0, aiInFlightCount - 1)
             state.eventBus.raise(
                 kind: .aiReplied, subject: .world,
-                payload: ["requestId": .int(Int64(id)), "text": text.map { .string($0) } ?? .null,
-                          "error": errorText.map { .string($0) } ?? .null],
+                payload: ["requestId": .int(Int64(id)), "text": boundedText.map { .string($0) } ?? .null,
+                          "error": boundedError.map { .string($0) } ?? .null],
                 source: .engine, tick: host.currentTick
             )
-        } else {
-            for run in waiting {
-                scheduled.removeAll { $0.key == run.key && $0.ordinal == run.ordinal }
-                let args: [ScriptValue] = text != nil
-                    ? [.string(text!), .null] : [.null, .string(errorText ?? "timeout")]
-                _ = resumeAndSchedule(key: run.key, coroutine: run.coroutine, args: args, isLoad: false, context: nil)
+            return true
+        case .await:
+            let waiting = scheduled.filter { $0.awaitToken == id }.sorted { $0.ordinal < $1.ordinal }
+            guard !waiting.isEmpty else {
+                aiRequestModes.removeValue(forKey: id)
+                aiInFlightCount = max(0, aiInFlightCount - 1)
+                return true
             }
+            guard nextInstructionSlice > 0 else { return false }
+            for run in waiting {
+                _ = removeScheduledRun(key: run.key, ordinal: run.ordinal)
+                guard scheduledRunIsCurrent(run) else {
+                    try? lua.close(run.coroutine)
+                    if run.isLoad, instances[run.key] != nil {
+                        unloadInstance(
+                            key: run.key, runUnloadHandler: false, removeDurableTimers: true,
+                            dropSubscriptions: true
+                        )
+                        failedDefinitions.removeValue(forKey: run.key)
+                    }
+                    continue
+                }
+                let args: [ScriptValue] = boundedText != nil
+                    ? [.string(boundedText!), .null] : [.null, .string(boundedError ?? "timeout")]
+                let result = resumeScheduledRun(run, args: args)
+                if case .deferred = result {
+                    // Defensive against a future scheduler policy changing between admission and
+                    // resume. The caller retains this reply and every higher request-id suffix.
+                    _ = appendSuspendedRun(run)
+                    return false
+                }
+                if run.isLoad { finishResumedLoad(key: run.key, result: result, tick: host.currentTick) }
+            }
+            aiRequestModes.removeValue(forKey: id)
+            aiInFlightCount = max(0, aiInFlightCount - 1)
+            return true
         }
+    }
+
+    /// Lua's `ScriptValue` string ceiling is measured in UTF-8 bytes, not Swift `Character`s.
+    /// Clamp every reply at Core's final script-visible boundary as well as at the app broker so
+    /// injected/test responders and future transports cannot fault `ai.await` argument pushes or
+    /// `ai.replied` event delivery with an otherwise successful response.
+    private func boundedScriptVisibleAIText(_ value: String) -> String {
+        let limit = max(0, budgets.valueStringBytes)
+        guard value.utf8.count > limit else { return value }
+        var result = ""
+        result.reserveCapacity(min(limit, value.utf8.count))
+        var byteCount = 0
+        for character in value {
+            let characterText = String(character)
+            let characterBytes = characterText.utf8.count
+            guard characterBytes <= limit - byteCount else { break }
+            result.append(character)
+            byteCount += characterBytes
+        }
+        return result
+    }
+
+    private func cancelAIRequest(_ id: UInt64) {
+        guard aiRequestModes.removeValue(forKey: id) != nil else { return }
+        aiCancellationHandoff?(id)
+        aiInFlightCount = max(0, aiInFlightCount - 1)
+        aiOutbox.removeAll { $0.id == id }
+        incomingAIReplies.removeAll { $0.id == id }
+    }
+
+    private func finishResumedLoad(key: String, result: RunResult, tick: Int64) {
+        guard let instance = instances[key] else { return }
+        switch result {
+        case .completed:
+            guard definitionIsCurrent(instance) else {
+                unloadInstance(
+                    key: key, runUnloadHandler: false, removeDurableTimers: true,
+                    dropSubscriptions: true
+                )
+                failedDefinitions.removeValue(forKey: key)
+                return
+            }
+            var live = instance
+            live.live = true
+            instances[key] = live
+            failedDefinitions.removeValue(forKey: key)
+            scriptStore.storeLastError(live.ref, live.name, nil)
+            state.eventBus.raise(
+                kind: .load, subject: live.ref, payload: ["name": .string(live.name)],
+                source: .engine, tick: tick,
+                subjectType: eventSubjectType(for: live.ref)
+            )
+        case .yielded:
+            break
+        case .deferred:
+            break
+        case .faulted:
+            failLoad(key: key, definition: instance.definition)
+        }
+    }
+
+    private func scheduledRunIsCurrent(_ run: ScheduledRun) -> Bool {
+        let scriptKey: String
+        if run.isLoad {
+            scriptKey = run.key
+        } else if let parsed = parseKey(run.key) {
+            scriptKey = parsed.owner.canonical + "#" + parsed.name
+        } else {
+            return false
+        }
+        guard let instance = instances[scriptKey] else { return false }
+        // A load coroutine belongs to a not-yet-live instance; every other suspended coroutine
+        // belongs to a module/handler that must still be live and unchanged.
+        return definitionIsCurrent(instance) && (run.isLoad || instance.live)
+    }
+
+    private func resumeScheduledRun(_ run: ScheduledRun, args: [ScriptValue]) -> RunResult {
+        resumeAndSchedule(
+            key: run.key, coroutine: run.coroutine, args: args,
+            isLoad: run.isLoad, context: nil, causedBy: run.causedBy,
+            handlerEventCount: run.handlerEventCount
+        )
     }
 
     /// ai-object-graph (change 2): the broker calls this — from any thread
@@ -699,29 +1363,117 @@ public final class ScriptRuntime {
     /// `GameCore+Scripting.handleScriptedChunkUnload` (chunk unload) and
     /// `exitToTitle` (whole-session shutdown).
     func unloadScripts(for refs: [ObjectRef]) {
-        guard !instances.isEmpty else { return }
-        let refSet = Set(refs.map(\.canonical))
-        let keys = instances.keys.filter { key in
-            guard let parsed = parseKey(key) else { return false }
-            return refSet.contains(parsed.owner.canonical)
-        }
-        for key in keys.sorted() {
-            guard let instance = instances[key] else { continue }
-            if let unloadFn = namedHandlers[key + "#unload"] {
-                _ = runNew(key: key + "#unload", function: unloadFn, args: [], isLoad: false)
+        for ref in refs.sorted(by: { utf8Less($0.canonical, $1.canonical) }) {
+            let refKey = ref.canonical
+            var names = knownDefinitionNamesByRef[refKey] ?? []
+            names.formUnion(scriptStore.list(ref).map(\.name))
+            for name in names.sorted(by: utf8Less) {
+                let key = refKey + "#" + name
+                pendingDefinitionLoads.removeValue(forKey: key)
+                if let instance = instances[key] {
+                    unloadInstance(
+                        key: key, runUnloadHandler: instance.live, removeDurableTimers: false,
+                        dropSubscriptions: false
+                    )
+                }
+                failedDefinitions.removeValue(forKey: key)
             }
-            instance.environment.destroy()
-            instances.removeValue(forKey: key)
-            scheduled.removeAll { $0.key.hasPrefix(key) }
-            namedHandlers = namedHandlers.filter { !$0.key.hasPrefix(key + "#") }
+            knownDefinitionNamesByRef.removeValue(forKey: refKey)
+        }
+    }
+
+    private func failLoad(key: String, definition: ScriptRecord) {
+        let retainedTimerIDs = instances[key]?.timerIDsAtLoadStart ?? []
+        let owner = instances[key]?.ref
+        let scriptName = instances[key]?.name
+        unloadInstance(
+            key: key, runUnloadHandler: false, removeDurableTimers: false,
+            dropSubscriptions: true
+        )
+        if let owner, let scriptName {
+            timers.removeAll {
+                $0.owner == owner && $0.scriptName == scriptName && !retainedTimerIDs.contains($0.id)
+            }
+        }
+        failedDefinitions[key] = definition
+    }
+
+    private func unloadInstance(
+        key: String, runUnloadHandler: Bool, removeDurableTimers: Bool,
+        dropSubscriptions: Bool
+    ) {
+        guard let instance = instances[key] else { return }
+        if runUnloadHandler, let unloadFn = namedHandlers[key + "#unload"] {
+            let unloadError: String? = {
+                let previousScript = currentScript
+                let previousUnloadState = unloadActive
+                currentScript = (instance.ref, instance.name)
+                unloadActive = true
+                defer {
+                    unloadActive = previousUnloadState
+                    currentScript = previousScript
+                }
+                do {
+                    switch try lua.call(
+                        unloadFn, args: [], slice: budgets.handlerSliceInstructions
+                    ) {
+                    case .success:
+                        return nil
+                    case .failure(let fault):
+                        return fault.message
+                    }
+                } catch {
+                    return "script runtime could not run unload"
+                }
+            }()
+            // An edit/detach unloads a stale instance after its persisted definition has
+            // already changed. Preserve diagnostics for a still-current chunk/shutdown
+            // unload, but never write an old callback's fault onto the replacement record.
+            if let unloadError, definitionIsCurrent(instance) {
+                scriptStore.storeLastError(instance.ref, instance.name, unloadError)
+                state.eventBus.raise(
+                    kind: .scriptFaulted, subject: instance.ref,
+                    payload: ["name": .string(instance.name), "message": .string(unloadError)],
+                    source: .engine, tick: host.currentTick,
+                    subjectType: eventSubjectType(for: instance.ref)
+                )
+            }
+        }
+        let discardedRuns = scheduled.filter { $0.key == key || $0.key.hasPrefix(key + "#") }
+        for run in discardedRuns { try? lua.close(run.coroutine) }
+        let canceledAIRequestIDs = Set(discardedRuns.compactMap(\.awaitToken))
+        if !canceledAIRequestIDs.isEmpty {
+            for id in canceledAIRequestIDs { cancelAIRequest(id) }
+        }
+        if definitionIsCurrent(instance) {
+            let words = instance.randomAdapter.inner.stateWords
+            scriptStore.storeRNGWords(
+                instance.ref, instance.name, [words.0, words.1, words.2, words.3]
+            )
+        }
+        instance.environment.destroy()
+        instances.removeValue(forKey: key)
+        _ = removeScheduledRuns { $0.key == key || $0.key.hasPrefix(key + "#") }
+        namedHandlers = namedHandlers.filter { !$0.key.hasPrefix(key + "#") }
+        if removeDurableTimers {
+            timers.removeAll { $0.owner == instance.ref && $0.scriptName == instance.name }
+        }
+        if dropSubscriptions {
+            state.eventBus.dropScriptOwnedSubscriptions(owner: instance.ref, scriptName: instance.name)
         }
     }
 
     /// Whole-session teardown (`exitToTitle`): unload every live instance,
     /// synchronously, before the world record is captured for save.
     func unloadAllForShutdown() {
-        let refs = Array(Set(instances.values.map(\.ref)))
-        unloadScripts(for: refs)
+        var refs = Set(instances.values.map(\.ref))
+        for canonical in knownDefinitionNamesByRef.keys {
+            if let ref = ObjectRef.parse(canonical) { refs.insert(ref) }
+        }
+        for key in failedDefinitions.keys {
+            if let parsed = parseKey(key) { refs.insert(parsed.owner) }
+        }
+        unloadScripts(for: Array(refs))
     }
 
     /// §8.6: persists every live instance's current RNG stream words. Called
@@ -839,10 +1591,14 @@ public final class ScriptRuntime {
     /// zero-cost invariant (a world with no scripts has empty collections here, so this is
     /// effectively free even when F3 is showing).
     public var summary: ScriptRuntimeSummary {
-        ScriptRuntimeSummary(
+        refreshInstructionBudget()
+        return ScriptRuntimeSummary(
             liveScripts: instances.values.filter(\.live).count,
             suspendedCoroutines: scheduled.count,
-            durableTimers: timers.count
+            durableTimers: timers.count,
+            instructionsUsedThisTick: instructionsUsedThisTick,
+            instructionBudgetRemaining: max(0, instructionTokens),
+            instructionBucketCapacity: max(0, budgets.perTickBucket)
         )
     }
 
@@ -875,7 +1631,8 @@ public final class ScriptRuntime {
     /// throwaway environment. The method never throws; callers decide whether a failure is
     /// blocking (editor Check) or an advisory warning (AI attach validation).
     public func dryRunOutcome(
-        source: String, owner: ObjectRef, mode: ScriptMode, handlerEvent: EventKind? = nil
+        source: String, owner: ObjectRef, mode: ScriptMode, handlerEvent: EventKind? = nil,
+        handlerSubject: ObjectRef? = nil, handlerSubjectIsExact: Bool = true
     ) -> ScriptDryRunOutcome {
         guard case .live = graph.resolve(owner) else { return .failure("\(owner.canonical) is not loaded") }
         let wasDryRun = dryRunActive
@@ -896,7 +1653,22 @@ public final class ScriptRuntime {
             return .failure(fault.message)
         case .success(let fn):
             let selectedEvent = handlerEvent ?? EventKind.parse("dryrun") ?? .load
-            if mode == .handler, EventDescriptorRegistry.descriptor(for: selectedEvent) == nil {
+            let selectedSubject = handlerSubject ?? owner
+            let selectedDescriptor: ScriptEventDescriptor?
+            if handlerSubjectIsExact {
+                let subjectRecord: ObjectRecord
+                if case .live(let live) = graph.resolve(selectedSubject) {
+                    subjectRecord = AttributeStore.readRecord(live, host: host)
+                } else {
+                    subjectRecord = ObjectRecord()
+                }
+                selectedDescriptor = EventDescriptorRegistry.descriptor(
+                    for: selectedEvent, declaredOn: selectedSubject, in: subjectRecord
+                )
+            } else {
+                selectedDescriptor = EventDescriptorRegistry.descriptor(for: selectedEvent)
+            }
+            if mode == .handler, selectedDescriptor == nil {
                 return .compiledOnly(
                     "custom event '\(selectedEvent.rawValue)' has no declared payload schema, so its handler was not executed"
                 )
@@ -916,7 +1688,9 @@ public final class ScriptRuntime {
                 // The editor and AI attach flow pass the handler's selected trigger. The custom
                 // fallback returned `compiledOnly` above, so only a registry-described event is
                 // ever executed with representative payload data.
-                let event = syntheticDryRunEvent(kind: selectedEvent, subject: owner)
+                let event = syntheticDryRunEvent(
+                    kind: selectedEvent, subject: selectedSubject, descriptor: selectedDescriptor
+                )
                 args = [
                     handleValue(for: owner), handleValue(for: .world), handleValue(for: .player),
                     eventValue(event),
@@ -951,10 +1725,12 @@ public final class ScriptRuntime {
     /// Compatibility helper for existing validation callers: suspension is legal attached-script
     /// behavior, while actual dry-run failures retain the historical optional-message shape.
     public func dryRun(
-        source: String, owner: ObjectRef, mode: ScriptMode, handlerEvent: EventKind? = nil
+        source: String, owner: ObjectRef, mode: ScriptMode, handlerEvent: EventKind? = nil,
+        handlerSubject: ObjectRef? = nil, handlerSubjectIsExact: Bool = true
     ) -> String? {
         if case .failure(let message) = dryRunOutcome(
-            source: source, owner: owner, mode: mode, handlerEvent: handlerEvent
+            source: source, owner: owner, mode: mode, handlerEvent: handlerEvent,
+            handlerSubject: handlerSubject, handlerSubjectIsExact: handlerSubjectIsExact
         ) {
             return message
         }
@@ -965,9 +1741,11 @@ public final class ScriptRuntime {
     /// order and fixed non-null values make this deterministic. Nullable fields intentionally use
     /// one valid typed value so Check can exercise guarded and direct payload access without a
     /// missing live event becoming a false runtime fault.
-    private func syntheticDryRunEvent(kind: EventKind, subject: ObjectRef) -> ScriptEvent {
+    private func syntheticDryRunEvent(
+        kind: EventKind, subject: ObjectRef, descriptor: ScriptEventDescriptor?
+    ) -> ScriptEvent {
         var payload: [String: AttrValue] = [:]
-        if let descriptor = EventDescriptorRegistry.descriptor(for: kind) {
+        if let descriptor {
             for field in descriptor.payload {
                 payload[field.name] = representativeDryRunValue(for: field, subject: subject)
             }
@@ -1016,26 +1794,6 @@ public final class ScriptRuntime {
         }
     }
 
-    // MARK: - discovery (bounded scan, only when `state.anyScriptsAttached`)
-
-    private func forEachScriptedObject(_ body: (ObjectRef, ScriptRecord) -> Void) {
-        for ref in [ObjectRef.world, .dimension(.overworld), .dimension(.nether), .dimension(.end)] {
-            for record in scriptStore.list(ref) { body(ref, record) }
-        }
-        guard let w = host.world(for: host.currentDimension) else { return }
-        for e in w.entities {
-            guard let ent = e as? Entity, !ent.dead else { continue }
-            let ref = scriptRef(for: ent)
-            for record in scriptStore.list(ref) { body(ref, record) }
-        }
-        for chunk in w.chunks.values where !chunk.objectRecords.isEmpty {
-            for cellIndex in chunk.objectRecords.keys.sorted() {
-                let (x, y, z) = chunk.idxToWorld(cellIndex)
-                let ref = ObjectRef.block(dim: w.dim, x: x, y: y, z: z)
-                for record in scriptStore.list(ref) { body(ref, record) }
-            }
-        }
-    }
 }
 
 

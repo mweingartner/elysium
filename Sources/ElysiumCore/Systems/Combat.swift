@@ -12,14 +12,15 @@ private func typeMatchesAny(_ type: String, _ words: [String]) -> Bool {
 // Player melee attack
 // ---------------------------------------------------------------------------
 public func playerAttack(_ player: Player, _ target: Entity) {
+    let actor = player.scriptEventActorIdentity
     let strength = player.attackStrength()
     player.resetAttackCooldown()
     player.attackAnim = 1
     player.lastHurtTarget = target
     // event-bus (change 1b): `player.attacked` (design.md §7.2, "playerAttack").
     player.world.hooks.raiseScriptEvent(
-        .playerAttacked, .player, ["target": .ref(scriptRef(for: target).canonical)],
-        .player, target.type
+        .playerAttacked, actor.ref, ["target": .ref(scriptRef(for: target).canonical)],
+        actor.source, nil
     )
 
     let held = player.mainHand

@@ -17,6 +17,9 @@ public enum AttributeError: Error, Equatable {
     case unsupported
     case invalidName(hint: String?)
     case nameIsBuiltIn
+    /// The shared ObjectRecord namespace already contains an attached script with this name.
+    /// Attribute APIs never replace it; callers must detach the script explicitly first.
+    case nameIsScript
     case invalidValue(AttrValueError)
     case readonly
     case tooManyEntries(limit: Int)
@@ -78,26 +81,79 @@ public struct AttributeStore {
 
     // MARK: - writes
 
+    private struct SetPlan {
+        var live: LiveObject
+        var candidate: ObjectRecord?
+        var oldValue: AttrValue?
+        var value: AttrValue
+    }
+
+    private struct DefinePlan {
+        var live: LiveObject
+        var candidate: ObjectRecord?
+        var oldValue: AttrValue?
+        var value: AttrValue
+        var forced: Bool
+    }
+
+    private struct RemovePlan {
+        var live: LiveObject
+        var candidate: ObjectRecord?
+        var oldValue: AttrValue?
+        var existed: Bool
+        var forced: Bool
+    }
+
     /// Creates or updates a *mutable* custom entry. Refuses a built-in name,
     /// an invalid name/value, a readonly entry, or a cap.
     public func set(
         _ ref: ObjectRef, _ name: String, _ value: AttrValue, by author: Provenance.Author = .player
     ) -> Result<AttrValue, AttributeError> {
+        switch planSet(ref, name, value, by: author) {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let plan):
+            guard let candidate = plan.candidate else { return .success(plan.value) }
+            Self.writeRecord(candidate, to: plan.live, host: graph.host)
+            onChange?(ref, name, plan.oldValue, plan.value, candidate.revision, author)
+            return .success(plan.value)
+        }
+    }
+
+    /// Runs the exact `set` admission path without committing the candidate record or publishing
+    /// `attribute.changed`. Script Check/dry-run uses this instead of accepting mutations blindly.
+    public func validateSet(
+        _ ref: ObjectRef, _ name: String, _ value: AttrValue,
+        by author: Provenance.Author = .player
+    ) -> Result<AttrValue, AttributeError> {
+        planSet(ref, name, value, by: author).map(\.value)
+    }
+
+    private func planSet(
+        _ ref: ObjectRef, _ name: String, _ value: AttrValue, by author: Provenance.Author
+    ) -> Result<SetPlan, AttributeError> {
         if graph.host.isLANClient { return .failure(.lanClient) } // Security (plan) C27
         guard case .live(let live) = graph.resolve(ref) else { return .failure(liveFailure(ref)) }
         if let err = validateNameAndValue(name: name, value: value, kind: ref.kind) { return .failure(err) }
-        var record = Self.readRecord(live, host: graph.host)
-        if case .value(_, let readonly, _)? = record.entries[name], readonly { return .failure(.readonly) }
+        let record = Self.readRecord(live, host: graph.host)
+        if case .script? = record.entries[name] { return .failure(.nameIsScript) }
+        if case .value(let existing, let readonly, _)? = record.entries[name] {
+            if readonly { return .failure(.readonly) }
+            if existing == value {
+                return .success(SetPlan(
+                    live: live, candidate: nil, oldValue: existing, value: value
+                ))
+            }
+        }
         guard let newRevision = bumpedRevision(record.revision) else { return .failure(.revisionOverflow) }
         var candidate = record
         candidate.entries[name] = .value(value, readonly: false, provenance: Provenance(createdBy: author, createdTick: graph.host.currentTick))
         candidate.revision = newRevision
         if let err = checkCaps(candidate, live: live, ref: ref) { return .failure(err) }
-        let old = Self.extractValue(record.entries[name])
-        record = candidate
-        Self.writeRecord(record, to: live, host: graph.host)
-        onChange?(ref, name, old, value, record.revision, author)
-        return .success(value)
+        return .success(SetPlan(
+            live: live, candidate: candidate,
+            oldValue: Self.extractValue(record.entries[name]), value: value
+        ))
     }
 
     /// Creates or overwrites an entry, optionally `readonly`. `force` is
@@ -107,14 +163,52 @@ public struct AttributeStore {
         _ ref: ObjectRef, _ name: String, _ value: AttrValue, readonly: Bool, force: Bool = false,
         by author: Provenance.Author = .player
     ) -> Result<(value: AttrValue, forced: Bool), AttributeError> {
+        switch planDefine(ref, name, value, readonly: readonly, force: force, by: author) {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let plan):
+            guard let candidate = plan.candidate else {
+                return .success((plan.value, plan.forced))
+            }
+            Self.writeRecord(candidate, to: plan.live, host: graph.host)
+            if plan.oldValue != plan.value {
+                onChange?(ref, name, plan.oldValue, plan.value, candidate.revision, author)
+            }
+            return .success((plan.value, plan.forced))
+        }
+    }
+
+    /// Runs the exact `define` admission path without committing its candidate record.
+    public func validateDefine(
+        _ ref: ObjectRef, _ name: String, _ value: AttrValue, readonly: Bool,
+        force: Bool = false, by author: Provenance.Author = .player
+    ) -> Result<(value: AttrValue, forced: Bool), AttributeError> {
+        planDefine(ref, name, value, readonly: readonly, force: force, by: author).map {
+            ($0.value, $0.forced)
+        }
+    }
+
+    private func planDefine(
+        _ ref: ObjectRef, _ name: String, _ value: AttrValue, readonly: Bool, force: Bool,
+        by author: Provenance.Author
+    ) -> Result<DefinePlan, AttributeError> {
         if graph.host.isLANClient { return .failure(.lanClient) } // Security (plan) C27
         guard case .live(let live) = graph.resolve(ref) else { return .failure(liveFailure(ref)) }
         if let err = validateNameAndValue(name: name, value: value, kind: ref.kind) { return .failure(err) }
-        var record = Self.readRecord(live, host: graph.host)
+        let record = Self.readRecord(live, host: graph.host)
+        if case .script? = record.entries[name] { return .failure(.nameIsScript) }
         var forced = false
-        if case .value(_, let existingReadonly, _)? = record.entries[name], existingReadonly {
-            guard force else { return .failure(.readonly) }
-            forced = true
+        if case .value(let existingValue, let existingReadonly, _)? = record.entries[name] {
+            if existingValue == value, existingReadonly == readonly {
+                return .success(DefinePlan(
+                    live: live, candidate: nil, oldValue: existingValue, value: value,
+                    forced: false
+                ))
+            }
+            if existingReadonly {
+                guard force else { return .failure(.readonly) }
+                forced = true
+            }
         }
         guard let newRevision = bumpedRevision(record.revision) else { return .failure(.revisionOverflow) }
         var candidate = record
@@ -123,11 +217,10 @@ public struct AttributeStore {
         )
         candidate.revision = newRevision
         if let err = checkCaps(candidate, live: live, ref: ref) { return .failure(err) }
-        let old = Self.extractValue(record.entries[name])
-        record = candidate
-        Self.writeRecord(record, to: live, host: graph.host)
-        onChange?(ref, name, old, value, record.revision, author)
-        return .success((value, forced))
+        return .success(DefinePlan(
+            live: live, candidate: candidate,
+            oldValue: Self.extractValue(record.entries[name]), value: value, forced: forced
+        ))
     }
 
     /// Removes a custom entry. `force` is required for a readonly entry and
@@ -136,19 +229,47 @@ public struct AttributeStore {
     public func remove(
         _ ref: ObjectRef, _ name: String, force: Bool = false, by author: Provenance.Author = .player
     ) -> Result<(existed: Bool, forced: Bool), AttributeError> {
+        switch planRemove(ref, name, force: force) {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let plan):
+            guard let candidate = plan.candidate else {
+                return .success((plan.existed, plan.forced))
+            }
+            Self.writeRecord(candidate, to: plan.live, host: graph.host)
+            onChange?(ref, name, plan.oldValue, nil, candidate.revision, author)
+            return .success((plan.existed, plan.forced))
+        }
+    }
+
+    /// Runs the exact `remove` admission path without committing its candidate record.
+    public func validateRemove(
+        _ ref: ObjectRef, _ name: String, force: Bool = false
+    ) -> Result<(existed: Bool, forced: Bool), AttributeError> {
+        planRemove(ref, name, force: force).map { ($0.existed, $0.forced) }
+    }
+
+    private func planRemove(
+        _ ref: ObjectRef, _ name: String, force: Bool
+    ) -> Result<RemovePlan, AttributeError> {
         if graph.host.isLANClient { return .failure(.lanClient) } // Security (plan) C27
         guard case .live(let live) = graph.resolve(ref) else { return .failure(liveFailure(ref)) }
-        var record = Self.readRecord(live, host: graph.host)
+        let record = Self.readRecord(live, host: graph.host)
+        if case .script? = record.entries[name] { return .failure(.nameIsScript) }
         guard case .value(let oldValue, let readonly, _)? = record.entries[name] else {
-            return .success((existed: false, forced: false))
+            return .success(RemovePlan(
+                live: live, candidate: nil, oldValue: nil, existed: false, forced: false
+            ))
         }
         if readonly, !force { return .failure(.readonly) }
         guard let newRevision = bumpedRevision(record.revision) else { return .failure(.revisionOverflow) }
-        record.entries.removeValue(forKey: name)
-        record.revision = newRevision
-        Self.writeRecord(record, to: live, host: graph.host)
-        onChange?(ref, name, oldValue, nil, record.revision, author)
-        return .success((existed: true, forced: readonly && force))
+        var candidate = record
+        candidate.entries.removeValue(forKey: name)
+        candidate.revision = newRevision
+        return .success(RemovePlan(
+            live: live, candidate: candidate, oldValue: oldValue, existed: true,
+            forced: readonly && force
+        ))
     }
 
     // MARK: - validation / caps
@@ -172,7 +293,7 @@ public struct AttributeStore {
     }
 
     private func checkCaps(_ candidate: ObjectRecord, live: LiveObject, ref: ObjectRef) -> AttributeError? {
-        guard candidate.entries.count <= caps.maxEntriesPerObject else {
+        guard candidate.storageEntryCount <= caps.maxEntriesPerObject else {
             return .tooManyEntries(limit: caps.maxEntriesPerObject)
         }
         let text = ObjectRecordCodec.encode(candidate)

@@ -46,11 +46,22 @@ public struct ScriptEvent: Sendable {
     /// back to live game state (which may already be gone — e.g.
     /// `entity.removed`).
     public let subjectType: String?
+    /// For an attribute transition that changes a block's family, the family at the start of the
+    /// coalesced transition. This is delivery metadata rather than user payload: an observer of
+    /// `kind:block:stone` must receive `stone -> dirt`, even though the live subject is now dirt.
+    /// Coalescing retains the original endpoint and the final `subjectType`, never an intermediate
+    /// family.
+    public let priorSubjectType: String?
+    /// Delivery-only discriminator for the quantized entity-position pseudo-field. A custom
+    /// attribute named `pos` is ordinary extensible state and must not inherit position's special
+    /// unfiltered/recent-event policy or coalesce with a movement sample.
+    public let isSyntheticPositionChange: Bool
 
     public init(
         seq: UInt64, tick: Int64, kind: EventKind, subject: ObjectRef,
         payload: [String: AttrValue], source: EventSource, cascadeDepth: Int = 0,
-        subjectType: String? = nil
+        subjectType: String? = nil, priorSubjectType: String? = nil,
+        isSyntheticPositionChange: Bool = false
     ) {
         self.seq = seq
         self.tick = tick
@@ -60,5 +71,7 @@ public struct ScriptEvent: Sendable {
         self.source = source
         self.cascadeDepth = cascadeDepth
         self.subjectType = subjectType
+        self.priorSubjectType = priorSubjectType
+        self.isSyntheticPositionChange = isSyntheticPositionChange
     }
 }

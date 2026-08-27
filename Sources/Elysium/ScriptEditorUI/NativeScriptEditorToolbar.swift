@@ -188,6 +188,9 @@ final class NativeScriptEditorToolbarView: NSView {
 
     private var backgroundColor = NSColor.windowBackgroundColor
     private var contentInset: CGFloat = 8
+    private weak var coordinator: NativeScriptEditorToolbar.Coordinator?
+    private var presentedEventCandidates: [ScriptEditorEventCandidate] = []
+    private var presentedEventTarget: String?
 
     init(theme: ScriptEditorTheme) {
         super.init(frame: .zero)
@@ -245,6 +248,7 @@ final class NativeScriptEditorToolbarView: NSView {
     }
 
     func connect(to coordinator: NativeScriptEditorToolbar.Coordinator) {
+        self.coordinator = coordinator
         scriptNameField.delegate = coordinator
         handlerEventField.delegate = coordinator
 
@@ -268,11 +272,7 @@ final class NativeScriptEditorToolbarView: NSView {
             NativeScriptEditorToolbar.Coordinator.requestScriptingActivation(_:)
         )
 
-        for item in eventMenuButton.itemArray.dropFirst() {
-            guard !item.isSeparatorItem else { continue }
-            item.target = coordinator
-            item.action = #selector(NativeScriptEditorToolbar.Coordinator.eventSelected(_:))
-        }
+        rebuildEventMenu()
     }
 
     func disconnect() {
@@ -286,9 +286,8 @@ final class NativeScriptEditorToolbarView: NSView {
         saveButton.target = nil
         aiPanelButton.target = nil
         availabilityActionButton.target = nil
-        for item in eventMenuButton.itemArray {
-            item.target = nil
-        }
+        coordinator = nil
+        rebuildEventMenu()
     }
 
     func update(
@@ -305,10 +304,32 @@ final class NativeScriptEditorToolbarView: NSView {
 
         modeControl.selectedSegment = model.mode == .handler ? 1 : 0
         modeControl.setAccessibilityValue(model.mode == .handler ? "Handler" : "Module")
+        let modeHelp = ScriptEditorAuthoringContract.modeHelp(model.mode)
+        modeControl.toolTip = modeHelp
+        modeControl.setAccessibilityHelp(modeHelp)
         handlerEventContainer.isHidden = model.mode != .handler
         if handlerEventField.stringValue != model.handlerEvent {
             handlerEventField.stringValue = model.handlerEvent
         }
+        if presentedEventCandidates != model.handlerEventCandidates
+            || presentedEventTarget != model.target.canonical {
+            presentedEventCandidates = model.handlerEventCandidates
+            presentedEventTarget = model.target.canonical
+            rebuildEventMenu()
+        }
+        let eventHelp = ScriptEditorAuthoringContract.handlerEventHelp(
+            eventName: model.handlerEvent,
+            candidates: model.handlerEventCandidates,
+            targetKind: model.target.kind
+        )
+        handlerEventField.toolTip = eventHelp
+        handlerEventField.setAccessibilityHelp(eventHelp)
+        eventMenuButton.isEnabled = model.mode == .handler && !model.handlerEventCandidates.isEmpty
+        eventMenuButton.toolTip = "Choose a compatible built-in or target-declared event"
+        eventMenuButton.setAccessibilityLabel("Choose a handler event for \(model.targetDisplayName)")
+        eventMenuButton.setAccessibilityHelp(
+            "Lists only events compatible with this \(model.target.kind.rawValue) target, followed by custom events declared on it."
+        )
 
         if let selectedAIItem = aiModeButton.itemArray.first(where: {
             ($0.representedObject as? String) == model.aiCompletionMode.rawValue
@@ -321,7 +342,13 @@ final class NativeScriptEditorToolbarView: NSView {
         let canRequestAI = model.isWorldSessionActive
             && model.aiCompletionMode != .off
             && !model.isRequestingAISuggestion
+            && model.handlerEventValidationError == nil
         aiRequestButton.isEnabled = canRequestAI
+        let aiRequestHelp = model.handlerEventValidationError.map {
+            "\($0) Correct the handler event before asking AI."
+        } ?? "Request one AI suggestion using the selected model (Option-Command-/)"
+        aiRequestButton.toolTip = aiRequestHelp
+        aiRequestButton.setAccessibilityHelp(aiRequestHelp)
         aiRequestButton.isHidden = model.isRequestingAISuggestion
         aiRequestProgress.isHidden = !model.isRequestingAISuggestion
         if model.isRequestingAISuggestion {
@@ -339,10 +366,14 @@ final class NativeScriptEditorToolbarView: NSView {
             checkButton.toolTip = model.scriptingAvailability.detail
         }
         checkButton.setAccessibilityHelp(checkButton.toolTip)
-        runButton.isEnabled = model.scriptingAvailability.canRunOnce
-        runButton.toolTip = model.scriptingAvailability.canRunOnce
-            ? Self.runOnceHelp
-            : model.scriptingAvailability.detail
+        runButton.isEnabled = model.scriptingAvailability.canRunOnce && model.mode == .module
+        if model.mode == .handler {
+            runButton.toolTip = ScriptEditorAuthoringContract.handlerRunOnceUnavailable
+        } else {
+            runButton.toolTip = model.scriptingAvailability.canRunOnce
+                ? Self.runOnceHelp
+                : model.scriptingAvailability.detail
+        }
         runButton.setAccessibilityHelp(runButton.toolTip)
         saveButton.isEnabled = model.scriptingAvailability.canSave
         saveButton.toolTip = model.scriptingAvailability.canSave
@@ -484,8 +515,9 @@ final class NativeScriptEditorToolbarView: NSView {
         modeControl.controlSize = .small
         modeControl.setWidth(65, forSegment: 0)
         modeControl.setWidth(65, forSegment: 1)
-        modeControl.toolTip = "Choose whether this source is a module or one event handler"
+        modeControl.toolTip = ScriptEditorAuthoringContract.modeHelp(.module)
         modeControl.setAccessibilityLabel("Script mode")
+        modeControl.setAccessibilityHelp(ScriptEditorAuthoringContract.modeHelp(.module))
         modeControl.setAccessibilityIdentifier("scriptEditor.mode")
     }
 
@@ -497,7 +529,7 @@ final class NativeScriptEditorToolbarView: NSView {
 
         handlerEventField.controlSize = .small
         handlerEventField.placeholderString = "event name"
-        handlerEventField.toolTip = "Built-in or validated custom event name"
+        handlerEventField.toolTip = "Choose a compatible built-in or target-declared custom event"
         handlerEventField.setAccessibilityLabel("Handler event name")
         handlerEventField.setAccessibilityIdentifier("scriptEditor.handlerEvent")
         handlerEventField.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -506,29 +538,59 @@ final class NativeScriptEditorToolbarView: NSView {
         eventMenuButton.controlSize = .small
         eventMenuButton.bezelStyle = .texturedRounded
         eventMenuButton.imagePosition = .imageOnly
-        eventMenuButton.toolTip = "Choose a shipped event"
-        eventMenuButton.setAccessibilityLabel("Choose a shipped handler event")
+        eventMenuButton.toolTip = "Choose a compatible built-in or target-declared event"
+        eventMenuButton.setAccessibilityLabel("Choose a handler event")
         eventMenuButton.setAccessibilityIdentifier("scriptEditor.handlerEventMenu")
         eventMenuButton.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        rebuildEventMenu()
 
-        let menu = NSMenu(title: "Shipped Events")
+        handlerEventContainer.addArrangedSubview(handlerEventField)
+        handlerEventContainer.addArrangedSubview(eventMenuButton)
+    }
+
+    private func rebuildEventMenu() {
+        let menu = NSMenu(title: "Handler Events")
         let titleItem = NSMenuItem(title: "Choose Event", action: nil, keyEquivalent: "")
         titleItem.image = NSImage(
             systemSymbolName: "chevron.down.circle",
             accessibilityDescription: "Choose Event"
         )
         menu.addItem(titleItem)
+
+        appendEventMenuGroup(
+            title: "Compatible Built-in Events",
+            candidates: presentedEventCandidates.filter { $0.source == .builtIn },
+            to: menu
+        )
+        appendEventMenuGroup(
+            title: presentedEventTarget.map { "Declared on \($0)" } ?? "Declared on Target",
+            candidates: presentedEventCandidates.filter { $0.source == .declaredCustom },
+            to: menu
+        )
+        eventMenuButton.menu = menu
+    }
+
+    private func appendEventMenuGroup(
+        title: String,
+        candidates: [ScriptEditorEventCandidate],
+        to menu: NSMenu
+    ) {
+        guard !candidates.isEmpty else { return }
         menu.addItem(.separator())
-        for event in EventDescriptorRegistry.available {
-            let item = NSMenuItem(title: event.kind.rawValue, action: nil, keyEquivalent: "")
-            item.representedObject = event.kind.rawValue
-            item.toolTip = event.summary
+        let heading = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        heading.isEnabled = false
+        menu.addItem(heading)
+        for candidate in candidates {
+            let item = NSMenuItem(
+                title: candidate.name,
+                action: #selector(NativeScriptEditorToolbar.Coordinator.eventSelected(_:)),
+                keyEquivalent: ""
+            )
+            item.target = coordinator
+            item.representedObject = candidate.name
+            item.toolTip = candidate.accessibilityDescription
             menu.addItem(item)
         }
-        eventMenuButton.menu = menu
-
-        handlerEventContainer.addArrangedSubview(handlerEventField)
-        handlerEventContainer.addArrangedSubview(eventMenuButton)
     }
 
     private func configureAIControls() {

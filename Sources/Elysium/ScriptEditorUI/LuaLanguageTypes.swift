@@ -101,38 +101,56 @@ struct LuaObjectReferenceCompletion: Equatable, Sendable {
     let displayName: String
     let kind: ObjectKind
     let isLive: Bool
+    /// Custom attributes captured with this exact nearby-object snapshot. This lets a binding such
+    /// as `local door = objects.get("block:...")` offer `door.attrs.<name>` without pretending the
+    /// same names apply to every block in the world.
+    let customAttributes: [LuaCustomAttributeCompletion]
 
-    init(canonicalRef: String, displayName: String, kind: ObjectKind, isLive: Bool = true) {
+    init(
+        canonicalRef: String, displayName: String, kind: ObjectKind, isLive: Bool = true,
+        customAttributes: [LuaCustomAttributeCompletion] = []
+    ) {
         self.canonicalRef = canonicalRef
         self.displayName = displayName
         self.kind = kind
         self.isLive = isLive
+        self.customAttributes = customAttributes
     }
 }
 
 struct LuaLanguageEnvironment: Equatable, Sendable {
     var targetKind: ObjectKind
+    var targetCanonicalRef: String?
     /// Canonical built-in names proven applicable to the current live target. `nil` means the
     /// editor has no authoritative per-object snapshot (for example a LAN guest).
     var targetApplicableBuiltInAttributes: Set<String>?
     var targetCustomAttributes: [LuaCustomAttributeCompletion]
     var objectReferences: [LuaObjectReferenceCompletion]
+    var scriptMode: ScriptMode
     var handlerEvent: String?
+    var eventCandidates: [ScriptEditorEventCandidate]
     var isYieldable: Bool
 
     init(
         targetKind: ObjectKind,
+        targetCanonicalRef: String? = nil,
         targetApplicableBuiltInAttributes: Set<String>? = nil,
         targetCustomAttributes: [LuaCustomAttributeCompletion] = [],
         objectReferences: [LuaObjectReferenceCompletion] = [],
+        scriptMode: ScriptMode = .module,
         handlerEvent: String? = nil,
+        eventCandidates: [ScriptEditorEventCandidate]? = nil,
         isYieldable: Bool = true
     ) {
         self.targetKind = targetKind
+        self.targetCanonicalRef = targetCanonicalRef
         self.targetApplicableBuiltInAttributes = targetApplicableBuiltInAttributes
         self.targetCustomAttributes = targetCustomAttributes
         self.objectReferences = objectReferences
+        self.scriptMode = scriptMode
         self.handlerEvent = handlerEvent
+        self.eventCandidates = eventCandidates
+            ?? ScriptEditorEventCatalog.candidates(targetKind: targetKind)
         self.isYieldable = isYieldable
     }
 }
@@ -147,7 +165,9 @@ indirect enum LuaInferredType: Equatable, Sendable {
     case function(signature: String)
     case module(String)
     case object(ObjectKind?)
+    case exactObject(ObjectKind?, canonicalRef: String)
     case attributes(ObjectKind?)
+    case exactAttributes(ObjectKind?, canonicalRef: String)
     case event(String?)
     case table([String: LuaInferredType])
     case list(LuaInferredType)
@@ -162,8 +182,10 @@ indirect enum LuaInferredType: Equatable, Sendable {
         case .string: "string"
         case .function(let signature): signature
         case .module(let name): "\(name) module"
-        case .object(let kind): kind.map { "\($0.rawValue) handle" } ?? "object handle"
-        case .attributes(let kind): kind.map { "\($0.rawValue) attributes" } ?? "custom attributes"
+        case .object(let kind), .exactObject(let kind, _):
+            kind.map { "\($0.rawValue) handle" } ?? "object handle"
+        case .attributes(let kind), .exactAttributes(let kind, _):
+            kind.map { "\($0.rawValue) attributes" } ?? "custom attributes"
         case .event(let name): name.map { "\($0) event" } ?? "event"
         case .table: "table"
         case .list(let element): "list<\(element.displayName)>"

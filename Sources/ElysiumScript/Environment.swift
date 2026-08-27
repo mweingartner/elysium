@@ -122,18 +122,18 @@ extension LuaState {
         record.destroyed = true
         environments.removeValue(forKey: environment.envId)
         guard !isClosed, let pointer else { return }
-        // F3 (test.md defect): release every registry ref this environment anchored
-        // on the Swift side (compiled chunks — each keeps _ENV reachable through its
-        // own upvalue, independent of envRef) before dropping the environment's own
-        // ref, and drop the fidTable entries for its host-binding closures (note N4)
-        // so the `HostFunction`/`ScriptEnvironment` they retain are not kept alive
-        // forever. elysium_destroy_environment (C) then reclaims the rest of the
-        // per-environment object graph (hidden tables, proxies, _ENV's metatable) by
-        // un-marking it from the host-owned set before unref'ing envRef itself.
-        for ref in record.compiledRefs {
+        // Release every registry ref this environment anchored on the Swift side:
+        // compiled chunks and callback arguments marshaled to host code both keep
+        // _ENV reachable through an upvalue, independent of envRef. Then drop the
+        // fidTable entries for its host-binding closures so the
+        // `HostFunction`/`ScriptEnvironment` they retain are not kept alive forever.
+        // elysium_destroy_environment (C) reclaims the rest of the per-environment
+        // object graph (hidden tables, proxies, _ENV's metatable) by un-marking it
+        // from the host-owned set before unref'ing envRef itself.
+        for ref in record.functionRefs {
             luaL_unref(pointer, elysium_registryindex(), ref)
         }
-        record.compiledRefs.removeAll()
+        record.functionRefs.removeAll()
         for fid in record.hostBindingFids {
             fidTable.removeValue(forKey: fid)
         }
@@ -141,9 +141,9 @@ extension LuaState {
         elysium_destroy_environment(pointer, record.envRef, environment.envId)
     }
 
-    /// `true` for a function/coroutine not tied to any one environment (an arbitrary
-    /// `ScriptArgument.function` extracted from a script call, `envId == nil`); `false`
-    /// once the owning environment has been destroyed (design.md Condition 30).
+    /// `true` for a genuinely state-wide function/coroutine (`envId == nil`); `false`
+    /// once an environment-owned compiled function or callback has been destroyed
+    /// (design.md Condition 30).
     func isEnvironmentAlive(_ envId: UInt64?) -> Bool {
         guard let envId else { return true }
         return environments[envId] != nil
@@ -192,7 +192,7 @@ extension LuaState {
         // A compiled chunk's upvalue 1 is this environment's _ENV table (bound just
         // above), so as long as this ref survives, _ENV stays reachable through it
         // regardless of the environment's own envRef being unref'd on destroy.
-        environments[environment.envId]?.compiledRefs.append(ref)
+        environments[environment.envId]?.functionRefs.append(ref)
         return .success(ScriptFunction(stateIdentity: identity, envId: environment.envId, ref: ref))
     }
 }

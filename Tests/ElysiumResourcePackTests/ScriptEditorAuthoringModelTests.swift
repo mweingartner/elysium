@@ -90,6 +90,140 @@ final class ScriptEditorAuthoringModelTests: XCTestCase {
         XCTAssertTrue(attribute.isReadOnly)
     }
 
+    func testNearbyObjectCompletionPreservesTypedReadonlyAttributeMetadata() throws {
+        let game = try makeGame()
+        let context = game.scriptingCommandContext()
+        guard case .success = context.store.define(
+            .world, "season_name", .string("summer"), readonly: true
+        ) else {
+            return XCTFail("expected readonly nearby-object attribute definition to succeed")
+        }
+
+        let model = ScriptEditorModel(target: .player, game: game)
+        let world = try XCTUnwrap(model.languageEnvironment.objectReferences.first {
+            $0.canonicalRef == ObjectRef.world.canonical
+        })
+        let attribute = try XCTUnwrap(world.customAttributes.first {
+            $0.name == "season_name"
+        })
+
+        XCTAssertEqual(attribute.typeName, "string")
+        XCTAssertTrue(attribute.isReadOnly)
+        XCTAssertTrue(attribute.summary.contains(ObjectRef.world.canonical))
+    }
+
+    func testHandlerValidationRejectsReservedOrIncompatibleBuiltInsButKeepsCustomNamespaceOpen() throws {
+        let game = try makeGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.mode = .handler
+
+        model.handlerEvent = "unload"
+        XCTAssertTrue(model.handlerEventValidationError?.contains("not an EventBus handler") == true)
+
+        model.handlerEvent = "block.used"
+        XCTAssertTrue(model.handlerEventValidationError?.contains("not raised for player") == true)
+
+        model.handlerEvent = "player.quest_ready"
+        XCTAssertNil(model.handlerEventValidationError)
+    }
+
+    func testChangingHandlerAwayFromAttributeChangedClearsItsAttributeFilter() throws {
+        let game = try makeGame()
+        let store = game.scriptingCommandContext().scriptStore
+        _ = try store.attach(
+            .player, name: "watch", source: "world.attrs.joined = true", mode: .handler,
+            triggers: [Trigger(
+                event: .attributeChanged, attribute: "favorite_color", target: .object(.player)
+            )], by: .player, tick: 0
+        ).get()
+        let model = ScriptEditorModel(target: .player, game: game, existingName: "watch")
+
+        model.handlerEvent = "player.joined"
+        XCTAssertTrue(model.save())
+
+        let saved = try XCTUnwrap(store.get(.player, "watch"))
+        XCTAssertEqual(saved.triggers.first?.event, .playerJoined)
+        XCTAssertNil(saved.triggers.first?.attribute)
+    }
+
+    func testEventCatalogFiltersBuiltInsAndPublishesTargetDeclarations() throws {
+        let game = try makeGame()
+        let context = game.scriptingCommandContext()
+        let eventStore = CustomEventStore(graph: context.graph)
+        guard case .success = eventStore.declare(
+            .player,
+            name: "player.quest_ready",
+            fields: [
+                CustomEventField(name: "quest", type: .string),
+                CustomEventField(name: "reward", type: .integer, isNullable: true),
+            ],
+            summary: "A quest reward is ready."
+        ) else {
+            return XCTFail("expected custom event declaration to succeed")
+        }
+
+        let model = ScriptEditorModel(target: .player, game: game)
+        let names = model.handlerEventCandidates.map(\.name)
+        XCTAssertTrue(names.contains("entity.damaged"))
+        XCTAssertFalse(names.contains("block.used"))
+        let custom = try XCTUnwrap(model.handlerEventCandidates.first {
+            $0.name == "player.quest_ready"
+        })
+        XCTAssertEqual(custom.source, .declaredCustom)
+        XCTAssertEqual(custom.payload.map(\.name), ["quest", "reward"])
+        XCTAssertEqual(custom.payload.last?.isNullable, true)
+        XCTAssertNotNil(custom.provenance)
+    }
+
+    func testAIInsertionPreflightRejectsModeContractViolations() throws {
+        let game = try makeGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+
+        model.mode = .handler
+        model.handlerEvent = "entity.damaged"
+        XCTAssertTrue(model.aiInsertionPreflightFailure(
+            "subscribe(self, \"entity.damaged\", function(ev) say(ev.amount) end)"
+        )?.contains("already the selected event body") == true)
+        XCTAssertNil(model.aiInsertionPreflightFailure("say(ev.amount)"))
+
+        model.mode = .module
+        XCTAssertTrue(model.aiInsertionPreflightFailure("say(ev.amount)")?.contains("no top-level ev") == true)
+        XCTAssertNil(model.aiInsertionPreflightFailure(
+            "on(\"entity.damaged\", function(ev) say(ev.amount) end)"
+        ))
+    }
+
+    func testAIAuthoringContractAndPaletteUseOnlyShippedShapes() throws {
+        let moduleHelp = ScriptEditorAuthoringContract.modeHelp(.module)
+        XCTAssertTrue(moduleHelp.contains("function(ev)"))
+        XCTAssertTrue(moduleHelp.contains("receives exactly one ev"))
+        XCTAssertTrue(moduleHelp.contains("target:onAttribute"))
+
+        let handlerHelp = ScriptEditorAuthoringContract.modeHelp(.handler)
+        XCTAssertTrue(handlerHelp.contains("supplies exactly one event value"))
+        XCTAssertTrue(handlerHelp.contains("target:onAttribute"))
+
+        let setSnippet = try XCTUnwrap(ScriptLanguageSchema.snippets.first {
+            $0.id == "object.set"
+        })
+        XCTAssertEqual(setSnippet.code, "self:set(\"custom_state\", \"active\")")
+        let defineSnippet = try XCTUnwrap(ScriptLanguageSchema.snippets.first {
+            $0.id == "object.define"
+        })
+        XCTAssertEqual(defineSnippet.code, "self:define(\"custom_state\", \"active\")")
+        let attach = try XCTUnwrap(ScriptLanguageSchema.handleMethods.first {
+            $0.name == "attach"
+        })
+        XCTAssertTrue(attach.summary.contains("There is no opts.mode option"))
+
+        let guide = ScriptAIAuthoringGuide.text
+        XCTAssertTrue(guide.contains("attributes and attached scripts share one name namespace"))
+        XCTAssertTrue(guide.contains("There is no mode option"))
+        XCTAssertTrue(guide.contains("only block-specific handle methods"))
+        XCTAssertTrue(guide.contains("engine, player, ai, lan, or script:<owner-ref>"))
+        XCTAssertFalse(guide.contains("{mode="))
+    }
+
     func testBindingSanitizesLuaKeywordsAndUnicodeToASafeIdentifier() throws {
         let game = try makeGame()
         let model = ScriptEditorModel(target: .player, game: game)
@@ -132,13 +266,20 @@ final class ScriptEditorAuthoringModelTests: XCTestCase {
         let manager = LANMultiplayerManager.shared
         let selfRef = ObjectRef.lanPlayer(peerID: manager.localGuestPeerID)
         let attributesJSON = AttrValueCodec.encode(.map(["mood": .string("focused")]))
+        let mirroredEvent = CustomEventDeclaration(
+            kind: try XCTUnwrap(EventKind.parse("guest.action_ready")),
+            fields: [CustomEventField(name: "action", type: .string)],
+            summary: "The host says an action is ready.",
+            provenance: Provenance(createdBy: .player, createdTick: 1)
+        )
         _ = manager.applyReplicationBatchForTesting(LANReplicationBatch(
             tick: 1, fullSnapshot: false,
             objectAttributes: [LANObjectAttributeSnapshot(
                 ref: selfRef.canonical, revision: 1, attrsJSON: attributesJSON,
                 scriptsJSON: LANObjectAttributeSnapshot.encodeScripts([
                     LANScriptMetadata(name: "greet", mode: "module", enabled: true),
-                ])
+                ]),
+                eventsJSON: LANObjectAttributeSnapshot.encodeEvents([mirroredEvent])
             )]
         ))
 
@@ -152,5 +293,11 @@ final class ScriptEditorAuthoringModelTests: XCTestCase {
         XCTAssertEqual(selfEntry.scriptNames, ["greet"])
         XCTAssertEqual(hostEntry.displayName, "Host player")
         XCTAssertEqual(model.targetCustomAttributes, ["mood"])
+        let event = try XCTUnwrap(model.handlerEventCandidates.first {
+            $0.name == "guest.action_ready"
+        })
+        XCTAssertEqual(event.source, .declaredCustom)
+        XCTAssertEqual(event.payload.map(\.name), ["action"])
+        XCTAssertNil(event.provenance, "LAN authoring metadata must not expose host provenance")
     }
 }

@@ -179,6 +179,34 @@ final class AttributeStoreTests: XCTestCase {
         XCTAssertEqual(changes.map(\.4), [1, 2, 3])
     }
 
+    func testEqualValueWritesAreIdempotentAndDoNotRaiseChangeCallbacks() {
+        var (host, store) = makeStore()
+        _ = host.worldsByDim[.overworld]?.setBlock(3, 64, 5, Int(cell(B.chest)))
+        var changes = 0
+        store.onChange = { _, _, _, _, _, _ in changes += 1 }
+
+        guard case .success = store.set(blockRef, "mood", .string("calm")) else {
+            return XCTFail("initial set failed")
+        }
+        let revisionAfterCreate = store.record(blockRef)?.revision
+        guard case .success = store.set(blockRef, "mood", .string("calm")) else {
+            return XCTFail("idempotent set failed")
+        }
+        XCTAssertEqual(store.record(blockRef)?.revision, revisionAfterCreate)
+        XCTAssertEqual(changes, 1)
+
+        guard case .success = store.define(
+            blockRef, "mood", .string("calm"), readonly: true
+        ) else { return XCTFail("readonly metadata update failed") }
+        XCTAssertEqual(changes, 1, "metadata-only readonly changes must not report a value change")
+        let revisionAfterReadonly = store.record(blockRef)?.revision
+        guard case .success = store.define(
+            blockRef, "mood", .string("calm"), readonly: true
+        ) else { return XCTFail("idempotent define failed") }
+        XCTAssertEqual(store.record(blockRef)?.revision, revisionAfterReadonly)
+        XCTAssertEqual(changes, 1)
+    }
+
     // MARK: - sorted list
 
     func testListIsSortedByName() {

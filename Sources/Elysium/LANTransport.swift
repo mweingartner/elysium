@@ -182,6 +182,10 @@ func lanHalvedChunkSectionBatches(_ sections: [LANChunkSectionSnapshot]) -> [[LA
 private final class LANWirePeer {
     let id = UUID()
     let connection: NWConnection
+    /// Non-nil only for the one host socket owned by a client session. The immutable generation
+    /// lets receive callbacks prove they still belong to the session that created them after a
+    /// reconnect or GameCore replacement has invalidated older queued work.
+    let clientSessionGeneration: UInt64?
     var buffer = Data()
     var accepted = false
     var playerID = ""
@@ -213,8 +217,9 @@ private final class LANWirePeer {
     var inFlightSendCount = 0
     var inFlightSendBytes = 0
 
-    init(connection: NWConnection) {
+    init(connection: NWConnection, clientSessionGeneration: UInt64? = nil) {
         self.connection = connection
+        self.clientSessionGeneration = clientSessionGeneration
     }
 
     /// Logs at most once per throttle category per 5s window, per peer, so a flood of
@@ -242,7 +247,13 @@ final class LANMultiplayerManager {
     private var hostedWorldName = ""
     private weak var activeGame: GameCore?
     private var hostReplicationSession = LANMultiplayerHostSession()
+    /// Main-thread-owned. Every access and replacement is confined to an explicit main-thread
+    /// seam below; Network.framework callbacks carry only an immutable generation token until
+    /// their guarded main-thread delivery.
     private var clientReplicationSession = LANMultiplayerClientSession()
+    private weak var clientSessionPeer: LANWirePeer?
+    private let clientSessionGenerationLock = NSLock()
+    private var clientSessionGeneration: UInt64 = 0
     private var hostGhostRegistry = LANHostGhostRegistry()
     private var lastHostReplicationPublish = 0.0
     private var lastHostEntityPublish = 0.0
@@ -255,6 +266,15 @@ final class LANMultiplayerManager {
     private var lastHostPeerPersist = 0.0
     private var hostRPGClockCatchUpWasPending = false
     private var lastHostedRPGRuleEnabled: Bool?
+    /// Main-thread-owned state for bounded scripting-metadata replication. The lexical cursor
+    /// rotates live refs across batches; consecutive revision censuses produce durable tombstones
+    /// until they have been placed in a non-skippable broadcast batch.
+    private var hostObjectAttributeCursor: String?
+    private var hostObjectAttributeRevisions: [String: UInt64] = [:]
+    private var hostObjectAttributeRawRevisions: [String: UInt64] = [:]
+    private var hostObjectAttributeRecordDigests: [String: LANV6SHA256Digest] = [:]
+    private var hostObjectAttributeWireRevisionClock: UInt64 = 0
+    private var hostObjectAttributeTombstones: [String: UInt64] = [:]
     private let hostReplicationInterval = 0.05
     private let hostBackgroundCadence = LANHostReplicationCadence()
     private let clientPlayerStateInterval = 0.05
@@ -359,7 +379,90 @@ final class LANMultiplayerManager {
         }
     }
 
+    @discardableResult
+    private func advanceClientSessionGeneration() -> UInt64 {
+        precondition(Thread.isMainThread)
+        // Finish any frame handler already executing on the serial transport queue before the
+        // boundary becomes visible. Its deferred main-thread work is still rejected by the new
+        // generation below.
+        queue.sync {}
+        clientSessionGenerationLock.lock()
+        defer { clientSessionGenerationLock.unlock() }
+        precondition(clientSessionGeneration < UInt64.max, "LAN client session generation exhausted")
+        clientSessionGeneration += 1
+        return clientSessionGeneration
+    }
+
+    private func currentClientSessionGeneration() -> UInt64 {
+        clientSessionGenerationLock.lock()
+        defer { clientSessionGenerationLock.unlock() }
+        return clientSessionGeneration
+    }
+
+    /// Transport-queue admission for host->client traffic. Both identity and generation are
+    /// required: object identity rejects callbacks from a replaced socket, while generation also
+    /// rejects the same socket after its GameCore owner was replaced.
+    private func isCurrentClientPeer(_ peer: LANWirePeer, generation: UInt64) -> Bool {
+        clientPeer === peer && peer.clientSessionGeneration == generation &&
+            currentClientSessionGeneration() == generation
+    }
+
+    /// Main-thread commit gate for every deferred host->client effect.
+    private func isCurrentClientSession(_ peer: LANWirePeer, generation: UInt64) -> Bool {
+        precondition(Thread.isMainThread)
+        return clientSessionPeer === peer && peer.clientSessionGeneration == generation &&
+            currentClientSessionGeneration() == generation
+    }
+
+    private func enqueueClientSessionMutation(
+        peer: LANWirePeer,
+        generation: UInt64,
+        _ mutation: @MainActor @escaping (LANMultiplayerManager) -> Void
+    ) {
+        // Retain `peer` until this main-thread gate executes. Terminal transport paths clear the
+        // manager's strong `clientPeer` reference before enqueueing their cleanup, and both the
+        // connection callbacks and `clientSessionPeer` are intentionally weak. A weak capture here
+        // could therefore discard the authoritative reset/lifecycle cleanup before it runs.
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self,
+                      self.isCurrentClientSession(peer, generation: generation) else { return }
+                mutation(self)
+            }
+        }
+    }
+
+    /// Starts a new client-side authority epoch. The complete mirror, including inventory/grant
+    /// baselines, belongs to that epoch and must never be partially retained.
+    @discardableResult
+    private func resetClientReplicationSession() -> UInt64 {
+        precondition(Thread.isMainThread)
+        let generation = advanceClientSessionGeneration()
+        clientReplicationSession = LANMultiplayerClientSession()
+        clientSessionPeer = nil
+        return generation
+    }
+
     func attachGame(_ game: GameCore) {
+        precondition(Thread.isMainThread)
+        // Client mirror revisions are scoped to one GameCore/world-session owner. `attachGame`
+        // is also called every replication tick, so preserve the mirror for the same identity but
+        // never let metadata or revision floors bleed into a newly constructed game.
+        if activeGame !== game {
+            let boundary = queue.sync { () -> (endedClient: Bool, hostActive: Bool) in
+                guard let peer = clientPeer else { return (false, listener != nil) }
+                peer.connection.cancel()
+                clientPeer = nil
+                clientConnectDeadline = nil
+                clientWaitingSince = nil
+                return (true, listener != nil)
+            }
+            if boundary.endedClient {
+                clearReplicationHooks(for: activeGame)
+                if !boundary.hostActive { setState(.idle) }
+            }
+            _ = resetClientReplicationSession()
+        }
         activeGame = game
     }
 
@@ -390,13 +493,41 @@ final class LANMultiplayerManager {
         return snapshot.scripts()
     }
 
+    /// Typed custom event declarations replicated for deterministic guest authoring/completion.
+    /// This is metadata only; every guest mutation still travels through a host-validated intent.
+    func mirroredEvents(for ref: ObjectRef) -> [LANCustomEventMetadata]? {
+        precondition(Thread.isMainThread)
+        guard let snapshot = clientReplicationSession.objectAttributes[ref.canonical] else { return nil }
+        return snapshot.events()
+    }
+
     /// Test seam only (`LANGuestCommandGateTests`): applies `batch` straight into
     /// `clientReplicationSession`, the same in-memory mirror the real socket path feeds
     /// (`handleClientReplicationBatch`), without needing a live transport connection — headless
     /// proof that a guest's Inspector reads what got replicated. Never called from production
     /// code (the real path is always a batch received over the wire).
     func applyReplicationBatchForTesting(_ batch: LANReplicationBatch) -> LANReplicationApplyReport {
-        clientReplicationSession.apply(batch)
+        precondition(Thread.isMainThread)
+        return clientReplicationSession.apply(batch)
+    }
+
+    /// Test-only deterministic substitute for a frame whose main-thread commit was queued before
+    /// a client-session boundary. The returned closure uses the production generation gate and
+    /// applies both the mirror and GameCore world path only while its captured epoch is current.
+    func deferredReplicationBatchCommitForTesting(
+        _ batch: LANReplicationBatch
+    ) -> () -> Bool {
+        precondition(Thread.isMainThread)
+        let generation = currentClientSessionGeneration()
+        return { [weak self] in
+            guard let self else { return false }
+            precondition(Thread.isMainThread)
+            return self.applyClientReplicationBatchOnMain(
+                batch,
+                generation: generation,
+                expectedPeer: nil
+            )
+        }
     }
 
     private func configureHostReplicationHooks(for game: GameCore) {
@@ -551,9 +682,14 @@ final class LANMultiplayerManager {
         activeGame = game
         game.lanHostKeepsSimulationRunning = true
         hostReplicationSession = LANMultiplayerHostSession()
-        clientReplicationSession = LANMultiplayerClientSession()
         hostGhostRegistry = LANHostGhostRegistry()
         knownHostPeerIDs.removeAll()
+        hostObjectAttributeCursor = nil
+        hostObjectAttributeRevisions.removeAll()
+        hostObjectAttributeRawRevisions.removeAll()
+        hostObjectAttributeRecordDigests.removeAll()
+        hostObjectAttributeWireRevisionClock = 0
+        hostObjectAttributeTombstones.removeAll()
         var loadedResumeTokens: [String: LANV6Token256] = [:]
         lastHostReplicationPublish = 0
         lastHostEntityPublish = 0
@@ -769,15 +905,9 @@ final class LANMultiplayerManager {
     }
 
     func stop() {
+        precondition(Thread.isMainThread)
         if let game = activeGame, game.hasWorld() {
-            if Thread.isMainThread {
-                terminateAllHostedRPGAuthorities(in: game, publish: false)
-            } else {
-                DispatchQueue.main.sync { [weak self, weak game] in
-                    guard let self, let game else { return }
-                    self.terminateAllHostedRPGAuthorities(in: game, publish: false)
-                }
-            }
+            terminateAllHostedRPGAuthorities(in: game, publish: false)
         }
         // §7.5: flush every tracked peer record to SQLite before tearing the session down, so a
         // host restart (or the app quitting) doesn't lose guest position/inventory progress.
@@ -802,9 +932,15 @@ final class LANMultiplayerManager {
         activeGame?.handleLANConnectionLost(reason: "")
         activeGame = nil
         hostReplicationSession = LANMultiplayerHostSession()
-        clientReplicationSession = LANMultiplayerClientSession()
+        _ = resetClientReplicationSession()
         hostGhostRegistry = LANHostGhostRegistry()
         knownHostPeerIDs.removeAll()
+        hostObjectAttributeCursor = nil
+        hostObjectAttributeRevisions.removeAll()
+        hostObjectAttributeRawRevisions.removeAll()
+        hostObjectAttributeRecordDigests.removeAll()
+        hostObjectAttributeWireRevisionClock = 0
+        hostObjectAttributeTombstones.removeAll()
         lastHostReplicationPublish = 0
         lastHostEntityPublish = 0
         lastHostCompleteEntityPublish = 0
@@ -1089,6 +1225,10 @@ final class LANMultiplayerManager {
     private func drainHostPerPeerEvents(game: GameCore) {
         guard game.hasWorld() else { return }
         let world = game.world
+        _ = drainLANAuthoritativePickupMutations(
+            in: world,
+            into: hostReplicationSession
+        )
         for entity in world.entities {
             guard let proxy = entity as? LANRemotePlayerEntity else { continue }
             let events = proxy.drainPendingDamage()
@@ -1153,11 +1293,17 @@ final class LANMultiplayerManager {
     /// through `game.handleLANConnectionLost`) if the host has gone silent for
     /// `clientSilenceTimeout` — mirrors the host's own reap policy from the client's perspective.
     private func tickClientRobustness() {
-        guard let peer = clientPeer else { return }
+        guard let peer = clientPeer,
+              let generation = peer.clientSessionGeneration,
+              isCurrentClientPeer(peer, generation: generation) else { return }
         let now = Date.timeIntervalSinceReferenceDate
         if now - peer.lastReceiveTime > clientSilenceTimeout {
-            appendStatus("LAN host connection timed out.")
-            disconnectClientDueToLoss(reason: "Connection to the LAN host timed out.")
+            disconnectClientDueToLoss(
+                reason: "Connection to the LAN host timed out.",
+                peer: peer,
+                generation: generation,
+                statusLine: "LAN host connection timed out."
+            )
             return
         }
         if peer.lastPingSentTime == nil || now - (peer.lastPingSentTime ?? 0) >= clientPingInterval {
@@ -1172,30 +1318,59 @@ final class LANMultiplayerManager {
     /// in the `.connecting`/`.waiting` states (i.e. before `serverAccept` moves it to `.connected`).
     private func tickClientConnectTimeout() {
         guard let peer = clientPeer, state != .connected else { return }
+        guard let generation = peer.clientSessionGeneration,
+              isCurrentClientPeer(peer, generation: generation) else { return }
         guard let deadline = clientConnectDeadline else { return }
         let now = Date.timeIntervalSinceReferenceDate
         guard now >= deadline else { return }
-        appendStatus("LAN connect timed out.")
-        peer.connection.cancel()
-        clientPeer = nil
-        clientConnectDeadline = nil
-        clientWaitingSince = nil
-        setState(.failed)
+        endClientSession(
+            peer: peer,
+            generation: generation,
+            state: .failed,
+            statusLine: "LAN connect timed out.",
+            connectionLossReason: nil
+        )
     }
 
     /// Client-side connection-loss teardown (§7.6/A6): cancels the socket, routes through the
     /// GameCore lifecycle hook (returns to title with a message, per D-I/M2) if a game world is
     /// active, and returns the transport to idle so the player can retry.
-    private func disconnectClientDueToLoss(reason: String) {
-        clientPeer?.connection.cancel()
+    private func disconnectClientDueToLoss(
+        reason: String,
+        peer: LANWirePeer,
+        generation: UInt64,
+        statusLine: String? = nil
+    ) {
+        endClientSession(
+            peer: peer,
+            generation: generation,
+            state: .idle,
+            statusLine: statusLine,
+            connectionLossReason: reason
+        )
+    }
+
+    private func endClientSession(
+        peer: LANWirePeer,
+        generation: UInt64,
+        state terminalState: LANMultiplayerConnectionState,
+        statusLine: String?,
+        connectionLossReason: String?
+    ) {
+        guard isCurrentClientPeer(peer, generation: generation) else { return }
+        peer.connection.cancel()
         clientPeer = nil
         clientConnectDeadline = nil
         clientWaitingSince = nil
-        clearReplicationHooks(for: activeGame)
-        DispatchQueue.main.async { [weak self] in
-            self?.activeGame?.handleLANConnectionLost(reason: reason)
+        enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
+            if let statusLine { manager.appendStatus(statusLine) }
+            if let connectionLossReason {
+                manager.clearReplicationHooks(for: manager.activeGame)
+                manager.activeGame?.handleLANConnectionLost(reason: connectionLossReason)
+            }
+            manager.setState(terminalState)
+            _ = manager.resetClientReplicationSession()
         }
-        setState(.idle)
     }
 
     func statusSummary() -> [String] {
@@ -1218,11 +1393,13 @@ final class LANMultiplayerManager {
     }
 
     private func connect(_ connection: NWConnection, playerName: String, joinCode code: String, label: String) {
-        let peer = LANWirePeer(connection: connection)
+        precondition(Thread.isMainThread)
+        let generation = resetClientReplicationSession()
+        let peer = LANWirePeer(connection: connection, clientSessionGeneration: generation)
+        clientSessionPeer = peer
         clientPeer = peer
         let resumeKey = resumeDefaultsKey(for: label)
         clientResumeDefaultsKey = resumeKey
-        clientReplicationSession = LANMultiplayerClientSession()
         let now = Date.timeIntervalSinceReferenceDate
         clientConnectDeadline = now + clientConnectHandshakeTimeout
         clientWaitingSince = nil
@@ -1230,10 +1407,13 @@ final class LANMultiplayerManager {
         appendStatus("Connecting to \(label).")
         connection.stateUpdateHandler = { [weak self, weak peer] connState in
             guard let self, let peer else { return }
+            guard self.isCurrentClientPeer(peer, generation: generation) else { return }
             switch connState {
             case .ready:
                 self.clientWaitingSince = nil
-                self.appendStatus("Connected transport to \(label); sending join request.")
+                self.enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
+                    manager.appendStatus("Connected transport to \(label); sending join request.")
+                }
                 let resumeToken = UserDefaults.standard.string(forKey: resumeKey).flatMap {
                     try? LANV6Token256(base64URL: $0)
                 }
@@ -1253,24 +1433,36 @@ final class LANMultiplayerManager {
                 let now = Date.timeIntervalSinceReferenceDate
                 if self.clientWaitingSince == nil {
                     self.clientWaitingSince = now
-                    self.appendStatus("LAN connect waiting: \(error.localizedDescription)")
+                    self.enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
+                        manager.appendStatus("LAN connect waiting: \(error.localizedDescription)")
+                    }
                 } else if now - (self.clientWaitingSince ?? now) > self.clientWaitingAbortTimeout {
-                    self.appendStatus("LAN connect aborted after \(Int(self.clientWaitingAbortTimeout))s waiting.")
-                    connection.cancel()
-                    self.clientPeer = nil
-                    self.clientConnectDeadline = nil
-                    self.clientWaitingSince = nil
-                    self.setState(.failed)
+                    self.endClientSession(
+                        peer: peer,
+                        generation: generation,
+                        state: .failed,
+                        statusLine: "LAN connect aborted after \(Int(self.clientWaitingAbortTimeout))s waiting.",
+                        connectionLossReason: nil
+                    )
                 }
             case .failed(let error):
-                self.clientConnectDeadline = nil
-                self.clientWaitingSince = nil
-                self.setState(.failed)
-                self.appendStatus("LAN connect failed: \(error.localizedDescription)")
+                self.endClientSession(
+                    peer: peer,
+                    generation: generation,
+                    state: .failed,
+                    statusLine: "LAN connect failed: \(error.localizedDescription)",
+                    connectionLossReason: peer.accepted
+                        ? "The LAN connection failed: \(error.localizedDescription)"
+                        : nil
+                )
             case .cancelled:
-                self.clientConnectDeadline = nil
-                self.clientWaitingSince = nil
-                if self.state != .hosting { self.setState(.idle) }
+                self.endClientSession(
+                    peer: peer,
+                    generation: generation,
+                    state: .idle,
+                    statusLine: nil,
+                    connectionLossReason: peer.accepted ? "The LAN connection closed." : nil
+                )
             default:
                 break
             }
@@ -1366,28 +1558,40 @@ final class LANMultiplayerManager {
                     // A6: a malformed frame runs the SAME lifecycle cleanup as any other
                     // disconnect path (host: markHostPeerDisconnected via finishHostPeerTeardown;
                     // client: handleLANConnectionLost) rather than silently vanishing the peer.
-                    self.appendStatus("Dropping malformed LAN peer: \(error)")
                     peer.connection.cancel()
                     switch mode {
                     case .hostPeer:
+                        self.appendStatus("Dropping malformed LAN peer: \(error)")
                         self.finishHostPeerTeardown(peer)
                     case .clientServer:
-                        if self.clientPeer === peer {
-                            self.disconnectClientDueToLoss(reason: "The LAN connection sent malformed data.")
+                        if let generation = peer.clientSessionGeneration,
+                           self.isCurrentClientPeer(peer, generation: generation) {
+                            self.disconnectClientDueToLoss(
+                                reason: "The LAN connection sent malformed data.",
+                                peer: peer,
+                                generation: generation,
+                                statusLine: "Dropping malformed LAN peer: \(error)"
+                            )
                         }
                     }
                     return
                 }
             }
             if let error {
-                self.appendStatus("LAN receive failed: \(error.localizedDescription)")
                 peer.connection.cancel()
                 switch mode {
                 case .hostPeer:
+                    self.appendStatus("LAN receive failed: \(error.localizedDescription)")
                     self.finishHostPeerTeardown(peer)
                 case .clientServer:
-                    if self.clientPeer === peer {
-                        self.disconnectClientDueToLoss(reason: "The LAN connection was interrupted.")
+                    if let generation = peer.clientSessionGeneration,
+                       self.isCurrentClientPeer(peer, generation: generation) {
+                        self.disconnectClientDueToLoss(
+                            reason: "The LAN connection was interrupted.",
+                            peer: peer,
+                            generation: generation,
+                            statusLine: "LAN receive failed: \(error.localizedDescription)"
+                        )
                     }
                 }
                 return
@@ -1398,8 +1602,13 @@ final class LANMultiplayerManager {
                 case .hostPeer:
                     self.finishHostPeerTeardown(peer)
                 case .clientServer:
-                    if self.clientPeer === peer {
-                        self.disconnectClientDueToLoss(reason: "The LAN host closed the connection.")
+                    if let generation = peer.clientSessionGeneration,
+                       self.isCurrentClientPeer(peer, generation: generation) {
+                        self.disconnectClientDueToLoss(
+                            reason: "The LAN host closed the connection.",
+                            peer: peer,
+                            generation: generation
+                        )
                     }
                 }
                 return
@@ -1411,6 +1620,20 @@ final class LANMultiplayerManager {
     @discardableResult
     private func handle(_ frame: LANMultiplayerFrame, from peer: LANWirePeer,
                         mode: LANPeerMode) -> Bool {
+        let admittedClientGeneration: UInt64?
+        if case .clientServer = mode {
+            guard let generation = peer.clientSessionGeneration,
+                  isCurrentClientPeer(peer, generation: generation) else {
+                // A canceled socket may still deliver bytes already buffered by Network.framework.
+                // Stop its receive loop before sequence, handshake, UI, mirror, or world effects.
+                peer.connection.cancel()
+                return false
+            }
+            admittedClientGeneration = generation
+        } else {
+            admittedClientGeneration = nil
+        }
+
         do {
             try peer.inboundSequence.consume(frame.sequence)
         } catch {
@@ -1458,7 +1681,13 @@ final class LANMultiplayerManager {
             handleHostMessage(frame.message, from: peer)
         case .clientServer:
             if case .pong = frame.message { peer.pendingPingNonce = nil }
-            handleClientMessage(frame.message, receivedSequence: frame.sequence, from: peer)
+            guard let generation = admittedClientGeneration else { return false }
+            handleClientMessage(
+                frame.message,
+                receivedSequence: frame.sequence,
+                from: peer,
+                generation: generation
+            )
         }
         return true
     }
@@ -1469,14 +1698,20 @@ final class LANMultiplayerManager {
         mode: LANPeerMode,
         reason: String
     ) -> Bool {
-        appendStatus("Dropping LAN peer for protocol violation: \(reason).")
         peer.connection.cancel()
         switch mode {
         case .hostPeer:
+            appendStatus("Dropping LAN peer for protocol violation: \(reason).")
             finishHostPeerTeardown(peer)
         case .clientServer:
-            if clientPeer === peer {
-                disconnectClientDueToLoss(reason: "The LAN peer violated the wire protocol.")
+            if let generation = peer.clientSessionGeneration,
+               isCurrentClientPeer(peer, generation: generation) {
+                disconnectClientDueToLoss(
+                    reason: "The LAN peer violated the wire protocol.",
+                    peer: peer,
+                    generation: generation,
+                    statusLine: "Dropping LAN peer for protocol violation: \(reason)."
+                )
             }
         }
         return false
@@ -1680,6 +1915,13 @@ final class LANMultiplayerManager {
                     inventorySnapshots: hostReplicationSession.peerInventorySnapshotsByPlayerID(),
                     objectRecordTexts: hostReplicationSession.peerObjectRecordTextsByPlayerID()
                 )
+                if let accepted = sanitized {
+                    raiseLANAcceptedPlayerLifecycleEvents(
+                        previous: before?.playerState,
+                        accepted: accepted,
+                        in: game.world
+                    )
+                }
             }
             guard let sanitized else { return }
             queue.async { [weak self] in
@@ -1715,7 +1957,18 @@ final class LANMultiplayerManager {
         case .inventoryUpdate(let update):
             guard peer.accepted, update.playerID == peer.playerID else { return }
             precondition(Thread.isMainThread)
-            _ = hostReplicationSession.applyInventoryUpdate(update, from: peer.playerID)
+            guard hostReplicationSession.applyInventoryUpdate(update, from: peer.playerID) else { return }
+            // Keep pickup capacity aligned in the authority-safe session -> proxy direction.
+            // Exact host pickup deltas flow back separately; the proxy is never scraped wholesale.
+            if let game = activeGame, game.hasWorld() {
+                _ = applyLANRemotePlayers(
+                    hostReplicationSession.peerPlayerStates(),
+                    to: game.world,
+                    localPlayerID: localPeerID,
+                    inventorySnapshots: hostReplicationSession.peerInventorySnapshotsByPlayerID(),
+                    objectRecordTexts: hostReplicationSession.peerObjectRecordTextsByPlayerID()
+                )
+            }
         case .replicationAck(_, let ack):
             guard peer.accepted else { return }
             DispatchQueue.main.async { [weak self] in
@@ -1783,80 +2036,108 @@ final class LANMultiplayerManager {
         queue.async { [weak self] in self?.sendGameplayEvent(event, to: peerID) }
     }
 
-    private func handleClientMessage(_ message: LANMultiplayerMessage, receivedSequence: UInt32, from peer: LANWirePeer) {
+    private func handleClientMessage(
+        _ message: LANMultiplayerMessage,
+        receivedSequence: UInt32,
+        from peer: LANWirePeer,
+        generation: UInt64
+    ) {
         switch message {
         case .serverAccept(_, let world, let resumeToken):
             peer.accepted = true
             clientConnectDeadline = nil
             clientWaitingSince = nil
-            if let resumeToken, let key = clientResumeDefaultsKey {
-                UserDefaults.standard.set(resumeToken.base64URL, forKey: key)
-            }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.setState(.connected)
-                if let game = self.activeGame, !game.hasWorld() {
-                    self.configureClientReplicationHooks(for: game)
+            let resumeKey = clientResumeDefaultsKey
+            enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
+                if let resumeToken, let resumeKey {
+                    UserDefaults.standard.set(resumeToken.base64URL, forKey: resumeKey)
+                }
+                manager.setState(.connected)
+                if let game = manager.activeGame, !game.hasWorld() {
+                    manager.configureClientReplicationHooks(for: game)
                     game.enterLANClientWorld(world)
                     game.host?.capturePointer()
-                    self.appendStatus("Entered LAN client world \"\(world.worldName)\".")
-                } else if self.activeGame == nil {
-                    self.appendStatus("LAN join accepted, but no active game was attached for world entry.")
+                    manager.appendStatus("Entered LAN client world \"\(world.worldName)\".")
+                } else if manager.activeGame == nil {
+                    manager.appendStatus("LAN join accepted, but no active game was attached for world entry.")
                 }
-                self.appendStatus("Joined LAN world \"\(world.worldName)\" with \(world.playerCount)/\(world.maxPlayers) players.")
-                self.postChat("§b[LAN] Connected to \"\(world.worldName)\".")
+                manager.appendStatus("Joined LAN world \"\(world.worldName)\" with \(world.playerCount)/\(world.maxPlayers) players.")
+                manager.postChat("§b[LAN] Connected to \"\(world.worldName)\".")
             }
         case .serverReject(let reason):
-            clientConnectDeadline = nil
-            clientWaitingSince = nil
-            setState(.rejected)
-            appendStatus("LAN join rejected: \(sanitizedLANChatText(reason))")
-            peer.connection.cancel()
+            let cleanReason = sanitizedLANChatText(reason)
+            endClientSession(
+                peer: peer,
+                generation: generation,
+                state: .rejected,
+                statusLine: "LAN join rejected: \(cleanReason)",
+                connectionLossReason: nil
+            )
         case .chat(let sender, let text):
             let cleanText = sanitizedLANChatText(text)
             guard !cleanText.isEmpty else { return }
-            postChat("§b<LAN \(sanitizedLANPlayerName(sender))> §r\(cleanText)")
+            let cleanSender = sanitizedLANPlayerName(sender)
+            enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
+                manager.postChat("§b<LAN \(cleanSender)> §r\(cleanText)")
+            }
         case .ping(let nonce):
             send(.pong(nonce: nonce), to: peer)
         case .pong:
             break
         case .disconnect(let reason):
-            appendStatus("LAN server disconnected: \(sanitizedLANChatText(reason))")
-            disconnectClientDueToLoss(reason: sanitizedLANChatText(reason))
+            disconnectClientDueToLoss(
+                reason: sanitizedLANChatText(reason),
+                peer: peer,
+                generation: generation,
+                statusLine: "LAN server disconnected: \(sanitizedLANChatText(reason))"
+            )
         case .playerState(let state):
-            DispatchQueue.main.async { [weak self] in
+            enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
                 let batch = LANReplicationBatch(tick: 0, fullSnapshot: false, players: [state])
-                _ = self?.clientReplicationSession.apply(batch)
-                if let self, let game = self.activeGame, game.hasWorld() {
-                    if state.playerID == self.localPeerID {
+                _ = manager.clientReplicationSession.apply(batch)
+                if let game = manager.activeGame, game.hasWorld() {
+                    if state.playerID == manager.localPeerID {
                         game.applyLANRPGState(state.rpg)
                     }
-                    _ = applyLANRemotePlayers([state], to: game.world, localPlayerID: self.localPeerID, removeMissing: false)
+                    _ = applyLANRemotePlayers(
+                        [state], to: game.world,
+                        localPlayerID: manager.localPeerID,
+                        removeMissing: false
+                    )
                 }
             }
         case .replicationBatch(let batch):
-            handleClientReplicationBatch(batch, receivedSequence: receivedSequence, from: peer)
+            handleClientReplicationBatch(
+                batch,
+                receivedSequence: receivedSequence,
+                from: peer,
+                generation: generation
+            )
         case .gameplayEvent(let event):
-            handleGameplayEvent(event)
+            handleGameplayEvent(event, from: peer, generation: generation)
         case .restoreState(let restore):
-            clientReplicationSession.applyRestore(restore)
-            DispatchQueue.main.async { [weak self] in
-                self?.activeGame?.applyLANRestore(restore)
-                self?.activeGame?.applyLANRPGState(restore.playerState.rpg)
+            enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
+                manager.clientReplicationSession.applyRestore(restore)
+                manager.activeGame?.applyLANRestore(restore)
+                manager.activeGame?.applyLANRPGState(restore.playerState.rpg)
             }
         case .inventoryGrant(let grant):
             guard grant.playerID == localPeerID else { return }
-            guard clientReplicationSession.markGrantApplied(grant.grantID) else { return }
-            DispatchQueue.main.async { [weak self] in
-                self?.activeGame?.applyLANGrant(grant)
+            enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
+                guard manager.clientReplicationSession.markGrantApplied(grant.grantID) else { return }
+                manager.activeGame?.applyLANGrant(grant)
             }
         case .damageEvent(let event):
             guard event.playerID == localPeerID else { return }
-            DispatchQueue.main.async { [weak self] in
-                self?.activeGame?.applyLANDamage(event)
+            enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
+                manager.activeGame?.applyLANDamage(event)
             }
         default:
-            appendStatus("LAN client received \(message.kind); no client-side handler was needed.")
+            enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
+                manager.appendStatus(
+                    "LAN client received \(message.kind); no client-side handler was needed."
+                )
+            }
         }
     }
 
@@ -1866,7 +2147,9 @@ final class LANMultiplayerManager {
     /// chunk replies, restore, grants, damage, gameplay events, chat) is never skipped.
     private func isSkippableDeltaBatch(_ message: LANMultiplayerMessage) -> Bool {
         if case .replicationBatch(let batch) = message, !batch.fullSnapshot {
-            return batch.blockChanges.isEmpty && batch.chunkSections.isEmpty && batch.blockEntities.isEmpty
+            let carriesMetadataDeletion = batch.objectAttributes.contains(where: \.removed)
+            return batch.blockChanges.isEmpty && batch.chunkSections.isEmpty &&
+                batch.blockEntities.isEmpty && !carriesMetadataDeletion
         }
         return false
     }
@@ -1897,11 +2180,17 @@ final class LANMultiplayerManager {
         do {
             sequence = try peer.outboundSequence.reserve()
         } catch {
-            appendStatus("LAN send sequence exhausted; closing peer.")
             peer.connection.cancel()
-            if clientPeer === peer {
-                disconnectClientDueToLoss(reason: "The LAN connection exhausted its wire sequence.")
+            if let generation = peer.clientSessionGeneration {
+                guard isCurrentClientPeer(peer, generation: generation) else { return }
+                disconnectClientDueToLoss(
+                    reason: "The LAN connection exhausted its wire sequence.",
+                    peer: peer,
+                    generation: generation,
+                    statusLine: "LAN send sequence exhausted; closing peer."
+                )
             } else {
+                appendStatus("LAN send sequence exhausted; closing peer.")
                 finishHostPeerTeardown(peer)
             }
             return
@@ -1913,19 +2202,43 @@ final class LANMultiplayerManager {
             peer?.inFlightSendCount = max(0, (peer?.inFlightSendCount ?? 1) - 1)
             peer?.inFlightSendBytes = max(0, (peer?.inFlightSendBytes ?? frame.count) - frame.count)
             if let error {
-                self?.appendStatus("LAN send failed: \(error.localizedDescription)")
                 peer?.connection.cancel()
                 if let self, let peer {
-                    if self.clientPeer === peer {
+                    if let generation = peer.clientSessionGeneration {
+                        guard self.isCurrentClientPeer(peer, generation: generation) else { return }
                         self.disconnectClientDueToLoss(
-                            reason: "The LAN connection could not send data."
+                            reason: "The LAN connection could not send data.",
+                            peer: peer,
+                            generation: generation,
+                            statusLine: "LAN send failed: \(error.localizedDescription)"
                         )
                     } else {
+                        self.appendStatus("LAN send failed: \(error.localizedDescription)")
                         self.finishHostPeerTeardown(peer)
                     }
                 }
             }
         })
+    }
+
+    /// Tombstones leave the main-thread replication census when selected for a batch. If that
+    /// batch cannot be encoded or has no recipient by the time the queue handles it, put them
+    /// back so a later broadcast can converge. Live snapshots need no equivalent requeue because
+    /// the rotating census will select them again; a deletion no longer exists in that census.
+    private func requeueObjectAttributeTombstones(
+        from snapshots: [LANObjectAttributeSnapshot]
+    ) {
+        let tombstones = snapshots.filter(\.removed)
+        guard !tombstones.isEmpty else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.activeGame != nil else { return }
+            for snapshot in tombstones where self.hostObjectAttributeRevisions[snapshot.ref] == nil {
+                self.hostObjectAttributeTombstones[snapshot.ref] = max(
+                    self.hostObjectAttributeTombstones[snapshot.ref] ?? 0,
+                    snapshot.revision
+                )
+            }
+        }
     }
 
     /// Broadcasts a host-originated replication batch honoring amendment A4 (never lose drained
@@ -1959,6 +2272,9 @@ final class LANMultiplayerManager {
             if sent == 0, !drainedDirtyBlockEntities.isEmpty {
                 hostReplicationSession.requeueDirtyBlockEntities(drainedDirtyBlockEntities)
             }
+            if sent == 0 {
+                requeueObjectAttributeTombstones(from: batch.objectAttributes)
+            }
         } catch LANMultiplayerCodecError.oversizedFrame where !batch.chunkSections.isEmpty {
             if !drainedBlockChanges.isEmpty {
                 hostReplicationSession.requeueBlockChanges(drainedBlockChanges)
@@ -1976,10 +2292,14 @@ final class LANMultiplayerManager {
                 if sent == 0, !drainedDirtyBlockEntities.isEmpty {
                     hostReplicationSession.requeueDirtyBlockEntities(drainedDirtyBlockEntities)
                 }
+                if sent == 0 {
+                    requeueObjectAttributeTombstones(from: withoutSections.objectAttributes)
+                }
             } catch {
                 if !drainedDirtyBlockEntities.isEmpty {
                     hostReplicationSession.requeueDirtyBlockEntities(drainedDirtyBlockEntities)
                 }
+                requeueObjectAttributeTombstones(from: withoutSections.objectAttributes)
                 appendStatus("LAN encode failed even without chunk sections: \(error)")
             }
             for sectionBatch in lanHalvedChunkSectionBatches(batch.chunkSections) {
@@ -1992,6 +2312,7 @@ final class LANMultiplayerManager {
             if !drainedDirtyBlockEntities.isEmpty {
                 hostReplicationSession.requeueDirtyBlockEntities(drainedDirtyBlockEntities)
             }
+            requeueObjectAttributeTombstones(from: batch.objectAttributes)
             appendStatus("LAN encode failed: \(error)")
         }
     }
@@ -2159,12 +2480,43 @@ final class LANMultiplayerManager {
         // dimension — `makeLANObjectAttributeSnapshots`'s own traversal), not tied to any one
         // peer's chunk-request window, so there is no per-peer focus/radius filter here the way
         // entities and block entities have one.
-        let objectAttributes = content.includeObjectAttributes
-            ? makeLANObjectAttributeSnapshots(
-                host: game, store: game.scriptingCommandContext().store,
-                scriptStore: game.scriptingCommandContext().scriptStore
-            )
-            : []
+        let objectAttributes: [LANObjectAttributeSnapshot]
+        if content.includeObjectAttributes {
+            let context = game.scriptingCommandContext()
+            let page: LANObjectAttributeSnapshotPage
+            if fullSnapshot {
+                // A directed join/chunk snapshot must not consume broadcast tombstones or advance
+                // the shared cursor: existing peers would otherwise miss those state transitions.
+                page = makeLANObjectAttributeSnapshotPage(
+                    host: game,
+                    store: context.store,
+                    scriptStore: context.scriptStore,
+                    customEventStore: CustomEventStore(graph: context.graph)
+                )
+            } else {
+                page = makeLANObjectAttributeSnapshotPage(
+                    host: game,
+                    store: context.store,
+                    scriptStore: context.scriptStore,
+                    customEventStore: CustomEventStore(graph: context.graph),
+                    afterRef: hostObjectAttributeCursor,
+                    previousRevisions: hostObjectAttributeRevisions,
+                    previousRawRevisions: hostObjectAttributeRawRevisions,
+                    previousRecordDigests: hostObjectAttributeRecordDigests,
+                    previousWireRevisionClock: hostObjectAttributeWireRevisionClock,
+                    pendingTombstones: hostObjectAttributeTombstones
+                )
+                hostObjectAttributeCursor = page.nextRef
+                hostObjectAttributeRevisions = page.currentRevisions
+                hostObjectAttributeRawRevisions = page.currentRawRevisions
+                hostObjectAttributeRecordDigests = page.currentRecordDigests
+                hostObjectAttributeWireRevisionClock = page.wireRevisionClock
+                hostObjectAttributeTombstones = page.remainingTombstones
+            }
+            objectAttributes = page.snapshots
+        } else {
+            objectAttributes = []
+        }
         if ProcessInfo.processInfo.environment["ELYSIUM_LAN_PROBE_LOG"] != nil, !objectAttributes.isEmpty {
             elysiumLANProbeLog("host_object_attributes_batch count=\(objectAttributes.count)")
         }
@@ -2241,6 +2593,36 @@ final class LANMultiplayerManager {
             let result = hostReplicationSession.applyBlockIntent(intent, from: playerID, to: game.world)
             reportBlockIntentResult(result, playerID: playerID, peerName: peerName,
                                     tick: game.rpgSimulationTick)
+        case .toolStrike:
+            applyHostToolStrikeIntent(intent, from: playerID, peerName: peerName)
+        }
+    }
+
+    private func applyHostToolStrikeIntent(
+        _ intent: LANBlockIntent,
+        from playerID: String,
+        peerName: String
+    ) {
+        precondition(Thread.isMainThread)
+        guard let game = activeGame, game.hasWorld() else { return }
+        let result = routeLANHostToolStrikeIntent(
+            intent,
+            from: playerID,
+            game: game,
+            session: hostReplicationSession,
+            ghostRegistry: hostGhostRegistry
+        )
+        switch result {
+        case .raised:
+            if ProcessInfo.processInfo.environment["ELYSIUM_LAN_PROBE_LOG"] != nil {
+                elysiumLANProbeLog("host_tool_strike_event player=\(peerName) target=\(intent.x),\(intent.y),\(intent.z)")
+            }
+        case .ignored:
+            break // replay/stale sequence: intentionally silent and side-effect free
+        case .rejected(let reason):
+            reportBlockIntentRejected(
+                reason, playerID: playerID, peerName: peerName, tick: game.rpgSimulationTick
+            )
         }
     }
 
@@ -2719,7 +3101,9 @@ final class LANMultiplayerManager {
                 return
             }
             let context = game.scriptingCommandContext(guestPeerID: playerID)
-            if intent.command != "unsubscribe", let targetToken = intent.arguments.first,
+            if let targetToken = ScriptingCommands.lanForwardedObjectTargetToken(
+                command: intent.command, arguments: intent.arguments
+            ),
                let ref = context.target.resolve(alias: targetToken),
                case .block(let dim, let x, let y, let z) = ref, dim == game.dim {
                 guard let record = hostReplicationSession.peerRecord(playerID: playerID),
@@ -2828,60 +3212,96 @@ final class LANMultiplayerManager {
         }
     }
 
-    private func handleClientReplicationBatch(_ batch: LANReplicationBatch, receivedSequence: UInt32, from peer: LANWirePeer) {
+    private func handleClientReplicationBatch(
+        _ batch: LANReplicationBatch,
+        receivedSequence: UInt32,
+        from peer: LANWirePeer,
+        generation: UInt64
+    ) {
         // Reject a malformed authority clock before ACKing or touching any
         // mirror. Core apply helpers also defend this boundary, but transport
         // owns local RPG/remote-player application outside those helpers.
         guard (0...RPG_MAX_COUNTER).contains(batch.tick) else {
-            appendStatus("Rejected LAN replication batch with invalid tick \(batch.tick).")
+            enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
+                manager.appendStatus("Rejected LAN replication batch with invalid tick \(batch.tick).")
+            }
             return
         }
         let ack = LANReplicationAck(tick: batch.tick, receivedSequence: receivedSequence)
         send(.replicationAck(playerID: localPeerID, ack: ack), to: peer)
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            let mirrorReport = self.clientReplicationSession.apply(batch)
-            if ProcessInfo.processInfo.environment["ELYSIUM_LAN_PROBE_LOG"] != nil,
-               mirrorReport.appliedObjectAttributes > 0 || mirrorReport.reconciledObjectAttributes > 0 {
-                elysiumLANProbeLog(
-                    "guest_object_attributes_applied applied=\(mirrorReport.appliedObjectAttributes) " +
-                    "reconciled=\(mirrorReport.reconciledObjectAttributes) " +
-                    "mirrored_total=\(self.clientReplicationSession.objectAttributes.count)"
-                )
-            }
-            var worldReport: LANReplicationApplyReport?
-            if let game = self.activeGame, game.hasWorld() {
-                // D-A: normal batches never overwrite the client-owned local inventory anymore —
-                // only `applyLANRestore` (join/reconnect) and `applyLANGrant` (additive host
-                // corrections) may touch it. The former per-batch
-                // `applyLANInventorySnapshot(localInventory, to: player)` call has been removed.
-                game.beginLANReplicationApply()
-                worldReport = game.applyLANHostReplicationBatch(batch)
-                if let localState = batch.players.first(where: { $0.playerID == self.localPeerID }) {
-                    game.applyLANRPGState(localState.rpg)
-                }
-                _ = applyLANRemotePlayers(batch.players, to: game.world, localPlayerID: self.localPeerID)
-                game.endLANReplicationApply()
-            }
-            if batch.fullSnapshot {
-                self.appendStatus("Applied LAN snapshot tick \(batch.tick): \(mirrorReport.appliedChunkSections) sections, \(mirrorReport.appliedBlockChanges) block deltas, \(mirrorReport.appliedBlockEntities) block entities, \(mirrorReport.appliedEntitySnapshots) entities.")
-            } else if let worldReport,
-                      worldReport.appliedBlockChanges > 0 ||
-                      worldReport.appliedBlockEntities > 0 ||
-                      worldReport.ignoredInvalidBlockEntities > 0 ||
-                      worldReport.removedEntitySnapshots > 0 ||
-                      worldReport.ignoredInvalidEntities > 0 {
-                let rejected = worldReport.ignoredInvalidEntities + worldReport.ignoredInvalidBlockEntities
-                self.appendStatus("Applied \(worldReport.appliedBlockChanges) LAN block delta\(worldReport.appliedBlockChanges == 1 ? "" : "s"), \(worldReport.appliedBlockEntities) block entit\(worldReport.appliedBlockEntities == 1 ? "y" : "ies"), \(worldReport.removedEntitySnapshots) entity removal\(worldReport.removedEntitySnapshots == 1 ? "" : "s"), \(rejected) rejected replicated update\(rejected == 1 ? "" : "s").")
-            }
+        enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
+            _ = manager.applyClientReplicationBatchOnMain(
+                batch,
+                generation: generation,
+                expectedPeer: peer
+            )
         }
     }
 
+    /// The sole client replication commit point. Callers must arrive on main and present the
+    /// generation captured when the frame was admitted; production callers additionally present
+    /// the exact socket identity.
+    @discardableResult
+    private func applyClientReplicationBatchOnMain(
+        _ batch: LANReplicationBatch,
+        generation: UInt64,
+        expectedPeer: LANWirePeer?
+    ) -> Bool {
+        precondition(Thread.isMainThread)
+        guard currentClientSessionGeneration() == generation else { return false }
+        if let expectedPeer {
+            guard isCurrentClientSession(expectedPeer, generation: generation) else { return false }
+        }
+
+        let mirrorReport = clientReplicationSession.apply(batch)
+        if ProcessInfo.processInfo.environment["ELYSIUM_LAN_PROBE_LOG"] != nil,
+           mirrorReport.appliedObjectAttributes > 0 || mirrorReport.reconciledObjectAttributes > 0 {
+            elysiumLANProbeLog(
+                "guest_object_attributes_applied applied=\(mirrorReport.appliedObjectAttributes) " +
+                "reconciled=\(mirrorReport.reconciledObjectAttributes) " +
+                "mirrored_total=\(clientReplicationSession.objectAttributes.count)"
+            )
+        }
+        var worldReport: LANReplicationApplyReport?
+        if let game = activeGame, game.hasWorld() {
+            // D-A: normal batches never overwrite the client-owned local inventory anymore —
+            // only `applyLANRestore` (join/reconnect) and `applyLANGrant` (additive host
+            // corrections) may touch it. The former per-batch
+            // `applyLANInventorySnapshot(localInventory, to: player)` call has been removed.
+            game.beginLANReplicationApply()
+            worldReport = game.applyLANHostReplicationBatch(batch)
+            if let localState = batch.players.first(where: { $0.playerID == localPeerID }) {
+                game.applyLANRPGState(localState.rpg)
+            }
+            _ = applyLANRemotePlayers(batch.players, to: game.world, localPlayerID: localPeerID)
+            game.endLANReplicationApply()
+        }
+        if batch.fullSnapshot {
+            appendStatus("Applied LAN snapshot tick \(batch.tick): \(mirrorReport.appliedChunkSections) sections, \(mirrorReport.appliedBlockChanges) block deltas, \(mirrorReport.appliedBlockEntities) block entities, \(mirrorReport.appliedEntitySnapshots) entities.")
+        } else if let worldReport,
+                  worldReport.appliedBlockChanges > 0 ||
+                  worldReport.appliedBlockEntities > 0 ||
+                  worldReport.ignoredInvalidBlockEntities > 0 ||
+                  worldReport.removedEntitySnapshots > 0 ||
+                  worldReport.ignoredInvalidEntities > 0 {
+            let rejected = worldReport.ignoredInvalidEntities + worldReport.ignoredInvalidBlockEntities
+            appendStatus("Applied \(worldReport.appliedBlockChanges) LAN block delta\(worldReport.appliedBlockChanges == 1 ? "" : "s"), \(worldReport.appliedBlockEntities) block entit\(worldReport.appliedBlockEntities == 1 ? "y" : "ies"), \(worldReport.removedEntitySnapshots) entity removal\(worldReport.removedEntitySnapshots == 1 ? "" : "s"), \(rejected) rejected replicated update\(rejected == 1 ? "" : "s").")
+        }
+        return true
+    }
+
     private func stopClientOnly() {
+        precondition(Thread.isMainThread)
         clearReplicationHooks(for: activeGame)
-        clientPeer?.connection.cancel()
-        clientPeer = nil
-        if listener == nil { setState(.idle) }
+        let hostActive = queue.sync { () -> Bool in
+            clientPeer?.connection.cancel()
+            clientPeer = nil
+            clientConnectDeadline = nil
+            clientWaitingSince = nil
+            return listener != nil
+        }
+        _ = resetClientReplicationSession()
+        if !hostActive { setState(.idle) }
     }
 
     private func markHostPeerDisconnected(_ peer: LANWirePeer) {
@@ -2928,23 +3348,27 @@ final class LANMultiplayerManager {
         }
     }
 
-    private func handleGameplayEvent(_ event: LANGameplayEvent) {
-        appendStatus(event.message)
-        switch event.kind {
-        case .peerDisconnected, .death:
-            DispatchQueue.main.async { [weak self] in
-                guard let self, let game = self.activeGame, game.hasWorld() else { return }
+    private func handleGameplayEvent(
+        _ event: LANGameplayEvent,
+        from peer: LANWirePeer,
+        generation: UInt64
+    ) {
+        enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
+            manager.appendStatus(event.message)
+            switch event.kind {
+            case .peerDisconnected, .death:
+                guard let game = manager.activeGame, game.hasWorld() else { return }
                 _ = removeLANRemotePlayer(event.playerID, from: game.world)
+            case .scriptIntentAccepted:
+                // lan-client-parity (change 4): the receipt for a guest's own forwarded
+                // `/attr`/`/script`/`/on`/`/unsubscribe`/`/events emit` — surfaced in chat exactly
+                // like the same command's local result text would be for a host.
+                manager.postChat("§7" + event.message)
+            case .scriptIntentRefused:
+                manager.postChat("§c" + event.message)
+            default:
+                break
             }
-        case .scriptIntentAccepted:
-            // lan-client-parity (change 4): the receipt for a guest's own forwarded
-            // `/attr`/`/script`/`/on`/`/unsubscribe`/`/events emit` — surfaced in chat exactly
-            // like the same command's local result text would be for a host.
-            postChat("§7" + event.message)
-        case .scriptIntentRefused:
-            postChat("§c" + event.message)
-        default:
-            break
         }
     }
 
@@ -2961,18 +3385,27 @@ final class LANMultiplayerManager {
         if ProcessInfo.processInfo.environment["ELYSIUM_LAN_PROBE_LOG"] != nil {
             elysiumLANProbeLog("status \(clean)")
         }
-        DispatchQueue.main.async { [weak self] in
+        let append = { [weak self] in
             guard let self else { return }
             self.statusLines.append(clean)
             if self.statusLines.count > 48 {
                 self.statusLines.removeFirst(self.statusLines.count - 48)
             }
         }
+        if Thread.isMainThread {
+            append()
+        } else {
+            DispatchQueue.main.async(execute: append)
+        }
     }
 
     private func postChat(_ line: String) {
-        DispatchQueue.main.async {
+        if Thread.isMainThread {
             pushChat(line)
+        } else {
+            DispatchQueue.main.async {
+                pushChat(line)
+            }
         }
     }
 

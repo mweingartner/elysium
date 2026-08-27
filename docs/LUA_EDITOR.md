@@ -13,19 +13,22 @@ and Check performs the editor-only `ScriptRuntime.dryRun` without persisting. Bo
 when the world is untrusted or `doScripts` is off: Check is read-only, while Save only persists the
 validated record and leaves it dormant. If no local runtime exists, Check, Save, and Run Once are
 unavailable because authoritative Lua validation cannot be performed; the draft remains available
-to copy. Handler Check executes a known built-in event with deterministic, non-null representative
-values from `EventDescriptorRegistry`; custom events compile only because their payload shape is not
-declared, and the status distinguishes that case from an executed pass.
+to copy. Handler Check executes a compatible built-in event with deterministic representative values
+from `EventDescriptorRegistry`. It also executes a custom-event handler when that event is declared
+on the current target, using representative values from its typed contract. A valid but undeclared
+custom event remains compile-only, and the status distinguishes that case from an executed pass.
 
-The local editor's explicit **Run Once** action is the one narrow trust-gate exception. It runs only the
-currently visible draft once through the same capability-reduced ephemeral machinery as
+The local editor's explicit **Run Once** action is the one narrow trust-gate exception. It runs only a
+currently visible **module** draft once through the same capability-reduced ephemeral machinery as
 `/script run`, without saving or attaching the draft, loading attached scripts, or changing the
 world's trust flag. It is not a dry run: permitted one-off verbs can change live game state, and
 those changes may persist with the world. It still obeys `doScripts`;
 **Run Once** refuses while the kill switch is off. Attached scripts, ordinary
 `/script run`, AI `run_script`, and every LAN-forwarded run remain gated by both world trust and
-`doScripts`. A granted LAN guest forwards Save and Run to the host; the local-editor exception is
-never forwarded, and Check is not available to a guest.
+`doScripts`. Handler mode disables Run Once because it cannot safely invent the selected event's
+`ev`; use Check for a deterministic representative event or Save and trigger the real event. A
+granted LAN guest forwards Save and Run to the host; the local-editor exception is never forwarded,
+and Check is not available to a guest.
 
 Editor analysis is read-only and has two deliberately separate planes:
 
@@ -58,8 +61,14 @@ confirmed action changes the named gate or gates: trust is persisted, while turn
 changes `doScripts`. Opening the editor, Check, Save, and Run never auto-trust or silently turn the
 kill switch on.
 
-Handler mode shows an editable event name plus a menu of shipped built-in events and their
-descriptions. A validated custom event name can still be typed directly.
+Handler mode shows an editable event name plus a target-aware menu: compatible produced built-in
+events first, then custom events declared on the current object. Rows expose whether the event is
+built-in or declared custom, its payload field names/types/nullability, and its summary. A valid
+undeclared custom event name can still be typed directly, with explicit guidance that payload
+completion and executed Check are unavailable until that target declares it. `unload` is deliberately
+not offered: it has no EventBus producer. A module instead uses `register("unload", fn)` for the
+separate synchronous, no-`ev`, custom-attribute-only finalizer; the mode help and schema-backed
+snippet explain that distinction to both the author and optional Ollama proposal context.
 
 The model tracks whether source or script metadata differs from the last clean state and shows an
 orange **Unsaved** marker beside the target. Switching scripts, closing the window, or quitting the
@@ -77,7 +86,9 @@ actions refuse to operate on a later world. In the valid local session, trust an
 not make the document read-only: Check remains read-only, Save remains persistence-only, and the
 explicit Run policy above applies. For an existing host script, ordinary source edits preserve its
 enabled state. Handler saves preserve additional triggers and the first trigger's filter and target
-while editing the first event name exposed by this UI.
+while editing the first event name exposed by this UI. If that first event changes away from
+`attribute.changed`, its now-inapplicable attribute filter is cleared before Save; the target and
+remaining triggers are still preserved.
 
 ## Language schema
 
@@ -88,15 +99,29 @@ and applicability metadata. For `self` and direct aliases of the current host ta
 filters built-in attributes against the live resolved object's applicability; guest targets and
 other inferred handles use the catalog's kind-level information. `EventDescriptorRegistry`
 describes the published built-in event catalog while preserving the runtime's open, validated
-custom-event namespace.
+custom-event namespace. `CustomEventStore` contributes the current target's persisted declarations,
+so editor event facts are object-scoped rather than treated as a global custom-event registry. A LAN
+guest uses the host's bounded, source-free mirror of names, field type tokens, and summaries for the
+same projection.
 
 The catalog also produces a non-executing LuaCATS definition string with real parameter and return
 annotations plus overloads from the schema. Engine globals and the `objects`/`ai` modules are ordered
 near the start so they remain inside the bounded AI schema prefix; the longer per-kind attribute and
-event-class tail can still be truncated. Tests compare the runtime binding tree with the schema,
-probe completable symbols in the shipped sandbox, project attribute and built-in event registries,
-check representative LuaCATS signatures, validate every palette snippet, and reject historical bad
-spellings. They do not prove every event producer payload or live applicability decision.
+event-class tail can still be truncated. The separate bounded authoring context always carries the
+current mode contract and prioritizes the selected Handler event with its whole payload schema, up
+to the declaration cap. Every included compatible event is whole; explicit total, included, and
+truncated counts identify any contracts that the fixed prompt budget omitted. For Module source, it
+carries produced built-in payloads plus kind-compatible names and declared custom events for objects
+in the bounded authorized snapshot. Nearby custom events are likewise included only as whole
+contracts, with per-object and snapshot omission metadata; the model is told never to infer an
+omitted schema. A selected open custom Handler event is identified as envelope-only with unknown
+event-specific fields. These facts remain truthful even when either bounded section clips less
+relevant entries. Tests compare the runtime binding tree with the schema, probe completable symbols in
+the shipped sandbox, project attribute and event registries, check representative LuaCATS signatures,
+validate every palette snippet, and reject historical bad spellings. The palette now uses the shipped
+callback parameter (`ev`), global/object `emit`, `h:attach`, `block:setBlock`/`breakBlock`, and
+`objects.find`/`objects.block` spellings; the earlier mismatched forms are not retained as snippets.
+These checks do not by themselves prove every producer call site or live applicability decision.
 
 ## Styling and analysis
 
@@ -129,11 +154,13 @@ The receiver determines the candidates:
 | host `self.` / a direct target alias followed by `.` | handle properties and live-applicable built-in fields whose names are valid after a dot |
 | guest `self.` | handle properties and kind-level built-in fields whose names are valid after a dot |
 | `player.` / another inferred handle followed by `.` | handle properties and kind-level built-in fields whose names are valid after a dot |
-| `handle:` | generic handle methods plus kind-specific methods such as block replacement |
+| `handle:` | generic handle methods, including `events`, `declareEvent`, `undeclareEvent`, `on`, `onAttribute`, and `emit`, plus kind-specific methods such as block replacement |
 | `self.attrs.` or a straightforward alias | live custom attributes for the editor target only |
+| `on("` / `self:on("` | built-in events compatible with the current target plus its declared custom events |
+| `emit("` / `self:emit("` | only custom events declared on the current target; engine-produced built-ins are not manually emittable |
 | `objects.` | `get`, `find`, and `block` |
 | `ai.` | `ask` and `await` |
-| handler `ev.` or a locally declared callback event | common event fields and payload fields for the known event |
+| handler `ev.` or a locally declared callback event | common event fields and payload fields for the compatible built-in or target-declared custom event |
 | `math.`, `string.`, `table.`, `utf8.` | only the sandbox allowlist |
 | a locally inferred table literal followed by `.` | that table's known named fields |
 
@@ -197,14 +224,15 @@ whole-document load/new/script-switch boundary clears the prior document's undo 
 
 On a host, the World Objects browser snapshots the `ObjectGraph`, `AttributeStore`, and `ScriptStore`
 read paths used by scripting commands. A LAN guest instead combines its client-side graph with
-replicated attribute and script metadata; it receives no host-only discovery surface. The snapshot
-includes the script target, player, world, current dimension, crosshair target, nearby live
-entities/players, and nearby blocks that already carry object records. It does not scan every
+replicated attribute, script, and custom-event metadata; it receives no host-only discovery surface.
+The snapshot includes the script target, player, world, current dimension, crosshair target, nearby
+live entities/players, and nearby blocks that already carry object records. It does not scan every
 ordinary terrain cell while typing.
 
 The default nearby query is radius 16 and limit 32. Rows show display name, exact canonical ref,
 kind, distance, live/stale status, custom-attribute count, and script count. Search matches names,
-refs, and kinds. Rows can be pinned and can insert either:
+refs, and kinds. The selected target's event catalog is a separate immutable projection, so custom
+declarations do not cause arbitrary terrain scans while typing. Rows can be pinned and can insert either:
 
 ```lua
 objects.get("block:overworld:10,64,3")
@@ -219,9 +247,13 @@ local door = objects.get("block:overworld:10,64,3")
 Display names are never used as identity. Object-reference completion includes live entries only.
 The palette can retain a missing pinned ref as a visibly stale row, but its Insert and Bind controls
 are disabled; the model also rechecks liveness immediately before any insertion. The host validates
-every explicit ref sent by a granted guest. The LAN protocol does not replicate a custom attribute's
-read-only bit; guest completion therefore cannot promise mutability, and the host remains
-authoritative for writes.
+every explicit ref sent by a granted guest. Each host snapshot carries the custom attribute's
+inferred Lua type and read-only state through exact-object member completion and the bounded AI
+projection. The LAN protocol does not replicate a custom attribute's
+read-only bit; guest completion therefore cannot promise mutability. It does replicate bounded event
+names, field type tokens, and summaries for target-aware authoring, but not declaration provenance or
+script source. The host remains authoritative for every write, declaration, subscription, emission,
+and execution.
 
 ## Optional Ollama completion
 
@@ -239,11 +271,21 @@ or **Refresh local models** starts that request explicitly. Model discovery is c
 panel closes, editor AI switches Off, or the world session ends.
 
 The read-only completion request is bounded to source before/after the caret, script mode/event,
-current diagnostics, and a small caller-authorized World Objects projection. It contains no tools,
-mutation context, save data, unrelated scripts, raw world state, or hidden LAN data. It includes the
-first 6,000 characters of the generated LuaCATS text. Engine globals and modules are deliberately
-ordered into that prefix, while later per-kind attributes and event classes can still be omitted;
-the runtime validator, not this prompt, remains the API authority.
+current diagnostics, a target authoring contract, and the current bounded World Objects snapshot.
+That snapshot leaves the app only after a manual suggestion request or after the user explicitly
+enables On Idle. The authoring contract lists the mode rule and target members. Handler requests
+carry target-compatible produced built-ins and target declarations. The selected Handler contract is
+prioritized and never field-clipped; every other included event is also a whole contract, while counts
+state whether the prompt budget omitted any contracts. Module requests add produced built-in payloads
+and, for each included object in the bounded authorized snapshot, compatible built-in names plus as many
+whole declared custom-event contracts as fit. Snapshot and per-object total/included/truncated metadata
+makes every omission explicit. An undeclared custom event explicitly
+selected for Handler mode is marked envelope-only with unknown event-specific payload. The request
+contains no tools, mutation context, save data, unrelated scripts, raw world state, or hidden LAN
+data. It also includes the first 6,000
+characters of generated LuaCATS text. Engine globals and modules are deliberately ordered into that
+prefix; even if later per-kind classes are omitted, the bounded authoring contract keeps facts needed
+for this target and selected event. The runtime validator, not this prompt, remains the API authority.
 
 `/api/show` metadata is fetched as advisory model information. The product currently uses the safe
 cursor-marker prompt path and always disables Ollama's fill-in-the-middle `suffix` field. The service
@@ -271,13 +313,15 @@ document size, but it is not compiled or schema-validated; use Check before rely
 In the Script AI input, Return submits, Shift-Return inserts a newline, and Up/Down recall prompt
 history only when the caret is on the first/last line respectively; otherwise they move the caret.
 
-Every request carries the document revision, UTF-16 caret, source hash, model, target, mode/event,
-and authoring-context revision. Editing, moving the caret, switching target/script/model, refreshing
+Every request carries a distinct document identity in addition to the document revision, UTF-16
+caret, source hash, model, target, mode/event, and authoring-context revision. Editing, moving the
+caret, switching target/script/model, refreshing
 World Objects, pressing Escape, or ending the world session cancels the inline request and makes late
 responses ineligible for insertion. The right-hand Script AI panel owns its task separately:
 **Stop**, closing the panel, switching AI Off, or ending the world session cancels it, while other
 document/context changes make its eventual response stale before it can be used against the changed
-document.
+document. New/Switch also clears the panel transcript, prompt history, and pending insertion so even
+byte-identical scripts cannot share conversational state.
 
 The panel asks Ollama not to use Markdown fences, and the service strips a fence wrapper when one is
 returned. After reviewing any successful reply, the user can explicitly insert the complete bounded
@@ -329,7 +373,7 @@ The following remain design targets rather than delivered behavior:
   only the first trigger's event name;
 - snippet placeholders with forward/backward navigation and previewable quick fixes;
 - replication of enough LAN attribute metadata to show mutability accurately;
-- a context-tailored AI schema projection that keeps every relevant per-kind/event definition inside
-  its bound, model-compatible FIM gating if FIM is exposed, and optional preflight of AI proposals
-  before display; and
+- a richer full-schema AI projection beyond the shipped bounded target contract,
+  model-compatible FIM gating if FIM is exposed, and optional preflight of AI proposals before
+  display; and
 - measured completion latency plus installed-app keyboard, mouse, and VoiceOver regression coverage.

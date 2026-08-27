@@ -124,7 +124,7 @@ final class ScriptLanguageSchemaTests: XCTestCase {
     func testEventRegistryCoversThePublishedBuiltInCatalogExactlyOnce() {
         let expected: [EventKind] = [
             .attributeChanged,
-            .blockPlaced, .blockBroken, .blockReplaced, .blockChanged, .blockUsed,
+            .blockPlaced, .blockToolStrike, .blockBroken, .blockReplaced, .blockChanged, .blockUsed,
             .blockNeighborChanged, .blockScheduledTick,
             .entitySpawned, .entityRemoved, .entityDamaged, .entityDied, .entityHealed,
             .entityInteracted, .entityTargetChanged,
@@ -235,5 +235,11 @@ final class ScriptLanguageSchemaTests: XCTestCase {
         }
         XCTAssertTrue(repeating.code.contains("every(20, \"on_interval\")"))
         XCTAssertFalse(repeating.code.contains("every(20, function"))
+
+        guard let unload = ScriptLanguageSchema.snippets.first(where: { $0.id == "lifecycle.unload" }) else {
+            return XCTFail("missing unload finalizer snippet")
+        }
+        XCTAssertTrue(unload.code.contains("register(\"unload\", function()"))
+        XCTAssertFalse(unload.code.contains("function(ev)"), "the unload finalizer receives no event")
     }
 }

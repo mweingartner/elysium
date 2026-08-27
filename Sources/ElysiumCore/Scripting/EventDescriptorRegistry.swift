@@ -67,7 +67,20 @@ public enum EventDescriptorRegistry {
         ),
 
         event(.blockPlaced, [.block], [field("by", .objectHandle, "Player that placed the block."), field("item", .string, "Placed block's registered name.")], "A player placed a block."),
-        event(.blockBroken, [.block], [field("by", .objectHandle, "Player that broke the block."), nullable("item", .string, "Held item name, or nil.")], "A player broke a block."),
+        event(
+            .blockToolStrike, [.block],
+            [
+                field("by", .objectHandle, "Player that began striking the block."),
+                field("item", .string, "Registered name of the tool used."),
+                field("blockName", .string, "Registered block name at first strike."),
+                field("face", .string, "Block face struck."),
+                field("toolType", .string, "Tool category."),
+                field("tier", .integer, "Tool tier."),
+                field("instant", .boolean, "Whether this strike will break the block immediately."),
+            ],
+            "A player first struck a block with a tool, including an unbreakable block. Held-button repeats do not re-fire."
+        ),
+        event(.blockBroken, [.block], [field("by", .objectHandle, "Player that broke the block."), nullable("item", .string, "Held item name, or nil."), field("blockName", .string, "Registered name of the broken block.")], "A player broke a block."),
         event(
             .blockReplaced, [.block], availability: .reserved("The name is reserved, but the shipped engine does not currently raise it."),
             "Reserved lifecycle event for record-owning block replacement."
@@ -78,20 +91,20 @@ public enum EventDescriptorRegistry {
             "A non-silent block cell write changed name or metadata."
         ),
         event(.blockUsed, [.block], [field("by", .objectHandle, "Player that used the block."), nullable("item", .string, "Held item name, or nil.")], "A player successfully used a block."),
-        event(.blockNeighborChanged, [.block], [field("from", .objectHandle, "Neighbor block whose change caused the notification.")], "A recorded block received a neighbor update."),
+        event(.blockNeighborChanged, [.block], [field("from", .objectHandle, "Neighbor block whose change caused the notification.")], "A subscribed or record-backed block received a neighbor update."),
         event(
             .blockScheduledTick, [.block], availability: .reserved("The name is reserved, but no script scheduling API or producer is shipped."),
             "Reserved block scheduled-tick event."
         ),
 
-        event(.entitySpawned, [.entity, .player], summary: "A scriptable non-mirror entity entered a world."),
-        event(.entityRemoved, [.entity, .player], summary: "A scriptable non-mirror entity left a world."),
+        event(.entitySpawned, [.entity, .player], summary: "A scriptable entity or canonical LAN-player proxy entered a world."),
+        event(.entityRemoved, [.entity, .player], summary: "A scriptable entity or canonical LAN-player proxy left a world."),
         event(
             .entityDamaged, [.entity, .player],
-            [field("amount", .number, "Actual health lost."), nullable("attacker", .objectHandle, "Attacking entity, or nil.")],
-            "A living entity lost health. ev.source is provenance; the engine's damage-cause string is not currently exposed."
+            [field("amount", .number, "Actual health lost."), field("cause", .string, "Engine damage-cause identifier."), nullable("attacker", .objectHandle, "Attacking entity, or nil.")],
+            "A living entity lost health. ev.source remains event provenance."
         ),
-        event(.entityDied, [.entity, .player], [nullable("attacker", .objectHandle, "Killing entity, or nil.")], "A living entity died."),
+        event(.entityDied, [.entity, .player], [field("cause", .string, "Engine damage-cause identifier."), nullable("attacker", .objectHandle, "Killing entity, or nil.")], "A living entity died."),
         event(.entityHealed, [.entity, .player], [field("amount", .number, "Effective health restored.")], "A living entity recovered health."),
         event(.entityInteracted, [.entity], [field("by", .objectHandle, "Player that interacted."), nullable("item", .string, "Held item name, or nil.")], "A player successfully interacted with an entity."),
         event(.entityTargetChanged, [.entity], [nullable("old", .objectHandle, "Previous target, or nil."), nullable("new", .objectHandle, "New target, or nil.")], "A mob changed its target."),
@@ -119,8 +132,9 @@ public enum EventDescriptorRegistry {
 
         event(.load, everyObjectKind, [field("name", .string, "Loaded script name.")], "A script finished loading and became live."),
         event(
-            .unload, everyObjectKind, availability: .reserved("The name is reserved, but the shipped runtime does not currently deliver unload handlers."),
-            "Reserved script lifecycle event."
+            .unload, everyObjectKind,
+            availability: .reserved("There is no EventBus producer; module scripts use register(\"unload\", fn) for synchronous finalization."),
+            "Reserved EventBus name. Module teardown uses the separate register(\"unload\", fn) finalizer."
         ),
         event(.timerFired, everyObjectKind, [field("name", .string, "Registered timer-handler name.")], "A durable named timer fired."),
         event(
@@ -130,7 +144,7 @@ public enum EventDescriptorRegistry {
         ),
         event(.scriptFaulted, everyObjectKind, [field("name", .string, "Faulting script name."), field("message", .string, "Bounded fault message.")], "A script failed to compile or run."),
         event(.scriptAttached, everyObjectKind, [field("name", .string, "Attached script name.")], "A script attached another script successfully."),
-        event(.scriptOverBudget, [.world], [field("message", .string, "Bounded budget diagnostic.")], "The event bus dropped excess work for this tick."),
+        event(.scriptOverBudget, [.world], [field("message", .string, "Bounded budget diagnostic.")], "The script scheduler or event bus reached a bounded-work limit this tick."),
     ]
 
     public static var available: [ScriptEventDescriptor] {

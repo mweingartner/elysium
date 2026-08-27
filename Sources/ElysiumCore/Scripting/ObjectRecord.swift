@@ -44,19 +44,32 @@ public struct Provenance: Equatable, Sendable {
     }
 }
 
-/// One bag of custom attributes for one object (block cell, entity/player,
-/// world or a dimension). `AttributeStore` is the only writer; everything else
-/// only reads.
+/// One bag of custom attributes/scripts plus a separate namespace of persistent
+/// custom-event declarations for one object (block cell, entity/player, world
+/// or a dimension).
 public struct ObjectRecord {
     public var entries: [String: AttributeEntry]
+    public var eventDeclarations: [String: CustomEventDeclaration]
     public var revision: UInt64
 
-    public init(entries: [String: AttributeEntry] = [:], revision: UInt64 = 0) {
+    public init(
+        entries: [String: AttributeEntry] = [:],
+        eventDeclarations: [String: CustomEventDeclaration] = [:],
+        revision: UInt64 = 0
+    ) {
         self.entries = entries
+        self.eventDeclarations = eventDeclarations
         self.revision = revision
     }
 
-    public var isEmpty: Bool { entries.isEmpty }
+    public var storageEntryCount: Int { entries.count + eventDeclarations.count }
+    public var isEmpty: Bool { entries.isEmpty && eventDeclarations.isEmpty }
+    public var hasScriptDefinitions: Bool {
+        entries.values.contains { entry in
+            if case .script = entry { return true }
+            return false
+        }
+    }
 }
 
 // MARK: - name grammar
@@ -92,6 +105,22 @@ public func normalizedAttributeNameHint(_ name: String) -> String? {
     let truncated = Array(scalars.prefix(32))
     let candidate = String(decoding: truncated, as: UTF8.self)
     return isValidAttributeName(candidate) ? candidate : nil
+}
+
+/// Canonical ergonomic spelling used when trusted Lua or the bounded AI tool lane supplies a
+/// custom attribute name. Unlike `normalizedAttributeNameHint`, this preserves camelCase word
+/// boundaries (`doorRef` -> `door_ref`) before applying the strict persisted-name grammar.
+public func normalizedScriptCustomAttributeName(_ raw: String) -> String {
+    guard !isValidAttributeName(raw) else { return raw }
+    var snake = ""
+    var previousLower = false
+    for character in raw {
+        if character.isUppercase && previousLower { snake.append("_") }
+        snake.append(Character(character.lowercased()))
+        previousLower = character.isLowercase
+    }
+    if isValidAttributeName(snake) { return snake }
+    return normalizedAttributeNameHint(snake) ?? raw
 }
 
 // MARK: - codec
@@ -153,6 +182,36 @@ public enum ObjectRecordCodec {
             }
             out += "}"
         }
+        // Persistent object-scoped custom-event declarations are an optional
+        // sibling section. Keeping them outside `entries` preserves the
+        // independent dotted event-name namespace.
+        let eventNames = record.eventDeclarations.keys.sorted(by: utf8Less).filter { name in
+            record.eventDeclarations[name]?.kind.rawValue == name
+        }
+        if !eventNames.isEmpty {
+            out += ",\"events\":{"
+            for (index, name) in eventNames.enumerated() {
+                guard let declaration = record.eventDeclarations[name] else { continue }
+                if index > 0 { out += "," }
+                out += AttrValueCodec.encode(.string(name))
+                out += ":{\"by\":"
+                out += AttrValueCodec.encode(.string(encodeAuthor(declaration.provenance.createdBy)))
+                out += ",\"fields\":{"
+                for (fieldIndex, field) in declaration.fields.sorted(by: { utf8Less($0.name, $1.name) }).enumerated() {
+                    if fieldIndex > 0 { out += "," }
+                    out += AttrValueCodec.encode(.string(field.name))
+                    out += ":"
+                    out += AttrValueCodec.encode(.string(field.typeToken))
+                }
+                out += "}"
+                if let summary = declaration.summary {
+                    out += ",\"summary\":"
+                    out += AttrValueCodec.encode(.string(summary))
+                }
+                out += ",\"t\":\(declaration.provenance.createdTick)}"
+            }
+            out += "}"
+        }
         out += ",\"rev\":\(record.revision),\"v\":1}"
         return out
     }
@@ -177,6 +236,7 @@ public enum ObjectRecordCodec {
         guard consume(bytes, &i, "{") else { return nil }
         var attrsText: (Int, Int)? = nil // byte range of the "attrs" object, parsed after the whole shell is walked
         var scriptsText: (Int, Int)? = nil // byte range of the "scripts" object (change 1c)
+        var eventsText: (Int, Int)? = nil // byte range of persistent custom-event declarations
         var revision: UInt64?
         var version: Int?
         if peek(bytes, i) == UInt8(ascii: "}") {
@@ -201,6 +261,11 @@ public enum ObjectRecordCodec {
                     guard let after = skipValue(bytes, i) else { return nil }
                     scriptsText = (start, after)
                     i = after
+                case "events":
+                    let start = i
+                    guard let after = skipValue(bytes, i) else { return nil }
+                    eventsText = (start, after)
+                    i = after
                 case "rev":
                     // Security (plan) C26: strict token, clamped to
                     // 0...(UInt64.max - 1_000_000) so a hostile/corrupt
@@ -223,7 +288,7 @@ public enum ObjectRecordCodec {
         }
         guard i == bytes.count else { return nil }
         guard version == 1 else { return nil }
-        var record = ObjectRecord(entries: [:], revision: revision ?? 0)
+        var record = ObjectRecord(entries: [:], eventDeclarations: [:], revision: revision ?? 0)
         var entries: [String: AttributeEntry] = [:]
         if let (attrsStart, attrsEnd) = attrsText,
             let decoded = decodeAttrsObject(bytes, attrsStart, attrsEnd, caps: caps, diagnostic: diagnostic) {
@@ -237,16 +302,109 @@ public enum ObjectRecordCodec {
         // diagnostic, same tolerance discipline as every other bad entry).
         if let (scriptsStart, scriptsEnd) = scriptsText {
             let scripts = decodeScriptsObject(bytes, scriptsStart, scriptsEnd, caps: caps, diagnostic: diagnostic)
-            for (name, scriptRecord) in scripts {
+            var scriptCount = 0
+            for name in scripts.keys.sorted(by: utf8Less) {
+                guard let scriptRecord = scripts[name] else { continue }
                 if entries[name] != nil {
                     diagnostic("dropped script '\(name)': name already used by an attribute")
                     continue
                 }
+                guard scriptCount < maxScriptsPerObject else {
+                    diagnostic("dropped script '\(name)': too many scripts")
+                    continue
+                }
+                guard entries.count < caps.maxEntriesPerObject else {
+                    diagnostic("dropped script '\(name)': too many entries")
+                    continue
+                }
                 entries[name] = .script(scriptRecord)
+                scriptCount += 1
             }
         }
         record.entries = entries
+        if let (eventsStart, eventsEnd) = eventsText {
+            let declarations = decodeEventsObject(
+                bytes, eventsStart, eventsEnd, caps: caps, diagnostic: diagnostic
+            )
+            for name in declarations.keys.sorted(by: utf8Less) {
+                guard let declaration = declarations[name] else { continue }
+                guard record.eventDeclarations.count < caps.maxEventDeclarationsPerObject else {
+                    diagnostic("dropped event '\(name)': too many declarations")
+                    continue
+                }
+                guard record.storageEntryCount < caps.maxEntriesPerObject else {
+                    diagnostic("dropped event '\(name)': too many entries")
+                    continue
+                }
+                record.eventDeclarations[name] = declaration
+            }
+        }
         return record
+    }
+
+    /// Tolerant per-entry decode for the optional v1 `events` section. A bad
+    /// declaration never drops an otherwise valid ObjectRecord.
+    private static func decodeEventsObject(
+        _ bytes: [UInt8], _ start: Int, _ end: Int, caps: ScriptingStorageCaps,
+        diagnostic: (String) -> Void
+    ) -> [String: CustomEventDeclaration] {
+        var i = start
+        guard consume(bytes, &i, "{") else { return [:] }
+        var result: [String: CustomEventDeclaration] = [:]
+        if peek(bytes, i) == UInt8(ascii: "}") { return result }
+        while true {
+            guard let (name, afterName) = parseKeyString(bytes, i) else { return result }
+            i = afterName
+            guard consume(bytes, &i, ":") else { return result }
+            let entryStart = i
+            guard let entryEnd = skipValue(bytes, i) else { return result }
+            i = entryEnd
+            if result[name] == nil,
+               let declaration = decodeEventDeclaration(
+                   bytes, entryStart, entryEnd, name: name, caps: caps
+               ) {
+                result[name] = declaration
+            } else {
+                diagnostic("dropped event '\(name)': invalid name, duplicate, or malformed declaration")
+            }
+            if peek(bytes, i) == UInt8(ascii: ",") { i += 1; continue }
+            if peek(bytes, i) == UInt8(ascii: "}") { i += 1; break }
+            return result
+        }
+        guard i == end else { return [:] }
+        return result
+    }
+
+    private static func decodeEventDeclaration(
+        _ bytes: [UInt8], _ start: Int, _ end: Int, name: String,
+        caps: ScriptingStorageCaps
+    ) -> CustomEventDeclaration? {
+        guard case .success(.map(let map)) = AttrValueCodec.decode(
+            String(decoding: bytes[start..<end], as: UTF8.self), caps: caps
+        ) else { return nil }
+        guard case .string(let authorText)? = map["by"], let author = decodeAuthor(authorText) else { return nil }
+        guard case .int(let tick)? = map["t"], tick >= 0 else { return nil }
+        guard case .map(let rawFields)? = map["fields"] else { return nil }
+        var fields: [CustomEventField] = []
+        fields.reserveCapacity(min(rawFields.count, caps.maxEventFieldsPerDeclaration))
+        for fieldName in rawFields.keys.sorted(by: utf8Less) {
+            guard case .string(let token)? = rawFields[fieldName],
+                  let field = CustomEventField(name: fieldName, typeToken: token) else { return nil }
+            fields.append(field)
+        }
+        let summary: String?
+        switch map["summary"] {
+        case nil: summary = nil
+        case .string(let value)?: summary = value
+        default: return nil
+        }
+        guard case .success(let validated) = validateCustomEventDeclaration(
+            name: name, fields: fields, summary: summary, caps: caps
+        ) else { return nil }
+        return CustomEventDeclaration(
+            kind: validated.kind, fields: validated.fields, summary: summary,
+            provenance: Provenance(createdBy: author, createdTick: tick)
+        )
     }
 
     /// script-runtime (change 1c). Tolerant per-entry decode matching

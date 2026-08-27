@@ -107,14 +107,28 @@ final class ScriptPersistenceTests: XCTestCase {
             entities: [["type": "cow", "x": 1.0, "y": 64.0, "z": 1.0, "vx": 0.0, "vy": 0.0, "vz": 0.0,
                         "yaw": 0.0, "pitch": 0.0, "age": 0, "fire": 0, "persistent": false, "id": 21]]
         )
-        let blockRecord = ObjectRecord(entries: [
-            "mood": .value(.string("happy"), readonly: false, provenance: Provenance(createdBy: .player, createdTick: 0)),
-        ], revision: 3)
+        let eventKind = try XCTUnwrap(EventKind.parse("furnace.output_ready"))
+        let blockRecord = ObjectRecord(
+            entries: [
+                "mood": .value(.string("happy"), readonly: false, provenance: Provenance(createdBy: .player, createdTick: 0)),
+            ],
+            eventDeclarations: [
+                eventKind.rawValue: CustomEventDeclaration(
+                    kind: eventKind, fields: [.init(name: "count", type: .integer)],
+                    provenance: Provenance(createdBy: .player, createdTick: 2)
+                ),
+            ],
+            revision: 3
+        )
         record.objects = [chunkCellIndex(3, 64, 5): ObjectRecordCodec.encode(blockRecord)]
 
         XCTAssertTrue(db.putChunks([record]))
         guard let read = db.getChunk("w1", 0, 0, 0) else { return XCTFail("chunk did not round trip") }
-        XCTAssertEqual(read.objects[chunkCellIndex(3, 64, 5)].flatMap { ObjectRecordCodec.decode($0, caps: .defaults) }?.revision, 3)
+        let decodedRecord = read.objects[chunkCellIndex(3, 64, 5)].flatMap {
+            ObjectRecordCodec.decode($0, caps: .defaults)
+        }
+        XCTAssertEqual(decodedRecord?.revision, 3)
+        XCTAssertEqual(decodedRecord?.eventDeclarations[eventKind.rawValue]?.fields.map(\.name), ["count"])
         XCTAssertEqual((read.entities.first?["id"] as? NSNumber)?.intValue, 21)
 
         // a second save of the *same in-memory record* (mirroring an
@@ -234,6 +248,31 @@ final class ScriptPersistenceTests: XCTestCase {
         cow2.load(dict)
         XCTAssertEqual(cow2.objectRecord.entries.count, 1)
         XCTAssertEqual(cow2.objectRecord.revision, 1)
+    }
+
+    func testEntitySaveAndLoadRoundTripsDeclarationOnlyObjectRecord() throws {
+        let world = World(dim: .overworld, seed: 1)
+        let cow = Cow(world: world)
+        let kind = try XCTUnwrap(EventKind.parse("cow.mood_changed"))
+        cow.objectRecord = ObjectRecord(
+            eventDeclarations: [
+                kind.rawValue: CustomEventDeclaration(
+                    kind: kind,
+                    fields: [.init(name: "mood", type: .string)],
+                    summary: "The cow's mood changed.",
+                    provenance: Provenance(createdBy: .player, createdTick: 5)
+                ),
+            ],
+            revision: 1
+        )
+
+        let saved = cow.save()
+        XCTAssertNotNil(saved["object"])
+        let loaded = Cow(world: world)
+        loaded.load(saved)
+        XCTAssertTrue(loaded.objectRecord.entries.isEmpty)
+        XCTAssertEqual(loaded.objectRecord.eventDeclarations[kind.rawValue]?.fields.map(\.name), ["mood"])
+        XCTAssertEqual(loaded.objectRecord.revision, 1)
     }
 
     func testEntityWithEmptyRecordOmitsObjectKey() {

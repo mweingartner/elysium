@@ -95,6 +95,24 @@ public enum LANBlockIntentResult: Equatable {
     case rejected(String)
 }
 
+/// Host-derived inputs needed to raise one `block.toolStrike` event. No tool or block metadata
+/// supplied by the guest survives into this value.
+public struct LANAuthorizedToolStrike: Equatable {
+    public var blockCell: Int
+    public var itemID: Int
+
+    public init(blockCell: Int, itemID: Int) {
+        self.blockCell = blockCell
+        self.itemID = itemID
+    }
+}
+
+public enum LANToolStrikeIntentResult: Equatable {
+    case accepted(LANAuthorizedToolStrike)
+    case ignored(String)
+    case rejected(String)
+}
+
 public enum LANContainerEditResult: Equatable {
     case applied(blockEntities: [LANBlockEntitySnapshot])
     case rejected(String)
@@ -282,6 +300,16 @@ public final class LANMultiplayerHostSession {
         var lastTemplateUndo: TemplatePlacementUndoSnapshot?
         var lastAckTick = 0
         var lastAckSequence: UInt32 = 0
+        /// Event-only block strikes have their own semantic sequence. Wire-frame sequencing
+        /// rejects duplicate packets; this rejects a peer replaying the action in fresh frames.
+        var lastToolStrikeSequence: UInt32 = 0
+        /// Highest valid left-button gesture observed in this connection epoch. Older gesture ids
+        /// cannot be replayed with a fresh semantic sequence after a newer gesture was accepted.
+        var lastToolStrikeGesture: UInt32 = 0
+        /// Last valid target accepted in this connection epoch. A new semantic sequence alone
+        /// cannot turn a held/replayed strike on the same block into another script event; moving
+        /// to a different valid block advances this target and permits returning later.
+        var lastToolStrikeTarget: LANBlockPosition?
         var lastSeenTick = 0
         var disconnectedTick: Int?
         /// Last authority tick already elapsed when this connection was accepted.
@@ -515,6 +543,9 @@ public final class LANMultiplayerHostSession {
             existing.lastSeenTick = max(existing.lastSeenTick, tick)
             existing.disconnectedTick = nil
             existing.rpgConnectedAfterTick = max(0, min(RPG_MAX_COUNTER, tick))
+            existing.lastToolStrikeSequence = 0
+            existing.lastToolStrikeGesture = 0
+            existing.lastToolStrikeTarget = nil
             peers[playerID] = existing
             return .reconnected
         }
@@ -1217,6 +1248,85 @@ public final class LANMultiplayerHostSession {
         return .ignored("unsupported use target")
     }
 
+    /// Validates an event-only tool strike without mutating the world. The per-peer semantic
+    /// sequence is consumed before the more expensive state checks once authorization succeeds,
+    /// so a semantically rejected or replayed frame can never be retried into a duplicate script
+    /// event. Gaps are accepted because transport loss/reconnect must not poison every later
+    /// strike; only a strictly newer positive value advances the connection-local high-water mark.
+    public func authorizeToolStrikeIntent(
+        _ intent: LANBlockIntent,
+        from rawPlayerID: String,
+        in world: World
+    ) -> LANToolStrikeIntentResult {
+        guard intent.action == .toolStrike else { return .rejected("invalid tool strike action") }
+        let playerID = String(rawPlayerID.prefix(128))
+        guard var peer = peers[playerID] else { return .rejected("unknown player") }
+        switch authorize(.build, from: playerID) {
+        case .accepted: break
+        case .rejected(let reason): return .rejected(reason)
+        }
+        guard let sequence = intent.toolStrikeSequence, sequence > 0 else {
+            return .rejected("missing tool strike sequence")
+        }
+        if let gesture = intent.toolStrikeGesture, gesture == 0 {
+            return .rejected("invalid tool strike gesture")
+        }
+        if sequence <= peer.lastToolStrikeSequence {
+            return .ignored("duplicate tool strike")
+        }
+        peer.lastToolStrikeSequence = sequence
+        peers[playerID] = peer
+
+        guard let playerState = peer.playerState else {
+            return .rejected("player state unavailable")
+        }
+        guard playerState.dimension == world.dim.rawValue else {
+            return .rejected("target dimension unavailable")
+        }
+        guard isWithinLANReach(playerState, x: intent.x, y: intent.y, z: intent.z) else {
+            return .rejected("target out of reach")
+        }
+        guard DIR_NAMES.indices.contains(intent.face) else {
+            return .rejected("invalid target face")
+        }
+
+        let blockCell = world.getBlock(intent.x, intent.y, intent.z)
+        guard blockCell != 0, isValidLANReplicatedCell(blockCell) else {
+            return .rejected("target block unavailable")
+        }
+        guard blockCell == intent.cell else {
+            return .rejected("stale target block")
+        }
+        guard let inventory = peer.inventory,
+              intent.selectedHotbarSlot == playerState.selectedHotbarSlot,
+              inventory.selectedHotbarSlot == playerState.selectedHotbarSlot else {
+            return .rejected("selected tool state unavailable")
+        }
+        guard let held = inventory.slots.first(where: {
+            $0.slot == playerState.selectedHotbarSlot && $0.count > 0
+        }), held.itemID >= 0, held.itemID < itemDefs.count,
+              let tool = itemDef(held.itemID).tool,
+              held.damage < tool.durability else {
+            return .rejected("selected item is not a usable tool")
+        }
+        let target = LANBlockPosition(
+            dimension: world.dim.rawValue, x: intent.x, y: intent.y, z: intent.z
+        )
+        if let gesture = intent.toolStrikeGesture, gesture < peer.lastToolStrikeGesture {
+            return .ignored("stale tool strike gesture")
+        }
+        let sameGesture = intent.toolStrikeGesture.map { $0 == peer.lastToolStrikeGesture } ?? true
+        if sameGesture, peer.lastToolStrikeTarget == target {
+            return .ignored("duplicate tool strike target")
+        }
+        if let gesture = intent.toolStrikeGesture {
+            peer.lastToolStrikeGesture = gesture
+        }
+        peer.lastToolStrikeTarget = target
+        peers[playerID] = peer
+        return .accepted(LANAuthorizedToolStrike(blockCell: blockCell, itemID: held.itemID))
+    }
+
     public func applyBlockIntent(_ intent: LANBlockIntent, from rawPlayerID: String, to world: World) -> LANBlockIntentResult {
         let playerID = String(rawPlayerID.prefix(128))
         guard let peer = peers[playerID] else { return .rejected("unknown player") }
@@ -1250,11 +1360,49 @@ public final class LANMultiplayerHostSession {
             let existing = world.getBlock(tx, ty, tz)
             guard isReplaceableLANCell(existing) else { return .ignored("target occupied") }
             _ = world.setBlock(tx, ty, tz, intent.cell)
-            let change = LANBlockChange(dimension: world.dim.rawValue, x: tx, y: ty, z: tz, cell: intent.cell)
+            let placedCell = world.getBlock(tx, ty, tz)
+            guard placedCell == intent.cell else { return .rejected("placement failed") }
+            let change = LANBlockChange(
+                dimension: world.dim.rawValue, x: tx, y: ty, z: tz, cell: placedCell
+            )
             changeLog.record(change)
+            let blockName = blockDefs[placedCell >> 4].name
+            let actor = ScriptEventActorIdentity.lanPlayer(peerID: playerID)
+            world.hooks.raiseScriptEvent(
+                .blockPlaced, .block(dim: world.dim, x: tx, y: ty, z: tz),
+                ["by": .ref(actor.ref.canonical), "item": .string(blockName)],
+                actor.source, blockName
+            )
             return .applied([change])
         case .useBlock:
-            return applyOpenableBlockUseIntent(intent, playerState: playerState, to: world)
+            let targetCell = world.getBlock(intent.x, intent.y, intent.z)
+            let result = applyOpenableBlockUseIntent(
+                intent, playerState: playerState, to: world
+            )
+            guard case .applied = result,
+                  isValidLANReplicatedCell(targetCell), targetCell != 0
+            else { return result }
+            let blockName = blockDefs[targetCell >> 4].name
+            let heldSlot = peer.inventory?.slots.first {
+                $0.slot == playerState.selectedHotbarSlot
+            }
+            let heldItem: AttrValue
+            if let heldSlot, heldSlot.itemID >= 0, heldSlot.itemID < itemDefs.count {
+                heldItem = .string(itemDef(heldSlot.itemID).name)
+            } else {
+                heldItem = .null
+            }
+            let actor = ScriptEventActorIdentity.lanPlayer(peerID: playerID)
+            world.hooks.raiseScriptEvent(
+                .blockUsed,
+                .block(dim: world.dim, x: intent.x, y: intent.y, z: intent.z),
+                ["by": .ref(actor.ref.canonical), "item": heldItem],
+                actor.source,
+                blockName
+            )
+            return result
+        case .toolStrike:
+            return .ignored("tool strike is event-only")
         }
     }
 
@@ -1379,6 +1527,82 @@ public final class LANMultiplayerHostSession {
         peer.inventoryRevision = update.revision
         peers[playerID] = peer
         return true
+    }
+
+    /// Applies a host-observed guest pickup as a narrow additive mutation against the peer's
+    /// current inventory baseline, then queues the same mutation as an idempotent owning-client
+    /// grant. No other field from the cosmetic `LANRemotePlayerEntity` is trusted or copied back.
+    @discardableResult
+    func applyAuthoritativePickupMutation(
+        _ mutation: LANAuthoritativePickupMutation,
+        for rawPlayerID: String
+    ) -> LANInventoryGrant? {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard var peer = peers[playerID],
+              mutation.items.count <= LAN_MULTIPLAYER_MAX_GRANT_ITEMS,
+              !mutation.items.isEmpty || mutation.xp > 0,
+              mutation.xp >= 0, mutation.xp <= 1_000_000_000
+        else { return nil }
+
+        let baseline = peer.inventory ?? LANPlayerInventorySnapshot(
+            playerID: peer.playerID,
+            selectedHotbarSlot: peer.playerState?.selectedHotbarSlot ?? 0,
+            slots: []
+        )
+        guard var inventory = makeInventory(from: baseline) else { return nil }
+        for item in mutation.items {
+            guard item.itemID >= 0, item.itemID < itemDefs.count,
+                  item.count > 0, item.damage >= 0 else { return nil }
+            let remaining = ItemStack(
+                item.itemID, item.count, damage: item.damage, label: item.label
+            )
+            guard remaining.count <= maxStackOf(remaining) else { return nil }
+            for index in inventory.indices where remaining.count > 0 {
+                guard let existing = inventory[index], canMerge(existing, remaining) else { continue }
+                let take = min(maxStackOf(existing) - existing.count, remaining.count)
+                if take > 0 {
+                    existing.count += take
+                    remaining.count -= take
+                }
+            }
+            if remaining.count > 0,
+               let empty = inventory.firstIndex(where: { $0 == nil }) {
+                inventory[empty] = remaining.copy()
+                remaining.count = 0
+            }
+            guard remaining.count == 0 else { return nil }
+        }
+
+        var nextXP = baseline.xp
+        var nextLevel = baseline.xpLevel
+        var nextProgress = baseline.xpProgress
+        if mutation.xp > 0 {
+            nextXP = max(0, min(1_000_000_000, nextXP + mutation.xp))
+            var needed = Double(lanXPRequiredForLevel(nextLevel))
+            var progressPoints = nextProgress * needed + Double(mutation.xp)
+            while progressPoints >= needed {
+                progressPoints -= needed
+                nextLevel = min(100_000, nextLevel + 1)
+                needed = Double(lanXPRequiredForLevel(nextLevel))
+            }
+            nextProgress = needed > 0 ? max(0, min(1, progressPoints / needed)) : 0
+        }
+
+        peer.inventory = LANPlayerInventorySnapshot(
+            playerID: peer.playerID,
+            selectedHotbarSlot: baseline.selectedHotbarSlot,
+            slots: makeLANInventorySlotSnapshots(inventory),
+            xp: nextXP,
+            xpLevel: nextLevel,
+            xpProgress: nextProgress
+        )
+        peers[playerID] = peer
+        return enqueueGrant(
+            items: mutation.items,
+            xp: mutation.xp,
+            clearAll: false,
+            to: playerID
+        )
     }
 
     /// Enqueues a host-originated inventory grant (pickup/correction/death-clear) for delivery to
@@ -1574,6 +1798,9 @@ public final class LANMultiplayerClientSession {
     /// mutation/gameplay path — the Inspector screen and `LANMultiplayerManager.mirroredAttributes
     /// (for:)` are its only readers.
     public private(set) var objectAttributes: [String: LANObjectAttributeSnapshot] = [:]
+    /// Last accepted revision per object, retained across tombstones so an equal/stale live
+    /// snapshot cannot resurrect metadata that a newer deletion already removed.
+    private var objectAttributeRevisionFloors: [String: UInt64] = [:]
     /// Baseline tracking for client-authoritative inventory (D-A): the last host grant this client
     /// has merged, and the client's own published inventory revision. `apply(_:)` never mutates
     /// local player inventory from a normal batch — only `applyRestore(_:)` / grant merges do.
@@ -1616,16 +1843,13 @@ public final class LANMultiplayerClientSession {
         for player in batch.players.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_PLAYERS) {
             players[player.playerID] = player
         }
-        // scripting-ui-and-replication (change 3), design.md §11: applied before chunk sections
-        // so the reconciliation pass below (1a's D5-adjacent note: `applyLANChunkSectionSnapshot`
-        // bulk-overwrites a whole section's blocks without running the single-block "does this
-        // replace clear the object's entries" identity check §17 Decision 5 relies on) can tell
-        // "refreshed by this very batch" apart from "stale, left behind by a bulk block swap".
+        // scripting-ui-and-replication (change 3), design.md §11. Attribute metadata is a
+        // separately paged stream: a chunk-section batch cannot imply that metadata omitted from
+        // that batch was deleted. Only an explicit, revisioned tombstone removes a mirror entry.
         // Hostile bytes: an unparseable `ref` or an `attrsJSON` that fails `AttrValueCodec.decode`
         // under the exact same caps `AttributeStore` persistence enforces is dropped, never
-        // trusted; a `revision` that regresses what is already mirrored (a stale replay, or a
-        // batch from a host that has since restarted onto an older save) is dropped too.
-        var refreshedAttributeRefs = Set<String>()
+        // trusted; a `revision` that is not strictly newer than the last accepted revision (a
+        // duplicate/stale replay, or a host that restarted onto an older save) is dropped too.
         for snapshot in batch.objectAttributes.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_OBJECT_ATTRIBUTES) {
             guard snapshot.attrsJSON.utf8.count <= LAN_MULTIPLAYER_MAX_OBJECT_ATTRIBUTES_JSON_BYTES,
                   ObjectRef.parse(snapshot.ref) != nil
@@ -1633,16 +1857,24 @@ public final class LANMultiplayerClientSession {
                 report.ignoredInvalidObjectAttributes += 1
                 continue
             }
-            if let existing = objectAttributes[snapshot.ref], snapshot.revision < existing.revision {
+            if let revisionFloor = objectAttributeRevisionFloors[snapshot.ref],
+               snapshot.revision <= revisionFloor {
                 report.ignoredStaleObjectAttributes += 1
+                continue
+            }
+            if snapshot.removed {
+                objectAttributeRevisionFloors[snapshot.ref] = snapshot.revision
+                if objectAttributes.removeValue(forKey: snapshot.ref) != nil {
+                    report.reconciledObjectAttributes += 1
+                }
                 continue
             }
             guard case .success(.map) = AttrValueCodec.decode(snapshot.attrsJSON, caps: .defaults) else {
                 report.ignoredInvalidObjectAttributes += 1
                 continue
             }
+            objectAttributeRevisionFloors[snapshot.ref] = snapshot.revision
             objectAttributes[snapshot.ref] = snapshot
-            refreshedAttributeRefs.insert(snapshot.ref)
             report.appliedObjectAttributes += 1
         }
 
@@ -1661,20 +1893,6 @@ public final class LANMultiplayerClientSession {
             report.appliedChunkSections += 1
             report.appliedChunkSectionPositions.append(key)
 
-            let minX = section.cx * CHUNK_W, maxX = minX + CHUNK_W - 1
-            let minZ = section.cz * CHUNK_W, maxZ = minZ + CHUNK_W - 1
-            let minY = section.minY, maxY = minY + SECTION_H - 1
-            let staleKeys = objectAttributes.keys.filter { key in
-                guard let parsed = ObjectRef.parse(key), case .block(let dim, let x, let y, let z) = parsed
-                else { return false }
-                return dim.rawValue == section.dimension &&
-                    (minX...maxX).contains(x) && (minY...maxY).contains(y) && (minZ...maxZ).contains(z) &&
-                    !refreshedAttributeRefs.contains(key)
-            }
-            for staleKey in staleKeys.sorted() {
-                objectAttributes.removeValue(forKey: staleKey)
-                report.reconciledObjectAttributes += 1
-            }
         }
         for change in batch.blockChanges.prefix(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES) {
             guard isValidLANReplicatedCell(change.cell) else {
@@ -2458,37 +2676,90 @@ public func makeLANWorldStateSnapshot(in world: World) -> LANWorldStateSnapshot 
     )
 }
 
-/// scripting-ui-and-replication (change 3), design.md §11. Mirrors `ScriptRuntime`'s own
-/// (private) `forEachScriptedObject` traversal — world, the three dimension bags, live
-/// entities and loaded chunks' objects in the *current* dimension — but reads
-/// `AttributeStore.list` instead of `ScriptStore.list`. The two enumerations visit the
-/// same `ObjectRecord`s (design.md §6.0's unified extensible attribute model stores
-/// attributes and scripts side by side in one record), so nothing here diverges from
-/// that traversal's own loaded/current-dimension scope. Sorted by `ref.canonical` for
-/// determinism; bounded to `maxCount` (design.md "64 objects/batch") — beyond that many
-/// simultaneously-attributed objects, the ones sorting after the cap simply wait for a
-/// later batch once an earlier one's attributes are removed (a full dirty-tracking/
-/// round-robin fill scheme, like entity replication's, is out of this change's scope).
+/// scripting-ui-and-replication (change 3), design.md §11. Enumerates every loaded metadata
+/// domain — world, the three dimension bags, live entities, and loaded chunks' objects in the
+/// *current* dimension. This LAN snapshot census is separate from ScriptRuntime definition
+/// discovery, which consumes exact persistence/mutation notifications and never scans the world.
+/// Sorted by `ref.canonical` for determinism. The page API carries a lexical cursor so every live ref eventually appears even
+/// when more than the per-batch cap exist, and compares consecutive censuses to emit explicit
+/// tombstones for refs whose final attribute/script/event declaration was removed.
+public struct LANObjectAttributeSnapshotPage: Equatable {
+    public var snapshots: [LANObjectAttributeSnapshot]
+    /// Monotonic wire revisions for the currently live refs after reconciling record
+    /// recreation/regression.
+    public var currentRevisions: [String: UInt64]
+    /// Raw ObjectRecord revisions used to detect a delete+recreate lifecycle at the same ref.
+    public var currentRawRevisions: [String: UInt64]
+    /// Canonical-record digests used to distinguish an equal-raw-revision replacement from an
+    /// unchanged record when deletion and recreation occur between consecutive censuses.
+    public var currentRecordDigests: [String: LANV6SHA256Digest]
+    /// Session-scoped high-water mark. Unlike a per-ref tombstone history, this remains O(1) and
+    /// still ensures a ref recreated after its tombstone was emitted receives a newer revision.
+    public var wireRevisionClock: UInt64
+    public var remainingTombstones: [String: UInt64]
+    public var emittedTombstoneRefs: Set<String>
+    public var nextRef: String?
+
+    public init(
+        snapshots: [LANObjectAttributeSnapshot],
+        currentRevisions: [String: UInt64],
+        currentRawRevisions: [String: UInt64],
+        currentRecordDigests: [String: LANV6SHA256Digest],
+        wireRevisionClock: UInt64,
+        remainingTombstones: [String: UInt64],
+        emittedTombstoneRefs: Set<String>,
+        nextRef: String?
+    ) {
+        self.snapshots = snapshots
+        self.currentRevisions = currentRevisions
+        self.currentRawRevisions = currentRawRevisions
+        self.currentRecordDigests = currentRecordDigests
+        self.wireRevisionClock = wireRevisionClock
+        self.remainingTombstones = remainingTombstones
+        self.emittedTombstoneRefs = emittedTombstoneRefs
+        self.nextRef = nextRef
+    }
+}
+
 public func makeLANObjectAttributeSnapshots(
     host: ObjectGraphHost,
     store: AttributeStore,
     scriptStore: ScriptStore? = nil,
+    customEventStore: CustomEventStore? = nil,
     maxCount: Int = LAN_MULTIPLAYER_MAX_REPLICATION_OBJECT_ATTRIBUTES
 ) -> [LANObjectAttributeSnapshot] {
+    makeLANObjectAttributeSnapshotPage(
+        host: host,
+        store: store,
+        scriptStore: scriptStore,
+        customEventStore: customEventStore,
+        maxCount: maxCount
+    ).snapshots
+}
+
+public func makeLANObjectAttributeSnapshotPage(
+    host: ObjectGraphHost,
+    store: AttributeStore,
+    scriptStore: ScriptStore? = nil,
+    customEventStore: CustomEventStore? = nil,
+    afterRef: String? = nil,
+    previousRevisions: [String: UInt64] = [:],
+    previousRawRevisions: [String: UInt64] = [:],
+    previousRecordDigests: [String: LANV6SHA256Digest] = [:],
+    previousWireRevisionClock: UInt64 = 0,
+    pendingTombstones: [String: UInt64] = [:],
+    maxCount: Int = LAN_MULTIPLAYER_MAX_REPLICATION_OBJECT_ATTRIBUTES
+) -> LANObjectAttributeSnapshotPage {
     let cappedCount = max(0, min(maxCount, LAN_MULTIPLAYER_MAX_REPLICATION_OBJECT_ATTRIBUTES))
-    guard cappedCount > 0 else { return [] }
 
     var refs: [ObjectRef] = [.world, .dimension(.overworld), .dimension(.nether), .dimension(.end)]
     if let w = host.world(for: host.currentDimension) {
         for e in w.entities {
             guard let ent = e as? Entity, !ent.dead else { continue }
-            refs.append(.entity(uid: ent.id))
-            // lan-client-parity (change 4): a connected guest's own object is
-            // discoverable/replicable under its `player:lan:<peerID>` ref too
-            // (never `entity:<uid>` — SC-1's guard on that path is untouched).
-            if let remote = ent as? LANRemotePlayerEntity {
-                refs.append(.lanPlayer(peerID: remote.multiplayerPlayerID))
-            }
+            // Use the same stable identity as every script/event traversal: local player metadata
+            // lives under `player`, LAN peers under `player:lan:<peerID>`, and only ordinary
+            // entities use their session-stable uid. Never emit an unsupported player entity ref.
+            refs.append(scriptRef(for: ent))
         }
         for chunk in w.chunks.values where !chunk.objectRecords.isEmpty {
             for cellIndex in chunk.objectRecords.keys.sorted() {
@@ -2498,27 +2769,184 @@ public func makeLANObjectAttributeSnapshots(
         }
     }
 
-    var out: [(ref: ObjectRef, revision: UInt64, attrs: [String: AttrValue], scripts: [LANScriptMetadata])] = []
-    for ref in refs {
-        let attrs = store.list(ref)
-        // script-only records for a scripted-but-attribute-free object (e.g.
-        // a freshly attached script with no custom attrs yet) still need a
-        // snapshot — never require attrs to be non-empty.
-        let scripts = (scriptStore?.list(ref) ?? [])
-            .map { LANScriptMetadata(name: $0.name, mode: $0.mode.rawValue, enabled: $0.enabled) }
-        guard !attrs.isEmpty || !scripts.isEmpty else { continue }
+    // One record read per live ref is enough to census all three metadata namespaces. Canonical
+    // record digests let the next census detect an equal-raw-revision replacement; the bounded
+    // page selected below separately pays only its wire snapshot encoding cost.
+    var out: [(ref: ObjectRef, revision: UInt64, record: ObjectRecord)] = []
+    var seenRefs = Set<ObjectRef>()
+    for ref in refs where seenRefs.insert(ref).inserted {
         guard case .live(let live) = store.graph.resolve(ref) else { continue }
         let record = AttributeStore.readRecord(live, host: host)
-        out.append((ref, record.revision, Dictionary(uniqueKeysWithValues: attrs.map { ($0.name, $0.value) }), scripts))
+        let hasAttributes = record.entries.values.contains {
+            if case .value = $0 { return true }
+            return false
+        }
+        let hasScripts = scriptStore != nil && record.entries.values.contains {
+            if case .script = $0 { return true }
+            return false
+        }
+        let hasEvents = customEventStore != nil && !record.eventDeclarations.isEmpty
+        // Script- or declaration-only records still need a snapshot — never require attributes.
+        guard hasAttributes || hasScripts || hasEvents else { continue }
+        out.append((ref, record.revision, record))
     }
-    out.sort { $0.ref.canonical < $1.ref.canonical }
-    return out.prefix(cappedCount).map { entry in
-        LANObjectAttributeSnapshot(
-            ref: entry.ref.canonical, revision: entry.revision,
-            attrsJSON: AttrValueCodec.encode(.map(entry.attrs)),
-            scriptsJSON: LANObjectAttributeSnapshot.encodeScripts(entry.scripts)
+    out.sort { utf8Less($0.ref.canonical, $1.ref.canonical) }
+    let currentRawRevisions = Dictionary(
+        uniqueKeysWithValues: out.map { ($0.ref.canonical, $0.revision) }
+    )
+    let currentRecordDigests = Dictionary(uniqueKeysWithValues: out.map {
+        (
+            $0.ref.canonical,
+            LANV6Crypto.sha256(Data(ObjectRecordCodec.encode($0.record).utf8))
+        )
+    })
+    // ObjectRecord storage is removed when its final metadata entry disappears, so recreating
+    // metadata at the same ref restarts the raw revision at 1. Preserve a separate monotonic wire
+    // revision: otherwise a guest holding revision 5 rejects the recreated revision 1 forever.
+    // A pending deletion tombstone is also a floor, covering deletion observed in one census and
+    // recreation before that tombstone fits on a bounded page.
+    var wireRevisionClock = max(
+        previousWireRevisionClock,
+        max(previousRevisions.values.max() ?? 0, pendingTombstones.values.max() ?? 0)
+    )
+    func allocateWireRevision(after floor: UInt64) -> UInt64 {
+        let base = max(wireRevisionClock, floor)
+        let allocated = base == UInt64.max ? UInt64.max : base + 1
+        wireRevisionClock = max(wireRevisionClock, allocated)
+        return allocated
+    }
+    var currentRevisions: [String: UInt64] = [:]
+    currentRevisions.reserveCapacity(currentRawRevisions.count)
+    for ref in currentRawRevisions.keys.sorted(by: utf8Less) {
+        let raw = currentRawRevisions[ref] ?? 0
+        if let tombstone = pendingTombstones[ref] {
+            currentRevisions[ref] = allocateWireRevision(after: max(raw, tombstone))
+            continue
+        }
+        guard let previousWire = previousRevisions[ref] else {
+            let clockSuccessor = allocateWireRevision(after: 0)
+            currentRevisions[ref] = max(raw, clockSuccessor)
+            wireRevisionClock = max(wireRevisionClock, raw)
+            continue
+        }
+        let previousRaw = previousRawRevisions[ref] ?? previousWire
+        let equalRawReplacement = raw == previousRaw
+            && previousRecordDigests[ref] != nil
+            && previousRecordDigests[ref] != currentRecordDigests[ref]
+        if raw < previousRaw || equalRawReplacement {
+            currentRevisions[ref] = allocateWireRevision(after: max(raw, previousWire))
+        } else {
+            let delta = raw - previousRaw
+            let (advanced, overflow) = previousWire.addingReportingOverflow(delta)
+            currentRevisions[ref] = overflow ? UInt64.max : max(raw, advanced)
+            wireRevisionClock = max(wireRevisionClock, currentRevisions[ref] ?? 0)
+        }
+    }
+
+    func makeSnapshot(
+        _ entry: (ref: ObjectRef, revision: UInt64, record: ObjectRecord)
+    ) -> LANObjectAttributeSnapshot {
+        var attrs: [String: AttrValue] = [:]
+        var scripts: [ScriptRecord] = []
+        for name in entry.record.entries.keys.sorted(by: utf8Less) {
+            guard let value = entry.record.entries[name] else { continue }
+            switch value {
+            case .value(let attr, _, _): attrs[name] = attr
+            case .script(let script):
+                if scriptStore != nil { scripts.append(script) }
+            }
+        }
+        scripts.sort {
+            $0.createdTick == $1.createdTick
+                ? utf8Less($0.name, $1.name)
+                : $0.createdTick < $1.createdTick
+        }
+        let scriptMetadata = scripts.map {
+            LANScriptMetadata(name: $0.name, mode: $0.mode.rawValue, enabled: $0.enabled)
+        }
+        let events = customEventStore == nil ? [] : entry.record.eventDeclarations.keys
+            .sorted(by: utf8Less)
+            .compactMap { entry.record.eventDeclarations[$0] }
+        return LANObjectAttributeSnapshot(
+            ref: entry.ref.canonical,
+            revision: currentRevisions[entry.ref.canonical] ?? entry.revision,
+            attrsJSON: AttrValueCodec.encode(.map(attrs)),
+            scriptsJSON: LANObjectAttributeSnapshot.encodeScripts(scriptMetadata),
+            eventsJSON: LANObjectAttributeSnapshot.encodeEvents(events)
         )
     }
+
+    var outstandingTombstones = pendingTombstones
+    for ref in previousRawRevisions.keys.sorted(by: utf8Less)
+        where currentRawRevisions[ref] == nil {
+        let revision = previousRevisions[ref] ?? previousRawRevisions[ref] ?? 0
+        let tombstoneRevision = allocateWireRevision(after: revision)
+        outstandingTombstones[ref] = max(outstandingTombstones[ref] ?? 0, tombstoneRevision)
+    }
+    for ref in currentRawRevisions.keys {
+        outstandingTombstones.removeValue(forKey: ref)
+    }
+
+    var snapshots: [LANObjectAttributeSnapshot] = []
+    snapshots.reserveCapacity(cappedCount)
+    let snapshotEncoder = JSONEncoder()
+    snapshotEncoder.outputFormatting = [.sortedKeys]
+    var encodedPageBytes = 2 // JSON array brackets; commas are charged as snapshots append.
+    func encodedCost(_ snapshot: LANObjectAttributeSnapshot, hasPredecessor: Bool) -> Int? {
+        guard let bytes = try? snapshotEncoder.encode(snapshot).count else { return nil }
+        return bytes + (hasPredecessor ? 1 : 0)
+    }
+
+    var emittedTombstoneRefs = Set<String>()
+    let tombstoneRefs = outstandingTombstones.keys.sorted(by: utf8Less)
+    for ref in tombstoneRefs where snapshots.count < cappedCount {
+        let snapshot = LANObjectAttributeSnapshot(
+            ref: ref,
+            revision: outstandingTombstones[ref] ?? 0,
+            attrsJSON: "{}",
+            removed: true
+        )
+        guard let cost = encodedCost(snapshot, hasPredecessor: !snapshots.isEmpty),
+              encodedPageBytes + cost <= LAN_MULTIPLAYER_MAX_OBJECT_METADATA_PAGE_BYTES
+        else { break }
+        snapshots.append(snapshot)
+        encodedPageBytes += cost
+        emittedTombstoneRefs.insert(ref)
+        outstandingTombstones.removeValue(forKey: ref)
+    }
+
+    let liveCapacity = cappedCount - snapshots.count
+    var nextRef = afterRef
+    if liveCapacity > 0, !out.isEmpty {
+        let startIndex: Int
+        if let afterRef,
+           let laterIndex = out.firstIndex(where: { utf8Less(afterRef, $0.ref.canonical) }) {
+            startIndex = laterIndex
+        } else {
+            startIndex = 0
+        }
+        let liveCount = min(liveCapacity, out.count)
+        for offset in 0..<liveCount {
+            let snapshot = makeSnapshot(out[(startIndex + offset) % out.count])
+            guard let cost = encodedCost(snapshot, hasPredecessor: !snapshots.isEmpty),
+                  encodedPageBytes + cost <= LAN_MULTIPLAYER_MAX_OBJECT_METADATA_PAGE_BYTES
+            else { break }
+            snapshots.append(snapshot)
+            encodedPageBytes += cost
+        }
+        nextRef = snapshots.last(where: { !$0.removed })?.ref ?? afterRef
+    }
+
+    return LANObjectAttributeSnapshotPage(
+        snapshots: snapshots,
+        currentRevisions: currentRevisions,
+        currentRawRevisions: currentRawRevisions,
+        currentRecordDigests: currentRecordDigests,
+        wireRevisionClock: wireRevisionClock,
+        remainingTombstones: outstandingTombstones,
+        emittedTombstoneRefs: emittedTombstoneRefs,
+        nextRef: nextRef
+    )
 }
 
 public func makeLANEntitySnapshots(

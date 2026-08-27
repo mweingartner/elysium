@@ -38,10 +38,16 @@ extension ScriptRuntime {
                 "set": { [weak runtime] handle, call in runtime?.methodSet(handle, call) ?? .error("runtime unavailable") },
                 "scripts": { [weak runtime] handle, _ in runtime?.methodScripts(handle) ?? .values([.list([])]) },
                 "define": { [weak runtime] handle, call in runtime?.methodDefine(handle, call) ?? .error("runtime unavailable") },
+                "events": { [weak runtime] handle, call in runtime?.methodEvents(handle, call) ?? .values([.list([])]) },
+                "declareEvent": { [weak runtime] handle, call in runtime?.methodDeclareEvent(handle, call) ?? .error("runtime unavailable") },
+                "undeclareEvent": { [weak runtime] handle, call in runtime?.methodUndeclareEvent(handle, call) ?? .error("runtime unavailable") },
+                "on": { [weak runtime] handle, call in runtime?.methodOn(handle, call) ?? .error("runtime unavailable") },
+                "onAttribute": { [weak runtime] handle, call in runtime?.methodOnAttribute(handle, call) ?? .error("runtime unavailable") },
+                "emit": { [weak runtime] handle, call in runtime?.methodEmit(handle, call) ?? .error("runtime unavailable") },
                 "attach": { [weak runtime] handle, call in runtime?.methodAttach(handle, call) ?? .error("runtime unavailable") },
                 "detach": { [weak runtime] handle, call in runtime?.methodDetach(handle, call) ?? .error("runtime unavailable") },
                 "setBlock": { [weak runtime] handle, call in runtime?.methodSetBlock(handle, call) ?? .error("runtime unavailable") },
-                "breakBlock": { [weak runtime] handle, _ in runtime?.methodBreakBlock(handle) ?? .error("runtime unavailable") },
+                "breakBlock": { [weak runtime] handle, call in runtime?.methodBreakBlock(handle, call) ?? .error("runtime unavailable") },
             ],
             index: { [weak runtime] handle, _, key in runtime?.objectIndex(handle, key) ?? .values([.null]) },
             newIndex: { [weak runtime] handle, _, key, value in runtime?.objectNewIndex(handle, key, value) ?? .error("runtime unavailable") }
@@ -70,8 +76,14 @@ extension ScriptRuntime {
             .function(name: "tick", HostFunction { [weak self] _ in .values([.int(self?.host.currentTick ?? 0)]) }),
             .function(name: "rng", HostFunction { [weak self] call in self?.hostRng(call) ?? .error("runtime unavailable") }),
             .function(name: "say", HostFunction { [weak self] call in self?.hostSay(call) ?? .error("runtime unavailable") }),
-            .function(name: "sound", HostFunction { _ in .values([]) }),
-            .function(name: "particles", HostFunction { _ in .values([]) }),
+            .function(name: "sound", HostFunction { [weak self] _ in
+                guard self?.unloadActive != true else { return .error("sound() is not available during unload") }
+                return .values([])
+            }),
+            .function(name: "particles", HostFunction { [weak self] _ in
+                guard self?.unloadActive != true else { return .error("particles() is not available during unload") }
+                return .values([])
+            }),
             .function(name: "dim", HostFunction { [weak self] call in self?.hostDim(call) ?? .values([.null]) }),
             .function(name: "register", HostFunction { [weak self] call in self?.hostRegister(call) ?? .error("runtime unavailable") }),
             .table(name: "objects", [
@@ -106,9 +118,12 @@ extension ScriptRuntime {
         // accepts either spelling for a built-in name — a snake_case-first
         // lookup, camelCase retried on a miss — documented in
         // ARCHITECTURE.md's script-runtime section.
-        if case .value(let v) = BuiltInAttributes.get(live, name: k, host: host) { return .values([v]) }
-        let snake = camelToSnakeAttributeName(k)
-        if snake != k, case .value(let v) = BuiltInAttributes.get(live, name: snake, host: host) { return .values([v]) }
+        if let descriptor = resolveLuaBuiltIn(kind: ref.kind, rawName: k),
+           case .value(let value) = BuiltInAttributes.get(
+               live, name: descriptor.canonical, host: host
+           ) {
+            return .values([value])
+        }
         return .values([.null])
     }
 
@@ -118,19 +133,23 @@ extension ScriptRuntime {
     }
 
     func performSet(ref: ObjectRef, name rawName: String, value: ScriptValue) -> HostResult {
-        // ai-object-graph (change 2), design.md §9.4 stage 6: a dry run's
-        // "read-only facade" — every write this call would otherwise make
-        // is skipped, and it reports success so the script's own control
-        // flow (an `if not ok then ...` after `h:set`) runs the same way it
-        // would for real, which is what makes the dry run's *other*
-        // failures (a later `nil` dereference, a bad argument count) mean
-        // something.
-        guard !dryRunActive else { return .values([]) }
+        // Check/dry-run resolves the same live object and executes the shared built-in/custom
+        // preflight below, but commits neither engine state nor an ObjectRecord candidate. A bad
+        // name, value, readonly/collision rule, or storage cap therefore fails exactly as it does
+        // live instead of being hidden by the read-only facade.
         guard case .live(let live) = graph.resolve(ref) else { return .error("\(ref.canonical) is not loaded") }
-        let name = AttributeRegistry.resolve(kind: ref.kind, name: rawName) != nil
-            ? rawName : camelToSnakeAttributeName(rawName)
-        if AttributeRegistry.resolve(kind: ref.kind, name: name) != nil {
-            switch BuiltInAttributes.set(live, name: name, value: value, host: host) {
+        guard let author = currentAuthor() else { return .error("no script context") }
+        if let descriptor = resolveLuaBuiltIn(kind: ref.kind, rawName: rawName) {
+            guard !unloadActive else {
+                return .error("built-in attributes are not writable during unload")
+            }
+            let name = descriptor.canonical
+            let outcome = dryRunActive
+                ? BuiltInAttributes.validateSet(live, name: name, value: value, host: host)
+                : host.setScriptBuiltInAttribute(
+                    live, ref: ref, name: name, value: value, author: author
+                )
+            switch outcome {
             case .ok: return .values([])
             case .unknownName(let suggestions):
                 let hint = suggestions.isEmpty ? "" : " (did you mean: \(suggestions.joined(separator: ", ")))"
@@ -141,8 +160,11 @@ extension ScriptRuntime {
             case .outOfRange(let range): return .error("'\(name)' must be in \(range)")
             }
         }
-        guard let author = currentAuthor() else { return .error("no script context") }
-        switch attributeStore.set(ref, name, value, by: author) {
+        let name = customAttributeStorageName(for: ref, rawName: rawName)
+        let outcome = dryRunActive
+            ? attributeStore.validateSet(ref, name, value, by: author)
+            : attributeStore.set(ref, name, value, by: author)
+        switch outcome {
         case .success: return .values([])
         case .failure(let err): return .error(attrErrorMessage(err, name: name))
         }
@@ -161,17 +183,17 @@ extension ScriptRuntime {
             return .values([.null])
         }
         guard case .live(let live) = graph.resolve(ref) else { return .values([.null]) }
-        let name = AttributeRegistry.resolve(kind: ref.kind, name: rawName) != nil
-            ? rawName : camelToSnakeAttributeName(rawName)
-        if AttributeRegistry.resolve(kind: ref.kind, name: name) != nil {
-            if case .value(let v) = BuiltInAttributes.get(live, name: name, host: host) { return .values([v]) }
+        if let descriptor = resolveLuaBuiltIn(kind: ref.kind, rawName: rawName) {
+            if case .value(let v) = BuiltInAttributes.get(
+                live, name: descriptor.canonical, host: host
+            ) { return .values([v]) }
             return .values([.null])
         }
-        return .values([attributeStore.get(ref, rawName) ?? .null])
+        return .values([customAttributeValue(for: ref, rawName: rawName) ?? .null])
     }
 
     func methodSet(_ handle: HandleRef, _ call: HostCall) -> HostResult {
-        guard call.arguments.count >= 2, case .value(.string(let name)) = call.arguments[0],
+        guard call.arguments.count == 2, case .value(.string(let name)) = call.arguments[0],
             let ref = ObjectRef.parse(handle.ref) else {
             return .error("set(name, value) requires a name and a value")
         }
@@ -192,59 +214,346 @@ extension ScriptRuntime {
     }
 
     func methodDefine(_ handle: HandleRef, _ call: HostCall) -> HostResult {
-        guard call.arguments.count >= 2, case .value(.string(let rawName)) = call.arguments[0],
+        guard (2...3).contains(call.arguments.count),
+            case .value(.string(let rawName)) = call.arguments[0],
             let ref = ObjectRef.parse(handle.ref) else {
             return .error("define(name, value[, opts])")
         }
-        guard !dryRunActive else { return .values([]) }
-        let name = normalizedCustomAttributeName(rawName)
+        let name = customAttributeStorageName(for: ref, rawName: rawName)
         guard let value = scriptValueArg(call.arguments[1]) else { return .error("unsupported value type") }
         var readonly = false
         var force = false
-        if call.arguments.count >= 3, case .value(.map(let opts)) = call.arguments[2] {
-            if case .bool(let b)? = opts["readonly"] { readonly = b }
-            if case .bool(let b)? = opts["force"] { force = b }
+        if call.arguments.count == 3 {
+            let options: [String: ScriptValue]
+            switch call.arguments[2] {
+            case .value(.list(let values)) where values.isEmpty:
+                options = [:]
+            case .value(.map(let map)):
+                options = map
+            default:
+                return .error("define options must be a table")
+            }
+            let allowed = Set(["readonly", "force"])
+            if let unknown = options.keys.sorted(by: utf8Less).first(where: { !allowed.contains($0) }) {
+                return .error("unknown define option '\(unknown)'")
+            }
+            if let value = options["readonly"] {
+                guard case .bool(let parsed) = value else {
+                    return .error("define option 'readonly' must be a boolean")
+                }
+                readonly = parsed
+            }
+            if let value = options["force"] {
+                guard case .bool(let parsed) = value else {
+                    return .error("define option 'force' must be a boolean")
+                }
+                force = parsed
+            }
         }
         guard let author = currentAuthor() else { return .error("no script context") }
-        switch attributeStore.define(ref, name, value, readonly: readonly, force: force, by: author) {
+        let outcome = dryRunActive
+            ? attributeStore.validateDefine(
+                ref, name, value, readonly: readonly, force: force, by: author
+            )
+            : attributeStore.define(
+                ref, name, value, readonly: readonly, force: force, by: author
+            )
+        switch outcome {
         case .success: return .values([])
         case .failure(let err): return .error(attrErrorMessage(err, name: name))
         }
     }
 
+    func methodEvents(_ handle: HandleRef, _ call: HostCall) -> HostResult {
+        guard call.arguments.isEmpty else { return .error("events() takes no arguments") }
+        guard let ref = ObjectRef.parse(handle.ref) else { return .values([.list([])]) }
+        let declarations = customEventStore.list(ref).map { declaration -> ScriptValue in
+            let fields = declaration.fields.map { field -> ScriptValue in
+                .map([
+                    "name": .string(field.name),
+                    "type": .string(field.typeToken),
+                    "nullable": .bool(field.isNullable),
+                ])
+            }
+            return .map([
+                "name": .string(declaration.kind.rawValue),
+                "fields": .list(fields),
+                "summary": declaration.summary.map(ScriptValue.string) ?? .null,
+                "author": .string(authorText(declaration.provenance.createdBy)),
+                "createdTick": .int(declaration.provenance.createdTick),
+            ])
+        }
+        return .values([.list(declarations)])
+    }
+
+    func methodDeclareEvent(_ handle: HandleRef, _ call: HostCall) -> HostResult {
+        guard let ctx = currentScript else { return .error("declareEvent() outside script context") }
+        guard !unloadActive else { return .error("declareEvent() is not available during unload") }
+        guard !ephemeralRunActive else {
+            return .error("declareEvent() is not available during ephemeral run")
+        }
+        guard (1...3).contains(call.arguments.count),
+              case .value(.string(let name)) = call.arguments[0],
+              let ref = ObjectRef.parse(handle.ref) else {
+            return .error("declareEvent(name[, fields][, summary])")
+        }
+        var fields: [CustomEventField] = []
+        if call.arguments.count >= 2 {
+            switch call.arguments[1] {
+            case .value(.list(let values)) where values.isEmpty:
+                break // Lua's empty table crosses the boundary as an empty list.
+            case .value(.map(let schema)):
+                for fieldName in schema.keys.sorted(by: utf8Less) {
+                    guard case .string(let token)? = schema[fieldName],
+                          let field = CustomEventField(name: fieldName, typeToken: token) else {
+                        return .error("event field '\(fieldName)' requires a valid type token")
+                    }
+                    fields.append(field)
+                }
+            default:
+                return .error("declareEvent fields must be a table mapping names to type tokens")
+            }
+        }
+        var summary: String?
+        if call.arguments.count >= 3 {
+            guard case .value(.string(let text)) = call.arguments[2] else {
+                return .error("declareEvent summary must be a string")
+            }
+            summary = text
+        }
+        // Check validates the exact contract but never writes it or spends the real lifecycle
+        // budget. The store's shared validator is exercised through a throwaway declaration call
+        // only in live mode, so perform the pure validation explicitly here.
+        if case .failure(let error) = validateCustomEventDeclaration(
+            name: name, fields: fields, summary: summary, caps: customEventStore.caps
+        ) {
+            return .error(customEventValidationMessage(error, name: name))
+        }
+        guard !dryRunActive else { return .values([.bool(true)]) }
+        if let existing = customEventStore.get(ref, name),
+           existing.hasSameContract(fields: fields, summary: summary) {
+            // Modules commonly publish their contract on every load. An identical declaration is
+            // metadata idempotence, not a lifecycle mutation, so it must not consume the shared
+            // attach/detach budget during a large world reload.
+            return .values([.bool(true)])
+        }
+        guard incrementEventDeclarations(ctx) else {
+            return .error("event declaration mutation budget exceeded this tick")
+        }
+        switch customEventStore.declare(
+            ref, name: name, fields: fields, summary: summary,
+            by: .script(owner: ctx.owner, name: ctx.name)
+        ) {
+        case .success: return .values([.bool(true)])
+        case .failure(let error): return .error(customEventStoreErrorMessage(error, name: name))
+        }
+    }
+
+    func methodUndeclareEvent(_ handle: HandleRef, _ call: HostCall) -> HostResult {
+        guard let ctx = currentScript else { return .error("undeclareEvent() outside script context") }
+        guard !unloadActive else { return .error("undeclareEvent() is not available during unload") }
+        guard !ephemeralRunActive else {
+            return .error("undeclareEvent() is not available during ephemeral run")
+        }
+        guard call.arguments.count == 1 else { return .error("undeclareEvent(name)") }
+        guard case .value(.string(let name)) = call.arguments[0],
+              EventKind.parse(name) != nil, let ref = ObjectRef.parse(handle.ref) else {
+            return .error("undeclareEvent(name) requires a valid event name")
+        }
+        guard !dryRunActive else { return .values([.bool(false)]) }
+        guard customEventStore.get(ref, name) != nil else { return .values([.bool(false)]) }
+        guard incrementEventDeclarations(ctx) else {
+            return .error("event declaration mutation budget exceeded this tick")
+        }
+        switch customEventStore.undeclare(ref, name) {
+        case .success(let existed): return .values([.bool(existed)])
+        case .failure(let error): return .error(customEventStoreErrorMessage(error, name: name))
+        }
+    }
+
+    func methodOn(_ handle: HandleRef, _ call: HostCall) -> HostResult {
+        guard let target = ObjectRef.parse(handle.ref) else { return .error("invalid object handle") }
+        return registerObjectHandler(target: target, call: call, attributeOverride: nil)
+    }
+
+    func methodOnAttribute(_ handle: HandleRef, _ call: HostCall) -> HostResult {
+        guard let target = ObjectRef.parse(handle.ref),
+              call.arguments.count == 2,
+              case .value(.string(let rawName)) = call.arguments[0],
+              case .function = call.arguments[1] else {
+            return .error("onAttribute(name, fn)")
+        }
+        guard let name = attributeFilterNames(
+            rawName, target: .object(target)
+        ).first else { return .error("'\(rawName)' is not a valid attribute name") }
+        return registerObjectHandler(target: target, call: HostCall(
+            arguments: [.value(.string(EventKind.attributeChanged.rawValue)), call.arguments[1]],
+            environment: call.environment, state: call.state
+        ), attributeOverride: name)
+    }
+
+    private func registerObjectHandler(
+        target: ObjectRef, call: HostCall, attributeOverride: String?
+    ) -> HostResult {
+        guard let ctx = currentScript else { return .error("on() outside script context") }
+        guard !unloadActive else { return .error("on() is not available during unload") }
+        guard !ephemeralRunActive else { return .error("on() is not available during ephemeral run") }
+        guard (2...3).contains(call.arguments.count),
+              case .value(.string(let eventName)) = call.arguments[0] else {
+            return .error("on(event[, opts], fn)")
+        }
+        guard let event = EventKind.parse(eventName) else {
+            return .error("'\(eventName)' is not a valid event name")
+        }
+        guard case .function(let fn)? = call.arguments.last else {
+            return .error("on() requires a function")
+        }
+
+        let options: TopLevelHandlerOptions
+        if let attributeOverride {
+            // `onAttribute` has already resolved its shorthand name. It still crosses the same
+            // EventBus shape validator as `h:on`, including during Check/dry-run.
+            let target = SubscriptionTarget.object(target)
+            if let error = EventBus.validateSubscriptionShape(
+                target, event: event, attribute: attributeOverride
+            ) {
+                return .error(scriptOwnedSubscriptionErrorMessage(error, owner: ctx.owner))
+            }
+            options = TopLevelHandlerOptions(
+                target: target, attributes: [attributeOverride], namedHandler: nil
+            )
+        } else {
+            let validatedOptions = validateTopLevelHandlerOptions(
+                call.arguments.count == 3 ? call.arguments[1] : nil,
+                callName: "h:on", defaultTarget: .object(target), event: event, owner: ctx.owner,
+                allowsTarget: false, allowsName: true
+            )
+            switch validatedOptions {
+            case .accepted(let accepted): options = accepted
+            case .refused(let message): return .error(message)
+            }
+        }
+
+        guard !dryRunActive else { return .values([]) }
+        let token = ScriptHandlerToken(.closure(fn, owner: ctx.owner, scriptName: ctx.name))
+        if let error = registerScriptOwnedHandlers(
+            owner: ctx.owner, scriptName: ctx.name, target: options.target, event: event,
+            attributes: options.attributes, token: token
+        ) {
+            return .error(scriptOwnedSubscriptionErrorMessage(error, owner: ctx.owner))
+        }
+        if let namedHandler = options.namedHandler {
+            namedHandlers[ctx.owner.canonical + "#" + ctx.name + "#" + namedHandler] = fn
+        }
+        return .values([])
+    }
+
+    func methodEmit(_ handle: HandleRef, _ call: HostCall) -> HostResult {
+        guard (1...2).contains(call.arguments.count) else {
+            return .error("h:emit(name[, payload])")
+        }
+        guard let target = ObjectRef.parse(handle.ref) else { return .error("invalid object handle") }
+        return emitEvent(call, target: target)
+    }
+
+    private enum NestedAttachOptionsValidation {
+        case accepted(mode: ScriptMode, triggers: [Trigger])
+        case refused(String)
+    }
+
+    /// Parses the complete `h:attach` option surface before either dry-run success or live
+    /// lifecycle accounting. Lua's empty table marshals as an empty list, so that one list shape
+    /// is the only non-map accepted here. Everything else fails closed instead of silently
+    /// degrading a mistyped handler request into a module attachment.
+    private func validateNestedAttachOptions(
+        _ argument: ScriptArgument?, receiver: ObjectRef, owner: ObjectRef
+    ) -> NestedAttachOptionsValidation {
+        guard let argument else { return .accepted(mode: .module, triggers: []) }
+
+        let options: [String: ScriptValue]
+        switch argument {
+        case .value(.list(let values)) where values.isEmpty:
+            return .accepted(mode: .module, triggers: [])
+        case .value(.map(let map)):
+            options = map
+        default:
+            return .refused("attach options must be a table")
+        }
+        guard !options.isEmpty else { return .accepted(mode: .module, triggers: []) }
+
+        let allowed = Set(["on", "attr", "target"])
+        if let unknown = options.keys.sorted(by: utf8Less).first(where: { !allowed.contains($0) }) {
+            return .refused("unknown attach option '\(unknown)'")
+        }
+        guard let onValue = options["on"] else {
+            return .refused("nonempty attach options require opts.on")
+        }
+        guard case .string(let eventName) = onValue else {
+            return .refused("attach option 'on' must be an event name string")
+        }
+        guard let event = EventKind.parse(eventName) else {
+            return .refused("'\(eventName)' is not a valid event name")
+        }
+
+        var targetRef = receiver
+        if let targetValue = options["target"] {
+            guard case .ref(let targetText) = targetValue,
+                  let parsedTarget = ObjectRef.parse(targetText) else {
+                return .refused("attach option 'target' must be an object handle")
+            }
+            targetRef = parsedTarget
+        }
+
+        var attribute: String?
+        if let attributeValue = options["attr"] {
+            guard case .string(let raw) = attributeValue else {
+                return .refused("attach option 'attr' must be an attribute name string")
+            }
+            guard let resolved = attributeFilterNames(raw, target: .object(targetRef)).first else {
+                return .refused("'\(raw)' is not a valid attribute name")
+            }
+            attribute = resolved
+        }
+
+        let target = SubscriptionTarget.object(targetRef)
+        if let error = EventBus.validateSubscriptionShape(target, event: event, attribute: attribute) {
+            return .refused(scriptOwnedSubscriptionErrorMessage(error, owner: owner))
+        }
+        return .accepted(
+            mode: .handler,
+            triggers: [Trigger(event: event, attribute: attribute, target: target)]
+        )
+    }
+
     func methodAttach(_ handle: HandleRef, _ call: HostCall) -> HostResult {
         guard let ctx = currentScript else { return .error("attach() outside script context") }
+        guard !unloadActive else { return .error("attach() is not available during unload") }
         guard !ephemeralRunActive else { return .error("attach() is not available during ephemeral run") }
-        guard call.arguments.count >= 2, case .value(.string(let name)) = call.arguments[0],
+        guard (2...3).contains(call.arguments.count),
+            case .value(.string(let name)) = call.arguments[0],
             case .value(.string(let source)) = call.arguments[1], let ref = ObjectRef.parse(handle.ref) else {
             return .error("attach(name, source[, opts])")
         }
-        // A dry run still validates a nested attach's source (useful
-        // signal) but never actually attaches it or spends the real
-        // attach/detach budget.
-        guard !dryRunActive else {
-            guard case .accepted = ScriptValidator.validate(source: source, chunkName: name, using: lua) else {
-                return .error("script source failed validation")
-            }
-            return .values([.bool(true)])
-        }
-        guard incrementAttachDetach(ctx) else { return .error("attach/detach budget exceeded this tick") }
-        var triggers: [Trigger] = []
-        var isModule = true
-        if call.arguments.count >= 3, case .value(.map(let opts)) = call.arguments[2] {
-            if case .string(let eventName)? = opts["on"], let event = EventKind.parse(eventName) {
-                var attribute: String?
-                if case .string(let a)? = opts["attr"] { attribute = a }
-                var target: SubscriptionTarget = .object(ref)
-                if case .ref(let t)? = opts["target"], let parsedRef = ObjectRef.parse(t) { target = .object(parsedRef) }
-                triggers = [Trigger(event: event, attribute: attribute, target: target)]
-                isModule = false
-            }
+        let validatedOptions = validateNestedAttachOptions(
+            call.arguments.count == 3 ? call.arguments[2] : nil,
+            receiver: ref, owner: ctx.owner
+        )
+        let mode: ScriptMode
+        let triggers: [Trigger]
+        switch validatedOptions {
+        case .accepted(let acceptedMode, let acceptedTriggers):
+            mode = acceptedMode
+            triggers = acceptedTriggers
+        case .refused(let message):
+            return .error(message)
         }
         guard case .accepted = ScriptValidator.validate(source: source, chunkName: name, using: lua) else {
             return .error("script source failed validation")
         }
-        let mode: ScriptMode = isModule ? .module : .handler
+        // Check/dry-run validates exactly the same nested source and options as live execution,
+        // but never persists the child or spends the real attach/detach budget.
+        guard !dryRunActive else { return .values([.bool(true)]) }
+        guard incrementAttachDetach(ctx) else { return .error("attach/detach budget exceeded this tick") }
         switch scriptStore.attach(
             ref, name: name, source: source, mode: mode, triggers: triggers,
             by: .script(owner: ctx.owner, name: ctx.name), tick: host.currentTick
@@ -253,7 +562,8 @@ extension ScriptRuntime {
             state.anyScriptsAttached = true
             state.eventBus.raise(
                 kind: Self.scriptAttachedEventKind, subject: ref,
-                payload: ["name": .string(name)], source: .script(owner: ctx.owner, name: ctx.name), tick: host.currentTick
+                payload: ["name": .string(name)], source: .script(owner: ctx.owner, name: ctx.name),
+                tick: host.currentTick, subjectType: eventSubjectType(for: ref)
             )
             return .values([.bool(true)])
         case .failure(let err):
@@ -263,43 +573,208 @@ extension ScriptRuntime {
 
     func methodDetach(_ handle: HandleRef, _ call: HostCall) -> HostResult {
         guard let ctx = currentScript else { return .error("detach() outside script context") }
+        guard !unloadActive else { return .error("detach() is not available during unload") }
         guard !ephemeralRunActive else { return .error("detach() is not available during ephemeral run") }
-        guard case .value(.string(let name))? = call.arguments.first, let ref = ObjectRef.parse(handle.ref) else {
+        guard call.arguments.count == 1,
+              case .value(.string(let name)) = call.arguments[0],
+              let ref = ObjectRef.parse(handle.ref) else {
             return .error("detach(name)")
         }
         guard !dryRunActive else { return .values([.bool(false)]) }
         guard incrementAttachDetach(ctx) else { return .error("attach/detach budget exceeded this tick") }
         switch scriptStore.detach(ref, name) {
         case .success(let existed):
-            if existed { unloadScripts(for: [ref]) }
             return .values([.bool(existed)])
         case .failure(let err): return .error(scriptErrorMessage(err))
         }
     }
 
+    private struct PrevalidatedBlockMutation {
+        var y: Int
+        var cell: Int
+    }
+
+    private enum BlockMutationPlanValidation {
+        case accepted([PrevalidatedBlockMutation])
+        case refused(String)
+    }
+
+    private enum BlockOptionValueValidation {
+        case accepted(Int)
+        case wrongValueKind
+        case outOfRange(String)
+    }
+
+    /// Validates one mutable block-state field against a prospective cell and returns the next
+    /// cell without touching the world. Applicability and mutability are checked by the caller;
+    /// this layer separates type/enum failures from the bounded integer ranges the codec encodes.
+    private func preflightBlockOptionValue(
+        cell currentCell: Int, descriptor: AttributeDescriptor, value: ScriptValue
+    ) -> BlockOptionValueValidation {
+        switch descriptor.valueKind {
+        case .bool:
+            guard case .bool = value else { return .wrongValueKind }
+        case .int:
+            guard case .int(let integer) = value else { return .wrongValueKind }
+            let range: ClosedRange<Int64>?
+            let displayRange: String?
+            switch descriptor.canonical {
+            case "meta": (range, displayRange) = (0...15, "0...15")
+            case "delay": (range, displayRange) = (1...4, "1...4")
+            case "age": (range, displayRange) = (0...7, "0...7")
+            case "layers": (range, displayRange) = (1...8, "1...8")
+            case "count": (range, displayRange) = (1...4, "1...4")
+            default: (range, displayRange) = (nil, nil)
+            }
+            if let range, let displayRange, !range.contains(integer) {
+                return .outOfRange(displayRange)
+            }
+        case .enumeration:
+            // The descriptor carries the union used for authoring help, while the codec owns the
+            // narrower concrete-cell enum (and the door-specific upper/lower half spellings).
+            guard case .string = value else { return .wrongValueKind }
+        default:
+            return .wrongValueKind
+        }
+
+        let encoded: UInt16?
+        if descriptor.canonical == "lit" {
+            guard case .bool(let on) = value else { return .wrongValueKind }
+            encoded = BlockStateCodec.encodeLitSwap(currentCell, on: on)
+        } else {
+            encoded = BlockStateCodec.encode(
+                currentCell, field: descriptor.canonical, value: value
+            )
+        }
+        guard let encoded else { return .wrongValueKind }
+        return .accepted(Int(encoded))
+    }
+
+    /// Builds every cell write for `block:setBlock` in memory. The target replacement and every
+    /// sorted option see the same prospective state that the former mutate-then-validate loop
+    /// exposed, including door open/hinge redirection, but no world hook runs until the complete
+    /// option set has passed name, applicability, mutability, type, and range checks.
+    private func preflightBlockMutation(
+        world: World, chunk: Chunk, x: Int, y: Int, z: Int, newID: UInt16,
+        options: [String: ScriptValue]
+    ) -> BlockMutationPlanValidation {
+        let oldCell = world.getBlock(x, y, z)
+        let oldID = oldCell >> 4
+        let baseCell = Int(cell(newID, 0))
+        let newIDInt = Int(newID)
+
+        var blockEntityType = chunk.getBlockEntity(
+            posMod(x, CHUNK_W), y, posMod(z, CHUNK_W)
+        )?.type
+        if oldID != newIDInt,
+           oldID >= 0, oldID < blockDefs.count,
+           newIDInt >= 0, newIDInt < blockDefs.count,
+           (blockDefs[oldID].shape != blockDefs[newIDInt].shape || !blockDefs[newIDInt].solid) {
+            blockEntityType = nil
+        }
+
+        var plannedCells: [Int: Int] = [y: baseCell]
+        var touchedY: [Int] = [y]
+        for key in options.keys.sorted(by: utf8Less) where key != "notify" {
+            guard let value = options[key],
+                  let descriptor = resolveLuaBuiltIn(kind: .block, rawName: key) else {
+                return .refused("'\(key)' is not a block attribute")
+            }
+            guard let targetCell = plannedCells[y] else {
+                return .refused("block mutation preflight lost its target cell")
+            }
+            let targetID = targetCell >> 4
+            guard targetID >= 0, targetID < blockDefs.count else {
+                return .refused("'\(descriptor.canonical)' does not apply to this block")
+            }
+            let applicability = AttributeApplicabilityContext.block(
+                shape: blockDefs[targetID].shape,
+                name: blockDefs[targetID].name,
+                blockEntityType: blockEntityType
+            )
+            guard AttributeRegistry.applies(descriptor, in: applicability) else {
+                return .refused("'\(descriptor.canonical)' does not apply to this block")
+            }
+            guard descriptor.mutability == .getSet else {
+                return .refused("'\(descriptor.canonical)' is readonly")
+            }
+
+            var mutationY = y
+            if blockDefs[targetID].shape == .door {
+                let isUpper = BlockStateCodec.isDoorUpperHalf(targetCell)
+                if descriptor.canonical == "open", isUpper { mutationY = y - 1 }
+                if descriptor.canonical == "hinge", !isUpper { mutationY = y + 1 }
+            }
+            let currentMutationCell = plannedCells[mutationY] ?? world.getBlock(x, mutationY, z)
+            switch preflightBlockOptionValue(
+                cell: currentMutationCell, descriptor: descriptor, value: value
+            ) {
+            case .accepted(let nextCell):
+                if plannedCells[mutationY] == nil { touchedY.append(mutationY) }
+                plannedCells[mutationY] = nextCell
+            case .wrongValueKind:
+                return .refused("'\(descriptor.canonical)' does not accept that value")
+            case .outOfRange(let range):
+                return .refused("'\(descriptor.canonical)' must be in \(range)")
+            }
+        }
+        return .accepted(touchedY.compactMap { mutationY in
+            plannedCells[mutationY].map {
+                PrevalidatedBlockMutation(y: mutationY, cell: $0)
+            }
+        })
+    }
+
     func methodSetBlock(_ handle: HandleRef, _ call: HostCall) -> HostResult {
-        guard case .value(.string(let name))? = call.arguments.first, let ref = ObjectRef.parse(handle.ref),
+        guard (1...2).contains(call.arguments.count),
+            case .value(.string(let name))? = call.arguments.first, let ref = ObjectRef.parse(handle.ref),
             case .block(let dim, let x, let y, let z) = ref else {
             return .error("setBlock(name[, opts]) is only valid on a block handle")
         }
-        guard !dryRunActive else { return .values([.bool(true)]) }
+        guard !unloadActive else { return .error("setBlock() is not available during unload") }
         guard let w = host.world(for: dim) else { return .error("dimension not loaded") }
         guard let id = name == "air" ? UInt16(0) : bidOpt(name) else { return .error("unknown block '\(name)'") }
-        _ = w.setBlock(x, y, z, id == 0 ? 0 : Int(cell(id, 0)), SET_DEFAULT)
-        if call.arguments.count >= 2, case .value(.map(let opts)) = call.arguments[1],
-            case .live(let live) = graph.resolve(ref) {
-            for (key, value) in opts where key != "notify" {
-                _ = BuiltInAttributes.set(live, name: key, value: value, host: host)
+        let options: [String: ScriptValue]
+        if call.arguments.count == 2 {
+            switch call.arguments[1] {
+            case .value(.list(let values)) where values.isEmpty:
+                options = [:]
+            case .value(.map(let map)):
+                options = map
+            default:
+                return .error("setBlock options must be a table")
             }
+        } else {
+            options = [:]
+        }
+        guard case .live(.block(_, let chunk, _, _, _, _)) = graph.resolve(ref) else {
+            return .error("block is not loaded")
+        }
+        let validatedPlan = preflightBlockMutation(
+            world: w, chunk: chunk, x: x, y: y, z: z, newID: id, options: options
+        )
+        let plan: [PrevalidatedBlockMutation]
+        switch validatedPlan {
+        case .accepted(let accepted): plan = accepted
+        case .refused(let message): return .error(message)
+        }
+        guard !dryRunActive else { return .values([.bool(true)]) }
+        guard let author = currentAuthor() else { return .error("no script context") }
+        for mutation in plan {
+            host.commitPrevalidatedScriptBlockCell(
+                w, x: x, y: mutation.y, z: z, cell: mutation.cell, author: author
+            )
         }
         return .values([.bool(true)])
     }
 
-    func methodBreakBlock(_ handle: HandleRef) -> HostResult {
+    func methodBreakBlock(_ handle: HandleRef, _ call: HostCall) -> HostResult {
+        guard call.arguments.isEmpty else { return .error("breakBlock() takes no arguments") }
         guard let ref = ObjectRef.parse(handle.ref), case .block(let dim, let x, let y, let z) = ref,
             let w = host.world(for: dim) else {
             return .error("breakBlock() is only valid on a block handle")
         }
+        guard !unloadActive else { return .error("breakBlock() is not available during unload") }
         guard !dryRunActive else { return .values([.bool(true)]) }
         w.breakBlockNaturally(x, y, z)
         return .values([.bool(true)])
@@ -309,22 +784,28 @@ extension ScriptRuntime {
 
     func attrsIndex(_ handle: HandleRef, _ key: ScriptValue) -> HostResult {
         guard case .string(let rawName) = key, let owner = ownerRef(fromAttrsRef: handle.ref) else { return .values([.null]) }
-        let name = normalizedCustomAttributeName(rawName)
-        return .values([attributeStore.get(owner, name) ?? .null])
+        return .values([customAttributeValue(for: owner, rawName: rawName) ?? .null])
     }
 
     func attrsNewIndex(_ handle: HandleRef, _ key: ScriptValue, _ value: ScriptValue) -> HostResult {
         guard case .string(let rawName) = key, let owner = ownerRef(fromAttrsRef: handle.ref) else {
             return .error("invalid attrs key")
         }
-        guard !dryRunActive else { return .values([]) }
-        let name = normalizedCustomAttributeName(rawName)
+        let name = customAttributeStorageName(for: owner, rawName: rawName)
         guard let author = currentAuthor() else { return .error("no script context") }
         if case .null = value {
-            _ = attributeStore.remove(owner, name)
-            return .values([])
+            let outcome = dryRunActive
+                ? attributeStore.validateRemove(owner, name)
+                : attributeStore.remove(owner, name, by: author)
+            switch outcome {
+            case .success: return .values([])
+            case .failure(let err): return .error(attrErrorMessage(err, name: name))
+            }
         }
-        switch attributeStore.set(owner, name, value, by: author) {
+        let outcome = dryRunActive
+            ? attributeStore.validateSet(owner, name, value, by: author)
+            : attributeStore.set(owner, name, value, by: author)
+        switch outcome {
         case .success: return .values([])
         case .failure(let err): return .error(attrErrorMessage(err, name: name))
         }
@@ -338,60 +819,265 @@ extension ScriptRuntime {
     /// will then be refused with the usual diagnostic) only in the
     /// unreachable case where normalization itself produces nothing valid.
     func normalizedCustomAttributeName(_ raw: String) -> String {
-        guard !isValidAttributeName(raw) else { return raw }
-        return normalizedAttributeNameHint(raw) ?? raw
+        normalizedScriptCustomAttributeName(raw)
+    }
+
+    /// New Lua-authored names persist as canonical snake_case. Before that rule shipped,
+    /// camelCase sugar was folded to collapsed lowercase (`doorRef` -> `doorref`). Keep the
+    /// legacy spelling as a deterministic second candidate so existing worlds remain readable;
+    /// an exact canonical entry always wins when both exist.
+    func customAttributeNameCandidates(_ raw: String) -> [String] {
+        let canonical = normalizedCustomAttributeName(raw)
+        var names: [String] = []
+        if isValidAttributeName(canonical) { names.append(canonical) }
+        if let legacy = normalizedAttributeNameHint(raw), isValidAttributeName(legacy),
+           !names.contains(legacy) {
+            names.append(legacy)
+        }
+        return names
+    }
+
+    func resolveLuaBuiltIn(kind: ObjectKind, rawName: String) -> AttributeDescriptor? {
+        if let descriptor = AttributeRegistry.resolve(kind: kind, name: rawName) {
+            return descriptor
+        }
+        let canonical = camelToSnakeAttributeName(rawName)
+        guard canonical != rawName else { return nil }
+        return AttributeRegistry.resolve(kind: kind, name: canonical)
+    }
+
+    func occupiedCustomAttributeName(for ref: ObjectRef, rawName: String) -> String? {
+        guard let record = attributeStore.record(ref) else { return nil }
+        return customAttributeNameCandidates(rawName).first { record.entries[$0] != nil }
+    }
+
+    func customAttributeValue(for ref: ObjectRef, rawName: String) -> AttrValue? {
+        guard let name = occupiedCustomAttributeName(for: ref, rawName: rawName),
+              let record = attributeStore.record(ref),
+              case .value(let value, _, _)? = record.entries[name] else { return nil }
+        return value
+    }
+
+    /// Writes keep using an existing canonical or legacy value entry instead of forking one
+    /// logical camelCase name into two persisted keys. With no prior entry, the first (canonical)
+    /// candidate is used. Script records do participate in name selection so the shared namespace
+    /// collision is refused at the same canonical-or-legacy key the prior runtime would have used.
+    func customAttributeStorageName(for ref: ObjectRef, rawName: String) -> String {
+        let candidates = customAttributeNameCandidates(rawName)
+        if let occupied = occupiedCustomAttributeName(for: ref, rawName: rawName) { return occupied }
+        return candidates.first ?? rawName
+    }
+
+    /// Exact-object filters follow the first occupied canonical/legacy slot. Kind-wide filters
+    /// store one canonical spelling; EventBus performs its bounded legacy-collapsed comparison at
+    /// delivery so compatibility never doubles subscription capacity or index entries.
+    func attributeFilterNames(_ raw: String, target: SubscriptionTarget) -> [String] {
+        if let kind = subscriptionTargetKind(target),
+           let descriptor = resolveLuaBuiltIn(kind: kind, rawName: raw) {
+            return [descriptor.canonical]
+        }
+        let candidates = customAttributeNameCandidates(raw)
+        if case .object(let ref) = target,
+           let occupied = occupiedCustomAttributeName(for: ref, rawName: raw) {
+            return [occupied]
+        }
+        if let canonical = candidates.first {
+            return [canonical]
+        }
+        return []
     }
 
     // MARK: - on / subscribe / every / after / wait / emit / rng / say / dim
 
+    private struct TopLevelHandlerOptions {
+        var target: SubscriptionTarget
+        var attributes: [String?]
+        var namedHandler: String?
+    }
+
+    private enum TopLevelHandlerOptionsValidation {
+        case accepted(TopLevelHandlerOptions)
+        case refused(String)
+    }
+
+    /// Global `on` and `subscribe` share this pure parser so Check/dry-run reaches the same option
+    /// and EventBus-shape boundary as live registration without retaining a throwaway closure.
+    private func validateTopLevelHandlerOptions(
+        _ argument: ScriptArgument?, callName: String, defaultTarget: SubscriptionTarget,
+        event: EventKind, owner: ObjectRef, allowsTarget: Bool, allowsName: Bool
+    ) -> TopLevelHandlerOptionsValidation {
+        var options: [String: ScriptValue] = [:]
+        if let argument {
+            switch argument {
+            case .value(.list(let values)) where values.isEmpty:
+                break
+            case .value(.map(let map)):
+                options = map
+            default:
+                return .refused("\(callName) options must be a table")
+            }
+        }
+
+        var allowed = Set(["attr"])
+        if allowsTarget { allowed.insert("target") }
+        if allowsName { allowed.insert("name") }
+        if let unknown = options.keys.sorted(by: utf8Less).first(where: { !allowed.contains($0) }) {
+            return .refused("unknown \(callName) option '\(unknown)'")
+        }
+
+        var target = defaultTarget
+        if let targetValue = options["target"] {
+            guard case .ref(let targetText) = targetValue,
+                  let targetRef = ObjectRef.parse(targetText) else {
+                return .refused("\(callName) option 'target' must be an object handle")
+            }
+            target = .object(targetRef)
+        }
+
+        var attributes: [String?] = [nil]
+        if let attributeValue = options["attr"] {
+            guard case .string(let raw) = attributeValue else {
+                return .refused("\(callName) option 'attr' must be an attribute name string")
+            }
+            let names = attributeFilterNames(raw, target: target)
+            guard !names.isEmpty else { return .refused("'\(raw)' is not a valid attribute name") }
+            attributes = names.map(Optional.some)
+        }
+
+        var namedHandler: String?
+        if let nameValue = options["name"] {
+            guard case .string(let name) = nameValue, isValidAttributeName(name) else {
+                return .refused("\(callName) option 'name' must be a valid handler name")
+            }
+            namedHandler = name
+        }
+
+        for attribute in attributes {
+            if let error = EventBus.validateSubscriptionShape(
+                target, event: event, attribute: attribute
+            ) {
+                return .refused(scriptOwnedSubscriptionErrorMessage(error, owner: owner))
+            }
+        }
+        return .accepted(TopLevelHandlerOptions(
+            target: target, attributes: attributes, namedHandler: namedHandler
+        ))
+    }
+
     func hostOn(_ call: HostCall) -> HostResult {
         guard let ctx = currentScript else { return .error("on() outside script context") }
+        guard !unloadActive else { return .error("on() is not available during unload") }
         guard !ephemeralRunActive else { return .error("on() is not available during ephemeral run") }
-        guard call.arguments.count >= 2, case .value(.string(let eventName)) = call.arguments[0] else {
+        guard (2...3).contains(call.arguments.count),
+              case .value(.string(let eventName)) = call.arguments[0] else {
             return .error("on(event[, opts], fn)")
         }
         guard let event = EventKind.parse(eventName) else { return .error("'\(eventName)' is not a valid event name") }
         guard case .function(let fn)? = call.arguments.last else { return .error("on() requires a function") }
-        // A dry run's closure dies with its throwaway environment — never
-        // register it on the real (persistent) event bus.
-        guard !dryRunActive else { return .values([]) }
-        var attribute: String?
-        var targetRef = ctx.owner
-        if call.arguments.count == 3, case .value(.map(let opts)) = call.arguments[1] {
-            if case .string(let a)? = opts["attr"] { attribute = a }
-            if case .ref(let t)? = opts["target"], let parsed = ObjectRef.parse(t) { targetRef = parsed }
-            if case .string(let name)? = opts["name"], isValidAttributeName(name) {
-                namedHandlers[ctx.owner.canonical + "#" + ctx.name + "#" + name] = fn
-            }
-        }
-        let token = ScriptHandlerToken(.closure(fn, owner: ctx.owner, scriptName: ctx.name))
-        state.eventBus.registerScriptOwned(
-            owner: ctx.owner, scriptName: ctx.name, target: .object(targetRef), event: event,
-            attribute: attribute, token: token
+        let validatedOptions = validateTopLevelHandlerOptions(
+            call.arguments.count == 3 ? call.arguments[1] : nil,
+            callName: "on", defaultTarget: .object(ctx.owner), event: event, owner: ctx.owner,
+            allowsTarget: true, allowsName: true
         )
+        let options: TopLevelHandlerOptions
+        switch validatedOptions {
+        case .accepted(let accepted): options = accepted
+        case .refused(let message): return .error(message)
+        }
+        // A dry run's closure dies with its throwaway environment — never
+        // register it on the real (persistent) event bus. Parsing and shape
+        // validation above are still authoritative Check failures.
+        guard !dryRunActive else { return .values([]) }
+        let token = ScriptHandlerToken(.closure(fn, owner: ctx.owner, scriptName: ctx.name))
+        if let error = registerScriptOwnedHandlers(
+            owner: ctx.owner, scriptName: ctx.name, target: options.target, event: event,
+            attributes: options.attributes, token: token
+        ) {
+            return .error(scriptOwnedSubscriptionErrorMessage(error, owner: ctx.owner))
+        }
+        if let namedHandler = options.namedHandler {
+            namedHandlers[ctx.owner.canonical + "#" + ctx.name + "#" + namedHandler] = fn
+        }
         return .values([])
     }
 
     func hostSubscribe(_ call: HostCall) -> HostResult {
         guard let ctx = currentScript else { return .error("subscribe() outside script context") }
+        guard !unloadActive else { return .error("subscribe() is not available during unload") }
         guard !ephemeralRunActive else { return .error("subscribe() is not available during ephemeral run") }
-        guard call.arguments.count >= 3, case .function(let fn)? = call.arguments.last else {
+        guard (3...4).contains(call.arguments.count),
+              case .function(let fn)? = call.arguments.last else {
             return .error("subscribe(target, event[, opts], fn)")
         }
         guard let target = subscriptionTargetArg(call.arguments[0]) else { return .error("subscribe() requires a valid target") }
         guard case .value(.string(let eventName)) = call.arguments[1], let event = EventKind.parse(eventName) else {
             return .error("subscribe() requires a valid event name")
         }
-        guard !dryRunActive else { return .values([]) }
-        var attribute: String?
-        if call.arguments.count == 4, case .value(.map(let opts)) = call.arguments[2] {
-            if case .string(let a)? = opts["attr"] { attribute = a }
-        }
-        let token = ScriptHandlerToken(.closure(fn, owner: ctx.owner, scriptName: ctx.name))
-        state.eventBus.registerScriptOwned(
-            owner: ctx.owner, scriptName: ctx.name, target: target, event: event, attribute: attribute, token: token
+        let validatedOptions = validateTopLevelHandlerOptions(
+            call.arguments.count == 4 ? call.arguments[2] : nil,
+            callName: "subscribe", defaultTarget: target, event: event, owner: ctx.owner,
+            allowsTarget: false, allowsName: false
         )
+        let options: TopLevelHandlerOptions
+        switch validatedOptions {
+        case .accepted(let accepted): options = accepted
+        case .refused(let message): return .error(message)
+        }
+        guard !dryRunActive else { return .values([]) }
+        let token = ScriptHandlerToken(.closure(fn, owner: ctx.owner, scriptName: ctx.name))
+        if let error = registerScriptOwnedHandlers(
+            owner: ctx.owner, scriptName: ctx.name, target: options.target, event: event,
+            attributes: options.attributes, token: token
+        ) {
+            return .error(scriptOwnedSubscriptionErrorMessage(error, owner: ctx.owner))
+        }
         return .values([])
+    }
+
+    /// Registers the already-resolved filter list atomically. The current compatibility model uses
+    /// one physical filter, but keeping this transactional boundary prevents future multi-filter
+    /// extensions from leaving a partially active handler after an admission refusal.
+    func registerScriptOwnedHandlers(
+        owner: ObjectRef, scriptName: String, target: SubscriptionTarget, event: EventKind,
+        attributes: [String?], token: AnyObject?
+    ) -> EventBus.SubscribeError? {
+        var registeredIDs: [UInt64] = []
+        for attribute in attributes {
+            switch state.eventBus.registerScriptOwnedChecked(
+                owner: owner, scriptName: scriptName, target: target, event: event,
+                attribute: attribute, token: token
+            ) {
+            case .success(let subscription):
+                registeredIDs.append(subscription.id)
+            case .failure(let error):
+                for id in registeredIDs { state.eventBus.unregisterScriptOwned(id: id) }
+                return error
+            }
+        }
+        return nil
+    }
+
+    func scriptOwnedSubscriptionErrorMessage(
+        _ error: EventBus.SubscribeError, owner: ObjectRef
+    ) -> String {
+        switch error {
+        case .tooManyForWorld:
+            return "too many subscriptions in this world (limit \(state.eventBus.caps.maxSubscriptionsPerWorld))"
+        case .tooManyForObject:
+            return "too many subscriptions on \(owner.canonical) (limit \(state.eventBus.caps.maxSubscriptionsPerObject))"
+        case .targetRequiresTypeFilter:
+            return "block.changed and attribute.changed require a block type filter"
+        case .anyNotAllowedForThisEvent:
+            return "any is not allowed for block.changed or attribute.changed"
+        case .attributeFilterNotAllowed:
+            return "an attribute filter is valid only for attribute.changed"
+        case .invalidAttributeFilter:
+            return "the attribute filter is not a canonical built-in or custom attribute name"
+        case .eventNotApplicable:
+            return "the event does not apply to that target kind"
+        case .eventNotAvailable:
+            return "the event is reserved and has no producer"
+        }
     }
 
     private func subscriptionTargetArg(_ arg: ScriptArgument) -> SubscriptionTarget? {
@@ -412,6 +1098,7 @@ extension ScriptRuntime {
 
     private func scheduleTimer(_ call: HostCall, repeating: Bool) -> HostResult {
         guard let ctx = currentScript else { return .error("timer outside script context") }
+        guard !unloadActive else { return .error("timers are not available during unload") }
         guard !ephemeralRunActive else { return .error("timers are not available during ephemeral run") }
         guard call.arguments.count >= 2, let n = intArg(call.arguments[0]), n > 0 else {
             return .error("after/every(n, handler) requires a positive tick count")
@@ -423,12 +1110,24 @@ extension ScriptRuntime {
         switch call.arguments[1] {
         case .value(.string(let name)):
             guard isValidAttributeName(name) else { return .error("invalid timer handler name") }
+            let interval = repeating ? Int64(n) : nil
+            let scriptKey = ctx.owner.canonical + "#" + ctx.name
+            if let instance = instances[scriptKey], !instance.live,
+               timers.contains(where: {
+                   $0.owner == ctx.owner && $0.scriptName == ctx.name
+                       && $0.handlerName == name && $0.intervalTicks == interval
+                        && instance.timerIDsAtLoadStart.contains($0.id)
+               }) {
+                // Module reloads repopulate handler functions but must not duplicate the durable
+                // registry entry that survived chunk/app unload.
+                return .values([])
+            }
             guard timers.count < DurableTimerRegistryCodec.maxTimersPerWorld else { return .error("too many durable timers") }
             let id = allocateTimerID()
-            let wake = host.currentTick + Int64(n)
+            let wake = scheduledTick(after: Int64(n))
             timers.append(DurableTimer(
                 id: id, owner: ctx.owner, scriptName: ctx.name, handlerName: name, wakeTick: wake,
-                intervalTicks: repeating ? Int64(n) : nil
+                intervalTicks: interval
             ))
             return .values([])
         case .function(let fn):
@@ -437,7 +1136,11 @@ extension ScriptRuntime {
             // regardless of `after` vs `every` — see this file's header.
             let key = ctx.owner.canonical + "#" + ctx.name + "#timer#\(scheduleOrdinal())"
             guard let coroutine = try? lua.makeCoroutine(function: fn) else { return .error("could not schedule timer") }
-            appendScheduled(key: key, coroutine: coroutine, wakeTick: host.currentTick + Int64(n))
+            guard appendScheduled(
+                key: key, coroutine: coroutine, wakeTick: scheduledTick(after: Int64(n))
+            ) else {
+                return .error("suspended coroutine limit exceeded")
+            }
             return .values([])
         default:
             return .error("after/every requires a handler name or function")
@@ -445,6 +1148,7 @@ extension ScriptRuntime {
     }
 
     func hostWait(_ call: HostCall) -> HostResult {
+        guard !unloadActive else { return .error("wait() is not available during unload") }
         guard !ephemeralRunActive else { return .error("wait() is not available during ephemeral run") }
         let n = call.arguments.first.flatMap(intArg) ?? 0
         return .yield([], .wait(max(0, n)))
@@ -452,28 +1156,56 @@ extension ScriptRuntime {
 
     func hostEmit(_ call: HostCall) -> HostResult {
         guard let ctx = currentScript else { return .error("emit() outside script context") }
+        guard (1...3).contains(call.arguments.count) else {
+            return .error("emit(name[, payload][, target])")
+        }
+        var target = ctx.owner
+        if call.arguments.count == 3 {
+            guard case .handle(let handle) = call.arguments[2],
+                  let explicitTarget = ObjectRef.parse(handle.ref) else {
+                return .error("emit target must be an object handle")
+            }
+            target = explicitTarget
+        }
+        return emitEvent(call, target: target)
+    }
+
+    private func emitEvent(_ call: HostCall, target: ObjectRef) -> HostResult {
+        guard let ctx = currentScript else { return .error("emit() outside script context") }
+        guard !unloadActive else { return .error("emit() is not available during unload") }
         guard case .value(.string(let name))? = call.arguments.first, let kind = EventKind.parse(name) else {
             return .error("emit(name[, payload][, target])")
         }
-        guard !dryRunActive else { return .values([.bool(true)]) }
+        guard case .live(let live) = graph.resolve(target) else {
+            return .error("cannot emit on \(target.canonical) because it is not loaded")
+        }
         var payload: [String: AttrValue] = [:]
-        var target = ctx.owner
-        if call.arguments.count >= 2, case .value(.map(let m)) = call.arguments[1] { payload = m }
-        if call.arguments.count >= 3 {
-            switch call.arguments[2] {
-            case .handle(let h): if let r = ObjectRef.parse(h.ref) { target = r }
-            case .value(.ref(let s)): if let r = ObjectRef.parse(s) { target = r }
-            default: break
+        if call.arguments.count >= 2 {
+            switch call.arguments[1] {
+            case .value(.map(let map)): payload = map
+            case .value(.list(let values)) where values.isEmpty: break
+            default: return .error("event payload must be a string-keyed table")
             }
         }
+        if let error = AttrValueCodec.validate(.map(payload), caps: customEventStore.caps) {
+            return .error("event payload rejected (\(error.message))")
+        }
+        if let refusal = ScriptEventEmissionValidator.refusal(
+            kind: kind, subject: target, payload: payload,
+            declaration: customEventStore.get(target, name)
+        ) {
+            return .error(refusal)
+        }
+        guard !dryRunActive else { return .values([.bool(true)]) }
         let outcome = state.eventBus.raise(
             kind: kind, subject: target, payload: payload, source: .script(owner: ctx.owner, name: ctx.name),
-            tick: host.currentTick
+            tick: host.currentTick, subjectType: familyName(live)
         )
         return .values([.bool(outcome.wasEnqueued)])
     }
 
     func hostRng(_ call: HostCall) -> HostResult {
+        guard !unloadActive else { return .error("rng() is not available during unload") }
         guard let ctx = currentScript else {
             return .error("rng() outside script context")
         }
@@ -496,12 +1228,18 @@ extension ScriptRuntime {
             guard let a = intArg(call.arguments[0]), let b = intArg(call.arguments[1]), a <= b else {
                 return .error("rng(a, b) requires a <= b")
             }
-            return .values([.int(Int64(a) + Int64(adapter.inner.nextInt(b - a + 1)))])
+            let (distance, subtractOverflow) = b.subtractingReportingOverflow(a)
+            let (span, addOverflow) = distance.addingReportingOverflow(1)
+            guard !subtractOverflow, !addOverflow, span > 0 else {
+                return .error("rng(a, b) range is too large")
+            }
+            return .values([.int(Int64(a) + Int64(adapter.inner.nextInt(span)))])
         }
     }
 
     func hostSay(_ call: HostCall) -> HostResult {
         guard case .value(.string(let text))? = call.arguments.first else { return .error("say(text)") }
+        guard !unloadActive else { return .error("say() is not available during unload") }
         guard !dryRunActive else { return .values([]) }
         sayFn(ScriptingDisplayText.line(text))
         return .values([])
@@ -516,6 +1254,7 @@ extension ScriptRuntime {
 
     func hostRegister(_ call: HostCall) -> HostResult {
         guard let ctx = currentScript else { return .error("register() outside script context") }
+        guard !unloadActive else { return .error("register() is not available during unload") }
         guard !ephemeralRunActive else { return .error("register() is not available during ephemeral run") }
         guard case .value(.string(let name))? = call.arguments.first, isValidAttributeName(name) else {
             return .error("register(name, fn)")
@@ -548,7 +1287,8 @@ extension ScriptRuntime {
 
     private func resolveAlias(_ s: String) -> ObjectRef? {
         switch s {
-        case "player", "self": return .player
+        case "self": return currentScript?.owner
+        case "player": return .player
         case "world": return .world
         default: return ObjectRef.parse(s)
         }
@@ -648,6 +1388,7 @@ extension ScriptRuntime {
     // MARK: - ai.ask / ai.await
 
     func hostAIAsk(_ call: HostCall) -> HostResult {
+        guard !unloadActive else { return .error("ai.ask() is not available during unload") }
         guard !ephemeralRunActive else { return .error("ai.ask() is not available during ephemeral run") }
         guard case .value(.string(let prompt))? = call.arguments.first, prompt.utf8.count <= 4_096 else {
             return .error("ai.ask(prompt[, opts])")
@@ -666,10 +1407,13 @@ extension ScriptRuntime {
             )
             return .values([.int(0)])
         }
-        return .values([.int(Int64(enqueueAIRequest(prompt: prompt)))])
+        return .values([.int(Int64(enqueueAIRequest(
+            prompt: prompt, mode: .ask
+        )))])
     }
 
     func hostAIAwait(_ call: HostCall) -> HostResult {
+        guard !unloadActive else { return .error("ai.await() is not available during unload") }
         guard !ephemeralRunActive else { return .error("ai.await() is not available during ephemeral run") }
         guard case .value(.string(let prompt))? = call.arguments.first, prompt.utf8.count <= 4_096 else {
             return .error("ai.await(prompt[, opts])")
@@ -678,7 +1422,7 @@ extension ScriptRuntime {
         // attached script's legal suspension point and close its throwaway coroutine immediately.
         guard !dryRunActive else { return .yield([], .await(0)) }
         guard aiBudgetAvailable() else { return .values([.null, .string("budget")]) }
-        let id = enqueueAIRequest(prompt: prompt)
+        let id = enqueueAIRequest(prompt: prompt, mode: .await)
         return .yield([], .await(id))
     }
 
@@ -712,7 +1456,12 @@ extension ScriptRuntime {
         guard case .value(let v) = a else { return nil }
         switch v {
         case .int(let i): return Int(i)
-        case .number(let d): return d.isFinite ? Int(d) : nil
+        case .number(let d):
+            // `Int(Double)` traps for finite-but-out-of-range values. Numeric script input is
+            // untrusted; reject it before conversion. `Double(Int.max)` rounds upward on 64-bit,
+            // hence the strict upper comparison. Exact large integers travel as `.int` above.
+            guard d.isFinite, d >= Double(Int.min), d < Double(Int.max) else { return nil }
+            return Int(d)
         default: return nil
         }
     }
@@ -722,10 +1471,21 @@ extension ScriptRuntime {
     }
 
     func incrementAttachDetach(_ ctx: (owner: ObjectRef, name: String)) -> Bool {
+        refreshAttachDetachBudget()
         let key = ctx.owner.canonical + "#" + ctx.name
         let count = attachDetachCounts[key, default: 0]
-        guard count < 2 else { return false }
+        guard count < 2, attachDetachWorldCount < 32 else { return false }
         attachDetachCounts[key] = count + 1
+        attachDetachWorldCount += 1
+        return true
+    }
+
+    func incrementEventDeclarations(_ ctx: (owner: ObjectRef, name: String)) -> Bool {
+        refreshEventDeclarationBudget()
+        let key = ctx.owner.canonical + "#" + ctx.name
+        let count = eventDeclarationCounts[key, default: 0]
+        guard count < customEventStore.caps.maxEventDeclarationsPerObject else { return false }
+        eventDeclarationCounts[key] = count + 1
         return true
     }
 
@@ -756,6 +1516,15 @@ extension ScriptRuntime {
         }
     }
 
+    /// EventBus kind subscriptions with a `type=` filter match the concrete family carried at
+    /// raise time. Lifecycle events are emitted from several runtime paths, so centralizing the
+    /// live lookup prevents block/entity load, fault, timer, and attach events from silently losing
+    /// their type identity.
+    func eventSubjectType(for ref: ObjectRef) -> String? {
+        guard case .live(let live) = graph.resolve(ref) else { return nil }
+        return familyName(live)
+    }
+
     func authorText(_ a: Provenance.Author) -> String {
         switch a {
         case .player: return "player"
@@ -773,6 +1542,7 @@ extension ScriptRuntime {
         case .invalidName(let hint):
             return hint.map { "'\(name)' is not a valid attribute name — try '\($0)'" } ?? "'\(name)' is not a valid attribute name"
         case .nameIsBuiltIn: return "'\(name)' is a built-in attribute — set it directly"
+        case .nameIsScript: return "'\(name)' is an attached script — detach it first"
         case .invalidValue(let e): return "value rejected (\(e.message))"
         case .readonly: return "'\(name)' is readonly"
         case .tooManyEntries(let limit): return "too many attributes (limit \(limit))"
@@ -784,5 +1554,42 @@ extension ScriptRuntime {
 
     func scriptErrorMessage(_ err: ScriptStoreError) -> String {
         scriptStoreErrorText(err)
+    }
+
+    func customEventValidationMessage(
+        _ error: CustomEventDeclarationValidationError, name: String
+    ) -> String {
+        switch error {
+        case .invalidEventName: return "'\(name)' is not a valid custom event name"
+        case .builtInEventName: return "'\(name)' is a built-in event and cannot be redeclared"
+        case .tooManyFields(let limit): return "event schema exceeds \(limit) fields"
+        case .invalidFieldName(let field): return "'\(field)' is not a valid event field name"
+        case .reservedFieldName(let field): return "'\(field)' is a reserved event envelope field"
+        case .duplicateFieldName(let field): return "event field '\(field)' is duplicated"
+        case .summaryTooLarge(let limit): return "event summary exceeds \(limit) UTF-8 bytes"
+        case .invalidSummary: return "event summary contains unsupported text"
+        }
+    }
+
+    func customEventStoreErrorMessage(_ error: CustomEventStoreError, name: String) -> String {
+        switch error {
+        case .objectNotLive: return "object is not loaded"
+        case .dormant: return "object's dimension is not loaded"
+        case .unsupported: return "unsupported object"
+        case .lanClient: return "event declarations are host-authoritative"
+        case .invalidEventName: return "'\(name)' is not a valid custom event name"
+        case .builtInEventName: return "'\(name)' is a built-in event and cannot be redeclared"
+        case .tooManyDeclarations(let limit): return "too many event declarations (limit \(limit))"
+        case .tooManyFields(let limit): return "event schema exceeds \(limit) fields"
+        case .invalidFieldName(let field): return "'\(field)' is not a valid event field name"
+        case .reservedFieldName(let field): return "'\(field)' is a reserved event envelope field"
+        case .duplicateFieldName(let field): return "event field '\(field)' is duplicated"
+        case .summaryTooLarge(let limit): return "event summary exceeds \(limit) UTF-8 bytes"
+        case .invalidSummary: return "event summary contains unsupported text"
+        case .tooManyEntries(let limit): return "object scripting storage exceeds \(limit) entries"
+        case .recordTooLarge, .chunkTooLarge, .documentTooLarge:
+            return "event declaration storage limit exceeded"
+        case .revisionOverflow: return "revision limit reached"
+        }
     }
 }

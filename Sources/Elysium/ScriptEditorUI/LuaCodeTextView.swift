@@ -11,11 +11,14 @@ struct LuaCodeTextView: NSViewRepresentable {
     @Binding var selectedRange: NSRange
     var errorLine: Int?
     var targetKind: ObjectKind
+    var targetCanonicalRef: String? = nil
     var theme: ScriptEditorTheme
     var targetApplicableBuiltInAttributes: Set<String>? = nil
     var targetCustomAttributes: [LuaCustomAttributeCompletion] = []
     var objectReferences: [LuaObjectReferenceCompletion] = []
+    var scriptMode: ScriptMode = .module
     var handlerEvent: String? = nil
+    var eventCandidates: [ScriptEditorEventCandidate]? = nil
     var isYieldable = true
     var inlineSuggestion: String? = nil
     var isRequestingAISuggestion = false
@@ -34,10 +37,13 @@ struct LuaCodeTextView: NSViewRepresentable {
     private var languageEnvironment: LuaLanguageEnvironment {
         LuaLanguageEnvironment(
             targetKind: targetKind,
+            targetCanonicalRef: targetCanonicalRef,
             targetApplicableBuiltInAttributes: targetApplicableBuiltInAttributes,
             targetCustomAttributes: targetCustomAttributes,
             objectReferences: objectReferences,
+            scriptMode: scriptMode,
             handlerEvent: handlerEvent,
+            eventCandidates: eventCandidates,
             isYieldable: isYieldable
         )
     }

@@ -219,6 +219,10 @@ final class LANMultiplayerTests: XCTestCase {
                 )
             ),
             .blockIntent(playerID: "peer-a", intent: LANBlockIntent(action: .placeBlock, x: 1, y: 2, z: 3, face: 9, selectedHotbarSlot: -5)),
+            .blockIntent(playerID: "peer-a", intent: LANBlockIntent(
+                action: .toolStrike, x: 1, y: 2, z: 3, face: 2,
+                selectedHotbarSlot: 4, cell: Int(cell(B.stone)), toolStrikeSequence: 7
+            )),
             .containerIntent(playerID: "peer-a", intent: LANContainerIntent(action: .clickSlot, containerID: "chest", slot: 5, button: 1, shift: true)),
             .templateIntent(playerID: "peer-a", intent: LANTemplateIntent(action: .placeTemplate, templateName: "A House!", x: 9, y: 64, z: -4, rotation: -1)),
             .replicationBatch(LANReplicationBatch(
@@ -397,6 +401,59 @@ final class LANMultiplayerTests: XCTestCase {
         let decoded = try JSONDecoder().decode(LANBlockIntent.self, from: data)
 
         XCTAssertEqual(decoded, LANBlockIntent(action: .placeBlock, x: 1, y: 2, z: 3, face: 1, selectedHotbarSlot: 0))
+    }
+
+    func testBlockIntentWireDecoderRejectsOutOfRangeSemanticFieldsInsteadOfClamping() {
+        let malformedPayloads = [
+            "{\"action\":\"placeBlock\",\"x\":1,\"y\":2,\"z\":3,\"face\":-1,\"selectedHotbarSlot\":0,\"cell\":0}",
+            "{\"action\":\"placeBlock\",\"x\":1,\"y\":2,\"z\":3,\"face\":6,\"selectedHotbarSlot\":0,\"cell\":0}",
+            "{\"action\":\"placeBlock\",\"x\":1,\"y\":2,\"z\":3,\"face\":0,\"selectedHotbarSlot\":-1,\"cell\":0}",
+            "{\"action\":\"placeBlock\",\"x\":1,\"y\":2,\"z\":3,\"face\":0,\"selectedHotbarSlot\":9,\"cell\":0}",
+            "{\"action\":\"placeBlock\",\"x\":1,\"y\":2,\"z\":3,\"face\":0,\"selectedHotbarSlot\":0,\"cell\":-1}",
+            "{\"action\":\"placeBlock\",\"x\":1,\"y\":2,\"z\":3,\"face\":0,\"selectedHotbarSlot\":0,\"cell\":65536}",
+        ]
+
+        for payload in malformedPayloads {
+            XCTAssertThrowsError(try JSONDecoder().decode(
+                LANBlockIntent.self,
+                from: Data(payload.utf8)
+            ), "hostile wire values must not be normalized into valid requests: \(payload)")
+        }
+
+        let locallyConstructed = LANBlockIntent(
+            action: .placeBlock,
+            x: 1,
+            y: 2,
+            z: 3,
+            face: 99,
+            selectedHotbarSlot: -1,
+            cell: Int(UInt16.max) + 1
+        )
+        XCTAssertEqual(locallyConstructed.face, 5)
+        XCTAssertEqual(locallyConstructed.selectedHotbarSlot, 0)
+        XCTAssertEqual(locallyConstructed.cell, Int(UInt16.max))
+    }
+
+    func testToolStrikeBlockIntentIsAdditiveAndLegacyActionsKeepTheirWireShape() throws {
+        let strike = LANBlockIntent(
+            action: .toolStrike, x: 1, y: 2, z: 3, face: Dir.north,
+            selectedHotbarSlot: 2, cell: Int(cell(B.stone)), toolStrikeSequence: 41,
+            toolStrikeGesture: 9
+        )
+        XCTAssertEqual(try JSONDecoder().decode(
+            LANBlockIntent.self, from: JSONEncoder().encode(strike)
+        ), strike)
+
+        let legacy = LANBlockIntent(
+            action: .breakBlock, x: 1, y: 2, z: 3, face: Dir.north,
+            selectedHotbarSlot: 2, cell: Int(cell(B.stone))
+        )
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(legacy)) as? [String: Any]
+        )
+        XCTAssertNil(object["toolStrikeSequence"])
+        XCTAssertNil(object["toolStrikeGesture"])
+        XCTAssertEqual(LAN_MULTIPLAYER_PROTOCOL_VERSION, 5)
     }
 
     func testPlayerStateDecodesLegacyPayloadWithDefaultDimensionAndAliveLifecycle() throws {

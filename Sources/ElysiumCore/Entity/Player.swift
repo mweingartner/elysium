@@ -91,6 +91,9 @@ public final class Player: LivingEntity {
     /// Session-only authority identity used by bounded RPG world effects.
     /// LAN ghost hydration replaces the default with the stable peer ID.
     public var rpgAuthorityID = ""
+    /// Session-only scripting identity/provenance. Local players keep the default; a host-side
+    /// LAN ghost is assigned its canonical peer identity during hydration.
+    public internal(set) var scriptEventActorIdentity: ScriptEventActorIdentity = .localPlayer
 
     public var effectiveRPGAuthorityID: String {
         rpgAuthorityID.isEmpty ? "entity:\(id)" : rpgAuthorityID

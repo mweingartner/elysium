@@ -449,6 +449,71 @@ final class MemoryTests: XCTestCase {
         XCTAssertFalse(state.isDead, "the state itself must remain usable after an environment is destroyed")
     }
 
+    func testCallbackRefsAreOwnedByEnvironmentAndReclaimedUnderBoundedChurn() throws {
+        let state = try ScriptTestSupport.makeState()
+        var lastCallback: ScriptFunction?
+        var sawStateWideHandleBoundary = false
+        let dispatch = HandleDispatch(methods: ["capture": { _, call in
+            sawStateWideHandleBoundary = sawStateWideHandleBoundary || call.environment == nil
+            guard case .function(let callback)? = call.arguments.first else {
+                return .error("expected callback")
+            }
+            lastCallback = callback
+            return .values([])
+        }])
+        let kind = state.registerHandleKind(name: "callbackSink", dispatch: dispatch, interned: true)
+        let sink = try state.makeHandle(kind: kind, ref: "callbackSink:1", id: 1)
+        let getSink = HostFunction { _ in .values([sink]) }
+
+        state.collectFull()
+        let baseline = state.memoryStatus.bytesInUse
+        for i in 0..<500 {
+            let environment = state.makeEnvironment(
+                name: "callbackCycle\(i)",
+                hostBindings: [.function(name: "getSink", getSink)],
+                random: ScriptTestSupport.randomStream()
+            )
+            let function = try environment.compile(
+                source: "local sink = getSink(); for n = 1, 16 do sink:capture(function() return n end) end",
+                chunkName: "callbackCycleChunk"
+            ).get()
+            if i.isMultiple(of: 2) {
+                guard case .success = try state.call(function, args: [], slice: 100_000) else {
+                    environment.destroy()
+                    return XCTFail("callback churn call failed at iteration \(i)")
+                }
+            } else {
+                guard let coroutine = try state.makeCoroutine(function: function),
+                      case .completed = try state.resume(coroutine, args: [], slice: 100_000) else {
+                    environment.destroy()
+                    return XCTFail("callback churn resume failed at iteration \(i)")
+                }
+            }
+            environment.destroy()
+            if i % 50 == 0 {
+                state.collectFull()
+                XCTAssertLessThanOrEqual(
+                    state.memoryStatus.bytesInUse, baseline + 256 * 1024,
+                    "callback registry refs must not accumulate across destroyed environments (iteration \(i))"
+                )
+            }
+        }
+
+        state.collectFull()
+        XCTAssertLessThanOrEqual(
+            state.memoryStatus.bytesInUse, baseline + 64 * 1024,
+            "destroying callback-heavy environments must reclaim their Lua registry refs"
+        )
+        XCTAssertTrue(sawStateWideHandleBoundary)
+
+        guard let lastCallback else { return XCTFail("expected a captured callback") }
+        guard case .failure(let fault) = try state.call(lastCallback, args: [], slice: 1_000) else {
+            return XCTFail("a callback must become unusable when its owning environment is destroyed")
+        }
+        XCTAssertEqual(fault.kind, .hostAbort)
+        XCTAssertEqual(fault.message, "function's environment was destroyed")
+    }
+
     // MARK: - A3-1 (Security (code) attempt 3, HIGH): a setmetatable storm at a tiny
     // memory cap must not permanently brick the shared state
 

@@ -486,18 +486,20 @@ or Delete/Backspace while the template list is focused opens a confirmation nami
 ## Scripting, attributes, events, and AI
 
 Elysium has a full player- and AI-facing scripting system: objects (blocks, entities, players,
-dimensions, the world) carry named custom attributes and up to 8 attached Lua scripts each,
-running on a sandboxed, deterministic Lua 5.4.8 runtime. Scripts react to a typed event bus,
-schedule named timers that survive a save/reload, and can ask the local AI for a reply. You drive
+dimensions, the world) carry named custom attributes, typed custom event declarations, handlers,
+and up to 8 attached Lua scripts each, running on a sandboxed, deterministic Lua 5.4.8 runtime.
+Scripts can watch another live object's events or attribute changes, schedule named timers that
+survive a save/reload, and ask the local AI for a reply. You drive
 all of this from chat commands, an in-game multi-line script editor, and a read-only Inspector; the
-`/ai` assistant can author and manage scripts and attributes too, through the exact same checks.
-Everything below is host-only. Attached/background execution and ordinary command, AI, and LAN
-one-off runs require both the per-world trust switch and the kill switch; the local editor's narrow
-Run Once exception is explained below. Every command is refused outright on a joined LAN world —
-until the host grants you scripting (see "Guest scripting" below), after which the commands that
-change something work for you too, forwarded to and executed by the host. This section covers the
-chat/editor surface; for the complete Lua API reference, the ref and value grammars, and more worked
-examples, see [docs/SCRIPTING_GUIDE.md](docs/SCRIPTING_GUIDE.md).
+`/ai` assistant can author and manage scripts, attributes, subscriptions, and custom events too,
+through the exact same checks.
+Authoritative storage and execution below are host-only. Attached/background execution and ordinary
+command, AI, and LAN one-off runs require both the per-world trust switch and the kill switch; the
+local editor's narrow Run Once exception is explained below. Every mutation command is refused on a
+joined LAN world until the host grants scripting (see "Guest scripting" below); the supported
+commands are then forwarded to and executed by the host. This section covers the chat/editor surface;
+for the complete Lua API reference, the ref and value grammars, and more worked examples, see
+[docs/SCRIPTING_GUIDE.md](docs/SCRIPTING_GUIDE.md).
 
 ### Attributes
 
@@ -510,9 +512,10 @@ dimension, or the world itself.
 - `/attr get <target> <name>` — read one attribute.
 - `/attr list <target>` — list every attribute currently set on the target.
 - `/attr define <target> <name> <value> [readonly] [--force]` — declare a custom attribute name by
-  giving it an initial value, which fixes its type; add `readonly` to make it read-only from then on,
-  or `--force` to redefine an existing readonly attribute.
-- `/attr remove <target> <name>` — clear one attribute.
+  giving it an initial value. Later writes may use a different supported value type. Add `readonly`
+  to make it read-only from then on, or `--force` to redefine an existing readonly attribute.
+- `/attr remove <target> <name> [--force]` — clear one custom attribute; `--force` is required for
+  one defined as read-only.
 - `/inspect [target]` — a readable dump of a target's built-in fields (block state such as facing,
   half, or open/closed) plus every attribute set on it. Unlike `/attr`, `/inspect`'s target is
   optional: omit it to default to `looking`, then `self` if nothing is under your crosshair.
@@ -525,10 +528,26 @@ reference to another object — written with a `ref:` prefix plus the target gra
 stored as a plain string instead. Some built-in fields are read-only (for example a door's
 `waterlogged` state) and refuse a `/attr set`.
 
+Custom attributes and attached scripts share one name namespace on an object: an attribute command
+will not replace a same-named script, and attaching a script will not replace a same-named attribute.
+Detach or remove the existing entry explicitly first. Custom event declarations are stored
+separately and do not participate in that collision rule.
+
+Lua and the AI accept ergonomic camelCase while storing new custom names as snake_case
+(`favoriteColor` becomes `favorite_color`). Unchanged scripts remain compatible with old worlds that
+stored the former collapsed spelling (`doorref`): canonical `door_ref` wins when present, otherwise
+the existing legacy key is reused. Built-ins always win before this fallback, so `maxHealth` means
+the built-in `max_health`, not a custom `maxhealth` value.
+
 Setting an attribute never bypasses the game's own rules for that block or entity — the engine stays
 authoritative. For example, `/attr set` can flip a door's `open` field, but the same redstone logic that
 governs every other door still applies afterward: an unsupported door still breaks, and a door wired to
 power still swings shut or open on the next power transition regardless of what a command just set.
+Every scripting-API write that actually changes a built-in or custom value raises
+`attribute.changed` on that object with the writer's provenance. Engine-driven built-ins are compared
+only while a matching subscription exists; a polled field's first observation establishes its
+baseline and does not fabricate a startup change. A script on any other live object can observe later
+changes directly with `target:onAttribute("name", fn)` or through the general subscription API.
 
 **Worked example** — label a chest without touching anything else about it, then read it back:
 
@@ -559,7 +578,8 @@ You can also register interest in things that happen in the world from chat. A s
 names a script and a handler function inside it (`<script>.<handler>`) — that handler runs whenever a
 matching event fires, exactly like a script's own `on(...)`/`subscribe(...)` calls (see "Scripts"
 below), except `/on` lets you wire up a handler in an *existing* script from chat rather than from
-inside the script's own source. Host-only, like every command above.
+inside the script's own source. Event registration and delivery are host-authoritative; a granted
+guest forwards supported mutations to the host rather than running them locally.
 
 - `/on <target> <event> [attr] <script>.<handler>` — subscribe. `<target>` is what to watch: `self`,
   `looking`, a canonical reference (`entity:12`, `block:overworld:10,64,3`), a bare kind name
@@ -568,7 +588,11 @@ inside the script's own source. Host-only, like every command above.
   `block.changed`, which need a narrower target). `<event>` is a dotted event name from the catalog
   (`block.broken`, `entity.damaged`, `player.joined`, …) or a custom name a script defines
   (`lumber.milestone`). `[attr]` narrows an `attribute.changed` subscription to one attribute name
-  (e.g. `health`); omit it to match every attribute change on the target. `<script>.<handler>` names
+  (e.g. `health`); omit it to match every ordinary attribute change on the target. Registry names
+  such as `inventory[0]` and `be.name` are valid filters even though custom names cannot contain
+  brackets or dots. Quantized movement uses the explicit `pos` filter and stays out of the recent
+  feed; an actual custom attribute named `pos` is still an ordinary change visible to unfiltered
+  handlers. `<script>.<handler>` names
   the script (attached with `/script attach`, see below) and the handler function inside it — both
   parts follow the same attribute-name grammar (lowercase letters, digits, underscore). A handler
   name only resolves once the named script's module body has called `register("<handler>", fn)` (or
@@ -577,23 +601,61 @@ inside the script's own source. Host-only, like every command above.
   Subscribing survives save and reload.
 - `/unsubscribe <id>` — remove a subscription by the numeric id `/on` printed when you created it.
 - `/events recent [limit]` — lists the most recent events the bus has seen (default limit if omitted).
-- `/events emit <target> <event>` — raise an event by hand. `<target>` here is a normal object
-  reference (the same grammar as `/attr`'s target, not `/on`'s kind-wildcard forms), and `<event>` is
-  the event name to raise on it.
+- `/events list <target>` — shows the standard events compatible with that object, followed by its
+  custom event declarations and typed payload fields.
+- `/events define <target> <event> [field:type ...] [--summary "text"]` — declares a discoverable
+  custom event contract on one object. Types are `any`, `boolean`, `integer`, `number`, `string`,
+  `object`, `list`, and `map`; add `?` for a nullable/optional field (`actor:object?`).
+- `/events remove <target> <event>` — removes that custom declaration. The open event name and old
+  subscriptions remain valid, but payload completion and strict validation disappear.
+- `/events emit <target> <custom-event> [payload-json]` — raises a custom event by hand. `<target>` is a normal
+  object reference, not a kind wildcard. If that object declares the event, every required field,
+  type, and extra-field rule is checked. An undeclared custom event remains legal for compatibility.
+  Built-in events are facts raised only by the engine and cannot be emitted manually.
+
+Declarations are object-scoped metadata; defining one does not register a handler or automatically
+make anything emit it. An object can hold up to 16 declarations, each with up to 32 fields and a
+256-byte summary, under the same bounded object/chunk/world persistence envelope as its attributes
+and scripts.
 
 `block:<name>`/`entity:<type>` in an `/on` target is a type filter, not a coordinate or an id — it
 only reads as a filter when there's no second `:` after it (`block:overworld:10,64,3` still resolves
 as a specific block, never as a filter named `overworld:10,64,3`).
 
-**Worked example** — raise an event by hand and see it land in the recent-events feed (no script
-needed for this part):
+**Worked example** — declare a machine event, emit a valid payload, and see it in the recent feed
+(no script needed for this part):
 
 ```
-/events emit self player.leveled
-emitted player.leveled on player
+/events define looking machine.ready item:string count:integer --summary "A machine completed a batch"
+/events emit looking machine.ready {\"item\":\"iron_ingot\",\"count\":4}
+emitted machine.ready on block:overworld:5,64,2
 /events recent 3
-#413 t118 player.leveled player
+#413 t118 machine.ready block:overworld:5,64,2
 ```
+
+The backslashes preserve JSON's quote characters through chat's one-line command parser. A missing
+`count`, a string where an integer was declared, or an extra field is refused before the event enters
+the bus.
+
+Standard events are grouped intuitively by subject: every object supports `attribute.changed` and
+script lifecycle/timer events; blocks cover placement, first tool strike, breaking, use, changes, and
+neighbor updates; entities cover spawn/removal, damage/death/healing, interaction, and targeting;
+players add join/leave/respawn, dimension, inventory, attack, sleep, level, and advancement events;
+dimensions cover day phase, weather, and explosions; the world covers gamerules, difficulty, AI
+replies, and budget diagnostics. The full event/payload table is in
+[the Scripting Guide](docs/SCRIPTING_GUIDE.md#standard-event-catalog).
+
+`block.changed` includes metadata-only writes: `oldName` and `newName` may be equal while `oldMeta`
+and `newMeta` identify an open/facing/growth-state transition. `block.neighborChanged` is raised for
+a notified block when it either carries an object record or matches an exact-object, block-kind
+(optionally type-filtered), or all-object subscription. A module may therefore register
+`target:on("block.neighborChanged", fn)` for a plain block without first adding an attribute or script
+to that target.
+
+`block.toolStrike` is specifically the first transition onto a block while holding a registered tool,
+not every repeated swing while the mouse is held. Its payload is `by`, `item`, `blockName`, `face`,
+`toolType`, `tier`, and `instant`, so a block can react immediately without creating a high-frequency
+hit event. It also fires when the contacted block is unbreakable; in that case `instant` is false.
 
 A more useful worked example — one that actually attaches a handler and reacts to a real event —
 follows in "Scripts" just below, since attaching a handler is a `/script` command.
@@ -605,9 +667,9 @@ in through a minimal in-game editor, or authored by the local AI through `/ai` (
 AI" below). Execution always happens on the host — a guest never runs a script itself, even its own.
 Reading (`/script list|show`), the world trust gate, the kill switch, and the AI journal/undo commands
 below stay host-only outright. The commands that actually change something — `/attr set|define|
-remove`, `/script attach|detach|run`, `/on`, `/unsubscribe`, `/events emit`, and `/ai` — now work for
-a joined guest too, once the host grants it (see "Guest scripting" below); until then they're refused
-exactly as before.
+remove`, `/script attach|detach|run`, `/on`, `/unsubscribe`, `/events define|remove|emit`, and `/ai`
+— work for a joined guest too once the host grants the matching permission (see "Guest scripting"
+below); until then they're refused exactly as before.
 
 - `/script list [target]` — lists the scripts on a target (default `self`), with their mode and
   whether they're currently disabled or faulted.
@@ -615,34 +677,56 @@ exactly as before.
   of one script.
 - `/script attach <target> <name> module <source...>` — attach a **module**-mode script: the source
   runs once when the script loads and typically calls `on(...)`/`subscribe(...)`/`every(...)`/
-  `after(...)` to register its own handlers.
+  `after(...)` to register its own handlers. A module may also call `register("unload", fn)` for a
+  synchronous final custom-attribute cleanup when it is edited, disabled, detached, unloaded, or the
+  session closes. This is not an event: the function receives no `ev`, cannot wait, emit, subscribe,
+  call AI, change scripts/world/built-ins, or call `say`/`sound`/`particles`, and is not available in
+  Handler mode.
 - `/script attach <target> <name> handler <event> <source...>` — attach a **handler**-mode script:
   the source *is* the handler, triggered on `self` by `<event>` (an `ev` table is bound automatically
   — no `on(...)` needed). Attaching from chat always targets the trigger at `self`; a script's own
   `h:attach(name, source, {on=..., attr=..., target=...})` call (see below) can target any object.
 - `/script detach <target> <name>` — remove a script.
+- A running script may perform at most 2 combined `h:attach`/`h:detach` operations per simulation
+  tick, while all scripts share a 32-operation world-wide limit for that tick. This prevents a
+  handler storm from creating unbounded lifecycle work; both limits reset on the next tick.
 - `/script run <target> <source...>` — run a one-off script against a target immediately; the source
   is not saved or attached, though permitted changes to live world state may persist. It can't
   subscribe, set timers, or call the AI. This chat command requires a trusted
   world and `doScripts` on.
+- `/script stats` — shows live/suspended script and durable-timer counts, pending events, and the
+  global Lua instruction tokens charged and remaining this simulation tick. Use it when a busy
+  script appears to be falling behind; ordered handler work is deferred, not silently discarded.
 - `/script trust` — trust the current world to run scripts. A world you created yourself is already
   trusted; a world imported or migrated from elsewhere starts untrusted (no script on it runs, even
   if it has scripts attached) until you trust it here.
 - `/script trust <peer> [ai] [off]` — **hosting a LAN world only**: grant (or, with `off`, revoke) a
   connected guest permission to author/attach/detach/run scripts, set/define/remove attributes,
-  subscribe/unsubscribe, and emit events through you. `<peer>` matches a connected player's name.
+  subscribe/unsubscribe, and define/remove/emit custom events through you. `<peer>` matches a
+  connected player's name.
   Add `ai` to also let that guest use `/ai` (a separate grant — scripting permission doesn't imply AI
   access, and vice versa): `/script trust Alice` grants scripting; `/script trust Alice ai` grants AI
   too; `/script trust Alice off` / `/script trust Alice ai off` revoke either one. This is a different
   command from the bare `/script trust` above (that one trusts the *world*, not a *guest* — the two
   never conflict).
+
+Attached execution refills 50,000 instruction tokens per simulation tick and can bank at most
+250,000 after idle ticks. Each callback gets a 5,000-instruction slice; a preempted callback resumes
+in deterministic FIFO order, while 20 consecutive preemptions fault a spinner. Short callbacks are
+conservatively charged one 1,000-instruction hook quantum, and hook overrun debt is repaid on later
+ticks. One script may retain at most 64 suspended callbacks and the world at most 1,024. Scheduler
+lanes reserve one 1,000-instruction quantum for later work, so a large load backlog cannot starve AI
+replies, resumptions, timers, or events. When the global bucket is empty, the event bus preserves the
+exact next recipient and suffix for a later tick rather than reporting that unrun work as delivered;
+an awaited AI reply likewise remains paired with its suspended script until credit returns. Prefer
+events and named timers over polling or busy loops.
 - `/script off` / `/script on` — the scripting kill switch (the `doScripts` game rule under the hood).
   Instant, and independent of trust: `/script off` stops every script this tick regardless of how
   hostile a world's scripts might be.
 - `/script journal [limit]` — lists what the AI has done to this world through `/ai` (attributes it
-  set, scripts it attached/detached/enabled, subscriptions it created, events it emitted), most recent
-  first: which request, which tool, which object, which model. Nothing you or another script does
-  appears here — only AI mutations are journaled.
+  set, scripts it attached/detached/enabled, subscriptions it created, and event declarations or
+  emissions it requested), most recent first: which request, which tool, which object, which model.
+  Nothing you or another script does appears here — only AI mutations are journaled.
 - `/script undo-ai [n]` — reverts the `n` most recent `/ai` requests' worth of mutations (default 1),
   most recent first. An attribute the AI set goes back to its previous value (or disappears, if the AI
   created it); a script the AI attached is detached (if it was new) or restored to what it replaced
@@ -654,8 +738,10 @@ exactly as before.
   Command-E to open the native Lua editor. It provides semantic colouring; completion for locals,
   engine globals, inferred tables, methods, properties, event payloads, and live custom attributes;
   signatures and diagnostics; validated snippets; and a searchable **World Objects** list that can
-  insert stable canonical references. Typing `.` or `:` opens member completion immediately, and
-  Control-Space requests it anywhere. On a local world with an active script runtime, the editor
+  insert stable canonical references. The Handler event picker shows only produced events compatible
+  with the current target, then that target's declared custom events; selecting one feeds its typed
+  payload fields to `ev.` completion and Check. Typing `.` or `:` opens member completion immediately,
+  and Control-Space requests it anywhere. On a local world with an active script runtime, the editor
   remains available even when scripting is not yet trusted or has been paused: **Check** performs a
   mutation-free dry run, **Save** validates and persists the script without starting it, and **Run
   Once** executes only the visible draft once without saving or attaching that draft. That explicit
@@ -675,7 +761,13 @@ exactly as before.
   Option-Command-/ asks the selected local Ollama model for one ghost-text proposal, Tab accepts it,
   and Escape dismisses it. Set editor AI to **Off** for no Ollama requests or explicitly choose
   **On Idle** for automatic requests after a pause; this explicit mode choice persists across app
-  sessions until changed. AI proposals have no tools and cannot save, run,
+  sessions until changed. In Handler mode, the proposal sees the current target's compatible
+  built-in/custom events and payload fields. In Module mode, it also sees every produced built-in
+  payload plus the compatible built-in names and declared custom payloads for each bounded World
+  Objects entry, so cross-object subscriptions do not require guessed event names. It also receives
+  target members and diagnostics. That snapshot is sent only when you explicitly request a
+  suggestion or opt into On Idle;
+  AI proposals have no tools and cannot save, run,
   or mutate the world. On a joined LAN world, existing source remains hidden; replacing it requires
   an explicit warning and the host still performs every validation and execution step. The complete
   controls and privacy boundary are in the [Lua Editor reference](docs/LUA_EDITOR.md).
@@ -723,7 +815,7 @@ A script's own Lua reference — the object model, event names, attribute access
 section only covers the chat/editor surface for attaching and managing scripts you (or another
 script, or the AI) already have the source for.
 
-### Attribute replication on a joined LAN world
+### Authoring metadata on a joined LAN world
 
 The host's script-set and AI-set attributes on any object now reach connected guests automatically —
 no command needed. What a guest sees is always a read-only snapshot (never more than a couple of
@@ -731,13 +823,15 @@ seconds behind the host, and never something the guest can edit or that any scri
 guest's own copy of the world could see, since guests never run scripts at all): open `/inspector` on
 the object in question, or `F3`, to check what's arrived so far. This is display-only — nothing about
 who's authoritative on a LAN world has changed; the host still runs every script and owns every
-attribute write.
+attribute write. Custom event declarations are mirrored through the same bounded, read-only channel
+for the editor's target-aware picker; only name, fields, and summary are included. The host remains
+the sole owner of declaration storage, event emission, subscription registration, and script execution.
 
 ### Guest scripting
 
 Once your host runs `/script trust <yourName>` (see above), you can author and manage scripts and
 attributes yourself while playing on their world — `/attr set|define|remove`, `/script attach|
-detach|run`, `/on`, `/unsubscribe`, and `/events emit` all work for you now, exactly as documented
+detach|run`, `/on`, `/unsubscribe`, and `/events define|remove|emit` all work for you now, exactly as documented
 above. Nothing you send runs on your own machine: it's sent to the host, validated and executed there
 (the same way the host's own commands are), and the result — accepted or refused, and why — shows up
 in your chat a moment later. `self` in any command you send means *your own* player object
@@ -748,8 +842,10 @@ if the host deletes that world, they're deleted too. If your host also adds `ai`
 `/ai <request>` works too — your prompt is sent to the host, which asks its own configured local model
 and relays the reply back to your chat (prefixed `<AI>`); you never talk to Ollama yourself, and `/ai
 cancel` isn't available to a guest yet. Everything not in this list — reading with `/inspect`/
-`/objects`, the world trust gate, the kill switch, and the AI journal/undo commands — stays host-only
-regardless of any grant.
+`/objects` and `/events list|recent`, the world trust gate, the kill switch, and the AI journal/undo
+commands — stays host-only regardless of any grant. The editor receives a bounded, source-free mirror
+of visible custom event names, field types, and summaries so its picker/completion stays accurate;
+that metadata grants no execution or mutation authority.
 
 ## Options, accessibility, and local AI
 
@@ -793,16 +889,21 @@ like it's about scripting (mentions a script, an attribute, an event, subscribin
 similar words) is handled differently from an ordinary building/world request: instead of picking one
 action, the AI can look around and make a short sequence of changes in the same request (up to four),
 narrating what it's doing as chat lines. It can list and inspect nearby objects and their attributes
-and scripts, look up what attributes and events exist and what a candidate script would do before
+and scripts, look up the target-compatible built-in catalog and object-scoped custom event
+declarations, and check what a candidate script would do before
 committing to it, set or remove a custom attribute, attach or detach a script (every AI-authored
 script is checked the same way `/script attach` checks a script you paste in, plus one extra pass
 that tries the script out on a scratch copy first and reports anything that looks wrong before it's
-saved for real), enable or disable a script, subscribe or unsubscribe to an event, raise a custom
-event, or run a one-off script. Every one of these goes through the exact same validated path as the
-matching `/attr`/`/script`/`/on`/`/events` command — the AI has no shortcut around any check a command
-would hit, and everything it changes is refused outright on a joined LAN world exactly like those
-commands are. Anything the AI sets or attaches is undoable with `/script undo-ai`, and `/script
-journal` shows exactly what it's touched (see "Scripting" above). Inside a script, `ai.ask(prompt)`
+saved for real), enable or disable a script, subscribe or unsubscribe to an event, declare, remove,
+  or raise a custom event, or run a one-off script. Its authoring prompt carries a compact explicit
+  Lua contract; the built-in event section and exact payload names such as `cause` and `blockName`
+  are generated from the canonical event registry instead of an independent handwritten event
+  list. Every one of these goes through the exact same
+validated path as the matching `/attr`/`/script`/`/on`/`/events` command — the AI has no shortcut
+around any check a command would hit. A guest cannot execute this lane locally; with the separate AI
+grant, its request is forwarded to the host's model and host-side executors. Anything the AI sets or
+attaches is undoable with `/script undo-ai`, and `/script journal` shows exactly what it touched (see
+"Scripting" above). Inside a script, `ai.ask(prompt)`
 and `local reply, err = ai.await(prompt)` now reach the same local Ollama model configured here
 (text only, no tools) — `ai.await` pauses that script's handler until the reply arrives (or times out,
 or is refused for being over budget) without pausing the rest of the game.

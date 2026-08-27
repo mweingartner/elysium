@@ -381,23 +381,34 @@ public enum BlockStateCodec {
     /// the engine actually stores them on (spec "Door writes touch the right
     /// half"). Returns `false` for an inapplicable field, an out-of-range
     /// value, or a wrong value kind — the world is left unchanged either way.
+    static func preflightWrite(
+        _ world: World, _ x: Int, _ y: Int, _ z: Int, field: String, value: AttrValue
+    ) -> (targetY: Int, cell: UInt16)? {
+        var targetY = y
+        let originalCell = world.getBlock(x, y, z)
+        let originalID = originalCell >> 4
+        guard originalID >= 0, originalID < blockDefs.count else { return nil }
+        if blockDefs[originalID].shape == .door {
+            let isUpper = isDoorUpperHalf(originalCell)
+            if field == "open", isUpper { targetY = y - 1 }
+            if field == "hinge", !isUpper { targetY = y + 1 }
+        }
+        let targetCell = world.getBlock(x, targetY, z)
+        if field == "lit" {
+            guard case .bool(let on) = value,
+                  let encoded = encodeLitSwap(targetCell, on: on) else { return nil }
+            return (targetY, encoded)
+        }
+        guard let encoded = encode(targetCell, field: field, value: value) else { return nil }
+        return (targetY, encoded)
+    }
+
     @discardableResult
     public static func write(_ world: World, _ x: Int, _ y: Int, _ z: Int, field: String, value: AttrValue) -> Bool {
-        var ty = y
-        let cell0 = world.getBlock(x, y, z)
-        if blockDefs[(cell0 >> 4)].shape == .door {
-            let isUpper = isDoorUpperHalf(cell0)
-            if field == "open", isUpper { ty = y - 1 }
-            if field == "hinge", !isUpper { ty = y + 1 }
+        guard let plan = preflightWrite(world, x, y, z, field: field, value: value) else {
+            return false
         }
-        let cell = world.getBlock(x, ty, z)
-        if field == "lit" {
-            guard case .bool(let on) = value, let newCell = encodeLitSwap(cell, on: on) else { return false }
-            world.setBlock(x, ty, z, Int(newCell), SET_DEFAULT)
-            return true
-        }
-        guard let newCell = encode(cell, field: field, value: value) else { return false }
-        world.setBlock(x, ty, z, Int(newCell), SET_DEFAULT)
+        world.setBlock(x, plan.targetY, z, Int(plan.cell), SET_DEFAULT)
         return true
     }
 }

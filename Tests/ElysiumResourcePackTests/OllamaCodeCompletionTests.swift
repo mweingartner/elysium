@@ -16,6 +16,26 @@ final class OllamaCodeCompletionTests: XCTestCase {
             source: "local door = self\ndoor:\n",
             caretUTF16: 23,
             schema: "self:exists() -> boolean",
+            authoring: OllamaCodeCompletionAuthoringContext(
+                targetReference: "player",
+                targetKind: "player",
+                scriptMode: "module",
+                modeContract: "Module source registers callbacks; ev exists only inside callback functions.",
+                selectedEvent: nil,
+                compatibleEvents: [
+                    OllamaCodeCompletionAuthoringEvent(
+                        name: "player.interacted",
+                        source: "built_in",
+                        payloadFields: ["item:string?"]
+                    ),
+                    OllamaCodeCompletionAuthoringEvent(
+                        name: "player.quest_ready",
+                        source: "declared_custom",
+                        payloadFields: ["quest:string"]
+                    ),
+                ],
+                targetMembers: ["method h:set(name, value)", "attribute health:number:writable"]
+            ),
             diagnostics: ["line 2: method expected"],
             nearby: [
                 OllamaCodeCompletionNearbyObject(
@@ -27,6 +47,14 @@ final class OllamaCodeCompletionTests: XCTestCase {
                     customAttributes: [
                         OllamaCodeCompletionNearbyAttribute(
                             name: "owner_note", type: "string", mutability: "read_only"
+                        ),
+                    ],
+                    builtInEvents: ["attribute.changed", "block.used"],
+                    customEvents: [
+                        OllamaCodeCompletionAuthoringEvent(
+                            name: "sensor.threshold",
+                            source: "declared_custom",
+                            payloadFields: ["value:number", "unit:string?"]
                         ),
                     ]
                 ),
@@ -58,6 +86,17 @@ final class OllamaCodeCompletionTests: XCTestCase {
         XCTAssertTrue(system.contains("block:overworld:1,64,2"))
         XCTAssertTrue(system.contains("owner_note"))
         XCTAssertTrue(system.contains("read_only"))
+        XCTAssertTrue(system.contains("built_in_events"))
+        XCTAssertTrue(system.contains("block.used"))
+        XCTAssertTrue(system.contains("custom_events"))
+        XCTAssertTrue(system.contains("sensor.threshold"))
+        XCTAssertTrue(system.contains("value:number"))
+        XCTAssertTrue(system.contains("<ELY_AUTHORING_CONTEXT>"))
+        XCTAssertTrue(system.contains("player.quest_ready [declared_custom]"))
+        XCTAssertTrue(system.contains("method h:set(name, value)"))
+        XCTAssertTrue(system.contains("ev exists only inside callback functions"))
+        XCTAssertTrue(system.contains("cannot be emitted manually"))
+        XCTAssertTrue(system.contains("custom event names only"))
         XCTAssertTrue(system.contains("untrusted data"))
     }
 
@@ -357,6 +396,7 @@ final class OllamaCodeCompletionTests: XCTestCase {
             source: source,
             caretUTF16: (source as NSString).length,
             documentRevision: 12,
+            documentIdentity: 41,
             contextKey: context,
             model: "qwen2.5-coder:7b",
             languageSchema: "self:exists()"
@@ -365,18 +405,169 @@ final class OllamaCodeCompletionTests: XCTestCase {
 
         XCTAssertTrue(result.isCurrent(
             documentRevision: 12,
+            documentIdentity: 41,
             source: source,
             caretUTF16: 5,
             contextKey: context,
             model: "qwen2.5-coder:7b"
         ))
         XCTAssertFalse(result.isCurrent(
+            documentRevision: 12,
+            documentIdentity: 42,
+            source: source,
+            caretUTF16: 5,
+            contextKey: context,
+            model: "qwen2.5-coder:7b"
+        ), "byte-identical scripts in different editor documents must not share AI proposals")
+        XCTAssertFalse(result.isCurrent(
             documentRevision: 13,
+            documentIdentity: 41,
             source: source + "x",
             caretUTF16: 6,
             contextKey: context,
             model: "qwen2.5-coder:7b"
         ))
+    }
+
+    func testCompactAuthoringContextIsIndependentOfLuaCATSTruncation() async throws {
+        let transport = RecordingCodeCompletionTransport(responses: [
+            response(["capabilities": ["completion"], "template": "ordinary-template"]),
+            response(["response": "say(ev.quest)"]),
+        ])
+        let service = OllamaCodeCompletionService(baseURL: baseURL, transport: transport)
+        let request = try makeRequest(
+            source: "say(ev.",
+            schema: String(repeating: "x", count: 7_000) + "SCHEMA_TAIL_MUST_BE_TRUNCATED",
+            authoring: OllamaCodeCompletionAuthoringContext(
+                targetReference: "player",
+                targetKind: "player",
+                scriptMode: "handler",
+                modeContract: "Handler source uses implicit ev directly and must not subscribe.",
+                selectedEvent: "player.open_signal",
+                compatibleEvents: [
+                    OllamaCodeCompletionAuthoringEvent(
+                        name: "player.quest_ready",
+                        source: "declared_custom",
+                        payloadFields: ["quest:string"]
+                    ),
+                    OllamaCodeCompletionAuthoringEvent(
+                        name: "player.open_signal",
+                        source: "open_custom_selected",
+                        payloadFields: [],
+                        payloadContract: "open_custom_unknown_envelope_only"
+                    ),
+                ],
+                targetMembers: ["property ref:string", "method h:get(name)"]
+            )
+        )
+
+        _ = try await service.complete(request)
+        let requests = await transport.recordedRequests()
+        let generateBody = try jsonBody(requests[1])
+        let system = try XCTUnwrap(generateBody["system"] as? String)
+        XCTAssertTrue(system.contains("<ELY_AUTHORING_CONTEXT>"))
+        XCTAssertTrue(system.contains("selected_event=player.open_signal"))
+        XCTAssertTrue(system.contains("player.quest_ready [declared_custom] payload_contract=typed_event_specific fields=quest:string"))
+        XCTAssertTrue(system.contains("event_envelope=kind:string,subject:object,tick:integer,source:string"))
+        XCTAssertTrue(system.contains("player.open_signal [open_custom_selected]"))
+        XCTAssertTrue(system.contains("payload_contract=open_custom_unknown_envelope_only fields=none"))
+        XCTAssertTrue(system.contains("event-specific payload is unknown"))
+        XCTAssertTrue(system.contains("Handler source uses implicit ev directly"))
+        XCTAssertFalse(system.contains("SCHEMA_TAIL_MUST_BE_TRUNCATED"))
+    }
+
+    func testSelectedEventKeepsAllDeclaredFieldsAndReportsOmittedWholeContracts() async throws {
+        let transport = RecordingCodeCompletionTransport(responses: [
+            response(["capabilities": ["completion"]]),
+            response(["response": "say(ev.required_31)"]),
+        ])
+        let selectedFields = (0..<32).map { "required_\($0):string" }
+        let fillerFields = (0..<32).map { "filler_\($0):string" }
+        var events = (0..<12).map {
+            OllamaCodeCompletionAuthoringEvent(
+                name: "machine.filler\($0)",
+                source: "declared_custom",
+                payloadFields: fillerFields
+            )
+        }
+        events.append(OllamaCodeCompletionAuthoringEvent(
+            name: "machine.selected",
+            source: "declared_custom",
+            payloadFields: selectedFields
+        ))
+        let request = try makeRequest(authoring: OllamaCodeCompletionAuthoringContext(
+            targetReference: "block:overworld:1,64,2",
+            targetKind: "block",
+            scriptMode: "handler",
+            modeContract: "Handler source uses implicit ev directly.",
+            selectedEvent: "machine.selected",
+            compatibleEvents: events,
+            targetMembers: []
+        ))
+
+        _ = try await OllamaCodeCompletionService(
+            baseURL: baseURL, transport: transport
+        ).complete(request)
+
+        let requests = await transport.recordedRequests()
+        let body = try jsonBody(try XCTUnwrap(requests.last))
+        let system = try XCTUnwrap(body["system"] as? String)
+        XCTAssertTrue(system.contains("compatible_events_total=13"))
+        XCTAssertTrue(system.contains("compatible_events_truncated=true"))
+        XCTAssertTrue(system.contains("machine.selected [declared_custom]"))
+        XCTAssertTrue(system.contains("required_0:string"))
+        XCTAssertTrue(system.contains("required_31:string"))
+    }
+
+    func testNearbyContextIncludesOnlyWholeEventContractsAndReportsTruncation() async throws {
+        let transport = RecordingCodeCompletionTransport(responses: [
+            response(["capabilities": ["completion"]]),
+            response(["response": "say('ok')"]),
+        ])
+        let fields = (0..<32).map { "field_\($0):string" }
+        let events = (0..<16).map {
+            OllamaCodeCompletionAuthoringEvent(
+                name: "machine.signal\($0)",
+                source: "declared_custom",
+                payloadFields: fields
+            )
+        }
+        let request = try makeRequest(nearby: [
+            OllamaCodeCompletionNearbyObject(
+                reference: "block:overworld:1,64,2",
+                kind: "block",
+                customEvents: events
+            ),
+        ])
+
+        _ = try await OllamaCodeCompletionService(
+            baseURL: baseURL, transport: transport
+        ).complete(request)
+
+        let requests = await transport.recordedRequests()
+        let body = try jsonBody(try XCTUnwrap(requests.last))
+        let system = try XCTUnwrap(body["system"] as? String)
+        let json = try XCTUnwrap(taggedContent(
+            "ELY_AUTHORIZED_NEARBY_OBJECTS_DATA", in: system
+        ))
+        let envelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(envelope["objects_total"] as? Int, 1)
+        XCTAssertEqual(envelope["objects_included"] as? Int, 1)
+        XCTAssertEqual(envelope["objects_truncated"] as? Bool, false)
+        let objects = try XCTUnwrap(envelope["objects"] as? [[String: Any]])
+        let object = try XCTUnwrap(objects.first)
+        XCTAssertEqual(object["custom_events_total"] as? Int, 16)
+        let included = try XCTUnwrap(object["custom_events_included"] as? Int)
+        XCTAssertGreaterThan(included, 0)
+        XCTAssertLessThan(included, 16)
+        XCTAssertEqual(object["custom_events_truncated"] as? Bool, true)
+        let includedEvents = try XCTUnwrap(object["custom_events"] as? [[String: Any]])
+        XCTAssertEqual(includedEvents.count, included)
+        for event in includedEvents {
+            XCTAssertEqual((event["payload_fields"] as? [String])?.count, 32)
+        }
     }
 
     func testCaretSplittingASurrogatePairIsRejected() throws {
@@ -402,6 +593,7 @@ final class OllamaCodeCompletionTests: XCTestCase {
         selectionLengthUTF16: Int = 0,
         model: String = "qwen2.5-coder:7b",
         schema: String = "self:exists() -> boolean",
+        authoring: OllamaCodeCompletionAuthoringContext? = nil,
         diagnostics: [String] = [],
         nearby: [OllamaCodeCompletionNearbyObject] = [],
         fillInMiddlePolicy: OllamaCodeCompletionFillInMiddlePolicy = .disabled,
@@ -420,6 +612,7 @@ final class OllamaCodeCompletionTests: XCTestCase {
             ),
             model: model,
             languageSchema: schema,
+            authoringContext: authoring,
             diagnostics: diagnostics,
             authorizedNearbyObjects: nearby,
             fillInMiddlePolicy: fillInMiddlePolicy,
@@ -435,6 +628,16 @@ final class OllamaCodeCompletionTests: XCTestCase {
     private func jsonBody(_ request: URLRequest) throws -> [String: Any] {
         let data = try XCTUnwrap(request.httpBody)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    private func taggedContent(_ tag: String, in text: String) -> String? {
+        let start = "<\(tag)>\n"
+        let end = "\n</\(tag)>"
+        guard let startRange = text.range(of: start),
+              let endRange = text.range(of: end, range: startRange.upperBound..<text.endIndex) else {
+            return nil
+        }
+        return String(text[startRange.upperBound..<endRange.lowerBound])
     }
 }
 

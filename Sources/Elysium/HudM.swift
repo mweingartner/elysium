@@ -1329,7 +1329,8 @@ final class HUD {
             lines.append(
                 "Scripts: \(summary.liveScripts) live, \(summary.suspendedCoroutines) waiting, "
                     + "\(summary.durableTimers) timers  Events: \(game.eventBus.pendingCount) pending, "
-                    + "\(faultsThisWindow) faulted"
+                    + "\(faultsThisWindow) faulted  Lua: \(summary.instructionsUsedThisTick) used, "
+                    + "\(summary.instructionBudgetRemaining) tokens"
             )
         }
         if let t = game.targetedBlock {

@@ -1272,7 +1272,7 @@ public func placeBlock(_ ctx: InteractCtx, _ hit: RaycastHit, _ blockId: Int, _ 
     world.hooks.raiseScriptEvent(
         .blockPlaced, .block(dim: world.dim, x: px, y: py, z: pz),
         ["by": .ref(scriptRef(for: player).canonical), "item": .string(blockDefs[blockId].name)],
-        .player, blockDefs[blockId].name
+        player.scriptEventActorIdentity.source, blockDefs[blockId].name
     )
     return true
 }
@@ -1585,8 +1585,12 @@ public func finishBreaking(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int) {
     // cell, so one raise here — before any of them run — covers all of them.
     world.hooks.raiseScriptEvent(
         .blockBroken, .block(dim: world.dim, x: x, y: y, z: z),
-        ["by": .ref(scriptRef(for: player).canonical), "item": player.mainHand.map { .string(itemDef($0.id).name) } ?? .null],
-        .player, def.name
+        [
+            "by": .ref(scriptRef(for: player).canonical),
+            "item": player.mainHand.map { .string(itemDef($0.id).name) } ?? .null,
+            "blockName": .string(def.name),
+        ],
+        player.scriptEventActorIdentity.source, def.name
     )
 
     // container contents spill

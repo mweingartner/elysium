@@ -20,6 +20,7 @@ final class EventBusTests: XCTestCase {
     func testEventKindParsesCatalogAndCustomNames() {
         XCTAssertEqual(EventKind.parse("attribute.changed"), .attributeChanged)
         XCTAssertEqual(EventKind.parse("block.broken"), .blockBroken)
+        XCTAssertEqual(EventKind.parse("block.toolStrike"), .blockToolStrike)
         XCTAssertEqual(EventKind.parse("lumber.milestone")?.rawValue, "lumber.milestone")
         XCTAssertEqual(EventKind.parse("custom_thing")?.rawValue, "custom_thing")
     }
@@ -104,6 +105,94 @@ final class EventBusTests: XCTestCase {
         XCTAssertEqual(Set(recipientIDs), Set([sub1.id, scriptOwned.id, sub2.id]))
     }
 
+    func testRecipientDeliveryBudgetSlicesOneEventWithoutReplayingHandlers() {
+        let caps = EventBus.Caps(
+            cascadeDepth: 8, maxDeliveriesPerTick: 2, maxEventsPerHandler: 256,
+            maxQueueSize: 32, maxRecentEvents: 32, maxSubscriptionsPerWorld: 8,
+            maxSubscriptionsPerObject: 8
+        )
+        let bus = EventBus(caps: caps)
+        for i in 0..<3 {
+            _ = bus.registerScriptOwned(
+                owner: .entity(uid: i + 1), scriptName: "s\(i)",
+                target: .object(.player), event: .playerJoined, attribute: nil
+            )
+        }
+        var recipientIDs: [UInt64] = []
+        bus.delivery = { _, targets in recipientIDs += targets.map(\.id) }
+        bus.raise(kind: .playerJoined, subject: .player, source: .player, tick: 0)
+
+        let first = bus.runDeliveryPhase(tick: 0)
+        XCTAssertEqual(first.delivered, 2)
+        XCTAssertEqual(first.carriedOver, 1)
+        XCTAssertEqual(bus.pendingCount, 1)
+        XCTAssertEqual(recipientIDs.count, 2)
+
+        let second = bus.runDeliveryPhase(tick: 1)
+        XCTAssertEqual(second.delivered, 1)
+        XCTAssertEqual(second.carriedOver, 0)
+        XCTAssertEqual(recipientIDs, recipientIDs.sorted())
+        XCTAssertEqual(Set(recipientIDs).count, 3, "a carried recipient suffix must not replay prior handlers")
+    }
+
+    func testRuntimeAdmissionZeroRetainsExactRecipientSuffixWithoutClaimingDelivery() {
+        let bus = EventBus()
+        for i in 0..<3 {
+            _ = bus.registerScriptOwned(
+                owner: .entity(uid: i + 1), scriptName: "s\(i)",
+                target: .object(.player), event: .playerJoined, attribute: nil
+            )
+        }
+        var admissionCalls = 0
+        bus.deliveryAdmission = { _, proposed in
+            admissionCalls += 1
+            return admissionCalls == 1 ? min(1, proposed.count) : 0
+        }
+        var deliveredIDs: [UInt64] = []
+        bus.delivery = { _, targets in deliveredIDs += targets.map(\.id) }
+        bus.raise(kind: .playerJoined, subject: .player, source: .player, tick: 0)
+
+        let first = bus.runDeliveryPhase(tick: 0)
+        XCTAssertEqual(first.delivered, 1)
+        XCTAssertEqual(first.carriedOver, 1)
+        XCTAssertEqual(deliveredIDs.count, 1)
+
+        bus.deliveryAdmission = { _, proposed in proposed.count }
+        let second = bus.runDeliveryPhase(tick: 1)
+        XCTAssertEqual(second.delivered, 2)
+        XCTAssertEqual(second.carriedOver, 0)
+        XCTAssertEqual(deliveredIDs, deliveredIDs.sorted())
+        XCTAssertEqual(Set(deliveredIDs).count, 3)
+    }
+
+    func testNoRecipientEventsConsumeBoundedPhaseWorkWithoutInflatingDeliveredCount() {
+        let caps = EventBus.Caps(
+            cascadeDepth: 8, maxDeliveriesPerTick: 2, maxEventsPerHandler: 256,
+            maxQueueSize: 32, maxRecentEvents: 32, maxSubscriptionsPerWorld: 8,
+            maxSubscriptionsPerObject: 8
+        )
+        let bus = EventBus(caps: caps)
+        var observed: [UInt64] = []
+        bus.delivery = { event, targets in
+            XCTAssertTrue(targets.isEmpty)
+            observed.append(event.seq)
+        }
+        for i in 0..<5 {
+            bus.raise(kind: .entitySpawned, subject: .entity(uid: i), source: .engine, tick: 0)
+        }
+
+        let first = bus.runDeliveryPhase(tick: 0)
+        XCTAssertEqual(first.delivered, 0)
+        XCTAssertEqual(first.carriedOver, 3)
+        XCTAssertEqual(observed, [0, 1])
+        let second = bus.runDeliveryPhase(tick: 1)
+        XCTAssertEqual(second.carriedOver, 1)
+        XCTAssertEqual(observed, [0, 1, 2, 3])
+        let third = bus.runDeliveryPhase(tick: 2)
+        XCTAssertEqual(third.carriedOver, 0)
+        XCTAssertEqual(observed, [0, 1, 2, 3, 4])
+    }
+
     // MARK: - coalescing (§7.6)
 
     func testAttributeChangedCoalescesKeepingFirstOldLastNewLastSeq() {
@@ -169,6 +258,24 @@ final class EventBusTests: XCTestCase {
         XCTAssertEqual(count, 2)
     }
 
+    func testRepeatedCoalescingKeepsBoundedSparseQueueStorageBehavior() {
+        let bus = EventBus()
+        for i in 0..<20_000 {
+            bus.raise(
+                kind: .attributeChanged, subject: .player,
+                payload: ["key": .string("mood"), "old": .int(0), "new": .int(Int64(i))],
+                source: .player, tick: 0
+            )
+        }
+        XCTAssertEqual(bus.pendingCount, 1)
+        var delivered: ScriptEvent?
+        bus.delivery = { event, _ in delivered = event }
+        bus.runDeliveryPhase(tick: 0)
+        XCTAssertEqual(delivered?.payload["old"], .int(0))
+        XCTAssertEqual(delivered?.payload["new"], .int(19_999))
+        XCTAssertEqual(bus.pendingCount, 0)
+    }
+
     // MARK: - caps (§7.6)
 
     func testQueueFullDropsExcessAndRaisesExactlyOneOverBudgetPerTick() {
@@ -185,11 +292,195 @@ final class EventBusTests: XCTestCase {
         }
         XCTAssertEqual(bus.raise(kind: .entitySpawned, subject: .entity(uid: 100), source: .engine, tick: 0), .droppedQueueFull)
         XCTAssertEqual(bus.raise(kind: .entitySpawned, subject: .entity(uid: 101), source: .engine, tick: 0), .droppedQueueFull)
+        XCTAssertEqual(bus.pendingCount, caps.maxQueueSize, "the diagnostic must not bypass the queue cap")
         var kinds: [EventKind] = []
         bus.delivery = { event, _ in kinds.append(event.kind) }
-        bus.runDeliveryPhase(tick: 0)
+        let report = bus.runDeliveryPhase(tick: 0)
         XCTAssertEqual(kinds.filter { $0 == .scriptOverBudget }.count, 1)
         XCTAssertEqual(kinds.filter { $0 == .entitySpawned }.count, 4)
+        XCTAssertEqual(report.droppedForQueueFull, 2)
+    }
+
+    func testPayloadSizerRejectsOversizedEventsAndMapKeysBeforeRetention() throws {
+        var byteCaps = EventBus.Caps.defaults
+        byteCaps.maxEventPayloadBytes = 64
+        byteCaps.maxPendingPayloadBytes = 4_096
+        byteCaps.maxRecentPayloadBytes = 4_096
+        let oversizedBus = EventBus(caps: byteCaps)
+        let custom = try XCTUnwrap(EventKind.parse("test.payload"))
+
+        XCTAssertEqual(
+            oversizedBus.raise(
+                kind: custom, subject: .world,
+                payload: ["blob": .string(String(repeating: "x", count: 100))],
+                source: .script(owner: .world, name: "adversary"), tick: 0
+            ),
+            .droppedQueueFull
+        )
+        XCTAssertFalse(oversizedBus.recentEvents().contains { $0.kind == custom })
+        XCTAssertEqual(oversizedBus.recentEvents().map(\.kind), [.scriptOverBudget])
+        XCTAssertLessThanOrEqual(oversizedBus.pendingPayloadBytes, byteCaps.maxPendingPayloadBytes)
+
+        var keyCaps = byteCaps
+        keyCaps.maxEventPayloadBytes = 512
+        let oversizedKeyBus = EventBus(caps: keyCaps)
+        XCTAssertEqual(
+            oversizedKeyBus.raise(
+                kind: custom, subject: .world,
+                payload: [String(repeating: "k", count: 257): .int(1)],
+                source: .engine, tick: 0
+            ),
+            .droppedQueueFull
+        )
+        XCTAssertFalse(oversizedKeyBus.recentEvents().contains { $0.kind == custom })
+        XCTAssertLessThanOrEqual(oversizedKeyBus.pendingPayloadBytes, keyCaps.maxPendingPayloadBytes)
+    }
+
+    func testAggregatePendingAndRecentPayloadByteCapsEvictAndDrainExactly() throws {
+        var caps = EventBus.Caps.defaults
+        caps.maxEventPayloadBytes = 512
+        caps.maxPendingPayloadBytes = 900
+        caps.maxRecentPayloadBytes = 300
+        let bus = EventBus(caps: caps)
+        let custom = try XCTUnwrap(EventKind.parse("test.payload"))
+        let payload = ["blob": AttrValue.string(String(repeating: "x", count: 250))]
+
+        XCTAssertTrue(bus.raise(
+            kind: custom, subject: .entity(uid: 1), payload: payload,
+            source: .engine, tick: 0
+        ).wasEnqueued)
+        let retainedAfterFirst = bus.pendingPayloadBytes
+        XCTAssertEqual(retainedAfterFirst, AttrValueCodec.encode(.map(payload)).utf8.count)
+        XCTAssertEqual(
+            bus.raise(
+                kind: custom, subject: .entity(uid: 2), payload: payload,
+                source: .engine, tick: 0
+            ),
+            .droppedQueueFull
+        )
+        XCTAssertGreaterThanOrEqual(bus.pendingPayloadBytes, retainedAfterFirst)
+        XCTAssertLessThanOrEqual(bus.pendingPayloadBytes, caps.maxPendingPayloadBytes)
+        XCTAssertLessThanOrEqual(bus.recentPayloadBytes, caps.maxRecentPayloadBytes)
+        XCTAssertFalse(bus.recentEvents().contains { $0.subject == .entity(uid: 1) },
+                       "the byte ring must evict an entry even below its count cap")
+
+        bus.delivery = { _, _ in }
+        _ = bus.runDeliveryPhase(tick: 0)
+        XCTAssertEqual(bus.pendingCount, 0)
+        XCTAssertEqual(bus.pendingPayloadBytes, 0)
+        XCTAssertLessThanOrEqual(bus.recentPayloadBytes, caps.maxRecentPayloadBytes)
+    }
+
+    func testFailedCoalescingByteReplacementKeepsOriginalAndAccounting() {
+        var caps = EventBus.Caps.defaults
+        caps.maxEventPayloadBytes = 512
+        caps.maxPendingPayloadBytes = 900
+        caps.maxRecentPayloadBytes = 4_096
+        let bus = EventBus(caps: caps)
+        XCTAssertTrue(bus.raise(
+            kind: .attributeChanged, subject: .player,
+            payload: ["key": .string("mood"), "old": .string("a"), "new": .string("b")],
+            source: .player, tick: 0
+        ).wasEnqueued)
+        let originalBytes = bus.pendingPayloadBytes
+
+        XCTAssertEqual(bus.raise(
+            kind: .attributeChanged, subject: .player,
+            payload: [
+                "key": .string("mood"), "old": .string("b"),
+                "new": .string(String(repeating: "z", count: 370)),
+            ],
+            source: .player, tick: 0
+        ), .droppedQueueFull)
+        XCTAssertGreaterThanOrEqual(bus.pendingPayloadBytes, originalBytes)
+        XCTAssertLessThanOrEqual(bus.pendingPayloadBytes, caps.maxPendingPayloadBytes)
+
+        var delivered: [ScriptEvent] = []
+        bus.delivery = { event, _ in delivered.append(event) }
+        _ = bus.runDeliveryPhase(tick: 0)
+        let original = delivered.first { $0.kind == .attributeChanged }
+        XCTAssertEqual(original?.payload["old"], .string("a"))
+        XCTAssertEqual(original?.payload["new"], .string("b"))
+        XCTAssertEqual(bus.pendingPayloadBytes, 0)
+    }
+
+    func testStalledCursorAndDeferredDiagnosticRemainChargedExactlyOnce() {
+        var caps = EventBus.Caps.defaults
+        caps.maxQueueSize = 1
+        caps.maxDeliveriesPerTick = 8
+        caps.maxEventPayloadBytes = 512
+        caps.maxPendingPayloadBytes = 900
+        caps.maxRecentPayloadBytes = 4_096
+        let bus = EventBus(caps: caps)
+        _ = bus.registerScriptOwned(
+            owner: .player, scriptName: "s", target: .object(.player),
+            event: .playerJoined, attribute: nil
+        )
+        bus.deliveryAdmission = { _, _ in 0 }
+        XCTAssertTrue(bus.raise(
+            kind: .playerJoined, subject: .player, source: .engine, tick: 0
+        ).wasEnqueued)
+        let eventBytes = bus.pendingPayloadBytes
+        _ = bus.runDeliveryPhase(tick: 0)
+        XCTAssertEqual(bus.pendingPayloadBytes, eventBytes, "moving into a cursor must not release bytes")
+
+        XCTAssertEqual(bus.raise(
+            kind: .entitySpawned, subject: .entity(uid: 1), source: .engine, tick: 1
+        ), .droppedQueueFull)
+        let eventAndDeferredBytes = bus.pendingPayloadBytes
+        XCTAssertGreaterThan(eventAndDeferredBytes, eventBytes)
+        XCTAssertLessThanOrEqual(eventAndDeferredBytes, caps.maxPendingPayloadBytes)
+        for tick in 2...20 {
+            XCTAssertEqual(bus.raise(
+                kind: .entitySpawned, subject: .entity(uid: tick),
+                source: .engine, tick: Int64(tick)
+            ), .droppedQueueFull)
+            XCTAssertEqual(bus.pendingPayloadBytes, eventAndDeferredBytes,
+                           "later diagnostics must not double-charge the one deferred slot")
+        }
+
+        bus.delivery = { _, _ in }
+        bus.deliveryAdmission = { _, proposed in proposed.count }
+        _ = bus.runDeliveryPhase(tick: 21)
+        XCTAssertEqual(bus.pendingCount, 0)
+        XCTAssertEqual(bus.pendingPayloadBytes, 0)
+    }
+
+    func testDeferredOverBudgetDiagnosticStaysBoundedBehindAStalledDeliveryCursor() {
+        let caps = EventBus.Caps(
+            cascadeDepth: 8, maxDeliveriesPerTick: 8, maxEventsPerHandler: 256,
+            maxQueueSize: 1, maxRecentEvents: 128, maxSubscriptionsPerWorld: 8,
+            maxSubscriptionsPerObject: 8
+        )
+        let bus = EventBus(caps: caps)
+        _ = bus.registerScriptOwned(
+            owner: .player, scriptName: "s", target: .object(.player),
+            event: .playerJoined, attribute: nil
+        )
+        bus.deliveryAdmission = { _, _ in 0 }
+        XCTAssertTrue(
+            bus.raise(kind: .playerJoined, subject: .player, source: .engine, tick: 0).wasEnqueued
+        )
+        _ = bus.runDeliveryPhase(tick: 0)
+
+        for tick in 1...32 {
+            XCTAssertEqual(
+                bus.raise(
+                    kind: .entitySpawned, subject: .entity(uid: tick),
+                    source: .engine, tick: Int64(tick)
+                ),
+                .droppedQueueFull
+            )
+            XCTAssertEqual(bus.pendingCount, caps.maxQueueSize)
+        }
+
+        var deliveredKinds: [EventKind] = []
+        bus.delivery = { event, _ in deliveredKinds.append(event.kind) }
+        bus.deliveryAdmission = { _, proposed in proposed.count }
+        _ = bus.runDeliveryPhase(tick: 33)
+        XCTAssertEqual(deliveredKinds.filter { $0 == .playerJoined }.count, 1)
+        XCTAssertEqual(deliveredKinds.filter { $0 == .scriptOverBudget }.count, 1)
+        XCTAssertEqual(bus.pendingCount, 0)
     }
 
     func testOverBudgetSignalResetsEachTick() {
@@ -362,6 +653,7 @@ final class EventBusTests: XCTestCase {
         XCTAssertTrue(bus.unsubscribe(id: sub.id))
         XCTAssertFalse(bus.unsubscribe(id: sub.id))
         XCTAssertFalse(bus.unsubscribe(id: 999_999))
+        XCTAssertFalse(bus.hasEventInterest(.playerJoined, subject: .player))
     }
 
     // MARK: - matching (§7.3 target shapes)
@@ -403,7 +695,37 @@ final class EventBusTests: XCTestCase {
         XCTAssertEqual(deliveries, ["mood"])
     }
 
-    func testUnfilteredAttributeChangedSubscriptionNeverMatchesPosition() {
+    func testCoalescedBlockAttributeTransitionMatchesOnlyOriginalAndFinalFamilies() throws {
+        let bus = EventBus()
+        var idsByType: [String: UInt64] = [:]
+        for type in ["stone", "dirt", "grass_block"] {
+            guard case .success(let subscription) = bus.subscribe(
+                subscriber: .player, scriptName: type, handler: "changed",
+                target: .kind(.block, typeFilter: type), event: .attributeChanged,
+                attribute: "name", createdBy: .player, tick: 0
+            ) else { return XCTFail("subscription failed for \(type)") }
+            idsByType[type] = subscription.id
+        }
+        let subject = ObjectRef.block(dim: .overworld, x: 1, y: 2, z: 3)
+        bus.raise(
+            kind: .attributeChanged, subject: subject,
+            payload: ["key": .string("name"), "old": .string("stone"), "new": .string("dirt")],
+            source: .engine, tick: 0, subjectType: "dirt", priorSubjectType: "stone"
+        )
+        bus.raise(
+            kind: .attributeChanged, subject: subject,
+            payload: ["key": .string("name"), "old": .string("dirt"), "new": .string("grass_block")],
+            source: .engine, tick: 0, subjectType: "grass_block", priorSubjectType: "dirt"
+        )
+        var deliveredIDs = Set<UInt64>()
+        bus.delivery = { _, targets in deliveredIDs.formUnion(targets.map(\.id)) }
+        bus.runDeliveryPhase(tick: 0)
+
+        XCTAssertEqual(deliveredIDs, [idsByType["stone"]!, idsByType["grass_block"]!])
+        XCTAssertFalse(deliveredIDs.contains(idsByType["dirt"]!))
+    }
+
+    func testUnfilteredAttributeChangedSubscriptionNeverMatchesSyntheticPosition() {
         let bus = EventBus()
         _ = bus.subscribe(
             subscriber: .player, scriptName: "s", handler: "h", target: .kind(.player, typeFilter: nil),
@@ -417,7 +739,8 @@ final class EventBusTests: XCTestCase {
         bus.raise(
             kind: .attributeChanged, subject: .player,
             payload: ["key": .string("pos"), "old": .null, "new": .list([.number(1), .number(2), .number(3)])],
-            source: .engine, tick: 0, excludeFromRecent: true
+            source: .engine, tick: 0, excludeFromRecent: true,
+            isSyntheticPositionChange: true
         )
         bus.raise(
             kind: .attributeChanged, subject: .player,
@@ -431,14 +754,106 @@ final class EventBusTests: XCTestCase {
 
     func testDropScriptOwnedSubscriptionsRemovesOnlyThoseOwnedByGivenRefs() {
         let bus = EventBus()
-        let a = bus.registerScriptOwned(owner: .entity(uid: 1), scriptName: "s", target: .any, event: .entitySpawned, attribute: nil)
-        let b = bus.registerScriptOwned(owner: .entity(uid: 2), scriptName: "s", target: .any, event: .entitySpawned, attribute: nil)
+        let a = bus.registerScriptOwned(owner: .entity(uid: 1), scriptName: "s", target: .object(.entity(uid: 1)), event: .entitySpawned, attribute: nil)
+        let b = bus.registerScriptOwned(owner: .entity(uid: 2), scriptName: "s", target: .object(.entity(uid: 2)), event: .entitySpawned, attribute: nil)
         XCTAssertEqual(bus.scriptOwnedSubscriptionCount, 2)
         bus.dropScriptOwnedSubscriptions(ownedBy: [.entity(uid: 1)])
         XCTAssertEqual(bus.scriptOwnedSubscriptionCount, 1)
+        XCTAssertFalse(bus.hasEventInterest(.entitySpawned, subject: .entity(uid: 1)))
+        XCTAssertTrue(bus.hasEventInterest(.entitySpawned, subject: .entity(uid: 2)))
         bus.unregisterScriptOwned(id: b.id)
         XCTAssertEqual(bus.scriptOwnedSubscriptionCount, 0)
         _ = a // silence unused-variable warnings for the ids kept only for readability
+    }
+
+    func testDropScriptOwnedSubscriptionsForOneScriptPreservesSiblingScripts() {
+        let bus = EventBus()
+        _ = bus.registerScriptOwned(
+            owner: .player, scriptName: "first", target: .object(.player),
+            event: .playerJoined, attribute: nil
+        )
+        _ = bus.registerScriptOwned(
+            owner: .player, scriptName: "second", target: .object(.player),
+            event: .playerJoined, attribute: nil
+        )
+
+        bus.dropScriptOwnedSubscriptions(owner: .player, scriptName: "first")
+
+        XCTAssertEqual(bus.scriptOwnedSubscriptionCount, 1)
+        XCTAssertTrue(bus.hasEventInterest(.playerJoined, subject: .player))
+        bus.dropScriptOwnedSubscriptions(owner: .player, scriptName: "second")
+        XCTAssertEqual(bus.scriptOwnedSubscriptionCount, 0)
+        XCTAssertFalse(bus.hasEventInterest(.playerJoined, subject: .player))
+    }
+
+    func testCheckedScriptOwnedRegistrationSharesPersistedWorldAndOwnerCaps() {
+        let caps = EventBus.Caps(
+            cascadeDepth: 8, maxDeliveriesPerTick: 2_048, maxEventsPerHandler: 256,
+            maxQueueSize: 8_192, maxRecentEvents: 128,
+            maxSubscriptionsPerWorld: 3, maxSubscriptionsPerObject: 2
+        )
+        let bus = EventBus(caps: caps)
+        XCTAssertTrue(bus.subscribe(
+            subscriber: .player, scriptName: "persisted", handler: "h",
+            target: .object(.player), event: .playerJoined, attribute: nil,
+            createdBy: .player, tick: 0
+        ).isSuccessValue)
+        let runtimeRegistration = bus.registerScriptOwnedChecked(
+            owner: .player, scriptName: "runtime", target: .object(.player),
+            event: .playerJoined, attribute: nil
+        )
+        guard case .success(let runtimeSubscription) = runtimeRegistration else {
+            return XCTFail("script-owned registration should fit the combined owner cap")
+        }
+        guard case .failure(.tooManyForObject) = bus.registerScriptOwnedChecked(
+            owner: .player, scriptName: "overflow", target: .object(.player),
+            event: .playerJoined, attribute: nil
+        ) else { return XCTFail("persisted and runtime subscriptions must share the owner cap") }
+        bus.unregisterScriptOwned(id: runtimeSubscription.id)
+        XCTAssertTrue(bus.registerScriptOwnedChecked(
+            owner: .player, scriptName: "replacement", target: .object(.player),
+            event: .playerJoined, attribute: nil
+        ).isSuccessValue, "removal must update the indexed owner count")
+
+        XCTAssertTrue(bus.registerScriptOwnedChecked(
+            owner: .entity(uid: 1), scriptName: "runtime", target: .any,
+            event: .playerJoined, attribute: nil
+        ).isSuccessValue)
+        guard case .failure(.tooManyForWorld) = bus.subscribe(
+            subscriber: .entity(uid: 2), scriptName: "persisted", handler: "h",
+            target: .any, event: .playerJoined, attribute: nil,
+            createdBy: .player, tick: 0
+        ) else { return XCTFail("persisted and runtime subscriptions must share the world cap") }
+        XCTAssertEqual(bus.listSubscriptions().count + bus.scriptOwnedSubscriptionCount, 3)
+    }
+
+    func testCheckedScriptOwnedRegistrationEnforcesBlockChangeTargetRules() {
+        let bus = EventBus()
+        guard case .failure(.anyNotAllowedForThisEvent) = bus.registerScriptOwnedChecked(
+            owner: .player, scriptName: "s", target: .any,
+            event: .blockChanged, attribute: nil
+        ) else { return XCTFail("block.changed must reject any") }
+        guard case .failure(.targetRequiresTypeFilter) = bus.registerScriptOwnedChecked(
+            owner: .player, scriptName: "s", target: .kind(.block, typeFilter: nil),
+            event: .blockChanged, attribute: nil
+        ) else { return XCTFail("block.changed must require a block type filter") }
+        XCTAssertEqual(bus.scriptOwnedSubscriptionCount, 0)
+    }
+
+    func testCentralSubscriptionValidationRejectsReservedInapplicableAndMeaninglessFilters() {
+        let bus = EventBus()
+        guard case .failure(.eventNotAvailable) = bus.subscribe(
+            subscriber: .player, scriptName: "s", handler: "h", target: .object(.world),
+            event: .unload, attribute: nil, createdBy: .player, tick: 0
+        ) else { return XCTFail("reserved events must not create dormant subscriptions") }
+        guard case .failure(.eventNotApplicable) = bus.subscribe(
+            subscriber: .player, scriptName: "s", handler: "h", target: .object(.player),
+            event: .blockToolStrike, attribute: nil, createdBy: .player, tick: 0
+        ) else { return XCTFail("a block event must reject a player target") }
+        guard case .failure(.attributeFilterNotAllowed) = bus.subscribe(
+            subscriber: .player, scriptName: "s", handler: "h", target: .object(.player),
+            event: .playerJoined, attribute: "health", createdBy: .player, tick: 0
+        ) else { return XCTFail("non-attribute events must reject ignored attribute filters") }
     }
 
     // MARK: - persistence round-trip
@@ -462,6 +877,155 @@ final class EventBusTests: XCTestCase {
         XCTAssertEqual(bus.listSubscriptions().map(\.event), bus2.listSubscriptions().map(\.event))
     }
 
+    func testPersistedAttributeFiltersAdmitRegistryBuiltInsAndRejectUnknownSyntax() throws {
+        let bus = EventBus()
+        let blockFilter = try bus.subscribe(
+            subscriber: .player, scriptName: "block_watch", handler: "changed",
+            target: .object(.block(dim: .overworld, x: 1, y: 64, z: 1)),
+            event: .attributeChanged, attribute: "be.name", createdBy: .player, tick: 1
+        ).get()
+        let playerFilter = try bus.subscribe(
+            subscriber: .player, scriptName: "inventory_watch", handler: "changed",
+            target: .object(.player), event: .attributeChanged, attribute: "inventory[0]",
+            createdBy: .player, tick: 2
+        ).get()
+        let camelBuiltIn = try bus.subscribe(
+            subscriber: .player, scriptName: "health_watch", handler: "changed",
+            target: .object(.player), event: .attributeChanged, attribute: "maxHealth",
+            createdBy: .player, tick: 3
+        ).get()
+        guard case .failure(.invalidAttributeFilter) = bus.subscribe(
+            subscriber: .player, scriptName: "bad", handler: "changed",
+            target: .object(.player), event: .attributeChanged, attribute: "not.valid[filter]",
+            createdBy: .player, tick: 4
+        ) else { return XCTFail("unknown punctuation must not cross the persisted filter boundary") }
+
+        let reloaded = EventBus()
+        reloaded.loadPersistedSubscriptions(
+            from: bus.encodePersistedSubscriptions(), storageCaps: .defaults
+        )
+        XCTAssertEqual(
+            reloaded.listSubscriptions().map(\.id),
+            [blockFilter.id, playerFilter.id, camelBuiltIn.id]
+        )
+        XCTAssertEqual(
+            reloaded.listSubscriptions().map(\.attribute),
+            ["be.name", "inventory[0]", "max_health"]
+        )
+    }
+
+    func testLegacyCamelCasePersistedFiltersMigrateWithoutAdmittingHostilePunctuation() {
+        let text = """
+        {"subs":[
+          {"id":1,"who":"player","script":"health","handler":"changed","tgt":"obj:player","ev":"attribute.changed","attr":"maxHealth","by":"player","t":0},
+          {"id":2,"who":"player","script":"door","handler":"changed","tgt":"obj:world","ev":"attribute.changed","attr":"doorRef","by":"player","t":0},
+          {"id":3,"who":"player","script":"bad","handler":"changed","tgt":"obj:world","ev":"attribute.changed","attr":"not.valid[filter]","by":"player","t":0}
+        ],"v":1}
+        """
+        var diagnostics: [String] = []
+        let decoded = SubscriptionRegistryCodec.decode(
+            text, caps: .defaults, diagnostic: { diagnostics.append($0) }
+        )
+        XCTAssertEqual(decoded?.map(\.attribute), ["max_health", "doorref"])
+        XCTAssertEqual(diagnostics.count, 1)
+        let encoded = SubscriptionRegistryCodec.encode(decoded ?? [])
+        XCTAssertTrue(encoded.contains("\"attr\":\"max_health\""))
+        XCTAssertTrue(encoded.contains("\"attr\":\"doorref\""))
+        XCTAssertFalse(encoded.contains("doorRef"))
+    }
+
+    func testCanonicalCustomFilterMatchesLegacyCollapsedKeyInOneSubscriptionSlot() throws {
+        let caps = EventBus.Caps(
+            cascadeDepth: 8, maxDeliveriesPerTick: 2_048, maxEventsPerHandler: 256,
+            maxQueueSize: 8_192, maxRecentEvents: 128, maxSubscriptionsPerWorld: 1,
+            maxSubscriptionsPerObject: 1
+        )
+        let bus = EventBus(caps: caps)
+        let subscription = try bus.subscribe(
+            subscriber: .world, scriptName: "watch", handler: "changed",
+            target: .object(.world), event: .attributeChanged, attribute: "door_ref",
+            createdBy: .player, tick: 0
+        ).get()
+        XCTAssertEqual(bus.listSubscriptions().count, 1)
+        var delivered: [UInt64] = []
+        bus.delivery = { _, targets in delivered.append(contentsOf: targets.map(\.id)) }
+
+        bus.raise(
+            kind: .attributeChanged, subject: .world,
+            payload: ["key": .string("doorref"), "old": .null, "new": .string("legacy")],
+            source: .player, tick: 1
+        )
+        _ = bus.runDeliveryPhase(tick: 1)
+
+        XCTAssertEqual(delivered, [subscription.id])
+    }
+
+    func testCanonicalBuiltInFilterNeverFallsThroughToCollapsedCustomKey() throws {
+        let bus = EventBus()
+        _ = try bus.subscribe(
+            subscriber: .world, scriptName: "watch", handler: "changed",
+            target: .object(.player), event: .attributeChanged, attribute: "maxHealth",
+            createdBy: .player, tick: 0
+        ).get()
+        var deliveredKeys: [String] = []
+        bus.delivery = { event, targets in
+            guard !targets.isEmpty, case .string(let key)? = event.payload["key"] else { return }
+            deliveredKeys.append(key)
+        }
+        bus.raise(
+            kind: .attributeChanged, subject: .player,
+            payload: ["key": .string("maxhealth"), "old": .null, "new": .string("custom")],
+            source: .player, tick: 1
+        )
+        bus.raise(
+            kind: .attributeChanged, subject: .player,
+            payload: ["key": .string("max_health"), "old": .number(19), "new": .number(20)],
+            source: .engine, tick: 1
+        )
+        _ = bus.runDeliveryPhase(tick: 1)
+        XCTAssertEqual(deliveredKeys, ["max_health"])
+    }
+
+    func testOrdinaryCustomPosDoesNotCoalesceWithOrInheritSyntheticPositionPolicy() throws {
+        let bus = EventBus()
+        let unfiltered = try bus.subscribe(
+            subscriber: .world, scriptName: "all", handler: "changed",
+            target: .object(.player), event: .attributeChanged, attribute: nil,
+            createdBy: .player, tick: 0
+        ).get()
+        let explicit = try bus.subscribe(
+            subscriber: .world, scriptName: "position", handler: "changed",
+            target: .object(.player), event: .attributeChanged, attribute: "pos",
+            createdBy: .player, tick: 0
+        ).get()
+        var delivered: [(synthetic: Bool, ids: [UInt64])] = []
+        bus.delivery = { event, targets in
+            delivered.append((event.isSyntheticPositionChange, targets.map(\.id)))
+        }
+
+        bus.raise(
+            kind: .attributeChanged, subject: .player,
+            payload: ["key": .string("pos"), "old": .null, "new": .string("custom")],
+            source: .script(owner: .world, name: "writer"), tick: 1
+        )
+        bus.raise(
+            kind: .attributeChanged, subject: .player,
+            payload: ["key": .string("pos"), "old": .null, "new": .list([.number(1), .number(2), .number(3)])],
+            source: .engine, tick: 1, excludeFromRecent: true,
+            isSyntheticPositionChange: true
+        )
+
+        XCTAssertEqual(bus.pendingCount, 2, "ordinary and synthetic pos changes are separate lanes")
+        _ = bus.runDeliveryPhase(tick: 1)
+        XCTAssertEqual(delivered.count, 2)
+        XCTAssertEqual(delivered[0].ids, [unfiltered.id, explicit.id])
+        XCTAssertFalse(delivered[0].synthetic)
+        XCTAssertEqual(delivered[1].ids, [explicit.id])
+        XCTAssertTrue(delivered[1].synthetic)
+        XCTAssertEqual(bus.recentEvents().count, 1)
+        XCTAssertFalse(bus.recentEvents()[0].isSyntheticPositionChange)
+    }
+
     func testLoadPersistedSubscriptionsDropsMalformedEntriesButKeepsGoodOnes() {
         let good = Subscription(
             id: 1, subscriber: .player, scriptName: "s", handler: "h", target: .object(.player),
@@ -478,6 +1042,92 @@ final class EventBusTests: XCTestCase {
         bus.loadPersistedSubscriptions(from: text, storageCaps: .defaults) { diagnostics.append($0) }
         XCTAssertEqual(bus.listSubscriptions().map(\.id), [good.id])
         XCTAssertFalse(diagnostics.isEmpty)
+    }
+
+    func testPersistedSubscriptionRejectsCoercedFloatingPointIdentifiers() throws {
+        let text = """
+        {"subs":[
+        {"id":1e100,"who":"player","script":"s","handler":"h","tgt":"obj:player","ev":"player.joined","by":"player","t":0},
+        {"id":2,"who":"player","script":"s","handler":"h2","tgt":"obj:player","ev":"player.joined","by":"player","t":1.5}
+        ],"v":1}
+        """
+        let bus = EventBus()
+        var diagnostics: [String] = []
+        bus.loadPersistedSubscriptions(from: text, storageCaps: .defaults) {
+            diagnostics.append($0)
+        }
+        XCTAssertTrue(bus.listSubscriptions().isEmpty)
+        XCTAssertEqual(diagnostics.count, 2)
+
+        let next = try bus.subscribe(
+            subscriber: .player, scriptName: "clean", handler: "h",
+            target: .object(.player), event: .playerJoined, attribute: nil,
+            createdBy: .player, tick: 0
+        ).get()
+        XCTAssertEqual(next.id, 1, "malformed saved numbers must not poison the live id allocator")
+    }
+
+    func testPersistedSubscriptionAllocatorWrapsInsideItsStrictCodecDomain() throws {
+        let maximum = Int64.max
+        let text = """
+        {"subs":[
+        {"id":\(maximum),"who":"player","script":"old","handler":"h","tgt":"obj:player","ev":"player.joined","by":"player","t":0}
+        ],"v":1}
+        """
+        let bus = EventBus()
+        bus.loadPersistedSubscriptions(from: text, storageCaps: .defaults)
+        let next = try bus.subscribe(
+            subscriber: .world, scriptName: "new", handler: "h",
+            target: .object(.player), event: .playerJoined, attribute: nil,
+            createdBy: .player, tick: 1
+        ).get()
+        XCTAssertEqual(next.id, 1)
+
+        let reloaded = EventBus()
+        reloaded.loadPersistedSubscriptions(
+            from: bus.encodePersistedSubscriptions(), storageCaps: .defaults
+        )
+        XCTAssertEqual(reloaded.listSubscriptions().map(\.id), [1, UInt64(maximum)])
+    }
+
+    func testPersistedSubscriptionLoadReappliesRuntimeCapsTargetsAndNaturalKeys() throws {
+        let caps = EventBus.Caps(
+            cascadeDepth: 8, maxDeliveriesPerTick: 32, maxEventsPerHandler: 16,
+            maxQueueSize: 32, maxRecentEvents: 32, maxSubscriptionsPerWorld: 3,
+            maxSubscriptionsPerObject: 2
+        )
+        func sub(
+            _ id: UInt64, _ subscriber: ObjectRef, _ handler: String,
+            target: SubscriptionTarget = .object(.player), event: EventKind = .playerJoined,
+            attribute: String? = nil
+        ) -> Subscription {
+            Subscription(
+                id: id, subscriber: subscriber, scriptName: "s", handler: handler,
+                target: target, event: event, attribute: attribute,
+                createdBy: .player, createdTick: 0
+            )
+        }
+        let duplicate = sub(2, .player, "h1")
+        let text = SubscriptionRegistryCodec.encode([
+            sub(1, .player, "h1"), duplicate, sub(3, .player, "h2"),
+            sub(4, .player, "h3"), sub(5, .entity(uid: 1), "h1"),
+            sub(6, .world, "h1"),
+            sub(7, .world, "bad", target: .any, event: .attributeChanged),
+        ])
+        let bus = EventBus(caps: caps)
+        var diagnostics: [String] = []
+        bus.loadPersistedSubscriptions(from: text, storageCaps: .defaults) {
+            diagnostics.append($0)
+        }
+        XCTAssertEqual(bus.listSubscriptions().map(\.id), [1, 3, 5])
+        XCTAssertGreaterThanOrEqual(diagnostics.count, 4)
+        XCTAssertTrue(bus.unsubscribe(id: 5))
+        let next = try bus.subscribe(
+            subscriber: .world, scriptName: "s", handler: "replacement",
+            target: .object(.player), event: .playerJoined, attribute: nil,
+            createdBy: .player, tick: 1
+        ).get()
+        XCTAssertEqual(next.id, 6, "dropped hostile ids must not create gaps in the live id space")
     }
 
     func testEncodeOmitsAttributeKeyWhenNil() {
@@ -519,14 +1169,25 @@ final class EventBusTests: XCTestCase {
         XCTAssertFalse(bus.hasAttributeChangedInterest(in: .entity(uid: 1)))
     }
 
+    func testAttributeInterestHonorsEntityTypeFilterBeforeDiffing() {
+        let bus = EventBus()
+        _ = bus.subscribe(
+            subscriber: .player, scriptName: "watch", handler: "changed",
+            target: .kind(.entity, typeFilter: "zombie"), event: .attributeChanged,
+            attribute: "health", createdBy: .player, tick: 0
+        )
+        XCTAssertTrue(bus.hasAttributeChangedInterest(in: .entity(uid: 1), subjectType: "zombie"))
+        XCTAssertFalse(bus.hasAttributeChangedInterest(in: .entity(uid: 2), subjectType: "cow"))
+    }
+
     // MARK: - the pre-filtered block-changed funnel (§6.6 point 2)
 
     func testRecordBlockChangeIsANoOpWithoutARecordOrTypeFilterInterest() {
         let bus = EventBus()
         var delivered = 0
         bus.delivery = { _, _ in delivered += 1 }
-        let stoneID = Int(bid("stone")), dirtID = Int(bid("dirt"))
-        bus.recordBlockChange(dim: .overworld, x: 0, y: 0, z: 0, oldId: stoneID, newId: dirtID, hasObjectRecord: false, tick: 0)
+        let stoneCell = Int(cell(bid("stone"))), dirtCell = Int(cell(bid("dirt")))
+        bus.recordBlockChange(dim: .overworld, x: 0, y: 0, z: 0, oldCell: stoneCell, newCell: dirtCell, hasObjectRecord: false, tick: 0)
         bus.runDeliveryPhase(tick: 0)
         XCTAssertEqual(delivered, 0)
         XCTAssertEqual(bus.pendingCount, 0)
@@ -536,8 +1197,8 @@ final class EventBusTests: XCTestCase {
         let bus = EventBus()
         var delivered = 0
         bus.delivery = { _, _ in delivered += 1 }
-        let stoneID = Int(bid("stone")), dirtID = Int(bid("dirt"))
-        bus.recordBlockChange(dim: .overworld, x: 0, y: 0, z: 0, oldId: stoneID, newId: dirtID, hasObjectRecord: true, tick: 0)
+        let stoneCell = Int(cell(bid("stone"))), dirtCell = Int(cell(bid("dirt")))
+        bus.recordBlockChange(dim: .overworld, x: 0, y: 0, z: 0, oldCell: stoneCell, newCell: dirtCell, hasObjectRecord: true, tick: 0)
         bus.runDeliveryPhase(tick: 0)
         XCTAssertEqual(delivered, 1)
     }
@@ -550,20 +1211,130 @@ final class EventBusTests: XCTestCase {
         )
         var delivered = 0
         bus.delivery = { _, _ in delivered += 1 }
-        let stoneID = Int(bid("stone")), dirtID = Int(bid("dirt"))
-        bus.recordBlockChange(dim: .overworld, x: 0, y: 0, z: 0, oldId: stoneID, newId: dirtID, hasObjectRecord: false, tick: 0)
+        let stoneCell = Int(cell(bid("stone"))), dirtCell = Int(cell(bid("dirt")))
+        bus.recordBlockChange(dim: .overworld, x: 0, y: 0, z: 0, oldCell: stoneCell, newCell: dirtCell, hasObjectRecord: false, tick: 0)
         bus.runDeliveryPhase(tick: 0)
         XCTAssertEqual(delivered, 1)
+    }
+
+    func testRecordBlockChangeMatchesTheOldBlockTypeEndpoint() {
+        let bus = EventBus()
+        _ = bus.subscribe(
+            subscriber: .player,
+            scriptName: "old_stone",
+            handler: "changed",
+            target: .kind(.block, typeFilter: "stone"),
+            event: .blockChanged,
+            attribute: nil,
+            createdBy: .player,
+            tick: 0
+        )
+        var delivered = 0
+        bus.delivery = { _, targets in delivered += targets.count }
+        bus.recordBlockChange(
+            dim: .overworld, x: 0, y: 0, z: 0,
+            oldCell: Int(cell(bid("stone"))), newCell: Int(cell(bid("dirt"))),
+            hasObjectRecord: false, tick: 0
+        )
+        bus.runDeliveryPhase(tick: 0)
+        XCTAssertEqual(delivered, 1, "stone -> dirt must notify both old- and new-family filters")
+    }
+
+    func testCoalescedBlockChangeMatchesOnlyOriginalAndFinalTypeEndpoints() throws {
+        let bus = EventBus()
+        var idsByType: [String: UInt64] = [:]
+        for type in ["stone", "dirt", "grass_block"] {
+            guard case .success(let subscription) = bus.subscribe(
+                subscriber: .player,
+                scriptName: type,
+                handler: "changed",
+                target: .kind(.block, typeFilter: type),
+                event: .blockChanged,
+                attribute: nil,
+                createdBy: .player,
+                tick: 0
+            ) else { return XCTFail("subscription failed for \(type)") }
+            idsByType[type] = subscription.id
+        }
+        var deliveredIDs = Set<UInt64>()
+        bus.delivery = { _, targets in deliveredIDs.formUnion(targets.map(\.id)) }
+        bus.recordBlockChange(
+            dim: .overworld, x: 1, y: 2, z: 3,
+            oldCell: Int(cell(bid("stone"))), newCell: Int(cell(bid("dirt"))),
+            hasObjectRecord: false, tick: 0
+        )
+        bus.recordBlockChange(
+            dim: .overworld, x: 1, y: 2, z: 3,
+            oldCell: Int(cell(bid("dirt"))), newCell: Int(cell(bid("grass_block"))),
+            hasObjectRecord: false, tick: 0
+        )
+        bus.runDeliveryPhase(tick: 0)
+
+        XCTAssertEqual(deliveredIDs, [idsByType["stone"]!, idsByType["grass_block"]!])
+        XCTAssertFalse(deliveredIDs.contains(idsByType["dirt"]!), "coalesced intermediate B is intentionally absent")
+    }
+
+    func testRecordBlockChangeFiresForAnExactObjectSubscriptionWithoutARecord() {
+        let bus = EventBus()
+        let subject = ObjectRef.block(dim: .overworld, x: 3, y: 4, z: 5)
+        _ = bus.subscribe(
+            subscriber: .player, scriptName: "s", handler: "h", target: .object(subject),
+            event: .blockChanged, attribute: nil, createdBy: .player, tick: 0
+        )
+        var captured: (ScriptEvent, [EventDeliveryTarget])?
+        bus.delivery = { captured = ($0, $1) }
+        bus.recordBlockChange(
+            dim: .overworld, x: 3, y: 4, z: 5,
+            oldCell: Int(cell(bid("stone"))), newCell: Int(cell(bid("dirt"))),
+            hasObjectRecord: false, tick: 0
+        )
+        bus.runDeliveryPhase(tick: 0)
+        XCTAssertEqual(captured?.0.kind, .blockChanged)
+        XCTAssertEqual(captured?.0.subject, subject)
+        XCTAssertEqual(captured?.1.count, 1)
+    }
+
+    func testScriptOwnedInterestIndexTracksRegistrationAndRemoval() {
+        let bus = EventBus()
+        let sub = bus.registerScriptOwned(
+            owner: .player, scriptName: "s", target: .object(.player),
+            event: .playerLeveled, attribute: nil
+        )
+        XCTAssertTrue(bus.hasEventInterest(.playerLeveled, subject: .player))
+        bus.unregisterScriptOwned(id: sub.id)
+        XCTAssertFalse(bus.hasEventInterest(.playerLeveled, subject: .player))
     }
 
     func testRecordBlockChangeIgnoresANoOpIDChange() {
         let bus = EventBus()
         var delivered = 0
         bus.delivery = { _, _ in delivered += 1 }
-        let stoneID = Int(bid("stone"))
-        bus.recordBlockChange(dim: .overworld, x: 0, y: 0, z: 0, oldId: stoneID, newId: stoneID, hasObjectRecord: true, tick: 0)
+        let stoneCell = Int(cell(bid("stone")))
+        bus.recordBlockChange(dim: .overworld, x: 0, y: 0, z: 0, oldCell: stoneCell, newCell: stoneCell, hasObjectRecord: true, tick: 0)
         bus.runDeliveryPhase(tick: 0)
         XCTAssertEqual(delivered, 0)
+    }
+
+    func testRecordBlockChangePublishesMetadataOnlyChangesWithExactValues() {
+        let bus = EventBus()
+        let subject = ObjectRef.block(dim: .overworld, x: 2, y: 3, z: 4)
+        _ = bus.subscribe(
+            subscriber: .player, scriptName: "meta", handler: "changed",
+            target: .object(subject), event: .blockChanged,
+            attribute: nil, createdBy: .player, tick: 0
+        )
+        var captured: ScriptEvent?
+        bus.delivery = { event, _ in captured = event }
+        let id = Int(bid("stone"))
+        bus.recordBlockChange(
+            dim: .overworld, x: 2, y: 3, z: 4,
+            oldCell: (id << 4) | 1, newCell: (id << 4) | 7,
+            hasObjectRecord: false, source: .player, tick: 0
+        )
+        bus.runDeliveryPhase(tick: 0)
+        XCTAssertEqual(captured?.payload["oldMeta"], .int(1))
+        XCTAssertEqual(captured?.payload["newMeta"], .int(7))
+        XCTAssertEqual(captured?.source, .player)
     }
 }
 
