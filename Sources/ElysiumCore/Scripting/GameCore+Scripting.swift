@@ -37,14 +37,14 @@ public final class GameScriptingState {
     /// step 6's own comment on `lua_State` lifetime), destroyed in
     /// `exitToTitle` after every script's `unload` runs.
     public var scriptRuntime: ScriptRuntime?
-    /// design.md §15's zero-cost invariant: the single boolean every phase
-    /// step checks before doing any scripted-object discovery work. Set by
+    /// design.md §15's zero-cost invariant: the fast-path boolean
+    /// `ScriptRuntime.runLoads()` checks before scripted-object discovery. Set by
     /// `ScriptStore.attach`/a script's own `h:attach` (via `ScriptRuntime`)
     /// and by the one-time scan `enterWorld` does when a world is opened;
     /// never cleared back to `false` once set this session (a false
     /// positive costs one extra bounded scan per tick; a false negative
-    /// would silently stop scripts from loading — the safe direction to
-    /// err in).
+    /// costs at most the deterministic 20-tick backstop interval before
+    /// discovery).
     public var anyScriptsAttached = false
     /// ai-object-graph (change 2), design.md §9.5. Replaced (never mutated
     /// in place) at every `enterWorld`, exactly like `eventBus` — a stale
@@ -360,14 +360,11 @@ extension GameCore: ObjectGraphHost {
     /// initial value: `true` when the world/dimension bags (the cheapest
     /// thing to check — already decoded into `scripting.worldRecords` by
     /// `loadWorldObjectRecords`, called just before this in `enterWorld`)
-    /// carry any entry at all. Entity/block-only scripts on a freshly
-    /// (re)opened world are picked up the first time any command/script
-    /// sets the flag some other way — a documented gap (ARCHITECTURE.md):
-    /// a world whose *only* scripts live on blocks/entities needs one
-    /// `/script trust`/`/script attach` touch after import before those
-    /// scripts resume running. Low risk because the trust gate already
-    /// keeps every imported world's scripting fully off until that same
-    /// `/script trust` moment.
+    /// carry any entry at all. This is only an eager optimization. If the
+    /// world's scripts live exclusively on blocks/entities, `ScriptRuntime
+    /// .runLoads()` still performs its deterministic every-20th-tick
+    /// backstop scan and discovers them within about one second once the
+    /// trust gate and kill switch allow execution.
     private func worldLikelyHasScripts(rec: WorldRecord?) -> Bool {
         guard rec != nil else { return false }
         return !scripting.worldRecords.isEmpty

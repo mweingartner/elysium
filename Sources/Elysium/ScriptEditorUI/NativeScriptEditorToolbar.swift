@@ -8,9 +8,9 @@ import AppKit
 import SwiftUI
 import ElysiumCore
 
-/// A two-row AppKit toolbar that participates in SwiftUI data flow without asking SwiftUI to
-/// render any of its controls. `onSave` remains a closure because the parent view owns collision
-/// confirmation; every other action can call the model directly.
+/// AppKit editor chrome that participates in SwiftUI data flow without asking SwiftUI to render
+/// controls above the TextKit surface. Save and script activation remain closures because the
+/// parent view owns their exact-snapshot confirmation alerts.
 @MainActor
 struct NativeScriptEditorToolbar: NSViewRepresentable {
     @ObservedObject private var model: ScriptEditorModel
@@ -18,19 +18,22 @@ struct NativeScriptEditorToolbar: NSViewRepresentable {
     private let aiPanelOpen: Bool
     private let onSave: () -> Void
     private let onToggleAI: () -> Void
+    private let onRequestScriptingActivation: (ScriptEditorScriptingActivationAction) -> Void
 
     init(
         model: ScriptEditorModel,
         theme: ScriptEditorTheme,
         aiPanelOpen: Bool,
         onSave: @escaping () -> Void,
-        onToggleAI: @escaping () -> Void
+        onToggleAI: @escaping () -> Void,
+        onRequestScriptingActivation: @escaping (ScriptEditorScriptingActivationAction) -> Void
     ) {
         _model = ObservedObject(wrappedValue: model)
         self.theme = theme
         self.aiPanelOpen = aiPanelOpen
         self.onSave = onSave
         self.onToggleAI = onToggleAI
+        self.onRequestScriptingActivation = onRequestScriptingActivation
     }
 
     func makeCoordinator() -> Coordinator {
@@ -48,6 +51,16 @@ struct NativeScriptEditorToolbar: NSViewRepresentable {
     func updateNSView(_ nsView: NativeScriptEditorToolbarView, context: Context) {
         context.coordinator.parent = self
         nsView.update(model: model, theme: theme, aiPanelOpen: aiPanelOpen)
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsView: NativeScriptEditorToolbarView,
+        context: Context
+    ) -> CGSize? {
+        _ = context
+        guard let width = proposal.width, width.isFinite else { return nil }
+        return nsView.representableSize(proposedWidth: width)
     }
 
     static func dismantleNSView(
@@ -121,6 +134,12 @@ struct NativeScriptEditorToolbar: NSViewRepresentable {
             _ = sender
             parent.onToggleAI()
         }
+
+        @objc func requestScriptingActivation(_ sender: Any?) {
+            _ = sender
+            guard let action = toolbarView?.presentedScriptingActivationAction else { return }
+            parent.onRequestScriptingActivation(action)
+        }
     }
 }
 
@@ -129,6 +148,8 @@ struct NativeScriptEditorToolbar: NSViewRepresentable {
 /// spacer to absorb resizing without hiding actions.
 @MainActor
 final class NativeScriptEditorToolbarView: NSView {
+    private static let runOnceHelp = "Execute the visible draft against the live world once; live changes may persist, but the draft is not saved or attached, world trust is unchanged, and attached scripts are not loaded"
+
     let scriptNameField = NSTextField()
     let handlerEventField = NSTextField()
 
@@ -151,14 +172,22 @@ final class NativeScriptEditorToolbarView: NSView {
     private let aiRequestProgress = NSProgressIndicator()
     private let flexibleSpacer = NSView()
     private let checkButton = NSButton(title: "Check", target: nil, action: nil)
-    private let runButton = NSButton(title: "Run", target: nil, action: nil)
+    private let runButton = NSButton(title: "Run Once", target: nil, action: nil)
     private let saveButton = NSButton(title: "Save", target: nil, action: nil)
     private let actionSeparator = NSBox()
     private let aiPanelButton = NSButton()
+    private let availabilityBox = NSBox()
+    private let availabilityRow = NSStackView()
+    private let availabilityIcon = NSImageView()
+    private let availabilityTextStack = NSStackView()
+    private let availabilityTitleField = NSTextField(labelWithString: "")
+    private let availabilityDetailField = NSTextField(labelWithString: "")
+    private let availabilityActionButton = NSButton(title: "", target: nil, action: nil)
+
+    private(set) var presentedScriptingActivationAction: ScriptEditorScriptingActivationAction?
 
     private var backgroundColor = NSColor.windowBackgroundColor
     private var contentInset: CGFloat = 8
-    private var insetConstraints: [NSLayoutConstraint] = []
 
     init(theme: ScriptEditorTheme) {
         super.init(frame: .zero)
@@ -176,6 +205,16 @@ final class NativeScriptEditorToolbarView: NSView {
         return NSSize(width: NSView.noIntrinsicMetric, height: max(78, measuredHeight))
     }
 
+    /// SwiftUI owns the horizontal split-pane width. Returning AppKit's unconstrained fitting
+    /// width here would let the long availability sentence widen and center this representable
+    /// beyond its pane. Only the measured vertical chrome height is intrinsic.
+    func representableSize(proposedWidth: CGFloat) -> CGSize {
+        CGSize(
+            width: max(0, proposedWidth),
+            height: intrinsicContentSize.height
+        )
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         promotePlatformHostAboveSiblingSurfaces()
@@ -190,6 +229,19 @@ final class NativeScriptEditorToolbarView: NSView {
         super.draw(dirtyRect)
         backgroundColor.setFill()
         NSBezierPath(rect: bounds).fill()
+    }
+
+    override func layout() {
+        super.layout()
+        let inset = contentInset
+        rootStack.frame = NSRect(
+            x: inset,
+            y: inset,
+            width: max(0, bounds.width - (inset * 2)),
+            height: max(0, bounds.height - (inset * 2))
+        )
+        rootStack.needsLayout = true
+        rootStack.layoutSubtreeIfNeeded()
     }
 
     func connect(to coordinator: NativeScriptEditorToolbar.Coordinator) {
@@ -211,6 +263,10 @@ final class NativeScriptEditorToolbarView: NSView {
         saveButton.action = #selector(NativeScriptEditorToolbar.Coordinator.save(_:))
         aiPanelButton.target = coordinator
         aiPanelButton.action = #selector(NativeScriptEditorToolbar.Coordinator.toggleAI(_:))
+        availabilityActionButton.target = coordinator
+        availabilityActionButton.action = #selector(
+            NativeScriptEditorToolbar.Coordinator.requestScriptingActivation(_:)
+        )
 
         for item in eventMenuButton.itemArray.dropFirst() {
             guard !item.isSeparatorItem else { continue }
@@ -229,6 +285,7 @@ final class NativeScriptEditorToolbarView: NSView {
         runButton.target = nil
         saveButton.target = nil
         aiPanelButton.target = nil
+        availabilityActionButton.target = nil
         for item in eventMenuButton.itemArray {
             item.target = nil
         }
@@ -273,13 +330,26 @@ final class NativeScriptEditorToolbarView: NSView {
             aiRequestProgress.stopAnimation(nil)
         }
 
-        checkButton.isEnabled = !model.isLANGuest && model.isWorldSessionActive
-        checkButton.toolTip = model.isLANGuest
-            ? "Check is not available for guests yet"
-            : "Compile and dry-run without persisting"
-        runButton.isEnabled = model.isWorldSessionActive
-        saveButton.isEnabled = model.isWorldSessionActive
-        saveButton.toolTip = "Attach this script to \(model.target.canonical)"
+        checkButton.isEnabled = model.scriptingAvailability.canCheck
+        if model.isLANGuest {
+            checkButton.toolTip = "Check is not available for guests yet"
+        } else if model.scriptingAvailability.canCheck {
+            checkButton.toolTip = "Compile and dry-run without persisting"
+        } else {
+            checkButton.toolTip = model.scriptingAvailability.detail
+        }
+        checkButton.setAccessibilityHelp(checkButton.toolTip)
+        runButton.isEnabled = model.scriptingAvailability.canRunOnce
+        runButton.toolTip = model.scriptingAvailability.canRunOnce
+            ? Self.runOnceHelp
+            : model.scriptingAvailability.detail
+        runButton.setAccessibilityHelp(runButton.toolTip)
+        saveButton.isEnabled = model.scriptingAvailability.canSave
+        saveButton.toolTip = model.scriptingAvailability.canSave
+            ? "Attach this script to \(model.target.canonical)"
+            : model.scriptingAvailability.detail
+        saveButton.setAccessibilityHelp(saveButton.toolTip)
+        updateScriptingAvailability(model.scriptingAvailability, theme: theme)
 
         let panelSymbol = aiPanelOpen ? "sidebar.trailing" : "sidebar.leading"
         aiPanelButton.image = NSImage(
@@ -312,23 +382,34 @@ final class NativeScriptEditorToolbarView: NSView {
         rootStack.alignment = .leading
         rootStack.distribution = .fill
         rootStack.spacing = 6
-        rootStack.translatesAutoresizingMaskIntoConstraints = false
+        // SwiftUI can first materialize the representable at its unconstrained fitting width and
+        // then assign the real split-pane width after that layout pass. Keep this outer stack
+        // frame-driven so every native descendant is reflowed from the current bounds in `layout`,
+        // instead of retaining the first oversized Auto Layout solution.
+        rootStack.translatesAutoresizingMaskIntoConstraints = true
+        rootStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        rootStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(rootStack)
 
         topRow.orientation = .horizontal
         topRow.alignment = .centerY
         topRow.distribution = .fill
         topRow.spacing = 8
+        topRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        topRow.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         bottomRow.orientation = .horizontal
         bottomRow.alignment = .centerY
         bottomRow.distribution = .fill
         bottomRow.spacing = 6
+        bottomRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        bottomRow.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         configureMetadataControls()
         configureHandlerEventControls()
         configureAIControls()
         configureActionControls()
+        configureAvailabilityControls()
 
         topRow.addArrangedSubview(metadataStack)
         topRow.addArrangedSubview(modeControl)
@@ -345,17 +426,13 @@ final class NativeScriptEditorToolbarView: NSView {
 
         rootStack.addArrangedSubview(topRow)
         rootStack.addArrangedSubview(bottomRow)
+        rootStack.addArrangedSubview(availabilityBox)
 
-        insetConstraints = [
-            rootStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            rootStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            rootStack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            rootStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
-        ]
-
-        NSLayoutConstraint.activate(insetConstraints + [
+        NSLayoutConstraint.activate([
             topRow.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
             bottomRow.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
+            availabilityBox.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
+            availabilityBox.heightAnchor.constraint(greaterThanOrEqualToConstant: 46),
             metadataStack.widthAnchor.constraint(greaterThanOrEqualToConstant: 90),
             modeControl.widthAnchor.constraint(equalToConstant: 130),
             handlerEventContainer.widthAnchor.constraint(greaterThanOrEqualToConstant: 125),
@@ -369,6 +446,8 @@ final class NativeScriptEditorToolbarView: NSView {
         metadataStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
         metadataStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         handlerEventContainer.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        availabilityBox.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        availabilityBox.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         flexibleSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         flexibleSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
     }
@@ -455,6 +534,7 @@ final class NativeScriptEditorToolbarView: NSView {
     private func configureAIControls() {
         aiModeButton.controlSize = .small
         aiModeButton.bezelStyle = .texturedRounded
+        aiModeButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         aiModeButton.setAccessibilityLabel("AI completion mode")
         aiModeButton.setAccessibilityIdentifier("scriptEditor.aiMode")
         for mode in ScriptEditorAICompletionMode.allCases {
@@ -506,7 +586,8 @@ final class NativeScriptEditorToolbarView: NSView {
         configureActionButton(runButton, identifier: "scriptEditor.run")
         configureActionButton(saveButton, identifier: "scriptEditor.save")
         checkButton.toolTip = "Compile and dry-run without persisting"
-        runButton.toolTip = "Run once, ephemeral — never saved"
+        runButton.toolTip = Self.runOnceHelp
+        runButton.setAccessibilityHelp(Self.runOnceHelp)
         saveButton.toolTip = "Attach this script to its target"
         saveButton.keyEquivalent = "s"
         saveButton.keyEquivalentModifierMask = [.command]
@@ -519,6 +600,71 @@ final class NativeScriptEditorToolbarView: NSView {
         aiPanelButton.imagePosition = .imageOnly
         aiPanelButton.setAccessibilityIdentifier("scriptEditor.toggleAIPanel")
         aiPanelButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
+    }
+
+    private func configureAvailabilityControls() {
+        availabilityBox.boxType = .custom
+        availabilityBox.titlePosition = .noTitle
+        availabilityBox.borderWidth = 1
+        availabilityBox.cornerRadius = 4
+        availabilityBox.contentViewMargins = .zero
+        availabilityBox.setAccessibilityElement(true)
+        availabilityBox.setAccessibilityRole(.group)
+        availabilityBox.setAccessibilityIdentifier("scriptEditor.scriptingAvailability")
+
+        availabilityRow.orientation = .horizontal
+        availabilityRow.alignment = .centerY
+        availabilityRow.distribution = .fill
+        availabilityRow.spacing = 8
+        availabilityRow.translatesAutoresizingMaskIntoConstraints = false
+        availabilityRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        availabilityRow.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        availabilityIcon.imageScaling = .scaleProportionallyDown
+        availabilityIcon.setAccessibilityElement(false)
+        availabilityIcon.widthAnchor.constraint(equalToConstant: 18).isActive = true
+
+        availabilityTextStack.orientation = .vertical
+        availabilityTextStack.alignment = .leading
+        availabilityTextStack.distribution = .fill
+        availabilityTextStack.spacing = 1
+        availabilityTextStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        availabilityTextStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        availabilityTitleField.font = NSFont.systemFont(
+            ofSize: NSFont.smallSystemFontSize,
+            weight: .semibold
+        )
+        availabilityTitleField.lineBreakMode = .byTruncatingTail
+        availabilityTitleField.maximumNumberOfLines = 1
+        availabilityTitleField.setAccessibilityElement(false)
+
+        availabilityDetailField.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        availabilityDetailField.lineBreakMode = .byTruncatingTail
+        availabilityDetailField.maximumNumberOfLines = 1
+        availabilityDetailField.setAccessibilityElement(false)
+
+        availabilityTextStack.addArrangedSubview(availabilityTitleField)
+        availabilityTextStack.addArrangedSubview(availabilityDetailField)
+
+        availabilityActionButton.bezelStyle = .rounded
+        availabilityActionButton.controlSize = .small
+        availabilityActionButton.setAccessibilityIdentifier("scriptEditor.scriptingActivation")
+        availabilityActionButton.setContentHuggingPriority(.required, for: .horizontal)
+        availabilityActionButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        availabilityRow.addArrangedSubview(availabilityIcon)
+        availabilityRow.addArrangedSubview(availabilityTextStack)
+        availabilityRow.addArrangedSubview(availabilityActionButton)
+
+        guard let contentView = availabilityBox.contentView else { return }
+        contentView.addSubview(availabilityRow)
+        NSLayoutConstraint.activate([
+            availabilityRow.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
+            availabilityRow.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -8),
+            availabilityRow.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 5),
+            availabilityRow.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -5),
+        ])
     }
 
     private func configureActionButton(_ button: NSButton, identifier: String) {
@@ -538,21 +684,54 @@ final class NativeScriptEditorToolbarView: NSView {
         scriptNameField.textColor = theme.foreground.nsColor
         targetStatusField.textColor = theme.comment.nsColor
         handlerEventField.textColor = theme.foreground.nsColor
+        availabilityTitleField.textColor = theme.foreground.nsColor
+        availabilityDetailField.textColor = theme.comment.nsColor
 
         let spacing = theme.spacing
         contentInset = spacing
         topRow.spacing = spacing
-        for constraint in insetConstraints {
-            switch constraint.firstAttribute {
-            case .leading, .top:
-                constraint.constant = spacing
-            case .trailing, .bottom:
-                constraint.constant = -spacing
-            default:
-                break
-            }
-        }
+        needsLayout = true
         needsDisplay = true
+    }
+
+    private func updateScriptingAvailability(
+        _ availability: ScriptEditorScriptingAvailability,
+        theme: ScriptEditorTheme
+    ) {
+        let accent = availability == .active ? NSColor.systemGreen : NSColor.systemOrange
+        availabilityBox.fillColor = accent.withAlphaComponent(0.12)
+        availabilityBox.borderColor = accent.withAlphaComponent(0.45)
+        availabilityIcon.contentTintColor = accent
+        availabilityIcon.image = NSImage(
+            systemSymbolName: availability.systemImage,
+            accessibilityDescription: nil
+        )
+        availabilityTitleField.stringValue = availability.title
+        availabilityDetailField.stringValue = availability.detail
+        availabilityTitleField.textColor = theme.foreground.nsColor
+        availabilityDetailField.textColor = theme.comment.nsColor
+        availabilityTitleField.toolTip = availability.title
+        availabilityDetailField.toolTip = availability.detail
+
+        let accessibilityLabel = "Script execution status: \(availability.title). \(availability.detail)"
+        availabilityBox.setAccessibilityLabel(accessibilityLabel)
+        availabilityBox.setAccessibilityHelp(availability.detail)
+
+        presentedScriptingActivationAction = availability.activationAction
+        availabilityActionButton.isHidden = availability.activationAction == nil
+        availabilityActionButton.isEnabled = availability.activationAction != nil
+        if let action = availability.activationAction {
+            availabilityActionButton.title = action.buttonTitle
+            availabilityActionButton.toolTip =
+                "Shows a warning before changing world-wide script execution settings"
+            availabilityActionButton.setAccessibilityLabel(action.buttonTitle)
+            availabilityActionButton.setAccessibilityHelp(
+                "Shows a warning before changing world-wide script execution settings"
+            )
+            availabilityBox.setAccessibilityChildren([availabilityActionButton])
+        } else {
+            availabilityBox.setAccessibilityChildren([])
+        }
     }
 
     private func updateTargetStatus(model: ScriptEditorModel, theme: ScriptEditorTheme) {

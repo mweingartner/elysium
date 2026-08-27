@@ -18,7 +18,9 @@ struct ScriptEditorView: View {
     @State private var problemsExpanded = false
     @State private var showingGuestReplacementWarning = false
     @State private var showingOverwriteWarning = false
+    @State private var showingScriptingActivationWarning = false
     @State private var pendingSaveCollision: ScriptEditorSaveCollision?
+    @State private var pendingScriptingActivationAction: ScriptEditorScriptingActivationAction?
 
     var body: some View {
         HSplitView {
@@ -39,8 +41,12 @@ struct ScriptEditorView: View {
         .onAppear {
             theme = ScriptEditorTheme.resolved(for: systemColorScheme)
             model.refreshAIConfiguration()
+            model.refreshScriptingAvailability()
         }
         .onChange(of: systemColorScheme) { _, newValue in theme = ScriptEditorTheme.resolved(for: newValue) }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            model.refreshScriptingAvailability()
+        }
         .background(theme.background.color)
         .alert("Replace source hidden by the host?", isPresented: $showingGuestReplacementWarning) {
             SwiftUI.Button("Cancel", role: .cancel) { pendingSaveCollision = nil }
@@ -59,6 +65,25 @@ struct ScriptEditorView: View {
         } message: {
             Text((pendingSaveCollision?.description ?? "An existing script would be replaced.") + " This is destructive and cannot be undone from the editor after saving.")
         }
+        .alert("Enable attached script execution?", isPresented: $showingScriptingActivationWarning) {
+            SwiftUI.Button("Cancel", role: .cancel) {
+                pendingScriptingActivationAction = nil
+            }
+            SwiftUI.Button(
+                pendingScriptingActivationAction?.buttonTitle ?? "Enable",
+                role: .destructive
+            ) {
+                if let pendingScriptingActivationAction {
+                    model.enableAttachedScriptExecutionAfterConfirmation(
+                        confirming: pendingScriptingActivationAction
+                    )
+                }
+                pendingScriptingActivationAction = nil
+            }
+        } message: {
+            Text(pendingScriptingActivationAction?.confirmationDetail
+                 ?? "Script execution settings changed before confirmation. Cancel and review the current status.")
+        }
     }
 
     // MARK: - center column: toolbar + editor + status banner
@@ -70,9 +95,10 @@ struct ScriptEditorView: View {
                 theme: theme,
                 aiPanelOpen: aiPanelOpen,
                 onSave: requestSave,
-                onToggleAI: { aiPanelOpen.toggle() }
+                onToggleAI: { aiPanelOpen.toggle() },
+                onRequestScriptingActivation: requestScriptingActivation
             )
-            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity)
             Divider()
             LuaCodeTextView(
                 text: $model.source,
@@ -198,6 +224,11 @@ struct ScriptEditorView: View {
             return
         }
         requestGuestConfirmationOrSave(confirming: nil)
+    }
+
+    private func requestScriptingActivation(_ action: ScriptEditorScriptingActivationAction) {
+        pendingScriptingActivationAction = action
+        showingScriptingActivationWarning = true
     }
 
     private func requestGuestConfirmationOrSave(confirming collision: ScriptEditorSaveCollision?) {

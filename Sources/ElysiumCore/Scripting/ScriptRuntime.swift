@@ -18,7 +18,10 @@ import Foundation
 /// enabled; absent == enabled, matching every other implicit-default
 /// gamerule read in this package) layered on top of the persisted trust gate
 /// (`WorldRecord.scriptsEnabled`, already enforced by `ObjectGraphHost
-/// .scriptsEnabled` since change 1a). Scripts never run when either is off.
+/// .scriptsEnabled` since change 1a). Attached scripts and ordinary one-off
+/// runs never execute when either gate is off. Editor Check is read-only and
+/// independent of both gates; its explicit Run Once may bypass only persisted
+/// trust and still honors `doScripts`.
 public func scriptsEffectivelyEnabled(host: ObjectGraphHost) -> Bool {
     guard host.scriptsEnabled else { return false }
     guard let w = host.world(for: host.currentDimension) else { return false }
@@ -86,6 +89,20 @@ final class ScriptHandlerToken {
 }
 
 public final class ScriptRuntime {
+    /// Which world-level execution gates a one-shot run must honor. Keeping this as a named
+    /// policy (rather than a Boolean bypass flag) makes the exceptional editor path explicit at
+    /// every call site and leaves room for the policies to diverge safely if another gate is
+    /// added later.
+    private enum EphemeralRunPolicy {
+        /// Commands, AI, and LAN-originated requests require both persisted world trust and the
+        /// live `doScripts` kill switch.
+        case fullyGated
+        /// A host user's explicit editor Run Once action may evaluate only the draft they can already
+        /// see. It does not trust the world or load any attached script; the kill switch remains
+        /// authoritative.
+        case editorExplicitRun
+    }
+
     let lua: LuaState
     let host: ObjectGraphHost
     let state: GameScriptingState
@@ -191,7 +208,7 @@ public final class ScriptRuntime {
     /// so dry-run and real execution can never drift apart on anything but
     /// the flag itself.
     var dryRunActive = false
-    /// True only while `/script run` / editor Run / AI `run_script` executes its one-shot
+    /// True only while `/script run` / editor Run Once / AI `run_script` executes its one-shot
     /// chunk. Durable script-lifecycle APIs reject in this scope so the destroyed throwaway
     /// environment can never leave handlers, timers, child scripts, or AI work behind.
     var ephemeralRunActive = false
@@ -728,7 +745,23 @@ public final class ScriptRuntime {
     /// simplification of "runs once in the next phase" (§9.3) — see
     /// ARCHITECTURE.md.
     public func runEphemeral(source: String, owner: ObjectRef) -> ScriptRunOutcome {
-        guard scriptsEffectivelyEnabled(host: host) else { return .failure("scripting is disabled") }
+        runEphemeral(source: source, owner: owner, policy: .fullyGated)
+    }
+
+    /// Runs only the source supplied by a host user's explicit editor Run Once action. This narrow
+    /// entry point bypasses the persisted trust flag because opening an imported world's editor
+    /// must not make its visible draft untestable, but it neither flips that flag nor saves or
+    /// attaches the draft. Calls made by the draft may mutate the live world and those mutations
+    /// may later be saved. The `doScripts` kill switch and open-world requirement still apply.
+    /// Commands, AI tools, and LAN forwarding must continue to call `runEphemeral`.
+    public func runEphemeralForEditorExplicitRun(source: String, owner: ObjectRef) -> ScriptRunOutcome {
+        runEphemeral(source: source, owner: owner, policy: .editorExplicitRun)
+    }
+
+    private func runEphemeral(
+        source: String, owner: ObjectRef, policy: EphemeralRunPolicy
+    ) -> ScriptRunOutcome {
+        if let refusal = ephemeralRunRefusal(for: policy) { return .failure(refusal) }
         guard case .live = graph.resolve(owner) else { return .failure("\(owner.canonical) is not loaded") }
         if case .refused(let stage, let message, _, let line) = ScriptValidator.validate(
             source: source, chunkName: "run", using: lua
@@ -770,10 +803,26 @@ public final class ScriptRuntime {
                 return .failure("call failed")
             }
             switch outcome {
-            case .success: return .success("ran '\(owner.canonical)' script (ephemeral, not saved)")
+            case .success:
+                return .success(
+                    "ran '\(owner.canonical)' script once (draft not saved or attached; live changes may persist)"
+                )
             case .failure(let fault): return .failure("runtime error: \(fault.message)")
             }
         }
+    }
+
+    private func ephemeralRunRefusal(for policy: EphemeralRunPolicy) -> String? {
+        guard let world = host.world(for: host.currentDimension) else {
+            return "scripting is unavailable because no world is loaded"
+        }
+        if case .fullyGated = policy, !host.scriptsEnabled {
+            return "scripting is not trusted for this world"
+        }
+        guard (world.gameRules["doScripts"] ?? 1) != 0 else {
+            return "scripting is disabled by the doScripts gamerule"
+        }
+        return nil
     }
 
     // MARK: - validation / dry-run (ai-object-graph, change 2, design.md §9.4)
@@ -828,7 +877,6 @@ public final class ScriptRuntime {
     public func dryRunOutcome(
         source: String, owner: ObjectRef, mode: ScriptMode, handlerEvent: EventKind? = nil
     ) -> ScriptDryRunOutcome {
-        guard scriptsEffectivelyEnabled(host: host) else { return .failure("scripting is disabled") }
         guard case .live = graph.resolve(owner) else { return .failure("\(owner.canonical) is not loaded") }
         let wasDryRun = dryRunActive
         dryRunActive = true

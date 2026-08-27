@@ -491,12 +491,13 @@ running on a sandboxed, deterministic Lua 5.4.8 runtime. Scripts react to a type
 schedule named timers that survive a save/reload, and can ask the local AI for a reply. You drive
 all of this from chat commands, an in-game multi-line script editor, and a read-only Inspector; the
 `/ai` assistant can author and manage scripts and attributes too, through the exact same checks.
-Everything below is host-only: execution always happens on the host, gated by a per-world trust
-switch and a kill switch, and every command is refused outright on a joined LAN world — until the
-host grants you scripting (see "Guest scripting" below), after which the commands that change
-something work for you too, forwarded to and executed by the host. This section covers the
-chat/editor surface; for the complete Lua API reference, the ref and value grammars, and more
-worked examples, see [docs/SCRIPTING_GUIDE.md](docs/SCRIPTING_GUIDE.md).
+Everything below is host-only. Attached/background execution and ordinary command, AI, and LAN
+one-off runs require both the per-world trust switch and the kill switch; the local editor's narrow
+Run Once exception is explained below. Every command is refused outright on a joined LAN world —
+until the host grants you scripting (see "Guest scripting" below), after which the commands that
+change something work for you too, forwarded to and executed by the host. This section covers the
+chat/editor surface; for the complete Lua API reference, the ref and value grammars, and more worked
+examples, see [docs/SCRIPTING_GUIDE.md](docs/SCRIPTING_GUIDE.md).
 
 ### Attributes
 
@@ -620,8 +621,10 @@ exactly as before.
   — no `on(...)` needed). Attaching from chat always targets the trigger at `self`; a script's own
   `h:attach(name, source, {on=..., attr=..., target=...})` call (see below) can target any object.
 - `/script detach <target> <name>` — remove a script.
-- `/script run <target> <source...>` — run a one-off script against a target immediately; nothing is
-  saved, and it can't subscribe, set timers, or call the AI.
+- `/script run <target> <source...>` — run a one-off script against a target immediately; the source
+  is not saved or attached, though permitted changes to live world state may persist. It can't
+  subscribe, set timers, or call the AI. This chat command requires a trusted
+  world and `doScripts` on.
 - `/script trust` — trust the current world to run scripts. A world you created yourself is already
   trusted; a world imported or migrated from elsewhere starts untrusted (no script on it runs, even
   if it has scripts attached) until you trust it here.
@@ -652,10 +655,22 @@ exactly as before.
   engine globals, inferred tables, methods, properties, event payloads, and live custom attributes;
   signatures and diagnostics; validated snippets; and a searchable **World Objects** list that can
   insert stable canonical references. Typing `.` or `:` opens member completion immediately, and
-  Control-Space requests it anywhere. **Save** attaches, **Check** performs a mutation-free dry run,
-  and **Run** executes once without saving; all three retain the runtime's authoritative validation.
+  Control-Space requests it anywhere. On a local world with an active script runtime, the editor
+  remains available even when scripting is not yet trusted or has been paused: **Check** performs a
+  mutation-free dry run, **Save** validates and persists the script without starting it, and **Run
+  Once** executes only the visible draft once without saving or attaching that draft. That explicit
+  editor Run Once can be used before trusting an imported world, but it is not read-only and can make
+  permitted changes to live game state; those changes may persist with the world. It still refuses
+  while `doScripts` is off; `/script run`, AI runs, attached scripts, and guest runs keep both gates.
+  All three retain the runtime's authoritative validation. If the local runtime is unavailable,
+  Check, Save, and Run Once are unavailable because that validation cannot be performed; copy the
+  retained draft and restart the world or Elysium before retrying.
   Run cannot suspend, so `wait`/`ai.await` are highlighted with guidance to Save for attached execution;
   Check accepts a valid attached-script suspension without scheduling it or contacting AI.
+  When attached execution is paused, the status banner offers **Trust World**, **Turn On Scripts**,
+  or **Trust & Turn On**, depending on which gate is off. Its confirmation warns that continuing
+  may start every enabled script already attached in the world. Nothing in the editor trusts a
+  world or turns on `doScripts` automatically.
   Unsaved source is protected when switching, closing, or quitting Elysium. Optional editor AI is **Manual** by default:
   Option-Command-/ asks the selected local Ollama model for one ghost-text proposal, Tab accepts it,
   and Escape dismisses it. Set editor AI to **Off** for no Ollama requests or explicitly choose
@@ -804,6 +819,8 @@ or is refused for being over budget) without pausing the rest of the game.
 | Character controls are missing or disabled | Confirm the world was created with **Character Classes: On**. Read the visible creation/action reason; fix the starting-skill selection, preparation, fatigue, cooldown, authority, or inventory issue it identifies. |
 | No LAN world appears | Confirm both Macs are on the same trusted LAN, choose **Browse LAN**, or use the host's direct address, port, and code. Do not weaken security or expose the port publicly. |
 | Ollama is unavailable | Confirm the independent local service is running, choose **Refresh Models**, select a local model, and retry. Core play does not require AI. |
+| The script editor says attached scripts are paused | Check and Save should still work: Check is read-only, and Save keeps the script dormant. The editor's explicit Run Once works before world trust but still requires `doScripts` on. Use the banner's **Trust World**, **Turn On Scripts**, or **Trust & Turn On** action only after reviewing its warning that existing attached scripts may start. |
+| The script editor says the script runtime is unavailable | Check, Save, and Run Once are unavailable because authoritative Lua validation cannot run. Copy the retained draft, then restart the world or Elysium and retry. |
 | Saved-world selection changed or reload is required | Review the current checked list. Use **Try Again** only after review; use the read-only reload when **Saved Worlds Need Reloading** appears. |
 | Resource Packs says settings recovery is required | Stop changing settings and restart Elysium. The saved choice is unknown; the current-session pack generation remains on the prior selection, and further persisted settings changes are blocked until restart. |
 | Resource Packs reports that disk durability was not confirmed | The selected pack generation was applied from exact reread settings bytes, but the directory-sync durability could not be confirmed. The recovery latch is not active; restart before relying on the choice surviving a system failure. |

@@ -497,20 +497,30 @@ built-in field (including entity/player "verbs" like position or health) goes th
 generic `h:get`/`h:set`/property sugar that `/attr` already used, since design.md itself frames most
 verbs as sugar over the funnels `BuiltInAttributes` already implements. `say`/`sound`/`particles` are
 accepted but `sound`/`particles` are no-ops in 1c (not wired to the renderer/audio layer).
-`/script run` and the AI's `run_script` tool share `ScriptRuntime.runEphemeral`: synchronous
-(`LuaState.call`, never yieldable — an attempted `wait`/`ai.await` correctly faults, matching §9.3's
-"no subscribe, no timers, no `ai.*`"), run once immediately rather than queued to "the next phase".
+`/script run` and the AI's `run_script` tool share the fully gated
+`ScriptRuntime.runEphemeral`: synchronous (`LuaState.call`, never yieldable — an attempted
+`wait`/`ai.await` correctly faults, matching §9.3's "no subscribe, no timers, no `ai.*`"), run once
+immediately rather than queued to "the next phase". The local editor's explicit Run Once action uses a
+separate entry point over the same capability-reduced implementation. It may bypass only persisted
+world trust for the visible draft; it still checks `doScripts`, never flips trust, and never loads
+attached scripts. The permitted ephemeral verbs can still mutate live game state; this is an
+explicit execution action, not Check's read-only facade. Run Once does not save or attach the
+visible draft, but world mutations it makes may persist with the world. Commands, AI tools, and LAN
+forwarding cannot select that policy.
 `ScriptRuntime.dryRun` (change 2) is a sibling read-only entry point used by the AI tool loop's
 `attach_script` gate and the native editor's Check action. It resumes one throwaway coroutine: a
 completed prefix passes, a fault is reported, and a first legal `wait`/`ai.await` yield passes then
 closes without scheduling or contacting AI. See "AI object graph tool loop" below.
 
-**Kill switch and trust gate.** `scriptsEffectivelyEnabled(host:)` is the single predicate every
-phase step and verb consults: the persisted trust gate (`WorldRecord.scriptsEnabled`, already shipped
-by 1a — `true` only for a world this install created, `false` for every imported/migrated one until
-`/script trust`) **and** a `doScripts` gamerule (absent == enabled, flipped instantly and
-losslessly by `/script off|on` through the existing `GameCore.setGameRule` — no new mechanism).
-Either being off makes scripts behave as if none were attached, session-wide, immediately.
+**Kill switch and trust gate.** `scriptsEffectivelyEnabled(host:)` is the predicate for attached
+execution and every ordinary command/AI/LAN one-off run: the persisted trust gate
+(`WorldRecord.scriptsEnabled`, set for a locally created world or by explicit `/script trust`, but
+false for every imported/migrated one until then) **and** a `doScripts` gamerule (absent == enabled,
+flipped instantly and losslessly by `/script off|on` through the existing `GameCore.setGameRule` —
+no new mechanism). Either being off makes attached scripts behave as if none were present,
+session-wide, immediately. Local editor Check and Save are authoring operations rather than attached
+execution; its explicit Run Once has the narrow trust-only exception described above and still obeys the
+kill switch.
 
 **Commands and UI.** `ScriptingCommands` provides `/script
 list|show|attach|detach|run|trust|off|on`; `/script edit [target] [name]` is an app-layer command in
@@ -559,6 +569,19 @@ Dirty-document protection covers script switching, window close, and application
 replicated metadata, never existing source; a replacement is explicitly disclosed and is forwarded
 to the host, where the same validation/execution boundary remains authoritative. See
 `docs/LUA_EDITOR.md` for the complete interaction, accessibility, and verification contract.
+
+Editor availability is intentionally separate from world execution trust. On a valid local session
+with a live `ScriptRuntime`, Check performs its read-only dry run and Save persists a validated
+record even when `WorldRecord.scriptsEnabled` or `doScripts` is off. If runtime construction failed,
+Check, Save, and Run Once are unavailable because the editor cannot perform authoritative Lua
+validation or execution; the draft remains available to copy. The explicit Run Once action can
+bypass only world trust for that visible draft and remains kill-switch-gated. It does not save or
+attach the draft, although permitted live-world mutations may persist. A separate activation action
+is presented as **Trust World**, **Turn On Scripts**, or **Trust & Turn On**, depending on the live
+gate state. Its confirmation warns that changing those world-wide controls may start every enabled
+attached script. No editor-open, Check, Save, or Run path auto-trusts or silently turns on the kill
+switch. Attached scripts, `/script run`, AI `run_script`, and LAN-forwarded runs continue through
+the full two-switch predicate.
 
 ## Inspector, F3 summary, and historical canvas-editor implementation
 

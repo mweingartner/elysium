@@ -29,6 +29,123 @@ struct ScriptEditorSaveCollision: Equatable {
     let snapshot: Snapshot
 }
 
+enum ScriptEditorRuntimeUnavailableReason: Equatable {
+    case lanGuest
+    case worldSessionEnded
+    case missingRuntime
+}
+
+enum ScriptEditorScriptingActivationAction: Equatable {
+    case trustWorld
+    case turnOnKillSwitch
+    case trustWorldAndTurnOnKillSwitch
+
+    var buttonTitle: String {
+        switch self {
+        case .trustWorld: "Trust World"
+        case .turnOnKillSwitch: "Turn On Scripts"
+        case .trustWorldAndTurnOnKillSwitch: "Trust & Turn On"
+        }
+    }
+
+    var confirmationDetail: String {
+        switch self {
+        case .trustWorld, .trustWorldAndTurnOnKillSwitch:
+            "Trusting this world is persisted and cannot be reversed with Elysium's current controls. Every attached script in this world may run as soon as simulation resumes, including load and event handlers. Continue only if you trust all attached scripts."
+        case .turnOnKillSwitch:
+            "Every attached script in this world may run as soon as simulation resumes, including load and event handlers. This does not change the world's persisted trust setting."
+        }
+    }
+}
+
+/// Durable editor-facing projection of the two execution gates. This state is intentionally
+/// independent of the transient `status` line: Save/Check/Run results must never hide why attached
+/// scripts are paused or imply that opening the editor changed a world-wide security control.
+enum ScriptEditorScriptingAvailability: Equatable {
+    case active
+    case trustRequired
+    case killSwitchOff
+    case both
+    case runtimeUnavailable(ScriptEditorRuntimeUnavailableReason)
+
+    var title: String {
+        switch self {
+        case .active: "Attached scripts are active"
+        case .trustRequired: "Attached scripts are paused — trust required"
+        case .killSwitchOff: "Attached scripts are paused — scripts are turned off"
+        case .both: "Attached scripts are paused — trust and activation required"
+        case .runtimeUnavailable(.lanGuest): "Scripts run on the LAN host"
+        case .runtimeUnavailable(.worldSessionEnded): "World session ended"
+        case .runtimeUnavailable(.missingRuntime): "Script runtime unavailable"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .active:
+            "Saved scripts can run when their events or lifecycle phases occur."
+        case .trustRequired:
+            "Save, Check, and Run Once remain available, but attached execution is paused until you explicitly trust this world."
+        case .killSwitchOff:
+            "Saving and Check remain available, but attached execution is paused by the doScripts kill switch."
+        case .both:
+            "Saving and Check remain available, but attached execution is paused until you trust the world and turn scripts on."
+        case .runtimeUnavailable(.lanGuest):
+            "Save and Run requests go to the host. Check requires a local host runtime."
+        case .runtimeUnavailable(.worldSessionEnded):
+            "This draft remains available to copy, but world-backed actions are no longer available."
+        case .runtimeUnavailable(.missingRuntime):
+            "This draft remains available to copy, but Check, Save, and Run Once are unavailable because this session cannot validate or execute scripts."
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .active: "checkmark.shield.fill"
+        case .trustRequired, .killSwitchOff, .both: "pause.circle.fill"
+        case .runtimeUnavailable(.lanGuest): "network"
+        case .runtimeUnavailable(.worldSessionEnded): "clock.badge.xmark"
+        case .runtimeUnavailable(.missingRuntime): "exclamationmark.triangle.fill"
+        }
+    }
+
+    var activationAction: ScriptEditorScriptingActivationAction? {
+        switch self {
+        case .active, .runtimeUnavailable: nil
+        case .trustRequired: .trustWorld
+        case .killSwitchOff: .turnOnKillSwitch
+        case .both: .trustWorldAndTurnOnKillSwitch
+        }
+    }
+
+    var attachedExecutionIsPaused: Bool {
+        self != .active
+    }
+
+    var canCheck: Bool {
+        switch self {
+        case .active, .trustRequired, .killSwitchOff, .both: true
+        case .runtimeUnavailable: false
+        }
+    }
+
+    var canRunOnce: Bool {
+        switch self {
+        case .active, .trustRequired, .runtimeUnavailable(.lanGuest): true
+        case .killSwitchOff, .both,
+             .runtimeUnavailable(.worldSessionEnded), .runtimeUnavailable(.missingRuntime): false
+        }
+    }
+
+    var canSave: Bool {
+        switch self {
+        case .active, .trustRequired, .killSwitchOff, .both,
+             .runtimeUnavailable(.lanGuest): true
+        case .runtimeUnavailable(.worldSessionEnded), .runtimeUnavailable(.missingRuntime): false
+        }
+    }
+}
+
 /// `GameCore` declares several of the members this model calls (notably
 /// `persistAndPublishSettingsCandidate`) as explicitly `@MainActor` — this model is itself
 /// `@MainActor` so those calls type-check directly, matching the hard rule that every
@@ -92,6 +209,8 @@ final class ScriptEditorModel: ObservableObject {
     @Published private(set) var externalEditorEdit: LuaEditorExternalEdit?
     @Published private(set) var documentIdentity: UInt64 = 0
     @Published private(set) var isWorldSessionActive: Bool
+    @Published private(set) var scriptingAvailability: ScriptEditorScriptingAvailability =
+        .runtimeUnavailable(.worldSessionEnded)
 
     private var cleanName = ""
     private var cleanSource = ""
@@ -185,6 +304,7 @@ final class ScriptEditorModel: ObservableObject {
                 self?.disconnectFromWorldSession()
             }
         }
+        refreshScriptingAvailability()
         reload()
         if let existingName {
             switchTo(existingName)
@@ -214,6 +334,7 @@ final class ScriptEditorModel: ObservableObject {
     private func disconnectFromWorldSession() {
         guard isWorldSessionActive else { return }
         isWorldSessionActive = false
+        scriptingAvailability = .runtimeUnavailable(.worldSessionEnded)
         authoringContextRevision &+= 1
         cancelAIWork(clearSuggestion: true)
         worldObjects = []
@@ -222,6 +343,71 @@ final class ScriptEditorModel: ObservableObject {
         targetCustomAttributeCompletions = []
         status = "World session ended. This draft is retained read-only from the game; copy it into a new editor to continue."
         statusIsError = true
+    }
+
+    /// Re-reads the world-wide execution controls without changing either one. The view invokes
+    /// this whenever its window becomes key so chat/command changes made elsewhere are reflected.
+    func refreshScriptingAvailability() {
+        guard isCurrentWorldSession else {
+            scriptingAvailability = .runtimeUnavailable(.worldSessionEnded)
+            return
+        }
+        guard !openedAsLANGuest else {
+            scriptingAvailability = .runtimeUnavailable(.lanGuest)
+            return
+        }
+        let context = game.scriptingCommandContext()
+        guard context.scriptRuntime != nil else {
+            scriptingAvailability = .runtimeUnavailable(.missingRuntime)
+            return
+        }
+        switch (context.scriptsTrusted, context.killSwitchOn) {
+        case (true, true): scriptingAvailability = .active
+        case (false, true): scriptingAvailability = .trustRequired
+        case (true, false): scriptingAvailability = .killSwitchOff
+        case (false, false): scriptingAvailability = .both
+        }
+    }
+
+    /// Applies the action the UI has already explained and confirmed. Opening, editing, Save,
+    /// Check, and Run never call this method. Re-read immediately so a stale confirmation cannot
+    /// turn on a gate that is no longer represented by the persistent banner.
+    func enableAttachedScriptExecutionAfterConfirmation(
+        confirming expectedAction: ScriptEditorScriptingActivationAction
+    ) {
+        guard requireCurrentWorldSession(for: "change script execution settings") else { return }
+        refreshScriptingAvailability()
+        guard scriptingAvailability.activationAction == expectedAction else {
+            Self.refreshScriptingAvailability(in: game)
+            status = "Script execution settings changed while confirmation was open. Review the current status and confirm again."
+            statusIsError = true
+            return
+        }
+        let context = game.scriptingCommandContext()
+        switch expectedAction {
+        case .trustWorld:
+            context.trustWorld()
+        case .turnOnKillSwitch:
+            context.setKillSwitch(true)
+        case .trustWorldAndTurnOnKillSwitch:
+            context.trustWorld()
+            context.setKillSwitch(true)
+        }
+
+        Self.refreshScriptingAvailability(in: game)
+        if case .active = scriptingAvailability {
+            status = "Attached script execution is active."
+            statusIsError = false
+        } else {
+            status = "The script execution settings could not be enabled."
+            statusIsError = true
+        }
+    }
+
+    private static func refreshScriptingAvailability(in game: GameCore) {
+        for editor in liveModels.allObjects where editor.game === game {
+            editor.refreshScriptingAvailability()
+        }
     }
 
     // MARK: - deterministic analysis and optional editor AI
@@ -864,9 +1050,8 @@ final class ScriptEditorModel: ObservableObject {
     /// The same validator `/script attach`/`/script run` use
     /// (`ScriptRuntime.validateSourceForEditor`) — the editor never accepts something the runtime
     /// would then refuse. Sets `errorLine`/`status` and returns `false` on refusal. A LAN client
-    /// (no local `ScriptRuntime`) or a test context with no session runtime is treated as
-    /// "nothing to validate against yet" and passes through — the same fallback the retired
-    /// screen used.
+    /// forwards Save to the host and therefore has no local validation result. A local session
+    /// with no runtime fails closed so invalid Lua can never be persisted as validated source.
     @discardableResult
     func validate() -> Bool {
         guard requireCurrentWorldSession(for: "check or save it") else { return false }
@@ -877,7 +1062,9 @@ final class ScriptEditorModel: ObservableObject {
         let context = game.scriptingCommandContext()
         guard let runtime = context.scriptRuntime else {
             errorLine = nil
-            return true
+            status = "No script runtime this session; Check and Save require validation."
+            statusIsError = true
+            return false
         }
         let chunkName = currentName.isEmpty ? "script" : currentName
         switch runtime.validateSourceForEditor(source, chunkName: chunkName).outcome {
@@ -908,6 +1095,7 @@ final class ScriptEditorModel: ObservableObject {
     @discardableResult
     func save(confirming expectedCollision: ScriptEditorSaveCollision? = nil) -> Bool {
         guard requireCurrentWorldSession(for: "save it") else { return false }
+        refreshScriptingAvailability()
         guard let name = validatedName() else { return false }
         let currentCollision = authoritativeSaveCollision(for: name)
         if let expectedCollision {
@@ -978,7 +1166,11 @@ final class ScriptEditorModel: ObservableObject {
         case .success(let savedRecord):
             currentName = name
             game.scripting.anyScriptsAttached = true
-            status = "Attached \"\(name)\" to \(target.canonical)"
+            if scriptingAvailability.attachedExecutionIsPaused {
+                status = "Saved \"\(name)\" to \(target.canonical). Attached execution is paused: \(scriptingAvailability.detail)"
+            } else {
+                status = "Saved and attached \"\(name)\" to \(target.canonical)"
+            }
             statusIsError = false
             isNewScript = false
             markCurrentDocumentClean(savedTriggers: savedRecord.triggers, savedEnabled: savedRecord.enabled)
@@ -992,11 +1184,15 @@ final class ScriptEditorModel: ObservableObject {
         }
     }
 
-    /// Run (ephemeral — §9.3). Never persists anything, on host or guest. LAN-guest aware: sends a
-    /// `scriptIntent` and never calls `runEphemeral` locally (a guest has no `ScriptRuntime` to
-    /// call it against in the first place).
+    /// Run Once (ephemeral — §9.3) never saves or attaches the draft. Permitted script calls may
+    /// still mutate the live world, and those mutations can be included in a later world save. A
+    /// host's explicit editor action can exercise the visible draft in an untrusted world without
+    /// trusting it or starting attached scripts. The doScripts emergency pause remains
+    /// authoritative. A LAN guest sends a `scriptIntent` and never runs Lua locally.
     func run() {
         guard requireCurrentWorldSession(for: "run it") else { return }
+        defer { Self.refreshScriptingAvailability(in: game) }
+        refreshScriptingAvailability()
         guard !source.isEmpty else {
             status = "Source is empty."
             statusIsError = true
@@ -1028,7 +1224,7 @@ final class ScriptEditorModel: ObservableObject {
             return
         }
         guard validate() else { return }
-        switch runtime.runEphemeral(source: source, owner: target) {
+        switch runtime.runEphemeralForEditorExplicitRun(source: source, owner: target) {
         case .success(let message):
             status = message
             statusIsError = false
@@ -1045,6 +1241,7 @@ final class ScriptEditorModel: ObservableObject {
     /// .lanForwardableCommand`).
     func check() {
         guard requireCurrentWorldSession(for: "check it") else { return }
+        refreshScriptingAvailability()
         guard !source.isEmpty else {
             status = "Source is empty."
             statusIsError = true

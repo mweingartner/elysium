@@ -14,7 +14,7 @@ example's exact byte-for-byte source is exercised by an automated test, that's n
 
 Every mutation — an attribute write, a script attach, a subscription, an emitted event — runs
 through the same three executors regardless of who initiated it (you, another script, or the AI):
-`AttributeStore`, `ScriptStore`, and `EventBus`. Two independent gates sit in front of all of them,
+`AttributeStore`, `ScriptStore`, and `EventBus`. Two independent gates govern script execution,
 re-checked every phase, never cached:
 
 - **The trust gate** — `WorldRecord.scriptsEnabled`. A world you create yourself starts trusted.
@@ -25,6 +25,16 @@ re-checked every phase, never cached:
   trust: flips instantly, stops or resumes every script the very next tick regardless of how
   hostile a world's own scripts might be.
   (`Sources/ElysiumCore/Scripting/ScriptRuntime.swift:22-26`, `scriptsEffectivelyEnabled`.)
+
+With an active local runtime, the editor stays useful on an untrusted or paused world without
+weakening those runtime gates. **Check** is read-only and ignores both switches. **Save** may persist
+a validated attached script while either switch is off, but does not run it. An explicit
+local-editor **Run Once** may execute only the visible draft once while the world is untrusted; it
+does not save or attach that draft, trust the world, or load other scripts, but its permitted
+live-world mutations may persist. It still refuses when `doScripts` is off. If no local runtime
+exists, Check, Save, and Run Once are unavailable because authoritative validation cannot be
+performed. Attached scripts, `/script run`, AI `run_script`, and LAN-forwarded runs remain fully
+gated. The editor never auto-trusts a world.
 
 Execution is **host-only**, always. A LAN guest never runs a script on their own machine, even
 their own — every scripting command is refused outright on a joined LAN world unless the host has
@@ -205,9 +215,11 @@ name, catalog or custom — payload-free. *(emit only, yes)*
   is bound automatically, no `on(...)` call needed). Attaching from chat can only trigger on the
   target you attach it to; a script's own `h:attach(...)` can target a trigger anywhere (§8). *(yes)*
 - `detach <target> <name>` — remove a script. *(yes)*
-- `run <target> <source...>` — run source once, immediately, capability-reduced: nothing is saved,
-  and `wait`/`ai.await`/subscribing/timers all fail rather than hang
-  (`Sources/ElysiumCore/Scripting/ScriptRuntime.swift:707-752`, `runEphemeral`). *(yes)*
+- `run <target> <source...>` — run source once, immediately, capability-reduced: the source is not
+  saved or attached, though permitted live-world changes may persist. `wait`/`ai.await`/subscribing/
+  timers all fail rather than hang. Unlike the local editor's
+  explicit Run button, this command requires both a trusted world and `doScripts` on
+  (`ScriptRuntime.runEphemeral`). *(yes)*
 - `journal [limit]` (default 32) — what `/ai` has done to this world, most recent first: request,
   entry, tick, tool, object, name, kind of change, model. Only AI mutations appear here. *(no)*
 - `undo-ai [n]` (default 1) — reverts the `n` most recent `/ai` requests' worth of mutations, most
@@ -239,15 +251,31 @@ Sends `<request>` to the configured local Ollama model. §9 covers this in depth
 ## 6. The in-game script editor
 
 `/script edit [target] [name]` opens the native multi-line editor: type directly or paste (⌘V) up
-to 16 KiB, choose **module** or **handler** mode, and use **Save**, **Check**, or **Run**. Save
-attaches through `ScriptStore`; Check performs a mutation-free dry run; Run executes once without
-persisting. Run is synchronous, so the editor highlights `wait`/`ai.await` and directs you to Save
-the script for attached, yieldable execution. Check uses a throwaway coroutine and treats its first
-legal yield as a successful validation boundary without scheduling it or contacting AI. The runtime
-validator remains authoritative and reports the offending line. In handler mode, Check supplies the
-selected built-in event kind and deterministic, non-null representative values for its registry-
-documented payload fields. A valid custom event has no authoritative payload schema, so Check
-reports compile-only success and deliberately does not execute that handler.
+to 16 KiB, choose **module** or **handler** mode, and use **Save**, **Check**, or **Run Once**. On a
+local host with an active script runtime, Check stays available regardless of world trust or
+`doScripts` and performs a mutation-free dry run. Save attaches through `ScriptStore` even while
+scripting is paused, but saving never runs the record; an untrusted or kill-switched world leaves it
+dormant. The explicit editor Run Once executes only the visible draft once without saving or
+attaching that draft. It can do that while the world remains untrusted, but it is not read-only and
+its permitted one-off verbs can change live game state; those changes may persist with the world. It
+still refuses when `doScripts` is off. If no local runtime exists, Check, Save, and Run Once are
+unavailable because authoritative validation cannot be performed; the draft remains available to
+copy. Run is synchronous, so the editor highlights
+`wait`/`ai.await` and directs you to Save the script for attached, yieldable execution. Check uses a
+throwaway coroutine and treats its first legal yield as a successful validation boundary without
+scheduling it or contacting AI. The runtime validator remains authoritative and reports the
+offending line. In handler mode, Check supplies the selected built-in event kind and deterministic,
+non-null representative values for its registry-documented payload fields. A valid custom event has
+no authoritative payload schema, so Check reports compile-only success and deliberately does not
+execute that handler.
+
+When attached execution is paused, the editor's persistent status banner offers the applicable
+**Trust World**, **Turn On Scripts**, or **Trust & Turn On** action. Its confirmation warns that all
+enabled scripts already attached across the world may start running. Confirming changes only the
+named gate or gates; opening the editor, saving, checking, or running a draft never grants trust or
+turns on the kill switch implicitly. The Run exception is deliberately local: ordinary
+`/script run`, AI `run_script`, attached/background execution, and every guest-forwarded run
+continue to require both gates.
 
 The editor's local language service adds semantic styling, receiver-correct completion and
 documentation, signature help, diagnostics, validated snippets, and a searchable **World Objects**
@@ -266,7 +294,8 @@ complete UI, key, data-sharing, accessibility, and cancellation contract.
 Unsaved changes are protected when switching scripts, closing the window, or quitting Elysium. On a joined LAN world
 (once granted), reopening an existing script still never reveals its source: the name/mode are
 replicated, the body starts blank, and an explicit warning precedes a full replacement sent to and
-executed by the host.
+executed by the host. A guest's Run is the ordinary fully gated host command path, never the local
+editor-only trust exception.
 
 **One-line chat commands have a quoting gotcha worth knowing.** `/script attach`/`run`/`/on`'s
 `<source...>` is parsed by the *same* chat-line tokenizer as every other command argument

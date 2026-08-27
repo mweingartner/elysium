@@ -7,14 +7,25 @@ authoring window. The scripting language and runtime contract remain defined by
 ## Scope and trust boundary
 
 The editor works with the shipped deterministic Lua 5.4.8 sandbox. It does not add libraries,
-permissions, globals, methods, event names, or mutation paths to that sandbox. On a host, Save uses
-the same validated `ScriptStore` attach path as `/script attach`, Run uses the same
-`ScriptRuntime.runEphemeral` path as `/script run`, and Check performs the editor-only
-`ScriptRuntime.dryRun` without persisting. Handler Check executes a known built-in event with
-deterministic, non-null representative values from `EventDescriptorRegistry`; custom events compile
-only because their payload shape is not declared, and the status distinguishes that case from an
-executed pass. A granted LAN guest forwards Save and Run to the host; Check is not available to a
-guest.
+permissions, globals, methods, event names, or mutation paths to that sandbox. On a local host with
+an active script runtime, Save uses the same validated `ScriptStore` attach path as `/script attach`,
+and Check performs the editor-only `ScriptRuntime.dryRun` without persisting. Both remain available
+when the world is untrusted or `doScripts` is off: Check is read-only, while Save only persists the
+validated record and leaves it dormant. If no local runtime exists, Check, Save, and Run Once are
+unavailable because authoritative Lua validation cannot be performed; the draft remains available
+to copy. Handler Check executes a known built-in event with deterministic, non-null representative
+values from `EventDescriptorRegistry`; custom events compile only because their payload shape is not
+declared, and the status distinguishes that case from an executed pass.
+
+The local editor's explicit **Run Once** action is the one narrow trust-gate exception. It runs only the
+currently visible draft once through the same capability-reduced ephemeral machinery as
+`/script run`, without saving or attaching the draft, loading attached scripts, or changing the
+world's trust flag. It is not a dry run: permitted one-off verbs can change live game state, and
+those changes may persist with the world. It still obeys `doScripts`;
+**Run Once** refuses while the kill switch is off. Attached scripts, ordinary
+`/script run`, AI `run_script`, and every LAN-forwarded run remain gated by both world trust and
+`doScripts`. A granted LAN guest forwards Save and Run to the host; the local-editor exception is
+never forwarded, and Check is not available to a guest.
 
 Editor analysis is read-only and has two deliberately separate planes:
 
@@ -29,14 +40,23 @@ All language-plane features remain available when Ollama is stopped or editor AI
 ## Opening and layout
 
 Use `/script edit [target] [name]`, Command-E while looking at an object, or **Edit Script** in the
-Object Inspector. The detached native window pauses the local simulation while it is open.
+Object Inspector. The detached native window pauses the local simulation while it is open. With an
+active local runtime, that UI pause does not disable Check or Save; Run Once is an explicit
+synchronous action and follows the trust/kill-switch policy above.
 
 The window has three working areas:
 
 - The left side lists scripts and switches between **Snippets** and **World Objects**.
 - The center contains target/mode/event controls, the source editor, signature/diagnostic status,
-  and Save, Check, and Run.
+  and Save, Check, and Run Once.
 - The optional right side is document-scoped Script AI. It is not the world-mutating `/ai` agent.
+
+When attached execution is paused, a persistent status banner explains which gate is off and offers
+the matching **Trust World**, **Turn On Scripts**, or **Trust & Turn On** action. Each first warns
+that every enabled script already attached anywhere in the world may begin running. Only the
+confirmed action changes the named gate or gates: trust is persisted, while turning scripts on
+changes `doScripts`. Opening the editor, Check, Save, and Run never auto-trust or silently turn the
+kill switch on.
 
 Handler mode shows an editable event name plus a menu of shipped built-in events and their
 descriptions. A validated custom event name can still be typed directly.
@@ -53,9 +73,11 @@ if that record changes again while the modal is open, Save refuses and requires 
 
 An editor is bound to the exact world session in which it opened. If that session ends, its draft
 remains available to copy, but Save, Run, Check, object insertion, deletion, and other world-backed
-actions refuse to operate on a later world. For an existing host script, ordinary source edits
-preserve its enabled state. Handler saves preserve additional triggers and the first trigger's
-filter and target while editing the first event name exposed by this UI.
+actions refuse to operate on a later world. In the valid local session, trust and the kill switch do
+not make the document read-only: Check remains read-only, Save remains persistence-only, and the
+explicit Run policy above applies. For an existing host script, ordinary source edits preserve its
+enabled state. Handler saves preserve additional triggers and the first trigger's filter and target
+while editing the first event name exposed by this UI.
 
 ## Language schema
 
@@ -152,7 +174,7 @@ Signature help recognizes cataloged calls after `(` and commas. Engine signature
 parameter/return descriptors and overloads; Lua standard-library parameter names and counts are
 derived from their display labels, with general `any` parameter types where the catalog has no more
 specific type. Diagnostics are advisory while editing; the runtime validator remains authoritative
-for Save, Check, and Run. Current editor diagnostics cover unmatched `()[]{}`, a fixed
+for Save, Check, and Run Once. Current editor diagnostics cover unmatched `()[]{}`, a fixed
 set of unavailable globals, invalid or reserved event names in recognized calls, unsupported
 `pairs(handle.attrs)`, wrong `.`/`:` member access, unknown members on inferred closed receivers, and
 direct assignment to a cataloged read-only dotted member. The language service has checks for

@@ -7,7 +7,8 @@
 // no `NSWindow` — the whole point of splitting a thin SwiftUI view over a testable model. The Core
 // assertions the old screen-driven suite proved carry over unchanged in substance: multiline
 // type+Save round-trips byte-exact via `scriptStore.get(...).source`; invalid syntax never
-// attaches and reports the right error line; Run/ephemeral never persists; a LAN guest's Save
+// attaches and reports the right error line; Run/ephemeral never persists its draft as a script;
+// permitted live-world mutations remain durable by design; a LAN guest's Save
 // sends a `scriptIntent` and never attaches locally.
 
 import XCTest
@@ -161,7 +162,7 @@ final class ScriptEditorModelTests: XCTestCase {
         XCTAssertFalse(model.statusIsError)
     }
 
-    // MARK: - host: Run is ephemeral, never persists
+    // MARK: - host: Run is ephemeral and never persists its draft as a script
 
     func testRunEphemeralNeverPersistsAScript() throws {
         let game = try makeTrustedGame()
@@ -202,7 +203,10 @@ final class ScriptEditorModelTests: XCTestCase {
         model.run()
 
         XCTAssertFalse(model.statusIsError, model.status ?? "missing status")
-        XCTAssertTrue(model.status?.contains("ephemeral, not saved") == true)
+        XCTAssertEqual(
+            model.status,
+            "ran 'player' script once (draft not saved or attached; live changes may persist)"
+        )
     }
 
     func testCheckAcceptsAttachedYieldPointsWithoutSchedulingOrCallingAI() throws {
@@ -249,6 +253,211 @@ final class ScriptEditorModelTests: XCTestCase {
         XCTAssertEqual(runtime.summary, before)
         XCTAssertTrue(game.scriptingCommandContext().scriptStore.list(.player).isEmpty,
                       "Check must not attach the handler it executes")
+    }
+
+    func testAvailabilityProjectionKeepsBannerCopyAndActionsExplicit() {
+        let expected: [(ScriptEditorScriptingAvailability, ScriptEditorScriptingActivationAction?)] = [
+            (.active, nil),
+            (.trustRequired, .trustWorld),
+            (.killSwitchOff, .turnOnKillSwitch),
+            (.both, .trustWorldAndTurnOnKillSwitch),
+            (.runtimeUnavailable(.lanGuest), nil),
+            (.runtimeUnavailable(.worldSessionEnded), nil),
+            (.runtimeUnavailable(.missingRuntime), nil),
+        ]
+
+        for (availability, action) in expected {
+            XCTAssertFalse(availability.title.isEmpty)
+            XCTAssertFalse(availability.detail.isEmpty)
+            XCTAssertFalse(availability.systemImage.isEmpty)
+            XCTAssertEqual(availability.activationAction, action)
+        }
+        XCTAssertFalse(ScriptEditorScriptingAvailability.active.attachedExecutionIsPaused)
+        XCTAssertTrue(ScriptEditorScriptingAvailability.both.attachedExecutionIsPaused)
+        XCTAssertTrue(ScriptEditorScriptingAvailability.trustRequired.detail.contains("Save, Check, and Run Once remain available"))
+        XCTAssertFalse(ScriptEditorScriptingAvailability.killSwitchOff.title.contains("kill switch is off"))
+        XCTAssertTrue(ScriptEditorScriptingAvailability.killSwitchOff.canCheck)
+        XCTAssertFalse(ScriptEditorScriptingAvailability.killSwitchOff.canRunOnce)
+        XCTAssertTrue(ScriptEditorScriptingAvailability.killSwitchOff.canSave)
+        XCTAssertFalse(ScriptEditorScriptingAvailability.runtimeUnavailable(.missingRuntime).canCheck)
+        XCTAssertFalse(ScriptEditorScriptingAvailability.runtimeUnavailable(.missingRuntime).canRunOnce)
+        XCTAssertFalse(ScriptEditorScriptingAvailability.runtimeUnavailable(.missingRuntime).canSave)
+        XCTAssertTrue(ScriptEditorScriptingActivationAction.trustWorld.confirmationDetail.contains("persisted"))
+        XCTAssertTrue(
+            ScriptEditorScriptingActivationAction.trustWorld.confirmationDetail
+                .contains("cannot be reversed with Elysium's current controls")
+        )
+    }
+
+    func testSaveAndCheckRemainAvailableWhileBothExecutionGatesAreOff() throws {
+        let game = try makeTrustedGame()
+        guard var record = game.worldRec else { return XCTFail("missing world record") }
+        record.scriptsEnabled = false
+        game.worldRec = record
+        game.setGameRule("doScripts", 0)
+        let model = ScriptEditorModel(target: .player, game: game)
+        XCTAssertEqual(model.scriptingAvailability, .both)
+
+        model.currentName = "paused_draft"
+        model.source = "assert(self:exists())"
+        XCTAssertTrue(model.save())
+        XCTAssertNotNil(game.scriptingCommandContext().scriptStore.get(.player, "paused_draft"))
+        XCTAssertFalse(model.statusIsError, model.status ?? "missing status")
+        XCTAssertTrue(model.status?.contains("Attached execution is paused") == true)
+        XCTAssertEqual(model.scriptingAvailability, .both, "Save must never change either execution gate")
+
+        model.check()
+        XCTAssertEqual(model.status, "Check passed — no issues found.")
+        XCTAssertFalse(model.statusIsError)
+        XCTAssertEqual(model.scriptingAvailability, .both, "Check must never change either execution gate")
+    }
+
+    func testKillSwitchOffDisablesRunOnceButLeavesCheckAndSaveAvailable() throws {
+        let game = try makeTrustedGame()
+        game.setGameRule("doScripts", 0)
+        let model = ScriptEditorModel(target: .player, game: game)
+        XCTAssertEqual(model.scriptingAvailability, .killSwitchOff)
+        XCTAssertTrue(model.scriptingAvailability.canCheck)
+        XCTAssertFalse(model.scriptingAvailability.canRunOnce)
+        XCTAssertTrue(model.scriptingAvailability.canSave)
+
+        model.source = "self.attrs.run_once_must_not_execute = true"
+        model.run()
+        XCTAssertTrue(model.statusIsError)
+        XCTAssertTrue(model.status?.contains("doScripts") == true)
+        XCTAssertNil(
+            AttributeStore(graph: ObjectGraph(host: game)).get(.player, "run_once_must_not_execute")
+        )
+
+        model.currentName = "paused_but_valid"
+        XCTAssertTrue(model.save())
+        XCTAssertNotNil(
+            game.scriptingCommandContext().scriptStore.get(.player, "paused_but_valid")
+        )
+        model.check()
+        XCTAssertEqual(model.status, "Check passed — no issues found.")
+        XCTAssertFalse(model.statusIsError)
+    }
+
+    func testMissingRuntimeRejectsInvalidLuaWithoutSavingOrAttaching() throws {
+        let game = try makeTrustedGame()
+        game.scripting.scriptRuntime = nil
+        let model = ScriptEditorModel(target: .player, game: game)
+        XCTAssertEqual(model.scriptingAvailability, .runtimeUnavailable(.missingRuntime))
+
+        model.currentName = "invalid_without_runtime"
+        model.source = "-- invalid Lua must not pass through\nif true then"
+
+        XCTAssertFalse(model.save())
+        XCTAssertTrue(model.statusIsError)
+        XCTAssertEqual(
+            model.status,
+            "No script runtime this session; Check and Save require validation."
+        )
+        XCTAssertNil(
+            game.scriptingCommandContext().scriptStore.get(.player, "invalid_without_runtime")
+        )
+    }
+
+    func testExplicitEditorRunWorksInAnUntrustedWorldWithoutTrustingIt() throws {
+        let game = try makeTrustedGame()
+        guard var record = game.worldRec else { return XCTFail("missing world record") }
+        record.scriptsEnabled = false
+        game.worldRec = record
+        let model = ScriptEditorModel(target: .player, game: game)
+        XCTAssertEqual(model.scriptingAvailability, .trustRequired)
+        model.source = "self.attrs.editor_manual_run = true"
+
+        model.run()
+
+        let attributes = AttributeStore(graph: ObjectGraph(host: game))
+        XCTAssertEqual(attributes.get(.player, "editor_manual_run"), .bool(true))
+        XCTAssertFalse(model.statusIsError, model.status ?? "missing status")
+        XCTAssertEqual(model.scriptingAvailability, .trustRequired)
+        XCTAssertFalse(game.worldRec?.scriptsEnabled ?? true, "explicit Run must never trust the world")
+    }
+
+    func testRunOnceRefreshesEveryLiveEditorAfterSuccessAndFailure() throws {
+        let game = try makeTrustedGame()
+        let first = ScriptEditorModel(target: .player, game: game)
+        let second = ScriptEditorModel(target: .world, game: game)
+        first.source = "assert(self:exists())"
+        XCTAssertEqual(second.scriptingAvailability, .active)
+
+        guard var record = game.worldRec else { return XCTFail("missing world record") }
+        record.scriptsEnabled = false
+        game.worldRec = record
+        first.run()
+
+        XCTAssertFalse(first.statusIsError, first.status ?? "missing success status")
+        XCTAssertEqual(first.scriptingAvailability, .trustRequired)
+        XCTAssertEqual(second.scriptingAvailability, .trustRequired)
+
+        game.setGameRule("doScripts", 0)
+        first.run()
+
+        XCTAssertTrue(first.statusIsError)
+        XCTAssertTrue(first.status?.contains("doScripts") == true)
+        XCTAssertEqual(first.scriptingAvailability, .both)
+        XCTAssertEqual(second.scriptingAvailability, .both)
+    }
+
+    func testConfirmedActivationRefreshesEveryLiveEditorForTheWorld() throws {
+        let game = try makeTrustedGame()
+        guard var record = game.worldRec else { return XCTFail("missing world record") }
+        record.scriptsEnabled = false
+        game.worldRec = record
+        game.setGameRule("doScripts", 0)
+        let first = ScriptEditorModel(target: .player, game: game)
+        let second = ScriptEditorModel(target: .world, game: game)
+        XCTAssertEqual(first.scriptingAvailability.activationAction, .trustWorldAndTurnOnKillSwitch)
+        XCTAssertEqual(second.scriptingAvailability, .both)
+
+        first.enableAttachedScriptExecutionAfterConfirmation(
+            confirming: .trustWorldAndTurnOnKillSwitch
+        )
+
+        XCTAssertTrue(game.worldRec?.scriptsEnabled ?? false)
+        XCTAssertTrue(game.scriptingCommandContext().killSwitchOn)
+        XCTAssertEqual(first.scriptingAvailability, .active)
+        XCTAssertEqual(second.scriptingAvailability, .active)
+        XCTAssertEqual(first.status, "Attached script execution is active.")
+        XCTAssertFalse(first.statusIsError)
+    }
+
+    func testStaleActivationConfirmationCannotEnableANewlyChangedGate() throws {
+        let game = try makeTrustedGame()
+        guard var record = game.worldRec else { return XCTFail("missing world record") }
+        record.scriptsEnabled = false
+        game.worldRec = record
+        let model = ScriptEditorModel(target: .player, game: game)
+        let presentedAction = try XCTUnwrap(model.scriptingAvailability.activationAction)
+        XCTAssertEqual(presentedAction, .trustWorld)
+
+        game.setGameRule("doScripts", 0)
+        model.enableAttachedScriptExecutionAfterConfirmation(confirming: presentedAction)
+
+        XCTAssertFalse(game.worldRec?.scriptsEnabled ?? true, "stale confirmation must not trust the world")
+        XCTAssertFalse(game.scriptingCommandContext().killSwitchOn, "stale confirmation must not turn scripts on")
+        XCTAssertEqual(model.scriptingAvailability, .both)
+        XCTAssertTrue(model.statusIsError)
+        XCTAssertTrue(model.status?.contains("changed while confirmation was open") == true)
+    }
+
+    func testAvailabilityRefreshObservesExternalGateChangesWithoutChangingThem() throws {
+        let game = try makeTrustedGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        XCTAssertEqual(model.scriptingAvailability, .active)
+        guard var record = game.worldRec else { return XCTFail("missing world record") }
+        record.scriptsEnabled = false
+        game.worldRec = record
+        game.setGameRule("doScripts", 0)
+
+        model.refreshScriptingAvailability()
+
+        XCTAssertEqual(model.scriptingAvailability, .both)
+        XCTAssertFalse(game.worldRec?.scriptsEnabled ?? true)
+        XCTAssertFalse(game.scriptingCommandContext().killSwitchOn)
     }
 
     func testNewScriptCannotReplaceExistingNameWithoutExplicitConfirmation() throws {
@@ -398,6 +607,7 @@ final class ScriptEditorModelTests: XCTestCase {
 
         game.exitToTitle()
         XCTAssertFalse(model.isWorldSessionActive)
+        XCTAssertEqual(model.scriptingAvailability, .runtimeUnavailable(.worldSessionEnded))
         XCTAssertTrue(model.isDirty, "world exit must retain the unsaved source")
 
         game.createWorld(
@@ -574,6 +784,8 @@ final class ScriptEditorModelTests: XCTestCase {
     func testGuestSaveNeverAttachesLocallyAndReportsSendingToHost() throws {
         let game = try makeLANClientGame()
         let model = ScriptEditorModel(target: .player, game: game)
+        XCTAssertEqual(model.scriptingAvailability, .runtimeUnavailable(.lanGuest))
+        XCTAssertNil(model.scriptingAvailability.activationAction)
         model.currentName = "greet"
         model.source = "say(\"hi\")"
 

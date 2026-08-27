@@ -12,6 +12,7 @@
 // level refusals, and `/script` LAN-client gating. `FakeObjectGraphHost` is
 // `ObjectGraphTests.swift`'s shared test double.
 
+import Foundation
 import XCTest
 @testable import ElysiumCore
 
@@ -137,6 +138,121 @@ final class ScriptRuntimeTests: XCTestCase {
         XCTAssertTrue(game.worldRec?.scriptsEnabled ?? false)
         game.runEventBusPhase()
         XCTAssertEqual(AttributeStore(graph: ObjectGraph(host: game)).get(.world, "ran"), .bool(true), "trust must re-enable scripting")
+    }
+
+    func testExplicitEditorRunBypassesOnlyTrustWithoutLoadingAttachedScripts() throws {
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "script-editor-explicit-run")
+        game.createWorld(name: "Editor Run", seedText: "53", mode: GameMode.creative, difficulty: 2)
+        guard var record = game.worldRec else { return XCTFail("no world record") }
+        record.scriptsEnabled = false
+        game.worldRec = record
+
+        let graph = ObjectGraph(host: game)
+        let attributes = AttributeStore(graph: graph)
+        let scripts = ScriptStore(graph: graph)
+        guard case .success = scripts.attach(
+            .world, name: "sibling", source: "world.attrs.sibling_loaded = true",
+            mode: .module, triggers: [], by: .player, tick: 0
+        ) else { return XCTFail("sibling attach failed") }
+        game.scripting.anyScriptsAttached = true
+        let runtime = try XCTUnwrap(game.scriptingCommandContext().scriptRuntime)
+
+        guard case .failure(let ordinaryRefusal) = runtime.runEphemeral(
+            source: "world.attrs.ordinary_run_seen = true", owner: .player
+        ) else { return XCTFail("ordinary one-shot execution must remain trust-gated") }
+        XCTAssertTrue(ordinaryRefusal.contains("not trusted"), ordinaryRefusal)
+        XCTAssertNil(attributes.get(.world, "ordinary_run_seen"))
+
+        guard case .success = runtime.runEphemeralForEditorExplicitRun(
+            source: "world.attrs.editor_run_seen = true", owner: .player
+        ) else { return XCTFail("an explicit editor Run should evaluate its visible draft") }
+        XCTAssertEqual(attributes.get(.world, "editor_run_seen"), .bool(true))
+        XCTAssertNil(attributes.get(.world, "sibling_loaded"), "editor Run must not load an attached sibling")
+        XCTAssertEqual(runtime.summary.liveScripts, 0, "editor Run must not load any attached script")
+        XCTAssertFalse(game.worldRec?.scriptsEnabled ?? true, "editor Run must not trust the world as a side effect")
+    }
+
+    func testExplicitEditorRunStillHonorsDoScriptsKillSwitchAndOpenWorld() throws {
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "script-editor-killswitch")
+        game.createWorld(name: "Editor Kill Switch", seedText: "59", mode: GameMode.creative, difficulty: 2)
+        let runtime = try XCTUnwrap(game.scriptingCommandContext().scriptRuntime)
+        let attributes = AttributeStore(graph: ObjectGraph(host: game))
+        game.setGameRule("doScripts", 0)
+
+        guard case .failure(let killSwitchRefusal) = runtime.runEphemeralForEditorExplicitRun(
+            source: "world.attrs.editor_run_seen = true", owner: .player
+        ) else { return XCTFail("editor Run must honor doScripts=0") }
+        XCTAssertTrue(killSwitchRefusal.contains("doScripts"), killSwitchRefusal)
+        XCTAssertNil(attributes.get(.world, "editor_run_seen"))
+
+        let noWorldRuntime = try ScriptRuntime(
+            host: FakeObjectGraphHost(), state: GameScriptingState(), say: { _ in }
+        )
+        guard case .failure(let noWorldRefusal) = noWorldRuntime.runEphemeralForEditorExplicitRun(
+            source: "return true", owner: .world
+        ) else { return XCTFail("editor Run must require an open world") }
+        XCTAssertTrue(noWorldRefusal.contains("no world is loaded"), noWorldRefusal)
+    }
+
+    func testDryRunIgnoresTrustAndKillSwitchWithoutMutatingWorld() throws {
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "script-dry-run-gates")
+        game.createWorld(name: "Dry Run Gates", seedText: "61", mode: GameMode.creative, difficulty: 2)
+        guard var record = game.worldRec else { return XCTFail("no world record") }
+        record.scriptsEnabled = false
+        game.worldRec = record
+        game.setGameRule("doScripts", 0)
+        let runtime = try XCTUnwrap(game.scriptingCommandContext().scriptRuntime)
+        let attributes = AttributeStore(graph: ObjectGraph(host: game))
+        let scripts = ScriptStore(graph: ObjectGraph(host: game))
+
+        XCTAssertEqual(
+            runtime.dryRunOutcome(
+                source: "world.attrs.dry_run_seen = true\nself:attach('dry_run_child', 'return true')",
+                owner: .player, mode: .module
+            ),
+            .completed
+        )
+        XCTAssertNil(attributes.get(.world, "dry_run_seen"))
+        XCTAssertNil(scripts.get(.player, "dry_run_child"))
+        XCTAssertFalse(game.worldRec?.scriptsEnabled ?? true)
+        XCTAssertEqual(game.world.gameRules["doScripts"], 0)
+    }
+
+    func testEditorOnlyRunEntryPointCannotSpreadOutsideItsRuntimeAndEditorCallSite() throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let allowedOccurrenceCounts = [
+            "Sources/ElysiumCore/Scripting/ScriptRuntime.swift": 1,
+            "Sources/Elysium/ScriptEditorUI/ScriptEditorModel.swift": 1,
+        ]
+        let symbol = "runEphemeralForEditorExplicitRun"
+        let manager = FileManager.default
+
+        let sourcesRoot = repository.appendingPathComponent("Sources")
+        let enumerator = try XCTUnwrap(manager.enumerator(
+            at: sourcesRoot, includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ))
+        let swiftFiles = (enumerator.allObjects as? [URL] ?? [])
+            .filter { $0.pathExtension == "swift" }
+            .sorted { $0.path < $1.path }
+        XCTAssertFalse(swiftFiles.isEmpty, "production Swift source scan must not be empty")
+
+        var observedAllowedPaths = Set<String>()
+        for file in swiftFiles {
+            let relativePath = file.path.replacing(repository.path + "/", with: "")
+            let source = try String(contentsOf: file, encoding: .utf8)
+            let occurrenceCount = source.components(separatedBy: symbol).count - 1
+            let expectedCount = allowedOccurrenceCounts[relativePath] ?? 0
+            XCTAssertEqual(
+                occurrenceCount, expectedCount,
+                "editor-only execution entry point has an unexpected production reference in \(relativePath)"
+            )
+            if expectedCount > 0 { observedAllowedPaths.insert(relativePath) }
+        }
+        XCTAssertEqual(observedAllowedPaths, Set(allowedOccurrenceCounts.keys))
     }
 
     // MARK: - fault isolation at the GameCore level
