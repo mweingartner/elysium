@@ -69,8 +69,10 @@ Typing `gate:` opens the target-aware member flyout; Handler mode similarly offe
 produced events plus that target's declarations, and `ev.` completes the selected event's payload.
 The nearby **World Objects** browser inserts canonical references so they do not need to be guessed.
 Deterministic completion and diagnostics are always local. Ollama completion is separate and Manual
-by default: Option-Command-/ explicitly requests one proposal from the model selected in Options,
-Tab accepts it, and Escape dismisses it. See the [Scripting Guide](docs/SCRIPTING_GUIDE.md) for the
+by default: showing the Script AI panel restores and preloads the exact local model selected in
+Options, but generation starts only after an explicit toolbar/menu/hotkey request or **Send** in the
+panel. Tab accepts an inline proposal, and Escape dismisses it. See the
+[Scripting Guide](docs/SCRIPTING_GUIDE.md) for the
 complete attribute, handler, declaration, payload, command, limits, persistence, and LAN contracts,
 and the [Lua Editor reference](docs/LUA_EDITOR.md) for editor controls and privacy behavior.
 

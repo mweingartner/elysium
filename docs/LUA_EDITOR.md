@@ -265,16 +265,24 @@ and execution.
 
 Editor AI has three modes:
 
-- **Off** — editor completion, panel prompts, and editor model discovery do not contact Ollama.
-- **Manual** — the default; only an explicit request contacts Ollama.
+- **Off** — editor completion, panel prompts, model discovery, and model preload do not contact
+  Ollama.
+- **Manual** — the default; only an explicit request generates a suggestion or sends authoring
+  context. A visible Script AI panel may still discover and preload the selected local model.
 - **On Idle** — optional; an explicit user preference requests after a short typing pause.
 
 Use **Edit > Request AI Suggestion** or Option-Command-/ in Manual or On Idle mode. The exact
 local model selected under Options > AI is used. Cloud-tagged model names remain refused. Selecting
 a model does not enable On Idle. The chosen editor-AI mode persists across application sessions;
-switch back to Manual or Off whenever automatic requests are no longer wanted. Opening the panel does not enumerate models: **Load local models**
-or **Refresh local models** starts that request explicitly. Model discovery is canceled when the
-panel closes, editor AI switches Off, or the world session ends.
+switch back to Manual or Off whenever automatic requests are no longer wanted. When the Script AI
+panel becomes visible—either because it was already open or because **Show AI panel** was
+selected—it refreshes the installed local-model list and preloads the exact saved selection through
+an empty, non-streaming loopback Ollama request with a 30-minute keep-alive. That preload contains no
+script source, world metadata, prompt, or generated suggestion. Choosing another model while the
+panel remains visible preloads the new exact selection. **Refresh local models** remains available
+as a retry. Discovery and an unfinished preload are canceled when the panel closes, editor AI
+switches Off, or the world session ends; a completed preload may remain in Ollama memory for its
+requested keep-alive.
 
 The read-only completion request is bounded to source before/after the caret, script mode/event,
 current diagnostics, a target authoring contract, and the current bounded World Objects snapshot.

@@ -129,6 +129,14 @@ artifact_sha256() {
 # 71680aec7314a60713b192f253b3e7cf6b379f265221826a6838354a6e88f3e8. StorageEngine.swift,
 # Saves.swift, both capability manifests, ElysiumStorage.o, ElysiumTextInput.swift,
 # ElysiumTextInput.o, and Player.swift remain byte-identical.
+#
+# script-ai-model-preload: EXPECTED_ELYSIUM_PRODUCT_SHA256 renewed from
+# 78a1d49fc33e00b0382f42ba9b837e04134f66cb2bdc11c5850ce9b810565de5 to
+# 5fece49d480bd5e9b6b84ef5a37ba1ea8fa60d20760ff9297e37854986e7d075 after the
+# Elysium application target gained visibility-scoped local-model discovery, exact saved-model
+# preload, retry/cancellation state, and its focused SwiftUI regression seam. ElysiumCore.o,
+# elysmoke, and every reviewed storage/text-input source, manifest, and object pin remain
+# byte-identical. docs/script-ai-model-preload/build.md records the normalization evidence.
 EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
 EXPECTED_STORAGE_API_SHA256='ea1dd595ee28762bc2ff7c2e080c2fc4cee0eee008a30e52e82747029206f46c'
 EXPECTED_STORAGE_OBJECT_SHA256='33fb1578d8262a4044ba42ccb1fc7b67e8dfac2589133ab2ff415b5a5d71326b'
@@ -139,7 +147,7 @@ EXPECTED_CORE_CAPABILITY_SHA256='67dbb84929eeda6bea6acec70567a6b8c3711521ae2c1f9
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='ca500f11c671c45b6a0648962bed37881a9adff2a6491632e7d655a50ed80efc'
 EXPECTED_CORE_OBJECT_SHA256='6f2c08d5d9f5b1371fcaa08eaa588b18bb7c311e7943f66f31e57753bf4eb809'
-EXPECTED_ELYSIUM_PRODUCT_SHA256='78a1d49fc33e00b0382f42ba9b837e04134f66cb2bdc11c5850ce9b810565de5'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='5fece49d480bd5e9b6b84ef5a37ba1ea8fa60d20760ff9297e37854986e7d075'
 EXPECTED_SMOKE_PRODUCT_SHA256='71680aec7314a60713b192f253b3e7cf6b379f265221826a6838354a6e88f3e8'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'

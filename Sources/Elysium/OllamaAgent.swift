@@ -79,6 +79,10 @@ private func boundedOllamaData(
 final class OllamaAgentService {
     private let baseURL = URL(string: "http://127.0.0.1:11434")!
     private let session: URLSession
+    private let preloadSession: URLSession
+
+    static let editorModelPreloadKeepAlive = "30m"
+    static let editorModelPreloadTimeout: TimeInterval = 300
 
     // ai-object-graph (change 2), design.md §9.1: "one /ai in flight per
     // world", `/ai cancel`, and the 90 s overall deadline. `currentToolLoopGeneration`
@@ -126,9 +130,18 @@ final class OllamaAgentService {
     init(session: URLSession? = nil) {
         if let session {
             self.session = session
+            self.preloadSession = session
         } else {
             self.session = URLSession(
                 configuration: Self.loopbackSessionConfiguration(),
+                delegate: OllamaLoopbackSessionDelegate(),
+                delegateQueue: nil
+            )
+            let preloadConfiguration = Self.loopbackSessionConfiguration()
+            preloadConfiguration.timeoutIntervalForRequest = Self.editorModelPreloadTimeout
+            preloadConfiguration.timeoutIntervalForResource = Self.editorModelPreloadTimeout
+            self.preloadSession = URLSession(
+                configuration: preloadConfiguration,
                 delegate: OllamaLoopbackSessionDelegate(),
                 delegateQueue: nil
             )
@@ -599,6 +612,52 @@ final class OllamaAgentService {
             .map(sanitizedOllamaModelName)
             .filter(isAllowedLocalOllamaModelName)
             .sorted()
+    }
+
+    /// Loads the exact configured local model without sending source, world state, or a prompt.
+    /// Ollama documents an empty `/api/generate` request as its preload operation. The dedicated
+    /// session gives a large local model enough time to enter memory without lengthening ordinary
+    /// editor suggestion or in-game agent timeouts.
+    func preloadModel(_ requestedModel: String) async throws {
+        let request = try Self.editorModelPreloadRequest(
+            baseURL: baseURL,
+            requestedModel: requestedModel
+        )
+        let (data, response) = try await boundedOllamaData(
+            session: preloadSession, request: request, maximumBytes: 262_144
+        )
+        try Task.checkCancellation()
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw OllamaAgentTransportError.http(http.statusCode)
+        }
+        let decoded = try JSONDecoder().decode(OllamaGenerateResponse.self, from: data)
+        if let error = decoded.error, !error.isEmpty {
+            throw OllamaAgentTransportError.ollama(error)
+        }
+    }
+
+    static func editorModelPreloadRequest(
+        baseURL: URL,
+        requestedModel: String
+    ) throws -> URLRequest {
+        let model = sanitizedOllamaModelName(requestedModel)
+        guard !model.isEmpty else { throw OllamaCodeCompletionError.invalidModel }
+        guard isAllowedLocalOllamaModelName(model) else {
+            throw OllamaCodeCompletionError.cloudModelForbidden
+        }
+        var request = URLRequest(
+            url: baseURL.appendingPathComponent("api/generate"),
+            timeoutInterval: editorModelPreloadTimeout
+        )
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "prompt": "",
+            "keep_alive": editorModelPreloadKeepAlive,
+            "stream": false,
+        ])
+        return request
     }
 
     private func requestAction(model: String, prompt: String,

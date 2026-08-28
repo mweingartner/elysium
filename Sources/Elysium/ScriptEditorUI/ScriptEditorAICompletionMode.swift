@@ -22,7 +22,7 @@ enum ScriptEditorAICompletionMode: String, CaseIterable, Identifiable {
     var detail: String {
         switch self {
         case .off: "Never contact Ollama from the editor"
-        case .manual: "Only request a suggestion with Option-Command-/"
+        case .manual: "Generate only after an explicit editor request"
         case .onIdle: "Request after a short pause; every request remains cancellable"
         }
     }

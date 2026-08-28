@@ -688,8 +688,14 @@ built-in names plus that exact object's declared custom names and typed fields. 
 represented explicitly as envelope-only with unknown event-specific payload. The contract also
 includes applicable target members. It receives no tool
 definitions or query/mutation context and cannot execute, Save, attach, emit, or otherwise change
-world state. Manual Option-Command-/ is the default; automatic idle requests require explicit
-opt-in, and all responses are revision/source-hash/caret/model/context bound and cancellable.
+world state. Manual explicit requests—panel Send or the toolbar/menu/hotkey action—are the default;
+automatic idle requests require explicit opt-in, and all responses are
+revision/source-hash/caret/model/context bound and cancellable.
+Panel visibility has a narrower lifecycle side effect: while editor AI is not Off, the panel
+refreshes the loopback-only installed-model list and preloads the exact persisted local model with
+an empty, non-streaming request. This sends no document or world context and does not generate a
+proposal; changing the visible panel's selection preloads that exact replacement. Hiding the panel,
+turning editor AI Off, or ending the world session cancels unfinished discovery/preload work.
 
 The World Objects projection is captured on main from the same side-effect-free `ObjectGraph`,
 `AttributeStore`, and `ScriptStore` reads as scripting commands. Default discovery is radius 16,

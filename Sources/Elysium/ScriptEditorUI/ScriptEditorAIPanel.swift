@@ -2,17 +2,76 @@
 // AI help column: transcript bubbles + auto-scroll + "Working…" (ported from Hype's
 // `Hype/Views/ScriptEditorAIView.swift`), wired only to the editor's bounded proposal service.
 // Unlike `/ai`, this panel receives no world query/mutation tools and cannot execute, save, or run
-// a script. It shows the currently selected model
-// (`game.settings.aiOllamaModel`) with a picker (`elysiumOllamaAgent.fetchModels`), prompt
-// history via ↑/↓ (`AIChatPromptHistory`), and an auto-growing input (`AutoGrowingTextInput`).
-// A successful response can be inserted explicitly after the user has reviewed it.
+// a script. It restores and preloads the currently selected local model
+// (`game.settings.aiOllamaModel`) whenever the panel becomes visible, refreshes the picker through
+// `elysiumOllamaAgent.fetchModels`, keeps prompt history via ↑/↓ (`AIChatPromptHistory`), and uses
+// an auto-growing input (`AutoGrowingTextInput`). A successful response can be inserted explicitly
+// after the user has reviewed it.
 
 import SwiftUI
 import ElysiumCore
 
+struct ScriptEditorAIModelLoader {
+    let fetchModels: @MainActor () async throws -> [String]
+    let preloadModel: @MainActor (String) async throws -> Void
+
+    static let live = ScriptEditorAIModelLoader(
+        fetchModels: { try await elysiumOllamaAgent.fetchModels() },
+        preloadModel: { try await elysiumOllamaAgent.preloadModel($0) }
+    )
+}
+
+@MainActor
+final class ScriptEditorAIModelPreloader: ObservableObject {
+    private let preloadOperation: @MainActor (String) async throws -> Void
+    private var task: Task<Void, Never>?
+    private var generation: UInt64 = 0
+    private(set) var satisfiedModel: String?
+
+    init(preloadOperation: @escaping @MainActor (String) async throws -> Void) {
+        self.preloadOperation = preloadOperation
+    }
+
+    deinit {
+        task?.cancel()
+    }
+
+    func preload(_ requestedModel: String, force: Bool = false) {
+        let model = sanitizedOllamaModelName(requestedModel)
+        guard isAllowedLocalOllamaModelName(model) else { return }
+        guard force || satisfiedModel != model else { return }
+
+        generation &+= 1
+        let currentGeneration = generation
+        task?.cancel()
+        satisfiedModel = model
+        let operation = preloadOperation
+        task = Task { @MainActor [weak self] in
+            do {
+                try await operation(model)
+                guard let self, self.generation == currentGeneration else { return }
+                self.task = nil
+            } catch {
+                guard let self, self.generation == currentGeneration else { return }
+                self.task = nil
+                self.satisfiedModel = nil
+            }
+        }
+    }
+
+    func stop() {
+        generation &+= 1
+        task?.cancel()
+        task = nil
+        satisfiedModel = nil
+    }
+}
+
 struct ScriptEditorAIPanel: View {
     @ObservedObject var model: ScriptEditorModel
     @Environment(\.scriptEditorTheme) private var theme
+    private let modelLoader: ScriptEditorAIModelLoader
+    @StateObject private var modelPreloader: ScriptEditorAIModelPreloader
 
     private struct Bubble: Identifiable, Equatable {
         let id = UUID()
@@ -35,6 +94,17 @@ struct ScriptEditorAIPanel: View {
     @State private var lastAssistantInsertionRefusal: String?
     @State private var requestGeneration: UInt64 = 0
     @FocusState private var isPromptFocused: Bool
+
+    init(
+        model: ScriptEditorModel,
+        modelLoader: ScriptEditorAIModelLoader = .live
+    ) {
+        _model = ObservedObject(wrappedValue: model)
+        self.modelLoader = modelLoader
+        _modelPreloader = StateObject(wrappedValue: ScriptEditorAIModelPreloader(
+            preloadOperation: modelLoader.preloadModel
+        ))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -75,12 +145,24 @@ struct ScriptEditorAIPanel: View {
         .background(theme.panelBackground.color)
         .onAppear {
             model.refreshAIConfiguration()
+            activateConfiguredModel()
         }
         .onChange(of: model.aiCompletionMode) { _, mode in
-            if mode == .off { stop() }
+            if mode == .off {
+                stop()
+            } else {
+                activateConfiguredModel()
+            }
         }
         .onChange(of: model.isWorldSessionActive) { _, active in
-            if !active { stop() }
+            if active {
+                activateConfiguredModel()
+            } else {
+                stop()
+            }
+        }
+        .onChange(of: model.aiModelName) { _, _ in
+            preloadConfiguredModel()
         }
         .onChange(of: model.documentIdentity) { _, _ in
             clearConversation()
@@ -92,6 +174,11 @@ struct ScriptEditorAIPanel: View {
 
     // MARK: - header
 
+    private func activateConfiguredModel() {
+        refreshModels()
+        preloadConfiguredModel()
+    }
+
     private var header: some View {
         HStack(spacing: 6) {
             Image(systemName: "wand.and.sparkles")
@@ -102,7 +189,7 @@ struct ScriptEditorAIPanel: View {
             Menu {
                 if availableModels.isEmpty {
                     SwiftUI.Button(isFetchingModels ? "Loading local models…" : "Load local models") {
-                        refreshModels()
+                        reloadModels()
                     }
                     .disabled(isFetchingModels || model.aiCompletionMode == .off || !model.isWorldSessionActive)
                 } else {
@@ -119,8 +206,7 @@ struct ScriptEditorAIPanel: View {
                     }
                     Divider()
                     SwiftUI.Button("Refresh local models") {
-                        availableModels = []
-                        refreshModels()
+                        reloadModels()
                     }
                 }
             } label: {
@@ -163,7 +249,7 @@ struct ScriptEditorAIPanel: View {
                 }
             }
             do {
-                let names = try await elysiumOllamaAgent.fetchModels()
+                let names = try await modelLoader.fetchModels()
                 guard !Task.isCancelled, modelDiscoveryGeneration == generation,
                       model.aiCompletionMode != .off,
                       model.isWorldSessionActive else { return }
@@ -174,6 +260,17 @@ struct ScriptEditorAIPanel: View {
                 guard !Task.isCancelled else { return }
             }
         }
+    }
+
+    private func reloadModels() {
+        availableModels = []
+        refreshModels()
+        preloadConfiguredModel(force: true)
+    }
+
+    private func preloadConfiguredModel(force: Bool = false) {
+        guard model.aiCompletionMode != .off, model.isWorldSessionActive else { return }
+        modelPreloader.preload(model.aiModelName, force: force)
     }
 
     // MARK: - transcript
@@ -327,6 +424,7 @@ struct ScriptEditorAIPanel: View {
         modelDiscoveryTask?.cancel()
         modelDiscoveryTask = nil
         isFetchingModels = false
+        modelPreloader.stop()
     }
 
     private func stopRequest() {
