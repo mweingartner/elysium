@@ -1,6 +1,6 @@
 diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=elysium_shim.c --exclude=elysium_shim.h --exclude=module.modulemap a/include/lauxlib.h b/include/lauxlib.h
---- a/include/lauxlib.h	2026-08-22 13:16:03
-+++ b/include/lauxlib.h	2026-08-22 13:53:49
+--- a/include/lauxlib.h	2026-08-28 19:24:01
++++ b/include/lauxlib.h	2026-08-28 19:24:01
 @@ -69,8 +69,8 @@
  
  LUALIB_API int   (luaL_newmetatable) (lua_State *L, const char *tname);
@@ -13,8 +13,8 @@ diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=ely
  LUALIB_API void (luaL_where) (lua_State *L, int lvl);
  LUALIB_API int (luaL_error) (lua_State *L, const char *fmt, ...);
 diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=elysium_shim.c --exclude=elysium_shim.h --exclude=module.modulemap a/include/luaconf.h b/include/luaconf.h
---- a/include/luaconf.h	2026-08-22 13:16:03
-+++ b/include/luaconf.h	2026-08-22 13:53:49
+--- a/include/luaconf.h	2026-08-28 19:24:01
++++ b/include/luaconf.h	2026-08-28 19:24:01
 @@ -792,10 +792,43 @@
  /*
  ** Local configuration. You can use this space to add your redefinitions
@@ -60,8 +60,8 @@ diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=ely
  
  #endif
 diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=elysium_shim.c --exclude=elysium_shim.h --exclude=module.modulemap a/lauxlib.c b/lauxlib.c
---- a/lauxlib.c	2026-08-22 13:16:03
-+++ b/lauxlib.c	2026-08-22 13:53:49
+--- a/lauxlib.c	2026-08-28 19:24:01
++++ b/lauxlib.c	2026-08-28 19:24:01
 @@ -330,27 +330,12 @@
  }
  
@@ -112,8 +112,8 @@ diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=ely
            lua_remove(L, -2);  /* remove '__name' */
          break;
 diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=elysium_shim.c --exclude=elysium_shim.h --exclude=module.modulemap a/lgc.c b/lgc.c
---- a/lgc.c	2026-08-22 13:16:03
-+++ b/lgc.c	2026-08-22 13:53:49
+--- a/lgc.c	2026-08-28 19:24:01
++++ b/lgc.c	2026-08-28 19:24:01
 @@ -261,6 +261,7 @@
    GCObject *o = cast(GCObject *, p + offset);
    o->marked = luaC_white(g);
@@ -122,9 +122,29 @@ diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=ely
    o->next = g->allgc;
    g->allgc = o;
    return o;
+diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=elysium_shim.c --exclude=elysium_shim.h --exclude=module.modulemap a/ljumptab.h b/ljumptab.h
+--- a/ljumptab.h	2026-08-28 19:24:01
++++ b/ljumptab.h	2026-08-28 19:24:01
+@@ -16,6 +16,11 @@
+ #define vmbreak		vmfetch(); vmdispatch(GET_OPCODE(i));
+ 
+ 
++/* The computed-goto dispatch table below is only valid inside luaV_execute (its
++** entries are address-of-label values). lvm.c sets ELYSIUM_LUA_VM_DISPATCH_TABLE at
++** the include site; hiding the table otherwise keeps clang's -extract-api pass
++** (swift package dump-symbol-graph) from rejecting this header at file scope. */
++#ifdef ELYSIUM_LUA_VM_DISPATCH_TABLE
+ static const void *const disptab[NUM_OPCODES] = {
+ 
+ #if 0
+@@ -110,3 +115,4 @@
+ &&L_OP_EXTRAARG
+ 
+ };
++#endif  /* ELYSIUM_LUA_VM_DISPATCH_TABLE */
 diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=elysium_shim.c --exclude=elysium_shim.h --exclude=module.modulemap a/lobject.h b/lobject.h
---- a/lobject.h	2026-08-22 13:16:03
-+++ b/lobject.h	2026-08-22 13:53:49
+--- a/lobject.h	2026-08-28 19:24:01
++++ b/lobject.h	2026-08-28 19:24:01
 @@ -284,8 +284,15 @@
  /*
  ** Common Header for all collectable objects (in macro form, to be
@@ -143,8 +163,8 @@ diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=ely
  
  /* Common type for all collectable objects */
 diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=elysium_shim.c --exclude=elysium_shim.h --exclude=module.modulemap a/lstate.c b/lstate.c
---- a/lstate.c	2026-08-22 13:16:03
-+++ b/lstate.c	2026-08-22 13:53:49
+--- a/lstate.c	2026-08-28 19:24:01
++++ b/lstate.c	2026-08-28 19:24:01
 @@ -380,6 +380,8 @@
    g->warnf = NULL;
    g->ud_warn = NULL;
@@ -155,8 +175,8 @@ diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=ely
    g->gcstp = GCSTPGC;  /* no GC while building state */
    g->strt.size = g->strt.nuse = 0;
 diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=elysium_shim.c --exclude=elysium_shim.h --exclude=module.modulemap a/lstate.h b/lstate.h
---- a/lstate.h	2026-08-22 13:16:03
-+++ b/lstate.h	2026-08-22 13:53:49
+--- a/lstate.h	2026-08-28 19:24:01
++++ b/lstate.h	2026-08-28 19:24:01
 @@ -262,6 +262,7 @@
    TValue l_registry;
    TValue nilvalue;  /* a nil value */
@@ -166,8 +186,8 @@ diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=ely
    lu_byte gcstate;  /* state of garbage collector */
    lu_byte gckind;  /* kind of GC running */
 diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=elysium_shim.c --exclude=elysium_shim.h --exclude=module.modulemap a/lstrlib.c b/lstrlib.c
---- a/lstrlib.c	2026-08-22 13:16:03
-+++ b/lstrlib.c	2026-08-22 13:53:49
+--- a/lstrlib.c	2026-08-28 19:24:01
++++ b/lstrlib.c	2026-08-28 19:24:01
 @@ -366,6 +366,7 @@
      const char *init;
      ptrdiff_t len;
@@ -244,8 +264,8 @@ diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=ely
    ms->src_end = s + ls;
    ms->p_end = p + lp;
 diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=elysium_shim.c --exclude=elysium_shim.h --exclude=module.modulemap a/ltable.c b/ltable.c
---- a/ltable.c	2026-08-22 13:16:03
-+++ b/ltable.c	2026-08-22 13:53:49
+--- a/ltable.c	2026-08-28 19:24:01
++++ b/ltable.c	2026-08-28 19:24:01
 @@ -179,8 +179,14 @@
        return hashpointer(t, f);
      }
@@ -263,8 +283,8 @@ diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=ely
    }
  }
 diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=elysium_shim.c --exclude=elysium_shim.h --exclude=module.modulemap a/lundump.c b/lundump.c
---- a/lundump.c	2026-08-22 13:16:03
-+++ b/lundump.c	2026-08-22 13:53:49
+--- a/lundump.c	2026-08-28 19:24:01
++++ b/lundump.c	2026-08-28 19:24:01
 @@ -4,332 +4,32 @@
  ** See Copyright Notice in lua.h
  */
@@ -615,8 +635,8 @@ diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=ely
 -}
 -
 diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=elysium_shim.c --exclude=elysium_shim.h --exclude=module.modulemap a/lvm.c b/lvm.c
---- a/lvm.c	2026-08-22 13:16:03
-+++ b/lvm.c	2026-08-22 13:53:49
+--- a/lvm.c	2026-08-28 19:24:01
++++ b/lvm.c	2026-08-28 19:24:01
 @@ -374,7 +374,8 @@
  ** Compare two strings 'ts1' x 'ts2', returning an integer less-equal-
  ** -greater than zero if 'ts1' is less-equal-greater than 'ts2'.
@@ -636,11 +656,10 @@ diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=ely
      if (temp != 0)  /* not equal? */
        return temp;  /* done */
      else {  /* strings are equal up to a '\0' */
-@@ -669,6 +670,14 @@
-           luaG_runerror(L, "string length overflow");
+@@ -670,6 +671,14 @@
          }
          tl += l;
-+      }
+       }
 +      /* Elysium: ELYSIUM_MAX_STRING (262,144 bytes) bounds every script-visible
 +      ** string; '..' is otherwise the only uncapped producer (C22, script-sandbox-
 +      ** and-budgets spec, "Pattern-matcher step budget and library input caps").
@@ -648,6 +667,20 @@ diff -ruN --exclude=elysium_internal.h --exclude=elysium_sandbox.c --exclude=ely
 +      if (l_unlikely(tl > ELYSIUM_MAX_STRING)) {
 +        L->top.p = top - total;  /* pop strings to avoid wasting stack */
 +        luaG_runerror(L, "string too long");
-       }
++      }
        if (tl <= LUAI_MAXSHORTLEN) {  /* is result a short string? */
          char buff[LUAI_MAXSHORTLEN];
+         copy2buff(top, n, buff);  /* copy strings to buffer */
+@@ -1158,7 +1167,12 @@
+   const Instruction *pc;
+   int trap;
+ #if LUA_USE_JUMPTABLE
++/* Pull in the computed-goto dispatch table inside this function body only; the sentinel
++** lets ljumptab.h expose the table here while staying valid for clang -extract-api
++** (swift package dump-symbol-graph) when the header is parsed standalone. */
++#define ELYSIUM_LUA_VM_DISPATCH_TABLE 1
+ #include "ljumptab.h"
++#undef ELYSIUM_LUA_VM_DISPATCH_TABLE
+ #endif
+  startfunc:
+   trap = L->hookmask;

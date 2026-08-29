@@ -16,6 +16,11 @@
 #define vmbreak		vmfetch(); vmdispatch(GET_OPCODE(i));
 
 
+/* The computed-goto dispatch table below is only valid inside luaV_execute (its
+** entries are address-of-label values). lvm.c sets ELYSIUM_LUA_VM_DISPATCH_TABLE at
+** the include site; hiding the table otherwise keeps clang's -extract-api pass
+** (swift package dump-symbol-graph) from rejecting this header at file scope. */
+#ifdef ELYSIUM_LUA_VM_DISPATCH_TABLE
 static const void *const disptab[NUM_OPCODES] = {
 
 #if 0
@@ -110,3 +115,4 @@ static const void *const disptab[NUM_OPCODES] = {
 &&L_OP_EXTRAARG
 
 };
+#endif  /* ELYSIUM_LUA_VM_DISPATCH_TABLE */

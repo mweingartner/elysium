@@ -1167,7 +1167,12 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
   const Instruction *pc;
   int trap;
 #if LUA_USE_JUMPTABLE
+/* Pull in the computed-goto dispatch table inside this function body only; the sentinel
+** lets ljumptab.h expose the table here while staying valid for clang -extract-api
+** (swift package dump-symbol-graph) when the header is parsed standalone. */
+#define ELYSIUM_LUA_VM_DISPATCH_TABLE 1
 #include "ljumptab.h"
+#undef ELYSIUM_LUA_VM_DISPATCH_TABLE
 #endif
  startfunc:
   trap = L->hookmask;

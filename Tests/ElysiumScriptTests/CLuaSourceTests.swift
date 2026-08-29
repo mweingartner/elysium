@@ -1,8 +1,8 @@
 // CLuaSourceTests.swift — task 6.2 (+ the C22/C25/C31 pins from 6.5 that concern
 // vendored sources). Lane A (vendoring) owns this file: it is a hermetic, network-free
 // check that Sources/CLua is byte-identical to the pinned upstream tarball plus
-// scripts/clua/elysium.patch, that the patch touches exactly the eleven files
-// design.md Decision 3 names, and that the determinism/boundary pins those eleven
+// scripts/clua/elysium.patch, that the patch touches exactly the twelve files
+// design.md Decision 3 names, and that the determinism/boundary pins those twelve
 // files exist to establish are actually present in the checked-in tree.
 //
 // This file never `import CLua` (CLuaSourceTests reasons about source text only, the
@@ -59,10 +59,11 @@ final class CLuaSourceTests: XCTestCase {
         "include/elysium_shim.h", "include/module.modulemap",
     ]
 
-    /// design.md Decision 3: the exact eleven files the patch may touch.
+    /// design.md Decision 3: the exact twelve files the patch may touch (ljumptab.h added
+    /// for the -extract-api computed-goto guard; see elysium.patch).
     private static let expectedPatchedFiles: Set<String> = [
         "include/luaconf.h", "lobject.h", "lstate.h", "lstate.c", "lgc.c", "ltable.c",
-        "include/lauxlib.h", "lauxlib.c", "lstrlib.c", "lvm.c", "lundump.c",
+        "include/lauxlib.h", "lauxlib.c", "lstrlib.c", "lvm.c", "lundump.c", "ljumptab.h",
     ]
 
     private struct UpstreamManifest: Decodable {
@@ -202,9 +203,9 @@ final class CLuaSourceTests: XCTestCase {
         XCTAssertEqual(actual, expected)
     }
 
-    // MARK: - The patch touches exactly the eleven listed files
+    // MARK: - The patch touches exactly the twelve listed files
 
-    func testPatchTouchesExactlyElevenFiles() throws {
+    func testPatchTouchesExactlyTwelveFiles() throws {
         let patchText = try String(contentsOf: patchURL, encoding: .utf8)
         var touched: Set<String> = []
         for line in patchText.split(separator: "\n", omittingEmptySubsequences: false) where line.hasPrefix("--- a/") {
@@ -213,7 +214,7 @@ final class CLuaSourceTests: XCTestCase {
             touched.insert(String(name))
         }
         XCTAssertEqual(touched, Self.expectedPatchedFiles)
-        XCTAssertEqual(touched.count, 11)
+        XCTAssertEqual(touched.count, 12)
     }
 
     // MARK: - Forbidden call sites, URL allowlist, locale/time hygiene
