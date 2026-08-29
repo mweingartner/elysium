@@ -139,6 +139,7 @@ All gameplay bindings can be changed in Options → Controls.
 | Shift | Sneak |
 | Control or double-tap forward | Sprint |
 | E | Inventory |
+| G / H | Toggle a torch or shield into the off (left) hand |
 | Command-S | Sort the open player inventory or local/host chest A-Z |
 | T | Chat and commands |
 | M | Expand or collapse the map |
@@ -155,13 +156,20 @@ expanded map opened with `M` remains available.
 
 An empty selected slot leaves the first-person view completely clear. Selected pickaxes use
 material-correct three-quarter Blender renders of a pinned CC0 voxel mesh, held at a readable
-scale without deforming the image during a strike. Other tools currently retain their reviewed
-Faithful silhouettes; blocks retain their three-dimensional voxel preview, while foods and other
-objects retain high-resolution Faithful item art. Attack/use poses provide clear feedback for swings and tool
-actions. Bows and shields render in the left hand. Holding use with a bow raises it, brings the
+scale without deforming the image during a strike. Other tools now stand upright in the fist —
+their reviewed Faithful art rotated so the handle meets the hand instead of floating past it, with
+the painted haft removed from the arm so the fingers grip the tool's own handle. Blocks retain
+their three-dimensional voxel preview, while foods and other objects retain high-resolution
+Faithful item art. Attack/use poses provide clear feedback for swings and tool
+actions. Bows, shields, and torches render in the left (off) hand. **G** and **H** toggle a torch
+or a shield from the inventory into the off hand and back, so you can carry a pickaxe and a torch
+to mine with light, or a sword and a shield to fight defensively; a held torch in either hand casts
+a soft, flickering warm light on the world around you. Holding use with a bow raises it, brings the
 right hand to the string, advances through the charge frames, and fires on release using the same
-charge duration that determines arrow power; shields also remain left-handed when placed in the
-offhand slot. Inventory and chest
+charge duration that determines arrow power. Holding use with a shield in the off hand and a sword,
+mace, or empty main hand raises the shield to guard, and while raised it stops a frontal melee or
+projectile hit — damage and knockback both — leaving flanking and environmental damage to land.
+Inventory and chest
 screens include a **Sort A-Z** button; sorting orders complete stacks by item
 name and type without merging them or moving equipment, crafting, cursor, or
 other non-storage slots. Chest sorting is disabled for LAN clients until the

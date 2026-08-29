@@ -118,6 +118,8 @@ These are the 25 current default bindings:
 | Command | `/` |
 | Perspective | `F5` |
 | Swap Offhand | `F` |
+| Equip Torch (off-hand) | `G` |
+| Equip Shield (off-hand) | `H` |
 | RPG Character | `K` |
 | Cycle RPG Action | `O` |
 | Use RPG Action | `L` |
@@ -132,6 +134,15 @@ These are the 25 current default bindings:
 | RPG Quick Slot 9 | `Shift+9` |
 
 Double-tapping forward also starts sprinting with the default movement setup.
+
+The off (left) hand carries a torch or shield alongside whatever the right hand holds. **G** equips
+or unequips a torch and **H** a shield — each pulls one from your inventory and returns it on a
+second press, while **F** still swaps the off hand with the selected hotbar slot. A held torch, in
+either hand, lights the area around you, so a pickaxe in the right hand and a torch in the left lets
+you mine without placing torches first. With a shield in the off hand and a sword, mace, or empty
+main hand, holding the **use** action raises the shield: while raised it blocks a frontal melee or
+projectile hit outright, including its knockback, but not attacks from the side or behind, falling,
+fire, or other environmental damage. Held tools stand upright in the fist, gripped by the handle.
 
 ### Fixed mouse and application shortcuts
 
