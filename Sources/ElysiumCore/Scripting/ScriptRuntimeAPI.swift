@@ -49,6 +49,7 @@ extension ScriptRuntime {
                 "setFurnaceOutput": { [weak runtime] handle, call in runtime?.methodSetFurnaceOutput(handle, call) ?? .error("runtime unavailable") },
                 "setBlock": { [weak runtime] handle, call in runtime?.methodSetBlock(handle, call) ?? .error("runtime unavailable") },
                 "breakBlock": { [weak runtime] handle, call in runtime?.methodBreakBlock(handle, call) ?? .error("runtime unavailable") },
+                "give": { [weak runtime] handle, call in runtime?.methodGive(handle, call) ?? .error("runtime unavailable") },
             ],
             index: { [weak runtime] handle, _, key in runtime?.objectIndex(handle, key) ?? .values([.null]) },
             newIndex: { [weak runtime] handle, _, key, value in runtime?.objectNewIndex(handle, key, value) ?? .error("runtime unavailable") }
@@ -827,6 +828,63 @@ extension ScriptRuntime {
         guard !dryRunActive else { return .values([.bool(true)]) }
         w.breakBlockNaturally(x, y, z)
         return .values([.bool(true)])
+    }
+
+    /// Grants a stack of `item` to a player's inventory and returns whether it fit.
+    ///
+    /// This is the only inventory-mutating script verb. Like `block:setBlock` it is a live,
+    /// host-authoritative *gameplay* mutation — bounded by the shared instruction budget, gated by
+    /// the `doScripts` kill switch and per-world script trust (both enforced pre-dispatch), refused
+    /// during unload, and a no-op that only validates under the Editor's "Check" (`dryRunActive`).
+    /// It is deliberately *not* journaled: granting an item on a button press is gameplay, not an
+    /// `/ai`-authoring edit to `/script undo-ai`, exactly as `setBlock`/`breakBlock` are not.
+    ///
+    /// Valid only on a player handle — `ev.by` in `block.used`, or the `player` object. A local
+    /// target mutates the host's own `Player`. A connected LAN guest (`player:lan:<peerID>`) is
+    /// delivered through the host's authoritative-pickup path (`LANRemotePlayerEntity.grantScriptItem`)
+    /// so the stack reaches that guest's own client-authoritative inventory over the normal grant
+    /// channel; a bare mirror write would be discarded by the guest's next inventory snapshot.
+    ///
+    /// `count` defaults to 1 and is capped at the item's own stack limit so a single call never
+    /// over-stacks a slot (`Player.give` does not clamp); a script that needs more calls it again,
+    /// which the per-tick instruction budget still bounds.
+    func methodGive(_ handle: HandleRef, _ call: HostCall) -> HostResult {
+        guard (1...2).contains(call.arguments.count),
+            case .value(.string(let itemName))? = call.arguments.first,
+            let ref = ObjectRef.parse(handle.ref), ref.kind == .player else {
+            return .error("give(item[, count]) is only valid on a player handle")
+        }
+        guard !unloadActive else { return .error("give() is not available during unload") }
+        guard let itemID = iidOpt(itemName) else { return .error("unknown item '\(itemName)'") }
+        let maxStack = itemDef(itemID).maxStack
+        let count: Int
+        if call.arguments.count == 2 {
+            guard let requested = intArg(call.arguments[1]) else {
+                return .error("give(item, count) count must be an integer")
+            }
+            count = requested
+        } else {
+            count = 1
+        }
+        guard (1...maxStack).contains(count) else {
+            return .error("give count must be between 1 and \(maxStack) for '\(itemName)'")
+        }
+        guard !dryRunActive else { return .values([.bool(true)]) }
+        switch graph.resolve(ref) {
+        case .live(.player(let player, _)):
+            return .values([.bool(player.give(ItemStack(itemID, count)))])
+        case .live(.entity(let entity, _)):
+            // A player-kind ref only ever resolves to a connected LAN guest's host-side proxy here.
+            // grantScriptItem routes through the authoritative-pickup/grant queue so the item reaches
+            // the guest's client-owned inventory — a plain mirror give() would be overwritten by the
+            // guest's next published snapshot and never delivered.
+            guard let remote = entity as? LANRemotePlayerEntity else {
+                return .error("give(item[, count]) is only valid on a player handle")
+            }
+            return .values([.bool(remote.grantScriptItem(ItemStack(itemID, count)))])
+        default:
+            return .error("player is not loaded")
+        }
     }
 
     // MARK: - attrs handle

@@ -217,7 +217,7 @@ public struct ScriptLanguageAttribute: Sendable, Equatable, Identifiable {
         let fixedHandleMembers: Set<String> = [
             "ref", "kind", "name", "attrs", "exists", "get", "set", "scripts", "define",
             "events", "declareEvent", "undeclareEvent", "on", "onAttribute", "emit",
-            "attach", "detach", "setFurnaceOutput", "setBlock", "breakBlock",
+            "attach", "detach", "setFurnaceOutput", "setBlock", "breakBlock", "give",
         ]
         guard !fixedHandleMembers.contains(candidate) else { return false }
         guard let first = candidate.utf8.first,
@@ -552,6 +552,7 @@ public enum ScriptLanguageSchema {
         method("setFurnaceOutput", signatures: [signature("furnace:setFurnaceOutput(item)", [p("item", .string)], returns: [r(.boolean)])], receiverKinds: [.block], summary: "While this attached script is live, replace this furnace family's existing and future recipe output with a registered item; use default to clear."),
         method("setBlock", signatures: [signature("block:setBlock(name[, opts])", [p("name", .string), p("opts", .table, optional: true)], returns: [r(.boolean)])], receiverKinds: [.block], summary: "Replace this block and optionally apply built-in block attributes."),
         method("breakBlock", signatures: [signature("block:breakBlock()", returns: [r(.boolean)])], receiverKinds: [.block], summary: "Break this block naturally, including normal drops."),
+        method("give", signatures: [signature("player:give(item[, count])", [p("item", .string), p("count", .number, optional: true)], returns: [r(.boolean)])], receiverKinds: [.player], summary: "Grant a stack of a registered item to this player's inventory; count defaults to 1 and is capped at the item's stack limit. Returns whether it fit."),
     ]
 
     public static let unsupportedSymbols: [ScriptLanguageSymbol] = [
@@ -616,6 +617,7 @@ public enum ScriptLanguageSchema {
         snippet("object.furnace_output", .objects, "self:setFurnaceOutput(item)", "self:setFurnaceOutput(\"iron_ingot\")", "Override this furnace's output while the attached script is live.", ownerKinds: [.block]),
         snippet("object.set_block", .objects, "self:setBlock(name)", "self:setBlock(\"stone\")", "Replace this block.", ownerKinds: [.block]),
         snippet("object.break_block", .objects, "self:breakBlock()", "self:breakBlock()", "Break this block naturally.", ownerKinds: [.block]),
+        snippet("object.give", .objects, "player:give(item, count)", "ev.by:give(\"iron_pickaxe\", 1)", "Grant an item to a player, e.g. the one from a block.used event.", ownerKinds: [.player]),
         snippet("object.attrs", .objects, "self.attrs", "local attrs = self.attrs", "Access named custom attributes."),
         snippet("object.ref", .objects, "self.ref", "local object_ref = self.ref", "Canonical reference."),
         snippet("object.kind", .objects, "self.kind", "local object_kind = self.kind", "Object kind."),

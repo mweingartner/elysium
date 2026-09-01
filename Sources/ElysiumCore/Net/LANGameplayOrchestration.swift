@@ -333,6 +333,40 @@ public final class LANRemotePlayerEntity: LivingEntity {
         return false
     }
 
+    /// Host-authoritative script grant (`player:give`) to this connected guest.
+    ///
+    /// A plain ``give(_:)`` only mutates this cosmetic proxy inventory, which the guest's next
+    /// published snapshot overwrites — so the guest never actually receives the item. This instead
+    /// mirrors the authoritative-pickup accounting: it applies the stack to the proxy inventory AND
+    /// enqueues the delivered amount into `pendingAuthoritativePickupItems`, so the host's per-tick
+    /// `drainLANAuthoritativePickupMutations` turns it into a `LANInventoryGrant` delivered to the
+    /// guest's own client-authoritative inventory, while `hasPendingAuthoritativePickupMutation`
+    /// keeps the proxy from being overwritten until that grant lands. Returns whether the whole
+    /// stack fit; false when the per-tick grant-batch cap is reached or the proxy inventory is full.
+    @discardableResult
+    public func grantScriptItem(_ stack: ItemStack) -> Bool {
+        let itemID = stack.id
+        guard itemID >= 0, itemID < itemDefs.count, stack.count > 0 else { return false }
+        let before = stack.count
+        let maxStack = max(1, maxStackOf(stack))
+        let entries = (before - 1) / maxStack + 1
+        guard entries <= LAN_MULTIPLAYER_MAX_GRANT_ITEMS - pendingAuthoritativePickupItems.count else {
+            return false
+        }
+        let placedAll = give(stack)
+        let delivered = before - stack.count
+        guard delivered > 0 else { return false }
+        var remaining = delivered
+        while remaining > 0 {
+            let count = min(remaining, maxStack)
+            pendingAuthoritativePickupItems.append(LANInventorySlotSnapshot(
+                slot: 0, itemID: itemID, count: count, damage: stack.damage, label: stack.label
+            ))
+            remaining -= count
+        }
+        return placedAll
+    }
+
     public func addXP(_ pointsIn: Int) {
         let points = max(0, min(100_000, pointsIn))
         guard points > 0 else { return }

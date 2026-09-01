@@ -23,6 +23,7 @@ final class ScriptRuntimeTests: XCTestCase {
         super.setUp()
         registerAllBlocks()
         registerAllEntities()
+        if itemDefs.isEmpty { registerAllItems() }
     }
 
     private func makeRuntimeHarness(
@@ -2648,6 +2649,71 @@ final class ScriptRuntimeTests: XCTestCase {
         })
         XCTAssertEqual(event.source, .script(owner: .world, name: "atomic_builder"))
         XCTAssertNil(scripts.get(.world, "atomic_builder")?.lastError)
+    }
+
+    func testGiveGrantsItemsToTheHostPlayerAndDryRunNeverMutates() throws {
+        let harness = try makeRuntimeHarness(seed: 1_180)
+        let world = try XCTUnwrap(harness.host.worldsByDim[.overworld])
+        let player = Player(world: world)
+        world.addEntity(player)
+        harness.host.localPlayer = player
+        let pickID = iid("iron_pickaxe")
+        XCTAssertEqual(player.countItem(pickID), 0)
+
+        // Editor "Check" validates the call but must never touch the inventory.
+        XCTAssertEqual(
+            harness.runtime.dryRunOutcome(
+                source: "objects.get(\"player\"):give(\"iron_pickaxe\", 1)",
+                owner: .world, mode: .module
+            ),
+            .completed
+        )
+        XCTAssertEqual(player.countItem(pickID), 0, "Check must not grant items")
+
+        _ = try harness.scripts.attach(
+            .world, name: "giver",
+            source: "objects.get(\"player\"):give(\"iron_pickaxe\", 1)",
+            mode: .module, triggers: [], by: .player, tick: 0
+        ).get()
+        harness.state.anyScriptsAttached = true
+        harness.runtime.runLoads()
+
+        XCTAssertEqual(player.countItem(pickID), 1, "a live give must grant exactly one pickaxe")
+        XCTAssertNil(harness.scripts.get(.world, "giver")?.lastError)
+    }
+
+    func testGivePreflightRejectsEveryInvalidShapeWithoutMutation() throws {
+        // iron_pickaxe is a tool, so its stack limit is 1: any count outside 1...1 is refused.
+        let cases: [(call: String, expectedError: String)] = [
+            ("objects.get(\"player\"):give(\"missing_item\")", "unknown item 'missing_item'"),
+            ("objects.get(\"player\"):give(\"iron_pickaxe\", 0)", "give count must be between 1 and 1 for 'iron_pickaxe'"),
+            ("objects.get(\"player\"):give(\"iron_pickaxe\", 2)", "give count must be between 1 and 1 for 'iron_pickaxe'"),
+            ("objects.block(\"overworld\", 1, 64, 1):give(\"iron_pickaxe\")", "give(item[, count]) is only valid on a player handle"),
+        ]
+
+        for (index, testCase) in cases.enumerated() {
+            let harness = try makeRuntimeHarness(seed: 1_190 + index)
+            let world = try XCTUnwrap(harness.host.worldsByDim[.overworld])
+            let player = Player(world: world)
+            world.addEntity(player)
+            harness.host.localPlayer = player
+            let pickID = iid("iron_pickaxe")
+            let managerName = "give_invalid_\(index)"
+            _ = try harness.scripts.attach(
+                .world, name: managerName, source: testCase.call,
+                mode: .module, triggers: [], by: .player, tick: 0
+            ).get()
+            harness.state.anyScriptsAttached = true
+
+            harness.runtime.runLoads()
+
+            XCTAssertEqual(player.countItem(pickID), 0, "case \(index) must not grant any item")
+            let error = try XCTUnwrap(harness.scripts.get(.world, managerName)?.lastError)
+            XCTAssertTrue(
+                error.contains(testCase.expectedError),
+                "case \(index) expected '\(testCase.expectedError)' in '\(error)'"
+            )
+        }
     }
 
     func testEditorOnlyRunEntryPointCannotSpreadOutsideItsRuntimeAndEditorCallSite() throws {

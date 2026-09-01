@@ -796,6 +796,9 @@ final class ScriptEditorModelTests: XCTestCase {
         XCTAssertTrue(blockObjectCode.contains("self:setBlock(\"stone\")"))
         XCTAssertTrue(blockObjectCode.contains("self:breakBlock()"))
         XCTAssertTrue(blockObjectCode.contains("self:setFurnaceOutput(\"iron_ingot\")"))
+        // give is the inverse of the block verbs: offered on player owners, withheld from blocks.
+        XCTAssertTrue(playerObjectCode.contains("ev.by:give(\"iron_pickaxe\", 1)"))
+        XCTAssertFalse(blockObjectCode.contains("ev.by:give(\"iron_pickaxe\", 1)"))
     }
 
     func testEditorAIModesKeepManualAndOffQuietAndDebounceOnIdle() async throws {

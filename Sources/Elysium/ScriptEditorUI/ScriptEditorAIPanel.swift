@@ -399,12 +399,16 @@ struct ScriptEditorAIPanel: View {
                 let reply = try await model.requestEditorAIReply(instruction: request)
                 guard !Task.isCancelled, requestGeneration == generation else { return }
                 messages.append(Bubble(role: "assistant", content: reply))
-                if let refusal = model.aiInsertionPreflightFailure(reply) {
-                    lastAssistantInsertion = nil
-                    lastAssistantInsertionRefusal = refusal
-                } else {
-                    lastAssistantInsertion = reply
+                // Insert the salvaged code, not the raw reply: the model sometimes appends an
+                // explanatory sentence the editor would treat as a syntax error. insertableProposal
+                // unwraps any fence and trims trailing prose to the largest compilable prefix.
+                if let insertable = model.insertableProposal(from: reply) {
+                    lastAssistantInsertion = insertable
                     lastAssistantInsertionRefusal = nil
+                } else {
+                    lastAssistantInsertion = nil
+                    lastAssistantInsertionRefusal = model.aiInsertionPreflightFailure(reply)
+                        ?? "AI proposal refused: the reply contained no insertable Lua."
                 }
             } catch let error as OllamaCodeCompletionError
                 where error == .cancelled || error == .stale {

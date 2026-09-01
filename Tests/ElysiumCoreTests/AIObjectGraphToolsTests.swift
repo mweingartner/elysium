@@ -110,6 +110,7 @@ final class AIObjectGraphToolsTests: XCTestCase {
             "self:onAttribute(attribute, fn)", "self:declareEvent(name, fields[, summary])",
             "self:events()", "self:undeclareEvent(name)", "self:emit(name[, payload])",
             "self:setFurnaceOutput(\"iron_ingot\")", "furnace.smeltCompleted", "block.toolStrike",
+            "player:give(item[, count])", "ev.by:give(\"iron_pickaxe\", 1)",
             "A declaration defines schema and discovery only", "unload is not an EventBus event",
             "register(\"unload\", fn)", "It receives no ev",
         ] {

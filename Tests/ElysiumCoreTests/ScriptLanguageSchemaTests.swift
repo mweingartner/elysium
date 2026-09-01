@@ -19,6 +19,10 @@ final class ScriptLanguageSchemaTests: XCTestCase {
             ScriptLanguageSchema.handleMethods.filter { $0.receiverKinds == [.block] }.map(\.name),
             ["setFurnaceOutput", "setBlock", "breakBlock"]
         )
+        XCTAssertEqual(
+            ScriptLanguageSchema.handleMethods.filter { $0.receiverKinds == [.player] }.map(\.name),
+            ["give"]
+        )
         XCTAssertEqual(ScriptLanguageSchema.unsupportedSymbols.map(\.name), ["log"])
         XCTAssertFalse(ScriptLanguageSchema.unsupportedSymbols[0].availability.isCompletable)
     }

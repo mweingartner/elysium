@@ -69,11 +69,13 @@ final class LuaLanguageServiceTests: XCTestCase {
         let playerResult = completion("self:", environment: environment(kind: .player))
         XCTAssertTrue(playerResult.items.contains { $0.label == "exists" })
         XCTAssertFalse(playerResult.items.contains { $0.label == "setBlock" })
+        XCTAssertTrue(playerResult.items.contains { $0.label == "give" })
 
         let aliasedBlock = "local door = objects.block(\"overworld\", 1, 64, 2)\ndoor:"
         let blockResult = completion(aliasedBlock, environment: environment(kind: .player))
         XCTAssertTrue(blockResult.items.contains { $0.label == "setBlock" })
         XCTAssertTrue(blockResult.items.contains { $0.label == "breakBlock" })
+        XCTAssertFalse(blockResult.items.contains { $0.label == "give" })
 
         let directBlock = completion("objects.block(\"overworld\", 1, 64, 2):")
         XCTAssertTrue(directBlock.items.contains { $0.label == "setBlock" })

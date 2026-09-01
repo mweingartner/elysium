@@ -144,6 +144,19 @@ artifact_sha256() {
 # Saves.swift, GameCore.swift, Player.swift, ElysiumTextInput.swift, both capability manifests'
 # source) is unchanged, and the storage boundary scan's public-declaration lists still match —
 # so the reachable storage API is identical; only the compiler's output bytes changed.
+# scripting-player-give + ai-prose-salvage: EXPECTED_CORE_OBJECT_SHA256 renewed from
+# b0a3bcf30a27c1e6f97a28bc6a3f641095e3ba8f57371b6803400abef797a807 to
+# 339c84fad017900f7585fffdb58f2e8a0e957deb67f77e5b8730bcb38f97eb90, EXPECTED_ELYSIUM_PRODUCT_SHA256
+# from c1c90e38bcefa71eb21d1306c2be603e44d5f9b3e0016738ae8646b11ff73c26 to
+# 7fc5d168f74ea1f0ea4a0ee430c642b3a2da33d58d03bdf4893278345f891504, and EXPECTED_SMOKE_PRODUCT_SHA256
+# from ef4e14f873d5c30861495460e7a1d85470b50d49cfce888fcd86151ede161bfe to
+# 9f09f4158d115363df0771a4b0271225e15c6484db09807c2cb3a7d1444a552d after the
+# player:give(item[, count]) scripting verb (ScriptRuntimeAPI/ScriptLanguageSchema/
+# ScriptAIAuthoringGuide) plus the LAN grantScriptItem guest-delivery path re-emitted ElysiumCore.o,
+# and both linked products followed (the Script-AI insertion-salvage fix touches only the Elysium
+# app target). Every reviewed storage/game/player/text-input *source* pin, both capability
+# manifests, ElysiumStorage.o, and ElysiumTextInput.o are byte-identical — only ElysiumCore.o and
+# the products' output bytes moved.
 #
 EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
 EXPECTED_STORAGE_API_SHA256='08acf52a794de902a69658a0926181918c62a30f7975cd0d685d3d3baa7c745b'
@@ -154,9 +167,9 @@ EXPECTED_PLAYER_SOURCE_SHA256='79dbd2e132f8e65f2a9857f763c263fea0a1b8cd86fc7db63
 EXPECTED_CORE_CAPABILITY_SHA256='67dbb84929eeda6bea6acec70567a6b8c3711521ae2c1f93fdfc6a2e957b8118'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3'
-EXPECTED_CORE_OBJECT_SHA256='b0a3bcf30a27c1e6f97a28bc6a3f641095e3ba8f57371b6803400abef797a807'
-EXPECTED_ELYSIUM_PRODUCT_SHA256='c1c90e38bcefa71eb21d1306c2be603e44d5f9b3e0016738ae8646b11ff73c26'
-EXPECTED_SMOKE_PRODUCT_SHA256='ef4e14f873d5c30861495460e7a1d85470b50d49cfce888fcd86151ede161bfe'
+EXPECTED_CORE_OBJECT_SHA256='339c84fad017900f7585fffdb58f2e8a0e957deb67f77e5b8730bcb38f97eb90'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='7fc5d168f74ea1f0ea4a0ee430c642b3a2da33d58d03bdf4893278345f891504'
+EXPECTED_SMOKE_PRODUCT_SHA256='9f09f4158d115363df0771a4b0271225e15c6484db09807c2cb3a7d1444a552d'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

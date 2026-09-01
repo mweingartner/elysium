@@ -197,6 +197,37 @@ final class ScriptEditorAuthoringModelTests: XCTestCase {
         ))
     }
 
+    func testInsertableProposalStripsTrailingProseAndRefusesUnparseableReplies() throws {
+        let game = try makeGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        model.mode = .module
+
+        // A clean module script is inserted verbatim.
+        let clean = "on(\"block.used\", function(ev)\n  ev.by:give(\"iron_pickaxe\", 1)\nend)"
+        XCTAssertEqual(model.insertableProposal(from: clean), clean)
+
+        // The model sometimes appends an explanation after the code despite the code-only prompt.
+        // That trailing prose is a syntax error once inserted, so it must be stripped, not kept —
+        // this is the exact Birch Button failure that motivated the salvage.
+        let withProse = clean + "\n\nNote: the exact attribute name may vary between versions."
+        XCTAssertEqual(model.insertableProposal(from: withProse), clean)
+
+        // A fenced reply is unwrapped and any prose after the closing fence discarded.
+        let fenced = "```lua\n" + clean + "\n```\nThat should grant the pickaxe."
+        XCTAssertEqual(model.insertableProposal(from: fenced), clean)
+
+        // A reply that is entirely prose yields nothing insertable: the salvage's own parse check
+        // rejects every trailing-trimmed prefix, so insertableProposal returns nil.
+        XCTAssertNil(model.insertableProposal(from: "I have added the handler for you."))
+
+        // Regression guard: the parse check lives ONLY in the salvage path, never in the shared
+        // aiInsertionPreflightFailure that the inline ghost-text completion also calls. So an
+        // in-progress completion that is valid Lua only once the surrounding edit is finished (here
+        // a mid-assignment "local total =") must still pass preflight rather than be rejected as a
+        // parse error.
+        XCTAssertNil(model.aiInsertionPreflightFailure("local total ="))
+    }
+
     func testAIAuthoringContractAndPaletteUseOnlyShippedShapes() throws {
         let moduleHelp = ScriptEditorAuthoringContract.modeHelp(.module)
         XCTAssertTrue(moduleHelp.contains("function(ev)"))
@@ -228,6 +259,7 @@ final class ScriptEditorAuthoringModelTests: XCTestCase {
         XCTAssertTrue(guide.contains("Block-specific handle methods"))
         XCTAssertTrue(guide.contains("engine, player, ai, lan, or script:<owner-ref>"))
         XCTAssertTrue(guide.contains("self:setFurnaceOutput(\"iron_ingot\")"))
+        XCTAssertTrue(guide.contains("player:give(item[, count])"))
         XCTAssertTrue(guide.contains("A declaration defines schema and discovery only"))
         XCTAssertFalse(guide.contains("h:"))
         XCTAssertFalse(guide.contains("target:on"))

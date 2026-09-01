@@ -689,6 +689,39 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertLessThan(afterDuplicateApply.x, 4)
     }
 
+    func testGrantScriptItemDeliversToGuestThroughAuthoritativePickupChannel() {
+        let world = makeLoadedWorld()
+        let session = LANMultiplayerHostSession()
+        _ = session.acceptPeer(playerID: "peer-a", displayName: "Alex", tick: 0)
+        let remote = LANRemotePlayerEntity(world: world, state: LANPlayerState(
+            playerID: "peer-a", displayName: "Alex", x: 1, y: 65, z: 2, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0,
+            gameMode: GameMode.creative, dimension: Dim.overworld.rawValue
+        ))
+        world.addEntity(remote)
+        let diamondID = iid("diamond")
+
+        // player:give on a connected LAN guest routes through grantScriptItem. It must both update
+        // the host-side proxy AND queue an authoritative-pickup mutation — a bare mirror give()
+        // would be silently discarded by the guest's next snapshot (the bug this guards).
+        XCTAssertTrue(remote.grantScriptItem(ItemStack(diamondID, 5)))
+        let proxyDiamonds = remote.inventory.compactMap { $0 }
+            .filter { $0.id == diamondID }.reduce(0) { $0 + $1.count }
+        XCTAssertEqual(proxyDiamonds, 5, "the proxy inventory reflects the grant")
+        XCTAssertTrue(
+            remote.hasPendingAuthoritativePickupMutation,
+            "a pending mutation must protect the proxy from snapshot overwrite until delivered"
+        )
+
+        // Draining (the host's per-tick step) turns it into a queued grant for the guest's own
+        // client-authoritative inventory, and clears the pending flag.
+        XCTAssertEqual(drainLANAuthoritativePickupMutations(in: world, into: session), 1)
+        XCTAssertFalse(remote.hasPendingAuthoritativePickupMutation)
+        let delivered = session.drainGrants(for: "peer-a")
+            .flatMap(\.items).filter { $0.itemID == diamondID }.reduce(0) { $0 + $1.count }
+        XCTAssertEqual(delivered, 5, "the guest receives exactly the 5 granted diamonds")
+    }
+
     func testLANRemotePlayerPresentationSnapsForTeleports() {
         let world = makeLoadedWorld()
         let remote = LANRemotePlayerEntity(world: world, state: LANPlayerState(

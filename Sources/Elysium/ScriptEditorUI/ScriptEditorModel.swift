@@ -807,6 +807,69 @@ final class ScriptEditorModel: ObservableObject {
         return nil
     }
 
+    /// Whether inserting `insertion` at the current selection yields Lua that PARSES.
+    ///
+    /// This is used ONLY by the chat-salvage path (``insertableProposal``) to strip trailing prose;
+    /// it is deliberately kept out of ``aiInsertionPreflightFailure`` so the shared inline
+    /// ghost-text completion path still offers a valid in-progress completion that only parses once
+    /// the surrounding edit is finished. It is a pure syntax check (``ScriptRuntime/validateSource``),
+    /// never a dry run, so a shape-valid body passes even when its object is unloaded. When no
+    /// runtime is available (e.g. a guest session) the check cannot run and is treated as passing.
+    private func mergedProposalParses(_ insertion: String) -> Bool {
+        guard let runtime = game.scriptingCommandContext().scriptRuntime else { return true }
+        let current = source as NSString
+        guard selectedRange.location >= 0,
+              selectedRange.location + selectedRange.length <= current.length else { return false }
+        let merged = current.replacingCharacters(in: selectedRange, with: insertion)
+        if case .refused = runtime.validateSource(merged, chunkName: "ai-proposal") { return false }
+        return true
+    }
+
+    /// Extracts the insertable Lua from a raw Script-AI chat reply.
+    ///
+    /// The panel asks the model for code only, but it occasionally appends an explanatory sentence
+    /// after the code (\"Note: ...\"). Inserted verbatim, that trailing prose is a syntax error — the
+    /// exact failure a Birch Button script hit. This unwraps a Markdown fence when present, then
+    /// drops trailing lines until the remaining prefix is non-empty, passes
+    /// ``aiInsertionPreflightFailure`` (safe text, size, mode-contract diagnostics), and parses as
+    /// Lua once merged (``mergedProposalParses``), so a code-plus-prose reply still yields its code.
+    /// Returns nil when no prefix is insertable.
+    func insertableProposal(from rawReply: String) -> String? {
+        var lines = Self.unwrapProposalFence(rawReply)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        while !lines.isEmpty {
+            let candidate = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !candidate.isEmpty,
+               aiInsertionPreflightFailure(candidate) == nil,
+               mergedProposalParses(candidate) {
+                return candidate
+            }
+            lines.removeLast()
+        }
+        return nil
+    }
+
+    /// Returns the contents of the first Markdown code fence in `raw`, or `raw` unchanged when it is
+    /// not fenced. Mirrors the fence handling in the inline-completion path so both AI surfaces treat
+    /// a fenced reply identically; trailing prose outside the fence is discarded here.
+    static func unwrapProposalFence(_ raw: String) -> String {
+        let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        guard let opening = normalized.range(of: "```") else { return normalized }
+        let afterOpening = normalized[opening.upperBound...]
+        guard let lineEnd = afterOpening.firstIndex(of: "\n") else { return normalized }
+        let possibleLanguage = afterOpening[..<lineEnd]
+        let codeStart = possibleLanguage.allSatisfy { $0.isLetter || $0 == "_" }
+            ? afterOpening.index(after: lineEnd)
+            : opening.upperBound
+        let remainder = normalized[codeStart...]
+        guard let closing = remainder.range(of: "```") else { return String(remainder) }
+        var fenced = String(remainder[..<closing.lowerBound])
+        if fenced.hasSuffix("\n") { fenced.removeLast() }
+        return fenced
+    }
+
     private func acceptAIFragment(_ split: (String) -> (accepted: String, remainder: String)) {
         guard let suggestion = inlineAISuggestion else { return }
         let parts = split(suggestion)
