@@ -512,7 +512,8 @@ final class GameView: MTKView {
 // ---------------------------------------------------------------------------
 // app delegate: window, game, renderer, UI, frame loop
 // ---------------------------------------------------------------------------
-final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWindowDelegate,
+                         NSMenuItemValidation {
     var window: NSWindow!
     var gameView: GameView!
     var renderer: WorldRenderer!
@@ -837,6 +838,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     @objc func redoText(_ sender: Any?) {
         guard let textView = NSApp.keyWindow?.firstResponder as? NSTextView else { return }
         textView.undoManager?.redo()
+    }
+
+    /// Native menu entry for the same guarded world command used by the configurable K binding
+    /// and controller. It never opens the workspace around class-rule, authority, or screen-state
+    /// checks; the semantic boundary remains the sole route into the character screen.
+    @objc @MainActor func openCharacterWindow(_ sender: Any?) {
+        _ = sender
+        if ui.current() is RPGCharacterScreen {
+            window.childWindows?.first(where: { $0.title == "Create Character" || $0.title == "Character" })?
+                .makeKeyAndOrderFront(nil)
+            return
+        }
+        _ = ui.dispatchRPGWorldSemanticCommand(.openCharacter, source: .keyboard, game: game)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard menuItem.action == #selector(openCharacterWindow(_:)) else { return true }
+        guard game?.hasWorld() == true, game.player?.rpgClassesEnabled() == true else { return false }
+        return !ui.hasScreen() || ui.current() is RPGCharacterScreen
     }
 
     // MARK: - native SwiftUI script editor (Stage A)
@@ -1272,6 +1292,16 @@ private func runOrdinaryElysiumApplication() {
     editMenu.addItem(requestAISuggestionItem)
     editItem.submenu = editMenu
     mainMenu.addItem(editItem)
+    let gameItem = NSMenuItem(title: "Game", action: nil, keyEquivalent: "")
+    let gameMenu = NSMenu(title: "Game")
+    let characterItem = NSMenuItem(
+        title: "Character…", action: #selector(AppDelegate.openCharacterWindow(_:)),
+        keyEquivalent: "")
+    characterItem.target = delegate
+    characterItem.toolTip = "Open the native character workspace (K while playing)"
+    gameMenu.addItem(characterItem)
+    gameItem.submenu = gameMenu
+    mainMenu.addItem(gameItem)
     let winItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
     let winMenu = NSMenu(title: "Window")
     winMenu.addItem(shippingMenuItem(commandID: "minimize", title: "Minimize",

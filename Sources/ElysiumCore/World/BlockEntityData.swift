@@ -15,7 +15,7 @@ public final class BlockEntityData: Codable {
     public var items: [ItemStack?]?
     public var lootTable: String?
     public var lootSeed: Int?
-    /// Exact bounded provenance for a generated RPG dungeon-container award.
+    /// Exact bounded provenance for a generated RPG world-structure-container award.
     /// Cleared atomically when the deferred loot is first materialized.
     public var rpgGeneratedContainerKey: String?
     public var name: String?

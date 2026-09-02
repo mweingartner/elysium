@@ -513,6 +513,31 @@ public enum RPGXPEventCategory: String, Codable, CaseIterable {
     }
 }
 
+public enum RPGXPReward: Equatable {
+    case fixed(Int)
+    case halfMagnitude(maximum: Int)
+
+    public func award(forMagnitude magnitude: Int) -> Int? {
+        guard magnitude > 0 else { return nil }
+        switch self {
+        case .fixed(let amount):
+            return amount > 0 ? amount : nil
+        case .halfMagnitude(let maximum):
+            let amount = min(maximum, magnitude / 2)
+            return amount > 0 ? amount : nil
+        }
+    }
+
+    public var progressionText: String {
+        switch self {
+        case .fixed(let amount):
+            return "\(amount) class XP"
+        case .halfMagnitude(let maximum):
+            return "1 class XP per 2 causal health, up to \(maximum) class XP"
+        }
+    }
+}
+
 public enum RPGXPEventKind: String, Codable, CaseIterable {
     case wardenMeleeDefeat
     case wardenMitigation
@@ -538,6 +563,127 @@ public enum RPGXPEventKind: String, Codable, CaseIterable {
         case .arcanistSpellPractice: return .cast
         case .menderEffectiveHealing, .menderCleanseRescue, .menderProvisionCraft: return .heal
         case .tinkerFirstRecipe, .tinkerMechanismTransition, .tinkerEngineeringCraft: return .engineer
+        }
+    }
+
+    /// The one path whose gameplay loop can earn this event. Keeping this mapping beside the
+    /// closed event enum gives UI, tests, and the authoritative award gate one shared source.
+    public var pathID: String {
+        switch self {
+        case .wardenMeleeDefeat, .wardenMitigation: return "warden"
+        case .rangerRangedDefeat, .rangerFieldDiscovery: return "ranger"
+        case .delverDepthMilestone, .delverDungeonMilestone, .delverExcavation: return "delver"
+        case .arcanistSpellDefeat, .arcanistSpellPractice: return "arcanist"
+        case .menderEffectiveHealing, .menderCleanseRescue, .menderProvisionCraft: return "mender"
+        case .tinkerFirstRecipe, .tinkerMechanismTransition, .tinkerEngineeringCraft: return "tinker"
+        }
+    }
+
+    /// Short, player-facing name for the action that qualifies for class XP.
+    public var progressionTitle: String {
+        switch self {
+        case .wardenMeleeDefeat: return "Win in close combat"
+        case .wardenMitigation: return "Protect with absorption"
+        case .rangerRangedDefeat: return "Win at range"
+        case .rangerFieldDiscovery: return "Visit an eligible field location"
+        case .delverDepthMilestone: return "Reach a new depth"
+        case .delverDungeonMilestone: return "Open generated structure treasure"
+        case .delverExcavation: return "Excavate deep stone or ore"
+        case .arcanistSpellDefeat: return "Win with a spell"
+        case .arcanistSpellPractice: return "Produce a real spell effect"
+        case .menderEffectiveHealing: return "Restore a hostile injury before it expires"
+        case .menderCleanseRescue: return "Cleanse or rescue"
+        case .menderProvisionCraft: return "Craft qualifying provisions"
+        case .tinkerFirstRecipe: return "Craft a recipe for the first time"
+        case .tinkerMechanismTransition: return "Place a powered mechanism"
+        case .tinkerEngineeringCraft: return "Craft an engineering output"
+        }
+    }
+
+    /// Exact qualification copy. This describes the same checked conditions used at the award
+    /// call sites; it deliberately avoids promising credit for cosmetic or repeated no-op actions.
+    public var progressionCriterion: String {
+        switch self {
+        case .wardenMeleeDefeat:
+            return "Defeat a hostile creature with a Warden melee action."
+        case .wardenMitigation:
+            return "Absorb at least 2 hostile damage through a Warden protection effect."
+        case .rangerRangedDefeat:
+            return "Defeat a hostile creature with a projectile or Ranger ranged action."
+        case .rangerFieldDiscovery:
+            return "Be in a loaded chunk whose dimension-and-chunk key is absent from the rolling history of the 64 most recently admitted class-XP events."
+        case .delverDepthMilestone:
+            return "In the Overworld, reach y ≤ 32, 16, 0, -16, -32, or -48 for the first time."
+        case .delverDungeonMilestone:
+            return "Materialize loot from a newly generated world-structure container."
+        case .delverExcavation:
+            return "In the Overworld below y = 63, break harvestable hard stone or ore with the correct pickaxe."
+        case .arcanistSpellDefeat:
+            return "Defeat a hostile creature with an Arcanist spell effect."
+        case .arcanistSpellPractice:
+            return "Resolve a distinct effect-producing spell once in the current XP window."
+        case .menderEffectiveHealing:
+            return "Restore at least 2 health attributable to a live, unconsumed hostile-injury record on a non-player ally before 1,200 simulation ticks have elapsed since that ally's latest hostile injury."
+        case .menderCleanseRescue:
+            return "Before 1,200 simulation ticks have elapsed since a non-player ally's latest hostile injury, use Restore to remove poison, wither, weakness, or slowness; use Purify to remove poison, hunger, or nausea; or use Mend Wounds or Restore when the hostile-attributable portion of the heal alone moves the ally from at most 25% health to above 25%. The hostile-injury record must remain live and unconsumed. One action grants at most one fixed bonus."
+        case .menderProvisionCraft:
+            return "Complete a crafting-grid recipe whose output is food with positive hunger and only beneficial effects."
+        case .tinkerFirstRecipe:
+            return "Complete any registered crafting-grid recipe not yet recorded in this character's recipe ledger."
+        case .tinkerMechanismTransition:
+            return "Immediately after placing a lever, dispenser, dropper, observer, piston, sticky piston, repeater, comparator, redstone lamp, or button, that block must have power above 0."
+        case .tinkerEngineeringCraft:
+            return "Complete a crafting-grid recipe that outputs redstone wire, a repeater, comparator, piston or sticky piston, daylight sensor, lever, button, pressure plate, tripwire hook, redstone torch or block, observer, detector rail, target, sculk or calibrated sculk sensor, lightning rod, trapped chest, redstone lamp, dispenser, dropper, note block, or TNT; a registered tool output also qualifies unless it is a sword, bow, crossbow, or trident."
+        }
+    }
+
+    /// Canonical award rule shared by authoritative progression and every UI projection.
+    public var reward: RPGXPReward {
+        switch self {
+        case .wardenMeleeDefeat, .rangerRangedDefeat, .arcanistSpellDefeat: return .fixed(10)
+        case .wardenMitigation, .tinkerMechanismTransition: return .fixed(2)
+        case .rangerFieldDiscovery, .delverDepthMilestone: return .fixed(3)
+        case .delverDungeonMilestone: return .fixed(12)
+        case .delverExcavation, .menderCleanseRescue, .tinkerFirstRecipe: return .fixed(4)
+        case .arcanistSpellPractice, .menderProvisionCraft, .tinkerEngineeringCraft: return .fixed(6)
+        case .menderEffectiveHealing: return .halfMagnitude(maximum: 8)
+        }
+    }
+
+    public var progressionReward: String { reward.progressionText }
+
+    /// Exact anti-farming and deduplication rule. The window is simulation time (normally
+    /// 60 seconds at 20 Hz), pauses with the game, and category counts reset together.
+    public var progressionLimit: String {
+        let shared = "Shares the \(category.windowLimit)-event cap for \(category.progressionName) every 1,200 simulation ticks (normally 60 seconds)."
+        switch self {
+        case .rangerFieldDiscovery:
+            return "\(shared) A location can award again only after its key leaves the rolling 64-event recent history."
+        case .delverDepthMilestone:
+            return "\(shared) Each of the six depth thresholds awards once per character."
+        case .arcanistSpellPractice:
+            return "\(shared) Each registered spell can award once per window, and only after producing an effect."
+        case .tinkerFirstRecipe:
+            return "\(shared) Each registered crafting-grid recipe awards this bonus once per character."
+        case .delverDungeonMilestone:
+            return "\(shared) Each generated container materializes its loot only once; its rolling world-location key is an additional duplicate guard."
+        case .tinkerMechanismTransition:
+            return "\(shared) The same world location cannot award again while its key remains in the rolling 64-event recent history."
+        default:
+            return "\(shared) Identical event keys cannot award again while they remain in the rolling 64-event recent history."
+        }
+    }
+}
+
+public extension RPGXPEventCategory {
+    var progressionName: String {
+        switch self {
+        case .combat: return "combat"
+        case .explore: return "exploration"
+        case .depthDungeon: return "Delver depth, structure treasure, and excavation"
+        case .cast: return "spell practice"
+        case .heal: return "healing and provisions"
+        case .engineer: return "engineering"
         }
     }
 }
@@ -579,7 +725,7 @@ public struct RPGXPLifetimeKey: Codable, Equatable, Hashable {
     }
 }
 
-/// Exact, registry-bounded XP proposal. `magnitude` is actual effective health
+/// Exact, registry-bounded XP proposal. `magnitude` is causal effective health
 /// for healing; `registryIndex` identifies a finite spell/milestone/recipe bit.
 public struct RPGXPEvent: Equatable {
     public var kind: RPGXPEventKind
@@ -1571,22 +1717,22 @@ public let RPG_BRANCH_DEFINITIONS: [RPGBranchDefinition] = [
                         summary: "Accurate ranged attacks and quick target swapping.",
                         skillIDs: ["quick_draw", "steady_aim", "crippling_shot"]),
     RPGBranchDefinition(id: "ranger_scout", pathID: "ranger", displayName: "Scout",
-                        summary: "Movement, stealth, map reading, and ambush setup.",
+                        summary: "Sneaking mobility and hostile detection for reconnaissance and ambushes.",
                         skillIDs: ["trail_sense", "soft_step", "far_sight"]),
     RPGBranchDefinition(id: "ranger_survivalist", pathID: "ranger", displayName: "Survivalist",
                         summary: "Forage, camp, weather, and animal handling.",
                         skillIDs: ["campcraft", "weather_eye", "beast_kinship"]),
     RPGBranchDefinition(id: "delver_miner", pathID: "delver", displayName: "Miner",
-                        summary: "Ore discovery and efficient underground routes.",
+                        summary: "Faster excavation, mining bursts, and fatigue recovery from deep blocks.",
                         skillIDs: ["vein_reader", "fast_bore", "deep_reserves"]),
     RPGBranchDefinition(id: "delver_trapper", pathID: "delver", displayName: "Trapper",
-                        summary: "Detect, disarm, and build traps.",
+                        summary: "Detect traps, reduce trap and explosion damage, and place timed deadfalls.",
                         skillIDs: ["trap_probe", "tripwire_mind", "deadfall"]),
     RPGBranchDefinition(id: "delver_treasure", pathID: "delver", displayName: "Treasure-Seeker",
                         summary: "Better salvage, locks, and risky loot handling.",
                         skillIDs: ["salvage_eye", "lock_touch", "fortune_read"]),
     RPGBranchDefinition(id: "arcanist_elementalist", pathID: "arcanist", displayName: "Elementalist",
-                        summary: "Fire, frost, force, and light spells.",
+                        summary: "Fire, frost, lightning, and storm magic.",
                         skillIDs: ["spell_formula", "spark_weave", "storm_focus"]),
     RPGBranchDefinition(id: "arcanist_illusionist", pathID: "arcanist", displayName: "Illusionist",
                         summary: "Blur, decoys, invisibility, and misdirection.",
@@ -2130,35 +2276,35 @@ public func rpgPreparedActions(_ state: RPGCharacterState) -> [RPGPreparedAction
     var out: [RPGPreparedAction] = []
     for skillID in state.preparedSkillIDs {
         guard let skill = rpgSkillDefinition(skillID), skill.kind == .active,
-              (state.skillRanks[skillID] ?? 0) > 0 else { continue }
-        let cooldown = state.activeCooldowns.first { $0.id == skillID && $0.remainingTicks > 0 }?.remainingTicks ?? 0
-        let hasFatigue = state.fatigue >= skill.fatigueCost
+              (state.skillRanks[skillID] ?? 0) > 0,
+              let quote = rpgActionResourceQuote(kind: .skill, id: skillID, state: state) else { continue }
+        let cooldown = quote.cooldownRemainingTicks
         out.append(RPGPreparedAction(
             kind: .skill,
             id: skillID,
             displayName: skill.displayName,
             iconAssetID: rpgAssetIDForSkill(skillID),
-            fatigueCost: skill.fatigueCost,
-            cooldownTicks: skill.cooldownTicks,
+            fatigueCost: quote.fatigueCost,
+            cooldownTicks: quote.cooldownTicks,
             cooldownRemainingTicks: cooldown,
-            available: cooldown <= 0 && hasFatigue,
-            statusText: cooldown > 0 ? "\(max(1, Int((Double(cooldown) / 20.0).rounded(.up))))s" : hasFatigue ? "Ready" : "Fatigue"
+            available: quote.resourceAvailable,
+            statusText: cooldown > 0 ? "\(max(1, Int((Double(cooldown) / 20.0).rounded(.up))))s" : quote.resourceAvailable ? "Resources ready" : "Fatigue"
         ))
     }
     for spellID in state.preparedSpellIDs {
-        guard let spell = rpgSpellDefinition(spellID), state.knownSpellIDs.contains(spellID) else { continue }
-        let cooldown = state.activeCooldowns.first { $0.id == spellID && $0.remainingTicks > 0 }?.remainingTicks ?? 0
-        let hasFatigue = state.fatigue >= spell.fatigueCost
+        guard let spell = rpgSpellDefinition(spellID), state.knownSpellIDs.contains(spellID),
+              let quote = rpgActionResourceQuote(kind: .spell, id: spellID, state: state) else { continue }
+        let cooldown = quote.cooldownRemainingTicks
         out.append(RPGPreparedAction(
             kind: .spell,
             id: spellID,
             displayName: spell.displayName,
             iconAssetID: rpgAssetIDForSpell(spellID),
-            fatigueCost: spell.fatigueCost,
-            cooldownTicks: max(10, spell.circle * 20),
+            fatigueCost: quote.fatigueCost,
+            cooldownTicks: quote.cooldownTicks,
             cooldownRemainingTicks: cooldown,
-            available: cooldown <= 0 && hasFatigue,
-            statusText: cooldown > 0 ? "\(max(1, Int((Double(cooldown) / 20.0).rounded(.up))))s" : hasFatigue ? "Ready" : "Fatigue"
+            available: quote.resourceAvailable,
+            statusText: cooldown > 0 ? "\(max(1, Int((Double(cooldown) / 20.0).rounded(.up))))s" : quote.resourceAvailable ? "Resources ready" : "Fatigue"
         ))
     }
     return out
@@ -2579,41 +2725,8 @@ func rpgAddXP(_ amount: Int, to state: inout RPGCharacterState) -> RPGProgressio
 }
 
 private func rpgXPEventAward(_ event: RPGXPEvent, state: RPGCharacterState) -> Int? {
-    guard event.magnitude > 0 else { return nil }
-    switch event.kind {
-    case .wardenMeleeDefeat:
-        return state.pathID == "warden" ? 10 : nil
-    case .wardenMitigation:
-        return state.pathID == "warden" ? 2 : nil
-    case .rangerRangedDefeat:
-        return state.pathID == "ranger" ? 10 : nil
-    case .rangerFieldDiscovery:
-        return state.pathID == "ranger" ? 3 : nil
-    case .delverDepthMilestone:
-        return state.pathID == "delver" ? 3 : nil
-    case .delverDungeonMilestone:
-        return state.pathID == "delver" ? 12 : nil
-    case .delverExcavation:
-        return state.pathID == "delver" ? 4 : nil
-    case .arcanistSpellDefeat:
-        return state.pathID == "arcanist" ? 10 : nil
-    case .arcanistSpellPractice:
-        return state.pathID == "arcanist" ? 6 : nil
-    case .menderEffectiveHealing:
-        guard state.pathID == "mender" else { return nil }
-        let award = min(8, event.magnitude / 2)
-        return award > 0 ? award : nil
-    case .menderCleanseRescue:
-        return state.pathID == "mender" ? 4 : nil
-    case .menderProvisionCraft:
-        return state.pathID == "mender" ? 6 : nil
-    case .tinkerFirstRecipe:
-        return state.pathID == "tinker" ? 4 : nil
-    case .tinkerMechanismTransition:
-        return state.pathID == "tinker" ? 2 : nil
-    case .tinkerEngineeringCraft:
-        return state.pathID == "tinker" ? 6 : nil
-    }
+    guard state.pathID == event.kind.pathID else { return nil }
+    return event.kind.reward.award(forMagnitude: event.magnitude)
 }
 
 private func rpgEventMaskBit(_ index: Int?, upperBound: Int) -> UInt64? {

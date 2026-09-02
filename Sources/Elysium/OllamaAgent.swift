@@ -79,6 +79,7 @@ private func boundedOllamaData(
 final class OllamaAgentService {
     private let baseURL = URL(string: "http://127.0.0.1:11434")!
     private let session: URLSession
+    private let editorCompletionSession: URLSession
     private let preloadSession: URLSession
 
     static let editorModelPreloadKeepAlive = "30m"
@@ -130,10 +131,16 @@ final class OllamaAgentService {
     init(session: URLSession? = nil) {
         if let session {
             self.session = session
+            self.editorCompletionSession = session
             self.preloadSession = session
         } else {
             self.session = URLSession(
                 configuration: Self.loopbackSessionConfiguration(),
+                delegate: OllamaLoopbackSessionDelegate(),
+                delegateQueue: nil
+            )
+            self.editorCompletionSession = URLSession(
+                configuration: Self.editorCompletionSessionConfiguration(),
                 delegate: OllamaLoopbackSessionDelegate(),
                 delegateQueue: nil
             )
@@ -164,12 +171,27 @@ final class OllamaAgentService {
         return config
     }
 
+    /// Source-bearing editor generation gets its own resource deadline. A URLRequest-level 90 s
+    /// timeout cannot extend the ordinary session's 45 s hard resource cap, which previously made
+    /// a large cold-capable model fail before the editor's advertised deadline.
+    static func editorCompletionSessionConfiguration() -> URLSessionConfiguration {
+        let config = loopbackSessionConfiguration()
+        config.timeoutIntervalForRequest = OllamaCodeCompletionService.generationTimeout
+        config.timeoutIntervalForResource = OllamaCodeCompletionService.generationTimeout + 30
+        return config
+    }
+
     /// Creates the editor's independent, read-only proposal service over the reviewed localhost
     /// transport. The completion service has no `GameCore`, tool definitions, or mutation context.
     func makeCodeCompletionService() -> OllamaCodeCompletionService {
         OllamaCodeCompletionService(
             baseURL: baseURL,
-            transport: OllamaCodeCompletionURLSessionTransport(session: session)
+            transport: OllamaCodeCompletionURLSessionTransport(
+                session: editorCompletionSession
+            ),
+            preparationTransport: OllamaCodeCompletionURLSessionTransport(
+                session: preloadSession
+            )
         )
     }
 
@@ -607,7 +629,9 @@ final class OllamaAgentService {
         }
         let decoded = try JSONDecoder().decode(OllamaTagsResponse.self, from: data)
         return decoded.models
-            .filter { ($0.remoteHost ?? "").isEmpty }
+            .filter {
+                ($0.remoteHost ?? "").isEmpty && ($0.remoteModel ?? "").isEmpty
+            }
             .map(\.name)
             .map(sanitizedOllamaModelName)
             .filter(isAllowedLocalOllamaModelName)
@@ -970,10 +994,12 @@ private struct OllamaTagsResponse: Decodable {
 
 private struct OllamaModel: Decodable {
     let name: String
+    let remoteModel: String?
     let remoteHost: String?
 
     enum CodingKeys: String, CodingKey {
         case name
+        case remoteModel = "remote_model"
         case remoteHost = "remote_host"
     }
 }

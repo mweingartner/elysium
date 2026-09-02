@@ -39,7 +39,8 @@ final class RPGPassiveRendererSourceTests: XCTestCase {
         let renderer = try source("Sources/Elysium/RPGScreensM.swift")
         let drawStart = try XCTUnwrap(renderer.range(of: "override func draw("))
         let drawEnd = try XCTUnwrap(renderer.range(
-            of: "// Mouse activation", range: drawStart.upperBound..<renderer.endIndex))
+            of: "override func inputOwnershipLost",
+            range: drawStart.upperBound..<renderer.endIndex))
         let drawBody = String(renderer[drawStart.lowerBound..<drawEnd.lowerBound])
         XCTAssertTrue(drawBody.contains("rpgCommittedSemanticSnapshot"))
         XCTAssertFalse(drawBody.contains("game."))

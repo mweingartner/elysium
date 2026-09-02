@@ -58,6 +58,76 @@ enum ScriptEditorScriptingActivationAction: Equatable {
     }
 }
 
+enum ScriptEditorAIReadinessState: Equatable {
+    case off
+    case needsModel
+    case idle
+    case preparing(String)
+    case ready(String)
+    case failed(model: String, message: String)
+
+    var statusText: String {
+        switch self {
+        case .off: "Editor AI is Off"
+        case .needsModel: "Choose a local Ollama model"
+        case .idle: "Script AI is idle"
+        case .preparing(let model): "Preparing \(model)…"
+        case .ready(let model): "\(model) is ready"
+        case .failed(let model, _): "\(model) is not ready"
+        }
+    }
+
+    var accessibilityText: String {
+        switch self {
+        case .failed(_, let message): "\(statusText). \(message)"
+        default: statusText
+        }
+    }
+}
+
+struct ScriptEditorAIInsertionReceipt: Equatable {
+    let mode: ScriptMode
+    let eventName: String?
+    let replacedRange: NSRange
+    let insertedUTF16Length: Int
+    let omittedTrailingText: Bool
+
+    var destinationDescription: String {
+        if mode == .handler {
+            let event = eventName.flatMap { $0.isEmpty ? nil : $0 } ?? "selected event"
+            return "Handler · \(event)"
+        }
+        return "Module"
+    }
+}
+
+/// The user, not model output, authorizes whether a panel request may edit source. This removes
+/// the ambiguity between a valid Lua-looking answer and a requested code change.
+enum ScriptEditorAIRequestIntent: String, CaseIterable, Identifiable, Sendable {
+    case writeCode = "Write Code"
+    case ask = "Ask"
+
+    var id: Self { self }
+
+    var completionIntent: OllamaCodeCompletionInstructionIntent {
+        switch self {
+        case .writeCode: .codeChange
+        case .ask: .question
+        }
+    }
+}
+
+enum ScriptEditorAIApplyOutcome: Equatable {
+    case inserted(ScriptEditorAIInsertionReceipt)
+    case answerOnly
+    case refused(String)
+}
+
+struct ScriptEditorAIReply: Equatable {
+    let text: String
+    let applyOutcome: ScriptEditorAIApplyOutcome
+}
+
 /// Durable editor-facing projection of the two execution gates. This state is intentionally
 /// independent of the transient `status` line: Save/Check/Run results must never hide why attached
 /// scripts are paused or imply that opening the editor changed a world-wide security control.
@@ -159,6 +229,7 @@ final class ScriptEditorModel: ObservableObject {
     let target: ObjectRef
     let game: GameCore
     private let aiCompleter: any ScriptEditorAICompleting
+    private var aiReadinessOwner = UUID()
     private let openedWorldSessionGeneration: UInt64
     private let openedWorldRecordID: String?
     private let openedAsLANGuest: Bool
@@ -207,6 +278,7 @@ final class ScriptEditorModel: ObservableObject {
     @Published private(set) var aiSuggestionError: String?
     @Published private(set) var aiCompletionMode: ScriptEditorAICompletionMode
     @Published private(set) var aiModelName: String
+    @Published private(set) var aiReadinessState: ScriptEditorAIReadinessState = .idle
     @Published private(set) var externalEditorEdit: LuaEditorExternalEdit?
     @Published private(set) var documentIdentity: UInt64 = 0
     @Published private(set) var isWorldSessionActive: Bool
@@ -223,7 +295,10 @@ final class ScriptEditorModel: ObservableObject {
     private var authoringContextRevision: UInt64 = 0
     private var aiSuggestionTask: Task<Void, Never>?
     private var aiIdleTask: Task<Void, Never>?
+    private var aiPreparationTask: Task<Void, Never>?
     private var aiRequestGeneration: UInt64 = 0
+    private var aiPreparationGeneration: UInt64 = 0
+    private var aiReadinessLifecycleActive = false
     private var externalEditorEditSequence: UInt64 = 0
     private var isApplyingAISuggestion = false
     private var worldSessionObserver: AnyCancellable?
@@ -323,6 +398,15 @@ final class ScriptEditorModel: ObservableObject {
         refreshWorldObjects()
     }
 
+    deinit {
+        aiPreparationTask?.cancel()
+        let completer = aiCompleter
+        let owner = aiReadinessOwner
+        Task {
+            await completer.releaseEditorModel(owner: owner)
+        }
+    }
+
     private var isCurrentWorldSession: Bool {
         isWorldSessionActive && game.hasWorld()
             && game.worldSessionGeneration == openedWorldSessionGeneration
@@ -346,6 +430,7 @@ final class ScriptEditorModel: ObservableObject {
         scriptingAvailability = .runtimeUnavailable(.worldSessionEnded)
         authoringContextRevision &+= 1
         cancelAIWork(clearSuggestion: true)
+        updateAIReadiness()
         worldObjects = []
         targetApplicableBuiltInAttributes = nil
         targetCustomAttributes = []
@@ -475,11 +560,41 @@ final class ScriptEditorModel: ObservableObject {
         synchronizeSharedAIConfiguration()
     }
 
+    /// Called by the native window controller as soon as an editor opens. This deliberately does
+    /// not depend on the optional Script AI panel being visible: Manual and On Idle both prepare
+    /// the exact configured local model before the first prompt can race its cold load.
+    func beginAIReadiness() {
+        guard !aiReadinessLifecycleActive else { return }
+        aiReadinessLifecycleActive = true
+        updateAIReadiness()
+    }
+
+    /// Releases this editor's interest. A process-shared preparation stays alive while another
+    /// editor still owns the same exact model.
+    func endAIReadiness() {
+        guard aiReadinessLifecycleActive else { return }
+        aiReadinessLifecycleActive = false
+        aiPreparationGeneration &+= 1
+        aiPreparationTask?.cancel()
+        aiPreparationTask = nil
+        aiReadinessState = aiCompletionMode == .off ? .off : .idle
+        releaseCurrentAIReadinessOwner()
+    }
+
+    func retryAIReadiness() {
+        guard aiCompletionMode != .off, isWorldSessionActive else { return }
+        aiPreparationGeneration &+= 1
+        aiPreparationTask?.cancel()
+        aiPreparationTask = nil
+        updateAIReadiness(force: true)
+    }
+
     private func applySharedAICompletionMode(_ newMode: ScriptEditorAICompletionMode) {
         guard newMode != aiCompletionMode else { return }
         aiCompletionMode = newMode
         cancelAIWork(clearSuggestion: true)
         aiSuggestionError = nil
+        updateAIReadiness()
         if newMode == .onIdle { scheduleIdleAISuggestionIfNeeded() }
     }
 
@@ -488,12 +603,77 @@ final class ScriptEditorModel: ObservableObject {
         cancelAIWork(clearSuggestion: true)
         aiModelName = name
         aiSuggestionError = nil
+        updateAIReadiness()
         scheduleIdleAISuggestionIfNeeded()
     }
 
     private func synchronizeSharedAIConfiguration() {
         applySharedAICompletionMode(ScriptEditorAICompletionMode.persisted())
         applySharedAIModel(game.settings.aiOllamaModel)
+    }
+
+    private func updateAIReadiness(force: Bool = false) {
+        aiPreparationGeneration &+= 1
+        let generation = aiPreparationGeneration
+        aiPreparationTask?.cancel()
+        aiPreparationTask = nil
+
+        guard aiReadinessLifecycleActive, isWorldSessionActive else {
+            aiReadinessState = aiCompletionMode == .off ? .off : .idle
+            releaseCurrentAIReadinessOwner()
+            return
+        }
+        guard aiCompletionMode != .off else {
+            aiReadinessState = .off
+            releaseCurrentAIReadinessOwner()
+            return
+        }
+        let model = aiModelName
+        guard !model.isEmpty, isAllowedLocalOllamaModelName(model) else {
+            aiReadinessState = .needsModel
+            releaseCurrentAIReadinessOwner()
+            return
+        }
+
+        if !force, aiReadinessState == .ready(model) { return }
+        aiReadinessState = .preparing(model)
+        let completer = aiCompleter
+        let owner = aiReadinessOwner
+        aiPreparationTask = Task { @MainActor [weak self] in
+            do {
+                try await completer.prepareEditorModel(model, owner: owner)
+                guard let self, !Task.isCancelled,
+                      self.aiPreparationGeneration == generation,
+                      self.aiReadinessLifecycleActive,
+                      self.aiCompletionMode != .off,
+                      self.isWorldSessionActive,
+                      self.aiModelName == model else { return }
+                self.aiReadinessState = .ready(model)
+                self.aiPreparationTask = nil
+            } catch let error as OllamaCodeCompletionError where error == .cancelled {
+                return
+            } catch {
+                guard let self, !Task.isCancelled,
+                      self.aiPreparationGeneration == generation,
+                      self.aiModelName == model else { return }
+                self.aiReadinessState = .failed(
+                    model: model,
+                    message: error.localizedDescription
+                )
+                self.aiPreparationTask = nil
+            }
+        }
+    }
+
+    /// Retire the token before scheduling its release. A delayed actor hop for an old lifecycle
+    /// state can then never remove this editor's newly prepared model ownership.
+    private func releaseCurrentAIReadinessOwner() {
+        let completer = aiCompleter
+        let retiredOwner = aiReadinessOwner
+        aiReadinessOwner = UUID()
+        Task {
+            await completer.releaseEditorModel(owner: retiredOwner)
+        }
     }
 
     /// Requests one optional Ollama proposal. Manual mode never reaches this method unless the
@@ -547,12 +727,24 @@ final class ScriptEditorModel: ObservableObject {
 
     /// The right-hand Script AI panel uses the same proposal-only service with an instruction.
     /// It remains separate from `/ai`: no tool definitions or mutation context are reachable.
-    func requestEditorAIReply(instruction: String) async throws -> String {
+    func requestEditorAIReply(
+        instruction: String,
+        intent: ScriptEditorAIRequestIntent
+    ) async throws -> ScriptEditorAIReply {
         synchronizeSharedAIConfiguration()
         guard aiCompletionMode != .off else { throw ScriptEditorAIRequestError.disabled }
-        if let authoringError = editorAIRequestPreflightError { throw authoringError }
-        let response = try await performEditorAIRequest(instruction: instruction)
-        return response.text
+        if intent == .writeCode, let authoringError = editorAIRequestPreflightError {
+            throw authoringError
+        }
+        let response = try await performEditorAIRequest(
+            instruction: instruction,
+            instructionIntent: intent.completionIntent
+        )
+        try Task.checkCancellation()
+        return ScriptEditorAIReply(
+            text: response.text,
+            applyOutcome: intent == .writeCode ? applyEditorAIReply(response.text) : .answerOnly
+        )
     }
 
     func acceptAISuggestion() {
@@ -613,12 +805,91 @@ final class ScriptEditorModel: ObservableObject {
     }
 
     private func performEditorAIRequest(
-        instruction: String?
+        instruction: String?,
+        instructionIntent: OllamaCodeCompletionInstructionIntent? = nil
     ) async throws -> OllamaCodeCompletionResponse {
         guard isCurrentWorldSession else {
             disconnectFromWorldSession()
             throw OllamaCodeCompletionError.stale
         }
+        let requestedModel = aiModelName
+        let requestGeneration = aiRequestGeneration
+        // Capture the exact document, selection, mode, event, model, and authorized context before
+        // a cold-model await. The editor remains editable while Ollama prepares; that must make
+        // this request stale rather than silently retargeting the eventual reply.
+        let request = try makeEditorAIRequest(
+            model: requestedModel,
+            instruction: instruction,
+            instructionIntent: instructionIntent ?? .codeChange
+        )
+        if aiReadinessState != .ready(requestedModel) {
+            aiReadinessState = .preparing(requestedModel)
+        }
+        do {
+            try await aiCompleter.prepareEditorModel(
+                requestedModel,
+                owner: aiReadinessOwner
+            )
+            try Task.checkCancellation()
+            guard isCurrentWorldSession,
+                  aiRequestGeneration == requestGeneration,
+                  aiCompletionMode != .off,
+                  aiModelName == requestedModel else {
+                throw OllamaCodeCompletionError.stale
+            }
+            aiReadinessState = .ready(requestedModel)
+        } catch let error as OllamaCodeCompletionError {
+            if error != .cancelled, error != .stale,
+               aiModelName == requestedModel, aiCompletionMode != .off {
+                aiReadinessState = .failed(
+                    model: requestedModel,
+                    message: error.localizedDescription
+                )
+            }
+            throw error
+        } catch is CancellationError {
+            throw OllamaCodeCompletionError.cancelled
+        } catch {
+            if aiModelName == requestedModel, aiCompletionMode != .off {
+                aiReadinessState = .failed(
+                    model: requestedModel,
+                    message: error.localizedDescription
+                )
+            }
+            throw error
+        }
+        guard isCurrentAIRequest(request, requestGeneration: requestGeneration) else {
+            throw OllamaCodeCompletionError.stale
+        }
+        let response: OllamaCodeCompletionResponse
+        do {
+            response = try await aiCompleter.completeEditorRequest(request)
+        } catch let error as OllamaCodeCompletionError {
+            if (error == .transport || error == .modelPreparationFailed),
+               isCurrentAIRequest(request, requestGeneration: requestGeneration) {
+                aiReadinessState = .failed(
+                    model: requestedModel,
+                    message: error.localizedDescription
+                )
+            }
+            throw error
+        } catch is CancellationError {
+            throw OllamaCodeCompletionError.cancelled
+        } catch {
+            throw error
+        }
+        guard response.identity == request.identity,
+              isCurrentAIRequest(request, requestGeneration: requestGeneration) else {
+            throw OllamaCodeCompletionError.stale
+        }
+        return response
+    }
+
+    private func makeEditorAIRequest(
+        model requestedModel: String,
+        instruction: String?,
+        instructionIntent: OllamaCodeCompletionInstructionIntent
+    ) throws -> OllamaCodeCompletionRequest {
         let contextKey = currentAIContextKey
         let scriptingContext = game.scriptingCommandContext()
         let includeCrossObjectEvents = mode == .module
@@ -650,26 +921,32 @@ final class ScriptEditorModel: ObservableObject {
                     : nil
             )
         }
-        let request = try OllamaCodeCompletionRequest(
+        return try OllamaCodeCompletionRequest(
             source: source,
             caretUTF16: selectedRange.location,
             selectionLengthUTF16: selectedRange.length,
             documentRevision: documentRevision,
             documentIdentity: documentIdentity,
             contextKey: contextKey,
-            model: aiModelName,
+            model: requestedModel,
             languageSchema: ScriptLanguageSchema.luaCATSDefinitions,
             authoringContext: currentAIAuthoringContext,
             diagnostics: editorDiagnostics.map(\.message),
             authorizedNearbyObjects: nearbyObjects,
             fillInMiddlePolicy: .disabled,
-            instruction: instruction
+            instruction: instruction,
+            instructionIntent: instructionIntent
         )
-        // The owning structured task is cancelled on every document/caret/context change. The
-        // response identity is checked again below on MainActor, which is the final publication
-        // gate and avoids sharing this non-Sendable UI model with the service actor.
-        let response = try await aiCompleter.completeEditorRequest(request)
-        guard isCurrentWorldSession, response.isCurrent(
+    }
+
+    private func isCurrentAIRequest(
+        _ request: OllamaCodeCompletionRequest,
+        requestGeneration: UInt64
+    ) -> Bool {
+        isCurrentWorldSession
+            && aiRequestGeneration == requestGeneration
+            && aiCompletionMode != .off
+            && request.identity.matches(
             documentRevision: documentRevision,
             documentIdentity: documentIdentity,
             source: source,
@@ -677,11 +954,8 @@ final class ScriptEditorModel: ObservableObject {
             selectionLengthUTF16: selectedRange.length,
             contextKey: currentAIContextKey,
             model: aiModelName,
-            instruction: instruction
-        ) else {
-            throw OllamaCodeCompletionError.stale
-        }
-        return response
+            instruction: request.instruction
+        )
     }
 
     private var currentAIContextKey: OllamaCodeCompletionContextKey {
@@ -830,44 +1104,1229 @@ final class ScriptEditorModel: ObservableObject {
     /// The panel asks the model for code only, but it occasionally appends an explanatory sentence
     /// after the code (\"Note: ...\"). Inserted verbatim, that trailing prose is a syntax error — the
     /// exact failure a Birch Button script hit. This unwraps a Markdown fence when present, then
-    /// drops trailing lines until the remaining prefix is non-empty, passes
+    /// drops only a clearly labeled explanatory suffix until the remaining prefix is non-empty, passes
     /// ``aiInsertionPreflightFailure`` (safe text, size, mode-contract diagnostics), and parses as
     /// Lua once merged (``mergedProposalParses``), so a code-plus-prose reply still yields its code.
-    /// Returns nil when no prefix is insertable.
+    /// A suffix that still looks like Lua is never discarded to make an unsafe partial proposal
+    /// insertable. Returns nil when no complete safe prefix is available.
     func insertableProposal(from rawReply: String) -> String? {
-        var lines = Self.unwrapProposalFence(rawReply)
+        let fenceParts = Self.proposalFenceParts(rawReply)
+        let exterior = fenceParts.exterior.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard exterior.isEmpty || Self.isClearlyExplanatoryText(exterior) else { return nil }
+        var lines = fenceParts.code
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
+        var removedLines: [String] = []
         while !lines.isEmpty {
             let candidate = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            let removedSuffix = removedLines.joined(separator: "\n")
             if !candidate.isEmpty,
+               (removedLines.isEmpty || Self.isClearlyExplanatoryText(removedSuffix)),
                aiInsertionPreflightFailure(candidate) == nil,
                mergedProposalParses(candidate) {
                 return candidate
             }
-            lines.removeLast()
+            removedLines.insert(lines.removeLast(), at: 0)
         }
         return nil
     }
 
-    /// Returns the contents of the first Markdown code fence in `raw`, or `raw` unchanged when it is
-    /// not fenced. Mirrors the fence handling in the inline-completion path so both AI surfaces treat
-    /// a fenced reply identically; trailing prose outside the fence is discarded here.
-    static func unwrapProposalFence(_ raw: String) -> String {
+    private static func isClearlyExplanatoryText(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let labels = ["Note:", "Explanation:"]
+        let body: String
+        if let label = labels.first(where: { trimmed.hasPrefix($0) }) {
+            body = String(trimmed.dropFirst(label.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            body = trimmed
+            guard body.first?.isUppercase == true,
+                  body.contains(where: { $0.isWhitespace }),
+                  body.last.map({ ".!?:".contains($0) }) == true else { return false }
+        }
+        return !body.isEmpty && !appearsToContainLua(body)
+    }
+
+    /// Applies an instruction-driven Script AI reply as one editor transaction. Inline and On
+    /// Idle proposals deliberately do not use this path; they remain ghost text requiring an
+    /// explicit accept action. The current mode/event and captured selection are app authority —
+    /// model text can never switch destinations, Save, Run, or enable script execution.
+    func applyEditorAIReply(_ rawReply: String) -> ScriptEditorAIApplyOutcome {
+        guard let insertion = insertableProposal(from: rawReply) else {
+            if Self.appearsToContainLua(rawReply) {
+                return .refused(
+                    "AI proposal was left in the transcript because it did not contain valid, insertable Lua."
+                )
+            }
+            return .answerOnly
+        }
+        if let refusal = automaticAIInsertionFailure(insertion) {
+            return .refused(refusal)
+        }
+
+        let replacedRange = selectedRange
+        let fenceParts = Self.proposalFenceParts(rawReply)
+        let normalizedReply = fenceParts.code
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let omittedTrailingText = normalizedReply != insertion
+            || !fenceParts.exterior.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let destinationMode = mode
+        let destinationEvent = destinationMode == .handler
+            ? handlerEvent.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+        insertAtCursor(insertion)
+        let receipt = ScriptEditorAIInsertionReceipt(
+            mode: destinationMode,
+            eventName: destinationEvent,
+            replacedRange: replacedRange,
+            insertedUTF16Length: (insertion as NSString).length,
+            omittedTrailingText: omittedTrailingText
+        )
+        status = "AI inserted validated Lua into \(receipt.destinationDescription). Review it, then use Check before Save."
+        statusIsError = false
+        return .inserted(receipt)
+    }
+
+    private func automaticAIInsertionFailure(_ insertion: String) -> String? {
+        if let refusal = aiInsertionPreflightFailure(insertion) { return refusal }
+        guard !isLANGuest,
+              let runtime = game.scriptingCommandContext().scriptRuntime else {
+            return "AI proposal was left in the transcript because automatic insertion requires the local authoritative Lua validator."
+        }
+
+        let current = source as NSString
+        guard selectedRange.location >= 0,
+              selectedRange.location + selectedRange.length <= current.length else {
+            return "AI proposal was left in the transcript because the editor selection changed."
+        }
+        let merged = current.replacingCharacters(in: selectedRange, with: insertion)
+        switch runtime.validateSourceForEditor(
+            merged,
+            chunkName: currentName.isEmpty ? "ai-proposal" : currentName
+        ).outcome {
+        case .accepted:
+            break
+        case .refused(_, let message, let hint, _):
+            let detail = hint.isEmpty ? message : "\(message) — \(hint)"
+            return "AI proposal was left in the transcript: \(detail)"
+        }
+
+        let diagnostics = LuaLanguageService.analyze(
+            source: merged,
+            environment: languageEnvironment
+        ).diagnostics
+        if let blocking = diagnostics.first(where: { diagnostic in
+            diagnostic.severity == .error
+                || diagnostic.id.hasPrefix("unknown-member:")
+                || diagnostic.id.hasPrefix("target-event:")
+                || diagnostic.id.hasPrefix("reserved-event:")
+        }) {
+            return "AI proposal was left in the transcript: \(blocking.message)"
+        }
+        // Run both comparisons. Whole-document counts catch a rewrite that removes a declaration
+        // needed by the unchanged suffix. Prefix-only counts prevent the inverse trick where a
+        // selected rewrite "pays for" a newly introduced unresolved call by deleting an old one.
+        // In both cases, unchanged pre-existing dynamic calls remain neutral.
+        let unchangedPrefix = current.substring(to: selectedRange.location)
+        let proposalContext = unchangedPrefix + insertion
+        let prefixUnsupportedCall = Self.firstAdditionalUnsupportedAutomaticAICall(
+            baseline: unchangedPrefix,
+            candidate: proposalContext
+        )
+        let wholeDocumentUnsupportedCall = Self.firstAdditionalUnsupportedAutomaticAICall(
+            baseline: source,
+            candidate: merged
+        )
+        if let unsupportedCall = prefixUnsupportedCall ?? wholeDocumentUnsupportedCall {
+            return "AI proposal was left in the transcript: '\(unsupportedCall)' cannot be proven to be a shipped function or a statically known call target."
+        }
+        let prefixUnresolvedRead = Self.firstAdditionalUnresolvedAutomaticAIGlobalRead(
+            baseline: unchangedPrefix,
+            candidate: proposalContext,
+            allowsImplicitEvent: mode == .handler
+        )
+        let wholeDocumentUnresolvedRead = Self.firstAdditionalUnresolvedAutomaticAIGlobalRead(
+            baseline: source,
+            candidate: merged,
+            allowsImplicitEvent: mode == .handler
+        )
+        if let unresolvedRead = prefixUnresolvedRead ?? wholeDocumentUnresolvedRead {
+            return "AI proposal was left in the transcript: '\(unresolvedRead)' is an unresolved global read."
+        }
+        let existingEnvironmentReferences = Self.automaticAIEnvironmentReferenceCount(
+            in: unchangedPrefix
+        )
+        if Self.automaticAIEnvironmentReferenceCount(in: proposalContext) > existingEnvironmentReferences {
+            return "AI proposal was left in the transcript: automatic insertion cannot introduce dynamic _ENV access."
+        }
+
+        let selectedEvent = mode == .handler
+            ? EventKind.parse(handlerEvent.trimmingCharacters(in: .whitespacesAndNewlines))
+            : nil
+        switch runtime.dryRunOutcome(
+            source: merged,
+            owner: target,
+            mode: mode,
+            handlerEvent: selectedEvent,
+            handlerSubject: mode == .handler ? target : nil,
+            handlerSubjectIsExact: true
+        ) {
+        case .completed, .suspended, .compiledOnly:
+            return nil
+        case .failure(let message):
+            return "AI proposal was left in the transcript: mutation-free Check found \(message)"
+        }
+    }
+
+    private static func appearsToContainLua(_ text: String) -> Bool {
+        let tokens = LuaSourceScanner.tokens(in: text)
+        if tokens.contains(where: { $0.kind == .keyword }) { return true }
+        if text.contains("```") || text.contains("--") { return true }
+
+        func nextSignificantIndex(after index: Int) -> Int? {
+            var cursor = index + 1
+            while cursor < tokens.count {
+                if tokens[cursor].kind != .newline { return cursor }
+                cursor += 1
+            }
+            return nil
+        }
+
+        for index in tokens.indices {
+            guard let next = nextSignificantIndex(after: index) else { continue }
+            if tokens[index].kind == .identifier {
+                if ["(", ":", "=", "[", "{"].contains(tokens[next].text)
+                    || tokens[next].kind == .string {
+                    return true
+                }
+                if tokens[next].text == ".",
+                   let member = nextSignificantIndex(after: next),
+                   tokens[member].kind == .identifier {
+                    return true
+                }
+            }
+            if [")", "]", "}", "end"].contains(tokens[index].text),
+               ["(", "{"].contains(tokens[next].text) || tokens[next].kind == .string {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Automatic insertion is intentionally stricter than ordinary authoring. A mutation-free
+    /// dry run stops at the first legal wait/await, so an invented global call after that boundary
+    /// would otherwise escape runtime validation. Permit the shipped Lua/Elysium globals and
+    /// simple top-level helper functions declared before use; more dynamic call graphs remain in
+    /// the transcript for deliberate review and manual insertion.
+    private static func firstAdditionalUnsupportedAutomaticAICall(
+        baseline: String,
+        candidate: String
+    ) -> String? {
+        let baselineCalls = unsupportedAutomaticAIBareCalls(in: baseline)
+        let candidateCalls = unsupportedAutomaticAIBareCalls(in: candidate)
+        let baselineCounts = Dictionary(
+            baselineCalls.map { ($0, 1) },
+            uniquingKeysWith: +
+        )
+        let candidateCounts = Dictionary(
+            candidateCalls.map { ($0, 1) },
+            uniquingKeysWith: +
+        )
+        return candidateCalls.first(where: {
+            candidateCounts[$0, default: 0] > baselineCounts[$0, default: 0]
+        })
+    }
+
+    private static func unsupportedAutomaticAIBareCalls(in source: String) -> [String] {
+        enum Block: Equatable {
+            case function
+            case branch
+            case scoped
+            case repeatLoop
+        }
+
+        let tokens = LuaSourceScanner.tokens(in: source)
+        let allowedGlobals = Set(
+            (ScriptLanguageSchema.luaBaseGlobals + ScriptLanguageSchema.engineGlobals)
+                .filter { $0.kind == .globalFunction }
+                .map(\.name)
+        )
+        let allowedReceiverRoots = Set(
+            (ScriptLanguageSchema.implicitLocals + ScriptLanguageSchema.modules).map(\.name)
+        )
+        let protectedBuiltInNames = allowedGlobals.union(allowedReceiverRoots)
+        var topLevelHelpers: Set<String> = []
+        var safeTopLevelReceivers: Set<String> = []
+        var shadowedBuiltInNames: Set<String> = []
+        var blocks: [Block] = []
+        var unsupported: [String] = []
+        var expressionDelimiterDepth = 0
+
+        func previousSignificantIndex(before index: Int) -> Int? {
+            guard index > 0 else { return nil }
+            var cursor = index - 1
+            while cursor >= 0 {
+                if tokens[cursor].kind != .newline { return cursor }
+                cursor -= 1
+            }
+            return nil
+        }
+
+        func nextSignificantIndex(after index: Int) -> Int? {
+            var cursor = index + 1
+            while cursor < tokens.count {
+                if tokens[cursor].kind != .newline { return cursor }
+                cursor += 1
+            }
+            return nil
+        }
+
+        func isCallArgumentStart(_ index: Int) -> Bool {
+            tokens[index].text == "(" || tokens[index].text == "{" ||
+                tokens[index].kind == .string
+        }
+
+        func identifierIsCalled(at index: Int) -> Bool {
+            if let next = nextSignificantIndex(after: index), isCallArgumentStart(next) {
+                return true
+            }
+            guard var left = previousSignificantIndex(before: index),
+                  var right = nextSignificantIndex(after: index),
+                  tokens[left].text == "(", tokens[right].text == ")" else {
+                return false
+            }
+            while true {
+                guard let afterRight = nextSignificantIndex(after: right) else { return false }
+                if isCallArgumentStart(afterRight) { return true }
+                guard tokens[afterRight].text == ")",
+                      let beforeLeft = previousSignificantIndex(before: left),
+                      tokens[beforeLeft].text == "(" else {
+                    return false
+                }
+                left = beforeLeft
+                right = afterRight
+            }
+        }
+
+        func rootReceiver(before operatorIndex: Int) -> String? {
+            guard var root = previousSignificantIndex(before: operatorIndex),
+                  tokens[root].kind == .identifier else { return nil }
+            while let join = previousSignificantIndex(before: root),
+                  tokens[join].text == "." || tokens[join].text == ":",
+                  let earlier = previousSignificantIndex(before: join),
+                  tokens[earlier].kind == .identifier {
+                root = earlier
+            }
+            return tokens[root].text
+        }
+
+        func expressionIndices(startingAt start: Int) -> [Int] {
+            var result: [Int] = []
+            var delimiterDepth = 0
+            var cursor = start
+            while cursor < tokens.count {
+                let token = tokens[cursor]
+                if delimiterDepth == 0,
+                   token.kind == .newline || token.text == ";" {
+                    break
+                }
+                result.append(cursor)
+                if ["(", "[", "{"].contains(token.text) {
+                    delimiterDepth += 1
+                } else if [")", "]", "}"].contains(token.text) {
+                    delimiterDepth = max(0, delimiterDepth - 1)
+                }
+                cursor += 1
+            }
+            return result
+        }
+
+        func isExactCall(_ expression: [Int], head: [String]) -> Bool {
+            guard expression.count >= head.count + 2 else { return false }
+            for (offset, expected) in head.enumerated()
+                where tokens[expression[offset]].text != expected {
+                return false
+            }
+            guard tokens[expression[head.count]].text == "(" else { return false }
+            var parenthesisDepth = 0
+            for offset in head.count..<expression.count {
+                switch tokens[expression[offset]].text {
+                case "(":
+                    parenthesisDepth += 1
+                case ")":
+                    parenthesisDepth -= 1
+                    if parenthesisDepth == 0 {
+                        return offset == expression.count - 1
+                    }
+                    if parenthesisDepth < 0 { return false }
+                default:
+                    break
+                }
+            }
+            return false
+        }
+
+        func expressionContinuesAfterLineBreak(_ expression: [Int]) -> Bool {
+            guard let last = expression.last, last + 1 < tokens.count,
+                  tokens[last + 1].kind == .newline,
+                  let next = nextSignificantIndex(after: last) else { return false }
+            let continuationTokens: Set<String> = [
+                "and", "or", "+", "-", "*", "/", "//", "%", "^", "..",
+                "==", "~=", "<", ">", "<=", ">=", ".", ":", "[", "(", "{",
+            ]
+            return continuationTokens.contains(tokens[next].text)
+                || tokens[next].kind == .string
+        }
+
+        func identifierIsAssignmentTarget(at index: Int) -> Bool {
+            // A syntactic identifier inside a table/index/call expression is not a variable
+            // binding even when followed by `=` (for example `{ gate = value }`).
+            guard expressionDelimiterDepth == 0,
+                  let next = nextSignificantIndex(after: index) else { return false }
+            if tokens[next].text == "=" { return true }
+            guard tokens[next].text == "," else { return false }
+
+            // Handle the first element of a multiple assignment (`gate, other = ...`). Stop at a
+            // real statement boundary; malformed or more complex syntax is refused elsewhere.
+            var cursor = next + 1
+            var delimiterDepth = 0
+            while cursor < tokens.count {
+                let token = tokens[cursor]
+                if delimiterDepth == 0, token.text == ";" {
+                    return false
+                }
+                if ["(", "[", "{"].contains(token.text) {
+                    delimiterDepth += 1
+                } else if [")", "]", "}"].contains(token.text) {
+                    delimiterDepth = max(0, delimiterDepth - 1)
+                } else if delimiterDepth == 0, token.text == "=" {
+                    return true
+                } else if delimiterDepth == 0,
+                          ["then", "do", "end", "until"].contains(token.text) {
+                    return false
+                }
+                cursor += 1
+            }
+            return false
+        }
+
+        func functionParameterNames(after functionIndex: Int) -> [String] {
+            var cursor = functionIndex + 1
+            while cursor < tokens.count, tokens[cursor].text != "(" {
+                cursor += 1
+            }
+            guard cursor < tokens.count, tokens[cursor].text == "(" else { return [] }
+            var names: [String] = []
+            var depth = 1
+            cursor += 1
+            while cursor < tokens.count, depth > 0 {
+                switch tokens[cursor].text {
+                case "(":
+                    depth += 1
+                case ")":
+                    depth -= 1
+                default:
+                    if depth == 1, tokens[cursor].kind == .identifier {
+                        names.append(tokens[cursor].text)
+                    }
+                }
+                cursor += 1
+            }
+            return names
+        }
+
+        func localNames(after localIndex: Int) -> [String] {
+            guard let first = nextSignificantIndex(after: localIndex),
+                  tokens[first].text != "function" else { return [] }
+            var names: [String] = []
+            var cursor = first
+            while cursor < tokens.count {
+                guard tokens[cursor].kind == .identifier else { break }
+                names.append(tokens[cursor].text)
+                guard let separator = nextSignificantIndex(after: cursor),
+                      tokens[separator].text == ",",
+                      let nextName = nextSignificantIndex(after: separator) else { break }
+                cursor = nextName
+            }
+            return names
+        }
+
+        func loopNames(after forIndex: Int) -> [String] {
+            var names: [String] = []
+            guard let first = nextSignificantIndex(after: forIndex) else { return names }
+            var cursor = first
+            while cursor < tokens.count {
+                guard tokens[cursor].kind == .identifier else { break }
+                names.append(tokens[cursor].text)
+                guard let separator = nextSignificantIndex(after: cursor),
+                      tokens[separator].text == ",",
+                      let nextName = nextSignificantIndex(after: separator) else { break }
+                cursor = nextName
+            }
+            return names
+        }
+
+        func callArgumentGroups(openingAt openIndex: Int) -> [[Int]] {
+            enum ArgumentBlock: Equatable {
+                case function
+                case branch
+                case scoped
+                case repeatLoop
+            }
+
+            var groups: [[Int]] = [[]]
+            var delimiters = ["("]
+            var argumentBlocks: [ArgumentBlock] = []
+            var cursor = openIndex + 1
+            while cursor < tokens.count {
+                let token = tokens[cursor]
+                if token.text == "elseif", argumentBlocks.last == .branch {
+                    argumentBlocks.removeLast()
+                }
+                if token.text == ")", delimiters.count == 1, argumentBlocks.isEmpty {
+                    return groups
+                }
+                if token.text == ",", delimiters.count == 1, argumentBlocks.isEmpty {
+                    groups.append([])
+                    cursor += 1
+                    continue
+                }
+                if token.kind != .newline { groups[groups.count - 1].append(cursor) }
+
+                switch token.text {
+                case "(", "[", "{":
+                    delimiters.append(token.text)
+                case ")", "]", "}":
+                    if delimiters.count > 1 { delimiters.removeLast() }
+                case "function":
+                    argumentBlocks.append(.function)
+                case "then":
+                    argumentBlocks.append(.branch)
+                case "do":
+                    argumentBlocks.append(.scoped)
+                case "repeat":
+                    argumentBlocks.append(.repeatLoop)
+                case "end":
+                    if !argumentBlocks.isEmpty { argumentBlocks.removeLast() }
+                case "until":
+                    if argumentBlocks.last == .repeatLoop { argumentBlocks.removeLast() }
+                default:
+                    break
+                }
+                cursor += 1
+            }
+            return groups
+        }
+
+        func isStaticallyKnownFunction(_ group: [Int]) -> Bool {
+            guard let first = group.first else { return false }
+            if tokens[first].text == "function" { return true }
+            guard group.count == 1, tokens[first].kind == .identifier else { return false }
+            let name = tokens[first].text
+            return topLevelHelpers.contains(name)
+                || (allowedGlobals.contains(name) && !shadowedBuiltInNames.contains(name))
+        }
+
+        enum CallableArgumentPolicy {
+            case function
+            case functionOrHandlerName
+            case functionStringOrTable
+        }
+
+        func callableArgumentIsKnown(_ group: [Int], policy: CallableArgumentPolicy) -> Bool {
+            if isStaticallyKnownFunction(group) { return true }
+            guard let first = group.first else { return false }
+            switch policy {
+            case .function:
+                return false
+            case .functionOrHandlerName:
+                return group.count == 1 && tokens[first].kind == .string
+            case .functionStringOrTable:
+                return (group.count == 1 && tokens[first].kind == .string)
+                    || (tokens[first].text == "{" && group.last.map { tokens[$0].text } == "}")
+            }
+        }
+
+        func unprovenCallableArgument(
+            callName: String,
+            receiverRoot: String?,
+            groups: [[Int]]
+        ) -> String? {
+            var requirements: [(Int, CallableArgumentPolicy)] = []
+            if receiverRoot == nil {
+                switch callName {
+                case "after", "every":
+                    requirements = [(1, .functionOrHandlerName)]
+                case "on", "subscribe":
+                    if !groups.isEmpty { requirements = [(groups.count - 1, .function)] }
+                case "register":
+                    requirements = [(1, .function)]
+                case "pcall":
+                    requirements = [(0, .function)]
+                case "xpcall":
+                    requirements = [(0, .function), (1, .function)]
+                default:
+                    break
+                }
+            } else {
+                switch (receiverRoot, callName) {
+                case (_, "on"):
+                    if !groups.isEmpty { requirements = [(groups.count - 1, .function)] }
+                case (_, "onAttribute"):
+                    requirements = [(1, .function)]
+                case ("table", "sort") where groups.count >= 2:
+                    requirements = [(1, .function)]
+                case ("string", "gsub") where groups.count >= 3:
+                    requirements = [(2, .functionStringOrTable)]
+                default:
+                    break
+                }
+            }
+
+            for (position, policy) in requirements {
+                guard position < groups.count,
+                      callableArgumentIsKnown(groups[position], policy: policy) else {
+                    return "unproven callable argument for \(callName)"
+                }
+            }
+            return nil
+        }
+
+        func genericForIteratorIsKnown(after inIndex: Int) -> Bool {
+            guard let first = nextSignificantIndex(after: inIndex) else { return false }
+            var expression: [Int] = []
+            var delimiters: [String] = []
+            var cursor = first
+            while cursor < tokens.count {
+                let token = tokens[cursor]
+                if delimiters.isEmpty, token.text == "," || token.text == "do" { break }
+                if token.kind != .newline { expression.append(cursor) }
+                switch token.text {
+                case "(", "[", "{":
+                    delimiters.append(token.text)
+                case ")", "]", "}":
+                    if !delimiters.isEmpty { delimiters.removeLast() }
+                default:
+                    break
+                }
+                cursor += 1
+            }
+            guard !expression.isEmpty else { return false }
+            var headOffset = 0
+            guard tokens[expression[headOffset]].kind == .identifier else {
+                return isStaticallyKnownFunction(expression)
+            }
+            headOffset += 1
+            while headOffset + 1 < expression.count,
+                  [".", ":"].contains(tokens[expression[headOffset]].text),
+                  tokens[expression[headOffset + 1]].kind == .identifier {
+                headOffset += 2
+            }
+            if headOffset < expression.count,
+               tokens[expression[headOffset]].text == "(" {
+                var parenthesisDepth = 0
+                var closesAtEnd = false
+                for offset in headOffset..<expression.count {
+                    switch tokens[expression[offset]].text {
+                    case "(":
+                        parenthesisDepth += 1
+                    case ")":
+                        parenthesisDepth -= 1
+                        if parenthesisDepth == 0 {
+                            closesAtEnd = offset == expression.count - 1
+                            break
+                        }
+                    default:
+                        break
+                    }
+                    if closesAtEnd { break }
+                }
+                guard closesAtEnd else { return false }
+                // The ordinary call/member gate validates the explicit factory invocation.
+                return true
+            }
+            return isStaticallyKnownFunction(expression)
+        }
+
+        for index in tokens.indices {
+            let token = tokens[index]
+
+            if token.text == "elseif", blocks.last == .branch {
+                blocks.removeLast()
+            }
+
+            if token.text == "function" {
+                let parameterNames = functionParameterNames(after: index)
+                for name in parameterNames {
+                    safeTopLevelReceivers.remove(name)
+                    topLevelHelpers.remove(name)
+                    if protectedBuiltInNames.contains(name) {
+                        shadowedBuiltInNames.insert(name)
+                    }
+                }
+                if blocks.isEmpty, let nameIndex = nextSignificantIndex(after: index),
+                   tokens[nameIndex].kind == .identifier,
+                   let openIndex = nextSignificantIndex(after: nameIndex),
+                   tokens[openIndex].text == "(" {
+                    let name = tokens[nameIndex].text
+                    if protectedBuiltInNames.contains(name) {
+                        shadowedBuiltInNames.insert(name)
+                    }
+                    safeTopLevelReceivers.remove(name)
+                    topLevelHelpers.remove(name)
+                    if !parameterNames.contains(name) {
+                        topLevelHelpers.insert(name)
+                    }
+                } else if blocks.isEmpty,
+                          let equalsIndex = previousSignificantIndex(before: index),
+                          tokens[equalsIndex].text == "=",
+                          let nameIndex = previousSignificantIndex(before: equalsIndex),
+                          tokens[nameIndex].kind == .identifier,
+                          let localIndex = previousSignificantIndex(before: nameIndex),
+                          tokens[localIndex].text == "local" {
+                    let name = tokens[nameIndex].text
+                    if protectedBuiltInNames.contains(name) {
+                        shadowedBuiltInNames.insert(name)
+                    }
+                    safeTopLevelReceivers.remove(name)
+                    topLevelHelpers.remove(name)
+                    if !parameterNames.contains(name) {
+                        topLevelHelpers.insert(name)
+                    }
+                } else if let nameIndex = nextSignificantIndex(after: index),
+                          tokens[nameIndex].kind == .identifier {
+                    let name = tokens[nameIndex].text
+                    safeTopLevelReceivers.remove(name)
+                    topLevelHelpers.remove(name)
+                    if protectedBuiltInNames.contains(name) {
+                        shadowedBuiltInNames.insert(name)
+                    }
+                }
+                blocks.append(.function)
+                continue
+            }
+
+            if token.text == "local" {
+                for name in localNames(after: index) {
+                    safeTopLevelReceivers.remove(name)
+                    topLevelHelpers.remove(name)
+                    if protectedBuiltInNames.contains(name) {
+                        shadowedBuiltInNames.insert(name)
+                    }
+                }
+            } else if token.text == "for" {
+                for name in loopNames(after: index) {
+                    safeTopLevelReceivers.remove(name)
+                    topLevelHelpers.remove(name)
+                    if protectedBuiltInNames.contains(name) {
+                        shadowedBuiltInNames.insert(name)
+                    }
+                }
+            }
+
+            if token.text == "local", blocks.isEmpty,
+               let nameIndex = nextSignificantIndex(after: index),
+               tokens[nameIndex].kind == .identifier {
+                let name = tokens[nameIndex].text
+                safeTopLevelReceivers.remove(name)
+                topLevelHelpers.remove(name)
+                if let equalsIndex = nextSignificantIndex(after: nameIndex),
+                   tokens[equalsIndex].text == "=",
+                   let valueIndex = nextSignificantIndex(after: equalsIndex) {
+                    let expression = expressionIndices(startingAt: valueIndex)
+                    let expressionIsComplete = !expressionContinuesAfterLineBreak(expression)
+                    let isImplicitHandle = expressionIsComplete && expression.count == 1
+                        && ["self", "world", "player", "ev"]
+                            .contains(tokens[expression[0]].text)
+                        && !shadowedBuiltInNames.contains(tokens[expression[0]].text)
+                    let isDimensionHandle = expressionIsComplete
+                        && !shadowedBuiltInNames.contains("dim")
+                        && isExactCall(expression, head: ["dim"])
+                    let isObjectLookup = expressionIsComplete && isExactCall(
+                        expression,
+                        head: ["objects", ".", "get"]
+                    ) && !shadowedBuiltInNames.contains("objects")
+                    if !protectedBuiltInNames.contains(name),
+                       isImplicitHandle || isDimensionHandle || isObjectLookup {
+                        safeTopLevelReceivers.insert(name)
+                    }
+                }
+            }
+
+            if token.kind == .identifier,
+               identifierIsAssignmentTarget(at: index) {
+                let previous = previousSignificantIndex(before: index)
+                    .map { tokens[$0].text }
+                if previous != "local", previous != "function" {
+                    safeTopLevelReceivers.remove(token.text)
+                    topLevelHelpers.remove(token.text)
+                    if protectedBuiltInNames.contains(token.text) {
+                        shadowedBuiltInNames.insert(token.text)
+                    }
+                }
+            }
+
+            if isCallArgumentStart(index),
+               let calleeEnd = previousSignificantIndex(before: index),
+               ["]", "}", ")", "end"].contains(tokens[calleeEnd].text) {
+                unsupported.append("computed call target")
+            }
+
+            if token.text == "in", !genericForIteratorIsKnown(after: index) {
+                unsupported.append("unproven generic-for iterator")
+            }
+
+            if token.kind == .identifier, identifierIsCalled(at: index) {
+                let previousIndex = previousSignificantIndex(before: index)
+                let previous = previousIndex.map { tokens[$0].text }
+                let isDeclaration = previous == "function"
+                let isMember = previous == "." || previous == ":"
+                let receiverRoot = isMember && previousIndex != nil
+                    ? rootReceiver(before: previousIndex!)
+                    : nil
+                if let openIndex = nextSignificantIndex(after: index),
+                   tokens[openIndex].text == "(",
+                   let callableFailure = unprovenCallableArgument(
+                    callName: token.text,
+                    receiverRoot: receiverRoot,
+                    groups: callArgumentGroups(openingAt: openIndex)
+                   ) {
+                    unsupported.append(callableFailure)
+                }
+                if isMember, let previousIndex {
+                    guard let root = rootReceiver(before: previousIndex),
+                          (allowedReceiverRoots.contains(root)
+                            && !shadowedBuiltInNames.contains(root))
+                            || safeTopLevelReceivers.contains(root) else {
+                        unsupported.append(rootReceiver(before: previousIndex) ?? "computed member call")
+                        continue
+                    }
+                } else if !isDeclaration,
+                          (!allowedGlobals.contains(token.text)
+                            || shadowedBuiltInNames.contains(token.text)),
+                          !topLevelHelpers.contains(token.text) {
+                    unsupported.append(token.text)
+                }
+            }
+
+            switch token.text {
+            case "then":
+                blocks.append(.branch)
+            case "do":
+                blocks.append(.scoped)
+            case "repeat":
+                blocks.append(.repeatLoop)
+            case "end":
+                if !blocks.isEmpty { blocks.removeLast() }
+            case "until":
+                if blocks.last == .repeatLoop { blocks.removeLast() }
+            default:
+                break
+            }
+            if ["(", "[", "{"].contains(token.text) {
+                expressionDelimiterDepth += 1
+            } else if [")", "]", "}"].contains(token.text) {
+                expressionDelimiterDepth = max(0, expressionDelimiterDepth - 1)
+            }
+        }
+        return unsupported
+    }
+
+    private static func firstAdditionalUnresolvedAutomaticAIGlobalRead(
+        baseline: String,
+        candidate: String,
+        allowsImplicitEvent: Bool
+    ) -> String? {
+        let baselineReads = unresolvedAutomaticAIGlobalReads(
+            in: baseline,
+            allowsImplicitEvent: allowsImplicitEvent
+        )
+        let candidateReads = unresolvedAutomaticAIGlobalReads(
+            in: candidate,
+            allowsImplicitEvent: allowsImplicitEvent
+        )
+        let baselineCounts = Dictionary(
+            baselineReads.map { ($0, 1) },
+            uniquingKeysWith: +
+        )
+        let candidateCounts = Dictionary(
+            candidateReads.map { ($0, 1) },
+            uniquingKeysWith: +
+        )
+        return candidateReads.first(where: {
+            candidateCounts[$0, default: 0] > baselineCounts[$0, default: 0]
+        })
+    }
+
+    /// Conservative lexical existence check for automatic AI edits. The normal editor remains
+    /// error tolerant and permits arbitrary user globals; auto-insertion has a narrower contract:
+    /// an identifier read must resolve to a shipped name or a declaration visible in its Lua
+    /// lexical block. Member names, table keys, labels, and declaration sites are not reads.
+    private static func unresolvedAutomaticAIGlobalReads(
+        in source: String,
+        allowsImplicitEvent: Bool
+    ) -> [String] {
+        enum ScopeKind {
+            case chunk
+            case function
+            case branch
+            case scoped
+            case repeatLoop
+        }
+        struct Scope {
+            let kind: ScopeKind
+            var names: Set<String>
+        }
+        struct Delimiter {
+            let text: String
+            let scopeDepth: Int
+        }
+        struct PendingLocalActivation {
+            let scopeIndex: Int
+            let names: Set<String>
+        }
+
+        let tokens = LuaSourceScanner.tokens(in: source)
+        var shippedNames = Set(
+            ScriptLanguageSchema.allSymbols
+                .filter { $0.parent == nil }
+                .map(\.name)
+        ).union(["self", "world", "player"])
+        if allowsImplicitEvent {
+            shippedNames.insert("ev")
+        } else {
+            shippedNames.remove("ev")
+        }
+        var scopes = [Scope(kind: .chunk, names: [])]
+        var delimiters: [Delimiter] = []
+        var declarationIndices: Set<Int> = []
+        var forNamesByDoIndex: [Int: [String]] = [:]
+        var localActivationsByIndex: [Int: [PendingLocalActivation]] = [:]
+        var unresolved: [String] = []
+
+        func previousSignificantIndex(before index: Int) -> Int? {
+            guard index > 0 else { return nil }
+            var cursor = index - 1
+            while cursor >= 0 {
+                if tokens[cursor].kind != .newline { return cursor }
+                cursor -= 1
+            }
+            return nil
+        }
+
+        func nextSignificantIndex(after index: Int) -> Int? {
+            var cursor = index + 1
+            while cursor < tokens.count {
+                if tokens[cursor].kind != .newline { return cursor }
+                cursor += 1
+            }
+            return nil
+        }
+
+        func nameList(startingAt first: Int) -> [Int] {
+            var result: [Int] = []
+            var cursor = first
+            while cursor < tokens.count, tokens[cursor].kind == .identifier {
+                result.append(cursor)
+                guard let comma = nextSignificantIndex(after: cursor),
+                      tokens[comma].text == ",",
+                      let nextName = nextSignificantIndex(after: comma) else { break }
+                cursor = nextName
+            }
+            return result
+        }
+
+        func localDeclaration(startingAt first: Int) -> (names: [Int], separator: Int?) {
+            var names: [Int] = []
+            var cursor = first
+            while cursor < tokens.count, tokens[cursor].kind == .identifier {
+                names.append(cursor)
+                guard var separator = nextSignificantIndex(after: cursor) else {
+                    return (names, nil)
+                }
+                if tokens[separator].text == "<",
+                   let attributeName = nextSignificantIndex(after: separator),
+                   tokens[attributeName].kind == .identifier,
+                   let close = nextSignificantIndex(after: attributeName),
+                   tokens[close].text == ">" {
+                    declarationIndices.insert(attributeName)
+                    guard let afterAttribute = nextSignificantIndex(after: close) else {
+                        return (names, nil)
+                    }
+                    separator = afterAttribute
+                }
+                guard tokens[separator].text == ",",
+                      let nextName = nextSignificantIndex(after: separator) else {
+                    return (names, separator)
+                }
+                cursor = nextName
+            }
+            return (names, cursor < tokens.count ? cursor : nil)
+        }
+
+        /// Lua evaluates a normal local declaration's initializer in the surrounding scope and
+        /// activates the new names only after that statement. Find a conservative lexical boundary
+        /// so `local x = x` never lets the new `x` authorize its own initializer. Newlines inside
+        /// delimiters, anonymous functions, or a continued expression remain part of the initializer.
+        func localInitializerActivationIndex(after equalsIndex: Int) -> Int {
+            enum InitializerBlock: Equatable {
+                case function
+                case branch
+                case scoped
+                case repeatLoop
+            }
+
+            let infixOrContinuationTokens: Set<String> = [
+                "=", ",", "and", "or", "not", "#", "+", "-", "*", "/", "//", "%", "^", "..",
+                "==", "~=", "<", ">", "<=", ">=", "&", "|", "~", "<<", ">>",
+                ".", ":", "[", "(", "{",
+            ]
+            var delimiterStack: [String] = []
+            var blocks: [InitializerBlock] = []
+            var cursor = equalsIndex + 1
+
+            while cursor < tokens.count {
+                let token = tokens[cursor]
+                if token.text == ";", delimiterStack.isEmpty, blocks.isEmpty {
+                    return cursor + 1
+                }
+                if token.kind == .newline, delimiterStack.isEmpty, blocks.isEmpty {
+                    let previous = previousSignificantIndex(before: cursor)
+                        .map { tokens[$0] }
+                    let next = nextSignificantIndex(after: cursor)
+                        .map { tokens[$0] }
+                    let previousContinues = previous.map {
+                        infixOrContinuationTokens.contains($0.text)
+                    } ?? true
+                    let nextContinues = next.map {
+                        infixOrContinuationTokens.contains($0.text) || $0.kind == .string
+                    } ?? false
+                    if !previousContinues, !nextContinues {
+                        return cursor + 1
+                    }
+                }
+
+                switch token.text {
+                case "(", "[", "{":
+                    delimiterStack.append(token.text)
+                case ")", "]", "}":
+                    if !delimiterStack.isEmpty { delimiterStack.removeLast() }
+                case "function":
+                    blocks.append(.function)
+                case "elseif":
+                    if blocks.last == .branch { blocks.removeLast() }
+                case "else":
+                    if blocks.last == .branch { blocks.removeLast() }
+                    blocks.append(.branch)
+                case "then":
+                    blocks.append(.branch)
+                case "do":
+                    blocks.append(.scoped)
+                case "repeat":
+                    blocks.append(.repeatLoop)
+                case "end":
+                    if !blocks.isEmpty { blocks.removeLast() }
+                case "until":
+                    if blocks.last == .repeatLoop { blocks.removeLast() }
+                default:
+                    break
+                }
+                cursor += 1
+            }
+            return tokens.count
+        }
+
+        func parameterIndices(after functionIndex: Int) -> [Int] {
+            var open = functionIndex + 1
+            while open < tokens.count, tokens[open].text != "(" { open += 1 }
+            guard open < tokens.count else { return [] }
+            var result: [Int] = []
+            var depth = 1
+            var cursor = open + 1
+            while cursor < tokens.count, depth > 0 {
+                switch tokens[cursor].text {
+                case "(": depth += 1
+                case ")": depth -= 1
+                default:
+                    if depth == 1, tokens[cursor].kind == .identifier {
+                        result.append(cursor)
+                    }
+                }
+                cursor += 1
+            }
+            return result
+        }
+
+        func firstDoIndex(after forIndex: Int) -> Int? {
+            var delimiterDepth = 0
+            var cursor = forIndex + 1
+            while cursor < tokens.count {
+                let token = tokens[cursor]
+                if token.text == "do", delimiterDepth == 0 { return cursor }
+                if ["(", "[", "{"].contains(token.text) {
+                    delimiterDepth += 1
+                } else if [")", "]", "}"].contains(token.text) {
+                    delimiterDepth = max(0, delimiterDepth - 1)
+                }
+                cursor += 1
+            }
+            return nil
+        }
+
+        func isVisible(_ name: String) -> Bool {
+            shippedNames.contains(name) || scopes.reversed().contains { $0.names.contains(name) }
+        }
+
+        func addNames(_ indices: [Int], toScopeAt scopeIndex: Int) {
+            for declarationIndex in indices {
+                declarationIndices.insert(declarationIndex)
+                scopes[scopeIndex].names.insert(tokens[declarationIndex].text)
+            }
+        }
+
+        for index in tokens.indices {
+            let token = tokens[index]
+
+            for activation in localActivationsByIndex[index] ?? []
+                where activation.scopeIndex < scopes.count {
+                scopes[activation.scopeIndex].names.formUnion(activation.names)
+            }
+
+            switch token.text {
+            case "elseif":
+                if scopes.last?.kind == .branch { scopes.removeLast() }
+            case "else":
+                if scopes.last?.kind == .branch { scopes.removeLast() }
+                scopes.append(Scope(kind: .branch, names: []))
+            case "end":
+                if scopes.count > 1 { scopes.removeLast() }
+            case "until":
+                // Popping before the condition is deliberately conservative: a repeat-local read
+                // in `until` may remain transcript-only, but no name can leak beyond its block.
+                if scopes.last?.kind == .repeatLoop { scopes.removeLast() }
+            default:
+                break
+            }
+
+            if token.text == "local", let first = nextSignificantIndex(after: index) {
+                if tokens[first].text == "function",
+                   let nameIndex = nextSignificantIndex(after: first),
+                   tokens[nameIndex].kind == .identifier {
+                    addNames([nameIndex], toScopeAt: scopes.count - 1)
+                } else if tokens[first].kind == .identifier {
+                    let declaration = localDeclaration(startingAt: first)
+                    declarationIndices.formUnion(declaration.names)
+                    let activationIndex: Int
+                    if let separator = declaration.separator,
+                       tokens[separator].text == "=" {
+                        activationIndex = localInitializerActivationIndex(after: separator)
+                    } else {
+                        activationIndex = declaration.separator ?? tokens.count
+                    }
+                    localActivationsByIndex[activationIndex, default: []].append(
+                        PendingLocalActivation(
+                            scopeIndex: scopes.count - 1,
+                            names: Set(declaration.names.map { tokens[$0].text })
+                        )
+                    )
+                }
+            }
+
+            if token.text == "for", let first = nextSignificantIndex(after: index),
+               tokens[first].kind == .identifier {
+                let names = nameList(startingAt: first)
+                declarationIndices.formUnion(names)
+                if let doIndex = firstDoIndex(after: index) {
+                    forNamesByDoIndex[doIndex] = names.map { tokens[$0].text }
+                }
+            }
+
+            if token.text == "function" {
+                let first = nextSignificantIndex(after: index)
+                if let first, tokens[first].kind == .identifier,
+                   let afterName = nextSignificantIndex(after: first),
+                   tokens[afterName].text == "(" {
+                    declarationIndices.insert(first)
+                    scopes[scopes.count - 1].names.insert(tokens[first].text)
+                }
+                let parameters = parameterIndices(after: index)
+                declarationIndices.formUnion(parameters)
+                scopes.append(Scope(
+                    kind: .function,
+                    names: Set(parameters.map { tokens[$0].text })
+                ))
+            }
+
+            if token.kind == .identifier, !declarationIndices.contains(index) {
+                let previous = previousSignificantIndex(before: index)
+                    .map { tokens[$0].text }
+                let next = nextSignificantIndex(after: index)
+                    .map { tokens[$0].text }
+                let isMemberName = previous == "." || previous == ":"
+                let isLabel = previous == "goto" || previous == "::" || next == "::"
+                let isLocalAttribute = previous == "<" && next == ">"
+                let isTableKey = next == "="
+                    && delimiters.last?.text == "{"
+                    && delimiters.last?.scopeDepth == scopes.count
+                if !isMemberName, !isLabel, !isLocalAttribute, !isTableKey,
+                   !isVisible(token.text) {
+                    unresolved.append(token.text)
+                }
+            }
+
+            switch token.text {
+            case "then":
+                scopes.append(Scope(kind: .branch, names: []))
+            case "do":
+                scopes.append(Scope(
+                    kind: .scoped,
+                    names: Set(forNamesByDoIndex[index] ?? [])
+                ))
+            case "repeat":
+                scopes.append(Scope(kind: .repeatLoop, names: []))
+            default:
+                break
+            }
+
+            if ["(", "[", "{"].contains(token.text) {
+                delimiters.append(Delimiter(text: token.text, scopeDepth: scopes.count))
+            } else if [")", "]", "}"].contains(token.text), !delimiters.isEmpty {
+                delimiters.removeLast()
+            }
+        }
+        return unresolved
+    }
+
+    private static func automaticAIEnvironmentReferenceCount(in source: String) -> Int {
+        LuaSourceScanner.tokens(in: source).count {
+            $0.kind == .identifier && $0.text == "_ENV"
+        }
+    }
+
+    private static func proposalFenceParts(_ raw: String) -> (code: String, exterior: String) {
         let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
-        guard let opening = normalized.range(of: "```") else { return normalized }
+        guard let opening = normalized.range(of: "```") else { return (normalized, "") }
         let afterOpening = normalized[opening.upperBound...]
-        guard let lineEnd = afterOpening.firstIndex(of: "\n") else { return normalized }
+        guard let lineEnd = afterOpening.firstIndex(of: "\n") else { return (normalized, "") }
         let possibleLanguage = afterOpening[..<lineEnd]
         let codeStart = possibleLanguage.allSatisfy { $0.isLetter || $0 == "_" }
             ? afterOpening.index(after: lineEnd)
             : opening.upperBound
         let remainder = normalized[codeStart...]
-        guard let closing = remainder.range(of: "```") else { return String(remainder) }
-        var fenced = String(remainder[..<closing.lowerBound])
-        if fenced.hasSuffix("\n") { fenced.removeLast() }
-        return fenced
+        guard let closing = remainder.range(of: "```") else { return (normalized, "") }
+        var code = String(remainder[..<closing.lowerBound])
+        if code.hasSuffix("\n") { code.removeLast() }
+        let leading = String(normalized[..<opening.lowerBound])
+        let trailing = String(normalized[closing.upperBound...])
+        return (code, [leading, trailing].joined(separator: "\n"))
+    }
+
+    /// Returns the contents of the first complete Markdown code fence in `raw`, or `raw` unchanged
+    /// when no complete fence is present. Automatic insertion separately validates all text outside
+    /// the fence as clearly explanatory and non-Lua before using this code.
+    static func unwrapProposalFence(_ raw: String) -> String {
+        proposalFenceParts(raw).code
     }
 
     private func acceptAIFragment(_ split: (String) -> (accepted: String, remainder: String)) {

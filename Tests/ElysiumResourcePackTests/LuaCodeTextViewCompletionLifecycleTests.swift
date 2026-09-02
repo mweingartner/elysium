@@ -6,6 +6,72 @@ import XCTest
 
 @MainActor
 final class LuaCodeTextViewCompletionLifecycleTests: XCTestCase {
+    func testSelectedAIExternalEditIsOneNativeUndoTransaction() throws {
+        let original = "local old = 1\nsay(old)"
+        let bindingState = LuaEditorBindingState()
+        bindingState.text = original
+        let replacedRange = (original as NSString).range(of: "local old = 1")
+        bindingState.selection = replacedRange
+        let representable = LuaCodeTextView(
+            text: Binding(
+                get: { bindingState.text },
+                set: { bindingState.text = $0 }
+            ),
+            selectedRange: Binding(
+                get: { bindingState.selection },
+                set: { bindingState.selection = $0 }
+            ),
+            errorLine: nil,
+            targetKind: .player,
+            theme: .defaultDark
+        )
+        let coordinator = representable.makeCoordinator()
+        let editorContainer = try XCTUnwrap(
+            representable.makeEditorView(coordinator: coordinator) as? LuaEditorContainerView
+        )
+        let editor = try XCTUnwrap(coordinator.textView)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 340),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = editorContainer
+        defer {
+            LuaCodeTextView.dismantleNSView(editorContainer, coordinator: coordinator)
+            window.close()
+        }
+
+        window.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(window.makeFirstResponder(editor))
+        let replacement = "local generated = 2"
+        let expected = (original as NSString).replacingCharacters(
+            in: replacedRange,
+            with: replacement
+        )
+        let edit = LuaEditorExternalEdit(
+            id: 1,
+            replacementRange: replacedRange,
+            replacementText: replacement
+        )
+
+        XCTAssertTrue(coordinator.applyExternalEdit(edit, expectedText: expected, in: editor))
+        XCTAssertEqual(editor.string, expected)
+        XCTAssertEqual(bindingState.text, expected)
+        let undoManager = try XCTUnwrap(editor.undoManager)
+        XCTAssertTrue(undoManager.canUndo)
+
+        undoManager.undo()
+        XCTAssertEqual(editor.string, original)
+        XCTAssertEqual(bindingState.text, original)
+        XCTAssertFalse(
+            undoManager.canUndo,
+            "one Cmd-Z must revert the complete selected AI replacement"
+        )
+        XCTAssertTrue(undoManager.canRedo)
+    }
+
     func testProductionCoordinatorDismissesAndTearsDownCompletionLifecycle() async throws {
         let application = NSApplication.shared
         let bindingState = LuaEditorBindingState()

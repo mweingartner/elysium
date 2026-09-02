@@ -34,6 +34,81 @@ final class RPGActionTransactionTests: XCTestCase {
         }
     }
 
+    func testIgniteResourceQuoteMatchesProjectionPreparationAndCommit() throws {
+        let world = makeWorld(seed: 330)
+        let player = makeMasteredPlayer(in: world, pathID: "arcanist", starter: "spell_formula",
+                                        preparedSpell: "ignite")
+        let zombie = Zombie(world: world)
+        zombie.setPos(0.5, 64, 3.5)
+        world.addEntity(zombie)
+
+        let before = player.rpg
+        let quote = try XCTUnwrap(rpgActionResourceQuote(kind: .spell, id: "ignite", state: before))
+        XCTAssertEqual(quote.fatigueCost, 0.5, accuracy: 0.000_001)
+        XCTAssertEqual(quote.cooldownTicks, 19)
+        XCTAssertEqual(quote.cooldownRemainingTicks, 0)
+        XCTAssertTrue(quote.resourceAvailable)
+
+        let projected = try XCTUnwrap(rpgPreparedActions(before).first { $0.id == "ignite" })
+        XCTAssertEqual(projected.fatigueCost, quote.fatigueCost, accuracy: 0.000_001)
+        XCTAssertEqual(projected.cooldownTicks, quote.cooldownTicks)
+        XCTAssertEqual(projected.cooldownRemainingTicks, quote.cooldownRemainingTicks)
+        XCTAssertEqual(projected.available, quote.resourceAvailable)
+        XCTAssertEqual(projected.statusText, "Resources ready")
+
+        let prepared = try unwrapPrepared(rpgPrepareAction(
+            player, kind: .spell, id: "ignite", authorization: .local(for: player)))
+        XCTAssertEqual(prepared.nextRPG.fatigue, before.fatigue - quote.fatigueCost,
+                       accuracy: 0.000_001)
+        XCTAssertEqual(prepared.nextRPG.activeCooldowns.first { $0.id == "ignite" }?.remainingTicks,
+                       quote.cooldownTicks)
+        _ = try rpgCommitPreparedAction(prepared, for: player).get()
+
+        let committedQuote = try XCTUnwrap(rpgActionResourceQuote(
+            kind: .spell, id: "ignite", state: player.rpg))
+        XCTAssertEqual(committedQuote.cooldownRemainingTicks, quote.cooldownTicks)
+        XCTAssertFalse(committedQuote.resourceAvailable)
+        XCTAssertEqual(rpgPreparedActions(player.rpg).first { $0.id == "ignite" }?.cooldownRemainingTicks,
+                       quote.cooldownTicks)
+    }
+
+    func testRemoteTriggerResourceQuoteMatchesProjectionPreparationAndCommit() throws {
+        let world = makeWorld(seed: 331)
+        let player = makeMasteredPlayer(in: world, pathID: "tinker", starter: "circuit_sense",
+                                        preparedSkill: "remote_trigger")
+        placeRayBlock(world, B.dispenser)
+
+        let before = player.rpg
+        let quote = try XCTUnwrap(rpgActionResourceQuote(
+            kind: .skill, id: "remote_trigger", state: before))
+        XCTAssertEqual(quote.fatigueCost, 3, accuracy: 0.000_001)
+        XCTAssertEqual(quote.cooldownTicks, 56)
+        XCTAssertEqual(quote.cooldownRemainingTicks, 0)
+        XCTAssertTrue(quote.resourceAvailable)
+
+        let projected = try XCTUnwrap(rpgPreparedActions(before).first { $0.id == "remote_trigger" })
+        XCTAssertEqual(projected.fatigueCost, quote.fatigueCost, accuracy: 0.000_001)
+        XCTAssertEqual(projected.cooldownTicks, quote.cooldownTicks)
+        XCTAssertEqual(projected.cooldownRemainingTicks, quote.cooldownRemainingTicks)
+        XCTAssertEqual(projected.available, quote.resourceAvailable)
+        XCTAssertEqual(projected.statusText, "Resources ready")
+
+        let prepared = try unwrapPrepared(rpgPrepareAction(
+            player, kind: .skill, id: "remote_trigger", authorization: .local(for: player)))
+        XCTAssertEqual(prepared.nextRPG.fatigue, before.fatigue - quote.fatigueCost,
+                       accuracy: 0.000_001)
+        XCTAssertEqual(prepared.nextRPG.activeCooldowns.first { $0.id == "remote_trigger" }?.remainingTicks,
+                       quote.cooldownTicks)
+        _ = try rpgCommitPreparedAction(prepared, for: player).get()
+
+        let committedQuote = try XCTUnwrap(rpgActionResourceQuote(
+            kind: .skill, id: "remote_trigger", state: player.rpg))
+        XCTAssertEqual(committedQuote.cooldownRemainingTicks, quote.cooldownTicks)
+        XCTAssertFalse(committedQuote.resourceAvailable)
+        XCTAssertEqual(rpgPreparedActions(player.rpg).first { $0.id == "remote_trigger" }?.cooldownRemainingTicks,
+                       quote.cooldownTicks)
+    }
+
     func testSuccessfulPreflightIsPureAcrossActorTargetItemsWorldAndFeedback() throws {
         let world = makeWorld(seed: 301)
         let player = makeMasteredPlayer(in: world, pathID: "warden", starter: "heavy_cut",

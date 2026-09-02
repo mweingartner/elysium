@@ -162,7 +162,10 @@ struct ScriptEditorView: View {
                     .lineLimit(1)
                     .help("Active parameter \(signature.activeParameter + 1). \(signature.documentation)")
             } else if model.isRequestingAISuggestion {
-                Label("Asking \(model.aiModelName)…", systemImage: "wand.and.sparkles")
+                Label(
+                    inlineAIProgressText,
+                    systemImage: "wand.and.sparkles"
+                )
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if let error = model.aiSuggestionError {
@@ -204,6 +207,13 @@ struct ScriptEditorView: View {
         }
         .padding(.horizontal, theme.spacing)
         .padding(.bottom, theme.spacing)
+    }
+
+    private var inlineAIProgressText: String {
+        if case .preparing = model.aiReadinessState {
+            return model.aiReadinessState.statusText
+        }
+        return "Asking \(model.aiModelName)…"
     }
 
     private func statusBanner(_ text: String) -> some View {

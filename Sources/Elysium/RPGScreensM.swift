@@ -7,6 +7,10 @@ final class RPGCharacterScreen: Screen {
     private var interaction: RPGScreenInteractionState
     private var highContrast: Bool
     private var lastSemanticDispatchAccepted = false
+    private var nativeWindowController: RPGNativeWindowController?
+    private weak var nativeUI: UIManager?
+    private weak var nativeGame: GameCore?
+    private var nativePresentationAvailable = false
     /// Pointer-only hover tracking. Presentation-only: never touches the semantic model, the
     /// interaction reducer, or any activation fingerprint (Condition 6).
     private var hoveredID: RPGUIElementID?
@@ -20,7 +24,10 @@ final class RPGCharacterScreen: Screen {
     }
 
     override var semanticSnapshot: RPGCommittedSemanticSnapshot? {
-        rpgCommittedSemanticSnapshot
+        // Native SwiftUI controls publish their own AppKit accessibility tree. The committed
+        // snapshot remains the guarded action source, but exposing the legacy canvas proxy too
+        // would give VoiceOver two copies of the same character workspace.
+        nativePresentationAvailable ? nil : rpgCommittedSemanticSnapshot
     }
 
     override var semanticRevision: UInt64 {
@@ -29,7 +36,8 @@ final class RPGCharacterScreen: Screen {
 
     override func focusSemanticElement(_ id: RPGUIElementID,
                                        _ ui: UIManager, _ game: GameCore) -> Bool {
-        reduceInteraction(.focusElement(id), ui: ui, game: game)
+        guard !nativePresentationAvailable else { return false }
+        return reduceInteraction(.focusElement(id), ui: ui, game: game)
     }
 
 #if DEBUG
@@ -46,6 +54,8 @@ final class RPGCharacterScreen: Screen {
 #endif
 
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
+        nativeUI = ui
+        nativeGame = game
         buttons.removeAll()
         sliders.removeAll()
         fields.removeAll()
@@ -97,11 +107,27 @@ final class RPGCharacterScreen: Screen {
         let model = needsAnchoredRebuild
             ? buildModel(scrollOffset: interaction.scrollOffset) : provisionalModel
         highContrast = runtime.highContrast
-        _ = ui.commitRPGSemanticModel(model, runtime: runtime, to: self)
+        guard let committed = ui.commitRPGSemanticModel(model, runtime: runtime, to: self) else {
+            nativePresentationAvailable = false
+            return
+        }
+        nativePresentationAvailable = MainActor.assumeIsolated {
+            let controller = nativeWindowController ?? RPGNativeWindowController(screen: self)
+            nativeWindowController = controller
+            return controller.present(
+                committed: committed, runtime: runtime,
+                creation: interaction.creation, tab: interaction.tab,
+                parent: ui.textInputView?.window)
+        }
+        if nativePresentationAvailable { ui.invalidateRPGAccessibilityCache() }
     }
 
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         ui.drawDarkBg(0.68)
+        // The ordinary product presents the character workspace in a real macOS window. The
+        // retained canvas renderer is a fail-safe only for an unavailable AppKit host (for
+        // example, an incomplete test shell), so character management never becomes unreachable.
+        if nativePresentationAvailable { return }
         guard !rpgPassiveSemanticUnavailable,
               let snapshot = rpgCommittedSemanticSnapshot else {
             drawUnavailable(ui, "RPG screen unavailable")
@@ -116,11 +142,49 @@ final class RPGCharacterScreen: Screen {
 
     override func onClose(_ ui: UIManager, _ game: GameCore) {
         _ = reduceInteraction(.inputOwnershipLost, ui: ui, game: game, rebuild: false)
+        MainActor.assumeIsolated { nativeWindowController?.dismissFromScreen() }
+        nativeWindowController = nil
+        nativePresentationAvailable = false
+        nativeUI = nil
+        nativeGame = nil
+    }
+
+    @MainActor
+    func activateNativeElement(_ id: RPGUIElementID) -> RPGSemanticActivationResult {
+        guard let ui = nativeUI, let game = nativeGame,
+              let capture = ui.captureRPGSemanticActivation(id: id, on: self) else {
+            return .unavailable
+        }
+        return ui.dispatchRPGSemanticActivation(
+            capture, source: .mouse, on: self, game: game)
+    }
+
+    @MainActor
+    func focusNativeElement(_ id: RPGUIElementID) -> Bool {
+        guard let ui = nativeUI, let game = nativeGame else { return false }
+        return reduceInteraction(.focusElement(id), ui: ui, game: game)
+    }
+
+    @MainActor
+    func applyNativePresentationCommand(_ command: RPGSemanticCommand) -> Bool {
+        guard let ui = nativeUI, let game = nativeGame else { return false }
+        return reduceInteraction(.applyCommand(
+            command,
+            tutorialCompletionPublished:
+                game.settings.rpgTutorialVersion == RPG_TUTORIAL_VERSION),
+            ui: ui, game: game)
+    }
+
+    @MainActor
+    func closeNativeWindow() {
+        guard let ui = nativeUI, let game = nativeGame, ui.current() === self else { return }
+        ui.closeTop(game)
     }
 
     // Mouse activation captures on button-down and dispatches only on a matching button-up.
     override func onMouseDown(_ ui: UIManager, _ game: GameCore, _ mx: Double,
                               _ my: Double, _ btn: Int) -> Bool {
+        guard !nativePresentationAvailable else { return true }
         _ = reduceInteraction(.cancelMouse, ui: ui, game: game, rebuild: false)
         guard btn == 0,
               let model = rpgCommittedSemanticSnapshot?.model,
@@ -134,6 +198,7 @@ final class RPGCharacterScreen: Screen {
         return handled
     }
     override func onMouseUp(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) {
+        guard !nativePresentationAvailable else { return }
         let releasedID: RPGUIElementID?
         if let model = rpgCommittedSemanticSnapshot?.model {
             releasedID = rpgScreenDescriptor(atX: mx, y: my, in: model)?.id
@@ -144,6 +209,10 @@ final class RPGCharacterScreen: Screen {
                               ui: ui, game: game, rebuild: false)
     }
     override func onMouseMove(_ ui: UIManager, _ game: GameCore, _ mx: Double, _ my: Double) {
+        guard !nativePresentationAvailable else {
+            hoveredID = nil
+            return
+        }
         guard let model = rpgCommittedSemanticSnapshot?.model else {
             hoveredID = nil
             return
@@ -152,10 +221,12 @@ final class RPGCharacterScreen: Screen {
         hoveredID = (descriptor?.isActionable == true) ? descriptor?.id : nil
     }
     override func onWheel(_ ui: UIManager, _ game: GameCore, _ dy: Double) -> Bool {
-        reduceInteraction(.scrollRows(dy >= 0 ? 1 : -1), ui: ui, game: game)
+        guard !nativePresentationAvailable else { return true }
+        return reduceInteraction(.scrollRows(dy >= 0 ? 1 : -1), ui: ui, game: game)
     }
     override func onKeyEvent(_ ui: UIManager, _ game: GameCore,
                              _ event: ElysiumKeyEvent) -> Bool {
+        guard !nativePresentationAvailable else { return true }
         if event.terminal.rawValue == "Tab" {
             return reduceInteraction(event.modifiers.contains(.shift) ? .focusPrevious : .focusNext,
                                      ui: ui, game: game)
@@ -163,6 +234,7 @@ final class RPGCharacterScreen: Screen {
         return onKey(ui, game, event.terminal.rawValue)
     }
     override func onKey(_ ui: UIManager, _ game: GameCore, _ key: String) -> Bool {
+        guard !nativePresentationAvailable else { return true }
         switch key {
         case "Tab": return reduceInteraction(.focusNext, ui: ui, game: game)
         case "ArrowUp": return reduceInteraction(.moveFocus(.up), ui: ui, game: game)
@@ -185,7 +257,9 @@ final class RPGCharacterScreen: Screen {
         default: return false
         }
     }
-    override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool { false }
+    override func onChar(_ ui: UIManager, _ game: GameCore, _ ch: String) -> Bool {
+        nativePresentationAvailable
+    }
 
     /// True while the local character is still being created and the flow has advanced past step 1,
     /// so a back gesture (Escape / controller B) steps the creation flow back (draft intact) rather
@@ -202,6 +276,7 @@ final class RPGCharacterScreen: Screen {
     /// boundary as keyboard input. No controller callback owns an independent screen mutation path.
     func handleRPGControllerCommand(_ command: RPGSemanticCommand,
                                     ui: UIManager, game: GameCore) -> Bool {
+        guard !nativePresentationAvailable else { return false }
         lastSemanticDispatchAccepted = false
         switch command {
         case .moveFocus(let direction):

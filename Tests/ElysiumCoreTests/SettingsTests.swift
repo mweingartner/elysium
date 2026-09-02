@@ -61,5 +61,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(isAllowedLocalOllamaModelName(""))
         XCTAssertFalse(isAllowedLocalOllamaModelName("minimax-m3:cloud"))
         XCTAssertFalse(isAllowedLocalOllamaModelName(" kimi-k2.5:cloud "))
+        XCTAssertFalse(isAllowedLocalOllamaModelName("gpt-oss:120b-cloud"))
+        XCTAssertFalse(isAllowedLocalOllamaModelName("qwen3-coder:480b-cloud"))
     }
 }

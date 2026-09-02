@@ -148,23 +148,31 @@ Crafting recipe planning stays in `ElysiumCore/Systems/Crafting.swift`. The surv
 
 ## RPG classes and progression
 
-`Sources/ElysiumCore/Game/CharacterProgression.swift` owns the class/path model, attribute budget, derived stats, XP curve, skill/spell registries, save repair, and player integration for the RPG layer. Characters start uncreated in old saves, and the `rpgClasses` game rule determines whether `Player.tickRPGState()` applies fatigue regeneration, upkeep drains, max-health derivation, and spell/combat progression. RPG progression is separate from vanilla enchantment XP: `RPGCharacterState.xp`/`level` drive class skill points and attribute points, while existing `player.xp`, `xpLevel`, and `xpProgress` remain the inventory/enchanting economy. Save/load stores a repaired nested `rpg` object inside the player JSON; unknown or cross-path skills/spells are dropped by registry-backed repair instead of crashing or silently preserving invalid state.
+`Sources/ElysiumCore/Game/CharacterProgression.swift` owns the path/sub-class model, derived stats, XP curve, XP-event path/category/reward/limit registry, player-facing qualification text, skill/spell registries, save repair, and player integration for the RPG layer. Event-specific gameplay call sites admit only concrete qualifying effects and emit a typed `RPGXPEvent`; the shared award gate then consumes the registry's path and reward rules and applies window/deduplication state. `RPGProgressionEvaluation.swift` projects each path's distinct purpose, play loop, and complete player-facing XP criteria from that closed registry, with focused call-site contract tests preventing the detailed qualification copy from becoming vague. Characters start uncreated in old saves, and the `rpgClasses` game rule determines whether `Player.tickRPGState()` applies fatigue regeneration, upkeep drains, max-health derivation, and spell/combat progression. RPG progression is separate from vanilla enchantment XP: `RPGCharacterState.xp`/`level` drive class skill points, while existing `player.xp`, `xpLevel`, and `xpProgress` remain the inventory/enchanting economy. There are no current RPG attributes or attribute points; health and fatigue use fixed per-path level growth. Path, sub-class, and exactly three rank-1 starting skills are committed once at character creation and have no respec path. Save/load stores a repaired nested `rpg` object inside the player JSON; unknown or cross-path skills/spells are dropped by registry-backed repair instead of crashing or silently preserving invalid state.
+
+Class XP enters through a bounded `RPGXPEventKind`: every event names exactly one owning path, category, player-facing gameplay criterion, reward rule, and visible limit text. A character's first admitted event starts a 1,200-simulation-tick window. Combat admits six events per window; exploration, Delver depth/structure-treasure/excavation, spell practice, healing/provisions, and engineering admit eight each. The first later admitted event at or beyond the boundary resets all category counts and the Arcanist distinct-spell mask together, but not the rolling 64-key event history, Delver's six persistent depth bits, or Tinker's persistent first-crafting-grid-recipe bitset. Event preparation mutates a private candidate and commits its ledger only when positive XP is added. Creative players, the wrong path, malformed keys/registry indices, backward clocks, exhausted authority, and capped characters receive no class XP.
 
 `Sources/ElysiumCore/Systems/RPGActions.swift` implements prepared spell and active-skill effects through existing world/entity routines. Damage rays, placed light/fire/TNT/gravel, wards, healing, movement, summons, redstone triggering, gear repair, cooldowns, and upkeep all mutate the same `World`/`LivingEntity`/`Player` state that non-RPG systems use, with deterministic target ordering by distance/id and bounded block scans sorted by distance/coordinates. `RPGCharacterState.selectedPreparedActionID` stores the repaired `skill:<id>` or `spell:<id>` selected-action token; it does not own the quick-slot row. The player-facing nine-slot row is a separate `RPGQuickSlotPreferences` value scoped to the exact local `WorldRecord.id`. Assigning, moving, clearing, or using a slot never changes selected action; only explicit Select or Cycle does. A decoded legacy player `actionQuickSlots` field is retained only as a bounded `RPGLegacyQuickSlotEnvelope` migration input, stays re-encoded until the local preference destination and receipt are committed and the player-row omission CAS succeeds, and is not part of current RPG authority. Melee damage receives only the derived RPG bonus in `Combat.swift`, and `LivingEntity.die` awards class XP to the attacking RPG player. `Sources/ElysiumCore/Render/RPGAssetManifest.swift` provides a deterministic procedural icon manifest for every path, branch, skill, spell, and RPG action, so the first implementation adds no unlicensed binary art and no pack dependency beyond existing rendering infrastructure.
 
 Local-world quick-slot persistence is a revisioned ElysiumStorage component keyed only by the exact `WorldRecord.id`. `SaveDB` is the sole Core adapter: it encodes the strict nine-entry `PBLQS1` envelope, recomputes domain-separated SHA-256 digests, materializes defaults once, performs explicit compare-and-swap updates, and binds one-time legacy migration receipts to an immutable origin digest/revision. World deletion removes the migration marker and preference in the same transaction while preserving the legacy return count. The compiled LAN-v6 client checkpoint component stores credential/owner/pending/notice primitives behind one aggregate storage transaction, but its schema bootstrap is test-only and its production accessor only verifies an already-installed component. ElysiumCore deliberately exposes no client checkpoint codec, candidate builder, `SaveDB` method, or façade acquisition until Phase 2.5 supplies the reviewed strict `LANOwnerSnapshotV1`, `LANRPGIntentV6`, send-state, disposition-binding, and credential-transition semantics; bounded opaque bytes are not treated as canonical authority. Host owner-row DDL is compiled for drift detection only; no host writer or bootstrap exists until its reviewed identity parents and coherent checkpoint phase ship.
 
-The app-side surface is intentionally thin. `RPGScreenModel.swift` is the sole source of RPG rectangles, fixed-versus-scrolling regions, complete visible lines, canonical display-name projections, card icons/adornments, contextual-detail precedence, and focus-ring geometry. Its fixed header/authority/status/detail/step-or-tab/command/footer bands leave only `contentFrame` scrollable; Create and Close never enter that scrolling region. Character creation projects one centered class card in canonical registry order rather than a scrolling class list. The card combines bounded role/primary copy with all five attribute controls, remaining-point status, and per-class reset; previous/next actions wrap through the six classes, and a dominant-horizontal, viewport-bounded swipe applies the same checked creation-session transition. Each class retains its independent branch and attribute draft. Compact creation uses two attribute columns so every value in the creation range remains visually separate from its controls at 360 x 224. Successful creation refreshes directly into the normal Character surface instead of automatically presenting the RPG tutorial. Actives projects path-action summaries before one selected-action inspector and local slots, while Progression projects the complete 17-of-19-point branch route and level-22 cross-branch constraint before the level table. `Sources/Elysium/RPGScreensM.swift` consumes that immutable model without reconstructing labels or layout; `UICanvas.drawRPGIcon` renders manifest-backed icons; `HudM.swift` draws the fatigue meter plus the second 1-9 RPG quick-slot row above the normal hotbar and lifts survival HUD elements to avoid overlap; `ScreensM.swift` adds a Character button to inventory screens when RPG classes are enabled; `main.swift` routes the `rpg` screen. The guarded semantic dispatcher applies RPG changes only when `GameCore` projects an eligible local world as `localReady`. Protocol-5 LAN clients project `unavailable`, have no writable quick-slot preference scope, reject every Track B authority or slot operation at the zero-fallback seam, and do not translate it to the legacy typed-intent callback. Only a separately reviewed future Track C protocol-v6 coordinator may add typed client intents and host execution. Keyboard `K` opens the character sheet, and world-mode Shift+1 through Shift+9 triggers the matching RPG quick slot without changing the normal hotbar selection.
+The app-side surface keeps presentation native without moving authority out of Core. `RPGScreenModel.swift` remains the immutable canonical projection for display names, creation/review content, skill/action/spell/slot state, status/authority explanations, progression plans, and receipt-bound semantic descriptors. It also retains the logical rectangles and visual lines required by the legacy canvas fallback. `RPGCharacterScreen` builds and commits that model, remains the pausing `Screen` on the UI stack, and owns every capture/dispatch transition.
+
+For the ordinary product, `Sources/Elysium/RPGNativeUI/RPGNativeWindowController.swift` presents a titled, closable, miniaturizable, resizable `NSWindow`, attaches it above the game window, restores its saved frame, and installs `RPGNativeCharacterView` through `NSHostingView`. The SwiftUI hierarchy uses `NavigationSplitView`, `List`, standard selection controls, buttons, scroll views, system symbols, materials, and native focus/Accessibility instead of drawing a game-format panel. Creation has four visible steps. Path and sub-class cards update UI-local pending selection, and explicit **Continue** actions issue the checked semantic transition; Starting Skills likewise requires exactly three selections before Continue. Review makes the permanent choices and starter-kit transaction explicit. Back preserves the draft, while closing a changed draft routes through a destructive discard confirmation. Created characters navigate through **Overview**, **Skills**, **Loadout** (Actions and Spells), and **Progress**; Progress combines current XP/thresholds, path identity and exact XP criteria, the selected sub-class route, and level/skill-point milestones.
+
+`RPGNativeViewModel` retains only the latest committed snapshot/runtime projection plus presentation state. A standard control never mutates gameplay directly: it resolves a currently actionable semantic descriptor, asks `RPGCharacterScreen` to capture that descriptor against the current committed revision, and dispatches the resulting receipt through the same revalidation boundary used by canvas, keyboard, controller, and Accessibility input. Closing the native window closes the backing screen; screen teardown removes the child window and releases the model. If an AppKit parent or native presentation cannot be established, `RPGScreensM.swift` renders the retained canvas implementation so character management remains reachable without creating a second mutation path.
+
+`HudM.swift` still draws the fatigue meter plus the second 1-9 RPG quick-slot row above the normal hotbar and lifts survival HUD elements to avoid overlap; `ScreensM.swift` adds a Character button to inventory screens when RPG classes are enabled; `main.swift` routes the `rpg` screen. The guarded semantic dispatcher applies RPG changes only when `GameCore` projects an eligible local world as `localReady`. Protocol-5 LAN clients project `unavailable`, have no writable quick-slot preference scope, reject every Track B authority or slot operation at the zero-fallback seam, and do not translate it to the legacy typed-intent callback. Only a separately reviewed future Track C protocol-v6 coordinator may add typed client intents and host execution. Keyboard `K` opens the character window, and world-mode Shift+1 through Shift+9 triggers the matching RPG quick slot without changing the normal hotbar selection.
 
 `RPGUIHarnessBootstrap` is a separate pre-bootstrap boundary. `main.swift` parses its bounded
 environment decision before the ordinary application is constructed. A valid case builds only the
-pure registry-backed fixture/model/semantic summary and `RPGUIHarnessM.swift` AppKit view; it does
-not construct or reference ordinary world, persistence, settings, player, audio, controller, or LAN
-runtime dependencies. The renderer consumes the same fixed bands, contextual-detail lines, descriptor
-icons/adornments, canonical display names, and shared focus-ring geometry as production while exposing
-the exact eight authority titles/help strings, distinct non-color shapes, and passive AppKit
-accessibility children. Screenshot output is an exclusive fd-relative file under a no-follow,
-owner-only temporary directory.
+pure registry-backed fixture/model/semantic summary and the passive `RPGUIHarnessM.swift` AppKit view;
+it does not construct or reference the ordinary world, persistence, settings, player, audio,
+controller, LAN runtime, or native character-window controller. The harness renders the canonical
+model's legacy logical layout and exposes all authority/status states through passive Accessibility
+children. It is useful for deterministic semantic and fallback-layout inspection, but is not evidence
+that the installed native SwiftUI window is visually or interactively correct. Screenshot output is an
+exclusive fd-relative file under a no-follow, owner-only temporary directory.
 
 The optional RPG harness remains separate from release authority. Release completion is the
 zero-argument automated pipeline: it binds the exhaustive tracked plus nonignored-untracked source
@@ -635,7 +643,8 @@ forwarding cannot select that policy.
 `ScriptRuntime.dryRun` (change 2) is a sibling read-only entry point used by the AI tool loop's
 `attach_script` gate and the native editor's Check action. It resumes one throwaway coroutine: a
 completed prefix passes, a fault is reported, and a first legal `wait`/`ai.await` yield passes then
-closes without scheduling or contacting AI. See "AI object graph tool loop" below.
+closes without scheduling or contacting AI. Its fixed validation identity and transient RNG do not
+consume the live scheduler/RNG ordinal. See "AI object graph tool loop" below.
 
 **Kill switch and trust gate.** `scriptsEffectivelyEnabled(host:)` is the predicate for attached
 execution and every ordinary command/AI/LAN one-off run: the persisted trust gate
@@ -681,21 +690,46 @@ inference, factual completion, signature help, documentation, diagnostics, valid
 the World Objects palette. Event and handler completion is target-aware: it combines compatible
 produced standard events with the selected object's persisted custom declarations, and completing
 `ev.` uses that event's exact payload-field schema. The optional Ollama plane accepts a bounded
-document/caret/schema/diagnostics/bounded-object request and returns insertion text only. Its
+document/caret/schema/diagnostics/bounded-object request and returns either code for deterministic
+validation or a transcript-only answer under an explicit app-owned intent. Its
 Handler contract includes the current target's compatible events; its Module contract adds every
 produced built-in payload and, for each authorized object in the bounded snapshot, kind-compatible
 built-in names plus that exact object's declared custom names and typed fields. A valid undeclared Handler selection is
 represented explicitly as envelope-only with unknown event-specific payload. The contract also
 includes applicable target members. It receives no tool
 definitions or query/mutation context and cannot execute, Save, attach, emit, or otherwise change
-world state. Manual explicit requests—panel Send or the toolbar/menu/hotkey action—are the default;
+world state. Manual explicit requests—panel Write Code/Ask or the toolbar/menu/hotkey action—are the default;
 automatic idle requests require explicit opt-in, and all responses are
 revision/source-hash/caret/model/context bound and cancellable.
-Panel visibility has a narrower lifecycle side effect: while editor AI is not Off, the panel
-refreshes the loopback-only installed-model list and preloads the exact persisted local model with
-an empty, non-streaming request. This sends no document or world context and does not generate a
-proposal; changing the visible panel's selection preloads that exact replacement. Hiding the panel,
-turning editor AI Off, or ending the world session cancels unfinished discovery/preload work.
+Opening the native editor in Manual or On Idle mode starts one shared warmup for the exact persisted
+local model, regardless of panel visibility. The empty, non-streaming warmup carries no document,
+world context, or tools and requests no proposal. An editor request joins an in-flight warmup instead
+of racing it; if the preceding warmup failed, that same explicit request retries the warmup before
+generation. A required source-free `/api/show` preflight rejects a model whose Ollama metadata names
+a remote model or host before any authoring source is sent; capability/template hints from that same
+response remain advisory. Changing the selected model invalidates old readiness and warms the exact replacement.
+The Script AI panel separately refreshes the loopback-only installed-model list when visible. Off
+forbids discovery, warmup, and generation, while editor/window/session teardown cancels unfinished
+work and makes every late result ineligible.
+
+The authoring actions deliberately publish different kinds of results. Toolbar/menu/hotkey and On
+Idle completion remain visually distinct ghost text requiring explicit acceptance. **Ask** is
+always transcript-only, even when its answer looks like Lua, and does not require a selected Handler
+event. **Write Code** is the explicit edit request: after the response is identity-revalidated, the
+editor extracts only safe Lua, enforces the current mode contract, compiles it, applies blocking
+diagnostics, conservative lexical unresolved-global/call-target/callback checks, and dynamic-`_ENV`
+rejection, then runs the existing mutation-free validation boundary. Accepted source may complete,
+stop at its first legal suspension,
+or compile-only for an undeclared Handler event. It is inserted at the captured selection as one
+ordinary undoable draft edit only when a local authoritative runtime is available.
+Module responses must be module/callback source with `ev` scoped inside callbacks; Handler responses
+must be only the selected event body using its implicit `ev`, never a second subscription wrapper.
+Write Code may omit only clearly explanatory, non-Lua text outside a complete fence or at the end of
+an unfenced reply; the full reply remains visible and the omission is reported. Prose-only replies,
+code-like exterior or suffix text, unsafe text, mode violations, parse failures, static refusals, and
+validation failures remain transcript or refusal state without changing the draft. Automatic
+insertion never saves, attaches, runs, changes trust or `doScripts`, or gives the proposal service
+world-mutation authority.
 
 The World Objects projection is captured on main from the same side-effect-free `ObjectGraph`,
 `AttributeStore`, and `ScriptStore` reads as scripting commands. Default discovery is radius 16,

@@ -69,32 +69,58 @@ Typing `gate:` opens the target-aware member flyout; Handler mode similarly offe
 produced events plus that target's declarations, and `ev.` completes the selected event's payload.
 The nearby **World Objects** browser inserts canonical references so they do not need to be guessed.
 Deterministic completion and diagnostics are always local. Ollama completion is separate and Manual
-by default: showing the Script AI panel restores and preloads the exact local model selected in
-Options, but generation starts only after an explicit toolbar/menu/hotkey request or **Send** in the
-panel. Tab accepts an inline proposal, and Escape dismisses it. See the
+by default. Opening the native editor in Manual or On Idle mode warms the exact local model selected
+in Options—even when the Script AI panel is closed—using an empty request with no source, world
+context, or tools. Before warmup or source-bearing generation, a source-free `/api/show` preflight
+requires Ollama to identify that selection as local rather than a remote-backed alias. An explicit
+request waits for the shared warmup and retries a failed warmup in the same interaction; Off performs
+no model discovery, warmup, or generation. Toolbar/menu/hotkey and On
+Idle proposals remain ghost text that Tab accepts and Escape dismisses. The Script AI panel has
+explicit **Write Code** and **Ask** intents: Ask is always transcript-only, while Write Code may
+replace the captured selection with safe, mode-correct Lua as one Command-Z-undoable draft edit.
+Before insertion, Elysium revalidates the captured document, selection, model, mode, event, and
+authoring context, then applies its compiler, diagnostics, conservative lexical
+unresolved-global/call-target/callback checks, dynamic-`_ENV` rejection, and mutation-free
+validation. Module receives module/callback source; Handler receives only the
+selected event's body with implicit `ev`. LAN guests and editors without a local authoritative
+runtime keep generated code in the transcript for manual review. Write Code may omit only clearly
+explanatory, non-Lua text outside a complete fence or at the end of an unfenced reply; the full reply
+stays visible and the omission is reported. Prose-only, code-like exterior or suffix, unsafe, or
+invalid output leaves the draft unchanged with a refusal. No AI response saves, runs, trusts,
+enables, or directly mutates the world. See the
 [Scripting Guide](docs/SCRIPTING_GUIDE.md) for the
 complete attribute, handler, declaration, payload, command, limits, persistence, and LAN contracts,
 and the [Lua Editor reference](docs/LUA_EDITOR.md) for editor controls and privacy behavior.
 
 ### Character paths and sub-classes
 
-When the Character Classes rule is on, character creation runs **Path → Sub-class → Starting Skills →
-Review**. A **path** is the top-level choice; each path has exactly three **sub-classes** (a
-focused build within that path). Choosing a sub-class picks its three-skill tree (some skills always-on
-passive, some prepared active with a cooldown and fatigue cost); you then pick exactly 3 starting skills
-at rank 1 from a 5-skill pool (your sub-class's 3 plus the signature skill of each of the path's other two
-sub-classes). Every skill has 5 ranks, and two paths (Arcanist, Mender) grant starter spells through their
-first-rank skill unlocks. There are no attributes — health and fatigue grow with level according to a
-fixed per-path rate.
+When the Character Classes rule is on, the inventory's **Character** button or `K` opens a
+resizable native macOS window. Creation runs **Path → Sub-class → Starting Skills → Review** in a
+four-step sidebar: select a card, inspect its details, then use **Continue**. Closing after changing the
+draft asks before discarding it. The final review is consequential: the chosen path, sub-class, and three
+starting skills are permanent for that character.
 
-| Path | Growth | Focus | Sub-classes |
+A **path** is the top-level gameplay role; each path has exactly three **sub-classes**, each with its own
+three-skill purpose. You choose exactly 3 rank-1 starting skills from a pool of 5: the selected
+sub-class's 3 skills plus the signature skill of each sibling sub-class. Every skill has 5 ranks, and
+Arcanist and Mender grant starter spells through first-rank skill unlocks. There are no attributes —
+health and fatigue grow automatically with level at a fixed per-path rate.
+
+| Path | Growth | Purpose and play loop | Sub-classes |
 |---|---|---|---|
-| **Warden** | Health 26 +2/lvl · Fatigue 10 +1/lvl | Armor, shield timing, threat control, protection | **Guardian** (defend an area, keep allies up) · **Vanguard** (close distance, punish exposed foes) · **Bulwark** (turn armor and blocks into durable defense) |
-| **Ranger** | Health 20 +1/lvl · Fatigue 14 +2/lvl | Bows, scouting, terrain movement, ambushes, fieldcraft | **Marksman** (accurate ranged, fast target-swap) · **Scout** (stealth, map-reading, ambush setup) · **Survivalist** (forage, camp, weather, animals) |
-| **Delver** | Health 24 +2/lvl · Fatigue 12 +1/lvl | Mining, traps, underground navigation, lockwork, treasure | **Miner** (ore-finding, fast tunneling) · **Trapper** (detect, disarm, and build traps) · **Treasure-Seeker** (salvage, locks, risky loot) |
-| **Arcanist** | Health 16 +1/lvl · Fatigue 20 +3/lvl | Fatigue-driven spellcasting *(+ starter spells)* | **Elementalist** (fire, frost, force, light) · **Illusionist** (blur, decoys, invisibility) · **Ritualist** (long casts, wards, summons) |
-| **Mender** | Health 18 +1/lvl · Fatigue 18 +2/lvl | Healing, food, antidotes, protective rites *(+ starter spells)* | **Physic** (direct and emergency healing) · **Harvest** (food, herbs, medicine) · **Sanctuary** (safe zones, wards, rescues) |
-| **Tinker** | Health 20 +1/lvl · Fatigue 16 +2/lvl | Redstone, automation, gear mods, explosives | **Redstone** (compact circuits, signals) · **Artificer** (gear tuning, field repairs) · **Sapper** (controlled blasts, demolition) |
+| **Warden** | Health 26 +2/lvl · Fatigue 10 +1/lvl | Front-line protector: hold dangerous ground, blunt hostile pressure, and turn close combat or timely defense into safety. | **Guardian** (defend an area, keep allies up) · **Vanguard** (close distance, punish exposed foes) · **Bulwark** (turn armor and blocks into durable defense) |
+| **Ranger** | Health 20 +1/lvl · Fatigue 14 +2/lvl | Mobile ranged scout: explore ahead, establish safe sightlines, and stop threats before they close. | **Marksman** (accurate ranged, fast target-swap) · **Scout** (sneaking mobility, hostile detection) · **Survivalist** (forage, camp, weather, animals) |
+| **Delver** | Health 24 +2/lvl · Fatigue 12 +1/lvl | Underground specialist: read terrain, manage hazards, extract resources, and recover guarded treasure. | **Miner** (faster excavation, mining bursts, deep-fatigue recovery) · **Trapper** (detect traps, resist blasts, place deadfalls) · **Treasure-Seeker** (salvage, locks, risky loot) |
+| **Arcanist** | Health 16 +1/lvl · Fatigue 20 +3/lvl | Fatigue-driven spellcaster: prepare a compact spell kit and reshape encounters with damage, deception, wards, or summons. | **Elementalist** (fire, frost, lightning, storms) · **Illusionist** (blur, decoys, invisibility) · **Ritualist** (long casts, wards, summons) |
+| **Mender** | Health 18 +1/lvl · Fatigue 18 +2/lvl | Support specialist: answer hostile injuries, cleanse danger, establish safe zones, and turn food into expedition strength. | **Physic** (direct and emergency healing) · **Harvest** (food, herbs, medicine) · **Sanctuary** (safe zones, wards, rescues) |
+| **Tinker** | Health 20 +1/lvl · Fatigue 16 +2/lvl | Engineering specialist: learn recipes, build powered mechanisms, maintain gear, and trade setup time for repeatable advantage. | **Redstone** (compact circuits, signals) · **Artificer** (gear tuning, field repairs) · **Sapper** (controlled blasts, demolition) |
+
+Class XP comes only from each path's registered gameplay events; cosmetic or repeated no-op actions do
+not count. Per-category 1,200-simulation-tick admission caps and separate rolling or lifetime duplicate
+guards limit farming. The native **Progress** page shows registry-backed criteria alongside the canonical
+path ownership and reward rules consumed by the authoritative award gate; focused contracts keep that
+copy aligned with the qualifying gameplay call sites. The [Player Guide](PLAYER_GUIDE.md#exact-class-xp-rules)
+lists every source, reward, shared window, and duplicate rule.
 
 ## Install and run
 

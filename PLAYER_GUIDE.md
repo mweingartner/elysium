@@ -167,8 +167,10 @@ These inputs are routed separately and do not appear as configurable gameplay bi
 | Arrow keys (during placement) | Left/Right rotate the pending wireframe; Up pushes it away; Down pulls it closer. |
 | `Command-Z` | Undo the most recent template placement. |
 
-Physical-controller support currently covers the RPG interface/actions and villager trading sheet. Do
-not expect a controller to replace the keyboard and mouse for movement, camera, inventory, or crafting.
+Physical-controller support currently covers RPG world actions, the canvas character fallback, and the
+villager trading sheet. The ordinary native Character window uses standard macOS keyboard and pointer
+controls and does not intercept controller input. Do not expect a controller to replace the keyboard
+and mouse for movement, camera, inventory, or crafting.
 
 ### Enter text
 
@@ -300,70 +302,109 @@ continue to track the base survival journey; character levels, skill points, ski
 fatigue, and cooldowns belong to the RPG layer. There are no attributes in this system — a character's
 health and fatigue grow automatically with level, at a fixed rate set by its path.
 
-### Choose a path and a sub-class
+### Choose a permanent path and sub-class
 
-- **Warden** focuses on armor, shield timing, threat, and protection. Sub-classes: Guardian, Vanguard, and
-  Bulwark. Health 26 (+2 per level), Fatigue 10 (+1 per level). Progress through melee victories and
-  protecting or mitigating damage.
-- **Ranger** focuses on bows, scouting, terrain movement, and survival. Sub-classes: Marksman, Scout, and
-  Survivalist. Health 20 (+1 per level), Fatigue 14 (+2 per level). Progress through ranged victories and
-  field discoveries.
-- **Delver** focuses on mining, traps, underground travel, and treasure. Sub-classes: Miner, Trapper, and
-  Treasure-Seeker. Health 24 (+2 per level), Fatigue 12 (+1 per level). Progress through deep exploration,
-  dungeons, and excavation.
-- **Arcanist** focuses on spellcasting, illusions, wards, and rituals. Sub-classes: Elementalist,
-  Illusionist, and Ritualist. Health 16 (+1 per level), Fatigue 20 (+3 per level). Progress through spell
-  practice and spell victories.
-- **Mender** focuses on healing, food, antidotes, and rescue. Sub-classes: Physic, Harvest, and Sanctuary.
-  Health 18 (+1 per level), Fatigue 18 (+2 per level). Progress through healing, cleansing, rescues, and
-  provision crafting.
-- **Tinker** focuses on redstone, automation, gear, and explosives. Sub-classes: Redstone, Artificer, and
-  Sapper. Health 20 (+1 per level), Fatigue 16 (+2 per level). Progress through new recipes, mechanisms,
-  and engineering crafts.
+A path determines the character's role, health/fatigue growth, class-XP sources, and the nine skills that
+can be developed. A sub-class specializes that path around one three-skill route. The choice is permanent
+after character creation; Elysium does not currently offer path, sub-class, or starting-skill respec.
 
-Each sub-class defines a three-skill tree, and every skill has 5 ranks. Skills in your chosen sub-class
-cost 1 skill point per rank; skills that belong to one of the path's other two sub-classes cost 2 skill
-points per rank. Each skill also has its own level requirement per rank, so a focused build reaches its
-defining abilities sooner. You gain a skill point for every level after level 1, plus a bonus skill point
-at levels 4, 7, 10, 13, 16, and 19.
+| Path | Role and play loop | Growth |
+|---|---|---|
+| **Warden** | Front-line protector. Hold dangerous ground, blunt hostile pressure, and spend fatigue on protection or decisive close combat. | Health 26 (+2/level), Fatigue 10 (+1/level) |
+| **Ranger** | Mobile ranged scout. Explore ahead, establish safe sightlines, and finish threats before they reach close range. | Health 20 (+1/level), Fatigue 14 (+2/level) |
+| **Delver** | Underground specialist. Descend deliberately, read terrain, manage hazards, and bring resources or guarded treasure back safely. | Health 24 (+2/level), Fatigue 12 (+1/level) |
+| **Arcanist** | Fatigue-driven spellcaster. Prepare a compact spell kit and reshape encounters with damage, deception, wards, and summons. | Health 16 (+1/level), Fatigue 20 (+3/level) |
+| **Mender** | Support specialist. Prevent losses, answer hostile injuries, cleanse danger, establish safe zones, and prepare sustaining food. | Health 18 (+1/level), Fatigue 18 (+2/level) |
+| **Tinker** | Engineering specialist. Learn recipes, build working mechanisms, maintain gear, and trade setup time for repeatable mechanical advantage. | Health 20 (+1/level), Fatigue 16 (+2/level) |
+
+Every sub-class has a distinct three-skill purpose:
+
+| Path | Sub-class roles |
+|---|---|
+| **Warden** | **Guardian** defends an area and keeps allies standing; **Vanguard** closes distance and punishes exposed enemies; **Bulwark** turns armor and blocks into durable defenses. |
+| **Ranger** | **Marksman** emphasizes accurate ranged attacks and target swapping; **Scout** improves sneaking movement, detects nearby hostiles, and reveals threats for reconnaissance or ambushes; **Survivalist** emphasizes forage, camp, weather, and animal handling. |
+| **Delver** | **Miner** accelerates hard-stone and ore excavation, provides mining bursts, and recovers fatigue from deep blocks; **Trapper** detects traps, reduces trap and explosion damage, and places timed gravel deadfalls; **Treasure-Seeker** improves salvage, locks, and risky loot handling. |
+| **Arcanist** | **Elementalist** develops fire, frost, lightning, and storm magic; **Illusionist** uses blur, decoys, invisibility, and misdirection; **Ritualist** uses longer casts, wards, creations, light, and summons. |
+| **Mender** | **Physic** provides direct healing and emergency recovery; **Harvest** develops food, herbs, medicine, and sustainable supplies; **Sanctuary** establishes safe zones, wards, and rescue escapes. |
+| **Tinker** | **Redstone** develops compact circuits and signal reading; **Artificer** tunes gear and performs field repairs; **Sapper** specializes in controlled blasts and demolition timing. |
+
+Each sub-class defines a three-skill tree, and every skill has 5 ranks. Your three chosen rank-1 starting
+skills are free. Other purchases in your chosen sub-class cost 1 skill point per rank; purchases from one
+of the path's other two sub-classes cost 2. Each skill also has its own level requirement per rank, so a
+focused build reaches its defining abilities sooner. You gain a skill point for every level after level 1,
+plus a bonus skill point at levels 4, 7, 10, 13, 16, and 19.
+
+### Exact class XP rules
+
+Class XP is separate from ordinary enchanting XP and Advancements. Elysium admits a class-XP event only
+for its owning path, while Character Classes are enabled, the character exists, and the player is not in
+Creative mode. A character at the level-20 cap cannot earn more class XP.
+
+The anti-farming rules are shared and deterministic:
+
+- The first admitted event starts that character's XP window. On the first later admitted event at least
+  1,200 simulation ticks later (normally 60 seconds at 20 ticks/second), all category counts and the
+  Arcanist distinct-spell mask reset together. Pausing the simulation pauses this clock.
+- **Combat** admits at most 6 events per window. **Exploration**, **Delver depth, structure treasure,
+  and excavation**, **spell practice**, **healing and provisions**, and **engineering** each admit at
+  most 8. Sources in the same category share its cap.
+- Every admitted event also records a bounded key. Reusing the same key is blocked until it leaves the
+  rolling history of the 64 most recent admitted events; starting a new window does not clear that
+  history.
+- Delver depth thresholds and Tinker first-crafting-grid-recipe records are persistent once-per-character bits. They
+  never reset. Arcanist spell-practice uniqueness resets with the window.
+
+| Path | Qualifying source | Reward | Exact admission and duplicate rule |
+|---|---|---:|---|
+| **Warden** | Close-combat victory | 10 XP | A hostile monster or the Ender Dragon must die from the Warden RPG melee damage source. Uses the 6-event combat cap and the defeated entity's rolling event key. |
+| **Warden** | Causal protection | 2 XP | A protection layer owned by the Warden must absorb at least 2 cumulative damage from a live hostile attacker. The layer is consumed when it reaches the threshold, even if the shared combat cap suppresses the award; its owner/sequence key is rolling. |
+| **Ranger** | Ranged victory | 10 XP | A hostile monster or the Ender Dragon must die from a projectile or Ranger projectile damage source. Uses the combat cap and defeated-entity rolling key. |
+| **Ranger** | Eligible field location | 3 XP | Be in a currently loaded chunk whose dimension/chunk key is absent from the rolling history of the 64 most recently admitted class-XP events. The check runs during gameplay rather than only on a chunk-entry transition. It uses the 8-event exploration cap; the occupied location can award again only after its key is evicted. |
+| **Delver** | Depth milestone | 3 XP | Reach `y ≤ 32`, `16`, `0`, `-16`, `-32`, or `-48` in the Overworld. Each of the six thresholds awards once per character and shares the 8-event Delver depth/structure/excavation cap. |
+| **Delver** | Generated world-structure treasure | 12 XP | Materialize loot from a newly generated world-structure container carrying a valid provenance key, including eligible village, ruined-portal, temple, shipwreck, and dungeon containers. A generated container materializes its loot only once; its rolling world-location key is an additional duplicate guard. The event shares the 8-event Delver depth/structure/excavation cap. |
+| **Delver** | Deep excavation | 4 XP | In the Overworld below `y = 63`, break harvestable hard stone or ore with the correct pickaxe. The dimension/coordinate key is rolling and the event shares the 8-event Delver depth/structure/excavation cap. |
+| **Arcanist** | Spell victory | 10 XP | A hostile monster or the Ender Dragon must die from an Arcanist spell or Arcanist spell-fire damage source. Uses the combat cap and defeated-entity rolling key. |
+| **Arcanist** | Effect-producing spell practice | 6 XP | Successfully resolve a registered spell that produces an effect. Each registered spell can award once per window; all practice shares the 8-event spell-practice cap. |
+| **Mender** | Causal ally healing | 1 XP per 2 health, maximum 8 XP | Before 1,200 simulation ticks have elapsed since a non-player ally's latest hostile injury, restore at least 2 health attributable to that live, unconsumed hostile-injury record. XP uses `floor(causal health / 2)` and the injury record is consumed when credited. Shares the 8-event healing-and-provisions cap. |
+| **Mender** | Causal cleanse or emergency rescue | 4 XP | Before 1,200 simulation ticks have elapsed since a non-player ally's latest hostile injury, Restore can remove poison, wither, weakness, or slowness; Purify can remove poison, hunger, or nausea; and Mend Wounds or Restore can qualify when the hostile-attributable portion of the heal alone carries the ally from at most 25% health to above 25%. The hostile-injury record must remain live and unconsumed. One action earns at most one fixed bonus even when it both cleanses and rescues; a credited action consumes the record. Shares the healing-and-provisions cap. |
+| **Mender** | Provision crafting | 6 XP per completed round | Complete a crafting-grid recipe whose output is food with positive hunger and no non-beneficial listed effect. Each actually completed crafting round proposes one event; all provision, healing, and rescue events share the 8-event cap. Smelting, stonecutting, and smithing do not use this award path. |
+| **Tinker** | First registered crafting-grid recipe | 4 XP | The first admitted completion of **any** registered crafting-grid recipe, not only an engineering output, sets a persistent per-character recipe bit. It consumes one slot from the shared 8-event engineering cap and never becomes first-time again. A craft suppressed by the cap does not reserve the bit; smelting, stonecutting, and smithing are outside this ledger. |
+| **Tinker** | First powered placement at a location | 2 XP | Place a lever, dispenser/dropper, observer, piston/sticky piston, repeater/comparator, redstone lamp, or button where it is powered immediately after placement. The dimension/coordinate key is rolling; all such placements share the engineering cap. |
+| **Tinker** | Engineering crafting-grid output | 6 XP per completed round | Complete a crafting-grid recipe for a circuit-component block: redstone wire; repeater; comparator; piston/sticky piston; daylight sensor; lever; button; pressure plate; tripwire hook; redstone torch/block; observer; detector rail; target; sculk/calibrated sculk sensor; lightning rod; trapped chest; redstone lamp; dispenser/dropper; note block; or TNT. A registered tool output also qualifies unless its type is sword, bow, crossbow, or trident. Each actually completed round proposes one event and shares the engineering cap. A first-time recipe whose output qualifies can earn both the 4-XP first-recipe bonus and 6-XP engineering award when two cap slots remain. |
 
 ### Create the character
 
-Character creation is four steps — **Path → Sub-class → Starting Skills → Review** — and every card is a
-single click: clicking a card both selects it and advances to the next step (or, on Starting Skills,
-toggles it).
+Character creation is a resizable native macOS window with standard lists, selection controls, buttons,
+scrolling, keyboard focus, and a four-step sidebar:
 
-1. **Path** — click one of the six path cards. Each card shows the path's focus and its health/fatigue
-   growth.
-2. **Sub-class** — click one of the chosen path's three sub-class cards. Each card lists its three skills
-   and any spell its signature skill grants.
-3. **Starting Skills** — click to choose exactly 3 starting skills, each granted at rank 1, from a pool of
-   5: your sub-class's 3 skills plus the signature (first) skill of each of the path's other two
-   sub-classes. The pool's three signature skills are preselected by default — choosing them reproduces
-   the path's classic starting skills, including its starter spells, if any. The screen tracks your choice
-   with "Starting skills: *n* of 3 chosen"; a 4th click is blocked once you have 3 until you unchoose one
-   first.
-4. **Review** — check the path, sub-class, chosen starting skills, any spells granted, the health/fatigue
-   growth line, and the starter kit. **Reject** discards the draft and closes without confirmation,
-   **Back** returns to Starting Skills with your choices intact, and **Accept** creates the character and
-   starter kit together. **Accept** can remain disabled when the current player is not allowed to make the
-   change or required inventory capacity is unavailable; follow the visible explanation and retry.
+1. **Path** — select one of six path cards, inspect its purpose, play loop, growth, and exact XP sources,
+   then choose **Continue**.
+2. **Sub-class** — select one of the path's three sub-classes, inspect its purpose, three skills, and any
+   signature-skill spell unlock, then choose **Continue**.
+3. **Starting Skills** — choose exactly 3 rank-1 skills from a pool of 5: the chosen sub-class's three plus
+   the signature skill of each sibling sub-class. The three signatures are preselected by default. A
+   fourth selection is unavailable until one is removed; **Continue** is available only with exactly 3.
+4. **Review** — verify the permanent path, sub-class, and starting skills, plus spell grants,
+   health/fatigue growth, focus requirement, starter kit, class-XP guidance, inventory capacity, and
+   authority. **Create Character** commits the character and starter kit together. It remains disabled
+   when the draft is incomplete, authority is unavailable, or the starter kit cannot fit; the window
+   gives the exact reason.
 
-Every step also has a keyboard/controller path: Tab or the arrow keys move focus, Enter/Space/A activates
-the focused card or button, and Escape/B steps back (or closes, on the first step).
+**Back** preserves the draft. Escape steps back until Path; closing a changed draft from Path or with the
+window's close control asks **Discard Character Draft?** before anything is lost. An untouched draft can
+close directly. After **Create Character**, path, sub-class, and starting skills cannot be changed.
 
-After creation, the interface has five tabs:
+After creation, the native sidebar has four destinations:
 
-- **Character** summarizes the character's path, sub-class, level, and current selections, along with
-  Health and Fatigue shown as base plus per-level growth (for example, "Health 38 (26 + 2 per level)").
-- **Skills** shows a **Skill Points** total and one card per skill, grouped by sub-class (your chosen
-  sub-class first). Each skill's progress is five pips — filled for earned ranks, hollow for the next
-  purchasable rank or a rank you don't yet qualify for. A skill at rank 5 is labeled **Mastered**. Passive
-  skills are always on once learned; they never consume a prepared slot.
-- **Actives** prepares learned active skills. Up to four active skills can be prepared, then assigned to
-  the RPG quick slots.
-- **Spells** prepares learned spells. Up to six spells can be prepared, then assigned to quick slots.
-- **Progression** shows the selected route, level requirements, automatic rewards, and future steps.
+- **Overview** summarizes path, sub-class, level, class XP, health/fatigue growth, derived combat and
+  recovery values, equipment/focus state, banked points, and the next milestone.
+- **Skills** groups all nine path skills by sub-class, shows five ranks and their effects/requirements,
+  and performs a checked rank purchase. Passive skills are always on once learned.
+- **Loadout** combines **Actions** and **Spells**. Prepare up to four active skills and six spells, select
+  the current prepared action, and assign prepared actions to the nine RPG quick slots.
+- **Progress** shows current class XP and the next threshold, the path's purpose/play loop, every exact XP
+  source above, the selected sub-class route, level requirements, automatic skill-point rewards, and
+  completion constraints.
 
 Cycle or activate prepared active skills and spells with the configurable RPG bindings. Fatigue and
 cooldowns can temporarily prevent an otherwise prepared action; the interface shows the current reason.
@@ -371,10 +412,10 @@ Some character operations remain unavailable to LAN clients because the host own
 
 If you open a character created before this system was simplified, Elysium migrates it automatically the
 first time you load it: the character keeps its path, sub-class, level, and skill ranks; health and
-fatigue are recalculated from the level-growth table above; any points freed by the retirement of
-attributes become available to spend on the Skills tab; and you see a one-time notice — "Your character
-was updated: attributes are retired. Health and fatigue now grow with your level. Unspent skill points are
-ready on the Skills tab."
+fatigue are recalculated from the level-growth table above; earned skill points that are not already
+spent remain available on the Skills tab; and you see a one-time notice — "Your character was updated:
+attributes are retired. Health and fatigue now grow with your level. Unspent skill points are ready on
+the Skills tab."
 
 ## Trade with villagers
 
@@ -942,7 +983,9 @@ Current beta boundaries to keep in mind:
 
 - Only Survival and Creative are available; there is no Hardcore or Spectator mode.
 - The map is a live view, not a named/saved map system.
-- Controller support is limited to RPG and trading surfaces rather than complete game control.
+- Controller support is limited to RPG world actions and trading rather than complete game control.
+  The native Character window uses standard macOS keyboard and pointer controls and does not
+  intercept controller input.
 - Multiplayer is LAN-only, join codes do not make a hostile LAN safe, LAN clients cannot trade, and some
   character operations remain host-only.
 - Faithful 64x is the pinned baseline. Open **Options... → Video → Resource Packs...** to enable or

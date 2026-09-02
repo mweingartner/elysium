@@ -2,76 +2,27 @@
 // AI help column: transcript bubbles + auto-scroll + "Working…" (ported from Hype's
 // `Hype/Views/ScriptEditorAIView.swift`), wired only to the editor's bounded proposal service.
 // Unlike `/ai`, this panel receives no world query/mutation tools and cannot execute, save, or run
-// a script. It restores and preloads the currently selected local model
-// (`game.settings.aiOllamaModel`) whenever the panel becomes visible, refreshes the picker through
+// a script. The editor lifecycle prepares the selected local model even while this panel is hidden;
+// this view refreshes the picker through
 // `elysiumOllamaAgent.fetchModels`, keeps prompt history via ↑/↓ (`AIChatPromptHistory`), and uses
-// an auto-growing input (`AutoGrowingTextInput`). A successful response can be inserted explicitly
-// after the user has reviewed it.
+// an auto-growing input (`AutoGrowingTextInput`). Explicit Write Code may apply only Lua that passes
+// the editor's mode-aware deterministic validation boundary; Ask always remains transcript-only.
 
 import SwiftUI
 import ElysiumCore
 
 struct ScriptEditorAIModelLoader {
     let fetchModels: @MainActor () async throws -> [String]
-    let preloadModel: @MainActor (String) async throws -> Void
 
     static let live = ScriptEditorAIModelLoader(
-        fetchModels: { try await elysiumOllamaAgent.fetchModels() },
-        preloadModel: { try await elysiumOllamaAgent.preloadModel($0) }
+        fetchModels: { try await elysiumOllamaAgent.fetchModels() }
     )
-}
-
-@MainActor
-final class ScriptEditorAIModelPreloader: ObservableObject {
-    private let preloadOperation: @MainActor (String) async throws -> Void
-    private var task: Task<Void, Never>?
-    private var generation: UInt64 = 0
-    private(set) var satisfiedModel: String?
-
-    init(preloadOperation: @escaping @MainActor (String) async throws -> Void) {
-        self.preloadOperation = preloadOperation
-    }
-
-    deinit {
-        task?.cancel()
-    }
-
-    func preload(_ requestedModel: String, force: Bool = false) {
-        let model = sanitizedOllamaModelName(requestedModel)
-        guard isAllowedLocalOllamaModelName(model) else { return }
-        guard force || satisfiedModel != model else { return }
-
-        generation &+= 1
-        let currentGeneration = generation
-        task?.cancel()
-        satisfiedModel = model
-        let operation = preloadOperation
-        task = Task { @MainActor [weak self] in
-            do {
-                try await operation(model)
-                guard let self, self.generation == currentGeneration else { return }
-                self.task = nil
-            } catch {
-                guard let self, self.generation == currentGeneration else { return }
-                self.task = nil
-                self.satisfiedModel = nil
-            }
-        }
-    }
-
-    func stop() {
-        generation &+= 1
-        task?.cancel()
-        task = nil
-        satisfiedModel = nil
-    }
 }
 
 struct ScriptEditorAIPanel: View {
     @ObservedObject var model: ScriptEditorModel
     @Environment(\.scriptEditorTheme) private var theme
     private let modelLoader: ScriptEditorAIModelLoader
-    @StateObject private var modelPreloader: ScriptEditorAIModelPreloader
 
     private struct Bubble: Identifiable, Equatable {
         let id = UUID()
@@ -90,9 +41,10 @@ struct ScriptEditorAIPanel: View {
     @State private var modelDiscoveryTask: Task<Void, Never>?
     @State private var modelDiscoveryGeneration: UInt64 = 0
     @State private var requestTask: Task<Void, Never>?
-    @State private var lastAssistantInsertion: String?
+    @State private var lastAssistantInsertionStatus: String?
     @State private var lastAssistantInsertionRefusal: String?
     @State private var requestGeneration: UInt64 = 0
+    @State private var requestIntent: ScriptEditorAIRequestIntent = .writeCode
     @FocusState private var isPromptFocused: Bool
 
     init(
@@ -101,9 +53,6 @@ struct ScriptEditorAIPanel: View {
     ) {
         _model = ObservedObject(wrappedValue: model)
         self.modelLoader = modelLoader
-        _modelPreloader = StateObject(wrappedValue: ScriptEditorAIModelPreloader(
-            preloadOperation: modelLoader.preloadModel
-        ))
     }
 
     var body: some View {
@@ -111,25 +60,13 @@ struct ScriptEditorAIPanel: View {
             header
             Divider()
             transcript
-            if let insertion = lastAssistantInsertion {
-                HStack {
-                    SwiftUI.Button {
-                        if let refusal = model.aiInsertionPreflightFailure(insertion) {
-                            lastAssistantInsertionRefusal = refusal
-                            lastAssistantInsertion = nil
-                        } else {
-                            model.insertAtCursor(insertion)
-                            lastAssistantInsertion = nil
-                            lastAssistantInsertionRefusal = nil
-                        }
-                    } label: {
-                        Label("Insert response at cursor", systemImage: "arrow.down.doc")
-                    }
+            if let insertionStatus = lastAssistantInsertionStatus {
+                Label(insertionStatus, systemImage: "checkmark.circle")
                     .font(.caption)
-                    Spacer()
-                }
-                .padding(.horizontal, theme.spacing)
-                .padding(.top, 4)
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, theme.spacing)
+                    .padding(.top, 4)
+                    .accessibilityLabel(insertionStatus)
             }
             if let refusal = lastAssistantInsertionRefusal {
                 Label(refusal, systemImage: "exclamationmark.triangle")
@@ -145,24 +82,21 @@ struct ScriptEditorAIPanel: View {
         .background(theme.panelBackground.color)
         .onAppear {
             model.refreshAIConfiguration()
-            activateConfiguredModel()
+            refreshModels()
         }
         .onChange(of: model.aiCompletionMode) { _, mode in
             if mode == .off {
                 stop()
             } else {
-                activateConfiguredModel()
+                refreshModels()
             }
         }
         .onChange(of: model.isWorldSessionActive) { _, active in
             if active {
-                activateConfiguredModel()
+                refreshModels()
             } else {
                 stop()
             }
-        }
-        .onChange(of: model.aiModelName) { _, _ in
-            preloadConfiguredModel()
         }
         .onChange(of: model.documentIdentity) { _, _ in
             clearConversation()
@@ -174,65 +108,102 @@ struct ScriptEditorAIPanel: View {
 
     // MARK: - header
 
-    private func activateConfiguredModel() {
-        refreshModels()
-        preloadConfiguredModel()
-    }
-
     private var header: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "wand.and.sparkles")
-                .foregroundColor(.secondary)
-            Text("Script AI")
-                .font(.headline)
-            Spacer(minLength: 4)
-            Menu {
-                if availableModels.isEmpty {
-                    SwiftUI.Button(isFetchingModels ? "Loading local models…" : "Load local models") {
-                        reloadModels()
-                    }
-                    .disabled(isFetchingModels || model.aiCompletionMode == .off || !model.isWorldSessionActive)
-                } else {
-                    ForEach(availableModels, id: \.self) { name in
-                        SwiftUI.Button {
-                            model.setAIModel(name)
-                        } label: {
-                            if name == model.aiModelName {
-                                Label(name, systemImage: "checkmark")
-                            } else {
-                                Text(name)
+        VStack(spacing: 3) {
+            HStack(spacing: 6) {
+                Image(systemName: "wand.and.sparkles")
+                    .foregroundColor(.secondary)
+                Text("Script AI")
+                    .font(.headline)
+                Spacer(minLength: 4)
+                Menu {
+                    if availableModels.isEmpty {
+                        SwiftUI.Button(isFetchingModels ? "Loading local models…" : "Load local models") {
+                            reloadModels()
+                        }
+                        .disabled(
+                            isFetchingModels || model.aiCompletionMode == .off ||
+                                !model.isWorldSessionActive
+                        )
+                    } else {
+                        ForEach(availableModels, id: \.self) { name in
+                            SwiftUI.Button {
+                                model.setAIModel(name)
+                            } label: {
+                                if name == model.aiModelName {
+                                    Label(name, systemImage: "checkmark")
+                                } else {
+                                    Text(name)
+                                }
                             }
                         }
+                        Divider()
+                        SwiftUI.Button("Refresh local models") {
+                            reloadModels()
+                        }
                     }
-                    Divider()
-                    SwiftUI.Button("Refresh local models") {
-                        reloadModels()
-                    }
-                }
-            } label: {
-                Text(model.aiModelName.isEmpty ? "Choose model" : model.aiModelName)
-                    .font(.caption)
-                    .lineLimit(1)
-            }
-            .menuStyle(.borderlessButton)
-            .frame(maxWidth: 150)
-            .accessibilityLabel("AI model")
-
-            if !messages.isEmpty {
-                SwiftUI.Button {
-                    clearConversation()
                 } label: {
-                    Label("Clear AI conversation", systemImage: "trash")
-                        .labelStyle(.iconOnly)
+                    Text(model.aiModelName.isEmpty ? "Choose model" : model.aiModelName)
+                        .font(.caption)
+                        .lineLimit(1)
                 }
-                .buttonStyle(.plain)
-                .help("Clear chat")
-                .accessibilityLabel("Clear AI conversation")
+                .menuStyle(.borderlessButton)
+                .frame(maxWidth: 150)
+                .accessibilityLabel("AI model")
+
+                if !messages.isEmpty {
+                    SwiftUI.Button {
+                        clearConversation()
+                    } label: {
+                        Label("Clear AI conversation", systemImage: "trash")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear chat")
+                    .accessibilityLabel("Clear AI conversation")
+                }
             }
+            readinessRow
         }
         .padding(.horizontal, theme.spacing)
         .padding(.vertical, 6)
         .background(theme.toolbarBackground.color)
+    }
+
+    @ViewBuilder
+    private var readinessRow: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 5) {
+                switch model.aiReadinessState {
+                case .preparing:
+                    ProgressView().controlSize(.small)
+                case .ready:
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                case .failed:
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                case .off, .needsModel, .idle:
+                    Image(systemName: "circle.dotted").foregroundStyle(.secondary)
+                }
+                Text(model.aiReadinessState.statusText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if case .failed = model.aiReadinessState {
+                    SwiftUI.Button("Retry") { model.retryAIReadiness() }
+                        .buttonStyle(.link)
+                        .font(.caption2)
+                }
+            }
+            if case .failed(_, let message) = model.aiReadinessState {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(model.aiReadinessState.accessibilityText)
     }
 
     private func refreshModels() {
@@ -265,12 +236,7 @@ struct ScriptEditorAIPanel: View {
     private func reloadModels() {
         availableModels = []
         refreshModels()
-        preloadConfiguredModel(force: true)
-    }
-
-    private func preloadConfiguredModel(force: Bool = false) {
-        guard model.aiCompletionMode != .off, model.isWorldSessionActive else { return }
-        modelPreloader.preload(model.aiModelName, force: force)
+        model.retryAIReadiness()
     }
 
     // MARK: - transcript
@@ -281,7 +247,7 @@ struct ScriptEditorAIPanel: View {
                 LazyVStack(alignment: .leading, spacing: theme.spacing) {
                     if messages.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Ask about \(model.targetDisplayName)'s script, request a rewrite, or ask for Lua to insert.")
+                            Text("Write validated Lua for \(model.targetDisplayName), or switch to Ask for transcript-only help.")
                             Label("Read-only proposal service · no world tools", systemImage: "lock.shield")
                         }
                             .font(.callout)
@@ -295,7 +261,7 @@ struct ScriptEditorAIPanel: View {
                     if isProcessing {
                         HStack(spacing: 6) {
                             ProgressView().scaleEffect(0.7)
-                            Text("Working…")
+                            Text(processingStatusText)
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                             Spacer()
@@ -333,46 +299,81 @@ struct ScriptEditorAIPanel: View {
     // MARK: - input
 
     private var inputArea: some View {
-        HStack(alignment: .bottom, spacing: 6) {
-            ZStack(alignment: .topLeading) {
-                if prompt.isEmpty {
-                    Text(model.aiCompletionMode == .off ? "Editor AI is Off" : "Ask Script AI…")
-                        .foregroundColor(.secondary)
-                        .font(.body)
-                        .padding(8)
-                        .allowsHitTesting(false)
+        VStack(alignment: .leading, spacing: 7) {
+            Picker("Request type", selection: $requestIntent) {
+                ForEach(ScriptEditorAIRequestIntent.allCases) { intent in
+                    Text(intent.rawValue).tag(intent)
                 }
-                AutoGrowingTextInput(
-                    text: $prompt,
-                    contentHeight: $promptContentHeight,
-                    isEnabled: !isProcessing && model.aiCompletionMode != .off && model.isWorldSessionActive,
-                    onSubmit: send,
-                    onHistoryUp: { recallHistory(.up) },
-                    onHistoryDown: { recallHistory(.down) }
-                )
-                .padding(8)
-                .focused($isPromptFocused)
             }
-            .frame(height: min(max(promptContentHeight + 16, 32), 320))
-            .background(
-                RoundedRectangle(cornerRadius: theme.cornerRadiusSmall)
-                    .stroke(Color.secondary.opacity(0.3))
-            )
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(isProcessing)
+            .accessibilityLabel("Script AI request type")
 
-            if isProcessing {
-                SwiftUI.Button("Stop") { stop() }
-                    .foregroundColor(.red)
-            } else {
-                SwiftUI.Button("Send") { send() }
-                    .disabled(
-                        model.aiCompletionMode == .off ||
-                            !model.isWorldSessionActive ||
-                            prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            Text(requestIntent == .writeCode
+                 ? "Validated Lua inserts into the current Module or Handler. It is never saved or run automatically."
+                 : "Answers stay in this conversation and never edit your script.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            HStack(alignment: .bottom, spacing: 6) {
+                ZStack(alignment: .topLeading) {
+                    if prompt.isEmpty {
+                        Text(promptPlaceholder)
+                            .foregroundColor(.secondary)
+                            .font(.body)
+                            .padding(8)
+                            .allowsHitTesting(false)
+                    }
+                    AutoGrowingTextInput(
+                        text: $prompt,
+                        contentHeight: $promptContentHeight,
+                        isEnabled: !isProcessing && model.aiCompletionMode != .off &&
+                            model.isWorldSessionActive,
+                        onSubmit: send,
+                        onHistoryUp: { recallHistory(.up) },
+                        onHistoryDown: { recallHistory(.down) }
                     )
-                    .keyboardShortcut(.return, modifiers: [])
+                    .padding(8)
+                    .focused($isPromptFocused)
+                }
+                .frame(height: min(max(promptContentHeight + 16, 32), 320))
+                .background(
+                    RoundedRectangle(cornerRadius: theme.cornerRadiusSmall)
+                        .stroke(Color.secondary.opacity(0.3))
+                )
+
+                if isProcessing {
+                    SwiftUI.Button("Stop") { stop() }
+                        .foregroundColor(.red)
+                } else {
+                    SwiftUI.Button(requestIntent == .writeCode ? "Write" : "Ask") { send() }
+                        .disabled(
+                            model.aiCompletionMode == .off ||
+                                !model.isWorldSessionActive ||
+                                prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        )
+                        .keyboardShortcut(.return, modifiers: [])
+                }
             }
         }
         .padding(theme.spacing)
+    }
+
+    private var promptPlaceholder: String {
+        if model.aiCompletionMode == .off { return "Editor AI is Off" }
+        return requestIntent == .writeCode
+            ? "Describe code to add…"
+            : "Ask about this script…"
+    }
+
+    private var processingStatusText: String {
+        switch model.aiReadinessState {
+        case .ready:
+            requestIntent == .writeCode ? "Generating and validating…" : "Thinking…"
+        default:
+            model.aiReadinessState.statusText
+        }
     }
 
     private func send() {
@@ -382,12 +383,13 @@ struct ScriptEditorAIPanel: View {
         history = AIChatPromptHistory.appending(request, to: history)
         historyIndex = -1
         messages.append(Bubble(role: "user", content: request))
-        lastAssistantInsertion = nil
+        lastAssistantInsertionStatus = nil
         lastAssistantInsertionRefusal = nil
         prompt = ""
         isProcessing = true
         requestGeneration &+= 1
         let generation = requestGeneration
+        let intent = requestIntent
         requestTask = Task { @MainActor in
             defer {
                 if requestGeneration == generation {
@@ -396,26 +398,37 @@ struct ScriptEditorAIPanel: View {
                 }
             }
             do {
-                let reply = try await model.requestEditorAIReply(instruction: request)
+                let reply = try await model.requestEditorAIReply(
+                    instruction: request,
+                    intent: intent
+                )
                 guard !Task.isCancelled, requestGeneration == generation else { return }
-                messages.append(Bubble(role: "assistant", content: reply))
-                // Insert the salvaged code, not the raw reply: the model sometimes appends an
-                // explanatory sentence the editor would treat as a syntax error. insertableProposal
-                // unwraps any fence and trims trailing prose to the largest compilable prefix.
-                if let insertable = model.insertableProposal(from: reply) {
-                    lastAssistantInsertion = insertable
+                messages.append(Bubble(role: "assistant", content: reply.text))
+                switch reply.applyOutcome {
+                case .inserted(let receipt):
+                    let omission = receipt.omittedTrailingText ? " Trailing non-code text was omitted." : ""
+                    lastAssistantInsertionStatus = "Inserted validated Lua into \(receipt.destinationDescription).\(omission)"
                     lastAssistantInsertionRefusal = nil
-                } else {
-                    lastAssistantInsertion = nil
-                    lastAssistantInsertionRefusal = model.aiInsertionPreflightFailure(reply)
-                        ?? "AI proposal refused: the reply contained no insertable Lua."
+                case .answerOnly:
+                    lastAssistantInsertionStatus = nil
+                    lastAssistantInsertionRefusal = intent == .writeCode
+                        ? "No code was inserted because the model returned an answer instead of valid Lua."
+                        : nil
+                case .refused(let message):
+                    lastAssistantInsertionStatus = nil
+                    lastAssistantInsertionRefusal = message
                 }
-            } catch let error as OllamaCodeCompletionError
-                where error == .cancelled || error == .stale {
+            } catch let error as OllamaCodeCompletionError where error == .cancelled {
                 return
+            } catch let error as OllamaCodeCompletionError where error == .stale {
+                guard !Task.isCancelled, requestGeneration == generation else { return }
+                let message = "The draft, selection, mode, event, or model changed. This request was not applied."
+                messages.append(Bubble(role: "assistant", content: message))
+                lastAssistantInsertionStatus = nil
+                lastAssistantInsertionRefusal = message
             } catch {
                 guard !Task.isCancelled, requestGeneration == generation else { return }
-                lastAssistantInsertion = nil
+                lastAssistantInsertionStatus = nil
                 lastAssistantInsertionRefusal = nil
                 messages.append(Bubble(role: "assistant", content: error.localizedDescription))
             }
@@ -428,7 +441,6 @@ struct ScriptEditorAIPanel: View {
         modelDiscoveryTask?.cancel()
         modelDiscoveryTask = nil
         isFetchingModels = false
-        modelPreloader.stop()
     }
 
     private func stopRequest() {
@@ -444,7 +456,7 @@ struct ScriptEditorAIPanel: View {
         prompt = ""
         history.removeAll()
         historyIndex = -1
-        lastAssistantInsertion = nil
+        lastAssistantInsertionStatus = nil
         lastAssistantInsertionRefusal = nil
     }
 

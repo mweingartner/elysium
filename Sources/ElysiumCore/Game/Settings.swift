@@ -77,7 +77,9 @@ public func sanitizedOllamaModelName(_ raw: String) -> String {
 
 public func isAllowedLocalOllamaModelName(_ raw: String) -> Bool {
     let model = sanitizedOllamaModelName(raw).lowercased()
-    return !model.isEmpty && !model.hasSuffix(":cloud")
+    return !model.isEmpty
+        && !model.hasSuffix(":cloud")
+        && !model.hasSuffix("-cloud")
 }
 
 func sanitizedSettings(_ input: Settings) -> Settings {

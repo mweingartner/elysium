@@ -128,6 +128,7 @@ final class ScriptEditorWindowController: NSObject, NSWindowDelegate {
         }
 
         let model = ScriptEditorModel(target: target, game: game, existingName: existingName)
+        model.beginAIReadiness()
 
         // Default sized so all three columns (script list + palette | editor | AI chat) and the
         // full editor toolbar (name, mode picker, Check/Run/Save, AI toggle) render without the
@@ -181,6 +182,7 @@ final class ScriptEditorWindowController: NSObject, NSWindowDelegate {
               let key = windows.first(where: { $0.value === window })?.key
         else { return }
         models[key]?.cancelAIWork(clearSuggestion: true)
+        models[key]?.endAIReadiness()
         windows.removeValue(forKey: key)
         models.removeValue(forKey: key)
         dirtyObservers.removeValue(forKey: key)

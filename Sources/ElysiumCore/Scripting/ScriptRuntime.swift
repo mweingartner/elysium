@@ -1676,8 +1676,9 @@ public final class ScriptRuntime {
     /// a valid but prefix-limited suspension and its coroutine is closed without scheduling;
     /// faults and slice preemption are failures. Registered handler closures are not invoked in
     /// this bounded pass. Nothing is persisted, emitted, sent to chat/AI, or allowed to escape the
-    /// throwaway environment. The method never throws; callers decide whether a failure is
-    /// blocking (editor Check) or an advisory warning (AI attach validation).
+    /// throwaway environment, and the pass does not consume the live scheduler/RNG ordinal. The
+    /// method never throws; callers decide whether a failure is blocking (editor Check) or an
+    /// advisory warning (AI attach validation).
     public func dryRunOutcome(
         source: String, owner: ObjectRef, mode: ScriptMode, handlerEvent: EventKind? = nil,
         handlerSubject: ObjectRef? = nil, handlerSubjectIsExact: Bool = true
@@ -1688,10 +1689,9 @@ public final class ScriptRuntime {
         defer { dryRunActive = wasDryRun }
         let transientRandom = RandomStreamBoxAdapter(RandomX(0xD8A1_1D8A))
         let env = lua.makeEnvironment(
-            name: "dryrun#\(nextOrdinal)", hostBindings: buildHostBindings(),
+            name: "dryrun", hostBindings: buildHostBindings(),
             random: transientRandom
         )
-        nextOrdinal += 1
         defer { env.destroy() }
         let wrapped = mode == .module
             ? "local self, world, player = ...\n" + source

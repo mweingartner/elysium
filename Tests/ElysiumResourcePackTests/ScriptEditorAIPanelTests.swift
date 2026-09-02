@@ -13,7 +13,7 @@ final class ScriptEditorAIPanelTests: XCTestCase {
         if entityTypes().isEmpty { registerAllEntities() }
     }
 
-    func testVisiblePanelDiscoversModelsAndPreloadsExactPersistedSelection() async throws {
+    func testVisiblePanelDiscoversModelsWithoutOwningEditorWarmup() async throws {
         let restoreMode = setCompletionModeForTest(.manual)
         defer { restoreMode() }
 
@@ -23,18 +23,12 @@ final class ScriptEditorAIPanelTests: XCTestCase {
         XCTAssertEqual(model.aiModelName, selectedModel)
 
         let discovered = expectation(description: "visible panel discovers local models")
-        let preloaded = expectation(description: "visible panel preloads saved model")
         var discoveryCount = 0
-        var preloadedModels: [String] = []
         let loader = ScriptEditorAIModelLoader(
             fetchModels: {
                 discoveryCount += 1
                 discovered.fulfill()
                 return ["another-model:latest", selectedModel]
-            },
-            preloadModel: { name in
-                preloadedModels.append(name)
-                preloaded.fulfill()
             }
         )
 
@@ -54,11 +48,10 @@ final class ScriptEditorAIPanelTests: XCTestCase {
 
         window.makeKeyAndOrderFront(nil)
         hosting.layoutSubtreeIfNeeded()
-        await fulfillment(of: [discovered, preloaded], timeout: 2)
+        await fulfillment(of: [discovered], timeout: 2)
         for _ in 0..<4 { await Task.yield() }
 
         XCTAssertEqual(discoveryCount, 1)
-        XCTAssertEqual(preloadedModels, [selectedModel])
         XCTAssertEqual(model.aiModelName, selectedModel)
         XCTAssertEqual(game.settings.aiOllamaModel, selectedModel)
     }
@@ -70,14 +63,10 @@ final class ScriptEditorAIPanelTests: XCTestCase {
         let game = try makeGame(selectedModel: "local-model:latest")
         let model = ScriptEditorModel(target: .player, game: game)
         var discoveryCount = 0
-        var preloadCount = 0
         let loader = ScriptEditorAIModelLoader(
             fetchModels: {
                 discoveryCount += 1
                 return []
-            },
-            preloadModel: { _ in
-                preloadCount += 1
             }
         )
         let hosting = NSHostingView(rootView: ScriptEditorAIPanel(
@@ -99,7 +88,6 @@ final class ScriptEditorAIPanelTests: XCTestCase {
         for _ in 0..<8 { await Task.yield() }
 
         XCTAssertEqual(discoveryCount, 0)
-        XCTAssertEqual(preloadCount, 0)
     }
 
     func testPreloadRequestContainsOnlyExactModelAndEmptyWarmupFields() throws {
@@ -126,31 +114,75 @@ final class ScriptEditorAIPanelTests: XCTestCase {
         XCTAssertEqual(body["stream"] as? Bool, false)
     }
 
-    func testFailedPreloadCanRetryTheSameSelectedModel() async {
-        let firstAttempt = expectation(description: "first preload fails")
-        let retryAttempt = expectation(description: "same model retries")
+    func testEditorLifecycleWarmsWithPanelClosedAndRetriesFailedExactModel() async throws {
+        let restoreMode = setCompletionModeForTest(.manual)
+        defer { restoreMode() }
+
         let selectedModel = "retry-model:latest"
-        var attempts = 0
-        let preloader = ScriptEditorAIModelPreloader { model in
-            XCTAssertEqual(model, selectedModel)
-            attempts += 1
-            if attempts == 1 {
-                firstAttempt.fulfill()
-                throw RetryTestError.transientFailure
-            }
-            retryAttempt.fulfill()
-        }
+        let completer = FlakyPreparationCompleter()
+        let game = try makeGame(selectedModel: selectedModel)
+        let model = ScriptEditorModel(
+            target: .player,
+            game: game,
+            aiCompleter: completer
+        )
 
-        preloader.preload(selectedModel)
-        await fulfillment(of: [firstAttempt], timeout: 2)
-        for _ in 0..<4 { await Task.yield() }
-        XCTAssertNil(preloader.satisfiedModel)
+        // No ScriptEditorAIPanel is constructed: opening the editor model lifecycle is enough.
+        model.beginAIReadiness()
+        try await waitUntil { if case .failed = model.aiReadinessState { true } else { false } }
+        var preparedModels = await completer.preparedModels()
+        XCTAssertEqual(preparedModels, [selectedModel])
 
-        preloader.preload(selectedModel)
-        await fulfillment(of: [retryAttempt], timeout: 2)
-        for _ in 0..<4 { await Task.yield() }
-        XCTAssertEqual(attempts, 2)
-        XCTAssertEqual(preloader.satisfiedModel, selectedModel)
+        model.retryAIReadiness()
+        try await waitUntil { model.aiReadinessState == .ready(selectedModel) }
+        preparedModels = await completer.preparedModels()
+        XCTAssertEqual(preparedModels, [selectedModel, selectedModel])
+        model.endAIReadiness()
+        try await waitUntil { await completer.releaseCount() == 1 }
+    }
+
+    func testOffEditorLifecycleMakesNoPreparationRequest() async throws {
+        let restoreMode = setCompletionModeForTest(.off)
+        defer { restoreMode() }
+
+        let completer = FlakyPreparationCompleter(failFirst: false)
+        let game = try makeGame(selectedModel: "local-model:latest")
+        let model = ScriptEditorModel(
+            target: .player,
+            game: game,
+            aiCompleter: completer
+        )
+        model.beginAIReadiness()
+        for _ in 0..<8 { await Task.yield() }
+
+        XCTAssertEqual(model.aiReadinessState, .off)
+        let preparedModels = await completer.preparedModels()
+        XCTAssertTrue(preparedModels.isEmpty)
+    }
+
+    func testClosingEditorBeforePreparationStartsRetiresOwnerWithoutWarmup() async throws {
+        let restoreMode = setCompletionModeForTest(.manual)
+        defer { restoreMode() }
+
+        let completer = FlakyPreparationCompleter(failFirst: false)
+        let game = try makeGame(selectedModel: "local-model:latest")
+        let model = ScriptEditorModel(
+            target: .player,
+            game: game,
+            aiCompleter: completer
+        )
+
+        // Both lifecycle calls happen in the same MainActor turn, before the preparation task can
+        // start. Closing must retire and release that owner without doing a late cold warmup.
+        model.beginAIReadiness()
+        model.endAIReadiness()
+        try await waitUntil { await completer.releaseAttemptCount() == 1 }
+
+        XCTAssertEqual(model.aiReadinessState, .idle)
+        let preparedModels = await completer.preparedModels()
+        let activeOwnerCount = await completer.activeOwnerCount()
+        XCTAssertTrue(preparedModels.isEmpty)
+        XCTAssertEqual(activeOwnerCount, 0)
     }
 
     private func makeGame(selectedModel: String) throws -> GameCore {
@@ -199,8 +231,65 @@ final class ScriptEditorAIPanelTests: XCTestCase {
             }
         }
     }
+
+    private func waitUntil(
+        timeout: Duration = .seconds(2),
+        _ condition: @escaping @MainActor () async -> Bool
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if await condition() { return }
+            try await clock.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for Script AI lifecycle state")
+    }
 }
 
 private enum RetryTestError: Error {
     case transientFailure
+}
+
+private actor FlakyPreparationCompleter: ScriptEditorAICompleting {
+    private let failFirst: Bool
+    private var models: [String] = []
+    private var releases = 0
+    private var releaseAttempts = 0
+    private var activeOwners: Set<UUID> = []
+
+    init(failFirst: Bool = true) {
+        self.failFirst = failFirst
+    }
+
+    func prepareEditorModel(_ model: String, owner: UUID) async throws {
+        try Task.checkCancellation()
+        models.append(model)
+        if failFirst, models.count == 1 {
+            throw RetryTestError.transientFailure
+        }
+        activeOwners.insert(owner)
+    }
+
+    func releaseEditorModel(owner: UUID) async {
+        releaseAttempts += 1
+        if activeOwners.remove(owner) != nil {
+            releases += 1
+        }
+    }
+
+    func completeEditorRequest(
+        _ request: OllamaCodeCompletionRequest
+    ) async throws -> OllamaCodeCompletionResponse {
+        OllamaCodeCompletionResponse(
+            identity: request.identity,
+            insertion: "say('ready')",
+            strategy: .safePrompt,
+            modelHints: nil
+        )
+    }
+
+    func preparedModels() -> [String] { models }
+    func releaseCount() -> Int { releases }
+    func releaseAttemptCount() -> Int { releaseAttempts }
+    func activeOwnerCount() -> Int { activeOwners.count }
 }

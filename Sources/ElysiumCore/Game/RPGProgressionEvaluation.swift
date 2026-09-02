@@ -1,5 +1,81 @@
 import Foundation
 
+public struct RPGPathProgressionCriterion: Equatable {
+    public let eventKind: RPGXPEventKind
+    public let title: String
+    public let criterion: String
+    public let reward: String
+    public let limit: String
+
+    public init(eventKind: RPGXPEventKind, title: String,
+                criterion: String, reward: String, limit: String) {
+        self.eventKind = eventKind
+        self.title = title
+        self.criterion = criterion
+        self.reward = reward
+        self.limit = limit
+    }
+}
+
+/// Player-facing identity for one path. Purpose and play loop are deliberately separate from the
+/// XP rows: the former explains why the path exists, while the latter states exactly what advances
+/// it. Criteria are projected from the closed event registry so every shipped XP source appears
+/// once and only on its owning path.
+public struct RPGPathIdentity: Equatable {
+    public let pathID: String
+    public let purpose: String
+    public let playLoop: String
+    public let progressionCriteria: [RPGPathProgressionCriterion]
+
+    public init(pathID: String, purpose: String, playLoop: String,
+                progressionCriteria: [RPGPathProgressionCriterion]) {
+        self.pathID = pathID
+        self.purpose = purpose
+        self.playLoop = playLoop
+        self.progressionCriteria = progressionCriteria
+    }
+}
+
+public func rpgPathIdentity(pathID: String) -> RPGPathIdentity? {
+    let purpose: String
+    let playLoop: String
+    switch pathID {
+    case "warden":
+        purpose = "Front-line protector who converts close combat and timely defense into team safety."
+        playLoop = "Hold dangerous ground, stop hostile pressure, and spend fatigue on protection or decisive melee control."
+    case "ranger":
+        purpose = "Mobile ranged scout who turns distance, terrain knowledge, and fieldcraft into control."
+        playLoop = "Explore ahead, establish safe sightlines, and finish threats before they reach close range."
+    case "delver":
+        purpose = "Underground specialist who finds resources, manages hazards, and extracts guarded treasure."
+        playLoop = "Descend deliberately, read the terrain, open dangerous sites, and bring valuable material back safely."
+    case "arcanist":
+        purpose = "Fatigue-driven spellcaster who reshapes encounters with damage, deception, wards, and summons."
+        playLoop = "Prepare a compact spell kit, create real magical effects, and manage fatigue and focus positioning."
+    case "mender":
+        purpose = "Support specialist who preserves a group through healing, provisions, cleansing, and safe zones."
+        playLoop = "Prevent losses, answer hostile injuries, and turn gathered supplies into sustained expedition strength."
+    case "tinker":
+        purpose = "Engineering specialist who solves problems with mechanisms, maintained gear, and controlled demolition."
+        playLoop = "Learn useful recipes, build working devices, and trade setup time for repeatable mechanical advantage."
+    default:
+        return nil
+    }
+    let criteria = RPGXPEventKind.allCases
+        .filter { $0.pathID == pathID }
+        .map {
+            RPGPathProgressionCriterion(
+                eventKind: $0,
+                title: $0.progressionTitle,
+                criterion: $0.progressionCriterion,
+                reward: $0.progressionReward,
+                limit: $0.progressionLimit)
+        }
+    guard !criteria.isEmpty else { return nil }
+    return RPGPathIdentity(pathID: pathID, purpose: purpose,
+                           playLoop: playLoop, progressionCriteria: criteria)
+}
+
 public enum RPGSkillPurchaseFailure: Equatable {
     case characterNotCreated
     case unknownOrCrossPathSkill(String)
@@ -185,27 +261,27 @@ public func rpgLevelOneProgressionGuidance(pathID: String) -> RPGPathProgression
     case "warden":
         return RPGPathProgressionGuidance(pathID: pathID, targetXP: target,
             eventKind: .wardenMeleeDefeat, eventCount: 5, xpPerEvent: 10, rolloverEventCount: 0,
-            visibleText: "Defeat five hostile creatures in melee (5 x 10 XP), or earn XP by mitigating damage.")
+            visibleText: "Defeat five hostile creatures with a Warden's normal melee attack or melee action (5 x 10 XP), or earn 2 XP when a Warden protection effect absorbs at least 2 hostile damage.")
     case "ranger":
         return RPGPathProgressionGuidance(pathID: pathID, targetXP: target,
             eventKind: .rangerFieldDiscovery, eventCount: 17, xpPerEvent: 3, rolloverEventCount: 0,
-            visibleText: "Discover seventeen loaded-chunk field locations (17 x 3 XP).")
+            visibleText: "Earn 50 class XP through ranged victories or eligible loaded field locations. Exploration admits 8 events per 1,200 simulation ticks, so 17 location awards alone require 3 windows.")
     case "delver":
         return RPGPathProgressionGuidance(pathID: pathID, targetXP: target,
             eventKind: .delverExcavation, eventCount: 13, xpPerEvent: 4, rolloverEventCount: 0,
-            visibleText: "Complete thirteen legal deep excavations (13 x 4 XP).")
+            visibleText: "Earn 50 class XP through depth milestones, generated world-structure treasure, or deep excavation. Thirteen excavations alone require 2 windows because depth, generated-structure treasure, and excavation events share an 8-event cap.")
     case "arcanist":
         return RPGPathProgressionGuidance(pathID: pathID, targetXP: target,
             eventKind: .arcanistSpellPractice, eventCount: 9, xpPerEvent: 6, rolloverEventCount: 0,
-            visibleText: "Make nine effect-producing practice casts across bounded windows (9 x 6 XP).")
+            visibleText: "Earn 50 class XP through spell victories or effect-producing practice. Practice awards once per distinct spell per window, so combine spells and victories instead of repeating one cast.")
     case "mender":
         return RPGPathProgressionGuidance(pathID: pathID, targetXP: target,
             eventKind: .menderProvisionCraft, eventCount: 9, xpPerEvent: 6, rolloverEventCount: 0,
-            visibleText: "Produce nine qualifying provisions (9 x 6 XP), or earn XP through causal support healing.")
+            visibleText: "Earn 50 class XP by healing, cleansing, or rescuing a non-player ally through a live, unconsumed injury record before 1,200 simulation ticks have elapsed since that ally's latest hostile injury, or by completing crafting-grid recipes for qualifying beneficial food. Nine provisions alone require 2 windows.")
     case "tinker":
         return RPGPathProgressionGuidance(pathID: pathID, targetXP: target,
             eventKind: .tinkerEngineeringCraft, eventCount: 7, xpPerEvent: 6, rolloverEventCount: 1,
-            visibleText: "Learn one engineering recipe (4 XP), make seven outputs (7 x 6 XP), then one output after rollover (+6 XP).")
+            visibleText: "Earn 50 class XP through first-time crafting-grid recipes, powered mechanisms, or qualifying crafting-grid outputs. Engineering admits 8 events per 1,200 simulation ticks.")
     default:
         return nil
     }

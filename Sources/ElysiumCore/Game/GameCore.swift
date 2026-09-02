@@ -2365,13 +2365,11 @@ public final class GameCore {
         ticksSinceSave = 0
         host?.closeAllScreens()
         host?.showActionBar("§e\(rec.name)§r — seed \(rec.seed)", 60)
-        // The player lands directly in the world. When RPG classes are enabled the character
-        // sheet stays one click away via the Character button; it is no longer force-opened on
-        // entry (that overlay only dismissed on Escape and read as a stray screen). A quiet,
-        // non-modal chat nudge replaces the ambush so a first-time player still knows the
-        // progression system is waiting; it stops appearing once a class is chosen.
+        // The player lands directly in the world. Creation is recoverable from a stable native
+        // Game menu command as well as the configurable gameplay binding and inventory button,
+        // so the first-time nudge can explain a direct route without ambushing world entry.
         if player.rpgClassesEnabled(), !player.rpg.created {
-            host?.pushChat("§7Open your inventory and pick a class under §fCharacter§7 to start progression.")
+            host?.pushChat("§7Press §fK§7 (default) or choose §fGame > Character…§7 to create your character.")
         }
         // loaded in deep underground? say so loudly instead of looking like a render bug
         let bx = ifloor(player.x), bz = ifloor(player.z)

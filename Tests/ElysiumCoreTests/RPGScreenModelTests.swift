@@ -311,8 +311,16 @@ final class RPGScreenModelTests: XCTestCase {
                 session: session, chordBindings: rpgDefaultChordBindings(),
                 authority: .localReady, inventoryCapacitySummary: "Fits."))
             XCTAssertEqual(review.configuredChordProjections.count, 12)
-            XCTAssertEqual(review.starterKitItems.count,
-                           try XCTUnwrap(rpgStarterKit(pathID: path.id)).count)
+            let rawKit = try XCTUnwrap(rpgStarterKit(pathID: path.id))
+            XCTAssertEqual(review.starterKitItems.reduce(0) { $0 + $1.count },
+                           rawKit.reduce(0) { $0 + $1.count })
+            if path.id == "mender" {
+                let potions = review.starterKitItems.filter {
+                    $0.displayNameDetail == "Potion of Healing"
+                }
+                XCTAssertEqual(potions.count, 1)
+                XCTAssertEqual(potions.first?.count, 2)
+            }
             let visible = review.starterKit + review.configuredChords
             for forbidden in ["rpgCharacter", "rpgCycleAction", "rpgUseAction",
                               "rpgQuickSlot", "stone_sword", "apprentice_focus"] {
@@ -1472,6 +1480,7 @@ final class RPGScreenModelTests: XCTestCase {
             let spells = rpgSpellUnlockProjections(pathID: path.id)
             spells.forEach { projectedSpells.insert($0.spellID) }
             XCTAssertTrue(spells.allSatisfy { !$0.unlockingSkillRanks.isEmpty })
+            XCTAssertTrue(spells.allSatisfy { !$0.unlockRequirementText.isEmpty })
         }
         XCTAssertEqual(projectedSpells, Set(RPG_SPELL_DEFINITIONS.map(\.id)))
     }
@@ -1505,7 +1514,7 @@ final class RPGScreenModelTests: XCTestCase {
         let characterLabels = Set(character.descriptors.map(\.label))
         for label in ["Path", "Sub-class", "Level and XP", "Fatigue", "Health", "Growth",
                       "Derived recovery", "Derived offense", "Banked points",
-                      "Equipment", "Focus", "Next milestone", "Level-one guidance"] {
+                      "Equipment", "Focus", "Next milestone", "How to earn class XP"] {
             XCTAssertTrue(characterLabels.contains(label), label)
         }
         XCTAssertFalse(character.descriptors.contains { $0.label.hasPrefix("Character detail") })
@@ -1528,12 +1537,15 @@ final class RPGScreenModelTests: XCTestCase {
         let reviewLabels = Set(review.descriptors.map(\.label))
         for label in ["Path", "Sub-class", "Starting skills", "Spells granted",
                       "Health and fatigue", "Starter kit", "Focus requirement",
-                      "Level-one progression", "Configured RPG chords", "Controller scope",
+                      "First-level progression plan", "Configured RPG chords", "Controller scope",
                       "Inventory", "Authority"] {
             XCTAssertTrue(reviewLabels.contains(label), label)
         }
         XCTAssertEqual(review.creationReview?.configuredChords.count, 12)
-        XCTAssertTrue(review.creationReview?.controllerScope.contains("RPG menus and actions") == true)
+        XCTAssertTrue(review.creationReview?.controllerScope
+            .contains("standard macOS keyboard and pointer controls") == true)
+        XCTAssertTrue(review.creationReview?.controllerScope
+            .contains("do not operate this window") == true)
     }
 
     /// Wrong-step creation commands and extreme tutorial-page arithmetic both fail closed without
@@ -1805,6 +1817,104 @@ final class RPGScreenModelTests: XCTestCase {
             .allSatisfy { $0.actionCommand == nil })
         XCTAssertTrue(spells.descriptors.filter { $0.role == .row }
             .allSatisfy { $0.actionCommand == nil })
+    }
+
+    func testSpellCanBeReselectedAfterUnifiedActionSelectionMovesToASkill() throws {
+        var state = try XCTUnwrap(rpgScreenFixture(
+            pathID: "mender", branchID: "mender_physic"))
+        let projection = try XCTUnwrap(rpgPathProjection(pathID: state.pathID, state: state))
+        let spellID = try XCTUnwrap(projection.reachableSpellIDs.first)
+        let skillID = try XCTUnwrap(projection.activeSkillIDs.first)
+        state.knownSpellIDs.append(spellID)
+        state.knownSpellIDs = Array(Set(state.knownSpellIDs)).sorted()
+        state.preparedSpellIDs = [spellID]
+        state.selectedPreparedSpellID = spellID
+        state.skillRanks[skillID] = max(1, state.skillRanks[skillID] ?? 0)
+        state.preparedSkillIDs = [skillID]
+        state.selectedPreparedActionID = rpgPreparedActionToken(kind: .skill, id: skillID)
+        state = repairRPGCharacterState(state)
+
+        let model = rpgBuildScreenModel(RPGScreenModelInput(
+            state: state, viewportWidth: 700, viewportHeight: 420, tab: .spells))
+        let selectID = RPGUIElementID.operation(owner: .spell(spellID), name: "select")
+        let select = try XCTUnwrap(model.descriptors.first { $0.id == selectID })
+        XCTAssertEqual(select.actionCommand, .selectSpell(spellID))
+        XCTAssertTrue(select.isActionable)
+        XCTAssertEqual(select.selected, false)
+    }
+
+    func testEveryPreparedUnselectedSpellRetainsAnActionableSelectDescriptor() throws {
+        for path in RPG_PATH_DEFINITIONS {
+            let branchID = try XCTUnwrap(path.branchIDs.first, path.id)
+            let base = try XCTUnwrap(rpgScreenFixture(pathID: path.id, branchID: branchID), path.id)
+            let spellIDs = try XCTUnwrap(
+                rpgPathProjection(pathID: path.id, state: base)?.reachableSpellIDs, path.id)
+            for spellID in spellIDs {
+                var state = base
+                state.knownSpellIDs = [spellID]
+                state.preparedSpellIDs = [spellID]
+                state.selectedPreparedSpellID = spellID
+                state.selectedPreparedActionID = nil
+
+                let model = rpgBuildScreenModel(RPGScreenModelInput(
+                    state: state, viewportWidth: 700, viewportHeight: 420, tab: .spells))
+                let selectID = RPGUIElementID.operation(owner: .spell(spellID), name: "select")
+                let select = try XCTUnwrap(model.descriptors.first { $0.id == selectID },
+                                           "\(path.id):\(spellID)")
+                XCTAssertEqual(select.actionCommand, .selectSpell(spellID),
+                               "\(path.id):\(spellID)")
+                XCTAssertTrue(select.isActionable, "\(path.id):\(spellID)")
+                XCTAssertTrue(rpgDescriptorVisualLinesFit(
+                    frame: select.frame, iconAssetID: select.iconAssetID,
+                    visualLines: select.visualLines), "\(path.id):\(spellID)")
+            }
+        }
+    }
+
+    func testNativeActionInspectorPrefersPreparedThenLearnedBeforeLockedCatalogOrder() throws {
+        var state = try XCTUnwrap(rpgScreenFixture(
+            pathID: "mender", branchID: "mender_physic"))
+        let activeIDs = try XCTUnwrap(
+            rpgPathProjection(pathID: state.pathID, state: state)?.activeSkillIDs)
+        XCTAssertEqual(activeIDs.first, "second_breath",
+                       "fixture must retain the locked-first registry order from the live finding")
+        XCTAssertTrue(state.preparedSkillIDs.contains("safe_haven"))
+        XCTAssertEqual(rpgPreferredActiveSkillID(
+            activeSkillIDs: activeIDs, state: state,
+            current: nil, currentIsExplicit: false), "safe_haven")
+
+        let defaultModel = rpgBuildScreenModel(RPGScreenModelInput(
+            state: state, viewportWidth: 700, viewportHeight: 420, tab: .actives))
+        XCTAssertEqual(defaultModel.descriptors.first {
+            $0.id.rawValue == "actives:selected-action"
+        }?.value, "Safe Haven")
+        let safeHavenSelectID = RPGUIElementID.operation(
+            owner: .skill("safe_haven"), name: "select")
+        let safeHavenSelect = try XCTUnwrap(defaultModel.descriptors.first {
+            $0.id == safeHavenSelectID
+        })
+        XCTAssertEqual(safeHavenSelect.actionCommand, .selectSkill("safe_haven"))
+        XCTAssertTrue(safeHavenSelect.isActionable)
+
+        XCTAssertEqual(rpgPreferredActiveSkillID(
+            activeSkillIDs: activeIDs, state: state,
+            current: "second_breath", currentIsExplicit: true), "second_breath",
+            "an explicit valid inspector choice remains stable even when it is locked")
+        XCTAssertEqual(rpgPreferredActiveSkillID(
+            activeSkillIDs: activeIDs, state: state,
+            current: "second_breath", currentIsExplicit: false), "safe_haven",
+            "an automatic locked fallback must yield when a prepared action becomes available")
+
+        state.preparedSkillIDs = []
+        XCTAssertEqual(rpgPreferredActiveSkillID(
+            activeSkillIDs: activeIDs, state: state,
+            current: nil, currentIsExplicit: false), "safe_haven",
+            "a learned but unprepared action is preferable to a locked catalog entry")
+
+        state.skillRanks["safe_haven"] = 0
+        XCTAssertEqual(rpgPreferredActiveSkillID(
+            activeSkillIDs: activeIDs, state: state,
+            current: nil, currentIsExplicit: false), activeIDs.first)
     }
 
     func testQuickSlotPersistenceFailureProjectsTruthWithoutChangingSlots() throws {

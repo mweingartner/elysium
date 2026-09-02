@@ -83,6 +83,10 @@ final class OllamaCodeCompletionTests: XCTestCase {
         let generateBody = try jsonBody(requests[1])
         XCTAssertEqual(generateBody["model"] as? String, "qwen2.5-coder:7b")
         XCTAssertEqual(generateBody["stream"] as? Bool, false)
+        XCTAssertEqual(
+            generateBody["keep_alive"] as? String,
+            OllamaAgentService.editorModelPreloadKeepAlive
+        )
         XCTAssertNil(generateBody["tools"], "editor completion must never expose AI tools")
         XCTAssertNil(generateBody["messages"], "editor completion must not reuse the tool-loop chat body")
         XCTAssertNil(generateBody["suffix"], "safe-prompt mode must not silently assume FIM support")
@@ -193,7 +197,8 @@ final class OllamaCodeCompletionTests: XCTestCase {
         let service = OllamaCodeCompletionService(baseURL: baseURL, transport: transport)
         let request = try makeRequest(
             fillInMiddlePolicy: .explicitlyEnabled,
-            instruction: "Explain this script without changing the world."
+            instruction: "Explain this script without changing the world.",
+            instructionIntent: .question
         )
 
         let result = try await service.complete(request)
@@ -207,6 +212,7 @@ final class OllamaCodeCompletionTests: XCTestCase {
         XCTAssertNil(body["messages"])
         XCTAssertTrue((body["prompt"] as? String)?.contains("Explain this script without changing the world.") == true)
         XCTAssertTrue((body["system"] as? String)?.contains("You have no tools") == true)
+        XCTAssertTrue((body["system"] as? String)?.contains("This is a question") == true)
         XCTAssertTrue(result.isCurrent(
             documentRevision: 4,
             source: "self:",
@@ -225,19 +231,62 @@ final class OllamaCodeCompletionTests: XCTestCase {
         ))
     }
 
+    func testQuestionResponsePreservesExplanationAroundFencedExample() async throws {
+        let raw = "Use this example:\r\n```lua\r\nsay('hello')\r\n```\r\nIt posts one line."
+        let transport = RecordingCodeCompletionTransport(responses: [
+            response(["capabilities": ["completion"]]),
+            response(["response": raw]),
+        ])
+        let request = try makeRequest(
+            instruction: "How do I post a line?",
+            instructionIntent: .question
+        )
+
+        let result = try await OllamaCodeCompletionService(
+            baseURL: baseURL,
+            transport: transport
+        ).complete(request)
+
+        XCTAssertEqual(
+            result.text,
+            "Use this example:\n```lua\nsay('hello')\n```\nIt posts one line."
+        )
+    }
+
     func testCloudTaggedModelIsRejectedBeforeAnyTransportCall() async throws {
         let transport = RecordingCodeCompletionTransport(responses: [])
         let service = OllamaCodeCompletionService(baseURL: baseURL, transport: transport)
-        let request = try makeRequest(model: "qwen3-coder:cloud")
+        for model in ["qwen3-coder:cloud", "qwen3-coder:480b-cloud"] {
+            do {
+                _ = try await service.complete(makeRequest(model: model))
+                XCTFail("cloud-tagged completion model should be rejected")
+            } catch {
+                XCTAssertEqual(error as? OllamaCodeCompletionError, .cloudModelForbidden)
+            }
+        }
+        let requests = await transport.recordedRequests()
+        XCTAssertTrue(requests.isEmpty)
+    }
+
+    func testRemoteBackedAliasIsRejectedBySourceFreeShowBeforeGeneration() async throws {
+        let transport = RecordingCodeCompletionTransport(responses: [response([
+            "capabilities": ["completion"],
+            "remote_model": "qwen3-coder:480b-cloud",
+            "remote_host": "https://ollama.com",
+        ])])
+        let service = OllamaCodeCompletionService(baseURL: baseURL, transport: transport)
 
         do {
-            _ = try await service.complete(request)
-            XCTFail("cloud-tagged completion model should be rejected")
+            _ = try await service.complete(makeRequest(model: "friendly-local-name:latest"))
+            XCTFail("a remote-backed alias must never receive editor source")
         } catch {
             XCTAssertEqual(error as? OllamaCodeCompletionError, .cloudModelForbidden)
         }
         let requests = await transport.recordedRequests()
-        XCTAssertTrue(requests.isEmpty)
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.url?.path, "/api/show")
+        let showBody = try jsonBody(try XCTUnwrap(requests.first))
+        XCTAssertEqual(Set(showBody.keys), ["model"])
     }
 
     func testProductionOllamaSessionRejectsRedirectBeforeForwardingRequestBody() throws {
@@ -272,6 +321,7 @@ final class OllamaCodeCompletionTests: XCTestCase {
 
     func testProductionOllamaConfigurationDisablesAmbientTransportStateAndProxies() {
         let configuration = OllamaAgentService.loopbackSessionConfiguration()
+        let editorConfiguration = OllamaAgentService.editorCompletionSessionConfiguration()
 
         XCTAssertEqual(configuration.connectionProxyDictionary?.isEmpty, true)
         XCTAssertNil(configuration.urlCache)
@@ -279,6 +329,14 @@ final class OllamaCodeCompletionTests: XCTestCase {
         XCTAssertFalse(configuration.httpShouldSetCookies)
         XCTAssertNil(configuration.urlCredentialStorage)
         XCTAssertEqual(configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
+        XCTAssertGreaterThanOrEqual(
+            editorConfiguration.timeoutIntervalForRequest,
+            OllamaCodeCompletionService.generationTimeout
+        )
+        XCTAssertGreaterThan(
+            editorConfiguration.timeoutIntervalForResource,
+            OllamaCodeCompletionService.generationTimeout
+        )
     }
 
     func testBoundedResponseBufferRejectsDeclaredAndStreamingOverflow() throws {
@@ -389,6 +447,204 @@ final class OllamaCodeCompletionTests: XCTestCase {
         }
         let checkCount = await gate.checkCount()
         XCTAssertEqual(checkCount, 3)
+    }
+
+    func testFirstRequestWaitsForOneSharedColdPreparationAcrossEditors() async throws {
+        let transport = CoordinatedPreparationTransport(blockFirstWarmup: true)
+        let service = OllamaCodeCompletionService(
+            baseURL: baseURL,
+            transport: transport,
+            preparationTransport: transport
+        )
+        let model = "qwen2.5-coder:7b"
+        let firstOwner = UUID()
+        let secondOwner = UUID()
+        let firstPreparation = Task {
+            try await service.prepareEditorModel(model, owner: firstOwner)
+        }
+        try await waitForWarmupCount(1, transport: transport)
+
+        let secondPreparation = Task {
+            try await service.prepareEditorModel(model, owner: secondOwner)
+        }
+        let completion = Task {
+            try await service.complete(makeRequest(model: model))
+        }
+        for _ in 0..<20 { await Task.yield() }
+
+        var counts = await transport.counts()
+        XCTAssertEqual(counts.warmups, 1, "same-model editor/request preparation must coalesce")
+        XCTAssertEqual(
+            counts.metadata,
+            1,
+            "one source-free locality check must precede cold preparation"
+        )
+        XCTAssertEqual(counts.generations, 0, "the first prompt must not race the cold load")
+
+        await transport.releaseFirstWarmup()
+        try await firstPreparation.value
+        try await secondPreparation.value
+        let result = try await completion.value
+        XCTAssertEqual(result.insertion, "say('first request works')")
+
+        counts = await transport.counts()
+        XCTAssertEqual(counts.warmups, 1)
+        XCTAssertEqual(counts.metadata, 1)
+        XCTAssertEqual(counts.generations, 1)
+        let requests = await transport.recordedRequests()
+        let warmup = try XCTUnwrap(requests.first { request in
+            guard request.url?.path == "/api/generate",
+                  let body = try? jsonBody(request) else { return false }
+            return (body["prompt"] as? String) == ""
+        })
+        let metadata = try XCTUnwrap(requests.first { $0.url?.path == "/api/show" })
+        let generation = try XCTUnwrap(requests.last { request in
+            guard request.url?.path == "/api/generate",
+                  let body = try? jsonBody(request) else { return false }
+            return (body["prompt"] as? String)?.isEmpty == false
+        })
+        XCTAssertEqual(warmup.timeoutInterval, OllamaAgentService.editorModelPreloadTimeout)
+        XCTAssertEqual(metadata.timeoutInterval, OllamaCodeCompletionService.metadataTimeout)
+        XCTAssertEqual(generation.timeoutInterval, OllamaCodeCompletionService.generationTimeout)
+
+        await service.releaseEditorModel(owner: firstOwner)
+        await service.releaseEditorModel(owner: secondOwner)
+    }
+
+    func testFailedProactivePreparationRetriesInsideFirstExplicitRequest() async throws {
+        let transport = CoordinatedPreparationTransport(failFirstWarmup: true)
+        let service = OllamaCodeCompletionService(
+            baseURL: baseURL,
+            transport: transport,
+            preparationTransport: transport
+        )
+        let model = "qwen2.5-coder:7b"
+        let owner = UUID()
+
+        do {
+            try await service.prepareEditorModel(model, owner: owner)
+            XCTFail("the injected first preparation should fail")
+        } catch {
+            XCTAssertEqual(error as? OllamaCodeCompletionError, .modelPreparationFailed)
+        }
+
+        let result = try await service.complete(makeRequest(model: model))
+        XCTAssertEqual(result.insertion, "say('first request works')")
+        let counts = await transport.counts()
+        XCTAssertEqual(counts.warmups, 2, "the explicit request should retry preparation itself")
+        XCTAssertEqual(counts.generations, 1, "one click should produce one source-bearing request")
+        await service.releaseEditorModel(owner: owner)
+    }
+
+    func testMalformedSuccessfulWarmupNeverMarksModelReady() async throws {
+        for malformed in [[:], ["response": ""], ["done": true]] as [[String: Any]] {
+            let transport = RecordingCodeCompletionTransport(responses: [
+                response(["capabilities": ["completion"]]),
+                response(malformed),
+            ])
+            let service = OllamaCodeCompletionService(
+                baseURL: baseURL,
+                transport: transport,
+                preparationTransport: transport
+            )
+            do {
+                try await service.prepareEditorModel("qwen2.5-coder:7b", owner: UUID())
+                XCTFail("a partial 2xx warmup response must fail closed")
+            } catch {
+                XCTAssertEqual(error as? OllamaCodeCompletionError, .modelPreparationFailed)
+            }
+        }
+    }
+
+    func testFinalGenerationTransportFailureInvalidatesReadinessForRetry() async throws {
+        let transport = CoordinatedPreparationTransport(failEveryGeneration: true)
+        let service = OllamaCodeCompletionService(
+            baseURL: baseURL,
+            transport: transport,
+            preparationTransport: transport
+        )
+        let model = "qwen2.5-coder:7b"
+
+        do {
+            _ = try await service.complete(makeRequest(model: model))
+            XCTFail("both injected generation attempts should fail")
+        } catch {
+            XCTAssertEqual(error as? OllamaCodeCompletionError, .transport)
+        }
+        var counts = await transport.counts()
+        XCTAssertEqual(counts.warmups, 2)
+        XCTAssertEqual(counts.generations, 2)
+
+        let owner = UUID()
+        try await service.prepareEditorModel(model, owner: owner)
+        counts = await transport.counts()
+        XCTAssertEqual(
+            counts.warmups,
+            3,
+            "Retry must perform a real warmup after the final generation transport failure"
+        )
+        await service.releaseEditorModel(owner: owner)
+    }
+
+    func testCancelledLatePreparationCannotLeaveRetiredEditorOwnership() async throws {
+        let transport = CancellablePreparationTransport()
+        let service = OllamaCodeCompletionService(
+            baseURL: baseURL,
+            transport: transport,
+            preparationTransport: transport
+        )
+        let model = "qwen2.5-coder:7b"
+        let retiredOwner = UUID()
+        let gate = TestAsyncGate()
+        let retiredPreparation = Task {
+            await gate.wait()
+            try await service.prepareEditorModel(model, owner: retiredOwner)
+        }
+
+        await service.releaseEditorModel(owner: retiredOwner)
+        retiredPreparation.cancel()
+        await gate.open()
+        do {
+            try await retiredPreparation.value
+            XCTFail("a canceled late preparation must not register its retired owner")
+        } catch {
+            XCTAssertTrue(
+                error is CancellationError ||
+                    (error as? OllamaCodeCompletionError) == .cancelled
+            )
+        }
+
+        let activeOwner = UUID()
+        let activePreparation = Task {
+            try await service.prepareEditorModel(model, owner: activeOwner)
+        }
+        let clock = ContinuousClock()
+        let startDeadline = clock.now.advanced(by: .seconds(2))
+        while clock.now < startDeadline, await transport.startedCount() == 0 {
+            try await clock.sleep(for: .milliseconds(10))
+        }
+        let startedCount = await transport.startedCount()
+        XCTAssertEqual(startedCount, 1)
+
+        await service.releaseEditorModel(owner: activeOwner)
+        let cancelDeadline = clock.now.advanced(by: .seconds(2))
+        while clock.now < cancelDeadline, await transport.cancelledCount() == 0 {
+            try await clock.sleep(for: .milliseconds(10))
+        }
+        let cancellationCount = await transport.cancelledCount()
+        XCTAssertEqual(
+            cancellationCount,
+            1,
+            "the active owner's release must cancel the now-unowned preparation"
+        )
+        await service.releaseEditorModel(owner: retiredOwner)
+        await service.releaseEditorModel(owner: activeOwner)
+        do {
+            try await activePreparation.value
+            XCTFail("released preparation should be canceled")
+        } catch {
+            XCTAssertEqual(error as? OllamaCodeCompletionError, .cancelled)
+        }
     }
 
     func testResponseIdentityDetectsDocumentCaretContextAndModelChanges() async throws {
@@ -608,7 +864,8 @@ final class OllamaCodeCompletionTests: XCTestCase {
         diagnostics: [String] = [],
         nearby: [OllamaCodeCompletionNearbyObject] = [],
         fillInMiddlePolicy: OllamaCodeCompletionFillInMiddlePolicy = .disabled,
-        instruction: String? = nil
+        instruction: String? = nil,
+        instructionIntent: OllamaCodeCompletionInstructionIntent = .codeChange
     ) throws -> OllamaCodeCompletionRequest {
         try OllamaCodeCompletionRequest(
             source: source,
@@ -627,7 +884,8 @@ final class OllamaCodeCompletionTests: XCTestCase {
             diagnostics: diagnostics,
             authorizedNearbyObjects: nearby,
             fillInMiddlePolicy: fillInMiddlePolicy,
-            instruction: instruction
+            instruction: instruction,
+            instructionIntent: instructionIntent
         )
     }
 
@@ -649,6 +907,19 @@ final class OllamaCodeCompletionTests: XCTestCase {
             return nil
         }
         return String(text[startRange.upperBound..<endRange.lowerBound])
+    }
+
+    private func waitForWarmupCount(
+        _ expected: Int,
+        transport: CoordinatedPreparationTransport
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while clock.now < deadline {
+            if await transport.counts().warmups >= expected { return }
+            try await clock.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for \(expected) model warmup request(s)")
     }
 }
 
@@ -714,4 +985,123 @@ private actor CurrentnessGate {
     }
 
     func checkCount() -> Int { count }
+}
+
+private actor TestAsyncGate {
+    private var isOpen = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let pending = continuations
+        continuations.removeAll()
+        for continuation in pending { continuation.resume() }
+    }
+}
+
+private actor CancellablePreparationTransport: OllamaCodeCompletionTransport {
+    private var started = 0
+    private var cancelled = 0
+
+    func send(_ request: URLRequest) async throws -> OllamaCodeCompletionHTTPResponse {
+        if request.url?.path == "/api/show" {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "capabilities": ["completion"],
+            ])
+            return OllamaCodeCompletionHTTPResponse(statusCode: 200, body: data)
+        }
+        started += 1
+        do {
+            try await ContinuousClock().sleep(for: .seconds(30))
+            let data = try JSONSerialization.data(withJSONObject: [
+                "response": "",
+                "done": true,
+            ])
+            return OllamaCodeCompletionHTTPResponse(statusCode: 200, body: data)
+        } catch {
+            cancelled += 1
+            throw error
+        }
+    }
+
+    func startedCount() -> Int { started }
+    func cancelledCount() -> Int { cancelled }
+}
+
+private actor CoordinatedPreparationTransport: OllamaCodeCompletionTransport {
+    private let blockFirstWarmup: Bool
+    private let failFirstWarmup: Bool
+    private let failEveryGeneration: Bool
+    private var warmupCount = 0
+    private var metadataCount = 0
+    private var generationCount = 0
+    private var requests: [URLRequest] = []
+    private var firstWarmupContinuation: CheckedContinuation<Void, Never>?
+
+    init(
+        blockFirstWarmup: Bool = false,
+        failFirstWarmup: Bool = false,
+        failEveryGeneration: Bool = false
+    ) {
+        self.blockFirstWarmup = blockFirstWarmup
+        self.failFirstWarmup = failFirstWarmup
+        self.failEveryGeneration = failEveryGeneration
+    }
+
+    func send(_ request: URLRequest) async throws -> OllamaCodeCompletionHTTPResponse {
+        requests.append(request)
+        if request.url?.path == "/api/show" {
+            metadataCount += 1
+            return Self.response(["capabilities": ["completion"]])
+        }
+        let body = try Self.jsonBody(request)
+        if (body["prompt"] as? String) == "" {
+            warmupCount += 1
+            if failFirstWarmup, warmupCount == 1 {
+                throw URLError(.cannotConnectToHost)
+            }
+            if blockFirstWarmup, warmupCount == 1 {
+                await withCheckedContinuation { continuation in
+                    firstWarmupContinuation = continuation
+                }
+            }
+            return Self.response(["response": "", "done": true])
+        }
+        generationCount += 1
+        if failEveryGeneration {
+            throw URLError(.timedOut)
+        }
+        return Self.response(["response": "say('first request works')"])
+    }
+
+    func releaseFirstWarmup() {
+        firstWarmupContinuation?.resume()
+        firstWarmupContinuation = nil
+    }
+
+    func counts() -> (warmups: Int, metadata: Int, generations: Int) {
+        (warmupCount, metadataCount, generationCount)
+    }
+
+    func recordedRequests() -> [URLRequest] { requests }
+
+    private static func jsonBody(_ request: URLRequest) throws -> [String: Any] {
+        guard let data = request.httpBody,
+              let body = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw RecordingTransportError.missingResponse
+        }
+        return body
+    }
+
+    private static func response(_ body: [String: Any]) -> OllamaCodeCompletionHTTPResponse {
+        let data = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+        return OllamaCodeCompletionHTTPResponse(statusCode: 200, body: data)
+    }
 }

@@ -2992,6 +2992,47 @@ final class ScriptRuntimeTests: XCTestCase {
         )
     }
 
+    func testDryRunDoesNotAdvanceLiveEphemeralRNGOrdinal() throws {
+        let control = PersistenceTestSupport.makeGame(owner: self, label: "dry-run-ordinal-control")
+        let checked = PersistenceTestSupport.makeGame(owner: self, label: "dry-run-ordinal-checked")
+        control.createWorld(name: "Ordinal Control", seedText: "44", mode: GameMode.creative, difficulty: 2)
+        checked.createWorld(name: "Ordinal Checked", seedText: "44", mode: GameMode.creative, difficulty: 2)
+        let controlRuntime = try XCTUnwrap(control.scriptingCommandContext().scriptRuntime)
+        let checkedRuntime = try XCTUnwrap(checked.scriptingCommandContext().scriptRuntime)
+
+        XCTAssertEqual(
+            checkedRuntime.dryRunOutcome(
+                source: "return true",
+                owner: .player,
+                mode: .module
+            ),
+            .completed
+        )
+        let source = "world.attrs.ai_ordinal_probe = rng()"
+        guard case .success = controlRuntime.runEphemeralForEditorExplicitRun(
+            source: source,
+            owner: .player
+        ) else {
+            return XCTFail("control ephemeral run should succeed")
+        }
+        guard case .success = checkedRuntime.runEphemeralForEditorExplicitRun(
+            source: source,
+            owner: .player
+        ) else {
+            return XCTFail("checked ephemeral run should succeed")
+        }
+
+        let controlValue = AttributeStore(graph: ObjectGraph(host: control))
+            .get(.world, "ai_ordinal_probe")
+        let checkedValue = AttributeStore(graph: ObjectGraph(host: checked))
+            .get(.world, "ai_ordinal_probe")
+        XCTAssertEqual(
+            checkedValue,
+            controlValue,
+            "advisory validation must not change the RNG seed of the next live run"
+        )
+    }
+
     func testLuaEmitRejectsOversizedPayloadMapKeyBeforeEventBusRetention() throws {
         let game = PersistenceTestSupport.makeGame(owner: self, label: "emit-map-key-cap")
         game.createWorld(name: "Emit Map Key Cap", seedText: "45", mode: GameMode.creative, difficulty: 2)

@@ -355,7 +355,8 @@ representative values from the target-aware catalog. That means it executes both
 built-in handler and a custom-event handler whose payload contract is declared on the current
 target. A valid but undeclared custom event still reports compile-only success because there is no
 authoritative payload shape to invent. Handler mode disables Run Once rather than executing with a
-missing or invented `ev`.
+missing or invented `ev`. Check's fixed validation identity and transient RNG do not consume the
+live scheduler/RNG ordinal.
 
 When attached execution is paused, the editor's persistent status banner offers the applicable
 **Trust World**, **Turn On Scripts**, or **Trust & Turn On** action. Its confirmation warns that all
@@ -378,15 +379,34 @@ events declared on the current target because engine events cannot be forged. Th
 execute Lua and do not require Ollama.
 
 Ollama editor proposals are optional and separate from factual completion. **Manual** is the
-default: Option-Command-/ requests one insertion from the exact selected local model, Tab accepts,
-and Escape dismisses/cancels. **Off** prevents editor requests, while **On Idle** is an explicit
-opt-in that persists across application sessions. In Handler mode, the bounded text-only prompt
-includes the current target's compatible catalog. In Module mode it includes every produced
-built-in payload plus, for each explicitly authorized nearby object, its kind-compatible built-in
-names and declared custom event payload fields. A valid selected but undeclared Handler event is labeled
-envelope-only with unknown event-specific payload rather than omitted. The request also includes
-target members and diagnostics; it receives no world-mutation tools.
-Save/Check/Run are still required to validate or execute accepted text. See
+default. Opening the native editor in Manual or On Idle warms the exact selected local model with an
+empty request, even when the Script AI panel is closed; it sends no source, world context, prompt, or
+tools. A required source-free `/api/show` preflight rejects a selection identified by Ollama as a
+remote model or host before any authoring source is sent. A generation request waits for shared
+readiness and retries a failed warmup in the same explicit interaction. **Off** performs no editor
+model discovery, warmup, or generation.
+Option-Command-/ and On Idle produce ghost text that still requires Tab or another explicit acceptance,
+and Escape dismisses/cancels it.
+
+The Script AI panel has explicit **Write Code** and **Ask** intents. Ask is transcript-only—even when
+the answer looks like Lua—and does not require a Handler event. Write Code is an explicit draft-edit
+request. Its destination identity is captured before readiness waits; any draft, selection, mode,
+event, model, or authoring-context change makes the reply stale and unapplied. In Handler mode, its
+bounded text-only prompt includes the selected event and current target's compatible catalog, and only a
+mode-correct selected-event body using implicit `ev` may be inserted. In Module mode, the prompt
+includes every produced built-in payload plus each explicitly authorized nearby object's compatible
+built-ins and declared custom-event payloads, and the insertion must be valid module/callback source.
+A valid selected but undeclared Handler event is labeled envelope-only with unknown event-specific
+payload rather than omitted. The request also includes target members and diagnostics; it receives
+no world-mutation tools. With a local authoritative runtime, the editor automatically replaces the
+captured selection as one Command-Z-undoable edit only with safe Lua accepted by the compiler,
+blocking diagnostics, conservative lexical unresolved-global/call-target/callback and
+dynamic-`_ENV` checks, and the mutation-free validation boundary. LAN guests and missing-runtime
+sessions keep code in the transcript. Write Code may omit only clearly explanatory, non-Lua text
+outside a complete fence or at the end of an unfenced reply; the full reply remains visible and the
+omission is reported. Prose-only, code-like exterior or suffix, unsafe, or invalid output leaves the
+draft unchanged. This never saves, attaches, runs, trusts the world, turns on `doScripts`, or mutates
+game state. Save/Check/Run remain separate authoring and execution actions. See
 [`LUA_EDITOR.md`](LUA_EDITOR.md) for the complete UI, key, data-sharing, accessibility, and
 cancellation contract.
 

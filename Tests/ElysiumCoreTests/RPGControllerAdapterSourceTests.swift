@@ -18,9 +18,11 @@ final class RPGControllerAdapterSourceTests: XCTestCase {
         XCTAssertEqual(package.components(separatedBy: ".linkedFramework(\"GameController\")").count - 1, 1)
         let adapter = try source("Sources/Elysium/RPGControllerM.swift")
         XCTAssertTrue(adapter.contains("import GameController"))
-        XCTAssertTrue(adapter.contains("RPG menus and actions"))
+        XCTAssertTrue(adapter.contains("RPG world actions"))
+        XCTAssertTrue(adapter.contains("native AppKit character window"))
         let model = try source("Sources/ElysiumCore/Game/RPGScreenModel.swift")
-        XCTAssertTrue(model.contains("Controller support covers RPG menus and actions only."))
+        XCTAssertTrue(model.contains("Controller shortcuts remain available for RPG world actions and trading"))
+        XCTAssertTrue(model.contains("do not operate this window"))
     }
 
     func testCallbacksCaptureStableIdentityAndBothCheckedGenerations() throws {

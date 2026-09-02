@@ -201,6 +201,87 @@ public func rpgActionMetadata(kind: RPGPreparedActionKind, id: String) -> RPGAct
     }
 }
 
+/// The fatigue and cooldown resources required to execute one RPG action in a
+/// specific character state. This intentionally excludes character ownership,
+/// prepared-slot, equipment, target, material, and permission checks, which are
+/// validated during preparation.
+public struct RPGActionResourceQuote: Equatable {
+    public let fatigueCost: Double
+    public let cooldownTicks: Int
+    public let cooldownRemainingTicks: Int
+    public let resourceAvailable: Bool
+
+    public init(fatigueCost: Double,
+                cooldownTicks: Int,
+                cooldownRemainingTicks: Int,
+                resourceAvailable: Bool) {
+        self.fatigueCost = fatigueCost
+        self.cooldownTicks = cooldownTicks
+        self.cooldownRemainingTicks = cooldownRemainingTicks
+        self.resourceAvailable = resourceAvailable
+    }
+}
+
+/// Returns the canonical effective fatigue and cooldown values for an active
+/// skill or spell. Prepared-action UI and action execution both consume this
+/// quote so class growth and skill discounts cannot be represented differently
+/// from the values that are committed.
+public func rpgActionResourceQuote(kind: RPGPreparedActionKind,
+                                   id: String,
+                                   state: RPGCharacterState) -> RPGActionResourceQuote? {
+    guard let metadata = rpgActionMetadata(kind: kind, id: id) else { return nil }
+
+    let baseFatigue: Double
+    let baseCooldown: Int
+    switch kind {
+    case .skill:
+        guard let skill = rpgSkillDefinition(id), skill.kind == .active else { return nil }
+        baseFatigue = skill.fatigueCost
+        baseCooldown = skill.cooldownTicks
+    case .spell:
+        guard let spell = rpgSpellDefinition(id) else { return nil }
+        baseFatigue = spell.fatigueCost
+        baseCooldown = max(10, spell.circle * 20)
+    }
+
+    let fatigueCost = effectiveRPGFatigueCost(baseFatigue, identity: metadata.id, state: state)
+    var cooldownTicks = effectiveRPGCooldown(baseCooldown, state: state)
+    if metadata.id == .skill(.remoteTrigger) {
+        cooldownTicks = max(10, cooldownTicks - Int(rpgSkillEffectValue(.compactGate, in: state)))
+    }
+    let cooldownRemainingTicks = state.activeCooldowns.first {
+        $0.id == id && $0.remainingTicks > 0
+    }?.remainingTicks ?? 0
+    return RPGActionResourceQuote(
+        fatigueCost: fatigueCost,
+        cooldownTicks: cooldownTicks,
+        cooldownRemainingTicks: cooldownRemainingTicks,
+        resourceAvailable: cooldownRemainingTicks <= 0 && state.fatigue + 0.000_001 >= fatigueCost
+    )
+}
+
+private func effectiveRPGCooldown(_ base: Int, state: RPGCharacterState) -> Int {
+    let multiplier = max(0.80, rpgDerivedStats(state).actionRecoveryMultiplier)
+    return max(10, Int((Double(max(0, base)) * multiplier).rounded(.up)))
+}
+
+private func effectiveRPGFatigueCost(_ base: Double,
+                                     identity: RPGExecutableEffectID,
+                                     state: RPGCharacterState) -> Double {
+    guard base > 0 else { return 0 }
+    let derived = rpgDerivedStats(state)
+    var cost = base
+    if case .spell(let spell) = identity {
+        if [.ignite, .frostRay, .shock, .stormAura].contains(spell) {
+            cost = max(0, cost - rpgSkillEffectValue(.sparkWeave, in: state))
+        }
+        cost *= derived.focusCostMultiplier
+    }
+    // Non-zero actions always retain a final 0.5-fatigue floor after every
+    // skill discount and class multiplier has been applied.
+    return max(0.5, (cost * 10).rounded(.up) / 10)
+}
+
 struct RPGPlayerItemsSnapshot: Equatable {
     var inventory: [ItemStack?]
     var armor: [ItemStack?]

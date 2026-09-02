@@ -30,13 +30,17 @@ those changes may persist with the world. It still obeys `doScripts`;
 granted LAN guest forwards Save and Run to the host; the local-editor exception is never forwarded,
 and Check is not available to a guest.
 
-Editor analysis is read-only and has two deliberately separate planes:
+Editor authoring intelligence has two deliberately separate planes:
 
 1. The **language plane** is local and deterministic. It owns syntax and semantic styling,
    completion, signatures, documentation, diagnostics, snippets, and nearby-object discovery.
-2. The **proposal plane** is optional Ollama output. It can propose insertion text, but it does not
-   change the deterministic completion catalog, execute Lua, receive tools, save a script, or mutate
-   the world. Its text is untrusted and can be wrong; Check, Save, and the runtime remain authoritative.
+2. The **proposal plane** is optional Ollama output. Inline and On Idle results remain ghost text.
+   Panel **Ask** is transcript-only; explicit **Write Code** may edit the unsaved draft automatically,
+   but only after the response is identity-bound, mode-checked, compiled, and passed through the
+   conservative static and mutation-free validation boundaries. The
+   plane does not change the deterministic completion catalog, receive tools, save, attach, execute,
+   trust, enable scripts, or mutate the world. Its text is untrusted and can be wrong; Check, Save,
+   and the runtime remain authoritative.
 
 All language-plane features remain available when Ollama is stopped or editor AI is disabled.
 
@@ -219,6 +223,8 @@ work or contacting AI, so a valid attached `while true do wait(...) end` loop is
 Its success status explicitly says that source after that suspension was not executed. The shallow
 symbol table keeps locally shadowed `wait` and `ai` values out of these diagnostics. Run and Check
 use isolated transient RNG streams rather than changing any attached script's persisted sequence.
+Check and automatic proposal validation also use a fixed validation identity, so they do not
+consume the live scheduler/RNG ordinal.
 
 The editor does not yet diagnose general Lua grammar, undefined globals, wrong arity, or
 accepted-but-no-op calls. Available quick fixes appear as buttons in the Problems pane and apply
@@ -265,24 +271,31 @@ and execution.
 
 Editor AI has three modes:
 
-- **Off** — editor completion, panel prompts, model discovery, and model preload do not contact
+- **Off** — editor completion, panel prompts, model discovery, model warmup, and generation do not contact
   Ollama.
 - **Manual** — the default; only an explicit request generates a suggestion or sends authoring
-  context. A visible Script AI panel may still discover and preload the selected local model.
-- **On Idle** — optional; an explicit user preference requests after a short typing pause.
+  context. Opening the editor may still warm the exact configured local model with a context-free
+  request, even while the Script AI panel is closed.
+- **On Idle** — optional; an explicit user preference requests a ghost-text proposal after a short
+  typing pause. Opening the editor performs the same context-free warmup as Manual.
 
 Use **Edit > Request AI Suggestion** or Option-Command-/ in Manual or On Idle mode. The exact
 local model selected under Options > AI is used. Cloud-tagged model names remain refused. Selecting
 a model does not enable On Idle. The chosen editor-AI mode persists across application sessions;
-switch back to Manual or Off whenever automatic requests are no longer wanted. When the Script AI
-panel becomes visible—either because it was already open or because **Show AI panel** was
-selected—it refreshes the installed local-model list and preloads the exact saved selection through
-an empty, non-streaming loopback Ollama request with a 30-minute keep-alive. That preload contains no
-script source, world metadata, prompt, or generated suggestion. Choosing another model while the
-panel remains visible preloads the new exact selection. **Refresh local models** remains available
-as a retry. Discovery and an unfinished preload are canceled when the panel closes, editor AI
-switches Off, or the world session ends; a completed preload may remain in Ollama memory for its
-requested keep-alive.
+switch back to Manual or Off whenever automatic requests are no longer wanted. When the native
+editor opens in Manual or On Idle, it begins one shared warmup for the exact saved selection through
+an empty, non-streaming loopback Ollama request with a 30-minute keep-alive. The warmup contains no
+script source, world metadata, authoring prompt, generation tools, or generated suggestion. It runs
+whether the panel is open or closed. A generation request waits for the same in-flight warmup rather
+than racing it; if an earlier warmup failed, the same explicit request retries readiness before
+generation instead of consuming a sacrificial first attempt. Choosing another model invalidates the
+old readiness and warms that exact replacement. The visible panel separately refreshes the installed
+local-model list, and **Refresh local models** remains available as a retry. Turning editor AI Off,
+closing the editor, or ending the world session cancels unfinished work; a completed warmup may
+remain in Ollama memory for its requested keep-alive. Every generated editor request also asks
+Ollama to retain the selected model for 30 minutes. Source-bearing generation uses a dedicated
+ephemeral loopback session with a 90-second request deadline and a 120-second hard resource deadline,
+rather than the ordinary 45-second session cap.
 
 The read-only completion request is bounded to source before/after the caret, script mode/event,
 current diagnostics, a target authoring contract, and the current bounded World Objects snapshot.
@@ -301,10 +314,12 @@ characters of generated LuaCATS text. Engine globals and modules are deliberatel
 prefix; even if later per-kind classes are omitted, the bounded authoring contract keeps facts needed
 for this target and selected event. The runtime validator, not this prompt, remains the API authority.
 
-`/api/show` metadata is fetched as advisory model information. The product currently uses the safe
-cursor-marker prompt path and always disables Ollama's fill-in-the-middle `suffix` field. The service
-has an internal explicit-FIM policy seam, but there is no product preference for it and model-hint
-compatibility is not currently an enforcement gate.
+`/api/show` is a required, source-free locality preflight: a response that identifies a remote model
+or remote host is rejected before warmup or source-bearing generation. Capability and template hints
+from the accepted response remain advisory. The product currently uses the safe cursor-marker prompt
+path and always disables Ollama's fill-in-the-middle `suffix` field. The service has an internal
+explicit-FIM policy seam, but there is no product preference for it and model-hint compatibility is
+not currently an enforcement gate.
 
 Production editor requests use the numeric loopback endpoint `127.0.0.1`, an ephemeral URL session
 with system proxies, caches, cookies, and credential storage disabled, and a delegate that rejects
@@ -312,9 +327,28 @@ all HTTP redirects. Model-list, metadata, and generation responses are increment
 before decoding; generated text is also capped by character and line counts. These transport limits
 contain the reply but do not make its Lua correct.
 
-AI output appears as visually distinct ghost text labeled with the selected model. It is never
-mixed into deterministic member results. Before display it is bounded and checked for safe text and
-document size, but it is not compiled or schema-validated; use Check before relying on it.
+Inline and On Idle output appears as visually distinct ghost text labeled with the selected model.
+It is never mixed into deterministic member results, never edits the source without acceptance, and
+is bounded and checked for safe text and document size before display. An accepted inline proposal
+still requires Check before reliance because an in-progress insertion need not compile by itself.
+
+The panel makes intent app-owned and explicit. **Ask** always leaves its answer in the transcript,
+even if the answer is valid Lua, and does not require a Handler event selection. **Write Code** is
+the explicit edit request. Its response is bound to the captured document identity, source
+revision/hash, UTF-16 selection, target, mode/event, model, and authoring-context revision. The
+editor extracts only safe insertable Lua, then checks the complete candidate against the active mode,
+compiler, blocking diagnostics, conservative lexical unresolved-global/call-target/callback and
+dynamic-`_ENV` checks, and the mutation-free validation boundary before replacing that captured
+selection as one normal undoable
+draft edit. That boundary may complete, stop at its first legal suspension, or compile-only for an
+undeclared Handler event; static checks protect the unexecuted suffix. Module mode accepts module source or callback
+registrations and permits `ev` only inside callbacks. Handler mode requires a valid selected event
+and accepts only that event's body with its implicit `ev`; a second `on`/`subscribe`/`function(ev)`
+wrapper is refused. Prose-only replies, unsafe text, mode violations, parse failures, and dry-run
+failures remain in the transcript or visible refusal state and leave the draft byte-for-byte
+unchanged. Automatic insertion requires the local authoritative runtime and is refused for LAN
+guests or a missing runtime. It never saves, attaches, runs, changes world trust or `doScripts`, or
+grants the proposal service world-mutation authority.
 
 | Key | AI action |
 |---|---|
@@ -332,14 +366,17 @@ caret, source hash, model, target, mode/event, and authoring-context revision. E
 caret, switching target/script/model, refreshing
 World Objects, pressing Escape, or ending the world session cancels the inline request and makes late
 responses ineligible for insertion. The right-hand Script AI panel owns its task separately:
-**Stop**, closing the panel, switching AI Off, or ending the world session cancels it, while other
-document/context changes make its eventual response stale before it can be used against the changed
-document. New/Switch also clears the panel transcript, prompt history, and pending insertion so even
-byte-identical scripts cannot share conversational state.
+**Stop**, closing the panel, switching AI Off, or ending the world session cancels it, while any
+document/selection/context change makes its eventual response stale before automatic insertion.
+New/Switch also clears the panel transcript and prompt history so even byte-identical scripts cannot
+share conversational state.
 
-The panel asks Ollama not to use Markdown fences, and the service strips a fence wrapper when one is
-returned. After reviewing any successful reply, the user can explicitly insert the complete bounded
-reply at the editor cursor; insertion is never automatic.
+Write Code asks Ollama not to use Markdown fences. A complete returned fence is unwrapped only when
+all exterior text is clearly explanatory and contains no Lua shape. Ask preserves explanatory
+transcript text, including fenced examples. An unfenced Write Code reply may drop only a clearly
+explanatory, non-Lua suffix before the complete candidate crosses the mode, compiler, static, and
+mutation-free gates. A code-like suffix refuses automatic insertion rather than silently inserting
+a partial program; prose is never inserted as source.
 
 ## Accessibility and performance
 
@@ -354,8 +391,9 @@ reply at the editor cursor; insertion is never automatic.
 - Sub-50 ms local completion at the 16 KiB source maximum is a performance target, not a measured
   release guarantee. Current analysis rescans synchronously after an edit.
 - World Objects refresh explicitly and never scan on each keystroke.
-- Ollama transport work is asynchronous. Inline work is canceled on editor changes; panel work has
-  its separate **Stop** action. Neither path blocks editing or Save/Run.
+- Ollama transport work is asynchronous. A request may wait on the shared exact-model warmup without
+  blocking editing or Save/Run. Inline work is canceled on editor changes; panel work has its
+  separate **Stop** action.
 
 ## Verification
 

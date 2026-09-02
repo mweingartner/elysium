@@ -1383,6 +1383,7 @@ public struct RPGPathProjection: Equatable {
 public struct RPGSpellUnlockProjection: Equatable {
     public let spellID: String
     public let unlockingSkillRanks: [String]
+    public let unlockRequirementText: String
 }
 
 public struct RPGProgressionLevelProjection: Equatable {
@@ -1494,7 +1495,10 @@ public func rpgCharacterSummaryProjection(_ state: RPGCharacterState,
         equipmentSummary: rpgSanitizeStatusText(equipmentSummary, byteLimit: 160),
         focusSummary: rpgSanitizeStatusText(focusSummary, byteLimit: 160),
         nextActionableMilestone: nextText,
-        levelOneGuidance: state.level == 1 ? rpgLevelOneProgressionGuidance(pathID: state.pathID)?.visibleText : nil)
+        // This projection is deliberately the concrete 0-to-50-XP starter plan. Exact earning
+        // rules for every level live in the canonical path criteria shown on Progress.
+        levelOneGuidance: state.level == 1
+            ? rpgLevelOneProgressionGuidance(pathID: state.pathID)?.visibleText : nil)
 }
 
 public func rpgProgressionSummaryProjection(_ state: RPGCharacterState) -> RPGProgressionSummaryProjection {
@@ -1575,7 +1579,7 @@ public func rpgCreationReviewProjection(session: RPGCreationSession,
     }
     guard chordProjections.count == chordIDs.count else { return nil }
     let chordLines = chordProjections.map { "\($0.actionDisplayName): \($0.chord)" }
-    let kitItems = kit.compactMap { entry -> RPGCreationReviewItemProjection? in
+    let projectedKitItems = kit.compactMap { entry -> RPGCreationReviewItemProjection? in
         guard let display = rpgStarterKitItemRegistrationDisplayName(entry.itemID),
               !display.isEmpty else { return nil }
         let potionDisplay: String?
@@ -1589,7 +1593,23 @@ public func rpgCreationReviewProjection(session: RPGCreationSession,
         return RPGCreationReviewItemProjection(displayName: display,
             count: entry.count, displayNameDetail: potionDisplay)
     }
-    guard kitItems.count == kit.count else { return nil }
+    guard projectedKitItems.count == kit.count else { return nil }
+    // Present identical grants as one clear quantity while leaving the actual starter-kit
+    // transaction untouched. Mender deliberately receives two separate Healing Potion stacks.
+    var kitItems: [RPGCreationReviewItemProjection] = []
+    for item in projectedKitItems {
+        if let index = kitItems.firstIndex(where: {
+            $0.displayName == item.displayName && $0.displayNameDetail == item.displayNameDetail
+        }) {
+            let existing = kitItems[index]
+            kitItems[index] = RPGCreationReviewItemProjection(
+                displayName: existing.displayName,
+                count: existing.count + item.count,
+                displayNameDetail: existing.displayNameDetail)
+        } else {
+            kitItems.append(item)
+        }
+    }
     let kitLines = kitItems.map {
         "\($0.displayName) x\($0.count)" +
             ($0.displayNameDetail.map { " (\($0))" } ?? "")
@@ -1603,7 +1623,7 @@ public func rpgCreationReviewProjection(session: RPGCreationSession,
         levelOneGuidance: rpgLevelOneProgressionGuidance(pathID: draft.pathID)?.visibleText ?? "",
         configuredChords: chordLines,
         configuredChordProjections: chordProjections,
-        controllerScope: "Controller support covers RPG menus and actions only.",
+        controllerScope: "The native Character window uses standard macOS keyboard and pointer controls. Controller shortcuts remain available for RPG world actions and trading, but do not operate this window.",
         inventoryCapacityCaveat: rpgSanitizeStatusText(inventoryCapacitySummary, byteLimit: 160),
         authorityCaveat: {
             switch authority.phase {
@@ -1621,14 +1641,16 @@ public func rpgSpellUnlockProjections(pathID: String) -> [RPGSpellUnlockProjecti
     guard let path = rpgPathDefinition(pathID) else { return [] }
     let skills = path.branchIDs.flatMap { rpgBranchDefinition($0)?.skillIDs ?? [] }
     return RPG_SPELL_DEFINITIONS.compactMap { spell in
-        let unlockers = skills.compactMap { skillID -> String? in
+        let unlockers = skills.compactMap { skillID -> (token: String, text: String)? in
             guard let unlock = rpgSkillDefinition(skillID)?.spellUnlocks.first(where: {
                 $0.spellID == spell.id
-            }) else { return nil }
-            return "\(skillID):rank:\(unlock.rank)"
+            }), let skill = rpgSkillDefinition(skillID) else { return nil }
+            return ("\(skillID):rank:\(unlock.rank)",
+                    "\(skill.displayName) Rank \(unlock.rank)")
         }
         return unlockers.isEmpty ? nil : RPGSpellUnlockProjection(spellID: spell.id,
-                                                                   unlockingSkillRanks: unlockers)
+            unlockingSkillRanks: unlockers.map { $0.token },
+            unlockRequirementText: unlockers.map { $0.text }.joined(separator: " or "))
     }
 }
 
@@ -1673,6 +1695,23 @@ public func rpgPathProjection(pathID: String, state: RPGCharacterState) -> RPGPa
     }.map(\.id)
     return RPGPathProjection(pathID: pathID, branchIDs: orderedBranchIDs, skillIDs: skillIDs,
                              skillCards: skillCards, activeSkillIDs: active, reachableSpellIDs: reachable)
+}
+
+/// Stable inspector selection for the native Actions view. Preserve an explicit valid choice;
+/// otherwise lead with something the character can actually use before falling back to locked
+/// catalog entries.
+public func rpgPreferredActiveSkillID(activeSkillIDs: [String],
+                                      state: RPGCharacterState,
+                                      current: String?,
+                                      currentIsExplicit: Bool) -> String? {
+    if currentIsExplicit, let current, activeSkillIDs.contains(current) { return current }
+    if let prepared = activeSkillIDs.first(where: { state.preparedSkillIDs.contains($0) }) {
+        return prepared
+    }
+    if let learned = activeSkillIDs.first(where: { (state.skillRanks[$0] ?? 0) > 0 }) {
+        return learned
+    }
+    return activeSkillIDs.first
 }
 
 public let RPG_TUTORIAL_VERSION = 1
@@ -2545,7 +2584,7 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                     ("Health and fatigue", review.growthLine),
                     ("Starter kit", review.starterKit.joined(separator: ", ")),
                     ("Focus requirement", review.focusRequirement),
-                    ("Level-one progression", review.levelOneGuidance),
+                    ("First-level progression plan", review.levelOneGuidance),
                     ("Configured RPG chords", review.configuredChords.joined(separator: "; ")),
                     ("Controller scope", review.controllerScope),
                     ("Inventory", review.inventoryCapacityCaveat),
@@ -2812,7 +2851,11 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                 if let inspector = input.selection?.inspectorItemID {
                     return projection.activeSkillIDs.first { inspector == .skill($0) }
                 }
-                return projection.activeSkillIDs.first
+                return rpgPreferredActiveSkillID(
+                    activeSkillIDs: projection.activeSkillIDs,
+                    state: input.state,
+                    current: nil,
+                    currentIsExplicit: false)
             }()
             if let skillID = selectedSkillID {
                 let displayName = rpgSkillDefinition(skillID)?.displayName ?? "Unavailable action"
@@ -2961,7 +3004,10 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                     let operationLabel = prepared ? "Unprepare \(displayName)" : "Prepare \(displayName)"
                     let operationLines = rpgWrappedControlLines(operationLabel, width: 100)
                     let operationHeight = rpgControlHeight(lines: operationLines)
-                    let rowHeight = max(28, operationHeight + 8)
+                    let selectLabel = "Select \(displayName)"
+                    let selectLines = rpgWrappedControlLines(selectLabel, width: 104)
+                    let selectHeight = rpgControlHeight(lines: selectLines)
+                    let rowHeight = max(28, max(operationHeight, prepared ? selectHeight : 0) + 8)
                     let frame = RPGLogicalRect(x: content.x, y: y,
                                                width: content.width, height: rowHeight)
                     descriptors.append(descriptor(id: .spell(spellID), role: .row,
@@ -2988,7 +3034,7 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                         visualLines: operationLines))
                     var rowAdvance = rowHeight
                     if prepared {
-                        let selected = input.state.selectedPreparedSpellID == spellID
+                        let selected = input.state.selectedPreparedActionID == token
                         let selectHelp = rpgAuthorityEnabled(input.authority)
                             ? (selected ? "This spell is already selected." : "Select this prepared spell.")
                             : rpgAuthorityPhasePresentation(input.authority.phase).visibleHelp
@@ -2997,9 +3043,9 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                             selected: selected,
                             enabled: !selected && rpgAuthorityEnabled(input.authority), locked: selected,
                             frame: RPGLogicalRect(x: frame.maxX - 212, y: frame.y + 4,
-                                                  width: 104, height: 20), visibleIn: content,
+                                                  width: 104, height: selectHeight), visibleIn: content,
                             command: !selected ? .selectSpell(spellID) : nil,
-                            visualLines: rpgWrappedControlLines("Select \(displayName)", width: 104)))
+                            visualLines: selectLines))
                         let writable = input.localPreferenceWritable && input.localPreferenceScope != nil
                         let assignable = writable && input.authority.phase != .authorityExhausted
                         let headingID = RPGUIElementID.operation(owner: .spell(spellID), name: "assign-heading")
@@ -3053,7 +3099,7 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                     ("Equipment", summary.equipmentSummary), ("Focus", summary.focusSummary),
                     ("Next milestone", summary.nextActionableMilestone),
                 ]
-                if let guidance = summary.levelOneGuidance { rows.append(("Level-one guidance", guidance)) }
+                if let guidance = summary.levelOneGuidance { rows.append(("How to earn class XP", guidance)) }
                 for (index, row) in rows.enumerated() {
                     let id = RPGUIElementID(rawValue: "character:row:\(index)")!
                     let frame = RPGLogicalRect(x: content.x, y: y, width: content.width, height: 28)
@@ -3094,7 +3140,7 @@ private func rpgBuildScreenModelPass(_ input: RPGScreenModelInput,
                 appendProgressionRow(
                     id: RPGUIElementID(rawValue: "progression:plan:utility")!,
                     label: "Utility Allowance",
-                    value: "\(summary.plan.utilityAllowance) SP remain for one cross-sub-class rank 1.")
+                    value: "\(summary.plan.utilityAllowance) SP remain after the selected sub-class route; each off-sub-class rank costs 2 SP.")
                 appendProgressionRow(
                     id: RPGUIElementID(rawValue: "progression:plan:impact")!,
                     label: "Completion Impact",

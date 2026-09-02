@@ -220,9 +220,10 @@ public func rpgPrepareAction(_ player: Player,
     guard let metadata = rpgActionMetadata(kind: kind, id: id) else {
         return .failure(kind == .skill ? .unknownSkill(id) : .unknownSpell(id))
     }
+    guard let resourceQuote = rpgActionResourceQuote(kind: kind, id: id, state: state) else {
+        return .failure(kind == .skill ? .unknownSkill(id) : .unknownSpell(id))
+    }
 
-    let baseFatigue: Double
-    let baseCooldown: Int
     let duration: Int
     switch kind {
     case .skill:
@@ -231,29 +232,25 @@ public func rpgPrepareAction(_ player: Player,
         guard (state.skillRanks[id] ?? 0) > 0, state.preparedSkillIDs.contains(id) else {
             return .failure(.skillNotPrepared(id))
         }
-        if state.activeCooldowns.contains(where: { $0.id == id && $0.remainingTicks > 0 }) {
+        if resourceQuote.cooldownRemainingTicks > 0 {
             return .failure(.skillOnCooldown(id))
         }
-        baseFatigue = skill.fatigueCost
-        baseCooldown = skill.cooldownTicks
         duration = 0
     case .spell:
         guard let spell = rpgSpellDefinition(id) else { return .failure(.unknownSpell(id)) }
         guard state.knownSpellIDs.contains(id), state.preparedSpellIDs.contains(id) else {
             return .failure(.spellNotPrepared(id))
         }
-        if state.activeCooldowns.contains(where: { $0.id == id && $0.remainingTicks > 0 }) {
+        if resourceQuote.cooldownRemainingTicks > 0 {
             return .failure(.spellOnCooldown(id))
         }
-        baseFatigue = spell.fatigueCost
-        baseCooldown = max(10, spell.circle * 20)
         duration = effectiveRPGSpellDuration(spell, state: state)
     }
     if let failure = validateEquipment(metadata.equipment, player: player) { return .failure(failure) }
     if metadata.permission == .build, !authorization.canBuild { return .failure(.permissionDenied(.build)) }
     if metadata.permission == .container, !authorization.canUseContainers { return .failure(.permissionDenied(.container)) }
 
-    let cost = effectiveRPGFatigueCost(baseFatigue, identity: metadata.id, state: state)
+    let cost = resourceQuote.fatigueCost
     guard state.fatigue + 0.000_001 >= cost else {
         return .failure(.insufficientFatigue(required: cost, available: state.fatigue))
     }
@@ -304,11 +301,7 @@ public func rpgPrepareAction(_ player: Player,
                        max(0, next.fatigue - cost + plan.fatigueCredit))
     next.actionSequence = sequence
     next.activeCooldowns.removeAll { $0.id == id }
-    var cooldown = effectiveRPGCooldown(baseCooldown, state: state)
-    if metadata.id == .skill(.remoteTrigger) {
-        cooldown = max(10, cooldown - Int(rpgSkillEffectValue(.compactGate, in: state)))
-    }
-    next.activeCooldowns.append(RPGCooldown(id: id, remainingTicks: cooldown))
+    next.activeCooldowns.append(RPGCooldown(id: id, remainingTicks: resourceQuote.cooldownTicks))
     if kind == .spell, let spell = rpgSpellDefinition(id), spell.upkeepCostPerSecond > 0, duration > 0 {
         next.activeUpkeeps.removeAll { $0.spellID == id }
         next.activeUpkeeps.append(RPGUpkeep(spellID: id, ownerSequence: sequence,
@@ -637,29 +630,6 @@ private func validateEquipment(_ requirement: RPGEquipmentRequirement,
         }
     }
     return nil
-}
-
-private func effectiveRPGCooldown(_ base: Int, state: RPGCharacterState) -> Int {
-    let multiplier = max(0.80, rpgDerivedStats(state).actionRecoveryMultiplier)
-    return max(10, Int((Double(max(0, base)) * multiplier).rounded(.up)))
-}
-
-private func effectiveRPGFatigueCost(_ base: Double,
-                                     identity: RPGExecutableEffectID,
-                                     state: RPGCharacterState) -> Double {
-    guard base > 0 else { return 0 }
-    let derived = rpgDerivedStats(state)
-    var cost = base
-    if case .spell(let spell) = identity {
-        if [.ignite, .frostRay, .shock, .stormAura].contains(spell) {
-            cost = max(0, cost - rpgSkillEffectValue(.sparkWeave, in: state))
-        }
-        cost *= derived.focusCostMultiplier
-    }
-    // Single application site for the final fatigue-cost floor. spark_weave
-    // ranks 4-5 can discount a spell's cost toward zero; every action (skill
-    // or spell) is floored at 0.5 fatigue here.
-    return max(0.5, (cost * 10).rounded(.up) / 10)
 }
 
 private func effectiveRPGSpellDuration(_ spell: RPGSpellDefinition, state: RPGCharacterState) -> Int {

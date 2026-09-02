@@ -3,9 +3,10 @@ import GameController
 import QuartzCore
 import ElysiumCore
 
-/// Physical controller support is scoped to RPG menus and actions plus the explicit
-/// villager barter sheet. It does not route movement, camera, inventory, or
-/// crafting input.
+/// Physical controller support is scoped to RPG world actions, the canvas fallback character
+/// surface, and the explicit villager barter sheet. The native AppKit character window owns
+/// standard macOS keyboard/pointer input and deliberately does not receive this legacy command
+/// stream. Movement, camera, inventory, and crafting input are also out of scope.
 @MainActor
 final class RPGControllerAdapter {
     private weak var app: AppDelegate?
