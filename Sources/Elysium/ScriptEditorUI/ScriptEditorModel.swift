@@ -733,6 +733,9 @@ final class ScriptEditorModel: ObservableObject {
     ) async throws -> ScriptEditorAIReply {
         synchronizeSharedAIConfiguration()
         guard aiCompletionMode != .off else { throw ScriptEditorAIRequestError.disabled }
+        if let selectionError = editorAISelectionPreflightError {
+            throw selectionError
+        }
         if intent == .writeCode, let authoringError = editorAIRequestPreflightError {
             throw authoringError
         }
@@ -912,6 +915,9 @@ final class ScriptEditorModel: ObservableObject {
                 builtInEvents: includeCrossObjectEvents
                     ? EventDescriptorRegistry.available.compactMap { descriptor in
                         descriptor.subjectKinds.contains(entry.ref.kind)
+                            && aiBuiltInEventIsApplicable(
+                                descriptor.kind, to: entry.ref, graph: scriptingContext.graph
+                            )
                             ? descriptor.kind.rawValue
                             : nil
                     }
@@ -980,7 +986,24 @@ final class ScriptEditorModel: ObservableObject {
         return nil
     }
 
+    /// Write Code replaces the complete captured selection, so the model must receive that same
+    /// complete selection. Ask follows the same rule: a partial excerpt would make an apparently
+    /// authoritative answer misleading. Refuse before warmup or any source-bearing request.
+    private var editorAISelectionPreflightError: ScriptEditorAIRequestError? {
+        let sourceText = source as NSString
+        guard selectedRange.location >= 0,
+              selectedRange.location + selectedRange.length <= sourceText.length else {
+            return nil
+        }
+        let selectedText = sourceText.substring(with: selectedRange)
+        let maximum = OllamaCodeCompletionLimits.default.selectionCharacters
+        guard selectedText.count > maximum else { return nil }
+        return .selectionTooLarge(maximumCharacters: maximum)
+    }
+
     private var currentAIAuthoringContext: OllamaCodeCompletionAuthoringContext {
+        let graph = game.scriptingCommandContext().graph
+        let supportsFurnaceOutput = isLoadedFurnaceFamilyBlock(target, graph: graph)
         let applicableBuiltIns = ScriptLanguageSchema.attributes(for: target.kind).filter { attribute in
             guard let targetApplicableBuiltInAttributes else { return true }
             return targetApplicableBuiltInAttributes.contains(attribute.name)
@@ -992,6 +1015,7 @@ final class ScriptEditorModel: ObservableObject {
             .filter {
                 ($0.receiverKinds.isEmpty || $0.receiverKinds.contains(target.kind))
                     && $0.availability.isCompletable
+                    && ($0.name != "setFurnaceOutput" || supportsFurnaceOutput)
             }
             .map { symbol in
                 let label = symbol.signatures.first?.label ?? symbol.name
@@ -1009,11 +1033,16 @@ final class ScriptEditorModel: ObservableObject {
         let eventName = mode == .handler
             ? handlerEvent.trimmingCharacters(in: .whitespacesAndNewlines)
             : nil
-        let eventCandidates = mode == .module
+        let broadlyCompatibleEventCandidates = mode == .module
             ? ScriptEditorEventCatalog.broadlyAvailableCandidates(
                 including: handlerEventCandidates
             )
             : handlerEventCandidates
+        let eventCandidates = broadlyCompatibleEventCandidates.filter { candidate in
+            mode == .module
+                || candidate.name != EventKind.furnaceSmeltCompleted.rawValue
+                || supportsFurnaceOutput
+        }
         var compatibleEvents = eventCandidates.map(aiEvent)
         if mode == .handler,
            let eventName, !eventName.isEmpty,
@@ -1039,6 +1068,29 @@ final class ScriptEditorModel: ObservableObject {
             compatibleEvents: compatibleEvents,
             targetMembers: members
         )
+    }
+
+    /// Event descriptors are kind-wide, but furnace completion and output control require the
+    /// stricter runtime applicability predicate. Keep the editor AI's positive facts aligned with
+    /// the actual loaded block entity instead of advertising a never-working ordinary-block API.
+    private func aiBuiltInEventIsApplicable(
+        _ event: EventKind,
+        to ref: ObjectRef,
+        graph: ObjectGraph
+    ) -> Bool {
+        event != .furnaceSmeltCompleted || isLoadedFurnaceFamilyBlock(ref, graph: graph)
+    }
+
+    private func isLoadedFurnaceFamilyBlock(_ ref: ObjectRef, graph: ObjectGraph) -> Bool {
+        guard case .live(.block(let world, _, _, let x, let y, let z)) = graph.resolve(ref),
+              let blockEntity = world.getBlockEntity(x, y, z),
+              blockEntity.type == "furnace",
+              ["furnace", "blast", "smoker"].contains(blockEntity.kind ?? "furnace"),
+              [
+                  Int(B.furnace), Int(B.furnace_lit), Int(B.blast_furnace),
+                  Int(B.blast_furnace_lit), Int(B.smoker), Int(B.smoker_lit),
+              ].contains(world.getBlockId(x, y, z)) else { return false }
+        return true
     }
 
     private func aiEvent(

@@ -302,22 +302,27 @@ current diagnostics, a target authoring contract, and the current bounded World 
 That snapshot leaves the app only after a manual suggestion request or after the user explicitly
 enables On Idle. The authoring contract lists the mode rule and target members. Handler requests
 carry target-compatible produced built-ins and target declarations. The selected Handler contract is
-prioritized and never field-clipped; every other included event is also a whole contract, while counts
-state whether the prompt budget omitted any contracts. Module requests add produced built-in payloads
+prioritized and never field-clipped; current-target members are budgeted next, before the remaining
+event catalog. Every other included event is also a whole contract, while counts state whether the
+prompt budget omitted any contracts. Module requests add produced built-in payloads
 and, for each included object in the bounded authorized snapshot, compatible built-in names plus as many
 whole declared custom-event contracts as fit. Snapshot and per-object total/included/truncated metadata
 makes every omission explicit. An undeclared custom event explicitly
 selected for Handler mode is marked envelope-only with unknown event-specific payload. The request
 contains no tools, mutation context, save data, unrelated scripts, raw world state, or hidden LAN
-data. It also includes the first 6,000
+data. System-side authoring facts and request-side source are separate nonce-fenced JSON objects.
+Only the explicit `editor_instruction` field is task intent; source, selection, object names,
+attributes, event summaries, and diagnostics remain data even when their text resembles a prompt
+delimiter or instruction. It also includes the first 6,500
 characters of generated LuaCATS text. Engine globals and modules are deliberately ordered into that
 prefix; even if later per-kind classes are omitted, the bounded authoring contract keeps facts needed
-for this target and selected event. The runtime validator, not this prompt, remains the API authority.
+for this target and selected event. The request uses a 16,384-token context. The runtime validator,
+not this prompt, remains the API authority.
 
 `/api/show` is a required, source-free locality preflight: a response that identifies a remote model
 or remote host is rejected before warmup or source-bearing generation. Capability and template hints
-from the accepted response remain advisory. The product currently uses the safe cursor-marker prompt
-path and always disables Ollama's fill-in-the-middle `suffix` field. The service has an internal
+from the accepted response remain advisory. The product currently uses the safe nonce-fenced JSON
+prompt path and always disables Ollama's fill-in-the-middle `suffix` field. The service has an internal
 explicit-FIM policy seam, but there is no product preference for it and model-hint compatibility is
 not currently an enforcement gate.
 
@@ -339,12 +344,22 @@ revision/hash, UTF-16 selection, target, mode/event, model, and authoring-contex
 editor extracts only safe insertable Lua, then checks the complete candidate against the active mode,
 compiler, blocking diagnostics, conservative lexical unresolved-global/call-target/callback and
 dynamic-`_ENV` checks, and the mutation-free validation boundary before replacing that captured
-selection as one normal undoable
-draft edit. That boundary may complete, stop at its first legal suspension, or compile-only for an
+selection as one normal undoable draft edit. A request may replace a selection only when its complete
+text fits the 4,096-character selection budget; a larger selection is refused before warmup or
+generation and remains byte-for-byte unchanged. The production completion service independently
+enforces the same bound before any metadata or generation request.
+
+That boundary may complete, stop at its first legal suspension, or compile-only for an
 undeclared Handler event; static checks protect the unexecuted suffix. Module mode accepts module source or callback
 registrations and permits `ev` only inside callbacks. Handler mode requires a valid selected event
 and accepts only that event's body with its implicit `ev`; a second `on`/`subscribe`/`function(ev)`
-wrapper is refused. Prose-only replies, unsafe text, mode violations, parse failures, and dry-run
+wrapper is refused. The prompt explicitly distinguishes inability to perform an action from the
+ability to propose a shipped mutation call: editor AI may author valid `emit`, `attach`, `detach`,
+`player:give`, or furnace-output Lua when the authorized target contract supports it, but it cannot
+perform or claim that it performed those actions. Furnace-output methods and completion events are
+advertised for a current target only when it is a loaded furnace, blast furnace, or smoker.
+
+Prose-only replies, unsafe text, mode violations, parse failures, and dry-run
 failures remain in the transcript or visible refusal state and leave the draft byte-for-byte
 unchanged. Automatic insertion requires the local authoritative runtime and is refused for LAN
 guests or a missing runtime. It never saves, attaches, runs, changes world trust or `doScripts`, or
@@ -360,6 +375,9 @@ grants the proposal service world-mutation authority.
 
 In the Script AI input, Return submits, Shift-Return inserts a newline, and Up/Down recall prompt
 history only when the caret is on the first/last line respectively; otherwise they move the caret.
+The visible bubbles are a local review transcript, not model conversation memory: every request is
+independent and receives the current script/context plus that request only. The panel states this
+directly so a follow-up must restate any fact that exists only in an earlier bubble.
 
 Every request carries a distinct document identity in addition to the document revision, UTF-16
 caret, source hash, model, target, mode/event, and authoring-context revision. Editing, moving the

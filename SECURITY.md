@@ -20,7 +20,21 @@ Current release properties:
   checks reject newly introduced unresolved global reads, unresolved or computed call targets,
   unproven callback arguments, and dynamic `_ENV` access in addition to compiler, diagnostic, and
   mutation-free validation. Existing user-authored dynamic code is count-neutral rather than being
-  silently reclassified as model authority.
+  silently reclassified as model authority. The complete selected text must fit the 4,096-character
+  prompt bound before warmup or generation, so a response can never replace a selection suffix the
+  model did not receive. Furnace-only methods/events are positive authoring facts only for a loaded
+  furnace-family target. Ask remains transcript-only; Write Code still cannot Save, Run, trust,
+  enable scripts, or mutate the world.
+- **Prompt text does not grant authority.** The editor's app-owned system protocol separates
+  system-side authoring facts and request-side source into distinct random-nonce JSON data blocks;
+  only the explicit `editor_instruction` field is task intent. The built-in `/ai` scripting lane
+  likewise nonce-fences its initial world snapshot, while every tool result keeps its separate
+  per-request fence. Names, attributes, source, event summaries, diagnostics, and errors remain data
+  even if they resemble instructions or closing tags. For an install request, the model is instructed
+  to query the exact owner/script/event/attribute/registry facts, choose Module or Handler, and call
+  the typed `attach_script` tool using its exact argument shape. These prompt rules are defense in
+  depth only: fixed tool schemas, typed decoders, compiler/lint/reference checks, mutation-free dry
+  run, normal executors, mutation budgets, world trust, and `doScripts` remain authoritative.
 - **No accounts, no credentials, no personal data.** Elysium stores worlds, settings, and keybinds under `~/Library/Application Support/Elysium/`.
 - **No elevated privileges.** It's an ad-hoc-signed app running in a normal user session.
 

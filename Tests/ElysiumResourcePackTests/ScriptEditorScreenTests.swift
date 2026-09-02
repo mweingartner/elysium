@@ -1040,6 +1040,96 @@ final class ScriptEditorModelTests: XCTestCase {
         XCTAssertTrue(event.summary.contains("completed one smelting operation"))
     }
 
+    func testOrdinaryBlockAIContextDoesNotAdvertiseFurnaceOnlyFacts() async throws {
+        let defaults = UserDefaults.standard
+        let previousMode = defaults.object(forKey: ScriptEditorAICompletionMode.defaultsKey)
+        defaults.set(
+            ScriptEditorAICompletionMode.manual.rawValue,
+            forKey: ScriptEditorAICompletionMode.defaultsKey
+        )
+        defer {
+            if let previousMode {
+                defaults.set(previousMode, forKey: ScriptEditorAICompletionMode.defaultsKey)
+            } else {
+                defaults.removeObject(forKey: ScriptEditorAICompletionMode.defaultsKey)
+            }
+        }
+
+        let game = try makeTrustedGame()
+        let x = Int(game.player.x.rounded(.down))
+        let y = Int(game.player.y.rounded(.down))
+        let z = Int(game.player.z.rounded(.down))
+        guard game.world.getChunkAt(x, z) != nil else { return XCTFail("spawn chunk must be loaded") }
+        _ = game.world.setBlock(x, y, z, Int(cell(B.stone)))
+        let target = ObjectRef.block(dim: game.dim, x: x, y: y, z: z)
+        let completer = RecordingScriptEditorAICompleter()
+        let model = ScriptEditorModel(target: target, game: game, aiCompleter: completer)
+        model.source = "-- ordinary block"
+        model.selectedRange = NSRange(location: (model.source as NSString).length, length: 0)
+
+        model.requestAISuggestion()
+        try await waitForEditorAIRequestCount(1, from: completer)
+        var recordedRequests = await completer.recordedRequests()
+        let moduleRequest = try XCTUnwrap(recordedRequests.first)
+        XCTAssertFalse(moduleRequest.authoringContext.targetMembers.contains {
+            $0 == "method self:setFurnaceOutput(item)"
+        })
+        let nearbyTarget = try XCTUnwrap(moduleRequest.authorizedNearbyObjects.first {
+            $0.reference == target.canonical
+        })
+        XCTAssertFalse(nearbyTarget.builtInEvents?.contains(
+            EventKind.furnaceSmeltCompleted.rawValue
+        ) == true)
+
+        model.dismissAISuggestion()
+        model.mode = .handler
+        model.handlerEvent = "block.used"
+        model.requestAISuggestion()
+        try await waitForEditorAIRequestCount(2, from: completer)
+        recordedRequests = await completer.recordedRequests()
+        let handlerRequest = try XCTUnwrap(recordedRequests.last)
+        XCTAssertFalse(handlerRequest.authoringContext.compatibleEvents.contains {
+            $0.name == EventKind.furnaceSmeltCompleted.rawValue
+        })
+    }
+
+    func testScriptAIRefusesSelectionLargerThanItsPromptBeforeCallingCompleter() async throws {
+        let defaults = UserDefaults.standard
+        let previousMode = defaults.object(forKey: ScriptEditorAICompletionMode.defaultsKey)
+        defaults.set(
+            ScriptEditorAICompletionMode.manual.rawValue,
+            forKey: ScriptEditorAICompletionMode.defaultsKey
+        )
+        defer {
+            if let previousMode {
+                defaults.set(previousMode, forKey: ScriptEditorAICompletionMode.defaultsKey)
+            } else {
+                defaults.removeObject(forKey: ScriptEditorAICompletionMode.defaultsKey)
+            }
+        }
+
+        let game = try makeTrustedGame()
+        let completer = RecordingScriptEditorAICompleter()
+        let model = ScriptEditorModel(target: .player, game: game, aiCompleter: completer)
+        let original = String(repeating: "x", count: 4_097)
+        model.source = original
+        model.selectedRange = NSRange(location: 0, length: (original as NSString).length)
+
+        do {
+            _ = try await model.requestEditorAIReply(
+                instruction: "Rewrite this selection.",
+                intent: .writeCode
+            )
+            XCTFail("oversized selection must be refused")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("was not sent or replaced"))
+        }
+        let requests = await completer.recordedRequests()
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertEqual(model.source, original)
+        XCTAssertEqual(model.selectedRange, NSRange(location: 0, length: 4_097))
+    }
+
     private func waitForEditorAIRequestCount(
         _ expected: Int,
         from completer: RecordingScriptEditorAICompleter,

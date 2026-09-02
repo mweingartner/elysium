@@ -312,7 +312,10 @@ struct ScriptEditorAIPanel: View {
 
             Text(requestIntent == .writeCode
                  ? "Validated Lua inserts into the current Module or Handler. It is never saved or run automatically."
-                 : "Answers stay in this conversation and never edit your script.")
+                 : "Answers appear here and never edit your script.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("Each request is independent; prior bubbles are not sent to Ollama. Restate any detail the next request needs.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 

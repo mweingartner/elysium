@@ -78,6 +78,14 @@ no model discovery, warmup, or generation. Toolbar/menu/hotkey and On
 Idle proposals remain ghost text that Tab accepts and Escape dismisses. The Script AI panel has
 explicit **Write Code** and **Ask** intents: Ask is always transcript-only, while Write Code may
 replace the captured selection with safe, mode-correct Lua as one Command-Z-undoable draft edit.
+The editor sends a nonce-fenced JSON request in which only the explicit instruction is intent;
+surrounding Lua, object metadata, event summaries, and diagnostics remain untrusted data even if a
+comment or string resembles a prompt. Module requests ask for one complete chunk with callbacks and
+no top-level `ev`; Handler requests ask only for the selected event body with implicit `ev`. A
+selection is never partly shown and wholly replaced: requests larger than 4,096 selected characters
+are refused before model warmup or generation, leaving the draft unchanged. The 16K model context
+provides headroom for the separately bounded schema, target contract, diagnostics, nearby-object
+facts, and complete accepted selection.
 Before insertion, Elysium revalidates the captured document, selection, model, mode, event, and
 authoring context, then applies its compiler, diagnostics, conservative lexical
 unresolved-global/call-target/callback checks, dynamic-`_ENV` rejection, and mutation-free
@@ -91,6 +99,20 @@ enables, or directly mutates the world. See the
 [Scripting Guide](docs/SCRIPTING_GUIDE.md) for the
 complete attribute, handler, declaration, payload, command, limits, persistence, and LAN contracts,
 and the [Lua Editor reference](docs/LUA_EDITOR.md) for editor controls and privacy behavior.
+
+The separate built-in `/ai` scripting lane can install code when the request says to create, add,
+install, fix, or replace a script. Its app-owned system protocol first requires the model to resolve
+an observed exact object reference, inspect that object and any existing named script, query the
+target-compatible event/payload and attributes, and resolve every new registry id. It must then
+choose exactly one shape: a Module is a complete top-level chunk and omits `triggers`; a Handler is
+only an implicit-`ev` callback body and passes `triggers` as the tool's JSON-string argument. The
+model must call the validated `attach_script` tool for an installation request instead of merely
+printing code, read the complete result, and surface every warning or refusal. A result marked
+`loaded:"pending"` means stored for the next script phase—not proof that the script is running or
+that its event fired—and world trust plus `doScripts` remain authoritative. World snapshots, tool
+results, object names, attributes, existing source, event summaries, and errors are nonce-fenced
+untrusted data; the runtime compiler, lint, reference checks, dry run, and mutation gates remain the
+real authority rather than the prompt.
 
 ### Character paths and sub-classes
 

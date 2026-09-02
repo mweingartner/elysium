@@ -37,6 +37,7 @@ enum ScriptEditorAICompletionMode: String, CaseIterable, Identifiable {
 
 enum ScriptEditorAIRequestError: LocalizedError {
     case disabled
+    case selectionTooLarge(maximumCharacters: Int)
     case handlerEventRequired
     case invalidHandlerEvent(String)
 
@@ -44,6 +45,8 @@ enum ScriptEditorAIRequestError: LocalizedError {
         switch self {
         case .disabled:
             "Editor AI is Off. Choose Manual or On Idle before contacting Ollama."
+        case .selectionTooLarge(let maximumCharacters):
+            "Select at most \(maximumCharacters) characters for one Script AI request. The oversized selection was not sent or replaced."
         case .handlerEventRequired:
             ScriptEditorAuthoringContract.handlerEventRequired
         case .invalidHandlerEvent(let reason):

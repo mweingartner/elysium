@@ -188,6 +188,14 @@ artifact_sha256() {
 # Saves, GameCore, Player, text-input, capability-manifest, ElysiumStorage.o, and
 # ElysiumTextInput.o pins remain byte-identical.
 #
+# ai-script-authoring-protocol: EXPECTED_ELYSIUM_PRODUCT_SHA256 renewed from
+# 3d12ad0a93d87227e7585c0a40c82d3aea55dde09a07f3894ebf11c92f4ee7ad to
+# 1e75abe9fa1e3e959b6ca2c31e5a45cccea458aabf1f8288f89af233f7a898e5 after the Elysium app
+# added the built-in /ai Lua creation protocol, nonce-fenced world/editor prompt data, complete-
+# selection enforcement, target-member prompt priority, furnace-specific authoring facts, and the
+# explicit single-turn panel notice. No ElysiumCore, storage, save, player, text-input, capability,
+# or elysmoke source changed; all of their reviewed source/object/product pins remain byte-identical.
+#
 EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
 EXPECTED_STORAGE_API_SHA256='08acf52a794de902a69658a0926181918c62a30f7975cd0d685d3d3baa7c745b'
 EXPECTED_STORAGE_OBJECT_SHA256='43ea474d75be3fc2311f1a95295c94d23329249f505ed0c14878f7318e14b3a8'
@@ -198,7 +206,7 @@ EXPECTED_CORE_CAPABILITY_SHA256='67dbb84929eeda6bea6acec70567a6b8c3711521ae2c1f9
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3'
 EXPECTED_CORE_OBJECT_SHA256='450a1c3cf1602cdbb793ecd48d1e56722539508ac3f626f566c7971a18528a36'
-EXPECTED_ELYSIUM_PRODUCT_SHA256='3d12ad0a93d87227e7585c0a40c82d3aea55dde09a07f3894ebf11c92f4ee7ad'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='1e75abe9fa1e3e959b6ca2c31e5a45cccea458aabf1f8288f89af233f7a898e5'
 EXPECTED_SMOKE_PRODUCT_SHA256='61edb5e5e7a935375307277ad71b6b0f10358021389fc6daef0eff883193ffe2'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'

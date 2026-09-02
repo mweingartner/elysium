@@ -696,9 +696,11 @@ Handler contract includes the current target's compatible events; its Module con
 produced built-in payload and, for each authorized object in the bounded snapshot, kind-compatible
 built-in names plus that exact object's declared custom names and typed fields. A valid undeclared Handler selection is
 represented explicitly as envelope-only with unknown event-specific payload. The contract also
-includes applicable target members. It receives no tool
-definitions or query/mutation context and cannot execute, Save, attach, emit, or otherwise change
-world state. Manual explicit requests—panel Write Code/Ask or the toolbar/menu/hotkey action—are the default;
+includes applicable target members; furnace-only members and event names are included for a current
+target only when the object graph proves a loaded furnace-family block. It receives no tool
+definitions or query/mutation context and cannot perform or claim an execution, Save, attach, emit,
+or other world change. It may still propose a shipped Lua mutation call when the user asks and the
+authorized target contract lists that API. Manual explicit requests—panel Write Code/Ask or the toolbar/menu/hotkey action—are the default;
 automatic idle requests require explicit opt-in, and all responses are
 revision/source-hash/caret/model/context bound and cancellable.
 Opening the native editor in Manual or On Idle mode starts one shared warmup for the exact persisted
@@ -711,6 +713,19 @@ response remain advisory. Changing the selected model invalidates old readiness 
 The Script AI panel separately refreshes the loopback-only installed-model list when visible. Off
 forbids discovery, warmup, and generation, while editor/window/session teardown cancels unfinished
 work and makes every late result ineligible.
+
+The editor prompt has a fixed app-owned protocol and two separate random-nonce JSON data blocks.
+System-side authoring facts and request-side source cannot manufacture a structural boundary; only
+the request block's `editor_instruction` field is user intent, while prefix, selection, suffix,
+object metadata, event summaries, and diagnostics remain data. Module and Handler source shapes,
+implicit-local rules, selected-event payload limits, `player:give`, furnace-only output control,
+built-in/custom event emission, and the proposal-only capability boundary are explicit system
+instructions. Within the authoring-data budget, the selected Handler contract is first, current-target
+members second, and remaining compatible events last, so a broad catalog cannot crowd out every
+callable target fact. Source-bearing generation uses `num_ctx=16384`. The complete selected text must fit
+the 4,096-character selection bound: `ScriptEditorModel` refuses before warmup, and the completion
+actor repeats the guard before locality metadata or generation, so a model can never see a prefix
+and then replace an unseen selection suffix.
 
 The authoring actions deliberately publish different kinds of results. Toolbar/menu/hotkey and On
 Idle completion remain visually distinct ghost text requiring explicit acceptance. **Ask** is
@@ -730,6 +745,9 @@ code-like exterior or suffix text, unsafe text, mode violations, parse failures,
 validation failures remain transcript or refusal state without changing the draft. Automatic
 insertion never saves, attaches, runs, changes trust or `doScripts`, or gives the proposal service
 world-mutation authority.
+The panel's bubbles are a local review transcript only. Each request sends the current script and
+that request, not prior bubbles; the panel labels this single-turn behavior rather than implying
+that Ollama remembers an earlier answer.
 
 The World Objects projection is captured on main from the same side-effect-free `ObjectGraph`,
 `AttributeStore`, and `ScriptStore` reads as scripting commands. Default discovery is radius 16,
@@ -1038,6 +1056,24 @@ object-first Lua rules followed by a built-in event section generated at request
 come from the same descriptors used by the runtime and editor; the event list is not a separately
 maintained copy that can drift. The remaining Lua API prose is not generated from
 `ScriptLanguageSchema` and must stay aligned through review and focused contract tests.
+
+An app-owned script-creation protocol precedes that API reference. For create/add/install/fix/
+replace requests it requires an observed exact ref plus `get_object`; `list_scripts` before named
+replacement; `describe_events(ref)`, `describe_attributes(ref)`, and `search_registry` for facts not
+already established; then exactly one source shape and an `attach_script` mutation rather than a
+code-only final answer. Module source is the complete chunk with `mode:"module"` and no triggers.
+Handler source is only the implicit-`ev` body with `mode:"handler"`; because the tool schema carries
+`triggers` as a string, the prompt shows the exact nested form
+`"triggers":"[{\"event\":\"block.used\"}]"`. The model must read the complete result, surface
+warnings/refusals, and treat `loaded:"pending"` as next-phase storage rather than proof of execution
+or event delivery. Draft/explanation requests remain non-mutating.
+
+The initial world snapshot is separately fenced as
+`===ELY_WORLD_SNAPSHOT_DATA_<nonce>===`/`===END_ELY_WORLD_SNAPSHOT_DATA_<nonce>===` with an explicit
+untrusted-data warning. Object names, attributes, existing source, event summaries, and errors are
+data even when they resemble instructions. Subsequent tool results retain the independent tool-loop
+nonce envelope described below. Both prompt boundaries are defense in depth; typed decoders,
+validation, dry run, mutation budgets, world trust, and `doScripts` remain authoritative.
 
 **The `attach_script` gate (§9.4).** `AIScriptValidationGate.validate` runs `ScriptValidator`'s
 stages 0-3 (`ScriptRuntime.validateSource`, the exact gate every script — player, AI, or script-

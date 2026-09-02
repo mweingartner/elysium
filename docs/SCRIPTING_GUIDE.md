@@ -799,6 +799,47 @@ module-vs-handler, object-method, and declaration guidance is not generated from
 `describe_events` accepts an optional object `ref`; with one it filters built-ins to that object's
 kind and includes that object's custom declarations. `get_object` includes declaration metadata too.
 
+For script creation, the built-in AI receives an additional app-owned system protocol with this
+required order:
+
+1. Resolve the requested owner to an exact ref already observed in the snapshot or a query result,
+   then call `get_object`. Before replacing a named script, call `list_scripts` with that exact ref
+   and name so existing behavior is not silently discarded.
+2. Call `describe_events(ref)` before using an event and copy only its exact event name and payload
+   fields. Call `describe_attributes(ref)` before using built-ins, and `search_registry` before using
+   any item, block, entity, or effect id the model has not already established.
+3. Choose exactly one source shape. A Module is the complete top-level chunk, may initialize state
+   and register callbacks, and has no top-level `ev`. A Handler is only the selected callback body;
+   `ev` is implicit and the source must not add `function(ev)`, `on`, `self:on`, or `subscribe`.
+4. A draft or explanation returns text without a mutation tool. A request to create, add, install,
+   fix, or replace must call `attach_script`, then read the full result and report every warning or
+   refusal instead of merely printing code or claiming success.
+
+The exact mutation argument shapes are:
+
+```json
+{"ref":"player","name":"quest_tracker","source":"<complete Lua chunk>","mode":"module"}
+```
+
+```json
+{"ref":"block:overworld:10,64,3","name":"used_handler","source":"<Lua callback body using implicit ev>","mode":"handler","triggers":"[{\"event\":\"block.used\"}]"}
+```
+
+`triggers` is itself a JSON **string** containing the trigger array; it is not an array-valued tool
+argument. An attribute-filtered Handler uses, for example,
+`"triggers":"[{\"event\":\"attribute.changed\",\"attr\":\"state\"}]"`. Script names must match
+`[a-z][a-z0-9_]{0,31}`. This is the AI tool shape, not the Lua
+`self:attach(name, source[, opts])` shape: the Lua method has no `mode` option and creates a Handler
+only through `opts.on`. A successful result with `loaded:"pending"` means the record was accepted
+for the next script phase; it does not prove that the script is currently running or that an event
+has fired, and world trust plus `doScripts` still control execution.
+
+The initial world snapshot and every subsequent tool result use separate random nonce fences.
+Object names, attributes, existing script source, event summaries, errors, and any instruction-like
+text within those values remain untrusted data. Prompt guidance is defense in depth: tool argument
+decoders, compiler/lint/reference checks, the mutation-free dry run, normal mutation executors,
+world trust, and `doScripts` are still authoritative.
+
 Every successful AI mutation is journaled with `.ai(model)` provenance:
 
 ```
