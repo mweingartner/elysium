@@ -196,18 +196,37 @@ artifact_sha256() {
 # explicit single-turn panel notice. No ElysiumCore, storage, save, player, text-input, capability,
 # or elysmoke source changed; all of their reviewed source/object/product pins remain byte-identical.
 #
+# held-item-choreography: EXPECTED_GAME_CORE_SOURCE_SHA256 renewed from
+# dcd46910fd7a693fcd26fe1991029deebde59fc42624032632c88abfa20d44ef to
+# a08cad717b4a61c6d45d933652bd6694d3b0a8a6b0556dc51394da048d319092 after GameCore gained
+# only the cosmetic mining re-swing (restartMiningSwing) and the read-only heldItemBob(partial:)
+# walk-bob accessor for the first-person hands. Both checked-player caller spans, getter/CAS
+# counts, and approved owners remain byte-identical. EXPECTED_CORE_OBJECT_SHA256 moves from
+# 450a1c3cf1602cdbb793ecd48d1e56722539508ac3f626f566c7971a18528a36 to
+# 3798ee8676de1511cbe883a1ce17f087c70b8cd0125faf0a26eee3c145f20741 for those two GameCore
+# additions. EXPECTED_ELYSIUM_PRODUCT_SHA256 moves from
+# 1e75abe9fa1e3e959b6ca2c31e5a45cccea458aabf1f8288f89af233f7a898e5 to
+# 887c7abe4be31a97dc9498b04747da39b65df7c45c3bf6ce2cf1d995fea49ec0 for the HUD held-item
+# choreography (wall-clock swing state, lower/raise hand-off, partial-tick smoothing, walk-bob,
+# eased shield/bow release) and the render partial reaching hud.draw, and
+# EXPECTED_SMOKE_PRODUCT_SHA256 moves transitively from
+# 61edb5e5e7a935375307277ad71b6b0f10358021389fc6daef0eff883193ffe2 to
+# 1d045b5c1944236712112658aea5619cd7231a6e953685d3159b8b260d2f2479. The storage, Saves,
+# Player, text-input, capability-manifest, ElysiumStorage.o, and ElysiumTextInput.o pins remain
+# byte-identical.
+#
 EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
 EXPECTED_STORAGE_API_SHA256='08acf52a794de902a69658a0926181918c62a30f7975cd0d685d3d3baa7c745b'
 EXPECTED_STORAGE_OBJECT_SHA256='43ea474d75be3fc2311f1a95295c94d23329249f505ed0c14878f7318e14b3a8'
 EXPECTED_SAVES_SOURCE_SHA256='104564ee02dd009085cc5bf2f1d09fb6e893915283bef1cc09a3e5f7ab884dec'
-EXPECTED_GAME_CORE_SOURCE_SHA256='dcd46910fd7a693fcd26fe1991029deebde59fc42624032632c88abfa20d44ef'
+EXPECTED_GAME_CORE_SOURCE_SHA256='a08cad717b4a61c6d45d933652bd6694d3b0a8a6b0556dc51394da048d319092'
 EXPECTED_PLAYER_SOURCE_SHA256='79dbd2e132f8e65f2a9857f763c263fea0a1b8cd86fc7db6388fc77129373e10'
 EXPECTED_CORE_CAPABILITY_SHA256='67dbb84929eeda6bea6acec70567a6b8c3711521ae2c1f93fdfc6a2e957b8118'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3'
-EXPECTED_CORE_OBJECT_SHA256='450a1c3cf1602cdbb793ecd48d1e56722539508ac3f626f566c7971a18528a36'
-EXPECTED_ELYSIUM_PRODUCT_SHA256='1e75abe9fa1e3e959b6ca2c31e5a45cccea458aabf1f8288f89af233f7a898e5'
-EXPECTED_SMOKE_PRODUCT_SHA256='61edb5e5e7a935375307277ad71b6b0f10358021389fc6daef0eff883193ffe2'
+EXPECTED_CORE_OBJECT_SHA256='3798ee8676de1511cbe883a1ce17f087c70b8cd0125faf0a26eee3c145f20741'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='887c7abe4be31a97dc9498b04747da39b65df7c45c3bf6ce2cf1d995fea49ec0'
+EXPECTED_SMOKE_PRODUCT_SHA256='1d045b5c1944236712112658aea5619cd7231a6e953685d3159b8b260d2f2479'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'
