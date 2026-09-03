@@ -95,7 +95,61 @@ struct BowOverlayPlan: Equatable {
 }
 
 let HELD_EQUIP_FLIP_DURATION = 0.62
+/// One full mining/punching stroke while the primary button is held; also the one-shot attack.
 let HELD_PRIMARY_ACTION_CYCLE_DURATION = 0.32
+/// A one-shot use gesture (placing, opening, interacting) is a shorter stroke than an attack.
+let HELD_USE_SWING_DURATION = 0.2
+/// Switching items lowers the outgoing item out of view, then raises the incoming one.
+let HELD_EQUIP_LOWER_DURATION = 0.14
+let HELD_EQUIP_RAISE_DURATION = 0.22
+/// How far (logical pixels at scale 1) a hand drops to leave the frame during a swap.
+let HELD_EQUIP_DROP_DISTANCE = 150.0
+/// Releasing a guard or a bowstring relaxes the hand home instead of snapping it.
+let HELD_SHIELD_LOWER_DURATION = 0.12
+let HELD_BOW_RELAX_DURATION = 0.16
+
+struct HeldWalkBob: Equatable {
+    let x: Double
+    let y: Double
+    let rotation: Double
+}
+
+/// Screen-space sway of the first-person hands from the walk cycle: the hands drift sideways
+/// with the stride and dip on each footfall, the same phase that bobs the camera. Amplitude is
+/// capped at the engine's sprint value and the excursion stays well inside the crosshair
+/// clearance the rest pose reserves, so a walking hand never covers the aim point.
+func heldWalkBob(phase: Double, amplitude: Double, scale: Double) -> HeldWalkBob {
+    guard phase.isFinite, amplitude.isFinite, scale.isFinite, amplitude > 0 else {
+        return HeldWalkBob(x: 0, y: 0, rotation: 0)
+    }
+    let amp = min(0.4, amplitude)
+    let stride = Foundation.sin(phase * .pi)
+    let footfall = abs(Foundation.cos(phase * .pi))
+    let s = max(0.72, min(1.15, scale))
+    return HeldWalkBob(x: stride * amp * 12 * s,
+                       y: footfall * amp * 14 * s,
+                       rotation: stride * amp * 0.04)
+}
+
+/// A visual value that follows its target instantly on the way up (the engine's authoritative
+/// raise) and settles back over `fallDuration` seconds on the way down.
+struct HeldRelaxState: Equatable {
+    private(set) var value = 0.0
+    private(set) var observedAt: Double?
+
+    mutating func observe(target: Double, at now: Double, fallDuration: Double) -> Double {
+        let goal = target.isFinite ? max(0, min(1, target)) : 0
+        guard now.isFinite, fallDuration.isFinite, fallDuration > 0 else {
+            value = goal
+            observedAt = nil
+            return goal
+        }
+        let dt = observedAt.map { max(0, now - $0) } ?? 0
+        observedAt = now
+        value = goal >= value ? goal : max(goal, value - dt / fallDuration)
+        return value
+    }
+}
 
 private func armAssetOrigin(gripX: Double, gripY: Double,
                             size: Double, mirrored: Bool) -> (Double, Double) {
@@ -107,21 +161,25 @@ private func armAssetOrigin(gripX: Double, gripY: Double,
 func leftHandShieldOverlayPlan(viewWidth: Double, viewHeight: Double,
                                guiVisible: Bool, firstPerson: Bool,
                                screenOpen: Bool, hotbarLeftX: Double,
-                               raised: Bool = false) -> LeftHandItemOverlayPlan? {
+                               raise: Double = 0,
+                               equipLift: Double = 0) -> LeftHandItemOverlayPlan? {
     guard guiVisible, firstPerson, !screenOpen,
           viewWidth.isFinite, viewHeight.isFinite, hotbarLeftX.isFinite,
           viewWidth >= 160, viewHeight >= 120 else { return nil }
     let scale = min(1.15, max(0.72, min(viewWidth / 320, viewHeight / 180)))
     let armSize = 160 * scale
+    let lift = raise.isFinite ? max(0, min(1, raise)) : 0
+    let drop = (equipLift.isFinite ? max(0, min(1, equipLift)) : 0) * HELD_EQUIP_DROP_DISTANCE * scale
     // The angled "held_shield" sprite has transparent margin around a 3D-posed shield, so it is
-    // framed a touch larger than the old flat sprite and offset to sit over the fist. When the
-    // shield is actively raised to block it rises up and swings inward toward the crosshair to
-    // cover the centre — the same motion Minecraft's shield makes going idle → blocking.
-    let itemSize = (raised ? 168 : 156) * scale
-    let raiseUp = raised ? 40 * scale : 0
-    let raiseIn = raised ? 34 * scale : 0
+    // framed a touch larger than the old flat sprite and offset to sit over the fist. As the
+    // shield is raised to block (`raise` 0 → 1, following the engine's raise ticks) it rises up
+    // and swings inward toward the crosshair to cover the centre — the same motion Minecraft's
+    // shield makes going idle → blocking — and eases back down when the guard is released.
+    let itemSize = (156 + 12 * lift) * scale
+    let raiseUp = 40 * scale * lift
+    let raiseIn = 34 * scale * lift
     let gripX = max(12 * scale, hotbarLeftX - 18 * scale) + raiseIn
-    let gripY = viewHeight - 48 * scale - raiseUp
+    let gripY = viewHeight - 48 * scale - raiseUp + drop
     let armOrigin = armAssetOrigin(
         gripX: gripX, gripY: gripY, size: armSize, mirrored: true)
     return LeftHandItemOverlayPlan(
@@ -138,15 +196,17 @@ func leftHandShieldOverlayPlan(viewWidth: Double, viewHeight: Double,
 /// fingers are drawn over the stick, same as a right-hand tool.
 func leftHandTorchOverlayPlan(viewWidth: Double, viewHeight: Double,
                               guiVisible: Bool, firstPerson: Bool,
-                              screenOpen: Bool, hotbarLeftX: Double) -> LeftHandItemOverlayPlan? {
+                              screenOpen: Bool, hotbarLeftX: Double,
+                              equipLift: Double = 0) -> LeftHandItemOverlayPlan? {
     guard guiVisible, firstPerson, !screenOpen,
           viewWidth.isFinite, viewHeight.isFinite, hotbarLeftX.isFinite,
           viewWidth >= 160, viewHeight >= 120 else { return nil }
     let scale = min(1.15, max(0.72, min(viewWidth / 320, viewHeight / 180)))
     let armSize = 160 * scale
     let itemSize = 108 * scale
+    let drop = (equipLift.isFinite ? max(0, min(1, equipLift)) : 0) * HELD_EQUIP_DROP_DISTANCE * scale
     let gripX = max(16 * scale, hotbarLeftX - 10 * scale)
-    let gripY = viewHeight - 46 * scale
+    let gripY = viewHeight - 46 * scale + drop
     let armOrigin = armAssetOrigin(
         gripX: gripX, gripY: gripY, size: armSize, mirrored: true)
     return LeftHandItemOverlayPlan(
@@ -161,18 +221,29 @@ func leftHandTorchOverlayPlan(viewWidth: Double, viewHeight: Double,
 func bowOverlayPlan(viewWidth: Double, viewHeight: Double,
                     guiVisible: Bool, firstPerson: Bool, screenOpen: Bool,
                     usingItem: Bool, useTicks: Int,
-                    hotbarLeftX: Double) -> BowOverlayPlan? {
+                    hotbarLeftX: Double,
+                    usePartial: Double = 0,
+                    releaseTicks: Int = 0, release: Double = 0,
+                    equipLift: Double = 0) -> BowOverlayPlan? {
     guard guiVisible, firstPerson, !screenOpen,
           viewWidth.isFinite, viewHeight.isFinite, hotbarLeftX.isFinite,
           viewWidth >= 160, viewHeight >= 120 else { return nil }
     let scale = min(1.15, max(0.72, min(viewWidth / 320, viewHeight / 180)))
     let armSize = 160 * scale
     let bowSize = 138 * scale
-    let ticks = max(0, useTicks)
-    let progress = usingItem ? min(1, Double(ticks) / 20) : 0
-    let raise = usingItem ? smoothStep(min(1, Double(ticks + 1) / 6)) : 0
+    let drop = (equipLift.isFinite ? max(0, min(1, equipLift)) : 0) * HELD_EQUIP_DROP_DISTANCE * scale
+    // Charge follows the authoritative use ticks, smoothed by the render partial. After the
+    // string is released the pose relaxes home from where it was (`releaseTicks` at
+    // `release` 1 → 0) instead of snapping: both hands travel back along their draw path.
+    let partial = usePartial.isFinite ? max(0, min(1, usePartial)) : 0
+    let relax = usingItem ? 1 : (release.isFinite ? max(0, min(1, release)) : 0)
+    let ticks = max(0, usingItem ? useTicks : releaseTicks)
+    let chargeTime = Double(ticks) + (usingItem ? partial : 0)
+    let active = usingItem || relax > 0.001
+    let progress = active ? min(1, chargeTime / 20) * relax : 0
+    let raise = active ? smoothStep(min(1, (chargeTime + 1) / 6)) * relax : 0
     let leftRestX = max(12 * scale, hotbarLeftX - 18 * scale)
-    let leftRestY = viewHeight - 48 * scale
+    let leftRestY = viewHeight - 48 * scale + drop
     let leftRaisedX = max(armSize * 0.48, viewWidth * 0.34)
     let leftRaisedY = viewHeight * 0.60
     let gripX = leftRestX + (leftRaisedX - leftRestX) * raise
@@ -181,7 +252,7 @@ func bowOverlayPlan(viewWidth: Double, viewHeight: Double,
     let armOrigin = armAssetOrigin(
         gripX: gripX, gripY: gripY, size: armSize, mirrored: true)
     let frameName: String
-    switch ticks {
+    switch usingItem ? ticks : 0 {
     case ..<6: frameName = usingItem ? "bow_pulling_0" : "bow"
     case ..<13: frameName = "bow_pulling_1"
     default: frameName = "bow_pulling_2"
@@ -194,17 +265,17 @@ func bowOverlayPlan(viewWidth: Double, viewHeight: Double,
         itemY: gripY - bowSize * 0.42,
         itemSize: bowSize, itemRotation: bowRotation)
 
-    guard usingItem else {
+    guard active else {
         return BowOverlayPlan(frameName: frameName, drawProgress: 0, bow: bowPlan,
                               rightArmAssetX: nil, rightArmAssetY: nil)
     }
     // The right hand reaches the string during the raise, then travels toward
     // the player's cheek as projectile charge approaches full power.
-    let reach = smoothStep(min(1, Double(ticks + 1) / 5))
+    let reach = smoothStep(min(1, (chargeTime + 1) / 5)) * relax
     let stringX = gripX + 34 * scale
     let stringY = gripY - 8 * scale
     let restRightX = viewWidth - 52 * scale
-    let restRightY = viewHeight - 48 * scale
+    let restRightY = viewHeight - 48 * scale + drop
     let reachedX = restRightX + (stringX - restRightX) * reach
     let reachedY = restRightY + (stringY - restRightY) * reach
     let pulledX = viewWidth * 0.63
@@ -333,20 +404,165 @@ func heldItemPresentation(for definition: ItemDef?, hasDetailedVisual: Bool) -> 
     return GENERIC_HELD_ITEM_PRESENTATION
 }
 
-struct HeldPrimaryActionAnimationState: Equatable {
-    private(set) var startedAt: Double?
+/// The first-person swing timeline. The engine's `attackAnim` only *triggers* strokes here — it
+/// is a four-tick value that steps at 20Hz and restarts while mining — so the arm is driven on
+/// the wall clock: a continuous stroke cycle while the primary button is held (mining,
+/// punching), the in-flight stroke completing after release instead of snapping to rest, and a
+/// one-shot stroke for each engine-reported swing while idle (a use gesture, a placed block).
+struct HeldSwingAnimationState: Equatable {
+    private(set) var cycleStartedAt: Double?
+    private(set) var cycleEndsAt: Double?
+    private(set) var strokeStartedAt: Double?
+    private(set) var strokeDuration = HELD_PRIMARY_ACTION_CYCLE_DURATION
+    private(set) var lastEngineAttack = 0.0
 
-    /// Returns a normalized repeating cycle while the primary button is held.
-    /// Releasing, obscuring gameplay, or invalid time stops the cycle immediately.
-    mutating func observe(isHeld: Bool, at now: Double, eligible: Bool) -> Double? {
-        guard isHeld, eligible, now.isFinite else {
-            startedAt = nil
+    /// Normalized stroke progress (0 = wind-up, 1 = rest), or nil while the hand rests.
+    mutating func observe(primaryHeld: Bool, engineAttack: Double,
+                          at now: Double, eligible: Bool) -> Double? {
+        // Track the engine baseline even while ineligible so a screen closing mid-decay does not
+        // read as a fresh swing.
+        let engine = engineAttack.isFinite ? max(0, min(1, engineAttack)) : 0
+        let rose = engine > lastEngineAttack + 1e-6
+        lastEngineAttack = engine
+        guard eligible, now.isFinite else {
+            cycleStartedAt = nil
+            cycleEndsAt = nil
+            strokeStartedAt = nil
             return nil
         }
-        if startedAt == nil { startedAt = now }
-        let elapsed = max(0, now - (startedAt ?? now))
-        return elapsed.truncatingRemainder(dividingBy: HELD_PRIMARY_ACTION_CYCLE_DURATION)
-            / HELD_PRIMARY_ACTION_CYCLE_DURATION
+        let cycle = HELD_PRIMARY_ACTION_CYCLE_DURATION
+        if primaryHeld {
+            strokeStartedAt = nil
+            cycleEndsAt = nil
+            if let start = cycleStartedAt, start <= now {
+                return (now - start).truncatingRemainder(dividingBy: cycle) / cycle
+            }
+            cycleStartedAt = now
+            return 0
+        }
+        if let start = cycleStartedAt {
+            let elapsed = max(0, now - start)
+            let end = cycleEndsAt ?? (start + (Foundation.floor(elapsed / cycle) + 1) * cycle)
+            cycleEndsAt = end
+            if now < end {
+                return elapsed.truncatingRemainder(dividingBy: cycle) / cycle
+            }
+            cycleStartedAt = nil
+            cycleEndsAt = nil
+        }
+        if rose {
+            strokeStartedAt = now
+            strokeDuration = engine >= 0.99 ? cycle : HELD_USE_SWING_DURATION
+        }
+        guard let start = strokeStartedAt else { return nil }
+        let progress = (now - start) / strokeDuration
+        guard progress >= 0, progress < 1 else {
+            strokeStartedAt = nil
+            return nil
+        }
+        return progress
+    }
+}
+
+enum HeldSwapPhase: Equatable {
+    case rest
+    /// The previous item sinks out of the frame before its replacement rises.
+    case lowering(previousKey: Int, progress: Double)
+    case raising(progress: Double)
+}
+
+/// Changing what a hand holds is choreographed like a real hand-off: the outgoing item is
+/// lowered out of view, then the incoming one rises into the fist. A change during a swap
+/// continues from what is on screen — a lowering item keeps lowering, a half-raised item is
+/// lowered from its current height — so rapid hotbar scrolling never stacks transitions.
+struct HeldSwapAnimationState: Equatable {
+    private(set) var itemKey: Int?
+    private(set) var initialized = false
+    private(set) var loweringKey: Int?
+    private(set) var loweringStartedAt: Double?
+    private(set) var raisingStartedAt: Double?
+
+    mutating func observe(itemKey newKey: Int?, at now: Double, eligible: Bool) -> HeldSwapPhase {
+        guard now.isFinite, eligible else {
+            itemKey = newKey
+            initialized = true
+            loweringKey = nil
+            loweringStartedAt = nil
+            raisingStartedAt = nil
+            return .rest
+        }
+        if !initialized {
+            initialized = true
+            itemKey = newKey
+            return .rest
+        }
+        if newKey != itemKey {
+            let previousKey = itemKey
+            itemKey = newKey
+            if loweringStartedAt == nil {
+                if let raiseStart = raisingStartedAt, let previousKey {
+                    // Interrupted mid-raise: lower from the height the item actually reached.
+                    let raised = max(0, min(1, (now - raiseStart) / HELD_EQUIP_RAISE_DURATION))
+                    loweringKey = previousKey
+                    loweringStartedAt = now - (1 - raised) * HELD_EQUIP_LOWER_DURATION
+                } else if let previousKey {
+                    loweringKey = previousKey
+                    loweringStartedAt = now
+                } else if newKey != nil {
+                    raisingStartedAt = now
+                }
+                if loweringStartedAt != nil { raisingStartedAt = nil }
+            }
+        }
+        if let key = loweringKey, let start = loweringStartedAt {
+            let progress = (now - start) / HELD_EQUIP_LOWER_DURATION
+            if progress + 1e-9 < 1 {
+                return .lowering(previousKey: key, progress: max(0, progress))
+            }
+            loweringKey = nil
+            loweringStartedAt = nil
+            raisingStartedAt = itemKey == nil ? nil : start + HELD_EQUIP_LOWER_DURATION
+        }
+        if let start = raisingStartedAt {
+            guard itemKey != nil else {
+                raisingStartedAt = nil
+                return .rest
+            }
+            let progress = (now - start) / HELD_EQUIP_RAISE_DURATION
+            if progress + 1e-9 < 1 { return .raising(progress: max(0, progress)) }
+            raisingStartedAt = nil
+        }
+        return .rest
+    }
+}
+
+/// Per-hand bookkeeping the HUD keeps between frames so an outgoing item can still be drawn
+/// while it is lowered out of view, after the inventory already holds its replacement.
+struct HeldHandDisplay {
+    private(set) var swap = HeldSwapAnimationState()
+    private(set) var previousStack: ItemStack?
+    private(set) var previousKey: Int?
+
+    /// The stack to draw for this hand, its identity key, and how far (0...1) it is dropped
+    /// out of the frame by an in-flight swap.
+    mutating func observe(stack: ItemStack?, key: Int?, at now: Double,
+                          eligible: Bool) -> (stack: ItemStack?, key: Int?, lift: Double) {
+        switch swap.observe(itemKey: key, at: now, eligible: eligible) {
+        case let .lowering(previousKey, progress):
+            return (previousStack, previousKey, smoothStep(progress))
+        case let .raising(progress):
+            remember(stack, key)
+            return (stack, key, 1 - smoothStep(progress))
+        case .rest:
+            remember(stack, key)
+            return (stack, key, 0)
+        }
+    }
+
+    private mutating func remember(_ stack: ItemStack?, _ key: Int?) {
+        guard key != previousKey else { return }
+        previousStack = stack?.copy()
+        previousKey = key
     }
 }
 
@@ -405,7 +621,9 @@ private func smoothStep(_ value: Double) -> Double {
 /// Attack progress is the engine's remaining value (1 -> 0); both endpoints are at rest.
 func heldMotionPose(attack: Double, usingItem: Bool, useTicks: Int,
                     equipFlipProgress: Double,
-                    primaryActionProgress: Double? = nil) -> HeldMotionPose {
+                    primaryActionProgress: Double? = nil,
+                    usePartial: Double = 0,
+                    consuming: Bool = false) -> HeldMotionPose {
     let engineRemaining = attack.isFinite ? max(0, min(1, attack)) : 0
     let remaining: Double
     if let progress = primaryActionProgress, progress.isFinite {
@@ -413,7 +631,9 @@ func heldMotionPose(attack: Double, usingItem: Bool, useTicks: Int,
     } else {
         remaining = engineRemaining
     }
-    let use = usingItem ? min(1, Double(max(0, useTicks)) / 12) : 0
+    let partial = usePartial.isFinite ? max(0, min(1, usePartial)) : 0
+    let useTime = Double(max(0, useTicks)) + partial
+    let use = usingItem ? min(1, useTime / 12) : 0
     let t = 1 - remaining
     let x: Double
     let y: Double
@@ -421,9 +641,12 @@ func heldMotionPose(attack: Double, usingItem: Bool, useTicks: Int,
     let wristRotation: Double
     if usingItem {
         let raised = smoothStep(use)
+        // Food and drink are brought to the mouth and nibbled: a four-tick bite rhythm (the
+        // cadence of the eating sound) dips the item and rolls the wrist a touch each bite.
+        let bite = consuming ? abs(Foundation.sin(useTime * .pi / 4)) * raised : 0
         x = -22 * raised
-        y = -24 * raised
-        rotation = 0.55 * raised
+        y = -24 * raised + 3 * bite
+        rotation = 0.55 * raised + 0.06 * bite
         wristRotation = 0
     } else if t <= 0 || t >= 1 {
         x = 0
@@ -471,17 +694,24 @@ func heldOverlayPlan(viewWidth: Double, viewHeight: Double,
                      equipFlipProgress: Double = 1,
                      primaryActionProgress: Double? = nil,
                      hotbarRightX: Double? = nil,
-                     rightObstruction: MapOverlayRect? = nil) -> HeldOverlayPlan? {
+                     rightObstruction: MapOverlayRect? = nil,
+                     usePartial: Double = 0,
+                     consuming: Bool = false,
+                     equipLift: Double = 0) -> HeldOverlayPlan? {
     guard guiVisible, firstPerson, !screenOpen,
           presentation.hasItem,
           viewWidth.isFinite, viewHeight.isFinite,
           viewWidth >= 160, viewHeight >= 120 else { return nil }
     let remaining = attack.isFinite ? max(0, min(1, attack)) : 0
-    let use = usingItem ? min(1, Double(max(0, useTicks)) / 12) : 0
+    let partial = usePartial.isFinite ? max(0, min(1, usePartial)) : 0
+    let use = usingItem ? min(1, (Double(max(0, useTicks)) + partial) / 12) : 0
+    let lift = equipLift.isFinite ? max(0, min(1, equipLift)) : 0
     let pose = heldMotionPose(attack: remaining, usingItem: usingItem,
                               useTicks: useTicks,
                               equipFlipProgress: equipFlipProgress,
-                              primaryActionProgress: primaryActionProgress)
+                              primaryActionProgress: primaryActionProgress,
+                              usePartial: partial,
+                              consuming: consuming)
     let scale = min(1.15, max(0.72, min(viewWidth / 320, viewHeight / 180)))
     let iconSize = presentation.iconBaseSize * scale
     let armAssetSize = 160 * scale
@@ -554,7 +784,9 @@ func heldOverlayPlan(viewWidth: Double, viewHeight: Double,
         }
     }
     let baseArmX = restArmX + pose.x * scale * motionScale
-    let baseArmY = restArmY + pose.y * scale * motionScale
+    // An equip swap drops the whole assembly straight down out of the frame (and raises the
+    // replacement back up the same way); the drop is not a motion, so it ignores motionScale.
+    let baseArmY = restArmY + pose.y * scale * motionScale + lift * HELD_EQUIP_DROP_DISTANCE * scale
     // The opaque sleeve exits below/right of the hand. Pivoting there produces the
     // broad shoulder/elbow arc of a striking tool instead of rotating the forearm
     // around a stationary wrist.
@@ -646,7 +878,7 @@ func heldOverlayPlan(viewWidth: Double, viewHeight: Double,
     // briefly pass through it; suppressing the whole arm mid-swing creates a visible pop.
     let isResting = abs(pose.x) < 0.0001 && abs(pose.y) < 0.0001 &&
         abs(pose.armRotation) < 0.0001 && abs(pose.wristRotation) < 0.0001 &&
-        abs(toolRotation) < 0.0001 && use < 0.0001
+        abs(toolRotation) < 0.0001 && use < 0.0001 && lift < 0.0001
     guard !(isResting && crossesCrosshair),
           anchoredHotbarRight != nil || rightObstruction.map({
               maxX <= $0.x || minX >= $0.x + $0.size ||
@@ -692,8 +924,23 @@ final class HUD {
     private var tickSteps = 0
     private var rpgInsightCache = RPGHUDInsightCache()
     private var heldEquipmentAnimation = HeldEquipmentAnimationState()
-    private var heldPrimaryActionAnimation = HeldPrimaryActionAnimationState()
+    private var heldSwingAnimation = HeldSwingAnimationState()
+    private var mainHandDisplay = HeldHandDisplay()
+    private var offHandDisplay = HeldHandDisplay()
+    private var shieldRaiseRelax = HeldRelaxState()
+    private var bowDrawRelax = HeldRelaxState()
+    private var bowReleaseTicks = 0
     private var heldAnimationPlayer: ObjectIdentifier?
+
+    private func resetHeldAnimations() {
+        heldEquipmentAnimation = HeldEquipmentAnimationState()
+        heldSwingAnimation = HeldSwingAnimationState()
+        mainHandDisplay = HeldHandDisplay()
+        offHandDisplay = HeldHandDisplay()
+        shieldRaiseRelax = HeldRelaxState()
+        bowDrawRelax = HeldRelaxState()
+        bowReleaseTicks = 0
+    }
 
     func showActionBar(_ text: String) {
         actionBarText = text
@@ -773,29 +1020,68 @@ final class HUD {
 
         // A connected first-person forearm holds a large item sprite by its handle.
         // It is drawn before the hotbar so conventional controls remain readable.
-        let held = player.inventory[player.selectedSlot]
+        let playerIdentity = ObjectIdentifier(player)
+        if heldAnimationPlayer != playerIdentity {
+            heldAnimationPlayer = playerIdentity
+            resetHeldAnimations()
+        }
+        let animationsEligible = game.perspective == 0 && !screenOpen
+        let renderPartial = partial.isFinite ? max(0, min(1, partial)) : 0
+        // Each hand draws what it *displays*, which lags the inventory by one swap: the
+        // outgoing item is still lowered out of view after its replacement is selected. The
+        // key folds the slot in so re-selecting the same kind of tool in another slot still
+        // hands off. The off hand keys by item alone (it has one slot).
+        let selectedStack = player.inventory[player.selectedSlot]
+        let mainHand = mainHandDisplay.observe(
+            stack: selectedStack,
+            key: selectedStack.map { $0.id &* 16 &+ player.selectedSlot },
+            at: nowT, eligible: animationsEligible)
+        let offHand = offHandDisplay.observe(
+            stack: player.offHand, key: player.offHand?.id,
+            at: nowT, eligible: animationsEligible)
+        let held = mainHand.stack
         let heldDefinition = held.map { itemDef($0.id) }
         let heldName = heldDefinition?.name
-        let offHandName = player.offHand.map { itemDef($0.id).name }
+        let offHandName = offHand.stack.map { itemDef($0.id).name }
         let mainHandIsBow = heldName == "bow"
         let mainHandIsShield = heldName == "shield"
         let hasDetailedHeldAsset = heldName.flatMap(heldItemVisualAsset(for:)) != nil
         let heldPresentation = heldItemPresentation(
             for: heldDefinition, hasDetailedVisual: hasDetailedHeldAsset)
-        let playerIdentity = ObjectIdentifier(player)
-        if heldAnimationPlayer != playerIdentity {
-            heldAnimationPlayer = playerIdentity
-            heldEquipmentAnimation.reset(to: held?.id)
-            heldPrimaryActionAnimation = HeldPrimaryActionAnimationState()
-        }
+        // The equip flourish is keyed by the displayed item, so it begins as the new tool rises
+        // rather than spinning the outgoing one on its way down.
         let equipFlipProgress = heldEquipmentAnimation.observe(
-            itemID: heldPresentation.performsEquipFlip ? held?.id : nil,
-            at: nowT,
-            eligible: game.perspective == 0 && !screenOpen)
-        let primaryActionProgress = heldPrimaryActionAnimation.observe(
-            isHeld: game.primaryActionHeld,
-            at: nowT,
-            eligible: game.perspective == 0 && !screenOpen)
+            itemID: heldPresentation.performsEquipFlip ? mainHand.key : nil,
+            at: nowT, eligible: animationsEligible)
+        // The stroke timeline is owned by the HUD; the engine value is only its trigger, so
+        // the plan receives the rest value and the wall-clock progress.
+        let swingProgress = heldSwingAnimation.observe(
+            primaryHeld: game.primaryActionHeld,
+            engineAttack: player.attackAnim,
+            at: nowT, eligible: animationsEligible)
+        let usingMainHand = player.usingItem && player.useItemHand == "main"
+        let consuming = heldDefinition?.food != nil
+            || heldName == "potion" || heldName == "milk_bucket"
+        // The shield follows the engine's raise ticks up (full guard at five) and eases down.
+        let shieldRaise = shieldRaiseRelax.observe(
+            target: player.shieldRaised
+                ? min(1, (Double(player.shieldRaiseTicks) + renderPartial) / 5) : 0,
+            at: nowT, fallDuration: HELD_SHIELD_LOWER_DURATION)
+        if usingMainHand && mainHandIsBow { bowReleaseTicks = player.useItemTicks }
+        let bowRelease = bowDrawRelax.observe(
+            target: usingMainHand && mainHandIsBow ? 1 : 0,
+            at: nowT, fallDuration: HELD_BOW_RELAX_DURATION)
+        let shieldLift = mainHandIsShield ? mainHand.lift : offHand.lift
+
+        // Both hands sway with the walk cycle: the same phase that bobs the camera, applied to
+        // the whole first-person layer as one transform so the arms and items stay assembled.
+        let handScale = min(1.15, max(0.72, min(W / 320, H / 180)))
+        let walk = game.heldItemBob(partial: renderPartial)
+        let bob = heldWalkBob(phase: walk.phase, amplitude: walk.amplitude, scale: handScale)
+        cv.save()
+        cv.translate(W / 2, H)
+        cv.rotate(bob.rotation)
+        cv.translate(-W / 2 + bob.x, -H + bob.y)
 
         // Shields are visually equipped in the left hand whether selected or in
         // the offhand slot. A bow owns that same hand while it is selected.
@@ -804,7 +1090,7 @@ final class HUD {
                viewWidth: W, viewHeight: H,
                guiVisible: !hideGui, firstPerson: game.perspective == 0,
                screenOpen: screenOpen, hotbarLeftX: hbX,
-               raised: player.shieldRaised) {
+               raise: shieldRaise, equipLift: shieldLift) {
             cv.drawFirstPersonArm(.back,
                                   shield.armAssetX, shield.armAssetY,
                                   shield.armAssetSize, shield.armAssetSize,
@@ -821,7 +1107,8 @@ final class HUD {
            let torch = leftHandTorchOverlayPlan(
                viewWidth: W, viewHeight: H,
                guiVisible: !hideGui, firstPerson: game.perspective == 0,
-               screenOpen: screenOpen, hotbarLeftX: hbX) {
+               screenOpen: screenOpen, hotbarLeftX: hbX,
+               equipLift: offHand.lift) {
             cv.drawFirstPersonArm(.back,
                                   torch.armAssetX, torch.armAssetY,
                                   torch.armAssetSize, torch.armAssetSize,
@@ -840,9 +1127,12 @@ final class HUD {
                viewWidth: W, viewHeight: H,
                guiVisible: !hideGui, firstPerson: game.perspective == 0,
                screenOpen: screenOpen,
-               usingItem: player.usingItem && player.useItemHand == "main",
+               usingItem: usingMainHand,
                useTicks: player.useItemTicks,
-               hotbarLeftX: hbX) {
+               hotbarLeftX: hbX,
+               usePartial: renderPartial,
+               releaseTicks: bowReleaseTicks, release: bowRelease,
+               equipLift: mainHand.lift) {
             let left = bow.bow
             cv.drawFirstPersonArm(.back,
                                   left.armAssetX, left.armAssetY,
@@ -874,14 +1164,17 @@ final class HUD {
                                       guiVisible: !hideGui,
                                       firstPerson: game.perspective == 0,
                                       screenOpen: screenOpen,
-                                      attack: player.attackAnim,
-                                      usingItem: player.usingItem,
+                                      attack: 1,
+                                      usingItem: usingMainHand,
                                       useTicks: player.useItemTicks,
                                       presentation: heldPresentation,
                                       equipFlipProgress: equipFlipProgress,
-                                      primaryActionProgress: primaryActionProgress,
+                                      primaryActionProgress: swingProgress,
                                       hotbarRightX: hbX + 182,
-                                      rightObstruction: minimapRect) {
+                                      rightObstruction: minimapRect,
+                                      usePartial: renderPartial,
+                                      consuming: consuming,
+                                      equipLift: mainHand.lift) {
             // One transform moves every layer around the physical grip. The arm-back
             // renders first, the item enters the palm, and handle-shaped items receive
             // the foreground finger layer. Empty slots produce no overlay at all.
@@ -917,6 +1210,7 @@ final class HUD {
             }
             cv.restore()
         }
+        cv.restore()   // walk-bob transform of the first-person layer
 
         // hotbar
         if packHud {

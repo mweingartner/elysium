@@ -589,29 +589,232 @@ final class ResourcePackHardeningTests: XCTestCase {
                        shield.armAssetSize * (1 - 0.361328125), accuracy: 0.0001)
     }
 
-    func testPrimaryActionAnimationRepeatsOnlyDuringContinuousHold() throws {
-        var animation = HeldPrimaryActionAnimationState()
-        XCTAssertNil(animation.observe(isHeld: false, at: 2, eligible: true))
-        XCTAssertEqual(animation.observe(isHeld: true, at: 3, eligible: true), 0)
-        XCTAssertEqual(try XCTUnwrap(animation.observe(
-            isHeld: true, at: 3 + HELD_PRIMARY_ACTION_CYCLE_DURATION / 2,
+    func testHeldSwingCyclesWhileHeldFinishesOnReleaseAndStrokesOnEngineSwings() throws {
+        var swing = HeldSwingAnimationState()
+        let cycle = HELD_PRIMARY_ACTION_CYCLE_DURATION
+        // Idle: nothing plays without a trigger.
+        XCTAssertNil(swing.observe(primaryHeld: false, engineAttack: 0, at: 2, eligible: true))
+        // Holding the primary button cycles continuously from the first frame, whatever the
+        // engine value does (it pins at the top and restarts while mining).
+        XCTAssertEqual(swing.observe(primaryHeld: true, engineAttack: 1, at: 3, eligible: true), 0)
+        XCTAssertEqual(try XCTUnwrap(swing.observe(
+            primaryHeld: true, engineAttack: 0.75, at: 3 + cycle / 2, eligible: true)),
+            0.5, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(swing.observe(
+            primaryHeld: true, engineAttack: 0, at: 3 + cycle * 1.25, eligible: true)),
+            0.25, accuracy: 0.0001)
+        // Releasing mid-stroke lets the stroke finish instead of snapping to rest…
+        XCTAssertEqual(try XCTUnwrap(swing.observe(
+            primaryHeld: false, engineAttack: 0, at: 3 + cycle * 1.5, eligible: true)),
+            0.5, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(swing.observe(
+            primaryHeld: false, engineAttack: 0, at: 3 + cycle * 1.9, eligible: true)),
+            0.9, accuracy: 0.0001)
+        // …and then the hand rests.
+        XCTAssertNil(swing.observe(primaryHeld: false, engineAttack: 0, at: 3 + cycle * 2.01, eligible: true))
+        XCTAssertNil(swing.observe(primaryHeld: false, engineAttack: 0, at: 5, eligible: true))
+        // A use gesture (engine 0.6) is a short one-shot stroke; its decay is not a new trigger.
+        XCTAssertEqual(swing.observe(primaryHeld: false, engineAttack: 0.6, at: 6, eligible: true), 0)
+        XCTAssertEqual(try XCTUnwrap(swing.observe(
+            primaryHeld: false, engineAttack: 0.35, at: 6 + HELD_USE_SWING_DURATION / 2,
             eligible: true)), 0.5, accuracy: 0.0001)
-        // At an exact full cycle the phase wraps back to the start. Because the cycle
-        // constant is not float-exact, (start + CYCLE) - start lands a hair under or over
-        // CYCLE, so the wrapped phase reads as ~0 or ~1 — the same animation frame either
-        // way. Assert cyclic proximity to the start (0 ≡ 1) rather than one arbitrary end.
-        let atFullCycle = try XCTUnwrap(animation.observe(
-            isHeld: true, at: 3 + HELD_PRIMARY_ACTION_CYCLE_DURATION, eligible: true))
-        XCTAssertLessThan(min(atFullCycle, 1 - atFullCycle), 0.0001,
-                          "one full cycle must return to the start phase (0 ≡ 1)")
-        XCTAssertEqual(try XCTUnwrap(animation.observe(
-            isHeld: true, at: 3 + HELD_PRIMARY_ACTION_CYCLE_DURATION * 1.5,
-            eligible: true)), 0.5, accuracy: 0.0001)
-        XCTAssertNil(animation.observe(isHeld: false, at: 4, eligible: true))
-        XCTAssertNil(animation.startedAt)
-        XCTAssertEqual(animation.observe(isHeld: true, at: 5, eligible: true), 0)
-        XCTAssertNil(animation.observe(isHeld: true, at: 5.1, eligible: false))
-        XCTAssertNil(animation.observe(isHeld: true, at: .nan, eligible: true))
+        XCTAssertNil(swing.observe(primaryHeld: false, engineAttack: 0.1,
+                                   at: 6 + HELD_USE_SWING_DURATION, eligible: true))
+        XCTAssertNil(swing.observe(primaryHeld: false, engineAttack: 0, at: 6.5, eligible: true))
+        // A full engine swing while idle is a full-length stroke; a repeat trigger restarts it.
+        XCTAssertEqual(swing.observe(primaryHeld: false, engineAttack: 1, at: 7, eligible: true), 0)
+        XCTAssertEqual(try XCTUnwrap(swing.observe(
+            primaryHeld: false, engineAttack: 0.75, at: 7 + cycle * 0.75, eligible: true)),
+            0.75, accuracy: 0.0001)
+        XCTAssertEqual(swing.observe(primaryHeld: false, engineAttack: 1,
+                                     at: 7 + cycle * 0.8, eligible: true), 0)
+        // Ineligible frames rest but keep tracking the engine, so closing a screen mid-decay
+        // is not mistaken for a fresh swing.
+        XCTAssertNil(swing.observe(primaryHeld: true, engineAttack: 1, at: 8, eligible: false))
+        XCTAssertNil(swing.observe(primaryHeld: false, engineAttack: 0.75, at: 8.1, eligible: true))
+        XCTAssertNil(swing.observe(primaryHeld: false, engineAttack: 1, at: .nan, eligible: true))
+        XCTAssertNil(swing.observe(primaryHeld: false, engineAttack: .nan, at: 9, eligible: true))
+    }
+
+    func testHeldSwapLowersOutgoingItemThenRaisesIncomingOne() {
+        var swap = HeldSwapAnimationState()
+        let lower = HELD_EQUIP_LOWER_DURATION
+        let raise = HELD_EQUIP_RAISE_DURATION
+        // The first observation adopts the held item silently.
+        XCTAssertEqual(swap.observe(itemKey: 4, at: 1, eligible: true), .rest)
+        XCTAssertEqual(swap.observe(itemKey: 4, at: 1.5, eligible: true), .rest)
+        // Item → item: the old one lowers, then the new one rises, back to back.
+        XCTAssertEqual(swap.observe(itemKey: 5, at: 2, eligible: true),
+                       .lowering(previousKey: 4, progress: 0))
+        guard case let .lowering(loweringKey, loweringProgress) =
+                swap.observe(itemKey: 5, at: 2 + lower / 2, eligible: true) else {
+            return XCTFail("expected the outgoing item to keep lowering")
+        }
+        XCTAssertEqual(loweringKey, 4)
+        XCTAssertEqual(loweringProgress, 0.5, accuracy: 0.0001)
+        guard case let .raising(raisingProgress) =
+                swap.observe(itemKey: 5, at: 2 + lower + raise / 4, eligible: true) else {
+            return XCTFail("expected the incoming item to rise after the lower")
+        }
+        XCTAssertEqual(raisingProgress, 0.25, accuracy: 0.0001)
+        XCTAssertEqual(swap.observe(itemKey: 5, at: 2 + lower + raise, eligible: true), .rest)
+        // Item → empty only lowers; empty → item only raises.
+        XCTAssertEqual(swap.observe(itemKey: nil, at: 3, eligible: true),
+                       .lowering(previousKey: 5, progress: 0))
+        XCTAssertEqual(swap.observe(itemKey: nil, at: 3 + lower, eligible: true), .rest)
+        XCTAssertEqual(swap.observe(itemKey: 6, at: 4, eligible: true), .raising(progress: 0))
+        XCTAssertEqual(swap.observe(itemKey: 6, at: 4 + raise, eligible: true), .rest)
+        // Interrupting a raise lowers from the height actually reached; a change mid-lower
+        // keeps lowering and raises whatever is selected once the hand comes back up.
+        XCTAssertEqual(swap.observe(itemKey: 7, at: 5, eligible: true),
+                       .lowering(previousKey: 6, progress: 0))
+        XCTAssertEqual(swap.observe(itemKey: 7, at: 5 + lower, eligible: true),
+                       .raising(progress: 0))
+        let interruptedAt = 5 + lower + raise / 2
+        guard case let .lowering(interruptedKey, interruptedProgress) =
+                swap.observe(itemKey: 8, at: interruptedAt, eligible: true) else {
+            return XCTFail("expected a half-raised item to lower from its height")
+        }
+        XCTAssertEqual(interruptedKey, 7)
+        XCTAssertEqual(interruptedProgress, 0.5, accuracy: 0.0001)
+        guard case let .lowering(continuedKey, _) =
+                swap.observe(itemKey: 9, at: interruptedAt + lower / 4, eligible: true) else {
+            return XCTFail("expected the lowering to continue through a second change")
+        }
+        XCTAssertEqual(continuedKey, 7)
+        guard case .raising = swap.observe(itemKey: 9, at: interruptedAt + lower / 2 + 0.001,
+                                           eligible: true) else {
+            return XCTFail("expected the final selection to rise")
+        }
+        XCTAssertEqual(swap.itemKey, 9)
+        // Hidden screens do not animate; the new selection is adopted at rest.
+        XCTAssertEqual(swap.observe(itemKey: 10, at: 9, eligible: false), .rest)
+        XCTAssertEqual(swap.observe(itemKey: 10, at: 9.1, eligible: true), .rest)
+        XCTAssertEqual(swap.observe(itemKey: 11, at: .nan, eligible: true), .rest)
+    }
+
+    func testHeldRelaxFollowsRaisesInstantlyAndEasesDown() {
+        var relax = HeldRelaxState()
+        XCTAssertEqual(relax.observe(target: 0.4, at: 1, fallDuration: 0.2), 0.4)
+        XCTAssertEqual(relax.observe(target: 1, at: 1.01, fallDuration: 0.2), 1)
+        XCTAssertEqual(relax.observe(target: 0, at: 1.11, fallDuration: 0.2), 0.5, accuracy: 0.0001)
+        XCTAssertEqual(relax.observe(target: 0, at: 1.5, fallDuration: 0.2), 0)
+        XCTAssertEqual(relax.observe(target: 0.7, at: .nan, fallDuration: 0.2), 0.7)
+        XCTAssertEqual(relax.observe(target: .nan, at: 2, fallDuration: 0), 0)
+    }
+
+    func testHeldWalkBobIsBoundedAndSilentWhenStill() {
+        XCTAssertEqual(heldWalkBob(phase: 3, amplitude: 0, scale: 1),
+                       HeldWalkBob(x: 0, y: 0, rotation: 0))
+        XCTAssertEqual(heldWalkBob(phase: .nan, amplitude: 0.3, scale: 1),
+                       HeldWalkBob(x: 0, y: 0, rotation: 0))
+        var maxX = 0.0
+        var maxY = 0.0
+        for step in 0..<200 {
+            // An absurd amplitude is capped at the engine's sprint value.
+            let bob = heldWalkBob(phase: Double(step) / 40, amplitude: 9, scale: 1.15)
+            maxX = max(maxX, abs(bob.x))
+            maxY = max(maxY, abs(bob.y))
+            XCTAssertLessThan(abs(bob.rotation), 0.02)
+        }
+        // Peaks stay well inside the 24-pixel crosshair clearance the rest pose reserves.
+        XCTAssertGreaterThan(maxX, 4)
+        XCTAssertLessThan(maxX, 8)
+        XCTAssertGreaterThan(maxY, 4)
+        XCTAssertLessThan(maxY, 8)
+        XCTAssertEqual(heldWalkBob(phase: 0.5, amplitude: 0.2, scale: 1),
+                       heldWalkBob(phase: 0.5, amplitude: 0.2, scale: 1))
+    }
+
+    func testShieldRaiseBlendsAndBowRelaxesHomeAfterRelease() throws {
+        func shield(raise: Double = 0, lift: Double = 0) throws -> LeftHandItemOverlayPlan {
+            try XCTUnwrap(leftHandShieldOverlayPlan(
+                viewWidth: 480, viewHeight: 270, guiVisible: true,
+                firstPerson: true, screenOpen: false, hotbarLeftX: 149,
+                raise: raise, equipLift: lift))
+        }
+        let idle = try shield()
+        let half = try shield(raise: 0.5)
+        let raised = try shield(raise: 1)
+        XCTAssertLessThan(raised.gripY, half.gripY)
+        XCTAssertLessThan(half.gripY, idle.gripY)
+        XCTAssertGreaterThan(raised.gripX, half.gripX)
+        XCTAssertGreaterThan(half.gripX, idle.gripX)
+        XCTAssertEqual(half.gripY, (idle.gripY + raised.gripY) / 2, accuracy: 0.0001)
+        XCTAssertGreaterThan(try shield(lift: 0.5).gripY, idle.gripY)
+        let torchIdle = try XCTUnwrap(leftHandTorchOverlayPlan(
+            viewWidth: 480, viewHeight: 270, guiVisible: true,
+            firstPerson: true, screenOpen: false, hotbarLeftX: 149))
+        let torchLowered = try XCTUnwrap(leftHandTorchOverlayPlan(
+            viewWidth: 480, viewHeight: 270, guiVisible: true,
+            firstPerson: true, screenOpen: false, hotbarLeftX: 149, equipLift: 1))
+        XCTAssertGreaterThan(torchLowered.gripY - torchIdle.gripY, 100)
+
+        func bow(usingItem: Bool, useTicks: Int, usePartial: Double = 0,
+                 releaseTicks: Int = 0, release: Double = 0) throws -> BowOverlayPlan {
+            try XCTUnwrap(bowOverlayPlan(
+                viewWidth: 480, viewHeight: 270, guiVisible: true,
+                firstPerson: true, screenOpen: false,
+                usingItem: usingItem, useTicks: useTicks, hotbarLeftX: 149,
+                usePartial: usePartial, releaseTicks: releaseTicks, release: release))
+        }
+        let drawn = try bow(usingItem: true, useTicks: 20)
+        let released = try bow(usingItem: false, useTicks: 0, releaseTicks: 20, release: 0.5)
+        let home = try bow(usingItem: false, useTicks: 0, releaseTicks: 20, release: 0)
+        XCTAssertEqual(released.frameName, "bow")
+        XCTAssertNotNil(released.rightArmAssetX)
+        XCTAssertNil(home.rightArmAssetX)
+        XCTAssertLessThan(drawn.bow.gripY, released.bow.gripY)
+        XCTAssertLessThan(released.bow.gripY, home.bow.gripY)
+        XCTAssertGreaterThan(try XCTUnwrap(released.rightArmAssetX),
+                             try XCTUnwrap(drawn.rightArmAssetX))
+        // The render partial advances the draw between ticks without changing the frame.
+        let atTick = try bow(usingItem: true, useTicks: 2)
+        let between = try bow(usingItem: true, useTicks: 2, usePartial: 0.5)
+        let nextTick = try bow(usingItem: true, useTicks: 3)
+        XCTAssertEqual(between.frameName, atTick.frameName)
+        XCTAssertLessThan(between.bow.gripY, atTick.bow.gripY)
+        XCTAssertGreaterThan(between.bow.gripY, nextTick.bow.gripY)
+    }
+
+    func testHeldMotionSmoothsUseWithPartialTicksNibblesFoodAndDropsForSwaps() throws {
+        let atTick = heldMotionPose(attack: 1, usingItem: true, useTicks: 4, equipFlipProgress: 1)
+        let between = heldMotionPose(attack: 1, usingItem: true, useTicks: 4,
+                                     equipFlipProgress: 1, usePartial: 0.5)
+        let nextTick = heldMotionPose(attack: 1, usingItem: true, useTicks: 5, equipFlipProgress: 1)
+        XCTAssertLessThan(between.y, atTick.y)
+        XCTAssertGreaterThan(between.y, nextTick.y)
+        // Bites arrive on a four-tick rhythm: none at tick 16, a full bite at tick 14.
+        XCTAssertEqual(
+            heldMotionPose(attack: 1, usingItem: true, useTicks: 16, equipFlipProgress: 1,
+                           consuming: true),
+            heldMotionPose(attack: 1, usingItem: true, useTicks: 16, equipFlipProgress: 1))
+        let biting = heldMotionPose(attack: 1, usingItem: true, useTicks: 14,
+                                    equipFlipProgress: 1, consuming: true)
+        let notFood = heldMotionPose(attack: 1, usingItem: true, useTicks: 14, equipFlipProgress: 1)
+        XCTAssertEqual(biting.y, notFood.y + 3, accuracy: 0.0001)
+        XCTAssertEqual(biting.armRotation, notFood.armRotation + 0.06, accuracy: 0.0001)
+
+        if blockDefs.isEmpty { registerAllBlocks() }
+        if itemDefs.isEmpty { registerAllItems() }
+        let presentation = heldItemPresentation(
+            for: itemDef(iid("iron_pickaxe")), hasDetailedVisual: true)
+        func plan(lift: Double) -> HeldOverlayPlan? {
+            heldOverlayPlan(viewWidth: 480, viewHeight: 270,
+                            guiVisible: true, firstPerson: true, screenOpen: false,
+                            attack: 1, usingItem: false, useTicks: 0,
+                            presentation: presentation, hotbarRightX: 331,
+                            equipLift: lift)
+        }
+        let rest = try XCTUnwrap(plan(lift: 0))
+        let halfway = try XCTUnwrap(plan(lift: 0.5))
+        XCTAssertEqual(halfway.armY - rest.armY, HELD_EQUIP_DROP_DISTANCE * 0.5 * rest.scale,
+                       accuracy: 0.0001)
+        XCTAssertEqual(halfway.armX, rest.armX, accuracy: 0.0001)
+        XCTAssertEqual(halfway.rotation, 0, accuracy: 0.000001)
+        XCTAssertFalse(halfway.obscuresCrosshair)
+        // Fully dropped, the assembly is entirely below the frame and draws nothing.
+        XCTAssertNil(plan(lift: 1))
     }
 
     func testHeldEquipmentFlipTriggersOnceForNewVisibleTool() {

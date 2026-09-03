@@ -4197,6 +4197,26 @@ public final class GameCore {
         }
     }
 
+    /// Mining re-swings the arm each time the previous stroke completes (an engine stroke is four
+    /// ticks), so a third-person or mirrored player visibly works at the block instead of freezing
+    /// with the arm pinned at the top of a swing that never plays. The first-person hand keeps its
+    /// own wall-clock stroke timeline and only uses this value as a trigger.
+    private func restartMiningSwing(_ p: Player) {
+        if p.attackAnim <= 0 { p.attackAnim = 1 }
+    }
+
+    /// Interpolated walk-bob for the first-person hands: the same 20Hz phase and amplitude that
+    /// sway the camera, so the held item, off-hand torch, shield, and bow step with the body.
+    /// Zero when view bobbing is off or the player rides a vehicle.
+    public func heldItemBob(partial: Double) -> (phase: Double, amplitude: Double) {
+        guard let p = player, settings.viewBobbing, p.vehicle == nil, partial.isFinite else {
+            return (0, 0)
+        }
+        let t = clampD(partial, 0, 1)
+        return (prevBobPhase + (bobPhase - prevBobPhase) * t,
+                prevBobAmp + (bobAmp - prevBobAmp) * t)
+    }
+
     /// per-tick walk-bob state, vanilla-style smoothed amplitude
     private func tickViewBob() {
         let p = player!
@@ -4317,7 +4337,7 @@ public final class GameCore {
                 p.breakingProgress = 0
                 _ = raiseBlockToolStrike(player: p, hit: hit)
             }
-            p.attackAnim = 1
+            restartMiningSwing(p)
             return
         }
         if p.gameMode == GameMode.creative {
@@ -4339,7 +4359,7 @@ public final class GameCore {
             _ = raiseBlockToolStrike(player: p, hit: hit)
         }
         p.breakingProgress += speed
-        p.attackAnim = 1
+        restartMiningSwing(p)
         if w.time % 4 == 0 {
             host?.playSound("block.\(def.sound).hit", Double(hit.x) + 0.5, Double(hit.y) + 0.5, Double(hit.z) + 0.5, 0.25, 0.6)
             w.hooks.addParticles("block", hit.px, hit.py, hit.pz, 1, 0.12, hit.cell)
@@ -4419,7 +4439,7 @@ public final class GameCore {
                 p.breakingProgress = 0
             }
             beginLANToolStrikeIfNeeded(hit)
-            p.attackAnim = 1
+            restartMiningSwing(p)
             return
         }
         if p.gameMode == GameMode.creative {
@@ -4444,7 +4464,7 @@ public final class GameCore {
         }
         beginLANToolStrikeIfNeeded(hit)
         p.breakingProgress += breakSpeed(p, hit.cell)
-        p.attackAnim = 1
+        restartMiningSwing(p)
         if lanClientTickCounter % 4 == 0 {
             host?.playSound("block.\(def.sound).hit", Double(hit.x) + 0.5, Double(hit.y) + 0.5, Double(hit.z) + 0.5, 0.25, 0.6)
             w.hooks.addParticles("block", hit.px, hit.py, hit.pz, 1, 0.12, hit.cell)

@@ -1172,8 +1172,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         }
 
         let enc: MTLRenderCommandEncoder
+        // The render partial (fraction of the way to the next 20Hz tick) also feeds the HUD so
+        // the first-person hands move at frame rate rather than stepping per tick.
+        var partial = 0.0
         if game.hasWorld() {
-            let partial = game.frame(dtMs: dt)
+            partial = game.frame(dtMs: dt)
             LANMultiplayerManager.shared.tickReplication(game: game)
             AIScriptBroker.pump(game: game)
             bot?.tick()
@@ -1189,7 +1192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         ui.beginFrame()
         let screen = ui.current()
         if game.hasWorld() && (screen == nil || screen!.showHUD || !screen!.pausesGame) {
-            hud.draw(ui, game, 0)
+            hud.draw(ui, game, partial)
             if !(screen is ChatScreen) { drawChatOverlay(ui) }
         }
         screen?.draw(ui, game, 0)

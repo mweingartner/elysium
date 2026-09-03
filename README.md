@@ -208,14 +208,20 @@ scale without deforming the image during a strike. Other tools now stand upright
 their reviewed Faithful art rotated so the handle meets the hand instead of floating past it, with
 the painted haft removed from the arm so the fingers grip the tool's own handle. Blocks retain
 their three-dimensional voxel preview, while foods and other objects retain high-resolution
-Faithful item art. Attack/use poses provide clear feedback for swings and tool
-actions. Bows, shields, and torches render in the left (off) hand. **G** and **H** toggle a torch
+Faithful item art. Attack/use poses provide clear feedback for swings and tool actions: the
+stroke runs on the wall clock at frame rate, cycles continuously while the mouse button is held,
+completes its arc after release instead of snapping home, and plays a shorter stroke for each
+use gesture. Both hands sway with the walk cycle alongside the camera. Changing what a hand holds
+lowers the outgoing item out of view and raises the incoming one; food is nibbled on the rhythm
+of the eating sound. Bows, shields, and torches render in the left (off) hand. **G** and **H** toggle a torch
 or a shield from the inventory into the off hand and back, so you can carry a pickaxe and a torch
 to mine with light, or a sword and a shield to fight defensively; a held torch in either hand casts
 a soft, flickering warm light on the world around you. Holding use with a bow raises it, brings the
 right hand to the string, advances through the charge frames, and fires on release using the same
-charge duration that determines arrow power. Holding use with a shield in the off hand and a sword,
-mace, or empty main hand raises the shield to guard, and while raised it stops a frontal melee or
+charge duration that determines arrow power; after the shot both hands relax back along the draw
+path. Holding use with a shield in the off hand and a sword,
+mace, or empty main hand raises the shield to guard over the same quarter second the block takes
+to become active (and eases it back down on release), and while raised it stops a frontal melee or
 projectile hit — damage and knockback both — leaving flanking and environmental damage to land.
 Inventory and chest
 screens include a **Sort A-Z** button; sorting orders complete stacks by item
