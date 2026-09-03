@@ -125,7 +125,7 @@ final class LANReplicationTests: XCTestCase {
         )
     }
 
-    func testHostSessionAppliedUseBlockRaisesExactGuestBlockUsedEvent() throws {
+    func testHostSessionInteractionIntentRaisesOnceAndNativeUseDoesNotDuplicate() throws {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession(x: 2.5, y: 64, z: 1.5)
         session.recordInventorySnapshot(
@@ -150,6 +150,21 @@ final class LANReplicationTests: XCTestCase {
         }
 
         XCTAssertEqual(
+            session.applyInteractionIntent(
+                LANInteractionIntent(
+                    target: .block(
+                        x: 2, y: 64, z: 1, face: Dir.north,
+                        cell: Int(cell(B.oak_door, 0))
+                    ),
+                    selectedHotbarSlot: 0,
+                    sequence: 1
+                ),
+                from: "peer-a",
+                to: world
+            ),
+            .raised
+        )
+        XCTAssertEqual(
             session.applyBlockIntent(
                 LANBlockIntent(
                     action: .useBlock, x: 2, y: 64, z: 1,
@@ -168,7 +183,7 @@ final class LANReplicationTests: XCTestCase {
         )
 
         let event = try XCTUnwrap(events.first)
-        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.count, 1, "native openable use must not duplicate the semantic event")
         XCTAssertEqual(event.subject, .block(dim: .overworld, x: 2, y: 64, z: 1))
         XCTAssertEqual(event.payload, [
             "by": .ref(ObjectRef.lanPlayer(peerID: "peer-a").canonical),
@@ -177,19 +192,208 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(event.source, .lan(peerID: "peer-a"))
         XCTAssertEqual(event.subjectType, "oak_door")
 
-        forceSetBlock(world, x: 3, y: 64, z: 1, cell: Int(cell(B.stone, 0)))
         XCTAssertEqual(
-            session.applyBlockIntent(
-                LANBlockIntent(
-                    action: .useBlock, x: 3, y: 64, z: 1,
-                    face: Dir.up, selectedHotbarSlot: 0
+            session.applyInteractionIntent(
+                LANInteractionIntent(
+                    target: .block(
+                        x: 2, y: 64, z: 1, face: Dir.north,
+                        cell: Int(cell(B.oak_door, 0))
+                    ),
+                    selectedHotbarSlot: 0,
+                    sequence: 1
                 ),
                 from: "peer-a",
                 to: world
             ),
-            .ignored("unsupported use target")
+            .ignored("duplicate interaction")
         )
-        XCTAssertEqual(events.count, 1, "an ignored use must not raise block.used")
+        XCTAssertEqual(events.count, 1)
+
+        forceSetBlock(world, x: 3, y: 64, z: 1, cell: Int(cell(B.stone, 0)))
+        XCTAssertEqual(
+            session.applyInteractionIntent(
+                LANInteractionIntent(
+                    target: .block(
+                        x: 3, y: 64, z: 1, face: Dir.north,
+                        cell: Int(cell(B.stone, 0))
+                    ),
+                    selectedHotbarSlot: 0,
+                    sequence: 2
+                ),
+                from: "peer-a",
+                to: world
+            ),
+            .raised
+        )
+        XCTAssertEqual(events.count, 2, "an inert block is still a valid secondary-use target")
+        XCTAssertEqual(events.last?.subject, .block(dim: .overworld, x: 3, y: 64, z: 1))
+        XCTAssertEqual(events.last?.subjectType, "stone")
+        XCTAssertEqual(world.getBlock(3, 64, 1), Int(cell(B.stone, 0)))
+    }
+
+    func testHostSessionInteractionIntentRaisesForInertEntityWithLANProvenance() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 2.5, y: 64, z: 1.5)
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
+            from: "peer-a"
+        )
+        let entity = Entity(world: world)
+        entity.setPos(2.5, 64, 2.5)
+        world.addEntity(entity)
+        var events: [(ObjectRef, [String: AttrValue], EventSource, String?)] = []
+        world.hooks.raiseScriptEvent = { kind, subject, payload, source, subjectType in
+            if kind == .entityInteracted {
+                events.append((subject, payload, source, subjectType))
+            }
+        }
+
+        XCTAssertEqual(
+            session.applyInteractionIntent(
+                LANInteractionIntent(
+                    target: .entity(id: entity.id), selectedHotbarSlot: 0, sequence: 1
+                ),
+                from: "peer-a",
+                to: world
+            ),
+            .raised
+        )
+        let event = try XCTUnwrap(events.first)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(event.0, .entity(uid: entity.id))
+        XCTAssertEqual(event.1, [
+            "by": .ref(ObjectRef.lanPlayer(peerID: "peer-a").canonical),
+            "item": .null,
+        ])
+        XCTAssertEqual(event.2, .lan(peerID: "peer-a"))
+        XCTAssertEqual(event.3, entity.type)
+
+        entity.dead = true
+        XCTAssertEqual(
+            session.applyInteractionIntent(
+                LANInteractionIntent(
+                    target: .entity(id: entity.id), selectedHotbarSlot: 0, sequence: 2
+                ),
+                from: "peer-a",
+                to: world
+            ),
+            .rejected("target entity unavailable")
+        )
+        XCTAssertEqual(events.count, 1)
+    }
+
+    func testHostSessionInteractionIntentRejectsReachCellAndSelectedSlotMismatch() {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 2.5, y: 64, z: 1.5)
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
+            from: "peer-a"
+        )
+        forceSetBlock(world, x: 3, y: 64, z: 1, cell: Int(cell(B.stone, 0)))
+        forceSetBlock(world, x: 15, y: 64, z: 15, cell: Int(cell(B.stone, 0)))
+        var eventCount = 0
+        world.hooks.raiseScriptEvent = { kind, _, _, _, _ in
+            if kind == .blockUsed { eventCount += 1 }
+        }
+
+        XCTAssertEqual(
+            session.applyInteractionIntent(
+                LANInteractionIntent(
+                    target: .block(
+                        x: 3, y: 64, z: 1, face: Dir.north,
+                        cell: Int(cell(B.stone, 0))
+                    ),
+                    selectedHotbarSlot: 0,
+                    sequence: 0
+                ),
+                from: "peer-a",
+                to: world
+            ),
+            .rejected("invalid interaction sequence")
+        )
+        XCTAssertEqual(
+            session.applyInteractionIntent(
+                LANInteractionIntent(
+                    target: .block(
+                        x: 15, y: 64, z: 15, face: Dir.north,
+                        cell: Int(cell(B.stone, 0))
+                    ),
+                    selectedHotbarSlot: 0,
+                    sequence: 1
+                ),
+                from: "peer-a",
+                to: world
+            ),
+            .rejected("target out of reach")
+        )
+        XCTAssertEqual(
+            session.applyInteractionIntent(
+                LANInteractionIntent(
+                    target: .block(
+                        x: 3, y: 64, z: 1, face: Dir.north,
+                        cell: Int(cell(B.dirt, 0))
+                    ),
+                    selectedHotbarSlot: 0,
+                    sequence: 2
+                ),
+                from: "peer-a",
+                to: world
+            ),
+            .rejected("stale target block")
+        )
+        XCTAssertEqual(
+            session.applyInteractionIntent(
+                LANInteractionIntent(
+                    target: .block(
+                        x: 3, y: 64, z: 1, face: Dir.north,
+                        cell: Int(cell(B.stone, 0))
+                    ),
+                    selectedHotbarSlot: 1,
+                    sequence: 3
+                ),
+                from: "peer-a",
+                to: world
+            ),
+            .rejected("selected item state unavailable")
+        )
+        XCTAssertEqual(eventCount, 0)
+    }
+
+    func testHostSessionInteractionSequenceResetsOnlyOnReconnect() {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 2.5, y: 64, z: 1.5)
+        forceSetBlock(world, x: 3, y: 64, z: 1, cell: Int(cell(B.stone, 0)))
+        let intent = LANInteractionIntent(
+            target: .block(
+                x: 3, y: 64, z: 1, face: Dir.north,
+                cell: Int(cell(B.stone, 0))
+            ),
+            selectedHotbarSlot: 0,
+            sequence: 1
+        )
+        var eventCount = 0
+        world.hooks.raiseScriptEvent = { kind, _, _, _, _ in
+            if kind == .blockUsed { eventCount += 1 }
+        }
+
+        XCTAssertEqual(
+            session.applyInteractionIntent(intent, from: "peer-a", to: world),
+            .raised
+        )
+        XCTAssertEqual(
+            session.applyInteractionIntent(intent, from: "peer-a", to: world),
+            .ignored("duplicate interaction")
+        )
+        session.disconnectPeer(playerID: "peer-a", tick: 1)
+        XCTAssertEqual(
+            session.acceptPeer(playerID: "peer-a", displayName: "Alex", tick: 2),
+            .reconnected
+        )
+        XCTAssertEqual(
+            session.applyInteractionIntent(intent, from: "peer-a", to: world),
+            .raised
+        )
+        XCTAssertEqual(eventCount, 2)
     }
 
     func testHostSessionRejectsOrIgnoresUnsupportedUseBlockIntentTargets() {
@@ -370,6 +574,21 @@ final class LANReplicationTests: XCTestCase {
             .rejected("permission denied: build")
         )
         XCTAssertEqual(
+            session.applyInteractionIntent(
+                LANInteractionIntent(
+                    target: .block(
+                        x: 2, y: 64, z: 1, face: Dir.north,
+                        cell: Int(cell(B.dirt, 0))
+                    ),
+                    selectedHotbarSlot: 0,
+                    sequence: 1
+                ),
+                from: "peer-a",
+                to: world
+            ),
+            .rejected("permission denied: build")
+        )
+        XCTAssertEqual(
             session.authorizeContainerIntent(LANContainerIntent(action: .open, containerID: "chest@2,64,1", slot: -1, button: 0, shift: false), from: "peer-a"),
             .rejected("permission denied: container")
         )
@@ -402,6 +621,21 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(
             session.applyBlockIntent(
                 LANBlockIntent(action: .breakBlock, x: 2, y: 64, z: 1, face: 1, selectedHotbarSlot: 0),
+                from: "peer-a",
+                to: world
+            ),
+            .rejected("player is dead")
+        )
+        XCTAssertEqual(
+            session.applyInteractionIntent(
+                LANInteractionIntent(
+                    target: .block(
+                        x: 2, y: 64, z: 1, face: Dir.north,
+                        cell: Int(cell(B.dirt, 0))
+                    ),
+                    selectedHotbarSlot: 0,
+                    sequence: 1
+                ),
                 from: "peer-a",
                 to: world
             ),

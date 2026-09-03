@@ -75,10 +75,11 @@ public struct DimState: Codable {
     }
 }
 
-/// single source of truth for the app version — the title screen, the F3
-/// overlay and save records all read this (Info.plist is bumped separately
-/// at packaging time)
-public let ELYSIUM_VERSION = "1.1.0"
+/// Single source of truth for the app version — the title screen, F3 overlay, save records, and
+/// strict LAN hello compatibility gate all read this (Info.plist is bumped separately at packaging
+/// time). Additive live-protocol message kinds therefore require an app-version bump even when the
+/// protocol number stays at v5, so mixed binaries reject one another before gameplay frames flow.
+public let ELYSIUM_VERSION = "1.1.1"
 
 /// Finite playable extents offered by the world creator. Terrain is still generated lazily,
 /// so choosing a larger map does not front-load generation or memory use. The maximum is the

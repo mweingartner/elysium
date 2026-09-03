@@ -175,6 +175,14 @@ public protocol GameHost: AnyObject {
     func setBossBars(_ bars: [BossBarInfo])
     // audio
     func playSound(_ name: String, _ x: Double, _ y: Double, _ z: Double, _ volume: Double, _ pitch: Double)
+    /// Deterministic, user-facing names available to scripts. Implementations must resolve names
+    /// inside their own managed catalog; scripts never provide filesystem paths.
+    func scriptSoundNames() -> [String]
+    /// Plays one managed or operating-system sound at the supplied world position. Returns false
+    /// when the name is unknown or playback could not be started.
+    @discardableResult
+    func playScriptSound(_ name: String, _ x: Double, _ y: Double, _ z: Double,
+                         _ volume: Double) -> Bool
     func playUI(_ name: String)
     func setAudioEnvironment(_ underwater: Bool, _ caveFactor: Double)
     func setAudioListener(_ x: Double, _ y: Double, _ z: Double, _ yaw: Double)
@@ -191,6 +199,10 @@ public protocol GameHost: AnyObject {
 }
 
 public extension GameHost {
+    func scriptSoundNames() -> [String] { [] }
+    @discardableResult
+    func playScriptSound(_ name: String, _ x: Double, _ y: Double, _ z: Double,
+                         _ volume: Double) -> Bool { false }
     func rpgLocalPreferenceDidRefresh(_ refresh: RPGLocalPreferenceUIRefresh) {}
 }
 
@@ -448,6 +460,9 @@ public final class GameCore {
     public var lanHostKeepsSimulationRunning = false
     private var lanClientResumeStorageKey: String?
     private var lanClientWorldSummary: LANWorldSummary?
+    /// Exposes only the host-published completion catalog to the scripting extension while keeping
+    /// the rest of the mutable LAN world summary encapsulated in `GameCore.swift`.
+    var lanClientScriptSoundNames: [String]? { lanClientWorldSummary?.scriptSoundNames }
     public private(set) var paused = false
     /// scripting-editor-ui (native SwiftUI script editor): the native editor window is not a
     /// `Screen` (it lives outside `UIManager`'s stack entirely, in its own `NSWindow`), so it
@@ -498,6 +513,10 @@ public final class GameCore {
     /// which cannot express "whole column" through `lanChunkRequestHandler`'s visible-band request.
     public var lanFullColumnRequestHandler: ((World, Int, Int) -> Bool)?
     public var lanBlockIntentHandler: ((LANBlockIntent) -> Void)?
+    /// Event-only secondary-use intent. Native LAN block mutations continue to use
+    /// `lanBlockIntentHandler`; keeping the semantic interaction separate guarantees one
+    /// host-authored script event even when the targeted object has no built-in use behavior.
+    public var lanInteractionIntentHandler: ((LANInteractionIntent) -> Void)?
     /// client → host gameplay intents (all additive, LAN-client-only)
     public var lanAttackIntentHandler: ((LANAttackIntent) -> Void)?
     public var lanTossIntentHandler: ((LANTossIntent) -> Void)?
@@ -522,6 +541,7 @@ public final class GameCore {
     private var lanLastPublishedInventory: LANPlayerInventorySnapshot?
     public private(set) var lanApplyingReplication = false
     private var lanContainerEditSeq = 0
+    private var lanInteractionSequence: UInt32 = 0
     private var lanToolStrikeSequence: UInt32 = 0
     /// Monotone left-button gesture id paired with tool-strike target transitions. Unlike the
     /// per-intent sequence, it changes only after release and a new accepted primary press.
@@ -1324,6 +1344,7 @@ public final class GameCore {
         lanLastPublishedInventory = nil
         lanApplyingReplication = false
         lanContainerEditSeq = 0
+        lanInteractionSequence = 0
         lanToolStrikeSequence = 0
         lanToolStrikeGesture = 0
         lanToolStrikeTarget = nil
@@ -2988,6 +3009,9 @@ public final class GameCore {
         guard isLANClientWorld else {
             return applyLANReplicationBatch(batch, to: world)
         }
+        if let publishedNames = batch.world?.scriptSoundNames {
+            lanClientWorldSummary?.scriptSoundNames = publishedNames
+        }
         var deferred = Optional(lanDeferredReplication)
         let report = applyLANReplicationBatch(batch, to: world, deferred: &deferred)
         let acceptedTick = max(rpgSimulationTick, batch.tick)
@@ -4560,7 +4584,14 @@ public final class GameCore {
     @discardableResult
     private func performLANClientUse() -> Bool {
         let p = player!
-        guard let hit = crosshairBlock() else { return false }
+        let sentInteraction = sendLANClientInteractionIntent()
+        guard let hit = crosshairBlock() else {
+            if sentInteraction {
+                p.attackAnim = 0.6
+                useCooldown = 4
+            }
+            return sentInteraction
+        }
         if openLANClientMirroredBlockScreen(hit) {
             p.attackAnim = 0.6
             useCooldown = 4
@@ -4588,7 +4619,41 @@ public final class GameCore {
                 }
             }
         }
-        return false
+        if sentInteraction {
+            p.attackAnim = 0.6
+            useCooldown = 4
+        }
+        return sentInteraction
+    }
+
+    /// Sends exactly one event-only semantic interaction for this use pulse. Native LAN actions
+    /// (openable mutation, container UI, placement) are intentionally separate and never publish
+    /// `block.used`/`entity.interacted` themselves.
+    private func sendLANClientInteractionIntent() -> Bool {
+        guard let handler = lanInteractionIntentHandler,
+              lanInteractionSequence < UInt32.max,
+              let p = player else { return false }
+        let entityReach = p.gameMode == GameMode.creative
+            ? REACH_CREATIVE - 1
+            : REACH_SURVIVAL - 1
+        let target: LANInteractionTarget
+        if let entity = crosshairSecondaryUseEntity(entityReach) {
+            guard let hostEntityID = entity.lanReplicationSourceID else { return false }
+            target = .entity(id: hostEntityID)
+        } else if let hit = crosshairBlock() {
+            target = .block(
+                x: hit.x, y: hit.y, z: hit.z, face: hit.face, cell: hit.cell
+            )
+        } else {
+            return false
+        }
+        lanInteractionSequence += 1
+        handler(LANInteractionIntent(
+            target: target,
+            selectedHotbarSlot: p.selectedSlot,
+            sequence: lanInteractionSequence
+        ))
+        return true
     }
 
     /// computes the placement target + orientation exactly as local placement would, and emits
@@ -5101,6 +5166,35 @@ public final class GameCore {
         return best
     }
 
+    /// The foremost non-player entity targeted by a secondary-use gesture. Unlike
+    /// `crosshairEntity`, this deliberately includes inert/decorative entity families: an
+    /// attached script is itself enough to make any live entity respond to right-click even when
+    /// its native `interact` implementation is the base no-op.
+    private func crosshairSecondaryUseEntity(_ maxDist: Double) -> Entity? {
+        let p = player!
+        let dx = -detSin(p.yaw) * detCos(p.pitch)
+        let dy = -detSin(p.pitch)
+        let dz = detCos(p.yaw) * detCos(p.pitch)
+        let ox = p.x, oy = p.eyeY(), oz = p.z
+        var best: Entity?
+        var bestT = maxDist
+        let blockT = world.raycast(ox, oy, oz, dx, dy, dz, maxDist)?.t ?? maxDist
+        for candidate in world.getEntitiesNear(ox, oy, oz, maxDist + 2) {
+            guard candidate !== p, !candidate.dead, let entity = candidate as? Entity,
+                  !entity.isPlayer else { continue }
+            let box = entity.bb()
+            if let t = rayBoxT(
+                ox, oy, oz, dx, dy, dz,
+                box.x0 - 0.1, box.y0 - 0.1, box.z0 - 0.1,
+                box.x1 + 0.1, box.y1 + 0.1, box.z1 + 0.1
+            ), t < bestT, t < blockT {
+                best = entity
+                bestT = t
+            }
+        }
+        return best
+    }
+
     private func doAttack() {
         let p = player!
         if p.dead || p.deathTime > 0 || (host?.hasScreen() ?? false) { return }
@@ -5174,44 +5268,51 @@ public final class GameCore {
         let p = player!
         if p.dead || p.deathTime > 0 || (host?.hasScreen() ?? false) { return }
         let ctx = interactCtx()
-        // entities first
-        let target = crosshairEntity(REACH_SURVIVAL - 1)
-        if let target, !p.sneaking {
-            let targetRef = scriptRef(for: target)
-            let targetType = target.type
-            let heldItemName = p.mainHand.map { itemDef($0.id).name }
-            if target.interact(p, p.mainHand) {
+        // Choose the semantic target once, before native behavior mutates held items or object
+        // state. The foremost entity owns the interaction event even when its native handler
+        // declines and gameplay subsequently falls through to the block/item paths.
+        let entityReach = p.gameMode == GameMode.creative
+            ? REACH_CREATIVE - 1
+            : REACH_SURVIVAL - 1
+        let semanticTarget = crosshairSecondaryUseEntity(entityReach)
+        // Preserve the pre-existing native interaction filter/reach. The broader semantic ray may
+        // select an inert projectile or decoration for scripting, but must not make that object
+        // steal or extend built-in interaction behavior.
+        let nativeTarget = crosshairEntity(REACH_SURVIVAL - 1)
+        let hit = crosshairBlock()
+        let heldItemName = p.mainHand.map { itemDef($0.id).name }
+        let eventTarget: (kind: EventKind, subject: ObjectRef, type: String)? = if let semanticTarget {
+            (.entityInteracted, scriptRef(for: semanticTarget), semanticTarget.type)
+        } else if let hit {
+            (.blockUsed, .block(dim: dim, x: hit.x, y: hit.y, z: hit.z), blockDefs[hit.cell >> 4].name)
+        } else {
+            nil
+        }
+        defer {
+            if !isLANClientWorld, let eventTarget {
+                let actor = p.scriptEventActorIdentity
+                eventBus.raise(
+                    kind: eventTarget.kind, subject: eventTarget.subject,
+                    payload: [
+                        "by": .ref(actor.ref.canonical),
+                        "item": heldItemName.map(AttrValue.string) ?? .null,
+                    ],
+                    source: actor.source, tick: Int64(rpgSimulationTick),
+                    subjectType: eventTarget.type
+                )
+            }
+        }
+
+        // Native entity behavior remains entity-first and keeps its existing sneak bypass.
+        if let nativeTarget, !p.sneaking {
+            if nativeTarget.interact(p, p.mainHand) {
                 p.attackAnim = 0.6
-                // event-bus (change 1b): `entity.interacted` (design.md §7.2,
-                // "Entity.interact (GameCore.doUse)"). Host-only (LAN clients
-                // never reach `doUse` for a real interact — they mirror
-                // through the intent path).
-                if !isLANClientWorld {
-                    eventBus.raise(
-                        kind: .entityInteracted, subject: targetRef,
-                        payload: ["by": .ref(ObjectRef.player.canonical), "item": heldItemName.map(AttrValue.string) ?? .null],
-                        source: .player, tick: Int64(rpgSimulationTick), subjectType: targetType
-                    )
-                }
                 return
             }
         }
-        let hit = crosshairBlock()
         if let hit, !p.sneaking || p.mainHand == nil {
-            let blockName = blockDefs[hit.cell >> 4].name
-            let heldItemName = p.mainHand.map { itemDef($0.id).name }
             if useBlock(ctx, hit) {
                 p.attackAnim = 0.6
-                // event-bus (change 1b): `block.used` (design.md §7.2, "a
-                // wrapper at the `useBlock` call site"). Host-only.
-                if !isLANClientWorld {
-                    eventBus.raise(
-                        kind: .blockUsed, subject: .block(dim: dim, x: hit.x, y: hit.y, z: hit.z),
-                        payload: ["by": .ref(ObjectRef.player.canonical), "item": heldItemName.map(AttrValue.string) ?? .null],
-                        source: .player, tick: Int64(rpgSimulationTick),
-                        subjectType: blockName
-                    )
-                }
                 return
             }
         }

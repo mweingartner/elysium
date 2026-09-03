@@ -744,6 +744,7 @@ final class LANV6HelloTests: XCTestCase {
             .chat, .ping, .pong, .disconnect, .inputIntent, .blockIntent,
             .containerIntent, .templateIntent, .chunkRequest, .replicationAck,
             .attackIntent, .tossIntent, .containerEditIntent, .keepalive, .rpgIntent,
+            .interactionIntent,
         ]
         let hostAuthenticatedOutbound: KindSet = [
             .chat, .playerState, .worldSummary, .ping, .pong, .disconnect,
@@ -755,7 +756,7 @@ final class LANV6HelloTests: XCTestCase {
             .chat, .ping, .pong, .disconnect, .inputIntent,
             .blockIntent, .containerIntent, .templateIntent, .chunkRequest,
             .replicationAck, .attackIntent, .tossIntent, .containerEditIntent,
-            .keepalive, .rpgIntent,
+            .keepalive, .rpgIntent, .interactionIntent,
         ]
 
         assertPolicy(

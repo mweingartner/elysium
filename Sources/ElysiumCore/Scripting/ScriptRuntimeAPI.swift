@@ -18,8 +18,10 @@
 //     script registered by name via `register(name, fn)` — not a bare
 //     global function lookup (Swift cannot read an arbitrary Lua global by
 //     name from outside a running call).
-//   * `sound(...)`/`particles(...)` are accepted (arguments validated
-//     loosely) but are no-ops in 1c — not wired to the renderer/audio layer.
+//   * `particles(...)` is accepted (arguments validated loosely) but remains
+//     a no-op — it is not yet wired to the renderer layer. `sound(name[, volume])`
+//     resolves only names supplied by the app-owned sound catalog; Lua never
+//     receives a path or filesystem capability.
 //   * `ai.ask`/`ai.await` are served by an injected, synchronous stub
 //     responder (§9.6's own "tests inject a stub broker") rather than the
 //     real Ollama tool loop, which is change 2.
@@ -78,9 +80,8 @@ extension ScriptRuntime {
             .function(name: "tick", HostFunction { [weak self] _ in .values([.int(self?.host.currentTick ?? 0)]) }),
             .function(name: "rng", HostFunction { [weak self] call in self?.hostRng(call) ?? .error("runtime unavailable") }),
             .function(name: "say", HostFunction { [weak self] call in self?.hostSay(call) ?? .error("runtime unavailable") }),
-            .function(name: "sound", HostFunction { [weak self] _ in
-                guard self?.unloadActive != true else { return .error("sound() is not available during unload") }
-                return .values([])
+            .function(name: "sound", HostFunction { [weak self] call in
+                self?.hostSound(call) ?? .error("runtime unavailable")
             }),
             .function(name: "particles", HostFunction { [weak self] _ in
                 guard self?.unloadActive != true else { return .error("particles() is not available during unload") }
@@ -1350,6 +1351,56 @@ extension ScriptRuntime {
         guard !dryRunActive else { return .values([]) }
         sayFn(ScriptingDisplayText.line(text))
         return .values([])
+    }
+
+    func hostSound(_ call: HostCall) -> HostResult {
+        guard !unloadActive else { return .error("sound() is not available during unload") }
+        guard let context = currentScript else { return .error("sound() outside script context") }
+        guard (1...2).contains(call.arguments.count),
+              case .value(.string(let rawName)) = call.arguments[0]
+        else { return .error("sound(name[, volume])") }
+
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.utf8.count <= 128,
+              !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+        else { return .error("sound name must contain 1...128 non-control UTF-8 bytes") }
+
+        let volume: Double
+        if call.arguments.count == 1 {
+            volume = 1
+        } else {
+            switch call.arguments[1] {
+            case .value(.int(let value)): volume = Double(value)
+            case .value(.number(let value)): volume = value
+            default: return .error("sound volume must be a number from 0 through 1")
+            }
+            guard volume.isFinite, (0...1).contains(volume) else {
+                return .error("sound volume must be a number from 0 through 1")
+            }
+        }
+
+        guard let canonicalName = host.scriptSoundNames().first(where: {
+            $0.compare(name, options: [.caseInsensitive], range: nil, locale: Locale(identifier: "en_US_POSIX"))
+                == .orderedSame
+        }) else {
+            return .error("unknown sound '\(name)'")
+        }
+        // Check exercises the exact argument and catalog validation above, but must never emit
+        // presentation output or consume the live tick's playback allowance.
+        guard !dryRunActive else { return .values([.bool(true)]) }
+
+        refreshSoundBudget()
+        let key = context.owner.canonical + "#" + context.name
+        let count = soundCounts[key, default: 0]
+        guard count < Self.maxSoundsPerScriptPerTick,
+              soundWorldCount < Self.maxSoundsPerWorldPerTick else {
+            return .error("sound playback budget exceeded this tick")
+        }
+        soundCounts[key] = count + 1
+        soundWorldCount += 1
+        return .values([.bool(host.playScriptSound(
+            named: canonicalName, volume: volume, owner: context.owner
+        ))])
     }
 
     func hostDim(_ call: HostCall) -> HostResult {

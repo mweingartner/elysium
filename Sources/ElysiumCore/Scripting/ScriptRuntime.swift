@@ -293,6 +293,13 @@ public final class ScriptRuntime {
     /// while repeated cross-object churn remains bounded per script and tick.
     private var eventDeclarationBudgetTick: Int64?
     var eventDeclarationCounts: [String: Int] = [:]
+    /// Presentation effects are non-deterministic host output, but calls still need deterministic
+    /// per-tick admission so a tiny script cannot create an unbounded number of audio players.
+    private var soundBudgetTick: Int64?
+    var soundCounts: [String: Int] = [:]
+    var soundWorldCount = 0
+    static let maxSoundsPerScriptPerTick = 8
+    static let maxSoundsPerWorldPerTick = 64
     /// One phase reconciles only a fixed canonical prefix of the host's exact dirty-ref queue.
     /// Hydration/mutation bursts retain their suffix at the host; no periodic whole-world census is
     /// required. Loading has a separate fixed budget because one ref may own up to eight scripts.
@@ -392,6 +399,7 @@ public final class ScriptRuntime {
         refreshInstructionBudget()
         refreshAttachDetachBudget()
         refreshEventDeclarationBudget()
+        refreshSoundBudget()
     }
 
     /// Tick-key the lifecycle budget at the mutation boundary as well as the ordinary phase entry.
@@ -412,6 +420,14 @@ public final class ScriptRuntime {
         guard eventDeclarationBudgetTick != tick else { return }
         eventDeclarationBudgetTick = tick
         eventDeclarationCounts.removeAll()
+    }
+
+    func refreshSoundBudget() {
+        let tick = host.currentTick
+        guard soundBudgetTick != tick else { return }
+        soundBudgetTick = tick
+        soundCounts.removeAll()
+        soundWorldCount = 0
     }
 
     // MARK: - scheduler helpers (shared with ScriptRuntimeAPI.swift)

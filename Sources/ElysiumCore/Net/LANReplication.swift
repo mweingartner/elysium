@@ -95,6 +95,15 @@ public enum LANBlockIntentResult: Equatable {
     case rejected(String)
 }
 
+/// Host disposition for the event-only semantic secondary-use intent. `raised` means the target
+/// still matched authoritative world state and exactly one script event was published; native
+/// object behavior is intentionally handled by its existing mutation intent.
+public enum LANInteractionIntentResult: Equatable {
+    case raised
+    case ignored(String)
+    case rejected(String)
+}
+
 /// Host-derived inputs needed to raise one `block.toolStrike` event. No tool or block metadata
 /// supplied by the guest survives into this value.
 public struct LANAuthorizedToolStrike: Equatable {
@@ -303,6 +312,9 @@ public final class LANMultiplayerHostSession {
         /// Event-only block strikes have their own semantic sequence. Wire-frame sequencing
         /// rejects duplicate packets; this rejects a peer replaying the action in fresh frames.
         var lastToolStrikeSequence: UInt32 = 0
+        /// Event-only secondary-use intents have an independent per-connection high-water mark.
+        /// This rejects semantic replays even when they arrive inside fresh transport frames.
+        var lastInteractionSequence: UInt32 = 0
         /// Highest valid left-button gesture observed in this connection epoch. Older gesture ids
         /// cannot be replayed with a fresh semantic sequence after a newer gesture was accepted.
         var lastToolStrikeGesture: UInt32 = 0
@@ -544,6 +556,7 @@ public final class LANMultiplayerHostSession {
             existing.disconnectedTick = nil
             existing.rpgConnectedAfterTick = max(0, min(RPG_MAX_COUNTER, tick))
             existing.lastToolStrikeSequence = 0
+            existing.lastInteractionSequence = 0
             existing.lastToolStrikeGesture = 0
             existing.lastToolStrikeTarget = nil
             peers[playerID] = existing
@@ -1375,35 +1388,107 @@ public final class LANMultiplayerHostSession {
             )
             return .applied([change])
         case .useBlock:
-            let targetCell = world.getBlock(intent.x, intent.y, intent.z)
-            let result = applyOpenableBlockUseIntent(
+            return applyOpenableBlockUseIntent(
                 intent, playerState: playerState, to: world
             )
-            guard case .applied = result,
-                  isValidLANReplicatedCell(targetCell), targetCell != 0
-            else { return result }
-            let blockName = blockDefs[targetCell >> 4].name
-            let heldSlot = peer.inventory?.slots.first {
-                $0.slot == playerState.selectedHotbarSlot
-            }
-            let heldItem: AttrValue
-            if let heldSlot, heldSlot.itemID >= 0, heldSlot.itemID < itemDefs.count {
-                heldItem = .string(itemDef(heldSlot.itemID).name)
-            } else {
-                heldItem = .null
-            }
-            let actor = ScriptEventActorIdentity.lanPlayer(peerID: playerID)
-            world.hooks.raiseScriptEvent(
-                .blockUsed,
-                .block(dim: world.dim, x: intent.x, y: intent.y, z: intent.z),
-                ["by": .ref(actor.ref.canonical), "item": heldItem],
-                actor.source,
-                blockName
-            )
-            return result
         case .toolStrike:
             return .ignored("tool strike is event-only")
         }
+    }
+
+    /// Validates and raises exactly one host-authoritative secondary-use event. The target carries
+    /// only stable identity data; the host derives its type and held-item payload from current
+    /// authoritative state. Sequence admission happens before target validation so replaying an
+    /// invalid intent cannot become valid later in the same connection epoch. As with the existing
+    /// LAN block/attack intent trust model, the host bounds reach but does not reconstruct a guest
+    /// ray from asynchronously published yaw/pitch; therefore occlusion is not authority-verified.
+    public func applyInteractionIntent(
+        _ intent: LANInteractionIntent,
+        from rawPlayerID: String,
+        to world: World
+    ) -> LANInteractionIntentResult {
+        let playerID = String(rawPlayerID.prefix(128))
+        guard var peer = peers[playerID] else { return .rejected("unknown player") }
+        switch authorize(.build, from: playerID) {
+        case .accepted: break
+        case .rejected(let reason): return .rejected(reason)
+        }
+        guard intent.sequence > 0 else { return .rejected("invalid interaction sequence") }
+        guard intent.sequence > peer.lastInteractionSequence else {
+            return .ignored("duplicate interaction")
+        }
+        peer.lastInteractionSequence = intent.sequence
+        peers[playerID] = peer
+
+        guard let playerState = peer.playerState else {
+            return .rejected("player state unavailable")
+        }
+        guard playerState.dimension == world.dim.rawValue else {
+            return .rejected("target dimension unavailable")
+        }
+        guard let inventory = peer.inventory,
+              intent.selectedHotbarSlot == playerState.selectedHotbarSlot,
+              inventory.selectedHotbarSlot == playerState.selectedHotbarSlot else {
+            return .rejected("selected item state unavailable")
+        }
+        let heldItem: AttrValue
+        if let held = inventory.slots.first(where: {
+            $0.slot == playerState.selectedHotbarSlot && $0.count > 0
+        }) {
+            guard held.itemID >= 0, held.itemID < itemDefs.count else {
+                return .rejected("selected item state unavailable")
+            }
+            heldItem = .string(itemDef(held.itemID).name)
+        } else {
+            heldItem = .null
+        }
+
+        let eventKind: EventKind
+        let subject: ObjectRef
+        let subjectType: String
+        switch intent.target {
+        case .block(let x, let y, let z, let face, let expectedCell):
+            guard DIR_NAMES.indices.contains(face) else {
+                return .rejected("invalid target face")
+            }
+            guard isWithinLANReach(playerState, x: x, y: y, z: z) else {
+                return .rejected("target out of reach")
+            }
+            let currentCell = world.getBlock(x, y, z)
+            guard currentCell != 0, isValidLANReplicatedCell(currentCell) else {
+                return .rejected("target block unavailable")
+            }
+            guard currentCell == expectedCell else {
+                return .rejected("stale target block")
+            }
+            eventKind = .blockUsed
+            subject = .block(dim: world.dim, x: x, y: y, z: z)
+            subjectType = blockDefs[currentCell >> 4].name
+        case .entity(let id):
+            guard id > 0,
+                  let entity = world.entityById[id] as? Entity,
+                  entity.id == id,
+                  entity.world === world,
+                  !entity.dead,
+                  !entity.isPlayer,
+                  !entity.lanReplicatedMirror else {
+                return .rejected("target entity unavailable")
+            }
+            guard isWithinLANReach(playerState, entity: entity) else {
+                return .rejected("target out of reach")
+            }
+            eventKind = .entityInteracted
+            subject = scriptRef(for: entity)
+            subjectType = entity.type
+        }
+
+        let actor = ScriptEventActorIdentity.lanPlayer(peerID: playerID)
+        world.hooks.raiseScriptEvent(
+            eventKind, subject,
+            ["by": .ref(actor.ref.canonical), "item": heldItem],
+            actor.source, subjectType
+        )
+        return .raised
     }
 
     /// Validates and applies a block-entity container edit (D-C): authorizes `.container`,
@@ -3531,6 +3616,18 @@ public func isWithinLANReach(_ player: LANPlayerState, x: Int, y: Int, z: Int) -
     let dx = Double(x) + 0.5 - player.x
     let dy = Double(y) + 0.5 - eyeY
     let dz = Double(z) + 0.5 - player.z
+    let reach = player.gameMode == GameMode.creative ? 8.0 : 6.0
+    return dx * dx + dy * dy + dz * dz <= reach * reach
+}
+
+private func isWithinLANReach(_ player: LANPlayerState, entity: Entity) -> Bool {
+    let bounds = entity.bb()
+    let targetX = (bounds.x0 + bounds.x1) * 0.5
+    let targetY = (bounds.y0 + bounds.y1) * 0.5
+    let targetZ = (bounds.z0 + bounds.z1) * 0.5
+    let dx = targetX - player.x
+    let dy = targetY - (player.y + PLAYER_EYE)
+    let dz = targetZ - player.z
     let reach = player.gameMode == GameMode.creative ? 8.0 : 6.0
     return dx * dx + dy * dy + dz * dz <= reach * reach
 }

@@ -111,6 +111,7 @@ struct ScriptEditorView: View {
                 targetApplicableBuiltInAttributes: model.languageEnvironment.targetApplicableBuiltInAttributes,
                 targetCustomAttributes: model.languageEnvironment.targetCustomAttributes,
                 objectReferences: model.languageEnvironment.objectReferences,
+                soundNames: model.languageEnvironment.soundNames,
                 scriptMode: model.languageEnvironment.scriptMode,
                 handlerEvent: model.languageEnvironment.handlerEvent,
                 eventCandidates: model.languageEnvironment.eventCandidates,

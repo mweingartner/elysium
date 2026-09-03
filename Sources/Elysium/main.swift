@@ -196,6 +196,23 @@ final class HostBridge: GameHost {
         }
         app.audio.play(name, x, y, z, volume, pitch)
     }
+    func scriptSoundNames() -> [String] {
+        guard let app else { return [] }
+        return elysiumMainActorSync { app.scriptSoundLibrary.names }
+    }
+    @discardableResult
+    func playScriptSound(
+        _ name: String, _ x: Double, _ y: Double, _ z: Double, _ volume: Double
+    ) -> Bool {
+        guard let app else { return false }
+        return elysiumMainActorSync {
+            let library = app.scriptSoundLibrary
+            guard library.contains(name: name) else { return false }
+            guard let mix = app.audio.scriptSampleMix(x, y, z, volume),
+                  mix.volume > 0.001 else { return false }
+            return library.play(name: name, volume: mix.volume, pan: mix.pan)
+        }
+    }
     func playUI(_ name: String) { app?.audio.playUI(name) }
     func setAudioEnvironment(_ underwater: Bool, _ caveFactor: Double) {
         app?.audio.setEnvironment(underwater, caveFactor)
@@ -522,6 +539,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     var ui: UIManager!
     let hud = HUD()
     let audio = AudioEngineM()
+    @MainActor lazy var scriptSoundLibrary = ScriptSoundLibrary()
     private var rpgControllerAdapter: RPGControllerAdapter!
     lazy var realityDerivedCoordinator = RealityDerivedCoordinator(owner: self)
     // native SwiftUI script editor (Stage A): lazy, `RealityDerivedCoordinator`'s own ownership

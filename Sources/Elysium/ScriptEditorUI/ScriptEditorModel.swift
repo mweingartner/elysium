@@ -281,6 +281,9 @@ final class ScriptEditorModel: ObservableObject {
     @Published private(set) var aiReadinessState: ScriptEditorAIReadinessState = .idle
     @Published private(set) var externalEditorEdit: LuaEditorExternalEdit?
     @Published private(set) var documentIdentity: UInt64 = 0
+    /// Invalidates the computed language environment when Options imports or deletes a sound
+    /// while this native editor window remains open.
+    @Published private(set) var soundCatalogRevision: UInt64 = 0
     @Published private(set) var isWorldSessionActive: Bool
     @Published private(set) var scriptingAvailability: ScriptEditorScriptingAvailability =
         .runtimeUnavailable(.worldSessionEnded)
@@ -302,6 +305,7 @@ final class ScriptEditorModel: ObservableObject {
     private var externalEditorEditSequence: UInt64 = 0
     private var isApplyingAISuggestion = false
     private var worldSessionObserver: AnyCancellable?
+    private var soundCatalogObserver: AnyCancellable?
 
     var isLANGuest: Bool { openedAsLANGuest }
 
@@ -386,6 +390,13 @@ final class ScriptEditorModel: ObservableObject {
             .sink { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.disconnectFromWorldSession()
+            }
+        }
+        soundCatalogObserver = NotificationCenter.default
+            .publisher(for: .elysiumScriptSoundCatalogDidChange)
+            .sink { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.soundCatalogRevision &+= 1
             }
         }
         refreshScriptingAvailability()
@@ -522,6 +533,7 @@ final class ScriptEditorModel: ObservableObject {
                     customAttributes: entry.attributeCompletions
                 )
             },
+            soundNames: game.scriptSoundNames(),
             scriptMode: mode,
             handlerEvent: mode == .handler ? handlerEvent : nil,
             eventCandidates: handlerEventCandidates,

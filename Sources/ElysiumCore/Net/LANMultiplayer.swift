@@ -19,6 +19,12 @@ public let LAN_MULTIPLAYER_MAX_HANDSHAKING_HOST_SOCKETS = LAN_MULTIPLAYER_MAX_CL
 public let LAN_MULTIPLAYER_MAX_PLAYER_NAME_CHARS = 32
 public let LAN_MULTIPLAYER_MAX_CHAT_BYTES = 512
 public let LAN_MULTIPLAYER_MAX_WORLD_NAME_CHARS = 64
+/// The host's script-sound catalog is mirrored to guests for editor completion. The local app
+/// currently exposes at most 256 managed WAVs plus the finite macOS system catalog; this bound
+/// leaves headroom while keeping a hostile summary well below the authenticated frame ceiling.
+public let LAN_MULTIPLAYER_MAX_SCRIPT_SOUND_NAMES = 512
+public let LAN_MULTIPLAYER_MAX_SCRIPT_SOUND_NAME_BYTES = 128
+public let LAN_MULTIPLAYER_MAX_SCRIPT_SOUND_CATALOG_BYTES = 65_536
 public let LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES = 4096
 public let LAN_MULTIPLAYER_MAX_REPLICATION_CHUNK_SECTIONS = 32
 public let LAN_MULTIPLAYER_MAX_REPLICATION_ENTITIES = 512
@@ -148,6 +154,9 @@ public enum LANMultiplayerMessageKind: UInt16, Codable, Equatable, CaseIterable 
     /// past `rpgIntent` (26) so the gap itself documents "reserved, do not
     /// reuse" for any protocol-5 kind that never shipped.
     case scriptIntent = 30
+    /// Event-only, replay-safe player secondary-use target. Kept distinct from block mutation
+    /// intents because it also names entities and must never duplicate native-use producers.
+    case interactionIntent = 31
 
     /// Guest-originated messages whose authoritative handling can mutate gameplay state.
     /// The LAN transport holds these messages while the bounded RPG authority clock is
@@ -158,7 +167,7 @@ public enum LANMultiplayerMessageKind: UInt16, Codable, Equatable, CaseIterable 
         switch self {
         case .playerState, .inputIntent, .blockIntent, .containerIntent,
              .templateIntent, .attackIntent, .tossIntent, .containerEditIntent,
-             .inventoryUpdate, .rpgIntent, .scriptIntent:
+             .inventoryUpdate, .rpgIntent, .scriptIntent, .interactionIntent:
             return true
         case .clientHello, .serverAccept, .serverReject, .chat, .worldSummary,
              .ping, .pong, .disconnect, .replicationBatch, .chunkRequest,
@@ -196,7 +205,8 @@ public func lanMultiplayerAllowsInbound(
         case .chat, .playerState, .ping, .pong, .disconnect, .inputIntent,
              .blockIntent, .containerIntent, .templateIntent, .chunkRequest,
              .replicationAck, .attackIntent, .tossIntent, .containerEditIntent,
-             .inventoryUpdate, .keepalive, .rpgIntent, .scriptIntent:
+             .inventoryUpdate, .keepalive, .rpgIntent, .scriptIntent,
+             .interactionIntent:
             return true
         case .clientHello, .serverAccept, .serverReject, .worldSummary,
              .replicationBatch, .gameplayEvent, .inventoryGrant, .restoreState,
@@ -212,7 +222,7 @@ public func lanMultiplayerAllowsInbound(
         case .clientHello, .serverAccept, .serverReject, .inputIntent,
              .blockIntent, .containerIntent, .templateIntent, .chunkRequest,
              .replicationAck, .attackIntent, .tossIntent, .containerEditIntent,
-             .inventoryUpdate, .rpgIntent, .scriptIntent:
+             .inventoryUpdate, .rpgIntent, .scriptIntent, .interactionIntent:
             return false
         }
     }
@@ -250,7 +260,8 @@ public func lanMultiplayerHostRateLimitCategory(
         return .heartbeat
     case .chunkRequest:
         return .chunkRequest
-    case .blockIntent, .containerIntent, .templateIntent, .attackIntent, .tossIntent, .rpgIntent:
+    case .blockIntent, .containerIntent, .templateIntent, .attackIntent, .tossIntent, .rpgIntent,
+         .interactionIntent:
         return .gameplayIntent
     case .inventoryUpdate:
         return .inventoryUpdate
@@ -450,6 +461,7 @@ public struct LANWorldSummary: Codable, Equatable {
         case maxPlayers
         case elysiumVersion
         case rpgClassesEnabled
+        case scriptSoundNames
     }
 
     public var worldID: String
@@ -462,6 +474,12 @@ public struct LANWorldSummary: Codable, Equatable {
     public var maxPlayers: Int
     public var elysiumVersion: String
     public var rpgClassesEnabled: Bool
+    /// Ordered exactly as the host editor presents it: imported WAVs before macOS built-ins.
+    /// Guest script execution remains host-authoritative, so guests must complete against this
+    /// catalog rather than the sounds installed on their own Mac.
+    public var scriptSoundNames: [String] {
+        didSet { scriptSoundNames = sanitizedLANScriptSoundNames(scriptSoundNames) }
+    }
 
     public init(
         worldID: String,
@@ -473,7 +491,8 @@ public struct LANWorldSummary: Codable, Equatable {
         playerCount: Int,
         maxPlayers: Int = LAN_MULTIPLAYER_MAX_CLIENTS,
         elysiumVersion: String = ELYSIUM_VERSION,
-        rpgClassesEnabled: Bool = true
+        rpgClassesEnabled: Bool = true,
+        scriptSoundNames: [String] = []
     ) {
         self.worldID = String(worldID.prefix(128))
         self.worldName = sanitizedLANWorldName(worldName)
@@ -485,6 +504,7 @@ public struct LANWorldSummary: Codable, Equatable {
         self.maxPlayers = max(1, min(LAN_MULTIPLAYER_MAX_CLIENTS, maxPlayers))
         self.elysiumVersion = elysiumVersion
         self.rpgClassesEnabled = rpgClassesEnabled
+        self.scriptSoundNames = sanitizedLANScriptSoundNames(scriptSoundNames)
     }
 
     public init(from decoder: Decoder) throws {
@@ -499,9 +519,37 @@ public struct LANWorldSummary: Codable, Equatable {
             playerCount: try c.decode(Int.self, forKey: .playerCount),
             maxPlayers: try c.decodeIfPresent(Int.self, forKey: .maxPlayers) ?? LAN_MULTIPLAYER_MAX_CLIENTS,
             elysiumVersion: try c.decodeIfPresent(String.self, forKey: .elysiumVersion) ?? ELYSIUM_VERSION,
-            rpgClassesEnabled: try c.decodeIfPresent(Bool.self, forKey: .rpgClassesEnabled) ?? true
+            rpgClassesEnabled: try c.decodeIfPresent(Bool.self, forKey: .rpgClassesEnabled) ?? true,
+            scriptSoundNames: try c.decodeIfPresent([String].self, forKey: .scriptSoundNames) ?? []
         )
     }
+}
+
+private func sanitizedLANScriptSoundNames(_ rawNames: [String]) -> [String] {
+    let locale = Locale(identifier: "en_US_POSIX")
+    var names: [String] = []
+    var seen: Set<String> = []
+    var aggregateBytes = 0
+    names.reserveCapacity(min(rawNames.count, LAN_MULTIPLAYER_MAX_SCRIPT_SOUND_NAMES))
+
+    for raw in rawNames.prefix(LAN_MULTIPLAYER_MAX_SCRIPT_SOUND_NAMES) {
+        let name = raw.precomposedStringWithCanonicalMapping
+        guard !name.isEmpty,
+              name.utf8.count <= LAN_MULTIPLAYER_MAX_SCRIPT_SOUND_NAME_BYTES,
+              !name.contains("/"), !name.contains("\\"), !name.contains("\0"),
+              name.unicodeScalars.allSatisfy({ scalar in
+                  !CharacterSet.controlCharacters.contains(scalar)
+                      && !CharacterSet.newlines.contains(scalar)
+                      && scalar.properties.generalCategory != .format
+              }) else { continue }
+        let nextBytes = aggregateBytes + name.utf8.count
+        guard nextBytes <= LAN_MULTIPLAYER_MAX_SCRIPT_SOUND_CATALOG_BYTES else { break }
+        let key = name.folding(options: [.caseInsensitive], locale: locale)
+        guard seen.insert(key).inserted else { continue }
+        names.append(name)
+        aggregateBytes = nextBytes
+    }
+    return names
 }
 
 public func sanitizedLANWorldIdentifier(_ raw: String, maxLength: Int = 48) -> String {
@@ -645,6 +693,125 @@ public struct LANInputIntent: Codable, Equatable {
         self.yaw = yaw.isFinite ? yaw : 0
         self.pitch = pitch.isFinite ? max(-.pi / 2, min(.pi / 2, pitch)) : 0
         self.selectedHotbarSlot = max(0, min(8, selectedHotbarSlot))
+    }
+}
+
+/// One player secondary-use target. This is event-only: native block/entity gameplay remains on
+/// its existing authoritative intent paths, so one input pulse cannot double-publish a script
+/// interaction event.
+public enum LANInteractionTarget: Equatable, Sendable {
+    case block(x: Int, y: Int, z: Int, face: Int, cell: Int)
+    case entity(id: Int)
+}
+
+public struct LANInteractionIntent: Codable, Equatable, Sendable {
+    private enum TargetKind: String, Codable {
+        case block
+        case entity
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case targetKind
+        case x
+        case y
+        case z
+        case face
+        case cell
+        case entityID
+        case selectedHotbarSlot
+        case sequence
+    }
+
+    public var target: LANInteractionTarget
+    public var selectedHotbarSlot: Int
+    /// Connection-epoch monotone semantic sequence. The host keeps a per-peer high-water mark so
+    /// a captured intent cannot be replayed inside a fresh transport frame.
+    public var sequence: UInt32
+
+    public init(target: LANInteractionTarget, selectedHotbarSlot: Int, sequence: UInt32) {
+        switch target {
+        case .block(let x, let y, let z, let face, let cell):
+            self.target = .block(
+                x: x, y: y, z: z,
+                face: max(0, min(5, face)),
+                cell: max(0, min(Int(UInt16.max), cell))
+            )
+        case .entity(let id):
+            self.target = .entity(id: max(0, id))
+        }
+        self.selectedHotbarSlot = max(0, min(8, selectedHotbarSlot))
+        self.sequence = sequence
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try values.decode(TargetKind.self, forKey: .targetKind)
+        let selectedHotbarSlot = try values.decode(Int.self, forKey: .selectedHotbarSlot)
+        guard (0...8).contains(selectedHotbarSlot) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .selectedHotbarSlot, in: values,
+                debugDescription: "Interaction-intent hotbar slot must be in 0...8"
+            )
+        }
+        let sequence = try values.decode(UInt32.self, forKey: .sequence)
+        guard sequence > 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .sequence, in: values,
+                debugDescription: "Interaction-intent sequence must be positive"
+            )
+        }
+        let target: LANInteractionTarget
+        switch kind {
+        case .block:
+            let x = try values.decode(Int.self, forKey: .x)
+            let y = try values.decode(Int.self, forKey: .y)
+            let z = try values.decode(Int.self, forKey: .z)
+            let face = try values.decode(Int.self, forKey: .face)
+            guard (0...5).contains(face) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .face, in: values,
+                    debugDescription: "Interaction-intent face must be in 0...5"
+                )
+            }
+            let cell = try values.decode(Int.self, forKey: .cell)
+            guard cell > 0, cell <= Int(UInt16.max) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .cell, in: values,
+                    debugDescription: "Interaction-intent cell must be in 1...65535"
+                )
+            }
+            target = .block(x: x, y: y, z: z, face: face, cell: cell)
+        case .entity:
+            let entityID = try values.decode(Int.self, forKey: .entityID)
+            guard entityID > 0 else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .entityID, in: values,
+                    debugDescription: "Interaction-intent entity id must be positive"
+                )
+            }
+            target = .entity(id: entityID)
+        }
+        self.target = target
+        self.selectedHotbarSlot = selectedHotbarSlot
+        self.sequence = sequence
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(selectedHotbarSlot, forKey: .selectedHotbarSlot)
+        try values.encode(sequence, forKey: .sequence)
+        switch target {
+        case .block(let x, let y, let z, let face, let cell):
+            try values.encode(TargetKind.block, forKey: .targetKind)
+            try values.encode(x, forKey: .x)
+            try values.encode(y, forKey: .y)
+            try values.encode(z, forKey: .z)
+            try values.encode(face, forKey: .face)
+            try values.encode(cell, forKey: .cell)
+        case .entity(let id):
+            try values.encode(TargetKind.entity, forKey: .targetKind)
+            try values.encode(id, forKey: .entityID)
+        }
     }
 }
 
@@ -2046,6 +2213,7 @@ public enum LANMultiplayerMessage: Codable, Equatable {
     case keepalive
     case rpgIntent(playerID: String, intent: LANRPGIntent)
     case scriptIntent(playerID: String, intent: LANScriptIntent)
+    case interactionIntent(playerID: String, intent: LANInteractionIntent)
 
     public var kind: LANMultiplayerMessageKind {
         switch self {
@@ -2076,6 +2244,7 @@ public enum LANMultiplayerMessage: Codable, Equatable {
         case .keepalive: return .keepalive
         case .rpgIntent: return .rpgIntent
         case .scriptIntent: return .scriptIntent
+        case .interactionIntent: return .interactionIntent
         }
     }
 
@@ -2090,7 +2259,7 @@ public enum LANMultiplayerMessage: Codable, Equatable {
              .chunkRequest(let playerID, _), .replicationAck(let playerID, _),
              .attackIntent(let playerID, _), .tossIntent(let playerID, _),
              .containerEditIntent(let playerID, _), .rpgIntent(let playerID, _),
-             .scriptIntent(let playerID, _):
+             .scriptIntent(let playerID, _), .interactionIntent(let playerID, _):
             return playerID
         case .inventoryUpdate(let update): return update.playerID
         case .clientHello, .serverAccept, .serverReject, .chat, .worldSummary,

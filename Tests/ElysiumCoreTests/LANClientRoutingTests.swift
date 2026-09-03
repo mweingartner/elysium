@@ -189,6 +189,60 @@ final class LANClientRoutingTests: XCTestCase {
         XCTAssertEqual(game.world.getBlock(8, 66, 9), 0)
     }
 
+    func testRightClickInertBlockEmitsOneSemanticInteractionPerUsePulse() {
+        let game = makeLANClientGame()
+        var interactions: [LANInteractionIntent] = []
+        var mutations: [LANBlockIntent] = []
+        game.lanInteractionIntentHandler = { interactions.append($0) }
+        game.lanBlockIntentHandler = { mutations.append($0) }
+
+        game.mouseDown(2)
+
+        XCTAssertEqual(interactions, [
+            LANInteractionIntent(
+                target: .block(
+                    x: 8, y: 66, z: 10, face: Dir.north,
+                    cell: Int(cell(B.stone, 0))
+                ),
+                selectedHotbarSlot: 0,
+                sequence: 1
+            ),
+        ])
+        XCTAssertTrue(mutations.isEmpty, "inert block use is event-only")
+
+        for _ in 0..<4 { stepOneTick(game) }
+        XCTAssertEqual(interactions.count, 1)
+        stepOneTick(game)
+        XCTAssertEqual(interactions.map(\.sequence), [1, 2])
+        XCTAssertTrue(mutations.isEmpty)
+        game.mouseUp(2)
+    }
+
+    func testRightClickForemostInertEntityTargetsItsAuthoritativeHostID() {
+        let game = makeLANClientGame()
+        let mirror = Entity(world: game.world)
+        mirror.lanReplicatedMirror = true
+        mirror.lanReplicationSourceID = 888
+        mirror.setPos(8.5, 65.3, 9.5)
+        game.world.addEntity(mirror)
+        var interactions: [LANInteractionIntent] = []
+        var mutations: [LANBlockIntent] = []
+        game.lanInteractionIntentHandler = { interactions.append($0) }
+        game.lanBlockIntentHandler = { mutations.append($0) }
+
+        game.mouseDown(2)
+
+        XCTAssertEqual(interactions, [
+            LANInteractionIntent(
+                target: .entity(id: 888),
+                selectedHotbarSlot: 0,
+                sequence: 1
+            ),
+        ])
+        XCTAssertTrue(mutations.isEmpty)
+        game.mouseUp(2)
+    }
+
     // MARK: - toss
 
     func testDropKeyEmitsTossIntentAndDecrementsLocalSlotOptimistically() {

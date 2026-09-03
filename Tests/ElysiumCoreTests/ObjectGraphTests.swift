@@ -19,6 +19,8 @@ final class FakeObjectGraphHost: ObjectGraphHost {
     var gameRuleWrites: [(String, Double)] = []
     var scriptDefinitionGeneration: UInt64 = 0
     var scriptDefinitionChanges = ScriptDefinitionChangeIndex()
+    var availableScriptSounds: [String] = []
+    var playedScriptSounds: [(name: String, volume: Double, owner: ObjectRef)] = []
 
     func world(for dim: Dim) -> World? { worldsByDim[dim] }
 
@@ -34,6 +36,12 @@ final class FakeObjectGraphHost: ObjectGraphHost {
     }
     func drainDirtyScriptDefinitionRefs(limit: Int) -> [ObjectRef] {
         scriptDefinitionChanges.drain(limit: limit)
+    }
+    func scriptSoundNames() -> [String] { availableScriptSounds }
+    func playScriptSound(named name: String, volume: Double, owner: ObjectRef) -> Bool {
+        guard availableScriptSounds.contains(name) else { return false }
+        playedScriptSounds.append((name, volume, owner))
+        return true
     }
 }
 

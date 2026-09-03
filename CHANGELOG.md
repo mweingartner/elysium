@@ -5,6 +5,13 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Made secondary use a script event for every targeted live block or non-player entity, including
+  objects with no native use behavior, with host-validated replay-safe LAN forwarding. Added the
+  bounded `sound(name[, volume])` Lua API, a managed WAV import/preview/delete screen under Audio
+  options, completion from imported and dynamically discovered macOS sound names, and host-catalog
+  completion for LAN guests. Bumped the app compatibility version to 1.1.1 so older protocol-v5
+  binaries reject the new interaction message during the exact-version handshake.
+
 - Replaced every held pickaxe's flat procedural silhouette with a material-correct Blender render of
   the pinned CC0 tfwa.games voxel mesh. Removed the per-axis strike-scaling mechanism that visibly
   deformed held art during use, leaving only translation and rigid rotation. Added deterministic

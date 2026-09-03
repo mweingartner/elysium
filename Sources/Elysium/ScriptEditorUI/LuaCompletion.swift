@@ -170,6 +170,66 @@ enum LuaCompletion {
         }
     }
 
+    static func soundNameItems(names: [String], quoted: Bool) -> [LuaCompletionItem] {
+        names.enumerated().map { index, name in
+            LuaCompletionItem(
+                label: name,
+                insertionText: quoted ? name : luaQuotedString(name),
+                kind: .value,
+                detail: "playable sound",
+                documentation: "A currently available imported or macOS system sound.",
+                source: .elysium,
+                isReadOnly: true,
+                sortPriority: index
+            )
+        }
+    }
+
+    private static func luaQuotedString(_ value: String) -> String {
+        var result = "\""
+        for scalar in value.unicodeScalars {
+            switch scalar.value {
+            case 0x22: result += "\\\""
+            case 0x5C: result += "\\\\"
+            case 0x0A: result += "\\n"
+            case 0x0D: result += "\\r"
+            case 0x09: result += "\\t"
+            default: result.unicodeScalars.append(scalar)
+            }
+        }
+        result += "\""
+        return result
+    }
+
+    /// Sound catalogs can contain more entries than the popup limit. Match quality must win once
+    /// the user types (an exact built-in should not lose to a weakly matching earlier import),
+    /// while the app-owned imported-first catalog order is the deterministic tie-break and the
+    /// order shown for an empty prefix.
+    static func rankSoundNames(
+        items: [LuaCompletionItem], prefix: String, limit: Int = 50
+    ) -> [LuaCompletionItem] {
+        var unique: [String: LuaCompletionItem] = [:]
+        for item in items {
+            if let current = unique[item.label], current.sortPriority <= item.sortPriority {
+                continue
+            }
+            unique[item.label] = item
+        }
+        let scored = unique.values.compactMap { item -> (LuaCompletionItem, Int)? in
+            guard let match = matchScore(label: item.label, prefix: prefix) else { return nil }
+            return (item, match)
+        }
+        return scored.sorted { lhs, rhs in
+            if lhs.1 != rhs.1 { return lhs.1 < rhs.1 }
+            if lhs.0.sortPriority != rhs.0.sortPriority {
+                return lhs.0.sortPriority < rhs.0.sortPriority
+            }
+            let compare = lhs.0.label.localizedCaseInsensitiveCompare(rhs.0.label)
+            if compare != .orderedSame { return compare == .orderedAscending }
+            return lhs.0.id < rhs.0.id
+        }.prefix(limit).map(\.0)
+    }
+
     static func signature(for callee: String, activeParameter: Int = 0) -> LuaCatalogSignature? {
         let normalized: (parent: String?, name: String)
         if let separator = callee.lastIndex(where: { $0 == "." || $0 == ":" }) {

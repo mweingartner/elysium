@@ -439,10 +439,140 @@ final class EventBusFunnelTests: XCTestCase {
         chunk.set(8, 66, 10, cell(B.cauldron))
         game.player.mainHand = ItemStack(iid("water_bucket"), 1)
         game.mouseDown(2)
-        let event = game.eventBus.recentEvents().last { $0.kind == .blockUsed }
+        let events = game.eventBus.recentEvents().filter { $0.kind == .blockUsed }
+        let event = events.last
+        XCTAssertEqual(events.count, 1, "one interactive use pulse must publish exactly once")
         XCTAssertEqual(game.player.mainHand.map { itemDef($0.id).name }, "bucket")
         XCTAssertEqual(event?.payload["item"], .string("water_bucket"))
         XCTAssertEqual(event?.subjectType, "cauldron")
+    }
+
+    func testInertBlockSecondaryUseRunsItsAttachedHandlerAndRepeatsOncePerPulse() throws {
+        let game = makeGameInWorld(label: "inert-block-use")
+        _ = prepareMiningWall(in: game)
+        let block = ObjectRef.block(dim: .overworld, x: 8, y: 66, z: 10)
+        let scripts = ScriptStore(graph: ObjectGraph(host: game))
+        _ = try scripts.attach(
+            block,
+            name: "use_counter",
+            source: "self.attrs.use_count = (self.attrs.use_count or 0) + 1",
+            mode: .handler,
+            triggers: [Trigger(event: .blockUsed, attribute: nil, target: .object(block))],
+            by: .player,
+            tick: 0
+        ).get()
+        game.scripting.anyScriptsAttached = true
+        game.runEventBusPhase()
+
+        game.mouseDown(2)
+        game.runEventBusPhase()
+
+        XCTAssertEqual(game.attributeStore.get(block, "use_count"), .int(1))
+        XCTAssertEqual(
+            game.eventBus.recentEvents().filter { $0.kind == .blockUsed }.count,
+            1,
+            "an inert target still gets exactly one event for the initial pulse"
+        )
+
+        for _ in 0..<4 { stepOneTick(game) }
+        XCTAssertEqual(game.attributeStore.get(block, "use_count"), .int(1))
+        stepOneTick(game)
+        game.runEventBusPhase()
+        XCTAssertEqual(game.attributeStore.get(block, "use_count"), .int(2))
+        XCTAssertEqual(
+            game.eventBus.recentEvents().filter { $0.kind == .blockUsed }.count,
+            2,
+            "the held-use repeat publishes once, not once per simulation tick"
+        )
+        game.mouseUp(2)
+    }
+
+    func testForemostInertEntityWinsSecondaryUseAndRunsOnlyItsAttachedHandler() throws {
+        let game = makeGameInWorld(label: "inert-entity-use")
+        _ = prepareMiningWall(in: game)
+        let block = ObjectRef.block(dim: .overworld, x: 8, y: 66, z: 10)
+        let entity = Entity(world: game.world)
+        entity.setPos(8.5, 65.3, 9.5)
+        game.world.addEntity(entity)
+        let entityRef = ObjectRef.entity(uid: entity.id)
+        let scripts = ScriptStore(graph: ObjectGraph(host: game))
+        _ = try scripts.attach(
+            block,
+            name: "block_counter",
+            source: "self.attrs.use_count = (self.attrs.use_count or 0) + 1",
+            mode: .handler,
+            triggers: [Trigger(event: .blockUsed, attribute: nil, target: .object(block))],
+            by: .player,
+            tick: 0
+        ).get()
+        _ = try scripts.attach(
+            entityRef,
+            name: "entity_counter",
+            source: "self.attrs.use_count = (self.attrs.use_count or 0) + 1",
+            mode: .handler,
+            triggers: [Trigger(event: .entityInteracted, attribute: nil, target: .object(entityRef))],
+            by: .player,
+            tick: 0
+        ).get()
+        game.scripting.anyScriptsAttached = true
+        game.runEventBusPhase()
+
+        game.mouseDown(2)
+        game.runEventBusPhase()
+
+        XCTAssertEqual(game.attributeStore.get(entityRef, "use_count"), .int(1))
+        XCTAssertNil(game.attributeStore.get(block, "use_count"))
+        let interactions = game.eventBus.recentEvents().filter {
+            $0.kind == .entityInteracted || $0.kind == .blockUsed
+        }
+        XCTAssertEqual(interactions.count, 1)
+        XCTAssertEqual(interactions.first?.kind, .entityInteracted)
+        XCTAssertEqual(interactions.first?.subject, entityRef)
+        game.mouseUp(2)
+    }
+
+    func testBroaderScriptTargetDoesNotStealExistingNativeEntityInteraction() {
+        let game = makeGameInWorld(label: "semantic-use-preserves-native")
+        _ = prepareMiningWall(in: game)
+        let inert = Entity(world: game.world)
+        inert.setPos(8.5, 65.3, 9.1)
+        game.world.addEntity(inert)
+        let cow = Cow(world: game.world)
+        cow.setPos(8.5, 65.3, 9.6)
+        game.world.addEntity(cow)
+        game.player.mainHand = ItemStack(iid("bucket"), 1)
+
+        game.mouseDown(2)
+
+        XCTAssertEqual(
+            game.player.mainHand.map { itemDef($0.id).name }, "milk_bucket",
+            "the pre-existing native entity filter must still reach the cow behind an inert entity"
+        )
+        let event = game.eventBus.recentEvents().last { $0.kind == .entityInteracted }
+        XCTAssertEqual(
+            event?.subject, .entity(uid: inert.id),
+            "the broader scripted target remains the foremost physical object"
+        )
+        game.mouseUp(2)
+    }
+
+    func testSecondaryUseMissAndDeadPlayerDoNotPublishInteractionEvents() {
+        let game = makeGameInWorld(label: "use-guards")
+        _ = prepareMiningWall(in: game)
+        game.player.pitch = -.pi / 2
+        game.mouseDown(2)
+        game.mouseUp(2)
+        XCTAssertFalse(game.eventBus.recentEvents().contains {
+            $0.kind == .entityInteracted || $0.kind == .blockUsed
+        })
+
+        game.player.pitch = 0
+        game.player.dead = true
+        game.mouseDown(2)
+        game.mouseUp(2)
+        XCTAssertFalse(game.eventBus.recentEvents().contains {
+            $0.kind == .entityInteracted || $0.kind == .blockUsed
+        })
     }
 
     func testPlayerSleptFiresOnlyFromTheSuccessfulBedUsePath() {

@@ -561,7 +561,7 @@ public extension LANV6FrameAdmissionPolicy {
                 .chat, .ping, .pong, .disconnect, .inputIntent,
                 .blockIntent, .containerIntent, .templateIntent, .chunkRequest,
                 .replicationAck, .attackIntent, .tossIntent, .containerEditIntent,
-                .keepalive, .rpgIntent,
+                .keepalive, .rpgIntent, .interactionIntent,
             ],
             outbound: [
                 .chat, .playerState, .worldSummary, .ping, .pong, .disconnect,
@@ -605,7 +605,7 @@ public extension LANV6FrameAdmissionPolicy {
                 .chat, .ping, .pong, .disconnect, .inputIntent,
                 .blockIntent, .containerIntent, .templateIntent, .chunkRequest,
                 .replicationAck, .attackIntent, .tossIntent, .containerEditIntent,
-                .keepalive, .rpgIntent,
+                .keepalive, .rpgIntent, .interactionIntent,
             ]
         )
     }

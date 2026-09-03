@@ -108,6 +108,11 @@ so editor event facts are object-scoped rather than treated as a global custom-e
 guest uses the host's bounded, source-free mirror of names, field type tokens, and summaries for the
 same projection.
 
+The app additionally projects the current script-sound catalog into each language environment.
+That list is live rather than a copied constant: it combines validated imported WAV names with
+standard names discovered from `/System/Library/Sounds` and macOS ToneLibrary. The runtime remains
+authoritative for case-insensitive name resolution and can still refuse playback after completion.
+
 The catalog also produces a non-executing LuaCATS definition string with real parameter and return
 annotations plus overloads from the schema. Engine globals and the `objects`/`ai` modules are ordered
 near the start so they remain inside the bounded AI schema prefix; the longer per-kind attribute and
@@ -145,7 +150,8 @@ Semantic roles include:
 - event names and known event payload fields; and
 - a fixed set of unavailable sandbox globals.
 
-Read-only metadata and accepted-but-currently-no-op status appear in completion documentation, but
+Read-only metadata and the remaining accepted-but-currently-no-op status (such as `particles`)
+appear in completion documentation, but
 do not currently receive distinct source styles. TextKit ranges use UTF-16 offsets throughout.
 Local language analysis is synchronous and error tolerant; it is recalculated from the current
 source rather than published asynchronously. Ollama proposals separately carry document and context
@@ -168,11 +174,21 @@ The receiver determines the candidates:
 | `self.attrs.` or a straightforward alias | live custom attributes for the editor target only |
 | `on("` / `self:on("` | built-in events compatible with the current target plus its declared custom events |
 | `emit("` / `self:emit("` | only custom events declared on the current target; engine-produced built-ins are not manually emittable |
+| first argument of `sound(` / `sound("` | currently playable imported and macOS sound names; imported names are ordered before built-ins |
 | `objects.` | `get`, `find`, and `block` |
 | `ai.` | `ask` and `await` |
 | handler `ev.` or a locally declared callback event | common event fields and payload fields for the compatible built-in or target-declared custom event |
 | `math.`, `string.`, `table.`, `utf8.` | only the sandbox allowlist |
 | a locally inferred table literal followed by `.` | that table's known named fields |
+
+Sound-name completion is limited to `sound`'s first argument. It replaces the whole string token
+with a canonical double-quoted Lua literal, escaping quotes, backslashes, and line controls; an
+unquoted first argument receives the same quoted form. Names are matched and ranked locally,
+case-insensitively, with the app's catalog order as the deterministic tie-break. **Options... →
+Audio → Script Sounds...** imports, previews, and deletes managed `.wav` files; catalog-change
+notifications refresh editor environments. Imported names cannot shadow built-ins, so completion
+and runtime resolve the same name. A LAN guest uses the host-published catalog because its scripts
+execute and play audio on the host; changes arrive with host world-summary replication.
 
 Rows visibly contain a symbol-kind icon, name, and signature/type detail. A documentation pane shows
 the selected item's description and read-only state; provenance is retained internally but is not
@@ -226,9 +242,9 @@ use isolated transient RNG streams rather than changing any attached script's pe
 Check and automatic proposal validation also use a fixed validation identity, so they do not
 consume the live scheduler/RNG ordinal.
 
-The editor does not yet diagnose general Lua grammar, undefined globals, wrong arity, or
-accepted-but-no-op calls. Available quick fixes appear as buttons in the Problems pane and apply
-immediately; there is no preview command. Quick fixes, palette insertions, and other ranged
+The editor does not yet diagnose general Lua grammar, undefined globals, wrong arity, or remaining
+accepted-but-no-op calls such as `particles`. Available quick fixes appear as buttons in the
+Problems pane and apply immediately; there is no preview command. Quick fixes, palette insertions, and other ranged
 model-driven edits are bridged through `NSTextView` insertion and participate in native undo. A
 whole-document load/new/script-switch boundary clears the prior document's undo history.
 

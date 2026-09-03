@@ -16,6 +16,7 @@ struct LuaCodeTextView: NSViewRepresentable {
     var targetApplicableBuiltInAttributes: Set<String>? = nil
     var targetCustomAttributes: [LuaCustomAttributeCompletion] = []
     var objectReferences: [LuaObjectReferenceCompletion] = []
+    var soundNames: [String] = []
     var scriptMode: ScriptMode = .module
     var handlerEvent: String? = nil
     var eventCandidates: [ScriptEditorEventCandidate]? = nil
@@ -41,6 +42,7 @@ struct LuaCodeTextView: NSViewRepresentable {
             targetApplicableBuiltInAttributes: targetApplicableBuiltInAttributes,
             targetCustomAttributes: targetCustomAttributes,
             objectReferences: objectReferences,
+            soundNames: soundNames,
             scriptMode: scriptMode,
             handlerEvent: handlerEvent,
             eventCandidates: eventCandidates,
@@ -640,7 +642,7 @@ struct LuaCodeTextView: NSViewRepresentable {
             )
             let shouldPresent: Bool
             switch result.context {
-            case .members, .eventName, .objectReference:
+            case .members, .eventName, .objectReference, .soundName:
                 shouldPresent = true
             case .keywordsAndGlobals:
                 shouldPresent = force || !result.prefix.isEmpty

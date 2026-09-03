@@ -90,7 +90,7 @@ public enum EventDescriptorRegistry {
             [field("oldName", .string, "Previous registered block name."), field("newName", .string, "New registered block name."), field("oldMeta", .integer, "Previous metadata nibble."), field("newMeta", .integer, "New metadata nibble.")],
             "A non-silent block cell write changed name or metadata."
         ),
-        event(.blockUsed, [.block], [field("by", .objectHandle, "Player that used the block."), nullable("item", .string, "Held item name, or nil.")], "A player successfully used a block."),
+        event(.blockUsed, [.block], [field("by", .objectHandle, "Player that used the block."), nullable("item", .string, "Held item name, or nil.")], "A player's secondary-use targeted this block, whether or not it has built-in use behavior."),
         event(.blockNeighborChanged, [.block], [field("from", .objectHandle, "Neighbor block whose change caused the notification.")], "A subscribed or record-backed block received a neighbor update."),
         event(
             .blockScheduledTick, [.block], availability: .reserved("The name is reserved, but no script scheduling API or producer is shipped."),
@@ -118,7 +118,7 @@ public enum EventDescriptorRegistry {
         ),
         event(.entityDied, [.entity, .player], [field("cause", .string, "Engine damage-cause identifier."), nullable("attacker", .objectHandle, "Killing entity, or nil.")], "A living entity died."),
         event(.entityHealed, [.entity, .player], [field("amount", .number, "Effective health restored.")], "A living entity recovered health."),
-        event(.entityInteracted, [.entity], [field("by", .objectHandle, "Player that interacted."), nullable("item", .string, "Held item name, or nil.")], "A player successfully interacted with an entity."),
+        event(.entityInteracted, [.entity], [field("by", .objectHandle, "Player that interacted."), nullable("item", .string, "Held item name, or nil.")], "A player's secondary-use targeted this entity, whether or not it has built-in interaction behavior."),
         event(.entityTargetChanged, [.entity], [nullable("old", .objectHandle, "Previous target, or nil."), nullable("new", .objectHandle, "New target, or nil.")], "A mob changed its target."),
 
         event(.playerJoined, [.player], summary: "The local/host player entered the world."),

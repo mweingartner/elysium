@@ -549,6 +549,7 @@ final class LANMultiplayerManager {
         }
         game.lanChunkRequestHandler = nil
         game.lanBlockIntentHandler = nil
+        game.lanInteractionIntentHandler = nil
     }
 
     private func configureClientReplicationHooks(for game: GameCore) {
@@ -590,6 +591,16 @@ final class LANMultiplayerManager {
             self.queue.async { [weak self] in
                 guard let self, let peer = self.clientPeer else { return }
                 self.send(.blockIntent(playerID: self.localPeerID, intent: intent), to: peer)
+            }
+        }
+        game.lanInteractionIntentHandler = { [weak self] intent in
+            guard let self else { return }
+            self.queue.async { [weak self] in
+                guard let self, let peer = self.clientPeer else { return }
+                self.send(
+                    .interactionIntent(playerID: self.localPeerID, intent: intent),
+                    to: peer
+                )
             }
         }
         game.lanAttackIntentHandler = { [weak self] intent in
@@ -637,6 +648,7 @@ final class LANMultiplayerManager {
         game?.lanChunkRequestHandler = nil
         game?.lanFullColumnRequestHandler = nil
         game?.lanBlockIntentHandler = nil
+        game?.lanInteractionIntentHandler = nil
         game?.lanAttackIntentHandler = nil
         game?.lanTossIntentHandler = nil
         game?.lanRPGIntentHandler = nil
@@ -674,7 +686,8 @@ final class LANMultiplayerManager {
             difficulty: rec?.difficulty ?? game.world.difficulty,
             dimension: game.dim.rawValue,
             playerCount: 1,
-            rpgClassesEnabled: game.world.rule(RPG_CLASSES_GAME_RULE)
+            rpgClassesEnabled: game.world.rule(RPG_CLASSES_GAME_RULE),
+            scriptSoundNames: game.scriptSoundNames()
         )
         joinCode = code
         hostPort = port
@@ -1933,6 +1946,9 @@ final class LANMultiplayerManager {
                 elysiumLANProbeLog("host_recv_block_intent player=\(peer.playerName) action=\(intent.action.rawValue) target=\(intent.x),\(intent.y),\(intent.z) cell=\(intent.cell)")
             }
             applyHostBlockIntent(intent, from: peer.playerID, peerName: peer.playerName)
+        case .interactionIntent(_, let intent):
+            guard peer.accepted else { return }
+            applyHostInteractionIntent(intent, from: peer.playerID, peerName: peer.playerName)
         case .containerIntent(_, let intent):
             guard peer.accepted else { return }
             applyHostContainerIntent(intent, from: peer.playerID, peerID: peer.id, peerName: peer.playerName)
@@ -2391,6 +2407,7 @@ final class LANMultiplayerManager {
     private func makeWorldSummary(playerCount: Int) -> LANWorldSummary {
         if var summary = hostWorldSummary {
             summary.playerCount = max(1, min(summary.maxPlayers, playerCount + 1))
+            summary.scriptSoundNames = activeGame?.scriptSoundNames() ?? summary.scriptSoundNames
             return summary
         }
         return LANWorldSummary(
@@ -2401,7 +2418,8 @@ final class LANMultiplayerManager {
             difficulty: 2,
             dimension: Dim.overworld.rawValue,
             playerCount: max(1, playerCount + 1),
-            rpgClassesEnabled: activeGame?.world.rule(RPG_CLASSES_GAME_RULE) ?? true
+            rpgClassesEnabled: activeGame?.world.rule(RPG_CLASSES_GAME_RULE) ?? true,
+            scriptSoundNames: activeGame?.scriptSoundNames() ?? []
         )
     }
 
@@ -2595,6 +2613,29 @@ final class LANMultiplayerManager {
                                     tick: game.rpgSimulationTick)
         case .toolStrike:
             applyHostToolStrikeIntent(intent, from: playerID, peerName: peerName)
+        }
+    }
+
+    private func applyHostInteractionIntent(
+        _ intent: LANInteractionIntent,
+        from playerID: String,
+        peerName: String
+    ) {
+        precondition(Thread.isMainThread)
+        guard let game = activeGame, game.hasWorld() else { return }
+        let result = hostReplicationSession.applyInteractionIntent(
+            intent, from: playerID, to: game.world
+        )
+        switch result {
+        case .raised:
+            break
+        case .ignored:
+            break // semantic replay: intentionally silent and side-effect free
+        case .rejected(let reason):
+            reportBlockIntentRejected(
+                reason, playerID: playerID, peerName: peerName,
+                tick: game.rpgSimulationTick
+            )
         }
     }
 
@@ -3264,6 +3305,7 @@ final class LANMultiplayerManager {
         }
         var worldReport: LANReplicationApplyReport?
         if let game = activeGame, game.hasWorld() {
+            let priorScriptSoundNames = game.scriptSoundNames()
             // D-A: normal batches never overwrite the client-owned local inventory anymore —
             // only `applyLANRestore` (join/reconnect) and `applyLANGrant` (additive host
             // corrections) may touch it. The former per-batch
@@ -3275,6 +3317,12 @@ final class LANMultiplayerManager {
             }
             _ = applyLANRemotePlayers(batch.players, to: game.world, localPlayerID: localPeerID)
             game.endLANReplicationApply()
+            if game.scriptSoundNames() != priorScriptSoundNames {
+                NotificationCenter.default.post(
+                    name: .elysiumScriptSoundCatalogDidChange,
+                    object: game
+                )
+            }
         }
         if batch.fullSnapshot {
             appendStatus("Applied LAN snapshot tick \(batch.tick): \(mirrorReport.appliedChunkSections) sections, \(mirrorReport.appliedBlockChanges) block deltas, \(mirrorReport.appliedBlockEntities) block entities, \(mirrorReport.appliedEntitySnapshots) entities.")

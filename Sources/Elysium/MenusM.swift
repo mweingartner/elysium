@@ -2073,6 +2073,17 @@ final class SettingsScreen: Screen {
                     }))
                 if col == 1 { y += 22 }
             }
+            y += 22
+            let sounds = Button(cx - 160, y, W * 2 + 8, 18, "Script Sounds…", {})
+            sounds.onClick = { [weak self, weak ui, weak game] in
+                guard let self, let ui, let game else { return }
+                self.settingsFocusID = "audio.script-sounds"
+                ui.open(SoundLibraryScreen(), game)
+            }
+            buttons.append(sounds)
+            // The managed sound catalog is independent of Settings.json, just like the
+            // resource-pack browser, so it remains available while settings recovery is active.
+            recoveryNavigationButtons.insert(ObjectIdentifier(sounds))
         } else if tab == "controls" {
             sliders.append(Slider(cx - 160, y, W, 18,
                 { [weak game] in "Sensitivity: \(Int(((game?.settings.sensitivity ?? 0.5) * 200).rounded()))%" },
@@ -2271,6 +2282,17 @@ final class SettingsScreen: Screen {
             slider("Max FPS:", "video.max-fps")
             button("Shaders:", "video.shaders")
             button("Resource Packs...", "video.resource-packs")
+        } else if tab == "audio" {
+            slider("Master Volume:", "audio.master")
+            slider("Music:", "audio.music")
+            slider("Blocks:", "audio.blocks")
+            slider("Hostile Creatures:", "audio.hostile")
+            slider("Friendly Creatures:", "audio.friendly")
+            slider("Players:", "audio.players")
+            slider("Ambient:", "audio.ambient")
+            slider("Jukebox:", "audio.records")
+            slider("UI:", "audio.ui")
+            button("Script Sounds", "audio.script-sounds")
         }
         button("Done", "settings.done")
 
@@ -2300,7 +2322,17 @@ final class SettingsScreen: Screen {
             if tab == "video" {
                 return tabs + ["video.fullscreen", "video.resource-packs", "settings.done"]
             }
+            if tab == "audio" {
+                return tabs + ["audio.script-sounds", "settings.done"]
+            }
             return tabs + ["settings.done"]
+        }
+        if tab == "audio" {
+            return tabs + [
+                "audio.master", "audio.music", "audio.blocks", "audio.hostile",
+                "audio.friendly", "audio.players", "audio.ambient", "audio.records",
+                "audio.ui", "audio.script-sounds", "settings.done",
+            ]
         }
         guard tab == "video" else {
             return tabs + settingsFocusControls.keys.filter {

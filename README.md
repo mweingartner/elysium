@@ -24,7 +24,7 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 - **Local-network multiplayer** — host, discover, join, or directly connect to LAN worlds with join codes and host-authoritative replication. Elysium has no public matchmaking, cloud relay, or built-in NAT traversal; a join code is an access gate, not protection from an already hostile local network.
 - **Optional local AI assistant** — `/ai <request>` sends context to a configured Ollama endpoint at `http://127.0.0.1:11434`. Model output is treated as untrusted and reduced to registered, validated, count- and distance-bounded game actions. Elysium does not control what an independently configured Ollama installation or model provider does beyond that interface.
 - **Maps and controls** — compact and expanded live maps, including player-level cavern mapping in the Nether, configurable controls, keyboard and controller input, text-entry accessibility, fullscreen support, and debug/automation surfaces used by the verification suite. The compact minimap is shown by default and can be hidden under **Options... → Video → Show Minimap** without disabling the `M` expanded map.
-- **Synthesized audio** — music and sound effects are produced at runtime rather than shipped as conventional audio recordings.
+- **Audio and script sounds** — Elysium's existing game music and effects remain synthesized at runtime. Scripts may additionally play a named imported WAV or a standard macOS system/ToneLibrary sound at the owning object's position. **Options... → Audio → Script Sounds...** imports, previews, and deletes the managed WAV library.
 - **Resource-pack support** — Java Edition-style resource packs are read through Elysium's bounded archive and metadata loaders. The pinned default is [Faithful 64x](https://faithfulpack.net/faithful64x) Release 12; **Options... → Video → Resource Packs...** offers the reviewed Ore Borders 64x and Static Lanterns add-ons independently, both off by default.
 - **Scripting, extensible events, and the AI object graph** — every block, entity, player, dimension, and world can carry typed custom attributes, object-scoped custom event declarations, event handlers, and up to 8 attached Lua scripts on a sandboxed, deterministic, budgeted Lua 5.4.8 interpreter (`CLua` + `ElysiumScript`). Scripts can observe another live object directly (`target:on(...)`, `target:onAttribute(...)`), publish a discoverable payload contract (`target:declareEvent(...)`), and emit either declared or open custom events. A broad built-in catalog covers attribute/lifecycle, block, entity, player, dimension, world, and furnace interaction; `block.toolStrike` describes a real first tool strike, while `furnace.smeltCompleted` reports each completed smelt. A furnace's own attached script may use `self:setFurnaceOutput("iron_ingot")` to replace its existing and future recipe output only while that trusted script remains live. Built-in events are engine-produced facts and cannot be emitted manually. Players can inspect, define, remove, and emit custom events through `/events`, or use the native editor's target-aware event picker, payload-field completion, validated snippets, diagnostics, and nearby World Objects browser. Deterministic completion never needs AI; editor Ollama suggestions remain a separate, optional manual action by default. The embedded-AI world tool loop receives a compact Lua authoring contract whose built-in event catalog and payloads come from the live canonical registry, and can inspect or manage declarations, scripts, attributes, subscriptions, and events through the same validated, budgeted, journaled path, undoable where supported with `/script undo-ai`. Execution remains host-only, gated by per-world trust and the `doScripts` kill switch; authorized LAN guests receive source-free event metadata for accurate authoring and send mutations to the host for validation. See [docs/SCRIPTING_GUIDE.md](docs/SCRIPTING_GUIDE.md) for the command/Lua API and [docs/LUA_EDITOR.md](docs/LUA_EDITOR.md) for editor behavior and controls.
 
@@ -54,6 +54,24 @@ self:on("block.toolStrike", function(ev)
   end
 end)
 ```
+
+Secondary use is an event in its own right, not merely a report that built-in gameplay changed
+something. A valid use target emits `entity.interacted` for the foremost entity under the crosshair,
+or `block.used` for the block when no entity is foremost, even when that entity or block has no
+native use action. Scripts attached to inert terrain, decorations, and otherwise non-interactive
+entities can therefore react to the ordinary use control. The event's held-item payload is captured
+before native interaction code can consume or replace the stack. On LAN, the client names its
+observed target; the host validates current identity, reach, dimension, lifecycle, permission, and
+selected slot before raising a replay-safe event without duplicating native-use events. Protocol 5
+does not independently reconstruct the guest's ray or verify occlusion, so it remains a trusted-LAN
+facility rather than a hostile-network authority boundary.
+
+Scripts can play audio by live catalog name with `sound(name[, volume])`, where `volume` is from 0
+through 1 and the boolean result reports whether playback started. Matching is case-insensitive and
+playback is positioned at the script-owning object. The catalog combines imported WAV filenames
+with the standard names discovered from `/System/Library/Sounds` and macOS ToneLibrary; imported
+names are offered first by completion but cannot shadow a built-in name. Manage imported files at
+**Options... → Audio → Script Sounds...**.
 
 Every handle—world, dimension, block, entity, or player—supports custom attributes and object-scoped
 event declarations. A script can observe a different live object directly:
@@ -248,11 +266,14 @@ state on the client.
 
 ## Local data
 
-Elysium stores worlds, player state, settings, key bindings, and templates under:
+Elysium stores worlds, player state, settings, key bindings, templates, and imported script sounds under:
 
 ```text
 ~/Library/Application Support/Elysium/
 ```
+
+Validated script WAV files are copied into the managed `Sounds/` subdirectory. Lua receives only
+catalog names and never a filesystem path.
 
 On first use after the rename, the app can migrate supported legacy Pebble data into the Elysium application-support location. Back up world data before manual deletion or migration.
 

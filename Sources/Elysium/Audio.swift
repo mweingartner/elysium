@@ -121,21 +121,52 @@ final class AudioEngineM {
 
     /// play a positional game sound
     func play(_ name: String, _ x: Double, _ y: Double, _ z: Double, _ volume: Double = 1, _ pitch: Double = 1) {
-        guard inited else { return }
+        guard inited,
+              let mix = positionalMix(x, y, z, volume) else { return }
+        playRecipe(name, mix.volume, pitch, mix.pan, true)
+    }
+
+    /// Produces the same positional attenuation/pan used by synthesized player sounds, with the
+    /// external player's gain including both current Master and Players settings.
+    func scriptSampleMix(
+        _ x: Double, _ y: Double, _ z: Double, _ volume: Double
+    ) -> (volume: Float, pan: Float)? {
+        guard let mix = positionalMix(x, y, z, min(1, max(0, volume))) else { return nil }
+        let master = masterGain.isFinite ? masterGain : 0
+        let configuredPlayers = catGains["players"] ?? 1
+        let players = configuredPlayers.isFinite ? configuredPlayers : 0
+        return (
+            volume: Float(min(1, max(0, mix.volume * master * players))),
+            pan: Float(min(1, max(-1, mix.pan)))
+        )
+    }
+
+    private func positionalMix(
+        _ x: Double, _ y: Double, _ z: Double, _ volume: Double
+    ) -> (volume: Double, pan: Double)? {
+        guard x.isFinite, y.isFinite, z.isFinite, volume.isFinite, volume >= 0,
+              listenerX.isFinite, listenerY.isFinite, listenerZ.isFinite,
+              listenerYaw.isFinite else {
+            return nil
+        }
         let dx = x - listenerX, dy = y - listenerY, dz = z - listenerZ
         let dist = (dx * dx + dy * dy + dz * dz).squareRoot()
+        guard dist.isFinite else { return nil }
         let maxDist = 18 * max(1, volume)
-        if dist > maxDist { return }
+        if dist > maxDist { return nil }
         let atten = min(1, max(0, 1 - dist / maxDist))
         let angle = Foundation.atan2(-dx, dz) - listenerYaw
         let pan = min(1, max(-1, -Foundation.sin(angle))) * min(1, max(0, dist / 4))
-        playRecipe(name, volume * atten * atten, pitch, pan, true)
+        return (volume * atten * atten, pan)
     }
     func playUI(_ name: String) {
         playRecipe(name, 0.8, 1, 0, false)
     }
 
-    private func playRecipe(_ name: String, _ volume: Double, _ pitch: Double, _ pan: Double, _ allowReverb: Bool) {
+    private func playRecipe(
+        _ name: String, _ volume: Double, _ pitch: Double, _ pan: Double,
+        _ allowReverb: Bool
+    ) {
         guard inited, volume > 0.001 else { return }
         guard let recipe = resolveRecipe(name) else { return }
         var seed = UInt32(truncatingIfNeeded: Int.random(in: 0..<1_000_000_000)) &+ 12345

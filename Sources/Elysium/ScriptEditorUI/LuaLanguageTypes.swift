@@ -126,6 +126,9 @@ struct LuaLanguageEnvironment: Equatable, Sendable {
     var targetApplicableBuiltInAttributes: Set<String>?
     var targetCustomAttributes: [LuaCustomAttributeCompletion]
     var objectReferences: [LuaObjectReferenceCompletion]
+    /// Imported sounds are ordered before built-in macOS sounds by the app-owned catalog so an
+    /// empty `sound("` completion still lists every user asset before the bounded popup limit.
+    var soundNames: [String]
     var scriptMode: ScriptMode
     var handlerEvent: String?
     var eventCandidates: [ScriptEditorEventCandidate]
@@ -137,6 +140,7 @@ struct LuaLanguageEnvironment: Equatable, Sendable {
         targetApplicableBuiltInAttributes: Set<String>? = nil,
         targetCustomAttributes: [LuaCustomAttributeCompletion] = [],
         objectReferences: [LuaObjectReferenceCompletion] = [],
+        soundNames: [String] = [],
         scriptMode: ScriptMode = .module,
         handlerEvent: String? = nil,
         eventCandidates: [ScriptEditorEventCandidate]? = nil,
@@ -147,6 +151,7 @@ struct LuaLanguageEnvironment: Equatable, Sendable {
         self.targetApplicableBuiltInAttributes = targetApplicableBuiltInAttributes
         self.targetCustomAttributes = targetCustomAttributes
         self.objectReferences = objectReferences
+        self.soundNames = soundNames
         self.scriptMode = scriptMode
         self.handlerEvent = handlerEvent
         self.eventCandidates = eventCandidates
@@ -276,6 +281,7 @@ enum LuaCompletionContext: Equatable, Sendable {
     case members(receiver: String, access: LuaMemberAccess)
     case eventName
     case objectReference
+    case soundName
     case keywordsAndGlobals
 }
 

@@ -388,9 +388,12 @@ public enum ScriptLanguageSchema {
         function(.globalFunction, "say", signatures: [signature("say(text)", [p("text", .string)])], summary: "Post a bounded, filtered chat line from this object."),
         function(
             .globalFunction, "sound",
-            signatures: [signature("sound(...)", [p("arguments", .any, variadic: true)])],
-            availability: .acceptedNoOp("Audio wiring is not implemented yet."),
-            summary: "Accepted for forward compatibility, but currently produces no sound."
+            signatures: [signature(
+                "sound(name[, volume])",
+                [p("name", .string), p("volume", .number, optional: true)],
+                returns: [r(.boolean, "Whether playback started.")]
+            )],
+            summary: "Play an imported or macOS system sound at this object's position. Volume is 0 through 1."
         ),
         function(
             .globalFunction, "particles",
@@ -635,7 +638,7 @@ public enum ScriptLanguageSchema {
 
         snippet("misc.rng", .misc, "rng()", "rng()", "Draw from this script's deterministic random stream."),
         snippet("misc.say", .misc, "say(text)", "say(\"hello\")", "Show player-visible text."),
-        snippet("misc.sound", .misc, "sound(...)", "sound(\"block.stone.break\")", "Accepted but currently a no-op."),
+        snippet("misc.sound", .misc, "sound(name[, volume])", "sound(\"Glass\", 0.8)", "Play an imported or macOS system sound at this object's position."),
         snippet("misc.particles", .misc, "particles(...)", "particles(\"smoke\", x, y, z)", "Accepted but currently a no-op."),
         snippet("misc.dim", .misc, "dim(name)", "dim(\"overworld\")", "Resolve a dimension handle."),
     ]

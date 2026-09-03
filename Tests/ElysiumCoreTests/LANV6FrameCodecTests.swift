@@ -6,12 +6,12 @@ final class LANV6FrameCodecTests: XCTestCase {
     private let hostPhase = LANV6ConnectionPhase.authenticated
     private let clientPhase = LANV6ConnectionPhase.connected
 
-    func testKindManifestIsExactContiguousOneThroughThirty() {
+    func testKindManifestIsExactContiguousOneThroughThirtyOne() {
         // lan-client-parity (change 4): `scriptIntent = 30`, mirroring `LANMultiplayerMessageKind
         // .scriptIntent` (design.md §11 "mirrored into the v6 manifest") — the manifest is no
-        // longer contiguous 1...29; it's 1...30.
+        // longer contiguous 1...29; interactionIntent extends it through 31.
         XCTAssertEqual(LANV6MessageKind.allCases.map(\.rawValue),
-                       Array(UInt16(1)...UInt16(30)))
+                       Array(UInt16(1)...UInt16(31)))
         XCTAssertEqual(LANV6MessageKind(rawValue: 1), .clientHello)
         XCTAssertEqual(LANV6MessageKind(rawValue: 5), .playerState)
         XCTAssertEqual(LANV6MessageKind(rawValue: 10), .inputIntent)
@@ -20,8 +20,9 @@ final class LANV6FrameCodecTests: XCTestCase {
         XCTAssertEqual(LANV6MessageKind(rawValue: 28), .ownerChunk)
         XCTAssertEqual(LANV6MessageKind(rawValue: 29), .clientReady)
         XCTAssertEqual(LANV6MessageKind(rawValue: 30), .scriptIntent)
+        XCTAssertEqual(LANV6MessageKind(rawValue: 31), .interactionIntent)
         XCTAssertNil(LANV6MessageKind(rawValue: 0))
-        XCTAssertNil(LANV6MessageKind(rawValue: 31))
+        XCTAssertNil(LANV6MessageKind(rawValue: 32))
     }
 
     func testAdmissionPolicyCartesianLookupIsExactAndPublicPolicyDeniesAll() {
@@ -161,12 +162,11 @@ final class LANV6FrameCodecTests: XCTestCase {
         var badVersion = valid
         badVersion[5] = 5
         assertDecodeError(badVersion, policy: policy, .unsupportedVersion(5))
-        // lan-client-parity (change 4): raw value 30 is now `.scriptIntent` (a known kind) — 31
-        // is the first genuinely-unknown value this fixture needs.
+        // Raw value 31 is now `.interactionIntent`; 32 is the first unknown value.
         var badKind = valid
         badKind[6] = 0
-        badKind[7] = 31
-        assertDecodeError(badKind, policy: policy, .unknownMessageKind(31))
+        badKind[7] = 32
+        assertDecodeError(badKind, policy: policy, .unknownMessageKind(32))
 
         assertDecodeError(Data(valid.dropLast()), policy: policy, .truncated)
         var trailing = valid

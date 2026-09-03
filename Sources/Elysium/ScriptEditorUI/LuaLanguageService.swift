@@ -79,6 +79,19 @@ enum LuaLanguageService {
             )
         }
 
+        if let soundContext = soundArgumentContext(source: source, tokens: tokens, cursor: cursor) {
+            let items = LuaCompletion.soundNameItems(
+                names: environment.soundNames,
+                quoted: soundContext.insideString
+            )
+            return LuaCompletionResult(
+                context: .soundName,
+                prefix: soundContext.prefix,
+                replacementRange: soundContext.replacementRange,
+                items: LuaCompletion.rankSoundNames(items: items, prefix: soundContext.prefix)
+            )
+        }
+
         if isInNonCodeRegion(source: source, tokens: tokens, cursor: cursor) {
             return LuaCompletionResult(
                 context: .keywordsAndGlobals,
@@ -817,6 +830,12 @@ enum LuaLanguageService {
         let asHandleLookup: Bool
     }
 
+    private struct SoundArgumentContext {
+        let prefix: String
+        let replacementRange: NSRange
+        let insideString: Bool
+    }
+
     private struct ActiveCall {
         let callee: String
         let argumentIndex: Int
@@ -883,7 +902,7 @@ enum LuaLanguageService {
         if let stringToken = tokens.last(where: {
             $0.kind == .string && caretIsInsideStringToken($0, cursor: cursor)
         }) {
-            let quoteLength = stringToken.text.hasPrefix("[[") ? 2 : 1
+            let quoteLength = stringLiteralOpenerUTF16Length(stringToken.text)
             let start = min(cursor, stringToken.range.location + quoteLength)
             let range = NSRange(location: start, length: max(0, cursor - start))
             return EventArgumentContext(
@@ -936,7 +955,7 @@ enum LuaLanguageService {
         if let stringToken = tokens.last(where: {
             $0.kind == .string && caretIsInsideStringToken($0, cursor: cursor)
         }) {
-            let quoteLength = stringToken.text.hasPrefix("[[") ? 2 : 1
+            let quoteLength = stringLiteralOpenerUTF16Length(stringToken.text)
             let start = min(cursor, stringToken.range.location + quoteLength)
             let prefixRange = NSRange(location: start, length: max(0, cursor - start))
             return ObjectReferenceArgumentContext(
@@ -958,6 +977,38 @@ enum LuaLanguageService {
         )
     }
 
+    private static func soundArgumentContext(
+        source: String, tokens: [LuaSourceToken], cursor: Int
+    ) -> SoundArgumentContext? {
+        guard let call = activeCall(tokens: tokens, cursor: cursor),
+              call.callee == "sound", call.argumentIndex == 0 else { return nil }
+        let text = source as NSString
+        if let stringToken = tokens.last(where: {
+            $0.kind == .string && caretIsInsideStringToken($0, cursor: cursor)
+        }) {
+            let quoteLength = stringLiteralOpenerUTF16Length(stringToken.text)
+            let start = min(cursor, stringToken.range.location + quoteLength)
+            let range = NSRange(location: start, length: max(0, cursor - start))
+            return SoundArgumentContext(
+                prefix: text.substring(with: range),
+                // Replace the complete literal with one canonical escaped Lua string. This keeps
+                // imported filenames containing either quote safe even when the author started
+                // with a single quote or long-bracket string.
+                replacementRange: stringToken.range,
+                insideString: false
+            )
+        }
+        if tokens.last(where: { NSMaxRange($0.range) <= cursor && $0.kind != .newline })?.kind == .string {
+            return nil
+        }
+        let prefix = identifierPrefix(in: source, cursor: cursor)
+        return SoundArgumentContext(
+            prefix: prefix.text,
+            replacementRange: prefix.range,
+            insideString: false
+        )
+    }
+
     private static func activeCall(tokens: [LuaSourceToken], cursor: Int) -> ActiveCall? {
         let relevant = tokens.enumerated().filter { $0.element.range.location < cursor }
         var depth = 0
@@ -973,6 +1024,18 @@ enum LuaLanguageService {
             if token.text == "(" || token.text == "{" || token.text == "[" { depth = max(0, depth - 1) }
         }
         return nil
+    }
+
+    /// Returns the UTF-16 width of a quote or Lua long-bracket opener (`[[`, `[=[`, `[==[`, …`).
+    /// Completion ranges use `NSRange`, so deriving this from the token's UTF-16 view avoids
+    /// leaking any of the long-bracket delimiter into the typed prefix.
+    private static func stringLiteralOpenerUTF16Length(_ tokenText: String) -> Int {
+        let text = tokenText as NSString
+        guard text.length > 0, text.character(at: 0) == 91 else { return 1 } // [
+        var cursor = 1
+        while cursor < text.length, text.character(at: cursor) == 61 { cursor += 1 } // =
+        guard cursor < text.length, text.character(at: cursor) == 91 else { return 1 } // [
+        return cursor + 1
     }
 
     private static func callee(before openingParenIndex: Int, tokens: [LuaSourceToken]) -> String? {

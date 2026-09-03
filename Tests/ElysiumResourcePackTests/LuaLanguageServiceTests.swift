@@ -9,6 +9,7 @@ final class LuaLanguageServiceTests: XCTestCase {
         applicableBuiltIns: Set<String>? = nil,
         customAttributes: [LuaCustomAttributeCompletion] = [],
         references: [LuaObjectReferenceCompletion] = [],
+        soundNames: [String] = [],
         scriptMode: ScriptMode = .module,
         handlerEvent: String? = nil,
         eventCandidates: [ScriptEditorEventCandidate]? = nil,
@@ -20,6 +21,7 @@ final class LuaLanguageServiceTests: XCTestCase {
             targetApplicableBuiltInAttributes: applicableBuiltIns,
             targetCustomAttributes: customAttributes,
             objectReferences: references,
+            soundNames: soundNames,
             scriptMode: scriptMode,
             handlerEvent: handlerEvent,
             eventCandidates: eventCandidates,
@@ -243,6 +245,93 @@ final class LuaLanguageServiceTests: XCTestCase {
         let subscribe = completion("subscribe(\"block:o", environment: env)
         XCTAssertEqual(subscribe.items.first?.insertionText, "objects.get(\"\(ref.canonicalRef)\")")
         XCTAssertEqual(("subscribe(\"block:o" as NSString).substring(with: subscribe.replacementRange), "\"block:o")
+    }
+
+    func testSoundNamesCompleteOnlyInTheFirstSoundArgument() {
+        let env = environment(soundNames: ["Imported Bell", "Glass", "Ping"])
+        let quoted = completion("sound(\"Imp", environment: env)
+        XCTAssertEqual(quoted.context, .soundName)
+        XCTAssertEqual(quoted.prefix, "Imp")
+        XCTAssertEqual(quoted.items.map(\.label), ["Imported Bell"])
+        XCTAssertEqual(quoted.items.first?.insertionText, "\"Imported Bell\"")
+        XCTAssertEqual(
+            ("sound(\"Imp" as NSString).substring(with: quoted.replacementRange),
+            "\"Imp"
+        )
+
+        let unquoted = completion("sound(Gla", environment: env)
+        XCTAssertEqual(unquoted.context, .soundName)
+        XCTAssertEqual(unquoted.items.first?.insertionText, "\"Glass\"")
+
+        let volume = completion("sound(\"Glass\", 0", environment: env)
+        XCTAssertNotEqual(volume.context, .soundName)
+        XCTAssertFalse(volume.items.contains { env.soundNames.contains($0.label) })
+        XCTAssertFalse(
+            completion("local label = \"Imp", environment: env).items.contains {
+                $0.label == "Imported Bell"
+            }
+        )
+    }
+
+    func testSoundCompletionPreservesCatalogOrderAtTheLimitButTypedMatchWins() {
+        let imported = ["Imported Bell", "Imported Chime"]
+        let builtIns = (0..<60).map { String(format: "System %02d", $0) }
+        let env = environment(soundNames: imported + builtIns)
+
+        let empty = completion("sound(\"", environment: env)
+        XCTAssertEqual(empty.items.count, 50)
+        XCTAssertEqual(Array(empty.items.prefix(imported.count)).map(\.label), imported)
+
+        let matchEnv = environment(soundNames: ["Imported Glassy", "Glass"])
+        let typed = completion("sound(\"Glass", environment: matchEnv)
+        XCTAssertEqual(typed.items.map(\.label), ["Glass", "Imported Glassy"])
+    }
+
+    func testSoundCompletionQuotesUnsafeLiteralCharacters() {
+        let env = environment(soundNames: ["Builder's \"Bell\""])
+        let result = completion("sound('Build", environment: env)
+
+        XCTAssertEqual(result.context, .soundName)
+        XCTAssertEqual(result.items.first?.label, "Builder's \"Bell\"")
+        XCTAssertEqual(result.items.first?.insertionText, "\"Builder's \\\"Bell\\\"\"")
+        XCTAssertEqual(
+            ("sound('Build" as NSString).substring(with: result.replacementRange),
+            "'Build"
+        )
+    }
+
+    func testSoundCompletionHandlesArbitraryLongBracketLevelsAndCanonicalizesReplacement() throws {
+        let soundName = #"Imp "Bell" \ Chime"#
+        let env = environment(soundNames: [soundName])
+
+        let incompleteSource = "sound([=[Imp"
+        let incomplete = completion(incompleteSource, environment: env)
+        XCTAssertEqual(incomplete.context, .soundName)
+        XCTAssertEqual(incomplete.prefix, "Imp")
+        XCTAssertEqual(incomplete.items.first?.label, soundName)
+        XCTAssertEqual(incomplete.items.first?.insertionText, #""Imp \"Bell\" \\ Chime""#)
+        XCTAssertEqual(
+            (incompleteSource as NSString).substring(with: incomplete.replacementRange),
+            "[=[Imp"
+        )
+
+        let closedSource = "sound([==[Imp]==])"
+        let closed = LuaLanguageService.completions(
+            source: closedSource,
+            cursorUTF16: ("sound([==[Imp" as NSString).length,
+            environment: env
+        )
+        XCTAssertEqual(closed.prefix, "Imp")
+        XCTAssertEqual(
+            (closedSource as NSString).substring(with: closed.replacementRange),
+            "[==[Imp]==]"
+        )
+        let completedSource = NSMutableString(string: closedSource)
+        completedSource.replaceCharacters(
+            in: closed.replacementRange,
+            with: try XCTUnwrap(closed.items.first?.insertionText)
+        )
+        XCTAssertEqual(completedSource as String, #"sound("Imp \"Bell\" \\ Chime")"#)
     }
 
     func testExactNearbyBindingOffersOnlyThatObjectsCustomAttributesAndMethods() {

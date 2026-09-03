@@ -1,6 +1,6 @@
 # Elysium — Architecture
 
-This is the technical tour. The one-paragraph version: **ElysiumCore** is a headless, deterministic game engine (no AppKit imports anywhere); **Elysium** is a thin-ish macOS shell that owns the window, the Metal renderer, the synthesized audio engine, and the UI stack; **elysmoke** is the regression harness that pins the engine to golden files. The app talks to the engine exclusively through the `GameHost` protocol, and the engine never draws, plays, or reads input directly.
+This is the technical tour. The one-paragraph version: **ElysiumCore** is a headless, deterministic game engine (no AppKit imports anywhere); **Elysium** is a thin-ish macOS shell that owns the window, the Metal renderer, the audio stack, and the UI stack; **elysmoke** is the regression harness that pins the engine to golden files. The app talks to the engine exclusively through the `GameHost` protocol, and the engine never draws, plays, or reads input directly.
 
 ```
 ┌─────────────────────────── Elysium.app ───────────────────────────┐
@@ -10,7 +10,7 @@ This is the technical tour. The one-paragraph version: **ElysiumCore** is a head
 │                    sky/celestials/clouds, bloom, ultra, capture  │
 │  UICanvas/UIManager/Screens/Menus/HUD   canvas-2D-style batcher, │
 │                    screen stack, 16 gameplay screens, menus      │
-│  Audio             AVAudioSourceNode synth, recipes, reverb      │
+│  Audio             synthesized game audio + named script WAVs    │
 │  ResourcePacks (built-in Faithful loading)                       │
 │  OllamaAgent       loopback-only /api/chat, /api/generate, /api/tags │
 │  LANTransport      Bonjour browse/advertise + TCP Direct Connect │
@@ -197,7 +197,33 @@ future authority boundary.
 
 ## Audio
 
-No samples. `Audio.swift` is a synthesizer: each sound effect is a recipe that spawns voices (oscillator or filtered noise) with envelopes, pitch sweeps, and vibrato, mixed in an `AVAudioSourceNode` render callback at 48 kHz. Effects: RBJ biquad filters, positional stereo panning, underwater lowpass, and a cave reverb built from two coprime-length feedback delay lines. Music (ambient + jukebox discs) is generated on the fly from scale/tempo configs. The render thread owns the voice list; the main thread communicates through a locked inbox.
+`Audio.swift` remains the engine for ordinary game audio: each effect is a synthesized recipe that
+spawns oscillator or filtered-noise voices with envelopes, pitch sweeps, and vibrato, mixed in an
+`AVAudioSourceNode` render callback at 48 kHz. RBJ biquad filters, positional stereo panning,
+underwater lowpass, and two coprime-length feedback delays provide the effects and cave reverb;
+ambient music and jukebox discs are still generated from scale/tempo configurations. The render
+thread owns the synthesized voice list and receives main-thread work through its locked inbox.
+
+`ScriptSoundLibrary.swift` is the separate app-owned boundary for `sound(name[, volume])`. Its live,
+case-insensitive catalog dynamically enumerates standard names below `/System/Library/Sounds` and
+the macOS ToneLibrary resource locations, then adds validated user WAVs managed under
+`~/Library/Application Support/Elysium/Sounds`. Imported names are presented before built-ins in
+editor completion but cannot case-insensitively shadow a built-in. **Options... → Audio → Script
+Sounds...** owns import, preview, and confirmed deletion; Lua receives only catalog names, never a
+URL or path.
+
+Import is a fail-closed file boundary. A source must be a regular, non-symlink, single-link `.wav`
+whose normalized visible basename is at most 128 UTF-8 bytes; it must decode as WAV, be no larger
+than 16 MiB or 120 seconds, and contain one or two channels. The managed catalog admits at most 256
+files and 256 MiB in aggregate. Reads use no-follow descriptors and stable file identity, and import
+copies through an exclusive temporary file plus an atomic no-replace rename. Playback reopens the
+managed copy, limits sample-backed audio to eight simultaneous players, and applies the ordinary
+listener distance/pan plus Master and Players gains. Spatial object scripts play from the live
+block center or entity/player position; world and dimension owners use the host player's current
+position. Core sees only `GameHost.scriptSoundNames`/`playScriptSound` and therefore retains no file
+or AppKit authority. A bounded ordered sound-name catalog travels in `LANWorldSummary`; LAN guest
+editors consume that host catalog, and replication refreshes it, because guest scripts execute and
+produce their audio on the host rather than the guest Mac.
 
 ## Local AI agent
 
@@ -205,9 +231,9 @@ The in-game `/ai` command is split across the app and core boundary on purpose. 
 
 ## LAN multiplayer
 
-LAN support follows the same core/app split as rendering and AI. `Sources/ElysiumCore/Net/LANMultiplayer.swift` defines the protocol v5 constants, message kinds, host/client state names, sanitized input helpers, `LANWorldSummary`, dimension/death-aware `LANPlayerState`, lifecycle/permission/event payloads, player-input/block/container/template/RPG intent payloads, and the `PBLN` frame codec. Frames are fixed-header, length-prefixed, versioned, type-tagged, sequence-numbered, JSON payloads with a 1 MiB hard cap; the decoder validates magic, version, message type, and payload length before allocation/JSON decode and leaves partial stream frames buffered.
+LAN support follows the same core/app split as rendering and AI. `Sources/ElysiumCore/Net/LANMultiplayer.swift` defines the protocol v5 constants, message kinds, host/client state names, sanitized input helpers, `LANWorldSummary`, dimension/death-aware `LANPlayerState`, lifecycle/permission/event payloads, player-input/block/container/template/RPG intent payloads, and the `PBLN` frame codec. Frames are fixed-header, length-prefixed, versioned, type-tagged, sequence-numbered, JSON payloads with a 1 MiB hard cap; the decoder validates magic, version, message type, and payload length before allocation/JSON decode and leaves partial stream frames buffered. The hello also requires exact `ELYSIUM_VERSION` equality, so a live-protocol message-kind addition bumps the app version even when the v5 frame version remains stable; mixed binaries reject each other before gameplay traffic rather than accepting a capability set they cannot decode.
 
-`Sources/ElysiumCore/Net/LANReplication.swift` adds the core-only replication and authority layer. The host session tracks accepted peers, reconnect-preserved peer records, last player states, host-owned RPG state, inventory/XP snapshots, permissions, lifecycle state, replication acknowledgments, per-peer template undo snapshots, dirty chunk-section queues, and a deterministic coalescing block-change log. It clamps untrusted client player state through host permissions before publishing it and never trusts client-sent RPG snapshots in high-frequency player state; `recordRPGState` is the host-owned path that merges full RPG state only into direct RPG-change/restore snapshots, while normal periodic peer states stay lean. It rejects dead/disconnected/unknown players before mutation, enforces build/container/crafting/template/command/AI/creative/dimension/respawn permissions, and executes object-template copy/place/undo through the same validated template store and placement routines as local play, with place and undo sliced across host ticks through per-peer placement/undo jobs while copy stays synchronous. Host-side block intents check the peer's current dimension and reach before mutating the active world; remote `.useBlock` is intentionally limited to non-iron doors, non-iron trapdoors, and fence gates, where the host produces the same block delta as local play without running the full screen/item/sleep interaction path. Container-edit intents carry the peer inventory snapshot, a deterministic host block-entity revision, and up to two block-entity snapshots so linked large chests are validated and applied as one transaction; stale revisions, duplicate positions, incompatible blocks, out-of-reach targets, non-conservative item deltas, and invalid crafting transforms fail closed. Replication batches carry capped world-state snapshots, lean player states, chunk-section snapshots, block deltas, complete-list entity snapshots, player inventory snapshots, and item-bearing block-entity snapshots for containers and crafting stations. Template place/undo streams per-block deltas through the same `onWorldBlockChanged` change log as every other block mutation while the job steps, and marks affected chunk sections dirty once on completion so large object mutations still receive authoritative section snapshots without overflowing the delta log. Block-entity snapshots carry slot counts plus sparse item slots for `container`, `hopper`, `furnace`, `brewing`, `shelf`, `campfire`, and `crafting` entities; clients validate dimensions, chunk/block readiness, block compatibility, slot ranges, item ids, and stack counts before mutating an existing `BlockEntityData` in place or creating a compatible mirror. LAN client worlds keep a bounded deferred replication buffer for block changes and block-entity snapshots that arrive before their chunk; replay runs after authoritative sections and block changes so container contents are not lost during chunk-stream timing gaps. World-state snapshots carry host time, day time, weather, difficulty, and dimension so clients do not run an independent clock. Entity snapshots include bounded dropped-item stack payloads and XP-orb amounts; clients validate entity type/item id/count/XP fields, materialize non-persistent LAN mirror entities in `World`, skip normal ticks for those mirrors, and remove stale mirrors only when the batch explicitly marks its entity list complete. Transient LAN client worlds also suppress saved/worldgen entity adoption and purge any non-authoritative local entity that is not the local player, a remote-player proxy, or a host-published mirror, keeping spawned mobs/drops/XP host-owned. Client-side apply stores a bounded mirror and drops malformed world-state dimensions, chunk sections, registry-invalid block cells, invalid block-entity payloads, or invalid entity payloads before anything can reach `World`. Chunk-section application calls the normal dirty-section hook so replicated sections remesh through the same path as local block edits.
+`Sources/ElysiumCore/Net/LANReplication.swift` adds the core-only replication and authority layer. The host session tracks accepted peers, reconnect-preserved peer records, last player states, host-owned RPG state, inventory/XP snapshots, permissions, lifecycle state, replication acknowledgments, per-peer template undo snapshots, dirty chunk-section queues, and a deterministic coalescing block-change log. It clamps untrusted client player state through host permissions before publishing it and never trusts client-sent RPG snapshots in high-frequency player state; `recordRPGState` is the host-owned path that merges full RPG state only into direct RPG-change/restore snapshots, while normal periodic peer states stay lean. It rejects dead/disconnected/unknown players before mutation, enforces build/container/crafting/template/command/AI/creative/dimension/respawn permissions, and executes object-template copy/place/undo through the same validated template store and placement routines as local play, with place and undo sliced across host ticks through per-peer placement/undo jobs while copy stays synchronous. Host-side block intents check the peer's current dimension and reach before mutating the active world; native remote `.useBlock` remains limited to non-iron doors, non-iron trapdoors, and fence gates, where the host produces the same block delta as local play without running the full screen/item/sleep interaction path. A separate event-only `LANInteractionIntent` covers the semantic secondary-use target even when it has no native behavior: the host validates the accepted peer, permission, lifecycle, dimension, reach, current block cell or live entity, and selected inventory slot; derives the payload from authoritative state; and admits only a positive per-connection sequence above its high-water mark. Invalid attempts consume their admitted sequence, so replay cannot become valid later, and native mutation paths never raise the same script event. Container-edit intents carry the peer inventory snapshot, a deterministic host block-entity revision, and up to two block-entity snapshots so linked large chests are validated and applied as one transaction; stale revisions, duplicate positions, incompatible blocks, out-of-reach targets, non-conservative item deltas, and invalid crafting transforms fail closed. Replication batches carry capped world-state snapshots, lean player states, chunk-section snapshots, block deltas, complete-list entity snapshots, player inventory snapshots, and item-bearing block-entity snapshots for containers and crafting stations. Template place/undo streams per-block deltas through the same `onWorldBlockChanged` change log as every other block mutation while the job steps, and marks affected chunk sections dirty once on completion so large object mutations still receive authoritative section snapshots without overflowing the delta log. Block-entity snapshots carry slot counts plus sparse item slots for `container`, `hopper`, `furnace`, `brewing`, `shelf`, `campfire`, and `crafting` entities; clients validate dimensions, chunk/block readiness, block compatibility, slot ranges, item ids, and stack counts before mutating an existing `BlockEntityData` in place or creating a compatible mirror. LAN client worlds keep a bounded deferred replication buffer for block changes and block-entity snapshots that arrive before their chunk; replay runs after authoritative sections and block changes so container contents are not lost during chunk-stream timing gaps. World-state snapshots carry host time, day time, weather, difficulty, and dimension so clients do not run an independent clock. Entity snapshots include bounded dropped-item stack payloads and XP-orb amounts; clients validate entity type/item id/count/XP fields, materialize non-persistent LAN mirror entities in `World`, skip normal ticks for those mirrors, and remove stale mirrors only when the batch explicitly marks its entity list complete. Transient LAN client worlds also suppress saved/worldgen entity adoption and purge any non-authoritative local entity that is not the local player, a remote-player proxy, or a host-published mirror, keeping spawned mobs/drops/XP host-owned. Client-side apply stores a bounded mirror and drops malformed world-state dimensions, chunk sections, registry-invalid block cells, invalid block-entity payloads, or invalid entity payloads before anything can reach `World`. Chunk-section application calls the normal dirty-section hook so replicated sections remesh through the same path as local block edits.
 
 The event-only `.toolStrike` block action never mutates the world. A guest sends only its observed target, face, selected slot, and a positive monotone client-world sequence; the host validates build authorization, player lifecycle, dimension, reach, current block/cell, selected inventory slot, and usable registered tool before reconstructing and raising the standard `block.toolStrike` event from authoritative state. The host checks both a connection-local sequence high-water mark and the last valid target: gaps are accepted, stale/replayed sequences and fresh sequences for the same target are ignored, semantic rejection consumes the sequence without resetting the target, and a valid move to another block permits a later return to the first. Reconnect begins a new sequence/target epoch so either a continuing or reset client counter remains valid.
 
@@ -394,6 +420,14 @@ expose), `subject`, `payload`, `source`, and internal delivery metadata the bus 
 enforcement and kind-wildcard type-filter matching. A dedicated `isSyntheticPositionChange` bit
 distinguishes quantized movement from a legal custom attribute whose physical key is also `pos`;
 it participates in coalescing identity and never enters the Lua payload.
+
+`block.used` and `entity.interacted` describe a valid secondary-use target, not successful native
+gameplay mutation. `GameCore.doUse` selects the foremost entity under the crosshair, otherwise the
+block hit, snapshots the held item before native behavior can consume or replace it, and raises one
+event on that selected subject even when its native `interact`/`useBlock` path returns false. This
+lets handlers attached to inert or decorative objects observe the same player gesture without
+changing placement, screens, sleep, or other native use precedence. LAN clients send the separate
+event-only interaction intent described above; native block intents cannot publish a duplicate.
 
 Subscriptions come in two flavors sharing one matching shape (`SubscriptionTarget` — `.object(ref)`,
 `.kind(kind, typeFilter)`, `.any`): **persisted** (`Subscription`, `/on`/`/unsubscribe`, natural-key
@@ -628,8 +662,12 @@ no fallible validation left during its author-scoped world-cell commit, so synch
 retain script provenance. Check/dry-run performs the same preflight without committing. Every other
 built-in field (including entity/player "verbs" like position or health) goes through the same
 generic `h:get`/`h:set`/property sugar that `/attr` already used, since design.md itself frames most
-verbs as sugar over the funnels `BuiltInAttributes` already implements. `say`/`sound`/`particles` are
-accepted but `sound`/`particles` are no-ops in 1c (not wired to the renderer/audio layer).
+verbs as sugar over the funnels `BuiltInAttributes` already implements. `say` produces bounded chat;
+`sound(name[, volume])` resolves the current app-owned catalog case-insensitively and returns whether
+positioned playback started. It is available to attached module and handler execution plus ephemeral
+Run Once, but refused during unload. Check/dry-run validates the exact catalog name and 0-through-1
+volume without playback or budget consumption. Admission is capped at 8 calls per script and 64 per
+world per simulation tick. `particles` remains an accepted no-op until renderer wiring exists.
 `/script run` and the AI's `run_script` tool share the fully gated
 `ScriptRuntime.runEphemeral`: synchronous (`LuaState.call`, never yieldable — an attempted
 `wait`/`ai.await` correctly faults, matching §9.3's "no subscribe, no timers, no `ai.*`"), run once

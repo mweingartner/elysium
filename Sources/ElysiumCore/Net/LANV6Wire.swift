@@ -46,6 +46,8 @@ public enum LANV6MessageKind: UInt16, CaseIterable, Codable, Equatable, Hashable
     /// path (see the file header), so the case exists here only to keep the two raw-
     /// value spaces in lockstep per design.md §11's "mirrored into the v6 manifest".
     case scriptIntent = 30
+    /// Replay-safe semantic secondary-use target, mirrored from the live message manifest.
+    case interactionIntent = 31
 
     public var payloadLimit: Int {
         switch self {

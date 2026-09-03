@@ -215,18 +215,34 @@ artifact_sha256() {
 # Player, text-input, capability-manifest, ElysiumStorage.o, and ElysiumTextInput.o pins remain
 # byte-identical.
 #
+# universal-interaction-and-script-sounds: EXPECTED_SAVES_SOURCE_SHA256 renewed from
+# 104564ee02dd009085cc5bf2f1d09fb6e893915283bef1cc09a3e5f7ab884dec to
+# 4018f336ad76cdbf1e9801c40211fb60c79bb24aecee952ce46f3cf5ef21c36c for the 1.1.1
+# compatibility boundary and bounded LAN sound-catalog summary. EXPECTED_GAME_CORE_SOURCE_SHA256
+# moves from a08cad717b4a61c6d45d933652bd6694d3b0a8a6b0556dc51394da048d319092 to
+# d21afda791c66a30597a9e37b572a530c5d977d691506a0d16c9bc0f7eabccce for universal,
+# exactly-once semantic interaction targeting plus host-authoritative LAN interaction routing and
+# script sound dispatch. The Saves parse-AST capability entry and consequently
+# EXPECTED_CORE_CAPABILITY_SHA256 move for the reviewed Saves declarations. ElysiumCore.o follows
+# those changes and the scripting/LAN protocol implementation; Elysium and elysmoke follow that
+# linked Core object, while Elysium additionally contains the bounded WAV library, macOS system
+# sound discovery/playback, Options management UI, and sound-name editor completion. The storage
+# source/API/object, Player source, ElysiumTextInput source/object, storage capability symbol graph,
+# and LegacySaveMigration parse-AST entry remain byte-identical. Full old/new evidence is recorded
+# in docs/script-interaction-sounds/build.md.
+#
 EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
 EXPECTED_STORAGE_API_SHA256='08acf52a794de902a69658a0926181918c62a30f7975cd0d685d3d3baa7c745b'
 EXPECTED_STORAGE_OBJECT_SHA256='43ea474d75be3fc2311f1a95295c94d23329249f505ed0c14878f7318e14b3a8'
-EXPECTED_SAVES_SOURCE_SHA256='104564ee02dd009085cc5bf2f1d09fb6e893915283bef1cc09a3e5f7ab884dec'
-EXPECTED_GAME_CORE_SOURCE_SHA256='a08cad717b4a61c6d45d933652bd6694d3b0a8a6b0556dc51394da048d319092'
+EXPECTED_SAVES_SOURCE_SHA256='4018f336ad76cdbf1e9801c40211fb60c79bb24aecee952ce46f3cf5ef21c36c'
+EXPECTED_GAME_CORE_SOURCE_SHA256='d21afda791c66a30597a9e37b572a530c5d977d691506a0d16c9bc0f7eabccce'
 EXPECTED_PLAYER_SOURCE_SHA256='79dbd2e132f8e65f2a9857f763c263fea0a1b8cd86fc7db6388fc77129373e10'
-EXPECTED_CORE_CAPABILITY_SHA256='67dbb84929eeda6bea6acec70567a6b8c3711521ae2c1f93fdfc6a2e957b8118'
+EXPECTED_CORE_CAPABILITY_SHA256='23eb45f111a2be91e6bcb2b0be41bb9fc58b5457bb3af09f8af0d9ad56987dd5'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3'
-EXPECTED_CORE_OBJECT_SHA256='3798ee8676de1511cbe883a1ce17f087c70b8cd0125faf0a26eee3c145f20741'
-EXPECTED_ELYSIUM_PRODUCT_SHA256='887c7abe4be31a97dc9498b04747da39b65df7c45c3bf6ce2cf1d995fea49ec0'
-EXPECTED_SMOKE_PRODUCT_SHA256='1d045b5c1944236712112658aea5619cd7231a6e953685d3159b8b260d2f2479'
+EXPECTED_CORE_OBJECT_SHA256='3810b3aee479d2533277afdfb44ef9637f2fd5ee820ecf7c076b952b68dde737'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='193425557606069d54a33bc1349bea5f931dbd7ac36a771c8802265d88f445d9'
+EXPECTED_SMOKE_PRODUCT_SHA256='7846fc13cd37b933b685617a44600bae23ed90d6a44465c5f609d096e1be75db'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

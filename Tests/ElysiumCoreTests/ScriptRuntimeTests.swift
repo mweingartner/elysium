@@ -191,6 +191,75 @@ final class ScriptRuntimeTests: XCTestCase {
         )
     }
 
+    func testSoundPlaysFromModuleAndHandlerWithoutDryRunSideEffects() throws {
+        let harness = try makeRuntimeHarness(seed: 916)
+        harness.host.availableScriptSounds = ["Glass", "Imported Bell"]
+
+        guard case .success = harness.runtime.runEphemeral(
+            source: "assert(sound('glass', 0.5))", owner: .world
+        ) else { return XCTFail("module sound should resolve names case-insensitively") }
+        XCTAssertEqual(harness.host.playedScriptSounds.count, 1)
+        XCTAssertEqual(harness.host.playedScriptSounds.first?.name, "Glass")
+        XCTAssertEqual(harness.host.playedScriptSounds.first?.volume, 0.5)
+        XCTAssertEqual(harness.host.playedScriptSounds.first?.owner, .world)
+
+        XCTAssertEqual(
+            harness.runtime.dryRunOutcome(
+                source: "assert(sound('Imported Bell'))", owner: .world, mode: .module
+            ),
+            .completed
+        )
+        XCTAssertEqual(
+            harness.host.playedScriptSounds.count, 1,
+            "Check must validate the catalog entry without playing it"
+        )
+
+        let event = try XCTUnwrap(EventKind.parse("test.ring"))
+        _ = try harness.scripts.attach(
+            .world, name: "ringer", source: "assert(sound('Imported Bell'))", mode: .handler,
+            triggers: [Trigger(event: event, attribute: nil, target: .object(.world))],
+            by: .player, tick: 0
+        ).get()
+        harness.state.anyScriptsAttached = true
+        harness.runtime.runLoads()
+        harness.state.eventBus.raise(kind: event, subject: .world, source: .engine, tick: 0)
+        _ = harness.state.eventBus.runDeliveryPhase(tick: 0)
+        XCTAssertEqual(harness.host.playedScriptSounds.map(\.name), ["Glass", "Imported Bell"])
+    }
+
+    func testSoundValidatesCatalogArgumentsAndEnforcesSameTickBudget() throws {
+        let harness = try makeRuntimeHarness(seed: 917)
+        harness.host.availableScriptSounds = ["Glass"]
+        let invalid: [(String, String)] = [
+            ("sound()", "sound(name[, volume])"),
+            ("sound('missing')", "unknown sound"),
+            ("sound('Glass', -0.1)", "volume"),
+            ("sound('Glass', 1.1)", "volume"),
+            ("sound(string.rep('x', 129))", "1...128"),
+        ]
+        for (source, expected) in invalid {
+            guard case .failure(let message) = harness.runtime.runEphemeral(
+                source: source, owner: .world
+            ) else { return XCTFail("expected refusal for \(source)") }
+            XCTAssertTrue(message.contains(expected), message)
+        }
+        XCTAssertTrue(harness.host.playedScriptSounds.isEmpty)
+
+        let allowed = ScriptRuntime.maxSoundsPerScriptPerTick
+        let burst = (0...allowed).map { _ in "assert(sound('Glass'))" }.joined(separator: "\n")
+        guard case .failure(let overBudget) = harness.runtime.runEphemeral(
+            source: burst, owner: .world
+        ) else { return XCTFail("one script must not exceed its same-tick sound allowance") }
+        XCTAssertTrue(overBudget.contains("sound playback budget exceeded"), overBudget)
+        XCTAssertEqual(harness.host.playedScriptSounds.count, allowed)
+
+        harness.host.currentTick += 1
+        guard case .success = harness.runtime.runEphemeral(
+            source: "assert(sound('Glass'))", owner: .world
+        ) else { return XCTFail("the sound allowance must renew on the next tick") }
+        XCTAssertEqual(harness.host.playedScriptSounds.count, allowed + 1)
+    }
+
     func testDefinitionReconciliationIsDirtyDrivenWithoutPeriodicWorldCensus() throws {
         let harness = try makeRuntimeHarness(seed: 913)
         harness.runtime.runLoads()
@@ -1441,6 +1510,7 @@ final class ScriptRuntimeTests: XCTestCase {
           world.attrs.unload_builtin_blocked = blocked(function() player.health = 1 end)
           world.attrs.unload_register_blocked = blocked(function() register("late", function() end) end)
           world.attrs.unload_say_blocked = blocked(function() say("must not escape") end)
+          world.attrs.unload_sound_blocked = blocked(function() sound("Glass") end)
           world:define("unload_defined", 7)
           world.unload_direct = "done"
           world.attrs.unload_finished = true
@@ -1464,6 +1534,7 @@ final class ScriptRuntimeTests: XCTestCase {
             "unload_attach_blocked", "unload_detach_blocked", "unload_emit_blocked",
             "unload_on_blocked", "unload_declare_blocked", "unload_world_blocked",
             "unload_builtin_blocked", "unload_register_blocked", "unload_say_blocked",
+            "unload_sound_blocked",
         ] {
             XCTAssertEqual(attributes.get(.world, name), .bool(true), name)
         }

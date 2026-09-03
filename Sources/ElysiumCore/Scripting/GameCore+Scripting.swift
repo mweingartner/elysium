@@ -103,6 +103,33 @@ extension GameCore: ObjectGraphHost {
         scripting.scriptDefinitionChanges.drain(limit: limit)
     }
 
+    public func scriptSoundNames() -> [String] {
+        if isLANClientWorld {
+            return lanClientScriptSoundNames ?? []
+        }
+        return host?.scriptSoundNames() ?? []
+    }
+
+    public func playScriptSound(named name: String, volume: Double, owner: ObjectRef) -> Bool {
+        let origin: (Double, Double, Double)?
+        switch ObjectGraph(host: self).resolve(owner) {
+        case .live(.block(_, _, _, let x, let y, let z)):
+            origin = (Double(x) + 0.5, Double(y) + 0.5, Double(z) + 0.5)
+        case .live(.entity(let entity, _)):
+            origin = (entity.x, entity.y, entity.z)
+        case .live(.player(let player, _)):
+            origin = (player.x, player.y, player.z)
+        case .live(.world), .live(.dimension):
+            origin = localPlayer.map { ($0.x, $0.y, $0.z) }
+        case .unknown, .unsupported, .dormant, .notLoaded:
+            origin = nil
+        }
+        guard let origin else { return false }
+        return host?.playScriptSound(
+            name, origin.0, origin.1, origin.2, volume
+        ) ?? false
+    }
+
     public func worldObjectRecord(for ref: ObjectRef) -> ObjectRecord {
         scripting.worldRecords[ref.canonical] ?? ObjectRecord()
     }

@@ -139,6 +139,15 @@ final class LANMultiplayerTests: XCTestCase {
                 .guestClaimedPlayerID,
             peerID
         )
+        XCTAssertEqual(
+            LANMultiplayerMessage.interactionIntent(
+                playerID: peerID,
+                intent: LANInteractionIntent(
+                    target: .entity(id: 1), selectedHotbarSlot: 0, sequence: 1
+                )
+            ).guestClaimedPlayerID,
+            peerID
+        )
         XCTAssertNil(LANMultiplayerMessage.chat(sender: "spoof", text: "hello").guestClaimedPlayerID)
     }
 
@@ -146,7 +155,7 @@ final class LANMultiplayerTests: XCTestCase {
         let expected: [LANMultiplayerMessageKind] = [
             .playerState, .inputIntent, .blockIntent, .containerIntent,
             .templateIntent, .attackIntent, .tossIntent, .containerEditIntent,
-            .inventoryUpdate, .rpgIntent, .scriptIntent,
+            .inventoryUpdate, .rpgIntent, .scriptIntent, .interactionIntent,
         ]
         let classified = LANMultiplayerMessageKind.allCases.filter {
             $0.isHostMutationBlockedByRPGClockCatchUp
@@ -223,6 +232,17 @@ final class LANMultiplayerTests: XCTestCase {
                 action: .toolStrike, x: 1, y: 2, z: 3, face: 2,
                 selectedHotbarSlot: 4, cell: Int(cell(B.stone)), toolStrikeSequence: 7
             )),
+            .interactionIntent(
+                playerID: "peer-a",
+                intent: LANInteractionIntent(
+                    target: .block(
+                        x: 1, y: 2, z: 3, face: Dir.north,
+                        cell: Int(cell(B.stone))
+                    ),
+                    selectedHotbarSlot: 4,
+                    sequence: 9
+                )
+            ),
             .containerIntent(playerID: "peer-a", intent: LANContainerIntent(action: .clickSlot, containerID: "chest", slot: 5, button: 1, shift: true)),
             .templateIntent(playerID: "peer-a", intent: LANTemplateIntent(action: .placeTemplate, templateName: "A House!", x: 9, y: 64, z: -4, rotation: -1)),
             .replicationBatch(LANReplicationBatch(
@@ -434,6 +454,60 @@ final class LANMultiplayerTests: XCTestCase {
         XCTAssertEqual(locallyConstructed.cell, Int(UInt16.max))
     }
 
+    func testInteractionIntentRoundTripsTargetsAndRejectsHostileSemanticFields() throws {
+        XCTAssertTrue(lanMultiplayerAllowsInbound(
+            .interactionIntent, localRole: .host, phase: .authenticated
+        ))
+        XCTAssertFalse(lanMultiplayerAllowsInbound(
+            .interactionIntent, localRole: .client, phase: .authenticated
+        ))
+        XCTAssertFalse(lanMultiplayerAllowsInbound(
+            .interactionIntent, localRole: .host, phase: .awaitingHandshake
+        ))
+        XCTAssertEqual(
+            lanMultiplayerHostRateLimitCategory(for: .interactionIntent),
+            .gameplayIntent
+        )
+        XCTAssertEqual(
+            LANV6MessageKind.interactionIntent.rawValue,
+            LANMultiplayerMessageKind.interactionIntent.rawValue
+        )
+
+        let block = LANInteractionIntent(
+            target: .block(
+                x: 1, y: 64, z: -2, face: Dir.north,
+                cell: Int(cell(B.stone))
+            ),
+            selectedHotbarSlot: 2,
+            sequence: 7
+        )
+        let entity = LANInteractionIntent(
+            target: .entity(id: 42), selectedHotbarSlot: 1, sequence: 8
+        )
+        for intent in [block, entity] {
+            XCTAssertEqual(
+                try JSONDecoder().decode(
+                    LANInteractionIntent.self,
+                    from: JSONEncoder().encode(intent)
+                ),
+                intent
+            )
+        }
+
+        let malformedPayloads = [
+            #"{"targetKind":"block","x":1,"y":64,"z":2,"face":6,"cell":1,"selectedHotbarSlot":0,"sequence":1}"#,
+            #"{"targetKind":"block","x":1,"y":64,"z":2,"face":2,"cell":0,"selectedHotbarSlot":0,"sequence":1}"#,
+            #"{"targetKind":"entity","entityID":0,"selectedHotbarSlot":0,"sequence":1}"#,
+            #"{"targetKind":"entity","entityID":1,"selectedHotbarSlot":9,"sequence":1}"#,
+            #"{"targetKind":"entity","entityID":1,"selectedHotbarSlot":0,"sequence":0}"#,
+        ]
+        for payload in malformedPayloads {
+            XCTAssertThrowsError(try JSONDecoder().decode(
+                LANInteractionIntent.self, from: Data(payload.utf8)
+            ), "hostile interaction value must fail closed: \(payload)")
+        }
+    }
+
     func testToolStrikeBlockIntentIsAdditiveAndLegacyActionsKeepTheirWireShape() throws {
         let strike = LANBlockIntent(
             action: .toolStrike, x: 1, y: 2, z: 3, face: Dir.north,
@@ -636,6 +710,62 @@ final class LANMultiplayerTests: XCTestCase {
         XCTAssertFalse(game.hasWorld())
         XCTAssertFalse(game.isLANClientWorld)
         XCTAssertEqual(Set(game.listWorlds().map(\.id)), before)
+    }
+
+    func testWorldSummaryBoundsAndRoundTripsHostScriptSoundCatalog() throws {
+        let invalidFormat = "Hidden\u{202E}Name"
+        let tooLong = String(repeating: "x", count: LAN_MULTIPLAYER_MAX_SCRIPT_SOUND_NAME_BYTES + 1)
+        let candidates = [
+            "Imported Bell", "Glass", "IMPORTED BELL", "bad\nname", invalidFormat, "", tooLong,
+        ]
+        let summary = LANWorldSummary(
+            worldID: "sound-host", worldName: "Sound Host", seed: 7,
+            gameMode: GameMode.survival, difficulty: 2, dimension: Dim.overworld.rawValue,
+            playerCount: 2, scriptSoundNames: candidates
+        )
+
+        XCTAssertEqual(summary.scriptSoundNames.count, 2)
+        XCTAssertEqual(Array(summary.scriptSoundNames.prefix(2)), ["Imported Bell", "Glass"])
+        XCTAssertFalse(summary.scriptSoundNames.contains("IMPORTED BELL"))
+        XCTAssertFalse(summary.scriptSoundNames.contains("bad\nname"))
+        XCTAssertFalse(summary.scriptSoundNames.contains(invalidFormat))
+        XCTAssertFalse(summary.scriptSoundNames.contains(tooLong))
+
+        let capped = LANWorldSummary(
+            worldID: "capped-sound-host", worldName: "Capped Sound Host", seed: 8,
+            gameMode: GameMode.survival, difficulty: 2, dimension: Dim.overworld.rawValue,
+            playerCount: 2,
+            scriptSoundNames: (0..<(LAN_MULTIPLAYER_MAX_SCRIPT_SOUND_NAMES + 8)).map { "Sound \($0)" }
+        )
+        XCTAssertEqual(capped.scriptSoundNames.count, LAN_MULTIPLAYER_MAX_SCRIPT_SOUND_NAMES)
+
+        let encoded = try JSONEncoder().encode(summary)
+        XCTAssertEqual(try JSONDecoder().decode(LANWorldSummary.self, from: encoded), summary)
+
+        var mutated = summary
+        mutated.scriptSoundNames = ["Replaced", "REPLACED", "bad\nname"]
+        XCTAssertEqual(mutated.scriptSoundNames, ["Replaced"])
+    }
+
+    func testLANGuestScriptCompletionCatalogComesFromHostSummaryAndRefreshes() {
+        let game = PersistenceTestSupport.makeGame(owner: self, label: "lan-sound-catalog")
+        var summary = LANWorldSummary(
+            worldID: "sound-host", worldName: "Sound Host", seed: 7,
+            gameMode: GameMode.survival, difficulty: 2, dimension: Dim.overworld.rawValue,
+            playerCount: 2, scriptSoundNames: ["Host Import", "Glass"]
+        )
+        game.enterLANClientWorld(summary)
+
+        XCTAssertEqual(game.scriptSoundNames(), ["Host Import", "Glass"])
+
+        summary.scriptSoundNames = ["New Host Import", "Glass"]
+        _ = game.applyLANHostReplicationBatch(LANReplicationBatch(
+            tick: game.rpgSimulationTick,
+            fullSnapshot: false,
+            world: summary
+        ))
+
+        XCTAssertEqual(game.scriptSoundNames(), ["New Host Import", "Glass"])
     }
 
     func testLANClientResumeLocationPersistsPerHostedWorldWithoutSavingHostWorld() throws {

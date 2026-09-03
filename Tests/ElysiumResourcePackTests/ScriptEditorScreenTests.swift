@@ -103,6 +103,18 @@ final class ScriptEditorModelTests: XCTestCase {
         return game
     }
 
+    func testLiveSoundCatalogChangeInvalidatesOpenEditorLanguageEnvironment() throws {
+        let game = try makeTrustedGame()
+        let model = ScriptEditorModel(target: .player, game: game)
+        let before = model.soundCatalogRevision
+
+        NotificationCenter.default.post(
+            name: .elysiumScriptSoundCatalogDidChange, object: nil
+        )
+
+        XCTAssertEqual(model.soundCatalogRevision, before + 1)
+    }
+
     // MARK: - host: type + Save round-trips byte-exact
 
     func testTypingMultilineModuleSourceAndSavingAttachesItByteExact() throws {

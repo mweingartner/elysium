@@ -471,6 +471,21 @@ and `source` fields. `?` means nullable.
 | world | `ai.replied` | `requestId:integer`, `text:string?`, `error:string?` |
 | world | `script.overBudget` | `message:string` |
 
+`block.used` and `entity.interacted` mean that the player made a valid secondary-use gesture at
+that object; they do not require the object's native gameplay implementation to perform an action.
+The foremost entity under the crosshair owns `entity.interacted`; only when no entity is foremost
+does the block hit receive `block.used`. The `item` field is snapshotted before any native behavior
+can consume or replace the held stack. Consequently a Handler attached to inert terrain, a
+decoration, or a normally non-interactive entity still receives the use event exactly once. Native
+interaction remains entity-first and otherwise unchanged.
+
+LAN guests send this semantic gesture as a separate event-only intent. The host validates the peer,
+permission and lifecycle, dimension, reach, current block cell or live entity, and authoritative
+selected inventory slot before deriving the event and payload. A positive per-connection sequence
+high-water mark rejects replay; an admitted invalid sequence is consumed so it cannot become valid
+later. Native entity/block behavior and the separate native-use intent do not raise the semantic
+event, so a built-in action cannot duplicate the script handler.
+
 `block.toolStrike` is a semantic first-strike event, not a repeated swing/hit-sound event. It fires
 once when mining first transitions to a new block target, and only when the held registered item is
 an actual tool. An unbreakable block still receives this first-contact event. Holding the button on
@@ -625,7 +640,8 @@ produce visible output — see the note right after the table on `log`/`print`, 
 | `tick()` | the current world tick |
 | `rng()` / `rng(n)` / `rng(a,b)` | this script's own deterministic `RandomX` stream: `[0,1)`, `[1,n]`, or `[a,b]` |
 | `say(text)` | a chat line from this object — the way to produce visible output; host-only, rate-limited, text-hygiene filtered |
-| `sound(...)` / `particles(...)` | accepted (arguments loosely checked) but currently no-ops — not wired to audio/renderer yet |
+| `sound(name[, volume])` → boolean | play a live-catalog sound at this script owner's position. Names match case-insensitively; `volume` defaults to 1 and must be from 0 through 1. Returns whether playback started. Available in module, handler, and ephemeral execution; unavailable during unload |
+| `particles(...)` | accepted for forward compatibility but currently a no-op — not wired to the renderer yet |
 | `dim(name)` | `"overworld"`/`"nether"`/`"end"` → that dimension's handle |
 | `register(name, fn)` | name a function so `/on`, a durable `after`/`every`, or another `on(event, {name=...})` call can find it later. The reserved name `unload` installs the separate synchronous finalizer above; it is not an EventBus handler |
 | `objects.get(ref)` | a handle, or `nil`. Accepts a handle, a canonical ref string, or the aliases `"player"` (the local/host player), `"self"` (the calling script's owner), and `"world"` |
@@ -633,6 +649,46 @@ produce visible output — see the note right after the table on `log`/`print`, 
 | `objects.block(dim, x, y, z)` | a block handle at that position (bounds-checked) |
 | `ai.ask(prompt[, opts])` → `requestId` | fire-and-forget; reply arrives as an `ai.replied` event on `world` |
 | `local text, err = ai.await(prompt[, opts])` | yields the handler until the reply (or `"timeout"`/`"budget"`). `opts` is accepted for forward compatibility but not currently read by either call — no field in it (e.g. a max-length hint) changes behavior today |
+
+#### Script sounds
+
+The app-owned live catalog contains validated imported WAV filenames plus standard names discovered
+dynamically from `/System/Library/Sounds` and the macOS ToneLibrary resource locations. Matching is
+case-insensitive. Imported names appear before built-ins in `sound("` completion so a user's own
+small library remains immediately visible, but an import cannot shadow a built-in name under that
+same comparison. Existing synthesized game audio remains available through its ordinary engine
+paths; script sound support adds the named catalog without replacing it. In a LAN world, scripts
+execute and produce audio on the host. Guest editor completion therefore uses the bounded ordered
+catalog published by the host in world summaries, not the guest Mac's local imports and built-ins.
+
+Manage imports at **Options... → Audio → Script Sounds...**. The screen imports one `.wav`,
+previews the selected import, and deletes a selected managed copy after confirmation. Files live in:
+
+```text
+~/Library/Application Support/Elysium/Sounds/
+```
+
+The importer accepts only a regular, non-symlink, single-link source with a visible normalized
+basename of at most 128 UTF-8 bytes. The contents must decode as WAV, be no larger than 16 MiB or
+120 seconds, and have one or two channels. The managed library is limited to 256 entries and 256 MiB
+in aggregate. Copying uses an exclusive temporary file and atomic no-replace rename; catalog reads
+and playback reopen a regular single-link managed file with no-follow descriptors and stable
+identity checks. The app retains at most eight simultaneous sample players. Lua can supply only the
+catalog name and optional volume, never a path, URL, or file handle.
+
+Playback is positioned at the owning block center or the owning entity/player's live position; a
+world- or dimension-owned script uses the host player's current position. Each script may admit at
+most eight `sound` calls per simulation tick and the world at most 64. Check and AI dry-run perform
+the same arity, name, live-catalog, and volume validation but do not play anything or consume those
+allowances. An unknown or invalid name is a Lua error; `false` means a valid catalog entry was found
+but playback could not be started. For example:
+
+```lua
+local started = sound("Glass", 0.8)
+if not started then
+  say("The sound could not be started")
+end
+```
 
 There is no bare `log(...)` global — calling it errors ("attempt to call a nil value"). There *is* a
 `print(...)`, but it is not a player-facing print: it's wired to the sandbox's own log sink, which
@@ -680,6 +736,7 @@ Every mutating call above (attribute and declaration writes, `attach`/`detach`,
 `setBlock`/`breakBlock`, `emit`, timers) is a no-op during a read-only Check/AI dry run — never
 during ordinary attached execution. Declaration creation/removal is also unavailable in an
 ephemeral Run Once because it is durable authoring state, not a one-off world verb.
+`sound` similarly validates during Check/dry-run but produces no audio and spends no playback budget.
 
 `setFurnaceOutput` is intentionally an attached-lifecycle registration rather than a persisted
 block-entity attribute. Put it in a Module script on the furnace itself. Disabling scripts with

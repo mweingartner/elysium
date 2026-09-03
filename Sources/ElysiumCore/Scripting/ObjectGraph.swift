@@ -60,6 +60,12 @@ public protocol ObjectGraphHost: AnyObject {
     /// Removes at most `limit` canonically ordered dirty refs. Implementations retain every suffix
     /// entry for a later phase; the runtime never needs to census the live world.
     func drainDirtyScriptDefinitionRefs(limit: Int) -> [ObjectRef]
+    /// Canonical, currently playable names exposed to sandboxed scripts. The app owns discovery
+    /// and imported-file storage; Core receives names only and never grants Lua filesystem access.
+    func scriptSoundNames() -> [String]
+    /// Plays one already-resolved catalog sound for `owner`. Implementations choose the spatial
+    /// origin from the live object and return false when playback could not start.
+    func playScriptSound(named name: String, volume: Double, owner: ObjectRef) -> Bool
     /// lan-client-parity (change 4): the live `LANRemotePlayerEntity` for a
     /// connected guest, if the host currently mirrors one *in the current
     /// dimension* — `nil` when the peer isn't connected, or is connected but
@@ -95,6 +101,8 @@ extension ObjectGraphHost {
     public var scriptDefinitionGeneration: UInt64 { 0 }
     public func scriptDefinitionsDidChange(for _: ObjectRef, hasScripts _: Bool) {}
     public func drainDirtyScriptDefinitionRefs(limit _: Int) -> [ObjectRef] { [] }
+    public func scriptSoundNames() -> [String] { [] }
+    public func playScriptSound(named _: String, volume _: Double, owner _: ObjectRef) -> Bool { false }
 }
 
 /// A deterministic deduplicating min-heap used for bounded script-definition work. Canonical UTF-8
