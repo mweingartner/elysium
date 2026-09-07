@@ -231,18 +231,38 @@ artifact_sha256() {
 # and LegacySaveMigration parse-AST entry remain byte-identical. Full old/new evidence is recorded
 # in docs/script-interaction-sounds/build.md.
 #
+# grounded-spawns + ore/animal/lava worldgen: EXPECTED_GAME_CORE_SOURCE_SHA256 renewed from
+# d21afda791c66a30597a9e37b572a530c5d977d691506a0d16c9bc0f7eabccce to
+# c1ea09663131500c4e546c6d2d34fd49b6b49ded4e383aeb5efa8c0df169ea75 after GameCore gained the
+# groundedSpawn helper (dry-ground column search on first entry, bed-less respawn, and the End
+# return, re-recording the world spawn through the existing putWorld path) and the inland
+# spawn-candidate filter. Both checked-player caller spans, getter/CAS counts, and approved
+# owners remain byte-identical. EXPECTED_CORE_OBJECT_SHA256 moves from
+# 3810b3aee479d2533277afdfb44ef9637f2fd5ee820ecf7c076b952b68dde737 to
+# ec805bc9ae4efa724f6ce08caf58a35089b3bf92eaac227cc2443095d586711c for that GameCore change plus
+# the coal/iron hill bands and lava-region cave density in Terrain, the World dryGroundY /
+# groundedSpawnColumn lookups, and land-animal water avoidance in Animals.
+# EXPECTED_ELYSIUM_PRODUCT_SHA256 moves from
+# 193425557606069d54a33bc1349bea5f931dbd7ac36a771c8802265d88f445d9 to
+# 4be891cd6d31200b9e122b0341b81aa300fc73dd7d9aaf48003775e8f56240c6 for those ElysiumCore changes
+# and the re-embedded premultiplied-alpha held-tool sprites, and EXPECTED_SMOKE_PRODUCT_SHA256
+# moves transitively from 7846fc13cd37b933b685617a44600bae23ed90d6a44465c5f609d096e1be75db to
+# 90a9fa30f8941ef7da1991d8ad1a8420597f12a963f4e2a04d230d2d8316692e. The storage, Saves, Player,
+# text-input, capability-manifest, ElysiumStorage.o, and ElysiumTextInput.o pins remain
+# byte-identical.
+#
 EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
 EXPECTED_STORAGE_API_SHA256='08acf52a794de902a69658a0926181918c62a30f7975cd0d685d3d3baa7c745b'
 EXPECTED_STORAGE_OBJECT_SHA256='43ea474d75be3fc2311f1a95295c94d23329249f505ed0c14878f7318e14b3a8'
 EXPECTED_SAVES_SOURCE_SHA256='4018f336ad76cdbf1e9801c40211fb60c79bb24aecee952ce46f3cf5ef21c36c'
-EXPECTED_GAME_CORE_SOURCE_SHA256='d21afda791c66a30597a9e37b572a530c5d977d691506a0d16c9bc0f7eabccce'
+EXPECTED_GAME_CORE_SOURCE_SHA256='c1ea09663131500c4e546c6d2d34fd49b6b49ded4e383aeb5efa8c0df169ea75'
 EXPECTED_PLAYER_SOURCE_SHA256='79dbd2e132f8e65f2a9857f763c263fea0a1b8cd86fc7db6388fc77129373e10'
 EXPECTED_CORE_CAPABILITY_SHA256='23eb45f111a2be91e6bcb2b0be41bb9fc58b5457bb3af09f8af0d9ad56987dd5'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3'
-EXPECTED_CORE_OBJECT_SHA256='3810b3aee479d2533277afdfb44ef9637f2fd5ee820ecf7c076b952b68dde737'
-EXPECTED_ELYSIUM_PRODUCT_SHA256='193425557606069d54a33bc1349bea5f931dbd7ac36a771c8802265d88f445d9'
-EXPECTED_SMOKE_PRODUCT_SHA256='7846fc13cd37b933b685617a44600bae23ed90d6a44465c5f609d096e1be75db'
+EXPECTED_CORE_OBJECT_SHA256='ec805bc9ae4efa724f6ce08caf58a35089b3bf92eaac227cc2443095d586711c'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='4be891cd6d31200b9e122b0341b81aa300fc73dd7d9aaf48003775e8f56240c6'
+EXPECTED_SMOKE_PRODUCT_SHA256='90a9fa30f8941ef7da1991d8ad1a8420597f12a963f4e2a04d230d2d8316692e'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'
