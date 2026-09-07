@@ -17,6 +17,15 @@ double-rotates.
 Per tool TYPE the rotation/scale/translation is computed once (from the iron
 variant) and applied identically to every material, so the material variants keep a
 single shared silhouette (ResourcePackHardeningTests asserts this).
+
+Edge quality: resampling is done in premultiplied alpha so fully transparent (black)
+texels never bleed into the edge colour; a half-output-pixel Gaussian pre-filter
+followed by a box downscale keeps the source's 45-degree outline staircase from
+aliasing into a serrated edge; and the result is returned to straight alpha with
+specks (< EDGE_SPECK_ALPHA) dropped and near-opaque pixels snapped solid.
+Straight-alpha bicubic/Lanczos resampling used to leave a dashed ring of dark,
+half-transparent pixels around every tool that the nearest-sampled first-person
+layer rendered as missing fragments along the blade and haft.
 """
 import hashlib
 import json
@@ -24,7 +33,7 @@ import math
 import os
 import sys
 
-from PIL import Image
+from PIL import Image, ImageFilter
 import numpy as np
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -39,6 +48,9 @@ REFERENCE_MATERIAL = "iron"  # the variant the shared transform is measured from
 FIT_W, FIT_H = 120, 122
 ANCHOR_X, ANCHOR_Y = 64, 124
 SS = 4  # supersample factor for a clean rotation
+EDGE_PREFILTER = 0.5     # Gaussian radius, in output pixels, applied before the downscale
+EDGE_SPECK_ALPHA = 32    # coverage below this is dropped (stray resampling specks)
+EDGE_SOLID_ALPHA = 224   # coverage at or above this is snapped fully opaque
 
 
 def diagonal_source(item):
@@ -56,12 +68,38 @@ def pca_angle(im):
     return ((ang + 90) % 180) - 90  # fold to (-90, 90]; rotate by +ang -> vertical
 
 
+def premultiplied(im):
+    """RGBA -> premultiplied RGBA so resampling never mixes in the black of clear texels."""
+    a = np.array(im).astype(np.float32)
+    a[:, :, :3] *= a[:, :, 3:4] / 255.0
+    return Image.fromarray(np.rint(a).clip(0, 255).astype(np.uint8), "RGBA")
+
+
+def straight_alpha(im):
+    """Premultiplied RGBA -> straight RGBA with cleaned coverage.
+
+    True colours are restored by dividing out coverage; stray specks are dropped and
+    near-solid pixels snapped opaque, so the only partial pixels left are a thin,
+    correctly coloured anti-aliased rim (no dark half-transparent fringe).
+    """
+    a = np.array(im).astype(np.float32)
+    alpha = a[:, :, 3]
+    keep = alpha >= EDGE_SPECK_ALPHA
+    rgb = np.zeros_like(a[:, :, :3])
+    rgb[keep] = a[:, :, :3][keep] * (255.0 / alpha[keep][:, None])
+    out = np.zeros_like(a)
+    out[:, :, :3] = np.rint(rgb).clip(0, 255)
+    out[:, :, 3] = np.where(keep, np.where(alpha >= EDGE_SOLID_ALPHA, 255, alpha), 0)
+    return Image.fromarray(out.astype(np.uint8), "RGBA")
+
+
 def rotated_content(im, ang):
-    """Rotate upright on a large transparent canvas; return the tight-cropped SS content."""
-    up = im.resize((im.width * SS, im.height * SS), Image.NEAREST)
+    """Rotate upright on a large transparent canvas; return the tight-cropped SS content
+    (premultiplied alpha)."""
+    up = premultiplied(im).resize((im.width * SS, im.height * SS), Image.NEAREST)
     canvas = Image.new("RGBA", (up.width * 2, up.height * 2), (0, 0, 0, 0))
-    canvas.alpha_composite(up, (up.width // 2, up.height // 2))
-    r = canvas.rotate(ang, resample=Image.BICUBIC, center=(up.width, up.height))
+    canvas.paste(up, (up.width // 2, up.height // 2))
+    r = canvas.rotate(ang, resample=Image.BILINEAR, center=(up.width, up.height))
     a = np.array(r)
     ys, xs = np.where(a[:, :, 3] > 16)
     return r.crop((xs.min(), ys.min(), xs.max() + 1, ys.max() + 1))
@@ -78,11 +116,12 @@ def compose_128(content, scale, handle_x_ss):
     """Downscale the SS content by `scale`, then place it handle-centered & bottom-anchored."""
     nw = max(1, round(content.width * scale))
     nh = max(1, round(content.height * scale))
-    sm = content.resize((nw, nh), Image.LANCZOS)
+    filtered = content.filter(ImageFilter.GaussianBlur(radius=EDGE_PREFILTER / scale))
+    sm = filtered.resize((nw, nh), Image.BOX)  # premultiplied, ring-free area average
     hx = handle_x_ss * scale
     out = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
-    out.alpha_composite(sm, (round(ANCHOR_X - hx), round(ANCHOR_Y - nh)))
-    return out
+    out.paste(sm, (round(ANCHOR_X - hx), round(ANCHOR_Y - nh)))
+    return straight_alpha(out)
 
 
 def sha256(path):
