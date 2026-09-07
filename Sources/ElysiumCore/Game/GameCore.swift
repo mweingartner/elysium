@@ -1217,6 +1217,14 @@ public final class GameCore {
 #endif
     }
 
+    /// A standing position on dry, open ground near the overworld spawn column: the nearest
+    /// generated column whose top is solid ground rather than water, lava, or a tree, searched
+    /// through the loaded spawn chunks. Falls back to the plain surface height only when no
+    /// such column is loaded.
+    func groundedSpawn(_ w: World, _ x: Int, _ z: Int) -> (x: Int, y: Int, z: Int) {
+        w.groundedSpawnColumn(near: x, z) ?? (x, w.surfaceY(x, z), z)
+    }
+
     public func respawnPlayer() {
         if traveling { return }
         traveling = true
@@ -1248,9 +1256,12 @@ public final class GameCore {
             destDim = worldRec?.generationSettings.preset.startingDimension ?? .overworld
             let w = worlds[destDim]!
             ensureChunksLoaded(w, floorDiv(Int(w.spawnX), 16), floorDiv(Int(w.spawnZ), 16), 1)
-            let spawnY = worldRec?.generationSettings.preset == .netherWorld && destDim == .nether
-                ? w.spawnY : Double(w.surfaceY(Int(w.spawnX), Int(w.spawnZ)))
-            dest = (w.spawnX + 0.5, spawnY, w.spawnZ + 0.5)
+            if worldRec?.generationSettings.preset == .netherWorld && destDim == .nether {
+                dest = (w.spawnX + 0.5, w.spawnY, w.spawnZ + 0.5)
+            } else {
+                let spawn = groundedSpawn(w, Int(w.spawnX), Int(w.spawnZ))
+                dest = (Double(spawn.x) + 0.5, Double(spawn.y), Double(spawn.z) + 0.5)
+            }
         }
         if destDim != dim { moveToDimension(destDim) }
         p.respawn()
@@ -1603,7 +1614,11 @@ public final class GameCore {
             let b = gen.surfaceBiomeAt(Double(tx), Double(tz))
             let h = gen.heightEstimate(Double(tx), Double(tz))
             let bname = (BIOMES[Int(b.rawValue)]?.name ?? "").lowercased()
-            if h > DIMS[Dim.overworld.rawValue].seaLevel && !bname.contains("ocean") && !bname.contains("river") {
+            // Inland and clear of the waterline: swamps and beaches sit a block above sea
+            // level on a rim of mud or sand, which reads as spawning in the water.
+            let seaLevel = DIMS[Dim.overworld.rawValue].seaLevel
+            if h > seaLevel + 2 && !bname.contains("ocean") && !bname.contains("river")
+                && !bname.contains("swamp") && !bname.contains("beach") {
                 sx = tx
                 sz = tz
                 break
@@ -2360,9 +2375,26 @@ public final class GameCore {
         let pcx = floorDiv(ifloor(player.x), 16), pcz = floorDiv(ifloor(player.z), 16)
         ensureChunksLoaded(w, pcx, pcz, 1)
         if playerData == nil && !transientLANClient {
-            let sy = rec.generationSettings.preset == .netherWorld && dim == .nether
-                ? rec.spawnY : w.surfaceY(rec.spawnX, rec.spawnZ)
-            player.setPos(Double(rec.spawnX) + 0.5, Double(sy), Double(rec.spawnZ) + 0.5)
+            if rec.generationSettings.preset == .netherWorld && dim == .nether {
+                player.setPos(Double(rec.spawnX) + 0.5, Double(rec.spawnY), Double(rec.spawnZ) + 0.5)
+            } else {
+                // The record only holds a noise height estimate; now that the spawn chunks
+                // are generated, land on real dry ground and keep that column as the world
+                // spawn so bed-less respawns and dimension returns share it.
+                let spawn = groundedSpawn(w, rec.spawnX, rec.spawnZ)
+                player.setPos(Double(spawn.x) + 0.5, Double(spawn.y), Double(spawn.z) + 0.5)
+                if (spawn.x, spawn.y, spawn.z) != (rec.spawnX, rec.spawnY, rec.spawnZ) {
+                    var grounded = rec
+                    grounded.spawnX = spawn.x
+                    grounded.spawnY = spawn.y
+                    grounded.spawnZ = spawn.z
+                    w.spawnX = Double(spawn.x)
+                    w.spawnY = Double(spawn.y)
+                    w.spawnZ = Double(spawn.z)
+                    worldRec = grounded
+                    db.putWorld(grounded)
+                }
+            }
         }
         // if loading into the End with a living fight, re-arm the dragon hook
         for e in w.entities {
@@ -3740,7 +3772,8 @@ public final class GameCore {
             let ow = worlds[.overworld]!
             ensureChunksLoaded(ow, floorDiv(Int(ow.spawnX), 16), floorDiv(Int(ow.spawnZ), 16), 1)
             moveToDimension(.overworld)
-            p.setPos(ow.spawnX + 0.5, Double(ow.surfaceY(Int(ow.spawnX), Int(ow.spawnZ))), ow.spawnZ + 0.5)
+            let spawn = groundedSpawn(ow, Int(ow.spawnX), Int(ow.spawnZ))
+            p.setPos(Double(spawn.x) + 0.5, Double(spawn.y), Double(spawn.z) + 0.5)
             p.vx = 0; p.vy = 0; p.vz = 0
             p.portalCooldown = 200
             p.insidePortalKind = nil

@@ -636,6 +636,41 @@ public final class World {
         }
         return info.minY + 1
     }
+    /// The standing height above the highest dry, motion-blocking ground in a column, or nil
+    /// when nothing should be put down there: the column is topped by water or lava, or its
+    /// first solid block is part of a tree (leaves, trunk, or a mushroom cap), which would leave
+    /// a spawn perched in a canopy or wedged inside a trunk.
+    public func dryGroundY(_ x: Int, _ z: Int) -> Int? {
+        let top = info.minY + info.height - 1
+        var y = top
+        while y > info.minY {
+            let id = getBlock(x, y, z) >> 4
+            if id != 0 {
+                let def = blockDefs[id]
+                if id == Int(B.water) || id == Int(B.lava) || def.shape == .liquid { return nil }
+                if def.solid { return isTreeCanopyOrTrunk(def.name) ? nil : y + 1 }
+            }
+            y -= 1
+        }
+        return nil
+    }
+
+    /// The nearest loaded column around (x, z), by square ring, whose top is dry open ground
+    /// (see `dryGroundY`). The scan order is fixed so the same world always yields the same
+    /// column. Nil when no loaded column within `radius` qualifies.
+    public func groundedSpawnColumn(near x: Int, _ z: Int, radius: Int = 24) -> (x: Int, y: Int, z: Int)? {
+        for r in 0...max(0, radius) {
+            for dz in -r...r {
+                for dx in -r...r where max(abs(dx), abs(dz)) == r {
+                    let cx = x + dx, cz = z + dz
+                    guard isLoadedAt(cx, cz), let y = dryGroundY(cx, cz) else { continue }
+                    return (cx, y, cz)
+                }
+            }
+        }
+        return nil
+    }
+
     public func canSeeSky(_ x: Int, _ y: Int, _ z: Int) -> Bool {
         y >= heightAt(x, z) && info.hasSky
     }
@@ -882,4 +917,10 @@ private func compareTicks(_ a: ScheduledTick, _ b: ScheduledTick) -> Int {
     if a.time != b.time { return a.time - b.time }
     if a.priority != b.priority { return a.priority - b.priority }
     return a.order - b.order
+}
+
+/// Tree parts a spawn must never rest on or inside: canopies, trunks, and mushroom caps.
+func isTreeCanopyOrTrunk(_ name: String) -> Bool {
+    name.hasSuffix("_leaves") || name.hasSuffix("_log") || name.hasSuffix("_wood")
+        || name.hasSuffix("_stem") || name.hasSuffix("_hyphae") || name.hasSuffix("mushroom_block")
 }

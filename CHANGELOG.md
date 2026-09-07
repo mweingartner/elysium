@@ -5,6 +5,33 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Made coal and iron worth digging for in every world type. The vanilla bands left rolling
+  terrain almost bare (upper coal starts at y136 and upper iron peaks near y232, open air outside
+  true mountains), so the bands that meet ordinary ground now roll more veins and each ore gains a
+  hill band through the y24..136 interior. **Rich Resources** doubles the new counts, as it does
+  every other ore. The terrain ore golden moved deliberately with this change.
+
+- Put new players down on dry, open ground. The world record only holds a noise height estimate,
+  and the surface lookup it fed landed spawns in ponds and on tree canopies; the first entry, every
+  bed-less respawn, and the return from the End now walk outward from the spawn column to the
+  nearest generated column whose top is solid ground rather than water, lava, or a tree, and the
+  world spawn is re-recorded there. The spawn column itself is now chosen a few blocks above sea
+  level and outside swamps and beaches, so the first view is not a mud rim in a lake.
+
+- Kept land animals out of the water. The navigator's water avoidance was never switched on, so
+  herds strolled into ponds and across rivers; every land animal now refuses water as a stroll
+  target and a path node, while turtles, frogs, axolotls, dolphins and squid keep swimming.
+
+- Restored periodic lava lakes to **Rich Resources** worlds. The preset thins its cave noise to
+  keep the hills solid, which also removed nearly all of the cave voids that lava aquifers fill;
+  the full cave density is now kept inside lava-aquifer regions so those lakes form as they do on
+  a default map.
+
+- Cleaned the ragged edges on the first-person sword, axe, shovel and hoe sprites. The upright
+  alignment step resampled straight alpha, bleeding transparent black into a dashed rim of dark
+  half-transparent pixels that the nearest-sampled hand layer rendered as missing fragments; it now
+  resamples in premultiplied alpha with an anti-aliasing pre-filter and drops stray specks.
+
 - Made secondary use a script event for every targeted live block or non-player entity, including
   objects with no native use behavior, with host-validated replay-safe LAN forwarding. Added the
   bounded `sound(name[, volume])` Lua API, a managed WAV import/preview/delete screen under Audio

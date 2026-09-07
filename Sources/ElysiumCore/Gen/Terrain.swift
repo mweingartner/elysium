@@ -261,6 +261,12 @@ public final class OverworldGen {
                 // so adjacent chunks disagreed about their shared boundary
                 let cl = climate.at(wx, wz)
                 let target = terrainBaseHeight(cl)
+                // Rich Resources thins the cave noise so its hills stay solid, but lava only
+                // enters the overworld through cave voids under a lava aquifer. Those regions
+                // keep the full cave density so the preset still meets the periodic lava
+                // lakes every other map has.
+                let sparseCaves = settings.preset == .moderateHillsResourceRich
+                    && !aquiferAt(wx, wz, cl).lava
                 let ampBase = SPLINE_3D_AMP.at(cl.e) * clampD(mapRange(cl.c, -0.19, -0.05, 0.35, 1), 0.35, 1)
                 let amp: Double
                 if settings.preset == .amplified {
@@ -280,8 +286,8 @@ public final class OverworldGen {
                     if y < 58 {
                         let ch = cheese.sample3(wx * 0.9, y * 2.0, wz * 0.9)
                         let fade = clampD((58 - y) / 14, 0, 1) * clampD((y - Double(GEN_MIN_Y + 4)) / 10, 0, 1)
-                        let cheeseThreshold = settings.preset == .moderateHillsResourceRich ? 0.74 : 0.42
-                        let cheeseStrength = settings.preset == .moderateHillsResourceRich ? 120.0 : 260.0
+                        let cheeseThreshold = sparseCaves ? 0.74 : 0.42
+                        let cheeseStrength = sparseCaves ? 120.0 : 260.0
                         if ch > cheeseThreshold && fade > 0 {
                             d = min(d, lerpD(d, (cheeseThreshold - ch) * cheeseStrength, fade))
                         }
@@ -291,7 +297,7 @@ public final class OverworldGen {
                         let s1 = spag1.sample3(wx, y * 1.6, wz)
                         let s2 = spag2.sample3(wx, y * 1.6, wz)
                         let tube = max(abs(s1), abs(s2))
-                        let thresh = settings.preset == .moderateHillsResourceRich
+                        let thresh = sparseCaves
                             ? 0.025 + clampD((y - 60) / 240, 0, 0.012)
                             : 0.065 + clampD((y - 60) / 240, 0, 0.03)
                         if tube < thresh {
@@ -304,10 +310,10 @@ public final class OverworldGen {
                         let n1 = noodleA.sample3(wx, y * 1.8, wz)
                         let n2 = noodleB.sample3(wx, y * 1.8, wz)
                         let tube = max(abs(n1), abs(n2))
-                        let thresh = settings.preset == .moderateHillsResourceRich ? 0.014 : 0.038
+                        let thresh = sparseCaves ? 0.014 : 0.038
                         if tube < thresh {
                             let fade = clampD((y - Double(GEN_MIN_Y + 3)) / 8, 0, 1)
-                            let strength = settings.preset == .moderateHillsResourceRich ? 650.0 : 1200.0
+                            let strength = sparseCaves ? 650.0 : 1200.0
                             if fade > 0 { d = min(d, (tube - thresh) * strength * fade) }
                         }
                     }
@@ -643,11 +649,20 @@ public final class OverworldGen {
         }
         // vanilla 1.20 attempts/sizes/bands (the old numbers left mountains
         // nearly iron-free — 8 attempts vs vanilla's 90 — and misplaced coal)
+        //
+        // Coal and iron gate every tool and smelting recipe, and the vanilla bands
+        // starve rolling terrain: coal_upper starts at y136 and iron_upper peaks near
+        // y232, which is open air everywhere but true mountains (Rich Resources clamps
+        // the surface to y54..118, so those attempts were wasted there). The bands that
+        // meet ordinary ground get more attempts and each ore gains a hill band through
+        // the y24..136 interior; Rich Resources doubles all of it via placeResource.
         placeResource(cell(B.coal_ore), cell(B.deepslate_coal_ore), 30, 136, 320, 17, false)
-        placeResource(cell(B.coal_ore), cell(B.deepslate_coal_ore), 20, 0, 192, 17, true, 0.5)
-        placeResource(cell(B.iron_ore), cell(B.deepslate_iron_ore), 10, -24, 56, 9, true)
+        placeResource(cell(B.coal_ore), cell(B.deepslate_coal_ore), 30, 0, 192, 17, true, 0.5)
+        placeResource(cell(B.coal_ore), cell(B.deepslate_coal_ore), 12, 40, 136, 17, true)
+        placeResource(cell(B.iron_ore), cell(B.deepslate_iron_ore), 16, -24, 56, 9, true)
         placeResource(cell(B.iron_ore), cell(B.deepslate_iron_ore), 90, 80, 384, 9, true)
-        placeResource(cell(B.iron_ore), cell(B.deepslate_iron_ore), 10, -64, 72, 4, false)
+        placeResource(cell(B.iron_ore), cell(B.deepslate_iron_ore), 14, -64, 72, 4, false)
+        placeResource(cell(B.iron_ore), cell(B.deepslate_iron_ore), 14, 24, 136, 9, true)
         placeResource(cell(B.copper_ore), cell(B.deepslate_copper_ore), 16, -16, 112, 10, true)
         placeResource(cell(B.gold_ore), cell(B.deepslate_gold_ore), 4, -64, 32, 9, true)
         placeResource(cell(B.gold_ore), cell(B.deepslate_gold_ore), 1, -64, -48, 9, false, 0.5)

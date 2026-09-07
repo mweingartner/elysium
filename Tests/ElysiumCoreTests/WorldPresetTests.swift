@@ -298,16 +298,64 @@ final class WorldPresetTests: XCTestCase {
         XCTAssertLessThan(rich, normal / 4)
     }
 
-    private func oreFamilyCounts(settings: WorldGenerationSettings) -> [String: Int] {
+    /// Coal and iron must land in the ground players actually dig: the Rich Resources surface sits
+    /// at y54..118 and Default rolling terrain is in the same range, where the vanilla bands alone
+    /// left both ores scarce. The floors are per 16 solid fixture chunks.
+    func testCoalAndIronReachRollingTerrainInEveryPresetAndDoubleWhenResourceRich() {
+        let band = 54...118
+        let normal = oreFamilyCounts(settings: .normal, yRange: band)
+        let rich = oreFamilyCounts(settings: WorldGenerationSettings(preset: .moderateHillsResourceRich),
+                                   yRange: band)
+        // The vanilla-only bands measured 5041 coal / 423 iron here; the hill bands lift that to
+        // roughly 12000 / 1700, so these floors fail the old layout with headroom for RNG drift.
+        XCTAssertGreaterThanOrEqual(normal["coal", default: 0], 9000, "coal in rolling terrain")
+        XCTAssertGreaterThanOrEqual(normal["iron", default: 0], 1400, "iron in rolling terrain")
+        for family in ["coal", "iron"] {
+            XCTAssertGreaterThanOrEqual(rich[family, default: 0], normal[family, default: 0] * 9 / 5,
+                                        "\(family) should reflect doubled placement attempts in the band")
+        }
+    }
+
+    /// Lava only enters the overworld through cave voids under a lava aquifer. Rich Resources
+    /// thins its caves, but must keep the full cave density inside those aquifer regions so it
+    /// still generates the periodic lava lakes a default map has.
+    func testModerateHillsResourceRichStillGeneratesLavaLakes() {
+        let normal = lavaCellCount(settings: .normal)
+        let rich = lavaCellCount(settings: WorldGenerationSettings(preset: .moderateHillsResourceRich))
+        // Measured 196 default / 65 rich lava cells here; the thinned caves alone left 4.
+        XCTAssertGreaterThan(normal, 0)
+        XCTAssertGreaterThanOrEqual(rich, 40, "Rich Resources lava lakes")
+        XCTAssertGreaterThanOrEqual(rich, normal / 4, "Rich Resources lava lakes relative to default")
+    }
+
+    private func lavaCellCount(settings: WorldGenerationSettings) -> Int {
+        let gen = OverworldGen(2024, settings: settings)
+        let lava = cell(B.lava)
+        var total = 0
+        for cz in -4..<4 {
+            for cx in -4..<4 {
+                var blocks = [UInt16](repeating: 0, count: CHUNK_W * CHUNK_W * WORLD_H)
+                var biomes = [UInt8](repeating: 0, count: 4 * 4 * ((WORLD_H + 3) / 4))
+                _ = gen.fillTerrain(cx, cz, &blocks, &biomes)
+                total += blocks.reduce(0) { $0 + ($1 == lava ? 1 : 0) }
+            }
+        }
+        return total
+    }
+
+    private func oreFamilyCounts(settings: WorldGenerationSettings,
+                                 yRange: ClosedRange<Int> = GEN_MIN_Y...(GEN_MIN_Y + WORLD_H - 1)) -> [String: Int] {
         let gen = OverworldGen(77, settings: settings)
         let surfaceBiomes = [UInt8](repeating: UInt8(Biome.plains.rawValue), count: 256)
         let families = oreFamilyByBlockID
         var counts: [String: Int] = [:]
+        let firstIndex = (yRange.lowerBound - GEN_MIN_Y) * CHUNK_W * CHUNK_W
+        let endIndex = (yRange.upperBound - GEN_MIN_Y + 1) * CHUNK_W * CHUNK_W
         for cz in 0..<4 {
             for cx in 0..<4 {
                 var blocks = solidOreFixtureBlocks()
                 gen.placeOres(cx, cz, &blocks, surfaceBiomes)
-                for cell in blocks {
+                for cell in blocks[firstIndex..<endIndex] {
                     let id = Int(cell >> 4)
                     if let family = families[id] {
                         counts[family, default: 0] += 1

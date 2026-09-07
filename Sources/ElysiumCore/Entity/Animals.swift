@@ -19,6 +19,10 @@ open class Animal: Mob {
     public override init(world: World) {
         super.init(world: world)
         category = "creature"
+        // Land animals keep their hooves dry: strolls, tempting, panicking and following all
+        // route through the navigator, so refusing water there keeps herds off ponds and
+        // rivers. Swimming and amphibious species switch this back off in their own inits.
+        nav.avoidWater = true
     }
 
     open override func isFood(_ stack: ItemStack?) -> Bool {
@@ -606,6 +610,7 @@ public final class Axolotl: Animal {
     public var playDead = 0
     public override init(world: World) {
         super.init(world: world)
+        nav.avoidWater = false   // lives in or returns to water
         breathesWater = true
         width = 0.75; height = 0.42
         maxHealth = 14; health = 14
@@ -646,6 +651,7 @@ public final class Frog: Animal {
     public override var type: String { "frog" }
     public override init(world: World) {
         super.init(world: world)
+        nav.avoidWater = false   // lives in or returns to water
         width = 0.5; height = 0.5
         maxHealth = 10; health = 10
         speed = 0.16
@@ -695,6 +701,7 @@ public final class Tadpole: Animal {
     public override var type: String { "tadpole" }
     public override init(world: World) {
         super.init(world: world)
+        nav.avoidWater = false   // lives in or returns to water
         breathesWater = true
         width = 0.4; height = 0.3
         maxHealth = 6; health = 6
@@ -781,6 +788,7 @@ public final class Turtle: Animal {
     public override var type: String { "turtle" }
     public override init(world: World) {
         super.init(world: world)
+        nav.avoidWater = false   // lives in or returns to water
         breathesWater = true
         width = 1.2; height = 0.4
         maxHealth = 30; health = 30
@@ -805,6 +813,7 @@ public final class Dolphin: Animal {
     public override var type: String { "dolphin" }
     public override init(world: World) {
         super.init(world: world)
+        nav.avoidWater = false   // lives in or returns to water
         width = 0.9; height = 0.6
         maxHealth = 10; health = 10
         speed = 0.14
@@ -845,6 +854,7 @@ open class Squid: Animal {
     open override var type: String { "squid" }
     public override init(world: World) {
         super.init(world: world)
+        nav.avoidWater = false   // lives in or returns to water
         breathesWater = true
         breathesWaterOnly = true
         width = 0.8; height = 0.8
