@@ -30,6 +30,9 @@ func walkable(_ world: World, _ x: Int, _ y: Int, _ z: Int, _ avoidWater: Bool) 
     if !feetOK || !headOK { return false }
     if feet == Int(B.lava) || head == Int(B.lava) || bid == Int(B.lava) { return false }
     if feet == Int(B.fire) || bid == Int(B.magma_block) || bid == Int(B.cactus) { return false }
+    if avoidWater && [below, world.getBlock(x, y, z), world.getBlock(x, y + 1, z)].contains(where: {
+        ($0 >> 4) == Int(B.water) || ($0 >= 0 && isWaterlogged(UInt16($0)))
+    }) { return false }
     if feet == Int(B.water) { return !avoidWater }
     if bid == Int(B.water) { return !avoidWater } // swim surface
     return bid != 0 && blockDefs[bid].solid
@@ -37,7 +40,8 @@ func walkable(_ world: World, _ x: Int, _ y: Int, _ z: Int, _ avoidWater: Bool) 
 
 public func findPath(_ world: World, _ fromX: Double, _ fromY: Double, _ fromZ: Double,
                      _ toX: Double, _ toY: Double, _ toZ: Double,
-                     _ maxNodes: Int = 600, _ avoidWater: Bool = false) -> [PathNode]? {
+                     _ maxNodes: Int = 600, _ avoidWater: Bool = false,
+                     _ footprint: Mob? = nil) -> [PathNode]? {
     let sx = ifloor(fromX), sy = ifloor(fromY), sz = ifloor(fromZ)
     let tx = ifloor(toX), ty = ifloor(toY), tz = ifloor(toZ)
     if sx == tx && sy == ty && sz == tz { return [] }
@@ -76,9 +80,13 @@ public func findPath(_ world: World, _ fromX: Double, _ fromY: Double, _ fromZ: 
                     if above != 0 && blockDefs[above].solid { continue }
                 }
                 if !walkable(world, nx, ny, nz, avoidWater) { continue }
+                if avoidWater, let footprint,
+                   footprint.touchesWater(atX: Double(nx) + 0.5, y: Double(ny), z: Double(nz) + 0.5, below: 0.5) { continue }
                 if diag {
                     // both cardinals must be passable
-                    if !walkable(world, cur.x + dx, cur.y, cur.z, avoidWater) && !walkable(world, cur.x, cur.y, cur.z + dz, avoidWater) { continue }
+                    let blockedX = !walkable(world, cur.x + dx, cur.y, cur.z, avoidWater)
+                    let blockedZ = !walkable(world, cur.x, cur.y, cur.z + dz, avoidWater)
+                    if avoidWater ? (blockedX || blockedZ) : (blockedX && blockedZ) { continue }
                 }
                 let cost = (diag ? 1.41 : 1) + Double(abs(dy)) * 0.5 + (dy < -1 ? (dy < -2 ? 4.0 : 2.0) : 0.0)
                 let g = cur.g + cost
@@ -112,6 +120,7 @@ public final class Navigation {
     public var nodeTicks = 0
     public var lastX = 0.0, lastZ = 0.0
     public var avoidWater = false
+    var escapingWater = false
 
     unowned let mob: Mob
     init(_ mob: Mob) { self.mob = mob }
@@ -124,7 +133,7 @@ public final class Navigation {
         targetX = x; targetY = y; targetZ = z
         if repathCooldown > 0 { return path != nil }
         repathCooldown = 20
-        path = findPath(mob.world, mob.x, mob.y, mob.z, x, y, z, 600, avoidWater)
+        path = findPath(mob.world, mob.x, mob.y, mob.z, x, y, z, 600, avoidWater, mob)
         pathIndex = 0
         return path != nil
     }
@@ -154,7 +163,8 @@ public final class Navigation {
         // accept on horizontal arrival regardless of y when very close — a mob
         // >1 block above/below its node otherwise orbits it forever (the old
         // y-gate + fast movement never tripped the stuck detector)
-        if distSq < 0.6 * 0.6 && (abs(node.y - ifloor(mob.y)) <= 1 || distSq < 0.35 * 0.35) {
+        let arrivalRadius = escapingWater ? 0.2 : 0.6
+        if distSq < arrivalRadius * arrivalRadius && (abs(node.y - ifloor(mob.y)) <= 1 || distSq < 0.35 * 0.35) {
             pathIndex += 1
             nodeTicks = 0
             return
@@ -483,6 +493,91 @@ public final class FloatGoal: Goal {
     }
     public override func canUse() -> Bool { mob.inWater || mob.inLava }
     public override func tick() { if mob.rng.nextFloat() < 0.8 { mob.jumping = true } }
+}
+
+/// Emergency navigation may swim, but only toward reachable dry ground. A stable breadth-first
+/// search finds the closest reachable shore, rather than steering through an obstructing bank.
+/// It is capped at 1,024 nodes and retried once per second when no route is available.
+final class LeaveWaterGoal: Goal {
+    private var retryTicks = 0
+
+    override func canUse() -> Bool {
+        mob.avoidsWaterWhileMoving && mob.touchesWater(atX: mob.x, y: mob.y, z: mob.z, below: 0.5)
+    }
+    override func canContinue() -> Bool { canUse() }
+    override func start() {
+        mob.nav.stop()
+        mob.nav.escapingWater = true
+        retryTicks = 0
+    }
+    override func stop() {
+        mob.nav.stop()
+        mob.nav.escapingWater = false
+    }
+    override func tick() {
+        // A cancelled tempting/look goal must not keep turning the animal away from shore.
+        mob.lookX = nil
+        mob.jumping = true
+        retryTicks = max(0, retryTicks - 1)
+        if mob.nav.isDone() && retryTicks == 0 {
+            mob.nav.path = pathToShore()
+            mob.nav.pathIndex = 0
+            mob.nav.nodeTicks = 0
+            mob.nav.speedMod = 1
+            retryTicks = 20
+        }
+        // Water's float impulse alone balances gravity at a bank. Give a swimming
+        // animal enough lift to get its feet over the one-block shore collision box.
+        if mob.inWater { mob.vy = max(mob.vy, 0.16) }
+    }
+
+    func pathToShore(maxNodes: Int = 1024) -> [PathNode]? {
+        struct Key: Hashable { let x: Int, y: Int, z: Int }
+        struct Visit { let key: Key; let parent: Int? }
+        let sx = ifloor(mob.x), sz = ifloor(mob.z)
+        var sy = ifloor(mob.y)
+        // Search at the water surface even when an animal was spawned on a deep lake bed.
+        // Collision still governs the actual ascent; an overhead solid never becomes a route.
+        while sy + 1 < mob.world.info.minY + mob.world.info.height,
+              (mob.world.getBlock(sx, sy + 1, sz) >> 4) == Int(B.water) { sy += 1 }
+        let start = Key(x: sx, y: sy, z: sz)
+        var queue = [Visit(key: start, parent: nil)]
+        var seen: Set<Key> = [start]
+        var index = 0
+        while index < queue.count && index < maxNodes {
+            let current = queue[index].key
+            if walkable(mob.world, current.x, current.y, current.z, true),
+               !mob.touchesWater(atX: Double(current.x) + 0.5, y: Double(current.y),
+                                 z: Double(current.z) + 0.5, below: 0.5) {
+                var path: [PathNode] = []
+                var cursor: Int? = index
+                while let i = cursor {
+                    let k = queue[i].key
+                    path.append(PathNode(x: k.x, y: k.y, z: k.z))
+                    cursor = queue[i].parent
+                }
+                return path.reversed()
+            }
+            for (dx, _, dz) in NEIGHBORS.prefix(4) {
+                for dy in [0, 1, -1] {
+                    let next = Key(x: current.x + dx, y: current.y + dy, z: current.z + dz)
+                    if abs(next.x - sx) > 24 || abs(next.z - sz) > 24 { continue }
+                    guard walkable(mob.world, next.x, next.y, next.z, false) else { continue }
+                    if dy == 1 {
+                        let head = mob.world.getBlock(current.x, current.y + 2, current.z) >> 4
+                        if blockDefs[head].solid { continue }
+                    }
+                    if !seen.contains(next) && queue.count < maxNodes {
+                        seen.insert(next)
+                        queue.append(Visit(key: next, parent: index))
+                    }
+                    break
+                }
+            }
+            index += 1
+        }
+        return nil
+    }
 }
 
 public final class PanicGoal: Goal {

@@ -260,9 +260,15 @@ EXPECTED_PLAYER_SOURCE_SHA256='79dbd2e132f8e65f2a9857f763c263fea0a1b8cd86fc7db63
 EXPECTED_CORE_CAPABILITY_SHA256='23eb45f111a2be91e6bcb2b0be41bb9fc58b5457bb3af09f8af0d9ad56987dd5'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3'
-EXPECTED_CORE_OBJECT_SHA256='ec805bc9ae4efa724f6ce08caf58a35089b3bf92eaac227cc2443095d586711c'
-EXPECTED_ELYSIUM_PRODUCT_SHA256='4be891cd6d31200b9e122b0341b81aa300fc73dd7d9aaf48003775e8f56240c6'
-EXPECTED_SMOKE_PRODUCT_SHA256='90a9fa30f8941ef7da1991d8ad1a8420597f12a963f4e2a04d230d2d8316692e'
+# land-animal shore escape: AI.swift, Animals.swift and Entity.swift add footprint-aware
+# water avoidance, bounded deterministic shore search, and bat surface avoidance. The Core
+# object and its two linked products therefore change. Reviewed with 26 focused regressions,
+# 491 smoke checks (only intentional zooStages updated), and a rendered debug-app pond test.
+# StorageEngine, Saves, GameCore, Player, both storage manifests, ElysiumTextInput and the
+# storage/text-input objects remain byte-identical; no persistence API or authority changed.
+EXPECTED_CORE_OBJECT_SHA256='fd850d2013fc8e293e9805dc6562b2d5e494ffba4d100d289bcc65ba20fd0cdb'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='26a9d506fdb3db4d8254bc9ca20e573cee1d863a04b66891420fdfec3abf47f9'
+EXPECTED_SMOKE_PRODUCT_SHA256='e51eed27df113faaa10ea1872f228a5fde806fcbb65e29e3725d659fbfdcc130'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

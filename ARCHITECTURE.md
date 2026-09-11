@@ -100,6 +100,21 @@ million, imported chunks at 1,000,000, and imported plus transition rows at the 
 
 ## Entities (Entity/)
 
+Land animals avoid water while grazing, following, or panicking. Dry navigation checks the
+animal's footprint, waterlogged blocks, and diagonal corners; resolved physical movement also
+checks the swept footprint so turning and inertia cannot carry an unattended animal into a pond.
+`LeaveWaterGoal` takes priority over normal animal goals when wet, floats the animal upward, and
+uses a deterministic, cardinal breadth-first search toward reachable dry shore (1,024 nodes,
+24-block horizontal radius). If no shore is reachable in loaded terrain, it floats and retries
+once per second. Once dry, normal goals resume. Aquatic/amphibious species opt out, and mounted
+animals preserve rider control. Bats use their own flight correction to lift out of water and
+turn upward before descending into its surface; flight above water remains allowed.
+
+The zoo golden's 50/120/200-tick checkpoints include these deliberate shore-escape routes.
+Nearby frog and silverfish positions also change through the existing entity-pushing physics;
+their navigation policy does not change. The update is confined to `zooStages`; combat, player
+physics, pathfinding, spawning, and every other golden category retain their previous values.
+
 `Entity` (AABB physics with auto-step, fluid state, fire, riding) → `LivingEntity` (health, effects with insertion-order semantics, equipment, per-entity seeded RNG) → `Mob` (goal selectors with stable priority sort, A* grid navigation up to 600 nodes) → 100 concrete types. The player is vanilla-1.20-exact: input ×0.98, ground accel `speed × 0.21600002 / slip³`, friction `slip × 0.91`, gravity `(vy − 0.08) × 0.98`, jump 0.42 + sprint boost, water/lava/elytra regimes, sneak edge-guard. Those constants are *derived* in the test suite, not just asserted.
 
 Direct-sky hostile daylight classification is centralized on `Mob`: every ordinary `Monster` ignites under qualifying skylight unless protected by weather, fluid, powder snow, or valid head equipment. Creepers instead enter an irreversible fuse with at most 15 ticks remaining under sunlight (30 ticks when newly primed by player proximity); sunlight acceleration cannot lengthen an earlier deadline. Creepers latch horizontal position, stop navigation and horizontal knockback, persist bounded state, and explode exactly once; LAN clients render optional host-published fuse fields but never advance or explode mirrors locally.

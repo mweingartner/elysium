@@ -96,4 +96,129 @@ final class SpawnGroundingAndWaterAvoidanceTests: XCTestCase {
                            "path node (\(node.x), \(node.z)) crosses the pond")
         }
     }
+
+    func testWholeAnimalCannotDriftOrCutDiagonallyIntoPond() {
+        let world = makeFixtureWorld()
+        for animal in [Cow(world: world), Sheep(world: world), Goat(world: world), Horse(world: world)] as [Animal] {
+            animal.x = 4.5; animal.y = 64; animal.z = 2.0
+            animal.onGround = true
+            animal.move(0, -0.08, 0.7)
+            XCTAssertEqual(animal.z, 2.0, "\(animal.type) must stop before its body overlaps the pond")
+            XCTAssertFalse(animal.touchesWater(atX: animal.x, y: animal.y, z: animal.z, below: 0.5))
+            animal.x = 2; animal.z = 2
+            animal.move(1.2, 0, 1.2)
+            XCTAssertEqual(animal.x, 2)
+            XCTAssertEqual(animal.z, 2)
+        }
+        let cow = Cow(world: world)
+        cow.x = 1.5; cow.y = 64; cow.z = 1.5
+        cow.move(0.4, -0.08, 0.4)
+        XCTAssertEqual(cow.x, 1.9, accuracy: 0.0001, "ordinary dry grazing is unchanged")
+    }
+
+    func testAnimalsActuallySwimOutAndResumeDryGrazing() {
+        let world = makeFixtureWorld()
+        for animal in [Cow(world: world), Sheep(world: world), Goat(world: world), Horse(world: world),
+                       Pig(world: world), Chicken(world: world), Wolf(world: world)] as [Animal] {
+            animal.x = 4.5; animal.y = 63; animal.z = 4.5
+            animal.rng = RandomX(42)
+            animal.persistent = true
+            animal.lookX = 4.5; animal.lookY = 64; animal.lookZ = 12
+            // Exercise complete goal selection, navigation, buoyancy and collision, not just flags.
+            var escaped = false
+            for _ in 0..<300 {
+                animal.tick()
+                if !animal.touchesWater(atX: animal.x, y: animal.y, z: animal.z, below: 0.5), animal.onGround {
+                    escaped = true
+                    break
+                }
+            }
+            XCTAssertTrue(escaped, "\(animal.type) stayed in water at \(animal.x),\(animal.y),\(animal.z)")
+            for _ in 0..<150 { animal.tick() }
+            XCTAssertFalse(animal.inWater, "\(animal.type) returned to the pond")
+        }
+    }
+
+    func testEscapeFindsReachableShoreAndHandlesDeepWater() throws {
+        let world = makeFixtureWorld()
+        for z in 3...5 { for x in 3...5 {
+            for y in 58...62 { world.setBlock(x, y, z, Int(cell(B.water))) }
+        } }
+        // Block the first (+X) exit. The ordered search must find another bank.
+        for z in 2...6 { for y in 63...67 { world.setBlock(6, y, z, Int(cell(B.stone))) } }
+        let sheep = Sheep(world: world)
+        sheep.x = 4.5; sheep.y = 59; sheep.z = 4.5
+        sheep.rng = RandomX(9)
+        let goal = LeaveWaterGoal(sheep, -1)
+        let path = try XCTUnwrap(goal.pathToShore())
+        XCTAssertFalse(path.contains { $0.x == 6 })
+        let end = try XCTUnwrap(path.last)
+        XCTAssertTrue(walkable(world, end.x, end.y, end.z, true))
+        for _ in 0..<400 { sheep.tick() }
+        XCTAssertFalse(sheep.inWater)
+        XCTAssertGreaterThanOrEqual(sheep.y, 64)
+    }
+
+    func testNoReachableShoreIsBoundedAndAnimalKeepsFloating() {
+        let world = makeFixtureWorld()
+        for z in 0..<16 { for x in 0..<16 { world.setBlock(x, 63, z, Int(cell(B.water))) } }
+        let cow = Cow(world: world)
+        cow.x = 8.5; cow.y = 63; cow.z = 8.5
+        let goal = LeaveWaterGoal(cow, -1)
+        XCTAssertNil(goal.pathToShore(maxNodes: 32))
+        for _ in 0..<100 { cow.tick() }
+        XCTAssertGreaterThan(cow.y, 63, "no land in loaded chunks: float and retry instead of sinking")
+        XCTAssertTrue(cow.x.isFinite && cow.y.isFinite && cow.z.isFinite)
+    }
+
+    func testBatsLiftOutOfWaterAndDoNotDiveBackIn() {
+        let world = makeFixtureWorld()
+        let bat = Bat(world: world)
+        bat.x = 4.5; bat.y = 63; bat.z = 4.5
+        bat.hanging = true
+        bat.persistent = true
+        bat.rng = RandomX(12)
+        for _ in 0..<12 { bat.tick() }
+        XCTAssertFalse(bat.inWater)
+        XCTAssertFalse(bat.hanging)
+        XCTAssertGreaterThan(bat.y, 64)
+        bat.x = 4.5; bat.y = 64.4; bat.z = 4.5
+        bat.vx = 0; bat.vz = 0; bat.vy = -0.2
+        for _ in 0..<100 {
+            bat.tick()
+            XCTAssertFalse(bat.touchesWater(atX: bat.x, y: bat.y, z: bat.z))
+        }
+    }
+
+    func testAquaticAnimalsAndRiddenHorsesCanStillEnterWater() {
+        let world = makeFixtureWorld()
+        for swimmer in [Turtle(world: world), Frog(world: world), Axolotl(world: world)] as [Animal] {
+            swimmer.x = 4.5; swimmer.y = 64; swimmer.z = 2
+            swimmer.move(0, 0, 1)
+            XCTAssertEqual(swimmer.z, 3)
+            XCTAssertFalse(LeaveWaterGoal(swimmer, -1).canUse())
+        }
+        let horse = Horse(world: world)
+        horse.x = 4.5; horse.y = 64; horse.z = 2
+        let rider = Player(world: world)
+        rider.mount(horse)
+        horse.move(0, 0, 1)
+        XCTAssertEqual(horse.z, 3)
+    }
+
+    func testGrazingStaysDryAcrossSeededTurnsAndWideFootprints() {
+        let world = makeFixtureWorld()
+        for seed in 0..<6 {
+            for animal in [Sheep(world: world), Horse(world: world)] as [Animal] {
+                animal.x = 4.5; animal.y = 64; animal.z = 1.5
+                animal.rng = RandomX(UInt32(seed))
+                animal.goals = GoalSelector()
+                animal.goals.add(StrollGoal(animal, 6, 1, 1))
+                for tick in 0..<600 {
+                    animal.tick()
+                    XCTAssertFalse(animal.inWater, "\(animal.type) seed \(seed) entered water at tick \(tick)")
+                }
+            }
+        }
+    }
 }

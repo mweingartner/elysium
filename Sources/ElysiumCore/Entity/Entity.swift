@@ -293,6 +293,25 @@ open class Entity: EntityRef {
         }
     }
 
+    /// Autonomous land animals keep their whole footprint clear of shore water.
+    /// Riders retain control; water escape is allowed to cross wet ground.
+    open var avoidsWaterWhileMoving: Bool { false }
+
+    func touchesWater(atX px: Double, y py: Double, z pz: Double, below: Double = 0) -> Bool {
+        let half = width / 2
+        for yy in ifloor(py - below)...ifloor(py + height - 0.00001) {
+            for zz in ifloor(pz - half + 0.00001)...ifloor(pz + half - 0.00001) {
+                for xx in ifloor(px - half + 0.00001)...ifloor(px + half - 0.00001) {
+                    let c = world.getBlock(xx, yy, zz)
+                    if (c >> 4) == Int(B.water) || (c >= 0 && isWaterlogged(UInt16(c))) {
+                        if py - below < Double(yy) + world.fluidHeight(xx, yy, zz) { return true }
+                    }
+                }
+            }
+        }
+        return false
+    }
+
     /// swept AABB move with auto-step
     public func move(_ dxIn: Double, _ dyIn: Double, _ dzIn: Double) {
         var dx = dxIn, dy = dyIn, dz = dzIn
@@ -354,6 +373,19 @@ open class Entity: EntityRef {
             }
         }
 
+        // Path nodes alone cannot protect the shore: turning, inertia and wide bodies
+        // can cross water between nodes. Check the actual resolved movement as well.
+        if avoidsWaterWhileMoving && !touchesWater(atX: x, y: y, z: z, below: 0.5) {
+            let steps = max(1, Int(min(256, (max(abs(dx), abs(dz)) / 0.25).rounded(.up))))
+            for i in 1...steps {
+                let t = Double(i) / Double(steps)
+                if touchesWater(atX: x + dx * t, y: y + max(0, dy) * t,
+                                z: z + dz * t, below: 0.5) {
+                    dx = 0; dz = 0; vx = 0; vz = 0
+                    break
+                }
+            }
+        }
         x += dx; y += dy; z += dz
         horizontalCollision = hitX || hitZ
         onGround = hitY && origDy < 0

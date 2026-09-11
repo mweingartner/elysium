@@ -23,7 +23,10 @@ open class Animal: Mob {
         // route through the navigator, so refusing water there keeps herds off ponds and
         // rivers. Swimming and amphibious species switch this back off in their own inits.
         nav.avoidWater = true
+        goals.add(LeaveWaterGoal(self, -1))
     }
+
+    open override var avoidsWaterWhileMoving: Bool { nav.avoidWater && passengers.isEmpty }
 
     open override func isFood(_ stack: ItemStack?) -> Bool {
         guard let stack else { return false }
@@ -897,6 +900,19 @@ public final class Bat: Mob {
     public override func tick() {
         baseLivingTick()
         if dead || deathTime > 0 { return }
+        // Bats do not use ground navigation. Lift out of water (including a flooded
+        // roost) and turn upward before a descending flight would touch the surface.
+        let wet = touchesWater(atX: x, y: y, z: z)
+        let approachingWater = touchesWater(atX: x + vx, y: y + min(vy, -0.1), z: z + vz, below: 0.35)
+        if wet || approachingWater {
+            hanging = false
+            data.hanging = false
+            vy = 0.18
+            if !wet { vx *= -0.5; vz *= -0.5 }
+            move(vx, vy, vz)
+            vx *= 0.9; vz *= 0.9
+            return
+        }
         let above = world.getBlock(ifloor(x), ifloor(y + 1), ifloor(z)) >> 4
         if hanging {
             data.hanging = true
