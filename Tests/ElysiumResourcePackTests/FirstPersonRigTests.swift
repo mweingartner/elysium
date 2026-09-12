@@ -227,4 +227,113 @@ final class FirstPersonRigTests: XCTestCase {
             XCTAssertTrue([fallback[column].x,fallback[column].y,fallback[column].z,fallback[column].w].allSatisfy(\.isFinite))
         }
     }
+
+    private var handMeshes: [(FirstPersonHandGrip, ViewmodelMesh)] {
+        [(.standard,ViewmodelMesh(FirstPersonModelAssets.handNarrow)),
+         (.pickaxe,ViewmodelMesh(FirstPersonModelAssets.hand)),
+         (.round,ViewmodelMesh(FirstPersonModelAssets.handRound)),
+         (.shield,ViewmodelMesh(FirstPersonModelAssets.handShield)),
+         (.draw,ViewmodelMesh(FirstPersonModelAssets.handDraw))]
+    }
+
+    func testHandFacingCorrectionPreservesGripWristHaftAndProperHandedness() throws {
+        // A correct helper is insufficient if the renderer draws the old hand
+        // frame. Bind the semantic regression to the actual hand-only call site.
+        let root = URL(fileURLWithPath:#filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let renderer = try String(contentsOf:root.appendingPathComponent("Sources/Elysium/FirstPersonRenderer.swift"),encoding:.utf8)
+            .filter { !$0.isWhitespace }
+        XCTAssertTrue(renderer.contains(#"draw("hand:\(left):\(handGrip.rawValue)",handGrip.meshTransform(in:transform))"#))
+        let tip = try authoredProng()
+        for left in [false,true] {
+            let rest = ViewmodelPlacement.grip(left:left,logicalWidth:960,aspect:16.0/9)
+            for progress in [0.0,0.24,0.43,0.48,0.49,0.85,1] {
+                let socket = FirstPersonStrike.pose(rest:rest,progress:progress,action:.mining,
+                    workingPoint:tip,target:SIMD3(0,0,-1.75),reducedMotion:false)
+                let bones = FirstPersonArmPose.solve(hand:socket,left:left)
+                for (grip,_) in handMeshes {
+                    let transform = grip.meshTransform(in:socket)
+                    XCTAssertEqual(simd_determinant(transform),1,accuracy:1e-5,grip.rawValue)
+                    XCTAssertEqual(transform.columns.3,socket.columns.3,"grip origin must stay fixed")
+                    for y: Float in [-0.5,-0.10,0,0.5,1] {
+                        XCTAssertEqual(transform * SIMD4(0,y,0,1),socket * SIMD4(0,y,0,1),
+                            "\(grip.rawValue): local haft/wrist Y-axis must not change")
+                    }
+                    let correctedBones = FirstPersonArmPose.solve(hand:transform,left:left)
+                    XCTAssertEqual(correctedBones.wrist,bones.wrist)
+                    XCTAssertEqual(correctedBones.elbow,bones.elbow)
+                    XCTAssertEqual(correctedBones.shoulder,bones.shoulder)
+                }
+            }
+        }
+    }
+
+    func testAuthoredDorsalHandSurfaceFacesViewerAtIdleAndContactForBothHands() throws {
+        let tip = try authoredProng()
+        for left in [false,true] {
+            let rest = ViewmodelPlacement.grip(left:left,logicalWidth:960,aspect:16.0/9)
+            for progress in [0.0,0.48] {
+                let socket = FirstPersonStrike.pose(rest:rest,progress:progress,action:.mining,
+                    workingPoint:tip,target:SIMD3(0,0,-1.75),reducedMotion:false)
+                for (grip,source) in handMeshes where grip != .draw {
+                    let mesh = left ? source.reflectedX() : source
+                    let backZ = try XCTUnwrap(mesh.vertices.map(\.position.z).min())
+                    let dorsal = mesh.vertices.filter { abs($0.position.z-backZ)<1e-6 && $0.normal.z < -0.99 }
+                    XCTAssertFalse(dorsal.isEmpty,"\(grip.rawValue) must have an authored dorsal -Z surface")
+                    guard !dorsal.isEmpty else { continue }
+                    let center = dorsal.reduce(SIMD3<Float>.zero) { $0+xyz($1.position) } / Float(dorsal.count)
+                    let transform = grip.meshTransform(in:socket)
+                    let normal = simd_normalize(xyz(transform * SIMD4(0,0,-1,0)))
+                    let towardViewer = simd_normalize(-xyz(transform * SIMD4(center,1)))
+                    XCTAssertGreaterThan(simd_dot(normal,towardViewer),0,
+                        "\(grip.rawValue), left=\(left), phase=\(progress): dorsal face must face the camera")
+                    let oldNormal = simd_normalize(xyz(socket * SIMD4(0,0,-1,0)))
+                    let oldTowardViewer = simd_normalize(-xyz(socket * SIMD4(center,1)))
+                    XCTAssertLessThan(simd_dot(oldNormal,oldTowardViewer),0,
+                        "negative control must reproduce the former palm/fingers-facing-player orientation")
+                }
+            }
+        }
+    }
+
+    func testBowDrawingHandKeepsExactStringContactAndAuthoredOrientation() {
+        let contact = FirstPersonModelAssets.handDrawStringContact
+        let stringAxis = FirstPersonModelAssets.handDrawStringAxis
+        for draw: Float in [0,0.25,0.5,0.75,1] {
+            let socket = vmTranslation(SIMD3(0.12+draw*0.25,-0.21,-1.30+draw*0.36))
+                * vmRotation(SIMD3(0.30*draw,-0.45,0.70*draw))
+            let transform = FirstPersonHandGrip.draw.meshTransform(in:socket)
+            XCTAssertEqual(transform,socket,"the split-finger draw hand has its own authored contact pose")
+            XCTAssertEqual(transform * SIMD4(contact,1),socket * SIMD4(contact,1))
+            XCTAssertEqual(transform * SIMD4(stringAxis,0),socket * SIMD4(stringAxis,0))
+            let wrong = FirstPersonHandGrip.standard.meshTransform(in:socket)
+            XCTAssertGreaterThan(simd_distance(xyz(wrong * SIMD4(contact,1)),xyz(socket * SIMD4(contact,1))),0.08,
+                "applying the ordinary gripping-hand turn would visibly detach the string contact")
+        }
+    }
+
+    func testHandFacingTurnAndLeftReflectionPreserveActualTriangleWinding() throws {
+        let tip = try authoredProng()
+        for left in [false,true] {
+            let rest = ViewmodelPlacement.grip(left:left,logicalWidth:960,aspect:16.0/9)
+            for progress in [0.0,0.48] {
+                let socket = FirstPersonStrike.pose(rest:rest,progress:progress,action:.mining,
+                    workingPoint:tip,target:SIMD3(0,0,-1.75),reducedMotion:false)
+                for (grip,source) in handMeshes {
+                    let mesh = left ? source.reflectedX() : source
+                    let transform = grip.meshTransform(in:socket)
+                    for index in stride(from:0,to:mesh.vertices.count,by:3) {
+                        let a = xyz(transform * mesh.vertices[index].position)
+                        let b = xyz(transform * mesh.vertices[index+1].position)
+                        let c = xyz(transform * mesh.vertices[index+2].position)
+                        let normal = xyz(transform * mesh.vertices[index].normal)
+                        let area = simd_cross(b-a,c-a)
+                        XCTAssertGreaterThan(simd_length(area),1e-10)
+                        XCTAssertGreaterThan(simd_dot(area,normal),0,
+                            "\(grip.rawValue), left=\(left), triangle=\(index/3): winding must agree with outward normal")
+                    }
+                }
+            }
+        }
+    }
 }

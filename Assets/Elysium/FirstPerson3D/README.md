@@ -52,8 +52,13 @@ coordinate transformation, bounds, triangle counts, and binary/Swift hashes.
 - `hand` is separate from the arm, so grips can adapt to smaller handles without
   resizing the tool or distorting the forearm. Its bore is approximately
   ±0.064 in X/Z, fitting the 0.1225-wide reinforced pickaxe handle after the
-  runtime's explicit 0.98/0.85 uniform presentation scale. Fingers are on +Z
-  and palm on -Z. The wrist overlaps the legacy arm
+  runtime's explicit 0.98/0.85 uniform presentation scale. In the authored mesh,
+  curled fingers are on +Z and the back of the hand is on -Z. Runtime applies a
+  proper 180-degree Y rotation to holding hands **only**, so the back faces the
+  wearer without turning the item, changing handedness, or moving the grip and
+  wrist anchors. The Blender previews apply the same hand-only attachment turn
+  after export. The dedicated bow draw hook retains its own unrotated frame.
+  The wrist overlaps the legacy arm
   over Y=-0.12...-0.08. There is no baked handle in either mesh.
 - `handNarrow` closes its fingers and palm around a rectangular bore of nominal
   X±0.045, Z±0.025 for the measured 0.078–0.084-wide Faithful diagonal haft

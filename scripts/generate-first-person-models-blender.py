@@ -447,6 +447,12 @@ def previews(objects):
     # length. Apply the same inspection-only uniform scale after stream export.
     objects["pickaxe"].scale = (.98/.85,)*3
     objects["pickaxe"].location.y = .05
+    # Match FirstPersonHandGrip.meshTransform: the authored curled fingers are
+    # +Z, but the closed fist's dorsal side faces the wearer at runtime. Turn
+    # the hand only, keeping its shaft bore, grip origin, and wrist invariant.
+    # This is applied after export; the dedicated archery hook is not turned.
+    for name in ("hand", "handNarrow", "handShield", "handRound"):
+        objects[name].rotation_euler.y = math.pi
     # Inspection-only reference shaft proves the tighter bore without changing
     # the authored tool model or embedding another handle into the hand.
     verts,faces,colors = [],[],[]
@@ -593,6 +599,7 @@ def main():
         "geometry_url":"https://tfwagames.itch.io/voxel-tools",
         "arm_hand_shield":"Original Elysium voxel geometry and face palettes; repository MIT license",
         "grip":{"origin":[0,0,0],"axis":[0,1,0],"pickaxe_handle_width":.10625,
+                "runtime_closed_hand_rotation_degrees":[0,180,0],
                 "hand_bore_half_width":.064,"handNarrow_bore_half_x":.045,"handNarrow_bore_half_z":.025,
                 "handShield_bore_half_x":.032,"handShield_bore_half_z":.032,
                 "handRound_bore_half_x":.028,"handRound_bore_half_z":.028,

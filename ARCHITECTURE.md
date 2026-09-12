@@ -143,6 +143,11 @@ colours remain authoritative over an uncoloured pack bottle. Opaque depth-tested
 is no separate painted hilt. Left arm geometry has corrected winding after reflection; item transforms
 remain positive-determinant and the shield's rear grip faces the wearer. GPU meshes are immutable,
 cached with a 24-entry bound, and discarded on resource-pack generation changes.
+Closed holding-hand meshes receive a proper local Y half-turn at their shared socket: their
+authored finger-pad side points away from the wearer and their dorsal side toward the wearer.
+This correction is separate from the item transform and arm IK; it preserves the fitted shaft bore,
+grip origin, wrist anchor, and handedness. The bow's right-hand string hook is not a closed holding
+grip and keeps its original contact frame. Facing-direction tests cover both hands at rest and strike.
 The forearm and upper arm have separate wrist/elbow/shoulder joints and fixed bone lengths; the
 hand/tool socket no longer rotates the complete arm as one board. Pickaxe, flat-haft, bow, and shield
 grips have distinct fitted bores. The native pickaxe is explicitly scaled from its 0.85-unit source

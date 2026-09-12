@@ -87,6 +87,11 @@
       0
     ],
     "pickaxe_handle_width": 0.10625,
+    "runtime_closed_hand_rotation_degrees": [
+      0,
+      180,
+      0
+    ],
     "runtime_pickaxe_handle_width": 0.1225,
     "runtime_pickaxe_translation_after_scale": [
       0,

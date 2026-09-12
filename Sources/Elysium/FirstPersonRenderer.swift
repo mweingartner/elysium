@@ -165,7 +165,7 @@ final class FirstPersonRenderer {
             draw("forearm:\(left)", pose.forearm) { reflected(FirstPersonModelAssets.forearm) }
             draw("upper-arm:\(left)", pose.upperArm) { reflected(FirstPersonModelAssets.upperArm) }
             draw("wrist-joint:\(left)", vmTranslation(pose.wrist)) { reflected(FirstPersonModelAssets.wristJoint) }
-            draw("hand:\(left):\(handGrip.rawValue)", transform) {
+            draw("hand:\(left):\(handGrip.rawValue)", handGrip.meshTransform(in: transform)) {
                 switch handGrip {
                 case .standard: return reflected(FirstPersonModelAssets.handNarrow)
                 case .pickaxe: return reflected(FirstPersonModelAssets.hand)

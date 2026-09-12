@@ -4,6 +4,17 @@ import ElysiumCore
 
 enum FirstPersonHandGrip: String {
     case standard, pickaxe, round, shield, draw
+
+    /// Holding meshes were authored with curled fingers on +Z, while the
+    /// camera looks at that side of the item socket. Turn only the fist around
+    /// its shaft so the back of the hand faces the wearer. A proper rotation
+    /// preserves handedness, the fitted bore, and the wrist on the Y axis;
+    /// neither the held item nor the independently solved arm is turned.
+    func meshTransform(in socket: simd_float4x4) -> simd_float4x4 {
+        // The archery hook has its own string-contact frame, not a shaft grip.
+        guard self != .draw else { return socket }
+        return socket * simd_float4x4(diagonal: SIMD4(-1, 1, -1, 1))
+    }
 }
 
 struct FirstPersonAimDepth {
