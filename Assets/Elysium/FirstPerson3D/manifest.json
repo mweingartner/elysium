@@ -1,0 +1,310 @@
+{
+  "arm_hand_shield": "Original Elysium voxel geometry and face palettes; repository MIT license",
+  "arm_joints": {
+    "forearm": {
+      "elbow": [
+        0,
+        -0.4,
+        0
+      ],
+      "overlap_y": [
+        -0.425,
+        0.025
+      ],
+      "wrist": [
+        0,
+        0,
+        0
+      ]
+    },
+    "hand_to_wrist": [
+      0,
+      -0.1,
+      0
+    ],
+    "scaling": "rigid rotation/translation; never stretch the X/Z cross-section",
+    "upperArm": {
+      "elbow": [
+        0,
+        0,
+        0
+      ],
+      "overlap_y": [
+        -0.48,
+        0.035
+      ],
+      "shoulder": [
+        0,
+        -0.45,
+        0
+      ]
+    },
+    "wristJoint": {
+      "bevel": 0.018,
+      "half_extent": 0.082,
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "placement": "at solved wrist; same hand frame or forearm frame"
+    }
+  },
+  "format": "little-endian float32 position xyz, flat normal xyz, linear rgba; CCW outside",
+  "generated_swift_sha256": "894f1c897dd7a2d0c244341955b8b8a7e05f7b5c332eca67cf1b0d9403ef6632",
+  "generator": "Blender 5.1.2 real mesh triangle export",
+  "geometry_license": "CC0-1.0",
+  "geometry_provider": "tfwa.games Voxel Tools",
+  "geometry_source": "Assets/Meshy/IronPickaxe/tfwa_pickaxe_cc0_source.glb",
+  "geometry_source_sha256": "3d3c188a832b80518f405f7ab95c7982d88cd482ac81fe9be4eb535e39269f1d",
+  "geometry_url": "https://tfwagames.itch.io/voxel-tools",
+  "grip": {
+    "axis": [
+      0,
+      1,
+      0
+    ],
+    "handDraw_string_axis": [
+      1,
+      0,
+      0
+    ],
+    "handDraw_string_contact": [
+      0.025,
+      0.04,
+      -0.0415
+    ],
+    "handNarrow_bore_half_x": 0.045,
+    "handNarrow_bore_half_z": 0.025,
+    "handRound_bore_half_x": 0.028,
+    "handRound_bore_half_z": 0.028,
+    "handShield_bore_half_x": 0.032,
+    "handShield_bore_half_z": 0.032,
+    "hand_bore_half_width": 0.064,
+    "origin": [
+      0,
+      0,
+      0
+    ],
+    "pickaxe_handle_width": 0.10625,
+    "runtime_pickaxe_handle_width": 0.1225,
+    "runtime_pickaxe_translation_after_scale": [
+      0,
+      0.05,
+      0
+    ],
+    "runtime_pickaxe_uniform_scale": 1.1529411764705881
+  },
+  "models": {
+    "arm": {
+      "bounds": [
+        [
+          -0.09,
+          0.09
+        ],
+        [
+          -1.28,
+          -0.08
+        ],
+        [
+          -0.08,
+          0.461552
+        ]
+      ],
+      "float32_sha256": "58b7b5a665374992544ad5d3046f3893d8e5a27e4666280ea4743a49225ad7b2",
+      "triangles": 1604,
+      "vertices": 4812
+    },
+    "forearm": {
+      "bounds": [
+        [
+          -0.082,
+          0.082
+        ],
+        [
+          -0.425,
+          0.025
+        ],
+        [
+          -0.08,
+          0.078
+        ]
+      ],
+      "float32_sha256": "596c4d7e630bfcb46e0f67ccfc8a2f148411d6a0138ad7c7044ca7f5b4d6bc34",
+      "triangles": 972,
+      "vertices": 2916
+    },
+    "hand": {
+      "bounds": [
+        [
+          -0.1,
+          0.1
+        ],
+        [
+          -0.12,
+          0.08
+        ],
+        [
+          -0.11,
+          0.1
+        ]
+      ],
+      "float32_sha256": "5449f3a3c4539edd03a7a53770dff81d7fc9a0e3ead2d1e115ce0d9416bd0205",
+      "triangles": 286,
+      "vertices": 858
+    },
+    "handDraw": {
+      "bounds": [
+        [
+          -0.08,
+          0.08
+        ],
+        [
+          -0.12,
+          0.08
+        ],
+        [
+          -0.09,
+          0.05
+        ]
+      ],
+      "float32_sha256": "b1c030d9db292144150aba7bb52d7ddd2cb2d781f33b7d4b0609e368f6cc14f1",
+      "triangles": 330,
+      "vertices": 990
+    },
+    "handNarrow": {
+      "bounds": [
+        [
+          -0.1,
+          0.1
+        ],
+        [
+          -0.12,
+          0.08
+        ],
+        [
+          -0.11,
+          0.1
+        ]
+      ],
+      "float32_sha256": "ea79ec32a77d0fbab80f6a8353a3e341ab218a9937a1131b0862706626210ed9",
+      "triangles": 330,
+      "vertices": 990
+    },
+    "handRound": {
+      "bounds": [
+        [
+          -0.1,
+          0.1
+        ],
+        [
+          -0.12,
+          0.08
+        ],
+        [
+          -0.11,
+          0.1
+        ]
+      ],
+      "float32_sha256": "559c3cfd702fb1d020adad5686a2fac692da1efb80cd7cb45444762820e3e9ad",
+      "triangles": 296,
+      "vertices": 888
+    },
+    "handShield": {
+      "bounds": [
+        [
+          -0.1,
+          0.1
+        ],
+        [
+          -0.12,
+          0.08
+        ],
+        [
+          -0.11,
+          0.1
+        ]
+      ],
+      "float32_sha256": "fe2b15d282bb32439cb2554b84659c44a92983e3166ba8dfda77cd24b4f17c0c",
+      "triangles": 296,
+      "vertices": 888
+    },
+    "pickaxe": {
+      "bounds": [
+        [
+          -0.286875,
+          0.286875
+        ],
+        [
+          -0.1275,
+          0.7225
+        ],
+        [
+          -0.074375,
+          0.074375
+        ]
+      ],
+      "float32_sha256": "e349b36940010281bc973b1df6421bea50e967c56a5f94833c714ba44cf46eac",
+      "triangles": 1564,
+      "vertices": 4692
+    },
+    "shield": {
+      "bounds": [
+        [
+          -0.25,
+          0.25
+        ],
+        [
+          -0.42,
+          0.38
+        ],
+        [
+          -0.19,
+          0.03
+        ]
+      ],
+      "float32_sha256": "bf58458b74558761d54433198bc598924d4ada60b71d02f772f967b28498b125",
+      "triangles": 1496,
+      "vertices": 4488
+    },
+    "upperArm": {
+      "bounds": [
+        [
+          -0.098,
+          0.098
+        ],
+        [
+          -0.48,
+          0.035
+        ],
+        [
+          -0.093,
+          0.093
+        ]
+      ],
+      "float32_sha256": "94b11b1b81bb0402a75bb9bfc5c05dc0b726bbc573ad08b58f86a766a8cbc00c",
+      "triangles": 1020,
+      "vertices": 3060
+    },
+    "wristJoint": {
+      "bounds": [
+        [
+          -0.082,
+          0.082
+        ],
+        [
+          -0.082,
+          0.082
+        ],
+        [
+          -0.082,
+          0.082
+        ]
+      ],
+      "float32_sha256": "98122a833e50ea5cbe9f1dc1b2161183c302396dd2bd137cd989d3e0e822cc1c",
+      "triangles": 44,
+      "vertices": 132
+    }
+  },
+  "source_axes_to_runtime": "(x-.05,z-.60,-y-.15)*.2125; uniform scale; preserved silhouette"
+}

@@ -1108,23 +1108,7 @@ private func registerModels2() {
         packTex: ["entity/tadpole/tadpole.png"]))
 
     // AMBIENT / MISC
-    M2("bat", MobModel(
-        texW: 64, texH: 64,
-        parts: [
-            part("head", (0, 14, 0), box(-3, 0, -3, 6, 6, 6, 0, 0), box(-4, 5, -1, 3, 4, 1, 24, 0), box(1, 5, -1, 3, 4, 1, 24, 0)),
-            part("body", (0, 14, 0), box(-3, -12, -3, 6, 12, 6, 0, 16)),
-            part("wingR", (-3, 13, 0), box(-10, -15, 0, 10, 16, 1, 42, 0), box(-18, -13, 0, 8, 12, 1, 24, 16)),
-            part("wingL", (3, 13, 0), box(0, -15, 0, 10, 16, 1, 42, 0), box(10, -13, 0, 8, 12, 1, 24, 16)),
-        ],
-        anim: "bat", scale: 0.5,
-        paint: { s in
-            s.box(0, 0, 6, 6, 6, 0x5a4a42, 0.14)
-            s.px(6 + 1, 6 + 2, 0x1c1c1c); s.px(6 + 4, 6 + 2, 0x1c1c1c)
-            s.box(24, 0, 3, 4, 1, 0x4a3c36, 0.1)
-            s.box(0, 16, 6, 12, 6, 0x5a4a42, 0.14)
-            s.box(42, 0, 10, 16, 1, 0x44382e, 0.1)
-            s.box(24, 16, 8, 12, 1, 0x44382e, 0.1)
-        }, packTex: ["entity/bat.png"]))
+    M2("bat", makeBatModel())
     M2("bee", MobModel(
         texW: 64, texH: 64,
         parts: [

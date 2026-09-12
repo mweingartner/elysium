@@ -534,6 +534,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
     var window: NSWindow!
     var gameView: GameView!
     var renderer: WorldRenderer!
+    var firstPersonRenderer: FirstPersonRenderer!
     let host = HostBridge()
     var game: GameCore!
     var ui: UIManager!
@@ -597,6 +598,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         guard let device = MTLCreateSystemDefaultDevice() else { fatalError("no Metal device") }
         let t1 = CFAbsoluteTimeGetCurrent()
         renderer = WorldRenderer(device: device)
+        firstPersonRenderer = FirstPersonRenderer(device: device)
         ui = UIManager(cv: UICanvas(device: device))
         print(String(format: "renderer: %.0fms (atlas + pipelines)", (CFAbsoluteTimeGetCurrent() - t1) * 1000))
 
@@ -1189,10 +1191,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
             if shotQuitFrames == 0 { NSApp.terminate(nil) }
         }
 
-        let enc: MTLRenderCommandEncoder
+        var enc: MTLRenderCommandEncoder
         // The render partial (fraction of the way to the next 20Hz tick) also feeds the HUD so
         // the first-person hands move at frame rate rather than stepping per tick.
         var partial = 0.0
+        var viewmodelCamera: CamState?
         if game.hasWorld() {
             partial = game.frame(dtMs: dt)
             LANMultiplayerManager.shared.tickReplication(game: game)
@@ -1201,6 +1204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
             booth?.tickBooth()
             renderer.particles.tick(game.world)
             let cam = game.camState(partial, timeSec: timeSec)
+            viewmodelCamera = cam
             enc = renderer.render(cmd: cmd, rpd: rpd, game: game, cam: cam, partial: partial, timeSec: timeSec)
         } else {
             enc = renderer.renderTitle(cmd: cmd, rpd: rpd)
@@ -1209,6 +1213,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         // ---- UI pass ----
         ui.beginFrame()
         let screen = ui.current()
+        if game.hasWorld(), let viewmodelCamera {
+            enc.endEncoding()
+            firstPersonRenderer.render(command: cmd, target: drawable.texture, game: game,
+                cam: viewmodelCamera,
+                canvas: ui.cv, atlas: renderer.atlasTexture, partial: partial, time: timeSec,
+                visible: !hud.hideGui && screen == nil,
+                logicalWidth: ui.width, logicalHeight: ui.height)
+            rpd.colorAttachments[0].loadAction = .load
+            enc = cmd.makeRenderCommandEncoder(descriptor: rpd)!
+        }
         if game.hasWorld() && (screen == nil || screen!.showHUD || !screen!.pausesGame) {
             hud.draw(ui, game, partial)
             if !(screen is ChatScreen) { drawChatOverlay(ui) }

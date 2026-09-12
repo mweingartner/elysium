@@ -274,13 +274,9 @@ final class EntityRendererM {
                     m = mRotateZ(m, 0.96)
                 }
             case "bat":
-                if n == "wingR" {
-                    m = mRotateY(m, Float(Foundation.sin(time * 22) * 1 + 0.4))
-                } else if n == "wingL" {
-                    m = mRotateY(m, Float(-Foundation.sin(time * 22) * 1 - 0.4))
-                } else if n == "head" && p.hanging {
-                    m = mRotateX(m, .pi)
-                }
+                m = BatPresentation.partMatrix(n, hanging: p.hanging, time: time,
+                                               headYaw: p.headYaw,
+                                               ceilingOffset: floor(p.y + 1) - p.y)
             case "bee":
                 if n == "wingR" {
                     m = mRotateY(m, Float(Foundation.sin(time * 40) * 0.9 + 0.3))

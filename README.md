@@ -220,29 +220,35 @@ The compact lower-right minimap follows the open cavern around you in the Nether
 sealed ceiling. To reclaim that HUD space, turn off **Options... → Video → Show Minimap**; the
 expanded map opened with `M` remains available.
 
-An empty selected slot leaves the first-person view completely clear. Selected pickaxes use
-material-correct three-quarter Blender renders of a pinned CC0 voxel mesh, held at a readable
-scale without deforming the image during a strike. Other tools now stand upright in the fist —
-their reviewed Faithful art rotated so the handle meets the hand instead of floating past it, with
-the painted haft removed from the arm so the fingers grip the tool's own handle. Blocks retain
-their three-dimensional voxel preview, while foods and other objects retain high-resolution
-Faithful item art. Attack/use poses provide clear feedback for swings and tool actions: the
-stroke runs on the wall clock at frame rate, cycles continuously while the mouse button is held,
-completes its arc after release instead of snapping home, and plays a shorter stroke for each
-use gesture. Both hands sway with the walk cycle alongside the camera. Changing what a hand holds
-lowers the outgoing item out of view and raises the incoming one; food is nibbled on the rhythm
-of the eating sound. Bows, shields, and torches render in the left (off) hand. **G** and **H** toggle a torch
-or a shield from the inventory into the off hand and back, so you can carry a pickaxe and a torch
+An empty main hand draws no arm or hand; separately equipped off-hand items remain visible.
+Held equipment now renders as depth-tested 3D geometry beneath the HUD, so the minimap and quickbar
+cover overlapping hands. Blender-authored arms, pickaxes, and shields share a physical grip; other
+items preserve native-resolution Faithful/resource-pack pixels with extruded edges, and blocks use
+their registered 3D shapes. Tool handles align through the fingers without a separate painted hilt,
+and shields keep their rear grip toward the wearer and their protective face outward.
+An articulated elbow connects each wrist to its shoulder. Strikes bring the tool's actual working
+edge toward the selected target in perspective; bow aiming follows the selected hit distance.
+The hand camera preserves item readability when world FOV changes, without extending attack reach.
+
+Action-specific motion covers mining and chopping, sword cuts, digging, placement, and eating.
+Primary strokes repeat continuously while the mouse button is held and complete their active arc after release.
+Changing equipment lowers the outgoing item before raising the replacement; the cosmetic equip
+twirl rotates the whole prop and yields to actions and Reduce Motion. Bows and shields are presented
+in the left hand. **G** and **H** toggle a torch or a shield from the inventory into the
+off hand and back, so you can carry a pickaxe and a torch
 to mine with light, or a sword and a shield to fight defensively; a held torch in either hand casts
 a soft, flickering warm light on the world around you. Holding use with a bow raises it, brings the
-right hand to the string, advances through the charge frames, and fires on release using the same
+right hand to the string, flexes the limbs as the string draws back, and fires on release using the same
 charge duration that determines arrow power; after the shot both hands relax back along the draw
-path. Holding use with a shield in the off hand and a sword,
-mace, or empty main hand raises the shield to guard over the same quarter second the block takes
+path. Holding use with a shield in the off hand and a sword, mace, or empty main hand raises the
+shield to guard over the same quarter second the block takes
 to become active (and eases it back down on release), and while raised it stops a frontal melee or
 projectile hit — damage and knockback both — leaving flanking and environmental damage to land.
-Inventory and chest
-screens include a **Sort A-Z** button; sorting orders complete stacks by item
+
+Bats now use an upright flying pose with articulated wings; only their hanging pose inverts the
+body and folds the wings against the ceiling.
+
+Inventory and chest screens include a **Sort A-Z** button; sorting orders complete stacks by item
 name and type without merging them or moving equipment, crafting, cursor, or
 other non-storage slots. Chest sorting is disabled for LAN clients until the
 host-authoritative container protocol carries the item metadata required to
@@ -388,7 +394,7 @@ Report suspected security vulnerabilities privately using [SECURITY.md](SECURITY
 
 - **Starting point:** Elysium began from [thebriangao/pebble](https://github.com/thebriangao/pebble), created by Brian Gao. Its open-source Swift and Metal codebase provided the foundation from which Elysium evolved. The inherited MIT copyright and permission notice are preserved in [LICENSE](LICENSE).
 - **Textures:** the bundled [Faithful 64x](https://faithfulpack.net/faithful64x) texture set is the work of the Faithful team and its contributors. The reviewed [Ore Borders 64x](https://faithfulpack.net/addons/OreBorders64x) and [Static Lanterns](https://faithfulpack.net/addons/ClearerLanterns) add-ons remain separate, optional layers. They are distributed under the separate [Faithful License](packaging/FAITHFUL-LICENSE.txt), with archive hashes and exact add-on attribution in [FAITHFUL-ADDONS-CREDITS.txt](packaging/FAITHFUL-ADDONS-CREDITS.txt), and are not covered by Elysium's MIT license.
-- **Held pickaxe geometry:** the model-rendered pickaxe family derives from [tfwa.games Voxel Tools](https://tfwagames.itch.io/voxel-tools), distributed under [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/). Elysium pins the source geometry and every generated render by SHA-256; details and reproducible commands are in [Assets/Elysium/HeldPickaxe3D/README.md](Assets/Elysium/HeldPickaxe3D/README.md).
+- **Held pickaxe geometry:** the runtime 3D pickaxe family derives from [tfwa.games Voxel Tools](https://tfwagames.itch.io/voxel-tools), distributed under [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/). Elysium pins the source geometry and generated mesh data by SHA-256; details and reproducible commands are in [Assets/Elysium/FirstPerson3D/README.md](Assets/Elysium/FirstPerson3D/README.md).
 - **Deterministic math:** the fdlibm-derived math implementation retains its upstream notice in source.
 - **Elysium hero artwork:** `packaging/title-bg.png` was newly generated for Elysium and serves as both this README's hero and the in-game title-menu background. It is not derived from Pebble's README artwork or an in-game Faithful texture capture.
 - **Reality Derived maps:** the bundled [Arnis](https://github.com/louis-e/arnis) generator is by Louis Eriguchi and contributors and is redistributed under its [Apache-2.0 license](Vendor/Arnis/LICENSE). It uses OpenStreetMap and elevation/land-cover sources identified in the Arnis interface; map attribution remains visible in that interface.

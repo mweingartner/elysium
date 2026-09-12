@@ -123,13 +123,108 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
 
 ## Rendering
 
-First-person hand presentation is implemented as viewport-constrained overlay geometry in `HudM.swift`.
-The arm is independent of main-hand occupancy, while held-item drawing remains conditional. Pickaxes
-resolve first to immutable, manifest-bound Blender renders of the bundled CC0 tfwa.games voxel mesh;
-other tools currently use bounded pack-derived sprites. Attack and use poses translate and rigidly
-rotate the complete authored image. They never rewrite its texture or apply non-uniform scale, and keep
-both arm and item clear of the crosshair and hotbar. A future all-tool runtime-mesh renderer can replace
-the remaining sprite family without changing the deterministic engine boundary.
+First-person presentation uses `FirstPersonRenderer.swift` and `FirstPersonViewmodel.swift`, not
+layered pictures of an arm and tool. A camera-space Metal pass has its own cleared depth buffer and
+fixed 70-degree lens; it runs after world compositing and before every HUD element. The minimap and
+quickbar therefore occlude the hand without moving its shoulder. Empty hands emit no hand geometry;
+hidden GUI, third-person, and open screens suppress the entire first-person pass.
+Animation is presentation-only and cannot fire an arrow, consume an item, or alter combat/mining timing.
+
+The canonical socket is the origin, +Y follows the handle, and +Z points toward the player. The
+Blender-authored articulated arm, fitted fingers, pickaxe, and shield are genuine flat-shaded triangle meshes, embedded
+from reproducible, manifest-bound data in `Assets/Elysium/FirstPerson3D`. The accepted CC0 pickaxe
+silhouette is retained across material palettes. Other items extrude the actual native-resolution
+Faithful/resource-pack pixels with silhouette sidewalls, while placeable blocks reuse registered
+shape boxes and the current full-resolution block atlas. A diagonal source handle is straightened
+geometrically, never by resampling its image. Named shaft anchors are measured from the shipped art,
+including off-diagonal axe/shovel/hoe and fishing-rod handles. The crossbow and Flying Wand use native
+grip-aligned solids rather than extruding an already projected inventory icon. Stack-specific potion
+colours remain authoritative over an uncoloured pack bottle. Opaque depth-tested fingers wrap the real handle; there
+is no separate painted hilt. Left arm geometry has corrected winding after reflection; item transforms
+remain positive-determinant and the shield's rear grip faces the wearer. GPU meshes are immutable,
+cached with a 24-entry bound, and discarded on resource-pack generation changes.
+The forearm and upper arm have separate wrist/elbow/shoulder joints and fixed bone lengths; the
+hand/tool socket no longer rotates the complete arm as one board. Pickaxe, flat-haft, bow, and shield
+grips have distinct fitted bores. The native pickaxe is explicitly scaled from its 0.85-unit source
+height to the intended 0.98-unit display height, without altering its accepted shape or palette.
+
+Action families distinguish mining/chopping, sword cuts, digging, placement, and consumption.
+`FirstPersonAnimation.swift` owns the shared action, equipment-swap, and relaxation timelines. A
+continuous windup/strike/recovery timeline repeats while primary input is held and finishes the active
+stroke on release. Equipment lowers before swapping and raises afterward; a whole-prop shaft-axis
+twirl is cosmetic and yields to real actions and Reduce Motion. The bow has a distinct left-hand aim
+pose, flexing limbs, a shared string/nock/draw-hand position, a right-shoulder return, and an arrow
+aligned toward the crosshair. Gameplay remains owned by the existing use/release path.
+
+### First-person design decision — September 12, 2026
+
+Repeated reports of fragments, detached grips, incorrect angles and left-hand facing ruled out further
+2D offset tuning. Keeping baked sprites would be cheaper, but cannot expose consistent surfaces during
+3D rotation. The selected alternative is bounded runtime geometry; the accepted downside is another
+small render pass and cached meshes. Acceptance requires a coherent grip at idle/windup/contact/recovery,
+readable tool size, no empty-hand remnants, correct shield rear/front and two-handed bow release,
+plus HUD occlusion at small/wide layouts. Unit geometry assertions are necessary but do not replace
+native rendered sequences. Revisit if measured frame cost or the live grip/near-plane checks fail.
+
+**Perspective correction prompted by visual feedback:** the first native candidate passed geometry
+tests but still struck beside the crosshair. A projection probe using its actual pickaxe vertices put
+the entire prop at x586–693/y319–432 in a 960×540 contact frame, missing the crosshair at (480,270).
+That invalidated the fixed-pose acceptance assumption. `FirstPersonTarget` now selects the actual
+simulation-eye block/entity hit and projects it through the exact interpolated, bobbed `CamState`
+used for world rendering. It maps that screen point into the independent hand lens, preserving
+perspective across world FOV and aspect changes. `FirstPersonStrike` solves the actual working edge
+against a bounded presentation-depth target; the hand remains attached to the same tool socket.
+This is screen-space contact, **not** a claim that a short pickaxe physically reaches a block several
+metres away, and it does not extend gameplay reach. Bow geometry converges toward the selected hit
+rather than a hard-coded eight-unit point. Crossbow and charging-trident poses analytically align the
+actual muzzle/tip ray, including its offset from the grip. Ranged aim takes precedence over melee
+contact; a long trident uses a minimum three-unit presentation depth so its target stays ahead of
+its tip. Depth changes ease over 60ms without moving the projected
+target. The shield remains a protective pose rather than following the mining point. Active portal
+post-processing intentionally distorts the world after geometric projection; exact contact during
+that warp is not promised. Reduced Motion deliberately limits swing excursion.
+
+Ten primary references informed this design (behavioral conventions, not copied implementation):
+[Minecraft attachments](https://learn.microsoft.com/en-us/minecraft/creator/documents/attachables?view=minecraft-bedrock-stable),
+[per-hand display transforms](https://learn.microsoft.com/en-us/minecraft/creator/reference/content/blockreference/examples/itemdisplaytransforms?view=minecraft-bedrock-stable),
+[first-person animation layers](https://github.com/Mojang/bedrock-samples/blob/main/resource_pack/animations/player_firstperson.animation.json),
+[shield geometry](https://github.com/Mojang/bedrock-samples/blob/main/resource_pack/models/entity/shield.geo.json),
+[shield poses](https://github.com/Mojang/bedrock-samples/blob/main/resource_pack/animations/shield.animation.json),
+[bow state/attachments](https://github.com/Mojang/bedrock-samples/blob/main/resource_pack/attachables/bow.json),
+[Luanti's independent wield camera](https://github.com/luanti-org/luanti/blob/master/src/client/camera.cpp),
+[Luanti's wield geometry](https://github.com/luanti-org/luanti/blob/master/src/client/wieldmesh.cpp),
+[Vintage Story item presentation](https://apidocs.vintagestory.at/api/Vintagestory.API.Common.CollectibleObject.html),
+and [held interaction lifecycle](https://apidocs.vintagestory.at/api/Vintagestory.API.Common.CollectibleBehavior.html).
+
+Eight additional primary technical references informed the perspective/rig correction:
+[Valve viewmodel FOV correction](https://github.com/ValveSoftware/source-sdk-2013/blob/master/src/game/client/c_baseviewmodel.cpp),
+[Vintage Story projection math](https://github.com/anegostudios/vsapi/blob/master/Math/Matrix/MatrixTools.cs),
+[exact block hit positions](https://apidocs.vintagestory.at/api/Vintagestory.API.Common.BlockSelection.html),
+[Unity world-to-viewport](https://docs.unity3d.com/6000.0/Documentation/ScriptReference/Camera.WorldToViewportPoint.html),
+[viewport-to-ray](https://docs.unity3d.com/6000.0/Documentation/ScriptReference/Camera.ViewportPointToRay.html),
+[Epic two-bone IK](https://dev.epicgames.com/documentation/en-us/unreal-engine/two-bone-ik?application_version=4.27),
+[independent first-person rendering](https://dev.epicgames.com/documentation/unreal-engine/first-person-rendering),
+and [perspective projection derivation](https://www.scratchapixel.com/lessons/3d-basic-rendering/perspective-and-orthographic-projection-matrix/opengl-perspective-projection-matrix.html).
+The reviewed Mojang/Luanti attack curves establish stylized swing conventions, not literal
+working-tip contact; Elysium's target-aware edge solver is an explicit design inference beyond them.
+
+Verification for this change: 116 distinct affected XCTest cases passed (114-case affected run plus
+two new aiming regressions, with all eight rig cases rerun after the analytic correction), and the
+production build passed with warnings treated as errors. The unchanged simulation contract passed
+491 goldens; the source/security and asset-integrity checks also passed. Native Metal captures
+confirmed repeated pickaxe contact at 70° and 110° world FOV, closed wrist joins, near/far bow aim and
+release, shield rear-facing grip, crossbow/trident orientation, empty-hand cleanup, and HUD occlusion.
+Earlier native item-family and upright flying-bat inspections remain applicable to their unchanged
+meshes. Aspect extremes and folded bat roost are covered mathematically, not claimed as native
+playtests; no sustained performance benchmark or user aesthetic acceptance is claimed. The disposable
+debug world was deleted and its original FOV restored. Applications deployment and Git publication
+are separate from this local build/verification result.
+
+Bat rendering uses `BatModel`'s modern 32-unit UV layout, matching Faithful's 128-pixel skin.
+`BatPresentation` composes an upright flying body with connected, parented wing tips, or a static
+full-body inverted/folded roost anchored to the ceiling. Hanging comes from the actual bat state
+(with legacy entity-data fallback), never `onGround`; this does not change deterministic simulation
+or add roost state to the LAN wire format.
 
 `InventorySorting.swift` is the deterministic core boundary for inventory ordering. It validates every
 registered item identifier before mutation, compares an ASCII-folded display name, item category,
@@ -153,11 +248,11 @@ pack selection.
 
 Engine side (`Render/`): the **mesher** consumes a padded 18×18×18 snapshot and emits opaque/cutout/translucent vertex buffers — greedy quad merging for full cubes, per-vertex AO, smooth light, biome tint, and an animation channel (water/lava/portal/fire/sway). Vertex format is 28 bytes / 7 words. Each mesh input owns an immutable, generation-tagged tint/provenance context; main-thread completion rejects an old generation or replaced section job before any upload or bookkeeping side effect. Generated and pack-backed atlas slices use the same top-origin row convention from CPU bytes through Metal sampling; semantic door, bed, and chest slices apply facing, half/piece, hinge, and open-state transforms directly within that coordinate space. Paired chests extend their neighbor-aware shape boxes to one shared seam and use the entity unwrap's complete fifteen-texel left/right front crops, while single chests retain their fourteen-texel crop. Pack provenance selects only those semantic transforms and tint behavior, never a global V-axis flip. Torch and lantern fixtures have dedicated live-world cuboid emitters so placed blocks render as material-built 3D fixtures instead of transparent sprite cards. The **atlas substrate** generates all 757+ baseline tiles in code with integer-only color math (pinned byte-identical by `atlas-goldens.json`); the built-in Faithful art overlays it. Tiles that vanilla renders as block entities (beds, chests, the bell, the decorated pot) have no flat `block/` texture in the Java format — the loader composites them from the art's `entity/` unwraps, so every visible surface comes from the Faithful set (the only substrate tiles left at runtime are the three airs, a particle speck, and the end-portal effect, which vanilla also renders as a shader rather than a texture).
 
-App side (`WorldRenderer`): runtime-compiled MSL (no `.metal` files — SPM doesn't build them), a **mesh arena** of 32 MB shared `MTLBuffer` pages with a first-fit free list and 3-frame deferred frees so all section draws bind one buffer at different offsets. Pass order: shadow (PCF/Poisson, snapped texel grid) → sky gradient → stars → celestials (Faithful sun/moon drawn additively) → clouds → opaque → cutout (back-culled) → translucent → entities (pose animator, Faithful skins) → particles (instanced, triple-buffered) → ultra (half-res SSAO + shadow-marched volumetrics) → bloom → composite (ACES) → UI. The section mesher treats `Shape.cube` as the visible-geometry contract; `fullCube` remains an independent gameplay/occlusion property, so deliberately non-full cubes such as soul sand and translucent cubes such as honey cannot disappear from the mesh. The UI is a single draw call: `UICanvas` mimics Canvas2D (fillRect, gradients, transforms, text via a built-in 5×7 font or the Faithful font sheets) into one vertex stream with a texture-segmented batch. Pack GUI sheets share one bounded integral raster scale chosen from their highest supported native source (up to 4x), while logical source coordinates keep layout and glyph advances independent of physical composite size; this preserves Faithful 64x font and panel detail without a lossy 2x intermediate. Non-block item icons prefer active `textures/item` pack art; Elysium-only variants without pack art can derive from a matching packed sibling, such as copper tools from iron tools with only neutral metal pixels recolored, before falling back to deterministic procedural templates. Block item icons choose their flat-vs-3D path from registered shape boxes, so torch, lantern, chain, and other volumetric non-cube block items do not fall back to flat tile sprites. The first-person HUD composes an edge-connected sleeve, faceted forearm, hand grip, and scale-bounded selected-item sprite; the item and attack/use rotation pivot around the shared grip while the arm base remains attached to the screen or the safe edge beside the minimap.
+App side (`WorldRenderer`): runtime-compiled MSL (no `.metal` files — SPM doesn't build them), a **mesh arena** of 32 MB shared `MTLBuffer` pages with a first-fit free list and 3-frame deferred frees so all section draws bind one buffer at different offsets. Pass order: shadow (PCF/Poisson, snapped texel grid) → sky gradient → stars → celestials (Faithful sun/moon drawn additively) → clouds → opaque → cutout (back-culled) → translucent → entities (pose animator, Faithful skins) → particles (instanced, triple-buffered) → ultra (half-res SSAO + shadow-marched volumetrics) → bloom → composite (ACES) → first-person geometry (independent depth) → UI. The section mesher treats `Shape.cube` as the visible-geometry contract; `fullCube` remains an independent gameplay/occlusion property, so deliberately non-full cubes such as soul sand and translucent cubes such as honey cannot disappear from the mesh. The UI is a single draw call: `UICanvas` mimics Canvas2D (fillRect, gradients, transforms, text via a built-in 5×7 font or the Faithful font sheets) into one vertex stream with a texture-segmented batch. Pack GUI sheets share one bounded integral raster scale chosen from their highest supported native source (up to 4x), while logical source coordinates keep layout and glyph advances independent of physical composite size; this preserves Faithful 64x font and panel detail without a lossy 2x intermediate. Non-block item icons prefer active `textures/item` pack art; Elysium-only variants without pack art can derive from a matching packed sibling, such as copper tools from iron tools with only neutral metal pixels recolored, before falling back to deterministic procedural templates. Block item icons choose their flat-vs-3D path from registered shape boxes, so torch, lantern, chain, and other volumetric non-cube block items do not fall back to flat tile sprites. First-person hands and items use the dedicated 3D pass described above; `HudM.swift` draws no held-item sprites.
 
 Chat and command-line rendering stays in the app shell (`ScreensM.swift` + `UICanvas`), but its wrapping and item-completion rules live in `ElysiumCore/Game/CommandLineSupport.swift` so XCTest can prove those behaviors against the real registered item list.
 
-The map overlay follows the same split. `ElysiumCore/Game/MapOverlay.swift` owns the deterministic layout, compact minimap size modes, zoom, loaded-bounds, pan, cursor-anchored zoom math, visibility policy, and dimension-aware column sampling. `HudM.swift` draws the lower-right square minimap flush to the bottom/right HUD edge and centered on the player; `-` / `=` cycle the compact map through small, medium, and large sizes, with medium as the default. The persisted, default-on **Show Minimap** Video setting suppresses only this HUD surface and releases its held-arm obstruction; the explicit expanded map remains available. `ScreensM.swift` owns the expanded non-pausing map screen with drag-pan, arrow-key pan, and `,` / `.` zoom. Because Elysium terrain is generated lazily, "full map" zoom means the finite extent of currently loaded/generated chunks rather than pre-rendering the selected world boundary; the maximum zoom-out span grows as streaming loads more chunks. Sky dimensions map the validated heightmap cell. Sealed/no-sky dimensions instead map a bounded 32-block vertical slice from one block above the player's current level downward, exposing the traversable cavern rather than the bedrock roof while bounding per-frame work. App-side drawing caps minimap and expanded-map sample resolution and colors the selected block plus biome tint without mutating simulation state.
+The map overlay follows the same split. `ElysiumCore/Game/MapOverlay.swift` owns the deterministic layout, compact minimap size modes, zoom, loaded-bounds, pan, cursor-anchored zoom math, visibility policy, and dimension-aware column sampling. `HudM.swift` draws the lower-right square minimap flush to the bottom/right HUD edge and centered on the player; `-` / `=` cycle the compact map through small, medium, and large sizes, with medium as the default. The persisted, default-on **Show Minimap** Video setting suppresses only this HUD surface; the explicit expanded map remains available, and first-person hand placement does not change. `ScreensM.swift` owns the expanded non-pausing map screen with drag-pan, arrow-key pan, and `,` / `.` zoom. Because Elysium terrain is generated lazily, "full map" zoom means the finite extent of currently loaded/generated chunks rather than pre-rendering the selected world boundary; the maximum zoom-out span grows as streaming loads more chunks. Sky dimensions map the validated heightmap cell. Sealed/no-sky dimensions instead map a bounded 32-block vertical slice from one block above the player's current level downward, exposing the traversable cavern rather than the bedrock roof while bounding per-frame work. App-side drawing caps minimap and expanded-map sample resolution and colors the selected block plus biome tint without mutating simulation state.
 
 Crafting recipe planning stays in `ElysiumCore/Systems/Crafting.swift`. The survival inventory uses only the player's carried inventory plus the local 2x2 grid. Crafting-table screens carry their block coordinates and shared `crafting` block entity from `Interact.swift` through `ScreenData`, then build recipe plans from the player's inventory, the current table-backed 3x3 grid, and loaded block/entity containers within a 25-block radius. Selecting a recipe withdraws concrete ingredients into the grid through the same recipe planner, consumes player inventory first, marks mutated block-entity containers dirty through `World.setBlockEntity`, and still lets the normal output-slot path consume the staged grid. Table-backed grids persist as station contents instead of returning to the opener's inventory on close, while personal inventory crafting keeps its old temporary-grid behavior. The output-slot quantity arrows use core-tested round-limit helpers: survival counts concrete ingredients from the current grid plus eligible resources, while creative caps the selected quantity to what the player inventory can receive. Multi-stack output transfer is split by the shared slot framework instead of creating oversized stacks. Recipe-popup typeahead is split the same way: normalized search matching and the query/highlight/scroll state machine are core-tested in `Crafting.swift`, while `ScreensM.swift` owns drawing, mouse hit testing, and routing keyboard events into that state.
 

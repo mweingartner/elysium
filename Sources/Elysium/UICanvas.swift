@@ -270,6 +270,30 @@ final class UICanvas {
         heldItemTextures.removeAll(keepingCapacity: true)
     }
 
+    /// Immutable, native-resolution source for the 3D viewmodel. Never use an already
+    /// projected/baked held sprite as geometry input: that would extrude its perspective.
+    func viewmodelItemImage(_ definition: ItemDef, data: StackData?) -> RGBAImage {
+        // Stack-specific potion colours must not be replaced by the pack's empty bottle.
+        if data?.potion != nil {
+            return RGBAImage(width: 16, height: 16, pixels: itemIconPixels(definition.id, data))
+        }
+        if let image = heldPackItemImages[definition.name] ?? heldPackItemImages[definition.icon] { return image }
+        if definition.name.hasPrefix("copper_"),
+           let iron = heldPackItemImages[definition.name.replacingOccurrences(of: "copper_", with: "iron_")] {
+            var pixels = iron.pixels
+            for i in stride(from: 0, to: pixels.count, by: 4) {
+                let r = Int(pixels[i]), g = Int(pixels[i+1]), b = Int(pixels[i+2])
+                if pixels[i+3] > 0, max(r,g,b) - min(r,g,b) < 44, r > 40 {
+                    pixels[i] = UInt8(min(255, r*115/100+20))
+                    pixels[i+1] = UInt8(g*65/100)
+                    pixels[i+2] = UInt8(b*42/100)
+                }
+            }
+            return RGBAImage(width: iron.width, height: iron.height, pixels: pixels)
+        }
+        return RGBAImage(width: 16, height: 16, pixels: itemIconPixels(definition.id, data))
+    }
+
     private func allocSlot(_ key: String, _ pixels: [UInt8]) -> (Int, Int)? {
         guard pixels.count == 1024 else { return nil }
         if let s = slots[key] { return s }

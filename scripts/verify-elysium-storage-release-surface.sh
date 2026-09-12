@@ -266,9 +266,18 @@ EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75
 # 491 smoke checks (only intentional zooStages updated), and a rendered debug-app pond test.
 # StorageEngine, Saves, GameCore, Player, both storage manifests, ElysiumTextInput and the
 # storage/text-input objects remain byte-identical; no persistence API or authority changed.
-EXPECTED_CORE_OBJECT_SHA256='fd850d2013fc8e293e9805dc6562b2d5e494ffba4d100d289bcc65ba20fd0cdb'
-EXPECTED_ELYSIUM_PRODUCT_SHA256='26a9d506fdb3db4d8254bc9ca20e573cee1d863a04b66891420fdfec3abf47f9'
-EXPECTED_SMOKE_PRODUCT_SHA256='e51eed27df113faaa10ea1872f228a5fde806fcbb65e29e3725d659fbfdcc130'
+# target-aware first-person geometry + upright bats: only Render/BatModel.swift and
+# Render/EntityModels2.swift change in Core (model geometry/UVs, not simulation or storage).
+# The native first-person Metal renderer, rig/target math and asset streams change Elysium;
+# elysmoke follows the relinked Core. Normalized with the same disposable-copy strip -S -x
+# path above. The seven reviewed source/manifest hashes and both Storage/TextInput object
+# hashes were independently compared and remain byte-identical. No capability pin changes.
+# Renewed from Core fd850d2013fc8e293e9805dc6562b2d5e494ffba4d100d289bcc65ba20fd0cdb,
+# Elysium 26a9d506fdb3db4d8254bc9ca20e573cee1d863a04b66891420fdfec3abf47f9,
+# smoke e51eed27df113faaa10ea1872f228a5fde806fcbb65e29e3725d659fbfdcc130.
+EXPECTED_CORE_OBJECT_SHA256='e5b22d1d1310976aff6b501ae8aca784799dfde54f31aa12a8426016498a3fa7'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='5ab8a16a1524fa5c1a72cb1511f553e8bd4f6d34501fe12c61baaa34be03e136'
+EXPECTED_SMOKE_PRODUCT_SHA256='f479f5f0a4bf0565a42c561ebab70f5533d57e0fac91f65ba220e0308b9c5cd7'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

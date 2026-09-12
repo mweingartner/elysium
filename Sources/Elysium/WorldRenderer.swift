@@ -1466,7 +1466,7 @@ final class WorldRenderer {
             pose.grazing = ent.data.grazing ?? false
             pose.sitting = (ent as? Mob)?.sitting ?? false
             pose.open = (ent as? Shulker)?.peekAmount ?? 0
-            pose.hanging = ent.type == "bat" && ent.onGround
+            pose.hanging = (ent as? Bat)?.hanging ?? (ent.data.hanging ?? false)
             pose.alpha = deathFlip > 0 ? 1 - deathFlip * 0.6 : 1
             enc.setDepthStencilState(depthWrite)
             entityRenderer.draw(enc, pipeline: packTargets ? entityPipelineHDR : entityPipeline, sampler: atlasSampler,
