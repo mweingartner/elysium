@@ -7,6 +7,15 @@ understand the relevant behavior, make the smallest coherent change, review the 
 the proportionate verification commands below, and report build, test, install, commit, push, and
 remote-parity states separately. Never commit around a failing hook.
 
+For completed Elysium implementation tasks, the user's standing closeout instruction is to deploy
+the verified production release to `/Applications/Elysium.app`, commit the task's changes locally,
+and push them to `main` at `https://github.com/mweingartner/elysium`. Perform all three without
+requiring another reminder unless the user requests a pause or a different delivery scope. Run the
+release pipeline and active hooks, verify installed identity and remote `main` parity, and preserve
+unrelated worktrees and stashes. A failing gate, dirty destination, or non-fast-forward conflict must
+be resolved safely or reported; this instruction does not authorize bypasses or destructive pushes.
+Read-only analysis/review tasks do not require a deployment or commit.
+
 Before editing, read the intent-shaping docs relevant to the task:
 
 - [README.md](/Users/mweingar/dev/elysium/README.md)
