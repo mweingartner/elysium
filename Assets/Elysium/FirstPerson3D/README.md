@@ -1,15 +1,33 @@
-# First-person runtime meshes
+# First-person special meshes and reference assets
 
-These are actual Blender-authored triangle meshes, not pre-rendered sprites. The
-game consumes `Sources/Elysium/FirstPersonModelAssets.swift`: embedded immutable
-Float32 data decoded once, independent of bundle paths or a Blender installation.
+The retained bow/shield anatomy uses these Blender-authored triangle meshes,
+not pre-rendered sprites. Ordinary held tools, food, and blocks draw no hand or
+arm: tools including pickaxes extrude active Faithful/resource-pack pixels, and
+blocks use the registered mesher. Existing native ranged/special meshes remain
+separate. The CC0 pickaxe and ordinary-tool grips here are historical reference
+assets, **not** ordinary runtime overrides.
+
+The game consumes the special meshes from `Sources/Elysium/FirstPersonModelAssets.swift`:
+embedded immutable Float32 data, independent of bundle paths or a Blender installation.
 The `.f32` exports and manifest permit a byte-level comparison with the embedded
 stream. The `.blend` is an editable isolated inspection scene. PNGs show model
 geometry and grip alignment; they are **not** runtime or gameplay proof.
 
+The ordinary redesign follows one directly inspected Minecraft 26.2 session:
+six held items plus pickaxe/sword/equip motion. Its approximately 0.20-second,
+target-independent primary cycle replaces the earlier visible-arm/exact-contact
+design. Bow/shield were unavailable in that session's hotbar/chest and are not
+claimed as compared matches. Their anatomy/ranged aim, the fixed 70-degree hand
+lens, empty-slot hiding, HUD occlusion, equipment lowering/raising, and existing
+360-degree equip flip remain separate retained behavior. The final ordinary poses,
+repeated pickaxe/sword strokes, release recovery, and empty slot were inspected in
+the native Elysium renderer; near/far trident charge/release also passed. No Mojang
+code or art was copied; see [ARCHITECTURE.md](../../../ARCHITECTURE.md#ordinary-item-redesign--direct-minecraft-262-comparison)
+for the superseding decision and bounded evidence.
+
 ## Source and reproducibility
 
-The pickaxe preserves the existing accepted tfwa.games [Voxel Tools](https://tfwagames.itch.io/voxel-tools)
+The historical pickaxe preserves the tfwa.games [Voxel Tools](https://tfwagames.itch.io/voxel-tools)
 mesh under [CC0-1.0](https://creativecommons.org/publicdomain/zero/1.0/), pinned by
 SHA-256 `3d3c188a832b80518f405f7ab95c7982d88cd482ac81fe9be4eb535e39269f1d`.
 No generated Meshy mesh, paid-generation credit, or external download is used.
@@ -36,7 +54,11 @@ The generator rejects a changed source hash, detached voxel components,
 degenerate triangles, and non-finite values. `manifest.json` records source,
 coordinate transformation, bounds, triangle counts, and binary/Swift hashes.
 
-## Grip and renderer contract
+## Retained mesh contract
+
+Bow/shield meshes and their segmented arms remain active. Ordinary pickaxe/haft
+dimensions and inspection assemblies below describe the superseded anatomical
+candidate; retaining their provenance does not make them current gameplay proof.
 
 - Every stream has ten little-endian Float32 values per vertex: position XYZ,
   flat outward normal XYZ, and **linear** RGBA. Triangles wind counter-clockwise
@@ -46,22 +68,22 @@ coordinate transformation, bounds, triangle counts, and binary/Swift hashes.
 - `pickaxe` is 0.85 units high, with the grip 15% up its height. Its reinforced
   lower handle is 0.10625 units wide. The accepted head is 0.57375 units wide.
   `pickaxe(material:)` provides wooden, stone, copper, iron, golden, diamond,
-  and netherite head palettes without modifying the wood or silhouette. Runtime
-  presentation applies the explicit 0.98/0.85 scale, then translates +0.05 in Y
-  so its pommel stays inside the fist rather than the independently bent wrist.
-- `hand` is separate from the arm, so grips can adapt to smaller handles without
-  resizing the tool or distorting the forearm. Its bore is approximately
+  and netherite head palettes without modifying the wood or silhouette. The
+  historical candidate applied 0.98/0.85 scale, then +0.05 in Y to keep its
+  pommel inside the fist. Ordinary pickaxes now use pack art instead.
+- `hand`, the historical ordinary-tool grip, is separate from the arm, so grips
+  can adapt to smaller handles without resizing the tool or distorting the forearm. Its bore is approximately
   ±0.064 in X/Z, fitting the 0.1225-wide reinforced pickaxe handle after the
-  runtime's explicit 0.98/0.85 uniform presentation scale. In the authored mesh,
+  historical candidate's 0.98/0.85 uniform presentation scale. In the authored mesh,
   curled fingers are on +Z and the back of the hand is on -Z. Runtime applies a
-  proper 180-degree Y rotation to holding hands **only**, so the back faces the
-  wearer without turning the item, changing handedness, or moving the grip and
+  proper 180-degree Y rotation to retained bow/shield holding hands **only**, so
+  the back faces the wearer without turning the item, changing handedness, or moving the grip and
   wrist anchors. The Blender previews apply the same hand-only attachment turn
   after export. The dedicated bow draw hook retains its own unrotated frame.
   The wrist overlaps the legacy arm
   over Y=-0.12...-0.08. There is no baked handle in either mesh.
-- `handNarrow` closes its fingers and palm around a rectangular bore of nominal
-  X±0.045, Z±0.025 for the measured 0.078–0.084-wide Faithful diagonal haft
+- `handNarrow`, retained for historical ordinary-tool inspection, closes around
+  a rectangular bore of nominal X±0.045, Z±0.025 for the measured 0.078–0.084-wide Faithful diagonal haft
   geometry and 0.045 extrusion depth. It preserves the wide hand's outer bounds and exact
   wrist join; do not scale the whole fist to tighten its grip. `grip-narrow.png`
   uses an inspection-only 0.08×0.045 shaft, which is not a runtime asset.
@@ -89,8 +111,8 @@ coordinate transformation, bounds, triangle counts, and binary/Swift hashes.
   unchanged through Y=-0.68; a same-width sleeve extension continues its shoulder
   direction below that point. This was an intermediate repair for a visible cap;
   the stream is now archived and is not used by the runtime. The focused
-  `FirstPersonArmViewportTests` exercises the replacement segmented rig, with
-  `FirstPersonRigTests` covering contact, joint continuity, and fixed bone lengths.
+  `FirstPersonArmViewportTests` exercises the segmented rig; older exact-contact
+  assertions document the superseded ordinary candidate, not current swing acceptance.
 - New runtime `forearm` and `upperArm` streams replace that archived one-piece
   arm with two rigid, independently posed segments. `forearm` has wrist joint
   `(0,0,0)` and elbow joint `(0,-0.40,0)`, with geometry over Y=-0.425...+0.025.
@@ -113,11 +135,12 @@ coordinate transformation, bounds, triangle counts, and binary/Swift hashes.
   to the wearer. The shield handle is roughly 0.06 wide; its fist must close more
   tightly than the reinforced pickaxe grip.
 
-At the reviewed export the segmented pickaxe/forearm/upper-arm/wide-hand assembly
+At the reviewed export the historical pickaxe/forearm/upper-arm/wide-hand assembly
 is 3,886 triangles (1,564 + 972 + 1,020 + 286 + 44 at the wrist joint).
 Each dedicated grip's exact count
 is recorded in `manifest.json`. The legacy one-piece arm
-remains available for archive tests but is not the new runtime rig. The rest of
+remains available for archive tests but is not the retained bow/shield runtime rig.
+This historical assembly count is not the ordinary item-only render cost. The rest of
 the rendering and animation system owns camera placement, lighting, material
 selection, mirrored left-hand transforms, action timing, occlusion, and empirical
 in-game review.

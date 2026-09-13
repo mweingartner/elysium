@@ -69,6 +69,33 @@ struct FirstPersonArmPose {
     }
 }
 
+/// Screen-space wield motion informed by the captured Minecraft 26.2 pickaxe
+/// sequence. The prop first comes inboard/up, sweeps downward and forward, then
+/// returns; it never stops on an invented contact point. Target selection and
+/// gameplay reach deliberately cannot enter this presentation-only API.
+enum FirstPersonSwing {
+    static func pose(rest: simd_float4x4, progress: Double?, action _: ViewmodelAction,
+                     left: Bool, reducedMotion: Bool) -> simd_float4x4 {
+        guard let progress, progress.isFinite, progress > 0, progress < 1 else { return rest }
+        let p = Float(progress)
+        let root = sqrt(p)
+        // The early inboard presentation and later downward sweep are offset in
+        // phase. A single analytic arc has no impact plateau or keyframe pause.
+        let inboard = sin(.pi * root)
+        let vertical = sin(2 * .pi * root)
+        let sweep = sin(.pi * p)
+        let turn = sin(.pi * p * p)
+        let side: Float = left ? -1 : 1
+        let amount: Float = reducedMotion ? 0.22 : 1
+        let offset = SIMD3<Float>(-side * 0.50 * inboard, 0.22 * vertical, -0.18 * sweep) * amount
+        let rotation = SIMD3<Float>(-1.20 * sweep, -side * 0.28 * turn,
+                                    side * 0.85 * inboard) * amount
+        // Translation is camera-relative and independent of the item's display
+        // scale; local rotation preserves the authored +Y shaft and grip origin.
+        return vmTranslation(offset) * rest * vmRotation(rotation)
+    }
+}
+
 enum FirstPersonStrike {
     static func aimedProp(rest: simd_float4x4, muzzle: SIMD3<Float>,
                           forward: SIMD3<Float>, target: SIMD3<Float>) -> simd_float4x4 {
@@ -133,44 +160,4 @@ enum FirstPersonStrike {
         }
     }
 
-    /// Keep the working end on the visible target ray at impact. This is a
-    /// reach-bounded viewmodel proxy, not an extension of gameplay reach.
-    static func pose(rest: simd_float4x4, progress: Double?, action: ViewmodelAction,
-                     workingPoint: SIMD3<Float>, target: SIMD3<Float>, reducedMotion: Bool) -> simd_float4x4 {
-        guard let progress, progress.isFinite, progress > 0, progress < 1 else { return rest }
-        let p = Float(progress)
-        let wind = rest * vmTranslation(SIMD3(0.035,0.10,0.035))
-            * vmRotation(SIMD3(0.24,-0.06,-0.16))
-        let desiredWrist: SIMD3<Float>
-        switch action {
-        case .cutting: desiredWrist = SIMD3(0.27,-0.24,-1.08)
-        case .digging: desiredWrist = SIMD3(0.22,-0.36,-1.12)
-        default: desiredWrist = SIMD3(0.24,-0.29,-1.13)
-        }
-        let direction = simd_normalize(target-desiredWrist)
-        let localAxis = simd_normalize(workingPoint)
-        func basis(axis: SIMD3<Float>, face: SIMD3<Float>) -> simd_float3x3 {
-            let front = simd_normalize(face-axis*simd_dot(face,axis))
-            return .init(columns:(simd_normalize(simd_cross(axis,front)),axis,front))
-        }
-        // Preserve a readable broad face, subject to honest foreshortening as
-        // the blade approaches the target. Never billboard the head separately.
-        let local = basis(axis:localAxis,face:SIMD3(0,0,1))
-        let desired = basis(axis:direction,face:SIMD3(0.18,0.08,1))
-        let rotation = desired * local.transpose
-        let contactPosition = target-rotation*workingPoint
-        let contact = vmTranslation(contactPosition) * simd_float4x4(simd_quatf(rotation))
-        func smooth(_ value: Float) -> Float { value*value*(3-2*value) }
-        func blend(_ a: simd_float4x4, _ b: simd_float4x4, _ t: Float) -> simd_float4x4 {
-            let pa = SIMD3(a.columns.3.x,a.columns.3.y,a.columns.3.z)
-            let pb = SIMD3(b.columns.3.x,b.columns.3.y,b.columns.3.z)
-            return vmTranslation(pa+(pb-pa)*t) * simd_float4x4(simd_slerp(simd_quatf(a),simd_quatf(b),t))
-        }
-        let result: simd_float4x4
-        if p < 0.24 { result = blend(rest,wind,smooth(p/0.24)) }
-        else if p < 0.43 { result = blend(wind,contact,smooth((p-0.24)/0.19)) }
-        else if p <= 0.49 { result = contact }
-        else { result = blend(contact,rest,smooth((p-0.49)/0.51)) }
-        return reducedMotion ? blend(rest,result,0.22) : result
-    }
 }

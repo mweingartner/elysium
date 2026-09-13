@@ -276,12 +276,14 @@ EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75
 # Elysium 26a9d506fdb3db4d8254bc9ca20e573cee1d863a04b66891420fdfec3abf47f9,
 # smoke e51eed27df113faaa10ea1872f228a5fde806fcbb65e29e3725d659fbfdcc130.
 EXPECTED_CORE_OBJECT_SHA256='e5b22d1d1310976aff6b501ae8aca784799dfde54f31aa12a8426016498a3fa7'
-# Closed-hand facing: only FirstPersonHandGrip's hand-only Y rotation and its renderer
-# call change the app binary. Renewed from 5ab8a16a1524fa5c1a72cb1511f553e8bd4f6d34501fe12c61baaa34be03e136
-# after a warning-free release build and 60 affected tests. Disposable-copy strip -S -x
-# verification confirms Core, Storage, TextInput, elysmoke and all runtime mesh streams
-# remain byte-identical; no simulation, storage, input or capability source changed.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72'
+# Minecraft-reference ordinary item presentation: only app-side renderer, placement,
+# rig and animation sources change the product. Renewed from
+# 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
+# release build, 73 affected tests, and native pose/swing/trident inspection.
+# Disposable-copy strip -S -x verification confirms Core, Storage, TextInput and
+# elysmoke remain byte-identical. No runtime mesh stream, simulation, storage,
+# input or capability source changed. See docs/first-person-minecraft-comparison.md.
+EXPECTED_ELYSIUM_PRODUCT_SHA256='19a57fadf1d25853560b5026f18a4192b17a75223548bb93d511583d8593afe2'
 EXPECTED_SMOKE_PRODUCT_SHA256='f479f5f0a4bf0565a42c561ebab70f5533d57e0fac91f65ba220e0308b9c5cd7'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'

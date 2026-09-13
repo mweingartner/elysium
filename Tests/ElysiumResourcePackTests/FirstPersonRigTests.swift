@@ -48,37 +48,43 @@ final class FirstPersonRigTests: XCTestCase {
         XCTAssertGreaterThan(tip.y,0.56)
     }
 
-    func testActualProngMeetsProjectedTargetAtNearFarAndDifferentFOVs() throws {
-        let tip = try authoredProng()
-        for fov in [50.0,70,110] {
-            var cam = CamState(); cam.fov = fov
-            for aspect: Float in [0.75,16.0/9,2.37] {
-                let rest = ViewmodelPlacement.grip(left:false,logicalWidth:960,aspect:aspect)
-                let projection = Elysium.mat4Perspective(fovYRad:70 * .pi/180,aspect:aspect,near:0.035,far:12)
-                for distance in [0.2,2.0,5] {
-                    let world = try XCTUnwrap(FirstPersonTarget.project(worldPoint:SIMD3(-0.03,0.02,distance),cam:cam,aspect:aspect))
-                    let proxy = try XCTUnwrap(FirstPersonTarget.viewmodelPoint(ndc:world.ndc,worldDepth:world.depth,
-                        depthRange:1.60...1.85,aspect:aspect))
-                    let impact = FirstPersonStrike.pose(rest:rest,progress:0.48,action:.mining,
-                        workingPoint:tip,target:proxy,reducedMotion:false)
-                    let actual = impact * SIMD4(tip,1)
-                    XCTAssertEqual(simd_distance(xyz(actual),proxy),0,accuracy:1e-5)
-                    let clip = projection * actual
-                    XCTAssertEqual(clip.x/clip.w,world.ndc.x,accuracy:1e-5)
-                    XCTAssertEqual(clip.y/clip.w,world.ndc.y,accuracy:1e-5)
-                    XCTAssertEqual(simd_determinant(impact),1,accuracy:1e-5)
-                }
-            }
+    func testCanonicalSwingMovesInboardThenDownAndNeverPinsAnImpactPose() throws {
+        registerAllBlocks(); registerAllItems()
+        let definition = itemDef(iid("iron_pickaxe"))
+        let pack = try XCTUnwrap(Self.faithfulPack)
+        let data = try XCTUnwrap(pack.file("assets/minecraft/textures/item/iron_pickaxe.png"))
+        let mesh = ViewmodelMesh.extruded(try XCTUnwrap(decodePNG(data)),profile:ViewmodelProfile.item(definition))
+        let tip = xyz(try XCTUnwrap(mesh.vertices.max { $0.position.y < $1.position.y }).position)
+        let rest = ViewmodelPlacement.item(definition,left:false,aspect:16.0/9)
+        func pose(_ progress: Double) -> simd_float4x4 {
+            FirstPersonSwing.pose(rest:rest,progress:progress,action:.mining,left:false,reducedMotion:false)
         }
-        let rest = ViewmodelPlacement.grip(left:false,logicalWidth:960,aspect:16.0/9)
-        let oldImpact = rest * vmTranslation(SIMD3(-0.15,-0.035,-0.24)) * vmRotation(SIMD3(-1,-0.10,0.18))
-        let projection = Elysium.mat4Perspective(fovYRad:70 * .pi/180,aspect:16.0/9,near:0.035,far:12)
-        let oldClip = projection * oldImpact * SIMD4(tip,1)
-        XCTAssertGreaterThan(simd_length(SIMD2(oldClip.x/oldClip.w,oldClip.y/oldClip.w)),0.05,
-                             "the frozen old stroke must demonstrably miss the real center target")
+        let presented = pose(0.0625), low = pose(0.5625), returning = pose(0.95)
+        XCTAssertLessThan(presented.columns.3.x,rest.columns.3.x-0.25)
+        XCTAssertGreaterThan(presented.columns.3.y,rest.columns.3.y+0.15)
+        XCTAssertLessThan(low.columns.3.y,rest.columns.3.y-0.15)
+        XCTAssertLessThan(low.columns.3.z,rest.columns.3.z-0.15)
+        XCTAssertLessThan(simd_distance(returning.columns.3,rest.columns.3),
+                          simd_distance(low.columns.3,rest.columns.3))
+        // Direct Minecraft observation supersedes the old policy that froze the
+        // working tip at a projected target throughout phases .43 through .49.
+        // Both the grip and actual tip must continue moving across that interval.
+        for (a,b) in [(0.43,0.46),(0.46,0.49)] {
+            XCTAssertGreaterThan(simd_distance(pose(a).columns.3,pose(b).columns.3),0.01)
+            XCTAssertGreaterThan(simd_distance(xyz(pose(a)*SIMD4(tip,1)),xyz(pose(b)*SIMD4(tip,1))),0.01)
+        }
+        func movesThroughFormerImpact(_ candidate: (Double) -> simd_float4x4) -> Bool {
+            simd_distance(candidate(0.43).columns.3,candidate(0.49).columns.3) > 0.02
+        }
+        XCTAssertTrue(movesThroughFormerImpact(pose))
+        XCTAssertFalse(movesThroughFormerImpact { _ in vmTranslation(SIMD3<Float>(0.24,-0.29,-1.13)) },
+                       "negative control: the old held contact keyframe fails the movement envelope")
+        // Target/FOV inputs are deliberately absent from the API. The tip may
+        // naturally cross the reticle during the arc; that is not a regression.
+        // Only adaptive target pinning and the fixed impact plateau are retired.
     }
 
-    func testFaithfulAxeAndSwordWorkingEdgesAreRealSurfacesAndReachImpact() throws {
+    func testFaithfulAxeAndSwordWorkingEdgesRemainRealSurfacesWithoutContactConstraint() throws {
         registerAllBlocks(); registerAllItems()
         let pack = try XCTUnwrap(Self.faithfulPack)
         for family in ["axe","sword"] {
@@ -87,25 +93,47 @@ final class FirstPersonRigTests: XCTestCase {
             let mesh = ViewmodelMesh.extruded(image,profile:ViewmodelProfile.item(definition))
             let edge = FirstPersonStrike.workingPoint(definition,mesh:mesh)
             XCTAssertTrue(liesOnTriangle(edge,mesh:mesh),"\(family) contact must be an actual exposed mesh surface")
-            let target = SIMD3<Float>(0.04,-0.03,-1.7)
-            let rest = ViewmodelPlacement.grip(left:false,logicalWidth:960,aspect:16.0/9)
-            let impact = FirstPersonStrike.pose(rest:rest,progress:0.48,action:ViewmodelProfile.item(definition).action,
-                workingPoint:edge,target:target,reducedMotion:false)
-            XCTAssertEqual(simd_distance(xyz(impact * SIMD4(edge,1)),target),0,accuracy:1e-5)
+            let rest = ViewmodelPlacement.item(definition,left:false,aspect:16.0/9)
+            let stroke = FirstPersonSwing.pose(rest:rest,progress:0.48,action:ViewmodelProfile.item(definition).action,
+                left:false,reducedMotion:false)
+            XCTAssertEqual(simd_distance(xyz(stroke * SIMD4(edge,1)),xyz(stroke.columns.3)),simd_length(edge),accuracy:1e-5)
             XCTAssertGreaterThan(simd_distance(edge,FirstPersonStrike.workingPoint(definition)),0.03,
                                  "fixture should expose the old guessed-edge discrepancy")
         }
     }
 
+    func testCanonicalSwingMirrorsWholeTransformAndPreservesAuthoredDisplayScale() {
+        registerAllBlocks(); registerAllItems()
+        let definition = itemDef(iid("iron_pickaxe"))
+        let reflection = simd_float4x4(diagonal:SIMD4(-1,1,1,1))
+        for scale: Float in [0.65,1,1.35] {
+            let rest = ViewmodelPlacement.item(definition,left:false,aspect:16.0/9) * vmScale(scale)
+            let mirroredRest = reflection * rest * reflection
+            for frame in 0...100 {
+                let progress = Double(frame)/100
+                let right = FirstPersonSwing.pose(rest:rest,progress:progress,action:.mining,left:false,reducedMotion:false)
+                let left = FirstPersonSwing.pose(rest:mirroredRest,progress:progress,action:.mining,left:true,reducedMotion:false)
+                let expectedLeft = reflection * right * reflection
+                for column in 0..<4 {
+                    XCTAssertEqual(simd_distance(left[column],expectedLeft[column]),0,accuracy:1e-5)
+                }
+                XCTAssertEqual(simd_determinant(right),scale*scale*scale,accuracy:1e-5)
+                XCTAssertEqual(simd_determinant(left),scale*scale*scale,accuracy:1e-5)
+                for column in 0..<3 {
+                    XCTAssertEqual(simd_length(xyz(right[column])),scale,accuracy:1e-5)
+                }
+            }
+        }
+    }
+
     func testTwoBoneRigPreservesLengthsAndSharedEndpointsThroughAllStrikePhases() throws {
-        let tip = try authoredProng()
         for left in [false,true] {
             for lift in [0.0,0.5,1] {
                 let rest = ViewmodelPlacement.grip(left:left,lift:lift,logicalWidth:960,aspect:16.0/9)
                 for action in ViewmodelAction.allCases {
                     for frame in 0...100 {
-                        let hand = FirstPersonStrike.pose(rest:rest,progress:Double(frame)/100,action:action,
-                            workingPoint:tip,target:SIMD3(0,0,-1.75),reducedMotion:false)
+                        let hand = FirstPersonSwing.pose(rest:rest,progress:Double(frame)/100,action:action,
+                            left:left,reducedMotion:false)
                         let rig = FirstPersonArmPose.solve(hand:hand,left:left)
                         XCTAssertEqual(simd_distance(rig.wrist,rig.elbow),0.40,accuracy:1e-5)
                         XCTAssertEqual(simd_distance(rig.elbow,rig.shoulder),0.45,accuracy:1e-5)
@@ -121,26 +149,22 @@ final class FirstPersonRigTests: XCTestCase {
         }
     }
 
-    func testEquipmentLiftCannotBeCancelledByTargetContact() throws {
+    func testEquipmentLiftRemainsFinalAndCannotBeCancelledBySwing() throws {
         let tip = try authoredProng()
-        let target = SIMD3<Float>(0.02,-0.01,-1.75)
-        let rest = ViewmodelPlacement.grip(left:false,logicalWidth:960,aspect:16.0/9)
+        registerAllBlocks(); registerAllItems()
+        let rest = ViewmodelPlacement.item(itemDef(iid("iron_pickaxe")),left:false,aspect:16.0/9)
         for progress in [0.0,0.24,0.43,0.48,0.49,0.85,1] {
-            let action = FirstPersonStrike.pose(rest:rest,progress:progress,action:.mining,
-                workingPoint:tip,target:target,reducedMotion:false)
+            let action = FirstPersonSwing.pose(rest:rest,progress:progress,action:.mining,
+                left:false,reducedMotion:false)
             for lift in [0.0,0.5,1] {
                 let displayed = FirstPersonStrike.equipmentPose(action,lift:lift)
                 let originalTip = xyz(action * SIMD4(tip,1))
                 let displayedTip = xyz(displayed * SIMD4(tip,1))
                 XCTAssertEqual(simd_distance(displayedTip,originalTip+SIMD3(0,-Float(lift)*1.25,0)),
-                               0,accuracy:1e-5,"equipment drop must survive contact and recovery")
+                               0,accuracy:1e-5,"equipment drop must survive the entire swing and recovery")
                 XCTAssertEqual(displayed.columns.0,action.columns.0)
                 XCTAssertEqual(displayed.columns.1,action.columns.1)
                 XCTAssertEqual(displayed.columns.2,action.columns.2)
-                if progress == 0.48 {
-                    XCTAssertEqual(displayedTip.y,target.y-Float(lift)*1.25,accuracy:1e-5,
-                                   "a fully lowered item must not jump back to the contact target")
-                }
             }
         }
         for lift in [-1.0,Double.nan,Double.infinity] {
@@ -150,16 +174,16 @@ final class FirstPersonRigTests: XCTestCase {
                        FirstPersonStrike.equipmentPose(rest,lift:1))
 
         // The helper must own the final screen-space drop in the real renderer,
-        // not only pass in isolation while target solving cancels the old rest lift.
+        // not only pass in isolation while another pose replaces the old rest lift.
         let root = URL(fileURLWithPath:#filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let source = try String(contentsOf:root.appendingPathComponent("Sources/Elysium/FirstPersonRenderer.swift"),encoding:.utf8)
             .filter { !$0.isWhitespace }
-        let poseCall = try XCTUnwrap(source.range(of:"varassembly=FirstPersonStrike.pose(rest:grip(left:false),"))
+        let poseCall = try XCTUnwrap(source.range(of:"varassembly=FirstPersonSwing.pose("))
         let dropCall = try XCTUnwrap(source.range(of:"assembly=FirstPersonStrike.equipmentPose(assembly,lift:main.lift)"))
-        let handCall = try XCTUnwrap(source.range(of:"arm(assembly,left:false,"))
+        let itemCall = try XCTUnwrap(source.range(of:"item(mainStack,transform:assembly"))
         XCTAssertLessThan(poseCall.lowerBound,dropCall.lowerBound)
-        XCTAssertLessThan(dropCall.lowerBound,handCall.lowerBound)
+        XCTAssertLessThan(dropCall.lowerBound,itemCall.lowerBound)
     }
 
     func testAimDepthSmoothsWithoutChangingProjectedTargetAndHandlesClockDiscontinuity() throws {
@@ -244,12 +268,11 @@ final class FirstPersonRigTests: XCTestCase {
         let renderer = try String(contentsOf:root.appendingPathComponent("Sources/Elysium/FirstPersonRenderer.swift"),encoding:.utf8)
             .filter { !$0.isWhitespace }
         XCTAssertTrue(renderer.contains(#"draw("hand:\(left):\(handGrip.rawValue)",handGrip.meshTransform(in:transform))"#))
-        let tip = try authoredProng()
         for left in [false,true] {
             let rest = ViewmodelPlacement.grip(left:left,logicalWidth:960,aspect:16.0/9)
             for progress in [0.0,0.24,0.43,0.48,0.49,0.85,1] {
-                let socket = FirstPersonStrike.pose(rest:rest,progress:progress,action:.mining,
-                    workingPoint:tip,target:SIMD3(0,0,-1.75),reducedMotion:false)
+                let socket = FirstPersonSwing.pose(rest:rest,progress:progress,action:.mining,
+                    left:left,reducedMotion:false)
                 let bones = FirstPersonArmPose.solve(hand:socket,left:left)
                 for (grip,_) in handMeshes {
                     let transform = grip.meshTransform(in:socket)
@@ -268,13 +291,13 @@ final class FirstPersonRigTests: XCTestCase {
         }
     }
 
-    func testAuthoredDorsalHandSurfaceFacesViewerAtIdleAndContactForBothHands() throws {
-        let tip = try authoredProng()
+    func testAuthoredDorsalHandSurfaceFacesViewerInRetainedIdleAndGuardPoses() throws {
         for left in [false,true] {
             let rest = ViewmodelPlacement.grip(left:left,logicalWidth:960,aspect:16.0/9)
-            for progress in [0.0,0.48] {
-                let socket = FirstPersonStrike.pose(rest:rest,progress:progress,action:.mining,
-                    workingPoint:tip,target:SIMD3(0,0,-1.75),reducedMotion:false)
+            // Ordinary held items no longer draw a fist. Preserve the facing
+            // contract only for the retained idle/guard hand presentation.
+            for guardAmount: Float in [0,1] {
+                let socket = rest * vmRotation(SIMD3(0,-0.30*guardAmount,0.10*guardAmount))
                 for (grip,source) in handMeshes where grip != .draw {
                     let mesh = left ? source.reflectedX() : source
                     let backZ = try XCTUnwrap(mesh.vertices.map(\.position.z).min())
@@ -286,7 +309,7 @@ final class FirstPersonRigTests: XCTestCase {
                     let normal = simd_normalize(xyz(transform * SIMD4(0,0,-1,0)))
                     let towardViewer = simd_normalize(-xyz(transform * SIMD4(center,1)))
                     XCTAssertGreaterThan(simd_dot(normal,towardViewer),0,
-                        "\(grip.rawValue), left=\(left), phase=\(progress): dorsal face must face the camera")
+                        "\(grip.rawValue), left=\(left), guard=\(guardAmount): dorsal face must face the camera")
                     let oldNormal = simd_normalize(xyz(socket * SIMD4(0,0,-1,0)))
                     let oldTowardViewer = simd_normalize(-xyz(socket * SIMD4(center,1)))
                     XCTAssertLessThan(simd_dot(oldNormal,oldTowardViewer),0,
@@ -313,12 +336,11 @@ final class FirstPersonRigTests: XCTestCase {
     }
 
     func testHandFacingTurnAndLeftReflectionPreserveActualTriangleWinding() throws {
-        let tip = try authoredProng()
         for left in [false,true] {
             let rest = ViewmodelPlacement.grip(left:left,logicalWidth:960,aspect:16.0/9)
             for progress in [0.0,0.48] {
-                let socket = FirstPersonStrike.pose(rest:rest,progress:progress,action:.mining,
-                    workingPoint:tip,target:SIMD3(0,0,-1.75),reducedMotion:false)
+                let socket = FirstPersonSwing.pose(rest:rest,progress:progress,action:.mining,
+                    left:left,reducedMotion:false)
                 for (grip,source) in handMeshes {
                     let mesh = left ? source.reflectedX() : source
                     let transform = grip.meshTransform(in:socket)

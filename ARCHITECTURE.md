@@ -123,73 +123,73 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
 
 ## Rendering
 
-First-person presentation uses `FirstPersonRenderer.swift` and `FirstPersonViewmodel.swift`, not
-layered pictures of an arm and tool. A camera-space Metal pass has its own cleared depth buffer and
-fixed 70-degree lens; it runs after world compositing and before every HUD element. The minimap and
-quickbar therefore occlude the hand without moving its shoulder. Empty hands emit no hand geometry;
-hidden GUI, third-person, and open screens suppress the entire first-person pass.
-Animation is presentation-only and cannot fire an arrow, consume an item, or alter combat/mining timing.
+First-person presentation uses `FirstPersonRenderer.swift` and `FirstPersonViewmodel.swift` in a
+camera-space Metal pass with an independent cleared depth buffer and fixed 70-degree lens. It runs
+after world compositing and before the HUD, so minimap/quickbar occlusion does not move held items.
+Empty slots emit no geometry; hidden GUI, third-person, and open screens suppress the whole pass.
+Presentation cannot fire projectiles, consume items, or alter combat/mining timing.
 
-The canonical socket is the origin, +Y follows the handle, and +Z points toward the player. The
-Blender-authored articulated arm, fitted fingers, pickaxe, and shield are genuine flat-shaded triangle meshes, embedded
-from reproducible, manifest-bound data in `Assets/Elysium/FirstPerson3D`. The accepted CC0 pickaxe
-silhouette is retained across material palettes. Other items extrude the actual native-resolution
-Faithful/resource-pack pixels with silhouette sidewalls, while placeable blocks reuse registered
-shape boxes and the current full-resolution block atlas. A diagonal source handle is straightened
-geometrically, never by resampling its image. Named shaft anchors are measured from the shipped art,
-including off-diagonal axe/shovel/hoe and fishing-rod handles. The crossbow and Flying Wand use native
-grip-aligned solids rather than extruding an already projected inventory icon. Stack-specific potion
-colours remain authoritative over an uncoloured pack bottle. Opaque depth-tested fingers wrap the real handle; there
-is no separate painted hilt. Left arm geometry has corrected winding after reflection; item transforms
-remain positive-determinant and the shield's rear grip faces the wearer. GPU meshes are immutable,
-cached with a 24-entry bound, and discarded on resource-pack generation changes.
-Closed holding-hand meshes receive a proper local Y half-turn at their shared socket: their
-authored finger-pad side points away from the wearer and their dorsal side toward the wearer.
-This correction is separate from the item transform and arm IK; it preserves the fitted shaft bore,
-grip origin, wrist anchor, and handedness. The bow's right-hand string hook is not a closed holding
-grip and keeps its original contact frame. Facing-direction tests cover both hands at rest and strike.
-The forearm and upper arm have separate wrist/elbow/shoulder joints and fixed bone lengths; the
-hand/tool socket no longer rotates the complete arm as one board. Pickaxe, flat-haft, bow, and shield
-grips have distinct fitted bores. The native pickaxe is explicitly scaled from its 0.85-unit source
-height to the intended 0.98-unit display height, without altering its accepted shape or palette.
+Ordinary held tools, food, and blocks render **without a visible hand or arm**. Ordinary tool art,
+including pickaxes, comes from active native-resolution Faithful/resource-pack pixels extruded with
+silhouette sidewalls; the retained CC0 pickaxe mesh is not a runtime override. Placeable blocks reuse
+the registered mesher and current full-resolution atlas. Source handle alignment is geometric, not
+image resampling; stack-specific potion colours remain authoritative. Dedicated ranged/special
+native paths remain separate. GPU geometry is immutable, cached with a 24-entry bound, and discarded
+when the resource-pack generation changes.
 
-Action families distinguish mining/chopping, sword cuts, digging, placement, and consumption.
-`FirstPersonAnimation.swift` owns the shared action, equipment-swap, and relaxation timelines. A
-continuous windup/strike/recovery timeline repeats while primary input is held and finishes the active
-stroke on release. Equipment lowers before swapping and raises afterward; a whole-prop shaft-axis
-twirl is cosmetic and yields to real actions and Reduce Motion. The bow has a distinct left-hand aim
-pose, flexing limbs, a shared string/nock/draw-hand position, a right-shoulder return, and an arrow
-aligned toward the crosshair. Gameplay remains owned by the existing use/release path.
+`FirstPersonSwing` provides the canonical target-independent ordinary swing;
+`FirstPersonAnimation.swift` owns continuous input timing, equipment swaps, and relaxation. Primary
+input repeats an approximately 0.20-second cycle and release completes the active cycle. This is an
+observational timing choice, not an extracted Minecraft engine constant. Ordinary swings do not solve
+a working point against the selected block/entity. Equipment still lowers before replacement and
+raises afterward. The previously requested cosmetic 360-degree equip flip is retained;
+it yields to real actions and Reduce Motion and was not established by the Minecraft comparison.
 
-### First-person design decision — September 12, 2026
+Bow and shield anatomy is retained: fixed-length forearm/upper-arm segments, a closed wrist joint,
+fitted holding grips, and a separate hooked right-hand bow-string contact. Closed grips receive the
+hand-only local Y half-turn; the draw hook retains its own contact frame. Shield rear grip remains
+toward the wearer and its protective face outward. These paths, plus ranged aiming, were not redesigned
+from the ordinary-item comparison.
 
-Repeated reports of fragments, detached grips, incorrect angles and left-hand facing ruled out further
-2D offset tuning. Keeping baked sprites would be cheaper, but cannot expose consistent surfaces during
-3D rotation. The selected alternative is bounded runtime geometry; the accepted downside is another
-small render pass and cached meshes. Acceptance requires a coherent grip at idle/windup/contact/recovery,
-readable tool size, no empty-hand remnants, correct shield rear/front and two-handed bow release,
-plus HUD occlusion at small/wide layouts. Unit geometry assertions are necessary but do not replace
-native rendered sequences. Revisit if measured frame cost or the live grip/near-plane checks fail.
+`FirstPersonTarget` remains read-only for ranged presentation: it selects the simulation-eye hit,
+projects through the same interpolated/bobbed `CamState` as the world, and maps that screen point into
+the independent hand lens. Bow arrows and crossbow/charging-trident poses retain target convergence;
+the analytic muzzle/tip solve includes the offset from the grip. A charging trident uses at least
+three units of presentation depth, and depth changes ease over 60ms. These are bounded presentation
+proxies, not extra gameplay reach. Portal post-processing intentionally distorts the world after
+projection; exact alignment during that warp is not promised.
 
-**Perspective correction prompted by visual feedback:** the first native candidate passed geometry
-tests but still struck beside the crosshair. A projection probe using its actual pickaxe vertices put
-the entire prop at x586–693/y319–432 in a 960×540 contact frame, missing the crosshair at (480,270).
-That invalidated the fixed-pose acceptance assumption. `FirstPersonTarget` now selects the actual
-simulation-eye block/entity hit and projects it through the exact interpolated, bobbed `CamState`
-used for world rendering. It maps that screen point into the independent hand lens, preserving
-perspective across world FOV and aspect changes. `FirstPersonStrike` solves the actual working edge
-against a bounded presentation-depth target; the hand remains attached to the same tool socket.
-This is screen-space contact, **not** a claim that a short pickaxe physically reaches a block several
-metres away, and it does not extend gameplay reach. Bow geometry converges toward the selected hit
-rather than a hard-coded eight-unit point. Crossbow and charging-trident poses analytically align the
-actual muzzle/tip ray, including its offset from the grip. Ranged aim takes precedence over melee
-contact; a long trident uses a minimum three-unit presentation depth so its target stays ahead of
-its tip. Depth changes ease over 60ms without moving the projected
-target. The shield remains a protective pose rather than following the mining point. Active portal
-post-processing intentionally distorts the world after geometric projection; exact contact during
-that warp is not promised. Reduced Motion deliberately limits swing excursion.
+### Ordinary-item redesign — direct Minecraft 26.2 comparison
 
-Ten primary references informed this design (behavioral conventions, not copied implementation):
+The direct primary reference is **one running Minecraft 26.2 session**, with six held items inspected
+and pickaxe, sword, and equipment-change motion observed. Its ordinary held items had no visible
+holding hand/arm. This supports the item-only silhouette and canonical repeated swing used here,
+not a claim of exhaustive Minecraft/version parity. Neither the inspected hotbar nor chest contained
+a bow or shield, so their retained Elysium anatomy is **not** claimed as a compared match.
+No Mojang assets or source code were copied. The redesigned native Metal renderer was inspected with
+pickaxe, axe, shovel, sword, bread, a block, and an empty slot; repeated pickaxe/sword strokes and
+release recovery were checked. Faithful silhouettes remain crisp and connected, with deliberate
+edge cropping and HUD occlusion. Trident charge/release was also checked at near/far targets after
+preserving its ordinary rest origin. See [comparison and verification notes](docs/first-person-minecraft-comparison.md)
+for the tested build and the limits of this evidence. Native review does not imply user aesthetic
+approval or exact parity with every Minecraft item, version, or animation.
+
+This explicitly supersedes the earlier ordinary-item decisions to expose anatomical grips, override
+pickaxes with the CC0 mesh, and force an exact projected contact point. Retained Blender assets,
+technical references, and earlier test/capture records remain useful history, not acceptance evidence
+for the replacement ordinary swing.
+
+### Historical first-person experiments — superseded for ordinary items
+
+The earlier visible-arm candidate used true runtime geometry to address sprite fragments and grip
+angles. A projection probe then exposed a separate contact error: at 960×540 its pickaxe occupied
+x586–693/y319–432 while the crosshair was at (480,270). A target-aware edge solver corrected that
+screen-space discrepancy; it never made a short tool physically reach a distant block. The later
+direct Minecraft comparison changed the intended ordinary-item behavior, so that solver and its
+contact acceptance criterion no longer govern ordinary swings. The ranged projection and bow/shield
+rig work remain applicable to their retained paths.
+
+Ten primary references informed the earlier design (background conventions, not copied implementation):
 [Minecraft attachments](https://learn.microsoft.com/en-us/minecraft/creator/documents/attachables?view=minecraft-bedrock-stable),
 [per-hand display transforms](https://learn.microsoft.com/en-us/minecraft/creator/reference/content/blockreference/examples/itemdisplaytransforms?view=minecraft-bedrock-stable),
 [first-person animation layers](https://github.com/Mojang/bedrock-samples/blob/main/resource_pack/animations/player_firstperson.animation.json),
@@ -211,16 +211,17 @@ Eight additional primary technical references informed the perspective/rig corre
 [independent first-person rendering](https://dev.epicgames.com/documentation/unreal-engine/first-person-rendering),
 and [perspective projection derivation](https://www.scratchapixel.com/lessons/3d-basic-rendering/perspective-and-orthographic-projection-matrix/opengl-perspective-projection-matrix.html).
 The reviewed Mojang/Luanti attack curves establish stylized swing conventions, not literal
-working-tip contact; Elysium's target-aware edge solver is an explicit design inference beyond them.
+working-tip contact; the superseded ordinary edge solver was an Elysium design inference beyond them.
 
-Verification for this change: 116 distinct affected XCTest cases passed (114-case affected run plus
+Historical verification of that candidate, not the replacement ordinary-item design: 116 distinct
+affected XCTest cases passed (114-case affected run plus
 two new aiming regressions, with all eight rig cases rerun after the analytic correction), and the
 production build passed with warnings treated as errors. The unchanged simulation contract passed
 491 goldens; the source/security and asset-integrity checks also passed. Native Metal captures
 confirmed repeated pickaxe contact at 70° and 110° world FOV, closed wrist joins, near/far bow aim and
 release, shield rear-facing grip, crossbow/trident orientation, empty-hand cleanup, and HUD occlusion.
-Earlier native item-family and upright flying-bat inspections remain applicable to their unchanged
-meshes. Aspect extremes and folded bat roost are covered mathematically, not claimed as native
+The earlier ordinary item-family captures are superseded; upright flying-bat inspection remains
+applicable to its unchanged mesh. Aspect extremes and folded bat roost were covered mathematically, not as native
 playtests; no sustained performance benchmark or user aesthetic acceptance is claimed. The disposable
 debug world was deleted and its original FOV restored. Applications deployment and Git publication
 are separate from this local build/verification result.

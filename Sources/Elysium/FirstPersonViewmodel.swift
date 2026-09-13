@@ -44,15 +44,15 @@ struct ViewmodelProfile {
         }
         let family = definition.tool?.type ?? ""
         switch family {
-        case "pickaxe": return .init(action: .mining, length: 0.98, grip: .init(0.2, 0.8), straighten: .pi / 4)
+        case "pickaxe": return .init(action: .mining, length: 1.35, grip: .init(0.2, 0.8), straighten: .pi / 4)
         // Faithful haft pixels are centred on x+y=1.0625, not the canvas diagonal.
         // This perpendicular offset puts the actual wood through the socket.
-        case "axe": return .init(action: .chopping, length: 0.88, grip: .init(0.24125, 0.82125), straighten: .pi / 4)
-        case "shovel": return .init(action: .digging, length: 0.94, grip: .init(0.24125, 0.82125), straighten: .pi / 4)
-        case "hoe": return .init(action: .digging, length: 0.88, grip: .init(0.24125, 0.82125), straighten: .pi / 4)
-        case "sword": return .init(action: .cutting, length: 1.02, grip: .init(0.23, 0.77), straighten: .pi / 4)
+        case "axe": return .init(action: .chopping, length: 1.35, grip: .init(0.24125, 0.82125), straighten: .pi / 4)
+        case "shovel": return .init(action: .digging, length: 1.35, grip: .init(0.24125, 0.82125), straighten: .pi / 4)
+        case "hoe": return .init(action: .digging, length: 1.35, grip: .init(0.24125, 0.82125), straighten: .pi / 4)
+        case "sword": return .init(action: .cutting, length: 1.50, grip: .init(0.23, 0.77), straighten: .pi / 4)
         default:
-            if definition.food != nil { return .init(action: .eating, length: 0.42, grip: .init(0.5, 0.78), straighten: 0) }
+            if definition.food != nil { return .init(action: .eating, length: 0.90, grip: .init(0.5, 0.78), straighten: 0) }
             if definition.block != nil { return .init(action: .placing, length: 0.38, grip: .init(0.5, 0.8), straighten: 0) }
             let compact = ["shears", "flint_and_steel"].contains(definition.name)
             return .init(action: .generic, length: compact ? 0.48 : 0.55,
@@ -75,6 +75,37 @@ func vmRotation(_ angles: SIMD3<Float>) -> simd_float4x4 {
 }
 
 enum ViewmodelPlacement {
+    /// Item-only pose measured against the running Minecraft reference. The
+    /// shaft enters at the outer lower edge and leans away from screen centre;
+    /// no anatomical wrist or elbow constrains the ordinary item silhouette.
+    static func item(_ definition: ItemDef, left: Bool, lift: Double = 0,
+                     aspect: Float, bob: SIMD3<Float> = .zero) -> simd_float4x4 {
+        let sign: Float = left ? -1 : 1
+        let block = definition.block != nil
+        let food = definition.food != nil
+        let depth: Float = block ? 0.72 : (food ? 1.05 : 1.10)
+        let halfHeight = depth * tan(35 * Float.pi / 180)
+        // Blade, head and food silhouettes need distinct screen placement,
+        // not an attempt to keep an invisible fist
+        // at one fixed screen coordinate. Intentional right/bottom cropping
+        // remains, but the useful head/blade must not disappear past the edge.
+        let sword = definition.tool?.type == "sword" && definition.name != "flying_wand"
+        let x: Float = block ? 0.88 : (food ? 0.94 : (sword ? 0.88 : 0.85))
+        let y: Float = block ? 1.24 : (food ? 0.90 : 1.04)
+        let safeAspect = aspect.isFinite && aspect > 0 ? aspect : 16.0/9
+        let drop = lift.isFinite ? Float(min(1,max(0,lift))) * 1.25 : 0
+        // Keep the edge inset in viewport-height units: a fixed normalized X
+        // clips more of a long blade when the window becomes narrower.
+        let horizontal = halfHeight * max(safeAspect*0.2, safeAspect-2*(1-x)*(16.0/9))
+        let position = SIMD3(sign*horizontal,
+                             (1-y*2)*halfHeight-drop,-depth) + bob
+        // Food has no straightened shaft. Its diagonal source silhouette needs
+        // the opposite cant to stand up like the reference instead of flattening.
+        let angles = block ? SIMD3<Float>(0.12,sign*0.45,0)
+            : SIMD3<Float>(-0.08,-sign*0.55,sign*(food ? 0.35 : -0.43))
+        return vmTranslation(position) * vmRotation(angles)
+    }
+
     static func grip(left: Bool, lift: Double = 0, logicalWidth: Double,
                      aspect: Float, bob: SIMD3<Float> = .zero) -> simd_float4x4 {
         let h: Float = 1.35 * tan(35 * .pi/180)

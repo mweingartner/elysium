@@ -142,7 +142,8 @@ either hand, lights the area around you, so a pickaxe in the right hand and a to
 you mine without placing torches first. With a shield in the off hand and a sword, mace, or empty
 main hand, holding the **use** action raises the shield: while raised it blocks a frontal melee or
 projectile hit outright, including its knockback, but not attacks from the side or behind, falling,
-fire, or other environmental damage. Held tools stand upright in the fist, gripped by the handle.
+fire, or other environmental damage. Ordinary tools use detailed, extruded resource-pack art
+without a visible holding hand; bows and shields retain their specialized hand animations.
 
 ### Fixed mouse and application shortcuts
 
@@ -199,9 +200,11 @@ live map or renaming a saved world.
 The HUD keeps the crosshair, hotbar, health, hunger, armor, experience, status information, and compact
 live map visible during play. It also shows air while submerged, RPG quick slots when available, and
 the health of a living mount while you ride it. Your inventory exposes the equipped armor and offhand
-slots. In first person, your lower-right arm remains connected to the bottom edge with an empty hand;
-a selected main-hand item is shown at a readable size with its handle under the hand's grip, and distinct
-attack/use poses make swings and tool actions easier to recognize. The earned part
+slots. In first person, ordinary tools, food, and blocks enter from the lower outer edge without a
+visible arm; an empty slot draws nothing. Holding the attack button repeats the tool stroke, and
+release lets the active stroke finish. Equipment lowers before a replacement rises, with a cosmetic
+whole-item twirl that yields to actions and Reduce Motion. The minimap covers overlapping items
+without moving them. The earned part
 of the experience bar reveals a fixed red-to-violet rainbow as it fills; its length and centered level
 number remain the non-color progress cues. Use `F1` when you want an unobstructed view and `F3` when you
 need the debug overlay.

@@ -27,6 +27,11 @@ final class FirstPersonViewmodelTests: XCTestCase {
 
     private func xyz(_ v: SIMD4<Float>) -> SIMD3<Float> { SIMD3(v.x, v.y, v.z) }
 
+    private func ordinaryRest(left: Bool = false) -> simd_float4x4 {
+        registerAllBlocks(); registerAllItems()
+        return ViewmodelPlacement.item(itemDef(iid("iron_pickaxe")),left:left,aspect:16.0/9)
+    }
+
     private func assertValidTriangles(_ mesh: ViewmodelMesh, label: String,
                                       file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertFalse(mesh.vertices.isEmpty, label, file: file, line: line)
@@ -187,56 +192,59 @@ final class FirstPersonViewmodelTests: XCTestCase {
         }
     }
 
-    func testActionCurvesHaveSafeEndpointsForwardContactAndRecovery() {
-        let rest = ViewmodelPlacement.grip(left: false, logicalWidth: 960, aspect: 16.0/9)
-        let working = SIMD3<Float>(-0.31,0.56,0), target = SIMD3<Float>(0,0,-1.75)
+    func testActionCurvesHaveSafeEndpointsInboardSweepAndRecovery() {
+        let rest = ordinaryRest()
         func pose(_ progress: Double?, _ action: ViewmodelAction) -> simd_float4x4 {
-            FirstPersonStrike.pose(rest: rest, progress: progress, action: action,
-                                   workingPoint: working, target: target, reducedMotion: false)
+            FirstPersonSwing.pose(rest: rest, progress: progress, action: action,
+                                  left: false, reducedMotion: false)
         }
         for action in ViewmodelAction.allCases {
             for progress in [nil, -1, 0, 1, 2, Double.nan, .infinity] as [Double?] {
                 XCTAssertEqual(pose(progress, action), rest)
             }
-            let windup = pose(0.24, action), contact = pose(0.48, action), recovery = pose(0.85, action)
-            XCTAssertGreaterThan(windup.columns.3.z, rest.columns.3.z)
-            XCTAssertEqual(simd_distance(xyz(contact * SIMD4(working,1)), target), 0, accuracy: 1e-6)
+            let presentation = pose(0.0625, action), slash = pose(0.5625, action), recovery = pose(0.95, action)
+            XCTAssertLessThan(presentation.columns.3.x, rest.columns.3.x)
+            XCTAssertGreaterThan(presentation.columns.3.y, rest.columns.3.y)
+            XCTAssertLessThan(slash.columns.3.y, rest.columns.3.y)
+            XCTAssertLessThan(slash.columns.3.z, rest.columns.3.z)
             XCTAssertLessThan(simd_distance(recovery.columns.3, rest.columns.3),
-                              simd_distance(contact.columns.3, rest.columns.3))
+                              simd_distance(slash.columns.3, rest.columns.3))
         }
     }
 
     func testEveryActionIsContinuousAtPhaseBoundariesAndLoopSeam() {
-        let rest = ViewmodelPlacement.grip(left: false, logicalWidth: 960, aspect: 16.0/9)
+        let rest = ordinaryRest()
         func pose(_ progress: Double, _ action: ViewmodelAction) -> simd_float4x4 {
-            FirstPersonStrike.pose(rest: rest, progress: progress, action: action,
-                workingPoint: SIMD3(-0.31,0.56,0), target: SIMD3(0,0,-1.75), reducedMotion: false)
+            FirstPersonSwing.pose(rest: rest, progress: progress, action: action,
+                                 left: false, reducedMotion: false)
         }
         func distance(_ a: simd_float4x4, _ b: simd_float4x4) -> Float {
             (0..<4).reduce(0) { $0 + simd_distance(a[$1],b[$1]) }
         }
         for action in ViewmodelAction.allCases {
-            for boundary in [0.24, 0.43, 0.49] {
-                XCTAssertLessThan(distance(pose(boundary - 0.000001,action), pose(boundary + 0.000001,action)), 0.00001)
+            for boundary in [0.0625, 0.24, 0.43, 0.49, 0.5625, 0.95] {
+                XCTAssertLessThan(distance(pose(boundary - 0.000001,action), pose(boundary + 0.000001,action)), 0.0001)
             }
-            XCTAssertLessThan(distance(pose(0.000001,action), pose(0.999999,action)), 0.00001)
+            // The observed stroke begins quickly, unlike the previous zero-speed
+            // windup. It is position-continuous without a fixed impact plateau.
+            XCTAssertLessThan(distance(pose(0.00000001,action), pose(0.99999999,action)), 0.001)
             var previous = pose(0,action)
             for frame in 1...1200 {
                 let next = pose(Double(frame) / 1200,action)
-                XCTAssertLessThan(distance(previous,next), 0.06)
+                XCTAssertLessThan(distance(previous,next), frame == 1 ? 0.3 : 0.12)
                 previous = next
             }
         }
     }
 
     func testReducedMotionPreservesForwardActionWithSmallerExcursion() {
-        let rest = ViewmodelPlacement.grip(left: false, logicalWidth: 960, aspect: 16.0/9)
+        let rest = ordinaryRest()
         for action in ViewmodelAction.allCases {
             for progress in [0.12, 0.24, 0.36, 0.48, 0.75] {
-                let full = FirstPersonStrike.pose(rest: rest, progress: progress, action: action,
-                    workingPoint: SIMD3(-0.31,0.56,0), target: SIMD3(0,0,-1.75), reducedMotion: false)
-                let reduced = FirstPersonStrike.pose(rest: rest, progress: progress, action: action,
-                    workingPoint: SIMD3(-0.31,0.56,0), target: SIMD3(0,0,-1.75), reducedMotion: true)
+                let full = FirstPersonSwing.pose(rest: rest, progress: progress, action: action,
+                    left: false, reducedMotion: false)
+                let reduced = FirstPersonSwing.pose(rest: rest, progress: progress, action: action,
+                    left: false, reducedMotion: true)
                 let expected = rest.columns.3 + (full.columns.3-rest.columns.3)*0.22
                 XCTAssertEqual(simd_distance(reduced.columns.3, expected), 0, accuracy: 1e-6)
                 XCTAssertLessThan(simd_length((simd_quatf(rest).inverse * simd_quatf(reduced)).imag),
@@ -296,28 +304,31 @@ final class FirstPersonViewmodelTests: XCTestCase {
         }
     }
 
-    func testAuthoredAssemblyStaysSafelyBeyondNearPlaneDuringAllActions() {
-        let hand = ViewmodelMesh(FirstPersonModelAssets.hand)
-        let pickaxe = ViewmodelMesh(FirstPersonModelAssets.pickaxe)
-        let forearm = ViewmodelMesh(FirstPersonModelAssets.forearm)
-        let upperArm = ViewmodelMesh(FirstPersonModelAssets.upperArm)
-        for left in [false, true] {
-            let grip = ViewmodelPlacement.grip(left: left, logicalWidth: 960, aspect: 16.0 / 9)
-            for action in ViewmodelAction.allCases {
+    func testOrdinaryHeldPropStaysSafelyBeyondNearPlaneDuringAllActions() throws {
+        registerAllBlocks(); registerAllItems()
+        let pack = try XCTUnwrap(Self.faithfulPack)
+        for name in ["iron_pickaxe","iron_axe","iron_shovel","iron_hoe","iron_sword","apple","bread","stone"] {
+            let definition = itemDef(iid(name))
+            let mesh: ViewmodelMesh
+            if let block = definition.block { mesh = .block(Int(block)) }
+            else {
+                let data = try XCTUnwrap(pack.file("assets/minecraft/textures/item/\(name).png"))
+                mesh = .extruded(try XCTUnwrap(decodePNG(data)),profile:ViewmodelProfile.item(definition))
+            }
+            let positions = Set(mesh.vertices.map(\.position))
+            XCTAssertFalse(positions.isEmpty)
+            for left in [false,true] {
+                let grip = ViewmodelPlacement.item(definition,left:left,aspect:16.0/9)
+                let action = ViewmodelProfile.item(definition).action
                 for frame in 0...60 {
-                    let transform = FirstPersonStrike.pose(rest: grip, progress: Double(frame)/60, action: action,
-                        workingPoint: SIMD3(-0.31,0.56,0), target: SIMD3(0,0,-1.75), reducedMotion: false)
-                    let bones = FirstPersonArmPose.solve(hand: transform, left: left)
-                    let meshes = [(hand,transform),(pickaxe,transform * vmScale(0.98/0.85)),
-                                  (forearm,bones.forearm),(upperArm,bones.upperArm)]
+                    let transform = FirstPersonSwing.pose(rest: grip, progress: Double(frame)/60, action: action,
+                        left: left, reducedMotion: false)
                     var nearestZ: Float = -.infinity
-                    for (mesh,matrix) in meshes {
-                        for vertex in mesh.vertices {
-                            nearestZ = max(nearestZ, (matrix * vertex.position).z)
-                        }
+                    for position in positions {
+                        nearestZ = max(nearestZ,(transform * position).z)
                     }
                     XCTAssertLessThan(nearestZ, -0.06,
-                                      "\(action), frame \(frame), left=\(left): geometry risks camera/near-plane fragments")
+                                      "\(name), frame \(frame), left=\(left): geometry risks camera/near-plane fragments")
                 }
             }
         }

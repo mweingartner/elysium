@@ -220,21 +220,19 @@ The compact lower-right minimap follows the open cavern around you in the Nether
 sealed ceiling. To reclaim that HUD space, turn off **Options... → Video → Show Minimap**; the
 expanded map opened with `M` remains available.
 
-An empty main hand draws no arm or hand; separately equipped off-hand items remain visible.
-Held equipment now renders as depth-tested 3D geometry beneath the HUD, so the minimap and quickbar
-cover overlapping hands. Blender-authored arms, pickaxes, and shields share a physical grip; other
-items preserve native-resolution Faithful/resource-pack pixels with extruded edges, and blocks use
-their registered 3D shapes. Tool handles align through the fingers without a separate painted hilt,
-and shields keep their rear grip toward the wearer and their protective face outward.
-An articulated elbow connects each wrist to its shoulder. Strikes bring the tool's actual working
-edge toward the selected target in perspective; bow aiming follows the selected hit distance.
-The hand camera preserves item readability when world FOV changes, without extending attack reach.
+Ordinary held tools, food, and blocks appear without a visible hand or arm; an empty slot draws
+nothing. Ordinary tools, including pickaxes, use the active Faithful 64x/resource-pack pixels with
+extruded edges instead of a separate pickaxe model. Blocks use their registered 3D geometry.
+The depth-tested first-person pass retains a fixed 70-degree lens beneath the HUD, so the minimap
+and quickbar cover overlapping equipment without world-FOV changes shrinking it.
 
-Action-specific motion covers mining and chopping, sword cuts, digging, placement, and eating.
-Primary strokes repeat continuously while the mouse button is held and complete their active arc after release.
+The ordinary primary swing repeats continuously while the mouse button is held, completes its
+active cycle after release, and does not steer toward a selected block or entity. Its approximately
+0.20-second cycle follows the observed Minecraft reference rather than physical tip-to-target contact.
 Changing equipment lowers the outgoing item before raising the replacement; the cosmetic equip
-twirl rotates the whole prop and yields to actions and Reduce Motion. Bows and shields are presented
-in the left hand. **G** and **H** toggle a torch or a shield from the inventory into the
+twirl rotates the whole prop and yields to actions and Reduce Motion. Bows and shields retain their
+separate anatomical presentation in the left hand, including the bow's right-hand draw and the
+shield's outward protective face. **G** and **H** toggle a torch or a shield from the inventory into the
 off hand and back, so you can carry a pickaxe and a torch
 to mine with light, or a sword and a shield to fight defensively; a held torch in either hand casts
 a soft, flickering warm light on the world around you. Holding use with a bow raises it, brings the
@@ -394,7 +392,7 @@ Report suspected security vulnerabilities privately using [SECURITY.md](SECURITY
 
 - **Starting point:** Elysium began from [thebriangao/pebble](https://github.com/thebriangao/pebble), created by Brian Gao. Its open-source Swift and Metal codebase provided the foundation from which Elysium evolved. The inherited MIT copyright and permission notice are preserved in [LICENSE](LICENSE).
 - **Textures:** the bundled [Faithful 64x](https://faithfulpack.net/faithful64x) texture set is the work of the Faithful team and its contributors. The reviewed [Ore Borders 64x](https://faithfulpack.net/addons/OreBorders64x) and [Static Lanterns](https://faithfulpack.net/addons/ClearerLanterns) add-ons remain separate, optional layers. They are distributed under the separate [Faithful License](packaging/FAITHFUL-LICENSE.txt), with archive hashes and exact add-on attribution in [FAITHFUL-ADDONS-CREDITS.txt](packaging/FAITHFUL-ADDONS-CREDITS.txt), and are not covered by Elysium's MIT license.
-- **Held pickaxe geometry:** the runtime 3D pickaxe family derives from [tfwa.games Voxel Tools](https://tfwagames.itch.io/voxel-tools), distributed under [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/). Elysium pins the source geometry and generated mesh data by SHA-256; details and reproducible commands are in [Assets/Elysium/FirstPerson3D/README.md](Assets/Elysium/FirstPerson3D/README.md).
+- **Historical pickaxe geometry:** the retained reference model derives from [tfwa.games Voxel Tools](https://tfwagames.itch.io/voxel-tools), distributed under [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/). It no longer overrides ordinary held pickaxes, which use the active resource pack. Source hashes, historical inspection assets, and the current bow/shield mesh contract remain documented in [Assets/Elysium/FirstPerson3D/README.md](Assets/Elysium/FirstPerson3D/README.md).
 - **Deterministic math:** the fdlibm-derived math implementation retains its upstream notice in source.
 - **Elysium hero artwork:** `packaging/title-bg.png` was newly generated for Elysium and serves as both this README's hero and the in-game title-menu background. It is not derived from Pebble's README artwork or an in-game Faithful texture capture.
 - **Reality Derived maps:** the bundled [Arnis](https://github.com/louis-e/arnis) generator is by Louis Eriguchi and contributors and is redistributed under its [Apache-2.0 license](Vendor/Arnis/LICENSE). It uses OpenStreetMap and elevation/land-cover sources identified in the Arnis interface; map attribution remains visible in that interface.

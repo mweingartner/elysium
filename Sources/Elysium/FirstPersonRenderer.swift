@@ -1,5 +1,5 @@
 // A separate camera-space depth pass. The HUD is rendered afterward, so the minimap
-// always occludes hands without moving the player's shoulder as map size changes.
+// always occludes held equipment without changing its placement as map size changes.
 import Foundation
 import Metal
 import simd
@@ -37,7 +37,6 @@ final class FirstPersonRenderer {
     private var flourish = HeldEquipmentAnimationState()
     private var shieldRelax = HeldRelaxState()
     private var bowRelax = HeldRelaxState()
-    private var strikeDepth = FirstPersonAimDepth()
     private var projectileDepth = FirstPersonAimDepth()
     private var identity: ObjectIdentifier?
 
@@ -72,7 +71,7 @@ final class FirstPersonRenderer {
         mainDisplay = HeldHandDisplay(); offDisplay = HeldHandDisplay()
         swing = HeldSwingAnimationState(); flourish = HeldEquipmentAnimationState()
         shieldRelax = HeldRelaxState(); bowRelax = HeldRelaxState()
-        strikeDepth = FirstPersonAimDepth(); projectileDepth = FirstPersonAimDepth()
+        projectileDepth = FirstPersonAimDepth()
     }
 
     func render(command: MTLCommandBuffer, target: MTLTexture, game: GameCore, cam: CamState,
@@ -132,11 +131,12 @@ final class FirstPersonRenderer {
         encoder.setCullMode(.back); encoder.setFrontFacing(.counterClockwise)
         encoder.setFragmentTexture(atlas, index: 0); encoder.setFragmentSamplerState(sampler, index: 0)
         let aspect = Float(target.width)/Float(target.height)
-        // Fixed viewmodel lens: sprint/world FOV changes cannot shrink the tool against its hand.
+        // Fixed viewmodel lens keeps held-item presentation stable across world FOV changes.
         let projection = mat4Perspective(fovYRad: 70 * .pi/180, aspect: aspect, near: 0.035, far: 12)
-        let aimedTarget = FirstPersonTarget.resolve(game: game, cam: cam, partial: partial,
-            aspect: aspect, ranged: isBow || mainName == "crossbow" || (mainName == "trident" && isUsing))
-        let meleeDepth = strikeDepth.observe(min(1.85,max(1.60,aimedTarget?.worldDepth ?? 1.75)),at:time)
+        let ranged = isBow || mainName == "crossbow" || (mainName == "trident" && isUsing)
+        let aimedTarget = ranged
+            ? FirstPersonTarget.resolve(game: game, cam: cam, partial: partial, aspect: aspect, ranged: true)
+            : nil
         let rangedDepth = projectileDepth.observe(min(64,max(2,aimedTarget?.worldDepth ?? 32)),at:time)
         let walk = game.heldItemBob(partial: partial)
         let motion = game.settings.reduceMotion ? 0 : min(0.4, walk.amplitude)
@@ -177,7 +177,7 @@ final class FirstPersonRenderer {
         }
 
         func grip(left: Bool, lift: Double = 0) -> simd_float4x4 {
-            // Shoulder comes up immediately outside the quickbar, independent of minimap size.
+            // Item placement is independent of minimap size.
             ViewmodelPlacement.grip(left: left, lift: lift, logicalWidth: logicalWidth, aspect: aspect, bob: bob)
         }
 
@@ -192,15 +192,6 @@ final class FirstPersonRenderer {
             let profile = ViewmodelProfile.item(definition)
             let biome = game.world.biomeAt(ifloorD(player.x), ifloorD(player.y), ifloorD(player.z))
             let context = game.liveMeshRenderContext
-            if definition.tool?.type == "pickaxe" {
-                var result = ViewmodelMesh(FirstPersonModelAssets.pickaxe(material: definition.name.components(separatedBy: "_")[0]))
-                for i in result.vertices.indices {
-                    let p = result.vertices[i].position
-                    let transformed = SIMD3(p.x,p.y,p.z)*FirstPersonStrike.pickaxeScale+FirstPersonStrike.pickaxeSocketOffset
-                    result.vertices[i].position = SIMD4(transformed,1)
-                }
-                return result
-            }
             if definition.name == "crossbow" { return .crossbow() }
             if definition.name == "flying_wand" { return .flyingWand() }
             if let block = definition.block, blockItemIconUsesThreeDimensionalPreview(Int(block)) {
@@ -289,11 +280,9 @@ final class FirstPersonRenderer {
             if let mainStack = main.stack, !isShield {
                 let definition = itemDef(mainStack.id)
                 let profile = ViewmodelProfile.item(definition)
-                let contact = aimedTarget?.viewmodelPoint(depthRange: meleeDepth...meleeDepth, aspect: aspect)
-                    ?? SIMD3<Float>(0,0,-1.75)
-                var assembly = FirstPersonStrike.pose(rest: grip(left: false),
-                    progress: progress, action: profile.action,
-                    workingPoint: workingPoint(mainStack), target: contact,
+                var assembly = FirstPersonSwing.pose(rest: ViewmodelPlacement.item(definition,
+                    left: false, aspect: aspect, bob: bob),
+                    progress: progress, action: profile.action, left: false,
                     reducedMotion: game.settings.reduceMotion)
                 if isUsing && (definition.food != nil || mainName == "potion" || mainName == "milk_bucket") {
                     let t = Float(min(1,(Double(player.useItemTicks)+partial)/6))
@@ -306,16 +295,20 @@ final class FirstPersonRenderer {
                     let aimDepth = mainName == "trident" ? max(3,rangedDepth) : rangedDepth
                     let aim = aimedTarget?.viewmodelPoint(depthRange:aimDepth...aimDepth,aspect:aspect)
                         ?? SIMD3<Float>(0,0,-32)
-                    // Ranged aim takes precedence over melee contact. Moving
-                    // the grip to the strike point can put the muzzle past it.
-                    assembly = FirstPersonStrike.aimedProp(rest:grip(left:false),
+                    // Ranged use aligns from rest instead of inheriting the
+                    // ordinary item swing, which can carry the muzzle past its target.
+                    let aimRest = mainName == "trident"
+                        ? ViewmodelPlacement.item(definition,left:false,aspect:aspect,bob:bob)
+                        : grip(left:false)
+                    assembly = FirstPersonStrike.aimedProp(rest:aimRest,
                         muzzle:mainName == "crossbow" ? SIMD3(0,0.15,-0.55) : workingPoint(mainStack),
                         forward:mainName == "crossbow" ? SIMD3(0,0,-1) : SIMD3(0,1,0),target:aim)
                 }
                 // Equipment swapping owns its screen-space drop even at impact;
                 // a held attack cannot raise the outgoing item back to the target.
                 assembly = FirstPersonStrike.equipmentPose(assembly,lift:main.lift)
-                arm(assembly, left: false, handGrip: definition.tool?.type == "pickaxe" || definition.name == "spyglass" ? .pickaxe : .standard)
+                // The live Minecraft reference renders ordinary held items alone;
+                // visible arms remain confined to the dedicated bow/shield paths.
                 // The timeline eases an interrupted twirl to its nearest full-turn
                 // rest even during work; zeroing it here would reintroduce a snap.
                 let turn: Float = game.settings.reduceMotion ? 0 : Float(flip < 1 ? flip : 0) * .pi * 2
@@ -328,9 +321,8 @@ final class FirstPersonRenderer {
                 arm(base, left: true, handGrip: .shield)
                 draw("shield", base) { ViewmodelMesh(FirstPersonModelAssets.shield) }
             } else if let offStack = off.stack {
-                let base = grip(left: true, lift: off.lift)
-                let definition = itemDef(offStack.id)
-                arm(base, left: true, handGrip: definition.tool?.type == "pickaxe" || definition.name == "spyglass" ? .pickaxe : .standard)
+                let base = ViewmodelPlacement.item(itemDef(offStack.id),
+                    left:true,lift:off.lift,aspect:aspect,bob:bob)
                 item(offStack, transform: base)
             }
         }

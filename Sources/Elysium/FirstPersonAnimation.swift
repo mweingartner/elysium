@@ -6,9 +6,10 @@ import ElysiumCore
 let HELD_EQUIP_FLIP_DURATION = 0.62
 /// A real action takes ownership of the grip promptly without snapping a partial twirl.
 let HELD_EQUIP_INTERRUPT_DURATION = 0.08
-/// One full mining/punching stroke while the primary button is held; also the one-shot attack.
-let HELD_PRIMARY_ACTION_CYCLE_DURATION = 0.32
-/// A one-shot use gesture (placing, opening, interacting) is a shorter stroke than an attack.
+/// The live Minecraft reference repeats a held tool stroke about every 0.20 s.
+/// This is presentation cadence only, not a combat or block-breaking timer.
+let HELD_PRIMARY_ACTION_CYCLE_DURATION = 0.20
+/// Duration of a one-shot use gesture (placing, opening, interacting).
 let HELD_USE_SWING_DURATION = 0.2
 /// Switching items lowers the outgoing item out of view, then raises the incoming one.
 let HELD_EQUIP_LOWER_DURATION = 0.14
@@ -38,7 +39,7 @@ struct HeldRelaxState: Equatable {
 }
 
 /// The first-person swing timeline. The engine's `attackAnim` only *triggers* strokes here — it
-/// is a four-tick value that steps at 20Hz and restarts while mining — so the arm is driven on
+/// is a four-tick value that steps at 20Hz and restarts while mining — so the prop is driven on
 /// the wall clock: a continuous stroke cycle while the primary button is held (mining,
 /// punching), the in-flight stroke completing after release instead of snapping to rest, and a
 /// one-shot stroke for each engine-reported swing while idle (a use gesture, a placed block).
@@ -49,7 +50,7 @@ struct HeldSwingAnimationState: Equatable {
     private(set) var strokeDuration = HELD_PRIMARY_ACTION_CYCLE_DURATION
     private(set) var lastEngineAttack = 0.0
 
-    /// Normalized stroke progress (0 = wind-up, 1 = rest), or nil while the hand rests.
+    /// Normalized stroke progress (0 = wind-up, 1 = rest), or nil while the item rests.
     mutating func observe(primaryHeld: Bool, engineAttack: Double,
                           at now: Double, eligible: Bool) -> Double? {
         // Track the engine baseline even while ineligible so a screen closing mid-decay does not
@@ -105,7 +106,7 @@ enum HeldSwapPhase: Equatable {
 }
 
 /// Changing what a hand holds is choreographed like a real hand-off: the outgoing item is
-/// lowered out of view, then the incoming one rises into the fist. A change during a swap
+/// lowered out of view, then the incoming one rises into its display pose. A change during a swap
 /// continues from what is on screen — a lowering item keeps lowering, a half-raised item is
 /// lowered from its current height — so rapid hotbar scrolling never stacks transitions.
 struct HeldSwapAnimationState: Equatable {
