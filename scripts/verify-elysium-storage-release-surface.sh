@@ -255,7 +255,6 @@ EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf
 EXPECTED_STORAGE_API_SHA256='08acf52a794de902a69658a0926181918c62a30f7975cd0d685d3d3baa7c745b'
 EXPECTED_STORAGE_OBJECT_SHA256='43ea474d75be3fc2311f1a95295c94d23329249f505ed0c14878f7318e14b3a8'
 EXPECTED_SAVES_SOURCE_SHA256='4018f336ad76cdbf1e9801c40211fb60c79bb24aecee952ce46f3cf5ef21c36c'
-EXPECTED_GAME_CORE_SOURCE_SHA256='13c75748d1e4e27ebd8a464eda2cf702a726e092d7b52ee076d1b8dd21928114'
 EXPECTED_PLAYER_SOURCE_SHA256='79dbd2e132f8e65f2a9857f763c263fea0a1b8cd86fc7db6388fc77129373e10'
 EXPECTED_CORE_CAPABILITY_SHA256='23eb45f111a2be91e6bcb2b0be41bb9fc58b5457bb3af09f8af0d9ad56987dd5'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
@@ -276,10 +275,12 @@ EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75
 # Elysium 26a9d506fdb3db4d8254bc9ca20e573cee1d863a04b66891420fdfec3abf47f9,
 # smoke e51eed27df113faaa10ea1872f228a5fde806fcbb65e29e3725d659fbfdcc130.
 # Tool-family action audio changes only cosmetic local/LAN mining and melee
-# presentation routing plus a closed ItemDefs map. Checked-player caller
-# spans/counts and storage/capability surfaces remain byte-identical; this Core
-# pin is the stripped release object after the focused palette/mining checks.
-EXPECTED_CORE_OBJECT_SHA256='f20d90ef9c9116b29d47aef3734cccb9de4a8299a3d7b58cb7ec9da85fe985c2'
+# presentation routing plus a closed ItemDefs map. The swing cadence now owns
+# its four-tick timer in GameCore so audible strokes continue while chunk
+# readiness temporarily pauses the player's entity tick. Checked-player caller
+# spans/counts and storage/capability surfaces remain byte-identical.
+EXPECTED_GAME_CORE_SOURCE_SHA256='ce10a13b5dfc33d9c38bd9a3c7fa79c50ab25cb14a4225902dcb5e90ef0aabdf'
+EXPECTED_CORE_OBJECT_SHA256='6abb2e6677563db8d2e686726c6d2b8ea87bbfda873677d69cfe2399905ce3c6'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -289,8 +290,8 @@ EXPECTED_CORE_OBJECT_SHA256='f20d90ef9c9116b29d47aef3734cccb9de4a8299a3d7b58cb7e
 # input or capability source changed. See docs/first-person-minecraft-comparison.md.
 # Tool-family action audio additionally changes the procedural app recipes, so
 # the linked Elysium and elysmoke stripped-product pins renew transitively.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='762bffd831cf23a114f039a96e39ac9de7dcaea58dcaa19fa37cf4056f90b1bb'
-EXPECTED_SMOKE_PRODUCT_SHA256='52cd392e16fd03c150a54e1ad2e1e597d9c93351d9be81d2476174d78b068170'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='26282d4a551117051be8ea8120e35f583680e0fd0b2595c30ad3faf19cb4d974'
+EXPECTED_SMOKE_PRODUCT_SHA256='82a8379ead01acaf7c90a6f788c9ca1d49a7179fa9d009525f770b2b3f11eda1'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

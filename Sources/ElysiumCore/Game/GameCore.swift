@@ -549,6 +549,11 @@ public final class GameCore {
     /// Last block this uninterrupted left-button hold began striking. Kept separate from
     /// `breakingProgress`, which resets after a completed break before the host echo arrives.
     private var lanToolStrikeTarget: (x: Int, y: Int, z: Int)?
+    /// Remaining full simulation ticks in the currently audible mining arm stroke.
+    /// This stays GameCore-owned so held mining keeps its cadence even while a
+    /// player is temporarily held for unloaded chunks and their entity tick is
+    /// not advancing `attackAnim`.
+    private var miningSwingTicksRemaining = 0
     private var lanLastAppliedGrantID = 0
     public private(set) var lanConnectionLost = false
     private var lanDeferredReplication = LANDeferredReplicationBuffer()
@@ -4258,8 +4263,16 @@ public final class GameCore {
     /// ticks), so a third-person or mirrored player visibly works at the block instead of freezing
     /// with the arm pinned at the top of a swing that never plays. The first-person hand keeps its
     /// own wall-clock stroke timeline and only uses this value as a trigger.
-    private func restartMiningSwing(_ p: Player) {
-        if p.attackAnim <= 0 { p.attackAnim = 1 }
+    @discardableResult
+    private func restartMiningSwing(_ p: Player) -> Bool {
+        if miningSwingTicksRemaining > 0 {
+            miningSwingTicksRemaining -= 1
+            return false
+        }
+        miningSwingTicksRemaining = 3
+        p.attackAnim = 1
+        _ = playHeldToolSwing(p)
+        return true
     }
 
     /// Cosmetic only: the family stroke layers over material hits without
@@ -4397,12 +4410,14 @@ public final class GameCore {
         let p = player!
         if !leftDown || p.dead || p.deathTime > 0 || (host?.hasScreen() ?? false) {
             p.breakingProgress = -1
+            miningSwingTicksRemaining = 0
             return
         }
         let hitOpt = crosshairBlock()
         targetedBlock = hitOpt.map { ($0.x, $0.y, $0.z, $0.cell) }
         guard let hit = hitOpt else {
             p.breakingProgress = -1
+            miningSwingTicksRemaining = 0
             return
         }
         let w = world
@@ -4411,8 +4426,8 @@ public final class GameCore {
             if p.breakingProgress < 0 || p.breakingX != hit.x || p.breakingY != hit.y || p.breakingZ != hit.z {
                 p.breakingX = hit.x; p.breakingY = hit.y; p.breakingZ = hit.z
                 p.breakingProgress = 0
+                miningSwingTicksRemaining = 0
                 _ = raiseBlockToolStrike(player: p, hit: hit)
-                _ = playHeldToolSwing(p)
             }
             restartMiningSwing(p)
             return
@@ -4420,7 +4435,9 @@ public final class GameCore {
         if p.gameMode == GameMode.creative {
             if breakCooldown <= 0 {
                 _ = raiseBlockToolStrike(player: p, hit: hit)
-                _ = playHeldToolSwing(p)
+                miningSwingTicksRemaining = 0
+                p.attackAnim = 0
+                _ = restartMiningSwing(p)
                 finishBreaking(interactCtx(), hit.x, hit.y, hit.z)
                 breakCooldown = 5
             }
@@ -4428,14 +4445,15 @@ public final class GameCore {
         }
         if breakCooldown > 0 {
             p.breakingProgress = -1
+            miningSwingTicksRemaining = 0
             return
         }
         let speed = breakSpeed(p, hit.cell)
         if p.breakingProgress < 0 || p.breakingX != hit.x || p.breakingY != hit.y || p.breakingZ != hit.z {
             p.breakingX = hit.x; p.breakingY = hit.y; p.breakingZ = hit.z
             p.breakingProgress = 0
+            miningSwingTicksRemaining = 0
             _ = raiseBlockToolStrike(player: p, hit: hit)
-            _ = playHeldToolSwing(p)
         }
         p.breakingProgress += speed
         restartMiningSwing(p)
@@ -4448,6 +4466,7 @@ public final class GameCore {
             trackBreakAdvancements(hit.cell >> 4)
             p.breakingProgress = -1
             breakCooldown = 3
+            miningSwingTicksRemaining = 0
             p.addExhaustion(0.005)
         }
     }
@@ -4500,6 +4519,7 @@ public final class GameCore {
         let p = player!
         if !leftDown || p.dead || p.deathTime > 0 || (host?.hasScreen() ?? false) {
             p.breakingProgress = -1
+            miningSwingTicksRemaining = 0
             lanToolStrikeTarget = nil
             return
         }
@@ -4507,6 +4527,7 @@ public final class GameCore {
         targetedBlock = hitOpt.map { ($0.x, $0.y, $0.z, $0.cell) }
         guard let hit = hitOpt else {
             p.breakingProgress = -1
+            miningSwingTicksRemaining = 0
             lanToolStrikeTarget = nil
             return
         }
@@ -4516,6 +4537,7 @@ public final class GameCore {
             if p.breakingProgress < 0 || p.breakingX != hit.x || p.breakingY != hit.y || p.breakingZ != hit.z {
                 p.breakingX = hit.x; p.breakingY = hit.y; p.breakingZ = hit.z
                 p.breakingProgress = 0
+                miningSwingTicksRemaining = 0
             }
             beginLANToolStrikeIfNeeded(hit)
             restartMiningSwing(p)
@@ -4527,7 +4549,10 @@ public final class GameCore {
                 if p.breakingProgress < 0 || p.breakingX != hit.x || p.breakingY != hit.y || p.breakingZ != hit.z {
                     p.breakingX = hit.x; p.breakingY = hit.y; p.breakingZ = hit.z
                     p.breakingProgress = 0
+                    miningSwingTicksRemaining = 0
                 }
+                p.attackAnim = 0
+                _ = restartMiningSwing(p)
                 emitLANBreakBlockIntent(hit)
                 breakCooldown = 5
             }
@@ -4535,11 +4560,13 @@ public final class GameCore {
         }
         if breakCooldown > 0 {
             p.breakingProgress = -1
+            miningSwingTicksRemaining = 0
             return
         }
         if p.breakingProgress < 0 || p.breakingX != hit.x || p.breakingY != hit.y || p.breakingZ != hit.z {
             p.breakingX = hit.x; p.breakingY = hit.y; p.breakingZ = hit.z
             p.breakingProgress = 0
+            miningSwingTicksRemaining = 0
         }
         beginLANToolStrikeIfNeeded(hit)
         p.breakingProgress += breakSpeed(p, hit.cell)
@@ -4552,6 +4579,7 @@ public final class GameCore {
             emitLANBreakBlockIntent(hit)
             p.breakingProgress = -1
             breakCooldown = 3
+            miningSwingTicksRemaining = 0
         }
     }
 
@@ -4593,7 +4621,6 @@ public final class GameCore {
            target.x == hit.x, target.y == hit.y, target.z == hit.z { return }
         lanToolStrikeTarget = (hit.x, hit.y, hit.z)
         emitLANToolStrikeIntent(hit)
-        _ = playHeldToolSwing(player!)
     }
 
     private func tickLANClientMirroredUse() {

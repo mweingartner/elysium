@@ -320,9 +320,10 @@ underwater lowpass, and two coprime-length feedback delays provide the effects a
 ambient music and jukebox discs are still generated from scale/tempo configurations. The render
 thread owns the synthesized voice list and receives main-thread work through its locked inbox.
 The held-tool palette maps every registered tool family to a single action cue: mining/melee family
-strokes play once at the start of a target transition and layer over the continuing material-hit
-loop, while flint and steel, fishing rod, bow, crossbow, trident, and brush retain their concrete
-secondary-use events. These cosmetic cues never affect simulation, event-bus, or LAN authority.
+strokes play whenever the arm begins a new completed swing (every four ticks while mining) and layer
+over the continuing material-hit loop, while flint and steel, fishing rod, bow, crossbow, trident,
+and brush retain their concrete secondary-use events. These cosmetic cues never affect simulation,
+event-bus, or LAN authority.
 
 `ScriptSoundLibrary.swift` is the separate app-owned boundary for `sound(name[, volume])`. Its live,
 case-insensitive catalog dynamically enumerates standard names below `/System/Library/Sounds` and

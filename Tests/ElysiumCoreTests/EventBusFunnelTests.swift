@@ -458,7 +458,7 @@ final class EventBusFunnelTests: XCTestCase {
         XCTAssertNil(toolActionSoundName(for: "unregistered_tool"))
     }
 
-    func testMiningToolActionSoundPlaysOnceAtTheStartOfAStroke() {
+    func testMiningToolActionSoundPlaysForEveryCompletedStroke() {
         let game = makeGameInWorld(label: "tool-action-sound")
         _ = prepareMiningWall(in: game)
         let host = SoundCapturingHost()
@@ -471,8 +471,8 @@ final class EventBusFunnelTests: XCTestCase {
 
         XCTAssertEqual(
             host.soundNames.filter { $0 == "item.tool.pickaxe.swing" },
-            ["item.tool.pickaxe.swing"],
-            "material contact repeats must not duplicate the held-tool stroke"
+            ["item.tool.pickaxe.swing", "item.tool.pickaxe.swing"],
+            "the held-tool cue must re-arm with the animation after each completed mining stroke"
         )
     }
 
