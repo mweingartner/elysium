@@ -5,6 +5,8 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Bumped the release and exact-LAN-compatibility version to 1.2.1.
+
 - Made coal and iron worth digging for in every world type. The vanilla bands left rolling
   terrain almost bare (upper coal starts at y136 and upper iron peaks near y232, open air outside
   true mountains), so the bands that meet ordinary ground now roll more veins and each ore gains a
