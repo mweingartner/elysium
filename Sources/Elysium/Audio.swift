@@ -717,6 +717,37 @@ private func buildRecipes() {
         s.tone(freq: 350, endFreq: 220, dur: 0.18, type: .square, vol: 0.25)
     }
 
+    // tool-family strokes. These are the short hand-and-head sounds at the
+    // beginning of an action; recurring block-material hits remain separate
+    // so stone, wood, sand, and metal still read as the thing being struck.
+    R("item.tool.pickaxe.swing", "players", "Pickaxe swings") { s, pitch, _ in
+        s.tone(freq: 260 * pitch, endFreq: 170 * pitch, dur: 0.09, type: .triangle, vol: 0.17)
+        s.noiseBurst(dur: 0.055, freq: 2100, q: 4, vol: 0.20, pitch: pitch)
+    }
+    R("item.tool.axe.swing", "players", "Axe swings") { s, pitch, _ in
+        s.tone(freq: 170 * pitch, endFreq: 105 * pitch, dur: 0.11, type: .triangle, vol: 0.24)
+        s.noiseBurst(dur: 0.07, freq: 720, q: 0.9, lowpass: true, vol: 0.20, pitch: pitch)
+    }
+    R("item.tool.shovel.swing", "players", "Shovel scrapes") { s, pitch, _ in
+        s.noiseBurst(dur: 0.12, freq: 1250, q: 0.55, vol: 0.25, attack: 0.015, pitch: pitch)
+        s.tone(freq: 170 * pitch, endFreq: 125 * pitch, dur: 0.08, type: .triangle, vol: 0.08)
+    }
+    R("item.tool.hoe.swing", "players", "Hoe rakes") { s, pitch, _ in
+        for i in 0..<2 {
+            s.noiseBurst(dur: 0.045, freq: 1500, q: 1.6, vol: 0.18, pitch: pitch, delay: Double(i) * 0.055)
+        }
+        s.tone(freq: 190 * pitch, endFreq: 135 * pitch, dur: 0.14, type: .triangle, vol: 0.12)
+    }
+    R("item.tool.sword.swing", "players", "Sword swings") { s, pitch, _ in
+        s.noiseBurst(dur: 0.16, freq: 2500, q: 0.45, vol: 0.20, attack: 0.03, pitch: pitch)
+        s.tone(freq: 880 * pitch, endFreq: 1260 * pitch, dur: 0.10, type: .triangle, vol: 0.10)
+    }
+    R("item.tool.shears.snip", "players", "Shears snip") { s, pitch, _ in
+        for i in 0..<2 {
+            s.noiseBurst(dur: 0.035, freq: 3600, q: 5, vol: 0.18, pitch: pitch, delay: Double(i) * 0.045)
+        }
+    }
+
     // mob voices
     mobVoice("entity.cow.ambient", "friendly", "Cow moos", 160, .sawtooth, 0.6, 0.75, 5)
     mobVoice("entity.cow.hurt", "friendly", "Cow hurts", 200, .sawtooth, 0.3, 0.7)
@@ -945,7 +976,8 @@ private func buildRecipes() {
 
     // projectiles & misc
     R("entity.arrow.shoot", "players", "Arrow fired") { s, pitch, _ in
-        s.noiseBurst(dur: 0.12, freq: 1800, q: 1, vol: 0.35, pitch: pitch)
+        s.tone(freq: 610 * pitch, endFreq: 1420 * pitch, dur: 0.075, type: .triangle, vol: 0.14)
+        s.noiseBurst(dur: 0.13, freq: 2100, q: 0.5, vol: 0.26, attack: 0.018, pitch: pitch)
     }
     R("entity.arrow.hit", "players", "Arrow hits") { s, _, _ in
         s.noiseBurst(dur: 0.06, freq: 2400, q: 2, vol: 0.3)
@@ -957,7 +989,8 @@ private func buildRecipes() {
         s.noiseBurst(dur: 0.1, freq: 1500, q: 0.8, vol: 0.25)
     }
     R("entity.fishing_bobber.throw", "players", nil) { s, _, _ in
-        s.noiseBurst(dur: 0.1, freq: 1400, q: 1, vol: 0.25)
+        s.tone(freq: 480, endFreq: 980, dur: 0.07, type: .triangle, vol: 0.13)
+        s.noiseBurst(dur: 0.14, freq: 1450, q: 0.65, vol: 0.22, attack: 0.025)
     }
     R("entity.fishing_bobber.splash", "players", "Fish bites") { s, _, _ in
         s.noiseBurst(dur: 0.25, freq: 1000, q: 0.5, vol: 0.45)
@@ -987,8 +1020,9 @@ private func buildRecipes() {
     R("item.totem.use", "players", "Totem activates") { s, _, _ in
         for i in 0..<5 { s.tone(freq: 600 + Double(i) * 150, dur: 0.4, vol: 0.25, delay: Double(i) * 0.06) }
     }
-    R("item.trident.throw", "players", "Trident clangs") { s, _, _ in
-        s.noiseBurst(dur: 0.2, freq: 1600, q: 2, vol: 0.4)
+    R("item.trident.throw", "players", "Trident throws") { s, pitch, _ in
+        s.tone(freq: 240 * pitch, endFreq: 120 * pitch, dur: 0.16, type: .triangle, vol: 0.16)
+        s.noiseBurst(dur: 0.20, freq: 1650, q: 0.45, vol: 0.27, attack: 0.035, pitch: pitch)
     }
     R("item.trident.hit_ground", "players", "Trident vibrates") { s, _, _ in
         s.tone(freq: 800, endFreq: 600, dur: 0.3, type: .triangle, vol: 0.3, vibrato: 20)
@@ -997,7 +1031,12 @@ private func buildRecipes() {
         s.noiseBurst(dur: 0.5, freq: 1200, q: 0.5, vol: 0.5)
     }
     R("item.flintandsteel.use", "blocks", "Flint and Steel click") { s, _, _ in
-        s.noiseBurst(dur: 0.07, freq: 3000, q: 3, vol: 0.4)
+        s.noiseBurst(dur: 0.04, freq: 2700, q: 5, vol: 0.28)
+        s.noiseBurst(dur: 0.08, freq: 5200, q: 1.2, vol: 0.20, delay: 0.025)
+    }
+    R("item.crossbow.shoot", "players", "Crossbow fires") { s, pitch, _ in
+        s.tone(freq: 190 * pitch, endFreq: 110 * pitch, dur: 0.08, type: .triangle, vol: 0.16)
+        s.noiseBurst(dur: 0.12, freq: 1750, q: 0.65, vol: 0.28, attack: 0.01, pitch: pitch)
     }
     R("item.bucket.fill", "blocks", "Bucket fills") { s, _, _ in
         s.tone(freq: 500, endFreq: 900, dur: 0.25, vol: 0.3)
@@ -1045,7 +1084,8 @@ private func buildRecipes() {
         s.tone(freq: 466, dur: 1.8, vol: 0.15)
     }
     R("item.brush.brushing", "blocks", "Brushing") { s, _, _ in
-        s.noiseBurst(dur: 0.25, freq: 1900, q: 0.7, vol: 0.3)
+        s.noiseBurst(dur: 0.20, freq: 1700, q: 0.45, vol: 0.21, attack: 0.03)
+        s.noiseBurst(dur: 0.10, freq: 3100, q: 1.5, vol: 0.10, delay: 0.07)
     }
 
     // blocks & machines

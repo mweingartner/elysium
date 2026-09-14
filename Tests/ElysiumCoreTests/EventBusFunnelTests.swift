@@ -9,6 +9,41 @@ import XCTest
 
 @MainActor
 final class EventBusFunnelTests: XCTestCase {
+    private final class SoundCapturingHost: GameHost {
+        var soundNames: [String] = []
+
+        func hasScreen() -> Bool { false }
+        func screenPausesGame() -> Bool { false }
+        func openScreen(_ kind: String, _ data: ScreenData?) {}
+        func openTrading(_ villager: Mob) {}
+        func openVehicleChest(_ kind: String, _ vehicle: Entity) {}
+        func openChat(_ prefix: String) {}
+        func openDeathScreen(_ message: String) {}
+        func openPauseScreen() {}
+        func openTitleScreen() {}
+        func closeAllScreens() {}
+        func releasePointer() {}
+        func capturePointer() {}
+        func showActionBar(_ text: String, _ time: Int) {}
+        func pushChat(_ line: String) {}
+        func pushToast(_ adv: AdvancementDef) {}
+        func setBossBars(_ bars: [BossBarInfo]) {}
+        func playSound(_ name: String, _ x: Double, _ y: Double, _ z: Double,
+                       _ volume: Double, _ pitch: Double) { soundNames.append(name) }
+        func playUI(_ name: String) {}
+        func setAudioEnvironment(_ underwater: Bool, _ caveFactor: Double) {}
+        func setAudioListener(_ x: Double, _ y: Double, _ z: Double, _ yaw: Double) {}
+        func tickMusic(_ mood: String, _ enabled: Bool) {}
+        func stopDisc() {}
+        func addParticles(_ type: String, _ x: Double, _ y: Double, _ z: Double,
+                          _ count: Int, _ spread: Double, _ cell: Int) {}
+        func spawnPrecipitation(_ kind: String, _ x: Double, _ y: Double, _ z: Double,
+                                _ groundY: Double) {}
+        func uploadMesh(_ cx: Int, _ sy: Int, _ cz: Int, _ minY: Int, _ mesh: MeshOutput) {}
+        func removeChunkMeshes(_ cx: Int, _ cz: Int, _ sections: Int) {}
+        func clearAllSections() {}
+    }
+
     override class func setUp() {
         super.setUp()
         registerAllBlocks()
@@ -405,6 +440,39 @@ final class EventBusFunnelTests: XCTestCase {
         XCTAssertEqual(
             game.eventBus.recentEvents().filter { $0.kind == .blockToolStrike }.count, 1,
             "empty-hand mining is not a tool strike"
+        )
+    }
+
+    func testToolSoundPaletteCoversEveryRegisteredToolFamily() {
+        let expected = [
+            "pickaxe", "axe", "shovel", "hoe", "sword", "shears",
+            "flint_and_steel", "fishing_rod", "bow", "crossbow", "trident", "brush",
+        ]
+        XCTAssertEqual(
+            Set(itemDefs.compactMap { $0.tool?.type }), Set(expected),
+            "the tool-action palette is intentionally closed over the registered tool families"
+        )
+        for type in expected {
+            XCTAssertNotNil(toolActionSoundName(for: type), "missing action sound for \(type)")
+        }
+        XCTAssertNil(toolActionSoundName(for: "unregistered_tool"))
+    }
+
+    func testMiningToolActionSoundPlaysOnceAtTheStartOfAStroke() {
+        let game = makeGameInWorld(label: "tool-action-sound")
+        _ = prepareMiningWall(in: game)
+        let host = SoundCapturingHost()
+        game.host = host
+        game.player.mainHand = ItemStack(iid("wooden_pickaxe"), 1)
+
+        game.mouseDown(0)
+        stepOneTick(game)
+        for _ in 0..<4 { stepOneTick(game) }
+
+        XCTAssertEqual(
+            host.soundNames.filter { $0 == "item.tool.pickaxe.swing" },
+            ["item.tool.pickaxe.swing"],
+            "material contact repeats must not duplicate the held-tool stroke"
         )
     }
 

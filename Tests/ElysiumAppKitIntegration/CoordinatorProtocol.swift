@@ -39,7 +39,14 @@ private func coordinatorWait(_ fd: Int32, events: Int16, deadline: CoordinatorDe
         var descriptor = pollfd(fd: fd, events: events, revents: 0)
         let result = Darwin.poll(&descriptor, 1, milliseconds)
         if result < 0 && errno == EINTR { continue }
-        guard result > 0, descriptor.revents & Int16(POLLERR | POLLHUP | POLLNVAL) == 0,
+        // A local stream peer can close immediately after writing its final
+        // frame, leaving POLLIN and POLLHUP set together. For reads, accept
+        // the queued bytes first; `coordinatorReadExact` still rejects EOF if
+        // the frame is incomplete. A hangup is terminal for writes, while
+        // POLLERR and POLLNVAL remain terminal for every operation.
+        let hasFatalError = descriptor.revents & Int16(POLLERR | POLLNVAL) != 0
+        let hungUpBeforeWrite = events == Int16(POLLOUT) && descriptor.revents & Int16(POLLHUP) != 0
+        guard result > 0, !hasFatalError, !hungUpBeforeWrite,
               descriptor.revents & events != 0 else {
             throw CoordinatorProtocolError.invalid("descriptor unavailable")
         }

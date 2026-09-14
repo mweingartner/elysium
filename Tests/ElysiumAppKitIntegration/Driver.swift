@@ -33,6 +33,20 @@ private func secureRandom32() throws -> Data {
 }
 private func hexString(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
 
+private func coordinatorFailureMarker(_ profile: URL) -> String? {
+    let marker = profile.appendingPathComponent("coordinator-failure", isDirectory: false)
+    guard let attributes = try? FileManager.default.attributesOfItem(atPath: marker.path),
+          attributes[.type] as? FileAttributeType == .typeRegular,
+          attributes[.posixPermissions] as? NSNumber == 0o600,
+          let data = try? Data(contentsOf: marker, options: [.mappedIfSafe]),
+          data.count > 0, data.count <= 128,
+          let value = String(data: data, encoding: .utf8),
+          value.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value <= 0x7e }) else {
+        return nil
+    }
+    return value
+}
+
 private func setCloseOnExec(_ fd: Int32) throws {
     let flags = fcntl(fd, F_GETFD)
     guard flags >= 0, fcntl(fd, F_SETFD, flags | FD_CLOEXEC) == 0,
@@ -4201,6 +4215,7 @@ rawDriverApplication.finishLaunching()
 private let workspaceCenter = NSWorkspace.shared.notificationCenter
 private let cleanup = Cleanup()
 private var gateStage = "preflight"
+private var coordinatorFailureProfile: URL?
 private let actionLedger = OneShotActionLedger(expectedIDs: expectedOneShotActionIDs)
 signal(SIGINT, SIG_IGN)
 signal(SIGTERM, SIG_IGN)
@@ -4278,6 +4293,7 @@ do {
     try coordinatorSession.validateNamespace(expectSocket: true)
     let isolatedHome = bundleURL.deletingLastPathComponent()
         .appendingPathComponent("profile", isDirectory: true)
+    coordinatorFailureProfile = isolatedHome
     try FileManager.default.createDirectory(at: isolatedHome,
                                             withIntermediateDirectories: true)
     try FileManager.default.setAttributes([.posixPermissions: 0o700],
@@ -6027,7 +6043,11 @@ do {
     cleanup.run()
     fail("\(gateStage): \(stage)")
 } catch CoordinatorProtocolError.invalid(let detail) {
+    let marker = coordinatorFailureProfile.flatMap(coordinatorFailureMarker)
     cleanup.run()
+    if let marker {
+        fail("\(gateStage): coordinator protocol \(detail) coordinator=\(marker)")
+    }
     fail("\(gateStage): coordinator protocol \(detail)")
 } catch {
     cleanup.run()

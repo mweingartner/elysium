@@ -4262,6 +4262,25 @@ public final class GameCore {
         if p.attackAnim <= 0 { p.attackAnim = 1 }
     }
 
+    /// Cosmetic only: the family stroke layers over material hits without
+    /// participating in simulation, event-bus, or LAN authority state.
+    @discardableResult
+    private func playHeldToolSwing(_ p: Player) -> Bool {
+        guard let held = p.mainHand,
+              held.id >= 0, held.id < itemDefs.count,
+              let tool = itemDef(held.id).tool,
+              let sound = toolActionSoundName(for: tool.type) else { return false }
+        switch tool.type {
+        case "pickaxe", "axe", "shovel", "hoe", "sword", "shears":
+            host?.playSound(sound, p.x, p.y, p.z, 0.55, 1)
+            return true
+        default:
+            // Specialised families emit their mapped sound only from their
+            // actual secondary-use implementation, never from a left-click.
+            return false
+        }
+    }
+
     /// Interpolated walk-bob for the first-person hands: the same 20Hz phase and amplitude that
     /// sway the camera, so the held item, off-hand torch, shield, and bow step with the body.
     /// Zero when view bobbing is off or the player rides a vehicle.
@@ -4393,6 +4412,7 @@ public final class GameCore {
                 p.breakingX = hit.x; p.breakingY = hit.y; p.breakingZ = hit.z
                 p.breakingProgress = 0
                 _ = raiseBlockToolStrike(player: p, hit: hit)
+                _ = playHeldToolSwing(p)
             }
             restartMiningSwing(p)
             return
@@ -4400,6 +4420,7 @@ public final class GameCore {
         if p.gameMode == GameMode.creative {
             if breakCooldown <= 0 {
                 _ = raiseBlockToolStrike(player: p, hit: hit)
+                _ = playHeldToolSwing(p)
                 finishBreaking(interactCtx(), hit.x, hit.y, hit.z)
                 breakCooldown = 5
             }
@@ -4414,6 +4435,7 @@ public final class GameCore {
             p.breakingX = hit.x; p.breakingY = hit.y; p.breakingZ = hit.z
             p.breakingProgress = 0
             _ = raiseBlockToolStrike(player: p, hit: hit)
+            _ = playHeldToolSwing(p)
         }
         p.breakingProgress += speed
         restartMiningSwing(p)
@@ -4571,6 +4593,7 @@ public final class GameCore {
            target.x == hit.x, target.y == hit.y, target.z == hit.z { return }
         lanToolStrikeTarget = (hit.x, hit.y, hit.z)
         emitLANToolStrikeIntent(hit)
+        _ = playHeldToolSwing(player!)
     }
 
     private func tickLANClientMirroredUse() {
@@ -5234,15 +5257,23 @@ public final class GameCore {
         let target = crosshairEntity(ATTACK_REACH)
         p.attackAnim = 1
         if let target {
+            let playedToolSwing = playHeldToolSwing(p)
             if target is LivingEntity || target.type == "end_crystal" {
                 playerAttack(p, target)
                 advance("kill_mob_attempt")
             } else if target.type == "boat" || target.type == "minecart" {
                 _ = target.hurt(2, "player", p)
             }
+            if !playedToolSwing {
+                host?.playSound("entity.player.attack.sweep", p.x, p.y, p.z, 0.3, 1.2)
+            }
             return
         }
-        host?.playSound("entity.player.attack.sweep", p.x, p.y, p.z, 0.3, 1.2)
+        // A block will begin mining on the next tick and emits its own family
+        // stroke. Avoid doubling that immediate click with an air-swing cue.
+        if crosshairBlock() == nil, !playHeldToolSwing(p) {
+            host?.playSound("entity.player.attack.sweep", p.x, p.y, p.z, 0.3, 1.2)
+        }
     }
 
     /// LAN-client left-click dispatcher (replaces doAttack for LAN clients — C3 fix): raycasts
@@ -5260,12 +5291,15 @@ public final class GameCore {
            !target.isPlayer,
            let hostEntityID = target.lanReplicationSourceID,
            let handler = lanAttackIntentHandler {
-            p.attackAnim = 1
-            handler(LANAttackIntent(
-                targetEntityID: hostEntityID,
-                selectedHotbarSlot: p.selectedSlot,
-                sprinting: p.sprinting
-            ))
+           p.attackAnim = 1
+           handler(LANAttackIntent(
+               targetEntityID: hostEntityID,
+               selectedHotbarSlot: p.selectedSlot,
+               sprinting: p.sprinting
+           ))
+            if !playHeldToolSwing(p) {
+                host?.playSound("entity.player.attack.sweep", p.x, p.y, p.z, 0.3, 1.2)
+            }
             return
         }
     }

@@ -58,6 +58,28 @@ public struct ToolDef {
     }
 }
 
+/// The audible action associated with each registered tool family.  Ordinary
+/// mining and melee tools use these at the start of a swing; specialised tools
+/// use the same names from their concrete secondary-use path (casting, firing,
+/// throwing, igniting, or brushing).
+public func toolActionSoundName(for toolType: String) -> String? {
+    switch toolType {
+    case "pickaxe": return "item.tool.pickaxe.swing"
+    case "axe": return "item.tool.axe.swing"
+    case "shovel": return "item.tool.shovel.swing"
+    case "hoe": return "item.tool.hoe.swing"
+    case "sword": return "item.tool.sword.swing"
+    case "shears": return "item.tool.shears.snip"
+    case "flint_and_steel": return "item.flintandsteel.use"
+    case "fishing_rod": return "entity.fishing_bobber.throw"
+    case "bow": return "entity.arrow.shoot"
+    case "crossbow": return "item.crossbow.shoot"
+    case "trident": return "item.trident.throw"
+    case "brush": return "item.brush.brushing"
+    default: return nil
+    }
+}
+
 public struct ArmorDef {
     public let slot: Int       // 0 head 1 chest 2 legs 3 feet
     public let defense: Int

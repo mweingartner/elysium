@@ -177,9 +177,18 @@ do {
     try wire.send(fd, type: 7, payload: Data("bye".utf8))
     window.orderOut(nil); window.close(); exit(0)
 } catch CoordinatorFailure.invalid(let stage) {
+    // The driver owns this private 0700 temporary profile. Persisting one
+    // bounded diagnostic there lets its peer distinguish an early coordinator
+    // rejection from a transport failure; the harness cleanup removes it.
+    let marker = isolatedHome.appendingPathComponent("coordinator-failure", isDirectory: false)
+    try? Data(stage.utf8).write(to: marker, options: [.atomic])
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: marker.path)
     os_log("Elysium integration Coordinator failed at %{public}s", type: .error, stage)
     exit(70)
 } catch {
+    let marker = isolatedHome.appendingPathComponent("coordinator-failure", isDirectory: false)
+    try? Data("unexpected".utf8).write(to: marker, options: [.atomic])
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: marker.path)
     NSLog("Elysium integration Coordinator failed unexpectedly")
     exit(71)
 }
