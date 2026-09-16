@@ -1398,6 +1398,10 @@ final class WorldRenderer {
            hasModel("sheep_\(c)") {
             return "sheep_\(c)"
         }
+        if type == "cat", ent.data.variant == CatVariant.allBlack.rawValue,
+           hasModel("cat_all_black") {
+            return "cat_all_black"
+        }
         if type == "villager", let prof = (ent as? Villager)?.profession, prof != "none",
            hasModel("villager_\(prof)") {
             return "villager_\(prof)"

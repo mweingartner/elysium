@@ -1525,15 +1525,19 @@ final class WorldCreateScreen: Screen {
         init(uiHeight: Double) {
             self.uiHeight = uiHeight
             // The stack is Name, Seed, Game Mode, Difficulty, Character Classes, World Type,
-            // (Biome), Dungeons, Create/Cancel. With the Character Classes row added, the
-            // roomy 24px-gap spacing overflows the Create button below the canonical minimum
-            // height (~240) once the Biome row is also shown, so anything under 300 uses the
-            // tighter compact spacing that keeps the action row fully on-screen at height 240.
+            // (Biome), Dungeons, Villages, Create/Cancel. Anything under 300 uses compact
+            // spacing that keeps the full single-biome selector set on-screen at height 240.
             compact = uiHeight < 300
+            // Compact controls are still 20 units tall. A smaller gap made
+            // neighbouring hit targets overlap, so clicking the top of
+            // Villages could activate Dungeons (and likewise World Type could
+            // activate the preceding row). Touching edges remain accessible;
+            // the 240-unit layout still leaves room for Single Biome plus both
+            // procedural selectors and Create/Cancel.
             buttonGap = compact ? 20.0 : 24.0
-            nameY = compact ? 30 : 40
-            seedY = compact ? 56 : 76
-            modeY = compact ? 80 : 102
+            nameY = compact ? 28 : 40
+            seedY = compact ? 52 : 76
+            modeY = compact ? 76 : 102
             difficultyY = modeY + buttonGap
             classesY = difficultyY + buttonGap
             worldTypeY = classesY + buttonGap
@@ -1544,14 +1548,49 @@ final class WorldCreateScreen: Screen {
             showsBiome ? biomeY + buttonGap : biomeY
         }
 
-        func actionY(showsBiome: Bool) -> Double {
-            let dungeonY = dungeonY(showsBiome: showsBiome)
-            let preferredActionY = dungeonY + (compact ? 28 : 32)
-            return max(dungeonY + 24, min(preferredActionY, uiHeight - 34))
+        func villageY(showsBiome: Bool) -> Double {
+            dungeonY(showsBiome: showsBiome) + buttonGap
         }
 
-        func statusY(showsBiome: Bool) -> Double {
-            min(actionY(showsBiome: showsBiome) + 30, uiHeight - 10)
+        func actionY(showsBiome: Bool, showsProceduralOptions: Bool) -> Double {
+            let lastSelectorY = showsProceduralOptions
+                ? villageY(showsBiome: showsBiome)
+                : (showsBiome ? biomeY : worldTypeY)
+            let preferredActionY = lastSelectorY + (compact ? 24 : 32)
+            return max(lastSelectorY + 22, min(preferredActionY, uiHeight - 34))
+        }
+
+        func statusY(showsBiome: Bool, showsProceduralOptions: Bool) -> Double {
+            min(actionY(showsBiome: showsBiome, showsProceduralOptions: showsProceduralOptions) + 30,
+                uiHeight - 10)
+        }
+    }
+
+    private enum AccessibilityAction: String, CaseIterable {
+        case mode = "create.gameMode"
+        case difficulty = "create.difficulty"
+        case classes = "create.classes"
+        case size = "create.size"
+        case worldType = "create.worldType"
+        case biome = "create.biome"
+        case dungeons = "create.dungeons"
+        case villages = "create.villages"
+        case create = "create.confirm"
+        case cancel = "create.cancel"
+
+        var help: String {
+            switch self {
+            case .mode: return "Activate to switch Survival and Creative mode."
+            case .difficulty: return "Activate to choose the next difficulty."
+            case .classes: return "Activate to toggle RPG character classes."
+            case .size: return "Activate to choose the next map size."
+            case .worldType: return "Activate to choose the next world type."
+            case .biome: return "Activate to choose the next biome."
+            case .dungeons: return "Activate to choose the next dungeon density."
+            case .villages: return "Activate to choose the next village density."
+            case .create: return "Create this world."
+            case .cancel: return "Return without creating a world."
+            }
         }
     }
 
@@ -1566,16 +1605,21 @@ final class WorldCreateScreen: Screen {
     var realityDerived = false
     var singleBiome = Biome.plains
     var dungeonDensity = DungeonDensity.normal
+    var villageDensity = VillageDensity.normal
     var mapSize = WorldMapSize.medium
     var rpgClasses = true
     var creating = false
+    private weak var modeBtn: Button?
+    private weak var difficultyBtn: Button?
     private var classesBtn: Button!
     private var mapSizeBtn: Button!
     private var worldTypeBtn: Button!
     private var biomeBtn: Button!
     private var dungeonBtn: Button!
+    private var villageBtn: Button!
     private weak var createBtn: Button?
     private weak var cancelBtn: Button?
+    private var focusedAccessibilityAction: AccessibilityAction?
     private var lastUIHeight = 240.0
 
     init(lanHostRequest: LANHostLaunchRequest? = nil) {
@@ -1605,6 +1649,8 @@ final class WorldCreateScreen: Screen {
             self.difficulty = (self.difficulty + 1) % 4
             diffBtn.label = "Difficulty: \(DIFFICULTY_NAMES[self.difficulty])"
         }
+        self.modeBtn = modeBtn
+        self.difficultyBtn = diffBtn
         buttons.append(modeBtn)
         buttons.append(diffBtn)
         classesBtn = Button(cx - 100, layout.classesY, 78, 20, "", {})
@@ -1652,7 +1698,18 @@ final class WorldCreateScreen: Screen {
             self.updateWorldTypeLabels()
         }
         buttons.append(dungeonBtn)
-        let create = Button(cx - 100, layout.actionY(showsBiome: false), 98, 20, lanHostRequest == nil ? "Create World" : "Create & Host", { [weak self, weak ui, weak game] in
+        villageBtn = Button(cx - 100, layout.villageY(showsBiome: false), 200, 20, "", {})
+        villageBtn.onClick = { [weak self] in
+            guard let self else { return }
+            let cases = VillageDensity.allCases
+            let current = cases.firstIndex(of: self.villageDensity) ?? 2
+            self.villageDensity = cases[(current + 1) % cases.count]
+            self.updateWorldTypeLabels()
+        }
+        buttons.append(villageBtn)
+        let create = Button(cx - 100,
+                            layout.actionY(showsBiome: false, showsProceduralOptions: true),
+                            98, 20, lanHostRequest == nil ? "Create World" : "Create & Host", { [weak self, weak ui, weak game] in
             guard let self, let ui, let game, !self.creating else { return }
             self.creating = true
             if self.realityDerived, let coordinator = gAppDelegate?.realityDerivedCoordinator {
@@ -1677,13 +1734,16 @@ final class WorldCreateScreen: Screen {
                     difficulty: self.difficulty, worldPreset: self.worldPreset,
                     singleBiome: self.singleBiome,
                     dungeonDensity: self.dungeonDensity,
+                    villageDensity: self.villageDensity,
                     mapSize: self.mapSize,
                     rpgClassesEnabled: self.rpgClasses)
             }
             self.startPendingLANHost(game)
             ui.open(LoadingScreen(), game)
         })
-        let cancel = Button(cx + 2, layout.actionY(showsBiome: false), 98, 20, "Cancel", { [weak ui, weak game] in
+        let cancel = Button(cx + 2,
+                            layout.actionY(showsBiome: false, showsProceduralOptions: true),
+                            98, 20, "Cancel", { [weak ui, weak game] in
             guard let ui, let game else { return }
             ui.closeTop(game)
         })
@@ -1696,32 +1756,187 @@ final class WorldCreateScreen: Screen {
     override func draw(_ ui: UIManager, _ game: GameCore, _ partial: Double) {
         lastUIHeight = ui.height
         let layout = Layout(uiHeight: ui.height)
-        let showsBiome = worldPreset == .singleBiomeSurface
+        let showsBiome = !realityDerived && worldPreset == .singleBiomeSurface
+        let showsProceduralOptions = !realityDerived
+            && (worldPreset.supportsDungeonDensity || worldPreset.supportsVillageDensity)
         ui.drawDirtBg()
         ui.cv.drawTextCentered(lanHostRequest == nil ? "Create New World" : "Create World to Host", ui.width / 2, 10, 1)
         ui.cv.drawText("World Name", nameField.x, nameField.y - 10, 1, "#a0a0a0")
         ui.cv.drawText(realityDerived ? "Seed (outside selected area)" : "Seed",
                        seedField.x, seedField.y - 10, 1, "#a0a0a0")
         if creating {
-            ui.cv.drawTextCentered("Generating world...", ui.width / 2, layout.statusY(showsBiome: showsBiome), 1, "#ffff55")
+            ui.cv.drawTextCentered("Generating world...", ui.width / 2,
+                                   layout.statusY(showsBiome: showsBiome,
+                                                  showsProceduralOptions: showsProceduralOptions),
+                                   1, "#ffff55")
         }
         ui.drawButtons(self)
+        if let focusedAccessibilityAction, let mapped = actionButtons(),
+           let button = mapped.first(where: { $0.0 == focusedAccessibilityAction })?.1,
+           button.visible && button.enabled {
+            let light = game.settings.highContrast ? "#ffff00" : "#ffffff"
+            ui.cv.setStroke("#000000")
+            ui.cv.strokeRect(button.x + 1, button.y + 1, button.w - 2, button.h - 2)
+            ui.cv.setStroke(light)
+            ui.cv.strokeRect(button.x + 2, button.y + 2, button.w - 4, button.h - 4)
+        }
     }
 
     private func updateWorldTypeLabels() {
+        if !worldPreset.supportsDungeonDensity {
+            // Do not retain a setting that the selected terrain cannot honor:
+            // Superflat has no underground envelope, and Debug has no
+            // procedural world at all. Nether World retains the setting for
+            // its reachable ordinary Overworld.
+            dungeonDensity = .normal
+        }
+        if !worldPreset.supportsVillageDensity {
+            villageDensity = .normal
+        }
         classesBtn?.label = "Classes: \(rpgClasses ? "On" : "Off")"
         mapSizeBtn?.label = "Size: \(mapSize.displayName)"
         worldTypeBtn?.label = "World Type: \(realityDerived ? "Reality Derived" : worldPreset.displayName)"
         biomeBtn?.label = "Biome: \(singleBiomeDisplayName(singleBiome))"
         let showsBiome = !realityDerived && worldPreset == .singleBiomeSurface
         biomeBtn?.visible = showsBiome
+        let showsDungeonDensity = !realityDerived && worldPreset.supportsDungeonDensity
+        let showsVillageDensity = !realityDerived && worldPreset.supportsVillageDensity
+        let showsProceduralOptions = showsDungeonDensity || showsVillageDensity
         let layout = Layout(uiHeight: lastUIHeight)
         biomeBtn?.y = layout.biomeY
         dungeonBtn?.y = layout.dungeonY(showsBiome: showsBiome)
-        createBtn?.y = layout.actionY(showsBiome: showsBiome)
-        cancelBtn?.y = layout.actionY(showsBiome: showsBiome)
+        villageBtn?.y = layout.villageY(showsBiome: showsBiome)
+        createBtn?.y = layout.actionY(showsBiome: showsBiome,
+                                      showsProceduralOptions: showsProceduralOptions)
+        cancelBtn?.y = layout.actionY(showsBiome: showsBiome,
+                                      showsProceduralOptions: showsProceduralOptions)
         dungeonBtn?.label = "Dungeons: \(dungeonDensity.displayName)"
-        dungeonBtn?.visible = !realityDerived
+        dungeonBtn?.visible = showsDungeonDensity
+        villageBtn?.label = "Villages: \(villageDensity.displayName)"
+        villageBtn?.visible = showsVillageDensity
+        reconcileAccessibilityFocus()
+    }
+
+    private func actionButtons() -> [(AccessibilityAction, Button)]? {
+        guard let modeBtn, let difficultyBtn, let classesBtn, let mapSizeBtn,
+              let worldTypeBtn, let biomeBtn, let dungeonBtn, let villageBtn,
+              let createBtn, let cancelBtn else { return nil }
+        let mapped: [(AccessibilityAction, Button)] = [
+            (.mode, modeBtn), (.difficulty, difficultyBtn), (.classes, classesBtn),
+            (.size, mapSizeBtn), (.worldType, worldTypeBtn), (.biome, biomeBtn),
+            (.dungeons, dungeonBtn), (.villages, villageBtn), (.create, createBtn),
+            (.cancel, cancelBtn),
+        ]
+        guard mapped.count == AccessibilityAction.allCases.count,
+              Set(mapped.map { ObjectIdentifier($0.1) }).count == mapped.count,
+              mapped.allSatisfy({ $0.1.label.utf8.count <= 4_096 &&
+                  [$0.1.x, $0.1.y, $0.1.w, $0.1.h].allSatisfy(\.isFinite) &&
+                  $0.1.w > 0 && $0.1.h > 0 }) else { return nil }
+        return mapped
+    }
+
+    private func reconcileAccessibilityFocus() {
+        guard let mapped = actionButtons() else { focusedAccessibilityAction = nil; return }
+        let eligible = mapped.filter { $0.1.visible && $0.1.enabled }.map(\.0)
+        guard !eligible.isEmpty else { focusedAccessibilityAction = nil; return }
+        if focusedAccessibilityAction.map(eligible.contains) != true {
+            focusedAccessibilityAction = eligible[0]
+        }
+    }
+
+    private func activate(_ action: AccessibilityAction, _ ui: UIManager,
+                          _ game: GameCore) -> Bool {
+        guard ui.current() === self, let mapped = actionButtons(),
+              let button = mapped.first(where: { $0.0 == action })?.1,
+              mapped.filter({ $0.0 == action && $0.1.visible && $0.1.enabled }).count == 1 else {
+            return false
+        }
+        focusedAccessibilityAction = action
+        game.playUISound("ui.button.click")
+        button.onClick()
+        guard ui.current() === self else { return true }
+        reconcileAccessibilityFocus()
+        ui.renewTextAccessibilityPresentation(screen: self, game: game)
+        return true
+    }
+
+    override func onMouseDown(_ ui: UIManager, _ game: GameCore,
+                              _ mx: Double, _ my: Double, _ btn: Int) -> Bool {
+        let activatedButton = btn == 0 && buttons.contains { $0.contains(mx, my) }
+        let handled = super.onMouseDown(ui, game, mx, my, btn)
+        if activatedButton && handled && ui.current() === self {
+            reconcileAccessibilityFocus()
+            ui.renewTextAccessibilityPresentation(screen: self, game: game)
+        }
+        return handled
+    }
+
+    override func onKeyEvent(_ ui: UIManager, _ game: GameCore,
+                             _ event: ElysiumKeyEvent) -> Bool {
+        let key = event.terminal.rawValue
+        if key == "Tab" {
+            guard event.modifiers.isEmpty || event.modifiers == [.shift],
+                  let mapped = actionButtons() else { return true }
+            let eligible = mapped.filter { $0.1.visible && $0.1.enabled }.map(\.0)
+            guard !eligible.isEmpty else { focusedAccessibilityAction = nil; return true }
+            ui.clearTextReadiness(screen: self, clearLogicalFocus: true)
+            let current = focusedAccessibilityAction.flatMap(eligible.firstIndex) ?? 0
+            let delta = event.modifiers.contains(.shift) ? -1 : 1
+            focusedAccessibilityAction = eligible[(current + delta + eligible.count) % eligible.count]
+            ui.renewTextAccessibilityPresentation(screen: self, game: game)
+            if let focusedAccessibilityAction {
+                _ = ui.publishOrdinaryAccessibilityFocus(
+                    screen: self, game: game, descriptorID: focusedAccessibilityAction.rawValue)
+            }
+            return true
+        }
+        if ["Enter", "NumpadEnter", "Space"].contains(key) {
+            guard event.modifiers.isEmpty, !event.isRepeat,
+                  let focusedAccessibilityAction else { return true }
+            _ = activate(focusedAccessibilityAction, ui, game)
+            return true
+        }
+        return super.onKeyEvent(ui, game, event)
+    }
+
+    override func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore)
+        -> [TextEntryAccessibilityDescriptor] {
+        guard ui.current() === self, let mapped = actionButtons() else { return [] }
+        var descriptors = super.textAccessibilityDescriptors(ui, game)
+        for (action, button) in mapped where button.visible {
+            descriptors.append(TextEntryAccessibilityDescriptor(
+                id: action.rawValue, role: .button, label: button.label, value: "",
+                help: action.help, frame: (button.x, button.y, button.w, button.h),
+                enabled: button.enabled, focused: focusedAccessibilityAction == action,
+                insertionUTF16Offset: nil, focusable: button.enabled,
+                actionable: button.enabled))
+        }
+        return descriptors
+    }
+
+    override func focusTextAccessibilityElement(_ id: String, _ ui: UIManager,
+                                                _ game: GameCore) -> Bool {
+        guard ui.current() === self, let action = AccessibilityAction(rawValue: id),
+              textAccessibilityDescriptors(ui, game).filter({
+                  $0.id == id && $0.enabled && $0.focusable
+              }).count == 1 else { return false }
+        ui.clearTextReadiness(screen: self, clearLogicalFocus: true)
+        focusedAccessibilityAction = action
+        // The logical focus is valid in headless/unit-test UI contexts too;
+        // native AppKit publication is a best-effort notification once a
+        // focused game view exists.
+        _ = ui.publishOrdinaryAccessibilityFocus(
+            screen: self, game: game, descriptorID: action.rawValue)
+        return true
+    }
+
+    override func performTextAccessibilityAction(_ id: String, _ ui: UIManager,
+                                                 _ game: GameCore) -> Bool {
+        guard let action = AccessibilityAction(rawValue: id),
+              textAccessibilityDescriptors(ui, game).filter({
+                  $0.id == id && $0.enabled && $0.actionable
+              }).count == 1 else { return false }
+        return activate(action, ui, game)
     }
 
     private func startPendingLANHost(_ game: GameCore) {

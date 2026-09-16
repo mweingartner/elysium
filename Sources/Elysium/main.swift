@@ -686,9 +686,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         if ProcessInfo.processInfo.environment["ELYSIUM_AUTOLOAD"] != nil {
             if let seedText = ProcessInfo.processInfo.environment["ELYSIUM_NEWWORLD"] {
                 let dungeonDensity = normalizedDungeonDensity(ProcessInfo.processInfo.environment["ELYSIUM_DUNGEON_DENSITY"])
+                let villageDensity = normalizedVillageDensity(ProcessInfo.processInfo.environment["ELYSIUM_VILLAGE_DENSITY"])
                 game.createWorld(name: "WGTest-\(seedText)", seedText: seedText,
                                  mode: GameMode.survival, difficulty: 2,
-                                 dungeonDensity: dungeonDensity)
+                                 dungeonDensity: dungeonDensity,
+                                 villageDensity: villageDensity)
             } else if let rec = game.listWorlds().sorted(by: { $0.lastPlayed > $1.lastPlayed }).first {
                 game.loadWorld(rec.id)
             } else {

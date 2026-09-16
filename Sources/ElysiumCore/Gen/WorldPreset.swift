@@ -35,6 +35,51 @@ public enum WorldPreset: String, CaseIterable, Equatable {
     public var startingDimension: Dim {
         self == .netherWorld ? .nether : .overworld
     }
+
+    /// Whether an Overworld village plan can materialize for this preset.
+    /// Superflat deliberately retains villages; a Nether World retains its
+    /// world-level choice for the reachable Overworld. Only Debug has no
+    /// meaningful village generator anywhere.
+    public var supportsVillageDensity: Bool {
+        switch self {
+        case .debugAllBlockStates:
+            return false
+        default:
+            return true
+        }
+    }
+
+    /// Whether the selected starting world has a dungeon generator with a
+    /// meaningful underground terrain envelope. Superflat has no such volume;
+    /// Nether World retains the world-level choice for its reachable
+    /// Overworld, whose ordinary generator does honor it.
+    public var supportsDungeonDensity: Bool {
+        switch self {
+        case .flat, .debugAllBlockStates:
+            return false
+        default:
+            return true
+        }
+    }
+
+    /// Compatibility summary for callers that only need to know whether at
+    /// least one procedural-density control is meaningful. New UI and
+    /// persistence code must use the specific property above.
+    public var supportsProceduralStructureDensities: Bool {
+        supportsDungeonDensity || supportsVillageDensity
+    }
+}
+
+/// Persist only choices that the selected preset can actually generate. This
+/// is shared by settings construction, save decoding/encoding, direct API
+/// callers, and the create screen so stale records cannot reintroduce an
+/// unreachable option.
+public func canonicalStructureDensities(for preset: WorldPreset,
+                                        dungeon: DungeonDensity,
+                                        village: VillageDensity) -> (dungeon: DungeonDensity,
+                                                                       village: VillageDensity) {
+    (preset.supportsDungeonDensity ? dungeon : .normal,
+     preset.supportsVillageDensity ? village : .normal)
 }
 
 public func normalizedWorldPreset(_ raw: String?) -> WorldPreset {
@@ -109,18 +154,30 @@ public struct WorldGenerationSettings: Equatable {
     public var preset: WorldPreset
     public var singleBiome: Biome
     public var dungeonDensity: DungeonDensity
+    public var villageDensity: VillageDensity
 
     public init(preset: WorldPreset = .normal, singleBiome: Biome = .plains,
-                dungeonDensity: DungeonDensity = .normal) {
+                dungeonDensity: DungeonDensity = .normal,
+                villageDensity: VillageDensity = .normal) {
         self.preset = preset
         self.singleBiome = singleBiome
-        self.dungeonDensity = dungeonDensity
+        let canonical = canonicalStructureDensities(for: preset, dungeon: dungeonDensity,
+                                                     village: villageDensity)
+        self.dungeonDensity = canonical.dungeon
+        self.villageDensity = canonical.village
     }
 
-    public init(presetID: String?, singleBiomeID: String?, dungeonDensityLevel: Int? = nil) {
+    public init(presetID: String?, singleBiomeID: String?, dungeonDensityLevel: Int? = nil,
+                villageDensityLevel: Int? = nil) {
         preset = normalizedWorldPreset(presetID)
         singleBiome = normalizedSingleBiome(singleBiomeID)
-        dungeonDensity = normalizedDungeonDensity(dungeonDensityLevel)
+        let canonical = canonicalStructureDensities(
+            for: preset,
+            dungeon: normalizedDungeonDensity(dungeonDensityLevel),
+            village: normalizedVillageDensity(villageDensityLevel)
+        )
+        dungeonDensity = canonical.dungeon
+        villageDensity = canonical.village
     }
 
     public static let normal = WorldGenerationSettings()
@@ -128,6 +185,6 @@ public struct WorldGenerationSettings: Equatable {
     /// Stable, complete identity for generation caches. Keep this explicit so a
     /// future setting cannot silently alias an older structure plan.
     public var cacheIdentity: String {
-        "\(preset.rawValue)|\(biomeID(singleBiome))|dungeons:\(dungeonDensity.rawValue)"
+        "\(preset.rawValue)|\(biomeID(singleBiome))|dungeons:\(dungeonDensity.rawValue)|villages:\(villageDensity.rawValue)"
     }
 }

@@ -95,7 +95,7 @@ final class SunlightBurnTests: XCTestCase {
         XCTAssertFalse(zombie.dead)
     }
 
-    func testHuskBurnsInDirectSunlightLikeEveryNonCreeperMonster() throws {
+    func testHuskBurnsInDirectSunlight() throws {
         let world = makeOverworld()
         world.dayTime = 1_000
         world.gameRules["doDaylightCycle"] = 0
@@ -110,7 +110,7 @@ final class SunlightBurnTests: XCTestCase {
         XCTAssertFalse(husk.dead)
     }
 
-    func testEveryRegisteredMonsterUsesUniformSunlightReaction() throws {
+    func testEveryRegisteredMonsterUsesExplicitSunlightClassification() throws {
         // Keep this inventory explicit so adding a hostile factory requires a
         // deliberate sunlight classification update rather than silently
         // inheriting whichever registry snapshot a concurrent test observes.
@@ -137,6 +137,9 @@ final class SunlightBurnTests: XCTestCase {
                 XCTAssertNotNil(creeper.fuse, "creeper should start its rapid sunlight fuse")
                 XCTAssertEqual(creeper.fuse?.trigger, .sunlight)
                 XCTAssertEqual(creeper.fireTicks, 0)
+            } else if type == "witch" {
+                XCTAssertFalse(monster.burnsInSun, "witches must opt out of daylight burning")
+                XCTAssertEqual(monster.fireTicks, 0, "witches must not ignite in direct sunlight")
             } else {
                 XCTAssertGreaterThan(monster.fireTicks, 0, "\(type) should ignite")
             }
@@ -144,6 +147,21 @@ final class SunlightBurnTests: XCTestCase {
         XCTAssertGreaterThan(checked.count, 20, "the registry-wide assertion must cover the hostile catalog")
         XCTAssertTrue(checked.contains("husk"))
         XCTAssertTrue(checked.contains("creeper"))
+        XCTAssertTrue(checked.contains("witch"))
+    }
+
+    func testExposedWitchDoesNotIgniteAtVisibleSunrise() throws {
+        let world = makeOverworld()
+        world.dayTime = 23_000
+        world.gameRules["doDaylightCycle"] = 0
+        let witch = try XCTUnwrap(spawnMob(world, "witch", 0.5, 64, 0.5, SpawnOpts()) as? Witch)
+        witch.persistent = true
+
+        tick(world, count: 1)
+
+        XCTAssertEqual(witch.fireTicks, 0)
+        XCTAssertEqual(witch.health, witch.maxHealth)
+        XCTAssertFalse(witch.dead)
     }
 
     func testDaylightIgnitionParticleDensityIsCappedAcrossACrowd() throws {

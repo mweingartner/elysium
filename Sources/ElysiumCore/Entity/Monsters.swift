@@ -482,50 +482,177 @@ open class Slime: Monster {
 // WITCH --------------------------------------------------------------------------
 public final class Witch: Monster {
     public override var type: String { "witch" }
+
+    /// A witch spends the whole 1.6 second (32-tick) use window drinking.  Keep
+    /// the chosen potion separately from its remaining time: the state must
+    /// survive a chunk save, controls its movement penalty, and is the only potion
+    /// eligible for the conditional death drop.
+    private static let drinkDuration = 32
+    private static let defensivePotionIDs = [
+        "water_breathing", "fire_resistance", "healing", "swiftness",
+    ]
+
     public var drinkTime = 0
+    public var drinkingPotionId: String?
+
+    private var hasValidDrinkState: Bool {
+        guard drinkTime > 0 && drinkTime <= Self.drinkDuration,
+              let potionId = drinkingPotionId else { return false }
+        return Self.defensivePotionIDs.contains(potionId)
+    }
+
     public override init(world: World) {
         super.init(world: world)
         width = 0.6; height = 1.95
         maxHealth = 26; health = 26
         speed = 0.1
+        burnsInSun = false
         goals.add(FloatGoal(self, 0))
         goals.add(RangedAttackGoal(self, 2, 50, 10, { [unowned self] t, _ in
-            let pot = ThrownPotion(world: self.world)
-            let dy = t.y + t.height * 0.5 - (self.y + 1.4)
-            pot.potionId = t.hasEffect("slowness") ? "harming" : (self.distanceToSq(t) > 64 ? "slowness" : "poison")
-            let horiz = ((t.x - self.x) * (t.x - self.x) + (t.z - self.z) * (t.z - self.z)).squareRoot()
-            pot.shootFrom(self, -detAtan2(dy + 0.3, horiz), detAtan2(-(t.x - self.x), t.z - self.z), 0.75, 8)
-            pot.gravity = 0.05
-            self.world.addEntity(pot)
-            self.world.hooks.playSound("entity.witch.throw", self.x, self.y, self.z, 1, 1)
+            self.throwPotion(at: t)
         }))
         goals.add(StrollGoal(self, 6, 0.8))
         goals.add(LookAtPlayerGoal(self, 7))
         targetGoals.add(HurtByTargetGoal(self, 1))
         targetGoals.add(NearestTargetGoal(self, 2, isPlayerTarget, 16))
     }
-    public override func tick() {
-        super.tick()
-        if dead || deathTime > 0 { return }
-        // drink potions defensively
-        if drinkTime > 0 { drinkTime -= 1 }
-        else {
-            if fireTicks > 0 && !hasEffect("fire_resistance") {
-                addEffect("fire_resistance", 400, 0)
-                drinkTime = 40
-            } else if health < maxHealth * 0.75 && rng.nextFloat() < 0.05 {
-                heal(6)
-                drinkTime = 40
-                world.hooks.playSound("entity.witch.drink", x, y, z, 1, 1)
-            }
+
+    /// The Java-edition target ordering is significant: slowness at range,
+    /// poison against a healthy unpoisoned target, then a close-range weakness
+    /// roll, otherwise harming.  This uses the entity stream exclusively.
+    func selectOffensivePotion(for target: LivingEntity) -> String {
+        let distance = distanceToSq(target).squareRoot()
+        if distance >= 8 && !target.hasEffect("slowness") { return "slowness" }
+        if target.health >= 8 && !target.hasEffect("poison") { return "poison" }
+        if distance <= 3 && !target.hasEffect("weakness") && rng.nextFloat() < 0.25 { return "weakness" }
+        return "harming"
+    }
+
+    /// Returns at most one defensive potion per idle tick.  Conditions that do
+    /// not apply do not consume RNG, preserving a deterministic entity stream.
+    func selectDefensivePotion() -> String? {
+        if underwater && !hasEffect("water_breathing") && rng.nextFloat() < 0.15 {
+            return "water_breathing"
+        }
+        if fireTicks > 0 && !hasEffect("fire_resistance") && rng.nextFloat() < 0.15 {
+            return "fire_resistance"
+        }
+        if health < maxHealth && rng.nextFloat() < 0.05 {
+            return "healing"
+        }
+        if let target, distanceToSq(target) > 121, !hasEffect("speed"), rng.nextFloat() < 0.5 {
+            return "swiftness"
+        }
+        return nil
+    }
+
+    /// Java witches continue navigating while drinking, but their movement
+    /// speed is reduced by 25% for the valid 32-tick use window.
+    public override func effectiveSpeed() -> Double {
+        super.effectiveSpeed() * (hasValidDrinkState ? 0.75 : 1)
+    }
+
+    @discardableResult
+    func startDrinking(_ potionId: String) -> Bool {
+        guard drinkTime == 0, Self.defensivePotionIDs.contains(potionId) else { return false }
+        drinkingPotionId = potionId
+        drinkTime = Self.drinkDuration
+        world.hooks.playSound("entity.witch.drink", x, y, z, 1, 1)
+        return true
+    }
+
+    private func clearDrinkingState() {
+        drinkTime = 0
+        drinkingPotionId = nil
+    }
+
+    private func finishDrinking() {
+        guard let potionId = drinkingPotionId,
+              Self.defensivePotionIDs.contains(potionId) else {
+            clearDrinkingState()
+            return
+        }
+        clearDrinkingState()
+        for effect in potionDef(potionId).effects {
+            addEffect(effect.effect, effect.duration, effect.amplifier)
         }
     }
+
+    private func throwPotion(at target: LivingEntity) {
+        guard !hasValidDrinkState else { return }
+        let pot = ThrownPotion(world: world)
+        pot.owner = self
+        let dy = target.y + target.height * 0.5 - (y + 1.4)
+        pot.potionId = selectOffensivePotion(for: target)
+        let horiz = ((target.x - x) * (target.x - x) + (target.z - z) * (target.z - z)).squareRoot()
+        pot.shootFrom(self, -detAtan2(dy + 0.3, horiz), detAtan2(-(target.x - x), target.z - z), 0.75, 8)
+        pot.gravity = 0.05
+        world.addEntity(pot)
+        world.hooks.playSound("entity.witch.throw", x, y, z, 1, 1)
+    }
+
+    public override func tick() {
+        // Pick a defensive response before `Mob.mobTick()` so the movement
+        // penalty begins on the same tick as the drink action.
+        if !dead && deathTime <= 0 {
+            if drinkTime > 0 && !hasValidDrinkState { clearDrinkingState() }
+            if drinkTime == 0, let potionId = selectDefensivePotion() {
+                _ = startDrinking(potionId)
+            }
+        }
+        super.tick()
+        if dead || deathTime > 0 { return }
+        guard hasValidDrinkState else { return }
+        drinkTime -= 1
+        if drinkTime == 0 {
+            finishDrinking()
+        }
+    }
+
+    public override func save() -> [String: Any] {
+        var d = super.save()
+        if hasValidDrinkState, let potionId = drinkingPotionId {
+            d["witchDrinkTime"] = drinkTime
+            d["witchDrinkPotion"] = potionId
+        }
+        return d
+    }
+
+    public override func load(_ d: [String: Any]) {
+        super.load(d)
+        let time = inum(d["witchDrinkTime"])
+        guard (1...Self.drinkDuration).contains(time),
+              let potionId = d["witchDrinkPotion"] as? String,
+              Self.defensivePotionIDs.contains(potionId) else {
+            clearDrinkingState()
+            return
+        }
+        drinkTime = time
+        drinkingPotionId = potionId
+    }
+
+    public override func dropLoot(_ looting: Int, _ byPlayer: Bool) {
+        // The carried defensive potion is distinct from the ordinary material
+        // table.  It can only be rolled once during the idempotent death path,
+        // while a player kill catches the witch actively drinking it.
+        if byPlayer, hasValidDrinkState, let potionId = drinkingPotionId,
+           rng.nextFloat() < min(1, 0.085 + Double(max(0, looting)) * 0.01),
+           itemExists("potion") {
+            var data = StackData()
+            data.potion = potionId
+            dropStack(ItemStack(iid("potion"), 1, data: data))
+        }
+        super.dropLoot(looting, byPlayer)
+    }
+
     public override func drops() -> [DropEntry] {
         [
             DropEntry("glass_bottle", min: 0, max: 2, lootingBonus: 1),
             DropEntry("glowstone_dust", min: 0, max: 2, lootingBonus: 1),
             DropEntry("gunpowder", min: 0, max: 2, lootingBonus: 1),
-            DropEntry("redstone", min: 0, max: 2, lootingBonus: 1),
+            // Java 1.21's witch revision guarantees a meaningful redstone
+            // reward independently of the ordinary ingredient table.
+            DropEntry("redstone", min: 4, max: 8),
             DropEntry("spider_eye", min: 0, max: 2, chance: 0.5),
             DropEntry("sugar", min: 0, max: 2, chance: 0.5),
             DropEntry("stick", min: 0, max: 2, chance: 0.5),

@@ -19,6 +19,7 @@ struct VillageStyle {
     var wall: Int
     var path: Int
     var fence: Int
+    var fenceGate: Int
     var door: UInt16
     var window: Int
     var farmFrame: Int
@@ -30,7 +31,8 @@ private func styleFor(_ biomeId: Int) -> VillageStyle? {
         VillageStyle(
             planks: Int(cell(bid("\(wood)_planks"))), log: Int(cell(bid("\(wood)_log"))),
             stairs: Int(cell(bid("\(wood)_stairs"))), slab: Int(cell(bid("\(wood)_slab"))),
-            wall: wallBlock, path: path, fence: Int(cell(bid("\(wood)_fence"))), door: bid("\(wood)_door"),
+            wall: wallBlock, path: path, fence: Int(cell(bid("\(wood)_fence"))),
+            fenceGate: Int(cell(bid("\(wood)_fence_gate"))), door: bid("\(wood)_door"),
             window: window, farmFrame: Int(cell(bid("\(wood)_log"))),
             roofStairs: Int(cell(bid("\(wood)_stairs")))
         )
@@ -53,70 +55,137 @@ private func styleFor(_ biomeId: Int) -> VillageStyle? {
     case Biome.taiga.rawValue, Biome.oldGrowthPineTaiga.rawValue, Biome.oldGrowthSpruceTaiga.rawValue:
         return mk("spruce", Int(cell(B.cobblestone)), Int(cell(B.dirt_path)))
     case Biome.snowyPlains.rawValue, Biome.snowyTaiga.rawValue:
-        return mk("spruce", Int(cell(B.snow_block)), Int(cell(B.snow_block)), Int(cell(B.glass_pane)))
+        // A snow-block road is visually indistinguishable from its terrain.
+        // Snow is deliberately excluded after structures are stamped, so a
+        // dirt path remains a readable and walkable route through the village.
+        return mk("spruce", Int(cell(B.snow_block)), Int(cell(B.dirt_path)), Int(cell(B.glass_pane)))
     default:
         return nil
     }
 }
 
-private func houseSmall(_ b: Builder, _ x: Int, _ y: Int, _ z: Int, _ st: VillageStyle, _ rot: Int, _ sink: ChunkSink) {
-    // 5×5 footprint, walls 3 high, stair roof
-    for dz in 0..<5 { for dx in 0..<5 { b.foundation(x + dx, y - 1, z + dz, st.wall) } }
-    b.fill(x, y, z, x + 4, y + 2, z + 4, AIR)
-    b.fill(x + 1, y + 3, z + 1, x + 3, y + 3, z + 3, AIR)
-    // walls
-    for h in 0..<3 {
-        for d in 0..<5 {
-            b.set(x + d, y + h, z, h == 1 && d == 2 ? st.window : st.planks)
-            b.set(x + d, y + h, z + 4, h == 1 && d == 2 ? st.window : st.planks)
-            b.set(x, y + h, z + d, h == 1 && d == 2 ? st.window : st.planks)
-            b.set(x + 4, y + h, z + d, st.planks)
-        }
-    }
-    for (cx2, cz2) in [(0, 0), (4, 0), (0, 4), (4, 4)] {
-        for h in 0..<3 { b.set(x + cx2, y + h, z + cz2, st.log) }
-    }
-    // slab roof with planks core
-    for dz in -1...5 { for dx in -1...5 {
-        b.set(x + dx, y + 3, z + dz, (dx >= 1 && dx <= 3 && dz >= 1 && dz <= 3) ? st.planks : st.slab)
-    } }
-    b.set(x + 2, y + 4, z + 2, st.slab)
-    // door (south face center)
-    let doorFace = rotF(0, rot)
-    b.set(x + 2, y, z, Int(cell(st.door, doorFace)))
-    b.set(x + 2, y + 1, z, Int(cell(st.door, 8)))
-    // interior: bed + crafting
-    b.set(x + 3, y, z + 3, Int(cell(B.red_bed, 2 | 4)))
-    b.set(x + 3, y, z + 2, Int(cell(B.red_bed, 2)))
-    b.set(x + 1, y, z + 3, Int(cell(B.crafting_table)))
-    b.set(x + 1, y + 2, z + 1, Int(cell(B.torch)))
-    sink.addEntity(EntitySpec(mob: "villager", x: Double(x) + 2.5, y: Double(y), z: Double(z) + 2.5))
+/// Maps a square house's local coordinates to world space. Local negative Z is
+/// the front of the house; aligning it with the adjacent radial road prevents
+/// a connector from ever crossing the house it serves.
+private func villageHousePoint(_ centerX: Int, _ centerZ: Int,
+                               _ localX: Int, _ localZ: Int, _ facing: Int) -> (Int, Int) {
+    let right = rightOf(facing)
+    return (centerX + localX * FACE_DX[right] - localZ * FACE_DX[facing],
+            centerZ + localX * FACE_DZ[right] - localZ * FACE_DZ[facing])
 }
 
-private func houseJob(_ b: Builder, _ x: Int, _ y: Int, _ z: Int, _ st: VillageStyle, _ jobBlock: Int, _ lootTable: String?, _ sink: ChunkSink) {
-    for dz in 0..<6 { for dx in 0..<6 { b.foundation(x + dx, y - 1, z + dz, st.wall) } }
-    b.fill(x, y, z, x + 5, y + 3, z + 5, AIR)
-    for h in 0..<3 {
-        for d in 0..<6 {
-            b.set(x + d, y + h, z, h == 1 && (d == 2 || d == 3) ? st.window : st.planks)
-            b.set(x + d, y + h, z + 5, h == 1 && d == 2 ? st.window : st.planks)
-            b.set(x, y + h, z + d, h == 1 && d == 3 ? st.window : st.planks)
-            b.set(x + 5, y + h, z + d, st.planks)
+/// A complete square dwelling centred on a grounded pad. It is deliberately
+/// rotated as a single unit: foundation, door pair, outward-facing stair,
+/// roof, furniture and residents always agree on the same front.
+private func houseSmall(_ b: Builder, _ centerX: Int, _ y: Int, _ centerZ: Int,
+                        _ st: VillageStyle, _ facing: Int, child: Bool = false) {
+    func p(_ localX: Int, _ localZ: Int) -> (Int, Int) {
+        villageHousePoint(centerX, centerZ, localX, localZ, facing)
+    }
+    for localZ in -2...2 {
+        for localX in -2...2 {
+            let point = p(localX, localZ)
+            b.foundation(point.0, y - 1, point.1, st.wall)
+            b.set(point.0, y, point.1, AIR)
+            b.set(point.0, y + 1, point.1, AIR)
+            b.set(point.0, y + 2, point.1, AIR)
         }
     }
-    for (cx2, cz2) in [(0, 0), (5, 0), (0, 5), (5, 5)] {
-        for h in 0..<3 { b.set(x + cx2, y + h, z + cz2, st.log) }
+    for h in 0..<3 {
+        for localZ in -2...2 {
+            for localX in -2...2 where abs(localX) == 2 || abs(localZ) == 2 {
+                let point = p(localX, localZ)
+                let window = h == 1 && ((localZ == -2 && localX == 0)
+                    || (localZ == 2 && localX == 0) || (localX == -2 && localZ == 0))
+                b.set(point.0, y + h, point.1, window ? st.window : st.planks)
+            }
+        }
     }
-    for dz in -1...6 { for dx in -1...6 {
-        b.set(x + dx, y + 3, z + dz, (dx >= 1 && dx <= 4 && dz >= 1 && dz <= 4) ? st.planks : st.slab)
-    } }
-    b.set(x + 2, y, z, Int(cell(st.door, 0)))
-    b.set(x + 2, y + 1, z, Int(cell(st.door, 8)))
-    b.set(x + 4, y, z + 4, jobBlock)
-    if let lootTable { b.chest(x + 1, y, z + 4, 3, lootTable) }
-    b.set(x + 1, y + 2, z + 1, Int(cell(B.torch)))
-    b.set(x + 4, y + 2, z + 1, Int(cell(B.torch)))
-    sink.addEntity(EntitySpec(mob: "villager", x: Double(x) + 3.5, y: Double(y), z: Double(z) + 3.5))
+    for (localX, localZ) in [(-2, -2), (2, -2), (-2, 2), (2, 2)] {
+        let point = p(localX, localZ)
+        for h in 0..<3 { b.set(point.0, y + h, point.1, st.log) }
+    }
+    for localZ in -3...3 {
+        for localX in -3...3 {
+            let point = p(localX, localZ)
+            b.set(point.0, y + 3, point.1,
+                  abs(localX) <= 1 && abs(localZ) <= 1 ? st.planks : st.slab)
+        }
+    }
+    b.set(centerX, y + 4, centerZ, st.slab)
+
+    let door = p(0, -2)
+    b.set(door.0, y, door.1, Int(cell(st.door, facing)))
+    b.set(door.0, y + 1, door.1, Int(cell(st.door, 8)))
+    let step = p(0, -3)
+    b.foundation(step.0, y - 2, step.1, st.wall)
+    // The stair's high half belongs beside the door, so it faces back toward
+    // the house rather than away from the approach.
+    b.set(step.0, y - 1, step.1, st.stairs | FACE_OPP[facing])
+
+    let bedFoot = p(1, 0), bedHead = p(1, 1), crafting = p(-1, 1), torch = p(-1, -1)
+    let bedFacing = FACE_OPP[facing]
+    b.set(bedFoot.0, y, bedFoot.1, Int(cell(B.red_bed, bedFacing)))
+    b.set(bedHead.0, y, bedHead.1, Int(cell(B.red_bed, bedFacing | 4)))
+    b.set(crafting.0, y, crafting.1, Int(cell(B.crafting_table)))
+    b.set(torch.0, y, torch.1, Int(cell(B.torch)))
+    b.mob("villager", centerX, y, centerZ)
+    if child {
+        let childPoint = p(-1, 0)
+        b.mob("villager", childPoint.0, y, childPoint.1,
+              ["baby": .bool(true), "persistent": .bool(true)])
+    }
+}
+
+private func houseJob(_ b: Builder, _ centerX: Int, _ y: Int, _ centerZ: Int,
+                      _ st: VillageStyle, _ facing: Int, _ jobBlock: Int, _ lootTable: String?) {
+    func p(_ localX: Int, _ localZ: Int) -> (Int, Int) {
+        villageHousePoint(centerX, centerZ, localX, localZ, facing)
+    }
+    for localZ in -2...2 {
+        for localX in -2...2 {
+            let point = p(localX, localZ)
+            b.foundation(point.0, y - 1, point.1, st.wall)
+            b.set(point.0, y, point.1, AIR)
+            b.set(point.0, y + 1, point.1, AIR)
+            b.set(point.0, y + 2, point.1, AIR)
+        }
+    }
+    for h in 0..<3 {
+        for localZ in -2...2 {
+            for localX in -2...2 where abs(localX) == 2 || abs(localZ) == 2 {
+                let point = p(localX, localZ)
+                let window = h == 1 && ((localZ == -2 && localX == 0)
+                    || (localZ == 2 && localX == 0) || (localX == -2 && localZ == 0))
+                b.set(point.0, y + h, point.1, window ? st.window : st.planks)
+            }
+        }
+    }
+    for (localX, localZ) in [(-2, -2), (2, -2), (-2, 2), (2, 2)] {
+        let point = p(localX, localZ)
+        for h in 0..<3 { b.set(point.0, y + h, point.1, st.log) }
+    }
+    for localZ in -3...3 {
+        for localX in -3...3 {
+            let point = p(localX, localZ)
+            b.set(point.0, y + 3, point.1,
+                  abs(localX) <= 1 && abs(localZ) <= 1 ? st.planks : st.slab)
+        }
+    }
+    b.set(centerX, y + 4, centerZ, st.slab)
+
+    let door = p(0, -2)
+    b.set(door.0, y, door.1, Int(cell(st.door, facing)))
+    b.set(door.0, y + 1, door.1, Int(cell(st.door, 8)))
+    let step = p(0, -3)
+    b.foundation(step.0, y - 2, step.1, st.wall)
+    b.set(step.0, y - 1, step.1, st.stairs | FACE_OPP[facing])
+    let job = p(1, 1), chest = p(-1, 1), torchA = p(-1, -1), torchB = p(1, -1)
+    b.set(job.0, y, job.1, jobBlock)
+    if let lootTable { b.chest(chest.0, y, chest.1, facing, lootTable) }
+    b.set(torchA.0, y, torchA.1, Int(cell(B.torch)))
+    b.set(torchB.0, y, torchB.1, Int(cell(B.torch)))
+    b.mob("villager", centerX, y, centerZ)
 }
 
 private func farm(_ b: Builder, _ x: Int, _ y: Int, _ z: Int, _ st: VillageStyle, _ rng: Rng) {
@@ -137,6 +206,56 @@ private func farm(_ b: Builder, _ x: Int, _ y: Int, _ z: Int, _ st: VillageStyle
         }
     }
     b.set(x, y, z, Int(cell(B.composter)))
+}
+
+private func villageLivestockPen(_ b: Builder, _ x: Int, _ y: Int, _ z: Int,
+                                 _ st: VillageStyle, _ livestock: [String]) {
+    for dz in 0...6 {
+        for dx in 0...6 {
+            let px = x + dx, pz = z + dz
+            let edge = dx == 0 || dx == 6 || dz == 0 || dz == 6
+            b.foundation(px, y - 1, pz, st.wall, 6)
+            if edge {
+                b.set(px, y, pz, st.fence)
+                // A camel has a 1.5-block step height.  A second rail makes
+                // the enclosure actually contain every livestock type rather
+                // than letting desert camels walk over a nominal one-high
+                // fence.
+                b.set(px, y + 1, pz, st.fence)
+            } else {
+                b.set(px, y, pz, AIR)
+                b.set(px, y + 1, pz, AIR)
+                // Camels are taller than the ordinary two-block livestock;
+                // clearing a third interior cell keeps desert pens genuinely
+                // usable rather than spawning their riders into a roof.
+                b.set(px, y + 2, pz, AIR)
+            }
+        }
+    }
+    // A real, interactive gate faces the path rather than an invisible gap.
+    b.set(x + 3, y, z, st.fenceGate)
+    // Leave a two-block pedestrian opening when the gate is opened, while the
+    // lintel keeps a 2.375-block camel from stepping over the gate itself.
+    b.set(x + 3, y + 1, z, AIR)
+    b.set(x + 3, y + 2, z, st.fence)
+    let spawnSites = [(2, 2), (4, 2), (2, 4), (4, 4)]
+    for (index, mob) in livestock.enumerated() {
+        let site = spawnSites[index % spawnSites.count]
+        b.mob(mob, x + site.0, y, z + site.1, ["persistent": .bool(true)])
+    }
+}
+
+private func villageLivestock(_ biomeID: Int, _ rng: Rng) -> [String] {
+    switch biomeID {
+    case Biome.desert.rawValue:
+        return ["camel", "donkey"]
+    case Biome.snowyPlains.rawValue, Biome.snowyTaiga.rawValue:
+        return ["goat", "sheep"]
+    default:
+        let choices = ["cow", "sheep", "pig", "chicken"]
+        return [choices[rng.nextInt(choices.count)], choices[rng.nextInt(choices.count)],
+                choices[rng.nextInt(choices.count)]]
+    }
 }
 
 private func well(_ b: Builder, _ x: Int, _ y: Int, _ z: Int, _ st: VillageStyle) {
@@ -167,6 +286,8 @@ private let villageCenterOffsets: [(Int, Int)] = [
     (0, 0), (-16, 0), (16, 0), (0, -16), (0, 16),
     (-16, -16), (16, -16), (-16, 16), (16, 16),
     (-32, 0), (32, 0), (0, -32), (0, 32),
+    (-48, 0), (48, 0), (0, -48), (0, 48),
+    (-32, -32), (32, -32), (-32, 32), (32, 32),
 ]
 
 private struct VillageXZFootprint {
@@ -187,13 +308,218 @@ private struct VillageXZFootprint {
     }
 }
 
+/// A radial village street.  Keeping the road's build box independent from
+/// lamps lets a rejected lamp site stay out of terrain validation instead of
+/// incorrectly discarding an otherwise sound settlement.
+private struct VillageRoadSpec {
+    let dx: Int
+    let dz: Int
+    let start: Int
+    let length: Int
+    /// One common walking elevation for the full three-block road width at
+    /// each radial position.  It is a minimal one-block-grade envelope above
+    /// the real terrain, so a road never tunnels into a contour or asks the
+    /// player to jump a whole block.
+    let levels: [Int]
+    let footprint: VillageXZFootprint
+}
+
+/// Builds the smallest road deck that sits on or above every terrain column
+/// beneath the three-wide street while changing by at most one block per
+/// forward step.  This is the discrete upper Lipschitz envelope of the ground
+/// profile.  A bounded four-block foundation keeps it a hillside road rather
+/// than an implausible elevated bridge.
+private func villageRoadLevels(_ ctx: GenCtx, _ centerX: Int, _ centerZ: Int,
+                               _ dx: Int, _ dz: Int, _ start: Int, _ length: Int,
+                               _ plazaY: Int) -> [Int]? {
+    let end = start + length
+    var surface: [Int] = []
+    var laneSurfaces: [[Int]] = []
+    surface.reserveCapacity(length + 1)
+    laneSurfaces.reserveCapacity(length + 1)
+    for i in start...end {
+        var row: [Int] = []
+        row.reserveCapacity(3)
+        for w in -1...1 {
+            let x = centerX + dx * i + (dz != 0 ? w : 0)
+            let z = centerZ + dz * i + (dx != 0 ? w : 0)
+            guard let y = dryVillageSurface(ctx, x, z) else { return nil }
+            row.append(y)
+        }
+        guard let rowTop = row.max() else { return nil }
+        surface.append(rowTop)
+        laneSurfaces.append(row)
+    }
+    var levels = surface
+    for target in levels.indices {
+        for source in surface.indices {
+            levels[target] = max(levels[target], surface[source] - abs(source - target))
+        }
+    }
+    guard abs(levels[0] - plazaY) <= 1,
+          zip(levels, laneSurfaces).allSatisfy({ level, row in
+              row.allSatisfy { ground in level >= ground && level - ground <= 4 }
+          }) else {
+        return nil
+    }
+    return levels
+}
+
+/// Returns a walkable grade for a short, one-block-wide connector.  Endpoints
+/// are anchored to their doorway/gate and adjoining road elevations, and every
+/// deck cell is bounded over the actual terrain so foundations never stop in
+/// midair below a path.
+private func villageStraightPathLevels(_ ctx: GenCtx, _ startX: Int, _ startZ: Int,
+                                       _ endX: Int, _ endZ: Int,
+                                       _ startY: Int, _ endY: Int,
+                                       exactEndpoints: Bool = false) -> [Int]? {
+    let horizontal = startZ == endZ
+    guard horizontal || startX == endX else { return nil }
+    let count = horizontal ? abs(endX - startX) + 1 : abs(endZ - startZ) + 1
+    let stepX = horizontal ? (endX >= startX ? 1 : -1) : 0
+    let stepZ = horizontal ? 0 : (endZ >= startZ ? 1 : -1)
+    var ground: [Int] = []
+    ground.reserveCapacity(count)
+    for index in 0..<count {
+        guard let y = dryVillageSurface(ctx, startX + stepX * index, startZ + stepZ * index) else {
+            return nil
+        }
+        ground.append(y)
+    }
+    var levels = ground
+    levels[0] = max(levels[0], startY)
+    levels[levels.count - 1] = max(levels[levels.count - 1], endY)
+    let constraints = levels
+    for target in levels.indices {
+        for source in constraints.indices {
+            levels[target] = max(levels[target], constraints[source] - abs(source - target))
+        }
+    }
+    let endpointsMatch = exactEndpoints
+        ? levels[0] == startY && levels[levels.count - 1] == endY
+        : abs(levels[0] - startY) <= 1 && abs(levels[levels.count - 1] - endY) <= 1
+    guard endpointsMatch,
+          zip(levels, ground).allSatisfy({ level, terrain in level >= terrain && level - terrain <= 4 }) else {
+        return nil
+    }
+    return levels
+}
+
+private func villagePathFacing(_ x0: Int, _ z0: Int, _ x1: Int, _ z1: Int) -> Int {
+    if x1 > x0 { return 3 }
+    if x1 < x0 { return 2 }
+    return z1 > z0 ? 1 : 0
+}
+
+private struct VillageLivestockSite {
+    let x: Int
+    let y: Int
+    let z: Int
+    let roadLevel: Int
+    let footprint: VillageXZFootprint
+    let connector: VillageXZFootprint
+}
+
+/// Places the pen beside an accepted east/west street, with its north-facing
+/// gate connected to that street.  This replaces the former distant diagonal
+/// pen: it could be technically valid yet inaccessible, and one rough 7×7
+/// patch arbitrarily cancelled an entire village before roads were known.
+private func villageLivestockPenSite(_ ctx: GenCtx, _ centerX: Int, _ centerZ: Int,
+                                     _ roads: [VillageRoadSpec],
+                                     _ reserved: [VillageXZFootprint]) -> VillageLivestockSite? {
+    for road in roads where road.dx != 0 {
+        let end = road.start + road.length
+        let candidateAlong = [end - 3, road.start + 10, end - 8]
+        for along in candidateAlong where along >= road.start && along <= end {
+            let gateX = centerX + road.dx * along
+            let penX = gateX - 3
+            let penZ = centerZ + 4
+            let footprint = VillageXZFootprint(penX, penZ, penX + 6, penZ + 6)
+            // The road already occupies z=center±1.  Start just beyond its
+            // southern edge so the pen spur meets it without overwriting a
+            // road stair or path block during later piece replay.
+            let connector = VillageXZFootprint(gateX, centerZ + 2, gateX, penZ - 1)
+            guard !reserved.contains(where: { footprint.intersects($0) || connector.intersects($0) }),
+                  let y = dryStructurePadY(ctx, footprint.x0, footprint.z0,
+                                            footprint.x1, footprint.z1,
+                                            maxVariation: 3) else {
+                continue
+            }
+            var routeIsDry = true
+            for z in connector.z0...connector.z1 where dryVillageSurface(ctx, gateX, z) == nil {
+                routeIsDry = false
+            }
+            if routeIsDry {
+                return VillageLivestockSite(x: penX, y: y, z: penZ,
+                                            roadLevel: road.levels[along - road.start],
+                                            footprint: footprint, connector: connector)
+            }
+        }
+    }
+    return nil
+}
+
 private func dryVillageSurface(_ ctx: GenCtx, _ x: Int, _ z: Int) -> Int? {
-    guard let oracle = ctx.terrainOracle,
-          let occupied = oracle.highestOccupiedCell(x, z),
-          let solidY = oracle.topSolidY(x, z) else { return nil }
-    let id = occupied.cell >> 4
-    guard id != Int(B.water), id != Int(B.lava), occupied.y == solidY else { return nil }
-    return solidY + 1
+    exactDrySurfaceFeetYOrEstimate(ctx, x, z)
+}
+
+/// Production Overworld planning must use exact base terrain. Legacy tests and
+/// non-Overworld plans deliberately lack that oracle, so retain their existing
+/// height closure only when no exact terrain is available by design—not when a
+/// bounded oracle rejects a real site.
+private func exactSurfaceFeetYOrEstimate(_ ctx: GenCtx, _ x: Int, _ z: Int) -> Int? {
+    guard ctx.dim == Dim.overworld.rawValue, ctx.terrainOracle != nil else {
+        return ctx.heightAt(x, z)
+    }
+    return exactTerrainSurface(ctx, x, z)?.feetY
+}
+
+private func exactDrySurfaceFeetYOrEstimate(_ ctx: GenCtx, _ x: Int, _ z: Int) -> Int? {
+    guard ctx.dim == Dim.overworld.rawValue, ctx.terrainOracle != nil else {
+        return ctx.heightAt(x, z)
+    }
+    guard let surface = exactTerrainSurface(ctx, x, z), surface.isDry else { return nil }
+    return surface.feetY
+}
+
+private func exactDryPadYOrEstimate(_ ctx: GenCtx,
+                                     _ x0: Int, _ z0: Int, _ x1: Int, _ z1: Int,
+                                     anchorX: Int, anchorZ: Int,
+                                     maxVariation: Int) -> Int? {
+    guard ctx.dim == Dim.overworld.rawValue, ctx.terrainOracle != nil else {
+        return ctx.heightAt(anchorX, anchorZ)
+    }
+    return exactDryTerrainPadY(ctx, x0, z0, x1, z1, maxVariation: maxVariation)
+}
+
+/// Witch huts deliberately tolerate water beneath their stilts, unlike a
+/// conventional dry building. They still need every platform column sampled
+/// exactly, plus a reachable solid footing for each stilt; otherwise a hill
+/// can bury the room or deep water can leave it suspended in air.
+private let witchHutMaxStiltDepth = 32
+
+private func stiltedWitchHutYOrEstimate(_ ctx: GenCtx, _ x: Int, _ z: Int) -> Int? {
+    guard ctx.dim == Dim.overworld.rawValue, ctx.terrainOracle != nil else {
+        return max(64, ctx.heightAt(x + 3, z + 4) + 1)
+    }
+    var highFeet: Int?
+    for zc in z...(z + 8) {
+        for xc in x...(x + 6) {
+            guard let surface = exactTerrainSurface(ctx, xc, zc) else { return nil }
+            highFeet = max(highFeet ?? surface.feetY, surface.feetY)
+        }
+    }
+    guard let highFeet else { return nil }
+    let y = max(64, highFeet + 1)
+    for (sx, sz) in [(1, 1), (5, 1), (1, 7), (5, 7)] {
+        guard let surface = exactTerrainSurface(ctx, x + sx, z + sz),
+              // The final sampled position must reach the top solid cell
+              // (`feetY - 1`), not merely stop in a water column.
+              y - surface.feetY <= witchHutMaxStiltDepth - 2 else {
+            return nil
+        }
+    }
+    return y
 }
 
 /// Cheap ordered preflight. The exact occupied piece footprints are checked
@@ -214,7 +540,12 @@ private func chooseVillageCenter(_ ctx: GenCtx, _ originX: Int, _ originZ: Int) 
             }
             if !valid { break }
         }
-        if valid, let lo = heights.min(), let hi = heights.max(), hi - lo <= 12 { return (x, z) }
+        // Roads and buildings follow their local dry surface and use bounded
+        // foundations. Requiring one 80-block survey to fit inside 12 vertical
+        // blocks disproportionately eliminated villages on the deliberately
+        // rolling Rich Resources preset, despite its individual plots being
+        // sound. Keep the local piece-by-piece grounding gate below.
+        if valid, let lo = heights.min(), let hi = heights.max(), hi - lo <= 28 { return (x, z) }
     }
     return nil
 }
@@ -223,20 +554,68 @@ private func validateVillagePieces(_ ctx: GenCtx, _ pieces: [StructPiece]) -> Bo
     guard !pieces.isEmpty else { return false }
     var checked = 0
     for p in pieces {
-        var previousRow: [Int] = []
         for z in p.z0...p.z1 {
-            var row: [Int] = []
             for x in p.x0...p.x1 {
                 checked += 1
-                guard checked <= 24_000, let y = dryVillageSurface(ctx, x, z) else { return false }
-                row.append(y)
-                if row.count > 1, abs(row[row.count - 1] - row[row.count - 2]) > 1 { return false }
-                if !previousRow.isEmpty, abs(y - previousRow[row.count - 1]) > 1 { return false }
+                guard checked <= 24_000, dryVillageSurface(ctx, x, z) != nil else { return false }
             }
-            previousRow = row
         }
     }
     return true
+}
+
+private let villageForeignSurfaceStructureIDs: Set<String> = [
+    "desert_temple", "jungle_temple", "igloo", "witch_hut", "pillager_outpost",
+    "shipwreck", "ocean_ruin", "buried_treasure", "ruined_portal", "trail_ruins",
+    "ocean_monument", "woodland_mansion",
+]
+
+/// Structure plans are stamped in frozen registry order.  Villages are first,
+/// so a later temple/outpost/etc. could otherwise overwrite a door, roof, or
+/// resident on dense maps.  Reject only the village candidate when its actual
+/// pieces overlap an actual surface-structure piece; this preserves the older
+/// landmark and keeps generation order-independent without reserving an
+/// overly broad reference box.
+func villageOverlapsForeignSurfaceStructure(_ ctx: GenCtx, _ villagePieces: [StructPiece],
+                                            collisionDefinitions: [StructureDef] = STRUCTURES) -> Bool {
+    guard let minX = villagePieces.map(\.x0).min(), let maxX = villagePieces.map(\.x1).max(),
+          let minZ = villagePieces.map(\.z0).min(), let maxZ = villagePieces.map(\.z1).max() else {
+        return true
+    }
+    let minChunkX = floorDiv(minX, 16), maxChunkX = floorDiv(maxX, 16)
+    let minChunkZ = floorDiv(minZ, 16), maxChunkZ = floorDiv(maxZ, 16)
+    for def in collisionDefinitions where villageForeignSurfaceStructureIDs.contains(def.id) {
+        guard let placement = def.placement(ctx) else { continue }
+        let radius = def.maxRadiusChunks
+        let regionX = floorDiv(minChunkX - radius, placement.spacing)...floorDiv(maxChunkX + radius, placement.spacing)
+        let regionZ = floorDiv(minChunkZ - radius, placement.spacing)...floorDiv(maxChunkZ + radius, placement.spacing)
+        for rz in regionZ {
+            for rx in regionX {
+                let origin = structureOriginFor(def, placement: placement, seed: ctx.seed,
+                                                 regionX: rx, regionZ: rz)
+                guard origin.0 >= minChunkX - radius, origin.0 <= maxChunkX + radius,
+                      origin.1 >= minChunkZ - radius, origin.1 <= maxChunkZ + radius,
+                      let plan = getPlan(def, ctx, origin.0, origin.1),
+                      surfaceStructurePlanWins(def, plan, ctx, origin.0, origin.1,
+                                               collisionDefinitions: collisionDefinitions) else {
+                    continue
+                }
+                if surfaceStructurePiecesOverlapXZ(villagePieces, plan.pieces) { return true }
+            }
+        }
+    }
+    return false
+}
+
+/// A temple is a single architectural mass, unlike a village's individually
+/// grounded roads and buildings. It therefore needs one dry, gently sloped pad
+/// before any block is emitted; otherwise a one-point height estimate can bury
+/// its body and leave only decorative fragments visible.
+private func dryStructurePadY(_ ctx: GenCtx, _ x0: Int, _ z0: Int, _ x1: Int, _ z1: Int,
+                               maxVariation: Int) -> Int? {
+    exactDryPadYOrEstimate(ctx, x0, z0, x1, z1,
+                            anchorX: (x0 + x1) / 2, anchorZ: (z0 + z1) / 2,
+                            maxVariation: maxVariation)
 }
 
 // =============================================================================
@@ -286,6 +665,10 @@ private struct DungeonRegionKey: Hashable {
 private let dungeonRegionSide = 32
 private let dungeonRegionCacheLimit = 64
 private let dungeonRegionMaximumPasses = 8
+/// A selected member has one deterministic underwater attempt and may emit at
+/// most one room. Keeping this bound per region, rather than tracking mutable
+/// commits, makes lazy/concurrent chunk generation independent of load order.
+private let dungeonRegionMaximumUnderwaterMembers = 1
 private let dungeonRegionMaximumRawCandidates = dungeonRegionSide * dungeonRegionSide
     * dungeonRegionMaximumPasses * 4
 private let dungeonRegionMaximumStoredMembers = dungeonRegionSide * dungeonRegionSide
@@ -356,11 +739,15 @@ private func buildDungeonRegionPlan(_ key: DungeonRegionKey) -> DungeonRegionPla
     }
     precondition(rawCandidateCount <= dungeonRegionMaximumRawCandidates)
     precondition(raw.count <= dungeonRegionMaximumStoredMembers)
-    let budget = rawCandidateCount / 16
-    // 29 mod 64 preserves the reviewed pinned fixture (also 13 mod 16)
-    // while keeping actual submerged rooms substantially rarer than the hard
-    // regional 1/16 ceiling.
-    let eligible = raw.filter { Int($0.hash & 0x3F) == 29 }.sorted {
+    // A mutable "committed so far" counter would make a seed depend on the
+    // order in which chunks arrive. Select at most one member from the full
+    // aligned region instead. The selected member has one underwater attempt
+    // and `tryDungeonPass` returns after one commit, so this is an
+    // actual-output cap of one sealed underwater room per region.
+    //
+    // The hash subset preserves the deliberately rare underwater form while
+    // the sorted tie-break makes the choice independent of iteration order.
+    let eligible = raw.filter { Int($0.hash & 0xFF) == 29 }.sorted {
         if $0.hash != $1.hash { return $0.hash < $1.hash }
         if $0.member.cx != $1.member.cx { return $0.member.cx < $1.member.cx }
         if $0.member.cz != $1.member.cz { return $0.member.cz < $1.member.cz }
@@ -370,7 +757,7 @@ private func buildDungeonRegionPlan(_ key: DungeonRegionKey) -> DungeonRegionPla
     let estimatedRetainedBytes = raw.count * 40 + orderedEligible.count * 24
     precondition(estimatedRetainedBytes <= dungeonRegionMaximumRetainedBytesPerPlan)
     return DungeonRegionPlan(rawAcceptedCount: rawCandidateCount,
-                             underwater: Set(orderedEligible.prefix(budget)))
+                             underwater: Set(orderedEligible.prefix(dungeonRegionMaximumUnderwaterMembers)))
 }
 
 private func dungeonRegionPlan(seed: UInt32, cx: Int, cz: Int, passes: Int,
@@ -420,6 +807,7 @@ struct DungeonRegionPlannerLimits: Equatable {
     public let side: Int
     public let cacheEntries: Int
     public let maximumPasses: Int
+    public let maximumUnderwaterMembers: Int
     public let maximumRawCandidates: Int
     public let maximumStoredMembers: Int
     public let maximumRetainedBytesPerPlan: Int
@@ -429,6 +817,7 @@ let dungeonRegionPlannerLimits = DungeonRegionPlannerLimits(
     side: dungeonRegionSide,
     cacheEntries: dungeonRegionCacheLimit,
     maximumPasses: dungeonRegionMaximumPasses,
+    maximumUnderwaterMembers: dungeonRegionMaximumUnderwaterMembers,
     maximumRawCandidates: dungeonRegionMaximumRawCandidates,
     maximumStoredMembers: dungeonRegionMaximumStoredMembers,
     maximumRetainedBytesPerPlan: dungeonRegionMaximumRetainedBytesPerPlan)
@@ -464,6 +853,10 @@ private final class DetachedDungeonSink: ChunkSink {
         latest[Key(x: x, y: y, z: z)].map(Int.init) ?? base.get(x, y, z)
     }
     func topY(_ x: Int, _ z: Int) -> Int { base.topY(x, z) }
+    func hasBlockEntity(_ x: Int, _ y: Int, _ z: Int) -> Bool {
+        blockEntities.contains { $0.x == x && $0.y == y && $0.z == z }
+            || base.hasBlockEntity(x, y, z)
+    }
     func addBlockEntity(_ spec: BESpec) { blockEntities.append(spec) }
     func addEntity(_ spec: EntitySpec) {}
     func commit() {
@@ -478,30 +871,175 @@ private func isFluidCell(_ value: Int) -> Bool {
     return id == Int(B.water) || id == Int(B.lava)
 }
 
+/// Unlike `isFluidCell`, this deliberately excludes lava. The registry marks
+/// water itself and native water-filled aquatic flora as waterlogged, which is
+/// the exact admissible precondition for a sealed underwater room.
+private func isSubmergedWaterCell(_ value: Int) -> Bool {
+    guard value >= 0, value <= Int(UInt16.max) else { return false }
+    return isWaterlogged(UInt16(value))
+}
+
+/// Dungeons run after surface and underground structures. A room may replace
+/// only dry cave void, natural geology/resources, and water for the
+/// deliberately sealed underwater variant. In particular, ores must be
+/// eligible: Rich Resources deliberately raises their frequency enough that a
+/// whole-room preflight which rejects every ore almost never finds a room.
+/// Construction blocks (including temple sandstone variants, mineshaft wood,
+/// rails, and all block entities) remain ineligible before a detached buffer
+/// can stamp through a landmark, road, or mineshaft.
+private let dungeonNaturalTerrainNames: Set<String> = [
+    "stone", "deepslate", "andesite", "diorite", "granite", "tuff",
+    "gravel", "grass_block", "dirt", "coarse_dirt", "rooted_dirt", "clay", "mud",
+    "calcite", "dripstone_block", "moss_block",
+]
+
+/// Natural cave decoration is safe to clear while forming a room. This is
+/// deliberately a name allowlist rather than a generic `replaceable` test so
+/// mineshaft cobwebs and other construction remnants cannot turn into an
+/// implicit permission to overwrite a structure.
+private let dungeonNaturalCaveDecorationNames: Set<String> = [
+    "cave_vines", "cave_vines_plant", "glow_lichen", "hanging_roots",
+    "moss_carpet", "pointed_dripstone", "spore_blossom", "small_dripleaf",
+    "big_dripleaf", "big_dripleaf_stem",
+]
+
+private func dungeonMayReplace(_ value: Int, allowsWater: Bool) -> Bool {
+    guard value >= 0 else { return false }
+    if value == 0 { return true }
+    // `isWaterlogged` is intentionally limited by the block registry to water
+    // and native aquatic flora (including coral/sea pickles), never lava or a
+    // generic replaceable construction block. Block entities remain rejected
+    // by the footprint preflight below.
+    if allowsWater && isSubmergedWaterCell(value) { return true }
+    let id = value >> 4
+    guard blockDefs.indices.contains(id) else { return false }
+    let name = blockDefs[id].name
+    return dungeonNaturalTerrainNames.contains(name)
+        || dungeonNaturalCaveDecorationNames.contains(name)
+        || name.hasSuffix("_ore")
+}
+
+/// Per-chunk dungeon passes share one terrain sink. Reserve every accepted
+/// room's complete shell and doorway margin before the next pass searches so
+/// a higher density can add a distinct dungeon instead of overwriting a
+/// previously committed entrance or block entity.
+private struct DungeonFootprint {
+    let x0: Int
+    let y0: Int
+    let z0: Int
+    let x1: Int
+    let y1: Int
+    let z1: Int
+
+    func intersects(_ other: DungeonFootprint) -> Bool {
+        !(x1 < other.x0 || x0 > other.x1 ||
+          y1 < other.y0 || y0 > other.y1 ||
+          z1 < other.z0 || z0 > other.z1)
+    }
+}
+
+private func dungeonFootprint(x: Int, y: Int, z: Int, halfWidth: Int) -> DungeonFootprint {
+    // The extra block in both horizontal directions covers whichever cardinal
+    // doorway is selected. Keeping that margin in every direction makes the
+    // result independent of pass order and prevents a later room from sealing
+    // an earlier room's cave connection.
+    DungeonFootprint(x0: x - halfWidth - 1, y0: y - 1, z0: z - halfWidth - 1,
+                     x1: x + halfWidth + 1, y1: y + 3, z1: z + halfWidth + 1)
+}
+
+private func dungeonFootprintIsUnclaimed(_ sink: ChunkSink, _ footprint: DungeonFootprint,
+                                         allowsWater: Bool) -> Bool {
+    for y in footprint.y0...footprint.y1 {
+        for z in footprint.z0...footprint.z1 {
+            for x in footprint.x0...footprint.x1 {
+                guard !sink.hasBlockEntity(x, y, z),
+                      dungeonMayReplace(sink.get(x, y, z), allowsWater: allowsWater) else {
+                    return false
+                }
+            }
+        }
+    }
+    return true
+}
+
+/// A sealed room has no entrance: its complete future floor, dry interior,
+/// and ceiling must start submerged. The surrounding footprint includes a
+/// one-cell doorway margin for reservation/ownership only, so it is not part
+/// of this water-envelope requirement.
+private func dungeonRoomIsFullySubmerged(_ read: (Int, Int, Int) -> Int,
+                                         x: Int, y: Int, z: Int,
+                                         halfWidth: Int) -> Bool {
+    for py in (y - 1)...(y + 3) {
+        for pz in (z - halfWidth)...(z + halfWidth) {
+            for px in (x - halfWidth)...(x + halfWidth) {
+                guard isSubmergedWaterCell(read(px, py, pz)) else { return false }
+            }
+        }
+    }
+    return true
+}
+
 @discardableResult
 private func tryDungeonPass(_ seed: UInt32, _ ocx: Int, _ ocz: Int, _ sink: ChunkSink,
                             pass: Int, settings: WorldGenerationSettings,
-                            oracle: BaseTerrainOracle?) -> Int {
+                            oracle: BaseTerrainOracle?,
+                            occupied: inout [DungeonFootprint]) -> Int {
     let salt = pass == 0 ? UInt32(0xD0D6E0) : dungeonPassSalt(pass)
     let rng = Rng(hash2(seed, ocx, ocz, salt))
-    let underwaterBudgeted = dungeonUnderwaterBudgetSelected(seed: seed, cx: ocx, cz: ocz,
-                                                              pass: pass, settings: settings)
-    for _ in 0..<4 {
+    for attempt in 0..<4 {
         if rng.nextFloat() > 0.12 { continue }
         let rawX = ocx * 16 + 3 + rng.nextInt(10)
         let rawZ = ocz * 16 + 3 + rng.nextInt(10)
-        let y = -40 + rng.nextInt(90)
+        // Keep one deterministic vertical starting point, but walk the local
+        // cave column from there. Previously a room had to land at one random
+        // Y *and* have a two-block cave opening on its exact wall, causing
+        // "many" to mean eight mostly-rejected attempts rather than dungeons.
+        let sampledY = -40 + rng.nextInt(90)
         let hw = 3 + rng.nextInt(2)
         let minLocal = hw + 1, maxLocal = 15 - hw - 1
         let x = ocx * 16 + min(max(rawX - ocx * 16, minLocal), maxLocal)
         let z = ocz * 16 + min(max(rawZ - ocz * 16, minLocal), maxLocal)
         let read: (Int, Int, Int) -> Int = { x, y, z in
-            oracle?.cell(x, y, z) ?? sink.get(x, y, z)
+            // The complete room is intentionally clamped inside its origin
+            // chunk. Read that finished local terrain so a dungeon cannot
+            // overlap a structure that already owns this terrain.
+            sink.get(x, y, z)
         }
-        let genuinelySubmerged = isFluidCell(read(rawX, y, rawZ))
-        let underwater = underwaterBudgeted && genuinelySubmerged
-        var entrance: (dx: Int, dz: Int)?
-        if !underwater {
+        // The regional plan selects one attempt for an eligible member. Test
+        // the final clamped room (not the discarded raw coordinate) across its
+        // full sealed shell and future occupiable volume before admitting it.
+        let underwaterAttempt = Int(dungeonRarityHash(seed, ocx, ocz, pass) & 0x3)
+        let fullySubmerged = dungeonUnderwaterBudgetSelected(seed: seed, cx: ocx, cz: ocz,
+                                                               pass: pass, settings: settings)
+            && attempt == underwaterAttempt
+            && dungeonRoomIsFullySubmerged(read, x: x, y: sampledY, z: z, halfWidth: hw)
+        let surfaceCeiling = min(64, sink.topY(x, z) - 4)
+        let lowestY = max(sink.minY + 2, -48)
+        let highestY = max(lowestY, min(surfaceCeiling, sink.maxY - 5))
+        let span = highestY - lowestY + 1
+        let start = lowestY + ((sampledY - lowestY) % span + span) % span
+        var selected: (y: Int, entrance: (dx: Int, dz: Int)?, footprint: DungeonFootprint)?
+        for offset in 0..<span {
+            let y = lowestY + ((start - lowestY + offset) % span)
+            let footprint = dungeonFootprint(x: x, y: y, z: z, halfWidth: hw)
+            guard !occupied.contains(where: { $0.intersects(footprint) }) else { continue }
+            if fullySubmerged {
+                if y == sampledY,
+                   dungeonFootprintIsUnclaimed(sink, footprint, allowsWater: true) {
+                    selected = (y, nil, footprint)
+                    break
+                }
+                continue
+            }
+            var entrance: (dx: Int, dz: Int)?
+            for direction in [(dx: -1, dz: 0), (dx: 1, dz: 0), (dx: 0, dz: -1), (dx: 0, dz: 1)] {
+                let ex = x + direction.dx * (hw + 1), ez = z + direction.dz * (hw + 1)
+                if read(ex, y, ez) == 0, read(ex, y + 1, ez) == 0 {
+                    entrance = direction
+                    break
+                }
+            }
+            guard let entrance else { continue }
             var fluidFound = false
             for py in (y - 1)...(y + 3) {
                 for pz in (z - hw - 1)...(z + hw + 1) {
@@ -510,16 +1048,16 @@ private func tryDungeonPass(_ seed: UInt32, _ ocx: Int, _ ocz: Int, _ sink: Chun
                     }
                 }
             }
-            if fluidFound { continue }
-            for direction in [(dx: -1, dz: 0), (dx: 1, dz: 0), (dx: 0, dz: -1), (dx: 0, dz: 1)] {
-                let ex = x + direction.dx * (hw + 1), ez = z + direction.dz * (hw + 1)
-                if read(ex, y, ez) == 0, read(ex, y + 1, ez) == 0 {
-                    entrance = direction
+            if !fluidFound {
+                if dungeonFootprintIsUnclaimed(sink, footprint, allowsWater: false) {
+                    selected = (y, entrance, footprint)
                     break
                 }
             }
-            if entrance == nil { continue }
         }
+        guard let selected else { continue }
+        let y = selected.y
+        let entrance = selected.entrance
 
         let detached = DetachedDungeonSink(sink)
         let b = Builder(detached, rng)
@@ -550,6 +1088,7 @@ private func tryDungeonPass(_ seed: UInt32, _ ocx: Int, _ ocz: Int, _ sink: Chun
                 || (spec.kind == "chest_loot" && id == Int(B.chest))
         }) else { continue }
         detached.commit()
+        occupied.append(selected.footprint)
         return 1 // max one per chunk per pass
     }
     return 0
@@ -569,9 +1108,12 @@ public func tryDungeons(_ seed: UInt32, _ ocx: Int, _ ocz: Int, _ sink: ChunkSin
     var effectiveSettings = settings ?? WorldGenerationSettings(dungeonDensity: density)
     effectiveSettings.dungeonDensity = density
     var placed = 0
+    var occupied: [DungeonFootprint] = []
+    occupied.reserveCapacity(passes)
     for pass in 0..<passes {
         placed += tryDungeonPass(seed, ocx, ocz, sink, pass: pass,
-                                 settings: effectiveSettings, oracle: terrainOracle)
+                                 settings: effectiveSettings, oracle: terrainOracle,
+                                 occupied: &occupied)
     }
     return placed
 }
@@ -579,11 +1121,14 @@ public func tryDungeons(_ seed: UInt32, _ ocx: Int, _ ocz: Int, _ sink: ChunkSin
 // =============================================================================
 // registration
 // =============================================================================
-func registerOverworldStructures() {
-    registerStructure(StructureDef(
-        id: "village", spacing: 34, separation: 8, salt: 10387312, maxRadiusChunks: 5,
+private func villageStructureDefinition() -> StructureDef {
+    StructureDef(
+        id: "village", spacing: 34, separation: 18, salt: 10387312, maxRadiusChunks: 8,
+        placement: { context in context.villageDensity.structurePlacement },
         check: { ctx, ocx, ocz, _ in
-            styleFor(ctx.biomeAt(ocx * 16 + 8, ocz * 16 + 8)) != nil
+            ctx.villageDensity != .none
+                && ctx.villageDensity.includesCandidate(seed: ctx.seed, originX: ocx, originZ: ocz)
+                && styleFor(ctx.biomeAt(ocx * 16 + 8, ocz * 16 + 8)) != nil
         },
         plan: { ctx, ocx, ocz, rng in
             guard let (centerX, centerZ) = chooseVillageCenter(ctx, ocx * 16 + 8, ocz * 16 + 8) else {
@@ -591,31 +1136,59 @@ func registerOverworldStructures() {
             }
             let biomeId = ctx.biomeAt(centerX, centerZ)
             guard let st = styleFor(biomeId) else { return nil }
-            let siteHeight: (Int, Int) -> Int = { x, z in
-                dryVillageSurface(ctx, x, z) ?? ctx.heightAt(x, z)
-            }
             var pieces: [StructPiece] = []
             var acceptedBuildingFootprints: [VillageXZFootprint] = []
             var acceptedConnectorCorridors: [VillageXZFootprint] = []
             acceptedBuildingFootprints.reserveCapacity(16)
             acceptedConnectorCorridors.reserveCapacity(16)
-            let cy = siteHeight(centerX, centerZ)
+            // The well, bell, residents, and the first blocks of every road
+            // share this plaza.  Treat it as one actual pad rather than using
+            // a centre sample, otherwise a bell or a well rim can be buried
+            // on the adjacent contour.
+            guard let cy = dryStructurePadY(ctx, centerX - 4, centerZ - 4,
+                                            centerX + 4, centerZ + 4,
+                                            maxVariation: 3) else {
+                return nil
+            }
+            // Village planning already rejects a piece with an unavailable or
+            // wet exact surface. A transient later probe should therefore use
+            // the accepted plaza level, never revive the approximate closure.
+            let siteHeight: (Int, Int) -> Int = { x, z in
+                dryVillageSurface(ctx, x, z) ?? cy
+            }
+            let livestock = villageLivestock(biomeId,
+                                             Rng(hash2(ctx.seed, ocx, ocz, 0x71A5EED)))
 
+            // A real plaza pad supports the well, bell, golem, cat, and desert
+            // camel.  `cy` is the high edge of a gently sloped survey; without
+            // this mass the residents on lower columns were merely placed in
+            // air beside a decorative well.
+            pieces.append(piece(centerX - 4, cy - 8, centerZ - 4,
+                                centerX + 4, cy + 2, centerZ + 4) { b in
+                for z in (centerZ - 4)...(centerZ + 4) {
+                    for x in (centerX - 4)...(centerX + 4) {
+                        b.foundation(x, cy - 1, z, st.path)
+                        b.set(x, cy, z, AIR)
+                        b.set(x, cy + 1, z, AIR)
+                        b.set(x, cy + 2, z, AIR)
+                    }
+                }
+            })
             // well at center
-            pieces.append(piece(centerX - 2, cy - 12, centerZ - 2, centerX + 5, cy + 4, centerZ + 5) { b in
+            pieces.append(piece(centerX - 1, cy - 11, centerZ - 1, centerX + 4, cy + 3, centerZ + 4) { b in
                 well(b, centerX, cy, centerZ, st)
             })
             // bell next to well
-            pieces.append(piece(centerX - 4, cy, centerZ, centerX - 4, cy + 2, centerZ) { b in
+            pieces.append(piece(centerX - 4, cy - 8, centerZ, centerX - 4, cy + 2, centerZ) { b in
                 b.foundation(centerX - 4, cy - 1, centerZ, st.wall)
                 b.set(centerX - 4, cy, centerZ, st.wall)
                 b.set(centerX - 4, cy + 1, centerZ, Int(cell(B.bell, 0)))
             })
             // iron golem + extras at center
-            let golemY = siteHeight(centerX, centerZ - 3)
-            let catY = siteHeight(centerX + 2, centerZ - 3)
+            let golemY = cy
+            let catY = cy
             let camelY = biomeId == Biome.desert.rawValue
-                ? siteHeight(centerX - 3, centerZ - 4)
+                ? cy
                 : nil
             let residentMinX = camelY == nil ? centerX : centerX - 3
             let residentMinZ = camelY == nil ? centerZ - 3 : centerZ - 4
@@ -627,6 +1200,14 @@ func registerOverworldStructures() {
                 b.mob("cat", centerX + 2, catY, centerZ - 3)
                 if let camelY { b.mob("camel", centerX - 3, camelY, centerZ - 4) }
             })
+            // Roads start just beyond the well and bell plaza.  Beginning at
+            // four used to stamp over the south/east well rim and west bell
+            // after those pieces had been built.
+            let roadStart = 5
+            var roadSpecs: [VillageRoadSpec] = []
+            var roadPieces: [StructPiece] = []
+            var lampPieces: [StructPiece] = []
+            var connectorPieces: [StructPiece] = []
 
             // roads in 4 directions with buildings
             let jobs: [(Int, String?)] = [
@@ -643,86 +1224,133 @@ func registerOverworldStructures() {
                 (Int(cell(B.cartography_table)), nil),
             ]
             var jobIdx = rng.nextInt(jobs.count)
-            let arms = 3 + rng.nextInt(2)
+            let arms = ctx.villageDensity.armCount.lowerBound == ctx.villageDensity.armCount.upperBound
+                ? ctx.villageDensity.armCount.lowerBound
+                : ctx.villageDensity.armCount.lowerBound
+                    + rng.nextInt(ctx.villageDensity.armCount.count)
             let dirOrder = rng.shuffle([0, 1, 2, 3])
+            // A settlement is only a village when it has a small resident
+            // community, rather than one family surrounded by decorative
+            // farms.  Count actual accepted homes/job-houses (each emits one
+            // adult), not attempted plots, because rejected footprints must
+            // never satisfy the population invariant.
+            var childAssigned = false
+            var adultResidentBuildings = 0
             for a in 0..<arms {
                 let dir = dirOrder[a]
                 let dx = [0, 0, -1, 1][dir], dz = [-1, 1, 0, 0][dir]
                 let len = 14 + rng.nextInt(16)
-                // road piece
-                let rx0 = min(centerX + dx * 4, centerX + dx * (4 + len)) - 1
-                let rx1 = max(centerX + dx * 4, centerX + dx * (4 + len)) + 1
-                let rz0 = min(centerZ + dz * 4, centerZ + dz * (4 + len)) - 1
-                let rz1 = max(centerZ + dz * 4, centerZ + dz * (4 + len)) + 1
-                pieces.append(piece(rx0, cy - 6, rz0, rx1, cy + 30, rz1) { b in
-                    for i in 4...(4 + len) {
-                        let px = centerX + dx * i, pz = centerZ + dz * i
-                        _ = siteHeight(px, pz)
-                        for w in -1...1 {
-                            let wx = px + (dz != 0 ? w : 0), wz = pz + (dx != 0 ? w : 0)
-                            let wy = siteHeight(wx, wz)
-                            b.foundation(wx, wy - 1, wz, st.path, 4)
-                            b.set(wx, wy, wz, AIR)
-                            b.set(wx, wy + 1, wz, AIR)
-                        }
-                        // lamp posts
-                        if i % 7 == 0 {
-                            let lx = px + (dz != 0 ? 2 : 0), lz = pz + (dx != 0 ? 2 : 0)
-                            let ly = siteHeight(lx, lz)
-                            b.set(lx, ly, lz, st.fence)
-                            b.set(lx, ly + 1, lz, st.fence)
-                            b.set(lx, ly + 2, lz, Int(cell(B.torch)))
-                        }
-                    }
-                })
+                let roadEnd = roadStart + len
+                let rx0 = min(centerX + dx * roadStart, centerX + dx * roadEnd) - (dz != 0 ? 1 : 0)
+                let rx1 = max(centerX + dx * roadStart, centerX + dx * roadEnd) + (dz != 0 ? 1 : 0)
+                let rz0 = min(centerZ + dz * roadStart, centerZ + dz * roadEnd) - (dx != 0 ? 1 : 0)
+                let rz1 = max(centerZ + dz * roadStart, centerZ + dz * roadEnd) + (dx != 0 ? 1 : 0)
+                guard let roadLevels = villageRoadLevels(ctx, centerX, centerZ, dx, dz,
+                                                         roadStart, len, cy) else {
+                    continue
+                }
+                roadSpecs.append(VillageRoadSpec(dx: dx, dz: dz, start: roadStart, length: len,
+                                                  levels: roadLevels,
+                                                  footprint: VillageXZFootprint(rx0, rz0, rx1, rz1)))
                 // buildings along the arm
-                let bcount = 2 + rng.nextInt(3)
+                let buildingCount = ctx.villageDensity.buildingCountPerArm
+                let bcount = buildingCount.lowerBound == buildingCount.upperBound
+                    ? buildingCount.lowerBound
+                    : buildingCount.lowerBound + rng.nextInt(buildingCount.count)
                 for _ in 0..<bcount {
-                    let along = 7 + rng.nextInt(max(1, len - 6))
+                    let along = roadStart + 4 + rng.nextInt(max(1, len - 3))
                     let side = rng.nextBoolean() ? 1 : -1
-                    let off = 3 + rng.nextInt(2)
-                    let kind = rng.nextFloat()
-                    let pieceReach = kind < 0.4 ? 6 : kind < 0.62 ? 10 : 7
-                    let lateralOffset = side > 0 ? off : -(off + pieceReach)
-                    let bx = centerX + dx * along + (dz != 0 ? lateralOffset : 0)
-                    let bz = centerZ + dz * along + (dx != 0 ? lateralOffset : 0)
-                    let by = siteHeight(bx + 3, bz + 3)
-                    let buildingFootprint: VillageXZFootprint
-                    if kind < 0.4 {
-                        buildingFootprint = VillageXZFootprint(bx - 1, bz - 1, bx + 6, bz + 6)
-                    } else if kind < 0.62 {
-                        buildingFootprint = VillageXZFootprint(bx - 1, bz - 1, bx + 10, bz + 8)
+                    var kind = rng.nextFloat()
+                    // Every accepted settlement has a family, then enough
+                    // inhabited homes to support a village rather than an
+                    // empty agricultural layout.  Farms resume only after
+                    // four adult residents are guaranteed.
+                    if !childAssigned {
+                        kind = 0.2
+                    } else if adultResidentBuildings < 4 {
+                        kind = 0.8
+                    }
+                    // A house is centred seven blocks from the three-wide road:
+                    // its outer roof begins at distance three, its door/step
+                    // face the road, and its two-cell connector begins only
+                    // after the step.  Six made the connector a one-cell
+                    // path whose house and road endpoints could disagree by
+                    // one level on rolling terrain; seven preserves both
+                    // exact endpoint elevations without reclaiming a street
+                    // cell. The old one-sided anchors left several rotations
+                    // with a road through the house interior.
+                    let sideDistance = 7
+                    let buildingCenterX = centerX + dx * along + (dz != 0 ? side * sideDistance : 0)
+                    let buildingCenterZ = centerZ + dz * along + (dx != 0 ? side * sideDistance : 0)
+                    let facing: Int
+                    if dz != 0 {
+                        facing = side > 0 ? 2 : 3
                     } else {
-                        buildingFootprint = VillageXZFootprint(bx - 1, bz - 1, bx + 7, bz + 7)
+                        facing = side > 0 ? 0 : 1
+                    }
+                    let buildingFootprint: VillageXZFootprint
+                    let by: Int
+                    if kind < 0.4 || kind >= 0.62 {
+                        buildingFootprint = VillageXZFootprint(buildingCenterX - 3, buildingCenterZ - 3,
+                                                               buildingCenterX + 3, buildingCenterZ + 3)
+                        guard let padY = dryStructurePadY(ctx, buildingFootprint.x0, buildingFootprint.z0,
+                                                           buildingFootprint.x1, buildingFootprint.z1,
+                                                           maxVariation: 3) else {
+                            continue
+                        }
+                        by = padY
+                    } else {
+                        let farmX = buildingCenterX - 4, farmZ = buildingCenterZ - 3
+                        buildingFootprint = VillageXZFootprint(farmX, farmZ, farmX + 8, farmZ + 6)
+                        guard let padY = dryStructurePadY(ctx, buildingFootprint.x0, buildingFootprint.z0,
+                                                           buildingFootprint.x1, buildingFootprint.z1,
+                                                           maxVariation: 3) else {
+                            continue
+                        }
+                        by = padY
                     }
                     let connectorFootprint: VillageXZFootprint?
-                    let doorX = bx + 2, doorZ = bz
-                    let roadX = dz != 0 ? centerX : doorX
-                    let roadZ = dx != 0 ? centerZ : doorZ
+                    let connectorLevels: [Int]?
+                    let connectorStart = villageHousePoint(buildingCenterX, buildingCenterZ, 0, -4, facing)
+                    let pathStartX = connectorStart.0, pathStartZ = connectorStart.1
+                    // Stop at the block immediately outside the three-wide
+                    // street.  The adjacent road edge remains owned by the
+                    // grade-aware road piece rather than being reset to raw
+                    // terrain height by the connector replay.
+                    let roadX = dz != 0 ? centerX + side * 2 : pathStartX
+                    let roadZ = dx != 0 ? centerZ + side * 2 : pathStartZ
                     if kind < 0.4 || kind >= 0.62 {
-                        connectorFootprint = VillageXZFootprint(doorX, doorZ, roadX, roadZ)
+                        connectorFootprint = VillageXZFootprint(pathStartX, pathStartZ, roadX, roadZ)
+                        guard let pathLevels = villageStraightPathLevels(ctx, pathStartX, pathStartZ,
+                                                                          roadX, roadZ,
+                                                                          // The doorstep stair is stored one cell
+                                                                          // lower, but its walking surface reaches
+                                                                          // the house floor at `by`.
+                                                                          by,
+                                                                          roadLevels[along - roadStart],
+                                                                          exactEndpoints: true) else {
+                            continue
+                        }
+                        connectorLevels = pathLevels
                     } else {
                         connectorFootprint = nil
+                        connectorLevels = nil
                     }
-                    let selectedJob: (block: Int, loot: String?)?
-                    if kind >= 0.62 {
-                        let job = jobs[jobIdx % jobs.count]
-                        jobIdx += 1
-                        selectedJob = (job.0, job.1)
-                    } else {
-                        selectedJob = nil
-                    }
-                    let buildingConflicts = acceptedConnectorCorridors.contains {
+                    // A later plot may not overwrite either an earlier home
+                    // or its walkable front connection.  The old check only
+                    // compared plots to connectors, which still allowed two
+                    // houses on crossing arms to stamp through each other's
+                    // doors, floors, or roof.
+                    let buildingConflicts = acceptedBuildingFootprints.contains {
+                        buildingFootprint.intersects($0)
+                    } || acceptedConnectorCorridors.contains {
                         buildingFootprint.intersects($0)
                     }
                     let connectorConflicts = connectorFootprint.map { connector in
                         acceptedBuildingFootprints.contains { connector.intersects($0) }
+                            || acceptedConnectorCorridors.contains { connector.intersects($0) }
                     } ?? false
                     guard !buildingConflicts && !connectorConflicts else {
-                        let placeholder = piece(centerX, cy, centerZ,
-                                                centerX, cy, centerZ) { _ in }
-                        pieces.append(placeholder)
-                        if connectorFootprint != nil { pieces.append(placeholder) }
                         continue
                     }
                     precondition(acceptedBuildingFootprints.count < 16)
@@ -732,47 +1360,173 @@ func registerOverworldStructures() {
                         acceptedConnectorCorridors.append(connectorFootprint)
                     }
                     if kind < 0.4 {
-                        pieces.append(piece(bx - 1, by - 8, bz - 1, bx + 6, by + 6, bz + 6) { b in
-                            houseSmall(b, bx, by, bz, st, 0, b.s)
+                        let emitsChild = !childAssigned
+                        pieces.append(piece(buildingFootprint.x0, by - 9, buildingFootprint.z0,
+                                            buildingFootprint.x1, by + 6, buildingFootprint.z1) { b in
+                            houseSmall(b, buildingCenterX, by, buildingCenterZ, st, facing, child: emitsChild)
                         })
+                        childAssigned = true
+                        adultResidentBuildings += 1
                     } else if kind < 0.62 {
-                        pieces.append(piece(bx - 1, by - 8, bz - 1, bx + 10, by + 3, bz + 8) { b in
-                            farm(b, bx, by, bz, st, b.rng)
+                        let farmX = buildingCenterX - 4, farmZ = buildingCenterZ - 3
+                        pieces.append(piece(buildingFootprint.x0, by - 8, buildingFootprint.z0,
+                                            buildingFootprint.x1, by + 3, buildingFootprint.z1) { b in
+                            farm(b, farmX, by, farmZ, st, b.rng)
                         })
                     } else {
-                        guard let selectedJob else { preconditionFailure("job offer must be resolved") }
-                        pieces.append(piece(bx - 1, by - 8, bz - 1, bx + 7, by + 6, bz + 7) { b in
-                            houseJob(b, bx, by, bz, st, selectedJob.block, selectedJob.loot, b.s)
+                        let job = jobs[jobIdx % jobs.count]
+                        jobIdx += 1
+                        pieces.append(piece(buildingFootprint.x0, by - 9, buildingFootprint.z0,
+                                            buildingFootprint.x1, by + 6, buildingFootprint.z1) { b in
+                            houseJob(b, buildingCenterX, by, buildingCenterZ, st, facing, job.0, job.1)
                         })
+                        adultResidentBuildings += 1
                     }
-                    if connectorFootprint != nil {
-                        let x0 = min(doorX, roadX), x1 = max(doorX, roadX)
-                        let z0 = min(doorZ, roadZ), z1 = max(doorZ, roadZ)
-                        pieces.append(piece(x0, by - 4, z0, x1, by + 2, z1) { b in
-                            if x0 == x1 {
-                                for pz in z0...z1 {
-                                    let py = siteHeight(x0, pz)
-                                    b.foundation(x0, py - 1, pz, st.path, 4)
-                                    b.set(x0, py, pz, AIR)
-                                    b.set(x0, py + 1, pz, AIR)
+                    if let connectorFootprint, let connectorLevels {
+                        let x0 = connectorFootprint.x0, x1 = connectorFootprint.x1
+                        let z0 = connectorFootprint.z0, z1 = connectorFootprint.z1
+                        let pathFacing = villagePathFacing(pathStartX, pathStartZ, roadX, roadZ)
+                        let stepX = roadX == pathStartX ? 0 : (roadX > pathStartX ? 1 : -1)
+                        let stepZ = roadZ == pathStartZ ? 0 : (roadZ > pathStartZ ? 1 : -1)
+                        connectorPieces.append(piece(x0, (connectorLevels.min() ?? by) - 8, z0,
+                                                    x1, (connectorLevels.max() ?? by) + 3, z1) { b in
+                            for index in connectorLevels.indices {
+                                let px = pathStartX + stepX * index
+                                let pz = pathStartZ + stepZ * index
+                                let py = connectorLevels[index]
+                                let previousY = connectorLevels[max(0, index - 1)]
+                                let nextY = connectorLevels[min(connectorLevels.count - 1, index + 1)]
+                                b.foundation(px, py - 1, pz, st.path, 8)
+                                if nextY == py + 1 {
+                                    b.set(px, py, pz, st.stairs | pathFacing)
+                                } else if previousY == py + 1 {
+                                    b.set(px, py, pz, st.stairs | FACE_OPP[pathFacing])
+                                } else {
+                                    b.set(px, py, pz, AIR)
                                 }
-                            } else {
-                                for px in x0...x1 {
-                                    let py = siteHeight(px, z0)
-                                    b.foundation(px, py - 1, z0, st.path, 4)
-                                    b.set(px, py, z0, AIR)
-                                    b.set(px, py + 1, z0, AIR)
-                                }
+                                b.set(px, py + 1, pz, AIR)
                             }
                         })
                     }
                 }
             }
+            let penReservations = acceptedBuildingFootprints + acceptedConnectorCorridors
+            guard let livestockPen = villageLivestockPenSite(ctx, centerX, centerZ,
+                                                              roadSpecs, penReservations) else {
+                return nil
+            }
+            acceptedBuildingFootprints.append(livestockPen.footprint)
+            acceptedConnectorCorridors.append(livestockPen.connector)
+            pieces.append(piece(livestockPen.footprint.x0, livestockPen.y - 6, livestockPen.footprint.z0,
+                                livestockPen.footprint.x1, livestockPen.y + 3, livestockPen.footprint.z1) { b in
+                villageLivestockPen(b, livestockPen.x, livestockPen.y, livestockPen.z, st, livestock)
+            })
+            let penGateX = livestockPen.x + 3
+            let penPathStartZ = livestockPen.z - 1
+            let penPathEndZ = livestockPen.connector.z0
+            guard let penPathLevels = villageStraightPathLevels(ctx, penGateX, penPathStartZ,
+                                                                 penGateX, penPathEndZ,
+                                                                 livestockPen.y, livestockPen.roadLevel,
+                                                                 exactEndpoints: true) else {
+                return nil
+            }
+            let penPathFacing = villagePathFacing(penGateX, penPathStartZ, penGateX, penPathEndZ)
+            let penPathStepZ = penPathEndZ > penPathStartZ ? 1 : -1
+            connectorPieces.append(piece(livestockPen.connector.x0, (penPathLevels.min() ?? livestockPen.y) - 8,
+                                         livestockPen.connector.z0, livestockPen.connector.x1,
+                                         (penPathLevels.max() ?? livestockPen.y) + 3, livestockPen.connector.z1) { b in
+                for index in penPathLevels.indices {
+                    let pz = penPathStartZ + penPathStepZ * index
+                    let py = penPathLevels[index]
+                    let previousY = penPathLevels[max(0, index - 1)]
+                    let nextY = penPathLevels[min(penPathLevels.count - 1, index + 1)]
+                    b.foundation(penGateX, py - 1, pz, st.path, 8)
+                    if nextY == py + 1 {
+                        b.set(penGateX, py, pz, st.stairs | penPathFacing)
+                    } else if previousY == py + 1 {
+                        b.set(penGateX, py, pz, st.stairs | FACE_OPP[penPathFacing])
+                    } else {
+                        b.set(penGateX, py, pz, AIR)
+                    }
+                    b.set(penGateX, py + 1, pz, AIR)
+                }
+            })
+            // Roads are stamped after houses but before their connectors.  A
+            // road never reaches a roof, while connector paths deliberately
+            // meet its edge.  Lamps are their own pieces and are omitted only
+            // when a complete roof, farm, or connector reserves that column.
+            for road in roadSpecs {
+                let end = road.start + road.length
+                roadPieces.append(piece(road.footprint.x0, cy - 6, road.footprint.z0,
+                                        road.footprint.x1, cy + 30, road.footprint.z1) { b in
+                    let roadFacing = road.dz < 0 ? 0 : road.dz > 0 ? 1 : road.dx < 0 ? 2 : 3
+                    for i in road.start...end {
+                        let px = centerX + road.dx * i, pz = centerZ + road.dz * i
+                        for w in -1...1 {
+                            let wx = px + (road.dz != 0 ? w : 0)
+                            let wz = pz + (road.dx != 0 ? w : 0)
+                            let levelIndex = i - road.start
+                            let wy = road.levels[levelIndex]
+                            let previousY = levelIndex == 0 ? cy : road.levels[levelIndex - 1]
+                            let nextY = road.levels[min(road.levels.count - 1, levelIndex + 1)]
+                            let risesFromPlaza = levelIndex == 0 && wy == cy + 1
+                            b.foundation(wx, (risesFromPlaza ? cy : wy) - 1, wz, st.path, 8)
+                            // A one-block rise receives a real stair whose
+                            // high half points to the higher neighbour.  This
+                            // keeps the road traversable by the player's
+                            // 0.6-block auto-step instead of turning every
+                            // terrain contour into a jump.
+                            if risesFromPlaza {
+                                // The first road block is also the ramp from
+                                // the adjacent plaza: its stair base belongs
+                                // one cell below the deck it reaches.
+                                b.set(wx, cy, wz, st.stairs | roadFacing)
+                            } else if nextY == wy + 1 {
+                                b.set(wx, wy, wz, st.stairs | roadFacing)
+                            } else if previousY == wy + 1 {
+                                b.set(wx, wy, wz, st.stairs | FACE_OPP[roadFacing])
+                            } else {
+                                b.set(wx, wy, wz, AIR)
+                            }
+                            b.set(wx, wy + 1, wz, AIR)
+                        }
+                    }
+                })
+                for i in road.start...end where i % 7 == 0 {
+                    let px = centerX + road.dx * i, pz = centerZ + road.dz * i
+                    let lx = px + (road.dz != 0 ? 2 : 0)
+                    let lz = pz + (road.dx != 0 ? 2 : 0)
+                    let lampFootprint = VillageXZFootprint(lx, lz, lx, lz)
+                    guard !acceptedBuildingFootprints.contains(where: { lampFootprint.intersects($0) }),
+                          !acceptedConnectorCorridors.contains(where: { lampFootprint.intersects($0) }) else {
+                        continue
+                    }
+                    let ly = siteHeight(lx, lz)
+                    lampPieces.append(piece(lx, ly - 8, lz, lx, ly + 3, lz) { b in
+                        b.foundation(lx, ly - 1, lz, st.wall)
+                        b.set(lx, ly, lz, st.fence)
+                        b.set(lx, ly + 1, lz, st.fence)
+                        b.set(lx, ly + 2, lz, Int(cell(B.torch)))
+                    })
+                }
+            }
+            pieces.append(contentsOf: roadPieces)
+            pieces.append(contentsOf: lampPieces)
+            pieces.append(contentsOf: connectorPieces)
+            guard childAssigned, adultResidentBuildings >= 4 else { return nil }
             guard validateVillagePieces(ctx, pieces) else { return nil }
+            guard !villageOverlapsForeignSurfaceStructure(
+                ctx, pieces,
+                collisionDefinitions: ctx.activeStructureDefinitions ?? STRUCTURES
+            ) else { return nil }
             return StructurePlan(id: "village", pieces: pieces,
                                  ref: StructRefBox(centerX - 80, cy - 20, centerZ - 80, centerX + 80, cy + 40, centerZ + 80))
         }
-    ))
+    )
+}
+
+func registerOverworldStructures() {
+    registerStructure(villageStructureDefinition())
 
     registerStructure(StructureDef(
         id: "desert_temple", spacing: 32, separation: 9, salt: 14357617, maxRadiusChunks: 2,
@@ -781,9 +1535,14 @@ func registerOverworldStructures() {
         },
         plan: { ctx, ocx, ocz, _ in
             let x = ocx * 16, z = ocz * 16
-            let y = ctx.heightAt(x + 10, z + 10)
+            // Do not assemble a pyramid from a single centre-height sample.
+            // A dry, nearly level footprint prevents its body from being
+            // swallowed by a hill while isolated decorative pieces remain.
+            guard let y = dryStructurePadY(ctx, x, z, x + 20, z + 20, maxVariation: 4) else {
+                return nil
+            }
             let SS = Int(cell(B.sandstone)), CUT = Int(cell(B.cut_sandstone)), CHIS = Int(cell(B.chiseled_sandstone))
-            let OR = Int(cell(B.orange_terracotta)), BL = Int(cell(B.blue_terracotta))
+            let BL = Int(cell(B.blue_terracotta))
             return StructurePlan(id: "desert_temple", pieces: [
                 piece(x - 1, y - 16, z - 1, x + 21, y + 22, z + 21) { b in
                     for dz in 0..<21 { for dx in 0..<21 { b.foundation(x + dx, y - 1, z + dz, SS, 10) } }
@@ -794,7 +1553,7 @@ func registerOverworldStructures() {
                     b.fill(x + 1, y, z + 1, x + 19, y + 3, z + 19, AIR)
                     for dz in 1..<20 { for dx in 1..<20 { b.set(x + dx, y - 1, z + dz, SS) } }
                     let cx2 = x + 10, cz2 = z + 10
-                    b.fill(cx2 - 1, y - 1, cz2 - 1, cx2 + 1, y - 1, cz2 + 1, OR)
+                    b.fill(cx2 - 1, y - 1, cz2 - 1, cx2 + 1, y - 1, cz2 + 1, CUT)
                     b.set(cx2, y - 1, cz2, BL)
                     // treasure pit — clears/floors FIRST, trap LAST (the plate
                     // used to be wiped by the later fills: dead trap, sealed TNT)
@@ -819,20 +1578,13 @@ func registerOverworldStructures() {
                     // entrance
                     b.fill(x + 9, y, z, x + 11, y + 2, z + 1, AIR)
                     b.set(x + 9, y + 2, z, CUT); b.set(x + 11, y + 2, z, CUT)
-                    // orange decoration band
-                    var d = 0
-                    while d < 21 {
-                        b.set(x + d, y + 4, z, OR)
-                        b.set(x + d, y + 4, z + 20, OR)
-                        d += 2
-                    }
                     // archaeology
                     b.suspicious(cx2 - 2, y - 14, cz2 - 2, false, "desert_pyramid_archaeology")
                     b.suspicious(cx2 + 2, y - 14, cz2 + 2, false, "desert_pyramid_archaeology")
                     b.suspicious(cx2 + 2, y - 14, cz2 - 2, false, "desert_pyramid_archaeology")
                     b.suspicious(cx2 - 2, y - 14, cz2 + 2, false, "desert_pyramid_archaeology")
                 },
-            ])
+            ], ref: StructRefBox(x - 1, y - 16, z - 1, x + 21, y + 22, z + 21))
         }
     ))
 
@@ -844,11 +1596,17 @@ func registerOverworldStructures() {
         },
         plan: { ctx, ocx, ocz, _ in
             let x = ocx * 16 + 2, z = ocz * 16 + 2
-            let y = ctx.heightAt(x + 6, z + 7)
+            guard let y = exactDryPadYOrEstimate(ctx,
+                                                 x, z - 2, x + 11, z + 14,
+                                                 anchorX: x + 6, anchorZ: z + 7,
+                                                 maxVariation: 4) else {
+                return nil
+            }
             let C = Int(cell(B.cobblestone)), M = Int(cell(B.mossy_cobblestone))
+            let STAIR = Int(cell(B.cobblestone_stairs)), DOOR = bid("jungle_door")
             let mossy: [(Int, Double)] = [(C, 6), (M, 4)]
             return StructurePlan(id: "jungle_temple", pieces: [
-                piece(x - 1, y - 6, z - 1, x + 12, y + 14, z + 15) { b in
+                piece(x - 1, y - 6, z - 2, x + 12, y + 14, z + 15) { b in
                     for dz in 0..<15 { for dx in 0..<12 { b.foundation(x + dx, y - 1, z + dz, C, 6) } }
                     b.fillRandom(x, y, z, x + 11, y, z + 14, mossy)
                     b.fillRandom(x, y + 1, z, x + 11, y + 4, z + 14, mossy)
@@ -857,13 +1615,36 @@ func registerOverworldStructures() {
                     b.fillRandom(x + 2, y + 5, z + 2, x + 9, y + 8, z + 12, mossy)
                     b.fill(x + 3, y + 5, z + 3, x + 8, y + 7, z + 11, AIR)
                     b.fillRandom(x + 3, y + 9, z + 3, x + 8, y + 10, z + 11, mossy)
-                    // entrance (north)
+                    // The tall north arch remains part of the ruin silhouette,
+                    // but it used to be the only "entrance": it began four
+                    // blocks above the surrounding ground and never met the
+                    // interior stairs.  Give the lower room a real, supported
+                    // north vestibule: a two-wide jungle door over its floor,
+                    // a stair whose high half reaches that threshold, and a
+                    // short ground-level landing.
                     b.fill(x + 5, y + 5, z, x + 6, y + 7, z + 3, AIR)
                     b.fill(x + 5, y + 1, z + 1, x + 6, y + 4, z + 1, AIR)
+                    for dx in 5...6 {
+                        b.foundation(x + dx, y - 1, z - 2, C, 6)
+                        b.set(x + dx, y - 1, z - 2, Int(cell(B.dirt_path)))
+                        b.foundation(x + dx, y - 1, z - 1, C, 6)
+                        b.set(x + dx, y, z - 1, STAIR | FACE_OPP[0])
+                        b.clear(x + dx, y + 1, z - 2, x + dx, y + 3, z)
+                        b.set(x + dx, y + 1, z, Int(cell(DOOR, 0)))
+                        // The west leaf hinges right and the east leaf hinges
+                        // left, so the paired doors swing away from their seam.
+                        b.set(x + dx, y + 2, z, Int(cell(DOOR, dx == 5 ? 9 : 8)))
+                    }
                     // stairs down inside
                     for i in 0..<4 {
-                        b.set(x + 5, y + 4 - i, z + 4 + i, Int(cell(B.cobblestone_stairs, 1)))
-                        b.set(x + 6, y + 4 - i, z + 4 + i, Int(cell(B.cobblestone_stairs, 1)))
+                        let stairY = y + 4 - i, stairZ = z + 4 + i
+                        // The descending flight runs south, so its high half
+                        // must face north toward the preceding step.  Fill the
+                        // complete wedge below it, not merely its top support,
+                        // so no riser or support cell is left floating.
+                        b.fill(x + 5, y, stairZ, x + 6, stairY - 1, stairZ, C)
+                        b.set(x + 5, stairY, stairZ, Int(cell(B.cobblestone_stairs, 0)))
+                        b.set(x + 6, stairY, stairZ, Int(cell(B.cobblestone_stairs, 0)))
                         b.fill(x + 5, y + 5 - i, z + 4 + i, x + 6, y + 7 - i, z + 4 + i, AIR)
                     }
                     // tripwire trap corridor
@@ -904,8 +1685,16 @@ func registerOverworldStructures() {
         },
         plan: { ctx, ocx, ocz, rng in
             let x = ocx * 16 + 4, z = ocz * 16 + 4
-            let y = ctx.heightAt(x + 3, z + 3)
-            let SNOW = Int(cell(B.snow_block))
+            // The dome and its entrance tunnel are one land structure. Check
+            // their entire occupied footprint, then keep its four-deep
+            // foundations within the allowed contour variation.
+            guard let y = exactDryPadYOrEstimate(ctx,
+                                                 x, z, x + 6, z + 9,
+                                                 anchorX: x + 3, anchorZ: z + 3,
+                                                 maxVariation: 3) else {
+                return nil
+            }
+            let SNOW = Int(cell(B.snow_block)), RAMP = Int(cell(B.stone_brick_stairs, 0))
             let hasBasement = rng.nextFloat() < 0.5
             return StructurePlan(id: "igloo", pieces: [
                 piece(x - 1, y - 24, z - 1, x + 8, y + 5, z + 10) { b in
@@ -922,10 +1711,23 @@ func registerOverworldStructures() {
                     b.fill(x + 2, y + 3, z + 2, x + 4, y + 3, z + 4, SNOW)
                     b.set(x + 3, y + 3, z + 3, Int(cell(B.snow_block)))
                     // entrance tunnel south
+                    // The tunnel extends past the seven-by-seven dome, so it
+                    // needs its own foundations on a contoured (but accepted)
+                    // pad instead of depending on an arbitrary centre sample.
+                    for dz in 6...9 {
+                        b.foundation(x + 2, y, z + dz, SNOW, 4)
+                        b.foundation(x + 3, y - 1, z + dz, SNOW, 4)
+                        b.foundation(x + 4, y, z + dz, SNOW, 4)
+                    }
                     b.fill(x + 3, y + 1, z + 6, x + 3, y + 2, z + 9, AIR)
                     b.fill(x + 2, y + 1, z + 6, x + 2, y + 3, z + 9, SNOW)
                     b.fill(x + 4, y + 1, z + 6, x + 4, y + 3, z + 9, SNOW)
                     b.fill(x + 2, y + 3, z + 6, x + 4, y + 3, z + 9, SNOW)
+                    // The center tunnel floor is one block below the dome's
+                    // south floor.  Its north-facing high half meets that
+                    // landing, while the center foundation directly supports
+                    // the ramp instead of leaving a one-block dead end.
+                    b.set(x + 3, y, z + 6, RAMP)
                     // furnishings
                     b.set(x + 1, y + 1, z + 3, Int(cell(B.red_bed, 2 | 4)))
                     b.set(x + 1, y + 1, z + 2, Int(cell(B.red_bed, 2)))
@@ -968,13 +1770,13 @@ func registerOverworldStructures() {
         },
         plan: { ctx, ocx, ocz, _ in
             let x = ocx * 16 + 5, z = ocz * 16 + 5
-            let y = max(64, ctx.heightAt(x + 3, z + 4) + 1)
+            guard let y = stiltedWitchHutYOrEstimate(ctx, x, z) else { return nil }
             let P = Int(cell(B.spruce_planks)), L = Int(cell(B.oak_log))
             return StructurePlan(id: "witch_hut", pieces: [
-                piece(x - 1, y - 8, z - 1, x + 8, y + 7, z + 10) { b in
+                piece(x - 1, y - witchHutMaxStiltDepth, z - 1, x + 8, y + 7, z + 10) { b in
                     // stilts
                     for (sx, sz) in [(1, 1), (5, 1), (1, 7), (5, 7)] {
-                        for d in 0..<8 {
+                        for d in 0..<witchHutMaxStiltDepth {
                             let yy = y - d
                             let cur = b.get(x + sx, yy, z + sz)
                             if cur > 0 && UInt16(cur >> 4) != B.water { break }
@@ -993,10 +1795,15 @@ func registerOverworldStructures() {
                     b.set(x + 1, y + 2, z + 7, Int(cell(B.crafting_table)))
                     b.set(x + 1, y + 2, z + 2, Int(cell(B.flower_pot)))
                     b.s.addBlockEntity(BESpec(x: x + 1, y: y + 2, z: z + 2, kind: "pot_plant", data: ["plant": .str("red_mushroom")]))
-                    b.mob("witch", x + 3, y + 2, z + 4, ["persistent": .bool(true)])
-                    b.mob("cat", x + 2, y + 2, z + 5, ["variant": .str("black"), "persistent": .bool(true)])
+                    // `walls` supplies a solid room floor at y+2.  Spawn the
+                    // residents on its upper surface instead of embedding
+                    // them in that floor; the two cells through the roof stay
+                    // explicitly clear for their normal bodies.
+                    b.mob("witch", x + 3, y + 3, z + 4, ["persistent": .bool(true)])
+                    b.mob("cat", x + 2, y + 3, z + 5,
+                          ["variant": .num(Double(CatVariant.allBlack.rawValue)), "persistent": .bool(true)])
                 },
-            ], ref: StructRefBox(x - 8, y - 8, z - 8, x + 14, y + 12, z + 16))
+            ], ref: StructRefBox(x - 8, y - witchHutMaxStiltDepth, z - 8, x + 14, y + 12, z + 16))
         }
     ))
 
@@ -1010,8 +1817,20 @@ func registerOverworldStructures() {
         },
         plan: { ctx, ocx, ocz, _ in
             let x = ocx * 16 + 4, z = ocz * 16 + 4
-            let y = ctx.heightAt(x + 4, z + 4)
+            // The tower, cage, tent, and both patrol positions form one
+            // ordinary land outpost. Survey that full occupied area rather
+            // than placing the tower from a centre estimate and leaving its
+            // detached pieces floating across a contour.
+            guard let y = exactDryPadYOrEstimate(ctx,
+                                                 x - 5, z - 2, x + 14, z + 10,
+                                                 anchorX: x + 4, anchorZ: z + 4,
+                                                 maxVariation: 3) else {
+                return nil
+            }
+            let eastPatrolY = exactDrySurfaceFeetYOrEstimate(ctx, x + 9, z + 8)
+            let westPatrolY = exactDrySurfaceFeetYOrEstimate(ctx, x - 2, z + 2)
             let P = Int(cell(B.dark_oak_planks)), L = Int(cell(B.dark_oak_log)), C = Int(cell(B.cobblestone))
+            let STAIR = Int(cell(B.dark_oak_stairs)), DOOR = bid("dark_oak_door")
             return StructurePlan(id: "pillager_outpost", pieces: [
                 piece(x - 6, y - 6, z - 6, x + 14, y + 22, z + 14) { b in
                     for dz in 0..<8 { for dx in 0..<8 { b.foundation(x + dx, y - 1, z + dz, C, 6) } }
@@ -1021,14 +1840,33 @@ func registerOverworldStructures() {
                     for (cx2, cz2) in [(0, 0), (7, 0), (0, 7), (7, 7)] {
                         for h in 0..<15 { b.set(x + cx2, y + h, z + cz2, L) }
                     }
-                    // door
-                    b.set(x + 3, y, z, AIR); b.set(x + 4, y, z, AIR)
-                    b.set(x + 3, y + 1, z, AIR); b.set(x + 4, y + 1, z, AIR)
+                    // A conventional tower needs a usable entry rather than
+                    // a two-wide void through its raised floor.  Keep the
+                    // floor beneath the door, clear its body, then join the
+                    // natural grade to it with a supported two-wide stair.
+                    for dx in 3...4 {
+                        b.clear(x + dx, y + 1, z, x + dx, y + 2, z)
+                        b.set(x + dx, y + 1, z, Int(cell(DOOR, 0)))
+                        // Mirror the hinge bit across the double-door seam.
+                        b.set(x + dx, y + 2, z, Int(cell(DOOR, dx == 3 ? 9 : 8)))
+                        b.foundation(x + dx, y - 1, z - 2, C, 6)
+                        b.set(x + dx, y - 1, z - 2, Int(cell(B.dirt_path)))
+                        b.foundation(x + dx, y - 1, z - 1, C, 6)
+                        b.set(x + dx, y, z - 1, STAIR | FACE_OPP[0])
+                        b.clear(x + dx, y + 1, z - 2, x + dx, y + 2, z - 1)
+                    }
                     // floors + ladders
                     b.fill(x + 1, y + 4, z + 1, x + 6, y + 4, z + 6, P)
                     b.fill(x + 1, y + 10, z + 1, x + 6, y + 10, z + 6, P)
                     b.set(x + 1, y + 4, z + 1, AIR); b.set(x + 1, y + 10, z + 1, AIR)
-                    for h in 0..<14 { b.set(x + 1, y + h, z + 2, Int(cell(B.ladder, 5))) }
+                    for h in 0..<14 {
+                        // Ladder meta 5 mounts on the north face of z + 2;
+                        // restore a continuous backing post after the floor
+                        // openings above, rather than leaving several rungs
+                        // visibly unsupported.
+                        b.set(x + 1, y + h, z + 1, L)
+                        b.set(x + 1, y + h, z + 2, Int(cell(B.ladder, 5)))
+                    }
                     // crenellations + windows
                     var d = 0
                     while d < 8 {
@@ -1043,20 +1881,52 @@ func registerOverworldStructures() {
                     b.chest(x + 5, y + 11, z + 5, 2, "pillager_outpost")
                     // mobs: captain on top + patrols
                     b.mob("pillager", x + 4, y + 11, z + 4, ["captain": .bool(true), "persistent": .bool(true)])
-                    b.mob("pillager", x + 2, y, z + 3, ["persistent": .bool(true)])
-                    b.mob("pillager", x + 9, y, z + 8, ["persistent": .bool(true)])
-                    b.mob("pillager", x - 2, y, z + 2, ["persistent": .bool(true)])
+                    // `walls` owns a solid lower floor at y, so the indoor
+                    // guard must stand above it rather than spawn embedded.
+                    b.mob("pillager", x + 2, y + 1, z + 3, ["persistent": .bool(true)])
+                    if let eastPatrolY {
+                        b.mob("pillager", x + 9, eastPatrolY, z + 8, ["persistent": .bool(true)])
+                    }
+                    if let westPatrolY {
+                        b.mob("pillager", x - 2, westPatrolY, z + 2, ["persistent": .bool(true)])
+                    }
                     // golem cage (50%)
                     if b.rng.nextBoolean() {
                         let gx = x + 11, gz = z + 2
-                        let gy = ctx.heightAt(gx + 1, gz + 1)
-                        b.walls(gx, gy, gz, gx + 3, gy + 3, gz + 3, Int(cell(B.dark_oak_fence)), AIR)
-                        b.fill(gx, gy + 3, gz, gx + 3, gy + 3, gz + 3, P)
-                        b.mob("iron_golem", gx + 1, gy, gz + 1)
+                        let gy = y
+                        // `walls` would make a fence-shaped lower plane: a
+                        // 1.4-wide golem standing above that 1.5-high shape
+                        // still overlaps it. Build a full-cube floor, raised
+                        // fence rails, three clear interior cells, and a roof
+                        // explicitly so the captive has genuine footing and
+                        // headroom.
+                        for cageZ in gz...(gz + 3) {
+                            for cageX in gx...(gx + 3) {
+                                b.foundation(cageX, gy, cageZ, P, 4)
+                            }
+                        }
+                        b.fill(gx, gy, gz, gx + 3, gy, gz + 3, P)
+                        for cageY in (gy + 1)...(gy + 3) {
+                            for cageZ in gz...(gz + 3) {
+                                for cageX in gx...(gx + 3) {
+                                    let edge = cageX == gx || cageX == gx + 3 || cageZ == gz || cageZ == gz + 3
+                                    b.set(cageX, cageY, cageZ, edge ? Int(cell(B.dark_oak_fence)) : AIR)
+                                }
+                            }
+                        }
+                        b.fill(gx, gy + 4, gz, gx + 3, gy + 4, gz + 3, P)
+                        // The cage's `walls` helper likewise emits its floor
+                        // at gy; put the captive on that floor's top surface.
+                        b.mob("iron_golem", gx + 1, gy + 1, gz + 1)
                     }
                     // tent
                     let tx = x - 5, tz = z + 8
-                    let ty = ctx.heightAt(tx + 1, tz + 1)
+                    let ty = y
+                    for tentZ in tz...(tz + 2) {
+                        for tentX in tx...(tx + 2) {
+                            b.foundation(tentX, ty, tentZ, P, 4)
+                        }
+                    }
                     b.fill(tx, ty, tz, tx + 2, ty, tz + 2, Int(cell(B.white_wool)))
                     b.fill(tx, ty + 1, tz + 1, tx + 2, ty + 1, tz + 1, Int(cell(B.white_wool)))
                 },
@@ -1072,7 +1942,11 @@ func registerOverworldStructures() {
         },
         plan: { ctx, ocx, ocz, rng in
             let x = ocx * 16 + 2, z = ocz * 16 + 4
-            let seafloor = ctx.heightAt(x + 5, z + 4)
+            // Wrecks are intentionally beach/ocean-integrated, so preserve
+            // their water semantics while anchoring to exact base terrain.
+            guard let seafloor = exactSurfaceFeetYOrEstimate(ctx, x + 5, z + 4) else {
+                return nil
+            }
             let y = max(seafloor, 35)
             let variantRoll = rng.nextFloat()
             let variant = variantRoll < 0.4 ? "full" : variantRoll < 0.7 ? "bow" : "stern"
@@ -1127,7 +2001,11 @@ func registerOverworldStructures() {
             let x = ocx * 16 + 4, z = ocz * 16 + 4
             let bm = ctx.biomeAt(x, z)
             let warm = bm == Biome.warmOcean.rawValue || bm == Biome.lukewarmOcean.rawValue || bm == Biome.deepLukewarmOcean.rawValue
-            let y = ctx.heightAt(x + 3, z + 3)
+            // Ocean ruins intentionally remain underwater when this exact
+            // terrain column is covered; do not apply a dry-pad filter here.
+            guard let y = exactSurfaceFeetYOrEstimate(ctx, x + 3, z + 3) else {
+                return nil
+            }
             let W = warm ? Int(cell(B.sandstone)) : Int(cell(B.stone_bricks))
             let W2 = warm ? Int(cell(B.cut_sandstone)) : Int(cell(B.cracked_stone_bricks))
             return StructurePlan(id: "ocean_ruin", pieces: [
@@ -1163,7 +2041,9 @@ func registerOverworldStructures() {
         },
         plan: { ctx, ocx, ocz, _ in
             let x = ocx * 16 + 9, z = ocz * 16 + 9
-            let y = ctx.heightAt(x, z) - 4
+            // Treasure is intentionally buried below its exact surface.
+            guard let surfaceY = exactSurfaceFeetYOrEstimate(ctx, x, z) else { return nil }
+            let y = surfaceY - 4
             return StructurePlan(id: "buried_treasure", pieces: [
                 piece(x, y, z, x, y, z) { b in
                     b.chest(x, y, z, 0, "buried_treasure")
@@ -1179,10 +2059,18 @@ func registerOverworldStructures() {
         },
         plan: { ctx, ocx, ocz, _ in
             let x = ocx * 16 + 5, z = ocz * 16 + 7
-            let y = ctx.heightAt(x + 2, z)
+            // The Overworld frame has no general foundation, so only accept a
+            // fully dry, level landing patch. The Nether has no base-terrain
+            // oracle and deliberately preserves its existing floor probe.
+            guard let y = exactDryPadYOrEstimate(ctx,
+                                                 x - 2, z - 2, x + 4, z + 2,
+                                                 anchorX: x + 2, anchorZ: z,
+                                                 maxVariation: 0) else {
+                return nil
+            }
             return StructurePlan(id: "ruined_portal", pieces: [
                 piece(x - 3, y - 3, z - 3, x + 7, y + 6, z + 4) { b in
-                    buildRuinedPortal(b, x, y, z, false)
+                    buildRuinedPortal(b, x, y, z, ctx.dim == Dim.nether.rawValue)
                 },
             ])
         }
@@ -1197,7 +2085,11 @@ func registerOverworldStructures() {
         },
         plan: { ctx, ocx, ocz, rng in
             let cxw = ocx * 16 + 8, czw = ocz * 16 + 8
-            let surfaceY = ctx.heightAt(cxw, czw)
+            // Trail ruins are intentionally buried, but their depth must be
+            // relative to the exact local terrain rather than an estimate.
+            guard let surfaceY = exactSurfaceFeetYOrEstimate(ctx, cxw, czw) else {
+                return nil
+            }
             let y = surfaceY - 6
             var pieces: [StructPiece] = []
             let mats = [Int(cell(B.mud_bricks)), Int(cell(B.packed_mud)), Int(cell(B.terracotta)), Int(cell(B.cobblestone)), Int(cell(B.bricks))]

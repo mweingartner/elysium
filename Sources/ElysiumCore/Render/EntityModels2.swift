@@ -310,6 +310,7 @@ func registerAllModels() {
         },
         packTex: ["entity/wolf/wolf.png"]))
     M2("cat", catModel(["entity/cat/tabby.png"]))
+    M2("cat_all_black", catModel(["entity/cat/all_black.png"], paint: allBlackCatPaint))
     M2("fox", MobModel(
         texW: 48, texH: 32,
         parts: [
@@ -441,7 +442,7 @@ func registerAllModels() {
     registerModels2()
 }
 
-func catModel(_ packTex: [String]) -> MobModel {
+func catModel(_ packTex: [String], paint: @escaping (EntitySkin) -> Void = catPaint) -> MobModel {
     MobModel(
         texW: 64, texH: 32,
         parts: [
@@ -455,7 +456,7 @@ func catModel(_ packTex: [String]) -> MobModel {
             part("legBR", (-1.1, 6, 5), box(-1, -6, -1, 2, 6, 2, 8, 13)),
             part("legBL", (1.1, 6, 5), box(-1, -6, -1, 2, 6, 2, 8, 13)),
         ],
-        anim: "quadTail", scale: 1, paint: catPaint, packTex: packTex)
+        anim: "quadTail", scale: 1, paint: paint, packTex: packTex)
 }
 
 private func catPaint(_ s: EntitySkin) {
@@ -467,6 +468,19 @@ private func catPaint(_ s: EntitySkin) {
     s.box(0, 10, 1, 1, 2, shadeColor(fur, 0.9))        // ears
     s.box(20, 0, 4, 16, 6, fur, 0.14)                  // body
     s.box(0, 15, 1, 8, 1, shadeColor(fur, 0.85), 0.1)  // tail
+    s.box(40, 0, 2, 10, 2, fur, 0.14)                  // front legs
+    s.box(8, 13, 2, 6, 2, fur, 0.14)                   // back legs
+}
+
+private func allBlackCatPaint(_ s: EntitySkin) {
+    let fur = 0x15171a
+    s.box(0, 0, 5, 4, 5, fur, 0.14)
+    let fu = 5, fv = 5
+    s.px(fu + 0, fv + 0, 0xe9d36b); s.px(fu + 4, fv + 0, 0xe9d36b)
+    s.box(0, 24, 3, 2, 2, shadeColor(fur, 1.35), 0.1)  // muzzle
+    s.box(0, 10, 1, 1, 2, shadeColor(fur, 1.25))       // ears
+    s.box(20, 0, 4, 16, 6, fur, 0.14)                  // body
+    s.box(0, 15, 1, 8, 1, shadeColor(fur, 0.8), 0.1)   // tail
     s.box(40, 0, 2, 10, 2, fur, 0.14)                  // front legs
     s.box(8, 13, 2, 6, 2, fur, 0.14)                   // back legs
 }

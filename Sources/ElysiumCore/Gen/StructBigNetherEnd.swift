@@ -59,6 +59,11 @@ func registerBigStructures() {
                     let sx = x0 + 12, sz = z0 + 40
                     b.fill(sx, y0 + 10, sz, sx + 8, y0 + 14, sz + 8, PB)
                     b.fill(sx + 1, y0 + 11, sz + 1, sx + 7, y0 + 13, sz + 7, AIR)
+                    // Keep the sponge chamber part of the monument's water
+                    // circuit.  A three-wide, three-high water arch reaches
+                    // the existing interior sea while retaining its solid
+                    // prismarine floor and roof.
+                    b.fill(sx + 3, y0 + 11, sz, sx + 5, y0 + 13, sz, W)
                     for _ in 0..<12 {
                         b.set(sx + 1 + b.rng.nextInt(7), y0 + 13, sz + 1 + b.rng.nextInt(7), Int(cell(B.wet_sponge)))
                     }
@@ -78,20 +83,44 @@ func registerBigStructures() {
         },
         plan: { ctx, ocx, ocz, rng in
             let x0 = ocx * 16 - 16, z0 = ocz * 16 - 24
-            let y = ctx.heightAt(ocx * 16 + 8, ocz * 16 + 8)
+            // room grid: 5 × 4 rooms of 8×8, 3 floors
+            let ROOMS_X = 5, ROOMS_Z = 4, ROOM = 8, FLOORS = 3, FLOOR_H = 6
+            let width = ROOMS_X * ROOM + 2, depth = ROOMS_Z * ROOM + 2
+            // A mansion is too broad for a one-column height guess.  Its
+            // plan may only use a dry, exact terrain pad whose eight-block
+            // maximum drop remains inside the 12-block support foundation.
+            // Legacy synthetic contexts without an oracle retain their
+            // explicit height function, but normal Overworld plans fail
+            // closed on wet, unsupported, or excessively varied ground.
+            let y: Int
+            if ctx.terrainOracle != nil {
+                guard let padY = exactDryTerrainPadY(ctx, x0, z0 - 3,
+                                                      x0 + width, z0 + depth,
+                                                      maxVariation: 8) else {
+                    return nil
+                }
+                y = padY
+            } else {
+                y = ctx.heightAt(ocx * 16 + 8, ocz * 16 + 8)
+            }
             var pieces: [StructPiece] = []
             let PLANK = Int(cell(B.dark_oak_planks)), LOG = Int(cell(B.dark_oak_log))
             let CARPET = Int(cell(B.red_carpet))
             let COBBLE = Int(cell(B.cobblestone)), GLASS = Int(cell(B.glass_pane))
             let BIRCH = Int(cell(B.birch_planks))
-            // room grid: 5 × 4 rooms of 8×8, 3 floors
-            let ROOMS_X = 5, ROOMS_Z = 4, ROOM = 8, FLOORS = 3, FLOOR_H = 6
-            let width = ROOMS_X * ROOM + 2, depth = ROOMS_Z * ROOM + 2
+            let STAIR = Int(cell(B.dark_oak_stairs)), PATH = Int(cell(B.dirt_path))
+            let DOOR = bid("dark_oak_door")
+            // The southeast room is deliberately a circulation hall, rather
+            // than a furnished room subsequently carved open for stairs.
+            // Keeping the shaft in a reserved room preserves the remaining
+            // plan and gives every floor a predictable way up and down.
+            let stairHallX = x0 + 1 + (ROOMS_X - 1) * ROOM
+            let stairHallZ = z0 + 1 + (ROOMS_Z - 1) * ROOM
 
             // foundation + shell
-            pieces.append(piece(x0 - 2, y - 10, z0 - 2, x0 + width + 2, y + FLOORS * FLOOR_H + 8, z0 + depth + 2) { b in
+            pieces.append(piece(x0 - 2, y - 12, z0 - 3, x0 + width + 2, y + FLOORS * FLOOR_H + 8, z0 + depth + 2) { b in
                 for dz in 0...depth { for dx in 0...width {
-                    b.foundation(x0 + dx, y - 1, z0 + dz, COBBLE, 10)
+                    b.foundation(x0 + dx, y - 1, z0 + dz, COBBLE, 12)
                 } }
                 // outer walls
                 for f in 0..<FLOORS {
@@ -123,8 +152,26 @@ func registerBigStructures() {
                 for (px, pz) in [(0, 0), (width, 0), (0, depth), (width, depth)] {
                     for h in 0..<(FLOORS * FLOOR_H + 2) { b.set(x0 + px, y + h, z0 + pz, LOG) }
                 }
-                // entrance
-                b.fill(x0 + width / 2 - 1, y, z0, x0 + width / 2 + 1, y + 3, z0 + 1, AIR)
+                // A real north-facing double doorway, with an exterior stair
+                // whose high half leads back to the house and a short, clear
+                // approach.  Earlier mansions merely removed wall blocks,
+                // leaving an implausible hole with no interactive entrance.
+                let entranceX = x0 + width / 2
+                for dx in -1...0 {
+                    let doorX = entranceX + dx
+                    b.set(doorX, y, z0, Int(cell(DOOR, 0)))
+                    // Complementary hinge bits let the two leaves open away
+                    // from the centre seam instead of colliding as twins.
+                    b.set(doorX, y + 1, z0, Int(cell(DOOR, dx == -1 ? 9 : 8)))
+                    b.clear(doorX, y, z0 + 1, doorX, y + 3, z0 + 1)
+                    b.foundation(doorX, y - 2, z0 - 1, COBBLE, 12)
+                    b.set(doorX, y - 1, z0 - 1, STAIR | FACE_OPP[0])
+                    for approachZ in (z0 - 3)...(z0 - 2) {
+                        b.foundation(doorX, y - 2, approachZ, COBBLE, 12)
+                        b.set(doorX, y - 1, approachZ, PATH)
+                    }
+                    b.clear(doorX, y, z0 - 3, doorX, y + 2, z0 - 1)
+                }
             })
 
             // rooms with interior walls + furnishings + mobs
@@ -137,6 +184,7 @@ func registerBigStructures() {
                         let kind = rng.pick(roomKinds)
                         let hasEastWall = rx < ROOMS_X - 1
                         let hasSouthWall = rz < ROOMS_Z - 1
+                        let isStairHall = rx == ROOMS_X - 1 && rz == ROOMS_Z - 1
                         pieces.append(piece(roomX, fy, roomZ, roomX + ROOM, fy + FLOOR_H - 1, roomZ + ROOM) { b in
                             // interior walls with door gaps
                             if hasEastWall {
@@ -156,54 +204,98 @@ func registerBigStructures() {
                                 }
                             }
                             let midX = roomX + 3, midZ = roomZ + 3
-                            switch kind {
-                            case "bedroom":
-                                b.set(midX, fy, midZ, Int(cell(B.red_bed, 0 | 4)))
-                                b.set(midX, fy, midZ + 1, Int(cell(B.red_bed, 0)))
-                                b.set(midX + 2, fy, midZ, Int(cell(B.chest, 1)))
-                                b.set(midX - 1, fy, midZ - 1, CARPET)
-                            case "library":
-                                for i in 0..<3 {
-                                    for h in 0..<3 {
-                                        b.set(roomX + 1, fy + h, roomZ + 1 + i * 2, Int(cell(B.bookshelf)))
-                                        b.set(roomX + 5, fy + h, roomZ + 1 + i * 2, Int(cell(B.bookshelf)))
+                            if !isStairHall {
+                                switch kind {
+                                case "bedroom":
+                                    b.set(midX, fy, midZ, Int(cell(B.red_bed, 0 | 4)))
+                                    b.set(midX, fy, midZ + 1, Int(cell(B.red_bed, 0)))
+                                    b.set(midX + 2, fy, midZ, Int(cell(B.chest, 1)))
+                                    b.set(midX - 1, fy, midZ - 1, CARPET)
+                                case "library":
+                                    for i in 0..<3 {
+                                        for h in 0..<3 {
+                                            b.set(roomX + 1, fy + h, roomZ + 1 + i * 2, Int(cell(B.bookshelf)))
+                                            b.set(roomX + 5, fy + h, roomZ + 1 + i * 2, Int(cell(B.bookshelf)))
+                                        }
                                     }
+                                case "dining":
+                                    b.fill(midX - 1, fy, midZ, midX + 1, fy, midZ, Int(cell(B.dark_oak_slab, 1)))
+                                    b.set(midX - 2, fy, midZ, Int(cell(B.dark_oak_stairs, 3)))
+                                    b.set(midX + 2, fy, midZ, Int(cell(B.dark_oak_stairs, 2)))
+                                case "storage":
+                                    b.chest(midX, fy, midZ, 0, "woodland_mansion")
+                                    b.set(midX + 1, fy, midZ, Int(cell(B.barrel, 1)))
+                                case "allay":
+                                    // jail cell with allay
+                                    b.fill(midX - 1, fy, midZ - 1, midX + 1, fy + 2, midZ + 1, Int(cell(B.dark_oak_fence)))
+                                    b.fill(midX, fy, midZ, midX, fy + 1, midZ, AIR)
+                                    b.mob("allay", midX, fy, midZ, ["persistent": .bool(true)])
+                                case "conference":
+                                    for i in 0..<4 { b.set(roomX + 1 + i, fy, roomZ + 2, Int(cell(B.dark_oak_stairs, 1))) }
+                                    b.set(midX, fy + 3, midZ, Int(cell(B.lantern, 1)))
+                                case "flower":
+                                    b.set(midX, fy, midZ, Int(cell(B.flower_pot)))
+                                    b.s.addBlockEntity(BESpec(x: midX, y: fy, z: midZ, kind: "pot_plant", data: ["plant": .str("poppy")]))
+                                    b.set(midX, fy - 1, midZ, Int(cell(B.grass_block)))
+                                case "lootRare":
+                                    b.chest(midX, fy, midZ, 0, "woodland_mansion")
+                                    b.set(midX, fy - 1, midZ, Int(cell(B.obsidian)))
+                                default:
+                                    break
                                 }
-                            case "dining":
-                                b.fill(midX - 1, fy, midZ, midX + 1, fy, midZ, Int(cell(B.dark_oak_slab, 1)))
-                                b.set(midX - 2, fy, midZ, Int(cell(B.dark_oak_stairs, 3)))
-                                b.set(midX + 2, fy, midZ, Int(cell(B.dark_oak_stairs, 2)))
-                            case "storage":
-                                b.chest(midX, fy, midZ, 0, "woodland_mansion")
-                                b.set(midX + 1, fy, midZ, Int(cell(B.barrel, 1)))
-                            case "allay":
-                                // jail cell with allay
-                                b.fill(midX - 1, fy, midZ - 1, midX + 1, fy + 2, midZ + 1, Int(cell(B.dark_oak_fence)))
-                                b.fill(midX, fy, midZ, midX, fy + 1, midZ, AIR)
-                                b.mob("allay", midX, fy, midZ, ["persistent": .bool(true)])
-                            case "conference":
-                                for i in 0..<4 { b.set(roomX + 1 + i, fy, roomZ + 2, Int(cell(B.dark_oak_stairs, 1))) }
-                                b.set(midX, fy + 3, midZ, Int(cell(B.lantern, 1)))
-                            case "flower":
-                                b.set(midX, fy, midZ, Int(cell(B.flower_pot)))
-                                b.s.addBlockEntity(BESpec(x: midX, y: fy, z: midZ, kind: "pot_plant", data: ["plant": .str("poppy")]))
-                                b.set(midX, fy - 1, midZ, Int(cell(B.grass_block)))
-                            case "lootRare":
-                                b.chest(midX, fy, midZ, 0, "woodland_mansion")
-                                b.set(midX, fy - 1, midZ, Int(cell(B.obsidian)))
-                            default:
-                                break
                             }
                             // illager population
                             let r = b.rng.nextFloat()
-                            if r < 0.3 { b.mob("vindicator", midX + 1, fy, midZ + 1, ["persistent": .bool(true)]) }
-                            else if r < 0.42 { b.mob("evoker", midX - 1, fy, midZ - 1, ["persistent": .bool(true)]) }
+                            // Keep one per-room RNG draw even for the stair
+                            // hall.  Its construction must not perturb the
+                            // deterministic room-kind stream elsewhere.
+                            let occupantX = roomX + 6, occupantZ = roomZ + 6
+                            if !isStairHall, r < 0.3 {
+                                b.clear(occupantX, fy, occupantZ, occupantX, fy + 2, occupantZ)
+                                b.mob("vindicator", occupantX, fy, occupantZ, ["persistent": .bool(true)])
+                            } else if !isStairHall, r < 0.42 {
+                                b.clear(occupantX, fy, occupantZ, occupantX, fy + 2, occupantZ)
+                                b.mob("evoker", occupantX, fy, occupantZ, ["persistent": .bool(true)])
+                            }
                             // torch
-                            b.set(roomX + 1, fy + 3, roomZ + 1, Int(cell(B.torch, 0)))
+                            if !isStairHall { b.set(roomX + 1, fy + 3, roomZ + 1, Int(cell(B.torch, 0))) }
                         })
                     }
                 }
             }
+            // A two-flight stair hall connects all three floor decks.  The
+            // closure comes after room furnishing, but it owns a room that was
+            // reserved above, so it never tears a route through a furnished
+            // bedroom or blocks a resident spawn.
+            pieces.append(piece(stairHallX + 1, y - 1, stairHallZ + 1,
+                                stairHallX + 6, y + FLOORS * FLOOR_H - 1, stairHallZ + 6) { b in
+                b.clear(stairHallX + 1, y, stairHallZ + 1,
+                        stairHallX + 6, y + FLOORS * FLOOR_H - 1, stairHallZ + 6)
+                for f in 0..<FLOORS {
+                    let fy = y + f * FLOOR_H
+                    b.fill(stairHallX + 1, fy - 1, stairHallZ + 1,
+                           stairHallX + 6, fy - 1, stairHallZ + 6,
+                           f == 0 ? COBBLE : BIRCH)
+                }
+                func stairFlight(_ floor: Int, _ z: Int, risingEast: Bool) {
+                    let fy = y + floor * FLOOR_H
+                    for step in 0..<FLOOR_H {
+                        let x = risingEast ? stairHallX + 1 + step : stairHallX + 6 - step
+                        // A tread cannot float above the stair shaft.  Every
+                        // rise gets a solid riser beneath it, while the next
+                        // two cells remain clear for a player's body/head.
+                        if step > 0 {
+                            b.fill(x, fy, z, x, fy + step - 1, z,
+                                   floor == 0 ? COBBLE : BIRCH)
+                        }
+                        b.set(x, fy + step, z, STAIR | (risingEast ? 3 : 2))
+                        b.set(x, fy + step + 1, z, AIR)
+                        b.set(x, fy + step + 2, z, AIR)
+                    }
+                }
+                stairFlight(0, stairHallZ + 1, risingEast: true)
+                stairFlight(1, stairHallZ + 6, risingEast: false)
+            })
             return StructurePlan(id: "woodland_mansion", pieces: pieces,
                                  ref: StructRefBox(x0 - 8, y - 8, z0 - 8, x0 + width + 8, y + FLOORS * FLOOR_H + 8, z0 + depth + 8))
         }
@@ -227,6 +319,7 @@ func registerNetherEndStructures() {
             var pieces: [StructPiece] = []
             let NB = Int(cell(B.nether_bricks))
             let FENCE = Int(cell(B.nether_brick_fence))
+            let STAIR = Int(cell(B.nether_brick_stairs))
             let cx = ocx * 16 + 8, cz = ocz * 16 + 8
             let y = 48 + rng.nextInt(16)
 
@@ -244,7 +337,11 @@ func registerNetherEndStructures() {
                     }
                     // railings
                     for d in -3...3 {
-                        if abs(d) == 2 { continue }
+                        // Bridges and side rooms meet a crossing at its middle
+                        // three cells.  Leave those matching gates open; the
+                        // former off-centre gaps decorated the rail but sealed
+                        // every authored bridge at the junction.
+                        if abs(d) <= 1 { continue }
                         b.set(x + d, y + 1, z - 3, FENCE); b.set(x + d, y + 1, z + 3, FENCE)
                         b.set(x - 3, y + 1, z + d, FENCE); b.set(x + 3, y + 1, z + d, FENCE)
                     }
@@ -263,7 +360,13 @@ func registerNetherEndStructures() {
                             let wx = px + (dz != 0 ? w : 0), wz = pz + (dx != 0 ? w : 0)
                             b.set(wx, y, wz, NB)
                             for h in 1...5 { b.set(wx, y + h, wz, AIR) }
-                            if abs(w) == 2 { b.set(wx, y + 1, wz, FENCE) }
+                            // The first/last four bridge cells lie inside a
+                            // crossing's 7×7 deck.  Their transverse rails
+                            // would otherwise intersect the perpendicular arm
+                            // and turn the junction into a fence grid.
+                            if abs(w) == 2 && i > 3 && i < len - 3 {
+                                b.set(wx, y + 1, wz, FENCE)
+                            }
                         }
                         // support arches
                         if i % 6 == 3 {
@@ -280,28 +383,55 @@ func registerNetherEndStructures() {
                 })
                 return (ex, ez)
             }
-            func blazePlatform(_ x: Int, _ z: Int) {
+            /// A raised blaze platform attaches to a crossing at `entryDir`.
+            /// Its threshold is a real one-block stair, not a disconnected
+            /// decorative stair floating above the bridge deck.
+            func blazePlatform(_ x: Int, _ z: Int, _ entryDir: Int) {
                 pieces.append(piece(x - 3, y, z - 3, x + 3, y + 9, z + 3) { b in
                     b.fill(x - 3, y + 1, z - 3, x + 3, y + 1, z + 3, NB)
                     b.fill(x - 2, y + 2, z - 2, x + 2, y + 7, z + 2, AIR)
-                    // stairs up
-                    for i in 0..<3 { b.set(x - 3 + i, y + 1 + i, z, Int(cell(B.nether_brick_stairs, 3))) }
                     b.fill(x - 1, y + 2, z - 1, x + 1, y + 2, z + 1, NB)
                     b.spawner(x, y + 3, z, "blaze")
                     for d in -2...2 {
                         b.set(x + d, y + 2, z - 2, FENCE); b.set(x + d, y + 2, z + 2, FENCE)
                         b.set(x - 2, y + 2, z + d, FENCE); b.set(x + 2, y + 2, z + d, FENCE)
                     }
+                    // The platform's near edge shares the crossing's outer
+                    // deck coordinate.  Back the threshold directly and
+                    // clear both the old crossing rail and platform rail so
+                    // the stair joins a legal two-block-high route.
+                    let dx = FACE_DX[entryDir], dz = FACE_DZ[entryDir]
+                    let entryX = x - dx * 3, entryZ = z - dz * 3
+                    let landingX = entryX + dx, landingZ = entryZ + dz
+                    b.foundation(entryX, y - 1, entryZ, NB, 14)
+                    b.set(entryX, y, entryZ, STAIR | entryDir)
+                    b.clear(entryX, y + 1, entryZ, entryX, y + 2, entryZ)
+                    b.clear(landingX, y + 2, landingZ, landingX, y + 3, landingZ)
                 })
             }
-            func wartRoom(_ x: Int, _ z: Int) {
+            /// A nether-wart room has a three-wide threshold that rises from
+            /// the crossing deck to the soul-sand bed without erasing crops
+            /// or openings on the other three sides.
+            func wartRoom(_ x: Int, _ z: Int, _ entryDir: Int) {
                 pieces.append(piece(x - 4, y - 2, z - 4, x + 4, y + 6, z + 4) { b in
                     b.walls(x - 4, y, z - 4, x + 4, y + 5, z + 4, NB, AIR)
                     b.fill(x - 3, y + 1, z - 3, x + 3, y + 1, z + 3, Int(cell(B.soul_sand)))
                     for dz in -3...3 { for dx in -3...3 {
                         if b.rng.nextFloat() < 0.7 { b.set(x + dx, y + 2, z + dz, Int(cell(B.nether_wart, b.rng.nextInt(4)))) }
                     } }
-                    b.set(x, y + 2, z - 4, AIR); b.set(x, y + 3, z - 4, AIR) // doorway
+                    let dx = FACE_DX[entryDir], dz = FACE_DZ[entryDir]
+                    let sideX = FACE_DZ[entryDir], sideZ = -FACE_DX[entryDir]
+                    for offset in -1...1 {
+                        let entryX = x - dx * 4 + sideX * offset
+                        let entryZ = z - dz * 4 + sideZ * offset
+                        let landingX = entryX + dx, landingZ = entryZ + dz
+                        b.foundation(entryX, y - 1, entryZ, NB, 14)
+                        b.set(entryX, y, entryZ, STAIR | entryDir)
+                        b.clear(entryX, y + 1, entryZ, entryX, y + 3, entryZ)
+                        // Reserve the first crop row as a clear landing.  Its
+                        // soul-sand surface remains intact at y + 1.
+                        b.clear(landingX, y + 2, landingZ, landingX, y + 3, landingZ)
+                    }
                     b.chest(x + 3, y + 2, z + 3, 0, "nether_fortress")
                 })
             }
@@ -315,14 +445,31 @@ func registerNetherEndStructures() {
                 let (ex, ez) = bridge(cx, cz, dir, len)
                 crossing(ex, ez)
                 let what = rng.nextFloat()
-                if what < 0.4 { blazePlatform(ex + (dir < 2 ? 8 : 0), ez + (dir >= 2 ? 8 : 0)) }
-                else if what < 0.65 { wartRoom(ex + (dir < 2 ? 9 : 0), ez + (dir >= 2 ? 9 : 0)) }
+                // Put side rooms flush with a crossing's outer deck.  The
+                // orientation is derived, not random, so this does not alter
+                // the frozen plan RNG stream.
+                // Direction IDs are N,S,W,E rather than a rotational enum,
+                // so choose the right-hand perpendicular explicitly.  Simple
+                // modular arithmetic would send south/east branches back onto
+                // their bridge instead of beside it.
+                let sideDir = [3, 2, 0, 1][dir]
+                if what < 0.4 {
+                    blazePlatform(ex + FACE_DX[sideDir] * 6,
+                                  ez + FACE_DZ[sideDir] * 6, sideDir)
+                } else if what < 0.65 {
+                    wartRoom(ex + FACE_DX[sideDir] * 7,
+                             ez + FACE_DZ[sideDir] * 7, sideDir)
+                }
                 else if what < 0.85 {
                     let len2 = 12 + rng.nextInt(12)
                     let dir2 = (dir + (rng.nextBoolean() ? 2 : 3)) % 4
                     let (ex2, ez2) = bridge(ex, ez, dir2, len2)
                     crossing(ex2, ez2)
-                    if rng.nextBoolean() { blazePlatform(ex2, ez2 + 8) }
+                    if rng.nextBoolean() {
+                        let sideDir2 = [3, 2, 0, 1][dir2]
+                        blazePlatform(ex2 + FACE_DX[sideDir2] * 6,
+                                      ez2 + FACE_DZ[sideDir2] * 6, sideDir2)
+                    }
                 }
             }
             return StructurePlan(id: "fortress", pieces: pieces,
@@ -340,6 +487,8 @@ func registerNetherEndStructures() {
             let x0 = ocx * 16 - 8, z0 = ocz * 16 - 8
             let y = 50 + rng.nextInt(12)
             let BS: [(Int, Double)] = [(Int(cell(B.blackstone)), 5), (Int(cell(B.polished_blackstone_bricks)), 4), (Int(cell(B.cracked_polished_blackstone_bricks)), 2), (Int(cell(B.gilded_blackstone)), 0.4)]
+            let BLACKSTONE = Int(cell(B.blackstone))
+            let STAIR = Int(cell(B.nether_brick_stairs))
             let W = 32, D = 32, H = 20
             return StructurePlan(id: "bastion", pieces: [
                 piece(x0 - 1, y - 16, z0 - 1, x0 + W + 1, y + H + 1, z0 + D + 1) { b in
@@ -391,14 +540,83 @@ func registerNetherEndStructures() {
                         let facing = b.rng.nextInt(4)
                         if b.get(lx, ly - 1, lz) > 0 { b.chest(lx, ly, lz, facing, "bastion_other") }
                     }
-                    // mobs
+                    // Fixed circulation is stamped after the ruined shell and
+                    // randomized bridges.  It supplies a grounded north
+                    // entrance, a reliable route through every deck height,
+                    // and a small threshold into the raised treasure room.
+                    let entryX = x0 + W / 2
+                    for dx in -1...1 {
+                        let px = entryX + dx
+                        b.foundation(px, y - 1, z0 - 1, BLACKSTONE, 14)
+                        b.clear(px, y, z0 - 1, px, y + 2, z0)
+                    }
+
+                    // The ruined suspended bridges can otherwise turn the
+                    // entire ground deck into a head-height checkerboard.
+                    // Carve one explicit lower promenade from the north gate
+                    // to the stair spine and treasure-room threshold.
+                    let promenadeX = x0 + 4
+
+                    // A supported south-rising stair spine reaches the three
+                    // authored bridge decks (y + 1, y + 7, and y + 13).  The
+                    // riser column below each later tread is deliberate: an
+                    // all-air fixture must not be able to make these stairs
+                    // float merely because a terrain column happens to exist.
+                    let stairX = x0 + 3
+                    for level in 0..<3 {
+                        let deckY = y + 1 + level * 6
+                        let deckZ = z0 + 4 + level * 6
+                        b.fill(stairX, deckY, deckZ, x0 + W - 3, deckY, deckZ, BLACKSTONE)
+                    }
+                    for step in 0...13 {
+                        let stairZ = z0 + 3 + step
+                        if step > 0 {
+                            b.fill(stairX, y, stairZ, stairX, y + step - 1, stairZ, BLACKSTONE)
+                        }
+                        b.set(stairX, y + step, stairZ, STAIR | 1)
+                        b.clear(stairX, y + step + 1, stairZ, stairX, y + step + 2, stairZ)
+                    }
+                    // Stamp this after the fixed deck rows as well: the first
+                    // row otherwise becomes a head-height ceiling across the
+                    // ground route at z0 + 4.
+                    b.clear(promenadeX, y, z0 + 1, entryX, y + 2, z0 + 1)
+                    b.clear(promenadeX, y, z0 + 1, promenadeX, y + 2, z0 + 16)
+                    b.clear(promenadeX, y, z0 + 16, cx - 5, y + 2, z0 + 16)
+
+                    // The room's retained bottom wall block forms the raised
+                    // floor threshold.  A backed east-rising stair makes that
+                    // one-block change usable instead of a decorative hole.
+                    b.foundation(cx - 5, y - 1, cz, BLACKSTONE, 14)
+                    b.set(cx - 5, y, cz, STAIR | 3)
+                    b.clear(cx - 5, y + 1, cz, cx - 5, y + 2, cz)
+                    // Persistent mobs outlive normal spawn admission, so they
+                    // must never inherit an incidental ruined bridge cell.
+                    // Each patrol deck owns a three-by-three solid floor and
+                    // two clear cells above its selected spawn point.  The
+                    // fixed lower promenade and bridge decks keep these
+                    // guards connected to the authored circulation network.
+                    func patrolDeck(_ x: Int, _ feetY: Int, _ z: Int) {
+                        b.fill(x - 1, feetY - 1, z - 1,
+                               x + 1, feetY - 1, z + 1, BLACKSTONE)
+                        b.clear(x - 1, feetY, z - 1,
+                                x + 1, feetY + 1, z + 1)
+                    }
+                    patrolDeck(x0 + 9, y, z0 + 3)              // lower promenade
+                    patrolDeck(x0 + 8, y, z0 + 16)             // treasure approach
+                    patrolDeck(x0 + 14, y + 2, z0 + 4)         // lower bridge deck
+                    patrolDeck(x0 + 14, y + 8, z0 + 10)        // middle bridge deck
+                    patrolDeck(x0 + W - 6, y + 14, z0 + 16)    // upper bridge deck
+
+                    // The two interior guards use the treasure room's solid
+                    // bottom course; the remaining guards stand on authored
+                    // patrol decks rather than sampled bridge cells.
                     b.mob("piglin", cx + 3, y + 1, cz + 3, ["persistent": .bool(true)])
-                    b.mob("piglin", cx - 3, y + 7, cz - 3, ["persistent": .bool(true)])
-                    b.mob("piglin", x0 + 6, y + 1, z0 + 6, ["persistent": .bool(true)])
-                    b.mob("piglin_brute", cx + 1, y + 3, cz - 2, ["persistent": .bool(true)])
-                    b.mob("piglin_brute", x0 + W - 6, y + 13, z0 + 6, ["persistent": .bool(true)])
-                    b.mob("hoglin", x0 + 8, y + 1, z0 + D - 8, ["persistent": .bool(true)])
-                    b.mob("hoglin", x0 + W - 8, y + 1, z0 + D - 8, ["persistent": .bool(true)])
+                    b.mob("piglin", cx - 3, y + 1, cz - 3, ["persistent": .bool(true)])
+                    b.mob("piglin", x0 + 9, y, z0 + 3, ["persistent": .bool(true)])
+                    b.mob("piglin_brute", x0 + 14, y + 2, z0 + 4, ["persistent": .bool(true)])
+                    b.mob("piglin_brute", x0 + W - 6, y + 14, z0 + 16, ["persistent": .bool(true)])
+                    b.mob("hoglin", x0 + 8, y, z0 + 16, ["persistent": .bool(true)])
+                    b.mob("hoglin", x0 + 14, y + 8, z0 + 10, ["persistent": .bool(true)])
                 },
             ], ref: StructRefBox(x0 - 8, y - 16, z0 - 8, x0 + W + 8, y + H + 4, z0 + D + 8))
         }
@@ -417,6 +635,7 @@ func registerNetherEndStructures() {
             let cx = ocx * 16 + 8, cz = ocz * 16 + 8
             let baseY = ctx.heightAt(cx, cz)
             let PUR = Int(cell(B.purpur_block)), PIL = Int(cell(B.purpur_pillar)), END_ROD = Int(cell(B.end_rod))
+            let PUR_STAIR = Int(cell(B.purpur_stairs))
             var pieces: [StructPiece] = []
             let floors = 3 + rng.nextInt(3)
 
@@ -446,11 +665,6 @@ func registerNetherEndStructures() {
                     for (px, pz) in [(-4, -4), (4, -4), (-4, 4), (4, 4)] {
                         for h in 0..<5 { b.set(cx + px, fy + h, cz + pz, PIL) }
                     }
-                    // spiral purpur stairs inside
-                    let steps = [(-2, -2), (0, -3), (2, -2), (3, 0), (2, 2), (0, 3), (-2, 2), (-3, 0)]
-                    let (sx, sz) = steps[f % steps.count]
-                    b.set(cx + sx, fy + 1, cz + sz, Int(cell(B.purpur_stairs, f % 4)))
-                    b.set(cx + sx, fy + 2, cz + sz, AIR)
                     // shulker guarding each floor
                     b.mob("shulker", cx + (f % 2 == 0 ? 2 : -2), fy, cz + (f % 2 == 0 ? 2 : -2), ["persistent": .bool(true)])
                     // end rods
@@ -459,6 +673,13 @@ func registerNetherEndStructures() {
                 }
                 // door at base
                 b.fill(cx, baseY, cz - 4, cx, baseY + 2, cz - 4, AIR)
+                // Extend the doorway one supported cell beyond the tower so
+                // a player can arrive from an all-air island edge rather than
+                // appearing inside an isolated door opening.
+                for dx in -1...1 {
+                    b.foundation(cx + dx, baseY - 1, cz - 5, Int(cell(B.end_stone_bricks)), 6)
+                    b.clear(cx + dx, baseY, cz - 5, cx + dx, baseY + 2, cz - 5)
+                }
                 // roof + loot
                 let ty = baseY + floors * 5
                 for dz in -5...5 { for dx in -5...5 {
@@ -469,6 +690,27 @@ func registerNetherEndStructures() {
                 b.chest(cx + 2, ty + 1, cz, 2, "end_city_treasure")
                 b.set(cx, ty + 1, cz, END_ROD)
                 b.mob("shulker", cx, ty + 1, cz + 2, ["persistent": .bool(true)])
+
+                // Each completed flight starts on one floor deck and ends on
+                // the next.  The final six-tread flight cuts a controlled
+                // roof hatch, so the roof loot is reachable too.  Build after
+                // every floor/roof clear so a later deck cannot erase a tread.
+                for f in 0..<floors {
+                    let fy = baseY + f * 5
+                    let risingEast = f % 2 == 0
+                    let stairZ = cz + (risingEast ? -1 : 1)
+                    let treadCount = f == floors - 1 ? 6 : 5
+                    let startX = risingEast ? cx - 3 : cx + 2
+                    for step in 0..<treadCount {
+                        let stairX = risingEast ? startX + step : startX - step
+                        if step > 0 {
+                            b.fill(stairX, fy, stairZ, stairX, fy + step - 1, stairZ, PUR)
+                        }
+                        b.set(stairX, fy + step, stairZ, PUR_STAIR | (risingEast ? 3 : 2))
+                        b.clear(stairX, fy + step + 1, stairZ,
+                                stairX, fy + step + 2, stairZ)
+                    }
+                }
             })
 
             // end ship (60%)
@@ -493,12 +735,41 @@ func registerNetherEndStructures() {
                     // dragon head prow
                     b.set(sx - 1, sy + 1, sz, Int(cell(B.dragon_head)))
                     // treasure: elytra chest + brewing stand
-                    b.chest(sx + 10, sy + 3, sz, 4, "end_city_treasure")
-                    b.s.addBlockEntity(BESpec(x: sx + 11, y: sy + 3, z: sz, kind: "elytra_chest"))
-                    b.set(sx + 11, sy + 3, sz, Int(cell(B.chest, 4)))
-                    b.set(sx + 12, sy + 3, sz - 1, Int(cell(B.brewing_stand)))
+                    // The cabin walls establish their floor at sy + 3, so
+                    // furnishing belongs one cell above it.  Writing loot at
+                    // the floor level used to replace the floor itself and
+                    // embed the chest in the deck.
+                    b.chest(sx + 10, sy + 4, sz, 4, "end_city_treasure")
+                    b.s.addBlockEntity(BESpec(x: sx + 11, y: sy + 4, z: sz, kind: "elytra_chest"))
+                    b.set(sx + 11, sy + 4, sz, Int(cell(B.chest, 4)))
+                    b.set(sx + 12, sy + 4, sz - 1, Int(cell(B.brewing_stand)))
                     b.mob("shulker", sx + 7, sy + 3, sz, ["persistent": .bool(true)])
                     b.mob("shulker", sx + 11, sy + 4, sz + 1, ["persistent": .bool(true)])
+
+                    // The cabin is one block above the deck.  Its west wall
+                    // now has a backed east-rising stair and a two-block arch
+                    // rather than trapping the elytra chest behind solid
+                    // purpur.
+                    // Use the north deck slot so the threshold lands on an
+                    // open cabin floor tile rather than directly into the
+                    // centered chest pair.
+                    let cabinEntryZ = sz - 1
+                    b.set(sx + 8, sy + 3, cabinEntryZ, PUR_STAIR | 3)
+                    b.clear(sx + 8, sy + 4, cabinEntryZ, sx + 8, sy + 5, cabinEntryZ)
+                    b.clear(sx + 9, sy + 4, cabinEntryZ, sx + 9, sy + 5, cabinEntryZ)
+                })
+                // A short, supported bridge from the roof descends two blocks
+                // onto the ship deck.  It is a later piece so the hull/deck
+                // cannot overwrite its landing or headroom.
+                let ty = baseY + floors * 5
+                pieces.append(piece(cx + 5, ty - 3, cz - 1, sx + 3, ty + 2, cz + 1) { b in
+                    b.fill(cx + 5, ty, cz, sx + 1, ty, cz, PUR)
+                    for (step, stairX) in [(0, sx + 2), (1, sx + 3)] {
+                        let stairY = ty - 1 - step
+                        b.set(stairX, stairY - 1, cz, PUR)
+                        b.set(stairX, stairY, cz, PUR_STAIR | 2)
+                        b.clear(stairX, stairY + 1, cz, stairX, stairY + 2, cz)
+                    }
                 })
             }
             return StructurePlan(id: "end_city", pieces: pieces,

@@ -28,22 +28,51 @@ public struct GenCtx {
     public let heightAt: (Int, Int) -> Int
     public let biomeAt: (Int, Int) -> Int
     public let dim: Int
+    /// Generation setting carried explicitly because structure placement and
+    /// feature exclusion must not infer it from an opaque cache identity.
+    public let villageDensity: VillageDensity
     public let generationSettingsIdentity: String
     public let baseTerrainOracleVersion: Int
     public let terrainOracle: BaseTerrainOracle?
+    /// The immutable set of definitions that can materialize in this exact
+    /// dimension/preset. Planning decisions must never consult disabled
+    /// definitions: doing so lets a landmark that generation will not emit
+    /// veto a real plan (most visibly flat-world villages).
+    public let activeStructureDefinitions: [StructureDef]?
+    public let activeStructureDomainIdentity: String
 
     public init(seed: UInt32, heightAt: @escaping (Int, Int) -> Int,
                 biomeAt: @escaping (Int, Int) -> Int, dim: Int,
+                villageDensity: VillageDensity = .normal,
                 generationSettingsIdentity: String = "legacy",
                 baseTerrainOracleVersion: Int = 0,
-                terrainOracle: BaseTerrainOracle? = nil) {
+                terrainOracle: BaseTerrainOracle? = nil,
+                activeStructureDefinitions: [StructureDef]? = nil) {
         self.seed = seed
         self.heightAt = heightAt
         self.biomeAt = biomeAt
         self.dim = dim
+        self.villageDensity = villageDensity
         self.generationSettingsIdentity = generationSettingsIdentity
         self.baseTerrainOracleVersion = baseTerrainOracleVersion
         self.terrainOracle = terrainOracle
+        self.activeStructureDefinitions = activeStructureDefinitions
+        self.activeStructureDomainIdentity = activeStructureDefinitions.map(structureDefinitionDomainIdentity) ?? "legacy"
+    }
+}
+
+/// A structure may select its candidate lattice from immutable generation
+/// settings. `nil` disables that structure for the current world; registry
+/// definitions are never mutated after registration.
+public struct StructurePlacement: Equatable {
+    public let spacing: Int
+    public let separation: Int
+
+    public init(spacing: Int, separation: Int) {
+        precondition(spacing > 0)
+        precondition(separation >= 0 && separation < spacing)
+        self.spacing = spacing
+        self.separation = separation
     }
 }
 
@@ -79,10 +108,12 @@ public struct StructureDef {
     public let separation: Int
     public let salt: UInt32
     public let maxRadiusChunks: Int
+    public let placement: (GenCtx) -> StructurePlacement?
     public let check: (GenCtx, Int, Int, Rng) -> Bool
     public let plan: (GenCtx, Int, Int, Rng) -> StructurePlan?
 
     public init(id: String, spacing: Int, separation: Int, salt: UInt32, maxRadiusChunks: Int,
+                placement: ((GenCtx) -> StructurePlacement?)? = nil,
                 check: @escaping (GenCtx, Int, Int, Rng) -> Bool,
                 plan: @escaping (GenCtx, Int, Int, Rng) -> StructurePlan?) {
         self.id = id
@@ -90,9 +121,22 @@ public struct StructureDef {
         self.separation = separation
         self.salt = salt
         self.maxRadiusChunks = maxRadiusChunks
+        self.placement = placement ?? { _ in
+            StructurePlacement(spacing: spacing, separation: separation)
+        }
         self.check = check
         self.plan = plan
     }
+}
+
+/// A cache identity for the immutable structure domain. Closures are not
+/// comparable, so use the complete frozen placement tuple instead. The
+/// production registry has one definition per id; retaining the full tuple
+/// also makes synthetic tests independent of input-array order.
+public func structureDefinitionDomainIdentity(_ definitions: [StructureDef]) -> String {
+    definitions.map { def in
+        "\(def.id):\(def.salt):\(def.spacing):\(def.separation):\(def.maxRadiusChunks)"
+    }.sorted().joined(separator: "|")
 }
 
 public struct StructRef {
@@ -279,6 +323,11 @@ private final class BufferedChunkSink: ChunkSink {
         return minY + 1
     }
 
+    func hasBlockEntity(_ x: Int, _ y: Int, _ z: Int) -> Bool {
+        blockEntities.contains { $0.x == x && $0.y == y && $0.z == z }
+            || base.hasBlockEntity(x, y, z)
+    }
+
     func addBlockEntity(_ spec: BESpec) {
         guard floorDiv(spec.x, 16) == cx, floorDiv(spec.z, 16) == cz,
               spec.y >= minY, spec.y < maxY else { return }
@@ -312,11 +361,122 @@ public func rotF(_ facing: Int, _ rot: Int) -> Int {
 public var STRUCTURES: [StructureDef] = []
 public func registerStructure(_ def: StructureDef) { STRUCTURES.append(def) }
 
+// Conventional overworld landmarks share land with one another, so their
+// footprint conflict policy must not depend on the order in which chunks (or
+// registry entries) happen to be replayed.  Villages retain their older,
+// stricter foreign-landmark rejection in StructOverworld: that policy is
+// intentionally outside this resolver until it can be revised independently.
+//
+// The numeric order is frozen deliberately.  It follows the established
+// landmark registration order, then origin coordinates and frozen registry
+// position make same-class decisions explicit as well.  Do not infer this
+// order from an input [StructureDef] array: test harnesses and callers may
+// supply equivalent definitions in a different order.
+@inline(__always)
+private func conventionalSurfaceStructurePriority(_ id: String) -> Int? {
+    switch id {
+    case "desert_temple": return 0
+    case "jungle_temple": return 1
+    case "igloo": return 2
+    case "witch_hut": return 3
+    case "pillager_outpost": return 4
+    case "woodland_mansion": return 5
+    // Ruined portals are placed after the established landmark classes. They
+    // must lose a real overlap instead of stamping across an accepted
+    // outpost/mansion (including its block entities).
+    case "ruined_portal": return 6
+    default: return nil
+    }
+}
+
+@inline(__always)
+private func isConventionalSurfaceStructure(_ def: StructureDef) -> Bool {
+    conventionalSurfaceStructurePriority(def.id) != nil
+}
+
+/// Compare immutable definition fields rather than an input array position.
+/// The registry has exactly one production definition for each conventional
+/// id; the complete tuple also keeps synthetic tests independent of closure
+/// identity, which Swift cannot compare.
+private func sameSurfaceStructureDefinition(_ lhs: StructureDef, _ rhs: StructureDef) -> Bool {
+    lhs.id == rhs.id
+        && lhs.spacing == rhs.spacing
+        && lhs.separation == rhs.separation
+        && lhs.salt == rhs.salt
+        && lhs.maxRadiusChunks == rhs.maxRadiusChunks
+}
+
+/// Registry position is a final, frozen tie-breaker after rank and origin. A
+/// stable immutable fallback makes focused tests (whose definitions are not
+/// registered globally) just as independent of their supplied array order.
+private func frozenSurfaceStructureRegistrationIndex(_ def: StructureDef) -> Int {
+    for (index, registered) in STRUCTURES.enumerated()
+    where sameSurfaceStructureDefinition(registered, def) {
+        return index
+    }
+    return Int.max
+}
+
+private func surfaceDefinitionFallbackPrecedes(_ lhs: StructureDef, _ rhs: StructureDef) -> Bool {
+    if lhs.id != rhs.id { return lhs.id < rhs.id }
+    if lhs.salt != rhs.salt { return lhs.salt < rhs.salt }
+    if lhs.spacing != rhs.spacing { return lhs.spacing < rhs.spacing }
+    if lhs.separation != rhs.separation { return lhs.separation < rhs.separation }
+    return lhs.maxRadiusChunks < rhs.maxRadiusChunks
+}
+
+/// Strict total ordering for accepted conventional landmark plans. This must
+/// remain independent of target chunk and `dimStructures` traversal order.
+private func surfacePlanPrecedes(_ lhsDef: StructureDef, _ lhsOriginX: Int, _ lhsOriginZ: Int,
+                                 _ rhsDef: StructureDef, _ rhsOriginX: Int, _ rhsOriginZ: Int) -> Bool {
+    guard let lhsPriority = conventionalSurfaceStructurePriority(lhsDef.id),
+          let rhsPriority = conventionalSurfaceStructurePriority(rhsDef.id) else {
+        return false
+    }
+    if lhsPriority != rhsPriority { return lhsPriority < rhsPriority }
+    if lhsOriginX != rhsOriginX { return lhsOriginX < rhsOriginX }
+    if lhsOriginZ != rhsOriginZ { return lhsOriginZ < rhsOriginZ }
+    let lhsIndex = frozenSurfaceStructureRegistrationIndex(lhsDef)
+    let rhsIndex = frozenSurfaceStructureRegistrationIndex(rhsDef)
+    if lhsIndex != rhsIndex { return lhsIndex < rhsIndex }
+    return surfaceDefinitionFallbackPrecedes(lhsDef, rhsDef)
+}
+
+private func orderedConventionalSurfaceDefinitions(_ definitions: [StructureDef]) -> [StructureDef] {
+    definitions.filter(isConventionalSurfaceStructure).sorted {
+        surfacePlanPrecedes($0, 0, 0, $1, 0, 0)
+    }
+}
+
+/// Collision evidence is only the pieces that can really emit blocks. Ref
+/// boxes are runtime metadata and candidate lattice bounds merely make the
+/// search finite; neither is allowed to decide an overlap.
+func surfaceStructurePiecesOverlapXZ(_ lhs: [StructPiece], _ rhs: [StructPiece]) -> Bool {
+    for first in lhs {
+        for second in rhs where !(first.x1 < second.x0 || second.x1 < first.x0
+                                  || first.z1 < second.z0 || second.z1 < first.z0) {
+            return true
+        }
+    }
+    return false
+}
+
+/// Deterministic signature for the collision domain. It intentionally ignores
+/// non-conventional structures, whose placement remains governed by their
+/// own semantics (notably the village planner).
+func conventionalSurfaceCollisionSignature(_ definitions: [StructureDef]) -> String {
+    orderedConventionalSurfaceDefinitions(definitions).map { def in
+        "\(conventionalSurfaceStructurePriority(def.id) ?? Int.max):\(frozenSurfaceStructureRegistrationIndex(def)):" +
+            "\(def.id):\(def.salt):\(def.spacing):\(def.separation):\(def.maxRadiusChunks)"
+    }.joined(separator: "|")
+}
+
 private struct StructurePlanCacheKey: Hashable {
     let seed: UInt32
     let dim: Int
     let generationSettingsIdentity: String
     let baseTerrainOracleVersion: Int
+    let activeStructureDomainIdentity: String
     let structureID: String
     let ocx: Int
     let ocz: Int
@@ -346,6 +506,31 @@ private var planCacheComputations = 0
 private var planCacheWaits = 0
 private let planCacheCondition = NSCondition()
 
+/// A conventional-landmark decision is keyed by its candidate origin and
+/// complete generation context, never by the chunk currently being stamped.
+/// That prevents a cross-chunk plan from winning on one side of a seam and
+/// losing on the other. Duplicate calculations are harmless: all plan reads
+/// are deterministic and the installed Boolean is the same result.
+private struct SurfacePlanWinnerCacheKey: Hashable {
+    let seed: UInt32
+    let dim: Int
+    let generationSettingsIdentity: String
+    let baseTerrainOracleVersion: Int
+    let activeStructureDomainIdentity: String
+    let structureID: String
+    let structureSalt: UInt32
+    let structureSpacing: Int
+    let structureSeparation: Int
+    let structureRadius: Int
+    let ocx: Int
+    let ocz: Int
+    let collisionSignature: String
+}
+
+private var surfacePlanWinnerCache: [SurfacePlanWinnerCacheKey: Bool] = [:]
+private let surfacePlanWinnerCacheLock = NSLock()
+private let surfacePlanWinnerCacheLimit = 4_096
+
 func resetStructurePlanCacheForTesting() {
     planCacheCondition.lock()
     while !planCacheInFlight.isEmpty { planCacheCondition.wait() }
@@ -353,6 +538,10 @@ func resetStructurePlanCacheForTesting() {
     planCacheComputations = 0
     planCacheWaits = 0
     planCacheCondition.unlock()
+
+    surfacePlanWinnerCacheLock.lock()
+    surfacePlanWinnerCache.removeAll(keepingCapacity: false)
+    surfacePlanWinnerCacheLock.unlock()
 }
 
 func structurePlanCacheStatsForTesting() -> StructurePlanCacheStats {
@@ -364,15 +553,24 @@ func structurePlanCacheStatsForTesting() -> StructurePlanCacheStats {
 }
 
 public func structureOriginFor(_ def: StructureDef, _ seed: UInt32, _ rcx: Int, _ rcz: Int) -> (Int, Int) {
-    var rng = RandomX(hash2(seed, rcx, rcz, def.salt))
-    let range = max(1, def.spacing - def.separation)
-    return (rcx * def.spacing + rng.nextInt(range), rcz * def.spacing + rng.nextInt(range))
+    structureOriginFor(def, placement: StructurePlacement(spacing: def.spacing,
+                                                           separation: def.separation),
+                       seed: seed, regionX: rcx, regionZ: rcz)
+}
+
+public func structureOriginFor(_ def: StructureDef, placement: StructurePlacement,
+                               seed: UInt32, regionX: Int, regionZ: Int) -> (Int, Int) {
+    var rng = RandomX(hash2(seed, regionX, regionZ, def.salt))
+    let range = max(1, placement.spacing - placement.separation)
+    return (regionX * placement.spacing + rng.nextInt(range),
+            regionZ * placement.spacing + rng.nextInt(range))
 }
 
 public func getPlan(_ def: StructureDef, _ ctx: GenCtx, _ ocx: Int, _ ocz: Int) -> StructurePlan? {
     let key = StructurePlanCacheKey(seed: ctx.seed, dim: ctx.dim,
                                     generationSettingsIdentity: ctx.generationSettingsIdentity,
                                     baseTerrainOracleVersion: ctx.baseTerrainOracleVersion,
+                                    activeStructureDomainIdentity: ctx.activeStructureDomainIdentity,
                                     structureID: def.id, ocx: ocx, ocz: ocz)
     planCacheCondition.lock()
     while true {
@@ -389,10 +587,33 @@ public func getPlan(_ def: StructureDef, _ ctx: GenCtx, _ ocx: Int, _ ocz: Int) 
         planCacheWaits += 1
         planCacheCondition.wait()
     }
-    let rng = Rng(hash2(ctx.seed, ocx, ocz, def.salt ^ 0x5757))
+    // A GenCtx may be shared by a caller that has already spent some of its
+    // oracle budget on unrelated candidates. Plans are global-cache values,
+    // so they must never inherit that mutable history. Exact Overworld plans
+    // therefore receive a fresh bounded oracle whose seed/settings are the
+    // only inputs; non-Overworld and legacy contexts keep their original
+    // height/floor semantics.
+    let planCtx: GenCtx
+    if ctx.dim == Dim.overworld.rawValue, let oracle = ctx.terrainOracle {
+        planCtx = GenCtx(seed: ctx.seed,
+                         heightAt: ctx.heightAt,
+                         biomeAt: ctx.biomeAt,
+                         dim: ctx.dim,
+                         villageDensity: ctx.villageDensity,
+                         generationSettingsIdentity: ctx.generationSettingsIdentity,
+                         baseTerrainOracleVersion: ctx.baseTerrainOracleVersion,
+                         terrainOracle: BaseTerrainOracle(
+                             seed: ctx.seed, settings: oracle.settings,
+                             maxCachedChunks: structurePlanOracleMaxCachedChunks,
+                             maxQueries: structurePlanOracleMaxQueries),
+                         activeStructureDefinitions: ctx.activeStructureDefinitions)
+    } else {
+        planCtx = ctx
+    }
+    let rng = Rng(hash2(planCtx.seed, ocx, ocz, def.salt ^ 0x5757))
     var plan: StructurePlan?
-    if def.check(ctx, ocx, ocz, rng) {
-        plan = def.plan(ctx, ocx, ocz, Rng(hash2(ctx.seed, ocx, ocz, def.salt ^ 0x1234)))
+    if def.check(planCtx, ocx, ocz, rng) {
+        plan = def.plan(planCtx, ocx, ocz, Rng(hash2(planCtx.seed, ocx, ocz, def.salt ^ 0x1234)))
     }
     if plan?.pieces.count ?? 0 > 256 { plan = nil }
     let computed: StructurePlanCacheValue = plan.map(StructurePlanCacheValue.accepted) ?? .rejected
@@ -408,19 +629,114 @@ public func getPlan(_ def: StructureDef, _ ctx: GenCtx, _ ocx: Int, _ ocz: Int) 
     return installed.plan
 }
 
+private func surfacePlanWinnerCacheKey(_ def: StructureDef, _ ctx: GenCtx,
+                                       _ ocx: Int, _ ocz: Int,
+                                       collisionSignature: String) -> SurfacePlanWinnerCacheKey {
+    SurfacePlanWinnerCacheKey(seed: ctx.seed, dim: ctx.dim,
+                              generationSettingsIdentity: ctx.generationSettingsIdentity,
+                              baseTerrainOracleVersion: ctx.baseTerrainOracleVersion,
+                              activeStructureDomainIdentity: ctx.activeStructureDomainIdentity,
+                              structureID: def.id, structureSalt: def.salt,
+                              structureSpacing: def.spacing, structureSeparation: def.separation,
+                              structureRadius: def.maxRadiusChunks,
+                              ocx: ocx, ocz: ocz,
+                              collisionSignature: collisionSignature)
+}
+
+/// Returns whether this already-planned conventional landmark is the one
+/// allowed to materialize among actually overlapping conventional surface
+/// plans. Candidate lattice/radius math only bounds which raw plans we inspect;
+/// actual StructPiece XZ overlap is the sole collision evidence.
+///
+/// The function deliberately lives outside `getPlan`: calling it while plans
+/// are being constructed would recurse through nearby candidates and make the
+/// result depend on cache timing. Callers invoke it after obtaining a raw plan,
+/// before either emitting pieces or reserving feature-clearance space.
+public func surfaceStructurePlanWins(_ def: StructureDef, _ plan: StructurePlan,
+                                     _ ctx: GenCtx, _ ocx: Int, _ ocz: Int,
+                                     collisionDefinitions: [StructureDef]) -> Bool {
+    guard isConventionalSurfaceStructure(def), !plan.pieces.isEmpty else { return true }
+    let conventionalDefinitions = orderedConventionalSurfaceDefinitions(collisionDefinitions)
+    guard !conventionalDefinitions.isEmpty else { return true }
+
+    let signature = conventionalSurfaceCollisionSignature(conventionalDefinitions)
+    let key = surfacePlanWinnerCacheKey(def, ctx, ocx, ocz, collisionSignature: signature)
+    surfacePlanWinnerCacheLock.lock()
+    if let cached = surfacePlanWinnerCache[key] {
+        surfacePlanWinnerCacheLock.unlock()
+        return cached
+    }
+    surfacePlanWinnerCacheLock.unlock()
+
+    var minX = Int.max, maxX = Int.min
+    var minZ = Int.max, maxZ = Int.min
+    for piece in plan.pieces {
+        minX = min(minX, piece.x0); maxX = max(maxX, piece.x1)
+        minZ = min(minZ, piece.z0); maxZ = max(maxZ, piece.z1)
+    }
+    let minChunkX = floorDiv(minX, 16)
+    let maxChunkX = floorDiv(maxX, 16)
+    let minChunkZ = floorDiv(minZ, 16)
+    let maxChunkZ = floorDiv(maxZ, 16)
+
+    var winner = true
+    candidateLoop: for candidate in conventionalDefinitions {
+        guard let placement = candidate.placement(ctx) else { continue }
+        // `maxRadiusChunks` is a conservative enumeration bound supplied by
+        // the definition. We still inspect every returned piece below; a
+        // candidate inside this search window wins only on real XZ overlap.
+        let radius = candidate.maxRadiusChunks
+        let regionX0 = floorDiv(minChunkX - radius, placement.spacing)
+        let regionX1 = floorDiv(maxChunkX + radius, placement.spacing)
+        let regionZ0 = floorDiv(minChunkZ - radius, placement.spacing)
+        let regionZ1 = floorDiv(maxChunkZ + radius, placement.spacing)
+        for regionZ in regionZ0...regionZ1 {
+            for regionX in regionX0...regionX1 {
+                let origin = structureOriginFor(candidate, placement: placement,
+                                                 seed: ctx.seed, regionX: regionX, regionZ: regionZ)
+                if sameSurfaceStructureDefinition(candidate, def)
+                    && origin.0 == ocx && origin.1 == ocz {
+                    continue
+                }
+                guard let otherPlan = getPlan(candidate, ctx, origin.0, origin.1),
+                      surfaceStructurePiecesOverlapXZ(plan.pieces, otherPlan.pieces) else {
+                    continue
+                }
+                if surfacePlanPrecedes(candidate, origin.0, origin.1, def, ocx, ocz) {
+                    winner = false
+                    break candidateLoop
+                }
+            }
+        }
+    }
+
+    surfacePlanWinnerCacheLock.lock()
+    if surfacePlanWinnerCache.count >= surfacePlanWinnerCacheLimit {
+        surfacePlanWinnerCache.removeAll(keepingCapacity: true)
+    }
+    let installed = surfacePlanWinnerCache[key] ?? winner
+    surfacePlanWinnerCache[key] = installed
+    surfacePlanWinnerCacheLock.unlock()
+    return installed
+}
+
 public func buildStructuresForChunk(_ ctx: GenCtx, _ cx: Int, _ cz: Int, _ sink: ChunkSink, _ dimStructures: [StructureDef]) -> [StructRef] {
     var refs: [StructRef] = []
     let chunkX0 = cx * 16, chunkZ0 = cz * 16
     let buffered = BufferedChunkSink(sink)
     for def in dimStructures {
+        guard let placement = def.placement(ctx) else { continue }
         let r = def.maxRadiusChunks
-        let rc0x = floorDiv(cx - r, def.spacing), rc1x = floorDiv(cx + r, def.spacing)
-        let rc0z = floorDiv(cz - r, def.spacing), rc1z = floorDiv(cz + r, def.spacing)
+        let rc0x = floorDiv(cx - r, placement.spacing), rc1x = floorDiv(cx + r, placement.spacing)
+        let rc0z = floorDiv(cz - r, placement.spacing), rc1z = floorDiv(cz + r, placement.spacing)
         for rcz in rc0z...rc1z {
             for rcx in rc0x...rc1x {
-                let (ocx, ocz) = structureOriginFor(def, ctx.seed, rcx, rcz)
+                let (ocx, ocz) = structureOriginFor(def, placement: placement,
+                                                     seed: ctx.seed, regionX: rcx, regionZ: rcz)
                 if abs(ocx - cx) > r || abs(ocz - cz) > r { continue }
                 guard let plan = getPlan(def, ctx, ocx, ocz) else { continue }
+                guard surfaceStructurePlanWins(def, plan, ctx, ocx, ocz,
+                                               collisionDefinitions: dimStructures) else { continue }
                 for (pi, piece) in plan.pieces.enumerated() {
                     // does the piece intersect this chunk?
                     if piece.x1 < chunkX0 || piece.x0 > chunkX0 + 15 || piece.z1 < chunkZ0 || piece.z0 > chunkZ0 + 15 { continue }

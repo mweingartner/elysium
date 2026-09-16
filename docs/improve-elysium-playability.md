@@ -34,8 +34,9 @@ exists. Saves and merchant fields remain untrusted and bounded.
 
 New village plans must validate dry support, headroom, safe spawns, and connected
 roads before any write. Ordinary dungeons remain dry, cave-connected, and inside
-their origin chunk; a region-budgeted minority may be deliberately underwater
-but sealed and dry inside. Existing saved full chunks are not migrated, repaired,
+their origin chunk; at most one deliberately sealed underwater dungeon can commit
+per deterministic 32x32-chunk region, and its complete room must begin submerged
+in water or waterlogged native aquatic flora. Existing saved full chunks are not migrated, repaired,
 or rewritten, and mixed old/new generation seams remain supported. This change
 does not add mobs, items, professions, public networking, waypoints, HUD warnings,
 or automatic legacy-world repair.
@@ -67,8 +68,9 @@ or automatic legacy-world repair.
 - Structure validation uses the same pure base-terrain function as generation,
   complete cache keys, single-flight computation, hard attempt/member/byte/cache
   caps, and detached output. Rejected candidates emit no blocks, block entities,
-  or entities. Actual-output tests count at least 256 committed dungeons and cap
-  underwater results at one sixteenth.
+  or entities. Actual-output tests count at least 256 committed dungeons, cap
+  sealed underwater results at one per deterministic 32x32-chunk region, and
+  reject centre-only water, stone, lava, or block-entity-owned room envelopes.
 
 ## Usage
 
@@ -91,4 +93,5 @@ capacity consumes nothing.
 When exploring new terrain, villages either appear on validated dry connected
 sites or are omitted after bounded candidate attempts. Ordinary dungeons are dry
 and cave-connected. Rare underwater dungeons are intentionally sealed with a dry
-interior. Previously saved full chunks retain their existing contents.
+interior only after their complete room envelope is verified as water or
+waterlogged native aquatic flora. Previously saved full chunks retain their existing contents.

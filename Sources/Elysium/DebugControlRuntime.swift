@@ -272,6 +272,11 @@ final class DebugControlRuntime {
                 .object(["id": .integer(Int64($0.rawValue)),
                          "displayName": .string($0.displayName)])
             })]
+        case "registry.village_densities":
+            return ["villageDensities": .array(VillageDensity.allCases.map {
+                .object(["id": .integer(Int64($0.rawValue)),
+                         "displayName": .string($0.displayName)])
+            })]
         case "registry.rpg":
             return try rpgRegistry()
         case "state.snapshot":
@@ -319,6 +324,10 @@ final class DebugControlRuntime {
             guard let density = DungeonDensity(rawValue: densityRaw) else {
                 throw RuntimeError(.invalidArguments, "Unknown dungeon density")
             }
+            let villageDensityRaw = try optionalInt(a, "villageDensity") ?? VillageDensity.normal.rawValue
+            guard let villageDensity = VillageDensity(rawValue: villageDensityRaw) else {
+                throw RuntimeError(.invalidArguments, "Unknown village density")
+            }
             let rpg = try optionalBool(a, "rpgClassesEnabled") ?? true
             // Validate the complete request before crossing the current-world boundary. A typo in
             // a preset or biome must not eject the developer from the world being inspected.
@@ -329,6 +338,7 @@ final class DebugControlRuntime {
             app.game.createWorld(name: name, seedText: seed, mode: mode,
                                  difficulty: difficulty, worldPreset: preset,
                                  singleBiome: biome, dungeonDensity: density,
+                                 villageDensity: villageDensity,
                                  rpgClassesEnabled: rpg)
             guard app.game.hasWorld(), let rec = app.game.worldRec else {
                 throw RuntimeError(.persistenceFailed, "World creation did not enter a world")
@@ -1483,13 +1493,15 @@ final class DebugControlRuntime {
     }
 
     private func worldRecordValue(_ record: WorldRecord) -> JSONValue {
-        .object(["id": .string(record.id), "name": .string(record.name),
+        let settings = record.generationSettings
+        return .object(["id": .string(record.id), "name": .string(record.name),
                  "seed": .integer(Int64(record.seed)),
                  "mode": .integer(Int64(record.gameMode)),
                  "difficulty": .integer(Int64(record.difficulty)),
-                 "preset": .string(record.worldPreset),
-                 "biome": .string(record.singleBiome),
-                 "dungeonDensity": .integer(Int64(record.dungeonDensity)),
+                 "preset": .string(settings.preset.rawValue),
+                 "biome": .string(biomeID(settings.singleBiome)),
+                 "dungeonDensity": .integer(Int64(settings.dungeonDensity.rawValue)),
+                 "villageDensity": .integer(Int64(settings.villageDensity.rawValue)),
                  "lastPlayed": .number(record.lastPlayed)])
     }
 

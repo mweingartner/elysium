@@ -13,6 +13,15 @@ func heldName(_ player: Entity?) -> String? {
     return itemDef(h.id).name
 }
 
+/// Stable persisted/rendered cat appearances. Worldgen uses this rather than a
+/// display string because entity spawn options carry canonical numeric variants.
+public enum CatVariant: Int, Sendable {
+    case tabby = 0
+    /// Bedrock's stable `all_black` data value. This is the witch-hut cat,
+    /// distinct from the separate tuxedo `black` appearance.
+    case allBlack = 9
+}
+
 open class Animal: Mob {
     public var foods: [String] = []
 

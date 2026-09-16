@@ -41,8 +41,16 @@ public protocol ChunkSink: AnyObject {
     func get(_ x: Int, _ y: Int, _ z: Int) -> Int
     /// top solid y within chunk; outside chunk uses noise estimate
     func topY(_ x: Int, _ z: Int) -> Int
+    /// Whether an earlier generation stage already owns a block entity at
+    /// this exact cell. Structure planners use this only for preflight; the
+    /// default keeps small fixture sinks source-compatible.
+    func hasBlockEntity(_ x: Int, _ y: Int, _ z: Int) -> Bool
     func addBlockEntity(_ spec: BESpec)
     func addEntity(_ spec: EntitySpec)
+}
+
+public extension ChunkSink {
+    func hasBlockEntity(_ x: Int, _ y: Int, _ z: Int) -> Bool { false }
 }
 
 private let AIR = 0
@@ -431,7 +439,9 @@ private let FLOWER_SETS: [String: [UInt16]] = [
     "swamp": [B.blue_orchid],
 ]
 
-public func runFeature(_ key: String, _ s: ChunkSink, _ rng: inout RandomX, _ ocx: Int, _ ocz: Int, _ seed: UInt32, _ biomeAt: (Int, Int) -> Int) {
+public func runFeature(_ key: String, _ s: ChunkSink, _ rng: inout RandomX, _ ocx: Int, _ ocz: Int, _ seed: UInt32, _ biomeAt: (Int, Int) -> Int,
+                       treeSiteAllowed: (Int, Int) -> Bool = { _, _ in true },
+                       treeRootSite: ((Int, Int) -> (y: Int, ground: Int)?)? = nil) {
     let parts = key.split(separator: ":").map(String.init)
     let name = parts[0]
     let baseX = ocx * 16, baseZ = ocz * 16
@@ -452,9 +462,25 @@ public func runFeature(_ key: String, _ s: ChunkSink, _ rng: inout RandomX, _ oc
         if count == 0 && n == 0 && rng.nextFloat() < extra * 2 { n = 1 }
         for _ in 0..<n {
             let (x, z) = randPos(&rng)
-            let y = s.topY(x, z)
+            // A structure is authoritative over decoration. The caller supplies
+            // the complete plan footprint, including a small tree-canopy buffer,
+            // so a tree whose trunk is hidden by a building cannot leave a crown
+            // behind in a neighbouring chunk.
+            guard treeSiteAllowed(x, z) else { continue }
+            let root: (y: Int, ground: Int)
+            if let treeRootSite {
+                // Cross-chunk callers supply the owning chunk's exact
+                // pre-structure terrain. Leaf placement itself remains on the
+                // target sink, so its normal clipping and feature ordering are
+                // unchanged.
+                guard let site = treeRootSite(x, z) else { continue }
+                root = site
+            } else {
+                root = (s.topY(x, z), s.get(x, s.topY(x, z) - 1, z))
+            }
+            let y = root.y
             if y <= s.minY || y > 250 { continue }
-            let ground = s.get(x, y - 1, z)
+            let ground = root.ground
             if ground != -1 && !isSoil(ground) { continue }
             if ground == -1 {
                 // base lies outside this sink: the soil can't be read, so be

@@ -611,7 +611,7 @@ open class LivingEntity: Entity {
     open func ambientSound() -> String? { "entity.\(type).ambient" }
 
     // ---- movement -----------------------------------------------------------
-    public func effectiveSpeed() -> Double {
+    open func effectiveSpeed() -> Double {
         var s = speed
         s *= 1 + 0.2 * Double(effectLevel("speed"))
         s *= max(0.1, 1 - 0.15 * Double(effectLevel("slowness")))

@@ -254,9 +254,9 @@ artifact_sha256() {
 EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
 EXPECTED_STORAGE_API_SHA256='08acf52a794de902a69658a0926181918c62a30f7975cd0d685d3d3baa7c745b'
 EXPECTED_STORAGE_OBJECT_SHA256='43ea474d75be3fc2311f1a95295c94d23329249f505ed0c14878f7318e14b3a8'
-EXPECTED_SAVES_SOURCE_SHA256='986a9ab68dbf8d6756ed67679a8f39e6e19eaf51fe7e88b27ec35c0f9d81a070'
+EXPECTED_SAVES_SOURCE_SHA256='40e0d4ffe5fa7b5f690527c81881837869efc2da84197bd5a6564bc6b2a22702'
 EXPECTED_PLAYER_SOURCE_SHA256='79dbd2e132f8e65f2a9857f763c263fea0a1b8cd86fc7db6388fc77129373e10'
-EXPECTED_CORE_CAPABILITY_SHA256='e2a5fd029d571bf391cd965be23a433c834a59582ff1850c103eecd9d75943ba'
+EXPECTED_CORE_CAPABILITY_SHA256='24067f0177a15585e610ba327ba5f89ecc2fc01f4ae1a90ce1618a3725989228'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3'
 # land-animal shore escape: AI.swift, Animals.swift and Entity.swift add footprint-aware
@@ -283,8 +283,30 @@ EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75
 # source and compiler parse-AST inventory pins move for the 1.2.1 release. That
 # source change relinks ElysiumCore.o, Elysium, and elysmoke. It does not alter
 # the storage API, SaveDB behavior, checked-player callers, Player, or text input.
-EXPECTED_GAME_CORE_SOURCE_SHA256='ce10a13b5dfc33d9c38bd9a3c7fa79c50ab25cb14a4225902dcb5e90ef0aabdf'
-EXPECTED_CORE_OBJECT_SHA256='d93b91e1d0924fbc2a0464e1c59c739b85e4b9c992af029796f299223419757c'
+# rich-resources-communities: exact-terrain structures, populated villages,
+# and witch behavior change Core gameplay. `WorldRecord` additionally persists
+# a normalized village-density integer; missing or malformed legacy values use
+# Normal. That changes Saves.swift, GameCore.swift, and the Saves compiler-AST
+# capability inventory, then relinks Core and its two production consumers.
+# The SQLite schema/API, StorageEngine, Player, and text-input surfaces remain
+# byte-identical because the existing worlds JSON column carries this field.
+# rich-resources-final-closeout: village density persistence, exact-terrain
+# structure admission, populated communities, witch behavior, and the final
+# dungeon water-envelope cap update change Saves.swift, GameCore.swift, and
+# the reviewed Saves compiler-AST capability inventory. The warning-free
+# release build below was normalized through the disposable-copy strip path.
+EXPECTED_GAME_CORE_SOURCE_SHA256='51384ca30482f40a727a8c055569c0fda23572e8f80d92fb59a2330e083bc771'
+# worldgen-form-integrity: the final structure pass adds terrain-backed surface
+# plans, deterministic realized-piece collision resolution, and supported routes
+# through villages, dungeons, mineshafts, strongholds, Ancient Cities, and the
+# large landmark families.  It changes ElysiumCore.o and both linked production
+# consumers, but does not further change the reviewed Saves/GameCore source,
+# storage API, Player, text-input, or capability-manifest surfaces above.
+# Normalized disposable-copy hashes renew from Core
+# 5ea20c16d0c9eb828514102c8d6411a24c01be26d466782186363aec330a2721,
+# Elysium 88b4cfa3009b6fa8f474b404af98f8b8b50f8daae92a782ca249c9cd6d9a854d,
+# and elysmoke 710e4462b3f1ecf21ee6c1d5c65722e1fc5f75faf7c498a4b1294509600914c9.
+EXPECTED_CORE_OBJECT_SHA256='2517de8a5a513c923102c83b3230faa98a8dbad36c24b5d2840718a5c8798566'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -294,8 +316,8 @@ EXPECTED_CORE_OBJECT_SHA256='d93b91e1d0924fbc2a0464e1c59c739b85e4b9c992af029796f
 # input or capability source changed. See docs/first-person-minecraft-comparison.md.
 # Tool-family action audio additionally changes the procedural app recipes, so
 # the linked Elysium and elysmoke stripped-product pins renew transitively.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='d2a98ee5e34eef6feb5836de6c0a7d3444a8329a2ed633430ff272f581d68166'
-EXPECTED_SMOKE_PRODUCT_SHA256='272e90997209b31bbb00173400aa8742fbabbde5f2580690c66465c5908abedf'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='82efcbe813c7beb53ce1f5fdef6457fba0aa05e51a44fe0435bdd395f0fc53a1'
+EXPECTED_SMOKE_PRODUCT_SHA256='5bf669a9fe54485c02802186109fa84964990f200e8ed2c734a9de9db27df908'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

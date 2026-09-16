@@ -104,6 +104,41 @@ final class WorldPresetTests: XCTestCase {
         XCTAssertEqual(DungeonDensity.many.dungeonPasses, 8)
     }
 
+    func testVillageDensityAliasesNormalizeToKnownLevelsInCreateScreenOrder() {
+        XCTAssertEqual(VillageDensity.allCases, [.none, .few, .normal, .many, .max])
+        XCTAssertEqual(normalizedVillageDensity(nil as Int?), .normal)
+        XCTAssertEqual(normalizedVillageDensity(1), .none)
+        XCTAssertEqual(normalizedVillageDensity(2), .few)
+        XCTAssertEqual(normalizedVillageDensity(3), .normal)
+        XCTAssertEqual(normalizedVillageDensity(4), .many)
+        XCTAssertEqual(normalizedVillageDensity(5), .max)
+        XCTAssertEqual(normalizedVillageDensity(0), .normal)
+        XCTAssertEqual(normalizedVillageDensity(6), .normal)
+        XCTAssertEqual(normalizedVillageDensity("none"), .none)
+        XCTAssertEqual(normalizedVillageDensity("sparse"), .few)
+        XCTAssertEqual(normalizedVillageDensity("default"), .normal)
+        XCTAssertEqual(normalizedVillageDensity("maximum"), .max)
+        XCTAssertEqual(normalizedVillageDensity("not-real"), .normal)
+    }
+
+    func testVillageDensitySeparatesGenerationCacheIdentityAndOverworldGenerator() {
+        let normal = WorldGenerationSettings(preset: .moderateHillsResourceRich,
+                                             dungeonDensity: .many,
+                                             villageDensity: .normal)
+        let maximum = WorldGenerationSettings(preset: .moderateHillsResourceRich,
+                                              dungeonDensity: .many,
+                                              villageDensity: .max)
+        XCTAssertNotEqual(normal.cacheIdentity, maximum.cacheIdentity)
+
+        let seed: UInt32 = 0x71A6_EC01
+        let normalGenerator = overworldGen(seed, settings: normal)
+        let maximumGenerator = overworldGen(seed, settings: maximum)
+        XCTAssertFalse(normalGenerator === maximumGenerator,
+                       "village density must not alias an OverworldGen cache entry")
+        XCTAssertEqual(normalGenerator.settings.villageDensity, .normal)
+        XCTAssertEqual(maximumGenerator.settings.villageDensity, .max)
+    }
+
     func testWorldRecordDefaultsLegacyPresetFields() throws {
         let legacy = """
         {
@@ -133,6 +168,8 @@ final class WorldPresetTests: XCTestCase {
         XCTAssertEqual(rec.worldPreset, WorldPreset.normal.rawValue)
         XCTAssertEqual(rec.singleBiome, "plains")
         XCTAssertEqual(rec.dungeonDensity, DungeonDensity.normal.rawValue)
+        XCTAssertEqual(rec.villageDensity, VillageDensity.normal.rawValue)
+        XCTAssertEqual(rec.generationSettings.villageDensity, .normal)
         XCTAssertEqual(rec.rpgSimulationTick, 45,
                        "legacy saves derive one monotonic clock from the greatest dimension age")
     }
@@ -161,19 +198,21 @@ final class WorldPresetTests: XCTestCase {
     func testWorldRecordSanitizesUnknownPresetFields() throws {
         var rec = WorldRecord(id: "w2", name: "Bad", seed: 7, gameMode: 0, difficulty: 2,
                               worldPreset: .amplified, singleBiome: .desert,
-                              dungeonDensity: .many)
+                              dungeonDensity: .many, villageDensity: .max)
         rec.worldPreset = "minecraft:not_real"
         rec.singleBiome = "minecraft:not_real"
         rec.dungeonDensity = 99
+        rec.villageDensity = 99
         let data = try JSONEncoder().encode(rec)
         let decoded = try JSONDecoder().decode(WorldRecord.self, from: data)
         XCTAssertEqual(decoded.generationSettings, .normal)
         XCTAssertEqual(decoded.worldPreset, WorldPreset.normal.rawValue)
         XCTAssertEqual(decoded.singleBiome, "plains")
         XCTAssertEqual(decoded.dungeonDensity, DungeonDensity.normal.rawValue)
+        XCTAssertEqual(decoded.villageDensity, VillageDensity.normal.rawValue)
     }
 
-    func testWorldRecordAcceptsStringDungeonDensityForCorruptSaveCompatibility() throws {
+    func testWorldRecordAcceptsStringDensityValuesForCorruptSaveCompatibility() throws {
         let raw = """
         {
           "id":"w3",
@@ -190,6 +229,7 @@ final class WorldPresetTests: XCTestCase {
           "worldPreset":"minecraft:normal",
           "singleBiome":"plains",
           "dungeonDensity":"many",
+          "villageDensity":"maximum",
           "gameRules":{},
           "dragonKilled":false,
           "gatewaysSpawned":0,
@@ -199,11 +239,13 @@ final class WorldPresetTests: XCTestCase {
         let rec = try JSONDecoder().decode(WorldRecord.self, from: Data(raw.utf8))
         XCTAssertEqual(rec.generationSettings.dungeonDensity, .many)
         XCTAssertEqual(rec.dungeonDensity, DungeonDensity.many.rawValue)
+        XCTAssertEqual(rec.generationSettings.villageDensity, .max)
+        XCTAssertEqual(rec.villageDensity, VillageDensity.max.rawValue)
     }
 
     func testFlatPresetUsesJavaDefaultLayerStack() {
         let out = generateChunk(.overworld, 123, 0, 0,
-                                settings: WorldGenerationSettings(preset: .flat))
+                                settings: WorldGenerationSettings(preset: .flat, villageDensity: .none))
         func cellAt(_ x: Int, _ y: Int, _ z: Int) -> UInt16 {
             out.blocks[((y - GEN_MIN_Y) * 16 + z) * 16 + x]
         }
@@ -230,6 +272,23 @@ final class WorldPresetTests: XCTestCase {
         XCTAssertEqual(cellAt(0, 60, 0), cell(B.bedrock))
         XCTAssertNotEqual(cellAt(0, 70, 0), 0)
         XCTAssertEqual(cellAt(0, 69, 0), 0)
+    }
+
+    func testPresetSpecificDensityCapabilitiesAndCanonicalSettings() {
+        XCTAssertFalse(WorldPreset.debugAllBlockStates.supportsDungeonDensity)
+        XCTAssertFalse(WorldPreset.debugAllBlockStates.supportsVillageDensity)
+        XCTAssertFalse(WorldPreset.flat.supportsDungeonDensity,
+                       "flat has no generated underground envelope for rooms")
+        XCTAssertTrue(WorldPreset.flat.supportsVillageDensity)
+        XCTAssertTrue(WorldPreset.netherWorld.supportsDungeonDensity,
+                      "Nether World retains the choice for its reachable Overworld")
+        XCTAssertTrue(WorldPreset.netherWorld.supportsVillageDensity)
+        XCTAssertTrue(WorldPreset.normal.supportsProceduralStructureDensities)
+
+        let flat = WorldGenerationSettings(preset: .flat, dungeonDensity: .many,
+                                           villageDensity: .max)
+        XCTAssertEqual(flat.dungeonDensity, .normal)
+        XCTAssertEqual(flat.villageDensity, .max)
     }
 
     func testDungeonDensityControlsDungeonPasses() {
@@ -445,6 +504,53 @@ final class WorldPresetTests: XCTestCase {
 }
 
 @MainActor
+final class DebugWorldCreationTests: XCTestCase {
+    override class func setUp() {
+        super.setUp()
+        registerAllBlocks()
+        registerAllItems()
+        registerAllBiomes()
+        registerAllEntities()
+    }
+
+    func testDirectDebugWorldCreationPersistsNormalStructureDensities() throws {
+        let database = try PersistenceTestSupport.makeDatabase(owner: self, label: "debug-world")
+        let game = GameCore(db: database)
+        game.createWorld(name: "Debug Grid", seedText: "5150", mode: GameMode.creative, difficulty: 2,
+                         worldPreset: .debugAllBlockStates, dungeonDensity: .many,
+                         villageDensity: .max)
+
+        let record = try XCTUnwrap(game.worldRec)
+        XCTAssertEqual(record.dungeonDensity, DungeonDensity.normal.rawValue)
+        XCTAssertEqual(record.villageDensity, VillageDensity.normal.rawValue)
+        let persisted = try XCTUnwrap(database.getWorld(record.id))
+        XCTAssertEqual(persisted.dungeonDensity, DungeonDensity.normal.rawValue)
+        XCTAssertEqual(persisted.villageDensity, VillageDensity.normal.rawValue)
+    }
+
+    func testLegacyDebugDensityValuesAreCanonicalizedOnDecodeAndReencode() throws {
+        let seedRecord = WorldRecord(id: "legacy-debug", name: "Legacy Debug", seed: 5150,
+                                     gameMode: GameMode.creative, difficulty: 2)
+        var object = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(seedRecord)) as? [String: Any])
+        object["worldPreset"] = WorldPreset.debugAllBlockStates.rawValue
+        object["dungeonDensity"] = DungeonDensity.many.rawValue
+        object["villageDensity"] = VillageDensity.max.rawValue
+        let decoded = try JSONDecoder().decode(
+            WorldRecord.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(decoded.dungeonDensity, DungeonDensity.normal.rawValue)
+        XCTAssertEqual(decoded.villageDensity, VillageDensity.normal.rawValue)
+        XCTAssertEqual(decoded.generationSettings.dungeonDensity, .normal)
+        XCTAssertEqual(decoded.generationSettings.villageDensity, .normal)
+
+        let reencoded = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(decoded)) as? [String: Any])
+        XCTAssertEqual(reencoded["dungeonDensity"] as? Int, DungeonDensity.normal.rawValue)
+        XCTAssertEqual(reencoded["villageDensity"] as? Int, VillageDensity.normal.rawValue)
+    }
+}
+
+@MainActor
 final class NetherWorldCreationTests: XCTestCase {
     override class func setUp() {
         super.setUp()
@@ -460,7 +566,7 @@ final class NetherWorldCreationTests: XCTestCase {
         game.createWorld(name: "Nether Start", seedText: "424242",
                          mode: GameMode.creative, difficulty: 3,
                          worldPreset: .netherWorld, singleBiome: .desert,
-                         dungeonDensity: .many, mapSize: .small,
+                         dungeonDensity: .many, villageDensity: .max, mapSize: .small,
                          rpgClassesEnabled: false)
 
         XCTAssertEqual(game.dim, .nether)
@@ -468,6 +574,7 @@ final class NetherWorldCreationTests: XCTestCase {
         XCTAssertEqual(game.worldRec?.gameMode, GameMode.creative)
         XCTAssertEqual(game.worldRec?.difficulty, 3)
         XCTAssertEqual(game.worldRec?.dungeonDensity, DungeonDensity.many.rawValue)
+        XCTAssertEqual(game.worldRec?.villageDensity, VillageDensity.max.rawValue)
         XCTAssertEqual(game.worldRec?.mapSize, .small)
         XCTAssertEqual(game.worldRec?.gameRules[RPG_CLASSES_GAME_RULE], 0)
 
@@ -494,6 +601,7 @@ final class NetherWorldCreationTests: XCTestCase {
         let relaunched = GameCore(db: database)
         relaunched.loadWorld(worldID)
         XCTAssertEqual(relaunched.dim, .nether)
+        XCTAssertEqual(relaunched.worldRec?.villageDensity, VillageDensity.max.rawValue)
         XCTAssertEqual(relaunched.player.inventory.compactMap { $0 }.count, 5,
                        "loading persisted player data must not grant a second starter kit")
 

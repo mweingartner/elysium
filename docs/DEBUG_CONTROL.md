@@ -170,7 +170,7 @@ not copy that node's manifest or session token to the controller.
 Example scenario:
 
 ```jsonl
-{"operation":"world.create","arguments":{"name":"Control Lab","seed":"24680","mode":1,"difficulty":2,"preset":"minecraft:flat","biome":"plains","dungeonDensity":1,"rpgClassesEnabled":true}}
+{"operation":"world.create","arguments":{"name":"Control Lab","seed":"24680","mode":1,"difficulty":2,"preset":"minecraft:normal","biome":"plains","dungeonDensity":5,"villageDensity":5,"rpgClassesEnabled":true}}
 {"operation":"simulation.pause"}
 {"operation":"interaction.action","arguments":{"action":{"action":"give_item","item":"diamond","count":16}}}
 {"operation":"interaction.action","arguments":{"action":{"action":"set_gamemode","mode":"survival"}}}
@@ -283,6 +283,7 @@ Context labels used below:
 | `registry.world_presets` | Any | `{}` | Accepted world-preset ids and display names. |
 | `registry.biomes` | Any | `{}` | Accepted biome names, numeric ids, and display names. |
 | `registry.dungeon_densities` | Any | `{}` | Accepted integer density ids and display names. |
+| `registry.village_densities` | Any | `{}` | Accepted integer density ids and display names. |
 | `registry.rpg` | Any | `{}` | Paths, branches/subclasses, starting-skill pools, skills, and spells. |
 | `state.snapshot` | Any | `{"scopes":["app","world","player","target","inventory","rpg","screen","entities","region","renderer","network"],"limit":256,"radius":2,"x":0,"y":64,"z":0}` | Identity-stamped bounded state sections. Unknown well-formed scope names return `null`. |
 | `events.replay` | Any | `{"after":120,"limit":256}` | Retained events with sequence greater than `after`; limit clamps to `1...4096`. |
@@ -314,7 +315,7 @@ test-LAN capability, not an internet-facing security boundary.
 | Operation | Context | Example arguments | Result/effect |
 |---|---|---|---|
 | `world.list` | Any | `{"offset":0,"limit":128}` | Saved worlds in the isolated debug profile, paged at no more than 256 records with `total` and `nextOffset`. |
-| `world.create` | Not LAN client | `{"name":"Control Lab","seed":"24680","mode":1,"difficulty":2,"preset":"minecraft:normal","biome":"plains","dungeonDensity":2,"rpgClassesEnabled":true}` | Exits an active world, creates and enters a new one, then advances epoch/revision. Mode is `0` survival or `1` creative; difficulty is `0...3`. Use the registries for preset/biome/density values. |
+| `world.create` | Not LAN client | `{"name":"Control Lab","seed":"24680","mode":1,"difficulty":2,"preset":"minecraft:normal","biome":"plains","dungeonDensity":2,"villageDensity":3,"rpgClassesEnabled":true}` | Exits an active world, creates and enters a new one, then advances epoch/revision. Mode is `0` survival or `1` creative; difficulty is `0...3`. Use the preset, biome, dungeon-density, and village-density registries for values. |
 | `world.load` | Not LAN client | `{"id":"<id from world.list>"}` | Exits an active world, loads the selected debug-profile world, and advances epoch/revision. |
 | `world.save` | Authority | `{}` | Safely closes transient screens and synchronously verifies world, player, advancements, and chunk persistence. |
 | `world.exit` | World | `{}` | Returns to title and advances epoch/revision. This is allowed for a LAN client because it exits rather than mutates host state. |
@@ -326,6 +327,10 @@ test-LAN capability, not an internet-facing security boundary.
 | `player.look` | World | `{"yaw":1.57,"pitch":0}` | Sets finite yaw/pitch in radians; yaw is normalized to one turn and pitch must be within `-pi/2...pi/2`. |
 | `player.flying` | Authority | `{"enabled":true}` | Changes flight; enabling requires creative mode. |
 | `inventory.select` | Authority | `{"slot":0}` | Selects hotbar slot `0...8`. |
+
+`world.list` and `world.create` return each world record's `dungeonDensity` and `villageDensity`.
+Unsupported choices are canonicalized to Normal rather than persisted as inert settings (for
+example, Debug worlds and Superflat dungeons).
 
 ### Scripting
 

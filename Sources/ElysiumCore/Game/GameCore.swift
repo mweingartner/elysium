@@ -1460,6 +1460,7 @@ public final class GameCore {
     public func createWorld(name: String, seedText: String, mode: Int, difficulty: Int,
                             worldPreset: WorldPreset = .normal, singleBiome: Biome = .plains,
                             dungeonDensity: DungeonDensity = .normal,
+                            villageDensity: VillageDensity = .normal,
                             mapSize: WorldMapSize = .medium,
                             rpgClassesEnabled: Bool = true) {
         guard savedWorldMaintenanceAllowsTransitions() else { return }
@@ -1468,9 +1469,17 @@ public final class GameCore {
         let seed = Self.worldSeed(from: seedText)
         let ms = Int(Date().timeIntervalSince1970 * 1000)
         let id = "w" + String(ms, radix: 36) + String(Int.random(in: 0..<1_000_000), radix: 36)
+        // Canonicalize direct API callers as well as the create screen so a
+        // saved record never advertises a density choice that its selected
+        // preset cannot honor (Debug and flat dungeons). Nether World keeps
+        // the world-level choices for its reachable ordinary Overworld.
+        let persistedDensities = canonicalStructureDensities(
+            for: worldPreset, dungeon: dungeonDensity, village: villageDensity)
         var rec = WorldRecord(id: id, name: name, seed: seed, gameMode: mode, difficulty: difficulty,
                               worldPreset: worldPreset, singleBiome: singleBiome,
-                              dungeonDensity: dungeonDensity, mapSize: mapSize)
+                              dungeonDensity: persistedDensities.dungeon,
+                              villageDensity: persistedDensities.village,
+                              mapSize: mapSize)
         rec.gameRules[RPG_CLASSES_GAME_RULE] = rpgClassesEnabled ? 1 : 0
         let spawn = defaultWorldSpawn(seed: seed, settings: rec.generationSettings)
         rec.spawnX = spawn.x

@@ -596,10 +596,12 @@ public final class OverworldGen {
     }
 
     /// freeze + snow-layer pass after features
-    public func applySnowAndIce(_ cx: Int, _ cz: Int, _ blocks: inout [UInt16], _ surfaceBiomes: [UInt8]) {
+    public func applySnowAndIce(_ cx: Int, _ cz: Int, _ blocks: inout [UInt16], _ surfaceBiomes: [UInt8],
+                                snowSiteAllowed: (Int, Int) -> Bool = { _, _ in true }) {
         let ICE = cell(B.ice)
         for z in 0..<16 {
             for x in 0..<16 {
+                guard snowSiteAllowed(cx * 16 + x, cz * 16 + z) else { continue }
                 let b = Int(surfaceBiomes[z * 16 + x])
                 // find top
                 var y = GEN_MIN_Y + WORLD_H - 1

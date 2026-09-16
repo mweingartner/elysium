@@ -350,7 +350,14 @@ func runCommand(_ game: GameCore, _ raw: String) {
         ok("Filled \(n) blocks")
     case "locate":
         guard let target = arg(0) else { return fail("Usage: /locate <structure>") }
+        registerAllStructures()
+        let generationSettings = world.generationSettings
+        let activeStructures = structureDefinitionsForGeneration(dim: world.dim,
+                                                                 settings: generationSettings)
         if target == "stronghold" {
+            guard activeStructures.contains(where: { $0.id == target }) else {
+                return fail("stronghold generation is disabled for this world")
+            }
             var best: (Int, Int)?
             var bestD = Double.infinity
             for (cx, cz) in strongholdPositions(world.seed) {
@@ -366,23 +373,32 @@ func runCommand(_ game: GameCore, _ raw: String) {
             }
             return
         }
-        guard let def = STRUCTURES.first(where: { $0.id == target }) else {
+        guard let def = activeStructures.first(where: { $0.id == target }) else {
+            if STRUCTURES.contains(where: { $0.id == target }) {
+                return fail("\(target) generation is disabled for this world")
+            }
             return fail("Unknown structure. Try: \(STRUCTURES.map { $0.id }.joined(separator: ", "))")
         }
         let pcx = Int((p.x / 16).rounded(.down)), pcz = Int((p.z / 16).rounded(.down))
-        let ctx = GenCtx(
-            seed: world.seed,
-            heightAt: { x, z in world.surfaceY(x, z) },
-            biomeAt: { x, z in world.biomeAt(x, world.surfaceY(x, z), z) },
-            dim: world.dim.rawValue)
+        guard let ctx = structurePlanningContext(seed: world.seed, dim: world.dim,
+                                                  settings: generationSettings) else {
+            return fail("\(target) generation is disabled for this world")
+        }
+        guard let placement = def.placement(ctx) else {
+            return fail("\(target) generation is disabled for this world")
+        }
         for r in 0..<12 {
             for rz in -r...r {
                 for rx in -r...r {
                     if max(abs(rx), abs(rz)) != r { continue }
-                    let rcx = Int((Double(pcx) / Double(def.spacing)).rounded(.down)) + rx
-                    let rcz = Int((Double(pcz) / Double(def.spacing)).rounded(.down)) + rz
-                    let (ocx, ocz) = structureOriginFor(def, world.seed, rcx, rcz)
-                    if getPlan(def, ctx, ocx, ocz) != nil {
+                    let rcx = Int((Double(pcx) / Double(placement.spacing)).rounded(.down)) + rx
+                    let rcz = Int((Double(pcz) / Double(placement.spacing)).rounded(.down)) + rz
+                    let (ocx, ocz) = structureOriginFor(def, placement: placement,
+                                                         seed: world.seed,
+                                                         regionX: rcx, regionZ: rcz)
+                    if let plan = getPlan(def, ctx, ocx, ocz),
+                       surfaceStructurePlanWins(def, plan, ctx, ocx, ocz,
+                                                collisionDefinitions: activeStructures) {
                         ok("Nearest \(target): \(ocx * 16 + 8), ~, \(ocz * 16 + 8)")
                         return
                     }
