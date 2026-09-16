@@ -303,14 +303,19 @@ final class HUD {
         }
         if rpgDrawPlan.showQuickSlots {
             let rpgState = repairRPGCharacterState(player.rpg)
-            let derived = rpgDerivedStats(rpgState)
-            let f = max(0, min(1, rpgState.fatigue / max(1, derived.maxFatigue)))
-            let fx = hbX + 186
-            let fy = hbY
-            cv.setFill("#1c1c1c")
-            cv.fillRect(fx, fy, 5, 22)
-            cv.setFill("#55aaff")
-            cv.fillRect(fx + 1, fy + 21 - (20 * f).rounded(), 3, (20 * f).rounded())
+            // Fatigue belongs to the retired class-action economy. Usage-tree
+            // actions still use this fast bar, but should not advertise a
+            // meter they neither spend nor replenish.
+            if rpgState.skillTrees == nil {
+                let derived = rpgDerivedStats(rpgState)
+                let f = max(0, min(1, rpgState.fatigue / max(1, derived.maxFatigue)))
+                let fx = hbX + 186
+                let fy = hbY
+                cv.setFill("#1c1c1c")
+                cv.fillRect(fx, fy, 5, 22)
+                cv.setFill("#55aaff")
+                cv.fillRect(fx + 1, fy + 21 - (20 * f).rounded(), 3, (20 * f).rounded())
+            }
             drawRPGQuickSlots(
                 ui, rpg: rpgState, preferences: game.rpgQuickSlotPreferences ?? .empty,
                 hotbarX: hbX, hotbarY: hbY)

@@ -4,12 +4,12 @@
 
 # Elysium
 
-Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, and Apple system frameworks. It combines deterministic world simulation with survival progression, construction, optional RPG character development, local-network multiplayer, and a bounded local AI assistant. Elysium is currently beta software.
+Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, and Apple system frameworks. It combines deterministic world simulation with survival progression, construction, usage-based skill advancement, local-network multiplayer, and a bounded local AI assistant. Elysium is currently beta software.
 
 > **Project origin:** Elysium began with [Brian Gao's open-source Pebble project (`thebriangao/pebble`)](https://github.com/thebriangao/pebble) as its starting point. The codebase has since been renamed and substantially extended as Elysium. We gratefully acknowledge Brian Gao and Pebble's contributors for the foundation they created.
 
 > **New to Elysium?** The [Player Guide](PLAYER_GUIDE.md) walks through a first world, complete controls,
-> progression, classes, trading, saves, LAN play, accessibility, and the current beta limits.
+> progression, skills, trading, saves, LAN play, accessibility, and the current beta limits.
 
 ## What is in Elysium
 
@@ -17,9 +17,9 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 - **Survival across three dimensions** — procedural overworld, nether, and end terrain; caves and structures; mining, farming, crafting, smelting, brewing, enchanting, combat, hunger, experience, sleep, death, respawn, bosses, and advancements.
 - **Living worlds** — animals, monsters, villagers, projectiles, vehicles, dropped items, raids, pathfinding, fluids, portals, redstone, block entities, containers, and host-owned simulation state. Hostile monsters use explicit direct-daylight reactions: sunlight-sensitive mobs ignite, creepers latch a short fuse and stop chasing, and witches remain immune, drink defensive potions, and throw target-aware splash potions.
 - **Villager trading** — profession-specific villagers and wandering traders advertise the resources they want, expose their complete ordered offer catalog, and show both costs, stock, level locks, restock state, and affordability before an atomic trade. The trade sheet supports pointer, keyboard, controller, and macOS Accessibility navigation.
-- **World creation choices** — Default, Superflat, Large Biomes, Amplified, Single Biome, Debug, Elysium's Rich Resources preset, and **Nether World**, plus **Reality Derived** maps built from a player-selected real-world area through the bundled Arnis generator. Nether World begins in a safe active-portal chamber with two iron pickaxes, an iron sword, an iron shovel, and 64 oak logs; active gateways recur throughout its Nether. Every type offers Small (1 km), Medium (4 km), Large (8 km), Extra-Large (12 km), and Max (15.811 km) playable widths with lazy terrain generation; Reality Derived Max reaches the local Arnis 250 km² envelope. Where a generator can honor it, creation exposes independent five-level dungeon and village densities; village choices are None, Few, Normal, Many, and Max. Superflat retains villages but omits its nonfunctional dungeon selector. Every world can enable or disable Character Classes.
+- **World creation choices** — Default, Superflat, Large Biomes, Amplified, Single Biome, Debug, Elysium's Rich Resources preset, and **Nether World**, plus **Reality Derived** maps built from a player-selected real-world area through the bundled Arnis generator. Nether World begins in a safe active-portal chamber with two iron pickaxes, an iron sword, an iron shovel, and 64 oak logs; active gateways recur throughout its Nether. Every type offers Small (1 km), Medium (4 km), Large (8 km), Extra-Large (12 km), and Max (15.811 km) playable widths with lazy terrain generation; Reality Derived Max reaches the local Arnis 250 km² envelope. Where a generator can honor it, creation exposes independent five-level dungeon and village densities; village choices are None, Few, Normal, Many, and Max. Superflat retains villages but omits its nonfunctional dungeon selector.
 - **Playable structure sites** — new village plans are moved to validated dry, supported terrain or omitted; each admitted settlement has complete grounded dwellings with paired doors, outward stair approaches, roofed interiors, connected roads, resident villagers, livestock pens, and an iron golem. Ordinary dungeons stay dry, cave-connected, and wholly inside their origin chunk. At most one sealed underwater dungeon may commit per deterministic 32x32-chunk region, and only when its complete room envelope is water or waterlogged native aquatic flora. Existing saved/modified chunks are never migrated or rewritten; mixed old/new generation seams are supported.
-- **RPG progression** — six character paths, each with three sub-classes, levels, five-rank skills with a skill-point economy, always-on passive skills, prepared active skills and spells, fatigue, cooldowns, and a second quick-slot bar activated with Shift+1 through Shift+9. Character progression is optional per world; some character operations remain local-world-only while LAN authority continues to be hardened.
+- **Skill-tree progression** — four independent, always-available trees—Mining, Melee, Ranged, and Crafting—advance from successful use rather than a selected class. Each has five primary ranks and five advanced ranks; advanced Melee/Ranged actions and Crafting's Field Repair appear in the Shift+1 through Shift+9 fast bar after their primary tree is mastered. Progression remains host-authoritative in LAN play.
 - **Object templates** — copy connected builds with Command-C, browse and preview saved templates with Command-V, steer the wireframe with the arrow keys (Left/Right rotate, Up/Down push/pull) or scroll wheel, place them, and undo the most recent placement with Command-Z. Template parsing and placement are bounded and validated before world mutation.
 - **Local-network multiplayer** — host, discover, join, or directly connect to LAN worlds with join codes and host-authoritative replication. Elysium has no public matchmaking, cloud relay, or built-in NAT traversal; a join code is an access gate, not protection from an already hostile local network.
 - **Optional local AI assistant** — `/ai <request>` sends context to a configured Ollama endpoint at `http://127.0.0.1:11434`. Model output is treated as untrusted and reduced to registered, validated, count- and distance-bounded game actions. Elysium does not control what an independently configured Ollama installation or model provider does beyond that interface.
@@ -132,35 +132,18 @@ results, object names, attributes, existing source, event summaries, and errors 
 untrusted data; the runtime compiler, lint, reference checks, dry run, and mutation gates remain the
 real authority rather than the prompt.
 
-### Character paths and sub-classes
+### Usage-based skill trees
 
-When the Character Classes rule is on, the inventory's **Character** button or `K` opens a
-resizable native macOS window. Creation runs **Path → Sub-class → Starting Skills → Review** in a
-four-step sidebar: select a card, inspect its details, then use **Continue**. Closing after changing the
-draft asks before discarding it. The final review is consequential: the chosen path, sub-class, and three
-starting skills are permanent for that character.
+There is no class, sub-class, permanent character-creation choice, or per-world Character Classes rule.
+Every survival player begins with the same four independent trees: **Mining**, **Melee**, **Ranged**, and
+**Crafting**. The inventory's **Skills** button or `K` opens their shared workspace.
 
-A **path** is the top-level gameplay role; each path has exactly three **sub-classes**, each with its own
-three-skill purpose. You choose exactly 3 rank-1 starting skills from a pool of 5: the selected
-sub-class's 3 skills plus the signature skill of each sibling sub-class. Every skill has 5 ranks, and
-Arcanist and Mender grant starter spells through first-rank skill unlocks. There are no attributes —
-health and fatigue grow automatically with level at a fixed per-path rate.
-
-| Path | Growth | Purpose and play loop | Sub-classes |
-|---|---|---|---|
-| **Warden** | Health 26 +2/lvl · Fatigue 10 +1/lvl | Front-line protector: hold dangerous ground, blunt hostile pressure, and turn close combat or timely defense into safety. | **Guardian** (defend an area, keep allies up) · **Vanguard** (close distance, punish exposed foes) · **Bulwark** (turn armor and blocks into durable defense) |
-| **Ranger** | Health 20 +1/lvl · Fatigue 14 +2/lvl | Mobile ranged scout: explore ahead, establish safe sightlines, and stop threats before they close. | **Marksman** (accurate ranged, fast target-swap) · **Scout** (sneaking mobility, hostile detection) · **Survivalist** (forage, camp, weather, animals) |
-| **Delver** | Health 24 +2/lvl · Fatigue 12 +1/lvl | Underground specialist: read terrain, manage hazards, extract resources, and recover guarded treasure. | **Miner** (faster excavation, mining bursts, deep-fatigue recovery) · **Trapper** (detect traps, resist blasts, place deadfalls) · **Treasure-Seeker** (salvage, locks, risky loot) |
-| **Arcanist** | Health 16 +1/lvl · Fatigue 20 +3/lvl | Fatigue-driven spellcaster: prepare a compact spell kit and reshape encounters with damage, deception, wards, or summons. | **Elementalist** (fire, frost, lightning, storms) · **Illusionist** (blur, decoys, invisibility) · **Ritualist** (long casts, wards, summons) |
-| **Mender** | Health 18 +1/lvl · Fatigue 18 +2/lvl | Support specialist: answer hostile injuries, cleanse danger, establish safe zones, and turn food into expedition strength. | **Physic** (direct and emergency healing) · **Harvest** (food, herbs, medicine) · **Sanctuary** (safe zones, wards, rescues) |
-| **Tinker** | Health 20 +1/lvl · Fatigue 16 +2/lvl | Engineering specialist: learn recipes, build powered mechanisms, maintain gear, and trade setup time for repeatable advantage. | **Redstone** (compact circuits, signals) · **Artificer** (gear tuning, field repairs) · **Sapper** (controlled blasts, demolition) |
-
-Class XP comes only from each path's registered gameplay events; cosmetic or repeated no-op actions do
-not count. Per-category 1,200-simulation-tick admission caps and separate rolling or lifetime duplicate
-guards limit farming. The native **Progress** page shows registry-backed criteria alongside the canonical
-path ownership and reward rules consumed by the authoritative award gate; focused contracts keep that
-copy aligned with the qualifying gameplay call sites. The [Player Guide](PLAYER_GUIDE.md#exact-class-xp-rules)
-lists every source, reward, shared window, and duplicate rule.
+Each tree has five primary ranks earned by doing its real activity. Reaching primary rank 5 opens five
+advanced ranks. Mining improves harvesting speed, then ore yield; Melee and Ranged improve equipped
+sword or bow damage, then unlock fast-bar abilities; Crafting improves throughput, then the quality,
+durability, damage, and repair value of gear made at that rank. Ordinary enchanting XP and Advancements
+remain separate. The [Player Guide](PLAYER_GUIDE.md#usage-based-skill-trees) gives the exact XP sources,
+rank gates, actions, and legacy-save migration behavior.
 
 ## Install and run
 
@@ -205,6 +188,7 @@ All gameplay bindings can be changed in Options → Controls.
 | Shift | Sneak |
 | Control or double-tap forward | Sprint |
 | E | Inventory |
+| K | Open the Skills workspace |
 | G / H | Toggle a torch or shield into the off (left) hand |
 | Command-S | Sort the open player inventory or local/host chest A-Z |
 | T | Chat and commands |
@@ -212,7 +196,7 @@ All gameplay bindings can be changed in Options → Controls.
 | `-` / `=` | Change compact map size |
 | `,` / `.` | Change map zoom |
 | Command-C / Command-V / Command-Z | Copy, place, or undo an object template |
-| Shift+1 … Shift+9 | Use a prepared RPG action |
+| Shift+1 … Shift+9 | Use an unlocked skill-tree action in the fast bar |
 | F1 / F3 / F11 | Toggle HUD, debug overlay, or fullscreen |
 | Escape | Pause or close the current screen |
 
@@ -292,7 +276,7 @@ toggle the focused row with Space. Delete and Backspace do not delete worlds.
 
 Play Selected or Host Selected requires exactly one selected world. To delete one or more worlds, use
 the Delete button and then confirm the permanent operation in the separate dialog; Cancel has initial
-focus. Elysium removes the selected worlds and their chunks, player data, advancements, and RPG data as
+focus. Elysium removes the selected worlds and their chunks, player data, advancements, and skill-tree data as
 one atomic local transaction. If the saved-world list changes, Elysium asks you to review the selection.
 If the result cannot be proven, the browser locks to Reload Saved Worlds and performs read-only recovery
 instead of repeating deletion. Saved-world deletion is local-only and never deletes data from a LAN host.

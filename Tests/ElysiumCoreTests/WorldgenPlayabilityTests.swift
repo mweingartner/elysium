@@ -543,8 +543,13 @@ final class WorldgenPlayabilityTests: XCTestCase {
         defer { resetStructurePlanCacheForTesting() }
         let candidates = plannedVillages(in: fixture.originChunks, seed: fixture.seed,
                                          settings: settings)
-        guard let firstCandidate = candidates.first else {
-            return XCTFail("Max must yield a terrain-valid village in the fixed Rich Resources envelope")
+        guard let firstCandidate = candidates.first(where: { candidate in
+            let centerBiome = overworldGen(fixture.seed, settings: settings).surfaceBiomeAt(
+                Double((candidate.reference.x0 + candidate.reference.x1) / 2),
+                Double((candidate.reference.z0 + candidate.reference.z1) / 2))
+            return centerBiome == .snowyPlains || centerBiome == .snowyTaiga
+        }) else {
+            return XCTFail("Max must retain a terrain-valid snowy village in the fixed Rich Resources envelope")
         }
         guard let village = STRUCTURES.first(where: { $0.id == "village" }) else {
             return XCTFail("village definition must be registered")
@@ -611,9 +616,14 @@ final class WorldgenPlayabilityTests: XCTestCase {
         }
         XCTAssertGreaterThan(counts.last ?? 0, 0,
                              "Max must yield at least one terrain-valid village in the fixed live-world envelope; \(countSummary)")
+        guard let manyIndex = densities.firstIndex(of: .many) else {
+            return XCTFail("VillageDensity must retain its Many option")
+        }
+        XCTAssertGreaterThanOrEqual(counts[manyIndex], 5,
+                                    "Rich Resources Many must retain five complete grounded settlements in the fixed envelope; \(countSummary)")
         let maxPlans = plansByDensity.last ?? []
-        XCTAssertGreaterThanOrEqual(maxPlans.count, 2,
-                                    "fixed envelope must contain at least two Max villages to exercise ref separation; \(countSummary)")
+        XCTAssertGreaterThanOrEqual(maxPlans.count, 8,
+                                    "Rich Resources Max must retain eight complete grounded settlements in the fixed envelope; \(countSummary)")
         for firstIndex in maxPlans.indices {
             for secondIndex in maxPlans.indices where secondIndex > firstIndex {
                 XCTAssertFalse(villageReferencesOverlap(maxPlans[firstIndex].reference,
@@ -1234,6 +1244,19 @@ final class WorldgenPlayabilityTests: XCTestCase {
                       previousLevel.map({ abs($0 - row[0].y) <= 1 }) ?? true else {
                     break
                 }
+                // A frozen lake can form a natural three-wide, level walking
+                // surface beyond a compact street's deliberate endpoint.  It
+                // is not an emitted road: require the current whole row to
+                // differ from exact pre-structure terrain before extending the
+                // observable corridor.  This keeps the scanner independent of
+                // a particular road material while preventing it from treating
+                // native ice/sand/snow as unsafe village construction.
+                let rowIsConstructed = row.allSatisfy { feet in
+                    let base = baseTerrain(at: feet.x, feet.z)
+                    return emission.cell(feet.x, feet.y - 1, feet.z)
+                        != base.cell(worldX: feet.x, y: feet.y - 1, worldZ: feet.z)
+                }
+                guard rowIsConstructed else { break }
                 previousLevel = row[0].y
                 for feet in row {
                     let base = baseTerrain(at: feet.x, feet.z)
@@ -1276,11 +1299,15 @@ final class WorldgenPlayabilityTests: XCTestCase {
             }
         }
 
-        XCTAssertGreaterThanOrEqual(radialArms, 3,
-                                    "accepted village must expose at least three emitted radial roads",
+        // A full village has three or four arms.  Its terrain-safe compact
+        // fallback retains two opposing complete streets, which is enough to
+        // reach every resident and pen without requiring an unsafe third
+        // hillside cut merely to satisfy a decorative layout minimum.
+        XCTAssertGreaterThanOrEqual(radialArms, 2,
+                                    "accepted village or compact hamlet must expose two emitted radial roads",
                                     file: file, line: line)
-        XCTAssertGreaterThanOrEqual(roadFeet.count, 135,
-                                    "accepted village must expose complete three-wide road geometry",
+        XCTAssertGreaterThanOrEqual(roadFeet.count, 90,
+                                    "accepted village or compact hamlet must expose complete three-wide road geometry",
                                     file: file, line: line)
         XCTAssertGreaterThan(alteredRoadColumns, 24,
                              "roads must materially alter their exact base-terrain columns",

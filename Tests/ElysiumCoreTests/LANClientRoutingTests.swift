@@ -167,6 +167,27 @@ final class LANClientRoutingTests: XCTestCase {
         XCTAssertEqual(game.world.getBlock(8, 66, 9), 0)
     }
 
+    func testRightClickChestNextToChestUsesExistingFacingInPlaceIntent() {
+        let game = makeLANClientGame()
+        guard let chunk = game.world.getChunkAt(7, 9) else {
+            return XCTFail("test fixture missing loaded chunk")
+        }
+        // The target is east of this south-facing chest. With yaw 0 the normal
+        // fallback would be north-facing, so this exercises the shared seam.
+        chunk.set(7, 66, 9, cell(B.chest, 1))
+        game.player.mainHand = ItemStack(iid("chest"), 1)
+        var captured: [LANBlockIntent] = []
+        game.lanBlockIntentHandler = { captured.append($0) }
+
+        game.mouseDown(2)
+
+        XCTAssertEqual(captured.count, 1)
+        XCTAssertEqual(captured.first?.action, .placeBlock)
+        XCTAssertEqual(captured.first?.cell, Int(cell(B.chest, 1)))
+        XCTAssertEqual(game.world.getBlock(8, 66, 9), 0,
+                       "the LAN client must still leave its mirror untouched")
+    }
+
     func testRightClickOpenableWithBlockHeldEmitsUseBeforePlace() {
         let game = makeLANClientGame()
         guard let chunk = game.world.getChunkAt(8, 10) else {
@@ -187,6 +208,53 @@ final class LANClientRoutingTests: XCTestCase {
         // The LAN mirror does not locally toggle or place; the host's authoritative echo will.
         XCTAssertEqual(game.world.getBlock(8, 66, 10), Int(cell(B.oak_door, 0)))
         XCTAssertEqual(game.world.getBlock(8, 66, 9), 0)
+    }
+
+    func testRightClickOrdinaryBowSendsHostTimedDrawReleaseWithoutMirrorProjectile() {
+        let game = makeLANClientGame()
+        game.player.mainHand = ItemStack(iid("bow"), 1)
+        game.player.inventory[1] = ItemStack(iid("arrow"), 1)
+        var captured: [LANBowIntent] = []
+        game.lanBowIntentHandler = { captured.append($0) }
+
+        game.mouseDown(2)
+
+        XCTAssertEqual(captured, [
+            LANBowIntent(action: .begin, selectedHotbarSlot: 0, sequence: 1),
+        ])
+        XCTAssertTrue(game.player.usingItem, "the guest may retain local bow draw feedback")
+        XCTAssertTrue(game.world.entities.compactMap { $0 as? ArrowEntity }.isEmpty,
+                      "only the host may create the real shared-world projectile")
+
+        for _ in 0..<6 { stepOneTick(game) }
+        XCTAssertEqual(captured.count, 1, "holding the button must not restart host charge")
+        XCTAssertTrue(game.world.entities.compactMap { $0 as? ArrowEntity }.isEmpty)
+
+        game.mouseUp(2)
+        XCTAssertEqual(captured, [
+            LANBowIntent(action: .begin, selectedHotbarSlot: 0, sequence: 1),
+            LANBowIntent(action: .release, selectedHotbarSlot: 0, sequence: 2),
+        ])
+        XCTAssertFalse(game.player.usingItem)
+        XCTAssertTrue(game.world.entities.compactMap { $0 as? ArrowEntity }.isEmpty)
+    }
+
+    func testRightClickOrdinaryBowCanStartInOpenAirWithoutMirrorProjectile() {
+        let game = makeLANClientGame()
+        game.player.mainHand = ItemStack(iid("bow"), 1)
+        game.player.inventory[1] = ItemStack(iid("arrow"), 1)
+        // Look above the wall and ground fixture so a bow use cannot depend on a block raycast.
+        game.player.pitch = -1.3
+        var captured: [LANBowIntent] = []
+        game.lanBowIntentHandler = { captured.append($0) }
+
+        game.mouseDown(2)
+
+        XCTAssertEqual(captured, [
+            LANBowIntent(action: .begin, selectedHotbarSlot: 0, sequence: 1),
+        ])
+        XCTAssertTrue(game.player.usingItem)
+        XCTAssertTrue(game.world.entities.compactMap { $0 as? ArrowEntity }.isEmpty)
     }
 
     func testRightClickInertBlockEmitsOneSemanticInteractionPerUsePulse() {
@@ -322,6 +390,40 @@ final class LANClientRoutingTests: XCTestCase {
         game.applyLANGrant(grant)
 
         XCTAssertEqual(game.player.countItem(iid("dirt")), 14)
+    }
+
+    func testApplyLANGrantPreservesCraftingQualityForAdditiveAndAbsoluteSlots() throws {
+        let game = makeLANClientGame()
+        let grant = LANInventoryGrant(
+            playerID: "peer",
+            grantID: 1,
+            items: [
+                LANInventorySlotSnapshot(
+                    slot: 0, itemID: iid("iron_sword"), count: 1, damage: 7, craftingQuality: 4,
+                    enchantments: [LANItemEnchantmentSnapshot(id: "sharpness", lvl: 3)],
+                    potion: "poison"
+                ),
+            ],
+            xp: 0,
+            clearAll: false,
+            slots: [
+                LANInventorySlotSnapshot(
+                    slot: 3, itemID: iid("iron_pickaxe"), count: 1, damage: 11, craftingQuality: 5,
+                    enchantments: [LANItemEnchantmentSnapshot(id: "efficiency", lvl: 4)]
+                ),
+            ]
+        )
+
+        game.applyLANGrant(grant)
+
+        XCTAssertEqual(game.player.inventory[0]?.data.craftingQuality, 4)
+        XCTAssertEqual(game.player.inventory[3]?.data.craftingQuality, 5)
+        XCTAssertEqual(game.player.inventory[0]?.ench, [EnchInstance("sharpness", 3)])
+        XCTAssertEqual(game.player.inventory[0]?.data.potion, "poison")
+        XCTAssertEqual(game.player.inventory[3]?.ench, [EnchInstance("efficiency", 4)])
+        let qualityPickaxe = try XCTUnwrap(game.player.inventory[3])
+        XCTAssertGreaterThan(maxDamageOf(qualityPickaxe),
+                             itemDef(iid("iron_pickaxe")).tool!.durability)
     }
 
     func testApplyLANPickupGrantAdvancesCanonicalExperienceState() {
@@ -491,12 +593,17 @@ final class LANClientRoutingTests: XCTestCase {
 
     // MARK: - protocol-5 RPG zero fallback
 
-    func testProtocol5RPGSubmissionDeniesBeforeLegacyIntentOrLocalMutation() {
+    func testProtocol5LegacyRPGSubmissionDeniesBeforeIntentOrLocalMutation() {
         let game = makeLANClientGame()
-        XCTAssertNil(game.player.createRPGCharacter(RPGCreationDraft(
+        XCTAssertTrue(game.world.isTransientLANClient)
+        XCTAssertTrue(game.world.rule(RPG_CLASSES_GAME_RULE),
+                      "the legacy summary field may still be true on a transient mirror")
+        XCTAssertEqual(game.player.rpg, .skillTreeProgression(),
+                       "the direct constructor must reject even a pristine usage tree")
+        XCTAssertEqual(game.player.createRPGCharacter(RPGCreationDraft(
             pathID: "arcanist", branchID: "arcanist_elementalist",
             startingSkillIDs: rpgBranchDefinition("arcanist_elementalist")!.skillIDs
-        )))
+        )), .classesDisabled)
         let beforeRPG = game.player.rpg
         let beforeInventory = game.player.inventory
         var intents: [LANRPGIntent] = []

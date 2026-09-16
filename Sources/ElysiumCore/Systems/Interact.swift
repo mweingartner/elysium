@@ -1367,7 +1367,9 @@ private func placementMeta(_ world: World, _ player: Player, _ hit: RaycastHit, 
         let deg = (player.yaw * 180 / .pi + 180).truncatingRemainder(dividingBy: 360)
         return Int((deg / 22.5).rounded(.down)) & 15
     case .chest:
-        return facingOpp
+        return chestPlacementFacing(blockId, fallback: facingOpp) { dx, dy, dz in
+            world.getBlock(px + dx, py + dy, pz + dz)
+        }
     case .repeater, .comparator:
         return facing
     case .rail:
@@ -1666,6 +1668,11 @@ public func finishBreaking(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int) {
     if !world.rule("doTileDrops") { return }
     if !canHarvest(player, c) { return }
 
+    // A resource award is tied to the same successful-harvest gate as the
+    // ordinary drops.  Breaking an ore with the wrong tool, in creative, or
+    // with tile drops disabled cannot farm usage progression.
+    _ = skillTreeAwardMiningBreak(player, blockID: id)
+
     let held = player.mainHand
     let fortune = held.map { enchLevel($0, "fortune") } ?? 0
     let silk = held.map { enchLevel($0, "silk_touch") > 0 } ?? false
@@ -1697,7 +1704,12 @@ public func finishBreaking(_ ctx: InteractCtx, _ x: Int, _ y: Int, _ z: Int) {
         if d.countMin == d.countMax { count = d.countMin }
         else { count = d.countMin + gameRng.nextInt(max(0, d.countMax - d.countMin) + 1) }
         if d.chance != 1 && gameRng.nextFloat() > d.chance { continue }
-        if count > 0 { spawnItem(world, Double(x) + 0.5, Double(y) + 0.3, Double(z) + 0.5, ItemStack(itemId, count)) }
+        if count > 0 {
+            count += skillTreeMiningBonusDrops(player, blockID: id, x: x, y: y, z: z,
+                                                itemID: itemId, baseDropCount: count)
+            spawnItem(world, Double(x) + 0.5, Double(y) + 0.3, Double(z) + 0.5,
+                      ItemStack(itemId, count))
+        }
     }
     // ore XP
     let xpMap: [Int: (Int, Int)] = [

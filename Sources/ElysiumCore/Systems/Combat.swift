@@ -25,7 +25,15 @@ public func playerAttack(_ player: Player, _ target: Entity) {
 
     let held = player.mainHand
     let tool = held.map { itemDef($0.id).tool } ?? nil
-    var dmg = 1 + (tool?.attackDamage ?? 0)
+    let weaponDamage = held.map(effectiveWeaponDamageOf) ?? 0
+    var dmg = 1 + weaponDamage
+    if let trees = player.rpg.skillTrees, tool?.type == "sword" {
+        // Tree growth scales the equipped weapon contribution only.  Strength,
+        // enchantments, critical hits, and ordinary combat cooldown remain
+        // independent systems.
+        dmg = 1 + weaponDamage * skillTreeWeaponDamageMultiplier(
+            primaryRank: trees.melee.primaryRank)
+    }
     if player.rpgClassesEnabled(), player.rpg.created {
         dmg += rpgDerivedStats(player.rpg).meleeDamageBonus
     }
@@ -58,8 +66,13 @@ public func playerAttack(_ player: Player, _ target: Entity) {
 
     let meleeSource = player.rpgClassesEnabled() && player.rpg.created && player.rpg.pathID == "warden"
         ? RPG_DAMAGE_SOURCE_WARDEN_MELEE : "mob"
+    // Capture admission before applying damage.  A lethal strike marks a
+    // LivingEntity dead immediately, so asking after `hurt` would make the
+    // killing blow incorrectly earn no usage XP.
+    let awardsMeleeUsageXP = tool?.type == "sword" && skillTreeIsUsageCombatTarget(target)
     let hurt = target.hurt(max(0, dmg), meleeSource, player)
     if hurt {
+        _ = skillTreeAwardMeleeHit(player, successfulSwordDamage: awardsMeleeUsageXP)
         // knockback enchant + sprint knockback (capture sprint state first —
         // the kb branch clears it, and the sweep gate below must see it)
         let wasSprinting = player.sprinting
@@ -102,18 +115,19 @@ public func playerAttack(_ player: Player, _ target: Entity) {
 // ---------------------------------------------------------------------------
 // Bow / crossbow shooting (player)
 // ---------------------------------------------------------------------------
-public func shootBow(_ player: Player, _ chargeTicks: Int) {
-    guard let held = player.mainHand else { return }
+@discardableResult
+public func shootBow(_ player: Player, _ chargeTicks: Int) -> ArrowEntity? {
+    guard let held = player.mainHand else { return nil }
     let effectiveChargeTicks = rpgBowEffectiveChargeTicks(player, rawTicks: chargeTicks)
     var power = Double(effectiveChargeTicks) / 20
     power = (power * power + power * 2) / 3
-    if power < 0.1 { return }
+    if power < 0.1 { return nil }
     if power > 1 { power = 1 }
 
     let infinity = enchLevel(held, "infinity") > 0
     let hasArrow = player.gameMode == 1 || infinity || player.countItem(iid("arrow")) > 0 ||
         player.countItem(iid("spectral_arrow")) > 0 || player.countItem(iid("tipped_arrow")) > 0
-    if !hasArrow { return }
+    if !hasArrow { return nil }
 
     // find arrow type
     var arrowItem = "arrow"
@@ -135,7 +149,17 @@ public func shootBow(_ player: Player, _ chargeTicks: Int) {
 
     let arrow = ArrowEntity(world: player.world)
     arrow.shootFrom(player, player.pitch, player.yaw, power * 3, rpgBowInaccuracy(player))
-    arrow.damage = 2 + Double(enchLevel(held, "power")) * 0.5 + (enchLevel(held, "power") > 0 ? 0.5 : 0)
+    let bowBaseDamage = 2 + Double(enchLevel(held, "power")) * 0.5
+        + (enchLevel(held, "power") > 0 ? 0.5 : 0)
+    let qualityDamage = skillTreeEffectiveWeaponDamage(
+        base: bowBaseDamage, qualityRank: held.data.craftingQuality ?? 0)
+    if let trees = player.rpg.skillTrees, itemDef(held.id).tool?.type == "bow" {
+        arrow.damage = qualityDamage * skillTreeWeaponDamageMultiplier(
+            primaryRank: trees.ranged.primaryRank)
+        arrow.skillTreeRangedShot = true
+    } else {
+        arrow.damage = qualityDamage
+    }
     arrow.critical = power >= 1
     arrow.punchLevel = enchLevel(held, "punch")
     arrow.flame = enchLevel(held, "flame") > 0
@@ -146,6 +170,7 @@ public func shootBow(_ player: Player, _ chargeTicks: Int) {
     player.world.hooks.playSound("entity.arrow.shoot", player.x, player.y, player.z, 1, 1 / (Double.random(in: 0..<1) * 0.4 + 1.2) + power * 0.5)
     player.damageHeld(1)
     player.stats["arrowsShot"] = (player.stats["arrowsShot"] ?? 0) + 1
+    return arrow
 }
 
 public func throwTridentPlayer(_ player: Player, _ chargeTicks: Int) {

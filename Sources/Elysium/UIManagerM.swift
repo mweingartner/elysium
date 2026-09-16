@@ -1115,6 +1115,9 @@ final class UIManager {
         if let revealed = stack.last as? RPGCharacterScreen {
             revealed.initScreen(self, game)
         }
+        if let revealed = stack.last as? SkillTreeScreen {
+            revealed.initScreen(self, game)
+        }
         if let revealed = stack.last {
             _ = advanceTextPresentation(for: revealed)
             commitTextAccessibility(screen: revealed, game: game)
@@ -1228,7 +1231,7 @@ final class UIManager {
                                          source: RPGSemanticActivationSource,
                                          game: GameCore) -> RPGSemanticActivationResult {
         guard game.hasWorld(), !hasScreen() else { return .unavailable }
-        if command == .openCharacter, game.player?.rpgClassesEnabled() != true { return .unavailable }
+        if command == .openCharacter, game.player?.rpg.skillTrees == nil { return .unavailable }
         guard !worldSemanticRevisionExhausted, !worldScreenInstanceIDExhausted else {
             return .unavailable
         }
@@ -1244,6 +1247,16 @@ final class UIManager {
             return .unavailable
         }
         nextWorldSemanticRevision = revisionAddition.partialValue
+        // Usage-tree actions have a deliberately narrower LAN path than the
+        // retired class system.  It may only cycle local presentation or send
+        // a closed `.useSkill` request to the host; no local RPG authority,
+        // cooldown, action sequence, inventory, or class command is admitted.
+        // Keep it ahead of the legacy synthetic boundary, whose Protocol-5
+        // rejection remains the fail-closed disposition for every other
+        // client-side RPG semantic command.
+        if game.dispatchLANUsageTreeWorldSemanticCommand(command) {
+            return .dispatched(serial: revisionAddition.partialValue)
+        }
         guard let id = RPGUIElementID(rawValue: "world-input:\(revisionAddition.partialValue)") else {
             return .unavailable
         }
@@ -1450,7 +1463,7 @@ final class UIManager {
             cv.fillRect(x + 1, y + 1, 16, 16)
         }
         // durability bar
-        let maxD = itemDef(s.id).tool?.durability ?? itemDef(s.id).armor?.durability ?? 0
+        let maxD = maxDamageOf(s)
         if maxD > 0 && s.damage > 0 {
             let f = 1 - Double(s.damage) / Double(maxD)
             cv.setFill("#000000")
@@ -1688,7 +1701,7 @@ final class UIManager {
         if let food = def.food {
             lines.append("§2+\(food.hunger) hunger")
         }
-        let maxD = def.tool?.durability ?? def.armor?.durability ?? 0
+        let maxD = maxDamageOf(s)
         if maxD > 0 { lines.append("§7Durability: \(maxD - s.damage) / \(maxD)") }
         return lines
     }

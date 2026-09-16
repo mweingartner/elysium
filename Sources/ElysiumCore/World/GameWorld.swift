@@ -203,6 +203,10 @@ public final class World {
     public var simCenterX = 0, simCenterZ = 0
     public var simDistance = 6
     public var randomTickSpeed = 3
+    /// Session-only authority marker installed by `GameCore` for a mirrored
+    /// LAN-client world. It is deliberately not persisted: a reconnect builds
+    /// a fresh mirror and only the host owns player progression mutations.
+    public internal(set) var isTransientLANClient = false
     public var gameRules: [String: Double] = [
         "doDaylightCycle": 1, "doWeatherCycle": 1, "doMobSpawning": 1, "doFireTick": 1,
         "mobGriefing": 1, "keepInventory": 0, "doMobLoot": 1, "doTileDrops": 1,

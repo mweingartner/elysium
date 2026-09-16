@@ -476,12 +476,13 @@ public final class GameCore {
                    worldRec?.rpgSimulationTick ?? worlds[dim]?.rpgSimulationTick ?? 0))
     }
 
-    /// Track-B authority projection. Protocol-5 clients deliberately have no compatible RPG
-    /// semantic authority or writable preference destination and therefore always fail closed.
+    /// Retired class actions retain their existing local-only trust boundary. Usage-tree actions
+    /// use their own host-authoritative request route, while this projection remains the local
+    /// input gate for the shared fastbar surface.
     public var rpgAuthorityPresentation: RPGAuthorityPresentation {
         guard inWorld, !isLANClientWorld, !rpgWorldEntryGenerationExhausted,
               !rpgRulesGenerationExhausted, rpgLocalPreferenceScope != nil,
-              player?.rpgClassesEnabled() == true else { return .unavailable }
+              player?.rpg.skillTrees != nil else { return .unavailable }
         return (try? RPGAuthorityPresentation(validating: .localReady,
                                                semanticRevision: rpgWorldEntryGeneration)) ?? .unavailable
     }
@@ -519,6 +520,9 @@ public final class GameCore {
     public var lanInteractionIntentHandler: ((LANInteractionIntent) -> Void)?
     /// client → host gameplay intents (all additive, LAN-client-only)
     public var lanAttackIntentHandler: ((LANAttackIntent) -> Void)?
+    /// Guest ordinary bows use a host-timed draw/release intent. The client may animate a draw,
+    /// but never creates a projectile or chooses its charge/damage locally.
+    public var lanBowIntentHandler: ((LANBowIntent) -> Void)?
     public var lanTossIntentHandler: ((LANTossIntent) -> Void)?
     public var lanRPGIntentHandler: ((LANRPGIntent) -> Void)?
     public var lanContainerEditHandler: ((LANContainerEditIntent) -> Void)?
@@ -543,6 +547,8 @@ public final class GameCore {
     private var lanContainerEditSeq = 0
     private var lanInteractionSequence: UInt32 = 0
     private var lanToolStrikeSequence: UInt32 = 0
+    private var lanBowIntentSequence: UInt32 = 0
+    private var lanBowDrawActive = false
     /// Monotone left-button gesture id paired with tool-strike target transitions. Unlike the
     /// per-intent sequence, it changes only after release and a new accepted primary press.
     private var lanToolStrikeGesture: UInt32 = 0
@@ -1362,6 +1368,8 @@ public final class GameCore {
         lanContainerEditSeq = 0
         lanInteractionSequence = 0
         lanToolStrikeSequence = 0
+        lanBowIntentSequence = 0
+        lanBowDrawActive = false
         lanToolStrikeGesture = 0
         lanToolStrikeTarget = nil
         lanLastAppliedGrantID = 0
@@ -1462,7 +1470,7 @@ public final class GameCore {
                             dungeonDensity: DungeonDensity = .normal,
                             villageDensity: VillageDensity = .normal,
                             mapSize: WorldMapSize = .medium,
-                            rpgClassesEnabled: Bool = true) {
+                            rpgClassesEnabled: Bool = false) {
         guard savedWorldMaintenanceAllowsTransitions() else { return }
         lanClientResumeStorageKey = nil
         lanClientWorldSummary = nil
@@ -2285,6 +2293,7 @@ public final class GameCore {
         loadEventSubscriptions(from: rec)
         for d in [Dim.overworld, .nether, .end] {
             let w = World(dim: d, seed: UInt32(bitPattern: rec.seed), generationSettings: rec.generationSettings)
+            w.isTransientLANClient = transientLANClient
             if let ds = rec.dims["\(d.rawValue)"] {
                 w.time = ds.time
                 w.dayTime = ds.dayTime
@@ -2432,12 +2441,6 @@ public final class GameCore {
         ticksSinceSave = 0
         host?.closeAllScreens()
         host?.showActionBar("§e\(rec.name)§r — seed \(rec.seed)", 60)
-        // The player lands directly in the world. Creation is recoverable from a stable native
-        // Game menu command as well as the configurable gameplay binding and inventory button,
-        // so the first-time nudge can explain a direct route without ambushing world entry.
-        if player.rpgClassesEnabled(), !player.rpg.created {
-            host?.pushChat("§7Press §fK§7 (default) or choose §fGame > Character…§7 to create your character.")
-        }
         // loaded in deep underground? say so loudly instead of looking like a render bug
         let bx = ifloor(player.x), bz = ifloor(player.z)
         if w.info.hasSky && Double(w.heightAt(bx, bz)) > player.eyeY() + 10 {
@@ -4125,7 +4128,16 @@ public final class GameCore {
                 return dx * dx + dz * dz <= simR
             }
             if !inRange && !ALWAYS_TICK.contains(ent.type) { continue }
-            ent.tick()
+            // A usage-tree stun must halt every hostile's decision loop for
+            // its entire duration, including special mobs whose custom `tick`
+            // implementations do not route through `Mob.mobTick()`.  Keep
+            // deterministic status/death/physics settling alive through the
+            // dedicated core path instead of freezing the entity object.
+            if let living = ent as? LivingEntity, living.skillTreeStunTicks > 0 {
+                living.tickWhileSkillTreeStunned()
+            } else {
+                ent.tick()
+            }
             // sculk catalyst blooms on death
             if let liv = ent as? LivingEntity, liv.catalystBloomPending {
                 liv.catalystBloomPending = false
@@ -4632,6 +4644,53 @@ public final class GameCore {
         emitLANToolStrikeIntent(hit)
     }
 
+    private func isLANClientOrdinaryBow(_ stack: ItemStack?) -> Bool {
+        guard let stack, stack.id >= 0, stack.id < itemDefs.count else { return false }
+        return itemDef(stack.id).tool?.type == "bow"
+    }
+
+    /// Starts the local draw animation and sends the semantic begin phase exactly once. The host
+    /// owns the charge clock, arrow, ammunition, durability, and damage; this client-side state
+    /// exists only to preserve ordinary bow movement/visual feedback while the button is held.
+    @discardableResult
+    private func beginLANClientBowDraw() -> Bool {
+        guard let p = player,
+              !lanBowDrawActive,
+              isLANClientOrdinaryBow(p.mainHand),
+              let handler = lanBowIntentHandler,
+              lanBowIntentSequence < UInt32.max
+        else { return false }
+        lanBowIntentSequence += 1
+        lanBowDrawActive = true
+        p.beginUsingMainHand()
+        handler(LANBowIntent(
+            action: .begin,
+            selectedHotbarSlot: p.selectedSlot,
+            sequence: lanBowIntentSequence
+        ))
+        return true
+    }
+
+    /// Releases a local mirrored bow draw without calling `releaseUsingItem`, which would spawn
+    /// an unauthoritative projectile into the guest mirror world. A host that did not receive an
+    /// earlier begin rejects this harmlessly; its own semantic sequence/draw state prevents a
+    /// stale release from firing.
+    private func releaseLANClientBowDrawIfNeeded() {
+        guard lanBowDrawActive else { return }
+        lanBowDrawActive = false
+        defer { player?.cancelUsingItem() }
+        guard let p = player,
+              let handler = lanBowIntentHandler,
+              lanBowIntentSequence < UInt32.max
+        else { return }
+        lanBowIntentSequence += 1
+        handler(LANBowIntent(
+            action: .release,
+            selectedHotbarSlot: p.selectedSlot,
+            sequence: lanBowIntentSequence
+        ))
+    }
+
     private func tickLANClientMirroredUse() {
         let p = player!
         if p.dead || p.deathTime > 0 || (host?.hasScreen() ?? false) { return }
@@ -4639,31 +4698,43 @@ public final class GameCore {
         _ = performLANClientUse()
     }
 
-    /// LAN-client eating/drinking continuation: mirrors tickUsing's food/potion completion
-    /// path (client-authoritative inventory — the item is consumed locally, no world mutation
-    /// involved) but never falls through to doUse's held-item-repeat branch, which would place
-    /// blocks or spawn projectiles directly into the non-authoritative mirror world.
+    /// LAN-client held-use continuation: mirrors food/potion completion and ordinary bow draw
+    /// feedback without ever resolving a projectile in the non-authoritative mirror world.
     private func tickLANClientEating() {
         let p = player!
         if p.dead || p.deathTime > 0 || (host?.hasScreen() ?? false) {
             if p.usingItem { p.cancelUsingItem() }
+            lanBowDrawActive = false
             return
         }
         guard p.usingItem else { return }
-        let ctx = interactCtx()
         guard let held = p.usingMainHandStack() else {
             p.cancelUsingItem()
+            lanBowDrawActive = false
             return
         }
         if !rightDown {
-            p.cancelUsingItem()
+            if lanBowDrawActive {
+                releaseLANClientBowDrawIfNeeded()
+            } else {
+                p.cancelUsingItem()
+            }
             return
         }
         p.useItemTicks += 1
+        if isLANClientOrdinaryBow(held) {
+            guard lanBowDrawActive else {
+                p.cancelUsingItem()
+                return
+            }
+            return
+        }
+        let ctx = interactCtx()
         let def = itemDef(held.id)
         guard def.food != nil || def.name == "potion" || def.name == "milk_bucket" else {
             // not a food/potion use — LAN clients don't locally resolve other held-use kinds
-            // (bows/tridents/crossbows spawn projectiles into the shared world and are host-only)
+            // (tridents/crossbows still spawn projectiles into the shared world and remain
+            // host-only; ordinary bows have the dedicated host-timed path above).
             p.cancelUsingItem()
             return
         }
@@ -4676,8 +4747,19 @@ public final class GameCore {
     @discardableResult
     private func performLANClientUse() -> Bool {
         let p = player!
+        // Holding a bow must not re-emit interaction/begin intents every client tick. Its host
+        // draw begins once on mouse-down and release arrives from mouse-up.
+        if lanBowDrawActive { return true }
         let sentInteraction = sendLANClientInteractionIntent()
         guard let hit = crosshairBlock() else {
+            // A bow is valid in open air (and when the semantic ray found only an inert entity),
+            // so it cannot be gated on a block raycast. Block/openable precedence remains below
+            // when there is a real block target, matching the ordinary local `doUse` ordering.
+            if isLANClientOrdinaryBow(p.mainHand), beginLANClientBowDraw() {
+                p.attackAnim = 0.6
+                useCooldown = 4
+                return true
+            }
             if sentInteraction {
                 p.attackAnim = 0.6
                 useCooldown = 4
@@ -4701,6 +4783,11 @@ public final class GameCore {
                 useCooldown = 4
                 return true
             }
+            if isLANClientOrdinaryBow(held), beginLANClientBowDraw() {
+                p.attackAnim = 0.6
+                useCooldown = 4
+                return true
+            }
             if def.food != nil || def.name == "potion" || def.name == "milk_bucket" {
                 // client-authoritative held-item use: begins the local eat/drink continuation
                 // (tickLANClientEating finishes it); never touches the mirror world
@@ -4710,6 +4797,11 @@ public final class GameCore {
                     return true
                 }
             }
+        }
+        if isLANClientOrdinaryBow(p.mainHand), beginLANClientBowDraw() {
+            p.attackAnim = 0.6
+            useCooldown = 4
+            return true
         }
         if sentInteraction {
             p.attackAnim = 0.6
@@ -4810,7 +4902,9 @@ public final class GameCore {
             let below = world.getBlock(px, py - 1, pz) >> 4
             return blockDefs[below].fullCube ? 0 : -1
         case .chest:
-            return facingOpp
+            return chestPlacementFacing(blockId, fallback: facingOpp) { dx, dy, dz in
+                world.getBlock(px + dx, py + dy, pz + dz)
+            }
         case .repeater, .comparator:
             return facing
         default:
@@ -5071,11 +5165,31 @@ public final class GameCore {
                   slot.count > 0, slot.damage >= 0
             else { continue }
             let count = min(slot.count, maxStackOf(ItemStack(slot.itemID, 1)))
-            p.inventory[slot.slot] = ItemStack(slot.itemID, count, damage: slot.damage, label: slot.label)
+            p.inventory[slot.slot] = ItemStack(
+                slot.itemID,
+                count,
+                damage: slot.damage,
+                ench: slot.enchantments.map(\.enchantment),
+                label: slot.label,
+                data: makeLANStackData(
+                    craftingQuality: slot.craftingQuality,
+                    potion: slot.potion
+                )
+            )
         }
         for slot in grant.items {
             guard slot.itemID >= 0, slot.itemID < itemDefs.count, slot.count > 0 else { continue }
-            _ = p.give(ItemStack(slot.itemID, slot.count, damage: slot.damage, label: slot.label))
+            _ = p.give(ItemStack(
+                slot.itemID,
+                slot.count,
+                damage: slot.damage,
+                ench: slot.enchantments.map(\.enchantment),
+                label: slot.label,
+                data: makeLANStackData(
+                    craftingQuality: slot.craftingQuality,
+                    potion: slot.potion
+                )
+            ))
         }
         if grant.xp > 0 { p.addXP(grant.xp) }
         lanLocalInventoryRevision += 1
@@ -5741,7 +5855,15 @@ public final class GameCore {
         }
         if button == 2 {
             rightDown = false
-            if player?.usingItem == true { releaseUsingItem(interactCtx()) }
+            if isLANClientWorld {
+                releaseLANClientBowDrawIfNeeded()
+                // Food/potion held-use has no host projectile counterpart and is cancelled rather
+                // than locally finalized on mouse-up. Bow release above is the sole LAN path that
+                // may make a real projectile, and it does so only through the host intent.
+                if player?.usingItem == true { player?.cancelUsingItem() }
+            } else if player?.usingItem == true {
+                releaseUsingItem(interactCtx())
+            }
         }
     }
 

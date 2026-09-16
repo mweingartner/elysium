@@ -48,6 +48,8 @@ public enum LANV6MessageKind: UInt16, CaseIterable, Codable, Equatable, Hashable
     case scriptIntent = 30
     /// Replay-safe semantic secondary-use target, mirrored from the live message manifest.
     case interactionIntent = 31
+    /// Host-timed ordinary bow draw/release, mirrored from the live protocol-5 manifest.
+    case bowIntent = 32
 
     public var payloadLimit: Int {
         switch self {

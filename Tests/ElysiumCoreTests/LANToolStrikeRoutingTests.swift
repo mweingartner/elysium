@@ -101,6 +101,98 @@ final class LANToolStrikeRoutingTests: XCTestCase {
         XCTAssertEqual(fixture.game.world.getBlock(2, 64, 1), bedrock)
     }
 
+    func testHostToolStrikeHonorsReplicatedCraftingQualityDurability() {
+        let fixture = makeFixture(label: "lan-tool-strike-quality-durability")
+        let pickaxeID = iid("wooden_pickaxe")
+        let baseDurability = itemDef(pickaxeID).tool!.durability
+        let quality = 5
+        let enhancedDurability = maxDamageOf(ItemStack(
+            pickaxeID, 1, data: makeLANStackData(craftingQuality: quality)
+        ))
+        XCTAssertGreaterThan(enhancedDurability, baseDurability)
+
+        // A quality rank arrives through a host-owned craft/pickup baseline;
+        // a later guest inventory publish may preserve it but cannot mint it.
+        fixture.session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(
+                playerID: "peer-a",
+                selectedHotbarSlot: 0,
+                slots: [LANInventorySlotSnapshot(
+                    slot: 0,
+                    itemID: pickaxeID,
+                    count: 1,
+                    damage: baseDurability,
+                    craftingQuality: quality
+                )]
+            ),
+            from: "peer-a"
+        )
+        XCTAssertTrue(fixture.session.applyInventoryUpdate(
+            LANInventoryUpdate(
+                playerID: "peer-a",
+                revision: 2,
+                snapshot: LANPlayerInventorySnapshot(
+                    playerID: "peer-a",
+                    selectedHotbarSlot: 0,
+                    slots: [LANInventorySlotSnapshot(
+                        slot: 0,
+                        itemID: pickaxeID,
+                        count: 1,
+                        damage: baseDurability,
+                        craftingQuality: quality
+                    )]
+                )
+            ),
+            from: "peer-a"
+        ))
+        XCTAssertEqual(
+            fixture.session.authorizeToolStrikeIntent(
+                intent(cell: fixture.cell, sequence: 1), from: "peer-a", in: fixture.game.world
+            ),
+            .accepted(LANAuthorizedToolStrike(blockCell: fixture.cell, itemID: pickaxeID))
+        )
+
+        let exhausted = makeFixture(label: "lan-tool-strike-quality-exhausted")
+        exhausted.session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(
+                playerID: "peer-a",
+                selectedHotbarSlot: 0,
+                slots: [LANInventorySlotSnapshot(
+                    slot: 0,
+                    itemID: pickaxeID,
+                    count: 1,
+                    damage: enhancedDurability,
+                    craftingQuality: quality
+                )]
+            ),
+            from: "peer-a"
+        )
+        XCTAssertTrue(exhausted.session.applyInventoryUpdate(
+            LANInventoryUpdate(
+                playerID: "peer-a",
+                revision: 2,
+                snapshot: LANPlayerInventorySnapshot(
+                    playerID: "peer-a",
+                    selectedHotbarSlot: 0,
+                    slots: [LANInventorySlotSnapshot(
+                        slot: 0,
+                        itemID: pickaxeID,
+                        count: 1,
+                        damage: enhancedDurability,
+                        craftingQuality: quality
+                    )]
+                )
+            ),
+            from: "peer-a"
+        ))
+        XCTAssertEqual(
+            exhausted.session.authorizeToolStrikeIntent(
+                intent(cell: exhausted.cell, sequence: 1), from: "peer-a", in: exhausted.game.world
+            ),
+            .rejected("selected item is not a usable tool")
+        )
+    }
+
     func testHostValidationConsumesSemanticFailuresAllowsGapsAndResetsOnReconnect() {
         let fixture = makeFixture(label: "lan-tool-strike-validation")
 

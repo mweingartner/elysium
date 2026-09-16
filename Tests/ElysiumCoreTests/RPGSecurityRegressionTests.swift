@@ -12,58 +12,29 @@ final class RPGSecurityRegressionTests: XCTestCase {
         registerAllSystems()
     }
 
-    func testGameCoreOrdinarySaveUsesOverlayAndFinalizingSaveCleansDurably() throws {
+    func testGameCoreTreeCooldownSaveRoundTripsWithoutClassEffects() throws {
         let db = try makeTempDB()
         let game = GameCore(db: db)
-        game.createWorld(name: "RPG Transient Save", seedText: "50101",
+        game.createWorld(name: "Usage Tree Save", seedText: "50101",
                          mode: GameMode.survival, difficulty: 2)
         let worldID = try XCTUnwrap(game.listWorlds().first?.id)
-        let oldWorld = game.world
-        let world = makeWorld(seed: oldWorld.seed)
-        world.hooks = oldWorld.hooks
-        world.gameRules = oldWorld.gameRules
-        world.difficulty = oldWorld.difficulty
-        oldWorld.removeEntity(game.player)
-        game.player.world = world
-        game.player.setPos(0.5, 64, 0.5)
-        world.addEntity(game.player)
-        game.worlds[game.dim] = world
-        world.rpgSimulationTick = 777
-        configureRitualist(game.player, preparedSpell: "summon_servant")
-        game.player.rpg.activeUpkeeps = [RPGUpkeep(spellID: "summon_servant", ownerSequence: 4,
-                                                   remainingTicks: 100, costPerSecond: 0.5)]
-        game.player.rpg.activeCooldowns = [RPGCooldown(id: "summon_servant", remainingTicks: 80)]
-
-        let position = RPGBlockPosition(1, 64, 1)
-        world.setBlock(position.x, position.y, position.z, Int(cell(B.torch)))
-        let light = RPGTemporaryEffectDraft(
-            kind: .mageLight, ownerAuthorityID: game.player.effectiveRPGAuthorityID,
-            ownerEntityID: game.player.id, ownerSequence: 1, center: position,
-            durationTicks: 200,
-            guardedBlock: RPGGuardedTemporaryBlock(position: position, originalCell: 0,
-                                                   temporaryCell: Int(cell(B.torch))))
-        XCTAssertTrue(world.registerRPGTemporaryEffect(light))
-        XCTAssertTrue(world.registerRPGTemporaryEffect(RPGTemporaryEffectDraft(
-            kind: .ward, ownerAuthorityID: game.player.effectiveRPGAuthorityID,
-            ownerEntityID: game.player.id, ownerSequence: 2, center: RPGBlockPosition(2, 64, 2),
-            durationTicks: 200, remainingCharges: 1)))
-        let servant = Allay(world: world)
-        servant.setPos(3.5, 64, 3.5)
-        world.addEntity(servant)
-        XCTAssertTrue(world.registerRPGTemporaryEffect(RPGTemporaryEffectDraft(
-            kind: .servant, ownerAuthorityID: game.player.effectiveRPGAuthorityID,
-            ownerEntityID: game.player.id, ownerSequence: 3, center: RPGBlockPosition(3, 64, 3),
-            durationTicks: 200), entityID: servant.id))
+        game.world.rpgSimulationTick = 777
+        var trees = game.player.skillTreeState
+        trees.melee = skillTreeBranchState(primaryRank: 5, advancedRank: 5)
+        game.player.skillTreeState = trees
+        game.player.rpg.activeCooldowns = [RPGCooldown(
+            id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 80
+        )]
+        let stateBeforeSave = game.player.rpg
+        XCTAssertTrue(game.world.rpgTemporaryEffects.isEmpty)
+        XCTAssertEqual(game.requestRPGCreateCharacter(RPGCreationDraft(
+            pathID: "arcanist", starterSkillID: "spell_formula"
+        )), RPGActionFailure.classesDisabled.description)
+        XCTAssertEqual(game.player.rpg, stateBeforeSave)
 
         game.saveAndFlush(synchronous: true)
 
         XCTAssertEqual(db.getWorld(worldID)?.rpgSimulationTick, 777)
-
-        XCTAssertEqual(world.rpgTemporaryEffects.count, 3)
-        XCTAssertEqual(world.getBlock(1, 64, 1), Int(cell(B.torch)))
-        XCTAssertNotNil(world.entityById[servant.id])
-        XCTAssertEqual(game.player.rpg.activeUpkeeps.count, 1)
-        XCTAssertEqual(game.player.rpg.activeCooldowns.count, 1)
         let ordinaryPlayerRecord = try XCTUnwrap(db.getPlayer(worldID))
         let ordinaryPlayerData = try XCTUnwrap(ordinaryPlayerRecord["data"] as? [String: Any])
         let ordinaryRPGData = try XCTUnwrap(ordinaryPlayerData["rpg"] as? [String: Any])
@@ -71,22 +42,19 @@ final class RPGSecurityRegressionTests: XCTestCase {
         let ordinaryRPGBytes = try JSONSerialization.data(withJSONObject: ordinaryRPGData)
         let ordinaryDecodedRPG = try JSONDecoder().decode(RPGCharacterState.self, from: ordinaryRPGBytes)
         XCTAssertEqual(ordinaryDecodedRPG.activeCooldowns.count, 1)
+        XCTAssertNotNil(ordinaryDecodedRPG.skillTrees)
         let reloadedOrdinary = GameCore(db: db)
         reloadedOrdinary.loadWorld(worldID)
         XCTAssertEqual(reloadedOrdinary.rpgSimulationTick, 777)
         XCTAssertTrue(reloadedOrdinary.worlds.values.allSatisfy { $0.rpgSimulationTick == 777 })
-        XCTAssertEqual(reloadedOrdinary.world.getBlock(1, 64, 1), 0)
-        XCTAssertFalse(reloadedOrdinary.world.entities.contains { $0 is Allay })
-        assertPersistedRitualist(reloadedOrdinary.player.rpg)
-        XCTAssertTrue(reloadedOrdinary.player.rpg.activeUpkeeps.isEmpty)
+        XCTAssertNotNil(reloadedOrdinary.player.rpg.skillTrees)
+        XCTAssertFalse(reloadedOrdinary.player.rpg.created)
+        XCTAssertTrue(reloadedOrdinary.world.rpgTemporaryEffects.isEmpty)
         XCTAssertEqual(reloadedOrdinary.player.rpg.activeCooldowns,
-                       [RPGCooldown(id: "summon_servant", remainingTicks: 80)])
+                       [RPGCooldown(id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 80)])
 
         game.finalizeAndSave(synchronous: true)
-        XCTAssertTrue(world.rpgTemporaryEffects.isEmpty)
-        XCTAssertEqual(world.getBlock(1, 64, 1), 0)
-        XCTAssertNil(world.entityById[servant.id])
-        XCTAssertTrue(game.player.rpg.activeUpkeeps.isEmpty)
+        XCTAssertTrue(game.world.rpgTemporaryEffects.isEmpty)
         XCTAssertEqual(game.player.rpg.activeCooldowns.count, 1)
         let finalPlayerRecord = try XCTUnwrap(db.getPlayer(worldID))
         let finalPlayerData = try XCTUnwrap(finalPlayerRecord["data"] as? [String: Any])
@@ -94,21 +62,22 @@ final class RPGSecurityRegressionTests: XCTestCase {
         XCTAssertEqual((finalRPGData["activeCooldowns"] as? [Any])?.count, 1)
         let reloadedFinal = GameCore(db: db)
         reloadedFinal.loadWorld(worldID)
-        XCTAssertEqual(reloadedFinal.world.getBlock(1, 64, 1), 0)
-        XCTAssertFalse(reloadedFinal.world.entities.contains { $0 is Allay })
-        assertPersistedRitualist(reloadedFinal.player.rpg)
-        XCTAssertTrue(reloadedFinal.player.rpg.activeUpkeeps.isEmpty)
+        XCTAssertNotNil(reloadedFinal.player.rpg.skillTrees)
+        XCTAssertFalse(reloadedFinal.player.rpg.created)
         XCTAssertEqual(reloadedFinal.player.rpg.activeCooldowns,
-                       [RPGCooldown(id: "summon_servant", remainingTicks: 80)])
+                       [RPGCooldown(id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 80)])
     }
 
-    func testPersistenceOverlayPreservesLiveEffectsAndFinalizationCleansThem() throws {
+    func testRetiredClassEffectsCannotEnterUsageTreePersistence() throws {
         let world = makeWorld(seed: 501)
-        let player = makeMasteredPlayer(in: world, pathID: "arcanist", starter: "ritual_circle",
-                                        preparedSpell: "summon_servant")
-        player.rpg.activeUpkeeps = [RPGUpkeep(spellID: "summon_servant", ownerSequence: 9,
-                                              remainingTicks: 100, costPerSecond: 0.5)]
-        player.rpg.activeCooldowns = [RPGCooldown(id: "summon_servant", remainingTicks: 80)]
+        world.gameRules[RPG_CLASSES_GAME_RULE] = 0
+        let player = Player(world: world)
+        var trees = player.skillTreeState
+        trees.melee = skillTreeBranchState(primaryRank: 5, advancedRank: 5)
+        player.skillTreeState = trees
+        player.rpg.activeCooldowns = [RPGCooldown(
+            id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 80
+        )]
 
         let lightPosition = RPGBlockPosition(1, 64, 1)
         world.setBlock(lightPosition.x, lightPosition.y, lightPosition.z, Int(cell(B.torch)))
@@ -118,48 +87,33 @@ final class RPGSecurityRegressionTests: XCTestCase {
             durationTicks: 200,
             guardedBlock: RPGGuardedTemporaryBlock(position: lightPosition, originalCell: 0,
                                                    temporaryCell: Int(cell(B.torch))))
-        XCTAssertTrue(world.registerRPGTemporaryEffect(lightDraft))
-        XCTAssertTrue(world.registerRPGTemporaryEffect(RPGTemporaryEffectDraft(
-            kind: .ward, ownerAuthorityID: player.effectiveRPGAuthorityID,
-            ownerEntityID: player.id, ownerSequence: 2, center: RPGBlockPosition(2, 64, 2),
-            durationTicks: 200, remainingCharges: 1)))
-        let servant = Allay(world: world)
-        servant.setPos(3.5, 64, 3.5)
-        world.addEntity(servant)
-        let servantDraft = RPGTemporaryEffectDraft(
-            kind: .servant, ownerAuthorityID: player.effectiveRPGAuthorityID,
-            ownerEntityID: player.id, ownerSequence: 3, center: RPGBlockPosition(3, 64, 3),
-            durationTicks: 200)
-        XCTAssertTrue(world.registerRPGTemporaryEffect(servantDraft, entityID: servant.id))
+        XCTAssertFalse(world.registerRPGTemporaryEffect(lightDraft),
+                       "class-only effects must fail before they can taint persistence")
 
         let chunk = try XCTUnwrap(world.getChunk(0, 0))
         let liveBlocks = chunk.blocks
-        let liveEffects = world.rpgTemporaryEffects
         let persisted = world.rpgBlocksForPersistence(in: chunk)
         let index = chunk.index(1, 64, 1)
-        XCTAssertEqual(persisted[index], 0)
+        XCTAssertEqual(persisted[index], cell(B.torch))
         XCTAssertEqual(chunk.blocks, liveBlocks)
-        XCTAssertEqual(world.rpgTemporaryEffects, liveEffects)
+        XCTAssertTrue(world.rpgTemporaryEffects.isEmpty)
         XCTAssertEqual(world.getBlock(1, 64, 1), Int(cell(B.torch)))
-        XCTAssertTrue(world.entityById[servant.id] != nil)
-        XCTAssertEqual(world.rpgTemporaryEntityIDsForPersistence(), [servant.id])
-        XCTAssertEqual(player.rpg.activeUpkeeps.count, 1)
+        XCTAssertTrue(world.rpgTemporaryEntityIDsForPersistence().isEmpty)
 
         let savedPlayer = player.save()
         let reloaded = Player(world: world)
         reloaded.load(savedPlayer)
-        XCTAssertTrue(reloaded.rpg.activeUpkeeps.isEmpty)
+        XCTAssertNotNil(reloaded.rpg.skillTrees)
+        XCTAssertFalse(reloaded.rpg.created)
         XCTAssertEqual(reloaded.rpg.activeCooldowns,
-                       [RPGCooldown(id: "summon_servant", remainingTicks: 80)])
+                       [RPGCooldown(id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 80)])
 
         world.finalizeRPGTransientState()
         world.finalizeRPGTransientState() // idempotent terminal path
         XCTAssertTrue(world.rpgTemporaryEffects.isEmpty)
-        XCTAssertEqual(world.getBlock(1, 64, 1), 0)
-        XCTAssertNil(world.entityById[servant.id])
-        XCTAssertTrue(player.rpg.activeUpkeeps.isEmpty)
+        XCTAssertEqual(world.getBlock(1, 64, 1), Int(cell(B.torch)))
         XCTAssertEqual(player.rpg.activeCooldowns,
-                       [RPGCooldown(id: "summon_servant", remainingTicks: 80)])
+                       [RPGCooldown(id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 80)])
     }
 
     func testForgedOwnerAndEntityAuthorizationsRejectBeforeAnyMutation() {

@@ -105,7 +105,7 @@ final class RPGSemanticGuardIntegrationTests: XCTestCase {
     }
 
     @MainActor
-    func testCommittedActionableSnapshotBindsModelToExactRuntimeInputs() throws {
+    func testCommittedLegacyCreateSnapshotBindsModelToExactRuntimeInputsButCannotReplaceUsageTree() throws {
         let game = try localGame("committed-model")
         let runtime = try XCTUnwrap(game.rpgScreenRuntimeSnapshot())
         // A complete, valid draft (path + sub-class + 3 default starting skills) so the Review
@@ -132,6 +132,7 @@ final class RPGSemanticGuardIntegrationTests: XCTestCase {
             return false
         })
         let boundary = RPGSemanticActivationBoundary()
+        let before = game.player.rpg
         let capture = try XCTUnwrap(boundary.capture(
             screenInstanceID: snapshot.screenInstanceID,
             semanticRevision: snapshot.semanticRevision, descriptor: create,
@@ -141,7 +142,10 @@ final class RPGSemanticGuardIntegrationTests: XCTestCase {
             screenInstanceID: snapshot.screenInstanceID,
             semanticRevision: snapshot.semanticRevision, descriptor: create),
             .dispatched(serial: 1))
-        XCTAssertTrue(game.player.rpg.created)
+        XCTAssertEqual(game.player.rpg, before)
+        XCTAssertNotNil(game.player.rpg.skillTrees)
+        XCTAssertEqual(game.requestRPGCreateCharacter(arcanistDraft),
+                       RPGActionFailure.classesDisabled.description)
         XCTAssertEqual(game.dispatchSyntheticRPGSemanticActivation(
             capture, source: .mouse, using: boundary,
             screenInstanceID: snapshot.screenInstanceID,
@@ -150,11 +154,12 @@ final class RPGSemanticGuardIntegrationTests: XCTestCase {
     }
 
     @MainActor
-    func testFreshLocalActivationDispatchesOnceAndReplayCannotMutate() throws {
+    func testFreshLegacyCreateActivationIsConsumedButCannotMutateUsageTree() throws {
         let game = try localGame("fresh")
         let command = RPGSemanticCommand.create(arcanistDraft)
         let operation = descriptor(command)
         let boundary = RPGSemanticActivationBoundary()
+        let before = game.player.rpg
         let capture = try XCTUnwrap(game.captureSyntheticRPGSemanticActivation(
             using: boundary, screenInstanceID: 11, semanticRevision: 17,
             descriptor: operation
@@ -164,7 +169,9 @@ final class RPGSemanticGuardIntegrationTests: XCTestCase {
             capture, source: .keyboard, using: boundary,
             screenInstanceID: 11, semanticRevision: 17, descriptor: operation
         ), .dispatched(serial: 1))
-        XCTAssertTrue(game.player.rpg.created)
+        XCTAssertEqual(game.player.rpg, before)
+        XCTAssertEqual(game.requestRPGCreateCharacter(arcanistDraft),
+                       RPGActionFailure.classesDisabled.description)
         let committed = game.player.rpg
         XCTAssertEqual(game.dispatchSyntheticRPGSemanticActivation(
             capture, source: .accessibility, using: boundary,
@@ -200,7 +207,7 @@ final class RPGSemanticGuardIntegrationTests: XCTestCase {
             let capture = try XCTUnwrap(game.captureSyntheticRPGSemanticActivation(
                 using: boundary, screenInstanceID: 1, semanticRevision: 1,
                 descriptor: operation))
-            game.setGameRule(RPG_CLASSES_GAME_RULE, 0)
+            game.setGameRule(RPG_CLASSES_GAME_RULE, 1)
             XCTAssertEqual(game.dispatchSyntheticRPGSemanticActivation(
                 capture, source: .controller, using: boundary,
                 screenInstanceID: 1, semanticRevision: 1, descriptor: operation),
@@ -297,7 +304,11 @@ final class RPGSemanticGuardIntegrationTests: XCTestCase {
 
     func testProtocol5DeniesEveryLegacyAuthoritativeAndSlotEntryBeforeMutation() throws {
         let game = try lanGame("all-operations")
-        XCTAssertNil(game.player.createRPGCharacter(arcanistDraft))
+        // Normalize the persisted usage-tree ledger before establishing the
+        // no-mutation baseline; LAN decode fixtures intentionally begin with
+        // the compact empty recipe ledger.
+        game.player.skillTreeState = game.player.skillTreeState
+        XCTAssertEqual(game.player.createRPGCharacter(arcanistDraft), .classesDisabled)
         let beforeRPG = game.player.rpg
         let beforeInventory = game.player.inventory
         let beforeCell = game.world.getBlock(0, 64, 0)

@@ -78,7 +78,10 @@ public struct LANPeerRecordSnapshot: Equatable {
         self.lifecycle = lifecycle
         self.permissions = permissions
         self.playerState = playerState
-        self.rpg = rpg.map(repairRPGCharacterState)
+        // Persisted/replayed LAN peer envelopes cross into host authority at
+        // this snapshot boundary.  Convert any class-only record once so an
+        // ordinary no-classes world retains its usage trees on reconnect.
+        self.rpg = rpg.map(rpgMigrateLegacyStateToSkillTrees)
         self.inventory = inventory
         self.inventoryRevision = inventoryRevision
         self.lastAckTick = lastAckTick
@@ -360,7 +363,14 @@ public final class LANRemotePlayerEntity: LivingEntity {
         while remaining > 0 {
             let count = min(remaining, maxStack)
             pendingAuthoritativePickupItems.append(LANInventorySlotSnapshot(
-                slot: 0, itemID: itemID, count: count, damage: stack.damage, label: stack.label
+                slot: 0,
+                itemID: itemID,
+                count: count,
+                damage: stack.damage,
+                label: stack.label,
+                craftingQuality: stack.data.craftingQuality,
+                enchantments: stack.ench.map(LANItemEnchantmentSnapshot.init),
+                potion: stack.data.potion
             ))
             remaining -= count
         }
@@ -415,7 +425,10 @@ public final class LANRemotePlayerEntity: LivingEntity {
                             itemID: itemID,
                             count: count,
                             damage: item.stack.damage,
-                            label: item.stack.label
+                            label: item.stack.label,
+                            craftingQuality: item.stack.data.craftingQuality,
+                            enchantments: item.stack.ench.map(LANItemEnchantmentSnapshot.init),
+                            potion: item.stack.data.potion
                         ))
                         remaining -= count
                     }

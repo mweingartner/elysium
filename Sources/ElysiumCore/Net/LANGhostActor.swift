@@ -13,6 +13,10 @@ import Foundation
 public struct LANGhostBreakOutcome: Equatable {
     public var broke: Bool
     public var inventory: LANPlayerInventorySnapshot
+    /// The detached actor runs the real harvest path, which may advance a
+    /// usage tree.  The transport persists this only after a successful
+    /// world mutation and publishes the repaired state to the guest.
+    public var rpg: RPGCharacterState? = nil
     public var spilledContainerAt: LANBlockPosition?
     public var reason: String?
 }
@@ -28,6 +32,20 @@ public struct LANGhostPlaceOutcome: Equatable {
 public struct LANGhostAttackOutcome: Equatable {
     public var attacked: Bool
     public var inventory: LANPlayerInventorySnapshot
+    /// A successful sword hit advances melee usage XP on the authoritative
+    /// ghost.  Return its envelope with the inventory delta so callers cannot
+    /// accidentally discard the progression mutation.
+    public var rpg: RPGCharacterState? = nil
+    public var reason: String?
+}
+
+/// Outcome of a host-timed ordinary bow release. The returned inventory includes arrow
+/// consumption/bow durability from the real `shootBow` path; ranged usage XP is asynchronous
+/// and is delivered through the arrow's runtime callback only after real successful damage.
+public struct LANGhostBowOutcome: Equatable {
+    public var fired: Bool
+    public var inventory: LANPlayerInventorySnapshot
+    public var rpg: RPGCharacterState?
     public var reason: String?
 }
 
@@ -168,7 +186,9 @@ public final class LANHostGhostRegistry {
         player.rpgAuthorityID = "lan:\(record.playerID)"
         player.scriptEventActorIdentity = .lanPlayer(peerID: peerID)
         if let state = record.playerState {
-            player.rpg = repairRPGCharacterState(record.rpg ?? state.rpg ?? .uncreated())
+            player.rpg = rpgMigrateLegacyStateToSkillTrees(
+                record.rpg ?? state.rpg ?? .uncreated()
+            )
             player.applyRPGDerivedStats()
             player.setPos(state.x, state.y, state.z)
             player.yaw = state.yaw
@@ -178,7 +198,7 @@ public final class LANHostGhostRegistry {
             player.hunger = max(0, min(20, state.hunger))
             player.selectedSlot = max(0, min(8, state.selectedHotbarSlot))
         } else {
-            player.rpg = repairRPGCharacterState(record.rpg ?? .uncreated())
+            player.rpg = rpgMigrateLegacyStateToSkillTrees(record.rpg ?? .uncreated())
             player.applyRPGDerivedStats()
         }
         if let inventory = record.inventory, let materialized = makeInventoryForGhost(inventory) {
@@ -232,6 +252,7 @@ public final class LANHostGhostRegistry {
         return LANGhostBreakOutcome(
             broke: true,
             inventory: makeLANInventorySnapshot(ghost, playerID: cleanID),
+            rpg: ghost.rpg,
             spilledContainerAt: spilled
         )
     }
@@ -317,7 +338,61 @@ public final class LANHostGhostRegistry {
 
         let ghost = ghost(for: cleanID, record: record, in: world)
         playerAttack(ghost, target)
-        return LANGhostAttackOutcome(attacked: true, inventory: makeLANInventorySnapshot(ghost, playerID: cleanID))
+        return LANGhostAttackOutcome(
+            attacked: true,
+            inventory: makeLANInventorySnapshot(ghost, playerID: cleanID),
+            rpg: ghost.rpg
+        )
+    }
+
+    /// Fires a host-authenticated ordinary bow through the real combat routine. `chargeTicks`
+    /// must have come from `LANMultiplayerHostSession.authorizeBowIntent`; this method never
+    /// accepts a client-provided projectile, damage value, ammunition type, or target. The arrow
+    /// callback records ranged XP only when the real projectile later damages a valid target.
+    public func applyBow(
+        for playerID: String,
+        chargeTicks: Int,
+        world: World,
+        session: LANMultiplayerHostSession,
+        onRangedUsageXP: @escaping (RPGCharacterState) -> Void
+    ) -> LANGhostBowOutcome {
+        let cleanID = String(playerID.prefix(128))
+        guard (0...20).contains(chargeTicks) else {
+            return LANGhostBowOutcome(
+                fired: false, inventory: emptyInventory(cleanID), rpg: nil,
+                reason: "invalid bow charge"
+            )
+        }
+        guard let record = session.peerRecord(playerID: cleanID) else {
+            return LANGhostBowOutcome(
+                fired: false, inventory: emptyInventory(cleanID), rpg: nil,
+                reason: "unknown player"
+            )
+        }
+        guard record.playerState != nil else {
+            return LANGhostBowOutcome(
+                fired: false, inventory: record.inventory ?? emptyInventory(cleanID), rpg: record.rpg,
+                reason: "player state unavailable"
+            )
+        }
+        let ghost = ghost(for: cleanID, record: record, in: world)
+        guard let arrow = shootBow(ghost, chargeTicks) else {
+            return LANGhostBowOutcome(
+                fired: false, inventory: makeLANInventorySnapshot(ghost, playerID: cleanID), rpg: ghost.rpg,
+                reason: "bow could not fire"
+            )
+        }
+        // Mirrors LAN melee's PvE-only authority boundary. The real bow routine still supplies
+        // all weapon/ammo/enchantment behavior; only player-proxy targeting is suppressed.
+        arrow.lanPvEOnly = true
+        arrow.onSkillTreeRangedHit = { player in
+            onRangedUsageXP(player.rpg)
+        }
+        return LANGhostBowOutcome(
+            fired: true,
+            inventory: makeLANInventorySnapshot(ghost, playerID: cleanID),
+            rpg: ghost.rpg
+        )
     }
 
     /// Authoritatively resolves a toss: removes `count` items from the given inventory slot and
@@ -360,7 +435,10 @@ public final class LANHostGhostRegistry {
                     itemID: existingSlot.itemID,
                     count: remaining,
                     damage: existingSlot.damage,
-                    label: existingSlot.label
+                    label: existingSlot.label,
+                    craftingQuality: existingSlot.craftingQuality,
+                    enchantments: existingSlot.enchantments,
+                    potion: existingSlot.potion
                 )
             }
         }
@@ -373,7 +451,17 @@ public final class LANHostGhostRegistry {
             xpProgress: inventory.xpProgress
         )
 
-        let stack = ItemStack(existingSlot.itemID, tossCount, damage: existingSlot.damage, label: existingSlot.label)
+        let stack = ItemStack(
+            existingSlot.itemID,
+            tossCount,
+            damage: existingSlot.damage,
+            ench: existingSlot.enchantments.map(\.enchantment),
+            label: existingSlot.label,
+            data: makeLANStackData(
+                craftingQuality: existingSlot.craftingQuality,
+                potion: existingSlot.potion
+            )
+        )
         let eyeY = playerState.y + PLAYER_EYE
         let forwardX = -detSin(playerState.yaw) * 0.3
         let forwardZ = detCos(playerState.yaw) * 0.3
@@ -404,7 +492,17 @@ private func makeInventoryForGhost(_ snapshot: LANPlayerInventorySnapshot) -> [I
         guard slot.slot >= 0, slot.slot < LAN_PLAYER_INVENTORY_SLOT_COUNT_FOR_GHOST,
               slot.itemID >= 0, slot.itemID < itemDefs.count, slot.count > 0
         else { continue }
-        inventory[slot.slot] = ItemStack(slot.itemID, slot.count, damage: slot.damage, label: slot.label)
+        inventory[slot.slot] = ItemStack(
+            slot.itemID,
+            slot.count,
+            damage: slot.damage,
+            ench: slot.enchantments.map(\.enchantment),
+            label: slot.label,
+            data: makeLANStackData(
+                craftingQuality: slot.craftingQuality,
+                potion: slot.potion
+            )
+        )
     }
     return inventory
 }
@@ -423,7 +521,10 @@ private func decrementOneMatchingItem(in slots: [LANInventorySlotSnapshot], item
             itemID: existing.itemID,
             count: existing.count - 1,
             damage: existing.damage,
-            label: existing.label
+            label: existing.label,
+            craftingQuality: existing.craftingQuality,
+            enchantments: existing.enchantments,
+            potion: existing.potion
         )
     } else {
         out.remove(at: index)
@@ -438,7 +539,17 @@ private func decrementOneMatchingItem(in slots: [LANInventorySlotSnapshot], item
 public func spawnPlayerDeathDrops(inventory: LANPlayerInventorySnapshot, at x: Double, _ y: Double, _ z: Double, in world: World) {
     for slot in inventory.slots.sorted(by: { $0.slot < $1.slot }) where slot.count > 0 {
         guard slot.itemID >= 0, slot.itemID < itemDefs.count else { continue }
-        let stack = ItemStack(slot.itemID, slot.count, damage: slot.damage, label: slot.label)
+        let stack = ItemStack(
+            slot.itemID,
+            slot.count,
+            damage: slot.damage,
+            ench: slot.enchantments.map(\.enchantment),
+            label: slot.label,
+            data: makeLANStackData(
+                craftingQuality: slot.craftingQuality,
+                potion: slot.potion
+            )
+        )
         spawnItem(world, x, y + 0.5, z, stack)
     }
     let xp = min(inventory.xpLevel * 7, 100)

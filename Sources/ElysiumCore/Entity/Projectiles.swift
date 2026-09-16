@@ -77,6 +77,10 @@ open class Projectile: Entity {
         for e in world.getEntitiesNear(x, y, z, speed + 2) {
             guard let ent = e as? Entity else { continue }
             if ent === self || (ent === owner && age < 5) || ent.dead { continue }
+            // Host-fired LAN bows intentionally share ordinary projectile physics but never
+            // target a player proxy.  Keep this at collision selection as well as ArrowEntity's
+            // direct-hit guard so the projectile can continue past a remote player to PvE mobs.
+            if let arrow = self as? ArrowEntity, arrow.lanPvEOnly, ent.isPlayer { continue }
             if !(ent is LivingEntity) && ent.type != "end_crystal" { continue }
             let bb = ent.bb()
             // ray vs box
@@ -125,6 +129,17 @@ public final class ArrowEntity: Projectile {
     public var stuckTime = 0
     public var fromCrossbow = false
     public var piercingLeft = 0
+    /// Runtime-only host policy for an ordinary LAN guest bow. LAN melee already rejects PvP;
+    /// this keeps its projectile counterpart from damaging local or remote player entities.
+    public var lanPvEOnly = false
+    /// Marks an ordinary bow projectile whose successful damage should award
+    /// usage-based ranged XP to its player owner.  It is runtime-only, like
+    /// projectile velocity and owner references.
+    public var skillTreeRangedShot = false
+    /// Runtime-only observer for an authoritative owner whose progression must be persisted
+    /// outside the entity graph. The LAN host attaches this to ghost-fired arrows; ordinary
+    /// local arrows leave it nil. It fires only after a successful, qualifying ranged-XP award.
+    public var onSkillTreeRangedHit: ((Player) -> Void)?
 
     public override init(world: World) {
         super.init(world: world)
@@ -132,12 +147,28 @@ public final class ArrowEntity: Projectile {
     }
 
     public override func onHitEntity(_ e: Entity) {
+        // Defend direct callers as well as Projectile.findEntityHit. A LAN-authoritative arrow
+        // must never become a PvP damage path merely because a test or future route invokes the
+        // entity hook without the normal collision query.
+        if lanPvEOnly && e.isPlayer { return }
         let speed = (vx * vx + vy * vy + vz * vz).squareRoot()
         var dmg = (speed * damage).rounded(.up)
         if critical { dmg += (gameRng.nextFloat() * (dmg / 2 + 1)).rounded(.down) }
         if flame { e.fireTicks = max(e.fireTicks, 100) }
+        // Determine whether this shot qualifies before damage resolves. A
+        // lethal arrow sets `dead` during `hurt`, and checking target
+        // eligibility afterwards would silently skip XP for a valid kill.
+        let awardsRangedUsageXP = skillTreeRangedShot
+            && (owner as? Player) != nil
+            && skillTreeIsUsageCombatTarget(e)
         let hurt = e.hurt(dmg, "projectile", owner)
         if hurt {
+            if awardsRangedUsageXP, let player = owner as? Player {
+                let report = skillTreeAwardRangedHit(player, successfulBowDamage: true)
+                if report.awardedXP > 0 {
+                    onSkillTreeRangedHit?(player)
+                }
+            }
             if punchLevel > 0, let liv = e as? LivingEntity {
                 var d = (vx * vx + vz * vz).squareRoot()
                 if d == 0 { d = 1 }

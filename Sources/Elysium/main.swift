@@ -123,7 +123,7 @@ final class HostBridge: GameHost {
             game.resetExpandedMapCenterToPlayer()
             ui.open(MapScreen(), game)
         case "rpg":
-            ui.open(RPGCharacterScreen(), game)
+            ui.open(makeSkillTreeScreen(), game)
         case "beacon":
             if let be = data?.be { ui.open(BeaconScreen(be), game) }
         case "sign":
@@ -862,14 +862,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         textView.undoManager?.redo()
     }
 
-    /// Native menu entry for the same guarded world command used by the configurable K binding
-    /// and controller. It never opens the workspace around class-rule, authority, or screen-state
-    /// checks; the semantic boundary remains the sole route into the character screen.
+    /// Native menu entry for the usage-based Skills workspace. K and controller activation still
+    /// flow through the world semantic boundary; the menu only presents the same read-only tree.
     @objc @MainActor func openCharacterWindow(_ sender: Any?) {
         _ = sender
-        if ui.current() is RPGCharacterScreen {
-            window.childWindows?.first(where: { $0.title == "Create Character" || $0.title == "Character" })?
-                .makeKeyAndOrderFront(nil)
+        if ui.current() is SkillTreeScreen {
+            window.makeKeyAndOrderFront(nil)
             return
         }
         _ = ui.dispatchRPGWorldSemanticCommand(.openCharacter, source: .keyboard, game: game)
@@ -877,8 +875,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         guard menuItem.action == #selector(openCharacterWindow(_:)) else { return true }
-        guard game?.hasWorld() == true, game.player?.rpgClassesEnabled() == true else { return false }
-        return !ui.hasScreen() || ui.current() is RPGCharacterScreen
+        guard game?.hasWorld() == true, game.player?.rpg.skillTrees != nil else { return false }
+        return !ui.hasScreen() || ui.current() is SkillTreeScreen
     }
 
     // MARK: - native SwiftUI script editor (Stage A)
@@ -1332,10 +1330,10 @@ private func runOrdinaryElysiumApplication() {
     let gameItem = NSMenuItem(title: "Game", action: nil, keyEquivalent: "")
     let gameMenu = NSMenu(title: "Game")
     let characterItem = NSMenuItem(
-        title: "Character…", action: #selector(AppDelegate.openCharacterWindow(_:)),
+        title: "Skills…", action: #selector(AppDelegate.openCharacterWindow(_:)),
         keyEquivalent: "")
     characterItem.target = delegate
-    characterItem.toolTip = "Open the native character workspace (K while playing)"
+    characterItem.toolTip = "Open your usage-based skill trees (K while playing)"
     gameMenu.addItem(characterItem)
     gameItem.submenu = gameMenu
     mainMenu.addItem(gameItem)

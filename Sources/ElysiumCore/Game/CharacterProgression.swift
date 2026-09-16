@@ -1,6 +1,9 @@
 import Foundation
 
-public let RPG_STATE_CURRENT_VERSION = 3
+/// Version four embeds the usage-based skill trees in the long-lived player
+/// envelope.  The envelope name remains for save/LAN compatibility; class
+/// paths are migrated out of it at the Player boundary.
+public let RPG_STATE_CURRENT_VERSION = 4
 public let RPG_CLASSES_GAME_RULE = "rpgClasses"
 public let RPG_LEVEL_CAP = 20
 public let RPG_MAX_PREPARED_SPELLS = 6
@@ -974,6 +977,7 @@ public struct RPGCharacterState: Codable, Equatable {
         case authorityRevision
         case xpLedger
         case migrationNoticePending
+        case skillTrees
     }
 
     public var version: Int
@@ -1000,6 +1004,11 @@ public struct RPGCharacterState: Codable, Equatable {
     public var kitGrantID: String?
     public var authorityRevision: Int
     public var xpLedger: RPGXPLedger
+    /// The authoritative usage-based advancement state. `nil` is retained
+    /// only for legacy class records until Player load translates them once.
+    /// It is deliberately optional so old class-only test fixtures and old
+    /// protocol payloads remain distinguishable from a new empty tree.
+    public var skillTrees: SkillTreeState?
     /// True exactly once, immediately after a legacy (version <= 2) save has
     /// been repaired into v3, until the one-time migration notice has been
     /// surfaced to the player.
@@ -1027,6 +1036,7 @@ public struct RPGCharacterState: Codable, Equatable {
                 kitGrantID: String? = nil,
                 authorityRevision: Int = 0,
                 xpLedger: RPGXPLedger = RPGXPLedger(),
+                skillTrees: SkillTreeState? = nil,
                 migrationNoticePending: Bool = false) {
         self.version = version
         self.created = created
@@ -1050,6 +1060,7 @@ public struct RPGCharacterState: Codable, Equatable {
         self.kitGrantID = kitGrantID
         self.authorityRevision = authorityRevision
         self.xpLedger = xpLedger
+        self.skillTrees = skillTrees
         self.migrationNoticePending = migrationNoticePending
     }
 
@@ -1090,6 +1101,7 @@ public struct RPGCharacterState: Codable, Equatable {
             kitGrantID: decodeBoundedID(from: c, key: .kitGrantID),
             authorityRevision: try c.decodeIfPresent(Int.self, forKey: .authorityRevision) ?? 0,
             xpLedger: try c.decodeIfPresent(RPGXPLedger.self, forKey: .xpLedger) ?? RPGXPLedger(),
+            skillTrees: try? c.decodeIfPresent(SkillTreeState.self, forKey: .skillTrees),
             migrationNoticePending: try c.decodeIfPresent(Bool.self, forKey: .migrationNoticePending) ?? false
         )
     }
@@ -1133,6 +1145,10 @@ public struct RPGCharacterState: Codable, Equatable {
         try c.encodeIfPresent(kitGrantID.flatMap { rpgIsBoundedID($0) ? $0 : nil }, forKey: .kitGrantID)
         try c.encode(max(0, min(RPG_MAX_COUNTER, authorityRevision)), forKey: .authorityRevision)
         try c.encode(xpLedger, forKey: .xpLedger)
+        if let skillTrees {
+            try c.encode(skillTreeValidatedState(skillTrees, recipeCount: skillTreeRecipeCountForValidation()),
+                         forKey: .skillTrees)
+        }
         if migrationNoticePending {
             try c.encode(true, forKey: .migrationNoticePending)
         }
@@ -1145,6 +1161,17 @@ public struct RPGCharacterState: Codable, Equatable {
                           selectedPreparedSpellID: nil,
                           selectedPreparedActionID: nil,
                           fatigue: 0)
+    }
+
+    /// New worlds start with the skill-tree payload immediately, without a
+    /// character-creation gate. `created` stays false so retired class-only
+    /// systems cannot accidentally grant legacy effects.
+    public static func skillTreeProgression() -> RPGCharacterState {
+        RPGCharacterState(created: false, pathID: "", starterSkillID: "", specializationBranchID: "",
+                          startingSkillIDs: [], xp: 0, level: 0,
+                          skillRanks: [:], preparedSkillIDs: [], knownSpellIDs: [], preparedSpellIDs: [],
+                          selectedPreparedSpellID: nil, selectedPreparedActionID: nil,
+                          fatigue: 0, skillTrees: .untrained())
     }
 }
 
@@ -1267,11 +1294,116 @@ public extension GameCore {
         "Character changes are unavailable in this LAN session"
     }
 
+    /// Routes a usage-tree action without ever mutating a LAN client's mirror.
+    /// The established `.useSkill` wire intent is intentionally reused: its
+    /// bounded `skillID` is the closed `SkillTreeActionID` raw value, and the
+    /// host remains the only side that resolves a target, consumes equipment,
+    /// starts a cooldown, or advances the action sequence.
+    private func requestSkillTreeActionOutcome(
+        _ actionID: SkillTreeActionID
+    ) -> (accepted: Bool, message: String) {
+        guard let player else { return (false, "No player") }
+        let state = repairRPGCharacterState(player.rpg)
+        guard let rawTrees = state.skillTrees else {
+            return (false, "Skill trees are unavailable")
+        }
+        let trees = skillTreeValidatedState(rawTrees, recipeCount: skillTreeRecipeCountForValidation())
+        let descriptor = skillTreeActionDescriptor(actionID)
+        guard skillTreeActionIsUnlocked(actionID, in: trees) else {
+            return (false, "\(descriptor.displayName) is still locked")
+        }
+        guard !state.activeCooldowns.contains(where: {
+            $0.id == actionID.rawValue && $0.remainingTicks > 0
+        }) else {
+            return (false, RPGActionFailure.skillOnCooldown(actionID.rawValue).description)
+        }
+        guard let nextSequence = rpgNextActionSequence(state) else {
+            return (false, "RPG action sequence is exhausted")
+        }
+
+        if isLANClientWorld {
+            guard let lanRPGIntentHandler else {
+                return (false, "Skill-tree host is unavailable")
+            }
+            lanRPGIntentHandler(LANRPGIntent(action: .useSkill, skillID: actionID.rawValue,
+                                              actionSequence: nextSequence))
+            return (true, "Using \(descriptor.displayName)")
+        }
+
+        switch skillTreeExecuteAction(player, id: actionID, authorization: .local(for: player)) {
+        case .success(let result): return (true, result.message)
+        case .failure(let error): return (false, error.description)
+        }
+    }
+
+    /// Presentation-facing action seam used by the skill-tree screen.  A
+    /// `true` result means the host accepted the request for execution (or a
+    /// local authoritative world committed it); LAN clients never speculate a
+    /// combat mutation here.
+    @discardableResult
+    func requestSkillTreeAction(_ actionID: SkillTreeActionID) -> Bool {
+        requestSkillTreeActionOutcome(actionID).accepted
+    }
+
+    /// Narrow LAN world-input bridge for the usage-tree fast bar.  The older
+    /// synthetic RPG boundary intentionally rejects every client-side class
+    /// operation because it was built around mutable local character state.
+    /// These three tree operations are different: cycling is presentation-only
+    /// and using an action emits the closed, host-validated `.useSkill` intent
+    /// without mutating the mirror, sequence, cooldown, or inventory locally.
+    /// Nothing else in `RPGSemanticCommand` may use this bridge.
+    @MainActor
+    @discardableResult
+    func dispatchLANUsageTreeWorldSemanticCommand(_ command: RPGSemanticCommand) -> Bool {
+        guard isLANClientWorld, player?.rpg.skillTrees != nil else { return false }
+        let message: String
+        switch command {
+        case .cyclePreparedAction:
+            message = requestRPGCyclePreparedAction()
+        case .useSelectedAction:
+            message = requestRPGUseSelectedAction()
+        case .useQuickSlot(let slot):
+            message = requestRPGUseActionQuickSlot(slot)
+        default:
+            return false
+        }
+        host?.showActionBar(message, 80)
+        return true
+    }
+
+    /// Read-only UI projection for the usage-tree workspace.  It deliberately
+    /// returns no synthetic tree for a legacy envelope, so callers cannot make
+    /// a class record look like it is already migrated.
+    func skillTreeStateSnapshot() -> SkillTreeState? {
+        guard let player else { return nil }
+        let state = repairRPGCharacterState(player.rpg)
+        guard state.skillTrees != nil else { return nil }
+        return rpgSkillTreeState(state)
+    }
+
+    /// One-based fastbar position for an unlocked usage-tree action.  The
+    /// projection is pure: on LAN clients it uses the same auto-fill policy as
+    /// the HUD without creating a writable local preference row or mutating a
+    /// mirror state.
+    func skillTreeQuickSlot(for actionID: SkillTreeActionID) -> Int? {
+        guard let player else { return nil }
+        let state = repairRPGCharacterState(player.rpg)
+        guard state.skillTrees != nil else { return nil }
+        let preferences = rpgQuickSlotPreferences ?? .empty
+        return rpgActionQuickSlotActions(state, preferences: preferences)
+            .firstIndex { $0?.kind == .skill && $0?.id == actionID.rawValue }
+            .map { $0 + 1 }
+    }
+
     @discardableResult
     func requestRPGCreateCharacter(_ draft: RPGCreationDraft) -> String {
         guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
-        guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
+        // New and migrated saves always carry a tree. Never let a stale legacy
+        // world rule resurrect an exclusive class on top of that progression.
+        guard player.rpg.skillTrees == nil, player.rpgClassesEnabled() else {
+            return RPGActionFailure.classesDisabled.description
+        }
         if let error = player.createRPGCharacter(draft) {
             return error.description
         }
@@ -1377,7 +1509,9 @@ public extension GameCore {
     func requestRPGAssignPreparedActionToQuickSlot(kind: RPGPreparedActionKind, id: String, slot: Int) -> String {
         guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
-        guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
+        guard player.rpg.skillTrees != nil || player.rpgClassesEnabled() else {
+            return RPGActionFailure.classesDisabled.description
+        }
         guard let preferences = rpgQuickSlotPreferences, rpgLocalPreferenceWritable else {
             return "RPG slots are unavailable"
         }
@@ -1403,7 +1537,9 @@ public extension GameCore {
     func requestRPGClearActionQuickSlot(_ slot: Int) -> String {
         guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
-        guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
+        guard player.rpg.skillTrees != nil || player.rpgClassesEnabled() else {
+            return RPGActionFailure.classesDisabled.description
+        }
         guard let preferences = rpgQuickSlotPreferences, rpgLocalPreferenceWritable else {
             return "RPG slots are unavailable"
         }
@@ -1423,7 +1559,9 @@ public extension GameCore {
     func requestRPGMoveActionQuickSlot(from: Int, to: Int) -> String {
         guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
-        guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
+        guard player.rpg.skillTrees != nil || player.rpgClassesEnabled() else {
+            return RPGActionFailure.classesDisabled.description
+        }
         guard let preferences = rpgQuickSlotPreferences, rpgLocalPreferenceWritable else {
             return "RPG slots are unavailable"
         }
@@ -1461,8 +1599,20 @@ public extension GameCore {
 
     @discardableResult
     func requestRPGCyclePreparedAction(direction: Int = 1) -> String {
-        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
+        if player.rpg.skillTrees != nil {
+            switch rpgCyclePreparedAction(
+                player,
+                direction: rpgNormalizedCycleDirection(direction),
+                presentationOnly: isLANClientWorld
+            ) {
+            case .noPreparedActions: return "No unlocked skill actions"
+            case .authorityExhausted: return RPGProgressionError.authorityExhausted.description
+            case .noOp(let action): return "Selected \(action.displayName)"
+            case .selected(let action): return "Selected \(action.displayName)"
+            }
+        }
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
         let step = rpgNormalizedCycleDirection(direction)
         let action: RPGPreparedAction
@@ -1515,10 +1665,18 @@ public extension GameCore {
 
     @discardableResult
     func requestRPGUseSelectedAction() -> String {
-        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
+        let state = repairRPGCharacterState(player.rpg)
+        if state.skillTrees != nil {
+            guard let action = rpgSelectedPreparedAction(state), action.kind == .skill,
+                  let actionID = SkillTreeActionID(rawValue: action.id) else {
+                return RPGActionFailure.actionNotPrepared.description
+            }
+            return requestSkillTreeActionOutcome(actionID).message
+        }
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
-        player.rpg = repairRPGCharacterState(player.rpg)
+        player.rpg = state
         guard let action = rpgSelectedPreparedAction(player.rpg) else {
             return RPGActionFailure.actionNotPrepared.description
         }
@@ -1550,10 +1708,27 @@ public extension GameCore {
 
     @discardableResult
     func requestRPGUseActionQuickSlot(_ slot: Int) -> String {
-        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard let player else { return "No player" }
+        let state = repairRPGCharacterState(player.rpg)
+        if state.skillTrees != nil {
+            guard slot >= 0 && slot < RPG_ACTION_QUICK_SLOT_COUNT else {
+                return RPGActionFailure.actionNotPrepared.description
+            }
+            // LAN clients deliberately own no persistent RPG preference row.
+            // The pure quick-slot projection fills its first empty slots with
+            // unlocked actions, which gives the client the same deterministic
+            // fastbar mapping without granting it a writable mirror state.
+            let preferences = rpgQuickSlotPreferences ?? .empty
+            let actions = rpgActionQuickSlotActions(state, preferences: preferences)
+            guard slot < actions.count, let action = actions[slot], action.kind == .skill,
+                  let actionID = SkillTreeActionID(rawValue: action.id) else {
+                return "RPG slot \(slot + 1) is empty"
+            }
+            return requestSkillTreeActionOutcome(actionID).message
+        }
+        guard !isLANClientWorld else { return protocol5RPGSemanticDenial }
         guard player.rpgClassesEnabled() else { return RPGActionFailure.classesDisabled.description }
-        player.rpg = repairRPGCharacterState(player.rpg)
+        player.rpg = state
         guard slot >= 0 && slot < RPG_ACTION_QUICK_SLOT_COUNT else {
             return RPGActionFailure.actionNotPrepared.description
         }
@@ -1570,7 +1745,21 @@ public extension GameCore {
 
     func applyLANRPGState(_ state: RPGCharacterState?) {
         guard isLANClientWorld, let player, let state else { return }
-        player.rpg = repairRPGCharacterState(state)
+        // Selection of a usage-tree action is client presentation state; it
+        // is never a host authority mutation and is not included in the
+        // action intent.  Preserve a still-unlocked local selection when a
+        // host snapshot naturally has none, so O/controller selection is not
+        // erased by the response to the action it initiated.
+        let localSelection = player.rpg.selectedPreparedActionID
+        var repaired = repairRPGCharacterState(state)
+        if repaired.skillTrees != nil, repaired.selectedPreparedActionID == nil,
+           let token = localSelection,
+           let parsed = rpgParsePreparedActionToken(token), parsed.kind == .skill,
+           let actionID = SkillTreeActionID(rawValue: parsed.id),
+           skillTreeActionIsUnlocked(actionID, in: rpgSkillTreeState(repaired)) {
+            repaired.selectedPreparedActionID = rpgPreparedActionToken(kind: .skill, id: actionID.rawValue)
+        }
+        player.rpg = repairRPGCharacterState(repaired)
         player.applyRPGDerivedStats()
     }
 }
@@ -2272,6 +2461,28 @@ private func sortSpellIDs(_ ids: [String]) -> [String] {
 }
 
 public func rpgPreparedActions(_ state: RPGCharacterState) -> [RPGPreparedAction] {
+    if let rawTrees = state.skillTrees {
+        let trees = skillTreeValidatedState(rawTrees, recipeCount: skillTreeRecipeCountForValidation())
+        return skillTreeUnlockedActions(in: trees).map { descriptor in
+            let cooldown = state.activeCooldowns.first { $0.id == descriptor.id.rawValue }?.remainingTicks ?? 0
+            return RPGPreparedAction(
+                // Reuse the established skill token namespace for fastbar and
+                // LAN compatibility. `rpgExecuteAction` recognizes these
+                // closed IDs before legacy skill lookup.
+                kind: .skill,
+                id: descriptor.id.rawValue,
+                displayName: descriptor.displayName,
+                iconAssetID: descriptor.iconAssetID,
+                fatigueCost: 0,
+                cooldownTicks: descriptor.cooldownTicks,
+                cooldownRemainingTicks: cooldown,
+                available: cooldown == 0,
+                statusText: cooldown > 0
+                    ? "\(max(1, Int((Double(cooldown) / 20.0).rounded(.up))))s"
+                    : "Ready"
+            )
+        }
+    }
     guard state.created else { return [] }
     var out: [RPGPreparedAction] = []
     for skillID in state.preparedSkillIDs {
@@ -2553,9 +2764,117 @@ public func rpgCreateCharacter(_ draft: RPGCreationDraft) -> Result<RPGCharacter
     return .success(repairRPGCharacterState(state))
 }
 
+/// The crafting registry is append-only. Before it has completed registration,
+/// keep the bounded persisted prefix rather than truncating a save merely
+/// because an early bootstrap code path asked for a repair.
+private func skillTreeRecipeCountForValidation() -> Int {
+    registeredCraftingRecipeCount ?? craftingRecipes.count
+}
+
+/// Returns a normalized usage tree even for an old class-only envelope. This
+/// is read-only and intentionally does not perform the one-time migration.
+public func rpgSkillTreeState(_ state: RPGCharacterState) -> SkillTreeState {
+    skillTreeValidatedState(state.skillTrees ?? .untrained(),
+                            recipeCount: skillTreeRecipeCountForValidation())
+}
+
+private func repairSkillTreeRPGCharacterState(_ raw: RPGCharacterState) -> RPGCharacterState {
+    var state = raw
+    state.version = RPG_STATE_CURRENT_VERSION
+    // Class fields are historical decode-only data once this payload exists.
+    // Keep `created` false so no remaining class-only consumer can become
+    // active through a partially migrated state.
+    state.created = false
+    state.pathID = ""
+    state.starterSkillID = ""
+    state.specializationBranchID = ""
+    state.startingSkillIDs = []
+    state.xp = 0
+    state.level = 0
+    state.skillRanks = [:]
+    state.preparedSkillIDs = []
+    state.knownSpellIDs = []
+    state.preparedSpellIDs = []
+    state.selectedPreparedSpellID = nil
+    // A selected tree action is not class residue: O/L and controller
+    // selection need to survive the ordinary repair/tick path.  Preserve it
+    // only when it names an unlocked closed tree action; legacy spell/skill
+    // tokens still retire with the rest of the class payload below.
+    let selectedTreeActionID: SkillTreeActionID? = state.selectedPreparedActionID.flatMap { token in
+        guard let parsed = rpgParsePreparedActionToken(token), parsed.kind == .skill else {
+            return nil
+        }
+        return SkillTreeActionID(rawValue: parsed.id)
+    }
+    state.selectedPreparedActionID = nil
+    state.fatigue = 0
+    state.actionSequence = max(0, min(RPG_MAX_COUNTER, state.actionSequence))
+    state.activeCooldowns = state.activeCooldowns.compactMap { cooldown in
+        guard cooldown.remainingTicks > 0,
+              let actionID = SkillTreeActionID(rawValue: cooldown.id)
+                    ?? skillTreeActionID(fastbarToken: cooldown.id) else { return nil }
+        return RPGCooldown(id: actionID.rawValue,
+                           remainingTicks: min(RPG_MAX_EFFECT_TICKS, cooldown.remainingTicks))
+    }
+    if state.activeCooldowns.count > RPG_MAX_COOLDOWNS {
+        state.activeCooldowns = Array(state.activeCooldowns.prefix(RPG_MAX_COOLDOWNS))
+    }
+    state.activeUpkeeps = []
+    state.kitGrantVersion = 0
+    state.kitGrantID = nil
+    state.authorityRevision = max(0, min(RPG_MAX_COUNTER, state.authorityRevision))
+    state.xpLedger = RPGXPLedger()
+    state.skillTrees = rpgSkillTreeState(state)
+    if let selectedTreeActionID, let trees = state.skillTrees,
+       skillTreeActionIsUnlocked(selectedTreeActionID, in: trees) {
+        state.selectedPreparedActionID = rpgPreparedActionToken(
+            kind: .skill, id: selectedTreeActionID.rawValue)
+    }
+    state.migrationNoticePending = false
+    return state
+}
+
+private func legacySkillRank(_ state: RPGCharacterState, ids: [String]) -> Int {
+    ids.reduce(0) { max($0, skillTreeClampPrimaryRank(state.skillRanks[$1] ?? 0)) }
+}
+
+/// Converts a class/path envelope into the four independent trees exactly
+/// once at the Player load boundary.  The mapping preserves the closest
+/// shipped progression: Delver mining, Warden melee, Ranger ranged, and
+/// Tinker crafting. Other former class-only perks retire rather than leaking
+/// into an unrelated usage skill.
+public func rpgMigrateLegacyStateToSkillTrees(_ raw: RPGCharacterState) -> RPGCharacterState {
+    guard raw.version >= 0, raw.version <= RPG_STATE_CURRENT_VERSION else { return .uncreated() }
+    if raw.skillTrees != nil { return repairSkillTreeRPGCharacterState(raw) }
+
+    var tree = SkillTreeState.untrained(recipeCount: skillTreeRecipeCountForValidation())
+    if raw.created {
+        tree.mining = skillTreeBranchState(
+            primaryRank: legacySkillRank(raw, ids: ["vein_reader"]),
+            advancedRank: legacySkillRank(raw, ids: ["fast_bore"])
+        )
+        tree.melee = skillTreeBranchState(
+            primaryRank: legacySkillRank(raw, ids: ["heavy_cut"]),
+            advancedRank: legacySkillRank(raw, ids: ["stagger_chain"])
+        )
+        tree.ranged = skillTreeBranchState(
+            primaryRank: legacySkillRank(raw, ids: ["quick_draw", "steady_aim"]),
+            advancedRank: legacySkillRank(raw, ids: ["crippling_shot"])
+        )
+        tree.crafting.progress = skillTreeBranchState(
+            primaryRank: legacySkillRank(raw, ids: ["field_mod", "tool_tune"]),
+            advancedRank: legacySkillRank(raw, ids: ["quick_repair"])
+        )
+    }
+    var migrated = raw
+    migrated.skillTrees = skillTreeValidatedState(tree, recipeCount: skillTreeRecipeCountForValidation())
+    return repairSkillTreeRPGCharacterState(migrated)
+}
+
 public func repairRPGCharacterState(_ raw: RPGCharacterState) -> RPGCharacterState {
-    if !raw.created { return .uncreated() }
     if raw.version < 0 || raw.version > RPG_STATE_CURRENT_VERSION { return .uncreated() }
+    if raw.skillTrees != nil { return repairSkillTreeRPGCharacterState(raw) }
+    if !raw.created { return .uncreated() }
     guard let path = rpgPathDefinition(raw.pathID) else { return .uncreated() }
 
     var state = raw
@@ -2966,7 +3285,11 @@ public func rpgSelectPreparedSkill(_ skillID: String, in state: inout RPGCharact
 @discardableResult
 public func rpgTickState(_ state: inout RPGCharacterState) -> [RPGUpkeep] {
     state = repairRPGCharacterState(state)
-    guard state.created else { return [] }
+    // Usage-tree actions share the compact cooldown envelope but do not have a
+    // legacy class `created` flag.  Their clock must therefore advance under
+    // the same authoritative tick rather than leaving Battle Cry/Eagle Eye
+    // permanently locked after a save or LAN replication.
+    guard state.created || state.skillTrees != nil else { return [] }
     let previousUpkeeps = state.activeUpkeeps
     let derived = rpgDerivedStats(state)
     if state.fatigue < derived.maxFatigue {
@@ -3040,6 +3363,15 @@ public func rpgCanHarvestHardStoneOrOre(_ player: Player, cell: Int) -> Bool {
 }
 
 public func rpgMiningSpeedMultiplier(_ player: Player, blockID: Int) -> Double {
+    if let trees = player.rpg.skillTrees,
+       blockID >= 0, blockID < blockDefs.count,
+       rpgIsHardStoneOrOreBlock(blockID) {
+        // Mining XP is intentionally resource-only, but the five speed ranks
+        // improve the same hard-stone-and-ore work domain that the retired
+        // mining perk covered. Limiting speed to ore blocks would make a
+        // "mining speed" tree feel inert throughout ordinary excavation.
+        return skillTreeMiningSpeedMultiplier(primaryRank: trees.mining.primaryRank)
+    }
     guard player.rpgClassesEnabled(), player.rpg.created,
           rpgIsHardStoneOrOreBlock(blockID) else { return 1 }
     return 1 + rpgSkillEffectValue(.veinReader, in: player.rpg)
@@ -3180,7 +3512,10 @@ public func rpgCircuitSenseInspection(_ player: Player) -> RPGCircuitSenseInspec
 }
 
 public func rpgHUDVisible(_ player: Player) -> Bool {
-    player.rpgClassesEnabled() && player.rpg.created
+    // Usage trees replace the legacy `created` character record.  Keep the
+    // action fast bar visible for those players so newly unlocked techniques
+    // present their icons at the same world-facing surface as their keybinds.
+    player.rpg.skillTrees != nil || (player.rpgClassesEnabled() && player.rpg.created)
 }
 
 public struct RPGHUDInsightLayout: Equatable {
@@ -3223,10 +3558,14 @@ public struct RPGHUDInsightCache {
 }
 
 public func rpgHUDDrawPlan(_ player: Player, screenOpen: Bool) -> RPGHUDDrawPlan {
-    let visible = rpgHUDVisible(player)
-    return RPGHUDDrawPlan(showInsights: visible && !screenOpen,
-                          showQuickSlots: visible,
-                          liftSurvivalHUD: visible && player.gameMode != GameMode.creative)
+    let showsActionFastBar = rpgHUDVisible(player)
+    // Usage trees use the shared action fast bar, but none of the retired
+    // class insight abilities (Weather Eye, Circuit Sense, and so on).  Keep
+    // their world-inspection panel scoped to a real legacy class record.
+    let showsLegacyInsights = player.rpgClassesEnabled() && player.rpg.created
+    return RPGHUDDrawPlan(showInsights: showsLegacyInsights && !screenOpen,
+                          showQuickSlots: showsActionFastBar,
+                          liftSurvivalHUD: showsActionFastBar && player.gameMode != GameMode.creative)
 }
 
 public func rpgHUDInsightCacheKey(_ player: Player,
@@ -3443,7 +3782,15 @@ private func rpgRemainingXPEvents(_ category: RPGXPEventCategory,
 
 @discardableResult
 public func rpgAwardCraftedRecipe(_ player: Player, recipeIndex: Int,
-                                  completedRounds: Int = 1) -> RPGProgressionReport {
+                                  completedRounds: Int = 1,
+                                  ingredients: [String?] = []) -> RPGProgressionReport {
+    if player.rpg.skillTrees != nil {
+        let report = skillTreeAwardCraftedRecipe(player, recipeIndex: recipeIndex,
+                                                  completedRounds: completedRounds,
+                                                  ingredients: ingredients)
+        return RPGProgressionReport(leveledUp: false, previousLevel: 0,
+                                    newLevel: 0, awardedXP: report.awardedXP)
+    }
     let empty = RPGProgressionReport(leveledUp: false, previousLevel: player.rpg.level,
                                      newLevel: player.rpg.level)
     guard player.rpgClassesEnabled(), player.rpg.created,
@@ -3576,6 +3923,20 @@ public enum RPGFatigueRestorationSource: String, CaseIterable {
 }
 
 public extension Player {
+    /// Single authoritative access point for usage-based progression. Assigning
+    /// through this property also removes any legacy class residue before the
+    /// state can be saved or replicated.
+    var skillTreeState: SkillTreeState {
+        get { rpgSkillTreeState(rpg) }
+        set {
+            var envelope = rpg.skillTrees == nil
+                ? RPGCharacterState.skillTreeProgression() : rpg
+            envelope.skillTrees = skillTreeValidatedState(
+                newValue, recipeCount: skillTreeRecipeCountForValidation())
+            rpg = repairRPGCharacterState(envelope)
+        }
+    }
+
     func clearRPGTerminalUpkeeps() {
         _ = rpgClearTerminalUpkeeps(&rpg)
     }
@@ -3670,7 +4031,10 @@ public extension Player {
     /// player physics is temporarily skipped (chunk holds, template jobs, or
     /// death). LAN clients never call it speculatively.
     func tickRPGContinuousState() {
-        guard rpgClassesEnabled() else {
+        // The class rule governs retired class mechanics only.  A usage-tree
+        // envelope still needs its action cooldown clock even when that legacy
+        // world option is disabled or absent on an older save.
+        guard rpgClassesEnabled() || rpg.skillTrees != nil else {
             if maxHealth != 20 {
                 maxHealth = 20
                 health = min(health, maxHealth)
@@ -3705,9 +4069,21 @@ public extension Player {
 
     @discardableResult
     func createRPGCharacter(_ draft: RPGCreationDraft) -> RPGCreationError? {
-        guard rpgClassesEnabled() else { return .classesDisabled }
-        rpg = repairRPGCharacterState(rpg)
-        guard !rpg.created else { return .alreadyCreated }
+        guard rpgClassesEnabled(), !world.isTransientLANClient else { return .classesDisabled }
+        // This is the raw legacy-construction seam retained for decoded
+        // class fixtures and compatibility tests. A direct Player starts with
+        // the same pristine tree envelope as a new world, but the GameCore/UI
+        // request path rejects every tree envelope before it can reach here.
+        // Do not treat a repaired, progressed, or migrated tree as eligible:
+        // a class must never be layered onto a real usage-based player.
+        let existing: RPGCharacterState
+        if rpg.skillTrees != nil {
+            guard rpg == .skillTreeProgression() else { return .classesDisabled }
+            existing = .uncreated()
+        } else {
+            existing = repairRPGCharacterState(rpg)
+        }
+        guard !existing.created else { return .alreadyCreated }
         switch rpgCreateCharacter(draft) {
         case .success(var state):
             let stacks: [ItemStack]

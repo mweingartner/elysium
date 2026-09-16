@@ -78,12 +78,20 @@ public let LAN_MULTIPLAYER_DEFAULT_CHUNK_REQUEST_RADIUS = 1
 public let LAN_MULTIPLAYER_DEFAULT_CHUNK_VERTICAL_RADIUS = 1
 private let LAN_MULTIPLAYER_MAX_ENTITY_COORDINATE = 30_000_000.0
 public let LAN_MULTIPLAYER_MAX_REPLICATED_ITEM_COUNT = 127
+/// A stack can only carry one effective level for each registered enchantment. This narrow
+/// metadata cap keeps inventory/block-entity snapshots bounded without forwarding arbitrary
+/// `StackData` payloads from a guest into host combat.
+public let LAN_MULTIPLAYER_MAX_STACK_ENCHANTMENTS = 16
 private let LAN_MULTIPLAYER_MAX_REPLICATED_XP_AMOUNT = 4096
 public let LAN_MULTIPLAYER_MAX_RLE_RUNS = LAN_MULTIPLAYER_CHUNK_SECTION_CELL_COUNT
 public let LAN_MULTIPLAYER_MAX_CELLS_DATA_BYTES = LAN_MULTIPLAYER_MAX_RLE_RUNS * 4
 public let LAN_MULTIPLAYER_MAX_GRANT_ITEMS = 64
 public let LAN_MULTIPLAYER_MAX_DAMAGE_AMOUNT = 2048.0
 public let LAN_MULTIPLAYER_MAX_CONTAINER_EDIT_BLOCK_ENTITIES = 2
+/// A guest must release an authoritative bow draw within this many host simulation ticks.
+/// Full draw strength still caps at the ordinary twenty ticks; the extra headroom absorbs a
+/// normal LAN round trip without leaving an abandoned draw armed indefinitely.
+public let LAN_MULTIPLAYER_MAX_BOW_DRAW_TICKS = 60
 /// Per-peer operation budget for stepping template PLACE/UNDO jobs each `tickReplication`
 /// call — keeps a guest's in-flight template job progressing every host frame without
 /// reintroducing the multi-second stall the synchronous path used to cause.
@@ -157,6 +165,10 @@ public enum LANMultiplayerMessageKind: UInt16, Codable, Equatable, CaseIterable 
     /// Event-only, replay-safe player secondary-use target. Kept distinct from block mutation
     /// intents because it also names entities and must never duplicate native-use producers.
     case interactionIntent = 31
+    /// Host-timed bow draw/release.  The guest supplies only its selected hotbar slot and a
+    /// connection-epoch semantic sequence; the host derives charge duration, ammunition,
+    /// projectile, durability, damage, and ranged progression.
+    case bowIntent = 32
 
     /// Guest-originated messages whose authoritative handling can mutate gameplay state.
     /// The LAN transport holds these messages while the bounded RPG authority clock is
@@ -167,7 +179,7 @@ public enum LANMultiplayerMessageKind: UInt16, Codable, Equatable, CaseIterable 
         switch self {
         case .playerState, .inputIntent, .blockIntent, .containerIntent,
              .templateIntent, .attackIntent, .tossIntent, .containerEditIntent,
-             .inventoryUpdate, .rpgIntent, .scriptIntent, .interactionIntent:
+             .inventoryUpdate, .rpgIntent, .scriptIntent, .interactionIntent, .bowIntent:
             return true
         case .clientHello, .serverAccept, .serverReject, .chat, .worldSummary,
              .ping, .pong, .disconnect, .replicationBatch, .chunkRequest,
@@ -206,7 +218,7 @@ public func lanMultiplayerAllowsInbound(
              .blockIntent, .containerIntent, .templateIntent, .chunkRequest,
              .replicationAck, .attackIntent, .tossIntent, .containerEditIntent,
              .inventoryUpdate, .keepalive, .rpgIntent, .scriptIntent,
-             .interactionIntent:
+             .interactionIntent, .bowIntent:
             return true
         case .clientHello, .serverAccept, .serverReject, .worldSummary,
              .replicationBatch, .gameplayEvent, .inventoryGrant, .restoreState,
@@ -222,7 +234,7 @@ public func lanMultiplayerAllowsInbound(
         case .clientHello, .serverAccept, .serverReject, .inputIntent,
              .blockIntent, .containerIntent, .templateIntent, .chunkRequest,
              .replicationAck, .attackIntent, .tossIntent, .containerEditIntent,
-             .inventoryUpdate, .rpgIntent, .scriptIntent, .interactionIntent:
+             .inventoryUpdate, .rpgIntent, .scriptIntent, .interactionIntent, .bowIntent:
             return false
         }
     }
@@ -261,7 +273,7 @@ public func lanMultiplayerHostRateLimitCategory(
     case .chunkRequest:
         return .chunkRequest
     case .blockIntent, .containerIntent, .templateIntent, .attackIntent, .tossIntent, .rpgIntent,
-         .interactionIntent:
+         .interactionIntent, .bowIntent:
         return .gameplayIntent
     case .inventoryUpdate:
         return .inventoryUpdate
@@ -634,7 +646,10 @@ public struct LANPlayerState: Codable, Equatable {
         self.dimension = isValidLANDimension(dimension) ? dimension : Dim.overworld.rawValue
         self.dead = dead || self.health <= 0
         self.inventoryRevision = max(0, inventoryRevision)
-        self.rpg = rpg.map(repairRPGCharacterState)
+        // A restored LAN player-state envelope is an authority handoff, not a
+        // compatibility tunnel for retired classes.  Normalize a valid legacy
+        // record into its independent usage trees at this boundary.
+        self.rpg = rpg.map(rpgMigrateLegacyStateToSkillTrees)
     }
 
     public init(from decoder: Decoder) throws {
@@ -1172,35 +1187,181 @@ public struct LANEntitySnapshot: Codable, Equatable {
     }
 }
 
+/// Crafted equipment carries a bounded, per-stack quality rank.  LAN stack metadata stays
+/// deliberately narrow: ordinary bow enchantments and tipped-arrow potion IDs must survive a
+/// host ghost hydration, while unrelated arbitrary `StackData` remains local-only.
+@inline(__always)
+public func lanClampedCraftingQuality(_ quality: Int?) -> Int? {
+    quality.map { max(0, min(5, $0)) }
+}
+
+/// A bounded, canonical wire representation of one registered enchantment. It mirrors the
+/// saved `EnchInstance` key spelling (`lvl`) while remaining `Hashable` for host conservation
+/// checks. Unknown IDs and out-of-range levels are discarded/clamped at the snapshot boundary.
+public struct LANItemEnchantmentSnapshot: Codable, Equatable, Hashable {
+    public var id: String
+    public var lvl: Int
+
+    public init(id: String, lvl: Int) {
+        self.id = id
+        self.lvl = lvl
+    }
+
+    public init(_ enchantment: EnchInstance) {
+        self.init(id: enchantment.id, lvl: enchantment.lvl)
+    }
+
+    public var enchantment: EnchInstance { EnchInstance(id, lvl) }
+}
+
+/// Canonicalizes metadata before it can influence a host ghost. This is intentionally not a
+/// general-purpose inventory authority mechanism: guest inventory layout remains the existing
+/// client-owned surface, but malformed/unknown metadata cannot reach combat or potion resolution.
+public func lanCanonicalEnchantments(
+    _ raw: [LANItemEnchantmentSnapshot]
+) -> [LANItemEnchantmentSnapshot] {
+    var byID: [String: Int] = [:]
+    for candidate in raw.prefix(LAN_MULTIPLAYER_MAX_STACK_ENCHANTMENTS) {
+        guard let definition = ENCH_BY_ID[candidate.id] else { continue }
+        let level = max(1, min(definition.maxLevel, candidate.lvl))
+        byID[candidate.id] = max(byID[candidate.id] ?? 0, level)
+    }
+    return byID.keys.sorted().compactMap { id in
+        byID[id].map { LANItemEnchantmentSnapshot(id: id, lvl: $0) }
+    }
+}
+
+@inline(__always)
+public func lanCanonicalPotionID(_ potion: String?) -> String? {
+    guard let potion, POTION_BY_ID[potion] != nil else { return nil }
+    return potion
+}
+
+@inline(__always)
+public func makeLANStackData(craftingQuality: Int?, potion: String? = nil) -> StackData {
+    var data = StackData()
+    data.craftingQuality = lanClampedCraftingQuality(craftingQuality)
+    data.potion = lanCanonicalPotionID(potion)
+    return data
+}
+
 public struct LANInventorySlotSnapshot: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case slot
+        case itemID
+        case count
+        case damage
+        case label
+        case craftingQuality
+        case enchantments
+        case potion
+    }
+
     public var slot: Int
     public var itemID: Int
     public var count: Int
     public var damage: Int
     public var label: String?
+    /// Optional for payload compatibility with pre-quality peers.  A present
+    /// value is always clamped into the five crafting-quality ranks.
+    public var craftingQuality: Int?
+    /// Canonical registered enchantments, retained so host-fired bows use their actual Power,
+    /// Infinity, Punch, and Flame effects after a guest inventory snapshot.
+    public var enchantments: [LANItemEnchantmentSnapshot]
+    /// Canonical tipped-arrow potion ID. Absent in legacy payloads and for ordinary arrows.
+    public var potion: String?
 
-    public init(slot: Int, itemID: Int, count: Int, damage: Int = 0, label: String? = nil) {
+    public init(
+        slot: Int,
+        itemID: Int,
+        count: Int,
+        damage: Int = 0,
+        label: String? = nil,
+        craftingQuality: Int? = nil,
+        enchantments: [LANItemEnchantmentSnapshot] = [],
+        potion: String? = nil
+    ) {
         self.slot = max(0, min(LAN_MULTIPLAYER_MAX_REPLICATION_INVENTORY_SLOTS - 1, slot))
         self.itemID = max(0, itemID)
         self.count = max(0, min(127, count))
         self.damage = max(0, damage)
         self.label = label.map { prefixByUTF8Bytes(cleanSingleLine($0), maxBytes: 128) }
+        self.craftingQuality = lanClampedCraftingQuality(craftingQuality)
+        self.enchantments = lanCanonicalEnchantments(enchantments)
+        self.potion = lanCanonicalPotionID(potion)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            slot: try c.decode(Int.self, forKey: .slot),
+            itemID: try c.decode(Int.self, forKey: .itemID),
+            count: try c.decode(Int.self, forKey: .count),
+            damage: try c.decodeIfPresent(Int.self, forKey: .damage) ?? 0,
+            label: try c.decodeIfPresent(String.self, forKey: .label),
+            craftingQuality: try c.decodeIfPresent(Int.self, forKey: .craftingQuality),
+            enchantments: try c.decodeIfPresent([LANItemEnchantmentSnapshot].self,
+                                                forKey: .enchantments) ?? [],
+            potion: try c.decodeIfPresent(String.self, forKey: .potion)
+        )
     }
 }
 
 public struct LANBlockEntitySlotSnapshot: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case slot
+        case itemID
+        case count
+        case damage
+        case label
+        case craftingQuality
+        case enchantments
+        case potion
+    }
+
     public var slot: Int
     public var itemID: Int
     public var count: Int
     public var damage: Int
     public var label: String?
+    /// Optional for payload compatibility with pre-quality peers.
+    public var craftingQuality: Int?
+    public var enchantments: [LANItemEnchantmentSnapshot]
+    public var potion: String?
 
-    public init(slot: Int, itemID: Int, count: Int, damage: Int = 0, label: String? = nil) {
+    public init(
+        slot: Int,
+        itemID: Int,
+        count: Int,
+        damage: Int = 0,
+        label: String? = nil,
+        craftingQuality: Int? = nil,
+        enchantments: [LANItemEnchantmentSnapshot] = [],
+        potion: String? = nil
+    ) {
         self.slot = max(0, min(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_ENTITY_SLOTS - 1, slot))
         self.itemID = max(0, itemID)
         self.count = max(0, min(LAN_MULTIPLAYER_MAX_REPLICATED_ITEM_COUNT, count))
         self.damage = max(0, damage)
         self.label = label.map { prefixByUTF8Bytes(cleanSingleLine($0), maxBytes: 128) }
+        self.craftingQuality = lanClampedCraftingQuality(craftingQuality)
+        self.enchantments = lanCanonicalEnchantments(enchantments)
+        self.potion = lanCanonicalPotionID(potion)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            slot: try c.decode(Int.self, forKey: .slot),
+            itemID: try c.decode(Int.self, forKey: .itemID),
+            count: try c.decode(Int.self, forKey: .count),
+            damage: try c.decodeIfPresent(Int.self, forKey: .damage) ?? 0,
+            label: try c.decodeIfPresent(String.self, forKey: .label),
+            craftingQuality: try c.decodeIfPresent(Int.self, forKey: .craftingQuality),
+            enchantments: try c.decodeIfPresent([LANItemEnchantmentSnapshot].self,
+                                                forKey: .enchantments) ?? [],
+            potion: try c.decodeIfPresent(String.self, forKey: .potion)
+        )
     }
 }
 
@@ -1796,6 +1957,55 @@ public struct LANAttackIntent: Codable, Equatable {
     }
 }
 
+/// One phase of an ordinary bow draw. The guest never supplies a charge amount: a connected
+/// host records its own simulation tick on `.begin` and derives the bounded release charge.
+/// `sequence` is a connection-epoch high-water mark, separate from wire-frame sequencing, so a
+/// captured draw/release cannot be replayed inside fresh transport frames.
+public struct LANBowIntent: Codable, Equatable {
+    public enum Action: String, Codable, Equatable {
+        case begin
+        case release
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case action
+        case selectedHotbarSlot
+        case sequence
+    }
+
+    public var action: Action
+    public var selectedHotbarSlot: Int
+    public var sequence: UInt32
+
+    public init(action: Action, selectedHotbarSlot: Int, sequence: UInt32) {
+        self.action = action
+        self.selectedHotbarSlot = max(0, min(8, selectedHotbarSlot))
+        self.sequence = sequence
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let action = try values.decode(Action.self, forKey: .action)
+        let selectedHotbarSlot = try values.decode(Int.self, forKey: .selectedHotbarSlot)
+        guard (0...8).contains(selectedHotbarSlot) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .selectedHotbarSlot, in: values,
+                debugDescription: "Bow-intent hotbar slot must be in 0...8"
+            )
+        }
+        let sequence = try values.decode(UInt32.self, forKey: .sequence)
+        guard sequence > 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .sequence, in: values,
+                debugDescription: "Bow-intent sequence must be positive"
+            )
+        }
+        self.action = action
+        self.selectedHotbarSlot = selectedHotbarSlot
+        self.sequence = sequence
+    }
+}
+
 public struct LANTossIntent: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case slot
@@ -2204,6 +2414,7 @@ public enum LANMultiplayerMessage: Codable, Equatable {
     case replicationAck(playerID: String, ack: LANReplicationAck)
     case gameplayEvent(LANGameplayEvent)
     case attackIntent(playerID: String, intent: LANAttackIntent)
+    case bowIntent(playerID: String, intent: LANBowIntent)
     case tossIntent(playerID: String, intent: LANTossIntent)
     case containerEditIntent(playerID: String, intent: LANContainerEditIntent)
     case inventoryUpdate(LANInventoryUpdate)
@@ -2235,6 +2446,7 @@ public enum LANMultiplayerMessage: Codable, Equatable {
         case .replicationAck: return .replicationAck
         case .gameplayEvent: return .gameplayEvent
         case .attackIntent: return .attackIntent
+        case .bowIntent: return .bowIntent
         case .tossIntent: return .tossIntent
         case .containerEditIntent: return .containerEditIntent
         case .inventoryUpdate: return .inventoryUpdate
@@ -2257,7 +2469,8 @@ public enum LANMultiplayerMessage: Codable, Equatable {
         case .inputIntent(let playerID, _), .blockIntent(let playerID, _),
              .containerIntent(let playerID, _), .templateIntent(let playerID, _),
              .chunkRequest(let playerID, _), .replicationAck(let playerID, _),
-             .attackIntent(let playerID, _), .tossIntent(let playerID, _),
+             .attackIntent(let playerID, _), .bowIntent(let playerID, _),
+             .tossIntent(let playerID, _),
              .containerEditIntent(let playerID, _), .rpgIntent(let playerID, _),
              .scriptIntent(let playerID, _), .interactionIntent(let playerID, _):
             return playerID

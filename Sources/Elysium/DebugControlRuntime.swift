@@ -277,8 +277,8 @@ final class DebugControlRuntime {
                 .object(["id": .integer(Int64($0.rawValue)),
                          "displayName": .string($0.displayName)])
             })]
-        case "registry.rpg":
-            return try rpgRegistry()
+        case "registry.skill_trees":
+            return skillTreeRegistry()
         case "state.snapshot":
             return ["snapshot": try jsonValue(makeSnapshot(arguments: a))]
         case "events.replay":
@@ -328,7 +328,10 @@ final class DebugControlRuntime {
             guard let villageDensity = VillageDensity(rawValue: villageDensityRaw) else {
                 throw RuntimeError(.invalidArguments, "Unknown village density")
             }
-            let rpg = try optionalBool(a, "rpgClassesEnabled") ?? true
+            // The legacy rule remains an explicit fixture/migration input, but
+            // every ordinary debug world starts with the usage trees just like
+            // the product world-creation flow.
+            let rpg = try optionalBool(a, "rpgClassesEnabled") ?? false
             // Validate the complete request before crossing the current-world boundary. A typo in
             // a preset or biome must not eject the developer from the world being inspected.
             if app.game.hasWorld() {
@@ -815,53 +818,27 @@ final class DebugControlRuntime {
             let deleted = try app.game.db.deleteTemplate(named: name)
             if deleted { mutate("template.deleted", payload: ["name": .string(name)]) }
             return ["deleted": .bool(deleted)]
-        case "rpg.create":
+        // Keep these legacy operation names recognized for existing debug
+        // clients, but do not parse their class/spell arguments or expose an
+        // alternate class-progression authority.  Their established refusal
+        // is deliberately returned without a revision or event mutation.
+        case "rpg.create", "rpg.learn", "rpg.prepare_skill", "rpg.prepare_spell",
+             "rpg.select_skill", "rpg.select_spell":
             try requireWorld(authoritative: true)
-            let path = try boundedString(a, "path", maximumBytes: 128)
-            let branch = try boundedString(a, "branch", maximumBytes: 128)
-            let skills = try optionalStringArray(a, "startingSkills", maximumCount: 3,
-                                                 maximumBytes: 128) ?? []
-            let message = app.game.requestRPGCreateCharacter(RPGCreationDraft(
-                pathID: path, branchID: branch, startingSkillIDs: skills))
-            mutate("rpg.created", payload: ["path": .string(path), "branch": .string(branch)])
-            return ["message": .string(message), "rpg": try jsonValue(app.game.player.rpg)]
-        case "rpg.learn":
-            try requireWorld(authoritative: true)
-            let id = try boundedString(a, "skill", maximumBytes: 128)
-            let message = app.game.requestRPGLearnSkill(id)
-            mutate("rpg.learned", payload: ["skill": .string(id)])
-            return ["message": .string(message), "rpg": try jsonValue(app.game.player.rpg)]
-        case "rpg.prepare_skill":
-            try requireWorld(authoritative: true)
-            let id = try boundedString(a, "skill", maximumBytes: 128)
-            let message = app.game.requestRPGTogglePreparedSkill(id)
-            mutate("rpg.prepared_skill", payload: ["skill": .string(id)])
-            return ["message": .string(message), "rpg": try jsonValue(app.game.player.rpg)]
-        case "rpg.prepare_spell":
-            try requireWorld(authoritative: true)
-            let id = try boundedString(a, "spell", maximumBytes: 128)
-            let message = app.game.requestRPGTogglePreparedSpell(id)
-            mutate("rpg.prepared_spell", payload: ["spell": .string(id)])
-            return ["message": .string(message), "rpg": try jsonValue(app.game.player.rpg)]
-        case "rpg.select_skill":
-            try requireWorld(authoritative: true)
-            let id = try boundedString(a, "skill", maximumBytes: 128)
-            let message = app.game.requestRPGSelectPreparedSkill(id)
-            mutate("rpg.selected_skill", payload: ["skill": .string(id)])
-            return ["message": .string(message)]
-        case "rpg.select_spell":
-            try requireWorld(authoritative: true)
-            let id = try boundedString(a, "spell", maximumBytes: 128)
-            let message = app.game.requestRPGSelectPreparedSpell(id)
-            mutate("rpg.selected_spell", payload: ["spell": .string(id)])
-            return ["message": .string(message)]
+            return ["message": .string(RPGActionFailure.classesDisabled.description)]
         case "rpg.use_selected":
             try requireWorld(authoritative: true)
+            guard app.game.skillTreeStateSnapshot() != nil else {
+                return ["message": .string(RPGActionFailure.classesDisabled.description)]
+            }
             let message = app.game.requestRPGUseSelectedAction()
             mutate("rpg.used_selected")
             return ["message": .string(message)]
         case "rpg.use_quick_slot":
             try requireWorld(authoritative: true)
+            guard app.game.skillTreeStateSnapshot() != nil else {
+                return ["message": .string(RPGActionFailure.classesDisabled.description)]
+            }
             let slot = try int(a, "slot")
             let message = app.game.requestRPGUseActionQuickSlot(slot)
             mutate("rpg.used_quick_slot", payload: ["slot": .integer(Int64(slot))])
@@ -1121,25 +1098,25 @@ final class DebugControlRuntime {
         ]
     }
 
-    private func rpgRegistry() throws -> [String: JSONValue] {
+    private func skillTreeRegistry() -> [String: JSONValue] {
         [
-            "paths": .array(RPG_PATH_DEFINITIONS.map { path in
-                .object(["id": .string(path.id), "displayName": .string(path.displayName),
-                         "branches": .array(path.branchIDs.map(JSONValue.string)),
-                         "starterSkills": .array(path.starterSkillIDs.map(JSONValue.string))])
+            "trees": .array(SkillTreeID.allCases.map { tree in
+                .object(["id": .string(tree.rawValue),
+                         "primaryRankCap": .integer(Int64(SKILL_TREE_PRIMARY_RANK_CAP)),
+                         "advancedRankCap": .integer(Int64(SKILL_TREE_ADVANCED_RANK_CAP))])
             }),
-            "branches": .array(RPG_BRANCH_DEFINITIONS.map { branch in
-                .object(["id": .string(branch.id), "path": .string(branch.pathID),
-                         "displayName": .string(branch.displayName),
-                         "skills": .array(branch.skillIDs.map(JSONValue.string))])
-            }),
-            "skills": .array(RPG_SKILL_DEFINITIONS.map { skill in
-                .object(["id": .string(skill.id), "path": .string(skill.pathID),
-                         "branch": .string(skill.branchID),
-                         "displayName": .string(skill.displayName)])
-            }),
-            "spells": .array(RPG_SPELL_DEFINITIONS.map { spell in
-                .object(["id": .string(spell.id), "displayName": .string(spell.displayName)])
+            "actions": .array(SKILL_TREE_ACTION_DESCRIPTORS.map { action in
+                .object(["id": .string(action.id.rawValue),
+                         "tree": .string(action.tree.rawValue),
+                         "displayName": .string(action.displayName),
+                         "advancedRankRequired": .integer(Int64(action.advancedRankRequired)),
+                         "equipment": .string(action.equipment.rawValue),
+                         "targeting": .string(action.targeting.rawValue),
+                         "weaponDamageMultiplier": .number(action.weaponDamageMultiplier),
+                         "stunDurationTicks": .integer(Int64(action.stunDurationTicks)),
+                         "pushDistanceBlocks": .integer(Int64(action.pushDistanceBlocks)),
+                         "disarmsTarget": .bool(action.disarmsTarget),
+                         "cooldownTicks": .integer(Int64(action.cooldownTicks))])
             }),
         ]
     }

@@ -8,7 +8,6 @@ struct RealityDerivedGenerationOptions {
     let seedText: String
     let gameMode: Int
     let difficulty: Int
-    let rpgClassesEnabled: Bool
     let mapSize: WorldMapSize
 }
 
@@ -249,7 +248,7 @@ final class RealityDerivedCoordinator: NSObject, WKScriptMessageHandler, NSWindo
                     id: worldID, name: options.worldName, seedText: options.seedText,
                     mode: options.gameMode,
                     difficulty: options.difficulty,
-                    rpgClassesEnabled: options.rpgClassesEnabled, mapSize: options.mapSize,
+                    rpgClassesEnabled: false, mapSize: options.mapSize,
                     plan: plan,
                     progress: { [weak self] completed, total in
                         DispatchQueue.main.async {

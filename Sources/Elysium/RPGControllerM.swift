@@ -90,7 +90,8 @@ final class RPGControllerAdapter {
 
     private func desiredContext() -> RPGControllerContext {
         guard focused, let app, app.game.hasWorld() else { return .inactive }
-        if app.ui.current() is RPGCharacterScreen || app.ui.current() is TradingScreen { return .sheet }
+        if app.ui.current() is RPGCharacterScreen || app.ui.current() is SkillTreeScreen
+            || app.ui.current() is TradingScreen { return .sheet }
         return app.ui.hasScreen() ? .inactive : .world
     }
 
@@ -233,6 +234,9 @@ final class RPGControllerAdapter {
             case .sheet:
                 if let screen = app.ui.current() as? RPGCharacterScreen {
                     accepted = screen.handleRPGControllerCommand(command, ui: app.ui, game: app.game)
+                } else if let screen = app.ui.current() as? SkillTreeScreen {
+                    accepted = Self.dispatchSkillTreeControllerCommand(
+                        command, screen: screen, ui: app.ui, game: app.game)
                 } else if let screen = app.ui.current() as? TradingScreen {
                     accepted = screen.handleControllerCommand(command, ui: app.ui, game: app.game)
                 } else {
@@ -246,6 +250,27 @@ final class RPGControllerAdapter {
                 accepted = false
             }
             if accepted { app.ui.setRPGControllerHelpPrimary(true, game: app.game) }
+        }
+    }
+
+    private static func dispatchSkillTreeControllerCommand(_ command: RPGSemanticCommand,
+                                                           screen: SkillTreeScreen,
+                                                           ui: UIManager,
+                                                           game: GameCore) -> Bool {
+        switch command {
+        case .moveFocus(.up):
+            return screen.onKey(ui, game, "ArrowUp")
+        case .scrollRows(let amount) where amount < 0:
+            return screen.onKey(ui, game, "ArrowUp")
+        case .moveFocus(.down):
+            return screen.onKey(ui, game, "ArrowDown")
+        case .scrollRows(let amount) where amount > 0:
+            return screen.onKey(ui, game, "ArrowDown")
+        case .back:
+            ui.closeTop(game)
+            return true
+        default:
+            return false
         }
     }
 

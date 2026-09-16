@@ -115,18 +115,36 @@ public func rpgNormalizedCycleDirection(_ direction: Int) -> Int {
 }
 
 public func rpgCyclePreparedAction(_ player: Player,
-                                   direction: Int = 1) -> RPGPreparedActionCycleResult {
+                                   direction: Int = 1,
+                                   presentationOnly: Bool = false) -> RPGPreparedActionCycleResult {
     player.rpg = repairRPGCharacterState(player.rpg)
     let prepared = rpgPreparedActions(player.rpg)
     guard !prepared.isEmpty else { return .noPreparedActions }
     let currentToken = player.rpg.selectedPreparedActionID
         ?? player.rpg.selectedPreparedSpellID.map { rpgPreparedActionToken(kind: .spell, id: $0) }
-    let current = currentToken.flatMap { token in prepared.firstIndex { $0.token == token } } ?? 0
     let step = rpgNormalizedCycleDirection(direction)
-    let next = (current + step + prepared.count) % prepared.count
+    // An empty or stale selection has no predecessor in the cycle.  Select
+    // the leading item (or trailing item when cycling backward) rather than
+    // treating item zero as already selected.  In particular, this makes a
+    // one-action skill tree usable through O/L: the first O must persist its
+    // selection instead of returning `.noOp` and leaving L with no action.
+    let current = currentToken.flatMap { token in prepared.firstIndex { $0.token == token } }
+    let next: Int
+    if let current {
+        next = (current + step + prepared.count) % prepared.count
+    } else {
+        next = step < 0 ? prepared.count - 1 : 0
+    }
     let selected = prepared[next]
     guard selected.token != currentToken else { return .noOp(selected) }
-    guard rpgIncrementAuthorityRevision(&player.rpg) else { return .authorityExhausted }
+    // A LAN usage-tree selection is a client-local presentation preference,
+    // not a host RPG mutation.  It must therefore leave the authoritative
+    // action sequence/revision untouched; the subsequent explicit `.useSkill`
+    // intent carries the host's exact next sequence.  Local and legacy callers
+    // retain the existing revision bump.
+    if !presentationOnly {
+        guard rpgIncrementAuthorityRevision(&player.rpg) else { return .authorityExhausted }
+    }
     player.rpg.selectedPreparedActionID = selected.token
     if selected.kind == .spell { player.rpg.selectedPreparedSpellID = selected.id }
     return .selected(selected)
@@ -184,6 +202,9 @@ public func rpgExecuteAction(_ player: Player,
                              kind: RPGPreparedActionKind,
                              id: String,
                              authorization: RPGActionAuthorization) -> Result<RPGActionResult, RPGActionFailure> {
+    if kind == .skill, let skillTreeAction = SkillTreeActionID(rawValue: id) {
+        return skillTreeExecuteAction(player, id: skillTreeAction, authorization: authorization)
+    }
     switch rpgPrepareAction(player, kind: kind, id: id, authorization: authorization) {
     case .failure(let failure): return .failure(failure)
     case .success(let prepared): return rpgCommitPreparedAction(prepared, for: player)

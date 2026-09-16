@@ -11,7 +11,7 @@ requirements and installation, start with the [Elysium project overview](README.
 - [Understand the HUD and maps](#understand-the-hud-and-maps)
 - [Core play loop](#core-play-loop)
 - [Explore the world](#explore-the-world)
-- [Optional character classes](#optional-character-classes)
+- [Usage-based skill trees](#usage-based-skill-trees)
 - [Trade with villagers](#trade-with-villagers)
 - [Save, manage, and recover worlds](#save-manage-and-recover-worlds)
 - [Local-network multiplayer](#local-network-multiplayer)
@@ -60,9 +60,7 @@ requirements and installation, start with the [Elysium project overview](README.
    proportionally smaller selection.
 8. For procedural world types, set **Dungeons** to **None**, **Normal**, **More**, **Plentiful**, or **Many**. **None** disables new
    dungeon placement; each later setting increases the number of placement attempts during generation.
-9. Leave **Classes: On** if you want the optional RPG character system in this world. Turn it
-   off for the base survival experience without character creation or character abilities.
-10. Choose **Create World**. **Generating world...**, **Loading world…**, and **Building terrain** mean
+9. Choose **Create World**. **Generating world...**, **Loading world…**, and **Building terrain** mean
    Elysium is working. Wait for the world to open; do not repeatedly submit creation.
 
 ### A practical first day
@@ -72,8 +70,8 @@ requirements and installation, start with the [Elysium project overview](README.
 - Craft a wooden pickaxe, mine stone, and upgrade your tools.
 - Collect food and make a lit shelter before exploring far from your starting area.
 - Look at **Advancements** from the pause menu when you want the next major progression objective.
-- If classes are enabled, open the character interface when you are ready to create a character; the
-  world remains playable before character creation.
+- Open **Skills** with `K` to see which real actions advance each tree and which advanced actions are
+  ready for the fast bar.
 - Press Escape and choose **Save & Quit to Title** when ending the session. Worlds also autosave during
   play, but **Save & Quit to Title** is the recommended clean exit.
 
@@ -120,18 +118,18 @@ These are the 25 current default bindings:
 | Swap Offhand | `F` |
 | Equip Torch (off-hand) | `G` |
 | Equip Shield (off-hand) | `H` |
-| RPG Character | `K` |
-| Cycle RPG Action | `O` |
-| Use RPG Action | `L` |
-| RPG Quick Slot 1 | `Shift+1` |
-| RPG Quick Slot 2 | `Shift+2` |
-| RPG Quick Slot 3 | `Shift+3` |
-| RPG Quick Slot 4 | `Shift+4` |
-| RPG Quick Slot 5 | `Shift+5` |
-| RPG Quick Slot 6 | `Shift+6` |
-| RPG Quick Slot 7 | `Shift+7` |
-| RPG Quick Slot 8 | `Shift+8` |
-| RPG Quick Slot 9 | `Shift+9` |
+| Skills | `K` |
+| Cycle Skill Action | `O` |
+| Use Selected Skill Action | `L` |
+| Skill Action Quick Slot 1 | `Shift+1` |
+| Skill Action Quick Slot 2 | `Shift+2` |
+| Skill Action Quick Slot 3 | `Shift+3` |
+| Skill Action Quick Slot 4 | `Shift+4` |
+| Skill Action Quick Slot 5 | `Shift+5` |
+| Skill Action Quick Slot 6 | `Shift+6` |
+| Skill Action Quick Slot 7 | `Shift+7` |
+| Skill Action Quick Slot 8 | `Shift+8` |
+| Skill Action Quick Slot 9 | `Shift+9` |
 
 Double-tapping forward also starts sprinting with the default movement setup.
 
@@ -168,10 +166,9 @@ These inputs are routed separately and do not appear as configurable gameplay bi
 | Arrow keys (during placement) | Left/Right rotate the pending wireframe; Up pushes it away; Down pulls it closer. |
 | `Command-Z` | Undo the most recent template placement. |
 
-Physical-controller support currently covers RPG world actions, the canvas character fallback, and the
-villager trading sheet. The ordinary native Character window uses standard macOS keyboard and pointer
-controls and does not intercept controller input. Do not expect a controller to replace the keyboard
-and mouse for movement, camera, inventory, or crafting.
+Physical-controller support currently covers skill actions, the Skills workspace, and the villager trading
+sheet. Do not expect a controller to replace the keyboard and mouse for movement, camera, inventory, or
+crafting.
 
 ### Enter text
 
@@ -198,7 +195,7 @@ live map or renaming a saved world.
 ## Understand the HUD and maps
 
 The HUD keeps the crosshair, hotbar, health, hunger, armor, experience, status information, and compact
-live map visible during play. It also shows air while submerged, RPG quick slots when available, and
+live map visible during play. It also shows air while submerged, skill-action fast-bar slots when available, and
 the health of a living mount while you ride it. Your inventory exposes the equipped armor and offhand
 slots. In first person, ordinary tools, food, and blocks enter from the lower outer edge without a
 visible arm; an empty slot draws nothing. Holding the attack button repeats the tool stroke, and
@@ -278,7 +275,7 @@ Elysium has three dimensions:
   exploration.
 
 You can instead choose **World Type: Nether World** when creating a world. All the usual size, game-mode,
-difficulty, dungeon-density, and Character Classes choices remain available, but your first entry and
+difficulty, and dungeon-density choices remain available, but your first entry and
 fallback respawn are in the Nether. You begin beside a lit portal with two iron pickaxes, an iron sword,
 an iron shovel, and 64 oak logs. Additional lit gateway chambers occur throughout the Nether, so an
 Overworld route is never dependent on finding and completing a rare ruined frame. The chosen map size is
@@ -297,128 +294,66 @@ Those guarantees apply when Elysium generates new terrain. Already-saved full ch
 created by older versions or modified by a player—are not rewritten or repaired. Mixed boundaries
 between old and newly generated terrain can therefore remain visible.
 
-## Optional character classes
+## Usage-based skill trees
 
-Character classes add a second, optional progression layer to a world. They are available only when
-**Character Classes: On** was selected during world creation. Ordinary experience and **Advancements**
-continue to track the base survival journey; character levels, skill points, skills, prepared actions,
-fatigue, and cooldowns belong to the RPG layer. There are no attributes in this system — a character's
-health and fatigue grow automatically with level, at a fixed rate set by its path.
+Every Survival player has the same four independent trees: **Mining**, **Melee**, **Ranged**, and
+**Crafting**. There is no character class, sub-class, starter-kit, permanent build choice, or world
+creation switch for this system. Open **Skills** from the inventory or press `K` to see all four trees,
+their XP, rank tracks, per-item crafting mastery, and fast-bar actions.
 
-### Choose a permanent path and sub-class
+Ordinary experience, enchanting, and **Advancements** remain the base survival journey. Skill-tree XP is
+separate and comes only from successful, authoritative play in Survival; misses, invalid targets, and
+Creative-mode actions do not advance a tree. Each tree has five primary ranks followed by five advanced
+ranks. Advanced ranks begin only after primary rank 5.
 
-A path determines the character's role, health/fatigue growth, class-XP sources, and the nine skills that
-can be developed. A sub-class specializes that path around one three-skill route. The choice is permanent
-after character creation; Elysium does not currently offer path, sub-class, or starting-skill respec.
+| Rank | Cumulative tree XP |
+|---|---:|
+| Primary 0–5 | 0, 100, 250, 450, 700, 1,000 |
+| Advanced 0–5 after primary cap | 1,000, 1,200, 1,450, 1,750, 2,100, 2,500 |
 
-| Path | Role and play loop | Growth |
+### Mining
+
+Breaking a supported ore block with a successful harvest gives Mining XP. Coal, copper, iron, and nether quartz give 2 XP; lapis, amethyst, and emerald give 4; gold, nether gold, redstone, diamond, ancient debris, and labradorite give 6. Labradorite is included in the progression table for compatible future content; this update does not itself add a labradorite block, item, or world-generation feature.
+
+Each primary Mining rank adds 10% harvesting speed on hard stone and ore, up to 50%. After reaching primary rank 5, each advanced rank adds a 10% ore-yield bonus, up to 50%. Yield rolls are deterministic for the same authoritative world state, so this benefit never consumes or perturbs world-generation randomness.
+
+### Melee
+
+A successful sword hit on an animal or hostile enemy gives 4 Melee XP. Each primary rank adds 10% to the equipped sword's base damage, up to 50%; enchantments, criticals, and special-action multipliers apply separately. After primary rank 5, each advanced rank unlocks one sword action. The actions appear in the first available slot of the second fast bar and can be used with `Shift+1` through `Shift+9`.
+
+| Advanced rank | Action | Effect |
 |---|---|---|
-| **Warden** | Front-line protector. Hold dangerous ground, blunt hostile pressure, and spend fatigue on protection or decisive close combat. | Health 26 (+2/level), Fatigue 10 (+1/level) |
-| **Ranger** | Mobile ranged scout. Explore ahead, establish safe sightlines, and finish threats before they reach close range. | Health 20 (+1/level), Fatigue 14 (+2/level) |
-| **Delver** | Underground specialist. Descend deliberately, read terrain, manage hazards, and bring resources or guarded treasure back safely. | Health 24 (+2/level), Fatigue 12 (+1/level) |
-| **Arcanist** | Fatigue-driven spellcaster. Prepare a compact spell kit and reshape encounters with damage, deception, wards, and summons. | Health 16 (+1/level), Fatigue 20 (+3/level) |
-| **Mender** | Support specialist. Prevent losses, answer hostile injuries, cleanse danger, establish safe zones, and prepare sustaining food. | Health 18 (+1/level), Fatigue 18 (+2/level) |
-| **Tinker** | Engineering specialist. Learn recipes, build working mechanisms, maintain gear, and trade setup time for repeatable mechanical advantage. | Health 20 (+1/level), Fatigue 16 (+2/level) |
+| 1 | **Stun Enemy** | Stops a targeted enemy's actions and horizontal movement for 30 seconds (600 simulation ticks). It is mechanically prone during that control state; this release does not add a separate prone model pose. |
+| 2 | **Spartan Kick** | Deals 1.5× equipped-sword damage and safely shoves the target up to 5 blocks. |
+| 3 | **Round House** | Deals 1× equipped-sword damage to each hostile surrounding the player. |
+| 4 | **Disarm Enemy** | Forces the target to drop its equipped items. |
+| 5 | **Battle Cry** | Deals 3× equipped-sword damage; it has a 2-minute cooldown. |
 
-Every sub-class has a distinct three-skill purpose:
+### Ranged
 
-| Path | Sub-class roles |
-|---|---|
-| **Warden** | **Guardian** defends an area and keeps allies standing; **Vanguard** closes distance and punishes exposed enemies; **Bulwark** turns armor and blocks into durable defenses. |
-| **Ranger** | **Marksman** emphasizes accurate ranged attacks and target swapping; **Scout** improves sneaking movement, detects nearby hostiles, and reveals threats for reconnaissance or ambushes; **Survivalist** emphasizes forage, camp, weather, and animal handling. |
-| **Delver** | **Miner** accelerates hard-stone and ore excavation, provides mining bursts, and recovers fatigue from deep blocks; **Trapper** detects traps, reduces trap and explosion damage, and places timed gravel deadfalls; **Treasure-Seeker** improves salvage, locks, and risky loot handling. |
-| **Arcanist** | **Elementalist** develops fire, frost, lightning, and storm magic; **Illusionist** uses blur, decoys, invisibility, and misdirection; **Ritualist** uses longer casts, wards, creations, light, and summons. |
-| **Mender** | **Physic** provides direct healing and emergency recovery; **Harvest** develops food, herbs, medicine, and sustainable supplies; **Sanctuary** establishes safe zones, wards, and rescue escapes. |
-| **Tinker** | **Redstone** develops compact circuits and signal reading; **Artificer** tunes gear and performs field repairs; **Sapper** specializes in controlled blasts and demolition timing. |
+A successful bow hit on an animal or hostile enemy gives 4 Ranged XP. Each primary rank adds 10% to the equipped bow's base damage, up to 50%. Ranged uses the same five-rank gate and fast-bar pattern as Melee, with bow-specific counterparts.
 
-Each sub-class defines a three-skill tree, and every skill has 5 ranks. Your three chosen rank-1 starting
-skills are free. Other purchases in your chosen sub-class cost 1 skill point per rank; purchases from one
-of the path's other two sub-classes cost 2. Each skill also has its own level requirement per rank, so a
-focused build reaches its defining abilities sooner. You gain a skill point for every level after level 1,
-plus a bonus skill point at levels 4, 7, 10, 13, 16, and 19.
+| Advanced rank | Action | Effect |
+|---|---|---|
+| 1 | **Pinning Shot** | Stops a targeted enemy's actions and horizontal movement for 30 seconds (600 simulation ticks). It is mechanically prone during that control state; this release does not add a separate prone model pose. |
+| 2 | **Power Shot** | Deals 1.5× equipped-bow damage and safely shoves the target up to 5 blocks. |
+| 3 | **Volley** | Deals 1× equipped-bow damage to hostile enemies around the aimed target. |
+| 4 | **Disarming Shot** | Forces the targeted enemy to drop its equipped items. |
+| 5 | **Eagle Eye** | Deals 3× equipped-bow damage; it has a 2-minute cooldown. |
 
-### Exact class XP rules
+### Crafting
 
-Class XP is separate from ordinary enchanting XP and Advancements. Elysium admits a class-XP event only
-for its owning path, while Character Classes are enabled, the character exists, and the player is not in
-Creative mode. A character at the level-20 cap cannot earn more class XP.
+Completing a crafting-grid recipe awards Crafting XP from the actual resolved ingredients: more and rarer resources contribute more. Crafting treats copper as tier 1, iron as tier 2, gold/redstone/lapis/quartz/amethyst as tier 3, emerald/diamond as tier 4, and ancient-debris/netherite as tier 5 (or a higher registered rarity when one exists). Each output item type can contribute XP for its first 100 completed craft rounds, then that item is mastered and stops granting Crafting XP even when another recipe makes the same output. The mastery counter is attached to a committed output, not to a preview or attempted craft, so cancelled or failed crafts do not consume its limit.
 
-The anti-farming rules are shared and deterministic:
+Primary Crafting ranks improve batch throughput: the maximum committed rounds per craft request progress from 1 to 2, 4, 8, 16, and 32. Advanced ranks improve the quality recorded on eligible crafted gear. Quality increases maximum durability by 10%, 20%, 35%, 55%, and 80%, and weapon base damage by 2.5%, 5%, 10%, 15%, and 25%. It also improves compatible repair outcomes by 5%, 10%, 15%, 20%, and 30%. These bonuses stay with the crafted stack and are used consistently by durability, damage, and repair logic.
 
-- The first admitted event starts that character's XP window. On the first later admitted event at least
-  1,200 simulation ticks later (normally 60 seconds at 20 ticks/second), all category counts and the
-  Arcanist distinct-spell mask reset together. Pausing the simulation pauses this clock.
-- **Combat** admits at most 6 events per window. **Exploration**, **Delver depth, structure treasure,
-  and excavation**, **spell practice**, **healing and provisions**, and **engineering** each admit at
-  most 8. Sources in the same category share its cap.
-- Every admitted event also records a bounded key. Reusing the same key is blocked until it leaves the
-  rolling history of the 64 most recent admitted events; starting a new window does not clear that
-  history.
-- Delver depth thresholds and Tinker first-crafting-grid-recipe records are persistent once-per-character bits. They
-  never reset. Arcanist spell-practice uniqueness resets with the window.
+At advanced rank 5, **Field Repair** appears in the action fast bar. With a damaged eligible item in the main hand and its compatible repair material in the inventory, it restores one quarter of that item's maximum durability, improved by its crafting quality. It has a 30-second cooldown; Creative mode does not consume repair material.
 
-| Path | Qualifying source | Reward | Exact admission and duplicate rule |
-|---|---|---:|---|
-| **Warden** | Close-combat victory | 10 XP | A hostile monster or the Ender Dragon must die from the Warden RPG melee damage source. Uses the 6-event combat cap and the defeated entity's rolling event key. |
-| **Warden** | Causal protection | 2 XP | A protection layer owned by the Warden must absorb at least 2 cumulative damage from a live hostile attacker. The layer is consumed when it reaches the threshold, even if the shared combat cap suppresses the award; its owner/sequence key is rolling. |
-| **Ranger** | Ranged victory | 10 XP | A hostile monster or the Ender Dragon must die from a projectile or Ranger projectile damage source. Uses the combat cap and defeated-entity rolling key. |
-| **Ranger** | Eligible field location | 3 XP | Be in a currently loaded chunk whose dimension/chunk key is absent from the rolling history of the 64 most recently admitted class-XP events. The check runs during gameplay rather than only on a chunk-entry transition. It uses the 8-event exploration cap; the occupied location can award again only after its key is evicted. |
-| **Delver** | Depth milestone | 3 XP | Reach `y ≤ 32`, `16`, `0`, `-16`, `-32`, or `-48` in the Overworld. Each of the six thresholds awards once per character and shares the 8-event Delver depth/structure/excavation cap. |
-| **Delver** | Generated world-structure treasure | 12 XP | Materialize loot from a newly generated world-structure container carrying a valid provenance key, including eligible village, ruined-portal, temple, shipwreck, and dungeon containers. A generated container materializes its loot only once; its rolling world-location key is an additional duplicate guard. The event shares the 8-event Delver depth/structure/excavation cap. |
-| **Delver** | Deep excavation | 4 XP | In the Overworld below `y = 63`, break harvestable hard stone or ore with the correct pickaxe. The dimension/coordinate key is rolling and the event shares the 8-event Delver depth/structure/excavation cap. |
-| **Arcanist** | Spell victory | 10 XP | A hostile monster or the Ender Dragon must die from an Arcanist spell or Arcanist spell-fire damage source. Uses the combat cap and defeated-entity rolling key. |
-| **Arcanist** | Effect-producing spell practice | 6 XP | Successfully resolve a registered spell that produces an effect. Each registered spell can award once per window; all practice shares the 8-event spell-practice cap. |
-| **Mender** | Causal ally healing | 1 XP per 2 health, maximum 8 XP | Before 1,200 simulation ticks have elapsed since a non-player ally's latest hostile injury, restore at least 2 health attributable to that live, unconsumed hostile-injury record. XP uses `floor(causal health / 2)` and the injury record is consumed when credited. Shares the 8-event healing-and-provisions cap. |
-| **Mender** | Causal cleanse or emergency rescue | 4 XP | Before 1,200 simulation ticks have elapsed since a non-player ally's latest hostile injury, Restore can remove poison, wither, weakness, or slowness; Purify can remove poison, hunger, or nausea; and Mend Wounds or Restore can qualify when the hostile-attributable portion of the heal alone carries the ally from at most 25% health to above 25%. The hostile-injury record must remain live and unconsumed. One action earns at most one fixed bonus even when it both cleanses and rescues; a credited action consumes the record. Shares the healing-and-provisions cap. |
-| **Mender** | Provision crafting | 6 XP per completed round | Complete a crafting-grid recipe whose output is food with positive hunger and no non-beneficial listed effect. Each actually completed crafting round proposes one event; all provision, healing, and rescue events share the 8-event cap. Smelting, stonecutting, and smithing do not use this award path. |
-| **Tinker** | First registered crafting-grid recipe | 4 XP | The first admitted completion of **any** registered crafting-grid recipe, not only an engineering output, sets a persistent per-character recipe bit. It consumes one slot from the shared 8-event engineering cap and never becomes first-time again. A craft suppressed by the cap does not reserve the bit; smelting, stonecutting, and smithing are outside this ledger. |
-| **Tinker** | First powered placement at a location | 2 XP | Place a lever, dispenser/dropper, observer, piston/sticky piston, repeater/comparator, redstone lamp, or button where it is powered immediately after placement. The dimension/coordinate key is rolling; all such placements share the engineering cap. |
-| **Tinker** | Engineering crafting-grid output | 6 XP per completed round | Complete a crafting-grid recipe for a circuit-component block: redstone wire; repeater; comparator; piston/sticky piston; daylight sensor; lever; button; pressure plate; tripwire hook; redstone torch/block; observer; detector rail; target; sculk/calibrated sculk sensor; lightning rod; trapped chest; redstone lamp; dispenser/dropper; note block; or TNT. A registered tool output also qualifies unless its type is sword, bow, crossbow, or trident. Each actually completed round proposes one event and shares the engineering cap. A first-time recipe whose output qualifies can earn both the 4-XP first-recipe bonus and 6-XP engineering award when two cap slots remain. |
+### Legacy saves and LAN authority
 
-### Create the character
+When an older save loads, Elysium translates its closest relevant class ranks into the four trees once: Delver mining skills map to Mining, Warden melee skills to Melee, Ranger bow skills to Ranged, and Tinker crafting/repair skills to Crafting. Former class spells and unrelated class-only perks retire rather than being assigned to an unrelated tree. New tree state is then saved in the existing versioned player envelope; a newer, unknown player-state version is not downgraded or overwritten.
 
-Character creation is a resizable native macOS window with standard lists, selection controls, buttons,
-scrolling, keyboard focus, and a four-step sidebar:
-
-1. **Path** — select one of six path cards, inspect its purpose, play loop, growth, and exact XP sources,
-   then choose **Continue**.
-2. **Sub-class** — select one of the path's three sub-classes, inspect its purpose, three skills, and any
-   signature-skill spell unlock, then choose **Continue**.
-3. **Starting Skills** — choose exactly 3 rank-1 skills from a pool of 5: the chosen sub-class's three plus
-   the signature skill of each sibling sub-class. The three signatures are preselected by default. A
-   fourth selection is unavailable until one is removed; **Continue** is available only with exactly 3.
-4. **Review** — verify the permanent path, sub-class, and starting skills, plus spell grants,
-   health/fatigue growth, focus requirement, starter kit, class-XP guidance, inventory capacity, and
-   authority. **Create Character** commits the character and starter kit together. It remains disabled
-   when the draft is incomplete, authority is unavailable, or the starter kit cannot fit; the window
-   gives the exact reason.
-
-**Back** preserves the draft. Escape steps back until Path; closing a changed draft from Path or with the
-window's close control asks **Discard Character Draft?** before anything is lost. An untouched draft can
-close directly. After **Create Character**, path, sub-class, and starting skills cannot be changed.
-
-After creation, the native sidebar has four destinations:
-
-- **Overview** summarizes path, sub-class, level, class XP, health/fatigue growth, derived combat and
-  recovery values, equipment/focus state, banked points, and the next milestone.
-- **Skills** groups all nine path skills by sub-class, shows five ranks and their effects/requirements,
-  and performs a checked rank purchase. Passive skills are always on once learned.
-- **Loadout** combines **Actions** and **Spells**. Prepare up to four active skills and six spells, select
-  the current prepared action, and assign prepared actions to the nine RPG quick slots.
-- **Progress** shows current class XP and the next threshold, the path's purpose/play loop, every exact XP
-  source above, the selected sub-class route, level requirements, automatic skill-point rewards, and
-  completion constraints.
-
-Cycle or activate prepared active skills and spells with the configurable RPG bindings. Fatigue and
-cooldowns can temporarily prevent an otherwise prepared action; the interface shows the current reason.
-Some character operations remain unavailable to LAN clients because the host owns the world simulation.
-
-If you open a character created before this system was simplified, Elysium migrates it automatically the
-first time you load it: the character keeps its path, sub-class, level, and skill ranks; health and
-fatigue are recalculated from the level-growth table above; earned skill points that are not already
-spent remain available on the Skills tab; and you see a one-time notice — "Your character was updated:
-attributes are retired. Health and fatigue now grow with your level. Unspent skill points are ready on
-the Skills tab."
+On a LAN world, the host owns skill XP, rank changes, targets, damage, displacement, dropped items, cooldowns, and the replicated player state. A client can request an unlocked action but cannot supply its own skill-tree state or bypass the host's equipment, range, target, or cooldown checks.
 
 ## Trade with villagers
 
@@ -477,7 +412,7 @@ recover a deleted world.
 ### Permanently delete saved worlds
 
 > **Permanent data-loss warning:** **Delete** removes every selected local world and its chunks, player
-> data, Advancements, and RPG data. There is no cloud copy or guaranteed recovery. Back up first if you
+> data, Advancements, and skill-tree data. There is no cloud copy or guaranteed recovery. Back up first if you
 > may want the data again.
 
 1. Review the checked worlds and choose **Delete**. Delete and Backspace keys intentionally do nothing.
@@ -518,7 +453,7 @@ unacceptable.
 3. Review **Player**, then choose **Join World**.
 
 A join code is an access gate, not encryption and not a defense against other hostile participants on the
-same LAN. Current LAN clients cannot trade and some RPG character operations remain host-only.
+same LAN. Current LAN clients cannot trade; skill-tree state and action resolution remain host-owned.
 
 ## Object templates
 
@@ -972,7 +907,7 @@ or is refused for being over budget) without pausing the rest of the game.
 | Recipe list says **No craftable items** | Gather the missing resources or use the correct crafting grid or workstation. |
 | Recipe list says **No matching recipes** | Shorten or clear the active search text. |
 | **Trade** is disabled | Read its visible reason; check payment, stock, level, workstation, distance, line of sight, inventory room, and whether you are a LAN client. |
-| Character controls are missing or disabled | Confirm the world was created with **Character Classes: On**. Read the visible creation/action reason; fix the starting-skill selection, preparation, fatigue, cooldown, authority, or inventory issue it identifies. |
+| A skill action is unavailable | Open **Skills** with `K`, confirm its tree's primary and advanced ranks, equip the required sword or bow, then read the visible cooldown, target, range, and authority reason. |
 | No LAN world appears | Confirm both Macs are on the same trusted LAN, choose **Browse LAN**, or use the host's direct address, port, and code. Do not weaken security or expose the port publicly. |
 | Ollama is unavailable | Confirm the independent local service is running, choose **Refresh Models**, select a local model, and retry. Core play does not require AI. |
 | The script editor says attached scripts are paused | Check and Save should still work: Check is read-only, and Save keeps the script dormant. The editor's explicit Run Once works before world trust but still requires `doScripts` on. Use the banner's **Trust World**, **Turn On Scripts**, or **Trust & Turn On** action only after reviewing its warning that existing attached scripts may start. |
@@ -986,11 +921,9 @@ Current beta boundaries to keep in mind:
 
 - Only Survival and Creative are available; there is no Hardcore or Spectator mode.
 - The map is a live view, not a named/saved map system.
-- Controller support is limited to RPG world actions and trading rather than complete game control.
-  The native Character window uses standard macOS keyboard and pointer controls and does not
-  intercept controller input.
-- Multiplayer is LAN-only, join codes do not make a hostile LAN safe, LAN clients cannot trade, and some
-  character operations remain host-only.
+- Controller support is limited to skill actions and trading rather than complete game control.
+- Multiplayer is LAN-only, join codes do not make a hostile LAN safe, LAN clients cannot trade, and
+  skill-tree state and action resolution remain host-owned.
 - Faithful 64x is the pinned baseline. Open **Options... → Video → Resource Packs...** to enable or
   disable Ore Borders 64x and Static Lanterns independently. Both optional add-ons start off; a named
   validation/load error leaves the prior selection active rather than silently applying a partial stack.

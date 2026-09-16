@@ -76,7 +76,10 @@ public final class Player: LivingEntity {
     public var stats: [String: Double] = [:]
     public var portalTicks = 0
     public var insidePortalKind: String? = nil   // nether | end | nil
-    public var rpg = RPGCharacterState.uncreated()
+    /// The persisted envelope retained its historical `rpg` name for
+    /// save/LAN compatibility, but new players begin with usage-based trees
+    /// and never enter a class-creation flow.
+    public var rpg = RPGCharacterState.skillTreeProgression()
     /// Security amendment S2 (forward guard): transient, never persisted. True only immediately
     /// after `load(_:)` decoded an `rpg` payload whose `version` exceeds
     /// `RPG_STATE_CURRENT_VERSION` -- i.e. this build cannot yet understand that save. Callers
@@ -633,7 +636,7 @@ public final class Player: LivingEntity {
 
     public func hasElytra() -> Bool {
         guard let chest = armor[1], itemDef(chest.id).name == "elytra" else { return false }
-        return chest.damage < (itemDef(chest.id).armor?.durability ?? 432) - 1
+        return chest.damage < maxDamageOf(chest) - 1
     }
     @discardableResult
     public func startElytra() -> Bool {
@@ -882,7 +885,7 @@ public final class Player: LivingEntity {
     public func damageStack(_ s: ItemStack, _ amount: Int) {
         if gameMode == GameMode.creative { return }
         let def = itemDef(s.id)
-        let maxD = def.tool?.durability ?? def.armor?.durability ?? 0
+        let maxD = maxDamageOf(s)
         if maxD <= 0 { return }
         let unb = enchLevel(s, "unbreaking")
         for _ in 0..<amount {
@@ -1093,10 +1096,15 @@ public final class Player: LivingEntity {
         } else {
             // A malformed or oversized RPG component must not discard the
             // player's inventory, pose, health, or other vanilla save data.
-            rpg = .uncreated()
+            rpg = .skillTreeProgression()
             rpgLegacyQuickSlotEnvelope = nil
         }
-        rpg = repairRPGCharacterState(rpg)
+        // A known legacy class state is translated once into the new payload.
+        // A future-version record remains fail-closed and is deliberately not
+        // rewritten into a lower-version tree.
+        rpg = rpgDecodedVersionExceedsCurrent
+            ? repairRPGCharacterState(rpg)
+            : rpgMigrateLegacyStateToSkillTrees(rpg)
         // Active upkeep has no durable world counterpart: temporary servants,
         // auras, and images are deliberately omitted from chunk persistence.
         clearRPGTerminalUpkeeps()

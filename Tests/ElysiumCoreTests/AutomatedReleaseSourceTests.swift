@@ -168,6 +168,31 @@ final class AutomatedReleaseSourceTests: XCTestCase {
         }
     }
 
+    func testDebugControlRetiresClassCommandsInFavorOfUsageTrees() throws {
+        let runtime = try source("Sources/Elysium/DebugControlRuntime.swift")
+        XCTAssertTrue(runtime.contains(
+            "let rpg = try optionalBool(a, \"rpgClassesEnabled\") ?? false"))
+        XCTAssertTrue(runtime.contains("case \"registry.skill_trees\":"))
+        XCTAssertFalse(runtime.contains("case \"registry.rpg\":"))
+        XCTAssertTrue(runtime.contains("private func skillTreeRegistry() -> [String: JSONValue]"))
+        XCTAssertTrue(runtime.contains(
+            "case \"rpg.create\", \"rpg.learn\", \"rpg.prepare_skill\", \"rpg.prepare_spell\","))
+        XCTAssertTrue(runtime.contains("\"rpg.select_skill\", \"rpg.select_spell\":"))
+        XCTAssertTrue(runtime.contains(
+            "return [\"message\": .string(RPGActionFailure.classesDisabled.description)]"))
+        for retiredRequest in [
+            "requestRPGCreateCharacter(", "requestRPGLearnSkill(",
+            "requestRPGTogglePreparedSkill(", "requestRPGTogglePreparedSpell(",
+            "requestRPGSelectPreparedSkill(", "requestRPGSelectPreparedSpell(",
+        ] {
+            XCTAssertFalse(runtime.contains(retiredRequest), retiredRequest)
+        }
+        XCTAssertEqual(runtime.components(separatedBy: "app.game.skillTreeStateSnapshot() != nil").count - 1, 2,
+                       "both surviving action entry points must reject legacy class state")
+        XCTAssertTrue(runtime.contains("case \"rpg.use_selected\":"))
+        XCTAssertTrue(runtime.contains("case \"rpg.use_quick_slot\":"))
+    }
+
     func testResourcePackPublicationTruthIsInTheProductionAccessibilityTree() throws {
         let menus = try source("Sources/Elysium/MenusM.swift")
         let screen = try source("Sources/Elysium/ResourcePackScreenM.swift")

@@ -4,6 +4,14 @@ import XCTest
 
 @MainActor
 final class LANMultiplayerTests: XCTestCase {
+    override class func setUp() {
+        super.setUp()
+        registerAllBlocks()
+        registerAllItems()
+        registerAllRecipes()
+        registerAllEntities()
+    }
+
     func testProtocol5InboundAdmissionIsClosedByRoleAndPhase() {
         XCTAssertEqual(
             LANMultiplayerMessageKind.allCases.filter {
@@ -148,6 +156,13 @@ final class LANMultiplayerTests: XCTestCase {
             ).guestClaimedPlayerID,
             peerID
         )
+        XCTAssertEqual(
+            LANMultiplayerMessage.bowIntent(
+                playerID: peerID,
+                intent: LANBowIntent(action: .begin, selectedHotbarSlot: 0, sequence: 2)
+            ).guestClaimedPlayerID,
+            peerID
+        )
         XCTAssertNil(LANMultiplayerMessage.chat(sender: "spoof", text: "hello").guestClaimedPlayerID)
     }
 
@@ -155,7 +170,7 @@ final class LANMultiplayerTests: XCTestCase {
         let expected: [LANMultiplayerMessageKind] = [
             .playerState, .inputIntent, .blockIntent, .containerIntent,
             .templateIntent, .attackIntent, .tossIntent, .containerEditIntent,
-            .inventoryUpdate, .rpgIntent, .scriptIntent, .interactionIntent,
+            .inventoryUpdate, .rpgIntent, .scriptIntent, .interactionIntent, .bowIntent,
         ]
         let classified = LANMultiplayerMessageKind.allCases.filter {
             $0.isHostMutationBlockedByRPGClockCatchUp
@@ -268,6 +283,9 @@ final class LANMultiplayerTests: XCTestCase {
             .replicationAck(playerID: "peer-a", ack: LANReplicationAck(tick: 7, receivedSequence: 42)),
             .gameplayEvent(event),
             .attackIntent(playerID: "peer-a", intent: LANAttackIntent(targetEntityID: 12, selectedHotbarSlot: 3, sprinting: true)),
+            .bowIntent(playerID: "peer-a", intent: LANBowIntent(
+                action: .release, selectedHotbarSlot: 3, sequence: 10
+            )),
             .tossIntent(playerID: "peer-a", intent: LANTossIntent(slot: 4, count: 12, all: false)),
             .containerEditIntent(
                 playerID: "peer-a",
@@ -423,6 +441,58 @@ final class LANMultiplayerTests: XCTestCase {
         XCTAssertEqual(decoded, LANBlockIntent(action: .placeBlock, x: 1, y: 2, z: 3, face: 1, selectedHotbarSlot: 0))
     }
 
+    func testInventoryAndBlockEntityQualitySlotsRoundTripAndDecodeLegacyShapes() throws {
+        let inventory = LANInventorySlotSnapshot(
+            slot: 3, itemID: 17, count: 1, damage: 4, label: "Made here", craftingQuality: 5,
+            enchantments: [LANItemEnchantmentSnapshot(id: "power", lvl: 3)],
+            potion: "poison"
+        )
+        let blockEntity = LANBlockEntitySlotSnapshot(
+            slot: 2, itemID: 19, count: 1, damage: 8, craftingQuality: 4,
+            enchantments: [LANItemEnchantmentSnapshot(id: "flame", lvl: 1)],
+            potion: "swiftness"
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(LANInventorySlotSnapshot.self, from: JSONEncoder().encode(inventory)),
+            inventory
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(LANBlockEntitySlotSnapshot.self, from: JSONEncoder().encode(blockEntity)),
+            blockEntity
+        )
+
+        let legacyInventory = try JSONDecoder().decode(
+            LANInventorySlotSnapshot.self,
+            from: Data(#"{"slot":3,"itemID":17,"count":1,"damage":4,"label":"Made here"}"#.utf8)
+        )
+        let legacyBlockEntity = try JSONDecoder().decode(
+            LANBlockEntitySlotSnapshot.self,
+            from: Data(#"{"slot":2,"itemID":19,"count":1,"damage":8}"#.utf8)
+        )
+        XCTAssertNil(legacyInventory.craftingQuality)
+        XCTAssertNil(legacyBlockEntity.craftingQuality)
+        XCTAssertEqual(legacyInventory.enchantments, [])
+        XCTAssertNil(legacyInventory.potion)
+        XCTAssertEqual(legacyBlockEntity.enchantments, [])
+        XCTAssertNil(legacyBlockEntity.potion)
+
+        let clampedInventory = try JSONDecoder().decode(
+            LANInventorySlotSnapshot.self,
+            from: Data(#"{"slot":0,"itemID":1,"count":1,"craftingQuality":99,"enchantments":[{"id":"power","lvl":99},{"id":"power","lvl":2},{"id":"invalid","lvl":1}],"potion":"not-a-potion"}"#.utf8)
+        )
+        let clampedBlockEntity = try JSONDecoder().decode(
+            LANBlockEntitySlotSnapshot.self,
+            from: Data(#"{"slot":0,"itemID":1,"count":1,"craftingQuality":-3}"#.utf8)
+        )
+        XCTAssertEqual(clampedInventory.craftingQuality, 5)
+        XCTAssertEqual(clampedBlockEntity.craftingQuality, 0)
+        XCTAssertEqual(
+            clampedInventory.enchantments,
+            [LANItemEnchantmentSnapshot(id: "power", lvl: 5)]
+        )
+        XCTAssertNil(clampedInventory.potion)
+    }
+
     func testBlockIntentWireDecoderRejectsOutOfRangeSemanticFieldsInsteadOfClamping() {
         let malformedPayloads = [
             "{\"action\":\"placeBlock\",\"x\":1,\"y\":2,\"z\":3,\"face\":-1,\"selectedHotbarSlot\":0,\"cell\":0}",
@@ -505,6 +575,41 @@ final class LANMultiplayerTests: XCTestCase {
             XCTAssertThrowsError(try JSONDecoder().decode(
                 LANInteractionIntent.self, from: Data(payload.utf8)
             ), "hostile interaction value must fail closed: \(payload)")
+        }
+    }
+
+    func testBowIntentRoundTripsAndRejectsHostileSemanticFields() throws {
+        XCTAssertTrue(lanMultiplayerAllowsInbound(
+            .bowIntent, localRole: .host, phase: .authenticated
+        ))
+        XCTAssertFalse(lanMultiplayerAllowsInbound(
+            .bowIntent, localRole: .client, phase: .authenticated
+        ))
+        XCTAssertEqual(
+            lanMultiplayerHostRateLimitCategory(for: .bowIntent),
+            .gameplayIntent
+        )
+        XCTAssertEqual(
+            LANV6MessageKind.bowIntent.rawValue,
+            LANMultiplayerMessageKind.bowIntent.rawValue
+        )
+
+        let begin = LANBowIntent(action: .begin, selectedHotbarSlot: 2, sequence: 7)
+        let release = LANBowIntent(action: .release, selectedHotbarSlot: 2, sequence: 8)
+        for intent in [begin, release] {
+            XCTAssertEqual(
+                try JSONDecoder().decode(LANBowIntent.self, from: JSONEncoder().encode(intent)),
+                intent
+            )
+        }
+        for payload in [
+            #"{"action":"begin","selectedHotbarSlot":9,"sequence":1}"#,
+            #"{"action":"release","selectedHotbarSlot":0,"sequence":0}"#,
+            #"{"action":"power","selectedHotbarSlot":0,"sequence":1}"#,
+        ] {
+            XCTAssertThrowsError(try JSONDecoder().decode(
+                LANBowIntent.self, from: Data(payload.utf8)
+            ), "hostile bow value must fail closed: \(payload)")
         }
     }
 

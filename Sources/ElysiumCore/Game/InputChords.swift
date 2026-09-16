@@ -252,9 +252,9 @@ private func makeKeybindDefinitions() -> [ElysiumKeybindDefinition] {
         ("chat", "Chat", "KeyT", .appHUD), ("command", "Command", "Slash", .appHUD),
         ("perspective", "Perspective", "F5", .appHUD),
         ("swapOffhand", "Swap Offhand", "KeyF", .appHUD),
-        ("rpgCharacter", "RPG Character", "KeyK", .rpgWorldAction),
-        ("rpgCycleAction", "Cycle RPG Action", "KeyO", .rpgWorldAction),
-        ("rpgUseAction", "Use RPG Action", "KeyL", .rpgWorldAction),
+        ("rpgCharacter", "Skills", "KeyK", .rpgWorldAction),
+        ("rpgCycleAction", "Cycle Skill Action", "KeyO", .rpgWorldAction),
+        ("rpgUseAction", "Use Selected Skill Action", "KeyL", .rpgWorldAction),
         // Kept at the end of `bases` so the fixed definitions[13/14/15] RPG overrides below
         // keep their indices. These resolve to .binding(.equipTorch/.equipShield) automatically.
         ("equipTorch", "Equip Torch (off-hand)", "KeyG", .appHUD),
@@ -268,20 +268,20 @@ private func makeKeybindDefinitions() -> [ElysiumKeybindDefinition] {
                                        defaultChord: chord(value.2), context: value.3,
                                        command: command)
     }
-    definitions[13] = ElysiumKeybindDefinition(actionID: "rpgCharacter", displayName: "RPG Character",
+    definitions[13] = ElysiumKeybindDefinition(actionID: "rpgCharacter", displayName: "Skills",
                                                defaultChord: chord("KeyK"),
                                                context: .rpgWorldAction, command: .semantic(.openCharacter))
-    definitions[14] = ElysiumKeybindDefinition(actionID: "rpgCycleAction", displayName: "Cycle RPG Action",
+    definitions[14] = ElysiumKeybindDefinition(actionID: "rpgCycleAction", displayName: "Cycle Skill Action",
                                                defaultChord: chord("KeyO"),
                                                context: .rpgWorldAction, command: .semantic(.cyclePreparedAction))
-    definitions[15] = ElysiumKeybindDefinition(actionID: "rpgUseAction", displayName: "Use RPG Action",
+    definitions[15] = ElysiumKeybindDefinition(actionID: "rpgUseAction", displayName: "Use Selected Skill Action",
                                                defaultChord: chord("KeyL"),
                                                context: .rpgWorldAction, command: .semantic(.useSelectedAction))
     for index in 1...9 {
         let defaultChord = chord("Shift+Digit\(index)")
         let command = ResolvedKeyCommand.semantic(.useQuickSlot(index - 1))
         definitions.append(ElysiumKeybindDefinition(actionID: "rpgQuickSlot\(index)",
-            displayName: "RPG Quick Slot \(index)",
+            displayName: "Skill Action \(index)",
             defaultChord: defaultChord, context: .rpgWorldAction, command: command))
     }
     return definitions

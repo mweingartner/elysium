@@ -70,6 +70,23 @@ final class CreativeModeTests: XCTestCase {
         XCTAssertEqual(player.inventory[0]?.count, 3)
     }
 
+    func testAdjacentChestPlacementInheritsExistingChestFacing() {
+        let (world, player, _) = makePlacementWorld(mode: GameMode.creative)
+        _ = world.setBlock(0, 64, 0, Int(cell(B.chest, 0)))
+        _ = world.setBlock(1, 63, 0, Int(cell(B.stone)))
+        player.yaw = .pi // standalone placement would face south (meta 1), not north (meta 0)
+        player.inventory[0] = stack("chest", 1)
+        player.selectedSlot = 0
+        let hit = RaycastHit(x: 1, y: 63, z: 0, face: Dir.up,
+                             cell: world.getBlock(1, 63, 0), t: 1,
+                             px: 1.5, py: 64, pz: 0.5)
+
+        XCTAssertTrue(placeBlock(InteractCtx(world: world, player: player), hit,
+                                 Int(B.chest), player.mainHand!))
+
+        XCTAssertEqual(world.getBlock(1, 64, 0), Int(cell(B.chest, 0)))
+    }
+
     func testCreativePlayerIgnoresAllDamageSources() {
         registerCoreIfNeeded()
         let world = World(dim: .overworld, seed: 456)

@@ -185,12 +185,44 @@ final class RPGNativeUISourceTests: XCTestCase {
         XCTAssertTrue(viewModel.contains("currentIsExplicit: selectedActiveSkillWasExplicit"))
     }
 
-    func testCharacterWindowHasStableGameMenuDiscovery() throws {
+    func testSkillsWorkspaceHasStableGameMenuDiscovery() throws {
         let main = try source("Sources/Elysium/main.swift")
-        XCTAssertTrue(main.contains("title: \"Character…\""))
+        XCTAssertTrue(main.contains("title: \"Skills…\""))
         XCTAssertTrue(main.contains("#selector(AppDelegate.openCharacterWindow(_:))"))
         XCTAssertTrue(main.contains("dispatchRPGWorldSemanticCommand(.openCharacter"))
+        XCTAssertTrue(main.contains("ui.open(makeSkillTreeScreen(), game)"))
         XCTAssertTrue(main.contains("NSMenuItemValidation"))
+    }
+
+    func testUsageTreeFastBarDoesNotRenderRetiredFatigueMeter() throws {
+        let hud = try source("Sources/Elysium/HudM.swift")
+        XCTAssertTrue(hud.contains("if rpgState.skillTrees == nil"))
+        XCTAssertTrue(hud.contains("drawRPGQuickSlots("))
+    }
+
+    func testLANUsageTreeFastBarUsesOnlyTheNarrowHostIntentBridge() throws {
+        let manager = try source("Sources/Elysium/UIManagerM.swift")
+        let bridge = try XCTUnwrap(manager.range(of:
+            "game.dispatchLANUsageTreeWorldSemanticCommand(command)"))
+        let legacyDescriptor = try XCTUnwrap(manager.range(of:
+            "let descriptor = RPGSemanticDescriptor", range: bridge.upperBound..<manager.endIndex))
+        XCTAssertLessThan(bridge.lowerBound, legacyDescriptor.lowerBound,
+                          "tree fastbar actions must route before the legacy client rejection boundary")
+        XCTAssertTrue(manager.contains("return .dispatched(serial: revisionAddition.partialValue)"))
+
+        let progression = try source("Sources/ElysiumCore/Game/CharacterProgression.swift")
+        let method = try XCTUnwrap(progression.range(of:
+            "func dispatchLANUsageTreeWorldSemanticCommand"))
+        let methodBody = String(progression[method.lowerBound...])
+        for required in [
+            "case .cyclePreparedAction:",
+            "case .useSelectedAction:",
+            "case .useQuickSlot(let slot):",
+            "default:\n            return false",
+            "guard isLANClientWorld, player?.rpg.skillTrees != nil",
+        ] {
+            XCTAssertTrue(methodBody.contains(required), required)
+        }
     }
 
     func testDecisionCardsAndStatusRetainRichVoiceOverContent() throws {

@@ -2,7 +2,7 @@ import XCTest
 @testable import ElysiumCore
 
 final class RPGAssetManifestTests: XCTestCase {
-    func testManifestCoversEveryRPGDefinitionAndAction() {
+    func testManifestCoversDefinitionsAndUsageTreeFastbarActions() {
         let manifest = rpgAssetManifest()
         let ids = manifest.map(\.id)
 
@@ -11,7 +11,17 @@ final class RPGAssetManifestTests: XCTestCase {
         XCTAssertEqual(manifest.filter { $0.kind == .branchIcon }.map(\.ownerID), RPG_BRANCH_DEFINITIONS.map(\.id))
         XCTAssertEqual(manifest.filter { $0.kind == .skillIcon }.map(\.ownerID), RPG_SKILL_DEFINITIONS.map(\.id))
         XCTAssertEqual(manifest.filter { $0.kind == .spellIcon }.map(\.ownerID), RPG_SPELL_DEFINITIONS.map(\.id))
-        XCTAssertEqual(manifest.filter { $0.kind == .actionIcon }.map(\.ownerID), RPG_ACTION_ASSET_IDS)
+        XCTAssertEqual(
+            manifest.filter { $0.kind == .actionIcon }.map(\.ownerID),
+            RPG_ACTION_ASSET_IDS + SKILL_TREE_ACTION_DESCRIPTORS.map { $0.id.rawValue }
+        )
+        XCTAssertEqual(
+            manifest.filter { $0.kind == .actionIcon }.suffix(SkillTreeActionID.allCases.count)
+                .map(\.ownerID),
+            SKILL_TREE_ACTION_DESCRIPTORS.map { $0.id.rawValue },
+            "every usage-tree action needs a deterministic fast-bar icon"
+        )
+        XCTAssertEqual(Set(SKILL_TREE_ACTION_DESCRIPTORS.map { $0.id }), Set(SkillTreeActionID.allCases))
     }
 
     func testEveryManifestEntryProducesNonBlankSixteenBySixteenPixels() {

@@ -5,7 +5,9 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
-- Bumped the release and exact-LAN-compatibility version to 1.2.1.
+- Bumped the release and exact-LAN-compatibility version to 1.2.2 for the new
+  host-timed ordinary-bow intent. Older binaries are rejected during the existing exact-version
+  handshake instead of decoding the new message kind incorrectly.
 
 - Made coal and iron worth digging for in every world type. The vanilla bands left rolling
   terrain almost bare (upper coal starts at y136 and upper iron peaks near y232, open air outside

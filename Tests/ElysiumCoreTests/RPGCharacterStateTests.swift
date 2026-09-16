@@ -138,35 +138,52 @@ final class RPGCharacterStateTests: XCTestCase {
         XCTAssertTrue(repaired.migrationNoticePending)
     }
 
-    func testPlayerSaveLoadPersistsRPGStateAndKeepsOldPlayersVanilla() {
+    func testPlayerSaveLoadKeepsNewPlayersTreeBasedAndMigratesLegacyClasses() throws {
         let world = World(dim: .overworld, seed: 1234)
-        let oldPlayer = Player(world: world)
-        let oldSnapshot = oldPlayer.save()
-        let loadedOld = Player(world: world)
-        loadedOld.load(oldSnapshot)
+        let newPlayer = Player(world: world)
+        let newSnapshot = newPlayer.save()
+        let loadedNew = Player(world: world)
+        loadedNew.load(newSnapshot)
 
-        XCTAssertFalse(loadedOld.rpg.created)
-        XCTAssertEqual(loadedOld.maxHealth, 20)
+        XCTAssertFalse(loadedNew.rpg.created)
+        let newTrees = try XCTUnwrap(loadedNew.rpg.skillTrees)
+        XCTAssertEqual(newTrees.mining, .untrained())
+        XCTAssertEqual(newTrees.melee, .untrained())
+        XCTAssertEqual(newTrees.ranged, .untrained())
+        XCTAssertEqual(newTrees.crafting.progress, .untrained())
+        XCTAssertEqual(loadedNew.maxHealth, 20)
 
-        let player = Player(world: world)
-        let error = player.createRPGCharacter(RPGCreationDraft(
-            pathID: "warden", branchID: "warden_guardian",
-            startingSkillIDs: rpgDefaultStartingSkillIDs(pathID: "warden")))
-        XCTAssertNil(error)
-        player.health = player.maxHealth
-        let saved = player.save()
+        // A decoded pre-tree save remains a valid migration input, but its
+        // class identity, starter kit, and class-only fields retire at load.
+        var legacy = RPGCharacterState.uncreated()
+        legacy.version = RPG_STATE_CURRENT_VERSION - 1
+        legacy.created = true
+        legacy.pathID = "warden"
+        legacy.starterSkillID = "heavy_cut"
+        legacy.specializationBranchID = "warden_vanguard"
+        legacy.startingSkillIDs = ["heavy_cut"]
+        legacy.skillRanks = ["heavy_cut": 1, "stagger_chain": 1]
+        legacy.kitGrantVersion = RPG_STARTER_KIT_VERSION
+        legacy.kitGrantID = rpgStarterKitGrantID(pathID: "warden", starterSkillID: "heavy_cut")
+        let legacyPlayer = Player(world: world)
+        legacyPlayer.rpg = legacy
+        let saved = legacyPlayer.save()
 
         let loaded = Player(world: world)
         loaded.load(saved)
 
-        XCTAssertTrue(loaded.rpg.created)
-        XCTAssertEqual(loaded.rpg.pathID, "warden")
-        XCTAssertEqual(loaded.rpg.skillRanks["guard_stance"], 1)
-        XCTAssertEqual(loaded.rpg.kitGrantVersion, RPG_STARTER_KIT_VERSION)
-        XCTAssertEqual(loaded.rpg.kitGrantID, rpgStarterKitGrantID(pathID: "warden", starterSkillID: "guard_stance"))
+        let trees = try XCTUnwrap(loaded.rpg.skillTrees)
+        XCTAssertFalse(loaded.rpg.created)
+        XCTAssertEqual(loaded.rpg.pathID, "")
+        XCTAssertTrue(loaded.rpg.skillRanks.isEmpty)
+        XCTAssertEqual(loaded.rpg.kitGrantVersion, 0)
+        XCTAssertNil(loaded.rpg.kitGrantID)
+        XCTAssertEqual(trees.melee.primaryRank, 1)
+        XCTAssertEqual(trees.melee.advancedRank, 0,
+                       "unearned legacy ranks must not become free advanced tree progress")
         XCTAssertNil((saved["rpg"] as? [String: Any])?["actionQuickSlots"])
-        XCTAssertEqual(loaded.maxHealth, rpgDerivedStats(loaded.rpg).maxHealth)
-        XCTAssertEqual(loaded.health, loaded.maxHealth)
+        XCTAssertEqual(loaded.maxHealth, 20)
+        XCTAssertEqual(loaded.health, 20)
     }
 
     func testLegacyActionQuickSlotsRemainInPlayerSaveUntilReceipt() throws {
@@ -183,6 +200,9 @@ final class RPGCharacterStateTests: XCTestCase {
                                            "spell:ignite"]
         legacy["rpg"] = legacyRPG
         loaded.load(legacy)
+        XCTAssertNotNil(loaded.rpg.skillTrees)
+        XCTAssertFalse(loaded.rpg.created)
+        XCTAssertTrue(loaded.rpg.knownSpellIDs.isEmpty)
         let retained = try XCTUnwrap(loaded.rpgLegacyQuickSlotEnvelope)
         XCTAssertEqual(retained.preferences.tokens[4], "spell:ignite")
         XCTAssertNotNil((loaded.save()["rpg"] as? [String: Any])?["actionQuickSlots"])

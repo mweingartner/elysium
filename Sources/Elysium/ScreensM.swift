@@ -556,10 +556,10 @@ final class InventoryScreen: ContainerScreen {
         })
         creativeCheckbox = cb
         buttons.append(cb)
-        if p.rpgClassesEnabled() {
-            let character = Button(236, 4, 86, 18, "Character", { [weak ui, weak game] in
+        if p.rpg.skillTrees != nil {
+            let character = Button(236, 4, 86, 18, "Skills", { [weak ui, weak game] in
                 guard let ui, let game else { return }
-                ui.open(RPGCharacterScreen(), game)
+                ui.open(makeSkillTreeScreen(), game)
             })
             characterButton = character
             buttons.append(character)
@@ -592,7 +592,10 @@ final class InventoryScreen: ContainerScreen {
             return min(MAX_CRAFTING_BATCH_ROUNDS,
                        max(1, maxCreativeCraftingRounds(plan, into: game.player.inventory)))
         }
-        return min(MAX_CRAFTING_BATCH_ROUNDS,
+        let treeLimit = game.player.rpg.skillTrees.map {
+            skillTreeCraftingBatchRoundLimit(primaryRank: $0.crafting.progress.primaryRank)
+        } ?? MAX_CRAFTING_BATCH_ROUNDS
+        return min(MAX_CRAFTING_BATCH_ROUNDS, treeLimit,
                    maxCraftingRounds(plan, from: availableRecipeResources(game)))
     }
     private func clampCraftRounds(_ game: GameCore) -> Int {
@@ -755,7 +758,7 @@ final class InventoryScreen: ContainerScreen {
             cb.y = 4
         }
         if let characterButton {
-            characterButton.visible = game.player.rpgClassesEnabled()
+            characterButton.visible = game.player.rpg.skillTrees != nil
             characterButton.x = (creativeCheckbox?.x ?? 148) + (creativeCheckbox?.w ?? 82) + 6
             characterButton.y = 4
             if characterButton.x + characterButton.w > ui.width - 4 {
@@ -1100,7 +1103,10 @@ final class CraftingScreen: ContainerScreen {
             return min(MAX_CRAFTING_BATCH_ROUNDS,
                        max(1, maxCreativeCraftingRounds(plan, into: game.player.inventory)))
         }
-        return min(MAX_CRAFTING_BATCH_ROUNDS,
+        let treeLimit = game.player.rpg.skillTrees.map {
+            skillTreeCraftingBatchRoundLimit(primaryRank: $0.crafting.progress.primaryRank)
+        } ?? MAX_CRAFTING_BATCH_ROUNDS
+        return min(MAX_CRAFTING_BATCH_ROUNDS, treeLimit,
                    maxCraftingRounds(plan, from: availableRecipeResources(game)))
     }
     private func clampCraftRounds(_ game: GameCore) -> Int {
@@ -2719,10 +2725,10 @@ final class CreativeScreen: ContainerScreen {
         })
         creativeCheckbox = cb
         buttons.append(cb)
-        if game.player.rpgClassesEnabled() {
-            let character = Button(panelX + panelW - 176, panelY + 4, 82, 18, "Character", { [weak ui, weak game] in
+        if game.player.rpg.skillTrees != nil {
+            let character = Button(panelX + panelW - 176, panelY + 4, 82, 18, "Skills", { [weak ui, weak game] in
                 guard let ui, let game else { return }
-                ui.open(RPGCharacterScreen(), game)
+                ui.open(makeSkillTreeScreen(), game)
             })
             characterButton = character
             buttons.append(character)
@@ -2761,7 +2767,7 @@ final class CreativeScreen: ContainerScreen {
             cb.y = panelY + 4
         }
         if let characterButton {
-            characterButton.visible = game.player.rpgClassesEnabled()
+            characterButton.visible = game.player.rpg.skillTrees != nil
             characterButton.x = (creativeCheckbox?.x ?? (panelX + panelW - 90)) - characterButton.w - 6
             characterButton.y = panelY + 4
             if characterButton.x < panelX + 96 {

@@ -1121,6 +1121,264 @@ public func tryDungeons(_ seed: UInt32, _ ocx: Int, _ ocz: Int, _ sink: ChunkSin
 // =============================================================================
 // registration
 // =============================================================================
+/// A deterministic, complete hamlet used only when the larger village cannot
+/// find enough individually grounded roads and plots.  It deliberately keeps
+/// the same safety contract as the full settlement: every emitted piece is
+/// dry, every dwelling and pen has a bounded pad, each doorway/pen gate has a
+/// grade-limited path, and the finished footprint is checked against other
+/// conventional surface structures.  The shorter opposing streets make a
+/// useful settlement possible on rolling resource-rich terrain without
+/// reducing candidate separation or treating a broad terrain survey as a
+/// foundation.
+private func compactVillagePlan(_ ctx: GenCtx, _ ocx: Int, _ ocz: Int,
+                                startingAt centerOffsetStart: Int = 0) -> StructurePlan? {
+    let originX = ocx * 16 + 8
+    let originZ = ocz * 16 + 8
+    var center: (x: Int, z: Int, y: Int, biomeID: Int, style: VillageStyle, offsetIndex: Int)?
+    // Unlike the full village's broad preflight, the fallback is intentionally
+    // admitted by its actual nine-by-nine plaza pad.  Every later road,
+    // dwelling, connector, and pen remains individually exact-validated.
+    for (offsetIndex, (dx, dz)) in villageCenterOffsets.enumerated() where offsetIndex >= centerOffsetStart {
+        let x = originX + dx
+        let z = originZ + dz
+        let biomeID = ctx.biomeAt(x, z)
+        guard let style = styleFor(biomeID),
+              let y = dryStructurePadY(ctx, x - 4, z - 4, x + 4, z + 4,
+                                        maxVariation: 3) else {
+            continue
+        }
+        center = (x, z, y, biomeID, style, offsetIndex)
+        break
+    }
+    guard let center else { return nil }
+
+    let centerX = center.x
+    let centerZ = center.z
+    let cy = center.y
+    let st = center.style
+    let livestock = villageLivestock(center.biomeID,
+                                     Rng(hash2(ctx.seed, ocx, ocz, 0xC0A4_11E7)))
+    var pieces: [StructPiece] = []
+    var buildingFootprints: [VillageXZFootprint] = []
+    var connectorCorridors: [VillageXZFootprint] = []
+    var connectorPieces: [StructPiece] = []
+
+    // This is the exact same supported community centre used by a full
+    // village.  The well, bell, golem, and cat therefore never become a
+    // decorative unsupported remnant when a larger plan was rejected.
+    pieces.append(piece(centerX - 4, cy - 8, centerZ - 4,
+                        centerX + 4, cy + 2, centerZ + 4) { b in
+        for z in (centerZ - 4)...(centerZ + 4) {
+            for x in (centerX - 4)...(centerX + 4) {
+                b.foundation(x, cy - 1, z, st.path)
+                b.set(x, cy, z, AIR)
+                b.set(x, cy + 1, z, AIR)
+                b.set(x, cy + 2, z, AIR)
+            }
+        }
+    })
+    pieces.append(piece(centerX - 1, cy - 11, centerZ - 1,
+                        centerX + 4, cy + 3, centerZ + 4) { b in
+        well(b, centerX, cy, centerZ, st)
+    })
+    pieces.append(piece(centerX - 4, cy - 8, centerZ,
+                        centerX - 4, cy + 2, centerZ) { b in
+        b.foundation(centerX - 4, cy - 1, centerZ, st.wall)
+        b.set(centerX - 4, cy, centerZ, st.wall)
+        b.set(centerX - 4, cy + 1, centerZ, Int(cell(B.bell, 0)))
+    })
+    let camelY = center.biomeID == Biome.desert.rawValue ? cy : nil
+    let residentMinX = camelY == nil ? centerX : centerX - 3
+    let residentMinZ = camelY == nil ? centerZ - 3 : centerZ - 4
+    pieces.append(piece(residentMinX, cy, residentMinZ,
+                        centerX + 2, cy + 2, centerZ - 3) { b in
+        b.mob("iron_golem", centerX, cy, centerZ - 3)
+        b.mob("cat", centerX + 2, cy, centerZ - 3)
+        if let camelY { b.mob("camel", centerX - 3, camelY, centerZ - 4) }
+    })
+
+    // The compact layout uses two opposing, east/west roads.  This makes room
+    // for a pen on the clear south side while retaining a second independent
+    // route for four residents.  The road length still gives each arm a
+    // complete 17-row, three-wide, grade-bounded walking corridor.
+    let roadStart = 5
+    let roadLength = 16
+    let directionOrder = Rng(hash2(ctx.seed, ocx, ocz, 0xC0A4_11E8)).shuffle([1, -1])
+    var roads: [VillageRoadSpec] = []
+    for dx in directionOrder {
+        guard let levels = villageRoadLevels(ctx, centerX, centerZ, dx, 0,
+                                              roadStart, roadLength, cy) else {
+            return compactVillagePlan(ctx, ocx, ocz, startingAt: center.offsetIndex + 1)
+        }
+        let end = roadStart + roadLength
+        roads.append(VillageRoadSpec(
+            dx: dx, dz: 0, start: roadStart, length: roadLength, levels: levels,
+            footprint: VillageXZFootprint(min(centerX + dx * roadStart, centerX + dx * end),
+                                          centerZ - 1,
+                                          max(centerX + dx * roadStart, centerX + dx * end),
+                                          centerZ + 1)
+        ))
+    }
+
+    let jobs: [(Int, String?)] = [
+        (Int(cell(B.smithing_table)), "village_weaponsmith"),
+        (Int(cell(B.lectern, 0)), nil),
+        (Int(cell(B.blast_furnace, 0)), "village_toolsmith"),
+        (Int(cell(B.fletching_table)), nil),
+    ]
+    var jobIndex = Rng(hash2(ctx.seed, ocx, ocz, 0xC0A4_11E9)).nextInt(jobs.count)
+    var houseIndex = 0
+    for road in roads {
+        // Both homes stay on the north side; the south side is intentionally
+        // kept clear for the animal pen and its traversable gate path.
+        for along in [roadStart + 4, roadStart + 11] {
+            let side = -1
+            let houseX = centerX + road.dx * along
+            let houseZ = centerZ + side * 7
+            let facing = 1
+            let footprint = VillageXZFootprint(houseX - 3, houseZ - 3,
+                                               houseX + 3, houseZ + 3)
+            guard let y = dryStructurePadY(ctx, footprint.x0, footprint.z0,
+                                            footprint.x1, footprint.z1,
+                                            maxVariation: 3) else {
+                return compactVillagePlan(ctx, ocx, ocz, startingAt: center.offsetIndex + 1)
+            }
+            let pathStart = villageHousePoint(houseX, houseZ, 0, -4, facing)
+            let roadX = pathStart.0
+            let roadZ = centerZ + side * 2
+            let connector = VillageXZFootprint(pathStart.0, pathStart.1, roadX, roadZ)
+            guard let pathLevels = villageStraightPathLevels(ctx, pathStart.0, pathStart.1,
+                                                              roadX, roadZ, y,
+                                                              road.levels[along - roadStart],
+                                                              exactEndpoints: true),
+                  !buildingFootprints.contains(where: { footprint.intersects($0) }),
+                  !connectorCorridors.contains(where: { footprint.intersects($0) }),
+                  !buildingFootprints.contains(where: { connector.intersects($0) }),
+                  !connectorCorridors.contains(where: { connector.intersects($0) }) else {
+                return compactVillagePlan(ctx, ocx, ocz, startingAt: center.offsetIndex + 1)
+            }
+            buildingFootprints.append(footprint)
+            connectorCorridors.append(connector)
+            let emitsChild = houseIndex == 0
+            if emitsChild {
+                pieces.append(piece(footprint.x0, y - 9, footprint.z0,
+                                    footprint.x1, y + 6, footprint.z1) { b in
+                    houseSmall(b, houseX, y, houseZ, st, facing, child: true)
+                })
+            } else {
+                let job = jobs[jobIndex % jobs.count]
+                jobIndex += 1
+                pieces.append(piece(footprint.x0, y - 9, footprint.z0,
+                                    footprint.x1, y + 6, footprint.z1) { b in
+                    houseJob(b, houseX, y, houseZ, st, facing, job.0, job.1)
+                })
+            }
+            let pathFacing = villagePathFacing(pathStart.0, pathStart.1, roadX, roadZ)
+            let pathStepZ = roadZ > pathStart.1 ? 1 : -1
+            connectorPieces.append(piece(connector.x0, (pathLevels.min() ?? y) - 8, connector.z0,
+                                        connector.x1, (pathLevels.max() ?? y) + 3, connector.z1) { b in
+                for index in pathLevels.indices {
+                    let pz = pathStart.1 + pathStepZ * index
+                    let py = pathLevels[index]
+                    let previousY = pathLevels[max(0, index - 1)]
+                    let nextY = pathLevels[min(pathLevels.count - 1, index + 1)]
+                    b.foundation(pathStart.0, py - 1, pz, st.path, 8)
+                    if nextY == py + 1 {
+                        b.set(pathStart.0, py, pz, st.stairs | pathFacing)
+                    } else if previousY == py + 1 {
+                        b.set(pathStart.0, py, pz, st.stairs | FACE_OPP[pathFacing])
+                    } else {
+                        b.set(pathStart.0, py, pz, AIR)
+                    }
+                    b.set(pathStart.0, py + 1, pz, AIR)
+                }
+            })
+            houseIndex += 1
+        }
+    }
+
+    guard houseIndex == 4,
+          let livestockPen = villageLivestockPenSite(ctx, centerX, centerZ,
+                                                      roads, buildingFootprints + connectorCorridors) else {
+        return compactVillagePlan(ctx, ocx, ocz, startingAt: center.offsetIndex + 1)
+    }
+    pieces.append(piece(livestockPen.footprint.x0, livestockPen.y - 6, livestockPen.footprint.z0,
+                        livestockPen.footprint.x1, livestockPen.y + 3, livestockPen.footprint.z1) { b in
+        villageLivestockPen(b, livestockPen.x, livestockPen.y, livestockPen.z, st, livestock)
+    })
+    let penGateX = livestockPen.x + 3
+    let penPathStartZ = livestockPen.z - 1
+    let penPathEndZ = livestockPen.connector.z0
+    guard let penPathLevels = villageStraightPathLevels(ctx, penGateX, penPathStartZ,
+                                                         penGateX, penPathEndZ,
+                                                         livestockPen.y, livestockPen.roadLevel,
+                                                         exactEndpoints: true) else {
+        return compactVillagePlan(ctx, ocx, ocz, startingAt: center.offsetIndex + 1)
+    }
+    let penPathFacing = villagePathFacing(penGateX, penPathStartZ, penGateX, penPathEndZ)
+    let penPathStepZ = penPathEndZ > penPathStartZ ? 1 : -1
+    connectorPieces.append(piece(livestockPen.connector.x0, (penPathLevels.min() ?? livestockPen.y) - 8,
+                                livestockPen.connector.z0, livestockPen.connector.x1,
+                                (penPathLevels.max() ?? livestockPen.y) + 3, livestockPen.connector.z1) { b in
+        for index in penPathLevels.indices {
+            let pz = penPathStartZ + penPathStepZ * index
+            let py = penPathLevels[index]
+            let previousY = penPathLevels[max(0, index - 1)]
+            let nextY = penPathLevels[min(penPathLevels.count - 1, index + 1)]
+            b.foundation(penGateX, py - 1, pz, st.path, 8)
+            if nextY == py + 1 {
+                b.set(penGateX, py, pz, st.stairs | penPathFacing)
+            } else if previousY == py + 1 {
+                b.set(penGateX, py, pz, st.stairs | FACE_OPP[penPathFacing])
+            } else {
+                b.set(penGateX, py, pz, AIR)
+            }
+            b.set(penGateX, py + 1, pz, AIR)
+        }
+    })
+
+    for road in roads {
+        let end = road.start + road.length
+        pieces.append(piece(road.footprint.x0, cy - 6, road.footprint.z0,
+                            road.footprint.x1, cy + 30, road.footprint.z1) { b in
+            let roadFacing = road.dx < 0 ? 2 : 3
+            for i in road.start...end {
+                let px = centerX + road.dx * i
+                let levelIndex = i - road.start
+                let wy = road.levels[levelIndex]
+                let previousY = levelIndex == 0 ? cy : road.levels[levelIndex - 1]
+                let nextY = road.levels[min(road.levels.count - 1, levelIndex + 1)]
+                let risesFromPlaza = levelIndex == 0 && wy == cy + 1
+                for width in -1...1 {
+                    let wz = centerZ + width
+                    b.foundation(px, (risesFromPlaza ? cy : wy) - 1, wz, st.path, 8)
+                    if risesFromPlaza {
+                        b.set(px, cy, wz, st.stairs | roadFacing)
+                    } else if nextY == wy + 1 {
+                        b.set(px, wy, wz, st.stairs | roadFacing)
+                    } else if previousY == wy + 1 {
+                        b.set(px, wy, wz, st.stairs | FACE_OPP[roadFacing])
+                    } else {
+                        b.set(px, wy, wz, AIR)
+                    }
+                    b.set(px, wy + 1, wz, AIR)
+                }
+            }
+        })
+    }
+    pieces.append(contentsOf: connectorPieces)
+    guard validateVillagePieces(ctx, pieces),
+          !villageOverlapsForeignSurfaceStructure(
+              ctx, pieces,
+              collisionDefinitions: ctx.activeStructureDefinitions ?? STRUCTURES
+          ) else {
+        return compactVillagePlan(ctx, ocx, ocz, startingAt: center.offsetIndex + 1)
+    }
+    return StructurePlan(id: "village", pieces: pieces,
+                         ref: StructRefBox(centerX - 80, cy - 20, centerZ - 80,
+                                           centerX + 80, cy + 40, centerZ + 80))
+}
+
 private func villageStructureDefinition() -> StructureDef {
     StructureDef(
         id: "village", spacing: 34, separation: 18, salt: 10387312, maxRadiusChunks: 8,
@@ -1132,10 +1390,10 @@ private func villageStructureDefinition() -> StructureDef {
         },
         plan: { ctx, ocx, ocz, rng in
             guard let (centerX, centerZ) = chooseVillageCenter(ctx, ocx * 16 + 8, ocz * 16 + 8) else {
-                return nil
+                return compactVillagePlan(ctx, ocx, ocz)
             }
             let biomeId = ctx.biomeAt(centerX, centerZ)
-            guard let st = styleFor(biomeId) else { return nil }
+            guard let st = styleFor(biomeId) else { return compactVillagePlan(ctx, ocx, ocz) }
             var pieces: [StructPiece] = []
             var acceptedBuildingFootprints: [VillageXZFootprint] = []
             var acceptedConnectorCorridors: [VillageXZFootprint] = []
@@ -1148,7 +1406,7 @@ private func villageStructureDefinition() -> StructureDef {
             guard let cy = dryStructurePadY(ctx, centerX - 4, centerZ - 4,
                                             centerX + 4, centerZ + 4,
                                             maxVariation: 3) else {
-                return nil
+                return compactVillagePlan(ctx, ocx, ocz)
             }
             // Village planning already rejects a piece with an unavailable or
             // wet exact surface. A transient later probe should therefore use
@@ -1413,7 +1671,7 @@ private func villageStructureDefinition() -> StructureDef {
             let penReservations = acceptedBuildingFootprints + acceptedConnectorCorridors
             guard let livestockPen = villageLivestockPenSite(ctx, centerX, centerZ,
                                                               roadSpecs, penReservations) else {
-                return nil
+                return compactVillagePlan(ctx, ocx, ocz)
             }
             acceptedBuildingFootprints.append(livestockPen.footprint)
             acceptedConnectorCorridors.append(livestockPen.connector)
@@ -1428,7 +1686,7 @@ private func villageStructureDefinition() -> StructureDef {
                                                                  penGateX, penPathEndZ,
                                                                  livestockPen.y, livestockPen.roadLevel,
                                                                  exactEndpoints: true) else {
-                return nil
+                return compactVillagePlan(ctx, ocx, ocz)
             }
             let penPathFacing = villagePathFacing(penGateX, penPathStartZ, penGateX, penPathEndZ)
             let penPathStepZ = penPathEndZ > penPathStartZ ? 1 : -1
@@ -1513,12 +1771,12 @@ private func villageStructureDefinition() -> StructureDef {
             pieces.append(contentsOf: roadPieces)
             pieces.append(contentsOf: lampPieces)
             pieces.append(contentsOf: connectorPieces)
-            guard childAssigned, adultResidentBuildings >= 4 else { return nil }
-            guard validateVillagePieces(ctx, pieces) else { return nil }
+            guard childAssigned, adultResidentBuildings >= 4 else { return compactVillagePlan(ctx, ocx, ocz) }
+            guard validateVillagePieces(ctx, pieces) else { return compactVillagePlan(ctx, ocx, ocz) }
             guard !villageOverlapsForeignSurfaceStructure(
                 ctx, pieces,
                 collisionDefinitions: ctx.activeStructureDefinitions ?? STRUCTURES
-            ) else { return nil }
+            ) else { return compactVillagePlan(ctx, ocx, ocz) }
             return StructurePlan(id: "village", pieces: pieces,
                                  ref: StructRefBox(centerX - 80, cy - 20, centerZ - 80, centerX + 80, cy + 40, centerZ + 80))
         }

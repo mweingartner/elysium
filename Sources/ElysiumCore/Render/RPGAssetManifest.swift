@@ -111,6 +111,23 @@ public func rpgAssetManifest() -> [RPGAssetManifestEntry] {
             palette: [0xf5f5f5, 0x8c9aa8, 0x26313d]
         ))
     }
+    for descriptor in SKILL_TREE_ACTION_DESCRIPTORS {
+        let palette: [Int]
+        switch descriptor.tree {
+        case .mining: palette = [0xd9ad4c, 0x8b6329, 0x322415]
+        case .melee: palette = [0xd96b62, 0x8f3f39, 0x351a18]
+        case .ranged: palette = [0x78b868, 0x417a37, 0x183618]
+        case .crafting: palette = [0x8e95d8, 0x565ca0, 0x252751]
+        }
+        entries.append(RPGAssetManifestEntry(
+            id: descriptor.iconAssetID,
+            kind: .actionIcon,
+            ownerID: descriptor.id.rawValue,
+            displayName: descriptor.displayName,
+            proceduralSeed: stableRPGSeed(descriptor.id.rawValue),
+            palette: palette
+        ))
+    }
     return entries
 }
 

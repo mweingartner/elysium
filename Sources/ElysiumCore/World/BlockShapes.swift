@@ -142,6 +142,19 @@ public func stairsShapeOf(_ meta: Int, _ get: CellGetter) -> Int {
     [3, 2, 0, 1][facing]
 }
 
+/// A normal or trapped chest placed beside another chest of the same type adopts
+/// that chest's facing. The shared facing keeps their backs aligned and is the
+/// key used by the double-chest mesh.
+@inline(__always) public func chestPlacementFacing(_ blockID: Int, fallback: Int,
+                                                    get: CellGetter) -> Int {
+    guard blockID == Int(B.chest) || blockID == Int(B.trapped_chest) else { return fallback }
+    for direction in 0..<4 {
+        let other = get(FACE_DX[direction], 0, FACE_DZ[direction])
+        if other >> 4 == blockID { return other & 3 }
+    }
+    return fallback
+}
+
 // ---------------------------------------------------------------------------
 // Boxes
 // ---------------------------------------------------------------------------

@@ -1518,13 +1518,13 @@ final class WorldCreateScreen: Screen {
         let seedY: Double
         let modeY: Double
         let difficultyY: Double
-        let classesY: Double
+        let mapSizeY: Double
         let worldTypeY: Double
         let biomeY: Double
 
         init(uiHeight: Double) {
             self.uiHeight = uiHeight
-            // The stack is Name, Seed, Game Mode, Difficulty, Character Classes, World Type,
+            // The stack is Name, Seed, Game Mode, Difficulty, Map Size, World Type,
             // (Biome), Dungeons, Villages, Create/Cancel. Anything under 300 uses compact
             // spacing that keeps the full single-biome selector set on-screen at height 240.
             compact = uiHeight < 300
@@ -1539,8 +1539,8 @@ final class WorldCreateScreen: Screen {
             seedY = compact ? 52 : 76
             modeY = compact ? 76 : 102
             difficultyY = modeY + buttonGap
-            classesY = difficultyY + buttonGap
-            worldTypeY = classesY + buttonGap
+            mapSizeY = difficultyY + buttonGap
+            worldTypeY = mapSizeY + buttonGap
             biomeY = worldTypeY + buttonGap
         }
 
@@ -1569,7 +1569,6 @@ final class WorldCreateScreen: Screen {
     private enum AccessibilityAction: String, CaseIterable {
         case mode = "create.gameMode"
         case difficulty = "create.difficulty"
-        case classes = "create.classes"
         case size = "create.size"
         case worldType = "create.worldType"
         case biome = "create.biome"
@@ -1582,7 +1581,6 @@ final class WorldCreateScreen: Screen {
             switch self {
             case .mode: return "Activate to switch Survival and Creative mode."
             case .difficulty: return "Activate to choose the next difficulty."
-            case .classes: return "Activate to toggle RPG character classes."
             case .size: return "Activate to choose the next map size."
             case .worldType: return "Activate to choose the next world type."
             case .biome: return "Activate to choose the next biome."
@@ -1607,11 +1605,9 @@ final class WorldCreateScreen: Screen {
     var dungeonDensity = DungeonDensity.normal
     var villageDensity = VillageDensity.normal
     var mapSize = WorldMapSize.medium
-    var rpgClasses = true
     var creating = false
     private weak var modeBtn: Button?
     private weak var difficultyBtn: Button?
-    private var classesBtn: Button!
     private var mapSizeBtn: Button!
     private var worldTypeBtn: Button!
     private var biomeBtn: Button!
@@ -1653,14 +1649,9 @@ final class WorldCreateScreen: Screen {
         self.difficultyBtn = diffBtn
         buttons.append(modeBtn)
         buttons.append(diffBtn)
-        classesBtn = Button(cx - 100, layout.classesY, 78, 20, "", {})
-        classesBtn.onClick = { [weak self] in
-            guard let self else { return }
-            self.rpgClasses.toggle()
-            self.updateWorldTypeLabels()
-        }
-        buttons.append(classesBtn)
-        mapSizeBtn = Button(cx - 18, layout.classesY, 118, 20, "", {})
+        // Skill-tree progression is always present; the retired class toggle
+        // is intentionally no longer part of world creation.
+        mapSizeBtn = Button(cx - 100, layout.mapSizeY, 200, 20, "", {})
         mapSizeBtn.onClick = { [weak self] in
             guard let self else { return }
             self.mapSize = self.mapSize.next
@@ -1717,7 +1708,7 @@ final class WorldCreateScreen: Screen {
                     worldName: self.nameField.text.isEmpty ? "New World" : self.nameField.text,
                     seedText: self.seedField.text,
                     gameMode: self.mode, difficulty: self.difficulty,
-                    rpgClassesEnabled: self.rpgClasses, mapSize: self.mapSize)
+                    mapSize: self.mapSize)
                 coordinator.present(options: options, completion: { [weak self, weak ui, weak game] _ in
                     guard let self, let ui, let game else { return }
                     self.startPendingLANHost(game)
@@ -1736,7 +1727,7 @@ final class WorldCreateScreen: Screen {
                     dungeonDensity: self.dungeonDensity,
                     villageDensity: self.villageDensity,
                     mapSize: self.mapSize,
-                    rpgClassesEnabled: self.rpgClasses)
+                    rpgClassesEnabled: false)
             }
             self.startPendingLANHost(game)
             ui.open(LoadingScreen(), game)
@@ -1793,7 +1784,6 @@ final class WorldCreateScreen: Screen {
         if !worldPreset.supportsVillageDensity {
             villageDensity = .normal
         }
-        classesBtn?.label = "Classes: \(rpgClasses ? "On" : "Off")"
         mapSizeBtn?.label = "Size: \(mapSize.displayName)"
         worldTypeBtn?.label = "World Type: \(realityDerived ? "Reality Derived" : worldPreset.displayName)"
         biomeBtn?.label = "Biome: \(singleBiomeDisplayName(singleBiome))"
@@ -1818,12 +1808,12 @@ final class WorldCreateScreen: Screen {
     }
 
     private func actionButtons() -> [(AccessibilityAction, Button)]? {
-        guard let modeBtn, let difficultyBtn, let classesBtn, let mapSizeBtn,
+        guard let modeBtn, let difficultyBtn, let mapSizeBtn,
               let worldTypeBtn, let biomeBtn, let dungeonBtn, let villageBtn,
               let createBtn, let cancelBtn else { return nil }
         let mapped: [(AccessibilityAction, Button)] = [
-            (.mode, modeBtn), (.difficulty, difficultyBtn), (.classes, classesBtn),
-            (.size, mapSizeBtn), (.worldType, worldTypeBtn), (.biome, biomeBtn),
+            (.mode, modeBtn), (.difficulty, difficultyBtn), (.size, mapSizeBtn),
+            (.worldType, worldTypeBtn), (.biome, biomeBtn),
             (.dungeons, dungeonBtn), (.villages, villageBtn), (.create, createBtn),
             (.cancel, cancelBtn),
         ]

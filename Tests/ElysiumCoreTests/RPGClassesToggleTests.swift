@@ -1,9 +1,8 @@
 import XCTest
 @testable import ElysiumCore
 
-/// Coverage for `GameCore.createWorld(..., rpgClassesEnabled:)`: the new opt-out world-creation
-/// flag that sets `RPG_CLASSES_GAME_RULE` in `WorldRecord.gameRules`, and for `enterWorld` no
-/// longer force-opening the RPG character screen on fresh world entry.
+/// The legacy rule remains decodable for old world records, but new worlds must
+/// begin with its class system retired and a usage-tree player envelope.
 @MainActor
 final class RPGClassesToggleTests: XCTestCase {
     private var arcanistDraft: RPGCreationDraft {
@@ -13,14 +12,15 @@ final class RPGClassesToggleTests: XCTestCase {
 
     // MARK: - createWorld(rpgClassesEnabled:)
 
-    func testCreateWorldWithClassesEnabledIsTheDefaultAndSetsTheGameRule() throws {
+    func testCreateWorldDefaultsToSkillTreesWithLegacyRuleRetired() throws {
         let game = GameCore(db: try PersistenceTestSupport.makeDatabase(owner: self, label: "classes-default"))
-        game.createWorld(name: "Default Classes", seedText: "1", mode: GameMode.survival, difficulty: 2)
+        game.createWorld(name: "Default Skills", seedText: "1", mode: GameMode.survival, difficulty: 2)
 
-        XCTAssertTrue(game.player.rpgClassesEnabled())
-        XCTAssertEqual(game.worldRec?.gameRules[RPG_CLASSES_GAME_RULE], 1)
+        XCTAssertFalse(game.player.rpgClassesEnabled())
+        XCTAssertEqual(game.worldRec?.gameRules[RPG_CLASSES_GAME_RULE], 0)
+        XCTAssertNotNil(game.player.rpg.skillTrees)
         XCTAssertNotEqual(game.rpgAuthorityPresentation, .unavailable,
-                          "an enabled world must expose the local RPG authority projection")
+                          "a skill-tree world must expose the local action-bar authority projection")
     }
 
     func testCreateWorldWithClassesDisabledClearsTheGameRuleAndFlipsThePlayerFlag() throws {
@@ -30,8 +30,9 @@ final class RPGClassesToggleTests: XCTestCase {
 
         XCTAssertFalse(game.player.rpgClassesEnabled())
         XCTAssertEqual(game.worldRec?.gameRules[RPG_CLASSES_GAME_RULE], 0)
-        XCTAssertEqual(game.rpgAuthorityPresentation, .unavailable,
-                       "a disabled world must fail closed on the RPG authority projection")
+        XCTAssertNotNil(game.player.rpg.skillTrees)
+        XCTAssertNotEqual(game.rpgAuthorityPresentation, .unavailable,
+                          "the retired legacy rule must not disable usage-tree actions")
     }
 
     // MARK: - Whole-subsystem no-op when the world rule is off
@@ -45,21 +46,22 @@ final class RPGClassesToggleTests: XCTestCase {
         XCTAssertFalse(game.player.rpg.created, "character creation must be a true no-op, not a partial write")
 
         XCTAssertEqual(game.requestRPGLearnSkill("spell_formula"), RPGActionFailure.classesDisabled.description)
-        XCTAssertEqual(game.requestRPGUseSelectedAction(), RPGActionFailure.classesDisabled.description)
+        XCTAssertEqual(game.requestRPGUseSelectedAction(), RPGActionFailure.actionNotPrepared.description)
         XCTAssertEqual(game.requestRPGTogglePreparedSkill("spell_formula"),
                        RPGActionFailure.classesDisabled.description)
     }
 
-    func testRPGActionRequestsStillWorkWhenClassesAreEnabled() throws {
-        // Contrast case: the same request sequence succeeds end-to-end on an enabled world, so
-        // the disabled-world no-op above is verified against a real positive path rather than a
-        // request that would have failed for any reason.
+    func testGameCoreClassCreationCannotReplaceASkillTreeEvenWhenLegacyRuleIsEnabled() throws {
         let game = GameCore(db: try PersistenceTestSupport.makeDatabase(owner: self, label: "classes-on-actions"))
-        game.createWorld(name: "Classes Actions", seedText: "4", mode: GameMode.survival, difficulty: 2)
+        game.createWorld(name: "Stale Rule", seedText: "4", mode: GameMode.survival, difficulty: 2,
+                         rpgClassesEnabled: true)
 
+        let before = game.player.rpg
+        XCTAssertNotNil(before.skillTrees)
         let result = game.requestRPGCreateCharacter(arcanistDraft)
-        XCTAssertNotEqual(result, RPGActionFailure.classesDisabled.description)
-        XCTAssertTrue(game.player.rpg.created)
+        XCTAssertEqual(result, RPGActionFailure.classesDisabled.description)
+        XCTAssertEqual(game.player.rpg, before,
+                       "the UI/GameCore route must not replace a usage tree with a legacy class")
     }
 
     // MARK: - gameRules persistence round-trip
@@ -97,22 +99,21 @@ final class RPGClassesToggleTests: XCTestCase {
         XCTAssertTrue(relaunched.player.rpgClassesEnabled())
     }
 
-    // MARK: - enterWorld no longer force-opens the RPG character screen
+    // MARK: - enterWorld does not force-open a Skills workspace
 
     func testFreshWorldEntryDoesNotForceOpenTheRPGCharacterScreen() throws {
         let host = RPGClassesToggleTestHost()
         let game = GameCore(db: try PersistenceTestSupport.makeDatabase(owner: self, label: "no-force-open"))
         game.host = host
 
-        // Classes enabled and no character created yet is exactly the precondition the old
-        // `enterWorld` force-open branch matched on — confirm it no longer fires.
         game.createWorld(name: "Fresh Entry", seedText: "7", mode: GameMode.survival, difficulty: 2)
 
         XCTAssertTrue(game.inWorld)
-        XCTAssertTrue(game.player.rpgClassesEnabled())
+        XCTAssertFalse(game.player.rpgClassesEnabled())
         XCTAssertFalse(game.player.rpg.created)
+        XCTAssertNotNil(game.player.rpg.skillTrees)
         XCTAssertFalse(host.openedScreens.contains("rpg"),
-                       "the character sheet must stay one click away, not auto-open on world entry")
+                       "the Skills workspace must stay one click away, not auto-open on world entry")
         XCTAssertTrue(host.closedAllScreens, "entry still clears any stale screen from a prior world")
     }
 

@@ -265,7 +265,10 @@ final class LANMultiplayerManager {
     private var lastClientPlayerStatePublish = 0.0
     private var lastHostPeerPersist = 0.0
     private var hostRPGClockCatchUpWasPending = false
-    private var lastHostedRPGRuleEnabled: Bool?
+    /// Whether the host peer RPG clock was last eligible to advance.  This is
+    /// broader than the retired class-rule toggle: usage-tree cooldowns remain
+    /// authoritative in ordinary new worlds where that legacy rule is false.
+    private var lastHostedRPGClockEnabled: Bool?
     /// Main-thread-owned state for bounded scripting-metadata replication. The lexical cursor
     /// rotates live refs across batches; consecutive revision censuses produce durable tombstones
     /// until they have been placed in a non-skippable broadcast batch.
@@ -550,6 +553,7 @@ final class LANMultiplayerManager {
         game.lanChunkRequestHandler = nil
         game.lanBlockIntentHandler = nil
         game.lanInteractionIntentHandler = nil
+        game.lanBowIntentHandler = nil
     }
 
     private func configureClientReplicationHooks(for game: GameCore) {
@@ -610,6 +614,13 @@ final class LANMultiplayerManager {
                 self.send(.attackIntent(playerID: self.localPeerID, intent: intent), to: peer)
             }
         }
+        game.lanBowIntentHandler = { [weak self] intent in
+            guard let self else { return }
+            self.queue.async { [weak self] in
+                guard let self, let peer = self.clientPeer else { return }
+                self.send(.bowIntent(playerID: self.localPeerID, intent: intent), to: peer)
+            }
+        }
         game.lanTossIntentHandler = { [weak self] intent in
             guard let self else { return }
             self.queue.async { [weak self] in
@@ -650,6 +661,7 @@ final class LANMultiplayerManager {
         game?.lanBlockIntentHandler = nil
         game?.lanInteractionIntentHandler = nil
         game?.lanAttackIntentHandler = nil
+        game?.lanBowIntentHandler = nil
         game?.lanTossIntentHandler = nil
         game?.lanRPGIntentHandler = nil
         game?.lanContainerEditHandler = nil
@@ -964,7 +976,7 @@ final class LANMultiplayerManager {
         lastClientPlayerStatePublish = 0
         lastHostPeerPersist = 0
         hostRPGClockCatchUpWasPending = false
-        lastHostedRPGRuleEnabled = nil
+        lastHostedRPGClockEnabled = nil
         clientConnectDeadline = nil
         clientWaitingSince = nil
         setState(.idle)
@@ -1042,19 +1054,48 @@ final class LANMultiplayerManager {
         }
     }
 
+    /// Turning off the legacy class rule still terminates legacy spell/upkeep
+    /// state, but it must not freeze or clear a usage-tree peer merely because
+    /// the old classes are disabled.  Tree cooldowns are advanced separately
+    /// by the shared host clock.
+    private func terminateHostedLegacyRPGAuthorities(in game: GameCore, publish: Bool) {
+        precondition(Thread.isMainThread)
+        for playerID in hostReplicationSession.rpgAuthorityPlayerIDs
+            where hostReplicationSession.rpgState(for: playerID)?.skillTrees == nil {
+            _ = terminateHostedRPGAuthority(playerID, in: game, publish: publish)
+        }
+    }
+
+    /// Pure seam for the app-layer regression test.  A usage-tree peer is an
+    /// independent authority source now that classes are retired.
+    static func hostedRPGClockShouldAdvance(
+        legacyClassesEnabled: Bool,
+        hasUsageTreeAuthority: Bool
+    ) -> Bool {
+        legacyClassesEnabled || hasUsageTreeAuthority
+    }
+
+    private func hostedRPGClockShouldAdvance(legacyClassesEnabled: Bool) -> Bool {
+        Self.hostedRPGClockShouldAdvance(
+            legacyClassesEnabled: legacyClassesEnabled,
+            hasUsageTreeAuthority: hostReplicationSession.hasUsageSkillTreeAuthority
+        )
+    }
+
     private func handleHostedRPGRuleTransition(enabled: Bool, in game: GameCore) {
         precondition(Thread.isMainThread)
         let tick = game.rpgSimulationTick
-        if enabled {
-            // Disabled authorities were terminally cleared, so re-enabling starts
-            // a fresh clock boundary at the current GameCore tick.
-            _ = hostReplicationSession.setRPGClockBaseline(tick)
-            lastHostedRPGRuleEnabled = true
-        } else {
-            terminateAllHostedRPGAuthorities(in: game, publish: true)
-            _ = hostReplicationSession.setRPGClockBaseline(tick)
-            lastHostedRPGRuleEnabled = false
+        if !enabled {
+            terminateHostedLegacyRPGAuthorities(in: game, publish: true)
         }
+        // This callback supplies the new legacy-rule value before GameCore
+        // writes it into World.gameRules, so derive the combined authority
+        // gate from its argument rather than reading the stale world value.
+        let clockEnabled = hostedRPGClockShouldAdvance(legacyClassesEnabled: enabled)
+        // Any rule transition is a deterministic clock boundary.  It must not
+        // erase a live usage tree when only the retired class rule changes.
+        _ = hostReplicationSession.setRPGClockBaseline(tick)
+        lastHostedRPGClockEnabled = clockEnabled
         hostRPGClockCatchUpWasPending = false
     }
 
@@ -1086,16 +1127,21 @@ final class LANMultiplayerManager {
     private func advanceHostPeerRPGClock(game: GameCore) -> Bool {
         precondition(Thread.isMainThread)
         let tick = game.rpgSimulationTick
-        guard game.world.rule(RPG_CLASSES_GAME_RULE) else {
-            if lastHostedRPGRuleEnabled != false {
+        let clockEnabled = hostedRPGClockShouldAdvance(
+            legacyClassesEnabled: game.world.rule(RPG_CLASSES_GAME_RULE)
+        )
+        guard clockEnabled else {
+            if lastHostedRPGClockEnabled != false {
                 handleHostedRPGRuleTransition(enabled: false, in: game)
             }
             _ = hostReplicationSession.setRPGClockBaseline(tick)
             hostRPGClockCatchUpWasPending = false
             return hostReplicationSession.isRPGClockCurrent(at: tick)
         }
-        if lastHostedRPGRuleEnabled != true {
-            handleHostedRPGRuleTransition(enabled: true, in: game)
+        if lastHostedRPGClockEnabled != true {
+            handleHostedRPGRuleTransition(
+                enabled: game.world.rule(RPG_CLASSES_GAME_RULE), in: game
+            )
         }
         let report = hostReplicationSession.advanceRPGClockToward(tick)
         processHostPeerRPGClockReport(report, game: game)
@@ -1958,6 +2004,9 @@ final class LANMultiplayerManager {
         case .attackIntent(_, let intent):
             guard peer.accepted else { return }
             applyHostAttackIntent(intent, from: peer.playerID, peerName: peer.playerName)
+        case .bowIntent(_, let intent):
+            guard peer.accepted else { return }
+            applyHostBowIntent(intent, from: peer.playerID, peerName: peer.playerName)
         case .tossIntent(_, let intent):
             guard peer.accepted else { return }
             applyHostTossIntent(intent, from: peer.playerID, peerName: peer.playerName)
@@ -2704,6 +2753,7 @@ final class LANMultiplayerManager {
             return
         }
         hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
+        recordAndPublishHostGhostRPGState(outcome.rpg, for: playerID)
         sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
         // the block change itself was already captured via `onWorldBlockChanged` ->
         // `recordBlockChange` (world.setBlock fires that hook during finishBreaking) — drain
@@ -2791,7 +2841,60 @@ final class LANMultiplayerManager {
             return
         }
         hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
+        recordAndPublishHostGhostRPGState(outcome.rpg, for: playerID)
         sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: outcome.inventory, playerID: playerID)
+    }
+
+    /// Guest ordinary bows are deliberately two-phase. The host session records the begin tick
+    /// and derives the release charge; the ghost then runs the ordinary `shootBow` routine so
+    /// ammo, durability, crafting quality, ranged damage, projectile collision, and hit XP all
+    /// remain host-authoritative. The arrow callback persists/broadcasts XP only after real
+    /// successful target damage, not merely after a client asked to release.
+    private func applyHostBowIntent(_ intent: LANBowIntent, from playerID: String, peerName: String) {
+        precondition(Thread.isMainThread)
+        guard let game = activeGame, game.hasWorld() else { return }
+        let authorization = hostReplicationSession.authorizeBowIntent(
+            intent,
+            from: playerID,
+            at: game.rpgSimulationTick,
+            currentDimension: game.world.dim.rawValue
+        )
+        switch authorization {
+        case .drawStarted:
+            return
+        case .released(let chargeTicks):
+            guard let record = hostReplicationSession.peerRecord(playerID: playerID) else { return }
+            let beforeInventory = record.inventory
+            let outcome = hostGhostRegistry.applyBow(
+                for: playerID,
+                chargeTicks: chargeTicks,
+                world: game.world,
+                session: hostReplicationSession,
+                onRangedUsageXP: { [weak self] state in
+                    // Projectiles tick on the host main simulation thread. Persist before any
+                    // later ghost hydration can replace the detached actor's state.
+                    precondition(Thread.isMainThread)
+                    self?.recordAndPublishHostGhostRPGState(state, for: playerID)
+                }
+            )
+            guard outcome.fired else {
+                if let reason = outcome.reason {
+                    appendStatus("LAN bow intent from \(peerName) rejected: \(reason).")
+                }
+                return
+            }
+            hostReplicationSession.recordInventorySnapshot(outcome.inventory, from: playerID)
+            recordAndPublishHostGhostRPGState(outcome.rpg, for: playerID)
+            sendInventoryDeltaGrantIfNeeded(
+                before: beforeInventory,
+                after: outcome.inventory,
+                playerID: playerID
+            )
+        case .ignored(let reason):
+            appendStatus("LAN bow intent from \(peerName) ignored: \(reason).")
+        case .rejected(let reason):
+            appendStatus("LAN bow intent from \(peerName) rejected: \(reason).")
+        }
     }
 
     /// §7.2: `.tossIntent` → `ghostRegistry.applyToss` (removes items from the stored peer
@@ -2840,12 +2943,30 @@ final class LANMultiplayerManager {
                 }
             }
 
-            guard world.rule(RPG_CLASSES_GAME_RULE) else {
+            var state = rpgMigrateLegacyStateToSkillTrees(
+                record.rpg ?? playerState.rpg ?? .uncreated()
+            )
+            // Usage-tree actions supersede the retired class game-rule gate.
+            // All other frozen protocol-5 RPG intents retain their existing
+            // class-rule behavior and therefore cannot activate legacy state
+            // in a no-classes world.
+            let isSkillTreeActionIntent = intent.action == .useSkill
+                && intent.skillID.flatMap { SkillTreeActionID(rawValue: $0) } != nil
+            guard world.rule(RPG_CLASSES_GAME_RULE)
+                    || (isSkillTreeActionIntent && state.skillTrees != nil) else {
                 reject("RPG classes are disabled")
                 return
             }
-            var state = repairRPGCharacterState(record.rpg ?? playerState.rpg ?? .uncreated())
             func publishActionSuccess(_ ghost: Player) {
+                // Skill-tree bow techniques and field repair can consume
+                // arrows/materials or damage held equipment.  Snapshot and
+                // correct exactly those host-authoritative inventory changes
+                // before publishing the resulting RPG state, just as the
+                // ordinary ghost attack/break routes do.
+                let beforeInventory = hostReplicationSession.peerRecord(playerID: playerID)?.inventory
+                let inventory = makeLANInventorySnapshot(ghost, playerID: playerID)
+                hostReplicationSession.recordInventorySnapshot(inventory, from: playerID)
+                sendInventoryDeltaGrantIfNeeded(before: beforeInventory, after: inventory, playerID: playerID)
                 let ghostState = makeLANPlayerState(ghost, playerID: playerID, displayName: peerName, dimension: world.dim.rawValue, includeRPG: false)
                 _ = hostReplicationSession.updatePlayerState(
                     ghostState,
@@ -2983,6 +3104,35 @@ final class LANMultiplayerManager {
                     reject(RPGActionFailure.skillNotPrepared("").description)
                     return
                 }
+                if let actionID = SkillTreeActionID(rawValue: skillID) {
+                    guard state.skillTrees != nil else {
+                        reject(RPGActionFailure.skillNotPrepared(skillID).description)
+                        return
+                    }
+                    guard skillTreeActionIsUnlocked(actionID, in: rpgSkillTreeState(state)) else {
+                        reject(RPGActionFailure.skillNotPrepared(skillID).description)
+                        return
+                    }
+                    // Hydrate the detached host ghost from the repaired
+                    // authoritative envelope before action resolution.  The
+                    // ghost's `lan:<playerID>` authority ID is then checked
+                    // by the shared executor; the packet's claimed player ID
+                    // was already discarded in favor of the authenticated peer.
+                    _ = hostReplicationSession.recordRPGState(state, for: playerID)
+                    guard let updatedRecord = hostReplicationSession.peerRecord(playerID: playerID) else {
+                        reject("player state unavailable")
+                        return
+                    }
+                    let ghost = hostGhostRegistry.ghost(for: playerID, record: updatedRecord, in: world)
+                    switch rpgExecuteAction(ghost, kind: .skill, id: actionID.rawValue,
+                                            authorization: .local(for: ghost)) {
+                    case .failure(let error):
+                        reject(error.description)
+                    case .success:
+                        publishActionSuccess(ghost)
+                    }
+                    return
+                }
                 if let error = rpgSelectPreparedSkill(skillID, in: &state) {
                     reject(error.description)
                     return
@@ -3040,13 +3190,39 @@ final class LANMultiplayerManager {
             let batch = LANReplicationBatch(tick: game.rpgSimulationTick,
                                             fullSnapshot: false,
                                             blockEntities: blockEntities)
+            // Container crafting derives mastery, XP, and equipment quality on
+            // the host.  Replicate that repaired peer envelope in the same
+            // immediate authority response as the block-entity transaction so
+            // the guest never waits for a periodic snapshot to learn its
+            // accepted crafting result.
+            let authoritativePlayerState = hostReplicationSession
+                .peerRestoreState(playerID: playerID)?
+                .playerState
             queue.async { [weak self] in
-                self?.broadcastFromHost(.replicationBatch(batch))
+                guard let self else { return }
+                if let authoritativePlayerState {
+                    self.broadcastFromHost(.playerState(authoritativePlayerState))
+                }
+                self.broadcastFromHost(.replicationBatch(batch))
             }
         case .rejected(let reason):
             appendStatus("LAN container edit from \(peerName) rejected: \(reason).")
             let event = LANGameplayEvent(playerID: playerID, kind: .permissionDenied, message: reason, tick: game.rpgSimulationTick)
             queue.async { [weak self] in self?.sendGameplayEvent(event, to: nil) }
+        }
+    }
+
+    /// Persists an RPG envelope created by a detached host ghost and immediately
+    /// sends the repaired authority state to connected guests. Ordinary mining
+    /// and melee award usage XP inside the shared singleplayer routines, so
+    /// merely retaining the inventory delta would otherwise lose that mutation
+    /// on the ghost's next hydration.
+    private func recordAndPublishHostGhostRPGState(_ state: RPGCharacterState?, for playerID: String) {
+        guard let state,
+              let playerState = hostReplicationSession.recordRPGState(state, for: playerID)
+        else { return }
+        queue.async { [weak self] in
+            self?.broadcastFromHost(.playerState(playerState))
         }
     }
 

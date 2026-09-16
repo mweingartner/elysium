@@ -151,12 +151,17 @@ public struct StackData: Equatable, Codable {
     public var lodestone: [Int]?
     /// firework flight duration
     public var flight: Int?
+    /// Usage-based crafting quality, stored only on equipment created after
+    /// the relevant crafting tree is advanced. It is a bounded rank rather
+    /// than a global item mutation, so two otherwise identical tools can
+    /// retain their correct durability and damage independently.
+    public var craftingQuality: Int?
 
     public init() {}
     public var isEmpty: Bool {
         potion == nil && trim == nil && sherds == nil && charged == nil
             && priorWork == nil && repairUnits == nil && contents == nil
-            && lodestone == nil && flight == nil
+            && lodestone == nil && flight == nil && craftingQuality == nil
     }
 }
 
@@ -254,7 +259,15 @@ public func canMerge(_ a: ItemStack?, _ b: ItemStack?) -> Bool {
 public func maxStackOf(_ s: ItemStack) -> Int { itemDefs[s.id].maxStack }
 public func maxDamageOf(_ s: ItemStack) -> Int {
     let d = itemDefs[s.id]
-    return d.tool?.durability ?? d.armor?.durability ?? 0
+    let base = d.tool?.durability ?? d.armor?.durability ?? 0
+    return skillTreeEffectiveMaxDurability(
+        base: base, qualityRank: s.data.craftingQuality ?? 0)
+}
+
+public func effectiveWeaponDamageOf(_ s: ItemStack) -> Double {
+    guard let tool = itemDefs[s.id].tool else { return 0 }
+    return skillTreeEffectiveWeaponDamage(
+        base: tool.attackDamage, qualityRank: s.data.craftingQuality ?? 0)
 }
 public func enchLevel(_ s: ItemStack?, _ ench: String) -> Int {
     guard let s else { return 0 }

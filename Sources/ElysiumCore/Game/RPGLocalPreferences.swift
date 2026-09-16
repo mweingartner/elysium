@@ -218,7 +218,7 @@ private func preparedActionTokens(_ state: RPGCharacterState) -> [String] {
 
 public func rpgNormalizeQuickSlotPreferences(_ raw: RPGQuickSlotPreferences,
                                              against repairedState: RPGCharacterState) -> RPGQuickSlotPreferences {
-    guard repairedState.created else { return .empty }
+    guard repairedState.created || repairedState.skillTrees != nil else { return .empty }
     let available = Set(preparedActionTokens(repairedState))
     var used = Set<String>()
     var output = Array(repeating: Optional<String>.none, count: RPG_ACTION_QUICK_SLOT_COUNT)
@@ -236,7 +236,7 @@ public func rpgDefaultQuickSlotPreferences(for repairedState: RPGCharacterState)
 public func rpgAssignQuickSlot(token: String, slot: Int,
                                preferences: RPGQuickSlotPreferences,
                                state: RPGCharacterState) -> Result<RPGQuickSlotPreferences, RPGQuickSlotPreferenceError> {
-    guard state.created else { return .failure(.characterNotCreated) }
+    guard state.created || state.skillTrees != nil else { return .failure(.characterNotCreated) }
     guard (0..<RPG_ACTION_QUICK_SLOT_COUNT).contains(slot) else { return .failure(.invalidSlot(slot)) }
     let canonical = rpgParsePreparedActionToken(token).map { rpgPreparedActionToken(kind: $0.kind, id: $0.id) }
     guard let canonical, preparedActionTokens(state).contains(canonical) else {
@@ -251,7 +251,7 @@ public func rpgAssignQuickSlot(token: String, slot: Int,
 public func rpgMoveQuickSlot(from: Int, to: Int,
                              preferences: RPGQuickSlotPreferences,
                              state: RPGCharacterState) -> Result<RPGQuickSlotPreferences, RPGQuickSlotPreferenceError> {
-    guard state.created else { return .failure(.characterNotCreated) }
+    guard state.created || state.skillTrees != nil else { return .failure(.characterNotCreated) }
     guard (0..<RPG_ACTION_QUICK_SLOT_COUNT).contains(from) else { return .failure(.invalidSlot(from)) }
     guard (0..<RPG_ACTION_QUICK_SLOT_COUNT).contains(to) else { return .failure(.invalidSlot(to)) }
     var tokens = rpgNormalizeQuickSlotPreferences(preferences, against: state).tokens
@@ -264,7 +264,7 @@ public func rpgMoveQuickSlot(from: Int, to: Int,
 public func rpgClearQuickSlot(_ slot: Int,
                               preferences: RPGQuickSlotPreferences,
                               state: RPGCharacterState) -> Result<RPGQuickSlotPreferences, RPGQuickSlotPreferenceError> {
-    guard state.created else { return .failure(.characterNotCreated) }
+    guard state.created || state.skillTrees != nil else { return .failure(.characterNotCreated) }
     guard (0..<RPG_ACTION_QUICK_SLOT_COUNT).contains(slot) else { return .failure(.invalidSlot(slot)) }
     var tokens = rpgNormalizeQuickSlotPreferences(preferences, against: state).tokens
     tokens[slot] = nil
@@ -275,7 +275,17 @@ public func rpgQuickSlotActions(state: RPGCharacterState,
                                 preferences: RPGQuickSlotPreferences) -> [RPGPreparedAction?] {
     let actions = rpgPreparedActions(state)
     let byToken = Dictionary(uniqueKeysWithValues: actions.map { ($0.token, $0) })
-    return rpgNormalizeQuickSlotPreferences(preferences, against: state).tokens.map { token in
+    var tokens = rpgNormalizeQuickSlotPreferences(preferences, against: state).tokens
+    // Newly unlocked usage abilities surface in the first empty fastbar slots
+    // immediately. They remain ordinary bindings after the player reorders
+    // them, but no one needs to discover a separate setup screen mid-combat.
+    if state.skillTrees != nil {
+        for action in actions where !tokens.contains(action.token) {
+            guard let slot = tokens.firstIndex(where: { $0 == nil }) else { break }
+            tokens[slot] = action.token
+        }
+    }
+    return tokens.map { token in
         token.flatMap { byToken[$0] }
     }
 }

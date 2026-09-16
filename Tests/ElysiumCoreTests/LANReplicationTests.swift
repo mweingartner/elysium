@@ -66,6 +66,76 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(world.getBlock(2, 65, 1), stone)
     }
 
+    func testAcceptedPeerSeedsUsageTreeWhenOrdinaryClientStateOmitsRPG() {
+        let session = LANMultiplayerHostSession()
+        XCTAssertEqual(session.acceptPeer(playerID: "peer-a", displayName: "Alex"), .joined)
+        let seeded = session.rpgState(for: "peer-a")
+        XCTAssertNotNil(seeded?.skillTrees)
+        XCTAssertEqual(seeded?.skillTrees, SkillTreeState.untrained(),
+                       "admission uses the canonical skillTreeProgression envelope; the ledger is sized on its first craft")
+        XCTAssertTrue(session.hasUsageSkillTreeAuthority)
+
+        _ = session.updatePlayerState(LANPlayerState(
+            playerID: "peer-a", displayName: "Alex",
+            x: 2.5, y: 64, z: 1.5, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0,
+            gameMode: GameMode.survival
+        ))
+        _ = session.recordRPGState(nil, for: "peer-a")
+        XCTAssertEqual(session.rpgState(for: "peer-a")?.skillTrees,
+                       SkillTreeState.untrained())
+    }
+
+    func testPersistedLegacyPeerMigratesToUsageTreesAtLANAuthorityBoundary() throws {
+        var legacy = RPGCharacterState.uncreated()
+        legacy.version = 3
+        legacy.created = true
+        legacy.pathID = "delver"
+        legacy.starterSkillID = "vein_reader"
+        legacy.specializationBranchID = "delver_excavator"
+        legacy.startingSkillIDs = ["vein_reader", "fast_bore"]
+        legacy.skillRanks = ["vein_reader": 5, "fast_bore": 2]
+
+        let state = LANPlayerState(
+            playerID: "legacy-peer", displayName: "Legacy",
+            x: 2.5, y: 64, z: 1.5, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0,
+            gameMode: GameMode.survival
+        )
+        let persisted = LANPeerRecordSnapshot(
+            playerID: "legacy-peer", displayName: "Legacy", lifecycle: .disconnected,
+            permissions: LANPeerPermissions(), playerState: state, rpg: legacy,
+            inventory: LANPlayerInventorySnapshot(playerID: "legacy-peer", selectedHotbarSlot: 0, slots: []),
+            lastAckTick: 0, lastSeenTick: 0, disconnectedTick: nil
+        )
+        let session = LANMultiplayerHostSession()
+        session.seedPeerRecord(persisted)
+        XCTAssertEqual(session.acceptPeer(playerID: "legacy-peer", displayName: "Legacy"), .reconnected)
+
+        let seeded = try XCTUnwrap(session.rpgState(for: "legacy-peer"))
+        let trees = try XCTUnwrap(seeded.skillTrees)
+        XCTAssertFalse(seeded.created)
+        XCTAssertEqual(trees.mining.primaryRank, 5)
+        XCTAssertEqual(trees.mining.advancedRank, 2)
+        XCTAssertEqual(
+            session.peerRestoreState(playerID: "legacy-peer")?.playerState.rpg?.skillTrees,
+            trees,
+            "the restored peer payload must remain a tree after the retired class rule is off"
+        )
+
+        let recordSession = LANMultiplayerHostSession()
+        _ = recordSession.acceptPeer(playerID: "record-peer", displayName: "Record")
+        _ = recordSession.updatePlayerState(LANPlayerState(
+            playerID: "record-peer", displayName: "Record",
+            x: 2.5, y: 64, z: 1.5, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0,
+            gameMode: GameMode.survival
+        ))
+        _ = recordSession.recordRPGState(legacy, for: "record-peer")
+        XCTAssertNotNil(recordSession.rpgState(for: "record-peer")?.skillTrees,
+                        "recording a legacy envelope cannot reintroduce class-only LAN authority")
+    }
+
     func testHostSessionAppliesUseBlockIntentForOpenableBlocks() {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession(x: 2.5, y: 64, z: 1.5, yaw: .pi / 2)
@@ -2082,6 +2152,63 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(player.inventory[2], ItemStack(iid("coal"), 4))
     }
 
+    func testInventoryAndBlockEntityReplicationPreserveCraftingQuality() throws {
+        var quality = StackData()
+        quality.craftingQuality = 5
+        quality.potion = "poison"
+
+        let inventorySource = Player(world: makeLoadedWorld())
+        inventorySource.inventory[0] = ItemStack(
+            iid("iron_pickaxe"), 1, damage: 12,
+            ench: [EnchInstance("efficiency", 3)], data: quality
+        )
+        let inventorySnapshot = makeLANInventorySnapshot(inventorySource, playerID: "peer-a")
+        XCTAssertEqual(inventorySnapshot.slots.first?.craftingQuality, 5)
+        XCTAssertEqual(inventorySnapshot.slots.first?.enchantments,
+                       [LANItemEnchantmentSnapshot(id: "efficiency", lvl: 3)])
+        XCTAssertEqual(inventorySnapshot.slots.first?.potion, "poison")
+
+        let inventoryReplica = Player(world: makeLoadedWorld())
+        XCTAssertTrue(applyLANInventorySnapshot(inventorySnapshot, to: inventoryReplica))
+        XCTAssertEqual(inventoryReplica.inventory[0]?.data.craftingQuality, 5)
+        XCTAssertEqual(inventoryReplica.inventory[0]?.ench, [EnchInstance("efficiency", 3)])
+        XCTAssertEqual(inventoryReplica.inventory[0]?.data.potion, "poison")
+        let replicatedPickaxe = try XCTUnwrap(inventoryReplica.inventory[0])
+        XCTAssertEqual(maxDamageOf(replicatedPickaxe),
+                       skillTreeEffectiveMaxDurability(base: itemDef(iid("iron_pickaxe")).tool!.durability,
+                                                       qualityRank: 5))
+
+        let host = makeLoadedWorld()
+        forceSetBlock(host, x: 2, y: 64, z: 2, cell: Int(cell(B.chest)))
+        let chest = makeContainerBE(2, 64, 2, 27)
+        chest.items![0] = ItemStack(
+            iid("iron_sword"), 1, damage: 6,
+            ench: [EnchInstance("sharpness", 4)], data: quality
+        )
+        host.setBlockEntity(chest)
+        let snapshot = try XCTUnwrap(makeLANBlockEntitySnapshot(chest, dimension: host.dim.rawValue))
+        XCTAssertEqual(snapshot.slots.first?.craftingQuality, 5)
+        XCTAssertEqual(snapshot.slots.first?.enchantments,
+                       [LANItemEnchantmentSnapshot(id: "sharpness", lvl: 4)])
+        XCTAssertEqual(snapshot.slots.first?.potion, "poison")
+
+        var lowerQuality = snapshot
+        lowerQuality.slots[0].craftingQuality = 4
+        XCTAssertNotEqual(lanBlockEntityRevision([snapshot]), lanBlockEntityRevision([lowerQuality]))
+
+        let client = makeLoadedWorld()
+        forceSetBlock(client, x: 2, y: 64, z: 2, cell: Int(cell(B.chest)))
+        let report = applyLANReplicationBatch(
+            LANReplicationBatch(tick: 1, fullSnapshot: false, blockEntities: [snapshot]),
+            to: client
+        )
+        XCTAssertEqual(report.appliedBlockEntities, 1)
+        XCTAssertEqual(client.getBlockEntity(2, 64, 2)?.items?[0]?.data.craftingQuality, 5)
+        XCTAssertEqual(client.getBlockEntity(2, 64, 2)?.items?[0]?.ench,
+                       [EnchInstance("sharpness", 4)])
+        XCTAssertEqual(client.getBlockEntity(2, 64, 2)?.items?[0]?.data.potion, "poison")
+    }
+
     func testReplicationBatchCapsLargePayloadCollections() {
         let changes = (0..<(LAN_MULTIPLAYER_MAX_REPLICATION_BLOCK_CHANGES + 10)).map {
             LANBlockChange(dimension: 0, x: $0, y: 64, z: 0, cell: 0)
@@ -2600,6 +2727,92 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.count, 4)
     }
 
+    func testCraftingTableTransformUsesHostTreeForQualityAndAwardsExactlyOnce() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession()
+        _ = world.setBlock(2, 64, 1, Int(B.crafting_table) << 4)
+        let table = makeCraftingTableBE(2, 64, 1)
+        // iron sword: X / X / S
+        table.items![0] = ItemStack(iid("iron_ingot"), 1)
+        table.items![3] = ItemStack(iid("iron_ingot"), 1)
+        table.items![6] = ItemStack(iid("stick"), 1)
+        world.setBlockEntity(table)
+        let beforeTable = try XCTUnwrap(makeLANBlockEntitySnapshot(
+            table, dimension: Dim.overworld.rawValue
+        ))
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: []),
+            from: "peer-a"
+        )
+
+        // The completed craft crosses the first advanced crafting threshold,
+        // so the host—not the submitted snapshot—must stamp quality rank one.
+        var rpg = try XCTUnwrap(session.rpgState(for: "peer-a"))
+        var trees = try XCTUnwrap(rpg.skillTrees)
+        trees.crafting.progress = SkillTreeBranchState(xp: 1_199)
+        rpg.skillTrees = trees
+        _ = session.recordRPGState(rpg, for: "peer-a")
+
+        let beforeGrid = try XCTUnwrap(table.items)
+        let plan = try XCTUnwrap(currentCraftingPlan(
+            from: beforeGrid, gridWidth: 3, gridHeight: 3
+        ))
+        XCTAssertEqual(itemDef(plan.output.id).name, "iron_sword")
+        let emptyTable = LANBlockEntitySnapshot(
+            dimension: Dim.overworld.rawValue,
+            x: 2, y: 64, z: 1,
+            type: "crafting",
+            slotCount: 9,
+            slots: []
+        )
+        func intent(quality: Int) -> LANContainerEditIntent {
+            LANContainerEditIntent(
+                blockEntity: emptyTable,
+                inventory: LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                    LANInventorySlotSnapshot(
+                        slot: 0,
+                        itemID: iid("iron_sword"),
+                        count: 1,
+                        craftingQuality: quality
+                    ),
+                ]),
+                revision: 1,
+                editSeq: 1,
+                blockEntityRevision: lanBlockEntityRevision([beforeTable])
+            )
+        }
+
+        XCTAssertEqual(
+            session.applyContainerEditIntent(intent(quality: 5), from: "peer-a", to: world),
+            .rejected("container edit is not host-verifiable"),
+            "a guest cannot choose its own crafting quality"
+        )
+        XCTAssertEqual(session.rpgState(for: "peer-a")?.skillTrees?.crafting.progress.xp, 1_199)
+        XCTAssertEqual(world.getBlockEntity(2, 64, 1)?.items?[0]?.id, iid("iron_ingot"))
+
+        guard case .applied(_) = session.applyContainerEditIntent(
+            intent(quality: 1), from: "peer-a", to: world
+        ) else {
+            return XCTFail("expected host-derived quality transform to be accepted")
+        }
+
+        let masteryKey = try XCTUnwrap(craftingOutputMasteryKey(forRecipeIndex: plan.recipeIndex))
+        let acceptedTrees = try XCTUnwrap(session.rpgState(for: "peer-a")?.skillTrees)
+        XCTAssertEqual(acceptedTrees.crafting.recipeMasteryCounts[masteryKey.canonicalRecipeIndex], 1)
+        XCTAssertEqual(acceptedTrees.crafting.progress.primaryRank, 5)
+        XCTAssertEqual(acceptedTrees.crafting.progress.advancedRank, 1)
+        XCTAssertGreaterThan(acceptedTrees.crafting.progress.xp, 1_199)
+        XCTAssertEqual(
+            session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.craftingQuality,
+            1
+        )
+        XCTAssertEqual(
+            session.peerRestoreState(playerID: "peer-a")?.playerState.rpg?.skillTrees,
+            Optional(acceptedTrees),
+            "the transport can immediately publish the host-owned crafting tree"
+        )
+    }
+
     func testApplyContainerEditIntentDirtiesBlockEntityQueue() {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession()
@@ -2696,6 +2909,45 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.count, 12)
     }
 
+    func testInventoryUpdateCannotMintOrCopyHostCraftingQuality() {
+        let session = makeAcceptedHostSession()
+        let pickaxeID = iid("iron_pickaxe")
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: pickaxeID, count: 1),
+            ]),
+            from: "peer-a"
+        )
+
+        let forged = LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+            LANInventorySlotSnapshot(slot: 0, itemID: pickaxeID, count: 1, craftingQuality: 5),
+        ])
+        XCTAssertFalse(session.applyInventoryUpdate(
+            LANInventoryUpdate(playerID: "peer-a", revision: 1, snapshot: forged),
+            from: "peer-a"
+        ))
+        XCTAssertNil(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.craftingQuality)
+
+        // Once a host-owned path has placed a rank-five stack in the baseline,
+        // the guest may publish the same stack, but still cannot copy it.
+        session.recordInventorySnapshot(forged, from: "peer-a")
+        XCTAssertTrue(session.applyInventoryUpdate(
+            LANInventoryUpdate(playerID: "peer-a", revision: 1, snapshot: forged),
+            from: "peer-a"
+        ))
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.count, 1)
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.craftingQuality, 5)
+        let copied = LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+            LANInventorySlotSnapshot(slot: 0, itemID: pickaxeID, count: 1, craftingQuality: 5),
+            LANInventorySlotSnapshot(slot: 1, itemID: pickaxeID, count: 1, craftingQuality: 5),
+        ])
+        XCTAssertFalse(session.applyInventoryUpdate(
+            LANInventoryUpdate(playerID: "peer-a", revision: 2, snapshot: copied),
+            from: "peer-a"
+        ))
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.inventory?.slots.first?.count, 1)
+    }
+
     // MARK: - W2: grant idempotency
 
     func testEnqueueGrantProducesMonotoneGrantIDsAndDrainsInOrder() {
@@ -2727,7 +2979,7 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertTrue(session.drainAllGrants().isEmpty)
     }
 
-    func testHostSessionIgnoresClientRPGSnapshotsAndPublishesAuthoritativeRPGState() throws {
+    func testHostSessionIgnoresClientRPGSnapshotsAndPublishesAuthoritativeUsageTreeState() throws {
         let session = LANMultiplayerHostSession()
         session.acceptPeer(playerID: "peer-a", displayName: "Alex")
         let rogue = try rpgCreateCharacter(RPGCreationDraft(
@@ -2752,17 +3004,18 @@ final class LANReplicationTests: XCTestCase {
         ))
 
         XCTAssertNil(sanitized?.rpg)
-        XCTAssertNil(session.peerRecord(playerID: "peer-a")?.rpg)
+        XCTAssertNotNil(session.peerRecord(playerID: "peer-a")?.rpg?.skillTrees,
+                        "ordinary client state packets must not erase the host-seeded usage tree")
 
-        let official = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "arcanist",
-            starterSkillID: "spell_formula",
-            starterSpellIDs: ["ignite"]
-        )).get()
+        var official = RPGCharacterState.skillTreeProgression()
+        var officialTrees = rpgSkillTreeState(official)
+        officialTrees.ranged = skillTreeBranchState(primaryRank: 3)
+        official.skillTrees = officialTrees
+        official = rpgMigrateLegacyStateToSkillTrees(official)
         let published = session.recordRPGState(official, for: "peer-a")
 
-        XCTAssertEqual(published?.rpg?.pathID, "arcanist")
-        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.rpg?.pathID, "arcanist")
+        XCTAssertEqual(published?.rpg?.skillTrees, official.skillTrees)
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.rpg?.skillTrees, official.skillTrees)
 
         _ = session.updatePlayerState(LANPlayerState(
             playerID: "peer-a",
@@ -2779,37 +3032,28 @@ final class LANReplicationTests: XCTestCase {
             rpg: rogue
         ))
 
-        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.rpg?.pathID, "arcanist")
+        XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.rpg?.skillTrees, official.skillTrees)
         XCTAssertNil(session.peerPlayerStates().first?.rpg)
-        XCTAssertEqual(session.peerPlayerStates(includeRPG: true).first?.rpg?.pathID, "arcanist")
-        XCTAssertEqual(session.peerRestoreState(playerID: "peer-a")?.playerState.rpg?.pathID, "arcanist")
+        XCTAssertEqual(session.peerPlayerStates(includeRPG: true).first?.rpg?.skillTrees,
+                       official.skillTrees)
+        XCTAssertEqual(session.peerRestoreState(playerID: "peer-a")?.playerState.rpg?.skillTrees,
+                       official.skillTrees)
     }
 
     func testHostRPGClockAdvancesConnectedPeersExactlyOnceAndFailsSyncSafely() throws {
         let session = LANMultiplayerHostSession()
         session.acceptPeer(playerID: "peer-b", displayName: "Bea")
         session.acceptPeer(playerID: "peer-a", displayName: "Alex")
-        var first = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "arcanist",
-            starterSkillID: "ritual_circle"
-        )).get()
-        first.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
-        first.level = RPG_LEVEL_CAP
-        for skillID in try XCTUnwrap(rpgBranchDefinition("arcanist_ritualist")).skillIDs {
-            first.skillRanks[skillID] = 3
-        }
-        first = repairRPGCharacterState(first)
-        first.preparedSpellIDs = ["summon_servant"]
-        first.activeCooldowns = [RPGCooldown(id: "interpose", remainingTicks: 3)]
-        first.activeUpkeeps = [RPGUpkeep(spellID: "summon_servant", ownerSequence: 7,
-                                         remainingTicks: 1, costPerSecond: 0)]
-        first = repairRPGCharacterState(first)
-        first.fatigue = max(0, rpgDerivedStats(first).maxFatigue - 1)
-        var second = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "ranger",
-            starterSkillID: "trail_sense"
-        )).get()
-        second.activeCooldowns = [RPGCooldown(id: "far_sight", remainingTicks: 4)]
+        var first = RPGCharacterState.skillTreeProgression()
+        first.activeCooldowns = [RPGCooldown(
+            id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 3
+        )]
+        first = rpgMigrateLegacyStateToSkillTrees(first)
+        var second = RPGCharacterState.skillTreeProgression()
+        second.activeCooldowns = [RPGCooldown(
+            id: SkillTreeActionID.fieldRepair.rawValue, remainingTicks: 4
+        )]
+        second = rpgMigrateLegacyStateToSkillTrees(second)
         _ = session.recordRPGState(first, for: "peer-b")
         _ = session.recordRPGState(second, for: "peer-a")
         XCTAssertTrue(session.setRPGClockBaseline(100))
@@ -2818,7 +3062,8 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(firstStep.advancedTicks, 1)
         XCTAssertEqual(firstStep.peerUpdates.map(\.playerID), ["peer-b", "peer-a"],
                        "joined ordinal is the stable authority order")
-        XCTAssertEqual(firstStep.peerUpdates.first?.endedUpkeeps.map(\.ownerSequence), [7])
+        XCTAssertTrue(firstStep.peerUpdates.first?.endedUpkeeps.isEmpty == true,
+                      "usage trees own cooldowns but never revive legacy upkeeps")
         XCTAssertEqual(session.peerRecord(playerID: "peer-b")?.rpg?.activeCooldowns.first?.remainingTicks, 2)
         XCTAssertEqual(session.peerRecord(playerID: "peer-a")?.rpg?.activeCooldowns.first?.remainingTicks, 3)
 
@@ -2858,21 +3103,11 @@ final class LANReplicationTests: XCTestCase {
     func testHostRPGClockCatchUpIsBoundedBlocksMutationsAndConvergesWithoutSkipping() throws {
         let session = LANMultiplayerHostSession()
         session.acceptPeer(playerID: "peer-a", displayName: "Alex")
-        var state = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "arcanist",
-            starterSkillID: "ritual_circle"
-        )).get()
-        state.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
-        state.level = RPG_LEVEL_CAP
-        for skillID in try XCTUnwrap(rpgBranchDefinition("arcanist_ritualist")).skillIDs {
-            state.skillRanks[skillID] = 3
-        }
-        state = repairRPGCharacterState(state)
-        state.preparedSpellIDs = ["summon_servant"]
-        state.activeCooldowns = [RPGCooldown(id: "summon_servant", remainingTicks: 30)]
-        state.activeUpkeeps = [RPGUpkeep(spellID: "summon_servant", ownerSequence: 7,
-                                         remainingTicks: 25, costPerSecond: 0)]
-        state = repairRPGCharacterState(state)
+        var state = RPGCharacterState.skillTreeProgression()
+        state.activeCooldowns = [RPGCooldown(
+            id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 30
+        )]
+        state = rpgMigrateLegacyStateToSkillTrees(state)
         _ = session.recordRPGState(state, for: "peer-a")
         XCTAssertTrue(session.setRPGClockBaseline(100))
 
@@ -2884,7 +3119,7 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertTrue(session.rpgMutationsBlocked)
         XCTAssertEqual(session.processedRPGTick, 110)
         XCTAssertEqual(session.rpgState(for: "peer-a")?.activeCooldowns.first?.remainingTicks, 20)
-        XCTAssertEqual(session.rpgState(for: "peer-a")?.activeUpkeeps.first?.remainingTicks, 15)
+        XCTAssertTrue(session.rpgState(for: "peer-a")?.activeUpkeeps.isEmpty == true)
 
         let afterFirst = session.rpgState(for: "peer-a")
         let invalid = session.advanceRPGClockToward(-1)
@@ -2906,7 +3141,7 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertTrue(second.mutationsBlocked)
         XCTAssertEqual(session.processedRPGTick, 120)
         XCTAssertEqual(session.rpgState(for: "peer-a")?.activeCooldowns.first?.remainingTicks, 10)
-        XCTAssertEqual(session.rpgState(for: "peer-a")?.activeUpkeeps.first?.remainingTicks, 5)
+        XCTAssertTrue(session.rpgState(for: "peer-a")?.activeUpkeeps.isEmpty == true)
 
         let final = session.advanceRPGClockToward(127)
         XCTAssertEqual(final.advancedTicks, 7)
@@ -2916,7 +3151,7 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(session.processedRPGTick, 127)
         XCTAssertEqual(session.rpgState(for: "peer-a")?.activeCooldowns.first?.remainingTicks, 3)
         XCTAssertTrue(session.rpgState(for: "peer-a")?.activeUpkeeps.isEmpty == true)
-        XCTAssertEqual(final.peerUpdates.first?.endedUpkeeps.map(\.ownerSequence), [7])
+        XCTAssertTrue(final.peerUpdates.first?.endedUpkeeps.isEmpty == true)
 
         let converged = session.rpgState(for: "peer-a")
         XCTAssertEqual(session.advanceRPGClockToward(127).advancedTicks, 0)
@@ -2988,23 +3223,22 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(report.peerUpdates.map(\.advancedTicks), [3, 3],
                        "transport recovery needs a tick count for every connected authority")
         XCTAssertNotNil(report.peerUpdates[0].rpg)
-        XCTAssertNil(report.peerUpdates[1].rpg,
-                     "a peer without a character still needs its exact non-RPG recovery cadence")
+        XCTAssertNotNil(report.peerUpdates[1].rpg?.skillTrees,
+                        "every newly admitted peer owns a usage tree, even without a legacy character")
     }
 
     func testPeerAcceptedDuringCatchUpDoesNotConsumePreJoinHistoricalTicks() throws {
-        func coolingState() throws -> RPGCharacterState {
-            var state = try rpgCreateCharacter(RPGCreationDraft(
-                pathID: "warden",
-                starterSkillID: "guard_stance"
-            )).get()
-            state.activeCooldowns = [RPGCooldown(id: "guard_stance", remainingTicks: 30)]
-            return repairRPGCharacterState(state)
+        func coolingState() -> RPGCharacterState {
+            var state = RPGCharacterState.skillTreeProgression()
+            state.activeCooldowns = [RPGCooldown(
+                id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 30
+            )]
+            return rpgMigrateLegacyStateToSkillTrees(state)
         }
 
         let session = LANMultiplayerHostSession()
         session.acceptPeer(playerID: "existing", displayName: "Existing", tick: 100)
-        _ = session.recordRPGState(try coolingState(), for: "existing")
+        _ = session.recordRPGState(coolingState(), for: "existing")
         XCTAssertTrue(session.setRPGClockBaseline(100))
         let world = makeLoadedWorld()
         let ghosts = LANHostGhostRegistry()
@@ -3015,7 +3249,7 @@ final class LANReplicationTests: XCTestCase {
         )
         existingGhost.attackStrengthTicker = 0
         let existingExpected = Player(world: world)
-        existingExpected.rpg = try coolingState()
+        existingExpected.rpg = coolingState()
         existingExpected.attackStrengthTicker = 0
 
         let first = session.advanceRPGClockToward(125)
@@ -3030,7 +3264,7 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(session.processedRPGTick, 110)
 
         session.acceptPeer(playerID: "newcomer", displayName: "Newcomer", tick: 125)
-        _ = session.recordRPGState(try coolingState(), for: "newcomer")
+        _ = session.recordRPGState(coolingState(), for: "newcomer")
         let newcomerGhost = ghosts.ghost(
             for: "newcomer",
             record: try XCTUnwrap(session.peerRecord(playerID: "newcomer")),
@@ -3038,7 +3272,7 @@ final class LANReplicationTests: XCTestCase {
         )
         newcomerGhost.attackStrengthTicker = 0
         let newcomerExpected = Player(world: world)
-        newcomerExpected.rpg = try coolingState()
+        newcomerExpected.rpg = coolingState()
         newcomerExpected.attackStrengthTicker = 0
 
         let second = session.advanceRPGClockToward(126)
@@ -3080,7 +3314,7 @@ final class LANReplicationTests: XCTestCase {
                        "ghost recovery advances only the newcomer’s two eligible ticks")
     }
 
-    func testPeerRPGTerminationIsIdempotentAndAuthorityCleanupCrossesWorlds() throws {
+    func testUsageTreePeerTerminationIsNoOpAndExternalCleanupCrossesWorlds() throws {
         let session = LANMultiplayerHostSession()
         session.acceptPeer(playerID: "peer-a", displayName: "Alex")
         _ = session.updatePlayerState(LANPlayerState(
@@ -3089,20 +3323,14 @@ final class LANReplicationTests: XCTestCase {
             health: 20, hunger: 20, selectedHotbarSlot: 0,
             gameMode: GameMode.survival
         ))
-        var state = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "arcanist",
-            starterSkillID: "ritual_circle"
-        )).get()
-        state.xp = rpgXPRequiredForLevel(RPG_LEVEL_CAP)
-        state.level = RPG_LEVEL_CAP
-        for skillID in try XCTUnwrap(rpgBranchDefinition("arcanist_ritualist")).skillIDs {
-            state.skillRanks[skillID] = 3
-        }
-        state = repairRPGCharacterState(state)
-        state.preparedSpellIDs = ["summon_servant"]
-        state.activeUpkeeps = [RPGUpkeep(spellID: "summon_servant", ownerSequence: 9,
-                                         remainingTicks: 100, costPerSecond: 0.5)]
-        state = repairRPGCharacterState(state)
+        var state = RPGCharacterState.skillTreeProgression()
+        var trees = rpgSkillTreeState(state)
+        trees.melee = skillTreeBranchState(primaryRank: 5, advancedRank: 1)
+        state.skillTrees = trees
+        state.activeCooldowns = [RPGCooldown(
+            id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 100
+        )]
+        state = rpgMigrateLegacyStateToSkillTrees(state)
         let revisionBefore = state.authorityRevision
         _ = session.recordRPGState(state, for: "peer-a")
 
@@ -3111,10 +3339,7 @@ final class LANReplicationTests: XCTestCase {
         let secondWorld = makeLoadedWorld()
         let ghost = Player(world: firstWorld)
         ghost.rpgAuthorityID = authorityID
-        ghost.rpg = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "warden",
-            starterSkillID: "guard_stance"
-        )).get()
+        ghost.rpg = state
         let ally = Villager(world: firstWorld)
         firstWorld.addEntity(ally)
         XCTAssertTrue(ally.grantRPGWardenAbsorption(4, owner: ghost, sequence: 11))
@@ -3137,16 +3362,20 @@ final class LANReplicationTests: XCTestCase {
         )))
         secondWorld.removeChunk(0, 0)
 
+        // The retired-class cleanup seam must not erase a live usage-tree peer if it is ever
+        // called defensively. Its transport caller only selects legacy-only peers; this direct
+        // check protects that invariant while retaining the historical world-cleanup exercise.
         let terminated = try XCTUnwrap(session.terminateRPGAuthority(for: "peer-a"))
         for world in [firstWorld, secondWorld] {
             XCTAssertEqual(world.terminateRPGTemporaryEffects(ownerID: authorityID), 1)
             _ = world.removeRPGWardenMitigationLayers(ownerAuthorityID: authorityID)
         }
 
-        XCTAssertEqual(terminated.endedUpkeeps.map(\.ownerSequence), [9])
-        XCTAssertTrue(terminated.stateChanged)
-        XCTAssertTrue(terminated.rpg?.activeUpkeeps.isEmpty == true)
-        XCTAssertEqual(terminated.rpg?.authorityRevision, revisionBefore + 1)
+        XCTAssertTrue(terminated.endedUpkeeps.isEmpty)
+        XCTAssertFalse(terminated.stateChanged)
+        XCTAssertEqual(terminated.rpg?.skillTrees, state.skillTrees)
+        XCTAssertEqual(terminated.rpg?.activeCooldowns, state.activeCooldowns)
+        XCTAssertEqual(terminated.rpg?.authorityRevision, revisionBefore)
         XCTAssertEqual(terminated.playerState?.rpg, terminated.rpg,
                        "the publishable terminal state must carry the cleaned authority state")
         XCTAssertTrue(firstWorld.rpgTemporaryEffects.isEmpty)
@@ -3168,27 +3397,28 @@ final class LANReplicationTests: XCTestCase {
 
     // MARK: - W2: ghost actor
 
-    func testGhostHydratesAuthoritativeRPGStateAndDerivedStats() throws {
+    func testGhostHydratesAuthoritativeUsageTreeStateAndDerivedStats() throws {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession()
-        let rpg = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "arcanist",
-            starterSkillID: "spell_formula",
-            starterSpellIDs: ["ignite"]
-        )).get()
+        var rpg = RPGCharacterState.skillTreeProgression()
+        var trees = rpgSkillTreeState(rpg)
+        trees.mining = skillTreeBranchState(primaryRank: 3)
+        rpg.skillTrees = trees
+        rpg.activeCooldowns = [RPGCooldown(
+            id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 12
+        )]
+        rpg = rpgMigrateLegacyStateToSkillTrees(rpg)
         _ = session.recordRPGState(rpg, for: "peer-a")
 
         let record = try XCTUnwrap(session.peerRecord(playerID: "peer-a"))
         let ghost = LANHostGhostRegistry().ghost(for: "peer-a", record: record, in: world)
 
-        XCTAssertEqual(ghost.rpg.pathID, "arcanist")
-        // A default arcanist's three signature starting skills grant ignite, blur, and mage_light;
-        // the ghost hydrates the exact recorded prepared set rather than a single starter spell.
-        XCTAssertEqual(ghost.rpg.preparedSpellIDs, rpg.preparedSpellIDs)
-        XCTAssertFalse(ghost.rpg.preparedSpellIDs.isEmpty)
-        // Derived stats are applied (path growth profile), replacing the vanilla 20-health baseline.
+        XCTAssertEqual(ghost.rpg.skillTrees, rpg.skillTrees)
+        XCTAssertEqual(ghost.rpg.activeCooldowns, rpg.activeCooldowns)
+        XCTAssertFalse(ghost.rpg.created, "ghost hydration must not revive a retired class")
+        // Tree progression has no class health profile, so derived stats retain the vanilla base.
         XCTAssertEqual(Double(ghost.maxHealth), rpgDerivedStats(rpg).maxHealth, accuracy: 0.0001)
-        XCTAssertEqual(ghost.maxHealth, 16, "arcanist level-1 health base is 16")
+        XCTAssertEqual(ghost.maxHealth, 20)
         XCTAssertLessThanOrEqual(ghost.health, ghost.maxHealth)
     }
 
@@ -3257,14 +3487,17 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertNotNil(overworld.entityById[overworldServant.id])
     }
 
-    func testGhostUsesAuthoritativePreparedActiveSkill() throws {
+    func testGhostUsesAuthoritativeUsageTreeAction() throws {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession(x: 0.5, y: 64, z: 0.5, yaw: 0)
-        var rpg = try rpgCreateCharacter(RPGCreationDraft(
-            pathID: "warden",
-            starterSkillID: "heavy_cut"
-        )).get()
-        XCTAssertNil(rpgSelectPreparedSkill("heavy_cut", in: &rpg))
+        var rpg = RPGCharacterState.skillTreeProgression()
+        var trees = rpgSkillTreeState(rpg)
+        trees.melee = skillTreeBranchState(primaryRank: 5, advancedRank: 2)
+        rpg.skillTrees = trees
+        rpg.selectedPreparedActionID = rpgPreparedActionToken(
+            kind: .skill, id: SkillTreeActionID.spartanKick.rawValue
+        )
+        rpg = rpgMigrateLegacyStateToSkillTrees(rpg)
         _ = session.recordRPGState(rpg, for: "peer-a")
         session.recordInventorySnapshot(
             LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0,
@@ -3278,7 +3511,7 @@ final class LANReplicationTests: XCTestCase {
 
         let record = try XCTUnwrap(session.peerRecord(playerID: "peer-a"))
         let ghost = LANHostGhostRegistry().ghost(for: "peer-a", record: record, in: world)
-        let result = rpgUsePreparedSkill(ghost, skillID: "heavy_cut")
+        let result = rpgUsePreparedSkill(ghost, skillID: SkillTreeActionID.spartanKick.rawValue)
 
         guard case .success(let action) = result else {
             return XCTFail("expected ghost skill use, got \(String(describing: result))")
@@ -3286,10 +3519,12 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(action.targetEntityID, zombie.id)
         XCTAssertLessThan(zombie.health, zombie.maxHealth)
         XCTAssertEqual(ghost.rpg.actionSequence, 1)
-        XCTAssertEqual(ghost.rpg.selectedPreparedActionID, rpgPreparedActionToken(kind: .skill, id: "heavy_cut"))
+        XCTAssertEqual(ghost.rpg.selectedPreparedActionID, rpgPreparedActionToken(
+            kind: .skill, id: SkillTreeActionID.spartanKick.rawValue
+        ))
     }
 
-    func testGhostBreakSpawnsDropsConsumesToolDurabilityAndRecordsBlockChange() throws {
+    func testGhostBreakSpawnsDropsPersistsMiningUsageAndRecordsBlockChange() throws {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession()
         var brokenEvent: (
@@ -3306,7 +3541,7 @@ final class LANReplicationTests: XCTestCase {
         world.hooks.onBlockChanged = { [weak session] x, y, z, _, newCell, _ in
             _ = session?.recordBlockChange(dimension: world.dim.rawValue, x: x, y: y, z: z, cell: newCell)
         }
-        _ = world.setBlock(2, 64, 1, Int(B.stone) << 4)
+        _ = world.setBlock(2, 64, 1, Int(B.coal_ore) << 4)
 
         session.updatePlayerState(LANPlayerState(
             playerID: "peer-a", displayName: "Alex", x: 2.5, y: 64, z: 1.5, yaw: 0, pitch: 0,
@@ -3325,9 +3560,16 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertTrue(outcome.broke)
         XCTAssertEqual(world.getBlock(2, 64, 1), 0)
         let drop = try XCTUnwrap(world.entities.compactMap { $0 as? ItemEntity }.first)
-        XCTAssertEqual(drop.stack.id, iid("cobblestone"))
+        XCTAssertEqual(drop.stack.id, iid("coal"))
         XCTAssertEqual(outcome.inventory.slots.first?.itemID, iid("iron_pickaxe"))
         XCTAssertEqual(outcome.inventory.slots.first?.damage, 1)
+        let minedTrees = try XCTUnwrap(outcome.rpg?.skillTrees)
+        XCTAssertEqual(minedTrees.mining.xp, skillTreeMiningXP(blockID: "coal_ore"))
+        let published = try XCTUnwrap(session.recordRPGState(outcome.rpg, for: "peer-a"))
+        XCTAssertEqual(published.rpg?.skillTrees?.mining.xp, minedTrees.mining.xp)
+        XCTAssertEqual(session.peerRestoreState(playerID: "peer-a")?.playerState.rpg?.skillTrees,
+                       minedTrees,
+                       "the host transport publishes this state after committing the ghost outcome")
         XCTAssertEqual(session.drainBlockChanges(), [
             LANBlockChange(dimension: Dim.overworld.rawValue, x: 2, y: 64, z: 1, cell: 0),
         ])
@@ -3336,10 +3578,10 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertEqual(event.payload, [
             "by": .ref(ObjectRef.lanPlayer(peerID: "peer-a").canonical),
             "item": .string("iron_pickaxe"),
-            "blockName": .string("stone"),
+            "blockName": .string("coal_ore"),
         ])
         XCTAssertEqual(event.source, .lan(peerID: "peer-a"))
-        XCTAssertEqual(event.subjectType, "stone")
+        XCTAssertEqual(event.subjectType, "coal_ore")
     }
 
     func testGhostPlaceRaisesAuthoritativeBlockPlacedEventAndConsumesItem() throws {
@@ -3406,7 +3648,7 @@ final class LANReplicationTests: XCTestCase {
         ])
     }
 
-    func testGhostAttackHurtsRealMobRejectsProxyTargetsAndReturnsDurabilityDelta() throws {
+    func testGhostAttackHurtsRealMobPersistsMeleeUsageAndRejectsProxyTargets() throws {
         let world = makeLoadedWorld()
         let session = makeAcceptedHostSession()
         var attackEvents: [(
@@ -3438,6 +3680,13 @@ final class LANReplicationTests: XCTestCase {
         XCTAssertTrue(outcome.attacked)
         XCTAssertLessThan(zombie.health, 20)
         XCTAssertEqual(outcome.inventory.slots.first?.itemID, iid("iron_sword"))
+        let meleeTrees = try XCTUnwrap(outcome.rpg?.skillTrees)
+        XCTAssertEqual(meleeTrees.melee.xp, skillTreeMeleeXP(successfulSwordDamage: true))
+        let published = try XCTUnwrap(session.recordRPGState(outcome.rpg, for: "peer-a"))
+        XCTAssertEqual(published.rpg?.skillTrees?.melee.xp, meleeTrees.melee.xp)
+        XCTAssertEqual(session.peerRestoreState(playerID: "peer-a")?.playerState.rpg?.skillTrees,
+                       meleeTrees,
+                       "the host transport publishes this state after committing the ghost outcome")
 
         let attacked = try XCTUnwrap(attackEvents.first { $0.kind == .playerAttacked })
         XCTAssertEqual(attacked.subject, .lanPlayer(peerID: "peer-a"))
@@ -3464,6 +3713,233 @@ final class LANReplicationTests: XCTestCase {
         let rejected = registry.applyAttack(for: "peer-a", targetEntityID: proxy.id, world: world, session: session)
         XCTAssertFalse(rejected.attacked)
         XCTAssertEqual(rejected.reason, "PvP not supported")
+    }
+
+    func testHostTimedBowUsesAuthoritativeChargeAndPersistsRangedXPOnlyAfterRealHit() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 0.5, y: 64, z: 0.5, yaw: 0)
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(
+                    slot: 0, itemID: iid("bow"), count: 1, damage: 0, craftingQuality: 5,
+                    enchantments: [
+                        LANItemEnchantmentSnapshot(id: "power", lvl: 3),
+                        LANItemEnchantmentSnapshot(id: "punch", lvl: 2),
+                        LANItemEnchantmentSnapshot(id: "flame", lvl: 1),
+                    ]
+                ),
+                LANInventorySlotSnapshot(slot: 1, itemID: iid("arrow"), count: 1),
+            ]),
+            from: "peer-a"
+        )
+
+        XCTAssertEqual(
+            session.authorizeBowIntent(
+                LANBowIntent(action: .begin, selectedHotbarSlot: 0, sequence: 1),
+                from: "peer-a", at: 100, currentDimension: Dim.overworld.rawValue
+            ),
+            .drawStarted
+        )
+        XCTAssertEqual(
+            session.authorizeBowIntent(
+                LANBowIntent(action: .begin, selectedHotbarSlot: 0, sequence: 1),
+                from: "peer-a", at: 101, currentDimension: Dim.overworld.rawValue
+            ),
+            .ignored("duplicate bow intent")
+        )
+        XCTAssertEqual(
+            session.authorizeBowIntent(
+                LANBowIntent(action: .release, selectedHotbarSlot: 0, sequence: 2),
+                from: "peer-a", at: 120, currentDimension: Dim.overworld.rawValue
+            ),
+            .released(chargeTicks: 20),
+            "release power is derived solely from elapsed host ticks"
+        )
+
+        var rangedHitState: RPGCharacterState?
+        let registry = LANHostGhostRegistry()
+        let outcome = registry.applyBow(
+            for: "peer-a", chargeTicks: 20, world: world, session: session,
+            onRangedUsageXP: { rangedHitState = $0 }
+        )
+        XCTAssertTrue(outcome.fired)
+        XCTAssertEqual(outcome.inventory.slots.map(\.itemID), [iid("bow")])
+        XCTAssertEqual(outcome.inventory.slots.first?.damage, 1)
+        XCTAssertEqual(outcome.inventory.slots.first?.craftingQuality, 5)
+        XCTAssertEqual(outcome.inventory.slots.first?.enchantments, [
+            LANItemEnchantmentSnapshot(id: "flame", lvl: 1),
+            LANItemEnchantmentSnapshot(id: "power", lvl: 3),
+            LANItemEnchantmentSnapshot(id: "punch", lvl: 2),
+        ])
+        XCTAssertEqual(outcome.rpg?.skillTrees?.ranged.xp, 0,
+                       "releasing an arrow alone must not award ranged progression")
+
+        let arrow = try XCTUnwrap(world.entities.compactMap { $0 as? ArrowEntity }.first)
+        XCTAssertTrue(arrow.lanPvEOnly)
+        XCTAssertGreaterThan(arrow.damage, 2)
+        XCTAssertEqual(arrow.punchLevel, 2)
+        XCTAssertTrue(arrow.flame)
+        let proxy = LANRemotePlayerEntity(world: world, state: LANPlayerState(
+            playerID: "peer-b", displayName: "Bea", x: 0.5, y: 64, z: 2.5, yaw: 0, pitch: 0,
+            health: 20, hunger: 20, selectedHotbarSlot: 0, gameMode: GameMode.survival
+        ))
+        world.addEntity(proxy)
+        let proxyHealth = proxy.health
+        arrow.onHitEntity(proxy)
+        XCTAssertEqual(proxy.health, proxyHealth, "host guest bows are PvE-only like LAN melee")
+        XCTAssertFalse(arrow.dead, "rejecting a player proxy must not consume the projectile")
+        let zombie = Zombie(world: world)
+        zombie.setPos(0.5, 64, 3.5)
+        world.addEntity(zombie)
+        arrow.onHitEntity(zombie)
+
+        let awarded = try XCTUnwrap(rangedHitState)
+        XCTAssertEqual(awarded.skillTrees?.ranged.xp,
+                       skillTreeRangedXP(successfulBowDamage: true))
+        let published = try XCTUnwrap(session.recordRPGState(awarded, for: "peer-a"))
+        XCTAssertEqual(published.rpg?.skillTrees?.ranged.xp,
+                       skillTreeRangedXP(successfulBowDamage: true))
+        XCTAssertEqual(session.peerRestoreState(playerID: "peer-a")?.playerState.rpg?.skillTrees?.ranged.xp,
+                       skillTreeRangedXP(successfulBowDamage: true),
+                       "the transport publication envelope retains the delayed host arrow award")
+
+        XCTAssertEqual(
+            session.authorizeBowIntent(
+                LANBowIntent(action: .release, selectedHotbarSlot: 0, sequence: 3),
+                from: "peer-a", at: 121, currentDimension: Dim.overworld.rawValue
+            ),
+            .rejected("bow is not drawing")
+        )
+        XCTAssertEqual(
+            session.authorizeBowIntent(
+                LANBowIntent(action: .begin, selectedHotbarSlot: 0, sequence: 4),
+                from: "peer-a", at: 200, currentDimension: Dim.overworld.rawValue
+            ),
+            .drawStarted
+        )
+        XCTAssertEqual(
+            session.authorizeBowIntent(
+                LANBowIntent(action: .release, selectedHotbarSlot: 0, sequence: 5),
+                from: "peer-a",
+                at: 200 + LAN_MULTIPLAYER_MAX_BOW_DRAW_TICKS + 1,
+                currentDimension: Dim.overworld.rawValue
+            ),
+            .ignored("bow draw expired")
+        )
+    }
+
+    func testHostGhostBowPreservesInfinityAndTippedArrowSnapshotMetadata() throws {
+        let world = makeLoadedWorld()
+        let session = makeAcceptedHostSession(x: 0.5, y: 64, z: 0.5, yaw: 0)
+        let registry = LANHostGhostRegistry()
+        let infinityBow = LANInventorySlotSnapshot(
+            slot: 0, itemID: iid("bow"), count: 1,
+            enchantments: [LANItemEnchantmentSnapshot(id: "infinity", lvl: 1)]
+        )
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                infinityBow,
+                LANInventorySlotSnapshot(slot: 1, itemID: iid("arrow"), count: 1),
+            ]),
+            from: "peer-a"
+        )
+
+        let infinityOutcome = registry.applyBow(
+            for: "peer-a", chargeTicks: 20, world: world, session: session, onRangedUsageXP: { _ in }
+        )
+        XCTAssertTrue(infinityOutcome.fired)
+        XCTAssertEqual(
+            infinityOutcome.inventory.slots.first(where: { $0.slot == 1 })?.count,
+            1,
+            "Infinity must retain an ordinary arrow after ghost hydration"
+        )
+        let infinityArrow = try XCTUnwrap(world.entities.compactMap { $0 as? ArrowEntity }.last)
+        XCTAssertFalse(infinityArrow.pickupable)
+
+        session.recordInventorySnapshot(
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("bow"), count: 1),
+                LANInventorySlotSnapshot(
+                    slot: 1, itemID: iid("tipped_arrow"), count: 1, potion: "poison"
+                ),
+            ]),
+            from: "peer-a"
+        )
+        let tippedOutcome = registry.applyBow(
+            for: "peer-a", chargeTicks: 20, world: world, session: session, onRangedUsageXP: { _ in }
+        )
+        XCTAssertTrue(tippedOutcome.fired)
+        XCTAssertNil(tippedOutcome.inventory.slots.first(where: { $0.slot == 1 }))
+        let tippedArrow = try XCTUnwrap(world.entities.compactMap { $0 as? ArrowEntity }.last)
+        XCTAssertEqual(tippedArrow.potionId, "poison")
+    }
+
+    func testHostBowDrawRejectsReplacementAndClearsOnDimensionOrDeath() {
+        let session = makeAcceptedHostSession(x: 0.5, y: 64, z: 0.5, yaw: 0)
+        func inventory(damage: Int = 0) -> LANPlayerInventorySnapshot {
+            LANPlayerInventorySnapshot(playerID: "peer-a", selectedHotbarSlot: 0, slots: [
+                LANInventorySlotSnapshot(slot: 0, itemID: iid("bow"), count: 1, damage: damage),
+                LANInventorySlotSnapshot(slot: 1, itemID: iid("arrow"), count: 1),
+            ])
+        }
+        func playerState(dimension: Int, dead: Bool = false) -> LANPlayerState {
+            LANPlayerState(
+                playerID: "peer-a", displayName: "Alex", x: 0.5, y: 64, z: 0.5, yaw: 0, pitch: 0,
+                health: dead ? 0 : 20, hunger: 20, selectedHotbarSlot: 0,
+                gameMode: GameMode.survival, dimension: dimension, dead: dead
+            )
+        }
+        session.recordInventorySnapshot(inventory(), from: "peer-a")
+
+        XCTAssertEqual(
+            session.authorizeBowIntent(
+                LANBowIntent(action: .begin, selectedHotbarSlot: 0, sequence: 1),
+                from: "peer-a", at: 100, currentDimension: Dim.overworld.rawValue
+            ),
+            .drawStarted
+        )
+        session.recordInventorySnapshot(inventory(damage: 1), from: "peer-a")
+        XCTAssertEqual(
+            session.authorizeBowIntent(
+                LANBowIntent(action: .release, selectedHotbarSlot: 0, sequence: 2),
+                from: "peer-a", at: 110, currentDimension: Dim.overworld.rawValue
+            ),
+            .rejected("bow changed during draw")
+        )
+
+        session.setPermissions(LANPeerPermissions(canChangeDimensions: true), for: "peer-a")
+        XCTAssertEqual(
+            session.authorizeBowIntent(
+                LANBowIntent(action: .begin, selectedHotbarSlot: 0, sequence: 3),
+                from: "peer-a", at: 120, currentDimension: Dim.overworld.rawValue
+            ),
+            .drawStarted
+        )
+        _ = session.updatePlayerState(playerState(dimension: Dim.nether.rawValue))
+        XCTAssertEqual(
+            session.authorizeBowIntent(
+                LANBowIntent(action: .release, selectedHotbarSlot: 0, sequence: 4),
+                from: "peer-a", at: 130, currentDimension: Dim.nether.rawValue
+            ),
+            .rejected("bow is not drawing")
+        )
+
+        XCTAssertEqual(
+            session.authorizeBowIntent(
+                LANBowIntent(action: .begin, selectedHotbarSlot: 0, sequence: 5),
+                from: "peer-a", at: 140, currentDimension: Dim.nether.rawValue
+            ),
+            .drawStarted
+        )
+        _ = session.updatePlayerState(playerState(dimension: Dim.nether.rawValue, dead: true), keepInventory: true)
+        _ = session.updatePlayerState(playerState(dimension: Dim.nether.rawValue))
+        XCTAssertEqual(
+            session.authorizeBowIntent(
+                LANBowIntent(action: .release, selectedHotbarSlot: 0, sequence: 6),
+                from: "peer-a", at: 150, currentDimension: Dim.nether.rawValue
+            ),
+            .rejected("bow is not drawing")
+        )
     }
 
     func testLANRemotePlayerAuthoritativePickupsRaiseStandardPlayerEvents() throws {

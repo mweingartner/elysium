@@ -53,17 +53,6 @@ final class FlatVillageGenerationTests: XCTestCase {
         XCTAssertEqual(active.activeStructureDefinitions?.map(\.id).sorted(),
                        ["stronghold", "village"],
                        "flat planning must use exactly the structures its generator emits")
-        let legacyDomain = GenCtx(
-            seed: seed,
-            heightAt: { _, _ in GEN_MIN_Y + 4 },
-            biomeAt: { _, _ in Biome.plains.rawValue },
-            dim: Dim.overworld.rawValue,
-            villageDensity: .max,
-            generationSettingsIdentity: settings.cacheIdentity,
-            baseTerrainOracleVersion: baseTerrainOracleVersion,
-            terrainOracle: BaseTerrainOracle(seed: seed, settings: settings,
-                                             maxCachedChunks: 128, maxQueries: 500_000)
-        )
         let placement = try XCTUnwrap(village.placement(active))
 
         resetStructurePlanCacheForTesting()
@@ -73,18 +62,55 @@ final class FlatVillageGenerationTests: XCTestCase {
                 let origin = structureOriginFor(village, placement: placement,
                                                  seed: seed, regionX: regionX, regionZ: regionZ)
                 guard let activePlan = getPlan(village, active, origin.0, origin.1),
-                      getPlan(village, legacyDomain, origin.0, origin.1) == nil,
-                      let ref = activePlan.ref else { continue }
+                      let ref = activePlan.ref,
+                      let minX = activePlan.pieces.map(\.x0).min(),
+                      let maxX = activePlan.pieces.map(\.x1).max(),
+                      let minZ = activePlan.pieces.map(\.z0).min(),
+                      let maxZ = activePlan.pieces.map(\.z1).max() else { continue }
+
+                // The compact-village fallback can safely choose a smaller
+                // footprint instead of recreating the old all-registry veto.
+                // Prove the active-domain rule directly: this synthetic
+                // desert temple overlaps every candidate footprint for this
+                // village origin, but flat generation excludes it because it
+                // cannot materialize in a flat world.
+                let disabledLandmark = StructureDef(
+                    id: "desert_temple", spacing: 1, separation: 0,
+                    salt: 0xD15A_B1ED, maxRadiusChunks: 16,
+                    check: { _, candidateX, candidateZ, _ in
+                        candidateX == origin.0 && candidateZ == origin.1
+                    },
+                    plan: { _, _, _, _ in
+                        StructurePlan(id: "desert_temple", pieces: [
+                            piece(minX - 256, GEN_MIN_Y, minZ - 256,
+                                  maxX + 256, GEN_MIN_Y + 1, maxZ + 256) { _ in }
+                        ])
+                    }
+                )
+                let blockedDomain = GenCtx(
+                    seed: seed,
+                    heightAt: { _, _ in GEN_MIN_Y + 4 },
+                    biomeAt: { _, _ in Biome.plains.rawValue },
+                    dim: Dim.overworld.rawValue,
+                    villageDensity: .max,
+                    generationSettingsIdentity: settings.cacheIdentity + ".disabled-foreign-fixture",
+                    baseTerrainOracleVersion: baseTerrainOracleVersion,
+                    terrainOracle: BaseTerrainOracle(seed: seed, settings: settings,
+                                                     maxCachedChunks: 128, maxQueries: 500_000),
+                    activeStructureDefinitions: [disabledLandmark]
+                )
+                XCTAssertNil(getPlan(village, blockedDomain, origin.0, origin.1),
+                                 "an actually active foreign landmark must still veto every overlapping village footprint")
                 let centerChunkX = floorDiv((ref.x0 + ref.x1) / 2, CHUNK_W)
                 let centerChunkZ = floorDiv((ref.z0 + ref.z1) / 2, CHUNK_W)
                 let output = generateChunk(.overworld, seed, centerChunkX, centerChunkZ,
                                            settings: settings)
                 XCTAssertTrue(output.structRefs.contains { $0.id == "village" },
-                              "the actual flat generator must emit a village that a disabled global landmark would veto")
+                              "the actual flat generator must emit a village despite disabled foreign landmarks")
                 return
             }
         }
-        XCTFail("fixture must find a flat village blocked only by a disabled global landmark")
+        XCTFail("fixture must find a terrain-valid flat village in the active generation domain")
     }
 
     /// Uses the actual desert terrain/oracle path so the assertions below

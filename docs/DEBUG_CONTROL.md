@@ -3,7 +3,7 @@
 Elysium's interactive control plane is a development-only way to inspect and drive a real
 running game. It can create and load isolated debug worlds, control the player and simulation,
 exercise production interaction/UI paths, manipulate bounded world regions, manage object
-templates and RPG characters, and capture the rendered frame. It is not a general remote shell
+templates and skill-tree actions, and capture the rendered frame. It is not a general remote shell
 and it is not present in the production `Elysium.app` executable.
 
 The implementation source of truth is:
@@ -55,7 +55,7 @@ The concrete controls are:
   is 300 seconds, and the server accepts at most 256 requests per second. Requests are serialized;
   clients must wait for each response before sending the next request.
 - All game and UI operations cross onto the main actor. Direct mutation is bounded and registry
-  checked; semantic operations call the same placement, interaction, screen, template, and RPG
+  checked; semantic operations call the same placement, interaction, screen, template, and skill-tree
   entry points used by the game.
 - There is no operation for shell execution, process launch, arbitrary SQL, arbitrary file access,
   dynamic code loading, or unrestricted network access.
@@ -170,7 +170,7 @@ not copy that node's manifest or session token to the controller.
 Example scenario:
 
 ```jsonl
-{"operation":"world.create","arguments":{"name":"Control Lab","seed":"24680","mode":1,"difficulty":2,"preset":"minecraft:normal","biome":"plains","dungeonDensity":5,"villageDensity":5,"rpgClassesEnabled":true}}
+{"operation":"world.create","arguments":{"name":"Control Lab","seed":"24680","mode":1,"difficulty":2,"preset":"minecraft:normal","biome":"plains","dungeonDensity":5,"villageDensity":5}}
 {"operation":"simulation.pause"}
 {"operation":"interaction.action","arguments":{"action":{"action":"give_item","item":"diamond","count":16}}}
 {"operation":"interaction.action","arguments":{"action":{"action":"set_gamemode","mode":"survival"}}}
@@ -284,7 +284,7 @@ Context labels used below:
 | `registry.biomes` | Any | `{}` | Accepted biome names, numeric ids, and display names. |
 | `registry.dungeon_densities` | Any | `{}` | Accepted integer density ids and display names. |
 | `registry.village_densities` | Any | `{}` | Accepted integer density ids and display names. |
-| `registry.rpg` | Any | `{}` | Paths, branches/subclasses, starting-skill pools, skills, and spells. |
+| `registry.skill_trees` | Any | `{}` | The four usage trees, their rank caps, and closed advanced-action descriptors. |
 | `state.snapshot` | Any | `{"scopes":["app","world","player","target","inventory","rpg","screen","entities","region","renderer","network"],"limit":256,"radius":2,"x":0,"y":64,"z":0}` | Identity-stamped bounded state sections. Unknown well-formed scope names return `null`. |
 | `events.replay` | Any | `{"after":120,"limit":256}` | Retained events with sequence greater than `after`; limit clamps to `1...4096`. |
 
@@ -315,7 +315,7 @@ test-LAN capability, not an internet-facing security boundary.
 | Operation | Context | Example arguments | Result/effect |
 |---|---|---|---|
 | `world.list` | Any | `{"offset":0,"limit":128}` | Saved worlds in the isolated debug profile, paged at no more than 256 records with `total` and `nextOffset`. |
-| `world.create` | Not LAN client | `{"name":"Control Lab","seed":"24680","mode":1,"difficulty":2,"preset":"minecraft:normal","biome":"plains","dungeonDensity":2,"villageDensity":3,"rpgClassesEnabled":true}` | Exits an active world, creates and enters a new one, then advances epoch/revision. Mode is `0` survival or `1` creative; difficulty is `0...3`. Use the preset, biome, dungeon-density, and village-density registries for values. |
+| `world.create` | Not LAN client | `{"name":"Control Lab","seed":"24680","mode":1,"difficulty":2,"preset":"minecraft:normal","biome":"plains","dungeonDensity":2,"villageDensity":3}` | Exits an active world, creates and enters a new usage-tree world, then advances epoch/revision. Mode is `0` survival or `1` creative; difficulty is `0...3`. Use the preset, biome, dungeon-density, and village-density registries for values. |
 | `world.load` | Not LAN client | `{"id":"<id from world.list>"}` | Exits an active world, loads the selected debug-profile world, and advances epoch/revision. |
 | `world.save` | Authority | `{}` | Safely closes transient screens and synchronously verifies world, player, advancements, and chunk persistence. |
 | `world.exit` | World | `{}` | Returns to title and advances epoch/revision. This is allowed for a LAN client because it exits rather than mutates host state. |
@@ -496,23 +496,20 @@ Template names follow the existing normalized template contract and are limited 
 the control boundary. Copy/place coordinates use the same loaded/height/256-block setup bound as
 other direct targets. A world boundary clears the one-level debug undo snapshot.
 
-### RPG character and actions
+### Skill-tree actions
 
 | Operation | Context | Example arguments | Result/effect |
 |---|---|---|---|
-| `rpg.create` | Authority | `{"path":"<path id>","branch":"<branch id>","startingSkills":["<skill 1>","<skill 2>","<skill 3>"]}` | Requests character creation. Use `registry.rpg`; the selection must be exactly three unique skills from that path/branch's five-skill pool. |
-| `rpg.learn` | Authority | `{"skill":"<registered skill id>"}` | Requests the next rank of a skill. |
-| `rpg.prepare_skill` | Authority | `{"skill":"<registered active skill id>"}` | Toggles a learned active skill in the prepared set. |
-| `rpg.prepare_spell` | Authority | `{"spell":"<registered known spell id>"}` | Toggles a known spell in the prepared set. |
-| `rpg.select_skill` | Authority | `{"skill":"<prepared skill id>"}` | Selects a prepared active skill. |
-| `rpg.select_spell` | Authority | `{"spell":"<prepared spell id>"}` | Selects a prepared spell. |
-| `rpg.use_selected` | Authority | `{}` | Uses the currently selected prepared action. |
-| `rpg.use_quick_slot` | Authority | `{"slot":0}` | Uses RPG quick slot `0...8`. |
+| `rpg.use_selected` | Authority | `{}` | Uses the currently selected unlocked skill-tree action. |
+| `rpg.use_quick_slot` | Authority | `{"slot":0}` | Uses skill-tree action fast-bar slot `0...8`. |
 
-These calls preserve the existing RPG validation, fatigue, cooldown, progression, and persistence
-rules. The GameCore RPG methods return a human-readable `message` for accepted and rejected game
-requests; a successful protocol response proves delivery, not that the gameplay request succeeded.
-Inspect `message` and a follow-up `rpg` snapshot before asserting the new state.
+The `rpg` operation prefix remains only for protocol/persistence compatibility. These two calls are
+available only when the active player has usage-tree state; they preserve the same host validation,
+equipment, cooldown, action-sequence, and persistence rules as the in-game fast bar. The retired
+class commands `rpg.create`, `rpg.learn`, `rpg.prepare_skill`, `rpg.prepare_spell`,
+`rpg.select_skill`, and `rpg.select_spell` remain recognized solely to return `RPG classes are
+disabled`; they neither parse class input nor mutate state. Inspect `message` and a follow-up `rpg`
+snapshot before asserting the new state.
 
 ### Capture and app lifecycle
 

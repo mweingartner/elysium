@@ -1,5 +1,10 @@
 # Character Class Creation Carousel
 
+> **Status: superseded — September 16, 2026.** This document is retained only as a historical record of
+> the retired class-creation UI. Elysium now uses the four usage-based Mining, Melee, Ranged, and Crafting
+> trees; players no longer select a class, foundation, sub-class, or attribute allocation. See
+> [the skill-progression decision](../ARCHITECTURE.md#decision-replace-selectable-classes-with-four-usage-based-trees--september-16-2026).
+
 ## Purpose
 
 Character creation previously separated a scrolling six-class list from attribute allocation and then

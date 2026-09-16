@@ -6,12 +6,12 @@ final class LANV6FrameCodecTests: XCTestCase {
     private let hostPhase = LANV6ConnectionPhase.authenticated
     private let clientPhase = LANV6ConnectionPhase.connected
 
-    func testKindManifestIsExactContiguousOneThroughThirtyOne() {
+    func testKindManifestIsExactContiguousOneThroughThirtyTwo() {
         // lan-client-parity (change 4): `scriptIntent = 30`, mirroring `LANMultiplayerMessageKind
         // .scriptIntent` (design.md §11 "mirrored into the v6 manifest") — the manifest is no
-        // longer contiguous 1...29; interactionIntent extends it through 31.
+        // longer contiguous 1...29; interactionIntent and bowIntent extend it through 32.
         XCTAssertEqual(LANV6MessageKind.allCases.map(\.rawValue),
-                       Array(UInt16(1)...UInt16(31)))
+                       Array(UInt16(1)...UInt16(32)))
         XCTAssertEqual(LANV6MessageKind(rawValue: 1), .clientHello)
         XCTAssertEqual(LANV6MessageKind(rawValue: 5), .playerState)
         XCTAssertEqual(LANV6MessageKind(rawValue: 10), .inputIntent)
@@ -21,8 +21,9 @@ final class LANV6FrameCodecTests: XCTestCase {
         XCTAssertEqual(LANV6MessageKind(rawValue: 29), .clientReady)
         XCTAssertEqual(LANV6MessageKind(rawValue: 30), .scriptIntent)
         XCTAssertEqual(LANV6MessageKind(rawValue: 31), .interactionIntent)
+        XCTAssertEqual(LANV6MessageKind(rawValue: 32), .bowIntent)
         XCTAssertNil(LANV6MessageKind(rawValue: 0))
-        XCTAssertNil(LANV6MessageKind(rawValue: 32))
+        XCTAssertNil(LANV6MessageKind(rawValue: 33))
     }
 
     func testAdmissionPolicyCartesianLookupIsExactAndPublicPolicyDeniesAll() {
@@ -162,11 +163,11 @@ final class LANV6FrameCodecTests: XCTestCase {
         var badVersion = valid
         badVersion[5] = 5
         assertDecodeError(badVersion, policy: policy, .unsupportedVersion(5))
-        // Raw value 31 is now `.interactionIntent`; 32 is the first unknown value.
+        // Raw values through 32 are allocated; 33 is the first unknown value.
         var badKind = valid
         badKind[6] = 0
-        badKind[7] = 32
-        assertDecodeError(badKind, policy: policy, .unknownMessageKind(32))
+        badKind[7] = 33
+        assertDecodeError(badKind, policy: policy, .unknownMessageKind(33))
 
         assertDecodeError(Data(valid.dropLast()), policy: policy, .truncated)
         var trailing = valid

@@ -99,7 +99,8 @@ final class RPGStorageV5IsolationTests: XCTestCase {
             playerCount: 2, rpgClassesEnabled: true
         ))
         let draft = RPGCreationDraft(pathID: "arcanist", starterSkillID: "spell_formula")
-        XCTAssertNil(game.player.createRPGCharacter(draft))
+        XCTAssertEqual(game.player.createRPGCharacter(draft), .classesDisabled,
+                       "a protocol-5 usage-tree mirror must not admit a legacy class")
         let before = game.player.rpg
         var intents: [LANRPGIntent] = []
         game.lanRPGIntentHandler = { intents.append($0) }

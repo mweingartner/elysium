@@ -90,6 +90,12 @@ open class LivingEntity: Entity {
     public var limbSwing = 0.0
     public var limbAmp = 0.0
     public var attackAnim = 0.0
+    /// Transient usage-tree control effect.  It is intentionally not saved:
+    /// a reload cannot preserve a combat stun beyond its live simulation.
+    public var skillTreeStunTicks = 0
+    /// Tracks only the crouched/prone pose applied by a skill-tree stun, so
+    /// expiry does not accidentally change unrelated movement state.
+    public var skillTreeStunProne = false
     public var headYaw = 0.0
     public var bodyYaw = 0.0
     public var lastAttacker: Entity?
@@ -521,7 +527,7 @@ open class LivingEntity: Entity {
             let unb = enchLevel(a, "unbreaking")
             if unb > 0 && rng.nextFloat() < Double(unb) / Double(unb + 1) * 0.6 { continue }
             a.damage += dmg
-            let maxD = itemDef(a.id).armor?.durability ?? 100
+            let maxD = maxDamageOf(a)
             if a.damage >= maxD {
                 armor[i] = nil
                 world.hooks.playSound("entity.item.break", x, y, z, 1, 1)
@@ -716,6 +722,13 @@ open class LivingEntity: Entity {
 
     public func baseLivingTick() {
         baseTick()
+        if skillTreeStunTicks > 0 {
+            skillTreeStunTicks -= 1
+            if skillTreeStunTicks == 0, skillTreeStunProne {
+                skillTreeStunProne = false
+                sneaking = false
+            }
+        }
         if hurtTime > 0 { hurtTime -= 1 }
         if lastHurtByPlayerTime > 0 { lastHurtByPlayerTime -= 1 }
         if attackAnim > 0 { attackAnim = max(0, attackAnim - 0.25) } // faster swing to match doubled strike speed
@@ -778,6 +791,27 @@ open class LivingEntity: Entity {
                 vz -= dz * scale
             }
         }
+    }
+
+    /// Runs the non-AI portion of a skill-tree stun tick.  GameCore uses this
+    /// in place of dynamic entity dispatch while the control effect is active,
+    /// which is important because several hostile subclasses own custom tick
+    /// loops rather than inheriting `Mob.mobTick()`.  Life-cycle timers,
+    /// effects, gravity, and collision still advance; target acquisition,
+    /// attacks, special casts, navigation, and horizontal movement do not.
+    public func tickWhileSkillTreeStunned() {
+        baseLivingTick()
+        guard !dead, deathTime <= 0 else { return }
+        moveForward = 0
+        moveStrafe = 0
+        jumping = false
+        sprinting = false
+        vx = 0
+        vz = 0
+        travel()
+        vx = 0
+        vz = 0
+        limbAmp = 0
     }
 }
 

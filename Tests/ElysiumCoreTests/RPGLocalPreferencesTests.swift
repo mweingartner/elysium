@@ -148,75 +148,95 @@ final class RPGLocalPreferencesTests: XCTestCase {
         try reopened.close()
     }
 
-    func testGameCoreLoadsMissingThenMaterializesDefaultsAndCASPublishesOnlyAfterCommit() throws {
+    func testGameCoreLoadsUsageTreeBindingAndCASPublishesOnlyAfterCommit() throws {
         let database = try makeDatabase("default-cas")
+        let record = WorldRecord(id: "tree-cas-world", name: "Tree CAS", seed: 991,
+                                 gameMode: GameMode.survival, difficulty: 1)
+        database.putWorld(record)
+        let source = Player(world: World(dim: .overworld, seed: 991))
+        database.putPlayer(record.id, ["dim": 0, "data": source.save()])
+        let stored = try database.materializeRPGQuickSlotPreferences(
+            worldRecordID: record.id, defaults: .empty)
         let game = GameCore(db: database)
         let host = RPGLocalPreferenceTestHost(); game.host = host
-        game.createWorld(name: "Defaults", seedText: "991", mode: GameMode.survival,
-                         difficulty: 1)
-        let draft = RPGCreationDraft(
-            pathID: "arcanist",
-            starterSkillID: "spell_formula", starterSpellIDs: ["ignite"])
-        XCTAssertTrue(game.requestRPGCreateCharacter(draft).hasPrefix("Created"))
-        waitUntil { game.rpgLocalPreferenceRevision == 1 }
-        XCTAssertEqual(host.preferenceRefreshes.last?.localPreferenceRevision, 1)
+        game.loadWorld(record.id)
+        waitUntil { game.rpgLocalPreferenceRevision == stored.revision }
+        XCTAssertEqual(host.preferenceRefreshes.last?.localPreferenceRevision, stored.revision)
         XCTAssertFalse(try XCTUnwrap(host.preferenceRefreshes.last).persistenceFailed)
         let defaults = try XCTUnwrap(game.rpgQuickSlotPreferences)
-        XCTAssertEqual(defaults.tokens[0], "spell:ignite")
+        XCTAssertEqual(defaults, .empty)
         let context = try XCTUnwrap(game._testLastRPGLocalPreferenceContext)
         XCTAssertGreaterThan(context.worldEntryGeneration, 0)
         XCTAssertGreaterThan(context.operationID, 0)
         XCTAssertEqual(context.expectedLiveRevision, .absent)
 
+        var trees = game.player.skillTreeState
+        trees.melee = skillTreeBranchState(primaryRank: 5, advancedRank: 5)
+        game.player.skillTreeState = trees
         let stateBefore = game.player.rpg
         let inventoryBefore = game.player.inventory.map {
             $0.map { "\($0.id):\($0.count):\($0.damage)" }
         }
+        let legacyDraft = RPGCreationDraft(pathID: "arcanist", starterSkillID: "spell_formula")
+        XCTAssertEqual(game.requestRPGCreateCharacter(legacyDraft),
+                       RPGActionFailure.classesDisabled.description)
+        XCTAssertEqual(game.player.rpg, stateBefore,
+                       "a GameCore create request must not replace a usage tree")
         let message = game.requestRPGAssignPreparedActionToQuickSlot(
-            kind: .spell, id: "ignite", slot: 8)
+            kind: .skill, id: SkillTreeActionID.battleCry.rawValue, slot: 8)
         XCTAssertTrue(message.hasPrefix("Saving slot"))
         XCTAssertEqual(game.rpgQuickSlotPreferences, defaults,
                        "candidate must not publish before storage completion")
-        waitUntil { game.rpgLocalPreferenceRevision == 2 }
-        XCTAssertEqual(host.preferenceRefreshes.last?.localPreferenceRevision, 2)
+        waitUntil { game.rpgLocalPreferenceRevision == stored.revision + 1 }
+        XCTAssertEqual(host.preferenceRefreshes.last?.localPreferenceRevision, stored.revision + 1)
         XCTAssertFalse(try XCTUnwrap(host.preferenceRefreshes.last).persistenceFailed)
-        XCTAssertEqual(game.rpgQuickSlotPreferences?.tokens[8], "spell:ignite")
+        XCTAssertEqual(game.rpgQuickSlotPreferences?.tokens[8],
+                       rpgPreparedActionToken(kind: .skill, id: SkillTreeActionID.battleCry.rawValue))
         XCTAssertNil(game.rpgQuickSlotPreferences?.tokens[0])
         XCTAssertEqual(game.player.rpg, stateBefore)
         XCTAssertEqual(game.player.inventory.map {
             $0.map { "\($0.id):\($0.count):\($0.damage)" }
         },
                        inventoryBefore)
-        XCTAssertEqual(game._testLastRPGLocalPreferenceContext?.expectedLiveRevision, .exact(1))
+        XCTAssertEqual(game._testLastRPGLocalPreferenceContext?.expectedLiveRevision,
+                       .exact(stored.revision))
         XCTAssertEqual(try database.loadRPGQuickSlotPreferences(
-            worldRecordID: try XCTUnwrap(game.worldRec?.id))?.preferences,
+            worldRecordID: record.id)?.preferences,
                        game.rpgQuickSlotPreferences)
     }
 
-    func testDelayedDefaultDoesNotPublishBeforeItsOwnCommit() throws {
+    func testRejectedClassCreationDoesNotScheduleLegacyDefaultMaterialization() throws {
         let database = try makeDatabase("delayed-default")
         let game = GameCore(db: database)
-        let gate = DispatchSemaphore(value: 0)
-        let entered = expectation(description: "default materialization delayed")
+        let initialRead = expectation(description: "initial tree preference load")
+        let unexpectedWrite = expectation(description: "retired class default materialization")
+        unexpectedWrite.isInverted = true
         let lock = NSLock()
         var operationCount = 0
         game._testRPGLocalPreferenceBeforeIO = { _ in
-            lock.lock(); operationCount += 1; let isDefault = operationCount == 2; lock.unlock()
-            if isDefault { entered.fulfill(); gate.wait() }
+            lock.lock()
+            operationCount += 1
+            let count = operationCount
+            lock.unlock()
+            if count == 1 { initialRead.fulfill() }
+            if count > 1 { unexpectedWrite.fulfill() }
         }
         game.createWorld(name: "Delayed Default", seedText: "992",
                          mode: GameMode.survival, difficulty: 1)
-        XCTAssertTrue(game.requestRPGCreateCharacter(RPGCreationDraft(
+        wait(for: [initialRead], timeout: 2)
+        let before = game.player.rpg
+        XCTAssertEqual(game.requestRPGCreateCharacter(RPGCreationDraft(
             pathID: "arcanist",
             starterSkillID: "spell_formula", starterSpellIDs: ["ignite"])
-        ).hasPrefix("Created"))
-        wait(for: [entered], timeout: 2)
+        ), RPGActionFailure.classesDisabled.description)
+        XCTAssertEqual(game.player.rpg, before)
+        wait(for: [unexpectedWrite], timeout: 0.2)
         XCTAssertNil(game.rpgQuickSlotPreferences)
         XCTAssertNil(try database.loadRPGQuickSlotPreferences(
             worldRecordID: try XCTUnwrap(game.worldRec?.id)))
-        gate.signal()
-        waitUntil { game.rpgLocalPreferenceRevision == 1 }
-        XCTAssertEqual(game.rpgQuickSlotPreferences?.tokens[0], "spell:ignite")
+        lock.lock(); let finalOperationCount = operationCount; lock.unlock()
+        XCTAssertEqual(finalOperationCount, 1,
+                       "a denied class route must not enqueue a second default-write operation")
     }
 
     func testLegacyMigrationReceiptPublishesAndOnlyThenAllowsPlayerKeyOmission() throws {

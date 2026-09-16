@@ -1325,20 +1325,21 @@ final class RPGCoreV2Tests: XCTestCase {
         XCTAssertNotNil(world.entityById[second.id])
     }
 
-    func testGameCoreGlobalClockDrivesAuthorityButNeverSpeculatesOnLANClient() {
+    func testGameCoreGlobalClockTicksUsageTreeCooldownsButNeverSpeculatesOnLANClient() {
         let host = PersistenceTestSupport.makeGame(owner: self, label: "rpg-clock-host")
         host.createWorld(name: "RPG Clock Host", seedText: "107",
                          mode: GameMode.survival, difficulty: 2)
-        host.player.rpg = makeState(pathID: "warden", starter: "guard_stance")
-        host.player.rpg.activeCooldowns = [RPGCooldown(id: "guard_stance", remainingTicks: 5)]
-        host.player.rpg.fatigue = max(0, rpgDerivedStats(host.player.rpg).maxFatigue - 1)
-        let hostFatigue = host.player.rpg.fatigue
+        var hostTrees = SkillTreeState.untrained()
+        hostTrees.melee = skillTreeBranchState(primaryRank: 5, advancedRank: 5)
+        host.player.skillTreeState = hostTrees
+        host.player.rpg.activeCooldowns = [RPGCooldown(
+            id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 5
+        )]
 
         _ = host.frame(dtMs: TICK_MS)
 
         XCTAssertEqual(host.rpgSimulationTick, 1)
         XCTAssertEqual(host.player.rpg.activeCooldowns.first?.remainingTicks, 4)
-        XCTAssertGreaterThan(host.player.rpg.fatigue, hostFatigue)
         XCTAssertTrue(host.worlds.values.allSatisfy { $0.rpgSimulationTick == 1 })
 
         host.worldRec?.rpgSimulationTick = RPG_MAX_COUNTER
@@ -1355,8 +1356,12 @@ final class RPGCoreV2Tests: XCTestCase {
             gameMode: GameMode.survival, difficulty: 2,
             dimension: Dim.overworld.rawValue, playerCount: 2
         ))
-        client.player.rpg = makeState(pathID: "warden", starter: "guard_stance")
-        client.player.rpg.activeCooldowns = [RPGCooldown(id: "guard_stance", remainingTicks: 5)]
+        var clientTrees = SkillTreeState.untrained()
+        clientTrees.melee = skillTreeBranchState(primaryRank: 5, advancedRank: 5)
+        client.player.skillTreeState = clientTrees
+        client.player.rpg.activeCooldowns = [RPGCooldown(
+            id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 5
+        )]
         let clientBefore = client.player.rpg
         _ = client.frame(dtMs: TICK_MS)
         XCTAssertEqual(client.rpgSimulationTick, 0)
@@ -1415,7 +1420,7 @@ final class RPGCoreV2Tests: XCTestCase {
         XCTAssertEqual(game.rpgSimulationTick, RPG_MAX_COUNTER)
     }
 
-    func testRPGGameRuleTransitionHookIsSynchronousEdgeTriggeredAndPreMutation() {
+    func testLegacyRuleTransitionIsSynchronousButCannotReviveClassesOrMutateTrees() {
         let game = PersistenceTestSupport.makeGame(owner: self, label: "rpg-rule-transition")
         game.createWorld(name: "RPG Rule Transition Hook", seedText: "113",
                          mode: GameMode.survival, difficulty: 2)
@@ -1428,42 +1433,52 @@ final class RPGCoreV2Tests: XCTestCase {
             )
         }
 
-        game.setGameRule(RPG_CLASSES_GAME_RULE, 1)
+        let treeBefore = game.player.rpg
+        game.setGameRule(RPG_CLASSES_GAME_RULE, 0)
         XCTAssertTrue(callbackValues.isEmpty,
                       "writing the existing value is not a transition")
 
-        game.setGameRule(RPG_CLASSES_GAME_RULE, 0)
-        XCTAssertEqual(callbackValues, [false],
+        game.setGameRule(RPG_CLASSES_GAME_RULE, 1)
+        XCTAssertEqual(callbackValues, [true],
                        "the callback must have completed before setGameRule returns")
-        XCTAssertEqual(ruleValuesObservedInsideCallback, [true],
-                       "terminal authority cleanup runs before the disabling rule mutation")
-        XCTAssertFalse(game.world.rule(RPG_CLASSES_GAME_RULE))
-
-        game.setGameRule(RPG_CLASSES_GAME_RULE, 0)
-        XCTAssertEqual(callbackValues, [false],
-                       "repeated disabled writes cannot replay terminal persistence")
+        XCTAssertEqual(ruleValuesObservedInsideCallback, [false],
+                       "a transition callback observes the prior decoded legacy value")
+        XCTAssertTrue(game.world.rule(RPG_CLASSES_GAME_RULE))
+        XCTAssertEqual(game.requestRPGCreateCharacter(RPGCreationDraft(
+            pathID: "warden", branchID: "warden_vanguard",
+            startingSkillIDs: rpgDefaultStartingSkillIDs(pathID: "warden")
+        )), RPGActionFailure.classesDisabled.description)
+        XCTAssertEqual(game.player.rpg, treeBefore,
+                       "a stale rule must not layer a class onto a usage tree")
 
         game.setGameRule(RPG_CLASSES_GAME_RULE, 1)
-        XCTAssertEqual(callbackValues, [false, true])
-        XCTAssertEqual(ruleValuesObservedInsideCallback, [true, false],
-                       "both edges are synchronously observable against the prior rule value")
-        XCTAssertTrue(game.world.rule(RPG_CLASSES_GAME_RULE))
+        XCTAssertEqual(callbackValues, [true],
+                       "repeated legacy-rule writes cannot replay a transition")
+
+        game.setGameRule(RPG_CLASSES_GAME_RULE, 0)
+        XCTAssertEqual(callbackValues, [true, false])
+        XCTAssertEqual(ruleValuesObservedInsideCallback, [false, true],
+                       "both edges remain synchronously observable against the prior rule value")
+        XCTAssertFalse(game.world.rule(RPG_CLASSES_GAME_RULE))
+        XCTAssertEqual(game.player.rpg, treeBefore)
 
         game.setGameRule("keepInventory", 1)
-        XCTAssertEqual(callbackValues, [false, true],
+        XCTAssertEqual(callbackValues, [true, false],
                        "unrelated rule changes cannot trigger RPG authority transitions")
     }
 
-    func testLANHostMenuKeepsGlobalClockRunningWhilePlayerInputRemainsBlocked() throws {
+    func testLANHostMenuKeepsUsageTreeClockRunningWhilePlayerInputRemainsBlocked() throws {
         let game = PersistenceTestSupport.makeGame(owner: self, label: "rpg-menu-host")
         game.createWorld(name: "RPG Clock Menu Host", seedText: "110",
                          mode: GameMode.survival, difficulty: 2)
         let menuHost = RPGClockMenuHost()
         game.host = menuHost
         game.lanHostKeepsSimulationRunning = true
-        game.player.rpg = makeState(pathID: "warden", starter: "guard_stance")
+        var trees = SkillTreeState.untrained()
+        trees.melee = skillTreeBranchState(primaryRank: 5, advancedRank: 5)
+        game.player.skillTreeState = trees
         game.player.rpg.activeCooldowns = [
-            RPGCooldown(id: "guard_stance", remainingTicks: 5),
+            RPGCooldown(id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 5),
         ]
 
         let forwardKey = try XCTUnwrap(game.keybinds["forward"])
@@ -1550,7 +1565,7 @@ final class RPGCoreV2Tests: XCTestCase {
         XCTAssertTrue(game.worlds.values.allSatisfy { $0.rpgSimulationTick == 751 })
     }
 
-    func testGlobalClockExpiresGuardedEffectInInactiveDimension() {
+    func testGlobalClockAdvancesInactiveDimensionWithoutRetiredClassEffects() {
         let game = PersistenceTestSupport.makeGame(owner: self, label: "rpg-cross-dimension")
         game.createWorld(name: "RPG Cross-Dimension Clock", seedText: "109",
                          mode: GameMode.survival, difficulty: 2)
@@ -1564,14 +1579,14 @@ final class RPGCoreV2Tests: XCTestCase {
             guardedBlock: RPGGuardedTemporaryBlock(position: position, originalCell: 0,
                                                    temporaryCell: Int(cell(B.torch)))
         )
-        XCTAssertTrue(nether.registerRPGTemporaryEffect(draft))
+        XCTAssertFalse(nether.registerRPGTemporaryEffect(draft),
+                       "a new skill-tree world must reject a class-only temporary effect")
         XCTAssertEqual(game.dim, .overworld)
 
         _ = game.frame(dtMs: TICK_MS)
 
         XCTAssertEqual(nether.rpgSimulationTick, 1)
         XCTAssertNil(nether.rpgTemporaryEffect(for: draft.key))
-        XCTAssertEqual(nether.getBlock(position.x, position.y, position.z), 0)
         XCTAssertEqual(game.dim, .overworld)
     }
 

@@ -122,6 +122,16 @@ public enum LANToolStrikeIntentResult: Equatable {
     case rejected(String)
 }
 
+/// Host authorization result for a semantic bow draw phase. A release contains only the number
+/// of host simulation ticks elapsed since the accepted begin; clients never choose projectile
+/// charge or damage.
+public enum LANBowIntentResult: Equatable {
+    case drawStarted
+    case released(chargeTicks: Int)
+    case ignored(String)
+    case rejected(String)
+}
+
 public enum LANContainerEditResult: Equatable {
     case applied(blockEntities: [LANBlockEntitySnapshot])
     case rejected(String)
@@ -293,6 +303,34 @@ public struct LANRPGPeerTermination: Equatable {
 }
 
 public final class LANMultiplayerHostSession {
+    /// A draw is bound to the exact canonical bow stack and inventory revision seen by the host
+    /// at begin.  The selected slot alone is insufficient: a guest could otherwise replace a
+    /// bow in-place while holding the draw, then fire the replacement with the earlier charge.
+    private struct BowHeldItemIdentity: Equatable {
+        var itemID: Int
+        var damage: Int
+        var label: String?
+        var craftingQuality: Int?
+        var enchantments: [LANItemEnchantmentSnapshot]
+        var potion: String?
+
+        init(_ slot: LANInventorySlotSnapshot) {
+            itemID = slot.itemID
+            damage = slot.damage
+            label = slot.label
+            craftingQuality = lanClampedCraftingQuality(slot.craftingQuality)
+            enchantments = lanCanonicalEnchantments(slot.enchantments)
+            potion = lanCanonicalPotionID(slot.potion)
+        }
+    }
+
+    private struct BowDraw {
+        var startTick: Int
+        var selectedHotbarSlot: Int
+        var inventoryRevision: Int
+        var held: BowHeldItemIdentity
+    }
+
     private struct Peer {
         var playerID: String
         var displayName: String
@@ -315,6 +353,11 @@ public final class LANMultiplayerHostSession {
         /// Event-only secondary-use intents have an independent per-connection high-water mark.
         /// This rejects semantic replays even when they arrive inside fresh transport frames.
         var lastInteractionSequence: UInt32 = 0
+        /// Ordinary bow draw/release has its own high-water mark and host-tick start. Keeping
+        /// this connection-epoch state in the host session means a guest cannot supply a charge
+        /// duration, replay a captured release, or carry an armed draw through reconnect.
+        var lastBowIntentSequence: UInt32 = 0
+        var bowDraw: BowDraw?
         /// Highest valid left-button gesture observed in this connection epoch. Older gesture ids
         /// cannot be replayed with a fresh semantic sequence after a newer gesture was accepted.
         var lastToolStrikeGesture: UInt32 = 0
@@ -557,8 +600,19 @@ public final class LANMultiplayerHostSession {
             existing.rpgConnectedAfterTick = max(0, min(RPG_MAX_COUNTER, tick))
             existing.lastToolStrikeSequence = 0
             existing.lastInteractionSequence = 0
+            existing.lastBowIntentSequence = 0
+            existing.bowDraw = nil
             existing.lastToolStrikeGesture = 0
             existing.lastToolStrikeTarget = nil
+            // Clients deliberately omit RPG state from ordinary position
+            // publishes.  A persisted envelope remains authoritative when it
+            // exists; only an old/no-state record receives the untrained
+            // usage-tree baseline on reconnect.
+            if let state = existing.rpg {
+                existing.rpg = rpgMigrateLegacyStateToSkillTrees(state)
+            } else {
+                existing.rpg = .skillTreeProgression()
+            }
             peers[playerID] = existing
             return .reconnected
         }
@@ -569,7 +623,11 @@ public final class LANMultiplayerHostSession {
             lifecycle: .connected,
             permissions: LANPeerPermissions(),
             playerState: nil,
-            rpg: nil,
+            // Do not wait for a guest to publish an RPG envelope: normal
+            // client player-state packets intentionally exclude it.  The host
+            // owns an untrained tree from admission onward, so tree actions
+            // and crafting progression have a durable authority state.
+            rpg: .skillTreeProgression(),
             inventory: LANPlayerInventorySnapshot(playerID: playerID, selectedHotbarSlot: 0, slots: []),
             lastTemplateUndo: nil,
             lastAckSequence: 0,
@@ -596,6 +654,7 @@ public final class LANMultiplayerHostSession {
         peer.lifecycle = .disconnected
         peer.disconnectedTick = max(0, tick)
         peer.lastTemplateUndo = nil
+        peer.bowDraw = nil
         peers[playerID] = peer
         // abandon-in-place: see removePeer above for rationale.
         templateJobs.removeValue(forKey: playerID)
@@ -611,10 +670,14 @@ public final class LANMultiplayerHostSession {
         guard var peer = peers[playerID] else { return nil }
         let original = peer.rpg
         let ended = original?.activeUpkeeps ?? []
-        var repaired = original.map(repairRPGCharacterState)
+        // A peer can have been restored from an older class-only envelope.
+        // Every LAN authority boundary migrates it before cleanup, otherwise
+        // turning off the retired class rule would leave it without the
+        // usage-tree state that owns current cooldowns and progression.
+        var repaired = original.map(rpgMigrateLegacyStateToSkillTrees)
         if var state = repaired, !state.activeUpkeeps.isEmpty {
             if !rpgClearTerminalUpkeeps(&state) {
-                state = repairRPGCharacterState(state)
+                state = rpgMigrateLegacyStateToSkillTrees(state)
             }
             repaired = state
         }
@@ -637,12 +700,23 @@ public final class LANMultiplayerHostSession {
         }.map(\.playerID)
     }
 
+    /// A connected peer with a usage tree has cooldowns that must remain on
+    /// the host's authoritative RPG clock even when the retired class rule is
+    /// disabled.  Disconnected records are deliberately excluded because the
+    /// clock itself advances only connected peers.
+    public var hasUsageSkillTreeAuthority: Bool {
+        peers.values.contains {
+            $0.lifecycle == .connected && $0.rpg?.skillTrees != nil
+        }
+    }
+
     @discardableResult
     public func updatePlayerState(_ state: LANPlayerState, currentDimension: Int? = nil, tick: Int = 0,
                                  keepInventory: Bool = false) -> LANPlayerState? {
         let playerID = String(state.playerID.prefix(128))
         guard var peer = peers[playerID] else { return nil }
-        let priorDimension = peer.playerState?.dimension ?? currentDimension ?? Dim.overworld.rawValue
+        let previousPlayerState = peer.playerState
+        let priorDimension = previousPlayerState?.dimension ?? currentDimension ?? Dim.overworld.rawValue
         let requestedDimension = isValidLANDimension(state.dimension) ? state.dimension : priorDimension
         let allowedDimension = peer.permissions.canChangeDimensions ? requestedDimension : priorDimension
         let allowedGameMode = state.gameMode == GameMode.creative && !peer.permissions.canUseCreative
@@ -685,6 +759,10 @@ public final class LANMultiplayerHostSession {
         }
         peer.playerState = sanitized
         peer.lifecycle = sanitized.dead ? .dead : .connected
+        if sanitized.dead
+            || (previousPlayerState != nil && sanitized.dimension != previousPlayerState!.dimension) {
+            peer.bowDraw = nil
+        }
         peer.lastSeenTick = max(peer.lastSeenTick, tick)
         peer.disconnectedTick = nil
         peers[playerID] = peer
@@ -725,7 +803,17 @@ public final class LANMultiplayerHostSession {
     public func recordRPGState(_ state: RPGCharacterState?, for rawPlayerID: String) -> LANPlayerState? {
         let playerID = String(rawPlayerID.prefix(128))
         guard var peer = peers[playerID] else { return nil }
-        peer.rpg = state.map(repairRPGCharacterState)
+        if let state {
+            // The host is the durable LAN RPG authority.  Normalize legacy
+            // class envelopes here rather than preserving them until a later
+            // world-rule transition can terminate their old authority.
+            peer.rpg = rpgMigrateLegacyStateToSkillTrees(state)
+        } else if peer.rpg == nil {
+            // A nil legacy/client envelope must not erase a host-owned
+            // usage-tree authority state.  This is also the recovery path for
+            // a malformed pre-tree persisted peer.
+            peer.rpg = .skillTreeProgression()
+        }
         var result: LANPlayerState?
         if let playerState = peer.playerState {
             peer.playerState = stateWithRPG(playerState, rpg: nil)
@@ -829,7 +917,10 @@ public final class LANMultiplayerHostSession {
             lifecycle: .disconnected,
             permissions: record.permissions,
             playerState: record.playerState.map { stateWithRPG($0, rpg: nil) },
-            rpg: record.rpg.map(repairRPGCharacterState),
+            // Preserve a saved legacy/tree envelope when present.  Older
+            // records without one are migrated to the untrained tree at the
+            // authority boundary rather than waiting on a guest packet.
+            rpg: record.rpg.map(rpgMigrateLegacyStateToSkillTrees) ?? .skillTreeProgression(),
             inventory: record.inventory,
             inventoryRevision: max(0, record.inventoryRevision),
             lastGrantID: 0,
@@ -1318,8 +1409,18 @@ public final class LANMultiplayerHostSession {
         guard let held = inventory.slots.first(where: {
             $0.slot == playerState.selectedHotbarSlot && $0.count > 0
         }), held.itemID >= 0, held.itemID < itemDefs.count,
-              let tool = itemDef(held.itemID).tool,
-              held.damage < tool.durability else {
+              itemDef(held.itemID).tool != nil,
+              held.damage < maxDamageOf(ItemStack(
+                held.itemID,
+                1,
+                damage: held.damage,
+                ench: held.enchantments.map(\.enchantment),
+                label: held.label,
+                data: makeLANStackData(
+                    craftingQuality: held.craftingQuality,
+                    potion: held.potion
+                )
+              )) else {
             return .rejected("selected item is not a usable tool")
         }
         let target = LANBlockPosition(
@@ -1338,6 +1439,96 @@ public final class LANMultiplayerHostSession {
         peer.lastToolStrikeTarget = target
         peers[playerID] = peer
         return .accepted(LANAuthorizedToolStrike(blockCell: blockCell, itemID: held.itemID))
+    }
+
+    /// Validates one host-authoritative ordinary-bow phase. The client identifies its selected
+    /// hotbar slot and a monotone semantic sequence, but cannot provide a charge amount, arrow
+    /// type, damage, or target. The detached ghost later executes the real `shootBow` path using
+    /// the resulting host-timed charge.
+    public func authorizeBowIntent(
+        _ intent: LANBowIntent,
+        from rawPlayerID: String,
+        at tick: Int,
+        currentDimension: Int
+    ) -> LANBowIntentResult {
+        guard (0...RPG_MAX_COUNTER).contains(tick) else {
+            return .rejected("invalid host tick")
+        }
+        let playerID = String(rawPlayerID.prefix(128))
+        guard var peer = peers[playerID] else { return .rejected("unknown player") }
+        guard peer.lifecycle == .connected else {
+            return .rejected(peer.lifecycle == .disconnected ? "player disconnected" : "player is dead")
+        }
+        guard intent.sequence > peer.lastBowIntentSequence else {
+            return .ignored("duplicate bow intent")
+        }
+        // From this point a semantic sequence is consumed even if the current player/inventory
+        // state proves invalid. That mirrors tool-strike replay behavior and prevents an old
+        // accepted begin/release from being retried in a fresh transport frame after state changes.
+        peer.lastBowIntentSequence = intent.sequence
+        defer { peers[playerID] = peer }
+
+        guard let playerState = peer.playerState,
+              !playerState.dead,
+              playerState.dimension == currentDimension,
+              let inventory = peer.inventory,
+              intent.selectedHotbarSlot == playerState.selectedHotbarSlot,
+              inventory.selectedHotbarSlot == playerState.selectedHotbarSlot,
+              let held = inventory.slots.first(where: {
+                  $0.slot == playerState.selectedHotbarSlot && $0.count > 0
+              }),
+              held.itemID >= 0, held.itemID < itemDefs.count,
+              itemDef(held.itemID).tool?.type == "bow"
+        else {
+            if intent.action == .release { peer.bowDraw = nil }
+            return .rejected("selected bow state unavailable")
+        }
+        let heldStack = ItemStack(
+            held.itemID,
+            1,
+            damage: held.damage,
+            ench: held.enchantments.map(\.enchantment),
+            label: held.label,
+            data: makeLANStackData(
+                craftingQuality: held.craftingQuality,
+                potion: held.potion
+            )
+        )
+        guard held.damage < maxDamageOf(heldStack) else {
+            if intent.action == .release { peer.bowDraw = nil }
+            return .rejected("selected bow is broken")
+        }
+        let heldIdentity = BowHeldItemIdentity(held)
+
+        switch intent.action {
+        case .begin:
+            // A later valid begin replaces an abandoned local draw rather than leaving the
+            // guest unable to fire after a focus loss. It always resets to the current host tick.
+            peer.bowDraw = BowDraw(
+                startTick: tick,
+                selectedHotbarSlot: intent.selectedHotbarSlot,
+                inventoryRevision: peer.inventoryRevision,
+                held: heldIdentity
+            )
+            return .drawStarted
+        case .release:
+            guard let draw = peer.bowDraw else { return .rejected("bow is not drawing") }
+            // Release consumes the draw regardless of rejection so a slot swap or broken bow
+            // cannot leave a stale start time armed for a later packet.
+            peer.bowDraw = nil
+            guard draw.selectedHotbarSlot == intent.selectedHotbarSlot else {
+                return .rejected("bow slot changed during draw")
+            }
+            guard draw.inventoryRevision == peer.inventoryRevision,
+                  draw.held == heldIdentity else {
+                return .rejected("bow changed during draw")
+            }
+            let elapsed = max(0, tick - draw.startTick)
+            guard elapsed <= LAN_MULTIPLAYER_MAX_BOW_DRAW_TICKS else {
+                return .ignored("bow draw expired")
+            }
+            return .released(chargeTicks: min(20, elapsed))
+        }
     }
 
     public func applyBlockIntent(_ intent: LANBlockIntent, from rawPlayerID: String, to world: World) -> LANBlockIntentResult {
@@ -1557,11 +1748,13 @@ public final class LANMultiplayerHostSession {
         guard lanBlockEntityRevision(beforeBlockEntities) == intent.blockEntityRevision else {
             return .rejected("stale container revision")
         }
-        guard isLANContainerEditItemTransitionAllowed(
+        guard let craftingTransition = validatedLANContainerEditItemTransition(
             beforeInventory: beforeInventory,
             afterInventory: normalizedInventory,
             beforeBlockEntities: beforeBlockEntities,
-            afterBlockEntities: afterBlockEntities
+            afterBlockEntities: afterBlockEntities,
+            rpg: peer.rpg,
+            gameMode: playerState.gameMode
         ) else {
             return .rejected("container edit is not host-verifiable")
         }
@@ -1587,8 +1780,18 @@ public final class LANMultiplayerHostSession {
                 xpProgress: normalizedInventory.xpProgress
             )
             peer.inventoryRevision = intent.revision
-            peers[playerID] = peer
         }
+        // The transform was checked against this exact candidate state and
+        // the world/container mutation above has now committed.  Persist the
+        // host-owned crafting mastery/XP only at this point, never while
+        // probing a submitted snapshot.
+        peers[playerID] = peer
+        // Keep the player-state envelope and the durable peer record on the
+        // same repaired authority state.  The transport publishes this
+        // returned state immediately after an accepted craft, so the guest
+        // sees mastery/XP and the host-derived quality rather than trusting
+        // its speculative local tree.
+        _ = recordRPGState(craftingTransition.rpg, for: playerID)
         return .applied(blockEntities: afterBlockEntities)
     }
 
@@ -1601,6 +1804,15 @@ public final class LANMultiplayerHostSession {
         guard var peer = peers[playerID] else { return false }
         guard update.revision > peer.inventoryRevision else { return false }
         guard let normalized = normalizedLANInventorySnapshot(update.snapshot) else { return false }
+        // Ordinary inventory publishes remain guest-owned, but an equipment
+        // quality rank is minted only by a host-verified craft (or a host
+        // pickup/grant).  Permit an already authoritative quality stack to be
+        // rearranged or consumed, never created, upgraded, or copied by an
+        // arbitrary inventory packet.
+        guard lanInventoryUpdatePreservesHostCraftingQuality(
+            before: peer.inventory,
+            after: normalized
+        ) else { return false }
         peer.inventory = LANPlayerInventorySnapshot(
             playerID: peer.playerID,
             selectedHotbarSlot: normalized.selectedHotbarSlot,
@@ -1639,7 +1851,15 @@ public final class LANMultiplayerHostSession {
             guard item.itemID >= 0, item.itemID < itemDefs.count,
                   item.count > 0, item.damage >= 0 else { return nil }
             let remaining = ItemStack(
-                item.itemID, item.count, damage: item.damage, label: item.label
+                item.itemID,
+                item.count,
+                damage: item.damage,
+                ench: item.enchantments.map(\.enchantment),
+                label: item.label,
+                data: makeLANStackData(
+                    craftingQuality: item.craftingQuality,
+                    potion: item.potion
+                )
             )
             guard remaining.count <= maxStackOf(remaining) else { return nil }
             for index in inventory.indices where remaining.count > 0 {
@@ -2166,7 +2386,10 @@ private func makeLANInventorySlotSnapshots(_ inventory: [ItemStack?]) -> [LANInv
             itemID: stack.id,
             count: stack.count,
             damage: stack.damage,
-            label: stack.label
+            label: stack.label,
+            craftingQuality: stack.data.craftingQuality,
+            enchantments: stack.ench.map(LANItemEnchantmentSnapshot.init),
+            potion: stack.data.potion
         )
     }
 }
@@ -2225,7 +2448,10 @@ private func makeLANBlockEntitySlotSnapshots(_ items: [ItemStack?]) -> [LANBlock
             itemID: stack.id,
             count: min(stack.count, maxStackOf(ItemStack(stack.id, 1))),
             damage: stack.damage,
-            label: stack.label
+            label: stack.label,
+            craftingQuality: stack.data.craftingQuality,
+            enchantments: stack.ench.map(LANItemEnchantmentSnapshot.init),
+            potion: stack.data.potion
         )
     }
 }
@@ -2366,7 +2592,10 @@ private func normalizedLANInventorySnapshot(_ snapshot: LANPlayerInventorySnapsh
             itemID: slot.itemID,
             count: min(slot.count, maxStackOf(ItemStack(slot.itemID, 1))),
             damage: slot.damage,
-            label: slot.label
+            label: slot.label,
+            craftingQuality: slot.craftingQuality,
+            enchantments: slot.enchantments,
+            potion: slot.potion
         ))
     }
     return LANPlayerInventorySnapshot(
@@ -2387,7 +2616,12 @@ private func makeInventory(from snapshot: LANPlayerInventorySnapshot) -> [ItemSt
             slot.itemID,
             slot.count,
             damage: slot.damage,
-            label: slot.label
+            ench: slot.enchantments.map(\.enchantment),
+            label: slot.label,
+            data: makeLANStackData(
+                craftingQuality: slot.craftingQuality,
+                potion: slot.potion
+            )
         )
         inventory[slot.slot] = stack
     }
@@ -2420,7 +2654,10 @@ private func normalizedLANBlockEntitySnapshot(_ raw: LANBlockEntitySnapshot) -> 
             itemID: slot.itemID,
             count: cappedCount,
             damage: slot.damage,
-            label: slot.label
+            label: slot.label,
+            craftingQuality: slot.craftingQuality,
+            enchantments: slot.enchantments,
+            potion: slot.potion
         ))
     }
     slots.sort { $0.slot < $1.slot }
@@ -2455,7 +2692,12 @@ private func items(from snapshot: LANBlockEntitySnapshot) -> [ItemStack?]? {
             slot.itemID,
             slot.count,
             damage: slot.damage,
-            label: slot.label
+            ench: slot.enchantments.map(\.enchantment),
+            label: slot.label,
+            data: makeLANStackData(
+                craftingQuality: slot.craftingQuality,
+                potion: slot.potion
+            )
         )
     }
     return items
@@ -2465,6 +2707,9 @@ private struct LANItemMultisetKey: Hashable {
     var itemID: Int
     var damage: Int
     var label: String?
+    var craftingQuality: Int?
+    var enchantments: [LANItemEnchantmentSnapshot]
+    var potion: String?
 }
 
 private func addLANItem(
@@ -2472,31 +2717,77 @@ private func addLANItem(
     count: Int,
     damage: Int,
     label: String?,
+    craftingQuality: Int?,
+    enchantments: [LANItemEnchantmentSnapshot],
+    potion: String?,
     to totals: inout [LANItemMultisetKey: Int]
 ) {
     guard itemID >= 0, itemID < itemDefs.count, count != 0 else { return }
-    let key = LANItemMultisetKey(itemID: itemID, damage: max(0, damage), label: label)
+    let key = LANItemMultisetKey(
+        itemID: itemID,
+        damage: max(0, damage),
+        label: label,
+        craftingQuality: lanClampedCraftingQuality(craftingQuality),
+        enchantments: lanCanonicalEnchantments(enchantments),
+        potion: lanCanonicalPotionID(potion)
+    )
     totals[key, default: 0] += count
     if totals[key] == 0 { totals.removeValue(forKey: key) }
 }
 
 private func removeLANItem(_ stack: ItemStack, from totals: inout [LANItemMultisetKey: Int]) {
-    addLANItem(itemID: stack.id, count: -1, damage: stack.damage, label: stack.label, to: &totals)
+    addLANItem(
+        itemID: stack.id,
+        count: -1,
+        damage: stack.damage,
+        label: stack.label,
+        craftingQuality: stack.data.craftingQuality,
+        enchantments: stack.ench.map(LANItemEnchantmentSnapshot.init),
+        potion: stack.data.potion,
+        to: &totals
+    )
 }
 
 private func addLANItem(_ stack: ItemStack, to totals: inout [LANItemMultisetKey: Int]) {
-    addLANItem(itemID: stack.id, count: stack.count, damage: stack.damage, label: stack.label, to: &totals)
+    addLANItem(
+        itemID: stack.id,
+        count: stack.count,
+        damage: stack.damage,
+        label: stack.label,
+        craftingQuality: stack.data.craftingQuality,
+        enchantments: stack.ench.map(LANItemEnchantmentSnapshot.init),
+        potion: stack.data.potion,
+        to: &totals
+    )
 }
 
 private func addLANInventorySnapshot(_ snapshot: LANPlayerInventorySnapshot, to totals: inout [LANItemMultisetKey: Int]) {
     for slot in snapshot.slots {
-        addLANItem(itemID: slot.itemID, count: slot.count, damage: slot.damage, label: slot.label, to: &totals)
+        addLANItem(
+            itemID: slot.itemID,
+            count: slot.count,
+            damage: slot.damage,
+            label: slot.label,
+            craftingQuality: slot.craftingQuality,
+            enchantments: slot.enchantments,
+            potion: slot.potion,
+            to: &totals
+        )
     }
 }
 
 private func addLANBlockEntitySnapshot(_ snapshot: LANBlockEntitySnapshot, to totals: inout [LANItemMultisetKey: Int]) {
     for slot in snapshot.slots {
-        addLANItem(itemID: slot.itemID, count: slot.count, damage: slot.damage, label: slot.label, to: &totals)
+        addLANItem(
+            itemID: slot.itemID,
+            count: slot.count,
+            damage: slot.damage,
+            label: slot.label,
+            craftingQuality: slot.craftingQuality,
+            enchantments: slot.enchantments,
+            potion: slot.potion,
+            to: &totals
+        )
     }
 }
 
@@ -2526,6 +2817,18 @@ public func lanBlockEntityRevision(_ snapshots: [LANBlockEntitySnapshot]) -> Int
             mix(UInt64(slot.itemID), into: &hash)
             mix(UInt64(slot.count), into: &hash)
             mix(UInt64(slot.damage), into: &hash)
+            mix(UInt64(bitPattern: Int64(slot.craftingQuality ?? -1)), into: &hash)
+            for enchantment in slot.enchantments {
+                for byte in enchantment.id.utf8 { mix(UInt64(byte), into: &hash) }
+                mix(UInt64(bitPattern: Int64(enchantment.lvl)), into: &hash)
+                mix(0xfe, into: &hash)
+            }
+            mix(0xfd, into: &hash)
+            if let potion = slot.potion {
+                for byte in potion.utf8 { mix(UInt64(byte), into: &hash) }
+            } else {
+                mix(UInt64.max, into: &hash)
+            }
             if let label = slot.label {
                 for byte in label.utf8 { mix(UInt64(byte), into: &hash) }
             }
@@ -2562,42 +2865,193 @@ private func lanContainerEditTotals(
     return totals
 }
 
+/// `LANInventoryUpdate` is intentionally flexible for ordinary guest-owned
+/// inventory layout, but crafting quality is host authority.  Count every
+/// quality-bearing item by the full immutable stack identity; a guest may
+/// split, merge, move, or consume one already in its host baseline, but cannot
+/// increase any such total or change it into another item/damage/label/rank.
+private func lanInventoryUpdatePreservesHostCraftingQuality(
+    before: LANPlayerInventorySnapshot?,
+    after: LANPlayerInventorySnapshot
+) -> Bool {
+    var beforeTotals: [LANItemMultisetKey: Int] = [:]
+    for slot in before?.slots ?? [] where slot.craftingQuality != nil {
+        addLANItem(
+            itemID: slot.itemID,
+            count: slot.count,
+            damage: slot.damage,
+            label: slot.label,
+            craftingQuality: slot.craftingQuality,
+            enchantments: slot.enchantments,
+            potion: slot.potion,
+            to: &beforeTotals
+        )
+    }
+    var afterTotals: [LANItemMultisetKey: Int] = [:]
+    for slot in after.slots where slot.craftingQuality != nil {
+        addLANItem(
+            itemID: slot.itemID,
+            count: slot.count,
+            damage: slot.damage,
+            label: slot.label,
+            craftingQuality: slot.craftingQuality,
+            enchantments: slot.enchantments,
+            potion: slot.potion,
+            to: &afterTotals
+        )
+    }
+    return afterTotals.allSatisfy { key, count in
+        count <= beforeTotals[key, default: 0]
+    }
+}
+
 private let LAN_CONTAINER_EDIT_MAX_CRAFT_ROUNDS = 64
 
-private func isLANCraftingTableTransformAllowed(
+/// The only mutable player state a host-side crafting-table transform may
+/// produce.  Keeping it separate from validation means malformed snapshots
+/// cannot consume recipe mastery or XP while the host is merely probing them.
+private struct LANCraftingTableTransition {
+    var rpg: RPGCharacterState?
+}
+
+/// Calculates the host-owned tree state after exactly the recipe rounds that
+/// were proven by the container transform.  This mirrors
+/// `skillTreeAwardCraftedRecipe` without materializing an untrusted guest as a
+/// `Player` object.
+private func lanCraftingStateAfterCommit(
+    _ source: RPGCharacterState?,
+    plan: CraftingRecipePlan,
+    completedRounds: Int,
+    gameMode: Int
+) -> RPGCharacterState? {
+    guard gameMode != GameMode.creative,
+          completedRounds > 0,
+          plan.recipeIndex >= 0,
+          plan.recipeIndex < craftingRecipes.count,
+          var state = source,
+          var trees = state.skillTrees
+    else { return source }
+
+    trees = skillTreeValidatedState(trees, recipeCount: craftingRecipes.count)
+    let masteryKey = craftingOutputMasteryKey(forRecipeIndex: plan.recipeIndex)
+    let mastery = skillTreeRecordCraftedRecipe(
+        recipeIndex: plan.recipeIndex,
+        completedRounds: completedRounds,
+        recipeCount: craftingRecipes.count,
+        masteryIndex: masteryKey?.canonicalRecipeIndex,
+        equivalentRecipeIndices: masteryKey?.equivalentRecipeIndices ?? [],
+        in: &trees.crafting
+    )
+    guard mastery.accepted else { return source }
+    _ = skillTreeAwardXP(
+        skillTreeCraftingXP(
+            for: skillTreeCraftingIngredients(plan.ingredients),
+            eligibleRounds: mastery.xpEligibleRounds
+        ),
+        to: .crafting,
+        in: &trees
+    )
+    state.skillTrees = trees
+    return state
+}
+
+/// Applies the same quality rule used by the local crafting commit, but from
+/// the candidate host state.  Creative crafting never uses the survival-tree
+/// commit path, so it deliberately remains unmarked here too.
+private func applyLANCraftingQuality(
+    to output: ItemStack,
+    rpg: RPGCharacterState?,
+    gameMode: Int
+) {
+    guard gameMode != GameMode.creative,
+          let rawTrees = rpg?.skillTrees,
+          itemDef(output.id).tool != nil || itemDef(output.id).armor != nil
+    else { return }
+    let trees = skillTreeValidatedState(rawTrees, recipeCount: craftingRecipes.count)
+    let rank = skillTreeClampAdvancedRank(trees.crafting.progress.advancedRank)
+    output.data.craftingQuality = rank > 0 ? rank : nil
+}
+
+/// Validates a single contiguous survival-crafting commit.  For every bounded
+/// candidate round count, it derives the recipe from the *before* grid,
+/// constructs the exact post-award quality output, and compares the complete
+/// item multiset.  A client-provided quality rank is never used as authority.
+private func validatedLANCraftingTableTransform(
     beforeBlockEntity: LANBlockEntitySnapshot,
     beforeTotals: [LANItemMultisetKey: Int],
-    afterTotals: [LANItemMultisetKey: Int]
-) -> Bool {
+    afterTotals: [LANItemMultisetKey: Int],
+    rpg: RPGCharacterState?,
+    gameMode: Int
+) -> LANCraftingTableTransition? {
     guard beforeBlockEntity.type == "crafting",
           var grid = items(from: beforeBlockEntity),
-          grid.count == 9
-    else { return false }
+          grid.count == 9,
+          let initialPlan = currentCraftingPlan(from: grid, gridWidth: 3, gridHeight: 3)
+    else { return nil }
+
+    let expectedRecipeIndex = initialPlan.recipeIndex
+    let expectedOutputID = initialPlan.output.id
+    let expectedOutputCount = initialPlan.output.count
+    let initialOutput = initialPlan.output.copy()
+    // The host owns the usage tree, so it owns crafting throughput too. This
+    // mirrors the local commit boundary rather than trusting a client UI's
+    // selected batch amount.
+    let treeRoundLimit = rpg?.skillTrees.map {
+        skillTreeCraftingBatchRoundLimit(primaryRank: $0.crafting.progress.primaryRank)
+    } ?? MAX_CRAFTING_BATCH_ROUNDS
+    let maximumCompletedRounds = min(
+        LAN_CONTAINER_EDIT_MAX_CRAFT_ROUNDS,
+        MAX_CRAFTING_BATCH_ROUNDS,
+        treeRoundLimit
+    )
 
     var totals = beforeTotals
-    for _ in 0..<LAN_CONTAINER_EDIT_MAX_CRAFT_ROUNDS {
+    for completedRounds in 1...maximumCompletedRounds {
         guard let plan = currentCraftingPlan(from: grid, gridWidth: 3, gridHeight: 3) else {
-            return false
+            return nil
+        }
+        guard plan.recipeIndex == expectedRecipeIndex,
+              plan.output.id == expectedOutputID,
+              plan.output.count == expectedOutputCount else {
+            return nil
         }
         for stack in grid {
             guard let stack else { continue }
             removeLANItem(stack, from: &totals)
         }
         let returns = consumeCraftingGrid(&grid)
-        addLANItem(plan.output, to: &totals)
         for stack in returns { addLANItem(stack, to: &totals) }
-        if totals == afterTotals { return true }
+
+        let candidateRPG = lanCraftingStateAfterCommit(
+            rpg,
+            plan: initialPlan,
+            completedRounds: completedRounds,
+            gameMode: gameMode
+        )
+        let (outputCount, overflow) = initialOutput.count.multipliedReportingOverflow(by: completedRounds)
+        guard !overflow, outputCount > 0 else { return nil }
+        let output = initialOutput.copy()
+        output.count = outputCount
+        applyLANCraftingQuality(to: output, rpg: candidateRPG, gameMode: gameMode)
+
+        var candidateTotals = totals
+        addLANItem(output, to: &candidateTotals)
+        if candidateTotals == afterTotals {
+            return LANCraftingTableTransition(rpg: candidateRPG)
+        }
     }
-    return false
+    return nil
 }
 
-private func isLANContainerEditItemTransitionAllowed(
+private func validatedLANContainerEditItemTransition(
     beforeInventory: LANPlayerInventorySnapshot,
     afterInventory: LANPlayerInventorySnapshot,
     beforeBlockEntities: [LANBlockEntitySnapshot],
-    afterBlockEntities: [LANBlockEntitySnapshot]
-) -> Bool {
-    guard beforeBlockEntities.count == afterBlockEntities.count, !beforeBlockEntities.isEmpty else { return false }
+    afterBlockEntities: [LANBlockEntitySnapshot],
+    rpg: RPGCharacterState?,
+    gameMode: Int
+) -> LANCraftingTableTransition? {
+    guard beforeBlockEntities.count == afterBlockEntities.count, !beforeBlockEntities.isEmpty else { return nil }
     for (before, after) in zip(beforeBlockEntities, afterBlockEntities) {
         guard before.dimension == after.dimension,
               before.x == after.x,
@@ -2605,17 +3059,19 @@ private func isLANContainerEditItemTransitionAllowed(
               before.z == after.z,
               before.type == after.type,
               before.slotCount == after.slotCount
-        else { return false }
+        else { return nil }
     }
 
     let beforeTotals = lanContainerEditTotals(inventory: beforeInventory, blockEntities: beforeBlockEntities)
     let afterTotals = lanContainerEditTotals(inventory: afterInventory, blockEntities: afterBlockEntities)
-    if beforeTotals == afterTotals { return true }
-    guard beforeBlockEntities.count == 1, let beforeBlockEntity = beforeBlockEntities.first else { return false }
-    return isLANCraftingTableTransformAllowed(
+    if beforeTotals == afterTotals { return LANCraftingTableTransition(rpg: rpg) }
+    guard beforeBlockEntities.count == 1, let beforeBlockEntity = beforeBlockEntities.first else { return nil }
+    return validatedLANCraftingTableTransform(
         beforeBlockEntity: beforeBlockEntity,
         beforeTotals: beforeTotals,
-        afterTotals: afterTotals
+        afterTotals: afterTotals,
+        rpg: rpg,
+        gameMode: gameMode
     )
 }
 

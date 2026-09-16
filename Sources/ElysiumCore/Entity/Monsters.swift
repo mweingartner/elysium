@@ -218,7 +218,7 @@ public final class Creeper: Monster {
         }
     }
     public var charged = false
-    public override var suppressesMobAI: Bool { fuse != nil }
+    public override var suppressesMobAI: Bool { super.suppressesMobAI || fuse != nil }
     public override init(world: World) {
         super.init(world: world)
         width = 0.6; height = 1.7

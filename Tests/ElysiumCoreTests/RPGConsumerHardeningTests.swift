@@ -478,97 +478,44 @@ final class RPGConsumerHardeningTests: XCTestCase {
         XCTAssertNil(rpgCircuitSenseInspection(player))
     }
 
-    func testServantUnprepareCycleCeilingDurabilityExhaustionAndRuleCleanup() throws {
+    func testRetiredClassActionsCannotReplaceOrFreezeUsageTreeProgression() throws {
         let game = PersistenceTestSupport.makeGame(owner: self, label: "rpg-consumer")
-        game.createWorld(name: "RPG lifecycle", seedText: "807", mode: GameMode.survival,
+        game.createWorld(name: "Usage tree lifecycle", seedText: "807", mode: GameMode.survival,
                          difficulty: 2)
         let player = game.player!
-        let world = game.world
-        player.rpg = mastered(pathID: "arcanist", starter: "ritual_circle")
-        player.rpg.preparedSpellIDs = ["summon_servant", "mage_light"]
-        player.rpg.selectedPreparedSpellID = "summon_servant"
-        player.rpg.selectedPreparedActionID = rpgPreparedActionToken(kind: .spell,
-                                                                     id: "summon_servant")
-        player.rpg.activeUpkeeps = [RPGUpkeep(spellID: "summon_servant", ownerSequence: 7,
-                                              remainingTicks: 100, costPerSecond: 0.5)]
-        player.rpg = repairRPGCharacterState(player.rpg)
-        let servant = Allay(world: world)
-        servant.setPos(player.x + 1, player.y, player.z)
-        world.addEntity(servant)
-        let servantDraft = RPGTemporaryEffectDraft(kind: .servant,
-                                                   ownerAuthorityID: player.effectiveRPGAuthorityID,
-                                                   ownerEntityID: player.id, ownerSequence: 7,
-                                                   center: RPGBlockPosition(ifloor(servant.x), ifloor(servant.y),
-                                                                            ifloor(servant.z)),
-                                                   durationTicks: 100)
-        XCTAssertTrue(world.registerRPGTemporaryEffect(servantDraft, entityID: servant.id))
-        let unrelated = RPGTemporaryEffectDraft(kind: .mageLight,
-                                                ownerAuthorityID: player.effectiveRPGAuthorityID,
-                                                ownerEntityID: player.id, ownerSequence: 8,
-                                                center: RPGBlockPosition(ifloor(player.x), ifloor(player.y),
-                                                                         ifloor(player.z)),
-                                                durationTicks: 100)
-        XCTAssertTrue(world.registerRPGTemporaryEffect(unrelated))
-        let beforeRevision = player.rpg.authorityRevision
-        XCTAssertTrue(game.requestRPGTogglePreparedSpell("summon_servant").contains("Unprepared"))
-        XCTAssertEqual(player.rpg.authorityRevision, beforeRevision + 1)
-        XCTAssertNil(world.rpgTemporaryEffect(for: servantDraft.key))
-        XCTAssertNil(world.entityById[servant.id])
-        XCTAssertNotNil(world.rpgTemporaryEffect(for: unrelated.key))
+        var trees = player.skillTreeState
+        trees.melee = skillTreeBranchState(primaryRank: 5, advancedRank: 5)
+        player.skillTreeState = trees
+        player.rpg.activeCooldowns = [RPGCooldown(
+            id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 5
+        )]
+        let beforeLegacyRequests = player.rpg
+        let legacyDraft = RPGCreationDraft(
+            pathID: "arcanist", branchID: "arcanist_elementalist",
+            startingSkillIDs: rpgDefaultStartingSkillIDs(pathID: "arcanist")
+        )
 
-        player.rpg.preparedSpellIDs = ["mage_light", "stone_ward"]
-        player.rpg.selectedPreparedSpellID = "mage_light"
-        player.rpg.selectedPreparedActionID = rpgPreparedActionToken(kind: .spell, id: "mage_light")
-        player.rpg.authorityRevision = RPG_MAX_NORMAL_AUTHORITY_REVISION
-        player.rpg = repairRPGCharacterState(player.rpg)
-        let beforeCycle = player.rpg
-        XCTAssertEqual(rpgCyclePreparedSpell(player), .authorityExhausted)
-        XCTAssertEqual(player.rpg, beforeCycle)
+        XCTAssertEqual(game.requestRPGCreateCharacter(legacyDraft),
+                       RPGActionFailure.classesDisabled.description)
+        XCTAssertEqual(game.requestRPGTogglePreparedSpell("summon_servant"),
+                       RPGActionFailure.classesDisabled.description)
         XCTAssertEqual(game.requestRPGCyclePreparedSpell(),
-                       RPGProgressionError.authorityExhausted.description)
-        XCTAssertEqual(player.rpg, beforeCycle)
+                       RPGActionFailure.classesDisabled.description)
+        XCTAssertEqual(game.requestRPGCastSelectedSpell(),
+                       RPGActionFailure.classesDisabled.description)
+        XCTAssertEqual(player.rpg, beforeLegacyRequests,
+                       "retired actions must not damage a real usage-tree envelope")
 
-        player.rpg.authorityRevision = 10
-        let extreme = rpgCyclePreparedSpell(player, direction: .max)
-        XCTAssertNotEqual(extreme, .authorityExhausted)
-        let afterExtreme = player.rpg
-        XCTAssertEqual(rpgCyclePreparedSpell(player, direction: 0),
-                       .noOp(player.rpg.selectedPreparedSpellID!))
-        XCTAssertEqual(player.rpg, afterExtreme)
-        XCTAssertNotEqual(rpgCyclePreparedSpell(player, direction: .min), .authorityExhausted)
-        player.rpg.authorityRevision = RPG_MAX_NORMAL_AUTHORITY_REVISION
-        let actionBefore = player.rpg
-        XCTAssertEqual(rpgCyclePreparedAction(player, direction: 1), .authorityExhausted)
-        XCTAssertEqual(player.rpg, actionBefore)
-
-        let tuned = Player(world: world)
-        tuned.rpg = mastered(pathID: "tinker", starter: "field_mod")
-        tuned.stats["rpg.toolTuneCounter"] = Double(RPG_MAX_COUNTER - 1)
-        XCTAssertTrue(tuned.shouldPreserveRPGToolDurability())
-        XCTAssertFalse(tuned.shouldPreserveRPGToolDurability())
-        XCTAssertEqual(tuned.stats["rpg.toolTuneCounter"], Double(RPG_MAX_COUNTER))
-        let salvager = Player(world: world)
-        salvager.rpg = mastered(pathID: "delver", starter: "salvage_eye")
-        salvager.stats["rpg.salvageCounter"] = Double(RPG_MAX_COUNTER - 1)
-        XCTAssertTrue(salvager.shouldPreserveRPGSalvageDurability())
-        XCTAssertFalse(salvager.shouldPreserveRPGSalvageDurability())
-
-        player.rpg = mastered(pathID: "arcanist", starter: "ritual_circle")
-        player.rpg.preparedSpellIDs = ["summon_servant"]
-        player.rpg.activeUpkeeps = [RPGUpkeep(spellID: "summon_servant", ownerSequence: 9,
-                                              remainingTicks: 100, costPerSecond: 0.5)]
-        player.maxHealth = 30
-        player.health = 30
-        let ruleRevision = player.rpg.authorityRevision
+        // Decoded legacy-rule values remain harmless: turning the old bit on
+        // cannot layer a class onto a progressed tree or stop its cooldown.
+        game.setGameRule(RPG_CLASSES_GAME_RULE, 1)
+        XCTAssertEqual(game.requestRPGCreateCharacter(legacyDraft),
+                       RPGActionFailure.classesDisabled.description)
+        XCTAssertEqual(player.rpg, beforeLegacyRequests)
         game.setGameRule(RPG_CLASSES_GAME_RULE, 0)
-        XCTAssertTrue(player.rpg.activeUpkeeps.isEmpty)
-        XCTAssertEqual(player.rpg.authorityRevision, ruleRevision + 1)
-        XCTAssertEqual(player.maxHealth, 20)
-        XCTAssertEqual(player.health, 20)
-        XCTAssertFalse(rpgHUDVisible(player))
-        let disabledState = player.rpg
-        game.setGameRule(RPG_CLASSES_GAME_RULE, 0)
-        XCTAssertEqual(player.rpg, disabledState, "repeated disable is idempotent")
+        _ = game.frame(dtMs: TICK_MS)
+        XCTAssertEqual(player.rpg.activeCooldowns,
+                       [RPGCooldown(id: SkillTreeActionID.battleCry.rawValue, remainingTicks: 4)])
     }
 
     private func makeWorld(seed: UInt32) -> World {

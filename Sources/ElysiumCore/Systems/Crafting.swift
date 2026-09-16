@@ -51,6 +51,48 @@ public func craftingRecipeOutput(_ recipe: CraftRecipe) -> ItemStack {
     }
 }
 
+/// The stable, output-item ownership slot for a crafting mastery counter.
+///
+/// Multiple registered recipes can deliberately yield the same item (for
+/// example, mossy cobblestone has vine and moss-block recipes).  The usage
+/// tree promises a cap per item type, not per ingredient variant, so all such
+/// recipes must charge one bounded counter.  Registration order is append-only;
+/// the first matching recipe is therefore a durable canonical slot.  The full
+/// equivalent-index list lets the progression layer fold an already-decoded
+/// pre-canonical ledger into that slot without changing its serialized shape.
+public struct CraftingOutputMasteryKey: Equatable {
+    public let outputItemID: Int
+    public let canonicalRecipeIndex: Int
+    public let equivalentRecipeIndices: [Int]
+
+    public init(outputItemID: Int, canonicalRecipeIndex: Int,
+                equivalentRecipeIndices: [Int]) {
+        self.outputItemID = outputItemID
+        self.canonicalRecipeIndex = canonicalRecipeIndex
+        self.equivalentRecipeIndices = equivalentRecipeIndices
+    }
+}
+
+/// Returns the canonical mastery slot shared by every currently registered
+/// crafting recipe that produces the requested recipe's output item.  It is
+/// intentionally a deterministic array scan rather than a cached dictionary:
+/// recipe registration is append-only, this path runs only on a successful
+/// craft, and it avoids making unordered map iteration part of saved state.
+public func craftingOutputMasteryKey(forRecipeIndex recipeIndex: Int) -> CraftingOutputMasteryKey? {
+    let recipeCount = skillTreeBoundedRecipeCount(craftingRecipes.count)
+    guard recipeIndex >= 0, recipeIndex < recipeCount else { return nil }
+    let outputItemID = craftingRecipeOutput(craftingRecipes[recipeIndex]).id
+    var matching: [Int] = []
+    matching.reserveCapacity(2)
+    for index in 0..<recipeCount where craftingRecipeOutput(craftingRecipes[index]).id == outputItemID {
+        matching.append(index)
+    }
+    guard let canonicalRecipeIndex = matching.first else { return nil }
+    return CraftingOutputMasteryKey(outputItemID: outputItemID,
+                                    canonicalRecipeIndex: canonicalRecipeIndex,
+                                    equivalentRecipeIndices: matching)
+}
+
 private func inventoryCounts(_ inventory: [ItemStack?]) -> [String: Int] {
     var counts: [String: Int] = [:]
     for stack in inventory {
@@ -811,7 +853,8 @@ public func consumeCraftingOutputRounds(
     expectedOutputID: Int,
     expectedOutputCount: Int,
     requestedRounds: Int,
-    refill: (inout [ItemStack?]) -> Bool
+    refill: (inout [ItemStack?]) -> Bool,
+    onRoundWillConsume: (([ItemStack?]) -> Void)? = nil
 ) -> Int {
     guard gridWidth > 0, gridHeight > 0,
           gridWidth <= 8, gridHeight <= 8,
@@ -833,6 +876,11 @@ public func consumeCraftingOutputRounds(
             guard refill(&grid) else { break }
         }
         guard isExpectedMatch() else { break }
+        // Capture only a just-revalidated, concrete grid.  In particular, do
+        // not use the caller-supplied plan's ingredient text for progression:
+        // plans are a presentation convenience, while this grid is what is
+        // actually about to be consumed.
+        onRoundWillConsume?(grid)
         _ = consumeCraftingGrid(&grid)
         consumed += 1
     }
@@ -873,10 +921,17 @@ public func commitCraftingOutputRounds(
           plan.output.count > 0,
           stacksEqual(plan.output, displayedOutput),
           requestedRounds > 0 else { return nil }
-    let rounds = min(requestedRounds, MAX_CRAFTING_BATCH_ROUNDS)
+    // The UI's stepper is only a convenience. Enforce the usage-tree
+    // throughput cap at the authoritative commit boundary as well, so a
+    // scripted/local caller cannot bypass primary Crafting progression.
+    let treeRoundLimit = player.rpg.skillTrees.map {
+        skillTreeCraftingBatchRoundLimit(primaryRank: $0.crafting.progress.primaryRank)
+    } ?? MAX_CRAFTING_BATCH_ROUNDS
+    let rounds = min(requestedRounds, MAX_CRAFTING_BATCH_ROUNDS, treeRoundLimit)
     let (previewCount, previewOverflow) = plan.output.count.multipliedReportingOverflow(by: rounds)
     guard !previewOverflow, previewCount == displayedOutput.count else { return nil }
 
+    var consumedIngredientRounds: [[String?]] = []
     let completed = consumeCraftingOutputRounds(
         grid: &grid,
         gridWidth: gridWidth,
@@ -885,16 +940,44 @@ public func commitCraftingOutputRounds(
         expectedOutputID: plan.output.id,
         expectedOutputCount: plan.output.count,
         requestedRounds: rounds,
-        refill: refill
+        refill: refill,
+        onRoundWillConsume: { matchedGrid in
+            consumedIngredientRounds.append(matchedGrid.map { stack in
+                guard let stack, stack.count > 0 else { return nil }
+                return itemDef(stack.id).name
+            })
+        }
     )
-    guard completed > 0 else { return nil }
+    guard completed > 0, consumedIngredientRounds.count == completed else { return nil }
     // The preview multiplication above proved this product safe for `rounds`;
     // `completed <= rounds`, so no fallible check remains after consumption.
     let committedCount = plan.output.count * completed
     let output = plan.output.copy()
     output.count = committedCount
-    let report = rpgAwardCraftedRecipe(player, recipeIndex: plan.recipeIndex,
-                                       completedRounds: completed)
+    let report: RPGProgressionReport
+    if player.rpg.skillTrees != nil {
+        // Ingredient tags may resolve differently on successive valid refills.
+        // Award each proven round from that actual grid, preserving both
+        // output-item mastery's 100-round cap and the resource-rarity rule.
+        var awardedXP = 0
+        for ingredients in consumedIngredientRounds {
+            awardedXP += rpgAwardCraftedRecipe(
+                player, recipeIndex: plan.recipeIndex,
+                completedRounds: 1, ingredients: ingredients
+            ).awardedXP
+        }
+        report = RPGProgressionReport(leveledUp: false, previousLevel: 0,
+                                      newLevel: 0, awardedXP: awardedXP)
+    } else {
+        // Retired class progression does not inspect ingredients, but retain
+        // its historical batch semantics for readable legacy saves.
+        report = rpgAwardCraftedRecipe(player, recipeIndex: plan.recipeIndex,
+                                       completedRounds: completed,
+                                       ingredients: consumedIngredientRounds[0])
+    }
+    // The threshold-crossing craft receives the quality it just unlocked.
+    // Only durable equipment is marked by the helper.
+    skillTreeApplyCraftingQuality(to: output, for: player)
     return CraftingOutputCommit(output: output, completedRounds: completed,
                                 progression: report)
 }
@@ -1020,6 +1103,20 @@ private let REPAIR_MATS: [String: String] = [
     "wooden": "oak_planks", "stone": "cobblestone",
 ]
 
+/// Resolves the concrete material consumed by an anvil or the crafting-tree
+/// Field Repair capstone.  Keeping the lookup here makes both repair paths use
+/// the same item-family rules rather than accepting a broad, exploitable tag.
+public func repairMaterialName(for stack: ItemStack) -> String? {
+    let definition = itemDef(stack.id)
+    if definition.tool != nil {
+        return REPAIR_MATS[String(definition.name.split(separator: "_")[0])]
+    }
+    if let armor = definition.armor {
+        return REPAIR_MATS[armor.material]
+    }
+    return nil
+}
+
 public func anvilCombine(_ left: ItemStack?, _ right: ItemStack?, _ rename: String?) -> AnvilResult? {
     guard let left else { return nil }
     let out = left.copy()
@@ -1031,9 +1128,7 @@ public func anvilCombine(_ left: ItemStack?, _ right: ItemStack?, _ rename: Stri
     if let right {
         let ldef = itemDef(left.id), rdef = itemDef(right.id)
         let rName = rdef.name
-        let material: String? = ldef.tool != nil
-            ? REPAIR_MATS[String(ldef.name.split(separator: "_")[0])]
-            : ldef.armor != nil ? REPAIR_MATS[ldef.armor!.material] : nil
+        let material = repairMaterialName(for: left)
         if rName == "enchanted_book" && !right.ench.isEmpty {
             // book apply
             var newEnch = out.ench
@@ -1055,16 +1150,18 @@ public func anvilCombine(_ left: ItemStack?, _ right: ItemStack?, _ rename: Stri
             out.ench = newEnch
         } else if let material, rName == material {
             // unit repair: each mat repairs 25%
-            let maxD = ldef.tool?.durability ?? ldef.armor?.durability ?? 0
+            let maxD = maxDamageOf(left)
             if maxD == 0 || left.damage == 0 { return nil }
-            let quarter = Int((Double(maxD) / 4).rounded(.up))
+            let quarter = skillTreeEffectiveRepairAmount(
+                base: Int((Double(maxD) / 4).rounded(.up)),
+                qualityRank: left.data.craftingQuality ?? 0)
             let units = min(right.count, Int((Double(left.damage) / (Double(maxD) / 4)).rounded(.up)))
             out.damage = max(0, left.damage - units * quarter)
             cost += Double(units)
             out.data.repairUnits = units
         } else if right.id == left.id {
             // combine same items
-            let maxD = ldef.tool?.durability ?? ldef.armor?.durability ?? 0
+            let maxD = maxDamageOf(left)
             if maxD != 0 {
                 let totalLife = (maxD - left.damage) + (maxD - right.damage) + Int((Double(maxD) * 0.12).rounded(.down))
                 out.damage = max(0, maxD - totalLife)
@@ -1111,7 +1208,7 @@ public func grindstoneResult(_ a: ItemStack?, _ b: ItemStack?) -> (out: ItemStac
         out.ench = out.ench.filter { enchDef($0.id).curse }
     }
     if let a, let b {
-        let maxD = def.tool?.durability ?? def.armor?.durability ?? 0
+        let maxD = maxDamageOf(item)
         if maxD != 0 {
             let totalLife = (maxD - a.damage) + (maxD - b.damage) + Int((Double(maxD) * 0.05).rounded(.down))
             out.damage = max(0, maxD - totalLife)
@@ -1120,6 +1217,10 @@ public func grindstoneResult(_ a: ItemStack?, _ b: ItemStack?) -> (out: ItemStac
     if def.name == "enchanted_book" && out.ench.isEmpty {
         out.id = iid("book")
     }
+    // Stripping enchants must not silently erase the maker's durable quality.
+    // It is intrinsic to this individual stack rather than an enchantment.
+    let craftingQuality = out.data.craftingQuality
     out.data = StackData()
+    out.data.craftingQuality = craftingQuality
     return (out, min(50, Int((Double(xp) / 2).rounded(.up))))
 }

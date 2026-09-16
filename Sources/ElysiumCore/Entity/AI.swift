@@ -299,7 +299,10 @@ open class Mob: LivingEntity {
 
     /// Hostile state machines may suppress navigation and horizontal input
     /// while still using ordinary vertical collision/gravity in `travel()`.
-    open var suppressesMobAI: Bool { false }
+    /// A skill-tree stun shares the existing total-AI suppression path so an
+    /// affected creature cannot navigate, acquire targets, attack, or leash
+    /// pull for its full declared duration.
+    open var suppressesMobAI: Bool { skillTreeStunTicks > 0 }
 
     open override func tick() { mobTick() }
 

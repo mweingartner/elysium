@@ -15,11 +15,12 @@ final class RPGQuickSlotInputTests: XCTestCase {
             playerCount: 2,
             rpgClassesEnabled: true
         ))
-        XCTAssertNil(game.player.createRPGCharacter(RPGCreationDraft(
+        XCTAssertEqual(game.player.createRPGCharacter(RPGCreationDraft(
             pathID: "arcanist",
             branchID: "arcanist_elementalist",
             startingSkillIDs: rpgDefaultStartingSkillIDs(pathID: "arcanist")
-        )))
+        )), .classesDisabled,
+        "a transient LAN usage-tree mirror must reject the legacy constructor")
         game.player.selectedSlot = 4
         var captured: [LANRPGIntent] = []
         game.lanRPGIntentHandler = { captured.append($0) }

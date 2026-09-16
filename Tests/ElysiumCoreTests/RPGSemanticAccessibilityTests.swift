@@ -559,59 +559,80 @@ final class RPGSemanticAccessibilityTests: XCTestCase {
 
     @MainActor
     func testEveryCachedIdentityAndContentReplacementInvalidatesSubtree() throws {
-        let baseline = try fixture()
-        XCTAssertEqual(rpgAccessibilityNotificationIntents(
-            previous: baseline.tree, current: baseline.tree), [])
+        let viewport = try XCTUnwrap(RPGAccessibilityViewport(width: 360, height: 224))
+        let id = try XCTUnwrap(RPGUIElementID(rawValue: "tree-fastbar:cycle"))
+        let input = try XCTUnwrap(RPGSemanticInputSnapshot(
+            localPreferenceScope: nil, localPreferenceRevision: 0,
+            localPreferenceWritable: false, worldEntryGeneration: 1,
+            rulesGeneration: 1, ownerRevision: 1,
+            inventoryDigest: try XCTUnwrap(rpgSemanticInventoryDigest(["usage-tree"])),
+            equipmentFocusDigest: try XCTUnwrap(rpgSemanticEquipmentFocusDigest(["sword"])),
+            authorityRevision: 1, authorityPhase: .localReady,
+            authorityRequestIdentity: nil, operationExpectedState: "tree-fastbar"
+        ))
+        let descriptor = RPGSemanticDescriptor(
+            id: id, role: .button, label: "Cycle skill action",
+            help: "Selects the next unlocked usage-tree action.", enabled: true,
+            isFocusable: true,
+            frame: RPGLogicalRect(x: 20, y: 20, width: 160, height: 24),
+            visibleFrame: RPGLogicalRect(x: 20, y: 20, width: 160, height: 24),
+            actionCommand: .cyclePreparedAction
+        )
+        let origin = try XCTUnwrap(RPGSemanticActivationOrigin(
+            screenInstanceID: 1, semanticRevision: 1, descriptor: descriptor, input: input
+        ))
+        let element = try XCTUnwrap(RPGAccessibilityElementSnapshot(
+            descriptor: descriptor, activationOrigin: origin,
+            layoutGeneration: 1, viewport: viewport
+        ))
+        let baseline = try XCTUnwrap(RPGAccessibilityTreeSnapshot(
+            screenInstanceID: 1, semanticRevision: 1, layoutGeneration: 1,
+            viewport: viewport, elements: [element], focusedID: id,
+            highContrast: false, reduceMotion: false
+        ))
+        XCTAssertEqual(rpgAccessibilityNotificationIntents(previous: baseline, current: baseline), [])
 
-        let screenReplacement = try fixture(screenInstanceID: 2)
         func assertSingleLayout(_ current: RPGAccessibilityTreeSnapshot,
                                 file: StaticString = #filePath, line: UInt = #line) {
             let intents = rpgAccessibilityNotificationIntents(
-                previous: baseline.tree, current: current)
+                previous: baseline, current: current)
             XCTAssertEqual(intents.filter { $0 == .layoutChanged }.count, 1,
                            file: file, line: line)
         }
-        assertSingleLayout(screenReplacement.tree)
-        let revisionReplacement = try fixture(semanticRevision: 2, layoutGeneration: 1)
-        assertSingleLayout(revisionReplacement.tree)
-        let layoutReplacement = try fixture(semanticRevision: 1, layoutGeneration: 2)
-        assertSingleLayout(layoutReplacement.tree)
 
-        func tree(replacing index: Int,
-                  with replacement: RPGAccessibilityElementSnapshot)
+        func tree(screenInstanceID: UInt64 = baseline.screenInstanceID,
+                  semanticRevision: UInt64 = baseline.semanticRevision,
+                  layoutGeneration: UInt64 = baseline.layoutGeneration,
+                  replacing replacement: RPGAccessibilityElementSnapshot? = nil)
             throws -> RPGAccessibilityTreeSnapshot {
-            var elements = baseline.tree.elements
-            elements[index] = replacement
+            let elements = replacement.map { [$0] } ?? baseline.elements
             return try XCTUnwrap(RPGAccessibilityTreeSnapshot(
-                screenInstanceID: baseline.tree.screenInstanceID,
-                semanticRevision: baseline.tree.semanticRevision,
-                layoutGeneration: baseline.tree.layoutGeneration,
-                viewport: baseline.tree.viewport, elements: elements,
-                focusedID: baseline.tree.focusedID,
-                highContrast: baseline.tree.highContrast,
-                reduceMotion: baseline.tree.reduceMotion))
+                screenInstanceID: screenInstanceID, semanticRevision: semanticRevision,
+                layoutGeneration: layoutGeneration, viewport: viewport, elements: elements,
+                focusedID: id, highContrast: false, reduceMotion: false))
         }
 
-        let index = try XCTUnwrap(baseline.tree.elements.firstIndex { $0.hasPressAction })
-        let cached = baseline.tree.elements[index]
-        let input = try XCTUnwrap(baseline.committed.semanticInputs[cached.descriptor.id])
+        assertSingleLayout(try tree(screenInstanceID: 2))
+        assertSingleLayout(try tree(semanticRevision: 2))
+        let layoutElement = try XCTUnwrap(RPGAccessibilityElementSnapshot(
+            descriptor: descriptor, activationOrigin: origin,
+            layoutGeneration: 2, viewport: viewport
+        ))
+        assertSingleLayout(try tree(layoutGeneration: 2, replacing: layoutElement))
+
         let changedCommand = RPGSemanticDescriptor(
-            id: cached.descriptor.id, role: cached.descriptor.role,
-            label: cached.descriptor.label, value: cached.descriptor.value,
-            help: cached.descriptor.help, enabled: true, isFocusable: true,
-            frame: cached.descriptor.frame, visibleFrame: cached.descriptor.visibleFrame,
-            actionCommand: .selectTab(.spells))
-        let commandInput = try XCTUnwrap(baseline.runtime.semanticInput(for: .selectTab(.spells)))
+            id: id, role: descriptor.role, label: descriptor.label,
+            value: descriptor.value, help: descriptor.help, enabled: true,
+            isFocusable: true, frame: descriptor.frame,
+            visibleFrame: descriptor.visibleFrame, actionCommand: .useSelectedAction)
         let commandOrigin = try XCTUnwrap(RPGSemanticActivationOrigin(
-            screenInstanceID: baseline.tree.screenInstanceID,
-            semanticRevision: baseline.tree.semanticRevision,
-            descriptor: changedCommand, input: commandInput))
+            screenInstanceID: baseline.screenInstanceID,
+            semanticRevision: baseline.semanticRevision,
+            descriptor: changedCommand, input: input))
         let commandElement = try XCTUnwrap(RPGAccessibilityElementSnapshot(
             descriptor: changedCommand, activationOrigin: commandOrigin,
-            layoutGeneration: baseline.tree.layoutGeneration,
-            viewport: baseline.tree.viewport))
-        let commandFingerprintReplacement = try tree(replacing: index, with: commandElement)
-        assertSingleLayout(commandFingerprintReplacement)
+            layoutGeneration: baseline.layoutGeneration, viewport: viewport))
+        assertSingleLayout(try tree(replacing: commandElement))
 
         let changedInput = try XCTUnwrap(RPGSemanticInputSnapshot(
             localPreferenceScope: input.localPreferenceScope,
@@ -627,19 +648,27 @@ final class RPGSemanticAccessibilityTests: XCTestCase {
             authorityRequestIdentity: input.authorityRequestIdentity,
             operationExpectedState: input.operationExpectedState))
         let inputOrigin = try XCTUnwrap(RPGSemanticActivationOrigin(
-            screenInstanceID: baseline.tree.screenInstanceID,
-            semanticRevision: baseline.tree.semanticRevision,
-            descriptor: cached.descriptor, input: changedInput))
+            screenInstanceID: baseline.screenInstanceID,
+            semanticRevision: baseline.semanticRevision,
+            descriptor: descriptor, input: changedInput))
         let inputElement = try XCTUnwrap(RPGAccessibilityElementSnapshot(
-            descriptor: cached.descriptor, activationOrigin: inputOrigin,
-            layoutGeneration: baseline.tree.layoutGeneration,
-            viewport: baseline.tree.viewport))
-        let inputFingerprintReplacement = try tree(replacing: index, with: inputElement)
-        assertSingleLayout(inputFingerprintReplacement)
+            descriptor: descriptor, activationOrigin: inputOrigin,
+            layoutGeneration: baseline.layoutGeneration, viewport: viewport))
+        assertSingleLayout(try tree(replacing: inputElement))
 
-        let tabReplacement = try fixture(tab: .actives,
-                                         semanticRevision: 1, layoutGeneration: 1)
-        assertSingleLayout(tabReplacement.tree)
+        let contentReplacement = RPGSemanticDescriptor(
+            id: id, role: descriptor.role, label: "Use selected skill action",
+            help: descriptor.help, enabled: true, isFocusable: true,
+            frame: descriptor.frame, visibleFrame: descriptor.visibleFrame,
+            actionCommand: .useSelectedAction)
+        let contentOrigin = try XCTUnwrap(RPGSemanticActivationOrigin(
+            screenInstanceID: baseline.screenInstanceID,
+            semanticRevision: baseline.semanticRevision,
+            descriptor: contentReplacement, input: input))
+        let contentElement = try XCTUnwrap(RPGAccessibilityElementSnapshot(
+            descriptor: contentReplacement, activationOrigin: contentOrigin,
+            layoutGeneration: baseline.layoutGeneration, viewport: viewport))
+        assertSingleLayout(try tree(replacing: contentElement))
     }
 
     @MainActor
@@ -647,11 +676,13 @@ final class RPGSemanticAccessibilityTests: XCTestCase {
         let game = PersistenceTestSupport.makeGame(owner: self, label: "accessibility-e2e")
         game.createWorld(name: "Accessibility E2E", seedText: "9090",
                          mode: GameMode.survival, difficulty: 2)
-        let draft = RPGCreationDraft(pathID: "arcanist", starterSkillID: "spell_formula")
-        let command = RPGSemanticCommand.create(draft)
-        let id = RPGUIElementID(rawValue: "accessibility:create")!
+        var trees = game.player.skillTreeState
+        trees.melee = skillTreeBranchState(primaryRank: 5, advancedRank: 2)
+        game.player.skillTreeState = trees
+        let command = RPGSemanticCommand.cyclePreparedAction
+        let id = RPGUIElementID(rawValue: "accessibility:cycle-tree-action")!
         let descriptor = RPGSemanticDescriptor(
-            id: id, role: .button, label: "Create character",
+            id: id, role: .button, label: "Cycle skill action",
             enabled: true, isFocusable: true,
             frame: RPGLogicalRect(x: 0, y: 0, width: 120, height: 24),
             visibleFrame: RPGLogicalRect(x: 0, y: 0, width: 120, height: 24),
@@ -660,12 +691,11 @@ final class RPGSemanticAccessibilityTests: XCTestCase {
         let oldOrigin = try XCTUnwrap(RPGSemanticActivationOrigin(
             screenInstanceID: 1, semanticRevision: 1,
             descriptor: descriptor, input: input))
-        let changedDraft = RPGCreationDraft(pathID: "warden", starterSkillID: "guard_stance")
         let changedDescriptor = RPGSemanticDescriptor(
-            id: id, role: .button, label: "Create character",
+            id: id, role: .button, label: "Use selected skill action",
             enabled: true, isFocusable: true,
             frame: descriptor.frame, visibleFrame: descriptor.visibleFrame,
-            actionCommand: .create(changedDraft))
+            actionCommand: .useSelectedAction)
 
         let boundary = RPGSemanticActivationBoundary()
         let beforeRPG = game.player.rpg
@@ -700,8 +730,11 @@ final class RPGSemanticAccessibilityTests: XCTestCase {
             fresh, source: .accessibility, using: boundary,
             screenInstanceID: 1, semanticRevision: 2,
             descriptor: descriptor), .dispatched(serial: 1))
-        XCTAssertTrue(game.player.rpg.created)
-        XCTAssertNotEqual(game.player.inventory, beforeInventory)
+        let selected = try XCTUnwrap(rpgSelectedPreparedAction(game.player.rpg))
+        XCTAssertEqual(selected.kind, .skill)
+        XCTAssertTrue([SkillTreeActionID.stunEnemy.rawValue,
+                       SkillTreeActionID.spartanKick.rawValue].contains(selected.id))
+        XCTAssertEqual(game.player.inventory, beforeInventory)
         XCTAssertEqual(game.rpgQuickSlotPreferences, beforePreferences)
         let afterRPG = game.player.rpg
         let afterInventory = game.player.inventory
