@@ -214,10 +214,6 @@ final class WorldRenderer {
     var logoPipeline: MTLRenderPipelineState!
     var titleBgTex: MTLTexture?
     var titleLogoTex: MTLTexture?
-    /// Canonical bundled title treatment, retained so non-KUBIKOS publication can atomically
-    /// restore it after an alternate visual style was active.
-    private(set) var bundledTitleBgTex: MTLTexture?
-    private(set) var bundledTitleLogoTex: MTLTexture?
     var sunTex: MTLTexture?         // pack environment/sun.png
     var moonTex: MTLTexture?        // pack environment/moon_phases.png (4×2 grid)
 
@@ -231,17 +227,6 @@ final class WorldRenderer {
                       withBytes: raw.baseAddress!, bytesPerRow: img.width * 4)
         }
         return t
-    }
-
-    /// Stage title textures before publication. A nil source means the base product title art;
-    /// non-nil sources must become GPU textures or the whole visual-style transaction fails.
-    func stageTitleTextures(background: RGBAImage?, logo: RGBAImage?)
-        -> (background: MTLTexture?, logo: MTLTexture?)? {
-        let stagedBackground = background.flatMap(makeImageTexture)
-        let stagedLogo = logo.flatMap(makeImageTexture)
-        guard background == nil || stagedBackground != nil,
-              logo == nil || stagedLogo != nil else { return nil }
-        return (stagedBackground ?? bundledTitleBgTex, stagedLogo ?? bundledTitleLogoTex)
     }
     var ultraPipeline: MTLRenderPipelineState!
     var ultraBlurPipeline: MTLRenderPipelineState!
@@ -443,8 +428,6 @@ final class WorldRenderer {
                 titleBgTex = t
             }
         }
-        bundledTitleLogoTex = titleLogoTex
-        bundledTitleBgTex = titleBgTex
         ultraPipeline = pipe("fs_vs", "ultra_fs", vd: nil, color: .rgba16Float, depth: .invalid)
         ultraBlurPipeline = pipe("fs_vs", "ultra_blur_fs", vd: nil, color: .rgba16Float, depth: .invalid)
 

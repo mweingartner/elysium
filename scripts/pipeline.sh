@@ -42,9 +42,7 @@ run_stage() {
     echo "[$number/9] $label ... PASS$pass_suffix"
 }
 
-stage_security() {
-    scripts/prepare-kubikos-theme.sh && bash scripts/security-scan.sh
-}
+stage_security() { bash scripts/security-scan.sh; }
 stage_build() {
     scripts/prepush-release-build.sh "$TMP/release-build.log" || return $?
     RELEASE_EXECUTABLE="$(cd .build/release && pwd -P)/Elysium"
@@ -72,16 +70,13 @@ verify_pack_set() {
     local resources="$1"
     [ "$(shasum -a 256 "$resources/Faithful 64x - December 2025 Release.zip" | awk '{print $1}')" = \
       a136d9101a4748558587980dace3cd7447b758fb72c4684d15fb805d0a812dac ] &&
-    [ "$(shasum -a 256 "$resources/KUBIKOS Cubic World - Elysium Theme.zip" | awk '{print $1}')" = \
-      e84a2e32ab95e250d631734bbdf26e25fd430fe51138841136ebbe782c5bdf2c ] &&
     [ "$(shasum -a 256 "$resources/Faithful 64x - Ore Borders 64x.zip" | awk '{print $1}')" = \
       232b8a64d745dc08b958c3c4c07167bd3f38eebdc4cd682da9d1016b2ed190f8 ] &&
     [ "$(shasum -a 256 "$resources/Faithful 64x - Static Lanterns.zip" | awk '{print $1}')" = \
       d0165130d505da8996354c21090a47fd6def87f4c2a96442f1a4282b1bf2cbc8 ] &&
     cmp -s "$ROOT/packaging/FAITHFUL-LICENSE.txt" "$resources/FAITHFUL-LICENSE.txt" &&
     cmp -s "$ROOT/packaging/FAITHFUL-ADDONS-CREDITS.txt" \
-        "$resources/FAITHFUL-ADDONS-CREDITS.txt" &&
-    cmp -s "$ROOT/packaging/KUBIKOS-ATTRIBUTION.txt" "$resources/KUBIKOS-ATTRIBUTION.txt"
+        "$resources/FAITHFUL-ADDONS-CREDITS.txt"
 }
 stage_xctest() {
     swift test 2>&1 | tee "$TMP/xctest.log"

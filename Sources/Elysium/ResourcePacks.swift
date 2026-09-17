@@ -446,28 +446,6 @@ func scaleTo(_ img: RGBAImage, _ res: Int) -> [UInt8] {
     img.width > res ? scaleBox(img, to: res) : scaleNearest(img, to: res)
 }
 
-/// Nearest-neighbour rectangle scaling for native-style fallback images whose model UV sheets are
-/// not square. Resource packs otherwise operate on square block/item textures.
-func scaleImageNearest(_ image: RGBAImage, width: Int, height: Int) -> RGBAImage? {
-    guard width > 0, height > 0, width <= 512, height <= 512,
-          width <= Int.max / height / 4 else { return nil }
-    if image.width == width, image.height == height { return image }
-    var pixels = [UInt8](repeating: 0, count: width * height * 4)
-    for y in 0..<height {
-        for x in 0..<width {
-            let sourceX = min(image.width - 1, x * image.width / width)
-            let sourceY = min(image.height - 1, y * image.height / height)
-            let source = (sourceY * image.width + sourceX) * 4
-            let destination = (y * width + x) * 4
-            pixels[destination] = image.pixels[source]
-            pixels[destination + 1] = image.pixels[source + 1]
-            pixels[destination + 2] = image.pixels[source + 2]
-            pixels[destination + 3] = image.pixels[source + 3]
-        }
-    }
-    return RGBAImage(width: width, height: height, pixels: pixels)
-}
-
 /// multiply RGB by a fixed color (bake a vanilla tint into the pixels)
 func bakeTint(_ px: inout [UInt8], _ rgb: Int) {
     let tr = (rgb >> 16) & 255, tg = (rgb >> 8) & 255, tb = rgb & 255
@@ -515,22 +493,7 @@ struct ResourcePackSourceSnapshot: Sendable {
 struct ResourcePackStackSourceSnapshot: Sendable {
     let enabledNames: [String]
     let sources: [ResourcePackSourceSnapshot]
-    let bundledBaseStyle: BundledResourcePackBaseStyleID
     let bundledAddOns: [BundledResourcePackAddOnID]
-    /// Value-owned provenance captured on main. KUBIKOS coverage runs on a worker and therefore
-    /// must not lazily initialize or read the mutable entity-model registry there.
-    let modelTextureAudit: [ModelTextureAuditEntry]
-
-    init(enabledNames: [String], sources: [ResourcePackSourceSnapshot],
-         bundledBaseStyle: BundledResourcePackBaseStyleID = .faithful64x,
-         bundledAddOns: [BundledResourcePackAddOnID],
-         modelTextureAudit: [ModelTextureAuditEntry] = []) {
-        self.enabledNames = enabledNames
-        self.sources = sources
-        self.bundledBaseStyle = bundledBaseStyle
-        self.bundledAddOns = bundledAddOns
-        self.modelTextureAudit = modelTextureAudit
-    }
 }
 
 private func resourcePackDirectoryNames(_ directoryFD: Int32) -> [String]? {
@@ -838,13 +801,10 @@ func resourcePacksDir() -> URL {
 }
 
 // =============================================================================
-// Reviewed managed visual-style assets. These exact hashes are the runtime and
+// Reviewed managed Faithful assets. These exact hashes are the runtime and
 // packaging authority; managed files are never selected by ambient discovery.
 // =============================================================================
-enum BundledResourcePackAssetRole {
-    case base(BundledResourcePackBaseStyleID)
-    case addOn(BundledResourcePackAddOnID)
-}
+enum BundledResourcePackAssetRole { case base, addOn(BundledResourcePackAddOnID) }
 struct BundledResourcePackAsset {
     let role: BundledResourcePackAssetRole
     let fileName: String
@@ -854,7 +814,7 @@ struct BundledResourcePackAsset {
 }
 
 let BUNDLED_RESOURCE_PACK_ASSETS: [BundledResourcePackAsset] = [
-    .init(role: .base(.faithful64x), fileName: "Faithful 64x - December 2025 Release.zip",
+    .init(role: .base, fileName: "Faithful 64x - December 2025 Release.zip",
           displayName: "Faithful 64x",
           sha256: "a136d9101a4748558587980dace3cd7447b758fb72c4684d15fb805d0a812dac",
           requiredPaths: ["pack.mcmeta", "LICENSE.txt",
@@ -862,30 +822,6 @@ let BUNDLED_RESOURCE_PACK_ASSETS: [BundledResourcePackAsset] = [
             "assets/minecraft/textures/item/diamond.png",
             "assets/minecraft/textures/gui/container/inventory.png",
             "assets/minecraft/textures/font/ascii.png"]),
-    .init(role: .base(.kubikosCubicWorld), fileName: "KUBIKOS Cubic World - Elysium Theme.zip",
-          displayName: "KUBIKOS Cubic World",
-          sha256: "e84a2e32ab95e250d631734bbdf26e25fd430fe51138841136ebbe782c5bdf2c",
-          requiredPaths: ["pack.mcmeta", "LICENSE.txt", "CREDITS.txt",
-            "assets/elysium/textures/tiles/stone.png",
-            "assets/elysium/textures/tiles/white_bed_top.png",
-            "assets/elysium/textures/tiles/end_portal.png",
-            "assets/elysium/textures/entity/fallback.png",
-            "assets/elysium/textures/title/background.png",
-            "assets/elysium/textures/title/logo.png",
-            "assets/minecraft/textures/block/stone.png",
-            "assets/minecraft/textures/item/diamond.png",
-            "assets/minecraft/textures/entity/pig/pig.png",
-            "assets/minecraft/textures/entity/chicken.png",
-            "assets/minecraft/textures/entity/cow/cow.png",
-            "assets/minecraft/textures/entity/sheep/sheep_fur.png",
-            "assets/minecraft/textures/entity/spider/spider_eyes.png",
-            "assets/minecraft/textures/gui/icons.png",
-            "assets/minecraft/textures/gui/widgets.png",
-            "assets/minecraft/textures/gui/options_background.png",
-            "assets/minecraft/textures/gui/container/inventory.png",
-            "assets/minecraft/textures/font/ascii.png",
-            "assets/minecraft/textures/environment/sun.png",
-            "assets/minecraft/textures/environment/moon_phases.png"]),
     .init(role: .addOn(.oreBorders64x), fileName: "Faithful 64x - Ore Borders 64x.zip",
           displayName: "Ore Borders 64x",
           sha256: "232b8a64d745dc08b958c3c4c07167bd3f38eebdc4cd682da9d1016b2ed190f8",
@@ -1020,34 +956,19 @@ func ensureDefaultPack() {
     _ = ensureBundledResourcePackAssets()
 }
 
-private func bundledBaseAsset(_ style: BundledResourcePackBaseStyleID) -> BundledResourcePackAsset? {
-    BUNDLED_RESOURCE_PACK_ASSETS.first(where: {
-        if case .base(let candidate) = $0.role { return candidate == style }
-        return false
-    })
-}
-
-/// user pack list → applied list: an exclusive visual baseline force-appended at the END
-/// (lowest priority — explicit user packs may still override it). KUBIKOS is deliberately
-/// exclusive: a missing KUBIKOS source fails the transaction instead of silently borrowing a
-/// Faithful visual and creating a mixed-style world.
-func withDefaultPack(_ userPacks: [String],
-                     baseStyle: BundledResourcePackBaseStyleID = .faithful64x,
-                     addOns: [BundledResourcePackAddOnID] = []) -> [String] {
+/// user pack list → applied list: default pack force-appended at the END
+/// (lowest priority — user packs override it, like vanilla's layering)
+func withDefaultPack(_ userPacks: [String], addOns: [BundledResourcePackAddOnID] = []) -> [String] {
     let managed = Set(BUNDLED_RESOURCE_PACK_ASSETS.map(\.fileName)).union(LEGACY_DEFAULT_PACK_FILES)
     var list = userPacks.filter { !managed.contains($0) }
-    let permittedAddOns = sanitizedBundledResourcePackAddOnIDs(addOns.map(\.rawValue), for: baseStyle)
-    for id in BUNDLED_RESOURCE_PACK_ADD_ONS.map(\.id) where permittedAddOns.contains(id) {
+    for id in BUNDLED_RESOURCE_PACK_ADD_ONS.map(\.id) where addOns.contains(id) {
         if let asset = BUNDLED_RESOURCE_PACK_ASSETS.first(where: {
             if case .addOn(let candidate) = $0.role { return candidate == id }
             return false
         }) { list.append(asset.fileName) }
     }
-    let directory = resourcePacksDir()
-    if let selected = bundledBaseAsset(baseStyle),
-       FileManager.default.fileExists(atPath: directory.appendingPathComponent(selected.fileName).path) {
-        list.append(selected.fileName)
-    }
+    let dest = resourcePacksDir().appendingPathComponent(DEFAULT_PACK_FILE)
+    if FileManager.default.fileExists(atPath: dest.path) { list.append(DEFAULT_PACK_FILE) }
     return list
 }
 
@@ -1372,9 +1293,12 @@ func cropSemanticChestTile(_ packs: [ResourcePack],
     return RGBAImage(width: width, height: height, pixels: pixels)
 }
 
-private func loadTexture(_ pack: ResourcePack, path full: String,
+private func loadTexture(_ packs: [ResourcePack], _ relPath: String,
                          budget: ResourcePackPreparationBudget) -> LoadedTexture? {
-        guard budget.shouldContinue, let d = pack.file(full) else { return nil }
+    for p in packs {
+        guard budget.shouldContinue else { return nil }
+        let full = "\(p.texRoot)\(relPath).png"
+        guard let d = p.file(full) else { continue }
         guard let img = decodePNG(d, budget: budget) else {
             _ = budget.reject()
             return nil
@@ -1385,7 +1309,7 @@ private func loadTexture(_ pack: ResourcePack, path full: String,
             var frametime = 1
             var interpolate = false
             var frames: [(Int, Int)] = []
-            if let md = pack.file(full + ".mcmeta") {
+            if let md = p.file(full + ".mcmeta") {
                 guard md.count <= budget.limits.metadataBytes, budget.chargeMetadata(md.count),
                       let json = try? JSONSerialization.jsonObject(with: md) as? [String: Any],
                       let a = json["animation"] as? [String: Any] else {
@@ -1418,44 +1342,9 @@ private func loadTexture(_ pack: ResourcePack, path full: String,
             if frames.count > 1 { anim = (frames, interpolate) }
         }
         return LoadedTexture(image: img, animation: anim)
-}
-
-private func loadTexture(_ packs: [ResourcePack], _ relPath: String,
-                         budget: ResourcePackPreparationBudget) -> LoadedTexture? {
-    for pack in packs {
-        guard budget.shouldContinue else { return nil }
-        if let texture = loadTexture(pack, path: "\(pack.texRoot)\(relPath).png", budget: budget) {
-            return texture
-        }
     }
     return nil
 }
-
-/// Elysium-native tile paths are exact registry overrides. A complete visual theme supplies one
-/// for every registered tile; ordinary Java resource packs retain the candidate/composite path
-/// below as a compatibility fallback. The registry owns `tileName`, nevertheless validate it so a
-/// malformed future caller cannot turn this into an archive-path selection primitive.
-private func loadNativeElysiumTile(_ packs: [ResourcePack], name tileName: String,
-                                   budget: ResourcePackPreparationBudget) -> LoadedTexture? {
-    let permitted = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789_-")
-    guard !tileName.isEmpty, tileName.unicodeScalars.allSatisfy({ permitted.contains($0) }) else {
-        return nil
-    }
-    let path = "assets/elysium/textures/tiles/\(tileName).png"
-    guard safePackPath(path) else { return nil }
-    for pack in packs {
-        guard budget.shouldContinue else { return nil }
-        if let texture = loadTexture(pack, path: path, budget: budget) { return texture }
-    }
-    return nil
-}
-
-/// These registry layers are semantic engine behavior rather than textured block faces. Themes
-/// retain archive records for a closed asset manifest but must not turn a portal effect or empty
-/// space into ordinary atlas geometry.
-private let ENGINE_MANAGED_NATIVE_TILE_NAMES: Set<String> = [
-    "air", "cave_air", "void_air", "end_portal",
-]
 
 /// cut frame i out of a vertical strip
 private func stripFrame(_ img: RGBAImage, _ i: Int) -> RGBAImage {
@@ -1484,14 +1373,6 @@ func buildPackAtlas(packs: [ResourcePack],
     var entityTiles: [Int: RGBAImage] = [:]
     for (i, name) in names.enumerated() {
         guard budget.shouldContinue else { return nil }
-        // A visual baseline may opt into exact Elysium names rather than depending on a lossy
-        // Minecraft-name mapping. This branch is intentionally before beds/entity crops and every
-        // other special case so its full tile manifest is authoritative.
-        if !ENGINE_MANAGED_NATIVE_TILE_NAMES.contains(name),
-           let direct = loadNativeElysiumTile(packs, name: name, budget: budget) {
-            resolved[i] = direct
-            continue
-        }
         if let halves = compositeHalves(name) {
             if var t = loadTexture(packs, halves.top, budget: budget)?.image,
                var b = loadTexture(packs, halves.bottom, budget: budget)?.image {
@@ -1642,18 +1523,10 @@ private let RESOURCE_PACK_FALLBACK_NOTICE =
 
 func resourcePackPresentationAfterActivePublication(
     _ current: ResourcePackPresentationSnapshot,
-    activeBaseStyle: BundledResourcePackBaseStyleID = .faithful64x,
     activeAddOns: [BundledResourcePackAddOnID]
 ) -> ResourcePackPresentationSnapshot {
-    let generation: ResourcePackPublishedGeneration
-    switch activeBaseStyle {
-    case .faithful64x:
-        generation = .faithful64x(activeAddOns: activeAddOns)
-    case .kubikosCubicWorld:
-        generation = .kubikosCubicWorld
-    }
-    return ResourcePackPresentationSnapshot(
-        generation: generation,
+    ResourcePackPresentationSnapshot(
+        generation: .faithful64x(activeAddOns: activeAddOns),
         noticeSerial: current.noticeSerial)
 }
 
@@ -1688,20 +1561,6 @@ func consumeResourcePackPresentationNotice() -> String? {
 /// (base + overlays alpha-blended in order, or stacked vertically); nil when absent
 func packEntityImage(_ rels: [String], stack: Bool = false, tints: [Int] = []) -> RGBAImage? {
     packEntityImage(rels, packs: ACTIVE_PACKS, stack: stack, tints: tints, budget: nil)
-}
-
-/// Native model UVs without a Minecraft-compatible texture path receive the KUBIKOS archive's
-/// audited fallback material. This remains separate from ordinary entity-path resolution, and is
-/// only reachable while the KUBIKOS base style is actually published.
-func kubikosFallbackEntityImage(width: Int, height: Int) -> RGBAImage? {
-    guard case .kubikosCubicWorld = RESOURCE_PACK_PRESENTATION.generation else { return nil }
-    for pack in ACTIVE_PACKS {
-        guard let data = pack.file(KUBIKOS_ENTITY_FALLBACK_PATH),
-              let image = decodePNG(data, budget: nil),
-              let scaled = scaleImageNearest(image, width: width, height: height) else { continue }
-        return scaled
-    }
-    return nil
 }
 
 private func packEntityImage(_ rels: [String], packs: [ResourcePack], stack: Bool = false,
@@ -1752,12 +1611,11 @@ var iconPackPublicationHook: ((IconPackPublicationBoundary) -> Void)?
 var failNextIconPackPublicationBeforeMutation = false
 
 private func resolvedResourcePackStack(
-    _ userPacks: [String], bundledBaseStyle: BundledResourcePackBaseStyleID,
-    bundledAddOns: [BundledResourcePackAddOnID],
+    _ userPacks: [String], bundledAddOns: [BundledResourcePackAddOnID],
     budget: ResourcePackPreparationBudget
 ) -> (names: [String], packs: [ResourcePack])? {
     let managedBytes = ensureBundledResourcePackAssets()
-    let enabled = withDefaultPack(userPacks, baseStyle: bundledBaseStyle, addOns: bundledAddOns)
+    let enabled = withDefaultPack(userPacks, addOns: bundledAddOns)
     guard budget.shouldContinue, Set(enabled).count == enabled.count else { return nil }
     let managedNames = Set(BUNDLED_RESOURCE_PACK_ASSETS.map(\.fileName))
     let directory = resourcePacksDir()
@@ -1779,16 +1637,11 @@ private func resolvedResourcePackStack(
 /// Resolve names and capture every byte exactly once on main. The returned value has no URL,
 /// descriptor, file descriptor, or resolver closure that a worker could use to touch live state.
 func snapshotResourcePackStack(
-    _ userPacks: [String], bundledBaseStyle: BundledResourcePackBaseStyleID = .faithful64x,
-    bundledAddOns: [BundledResourcePackAddOnID]
+    _ userPacks: [String], bundledAddOns: [BundledResourcePackAddOnID]
 ) -> ResourcePackStackSourceSnapshot? {
     guard Thread.isMainThread else { return nil }
-    // KUBIKOS validates every entity texture source on the worker. Materialize this compact,
-    // immutable model contract before crossing that boundary; `ensureModels()` mutates globals.
-    let modelTextureAudit = bundledBaseStyle == .kubikosCubicWorld
-        ? modelTextureAuditEntries() : []
     let managedBytes = ensureBundledResourcePackAssets()
-    let enabled = withDefaultPack(userPacks, baseStyle: bundledBaseStyle, addOns: bundledAddOns)
+    let enabled = withDefaultPack(userPacks, addOns: bundledAddOns)
     guard Set(enabled).count == enabled.count else { return nil }
     let managedNames = Set(BUNDLED_RESOURCE_PACK_ASSETS.map(\.fileName))
     let directory = resourcePacksDir()
@@ -1847,41 +1700,30 @@ func snapshotResourcePackStack(
         }
     }
     return ResourcePackStackSourceSnapshot(
-        enabledNames: enabled, sources: sources, bundledBaseStyle: bundledBaseStyle,
-        bundledAddOns: sanitizedBundledResourcePackAddOnIDs(bundledAddOns.map(\.rawValue),
-                                                             for: bundledBaseStyle),
-        modelTextureAudit: modelTextureAudit)
+        enabledNames: enabled, sources: sources, bundledAddOns: bundledAddOns)
 }
 
 /// Owned CPU result. Its input snapshot contains no path API, and `stage` claims this value once.
 final class PreparedResourcePackTransaction: @unchecked Sendable {
     fileprivate let enabledNames: [String]
-    fileprivate let bundledBaseStyle: BundledResourcePackBaseStyleID
     fileprivate let bundledAddOns: [BundledResourcePackAddOnID]
     fileprivate let packs: [ResourcePack]
     fileprivate let atlas: PackAtlasResult
     fileprivate let packUI: PreparedPackUI
     fileprivate let sunImage: RGBAImage?
     fileprivate let moonImage: RGBAImage?
-    fileprivate let titleBackgroundImage: RGBAImage?
-    fileprivate let titleLogoImage: RGBAImage?
     private var stagingClaimed = false
 
-    fileprivate init(enabledNames: [String], bundledBaseStyle: BundledResourcePackBaseStyleID,
-                     bundledAddOns: [BundledResourcePackAddOnID],
+    fileprivate init(enabledNames: [String], bundledAddOns: [BundledResourcePackAddOnID],
                      packs: [ResourcePack], atlas: PackAtlasResult, packUI: PreparedPackUI,
-                     sunImage: RGBAImage?, moonImage: RGBAImage?,
-                     titleBackgroundImage: RGBAImage?, titleLogoImage: RGBAImage?) {
+                     sunImage: RGBAImage?, moonImage: RGBAImage?) {
         self.enabledNames = enabledNames
-        self.bundledBaseStyle = bundledBaseStyle
         self.bundledAddOns = bundledAddOns
         self.packs = packs
         self.atlas = atlas
         self.packUI = packUI
         self.sunImage = sunImage
         self.moonImage = moonImage
-        self.titleBackgroundImage = titleBackgroundImage
-        self.titleLogoImage = titleLogoImage
     }
 
     /// Main-only and fallible. Claiming occurs before any GPU allocation, preventing retries that
@@ -1896,8 +1738,6 @@ final class PreparedResourcePackTransaction: @unchecked Sendable {
               let stagedPackUI = PackUI(prepared: packUI, device: renderer.device) else { return nil }
         let stagedSun = sunImage.flatMap(renderer.makeImageTexture)
         let stagedMoon = moonImage.flatMap(renderer.makeImageTexture)
-        guard let stagedTitle = renderer.stageTitleTextures(background: titleBackgroundImage,
-                                                            logo: titleLogoImage) else { return nil }
         guard (sunImage == nil || stagedSun != nil), (moonImage == nil || stagedMoon != nil) else {
             return nil
         }
@@ -1909,12 +1749,9 @@ final class PreparedResourcePackTransaction: @unchecked Sendable {
         guard let meshContext = game.prepareNextMeshRenderContext(
             tintGate: atlas.tintGate, textureGate: atlas.textureGate) else { return nil }
         return StagedResourcePackPublication(
-            enabledNames: enabledNames, bundledBaseStyle: bundledBaseStyle,
-            bundledAddOns: bundledAddOns, packs: packs,
+            enabledNames: enabledNames, bundledAddOns: bundledAddOns, packs: packs,
             atlas: atlas, candidate: candidate, world: stagedWorld, packUI: stagedPackUI,
-            sun: stagedSun, moon: stagedMoon,
-            titleBackground: stagedTitle.background, titleLogo: stagedTitle.logo,
-            meshContext: meshContext)
+            sun: stagedSun, moon: stagedMoon, meshContext: meshContext)
     }
 }
 
@@ -1931,35 +1768,15 @@ func prepareResourcePackTransaction(
     let sun = packEntityImage(["environment/sun.png"], packs: packs, budget: budget)
     let moon = packEntityImage(["environment/moon_phases.png"], packs: packs, budget: budget)
     guard budget.shouldContinue else { return nil }
-    let titleImages: (background: RGBAImage?, logo: RGBAImage?)
-    if snapshot.bundledBaseStyle == .kubikosCubicWorld {
-        guard let kubikos = packs.first(where: {
-            $0.fileName == bundledBaseAsset(.kubikosCubicWorld)?.fileName
-        }), let coverage = strictKubikosCoverageReport(
-            kubikos, modelTextureAudit: snapshot.modelTextureAudit, budget: budget
-        ) else { return nil }
-        guard coverage.isComplete else {
-            print("[packs] KUBIKOS coverage rejected: \(coverage.summary)")
-            fflush(stdout)
-            return nil
-        }
-        titleImages = kubikosTitleImages(pack: kubikos, budget: budget)
-    } else {
-        titleImages = (nil, nil)
-    }
-    guard budget.shouldContinue else { return nil }
     return PreparedResourcePackTransaction(
-        enabledNames: snapshot.enabledNames, bundledBaseStyle: snapshot.bundledBaseStyle,
-        bundledAddOns: snapshot.bundledAddOns,
-        packs: packs, atlas: atlas, packUI: preparedUI, sunImage: sun, moonImage: moon,
-        titleBackgroundImage: titleImages.background, titleLogoImage: titleImages.logo)
+        enabledNames: snapshot.enabledNames, bundledAddOns: snapshot.bundledAddOns,
+        packs: packs, atlas: atlas, packUI: preparedUI, sunImage: sun, moonImage: moon)
 }
 
 /// Fully staged publication. After successful staging and persistence, this operation has no
 /// recoverable failure branch: it consumes exactly once and commits every A/B generation together.
 final class StagedResourcePackPublication {
     private let enabledNames: [String]
-    private let bundledBaseStyle: BundledResourcePackBaseStyleID
     private let bundledAddOns: [BundledResourcePackAddOnID]
     private let packs: [ResourcePack]
     private let atlas: PackAtlasResult
@@ -1968,20 +1785,15 @@ final class StagedResourcePackPublication {
     private let packUI: PackUI
     private let sun: MTLTexture?
     private let moon: MTLTexture?
-    private let titleBackground: MTLTexture?
-    private let titleLogo: MTLTexture?
     private let meshContext: MeshRenderContext
     private var consumed = false
 
-    fileprivate init(enabledNames: [String], bundledBaseStyle: BundledResourcePackBaseStyleID,
-                     bundledAddOns: [BundledResourcePackAddOnID],
+    fileprivate init(enabledNames: [String], bundledAddOns: [BundledResourcePackAddOnID],
                      packs: [ResourcePack], atlas: PackAtlasResult,
                      candidate: IconSourceCandidate, world: WorldRenderer.StagedWorldAtlas,
                      packUI: PackUI, sun: MTLTexture?, moon: MTLTexture?,
-                     titleBackground: MTLTexture?, titleLogo: MTLTexture?,
                      meshContext: MeshRenderContext) {
         self.enabledNames = enabledNames
-        self.bundledBaseStyle = bundledBaseStyle
         self.bundledAddOns = bundledAddOns
         self.packs = packs
         self.atlas = atlas
@@ -1990,8 +1802,6 @@ final class StagedResourcePackPublication {
         self.packUI = packUI
         self.sun = sun
         self.moon = moon
-        self.titleBackground = titleBackground
-        self.titleLogo = titleLogo
         self.meshContext = meshContext
     }
 
@@ -2011,12 +1821,9 @@ final class StagedResourcePackPublication {
         // The atomic Core icon swap below is the final source commit for the complete generation.
         ACTIVE_PACKS = packs
         RESOURCE_PACK_PRESENTATION = resourcePackPresentationAfterActivePublication(
-            RESOURCE_PACK_PRESENTATION, activeBaseStyle: bundledBaseStyle,
-            activeAddOns: bundledAddOns)
+            RESOURCE_PACK_PRESENTATION, activeAddOns: bundledAddOns)
         renderer.sunTex = sun
         renderer.moonTex = moon
-        renderer.titleBgTex = titleBackground
-        renderer.titleLogoTex = titleLogo
         ui.packUI = packUI
         ui.cv.guiTexture = packUI.texture
         packFontWidths = packUI.fontWidths
@@ -2036,35 +1843,18 @@ final class StagedResourcePackPublication {
 }
 
 func validateResourcePackStack(_ userPacks: [String],
-                               bundledBaseStyle: BundledResourcePackBaseStyleID = .faithful64x,
                                bundledAddOns: [BundledResourcePackAddOnID],
                                cancellation: ResourcePackCancellationToken? = nil) -> Bool {
-    // KUBIKOS validation snapshots the lazy entity-model registry. Keep this public diagnostic
-    // helper on the same main-thread boundary as snapshot/apply rather than allowing it to race
-    // rendering from an arbitrary caller.
-    guard Thread.isMainThread else { return false }
     let budget = ResourcePackPreparationBudget(cancellation: cancellation)
-    guard let stack = resolvedResourcePackStack(userPacks, bundledBaseStyle: bundledBaseStyle,
-                                                bundledAddOns: bundledAddOns,
+    guard let stack = resolvedResourcePackStack(userPacks, bundledAddOns: bundledAddOns,
                                                 budget: budget) else {
         return false
     }
-    guard buildPackAtlas(packs: stack.packs, budget: budget) != nil, budget.isValid else {
-        return false
-    }
-    guard bundledBaseStyle == .kubikosCubicWorld else { return true }
-    let modelTextureAudit = modelTextureAuditEntries()
-    guard let kubikos = stack.packs.first(where: {
-        $0.fileName == bundledBaseAsset(.kubikosCubicWorld)?.fileName
-    }), let coverage = strictKubikosCoverageReport(
-        kubikos, modelTextureAudit: modelTextureAudit, budget: budget
-    ) else { return false }
-    return coverage.isComplete && budget.isValid
+    return buildPackAtlas(packs: stack.packs, budget: budget) != nil && budget.isValid
 }
 
 @discardableResult
 func applyResourcePacks(_ userPacks: [String],
-                        bundledBaseStyle: BundledResourcePackBaseStyleID = .faithful64x,
                         bundledAddOns: [BundledResourcePackAddOnID] = [],
                         game: GameCore, renderer: WorldRenderer, ui: UIManager) -> Bool {
     guard Thread.isMainThread, !iconPackPublicationActive else {
@@ -2075,12 +1865,7 @@ func applyResourcePacks(_ userPacks: [String],
     defer { iconPackPublicationActive = false }
     let t0 = CFAbsoluteTimeGetCurrent()
     let budget = ResourcePackPreparationBudget()
-    // Immediate application is main-thread-only, so this is the one safe point to take the
-    // registry snapshot consumed by the later KUBIKOS-only audit.
-    let modelTextureAudit = bundledBaseStyle == .kubikosCubicWorld
-        ? modelTextureAuditEntries() : []
-    let resolved = resolvedResourcePackStack(userPacks, bundledBaseStyle: bundledBaseStyle,
-                                             bundledAddOns: bundledAddOns,
+    let resolved = resolvedResourcePackStack(userPacks, bundledAddOns: bundledAddOns,
                                              budget: budget)
     if resolved == nil {
         print("[packs] requested resource-pack layer unavailable; retaining prior pack")
@@ -2088,21 +1873,6 @@ func applyResourcePacks(_ userPacks: [String],
     let enabled = resolved?.names ?? []
     let packs = resolved?.packs ?? []
     if let result = buildPackAtlas(packs: packs, budget: budget) {
-        let titleImages: (background: RGBAImage?, logo: RGBAImage?)
-        if bundledBaseStyle == .kubikosCubicWorld {
-            guard let kubikos = packs.first(where: {
-                $0.fileName == bundledBaseAsset(.kubikosCubicWorld)?.fileName
-            }), let coverage = strictKubikosCoverageReport(
-                kubikos, modelTextureAudit: modelTextureAudit, budget: budget
-            ),
-               coverage.isComplete else {
-                print("[packs] KUBIKOS coverage rejected during immediate apply")
-                return false
-            }
-            titleImages = kubikosTitleImages(pack: kubikos, budget: budget)
-        } else {
-            titleImages = (nil, nil)
-        }
         let items = result.itemIcons
         guard let candidate = IconSourceCandidate(
             atlas: result.icon16,
@@ -2122,11 +1892,6 @@ func applyResourcePacks(_ userPacks: [String],
         guard budget.shouldContinue else { return false }
         let stagedSun = stagedSunImage.flatMap { renderer.makeImageTexture($0) }
         let stagedMoon = stagedMoonImage.flatMap { renderer.makeImageTexture($0) }
-        guard (stagedSunImage == nil || stagedSun != nil),
-              (stagedMoonImage == nil || stagedMoon != nil),
-              let stagedTitle = renderer.stageTitleTextures(background: titleImages.background,
-                                                            logo: titleImages.logo),
-              budget.shouldContinue else { return false }
         iconPackPublicationHook?(.staged)
         if failNextIconPackPublicationBeforeMutation {
             failNextIconPackPublicationBeforeMutation = false
@@ -2156,12 +1921,9 @@ func applyResourcePacks(_ userPacks: [String],
         iconPackPublicationHook?(.coreCommitted)
         ACTIVE_PACKS = packs
         RESOURCE_PACK_PRESENTATION = resourcePackPresentationAfterActivePublication(
-            RESOURCE_PACK_PRESENTATION, activeBaseStyle: bundledBaseStyle,
-            activeAddOns: bundledAddOns)
+            RESOURCE_PACK_PRESENTATION, activeAddOns: bundledAddOns)
         renderer.sunTex = stagedSun
         renderer.moonTex = stagedMoon
-        renderer.titleBgTex = stagedTitle.background
-        renderer.titleLogoTex = stagedTitle.logo
         ui.packUI = stagedPackUI
         ui.cv.guiTexture = stagedPackUI.texture
         packFontWidths = stagedPackUI.fontWidths
@@ -2208,8 +1970,6 @@ func applyResourcePacks(_ userPacks: [String],
             RESOURCE_PACK_PRESENTATION)
         renderer.sunTex = nil
         renderer.moonTex = nil
-        renderer.titleBgTex = renderer.bundledTitleBgTex
-        renderer.titleLogoTex = renderer.bundledTitleLogoTex
         ui.packUI = nil
         ui.cv.guiTexture = nil
         packFontWidths = nil
@@ -2258,27 +2018,6 @@ final class PackUI {
         "smithing": (0, 1024), "cartography_table": (256, 1024), "beacon": (512, 1024), "horse": (768, 1024),
     ]
 
-    /// Closed input manifest used by both composition and strict visual-style validation.
-    static let requiredSourcePaths: [(key: String, relativePath: String, logicalSize: Int)] = [
-        ("icons", "gui/icons", 256), ("widgets", "gui/widgets", 256),
-        ("bg", "gui/options_background", 16),
-        ("inventory", "gui/container/inventory", 256),
-        ("generic_54", "gui/container/generic_54", 256),
-        ("crafting_table", "gui/container/crafting_table", 256),
-        ("furnace", "gui/container/furnace", 256),
-        ("brewing_stand", "gui/container/brewing_stand", 256),
-        ("enchanting_table", "gui/container/enchanting_table", 256),
-        ("anvil", "gui/container/anvil", 256), ("hopper", "gui/container/hopper", 256),
-        ("dispenser", "gui/container/dispenser", 256),
-        ("shulker_box", "gui/container/shulker_box", 256),
-        ("grindstone", "gui/container/grindstone", 256),
-        ("stonecutter", "gui/container/stonecutter", 256),
-        ("smithing", "gui/container/smithing", 256),
-        ("cartography_table", "gui/container/cartography_table", 256),
-        ("beacon", "gui/container/beacon", 256), ("horse", "gui/container/horse", 256),
-        ("ascii", "font/ascii", 128),
-    ]
-
     static func supportedRasterScale(width: Int, height: Int, logicalSize: Int) -> Int? {
         guard logicalSize > 0, width == height, width >= logicalSize,
               width % logicalSize == 0 else { return nil }
@@ -2312,16 +2051,34 @@ final class PackUI {
             return nil
         }
 
-        let sources = requiredSourcePaths.filter { $0.key != "ascii" }
+        let sources: [(String, String, Int)] = [
+            ("icons", "gui/icons", 256), ("widgets", "gui/widgets", 256),
+            ("bg", "gui/options_background", 16),
+            ("inventory", "gui/container/inventory", 256),
+            ("generic_54", "gui/container/generic_54", 256),
+            ("crafting_table", "gui/container/crafting_table", 256),
+            ("furnace", "gui/container/furnace", 256),
+            ("brewing_stand", "gui/container/brewing_stand", 256),
+            ("enchanting_table", "gui/container/enchanting_table", 256),
+            ("anvil", "gui/container/anvil", 256),
+            ("hopper", "gui/container/hopper", 256),
+            ("dispenser", "gui/container/dispenser", 256),
+            ("shulker_box", "gui/container/shulker_box", 256),
+            ("grindstone", "gui/container/grindstone", 256),
+            ("stonecutter", "gui/container/stonecutter", 256),
+            ("smithing", "gui/container/smithing", 256),
+            ("cartography_table", "gui/container/cartography_table", 256),
+            ("beacon", "gui/container/beacon", 256),
+            ("horse", "gui/container/horse", 256),
+        ]
         var decoded: [(key: String, logicalSize: Int, image: RGBAImage)] = []
-        for source in sources {
+        for (key, rel, base) in sources {
             guard budget?.shouldContinue != false else { return nil }
-            if let img = load(source.relativePath) {
-                decoded.append((source.key, source.logicalSize, img))
+            if let img = load(rel) {
+                decoded.append((key, base, img))
             }
         }
-        let asciiPath = requiredSourcePaths.first(where: { $0.key == "ascii" })!.relativePath
-        let ascii = load(asciiPath)
+        let ascii = load("font/ascii")
         var scaleCandidates = decoded.map {
             (width: $0.image.width, height: $0.image.height, logicalSize: $0.logicalSize)
         }
@@ -2411,138 +2168,4 @@ final class PackUI {
         guard let prepared = Self.prepare(packs: packs, budget: budget) else { return nil }
         self.init(prepared: prepared, device: device)
     }
-}
-
-/// Ordered, source-provenance coverage result for the exclusive KUBIKOS baseline. It audits the
-/// selected archive itself rather than the composited stack, so another pack can never conceal a
-/// missing KUBIKOS asset. The report is deliberately data-only for direct unit-test inspection.
-struct KubikosCoverageReport: Equatable {
-    let missingTiles: [String]
-    let missingItemProviders: [String]
-    let missingModelTextures: [String]
-    let missingGUI: [String]
-    let missingEnvironment: [String]
-    let missingNativeFallback: [String]
-    let missingTitle: [String]
-    let textureGateFailures: [String]
-
-    var isComplete: Bool {
-        missingTiles.isEmpty && missingItemProviders.isEmpty && missingModelTextures.isEmpty &&
-            missingGUI.isEmpty && missingEnvironment.isEmpty && missingNativeFallback.isEmpty &&
-            missingTitle.isEmpty && textureGateFailures.isEmpty
-    }
-
-    var summary: String {
-        let values = missingTiles.map { "tile/\($0)" } +
-            missingItemProviders.map { "item/\($0)" } +
-            missingModelTextures.map { "model/\($0)" } +
-            missingGUI.map { "gui/\($0)" } +
-            missingEnvironment.map { "environment/\($0)" } +
-            missingNativeFallback.map { "native/\($0)" } +
-            missingTitle.map { "title/\($0)" } +
-            textureGateFailures.map { "atlas/\($0)" }
-        return values.prefix(12).joined(separator: ", ")
-    }
-}
-
-private let KUBIKOS_ENTITY_FALLBACK_PATH = "assets/elysium/textures/entity/fallback.png"
-private let KUBIKOS_TITLE_BACKGROUND_PATH = "assets/elysium/textures/title/background.png"
-private let KUBIKOS_TITLE_LOGO_PATH = "assets/elysium/textures/title/logo.png"
-
-private func kubikosNativeImage(_ path: String, pack: ResourcePack,
-                                budget: ResourcePackPreparationBudget? = nil) -> RGBAImage? {
-    guard budget?.shouldContinue != false, let data = pack.file(path) else { return nil }
-    return decodePNG(data, budget: budget)
-}
-
-private func kubikosTitleImages(pack: ResourcePack,
-                                budget: ResourcePackPreparationBudget? = nil)
-    -> (background: RGBAImage?, logo: RGBAImage?) {
-    (kubikosNativeImage(KUBIKOS_TITLE_BACKGROUND_PATH, pack: pack, budget: budget),
-     kubikosNativeImage(KUBIKOS_TITLE_LOGO_PATH, pack: pack, budget: budget))
-}
-
-/// Strict source audit for the KUBIKOS package. `atlas` and `packUI` prove the current renderer
-/// accepted the data; the `pack` checks ensure each required source came from KUBIKOS itself.
-func kubikosCoverageReport(pack: ResourcePack, atlas: PackAtlasResult,
-                           packUI: PreparedPackUI, sun: RGBAImage?, moon: RGBAImage?,
-                           titleBackground: RGBAImage?, titleLogo: RGBAImage?,
-                           modelTextureAudit: [ModelTextureAuditEntry],
-                           budget: ResourcePackPreparationBudget? = nil)
-    -> KubikosCoverageReport {
-    let names = allTileNames()
-    let missingTiles = names.filter { name in
-        pack.file("assets/elysium/textures/tiles/\(name).png") == nil
-    }
-    // These four tile slots deliberately keep their native semantic behavior: the three air
-    // variants are null geometry and end_portal is the renderer's animated effect. They still
-    // have archive records for a closed one-for-one manifest, but a texture gate is not expected.
-    let gateFailures = names.enumerated().compactMap { index, name in
-        ENGINE_MANAGED_NATIVE_TILE_NAMES.contains(name) ||
-            (index < atlas.textureGate.count && atlas.textureGate[index] == 1) ? nil : name
-    }
-    let itemPaths = Set(pack.list(prefix: pack.texRoot + "item/").compactMap { path -> String? in
-        guard path.hasSuffix(".png") else { return nil }
-        return String(path.split(separator: "/").last!.dropLast(4))
-    })
-    let missingItems = itemDefs.compactMap { definition -> String? in
-        if definition.block != nil { return nil } // rendered from the fully themed block atlas
-        let direct = itemPaths.contains(definition.name) && atlas.itemIcons[definition.name] != nil
-        let alias = itemPaths.contains(definition.icon) && atlas.itemIcons[definition.icon] != nil
-        return direct || alias ? nil : definition.name
-    }
-    var missingModels: [String] = []
-    for model in modelTextureAudit {
-        for relativePath in model.packTextures where pack.file(pack.texRoot + relativePath) == nil {
-            missingModels.append("\(model.modelName):\(relativePath)")
-        }
-    }
-    let missingGUI = PackUI.requiredSourcePaths.compactMap { source -> String? in
-        let sourcePresent = kubikosNativeImage(pack.texRoot + source.relativePath + ".png",
-                                               pack: pack, budget: budget) != nil
-        let composed = packUI.sheets.contains(source.key)
-        return sourcePresent && composed ? nil : source.key
-    }
-    let missingEnvironment = [
-        ("sun", "environment/sun.png", sun),
-        ("moon", "environment/moon_phases.png", moon),
-    ].compactMap { key, path, image -> String? in
-        kubikosNativeImage(pack.texRoot + path, pack: pack, budget: budget) != nil && image != nil ? nil : key
-    }
-    let nativeFallback = kubikosNativeImage(KUBIKOS_ENTITY_FALLBACK_PATH, pack: pack, budget: budget) == nil
-        ? ["entity-fallback"] : []
-    let missingTitle = [
-        ("background", KUBIKOS_TITLE_BACKGROUND_PATH, titleBackground),
-        ("logo", KUBIKOS_TITLE_LOGO_PATH, titleLogo),
-    ].compactMap { key, path, image -> String? in
-        kubikosNativeImage(path, pack: pack, budget: budget) != nil && image != nil ? nil : key
-    }
-    return KubikosCoverageReport(
-        missingTiles: missingTiles, missingItemProviders: missingItems,
-        missingModelTextures: missingModels, missingGUI: missingGUI,
-        missingEnvironment: missingEnvironment, missingNativeFallback: nativeFallback,
-        missingTitle: missingTitle,
-        textureGateFailures: gateFailures)
-}
-
-/// Rebuild the exclusive baseline from the KUBIKOS archive alone. This is intentionally separate
-/// from the visible stack: a user pack above it may decorate the result, but it cannot conceal a
-/// damaged or incomplete KUBIKOS source archive during validation.
-private func strictKubikosCoverageReport(_ pack: ResourcePack,
-                                         modelTextureAudit: [ModelTextureAuditEntry],
-                                         budget: ResourcePackPreparationBudget) -> KubikosCoverageReport? {
-    // An empty audit would let a hand-constructed worker snapshot skip all entity coverage.
-    // Production snapshots always capture it on main before dispatching the worker.
-    guard !modelTextureAudit.isEmpty,
-          let atlas = buildPackAtlas(packs: [pack], budget: budget),
-          let packUI = PackUI.prepare(packs: [pack], budget: budget),
-          budget.shouldContinue else { return nil }
-    let sun = packEntityImage(["environment/sun.png"], packs: [pack], budget: budget)
-    let moon = packEntityImage(["environment/moon_phases.png"], packs: [pack], budget: budget)
-    let title = kubikosTitleImages(pack: pack, budget: budget)
-    guard budget.shouldContinue else { return nil }
-    return kubikosCoverageReport(pack: pack, atlas: atlas, packUI: packUI, sun: sun, moon: moon,
-                                 titleBackground: title.background, titleLogo: title.logo,
-                                 modelTextureAudit: modelTextureAudit,
-                                 budget: budget)
 }

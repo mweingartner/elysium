@@ -1,37 +1,5 @@
 import Foundation
 
-/// Stable identifiers for the mutually exclusive bundled visual baselines. A base style owns the
-/// whole atlas/UI/entity appearance; it is deliberately not modelled as an optional add-on.
-public enum BundledResourcePackBaseStyleID: String, Codable, CaseIterable, Sendable {
-    case faithful64x = "faithful-64x"
-    case kubikosCubicWorld = "kubikos-cubic-world"
-}
-
-public struct BundledResourcePackBaseStyleDescriptor: Equatable, Sendable {
-    public let id: BundledResourcePackBaseStyleID
-    public let displayName: String
-    public let detail: String
-
-    public init(id: BundledResourcePackBaseStyleID, displayName: String, detail: String) {
-        self.id = id
-        self.displayName = displayName
-        self.detail = detail
-    }
-}
-
-/// Catalog order is stable for keyboard/accessibility navigation. Faithful remains the migration
-/// default for settings written before visual-style selection existed.
-public let BUNDLED_RESOURCE_PACK_BASE_STYLES: [BundledResourcePackBaseStyleDescriptor] = [
-    .init(id: .faithful64x, displayName: "Faithful 64x",
-          detail: "The original Elysium texture baseline."),
-    .init(id: .kubikosCubicWorld, displayName: "KUBIKOS Cubic World",
-          detail: "A complete alternate KUBIKOS-inspired world, item, entity, and interface style."),
-]
-
-public func sanitizedBundledResourcePackBaseStyleID(_ raw: String?) -> BundledResourcePackBaseStyleID {
-    raw.flatMap(BundledResourcePackBaseStyleID.init(rawValue:)) ?? .faithful64x
-}
-
 /// Stable identifiers for the closed, reviewed set of bundled Faithful 64x add-ons.
 public enum BundledResourcePackAddOnID: String, Codable, CaseIterable, Sendable {
     case oreBorders64x = "ore-borders-64x"
@@ -60,19 +28,6 @@ public func sanitizedBundledResourcePackAddOnIDs(_ raw: [String]?) -> [BundledRe
     guard let raw else { return [] }
     let requested = Set(raw.compactMap(BundledResourcePackAddOnID.init(rawValue:)))
     return BUNDLED_RESOURCE_PACK_ADD_ONS.map(\.id).filter(requested.contains)
-}
-
-/// Faithful-specific overlays never sit above the KUBIKOS baseline. This is both a visual
-/// consistency rule and a fail-closed policy for settings migrated from older releases.
-public func bundledResourcePackAddOnsAllowed(for style: BundledResourcePackBaseStyleID) -> Bool {
-    style == .faithful64x
-}
-
-public func sanitizedBundledResourcePackAddOnIDs(
-    _ raw: [String]?, for style: BundledResourcePackBaseStyleID
-) -> [BundledResourcePackAddOnID] {
-    guard bundledResourcePackAddOnsAllowed(for: style) else { return [] }
-    return sanitizedBundledResourcePackAddOnIDs(raw)
 }
 
 public enum ResourcePackSelectionEvaluation: Equatable, Sendable {
@@ -125,7 +80,6 @@ public func evaluateBundledResourcePackToggle(
 
 public enum ResourcePackPublishedGeneration: Equatable, Sendable {
     case faithful64x(activeAddOns: [BundledResourcePackAddOnID])
-    case kubikosCubicWorld
     case proceduralFallback(failedPackDisplayName: String)
 }
 
@@ -143,7 +97,6 @@ public struct ResourcePackPresentationSnapshot: Equatable, Sendable {
 }
 
 public enum ResourcePackScreenFocusID: Hashable, Sendable {
-    case baseStyle(BundledResourcePackBaseStyleID)
     case addOn(BundledResourcePackAddOnID)
     case acknowledge
     case done
@@ -151,8 +104,8 @@ public enum ResourcePackScreenFocusID: Hashable, Sendable {
 
 public enum ResourcePackApplyState: Equatable, Sendable {
     case idle
-    case awaitingPresentedFrame(transactionID: UInt64)
-    case preparing(transactionID: UInt64)
+    case awaitingPresentedFrame(transactionID: UInt64, pack: BundledResourcePackAddOnID)
+    case preparing(transactionID: UInt64, pack: BundledResourcePackAddOnID)
 }
 
 public struct ResourcePackScreenRow: Equatable, Sendable {
@@ -161,7 +114,7 @@ public struct ResourcePackScreenRow: Equatable, Sendable {
     public let height: Double
 }
 
-/// Bounded, stable-ID layout policy for the base-style and add-on controls.
+/// Bounded, stable-ID layout policy for the small add-on catalog.
 public struct ResourcePackScreenLayout: Equatable, Sendable {
     public let visibleRows: [ResourcePackScreenRow]
     public let contentHeight: Double
@@ -172,8 +125,7 @@ public struct ResourcePackScreenLayout: Equatable, Sendable {
         let safeTop = contentTop.isFinite ? max(0, contentTop) : 76
         let safeBottom = contentBottom.isFinite ? max(safeTop, contentBottom) : safeTop
         let safeRowHeight = rowHeight.isFinite ? min(64, max(20, rowHeight)) : 30
-        let ids = BUNDLED_RESOURCE_PACK_BASE_STYLES.map { ResourcePackScreenFocusID.baseStyle($0.id) }
-            + BUNDLED_RESOURCE_PACK_ADD_ONS.map { ResourcePackScreenFocusID.addOn($0.id) }
+        let ids = BUNDLED_RESOURCE_PACK_ADD_ONS.map { ResourcePackScreenFocusID.addOn($0.id) }
         contentHeight = Double(ids.count) * safeRowHeight
         let viewport = max(0, safeBottom - safeTop)
         let maximumOffset = max(0, contentHeight - viewport)

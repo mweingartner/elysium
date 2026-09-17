@@ -651,12 +651,8 @@ private let expectedOneShotActionIDs = [
     "resource-packs.title-tab.1", "resource-packs.title-tab.2",
     "resource-packs.title-tab.3", "resource-packs.open-settings",
     "resource-packs.settings-shift-tab", "resource-packs.settings-tab",
-    "resource-packs.open-enter", "resource-packs.down.faithful-to-kubikos",
-    "resource-packs.tab.kubikos-to-ore", "resource-packs.down.ore-to-lantern",
-    "resource-packs.tab.lantern-to-done", "resource-packs.down.done-to-faithful",
-    "resource-packs.shift-tab.faithful-to-done", "resource-packs.up.done-to-lantern",
-    "resource-packs.shift-tab.lantern-to-ore", "resource-packs.up.ore-to-kubikos",
-    "resource-packs.shift-tab.kubikos-to-faithful", "resource-packs.escape-return",
+    "resource-packs.open-enter", "resource-packs.down", "resource-packs.up",
+    "resource-packs.shift-tab", "resource-packs.tab", "resource-packs.escape-return",
     "resource-packs.open-space", "resource-packs.escape-second",
     "resource-packs.settings-escape", "resource-packs.title-shift-tab.1",
     "resource-packs.title-shift-tab.2", "resource-packs.title-shift-tab.3",
@@ -5294,47 +5290,28 @@ do {
     try postKeyOnce("resource-packs.open-enter", 36, ledger: actionLedger,
                     finalCheck: { try requireLaunchPresentation("resource packs physical Enter") })
 
-    // Do not activate either style or add-on control in this gate: the isolated profile must
-    // remain at its default baseline while physical focus traversal verifies the full graph.
-    let faithfulID = "resource-pack.style.faithful-64x"
-    let kubikosID = "resource-pack.style.kubikos-cubic-world"
     let oreID = "resource-pack.ore-borders-64x"
     let lanternID = "resource-pack.static-lanterns"
     let doneID = "resource-pack.done"
-    try requireElementFocus(faithfulID, "resource packs initial visual style")
+    try requireElementFocus(oreID, "resource packs initial row")
     guard let baseline = currentElement("resource-pack.baseline"),
           let packStatus = currentElement("resource-pack.status"),
-          let faithful = currentElement(faithfulID), let kubikos = currentElement(kubikosID),
           let ore = currentElement(oreID), let lantern = currentElement(lanternID),
           let packDone = currentElement(doneID),
           axString(baseline, kAXRoleAttribute as CFString) == kAXStaticTextRole,
-          axString(baseline, kAXDescriptionAttribute as CFString) == "Visual style baseline",
-          axString(baseline, kAXValueAttribute as CFString) == "Faithful 64x active",
-          axString(baseline, kAXHelpAttribute as CFString)?.contains("Faithful 64x") == true,
+          axString(baseline, kAXDescriptionAttribute as CFString) == "Faithful 64x baseline",
+          axString(baseline, kAXValueAttribute as CFString) == "Active (always selected)",
+          axString(baseline, kAXHelpAttribute as CFString)?.contains("always selected") == true,
           axString(packStatus, kAXRoleAttribute as CFString) == kAXStaticTextRole,
           axString(packStatus, kAXDescriptionAttribute as CFString) == "Resource pack status",
           axString(packStatus, kAXValueAttribute as CFString) ==
-              "Select a visual style; Faithful add-ons remain opt-in.",
+              "Optional add-ons are OFF until you select them.",
           axBool(baseline, kAXEnabledAttribute as CFString) == true,
           axBool(packStatus, kAXEnabledAttribute as CFString) == true,
           axBool(baseline, kAXFocusedAttribute as CFString) == false,
           axBool(packStatus, kAXFocusedAttribute as CFString) == false,
           !axActionNames(baseline).contains(kAXPressAction as String),
           !axActionNames(packStatus).contains(kAXPressAction as String),
-          axString(faithful, kAXRoleAttribute as CFString) == kAXCheckBoxRole,
-          axString(kubikos, kAXRoleAttribute as CFString) == kAXCheckBoxRole,
-          axString(faithful, kAXDescriptionAttribute as CFString) == "Faithful 64x",
-          axString(kubikos, kAXDescriptionAttribute as CFString) == "KUBIKOS Cubic World",
-          axString(faithful, kAXValueAttribute as CFString) == "Selected",
-          axString(kubikos, kAXValueAttribute as CFString) == "Not selected",
-          axString(faithful, kAXHelpAttribute as CFString)?.contains("original Elysium") == true,
-          axString(kubikos, kAXHelpAttribute as CFString)?.contains("complete alternate") == true,
-          axBool(faithful, kAXEnabledAttribute as CFString) == true,
-          axBool(kubikos, kAXEnabledAttribute as CFString) == true,
-          axBool(faithful, kAXSelectedAttribute as CFString) == true,
-          axBool(kubikos, kAXSelectedAttribute as CFString) == false,
-          !axActionNames(faithful).contains(kAXPressAction as String),
-          axActionNames(kubikos).contains(kAXPressAction as String),
           axString(ore, kAXRoleAttribute as CFString) == kAXCheckBoxRole,
           axString(lantern, kAXRoleAttribute as CFString) == kAXCheckBoxRole,
           axString(ore, kAXDescriptionAttribute as CFString) == "Ore Borders 64x",
@@ -5353,10 +5330,9 @@ do {
     }.filter { $0.hasPrefix("text:resource-pack.") }
     guard resourcePackSemanticIDs == [
         "text:resource-pack.baseline", "text:resource-pack.status",
-        "text:\(faithfulID)", "text:\(kubikosID)",
         "text:\(oreID)", "text:\(lanternID)", "text:\(doneID)",
     ] else { throw GateError.failed("resource packs Accessibility tree order") }
-    for element in [baseline, packStatus, faithful, kubikos, ore, lantern] {
+    for element in [baseline, packStatus, ore, lantern] {
         guard let position = axPoint(element, kAXPositionAttribute as CFString),
               let extent = axSize(element, kAXSizeAttribute as CFString),
               let windowPosition = axPoint(window, kAXPositionAttribute as CFString),
@@ -5376,53 +5352,31 @@ do {
         _ = AXUIElementSetAttributeValue(element,
             kAXFocusedAttribute as CFString, kCFBooleanTrue)
         guard axBool(element, kAXFocusedAttribute as CFString) == false,
-              axBool(faithful, kAXFocusedAttribute as CFString) == true,
-              axBool(kubikos, kAXFocusedAttribute as CFString) == false,
+              axBool(ore, kAXFocusedAttribute as CFString) == true,
               axBool(lantern, kAXFocusedAttribute as CFString) == false,
-              axBool(ore, kAXFocusedAttribute as CFString) == false,
               axBool(packDone, kAXFocusedAttribute as CFString) == false else {
             throw GateError.failed("resource packs \(label) static focus isolation")
         }
     }
-    try postKeyOnce("resource-packs.down.faithful-to-kubikos", 125, ledger: actionLedger,
-                    finalCheck: { try requireLaunchPresentation("resource packs ArrowDown Faithful") })
-    try requireElementFocus(kubikosID, "resource packs Faithful to KUBIKOS")
-    try postKeyOnce("resource-packs.tab.kubikos-to-ore", 48, ledger: actionLedger,
-                    finalCheck: { try requireLaunchPresentation("resource packs Tab KUBIKOS") })
-    try requireElementFocus(oreID, "resource packs KUBIKOS to Ore Borders")
-    try postKeyOnce("resource-packs.down.ore-to-lantern", 125, ledger: actionLedger,
-                    finalCheck: { try requireLaunchPresentation("resource packs ArrowDown Ore Borders") })
-    try requireElementFocus(lanternID, "resource packs Ore Borders to Static Lanterns")
-    try postKeyOnce("resource-packs.tab.lantern-to-done", 48, ledger: actionLedger,
-                    finalCheck: { try requireLaunchPresentation("resource packs Tab Static Lanterns") })
-    try requireElementFocus(doneID, "resource packs Static Lanterns to Done")
-    try postKeyOnce("resource-packs.down.done-to-faithful", 125, ledger: actionLedger,
-                    finalCheck: { try requireLaunchPresentation("resource packs ArrowDown Done") })
-    try requireElementFocus(faithfulID, "resource packs Done wraps to Faithful")
-    try postKeyOnce("resource-packs.shift-tab.faithful-to-done", 48, flags: .maskShift,
+    try postKeyOnce("resource-packs.down", 125, ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("resource packs ArrowDown") })
+    try requireElementFocus(lanternID, "resource packs ArrowDown")
+    try postKeyOnce("resource-packs.up", 126, ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("resource packs ArrowUp") })
+    try requireElementFocus(oreID, "resource packs ArrowUp")
+    try postKeyOnce("resource-packs.shift-tab", 48, flags: .maskShift,
                     ledger: actionLedger,
-                    finalCheck: { try requireLaunchPresentation("resource packs Shift-Tab Faithful") })
-    try requireElementFocus(doneID, "resource packs Faithful reverse-wraps to Done")
-    try postKeyOnce("resource-packs.up.done-to-lantern", 126, ledger: actionLedger,
-                    finalCheck: { try requireLaunchPresentation("resource packs ArrowUp Done") })
-    try requireElementFocus(lanternID, "resource packs Done to Static Lanterns")
-    try postKeyOnce("resource-packs.shift-tab.lantern-to-ore", 48, flags: .maskShift,
-                    ledger: actionLedger,
-                    finalCheck: { try requireLaunchPresentation("resource packs Shift-Tab Static Lanterns") })
-    try requireElementFocus(oreID, "resource packs Static Lanterns to Ore Borders")
-    try postKeyOnce("resource-packs.up.ore-to-kubikos", 126, ledger: actionLedger,
-                    finalCheck: { try requireLaunchPresentation("resource packs ArrowUp Ore Borders") })
-    try requireElementFocus(kubikosID, "resource packs Ore Borders to KUBIKOS")
-    try postKeyOnce("resource-packs.shift-tab.kubikos-to-faithful", 48, flags: .maskShift,
-                    ledger: actionLedger,
-                    finalCheck: { try requireLaunchPresentation("resource packs Shift-Tab KUBIKOS") })
-    try requireElementFocus(faithfulID, "resource packs KUBIKOS to Faithful")
+                    finalCheck: { try requireLaunchPresentation("resource packs Shift-Tab") })
+    try requireElementFocus(doneID, "resource packs Shift-Tab")
+    try postKeyOnce("resource-packs.tab", 48, ledger: actionLedger,
+                    finalCheck: { try requireLaunchPresentation("resource packs Tab") })
+    try requireElementFocus(oreID, "resource packs Tab")
     try postKeyOnce("resource-packs.escape-return", 53, ledger: actionLedger,
                     finalCheck: { try requireLaunchPresentation("resource packs Escape") })
     try requireElementFocus("video.resource-packs", "resource packs exact return focus")
     try postKeyOnce("resource-packs.open-space", 49, ledger: actionLedger,
                     finalCheck: { try requireLaunchPresentation("resource packs physical Space") })
-    try requireElementFocus(faithfulID, "resource packs reopen")
+    try requireElementFocus(oreID, "resource packs reopen")
     try postKeyOnce("resource-packs.escape-second", 53, ledger: actionLedger,
                     finalCheck: { try requireLaunchPresentation("resource packs second Escape") })
     try requireElementFocus("video.resource-packs", "resource packs second return focus")

@@ -144,8 +144,7 @@ done
 [ -n "$EXECUTABLE" ] && [ -n "$OUTPUT" ] && [ "$MANIFEST_STDOUT" = true ] || \
     die "usage: package-app.sh --executable PATH --output APP --manifest-stdout [--expected-hash SHA256]"
 [ -f "$EXECUTABLE" ] && [ ! -L "$EXECUTABLE" ] || die "release executable must be a regular non-symlink file"
-bash "$ROOT/scripts/prepare-kubikos-theme.sh" >/dev/null || \
-    die "managed KUBIKOS theme preparation or verification failed"
+bash "$ROOT/scripts/verify-pack-assets.sh" >/dev/null || die "managed pack asset verification failed"
 EXECUTABLE="$(canonical_file "$EXECUTABLE")" || die "cannot resolve release executable"
 bash "$ROOT/scripts/security-check-binary.sh" "$EXECUTABLE" >/dev/null \
     || die "production input executable failed security inspection"
@@ -167,12 +166,10 @@ cp "$ROOT/Vendor/Arnis/ELYSIUM_PINNED_COMMIT" \
     "$OUTPUT/Contents/Resources/ArnisLegal/ELYSIUM_PINNED_COMMIT"
 PACK_ASSETS=(
     "Faithful 64x - December 2025 Release.zip"
-    "KUBIKOS Cubic World - Elysium Theme.zip"
     "Faithful 64x - Ore Borders 64x.zip"
     "Faithful 64x - Static Lanterns.zip"
     "FAITHFUL-LICENSE.txt"
     "FAITHFUL-ADDONS-CREDITS.txt"
-    "KUBIKOS-ATTRIBUTION.txt"
 )
 for name in "${PACK_ASSETS[@]}"; do
     asset="$ROOT/packaging/$name"

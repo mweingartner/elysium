@@ -663,18 +663,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         }
         rpgControllerAdapter.start()
 
-        // settings.resourcePacks holds USER packs only — the selected bundled visual baseline
-        // is self-healing and force-applied inside
+        // settings.resourcePacks holds USER packs only — the default pack
+        // (Faithful base layer) is self-healing and force-applied inside
         // applyResourcePacks, so this always runs, even with no user packs.
         // older settings that listed the default explicitly migrate cleanly
         // (withDefaultPack dedupes it to the base slot).
         applyResourcePacks(
             game.settings.resourcePacks ?? [],
-            bundledBaseStyle: sanitizedBundledResourcePackBaseStyleID(
-                game.settings.bundledResourcePackBaseStyle),
-            bundledAddOns: sanitizedBundledResourcePackAddOnIDs(
-                game.settings.bundledResourcePackAddOns,
-                for: sanitizedBundledResourcePackBaseStyleID(game.settings.bundledResourcePackBaseStyle)),
+            bundledAddOns: sanitizedBundledResourcePackAddOnIDs(game.settings.bundledResourcePackAddOns),
             game: game, renderer: renderer, ui: ui)
 
         ui.titlePhoto = renderer.titleBgTex != nil

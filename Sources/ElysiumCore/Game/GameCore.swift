@@ -1070,9 +1070,8 @@ public final class GameCore {
     private func enterSettingsRecovery(requestedResourcePackID: String?) {
         guard !settingsRecoveryRequired else { return }
         settingsRecoveryRequired = true
-        settingsRecoveryRequestedResourcePackID = requestedResourcePackID.flatMap { raw in
-            if let baseStyle = BundledResourcePackBaseStyleID(rawValue: raw) { return baseStyle.rawValue }
-            return BundledResourcePackAddOnID(rawValue: raw)?.rawValue
+        settingsRecoveryRequestedResourcePackID = requestedResourcePackID.flatMap {
+            BundledResourcePackAddOnID(rawValue: $0)?.rawValue
         }
         settingsRecoveryNoticeSerial = settingsRecoveryNoticeSerial == UInt64.max
             ? 1 : settingsRecoveryNoticeSerial + 1

@@ -44,8 +44,6 @@ public struct Settings: Codable, Equatable {
     public var resourcePacks: [String]? = nil
     /// Explicit consent for reviewed bundled Faithful 64x add-ons. Nil/empty = none.
     public var bundledResourcePackAddOns: [String]? = nil
-    /// Mutually exclusive bundled visual baseline. Nil migrates to Faithful 64x.
-    public var bundledResourcePackBaseStyle: String? = nil
     /// nil = off, "ultra" = built-in ultra preset, anything else = shader pack file name
     public var shader: String? = nil
     /// Local Ollama model name used by the in-game /ai command. Empty = unset.
@@ -108,10 +106,8 @@ func sanitizedSettings(_ input: Settings) -> Settings {
             !$0.isEmpty && $0.count <= 255 && !$0.contains("/") && !$0.contains("\\")
         }.prefix(64))
     }
-    let baseStyle = sanitizedBundledResourcePackBaseStyleID(s.bundledResourcePackBaseStyle)
-    s.bundledResourcePackBaseStyle = baseStyle.rawValue
     s.bundledResourcePackAddOns = sanitizedBundledResourcePackAddOnIDs(
-        s.bundledResourcePackAddOns, for: baseStyle).map(\.rawValue)
+        s.bundledResourcePackAddOns).map(\.rawValue)
     s.aiOllamaModel = sanitizedOllamaModelName(s.aiOllamaModel)
     let tutorialVersion = s.rpgTutorialVersion ?? 0
     s.rpgTutorialVersion = (0...RPG_TUTORIAL_VERSION).contains(tutorialVersion)

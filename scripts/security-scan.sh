@@ -9,7 +9,7 @@ for required in scripts/pipeline.sh scripts/release-source-snapshot.py \
                 scripts/package-app.sh scripts/package-debug-app.sh \
                 scripts/security-check-binary.sh scripts/appkit-text-entry-integration.sh \
                 scripts/test-lan-automation.sh scripts/lan-automation-lib.sh \
-                scripts/build-arnis-helper.sh scripts/prepare-kubikos-theme.sh \
+                scripts/build-arnis-helper.sh \
                 Tests/ElysiumAppKitIntegration/Driver.swift \
                 scripts/prepush-release-build.sh .githooks/pre-commit .githooks/pre-push \
                 packaging/DebugInfo.plist Sources/Elysium/DebugControlRuntime.swift \
@@ -20,7 +20,6 @@ done
 PRODUCTION_RELEASE_SURFACES=(
     scripts/pipeline.sh scripts/release-source-snapshot.py scripts/package-app.sh
     scripts/appkit-text-entry-integration.sh scripts/build-arnis-helper.sh
-    scripts/prepare-kubikos-theme.sh
     .githooks/pre-commit .githooks/pre-push
 )
 if grep -E '(--(fixture|scenario|fault|alternate-executable|caller-evidence)|case "(fixture|scenario|fault))' \
@@ -31,7 +30,6 @@ fi
 EXECUTABLE_RELEASE_SURFACES=(
     scripts/pipeline.sh scripts/release-source-snapshot.py scripts/package-app.sh
     scripts/package-debug-app.sh scripts/security-check-binary.sh
-    scripts/prepare-kubikos-theme.sh
     scripts/appkit-text-entry-integration.sh scripts/build-arnis-helper.sh
     .githooks/pre-commit .githooks/pre-push
 )

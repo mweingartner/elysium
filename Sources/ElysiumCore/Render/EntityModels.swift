@@ -66,19 +66,6 @@ public struct MobModel {
     }
 }
 
-/// Immutable pack-texture provenance captured before a resource-pack worker begins. The model
-/// registry itself is lazily populated and mutable, so background pack validation must receive
-/// this value rather than touching that registry directly.
-public struct ModelTextureAuditEntry: Equatable, Sendable {
-    public let modelName: String
-    public let packTextures: [String]
-
-    public init(modelName: String, packTextures: [String]) {
-        self.modelName = modelName
-        self.packTextures = packTextures
-    }
-}
-
 /// raw-pixel skin painter (the original renderer design painted a canvas)
 public final class EntitySkin {
     public let w: Int, h: Int
@@ -177,16 +164,6 @@ public func getModel(_ name: String) -> MobModel {
 public func hasModel(_ name: String) -> Bool {
     ensureModels()
     return MODELS[name] != nil
-}
-
-/// Take a deterministic, value-owned copy of every model's texture contract. Call this while
-/// preparing a main-thread resource-pack source snapshot; callers can then audit the result on a
-/// worker without racing the lazily initialized model registry.
-public func modelTextureAuditEntries() -> [ModelTextureAuditEntry] {
-    ensureModels()
-    return MODELS.keys.sorted().map { name in
-        ModelTextureAuditEntry(modelName: name, packTextures: MODELS[name]!.packTex)
-    }
 }
 
 private func M(_ name: String, _ m: MobModel) { MODELS[name] = m }

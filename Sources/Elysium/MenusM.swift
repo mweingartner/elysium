@@ -69,11 +69,6 @@ final class TitleScreen: Screen {
                 canvas: "Textures: Faithful 64x (faithfulpack.net)",
                 value: "Faithful 64x (faithfulpack.net)",
                 help: "Faithful 64x is the active texture baseline.")
-        case .kubikosCubicWorld:
-            return TexturePresentation(
-                canvas: "Textures: KUBIKOS Cubic World (ANIMMAL Game Assets)",
-                value: "KUBIKOS Cubic World (ANIMMAL Game Assets)",
-                help: "KUBIKOS Cubic World is the active alternate visual style.")
         case .proceduralFallback:
             return TexturePresentation(
                 canvas: "Textures: Built-in fallback — Faithful 64x unavailable",
@@ -2928,17 +2923,13 @@ final class CreditsScreen: Screen {
         "§ethebriangao/pebble",
         "§egithub.com/thebriangao/pebble",
         "",
-        "§fVisual styles: Faithful 64x",
-        "§fand KUBIKOS Cubic World.",
-        "§fFaithful: the Faithful Team;",
-        "§foptional Ore Borders/Static Lanterns.",
+        "§fBase textures: Faithful 64x,",
+        "§funmodified, by the Faithful Team.",
+        "§fOptional: Ore Borders 64x",
+        "§fand Static Lanterns.",
         "§fOre Borders credits: Vanilla Tweaks,",
         "§fAerod, Hedreon, and Scutoel.",
         "§efaithfulpack.net",
-        "",
-        "§fKUBIKOS - Cube World:",
-        "§fANIMMAL Game Assets · Fab Standard License",
-        "§fEmbedded in Elysium only.",
         "",
         "§fHeld pickaxe geometry: Voxel Tools",
         "§fby tfwa.games · CC0-1.0",

@@ -5,13 +5,7 @@ dist/
 .env
 meshy_output/
 *.zip
-!packaging/Faithful 64x - December 2025 Release.zip
-!packaging/Faithful 64x - Ore Borders 64x.zip
-!packaging/Faithful 64x - Static Lanterns.zip
-
-# Generated only from a locally licensed KUBIKOS Unity package. This derivative
-# is a local app-packaging input, never a public source artifact.
-packaging/KUBIKOS Cubic World - Elysium Theme.zip
+!packaging/*.zip
 .claude/
 .mpd/
 openspec/

@@ -11,7 +11,7 @@ This is the technical tour. The one-paragraph version: **ElysiumCore** is a head
 │  UICanvas/UIManager/Screens/Menus/HUD   canvas-2D-style batcher, │
 │                    screen stack, 16 gameplay screens, menus      │
 │  Audio             synthesized game audio + named script WAVs    │
-│  ResourcePacks (hash-pinned selectable visual styles)            │
+│  ResourcePacks (built-in Faithful loading)                       │
 │  OllamaAgent       loopback-only /api/chat, /api/generate, /api/tags │
 │  LANTransport      Bonjour browse/advertise + TCP Direct Connect │
 └────────────────────────────┬─────────────────────────────────────┘
@@ -250,8 +250,7 @@ playtests; no sustained performance benchmark or user aesthetic acceptance is cl
 debug world was deleted and its original FOV restored. Applications deployment and Git publication
 are separate from this local build/verification result.
 
-Bat rendering uses `BatModel`'s modern 32-unit UV layout, matching the 128-pixel skin contract
-used by the shipped visual styles.
+Bat rendering uses `BatModel`'s modern 32-unit UV layout, matching Faithful's 128-pixel skin.
 `BatPresentation` composes an upright flying body with connected, parented wing tips, or a static
 full-body inverted/folded roost anchored to the ceiling. Hanging comes from the actual bat state
 (with legacy entity-data fallback), never `onGround`; this does not change deterministic simulation
@@ -267,40 +266,19 @@ container slot, including paired halves, and excludes the displayed player rows.
 fails closed because current client container snapshots do not carry the metadata needed for parity with
 the host's sort order.
 
-Faithful 64x Release 12 and KUBIKOS Cubic World are the hash-pinned managed base visual styles.
-Faithful is the default, while KUBIKOS is an exclusive alternative rather than a layer over Faithful:
-its deterministic builder converts licensed KUBIKOS diffuse materials into Elysium-native art while
-preserving semantic alpha, silhouettes, and GUI layout. The builder emits a direct override for every
-registered atlas tile (including Elysium-only tiles), plus transformed block, item, entity, GUI, font,
-and celestial sources. A KUBIKOS selection is rejected if that closed coverage contract is incomplete,
-so a missing alternate asset cannot silently borrow a Faithful pixel. The closed optional catalog
-contains Ore Borders 64x and Static Lanterns; both are off by default and are compatible only with the
-Faithful base. Unrelated user packs retain their existing higher-priority order.
-KUBIKOS recipes sample only declared coherent source regions: an inset Cube.fbx material face, or a
-named repeatable water/lava shader surface and sapphire emission swatch where the model diffuse is
-shader-darkened. The builder excludes heterogeneous Unity UV atlases such as `Items_D` and
-`TreesAndPlants_D`; it never downsamples or wraps a whole unwrap. Representative decoded terrain,
-water/lava, gem, item, GUI, and title pixels are snapshot-reviewed alongside direct source-to-runtime
-atlas correspondence, so archive hash validation cannot silently approve a visually malformed pack.
-The semantic classifier uses a stone fallback for unknown world tiles and a neutral item fallback for
-unknown direct icons; colour, fluid, vegetation, portal, and tool families are snapshot-covered so a
-newly registered path cannot silently inherit the grass material.
-The KUBIKOS Unity package and its generated ZIP are not source-controlled: before a local release,
-debug package, or pipeline run, `scripts/prepare-kubikos-theme.sh` takes either
-`ELYSIUM_KUBIKOS_UNITYPACKAGE` or its documented private-vault default, verifies the reviewed source
-SHA-256, produces the Git-ignored ZIP, and verifies the complete managed pack set. The app packager
-then places that locally generated ZIP in its own Elysium.app resources; a public source checkout never
-contains the KUBIKOS source or derivative archive.
+Faithful 64x Release 12 is the hash-pinned, lowest-priority managed visual baseline. The closed
+optional catalog contains Ore Borders 64x and Static Lanterns, both off by default and layered in
+catalog order above the base while unrelated user packs retain their existing higher-priority order.
 `ResourcePacks.swift` verifies bundled bytes against the reviewed manifest, restores reserved
 application-support copies atomically, and builds the atlas from the verified immutable bytes.
-`ResourcePackSelection.swift` owns stable base-style and add-on IDs, sanitization, compatibility,
-and headless child-screen layout policy; `ResourcePackScreenM.swift` owns the Video-options child
-screen. The deterministic procedural atlas remains the named safe fallback substrate rather than a
-visual-style selection.
+`ResourcePackSelection.swift` owns stable add-on IDs, consent sanitization, conflict evaluation, and
+headless child-screen layout policy; `ResourcePackScreenM.swift` owns the Video-options child screen.
+The deterministic procedural atlas remains the named safe fallback substrate rather than an optional
+pack selection.
 
-Engine side (`Render/`): the **mesher** consumes a padded 18×18×18 snapshot and emits opaque/cutout/translucent vertex buffers — greedy quad merging for full cubes, per-vertex AO, smooth light, biome tint, and an animation channel (water/lava/portal/fire/sway). Vertex format is 28 bytes / 7 words. Each mesh input owns an immutable, generation-tagged tint/provenance context; main-thread completion rejects an old generation or replaced section job before any upload or bookkeeping side effect. Generated and pack-backed atlas slices use the same top-origin row convention from CPU bytes through Metal sampling; semantic door, bed, and chest slices apply facing, half/piece, hinge, and open-state transforms directly within that coordinate space. Paired chests extend their neighbor-aware shape boxes to one shared seam and use the entity unwrap's complete fifteen-texel left/right front crops, while single chests retain their fourteen-texel crop. Pack provenance selects only those semantic transforms and tint behavior, never a global V-axis flip. Torch and lantern fixtures have dedicated live-world cuboid emitters so placed blocks render as material-built 3D fixtures instead of transparent sprite cards. The **atlas substrate** generates all 757+ baseline tiles in code with integer-only color math (pinned byte-identical by `atlas-goldens.json`); the selected verified base style overlays it. Tiles that vanilla renders as block entities (beds, chests, the bell, the decorated pot) have no flat `block/` texture in the Java format — the loader composites them from the selected style's `entity/` unwraps. The only substrate tiles left at runtime are the three airs, a particle speck, and the end-portal effect, which vanilla also renders as a shader rather than a texture.
+Engine side (`Render/`): the **mesher** consumes a padded 18×18×18 snapshot and emits opaque/cutout/translucent vertex buffers — greedy quad merging for full cubes, per-vertex AO, smooth light, biome tint, and an animation channel (water/lava/portal/fire/sway). Vertex format is 28 bytes / 7 words. Each mesh input owns an immutable, generation-tagged tint/provenance context; main-thread completion rejects an old generation or replaced section job before any upload or bookkeeping side effect. Generated and pack-backed atlas slices use the same top-origin row convention from CPU bytes through Metal sampling; semantic door, bed, and chest slices apply facing, half/piece, hinge, and open-state transforms directly within that coordinate space. Paired chests extend their neighbor-aware shape boxes to one shared seam and use the entity unwrap's complete fifteen-texel left/right front crops, while single chests retain their fourteen-texel crop. Pack provenance selects only those semantic transforms and tint behavior, never a global V-axis flip. Torch and lantern fixtures have dedicated live-world cuboid emitters so placed blocks render as material-built 3D fixtures instead of transparent sprite cards. The **atlas substrate** generates all 757+ baseline tiles in code with integer-only color math (pinned byte-identical by `atlas-goldens.json`); the built-in Faithful art overlays it. Tiles that vanilla renders as block entities (beds, chests, the bell, the decorated pot) have no flat `block/` texture in the Java format — the loader composites them from the art's `entity/` unwraps, so every visible surface comes from the Faithful set (the only substrate tiles left at runtime are the three airs, a particle speck, and the end-portal effect, which vanilla also renders as a shader rather than a texture).
 
-App side (`WorldRenderer`): runtime-compiled MSL (no `.metal` files — SPM doesn't build them), a **mesh arena** of 32 MB shared `MTLBuffer` pages with a first-fit free list and 3-frame deferred frees so all section draws bind one buffer at different offsets. Pass order: shadow (PCF/Poisson, snapped texel grid) → sky gradient → stars → celestials (selected-style sun/moon drawn additively) → clouds → opaque → cutout (back-culled) → translucent → entities (pose animator, selected-style skins) → particles (instanced, triple-buffered) → ultra (half-res SSAO + shadow-marched volumetrics) → bloom → composite (ACES) → first-person geometry (independent depth) → UI. The section mesher treats `Shape.cube` as the visible-geometry contract; `fullCube` remains an independent gameplay/occlusion property, so deliberately non-full cubes such as soul sand and translucent cubes such as honey cannot disappear from the mesh. The UI is a single draw call: `UICanvas` mimics Canvas2D (fillRect, gradients, transforms, text via a built-in 5×7 font or selected-style font sheets) into one vertex stream with a texture-segmented batch. Pack GUI sheets share one bounded integral raster scale chosen from their highest supported native source (up to 4x), while logical source coordinates keep layout and glyph advances independent of physical composite size; this preserves selected-style font and panel detail without a lossy 2x intermediate. Non-block item icons prefer active `textures/item` pack art; Elysium-only variants without pack art can derive from a matching packed sibling, such as copper tools from iron tools with only neutral metal pixels recolored, before falling back to deterministic procedural templates. Block item icons choose their flat-vs-3D path from registered shape boxes, so torch, lantern, chain, and other volumetric non-cube block items do not fall back to flat tile sprites. First-person hands and items use the dedicated 3D pass described above; `HudM.swift` draws no held-item sprites.
+App side (`WorldRenderer`): runtime-compiled MSL (no `.metal` files — SPM doesn't build them), a **mesh arena** of 32 MB shared `MTLBuffer` pages with a first-fit free list and 3-frame deferred frees so all section draws bind one buffer at different offsets. Pass order: shadow (PCF/Poisson, snapped texel grid) → sky gradient → stars → celestials (Faithful sun/moon drawn additively) → clouds → opaque → cutout (back-culled) → translucent → entities (pose animator, Faithful skins) → particles (instanced, triple-buffered) → ultra (half-res SSAO + shadow-marched volumetrics) → bloom → composite (ACES) → first-person geometry (independent depth) → UI. The section mesher treats `Shape.cube` as the visible-geometry contract; `fullCube` remains an independent gameplay/occlusion property, so deliberately non-full cubes such as soul sand and translucent cubes such as honey cannot disappear from the mesh. The UI is a single draw call: `UICanvas` mimics Canvas2D (fillRect, gradients, transforms, text via a built-in 5×7 font or the Faithful font sheets) into one vertex stream with a texture-segmented batch. Pack GUI sheets share one bounded integral raster scale chosen from their highest supported native source (up to 4x), while logical source coordinates keep layout and glyph advances independent of physical composite size; this preserves Faithful 64x font and panel detail without a lossy 2x intermediate. Non-block item icons prefer active `textures/item` pack art; Elysium-only variants without pack art can derive from a matching packed sibling, such as copper tools from iron tools with only neutral metal pixels recolored, before falling back to deterministic procedural templates. Block item icons choose their flat-vs-3D path from registered shape boxes, so torch, lantern, chain, and other volumetric non-cube block items do not fall back to flat tile sprites. First-person hands and items use the dedicated 3D pass described above; `HudM.swift` draws no held-item sprites.
 
 Chat and command-line rendering stays in the app shell (`ScreensM.swift` + `UICanvas`), but its wrapping and item-completion rules live in `ElysiumCore/Game/CommandLineSupport.swift` so XCTest can prove those behaviors against the real registered item list.
 

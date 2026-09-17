@@ -7,19 +7,11 @@ final class ResourcePackSelectionTests: XCTestCase {
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
 
     func testCatalogIsClosedAndDeterministic() {
-        XCTAssertEqual(BUNDLED_RESOURCE_PACK_BASE_STYLES.map(\.id),
-                       [.faithful64x, .kubikosCubicWorld])
-        XCTAssertEqual(BUNDLED_RESOURCE_PACK_BASE_STYLES.map(\.displayName),
-                       ["Faithful 64x", "KUBIKOS Cubic World"])
         XCTAssertEqual(BUNDLED_RESOURCE_PACK_ADD_ONS.map(\.id), [.oreBorders64x, .staticLanterns])
         XCTAssertEqual(Set(BUNDLED_RESOURCE_PACK_ADD_ONS.map(\.conflictGroup)).count, 2)
     }
 
-    func testFreshAndMalformedSelectionsDefaultToFaithfulWithNoOptionalAddOns() {
-        XCTAssertEqual(sanitizedBundledResourcePackBaseStyleID(nil), .faithful64x)
-        XCTAssertEqual(sanitizedBundledResourcePackBaseStyleID("unknown-style"), .faithful64x)
-        XCTAssertEqual(sanitizedBundledResourcePackBaseStyleID("kubikos-cubic-world"),
-                       .kubikosCubicWorld)
+    func testFreshAndMalformedSelectionsDefaultToNoOptionalAddOns() {
         XCTAssertEqual(sanitizedBundledResourcePackAddOnIDs(nil), [])
         XCTAssertEqual(sanitizedBundledResourcePackAddOnIDs([]), [])
         XCTAssertEqual(sanitizedBundledResourcePackAddOnIDs(["../x", "unknown"]), [])
@@ -65,39 +57,18 @@ final class ResourcePackSelectionTests: XCTestCase {
             .evaluateToggle(selected: [], requested: .oreBorders64x), .invalid)
     }
 
-    func testLayoutIncludesBaseStylesAndClampsNonFiniteAndOversizedScroll() {
+    func testLayoutClampsNonFiniteAndOversizedScroll() {
         let layout = ResourcePackScreenLayout(
             viewportHeight: 120, contentTop: 20, contentBottom: 70,
             requestedScrollOffset: .infinity)
         XCTAssertTrue(layout.clampedScrollOffset.isFinite)
         XCTAssertEqual(layout.clampedScrollOffset, 0)
         XCTAssertEqual(layout.visibleRows.map(\.id), [
-            .baseStyle(.faithful64x), .baseStyle(.kubikosCubicWorld),
-        ])
-        let scrolled = ResourcePackScreenLayout(
-            viewportHeight: 120, contentTop: 20, contentBottom: 70,
-            requestedScrollOffset: 999)
-        XCTAssertEqual(scrolled.clampedScrollOffset, 70)
-        XCTAssertEqual(scrolled.visibleRows.map(\.id), [
             .addOn(.oreBorders64x), .addOn(.staticLanterns),
         ])
-    }
-
-    func testKubikosStyleClearsFaithfulAddOns() {
-        let selected = ["static-lanterns", "ore-borders-64x"]
-        XCTAssertTrue(bundledResourcePackAddOnsAllowed(for: .faithful64x))
-        XCTAssertFalse(bundledResourcePackAddOnsAllowed(for: .kubikosCubicWorld))
-        XCTAssertEqual(sanitizedBundledResourcePackAddOnIDs(selected, for: .faithful64x),
-                       [.oreBorders64x, .staticLanterns])
-        XCTAssertEqual(sanitizedBundledResourcePackAddOnIDs(selected, for: .kubikosCubicWorld), [])
-
-        var settings = Settings()
-        settings.bundledResourcePackBaseStyle = BundledResourcePackBaseStyleID.kubikosCubicWorld.rawValue
-        settings.bundledResourcePackAddOns = selected
-        let sanitized = sanitizedSettings(settings)
-        XCTAssertEqual(sanitized.bundledResourcePackBaseStyle,
-                       BundledResourcePackBaseStyleID.kubikosCubicWorld.rawValue)
-        XCTAssertEqual(sanitized.bundledResourcePackAddOns, [])
+        XCTAssertEqual(ResourcePackScreenLayout(
+            viewportHeight: 120, contentTop: 20, contentBottom: 70,
+            requestedScrollOffset: 999).clampedScrollOffset, 10)
     }
 
     func testSettingsSanitizesOptionalConsentIndependentlyFromUserPacks() {
@@ -106,8 +77,6 @@ final class ResourcePackSelectionTests: XCTestCase {
         settings.bundledResourcePackAddOns = ["static-lanterns", "bad", "static-lanterns"]
         let output = sanitizedSettings(settings)
         XCTAssertEqual(output.resourcePacks, ["custom.zip"])
-        XCTAssertEqual(output.bundledResourcePackBaseStyle,
-                       BundledResourcePackBaseStyleID.faithful64x.rawValue)
         XCTAssertEqual(output.bundledResourcePackAddOns, ["static-lanterns"])
     }
 
@@ -198,18 +167,7 @@ final class ResourcePackSelectionTests: XCTestCase {
             "resource-pack.acknowledge", "resource-pack.done", "saved choice unknown",
             "Settings recovery required — Restart Elysium",
             "Restart Elysium before changing settings", "consumeTextAccessibilityStatusAnnouncement",
-            "id: \"resource-pack.style.\\(descriptor.id.rawValue)\", role: .checkbox",
-            "BUNDLED_RESOURCE_PACK_BASE_STYLES", "Requires Faithful 64x",
-            "This Faithful 64x add-on cannot be used with KUBIKOS Cubic World.",
-            "button.enabled = idle && !game.settingsRecoveryRequired && baseStyle == .faithful64x",
-            "enabled: button.enabled,",
         ] { XCTAssertTrue(screen.contains(marker), marker) }
-        XCTAssertEqual(BUNDLED_RESOURCE_PACK_BASE_STYLES.map {
-            "resource-pack.style.\($0.id.rawValue)"
-        }, [
-            "resource-pack.style.faithful-64x",
-            "resource-pack.style.kubikos-cubic-world",
-        ])
         for marker in [
             "recoveryNavigationButtons", "for slider in sliders { slider.enabled = false",
             "for field in fields { field.enabled = false", "Settings recovery required — Restart Elysium",

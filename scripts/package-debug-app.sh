@@ -33,8 +33,8 @@ binary_contains_debug_marker() {
     || die "missing packaging/DebugInfo.plist"
 /usr/bin/plutil -lint "$ROOT/packaging/DebugInfo.plist" >/dev/null \
     || die "DebugInfo.plist is invalid"
-bash "$ROOT/scripts/prepare-kubikos-theme.sh" >/dev/null \
-    || die "managed KUBIKOS theme preparation or verification failed"
+bash "$ROOT/scripts/verify-pack-assets.sh" >/dev/null \
+    || die "managed pack asset verification failed"
 
 # This dedicated scratch directory prevents the compile-time debug capability from contaminating
 # the ordinary .build/release product consumed by scripts/package-app.sh and scripts/pipeline.sh.
@@ -92,12 +92,10 @@ cp "$ROOT/packaging/logo.png" "$OUTPUT/Contents/Resources/"
 cp "$ROOT/packaging/title-bg.png" "$OUTPUT/Contents/Resources/"
 PACK_ASSETS=(
     "Faithful 64x - December 2025 Release.zip"
-    "KUBIKOS Cubic World - Elysium Theme.zip"
     "Faithful 64x - Ore Borders 64x.zip"
     "Faithful 64x - Static Lanterns.zip"
     "FAITHFUL-LICENSE.txt"
     "FAITHFUL-ADDONS-CREDITS.txt"
-    "KUBIKOS-ATTRIBUTION.txt"
 )
 for name in "${PACK_ASSETS[@]}"; do
     asset="$ROOT/packaging/$name"
