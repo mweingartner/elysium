@@ -48,4 +48,14 @@ final class EntityFacingSourceTests: XCTestCase {
         XCTAssertLessThan(head.pivot.2, 0, "pig head must pivot at negative z (front = -Z)")
         XCTAssertGreaterThan(backLeg.pivot.2, 0, "pig hind legs must pivot at positive z")
     }
+
+    func testModelTextureAuditIsDeterministicAndValueOwned() {
+        let first = modelTextureAuditEntries()
+        let second = modelTextureAuditEntries()
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(first.map(\.modelName), first.map(\.modelName).sorted())
+        XCTAssertEqual(first.map(\.modelName).count, Set(first.map(\.modelName)).count)
+        XCTAssertEqual(first.first(where: { $0.modelName == "pig" })?.packTextures,
+                       ["entity/pig/pig.png"])
+    }
 }

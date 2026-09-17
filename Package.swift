@@ -103,6 +103,15 @@ let package = Package(
             path: "Sources/elysmoke",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        // Deterministic, headless registry export used by the checked-in visual-theme builder.
+        // Keeping the manifest tied to ElysiumCore prevents a newly registered tile from silently
+        // missing its alternate-style coverage.
+        .executableTarget(
+            name: "elythemegen",
+            dependencies: ["ElysiumCore"],
+            path: "Sources/elythemegen",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .testTarget(
             name: "ElysiumScriptTests",
             dependencies: ["ElysiumScript", "ElysiumCore", "ElysiumTextInput"],

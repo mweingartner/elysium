@@ -302,7 +302,12 @@ EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75
 # storage API, Storage/TextInput source, and their object pins remain unchanged.
 # The compiler-AST inventory renews because Saves.swift owns exact LAN-version
 # compatibility. docs/release-1.2.2-build.md records the renewed hashes.
-EXPECTED_GAME_CORE_SOURCE_SHA256='9aae5e19b00304145157b2a84ccd81dbf7dcb6effc0092d1c1e6952116a28f45'
+# kubikos-visual-style: settings recovery now preserves an explicitly requested
+# base visual-style identifier as well as a Faithful add-on identifier. This is
+# a UI-preference recovery change only: the checked-player getter/CAS declarations,
+# their two caller spans/counts, and their approved owner set below were reviewed
+# and remain unchanged.
+EXPECTED_GAME_CORE_SOURCE_SHA256='e6b1244ea32a8329a6e246257e8e47f3a0ffce086e4a8e500f6ecff083469c3f'
 # worldgen-form-integrity: the final structure pass adds terrain-backed surface
 # plans, deterministic realized-piece collision resolution, and supported routes
 # through villages, dungeons, mineshafts, strongholds, Ancient Cities, and the
@@ -313,7 +318,12 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='9aae5e19b00304145157b2a84ccd81dbf7dcb6effc0092
 # 5ea20c16d0c9eb828514102c8d6411a24c01be26d466782186363aec330a2721,
 # Elysium 88b4cfa3009b6fa8f474b404af98f8b8b50f8daae92a782ca249c9cd6d9a854d,
 # and elysmoke 710e4462b3f1ecf21ee6c1d5c65722e1fc5f75faf7c498a4b1294509600914c9.
-EXPECTED_CORE_OBJECT_SHA256='fe800a9ece392f1917ce9b3fcf749f8ccaa4f179a2ad954af4611ce9447c29e9'
+# kubikos-visual-style: the reviewed preference-recovery addition above re-emits
+# ElysiumCore.o and both linked products. Normalized disposable-copy hashes renew
+# from Core fe800a9ece392f1917ce9b3fcf749f8ccaa4f179a2ad954af4611ce9447c29e9,
+# Elysium 553559e3ab03ca61d4b2c16e05d909e5796cff2352c1679f8bb9a3a96dcd8758,
+# and elysmoke 0a13660761c0e273359a089375ccff8bcba6589722a4af7cf79f3b937022e0cd.
+EXPECTED_CORE_OBJECT_SHA256='3fbeed2c763438dcfe16632904cd2684edf3a85a373bad9a59332d0d91e7276c'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -323,8 +333,8 @@ EXPECTED_CORE_OBJECT_SHA256='fe800a9ece392f1917ce9b3fcf749f8ccaa4f179a2ad954af46
 # input or capability source changed. See docs/first-person-minecraft-comparison.md.
 # Tool-family action audio additionally changes the procedural app recipes, so
 # the linked Elysium and elysmoke stripped-product pins renew transitively.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='553559e3ab03ca61d4b2c16e05d909e5796cff2352c1679f8bb9a3a96dcd8758'
-EXPECTED_SMOKE_PRODUCT_SHA256='0a13660761c0e273359a089375ccff8bcba6589722a4af7cf79f3b937022e0cd'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='51a8efa8a24e166044f11b4a67cfc5e933ff8e7427f56e1d3a3f6755063de426'
+EXPECTED_SMOKE_PRODUCT_SHA256='5badf1066358004a13264b9ebe628894fd2f04cb80f20e6d15046f863eb8887e'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

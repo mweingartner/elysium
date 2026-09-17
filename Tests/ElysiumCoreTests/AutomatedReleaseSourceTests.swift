@@ -79,13 +79,15 @@ final class AutomatedReleaseSourceTests: XCTestCase {
             root.appendingPathComponent(".githooks/post-commit").path))
     }
 
-    func testFaithful64xPackagingIsExplicitAndInstalledHashesAreChecked() throws {
+    func testManagedVisualStylesAreExplicitlyPackagedAndInstalledHashesAreChecked() throws {
         let package = try source("scripts/package-app.sh")
         let pipeline = try source("scripts/pipeline.sh")
         let verifier = try source("scripts/verify-pack-assets.sh")
         let expected: [(String, String)] = [
             ("Faithful 64x - December 2025 Release.zip",
              "a136d9101a4748558587980dace3cd7447b758fb72c4684d15fb805d0a812dac"),
+            ("KUBIKOS Cubic World - Elysium Theme.zip",
+             "3ffdebe0e5a4025e1194ee6c3c30ce43b5a3cb43049d5e31179f7624b33bedb3"),
             ("Faithful 64x - Ore Borders 64x.zip",
              "232b8a64d745dc08b958c3c4c07167bd3f38eebdc4cd682da9d1016b2ed190f8"),
             ("Faithful 64x - Static Lanterns.zip",
@@ -94,7 +96,8 @@ final class AutomatedReleaseSourceTests: XCTestCase {
         XCTAssertFalse(package.contains("packaging/*.zip"))
         XCTAssertTrue(package.contains("FAITHFUL-LICENSE.txt"))
         XCTAssertTrue(package.contains("FAITHFUL-ADDONS-CREDITS.txt"))
-        XCTAssertTrue(package.contains("verify-pack-assets.sh"))
+        XCTAssertTrue(package.contains("KUBIKOS-ATTRIBUTION.txt"))
+        XCTAssertTrue(package.contains("prepare-kubikos-theme.sh"))
         XCTAssertTrue(pipeline.contains("verify_pack_set \"$INSTALLED_APP/Contents/Resources\""))
         for (name, hash) in expected {
             XCTAssertTrue(package.contains(name), name)

@@ -35,9 +35,29 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(out.volumes["music"], 1)
         XCTAssertEqual(out.volumes["blocks"], Settings().volumes["blocks"])
         XCTAssertEqual(out.resourcePacks, ["ok.zip"])
+        XCTAssertEqual(out.bundledResourcePackBaseStyle,
+                       BundledResourcePackBaseStyleID.faithful64x.rawValue)
         XCTAssertEqual(out.bundledResourcePackAddOns, ["ore-borders-64x", "static-lanterns"])
         XCTAssertEqual(out.aiOllamaModel, "llama3.1:8bbadchars")
         XCTAssertFalse(out.showMinimap)
+    }
+
+    func testBundledBaseStyleMigrationDefaultsFaithfulAndKubikosRejectsFaithfulAddOns() {
+        var malformed = Settings()
+        malformed.bundledResourcePackBaseStyle = "unsupported-style"
+        malformed.bundledResourcePackAddOns = ["static-lanterns"]
+        let repaired = sanitizedSettings(malformed)
+        XCTAssertEqual(repaired.bundledResourcePackBaseStyle,
+                       BundledResourcePackBaseStyleID.faithful64x.rawValue)
+        XCTAssertEqual(repaired.bundledResourcePackAddOns, ["static-lanterns"])
+
+        var kubikos = Settings()
+        kubikos.bundledResourcePackBaseStyle = BundledResourcePackBaseStyleID.kubikosCubicWorld.rawValue
+        kubikos.bundledResourcePackAddOns = ["ore-borders-64x", "static-lanterns"]
+        let alternate = sanitizedSettings(kubikos)
+        XCTAssertEqual(alternate.bundledResourcePackBaseStyle,
+                       BundledResourcePackBaseStyleID.kubikosCubicWorld.rawValue)
+        XCTAssertEqual(alternate.bundledResourcePackAddOns, [])
     }
 
     func testKeybindSanitizationDropsUnknownAndInvalidValues() {

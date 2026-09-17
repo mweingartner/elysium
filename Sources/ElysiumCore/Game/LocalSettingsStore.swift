@@ -584,6 +584,8 @@ public final class LocalSettingsStore {
                 decodeOptionalField("resourcePacks", from: object, into: &value.resourcePacks, diagnostics: &diagnostics)
                 decodeOptionalField("bundledResourcePackAddOns", from: object,
                                     into: &value.bundledResourcePackAddOns, diagnostics: &diagnostics)
+                decodeOptionalField("bundledResourcePackBaseStyle", from: object,
+                                    into: &value.bundledResourcePackBaseStyle, diagnostics: &diagnostics)
                 decodeOptionalField("shader", from: object, into: &value.shader, diagnostics: &diagnostics)
                 decodeField("aiOllamaModel", from: object, into: &value.aiOllamaModel, diagnostics: &diagnostics)
                 decodeOptionalField("rpgTutorialVersion", from: object, into: &value.rpgTutorialVersion, diagnostics: &diagnostics)

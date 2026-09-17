@@ -1,0 +1,26 @@
+Elysium KUBIKOS Cubic World visual style
+=========================================
+
+Archive: local Git-ignored build output, KUBIKOS Cubic World - Elysium Theme.zip
+Source product: KUBIKOS - Cube World
+Publisher: ANIMMAL Game Assets
+Source listing: https://www.fab.com/listings/7bbf72cf-03bd-458f-9a74-1ab85bd1f2e5
+Source format: Unity package acquired through the user's Fab library
+Source archive SHA-256: 4eb52b835610aca19a79681a81a744fc9a69b8414426e2f18a270e20f229e24e
+Default private vault: /Users/Shared/UnrealEngine/Launcher/VaultCache/FabLibrary/KUBIKOS_-_Cube_World-7bbf72cf/unity/kubikos_3d_cube_world.unitypackage
+Override: ELYSIUM_KUBIKOS_UNITYPACKAGE=/absolute/path/to/kubikos_3d_cube_world.unitypackage
+
+This optional Elysium visual style is a deterministic, Elysium-specific raster
+conversion. It preserves Elysium's semantic masks, alpha, silhouettes, and UI
+layouts while applying material detail and color from the licensed KUBIKOS source.
+Neither the original Unity package nor this generated archive is included in the
+public source repository. `scripts/prepare-kubikos-theme.sh` creates the archive
+only from a locally licensed package and only as a local Elysium.app packaging input.
+
+The KUBIKOS Fab listing identifies AI use as disallowed. No AI generation or
+training was used to create this conversion.
+
+A locally built Elysium.app may incorporate the resulting derivative only under the
+applicable Fab Standard License. This file does not grant redistribution rights.
+Do not commit, publish, extract, resell, or reuse the generated archive independently
+of Elysium. See https://www.fab.com/eula for the binding license text.

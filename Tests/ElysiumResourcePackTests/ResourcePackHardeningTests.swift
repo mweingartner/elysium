@@ -867,6 +867,72 @@ final class ResourcePackHardeningTests: XCTestCase {
         return value
     }
 
+    private func repositoryRoot() -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    }
+
+    private func kubikosBundledAsset() throws -> BundledResourcePackAsset {
+        try XCTUnwrap(BUNDLED_RESOURCE_PACK_ASSETS.first(where: {
+            if case .base(.kubikosCubicWorld) = $0.role { return true }
+            return false
+        }), "the KUBIKOS visual baseline must remain a reviewed bundled asset")
+    }
+
+    private func kubikosArchiveBytes() throws -> Data {
+        let asset = try kubikosBundledAsset()
+        let archive = repositoryRoot().appendingPathComponent("packaging")
+            .appendingPathComponent(asset.fileName)
+        guard FileManager.default.fileExists(atPath: archive.path) else {
+            throw XCTSkip("KUBIKOS archive is generated only for a locally licensed app package")
+        }
+        return try Data(contentsOf: archive)
+    }
+
+    /// A folder snapshot lets the strict source audit be exercised with one exact source record
+    /// removed, without relying on an ambient resource-pack directory or shell extraction.
+    private func kubikosFixturePack(removing paths: Set<String> = []) throws -> ResourcePack {
+        let archive = try XCTUnwrap(MiniZip(data: try kubikosArchiveBytes()))
+        var files: [String: Data] = [:]
+        for path in archive.entries.keys {
+            files[path] = try XCTUnwrap(archive.file(path), path)
+        }
+        for path in paths {
+            XCTAssertNotNil(files.removeValue(forKey: path), "fixture source must contain \(path)")
+        }
+        let snapshot = ResourcePackSourceSnapshot(
+            fileName: "KUBIKOS coverage fixture.zip",
+            displayName: "KUBIKOS coverage fixture",
+            payload: .folder(files))
+        return try XCTUnwrap(ResourcePack(snapshot: snapshot))
+    }
+
+    /// Mirrors the production exclusive-baseline audit, but exposes its data-only report to the
+    /// regression tests. The subject pack is the sole source for atlas, UI, environment, and title
+    /// images, so a fallback layer cannot conceal a missing KUBIKOS asset.
+    @MainActor
+    private func kubikosCoverage(for pack: ResourcePack) throws -> KubikosCoverageReport {
+        if blockDefs.isEmpty { registerAllBlocks() }
+        if itemDefs.isEmpty { registerAllItems() }
+        let budget = ResourcePackPreparationBudget()
+        let atlas = try XCTUnwrap(buildPackAtlas(packs: [pack], budget: budget))
+        let packUI = try XCTUnwrap(PackUI.prepare(packs: [pack], budget: budget))
+        let sun = pack.file(pack.texRoot + "environment/sun.png")
+            .flatMap { decodePNG($0, budget: budget) }
+        let moon = pack.file(pack.texRoot + "environment/moon_phases.png")
+            .flatMap { decodePNG($0, budget: budget) }
+        let titleBackground = pack.file("assets/elysium/textures/title/background.png")
+            .flatMap { decodePNG($0, budget: budget) }
+        let titleLogo = pack.file("assets/elysium/textures/title/logo.png")
+            .flatMap { decodePNG($0, budget: budget) }
+        let modelTextureAudit = modelTextureAuditEntries()
+        XCTAssertTrue(budget.isValid, "coverage inputs must stay within the production preparation budget")
+        return kubikosCoverageReport(
+            pack: pack, atlas: atlas, packUI: packUI, sun: sun, moon: moon,
+            titleBackground: titleBackground, titleLogo: titleLogo,
+            modelTextureAudit: modelTextureAudit, budget: budget)
+    }
+
     func testExactAndPlusOnePathAndByteBudgets() {
         let exactPath = zip([FixtureEntry(name: "12345678", bytes: Data([1, 2, 3, 4]))])
         XCTAssertNotNil(MiniZip(data: exactPath,
@@ -984,22 +1050,36 @@ final class ResourcePackHardeningTests: XCTestCase {
     }
 
     func testReviewedArchivesMatchHashesAndParseAsOneBoundedStack() throws {
-        let repository = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let repository = repositoryRoot()
         let budget = ResourcePackPreparationBudget()
         var parsed: [ResourcePack] = []
+        var faithfulCompatibleStack: [ResourcePack] = []
         for asset in BUNDLED_RESOURCE_PACK_ASSETS {
-            let bytes = try Data(contentsOf: repository.appendingPathComponent("packaging")
-                .appendingPathComponent(asset.fileName))
+            let archive = repository.appendingPathComponent("packaging")
+                .appendingPathComponent(asset.fileName)
+            if case .base(.kubikosCubicWorld) = asset.role,
+               !FileManager.default.fileExists(atPath: archive.path) {
+                continue // locally generated only; ordinary source checkouts do not redistribute it
+            }
+            let bytes = try Data(contentsOf: archive)
             let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
             XCTAssertEqual(digest, asset.sha256, asset.fileName)
             let pack = try XCTUnwrap(ResourcePack(data: bytes, fileName: asset.fileName,
                                                   budget: budget), asset.fileName)
             for path in asset.requiredPaths { XCTAssertNotNil(pack.file(path), "\(asset.fileName): \(path)") }
             parsed.append(pack)
+            if case .base(.kubikosCubicWorld) = asset.role {
+                continue // KUBIKOS is an exclusive base style, not a Faithful overlay.
+            }
+            faithfulCompatibleStack.append(pack)
         }
-        XCTAssertEqual(parsed.count, 3)
-        let atlas = try XCTUnwrap(buildPackAtlas(packs: parsed, budget: budget))
+        let localKubikosPresent = FileManager.default.fileExists(atPath: repository
+            .appendingPathComponent("packaging/KUBIKOS Cubic World - Elysium Theme.zip").path)
+        XCTAssertEqual(parsed.count, localKubikosPresent ? 4 : 3)
+        XCTAssertEqual(parsed.count, localKubikosPresent ? BUNDLED_RESOURCE_PACK_ASSETS.count : 3,
+                       "the local app package may include KUBIKOS; public source contains the three Faithful archives")
+        XCTAssertEqual(faithfulCompatibleStack.count, 3)
+        let atlas = try XCTUnwrap(buildPackAtlas(packs: faithfulCompatibleStack, budget: budget))
         for itemName in ["iron_sword", "bread", "brick", "bucket"] {
             let held = try XCTUnwrap(atlas.heldItemIcons[itemName], itemName)
             XCTAssertGreaterThanOrEqual(held.width, 16)
@@ -1010,6 +1090,48 @@ final class ResourcePackHardeningTests: XCTestCase {
         XCTAssertTrue(budget.isValid)
         XCTAssertLessThanOrEqual(budget.pathBytes, budget.limits.aggregatePathBytes)
         XCTAssertLessThanOrEqual(budget.inflatedBytes, budget.limits.inflatedBytes)
+    }
+
+    @MainActor
+    func testKubikosArchiveProvidesCompleteExclusiveSourceCoverage() throws {
+        let asset = try kubikosBundledAsset()
+        let bytes = try kubikosArchiveBytes()
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(digest, asset.sha256, "the shipped KUBIKOS archive must match its reviewed digest")
+
+        let pack = try XCTUnwrap(ResourcePack(data: bytes, fileName: asset.fileName))
+        let directTiles = Set(pack.list(prefix: "assets/elysium/textures/tiles/")
+            .filter { $0.hasSuffix(".png") }
+            .map { String($0.split(separator: "/").last!.dropLast(4)) })
+        if blockDefs.isEmpty { registerAllBlocks() }
+        XCTAssertEqual(directTiles, Set(allTileNames()),
+                       "every live atlas layer must have a direct KUBIKOS-native tile source")
+
+        let report = try kubikosCoverage(for: pack)
+        XCTAssertTrue(report.isComplete, report.summary)
+        XCTAssertEqual(report.missingTiles, [])
+        XCTAssertEqual(report.missingItemProviders, [])
+        XCTAssertEqual(report.missingModelTextures, [])
+        XCTAssertEqual(report.missingGUI, [])
+        XCTAssertEqual(report.missingEnvironment, [])
+        XCTAssertEqual(report.missingNativeFallback, [])
+        XCTAssertEqual(report.missingTitle, [])
+        XCTAssertEqual(report.textureGateFailures, [])
+    }
+
+    @MainActor
+    func testKubikosCoverageRejectsMissingDirectTileItemAndTitleSources() throws {
+        let pack = try kubikosFixturePack(removing: [
+            "assets/elysium/textures/tiles/stone.png",
+            "assets/minecraft/textures/item/diamond.png",
+            "assets/elysium/textures/title/logo.png",
+        ])
+        let report = try kubikosCoverage(for: pack)
+
+        XCTAssertFalse(report.isComplete)
+        XCTAssertTrue(report.missingTiles.contains("stone"), report.summary)
+        XCTAssertTrue(report.missingItemProviders.contains("diamond"), report.summary)
+        XCTAssertTrue(report.missingTitle.contains("logo"), report.summary)
     }
 
     func testShippedCatalogDefaultsOffAndSupportsIndependentAndCombinedSelection() {

@@ -59,7 +59,7 @@ final class ResourcePackCPUWorker {
     }
 }
 
-/// Video-options child screen for the closed, locally bundled Faithful 64x catalog.
+/// Video-options child screen for the closed, locally bundled visual-style catalog.
 final class ResourcePackScreen: Screen {
     private struct BaselinePresentation {
         let canvas: String
@@ -76,19 +76,39 @@ final class ResourcePackScreen: Screen {
 
     private struct Transaction {
         let id: UInt64
-        let requested: BundledResourcePackAddOnID
-        let descriptor: BundledResourcePackAddOnDescriptor
+        let requested: RequestedChange
+        let displayName: String
+        let candidateBaseStyle: BundledResourcePackBaseStyleID
         let candidateIDs: [BundledResourcePackAddOnID]
         let priorSettings: Settings
         let expectedRevision: UInt64
         let deadlineUptimeNanoseconds: UInt64
     }
 
-    private var status = "Optional add-ons are OFF until you select them."
+    private enum RequestedChange: Equatable {
+        case baseStyle(BundledResourcePackBaseStyleID)
+        case addOn(BundledResourcePackAddOnID)
+
+        var rawValue: String {
+            switch self {
+            case .baseStyle(let style): return style.rawValue
+            case .addOn(let addOn): return addOn.rawValue
+            }
+        }
+
+        var focusID: ResourcePackScreenFocusID {
+            switch self {
+            case .baseStyle(let style): return .baseStyle(style)
+            case .addOn(let addOn): return .addOn(addOn)
+            }
+        }
+    }
+
+    private var status = "Select a visual style; Faithful add-ons remain opt-in."
     private var applyState: ResourcePackApplyState = .idle
     private var transaction: Transaction?
     private var nextTransactionID: UInt64 = 0
-    private var focusedID: ResourcePackScreenFocusID = .addOn(.oreBorders64x)
+    private var focusedID: ResourcePackScreenFocusID = .baseStyle(.faithful64x)
     private var controlsByFocusID: [ResourcePackScreenFocusID: Button] = [:]
     private var pendingAnnouncement: String?
 
@@ -96,14 +116,19 @@ final class ResourcePackScreen: Screen {
         switch RESOURCE_PACK_PRESENTATION.generation {
         case .faithful64x:
             return BaselinePresentation(
-                canvas: "Faithful 64x — Active (always selected)",
-                value: "Active (always selected)",
-                help: "Faithful 64x is the active texture baseline and is always selected.")
+                canvas: "Visual style: Faithful 64x",
+                value: "Faithful 64x active",
+                help: "Faithful 64x is the active visual baseline.")
+        case .kubikosCubicWorld:
+            return BaselinePresentation(
+                canvas: "Visual style: KUBIKOS Cubic World",
+                value: "KUBIKOS Cubic World active",
+                help: "KUBIKOS Cubic World replaces the complete bundled visual baseline.")
         case .proceduralFallback:
             return BaselinePresentation(
-                canvas: "Faithful 64x — Unavailable; built-in fallback active",
+                canvas: "Visual style unavailable; built-in fallback active",
                 value: "Unavailable; built-in fallback active",
-                help: "Faithful 64x could not be loaded; built-in textures are active.")
+                help: "The selected visual baseline could not be loaded; built-in textures are active.")
         }
     }
 
@@ -120,9 +145,12 @@ final class ResourcePackScreen: Screen {
 
     override func initScreen(_ ui: UIManager, _ game: GameCore) {
         if game.settingsRecoveryRequired,
-           let raw = game.settingsRecoveryRequestedResourcePackID,
-           let requested = BundledResourcePackAddOnID(rawValue: raw) {
-            focusedID = .addOn(requested)
+           let raw = game.settingsRecoveryRequestedResourcePackID {
+            if let style = BundledResourcePackBaseStyleID(rawValue: raw) {
+                focusedID = .baseStyle(style)
+            } else if let requested = BundledResourcePackAddOnID(rawValue: raw) {
+                focusedID = .addOn(requested)
+            }
             status = "Could not confirm the saved resource pack choice; restart Elysium before changing it again."
         }
         rebuild(ui, game)
@@ -130,12 +158,12 @@ final class ResourcePackScreen: Screen {
     }
 
     override func onClose(_ ui: UIManager, _ game: GameCore) {
-        if case .awaitingPresentedFrame(let id, _) = applyState {
+        if case .awaitingPresentedFrame(let id) = applyState {
             ui.cancelAfterNextPresentedFrame()
             transaction = nil
             applyState = .idle
             ResourcePackCPUWorker.shared.cancel(transactionID: id)
-        } else if case .preparing(let id, _) = applyState {
+        } else if case .preparing(let id) = applyState {
             transaction = nil
             applyState = .idle
             ResourcePackCPUWorker.shared.cancel(transactionID: id)
@@ -145,20 +173,39 @@ final class ResourcePackScreen: Screen {
     private func rebuild(_ ui: UIManager, _ game: GameCore) {
         buttons = []
         controlsByFocusID = [:]
+        let baseStyle = sanitizedBundledResourcePackBaseStyleID(game.settings.bundledResourcePackBaseStyle)
         let selected = Set(sanitizedBundledResourcePackAddOnIDs(
-            game.settings.bundledResourcePackAddOns))
+            game.settings.bundledResourcePackAddOns, for: baseStyle))
         let cx = (ui.width / 2).rounded(.down)
         var y = 78.0
         let idle: Bool
         if case .idle = applyState { idle = true } else { idle = false }
+        for descriptor in BUNDLED_RESOURCE_PACK_BASE_STYLES {
+            let isSelected = descriptor.id == baseStyle
+            let focusID = ResourcePackScreenFocusID.baseStyle(descriptor.id)
+            let button = Button(cx - 150, y, 300, 22,
+                                "\(descriptor.displayName): \(isSelected ? "Selected" : "Select")", {})
+            button.enabled = idle && !game.settingsRecoveryRequired && !isSelected
+            button.onClick = { [weak self, weak ui, weak game] in
+                guard let self, let ui, let game else { return }
+                self.focusedID = focusID
+                self.beginSelectBaseStyle(descriptor.id, ui: ui, game: game)
+            }
+            buttons.append(button)
+            controlsByFocusID[focusID] = button
+            y += 32
+        }
+        y += 4
         for descriptor in BUNDLED_RESOURCE_PACK_ADD_ONS {
             let isOn = selected.contains(descriptor.id)
-            let value = game.settingsRecoveryRequired
+            let value = baseStyle != .faithful64x
+                ? "Requires Faithful 64x"
+                : game.settingsRecoveryRequired
                 ? "Current session: \(isOn ? "ON" : "OFF"); saved choice unknown"
                 : (isOn ? "ON" : "OFF")
             let focusID = ResourcePackScreenFocusID.addOn(descriptor.id)
             let button = Button(cx - 150, y, 300, 22, "\(descriptor.displayName): \(value)", {})
-            button.enabled = idle && !game.settingsRecoveryRequired
+            button.enabled = idle && !game.settingsRecoveryRequired && baseStyle == .faithful64x
             button.onClick = { [weak self, weak ui, weak game] in
                 guard let self, let ui, let game else { return }
                 self.focusedID = focusID
@@ -207,20 +254,28 @@ final class ResourcePackScreen: Screen {
         DispatchTime.now().uptimeNanoseconds >= transaction.deadlineUptimeNanoseconds
     }
 
-    private func beginToggle(_ id: BundledResourcePackAddOnID,
-                             ui: UIManager, game: GameCore) {
-        guard !game.settingsRecoveryRequired else { return }
-        guard case .idle = applyState,
-              let descriptor = BUNDLED_RESOURCE_PACK_ADD_ONS.first(where: { $0.id == id })
-        else { return }
-        guard !ResourcePackCPUWorker.shared.isLeased else {
-            status = "Previous resource pack work is still finishing; try again shortly."
+    private func beginSelectBaseStyle(_ style: BundledResourcePackBaseStyleID,
+                                      ui: UIManager, game: GameCore) {
+        let current = sanitizedBundledResourcePackBaseStyleID(game.settings.bundledResourcePackBaseStyle)
+        guard current != style,
+              let descriptor = BUNDLED_RESOURCE_PACK_BASE_STYLES.first(where: { $0.id == style }) else { return }
+        let retained = sanitizedBundledResourcePackAddOnIDs(
+            game.settings.bundledResourcePackAddOns, for: style)
+        beginTransaction(requested: .baseStyle(style), displayName: descriptor.displayName,
+                         candidateBaseStyle: style, candidateIDs: retained, ui: ui, game: game)
+    }
+
+    private func beginToggle(_ id: BundledResourcePackAddOnID, ui: UIManager, game: GameCore) {
+        let baseStyle = sanitizedBundledResourcePackBaseStyleID(game.settings.bundledResourcePackBaseStyle)
+        guard baseStyle == .faithful64x else {
+            status = "Faithful add-ons require the Faithful 64x visual style."
             publishState(ui, game, announcement: status)
             return
         }
-        let priorIDs = sanitizedBundledResourcePackAddOnIDs(game.settings.bundledResourcePackAddOns)
-        switch evaluateBundledResourcePackToggle(
-            selected: priorIDs.map(\.rawValue), requested: id.rawValue) {
+        guard let descriptor = BUNDLED_RESOURCE_PACK_ADD_ONS.first(where: { $0.id == id }) else { return }
+        let priorIDs = sanitizedBundledResourcePackAddOnIDs(game.settings.bundledResourcePackAddOns,
+                                                             for: baseStyle)
+        switch evaluateBundledResourcePackToggle(selected: priorIDs.map(\.rawValue), requested: id.rawValue) {
         case .invalid:
             status = "Resource pack choice was not changed."
             publishState(ui, game, announcement: status)
@@ -228,48 +283,61 @@ final class ResourcePackScreen: Screen {
             status = "Cannot enable \(requested) while \(active) is active."
             publishState(ui, game, announcement: status)
         case .ready(let candidateIDs):
-            let deadline = DispatchTime.now().uptimeNanoseconds
-                .addingReportingOverflow(15_000_000_000)
-            guard let transactionID = allocateTransactionID(), !deadline.overflow else {
-                status = "Could not apply \(descriptor.displayName): transaction limit reached."
-                publishState(ui, game, announcement: status)
-                return
-            }
-            let value = Transaction(
-                id: transactionID, requested: id, descriptor: descriptor,
-                candidateIDs: candidateIDs,
-                priorSettings: game.settings, expectedRevision: game.settingsRevision,
-                deadlineUptimeNanoseconds: deadline.partialValue)
-            transaction = value
-            focusedID = .addOn(id)
-            applyState = .awaitingPresentedFrame(transactionID: transactionID, pack: id)
-            status = "Applying \(descriptor.displayName)…"
+            beginTransaction(requested: .addOn(id), displayName: descriptor.displayName,
+                             candidateBaseStyle: baseStyle, candidateIDs: candidateIDs, ui: ui, game: game)
+        }
+    }
+
+    private func beginTransaction(requested: RequestedChange, displayName: String,
+                                  candidateBaseStyle: BundledResourcePackBaseStyleID,
+                                  candidateIDs: [BundledResourcePackAddOnID],
+                                  ui: UIManager, game: GameCore) {
+        guard !game.settingsRecoveryRequired else { return }
+        guard case .idle = applyState else { return }
+        guard !ResourcePackCPUWorker.shared.isLeased else {
+            status = "Previous resource pack work is still finishing; try again shortly."
             publishState(ui, game, announcement: status)
-            guard ui.afterNextPresentedFrame({ [weak self, weak ui, weak game] in
-                guard let self, let ui, let game else { return }
-                self.startPreparation(transactionID: transactionID, ui: ui, game: game)
-            }) else {
-                transaction = nil
-                applyState = .idle
-                status = "Could not apply \(descriptor.displayName): presentation unavailable."
-                publishState(ui, game, announcement: status)
-                return
-            }
-            DispatchQueue.main.asyncAfter(
-                deadline: DispatchTime(uptimeNanoseconds: deadline.partialValue)
-            ) { [weak self, weak ui, weak game] in
-                guard let self, let ui, let game else { return }
-                self.timeout(transactionID: transactionID, ui: ui, game: game)
-            }
+            return
+        }
+        let deadline = DispatchTime.now().uptimeNanoseconds.addingReportingOverflow(15_000_000_000)
+        guard let transactionID = allocateTransactionID(), !deadline.overflow else {
+            status = "Could not apply \(displayName): transaction limit reached."
+            publishState(ui, game, announcement: status)
+            return
+        }
+        let value = Transaction(
+            id: transactionID, requested: requested, displayName: displayName,
+            candidateBaseStyle: candidateBaseStyle, candidateIDs: candidateIDs,
+            priorSettings: game.settings, expectedRevision: game.settingsRevision,
+            deadlineUptimeNanoseconds: deadline.partialValue)
+        transaction = value
+        focusedID = requested.focusID
+        applyState = .awaitingPresentedFrame(transactionID: transactionID)
+        status = "Applying \(displayName)…"
+        publishState(ui, game, announcement: status)
+        guard ui.afterNextPresentedFrame({ [weak self, weak ui, weak game] in
+            guard let self, let ui, let game else { return }
+            self.startPreparation(transactionID: transactionID, ui: ui, game: game)
+        }) else {
+            transaction = nil
+            applyState = .idle
+            status = "Could not apply \(displayName): presentation unavailable."
+            publishState(ui, game, announcement: status)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: DispatchTime(uptimeNanoseconds: deadline.partialValue)) {
+            [weak self, weak ui, weak game] in
+            guard let self, let ui, let game else { return }
+            self.timeout(transactionID: transactionID, ui: ui, game: game)
         }
     }
 
     private func startPreparation(transactionID: UInt64, ui: UIManager, game: GameCore) {
         guard ui.current() === self,
               let transaction, transaction.id == transactionID,
-              case .awaitingPresentedFrame(let stateID, let statePack) = applyState,
-              stateID == transactionID, statePack == transaction.requested else { return }
-        applyState = .preparing(transactionID: transactionID, pack: transaction.requested)
+              case .awaitingPresentedFrame(let stateID) = applyState,
+              stateID == transactionID else { return }
+        applyState = .preparing(transactionID: transactionID)
         publishState(ui, game)
         if deadlineExpired(transaction) {
             timeout(transactionID: transactionID, ui: ui, game: game)
@@ -277,11 +345,12 @@ final class ResourcePackScreen: Screen {
         }
         guard let snapshot = snapshotResourcePackStack(
             transaction.priorSettings.resourcePacks ?? [],
+            bundledBaseStyle: transaction.candidateBaseStyle,
             bundledAddOns: transaction.candidateIDs) else {
             self.transaction = nil
             applyState = .idle
-            focusedID = .addOn(transaction.requested)
-            status = "Could not apply \(transaction.descriptor.displayName): source snapshot failed."
+            focusedID = transaction.requested.focusID
+            status = "Could not apply \(transaction.displayName): source snapshot failed."
             publishState(ui, game, announcement: status)
             return
         }
@@ -308,17 +377,17 @@ final class ResourcePackScreen: Screen {
     private func timeout(transactionID: UInt64, ui: UIManager, game: GameCore) {
         guard let transaction, transaction.id == transactionID else { return }
         switch applyState {
-        case .awaitingPresentedFrame(let stateID, _) where stateID == transactionID:
+        case .awaitingPresentedFrame(let stateID) where stateID == transactionID:
             ui.cancelAfterNextPresentedFrame()
-        case .preparing(let stateID, _) where stateID == transactionID:
+        case .preparing(let stateID) where stateID == transactionID:
             ResourcePackCPUWorker.shared.cancel(transactionID: transactionID)
         default:
             return
         }
         self.transaction = nil
         applyState = .idle
-        focusedID = .addOn(transaction.requested)
-        status = "Could not apply \(transaction.descriptor.displayName): timed out"
+        focusedID = transaction.requested.focusID
+        status = "Could not apply \(transaction.displayName): timed out"
         publishState(ui, game, announcement: status)
     }
 
@@ -327,12 +396,12 @@ final class ResourcePackScreen: Screen {
                                       ui: UIManager, game: GameCore) {
         guard !cancelled, ui.current() === self,
               let transaction, transaction.id == transactionID,
-              case .preparing(let stateID, let statePack) = applyState,
-              stateID == transactionID, statePack == transaction.requested else { return }
+              case .preparing(let stateID) = applyState,
+              stateID == transactionID else { return }
         guard let prepared else {
             self.transaction = nil
             applyState = .idle
-            status = "Could not apply \(transaction.descriptor.displayName): pack validation failed."
+            status = "Could not apply \(transaction.displayName): pack validation failed."
             publishState(ui, game, announcement: status)
             return
         }
@@ -348,7 +417,7 @@ final class ResourcePackScreen: Screen {
         defer {
             self.transaction = nil
             applyState = .idle
-            focusedID = .addOn(transaction.requested)
+            focusedID = transaction.requested.focusID
             publishState(ui, game, announcement: status)
         }
         guard game.settingsRevision == transaction.expectedRevision else {
@@ -360,11 +429,11 @@ final class ResourcePackScreen: Screen {
             return
         }
         guard let renderer = gAppDelegate?.renderer else {
-            status = "Could not apply \(transaction.descriptor.displayName): renderer unavailable."
+            status = "Could not apply \(transaction.displayName): renderer unavailable."
             return
         }
         guard let staged = prepared.stage(renderer: renderer, game: game) else {
-            status = "Could not apply \(transaction.descriptor.displayName): staging failed."
+            status = "Could not apply \(transaction.displayName): staging failed."
             return
         }
         if deadlineExpired(transaction) {
@@ -372,6 +441,7 @@ final class ResourcePackScreen: Screen {
             return
         }
         var candidate = transaction.priorSettings
+        candidate.bundledResourcePackBaseStyle = transaction.candidateBaseStyle.rawValue
         candidate.bundledResourcePackAddOns = transaction.candidateIDs.map(\.rawValue)
         let persistence = MainActor.assumeIsolated {
             game.persistAndPublishSettingsCandidateCommitAware(
@@ -394,16 +464,29 @@ final class ResourcePackScreen: Screen {
         }
         staged.publish(game: game, renderer: renderer, ui: ui)
         status = durabilityWarning
-            ? "Applied \(transaction.descriptor.displayName); disk durability was not confirmed."
-            : "Applied \(transaction.descriptor.displayName)."
+            ? "Applied \(transaction.displayName); disk durability was not confirmed."
+            : "Applied \(transaction.displayName)."
     }
 
-    private func ordinaryFocusGraph() -> [ResourcePackScreenFocusID] {
-        BUNDLED_RESOURCE_PACK_ADD_ONS.map { .addOn($0.id) } + [.done]
+    private func ordinaryFocusGraph(_ game: GameCore) -> [ResourcePackScreenFocusID] {
+        let base: [ResourcePackScreenFocusID] = BUNDLED_RESOURCE_PACK_BASE_STYLES.map {
+            ResourcePackScreenFocusID.baseStyle($0.id)
+        }
+        let style = sanitizedBundledResourcePackBaseStyleID(game.settings.bundledResourcePackBaseStyle)
+        let addOns: [ResourcePackScreenFocusID] = bundledResourcePackAddOnsAllowed(for: style)
+            ? BUNDLED_RESOURCE_PACK_ADD_ONS.map { ResourcePackScreenFocusID.addOn($0.id) } : []
+        return base + addOns + [.done]
     }
 
     private func recoveryNavigationGraph(_ game: GameCore) -> [ResourcePackScreenFocusID] {
         (game.settingsRecoveryTransientAcknowledged ? [] : [.acknowledge]) + [.done]
+    }
+
+    private func isSelectionControl(_ id: ResourcePackScreenFocusID) -> Bool {
+        switch id {
+        case .baseStyle, .addOn: return true
+        case .acknowledge, .done: return false
+        }
     }
 
     override func onKeyEvent(_ ui: UIManager, _ game: GameCore,
@@ -411,7 +494,7 @@ final class ResourcePackScreen: Screen {
         if event.isRepeat { return true }
         let key = event.terminal.rawValue
         switch applyState {
-        case .awaitingPresentedFrame(let id, _):
+        case .awaitingPresentedFrame(let id):
             if key == "Escape" {
                 ui.cancelAfterNextPresentedFrame()
                 transaction = nil
@@ -428,13 +511,14 @@ final class ResourcePackScreen: Screen {
         }
 
         if game.settingsRecoveryRequired,
-           case .addOn = focusedID,
+           isSelectionControl(focusedID),
            ["Enter", "NumpadEnter", "Space"].contains(key) { return true }
 
         let graph = game.settingsRecoveryRequired
-            ? recoveryNavigationGraph(game) : ordinaryFocusGraph()
+            ? recoveryNavigationGraph(game) : ordinaryFocusGraph(game)
         if key == "Tab" {
-            if game.settingsRecoveryRequired, case .addOn = focusedID {
+            if game.settingsRecoveryRequired,
+               isSelectionControl(focusedID) {
                 focusedID = event.modifiers.contains(.shift) ? .done : (graph.first ?? .done)
             } else {
                 let index = graph.firstIndex(of: focusedID) ?? 0
@@ -463,6 +547,7 @@ final class ResourcePackScreen: Screen {
 
     private func activateFocused(_ ui: UIManager, _ game: GameCore) {
         switch focusedID {
+        case .baseStyle(let style): beginSelectBaseStyle(style, ui: ui, game: game)
         case .addOn(let id): beginToggle(id, ui: ui, game: game)
         case .acknowledge:
             game.acknowledgeSettingsRecoveryNotice()
@@ -489,15 +574,16 @@ final class ResourcePackScreen: Screen {
     override func textAccessibilityDescriptors(_ ui: UIManager, _ game: GameCore)
         -> [TextEntryAccessibilityDescriptor] {
         guard ui.current() === self else { return [] }
+        let baseStyle = sanitizedBundledResourcePackBaseStyleID(game.settings.bundledResourcePackBaseStyle)
         let selected = Set(sanitizedBundledResourcePackAddOnIDs(
-            game.settings.bundledResourcePackAddOns))
+            game.settings.bundledResourcePackAddOns, for: baseStyle))
         let baseline = baselinePresentation()
         let currentStatus = statusPresentation(game)
         let staticWidth = max(1, ui.width - 4)
         var result: [TextEntryAccessibilityDescriptor] = [
             TextEntryAccessibilityDescriptor(
                 id: "resource-pack.baseline", role: .staticText,
-                label: "Faithful 64x baseline", value: baseline.value, help: baseline.help,
+                label: "Visual style baseline", value: baseline.value, help: baseline.help,
                 frame: (2, 42, staticWidth, 12), enabled: true, focused: false,
                 insertionUTF16Offset: nil, focusable: false, actionable: false),
             TextEntryAccessibilityDescriptor(
@@ -508,21 +594,43 @@ final class ResourcePackScreen: Screen {
                 enabled: true, focused: false, insertionUTF16Offset: nil,
                 focusable: false, actionable: false),
         ]
+        for descriptor in BUNDLED_RESOURCE_PACK_BASE_STYLES {
+            let id = ResourcePackScreenFocusID.baseStyle(descriptor.id)
+            guard let button = controlsByFocusID[id] else { continue }
+            let isSelected = descriptor.id == baseStyle
+            let value = game.settingsRecoveryRequired
+                ? "Current session: \(isSelected ? "selected" : "not selected"); saved choice unknown"
+                : (isSelected ? "Selected" : "Not selected")
+            let help = game.settingsRecoveryRequired
+                ? "Restart Elysium before changing settings."
+                : "\(descriptor.detail) Select this visual style."
+            result.append(TextEntryAccessibilityDescriptor(
+                id: "resource-pack.style.\(descriptor.id.rawValue)", role: .checkbox,
+                label: descriptor.displayName, value: value, help: help,
+                frame: (button.x, button.y, button.w, button.h), enabled: !game.settingsRecoveryRequired,
+                focused: focusedID == id, insertionUTF16Offset: nil,
+                focusable: !game.settingsRecoveryRequired, selected: isSelected,
+                actionable: button.enabled))
+        }
         for descriptor in BUNDLED_RESOURCE_PACK_ADD_ONS {
             let id = ResourcePackScreenFocusID.addOn(descriptor.id)
             guard let button = controlsByFocusID[id] else { continue }
             let isOn = selected.contains(descriptor.id)
             let value = game.settingsRecoveryRequired
                 ? "Current session: \(isOn ? "ON" : "OFF"); saved choice unknown"
+                : baseStyle != .faithful64x
+                ? "Requires Faithful 64x"
                 : (isOn ? "ON" : "OFF")
             let help = game.settingsRecoveryRequired
                 ? "Restart Elysium before changing settings"
+                : baseStyle != .faithful64x
+                ? "This Faithful 64x add-on cannot be used with KUBIKOS Cubic World."
                 : "Toggle \(descriptor.displayName)."
             result.append(TextEntryAccessibilityDescriptor(
                 id: "resource-pack.\(descriptor.id.rawValue)", role: .checkbox,
                 label: descriptor.displayName, value: value, help: help,
                 frame: (button.x, button.y, button.w, button.h), enabled: button.enabled,
-                focused: focusedID == id, insertionUTF16Offset: nil, focusable: true,
+                focused: focusedID == id, insertionUTF16Offset: nil, focusable: button.enabled,
                 selected: isOn, actionable: button.enabled))
         }
         for id in [ResourcePackScreenFocusID.acknowledge, .done] {
@@ -545,6 +653,9 @@ final class ResourcePackScreen: Screen {
         let focus: ResourcePackScreenFocusID?
         if id == "resource-pack.done" { focus = .done }
         else if id == "resource-pack.acknowledge" { focus = .acknowledge }
+        else if let descriptor = BUNDLED_RESOURCE_PACK_BASE_STYLES.first(where: {
+            id == "resource-pack.style.\($0.id.rawValue)"
+        }) { focus = .baseStyle(descriptor.id) }
         else if let descriptor = BUNDLED_RESOURCE_PACK_ADD_ONS.first(where: {
             id == "resource-pack.\($0.id.rawValue)"
         }) { focus = .addOn(descriptor.id) }

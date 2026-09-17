@@ -94,6 +94,13 @@ final class EntityRendererM {
             skinW = img.width
             skinH = img.height
             pixels = img.pixels
+        } else if let fallback = kubikosFallbackEntityImage(width: built.skin.w, height: built.skin.h) {
+            // KUBIKOS supplies an audited native fallback for UVs that have no compatible vanilla
+            // entity sheet. Geometry remains Elysium-native, but it no longer silently reverts to
+            // a procedural color treatment when the alternate visual baseline is selected.
+            skinW = fallback.width
+            skinH = fallback.height
+            pixels = fallback.pixels
         } else if ProcessInfo.processInfo.environment["ELYSIUM_PACKDEBUG"] != nil {
             let why = built.model.packTex.isEmpty ? "no packTex mapping" : "pack image missing or proportions mismatch"
             print("[packs] PROCEDURAL skin for model \(resolved): \(why)")

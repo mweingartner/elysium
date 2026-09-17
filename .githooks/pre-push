@@ -55,6 +55,7 @@ stage() {
     revalidate || { echo "pre-push blocked: outgoing source/ref moved during gates" >&2; exit 1; }
 }
 
+stage "prepare licensed KUBIKOS theme" scripts/prepare-kubikos-theme.sh
 stage "source security scan" bash scripts/security-scan.sh
 stage "warning-free release build" scripts/prepush-release-build.sh "$TMP/build.log"
 stage "release surface and binary" sh -c \

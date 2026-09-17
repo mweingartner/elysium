@@ -36,6 +36,9 @@ final class LocalSettingsStoreTests: XCTestCase {
         let store = try makeStore()
         let settings = try value(store.loadSettings())
         XCTAssertEqual(settings.renderDistance, Settings().renderDistance)
+        XCTAssertEqual(settings.bundledResourcePackBaseStyle,
+                       BundledResourcePackBaseStyleID.faithful64x.rawValue)
+        XCTAssertEqual(settings.bundledResourcePackAddOns, [])
         XCTAssertEqual(settings.rpgTutorialVersion, 0)
         XCTAssertTrue(settings.showMinimap)
 
@@ -130,17 +133,46 @@ final class LocalSettingsStoreTests: XCTestCase {
         XCTAssertEqual(settings.rpgTutorialVersion, 0)
     }
 
-    func testBundledResourcePackConsentDecodesClosedAndDefaultsOff() throws {
+    func testBundledResourcePackBaseStyleMigratesDefaultsAndRejectsFaithfulAddOnsForKubikos() throws {
         let defaultStore = try makeStore()
-        XCTAssertEqual(try value(defaultStore.loadSettings()).bundledResourcePackAddOns, [])
+        let defaults = try value(defaultStore.loadSettings())
+        XCTAssertEqual(defaults.bundledResourcePackBaseStyle,
+                       BundledResourcePackBaseStyleID.faithful64x.rawValue)
+        XCTAssertEqual(defaults.bundledResourcePackAddOns, [])
 
-        let store = try makeStore()
-        let json = #"{"bundledResourcePackAddOns":["static-lanterns","unknown","ore-borders-64x","static-lanterns"],"resourcePacks":["custom.zip"]}"#
-        try write(Data(json.utf8), named: "settings.json", to: store)
-        let settings = try value(store.loadSettings())
-        XCTAssertEqual(settings.bundledResourcePackAddOns,
+        let legacyStore = try makeStore()
+        let legacyJSON = #"{"bundledResourcePackAddOns":["static-lanterns","unknown","ore-borders-64x","static-lanterns"],"resourcePacks":["custom.zip"]}"#
+        try write(Data(legacyJSON.utf8), named: "settings.json", to: legacyStore)
+        let legacy = try value(legacyStore.loadSettings())
+        XCTAssertEqual(legacy.bundledResourcePackBaseStyle,
+                       BundledResourcePackBaseStyleID.faithful64x.rawValue)
+        XCTAssertEqual(legacy.bundledResourcePackAddOns,
                        ["ore-borders-64x", "static-lanterns"])
-        XCTAssertEqual(settings.resourcePacks, ["custom.zip"])
+        XCTAssertEqual(legacy.resourcePacks, ["custom.zip"])
+
+        let kubikosStore = try makeStore()
+        let kubikosJSON = #"{"bundledResourcePackBaseStyle":"kubikos-cubic-world","bundledResourcePackAddOns":["static-lanterns","ore-borders-64x"]}"#
+        try write(Data(kubikosJSON.utf8), named: "settings.json", to: kubikosStore)
+        let kubikos = try value(kubikosStore.loadSettings())
+        XCTAssertEqual(kubikos.bundledResourcePackBaseStyle,
+                       BundledResourcePackBaseStyleID.kubikosCubicWorld.rawValue)
+        XCTAssertEqual(kubikos.bundledResourcePackAddOns, [])
+
+        let malformedStore = try makeStore()
+        let malformedJSON = #"{"bundledResourcePackBaseStyle":"unknown-style","bundledResourcePackAddOns":["static-lanterns"]}"#
+        try write(Data(malformedJSON.utf8), named: "settings.json", to: malformedStore)
+        let malformed = try value(malformedStore.loadSettings())
+        XCTAssertEqual(malformed.bundledResourcePackBaseStyle,
+                       BundledResourcePackBaseStyleID.faithful64x.rawValue)
+        XCTAssertEqual(malformed.bundledResourcePackAddOns, ["static-lanterns"])
+
+        let malformedTypeStore = try makeStore()
+        let malformedTypeJSON = #"{"bundledResourcePackBaseStyle":["kubikos-cubic-world"],"bundledResourcePackAddOns":["static-lanterns"]}"#
+        try write(Data(malformedTypeJSON.utf8), named: "settings.json", to: malformedTypeStore)
+        let malformedType = try value(malformedTypeStore.loadSettings())
+        XCTAssertEqual(malformedType.bundledResourcePackBaseStyle,
+                       BundledResourcePackBaseStyleID.faithful64x.rawValue)
+        XCTAssertEqual(malformedType.bundledResourcePackAddOns, ["static-lanterns"])
     }
 
     func testTutorialVersionNormalizesIndependentlyAndPreservesValidPeers() throws {
@@ -377,11 +409,17 @@ final class LocalSettingsStoreTests: XCTestCase {
         var settings = Settings()
         settings.fov = 93
         settings.rpgTutorialVersion = RPG_TUTORIAL_VERSION
+        settings.bundledResourcePackBaseStyle = BundledResourcePackBaseStyleID.kubikosCubicWorld.rawValue
+        settings.bundledResourcePackAddOns = ["static-lanterns"]
         _ = try value(store.persistSettings(settings))
         let settingsURL = store.directoryURL.appendingPathComponent("settings.json")
         let first = try Data(contentsOf: settingsURL)
         _ = try value(store.persistSettings(settings))
         XCTAssertEqual(try Data(contentsOf: settingsURL), first)
+        let roundTripped = try value(store.loadSettings())
+        XCTAssertEqual(roundTripped.bundledResourcePackBaseStyle,
+                       BundledResourcePackBaseStyleID.kubikosCubicWorld.rawValue)
+        XCTAssertEqual(roundTripped.bundledResourcePackAddOns, [])
 
         let defaults = rpgDefaultChordBindings()
         _ = try value(store.persistKeybinds(defaults))

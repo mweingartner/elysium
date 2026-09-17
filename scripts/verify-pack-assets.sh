@@ -24,7 +24,7 @@ verify_archive() {
     rm -f "$list"
 }
 
-echo "==> assets: verifying Faithful 64x and reviewed add-ons"
+echo "==> assets: verifying Faithful 64x, KUBIKOS, and reviewed add-ons"
 verify_archive "Faithful 64x - December 2025 Release.zip" \
     a136d9101a4748558587980dace3cd7447b758fb72c4684d15fb805d0a812dac \
     pack.mcmeta LICENSE.txt \
@@ -32,6 +32,30 @@ verify_archive "Faithful 64x - December 2025 Release.zip" \
     assets/minecraft/textures/item/diamond.png \
     assets/minecraft/textures/gui/container/inventory.png \
     assets/minecraft/textures/font/ascii.png
+verify_archive "KUBIKOS Cubic World - Elysium Theme.zip" \
+    3ffdebe0e5a4025e1194ee6c3c30ce43b5a3cb43049d5e31179f7624b33bedb3 \
+    pack.mcmeta LICENSE.txt CREDITS.txt \
+    assets/elysium/textures/tiles/stone.png \
+    assets/elysium/textures/tiles/white_bed_top.png \
+    assets/elysium/textures/tiles/end_portal.png \
+    assets/elysium/textures/entity/fallback.png \
+    assets/elysium/textures/title/background.png \
+    assets/elysium/textures/title/logo.png \
+    assets/minecraft/textures/block/stone.png \
+    assets/minecraft/textures/item/diamond.png \
+    assets/minecraft/textures/entity/zombie/zombie.png \
+    assets/minecraft/textures/entity/chicken.png \
+    assets/minecraft/textures/entity/cow/cow.png \
+    assets/minecraft/textures/entity/pig/pig.png \
+    assets/minecraft/textures/entity/sheep/sheep_fur.png \
+    assets/minecraft/textures/entity/spider/spider_eyes.png \
+    assets/minecraft/textures/gui/icons.png \
+    assets/minecraft/textures/gui/widgets.png \
+    assets/minecraft/textures/gui/options_background.png \
+    assets/minecraft/textures/gui/container/inventory.png \
+    assets/minecraft/textures/font/ascii.png \
+    assets/minecraft/textures/environment/sun.png \
+    assets/minecraft/textures/environment/moon_phases.png
 verify_archive "Faithful 64x - Ore Borders 64x.zip" \
     232b8a64d745dc08b958c3c4c07167bd3f38eebdc4cd682da9d1016b2ed190f8 \
     pack.mcmeta LICENSE.txt CREDITS.txt \
@@ -45,10 +69,17 @@ verify_archive "Faithful 64x - Static Lanterns.zip" \
 
 [ -f "$ROOT/packaging/FAITHFUL-LICENSE.txt" ] || fail "missing Faithful license"
 [ -f "$ROOT/packaging/FAITHFUL-ADDONS-CREDITS.txt" ] || fail "missing add-on credits"
+[ -f "$ROOT/packaging/KUBIKOS-ATTRIBUTION.txt" ] || fail "missing KUBIKOS attribution"
 grep -Fxq "Vanilla Tweaks Team" "$ROOT/packaging/FAITHFUL-ADDONS-CREDITS.txt" || \
     fail "missing Ore Borders attribution"
 grep -Fq "Aerod" "$ROOT/packaging/FAITHFUL-ADDONS-CREDITS.txt" || fail "missing Aerod credit"
 grep -Fq "Hedreon" "$ROOT/packaging/FAITHFUL-ADDONS-CREDITS.txt" || fail "missing Hedreon credit"
 grep -Fq "Scutoel" "$ROOT/packaging/FAITHFUL-ADDONS-CREDITS.txt" || fail "missing Scutoel credit"
+grep -Fq "ANIMMAL Game Assets" "$ROOT/packaging/KUBIKOS-ATTRIBUTION.txt" || \
+    fail "missing KUBIKOS publisher attribution"
+grep -Fq "4eb52b835610aca19a79681a81a744fc9a69b8414426e2f18a270e20f229e24e" \
+    "$ROOT/packaging/KUBIKOS-ATTRIBUTION.txt" || fail "missing KUBIKOS source hash"
+grep -Fq "No AI generation" "$ROOT/packaging/KUBIKOS-ATTRIBUTION.txt" || \
+    fail "missing KUBIKOS AI-use provenance"
 
-echo "==> assets: Faithful 64x packs verified (3 archives, exact hashes)"
+echo "==> assets: managed visual packs verified (4 archives, exact hashes)"
