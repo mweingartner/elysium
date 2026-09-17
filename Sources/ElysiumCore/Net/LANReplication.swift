@@ -50,6 +50,10 @@ public struct LANReplicationApplyReport: Equatable {
     public var appliedChunkSectionPositions: [LANChunkSectionPosition] = []
     public var appliedEntitySnapshots = 0
     public var removedEntitySnapshots = 0
+    /// A replication batch advertised a world profile/content identity this
+    /// build cannot materialize. The entire batch is rejected before any
+    /// mirror or world state is applied.
+    public var ignoredInvalidWorldSummary = 0
     public var ignoredInvalidCells = 0
     public var ignoredInvalidSections = 0
     public var ignoredUnloadedBlockChanges = 0
@@ -74,6 +78,7 @@ public struct LANReplicationApplyReport: Equatable {
         appliedChunkSectionPositions.append(contentsOf: other.appliedChunkSectionPositions)
         appliedEntitySnapshots += other.appliedEntitySnapshots
         removedEntitySnapshots += other.removedEntitySnapshots
+        ignoredInvalidWorldSummary += other.ignoredInvalidWorldSummary
         ignoredInvalidCells += other.ignoredInvalidCells
         ignoredInvalidSections += other.ignoredInvalidSections
         ignoredUnloadedBlockChanges += other.ignoredUnloadedBlockChanges
@@ -2142,6 +2147,10 @@ public final class LANMultiplayerClientSession {
     public func apply(_ batch: LANReplicationBatch) -> LANReplicationApplyReport {
         var report = LANReplicationApplyReport()
         guard (0...RPG_MAX_COUNTER).contains(batch.tick) else { return report }
+        guard batch.world?.hasCompatiblePrehistoricContent ?? true else {
+            report.ignoredInvalidWorldSummary += 1
+            return report
+        }
         latestTick = max(latestTick, batch.tick)
         if let world = batch.world { worldSummary = world }
         if let state = batch.worldState { worldState = state }
@@ -3561,6 +3570,9 @@ public func makeLANEntitySnapshots(
             },
             fuseRapid: (entity as? Creeper)?.fuse.map { $0.trigger == .sunlight },
             charged: (entity as? Creeper)?.charged,
+            prehistoricAction: entity?.data.prehistoricAction,
+            prehistoricActionTicks: entity?.data.prehistoricActionTicks,
+            prehistoricAirSupply: entity?.data.prehistoricAirSupply,
             dimension: world.dim.rawValue
         ))
     }
@@ -3714,6 +3726,9 @@ private func normalizedLANEntitySnapshot(_ raw: LANEntitySnapshot) -> LANEntityS
         fuseProgress: raw.fuseProgress,
         fuseRapid: raw.fuseRapid,
         charged: raw.charged,
+        prehistoricAction: raw.prehistoricAction,
+        prehistoricActionTicks: raw.prehistoricActionTicks,
+        prehistoricAirSupply: raw.prehistoricAirSupply,
         dimension: raw.dimension
     )
     guard snapshot.entityID >= 0, snapshot.type != "player" else { return nil }
@@ -3799,6 +3814,14 @@ private func configureMirroredEntity(_ entity: Entity, from snapshot: LANEntityS
         entity.data.fuseRapid = snapshot.fuseRapid ?? false
         entity.data.charged = snapshot.charged ?? false
         if let creeper = entity as? Creeper { creeper.charged = snapshot.charged ?? false }
+    }
+    if PrehistoricCreatureDefinition.named(snapshot.type) != nil {
+        entity.data.prehistoricAction = normalizedPrehistoricAction(snapshot.prehistoricAction).rawValue
+        entity.data.prehistoricActionTicks = max(0, min(1_200, snapshot.prehistoricActionTicks ?? 0))
+        entity.data.prehistoricAirSupply = snapshot.prehistoricAirSupply.map { max(0, min(300, $0)) }
+        if let creature = entity as? PrehistoricCreature, creature.definition.medium == .aquatic {
+            creature.airSupply = entity.data.prehistoricAirSupply ?? 300
+        }
     }
     if let living = entity as? LivingEntity, let health = snapshot.health {
         living.health = max(0, min(living.maxHealth, health))

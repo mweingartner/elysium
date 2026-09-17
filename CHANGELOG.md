@@ -5,6 +5,12 @@ in-app version string comes from `ELYSIUM_VERSION` (ElysiumCore/Game/Saves.swift
 
 ## Unreleased
 
+- Bumped the release and exact-LAN-compatibility version to 1.3.0 for four
+  versioned **Prehistoric Worlds** profiles. They add a 36-creature native
+  roster, profile-bound terrain and population, and preserve normal saves while
+  suppressing modern natural, spawner, and direct landmark occupants inside the
+  opt-in profile domain.
+
 - Bumped the release and exact-LAN-compatibility version to 1.2.2 for the new
   host-timed ordinary-bow intent. Older binaries are rejected during the existing exact-version
   handshake instead of decoding the new message kind incorrectly.

@@ -34,6 +34,9 @@ struct EntityPose {
     var hanging = false
     var open = 0.0
     var sitting = false
+    /// Closed, replicated semantic state for opt-in prehistoric creatures.
+    /// Renderer-only: it never feeds simulation/RNG decisions.
+    var prehistoricAction = "idle"
 }
 
 struct EntityUniforms {
@@ -168,11 +171,13 @@ final class EntityRendererM {
             case "quad", "quadTail", "horse":
                 if n == "head" {
                     m = mRotateY(m, Float(p.headYaw * 0.6))
-                    m = mRotateX(m, Float(-(p.pitch * 0.6) - (p.grazing ? 0.9 : 0)))
+                    let headLowered = p.grazing || p.prehistoricAction == "browse"
+                        || p.prehistoricAction == "charge"
+                    m = mRotateX(m, Float(-(p.pitch * 0.6) - (headLowered ? 0.9 : 0)))
                 } else if n == "legFR" || n == "legBL" {
-                    m = mRotateX(m, Float(walkA))
+                    m = mRotateX(m, Float(walkA * (p.prehistoricAction == "charge" ? 1.35 : 1)))
                 } else if n == "legFL" || n == "legBR" {
-                    m = mRotateX(m, Float(walkB))
+                    m = mRotateX(m, Float(walkB * (p.prehistoricAction == "charge" ? 1.35 : 1)))
                 } else if n == "tail" {
                     m = mRotateX(m, Float(-0.6 - Foundation.sin(time * 3) * 0.15 * (1 + amp * 2)))
                 }
@@ -240,7 +245,11 @@ final class EntityRendererM {
                 }
             case "fish", "dolphin":
                 if n == "tail" {
-                    m = mRotateY(m, Float(Foundation.sin(time * 8 + swing) * 0.5))
+                    let burst = p.prehistoricAction == "burst"
+                    let surface = p.prehistoricAction == "surface"
+                    let speed = burst ? 15.0 : (surface ? 5.0 : 8.0)
+                    let amplitude = burst ? 0.8 : (surface ? 0.25 : 0.5)
+                    m = mRotateY(m, Float(Foundation.sin(time * speed + swing) * amplitude))
                 } else if n == "body" && anim == "fish" {
                     m = mRotateY(m, Float(Foundation.sin(time * 8) * 0.1))
                 } else if n == "head" && anim == "dolphin" {
@@ -287,17 +296,49 @@ final class EntityRendererM {
                 }
             case "parrot":
                 if n == "wingR" || n == "wingL" {
-                    let flap = p.airborne ? Foundation.sin(time * 25) * 0.8 : 0
+                    let activeFlight = p.airborne || p.prehistoricAction == "takeoff" || p.prehistoricAction == "flap"
+                    let flap = activeFlight ? Foundation.sin(time * 25) * 0.8 : 0
                     m = mRotateZ(m, Float((n == "wingR" ? 1.0 : -1.0) * flap))
                 } else if n == "head" {
                     m = mRotateY(m, Float(p.headYaw))
                     m = mRotateX(m, Float(-p.pitch))
                 }
             case "phantom":
+                let active = p.prehistoricAction == "takeoff" || p.prehistoricAction == "flap"
+                let glide = p.prehistoricAction == "glide"
+                // Native pterosaurs use the phantom rig, including separate
+                // elongated fingers. Keep a clear visual distinction between
+                // powered flight, a gliding membrane, and a perched/landing
+                // folded wing rather than leaving the full span out at rest.
+                let landing = p.prehistoricAction == "landing"
+                let perched = !p.airborne && p.prehistoricAction == "idle"
+                let fold = perched ? 1.28 : (landing ? 0.62 : 0)
                 if n == "wingR" {
-                    m = mRotateZ(m, Float(Foundation.sin(time * 4) * 0.3 + 0.1))
+                    let speed = active ? 14.0 : (glide ? 2.5 : 4.0)
+                    let amplitude = active ? 0.62 : (glide ? 0.12 : 0.3)
+                    let motion = Foundation.sin(time * speed) * amplitude + 0.1
+                    m = mRotateZ(m, Float(fold > 0 ? fold : motion))
+                    if fold > 0 { m = mRotateX(m, Float(0.20 + fold * 0.12)) }
                 } else if n == "wingL" {
-                    m = mRotateZ(m, Float(-Foundation.sin(time * 4) * 0.3 - 0.1))
+                    let speed = active ? 14.0 : (glide ? 2.5 : 4.0)
+                    let amplitude = active ? 0.62 : (glide ? 0.12 : 0.3)
+                    let motion = -Foundation.sin(time * speed) * amplitude - 0.1
+                    m = mRotateZ(m, Float(fold > 0 ? -fold : motion))
+                    if fold > 0 { m = mRotateX(m, Float(0.20 + fold * 0.12)) }
+                } else if n == "fingerR" {
+                    if fold > 0 {
+                        m = mRotateZ(m, Float(fold * 1.10))
+                        m = mRotateX(m, Float(0.24 + fold * 0.10))
+                    } else if active {
+                        m = mRotateZ(m, Float(Foundation.sin(time * 14) * 0.18))
+                    }
+                } else if n == "fingerL" {
+                    if fold > 0 {
+                        m = mRotateZ(m, Float(-fold * 1.10))
+                        m = mRotateX(m, Float(0.24 + fold * 0.10))
+                    } else if active {
+                        m = mRotateZ(m, Float(-Foundation.sin(time * 14) * 0.18))
+                    }
                 }
             case "dragon":
                 if n == "wingR" {

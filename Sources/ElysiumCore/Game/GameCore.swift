@@ -1568,7 +1568,9 @@ public final class GameCore {
 
     @MainActor
     public func enterLANClientWorld(_ summary: LANWorldSummary) {
-        guard savedWorldMaintenanceAllowsTransitions() else { return }
+        guard savedWorldMaintenanceAllowsTransitions(),
+              let preset = summary.compatibleWorldPreset
+        else { return }
         let seed = Int32(truncatingIfNeeded: summary.seed)
         let cleanID = sanitizedLANWorldIdentifier(summary.worldID)
         let resumeKey = lanClientResumeKey(for: summary)
@@ -1578,7 +1580,8 @@ public final class GameCore {
             name: "LAN: \(summary.worldName)",
             seed: seed,
             gameMode: summary.gameMode,
-            difficulty: summary.difficulty
+            difficulty: summary.difficulty,
+            worldPreset: preset
         )
         rec.gameRules[RPG_CLASSES_GAME_RULE] = summary.rpgClassesEnabled ? 1 : 0
         let spawn = defaultWorldSpawn(seed: seed, settings: rec.generationSettings)
@@ -3055,6 +3058,11 @@ public final class GameCore {
         guard (0...RPG_MAX_COUNTER).contains(batch.tick) else {
             return LANReplicationApplyReport()
         }
+        guard batch.world?.hasCompatiblePrehistoricContent ?? true else {
+            var report = LANReplicationApplyReport()
+            report.ignoredInvalidWorldSummary = 1
+            return report
+        }
         guard isLANClientWorld else {
             return applyLANReplicationBatch(batch, to: world)
         }
@@ -3178,10 +3186,35 @@ public final class GameCore {
             }
         } else if let entitySpecs {
             for es in entitySpecs {
+                guard Self.shouldMaterializeGeneratedEntity(es, in: w) else { continue }
                 let m = spawnMob(w, es.mob, es.x, es.y, es.z, spawnOptsFrom(es.data))
                 m?.persistent = true
             }
         }
+    }
+
+    /// Fresh chunk output is normally admitted by the generator's local
+    /// preflight. Recheck prehistoric specs after their chunk is adopted:
+    /// their full body can span neighboring chunks, legacy structure occupants
+    /// must not cross the profile boundary, and a direct bootstrap spec must
+    /// never phase a large creature through unloaded terrain.
+    static func shouldMaterializeGeneratedEntity(_ spec: EntitySpec, in world: World) -> Bool {
+        let definition = PrehistoricCreatureDefinition.named(spec.mob)
+        // A retained landmark may carry direct villagers, domestic animals, or
+        // ordinary hostile occupants. The profile preserves its geometry and
+        // loot, but only its explicitly curated roster may materialize from a
+        // fresh generated EntitySpec. Existing saved entities remain
+        // authoritative through the separate saved-record branch above.
+        if world.generationSettings.preset.isPrehistoric, definition == nil { return false }
+        guard let definition else { return true }
+        return prehistoricHasClearance(
+            world,
+            definition: definition,
+            x: ifloor(spec.x),
+            y: ifloor(spec.y),
+            z: ifloor(spec.z),
+            requireGround: definition.medium != .aquatic
+        )
     }
 
     private func spawnOptsFrom(_ data: [String: BEValue]) -> SpawnOpts {
@@ -3191,6 +3224,15 @@ public final class GameCore {
         if case .bool(let b)? = data["captain"] { opts.captain = b }
         if case .num(let n)? = data["size"] { opts.size = Int(n) }
         if case .num(let n)? = data["variant"] { opts.variant = Int(n) }
+        if case .num(let n)? = data["prehistoricSeedSalt"] {
+            let integral = n.rounded(.towardZero)
+            if n.isFinite,
+               n == integral,
+               integral >= 0,
+               integral <= Double(UInt32.max) {
+                opts.prehistoricSeedSalt = UInt32(integral)
+            }
+        }
         return opts
     }
 
@@ -4159,9 +4201,15 @@ public final class GameCore {
         tickFangs(w)
         // (updateDaylightDetectors is a no-op — detectors self-schedule ticks)
         naturalSpawnTick(w, [p], &w.rng)
-        raidManager.tick(w)
-        if w.time % 1200 == 0 && dim == .overworld { tryPatrolSpawn(w, [p], &w.rng) }
-        raidManager.tryStartRaid(w, p)
+        if Self.shouldRunRaidEvents(in: w) {
+            raidManager.tick(w)
+        }
+        if Self.shouldTryPatrolSpawn(in: w, dimension: dim) {
+            tryPatrolSpawn(w, [p], &w.rng)
+        }
+        if Self.shouldRunRaidEvents(in: w) {
+            raidManager.tryStartRaid(w, p)
+        }
         tickWeatherEffects()
         tickPortals()
         tickUsing()
@@ -4207,6 +4255,22 @@ public final class GameCore {
             ticksSinceSave = 0
             saveAndFlush()
         }
+    }
+
+    /// Patrols are modern hostile content, so opt-in prehistoric profiles
+    /// retain their curated creature tables while normal worlds preserve the
+    /// original cadence and dimension gate exactly.
+    static func shouldTryPatrolSpawn(in world: World, dimension: Dim) -> Bool {
+        !world.generationSettings.preset.isPrehistoric &&
+            world.time % 1200 == 0 &&
+            dimension == .overworld
+    }
+
+    /// Raids are likewise modern human hostile events. Keeping both their
+    /// scheduler and active-raid tick outside prehistoric worlds leaves the
+    /// normal-world event order untouched.
+    static func shouldRunRaidEvents(in world: World) -> Bool {
+        !world.generationSettings.preset.isPrehistoric
     }
 
     private func tickHotbarAndCooldowns(_ p: Player) {

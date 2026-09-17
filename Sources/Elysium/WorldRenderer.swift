@@ -1468,6 +1468,7 @@ final class WorldRenderer {
             pose.aiming = (ent as? Mob)?.target != nil
             pose.crossed = pose.aiming
             pose.grazing = ent.data.grazing ?? false
+            pose.prehistoricAction = ent.data.prehistoricAction ?? "idle"
             pose.sitting = (ent as? Mob)?.sitting ?? false
             pose.open = (ent as? Shulker)?.peekAmount ?? 0
             pose.hanging = (ent as? Bat)?.hanging ?? (ent.data.hanging ?? false)

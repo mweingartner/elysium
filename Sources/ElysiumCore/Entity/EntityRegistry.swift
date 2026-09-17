@@ -69,6 +69,11 @@ public func registerAllEntities() {
     reg("fishing_bobber") { FishingBobber(world: $0) }; reg("llama_spit") { LlamaSpit(world: $0) }
     reg("boat") { Boat(world: $0) }; reg("minecart") { Minecart(world: $0) }
     reg("player") { Player(world: $0) }
+    // Append-only registration: roster order is the stable profile catalog
+    // order and every existing entity type keeps its historical ordinal.
+    for definition in PrehistoricCreatureDefinition.all {
+        reg(definition.id) { PrehistoricCreature(world: $0, definition: definition) }
+    }
 
     bindSpawnMob(spawnMob)
 }
@@ -99,6 +104,14 @@ public func spawnMob(_ world: World, _ type: String, _ x: Double, _ y: Double, _
         if data.baby { e.data.baby = true }
         if data.persistent { e.data.persistent = true }
         if let s = data.size { e.data.size = s }
+        if let prehistoricSeedSalt = data.prehistoricSeedSalt {
+            e.data.prehistoricSeedSalt = prehistoricSeedSalt
+        }
+    }
+    if let prehistoric = e as? PrehistoricCreature {
+        // Apply the opt-in seed salt after all spawn options have been copied.
+        // A direct/manual spawn falls back to the unique live entity id.
+        prehistoric.seedControllerRNGForCurrentPosition()
     }
     world.addEntity(e)
     return e
@@ -187,7 +200,20 @@ public func naturalSpawnTick(_ world: World, _ players: [Player], _ rng: inout R
         }
         let biome = world.biomeAt(x, y, z)
         guard let bdef = BIOMES[Int(biome)] else { continue }
-        let list = cat == "monster" ? bdef.monsters : cat == "creature" ? bdef.creatures : cat == "water" ? bdef.waterCreatures : bdef.ambient
+        let list: [SpawnEntry]
+        if let profile = world.generationSettings.preset.prehistoricProfile {
+            // A prehistoric profile owns its entire natural-population domain:
+            // no modern passive animals and no ordinary fantasy/night-monster
+            // table. Predatory roster members provide its host-owned danger.
+            // The ordinary branch below stays byte-for-byte isolated for every
+            // non-prehistoric save.
+            list = cat == "monster" ? [] : prehistoricSpawnEntries(profile: profile, category: cat)
+        } else {
+            list = cat == "monster" ? bdef.monsters
+                : cat == "creature" ? bdef.creatures
+                : cat == "water" ? bdef.waterCreatures
+                : bdef.ambient
+        }
         if list.isEmpty { continue }
         let entry = rng.pickWeighted(list) { $0.weight }
         let mobType = entry.mob, minPack = entry.minPack, maxPack = entry.maxPack
@@ -197,7 +223,7 @@ public func naturalSpawnTick(_ world: World, _ players: [Player], _ rng: inout R
         // pack spawn
         let pack = minPack + rng.nextInt(Swift.max(1, maxPack - minPack + 1))
         var spawned = 0
-        for _ in 0..<pack {
+        for packOrdinal in 0..<pack {
             let px = x + rng.nextInt(9) - 4
             let pz = z + rng.nextInt(9) - 4
             var py = cat == "water" ? y : world.surfaceY(px, pz)
@@ -210,7 +236,17 @@ public func naturalSpawnTick(_ world: World, _ players: [Player], _ rng: inout R
                 if dx * dx + dy * dy + dz * dz < 24 * 24 { tooClose = true; break }
             }
             if tooClose { continue }
-            let mob = spawnMob(world, mobType, Double(px) + 0.5, Double(py), Double(pz) + 0.5, SpawnOpts())
+            let controllerSalt: UInt32?
+            if PrehistoricCreatureDefinition.named(mobType) != nil {
+                controllerSalt = hash3(
+                    world.seed ^ hashString(mobType), x, y, z,
+                    UInt32(truncatingIfNeeded: world.time) ^ UInt32(packOrdinal + 1)
+                )
+            } else {
+                controllerSalt = nil
+            }
+            let mob = spawnMob(world, mobType, Double(px) + 0.5, Double(py), Double(pz) + 0.5,
+                               SpawnOpts(prehistoricSeedSalt: controllerSalt))
             if mob != nil { spawned += 1 }
             if (counts[cat] ?? 0) + spawned >= cap { break }
         }
@@ -223,7 +259,13 @@ func canSpawnAt(_ world: World, _ mobType: String, _ cat: String, _ x: Int, _ y:
     let atId = at >> 4
     let below = world.getBlock(x, y - 1, z) >> 4
     if cat == "water" {
-        return atId == Int(B.water)
+        guard atId == Int(B.water) else { return false }
+        if let definition = PrehistoricCreatureDefinition.named(mobType) {
+            return prehistoricAquaticNaturalSpawnHasOpenWaterAdmission(
+                world, definition: definition, x: x, y: y, z: z
+            )
+        }
+        return true
     }
     // land mobs never spawn inside fluids (water is "replaceable" and slipped
     // through — zombies and chickens were spawning in the ocean)
@@ -264,7 +306,19 @@ func canSpawnAt(_ world: World, _ mobType: String, _ cat: String, _ x: Int, _ y:
     if cat == "creature" {
         // animals need grass-ish + light
         if world.lightAt(x, y, z) < 9 && world.info.hasSky { return false }
-        return below == Int(B.grass_block) || below == Int(B.sand) || below == Int(B.snow_block) || below == Int(B.mycelium) || below == Int(B.podzol) || !world.info.hasSky
+        let permittedGround = below == Int(B.grass_block) || below == Int(B.sand)
+            || below == Int(B.snow_block) || below == Int(B.mycelium)
+            || below == Int(B.podzol) || !world.info.hasSky
+        guard permittedGround else { return false }
+        if let definition = PrehistoricCreatureDefinition.named(mobType) {
+            return prehistoricHasClearance(world, definition: definition, x: x, y: y, z: z, requireGround: true)
+        }
+        return true
+    }
+    if let definition = PrehistoricCreatureDefinition.named(mobType) {
+        // Flyers enter from a clear, grounded launch site; the profile's air
+        // controller owns takeoff after spawning rather than phasing in sky.
+        return prehistoricHasClearance(world, definition: definition, x: x, y: y, z: z, requireGround: true)
     }
     return true
 }

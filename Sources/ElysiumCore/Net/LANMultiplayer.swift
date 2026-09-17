@@ -472,6 +472,8 @@ public struct LANWorldSummary: Codable, Equatable {
         case playerCount
         case maxPlayers
         case elysiumVersion
+        case worldPreset
+        case prehistoricContentIdentity
         case rpgClassesEnabled
         case scriptSoundNames
     }
@@ -485,6 +487,13 @@ public struct LANWorldSummary: Codable, Equatable {
     public var playerCount: Int
     public var maxPlayers: Int
     public var elysiumVersion: String
+    /// Normalized host generation profile. This prevents a guest from
+    /// rebuilding an opt-in prehistoric world as a normal transient world.
+    public var worldPreset: String
+    /// Versioned roster/simulation identity for opt-in prehistoric worlds.
+    /// Normal worlds intentionally encode this as `nil`, preserving their
+    /// historical compatibility and resume-key behavior.
+    public var prehistoricContentIdentity: String?
     public var rpgClassesEnabled: Bool
     /// Ordered exactly as the host editor presents it: imported WAVs before macOS built-ins.
     /// Guest script execution remains host-authoritative, so guests must complete against this
@@ -503,6 +512,7 @@ public struct LANWorldSummary: Codable, Equatable {
         playerCount: Int,
         maxPlayers: Int = LAN_MULTIPLAYER_MAX_CLIENTS,
         elysiumVersion: String = ELYSIUM_VERSION,
+        worldPreset: String = WorldPreset.normal.rawValue,
         rpgClassesEnabled: Bool = true,
         scriptSoundNames: [String] = []
     ) {
@@ -515,12 +525,58 @@ public struct LANWorldSummary: Codable, Equatable {
         self.playerCount = max(0, min(maxPlayers, playerCount))
         self.maxPlayers = max(1, min(LAN_MULTIPLAYER_MAX_CLIENTS, maxPlayers))
         self.elysiumVersion = elysiumVersion
+        if let validatedPreset = try? validatedWorldPreset(worldPreset) {
+            self.worldPreset = validatedPreset.rawValue
+            self.prehistoricContentIdentity = validatedPreset.prehistoricContentIdentity
+        } else {
+            // A direct caller may construct a future prehistoric profile
+            // before it ever reaches Codable. Preserve that identifier so
+            // `compatibleWorldPreset` fails closed instead of laundering it
+            // through the historical normal-world fallback.
+            self.worldPreset = worldPreset
+            self.prehistoricContentIdentity = nil
+        }
         self.rpgClassesEnabled = rpgClassesEnabled
         self.scriptSoundNames = sanitizedLANScriptSoundNames(scriptSoundNames)
     }
 
+    /// Resolves only a world summary that this build can safely materialize.
+    /// This protects direct in-process callers as well as decoded frames;
+    /// normal worlds remain compatible when the identity is absent.
+    public var compatibleWorldPreset: WorldPreset? {
+        guard let preset = try? validatedWorldPreset(worldPreset),
+              prehistoricContentIdentity == preset.prehistoricContentIdentity
+        else { return nil }
+        return preset
+    }
+
+    public var hasCompatiblePrehistoricContent: Bool {
+        compatibleWorldPreset != nil
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let rawPreset = try c.decodeIfPresent(String.self, forKey: .worldPreset)
+            ?? WorldPreset.normal.rawValue
+        let preset: WorldPreset
+        do {
+            preset = try validatedWorldPreset(rawPreset)
+        } catch {
+            throw DecodingError.dataCorruptedError(
+                forKey: .worldPreset,
+                in: c,
+                debugDescription: "This Elysium version does not support the host prehistoric world profile."
+            )
+        }
+        let advertisedContentIdentity = try c.decodeIfPresent(
+            String.self, forKey: .prehistoricContentIdentity)
+        guard advertisedContentIdentity == preset.prehistoricContentIdentity else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .prehistoricContentIdentity,
+                in: c,
+                debugDescription: "The host prehistoric content identity does not match this Elysium version."
+            )
+        }
         self.init(
             worldID: try c.decode(String.self, forKey: .worldID),
             worldName: try c.decode(String.self, forKey: .worldName),
@@ -531,6 +587,7 @@ public struct LANWorldSummary: Codable, Equatable {
             playerCount: try c.decode(Int.self, forKey: .playerCount),
             maxPlayers: try c.decodeIfPresent(Int.self, forKey: .maxPlayers) ?? LAN_MULTIPLAYER_MAX_CLIENTS,
             elysiumVersion: try c.decodeIfPresent(String.self, forKey: .elysiumVersion) ?? ELYSIUM_VERSION,
+            worldPreset: preset.rawValue,
             rpgClassesEnabled: try c.decodeIfPresent(Bool.self, forKey: .rpgClassesEnabled) ?? true,
             scriptSoundNames: try c.decodeIfPresent([String].self, forKey: .scriptSoundNames) ?? []
         )
@@ -576,8 +633,14 @@ public func sanitizedLANWorldIdentifier(_ raw: String, maxLength: Int = 48) -> S
 
 public func lanClientResumeKey(for summary: LANWorldSummary) -> String? {
     let worldID = sanitizedLANWorldIdentifier(summary.worldID)
-    guard !worldID.isEmpty, worldID != "unsaved" else { return nil }
-    return "\(worldID)#\(summary.seed)"
+    guard !worldID.isEmpty, worldID != "unsaved",
+          let preset = summary.compatibleWorldPreset
+    else { return nil }
+    let legacyNormalKey = "\(worldID)#\(summary.seed)"
+    guard let contentIdentity = preset.prehistoricContentIdentity else {
+        return legacyNormalKey
+    }
+    return "\(legacyNormalKey)#\(contentIdentity)"
 }
 
 public struct LANPlayerState: Codable, Equatable {
@@ -1074,6 +1137,9 @@ public struct LANEntitySnapshot: Codable, Equatable {
         case fuseProgress
         case fuseRapid
         case charged
+        case prehistoricAction
+        case prehistoricActionTicks
+        case prehistoricAirSupply
         case dimension
     }
 
@@ -1099,6 +1165,9 @@ public struct LANEntitySnapshot: Codable, Equatable {
     public var fuseProgress: Double?
     public var fuseRapid: Bool?
     public var charged: Bool?
+    public var prehistoricAction: String?
+    public var prehistoricActionTicks: Int?
+    public var prehistoricAirSupply: Int?
     public var dimension: Int
 
     public init(
@@ -1124,6 +1193,9 @@ public struct LANEntitySnapshot: Codable, Equatable {
         fuseProgress: Double? = nil,
         fuseRapid: Bool? = nil,
         charged: Bool? = nil,
+        prehistoricAction: String? = nil,
+        prehistoricActionTicks: Int? = nil,
+        prehistoricAirSupply: Int? = nil,
         dimension: Int = Dim.overworld.rawValue
     ) {
         self.entityID = entityID
@@ -1154,6 +1226,17 @@ public struct LANEntitySnapshot: Codable, Equatable {
             self.fuseRapid = nil
             self.charged = nil
         }
+        if let definition = PrehistoricCreatureDefinition.named(self.type) {
+            self.prehistoricAction = normalizedPrehistoricAction(prehistoricAction).rawValue
+            self.prehistoricActionTicks = max(0, min(1_200, prehistoricActionTicks ?? 0))
+            self.prehistoricAirSupply = definition.medium == .aquatic
+                ? prehistoricAirSupply.map { max(0, min(300, $0)) }
+                : nil
+        } else {
+            self.prehistoricAction = nil
+            self.prehistoricActionTicks = nil
+            self.prehistoricAirSupply = nil
+        }
         self.dimension = isValidLANDimension(dimension) ? dimension : Dim.overworld.rawValue
     }
 
@@ -1182,6 +1265,9 @@ public struct LANEntitySnapshot: Codable, Equatable {
             fuseProgress: try c.decodeIfPresent(Double.self, forKey: .fuseProgress),
             fuseRapid: try c.decodeIfPresent(Bool.self, forKey: .fuseRapid),
             charged: try c.decodeIfPresent(Bool.self, forKey: .charged),
+            prehistoricAction: try c.decodeIfPresent(String.self, forKey: .prehistoricAction),
+            prehistoricActionTicks: try c.decodeIfPresent(Int.self, forKey: .prehistoricActionTicks),
+            prehistoricAirSupply: try c.decodeIfPresent(Int.self, forKey: .prehistoricAirSupply),
             dimension: try c.decodeIfPresent(Int.self, forKey: .dimension) ?? Dim.overworld.rawValue
         )
     }
@@ -2744,7 +2830,7 @@ public func sanitizedLANTemplateName(_ raw: String) -> String {
 public func sanitizedLANEntityType(_ raw: String) -> String {
     var cleaned = ""
     for scalar in raw.unicodeScalars {
-        if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" || scalar == "-" || scalar == ":" {
+        if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" || scalar == "-" || scalar == ":" || scalar == "." {
             cleaned.unicodeScalars.append(scalar)
         }
     }

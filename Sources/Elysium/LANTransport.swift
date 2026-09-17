@@ -698,6 +698,7 @@ final class LANMultiplayerManager {
             difficulty: rec?.difficulty ?? game.world.difficulty,
             dimension: game.dim.rawValue,
             playerCount: 1,
+            worldPreset: game.world.generationSettings.preset.rawValue,
             rpgClassesEnabled: game.world.rule(RPG_CLASSES_GAME_RULE),
             scriptSoundNames: game.scriptSoundNames()
         )
@@ -2109,6 +2110,16 @@ final class LANMultiplayerManager {
     ) {
         switch message {
         case .serverAccept(_, let world, let resumeToken):
+            guard world.hasCompatiblePrehistoricContent else {
+                endClientSession(
+                    peer: peer,
+                    generation: generation,
+                    state: .rejected,
+                    statusLine: "LAN join rejected: incompatible prehistoric content.",
+                    connectionLossReason: nil
+                )
+                return
+            }
             peer.accepted = true
             clientConnectDeadline = nil
             clientWaitingSince = nil
@@ -2467,6 +2478,7 @@ final class LANMultiplayerManager {
             difficulty: 2,
             dimension: Dim.overworld.rawValue,
             playerCount: max(1, playerCount + 1),
+            worldPreset: activeGame?.world.generationSettings.preset.rawValue ?? WorldPreset.normal.rawValue,
             rpgClassesEnabled: activeGame?.world.rule(RPG_CLASSES_GAME_RULE) ?? true,
             scriptSoundNames: activeGame?.scriptSoundNames() ?? []
         )
@@ -3444,6 +3456,16 @@ final class LANMultiplayerManager {
             }
             return
         }
+        guard batch.world?.hasCompatiblePrehistoricContent ?? true else {
+            endClientSession(
+                peer: peer,
+                generation: generation,
+                state: .rejected,
+                statusLine: "LAN replication rejected: incompatible prehistoric content.",
+                connectionLossReason: nil
+            )
+            return
+        }
         let ack = LANReplicationAck(tick: batch.tick, receivedSequence: receivedSequence)
         send(.replicationAck(playerID: localPeerID, ack: ack), to: peer)
         enqueueClientSessionMutation(peer: peer, generation: generation) { manager in
@@ -3469,6 +3491,7 @@ final class LANMultiplayerManager {
         if let expectedPeer {
             guard isCurrentClientSession(expectedPeer, generation: generation) else { return false }
         }
+        guard batch.world?.hasCompatiblePrehistoricContent ?? true else { return false }
 
         let mirrorReport = clientReplicationSession.apply(batch)
         if ProcessInfo.processInfo.environment["ELYSIUM_LAN_PROBE_LOG"] != nil,

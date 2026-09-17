@@ -134,6 +134,15 @@ open class LivingEntity: Entity {
         rng = RandomX(UInt32(gameRng.nextInt(1000000000)))
     }
 
+    /// Opt-in deterministic entities must not consume the process-global
+    /// gameplay stream merely by being constructed.  Normal entities retain
+    /// the historical initializer above; callers that own a stable local seed
+    /// use this explicit path instead.
+    public init(world: World, deterministicRNGSeed: UInt32) {
+        super.init(world: world)
+        rng = RandomX(deterministicRNGSeed)
+    }
+
     public var breathesWaterOnly = false
     /// player-only props read through `(e as any)` in baseline goal filters
     open var gameMode: Int { 0 }

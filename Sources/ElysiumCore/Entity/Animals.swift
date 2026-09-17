@@ -27,6 +27,17 @@ open class Animal: Mob {
 
     public override init(world: World) {
         super.init(world: world)
+        configureAnimalDefaults()
+    }
+
+    /// Mirrors the ordinary animal setup without making a deterministic
+    /// subclass advance `gameRng` during construction.
+    public override init(world: World, deterministicRNGSeed: UInt32) {
+        super.init(world: world, deterministicRNGSeed: deterministicRNGSeed)
+        configureAnimalDefaults()
+    }
+
+    private func configureAnimalDefaults() {
         category = "creature"
         // Land animals keep their hooves dry: strolls, tempting, panicking and following all
         // route through the navigator, so refusing water there keeps herds off ponds and

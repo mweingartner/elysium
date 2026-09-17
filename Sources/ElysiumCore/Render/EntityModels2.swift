@@ -1468,6 +1468,10 @@ private func registerModels2() {
                                   packTex: ["entity/guardian_elder.png"]))
     let goat = MODELS["goat"]!
     M2("goat_kid", MobModel(texW: goat.texW, texH: goat.texH, parts: goat.parts, anim: goat.anim, scale: 0.5, paint: goat.paint))
+
+    // Appended native assets for the opt-in Prehistoric Worlds profiles.  This
+    // leaves every established bestiary registration and its frozen UVs intact.
+    registerPrehistoricModels()
 }
 
 private func hoglinPaint(_ s: EntitySkin) {

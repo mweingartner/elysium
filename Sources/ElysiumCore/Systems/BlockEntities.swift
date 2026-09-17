@@ -311,6 +311,12 @@ public func registerBlockEntityHandlers() {
     }
 
     beTickHandlers["spawner"] = { world, be in
+        // Prehistoric worlds own their creature population. Keep every
+        // retained legacy spawner inert before it advances its delay or draws
+        // from the authoritative gameplay RNG; this covers dungeon,
+        // mineshaft, stronghold, and Nether-fortress spawners without changing
+        // the landmark geometry or ordinary-world behavior.
+        guard !world.generationSettings.preset.isPrehistoric else { return }
         // require player within 16
         let near = !world.getEntitiesNear(Double(be.x) + 0.5, Double(be.y) + 0.5, Double(be.z) + 0.5, 16, filter: { ($0 as? Entity)?.isPlayer ?? false }).isEmpty
         if !near { return }

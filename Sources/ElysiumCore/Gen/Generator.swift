@@ -278,6 +278,13 @@ public func structureDefinitionsForGeneration(dim: Dim,
     switch dim {
     case .overworld:
         if settings.preset == .debugAllBlockStates { return [] }
+        // A prehistoric profile has no human settlement plans. Keep this
+        // decision here, alongside the generation domain filter, so `/locate`
+        // cannot report a village that its matching world-generation branch
+        // would never materialize. Other Overworld landmarks remain intact.
+        if settings.preset.isPrehistoric {
+            return STRUCTURES.filter { !["village", "pillager_outpost"].contains($0.id) }
+        }
         if settings.preset == .flat {
             return STRUCTURES.filter { $0.id == "village" || $0.id == "stronghold" }
         }
@@ -384,6 +391,43 @@ public final class ArraySink: ChunkSink {
         if lx < 0 || lx > 15 || lz < 0 || lz > 15 { return }
         entities.append(spec)
     }
+}
+
+/// Bootstrap generation has only one output chunk in hand, unlike runtime
+/// spawning which can inspect a live World. Keep large prehistoric specs
+/// safely inside that chunk and apply the same body-envelope rule before an
+/// `EntitySpec` is emitted. A footprint crossing an unknown chunk is rejected
+/// rather than guessed; runtime adoption repeats the authoritative check.
+func prehistoricBootstrapHasClearance(
+    _ sink: ChunkSink,
+    definition: PrehistoricCreatureDefinition,
+    x: Int,
+    y: Int,
+    z: Int
+) -> Bool {
+    let radius = definition.bodyClearanceRadius
+    let supportRadius = definition.groundSupportRadius
+    let vertical = definition.bodyClearanceHeight
+    guard y > sink.minY, y + vertical <= sink.maxY else { return false }
+    for zz in (z - radius)...(z + radius) {
+        for xx in (x - radius)...(x + radius) {
+            let insideChunk = floorDiv(xx, CHUNK_W) == sink.cx && floorDiv(zz, CHUNK_W) == sink.cz
+            guard insideChunk else { return false }
+            if abs(xx - x) <= supportRadius, abs(zz - z) <= supportRadius {
+                let below = sink.get(xx, y - 1, zz)
+                let belowID = below >> 4
+                guard below > 0, belowID < blockDefs.count, blockDefs[belowID].solid else { return false }
+            }
+            for yy in y..<(y + vertical) {
+                let cell = sink.get(xx, yy, zz)
+                let block = cell >> 4
+                guard cell >= 0,
+                      block == 0 || (block < blockDefs.count && blockDefs[block].replaceable)
+                else { return false }
+            }
+        }
+    }
+    return true
 }
 
 private struct OverworldGenKey: Hashable {
@@ -732,14 +776,17 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
         // Rich Resources promises a living, resource-rich surface. It receives
         // enough deterministic bootstrap packs to be noticeable before the
         // runtime natural-spawn loop has had time to fill the area.
-        let passiveBootstrapChance = settings.preset == .moderateHillsResourceRich ? 0.35 : 0.1
+        let passiveBootstrapChance = settings.preset == .moderateHillsResourceRich ? 0.35
+            : settings.preset.isPrehistoric ? 0.28 : 0.1
         if mobRng.nextFloat() < passiveBootstrapChance {
             let centerBiome = gen.surfaceBiomeAt(Double(cx * 16 + 8), Double(cz * 16 + 8))
-            let list = biomeDef(centerBiome.rawValue).creatures
+            let list = settings.preset.prehistoricProfile.map {
+                prehistoricSpawnEntries(profile: $0, category: "creature")
+            } ?? biomeDef(centerBiome.rawValue).creatures
             if !list.isEmpty {
                 let entry = mobRng.pickWeighted(list) { $0.weight }
                 let pack = entry.minPack + mobRng.nextInt(entry.maxPack - entry.minPack + 1)
-                for _ in 0..<pack {
+                for spawnOrdinal in 0..<pack {
                     let px = cx * 16 + mobRng.nextInt(16), pz = cz * 16 + mobRng.nextInt(16)
                     let py = sink.topY(px, pz)
                     // require real ground — topY over oceans returned the water
@@ -748,8 +795,21 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
                     let gid = ground >> 4
                     let grounded = ground != -1 && gid != Int(B.water) && gid != Int(B.lava)
                         && gid != 0 && blockDefs[gid].solid
-                    if py > 50 && py < 200 && grounded {
-                        sink.addEntity(EntitySpec(mob: entry.mob, x: Double(px) + 0.5, y: Double(py), z: Double(pz) + 0.5))
+                    let prehistoricDefinition = PrehistoricCreatureDefinition.named(entry.mob)
+                    let envelopeClear = prehistoricDefinition.map {
+                        prehistoricBootstrapHasClearance(sink, definition: $0, x: px, y: py, z: pz)
+                    } ?? true
+                    if py > 50 && py < 200 && grounded && envelopeClear {
+                        let data: [String: BEValue]
+                        if prehistoricDefinition != nil {
+                            // The generated pack ordinal is stable for this
+                            // chunk/spec and distinguishes even a rare pair
+                            // that lands on the same quantized coordinate.
+                            data = ["prehistoricSeedSalt": .num(Double(spawnOrdinal + 1))]
+                        } else {
+                            data = [:]
+                        }
+                        sink.addEntity(EntitySpec(mob: entry.mob, x: Double(px) + 0.5, y: Double(py), z: Double(pz) + 0.5, data: data))
                     }
                 }
             }

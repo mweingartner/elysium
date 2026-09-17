@@ -10,14 +10,20 @@ public struct SpawnOpts {
     public var persistent = false
     public var captain = false
     public var variant: Int? = nil
+    /// Stable, optional local controller identity for an opt-in prehistoric
+    /// spawn. It is persisted on the creature, never interpreted by ordinary
+    /// entity factories.
+    public var prehistoricSeedSalt: UInt32? = nil
 
     public init(baby: Bool = false, size: Int? = nil, persistent: Bool = false,
-                captain: Bool = false, variant: Int? = nil) {
+                captain: Bool = false, variant: Int? = nil,
+                prehistoricSeedSalt: UInt32? = nil) {
         self.baby = baby
         self.size = size
         self.persistent = persistent
         self.captain = captain
         self.variant = variant
+        self.prehistoricSeedSalt = prehistoricSeedSalt
     }
 }
 

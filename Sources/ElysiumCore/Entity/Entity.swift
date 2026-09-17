@@ -85,6 +85,29 @@ public struct EntityData: Codable, Equatable {
     public var deathCause: String?
     public var deathAttacker: String?
     public var swimTarget: [Double]?
+    /// Closed semantic presentation state for the opt-in prehistoric roster.
+    /// These are deliberately bounded by `PrehistoricCreature` rather than a
+    /// free-form entity metadata dictionary so saves and LAN mirrors remain
+    /// schema-checked.
+    public var prehistoricAction: String?
+    public var prehistoricActionTicks: Int?
+    /// Only aquatic prehistoric creatures use this bounded authoritative
+    /// reserve; ordinary entities retain their historical transient air path.
+    public var prehistoricAirSupply: Int?
+    /// The opt-in roster's ambient-audio cooldown is persisted with its
+    /// controller stream. Otherwise a reload would reset it to zero and inject
+    /// an artificial ambient controller-RNG draw before the scheduled time.
+    public var prehistoricAmbientSoundTimer: Int?
+    /// Exact sfc32 controller state for the opt-in roster. Four fixed words
+    /// avoid an unbounded decoder collection and preserve its next controller
+    /// draw across reload; transient routes intentionally recompute from terrain.
+    public var prehistoricRngA: UInt32?
+    public var prehistoricRngB: UInt32?
+    public var prehistoricRngC: UInt32?
+    public var prehistoricRngD: UInt32?
+    /// Stable initial-stream disambiguator for generated/manual prehistoric
+    /// instances that would otherwise share type and quantized coordinates.
+    public var prehistoricSeedSalt: UInt32?
 
     public init() {}
 }

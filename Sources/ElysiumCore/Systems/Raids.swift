@@ -44,6 +44,11 @@ public final class RaidManager {
 
     /// call when a player with Bad Omen enters a village area
     public func tryStartRaid(_ world: World, _ player: Player) {
+        // Prehistoric profiles own their hostile-event domain. Keep this
+        // defensive boundary inside the manager as well as GameCore's
+        // scheduler, because imported state and direct callers can bypass
+        // that outer tick gate.
+        guard !world.generationSettings.preset.isPrehistoric else { return }
         if !player.hasEffect("bad_omen") { return }
         // is there a village nearby? (bell or villagers)
         let villagers = world.getEntitiesNear(player.x, player.y, player.z, 48, filter: { ($0 as? Entity)?.type == "villager" })
@@ -62,6 +67,9 @@ public final class RaidManager {
     }
 
     public func tick(_ world: World) {
+        // See tryStartRaid: a direct manager call must neither mutate an
+        // imported raid nor emit modern raiders in a prehistoric world.
+        guard !world.generationSettings.preset.isPrehistoric else { return }
         raids.removeAll { $0.world == nil }
         for raid in raids {
             if raid.world !== world || !raid.active { continue }
@@ -145,6 +153,10 @@ public let raidManager = RaidManager()
 
 /// patrols: occasionally spawn pillager patrols in the world
 public func tryPatrolSpawn(_ world: World, _ players: [Player], _ rng: inout RandomX) {
+    // The scheduler guards this too, but direct callers/imported simulation
+    // must not consume patrol RNG or emit modern raiders in a profile that
+    // owns its hostile-event domain.
+    guard !world.generationSettings.preset.isPrehistoric else { return }
     if world.time % 12000 != 0 || world.difficulty == 0 || players.isEmpty { return }
     if rng.nextFloat() > 0.2 { return }
     let p = players[rng.nextInt(players.count)]

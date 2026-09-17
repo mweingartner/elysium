@@ -254,9 +254,13 @@ artifact_sha256() {
 EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
 EXPECTED_STORAGE_API_SHA256='08acf52a794de902a69658a0926181918c62a30f7975cd0d685d3d3baa7c745b'
 EXPECTED_STORAGE_OBJECT_SHA256='43ea474d75be3fc2311f1a95295c94d23329249f505ed0c14878f7318e14b3a8'
-EXPECTED_SAVES_SOURCE_SHA256='c9e0c55b400444f1262f3ff0c6f63fdcd4e5ff95e40e4d87f7dbee919c58a2b1'
+# prehistoric-worlds 1.3.0: Saves now rejects unknown/future prehistoric
+# profile IDs at the persistence boundary, and GameCore/LAN content changes
+# relink the Core object and both production consumers. The reviewed AST
+# inventory hash moves with Saves; storage/text-input surfaces remain pinned.
+EXPECTED_SAVES_SOURCE_SHA256='5efd5a22b43aeb04760462c8a3fd3dfae5c49ff61b7271cc30ec981b86b9786f'
 EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd69d2764b50eaf08'
-EXPECTED_CORE_CAPABILITY_SHA256='74174593860b79cca66bec942e05cfd707276281517d6739a8ce9db7221becd8'
+EXPECTED_CORE_CAPABILITY_SHA256='2c14c21b1045d414dd7b4931c63db6074df16ffe0cdbf2f29b1c6cd5abcd169e'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3'
 # land-animal shore escape: AI.swift, Animals.swift and Entity.swift add footprint-aware
@@ -302,7 +306,13 @@ EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75
 # storage API, Storage/TextInput source, and their object pins remain unchanged.
 # The compiler-AST inventory renews because Saves.swift owns exact LAN-version
 # compatibility. docs/release-1.2.2-build.md records the renewed hashes.
-EXPECTED_GAME_CORE_SOURCE_SHA256='9aae5e19b00304145157b2a84ccd81dbf7dcb6effc0092d1c1e6952116a28f45'
+# prehistoric-worlds 1.3.0: the four opt-in profiles add a strict generated
+# entity boundary and make retained legacy spawners inert before any timer/RNG
+# side effect. The roster's bounded ambient cooldown is saved with its private
+# controller stream, preventing a reload from introducing an early controller
+# draw. These GameCore/Entity/Core changes relink both production consumers;
+# Saves, storage/capability, Player, and text-input reviewed surfaces are unchanged.
+EXPECTED_GAME_CORE_SOURCE_SHA256='2734c85e3710b4992cdc4478c0a55dbff761ecc6268ab41e78928291692b871d'
 # worldgen-form-integrity: the final structure pass adds terrain-backed surface
 # plans, deterministic realized-piece collision resolution, and supported routes
 # through villages, dungeons, mineshafts, strongholds, Ancient Cities, and the
@@ -313,7 +323,7 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='9aae5e19b00304145157b2a84ccd81dbf7dcb6effc0092
 # 5ea20c16d0c9eb828514102c8d6411a24c01be26d466782186363aec330a2721,
 # Elysium 88b4cfa3009b6fa8f474b404af98f8b8b50f8daae92a782ca249c9cd6d9a854d,
 # and elysmoke 710e4462b3f1ecf21ee6c1d5c65722e1fc5f75faf7c498a4b1294509600914c9.
-EXPECTED_CORE_OBJECT_SHA256='fe800a9ece392f1917ce9b3fcf749f8ccaa4f179a2ad954af4611ce9447c29e9'
+EXPECTED_CORE_OBJECT_SHA256='2e0921f07e97e975947c768267205b8bffe004feca7f5b467012da258028fc94'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -323,8 +333,8 @@ EXPECTED_CORE_OBJECT_SHA256='fe800a9ece392f1917ce9b3fcf749f8ccaa4f179a2ad954af46
 # input or capability source changed. See docs/first-person-minecraft-comparison.md.
 # Tool-family action audio additionally changes the procedural app recipes, so
 # the linked Elysium and elysmoke stripped-product pins renew transitively.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='553559e3ab03ca61d4b2c16e05d909e5796cff2352c1679f8bb9a3a96dcd8758'
-EXPECTED_SMOKE_PRODUCT_SHA256='0a13660761c0e273359a089375ccff8bcba6589722a4af7cf79f3b937022e0cd'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='a9eb3393c93a97f26d59ea239349f7a5407e71422d32f80b6e5b442262916af1'
+EXPECTED_SMOKE_PRODUCT_SHA256='fe5561b89197d0175ef53f27126169db3e928b9f3f9061bc8d9973cc89738f97'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

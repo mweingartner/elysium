@@ -122,6 +122,15 @@ public final class OverworldGen {
     private let LAVA = cell(B.lava)
     private let BEDROCK = cell(B.bedrock)
 
+    /// Ancient Seas is deliberately a coast-heavy alternative, not a second
+    /// global terrain algorithm.  It shifts the existing continuous
+    /// continentalness field just far enough toward ocean that ordinary
+    /// mid-continent margins become navigable sea while high-continent terrain
+    /// remains as islands and safe landfalls.  Reusing the same climate field
+    /// keeps every chunk edge, oracle query, and structure lookup exactly
+    /// deterministic without touching normal-world terrain.
+    private let ancientSeasContinentalnessOffset = 0.24
+
     public init(_ seed: UInt32, settings: WorldGenerationSettings = .normal) {
         self.seed = seed
         self.settings = settings
@@ -140,7 +149,26 @@ public final class OverworldGen {
         bandOffset = SimplexNoise(seed &+ 1212)
     }
 
+    /// The profile-specific terrain climate is intentionally private to this
+    /// generator.  It is only consulted by the opt-in Ancient Seas preset;
+    /// every normal preset continues through its pre-existing climate and
+    /// terrain path unchanged.
+    private func terrainClimate(_ cl: Climate) -> Climate {
+        guard settings.preset == .prehistoricAncientSeas else { return cl }
+        var coastal = cl
+        coastal.c = clampD(coastal.c - ancientSeasContinentalnessOffset, -1, 1)
+        return coastal
+    }
+
+    private func terrainSurfaceBiome(_ cl: Climate) -> Biome {
+        if settings.preset == .singleBiomeSurface { return settings.singleBiome }
+        return selectBiome(terrainClimate(cl))
+    }
+
     private func terrainBaseHeight(_ cl: Climate) -> Double {
+        if settings.preset == .prehistoricAncientSeas {
+            return baseHeight(terrainClimate(cl))
+        }
         var h = baseHeight(cl)
         if settings.preset == .moderateHillsResourceRich {
             let seaDelta = h - Double(SEA)
@@ -170,8 +198,10 @@ public final class OverworldGen {
     /// the same detail noise land within a couple of blocks of the actual terrain.
     public func refinedHeightEstimate(_ x: Double, _ z: Double) -> Int {
         let cl = climate.at(x, z)
+        let terrainCl = terrainClimate(cl)
         let target = terrainBaseHeight(cl)
-        let ampBase = SPLINE_3D_AMP.at(cl.e) * clampD(mapRange(cl.c, -0.19, -0.05, 0.35, 1), 0.35, 1)
+        let ampBase = SPLINE_3D_AMP.at(terrainCl.e)
+            * clampD(mapRange(terrainCl.c, -0.19, -0.05, 0.35, 1), 0.35, 1)
         let amp: Double
         if settings.preset == .amplified {
             amp = ampBase * 1.65
@@ -187,8 +217,7 @@ public final class OverworldGen {
     }
 
     public func surfaceBiomeAt(_ x: Double, _ z: Double) -> Biome {
-        if settings.preset == .singleBiomeSurface { return settings.singleBiome }
-        return selectBiome(climate.at(x, z))
+        terrainSurfaceBiome(climate.at(x, z))
     }
 
     public func aquiferAt(_ x: Double, _ z: Double, _ cl: Climate) -> AquiferInfo {
@@ -245,7 +274,7 @@ public final class OverworldGen {
                 cl.pv = peaksValleys(cl.w)
                 climates[z * 16 + x] = cl
                 heights[z * 16 + x] = Int16(detRound(terrainBaseHeight(cl)))
-                let surfaceBiome: Biome = settings.preset == .singleBiomeSurface ? settings.singleBiome : selectBiome(cl)
+                let surfaceBiome = terrainSurfaceBiome(cl)
                 surfaceBiomes[z * 16 + x] = UInt8(surfaceBiome.rawValue)
             }
         }
@@ -260,6 +289,7 @@ public final class OverworldGen {
                 // min(15,…) clamp reused the x/z=15 column for the x/z=16 edge,
                 // so adjacent chunks disagreed about their shared boundary
                 let cl = climate.at(wx, wz)
+                let terrainCl = terrainClimate(cl)
                 let target = terrainBaseHeight(cl)
                 // Rich Resources thins the cave noise so its hills stay solid, but lava only
                 // enters the overworld through cave voids under a lava aquifer. Those regions
@@ -267,7 +297,8 @@ public final class OverworldGen {
                 // lakes every other map has.
                 let sparseCaves = settings.preset == .moderateHillsResourceRich
                     && !aquiferAt(wx, wz, cl).lava
-                let ampBase = SPLINE_3D_AMP.at(cl.e) * clampD(mapRange(cl.c, -0.19, -0.05, 0.35, 1), 0.35, 1)
+                let ampBase = SPLINE_3D_AMP.at(terrainCl.e)
+                    * clampD(mapRange(terrainCl.c, -0.19, -0.05, 0.35, 1), 0.35, 1)
                 let amp: Double
                 if settings.preset == .amplified {
                     amp = ampBase * 1.65
@@ -327,6 +358,7 @@ public final class OverworldGen {
             for x in 0..<16 {
                 let ci = z * 16 + x
                 let cl = climates[ci]
+                let terrainCl = terrainClimate(cl)
                 let aq = aquiferAt(Double(baseX + x), Double(baseZ + z), cl)
                 let gx = x >> 2, gz = z >> 2
                 let fx = Double(x & 3) / 4, fz = Double(z & 3) / 4
@@ -349,7 +381,7 @@ public final class OverworldGen {
                         if d > 0 {
                             blocks[idx] = STONE
                             topSolid = y
-                        } else if y <= SEA && cl.c < -0.11 {
+                        } else if y <= SEA && terrainCl.c < -0.11 {
                             blocks[idx] = WATER
                         } else if y <= aq.level {
                             // lava aquifers are lava throughout — the old `y < 0`
@@ -376,7 +408,7 @@ public final class OverworldGen {
                         y += 1
                     }
                 }
-                if aq.level > SEA && cl.c >= -0.11 && topSolid < aq.level {
+                if aq.level > SEA && terrainCl.c >= -0.11 && topSolid < aq.level {
                     var y = max(topSolid + 1, SEA + 1)
                     let yMax = min(aq.level, GEN_MIN_Y + WORLD_H - 1)
                     while y <= yMax {

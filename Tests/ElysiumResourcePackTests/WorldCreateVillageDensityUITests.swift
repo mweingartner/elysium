@@ -52,6 +52,56 @@ final class WorldCreateVillageDensityUITests: XCTestCase {
                       "pointer activation must reach \(button.label)", file: file, line: line)
     }
 
+    /// Select by the actual screen state rather than assuming a fixed number
+    /// of entries in the evolving world-type cycle. The bound makes a broken
+    /// selector fail rather than looping forever.
+    private func selectWorldPreset(_ target: WorldPreset, on screen: WorldCreateScreen,
+                                   ui: UIManager, game: GameCore,
+                                   file: StaticString = #filePath, line: UInt = #line) throws {
+        let worldType = try button("World Type:", on: screen)
+        for _ in 0...WorldPreset.extendedCycle.count {
+            if !screen.realityDerived, screen.worldPreset == target { return }
+            tap(worldType, screen: screen, ui: ui, game: game, file: file, line: line)
+        }
+        if !screen.realityDerived, screen.worldPreset == target { return }
+        XCTFail("World Type selector did not reach \(target.displayName)", file: file, line: line)
+    }
+
+    private func selectRealityDerived(on screen: WorldCreateScreen, ui: UIManager, game: GameCore,
+                                      file: StaticString = #filePath, line: UInt = #line) throws {
+        let worldType = try button("World Type:", on: screen)
+        for _ in 0...WorldPreset.extendedCycle.count {
+            if screen.realityDerived { return }
+            tap(worldType, screen: screen, ui: ui, game: game, file: file, line: line)
+        }
+        if screen.realityDerived { return }
+        XCTFail("World Type selector did not reach Reality Derived", file: file, line: line)
+    }
+
+    private func selectDungeonDensity(_ target: DungeonDensity, on screen: WorldCreateScreen,
+                                      ui: UIManager, game: GameCore,
+                                      file: StaticString = #filePath, line: UInt = #line) throws {
+        let dungeon = try button("Dungeons:", on: screen)
+        for _ in 0..<DungeonDensity.allCases.count {
+            if screen.dungeonDensity == target { return }
+            tap(dungeon, screen: screen, ui: ui, game: game, file: file, line: line)
+        }
+        if screen.dungeonDensity == target { return }
+        XCTFail("Dungeon selector did not reach \(target.displayName)", file: file, line: line)
+    }
+
+    private func selectVillageDensity(_ target: VillageDensity, on screen: WorldCreateScreen,
+                                      ui: UIManager, game: GameCore,
+                                      file: StaticString = #filePath, line: UInt = #line) throws {
+        let village = try button("Villages:", on: screen)
+        for _ in 0..<VillageDensity.allCases.count {
+            if screen.villageDensity == target { return }
+            tap(village, screen: screen, ui: ui, game: game, file: file, line: line)
+        }
+        if screen.villageDensity == target { return }
+        XCTFail("Village selector did not reach \(target.displayName)", file: file, line: line)
+    }
+
     func testVillageSelectorIsVisibleAndUsableAcrossCompactAndStandardLayouts() throws {
         let fixture = try makeFixture()
         let ui = try makeUI(width: 480, height: 240)
@@ -82,8 +132,8 @@ final class WorldCreateVillageDensityUITests: XCTestCase {
 
         // Single Biome inserts its own row. Both procedural controls must move
         // together while staying above Create at the minimum supported height.
+        try selectWorldPreset(.singleBiomeSurface, on: screen, ui: ui, game: fixture.game)
         var worldType = try button("World Type:", on: screen)
-        for _ in 0..<5 { tap(worldType, screen: screen, ui: ui, game: fixture.game) }
         XCTAssertEqual(worldType.label, "World Type: Single Biome")
         village = try button("Villages:", on: screen)
         dungeon = try button("Dungeons:", on: screen)
@@ -110,7 +160,8 @@ final class WorldCreateVillageDensityUITests: XCTestCase {
 
         // Reality Derived worlds do not use procedural map generation; hiding
         // the selector here confirms it is not a stale hit target.
-        for _ in 0..<2 { tap(worldType, screen: screen, ui: ui, game: fixture.game) }
+        try selectRealityDerived(on: screen, ui: ui, game: fixture.game)
+        worldType = try button("World Type:", on: screen)
         XCTAssertEqual(worldType.label, "World Type: Reality Derived")
         XCTAssertFalse(try button("Villages:", on: screen).visible)
         XCTAssertFalse(try button("Dungeons:", on: screen).visible)
@@ -209,8 +260,8 @@ final class WorldCreateVillageDensityUITests: XCTestCase {
         // route so the test verifies both its transition and its hidden hit
         // targets rather than mutating the screen's fields directly.
         ui.optionDown = true
+        try selectWorldPreset(.debugAllBlockStates, on: screen, ui: ui, game: fixture.game)
         let worldType = try button("World Type:", on: screen)
-        for _ in 0..<7 { tap(worldType, screen: screen, ui: ui, game: fixture.game) }
         XCTAssertEqual(worldType.label, "World Type: Debug Mode")
         XCTAssertEqual(screen.dungeonDensity, .normal)
         XCTAssertEqual(screen.villageDensity, .normal)
@@ -228,5 +279,54 @@ final class WorldCreateVillageDensityUITests: XCTestCase {
                      "a hidden village selector must retire its AX Press element")
         XCTAssertFalse(screen.performTextAccessibilityAction("create.dungeons", ui, fixture.game))
         XCTAssertFalse(screen.performTextAccessibilityAction("create.villages", ui, fixture.game))
+    }
+
+    func testEachPrehistoricProfileHidesAndCanonicalizesVillagesWhileKeepingDungeons() throws {
+        let fixture = try makeFixture()
+        let ui = try makeUI(width: 480, height: 240)
+        let screen = WorldCreateScreen()
+        ui.open(screen, fixture.game)
+
+        let prehistoricPresets: [WorldPreset] = [
+            .prehistoricLostWorld,
+            .prehistoricJurassicGiants,
+            .prehistoricCretaceousFrontiers,
+            .prehistoricAncientSeas,
+        ]
+        XCTAssertEqual(WorldPreset.normalCycle.filter { $0.isPrehistoric }, prehistoricPresets,
+                       "adding a profile must extend this UI contract test")
+
+        // Reaching Lost World from Default legitimately crosses Superflat,
+        // which historically canonicalizes dungeons. Verify that transition
+        // explicitly, then exercise the contiguous prehistoric segment: none
+        // of those profiles may clear a supported dungeon selection.
+        try selectDungeonDensity(.more, on: screen, ui: ui, game: fixture.game)
+        try selectVillageDensity(.many, on: screen, ui: ui, game: fixture.game)
+        try selectWorldPreset(.prehistoricLostWorld, on: screen, ui: ui, game: fixture.game)
+        XCTAssertEqual(screen.dungeonDensity, .normal,
+                       "the route through Superflat must preserve its historical dungeon canonicalization")
+        XCTAssertEqual(screen.villageDensity, .normal,
+                       "Lost World must clear an inapplicable village selection")
+
+        try selectDungeonDensity(.more, on: screen, ui: ui, game: fixture.game)
+        for preset in prehistoricPresets {
+            try selectWorldPreset(preset, on: screen, ui: ui, game: fixture.game)
+
+            let dungeon = try button("Dungeons:", on: screen)
+            let village = try button("Villages:", on: screen)
+            XCTAssertEqual(screen.worldPreset, preset)
+            XCTAssertFalse(screen.realityDerived)
+            XCTAssertEqual(screen.dungeonDensity, .more, "\(preset.displayName) must retain dungeons")
+            XCTAssertEqual(screen.villageDensity, .normal,
+                           "\(preset.displayName) must clear an inapplicable village selection")
+            XCTAssertTrue(dungeon.visible, "\(preset.displayName) must keep the dungeon selector")
+            XCTAssertFalse(village.visible, "\(preset.displayName) must hide the village selector")
+            XCTAssertEqual(dungeon.label, "Dungeons: More")
+            XCTAssertEqual(village.label, "Villages: Normal")
+            XCTAssertNotNil(screen.textAccessibilityDescriptors(ui, fixture.game)
+                .first { $0.id == "create.dungeons" })
+            XCTAssertNil(screen.textAccessibilityDescriptors(ui, fixture.game)
+                .first { $0.id == "create.villages" })
+        }
     }
 }

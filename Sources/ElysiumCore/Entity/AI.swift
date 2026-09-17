@@ -80,6 +80,15 @@ public func findPath(_ world: World, _ fromX: Double, _ fromY: Double, _ fromZ: 
                     if above != 0 && blockDefs[above].solid { continue }
                 }
                 if !walkable(world, nx, ny, nz, avoidWater) { continue }
+                // Ordinary mobs retain the frozen point-path behavior. The
+                // opt-in prehistoric roster asks for a bounded whole-body
+                // check before a large creature accepts a node, preventing a
+                // valid foot point from steering a multi-block animal into a
+                // one-block gap or low canopy.
+                if let footprint, footprint.requiresBodyAwarePathing,
+                   !footprint.hasPathClearance(atX: nx, y: ny, z: nz) {
+                    continue
+                }
                 if avoidWater, let footprint,
                    footprint.touchesWater(atX: Double(nx) + 0.5, y: Double(ny), z: Double(nz) + 0.5, below: 0.5) { continue }
                 if diag {
@@ -303,6 +312,12 @@ open class Mob: LivingEntity {
     /// affected creature cannot navigate, acquire targets, attack, or leash
     /// pull for its full declared duration.
     open var suppressesMobAI: Bool { skillTreeStunTicks > 0 }
+
+    /// Large articulated creatures can opt into a bounded body-volume check
+    /// during path construction. `false` preserves all established mob paths.
+    open var requiresBodyAwarePathing: Bool { false }
+
+    open func hasPathClearance(atX x: Int, y: Int, z: Int) -> Bool { true }
 
     open override func tick() { mobTick() }
 

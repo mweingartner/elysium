@@ -6,6 +6,7 @@
 import AVFoundation
 import Foundation
 import os
+import ElysiumCore
 
 // ---------------------------------------------------------------------------
 // voices
@@ -972,6 +973,45 @@ private func buildRecipes() {
     }
     R("entity.pig.saddle", "friendly", nil) { s, _, _ in
         s.noiseBurst(dur: 0.12, freq: 1100, q: 1, vol: 0.3)
+    }
+
+    // Original native procedural sound banks for every prehistoric species.
+    // These are authored synthesis recipes, not imported recordings; the
+    // species name remains in the accessibility subtitle and simulation never
+    // depends on the randomized voice variation.
+    for definition in PrehistoricCreatureDefinition.all {
+        let root = "entity.\(definition.id)"
+        let predator = definition.isPredatory || definition.canCharge
+        let base: Double
+        let oscillator: OscType
+        let duration: Double
+        let slide: Double
+        switch definition.medium {
+        case .land:
+            base = max(75, 390 - definition.authoringLengthMetres * 18)
+            oscillator = predator ? .sawtooth : .triangle
+            duration = predator ? 0.42 : 0.52
+            slide = predator ? 0.68 : 0.86
+        case .air:
+            base = max(180, 680 - definition.authoringLengthMetres * 24)
+            oscillator = .sine
+            duration = 0.28
+            slide = 1.28
+        case .aquatic:
+            base = max(90, 330 - definition.authoringLengthMetres * 11)
+            oscillator = predator ? .sawtooth : .sine
+            duration = 0.36
+            slide = predator ? 0.72 : 1.12
+        }
+        let subtitle = "\(definition.displayName) calls"
+        mobVoice("\(root).ambient", predator ? "hostile" : "friendly", subtitle,
+                 base, oscillator, duration, slide, definition.medium == .air ? 7 : 3)
+        mobVoice("\(root).hurt", predator ? "hostile" : "friendly",
+                 "\(definition.displayName) hurts", base * 1.18, oscillator,
+                 max(0.16, duration * 0.64), 0.66, 2)
+        mobVoice("\(root).death", predator ? "hostile" : "friendly",
+                 "\(definition.displayName) dies", base * 0.9, oscillator,
+                 max(0.28, duration * 1.15), 0.46, 1)
     }
 
     // projectiles & misc
