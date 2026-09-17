@@ -33,7 +33,7 @@ verify_archive "Faithful 64x - December 2025 Release.zip" \
     assets/minecraft/textures/gui/container/inventory.png \
     assets/minecraft/textures/font/ascii.png
 verify_archive "KUBIKOS Cubic World - Elysium Theme.zip" \
-    3ffdebe0e5a4025e1194ee6c3c30ce43b5a3cb43049d5e31179f7624b33bedb3 \
+    e84a2e32ab95e250d631734bbdf26e25fd430fe51138841136ebbe782c5bdf2c \
     pack.mcmeta LICENSE.txt CREDITS.txt \
     assets/elysium/textures/tiles/stone.png \
     assets/elysium/textures/tiles/white_bed_top.png \

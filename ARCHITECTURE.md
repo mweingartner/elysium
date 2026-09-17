@@ -276,6 +276,15 @@ and celestial sources. A KUBIKOS selection is rejected if that closed coverage c
 so a missing alternate asset cannot silently borrow a Faithful pixel. The closed optional catalog
 contains Ore Borders 64x and Static Lanterns; both are off by default and are compatible only with the
 Faithful base. Unrelated user packs retain their existing higher-priority order.
+KUBIKOS recipes sample only declared coherent source regions: an inset Cube.fbx material face, or a
+named repeatable water/lava shader surface and sapphire emission swatch where the model diffuse is
+shader-darkened. The builder excludes heterogeneous Unity UV atlases such as `Items_D` and
+`TreesAndPlants_D`; it never downsamples or wraps a whole unwrap. Representative decoded terrain,
+water/lava, gem, item, GUI, and title pixels are snapshot-reviewed alongside direct source-to-runtime
+atlas correspondence, so archive hash validation cannot silently approve a visually malformed pack.
+The semantic classifier uses a stone fallback for unknown world tiles and a neutral item fallback for
+unknown direct icons; colour, fluid, vegetation, portal, and tool families are snapshot-covered so a
+newly registered path cannot silently inherit the grass material.
 The KUBIKOS Unity package and its generated ZIP are not source-controlled: before a local release,
 debug package, or pipeline run, `scripts/prepare-kubikos-theme.sh` takes either
 `ELYSIUM_KUBIKOS_UNITYPACKAGE` or its documented private-vault default, verifies the reviewed source

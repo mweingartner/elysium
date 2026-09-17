@@ -40,6 +40,43 @@ private enum Material: String, CaseIterable {
     case grass, soil, stone, sand, wood, water, lava, ice, crystal, foliage, snow, item
 }
 
+/// A normalized rectangle in one of KUBIKOS's fixed 1024px Cube.fbx diffuse layouts.  These
+/// layouts are UV unwraps rather than directly tileable images: the central face is the only
+/// coherent material surface.  Keep this provenance explicit instead of ever sampling an entire
+/// Unity sheet or relying on a positional heuristic.
+private struct NormalizedCrop {
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+}
+
+private enum MaterialTreatment {
+    case cubeFace
+    case coherentSurface(NormalizedCrop)
+}
+
+private struct MaterialRecipe {
+    let suffixes: [String]
+    let treatment: MaterialTreatment
+}
+
+// Cube.fbx maps its central face to U .275...490 and V .502...718.  PNG rows are top-origin,
+// so this is intentionally an inset of that face (292, 299, 200, 200 at 1024px), avoiding its
+// beveled seams and the stretched padding outside the UV island.
+private let cubeFaceCrop = NormalizedCrop(x: 292.0 / 1024.0, y: 299.0 / 1024.0,
+                                          width: 200.0 / 1024.0, height: 200.0 / 1024.0)
+
+// `Water.png` is the coherent repeatable ripple map used by the KUBIKOS water shader.  It is
+// distinct from `Water_D.png`, whose dark center is merely one term in a Cube.fbx UV layout.
+private let waterTextureCrop = NormalizedCrop(x: 0, y: 0, width: 1, height: 1)
+
+// Crystal2_E is the KUBIKOS sapphire emission source.  Unlike the black `Crytal_D` crystal-model
+// unwrap, this declared blue facet region is visibly coherent and keeps gem blocks/items luminous
+// without borrowing from its unrelated UV islands.
+private let sapphireCrystalCrop = NormalizedCrop(x: 160.0 / 1024.0, y: 160.0 / 1024.0,
+                                                 width: 160.0 / 1024.0, height: 160.0 / 1024.0)
+
 private let fixedBuildDate = Date(timeIntervalSince1970: 946_684_800)
 private let tileRecordMagic = Data("ELYSIUM_TILE_RGBA_V1\n".utf8)
 private let itemRecordMagic = Data("ELYSIUM_ITEM_RGBA_V1\n".utf8)
@@ -162,8 +199,18 @@ private func fnv1a(_ text: String) -> UInt64 {
     text.utf8.reduce(14_695_981_039_346_656_037) { ($0 ^ UInt64($1)) &* 1_099_511_628_211 }
 }
 
-private func material(for path: String) -> Material {
+/// Map a semantic Elysium path to one of the reviewed KUBIKOS swatches.  The caller supplies
+/// the fallback because an unknown solid tile should be stone-like, while an unknown direct item
+/// should use the neutral item swatch.  Keeping that distinction at this one boundary prevents a
+/// future identifier from silently becoming grass-green in either surface.
+private func material(for path: String, fallback: Material) -> Material {
     let lower = path.lowercased()
+    // These are solid terrain surfaces, unlike short/tall grass and plants below.  This check
+    // must precede the foliage family so a grass block cannot inherit the large plant atlas.
+    if lower == "grass" || lower == "grass_top" || lower == "grass_side" ||
+        lower.contains("grass_block") || lower.contains("grass_path") {
+        return .grass
+    }
     if lower.contains("water") || lower.contains("bubble") || lower.contains("kelp") ||
         lower.contains("coral") || lower.contains("prismarine") || lower.contains("conduit") {
         return .water
@@ -177,23 +224,109 @@ private func material(for path: String) -> Material {
         lower.contains("powder") || lower.contains("polar") {
         return lower.contains("ice") ? .ice : .snow
     }
-    if lower.contains("diamond") || lower.contains("emerald") || lower.contains("amethyst") ||
-        lower.contains("crystal") || lower.contains("redstone") || lower.contains("lapis") ||
+    if lower.contains("redstone") {
+        return .lava
+    }
+    if lower.contains("emerald") {
+        return .foliage
+    }
+    if lower.contains("diamond") || lower.contains("amethyst") || lower.contains("crystal") ||
+        lower.contains("lapis") ||
         lower.contains("enchant") || lower.contains("beacon") || lower.contains("end") {
         return .crystal
     }
-    if lower.contains("leaf") || lower.contains("grass") || lower.contains("vine") ||
-        lower.contains("flower") || lower.contains("sapling") || lower.contains("wheat") ||
-        lower.contains("crop") || lower.contains("moss") || lower.contains("fern") ||
-        lower.contains("azalea") || lower.contains("bamboo") || lower.contains("cactus") ||
-        lower.contains("plant") || lower.contains("mushroom") || lower.contains("root") {
-        return .foliage
+    if lower.contains("gold") || lower.contains("glistering") {
+        return .lava
     }
-    if lower.contains("wood") || lower.contains("log") || lower.contains("plank") ||
+    if lower.contains("iron") || lower.contains("copper") || lower.contains("netherite") ||
+        lower.contains("chainmail") || lower.contains("shear") || lower.contains("flint") ||
+        lower.contains("compass") || lower.contains("clock") || lower.contains("minecart") {
+        return .stone
+    }
+    // These colour families are limited to manufactured coloured surfaces.  They retain a useful
+    // semantic colour family without treating an unrelated word such as "bedrock" as a bed.
+    let colourableSurface = lower.contains("_bed_") || lower.hasSuffix("_bed") ||
+        lower.contains("_candle") || lower.contains("_shulker_box") ||
+        lower.contains("_stained_glass") || lower.hasSuffix("_wool")
+    if colourableSurface {
+        if lower.hasPrefix("red_") || lower.hasPrefix("orange_") || lower.hasPrefix("yellow_") {
+            return .lava
+        }
+        if lower.hasPrefix("light_blue_") || lower.hasPrefix("blue_") || lower.hasPrefix("cyan_") {
+            return .water
+        }
+        if lower.hasPrefix("green_") || lower.hasPrefix("lime_") {
+            return .foliage
+        }
+        if lower.hasPrefix("purple_") || lower.hasPrefix("magenta_") || lower.hasPrefix("pink_") {
+            return .crystal
+        }
+        if lower.hasPrefix("white_") {
+            return .snow
+        }
+        if lower.hasPrefix("black_") || lower.hasPrefix("gray_") || lower.hasPrefix("light_gray_") {
+            return .stone
+        }
+        if lower.hasPrefix("brown_") {
+            return .wood
+        }
+    }
+    if lower.contains("bee_nest") || lower.contains("beehive") ||
+        lower.contains("crimson_stem") || lower.contains("warped_stem") ||
+        lower.contains("cartography") || lower.contains("fletching") ||
+        lower.contains("composter") || lower.contains("jukebox") ||
+        lower.contains("lectern") || lower.contains("loom") || lower.contains("scaffolding") ||
+        lower.contains("note_block") || lower.contains("pumpkin") ||
+        lower.contains("wood") || lower.contains("log") || lower.contains("plank") ||
         lower.contains("chest") || lower.contains("barrel") || lower.contains("ladder") ||
         lower.contains("door") || lower.contains("fence") || lower.contains("sign") ||
         lower.contains("bookshelf") || lower.contains("crafting") || lower.contains("bowl") {
         return .wood
+    }
+    if lower.contains("portal") || lower.contains("respawn_anchor") ||
+        lower.contains("sculk") || lower.contains("froglight") || lower.contains("dragon_egg") ||
+        lower.contains("shulker") || lower == "glass" || lower.contains("tinted_glass") {
+        return .crystal
+    }
+    if lower.contains("tnt") {
+        return .lava
+    }
+    if lower.contains("frogspawn") {
+        return .water
+    }
+    if lower.contains("sponge") || lower.contains("honey") || lower.contains("cake") ||
+        lower.contains("turtle_egg") || lower.contains("sniffer_egg") {
+        return .sand
+    }
+    if lower.contains("bedrock") || lower.contains("debris") || lower.contains("andesite") ||
+        lower.contains("diorite") || lower.contains("granite") || lower.contains("calcite") ||
+        lower.contains("quartz") || lower.contains("netherrack") || lower.contains("chain") ||
+        lower.contains("bell") || lower.contains("cauldron") || lower.contains("brewing") ||
+        lower.contains("comparator") || lower.contains("repeater") || lower.contains("rail") ||
+        lower.contains("hopper") || lower.contains("dispenser") || lower.contains("dropper") ||
+        lower.contains("observer") || lower.contains("piston") || lower.contains("lever") ||
+        lower.contains("lightning_rod") || lower.contains("spawner") || lower.contains("smithing") ||
+        lower.contains("target") || lower.contains("daylight_detector") ||
+        lower.contains("tripwire") || lower.contains("bone_block") || lower.contains("coal_block") ||
+        lower.contains("decorated_pot") || lower.contains("purpur") || lower.contains("smoker") {
+        return .stone
+    }
+    if lower.contains("leaf") || lower.contains("leaves") || lower.contains("grass") ||
+        lower.contains("vine") || lower.contains("flower") || lower.contains("sapling") ||
+        lower.contains("wheat") || lower.contains("crop") || lower.contains("moss") ||
+        lower.contains("fern") || lower.contains("azalea") || lower.contains("bamboo") ||
+        lower.contains("cactus") || lower.contains("plant") || lower.contains("mushroom") ||
+        lower.contains("root") || lower.contains("stem") || lower.contains("sprout") ||
+        lower.contains("wart") || lower.contains("fungus") || lower.contains("propagule") ||
+        lower.contains("sugar_cane") || lower.contains("berry") || lower.contains("cocoa") ||
+        lower.contains("carrot") || lower.contains("potato") || lower.contains("allium") ||
+        lower.contains("bluet") || lower.contains("orchid") || lower.contains("dandelion") ||
+        lower.contains("tulip") || lower.contains("daisy") || lower.contains("lilac") ||
+        lower.contains("lily") || lower.contains("peony") || lower.contains("poppy") ||
+        lower.contains("rose") || lower.contains("dead_bush") || lower.contains("petal") ||
+        lower.contains("sea_pickle") || lower.contains("melon") || lower.contains("hay") ||
+        lower.contains("slime") {
+        return .foliage
     }
     if lower.contains("sand") || lower.contains("gravel") || lower.contains("clay") ||
         lower.contains("terracotta") || lower.contains("concrete") || lower.contains("mud") {
@@ -213,7 +346,88 @@ private func material(for path: String) -> Material {
         lower.contains("entity") || lower.contains("environment") {
         return .item
     }
-    return .grass
+    return fallback
+}
+
+/// Direct item identifiers contain fewer material cues than block names.  Classify the tool,
+/// equipment, food, and spawn-egg families before falling back to the normal block classifier so
+/// a sword or bow never becomes an arbitrary grass-colored icon.
+private func material(forItem name: String) -> Material {
+    let lower = name.lowercased()
+    if lower.contains("wooden") || lower.contains("bow") || lower.contains("rod") ||
+        lower.contains("stick") || lower.contains("boat") || lower.contains("raft") ||
+        lower.contains("book") || lower.contains("paper") || lower.contains("bowl") ||
+        lower.contains("leather") || lower.contains("saddle") || lower.contains("shield") ||
+        lower.contains("arrow") || lower.contains("brush") {
+        return .wood
+    }
+    if lower.contains("axolotl_bucket") || lower.contains("cod_bucket") ||
+        lower.contains("pufferfish_bucket") || lower.contains("salmon_bucket") ||
+        lower.contains("tadpole_bucket") || lower.contains("tropical_fish_bucket") {
+        return .water
+    }
+    if lower.contains("turtle_helmet") {
+        return .foliage
+    }
+    if lower.contains("bucket") {
+        // Preserve liquid/snow buckets through the shared semantic classifier, while ordinary
+        // and milk buckets take the neutral metal fallback.
+        return material(for: lower, fallback: .stone)
+    }
+    if lower.contains("trident") || lower.contains("spyglass") || lower.contains("armor_trim") ||
+        lower.contains("mace") {
+        return .stone
+    }
+    if lower.contains("sword") || lower.contains("pickaxe") || lower.contains("axe") ||
+        lower.contains("shovel") || lower.contains("hoe") || lower.contains("helmet") ||
+        lower.contains("chestplate") || lower.contains("leggings") || lower.contains("boots") {
+        return material(for: lower, fallback: .item)
+    }
+    if lower.contains("apple") || lower.contains("bread") || lower.contains("cookie") ||
+        lower.contains("melon") || lower.contains("beef") || lower.contains("pork") ||
+        lower.contains("mutton") || lower.contains("chicken") || lower.contains("rabbit") ||
+        lower.contains("fish") || lower.contains("carrot") || lower.contains("potato") ||
+        lower.contains("beetroot") || lower.contains("stew") || lower.contains("fruit") ||
+        lower.contains("honey") || lower.contains("wheat") || lower.contains("egg") ||
+        lower.contains("spawn_egg") {
+        return .foliage
+    }
+    return material(for: lower, fallback: .item)
+}
+
+private func cropped(_ source: RGBA, normalized rect: NormalizedCrop, label: String) throws -> RGBA {
+    guard source.width == 1_024, source.height == 1_024 else {
+        throw BuildError.invalid("expected fixed 1024px KUBIKOS source for \(label), got \(source.width)x\(source.height)")
+    }
+    let x = Int((rect.x * Double(source.width)).rounded(.down))
+    let y = Int((rect.y * Double(source.height)).rounded(.down))
+    let width = Int((rect.width * Double(source.width)).rounded(.down))
+    let height = Int((rect.height * Double(source.height)).rounded(.down))
+    guard x >= 0, y >= 0, width >= 16, height >= 16,
+          x <= source.width - width, y <= source.height - height else {
+        throw BuildError.invalid("invalid declared KUBIKOS material crop for \(label)")
+    }
+    var pixels = [UInt8](repeating: 0, count: width * height * 4)
+    for row in 0..<height {
+        let sourceRange = ((y + row) * source.width + x) * 4..<( (y + row) * source.width + x + width) * 4
+        let destinationRange = row * width * 4..<(row + 1) * width * 4
+        pixels.replaceSubrange(destinationRange, with: source.pixels[sourceRange])
+    }
+    return RGBA(width: width, height: height, pixels: pixels)
+}
+
+/// KUBIKOS crystal art is an emission source, authored substantially darker than it appears once
+/// Unity applies the material emission pass.  Compensate only for that missing renderer stage;
+/// every output pixel remains a scaled KUBIKOS source pixel.
+private func emissionBalanced(_ source: RGBA, exposure: Double) -> RGBA {
+    var output = source
+    for offset in stride(from: 0, to: output.pixels.count, by: 4) {
+        for channel in 0..<3 {
+            output.pixels[offset + channel] = UInt8(min(255, max(0,
+                Int(Double(output.pixels[offset + channel]) * exposure))))
+        }
+    }
+    return output
 }
 
 private func loadKUBIKOSMaterials(from root: URL) throws -> [Material: RGBA] {
@@ -231,29 +445,41 @@ private func loadKUBIKOSMaterials(from root: URL) throws -> [Material: RGBA] {
         entries.append((logical, asset))
     }
     entries.sort { $0.0 < $1.0 }
-    let preferred: [Material: [String]] = [
-        .grass: ["/Textures/Grass_D.png", "/Textures/GroundWGrass_D.png"],
-        .soil: ["/Textures/Planes/Soil_D.png", "/Textures/Soil_D.png"],
-        .stone: ["/Textures/Stone_4_D.png", "/Textures/Rock_2_D.png", "/Textures/Rocks/Rocks_D.png"],
-        .sand: ["/Textures/Sand_D.png", "/Textures/GroundDried_D.png", "/Textures/Concrete_D.png"],
-        .wood: ["/Textures/Wood_Light_D.png", "/Textures/Wood_Normal_D.png", "/Textures/Wood_Dark_D.png"],
-        .water: ["/Textures/Water_D.png"],
-        .lava: ["/Textures/Lava_D.png", "/Textures/Magma/Magma_D.png"],
-        .ice: ["/Textures/Ice_D.png"],
-        .crystal: ["/Textures/Crystal/Crytal_D.png", "/Textures/Items_D.png"],
-        .foliage: ["/Textures/TreesAndPlants_D.png", "/Textures/Grass_D.png"],
-        .snow: ["/Textures/Snow_D.png", "/Textures/Planes/Snow_D.png"],
-        .item: ["/Textures/Items_D.png", "/Textures/CubesAtlas/CubeAtlas 1_D.png"],
+    // Do not add `Items_D`, `TreesAndPlants_D`, or `CubeAtlas 1_D` here.  They are 4096px
+    // heterogeneous UV atlases, not material swatches.  Every recipe below is either a fixed
+    // Cube.fbx diffuse map with an explicitly declared coherent face crop or a named, coherent
+    // KUBIKOS shader/emission surface.
+    let preferred: [Material: MaterialRecipe] = [
+        .grass: .init(suffixes: ["/Textures/Grass_D.png"], treatment: .cubeFace),
+        .soil: .init(suffixes: ["/Textures/Planes/Soil_D.png", "/Textures/Soil_D.png"], treatment: .cubeFace),
+        .stone: .init(suffixes: ["/Textures/Stone_4_D.png", "/Textures/Rock_2_D.png"], treatment: .cubeFace),
+        .sand: .init(suffixes: ["/Textures/Sand_D.png", "/Textures/GroundDried_D.png"], treatment: .cubeFace),
+        .wood: .init(suffixes: ["/Textures/Wood_Light_D.png", "/Textures/Wood_Normal_D.png"], treatment: .cubeFace),
+        .water: .init(suffixes: ["/Textures/Water.png"], treatment: .coherentSurface(waterTextureCrop)),
+        .lava: .init(suffixes: ["/Textures/Lava.png"], treatment: .coherentSurface(waterTextureCrop)),
+        .ice: .init(suffixes: ["/Textures/Ice_D.png"], treatment: .cubeFace),
+        .crystal: .init(suffixes: ["/Textures/Crystal/Crystal2_E.png"], treatment: .coherentSurface(sapphireCrystalCrop)),
+        .foliage: .init(suffixes: ["/Textures/Grass_D.png"], treatment: .cubeFace),
+        .snow: .init(suffixes: ["/Textures/Snow_D.png", "/Textures/Planes/Snow_D.png"], treatment: .cubeFace),
+        .item: .init(suffixes: ["/Textures/Wood_Normal_D.png", "/Textures/Wood_Light_D.png"], treatment: .cubeFace),
     ]
     var result: [Material: RGBA] = [:]
     for material in Material.allCases {
-        guard let suffixes = preferred[material] else { continue }
-        guard let entry = suffixes.lazy.compactMap({ suffix in
+        guard let recipe = preferred[material] else { continue }
+        guard let entry = recipe.suffixes.lazy.compactMap({ suffix in
             entries.first(where: { $0.0.hasSuffix(suffix) })
         }).first else {
             throw BuildError.invalid("missing KUBIKOS diffuse material for \(material.rawValue)")
         }
-        result[material] = try decodePNG(entry.1)
+        let source = try decodePNG(entry.1)
+        let swatch: RGBA
+        switch recipe.treatment {
+        case .cubeFace:
+            swatch = try cropped(source, normalized: cubeFaceCrop, label: entry.0)
+        case .coherentSurface(let crop):
+            swatch = try cropped(source, normalized: crop, label: entry.0)
+        }
+        result[material] = material == .crystal ? emissionBalanced(swatch, exposure: 1.8) : swatch
     }
     return result
 }
@@ -262,8 +488,13 @@ private func loadKUBIKOSMaterials(from root: URL) throws -> [Material: RGBA] {
 /// a scalar light map; no source palette pixels are carried into the generated art.
 private func materialized(_ target: RGBA, with source: RGBA, key: String) -> RGBA {
     let seed = fnv1a(key)
-    let offsetX = Int(seed & 0xffff) % max(1, source.width)
-    let offsetY = Int((seed >> 16) & 0xffff) % max(1, source.height)
+    // Sample one contiguous portion of a pre-cropped material swatch.  In particular, never
+    // modulo across a Unity UV sheet: that was what baked the visible cross/atlas collage into
+    // the original generated KUBIKOS archive.
+    let sampleWidth = max(1, source.width * 3 / 4)
+    let sampleHeight = max(1, source.height * 3 / 4)
+    let offsetX = Int(seed & 0xffff) % max(1, source.width - sampleWidth + 1)
+    let offsetY = Int((seed >> 16) & 0xffff) % max(1, source.height - sampleHeight + 1)
     var output = RGBA(width: target.width, height: target.height,
                       pixels: [UInt8](repeating: 0, count: target.pixels.count))
     for y in 0..<target.height {
@@ -271,8 +502,8 @@ private func materialized(_ target: RGBA, with source: RGBA, key: String) -> RGB
             let index = (y * target.width + x) * 4
             let alpha = target.pixels[index + 3]
             guard alpha > 0 else { continue }
-            let sx = (x * source.width / target.width + offsetX) % source.width
-            let sy = (y * source.height / target.height + offsetY) % source.height
+            let sx = offsetX + min(sampleWidth - 1, x * sampleWidth / target.width)
+            let sy = offsetY + min(sampleHeight - 1, y * sampleHeight / target.height)
             let sourceIndex = (sy * source.width + sx) * 4
             let luminance = (Double(target.pixels[index]) * 0.2126 +
                              Double(target.pixels[index + 1]) * 0.7152 +
@@ -422,24 +653,26 @@ private func blankImage(width: Int, height: Int) -> RGBA {
     RGBA(width: width, height: height, pixels: [UInt8](repeating: 0, count: width * height * 4))
 }
 
-/// Paint a rectangular KUBIKOS-material swatch directly into an image.  This is the only source
-/// for generated UI, entity, and celestial pixels; the surrounding geometry is Elysium-owned
-/// vector-like layout code rather than imported raster art.
+/// Paint a rectangular KUBIKOS-material swatch directly into an image.  The source has already
+/// been reduced to one declared coherent Cube.fbx face, so this function scales that face without
+/// wrapping across unrelated Unity UV islands.  It is the only source for generated UI, entity,
+/// and celestial pixels; the surrounding geometry is Elysium-owned vector-like layout code rather
+/// than imported raster art.
 private func paintMaterial(_ destination: inout RGBA, source: RGBA, key: String,
                            x: Int, y: Int, width: Int, height: Int,
                            alpha: UInt8 = 255, brightness: Double = 1) {
     guard width > 0, height > 0 else { return }
     let seed = fnv1a(key)
-    let offsetX = Int(seed & 0xffff) % max(1, source.width)
-    let offsetY = Int((seed >> 16) & 0xffff) % max(1, source.height)
     for dy in 0..<height {
         let destinationY = y + dy
         guard destinationY >= 0, destinationY < destination.height else { continue }
         for dx in 0..<width {
             let destinationX = x + dx
             guard destinationX >= 0, destinationX < destination.width else { continue }
-            let sourceX = (dx + offsetX) % source.width
-            let sourceY = (dy + offsetY) % source.height
+            // Use the center of the matching source texel, including for a one-pixel glyph or
+            // icon stroke.  This yields a stable representative material color without a seam.
+            let sourceX = min(source.width - 1, ((dx * 2 + 1) * source.width) / (width * 2))
+            let sourceY = min(source.height - 1, ((dy * 2 + 1) * source.height) / (height * 2))
             let sourceOffset = (sourceY * source.width + sourceX) * 4
             let destinationOffset = (destinationY * destination.width + destinationX) * 4
             // A small deterministic variation makes broad procedural panels retain the faceted
@@ -810,7 +1043,7 @@ private func build(_ options: Options) throws {
 
     let tileRecords = try decodeTileRecords(try run(options.registryExport.path, ["--tile-rgba"]))
     for (name, mask) in tileRecords.sorted(by: { $0.0 < $1.0 }) {
-        let source = try materials[material(for: name)].map { $0 } ?? {
+        let source = try materials[material(for: name, fallback: .stone)].map { $0 } ?? {
             throw BuildError.invalid("missing material for tile \(name)")
         }()
         let image = materialized(scaleNearest(mask, to: 64), with: source, key: "tile/\(name)")
@@ -828,7 +1061,7 @@ private func build(_ options: Options) throws {
         guard let mask = itemRecords[entry.name] else {
             throw BuildError.invalid("missing item mask for \(entry.name)")
         }
-        let source = try materials[material(for: entry.name)].map { $0 } ?? {
+        let source = try materials[material(forItem: entry.name)].map { $0 } ?? {
             throw BuildError.invalid("missing material for item \(entry.name)")
         }()
         try writeImage(materialized(scaleNearest(mask, to: 64), with: source, key: "item/\(entry.name)"),

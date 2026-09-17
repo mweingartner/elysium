@@ -333,7 +333,12 @@ EXPECTED_CORE_OBJECT_SHA256='3fbeed2c763438dcfe16632904cd2684edf3a85a373bad9a593
 # input or capability source changed. See docs/first-person-minecraft-comparison.md.
 # Tool-family action audio additionally changes the procedural app recipes, so
 # the linked Elysium and elysmoke stripped-product pins renew transitively.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='51a8efa8a24e166044f11b4a67cfc5e933ff8e7427f56e1d3a3f6755063de426'
+# kubikos-coherent-textures: only the app-side bundled-pack manifest changed to bind the
+# reviewed coherent-swatch archive. The storage/Core/TextInput objects and elysmoke remain
+# byte-identical; the normalized Elysium product renews from
+# 51a8efa8a24e166044f11b4a67cfc5e933ff8e7427f56e1d3a3f6755063de426 to
+# fa27e56c00136621f49046e950f7aaec46cfda8b8aab078e307e497092055a3a.
+EXPECTED_ELYSIUM_PRODUCT_SHA256='fa27e56c00136621f49046e950f7aaec46cfda8b8aab078e307e497092055a3a'
 EXPECTED_SMOKE_PRODUCT_SHA256='5badf1066358004a13264b9ebe628894fd2f04cb80f20e6d15046f863eb8887e'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'

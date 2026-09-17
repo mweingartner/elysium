@@ -87,7 +87,7 @@ final class AutomatedReleaseSourceTests: XCTestCase {
             ("Faithful 64x - December 2025 Release.zip",
              "a136d9101a4748558587980dace3cd7447b758fb72c4684d15fb805d0a812dac"),
             ("KUBIKOS Cubic World - Elysium Theme.zip",
-             "3ffdebe0e5a4025e1194ee6c3c30ce43b5a3cb43049d5e31179f7624b33bedb3"),
+             "e84a2e32ab95e250d631734bbdf26e25fd430fe51138841136ebbe782c5bdf2c"),
             ("Faithful 64x - Ore Borders 64x.zip",
              "232b8a64d745dc08b958c3c4c07167bd3f38eebdc4cd682da9d1016b2ed190f8"),
             ("Faithful 64x - Static Lanterns.zip",
