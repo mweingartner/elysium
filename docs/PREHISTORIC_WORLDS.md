@@ -86,16 +86,29 @@ randomness authoritative.
 
 ## Native assets and audio
 
-The current Elysium renderer has a bounded 24-rigid-part native `MobModel`
-contract; it does not have a safe generic skinned-mesh/GLB runtime importer.
-Accordingly, this release ships original native procedural models and texture
-painting for all 36 types rather than pretending a proposed weighted-skin asset
-format exists. Every model is validated for finite geometry, in-skin UVs, and
-the 24-part limit. The initial land, air, and water reference types carry
-specific silhouette checks: Triceratops has a three-horned/frilled head,
+The current Elysium renderer has a bounded 24-rigid-pose-part native
+`MobModel` contract; it does not have a safe generic skinned-mesh/GLB runtime
+importer. Prehistoric creatures therefore use original source-authored,
+faceted low-poly triangle meshes and native procedural texture painting for all
+36 types. The mesh stream is immutable presentation data, shares the existing
+one-pose-per-part renderer path, and deliberately does not introduce a file
+loader or weighted skinning. Every model is validated for finite,
+non-degenerate faces, in-skin UVs, no cuboid fallback, a bounded triangle
+count, and the 24-part limit. The art direction is historically informed and
+stylized rather than a claim of exact reconstruction: each taxon carries a
+distinct silhouette instead of relying only on color or scale. Reference types
+carry specific landmark checks: Triceratops has a three-horned/frilled head,
 Pteranodon has a toothless beak, crest, and paired membrane wings, and
 Ichthyosaurus uses a vertical tail fluke with fins rather than a reused dolphin
 model.
+
+Species landmarks stay in the rigid pose slot that moves them: skull details
+such as beaks, crests, frills, and horns move with the head; claws and thumb
+spikes move with their arm; and tail details move with their tail. Prehistoric
+quadrupeds preserve their source-authored tail rest angle rather than inheriting
+the legacy animal tail lift, while pterosaurs use a profile-safe standing pose
+instead of the generic phantom fold. This keeps a true in-game side view
+readable without adding a hierarchy or a new animation system.
 
 Creature voices are original runtime synthesis recipes with native accessibility
 subtitles. They do not read a user script-WAV library, external URL, authoring

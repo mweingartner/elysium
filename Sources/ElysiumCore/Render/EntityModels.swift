@@ -18,18 +18,58 @@ public struct ModelBox {
     }
 }
 
+/// One vertex of an authored rigid entity mesh.  Coordinates use the same
+/// model-space units as `ModelBox` (one unit is 1/16 block); UVs are expressed
+/// in native skin pixels.  Meshes are deliberately static, bounded geometry:
+/// they are not a file-import or weighted-skin runtime.
+public struct ModelMeshVertex {
+    public let x: Double, y: Double, z: Double
+    public let u: Double, v: Double
+
+    public init(_ x: Double, _ y: Double, _ z: Double, _ u: Double, _ v: Double) {
+        self.x = x; self.y = y; self.z = z
+        self.u = u; self.v = v
+    }
+}
+
+/// A convex, outward-wound face of a rigid entity mesh.  The geometry builder
+/// fan-triangulates it into the renderer's existing position/normal/UV/part
+/// vertex stream, so all vertices retain exactly one of the established 24
+/// pose-matrix influences.
+public struct ModelMeshFace {
+    public let vertices: [ModelMeshVertex]
+
+    public init(_ vertices: [ModelMeshVertex]) {
+        self.vertices = vertices
+    }
+}
+
+/// Compile-time authored rigid mesh geometry attached to one `ModelPart`.
+/// This lets new native creatures use tapered/faceted anatomy without changing
+/// the frozen cuboid data or adding a runtime asset importer.
+public struct ModelMesh {
+    public let faces: [ModelMeshFace]
+
+    public init(faces: [ModelMeshFace]) {
+        self.faces = faces
+    }
+}
+
 public struct ModelPart {
     public let name: String
     public let pivot: (Double, Double, Double)
     public let rot: (Double, Double, Double)   // baked rotation, radians (XYZ order)
     public let boxes: [ModelBox]
+    public let meshes: [ModelMesh]
 
     public init(name: String, pivot: (Double, Double, Double),
-                rot: (Double, Double, Double) = (0, 0, 0), boxes: [ModelBox]) {
+                rot: (Double, Double, Double) = (0, 0, 0), boxes: [ModelBox],
+                meshes: [ModelMesh] = []) {
         self.name = name
         self.pivot = pivot
         self.rot = rot
         self.boxes = boxes
+        self.meshes = meshes
     }
 }
 
@@ -379,6 +419,36 @@ public func buildEntityGeometry(_ name: String) -> EntityGeometry {
             quad(x0, y0, z1, x1, y0, z1, x1, y1, z1, x0, y1, z1, 0, 0, 1, back)
             quad(x0, y0, z0, x0, y0, z1, x0, y1, z1, x0, y1, z0, -1, 0, 0, right)
             quad(x1, y0, z1, x1, y0, z0, x1, y1, z0, x1, y1, z1, 1, 0, 0, left)
+        }
+        // Newer native creatures may use compile-time faceted meshes.  Keep
+        // boxes first so every historical model retains its exact vertex
+        // ordering/geometry; mesh faces simply share the established 9-float
+        // entity vertex layout and the part's one rigid pose slot.
+        for mesh in p.meshes {
+            for face in mesh.faces where face.vertices.count >= 3 {
+                let a = face.vertices[0]
+                let b = face.vertices[1]
+                let c = face.vertices[2]
+                let abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z
+                let acx = c.x - a.x, acy = c.y - a.y, acz = c.z - a.z
+                let nx = aby * acz - abz * acy
+                let ny = abz * acx - abx * acz
+                let nz = abx * acy - aby * acx
+                let length = Foundation.sqrt(nx * nx + ny * ny + nz * nz)
+                guard length.isFinite, length > 0 else { continue }
+                // `quad` above emits the reverse of its outward input winding
+                // for the renderer's established facing convention.  Preserve
+                // that convention for authored mesh faces as well.
+                for triangle in 1..<(face.vertices.count - 1) {
+                    for index in [0, triangle + 1, triangle] {
+                        let vertex = face.vertices[index]
+                        verts.append(Float(vertex.x / 16)); verts.append(Float(vertex.y / 16)); verts.append(Float(vertex.z / 16))
+                        verts.append(Float(nx / length)); verts.append(Float(ny / length)); verts.append(Float(nz / length))
+                        verts.append(Float(vertex.u / Double(model.texW))); verts.append(Float(vertex.v / Double(model.texH)))
+                        verts.append(Float(pi))
+                    }
+                }
+            }
         }
     }
     let skin = EntitySkin(model.texW, model.texH, name)

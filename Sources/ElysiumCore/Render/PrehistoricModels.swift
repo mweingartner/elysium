@@ -1,9 +1,10 @@
 // Original procedural creature assets for the opt-in Prehistoric Worlds profiles.
 //
 // The attached planning catalog deliberately contains no runtime art.  These are
-// native, editable box-part models for the existing Metal entity renderer: they
-// neither load external meshes nor borrow a resource-pack skin.  Keep every model
-// at 24 parts or fewer because EntityUniforms exposes exactly 24 pose matrices.
+// native, editable low-poly rigid-part models for the existing Metal entity
+// renderer: they neither load external meshes nor borrow a resource-pack skin.
+// Keep every model at 24 parts or fewer because EntityUniforms exposes exactly
+// 24 pose matrices.
 
 import Foundation
 
@@ -37,13 +38,28 @@ public func prehistoricModelValidationErrors() -> [String] {
         if model.parts.count > 24 {
             errors.append("model exceeds 24 parts: \(id) has \(model.parts.count)")
         }
+        if !model.scale.isFinite || model.scale <= 0 {
+            errors.append("model has an invalid display scale: \(id)")
+        }
         if Set(model.parts.map(\.name)).count != model.parts.count {
             errors.append("model repeats a part name: \(id)")
         }
         if !model.packTex.isEmpty {
             errors.append("prehistoric model must use its native procedural skin: \(id)")
         }
+        var triangleCount = 0
         for part in model.parts {
+            let transform = [part.pivot.0, part.pivot.1, part.pivot.2,
+                             part.rot.0, part.rot.1, part.rot.2]
+            if !transform.allSatisfy(\.isFinite) {
+                errors.append("model part has a non-finite rigid transform: \(id).\(part.name)")
+            }
+            if !part.boxes.isEmpty {
+                errors.append("prehistoric model must not fall back to cuboid geometry: \(id).\(part.name)")
+            }
+            if part.meshes.isEmpty {
+                errors.append("prehistoric model part has no faceted geometry: \(id).\(part.name)")
+            }
             for box in part.boxes {
                 let maxU = box.u + box.d * 2 + box.w * 2
                 let maxV = box.v + box.d + box.h
@@ -51,12 +67,49 @@ public func prehistoricModelValidationErrors() -> [String] {
                     errors.append("model unwrap escapes its native skin: \(id).\(part.name)")
                 }
             }
+            for (meshIndex, mesh) in part.meshes.enumerated() {
+                if mesh.faces.isEmpty {
+                    errors.append("faceted mesh has no faces: \(id).\(part.name)[\(meshIndex)]")
+                }
+                for (faceIndex, face) in mesh.faces.enumerated() {
+                    guard face.vertices.count >= 3 else {
+                        errors.append("faceted face has fewer than three vertices: \(id).\(part.name)[\(meshIndex)].\(faceIndex)")
+                        continue
+                    }
+                    for vertex in face.vertices {
+                        guard vertex.x.isFinite, vertex.y.isFinite, vertex.z.isFinite,
+                              vertex.u.isFinite, vertex.v.isFinite else {
+                            errors.append("faceted mesh has non-finite data: \(id).\(part.name)[\(meshIndex)].\(faceIndex)")
+                            break
+                        }
+                        if vertex.u < 0 || vertex.v < 0 ||
+                            vertex.u > Double(model.texW) || vertex.v > Double(model.texH) {
+                            errors.append("faceted mesh UV escapes its native skin: \(id).\(part.name)[\(meshIndex)].\(faceIndex)")
+                            break
+                        }
+                    }
+                    let a = face.vertices[0], b = face.vertices[1], c = face.vertices[2]
+                    let abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z
+                    let acx = c.x - a.x, acy = c.y - a.y, acz = c.z - a.z
+                    let nx = aby * acz - abz * acy
+                    let ny = abz * acx - abx * acz
+                    let nz = abx * acy - aby * acx
+                    let lengthSquared = nx * nx + ny * ny + nz * nz
+                    if !lengthSquared.isFinite || lengthSquared <= 0.000_000_1 {
+                        errors.append("faceted mesh face is degenerate: \(id).\(part.name)[\(meshIndex)].\(faceIndex)")
+                    }
+                    triangleCount += face.vertices.count - 2
+                }
+            }
+        }
+        if triangleCount > 4_096 {
+            errors.append("prehistoric model exceeds 4,096 triangle budget: \(id) has \(triangleCount)")
         }
     }
     return errors
 }
 
-private enum PrehistoricRigFamily {
+enum PrehistoricRigFamily {
     case theropod
     case herbivoreBiped
     case ceratopsian
@@ -70,7 +123,7 @@ private enum PrehistoricRigFamily {
     case crocodilian
 }
 
-private enum PrehistoricMarking {
+enum PrehistoricMarking {
     case bands
     case spots
     case mottled
@@ -79,7 +132,7 @@ private enum PrehistoricMarking {
     case tide
 }
 
-private struct PrehistoricModelRecipe {
+struct PrehistoricModelRecipe {
     let id: String
     let family: PrehistoricRigFamily
     let form: String
@@ -148,8 +201,8 @@ private func prehistoricRotatedPart(_ name: String, _ pivot: (Double, Double, Do
     ModelPart(name: name, pivot: pivot, rot: rot, boxes: boxes)
 }
 
-private func prehistoricPaint(_ recipe: PrehistoricModelRecipe, headDepth: Int,
-                              eyeX: Int = 1, eyeY: Int = 2, eyeGap: Int = 3) -> (EntitySkin) -> Void {
+func prehistoricPaint(_ recipe: PrehistoricModelRecipe, headDepth: Int,
+                      eyeX: Int = 1, eyeY: Int = 2, eyeGap: Int = 3) -> (EntitySkin) -> Void {
     { skin in
         // A complete native skin makes every UV area opaque even when a family
         // adds an accent box later.  The deterministic per-entity seed only
@@ -194,22 +247,10 @@ private func prehistoricPaint(_ recipe: PrehistoricModelRecipe, headDepth: Int,
 }
 
 private func prehistoricModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
-    switch recipe.family {
-    case .theropod: return prehistoricTheropodModel(recipe)
-    case .herbivoreBiped: return prehistoricHerbivoreBipedModel(recipe)
-    case .ceratopsian: return prehistoricCeratopsianModel(recipe)
-    case .armoredQuad: return prehistoricArmoredQuadModel(recipe)
-    case .sauropod: return prehistoricSauropodModel(recipe)
-    case .pterosaur: return prehistoricPterosaurModel(recipe)
-    case .microraptor: return prehistoricMicroraptorModel(recipe)
-    case .ichthyosaur: return prehistoricIchthyosaurModel(recipe)
-    case .plesiosaur: return prehistoricPlesiosaurModel(recipe)
-    case .mosasaur: return prehistoricMosasaurModel(recipe)
-    case .crocodilian: return prehistoricCrocodilianModel(recipe)
-    }
+    lowPolyPrehistoricModel(recipe)
 }
 
-private func prehistoricTheropodModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
+func prehistoricTheropodModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
     let large = ["large", "tyrannosaur", "spinosaur", "therizinosaur"].contains(recipe.form)
     let raptor = recipe.form == "raptor"
     let tyrant = recipe.form == "tyrannosaur"
@@ -281,7 +322,7 @@ private func prehistoricTheropodModel(_ recipe: PrehistoricModelRecipe) -> MobMo
                     paint: prehistoricPaint(recipe, headDepth: Int(headD)))
 }
 
-private func prehistoricHerbivoreBipedModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
+func prehistoricHerbivoreBipedModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
     let hadrosaur = recipe.form == "hadrosaur"
     let runner = recipe.form == "runner"
     let bodyW = hadrosaur ? 11.0 : (runner ? 7.0 : 8.0)
@@ -329,7 +370,7 @@ private func prehistoricHerbivoreBipedModel(_ recipe: PrehistoricModelRecipe) ->
                     paint: prehistoricPaint(recipe, headDepth: 9))
 }
 
-private func prehistoricCeratopsianModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
+func prehistoricCeratopsianModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
     let triceratops = recipe.form == "triceratops"
     let bodyW = triceratops ? 15.0 : 12.0
     let bodyL = triceratops ? 22.0 : 17.0
@@ -375,7 +416,7 @@ private func prehistoricCeratopsianModel(_ recipe: PrehistoricModelRecipe) -> Mo
                     paint: prehistoricPaint(recipe, headDepth: 10, eyeX: 2, eyeY: 3, eyeGap: 5))
 }
 
-private func prehistoricArmoredQuadModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
+func prehistoricArmoredQuadModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
     let stegosaur = recipe.form == "stegosaur"
     let bodyW = stegosaur ? 13.0 : 15.0
     let bodyL = stegosaur ? 23.0 : 20.0
@@ -419,7 +460,7 @@ private func prehistoricArmoredQuadModel(_ recipe: PrehistoricModelRecipe) -> Mo
                     paint: prehistoricPaint(recipe, headDepth: 9))
 }
 
-private func prehistoricSauropodModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
+func prehistoricSauropodModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
     let brachiosaur = recipe.form == "brachiosaur"
     let bodyW = brachiosaur ? 16.0 : 14.0
     let bodyL = brachiosaur ? 24.0 : 27.0
@@ -460,7 +501,7 @@ private func prehistoricSauropodModel(_ recipe: PrehistoricModelRecipe) -> MobMo
                     paint: prehistoricPaint(recipe, headDepth: 10, eyeX: 2, eyeY: 3, eyeGap: 4))
 }
 
-private func prehistoricPterosaurModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
+func prehistoricPterosaurModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
     let azhdarchid = recipe.form == "azhdarchid"
     let pteranodon = recipe.form == "pteranodon"
     let tapejara = recipe.form == "tapejara"
@@ -513,7 +554,7 @@ private func prehistoricPterosaurModel(_ recipe: PrehistoricModelRecipe) -> MobM
                     paint: prehistoricPaint(recipe, headDepth: 8, eyeX: 1, eyeY: 2, eyeGap: 4))
 }
 
-private func prehistoricMicroraptorModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
+func prehistoricMicroraptorModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
     let parts: [ModelPart] = [
         prehistoricPart("body", (0, 8, 0), prehistoricBox(-2.5, -3, -5, 5, 6, 11, 0, 20)),
         prehistoricPart("head", (0, 10, -5), prehistoricBox(-2.5, -2, -5, 5, 5, 6, 0, 0)),
@@ -529,7 +570,7 @@ private func prehistoricMicroraptorModel(_ recipe: PrehistoricModelRecipe) -> Mo
                     paint: prehistoricPaint(recipe, headDepth: 6, eyeX: 1, eyeY: 1, eyeGap: 2))
 }
 
-private func prehistoricIchthyosaurModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
+func prehistoricIchthyosaurModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
     // Vertical tail fluke and large lateral eye deliberately distinguish this
     // marine reptile asset from the renderer's horizontal-fluked dolphin model.
     let parts: [ModelPart] = [
@@ -547,7 +588,7 @@ private func prehistoricIchthyosaurModel(_ recipe: PrehistoricModelRecipe) -> Mo
                     paint: prehistoricPaint(recipe, headDepth: 9, eyeX: 1, eyeY: 2, eyeGap: 5))
 }
 
-private func prehistoricPlesiosaurModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
+func prehistoricPlesiosaurModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
     let longNeck = recipe.form == "longNeck"
     let pliosaur = recipe.form == "pliosaur"
     let neckSegments = longNeck ? 5 : (pliosaur ? 1 : 3)
@@ -584,7 +625,7 @@ private func prehistoricPlesiosaurModel(_ recipe: PrehistoricModelRecipe) -> Mob
                     paint: prehistoricPaint(recipe, headDepth: pliosaur ? 12 : 8, eyeX: 1, eyeY: 1, eyeGap: 3))
 }
 
-private func prehistoricMosasaurModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
+func prehistoricMosasaurModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
     let parts: [ModelPart] = [
         prehistoricPart("body", (0, 9, 0), prehistoricBox(-6, -4.5, -12, 12, 9, 25, 0, 20)),
         prehistoricPart("head", (0, 9, -11), prehistoricBox(-5.5, -4, -11, 11, 8, 12, 0, 0)),
@@ -600,7 +641,7 @@ private func prehistoricMosasaurModel(_ recipe: PrehistoricModelRecipe) -> MobMo
                     paint: prehistoricPaint(recipe, headDepth: 12, eyeX: 2, eyeY: 2, eyeGap: 5))
 }
 
-private func prehistoricCrocodilianModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
+func prehistoricCrocodilianModel(_ recipe: PrehistoricModelRecipe) -> MobModel {
     let parts: [ModelPart] = [
         prehistoricPart("head", (0, 7, -11),
                         prehistoricBox(-5, -3, -14, 10, 6, 15, 0, 0),

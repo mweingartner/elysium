@@ -181,6 +181,22 @@ final class EntityRendererM {
                 } else if n == "tail" {
                     m = mRotateX(m, Float(-0.6 - Foundation.sin(time * 3) * 0.15 * (1 + amp * 2)))
                 }
+            case "prehistoricQuad":
+                if n == "head" {
+                    m = mRotateY(m, Float(p.headYaw * 0.6))
+                    let headLowered = p.grazing || p.prehistoricAction == "browse"
+                        || p.prehistoricAction == "charge"
+                    m = mRotateX(m, Float(-(p.pitch * 0.6) - (headLowered ? 0.9 : 0)))
+                } else if n == "legFR" || n == "legBL" {
+                    m = mRotateX(m, Float(walkA * (p.prehistoricAction == "charge" ? 1.35 : 1)))
+                } else if n == "legFL" || n == "legBR" {
+                    m = mRotateX(m, Float(walkB * (p.prehistoricAction == "charge" ? 1.35 : 1)))
+                } else if n == "tail" {
+                    // Legacy quads deliberately carry an elevated vanilla
+                    // tail.  Source-authored prehistoric tails already have
+                    // their anatomical rest angle, so add only a small sway.
+                    m = mRotateX(m, Float(-0.08 - Foundation.sin(time * 3) * 0.06 * (1 + amp * 2)))
+                }
             case "creeper":
                 if n == "head" {
                     m = mRotateY(m, Float(p.headYaw))
@@ -306,10 +322,9 @@ final class EntityRendererM {
             case "phantom":
                 let active = p.prehistoricAction == "takeoff" || p.prehistoricAction == "flap"
                 let glide = p.prehistoricAction == "glide"
-                // Native pterosaurs use the phantom rig, including separate
-                // elongated fingers. Keep a clear visual distinction between
-                // powered flight, a gliding membrane, and a perched/landing
-                // folded wing rather than leaving the full span out at rest.
+                // Preserve the legacy Phantom's distinct powered, gliding,
+                // and perched wing states.  Source-authored pterosaurs have
+                // their own profile-safe rig below.
                 let landing = p.prehistoricAction == "landing"
                 let perched = !p.airborne && p.prehistoricAction == "idle"
                 let fold = perched ? 1.28 : (landing ? 0.62 : 0)
@@ -339,6 +354,25 @@ final class EntityRendererM {
                     } else if active {
                         m = mRotateZ(m, Float(-Foundation.sin(time * 14) * 0.18))
                     }
+                }
+            case "prehistoricPterosaur":
+                let active = p.prehistoricAction == "takeoff" || p.prehistoricAction == "flap"
+                let glide = p.prehistoricAction == "glide"
+                if n == "head" {
+                    m = mRotateY(m, Float(p.headYaw * 0.55))
+                    m = mRotateX(m, Float(-p.pitch * 0.55))
+                } else if n == "wingR" || n == "wingL" {
+                    // The authored rest mesh is a readable folded-wing
+                    // profile.  Do not reuse Phantom's wide-span-to-vertical
+                    // fold: it turns a side portrait into an opaque sail.
+                    let sign: Float = n == "wingR" ? 1 : -1
+                    if active {
+                        m = mRotateZ(m, sign * Float(Foundation.sin(time * 14) * 0.55))
+                    } else if glide {
+                        m = mRotateZ(m, sign * 0.10)
+                    }
+                } else if n == "tail" {
+                    m = mRotateY(m, Float(Foundation.sin(time * 2.2) * 0.05))
                 }
             case "dragon":
                 if n == "wingR" {

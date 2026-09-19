@@ -323,7 +323,15 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='2734c85e3710b4992cdc4478c0a55dbff761ecc6268ab4
 # 5ea20c16d0c9eb828514102c8d6411a24c01be26d466782186363aec330a2721,
 # Elysium 88b4cfa3009b6fa8f474b404af98f8b8b50f8daae92a782ca249c9cd6d9a854d,
 # and elysmoke 710e4462b3f1ecf21ee6c1d5c65722e1fc5f75faf7c498a4b1294509600914c9.
-EXPECTED_CORE_OBJECT_SHA256='2e0921f07e97e975947c768267205b8bffe004feca7f5b467012da258028fc94'
+# prehistoric-model-gallery: the rigid prehistoric renderer gains validated,
+# source-authored faceted mesh geometry and profile-safe pose routing.  It
+# changes presentation-only Core and AppKit renderer sources, so ElysiumCore.o
+# and both linked products renew.  The reviewed Saves/GameCore/Player,
+# storage/capability, and text-input source/object pins remain byte-identical.
+# Normalized through the disposable-copy strip -S -x path from a warning-free
+# release build; docs/prehistoric-model-gallery/build.md records the old/new
+# values and verification evidence.
+EXPECTED_CORE_OBJECT_SHA256='1a6059d09b63788ffe8bb955cc509115524ad0a2a9206ebac87cd355c7af6a67'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -333,8 +341,8 @@ EXPECTED_CORE_OBJECT_SHA256='2e0921f07e97e975947c768267205b8bffe004feca7f5b46701
 # input or capability source changed. See docs/first-person-minecraft-comparison.md.
 # Tool-family action audio additionally changes the procedural app recipes, so
 # the linked Elysium and elysmoke stripped-product pins renew transitively.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='a9eb3393c93a97f26d59ea239349f7a5407e71422d32f80b6e5b442262916af1'
-EXPECTED_SMOKE_PRODUCT_SHA256='fe5561b89197d0175ef53f27126169db3e928b9f3f9061bc8d9973cc89738f97'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='1f9ba7793cba112026ff7c004fc11337996ae323cfbf17d0cc3b8de14bcea388'
+EXPECTED_SMOKE_PRODUCT_SHA256='b77090afb36bbab576f0e87cc30360d480204c1374d2e4ccbba3b9b1b7138db7'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

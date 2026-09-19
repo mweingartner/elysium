@@ -1,8 +1,10 @@
 // Visual census rig (ELYSIUM_PHOTOBOOTH=1) — captures EVERY mob and EVERY block
 // in-game, exactly as rendered (current settings/packs/shaders), to
-// /tmp/vc-captures/{mobs,blocks}/<name>[@angle].png. Drives the real sim:
+// /tmp/vc-captures/{mobs,blocks}/<name>[@angle].png (or the directory supplied
+// by ELYSIUM_BOOTH_OUTPUT). Drives the real sim:
 // builds a lit platform, summons/places each subject, settles a few ticks,
-// then reads back the scene framebuffer (no UI) and writes a PNG.
+// then reads back the scene framebuffer (no UI) and writes a PNG. Set
+// ELYSIUM_BOOTH_SIDE_ONLY=1 for one exact side-view portrait per subject.
 
 import AppKit
 import Foundation
@@ -31,7 +33,22 @@ final class PhotoBooth {
     private var blockList: [Int] = []
     private var currentMob: Entity?
     private var captured = 0
-    private let outRoot = "/tmp/vc-captures"
+    private let outRoot: String
+    private let sideOnly: Bool
+
+    /// World-space bounds of a mesh-authored prehistoric presentation, used
+    /// only by the side-view census. Collision dimensions deliberately stay
+    /// compact for gameplay and are too small to frame a Microraptor's wings
+    /// or a sauropod's full profile.
+    private struct VisualBounds {
+        /// The maximum screen-plane dimension for the fixed +X camera used by
+        /// a true side portrait.  Deliberately excludes X/depth: a pterosaur's
+        /// wingspan and a Microraptor's lateral flight feathers must not make
+        /// an otherwise compact profile look tiny in its own capture.
+        let sideSpan: Double
+        let height: Double
+        let centerY: Double
+    }
 
     // set geometry
     private let SX = 0, SY = 200, SZ = 0          // subject position
@@ -39,6 +56,9 @@ final class PhotoBooth {
     init(game: GameCore, renderer: WorldRenderer) {
         self.game = game
         self.renderer = renderer
+        let environment = ProcessInfo.processInfo.environment
+        self.sideOnly = environment["ELYSIUM_BOOTH_SIDE_ONLY"] == "1"
+        self.outRoot = environment["ELYSIUM_BOOTH_OUTPUT"] ?? "/tmp/vc-captures"
         try? FileManager.default.createDirectory(atPath: outRoot + "/mobs", withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(atPath: outRoot + "/blocks", withIntermediateDirectories: true)
         mobList = spawnableMobs().sorted()
@@ -48,7 +68,9 @@ final class PhotoBooth {
                 && n != "end_portal" && n != "end_gateway" && n != "bubble_column"
         }
         // ELYSIUM_BOOTH_MOBS / ELYSIUM_BOOTH_BLOCKS: comma lists to shoot a subset
-        // ("-" = none); unset = full census
+        // ("-" = none); unset = full census. ELYSIUM_BOOTH_SIDE_ONLY=1
+        // records a single exact side instead of the normal face/back pair;
+        // ELYSIUM_BOOTH_OUTPUT supplies an isolated capture root.
         if let f = ProcessInfo.processInfo.environment["ELYSIUM_BOOTH_MOBS"] {
             let want = Set(f.components(separatedBy: ","))
             mobList = f == "-" ? [] : mobList.filter { want.contains($0) }
@@ -57,7 +79,8 @@ final class PhotoBooth {
             let want = Set(f.components(separatedBy: ","))
             blockList = f == "-" ? [] : blockList.filter { want.contains(blockDefs[$0].name) }
         }
-        print("[booth] \(mobList.count) mobs + \(blockList.count) blocks queued")
+        let viewDescription = sideOnly ? "side-only" : "face/back"
+        print("[booth] \(mobList.count) mobs + \(blockList.count) blocks queued (\(viewDescription))")
         fflush(stdout)
     }
 
@@ -108,7 +131,42 @@ final class PhotoBooth {
         }
     }
 
-    private func aimCamera(_ p: Player, dist: Double, height: Double, yawDeg: Double) {
+    private func prehistoricVisualBounds(_ name: String) -> VisualBounds? {
+        guard name.hasPrefix("prehistoric.") else { return nil }
+        let model = getModel(name)
+        var minX = Double.infinity, minY = Double.infinity, minZ = Double.infinity
+        var maxX = -Double.infinity, maxY = -Double.infinity, maxZ = -Double.infinity
+        func include(_ x: Double, _ y: Double, _ z: Double) {
+            minX = min(minX, x); minY = min(minY, y); minZ = min(minZ, z)
+            maxX = max(maxX, x); maxY = max(maxY, y); maxZ = max(maxZ, z)
+        }
+        for part in model.parts {
+            let pivot = part.pivot
+            for mesh in part.meshes {
+                for face in mesh.faces {
+                    for vertex in face.vertices {
+                        include(pivot.0 + vertex.x, pivot.1 + vertex.y, pivot.2 + vertex.z)
+                    }
+                }
+            }
+            for box in part.boxes {
+                include(pivot.0 + box.x - box.grow, pivot.1 + box.y - box.grow, pivot.2 + box.z - box.grow)
+                include(pivot.0 + box.x + box.w + box.grow,
+                        pivot.1 + box.y + box.h + box.grow,
+                        pivot.2 + box.z + box.d + box.grow)
+            }
+        }
+        guard minX.isFinite, minY.isFinite, minZ.isFinite,
+              maxX.isFinite, maxY.isFinite, maxZ.isFinite else { return nil }
+        let scale = model.scale / 16
+        let sideSpan = max(maxY - minY, maxZ - minZ) * scale
+        let height = (maxY - minY) * scale
+        let centerY = (minY + maxY) * scale * 0.5
+        return VisualBounds(sideSpan: sideSpan, height: height, centerY: centerY)
+    }
+
+    private func aimCamera(_ p: Player, dist: Double, height: Double,
+                           targetHeight: Double? = nil, yawDeg: Double) {
         let yaw = yawDeg * .pi / 180
         // Camera orbits the subject, which stands at yaw 0 facing +Z (the
         // renderer's vanilla-rig flip points authored -Z fronts along +Z).
@@ -125,7 +183,7 @@ final class PhotoBooth {
         let dz = (Double(SZ) + 0.5) - cz
         p.yaw = detAtan2(-dx, dz)
         let hd = (dx * dx + dz * dz).squareRoot()
-        let targetY = Double(SY) + height * 0.45
+        let targetY = Double(SY) + (targetHeight ?? height * 0.45)
         p.pitch = detAtan2(cy - targetY, hd)
     }
 
@@ -168,18 +226,47 @@ final class PhotoBooth {
             m.yaw = 0; m.bodyYaw = 0; m.headYaw = 0
             m.health = m.maxHealth
             m.hurtTime = 0   // no red flash in captures
+            if sideOnly {
+                // Controllers can update gait state before the booth freezes
+                // velocity.  Reset every renderer-consumed motion scalar so a
+                // side portrait is a neutral anatomical reference, not a
+                // random mid-stride or attack frame. The historical two-view
+                // census keeps its existing live-pose behavior.
+                m.limbAmp = 0
+                m.limbSwing = 0
+                m.attackAnim = 0
+            }
         }
-        let size = max(Double(mob.width), Double(mob.height))
-        let dist = max(2.2, size * 1.9 + 1.2)
-        let height = Double(mob.height) * 0.62 + 1.1
-        if subjectTick == 6 { aimCamera(p, dist: dist, height: height, yawDeg: angleIdx == 0 ? 150 : -30) }
+        if sideOnly && name.hasPrefix("prehistoric.") {
+            // A spawn controller can briefly retain takeoff/flap state even
+            // after the booth has frozen velocity.  Portraits need the same
+            // neutral, on-ground anatomy for every taxon; otherwise a true
+            // side view can catch a pterosaur in an arbitrary flap pose.
+            mob.data.prehistoricAction = "idle"
+            mob.data.prehistoricActionTicks = 0
+        }
+        let visualBounds = sideOnly ? prehistoricVisualBounds(name) : nil
+        let collisionSize = max(Double(mob.width), Double(mob.height))
+        let size = visualBounds?.sideSpan ?? collisionSize
+        // The normal game FOV is 70 degrees.  This puts the full lateral
+        // silhouette at a comfortably inspectable scale while retaining a
+        // safety margin for a pose's moving limbs and tail.
+        let dist = sideOnly ? max(0.72, size * 0.98 + 0.16) : max(2.2, size * 1.9 + 1.2)
+        let height = visualBounds.map { $0.centerY + max(0.42, $0.height * 0.28) }
+            ?? (Double(mob.height) * 0.62 + 1.1)
+        if subjectTick == 6 {
+            // A 90-degree orbit is a true lateral profile of the subject's
+            // +Z-facing authoring direction, not a three-quarter approximation.
+            let yawDeg: Double = sideOnly ? 90 : (angleIdx == 0 ? 150 : -30)
+            aimCamera(p, dist: dist, height: height, targetHeight: visualBounds?.centerY, yawDeg: yawDeg)
+        }
         if subjectTick == 9 {
-            let suffix = angleIdx == 0 ? "front" : "back"
+            let suffix = sideOnly ? "side" : (angleIdx == 0 ? "front" : "back")
             renderer.requestCapture(path: "\(outRoot)/mobs/\(name)@\(suffix).png")
             captured += 1
         }
         if subjectTick >= 11 {
-            if angleIdx == 0 {
+            if !sideOnly && angleIdx == 0 {
                 angleIdx = 1
                 subjectTick = 5   // re-aim + capture second angle
             } else {

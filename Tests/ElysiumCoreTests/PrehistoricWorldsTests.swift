@@ -250,23 +250,55 @@ final class PrehistoricWorldsTests: XCTestCase {
         }
     }
 
-    func testEveryCreatureRegistersAnOriginalNativeModelWithinRendererBudget() {
+    func testEveryCreatureRegistersAnOriginalNativeMeshWithinRendererBudget() {
         XCTAssertEqual(Array(entityTypes().suffix(36)), PrehistoricCreatureDefinition.allIDs)
         XCTAssertEqual(prehistoricModelIDs, PrehistoricCreatureDefinition.allIDs)
         XCTAssertTrue(prehistoricModelValidationErrors().isEmpty,
                       prehistoricModelValidationErrors().joined(separator: "; "))
+
+        func meshBacked(_ model: MobModel, _ partName: String) -> Bool {
+            model.parts.first { $0.name == partName }.map { !$0.meshes.isEmpty } ?? false
+        }
+
+        func hasVerticalTailFluke(_ model: MobModel) -> Bool {
+            guard let tail = model.parts.first(where: { $0.name == "tail" }) else { return false }
+            return tail.meshes.flatMap(\.faces).contains { face in
+                guard face.vertices.count >= 3 else { return false }
+                let ys = face.vertices.map(\.y)
+                let zs = face.vertices.map(\.z)
+                guard let minY = ys.min(), let maxY = ys.max(),
+                      let minZ = zs.min(), let maxZ = zs.max() else { return false }
+                return maxY - minY > maxZ - minZ && maxY - minY > 0.5
+            }
+        }
+
+        for id in PrehistoricCreatureDefinition.allIDs {
+            let model = getModel(id)
+            XCTAssertFalse(model.parts.flatMap(\.meshes).isEmpty,
+                           "\(id) must use source-owned rigid mesh geometry")
+            XCTAssertTrue(meshBacked(model, "body"), "\(id) must have a mesh-backed body")
+            XCTAssertTrue(meshBacked(model, "head"), "\(id) must have a mesh-backed head")
+            let geometry = buildEntityGeometry(id)
+            XCTAssertLessThanOrEqual(geometry.vertexCount / 3, 4_096,
+                                     "\(id) exceeds the bounded native renderer budget")
+        }
+
         let triceratops = getModel("prehistoric.triceratops")
         let pteranodon = getModel("prehistoric.pteranodon")
         let ichthyosaurus = getModel("prehistoric.ichthyosaurus")
-        XCTAssertGreaterThanOrEqual(triceratops.parts.first { $0.name == "head" }?.boxes.count ?? 0, 4)
-        XCTAssertTrue(triceratops.parts.contains { $0.name == "frill" })
-        XCTAssertTrue(pteranodon.parts.contains { $0.name == "crest" })
-        XCTAssertTrue(pteranodon.parts.contains { $0.name == "wingR" })
-        XCTAssertTrue(pteranodon.parts.contains { $0.name == "wingL" })
-        XCTAssertTrue(ichthyosaurus.parts.contains { $0.name == "tail" })
-        XCTAssertTrue(ichthyosaurus.parts.contains { $0.name == "dorsalFin" })
-        XCTAssertTrue(ichthyosaurus.parts.first { $0.name == "tail" }?.boxes.contains { $0.h > $0.d } ?? false,
-                      "the native ichthyosaur must not silently reuse the dolphin rig")
+        XCTAssertGreaterThanOrEqual(triceratops.parts.first { $0.name == "head" }?.meshes.count ?? 0, 5)
+        XCTAssertGreaterThanOrEqual(pteranodon.parts.first { $0.name == "head" }?.meshes.count ?? 0, 3)
+        XCTAssertFalse(pteranodon.parts.contains { ["beak", "crest", "skullCrest", "crown"].contains($0.name) })
+        XCTAssertTrue(meshBacked(pteranodon, "wingR"))
+        XCTAssertTrue(meshBacked(pteranodon, "wingL"))
+        XCTAssertGreaterThanOrEqual(pteranodon.parts.first { $0.name == "wingR" }?.meshes.count ?? 0, 2)
+        XCTAssertGreaterThanOrEqual(pteranodon.parts.first { $0.name == "wingL" }?.meshes.count ?? 0, 2)
+        XCTAssertTrue(meshBacked(ichthyosaurus, "tail"))
+        XCTAssertTrue(meshBacked(ichthyosaurus, "dorsalFin"))
+        XCTAssertTrue(meshBacked(ichthyosaurus, "flipperR"))
+        XCTAssertTrue(meshBacked(ichthyosaurus, "flipperL"))
+        XCTAssertTrue(hasVerticalTailFluke(ichthyosaurus),
+                      "the native ichthyosaur must not silently reuse a dolphin-like horizontal tail")
     }
 
     func testCreatureActionPersistenceAndBoundedBodyClearance() throws {
