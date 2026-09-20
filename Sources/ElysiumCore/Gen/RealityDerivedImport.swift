@@ -267,7 +267,9 @@ private func realityMeta(blockID: UInt16, name: String, properties: Any?) -> UIn
     case .trapdoor:
         return UInt16(facing | (realityBool(properties, key: "open") ? 4 : 0)
             | (realityString(properties, key: "half") == "top" ? 8 : 0))
-    case .fenceGate: return UInt16(facing | (realityBool(properties, key: "open") ? 4 : 0))
+    case .fenceGate:
+        return UInt16(facing | (realityBool(properties, key: "open") ? 4 : 0)
+            | (realityBool(properties, key: "in_wall") ? 8 : 0))
     case .ladder, .wallSign, .chest, .repeater, .comparator, .campfire: return UInt16(facing)
     case .rail: return (realityString(properties, key: "shape") ?? "").contains("east_west") ? 1 : 0
     default:

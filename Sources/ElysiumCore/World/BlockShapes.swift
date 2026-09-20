@@ -12,10 +12,75 @@ public typealias CellGetter = (Int, Int, Int) -> Int
 
 private let FULL = aabb(0, 0, 0, 1, 1, 1)
 
+// Minecraft's canonical fence-gate model faces south. Keeping its eight
+// authored pieces intact matters: the two posts, two uprights, and four rails
+// give every wood variant the recognizable open and closed silhouette.
+private let FENCE_GATE_CLOSED_SOUTH: [AABB] = [
+    aabb(0, 5 / 16, 7 / 16, 2 / 16, 1, 9 / 16),
+    aabb(14 / 16, 5 / 16, 7 / 16, 1, 1, 9 / 16),
+    aabb(6 / 16, 6 / 16, 7 / 16, 8 / 16, 15 / 16, 9 / 16),
+    aabb(8 / 16, 6 / 16, 7 / 16, 10 / 16, 15 / 16, 9 / 16),
+    aabb(2 / 16, 6 / 16, 7 / 16, 6 / 16, 9 / 16, 9 / 16),
+    aabb(2 / 16, 12 / 16, 7 / 16, 6 / 16, 15 / 16, 9 / 16),
+    aabb(10 / 16, 6 / 16, 7 / 16, 14 / 16, 9 / 16, 9 / 16),
+    aabb(10 / 16, 12 / 16, 7 / 16, 14 / 16, 15 / 16, 9 / 16),
+]
+
+private let FENCE_GATE_OPEN_SOUTH: [AABB] = [
+    aabb(0, 5 / 16, 7 / 16, 2 / 16, 1, 9 / 16),
+    aabb(14 / 16, 5 / 16, 7 / 16, 1, 1, 9 / 16),
+    aabb(0, 6 / 16, 13 / 16, 2 / 16, 15 / 16, 15 / 16),
+    aabb(14 / 16, 6 / 16, 13 / 16, 1, 15 / 16, 15 / 16),
+    aabb(0, 6 / 16, 9 / 16, 2 / 16, 9 / 16, 13 / 16),
+    aabb(0, 12 / 16, 9 / 16, 2 / 16, 15 / 16, 13 / 16),
+    aabb(14 / 16, 6 / 16, 9 / 16, 1, 9 / 16, 13 / 16),
+    aabb(14 / 16, 12 / 16, 9 / 16, 1, 15 / 16, 13 / 16),
+]
+
 /// facing index (0=N -z, 1=S +z, 2=W -x, 3=E +x) → delta
 public let FACE_DX = [0, 0, -1, 1]
 public let FACE_DZ = [-1, 1, 0, 0]
 public let FACE_OPP = [1, 0, 3, 2]
+
+/// Toggles a fence gate while preserving its attachment axis. Like Minecraft,
+/// opening a gate only rotates it when the player approaches from its back;
+/// closing always preserves both facing and the reserved wall bit.
+@inline(__always) public func toggledFenceGateMeta(_ meta: Int, playerFacing: Int) -> Int {
+    let state = meta & 15
+    if state & 4 != 0 { return state & ~4 }
+
+    let playerFacing = playerFacing & 3
+    var opened = state | 4
+    if (state & 3) == FACE_OPP[playerFacing] {
+        opened = (opened & ~3) | playerFacing
+    }
+    return opened
+}
+
+/// A gate lowers three pixels when it joins a wall on either end of its span.
+/// The stored bit is refreshed by the neighbor handler; this topology check is
+/// also used while meshing so a newly placed wall renders correctly immediately.
+@inline(__always) func fenceGateInWall(_ facing: Int, _ get: CellGetter) -> Bool {
+    let spansZ = (facing & 3) >= 2
+    for side in 0..<4 where (side >= 2) != spansZ {
+        let neighbor = get(FACE_DX[side], 0, FACE_DZ[side])
+        if shapeOf(neighbor >> 4) == .wall { return true }
+    }
+    return false
+}
+
+@inline(__always) private func rotateFenceGateBox(_ box: AABB, facing: Int) -> AABB {
+    switch facing & 3 {
+    case 0: // north: canonical south rotated 180 degrees
+        return aabb(1 - box.x1, box.y0, 1 - box.z1, 1 - box.x0, box.y1, 1 - box.z0)
+    case 1: // south: canonical model
+        return box
+    case 2: // west: canonical south rotated 90 degrees
+        return aabb(1 - box.z1, box.y0, box.x0, 1 - box.z0, box.y1, box.x1)
+    default: // east: canonical south rotated 270 degrees
+        return aabb(box.z0, box.y0, 1 - box.x1, box.z1, box.y1, 1 - box.x0)
+    }
+}
 
 @inline(__always) private func shapeOf(_ id: Int) -> Shape { Shape(rawValue: SHAPE_OF[id])! }
 
@@ -266,30 +331,13 @@ public func shapeBoxes(_ cell: Int, _ get: CellGetter, _ out: inout [AABB], _ fo
             else { out.append(aabb(6 / 16, 0, 0, 10 / 16, 1.5, 1)) }
             return
         }
-        // render: end posts + two bars + center upright (gate across X or Z)
-        if facing < 2 {
-            out.append(aabb(0, 5 / 16, 6 / 16, 2 / 16, 1, 10 / 16))
-            out.append(aabb(14 / 16, 5 / 16, 6 / 16, 1, 1, 10 / 16))
-            if !open {
-                out.append(aabb(2 / 16, 6 / 16, 7 / 16, 14 / 16, 9 / 16, 9 / 16))
-                out.append(aabb(2 / 16, 12 / 16, 7 / 16, 14 / 16, 15 / 16, 9 / 16))
-                out.append(aabb(6 / 16, 9 / 16, 7 / 16, 10 / 16, 12 / 16, 9 / 16))
-            } else {
-                // swung halves folded back to the posts
-                out.append(aabb(0, 6 / 16, 10 / 16, 2 / 16, 15 / 16, 1))
-                out.append(aabb(14 / 16, 6 / 16, 10 / 16, 1, 15 / 16, 1))
-            }
-        } else {
-            out.append(aabb(6 / 16, 5 / 16, 0, 10 / 16, 1, 2 / 16))
-            out.append(aabb(6 / 16, 5 / 16, 14 / 16, 10 / 16, 1, 1))
-            if !open {
-                out.append(aabb(7 / 16, 6 / 16, 2 / 16, 9 / 16, 9 / 16, 14 / 16))
-                out.append(aabb(7 / 16, 12 / 16, 2 / 16, 9 / 16, 15 / 16, 14 / 16))
-                out.append(aabb(7 / 16, 9 / 16, 6 / 16, 9 / 16, 12 / 16, 10 / 16))
-            } else {
-                out.append(aabb(10 / 16, 6 / 16, 0, 1, 15 / 16, 2 / 16))
-                out.append(aabb(10 / 16, 6 / 16, 14 / 16, 1, 15 / 16, 2 / 16))
-            }
+        let inWall = (meta & 8) != 0 || fenceGateInWall(facing, get)
+        for box in open ? FENCE_GATE_OPEN_SOUTH : FENCE_GATE_CLOSED_SOUTH {
+            let rotated = rotateFenceGateBox(box, facing: facing)
+            out.append(inWall
+                ? aabb(rotated.x0, rotated.y0 - 3.0 / 16, rotated.z0,
+                       rotated.x1, rotated.y1 - 3.0 / 16, rotated.z1)
+                : rotated)
         }
     case .layer:
         let layers = (meta & 7) + 1

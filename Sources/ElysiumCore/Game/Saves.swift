@@ -1744,6 +1744,15 @@ public final class SaveDB {
         }
     }
 
+    /// Removes only stale host-guest records with no corresponding local
+    /// world. LAN-client resume rows are a separate table and are untouched.
+    @discardableResult
+    public func deleteOrphanedLANPlayers() -> Int? {
+        try? withStorageRank {
+            try storage.deleteOrphanedLANPlayerRows()
+        }
+    }
+
 #if DEBUG
     func execRawLANPlayerInsertForTesting(world: String, playerID: String, json: String) {
         guard let row = try? ElysiumLANPlayerStorageRow(

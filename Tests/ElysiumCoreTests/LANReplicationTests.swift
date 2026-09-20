@@ -190,7 +190,7 @@ final class LANReplicationTests: XCTestCase {
                 to: world
             ),
             .applied([
-                LANBlockChange(dimension: Dim.overworld.rawValue, x: 4, y: 64, z: 1, cell: Int(cell(gate, 6))),
+                LANBlockChange(dimension: Dim.overworld.rawValue, x: 4, y: 64, z: 1, cell: Int(cell(gate, 4))),
             ])
         )
     }

@@ -265,21 +265,13 @@ catalog names and never a filesystem path.
 
 On first use after the rename, the app can migrate supported legacy Pebble data into the Elysium application-support location. Back up world data before manual deletion or migration.
 
-### Selecting and deleting saved worlds
+### Local-world retention
 
-The saved-world browser supports conventional macOS multi-selection. Click a row to select it;
-Command-click or click its checkbox to toggle it; Shift-click selects an anchored range; and
-Command-Shift-click adds a range. Select All/Clear All and Command-A, while the saved-world list has
-keyboard focus, operate on the complete checked list. Keyboard users can move focus with the Arrow keys,
-extend selection with Shift-Arrow, or move focus without changing selection with Command-Arrow, then
-toggle the focused row with Space. Delete and Backspace do not delete worlds.
-
-Play Selected or Host Selected requires exactly one selected world. To delete one or more worlds, use
-the Delete button and then confirm the permanent operation in the separate dialog; Cancel has initial
-focus. Elysium removes the selected worlds and their chunks, player data, advancements, and skill-tree data as
-one atomic local transaction. If the saved-world list changes, Elysium asks you to review the selection.
-If the result cannot be proven, the browser locks to Reload Saved Worlds and performs read-only recovery
-instead of repeating deletion. Saved-world deletion is local-only and never deletes data from a LAN host.
+The native app treats local worlds as one-session play. At launch it removes prior local worlds through
+the checked local deletion path, and **End & Discard World** removes the current local world when you
+leave or quit. Settings, key bindings, selected resource packs, templates, and imported script sounds are
+kept. A joined LAN world remains different: Elysium retains only the local player's per-host resume
+snapshot, never the host world or its chunks.
 
 To uninstall the application, remove `/Applications/Elysium.app`. Remove the application-support directory only if you also intend to permanently delete local worlds and settings. The CLI symlink, when created, is normally `/opt/homebrew/bin/elysium` or `/usr/local/bin/elysium`.
 

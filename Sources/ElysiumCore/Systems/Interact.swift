@@ -147,13 +147,7 @@ public func useBlock(_ ctx: InteractCtx, _ hit: RaycastHit) -> Bool {
         return true
     }
     if shape == .fenceGate {
-        var m = meta ^ 4
-        if (m & 4) != 0 {
-            // open away from player
-            let f = dirFacingMeta(player)
-            m = (m & 12) | f
-            if (meta & 3) == ((f + 2) % 4) { m = (m & 12) | f }
-        }
+        let m = toggledFenceGateMeta(meta, playerFacing: dirFacingMeta(player))
         world.setBlock(x, y, z, Int(cell(UInt16(id), m)))
         world.hooks.playSound((meta & 4) != 0 ? "block.fence_gate.close" : "block.fence_gate.open", Double(x) + 0.5, Double(y) + 0.5, Double(z) + 0.5, 1, 1)
         return true

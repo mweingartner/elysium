@@ -7816,6 +7816,52 @@ public final class ElysiumLegacyCoreStorage {
         }
     }
 
+    /// Removes only host-peer rows whose parent local world no longer exists.
+    /// `lan_players` intentionally has no foreign key, so a checked world
+    /// deletion needs this narrow cleanup for historical orphan rows. The
+    /// tuple-key selection never decodes payloads, so malformed guest JSON is
+    /// removable. The extra selected row makes the whole transaction fail
+    /// closed instead of deleting an arbitrarily large untrusted collection.
+    @discardableResult
+    public func deleteOrphanedLANPlayerRows() throws -> Int {
+        try executor.mutate(tables: ["worlds", "lan_players"]) { context in
+            // The anti-join below is only bounded if its input collection is.
+            // Read no payloads and use the primary-key order; the sentinel
+            // forces rollback before any mutation when the collection is too
+            // large for a one-session startup cleanup.
+            _ = try withStatement(context, """
+                SELECT 1 FROM lan_players
+                ORDER BY world,playerID LIMIT ?
+                """) { statement -> Int in
+                try statement.bindInt64(1, Int64(StorageBounds.lanPeerRows + 1))
+                var rows = 0
+                while try statement.step() == .row {
+                    guard rows < StorageBounds.lanPeerRows else {
+                        throw ElysiumStorageError.limitExceeded
+                    }
+                    rows += 1
+                }
+                return rows
+            }
+            let deleted = try executeMutation(context, """
+                DELETE FROM lan_players
+                WHERE (world,playerID) IN (
+                    SELECT candidate.world,candidate.playerID FROM lan_players AS candidate
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM worlds WHERE worlds.id = candidate.world
+                    )
+                    ORDER BY candidate.world,candidate.playerID LIMIT ?
+                )
+                """) {
+                try $0.bindInt64(1, Int64(StorageBounds.lanPeerRows + 1))
+            }
+            guard deleted <= StorageBounds.lanPeerRows else {
+                throw ElysiumStorageError.limitExceeded
+            }
+            return deleted
+        }
+    }
+
     public func getAdvancementJSON(world: String) throws -> ElysiumAdvancementStorageRow? {
         try StorageBounds.validateIdentifier(world, maximumBytes: StorageBounds.manifestText)
         return try executor.read(tables: ["advancements"]) { context in

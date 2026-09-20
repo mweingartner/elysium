@@ -9,6 +9,7 @@ enum LANTransportError: Error, CustomStringConvertible {
     case invalidPort
     case listenerUnavailable(String)
     case alreadyBusy
+    case endLocalWorldBeforeJoining
 
     var description: String {
         switch self {
@@ -18,6 +19,7 @@ enum LANTransportError: Error, CustomStringConvertible {
         case .invalidPort: return "Port must be 1-65535."
         case .listenerUnavailable(let reason): return "LAN listener could not start: \(reason)"
         case .alreadyBusy: return "Stop the current LAN session before starting another."
+        case .endLocalWorldBeforeJoining: return "End and discard the current local world before joining LAN."
         }
     }
 }
@@ -325,8 +327,23 @@ final class LANMultiplayerManager {
     private(set) var statusLines: [String] = ["LAN multiplayer idle."]
     private(set) var protocol5RPGSemanticRejectionCount: UInt64 = 0
     private(set) var protocol5RPGSemanticRejectionCounterExhausted = false
+    private var worldSessionObserver: NSObjectProtocol?
 
-    private init() {}
+    private init() {
+        // A world is the authority boundary for a host's guest records. Stop
+        // before GameCore saves or deletes that world so neither the listener
+        // nor any peer state can survive into the next local session.
+        worldSessionObserver = NotificationCenter.default.addObserver(
+            forName: .elysiumWorldSessionWillEnd, object: nil, queue: .main
+        ) { [weak self] notification in
+            MainActor.assumeIsolated {
+                guard let self,
+                      let endingGame = notification.object as? GameCore,
+                      self.activeGame === endingGame else { return }
+                self.stop(forWorldSessionEnd: true)
+            }
+        }
+    }
 
     /// Bounded live-test diagnostic. It exposes only a count, never peer identifiers, addresses,
     /// join codes, or credentials. The transport queue owns `hostPeers`.
@@ -334,6 +351,15 @@ final class LANMultiplayerManager {
         queue.sync { hostPeers.values.reduce(into: 0) { count, peer in
             if peer.accepted { count += 1 }
         } }
+    }
+
+    /// Test-only seam for the world-session lifecycle regression. It mirrors
+    /// the durable state an accepted host peer contributes without requiring a
+    /// loopback socket or exposing a production network control.
+    func seedHostPeerRecordForTesting(_ record: LANPeerRecordSnapshot) {
+        precondition(Thread.isMainThread)
+        knownHostPeerIDs.insert(record.playerID)
+        hostReplicationSession.seedPeerRecord(record)
     }
 
 #if ELYSIUM_DEBUG_CONTROL
@@ -826,6 +852,9 @@ final class LANMultiplayerManager {
         guard game.savedWorldMaintenanceAllowsTransitions() else {
             throw LANTransportError.alreadyBusy
         }
+        guard !game.hasWorld() || game.isLANClientWorld else {
+            throw LANTransportError.endLocalWorldBeforeJoining
+        }
         let code = normalizedLANJoinCode(rawJoinCode)
         guard isValidLANJoinCode(code) else { throw LANTransportError.invalidJoinCode }
         stopClientOnly()
@@ -840,6 +869,9 @@ final class LANMultiplayerManager {
     ) throws {
         guard game.savedWorldMaintenanceAllowsTransitions() else {
             throw LANTransportError.alreadyBusy
+        }
+        guard !game.hasWorld() || game.isLANClientWorld else {
+            throw LANTransportError.endLocalWorldBeforeJoining
         }
         guard let target = LANDirectConnectTarget.parse(host: rawHost, port: rawPort) else {
             throw LANTransportError.invalidDirectTarget
@@ -930,8 +962,19 @@ final class LANMultiplayerManager {
         }
     }
 
-    func stop() {
+    /// Stops LAN transport. A world-session teardown is voluntary: settle
+    /// host jobs while their world is still live, and let a joined client save
+    /// its final resume snapshot. True transport-loss paths use their dedicated
+    /// disconnect handling and remain fail-closed.
+    func stop(forWorldSessionEnd: Bool = false) {
         precondition(Thread.isMainThread)
+        if forWorldSessionEnd, let game = activeGame, listener != nil, game.hasWorld() {
+            // GameCore normally performs this just before its final save. The
+            // session observer must stop first to prevent peer leakage, so do
+            // it here before clearing the hook/session instead of discarding a
+            // half-placed host guest template.
+            game.lanSettleTemplateJobsHandler?()
+        }
         if let game = activeGame, game.hasWorld() {
             terminateAllHostedRPGAuthorities(in: game, publish: false)
         }
@@ -955,7 +998,9 @@ final class LANMultiplayerManager {
             clientResumeDefaultsKey = nil
         }
         clearReplicationHooks(for: activeGame)
-        activeGame?.handleLANConnectionLost(reason: "")
+        if !forWorldSessionEnd {
+            activeGame?.handleLANConnectionLost(reason: "")
+        }
         activeGame = nil
         hostReplicationSession = LANMultiplayerHostSession()
         _ = resetClientReplicationSession()
@@ -991,7 +1036,12 @@ final class LANMultiplayerManager {
     /// current record via the existing public `peerRecord(playerID:)` accessor.
     private func persistAllHostPeerRecords() {
         precondition(Thread.isMainThread)
-        guard let game = activeGame, listener != nil, let worldID = game.worldRec?.id else { return }
+        // Keep the durable key captured when this listener began hosting. A
+        // game object can already point at its next world during a teardown;
+        // guest records from the retiring listener must never move there.
+        guard let game = activeGame, listener != nil,
+              let worldID = hostWorldSummary?.worldID, worldID != "unsaved",
+              game.worldRec?.id == worldID else { return }
         for playerID in knownHostPeerIDs {
             guard let record = hostReplicationSession.peerRecord(playerID: playerID) else { continue }
             // lan-client-parity (change 4): a *connected* peer's live `player:lan:*`

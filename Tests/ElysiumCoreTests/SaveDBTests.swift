@@ -175,6 +175,53 @@ final class SaveDBTests: XCTestCase {
         XCTAssertEqual(db.listLANPlayers(world: "world-a").count, 1)
     }
 
+    func testDeleteOrphanedLANPlayersPreservesRowsForLiveWorlds() throws {
+        let db = try makeDB()
+        let live = WorldRecord(id: "live-world", name: "Live World", seed: 42,
+                               gameMode: GameMode.survival, difficulty: 2)
+        db.putWorld(live)
+        db.putLANPlayer(world: live.id, playerID: "live-guest", sampleLANPlayerRecord())
+        db.putLANPlayer(world: "retired-world", playerID: "stale-guest", sampleLANPlayerRecord())
+        db.execRawLANPlayerInsertForTesting(
+            world: "retired-corrupt-world", playerID: "corrupt-stale-guest", json: "{not valid json")
+
+        XCTAssertEqual(db.deleteOrphanedLANPlayers(), 2,
+                       "cleanup must remove a stale record even when its payload cannot decode")
+        XCTAssertNotNil(db.getLANPlayer(world: live.id, playerID: "live-guest"))
+        XCTAssertNil(db.getLANPlayer(world: "retired-world", playerID: "stale-guest"))
+        XCTAssertEqual(db.deleteOrphanedLANPlayers(), 0)
+    }
+
+    func testDeleteOrphanedLANPlayersFailsClosedAboveTheBound() throws {
+        let db = try makeDB()
+        for index in 0...256 {
+            db.putLANPlayer(world: "retired-\(index)", playerID: "stale-\(index)",
+                            sampleLANPlayerRecord())
+        }
+
+        XCTAssertNil(db.deleteOrphanedLANPlayers(),
+                     "the sentinel row must roll back rather than partially deleting a large collection")
+        XCTAssertNotNil(db.getLANPlayer(world: "retired-0", playerID: "stale-0"))
+        XCTAssertNotNil(db.getLANPlayer(world: "retired-256", playerID: "stale-256"))
+    }
+
+    func testDeleteOrphanedLANPlayersDoesNotScanPastTheTotalCollectionBound() throws {
+        let db = try makeDB()
+        for index in 0...256 {
+            let world = WorldRecord(id: "live-\(index)", name: "Live \(index)", seed: Int32(index),
+                                    gameMode: GameMode.survival, difficulty: 2)
+            db.putWorld(world)
+            db.putLANPlayer(world: world.id, playerID: "live-guest-\(index)",
+                            sampleLANPlayerRecord())
+        }
+        db.putLANPlayer(world: "retired-world", playerID: "stale-guest", sampleLANPlayerRecord())
+
+        XCTAssertNil(db.deleteOrphanedLANPlayers(),
+                     "a large live collection must fail before its orphan rows are scanned or deleted")
+        XCTAssertNotNil(db.getLANPlayer(world: "live-0", playerID: "live-guest-0"))
+        XCTAssertNotNil(db.getLANPlayer(world: "retired-world", playerID: "stale-guest"))
+    }
+
     func testCorruptLANPlayerJSONRowIsSkippedNotCrashed() throws {
         let db = try makeDB()
         db.putLANPlayer(world: "world-a", playerID: "good", sampleLANPlayerRecord())

@@ -1410,6 +1410,15 @@ public func registerRedstoneHandlers() {
     }
     for gate in WOODS.map({ Int(bid("\($0)_fence_gate")) }) {
         neighborHandlers[gate] = { world, x, y, z, c, _, _, _ in
+            let inWall = fenceGateInWall(c & 3) { dx, dy, dz in
+                world.getBlock(x + dx, y + dy, z + dz)
+            }
+            let correctedMeta = inWall ? ((c & 15) | 8) : ((c & 15) & ~8)
+            let correctedCell = Int(cell(UInt16(gate), correctedMeta))
+            if correctedCell != c {
+                _ = world.setBlock(x, y, z, correctedCell)
+                return
+            }
             let powered = powerAt(world, x, y, z) > 0
             let key = OpenablePos(x, y, z)
             let wasPowered = world.poweredOpenables.contains(key)

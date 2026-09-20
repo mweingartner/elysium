@@ -251,16 +251,22 @@ artifact_sha256() {
 # text-input, capability-manifest, ElysiumStorage.o, and ElysiumTextInput.o pins remain
 # byte-identical.
 #
-EXPECTED_STORAGE_SOURCE_SHA256='4d4bf5756df15ed9f50ef550fa93e08c2f5c99f0ebdf5fdf96154807f08c98ba'
-EXPECTED_STORAGE_API_SHA256='08acf52a794de902a69658a0926181918c62a30f7975cd0d685d3d3baa7c745b'
-EXPECTED_STORAGE_OBJECT_SHA256='43ea474d75be3fc2311f1a95295c94d23329249f505ed0c14878f7318e14b3a8'
+# local-world-retention-and-fence-gates follow-up: the checked post-snapshot
+# orphan-host-peer sweep is a new reviewed ElysiumStorage API. Its source,
+# public-symbol manifest, and stripped object pins renew; the manifest freezes
+# the exact public cleanup declaration alongside checked world deletion. The
+# final sweep first bounds the total peer collection before the anti-join, so
+# both the scan and its all-or-nothing deletion remain capped.
+EXPECTED_STORAGE_SOURCE_SHA256='d67282f8ca7d5a9f5f3530803ee2170f67ba6e9868ccd64e1f8c26ae52337eee'
+EXPECTED_STORAGE_API_SHA256='26c1e555f400d21e23a45945a472a201a89282cd2247c0221c7a2c46092fe98f'
+EXPECTED_STORAGE_OBJECT_SHA256='39306a13a5dc57f1e30b9b909e412ee64d917f6772e5e64bf28133b9f95b365b'
 # prehistoric-worlds 1.3.0: Saves now rejects unknown/future prehistoric
 # profile IDs at the persistence boundary, and GameCore/LAN content changes
 # relink the Core object and both production consumers. The reviewed AST
 # inventory hash moves with Saves; storage/text-input surfaces remain pinned.
-EXPECTED_SAVES_SOURCE_SHA256='5efd5a22b43aeb04760462c8a3fd3dfae5c49ff61b7271cc30ec981b86b9786f'
+EXPECTED_SAVES_SOURCE_SHA256='26b1d02152bcad3cf9dfa8fd601d2afb52551d8f7a3bae77b79e6151235a2104'
 EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd69d2764b50eaf08'
-EXPECTED_CORE_CAPABILITY_SHA256='2c14c21b1045d414dd7b4931c63db6074df16ffe0cdbf2f29b1c6cd5abcd169e'
+EXPECTED_CORE_CAPABILITY_SHA256='2650fd395216d9bdcb42c7003801b17556aa8a49f2b8fa3a828c9e7cdb31e033'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3'
 # land-animal shore escape: AI.swift, Animals.swift and Entity.swift add footprint-aware
@@ -319,7 +325,14 @@ EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75
 # declarations, callers, counts, approved owners, and protected spans below
 # remain unchanged; this gameplay-only source renewal was checked before these
 # release pins were regenerated from a warning-free production build.
-EXPECTED_GAME_CORE_SOURCE_SHA256='2f5ad0d1f44691e61b0cd1d528d242fbb30f9a658d486ef5f1c5fabdd183a113'
+# local-world-retention-and-fence-gates: GameCore gains a checked one-session
+# local-world lifecycle and the app transport ends LAN against the retiring
+# world before deletion. The orphan sweep now happens only after the checked
+# saved-world snapshot succeeds, so malformed world authority blocks all
+# cleanup mutations. Gate geometry/import/interaction changes recompile Core
+# and both products. See docs/local-world-retention-and-fence-gates/build.md
+# for old/new evidence.
+EXPECTED_GAME_CORE_SOURCE_SHA256='ce596f0286a01150e6f30f53026453398f3f41968d294dc3748e91f9b393d1e7'
 # worldgen-form-integrity: the final structure pass adds terrain-backed surface
 # plans, deterministic realized-piece collision resolution, and supported routes
 # through villages, dungeons, mineshafts, strongholds, Ancient Cities, and the
@@ -349,7 +362,10 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='2f5ad0d1f44691e61b0cd1d528d242fbb30f9a658d486e
 # disposable-copy hashes below were renewed together with the GameCore source
 # pin above; storage, Saves, Player, text-input, and capability surfaces are
 # still protected by their independent unchanged pins.
-EXPECTED_CORE_OBJECT_SHA256='d8fc4443cab81645e61fe87be6f145064ed7a5130ce5a0af981e40a4d0177b84'
+# Local-world retention, post-snapshot orphan cleanup, LAN teardown, and
+# fence-gate state rendering renew the same stripped Core object and linked
+# products from the warning-free build.
+EXPECTED_CORE_OBJECT_SHA256='5b22e34820bd29e68c9560362aab9d9e3c4e67c652c1a529f5c05da8f7aca7a8'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -359,8 +375,8 @@ EXPECTED_CORE_OBJECT_SHA256='d8fc4443cab81645e61fe87be6f145064ed7a5130ce5a0af981
 # input or capability source changed. See docs/first-person-minecraft-comparison.md.
 # Tool-family action audio additionally changes the procedural app recipes, so
 # the linked Elysium and elysmoke stripped-product pins renew transitively.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='1ff2d883d929723b3aa691bea89b759460aaefaa71f4452c75049236e1ab7596'
-EXPECTED_SMOKE_PRODUCT_SHA256='598783c4e8b58fc291bbbadfdff30493239b731434d866a5003f7fb3700b13d8'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='3694f9e0828ebc6455cb864ffe14a15bb2170b6f0813ddcd8afa76e91ff7eca5'
+EXPECTED_SMOKE_PRODUCT_SHA256='2c37a8725e9b76bdf3a05d171ca89d2e1c8ab3bb0dc12df354d24023852d2fdd'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

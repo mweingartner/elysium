@@ -1338,14 +1338,8 @@ public final class LANMultiplayerHostSession {
         }
 
         if shape == .fenceGate {
-            var updatedMeta = meta ^ 4
-            if (updatedMeta & 4) != 0 {
-                let facing = lanFacingMeta(fromPlayerYaw: playerState.yaw)
-                updatedMeta = (updatedMeta & 12) | facing
-                if (meta & 3) == ((facing + 2) % 4) {
-                    updatedMeta = (updatedMeta & 12) | facing
-                }
-            }
+            let updatedMeta = toggledFenceGateMeta(
+                meta, playerFacing: lanFacingMeta(fromPlayerYaw: playerState.yaw))
             let updatedCell = Int(cell(UInt16(id), updatedMeta))
             _ = world.setBlock(intent.x, intent.y, intent.z, updatedCell)
             world.hooks.playSound((meta & 4) != 0 ? "block.fence_gate.close" : "block.fence_gate.open", Double(intent.x) + 0.5, Double(intent.y) + 0.5, Double(intent.z) + 0.5, 1, 1)

@@ -14,6 +14,22 @@ public let REACH_SURVIVAL = 4.5
 public let REACH_CREATIVE = 5.0
 public let ATTACK_REACH = 3.0
 
+/// Product policy for locally hosted worlds. The Core default deliberately
+/// retains worlds so headless consumers choose their own lifecycle; the native
+/// game opts into one-session local worlds at launch.
+public enum LocalWorldRetentionPolicy: Sendable {
+    case retain
+    case discardOnExit
+}
+
+/// Result of a fail-closed local-world cleanup. A checked snapshot or deletion
+/// failure leaves every affected world untouched for a later safe retry.
+public enum LocalWorldDiscardResult: Equatable, Sendable {
+    case noSavedWorlds
+    case discarded(Int)
+    case unavailable
+}
+
 let SAVE_INTERVAL_TICKS = 1200          // 60 s autosave
 let GEN_RADIUS_PAD = 1                  // generate one ring beyond render distance
 let MAX_GEN_INFLIGHT = 24
@@ -621,6 +637,9 @@ public final class GameCore {
     private let rpgLocalPreferenceQueueSpecificValue: UInt8 = 1
     public let savedWorldMaintenance = SavedWorldMaintenanceCoordinator()
     private var lastConsumedSavedWorldDeleteToken: UInt64 = 0
+    /// Production enables `.discardOnExit`; embedders and tests retain the
+    /// historical behavior unless they explicitly opt in.
+    public var localWorldRetentionPolicy: LocalWorldRetentionPolicy = .retain
 
     // input
     private var keys = Set<String>()
@@ -1333,6 +1352,10 @@ public final class GameCore {
     }
 
     public func exitToTitle() {
+        // Capture this before teardown: a transient LAN client has no local
+        // `WorldRecord`, and its per-host resume snapshot must survive exit.
+        let localWorldToDiscard = inWorld && !isLANClientWorld
+            && localWorldRetentionPolicy == .discardOnExit ? worldRec?.id : nil
         if inWorld {
             NotificationCenter.default.post(name: .elysiumWorldSessionWillEnd, object: self)
             // event-bus (change 1b): `player.left` (design.md §7.2,
@@ -1395,6 +1418,16 @@ public final class GameCore {
         pendingChunkSaves.removeAll()
         clearEntityTimeouts()
         resetLANClientRoutingState()
+        if let localWorldToDiscard {
+            // `exitToTitle` predates the actor-annotated saved-world lifecycle
+            // API and remains callable from synchronous UI callbacks. World
+            // teardown itself is main-thread-only, so cross the checked-delete
+            // boundary explicitly rather than widening every callback type.
+            MainActor.preconditionIsolated()
+            MainActor.assumeIsolated {
+                _ = discardSavedLocalWorlds(requestedIDs: [localWorldToDiscard])
+            }
+        }
         host?.clearAllSections()
         host?.setBossBars([])
         host?.stopDisc()
@@ -1434,6 +1467,75 @@ public final class GameCore {
 
     public func checkedWorldSnapshot() throws -> CheckedSavedWorldSnapshot {
         try db.checkedWorldSnapshot()
+    }
+
+    /// Clears every persisted local world through the checked saved-world
+    /// authority. It intentionally does not touch local settings, resource
+    /// packs, templates, or LAN-client resume snapshots.
+    @MainActor
+    @discardableResult
+    public func discardAllSavedLocalWorlds() -> LocalWorldDiscardResult {
+        discardSavedLocalWorlds(requestedIDs: nil)
+    }
+
+    @MainActor
+    private func discardSavedLocalWorlds(
+        requestedIDs: Set<String>?
+    ) -> LocalWorldDiscardResult {
+        guard !inWorld, let token = acquireSavedWorldMaintenance() else {
+            return .unavailable
+        }
+        defer { releaseSavedWorldMaintenance(token) }
+
+        let snapshot: CheckedSavedWorldSnapshot
+        do {
+            snapshot = try checkedWorldSnapshot()
+        } catch {
+            return .unavailable
+        }
+
+        // `lan_players` is deliberately not a foreign-key child of worlds.
+        // Do not sweep orphan rows until the saved-world authority has passed
+        // its checked snapshot: corrupt world data must block every mutation.
+        // LAN-client resume rows remain in a separate table, and live-world
+        // guest rows remain untouched for the normal checked deletion below.
+        guard db.deleteOrphanedLANPlayers() != nil else {
+            return .unavailable
+        }
+
+        let selectedIDs: Set<String>
+        if let requestedIDs {
+            selectedIDs = requestedIDs.intersection(Set(snapshot.orderedIDs))
+        } else {
+            selectedIDs = Set(snapshot.orderedIDs)
+        }
+        guard !selectedIDs.isEmpty else { return .noSavedWorlds }
+        guard let request = try? snapshot.deleteRequest(selectedIDs: selectedIDs) else {
+            return .unavailable
+        }
+
+        // This internal context is still subject to the exact same one-shot
+        // admission, request identity, and completion checks as the UI path.
+        let launchContextIdentity = UUID()
+        guard let operation = admitSavedWorldDelete(
+            token, request: request, screenIdentity: UInt64.max,
+            launchContextIdentity: launchContextIdentity
+        ) else {
+            return .unavailable
+        }
+        let outcome = operation.execute()
+        guard finishSavedWorldDeleteOperation(
+            operation, outcome: outcome, screenIdentity: UInt64.max,
+            launchContextIdentity: launchContextIdentity
+        ) else {
+            return .unavailable
+        }
+        switch outcome {
+        case .direct(let receipt), .recovered(let receipt):
+            return .discarded(receipt.deletedWorldCount)
+        case .provenPrecommitFailure, .stale, .terminalRecovery, .terminalIntegrity:
+            return .unavailable
+        }
     }
 
     @MainActor
@@ -1502,6 +1604,7 @@ public final class GameCore {
                 retireRPGCommittedPlayerOmission(
                     worldID: worldID, worldEntryGeneration: nil)
             }
+            removeOrphanedLANPlayersAfterWorldDeletion()
         case .provenPrecommitFailure, .stale, .terminalRecovery, .terminalIntegrity:
             break
         }
@@ -1648,18 +1751,16 @@ public final class GameCore {
         db.deleteWorld(id)
         if db.getWorld(id) == nil {
             retireRPGCommittedPlayerOmission(worldID: id, worldEntryGeneration: nil)
-            // lan-client-parity (change 4), design.md §11: `lan_players` was never in
-            // `StorageEngine.deleteWorld`'s own cascade (design.md §10's "not cascaded today" —
-            // by design, `ElysiumStorage` stays untouched by this change too), so a guest's
-            // persisted `player:lan:*` attrs/scripts/permissions/position rows would otherwise
-            // survive a deleted world forever. Delete every row for `id` through the existing
-            // `SaveDB` surface (`getLANPlayer`/`putLANPlayer`'s own table accessors), the same
-            // "hook lives in the app-facing layer, not the storage engine" shape as the rest of
-            // `deleteWorld`'s own post-delete cleanup here.
-            for row in db.listLANPlayers(world: id) {
-                db.deleteLANPlayer(world: id, playerID: row.playerID)
-            }
+            removeOrphanedLANPlayersAfterWorldDeletion()
         }
+    }
+
+    /// `lan_players` intentionally sits outside StorageEngine's local-world
+    /// deletion transaction. Sweep after a checked/direct world delete is
+    /// proven so malformed guest JSON cannot hide a row from cleanup. This
+    /// leaves live worlds and the separate LAN-client resume table untouched.
+    private func removeOrphanedLANPlayersAfterWorldDeletion() {
+        _ = db.deleteOrphanedLANPlayers()
     }
 
     // ===========================================================================
@@ -2632,8 +2733,8 @@ public final class GameCore {
             if !lanConnectionLost { saveLANClientResume() }
             return !lanConnectionLost
         }
-        // A graceful termination (Cmd-Q), Save & Quit from the pause menu, or the
-        // interactive path (applicationDidResignActive -> PauseScreen -> Save & Quit)
+        // A graceful termination (Cmd-Q), End & Discard World from the pause menu, or the
+        // interactive path (applicationDidResignActive -> PauseScreen -> End & Discard World)
         // can all land here mid-placement: the pause guard in tick() freezes ticking
         // BEFORE tickTemplatePlacementJob runs, so a job can be left in-flight while
         // the player is looking at an open menu. Finish it now so the chunks about to
@@ -4019,7 +4120,7 @@ public final class GameCore {
 
     /// Drives every in-flight placement job to completion synchronously, publishing
     /// its undo snapshot exactly as the per-tick path does, so a graceful termination
-    /// (Cmd-Q, Save & Quit, or any other final flush) never persists a half-placed
+    /// (Cmd-Q, End & Discard World, or any other final flush) never persists a half-placed
     /// object. Intended for the `saveAndFlush` final-flush path only — never call this
     /// from `tick()`/autosave, since autosave must remain a structural no-op mid-job.
     ///

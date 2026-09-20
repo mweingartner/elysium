@@ -670,6 +670,7 @@ func verifySymbolGraph(root: URL) throws -> Set<String> {
         "ElysiumLegacyCoreStorage.checkedWorldSnapshot()",
         "ElysiumLegacyCoreStorage.deleteWorldsChecked(_:)",
         "ElysiumLegacyCoreStorage.recoverWorldsChecked(_:)",
+        "ElysiumLegacyCoreStorage.deleteOrphanedLANPlayerRows()",
     ]
     guard manifestWorldDeleteDeclarations == requiredWorldDeleteDeclarations else {
         throw ScanFailure(description: "checked world batch-delete API manifest declaration drift")
@@ -702,6 +703,7 @@ func verifySymbolGraph(root: URL) throws -> Set<String> {
         "checkedWorldSnapshot()": "swift.method",
         "deleteWorldsChecked(_:)": "swift.method",
         "recoverWorldsChecked(_:)": "swift.method",
+        "deleteOrphanedLANPlayerRows()": "swift.method",
     ]
     var observedWorldDeleteKinds: [String: String] = [:]
     for symbol in symbols {
