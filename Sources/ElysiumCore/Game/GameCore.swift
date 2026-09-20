@@ -1236,6 +1236,47 @@ public final class GameCore {
         w.groundedSpawnColumn(near: x, z) ?? (x, w.surfaceY(x, z), z)
     }
 
+    /// Prefer the authored v2 prehistoric shelter centre only while players
+    /// have left its floor and body space safe. Saved chunks are authoritative
+    /// and players may mine or fill the hut, so respawn/End return must not
+    /// blindly reinsert them into a collision or a fall. A fixed ring outside
+    /// the roof chooses a dry local fallback (the raised-ocean deck is part of
+    /// that ring) before generic grounding is allowed to consider the roof.
+    private func safeStarterShelterSpawn(_ w: World) -> (x: Int, y: Int, z: Int)? {
+        guard w.generationSettings.preset.supportsStarterShelter else { return nil }
+        let centerX = Int(w.spawnX), centerY = Int(w.spawnY), centerZ = Int(w.spawnZ)
+        func isOpenBodyCell(_ value: Int) -> Bool {
+            if value == 0 { return true }
+            let id = value >> 4
+            return id >= 0 && id < REPLACEABLE.count
+                && REPLACEABLE[id] == 1 && id != Int(B.water) && id != Int(B.lava)
+        }
+        let floor = w.getBlock(centerX, centerY - 1, centerZ)
+        let floorID = floor >> 4
+        let floorIsSafe = floorID >= 0 && floorID < blockDefs.count
+            && blockDefs[floorID].solid && floorID != Int(B.water) && floorID != Int(B.lava)
+        if floorIsSafe,
+           isOpenBodyCell(w.getBlock(centerX, centerY, centerZ)),
+           isOpenBodyCell(w.getBlock(centerX, centerY + 1, centerZ)),
+           isOpenBodyCell(w.getBlock(centerX, centerY + 2, centerZ)) {
+            return (centerX, centerY, centerZ)
+        }
+        for radius in 5...24 {
+            for dz in -radius...radius {
+                for dx in -radius...radius where max(abs(dx), abs(dz)) == radius {
+                    // The hut roof occupies the central five-by-five outer
+                    // footprint; never turn an altered shelter into a roof
+                    // respawn just because its centre became invalid.
+                    guard abs(dx) > 4 || abs(dz) > 4,
+                          let safeY = w.dryGroundY(centerX + dx, centerZ + dz)
+                    else { continue }
+                    return (centerX + dx, safeY, centerZ + dz)
+                }
+            }
+        }
+        return nil
+    }
+
     public func respawnPlayer() {
         if traveling { return }
         traveling = true
@@ -1269,6 +1310,9 @@ public final class GameCore {
             ensureChunksLoaded(w, floorDiv(Int(w.spawnX), 16), floorDiv(Int(w.spawnZ), 16), 1)
             if worldRec?.generationSettings.preset == .netherWorld && destDim == .nether {
                 dest = (w.spawnX + 0.5, w.spawnY, w.spawnZ + 0.5)
+            } else if let shelterSpawn = safeStarterShelterSpawn(w), destDim == .overworld {
+                dest = (Double(shelterSpawn.x) + 0.5, Double(shelterSpawn.y),
+                        Double(shelterSpawn.z) + 0.5)
             } else {
                 let spawn = groundedSpawn(w, Int(w.spawnX), Int(w.spawnZ))
                 dest = (Double(spawn.x) + 0.5, Double(spawn.y), Double(spawn.z) + 0.5)
@@ -1631,6 +1675,9 @@ public final class GameCore {
         }
         if settings.preset == .debugAllBlockStates {
             return (0, 71, 0)
+        }
+        if let shelter = prehistoricStarterShelterSite(seed: UInt32(bitPattern: seed), settings: settings) {
+            return (shelter.x, shelter.y, shelter.z)
         }
         let gen = overworldGen(UInt32(bitPattern: seed), settings: settings)
         var sx = 8, sz = 8
@@ -2363,11 +2410,13 @@ public final class GameCore {
             // a corrupted save (NaN position from an old physics blowup) renders
             // nothing at all — snap back to world spawn instead
             if !player.x.isFinite || !player.y.isFinite || !player.z.isFinite {
-                player.setPos(Double(rec.spawnX) + 0.5, Double(rec.spawnY + 1), Double(rec.spawnZ) + 0.5)
+                let spawnY = rec.generationSettings.preset.supportsStarterShelter ? rec.spawnY : rec.spawnY + 1
+                player.setPos(Double(rec.spawnX) + 0.5, Double(spawnY), Double(rec.spawnZ) + 0.5)
                 player.vx = 0; player.vy = 0; player.vz = 0
             }
         } else {
-            player.setPos(Double(rec.spawnX) + 0.5, Double(rec.spawnY + 1), Double(rec.spawnZ) + 0.5)
+            let spawnY = rec.generationSettings.preset.supportsStarterShelter ? rec.spawnY : rec.spawnY + 1
+            player.setPos(Double(rec.spawnX) + 0.5, Double(spawnY), Double(rec.spawnZ) + 0.5)
             player.spawnDim = startingDimension.rawValue
             if rec.generationSettings.preset == .netherWorld {
                 installNetherWorldStarterKit(on: player)
@@ -2403,6 +2452,12 @@ public final class GameCore {
         if playerData == nil && !transientLANClient {
             if rec.generationSettings.preset == .netherWorld && dim == .nether {
                 player.setPos(Double(rec.spawnX) + 0.5, Double(rec.spawnY), Double(rec.spawnZ) + 0.5)
+            } else if let shelterSpawn = safeStarterShelterSpawn(w), dim == .overworld {
+                // The stored spawn is the hut's clear centre when it remains
+                // intact. This prevents a corrupted or externally modified
+                // saved position from being grounded on its roof.
+                player.setPos(Double(shelterSpawn.x) + 0.5, Double(shelterSpawn.y),
+                              Double(shelterSpawn.z) + 0.5)
             } else {
                 // The record only holds a noise height estimate; now that the spawn chunks
                 // are generated, land on real dry ground and keep that column as the world
@@ -3831,8 +3886,13 @@ public final class GameCore {
             let ow = worlds[.overworld]!
             ensureChunksLoaded(ow, floorDiv(Int(ow.spawnX), 16), floorDiv(Int(ow.spawnZ), 16), 1)
             moveToDimension(.overworld)
-            let spawn = groundedSpawn(ow, Int(ow.spawnX), Int(ow.spawnZ))
-            p.setPos(Double(spawn.x) + 0.5, Double(spawn.y), Double(spawn.z) + 0.5)
+            if let shelterSpawn = safeStarterShelterSpawn(ow) {
+                p.setPos(Double(shelterSpawn.x) + 0.5, Double(shelterSpawn.y),
+                         Double(shelterSpawn.z) + 0.5)
+            } else {
+                let spawn = groundedSpawn(ow, Int(ow.spawnX), Int(ow.spawnZ))
+                p.setPos(Double(spawn.x) + 0.5, Double(spawn.y), Double(spawn.z) + 0.5)
+            }
             p.vx = 0; p.vy = 0; p.vz = 0
             p.portalCooldown = 200
             p.insidePortalKind = nil

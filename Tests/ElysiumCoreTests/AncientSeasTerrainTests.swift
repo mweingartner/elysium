@@ -171,4 +171,15 @@ final class AncientSeasTerrainTests: XCTestCase {
         let centerBiome = generator.surfaceBiomeAt(Double(-2 * CHUNK_W + 8), Double(3 * CHUNK_W + 8))
         XCTAssertEqual(first.surfaceBiomes[8 * CHUNK_W + 8], UInt8(centerBiome.rawValue))
     }
+
+    func testCurrentAncientSeasRevisionKeepsTheVersionedTerrainDomain() {
+        let legacy = WorldGenerationSettings(preset: .prehistoricAncientSeas)
+        let current = WorldGenerationSettings(preset: .prehistoricAncientSeasV2)
+        let legacyChunk = buildBaseTerrainChunk(seed: 0xCAFE_BABE, cx: -2, cz: 3, settings: legacy)
+        let currentChunk = buildBaseTerrainChunk(seed: 0xCAFE_BABE, cx: -2, cz: 3, settings: current)
+
+        XCTAssertEqual(currentChunk.blocks, legacyChunk.blocks)
+        XCTAssertEqual(currentChunk.biomes, legacyChunk.biomes)
+        XCTAssertEqual(currentChunk.heights, legacyChunk.heights)
+    }
 }

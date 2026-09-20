@@ -24,9 +24,11 @@ recordings.
 
 ## Player outcome
 
-World creation now offers the four profiles alongside the existing presets.
-Selecting one is persisted in the world record and changes only that new
-world's profile domain. Ancient Seas additionally applies a coast-heavy
+World creation offers the current v2 revision of the four profiles alongside
+the existing presets. Selecting one is persisted in the world record and
+changes only that new world's profile domain. Explicit v1 preset IDs remain
+loadable with their original simulation contract, but are not offered as a
+second set of duplicate create-world choices. Ancient Seas additionally applies a coast-heavy
 terrain treatment to its own continuous continentalness sample before terrain
 height and surface-biome selection: mid-continent margins become navigable
 water while high terrain remains dry island landfalls. It uses no global
@@ -39,16 +41,22 @@ their own host-authoritative danger while the rest of the Overworld structure
 domain remains available.
 
 Each profile is versioned in its `WorldPreset` raw identifier and cache
-identity. A later content revision must add a new versioned preset rather than
-silently reinterpret a saved prehistoric world.
+identity. Version 2 adds the predator/prey and herd-defense simulation plus a
+deterministic starter shelter while keeping the ordered creature roster stable.
+It uses a distinct cache and LAN content identity; a v1 save continues to
+resolve to its v1 profile and cannot silently gain the new behavior. Historical
+unversioned import aliases retain their v1 meaning, while the create-world
+selector writes explicit v2 IDs.
 
 ## Content model
 
 `PrehistoricWorldProfile` owns the canonical ordered roster of 36 stable
 `prehistoric.<name>` entity identifiers. The registry appends the roster after
-the historical entity range, preserving existing entity ordinals. The four
-profiles choose ordered subsets of that roster; Lost World contains the full
-mixed-era set.
+the historical entity range, preserving existing entity ordinals. Both
+supported revisions of the four profiles choose the same ordered subsets of
+that roster; Lost World contains the full mixed-era set. The version boundary
+therefore changes only explicitly versioned simulation rules, never entity
+ordinals or roster membership.
 
 One data definition drives collision bounds, health, attack, combat XP reward,
 speed, pack size, spawning weight, sound identity, and movement family. The implementation uses
@@ -74,6 +82,42 @@ table (`cod`, `salmon`, and `tropical_fish`) after the roster entries. These
 are non-domestic prey/resource species, not restored modern passive fauna;
 they give fish-focused swimmers a live in-profile food source and keep the
 water population bounded by the existing category cap.
+
+### Version-two land ecology and first-night shelter
+
+Only current v2 profiles opt into the land ecology. A land predator performs a
+bounded deterministic prey scan on a fixed cadence, selects a visible nearby
+land herd herbivore by distance then stable entity id, and keeps the normal
+player-target fallback at lower priority. It eats only after it has actually
+killed that herbivore; there is no hidden hunger meter, corpse ledger, or
+chunk-order-dependent ecosystem state. Pterosaurs and marine reptiles retain
+their specialized air/water controllers rather than receiving a nonsensical
+land hunt rule.
+
+Land herd herbivores rally across compatible species when a nearby ally was
+recently struck by a living prehistoric land predator. Their v2-only defensive
+attack, knockback resistance, and predator-only damage reduction make the
+response credible without changing player or environmental damage. Defensive
+creature XP uses the same bounded combat-difficulty policy, so a difficult
+defender remains worth more ordinary XP than a low-threat animal. Version-one
+profiles retain their original values and goal order.
+
+Every new v2 prehistoric world derives one bounded spawn site from its seed
+and complete generation settings. The site is stamped as a physical seven by
+seven oak shelter after terrain, vegetation, and snow: it has a supported
+floor, enclosed walls, a roof, paired door, paired red bed, crafting table,
+and a chest. The chest's seed is derived at world adoption from the world seed
+and its coordinates; guaranteed category pools supply two basic tools, a small
+random selection of resources, and food. Eight fixed nearby oak trees provide
+at least forty trunk logs independent of natural biome foliage. A dry,
+low-variation pad is preferred; Ancient Seas and pathological terrain use the
+same hut on a raised supported deck that remains walkably connected to every
+guaranteed tree above water. Local hosts and LAN clients use this exact site.
+Bed-less respawns and End returns use its clear centre while it remains intact,
+or a deterministic nearby dry fallback if a player has changed the hut.
+Bootstrap creatures are excluded from the immediate hut clearing. This is
+world generation rather than a runtime one-shot grant, so it is reproducible
+after reload or recovery; v1 maps do not receive a new structure.
 
 Action state is a closed, bounded field in `EntityData`; it is saved and
 replicated by the host for renderer presentation. Each creature also persists
@@ -144,11 +188,14 @@ performance, and real-renderer acceptance work.
 
 Old world records with no prehistoric preset decode as normal worlds. New
 prehistory entity fields are optional, bounded, and ignored for unrelated
-entities. Unknown future prehistoric preset IDs fail closed at save and LAN
-decode boundaries rather than being normalized to a normal world. LAN summaries
-carry both the normalized profile preset and its versioned content identity, so
-a joining guest constructs the same transient generation settings or receives
-an explicit incompatibility rejection; entity snapshots carry only validated
+entities. Explicit v1 identifiers and identities remain accepted for existing
+worlds; v2 identifiers select the current simulation contract. Unknown future
+prehistoric preset IDs fail closed at save and LAN decode boundaries rather
+than being normalized to a normal world. LAN summaries carry both the
+normalized profile preset and its versioned content identity, so a joining
+guest constructs the same transient generation settings or receives an
+explicit incompatibility rejection; a v1 peer can never join a v2 profile
+under the same friendly profile label. Entity snapshots carry only validated
 presentation action/air fields. A mixed app version is also rejected by
 Elysium's existing version gate rather than silently differing on models or
 collision.
@@ -167,8 +214,10 @@ terrain-fill golden, Ancient Seas deep-water connectivity and retained island
 landfalls, renderer model limits and landmarks, action/controller persistence,
 global-RNG isolation, unique creature/cue catalog signatures, direct
 source-synthesis recipe coverage, species attack cues, difficulty-scaled player
-XP-orb totals, spawn and route clearance rejection, finite land/air/water
-controllers, and LAN profile/content/action sanitization. Existing release gates cover the full
+XP-orb totals, deterministic predator target/kill/defense behavior, v1/v2
+combat separation, complete generated starter-hut geometry, seed-derived chest
+adoption and bounded category-complete supplies, ample fixed grove logs, and
+an Ancient Seas GameCore first entry. Existing release gates cover the full
 build, XCTest suite, golden smoke contract, security scan, packaging,
 installation, and push hook.
 

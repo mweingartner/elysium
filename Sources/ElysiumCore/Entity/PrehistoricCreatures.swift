@@ -33,6 +33,18 @@ public enum PrehistoricCreatureFamily: String, CaseIterable, Sendable {
     var canCharge: Bool {
         self == .ceratopsian || self == .largeTheropod || self == .shorePredator
     }
+
+    /// The land-only herbivore families that participate in the V2 herd
+    /// ecology. Do not infer this from `!isPredatory`: that would accidentally
+    /// classify flyers and non-predatory marine reptiles as herd prey.
+    var isLandHerdHerbivore: Bool {
+        switch self {
+        case .ceratopsian, .hadrosaur, .armoredHerbivore, .sauropod, .unusualHerbivore:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 /// Every source-authored cue a prehistoric creature can emit. The action
@@ -123,6 +135,58 @@ public struct PrehistoricCreatureDefinition: Equatable, Sendable {
 
     public var isPredatory: Bool { family.isPredatory }
     public var canCharge: Bool { family.canCharge }
+    public var isLandPredator: Bool { medium == .land && isPredatory }
+    public var isLandHerdHerbivore: Bool {
+        medium == .land && family.isLandHerdHerbivore
+    }
+
+    /// The V2 herd-combat values are derived from immutable family metadata,
+    /// rather than mutable entity data. That keeps defense selection stable
+    /// across a save/load and does not add a new LAN payload field.
+    public var herdDefenseDamage: Double {
+        guard isLandHerdHerbivore else { return attackDamage }
+        switch family {
+        case .ceratopsian:
+            return max(5, min(14, authoringLengthMetres * 1.15))
+        case .armoredHerbivore:
+            return max(4, min(12, authoringLengthMetres * 0.95))
+        case .sauropod:
+            return max(6, min(15, authoringLengthMetres * 0.60))
+        case .unusualHerbivore:
+            return max(5, min(12, authoringLengthMetres * 0.75))
+        case .hadrosaur:
+            return max(3, min(8, authoringLengthMetres * 0.55))
+        default:
+            return attackDamage
+        }
+    }
+
+    /// Multiplier applied only to incoming land-predator damage in a V2
+    /// profile. Player, environmental, projectile, and ordinary V1 damage
+    /// deliberately retain their existing values.
+    public var herdPredatorDamageMultiplier: Double {
+        guard isLandHerdHerbivore else { return 1 }
+        switch family {
+        case .armoredHerbivore: return 0.55
+        case .ceratopsian: return 0.65
+        case .sauropod: return 0.70
+        case .unusualHerbivore: return 0.75
+        case .hadrosaur: return 0.85
+        default: return 1
+        }
+    }
+
+    public var herdKnockbackResistance: Double {
+        guard isLandHerdHerbivore else { return 0 }
+        switch family {
+        case .armoredHerbivore: return 0.65
+        case .ceratopsian: return 0.55
+        case .sauropod: return 0.50
+        case .unusualHerbivore: return 0.35
+        case .hadrosaur: return 0.15
+        default: return 0
+        }
+    }
 
     /// A distinct, immutable signature for source-synthesized creature audio.
     /// The canonical roster ordering is frozen with `PrehistoricWorldProfile`;
@@ -158,13 +222,26 @@ public struct PrehistoricCreatureDefinition: Equatable, Sendable {
     /// rather than visual body length. `xpReward` also feeds the existing
     /// catalyst-bloom value by design, keeping both systems consistent.
     public var combatXPReward: Int {
+        combatXPReward(ecosystemCombat: false)
+    }
+
+    /// V2 profiles make land herbivores active, resistant defenders. Their
+    /// player-kill reward includes those real combat traits, while the legacy
+    /// value remains frozen for V1 saves.
+    public func combatXPReward(ecosystemCombat: Bool) -> Int {
         let healthTier = max(1, Int((max(0, health) / 10).rounded(.up)))
-        let activeThreat = isPredatory || canCharge
+        let herdDefender = ecosystemCombat && isLandHerdHerbivore
+        let activeThreat = isPredatory || canCharge || herdDefender
+        let effectiveDamage = herdDefender ? herdDefenseDamage : attackDamage
         let damageTier = activeThreat
-            ? max(1, Int((max(0, attackDamage) / 3).rounded(.up)))
+            ? max(1, Int((max(0, effectiveDamage) / 3).rounded(.up)))
             : 0
         let behaviourTier = (isPredatory ? 3 : 0) + (canCharge ? 2 : 0)
-        return min(24, max(2, healthTier + damageTier + behaviourTier))
+            + (herdDefender ? 2 : 0)
+        let resistanceTier = herdDefender
+            ? max(1, Int(((1 - herdPredatorDamageMultiplier) * 4).rounded(.up)))
+            : 0
+        return min(24, max(2, healthTier + damageTier + behaviourTier + resistanceTier))
     }
 
     /// Conservative voxel envelope used for spawn admission and body-aware
@@ -371,6 +448,90 @@ private struct PrehistoricWaterRouteNode {
     let parent: Int
 }
 
+/// A bounded, deterministic land-prey acquisition goal used only by V2
+/// prehistoric profiles. It owns neither a hunger meter nor a saved path:
+/// normal target/navigation state is intentionally transient and re-acquires
+/// from the authoritative loaded herd after a resume.
+private final class PrehistoricHuntTargetGoal: Goal {
+    private static let acquisitionInterval = 80
+    private let range: Double
+
+    init(_ mob: PrehistoricCreature, _ priority: Int, range: Double) {
+        self.range = range
+        super.init(mob, priority)
+        flags = GoalFlag.target
+    }
+
+    override func canUse() -> Bool {
+        guard let predator = mob as? PrehistoricCreature,
+              predator.usesPredatorHerdCombat,
+              predator.definition.isLandPredator
+        else { return false }
+
+        // Goal selectors try new targets only every other entity tick. Keep
+        // phases even so every persisted-ID phase is reachable, and never
+        // consume controller/global RNG merely to decide when to hunt.
+        let phase = (abs(predator.id) % (Self.acquisitionInterval / 2)) * 2
+        guard predator.age % Self.acquisitionInterval == phase,
+              let prey = predator.nearestLandHerdPrey(range: range)
+        else { return false }
+        predator.setTarget(prey)
+        predator.setAction(.alert, ticks: 20)
+        return true
+    }
+
+    override func canContinue() -> Bool {
+        guard let predator = mob as? PrehistoricCreature,
+              let prey = predator.target as? PrehistoricCreature,
+              !prey.dead, prey.deathTime <= 0,
+              prey.definition.isLandHerdHerbivore,
+              predator.distanceToSq(prey) <= (range * 1.5) * (range * 1.5)
+        else {
+            mob.setTarget(nil)
+            return false
+        }
+        return true
+    }
+}
+
+/// Lets a mixed land herd rally only against a prehistoric land predator that
+/// just injured it. The scan is deliberately local and ID tie-broken so herd
+/// members do not form a world-wide target graph or inherit insertion-order
+/// behavior from the spatial query.
+private final class PrehistoricHerdDefenseTargetGoal: Goal {
+    private let range: Double
+
+    init(_ mob: PrehistoricCreature, _ priority: Int, range: Double = 18) {
+        self.range = range
+        super.init(mob, priority)
+        flags = GoalFlag.target
+    }
+
+    override func canUse() -> Bool {
+        guard let defender = mob as? PrehistoricCreature,
+              defender.usesPredatorHerdCombat,
+              defender.definition.isLandHerdHerbivore,
+              let threat = defender.nearestHerdThreat(range: range)
+        else { return false }
+        defender.setTarget(threat)
+        defender.setAction(.alert, ticks: 24)
+        return true
+    }
+
+    override func canContinue() -> Bool {
+        guard let defender = mob as? PrehistoricCreature,
+              let threat = defender.target as? PrehistoricCreature,
+              !threat.dead, threat.deathTime <= 0,
+              threat.definition.isLandPredator,
+              defender.distanceToSq(threat) <= (range * 1.5) * (range * 1.5)
+        else {
+            mob.setTarget(nil)
+            return false
+        }
+        return true
+    }
+}
+
 public final class PrehistoricCreature: Animal {
     /// Extra underwater ticks reserved between a cached route being reached
     /// and a revalidated ascent beginning. It covers the mandatory tick after
@@ -408,6 +569,13 @@ public final class PrehistoricCreature: Animal {
         prehistoricHasClearance(world, definition: definition, x: x, y: y, z: z, requireGround: true)
     }
 
+    /// The versioned profile, rather than an entity save field, selects the
+    /// ecosystem rules. A V1 entity therefore remains V1 when a saved world is
+    /// resumed, while V2 reacquires transient targets from its loaded world.
+    fileprivate var usesPredatorHerdCombat: Bool {
+        world.generationSettings.preset.supportsPredatorHerdCombat
+    }
+
     public init(world: World, definition: PrehistoricCreatureDefinition) {
         self.definition = definition
         // This bypasses LivingEntity's historical gameRng-based constructor
@@ -421,8 +589,14 @@ public final class PrehistoricCreature: Animal {
         maxHealth = definition.health
         health = definition.health
         speed = definition.speed
-        attackDamage = definition.attackDamage
-        xpReward = definition.combatXPReward
+        let ecosystemCombat = usesPredatorHerdCombat
+        attackDamage = ecosystemCombat && definition.isLandHerdHerbivore
+            ? definition.herdDefenseDamage
+            : definition.attackDamage
+        if ecosystemCombat && definition.isLandHerdHerbivore {
+            kbResist = definition.herdKnockbackResistance
+        }
+        xpReward = definition.combatXPReward(ecosystemCombat: ecosystemCombat)
         data.prehistoricAction = PrehistoricAction.idle.rawValue
         data.prehistoricActionTicks = 0
         seedControllerRNGForCurrentPosition()
@@ -432,11 +606,21 @@ public final class PrehistoricCreature: Animal {
             category = "creature"
             nav.avoidWater = true
             addBasicGoals(definition.speed / 0.09, definition.speed / 0.07)
-            if definition.isPredatory || definition.canCharge {
+            if definition.isPredatory || (definition.canCharge && !ecosystemCombat) {
                 targetGoals.add(HurtByTargetGoal(self, 1, true))
                 goals.add(MeleeAttackGoal(self, 2, definition.canCharge ? 1.35 : 1.15))
             }
+            if ecosystemCombat && definition.isLandHerdHerbivore {
+                targetGoals.add(PrehistoricHerdDefenseTargetGoal(self, 1))
+                // This beats the ordinary priority-1 panic response only while
+                // a nearby herd member has a live prehistoric-predator threat.
+                goals.add(MeleeAttackGoal(self, 0, 1.18))
+            }
             if definition.isPredatory {
+                if ecosystemCombat {
+                    let huntRange = definition.family == .largeTheropod ? 22.0 : 16.0
+                    targetGoals.add(PrehistoricHuntTargetGoal(self, 2, range: huntRange))
+                }
                 // Predators replace the opt-in profile's ordinary hostile
                 // table. This remains a normal host-side target goal—not a
                 // renderer/action cue—and excludes creative/invisible players
@@ -463,6 +647,70 @@ public final class PrehistoricCreature: Animal {
             data.prehistoricAirSupply = airSupply
             stepHeight = 0
         }
+    }
+
+    /// Stable nearest-prey selection for a land predator. The explicit ID
+    /// tiebreak preserves deterministic behavior even if a world later changes
+    /// its entity insertion order.
+    fileprivate func nearestLandHerdPrey(range: Double) -> PrehistoricCreature? {
+        let candidates = world.getEntitiesNear(x, y, z, range) { entity in
+            guard let other = entity as? PrehistoricCreature else { return false }
+            return other !== self && !other.dead && other.deathTime <= 0
+                && other.definition.isLandHerdHerbivore
+        }
+        var best: PrehistoricCreature?
+        var bestDistance = Double.infinity
+        for candidate in candidates {
+            guard let other = candidate as? PrehistoricCreature, canSee(other) else { continue }
+            let distance = distanceToSq(other)
+            if distance < bestDistance
+                || (distance == bestDistance && other.id < (best?.id ?? Int.max)) {
+                best = other
+                bestDistance = distance
+            }
+        }
+        return best
+    }
+
+    /// Finds a just-injured mixed-herd member and its prehistoric predator.
+    /// The lexicographic `(ally distance, ally id, predator distance, predator
+    /// id)` selection avoids treating `getEntitiesNear` insertion order as a
+    /// simulation decision.
+    fileprivate func nearestHerdThreat(range: Double) -> PrehistoricCreature? {
+        var herdMembers: [PrehistoricCreature] = [self]
+        herdMembers += world.getEntitiesNear(x, y, z, range) { entity in
+            guard let other = entity as? PrehistoricCreature else { return false }
+            return other !== self && !other.dead && other.deathTime <= 0
+                && other.definition.isLandHerdHerbivore
+        }.compactMap { $0 as? PrehistoricCreature }
+
+        var bestThreat: PrehistoricCreature?
+        var bestAllyDistance = Double.infinity
+        var bestAllyID = Int.max
+        var bestThreatDistance = Double.infinity
+        var bestThreatID = Int.max
+        for herdMember in herdMembers {
+            guard herdMember.hurtTime > 0,
+                  let threat = herdMember.lastAttacker as? PrehistoricCreature,
+                  !threat.dead, threat.deathTime <= 0,
+                  threat.definition.isLandPredator
+            else { continue }
+            let allyDistance = distanceToSq(herdMember)
+            let threatDistance = distanceToSq(threat)
+            let betterAlly = allyDistance < bestAllyDistance
+                || (allyDistance == bestAllyDistance && herdMember.id < bestAllyID)
+            let sameAlly = allyDistance == bestAllyDistance && herdMember.id == bestAllyID
+            let betterThreat = sameAlly && (threatDistance < bestThreatDistance
+                || (threatDistance == bestThreatDistance && threat.id < bestThreatID))
+            if betterAlly || betterThreat {
+                bestThreat = threat
+                bestAllyDistance = allyDistance
+                bestAllyID = herdMember.id
+                bestThreatDistance = threatDistance
+                bestThreatID = threat.id
+            }
+        }
+        return bestThreat
     }
 
     public override func load(_ d: [String: Any]) {
@@ -578,6 +826,9 @@ public final class PrehistoricCreature: Animal {
     }
 
     public override func doMeleeAttack(_ target: LivingEntity) {
+        let huntedHerdHerbivore = usesPredatorHerdCombat
+            && definition.isLandPredator
+            && (target as? PrehistoricCreature)?.definition.isLandHerdHerbivore == true
         let wasCharging = action == .charge
         if wasCharging {
             attackAnim = 1
@@ -587,6 +838,24 @@ public final class PrehistoricCreature: Animal {
         } else {
             super.doMeleeAttack(target)
         }
+        if huntedHerdHerbivore && (target.health <= 0 || target.deathTime > 0) {
+            // Feeding is a bounded presentation/action state after a genuine
+            // prey kill. It deliberately does not introduce hunger/carcass
+            // persistence beyond the existing authoritative death/drop path.
+            setAction(.eat, ticks: 48)
+            setTarget(nil)
+        }
+    }
+
+    @discardableResult
+    public override func hurt(_ amount: Double, _ source: String, _ attacker: Entity? = nil) -> Bool {
+        let predatorAttack = usesPredatorHerdCombat
+            && definition.isLandHerdHerbivore
+            && (attacker as? PrehistoricCreature).map {
+                $0.world === world && $0.definition.isLandPredator
+            } == true
+        let mitigatedAmount = predatorAttack ? amount * definition.herdPredatorDamageMultiplier : amount
+        return super.hurt(mitigatedAmount, source, attacker)
     }
 
     private func tickFlight() {

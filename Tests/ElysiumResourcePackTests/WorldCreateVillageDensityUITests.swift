@@ -288,10 +288,10 @@ final class WorldCreateVillageDensityUITests: XCTestCase {
         ui.open(screen, fixture.game)
 
         let prehistoricPresets: [WorldPreset] = [
-            .prehistoricLostWorld,
-            .prehistoricJurassicGiants,
-            .prehistoricCretaceousFrontiers,
-            .prehistoricAncientSeas,
+            .prehistoricLostWorldV2,
+            .prehistoricJurassicGiantsV2,
+            .prehistoricCretaceousFrontiersV2,
+            .prehistoricAncientSeasV2,
         ]
         XCTAssertEqual(WorldPreset.normalCycle.filter { $0.isPrehistoric }, prehistoricPresets,
                        "adding a profile must extend this UI contract test")
@@ -302,7 +302,7 @@ final class WorldCreateVillageDensityUITests: XCTestCase {
         // of those profiles may clear a supported dungeon selection.
         try selectDungeonDensity(.more, on: screen, ui: ui, game: fixture.game)
         try selectVillageDensity(.many, on: screen, ui: ui, game: fixture.game)
-        try selectWorldPreset(.prehistoricLostWorld, on: screen, ui: ui, game: fixture.game)
+        try selectWorldPreset(.prehistoricLostWorldV2, on: screen, ui: ui, game: fixture.game)
         XCTAssertEqual(screen.dungeonDensity, .normal,
                        "the route through Superflat must preserve its historical dungeon canonicalization")
         XCTAssertEqual(screen.villageDensity, .normal,

@@ -312,7 +312,14 @@ EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75
 # controller stream, preventing a reload from introducing an early controller
 # draw. These GameCore/Entity/Core changes relink both production consumers;
 # Saves, storage/capability, Player, and text-input reviewed surfaces are unchanged.
-EXPECTED_GAME_CORE_SOURCE_SHA256='2734c85e3710b4992cdc4478c0a55dbff761ecc6268ab41e78928291692b871d'
+# prehistoric-ecosystem-starter-shelter: GameCore now selects the deterministic
+# v2 shelter spawn only after checking its saved floor/body space, with a
+# bounded dry fallback for modified huts, and makes first entry/respawn/End
+# return use that same physical contract. The checked-player getter/CAS
+# declarations, callers, counts, approved owners, and protected spans below
+# remain unchanged; this gameplay-only source renewal was checked before these
+# release pins were regenerated from a warning-free production build.
+EXPECTED_GAME_CORE_SOURCE_SHA256='2f5ad0d1f44691e61b0cd1d528d242fbb30f9a658d486ef5f1c5fabdd183a113'
 # worldgen-form-integrity: the final structure pass adds terrain-backed surface
 # plans, deterministic realized-piece collision resolution, and supported routes
 # through villages, dungeons, mineshafts, strongholds, Ancient Cities, and the
@@ -337,7 +344,12 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='2734c85e3710b4992cdc4478c0a55dbff761ecc6268ab4
 # Core and both linked products renew; storage, Saves, GameCore, Player,
 # capabilities, and text-input source/object pins remain byte-identical.
 # Normalized disposable-copy evidence is in docs/prehistoric-audio-xp/build.md.
-EXPECTED_CORE_OBJECT_SHA256='e850076161f23403841dab86775c803ab77a1d2e0cfdee3394dcab49c72ce9b7'
+# The v2 ecosystem, deterministic starter shelter, and safe GameCore spawn
+# paths recompile ElysiumCore and its two production consumers. The normalized
+# disposable-copy hashes below were renewed together with the GameCore source
+# pin above; storage, Saves, Player, text-input, and capability surfaces are
+# still protected by their independent unchanged pins.
+EXPECTED_CORE_OBJECT_SHA256='d8fc4443cab81645e61fe87be6f145064ed7a5130ce5a0af981e40a4d0177b84'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -347,8 +359,8 @@ EXPECTED_CORE_OBJECT_SHA256='e850076161f23403841dab86775c803ab77a1d2e0cfdee3394d
 # input or capability source changed. See docs/first-person-minecraft-comparison.md.
 # Tool-family action audio additionally changes the procedural app recipes, so
 # the linked Elysium and elysmoke stripped-product pins renew transitively.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='67bcc242494b2bbaf1a9758bb28a72f456f121c874214b65721f32c9c14b63f3'
-EXPECTED_SMOKE_PRODUCT_SHA256='efff5b717b6430021f0b02b175b5a085d11061eba737ab44b83b31927fe77361'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='1ff2d883d929723b3aa691bea89b759460aaefaa71f4452c75049236e1ab7596'
+EXPECTED_SMOKE_PRODUCT_SHA256='598783c4e8b58fc291bbbadfdff30493239b731434d866a5003f7fb3700b13d8'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

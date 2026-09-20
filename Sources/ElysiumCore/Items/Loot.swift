@@ -132,6 +132,25 @@ public func registerAllLootTables() {
     // -----------------------------------------------------------------------
     // Chest tables
     // -----------------------------------------------------------------------
+    // A deliberately modest, category-complete first-night cache for the
+    // version-two prehistoric starter hut. Separate guaranteed pools provide
+    // two basic tools, practical resources, and food while their picks/counts
+    // still vary per world through the chest's world-seeded loot stream.
+    table("prehistoric_starter",
+        pool(1, 1, [
+            E("wooden_pickaxe", 6), E("stone_pickaxe", 2),
+        ]),
+        pool(1, 1, [
+            E("wooden_axe", 5), E("wooden_sword", 5), E("stone_axe", 1),
+        ]),
+        pool(2, 2, [
+            E("oak_log", 6, 2, 4), E("stick", 5, 3, 6),
+            E("cobblestone", 4, 3, 6), E("coal", 2, 1, 3),
+        ]),
+        pool(1, 1, [
+            E("bread", 5, 2, 4), E("apple", 3, 2, 4), E("cooked_chicken", 2, 1, 3),
+        ])
+    )
     table("dungeon",
         pool(1, 3, [
             E("saddle", 20), E("golden_apple", 15),

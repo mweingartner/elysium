@@ -154,7 +154,7 @@ public final class OverworldGen {
     /// every normal preset continues through its pre-existing climate and
     /// terrain path unchanged.
     private func terrainClimate(_ cl: Climate) -> Climate {
-        guard settings.preset == .prehistoricAncientSeas else { return cl }
+        guard settings.preset.prehistoricProfile?.isAncientSeas == true else { return cl }
         var coastal = cl
         coastal.c = clampD(coastal.c - ancientSeasContinentalnessOffset, -1, 1)
         return coastal
@@ -166,7 +166,7 @@ public final class OverworldGen {
     }
 
     private func terrainBaseHeight(_ cl: Climate) -> Double {
-        if settings.preset == .prehistoricAncientSeas {
+        if settings.preset.prehistoricProfile?.isAncientSeas == true {
             return baseHeight(terrainClimate(cl))
         }
         var h = baseHeight(cl)

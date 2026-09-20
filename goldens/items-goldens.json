@@ -217,6 +217,10 @@
  "brewH": 582193747,
  "lootTables": [
   {
+   "name": "prehistoric_starter",
+   "h": 2757127782
+  },
+  {
    "name": "dungeon",
    "h": 1309658567
   },

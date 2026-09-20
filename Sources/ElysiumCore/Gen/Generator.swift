@@ -771,6 +771,14 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
                                 !snowExclusions.contains { $0.contains(x, z) }
                             })
 
+        // Version-two prehistoric maps own a physical first-night shelter.
+        // Stamp only after every terrain, feature, and snow pass so no later
+        // generator stage can fill the hut, cover its roof, or erase its
+        // deterministic nearby wood grove.
+        if settings.preset.supportsStarterShelter {
+            stampPrehistoricStarterShelter(seed: seed, settings: settings, sink: sink)
+        }
+
         // worldgen passive mobs
         var mobRng = chunkRandom(seed, cx, cz, 0xAB1E)
         // Rich Resources promises a living, resource-rich surface. It receives
@@ -778,6 +786,11 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
         // runtime natural-spawn loop has had time to fill the area.
         let passiveBootstrapChance = settings.preset == .moderateHillsResourceRich ? 0.35
             : settings.preset.isPrehistoric ? 0.28 : 0.1
+        // Do not bootstrap an animal or dinosaur inside the first-night hut
+        // itself. The site is pure/cached and therefore agrees with the stamp
+        // on hosts, LAN clients, and independently generated neighbor chunks.
+        let starterShelter = settings.preset.supportsStarterShelter
+            ? prehistoricStarterShelterSite(seed: seed, settings: settings) : nil
         if mobRng.nextFloat() < passiveBootstrapChance {
             let centerBiome = gen.surfaceBiomeAt(Double(cx * 16 + 8), Double(cz * 16 + 8))
             let list = settings.preset.prehistoricProfile.map {
@@ -799,7 +812,8 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
                     let envelopeClear = prehistoricDefinition.map {
                         prehistoricBootstrapHasClearance(sink, definition: $0, x: px, y: py, z: pz)
                     } ?? true
-                    if py > 50 && py < 200 && grounded && envelopeClear {
+                    let inStarterShelter = starterShelter?.containsProtectedSpawnColumn(px, pz) ?? false
+                    if py > 50 && py < 200 && grounded && envelopeClear && !inStarterShelter {
                         let data: [String: BEValue]
                         if prehistoricDefinition != nil {
                             // The generated pack ordinal is stable for this
