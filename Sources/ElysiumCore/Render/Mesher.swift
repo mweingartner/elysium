@@ -447,13 +447,21 @@ final class SectionMesher {
                     if cell == 0 { continue }
                     let id = cell >> 4
                     let shape = Shape(rawValue: SHAPE_OF[id])!
-                    if shape == .cube || shape == .air { continue }
-                    let meta = cell & 15
-                    let anim = animFor(id, shape)
-                    let target = TRANSLUCENT[id] == 1 ? translucent : cutout
+                    if shape == .air { continue }
                     let sky = skyAt(x, y, z), blk = blkAt(x, y, z)
                     let skyUp = skyAt(x, y + 1, z), blkUp = blkAt(x, y + 1, z)
                     let s4 = max(sky, skyUp), b4 = max(blk, blkUp)
+                    if shape == .cube {
+                        // The normal lit furnace has a static opaque front tile. Add a
+                        // fire layer without scrolling the surrounding stone facade.
+                        if id == Int(B.furnace_lit) {
+                            emitLitFurnaceFlame(cutout, x, y, z, cell, s4, b4)
+                        }
+                        continue
+                    }
+                    let meta = cell & 15
+                    let anim = animFor(id, shape)
+                    let target = TRANSLUCENT[id] == 1 ? translucent : cutout
                     let tileOf: (Int) -> Int = { face in Int(TILE_TABLE[(Int(cell) << 3) | face]) }
                     var tint = tintFor(cell, x, z)
                     if input.renderContext.tintGate != nil {
@@ -602,12 +610,6 @@ final class SectionMesher {
             id == Int(B.redstone_torch) || id == Int(B.redstone_torch_off)
     }
 
-    private func torchGlowTile(_ id: Int) -> Int {
-        if id == Int(B.soul_torch) { return faceTileOfBlock(B.sea_lantern, 2) }
-        if id == Int(B.redstone_torch) || id == Int(B.redstone_torch_off) { return faceTileOfBlock(B.redstone_block, 2) }
-        return faceTileOfBlock(B.glowstone, 2)
-    }
-
     private func lanternGlowTile(_ id: Int) -> Int {
         id == Int(B.soul_lantern) ? faceTileOfBlock(B.sea_lantern, 2) : faceTileOfBlock(B.glowstone, 2)
     }
@@ -628,22 +630,109 @@ final class SectionMesher {
         let cx = (outline.x0 + outline.x1) * 0.5
         let cz = (outline.z0 + outline.z1) * 0.5
         let stemHalf = 1.0 / 16
-        let headHalf = 2.0 / 16
         let stemTop = max(outline.y0 + 2.0 / 16, outline.y1 - 2.0 / 16)
-        let headTop = min(1, outline.y1 + 1.0 / 16)
         let woodTile = faceTileOfBlock(B.oak_planks, 2)
-        let glowTile = torchGlowTile(id)
 
         emitFixtureBox(
             b, x, y, z,
             aabb(cx - stemHalf, outline.y0, cz - stemHalf, cx + stemHalf, stemTop, cz + stemHalf),
             woodTile, sky, blk
         )
-        emitFixtureBox(
-            b, x, y, z,
-            aabb(cx - headHalf, stemTop - 1.0 / 16, cz - headHalf, cx + headHalf, headTop, cz + headHalf),
-            glowTile, sky, blk, Int(EMISSIVE[id])
+        if id == Int(B.redstone_torch) || id == Int(B.redstone_torch_off) {
+            // Redstone torches are their own small red indicator lamps, not a
+            // normal wood-torch flame. Preserve the powered tip's emissive glow
+            // without turning it into an orange animated fire.
+            let headHalf = 2.0 / 16
+            emitFixtureBox(
+                b, x, y, z,
+                aabb(cx - headHalf, stemTop - 1.0 / 16, cz - headHalf,
+                     cx + headHalf, min(1, outline.y1 + 1.0 / 16), cz + headHalf),
+                faceTileOfBlock(B.redstone_block, 2), sky, blk,
+                id == Int(B.redstone_torch) ? Int(EMISSIVE[id]) : 0
+            )
+            return
+        }
+
+        let flameTile = id == Int(B.soul_torch)
+            ? faceTileOfBlock(B.soul_fire, 2)
+            : faceTileOfBlock(B.fire, 2)
+        emitAnimatedFlameCross(
+            b, x, y, z, cx, cz,
+            max(outline.y0 + 3.0 / 16, stemTop - 1.0 / 16),
+            min(1, outline.y1 + 3.0 / 16),
+            2.0 / 16, flameTile, WHITE, sky, blk
         )
+    }
+
+    /// Emit a compact, double-sided crossed flame. The tile's native resource-pack
+    /// frames are uploaded by WorldRenderer; anim=4 preserves the procedural fallback.
+    private func emitAnimatedFlameCross(
+        _ b: MeshBuilder, _ x: Int, _ y: Int, _ z: Int,
+        _ cx: Double, _ cz: Double, _ y0: Double, _ y1: Double, _ half: Double,
+        _ tile: Int, _ tint: Int, _ sky: Int, _ blk: Int
+    ) {
+        guard y1 > y0, half > 0 else { return }
+        let bottom = Double(y) + y0, top = Double(y) + y1
+        let pairs = [
+            (cx - half, cz - half, cx + half, cz + half),
+            (cx + half, cz - half, cx - half, cz + half),
+        ]
+        for (pairIndex, (x0, z0, x1, z1)) in pairs.enumerated() {
+            for flip in [false, true] {
+                let ax = Double(x) + (flip ? x1 : x0)
+                let az = Double(z) + (flip ? z1 : z0)
+                let bx = Double(x) + (flip ? x0 : x1)
+                let bz = Double(z) + (flip ? z0 : z1)
+                // The planes are diagonal, but the compact mesh format stores
+                // cardinal normals. Keep the Z-facing sign aligned with the
+                // winding so the held-block renderer does not re-cull one side.
+                let normal = pairIndex == 0 ? (flip ? 3 : 2) : (flip ? 2 : 3)
+                b.quad(
+                    ax, bottom, az, bx, bottom, bz, bx, top, bz, ax, top, az,
+                    0, 1, 1, 1, 1, 0, 0, 0,
+                    tile, normal, 3, 3, 3, 3, sky, sky, sky, sky, blk, blk, blk, blk,
+                    1, tint, 4
+                )
+            }
+        }
+    }
+
+    /// A lit normal furnace's authored front is static. Keep that facade as the
+    /// background and place a small animated fire only in the outward-facing mouth.
+    private func emitLitFurnaceFlame(
+        _ b: MeshBuilder, _ x: Int, _ y: Int, _ z: Int, _ cell: Int, _ sky: Int, _ blk: Int
+    ) {
+        let front = [2, 3, 4, 5][cell & 3]
+        let (dx, dy, dz) = FACE_OFF[front]
+        guard OPAQUE[cellAt(x + dx, y + dy, z + dz) >> 4] == 0 else { return }
+
+        let epsilon = 1.0 / 1024
+        let x0 = Double(x) + 4.0 / 16, x1 = Double(x) + 12.0 / 16
+        let y0 = Double(y) + 1.0 / 16, y1 = Double(y) + 8.0 / 16
+        let z0 = Double(z) + 4.0 / 16, z1 = Double(z) + 12.0 / 16
+        let tile = faceTileOfBlock(B.fire, 2)
+        switch front {
+        case 2:
+            let plane = Double(z) - epsilon
+            b.quad(x0, y0, plane, x1, y0, plane, x1, y1, plane, x0, y1, plane,
+                   1, 1, 0, 1, 0, 0, 1, 0,
+                   tile, front, 3, 3, 3, 3, sky, sky, sky, sky, blk, blk, blk, blk, 1, WHITE, 4)
+        case 3:
+            let plane = Double(z) + 1 + epsilon
+            b.quad(x1, y0, plane, x0, y0, plane, x0, y1, plane, x1, y1, plane,
+                   1, 1, 0, 1, 0, 0, 1, 0,
+                   tile, front, 3, 3, 3, 3, sky, sky, sky, sky, blk, blk, blk, blk, 1, WHITE, 4)
+        case 4:
+            let plane = Double(x) - epsilon
+            b.quad(plane, y0, z1, plane, y0, z0, plane, y1, z0, plane, y1, z1,
+                   1, 1, 0, 1, 0, 0, 1, 0,
+                   tile, front, 3, 3, 3, 3, sky, sky, sky, sky, blk, blk, blk, blk, 1, WHITE, 4)
+        default:
+            let plane = Double(x) + 1 + epsilon
+            b.quad(plane, y0, z0, plane, y0, z1, plane, y1, z1, plane, y1, z0,
+                   1, 1, 0, 1, 0, 0, 1, 0,
+                   tile, front, 3, 3, 3, 3, sky, sky, sky, sky, blk, blk, blk, blk, 1, WHITE, 4)
+        }
     }
 
     private func emitLanternFixture(_ b: MeshBuilder, _ x: Int, _ y: Int, _ z: Int, _ cell: Int, _ sky: Int, _ blk: Int) {

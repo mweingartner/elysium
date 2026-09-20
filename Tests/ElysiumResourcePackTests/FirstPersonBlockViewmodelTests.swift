@@ -90,6 +90,23 @@ final class FirstPersonBlockViewmodelTests: XCTestCase {
         assertV(ViewmodelMesh.block(Int(bid("oak_door")), context: shortContext), tile: "oak_door", min: 0, max: 1)
     }
 
+    func testFaithfulFireAnimationDrivesTorchGeometry() throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let pack = try XCTUnwrap(ResourcePack(url: repository.appendingPathComponent(
+            "packaging/Faithful 64x - December 2025 Release.zip")))
+        let atlas = try XCTUnwrap(buildPackAtlas(packs: [pack]))
+        let fire = try XCTUnwrap(atlas.animations.first { $0.slice == tileId("fire") },
+                                 "Faithful's fire strip must remain available to animate torch flames")
+
+        XCTAssertEqual(atlas.textureGate[tileId("fire")], 1)
+        XCTAssertEqual(fire.frames.count, 32)
+        XCTAssertEqual(fire.order.count, 32)
+        XCTAssertEqual(Set(fire.order.map(\.0)).count, 32)
+        XCTAssertFalse(vertices(ViewmodelMesh.block(Int(B.torch)), tile: "fire").isEmpty,
+                       "held torches must use the same animated fire tile as placed torches")
+    }
+
     func testWholeAndMultipartBlocksStayBoundedFiniteAndOutwardWound() {
         for name in ["stone", "stone_slab", "oak_stairs", "chest", "oak_door", "red_bed", "torch"] {
             let mesh = ViewmodelMesh.block(Int(bid(name)))

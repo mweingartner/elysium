@@ -81,6 +81,15 @@ final class MesherFixtureTests: XCTestCase {
         let v: Float
     }
 
+    private struct MaterialVertex {
+        let x: Double
+        let y: Double
+        let z: Double
+        let normal: Int
+        let anim: Int
+        let emissive: Int
+    }
+
     private func quads(_ layer: MeshLayer, tileName expectedName: String, normal: Int,
                        blockX: Int, blockY: Int, blockZ: Int) -> [[Vertex]] {
         stride(from: 0, to: layer.count, by: 4).compactMap { first in
@@ -129,28 +138,137 @@ final class MesherFixtureTests: XCTestCase {
         return names
     }
 
-    func testLiveTorchMeshUses3DMaterialPiecesInsteadOfSpriteCard() {
+    private func materialVertices(in layer: MeshLayer, matchingTileName name: String) -> [MaterialVertex] {
+        (0..<layer.count).compactMap { index in
+            let base = index * 7
+            let material = layer.data[base + 5]
+            guard tileName(Int(material & 4095)) == name else { return nil }
+            let tint = layer.data[base + 6]
+            return MaterialVertex(
+                x: Double(Float(bitPattern: layer.data[base])),
+                y: Double(Float(bitPattern: layer.data[base + 1])),
+                z: Double(Float(bitPattern: layer.data[base + 2])),
+                normal: Int((material >> 12) & 7),
+                anim: Int((tint >> 24) & 7),
+                emissive: Int((material >> 25) & 1)
+            )
+        }
+    }
+
+    private func flameQuadsHaveNormalsMatchingTheirWinding(_ layer: MeshLayer, named name: String) -> Bool {
+        stride(from: 0, to: layer.count, by: 4).allSatisfy { first in
+            guard first + 3 < layer.count else { return false }
+            let material = layer.data[first * 7 + 5]
+            guard tileName(Int(material & 4095)) == name else { return true }
+            let normal = Int((material >> 12) & 7)
+            let normalZ: Double
+            switch normal {
+            case 2: normalZ = -1
+            case 3: normalZ = 1
+            default: return false
+            }
+            func point(_ offset: Int) -> (Double, Double, Double) {
+                let base = (first + offset) * 7
+                return (Double(Float(bitPattern: layer.data[base])),
+                        Double(Float(bitPattern: layer.data[base + 1])),
+                        Double(Float(bitPattern: layer.data[base + 2])))
+            }
+            let a = point(0), b = point(1), c = point(2)
+            let geometricZ = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+            // World meshes use the renderer's clockwise convention. The
+            // viewmodel intentionally reverses it while preserving UVs.
+            return geometricZ * normalZ < 0
+        }
+    }
+
+    func testLiveTorchMeshUsesAnimatedFireInsteadOfGlowstoneHead() {
         registerCoreIfNeeded()
 
         let mesh = meshFor(B.torch)
         let tiles = tileNames(in: mesh.cutout)
+        let flame = materialVertices(in: mesh.cutout, matchingTileName: "fire")
 
-        XCTAssertGreaterThanOrEqual(mesh.cutout.count, 48)
+        XCTAssertGreaterThanOrEqual(mesh.cutout.count, 40)
         XCTAssertTrue(tiles.contains("oak_planks"))
-        XCTAssertTrue(tiles.contains("glowstone"))
+        XCTAssertTrue(tiles.contains("fire"))
+        XCTAssertFalse(tiles.contains("glowstone"))
         XCTAssertFalse(tiles.contains("torch"))
+        XCTAssertEqual(Set(flame.map(\.anim)), [4])
+        XCTAssertEqual(Set(flame.map(\.emissive)), [1])
+        XCTAssertTrue(flameQuadsHaveNormalsMatchingTheirWinding(mesh.cutout, named: "fire"))
     }
 
-    func testSoulTorchUsesSoulGlowMaterialInLiveMesh() {
+    func testSoulTorchUsesAnimatedSoulFireMaterialInLiveMesh() {
         registerCoreIfNeeded()
 
         let mesh = meshFor(B.soul_torch)
         let tiles = tileNames(in: mesh.cutout)
+        let flame = materialVertices(in: mesh.cutout, matchingTileName: "soul_fire")
 
-        XCTAssertGreaterThanOrEqual(mesh.cutout.count, 48)
+        XCTAssertGreaterThanOrEqual(mesh.cutout.count, 40)
         XCTAssertTrue(tiles.contains("oak_planks"))
-        XCTAssertTrue(tiles.contains("sea_lantern"))
+        XCTAssertTrue(tiles.contains("soul_fire"))
+        XCTAssertFalse(tiles.contains("sea_lantern"))
         XCTAssertFalse(tiles.contains("soul_torch"))
+        XCTAssertEqual(Set(flame.map(\.anim)), [4])
+        XCTAssertEqual(Set(flame.map(\.emissive)), [1])
+        XCTAssertTrue(flameQuadsHaveNormalsMatchingTheirWinding(mesh.cutout, named: "soul_fire"))
+    }
+
+    func testRedstoneTorchesKeepTheirDistinctIndicatorTip() {
+        registerCoreIfNeeded()
+
+        let active = meshFor(B.redstone_torch)
+        let inactive = meshFor(B.redstone_torch_off)
+        XCTAssertTrue(tileNames(in: active.cutout).contains("redstone_block"))
+        XCTAssertFalse(tileNames(in: active.cutout).contains("fire"))
+        XCTAssertEqual(Set(materialVertices(in: active.cutout, matchingTileName: "redstone_block").map(\.emissive)), [1])
+        XCTAssertEqual(Set(materialVertices(in: inactive.cutout, matchingTileName: "redstone_block").map(\.emissive)), [0])
+        XCTAssertFalse(tileNames(in: inactive.cutout).contains("fire"))
+    }
+
+    func testTorchFlamesRemainBoundedForFloorAndWallFixtures() {
+        registerCoreIfNeeded()
+
+        for meta in [0, 2, 3, 4, 5] {
+            let mesh = meshFor(B.torch, meta: meta)
+            let flame = materialVertices(in: mesh.cutout, matchingTileName: "fire")
+            XCTAssertEqual(flame.count, 16, "torch meta \(meta)")
+            XCTAssertTrue(flame.allSatisfy {
+                $0.x >= 8 && $0.x <= 9 && $0.y >= 8 && $0.y <= 9 && $0.z >= 8 && $0.z <= 9
+            }, "torch meta \(meta) escaped its fixture cell")
+        }
+    }
+
+    func testLitFurnaceAddsOneAnimatedFlameOnlyOnItsVisibleFront() {
+        registerCoreIfNeeded()
+        XCTAssertTrue(materialVertices(in: meshFor(B.furnace).cutout, matchingTileName: "fire").isEmpty)
+
+        let epsilon = 1.0 / 1024.0
+        for meta in 0..<4 {
+            let mesh = meshFor(B.furnace_lit, meta: meta)
+            let flame = materialVertices(in: mesh.cutout, matchingTileName: "fire")
+            XCTAssertEqual(flame.count, 4, "furnace meta \(meta)")
+            XCTAssertEqual(Set(flame.map(\.normal)), [meta + 2])
+            XCTAssertEqual(Set(flame.map(\.anim)), [4])
+            XCTAssertEqual(Set(flame.map(\.emissive)), [1])
+            switch meta {
+            case 0:
+                XCTAssertTrue(flame.allSatisfy { abs($0.z - (8 - epsilon)) < 0.000_001 })
+            case 1:
+                XCTAssertTrue(flame.allSatisfy { abs($0.z - (9 + epsilon)) < 0.000_001 })
+            case 2:
+                XCTAssertTrue(flame.allSatisfy { abs($0.x - (8 - epsilon)) < 0.000_001 })
+            default:
+                XCTAssertTrue(flame.allSatisfy { abs($0.x - (9 + epsilon)) < 0.000_001 })
+            }
+        }
+
+        let occluded = meshForCells([
+            (8, 8, 8, B.furnace_lit, 0),
+            (8, 8, 7, B.stone, 0),
+        ])
+        XCTAssertTrue(materialVertices(in: occluded.cutout, matchingTileName: "fire").isEmpty)
     }
 
     func testLiveLanternMeshUsesFrameAndGlowingCorePieces() {
