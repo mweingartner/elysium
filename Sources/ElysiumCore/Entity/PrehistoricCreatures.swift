@@ -35,6 +35,47 @@ public enum PrehistoricCreatureFamily: String, CaseIterable, Sendable {
     }
 }
 
+/// Every source-authored cue a prehistoric creature can emit. The action
+/// cases deliberately keep their existing raw values, but this separate enum
+/// also covers combat, lifecycle, and continuous locomotion sounds without
+/// expanding the save/LAN action schema.
+public enum PrehistoricSoundCue: String, CaseIterable, Sendable {
+    case ambient
+    case hurt
+    case death
+    case attack
+    case step
+    case wingbeat
+    case swim
+    case idle
+    case browse
+    case alert
+    case charge
+    case recover
+    case takeoff
+    case flap
+    case glide
+    case landing
+    case cruise
+    case surface
+    case dive
+    case turn
+    case eat
+    case burst
+    case stranded
+}
+
+/// Stable, source-owned acoustic parameters. They are presentation metadata,
+/// never a simulation RNG input, and the roster index gives every species an
+/// audibly distinct formant even when body size and movement family match.
+public struct PrehistoricSoundProfile: Equatable, Hashable, Sendable {
+    public let signature: Int
+    public let formantFrequency: Int
+    public let pulseCount: Int
+    public let timbreIndex: Int
+    public let cadenceOffset: Int
+}
+
 public enum PrehistoricAction: String, CaseIterable, Sendable {
     case idle
     case browse
@@ -52,6 +93,15 @@ public enum PrehistoricAction: String, CaseIterable, Sendable {
     case eat
     case burst
     case stranded
+
+    public var soundCue: PrehistoricSoundCue {
+        // Action raw values are deliberately shared with their audio cue, so
+        // a newly added controller state cannot silently become soundless.
+        guard let cue = PrehistoricSoundCue(rawValue: rawValue) else {
+            preconditionFailure("missing prehistoric sound cue for \(rawValue)")
+        }
+        return cue
+    }
 }
 
 public struct PrehistoricCreatureDefinition: Equatable, Sendable {
@@ -73,6 +123,49 @@ public struct PrehistoricCreatureDefinition: Equatable, Sendable {
 
     public var isPredatory: Bool { family.isPredatory }
     public var canCharge: Bool { family.canCharge }
+
+    /// A distinct, immutable signature for source-synthesized creature audio.
+    /// The canonical roster ordering is frozen with `PrehistoricWorldProfile`;
+    /// it is therefore safe to use as authored presentation metadata.
+    public var soundProfile: PrehistoricSoundProfile {
+        let signature = (Self.all.firstIndex { $0.id == id } ?? 0) + 1
+        return PrehistoricSoundProfile(
+            signature: signature,
+            formantFrequency: 430 + signature * 37,
+            pulseCount: 2 + signature % 3,
+            timbreIndex: signature % 4,
+            cadenceOffset: signature % 7
+        )
+    }
+
+    public func soundName(for cue: PrehistoricSoundCue) -> String {
+        "entity.\(id).\(cue.rawValue)"
+    }
+
+    public var soundNames: [String] {
+        PrehistoricSoundCue.allCases.map { soundName(for: $0) }
+    }
+
+    /// A unique source-synthesis motif for every species/cue pair. Audio uses
+    /// this only to differentiate presentation; it is not saved or simulated.
+    public func soundSignature(for cue: PrehistoricSoundCue) -> Int {
+        let cueIndex = PrehistoricSoundCue.allCases.firstIndex(of: cue) ?? 0
+        return soundProfile.signature * PrehistoricSoundCue.allCases.count + cueIndex
+    }
+
+    /// Ordinary XP-orb value for a player-attributed kill. It reflects the
+    /// configured combat threat (durability, active attack, and behaviour),
+    /// rather than visual body length. `xpReward` also feeds the existing
+    /// catalyst-bloom value by design, keeping both systems consistent.
+    public var combatXPReward: Int {
+        let healthTier = max(1, Int((max(0, health) / 10).rounded(.up)))
+        let activeThreat = isPredatory || canCharge
+        let damageTier = activeThreat
+            ? max(1, Int((max(0, attackDamage) / 3).rounded(.up)))
+            : 0
+        let behaviourTier = (isPredatory ? 3 : 0) + (canCharge ? 2 : 0)
+        return min(24, max(2, healthTier + damageTier + behaviourTier))
+    }
 
     /// Conservative voxel envelope used for spawn admission and body-aware
     /// path nodes. It intentionally exceeds the collision AABB for long
@@ -301,6 +394,10 @@ public final class PrehistoricCreature: Animal {
     private var lastBreathingRouteProbeAge: Int?
 
     public override var type: String { definition.id }
+    public override func ambientSound() -> String? { definition.soundName(for: .ambient) }
+    public override func hurtSound() -> String { definition.soundName(for: .hurt) }
+    public override func deathSound() -> String { definition.soundName(for: .death) }
+    public override func attackSound() -> String { definition.soundName(for: .attack) }
     public override var avoidsWaterWhileMoving: Bool {
         definition.medium == .land && super.avoidsWaterWhileMoving
     }
@@ -325,7 +422,7 @@ public final class PrehistoricCreature: Animal {
         health = definition.health
         speed = definition.speed
         attackDamage = definition.attackDamage
-        xpReward = max(2, min(20, Int(definition.authoringLengthMetres.rounded())))
+        xpReward = definition.combatXPReward
         data.prehistoricAction = PrehistoricAction.idle.rawValue
         data.prehistoricActionTicks = 0
         seedControllerRNGForCurrentPosition()
@@ -399,17 +496,35 @@ public final class PrehistoricCreature: Animal {
         normalizedPrehistoricAction(data.prehistoricAction)
     }
 
-    private func setAction(_ action: PrehistoricAction, ticks: Int = 0) {
+    private func playSound(_ cue: PrehistoricSoundCue, volume: Double = 1, pitch: Double = 1) {
+        world.hooks.playSound(definition.soundName(for: cue), x, y, z, volume, pitch)
+    }
+
+    /// Controller-internal transition seam. It remains module-internal so the
+    /// action-to-cue contract can be exercised directly without widening the
+    /// public save/LAN surface.
+    func setAction(_ action: PrehistoricAction, ticks: Int = 0, emitsSound: Bool = true) {
+        let previous = self.action
         data.prehistoricAction = action.rawValue
         data.prehistoricActionTicks = max(0, min(1_200, ticks))
         data.grazing = action == .browse
+        // Action timers are refreshed frequently by the controllers. Audio is
+        // emitted only for a semantic transition, never every AI tick.
+        if emitsSound, previous != action {
+            playSound(action.soundCue, volume: 0.84,
+                      pitch: 0.90 + Double(definition.soundProfile.timbreIndex) * 0.035)
+        }
     }
 
-    private func consumeActionTick() {
+    /// Module-internal for the deterministic controller/cue contract test.
+    func consumeActionTick() {
         let remaining = max(0, min(1_200, data.prehistoricActionTicks ?? 0))
         if remaining > 0 {
             data.prehistoricActionTicks = remaining - 1
-            if remaining == 1 { setAction(.idle) }
+            // A timed state may immediately choose a new action in the same
+            // controller tick. Expiry is a bookkeeping handoff, not an idle
+            // performance, so do not stack an idle cue before the real cue.
+            if remaining == 1 { setAction(.idle, emitsSound: false) }
         }
     }
 
@@ -420,6 +535,7 @@ public final class PrehistoricCreature: Animal {
             super.tick()
             if dead || deathTime > 0 { return }
             tickGroundAction()
+            tickLocomotionSound()
         case .air:
             tickFlight()
         case .aquatic:
@@ -466,7 +582,7 @@ public final class PrehistoricCreature: Animal {
         if wasCharging {
             attackAnim = 1
             target.hurt(max(1, attackDamage * 1.5), "prehistoric_charge", self)
-            world.hooks.playSound("entity.\(type).ambient", x, y, z, 0.95, 0.75)
+            playSound(.attack, volume: 0.95, pitch: 0.75)
             setAction(.recover, ticks: 24)
         } else {
             super.doMeleeAttack(target)
@@ -596,6 +712,7 @@ public final class PrehistoricCreature: Animal {
         // through the approach volume.
         data.airborne = action != .idle
         tickManualLimbAnimation()
+        tickLocomotionSound()
         tickManualAmbient()
     }
 
@@ -818,7 +935,7 @@ public final class PrehistoricCreature: Animal {
                     prey.hurt(max(1, attackDamage), "prehistoric_bite", self)
                     setAction(.eat, ticks: 36)
                     movementTarget = nil
-                    world.hooks.playSound("entity.\(type).ambient", x, y, z, 0.82, 0.84)
+                    playSound(.attack, volume: 0.82, pitch: 0.84)
                 } else {
                     movementTarget = (prey.x, prey.y, prey.z)
                     setAction(.burst, ticks: 28)
@@ -873,6 +990,7 @@ public final class PrehistoricCreature: Animal {
         data.swimTarget = [target.x, target.y, target.z]
         data.prehistoricAirSupply = max(0, min(300, airSupply))
         tickManualLimbAnimation()
+        tickLocomotionSound()
         tickManualAmbient()
     }
 
@@ -1162,9 +1280,42 @@ public final class PrehistoricCreature: Animal {
         ambientSoundTimer -= 1
         if ambientSoundTimer <= 0 {
             ambientSoundTimer = 90 + rng.nextInt(180)
-            world.hooks.playSound("entity.\(type).ambient", x, y, z, 1,
-                                  0.92 + rng.nextFloat() * 0.12)
+            playSound(.ambient, volume: 1, pitch: 0.92 + rng.nextFloat() * 0.12)
         }
+    }
+
+    /// Movement sounds are cosmetic and derive their cadence from already
+    /// simulated position/age. They must not advance the controller RNG.
+    private func tickLocomotionSound() {
+        let dx = x - prevX
+        let dy = y - prevY
+        let dz = z - prevZ
+
+        let cue: PrehistoricSoundCue
+        let cadence: Int
+        switch definition.medium {
+        case .land:
+            guard onGround else { return }
+            guard dx * dx + dz * dz > 0.0016 else { return }
+            cue = .step
+            cadence = 9 + definition.soundProfile.cadenceOffset
+        case .air:
+            guard action == .takeoff || action == .flap else { return }
+            guard dx * dx + dy * dy + dz * dz > 0.0016 else { return }
+            cue = .wingbeat
+            cadence = 7 + definition.soundProfile.cadenceOffset
+        case .aquatic:
+            guard inWater else { return }
+            guard dx * dx + dy * dy + dz * dz > 0.0016 else { return }
+            cue = .swim
+            cadence = 8 + definition.soundProfile.cadenceOffset
+        }
+
+        let phase = (abs(id) + definition.soundProfile.cadenceOffset) % cadence
+        guard age % cadence == phase else { return }
+        let volume = min(1.05, max(0.42, definition.collisionWidth / 1.6))
+        playSound(cue, volume: volume,
+                  pitch: 0.88 + Double(definition.soundProfile.timbreIndex) * 0.04)
     }
 
     public override func drops() -> [DropEntry] {

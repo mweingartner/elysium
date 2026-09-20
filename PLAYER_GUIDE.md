@@ -281,6 +281,12 @@ an iron shovel, and 64 oak logs. Additional lit gateway chambers occur throughou
 Overworld route is never dependent on finding and completing a rare ruined frame. The chosen map size is
 the Nether's playable width; its paired Overworld is eight times wider to preserve normal portal scaling.
 
+The four optional **Prehistoric Worlds** profiles replace the ordinary natural population with their
+roster of prehistoric creatures. Each creature has its own calls and action sounds, including attacks and
+movement. A player-attributed kill gives ordinary experience based on that creature's configured combat
+difficulty—health, active damage, and predator/charge behaviour—not merely its apparent size. This is
+separate from the usage-based Melee and Ranged skill-tree XP described below.
+
 Weather changes as the world runs. Rain and thunder affect visibility and direct-daylight conditions;
 rain can also interrupt applicable burning. Elysium includes boats, minecarts, chest-carrying variants,
 and rideable creatures. Use the normal use/place action to mount or interact with an eligible vehicle;

@@ -458,13 +458,17 @@ open class Mob: LivingEntity {
         )
     }
 
+    /// Subtypes with source-authored combat voices override this seam without
+    /// copying the shared damage, effect, and knockback calculation.
+    open func attackSound() -> String { "entity.player.attack.strong" }
+
     open func doMeleeAttack(_ target: LivingEntity) {
         attackAnim = 1
         var dmg = attackDamage
         dmg += 3 * Double(effectLevel("strength"))
         dmg -= 4 * Double(effectLevel("weakness"))
         target.hurt(max(0, dmg), "mob", self)
-        world.hooks.playSound("entity.player.attack.strong", x, y, z, 0.7, 1)
+        world.hooks.playSound(attackSound(), x, y, z, 0.7, 1)
     }
 
     open func isFood(_ stack: ItemStack?) -> Bool { false }

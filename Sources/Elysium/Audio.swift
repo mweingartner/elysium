@@ -605,6 +605,196 @@ private func mobVoice(_ name: String, _ cat: String, _ subtitle: String?, _ base
     }
 }
 
+private func prehistoricCueSubtitle(_ cue: PrehistoricSoundCue) -> String {
+    switch cue {
+    case .ambient: return "calls"
+    case .hurt: return "is hurt"
+    case .death: return "dies"
+    case .attack: return "attacks"
+    case .step: return "steps"
+    case .wingbeat: return "beats its wings"
+    case .swim: return "swims"
+    case .idle: return "settles"
+    case .browse: return "browses"
+    case .alert: return "alerts"
+    case .charge: return "charges"
+    case .recover: return "recovers"
+    case .takeoff: return "takes off"
+    case .flap: return "flaps"
+    case .glide: return "glides"
+    case .landing: return "lands"
+    case .cruise: return "cruises"
+    case .surface: return "surfaces"
+    case .dive: return "dives"
+    case .turn: return "turns"
+    case .eat: return "eats"
+    case .burst: return "bursts forward"
+    case .stranded: return "struggles ashore"
+    }
+}
+
+/// Builds a named, source-owned synthesis recipe for one catalog creature and
+/// one semantic cue. A unique profile formant appears in every cue, while the
+/// cue motif changes the rhythm/envelope; matching body length no longer
+/// produces matching creature voices.
+private func prehistoricVoice(_ definition: PrehistoricCreatureDefinition, cue: PrehistoricSoundCue) {
+    let profile = definition.soundProfile
+    let hostile = definition.isPredatory || definition.canCharge
+    let category = hostile ? "hostile" : "friendly"
+    let base: Double
+    let bodyDuration: Double
+    switch definition.medium {
+    case .land:
+        base = max(64, 360 - definition.authoringLengthMetres * 13)
+        bodyDuration = hostile ? 0.42 : 0.50
+    case .air:
+        base = max(185, 720 - definition.authoringLengthMetres * 27)
+        bodyDuration = 0.28
+    case .aquatic:
+        base = max(78, 335 - definition.authoringLengthMetres * 10)
+        bodyDuration = hostile ? 0.36 : 0.40
+    }
+
+    let cueIndex = Double((PrehistoricSoundCue.allCases.firstIndex(of: cue) ?? 0) + 1)
+    let motif = 1 + cueIndex * 0.018
+    let signature = Double(definition.soundSignature(for: cue))
+    let primary = (base + Double(profile.signature * 3)) * motif
+    let formant = Double(profile.formantFrequency) * (0.34 + cueIndex * 0.006)
+    let pulseDelay = 0.035 + Double(profile.pulseCount) * 0.018
+    let voiceType: OscType
+    switch profile.timbreIndex {
+    case 0: voiceType = .sine
+    case 1: voiceType = .triangle
+    case 2: voiceType = .sawtooth
+    default: voiceType = .square
+    }
+
+    R(definition.soundName(for: cue), category,
+      "\(definition.displayName) \(prehistoricCueSubtitle(cue))") { s, pitch, _ in
+        let main = primary * pitch
+        let accent = formant * pitch
+        // The signature-derived modulation keeps even same-family, same-size
+        // creatures perceptibly distinct without touching simulation RNG.
+        let vibrato = 1.5 + Double(profile.pulseCount) + signature.truncatingRemainder(dividingBy: 5)
+        switch cue {
+        case .ambient:
+            s.tone(freq: main, endFreq: main * (hostile ? 0.70 : 0.92), dur: bodyDuration,
+                   type: voiceType, vol: 0.34, vibrato: vibrato)
+            s.tone(freq: accent, endFreq: accent * 0.93, dur: bodyDuration * 0.62,
+                   type: .sine, vol: 0.10, delay: pulseDelay)
+        case .hurt:
+            s.tone(freq: main * 1.25, endFreq: main * 0.54, dur: max(0.16, bodyDuration * 0.62),
+                   type: voiceType, vol: 0.40, vibrato: vibrato + 2)
+            s.noiseBurst(dur: 0.10, freq: accent, q: 1.4, vol: 0.18, attack: 0.012, pitch: pitch)
+        case .death:
+            s.tone(freq: main * 0.88, endFreq: main * 0.34, dur: bodyDuration * 1.45,
+                   type: voiceType, vol: 0.46, vibrato: vibrato * 0.55)
+            s.noiseBurst(dur: bodyDuration * 0.75, freq: accent * 0.48, q: 0.65,
+                         lowpass: true, vol: 0.20, attack: 0.03, pitch: pitch, delay: pulseDelay)
+        case .attack:
+            s.tone(freq: main * 1.18, endFreq: main * 0.52, dur: 0.22 + bodyDuration * 0.42,
+                   type: .sawtooth, vol: 0.42, vibrato: vibrato)
+            s.noiseBurst(dur: 0.11, freq: accent * 0.82, q: 1.1, vol: 0.20, pitch: pitch,
+                         delay: pulseDelay * 0.5)
+        case .step:
+            s.noiseBurst(dur: 0.10 + bodyDuration * 0.22, freq: max(70, main * 0.75), q: 0.55,
+                         lowpass: true, vol: 0.34, attack: 0.006, pitch: pitch)
+            s.tone(freq: accent * 0.22, endFreq: accent * 0.14, dur: 0.10,
+                   type: .triangle, vol: 0.08, delay: pulseDelay)
+        case .wingbeat:
+            s.noiseBurst(dur: 0.18, freq: accent * 0.72, q: 0.45, vol: 0.28,
+                         attack: 0.025, pitch: pitch)
+            s.tone(freq: main * 1.6, endFreq: main * 0.85, dur: 0.16,
+                   type: .sine, vol: 0.11, delay: pulseDelay)
+        case .swim:
+            s.noiseBurst(dur: 0.20, freq: accent * 0.46, q: 0.40, lowpass: true,
+                         vol: 0.25, attack: 0.035, pitch: pitch)
+            s.tone(freq: main * 0.78, endFreq: main * 1.08, dur: 0.16,
+                   type: .sine, vol: 0.10, delay: pulseDelay)
+        case .idle:
+            s.tone(freq: main * 0.74, endFreq: main * 0.69, dur: 0.20,
+                   type: .triangle, vol: 0.17, vibrato: vibrato * 0.35)
+            s.tone(freq: accent * 0.54, endFreq: accent * 0.48, dur: 0.14,
+                   type: .sine, vol: 0.06, delay: pulseDelay)
+        case .browse:
+            s.noiseBurst(dur: 0.13, freq: accent * 0.58, q: 1.6, vol: 0.18,
+                         attack: 0.025, pitch: pitch)
+            s.tone(freq: main * 0.95, endFreq: main * 1.08, dur: 0.16,
+                   type: .triangle, vol: 0.12, delay: pulseDelay)
+        case .alert:
+            s.tone(freq: main * 1.34, endFreq: main * 1.67, dur: 0.26,
+                   type: voiceType, vol: 0.31, vibrato: vibrato + 1)
+            s.tone(freq: accent * 0.92, endFreq: accent * 1.06, dur: 0.15,
+                   type: .sine, vol: 0.10, delay: pulseDelay)
+        case .charge:
+            s.tone(freq: main * 0.78, endFreq: main * 1.38, dur: 0.30,
+                   type: .sawtooth, vol: 0.37, vibrato: vibrato)
+            s.noiseBurst(dur: 0.16, freq: accent * 0.36, q: 0.42, lowpass: true,
+                         vol: 0.22, pitch: pitch, delay: pulseDelay)
+        case .recover:
+            s.tone(freq: main * 0.82, endFreq: main * 0.61, dur: 0.24,
+                   type: .triangle, vol: 0.21, vibrato: vibrato * 0.5)
+            s.noiseBurst(dur: 0.10, freq: accent * 0.42, q: 0.8, lowpass: true,
+                         vol: 0.11, pitch: pitch, delay: pulseDelay)
+        case .takeoff:
+            s.tone(freq: main * 0.88, endFreq: main * 1.72, dur: 0.32,
+                   type: voiceType, vol: 0.28, vibrato: vibrato)
+            s.noiseBurst(dur: 0.20, freq: accent * 0.74, q: 0.55, vol: 0.21,
+                         attack: 0.03, pitch: pitch, delay: pulseDelay)
+        case .flap:
+            s.noiseBurst(dur: 0.16, freq: accent * 0.67, q: 0.48, vol: 0.27,
+                         attack: 0.018, pitch: pitch)
+            s.tone(freq: main * 1.42, endFreq: main * 0.92, dur: 0.18,
+                   type: .sine, vol: 0.12, delay: pulseDelay)
+        case .glide:
+            s.tone(freq: main * 1.10, endFreq: main * 1.22, dur: 0.34,
+                   type: .sine, vol: 0.18, vibrato: vibrato * 0.45)
+            s.noiseBurst(dur: 0.18, freq: accent * 0.76, q: 0.35, vol: 0.09,
+                         attack: 0.06, pitch: pitch, delay: pulseDelay)
+        case .landing:
+            s.noiseBurst(dur: 0.18, freq: accent * 0.32, q: 0.55, lowpass: true,
+                         vol: 0.29, pitch: pitch)
+            s.tone(freq: main * 0.94, endFreq: main * 0.58, dur: 0.20,
+                   type: .triangle, vol: 0.15, delay: pulseDelay)
+        case .cruise:
+            s.tone(freq: main * 0.92, endFreq: main * 1.02, dur: 0.32,
+                   type: .sine, vol: 0.17, vibrato: vibrato * 0.4)
+            s.noiseBurst(dur: 0.14, freq: accent * 0.43, q: 0.5, lowpass: true,
+                         vol: 0.09, attack: 0.05, pitch: pitch, delay: pulseDelay)
+        case .surface:
+            s.noiseBurst(dur: 0.25, freq: accent * 0.48, q: 0.36, lowpass: true,
+                         vol: 0.30, attack: 0.04, pitch: pitch)
+            s.tone(freq: main * 0.76, endFreq: main * 1.20, dur: 0.22,
+                   type: .sine, vol: 0.13, delay: pulseDelay)
+        case .dive:
+            s.tone(freq: main * 1.22, endFreq: main * 0.68, dur: 0.26,
+                   type: .sine, vol: 0.20, vibrato: vibrato * 0.5)
+            s.noiseBurst(dur: 0.20, freq: accent * 0.41, q: 0.42, lowpass: true,
+                         vol: 0.21, attack: 0.03, pitch: pitch, delay: pulseDelay)
+        case .turn:
+            s.tone(freq: main * 0.96, endFreq: main * 1.30, dur: 0.18,
+                   type: voiceType, vol: 0.17, vibrato: vibrato)
+            s.tone(freq: accent * 0.56, endFreq: accent * 0.72, dur: 0.14,
+                   type: .sine, vol: 0.08, delay: pulseDelay)
+        case .eat:
+            s.noiseBurst(dur: 0.09, freq: accent * 0.63, q: 1.8, vol: 0.19,
+                         attack: 0.012, pitch: pitch)
+            s.tone(freq: main * 0.84, endFreq: main * 0.59, dur: 0.13,
+                   type: .triangle, vol: 0.11, delay: pulseDelay)
+        case .burst:
+            s.tone(freq: main * 0.74, endFreq: main * 1.56, dur: 0.24,
+                   type: .sawtooth, vol: 0.30, vibrato: vibrato + 1)
+            s.noiseBurst(dur: 0.18, freq: accent * 0.51, q: 0.45, lowpass: true,
+                         vol: 0.22, pitch: pitch, delay: pulseDelay)
+        case .stranded:
+            s.noiseBurst(dur: 0.24, freq: accent * 0.39, q: 0.62, lowpass: true,
+                         vol: 0.25, attack: 0.025, pitch: pitch)
+            s.tone(freq: main * 0.72, endFreq: main * 0.48, dur: 0.30,
+                   type: voiceType, vol: 0.22, vibrato: vibrato * 0.45, delay: pulseDelay)
+        }
+    }
+}
+
 private func buildRecipes() {
     if recipesBuilt { return }
     recipesBuilt = true
@@ -976,42 +1166,12 @@ private func buildRecipes() {
     }
 
     // Original native procedural sound banks for every prehistoric species.
-    // These are authored synthesis recipes, not imported recordings; the
-    // species name remains in the accessibility subtitle and simulation never
-    // depends on the randomized voice variation.
+    // These are authored synthesis recipes, not imported recordings; every
+    // semantic state and motion cue gets an explicit direct recipe.
     for definition in PrehistoricCreatureDefinition.all {
-        let root = "entity.\(definition.id)"
-        let predator = definition.isPredatory || definition.canCharge
-        let base: Double
-        let oscillator: OscType
-        let duration: Double
-        let slide: Double
-        switch definition.medium {
-        case .land:
-            base = max(75, 390 - definition.authoringLengthMetres * 18)
-            oscillator = predator ? .sawtooth : .triangle
-            duration = predator ? 0.42 : 0.52
-            slide = predator ? 0.68 : 0.86
-        case .air:
-            base = max(180, 680 - definition.authoringLengthMetres * 24)
-            oscillator = .sine
-            duration = 0.28
-            slide = 1.28
-        case .aquatic:
-            base = max(90, 330 - definition.authoringLengthMetres * 11)
-            oscillator = predator ? .sawtooth : .sine
-            duration = 0.36
-            slide = predator ? 0.72 : 1.12
+        for cue in PrehistoricSoundCue.allCases {
+            prehistoricVoice(definition, cue: cue)
         }
-        let subtitle = "\(definition.displayName) calls"
-        mobVoice("\(root).ambient", predator ? "hostile" : "friendly", subtitle,
-                 base, oscillator, duration, slide, definition.medium == .air ? 7 : 3)
-        mobVoice("\(root).hurt", predator ? "hostile" : "friendly",
-                 "\(definition.displayName) hurts", base * 1.18, oscillator,
-                 max(0.16, duration * 0.64), 0.66, 2)
-        mobVoice("\(root).death", predator ? "hostile" : "friendly",
-                 "\(definition.displayName) dies", base * 0.9, oscillator,
-                 max(0.28, duration * 1.15), 0.46, 1)
     }
 
     // projectiles & misc
@@ -1324,6 +1484,32 @@ private let hostileNames = ["zombie", "skeleton", "creeper", "spider", "blaze", 
                             "vindicator", "evoker", "vex", "ravager", "guardian", "shulker", "phantom", "wither",
                             "warden", "hoglin", "piglin", "silverfish", "endermite", "stray", "husk", "drowned",
                             "magma", "slime", "zoglin"]
+
+/// Read-only manifest used by the app-target contract test. It intentionally
+/// builds the recipe table without starting AVAudioEngine, so CI validates
+/// direct prehistoric recipes rather than exercising an audio device.
+struct PrehistoricSynthesizedSoundRecipe: Equatable, Hashable {
+    let name: String
+    let subtitle: String?
+    let category: String
+    let acousticSignature: Int
+}
+
+func prehistoricSynthesizedSoundRecipes() -> [PrehistoricSynthesizedSoundRecipe] {
+    buildRecipes()
+    return PrehistoricCreatureDefinition.all.flatMap { definition in
+        PrehistoricSoundCue.allCases.compactMap { cue in
+            let name = definition.soundName(for: cue)
+            guard let recipe = RECIPES[name] else { return nil }
+            return PrehistoricSynthesizedSoundRecipe(
+                name: name,
+                subtitle: recipe.subtitle,
+                category: recipe.cat,
+                acousticSignature: definition.soundSignature(for: cue)
+            )
+        }
+    }
+}
 
 private func resolveRecipe(_ name: String) -> SoundRecipe? {
     buildRecipes()

@@ -142,6 +142,147 @@ final class PrehistoricWorldsTests: XCTestCase {
         XCTAssertTrue(WorldPreset.normalCycle.contains(.prehistoricLostWorld))
     }
 
+    func testPrehistoricSoundCatalogAndCombatXPRewardsAreDistinct() throws {
+        let roster = PrehistoricCreatureDefinition.all
+        let expectedCueCount = PrehistoricSoundCue.allCases.count
+        XCTAssertEqual(expectedCueCount, 23)
+
+        let names = roster.flatMap(\.soundNames)
+        let signatures = roster.flatMap { definition in
+            PrehistoricSoundCue.allCases.map { definition.soundSignature(for: $0) }
+        }
+        XCTAssertEqual(names.count, roster.count * expectedCueCount)
+        XCTAssertEqual(Set(names).count, names.count,
+                       "every creature/cue pair needs an explicit sound name")
+        XCTAssertEqual(Set(signatures).count, signatures.count,
+                       "every creature/cue pair needs a distinct acoustic motif")
+        XCTAssertEqual(Set(roster.map(\.soundProfile.formantFrequency)).count, roster.count,
+                       "same-sized species must not share a synthesized voice formant")
+
+        func definition(_ id: String) throws -> PrehistoricCreatureDefinition {
+            try XCTUnwrap(PrehistoricCreatureDefinition.named(id))
+        }
+
+        let dimorphodon = try definition("prehistoric.dimorphodon")
+        let compsognathus = try definition("prehistoric.compsognathus")
+        let triceratops = try definition("prehistoric.triceratops")
+        let allosaurus = try definition("prehistoric.allosaurus")
+        let tyrannosaurus = try definition("prehistoric.tyrannosaurus")
+        let spinosaurus = try definition("prehistoric.spinosaurus")
+        let diplodocus = try definition("prehistoric.diplodocus")
+        let brachiosaurus = try definition("prehistoric.brachiosaurus")
+        let mosasaurus = try definition("prehistoric.mosasaurus")
+        let liopleurodon = try definition("prehistoric.liopleurodon")
+
+        XCTAssertEqual(dimorphodon.combatXPReward, 2)
+        XCTAssertEqual(compsognathus.combatXPReward, 5)
+        XCTAssertEqual(triceratops.combatXPReward, 10)
+        XCTAssertEqual(allosaurus.combatXPReward, 14)
+        XCTAssertEqual(tyrannosaurus.combatXPReward, 17)
+        XCTAssertEqual(spinosaurus.combatXPReward, 19)
+        XCTAssertTrue(roster.allSatisfy { (2...24).contains($0.combatXPReward) })
+        XCTAssertGreaterThan(spinosaurus.combatXPReward, tyrannosaurus.combatXPReward)
+        XCTAssertGreaterThan(tyrannosaurus.combatXPReward, allosaurus.combatXPReward)
+        XCTAssertGreaterThan(allosaurus.combatXPReward, compsognathus.combatXPReward)
+        XCTAssertGreaterThan(mosasaurus.combatXPReward, liopleurodon.combatXPReward)
+        XCTAssertGreaterThan(diplodocus.combatXPReward, brachiosaurus.combatXPReward)
+
+        let world = makeWorld()
+        let creature = PrehistoricCreature(world: world, definition: triceratops)
+        XCTAssertEqual(creature.xpReward, triceratops.combatXPReward)
+    }
+
+    func testEveryPrehistoricActionTransitionUsesOneSpeciesCue() throws {
+        let world = makeWorld()
+        let definition = try XCTUnwrap(
+            PrehistoricCreatureDefinition.named("prehistoric.pteranodon")
+        )
+        let creature = PrehistoricCreature(world: world, definition: definition)
+        creature.setPos(24.5, 66, 8.5)
+        var sounds: [String] = []
+        world.hooks.playSound = { name, _, _, _, _, _ in sounds.append(name) }
+
+        for action in PrehistoricAction.allCases where action != .idle {
+            sounds.removeAll()
+            creature.setAction(action, ticks: 12)
+            XCTAssertEqual(sounds, [definition.soundName(for: action.soundCue)],
+                           "\(action.rawValue) must emit exactly its species cue")
+
+            sounds.removeAll()
+            creature.setAction(action, ticks: 20)
+            XCTAssertTrue(sounds.isEmpty,
+                          "refreshing \(action.rawValue) must not replay a transition cue")
+        }
+
+        sounds.removeAll()
+        creature.setAction(.idle, ticks: 1)
+        XCTAssertEqual(sounds, [definition.soundName(for: .idle)])
+
+        sounds.removeAll()
+        creature.setAction(.browse, ticks: 1)
+        sounds.removeAll()
+        creature.consumeActionTick()
+        XCTAssertEqual(creature.action, .idle)
+        XCTAssertTrue(sounds.isEmpty,
+                      "timer expiry must stay silent until a controller selects a real next action")
+    }
+
+    func testPrehistoricCombatAndPlayerKillsUseSpeciesSoundsAndDifficultyXP() throws {
+        let world = makeWorld()
+        let velociraptor = try XCTUnwrap(
+            PrehistoricCreatureDefinition.named("prehistoric.velociraptor")
+        )
+        let attacker = PrehistoricCreature(world: world, definition: velociraptor)
+        attacker.setPos(24.5, 64, 8.5)
+        let target = Player(world: world)
+        target.setPos(25.5, 64, 8.5)
+        var sounds: [String] = []
+        world.hooks.playSound = { name, _, _, _, _, _ in sounds.append(name) }
+
+        attacker.doMeleeAttack(target)
+
+        XCTAssertEqual(sounds.last, velociraptor.soundName(for: .attack))
+        XCTAssertFalse(sounds.contains("entity.player.attack.strong"),
+                       "prehistoric attacks must not use the generic player strike")
+
+        let triceratops = try XCTUnwrap(
+            PrehistoricCreatureDefinition.named("prehistoric.triceratops")
+        )
+        let charging = PrehistoricCreature(world: world, definition: triceratops)
+        charging.setPos(24.5, 64, 8.5)
+        charging.data.prehistoricAction = PrehistoricAction.charge.rawValue
+        sounds.removeAll()
+        charging.doMeleeAttack(target)
+        XCTAssertTrue(sounds.contains(triceratops.soundName(for: .attack)))
+        XCTAssertFalse(sounds.contains(triceratops.soundName(for: .ambient)),
+                       "a charge impact must not replay the creature's ambient call")
+        XCTAssertTrue(sounds.contains(triceratops.soundName(for: .recover)),
+                      "the charge recovery transition needs its own semantic cue")
+
+        func playerKillXP(_ definition: PrehistoricCreatureDefinition) throws -> Int {
+            let killWorld = makeWorld()
+            let creature = PrehistoricCreature(world: killWorld, definition: definition)
+            creature.setPos(24.5, 64, 8.5)
+            creature.persistent = true
+            killWorld.addEntity(creature)
+            let player = Player(world: killWorld)
+            player.setPos(40.5, 64, 8.5)
+            killWorld.addEntity(player)
+
+            XCTAssertTrue(creature.hurt(creature.maxHealth, "test", player))
+            // `deathTime` starts at one. The nineteenth entity tick reaches
+            // the shared death animation's one XP-orb spawn point exactly.
+            for _ in 0..<19 { creature.tick() }
+            return killWorld.entities.compactMap { ($0 as? XPOrb)?.amount }.reduce(0, +)
+        }
+
+        let low = try XCTUnwrap(PrehistoricCreatureDefinition.named("prehistoric.compsognathus"))
+        let high = try XCTUnwrap(PrehistoricCreatureDefinition.named("prehistoric.spinosaurus"))
+        XCTAssertEqual(try playerKillXP(low), low.combatXPReward)
+        XCTAssertEqual(try playerKillXP(high), high.combatXPReward)
+        XCTAssertGreaterThan(high.combatXPReward, low.combatXPReward)
+    }
+
     func testPrehistoricProfileReplacesOnlyPassiveSpawnTablesAndDisablesVillagePlans() {
         let lostLand = prehistoricSpawnEntries(profile: .lostWorld, category: "creature")
         let lostAir = prehistoricSpawnEntries(profile: .lostWorld, category: "ambient")

@@ -50,8 +50,8 @@ the historical entity range, preserving existing entity ordinals. The four
 profiles choose ordered subsets of that roster; Lost World contains the full
 mixed-era set.
 
-One data definition drives collision bounds, health, speed, pack size,
-spawning weight, sound identity, and movement family. The implementation uses
+One data definition drives collision bounds, health, attack, combat XP reward,
+speed, pack size, spawning weight, sound identity, and movement family. The implementation uses
 three bounded deterministic controllers:
 
 - Land creatures use ordinary goals plus whole-body clearance for large
@@ -112,8 +112,25 @@ readable without adding a hierarchy or a new animation system.
 
 Creature voices are original runtime synthesis recipes with native accessibility
 subtitles. They do not read a user script-WAV library, external URL, authoring
-path, film/game recording, or network service. Cosmetic variation is generated
-in the audio layer and never consumes simulation RNG.
+path, film/game recording, or network service. New action and locomotion cue
+variation is generated in the audio layer without consuming simulation RNG.
+
+Every roster member has a direct synthesized cue for ambient, injury, death,
+attack, every closed controller action, and its applicable movement rhythm
+(step, wingbeat, or swim stroke). Action cues emit only when the semantic state
+actually changes; motion cues are rate-limited from already-simulated age and
+movement, never by a new random stream. Each species carries a stable,
+source-authored acoustic signature and formant, so matching size/family alone
+cannot make two species share a voice. This preserves the no-external-audio
+constraint while making a nearby creature's action and identity distinguishable.
+
+Player-attributed prehistoric kills award ordinary XP orbs from the creature's
+configured combat difficulty, not from visual body length: a bounded health
+tier, active-attack tier, and predator/charge behaviour bonuses yield 2–24 XP.
+The same existing `xpReward` remains the catalyst-bloom input, so sculk bloom
+strength stays consistent with the kill's XP value. This does not change the
+separate usage-based Melee/Ranged skill XP, which remains per successful use to
+avoid farming high-health creatures.
 
 The deliberately rejected alternative is a new generalized skeletal asset
 pipeline. It would require a versioned binary importer, filesystem/package
@@ -136,13 +153,21 @@ presentation action/air fields. A mixed app version is also rejected by
 Elysium's existing version gate rather than silently differing on models or
 collision.
 
+Gameplay sound hooks are currently host-local cosmetics: a LAN guest receives
+validated action state but no semantic sound-event stream, and must not infer
+an attack or death sound from sampled snapshots. Guest audio parity therefore
+requires a future bounded, host-authoritative event protocol rather than a
+best-effort snapshot guess.
+
 ## Verification map
 
 The source tests cover the ordered roster, normal-profile identity, profile
 spawn-domain replacement, village/patrol-domain filtering, an exact normal
 terrain-fill golden, Ancient Seas deep-water connectivity and retained island
 landfalls, renderer model limits and landmarks, action/controller persistence,
-global-RNG isolation, spawn and route clearance rejection, finite land/air/water
+global-RNG isolation, unique creature/cue catalog signatures, direct
+source-synthesis recipe coverage, species attack cues, difficulty-scaled player
+XP-orb totals, spawn and route clearance rejection, finite land/air/water
 controllers, and LAN profile/content/action sanitization. Existing release gates cover the full
 build, XCTest suite, golden smoke contract, security scan, packaging,
 installation, and push hook.

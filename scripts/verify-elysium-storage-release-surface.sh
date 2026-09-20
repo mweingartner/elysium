@@ -331,7 +331,13 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='2734c85e3710b4992cdc4478c0a55dbff761ecc6268ab4
 # Normalized through the disposable-copy strip -S -x path from a warning-free
 # release build; docs/prehistoric-model-gallery/build.md records the old/new
 # values and verification evidence.
-EXPECTED_CORE_OBJECT_SHA256='1a6059d09b63788ffe8bb955cc509115524ad0a2a9206ebac87cd355c7af6a67'
+# prehistoric-audio-xp: per-species lifecycle/action/movement sound routing and
+# combat-scaled ordinary XP change only PrehistoricCreatures.swift and AI.swift
+# in ElysiumCore, plus the application-owned procedural Audio.swift recipes.
+# Core and both linked products renew; storage, Saves, GameCore, Player,
+# capabilities, and text-input source/object pins remain byte-identical.
+# Normalized disposable-copy evidence is in docs/prehistoric-audio-xp/build.md.
+EXPECTED_CORE_OBJECT_SHA256='e850076161f23403841dab86775c803ab77a1d2e0cfdee3394dcab49c72ce9b7'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -341,8 +347,8 @@ EXPECTED_CORE_OBJECT_SHA256='1a6059d09b63788ffe8bb955cc509115524ad0a2a9206ebac87
 # input or capability source changed. See docs/first-person-minecraft-comparison.md.
 # Tool-family action audio additionally changes the procedural app recipes, so
 # the linked Elysium and elysmoke stripped-product pins renew transitively.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='1f9ba7793cba112026ff7c004fc11337996ae323cfbf17d0cc3b8de14bcea388'
-EXPECTED_SMOKE_PRODUCT_SHA256='b77090afb36bbab576f0e87cc30360d480204c1374d2e4ccbba3b9b1b7138db7'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='67bcc242494b2bbaf1a9758bb28a72f456f121c874214b65721f32c9c14b63f3'
+EXPECTED_SMOKE_PRODUCT_SHA256='efff5b717b6430021f0b02b175b5a085d11061eba737ab44b83b31927fe77361'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'
