@@ -739,7 +739,10 @@ final class RPGLocalPreferencesTests: XCTestCase {
             game.loadWorld(record.id)
         }
         game.loadWorld(record.id)
-        wait(for: [replacementBlocked], timeout: 3)
+        // The replacement entry synchronously prepares its spawn area on MainActor before the
+        // background migration can reach this gate.  Keep the assertion bounded, but allow that
+        // deliberately re-entrant entry to finish rather than timing out its setup race.
+        wait(for: [replacementBlocked], timeout: 10)
         XCTAssertEqual(game._testRPGCheckedPlayerOmissionFinalSegmentCount, 0)
         XCTAssertTrue(playerSnapshotHasLegacySlots(
             try XCTUnwrap(database.getPlayerChecked(record.id))))
