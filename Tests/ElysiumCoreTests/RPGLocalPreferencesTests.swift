@@ -381,6 +381,9 @@ final class RPGLocalPreferencesTests: XCTestCase {
 
         let omissionBarrier = database._testArmPlayerCASBarrier(.beforeFacade)
         let conflictWritten = expectation(description: "newer player row written at CAS barrier")
+        let first = GameCore(db: database)
+        let host = RPGLocalPreferenceTestHost(); first.host = host
+        first.loadWorld(record.id)
         DispatchQueue.global().async {
             guard omissionBarrier.waitUntilReached() else {
                 XCTFail("checked player CAS did not reach before-facade barrier")
@@ -407,9 +410,6 @@ final class RPGLocalPreferencesTests: XCTestCase {
             omissionBarrier.resume()
             conflictWritten.fulfill()
         }
-        let first = GameCore(db: database)
-        let host = RPGLocalPreferenceTestHost(); first.host = host
-        first.loadWorld(record.id)
         wait(for: [conflictWritten], timeout: 5)
         waitUntil { first.rpgLocalPreferencePersistenceFailed }
         XCTAssertEqual(host.actionBars.last, "Could not save RPG quick slots")
@@ -465,6 +465,7 @@ final class RPGLocalPreferencesTests: XCTestCase {
         var events: [String] = []
         game._testRPGCheckedPlayerOmissionDidCommit = { events.append("commit") }
         game._testRPGWorldTeardownDidInvalidate = { events.append("teardown") }
+        game.loadWorld(record.id)
         DispatchQueue.global().async {
             guard barrier.waitUntilReached() else {
                 XCTFail("checked player CAS did not reach before-facade barrier")
@@ -478,7 +479,6 @@ final class RPGLocalPreferencesTests: XCTestCase {
             queued.fulfill()
             barrier.resume()
         }
-        game.loadWorld(record.id)
         wait(for: [queued, tornDown], timeout: 5)
         XCTAssertEqual(events, ["commit", "teardown"])
         XCTAssertEqual(game._testRPGCheckedPlayerOmissionFinalSegmentCount, 1)
@@ -495,6 +495,7 @@ final class RPGLocalPreferencesTests: XCTestCase {
         let game = GameCore(db: database)
         var events: [String] = []
         game._testRPGCheckedPlayerOmissionDidCommit = { events.append("commit") }
+        game.loadWorld(record.id)
         DispatchQueue.global().async {
             guard barrier.waitUntilReached() else {
                 XCTFail("checked player CAS did not reach after-commit barrier")
@@ -513,7 +514,6 @@ final class RPGLocalPreferencesTests: XCTestCase {
             }
             barrier.resume()
         }
-        game.loadWorld(record.id)
         wait(for: [replaced], timeout: 5)
         XCTAssertEqual(events, ["commit", "replacement"])
         XCTAssertFalse(try XCTUnwrap(game.player.rpgLegacyQuickSlotEnvelope).omissionEligible)
@@ -615,7 +615,7 @@ final class RPGLocalPreferencesTests: XCTestCase {
             database.putPlayer(record.id, newer)
         }
         game.loadWorld(record.id)
-        waitUntil {
+        waitUntil(timeout: 10) {
             game.player.rpgLegacyQuickSlotEnvelope?.omissionEligible == true
         }
         XCTAssertEqual(game.rpgLocalPreferenceFailureCount, 0)
