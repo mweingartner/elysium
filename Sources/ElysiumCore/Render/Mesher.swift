@@ -160,6 +160,13 @@ private let GRASS_FALLBACK = 0x91bd59
     }
 }
 
+/// Anvil metadata names the short-end facing while `shapeBoxes` aligns the
+/// long body perpendicular to it. The authored top plate is broad on the X
+/// axis, so shift the facing by a quarter turn before sampling it.
+@inline(__always) private func anvilTopUV(_ facing: Int, _ u: Double, _ v: Double) -> (Double, Double) {
+    facingTopUV((facing + 2) & 3, u, v)
+}
+
 /// Convert a side-face U into foot-to-head distance for a bed. Only the two
 /// longitudinal faces have such a coordinate; end faces retain their stable
 /// fallback mapping because Elysium has no dedicated end crop.
@@ -205,6 +212,143 @@ private let GRASS_FALLBACK = 0x91bd59
     guard du > 0, dv > 0 else { return (0, 0) }
     return (max(0, min(1, (u - uBounds.0) / du)),
             max(0, min(1, (v - vBounds.0) / dv)))
+}
+
+/// Reconstruct the point addressed by `emitBox`'s face-local UV coordinates.
+/// Keeping this inverse beside the emitter lets stateful models rotate their
+/// art with their geometry instead of leaving a directional pack texture pinned
+/// to the world axes.
+@inline(__always) private func meshFacePoint(
+    _ face: Int, _ u: Double, _ v: Double, _ box: AABB
+) -> (x: Double, y: Double, z: Double) {
+    switch face {
+    case 0: return (u, box.y0, v)
+    case 1: return (u, box.y1, v)
+    case 2: return (1 - u, 1 - v, box.z0)
+    case 3: return (u, 1 - v, box.z1)
+    case 4: return (box.x0, 1 - v, u)
+    default: return (box.x1, 1 - v, 1 - u)
+    }
+}
+
+/// Undo `rotateFenceGateBox` so every gate texture uses the canonical
+/// south-facing model frame. This is especially important for the dedicated,
+/// asymmetric bamboo-gate texture supplied by resource packs.
+@inline(__always) private func canonicalFenceGatePoint(
+    _ facing: Int, _ x: Double, _ y: Double, _ z: Double
+) -> (x: Double, y: Double, z: Double) {
+    switch facing & 3 {
+    case 0: return (1 - x, y, 1 - z)
+    case 1: return (x, y, z)
+    case 2: return (z, y, 1 - x)
+    default: return (1 - z, y, x)
+    }
+}
+
+/// Transform a world face back into the canonical south-facing gate model's
+/// corresponding face. Horizontal faces survive a Y-axis rotation unchanged.
+@inline(__always) private func canonicalFenceGateFace(_ facing: Int, _ face: Int) -> Int {
+    guard face >= 2 else { return face }
+    switch facing & 3 {
+    case 0:
+        return face ^ 1
+    case 1:
+        return face
+    case 2:
+        switch face {
+        case 2: return 4
+        case 3: return 5
+        case 4: return 3
+        default: return 2
+        }
+    default:
+        switch face {
+        case 2: return 5
+        case 3: return 4
+        case 4: return 2
+        default: return 3
+        }
+    }
+}
+
+/// The UV convention `emitBox` would use for a point in the canonical model.
+@inline(__always) private func canonicalFaceUV(
+    _ face: Int, _ x: Double, _ y: Double, _ z: Double
+) -> (Double, Double) {
+    switch face {
+    case 0, 1: return (x, z)
+    case 2: return (1 - x, 1 - y)
+    case 3: return (x, 1 - y)
+    case 4: return (z, 1 - y)
+    default: return (1 - z, 1 - y)
+    }
+}
+
+/// Lock fence-gate material coordinates to the rotated canonical model.
+/// Without this, an asymmetric tile is world-aligned for north/west/east gates
+/// while the gate mesh itself rotates, making rails and apertures read wrong.
+@inline(__always) private func fenceGateUV(
+    _ facing: Int, _ face: Int, _ u: Double, _ v: Double, _ box: AABB,
+    _ wallLowering: Double
+) -> (Double, Double) {
+    let point = meshFacePoint(face, u, v, box)
+    // In-wall gates are translated down as one model. Undo just that translation
+    // before choosing UVs so the texture moves with the gate instead of sliding
+    // three pixels across its rails.
+    let canonical = canonicalFenceGatePoint(facing, point.x, point.y + wallLowering, point.z)
+    return canonicalFaceUV(canonicalFenceGateFace(facing, face),
+                           canonical.x, canonical.y, canonical.z)
+}
+
+/// Rotate a trapdoor's broad-leaf art with its stored facing and then keep the
+/// image attached to the leaf as it swings upright. A bottom-half leaf rises
+/// from its hinge while a top-half leaf drops from it, so only the latter flips
+/// V. The reverse open face mirrors U so a left/right detail remains on the
+/// same physical edge.
+@inline(__always) private func trapdoorLeafUV(
+    _ meta: Int, _ face: Int, _ u: Double, _ v: Double
+) -> (Double, Double) {
+    let facing = meta & 3
+    guard meta & 4 != 0 else {
+        guard face == 0 || face == 1 else { return (u, v) }
+        return facingTopUV(facing, u, v)
+    }
+
+    // `shapeBoxes` puts an open leaf on the plane opposite its stored facing.
+    // On that broad face raw U/V already follow a bottom leaf rotating up from
+    // its hinge. A top leaf rotates down instead, reversing that vertical axis.
+    let outwardFace = (facing ^ 1) + 2
+    let leafV = meta & 8 == 0 ? v : 1 - v
+    if face == outwardFace { return (u, leafV) }
+    if face == (outwardFace ^ 1) { return (1 - u, leafV) }
+    return (u, v)
+}
+
+/// The virtual sign-board tiles vertically pack the two broad entity-sheet
+/// faces. Return the band's origin only for a visible board face; sign posts
+/// and hanging supports deliberately retain their ordinary planks tile.
+@inline(__always) private func signBoardFaceBand(
+    _ shape: Shape, _ meta: Int, _ face: Int, _ box: AABB
+) -> Double? {
+    let front: Int
+    switch shape {
+    case .sign:
+        guard box.y0 == 9.0 / 16.0, box.y1 == 1 else { return nil }
+        front = standingSignFrontFace(meta)
+    case .wallSign:
+        // A wall sign's broad front points away from its support block.
+        front = [3, 2, 5, 4][meta & 3]
+    case .hangingSign:
+        // Hanging-sign metadata stores only the board axis, not a second
+        // directional state. Keep its source face assignment stable by axis.
+        guard box.y0 == 0, box.y1 == 10.0 / 16.0 else { return nil }
+        front = meta & 1 == 0 ? 2 : 4
+    default:
+        return nil
+    }
+    if face == front { return 0 }
+    if face == FACE_OPP[front - 2] + 2 { return 0.5 }
+    return nil
 }
 
 let TILE_WIRE_DOT = tileId("redstone_dust_dot")
@@ -549,8 +693,44 @@ final class SectionMesher {
                         // Packed regions are single, left, right.
                         return hasRight ? 1.0 / 3.0 : 2.0 / 3.0
                     }()
+                    let fenceGateWallLowering: Double = {
+                        guard shape == .fenceGate else { return 0 }
+                        let inWall = (meta & 8) != 0 || fenceGateInWall(meta & 3) { dx, dy, dz in
+                            self.cellAt(x + dx, y + dy, z + dz)
+                        }
+                        return inWall ? 3.0 / 16.0 : 0
+                    }()
+                    let signBoardTile: Int? = {
+                        guard let tile = signBoardTextureTiles[id],
+                              self.input.renderContext.isPackBacked(tile) else { return nil }
+                        return tile
+                    }()
                     let multipartUV: (Int, Double, Double, AABB) -> (Double, Double) = { face, u, v, box in
                         let tile = tileOf(face)
+                        // These openable models rotate geometry after their tile is
+                        // selected. Keep material coordinates in the object frame so
+                        // directional pack art follows the state rather than world axes.
+                        if shape == .fenceGate {
+                            return fenceGateUV(meta & 3, face, u, v, box, fenceGateWallLowering)
+                        }
+                        if shape == .trapdoor {
+                            return trapdoorLeafUV(meta, face, u, v)
+                        }
+                        // Repeater, comparator, and campfire tiles have an authored
+                        // forward edge on their horizontal presentation surface.
+                        // Their state stores facing in the low two bits, so rotate
+                        // that top art with the block rather than pinning it north.
+                        if (shape == .repeater || shape == .comparator || shape == .campfire), face == 1 {
+                            return facingTopUV(meta & 3, u, v)
+                        }
+                        if shape == .anvil, face == 1 {
+                            return anvilTopUV(meta & 3, u, v)
+                        }
+                        if signBoardTile != nil,
+                           let band = signBoardFaceBand(shape, meta, face, box) {
+                            let semantic = normalizedBoxUV(face, u, v, box)
+                            return (semantic.0, packedMeshV(band, 0.5, semantic.1))
+                        }
                         // Semantic packed pieces are present only for pack-backed
                         // slices.  Procedural tiles retain their historical full
                         // tile mapping as a deterministic fallback.
@@ -562,7 +742,15 @@ final class SectionMesher {
                             let doorU: Double
                             if let doorState,
                                face == doorState.side + 2 || face == FACE_OPP[doorState.side] + 2 {
-                                doorU = doorState.hingeRight ? 1 - semantic.0 : semantic.0
+                                // `semantic` is viewer-relative, so its U axis reverses
+                                // between the two broad faces.  The image itself must stay
+                                // fixed to a physical door edge: otherwise the handle looks
+                                // correct from one side but lands on the hinge side from the
+                                // other.  Hinge choice mirrors the authored image and the
+                                // back face supplies the second, independent mirror.
+                                let back = face == FACE_OPP[doorState.side] + 2
+                                let mirror = doorState.hingeRight != back
+                                doorU = mirror ? 1 - semantic.0 : semantic.0
                             } else {
                                 doorU = semantic.0
                             }
@@ -591,7 +779,15 @@ final class SectionMesher {
                                 packedMeshV(chestPieceStart, 1.0 / 3.0, semantic.1))
                     }
                     for bx in boxes {
-                        emitBox(target, x, y, z, bx, tileOf, s4, b4, tint, anim, Int(EMISSIVE[id]), multipartUV)
+                        let boxTileOf: (Int) -> Int = { face in
+                            if let signBoardTile,
+                               signBoardFaceBand(shape, meta, face, bx) != nil {
+                                return signBoardTile
+                            }
+                            return tileOf(face)
+                        }
+                        emitBox(target, x, y, z, bx, boxTileOf, s4, b4, tint, anim,
+                                Int(EMISSIVE[id]), multipartUV)
                     }
                 }
             }

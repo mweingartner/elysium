@@ -875,4 +875,12 @@ func registerPainters2() {
     p("bamboo_fence_gate") { t in
         t.planks(WOOD_COLORS["bamboo"]!.plank)
     }
+    // Semantic sign-board tiles are only selected when a resource pack has
+    // supplied an entity-sheet crop. Keep the procedural atlas complete for
+    // fallback builds and smoke verification; the live procedural mesher still
+    // renders these board faces with the original planks tile.
+    for wood in WOODS {
+        p("\(wood)_sign_board") { t in paintInto(t, "\(wood)_planks") }
+        p("\(wood)_hanging_sign_board") { t in paintInto(t, "\(wood)_planks") }
+    }
 }

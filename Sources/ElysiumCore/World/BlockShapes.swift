@@ -42,6 +42,25 @@ public let FACE_DX = [0, 0, -1, 1]
 public let FACE_DZ = [-1, 1, 0, 0]
 public let FACE_OPP = [1, 0, 3, 2]
 
+// Standing signs retain Minecraft's sixteen rotation states while this
+// renderer uses axis-aligned board boxes. Pick the nearest cardinal board
+// normal deterministically. At the four diagonal ties we retain the earlier
+// segment's axis; the table is deliberately half-turn invariant, so rotations
+// eight segments apart always share one physical board axis.
+private let STANDING_SIGN_FRONT_FACE: [Int] = [
+    3, 3, 3, 4, 4, 4, 4, 2,
+    2, 2, 2, 5, 5, 5, 5, 3,
+]
+
+@inline(__always) func standingSignFrontFace(_ rotation: Int) -> Int {
+    STANDING_SIGN_FRONT_FACE[rotation & 15]
+}
+
+@inline(__always) func standingSignBoardRunsAlongX(_ rotation: Int) -> Bool {
+    let front = standingSignFrontFace(rotation)
+    return front == 2 || front == 3
+}
+
 /// Toggles a fence gate while preserving its attachment axis. Like Minecraft,
 /// opening a gate only rotates it when the player approaches from its back;
 /// closing always preserves both facing and the reserved wall bit.
@@ -416,7 +435,7 @@ public func shapeBoxes(_ cell: Int, _ get: CellGetter, _ out: inout [AABB], _ fo
         if forCollision { out.removeLast() } // no collision
     case .sign:
         if forCollision { return }
-        let alongX = ((meta + 4) & 15) < 8   // rotation buckets → board axis
+        let alongX = standingSignBoardRunsAlongX(meta)
         out.append(aabb(7 / 16, 0, 7 / 16, 9 / 16, 9 / 16, 9 / 16))
         if alongX { out.append(aabb(0, 9 / 16, 6.5 / 16, 1, 1, 9.5 / 16)) }
         else { out.append(aabb(6.5 / 16, 9 / 16, 0, 9.5 / 16, 1, 1)) }

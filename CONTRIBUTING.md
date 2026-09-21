@@ -118,6 +118,7 @@ These are not style preferences. Violating them corrupts worlds or breaks determ
 - `ELYSIUM_RPG_UI_CASE=tab:warden:warden_guardian:skills ELYSIUM_RPG_UI_SEMANTIC_SUMMARY=1` — run one isolated, no-world RPG UI fixture. Do not combine harness cases with ordinary `ELYSIUM_` automation keys; the runtime rejects mixed mode.
 - `ELYSIUM_BOT=1` — runs the physics bot through the real input path and asserts walk/sprint/jump/fall-damage numbers.
 - `ELYSIUM_PHOTOBOOTH=1` (+ `ELYSIUM_BOOTH_MOBS=cow,sheep` / `ELYSIUM_BOOTH_BLOCKS=-`) — renders every mob/block to PNGs for visual review.
+- `ELYSIUM_PHOTOBOOTH=1 ELYSIUM_BOOTH_TEXTURE_AUDIT=all ELYSIUM_NEWWORLD=<throwaway> ELYSIUM_BOOTH_OUTPUT=/absolute/path` — produces the 160 paired stateful door, trapdoor, and fence-gate captures. The audit refuses to run without both an explicit fresh world and output path, so it cannot touch a saved world or overwrite an implicit artifact location.
 - `ELYSIUM_PROF=1` — per-stage timings for load and tick.
 
 ## Scope & conduct

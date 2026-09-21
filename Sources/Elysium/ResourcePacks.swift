@@ -410,12 +410,49 @@ func scaleNearest(_ img: RGBAImage, to res: Int) -> [UInt8] {
     return out
 }
 
-/// alpha-weighted box filter (downscale)
+/// Nearest-neighbor downscale for a cropped entity unwrap whose first and last
+/// destination texels must sample the first and last authored source texels.
+/// The ordinary atlas path deliberately retains its established pixel-center
+/// convention above; this narrower route is for non-integral entity crops,
+/// where floor sampling can otherwise omit a visible board edge entirely.
+func scaleNearestFullExtent(_ img: RGBAImage, to res: Int) -> [UInt8] {
+    precondition(res > 0)
+    if img.width == res && img.height == res { return img.pixels }
+    if res == 1 {
+        let sx = img.width / 2, sy = img.height / 2
+        let source = (sy * img.width + sx) * 4
+        return Array(img.pixels[source..<(source + 4)])
+    }
+    var out = [UInt8](repeating: 0, count: res * res * 4)
+    let denominator = res - 1
+    for y in 0..<res {
+        // Round the endpoint-aligned source position using integer math.
+        let sy = (y * (img.height - 1) + denominator / 2) / denominator
+        for x in 0..<res {
+            let sx = (x * (img.width - 1) + denominator / 2) / denominator
+            let s = (sy * img.width + sx) * 4, d = (y * res + x) * 4
+            out[d] = img.pixels[s]; out[d + 1] = img.pixels[s + 1]
+            out[d + 2] = img.pixels[s + 2]; out[d + 3] = img.pixels[s + 3]
+        }
+    }
+    return out
+}
+
+/// Alpha-weighted box filter for integral downscales.  Entity-sheet crops can
+/// have a width such as 24 or 96 pixels while the selected atlas is 16 or 64;
+/// a truncated integer box would discard the source's right/bottom tail, so
+/// use nearest-neighbor proportional sampling for those non-integral ratios.
 func scaleBox(_ img: RGBAImage, to res: Int) -> [UInt8] {
     if img.width == res && img.height == res { return img.pixels }
-    // either axis smaller than the target → box dims would hit zero (div-by-zero
-    // on a wide-but-short pack texture); nearest handles upscale fine
-    if img.width < res || img.height < res { return scaleNearest(img, to: res) }
+    // Either axis smaller than the target would make a box dimension zero.
+    // For a non-integral downscale, lock both endpoints so the entity-sheet
+    // crop's right/bottom authored edge cannot vanish between samples.
+    if img.width < res || img.height < res {
+        return scaleNearest(img, to: res)
+    }
+    if img.width % res != 0 || img.height % res != 0 {
+        return scaleNearestFullExtent(img, to: res)
+    }
     var out = [UInt8](repeating: 0, count: res * res * 4)
     let bx = img.width / res, by = img.height / res
     for y in 0..<res {
@@ -1072,6 +1109,10 @@ private let TINT_EXPECTED: Set<String> = [
 
 private func candidates(_ tile: String) -> [String] {
     if let m = NAME_MAP[tile] { return m }
+    // Sign-board names are renderer-owned semantic tiles, not a request to
+    // trust an arbitrary `block/<name>.png` from a pack. Their only source is
+    // the corresponding Java entity-sheet crop below.
+    if semanticSignBoard(tile) != nil { return [] }
     if tile.hasPrefix("destroy_"), let n = Int(tile.dropFirst("destroy_".count)) {
         return ["block/destroy_stage_\(n)"]
     }
@@ -1131,7 +1172,7 @@ private struct LoadedTexture {
 
 /// load a texture + its optional .mcmeta animation from the pack stack (first hit wins)
 // =============================================================================
-// entity-texture crops — beds, chests, the bell and the decorated pot are
+// entity-texture crops — beds, signs, chests, the bell and the decorated pot
 // rendered by vanilla as block ENTITIES, so no Java pack has flat block/
 // textures for them; the art lives in entity/ unwraps. These crops lift the
 // pack's own art from there so every visible surface comes from the pack.
@@ -1144,7 +1185,42 @@ private struct EntityTileCrop {
     let rotate: Bool                                           // long bed strips lie sideways
 }
 
+/// Virtual board tiles whose art comes from the sign entity sheets. The
+/// registry appends these names after the frozen atlas range, so this parser
+/// also rejects lookalike names from an arbitrary `block/` path.
+private func semanticSignBoard(_ tile: String) -> (wood: String, hanging: Bool)? {
+    let hangingSuffix = "_hanging_sign_board"
+    if tile.hasSuffix(hangingSuffix) {
+        let wood = String(tile.dropLast(hangingSuffix.count))
+        return WOODS.contains(wood) ? (wood, true) : nil
+    }
+    let suffix = "_sign_board"
+    if tile.hasSuffix(suffix) {
+        let wood = String(tile.dropLast(suffix.count))
+        return WOODS.contains(wood) ? (wood, false) : nil
+    }
+    return nil
+}
+
 private func entityTileCrop(_ tile: String) -> EntityTileCrop? {
+    if let sign = semanticSignBoard(tile) {
+        if sign.hanging {
+            // Hanging-sign plank: the two 14×10 broad faces occupy the
+            // source model's 64×32 entity sheet at (2,14) and (18,14).
+            // Stack them so the live mesher can select a physical front/back
+            // band without stretching either authored face across the other.
+            return EntityTileCrop(path: "entity/signs/hanging/\(sign.wood)",
+                                  rects: [(2 / 64, 14 / 32, 14 / 64, 10 / 32),
+                                          (18 / 64, 14 / 32, 14 / 64, 10 / 32)],
+                                  rotate: false)
+        }
+        // Standing and wall signs share the normal-sign board. Its two 24×12
+        // broad faces live at (2,2) and (28,2) in the 64×32 entity sheet.
+        return EntityTileCrop(path: "entity/signs/\(sign.wood)",
+                              rects: [(2 / 64, 2 / 32, 24 / 64, 12 / 32),
+                                      (28 / 64, 2 / 32, 24 / 64, 12 / 32)],
+                              rotate: false)
+    }
     if tile.hasSuffix("_bed_top") {
         let c = String(tile.dropLast("_bed_top".count))
         // head (pillow) half over foot half, like the painter's layout

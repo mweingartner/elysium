@@ -21,6 +21,7 @@ final class PhotoBooth {
         case buildSet
         case mobs
         case blocks
+        case textureAudit
         case done
     }
     private var phase = Phase.warmup
@@ -35,6 +36,27 @@ final class PhotoBooth {
     private var captured = 0
     private let outRoot: String
     private let sideOnly: Bool
+    private let textureAuditScope: String?
+    private var textureAuditShots: [TextureAuditShot] = []
+    private var textureAuditView = 0
+
+    /// A deliberately small capture recipe.  It can place compound models
+    /// (notably both halves of a door) and request both sides of asymmetric
+    /// stateful art without changing the user's loaded save.
+    private struct TextureAuditCell {
+        let dx: Int
+        let dy: Int
+        let dz: Int
+        let id: UInt16
+        let meta: Int
+    }
+
+    private struct TextureAuditShot {
+        let label: String
+        let cells: [TextureAuditCell]
+        /// Horizontal camera directions that see the intended broad faces.
+        let views: [Int]
+    }
 
     /// World-space bounds of a mesh-authored prehistoric presentation, used
     /// only by the side-view census. Collision dimensions deliberately stay
@@ -59,8 +81,21 @@ final class PhotoBooth {
         let environment = ProcessInfo.processInfo.environment
         self.sideOnly = environment["ELYSIUM_BOOTH_SIDE_ONLY"] == "1"
         self.outRoot = environment["ELYSIUM_BOOTH_OUTPUT"] ?? "/tmp/vc-captures"
-        try? FileManager.default.createDirectory(atPath: outRoot + "/mobs", withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(atPath: outRoot + "/blocks", withIntermediateDirectories: true)
+        self.textureAuditScope = environment["ELYSIUM_BOOTH_TEXTURE_AUDIT"]?.lowercased()
+        // The usual census retains its historical /tmp default.  Stateful
+        // texture audits are review artifacts, so require an explicit caller
+        // destination and a fresh test world instead of leaving an unbounded
+        // capture set behind or altering a loaded save.
+        let auditHasExplicitOutput = textureAuditScope == nil || environment["ELYSIUM_BOOTH_OUTPUT"] != nil
+        let auditHasFreshWorld = textureAuditScope == nil || environment["ELYSIUM_NEWWORLD"] != nil
+        let auditReady = auditHasExplicitOutput && auditHasFreshWorld
+        if auditReady {
+            try? FileManager.default.createDirectory(atPath: outRoot + "/mobs", withIntermediateDirectories: true)
+            try? FileManager.default.createDirectory(atPath: outRoot + "/blocks", withIntermediateDirectories: true)
+            if textureAuditScope != nil {
+                try? FileManager.default.createDirectory(atPath: outRoot + "/texture-audit", withIntermediateDirectories: true)
+            }
+        }
         mobList = spawnableMobs().sorted()
         blockList = (1..<blockDefs.count).filter { id in
             let n = blockDefs[id].name
@@ -79,9 +114,142 @@ final class PhotoBooth {
             let want = Set(f.components(separatedBy: ","))
             blockList = f == "-" ? [] : blockList.filter { want.contains(blockDefs[$0].name) }
         }
+        if let textureAuditScope {
+            guard auditReady else {
+                mobList = []
+                blockList = []
+                phase = .done
+                print("[booth] texture audit requires ELYSIUM_BOOTH_OUTPUT and ELYSIUM_NEWWORLD; no captures queued")
+                fflush(stdout)
+                return
+            }
+            mobList = []
+            blockList = []
+            textureAuditShots = makeTextureAuditShots(scope: textureAuditScope)
+            print("[booth] \(textureAuditShots.count) stateful texture subjects queued (explicit output)")
+            fflush(stdout)
+            return
+        }
         let viewDescription = sideOnly ? "side-only" : "face/back"
         print("[booth] \(mobList.count) mobs + \(blockList.count) blocks queued (\(viewDescription))")
         fflush(stdout)
+    }
+
+    /// Builds a compact visual matrix around the shared mapping code.  Oak is
+    /// the exhaustive state representative; every other material gets a real
+    /// paired/default capture so asymmetric Faithful asset variants remain
+    /// reviewable without producing thousands of committed files.
+    private func makeTextureAuditShots(scope: String) -> [TextureAuditShot] {
+        let normalized = scope == "" ? "all" : scope
+        let wantsDoors = normalized == "all" || normalized == "doors" || normalized == "openables"
+        let wantsTrapdoors = normalized == "all" || normalized == "trapdoors" || normalized == "openables"
+        let wantsGates = normalized == "all" || normalized == "gates" || normalized == "openables"
+        var shots: [TextureAuditShot] = []
+
+        let doors = blockDefs.filter { $0.shape == .door }.map { UInt16($0.id) }
+            .sorted { blockDefs[Int($0)].name < blockDefs[Int($1)].name }
+        let trapdoors = blockDefs.filter { $0.shape == .trapdoor }.map { UInt16($0.id) }
+            .sorted { blockDefs[Int($0)].name < blockDefs[Int($1)].name }
+        let gates = blockDefs.filter { $0.shape == .fenceGate }.map { UInt16($0.id) }
+            .sorted { blockDefs[Int($0)].name < blockDefs[Int($1)].name }
+
+        if wantsDoors, let oak = doors.first(where: { blockDefs[Int($0)].name == "oak_door" }) {
+            // Every valid lower/upper pairing, viewed from both broad faces.
+            for facing in 0..<4 {
+                for open in [false, true] {
+                    for hingeRight in [false, true] {
+                        let side = open
+                            ? (hingeRight ? leftOf(facing) : rightOf(facing))
+                            : facing
+                        let state = "f\(facing)-\(open ? "open" : "closed")-\(hingeRight ? "right" : "left")"
+                        shots.append(TextureAuditShot(
+                            label: "door-oak-\(state)",
+                            cells: [
+                                TextureAuditCell(dx: 0, dy: 0, dz: 0, id: oak,
+                                                 meta: facing | (open ? 4 : 0)),
+                                TextureAuditCell(dx: 0, dy: 1, dz: 0, id: oak,
+                                                 meta: 8 | (hingeRight ? 1 : 0)),
+                            ],
+                            views: [side, FACE_OPP[side]]
+                        ))
+                    }
+                }
+            }
+            // Material assets can differ even though they share the door mesh.
+            // Pair every remaining type correctly, then capture both faces.
+            for door in doors where door != oak {
+                shots.append(defaultDoorAuditShot(door))
+            }
+        }
+
+        if wantsTrapdoors, let oak = trapdoors.first(where: { blockDefs[Int($0)].name == "oak_trapdoor" }) {
+            // Four facings × open/closed × top/bottom makes every legal leaf
+            // presentation visible.  Other material tiles share that mesh.
+            for facing in 0..<4 {
+                for open in [false, true] {
+                    for top in [false, true] {
+                        let broadSide = open ? (facing ^ 1) : facing
+                        let state = "f\(facing)-\(open ? "open" : "closed")-\(top ? "top" : "bottom")"
+                        shots.append(TextureAuditShot(
+                            label: "trapdoor-oak-\(state)",
+                            cells: [TextureAuditCell(dx: 0, dy: 0, dz: 0, id: oak,
+                                                     meta: facing | (open ? 4 : 0) | (top ? 8 : 0))],
+                            views: [broadSide, FACE_OPP[broadSide]]
+                        ))
+                    }
+                }
+            }
+            for trapdoor in trapdoors where trapdoor != oak {
+                shots.append(defaultFlatAuditShot("trapdoor", trapdoor, views: [0, 1]))
+            }
+        }
+
+        if wantsGates, let oak = gates.first(where: { blockDefs[Int($0)].name == "oak_fence_gate" }) {
+            // The matrix includes both leaf poses and the lower in-wall model.
+            for facing in 0..<4 {
+                for open in [false, true] {
+                    for inWall in [false, true] {
+                        let state = "f\(facing)-\(open ? "open" : "closed")-\(inWall ? "wall" : "free")"
+                        shots.append(TextureAuditShot(
+                            label: "gate-oak-\(state)",
+                            cells: [TextureAuditCell(dx: 0, dy: 0, dz: 0, id: oak,
+                                                     meta: facing | (open ? 4 : 0) | (inWall ? 8 : 0))],
+                            views: [facing, FACE_OPP[facing]]
+                        ))
+                    }
+                }
+            }
+            for gate in gates where gate != oak {
+                shots.append(defaultFlatAuditShot("gate", gate, views: [0, 1]))
+            }
+        }
+
+        if shots.isEmpty {
+            print("[booth] unknown texture-audit scope '\(scope)'; use all, doors, trapdoors, gates, or openables")
+            fflush(stdout)
+        }
+        return shots
+    }
+
+    private func defaultDoorAuditShot(_ id: UInt16) -> TextureAuditShot {
+        let name = blockDefs[Int(id)].name
+        return TextureAuditShot(
+            label: "door-\(name)-default",
+            cells: [
+                TextureAuditCell(dx: 0, dy: 0, dz: 0, id: id, meta: 0),
+                TextureAuditCell(dx: 0, dy: 1, dz: 0, id: id, meta: 8),
+            ],
+            views: [0, 1]
+        )
+    }
+
+    private func defaultFlatAuditShot(_ category: String, _ id: UInt16,
+                                      views: [Int]) -> TextureAuditShot {
+        TextureAuditShot(
+            label: "\(category)-\(blockDefs[Int(id)].name)-default",
+            cells: [TextureAuditCell(dx: 0, dy: 0, dz: 0, id: id, meta: 0)],
+            views: views
+        )
     }
 
     /// once per frame after game.frame(); paces on sim ticks
@@ -115,17 +283,21 @@ final class PhotoBooth {
                     }
                 }
                 p.flying = true
-                phase = .mobs
+                phase = textureAuditScope == nil ? .mobs : .textureAudit
                 subjectIdx = 0
                 subjectTick = 0
                 angleIdx = 0
-                print("[booth] set built, starting mob captures")
+                print(textureAuditScope == nil
+                    ? "[booth] set built, starting mob captures"
+                    : "[booth] set built, starting stateful texture audit")
                 fflush(stdout)
             }
         case .mobs:
             tickMobs(p)
         case .blocks:
             tickBlocks(p)
+        case .textureAudit:
+            tickTextureAudit(p)
         case .done:
             break
         }
@@ -305,6 +477,66 @@ final class PhotoBooth {
             captured += 1
         }
         if subjectTick >= 10 { advanceSubject() }
+    }
+
+    private func textureAuditCameraYaw(_ side: Int) -> Double {
+        switch side & 3 {
+        case 0: return 0       // north / -Z
+        case 1: return 180     // south / +Z
+        case 2: return -90     // west / -X
+        default: return 90      // east / +X
+        }
+    }
+
+    private func tickTextureAudit(_ p: Player) {
+        guard subjectIdx < textureAuditShots.count else {
+            phase = .done
+            print("[booth] TEXTURE AUDIT DONE — \(captured) captures in \(outRoot)/texture-audit")
+            fflush(stdout)
+            return
+        }
+
+        let shot = textureAuditShots[subjectIdx]
+        guard !shot.views.isEmpty else {
+            subjectIdx += 1
+            subjectTick = 0
+            textureAuditView = 0
+            return
+        }
+        let w = game.world
+        if subjectTick == 1 {
+            // Rebuild only the booth pedestal.  Audit initialization requires
+            // ELYSIUM_NEWWORLD, so this is a disposable presentation world.
+            for dz in -2...2 {
+                for dx in -2...2 {
+                    for dy in 0...4 { w.setBlock(SX + dx, SY + dy, SZ + dz, 0) }
+                    w.setBlock(SX + dx, SY - 1, SZ + dz, Int(cell(B.smooth_stone)))
+                }
+            }
+            for state in shot.cells {
+                w.setBlock(SX + state.dx, SY + state.dy, SZ + state.dz,
+                           Int(cell(state.id, state.meta)), SET_NO_NEIGHBORS)
+            }
+        }
+        let side = shot.views[textureAuditView]
+        if subjectTick == 5 {
+            aimCamera(p, dist: 2.9, height: 1.75, targetHeight: 0.82,
+                      yawDeg: textureAuditCameraYaw(side))
+        }
+        if subjectTick == 8 {
+            let view = textureAuditView == 0 ? "front" : "back"
+            renderer.requestCapture(path: "\(outRoot)/texture-audit/\(shot.label)@\(view).png")
+            captured += 1
+        }
+        if subjectTick >= 10 {
+            if textureAuditView + 1 < shot.views.count {
+                textureAuditView += 1
+                subjectTick = 4     // re-aim on the next simulation tick
+            } else {
+                textureAuditView = 0
+                advanceSubject()
+            }
+        }
     }
 
     private func advanceSubject() {

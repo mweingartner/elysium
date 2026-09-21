@@ -14,6 +14,20 @@ private func facingFrontTexFn(_ front: String, _ top: String, _ side: String, bo
     }
 }
 
+/// Pistons use all six direction values, unlike the horizontal functional
+/// blocks above. Their face tile has to follow that direction rather than
+/// staying on the world-up/down pair supplied by `texCol`.
+private func pistonFrontTexFn(_ front: String) -> (Int, Int) -> Int {
+    { m, f in
+        f == (m & 7) ? tileId(front) : tileId("piston_side")
+    }
+}
+
+private func pistonHeadTexFn(_ m: Int, _ f: Int) -> Int {
+    guard f == (m & 7) else { return tileId("piston_side") }
+    return tileId((m & 8) != 0 ? "piston_top_sticky" : "piston_top")
+}
+
 func registerFunctionalToEnd() {
     // functional blocks
     registerBlock("crafting_table", tex: tex6("oak_planks", "crafting_table_top", "crafting_table_front", "crafting_table_side", "crafting_table_side", "crafting_table_front"), hardness: 2.5, tool: .axe, sound: "wood", flammable: 5)
@@ -55,7 +69,9 @@ func registerFunctionalToEnd() {
     registerBlock("smithing_table", tex: tex6("smithing_table_bottom", "smithing_table_top", "smithing_table_front", "smithing_table_front", "smithing_table_side", "smithing_table_side"), hardness: 2.5, tool: .axe, sound: "wood")
     registerBlock("fletching_table", tex: tex6("fletching_table_top", "fletching_table_top", "fletching_table_front", "fletching_table_front", "fletching_table_side", "fletching_table_side"), hardness: 2.5, tool: .axe, sound: "wood", flammable: 5)
     registerBlock("cartography_table", tex: tex6("cartography_table_side", "cartography_table_top", "cartography_table_side", "cartography_table_side", "cartography_table_side", "cartography_table_side"), hardness: 2.5, tool: .axe, sound: "wood", flammable: 5)
-    registerBlock("loom", tex: tex6("loom_bottom", "loom_top", "loom_front", "loom_front", "loom_side", "loom_side"), hardness: 2.5, tool: .axe, sound: "wood", flammable: 5)
+    registerBlock("loom", tex: tex6("loom_bottom", "loom_top", "loom_front", "loom_front", "loom_side", "loom_side"),
+                  texFn: facingFrontTexFn("loom_front", "loom_top", "loom_side", bottom: "loom_bottom"),
+                  hardness: 2.5, tool: .axe, sound: "wood", flammable: 5)
     registerBlock("composter", shape: .composter, tex: texTB("composter_top", "composter_bottom", "composter_side"), opaque: false, fullCube: false, hardness: 0.6, tool: .axe, sound: "wood", flammable: 5)
     registerBlock("cauldron", shape: .cauldron, tex: texTB("cauldron_top", "cauldron_bottom", "cauldron_side"), opaque: false, fullCube: false, hardness: 2, tool: .pickaxe, requiresTool: true, sound: "metal", drops: .item("cauldron"))
     registerBlock("brewing_stand", shape: .brewingStand, tex: .named("brewing_stand"), opaque: false, fullCube: false, light: 1, hardness: 0.5, tool: .pickaxe, requiresTool: true, piston: .blockEntity)
@@ -116,9 +132,12 @@ func registerFunctionalToEnd() {
     registerBlock("heavy_weighted_pressure_plate", shape: .pressurePlate, tex: .named("iron_block"), opaque: false, solid: false, fullCube: false, hardness: 0.5, tool: .pickaxe, requiresTool: true, sound: "metal", piston: .destroy)
     registerBlock("tripwire_hook", shape: .tripwireHook, tex: .named("tripwire_hook"), opaque: false, solid: false, fullCube: false, hardness: 0, sound: "wood", piston: .destroy)
     registerBlock("tripwire", shape: .tripwire, tex: .named("tripwire"), opaque: false, solid: false, fullCube: false, hardness: 0, piston: .destroy, drops: .item("string"), ao: false)
-    registerBlock("piston", shape: .piston, tex: texCol("piston_top", "piston_side"), opaque: false, fullCube: false, hardness: 1.5, piston: .block)
-    registerBlock("sticky_piston", shape: .piston, tex: texCol("piston_top_sticky", "piston_side"), opaque: false, fullCube: false, hardness: 1.5, piston: .block)
-    registerBlock("piston_head", shape: .pistonHead, tex: texCol("piston_top", "piston_side"), opaque: false, fullCube: false, hardness: 1.5, piston: .block, drops: .none)
+    registerBlock("piston", shape: .piston, tex: texCol("piston_top", "piston_side"),
+                  texFn: pistonFrontTexFn("piston_top"), opaque: false, fullCube: false, hardness: 1.5, piston: .block)
+    registerBlock("sticky_piston", shape: .piston, tex: texCol("piston_top_sticky", "piston_side"),
+                  texFn: pistonFrontTexFn("piston_top_sticky"), opaque: false, fullCube: false, hardness: 1.5, piston: .block)
+    registerBlock("piston_head", shape: .pistonHead, tex: texCol("piston_top", "piston_side"),
+                  texFn: pistonHeadTexFn, opaque: false, fullCube: false, hardness: 1.5, piston: .block, drops: .none)
     registerBlock("moving_piston", tex: .named("piston_side"), opaque: false, solid: false, fullCube: false, hardness: -1, piston: .block, drops: .none)
     registerBlock("observer", tex: texCol("observer_top", "observer_side"),
                   texFn: { m, f in
@@ -346,6 +365,20 @@ func finalizeBlockRegistry() {
             TILE_TABLE[(cellV << 3) | 1] = top
             for f in 2..<6 { TILE_TABLE[(cellV << 3) | f] = side }
         }
+    }
+
+    // Standing/wall and hanging signs are Java block entities. Their board
+    // faces are packed from `entity/signs` after every frozen baseline tile
+    // (and the existing bamboo-gate/bed extensions) so saved atlas indices
+    // remain stable. Keep these out of TILE_TABLE: supports continue to use
+    // the original planks tile, and the mesher selects a board tile only when
+    // the active resource-pack atlas actually supplied its semantic crop.
+    for wood in WOODS {
+        let board = tileId("\(wood)_sign_board")
+        let hangingBoard = tileId("\(wood)_hanging_sign_board")
+        signBoardTextureTiles[Int(bid("\(wood)_sign"))] = board
+        signBoardTextureTiles[Int(bid("\(wood)_wall_sign"))] = board
+        signBoardTextureTiles[Int(bid("\(wood)_hanging_sign"))] = hangingBoard
     }
 }
 

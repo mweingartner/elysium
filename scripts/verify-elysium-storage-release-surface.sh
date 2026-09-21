@@ -351,7 +351,15 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='2f5ad0d1f44691e61b0cd1d528d242fbb30f9a658d486e
 # still protected by their independent unchanged pins.
 # Fence-gate geometry and LAN session teardown renew the stripped Core object
 # and linked products from the warning-free build.
-EXPECTED_CORE_OBJECT_SHA256='49d23f2ae571ff4436476a55067d44360ef426fd75acf858852182a85c2c2340'
+# Stateful object texture mapping renews the stripped Core object for the
+# mesher/registry/shape changes and both linked products for the app-owned
+# resource-pack sign crops plus the explicit throwaway-world visual audit.
+# Storage, saves, GameCore, player, capability, and text-input source/object
+# pins remain byte-identical; docs/texture-mapping-audit/build.md records the
+# reviewed old/new values from the disposable-copy normalization path.
+# The follow-up endpoint-preserving sign-crop sampler changes only the
+# application product; Core and elysmoke remain byte-identical.
+EXPECTED_CORE_OBJECT_SHA256='36c132d622886299acc1efb57bf1291c688042cf50a0c71989237f754e5b7fa6'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -367,8 +375,8 @@ EXPECTED_CORE_OBJECT_SHA256='49d23f2ae571ff4436476a55067d44360ef426fd75acf858852
 # app-target lifecycle/UI behavior only: Core, elysmoke, and the reviewed
 # storage/text-input surfaces remain byte-identical. The stripped Elysium
 # product pin renews from 17f963e3512e40f14a298b7fcee90512ba94cc667f47a4e8dcf1c72718520b9c.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='1915b02a8ebf355566cda4d91121672eb92f5241230b758ac2b7956f9ce2275f'
-EXPECTED_SMOKE_PRODUCT_SHA256='6332cd84b934cd6900548ff619aefd3e764a68f447b2de574c80cb934fd988ac'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='c16333c4b11d8fd11a7f816c2ce0b48d0d12e3ed8d6318872440b8c1ab05c55f'
+EXPECTED_SMOKE_PRODUCT_SHA256='90c0a7d6b001a1b3a1b505b2b6dc15f4ca20afee9a61ea92a4f3d0205d56793b'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

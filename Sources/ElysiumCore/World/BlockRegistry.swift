@@ -108,6 +108,13 @@ private var registered = false
 // IDs; its runtime texture function picks up this dedicated tile afterward.
 var bambooFenceGateDedicatedTile: Int?
 
+// Like beds, sign boards take their visible art from Java resource packs'
+// entity-sheet unwraps rather than a `block/` texture. These virtual tiles are
+// appended after the frozen atlas range in `registerFunctionalToEnd`; the
+// mesher selects them only for a pack-backed board face and otherwise keeps
+// the block's historical planks tile.
+var signBoardTextureTiles: [Int: Int] = [:]
+
 public func registerAllBlocks() {
     if registered { return }
     registered = true
