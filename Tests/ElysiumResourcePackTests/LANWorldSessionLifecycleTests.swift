@@ -20,7 +20,6 @@ final class LANWorldSessionLifecycleTests: XCTestCase {
         game.createWorld(name: "Retiring LAN world", seedText: "20260920",
                          mode: GameMode.creative, difficulty: 2)
         let retiringWorldID = try XCTUnwrap(game.worldRec?.id)
-        game.localWorldRetentionPolicy = .discardOnExit
 
         let manager = LANMultiplayerManager.shared
         manager.stop()
@@ -38,10 +37,10 @@ final class LANWorldSessionLifecycleTests: XCTestCase {
 
         XCTAssertEqual(manager.state, .idle,
                        "the retiring world must tear down LAN before a new session can attach")
-        XCTAssertNil(game.db.getWorld(retiringWorldID),
-                     "the checked local-world cleanup must run after LAN teardown")
-        XCTAssertTrue(game.db.listLANPlayers(world: retiringWorldID).isEmpty,
-                      "checked cleanup must remove the retiring host's guest rows")
+        XCTAssertNotNil(game.db.getWorld(retiringWorldID),
+                        "Save & Quit must preserve the local world after LAN teardown")
+        XCTAssertEqual(game.db.listLANPlayers(world: retiringWorldID).map(\.playerID), ["retiring-guest"],
+                       "the retained world's guest state must be saved against its original world id")
 
         game.createWorld(name: "Replacement LAN world", seedText: "20260921",
                          mode: GameMode.creative, difficulty: 2)
@@ -101,13 +100,14 @@ final class LANWorldSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(manager.state, .idle)
     }
 
-    func testJoiningLANRefusesToAbandonAnActiveLocalWorld() throws {
+    func testJoiningLANRequiresSavingAndQuittingAnActiveLocalWorld() throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("elysium-lan-local-join-\(UUID().uuidString).sqlite")
         addTeardownBlock { try? FileManager.default.removeItem(at: databaseURL) }
         let game = GameCore(db: try SaveDB.open(databaseURL: databaseURL, migrateLegacy: false))
         game.createWorld(name: "Active Local World", seedText: "20260920",
                          mode: GameMode.creative, difficulty: 2)
+        let localWorldID = try XCTUnwrap(game.worldRec?.id)
 
         let manager = LANMultiplayerManager.shared
         manager.stop()
@@ -116,8 +116,11 @@ final class LANWorldSessionLifecycleTests: XCTestCase {
             host: "127.0.0.1", port: "57126", joinCode: "JOIN", playerName: "Player", game: game
         )) { error in
             XCTAssertEqual((error as? LANTransportError)?.description,
-                           LANTransportError.endLocalWorldBeforeJoining.description)
+                           LANTransportError.saveAndQuitLocalWorldBeforeJoining.description)
         }
         XCTAssertTrue(game.hasWorld())
+        XCTAssertNotNil(game.db.getWorld(localWorldID),
+                        "the refusal must never discard the active local world")
     }
+
 }

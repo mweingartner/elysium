@@ -590,11 +590,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         gAppDelegate = self
         let t0 = CFAbsoluteTimeGetCurrent()
         game = GameCore()
-        game.localWorldRetentionPolicy = .discardOnExit
-        let localWorldCleanup = game.discardAllSavedLocalWorlds()
-        if case .unavailable = localWorldCleanup {
-            print("[saves] retained prior local worlds because checked cleanup was unavailable")
-        }
         game.host = host
         host.app = self
         print(String(format: "registries: %.0fms (%d blocks, %d items, %d biomes)",

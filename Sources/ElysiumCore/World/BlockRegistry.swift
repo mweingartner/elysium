@@ -103,6 +103,10 @@ public let STONE_FAMILIES: [(String, String)] = [
 // MARK: - registration (call registerAllBlocks() exactly once at startup)
 
 private var registered = false
+// Allocated only after the frozen 757-tile baseline. The bamboo gate starts
+// on its planks tile during registration so it cannot shift persistent tile
+// IDs; its runtime texture function picks up this dedicated tile afterward.
+var bambooFenceGateDedicatedTile: Int?
 
 public func registerAllBlocks() {
     if registered { return }
@@ -254,8 +258,11 @@ public func registerAllBlocks() {
             wood("bamboo_mosaic_slab", shape: .slab, tex: .named("bamboo_mosaic"), opaque: false, fullCube: false, sound: snd)
         }
         wood("\(w)_fence", shape: .fence, tex: .named(planksName), opaque: false, fullCube: false, sound: snd, flammable: flam)
-        let gateTexture = w == "bamboo" ? "bamboo_fence_gate" : planksName
-        wood("\(w)_fence_gate", shape: .fenceGate, tex: .named(gateTexture), opaque: false, fullCube: false, sound: snd, flammable: flam)
+        let gateTextureFn: ((Int, Int) -> Int)? = w == "bamboo" ? { _, _ in
+            bambooFenceGateDedicatedTile ?? tileId("bamboo_planks")
+        } : nil
+        wood("\(w)_fence_gate", shape: .fenceGate, tex: .named(planksName), texFn: gateTextureFn,
+             opaque: false, fullCube: false, sound: snd, flammable: flam)
         wood("\(w)_door", shape: .door, tex: .named("\(w)_door"), opaque: false, fullCube: false, sound: snd, piston: .destroy,
              drops: .fn { m, _ in (m & 8) != 0 ? [] : [Drop("\(w)_door")] })
         wood("\(w)_trapdoor", shape: .trapdoor, tex: .named("\(w)_trapdoor"), opaque: false, fullCube: false, hardness: 3, sound: snd)

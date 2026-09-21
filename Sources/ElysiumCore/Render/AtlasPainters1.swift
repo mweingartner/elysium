@@ -391,12 +391,6 @@ func registerPainters1() {
         let wood = WOOD_COLORS[m[1] ?? ""] ?? WOOD_COLORS["oak"]!
         t.planks(wood.plank)
     }
-    // Faithful supplies this dedicated bamboo-gate tile. Keep the procedural
-    // default pack renderable too, rather than falling back to a missing-tile
-    // placeholder when the gate registry selects the canonical texture name.
-    p("bamboo_fence_gate") { t in
-        t.planks(WOOD_COLORS["bamboo"]!.plank)
-    }
     p("bamboo_mosaic") { t in
         let c = WOOD_COLORS["bamboo"]!.plank
         t.grain(c, 0.1, 8)

@@ -309,6 +309,11 @@ func finalizeBlockRegistry() {
         "soul_particle", "enchant_particle", "slime_particle", "sweep_particle",
     ] { tileId(extra) }
 
+    // The dedicated Faithful bamboo-gate texture is presentation-only. Add it
+    // after the frozen atlas range, then let the gate's texture function use it
+    // in the prebaked table and direct icon/first-person lookups.
+    bambooFenceGateDedicatedTile = tileId("bamboo_fence_gate")
+
     // freeze every B.<name> into stored fields — direct loads on all hot paths
     populateBlockIDs()
 

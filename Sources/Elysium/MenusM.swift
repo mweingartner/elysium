@@ -2024,7 +2024,7 @@ final class PauseScreen: Screen {
             ui.open(LANLobbyScreen(), game)
         }))
         y += 24
-        buttons.append(Button(cx - 100, y, 200, 20, "End & Discard World", { [weak game] in
+        buttons.append(Button(cx - 100, y, 200, 20, "Save & Quit to Title", { [weak game] in
             guard let game else { return }
             AIScriptBroker.cancelAll()
             game.exitToTitle()

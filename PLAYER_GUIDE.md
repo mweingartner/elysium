@@ -13,7 +13,7 @@ requirements and installation, start with the [Elysium project overview](README.
 - [Explore the world](#explore-the-world)
 - [Usage-based skill trees](#usage-based-skill-trees)
 - [Trade with villagers](#trade-with-villagers)
-- [Local-world sessions and LAN resume](#local-world-sessions-and-lan-resume)
+- [Save, manage, and recover worlds](#save-manage-and-recover-worlds)
 - [Local-network multiplayer](#local-network-multiplayer)
 - [Object templates](#object-templates)
 - [Scripting, attributes, events, and AI](#scripting-attributes-events-and-ai)
@@ -72,8 +72,8 @@ requirements and installation, start with the [Elysium project overview](README.
 - Look at **Advancements** from the pause menu when you want the next major progression objective.
 - Open **Skills** with `K` to see which real actions advance each tree and which advanced actions are
   ready for the fast bar.
-- Press Escape and choose **End & Discard World** when ending the session. Local worlds are one-session
-  play and are removed when you leave or quit.
+- Press Escape and choose **Save & Quit to Title** when ending the session. Worlds also autosave during
+  play, but **Save & Quit to Title** is the recommended clean exit.
 
 ### Pause, resume, or recover
 
@@ -85,11 +85,10 @@ Escape opens the paused **Game Menu**:
 | **Advancements** | Review the main survival progression. |
 | **Options...** | Change video, audio, controls, accessibility, or local-AI settings. |
 | **Open to LAN** | Host the current local world on the local network. |
-| **End & Discard World** | End the current local session and remove that local world. |
+| **Save & Quit to Title** | Save and leave the current session. |
 
 If **You Died!** appears, choose **Respawn** to return to the current world or **Title Screen** to leave
-the session and discard its local world. Respawning is a death-recovery action; it does not create a
-separate saved-world checkpoint.
+the session. Respawning is a death-recovery action; it is different from loading a saved world later.
 
 ## Controls and screen navigation
 
@@ -392,22 +391,46 @@ an eligible merchant. A LAN client must ask the host to trade instead.
 Different professions seek different resource groups and carry different offer catalogs. Revisit working
 villagers as they progress and restock; wandering traders use a separate traveling catalog.
 
-## Local-world sessions and LAN resume
+## Save, manage, and recover worlds
 
-Elysium treats a local world as one-session play. At startup, the app uses its checked deletion path to
-clear prior local worlds. **End & Discard World**, **Title Screen**, and quitting Elysium remove the
-current local world and its player, chunk, advancement, skill, and host-guest records. This is permanent:
-there is no cloud copy or later local-world resume.
-
-Settings, key bindings, selected resource packs, templates, and imported script sounds remain under:
+Elysium stores local worlds, player state, settings, key bindings, and templates under:
 
 ```text
 ~/Library/Application Support/Elysium/
 ```
 
-Joining someone else's LAN world is separate. Elysium retains only your local, per-host resume position
-and inventory snapshot; it never saves that host's world or chunks locally. Starting, ending, or clearing
-a local world does not remove that LAN-client resume data.
+For a manual backup, first quit Elysium. In Finder, copy the complete `Elysium` application-support
+folder to a separate backup location and verify that the copy exists before changing or deleting local
+data. Do not edit the live world database, and do not assume that an incomplete or unverified copy can
+recover a deleted world.
+
+### Select and open saved worlds
+
+- Click a row to select one world.
+- Command-click a row, or click its checkbox, to toggle it.
+- Shift-click selects a range; Command-Shift-click adds a range.
+- **Select All** and **Clear All** operate on the complete list. Command-A also selects all when the list
+  has keyboard focus.
+- Arrow keys move through the list. Shift-Arrow extends selection, Command-Arrow moves focus without
+  changing selection, and Space toggles the focused row.
+- **Play Selected** or **Host Selected** requires exactly one selected world.
+
+### Permanently delete saved worlds
+
+> **Permanent data-loss warning:** **Delete** removes every selected local world and its chunks, player
+> data, Advancements, and skill-tree data. There is no cloud copy or guaranteed recovery. Back up first if you
+> may want the data again.
+
+1. Review the checked worlds and choose **Delete**. Delete and Backspace keys intentionally do nothing.
+2. Review every name in the separate confirmation. **Cancel** has initial focus.
+3. Confirm only when the complete list is correct.
+
+If the saved-world list changed before confirmation, review the refreshed selection rather than assuming
+the earlier list still applies. If deletion fails, use **Try Again** only after another review or choose
+**Cancel**. If Elysium cannot prove the result, **Saved Worlds Need Reloading** locks the browser to a
+read-only reload instead of repeating deletion. Reload the list and inspect what remains; this state does
+not promise recovery of anything already deleted. Saved-world deletion is local and never deletes the
+host's world from a LAN client.
 
 ## Local-network multiplayer
 
@@ -424,18 +447,18 @@ unacceptable.
 
 1. Choose **Multiplayer** from the title screen, or choose **Open to LAN** from a paused local world.
 2. Review **Player**. Optionally enter a host-side **Code** and **Port**.
-3. Choose **Host World**. From the title screen this opens the world picker; create a new local world
-   there and Elysium begins hosting it automatically. While already playing, the pause menu opens the
-   active session directly.
+3. Choose **Host World**. From the title screen, select one saved world to host or create a new one.
 4. Share the displayed connection details only with people on the trusted LAN.
 5. Use **Stop** when you want to stop hosting or browsing.
 
 ### Join a world
 
-1. Finish any active local session with **End & Discard World**, then choose **Multiplayer** and **Browse LAN**.
-2. Select a discovered world. If discovery is unavailable, enter **Manual Host**, the join-side **Port**,
+1. If a local world is open, press Escape and choose **Save & Quit to Title** first. Joining never replaces
+   an active local world.
+2. Choose **Multiplayer** and **Browse LAN**.
+3. Select a discovered world. If discovery is unavailable, enter **Manual Host**, the join-side **Port**,
    and any required **Code** supplied by the host.
-3. Review **Player**, then choose **Join World**.
+4. Review **Player**, then choose **Join World**.
 
 A join code is an access gate, not encryption and not a defense against other hostile participants on the
 same LAN. Current LAN clients cannot trade; skill-tree state and action resolution remain host-owned.
@@ -897,7 +920,7 @@ or is refused for being over budget) without pausing the rest of the game.
 | Ollama is unavailable | Confirm the independent local service is running, choose **Refresh Models**, select a local model, and retry. Core play does not require AI. |
 | The script editor says attached scripts are paused | Check and Save should still work: Check is read-only, and Save keeps the script dormant. The editor's explicit Run Once works before world trust but still requires `doScripts` on. Use the banner's **Trust World**, **Turn On Scripts**, or **Trust & Turn On** action only after reviewing its warning that existing attached scripts may start. |
 | The script editor says the script runtime is unavailable | Check, Save, and Run Once are unavailable because authoritative Lua validation cannot run. Copy the retained draft, then restart the world or Elysium and retry. |
-| Local-world cleanup could not complete | Restart Elysium. It retries checked cleanup before the title screen; settings, resource packs, and LAN-client resume data remain separate. |
+| Saved-world selection changed or reload is required | Review the current checked list. Use **Try Again** only after review; use the read-only reload when **Saved Worlds Need Reloading** appears. |
 | Resource Packs says settings recovery is required | Stop changing settings and restart Elysium. The saved choice is unknown; the current-session pack generation remains on the prior selection, and further persisted settings changes are blocked until restart. |
 | Resource Packs reports that disk durability was not confirmed | The selected pack generation was applied from exact reread settings bytes, but the directory-sync durability could not be confirmed. The recovery latch is not active; restart before relying on the choice surviving a system failure. |
 | Performance or effects are uncomfortable | Reduce render distance, particles, shaders, or frame-rate demand; enable the relevant **Access** options. |

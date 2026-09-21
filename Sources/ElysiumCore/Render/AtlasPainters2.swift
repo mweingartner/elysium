@@ -870,4 +870,9 @@ func registerPainters2() {
             t.set(x, y + 1, 0xe8e8e8, 180)
         }
     }
+    // Faithful supplies this dedicated bamboo-gate tile. Register it after
+    // the frozen atlas range so existing numeric tile IDs remain stable.
+    p("bamboo_fence_gate") { t in
+        t.planks(WOOD_COLORS["bamboo"]!.plank)
+    }
 }

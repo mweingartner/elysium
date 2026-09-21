@@ -9,7 +9,7 @@ enum LANTransportError: Error, CustomStringConvertible {
     case invalidPort
     case listenerUnavailable(String)
     case alreadyBusy
-    case endLocalWorldBeforeJoining
+    case saveAndQuitLocalWorldBeforeJoining
 
     var description: String {
         switch self {
@@ -19,7 +19,8 @@ enum LANTransportError: Error, CustomStringConvertible {
         case .invalidPort: return "Port must be 1-65535."
         case .listenerUnavailable(let reason): return "LAN listener could not start: \(reason)"
         case .alreadyBusy: return "Stop the current LAN session before starting another."
-        case .endLocalWorldBeforeJoining: return "End and discard the current local world before joining LAN."
+        case .saveAndQuitLocalWorldBeforeJoining:
+            return "Save & Quit to Title before joining a LAN world."
         }
     }
 }
@@ -331,7 +332,7 @@ final class LANMultiplayerManager {
 
     private init() {
         // A world is the authority boundary for a host's guest records. Stop
-        // before GameCore saves or deletes that world so neither the listener
+        // before GameCore saves and unloads that world so neither the listener
         // nor any peer state can survive into the next local session.
         worldSessionObserver = NotificationCenter.default.addObserver(
             forName: .elysiumWorldSessionWillEnd, object: nil, queue: .main
@@ -853,7 +854,7 @@ final class LANMultiplayerManager {
             throw LANTransportError.alreadyBusy
         }
         guard !game.hasWorld() || game.isLANClientWorld else {
-            throw LANTransportError.endLocalWorldBeforeJoining
+            throw LANTransportError.saveAndQuitLocalWorldBeforeJoining
         }
         let code = normalizedLANJoinCode(rawJoinCode)
         guard isValidLANJoinCode(code) else { throw LANTransportError.invalidJoinCode }
@@ -871,7 +872,7 @@ final class LANMultiplayerManager {
             throw LANTransportError.alreadyBusy
         }
         guard !game.hasWorld() || game.isLANClientWorld else {
-            throw LANTransportError.endLocalWorldBeforeJoining
+            throw LANTransportError.saveAndQuitLocalWorldBeforeJoining
         }
         guard let target = LANDirectConnectTarget.parse(host: rawHost, port: rawPort) else {
             throw LANTransportError.invalidDirectTarget
@@ -971,7 +972,7 @@ final class LANMultiplayerManager {
         if forWorldSessionEnd, let game = activeGame, listener != nil, game.hasWorld() {
             // GameCore normally performs this just before its final save. The
             // session observer must stop first to prevent peer leakage, so do
-            // it here before clearing the hook/session instead of discarding a
+            // it here before clearing the hook/session instead of leaving a
             // half-placed host guest template.
             game.lanSettleTemplateJobsHandler?()
         }

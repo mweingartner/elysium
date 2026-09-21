@@ -41,7 +41,8 @@ final class FenceGateRenderingTests: XCTestCase {
             let gateID = Int(bid("\(wood)_fence_gate"))
             XCTAssertEqual(blockDefs[gateID].shape, .fenceGate, wood)
             let expectedTexture = wood == "bamboo" ? "bamboo_fence_gate" : "\(wood)_planks"
-            XCTAssertEqual(tileName(Int(blockDefs[gateID].tex[0])), expectedTexture, wood)
+            let gateTexture = blockDefs[gateID].texFn?(0, 0) ?? Int(blockDefs[gateID].tex[0])
+            XCTAssertEqual(tileName(gateTexture), expectedTexture, wood)
 
             for meta in 0..<16 {
                 let renderBoxes = boxes(gateID, meta: meta)
@@ -64,6 +65,12 @@ final class FenceGateRenderingTests: XCTestCase {
         let atlas = buildAtlas()
         XCTAssertFalse(atlas.missing.contains("bamboo_fence_gate"),
                        "the default atlas must not fall back when Faithful is unavailable")
+    }
+
+    func testBambooGateTextureAppendsAfterTheFrozenAtlasRange() {
+        XCTAssertEqual(tileId("destroy_9"), 740)
+        XCTAssertEqual(allTileNames()[756], "sweep_particle")
+        XCTAssertEqual(tileId("bamboo_fence_gate"), 757)
     }
 
     func testOpenGateLeavesFoldTowardTheirStoredFacing() {
