@@ -5,6 +5,32 @@
 
 import Foundation
 
+/// Dawn replenishment intervals, measured in complete in-game day/night cycles.
+/// This is a local preference: only the authoritative local player or LAN host applies it.
+public enum CreatureRespawnFrequency: Int, Codable, CaseIterable {
+    case daily = 1
+    case alternateDays = 2
+    case weekly = 7
+
+    public var dayCount: Int { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .daily: return "Daily"
+        case .alternateDays: return "Alternate Days"
+        case .weekly: return "Weekly"
+        }
+    }
+
+    public var next: CreatureRespawnFrequency {
+        switch self {
+        case .daily: return .alternateDays
+        case .alternateDays: return .weekly
+        case .weekly: return .daily
+        }
+    }
+}
+
 public struct Settings: Codable, Equatable {
     // video
     public var renderDistance = 8
@@ -22,6 +48,8 @@ public struct Settings: Codable, Equatable {
     public var entityDistance = 64.0
     /// Show the always-on compact HUD minimap. The explicit full-map screen remains available.
     public var showMinimap = true
+    // world: applies to local/host worlds, never to another player's LAN world.
+    public var creatureRespawnFrequency: CreatureRespawnFrequency = .daily
     // audio
     public var volumes: [String: Double] = [
         "master": 0.8, "music": 0.5, "blocks": 1, "hostile": 1, "friendly": 1,

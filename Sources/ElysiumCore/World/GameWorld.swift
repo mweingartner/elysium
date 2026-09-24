@@ -125,6 +125,10 @@ public final class World {
     /// Monotonic world-global RPG authority time, copied to every dimension.
     public var rpgSimulationTick = 0
     public var dayTime = 1000      // 0..23999
+    public var ecologyCalendar = EcologyCalendar()
+    public var creatureRespawnSequence = 0
+    public let treeEcology = TreeEcologyRuntime()
+    public var ecologyTick: Int { ecologyCalendar.elapsedTicks }
     public var raining = false
     public var thundering = false
     public var rainLevel = 0.0
@@ -243,6 +247,7 @@ public final class World {
     }
     public func removeChunk(_ cx: Int, _ cz: Int) {
         guard let chunk = chunks.removeValue(forKey: chunkKey(cx, cz)) else { return }
+        treeEcology.unload(chunk: chunk)
         for cellIndex in chunk.objectRecords.keys.sorted() {
             guard chunk.objectRecords[cellIndex]?.hasScriptDefinitions == true else { continue }
             let (x, y, z) = chunk.idxToWorld(cellIndex)
@@ -296,6 +301,7 @@ public final class World {
         if old == cellV { return old }
         c.set(lx, y, lz, UInt16(cellV))
         c.modified = true
+        treeEcology.blockChanged(in: self, x: x, y: y, z: z, old: old, new: cellV)
         c.trackSpecial(lx, y, lz, UInt16(cellV >> 4))
 
         let oldId = old >> 4, newId = cellV >> 4
@@ -481,6 +487,16 @@ public final class World {
     }
 
     private var dueScratch: [ScheduledTick] = []
+    /// Sleeping completes the current cycle once. Clock commands deliberately do not call this.
+    public func skipEcologyToDawn() {
+        guard info.hasSky, !isTransientLANClient else { return }
+        let current = posMod(dayTime, DAY_LENGTH)
+        if rule("doDaylightCycle"), current != 0 {
+            ecologyCalendar.advance(ticks: DAY_LENGTH - current, dawn: true)
+        }
+        dayTime = 0
+    }
+
     public func tick() {
         tick(simCenters: [(simCenterX, simCenterZ)], advanceRPGEffects: true)
     }
@@ -501,8 +517,13 @@ public final class World {
         time += 1
         if advanceRPGEffects { tickRPGTemporaryEffects() }
         if rule("doDaylightCycle") && info.hasSky {
-            dayTime = (dayTime + 1) % DAY_LENGTH
+            dayTime = (posMod(dayTime, DAY_LENGTH) + 1) % DAY_LENGTH
+            if !isTransientLANClient { ecologyCalendar.advance(ticks: 1, dawn: dayTime == 0) }
+        } else if !info.hasSky && !isTransientLANClient {
+            // Trees grown in a skyless dimension age by simulation time; it has no dawn waves.
+            ecologyCalendar.advance(ticks: 1)
         }
+        if !isTransientLANClient { treeEcology.tick(in: self) }
         tickWeather()
 
         // scheduled block ticks — fluids run under a per-tick budget; a save

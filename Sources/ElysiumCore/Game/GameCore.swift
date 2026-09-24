@@ -2350,6 +2350,8 @@ public final class GameCore {
                 w.raining = ds.raining
                 w.thundering = ds.thundering
                 w.weatherTimer = ds.weatherTimer
+                w.ecologyCalendar = ds.ecologyCalendar ?? EcologyCalendar()
+                w.creatureRespawnSequence = max(0, min(2, ds.creatureRespawnSequence ?? 0))
                 w.rainLevel = ds.raining ? 1 : 0
                 w.thunderLevel = ds.thundering ? 1 : 0
             }
@@ -2662,7 +2664,8 @@ public final class GameCore {
         for (d, w) in worlds {
             rec.dims["\(d.rawValue)"] = DimState(
                 time: w.time, dayTime: w.dayTime,
-                raining: w.raining, thundering: w.thundering, weatherTimer: w.weatherTimer)
+                raining: w.raining, thundering: w.thundering, weatherTimer: w.weatherTimer,
+                ecologyCalendar: w.ecologyCalendar, creatureRespawnSequence: w.creatureRespawnSequence)
         }
         rec.rpgSimulationTick = max(0, min(RPG_MAX_COUNTER,
                                            worlds.values.map(\.rpgSimulationTick).max() ?? rec.rpgSimulationTick))
@@ -2902,7 +2905,8 @@ public final class GameCore {
         return ChunkRecord(
             key: key, worldId: worldId, dim: d.rawValue, cx: c.cx, cz: c.cz,
             blocks: w.rpgBlocksForPersistence(in: c), biomes: c.biomes,
-            blockEntities: besCopy ?? besLive, entities: ents, objects: objectTexts)
+            blockEntities: besCopy ?? besLive, entities: ents, objects: objectTexts,
+            naturalTreeCells: c.naturalTreeCells)
     }
 
     // ===========================================================================
@@ -3045,11 +3049,13 @@ public final class GameCore {
                 loadedFull = true
                 let light = LoadProf.shared.time("light") { computeLocalLight(blocks: savedRec.blocks!, height: height, hasSky: hasSky) }
                 c = LoadProf.shared.time("mkchunk") { Self.makeChunk(cx, cz, minY, height, savedRec.blocks!, savedRec.biomes!, light.sky, light.blk) }
+                c.naturalTreeCells = savedRec.naturalTreeCells
             } else {
                 // fresh generation; a corrupt/entity-only record still re-attaches its entities
                 let out = LoadProf.shared.time("gen") { generateChunk(d, seed, cx, cz, settings: w.generationSettings) }
                 let light = LoadProf.shared.time("light") { computeLocalLight(blocks: out.blocks, height: height, hasSky: hasSky) }
                 c = LoadProf.shared.time("mkchunk") { Self.makeChunk(cx, cz, minY, height, out.blocks, out.biomes, light.sky, light.blk) }
+                c.naturalTreeCells = out.naturalTreeCells
                 beSpecs = out.blockEntities
                 entitySpecs = savedRec != nil ? nil : out.entities
             }
@@ -3216,6 +3222,7 @@ public final class GameCore {
         }
         w.adoptChunkBlockEntities(c)
         if isLANClientWorld { return }
+        w.treeEcology.adopt(chunk: c, in: w)
         // object-graph-attributes change 1a, design.md Decision 9: restore
         // block object records (non-LAN-client only — a LAN client world
         // never adopts host attribute data, matching the entity skip below).
@@ -3504,15 +3511,17 @@ public final class GameCore {
                     saved = db.getChunk(worldId, w.dim.rawValue, cx, cz)
                     if let s = saved, Self.recordUsable(s, height: w.info.height) {
                         let light = computeLocalLight(blocks: s.blocks!, height: w.info.height, hasSky: w.info.hasSky)
-                        adoptChunk(w, Self.makeChunk(cx, cz, w.info.minY, w.info.height, s.blocks!, s.biomes!, light.sky, light.blk),
-                                   nil, nil, s)
+                        let chunk = Self.makeChunk(cx, cz, w.info.minY, w.info.height, s.blocks!, s.biomes!, light.sky, light.blk)
+                        chunk.naturalTreeCells = s.naturalTreeCells
+                        adoptChunk(w, chunk, nil, nil, s)
                         continue
                     }
                 }
                 let out = generateChunk(w.dim, w.seed, cx, cz, settings: w.generationSettings)
                 let light = computeLocalLight(blocks: out.blocks, height: w.info.height, hasSky: w.info.hasSky)
-                adoptChunk(w, Self.makeChunk(cx, cz, w.info.minY, w.info.height, out.blocks, out.biomes, light.sky, light.blk),
-                           out.blockEntities, saved != nil ? nil : out.entities, saved)
+                let chunk = Self.makeChunk(cx, cz, w.info.minY, w.info.height, out.blocks, out.biomes, light.sky, light.blk)
+                chunk.naturalTreeCells = out.naturalTreeCells
+                adoptChunk(w, chunk, out.blockEntities, saved != nil ? nil : out.entities, saved)
             }
         }
         // teleport targets need light immediately — stitch the area now
@@ -4285,15 +4294,21 @@ public final class GameCore {
         }
 
         // sleeping skips to morning
-        if p.sleepTicks > 100 {
+        // Wake immediately if the natural dawn arrives during the bed fade;
+        // otherwise a late-night sleep could skip a second entire day.
+        if p.sleepTicks > 100 || (p.sleepTicks > 0 && w.dayTime == 0) {
             p.sleepTicks = 0
-            w.dayTime = 0
+            w.skipEcologyToDawn()
             if w.raining && w.rng.chance(0.6) {
                 w.raining = false
                 w.thundering = false
                 w.weatherTimer = 12000
             }
             advance("sleep_in_bed")
+        }
+
+        if w.ecologyCalendar.consumeRespawnDawn(frequency: settings.creatureRespawnFrequency) {
+            replenishCreaturesAtDawn(w, activeEntities, &w.rng)
         }
 
         tickHotbarAndCooldowns(p)

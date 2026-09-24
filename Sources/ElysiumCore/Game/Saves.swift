@@ -64,14 +64,20 @@ public struct DimState: Codable {
     public var raining: Bool
     public var thundering: Bool
     public var weatherTimer: Int
+    /// Optional for pre-ecology saves; loading never manufactures a missed dawn.
+    public var ecologyCalendar: EcologyCalendar?
+    public var creatureRespawnSequence: Int?
 
     public init(time: Int = 0, dayTime: Int = 1000, raining: Bool = false,
-                thundering: Bool = false, weatherTimer: Int = 24000) {
+                thundering: Bool = false, weatherTimer: Int = 24000,
+                ecologyCalendar: EcologyCalendar? = nil, creatureRespawnSequence: Int? = nil) {
         self.time = time
         self.dayTime = dayTime
         self.raining = raining
         self.thundering = thundering
         self.weatherTimer = weatherTimer
+        self.ecologyCalendar = ecologyCalendar
+        self.creatureRespawnSequence = creatureRespawnSequence
     }
 }
 
@@ -392,11 +398,12 @@ public struct ChunkRecord {
     /// change 1a, design.md Decision 9). Passed through opaquely: this file
     /// never decodes the text, only bounds and stores it.
     public var objects: [Int: String]
+    public var naturalTreeCells: [Int: NaturalTreeCell]
 
     public init(key: String, worldId: String, dim: Int, cx: Int, cz: Int,
                 blocks: [UInt16]? = nil, biomes: [UInt8]? = nil,
                 blockEntities: [BlockEntityData]? = nil, entities: [[String: Any]] = [],
-                objects: [Int: String] = [:]) {
+                objects: [Int: String] = [:], naturalTreeCells: [Int: NaturalTreeCell] = [:]) {
         self.key = key
         self.worldId = worldId
         self.dim = dim
@@ -407,6 +414,7 @@ public struct ChunkRecord {
         self.blockEntities = blockEntities
         self.entities = entities
         self.objects = objects
+        self.naturalTreeCells = naturalTreeCells
     }
 }
 
@@ -454,7 +462,8 @@ func encodeLegacyVCK(_ record: ChunkRecord) -> Data? {
         data.append(contentsOf: biomes)
     }
     guard let json = chunkTailJSON(
-        blockEntities: record.blockEntities, entities: record.entities, objects: record.objects
+        blockEntities: record.blockEntities, entities: record.entities, objects: record.objects,
+        naturalTreeCells: record.naturalTreeCells
     ), appendU32(json.count) else { return nil }
     data.append(json)
     return data
@@ -483,9 +492,14 @@ struct CompactChunkSectionV2 {
 /// folded into one dictionary passed through a single unsorted-by-default
 /// `JSONSerialization` call.
 private func chunkTailJSON(
-    blockEntities: [BlockEntityData]?, entities: [[String: Any]], objects: [Int: String] = [:]
+    blockEntities: [BlockEntityData]?, entities: [[String: Any]], objects: [Int: String] = [:],
+    naturalTreeCells: [Int: NaturalTreeCell] = [:]
 ) -> Data? {
     var tail: [String: Any] = ["entities": entities.map(sanitizeJSON)]
+    if !naturalTreeCells.isEmpty {
+        guard let text = NaturalTreePersistence.encode(naturalTreeCells) else { return nil }
+        tail["naturalTrees"] = text
+    }
     if let blockEntities,
        let encoded = try? JSONEncoder().encode(blockEntities),
        let object = try? JSONSerialization.jsonObject(with: encoded) {
@@ -553,7 +567,7 @@ func encodeCompactVCK2(
     biomes: [UInt8],
     blockEntities: [BlockEntityData]? = nil,
     entities: [[String: Any]] = [],
-    objects: [Int: String] = [:]
+    objects: [Int: String] = [:], naturalTreeCells: [Int: NaturalTreeCell] = [:]
 ) -> Data? {
     guard let dim = Dim(rawValue: dimension) else { return nil }
     let info = dimInfo(dim)
@@ -561,7 +575,8 @@ func encodeCompactVCK2(
     let maximumSection = Int8(clamping: floorDiv(info.minY + info.height - 1, 16))
     let expectedBiomes = 4 * 4 * ((info.height + 3) / 4)
     guard sections.count <= Int(UInt8.max), biomes.count == expectedBiomes,
-          let json = chunkTailJSON(blockEntities: blockEntities, entities: entities, objects: objects)
+          let json = chunkTailJSON(blockEntities: blockEntities, entities: entities, objects: objects,
+                                   naturalTreeCells: naturalTreeCells)
     else { return nil }
 
     var data = Data("VCK2".utf8)
@@ -679,7 +694,8 @@ func encodeCompactVCK2(_ record: ChunkRecord) -> Data? {
     }
     return encodeCompactVCK2(
         dimension: record.dim, sections: sections, biomes: biomes,
-        blockEntities: record.blockEntities, entities: record.entities, objects: record.objects)
+        blockEntities: record.blockEntities, entities: record.entities, objects: record.objects,
+        naturalTreeCells: record.naturalTreeCells)
 }
 
 private func decodeCompactVCK2(
@@ -791,6 +807,9 @@ private func decodeCompactVCK2(
         record.blockEntities = decoded
     }
     record.objects = decodeChunkTailObjects(tail, height: info.height)
+    if let text = tail["naturalTrees"] as? String {
+        record.naturalTreeCells = NaturalTreePersistence.decode(text, height: info.height)
+    }
     return record
 }
 
@@ -876,6 +895,9 @@ func decodeLegacyVCK(_ data: Data, key: String, worldId: String,
     }
     if let dim = Dim(rawValue: dimension) {
         record.objects = decodeChunkTailObjects(tail, height: dimInfo(dim).height)
+        if let text = tail["naturalTrees"] as? String {
+            record.naturalTreeCells = NaturalTreePersistence.decode(text, height: dimInfo(dim).height)
+        }
     }
     return record
 }

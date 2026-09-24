@@ -172,13 +172,12 @@ public func naturalSpawnTick(_ world: World, _ players: [Player], _ rng: inout R
     }
     let attempts: [(String, Int, Bool)] = [
         ("monster", 70, true),          // every tick
-        // Passive mobs need to recover in a player-visible interval. At the
-        // fixed 20 Hz simulation rate, 100 ticks is five seconds; the old
-        // 400-tick cadence made an empty area look lifeless for too long,
-        // especially while rendering or streaming was under load.
-        ("creature", 18, world.time % 100 == 0),
-        ("ambient", 15, world.time % 400 == 0),
-        ("water", 5, world.time % 400 == 0),
+        // Sky-world wildlife replenishes only through the saved dawn
+        // scheduler. Dimensions without a sunrise retain their historical
+        // cadence; in particular Nether striders must not stop spawning.
+        ("creature", 18, !world.info.hasSky && world.time % 100 == 0),
+        ("ambient", 15, !world.info.hasSky && world.time % 400 == 0),
+        ("water", 5, !world.info.hasSky && world.time % 400 == 0),
     ]
     for (cat, cap, doIt) in attempts {
         if !doIt { continue }

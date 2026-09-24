@@ -9,45 +9,91 @@ import Foundation
 
 var farmingRng = RandomX(0xFA01)
 
-// world-backed sink for tree growth
+// A tree is planned completely before any live cell changes. Auto-seeded and
+// player-planted saplings share the same no-overwrite/unloaded-chunk contract.
 final class WorldSink: ChunkSink {
     var cx = 0
     var cz = 0
     let minY: Int
     let maxY: Int
     private let world: World
+    private let origin: NaturalTreeOrigin
+    private let sapling: Int
+    private var planned: [NaturalTreeOrigin: UInt16] = [:]
+    private var provenance: [NaturalTreeOrigin: NaturalTreeOrigin] = [:]
+    private var rejected = false
 
-    init(_ world: World) {
+    init(_ world: World, x: Int, y: Int, z: Int, sapling: Int) {
         self.world = world
+        self.origin = NaturalTreeOrigin(x: x, y: y, z: z)
+        self.sapling = sapling
         minY = world.info.minY
         maxY = world.info.minY + world.info.height
+        planned[origin] = 0
     }
     func set(_ x: Int, _ y: Int, _ z: Int, _ c: UInt16) {
-        let cur = world.getBlock(x, y, z) >> 4
-        let curName = cur != 0 ? blockDefs[cur].name : ""
-        if cur == 0 || blockDefs[cur].replaceable || curName.contains("leaves") || c == 0 {
-            world.setBlock(x, y, z, Int(c))
-        } else if (c >> 4) != 0 {
-            let newName = blockDefs[Int(c >> 4)].name
-            if newName.contains("log") || newName.contains("dirt") || newName.contains("mangrove_roots") {
-                world.setBlock(x, y, z, Int(c))
+        guard world.isLoadedAt(x, z), y >= minY, y < maxY, planned.count < 8192 else { rejected = true; return }
+        let p = NaturalTreeOrigin(x: x, y: y, z: z)
+        let old = world.getBlock(x, y, z), id = old >> 4
+        let root = p == origin && id == sapling
+        let soil = y == origin.y - 1 && isTreeSoil(old) && isTreeSoil(Int(c))
+        let waterRoot = id == Int(B.water) && TreeEcologyRuntime.isWood(c)
+        let naturalLeaf: Bool
+        if TreeEcologyRuntime.isLeaf(UInt16(old)), let chunk = world.getChunkAt(x, z) {
+            naturalLeaf = chunk.naturalTreeCells[chunk.index(posMod(x, 16), y, posMod(z, 16))]?.expected == UInt16(old)
+        } else { naturalLeaf = false }
+        guard root || soil || old == 0 || blockDefs[id].replaceable
+            || naturalLeaf || waterRoot else { rejected = true; return }
+        guard !hasBlockEntity(x, y, z) else { rejected = true; return }
+        planned[p] = c
+        provenance.removeValue(forKey: p)
+    }
+    func setNaturalTreeCell(_ x: Int, _ y: Int, _ z: Int, _ c: UInt16, origin: NaturalTreeOrigin) {
+        set(x, y, z, c)
+        let p = NaturalTreeOrigin(x: x, y: y, z: z)
+        if planned[p] == c { provenance[p] = origin }
+    }
+    func get(_ x: Int, _ y: Int, _ z: Int) -> Int {
+        guard world.isLoadedAt(x, z), y >= minY, y < maxY else { rejected = true; return 1 }
+        let p = NaturalTreeOrigin(x: x, y: y, z: z)
+        if let value = planned[p] { return Int(value) }
+        if p == origin { return 0 }
+        return world.getBlock(x, y, z)
+    }
+    func topY(_ x: Int, _ z: Int) -> Int { world.surfaceY(x, z) }
+    func hasBlockEntity(_ x: Int, _ y: Int, _ z: Int) -> Bool {
+        guard let chunk = world.getChunkAt(x, z), chunk.inYRange(y) else { return true }
+        return chunk.getBlockEntity(posMod(x, 16), y, posMod(z, 16)) != nil
+    }
+    func addBlockEntity(_ spec: BESpec) {}
+    func addEntity(_ spec: EntitySpec) {}
+    func commit() -> Bool {
+        guard !rejected, !world.isTransientLANClient, planned[origin] != nil else { return false }
+        for p in planned.keys.sorted() {
+            guard let value = planned[p] else { continue }
+            world.setBlock(p.x, p.y, p.z, Int(value))
+            if let tree = provenance[p], let chunk = world.getChunkAt(p.x, p.z) {
+                let index = chunk.index(posMod(p.x, 16), p.y, posMod(p.z, 16))
+                chunk.naturalTreeCells[index] = NaturalTreeCell(origin: tree, expected: value)
+                chunk.modified = true
             }
         }
-    }
-    func get(_ x: Int, _ y: Int, _ z: Int) -> Int { world.getBlock(x, y, z) }
-    func topY(_ x: Int, _ z: Int) -> Int { world.surfaceY(x, z) }
-    func addBlockEntity(_ spec: BESpec) {}
-    func addEntity(_ spec: EntitySpec) {
-        var opts = SpawnOpts()
-        if case .bool(true)? = spec.data["baby"] { opts.baby = true }
-        _ = spawnMob(world, spec.mob, spec.x, spec.y, spec.z, opts)
+        for cx in floorDiv(origin.x - 16, 16)...floorDiv(origin.x + 16, 16) {
+            for cz in floorDiv(origin.z - 16, 16)...floorDiv(origin.z + 16, 16) {
+                if let chunk = world.getChunk(cx, cz) { world.treeEcology.adopt(chunk: chunk, in: world) }
+            }
+        }
+        return true
     }
 }
 
 @discardableResult
 public func growTreeAt(_ world: World, _ x: Int, _ y: Int, _ z: Int, _ sapId: Int) -> Bool {
-    let sink = WorldSink(world)
-    world.setBlock(x, y, z, 0)
+    guard !world.isTransientLANClient, world.getBlock(x, y, z) >> 4 == sapId else { return false }
+    let below = world.getBlock(x, y - 1, z)
+    guard isTreeSoil(below) || (sapId == Int(B.crimson_fungus) && below >> 4 == Int(B.crimson_nylium))
+        || (sapId == Int(B.warped_fungus) && below >> 4 == Int(B.warped_nylium)) else { return false }
+    let sink = WorldSink(world, x: x, y: y, z: z, sapling: sapId)
     if sapId == Int(B.oak_sapling) { genOakTree(sink, &farmingRng, x, y, z, fancy: farmingRng.nextFloat() < 0.1) }
     else if sapId == Int(B.birch_sapling) { genBirchTree(sink, &farmingRng, x, y, z) }
     else if sapId == Int(B.spruce_sapling) { genSpruceTree(sink, &farmingRng, x, y, z) }
@@ -56,10 +102,11 @@ public func growTreeAt(_ world: World, _ x: Int, _ y: Int, _ z: Int, _ sapId: In
     else if sapId == Int(B.dark_oak_sapling) { genDarkOakTree(sink, &farmingRng, x, y, z) }
     else if sapId == Int(B.cherry_sapling) { genCherryTree(sink, &farmingRng, x, y, z) }
     else if sapId == Int(B.mangrove_propagule) { genMangroveTree(sink, &farmingRng, x, y, z) }
+    else if sapId == Int(B.azalea) || sapId == Int(B.flowering_azalea) { genAzaleaTree(sink, &farmingRng, x, y, z) }
     else if sapId == Int(B.crimson_fungus) { genHugeFungus(sink, &farmingRng, x, y, z, crimson: true) }
     else if sapId == Int(B.warped_fungus) { genHugeFungus(sink, &farmingRng, x, y, z, crimson: false) }
-    else { world.setBlock(x, y, z, Int(cell(UInt16(sapId)))); return false }
-    return true
+    else { return false }
+    return sink.commit()
 }
 
 public func igniteTNT(_ world: World, _ x: Int, _ y: Int, _ z: Int) {
@@ -296,6 +343,10 @@ public func registerFarmingHandlers() {
     for leaf in ["oak_leaves", "spruce_leaves", "birch_leaves", "jungle_leaves", "acacia_leaves", "dark_oak_leaves", "mangrove_leaves", "cherry_leaves", "azalea_leaves", "flowering_azalea_leaves"] {
         reg(bid(leaf)) { world, x, y, z, c in
             if (c & 8) != 0 { return } // persistent
+            if let chunk = world.getChunkAt(x, z), chunk.inYRange(y),
+               chunk.naturalTreeCells[chunk.index(posMod(x, 16), y, posMod(z, 16))] != nil {
+                return // provenance-backed crowns use the one-day ecological schedule
+            }
             // distance to log scan (BFS depth 5)
             var foundLog = false
             struct K: Hashable { let x: Int, y: Int, z: Int }
@@ -487,9 +538,7 @@ public func registerFarmingHandlers() {
     for az in [B.azalea, B.flowering_azalea] {
         reg(az) { world, x, y, z, _ in
             if world.lightAt(x, y, z) >= 9 && farmingRng.nextFloat() < 0.1 {
-                let sink = WorldSink(world)
-                world.setBlock(x, y, z, 0)
-                genAzaleaTree(sink, &farmingRng, x, y, z)
+                growTreeAt(world, x, y, z, Int(az))
             }
         }
     }

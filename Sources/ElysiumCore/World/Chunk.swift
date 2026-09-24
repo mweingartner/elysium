@@ -68,6 +68,9 @@ public final class Chunk {
     /// `AttributeStore` is the only writer; `World.setBlock` clears an entry
     /// when its cell's id changes to a different family.
     public var objectRecords: [Int: ObjectRecord] = [:]
+    /// Only cells emitted by a living-tree generator participate in natural
+    /// deterioration. A full legacy save without this sidecar stays protected.
+    public var naturalTreeCells: [Int: NaturalTreeCell] = [:]
     public var portalBlocks = Set<Int>()
     public var sculkSensors = Set<Int>()
 

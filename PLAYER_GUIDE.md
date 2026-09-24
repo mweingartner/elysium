@@ -83,7 +83,7 @@ Escape opens the paused **Game Menu**:
 | --- | --- |
 | **Back to Game** | Resume the current world. |
 | **Advancements** | Review the main survival progression. |
-| **Options...** | Change video, audio, controls, accessibility, or local-AI settings. |
+| **Options...** | Change video, audio, world, controls, accessibility, or local-AI settings. |
 | **Open to LAN** | Host the current local world on the local network. |
 | **Save & Quit to Title** | Save and leave the current session. |
 
@@ -286,6 +286,47 @@ roster of prehistoric creatures. Each creature has its own calls and action soun
 movement. A player-attributed kill gives ordinary experience based on that creature's configured combat
 difficulty—health, active damage, and predator/charge behaviour—not merely its apparent size. This is
 separate from the usage-based Melee and Ranged skill-tree XP described below.
+
+### Wildlife renewal and forests
+
+Open **Options... → World → Creature Respawn** and choose **Daily** (the default), **Alternate Days**,
+or **Weekly**. These mean every **1, 2, or 7 in-game dawns**, not real-world days. Sleeping through a
+night counts as reaching the next dawn. Each saved world retains its progress when you leave and
+reload; changing the preference takes effect at a future eligible dawn, not immediately.
+
+At that dawn, Elysium attempts to refill vacancies near active players, subject to population caps and
+safe, loaded habitat. Regular maps use their ordinary animal, flying-creature, and aquatic tables.
+Prehistoric maps use their selected roster instead. New **land dinosaurs** follow a repeating
+**herbivore, herbivore, carnivore** sequence across successful spawns—even across separate dawns.
+This is a birth ratio, not a guarantee that the surviving population always has that ratio. **Ancient
+Seas** has no land-herbivore roster: its pterosaurs, marine reptiles, and existing wild-fish prey remain
+eligible without inventing herbivorous sea creatures. Initial wildlife in newly explored terrain is
+unchanged; the preference controls replenishment, not initial world generation or ordinary monsters.
+
+The setting applies to worlds you play locally or host; a LAN guest follows the host's choice.
+Closed, paused, or inactive worlds do not earn offline dawns. Freezing the daylight cycle freezes the
+dawn schedule. Changing the clock with a command does not itself age trees or immediately spawn
+creatures, but the next natural wrap to dawn counts; clock commands remain administrator shortcuts.
+Sleeping also advances tree age by the skipped portion of the night. Disabled mob spawning, a full
+population, or unsuitable habitat does not accumulate a later catch-up swarm. The
+Nether and End have no sunrise and keep their existing spawning rules.
+
+When a **natural tree's remaining trunk loses its connection to supported ground**, its unsupported
+wood and associated leaves disappear gradually over the next simulated day. Leaf decay occasionally
+produces a seedling: some are dropped as collectible saplings, while some plant themselves on nearby
+clear, suitable soil. Planted saplings use the normal light and growth rules; tree growth checks space
+before placing wood and foliage rather than overwriting an obstruction. Collectible seedlings do not
+all turn into trees, and new trees are not guaranteed for every chopped trunk.
+
+This cleanup tracks natural-tree provenance, not just a wood-block shape. Player-built beams and
+unmarked trees in older, fully saved chunks are left alone; it does not guess which wooden structures
+are disposable. Restore a grounded trunk connection before decay finishes to save the remaining
+supported natural blocks. Tree updates require their relevant chunks to be loaded; due decay resumes
+in bounded steps after returning to an area. The clock does not advance while the world is closed or
+paused, and freezing Overworld daylight also freezes deterioration. Turning off tile drops prevents
+both dropped and self-planted seedlings from this decay.
+
+### Weather, travel, and generated sites
 
 Weather changes as the world runs. Rain and thunder affect visibility and direct-daylight conditions;
 rain can also interrupt applicable burning. Elysium includes boats, minecarts, chest-carrying variants,
@@ -847,7 +888,7 @@ that metadata grants no execution or mutation authority.
 
 ## Options, accessibility, and local AI
 
-**Options...** contains five tabs:
+**Options...** contains six tabs:
 
 - **Video** controls render distance, field of view, brightness, GUI scale, graphics effects, fullscreen,
   particles, frame-rate limit, optional Ultra shaders, and the default-on **Show Minimap** setting.
@@ -856,6 +897,8 @@ that metadata grants no execution or mutation authority.
   height instead of drawing the sealed ceiling.
 - **Audio** controls the master level and categories such as music, blocks, creatures, players, ambient,
   jukebox, and UI.
+- **World** sets **Creature Respawn** to Daily, Alternate Days, or Weekly. These are in-game dawn
+  intervals for your local/host worlds; see [Wildlife renewal and forests](#wildlife-renewal-and-forests).
 - **Controls** manages sensitivity, inverted Y, and configurable gameplay bindings.
 - **Access** contains **Subtitles**, **Auto-Jump**, **Reduce Motion**, **Reduced Flashes**, **High Contrast
   UI**, and **Darkness Pulsing**.

@@ -10,6 +10,7 @@ public struct GenOutput {
     public let blockEntities: [BESpec]
     public let entities: [EntitySpec]
     public let structRefs: [StructRef]
+    public var naturalTreeCells: [Int: NaturalTreeCell] = [:]
 }
 
 /// Immutable terrain state immediately before structures and features. Both
@@ -336,6 +337,7 @@ public final class ArraySink: ChunkSink {
     public var blocks: [UInt16]
     public var blockEntities: [BESpec] = []
     public var entities: [EntitySpec] = []
+    public var naturalTreeCells: [Int: NaturalTreeCell] = [:]
     private let heightFallback: (Int, Int) -> Int
 
     public init(cx: Int, cz: Int, blocks: [UInt16], minY: Int, maxY: Int, heightFallback: @escaping (Int, Int) -> Int) {
@@ -350,7 +352,23 @@ public final class ArraySink: ChunkSink {
     public func set(_ x: Int, _ y: Int, _ z: Int, _ c: UInt16) {
         let lx = x - cx * 16, lz = z - cz * 16
         if lx < 0 || lx > 15 || lz < 0 || lz > 15 || y < minY || y >= maxY { return }
-        blocks[((y - minY) * 16 + lz) * 16 + lx] = c
+        let index = ((y - minY) * 16 + lz) * 16 + lx
+        blocks[index] = c
+        naturalTreeCells.removeValue(forKey: index)
+    }
+
+    public func setNaturalTreeCell(_ x: Int, _ y: Int, _ z: Int, _ c: UInt16, origin: NaturalTreeOrigin) {
+        set(x, y, z, c)
+        let lx = x - cx * 16, lz = z - cz * 16
+        guard (0..<16).contains(lx), (0..<16).contains(lz), y >= minY, y < maxY else { return }
+        let index = ((y - minY) * 16 + lz) * 16 + lx
+        naturalTreeCells[index] = NaturalTreeCell(origin: origin, expected: c)
+    }
+
+    /// Snow and a few bulk generators edit the array directly. Stale sidecar
+    /// records can never confer natural provenance on their replacement cells.
+    var validatedNaturalTreeCells: [Int: NaturalTreeCell] {
+        naturalTreeCells.filter { blocks[$0.key] == $0.value.expected }
     }
 
     public func get(_ x: Int, _ y: Int, _ z: Int) -> Int {
@@ -491,6 +509,9 @@ private final class StructureProtectedFeatureSink: ChunkSink {
     func set(_ x: Int, _ y: Int, _ z: Int, _ c: UInt16) {
         if !protected(x, z) { base.set(x, y, z, c) }
     }
+    func setNaturalTreeCell(_ x: Int, _ y: Int, _ z: Int, _ c: UInt16, origin: NaturalTreeOrigin) {
+        if !protected(x, z) { base.setNaturalTreeCell(x, y, z, c, origin: origin) }
+    }
     func get(_ x: Int, _ y: Int, _ z: Int) -> Int { base.get(x, y, z) }
     func topY(_ x: Int, _ z: Int) -> Int { base.topY(x, z) }
     func hasBlockEntity(_ x: Int, _ y: Int, _ z: Int) -> Bool {
@@ -622,7 +643,8 @@ private func generateFlatOverworldChunk(_ seed: UInt32, _ cx: Int, _ cz: Int,
     let flatStructs = structureDefinitionsForGeneration(dim: .overworld, settings: settings)
     let structRefs = buildStructuresForChunk(ctx, cx, cz, sink, flatStructs)
     return GenOutput(blocks: sink.blocks, biomes: base.biomes,
-                     blockEntities: sink.blockEntities, entities: sink.entities, structRefs: structRefs)
+                     blockEntities: sink.blockEntities, entities: sink.entities, structRefs: structRefs,
+                     naturalTreeCells: sink.validatedNaturalTreeCells)
 }
 
 private func debugBlockStateCells() -> [UInt16] {
@@ -829,7 +851,8 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
             }
         }
         return GenOutput(blocks: sink.blocks, biomes: biomes,
-                         blockEntities: sink.blockEntities, entities: sink.entities, structRefs: structRefs)
+                         blockEntities: sink.blockEntities, entities: sink.entities, structRefs: structRefs,
+                         naturalTreeCells: sink.validatedNaturalTreeCells)
     }
 
     if dim == .nether {
@@ -861,7 +884,8 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
             placeNetherWorldGateway(seed: seed, cx: cx, cz: cz, generator: gen, sink: sink)
         }
         return GenOutput(blocks: sink.blocks, biomes: biomes,
-                         blockEntities: sink.blockEntities, entities: sink.entities, structRefs: structRefs)
+                         blockEntities: sink.blockEntities, entities: sink.entities, structRefs: structRefs,
+                         naturalTreeCells: sink.validatedNaturalTreeCells)
     }
 
     // End
@@ -893,7 +917,8 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
         }
     }
     return GenOutput(blocks: sink.blocks, biomes: biomes,
-                     blockEntities: sink.blockEntities, entities: sink.entities, structRefs: structRefs)
+                     blockEntities: sink.blockEntities, entities: sink.entities, structRefs: structRefs,
+                     naturalTreeCells: sink.validatedNaturalTreeCells)
 }
 
 private let netherWorldGatewayRegionChunks = 8

@@ -27,7 +27,7 @@ recordings.
 World creation offers the current v2 revision of the four profiles alongside
 the existing presets. Selecting one is persisted in the world record and
 changes only that new world's profile domain. Explicit v1 preset IDs remain
-loadable with their original simulation contract, but are not offered as a
+loadable with their original terrain and combat contract, but are not offered as a
 second set of duplicate create-world choices. Ancient Seas additionally applies a coast-heavy
 terrain treatment to its own continuous continentalness sample before terrain
 height and surface-biome selection: mid-continent margins become navigable
@@ -82,6 +82,43 @@ table (`cod`, `salmon`, and `tropical_fish`) after the roster entries. These
 are non-domestic prey/resource species, not restored modern passive fauna;
 they give fish-focused swimmers a live in-profile food source and keep the
 water population bounded by the existing category cap.
+
+### Dawn replenishment and forest renewal
+
+**Options... → World → Creature Respawn** controls replenishment on both v1 and v2
+maps without changing their roster, terrain, or combat revision. **Daily** is the
+default; **Alternate Days** and **Weekly** wait for two or seven actual in-game
+dawns. Sleeping counts as completing the current cycle. Each world's saved
+calendar preserves progress across reload, while the local player's or LAN
+host's preference chooses the interval. Joined clients do not run their own
+waves. Paused or closed worlds earn no offline cycles, and frozen daylight earns
+no dawns. A clock command does not itself age trees or immediately spawn
+creatures; the ensuing natural wrap still counts as a dawn, intentionally
+allowing administrator shortcuts. Sleeping advances tree age by the skipped
+portion of the night.
+
+At an eligible dawn, bounded attempts refill available population capacity near
+active players using the existing loaded-terrain, distance, water, and whole-body
+clearance checks. Successful land-dinosaur births follow **herbivore, herbivore,
+carnivore**, with the next position saved across waves. Failed attempts do not
+advance that ratio, and mortality can change the ratio of survivors. **Ancient
+Seas** deliberately has no land-herbivore table: its native pterosaur/marine
+roster and wild-fish prey still replenish, without relabeling marine reptiles as
+herbivores or importing land species. Initial generated chunk populations are
+unchanged. A full population, disabled mob spawning, or failed habitat checks
+does not bank an unbounded later wave; ordinary monsters and skyless-dimension
+spawning keep their established rules.
+
+Natural trees, including newly generated/grown trees, carry explicit provenance.
+Disconnecting a trunk from grounded support causes its unsupported wood and
+associated canopy to deteriorate gradually over one simulated day. Some leaves
+produce collectible saplings; some attempt safe self-planting instead. Growth
+checks loaded space and preserves obstructing blocks and containers. Player
+builds and unmarked trees in older fully saved chunks are not retroactively
+classified as natural trees. Incomplete tree neighborhoods defer updates;
+returning to an area resumes due decay with bounded work. Freezing Overworld
+daylight freezes this deterioration clock, and disabling tile drops suppresses
+both kinds of seedling output. See the [Player Guide](../PLAYER_GUIDE.md#wildlife-renewal-and-forests).
 
 ### Version-two land ecology and first-night shelter
 

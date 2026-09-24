@@ -258,9 +258,9 @@ EXPECTED_STORAGE_OBJECT_SHA256='43ea474d75be3fc2311f1a95295c94d23329249f505ed0c1
 # profile IDs at the persistence boundary, and GameCore/LAN content changes
 # relink the Core object and both production consumers. The reviewed AST
 # inventory hash moves with Saves; storage/text-input surfaces remain pinned.
-EXPECTED_SAVES_SOURCE_SHA256='5efd5a22b43aeb04760462c8a3fd3dfae5c49ff61b7271cc30ec981b86b9786f'
+EXPECTED_SAVES_SOURCE_SHA256='21c80f8babbb2423a2bd65a2f5a3ae097ae5b46f4f9612c167904c2b363a3822'
 EXPECTED_PLAYER_SOURCE_SHA256='1f4dff72450f80e20d675bf645c01700ac6962375b331d0cd69d2764b50eaf08'
-EXPECTED_CORE_CAPABILITY_SHA256='2c14c21b1045d414dd7b4931c63db6074df16ffe0cdbf2f29b1c6cd5abcd169e'
+EXPECTED_CORE_CAPABILITY_SHA256='377ee1d5aced0ca72770b6e6e28647ab29397e5a9f56a0328068fecb62b5dffb'
 EXPECTED_TEXT_INPUT_SOURCE_SHA256='dda602f2008afa7914f471217848e1d6a2e701aced3d6a1ed304fdfc3c6f868e'
 EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75344dd259149dd705bf3'
 # land-animal shore escape: AI.swift, Animals.swift and Entity.swift add footprint-aware
@@ -319,7 +319,7 @@ EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75
 # declarations, callers, counts, approved owners, and protected spans below
 # remain unchanged; this gameplay-only source renewal was checked before these
 # release pins were regenerated from a warning-free production build.
-EXPECTED_GAME_CORE_SOURCE_SHA256='2f5ad0d1f44691e61b0cd1d528d242fbb30f9a658d486ef5f1c5fabdd183a113'
+EXPECTED_GAME_CORE_SOURCE_SHA256='63ced7f24fe9998202f54ec1386da3bd7944f7a09fce38bb4be694750eedf79d'
 # worldgen-form-integrity: the final structure pass adds terrain-backed surface
 # plans, deterministic realized-piece collision resolution, and supported routes
 # through villages, dungeons, mineshafts, strongholds, Ancient Cities, and the
@@ -359,7 +359,9 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='2f5ad0d1f44691e61b0cd1d528d242fbb30f9a658d486e
 # reviewed old/new values from the disposable-copy normalization path.
 # The follow-up endpoint-preserving sign-crop sampler changes only the
 # application product; Core and elysmoke remain byte-identical.
-EXPECTED_CORE_OBJECT_SHA256='36c132d622886299acc1efb57bf1291c688042cf50a0c71989237f754e5b7fa6'
+# Creature/tree ecology renews GameCore/Saves domain codecs and linked products,
+# not storage SQL or the admitted API. See docs/creature-tree-ecology/build.md.
+EXPECTED_CORE_OBJECT_SHA256='6ac3ca7edcfe7cdf4ac0ed5a69e43f32221a27a8c37a1b19b71d422a6b086fbc'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -375,8 +377,8 @@ EXPECTED_CORE_OBJECT_SHA256='36c132d622886299acc1efb57bf1291c688042cf50a0c719892
 # app-target lifecycle/UI behavior only: Core, elysmoke, and the reviewed
 # storage/text-input surfaces remain byte-identical. The stripped Elysium
 # product pin renews from 17f963e3512e40f14a298b7fcee90512ba94cc667f47a4e8dcf1c72718520b9c.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='c16333c4b11d8fd11a7f816c2ce0b48d0d12e3ed8d6318872440b8c1ab05c55f'
-EXPECTED_SMOKE_PRODUCT_SHA256='90c0a7d6b001a1b3a1b505b2b6dc15f4ca20afee9a61ea92a4f3d0205d56793b'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='db2d0e79e5e5a720920e92311b002aaa478c5f3f2ed32c62f4477a114693de03'
+EXPECTED_SMOKE_PRODUCT_SHA256='450f4f5d43c1ad67dca18615db8f2443670309b1ef6f7f917cffefe32c49d5b1'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

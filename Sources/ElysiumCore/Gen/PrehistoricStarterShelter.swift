@@ -306,6 +306,16 @@ public func stampPrehistoricStarterShelter(seed: UInt32, settings: WorldGenerati
     // and a clear visual signal that the hut has a renewable wood supply.
     for root in site.woodGroveRoots {
         stampPrehistoricStarterOak(root, builder: builder, support: stone, dirt: dirt)
+        // Only the grove's living cells receive provenance. The shelter's oak
+        // beams and deck stay ordinary construction, even beside these trees.
+        let origin = NaturalTreeOrigin(x: root.x, y: root.y, z: root.z)
+        for dy in 0...5 { for dz in -2...2 { for dx in -2...2 {
+            let x = root.x + dx, y = root.y + dy, z = root.z + dz
+            let value = sink.get(x, y, z)
+            if value == Int(cell(B.oak_log)) || value == Int(cell(B.oak_leaves, 4)) {
+                sink.setNaturalTreeCell(x, y, z, UInt16(value), origin: origin)
+            }
+        } } }
     }
 }
 

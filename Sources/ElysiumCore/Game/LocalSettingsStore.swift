@@ -571,6 +571,8 @@ public final class LocalSettingsStore {
                 decodeField("maxFps", from: object, into: &value.maxFps, diagnostics: &diagnostics)
                 decodeField("entityDistance", from: object, into: &value.entityDistance, diagnostics: &diagnostics)
                 decodeField("showMinimap", from: object, into: &value.showMinimap, diagnostics: &diagnostics)
+                decodeField("creatureRespawnFrequency", from: object,
+                            into: &value.creatureRespawnFrequency, diagnostics: &diagnostics)
                 decodeField("volumes", from: object, into: &value.volumes, diagnostics: &diagnostics)
                 decodeField("sensitivity", from: object, into: &value.sensitivity, diagnostics: &diagnostics)
                 decodeField("invertY", from: object, into: &value.invertY, diagnostics: &diagnostics)

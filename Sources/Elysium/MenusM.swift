@@ -2039,6 +2039,15 @@ final class PauseScreen: Screen {
 
 // =============================================================================
 final class SettingsScreen: Screen {
+    private static let tabIDs = ["video", "audio", "world", "controls", "accessibility", "ai"]
+    private static let worldRespawnHelp = [
+        "Creatures return at dawn every 1, 2 or 7",
+        "complete in-game day/night cycles.",
+        "Regular maps: animals. Prehistoric: dinosaurs.",
+        "Land dinosaurs: 2 herbivores per carnivore.",
+        "Applies to worlds you play locally or host.",
+        "LAN guests follow the host's frequency.",
+    ]
     var tab = "video"
     var bindingKey: String?
     private var controlsScrollOffset = 0.0
@@ -2113,11 +2122,13 @@ final class SettingsScreen: Screen {
         recoveryNavigationButtons = []
         let cx = (ui.width / 2).rounded(.down)
         // tabs
-        let tabs = ["video", "audio", "controls", "accessibility", "ai"]
-        let tabW = 64.0
+        let tabs = Self.tabIDs
+        let tabW = min(64.0, max(1, (ui.width - 16) / Double(tabs.count)))
         let tabStart = cx - (Double(tabs.count) * tabW) / 2
         for (i, t) in tabs.enumerated() {
-            let label = t == "accessibility" ? "Access" : t.prefix(1).uppercased() + String(t.dropFirst())
+            let label = t == "accessibility" ? "Access"
+                : t == "controls" && tabW < 58 ? "Keys"
+                : t.prefix(1).uppercased() + String(t.dropFirst())
             let b = Button(tabStart + Double(i) * tabW, 20, tabW - 2, 16, label, { [weak self, weak ui, weak game] in
                 guard let self, let ui, let game else { return }
                 guard self.saveAIModelIfNeeded(game) else { return }
@@ -2289,6 +2300,18 @@ final class SettingsScreen: Screen {
             // The managed sound catalog is independent of Settings.json, just like the
             // resource-pack browser, so it remains available while settings recovery is active.
             recoveryNavigationButtons.insert(ObjectIdentifier(sounds))
+        } else if tab == "world" {
+            let width = min(308.0, max(1, ui.width - 28))
+            let respawn = Button(cx - width / 2, y, width, 20,
+                "Creature Respawn: \(game.settings.creatureRespawnFrequency.displayName)", {})
+            respawn.onClick = { [weak self, weak respawn, weak game] in
+                guard let self, let respawn, let game else { return }
+                guard self.persistSettingsMutation(game, {
+                    $0.creatureRespawnFrequency = $0.creatureRespawnFrequency.next
+                }) else { return }
+                respawn.label = "Creature Respawn: \(game.settings.creatureRespawnFrequency.displayName)"
+            }
+            buttons.append(respawn)
         } else if tab == "controls" {
             sliders.append(Slider(cx - 160, y, W, 18,
                 { [weak game] in "Sensitivity: \(Int(((game?.settings.sensitivity ?? 0.5) * 200).rounded()))%" },
@@ -2456,7 +2479,7 @@ final class SettingsScreen: Screen {
 
     private func indexSettingsFocusControls() {
         settingsFocusControls = [:]
-        let tabs = ["video", "audio", "controls", "accessibility", "ai"]
+        let tabs = Self.tabIDs
         for (index, name) in tabs.enumerated() where index < buttons.count {
             settingsFocusControls["settings.tab.\(name)"] = buttons[index]
         }
@@ -2498,6 +2521,8 @@ final class SettingsScreen: Screen {
             slider("Jukebox:", "audio.records")
             slider("UI:", "audio.ui")
             button("Script Sounds", "audio.script-sounds")
+        } else if tab == "world" {
+            button("Creature Respawn:", "world.creature-respawn-frequency")
         }
         button("Done", "settings.done")
 
@@ -2521,8 +2546,7 @@ final class SettingsScreen: Screen {
     }
 
     private func settingsFocusGraph(_ recovery: Bool) -> [String] {
-        let tabs = ["settings.tab.video", "settings.tab.audio", "settings.tab.controls",
-                    "settings.tab.accessibility", "settings.tab.ai"]
+        let tabs = Self.tabIDs.map { "settings.tab.\($0)" }
         if recovery {
             if tab == "video" {
                 return tabs + ["video.fullscreen", "video.resource-packs", "settings.done"]
@@ -2531,6 +2555,9 @@ final class SettingsScreen: Screen {
                 return tabs + ["audio.script-sounds", "settings.done"]
             }
             return tabs + ["settings.done"]
+        }
+        if tab == "world" {
+            return tabs + ["world.creature-respawn-frequency", "settings.done"]
         }
         if tab == "audio" {
             return tabs + [
@@ -2666,6 +2693,15 @@ final class SettingsScreen: Screen {
                 focused: field.focused, insertionUTF16Offset: nil,
                 focusable: field.enabled, actionable: field.enabled))
         }
+        if tab == "world" {
+            result.append(TextEntryAccessibilityDescriptor(
+                id: "world.creature-respawn-help", role: .staticText, label: "Creature respawn rules",
+                value: Self.worldRespawnHelp.joined(separator: " "),
+                help: "This saved preference does not change another player's hosted world.",
+                frame: (max(14, ui.width / 2 - 154), 76, min(308, ui.width - 28), 72),
+                enabled: true, focused: false, insertionUTF16Offset: nil,
+                focusable: false, actionable: false))
+        }
         return result
     }
 
@@ -2762,6 +2798,11 @@ final class SettingsScreen: Screen {
                 if ui.mouseY >= statusY - 2 && ui.mouseY < statusY + 10 {
                     ui.tooltipLines = [controlsStatus]
                 }
+            }
+        } else if tab == "world" {
+            let x = max(14, ui.width / 2 - 154)
+            for (index, line) in Self.worldRespawnHelp.enumerated() {
+                ui.cv.drawText(line, x, 76 + Double(index) * 12, 0.8, "#d0d0d0")
             }
         } else if tab == "ai" {
             let cx = (ui.width / 2).rounded(.down)

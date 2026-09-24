@@ -37,6 +37,7 @@ public protocol ChunkSink: AnyObject {
     var maxY: Int { get }
     /// clipped write, world coords
     func set(_ x: Int, _ y: Int, _ z: Int, _ c: UInt16)
+    func setNaturalTreeCell(_ x: Int, _ y: Int, _ z: Int, _ c: UInt16, origin: NaturalTreeOrigin)
     /// read; outside chunk returns -1
     func get(_ x: Int, _ y: Int, _ z: Int) -> Int
     /// top solid y within chunk; outside chunk uses noise estimate
@@ -51,6 +52,9 @@ public protocol ChunkSink: AnyObject {
 
 public extension ChunkSink {
     func hasBlockEntity(_ x: Int, _ y: Int, _ z: Int) -> Bool { false }
+    func setNaturalTreeCell(_ x: Int, _ y: Int, _ z: Int, _ c: UInt16, origin: NaturalTreeOrigin) {
+        set(x, y, z, c)
+    }
 }
 
 private let AIR = 0
@@ -100,6 +104,7 @@ private func leafBlob(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: Int, 
 }
 
 public func genOakTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: Int, _ z: Int, fancy: Bool = false, beeChance: Double = 0) {
+    let s = NaturalTreeSink(s, x: x, y: y, z: z)
     let h = fancy ? 6 + rng.nextInt(5) : 4 + rng.nextInt(3)
     let log = cell(B.oak_log), leaves = cell(B.oak_leaves, 4)
     for i in 0..<h { s.set(x, y + i, z, log) }
@@ -127,6 +132,7 @@ public func genOakTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: Int,
 }
 
 public func genBirchTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: Int, _ z: Int, tall: Bool = false) {
+    let s = NaturalTreeSink(s, x: x, y: y, z: z)
     let h = (tall ? 7 : 5) + rng.nextInt(3)
     let log = cell(B.birch_log), leaves = cell(B.birch_leaves, 4)
     for i in 0..<h { s.set(x, y + i, z, log) }
@@ -136,6 +142,7 @@ public func genBirchTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: In
 }
 
 public func genSpruceTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: Int, _ z: Int) {
+    let s = NaturalTreeSink(s, x: x, y: y, z: z)
     let h = 6 + rng.nextInt(4)
     let log = cell(B.spruce_log), leaves = cell(B.spruce_leaves, 4)
     for i in 0..<h { s.set(x, y + i, z, log) }
@@ -162,6 +169,7 @@ public func genSpruceTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: I
 }
 
 public func genMegaSpruce(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: Int, _ z: Int, pine: Bool) {
+    let s = NaturalTreeSink(s, x: x, y: y, z: z)
     let h = 18 + rng.nextInt(10)
     let log = cell(B.spruce_log), leaves = cell(B.spruce_leaves, 4)
     for i in 0..<h {
@@ -193,6 +201,7 @@ public func genMegaSpruce(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: I
 }
 
 public func genJungleTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: Int, _ z: Int, mega: Bool) {
+    let s = NaturalTreeSink(s, x: x, y: y, z: z)
     let log = cell(B.jungle_log), leaves = cell(B.jungle_leaves, 4)
     if mega {
         let h = 20 + rng.nextInt(12)
@@ -223,6 +232,7 @@ public func genJungleTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: I
 }
 
 public func genAcaciaTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: Int, _ z: Int) {
+    let s = NaturalTreeSink(s, x: x, y: y, z: z)
     let log = cell(B.acacia_log), leaves = cell(B.acacia_leaves, 4)
     let h = 4 + rng.nextInt(3)
     var px = x, pz = z
@@ -247,6 +257,7 @@ public func genAcaciaTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: I
 }
 
 public func genDarkOakTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: Int, _ z: Int) {
+    let s = NaturalTreeSink(s, x: x, y: y, z: z)
     let log = cell(B.dark_oak_log), leaves = cell(B.dark_oak_leaves, 4)
     let h = 6 + rng.nextInt(3)
     for i in 0..<h {
@@ -269,6 +280,7 @@ public func genDarkOakTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: 
 }
 
 public func genCherryTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: Int, _ z: Int) {
+    let s = NaturalTreeSink(s, x: x, y: y, z: z)
     let log = cell(B.cherry_log), leaves = cell(B.cherry_leaves, 4)
     let h = 4 + rng.nextInt(3)
     for i in 0..<h { s.set(x, y + i, z, log) }
@@ -291,6 +303,7 @@ public func genCherryTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: I
 }
 
 public func genMangroveTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: Int, _ z: Int) {
+    let s = NaturalTreeSink(s, x: x, y: y, z: z)
     let log = cell(B.mangrove_log), leaves = cell(B.mangrove_leaves, 4), roots = cell(B.mangrove_roots)
     let stiltH = 2 + rng.nextInt(2)
     let waterC = WATER_CELL
@@ -324,6 +337,7 @@ public func genMangroveTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y:
 }
 
 public func genSwampOak(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: Int, _ z: Int) {
+    let s = NaturalTreeSink(s, x: x, y: y, z: z)
     let h = 5 + rng.nextInt(3)
     let log = cell(B.oak_log), leaves = cell(B.oak_leaves, 4)
     for i in 0..<h { s.set(x, y + i, z, log) }
@@ -343,6 +357,7 @@ public func genSwampOak(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: Int
 }
 
 public func genAzaleaTree(_ s: ChunkSink, _ rng: inout RandomX, _ x: Int, _ y: Int, _ z: Int) {
+    let s = NaturalTreeSink(s, x: x, y: y, z: z)
     let h = 4 + rng.nextInt(2)
     let log = cell(B.oak_log)
     for i in 0..<h { s.set(x, y + i, z, log) }

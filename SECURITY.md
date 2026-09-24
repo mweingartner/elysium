@@ -44,6 +44,13 @@ That makes the realistic threat model: **malicious files that you load into the 
 
 ## Attack surface
 
+Natural-tree ecology adds bounded provenance records to chunk tails, not a new file or network
+capability. Records identify original tree cells and their decay start time; adoption checks them
+against the actual chunk before they can authorize decay. Unmarked legacy wood is protected rather
+than guessed to be a tree. Host-only ecology uses capped work and a clamped saved calendar; guests
+receive ordinary authoritative block/entity replication. Seedling growth plans and validates its
+loaded footprint before mutation, and cannot overwrite containers or solid constructions.
+
 If you're auditing Elysium, these are the interesting places — all of them parse untrusted input:
 
 | Surface | Where | Notes |
