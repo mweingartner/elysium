@@ -2,6 +2,17 @@ import XCTest
 @testable import ElysiumCore
 
 final class SettingsTests: XCTestCase {
+    func testNewSettingsRequestRayTracingWithoutOverridingExplicitModes() {
+        XCTAssertEqual(Settings().shader, "raytraced")
+        XCTAssertEqual(defaultSettings().shader, "raytraced")
+        let shaders: [String?] = [nil, "ultra", "raytraced", "legacy-pack.zip"]
+        for shader in shaders {
+            var settings = Settings()
+            settings.shader = shader
+            XCTAssertEqual(sanitizedSettings(settings).shader, shader)
+        }
+    }
+
     func testSettingsAreSanitizedToRuntimeRanges() {
         var s = Settings()
         s.renderDistance = 10_000

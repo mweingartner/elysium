@@ -71,6 +71,82 @@ public struct MeshOutput {
     public let opaque: MeshLayer
     public let cutout: MeshLayer
     public let translucent: MeshLayer
+    /// Presentation-only source/occlusion snapshot. Simulation light and packed vertices stay unchanged.
+    public let lighting: MeshLightingMetadata?
+
+    public init(opaque: MeshLayer, cutout: MeshLayer, translucent: MeshLayer,
+                lighting: MeshLightingMetadata? = nil) {
+        self.opaque = opaque
+        self.cutout = cutout
+        self.translucent = translucent
+        self.lighting = lighting
+    }
+}
+
+public struct MeshLightEmitter: Sendable, Equatable {
+    public let position: SIMD3<UInt8>
+    public let level: UInt8
+    public let color: SIMD3<Float>
+
+    public init(position: SIMD3<UInt8>, level: UInt8, color: SIMD3<Float>) {
+        self.position = position
+        self.level = level
+        self.color = color
+    }
+}
+
+/// One immutable 16-cubed section, indexed x + 16 * (y + 16 * z).
+/// This is deliberately separate from gameplay's four-bit block-light contract.
+public struct MeshLightingMetadata: Sendable, Equatable {
+    public let opacity: [UInt8]
+    public let emitters: [MeshLightEmitter]
+
+    public init(opacity: [UInt8], emitters: [MeshLightEmitter]) {
+        self.opacity = opacity
+        self.emitters = emitters
+    }
+
+    public init?(paddedBlocks: [UInt16]) {
+        guard paddedBlocks.count == 18 * 18 * 18 else { return nil }
+        var opacity = [UInt8](repeating: 15, count: 16 * 16 * 16)
+        var emitters: [MeshLightEmitter] = []
+        for z in 0..<16 {
+            for y in 0..<16 {
+                for x in 0..<16 {
+                    let cell = paddedBlocks[((y + 1) * 18 + z + 1) * 18 + x + 1]
+                    let id = Int(cell >> 4)
+                    opacity[x + 16 * (y + 16 * z)] = LIGHT_OPACITY[id]
+                    let level = lightEmitOf(cell)
+                    if level > 0 {
+                        emitters.append(.init(position: .init(UInt8(x), UInt8(y), UInt8(z)),
+                            level: UInt8(min(15, level)), color: Self.lightColor(for: cell)))
+                    }
+                }
+            }
+        }
+        self.init(opacity: opacity, emitters: emitters)
+    }
+
+    /// Stable presentation colors; emission eligibility always comes from lightEmitOf(cell).
+    public static func lightColor(for cell: UInt16) -> SIMD3<Float> {
+        let id = Int(cell >> 4)
+        guard blockDefs.indices.contains(id) else { return .init(1, 0.85, 0.62) }
+        let name = blockDefs[id].name
+        if name.hasPrefix("soul_") { return .init(0.35, 0.80, 1) }
+        if name == "lava" || name == "magma_block" { return .init(1, 0.42, 0.13) }
+        if name.contains("redstone") || name == "repeater_on" || name == "comparator_on" {
+            return .init(1, 0.22, 0.10)
+        }
+        if name == "nether_portal" || name == "respawn_anchor" || name == "crying_obsidian" {
+            return .init(0.67, 0.38, 1)
+        }
+        if name.contains("amethyst") { return .init(0.72, 0.48, 1) }
+        if name == "sea_lantern" || name == "conduit" { return .init(0.64, 0.92, 1) }
+        if name == "verdant_froglight" || name == "glow_lichen" { return .init(0.75, 1, 0.78) }
+        if name == "pearlescent_froglight" { return .init(1, 0.79, 0.96) }
+        if name == "beacon" || name == "end_rod" { return .init(0.90, 0.94, 1) }
+        return .init(1, 0.85, 0.62)
+    }
 }
 
 private let P = 18
@@ -440,7 +516,8 @@ final class SectionMesher {
     func run() -> MeshOutput {
         greedyPass()
         blockPass()
-        return MeshOutput(opaque: opaque.build(), cutout: cutout.build(), translucent: translucent.build())
+        return MeshOutput(opaque: opaque.build(), cutout: cutout.build(), translucent: translucent.build(),
+                          lighting: MeshLightingMetadata(paddedBlocks: input.blocks))
     }
 
     private func greedyPass() {

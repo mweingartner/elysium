@@ -1,5 +1,127 @@
 # Ray-traced worlds verification — September 24, 2026
 
+## Underground emissive correction — September 25, 2026
+
+### User-tuned release candidate
+
+The final policy is 1.7× original non-sun light output (15% below the initial
+2× candidate), retaining doubled finite reach. New profiles request Ray Traced;
+existing persisted Standard/OFF, Ultra, Ray Traced, and custom-pack choices remain
+unchanged. Unsupported hardware retains the existing Ultra fallback.
+
+The tuned production build completed warning-free in 187.67 seconds:
+`/tmp/elysium-underground-tuned-release.log`. Disposable-copy normalization
+(`xcrun strip -S -x`) produced Elysium
+`10b192924179b948fd5117308506ccf65eca7574912ce318cb4c0829c32e4f7b`,
+ElysiumCore.o `8c7f8cfeca0f904a51dabb2e6c341c784e5a26f67be3ed725d7894aa3c37417c`,
+and elysmoke `85f96e0560205a6d1fce44f252162bd0b21eede6cad8f16fd4532c38b7e91f7a`.
+Storage/TextInput objects and protected source/API/capability pins are unchanged.
+The impact-selector harness passes ten tests; release validation includes the
+reviewed renderer, mesher, settings-persistence and release-workflow closure.
+
+The complete nine-stage production pipeline passed, including **186 impact-scoped
+tests**, all **491 golden checks**, source/binary security, warning-free build,
+signed packaging, real AppKit text entry, installation, and installed signature/
+identity verification. Log: `/tmp/elysium-underground-pipeline.log`.
+Installed `/Applications/Elysium.app/Contents/MacOS/Elysium` SHA-256:
+`7960b8092beed00a5486568ea71ea628eb5a04a713d7ceee92cf737d6e92c09f`.
+
+The tuned optimized native inspection build
+`ee573704b9c8f3fad5cefb8d5bd69de2749347c1881ffa32504a842821c2697b`
+renewed actual underground and outdoor checks in session
+`80f6fe14-9bdd-406e-ac74-ca94985c12e6`. Capture IDs:
+
+- Dim, readable unlit room: `fe7b26f6-fd8f-47da-b2f9-51c42ecc0a43`.
+- Warm furnace illumination at 18 blocks: `a6ca2efd-b72d-4685-890e-d293b542b1e6`.
+- Solid divider blocks light: `3d477bbd-956b-4634-aa8f-a7325619cacd`.
+- Doorway admits light: `744306b9-181b-4e33-9978-ae4f50f60688`.
+- Outdoor daylight retains visible texture: `17b05cbe-d447-4b29-a35e-a787f72cd81f`.
+- Ultra torch/doorway comparison: `da78345b-3922-443e-a808-abd6b86d4a3a`.
+
+The first startup probe was discarded because the manually paused fixture had
+not yet adopted its initial chunks. After normal streaming, all five scene
+captures were renewed; they are the IDs above, not the incomplete startup images.
+Capture metadata/hashes are recorded in
+`/tmp/elysium-underground-tuned-native-verified.jsonl` (Ultra PNG SHA-256
+`a615cbd29c24ff7aaf714537ae6b13450b96eec1e2cbf0da453c14b2eadfd1fa`).
+The renewed fixed-camera sequence remained ray-traced/ready for 100/100 snapshots,
+with no history drops or pending sections. History settled from 9 to 24 samples;
+the largest consecutive floor-patch mean-luminance change was 0.000680 on a 0–1
+scale. Median GPU time was 12.17 ms while release compilation ran concurrently;
+this is a small-room stability observation, not a general performance guarantee.
+The owned fixture was deleted and debug preferences restored after inspection.
+Git publication is verified separately after the unmodified pre-push hook.
+
+### Initial implementation
+
+The current change adds colored, render-only doubled-range lamp propagation,
+stable ray lighting, increased held/dynamic emission, and an underground visibility
+floor. Native inspection also found missing linear-to-display conversion after
+ray tone mapping. That conversion is now explicit on the BGRA8Unorm drawable;
+legacy raster, HUD, and first-person display paths are unchanged.
+
+The warning-free release build is recorded in `/tmp/elysium-underground-release-build.log`.
+The final focused integration run passed 46 tests in
+`/tmp/elysium-underground-integration.log`; the nine new source/field tests also
+passed, including actual GPU sampling, opaque-wall rejection, doubled reach,
+source removal, world clearing, and asynchronous recentering. The reviewed scope
+adds mesher fixtures and shared renderer consumers without selecting unrelated
+simulation/world-generation suites. The nine selector tests passed. Release and
+push gates will re-execute the complete selected closure and all 491 goldens.
+
+### Initial 2× candidate native evidence
+
+The captures and binary renewal below precede the user's requested 15% brightness
+reduction and new-profile Ray Traced default. They establish the lighting approach;
+the tuned 1.7× output candidate's renewed proof is recorded above.
+
+Final optimized inspection executable SHA-256:
+`fb78c2708e8194c957de2e7532c36996c35b7f035114e1b9d505bba493621cda`.
+Isolated session: `9dd6c304-9050-4661-b9fe-62526f246383`. A disposable 32×8×14
+stone room was observed from 18 blocks away from its source, beyond the old
+furnace/torch reach. These are real renderer captures, not generated art:
+
+| Scene | Capture ID | PNG SHA-256 |
+|---|---|---|
+| Unlit room, readable neutral floor | `999779e8-4bc9-4e97-941c-afb5dee6f227` | `38acbb3d866f0725b577305468299a3fcedeb8a0ca0ef557b6ec526b5e06e8ad` |
+| Lit furnace, warm surrounding floor/walls | `9f75d67b-cff7-445e-a0ec-63922225564a` | `a5aaeb8e68238c82fef51f99e926ef064d21929eab96a02f40f6e1a4a22424b6` |
+| Solid divider blocks lamp contribution | `8c7fd3df-7f11-44fc-bee8-746e16ae5bab` | `bda8ae2172224100a3880ac76309cd262c139b065d38494ae345e41fd5195a56` |
+| Doorway admits warm light | `dc0e24c6-035e-426c-8778-6da7d6f99f42` | `33001f20b89cdcd75148a9c9ba77b99c8071369ace465d032ca0a395d7fa3d55` |
+| Ultra raster torch/doorway comparison | `97d8f1ec-faf5-4eb6-a188-0c10e80cab4a` | `ac94f7738160d7582815becf1638dec1ebbdc1a1427bdc5795b4e2ed81ac1d4c` |
+
+The lit-furnace state was set directly in the isolated fixture; this proves
+emissive rendering, not a new furnace ignition/smelting mechanic. Existing
+smelting behavior was not changed.
+
+The fixed-camera torch sequence sampled 100 renderer states and ten images:
+all remained ray-traced/ready, history stayed at 24, no pending sections, median
+GPU time 7.43 ms (maximum 10.56 ms). The central floor patch's largest consecutive
+mean-luminance change was 0.0000181 on a 0–1 scale. A separate 20-frame traverse
+crossed the 16-block cache boundary in 0.05-block steps with no mode fallback or
+history reset; median GPU time 8.36 ms. These simple-room measurements are not
+performance guarantees for complex worlds. Logs:
+`/tmp/elysium-underground-static.jsonl` and `/tmp/elysium-underground-recenter.jsonl`.
+
+### Reviewed binary renewal
+
+Disposable copies normalized with `xcrun strip -S -x` produced:
+
+| Artifact | New SHA-256 |
+|---|---|
+| Elysium | `34a2c0f85a1bbbb3025a2b9bba767699ac65c07059f278243957db4670683874` |
+| ElysiumCore.o | `77a2a57db4903647c865f23661f77ab0fa26ac20e45a174e1a05e5d0a6b294bb` |
+| elysmoke | `195dc960552f8035aa03892c30925413093c79eea80fe27f67c05a1aa7016302` |
+
+Core's render-only mesh sidecar changes its object and linked products, but not
+the packed mesh or simulation goldens. ElysiumStorage.o and ElysiumTextInput.o
+remain byte-identical to the preceding release, as do all protected source,
+API, and capability-manifest pins. Installation and GitHub parity are separate
+closeout results, reported after their gates finish.
+
+---
+
+## Original renderer release
+
 The final focused renderer run passed **56 tests**, including real Metal
 intersection, alpha continuation, off-screen reflection, entity/item poses,
 geometry invalidation, resource limits, all three complete render pass graphs,

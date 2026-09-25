@@ -7,6 +7,8 @@ release and publication results are tracked in the [verification record](ray-tra
 
 Video's existing Shaders button cycles Standard, Ultra, and Ray Traced. The
 stored preference remains a string, so older preferences require no migration.
+New profiles default to Ray Traced. Loading an existing settings document preserves
+its choice, including legacy Standard/OFF documents that omit the shader key.
 Unsupported devices skip Ray Traced in the cycle; a stored request on an
 unsupported device falls back to Ultra without silently changing the preference.
 Preparing or over-budget scenes also use a visible Ultra fallback, never a
@@ -44,9 +46,10 @@ Primary air misses and fully distance-faded geometry resolve the same directiona
 atmosphere, while short-range blindness/lava/snow fog keeps its constant-color
 visibility constraint. This avoids outlining loaded terrain against clouds.
 
-Paths are bounded to seven surface events and two diffuse bounces. Emissive faces
-use a bounded set of light proxies, with real visibility rays and a small existing
-voxel-light contribution for stability. Metalness and dielectric properties are
+Paths are bounded to seven surface events and two diffuse bounces. Placed lamps
+use a stable, occlusion-respecting render-only voxel irradiance field instead of
+competing in a scene-wide random light lottery. Held and moving emitters retain
+visibility rays, and emissive faces remain visible to secondary paths. Metalness and dielectric properties are
 semantic material presets, not imported PBR maps. Water has normal-map waves and
 absorption/refraction, not a fluid simulation, geometric waves, or caustics.
 
@@ -90,6 +93,27 @@ and [acceleration-structure buffer ownership](https://developer.apple.com/docume
 
 ## Empirical checks
 
+### Underground and artificial light
+
+Torches, lit furnaces, lanterns, lava, and other emitting block states now use
+1.7× the original light output and twice the reach. Output was reduced 15% from
+the initial doubled-brightness candidate. The effect applies to Standard,
+Ultra, and Ray Traced modes without changing monster spawning, save data, or
+the day/night clock. Soul lights remain blue; ordinary flames are warm.
+Holding an emitting block uses the same 1.7× output and doubled reach.
+Moonlight is brighter, but sunlight is not boosted.
+
+The shared field spreads through loaded air and openings, while solid blocks
+stop it. It covers a 128-block cube around the player, blends to the existing
+lower-detail lighting near its boundary, and rebuilds off the main thread when
+sources or walls change. Fully dark rooms retain a subtle visibility floor;
+placing a real light still makes a substantial difference. This bounded voxel
+lighting is an intentional real-time approximation, not offline global illumination.
+Ray-traced tone-mapped color is now correctly encoded for the display. The missing
+conversion previously crushed dim linear illumination toward black; correcting it
+does not increase the sun's emitted light. HUD, hand rendering, and the legacy
+raster color path remain outside that conversion.
+
 ### Forest lighting and update stability
 
 Leaves use a separate render-only foliage classification, not the generic cutout
@@ -103,8 +127,8 @@ readable without making opaque building materials translucent.
 
 A small, neutral ambient contribution uses the existing propagated skylight,
 scaled down at night and absent in dimensions without an ordinary sky. It is
-zero where the skylight cache is zero. Exposure is unchanged; enclosed caves are
-not globally brightened. The foliage shadow transmission is deterministic, so it
+zero where the skylight cache is zero. Exposure is unchanged; a separate modest
+dark-adaptation floor keeps an unlit cave navigable. The foliage shadow transmission is deterministic, so it
 does not create random bright pixels from frame to frame.
 
 Routine terrain updates use a larger but bounded acceleration-structure catch-up

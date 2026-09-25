@@ -1,5 +1,5 @@
 // Genuine geometry rays; no screen-space reflection/occlusion approximation.
-let RAY_TRACING_MSL = """
+let RAY_TRACING_MSL = renderLocalLightingShaderSource + "\n" + """
 #include <metal_stdlib>
 #include <metal_raytracing>
 using namespace metal;
@@ -27,6 +27,7 @@ struct RTUniforms {
     float4 cameraDelta;
     float4 params;
     float4 heldLight;
+    RenderLocalLightUniforms localLight;
     float4 fogParameters;
     float4 quality;
     uint4 counts;
@@ -70,7 +71,11 @@ static float rtDirectLightCosine(float3 normal,float3 lightDirection,uint flags)
 }
 
 static float rtCachedIllumination(float sky,float block,constant RTUniforms& u) {
-    float cached=max(0.005,block*0.035);
+    float localLevel=clamp(block,0.0,1.0);
+    // Preserve the daylight/canopy baseline, but keep enclosed unlit caves above the
+    // tone mapper's near-black toe. This is a bounded visibility floor, not another lamp.
+    float caveFloor=mix(0.18,0.045,clamp(sky*2,0.0,1.0));
+    float cached=max(caveFloor,elyNonSunLightOutput*localLevel/(4-3*localLevel));
     if(u.atmosphere.options.x>0.5) cached=max(cached,0.045);
     cached=max(cached,clamp(u.fogParameters.z,0.0,1.0)*0.55);
     if(u.atmosphere.options.x<0.5) {
@@ -181,6 +186,38 @@ static float3 rtVisibility(float3 position,float3 normal,float3 direction,float 
     return float3(0);
 }
 
+// Only the no-volume compatibility path (and moving emitters) use surface proxies. Evaluate
+// stable strongest local sources without a global random lottery or biased inverse-PDF clamp.
+static float3 rtLocalProxyIrradiance(float3 position,float3 normal,device const RTLight* lights,uint count,
+                                    instance_acceleration_structure scene,device const RTInstance* instances,
+                                    constant RTTextures& textures,texture2d_array<float> atlas) {
+    uint indices[4]={0,0,0,0}; float weights[4]={0,0,0,0};
+    for(uint index=0;index<count;++index) {
+        RTLight light=lights[index]; float3 delta=light.positionRadius.xyz-position;
+        float d=length(delta),radius=light.positionRadius.w;
+        if(d<=0.05 || d>=radius) continue;
+        float cosine=max(0.0,dot(normal,delta/d));
+        float edge=1-d/radius;
+        float weight=light.colorPower.w*cosine*edge*edge/(1+d*d);
+        if(weight<=weights[3]) continue;
+        for(uint slot=0;slot<4;++slot) {
+            if(weight>weights[slot]) {
+                for(uint tail=3;tail>slot;--tail) { indices[tail]=indices[tail-1]; weights[tail]=weights[tail-1]; }
+                indices[slot]=index; weights[slot]=weight; break;
+            }
+        }
+    }
+    float3 irradiance(0);
+    for(uint slot=0;slot<4;++slot) {
+        if(weights[slot]<=0) continue;
+        RTLight light=lights[indices[slot]]; float3 delta=light.positionRadius.xyz-position;
+        float d=length(delta);
+        float3 visible=rtVisibility(position,normal,delta/d,d,scene,instances,textures,atlas);
+        irradiance+=light.colorPower.rgb*visible*weights[slot];
+    }
+    return irradiance;
+}
+
 kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
                          device const RTInstance* instances [[buffer(1)]],
                          constant RTUniforms& u [[buffer(2)]],
@@ -193,6 +230,7 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
                          texture2d<float,access::write> motion [[texture(4)]],
                          texture2d<float,access::write> diffuseAlbedo [[texture(5)]],
                          texture2d<float,access::write> specularAlbedo [[texture(6)]],
+                         texture3d<float,access::sample> localLightTexture [[texture(7)]],
                          uint2 pixel [[thread_position_in_grid]]) {
     if(pixel.x>=u.counts.z || pixel.y>=u.counts.w) return;
     // Pixel centers preserve the authored pixel art; secondary paths supply stochastic samples.
@@ -308,7 +346,7 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
         float daylight=u.atmosphere.sunDaylight.w;
         bool sunlight=sun.y>0;
         float3 lightDirection=sunlight?sun:-sun;
-        float lightStrength=sunlight?daylight*2.5*smoothstep(0.0,0.04,sun.y):0.085;
+        float lightStrength=sunlight?daylight*2.5*smoothstep(0.0,0.04,sun.y):0.085*elyNonSunLightOutput;
         float3 lightColor=sunlight?mix(float3(1,0.53,0.24),float3(1,0.96,0.88),smoothstep(0.03,0.5,sun.y)):float3(0.40,0.55,0.9);
         if(u.atmosphere.options.x<0.5) {
             float cosine=rtDirectLightCosine(faceNormal,lightDirection,s.flags);
@@ -344,19 +382,25 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
                 radiance+=throughput*s.albedo*u.heldLight.rgb*vis*(fall*max(0.0,dot(faceNormal,delta/d))*2.5);
             }
         }
-        // Every emissive candidate has nonzero sampling probability; no off-screen light list.
+        // The immutable propagated volume is deterministic and already respects solid voxel
+        // occlusion. It provides local diffuse illumination without competition from remote
+        // lava. Static proxy lights are not submitted when the volume is available.
+        float4 local=sampleRenderLocalLight(s.position,faceNormal,u.localLight,localLightTexture);
+        float cachedBlock=clamp(s.block,0.0,1.0);
+        float3 localIrradiance=local.rgb;
+        if(u.localLight.params.x>0.5) {
+            // Outside the bounded volume retain the original world light cache; interpolation
+            // is only a coverage blend, never filtering bright voxels through a solid wall.
+            float cachedRadiance=elyNonSunLightOutput*cachedBlock/(4-3*cachedBlock);
+            localIrradiance=mix(float3(cachedRadiance),local.rgb,local.a);
+        }
+        radiance+=throughput*s.albedo*localIrradiance;
         if(u.counts.y>0) {
-            uint index=min(u.counts.y-1,uint(rtUnit(seed)*float(u.counts.y)));
-            RTLight light=lights[index]; float3 delta=light.positionRadius.xyz-s.position;
-            float d=length(delta); float cosine=max(0.0,dot(faceNormal,delta/max(d,0.001)));
-            if(cosine>0 && d>0.05) {
-                float3 vis=rtVisibility(s.position,faceNormal,delta/d,d,scene,instances,textures,atlas);
-                float energy=light.colorPower.w*float(u.counts.y)/(1+d*d);
-                radiance+=throughput*s.albedo*light.colorPower.rgb*vis*(cosine*min(energy,32.0));
-            }
+            radiance+=throughput*s.albedo*rtLocalProxyIrradiance(s.position,faceNormal,lights,u.counts.y,
+                scene,instances,textures,atlas);
         }
         // Bounded neutral cache fill supports readable canopy shade without global exposure.
-        float cached=rtCachedIllumination(s.sky,s.block,u);
+        float cached=rtCachedIllumination(s.sky,u.localLight.params.x>0.5?0.0:s.block,u);
         radiance+=throughput*s.albedo*cached;
         if(diffuseBounces++>=2) break;
         throughput*=s.albedo;

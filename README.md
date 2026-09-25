@@ -13,6 +13,7 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 
 ## What is in Elysium
 
+- **Readable underground lighting** — non-sun lights have 1.7× the original output and twice the reach, with colored, wall-blocked illumination from torches, furnaces, lanterns, lava, and other emitting blocks. Ray-traced caves retain a dim visibility floor, and corrected display-color conversion preserves dark texture detail. Gameplay light rules are unchanged. New settings profiles default to Ray Traced; existing graphics choices are preserved, with Ultra fallback when ray tracing is unavailable.
 - **Native engine and renderer** — the headless-testable Swift engine drives a hand-written Metal renderer and AppKit interface. Video options offer Standard, Ultra raster effects, and capability-gated **Ray Traced** world rendering: primary geometry rays, occluded direct lighting, diffuse indirect light, off-screen reflections, and water/glass transmission. Ray memory scales with GPU capacity, and leaf-filtered daylight keeps forests shaded but readable. Both rendering paths use weather-lit volumetric clouds and depth-dependent water optics while retaining the Faithful textures. The HUD and first-person items remain sharp separate passes; unsupported or over-budget ray scenes visibly fall back to Ultra and temporary memory pressure retries automatically. See [graphics modes](PLAYER_GUIDE.md#graphics-modes-water-and-clouds).
 - **Survival across three dimensions** — procedural overworld, nether, and end terrain; caves and structures; mining, farming, crafting, smelting, brewing, enchanting, combat, hunger, experience, sleep, death, respawn, bosses, and advancements.
 - **Living worlds** — animals, monsters, villagers, projectiles, vehicles, dropped items, raids, pathfinding, fluids, portals, redstone, block entities, containers, and host-owned simulation state. Hostile monsters use explicit direct-daylight reactions: sunlight-sensitive mobs ignite, creepers latch a short fuse and stop chasing, and witches remain immune, drink defensive potions, and throw target-aware splash potions.
@@ -319,7 +320,7 @@ It runs these nine automated stages, in order, and stops at the first failure:
 1. Source security scan.
 2. Warning-free release build.
 3. Release-surface and binary security checks.
-4. Full XCTest.
+4. Impact-selected XCTest (full suite for unmapped or broad changes).
 5. The 491-check `elysmoke` golden suite.
 6. Application packaging.
 7. Packaged AppKit keyboard and Accessibility integration.

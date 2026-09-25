@@ -365,7 +365,12 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='63ced7f24fe9998202f54ec1386da3bd7944f7a09fce38
 # cave/lava tuning move only the Core object and its linked products. Storage,
 # Saves, GameCore, Player, capability manifests, and text-input pins are unchanged.
 # Reviewed normalization and old/new values: docs/volcanic-geology/build.md.
-EXPECTED_CORE_OBJECT_SHA256='ea2d96cf2b3075443f8a58e22a1c6e8c8eaa7ab0b227234a016361400ea4a498'
+# Underground emissive lighting adds a presentation-only MeshOutput metadata sidecar.
+# Packed mesh words, gameplay lighting, and storage/input source contracts are unchanged.
+# Core and linked products renew; normalization/native evidence: docs/ray-traced-worlds/build.md.
+# Tuned 1.7x output and new-profile RT default preserve legacy settings decoding.
+# Reviewed normalized artifacts are recorded in docs/ray-traced-worlds/build.md.
+EXPECTED_CORE_OBJECT_SHA256='8c7f8cfeca0f904a51dabb2e6c341c784e5a26f67be3ed725d7894aa3c37417c'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -385,8 +390,8 @@ EXPECTED_CORE_OBJECT_SHA256='ea2d96cf2b3075443f8a58e22a1c6e8c8eaa7ab0b227234a016
 # docs/ray-traced-worlds/build.md. Core/storage/text-input objects and all source pins are unchanged.
 # Adaptive ray-memory and canopy stability: renderer-only product renewal; normalized
 # Core/storage/text-input objects and elysmoke remain byte-identical. See build.md.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='2d74a0d1ae1e6bf6c7d5f0b7727c644020132d69092b8e0ec93f1c191c8a569c'
-EXPECTED_SMOKE_PRODUCT_SHA256='3f5260664269be010db64237b3da923021fcfb0bcfa315126f2f16fb5f7cb1a9'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='10b192924179b948fd5117308506ccf65eca7574912ce318cb4c0829c32e4f7b'
+EXPECTED_SMOKE_PRODUCT_SHA256='85f96e0560205a6d1fce44f252162bd0b21eede6cad8f16fd4532c38b7e91f7a'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

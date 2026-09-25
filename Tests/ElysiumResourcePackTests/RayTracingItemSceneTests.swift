@@ -113,8 +113,20 @@ final class RayTracingItemSceneTests: XCTestCase {
         }
         let flashing = try XCTUnwrap(RayTracingItemScene.cubeGeometry(cell: packedCell, flash: true, key: "flash"))
         let bright = try XCTUnwrap(RayTracingMeshDecoder.decodePacked(data: flashing.vertices, indices: flashing.indices))
-        XCTAssertTrue(bright.primitives.allSatisfy { $0.normalEmission.w == 2 })
+        XCTAssertTrue(bright.primitives.allSatisfy { $0.normalEmission.w == 3.4 })
         XCTAssertNil(RayTracingItemScene.cubeGeometry(cell: -1, flash: false, key: "invalid"))
+    }
+
+    func testLuminousDroppedItemsAndMovingBlocksRetainTheirLight() throws {
+        let item=ItemEntity(world:World(dim:.overworld,seed:1))
+        item.stack=ItemStack(iid("torch"),1)
+        XCTAssertEqual(try XCTUnwrap(RayTracingItemScene.spriteAppearance(item)).emission,14.0/15,accuracy:0.00001)
+        item.stack=ItemStack(iid("iron_pickaxe"),1)
+        XCTAssertEqual(try XCTUnwrap(RayTracingItemScene.spriteAppearance(item)).emission,0)
+        let geometry=try XCTUnwrap(RayTracingItemScene.cubeGeometry(cell:Int(cell(B.glowstone)),flash:false,key:"glowing"))
+        let decoded=try XCTUnwrap(RayTracingMeshDecoder.decodePacked(data:geometry.vertices,indices:geometry.indices))
+        XCTAssertTrue(decoded.primitives.allSatisfy { $0.normalEmission.w == 3.4 })
+        XCTAssertEqual(decoded.emitters.count,6)
     }
 
     func testPhysicalSceneIncludesOffscreenEntitiesButPreservesRangesAndSkipsDead() throws {

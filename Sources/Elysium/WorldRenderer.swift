@@ -286,6 +286,8 @@ final class WorldRenderer {
     var fbWidth = 0, fbHeight = 0
     private var shadowSizeNow = 0   // rebuilt when the ultra preset changes it
     private let rayTracer: RayTracedWorldRenderer?
+    private let localLighting: RenderLocalLighting
+    private let emptyLocalLight: MTLTexture
     private let rayItemScene: RayTracingItemScene
     private var rayTracingWorldIdentity: UInt64 = 0
     private var rayTracingAtlasGeneration: UInt64 = 0
@@ -323,6 +325,19 @@ final class WorldRenderer {
 
     init(device: MTLDevice) {
         self.device = device
+        localLighting = RenderLocalLighting(device: device)
+        let emptyDescriptor = MTLTextureDescriptor()
+        emptyDescriptor.textureType = .type3D
+        emptyDescriptor.pixelFormat = .rgba8Unorm
+        emptyDescriptor.width = 1
+        emptyDescriptor.height = 1
+        emptyDescriptor.depth = 1
+        emptyDescriptor.usage = .shaderRead
+        emptyDescriptor.storageMode = .shared
+        emptyLocalLight = device.makeTexture(descriptor: emptyDescriptor)!
+        var emptyPixel: UInt32 = 0
+        emptyLocalLight.replace(region: MTLRegionMake3D(0, 0, 0, 1, 1, 1), mipmapLevel: 0,
+                                slice: 0, withBytes: &emptyPixel, bytesPerRow: 4, bytesPerImage: 4)
         queue = device.makeCommandQueue()!
         arena = MeshArena(device: device)
         entityRenderer = EntityRendererM(device: device)
@@ -869,6 +884,7 @@ final class WorldRenderer {
 
     func uploadMesh(_ cx: Int, _ sy: Int, _ cz: Int, _ minY: Int, _ mesh: MeshOutput) {
         let key = SectionKey(cx: cx, sy: sy, cz: cz)
+        localLighting.upload(origin: SIMD3(cx * 16, minY + sy * 16, cz * 16), metadata: mesh.lighting)
         rayTracer?.uploadSection(key: key, minY: minY, mesh: mesh)
         if let old = sections.removeValue(forKey: key) { releaseSection(old) }
         let gpu = SectionGPU(key: key, minY: minY)
@@ -893,6 +909,7 @@ final class WorldRenderer {
         sections[key] = gpu
     }
     func removeChunkMeshes(_ cx: Int, _ cz: Int, _ sectionCount: Int) {
+        localLighting.removeChunk(cx: cx, cz: cz)
         rayTracer?.removeChunk(cx: cx, cz: cz, sectionCount: sectionCount)
         for sy in 0..<sectionCount {
             if let old = sections.removeValue(forKey: SectionKey(cx: cx, sy: sy, cz: cz)) {
@@ -901,6 +918,7 @@ final class WorldRenderer {
         }
     }
     func clearAllSections() {
+        localLighting.clear()
         rayTracer?.clear()
         rayTracingActive = false
         rayTracingWorldIdentity &+= 1
@@ -943,7 +961,8 @@ final class WorldRenderer {
         out.zenith = zenith
         out.horizon = horizon
         out.fog = horizon
-        out.dayLight = min(1, max(0.06, day + cam.nightVision))
+        // The night floor represents moonlight; sunlight above that floor is unchanged.
+        out.dayLight = min(1, max(0.102, day + cam.nightVision))
         out.sunGlow = dusk * (1 - Double(rain))
         return out
     }
@@ -955,16 +974,22 @@ final class WorldRenderer {
     /// a zero vector (radius 0) disables it. The shader turns this into a smooth radial glow
     /// around the camera without touching the static voxel light — see `chunk_fs`.
     private func heldTorchLightVector(for player: Player?) -> SIMD4<Float> {
-        func emit(_ stack: ItemStack?) -> Int {
-            guard let stack, let block = itemDef(stack.id).block else { return 0 }
-            return lightEmitOf(block)
+        Self.heldLightVector(mainHand: player?.mainHand, offHand: player?.offHand)
+    }
+
+    static func heldLightVector(mainHand: ItemStack?, offHand: ItemStack?) -> SIMD4<Float> {
+        func source(_ stack: ItemStack?) -> (level: Int, color: SIMD3<Float>) {
+            guard let stack, let block = itemDef(stack.id).block else { return (0, .zero) }
+            let packed = cell(block)
+            return (lightEmitOf(packed), MeshLightingMetadata.lightColor(for: packed))
         }
-        guard let player else { return SIMD4<Float>(repeating: 0) }
-        let level = max(emit(player.mainHand), emit(player.offHand))
+        let main = source(mainHand), off = source(offHand)
+        let brightest = main.level >= off.level ? main : off
+        let level = brightest.level
         guard level > 0 else { return SIMD4<Float>(repeating: 0) }
-        // Warm flame tint; intensity scales with the block's own light level (torch = 14/15).
-        let intensity = Float(level) / 15 * 0.9
-        return SIMD4<Float>(1.0 * intensity, 0.80 * intensity, 0.52 * intensity, Float(level))
+        // Match placed-source colors, including soul and underwater lamps.
+        let intensity = Float(level) / 15 * 0.9 * RenderLocalLightPolicy.outputMultiplier
+        return SIMD4<Float>(brightest.color * intensity, Float(level * 2))
     }
 
     /// renders the world into the offscreen scene target, then composites into
@@ -1021,6 +1046,22 @@ final class WorldRenderer {
         let angle = world.sunAngle()
         let sunDir = SIMD3<Float>(Float(-Foundation.sin(angle * .pi * 2 + .pi)), Float(Foundation.cos(angle * .pi * 2)), 0.18)
         let camPos = SIMD3<Double>(cam.x, cam.y, cam.z)
+        let localVolume = localLighting.prepare(camera: camPos)
+        let localTexture = localVolume?.texture ?? emptyLocalLight
+        let localOrigin = localVolume.map {
+            SIMD3<Float>(Float(Double($0.origin.x) - cam.x), Float(Double($0.origin.y) - cam.y),
+                         Float(Double($0.origin.z) - cam.z))
+        } ?? .zero
+        var localUniforms = RenderLocalLightUniforms(
+            originAndSize: SIMD4(localOrigin, Float(localVolume?.size ?? 1)),
+            params: SIMD4(localVolume == nil ? 0 : 1, RenderLocalLightPolicy.outputMultiplier, 0, 0))
+        // A field is immutable after publication. Keep this exact generation alive until
+        // every world pass in this submission has finished, including raster overlays.
+        cmd.addCompletedHandler { [localTexture] _ in _ = localTexture }
+        func bindLocalLight(_ encoder: MTLRenderCommandEncoder) {
+            encoder.setFragmentTexture(localTexture, index: 7)
+            encoder.setFragmentBytes(&localUniforms, length: MemoryLayout<RenderLocalLightUniforms>.stride, index: 7)
+        }
         let presentations = presentEntities(game: game, camPos: camPos, partial: partial, timeSec: timeSec)
         var atmosphere = AtmosphereUniforms()
         atmosphere.cameraTime = SIMD4<Float>(Float(cam.x), Float(cam.y), Float(cam.z), Float(timeSec))
@@ -1049,13 +1090,16 @@ final class WorldRenderer {
                     return instance
                 }
             }
-            let frame = RayTracingFrame(viewProjection: viewProj, inverseViewProjection: viewProj.inverse,
+            var frame = RayTracingFrame(viewProjection: viewProj, inverseViewProjection: viewProj.inverse,
                 camera: camPos, atmosphere: atmosphere, renderDistance: Float(settings.renderDistance * 16),
                 gamma: Float(settings.gamma),
                 heldLight: heldTorchLightVector(for: game.player), shadows: settings.shadows,
                 atlasGeneration: rayTracingAtlasGeneration, worldIdentity: rayTracingWorldIdentity,
                 fogStart: fogStart, fogEnd: fogEnd, nightVision: Float(cam.nightVision),
                 viewMatrix: viewM, projectionMatrix: proj)
+            frame.localLightTexture = localVolume?.texture
+            frame.localLightOrigin = localVolume == nil ? nil : localOrigin
+            frame.localLightGeneration = localVolume?.generation ?? 0
             rayTracingPresentationIncomplete = !itemPresentation.isComplete
             if itemPresentation.isComplete {
                 tracedColor = rayTracer.render(command: cmd, frame: frame, atlas: atlasTexture,
@@ -1217,6 +1261,7 @@ final class WorldRenderer {
             worldOrigin: SIMD4<Float>(Float(cam.x), Float(cam.y), Float(cam.z), settings.reduceMotion ? 1 : 0))
         enc.setFragmentTexture(atlasTexture, index: 0)
         enc.setFragmentTexture(shadowTexture, index: 1)
+        bindLocalLight(enc)
         enc.setFragmentSamplerState(atlasSampler, index: 0)
         enc.setFragmentSamplerState(shadowSampler, index: 1)
 
@@ -1251,6 +1296,7 @@ final class WorldRenderer {
                        _ list: [(gpu: SectionGPU, rel: SIMD3<Float>, dist: Float)],
                        cull: Bool) {
             enc.setRenderPipelineState(pipeline)
+            bindLocalLight(enc)
             enc.setCullMode(cull ? .back : .none)
             enc.setVertexBytes(&uni, length: MemoryLayout<ChunkSharedU>.stride, index: 1)
             enc.setFragmentBytes(&uni, length: MemoryLayout<ChunkSharedU>.stride, index: 1)
@@ -1676,7 +1722,8 @@ final class WorldRenderer {
             "fishing_bobber": "string", "wither_skull": "wither_skeleton_skull_item", "dragon_fireball": "fire_charge",
             "fireball": "fire_charge", "shulker_bullet": "shulker_shell", "llama_spit": "snowball",
         ]
-        var items: [(x: Double, y: Double, z: Double, slot: Int, size: Double, bob: Double, light: Double, emissive: Double)] = []
+        var items: [(x: Double, y: Double, z: Double, slot: Int, size: Double, bob: Double,
+                     light: Double, block: Double, emissive: Double)] = []
         for e in w.entities {
             if e.dead { continue }
             guard let ent = e as? Entity else { continue }
@@ -1703,11 +1750,10 @@ final class WorldRenderer {
             let iz = ent.prevZ + (ent.z - ent.prevZ) * partial
             let bx = ifloorD(ent.x), by = ifloorD(ent.y + 0.3), bz = ifloorD(ent.z)
             let sky = max(0, Double(w.getSkyLight(bx, by, bz)) - w.skyDarken())
-            let light = max(Double(w.info.ambientLight),
-                            max(sky * dayLight * 15 / max(1, 15 - w.skyDarken()), Double(w.getBlockLight(bx, by, bz))))
+            let light = max(Double(w.info.ambientLight), sky * dayLight * 15 / max(1, 15 - w.skyDarken()))
             items.append((ix, iy, iz, spriteSlot(stack), size,
                           ent.type == "item" ? detSin((Double(ent.age) + partial) * 0.08) * 0.08 + 0.12 : 0,
-                          min(1, max(0.12, light / 15)), emissive))
+                          min(1, max(0.12, light / 15)), Double(w.getBlockLight(bx, by, bz)) / 15, emissive))
         }
         if items.isEmpty { return }
         enc.setRenderPipelineState(packTargets ? spritePipelineHDR : spritePipeline)
@@ -1721,9 +1767,10 @@ final class WorldRenderer {
             var u = SpriteUniforms(
                 viewProj: viewProj,
                 center: SIMD4<Float>(Float(it.x - camPos.x), Float(it.y + it.bob - camPos.y), Float(it.z - camPos.z), Float(it.size)),
-                right: SIMD4<Float>(rx, 0, rz, 0),
+                right: SIMD4<Float>(rx, 0, rz, Float(it.emissive)),
                 uvRect: SIMD4<Float>(u0, v0, u0 + 16 / 2048, v0 + 16 / 512),
-                light: SIMD4<Float>(Float(it.emissive > 0 ? 1 : it.light * (0.35 + dayLight * 0.65) + 0.08), fog.1, fog.2, 0),
+                light: SIMD4<Float>(it.emissive > 0 ? RenderLocalLightPolicy.outputMultiplier : Float(it.light * (0.35 + dayLight * 0.65) + 0.08),
+                                   fog.1, fog.2, Float(it.block)),
                 fogColor: SIMD4<Float>(fog.0, 1))
             enc.setVertexBytes(&u, length: MemoryLayout<SpriteUniforms>.stride, index: 1)
             enc.setFragmentBytes(&u, length: MemoryLayout<SpriteUniforms>.stride, index: 1)
@@ -1742,7 +1789,8 @@ final class WorldRenderer {
             def.texFn?(meta, face) ?? (def.tex.isEmpty ? 0 : Int(def.tex[face]))
         }
         func u32(_ layer: Int, _ normal: Int) -> UInt32 {
-            UInt32((layer & 4095) | (normal << 12) | (3 << 15) | ((sky & 15) << 17) | ((blk & 15) << 21) | ((flash ? 1 : 0) << 25))
+            UInt32((layer & 4095) | (normal << 12) | (3 << 15) | ((sky & 15) << 17) | ((blk & 15) << 21)
+                   | ((flash || lightEmitOf(UInt16(blockCell)) > 0 ? 1 : 0) << 25))
         }
         let Bv: UInt32 = 0xffffff
         let faces: [(Int, [[Float]])] = [

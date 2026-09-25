@@ -9,6 +9,21 @@ import XCTest
 /// sampling/upsampling, behind-water translucency, refraction copies, water, bloom and composite.
 @MainActor
 final class WorldRendererIntegrationTests: XCTestCase {
+    func testHeldLightUsesPackedBlockStateAndTunedOutputWithDoubledRadius() {
+        registerAllBlocks(); registerAllItems()
+        let torch = WorldRenderer.heldLightVector(mainHand: ItemStack(iid("torch"), 1), offHand: nil)
+        XCTAssertEqual(torch.w, 28)
+        XCTAssertEqual(torch.x, (14.0 / 15) * 0.9 * 1.7, accuracy: 0.00001)
+        let soul = WorldRenderer.heldLightVector(mainHand: nil, offHand: ItemStack(iid("soul_torch"), 1))
+        XCTAssertEqual(soul.w, 20)
+        XCTAssertGreaterThan(soul.z, soul.x)
+        XCTAssertEqual(WorldRenderer.heldLightVector(mainHand: ItemStack(iid("iron_pickaxe"), 1), offHand: nil), .zero)
+        let strongest = WorldRenderer.heldLightVector(mainHand: ItemStack(iid("soul_torch"), 1),
+                                                     offHand: ItemStack(iid("lantern"), 1))
+        XCTAssertEqual(strongest.w, 30)
+        XCTAssertEqual(strongest.x, 1.53, accuracy: 0.00001)
+    }
+
     private func plane(z: Float, halfSize: Float, tile: UInt32, animation: UInt32 = 0,
                        tint: UInt32 = 0x00ffffff) -> MeshLayer {
         // Section (0,4,0), minY=0: camera (8,70,0) faces +Z, local Y=6 is eye height.

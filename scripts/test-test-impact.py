@@ -19,9 +19,18 @@ RENDER = "Sources/Elysium/RayTracingExample.swift"
 RENDER_CASES = ("RayTracingCloudOcclusionTests", "RayTracingCanopyLightingTests", "RayTracingDenoiserTests",
     "RayTracingMemoryBudgetTests", "RayTracingMemoryPresentationTests", "RayTracingMeshTests",
     "RayTracingItemSceneTests", "RayTracingDynamicSceneTests", "RayTracedWorldRendererTests",
-    "WorldRendererIntegrationTests", "AtmosphereShaderTests", "GraphicsModeTests", "WaterMeshPartitionTests")
+    "WorldRendererIntegrationTests", "AtmosphereShaderTests", "GraphicsModeTests", "WaterMeshPartitionTests",
+    "RenderLocalLightingTests")
+CORE_MESH_CASES = ("MeshGenerationTests", "MesherFixtureTests", "MeshLightingMetadataTests",
+    "PistonAndAnvilTextureMappingTests", "DoorTextureMappingTests", "SignTextureMappingTests",
+    "FenceGateRenderingTests", "StatefulOpenableTextureMappingTests", "DirectionalFunctionalTextureTests")
+SETTINGS_CASES = ("SettingsTests", "LocalSettingsStoreTests", "GameCoreLocalSettingsIntegrationTests",
+    "CreatureRespawnSettingsTests")
 DISCOVERY = "".join(f"ElysiumResourcePackTests.{name}/testProbe\n" for name in RENDER_CASES)
 DISCOVERY += "ElysiumCoreTests.AutomatedReleaseSourceTests/testPipeline\n"
+MESH_DISCOVERY = DISCOVERY + "".join(f"ElysiumCoreTests.{name}/testProbe\n" for name in CORE_MESH_CASES)
+MESH_DISCOVERY += "ElysiumCoreTests.EntityFacingSourceTests/testFacing\nElysiumCoreTests.BrandAttributionSourceTests/testTitle\n"
+SETTINGS_DISCOVERY = DISCOVERY + "".join(f"ElysiumCoreTests.{name}/testProbe\n" for name in SETTINGS_CASES)
 
 
 class ImpactTests(unittest.TestCase):
@@ -58,7 +67,7 @@ class ImpactTests(unittest.TestCase):
         self.assertEqual(selection["mode"], "scoped")
         self.assertEqual(selection["groups"], ["app-shell", "release-workflow", "renderer"])
         self.assertEqual(set(selection["patterns"]),
-                         {p for patterns in impact.GROUPS.values() for p in patterns})
+                         {p for group in selection["groups"] for p in impact.GROUPS[group]})
         for paths in (["README.md"], ["docs/rendering.md", "AGENTS.md"]):
             docs = impact.classify(paths)
             self.assertEqual(docs["groups"], ["release-workflow"])
@@ -66,12 +75,51 @@ class ImpactTests(unittest.TestCase):
         for path in ["Sources/Elysium/Unknown.swift", "Sources/ElysiumCore/Game/GameCore.swift", "Package.swift"]:
             self.assertEqual(impact.classify([RENDER, path])["mode"], "full", path)
 
+    def test_render_metadata_and_shared_shader_closures_are_explicit(self):
+        for path in ["Sources/ElysiumCore/Render/Mesher.swift", "Sources/Elysium/RenderLocalLighting.swift",
+                     "Tests/ElysiumCoreTests/MeshLightingMetadataTests.swift"]:
+            selection = impact.classify([path])
+            self.assertEqual(set(selection["groups"]), {"core-mesh", "renderer", "release-workflow"})
+            impact.validate_discovery(selection, MESH_DISCOVERY)
+        for path in ["Sources/Elysium/Shaders.swift", "Sources/Elysium/WorldRenderer.swift"]:
+            selection = impact.classify([path])
+            self.assertEqual(set(selection["groups"]),
+                {"core-mesh", "entity-presentation", "renderer-source", "renderer", "release-workflow"})
+            impact.validate_discovery(selection, MESH_DISCOVERY)
+        entity = impact.classify(["Sources/Elysium/EntityRendererM.swift"])
+        self.assertEqual(set(entity["groups"]), {"entity-presentation", "renderer", "release-workflow"})
+        self.assertEqual(impact.classify(["Tests/ElysiumResourcePackTests/RenderLocalLightingTests.swift"])["mode"], "scoped")
+        for path in ["Sources/ElysiumCore/World/LightEngine.swift", "Sources/ElysiumCore/World/BlockRegistry3.swift",
+                     "Sources/ElysiumCore/Render/Unreviewed.swift", "Sources/ElysiumCore/Storage/Saves.swift"]:
+            self.assertEqual(impact.classify([path, RENDER])["mode"], "full", path)
+        missing_metadata = MESH_DISCOVERY.replace("ElysiumCoreTests.MeshLightingMetadataTests/testProbe\n", "")
+        with self.assertRaises(ValueError):
+            impact.validate_discovery(impact.classify(["Sources/ElysiumCore/Render/Mesher.swift"]), missing_metadata)
+
     def test_explicit_full_request_overrides_known_scope(self):
         self.write(RENDER)
         selection = impact.plan(self.root, self.base, full=True)
         self.assertEqual(selection["mode"], "full")
         self.assertEqual(selection["patterns"], [])
         self.assertEqual(selection["reason"], "explicit full-suite request")
+
+    def test_settings_scope_requires_every_persistence_and_default_class(self):
+        paths = ["Sources/ElysiumCore/Game/Settings.swift", "Sources/ElysiumCore/Game/LocalSettingsStore.swift"]
+        paths += ["Tests/ElysiumCoreTests/" + name + ".swift" for name in SETTINGS_CASES]
+        for path in paths:
+            selection = impact.classify([path])
+            self.assertEqual(selection["mode"], "scoped", path)
+            self.assertEqual(set(selection["groups"]), {"local-settings", "renderer", "release-workflow"})
+            impact.validate_discovery(selection, SETTINGS_DISCOVERY)
+        selection = impact.classify(paths)
+        for name in SETTINGS_CASES:
+            missing = SETTINGS_DISCOVERY.replace(f"ElysiumCoreTests.{name}/testProbe\n", "")
+            with self.subTest(missing=name), self.assertRaises(ValueError):
+                impact.validate_discovery(selection, missing)
+        for path in ["Sources/ElysiumCore/Game/GameCore.swift", "Sources/ElysiumCore/Game/Saves.swift",
+                     "Sources/ElysiumCore/Game/UnknownSettings.swift", "Sources/ElysiumStorage/Settings.swift",
+                     "Package.swift"]:
+            self.assertEqual(impact.classify(paths + [path])["mode"], "full", path)
 
     def test_dirty_inventory_keeps_staged_then_reverted_and_untracked_paths(self):
         staged, unstaged = RENDER, "Sources/Elysium/RayTracingOther.swift"

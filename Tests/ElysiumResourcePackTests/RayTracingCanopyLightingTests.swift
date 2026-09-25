@@ -210,13 +210,15 @@ final class RayTracingCanopyLightingTests: XCTestCase {
             }
         }
         XCTAssertEqual(values[160], SIMD4(1,0.30,0,0))
-        let expectedFill: [Float] = [0.145,0.04,0.005,0.0134]
+        let expectedFill: [Float] = [0.185,0.08,0.18,0.0534]
         for (channel, value) in expectedFill.enumerated() {
             XCTAssertEqual(values[161][channel], value, accuracy: 0.00001)
         }
-        for channel in 0..<4 { XCTAssertEqual(values[162][channel], 0.045, accuracy: 0.00001) }
-        XCTAssertEqual(values[163].x, 0.075028, accuracy: 0.00001)
-        XCTAssertEqual(values[163].y, 0.074972, accuracy: 0.00001)
+        for (channel,value) in [Float(0.045),0.18,0.045,0.18].enumerated() {
+            XCTAssertEqual(values[162][channel],value,accuracy:0.00001)
+        }
+        XCTAssertEqual(values[163].x, 0.115028, accuracy: 0.00001)
+        XCTAssertEqual(values[163].y, 0.114972, accuracy: 0.00001)
         XCTAssertLessThan(abs(values[163].x-values[163].y), 0.0001,
             "Crossing the horizon must not switch the canopy fill between day/night constants")
 
@@ -245,6 +247,14 @@ final class RayTracingCanopyLightingTests: XCTestCase {
                 width: 16, height: 16, mipmapped: false)
             textureDescriptor.usage = [.shaderRead,.shaderWrite]
             let outputs = try (0..<6).map { _ in try XCTUnwrap(device.makeTexture(descriptor: textureDescriptor)) }
+            let localDescriptor=MTLTextureDescriptor()
+            localDescriptor.textureType = .type3D; localDescriptor.pixelFormat = .rgba8Unorm
+            localDescriptor.width=1; localDescriptor.height=1; localDescriptor.depth=1
+            localDescriptor.usage = .shaderRead
+            let localTexture=try XCTUnwrap(device.makeTexture(descriptor:localDescriptor))
+            var zero: UInt32=0
+            localTexture.replace(region:MTLRegionMake3D(0,0,0,1,1,1),mipmapLevel:0,slice:0,
+                withBytes:&zero,bytesPerRow:4,bytesPerImage:4)
             let counter = try buffer([UInt32(0)])
             let lights = try buffer([RayTracingLight(positionRadius: .zero,colorPower: .zero)])
             let projection = Elysium.mat4Perspective(fovYRad: 5 * .pi/180,aspect: 1,near: 0.05,far: 128)
@@ -262,6 +272,7 @@ final class RayTracingCanopyLightingTests: XCTestCase {
             trace.setBuffer(lights,offset: 0,index: 3); trace.setBuffer(arguments,offset: 0,index: 4)
             trace.setBuffer(counter,offset: 0,index: 5); trace.setTexture(atlas,index: 0)
             for index in outputs.indices { trace.setTexture(outputs[index],index: index+1) }
+            trace.setTexture(localTexture,index:7)
             trace.useResource(bottom,usage: .read); trace.useResource(entityTexture,usage: .read)
             trace.dispatchThreads(.init(width: 16,height: 16,depth: 1),
                 threadsPerThreadgroup: .init(width: 8,height: 8,depth: 1))

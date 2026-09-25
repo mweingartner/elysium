@@ -27,7 +27,7 @@ final class RayTracingMeshTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<RayTracingPrimitive>.stride,64)
         XCTAssertEqual(MemoryLayout<RayTracingInstanceUniforms>.stride,240)
         XCTAssertEqual(MemoryLayout<RayTracingLight>.stride,32)
-        XCTAssertEqual(MemoryLayout<RayTracingUniforms>.stride,416)
+        XCTAssertEqual(MemoryLayout<RayTracingUniforms>.stride,448)
     }
 
     func testPackedMeshPreservesRepeatedUVLightTintAndNormal() throws {
@@ -51,7 +51,7 @@ final class RayTracingMeshTests: XCTestCase {
 
     func testLavaKeepsEmissionAndPublishesAnActualSurfaceLight() throws {
         let value=try XCTUnwrap(decode(layer(animation:2,emissive:true)))
-        XCTAssertEqual(value.primitives[0].normalEmission.w,5)
+        XCTAssertEqual(value.primitives[0].normalEmission.w,8.5)
         let emitter=try XCTUnwrap(value.emitters.first)
         XCTAssertGreaterThan(emitter.colorPower.w,0)
         XCTAssertGreaterThan(emitter.positionRadius.y,0,"The shadow ray starts outside the emitting face")
@@ -86,5 +86,23 @@ final class RayTracingMeshTests: XCTestCase {
         XCTAssertEqual(block.primitives.first?.material,section.primitives.first?.material)
         XCTAssertEqual(block.primitives.first?.normalEmission,section.primitives.first?.normalEmission)
         XCTAssertNil(RayTracingMeshDecoder.decodePacked(data:[0],indices:[]))
+    }
+
+    func testFallbackLightSelectionDoesNotLetRemoteEmittersStarveNearbyLights() {
+        let nearby=RayTracingLight(positionRadius:.init(2,1,-3,30),colorPower:.init(1,0.7,0.3,4))
+        let remote=(0..<1024).map { RayTracingLight(positionRadius:.init(Float(100+$0),0,0,30),colorPower:.init(1,0.3,0.1,10)) }
+        let selected=RayTracingLocalLightSelection.select(remote+[nearby])
+        XCTAssertEqual(selected.count,512)
+        XCTAssertEqual(selected.first?.positionRadius,nearby.positionRadius)
+        let reversed=RayTracingLocalLightSelection.select(Array(([nearby]+remote).reversed()))
+        XCTAssertEqual(selected.map(\.positionRadius),reversed.map(\.positionRadius))
+        XCTAssertEqual(selected.first?.colorPower.w,4,"Selection must not add biased population compensation")
+        XCTAssertTrue(RayTracingLocalLightSelection.select([nearby],limit:0).isEmpty)
+    }
+
+    func testFallbackLightSelectionRejectsNonfiniteAndDisabledLights() {
+        let bad=RayTracingLight(positionRadius:.init(.nan,0,0,30),colorPower:.init(1,1,1,1))
+        let off=RayTracingLight(positionRadius:.init(0,0,0,0),colorPower:.init(1,1,1,1))
+        XCTAssertTrue(RayTracingLocalLightSelection.select([bad,off]).isEmpty)
     }
 }

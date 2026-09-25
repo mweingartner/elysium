@@ -4,6 +4,15 @@ import XCTest
 @testable import ElysiumCore
 
 final class GraphicsModeTests: XCTestCase {
+    func testFreshProfileRequestsRayTracingWithGracefulUnsupportedFallback() {
+        let settings = Settings()
+        let requested = GraphicsMode(shader: settings.shader)
+        XCTAssertEqual(requested, .rayTraced)
+        XCTAssertEqual(requested.effective(rayTracingSupported: true), .rayTraced)
+        XCTAssertEqual(requested.effective(rayTracingSupported: false), .ultra)
+        XCTAssertEqual(settings.shader, "raytraced", "Capability fallback must not rewrite the saved request")
+    }
+
     func testSupportedCycleIncludesTrueRayTracedModeAndReturnsToOff() {
         var mode = GraphicsMode.standard
         for expected in [GraphicsMode.ultra, .rayTraced, .standard] {

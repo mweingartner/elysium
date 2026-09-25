@@ -214,6 +214,9 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
   and transmission; thicker weather-lit clouds and depth-dependent water optics
   must retain Faithful detail. First-person items and the HUD remain separate
   presentation passes, not camera-distorted world geometry.
+- Default policy: new settings profiles request Ray Traced, retaining Ultra fallback
+  when unsupported. Existing settings documents keep their saved choice; omitted
+  optional shader keys continue to mean Standard/OFF, so this is not a forced migration.
 - Acceptance scene: a fixed waterfront with alpha-cutout trees, an off-screen
   structure, and a moving creature. Reflections must retain off-screen geometry,
   react to block edits and movement, and distinguish shallow from deep water.
@@ -308,6 +311,54 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
   meshing observations check renderer continuity. Check readable daylight under
   trees and retain dark enclosed/night scenes. Revisit the budgets or prewarming
   only if normal movement still causes repeated fallbacks in that probe.
+
+### Underground emissive lighting — September 25, 2026
+
+- Observed problem: a visibly glowing furnace in the installed game left the room
+  almost black. Static ray lighting sampled one random source from a rotating global
+  list, so numerous distant lava faces displaced useful nearby samples. Clamped
+  importance weights and triangle-area-dependent lamp power compounded the loss.
+  The native cave probe also exposed missing linear-to-sRGB display encoding after
+  ray-traced tone mapping on the non-sRGB drawable. Correct it only for the linear
+  ray scene; preserve the legacy raster path and subsequent HUD/hand presentation.
+- Outcome: an enclosed stone room is readable but dim without a lamp; a lit furnace
+  or torch clearly illuminates its floor, walls, and occupants. Non-sun lights use
+  1.7× the original linear output and twice the finite reach; moonlight uses 1.7× output
+  only because a directional source has no finite radius. Sunlight is unchanged.
+- Chosen approach: a shared, presentation-only voxel irradiance field. The mesher
+  publishes separate immutable source/opacity metadata from actual block states;
+  the existing packed vertices, four-bit gameplay lighting, spawning rules, and
+  saves do not change. A bounded worker floods levels up to 30 through loaded air
+  and openings, never through opacity-15 solids. Source colors distinguish ordinary
+  flame, soul flame, lava, and other lamps. The existing optical response is applied
+  before scaling radiance by 1.7 (15% below the initial 2× candidate, per user feedback).
+  The field supplies stable diffuse emission in all
+  graphics modes; ray-traced surface emission, secondary transport, and shadowed
+  held/dynamic lights remain separate. A restrained dark-adaptation floor is an
+  intentional visibility aid, not a claim that unlit stone emits light.
+- Alternatives: multiplying exposure would brighten the sun and still leave
+  source sampling unstable. A spatial list of shadowed point lights would improve
+  ray tracing, but raster would need a second occlusion implementation. Reusing
+  gameplay's light bytes would alter simulation and cannot encode levels above 15.
+- Bounds/tradeoff: the field is a 128-cubed camera-local cache snapped to 16-block
+  coordinates, with a 16-block edge blend to the 1.7× existing cached illumination.
+  This guarantees a full 30-block source halo around the central player region;
+  distant geometry uses the lower-detail cache. Missing section snapshots are
+  not treated as empty air. One worker snapshot is in flight; stale source/wall
+  results are rejected, and each published GPU texture is immutable. This is
+  bounded voxel diffuse lighting, not an unbiased all-emitter path integral.
+- Acceptance: source on/off, doubled reach, solid divider versus doorway, chunk
+  seams, source removal/unload, stateful lamps, distant-emitter crowding, and native
+  underground captures in Ray Traced and raster modes. Revisit if native movement
+  reveals cache transition flashes, a lamp cannot illuminate the room, a wall
+  leaks, or sustained remeshing prevents the field from publishing.
+- Research: three primary references support the boundaries. Two distinguish emitted surface radiance from
+  illumination and explain the inefficiency of uniform selection among many
+  lights: [PBRT light sampling](https://www.pbr-book.org/4ed/Light_Sources/Light_Sampling)
+  and [area lights](https://pbr-book.org/4ed/Light_Sources/Area_Lights).
+  Apple's [sRGB render-target contract](https://developer.apple.com/documentation/metal/mtlpixelformat/bgra8unorm_srgb)
+  establishes the conversion supplied by an sRGB format, which our existing
+  BGRA8Unorm drawable does not perform automatically.
 
 ### Release test impact selection — September 25, 2026
 

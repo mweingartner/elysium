@@ -79,6 +79,7 @@ final class RayTracedWorldRenderer {
     private let mediaPipeline: MTLComputePipelineState
     private let textureEncoder: MTLArgumentEncoder
     private let whiteTexture: MTLTexture
+    private let emptyLocalLightTexture: MTLTexture
     private var sections: [SectionKey: Section] = [:]
     private var requiredSectionKeys: Set<SectionKey> = []
     private var entities: [String: Geometry] = [:]
@@ -91,6 +92,9 @@ final class RayTracedWorldRenderer {
     private static let retentionMargin: Double=32
     private var previousWorldIdentity: UInt64 = 0
     private var previousAtlasGeneration: UInt64 = 0
+    private var previousLocalLightGeneration: UInt64 = 0
+    private var previousHadLocalLight = false
+    private var previousHeldLight = SIMD4<Float>(repeating: 0)
     private var previousCamera = SIMD3<Double>(repeating: 0)
     private var previousViewProjection = matrix_identity_float4x4
     private var previousTransforms: [String: simd_float4x4] = [:]
@@ -152,6 +156,15 @@ final class RayTracedWorldRenderer {
             var pixel: UInt32=0xffffffff
             white.replace(region:MTLRegionMake2D(0,0,1,1),mipmapLevel:0,withBytes:&pixel,bytesPerRow:4)
             whiteTexture=white
+            let localDescriptor=MTLTextureDescriptor()
+            localDescriptor.textureType = .type3D; localDescriptor.pixelFormat = .rgba8Unorm
+            localDescriptor.width=1; localDescriptor.height=1; localDescriptor.depth=1
+            localDescriptor.usage = .shaderRead
+            guard let emptyLight=device.makeTexture(descriptor:localDescriptor) else { return nil }
+            var emptyPixel: UInt32=0
+            emptyLight.replace(region:MTLRegionMake3D(0,0,0,1,1,1),mipmapLevel:0,slice:0,
+                               withBytes:&emptyPixel,bytesPerRow:4,bytesPerImage:4)
+            emptyLocalLightTexture=emptyLight
             diagnostics.available=true; diagnostics.status="Preparing ray scene"
         } catch {
             print("[ray tracing] unavailable: \(error.localizedDescription)")
@@ -310,8 +323,20 @@ final class RayTracedWorldRenderer {
             guard simd_length_squared(n)>0.00001 else { return nil }
             out.primitives.append(.init(uv01:.init(v[i+6],v[i+7],v[i+15],v[i+16]),
                                         uv2Light:.init(v[i+24],v[i+25],0,0),
-                                        normalEmission:.init(simd_normalize(n),source.emission),
+                                        normalEmission:.init(simd_normalize(n),source.emission*RenderLocalLightPolicy.outputMultiplier),
                                         material:.init(0xffffff,0,9,0)))
+        }
+        if source.emission>0,!out.positions.isEmpty {
+            let low=out.positions.reduce(out.positions[0]) { simd_min($0,$1) }
+            let high=out.positions.reduce(out.positions[0]) { simd_max($0,$1) }
+            // A double-sided moving sprite gets one anchor on each side. Do not place a
+            // point inside its opaque texels or scale intensity with its tiny billboard area.
+            let center=(low+high)*0.5
+            let normal=simd_normalize(SIMD3<Float>(v[3],v[4],v[5]))
+            for sign in [Float(-1),Float(1)] {
+                out.emitters.append(.init(positionRadius:.init(center+normal*(0.08*sign),16),
+                    colorPower:.init(1,0.68,0.27,source.emission*RenderLocalLightPolicy.outputMultiplier)))
+            }
         }
         return out
     }
@@ -328,6 +353,13 @@ final class RayTracedWorldRenderer {
             return fail("Preparing ray tracing targets")
         }
         let submission=Submission(ledger:memoryLedger)
+        let localLightTexture=frame.localLightTexture.flatMap { texture -> MTLTexture? in
+            guard texture.textureType == .type3D,texture.width>0,
+                  texture.width==texture.height,texture.height==texture.depth,
+                  frame.localLightOrigin != nil else { return nil }
+            return texture
+        }
+        let hasLocalLight=localLightTexture != nil
         // Completion owns every buffer/AS used by this submission, including replacement/eviction cases.
         command.addCompletedHandler { [weak self,submission] completed in
             submission.finish()
@@ -473,24 +505,14 @@ final class RayTracedWorldRenderer {
             instanceUniforms.append(.init(transform:m,normalTransform:m.inverse.transpose,
                 previousFromCurrent:(previous ?? m)*m.inverse,tint:instance.tint,overlay:instance.overlay,
                 info:.init(UInt32(textureIndex),instance.dynamic ? 1:0,(!instance.dynamic || previous != nil) ? 1:0,0)))
-            for light in geometry.emitters {
+            for light in hasLocalLight && !instance.dynamic ? []:geometry.emitters {
                 var positioned=light; positioned.positionRadius = .init((m*SIMD4(light.positionRadius.x,light.positionRadius.y,light.positionRadius.z,1)).xyz,light.positionRadius.w)
                 lights.append(positioned)
             }
         }
-        // Rotating stratified sampling retains a nonzero probability for every source across
-        // frames, not just a camera-frustum list. Power accounts for each stratum's population.
-        if lights.count>RayTracingLimits.maximumLights {
-            let count=lights.count,stride=Double(count)/Double(RayTracingLimits.maximumLights)
-            lights=(0..<RayTracingLimits.maximumLights).map { i in
-                let start=Int(Double(i)*stride),end=Int(Double(i+1)*stride)
-                var hash=UInt32(truncatingIfNeeded:i) &* 0x9e3779b9 ^ (sampleIndex &* 0x85ebca6b)
-                hash ^= hash >> 16; hash &*= 0x7feb352d; hash ^= hash >> 15
-                let width=max(1,end-start)
-                var light=lights[min(count-1,start+Int(hash % UInt32(width)))]
-                light.colorPower.w *= Float(width); return light
-            }
-        }
+        // Real gameplay uses the complete local propagation field. The bounded no-volume
+        // fallback keeps local sources instead of a rotating lottery dominated by remote lava.
+        lights=RayTracingLocalLightSelection.select(lights)
         let argumentsEstimate=max(textureEncoder.encodedLength,
             device.heapBufferSizeAndAlign(length:textureEncoder.encodedLength,options:.storageModeShared).size)
         guard let descriptorBuffer=makeBuffer(descriptors,label:"RT instance descriptors",submission:submission),
@@ -519,7 +541,7 @@ final class RayTracedWorldRenderer {
         buildEncoder.build(accelerationStructure:scene,descriptor:sceneDescriptor,scratchBuffer:scratch,scratchBufferOffset:0)
         buildEncoder.endEncoding()
         submission.geometry.append(contentsOf:instances.map(\.geometry))
-        submission.resources.append(contentsOf:[atlas,whiteTexture])
+        submission.resources.append(contentsOf:[atlas,whiteTexture,localLightTexture ?? emptyLocalLightTexture])
         submission.resources.append(contentsOf:textures)
         submission.resources.append(contentsOf:[raw,motion,diffuseAlbedo,specularAlbedo,filtered]+colors+depths+normals)
         let dimension=frame.atmosphere.options.x,clock=frame.atmosphere.cameraTime.w
@@ -531,6 +553,8 @@ final class RayTracedWorldRenderer {
             sections[key]?.revision != revision
         } || selected.contains { previousParticipatingSections[$0.key] == nil && $0.revision>previousSourceRevision }
         let discontinuity = frame.worldIdentity != previousWorldIdentity || frame.atlasGeneration != previousAtlasGeneration
+            || frame.localLightGeneration != previousLocalLightGeneration || hasLocalLight != previousHadLocalLight
+            || simd_length(frame.heldLight-previousHeldLight)>0.01
             || participatingChanged || simd_length(frame.camera-previousCamera)>8
             || dimension != lastDimension || abs(clock-lastClock)>0.5
             || simd_length(frame.atmosphere.sunDaylight-previousSun)>0.04
@@ -548,6 +572,8 @@ final class RayTracedWorldRenderer {
             quality:.init(Float(samplesPerPixel),0,0,0),
             counts:.init(sampleIndex,UInt32(lights.count),UInt32(desiredWidth),UInt32(desiredHeight)),
             atmosphere:frame.atmosphere)
+        uniforms.localLight.originAndSize = .init(frame.localLightOrigin ?? .zero,Float(localLightTexture?.width ?? 1))
+        uniforms.localLight.params = .init(hasLocalLight ? 1:0,RenderLocalLightPolicy.outputMultiplier,0,0)
         guard let encoder=command.makeComputeCommandEncoder() else { return fail("Unable to encode ray tracing") }
         encoder.label="Path traced world: primary, visibility, indirect and dielectric rays"
         encoder.setComputePipelineState(pathPipeline)
@@ -558,6 +584,7 @@ final class RayTracedWorldRenderer {
         encoder.setTexture(atlas,index:0); encoder.setTexture(raw,index:1); encoder.setTexture(depths[current],index:2)
         encoder.setTexture(normals[current],index:3); encoder.setTexture(motion,index:4)
         encoder.setTexture(diffuseAlbedo,index:5); encoder.setTexture(specularAlbedo,index:6)
+        encoder.setTexture(localLightTexture ?? emptyLocalLightTexture,index:7)
         for structure in structures { encoder.useResource(structure,usage:.read) }
         for texture in textures { encoder.useResource(texture,usage:.read) }; encoder.useResource(whiteTexture,usage:.read)
         dispatch(encoder,pipeline:pathPipeline)
@@ -595,6 +622,8 @@ final class RayTracedWorldRenderer {
         historyFrames=min(24,historyFrames+1); sampleIndex &+= 1
         previousTransforms=transforms; previousCamera=frame.camera; previousViewProjection=frame.viewProjection
         previousWorldIdentity=frame.worldIdentity; previousAtlasGeneration=frame.atlasGeneration
+        previousLocalLightGeneration=frame.localLightGeneration; previousHadLocalLight=hasLocalLight
+        previousHeldLight=frame.heldLight
         previousParticipatingSections=participatingSections; previousSourceRevision=sectionsRevision
         hasPresentedCompleteScene=true
         previousSun=frame.atmosphere.sunDaylight; lastClock=clock; lastDimension=dimension

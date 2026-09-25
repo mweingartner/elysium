@@ -1,7 +1,7 @@
 // All MSL shader sources — + the sprite shader from
 // the frozen baseline. Same lighting math, same packed vertex formats, same pass structure.
 
-let GAME_MSL = ELYSIUM_ENVIRONMENT_MSL + """
+let GAME_MSL = ELYSIUM_ENVIRONMENT_MSL + renderLocalLightingShaderSource + """
 #include <metal_stdlib>
 using namespace metal;
 
@@ -113,6 +113,8 @@ struct ChunkVOut {
     float3 worldPos;
     float3 faceNormal [[flat]];
     float3 materialTint;
+    float3 localMaterial;
+    float3 localFallback;
     uint layer [[flat]];
     uint anim [[flat]];
 };
@@ -166,15 +168,17 @@ vertex ChunkVOut chunk_vs(ChunkVIn in [[stage_in]],
     float ambient0 = u.light.z;
     float skyBright = sky * dayLight;
     float ambient = max(ambient0, 0.03);
-    float lightLevel = max(max(skyBright, blk), ambient);
+    // Sun/ambient and artificial irradiance are separate: doubling a lamp must
+    // not double daylight. The render-only field supplies the extended reach.
+    float lightLevel = max(skyBright, ambient);
     float l = lightLevel / (4.0 - 3.0 * lightLevel);
     l = mix(l, 1.0, gamma * 0.35);
     float3 skyCol = mix(float3(0.45, 0.55, 0.9), float3(1.0), clamp(dayLight, 0.0, 1.0));
-    float3 blockCol = float3(1.0, 0.85, 0.62);
-    float sb = skyBright, bb = blk;
-    float3 lightColor = (sb + bb < 0.001) ? float3(1.0) : (skyCol * sb + blockCol * bb) / (sb + bb);
     float aoF = mix(0.42, 1.0, ao);
-    out.color = tint * FACE_SHADE[normal] * aoF * max(l, emissive) * mix(lightColor, float3(1.0), emissive);
+    float3 material = tint * FACE_SHADE[normal] * aoF;
+    out.color = material * max(l, emissive * elyNonSunLightOutput) * mix(skyCol, float3(1.0), emissive);
+    out.localMaterial = material * (1.0 - emissive);
+    out.localFallback = float3(1.0, 0.85, 0.62) * (elyNonSunLightOutput * blk / (4.0 - 3.0 * blk));
     out.skyAmt = sky * (1.0 - emissive);
     out.fogDist = length(rel.xz);
     out.uv = in.uv;
@@ -189,7 +193,9 @@ vertex ChunkVOut chunk_vs(ChunkVIn in [[stage_in]],
 
 static float4 shadeChunk(ChunkVOut in, constant ChunkShared& u,
                          texture2d_array<float> atlas, depth2d<float> shadowMap,
-                         sampler atlasSmp, sampler shadowSmp) {
+                         sampler atlasSmp, sampler shadowSmp,
+                         constant RenderLocalLightUniforms& localLight,
+                         texture3d<float> localTexture) {
     float time = u.misc.x;
     // misc.y = 1 when a resource pack frame-animates the fluids; the procedural
     // UV scroll/warp would double-animate the art, so damp it out
@@ -245,6 +251,8 @@ static float4 shadeChunk(ChunkVOut in, constant ChunkShared& u,
     }
 
     float3 col = tex.rgb * in.color * shadow;
+    float4 artificial = sampleRenderLocalLight(in.worldPos, in.faceNormal, localLight, localTexture);
+    col += tex.rgb * in.localMaterial * mix(in.localFallback, artificial.rgb, artificial.a);
 
     // Held torch: a moving point light at the player. Rendering is camera-relative so the
     // player sits at the origin and in.worldPos is already the offset from the eye — the
@@ -269,20 +277,24 @@ static float4 shadeChunk(ChunkVOut in, constant ChunkShared& u,
 
 fragment float4 chunk_fs(ChunkVOut in [[stage_in]],
                          constant ChunkShared& u [[buffer(1)]],
+                         constant RenderLocalLightUniforms& localLight [[buffer(7)]],
                          texture2d_array<float> atlas [[texture(0)]],
                          depth2d<float> shadowMap [[texture(1)]],
+                         texture3d<float> localTexture [[texture(7)]],
                          sampler atlasSmp [[sampler(0)]],
                          sampler shadowSmp [[sampler(1)]]) {
-    return shadeChunk(in, u, atlas, shadowMap, atlasSmp, shadowSmp);
+    return shadeChunk(in, u, atlas, shadowMap, atlasSmp, shadowSmp, localLight, localTexture);
 }
 
 // Color behind the nearest water interface belongs in its refraction snapshot. Front-facing
 // glass remains for the ordinary later translucent pass, so it is neither hidden nor doubled.
 fragment float4 translucent_refraction_fs(ChunkVOut in [[stage_in]],
                          constant ChunkShared& u [[buffer(1)]],
+                         constant RenderLocalLightUniforms& localLight [[buffer(7)]],
                          texture2d_array<float> atlas [[texture(0)]],
                          depth2d<float> shadowMap [[texture(1)]],
                          depth2d<float> waterSurfaceDepth [[texture(4)]],
+                         texture3d<float> localTexture [[texture(7)]],
                          sampler atlasSmp [[sampler(0)]],
                          sampler shadowSmp [[sampler(1)]]) {
     constexpr sampler depthSmp(coord::normalized, address::clamp_to_edge, filter::nearest);
@@ -291,7 +303,7 @@ fragment float4 translucent_refraction_fs(ChunkVOut in [[stage_in]],
     // About two depth32 ULPs near the far plane: a 1e-5 bias swallowed whole submerged
     // blocks at distance, after which the later water depth test also hid their glass.
     if (waterDepth >= 0.99999 || in.clip.z <= waterDepth + 1.2e-7) discard_fragment();
-    return shadeChunk(in, u, atlas, shadowMap, atlasSmp, shadowSmp);
+    return shadeChunk(in, u, atlas, shadowMap, atlasSmp, shadowSmp, localLight, localTexture);
 }
 
 static float3 environmentWorldPosition(float2 uv, float depth,
@@ -305,11 +317,13 @@ static float3 environmentWorldPosition(float2 uv, float depth,
 // neither shader samples the color/depth attachments to which this pass is currently writing.
 fragment float4 water_fs(ChunkVOut in [[stage_in]],
                          constant ChunkShared& u [[buffer(1)]],
+                         constant RenderLocalLightUniforms& localLight [[buffer(7)]],
                          constant EnvironmentRenderUniforms& e [[buffer(3)]],
                          texture2d_array<float> atlas [[texture(0)]],
                          depth2d<float> shadowMap [[texture(1)]],
                          texture2d<float> opaqueColor [[texture(2)]],
                          depth2d<float> opaqueDepth [[texture(3)]],
+                         texture3d<float> localTexture [[texture(7)]],
                          sampler atlasSmp [[sampler(0)]],
                          sampler shadowSmp [[sampler(1)]]) {
     constexpr sampler colorSmp(coord::normalized, address::clamp_to_edge, filter::linear);
@@ -371,6 +385,8 @@ fragment float4 water_fs(ChunkVOut in [[stage_in]],
                                             reflect(-view, normal), e.atmosphere, true);
     if (underwater) reflected *= transmission;
     float3 color = mix(transmitted, reflected, fresnel);
+    float4 artificial = sampleRenderLocalLight(in.worldPos, in.faceNormal, localLight, localTexture);
+    color += art.rgb * mix(in.localFallback, artificial.rgb, artificial.a) * 0.12;
 
     float shadow = 1.0;
     if (u.light.w > 0.5) {
@@ -523,6 +539,8 @@ struct EntityVOut {
     float light;
     float3 normal;
     float fogDist;
+    float3 worldPos;
+    float localFallback;
 };
 vertex EntityVOut entity_vs(EntityVIn in [[stage_in]], constant EntityU& u [[buffer(1)]]) {
     float4x4 part = u.parts[int(in.part + 0.5)];
@@ -531,24 +549,32 @@ vertex EntityVOut entity_vs(EntityVIn in [[stage_in]], constant EntityU& u [[buf
     out.clip = u.viewProj * wp;
     out.uv = in.uv;
     float sky = u.light.x / 15.0 * u.light.z;
-    float lightLevel = max(max(sky, u.light.y / 15.0), max(u.misc.x, 0.03));
+    float lightLevel = max(sky, max(u.misc.x, 0.03));
     float l = lightLevel / (4.0 - 3.0 * lightLevel);
     out.light = mix(l, 1.0, u.light.w * 0.35);
     float3x3 m3 = float3x3(u.model[0].xyz, u.model[1].xyz, u.model[2].xyz);
     float3x3 p3 = float3x3(part[0].xyz, part[1].xyz, part[2].xyz);
     out.normal = m3 * p3 * in.normal;
     out.fogDist = length(wp.xz);
+    out.worldPos = wp.xyz;
+    float block = clamp(u.light.y / 15.0, 0.0, 1.0);
+    out.localFallback = elyNonSunLightOutput * block / (4.0 - 3.0 * block);
     return out;
 }
 fragment float4 entity_fs(EntityVOut in [[stage_in]],
                           constant EntityU& u [[buffer(1)]],
+                          constant RenderLocalLightUniforms& localLight [[buffer(7)]],
                           texture2d<float> tex [[texture(0)]],
+                          texture3d<float> localTexture [[texture(7)]],
                           sampler smp [[sampler(0)]]) {
     float4 t = tex.sample(smp, in.uv);
     if (t.a < 0.1) discard_fragment();
     float3 n = normalize(in.normal);
     float shade = 0.62 + 0.38 * clamp(n.y * 0.7 + 0.55, 0.0, 1.0);
     float3 col = t.rgb * in.light * shade;
+    float4 artificial = sampleRenderLocalLight(in.worldPos, float3(0), localLight, localTexture);
+    col += t.rgb * shade * mix(float3(1.0, 0.85, 0.62) * in.localFallback,
+                              artificial.rgb, artificial.a);
     col = mix(col, u.overlay.rgb, u.overlay.a);
     float fog = clamp((in.fogDist - u.misc.z) / (u.misc.w - u.misc.z), 0.0, 1.0);
     col = mix(col, u.fogColor.rgb, fog * fog);
@@ -570,6 +596,8 @@ struct ParticleVOut {
     float2 uv;
     float4 color;
     uint layer [[flat]];
+    float3 worldPos;
+    float3 materialColor;
 };
 vertex ParticleVOut particle_vs(ParticleVIn in [[stage_in]], constant ParticleU& u [[buffer(2)]]) {
     float layer = floor(in.layerSize / 256.0);
@@ -584,14 +612,19 @@ vertex ParticleVOut particle_vs(ParticleVIn in [[stage_in]], constant ParticleU&
     l = l / (4.0 - 3.0 * l);
     out.color = float4(in.colorLight.rgb * max(l, 0.25), 1.0);
     out.layer = uint(layer);
+    out.worldPos = p;
+    out.materialColor = in.colorLight.rgb;
     return out;
 }
 fragment float4 particle_fs(ParticleVOut in [[stage_in]],
+                            constant RenderLocalLightUniforms& localLight [[buffer(7)]],
                             texture2d_array<float> atlas [[texture(0)]],
+                            texture3d<float> localTexture [[texture(7)]],
                             sampler smp [[sampler(0)]]) {
     float4 tex = atlas.sample(smp, in.uv, in.layer);
     if (tex.a < 0.3) discard_fragment();
-    return float4(tex.rgb * in.color.rgb, tex.a);
+    float4 artificial = sampleRenderLocalLight(in.worldPos, float3(0), localLight, localTexture);
+    return float4(tex.rgb * (in.color.rgb + in.materialColor * artificial.rgb * artificial.a), tex.a);
 }
 
 // ---------------------------------------------------------------------------
@@ -629,12 +662,18 @@ vertex SpriteVOut sprite_vs(uint vid [[vertex_id]], constant SpriteU& u [[buffer
 }
 fragment float4 sprite_fs(SpriteVOut in [[stage_in]],
                           constant SpriteU& u [[buffer(1)]],
+                          constant RenderLocalLightUniforms& localLight [[buffer(7)]],
                           texture2d<float> tex [[texture(0)]],
+                          texture3d<float> localTexture [[texture(7)]],
                           sampler smp [[sampler(0)]]) {
     float4 c = tex.sample(smp, in.uv);
     if (c.a < 0.1) discard_fragment();
     float fog = clamp((in.dist - u.light.y) / max(u.light.z - u.light.y, 0.001), 0.0, 1.0);
-    return float4(mix(c.rgb * u.light.x, u.fogColor.rgb, fog), c.a);
+    float4 artificial = sampleRenderLocalLight(u.center.xyz, float3(0), localLight, localTexture);
+    float fallback = elyNonSunLightOutput * u.light.w / (4.0 - 3.0 * u.light.w);
+    float3 illumination = float3(u.light.x) + (1.0 - u.right.w)
+        * mix(float3(1.0, 0.85, 0.62) * fallback, artificial.rgb, artificial.a);
+    return float4(mix(c.rgb * illumination, u.fogColor.rgb, fog), c.a);
 }
 
 // ---------------------------------------------------------------------------
@@ -919,6 +958,15 @@ fragment float4 composite_fs(FSVOut in [[stage_in]],
         c = mix(float3(lum), c, 1.12);             // gentle saturation lift
     } else {
         c = c / (1.0 + c * 0.12);
+    }
+    if (u.params2.w > 0.5) {
+        // The ray tracer works in linear radiance, but the drawable is BGRA8Unorm,
+        // not an sRGB render target. Encode exactly once here; otherwise ACES's dim
+        // output is displayed as encoded color and caves are crushed toward black.
+        // Raster art already follows the legacy display-space path. HUD and hands
+        // are drawn after this pass and must not receive this conversion again.
+        c = max(c, float3(0));
+        c = select(1.055 * pow(c, float3(1.0 / 2.4)) - 0.055, c * 12.92, c <= 0.0031308);
     }
     return float4(c, 1.0);
 }

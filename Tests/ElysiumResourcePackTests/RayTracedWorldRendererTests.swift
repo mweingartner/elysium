@@ -157,6 +157,100 @@ final class RayTracedWorldRendererTests: XCTestCase {
         return Image(width: width, height: height, depth: depths, radiance: colors)
     }
 
+    func testLocalLightVolumeBrightensCaveWithoutStaticProxyDoubleCountingAndResetsOnSourceEdit() throws {
+        let f=try fixture()
+        var view=frame()
+        view.atmosphere.options.x=1 // No sun/moon; isolates the local underground term.
+        view.atmosphere.fogColor = .zero
+        view.atmosphere.zenith = .zero; view.atmosphere.horizon = .zero
+        let originalWall=plane(distance:4,halfSize:8)
+        var wallWords=originalWall.data
+        for vertex in 0..<originalWall.count { wallWords[vertex*7+5] &= ~(UInt32(15)<<17) }
+        let wall=MeshLayer(data:wallWords,idx:originalWall.idx,count:originalWall.count)
+        f.renderer.uploadSection(key:section,minY:0,mesh:mesh(opaque:wall))
+        let descriptor=MTLTextureDescriptor()
+        descriptor.textureType = .type3D; descriptor.pixelFormat = .rgba8Unorm
+        descriptor.width=64; descriptor.height=64; descriptor.depth=64
+        descriptor.usage = .shaderRead
+        func volume(level: UInt8) throws -> MTLTexture {
+            let texture=try XCTUnwrap(f.device.makeTexture(descriptor:descriptor))
+            var pixels=[UInt8](repeating:255,count:64*64*64*4)
+            for i in 0..<(64*64*64) { pixels[i*4+3]=level }
+            pixels.withUnsafeBytes { texture.replace(region:MTLRegionMake3D(0,0,0,64,64,64),mipmapLevel:0,slice:0,
+                withBytes:$0.baseAddress!,bytesPerRow:64*4,bytesPerImage:64*64*4) }
+            return texture
+        }
+        view.localLightTexture=try volume(level:0)
+        view.localLightOrigin = .init(-32,-32,-32); view.localLightGeneration=1
+        let dark=try render(f,frame:view).radiance[16*32+16]
+        view.localLightTexture=try volume(level:192); view.localLightGeneration=2
+        let lit=try render(f,frame:view).radiance[16*32+16]
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,1,"Source edits must discard old dark illumination")
+        XCTAssertGreaterThan(lit.x,dark.x+0.5)
+        XCTAssertGreaterThan(dark.x,0.15,"The enclosed-cave visibility floor must survive the tone mapper's dark toe")
+        XCTAssertLessThan(dark.x,0.25,"The cave safety floor must not make unlit walls fullbright")
+        view.localLightOrigin = .init(-33,-32,-32)
+        _=try render(f,frame:view)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,2,"Camera-only volume recentering is not a light-source edit")
+
+        // Packed emitter power stays nonzero, but black source texels return no secondary
+        // radiance. This isolates duplicate static proxy lighting; an ordinary white emitter
+        // can legitimately brighten this wall through diffuse bounce rays even with a field.
+        var black=[UInt8](repeating:0,count:16*16*4)
+        for pixel in 0..<(16*16) { black[pixel*4+3]=255 }
+        black.withUnsafeBytes { f.atlas.replace(region:MTLRegionMake2D(0,0,16,16),mipmapLevel:0,slice:1,
+            withBytes:$0.baseAddress!,bytesPerRow:16*4,bytesPerImage:16*16*4) }
+        let emitterPlane=plane(distance:1,halfSize:1,tile:1)
+        var emitterWords=emitterPlane.data
+        for vertex in 0..<emitterPlane.count {
+            emitterWords[vertex*7]=(Float(bitPattern:emitterWords[vertex*7])+4.5).bitPattern
+            emitterWords[vertex*7+5] = 1 | (2<<12) | (1<<25)
+        }
+        let emitter=MeshLayer(data:emitterWords,idx:emitterPlane.idx,count:emitterPlane.count)
+        let extra=SectionKey(cx:0,sy:1,cz:0)
+        f.renderer.uploadSection(key:extra,minY:-16,mesh:mesh(opaque:emitter))
+        let after=try render(f,frame:view).radiance[16*32+16]
+        XCTAssertEqual(after.x,lit.x,accuracy:0.06,"The static field replaces, not duplicates, mesh proxy lighting")
+        view.localLightTexture=try volume(level:0); view.localLightGeneration=3
+        let off=try render(f,frame:view).radiance[16*32+16]
+        XCTAssertLessThan(off.x,lit.x*0.3)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,1)
+    }
+
+    func testFallbackLocalLightingIsNotDimmedByMoreThan512RemoteEmissiveFaces() throws {
+        let f=try fixture()
+        var view=frame()
+        view.atmosphere.options.x=1; view.atmosphere.fogColor = .zero
+        view.atmosphere.zenith = .zero; view.atmosphere.horizon = .zero
+        let wall=plane(distance:4,halfSize:8)
+        func source(x: Float) -> MeshLayer {
+            let base=plane(distance:1.5,halfSize:0.5)
+            var words=base.data
+            for vertex in 0..<base.count {
+                words[vertex*7]=(Float(bitPattern:words[vertex*7])+x).bitPattern
+                words[vertex*7+5] = (2<<12) | (1<<25)
+            }
+            return MeshLayer(data:words,idx:base.idx,count:base.count)
+        }
+        func scene(remote: Bool) -> MeshOutput {
+            let layers=[wall,source(x:2)] + (remote ? (0..<600).map { source(x:Float(100+$0)) }:[])
+            var data:[UInt32]=[],indices:[UInt32]=[]
+            for layer in layers {
+                let base=UInt32(data.count/7)
+                data+=layer.data; indices+=layer.idx.map { $0+base }
+            }
+            return mesh(opaque:MeshLayer(data:data,idx:indices,count:data.count/7))
+        }
+        f.renderer.uploadSection(key:section,minY:0,mesh:scene(remote:false))
+        let local=try render(f,frame:view).radiance[16*32+16]
+        XCTAssertGreaterThan(local.x,0.08,"A real shadow ray must carry nearby emitter light to the cave wall")
+        f.renderer.uploadSection(key:section,minY:0,mesh:scene(remote:true))
+        let crowded=try render(f,frame:view).radiance[16*32+16]
+        XCTAssertEqual(crowded.x,local.x,accuracy:0.035)
+        XCTAssertEqual(crowded.y,local.y,accuracy:0.035)
+        XCTAssertEqual(crowded.z,local.z,accuracy:0.035)
+    }
+
     func testPrimaryRaysHitPlaneAndMissToLitSky() throws {
         let f = try fixture(), view = frame()
         f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))

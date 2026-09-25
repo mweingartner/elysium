@@ -12,6 +12,10 @@ struct RayTracingFrame {
     var renderDistance: Float
     var gamma: Float = 0.5
     var heldLight: SIMD4<Float> = .zero
+    /// Immutable, occlusion-propagated local illumination; origin is camera-relative.
+    var localLightTexture: MTLTexture?
+    var localLightOrigin: SIMD3<Float>?
+    var localLightGeneration: UInt64 = 0
     var shadows = true
     var atlasGeneration: UInt64 = 0
     /// World identity changes even when the next world happens to use the same dimension.
@@ -70,6 +74,33 @@ struct RayTracingLight {
     var colorPower: SIMD4<Float>
 }
 
+/// Compatibility path for synthetic scenes and frames without a propagated light volume.
+/// Fixed camera-distance ordering keeps nearby sources when distant emitters exceed the cap;
+/// the production volume is spatially complete and never uses this approximate candidate cap.
+enum RayTracingLocalLightSelection {
+    static func select(_ lights: [RayTracingLight], limit: Int = RayTracingLimits.maximumLights) -> [RayTracingLight] {
+        guard limit > 0 else { return [] }
+        let valid=lights.filter { light in
+            let p=light.positionRadius, c=light.colorPower
+            return p.x.isFinite && p.y.isFinite && p.z.isFinite && p.w.isFinite && p.w>0
+                && c.x.isFinite && c.y.isFinite && c.z.isFinite && c.w.isFinite && c.w>0
+        }
+        guard valid.count>limit else { return valid }
+        return Array(valid.sorted { a,b in
+            let ad=a.positionRadius.x*a.positionRadius.x+a.positionRadius.y*a.positionRadius.y+a.positionRadius.z*a.positionRadius.z
+            let bd=b.positionRadius.x*b.positionRadius.x+b.positionRadius.y*b.positionRadius.y+b.positionRadius.z*b.positionRadius.z
+            if ad != bd { return ad<bd }
+            for channel in 0..<4 where a.positionRadius[channel] != b.positionRadius[channel] {
+                return a.positionRadius[channel]<b.positionRadius[channel]
+            }
+            for channel in 0..<4 where a.colorPower[channel] != b.colorPower[channel] {
+                return a.colorPower[channel]>b.colorPower[channel]
+            }
+            return false
+        }.prefix(limit))
+    }
+}
+
 struct RayTracingUniforms {
     var inverseViewProjection: simd_float4x4
     var viewProjection: simd_float4x4
@@ -77,6 +108,7 @@ struct RayTracingUniforms {
     var cameraDelta: SIMD4<Float>
     var params: SIMD4<Float> // far, gamma, history valid, shadows
     var heldLight: SIMD4<Float>
+    var localLight: RenderLocalLightUniforms = .init()
     var fogParameters: SIMD4<Float> // start, end, night vision, reserved
     var quality: SIMD4<Float> // samples per pixel, reserved
     var counts: SIMD4<UInt32> // frame, lights, width, height
@@ -149,7 +181,8 @@ enum RayTracingMeshDecoder {
                 let normals: [SIMD3<Float>] = [.init(0,-1,0), .init(0,1,0), .init(0,0,-1),
                                              .init(0,0,1), .init(-1,0,0), .init(1,0,0)]
                 let anim = (b >> 24) & 7
-                let emission: Float = ((a >> 25) & 1) == 1 ? (anim == 2 ? 5 : 2) : 0
+                let emission: Float = ((a >> 25) & 1) == 1
+                    ? (anim == 2 ? 5 : 2) * RenderLocalLightPolicy.outputMultiplier : 0
                 let v0 = uv(0), v1 = uv(1), v2 = uv(2)
                 guard [v0.x,v0.y,v1.x,v1.y,v2.x,v2.y].allSatisfy(\.isFinite) else { return nil }
                 var flags = anim == 1 ? UInt32(2) : layerFlags
@@ -169,8 +202,8 @@ enum RayTracingMeshDecoder {
                     let area = simd_length(simd_cross(p1-p0,p2-p0)) * 0.5
                     if area > 0.00001 {
                         let color: SIMD3<Float> = anim == 2 ? .init(1,0.29,0.04) : .init(1,0.68,0.27)
-                        output.emitters.append(.init(positionRadius: .init((p0+p1+p2)/3 + normals[Int(normalID)]*0.04,0.15),
-                            colorPower: .init(color, min(16,area*emission))))
+                        output.emitters.append(.init(positionRadius: .init((p0+p1+p2)/3 + normals[Int(normalID)]*0.04,30),
+                            colorPower: .init(color, min(8 * RenderLocalLightPolicy.outputMultiplier,area*emission))))
                     }
                 }
             }

@@ -1,5 +1,5 @@
 // Settings — JSON files under ~/Library/Application Support/Elysium/.
-// Field names, defaults, and render-distance clamps are frozen; keybinds
+// Field names and render-distance clamps remain compatible; keybinds
 // keep internal key-code strings so the app's NSEvent translation layer
 // and saved configs stay engine-compatible.
 
@@ -73,8 +73,10 @@ public struct Settings: Codable, Equatable {
     /// Explicit consent for reviewed bundled Faithful 64x add-ons. Nil/empty = none.
     public var bundledResourcePackAddOns: [String]? = nil
     /// nil = standard, "ultra" = raster Ultra, "raytraced" = capability-gated path tracing.
+    /// New profiles request ray tracing; unsupported devices use the renderer's Ultra fallback.
+    /// Existing settings documents retain their stored choice, including omitted-key Standard.
     /// Other strings remain reserved for shader-pack file names.
-    public var shader: String? = nil
+    public var shader: String? = "raytraced"
     /// Local Ollama model name used by the in-game /ai command. Empty = unset.
     public var aiOllamaModel = ""
     /// Version of the local RPG tutorial that the player finished or skipped.

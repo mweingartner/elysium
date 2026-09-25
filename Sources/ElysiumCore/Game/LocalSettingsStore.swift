@@ -556,6 +556,9 @@ public final class LocalSettingsStore {
             do {
                 let object = try decodeObject(data, document: .settings)
                 var value = Settings()
+                // Standard/OFF was encoded by omitting this optional key. Preserve that
+                // existing choice; only a genuinely new profile adopts the new RT default.
+                value.shader = nil
                 var diagnostics: [LocalSettingsDiagnostic] = []
                 decodeField("renderDistance", from: object, into: &value.renderDistance, diagnostics: &diagnostics)
                 decodeField("fov", from: object, into: &value.fov, diagnostics: &diagnostics)

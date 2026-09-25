@@ -130,7 +130,10 @@ final class RayTracingItemScene {
     }
 
     static func spriteAppearance(_ entity: Entity) -> (stack: ItemStack, size: Float, emission: Float)? {
-        if let item = entity as? ItemEntity { return (item.stack, 0.45, 0) }
+        if let item = entity as? ItemEntity {
+            let level=itemDef(item.stack.id).block.map { lightEmitOf(cell($0)) } ?? 0
+            return (item.stack,0.45,Float(level)/15)
+        }
         if entity.type == "xp_orb" { return (ItemStack(iid("experience_bottle"), 1), 0.3, 1) }
         guard SPRITE_TYPES.contains(entity.type) else { return nil }
         let names = [
@@ -213,7 +216,8 @@ final class RayTracingItemScene {
             let layer = definition.texFn?(metadata, face)
                 ?? (definition.tex.isEmpty ? 0 : Int(definition.tex[face]))
             let packed = UInt32((layer & 4095) | (face << 12) | (3 << 15) | (15 << 17)
-                                | ((flash ? 15 : 0) << 21) | ((flash ? 1 : 0) << 25))
+                                | ((flash ? 15 : definition.lightEmit) << 21)
+                                | ((flash || definition.emissiveRender || definition.lightEmit>0 ? 1 : 0) << 25))
             let base = UInt32(vertices.count / 7)
             for corner in 0..<4 {
                 vertices.append(contentsOf: (faces[face][corner] + uv[corner]).map(\.bitPattern))

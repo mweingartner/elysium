@@ -126,7 +126,10 @@ final class AtmosphereShaderTests: XCTestCase {
         let output = try XCTUnwrap(device.makeTexture(descriptor: outputDescriptor))
         let sampler = try XCTUnwrap(device.makeSamplerState(descriptor: MTLSamplerDescriptor()))
         let queue = try XCTUnwrap(device.makeCommandQueue())
-        func render(hdr: Float) throws -> UInt8 {
+        func render(hdr: Float, value: Float = 4) throws -> UInt8 {
+            let pixel: [Float] = [value, value, value, 1]
+            pixel.withUnsafeBytes { input.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
+                withBytes: $0.baseAddress!, bytesPerRow: 16) }
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = output
             pass.colorAttachments[0].loadAction = .clear
@@ -151,6 +154,15 @@ final class AtmosphereShaderTests: XCTestCase {
         let mapped = try render(hdr: 1)
         XCTAssertGreaterThan(mapped, 200)
         XCTAssertLessThan(mapped, 254, "Ray-traced highlights retain headroom without enabling SSAO")
+        let dark = try render(hdr: 1, value: 0.03)
+        let exposed = 0.03 * 0.92
+        let aces = (exposed * (2.51 * exposed + 0.03)) / (exposed * (2.43 * exposed + 0.59) + 0.14)
+        let encoded = 1.055 * pow(aces, 1.0 / 2.4) - 0.055
+        XCTAssertEqual(Double(dark), encoded * 255, accuracy: 1,
+            "Linear ray radiance needs display encoding on the actual BGRA8Unorm target")
+        XCTAssertGreaterThan(dark, 30, "Dim stone must not be crushed into near-black display values")
+        XCTAssertEqual(try render(hdr: 0, value: 0.03), 8,
+            "The legacy raster/UI display path must not be gamma-encoded twice")
     }
 
     func testHalfResolutionCloudUpsampleDoesNotBleedAcrossFullResolutionTerrainEdge() throws {
@@ -270,6 +282,7 @@ final class AtmosphereShaderTests: XCTestCase {
             out.worldPos = fixture.xyz;
             out.faceNormal = float3(0,-1,0); out.materialTint = float3(0.25,0.46,0.89);
             out.uv = float2(0.5); out.color = float3(1); out.fogDist = 0;
+            out.localMaterial = float3(0); out.localFallback = float3(0);
             out.shadowPos = float4(0); out.skyAmt = 1; out.layer = 0; out.anim = 1;
             return out;
         }
@@ -332,6 +345,17 @@ final class AtmosphereShaderTests: XCTestCase {
         encoder.setFragmentBytes(&chunk, length: MemoryLayout<ChunkSharedU>.stride, index: 1)
         encoder.setFragmentBytes(&environment, length: MemoryLayout<EnvironmentRenderUniforms>.stride, index: 3)
         encoder.setFragmentTexture(atlas, index: 0)
+        let localDescriptor = MTLTextureDescriptor()
+        localDescriptor.textureType = .type3D
+        localDescriptor.pixelFormat = .rgba8Unorm
+        localDescriptor.usage = .shaderRead
+        let emptyLocal = try XCTUnwrap(device.makeTexture(descriptor: localDescriptor))
+        var emptyPixel: UInt32 = 0
+        emptyLocal.replace(region: MTLRegionMake3D(0, 0, 0, 1, 1, 1), mipmapLevel: 0, slice: 0,
+                           withBytes: &emptyPixel, bytesPerRow: 4, bytesPerImage: 4)
+        var localUniforms = RenderLocalLightUniforms(originAndSize: SIMD4(0, 0, 0, 1), params: .zero)
+        encoder.setFragmentTexture(emptyLocal, index: 7)
+        encoder.setFragmentBytes(&localUniforms, length: MemoryLayout<RenderLocalLightUniforms>.stride, index: 7)
         encoder.setFragmentTexture(background, index: 2)
         for index in [1, 3, 4] { encoder.setFragmentTexture(depth, index: index) }
         let sampler = try XCTUnwrap(device.makeSamplerState(descriptor: MTLSamplerDescriptor()))

@@ -38,6 +38,7 @@ final class LocalSettingsStoreTests: XCTestCase {
         XCTAssertEqual(settings.renderDistance, Settings().renderDistance)
         XCTAssertEqual(settings.rpgTutorialVersion, 0)
         XCTAssertTrue(settings.showMinimap)
+        XCTAssertEqual(settings.shader, "raytraced")
 
         let keybinds = try value(store.loadKeybinds())
         XCTAssertEqual(keybinds.count, 27)
@@ -55,6 +56,41 @@ final class LocalSettingsStoreTests: XCTestCase {
             guard case .failure = store.loadSettings() else { return XCTFail("\(name) should fail") }
             XCTAssertEqual(try Data(contentsOf: store.directoryURL.appendingPathComponent("settings.json")), data)
         }
+    }
+
+    func testExistingGraphicsChoicesSurviveNewDefaultWithoutRewritingDocument() throws {
+        let cases: [(String, String?)] = [
+            (#"{"fov":91}"#, nil),
+            (#"{"shader":null,"fov":91}"#, nil),
+            (#"{"shader":"ultra","fov":91}"#, "ultra"),
+            (#"{"shader":"raytraced","fov":91}"#, "raytraced"),
+            (#"{"shader":"legacy-pack.zip","fov":91}"#, "legacy-pack.zip"),
+        ]
+        for (json, expected) in cases {
+            let store = try makeStore()
+            let bytes = Data(json.utf8)
+            try write(bytes, named: "settings.json", to: store)
+            let settings = try value(store.loadSettings())
+            XCTAssertEqual(settings.shader, expected, json)
+            XCTAssertEqual(settings.fov, 91)
+            XCTAssertTrue(store.lastDiagnostics.isEmpty)
+            XCTAssertEqual(try Data(contentsOf: store.directoryURL.appendingPathComponent("settings.json")), bytes)
+        }
+    }
+
+    func testNewRayTracingDefaultAndSubsequentStandardSelectionSurviveRestart() throws {
+        let store = try makeStore()
+        var settings = try value(store.loadSettings())
+        XCTAssertEqual(settings.shader, "raytraced")
+        try value(store.persistSettings(settings))
+        XCTAssertEqual(try value(LocalSettingsStore(directoryURL: store.directoryURL).loadSettings()).shader,
+                       "raytraced")
+        settings.shader = nil
+        try value(store.persistSettings(settings))
+        let bytes = try Data(contentsOf: store.directoryURL.appendingPathComponent("settings.json"))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertNil(object["shader"], "The established Standard/OFF representation remains unchanged")
+        XCTAssertNil(try value(LocalSettingsStore(directoryURL: store.directoryURL).loadSettings()).shader)
     }
 
     func testSettingsExactByteCapAndCapPlusOne() throws {

@@ -925,8 +925,9 @@ problem. Use **Reduce Motion** and **Reduced Flashes** when camera movement or e
 
 Open **Options... → Video → Shaders** to cycle between **OFF** (Standard), **ULTRA**,
 and **RAY TRACED**. Ray Traced appears only when the selected Metal device supports
-the required ray-tracing capability. Your existing graphics choice is preserved;
-this update does not enable the more demanding mode automatically.
+the required ray-tracing capability. New settings profiles default to Ray Traced,
+with Ultra fallback on unsupported hardware. Your existing graphics choice is
+preserved, including Standard/OFF; installing the update does not override it.
 
 Ray Traced follows actual loaded world geometry, including objects outside the
 camera view, for lighting, shadows, indirect illumination, reflections, and
@@ -940,8 +941,13 @@ resolution, GPU frame time, and ray-memory usage/budget. Ray tracing is substant
 Standard; lower render distance or choose Ultra when necessary.
 
 Leaf canopies let a portion of daylight through, so wooded areas remain shaded
-but navigable. Denser leaf layers block more light; solid roofs and caves remain
-dark. Lighting changes smoothly through dawn and dusk rather than switching
+but navigable. Denser leaf layers block more light; solid roofs block sunlight.
+Underground areas remain dim but readable in Ray Traced mode. Torches, lit furnaces,
+lanterns, lava, and other artificial lights now have 1.7× the original output and twice the reach;
+solid walls stop their placed light, while openings let it spread. Carried lights
+are stronger too. Soul flames retain their blue light. These are visual changes:
+monster spawning and other gameplay light rules are unchanged.
+Lighting changes smoothly through dawn and dusk rather than switching
 between separate canopy day/night brightness values.
 
 On supported Macs running macOS 26 or newer, MetalFX reduces ray noise while

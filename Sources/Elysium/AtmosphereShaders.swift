@@ -212,7 +212,7 @@ static float3 elyAtmosphereRadianceForRay(float3 worldOrigin, float3 rayDirectio
         float disc = smoothstep(cos(0.010), cos(0.006), dot(d, sun));
         sky += elySunRadiance(e) * (disc * 10.0 * sunVisible * (1.0 - rain * 0.96));
         float moon = smoothstep(cos(0.012), cos(0.009), dot(d, -sun));
-        sky += float3(0.30, 0.34, 0.42) * moon * smoothstep(-0.02, 0.06, -sun.y) * (1.0 - rain);
+        sky += float3(0.51, 0.578, 0.714) * moon * smoothstep(-0.02, 0.06, -sun.y) * (1.0 - rain);
         float3 stars = d * 580.0;
         float starHash = elyAtmosphereHashValue(int3(floor(stars)));
         float star = step(0.998, starHash) * (1.0 - smoothstep(0.07, 0.22, length(fract(stars) - 0.5)));

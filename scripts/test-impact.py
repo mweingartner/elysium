@@ -16,16 +16,30 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
 RENDERER = (
     r"ElysiumResourcePackTests\.(?:RayTracing[^/]*|RayTracedWorldRendererTests|"
-    r"WorldRendererIntegrationTests|AtmosphereShaderTests|GraphicsModeTests|WaterMeshPartitionTests)/"
+    r"RenderLocalLightingTests|WorldRendererIntegrationTests|AtmosphereShaderTests|GraphicsModeTests|WaterMeshPartitionTests)/"
 )
 RENDERER_REQUIRED = (
     "RayTracingCloudOcclusionTests", "RayTracingCanopyLightingTests", "RayTracingDenoiserTests",
     "RayTracingMemoryBudgetTests", "RayTracingMemoryPresentationTests", "RayTracingMeshTests",
     "RayTracingItemSceneTests", "RayTracingDynamicSceneTests", "RayTracedWorldRendererTests",
     "WorldRendererIntegrationTests", "AtmosphereShaderTests", "GraphicsModeTests", "WaterMeshPartitionTests",
+    "RenderLocalLightingTests",
+)
+CORE_MESH_REQUIRED = (
+    "MeshGenerationTests", "MesherFixtureTests", "MeshLightingMetadataTests",
+    "PistonAndAnvilTextureMappingTests", "DoorTextureMappingTests", "SignTextureMappingTests",
+    "FenceGateRenderingTests", "StatefulOpenableTextureMappingTests", "DirectionalFunctionalTextureTests",
+)
+SETTINGS_REQUIRED = (
+    "SettingsTests", "LocalSettingsStoreTests", "GameCoreLocalSettingsIntegrationTests",
+    "CreatureRespawnSettingsTests",
 )
 GROUPS = {
     "renderer": [RENDERER],
+    "core-mesh": [r"ElysiumCoreTests\." + name + "/" for name in CORE_MESH_REQUIRED],
+    "entity-presentation": [r"ElysiumCoreTests\.EntityFacingSourceTests/"],
+    "renderer-source": [r"ElysiumCoreTests\.BrandAttributionSourceTests/"],
+    "local-settings": [r"ElysiumCoreTests\." + name + "/" for name in SETTINGS_REQUIRED],
     "app-shell": [r"ElysiumResourcePackTests\.", r"ElysiumDebugProtocolTests\.",
                   r"ElysiumCoreTests\.AutomatedReleaseSourceTests/"],
     "release-workflow": [r"ElysiumCoreTests\.AutomatedReleaseSourceTests/"],
@@ -38,7 +52,28 @@ WORKFLOW = {
 RENDER_FILES = {"RayTracedWorldRenderer.swift", "AtmosphereShaders.swift",
                 "GraphicsMode.swift", "WaterMeshPartition.swift"}
 RENDER_TESTS = {"RayTracedWorldRendererTests.swift", "WorldRendererIntegrationTests.swift",
-                "AtmosphereShaderTests.swift", "GraphicsModeTests.swift", "WaterMeshPartitionTests.swift"}
+                "RenderLocalLightingTests.swift", "AtmosphereShaderTests.swift", "GraphicsModeTests.swift", "WaterMeshPartitionTests.swift"}
+# Explicit dependency closures: Mesher adds render-only metadata, while the shared raster
+# shader/pass graph also feeds entities, sprites and the title. Do not generalize this to
+# Core's simulation light engine, block registry, persistence, or arbitrary Render files.
+REVIEWED_RENDER_PATHS = {
+    "Sources/ElysiumCore/Render/Mesher.swift": {"renderer", "core-mesh"},
+    "Sources/Elysium/RenderLocalLighting.swift": {"renderer", "core-mesh"},
+    "Sources/Elysium/WorldRenderer.swift": {"renderer", "core-mesh", "entity-presentation", "renderer-source"},
+    "Sources/Elysium/Shaders.swift": {"renderer", "core-mesh", "entity-presentation", "renderer-source"},
+    "Sources/Elysium/EntityRendererM.swift": {"renderer", "entity-presentation"},
+    **{"Tests/ElysiumCoreTests/" + name + ".swift": {"renderer", "core-mesh"}
+       for name in CORE_MESH_REQUIRED},
+    "Tests/ElysiumCoreTests/EntityFacingSourceTests.swift": {"renderer", "entity-presentation"},
+    "Tests/ElysiumCoreTests/BrandAttributionSourceTests.swift": {"renderer-source"},
+}
+# Graphics-default compatibility spans tolerant decoding, durable publication and the
+# renderer's supported-mode fallback. Neighboring Game/storage sources remain unmapped.
+REVIEWED_SETTINGS_PATHS = {
+    "Sources/ElysiumCore/Game/Settings.swift",
+    "Sources/ElysiumCore/Game/LocalSettingsStore.swift",
+    *{"Tests/ElysiumCoreTests/" + name + ".swift" for name in SETTINGS_REQUIRED},
+}
 SHELL_FILES = {"Sources/Elysium/main.swift", "Sources/Elysium/HudM.swift",
                "Sources/Elysium/DebugControlRuntime.swift"}
 DOCS = {"README.md", "AGENTS.md", "CONTRIBUTING.md", "ARCHITECTURE.md", "SECURITY.md", "PLAYER_GUIDE.md"}
@@ -54,6 +89,10 @@ def classify(paths):
             groups.add("release-workflow")
         elif path in SHELL_FILES:
             groups.add("app-shell")
+        elif path in REVIEWED_RENDER_PATHS:
+            groups.update(REVIEWED_RENDER_PATHS[path])
+        elif path in REVIEWED_SETTINGS_PATHS:
+            groups.update({"local-settings", "renderer"})
         elif parent == "Sources/Elysium" and (name in RENDER_FILES or
                 (name.startswith("RayTracing") and name.endswith(".swift"))):
             groups.add("renderer")
