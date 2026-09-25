@@ -10,6 +10,8 @@ struct RTPrimitive {
     float4 uv2Light;
     float4 normalEmission;
     uint4 material;
+    float4 textureGradientU;
+    float4 textureGradientV;
 };
 struct RTInstance {
     float4x4 transform;
@@ -144,7 +146,7 @@ static RTFilteredHit rtFilteredIntersection(ray r,instance_acceleration_structur
                             device const RTInstance* instances,constant RTTextures& textures,
                             texture2d_array<float> atlas,
                             intersection_function_table<triangle_data,instancing> functions,uint rayMask,
-                            bool sampleSurfaceColor=true) {
+                            bool sampleSurfaceColor=true,float3 pixelRayX=float3(0),float3 pixelRayY=float3(0)) {
     RTFilteredHit result; result.hit=false;
     intersector<triangle_data,instancing> trace;
     trace.assume_geometry_type(geometry_type::triangle);
@@ -170,15 +172,38 @@ static RTFilteredHit rtFilteredIntersection(ray r,instance_acceleration_structur
     result.texel=(p.material.z&8u)!=0
         ? textures.entities[min(instance.info.x,511u)].sample(nearest,uv)
         : atlas.sample(nearest,uv,p.material.y);
+    // Camera-ray differentials intersect the accepted hit's plane analytically: no
+    // extra scene rays. Filter only subpixel material detail, after exact alpha traversal.
+    // The inverse-transpose also transforms UV covectors under scaled instances.
+    if((p.material.z&8u)==0 && atlas.get_num_mip_levels()>1 && any(pixelRayX!=float3(0))) {
+        float3 normal=normalize((instance.normalTransform*float4(p.normalEmission.xyz,0)).xyz);
+        float3 position=r.origin+r.direction*hit.distance;
+        float plane=dot(normal,position), dx=dot(normal,pixelRayX), dy=dot(normal,pixelRayY);
+        if(abs(dx)>1e-6 && abs(dy)>1e-6) {
+            float3 dpdx=pixelRayX*(plane/dx)-position, dpdy=pixelRayY*(plane/dy)-position;
+            float3 gu=(instance.normalTransform*p.textureGradientU).xyz;
+            float3 gv=(instance.normalTransform*p.textureGradientV).xyz;
+            float2 duvdx(dot(gu,dpdx),dot(gv,dpdx)), duvdy(dot(gu,dpdy),dot(gv,dpdy));
+            float2 size(atlas.get_width(),atlas.get_height());
+            float footprint=max(length(duvdx*size),length(duvdy*size));
+            if(isfinite(footprint) && footprint>1) {
+                constexpr sampler minified(coord::normalized,address::repeat,
+                    min_filter::linear,mag_filter::nearest,mip_filter::linear,max_anisotropy(4));
+                float3 filtered=atlas.sample(minified,uv,p.material.y,gradient2d(duvdx,duvdy)).rgb;
+                result.texel.rgb=mix(result.texel.rgb,filtered,smoothstep(1.0,2.0,footprint));
+            }
+        }
+    }
     return result;
 }
 
 static RTSurface rtIntersect(ray r, instance_acceleration_structure scene,
                             device const RTInstance* instances, constant RTTextures& textures,
                             texture2d_array<float> atlas,
-                            intersection_function_table<triangle_data,instancing> functions,uint rayMask=0xff) {
+                            intersection_function_table<triangle_data,instancing> functions,uint rayMask=0xff,
+                            float3 pixelRayX=float3(0),float3 pixelRayY=float3(0)) {
     RTSurface result; result.hit=false;
-    RTFilteredHit hit=rtFilteredIntersection(r,scene,instances,textures,atlas,functions,rayMask);
+    RTFilteredHit hit=rtFilteredIntersection(r,scene,instances,textures,atlas,functions,rayMask,true,pixelRayX,pixelRayY);
     if(!hit.hit) return result;
     const device RTPrimitive& p=*hit.primitive;
     const device RTInstance& instance=instances[hit.instance];
@@ -281,6 +306,10 @@ static RTPathResult rtTracePixel(float2 uv,uint2 pixel,uint noiseWidth,
                          texture2d_array<float> atlas,
                          texture3d<float,access::sample> localLightTexture,bool allowFactor) {
     float4 farPoint=u.inverseViewProjection*float4(uv.x*2-1,1-uv.y*2,1,1);
+    float2 pixelStep=2.0/float2(noiseWidth,float(noiseWidth)*float(u.counts.w)/float(u.counts.z));
+    float4 farX=farPoint+u.inverseViewProjection*float4(pixelStep.x,0,0,0);
+    float4 farY=farPoint+u.inverseViewProjection*float4(0,-pixelStep.y,0,0);
+    float3 pixelRayX=farX.xyz/farX.w,pixelRayY=farY.xyz/farY.w;
     float3 accumulated(0);
     float guideDepth=1; float4 guideNormal(0),guideMotion(0),guideDiffuse(1,1,1,1),guideSpecular(0);
     bool primarySolarValid=false;
@@ -309,7 +338,8 @@ static RTPathResult rtTracePixel(float2 uv,uint2 pixel,uint noiseWidth,
         RTSurface s;
         if(bounce==0 && sample>0) s=primarySurface;
         else {
-            s=rtIntersect(r,scene,instances,textures,atlas,functions,primaryPending?0x01:0xff);
+            s=rtIntersect(r,scene,instances,textures,atlas,functions,primaryPending?0x01:0xff,
+                          bounce==0?pixelRayX:float3(0),bounce==0?pixelRayY:float3(0));
             if(bounce==0) primarySurface=s;
         }
         // All samples must share one material basis. A stochastic foreground body can
@@ -580,13 +610,16 @@ kernel void rt_surface_resolve(instance_acceleration_structure scene [[buffer(0)
     if(any(pixel>=fullSize)) return;
     float2 uv=(float2(pixel)+0.5)/float2(fullSize);
     float4 farPoint=u.inverseViewProjection*float4(uv.x*2-1,1-uv.y*2,1,1);
+    float4 farX=farPoint+u.inverseViewProjection*float4(2.0/float(fullSize.x),0,0,0);
+    float4 farY=farPoint+u.inverseViewProjection*float4(0,-2.0/float(fullSize.y),0,0);
+    float3 pixelRayX=farX.xyz/farX.w,pixelRayY=farY.xyz/farY.w;
     ray primary; primary.origin=float3(0); primary.direction=normalize(farPoint.xyz/farPoint.w);
     primary.min_distance=0.005; primary.max_distance=u.params.x;
     uint seed=rtHash(rtHash(pixel.x+pixel.y*fullSize.x)^rtHash(u.counts.x*4u+0x9e3779b9u));
     RTSurface surface; surface.hit=false;
     bool encounteredFade=false;
     for(uint event=0;event<7;++event) {
-        RTSurface candidate=rtIntersect(primary,scene,instances,textures,atlas,functions,0x01);
+        RTSurface candidate=rtIntersect(primary,scene,instances,textures,atlas,functions,0x01,pixelRayX,pixelRayY);
         if(!candidate.hit) break;
         if((candidate.flags&8u)!=0 && instances[candidate.instance].tint.a<1.0) {
             encounteredFade=true;

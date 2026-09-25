@@ -300,13 +300,14 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
   (0.349, required >0.45), and native captures showed changing leaf openings.
   It was rejected, not accepted by weakening the test.
 - Selected design: separate primary surface detail from expensive lighting.
-  Stable full-resolution primary rays resolve authored texels, alpha coverage,
+  Stable full-resolution primary rays resolve nearby, resolvable authored texels, alpha coverage,
   depth, and emission at the existing 1440 × 900 aspect-preserving surface cap.
   The native MetalFX path traces and denoises incident diffuse lighting at an
   aspect-preserving 640 × 400 cap. Only the first ordinary diffuse response is
   whitened before transport; secondary materials retain their actual color.
-  Geometry-, normal-, and material-aware reconstruction restores exact primary
-  albedo without dividing black texels. Unmatched diffuse samples blend into
+  Geometry-, normal-, and material-aware reconstruction restores primary
+  albedo without dividing black texels; nearby resolvable texels remain exact.
+  Unmatched diffuse samples blend into
   exact direct visibility plus the existing cached cave lighting. Water, glass,
   metals, submerged views, and fading bodies retain radiance transport, with
   full-path fallback when no compatible donor exists. Water/glass basis tags and
@@ -323,6 +324,45 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
   Sparse counter collection is optional, completion-owned, and never a condition
   for rendering. Revisit if measured throughput or native image quality fails;
   unit-test success alone does not establish either.
+
+### Outdoor material minification — September 25, 2026
+
+- Outcome: reduce outdoor grass/dirt speckling and motion shimmer while retaining
+  ray-cast visibility, nearby Faithful texels, and the existing frame-rate target.
+  Scene-matched native captures show reduced grass/dirt speckle while preserving
+  nearby detail. Stationary, camera-motion, and running-simulation samples retained
+  approximately 80 FPS; release evidence is recorded in the verification record.
+- Cause established in code: the atlas had only mip zero and accepted material
+  colors used nearest sampling without a pixel footprint. The native surface
+  pass restored that aliased albedo after lighting denoising. More transport
+  samples reuse the same primary hit and cannot integrate subpixel texture detail;
+  stronger lighting denoising cannot filter albedo restored afterward.
+- Selected design: decoded triangles retain UV gradients. Two neighboring camera
+  rays intersect the accepted surface plane analytically, without extra scene
+  intersections, to obtain explicit texture gradients. Primary atlas color blends
+  into mip filtering with up to 4x anisotropy when its texels become subpixel;
+  nearest sampling preserves resolvable nearby pixels. UV density and incidence
+  determine the footprint, so a distance-only LOD is insufficient. An isotropic
+  footprint is simpler but risks excess blur on grazing ground.
+- Atlas mips average linear light with alpha coverage and keep mip-zero bytes
+  unchanged. Odd sizes retain their complete image area. Animated tiles rebuild
+  only changed slice chains and upload immutable staged buffers before rendering;
+  raster sampler choices remain unchanged. Mips add approximately one third to
+  atlas storage. UV gradients add 32 bytes per primitive (64 to 96); existing
+  stride-based admission and actual Metal allocation accounting cover the increase.
+  At the tested 6.72 million primitives, the added gradient payload is about 205 MiB.
+- Research: three primary sources support texture-footprint filtering:
+  [PBRT texture sampling and ray differentials](https://www.pbr-book.org/4ed/Textures_and_Materials/Texture_Sampling_and_Antialiasing),
+  [JCGT's ray-cone and anisotropic LOD study](https://www.jcgt.org/published/0010/01/01/paper-lowres.pdf),
+  and [Apple's mipmap sampler guidance](https://developer.apple.com/documentation/metal/adding-mipmap-filtering-to-samplers).
+  Their performance results are not Elysium measurements.
+- Evidence/limits: the final reviewed scope passes 156 tests, including actual
+  GPU subpixel-checkerboard averaging, subpixel camera motion, oblique unequal UV
+  density, nearby three-pixel detail/black texels, exact cutout coverage, and
+  animated mip uploads. Alpha acceptance/silhouettes, entity textures, and
+  secondary-ray material sampling remain nearest; this is not general geometry
+  antialiasing or a fix for all residual transport noise. Revisit if native motion
+  retains grain, grazing surfaces blur, or measured GPU time/memory regresses.
 
 ### Ray-tracing memory policy correction — September 25, 2026
 

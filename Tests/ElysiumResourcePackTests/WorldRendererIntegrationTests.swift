@@ -9,6 +9,77 @@ import XCTest
 /// sampling/upsampling, behind-water translucency, refraction copies, water, bloom and composite.
 @MainActor
 final class WorldRendererIntegrationTests: XCTestCase {
+    func testMaterialMipmapsPreserveBaseAndAverageLinearLightWithCoverage() throws {
+        let checker: [UInt8] = [0,0,0,255, 255,255,255,255, 255,255,255,255, 0,0,0,255]
+        let levels = try XCTUnwrap(WorldAtlasMipChain.make(pixels: checker, size: 2))
+        XCTAssertEqual(levels.map(\.size), [2,1])
+        XCTAssertEqual(levels[0].pixels, checker, "Magnified authored pixels must remain byte-identical")
+        let halfLight = UInt8((pow(0.5, 1 / 2.2) * 255).rounded())
+        XCTAssertEqual(levels[1].pixels, [halfLight,halfLight,halfLight,255],
+                       "Minification averages radiance, not display-encoded darkness")
+
+        let cutout: [UInt8] = [255,0,0,255, 0,0,0,0, 0,0,0,0, 0,0,0,0]
+        let leaf = try XCTUnwrap(WorldAtlasMipChain.make(pixels: cutout, size: 2))
+        XCTAssertEqual(leaf[1].pixels, [255,0,0,64],
+                       "Transparent black cannot darken the surviving material color")
+
+        var odd = [UInt8](repeating: 0, count: 3 * 3 * 4)
+        for y in 0..<3 { for x in 0..<3 {
+            let i = (y * 3 + x) * 4
+            odd[i] = x == 2 ? 255:0; odd[i + 3] = 255
+        }}
+        let oddMip = try XCTUnwrap(WorldAtlasMipChain.make(pixels: odd, size: 3)).last!
+        XCTAssertEqual(oddMip.pixels[0], UInt8((pow(1.0 / 3, 1 / 2.2) * 255).rounded()),
+                       "Odd-sized pack textures must retain their final row and column")
+        XCTAssertNil(WorldAtlasMipChain.make(pixels: [], size: 0))
+        XCTAssertNil(WorldAtlasMipChain.make(pixels: [], size: 129))
+        XCTAssertNil(WorldAtlasMipChain.make(pixels: checker, size: 3))
+    }
+
+    func testActualAtlasAnimationUploadsEveryMipWithoutChangingOtherSlices() throws {
+        registerAllBlocks()
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let renderer = WorldRenderer(device: device)
+        let red = Array(repeating: [UInt8](arrayLiteral: 255,0,0,255), count: 16).flatMap { $0 }
+        let green = Array(repeating: [UInt8](arrayLiteral: 0,255,0,255), count: 16).flatMap { $0 }
+        var blue = [UInt8](repeating: 0, count: 4 * 4 * 4)
+        for i in 0..<16 where (i + i / 4).isMultiple(of: 2) {
+            blue[i * 4 + 2] = 255; blue[i * 4 + 3] = 255
+        }
+        let animation = TileAnimation(slice: 0, frames: [red,blue], order: [(0,1),(1,100)], interpolate: false)
+        let pack = PackAtlasResult(res: 4, slices: [red,green],
+            icon16: BuiltAtlas(count: 0, pixels: [], missing: []), animations: [animation],
+            itemIcons: [:], heldItemIcons: [:], tintGate: [1,1], textureGate: [1,1],
+            fluidAnimated: false, appliedTiles: 2, appliedItems: 0)
+        let staged = try XCTUnwrap(renderer.stagePackAtlas(pack))
+        XCTAssertEqual(staged.texture.mipmapLevelCount, 3)
+        renderer.installStagedWorldAtlas(staged)
+        renderer.tickTileAnimations(dtMs: 50)
+        let command = try XCTUnwrap(renderer.queue.makeCommandBuffer())
+        renderer.flushAtlasUploads(command)
+        if staged.texture.storageMode == .managed {
+            let blit = try XCTUnwrap(command.makeBlitCommandEncoder())
+            blit.synchronize(resource: staged.texture); blit.endEncoding()
+        }
+        command.commit(); command.waitUntilCompleted()
+        XCTAssertEqual(command.status, .completed, command.error?.localizedDescription ?? "")
+        for level in 0..<3 {
+            let size = 4 >> level
+            for slice in 0..<2 {
+                var bytes = [UInt8](repeating: 0, count: size * size * 4)
+                bytes.withUnsafeMutableBytes {
+                    staged.texture.getBytes($0.baseAddress!, bytesPerRow: size * 4, bytesPerImage: size * size * 4,
+                        from: MTLRegionMake2D(0,0,size,size), mipmapLevel: level, slice: slice)
+                }
+                let expectedPixel: [UInt8] = slice == 0 ? [0,0,255,128]:[0,255,0,255]
+                let expected = slice == 0 && level == 0 ? blue
+                    : Array(repeating: expectedPixel, count: size * size).flatMap { $0 }
+                XCTAssertEqual(bytes, expected,
+                    "GPU-ordered animation must update mip \(level) only in its own slice")
+            }
+        }
+    }
+
     func testHeldLightUsesPackedBlockStateAndTunedOutputWithDoubledRadius() {
         registerAllBlocks(); registerAllItems()
         let torch = WorldRenderer.heldLightVector(mainHand: ItemStack(iid("torch"), 1), offHand: nil)

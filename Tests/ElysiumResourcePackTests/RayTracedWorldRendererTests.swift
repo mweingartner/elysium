@@ -36,7 +36,8 @@ final class RayTracedWorldRendererTests: XCTestCase {
     private let section = SectionKey(cx: 0, sy: 0, cz: 0)
 
     private func fixture(splitAlpha: Bool = false, slices: Int = 2, redTile: Int? = nil,
-                         memoryBudgetOverride: Int? = nil) throws -> Fixture {
+                         memoryBudgetOverride: Int? = nil, tileSize: Int = 16,
+                         mipmapped: Bool = false) throws -> Fixture {
         guard let device = MTLCreateSystemDefaultDevice(), device.supportsRaytracing else {
             throw XCTSkip("Requires a Metal device with ray tracing support")
         }
@@ -54,22 +55,26 @@ final class RayTracedWorldRendererTests: XCTestCase {
         let descriptor = MTLTextureDescriptor()
         descriptor.textureType = .type2DArray
         descriptor.pixelFormat = .rgba8Unorm
-        descriptor.width = 16; descriptor.height = 16; descriptor.arrayLength = slices
+        descriptor.width = tileSize; descriptor.height = tileSize; descriptor.arrayLength = slices
+        descriptor.mipmapLevelCount = mipmapped ? 1 + Int(log2(Double(tileSize))) : 1
         descriptor.usage = .shaderRead
         let atlas = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
         for slice in 0..<slices {
-            var pixels = [UInt8](repeating: 255, count: 16 * 16 * 4)
-            if slice == redTile {
-                for pixel in 0..<(16 * 16) {
-                    pixels[pixel * 4 + 1] = 0; pixels[pixel * 4 + 2] = 0
+            for level in 0..<atlas.mipmapLevelCount {
+                let size = max(1, tileSize >> level)
+                var pixels = [UInt8](repeating: 255, count: size * size * 4)
+                if slice == redTile {
+                    for pixel in 0..<(size * size) {
+                        pixels[pixel * 4 + 1] = 0; pixels[pixel * 4 + 2] = 0
+                    }
                 }
-            }
-            if splitAlpha && slice == 0 {
-                for y in 0..<16 { for x in 0..<8 { pixels[(y * 16 + x) * 4 + 3] = 0 } }
-            }
-            pixels.withUnsafeBytes { raw in
-                atlas.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0, slice: slice,
-                              withBytes: raw.baseAddress!, bytesPerRow: 16 * 4, bytesPerImage: 16 * 16 * 4)
+                if splitAlpha && slice == 0 {
+                    for y in 0..<size { for x in 0..<(size / 2) { pixels[(y * size + x) * 4 + 3] = 0 } }
+                }
+                pixels.withUnsafeBytes { raw in
+                    atlas.replace(region: MTLRegionMake2D(0, 0, size, size), mipmapLevel: level, slice: slice,
+                                  withBytes: raw.baseAddress!, bytesPerRow: size * 4, bytesPerImage: size * size * 4)
+                }
             }
         }
         return Fixture(device: device, queue: queue, renderer: renderer, atlas: atlas)
@@ -437,8 +442,8 @@ final class RayTracedWorldRendererTests: XCTestCase {
         return MeshLayer(data: words,idx: [0,1,2,0,2,3],count: 4)
     }
 
-    private func nativeDetailFixture() throws -> (Fixture,RayTracingFrame) {
-        let f = try fixture()
+    private func nativeDetailFixture(tileSize: Int = 16, mipmapped: Bool = true) throws -> (Fixture,RayTracingFrame) {
+        let f = try fixture(tileSize:tileSize,mipmapped:mipmapped)
         guard #available(macOS 26.0, *),
               MTLFXTemporalDenoisedScalerDescriptor.supportsDevice(f.device) else {
             throw XCTSkip("Requires the split-rate native surface path")
@@ -449,6 +454,89 @@ final class RayTracedWorldRendererTests: XCTestCase {
         view.atmosphere.zenith = .zero; view.atmosphere.horizon = .zero
         view.atmosphere.fogColor = .zero
         return (f,view)
+    }
+
+    private func writeMinificationCheckerboard(_ atlas: MTLTexture) {
+        // Each coarse texel covers equal areas of black and white. Encode their
+        // independently known linear-light average, not the average encoded byte.
+        let average = UInt8((pow(0.5,1.0/2.2) * 255).rounded())
+        for level in 0..<atlas.mipmapLevelCount {
+            let size = max(1,atlas.width >> level)
+            var pixels = [UInt8](repeating:255,count:size * size * 4)
+            for y in 0..<size { for x in 0..<size {
+                let value: UInt8 = level == 0 ? ((x+y).isMultiple(of:2) ? 0 : 255) : average
+                let offset = (y * size + x) * 4
+                pixels[offset] = value; pixels[offset+1] = value; pixels[offset+2] = value
+            }}
+            pixels.withUnsafeBytes { atlas.replace(region:MTLRegionMake2D(0,0,size,size),
+                mipmapLevel:level,slice:0,withBytes:$0.baseAddress!,
+                bytesPerRow:size * 4,bytesPerImage:size * size * 4) }
+        }
+    }
+
+    private func minificationPlane(repetitions: SIMD2<Float>) -> MeshLayer {
+        let original = plane(distance:4,halfSize:32)
+        var words = original.data
+        for vertex in 0..<original.count {
+            words[vertex * 7 + 3] = (Float(bitPattern:words[vertex * 7 + 3]) * repetitions.x).bitPattern
+            words[vertex * 7 + 4] = (Float(bitPattern:words[vertex * 7 + 4]) * repetitions.y).bitPattern
+            words[vertex * 7 + 5] = (3 << 12) | (15 << 21) // Exact constant cached illumination.
+        }
+        return MeshLayer(data:words,idx:original.idx,count:original.count)
+    }
+
+    func testNativeSurfaceMinificationAveragesSubpixelTexelsAndRemainsStableDuringCameraMotion() throws {
+        let (f,view) = try nativeDetailFixture(tileSize:64,mipmapped:true)
+        writeMinificationCheckerboard(f.atlas)
+        // More than three texels fit in one output pixel, despite being only four
+        // world units from the camera. Distance alone cannot determine texture LOD.
+        f.renderer.uploadSection(key:section,minY:0,
+            mesh:mesh(opaque:minificationPlane(repetitions:.init(1024,1024))))
+        let initial = try render(f,frame:view)
+        var movedView = view
+        movedView.camera.x = 0.0008; movedView.camera.y = 0.0006
+        movedView.atmosphere.cameraTime.x = 0.0008; movedView.atmosphere.cameraTime.y = 0.0006
+        let moved = try render(f,frame:movedView)
+        XCTAssertEqual(f.renderer.diagnostics.denoiser,"MetalFX temporal denoising")
+        XCTAssertEqual(initial.colorWidth,1440); XCTAssertEqual(initial.colorHeight,810)
+        let expected: Float = 0.5 * (0.4 * RenderLocalLightPolicy.outputMultiplier)
+        var maximumError: Float = 0, maximumMotionChange: Float = 0
+        for y in 300..<492 { for x in 600..<840 {
+            for channel in 0..<3 {
+                maximumError = max(maximumError,abs(initial.colorAt(x,y)[channel]-expected),
+                                   abs(moved.colorAt(x,y)[channel]-expected))
+                maximumMotionChange = max(maximumMotionChange,
+                    abs(initial.colorAt(x,y)[channel]-moved.colorAt(x,y)[channel]))
+            }
+        }}
+        XCTAssertLessThan(maximumError,0.008,
+            "A subpixel checkerboard must resolve to its linear area average on the first frame")
+        XCTAssertLessThan(maximumMotionChange,0.004,
+            "Subpixel camera movement must not exchange black and white nearest texels")
+    }
+
+    func testNativeSurfaceMinificationUsesProjectedFootprintForObliqueUnequalUVDensity() throws {
+        let (f,baseView) = try nativeDetailFixture(tileSize:64,mipmapped:true)
+        writeMinificationCheckerboard(f.atlas)
+        // One UV axis is highly minified while the other is magnified. A grazing
+        // camera adds perspective variation across the same axis-aligned wall.
+        f.renderer.uploadSection(key:section,minY:0,
+            mesh:mesh(opaque:minificationPlane(repetitions:.init(1024,0.0625))))
+        var view = baseView
+        view.viewMatrix = simd_float4x4(simd_quatf(angle:Float.pi/3,axis:.init(0,1,0)))
+        view.viewProjection = view.projectionMatrix * view.viewMatrix
+        view.inverseViewProjection = view.viewProjection.inverse
+        let image = try render(f,frame:view)
+        let expected: Float = 0.5 * (0.4 * RenderLocalLightPolicy.outputMultiplier)
+        var maximumError: Float = 0
+        for y in stride(from:300,to:492,by:3) { for x in 600..<840 {
+            XCTAssertLessThan(image.depthAt(x,y),1,"The oblique fixture must hit the wall")
+            for channel in 0..<3 {
+                maximumError = max(maximumError,abs(image.colorAt(x,y)[channel]-expected))
+            }
+        }}
+        XCTAssertLessThan(maximumError,0.008,
+            "UV density and grazing incidence must select filtered texels without losing average energy")
     }
 
     func testNativeSurfaceResolvePreservesThreePixelAuthoredDetailIncludingBlackTexels() throws {

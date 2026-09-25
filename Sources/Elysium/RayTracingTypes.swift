@@ -53,14 +53,16 @@ struct RayTracingDiagnostics {
     var samplesPerPixel = 4
 }
 
-/// Exact 64-byte primitive payload, copied into the acceleration structure by Metal.
-/// UVs remain tile-local (including greedy-repeat values); colors remain Faithful pixels.
+/// Exact 96-byte primitive payload, copied into the acceleration structure by Metal.
+/// UV gradients retain arbitrary authored density, including greedy-repeat values.
 struct RayTracingPrimitive {
     var uv01: SIMD4<Float>
     var uv2Light: SIMD4<Float>
     var normalEmission: SIMD4<Float>
     /// tint RGB, atlas layer, flags (cutout=1, water=2, glass=4, entity=8, metal=16, foliage=32), animation
     var material: SIMD4<UInt32>
+    var textureGradientU: SIMD4<Float> = .zero
+    var textureGradientV: SIMD4<Float> = .zero
 }
 
 struct RayTracingInstanceUniforms {
@@ -199,6 +201,15 @@ enum RayTracingMeshDecoder {
                     ? (anim == 2 ? 5 : 2) * RenderLocalLightPolicy.outputMultiplier : 0
                 let v0 = uv(0), v1 = uv(1), v2 = uv(2)
                 guard [v0.x,v0.y,v1.x,v1.y,v2.x,v2.y].allSatisfy(\.isFinite) else { return nil }
+                let p0 = output.positions[Int(layer.idx[i] + base)]
+                let e1 = output.positions[Int(layer.idx[i+1] + base)] - p0
+                let e2 = output.positions[Int(layer.idx[i+2] + base)] - p0
+                let plane = simd_cross(e1,e2)
+                let areaSquared = simd_length_squared(plane)
+                let reciprocal1 = areaSquared > 1e-12 ? simd_cross(e2,plane)/areaSquared : .zero
+                let reciprocal2 = areaSquared > 1e-12 ? simd_cross(plane,e1)/areaSquared : .zero
+                let gradientU = reciprocal1*(v1.x-v0.x)+reciprocal2*(v2.x-v0.x)
+                let gradientV = reciprocal1*(v1.y-v0.y)+reciprocal2*(v2.y-v0.y)
                 var flags = anim == 1 ? UInt32(2) : layerFlags
                 if foliageTiles.contains(name) { flags |= 32 | 1 }
                 if ["iron_block","gold_block","copper_block","netherite_block","raw_iron_block","raw_gold_block"].contains(name)
@@ -206,7 +217,8 @@ enum RayTracingMeshDecoder {
                 output.primitives.append(RayTracingPrimitive(uv01: .init(v0.x,v0.y,v1.x,v1.y),
                     uv2Light: .init(v2.x,v2.y,Float((a >> 17)&15)/15,Float((a >> 21)&15)/15),
                     normalEmission: .init(normals[Int(normalID)],emission),
-                    material: .init(b & 0xffffff,a & 4095,flags,anim)))
+                    material: .init(b & 0xffffff,a & 4095,flags,anim),
+                    textureGradientU: .init(gradientU,0),textureGradientV: .init(gradientV,0)))
                 if emission > 0, i % 6 == 0 {
                     let p0 = output.positions[Int(layer.idx[i] + base)]
                     let p1 = output.positions[Int(layer.idx[i+1] + base)]

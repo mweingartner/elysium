@@ -1,7 +1,10 @@
 # Ray-traced worlds, clouds, and water
 
-Status: implementation and native-world visual acceptance complete. Production
-release and publication results are tracked in the [verification record](ray-traced-worlds/build.md).
+Status: the outdoor material-minification correction passes 156 selected tests.
+Matched native captures confirm reduced outdoor speckle with preserved nearby detail
+and approximately 80 FPS in the tested scene. The production release passed all nine
+pipeline stages and is installed. Release identity and separate Git publication
+results are tracked in the [verification record](ray-traced-worlds/build.md).
 
 ## Rendering contract
 
@@ -34,8 +37,10 @@ Missing device advice uses a conservative physical-memory fallback. Scene limits
 also bound triangles, instances, texture slots, and per-frame build work. Internal ray
 surface resolution preserves aspect ratio within 1440 × 900. Supported macOS 26+
 devices trace expensive transport within 640 × 400, denoise that working image
-1:1 with MetalFX, then independently trace primary visibility and authored material
-color at the full surface resolution. Only ordinary diffuse incident lighting is
+1:1 with MetalFX, then independently trace primary visibility and material color
+at the full surface resolution. Nearby resolvable authored texels retain nearest
+sampling; subpixel atlas detail uses the filtered footprint described below.
+Only ordinary diffuse incident lighting is
 reconstructed across compatible depth, normal, and material-class guides; primary
 emission is restored exactly afterward. Metal, glass, water, fading bodies, and
 submerged transport are not multiplied by a diffuse albedo. Missing special-material
@@ -106,6 +111,51 @@ Policy and lifetime decisions use three Apple references:
 and [acceleration-structure buffer ownership](https://developer.apple.com/documentation/metal/mtlaccelerationstructurecommandencoder/build(accelerationstructure:descriptor:scratchbuffer:scratchbufferoffset:)).
 
 ## Empirical checks
+
+### Outdoor material detail and grain
+
+The September 25 grain report exposed a separate problem from stochastic lighting:
+the native surface pass sampled nearest atlas mip zero and restored that color
+after lighting denoising. The atlas had no coarser levels. When several authored
+texels fit inside one output pixel, point sampling creates speckle and motion
+shimmer. Increasing transport samples repeats the same primary material lookup,
+and stronger lighting denoising does not change color restored afterward.
+
+Primary atlas sampling now computes its pixel footprint from decoded triangle UV
+gradients and analytic intersections of neighboring camera rays with the accepted
+surface plane. This adds no scene intersections and respects arbitrary UV density
+and oblique views. It blends into mip filtering with up to 4x anisotropy only for
+subpixel texels; resolvable nearby pixels and true black channels remain exact.
+Distance-only LOD misses UV-density differences, while an isotropic footprint can
+overblur grazing ground. Existing ray counts, lighting resolution, MetalFX
+reconstruction, and raster samplers remain unchanged.
+
+Atlas mip zero retains the original bytes. Coarser levels average linear-light
+color with alpha coverage, preventing transparent black from darkening their
+material color. Area weighting handles odd texture dimensions. Changed animation
+slices rebuild their own complete chains and use immutable, ordered GPU uploads;
+the whole atlas is not regenerated each tick. Mips add approximately one third to
+atlas texture storage. UV gradients add 32 bytes per primitive, bringing its GPU
+payload to 96 bytes; existing stride-based allocation admission and Metal's actual
+allocation sizes include that cost.
+
+Three primary sources inform this choice: [PBRT's texture sampling and ray
+differentials](https://www.pbr-book.org/4ed/Textures_and_Materials/Texture_Sampling_and_Antialiasing),
+[JCGT's Improved Shader and Texture Level of Detail Using Ray
+Cones](https://www.jcgt.org/published/0010/01/01/paper-lowres.pdf), and
+[Apple's mipmap sampler guidance](https://developer.apple.com/documentation/metal/adding-mipmap-filtering-to-samplers).
+The JCGT study demonstrates mip-zero aliasing in a ray-traced voxel game;
+its measured speedups do not predict Elysium's performance.
+
+The final reviewed scope passes 156 tests, including native GPU
+first-frame subpixel-checkerboard averaging, subpixel camera movement, oblique
+unequal UV density, three-output-pixel authored detail, black texels, exact cutout
+coverage, and complete animated mip uploads. Native scene-matched still/movement and
+frame-time measurements also passed and are recorded in the verification record.
+Alpha acceptance and silhouettes, entity textures, and secondary-ray
+material lookups remain nearest sampled. This correction does not establish
+general geometry antialiasing or eliminate all transport noise; residual shimmer,
+grazing-angle blur, or performance/memory regressions warrant further investigation.
 
 ### Underground and artificial light
 
@@ -216,10 +266,10 @@ observed image-driven revisions, not conclusions drawn from passing unit tests.
 
 ## Release closeout
 
-The latest memory/canopy correction passes 75 focused renderer tests and its
-production build is warning-free. Native still-frame and movement sampling at
-16-chunk distance stays ray traced without fallback; daytime forest shade is
-readable and night remains dark. See the verification record for sampling limits
+The preceding memory/canopy correction passed 75 focused renderer tests and its
+production build was warning-free. Native still-frame and movement sampling at
+16-chunk distance stayed ray traced without fallback; daytime forest shade was
+readable and night remained dark. See the verification record for sampling limits
 and GPU cost. The original renderer's native captures also confirm shallow/deep water, underwater transmission,
 weather clouds, and continuous rain fog without a loaded-world silhouette.
 See the [verification record](ray-traced-worlds/build.md) for capture identities,

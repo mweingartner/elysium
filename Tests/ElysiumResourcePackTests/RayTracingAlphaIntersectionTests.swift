@@ -32,6 +32,8 @@ final class RayTracingAlphaIntersectionTests: XCTestCase {
             var uv2Light=SIMD4<Float>(0.5,1,1,0)
             var normalEmission=SIMD4<Float>(0,0,1,0)
             var material: SIMD4<UInt32>
+            var textureGradientU=SIMD4<Float>.zero
+            var textureGradientV=SIMD4<Float>.zero
         }
         struct Instance {
             var transform=matrix_identity_float4x4
@@ -69,7 +71,8 @@ final class RayTracingAlphaIntersectionTests: XCTestCase {
         let g=MTLAccelerationStructureTriangleGeometryDescriptor()
         g.vertexBuffer=vb;g.vertexStride=MemoryLayout<SIMD3<Float>>.stride;g.vertexFormat = .float3
         g.triangleCount=primitives.count;g.opaque=true
-        g.primitiveDataBuffer=pb;g.primitiveDataStride=64;g.primitiveDataElementSize=64
+        g.primitiveDataBuffer=pb;g.primitiveDataStride=MemoryLayout<Primitive>.stride
+        g.primitiveDataElementSize=MemoryLayout<Primitive>.stride
         let bd=MTLPrimitiveAccelerationStructureDescriptor();bd.geometryDescriptors=[g]
         let bs=device.accelerationStructureSizes(descriptor:bd)
         let blas=device.makeAccelerationStructure(size:bs.accelerationStructureSize)!

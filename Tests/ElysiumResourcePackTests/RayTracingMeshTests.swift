@@ -67,7 +67,9 @@ final class RayTracingMeshTests: XCTestCase {
     }
 
     func testPrimitiveAndFrameABIExactlyMatchesMetal() {
-        XCTAssertEqual(MemoryLayout<RayTracingPrimitive>.stride,64)
+        XCTAssertEqual(MemoryLayout<RayTracingPrimitive>.stride,96)
+        XCTAssertEqual(MemoryLayout<RayTracingPrimitive>.offset(of:\.textureGradientU),64)
+        XCTAssertEqual(MemoryLayout<RayTracingPrimitive>.offset(of:\.textureGradientV),80)
         XCTAssertEqual(MemoryLayout<RayTracingInstanceUniforms>.stride,240)
         XCTAssertEqual(MemoryLayout<RayTracingLight>.stride,32)
         XCTAssertEqual(MemoryLayout<RayTracingUniforms>.stride,448)
@@ -84,6 +86,8 @@ final class RayTracingMeshTests: XCTestCase {
         XCTAssertEqual(p.uv2Light.w,7.0/15,accuracy:0.00001)
         XCTAssertEqual(p.normalEmission,.init(0,1,0,0))
         XCTAssertEqual(p.material.x,0x3478ab); XCTAssertEqual(p.material.y,37)
+        XCTAssertEqual(p.textureGradientU,.init(4,0,0,0))
+        XCTAssertEqual(p.textureGradientV,.init(0,0,8,0))
     }
 
     func testLayersKeepDistinctCutoutWaterAndGlassClassification() throws {

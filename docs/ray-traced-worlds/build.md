@@ -474,3 +474,78 @@ Executable SHA-256:
 No golden updates. Git publication is verified separately after the unchanged
 pre-push authority checks and new impact-selected test gate finish; the delivery
 report records the resulting commit and live GitHub main parity.
+
+
+## Outdoor material grain correction — September 25, 2026
+
+The user rejected the running valley scene as grainy. The same native camera
+revealed high-frequency grass/dirt aliasing: accepted materials always sampled
+nearest mip zero, and the surface resolve restored that aliasing after lighting
+reconstruction. Primary rays and the two transport samples were unchanged.
+Three primary research sources and the selected footprint/mipmap design are
+recorded in [ARCHITECTURE](../../ARCHITECTURE.md#outdoor-material-minification--september-25-2026).
+
+The optimized inspection build uses the same LostWorld save copied into the
+isolated debug profile, camera (44.653763, 87.65, -89.115717), yaw -0.504176,
+pitch 0.455396, clear day tick 3007, distance 16, 2880 × 1620 drawable,
+1440 × 810 surfaces and 640 × 360 two-sample lighting. Approximately 6.72 million
+triangles participate in both runs. World simulation is paused for comparison;
+small creature/mesh differences accumulated during initial streaming, so these
+are scene-matched samples rather than bit-identical simulation frames.
+
+| Warmed 20-second sample | Before | Filtered |
+|---|---:|---:|
+| FPS minimum / median / maximum | 71 / 78 / 81 | 79 / 80 / 82 |
+| Median whole-command GPU duration | 7.50 ms | 7.66 ms |
+| Median native surface pass | 0.80 ms | 0.87 ms |
+| Ray active, ready, no pending sections | Every sample | Every sample |
+
+A 20-second camera sweep retained 80–81 FPS (median 80), with fresh GPU
+samples and ray tracing active/ready throughout. Simulation stayed paused
+during this sweep to isolate camera motion. A further 20-second sample with
+simulation and animation running measured 80–83 FPS (median 80);
+ray tracing remained active/ready in every sample.
+
+The small FPS difference is timing variation, not a claimed speedup. Image quality
+improves substantially at similar throughput; hardware counters show the small
+additional surface cost. The matched captures visibly remove distant grass/dirt
+speckle while keeping block contours, water transport and visible foliage holes.
+A nearby hut/forest capture confirms sharp wood, stone, dirt and leaf texture.
+Thin alpha silhouettes and secondary-reflection aliasing remain outside this fix.
+
+| Inspection artifact | Identity |
+|---|---|
+| Before executable SHA-256 | `6253c69477d8a309e29fd70fb66ff1db19c11f6c2debd08a38b99a21892924ff` |
+| Filtered executable SHA-256 | `eb9cb0cb6e89671ccde5d4a419718a0fba75c752cc7d835aeddb8bb051402c49` |
+| Before capture | `e7f7c12f-ecff-481a-ab87-ebd7b740a334`, SHA-256 `4da1374504ec8e23247de250864bd812e42598c0c4f35a2cf319217223a53a40` |
+| Filtered capture | `0ba1b504-13ff-4ebe-b5d8-701e9e58ae31`, SHA-256 `77d77b345f97a6bc5f61f6a236410ccc037c2a6922b38a6123515f581f2dc0db` |
+| Nearby detail capture | `619cb393-033a-41f4-a064-978f8104cff1`, SHA-256 `2c5dbbd492ce0bf1c4329401a3d62623ed6eab1f919ea24a392a9ad28f65617a` |
+
+`/tmp/elysium-grain-release.log` is warning-free. The reviewed impact map selects
+156 tests; `/tmp/elysium-grain-impact-tests-final.log` passes all 156, including
+native subpixel averaging, camera motion, oblique UV density, sharp nearby/black
+texels with a mip-capable atlas, exact alpha continuation, shader ray counts,
+linear-light mip generation and GPU-ordered animated updates. The first broad
+run exposed an obsolete test instrumentation string after the call gained
+footprint arguments; its anchor was repaired without changing the ray-count
+expectations, then the entire selected scope passed.
+
+Only the stripped Elysium product release pin changes to
+`af471e5e86293490b3804826f42dd8df176d9be83ce0eb17b2f8018de1dd65c5`.
+ElysiumCore.o, ElysiumStorage.o, ElysiumTextInput.o, elysmoke and all source/API
+pins remain identical. The release-surface verifier passes.
+
+### Production release result
+
+`/tmp/elysium-grain-pipeline.log` completed all nine stages: source security,
+warning-free release build, release-surface/binary verification, **156 selected
+XCTest cases with zero failures**, all **10 selector tests**, **491 smoke checks
+with zero failures**, signed packaging, real AppKit text entry (two fields;
+no clipboard access; foreground and cleanup verified), installation, and
+installed identity/strict code-signature verification. No goldens changed.
+
+Installed production application: `/Applications/Elysium.app`.
+Executable SHA-256:
+`ebc1a774d01e29f04abf0b2f1466022ed964ffd75ae2bea4f389ca22a6029396`.
+Git publication is verified separately after the active pre-push gates; the
+delivery report records the resulting commit and live GitHub main parity.

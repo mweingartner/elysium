@@ -245,7 +245,9 @@ final class RayTracingCanopyLightingTests: XCTestCase {
         // No runtime preference or alternate production algorithm is introduced for testing.
         let reuseNeedle = "bool reusePrimarySolar = firstSurface && primarySolarValid"
         let primaryReuseNeedle = "if(bounce==0 && sample>0) s=primarySurface;"
-        let intersectionNeedle = "s=rtIntersect(r,scene,instances,textures,atlas,functions,primaryPending?0x01:0xff);"
+        // Count entry to the unique primary/continuation call independently of its
+        // trailing texture-footprint arguments; the full production call stays intact.
+        let intersectionNeedle = "s=rtIntersect(r,scene,instances,textures,atlas,functions,primaryPending?0x01:0xff,"
         let signatureNeedle = "device const RTLight* lights [[buffer(3)]],"
         let visibilityNeedle = "float3 visibility=u.params.w>0.5"
         let cloudGuardNeedle = "if(any(visibility>float3(0))) clouds="

@@ -12,6 +12,59 @@ struct SectionKey: Hashable {
     let cx: Int, sy: Int, cz: Int
 }
 
+/// Material mipmaps average linear light with alpha coverage, while mip zero keeps
+/// the authored bytes. Transparent texels cannot darken distant leaves or glass.
+enum WorldAtlasMipChain {
+    struct Level {
+        let size: Int
+        let pixels: [UInt8]
+    }
+
+    static let maximumSize = 128 // Same limit as resource-pack atlas preparation.
+    private static let linear = (0...255).map { pow(Double($0) / 255, 2.2) }
+    private static let encoded = (0...65535).map {
+        UInt8((pow(Double($0) / 65535, 1 / 2.2) * 255).rounded())
+    }
+
+    static func make(pixels: [UInt8], size: Int) -> [Level]? {
+        guard (1...maximumSize).contains(size), pixels.count == size * size * 4 else { return nil }
+        var levels = [Level(size: size, pixels: pixels)]
+        while let source = levels.last, source.size > 1 {
+            let targetSize = max(1, source.size / 2)
+            let scale = Double(source.size) / Double(targetSize)
+            var target = [UInt8](repeating: 0, count: targetSize * targetSize * 4)
+            for y in 0..<targetSize { for x in 0..<targetSize {
+                let left = Double(x) * scale, right = Double(x + 1) * scale
+                let top = Double(y) * scale, bottom = Double(y + 1) * scale
+                var alpha = 0.0, color = SIMD3<Double>.zero
+                // Area weights retain the entire image for non-power-of-two pack sizes.
+                for sy in Int(top)..<min(source.size, Int(ceil(bottom))) {
+                    let wy = min(bottom, Double(sy + 1)) - max(top, Double(sy))
+                    for sx in Int(left)..<min(source.size, Int(ceil(right))) {
+                        let weight = wy * (min(right, Double(sx + 1)) - max(left, Double(sx)))
+                        let index = (sy * source.size + sx) * 4
+                        let covered = weight * Double(source.pixels[index + 3])
+                        alpha += covered
+                        for channel in 0..<3 {
+                            color[channel] += linear[Int(source.pixels[index + channel])] * covered
+                        }
+                    }
+                }
+                let index = (y * targetSize + x) * 4
+                if alpha > 0 {
+                    for channel in 0..<3 {
+                        let value = Int((min(1, max(0, color[channel] / alpha)) * 65535).rounded())
+                        target[index + channel] = encoded[value]
+                    }
+                }
+                target[index + 3] = UInt8(min(255, max(0, (alpha / (scale * scale)).rounded())))
+            }}
+            levels.append(Level(size: targetSize, pixels: target))
+        }
+        return levels
+    }
+}
+
 /// suballocated mesh block: vertices at offset, indices at offset + ibRel
 struct MeshBlock {
     let page: Int
@@ -538,7 +591,10 @@ final class WorldRenderer {
 
     private func stageAtlasTexture(_ slices: [[UInt8]], res: Int,
                                    animations: [TileAnimation], fluidDamp: Float) -> StagedWorldAtlas? {
-        guard res > 0, !slices.isEmpty,
+        // The packed mesh has a 12-bit atlas layer. These bounds also cap the full
+        // mip allocation below 342 MiB; production registries use far fewer layers.
+        guard (1...WorldAtlasMipChain.maximumSize).contains(res),
+              !slices.isEmpty, slices.count <= 4096,
               slices.allSatisfy({ $0.count == res * res * 4 }) else { return nil }
         let td = MTLTextureDescriptor()
         td.textureType = .type2DArray
@@ -546,12 +602,17 @@ final class WorldRenderer {
         td.width = res
         td.height = res
         td.arrayLength = slices.count
+        td.mipmapLevelCount = Int(floor(log2(Double(res)))) + 1
         td.usage = .shaderRead
         guard let tex = device.makeTexture(descriptor: td) else { return nil }
         for (i, px) in slices.enumerated() {
-            px.withUnsafeBytes { raw in
-                tex.replace(region: MTLRegionMake2D(0, 0, res, res), mipmapLevel: 0, slice: i,
-                            withBytes: raw.baseAddress!, bytesPerRow: res * 4, bytesPerImage: res * res * 4)
+            guard let levels = WorldAtlasMipChain.make(pixels: px, size: res) else { return nil }
+            for (level, image) in levels.enumerated() {
+                image.pixels.withUnsafeBytes { raw in
+                    tex.replace(region: MTLRegionMake2D(0, 0, image.size, image.size), mipmapLevel: level, slice: i,
+                                withBytes: raw.baseAddress!, bytesPerRow: image.size * 4,
+                                bytesPerImage: image.size * image.size * 4)
+                }
             }
         }
         return StagedWorldAtlas(texture: tex, res: res, animations: animations, fluidDamp: fluidDamp)
@@ -568,6 +629,7 @@ final class WorldRenderer {
 
     func installStagedWorldAtlas(_ staged: StagedWorldAtlas) {
         rayTracingAtlasGeneration &+= 1
+        pendingAtlasUploads.removeAll()
         atlasTexture = staged.texture
         atlasRes = staged.res
         tileAnimations = staged.animations
@@ -768,25 +830,48 @@ final class WorldRenderer {
     // animated-tile uploads are staged and blitted at frame start —
     // texture.replace() writes CPU-side while 1-2 in-flight frames may still
     // sample the slice (frame tearing on animated water/lava)
-    private var pendingAtlasUploads: [(buf: MTLBuffer, slice: Int)] = []
+    private struct AtlasMipUpload {
+        let level: Int, size: Int, offset: Int, rowBytes: Int
+    }
+    private var pendingAtlasUploads: [(buf: MTLBuffer, slice: Int, levels: [AtlasMipUpload])] = []
 
     private func uploadAtlasSlice(_ px: [UInt8], _ slice: Int) {
-        let buf = px.withUnsafeBytes { raw in
+        guard slice >= 0, slice < atlasTexture.arrayLength,
+              let images = WorldAtlasMipChain.make(pixels: px, size: atlasRes) else { return }
+        var bytes: [UInt8] = [], levels: [AtlasMipUpload] = []
+        for (level, image) in images.enumerated() {
+            let rowBytes = ((image.size * 4 + 255) / 256) * 256
+            let offset = bytes.count
+            levels.append(AtlasMipUpload(level: level, size: image.size, offset: offset, rowBytes: rowBytes))
+            bytes.append(contentsOf: repeatElement(0, count: rowBytes * image.size))
+            for row in 0..<image.size {
+                bytes.replaceSubrange((offset + row * rowBytes)..<(offset + row * rowBytes + image.size * 4),
+                                      with: image.pixels[(row * image.size * 4)..<((row + 1) * image.size * 4)])
+            }
+        }
+        let buf = bytes.withUnsafeBytes { raw in
             device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
         }
-        if let buf { pendingAtlasUploads.append((buf, slice)) }
+        if let buf {
+            // Several simulation ticks may precede one rendered frame; only upload
+            // the newest immutable chain for a slice, bounding pending staging work.
+            pendingAtlasUploads.removeAll { $0.slice == slice }
+            pendingAtlasUploads.append((buf, slice, levels))
+        }
     }
 
     /// encode the staged slice updates as a blit BEFORE the frame's render
     /// passes — GPU-ordered, so in-flight frames finish sampling first
     func flushAtlasUploads(_ cmd: MTLCommandBuffer) {
         guard !pendingAtlasUploads.isEmpty, let blit = cmd.makeBlitCommandEncoder() else { return }
-        for (buf, slice) in pendingAtlasUploads {
-            blit.copy(from: buf, sourceOffset: 0, sourceBytesPerRow: atlasRes * 4,
-                      sourceBytesPerImage: atlasRes * atlasRes * 4,
-                      sourceSize: MTLSize(width: atlasRes, height: atlasRes, depth: 1),
-                      to: atlasTexture, destinationSlice: slice, destinationLevel: 0,
-                      destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        for (buf, slice, levels) in pendingAtlasUploads {
+            for image in levels {
+                blit.copy(from: buf, sourceOffset: image.offset, sourceBytesPerRow: image.rowBytes,
+                          sourceBytesPerImage: image.rowBytes * image.size,
+                          sourceSize: MTLSize(width: image.size, height: image.size, depth: 1),
+                          to: atlasTexture, destinationSlice: slice, destinationLevel: image.level,
+                          destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+            }
         }
         blit.endEncoding()
         pendingAtlasUploads.removeAll()
