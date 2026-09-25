@@ -40,6 +40,13 @@ struct SubtitleInfo {
     var time: Int
 }
 
+/// Report the RT subset separately from all Metal resources; neither is total system RAM.
+func rayTracingMemorySummary(_ ray: RayTracingDiagnostics) -> String {
+    func gib(_ bytes: Int) -> String { String(format: "%.2f", Double(max(0, bytes)) / 1_073_741_824) }
+    return "RT memory: \(gib(ray.geometryBytes))/\(gib(ray.memoryBudgetBytes)) GiB"
+        + " (temporary \(gib(ray.transientGeometryBytes)))  GPU total: \(gib(ray.deviceAllocatedBytes)) GiB"
+}
+
 final class HUD {
     var actionBarText = ""
     var actionBarTime = 0
@@ -547,6 +554,7 @@ final class HUD {
             "Mem: \(debugInfo["mem"] ?? "?")  Seed: \(world.seed)",
             "Graphics: \(debugInfo["graphics"] ?? "Standard")",
         ]
+        if let memory = debugInfo["graphicsMemory"] { lines.append(memory) }
         // scripting-ui-and-replication (change 3), design.md §12: "F3 summary" — script counts,
         // event/tick stats, budget trips, one line, only while a script runtime actually exists
         // this session (§15's zero-cost invariant: no line at all for a world with scripting

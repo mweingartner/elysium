@@ -62,6 +62,30 @@ static float3 rtCosine(float3 normal, thread uint& state) {
 static float3 rtTint(uint c) { return float3((c>>16)&255,(c>>8)&255,c&255)/255.0; }
 static float3 rtLinear(float3 c) { return pow(max(c,float3(0)),float3(2.2)); }
 
+// Render-only canopy art direction: two solid leaf faces transmit 0.62^2 = 38.44%.
+// A neutral deterministic factor avoids noisy alpha roulette and saturated green speckles.
+static float rtDirectLightCosine(float3 normal,float3 lightDirection,uint flags) {
+    float cosine=dot(normal,lightDirection);
+    return max(cosine,0.0)+((flags&32u)!=0?0.30*max(-cosine,0.0):0.0);
+}
+
+static float rtCachedIllumination(float sky,float block,constant RTUniforms& u) {
+    float cached=max(0.005,block*0.035);
+    if(u.atmosphere.options.x>0.5) cached=max(cached,0.045);
+    cached=max(cached,clamp(u.fogParameters.z,0.0,1.0)*0.55);
+    if(u.atmosphere.options.x<0.5) {
+        // The existing voxel skylight already propagates leaf opacity and solid-roof blocking.
+        // A small neutral fill stabilizes two-bounce canopy GI without lifting sealed caves or
+        // bypassing the actual direct-shadow ray. Nighttime remains deliberately subdued.
+        // Sky daylight is continuous through the horizon (roughly 0.5 there). Switching on
+        // the sign of sun height caused an abrupt seven-percent lighting jump at sunset.
+        float daylight=clamp(u.atmosphere.sunDaylight.w,0.04,1.0);
+        float skylight=clamp(sky,0.0,1.0);
+        cached+=0.14*skylight*skylight*daylight;
+    }
+    return cached;
+}
+
 static RTSurface rtIntersect(ray r, instance_acceleration_structure scene,
                             device const RTInstance* instances, constant RTTextures& textures,
                             texture2d_array<float> atlas,uint rayMask=0xff) {
@@ -116,13 +140,43 @@ static float3 rtVisibility(float3 position,float3 normal,float3 direction,float 
     ray r; r.origin=position+normal*0.003; r.direction=direction;
     r.min_distance=0.001; r.max_distance=max(0.002,distance-0.008);
     float3 transmission(1);
+    intersector<triangle_data,instancing> trace;
+    trace.assume_geometry_type(geometry_type::triangle);
+    trace.force_opacity(forced_opacity::opaque);
+    constexpr sampler nearest(coord::normalized,address::repeat,filter::nearest);
     for(uint layer=0;layer<8;++layer) {
-        RTSurface s=rtIntersect(r,scene,instances,textures,atlas);
-        if(!s.hit) return transmission;
-        if((s.flags&6u)==0) return float3(0);
-        transmission*=((s.flags&2u)!=0)?float3(0.7,0.86,0.92):mix(float3(1),s.albedo,0.35);
-        r.min_distance=s.distance+0.003;
-        if(r.min_distance>=r.max_distance) return transmission;
+        bool accepted=false;
+        // Keep the same alpha/layer budgets as surface intersection, but visibility needs no
+        // transformed normal, world position, emission, or diffuse albedo for foliage/stone.
+        for(uint skip=0;skip<96;++skip) {
+            auto hit=trace.intersect(r,scene,0xff);
+            if(hit.type==intersection_type::none) return transmission;
+            const device RTPrimitive& p=*(const device RTPrimitive*)hit.primitive_data;
+            const device RTInstance& instance=instances[hit.instance_id];
+            uint flags=p.material.z;
+            float2 bary=hit.triangle_barycentric_coord;
+            float2 uv=p.uv01.xy*(1-bary.x-bary.y)+p.uv01.zw*bary.x+p.uv2Light.xy*bary.y;
+            float4 tex=(flags&8u)!=0
+                ? textures.entities[min(instance.info.x,511u)].sample(nearest,uv)
+                : atlas.sample(nearest,uv,p.material.y);
+            float alpha=tex.a*instance.tint.a;
+            float coverage=(flags&8u)!=0?tex.a:alpha;
+            float cutoff=(flags&8u)!=0?0.1:0.35;
+            if(((flags&1u)!=0 && coverage<cutoff) || alpha<0.005) {
+                r.min_distance=hit.distance+0.0002; continue;
+            }
+            if((flags&32u)!=0) transmission*=0.62;
+            else if((flags&2u)!=0) transmission*=float3(0.7,0.86,0.92);
+            else if((flags&4u)!=0) {
+                float3 color=tex.rgb*rtTint(p.material.x)*instance.tint.rgb;
+                color=mix(color,instance.overlay.rgb,instance.overlay.a);
+                transmission*=mix(float3(1),rtLinear(clamp(color,float3(0),float3(1))),0.35);
+            } else return float3(0);
+            r.min_distance=hit.distance+0.003;
+            if(r.min_distance>=r.max_distance) return transmission;
+            accepted=true; break;
+        }
+        if(!accepted) return float3(0);
     }
     return float3(0);
 }
@@ -146,6 +200,9 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
     float4 farPoint=u.inverseViewProjection*float4(uv.x*2-1,1-uv.y*2,1,1);
     float3 accumulated(0);
     float guideDepth=1; float4 guideNormal(0),guideMotion(0),guideDiffuse(1,1,1,1),guideSpecular(0);
+    bool primarySolarValid=false;
+    uint primarySolarInstance=0,primarySolarFlags=0;
+    float3 primarySolarPosition(0),primarySolarNormal(0),primarySolarIrradiance(0);
     uint sampleCount=clamp(uint(u.quality.x),2u,4u);
     for(uint sample=0;sample<sampleCount;++sample) {
     uint seed=rtHash(pixel.x+pixel.y*u.counts.z)^rtHash(u.counts.x*4u+sample+0x9e3779b9u);
@@ -254,12 +311,28 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
         float lightStrength=sunlight?daylight*2.5*smoothstep(0.0,0.04,sun.y):0.085;
         float3 lightColor=sunlight?mix(float3(1,0.53,0.24),float3(1,0.96,0.88),smoothstep(0.03,0.5,sun.y)):float3(0.40,0.55,0.9);
         if(u.atmosphere.options.x<0.5) {
-            float cosine=max(0.0,dot(faceNormal,lightDirection));
+            float cosine=rtDirectLightCosine(faceNormal,lightDirection,s.flags);
             if(cosine>0) {
-                float3 visibility=u.params.w>0.5
-                    ?rtVisibility(s.position,faceNormal,lightDirection,u.params.x,scene,instances,textures,atlas):float3(1);
-                float clouds=elyCloudSunTransmittanceAir(worldPosition,u.atmosphere);
-                radiance+=throughput*s.albedo*lightColor*visibility*(cosine*lightStrength*clouds);
+                // Pixel-centered primary rays revisit the same diffuse surface in each path.
+                // Reuse only deterministic irradiance, not material albedo or random bounces.
+                // Exact keys also reject changed first hits behind stochastic entity fades.
+                bool reusePrimarySolar = firstSurface && primarySolarValid
+                    && s.instance==primarySolarInstance && s.flags==primarySolarFlags
+                    && all(s.position==primarySolarPosition) && all(faceNormal==primarySolarNormal);
+                float3 solarIrradiance;
+                if(reusePrimarySolar) solarIrradiance=primarySolarIrradiance;
+                else {
+                    float3 visibility=u.params.w>0.5
+                        ?rtVisibility(s.position,faceNormal,lightDirection,u.params.x,scene,instances,textures,atlas):float3(1);
+                    float clouds=elyCloudSunTransmittanceAir(worldPosition,u.atmosphere);
+                    solarIrradiance=lightColor*visibility*(cosine*lightStrength*clouds);
+                    if(firstSurface) {
+                        primarySolarValid=true; primarySolarInstance=s.instance; primarySolarFlags=s.flags;
+                        primarySolarPosition=s.position; primarySolarNormal=faceNormal;
+                        primarySolarIrradiance=solarIrradiance;
+                    }
+                }
+                radiance+=throughput*s.albedo*solarIrradiance;
             }
         }
         // Held torch is a physical local light with ray-occluded visibility, not a screen wash.
@@ -282,10 +355,8 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
                 radiance+=throughput*s.albedo*light.colorPower.rgb*vis*(cosine*min(energy,32.0));
             }
         }
-        // The voxel light cache is an intentionally low-energy stabilization term only.
-        float cached=max(0.005,s.block*0.035);
-        if(u.atmosphere.options.x>0.5) cached=max(cached,0.045);
-        cached=max(cached,clamp(u.fogParameters.z,0.0,1.0)*0.55);
+        // Bounded neutral cache fill supports readable canopy shade without global exposure.
+        float cached=rtCachedIllumination(s.sky,s.block,u);
         radiance+=throughput*s.albedo*cached;
         if(diffuseBounces++>=2) break;
         throughput*=s.albedo;

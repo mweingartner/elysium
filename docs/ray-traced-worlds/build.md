@@ -84,3 +84,127 @@ This record is included in the implementation commit. Git publication is a
 separate operation through the active pre-push hook; the delivery report records
 the resulting commit and live GitHub `main` parity rather than inferring them
 from the release pipeline.
+
+## Adaptive ray-memory correction — September 25, 2026
+
+The user's production LostWorld scene reached the old fixed 1 GiB cap on a
+128 GiB Apple M5 Max. This was an application policy rejection, not evidence of
+system RAM exhaustion. The revised budget is one-quarter of Metal's recommended
+working set, capped at 32 GiB and constrained by current device allocations plus
+a reserved margin. This machine reports a 107.52 GiB recommended working set,
+yielding a **26.88 GiB** ray-resource policy limit.
+
+The focused run passed **68 tests, zero failures**, including seven memory-policy
+tests, four real-GPU recovery/lifetime/eviction tests, and a diagnostic-format
+test. Log: `/tmp/elysium-ray-memory-focused.log`. An independent read-only review
+found no actionable resource-lifetime, accounting, recovery, or debug-isolation
+issues. No simulation or golden changes are intended.
+
+The warning-free optimized inspection package has executable SHA-256
+`6151eafa5539587259c2e829df34bce19e8d7bf21d6ddc9f274dfc3cdb59ec5a`.
+In isolated-debug session `4c0fb4b7-1e63-4d5a-ac09-576d26fed829`, a disposable
+Lost World v2 fixture used the user's seed `255591064`, 16-chunk render distance,
+and camera `(34, 90, -120)`. This reproduces the terrain/extent, not the user's
+saved buildings. The settled snapshot reported:
+
+- 8,239 loaded renderer sections; 7,397 selected ray sections; no pending builds.
+- Ray tracing active with MetalFX temporal denoising and no fallback warning.
+- 6,463,812 triangles in 7,422 instances.
+- 1,322,795,840 tracked ray-resource bytes, exceeding the old 1 GiB limit.
+- 2,697,019,392 total allocated Metal bytes; 28,862,181,376-byte effective budget.
+- 21.09 ms whole-command GPU time in one observation, not a performance guarantee.
+
+Inspected actual renderer capture `93e2a926-39c4-4a74-9895-76ce7e939c41`
+(2880 × 1620), PNG SHA-256
+`046f7179f8c33a68ddc561f1e909fe2de8906ca71045bd7b086cd4684e3338ae`.
+The owned fixture was deleted, debug preferences restored to distance 8/Shaders
+OFF, and the inspection app quit. Production saves/preferences were unchanged.
+
+Production release, installation, and publication for this correction are
+recorded separately below when verified; the inspection package is not deployment.
+
+## Final memory, canopy, and stability verification
+
+The final focused run passed **75 tests, zero failures** with no compiler warnings:
+`swift test --filter 'RayTracing|RayTracedWorldRendererTests|WorldRendererIntegrationTests|AtmosphereShaderTests|GraphicsModeTests|WaterMeshPartitionTests'`.
+Log: `/tmp/elysium-ray-light-optimized-focused.log`. The additional coverage includes
+visible-scene history changes, cold/warm geometry budgets, optional-cache eviction
+under pressure, real-GPU foliage/solid visibility, continuous dawn/dusk ambient
+fill, and exact cached/uncached primary-solar radiance equivalence with fewer queries.
+The ordinary production build also passed warning-free in
+`/tmp/elysium-ray-light-optimized-release.log`.
+
+The final optimized inspection executable SHA-256 is
+`aa614d251e06da3c61baa93798868c19be43707474a2042e8f121b7b66f00628`;
+isolated session `a485c44b-2292-423c-80b4-6a8fa5fcbb2f`. The disposable Lost World v2
+fixture used seed `255591064` at distance 16. Production saves/preferences were
+not modified. Reduced motion and paused simulation isolated static comparisons;
+movement used the real held-key route plus controlled simulation steps.
+
+- Static: 100/100 sampled snapshots active/ready, history 24 throughout, no pending
+  builds or fallback; 6,384,610 triangles. Ten world-only captures had maximum
+  successive average ground/canopy brightness change of 0.0001137 on a 0–1 scale
+  (under 0.012% full-scale), and maximum per-pixel mean absolute difference 0.00108.
+- Movement: 160/160 captured steps active/ready, no fallback or pending builds,
+  approximately 31.6 blocks out and back across chunk boundaries, up to 6,749,414
+  triangles. Real mesh/light changes still reset history (39 observed drops);
+  camera-only selection changes do not. Sampled captures cannot prove every frame
+  in every world is flicker-free.
+- Native day/night inspection at `(34, 75, -120)`, yaw 0.6, pitch 0 showed readable
+  grass, trunks, and filtered leaf shade at noon; midnight remained dark rather
+  than receiving a global exposure lift.
+- Max-distance forest remains GPU-intensive: median whole-command times were
+  79.6 ms static and 96.9 ms during captured movement. These include this workload
+  and capture overhead; neither a frame-rate guarantee nor a broad benchmark.
+
+Trace logs: `/tmp/elysium-ray-final-static.jsonl`,
+`/tmp/elysium-ray-final-walk.jsonl`. Representative 2880 × 1620 captures:
+
+| Scene | Capture ID | PNG SHA-256 |
+|---|---|---|
+| Forest traversal | `a1f98256-ea91-4d95-820e-fd13452cc4c2` | `f6fa8e6bee86b5c99813087fc22480afdd69d3caa3bced4163d6da33b94e9aa1` |
+| Player-height noon | `871fb31c-11fb-4c99-8acf-731cbb9c574a` | `d01a43004d61686f041b3ced34f1ac9f24a79a71a83352ce9521ce229f970566` |
+| Same view at midnight | `8759868e-49d7-438c-b12d-ccfeac1a9407` | `7a4858599f142f407c8ba78ae483cd4b5b03319bd13a8f531b341092665219dc` |
+
+The owned fixture was deleted, the inspection app quit, and original debug
+preferences restored (distance 8, Shaders OFF, reduced motion off).
+
+### Reviewed release-surface renewal
+
+Using the same disposable-copy `xcrun strip -S -x` normalization described above,
+only the Elysium product pin moves from
+`4846b2192c71a101618b77e1bd50c9666fcb6440cee418efaf1ae064b80be970` to
+`2d74a0d1ae1e6bf6c7d5f0b7727c644020132d69092b8e0ec93f1c191c8a569c`.
+ElysiumCore.o, ElysiumStorage.o, ElysiumTextInput.o, and elysmoke match the preceding
+release hashes exactly. No source/API/storage pin or simulation golden changes.
+
+Release pipeline/install and Git publication remain separate closeout checks.
+
+### User-authorized impact-scoped release gates
+
+The initial broad release run was stopped at the user's request to apply
+blast-radius testing to release and push, not just implementation iteration. It
+is not counted as a completed full-suite pass. Both gates now use the reviewed
+impact selector documented in CONTRIBUTING and ARCHITECTURE. Discovery for this
+change selects **438 of 2,668 XCTest cases**: renderer, app-shell/debug-protocol,
+and release-contract coverage. The broader app slice is intentional because HUD,
+app entry-point, and debug reporting files changed. Unrelated engine worldgen,
+storage, and Lua execution tests are not selected; their code did not change.
+The mandatory source-security baseline and all 491 smoke checks remain in place.
+No gate or failing hook is bypassed.
+
+### Production release result
+
+`/tmp/elysium-ray-memory-light-scoped-pipeline.log` completed all nine stages:
+source security, warning-free build, release-surface/binary verification,
+**438 selected XCTest cases with zero failures**, all **8 selector tests**,
+**491 smoke checks with zero failures**, signed packaging, real AppKit text
+entry (two fields; no clipboard access; foreground and cleanup verified),
+installation, and installed identity/strict code-signature verification.
+
+Installed production application: `/Applications/Elysium.app`.
+Executable SHA-256:
+`7132b6e9c08037a5d8353b113bae15e87e9037f3f2374b987223a3833407b3a9`.
+No golden updates. Git publication is verified separately after the unchanged
+pre-push authority checks and new impact-selected test gate finish; the delivery
+report records the resulting commit and live GitHub main parity.

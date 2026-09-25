@@ -933,9 +933,16 @@ camera view, for lighting, shadows, indirect illumination, reflections, and
 water/glass transmission. Animated creatures use the same poses and textures as
 Standard. It can take a short time to prepare newly loaded geometry; during
 preparation, or when the hardware or safe scene budget cannot support it, the game
-uses Ultra and displays a notice. `F3` reports the active mode, internal ray-tracing
-resolution, and GPU frame time. Ray tracing is substantially more demanding than
+uses Ultra and displays a notice. Memory allowance scales to the GPU instead of
+using a fixed small limit, and temporary memory pressure retries automatically
+without reopening the world. `F3` reports the active mode, internal ray-tracing
+resolution, GPU frame time, and ray-memory usage/budget. Ray tracing is substantially more demanding than
 Standard; lower render distance or choose Ultra when necessary.
+
+Leaf canopies let a portion of daylight through, so wooded areas remain shaded
+but navigable. Denser leaf layers block more light; solid roofs and caves remain
+dark. Lighting changes smoothly through dawn and dusk rather than switching
+between separate canopy day/night brightness values.
 
 On supported Macs running macOS 26 or newer, MetalFX reduces ray noise while
 preserving texture detail. Other supported systems use the built-in filter.

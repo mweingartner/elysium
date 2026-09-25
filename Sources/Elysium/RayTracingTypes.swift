@@ -32,6 +32,11 @@ struct RayTracingDiagnostics {
     var instances = 0
     var triangles = 0
     var geometryBytes = 0
+    var residentGeometryBytes = 0
+    var transientGeometryBytes = 0
+    var memoryBudgetBytes = 0
+    var deviceAllocatedBytes = 0
+    var deviceRecommendedBytes = 0
     var width = 0
     var height = 0
     var historySamples = 0
@@ -46,7 +51,7 @@ struct RayTracingPrimitive {
     var uv01: SIMD4<Float>
     var uv2Light: SIMD4<Float>
     var normalEmission: SIMD4<Float>
-    /// tint RGB, atlas layer, flags (cutout=1, water=2, glass=4, entity=8, metal=16), animation
+    /// tint RGB, atlas layer, flags (cutout=1, water=2, glass=4, entity=8, metal=16, foliage=32), animation
     var material: SIMD4<UInt32>
 }
 
@@ -81,7 +86,6 @@ struct RayTracingUniforms {
 enum RayTracingLimits {
     static let maximumInstances = 16_384
     static let maximumTextures = 512
-    static let maximumGeometryBytes = 1_024 * 1_024 * 1_024
     static let maximumTriangles = 8_000_000
     static let buildsPerFrame = 12
     static let buildTrianglesPerFrame = 250_000
@@ -117,6 +121,9 @@ enum RayTracingMeshDecoder {
     private static func decodeLayers(_ layers: [(data:[UInt32],idx:[UInt32],count:Int,flags:UInt32)]) -> Decoded? {
         var output = Decoded()
         let tiles = allTileNames()
+        // Only the game's registered leaf materials transmit canopy light. Generic cutouts
+        // also include fences, doors, roots and machinery, which remain solid occluders.
+        let foliageTiles = Set(LEAF_WOODS.map { "\($0)_leaves" })
         for layer in layers {
             let layerFlags=layer.flags
             guard layer.data.count == layer.count * 7, layer.idx.count % 3 == 0,
@@ -148,6 +155,7 @@ enum RayTracingMeshDecoder {
                 var flags = anim == 1 ? UInt32(2) : layerFlags
                 let layerIndex = Int(a & 4095)
                 let name = tiles.indices.contains(layerIndex) ? tiles[layerIndex] : ""
+                if foliageTiles.contains(name) { flags |= 32 | 1 }
                 if ["iron_block","gold_block","copper_block","netherite_block","raw_iron_block","raw_gold_block"].contains(name)
                     || name.hasPrefix("cut_copper") || name.hasSuffix("_copper") { flags |= 16 }
                 output.primitives.append(RayTracingPrimitive(uv01: .init(v0.x,v0.y,v1.x,v1.y),

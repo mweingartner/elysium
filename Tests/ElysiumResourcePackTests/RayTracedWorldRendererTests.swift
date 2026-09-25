@@ -32,14 +32,20 @@ final class RayTracedWorldRendererTests: XCTestCase {
 
     private let section = SectionKey(cx: 0, sy: 0, cz: 0)
 
-    private func fixture(splitAlpha: Bool = false, slices: Int = 2, redTile: Int? = nil) throws -> Fixture {
+    private func fixture(splitAlpha: Bool = false, slices: Int = 2, redTile: Int? = nil,
+                         memoryBudgetOverride: Int? = nil) throws -> Fixture {
         guard let device = MTLCreateSystemDefaultDevice(), device.supportsRaytracing else {
             throw XCTSkip("Requires a Metal device with ray tracing support")
         }
         let queue = try XCTUnwrap(device.makeCommandQueue())
         // Capability is known supported: a shader/pipeline failure is a test
         // failure, not an unsupported-device skip.
-        let renderer = try XCTUnwrap(RayTracedWorldRenderer(device: device),
+#if DEBUG
+        let candidate = RayTracedWorldRenderer(device: device, memoryBudgetOverride: memoryBudgetOverride)
+#else
+        let candidate = RayTracedWorldRenderer(device: device)
+#endif
+        let renderer = try XCTUnwrap(candidate,
                                     "Production ray-tracing shader pipelines must compile")
         renderer.resize(width: 32, height: 32)
         let descriptor = MTLTextureDescriptor()
@@ -330,6 +336,88 @@ final class RayTracedWorldRendererTests: XCTestCase {
         XCTAssertEqual(complete.depthAt(16, 16), expectedDepth(distance: 4, frame: view), accuracy: 0.00001)
     }
 
+    func testWarmSceneAbsorbs26MeshCompletionBurstWithoutRasterFallbackOrStaleBlocks() throws {
+        let f=try fixture(), view=frame()
+        f.renderer.uploadSection(key:section,minY:0,mesh:mesh(opaque:plane(distance:4)))
+        _=try render(f,frame:view)
+        // The core mesher can complete 26 jobs together. Replace the visible surface as part
+        // of that burst: merely retaining the previous image/BLAS is not a valid solution.
+        for y in 0..<26 {
+            f.renderer.uploadSection(key:SectionKey(cx:0,sy:y,cz:0),minY:0,
+                mesh:mesh(opaque:plane(distance:7,halfSize:4)))
+        }
+        let updated=try render(f,frame:view)
+        XCTAssertTrue(f.renderer.diagnostics.ready)
+        XCTAssertEqual(f.renderer.diagnostics.pendingSections,0)
+        XCTAssertEqual(f.renderer.diagnostics.instances,26)
+        XCTAssertEqual(f.renderer.diagnostics.triangles,52)
+        XCTAssertEqual(updated.depthAt(16,16),expectedDepth(distance:7,frame:view),accuracy:0.00001)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,1,"Real participating edits still invalidate old lighting")
+    }
+
+    func testDistantAndEmptyMeshUpdatesDoNotResetParticipatingHistory() throws {
+        let f=try fixture(), view=frame()
+        f.renderer.uploadSection(key:section,minY:0,mesh:mesh(opaque:plane(distance:4)))
+        _=try render(f,frame:view)
+        let distant=SectionKey(cx:64,sy:0,cz:0)
+        f.renderer.uploadSection(key:distant,minY:0,mesh:mesh(opaque:plane(distance:7)))
+        _=try render(f,frame:view)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,2)
+        f.renderer.uploadSection(key:SectionKey(cx:1,sy:3,cz:0),minY:0,mesh:mesh())
+        _=try render(f,frame:view)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,3,"An empty new section has no participating geometry")
+        f.renderer.removeChunk(cx:64,cz:0,sectionCount:2)
+        let retained=try render(f,frame:view)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,4)
+        XCTAssertEqual(retained.depthAt(16,16),expectedDepth(distance:4,frame:view),accuracy:0.00001)
+    }
+
+    func testRemovingParticipatingSectionResetsHistoryAndRevealsFreshGeometry() throws {
+        let f=try fixture(), view=frame()
+        f.renderer.uploadSection(key:section,minY:0,mesh:mesh(opaque:plane(distance:4)))
+        // A separate section uses an offset world origin to place the backing plane at eye level.
+        f.renderer.uploadSection(key:SectionKey(cx:0,sy:1,cz:0),minY:-16,
+            mesh:mesh(opaque:plane(distance:7,halfSize:4)))
+        _=try render(f,frame:view); _=try render(f,frame:view)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,2)
+        f.renderer.uploadSection(key:section,minY:0,mesh:mesh())
+        let removed=try render(f,frame:view)
+        XCTAssertEqual(removed.depthAt(16,16),expectedDepth(distance:7,frame:view),accuracy:0.00001)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,1)
+        XCTAssertEqual(f.renderer.diagnostics.instances,1)
+    }
+
+    func testSmallSelectionBoundaryReversalRetainsBLASInsteadOfRebuilding() throws {
+        let f=try fixture()
+        var inside=frame(); inside.camera.x=1; inside.atmosphere.cameraTime.x=1
+        var outside=inside; outside.camera.x = -1; outside.atmosphere.cameraTime.x = -1
+        f.renderer.uploadSection(key:section,minY:0,mesh:mesh(opaque:plane(distance:4,halfSize:4)))
+        f.renderer.uploadSection(key:SectionKey(cx:5,sy:0,cz:0),minY:0,
+            mesh:mesh(opaque:plane(distance:6)))
+        _=try render(f,frame:inside)
+        f.renderer.refreshMemoryDiagnostics()
+        let retainedResident=f.renderer.diagnostics.residentGeometryBytes
+        XCTAssertEqual(f.renderer.diagnostics.sections,2)
+        _=try render(f,frame:inside)
+        let steadyTransient=f.renderer.diagnostics.transientGeometryBytes
+        XCTAssertGreaterThan(steadyTransient,0)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,2)
+        _=try render(f,frame:outside)
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertEqual(f.renderer.diagnostics.sections,1)
+        XCTAssertEqual(f.renderer.diagnostics.residentGeometryBytes,retainedResident,
+            "The 32-block retention margin must keep the just-exited section cached")
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,3,
+            "Camera-only selection changes must not reset otherwise valid scene history")
+        let returned=try render(f,frame:inside)
+        XCTAssertEqual(f.renderer.diagnostics.sections,2)
+        XCTAssertLessThanOrEqual(f.renderer.diagnostics.transientGeometryBytes,steadyTransient,
+            "Returning across the boundary must need only normal TLAS/tables, not BLAS build uploads")
+        XCTAssertEqual(returned.depthAt(16,16),expectedDepth(distance:4,frame:inside),accuracy:0.00001)
+        XCTAssertEqual(f.renderer.diagnostics.pendingSections,0)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,4)
+    }
+
     func testFailedNativeDenoisingActivatesFourSampleFallbackThenRecovers() throws {
         let f = try fixture()
         guard #available(macOS 26.0, *),
@@ -411,4 +499,205 @@ final class RayTracedWorldRendererTests: XCTestCase {
             })
         }
     }
+
+#if DEBUG
+    func testMemoryPressureShedsMarginCacheAndRecoversAtSameCameraAfterCompletion() throws {
+        let f = try fixture(memoryBudgetOverride: 64 * 1_024 * 1_024)
+        var inside = frame()
+        inside.camera.x = 1; inside.atmosphere.cameraTime.x = 1
+        var outside = inside
+        outside.camera.x = -1; outside.atmosphere.cameraTime.x = -1
+        f.renderer.uploadSection(key: section, minY: 0,
+            mesh: mesh(opaque: plane(distance: 4, halfSize: 4)))
+        _ = try render(f, frame: inside)
+        _ = try render(f, frame: inside)
+        // The render diagnostics retain the encode-time peak until refreshed. Derive a
+        // device-specific limit that fits one complete scene plus half a spare BLAS,
+        // but not a second cached BLAS alongside that scene's normal frame resources.
+        let oneScenePeak = f.renderer.diagnostics.geometryBytes
+        f.renderer.refreshMemoryDiagnostics()
+        let oneResident = f.renderer.diagnostics.residentGeometryBytes
+        XCTAssertGreaterThan(oneResident, 0)
+        XCTAssertGreaterThan(oneScenePeak, oneResident)
+        let selectedSceneBudget = oneScenePeak + oneResident / 2
+
+        let margin = SectionKey(cx: 5, sy: 0, cz: 0)
+        f.renderer.uploadSection(key: margin, minY: 0,
+            mesh: mesh(opaque: plane(distance: 6)))
+        let pending = try XCTUnwrap(f.queue.makeCommandBuffer())
+        XCTAssertNotNil(f.renderer.render(command: pending, frame: inside, atlas: f.atlas, entities: []))
+        XCTAssertEqual(f.renderer.diagnostics.sections, 2)
+        f.renderer.refreshMemoryDiagnostics()
+        let twoResident = f.renderer.diagnostics.residentGeometryBytes
+        XCTAssertGreaterThan(twoResident, oneResident)
+
+        // Crossing this boundary removes only the far BLAS from selection, not from the
+        // 32-block retention margin. It is still a consumer of the uncommitted frame.
+        f.renderer.memoryBudgetOverride = selectedSceneBudget
+        let rejected = try XCTUnwrap(f.queue.makeCommandBuffer())
+        XCTAssertNil(f.renderer.render(command: rejected, frame: outside, atlas: f.atlas, entities: []))
+        XCTAssertEqual(f.renderer.diagnostics.sections, 1)
+        XCTAssertFalse(f.renderer.diagnostics.ready)
+        XCTAssertNil(f.renderer.depthTexture)
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertEqual(f.renderer.diagnostics.residentGeometryBytes, twoResident,
+            "Dropping the optional cache must not uncharge a BLAS still owned by a pending GPU consumer")
+        XCTAssertGreaterThan(f.renderer.diagnostics.transientGeometryBytes, 0)
+
+        let completions = expectation(description: "Pressure-shed geometry remains valid through GPU completion")
+        completions.expectedFulfillmentCount = 2
+        pending.addCompletedHandler { _ in completions.fulfill() }
+        rejected.addCompletedHandler { _ in completions.fulfill() }
+        pending.commit(); rejected.commit()
+        wait(for: [completions], timeout: 10)
+        XCTAssertEqual(pending.status, .completed, String(describing: pending.error))
+        XCTAssertEqual(rejected.status, .completed, String(describing: rejected.error))
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertEqual(f.renderer.diagnostics.residentGeometryBytes, oneResident,
+            "The unselected margin BLAS must leave the cache under pressure, even while command objects remain alive")
+        XCTAssertEqual(f.renderer.diagnostics.transientGeometryBytes, 0)
+
+        // Do not move farther, increase the budget, re-upload geometry or reopen the world.
+        let recovered = try render(f, frame: outside)
+        XCTAssertEqual(recovered.depthAt(16, 16), expectedDepth(distance: 4, frame: outside), accuracy: 0.00001)
+        XCTAssertTrue(f.renderer.diagnostics.ready)
+        XCTAssertEqual(f.renderer.diagnostics.pendingSections, 0)
+        XCTAssertLessThanOrEqual(f.renderer.diagnostics.geometryBytes, selectedSceneBudget)
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertEqual(f.renderer.diagnostics.residentGeometryBytes, oneResident)
+        XCTAssertEqual(f.renderer.diagnostics.transientGeometryBytes, 0)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples, 1)
+    }
+
+    func testGeometryBudgetFailureRecoversWithoutClearingOrReopeningWorld() throws {
+        let f = try fixture(memoryBudgetOverride: 1), view = frame()
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        let rejected = try XCTUnwrap(f.queue.makeCommandBuffer())
+        XCTAssertNil(f.renderer.render(command: rejected, frame: view, atlas: f.atlas, entities: []))
+        XCTAssertFalse(f.renderer.diagnostics.ready)
+        XCTAssertNil(f.renderer.depthTexture)
+        rejected.commit()
+        rejected.waitUntilCompleted()
+        XCTAssertEqual(rejected.status, .completed, String(describing: rejected.error))
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertEqual(f.renderer.diagnostics.transientGeometryBytes, 0)
+        XCTAssertEqual(f.renderer.diagnostics.residentGeometryBytes, 0,
+                       "Rejected geometry must not allocate a resident acceleration structure")
+
+        // The source section remains admitted. Only available capacity changes;
+        // no clear(), re-upload, settings toggle or world reload is allowed.
+        f.renderer.memoryBudgetOverride = 64 * 1_024 * 1_024
+        let recovered = try render(f, frame: view)
+        XCTAssertEqual(recovered.depthAt(16, 16), expectedDepth(distance: 4, frame: view), accuracy: 0.00001)
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertTrue(f.renderer.diagnostics.ready)
+        XCTAssertEqual(f.renderer.diagnostics.pendingSections, 0)
+        XCTAssertGreaterThan(f.renderer.diagnostics.residentGeometryBytes, 0)
+        XCTAssertLessThanOrEqual(f.renderer.diagnostics.geometryBytes, f.renderer.diagnostics.memoryBudgetBytes)
+    }
+
+    func testExhaustedGlobalHeadroomFallsBackAndRecoversExistingScene() throws {
+        let f = try fixture(memoryBudgetOverride: 64 * 1_024 * 1_024), view = frame()
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        _ = try render(f, frame: view)
+        f.renderer.refreshMemoryDiagnostics()
+        let resident = f.renderer.diagnostics.residentGeometryBytes
+        XCTAssertGreaterThan(resident, 0)
+
+        // Even a built scene needs temporary TLAS/instance tables each frame.
+        // Exhausting device-wide headroom must not present stale or partial RT.
+        f.renderer.memoryHeadroomOverride = 0
+        let rejected = try XCTUnwrap(f.queue.makeCommandBuffer())
+        XCTAssertNil(f.renderer.render(command: rejected, frame: view, atlas: f.atlas, entities: []))
+        XCTAssertFalse(f.renderer.diagnostics.ready)
+        XCTAssertNil(f.renderer.depthTexture)
+        rejected.commit()
+        rejected.waitUntilCompleted()
+        XCTAssertEqual(rejected.status, .completed, String(describing: rejected.error))
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertEqual(f.renderer.diagnostics.transientGeometryBytes, 0)
+
+        f.renderer.memoryHeadroomOverride = nil
+        let recovered = try render(f, frame: view)
+        XCTAssertEqual(recovered.depthAt(16, 16), expectedDepth(distance: 4, frame: view), accuracy: 0.00001)
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertTrue(f.renderer.diagnostics.ready)
+        XCTAssertEqual(f.renderer.diagnostics.residentGeometryBytes, resident)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples, 1, "Recovery must discard stale lighting history")
+    }
+
+    func testCompletedSubmissionsReleaseScratchUploadsAndRetiredGeometry() throws {
+        let f = try fixture(memoryBudgetOverride: 64 * 1_024 * 1_024), view = frame()
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        let first = try XCTUnwrap(f.queue.makeCommandBuffer())
+        XCTAssertNotNil(f.renderer.render(command: first, frame: view, atlas: f.atlas, entities: []))
+        f.renderer.refreshMemoryDiagnostics()
+        let oneResident = f.renderer.diagnostics.residentGeometryBytes
+        XCTAssertGreaterThan(oneResident, 0)
+        XCTAssertGreaterThan(f.renderer.diagnostics.transientGeometryBytes, 0,
+                             "Scratch/upload/scene buffers remain charged while their GPU consumer is pending")
+
+        // Retire the first mesh before either GPU submission has run. The old
+        // BLAS and upload buffers must remain alive for the first command.
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 6)))
+        let second = try XCTUnwrap(f.queue.makeCommandBuffer())
+        XCTAssertNotNil(f.renderer.render(command: second, frame: view, atlas: f.atlas, entities: []))
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertGreaterThan(f.renderer.diagnostics.residentGeometryBytes, oneResident)
+        let completions = expectation(description: "Both real GPU submissions release their completion-owned resources")
+        completions.expectedFulfillmentCount = 2
+        first.addCompletedHandler { _ in completions.fulfill() }
+        second.addCompletedHandler { _ in completions.fulfill() }
+        first.commit()
+        second.commit()
+        wait(for: [completions], timeout: 10)
+        XCTAssertEqual(first.status, .completed, String(describing: first.error))
+        XCTAssertEqual(second.status, .completed, String(describing: second.error))
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertEqual(f.renderer.diagnostics.transientGeometryBytes, 0)
+        XCTAssertEqual(f.renderer.diagnostics.residentGeometryBytes, oneResident,
+                       "Only the current two-triangle BLAS survives; command objects are deliberately still retained")
+        XCTAssertEqual(f.renderer.diagnostics.geometryBytes, oneResident)
+        let current = try render(f, frame: view)
+        XCTAssertEqual(current.depthAt(16, 16), expectedDepth(distance: 6, frame: view), accuracy: 0.00001)
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertEqual(f.renderer.diagnostics.transientGeometryBytes, 0,
+                       "Steady-state TLAS and instance tables must not accumulate either")
+    }
+
+    func testOutOfRangeAccelerationStructuresEvictAndRebuildOnReturn() throws {
+        let f = try fixture(memoryBudgetOverride: 64 * 1_024 * 1_024)
+        let home = frame()
+        var away = home
+        away.camera.x = 256
+        away.atmosphere.cameraTime.x = 256
+        let distant = SectionKey(cx: 16, sy: 0, cz: 0)
+        f.renderer.uploadSection(key: section, minY: 0, mesh: mesh(opaque: plane(distance: 4)))
+        f.renderer.uploadSection(key: distant, minY: 0, mesh: mesh(opaque: plane(distance: 6)))
+        let initial = try render(f, frame: home)
+        XCTAssertEqual(initial.depthAt(16, 16), expectedDepth(distance: 4, frame: home), accuracy: 0.00001)
+        f.renderer.refreshMemoryDiagnostics()
+        let oneResident = f.renderer.diagnostics.residentGeometryBytes
+        XCTAssertGreaterThan(oneResident, 0)
+        XCTAssertEqual(f.renderer.diagnostics.sections, 1)
+
+        let traveled = try render(f, frame: away)
+        XCTAssertEqual(traveled.depthAt(16, 16), expectedDepth(distance: 6, frame: away), accuracy: 0.00001)
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertEqual(f.renderer.diagnostics.sections, 1)
+        XCTAssertEqual(f.renderer.diagnostics.residentGeometryBytes, oneResident,
+                       "Leaving the selection radius evicts the old BLAS instead of accumulating both")
+        XCTAssertEqual(f.renderer.diagnostics.transientGeometryBytes, 0)
+
+        // No section is re-uploaded. A return visit must rebuild from its
+        // retained packed source, not show an empty world or a stale far BLAS.
+        let returned = try render(f, frame: home)
+        XCTAssertEqual(returned.depthAt(16, 16), expectedDepth(distance: 4, frame: home), accuracy: 0.00001)
+        f.renderer.refreshMemoryDiagnostics()
+        XCTAssertEqual(f.renderer.diagnostics.sections, 1)
+        XCTAssertEqual(f.renderer.diagnostics.residentGeometryBytes, oneResident)
+        XCTAssertEqual(f.renderer.diagnostics.transientGeometryBytes, 0)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples, 1)
+    }
+#endif
 }

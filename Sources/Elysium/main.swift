@@ -1104,6 +1104,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
                 : (game.settings.shader == "ultra" ? "Ultra" : "Standard")
             hud.graphicsNotice = game.settings.shader == "raytraced" && !renderer.rayTracingActive
                 ? "Ray tracing: \(ray.status). Using Ultra." : nil
+            hud.debugInfo["graphicsMemory"] = game.settings.shader == "raytraced"
+                ? rayTracingMemorySummary(ray) : nil
             hud.debugInfo["mem"] = "n/a"
             audio.applyVolumes(game.settings.volumes)
             applyFpsMode()

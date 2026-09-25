@@ -8,33 +8,37 @@ import ElysiumCore
 final class RayTracedWorldRenderer {
     private final class MemoryLedger {
         private let lock=NSLock()
-        private var count=0
-        var bytes: Int { lock.lock(); defer { lock.unlock() }; return count }
-        func change(_ delta: Int) { lock.lock(); count+=delta; lock.unlock() }
+        private var resident=0,transient=0
+        var snapshot: (resident: Int,transient: Int) {
+            lock.lock(); defer { lock.unlock() }; return (resident,transient)
+        }
+        func changeResident(_ delta: Int) { lock.lock(); resident+=delta; lock.unlock() }
+        func changeTransient(_ delta: Int) { lock.lock(); transient+=delta; lock.unlock() }
     }
     private final class Geometry {
         let structure: MTLAccelerationStructure
-        let vertices: MTLBuffer
-        let indices: MTLBuffer
-        let primitives: MTLBuffer
         let triangleCount: Int
         let bytes: Int
         let emitters: [RayTracingLight]
         let ledger: MemoryLedger
-        init(structure: MTLAccelerationStructure, vertices: MTLBuffer, indices: MTLBuffer,
-             primitives: MTLBuffer, triangles: Int, bytes: Int, emitters: [RayTracingLight],ledger: MemoryLedger) {
-            self.structure=structure; self.vertices=vertices; self.indices=indices
-            self.primitives=primitives; self.triangleCount=triangles; self.bytes=bytes; self.emitters=emitters
-            self.ledger=ledger; ledger.change(bytes)
+        init(structure: MTLAccelerationStructure,triangles: Int,bytes: Int,
+             emitters: [RayTracingLight],ledger: MemoryLedger) {
+            self.structure=structure; self.triangleCount=triangles; self.bytes=bytes; self.emitters=emitters
+            self.ledger=ledger; ledger.changeResident(bytes)
         }
-        deinit { ledger.change(-bytes) }
+        deinit { ledger.changeResident(-bytes) }
     }
     private final class Section {
         let key: SectionKey
         let minY: Int
-        var mesh: MeshOutput?
+        let revision: UInt64
+        // Packed source is reconstructible after a distance-based BLAS eviction. The original
+        // COW arrays are smaller than retaining duplicate decoded Metal build-input buffers.
+        let mesh: MeshOutput
         var geometry: Geometry?
-        init(key: SectionKey,minY: Int,mesh: MeshOutput) { self.key=key; self.minY=minY; self.mesh=mesh }
+        init(key: SectionKey,minY: Int,mesh: MeshOutput,revision: UInt64) {
+            self.key=key; self.minY=minY; self.mesh=mesh; self.revision=revision
+        }
     }
     private struct SceneInstance {
         let key: String
@@ -51,10 +55,22 @@ final class RayTracedWorldRenderer {
     private final class Submission {
         var geometry: [Geometry] = []
         var resources: [MTLResource] = []
-        var scratchBytes = 0
+        var transientBytes = 0
         let ledger: MemoryLedger
         init(ledger: MemoryLedger) { self.ledger=ledger }
-        deinit { ledger.change(-scratchBytes) }
+        func retainTransient(_ resource: MTLResource) {
+            resources.append(resource)
+            transientBytes+=resource.allocatedSize
+            ledger.changeTransient(resource.allocatedSize)
+        }
+        func finish() {
+            // A caller may retain its completed command buffer. Release at completion rather
+            // than relying on the command buffer/closure's eventual autorelease/deinit.
+            let released=transientBytes; transientBytes=0
+            resources.removeAll(); geometry.removeAll()
+            ledger.changeTransient(-released)
+        }
+        deinit { finish() }
     }
     let device: MTLDevice
     private let pathPipeline: MTLComputePipelineState
@@ -64,9 +80,15 @@ final class RayTracedWorldRenderer {
     private let textureEncoder: MTLArgumentEncoder
     private let whiteTexture: MTLTexture
     private var sections: [SectionKey: Section] = [:]
+    private var requiredSectionKeys: Set<SectionKey> = []
     private var entities: [String: Geometry] = [:]
     private var sectionsRevision: UInt64 = 1
-    private var historyRevision: UInt64 = 0
+    private var previousParticipatingSections: [SectionKey:UInt64] = [:]
+    private var previousSourceRevision: UInt64 = 0
+    private var hasPresentedCompleteScene=false
+    private static let warmBuildsPerFrame=64
+    private static let warmBuildTrianglesPerFrame=1_000_000
+    private static let retentionMargin: Double=32
     private var previousWorldIdentity: UInt64 = 0
     private var previousAtlasGeneration: UInt64 = 0
     private var previousCamera = SIMD3<Double>(repeating: 0)
@@ -88,7 +110,15 @@ final class RayTracedWorldRenderer {
     private var filtered: MTLTexture?
     private var desiredWidth = 1, desiredHeight = 1
     private var allocationFailure: String?
+    private var memoryPressureReason: String?
     private let memoryLedger=MemoryLedger()
+    private let memoryPolicy: RayTracingMemoryBudget
+#if DEBUG
+    // Internal fault injection only; no production setting/environment selector can change
+    // the memory policy or manufacture device headroom.
+    var memoryBudgetOverride: Int?
+    var memoryHeadroomOverride: Int?
+#endif
     private lazy var denoiser=RayTracingDenoiser(device:device)
     private var previousUsedDenoiser=false
     private var denoiserFailed=false
@@ -102,6 +132,8 @@ final class RayTracedWorldRenderer {
     init?(device: MTLDevice) {
         guard device.supportsRaytracing else { return nil }
         self.device=device
+        memoryPolicy=RayTracingMemoryBudget(recommendedWorkingSet:device.recommendedMaxWorkingSetSize,
+            physicalMemory:ProcessInfo.processInfo.physicalMemory)
         do {
             let options=MTLCompileOptions(); options.languageVersion = .version3_1
             let library=try device.makeLibrary(source: ELYSIUM_ENVIRONMENT_MSL + "\n" + RAY_TRACING_MSL,options: options)
@@ -127,10 +159,60 @@ final class RayTracedWorldRenderer {
         }
     }
 
+#if DEBUG
+    convenience init?(device: MTLDevice,memoryBudgetOverride: Int?) {
+        self.init(device:device)
+        self.memoryBudgetOverride=memoryBudgetOverride
+    }
+#endif
+
+    /// Refresh without encoding work; completion-bound resource release is observable even
+    /// while raster fallback is active. These values describe RT resources, not all GPU memory.
+    func refreshMemoryDiagnostics() {
+        let snapshot=memoryLedger.snapshot
+        let tracked=RayTracingMemoryBudget.saturatingAdd(snapshot.resident,snapshot.transient)
+        let allocated=device.currentAllocatedSize
+        let available=memoryPolicy.availability(deviceAllocatedBytes:allocated,trackedBytes:tracked)
+        var budget=available.effectiveBudgetBytes
+#if DEBUG
+        if let memoryBudgetOverride { budget=min(budget,max(0,memoryBudgetOverride)) }
+        if let memoryHeadroomOverride {
+            budget=min(budget,RayTracingMemoryBudget.saturatingAdd(tracked,max(0,memoryHeadroomOverride)))
+        }
+#endif
+        diagnostics.residentGeometryBytes=snapshot.resident
+        diagnostics.transientGeometryBytes=snapshot.transient
+        diagnostics.geometryBytes=tracked
+        diagnostics.memoryBudgetBytes=budget
+        diagnostics.deviceAllocatedBytes=allocated
+        diagnostics.deviceRecommendedBytes=Int(clamping:device.recommendedMaxWorkingSetSize)
+    }
+
+    private func admitsAllocation(_ bytes: Int) -> Bool {
+        refreshMemoryDiagnostics()
+        var available=max(0,diagnostics.memoryBudgetBytes-diagnostics.geometryBytes)
+        if bytes>available {
+            // The retention margin is optional performance caching, never a reason to deny a
+            // complete selected scene that would otherwise fit. Drop those BLAS references
+            // before retrying admission. Submitted frames retain their own references, so
+            // their bytes remain charged until real GPU completion and cannot be overspent.
+            for section in sections.values where !requiredSectionKeys.contains(section.key) {
+                section.geometry=nil
+            }
+            refreshMemoryDiagnostics()
+            available=max(0,diagnostics.memoryBudgetBytes-diagnostics.geometryBytes)
+        }
+        guard bytes>=0,bytes<=available else {
+            memoryPressureReason="Ray memory budget reached; retrying in Ultra"
+            return false
+        }
+        return true
+    }
+
     func uploadSection(key: SectionKey,minY: Int,mesh: MeshOutput) {
         let nonempty = !mesh.opaque.idx.isEmpty || !mesh.cutout.idx.isEmpty || !mesh.translucent.idx.isEmpty
-        sections[key]=nonempty ? Section(key:key,minY:minY,mesh:mesh) : nil
         sectionsRevision &+= 1
+        sections[key]=nonempty ? Section(key:key,minY:minY,mesh:mesh,revision:sectionsRevision) : nil
     }
     func removeChunk(cx: Int,cz: Int,sectionCount: Int) {
         for sy in 0..<sectionCount { sections.removeValue(forKey:SectionKey(cx:cx,sy:sy,cz:cz)) }
@@ -138,7 +220,10 @@ final class RayTracedWorldRenderer {
     }
     func clear() {
         sections.removeAll(); entities.removeAll(); previousTransforms.removeAll()
+        requiredSectionKeys.removeAll()
+        previousParticipatingSections.removeAll(); previousSourceRevision=0; hasPresentedCompleteScene=false
         sectionsRevision &+= 1; historyFrames=0; sampleIndex=0; allocationFailure=nil
+        memoryPressureReason=nil
         diagnosticsLock.lock(); completedError=nil; diagnosticsLock.unlock()
     }
     func resize(width: Int,height: Int) {
@@ -161,28 +246,30 @@ final class RayTracedWorldRenderer {
         normals=(0..<2).compactMap { texture(.rgba16Float,"RT normal/distance history \($0)") }
         if raw == nil || motion == nil || diffuseAlbedo == nil || specularAlbedo == nil || filtered == nil || colors.count != 2 || depths.count != 2 || normals.count != 2 {
             allocationFailure="Insufficient GPU memory for ray tracing targets"
-        }
+        } else { allocationFailure=nil }
     }
 
     private func fail(_ reason: String) -> MTLTexture? {
+        refreshMemoryDiagnostics()
         diagnostics.ready=false; diagnostics.status=reason; historyFrames=0; depthTexture=nil
         return nil
     }
-    private func makeBuffer<T>(_ values: [T],label: String) -> MTLBuffer? {
+    private func makeBuffer<T>(_ values: [T],label: String,submission: Submission) -> MTLBuffer? {
         guard !values.isEmpty else { return nil }
+        let bytes=values.count*MemoryLayout<T>.stride
+        let estimate=max(bytes,device.heapBufferSizeAndAlign(length:bytes,options:.storageModeShared).size)
+        guard admitsAllocation(estimate) else { return nil }
         let result=values.withUnsafeBytes { device.makeBuffer(bytes:$0.baseAddress!,length:$0.count,options:.storageModeShared) }
-        result?.label=label; return result
+        if let result { result.label=label; submission.retainTransient(result) }
+        return result
     }
     private func build(_ decoded: RayTracingMeshDecoder.Decoded,command: MTLCommandBuffer,
-                       submission: Submission,label: String,availableBytes: Int) -> Geometry? {
-        guard decoded.byteCount<=availableBytes else {
-            allocationFailure="Ray scene exceeds the safe memory budget; reopen with a lower render distance"
-            return nil
-        }
+                       submission: Submission,label: String) -> Geometry? {
+        guard admitsAllocation(decoded.byteCount) else { return nil }
         guard !decoded.primitives.isEmpty,
-              let vertices=makeBuffer(decoded.positions,label:label+" positions"),
-              let indices=makeBuffer(decoded.indices,label:label+" indices"),
-              let primitives=makeBuffer(decoded.primitives,label:label+" materials") else { return nil }
+              let vertices=makeBuffer(decoded.positions,label:label+" positions",submission:submission),
+              let indices=makeBuffer(decoded.indices,label:label+" indices",submission:submission),
+              let primitives=makeBuffer(decoded.primitives,label:label+" materials",submission:submission) else { return nil }
         let triangles=MTLAccelerationStructureTriangleGeometryDescriptor()
         triangles.vertexBuffer=vertices; triangles.vertexStride=MemoryLayout<SIMD3<Float>>.stride
         triangles.vertexFormat = .float3; triangles.indexBuffer=indices; triangles.indexType = .uint32
@@ -191,21 +278,19 @@ final class RayTracedWorldRenderer {
         triangles.primitiveDataElementSize=MemoryLayout<RayTracingPrimitive>.stride
         let descriptor=MTLPrimitiveAccelerationStructureDescriptor(); descriptor.geometryDescriptors=[triangles]
         let sizes=device.accelerationStructureSizes(descriptor:descriptor)
-        guard decoded.byteCount+sizes.accelerationStructureSize+sizes.buildScratchBufferSize<=availableBytes else {
-            allocationFailure="Ray scene exceeds the safe memory budget; reopen with a lower render distance"
-            return nil
-        }
+        let scratchEstimate=max(1,device.heapBufferSizeAndAlign(length:max(1,sizes.buildScratchBufferSize),options:.storageModePrivate).size)
+        guard admitsAllocation(RayTracingMemoryBudget.saturatingAdd(sizes.accelerationStructureSize,scratchEstimate)) else { return nil }
         guard let structure=device.makeAccelerationStructure(size:sizes.accelerationStructureSize),
               let scratch=device.makeBuffer(length:max(1,sizes.buildScratchBufferSize),options:.storageModePrivate),
               let encoder=command.makeAccelerationStructureCommandEncoder() else { return nil }
         structure.label=label
         encoder.build(accelerationStructure:structure,descriptor:descriptor,scratchBuffer:scratch,scratchBufferOffset:0)
         encoder.endEncoding()
-        submission.resources.append(scratch)
-        submission.scratchBytes += sizes.buildScratchBufferSize
-        memoryLedger.change(sizes.buildScratchBufferSize)
-        let geometry=Geometry(structure:structure,vertices:vertices,indices:indices,primitives:primitives,
-                              triangles:decoded.primitives.count,bytes:decoded.byteCount+sizes.accelerationStructureSize,
+        submission.retainTransient(scratch)
+        // Metal copies both geometry and per-primitive payload into the BLAS. Build-input
+        // buffers stay in Submission until completion, not in the persistent Geometry cache.
+        let geometry=Geometry(structure:structure,
+                              triangles:decoded.primitives.count,bytes:structure.allocatedSize,
                               emitters:decoded.emitters,ledger:memoryLedger)
         submission.geometry.append(geometry)
         return geometry
@@ -235,6 +320,8 @@ final class RayTracedWorldRenderer {
                 entities dynamic: [RayTracingEntityInstance],blocks: [RayTracingBlockInstance] = []) -> MTLTexture? {
         diagnosticsLock.lock(); let gpuTime=completedGPUTime, gpuError=completedError; diagnosticsLock.unlock()
         diagnostics.gpuMilliseconds=gpuTime
+        memoryPressureReason=nil
+        refreshMemoryDiagnostics()
         if let gpuError { return fail("Ray tracing GPU failure: "+gpuError) }
         if let allocationFailure { return fail(allocationFailure) }
         guard let raw,let motion,let diffuseAlbedo,let specularAlbedo,let filtered,colors.count==2,depths.count==2,normals.count==2 else {
@@ -243,7 +330,7 @@ final class RayTracedWorldRenderer {
         let submission=Submission(ledger:memoryLedger)
         // Completion owns every buffer/AS used by this submission, including replacement/eviction cases.
         command.addCompletedHandler { [weak self,submission] completed in
-            _=submission.resources.count; _=submission.geometry.count
+            submission.finish()
             guard let self else { return }
             self.diagnosticsLock.lock()
             if completed.status == .error { self.completedError=completed.error?.localizedDescription ?? "Unknown GPU error" }
@@ -265,43 +352,54 @@ final class RayTracedWorldRenderer {
         }
         diagnostics.sections=selected.count
         diagnostics.width=desiredWidth; diagnostics.height=desiredHeight
+        requiredSectionKeys=Set(selected.map(\.key))
+        // Retain a narrow margin beyond selection: walking back across a chunk/radius boundary
+        // should not continually destroy and rebuild the same BLAS. Only selected geometry
+        // enters the scene; this cache margin never admits an incomplete ray scene.
+        let retainRange=range+Self.retentionMargin
+        for section in sections.values where section.geometry != nil {
+            let dx=Double(section.key.cx*16+8)-frame.camera.x, dz=Double(section.key.cz*16+8)-frame.camera.z
+            if dx*dx+dz*dz>retainRange*retainRange { section.geometry=nil }
+        }
+        let activeEntityKeys=Set(dynamic.map { $0.geometry.key }+blocks.map { "block:"+$0.geometry.key })
+        // Eviction precedes admission. In-flight submissions still own retired BLAS objects,
+        // and their bytes remain charged until completion; packed terrain sources can rebuild.
+        entities=entities.filter { activeEntityKeys.contains($0.key) }
+        refreshMemoryDiagnostics()
         guard selected.count+dynamic.count+blocks.count <= RayTracingLimits.maximumInstances else {
             return fail("Ray scene exceeds the safe instance budget; using raster")
         }
         var built=0,builtTriangles=0
-        guard memoryLedger.bytes<RayTracingLimits.maximumGeometryBytes else {
-            allocationFailure="Ray scene exceeds the safe memory budget; reopen with a lower render distance"
-            return fail(allocationFailure!)
-        }
+        // Terrain meshing can deliver 26 completions at once. Once a complete RT scene has
+        // been shown, a bounded catch-up slice handles that ordinary burst in the same frame
+        // instead of flashing Ultra lighting for its second half. Cold startup stays smaller;
+        // genuinely larger work still waits for a complete, fresh scene rather than hiding edits.
+        let buildLimit=hasPresentedCompleteScene ? Self.warmBuildsPerFrame:RayTracingLimits.buildsPerFrame
+        let triangleBuildLimit=hasPresentedCompleteScene ? Self.warmBuildTrianglesPerFrame:RayTracingLimits.buildTrianglesPerFrame
         for section in selected where section.geometry == nil {
-            guard built<RayTracingLimits.buildsPerFrame,builtTriangles<RayTracingLimits.buildTrianglesPerFrame else { break }
-            guard let source=section.mesh,let decoded=RayTracingMeshDecoder.decode(source) else {
+            guard built<buildLimit,builtTriangles<triangleBuildLimit else { break }
+            guard let decoded=RayTracingMeshDecoder.decode(section.mesh) else {
                 return fail("Invalid section geometry; using raster")
             }
-            guard let geometry=build(decoded,command:command,submission:submission,label:"RT section \(section.key)",
-                availableBytes:RayTracingLimits.maximumGeometryBytes-memoryLedger.bytes) else {
-                return fail(allocationFailure ?? "Unable to allocate ray section geometry; using raster")
+            guard let geometry=build(decoded,command:command,submission:submission,label:"RT section \(section.key)") else {
+                diagnostics.pendingSections=selected.filter { $0.geometry == nil }.count
+                return fail(memoryPressureReason ?? "Unable to allocate ray section geometry; retrying in Ultra")
             }
-            section.geometry=geometry; section.mesh=nil; built+=1; builtTriangles+=geometry.triangleCount
+            section.geometry=geometry; built+=1; builtTriangles+=geometry.triangleCount
         }
-        let activeEntityKeys=Set(dynamic.map { $0.geometry.key }+blocks.map { "block:"+$0.geometry.key })
-        // Dead/evicted skins cannot accumulate for an unlimited play session.
-        entities=entities.filter { activeEntityKeys.contains($0.key) }
         for instance in dynamic where entities[instance.geometry.key] == nil {
-            guard built<RayTracingLimits.buildsPerFrame,builtTriangles<RayTracingLimits.buildTrianglesPerFrame else { break }
+            guard built<buildLimit,builtTriangles<triangleBuildLimit else { break }
             guard let decoded=decodeEntity(instance.geometry),!decoded.primitives.isEmpty,
-                  let geometry=build(decoded,command:command,submission:submission,label:"RT entity "+instance.geometry.key,
-                    availableBytes:RayTracingLimits.maximumGeometryBytes-memoryLedger.bytes) else {
-                return fail(allocationFailure ?? "Invalid or unavailable entity geometry; using raster")
+                  let geometry=build(decoded,command:command,submission:submission,label:"RT entity "+instance.geometry.key) else {
+                return fail(memoryPressureReason ?? "Invalid or unavailable entity geometry; using raster")
             }
             entities[instance.geometry.key]=geometry; built+=1; builtTriangles+=geometry.triangleCount
         }
         for instance in blocks where entities["block:"+instance.geometry.key] == nil {
-            guard built<RayTracingLimits.buildsPerFrame,builtTriangles<RayTracingLimits.buildTrianglesPerFrame else { break }
+            guard built<buildLimit,builtTriangles<triangleBuildLimit else { break }
             guard let decoded=RayTracingMeshDecoder.decodePacked(data:instance.geometry.vertices,indices:instance.geometry.indices),!decoded.primitives.isEmpty,
-                  let geometry=build(decoded,command:command,submission:submission,label:"RT block "+instance.geometry.key,
-                    availableBytes:RayTracingLimits.maximumGeometryBytes-memoryLedger.bytes) else {
-                return fail(allocationFailure ?? "Invalid or unavailable moving block geometry; using raster")
+                  let geometry=build(decoded,command:command,submission:submission,label:"RT block "+instance.geometry.key) else {
+                return fail(memoryPressureReason ?? "Invalid or unavailable moving block geometry; using raster")
             }
             entities["block:"+instance.geometry.key]=geometry; built+=1; builtTriangles+=geometry.triangleCount
         }
@@ -309,10 +407,7 @@ final class RayTracedWorldRenderer {
             + Set(dynamic.filter { entities[$0.geometry.key] == nil }.map { $0.geometry.key }).count
             + Set(blocks.filter { entities["block:"+$0.geometry.key] == nil }.map { $0.geometry.key }).count
         diagnostics.pendingSections=pending
-        diagnostics.geometryBytes=memoryLedger.bytes
-        guard diagnostics.geometryBytes <= RayTracingLimits.maximumGeometryBytes else {
-            return fail("Ray scene exceeds the safe memory budget; using raster")
-        }
+        refreshMemoryDiagnostics()
         if pending>0 { return fail("Preparing ray scene (\(pending) meshes remaining)") }
         var instances: [SceneInstance]=[]
         for section in selected {
@@ -396,12 +491,16 @@ final class RayTracedWorldRenderer {
                 light.colorPower.w *= Float(width); return light
             }
         }
-        guard let descriptorBuffer=makeBuffer(descriptors,label:"RT instance descriptors"),
-              let instanceBuffer=makeBuffer(instanceUniforms,label:"RT instance materials"),
-              let lightBuffer=makeBuffer(lights.isEmpty ? [.init(positionRadius:.zero,colorPower:.zero)] : lights,label:"RT emissive lights"),
+        let argumentsEstimate=max(textureEncoder.encodedLength,
+            device.heapBufferSizeAndAlign(length:textureEncoder.encodedLength,options:.storageModeShared).size)
+        guard let descriptorBuffer=makeBuffer(descriptors,label:"RT instance descriptors",submission:submission),
+              let instanceBuffer=makeBuffer(instanceUniforms,label:"RT instance materials",submission:submission),
+              let lightBuffer=makeBuffer(lights.isEmpty ? [.init(positionRadius:.zero,colorPower:.zero)] : lights,label:"RT emissive lights",submission:submission),
+              admitsAllocation(argumentsEstimate),
               let textureArguments=device.makeBuffer(length:textureEncoder.encodedLength,options:.storageModeShared) else {
-            return fail("Unable to allocate ray scene tables; using raster")
+            return fail(memoryPressureReason ?? "Unable to allocate ray scene tables; using raster")
         }
+        submission.retainTransient(textureArguments)
         textureEncoder.setArgumentBuffer(textureArguments,offset:0)
         for i in 0..<RayTracingLimits.maximumTextures { textureEncoder.setTexture(i<textures.count ? textures[i]:whiteTexture,index:i) }
         let sceneDescriptor=MTLInstanceAccelerationStructureDescriptor()
@@ -409,20 +508,30 @@ final class RayTracedWorldRenderer {
         sceneDescriptor.instanceDescriptorBuffer=descriptorBuffer
         sceneDescriptor.instanceDescriptorStride=MemoryLayout<MTLAccelerationStructureInstanceDescriptor>.stride
         let size=device.accelerationStructureSizes(descriptor:sceneDescriptor)
-        guard let scene=device.makeAccelerationStructure(size:size.accelerationStructureSize),
+        let topScratchEstimate=max(1,device.heapBufferSizeAndAlign(length:max(1,size.buildScratchBufferSize),options:.storageModePrivate).size)
+        guard admitsAllocation(RayTracingMemoryBudget.saturatingAdd(size.accelerationStructureSize,topScratchEstimate)),
+              let scene=device.makeAccelerationStructure(size:size.accelerationStructureSize),
               let scratch=device.makeBuffer(length:max(1,size.buildScratchBufferSize),options:.storageModePrivate),
               let buildEncoder=command.makeAccelerationStructureCommandEncoder() else {
-            return fail("Unable to allocate top-level ray scene; using raster")
+            return fail(memoryPressureReason ?? "Unable to allocate top-level ray scene; using raster")
         }
+        submission.retainTransient(scene); submission.retainTransient(scratch)
         buildEncoder.build(accelerationStructure:scene,descriptor:sceneDescriptor,scratchBuffer:scratch,scratchBufferOffset:0)
         buildEncoder.endEncoding()
         submission.geometry.append(contentsOf:instances.map(\.geometry))
-        submission.resources.append(contentsOf:[scene,scratch,descriptorBuffer,instanceBuffer,lightBuffer,textureArguments,atlas,whiteTexture])
+        submission.resources.append(contentsOf:[atlas,whiteTexture])
         submission.resources.append(contentsOf:textures)
         submission.resources.append(contentsOf:[raw,motion,diffuseAlbedo,specularAlbedo,filtered]+colors+depths+normals)
         let dimension=frame.atmosphere.options.x,clock=frame.atmosphere.cameraTime.w
+        let participatingSections=Dictionary(uniqueKeysWithValues:selected.map { ($0.key,$0.revision) })
+        // Camera-only entry/exit from the selection radius is not a scene edit. Depth/motion
+        // reject newly visible pixels locally. Reset globally for actual changes/removals to
+        // previously participating geometry, or new uploads entering current coverage.
+        let participatingChanged=previousParticipatingSections.contains { key,revision in
+            sections[key]?.revision != revision
+        } || selected.contains { previousParticipatingSections[$0.key] == nil && $0.revision>previousSourceRevision }
         let discontinuity = frame.worldIdentity != previousWorldIdentity || frame.atlasGeneration != previousAtlasGeneration
-            || sectionsRevision != historyRevision || simd_length(frame.camera-previousCamera)>8
+            || participatingChanged || simd_length(frame.camera-previousCamera)>8
             || dimension != lastDimension || abs(clock-lastClock)>0.5
             || simd_length(frame.atmosphere.sunDaylight-previousSun)>0.04
         if discontinuity { historyFrames=0 }
@@ -486,11 +595,14 @@ final class RayTracedWorldRenderer {
         historyFrames=min(24,historyFrames+1); sampleIndex &+= 1
         previousTransforms=transforms; previousCamera=frame.camera; previousViewProjection=frame.viewProjection
         previousWorldIdentity=frame.worldIdentity; previousAtlasGeneration=frame.atlasGeneration
-        historyRevision=sectionsRevision; previousSun=frame.atmosphere.sunDaylight; lastClock=clock; lastDimension=dimension
+        previousParticipatingSections=participatingSections; previousSourceRevision=sectionsRevision
+        hasPresentedCompleteScene=true
+        previousSun=frame.atmosphere.sunDaylight; lastClock=clock; lastDimension=dimension
         depthTexture=depths[current]
         diagnostics.ready=true; diagnostics.status="Ray Traced"; diagnostics.historySamples=historyFrames
         diagnostics.denoiser=denoised == nil ? "Albedo-guided temporal/spatial":"MetalFX temporal denoising"
         diagnostics.samplesPerPixel=samplesPerPixel
+        refreshMemoryDiagnostics()
         return raw
     }
     private func dispatch(_ encoder: MTLComputeCommandEncoder,pipeline: MTLComputePipelineState) {

@@ -13,7 +13,7 @@ Elysium is a native macOS voxel survival game built with Swift, Metal, AppKit, a
 
 ## What is in Elysium
 
-- **Native engine and renderer** — the headless-testable Swift engine drives a hand-written Metal renderer and AppKit interface. Video options offer Standard, Ultra raster effects, and capability-gated **Ray Traced** world rendering: primary geometry rays, occluded direct lighting, diffuse indirect light, off-screen reflections, and water/glass transmission. Both rendering paths use weather-lit volumetric clouds and depth-dependent water optics while retaining the Faithful textures. The HUD and first-person items remain sharp separate passes; unsupported or over-budget ray scenes visibly fall back to Ultra. See [graphics modes](PLAYER_GUIDE.md#graphics-modes-water-and-clouds).
+- **Native engine and renderer** — the headless-testable Swift engine drives a hand-written Metal renderer and AppKit interface. Video options offer Standard, Ultra raster effects, and capability-gated **Ray Traced** world rendering: primary geometry rays, occluded direct lighting, diffuse indirect light, off-screen reflections, and water/glass transmission. Ray memory scales with GPU capacity, and leaf-filtered daylight keeps forests shaded but readable. Both rendering paths use weather-lit volumetric clouds and depth-dependent water optics while retaining the Faithful textures. The HUD and first-person items remain sharp separate passes; unsupported or over-budget ray scenes visibly fall back to Ultra and temporary memory pressure retries automatically. See [graphics modes](PLAYER_GUIDE.md#graphics-modes-water-and-clouds).
 - **Survival across three dimensions** — procedural overworld, nether, and end terrain; caves and structures; mining, farming, crafting, smelting, brewing, enchanting, combat, hunger, experience, sleep, death, respawn, bosses, and advancements.
 - **Living worlds** — animals, monsters, villagers, projectiles, vehicles, dropped items, raids, pathfinding, fluids, portals, redstone, block entities, containers, and host-owned simulation state. Hostile monsters use explicit direct-daylight reactions: sunlight-sensitive mobs ignite, creepers latch a short fuse and stop chasing, and witches remain immune, drink defensive potions, and throw target-aware splash potions.
 - **Wildlife and forest renewal** — **Options... → World → Creature Respawn** selects Daily (default), Alternate Days, or Weekly dawn replenishment, measured in in-game day/night cycles. Regular maps replenish their ordinary wildlife; prehistoric maps use their profile roster, with two successful land-herbivore births per carnivore. Natural trees whose trunks lose ground support gradually deteriorate over a simulated day; some leaves drop collectible saplings and some safely plant new growth. Player-built wood and unmarked older saved trees are protected. See [Wildlife renewal and forests](PLAYER_GUIDE.md#wildlife-renewal-and-forests) for sleep, loading, LAN, and Ancient Seas details.
@@ -291,11 +291,16 @@ The ordinary development gate is:
 
 ```bash
 swift build -c release
-swift test
+python3 scripts/test-impact.py --run
 swift run -c release elysmoke
 ```
 
 `elysmoke` is the deterministic golden contract and is expected to report 491 passing checks unless a reviewed behavior change deliberately updates that contract.
+
+Regression tests follow a reviewed changed-file impact map in both release and push gates.
+Use `python3 scripts/test-impact.py --plan` to inspect coverage; unknown or shared-engine
+changes widen to the full suite. `ELYSIUM_FULL_TESTS=1` explicitly requests a full run.
+See [test scope and release gates](CONTRIBUTING.md#before-you-open-a-pr) for the mapping limits.
 
 Security-sensitive changes also run:
 

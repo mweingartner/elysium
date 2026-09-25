@@ -262,6 +262,76 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
   quality impractical. Resolve with a bounded native probe before release gates,
   not a claim based only on source assertions or device capability.
 
+### Ray-tracing memory policy correction — September 25, 2026
+
+- Observed failure: the production renderer rejected a normal 16-chunk Lost World
+  scene at its hard-coded 1 GiB cap on a 128 GiB M5 Max. That rejection latched
+  before eviction/retry; it did not establish actual memory exhaustion.
+- Outcome/acceptance: the same scene renders with ray tracing, and temporary
+  resource pressure recovers after completion or range reduction without reload.
+- Chosen policy: one quarter of Metal's recommended working set, capped at 32 GiB,
+  further constrained by current allocations and a reserved margin. This Mac's
+  107.52 GiB recommendation yields 26.88 GiB. Missing advice falls back to bounded
+  physical-memory capacity. A larger fixed cap was simpler but would still ignore
+  device differences; unlimited allocations would discard a useful safety bound.
+- Retention: build inputs become completion-owned temporaries, not permanent BLAS
+  cache members. Evict out-of-range BLAS and dead entity geometry before admission;
+  retain packed terrain source to rebuild on return. Completion retains all GPU
+  consumers and releases transient accounting even if the command remains alive.
+- Evidence: exact warning observed in the native application; live Metal capacity
+  probe; Apple API ownership/working-set references and verification results in
+  [Ray-traced worlds](docs/RAY_TRACING.md#memory-capacity-and-recovery).
+- Revisit if the representative native scene still falls back, recovery requires
+  reopening, GPU validation finds stale resources, or measured working-set growth
+  is not bounded by loaded/selected geometry. Pure policy tests are not a claim
+  of native acceptance; use real GPU recovery tests and the installed app.
+
+### Ray forest readability and temporal stability — September 25, 2026
+
+- User outcome: readable daytime forests with filtered canopy light, without
+  whole-scene lighting flashes during ordinary movement and remeshing.
+- Verified causes: opaque leaf texels stop visibility rays completely; decoded
+  skylight is unused by the stable indirect term; all mesh churn resets global
+  history; ordinary mesh-completion bursts can exceed the cold-start BLAS budget
+  and switch to the differently lit raster path.
+- Chosen repair: leaf-only deterministic light transmission (0.62 per surface),
+  modest backlighting, and a capped neutral propagated-skylight contribution.
+  Keep fixed exposure, ordinary opaque occlusion, primary leaf visibility, and
+  world light simulation unchanged. Raising global exposure or making all
+  cutouts translucent would alter caves/buildings and was rejected.
+- For scene updates, retain a small boundary margin and permit a bounded warm
+  catch-up build budget. Invalidate history for participating geometry changes,
+  not irrelevant distant/empty updates. Never display missing or stale geometry
+  to hide preparation. Exceptional bursts can still require explicit fallback.
+- Acceptance: real GPU tests distinguish leaf stacks, alpha holes, and solid
+  roofs; static frame sequences quantify temporal changes; native movement and
+  meshing observations check renderer continuity. Check readable daylight under
+  trees and retain dark enclosed/night scenes. Revisit the budgets or prewarming
+  only if normal movement still causes repeated fallbacks in that probe.
+
+### Release test impact selection — September 25, 2026
+
+- User outcome: contained renderer work must not repeatedly run unrelated simulation,
+  world-generation, storage, and Lua tests during release and push.
+- Chosen approach: a small reviewed changed-path map, unioned across the complete
+  outgoing/dirty delta. Dedicated renderer changes select graphics tests; shared
+  app entrypoints broaden to the app/debug-protocol targets and release contract.
+  Unknown, dependency/package, shared-engine, or unavailable-base changes select
+  the full suite. Docs-only work keeps the nonempty release-contract baseline.
+- Alternative rejected: a caller-supplied arbitrary filter would be simpler but
+  could silently omit affected domains. Full dependency-graph inference would add
+  substantial machinery without proving behavioral coverage. This map deliberately
+  over-tests shared entrypoints and needs reviewed extension for other domains.
+- Authority: pre-push supplies its actual remote SHA; release freezes its resolved
+  comparison SHA before gates. Both retain source revalidation, builds, security,
+  AppKit and smoke checks; only the pipeline packages and installs. The full-run
+  override only broadens scope. Discovery rejects absent required groups; execution
+  must succeed and report positive completed cases. The selector has isolated Git
+  and runner regression tests, executed on every gate.
+- Revisit when an omitted downstream regression demonstrates an incomplete mapping
+  or when another contained domain warrants its own reviewed scope. This is not
+  whole-program static dependency analysis or a claim that tests prove visual quality.
+
 First-person presentation uses `FirstPersonRenderer.swift` and `FirstPersonViewmodel.swift` in a
 camera-space Metal pass with an independent cleared depth buffer and fixed 70-degree lens. It runs
 after world compositing and before the HUD, so minimap/quickbar occlusion does not move held items.
