@@ -39,9 +39,23 @@ For ordinary development:
 
 ```bash
 swift build -c release
-swift test
+python3 scripts/test-impact.py --plan
+python3 scripts/test-impact.py --run
 swift run -c release elysmoke
 ```
+
+Scope regression tests to the change's blast radius. `scripts/test-impact.py --plan` reports the
+selected scope as JSON; `--run` executes it. The release pipeline and pre-push hook automatically
+union reviewed impact groups from changed paths. Unknown paths, sweeping changes, or
+shared-engine changes fall back to the full suite. `ELYSIUM_FULL_TESTS=1` explicitly requests the
+full suite and can only broaden coverage; never bypass a gate to narrow testing.
+
+The initial reviewed groups cover dedicated rendering code (75 test cases), release workflow
+(`AutomatedReleaseSourceTests` plus selector self-tests), and the broader app shell
+(`ElysiumResourcePackTests`, `ElysiumDebugProtocolTests`, and `AutomatedReleaseSourceTests`).
+Shared entrypoints such as `main.swift`, `HudM.swift`, and `DebugControlRuntime.swift` broaden the
+selection to app-shell coverage rather than relying on narrow changed-line exceptions.
+These are maintained impact rules, not a claim of complete automatic dependency analysis.
 
 For security-sensitive changes, also run:
 
@@ -54,6 +68,11 @@ For release/deploy readiness:
 ```bash
 bash scripts/pipeline.sh
 ```
+
+The pipeline compares against the merge-base with `origin/main`; when that equals a clean `HEAD`,
+it inspects the last commit using `HEAD^`. Pre-push supplies the actual remote base via `--base`.
+Test selection does not remove security, warning-free build, golden smoke, packaging, AppKit,
+installation, or installed-identity checks from the gates that own them.
 
 For UI/gameplay/world-state/LAN changes, verify the real built or installed app when the needed state
 is observable there. If product code changes afterward, renew affected proof.
@@ -80,7 +99,9 @@ This repo uses `.githooks/pre-push` as the local machine-enforced gate. After cl
 git config core.hooksPath .githooks
 ```
 
-The hook runs source security scans, a warning-free release build, XCTest, and `elysmoke`. Missing gate scripts fail closed instead of silently skipping the scan. Bypassing the hook requires an explicit `--no-verify`; do that only for a stated reason.
+The hook runs source security scans, a warning-free release build, impact-selected XCTest (or the
+full fallback), binary/AppKit checks, and `elysmoke`; packaging and installation remain pipeline
+gates. Missing gate scripts fail closed. Do not bypass the hook or a failing gate.
 
 ## Source Control
 

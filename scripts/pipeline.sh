@@ -26,6 +26,9 @@ fail() {
 
 snapshot() { "$SNAPSHOT_TOOL" "$ROOT"; }
 SOURCE_AUTHORITY="$(snapshot)" || fail source-security 1
+# Freeze the comparison commit before gates; a concurrent fetch cannot narrow stage 4.
+TEST_BASE="$(scripts/test-impact.py --plan | python3 -c 'import json,sys; print(json.load(sys.stdin).get("base", "0"*40))')" \
+    || fail impact-xctest 1
 revalidate_source() {
     local current
     current="$(snapshot)" || return 1
@@ -79,10 +82,10 @@ verify_pack_set() {
         "$resources/FAITHFUL-ADDONS-CREDITS.txt"
 }
 stage_xctest() {
-    swift test 2>&1 | tee "$TMP/xctest.log"
+    scripts/test-impact.py --run --base "$TEST_BASE" 2>&1 | tee "$TMP/xctest.log"
     local status=${PIPESTATUS[0]}
     [ "$status" -eq 0 ] || return "$status"
-    XCTEST_COUNT="$(perl -ne '$n=$1 if /Executed ([1-9][0-9]*) tests?/; $n=$1 if /Test run with ([1-9][0-9]*) tests?/; END { print $n // 0 }' "$TMP/xctest.log")"
+    XCTEST_COUNT="$(sed -nE 's/^IMPACT TESTS PASS tests=([1-9][0-9]*) mode=(scoped|full)$/\1/p' "$TMP/xctest.log")"
     [ "$XCTEST_COUNT" -gt 0 ] && release_unchanged
 }
 stage_smoke() {
@@ -162,9 +165,9 @@ stage_installed_identity() {
 run_stage 1 source-security 'Source security' '' stage_security
 run_stage 2 release-build 'Warning-free release build' '' stage_build
 run_stage 3 release-surface-binary 'Release surface and binary' '' stage_surface
-stage_xctest; status=$?; [ "$status" -eq 0 ] || fail full-xctest "$status"
-revalidate_source || fail full-xctest 98
-echo "[4/9] Full XCTest ... PASS tests=$XCTEST_COUNT"
+stage_xctest; status=$?; [ "$status" -eq 0 ] || fail impact-xctest "$status"
+revalidate_source || fail impact-xctest 98
+echo "[4/9] Impact-scoped XCTest ... PASS tests=$XCTEST_COUNT"
 run_stage 5 elysmoke 'Elysmoke' ' checks=491 failures=0' stage_smoke
 run_stage 6 package 'Package signed application' '' stage_package
 run_stage 7 packaged-appkit 'Packaged AppKit text entry' ' fields=2 clipboard_access=0' stage_appkit

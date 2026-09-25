@@ -6,6 +6,7 @@ if rg -n 'event\.eventNumber|NSEvent[^\n]*\.eventNumber' Sources/Elysium/AppInpu
     exit 1
 fi
 for required in scripts/pipeline.sh scripts/release-source-snapshot.py \
+                scripts/test-impact.py scripts/test-test-impact.py \
                 scripts/package-app.sh scripts/package-debug-app.sh \
                 scripts/security-check-binary.sh scripts/appkit-text-entry-integration.sh \
                 scripts/test-lan-automation.sh scripts/lan-automation-lib.sh \
@@ -18,6 +19,7 @@ for required in scripts/pipeline.sh scripts/release-source-snapshot.py \
     [ -f "$required" ] || { echo "security scan failed: missing $required" >&2; exit 1; }
 done
 PRODUCTION_RELEASE_SURFACES=(
+    scripts/test-impact.py scripts/test-test-impact.py
     scripts/pipeline.sh scripts/release-source-snapshot.py scripts/package-app.sh
     scripts/appkit-text-entry-integration.sh scripts/build-arnis-helper.sh
     .githooks/pre-commit .githooks/pre-push
@@ -28,6 +30,7 @@ if grep -E '(--(fixture|scenario|fault|alternate-executable|caller-evidence)|cas
     exit 1
 fi
 EXECUTABLE_RELEASE_SURFACES=(
+    scripts/test-impact.py scripts/test-test-impact.py
     scripts/pipeline.sh scripts/release-source-snapshot.py scripts/package-app.sh
     scripts/package-debug-app.sh scripts/security-check-binary.sh
     scripts/appkit-text-entry-integration.sh scripts/build-arnis-helper.sh

@@ -3,7 +3,7 @@ set -eu
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
-# Fast, repository-local staged checks. The full build/test/security suite remains pre-push.
+# Fast, staged checks. The build/security/impact-selected test gate remains pre-push.
 git diff --cached --check || {
     echo "pre-commit blocked: staged whitespace or conflict-marker check failed." >&2
     exit 1

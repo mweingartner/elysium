@@ -21,7 +21,7 @@ Even better than a report is a PR with the fix — the rest of this file tells y
 xcode-select --install        # Swift toolchain (Swift 6, macOS 14+ SDK)
 git clone https://github.com/mweingartner/elysium.git && cd elysium
 swift build                   # debug build, ~35s clean
-swift test                    # focused unit/security regression tests
+python3 scripts/test-impact.py --run # reviewed regression scope, or full fallback
 swift run -c release elysmoke # the golden suite — must print "491 passed, 0 failed"
 ./elysium install              # optional: build + install the real app
 ```
@@ -31,11 +31,11 @@ There is no `.xcodeproj` and there never will be — the whole workflow is Swift
 ## Before you open a PR
 
 1. `swift build -c release` — clean, **zero warnings**. The codebase is warning-free and stays that way.
-2. `swift test` — all focused unit/security regression tests pass.
+2. `python3 scripts/test-impact.py --plan`, then `python3 scripts/test-impact.py --run` — review the JSON scope and pass its regression tests.
 3. `swift run -c release elysmoke` (or `elysium test`) — **491/491**, from the repo root (goldens are found relative to cwd).
 4. `swift scripts/sqlite-boundary-scan.swift --root "$PWD" --self-test` after any persistence, package, or source-inventory change. A manifest update requires a reviewed semantic API/capability diff; never regenerate it merely to turn the gate green.
 5. For saved-world browser or batch-deletion changes, run
-   `swift test --filter SavedWorldBatchDeleteTests` before the full suite. Preserve checked collection
+   `swift test --filter SavedWorldBatchDeleteTests` during iteration. Preserve checked collection
    authority, the atomic six-scope transaction, read-only recovery, and installed Accessibility proof.
 6. For Reality Derived changes, run the Swift import/UI suites plus the pinned headless Arnis slice.
    Packaging performs the same locked helper build automatically:
@@ -45,10 +45,25 @@ There is no `.xcodeproj` and there never will be — the whole workflow is Swift
 
 The zero-argument release command is `bash scripts/pipeline.sh`. It runs exactly nine automated
 stages in order and fails closed: (1) source security scan, (2) warning-free release build,
-(3) release-surface and binary security checks, (4) full XCTest, (5) the 491-check `elysmoke`
+(3) release-surface and binary security checks, (4) impact-selected XCTest (or its full fallback), (5) the 491-check `elysmoke`
 golden suite, (6) application packaging, (7) packaged AppKit keyboard and Accessibility integration,
 (8) installation at `/Applications/Elysium.app`, and (9) installed-app identity and code-signature
 verification against the packaged candidate.
+
+The pipeline and pre-push hook select proportionate tests automatically from reviewed changed-path
+rules, unioning every affected group. Initial groups cover dedicated rendering code (75 test cases),
+release workflow (`AutomatedReleaseSourceTests` plus selector self-tests), and the broader app shell
+(`ElysiumResourcePackTests`, `ElysiumDebugProtocolTests`, and `AutomatedReleaseSourceTests`).
+Shared entrypoints such as `main.swift`, `HudM.swift`, and `DebugControlRuntime.swift` broaden the
+selection to app-shell coverage. Unknown paths, sweeping changes, and shared-engine changes
+select the full suite; there are no narrow changed-line exceptions for shared entrypoints.
+This is a maintained impact map, not universal automatic dependency discovery.
+
+`python3 scripts/test-impact.py --plan` shows the JSON scope; `--run` executes it. The pipeline uses
+the merge-base with `origin/main`, or `HEAD^` to inspect the last commit when that base equals a clean
+`HEAD`. Pre-push supplies the actual remote base with `--base`. Set `ELYSIUM_FULL_TESTS=1` to explicitly
+request the full suite; this override only broadens coverage. Security, build, smoke, packaging,
+AppKit, installation, and identity gates remain in place. Do not bypass hooks or failing gates.
 
 `PASS proves this checkout produced and installed the verified local /Applications/Elysium.app; it does not mean committed, pushed, CI-green, published, or subjectively visually approved.`
 
@@ -64,9 +79,9 @@ Keep the evidence categories distinct:
 | Human visual review passes | A person judged the reviewed screens and interactions acceptable. | Automated correctness, reproducibility, installation identity, or signature validity. |
 
 The pre-commit hook must remain fast and staged-only. The pre-push hook runs the heavier source scan,
-release build, binary checks, AppKit integration, XCTest, and `elysmoke`; it does not package or
+release build, binary checks, AppKit integration, impact-selected XCTest (or full fallback), and `elysmoke`; it does not package or
 install. Run the zero-argument pipeline for the complete real-target release gate.
-7. For RPG/LAN-v6 storage changes, run `swift test --filter 'RPGLocalPreferenceStorageTests|RPGLocalPreferencesTests|LANV6ClientAuthorityCheckpointStorageTests|LANV6HostOwnerCheckpointStorageTests'` before the full suite. These named suites are the minimum persistence-contract gate, not a replacement for `swift test`.
+7. For RPG/LAN-v6 storage changes, run `swift test --filter 'RPGLocalPreferenceStorageTests|RPGLocalPreferencesTests|LANV6ClientAuthorityCheckpointStorageTests|LANV6HostOwnerCheckpointStorageTests'` during iteration. These named suites are the minimum persistence-contract gate and do not narrow the selector's required coverage.
 8. For RPG UI/harness changes, run `swift test --filter 'RPGUIHarnessTests|RPGUIHarnessSourceTests|RPGScreenModelTests|RPGSemanticAccessibilityTests'`, then exercise the built executable with a semantic-summary case, a mixed-environment rejection, and an exclusive screenshot case. The harness must leave a fresh support home unchanged when `ELYSIUM_SHOT` is absent.
 9. If goldens changed, your PR description must justify **every** changed value (see below).
 10. Keep diffs surgical. Match the style of the file you're in — this codebase has a consistent voice (compact, comment-where-it-matters), and drive-by reformatting makes review impossible.

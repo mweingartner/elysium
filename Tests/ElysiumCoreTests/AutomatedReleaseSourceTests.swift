@@ -16,7 +16,7 @@ final class AutomatedReleaseSourceTests: XCTestCase {
             ("run_stage 1 source-security", "Source security"),
             ("run_stage 2 release-build", "Warning-free release build"),
             ("run_stage 3 release-surface-binary", "Release surface and binary"),
-            ("echo \"[4/9] Full XCTest ... PASS tests=$XCTEST_COUNT\"", "Full XCTest"),
+            ("echo \"[4/9] Impact-scoped XCTest ... PASS tests=$XCTEST_COUNT\"", "Impact-scoped XCTest"),
             ("run_stage 5 elysmoke", "Elysmoke"),
             ("run_stage 6 package", "Package signed application"),
             ("run_stage 7 packaged-appkit", "Packaged AppKit text entry"),
@@ -32,6 +32,8 @@ final class AutomatedReleaseSourceTests: XCTestCase {
         XCTAssertTrue(pipeline.contains("revalidate_source || fail"))
         XCTAssertTrue(pipeline.contains("package_unchanged"))
         XCTAssertTrue(pipeline.contains("release_unchanged"))
+        XCTAssertTrue(pipeline.contains("scripts/test-impact.py --run"))
+        XCTAssertTrue(pipeline.contains("IMPACT TESTS PASS tests="))
     }
 
     func testInstalledCodesignDetailsAreCapturedBeforeParsingWithoutEarlyClose() throws {
@@ -65,6 +67,7 @@ final class AutomatedReleaseSourceTests: XCTestCase {
         XCTAssertFalse(commit.contains("mpd "))
         XCTAssertFalse(commit.contains("pipeline.sh"))
         let push = try source(".githooks/pre-push")
+        XCTAssertTrue(push.contains("scripts/test-impact.py --run --base \"$remote_sha\""))
         for marker in ["exactly one outgoing ref", "local_sha\" = \"$HEAD_SHA",
                        "local_sha\" = \"$REF_SHA", "git status --porcelain=v1 --untracked-files=all",
                        "SOURCE_SNAPSHOT", "revalidate"] {

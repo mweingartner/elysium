@@ -62,6 +62,6 @@ stage "release surface and binary" sh -c \
 RELEASE_HASH="$(shasum -a 256 .build/release/Elysium | awk '{print $1}')"
 stage "real AppKit keyboard and Accessibility" scripts/appkit-text-entry-integration.sh --no-build \
     --executable "$(cd .build/release && pwd -P)/Elysium" --expected-hash "$RELEASE_HASH" --timeout 90
-stage "xctest" swift test
+stage "impact-scoped xctest" scripts/test-impact.py --run --base "$remote_sha"
 stage "elysmoke" swift run -c release elysmoke
 echo "==> pre-push: pass sha=$local_sha"
