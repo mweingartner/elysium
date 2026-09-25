@@ -27,6 +27,7 @@ final class SectionGPU {
     var opaque: MeshBlock?
     var cutout: MeshBlock?
     var translucent: MeshBlock?
+    var water: MeshBlock?
 
     init(key: SectionKey, minY: Int) {
         self.key = key
@@ -122,6 +123,7 @@ struct ChunkSharedU {
     var fogColor: SIMD4<Float>
     var misc: SIMD4<Float>      // time, packFluidDamp, ultraOn, shadowTexel
     var heldLight: SIMD4<Float> // rgb = torch color * intensity, w = radius (blocks)
+    var worldOrigin = SIMD4<Float>.zero // camera world position; w = Reduce Motion
 }
 struct UltraUniforms {
     var invViewProj: simd_float4x4
@@ -149,10 +151,17 @@ struct StarsUniforms {
     var viewProj: simd_float4x4
     var params: SIMD4<Float>
 }
-struct CloudUniforms {
-    var viewProj: simd_float4x4
-    var offset: SIMD4<Float>
-    var scroll: SIMD4<Float>
+struct EnvironmentRenderUniforms {
+    var inverseViewProjection: simd_float4x4
+    var atmosphere: AtmosphereUniforms
+    var viewport: SIMD4<Float>
+}
+
+private struct PresentedEntity {
+    let entity: Entity
+    let position: SIMD3<Double>
+    let snapshot: EntityRenderSnapshot?
+    let primaryVisible: Bool
 }
 struct LineUniforms {
     var viewProj: simd_float4x4
@@ -198,6 +207,11 @@ final class WorldRenderer {
     var celestialAddPipeline: MTLRenderPipelineState!   // additive — pack sun/moon art ships on black
     var starsPipeline: MTLRenderPipelineState!
     var cloudPipeline: MTLRenderPipelineState!
+    var cloudCompositePipeline: MTLRenderPipelineState!
+    var waterPipeline: MTLRenderPipelineState!
+    var waterDepthPipeline: MTLRenderPipelineState!
+    var refractionTranslucentPipeline: MTLRenderPipelineState!
+    var rayResolvePipeline: MTLRenderPipelineState!
     var entityPipeline: MTLRenderPipelineState!
     var entityPipelineHDR: MTLRenderPipelineState!
     var particlePipelineHDR: MTLRenderPipelineState!
@@ -254,12 +268,15 @@ final class WorldRenderer {
     private var prevCamPos = SIMD3<Float>(0, 0, 0)
     var shadowTexture: MTLTexture!
     var shadowSampler: MTLSamplerState!
-    var cloudTexture: MTLTexture!
     var starsBuffer: MTLBuffer!
     var starCount = 0
 
     // offscreen targets
     var sceneColor: MTLTexture!
+    var opaqueSceneColor: MTLTexture!
+    var opaqueSceneDepth: MTLTexture!
+    var waterSurfaceDepth: MTLTexture!
+    var cloudLayerColor: MTLTexture!
     var sceneDepth: MTLTexture!
     var bloomA: MTLTexture!
     var bloomB: MTLTexture!
@@ -268,6 +285,20 @@ final class WorldRenderer {
     var ultraDummy: MTLTexture!     // 1×1 neutral bound when ultra is off
     var fbWidth = 0, fbHeight = 0
     private var shadowSizeNow = 0   // rebuilt when the ultra preset changes it
+    private let rayTracer: RayTracedWorldRenderer?
+    private let rayItemScene: RayTracingItemScene
+    private var rayTracingWorldIdentity: UInt64 = 0
+    private var rayTracingAtlasGeneration: UInt64 = 0
+    private(set) var rayTracingActive = false
+    private var rayTracingPresentationIncomplete = false
+    var rayTracingDiagnostics: RayTracingDiagnostics {
+        var result = rayTracer?.diagnostics ?? RayTracingDiagnostics()
+        if rayTracingPresentationIncomplete {
+            result.ready = false
+            result.status = "Item geometry unavailable"
+        }
+        return result
+    }
 
     var sections: [SectionKey: SectionGPU] = [:]
     /// Reused every frame to avoid allocating one tuple buffer per camera pass. The ordering and
@@ -296,10 +327,11 @@ final class WorldRenderer {
         arena = MeshArena(device: device)
         entityRenderer = EntityRendererM(device: device)
         particles = ParticleSystemM(device: device)
+        rayTracer = RayTracedWorldRenderer(device: device)
+        rayItemScene = RayTracingItemScene(device: device)
         buildPipelines()
         buildAtlas()
         buildShadow()
-        buildClouds()
         buildStars()
         buildSpriteAtlas()
     }
@@ -324,7 +356,8 @@ final class WorldRenderer {
         chunkVD.layouts[0].stride = 28
 
         func pipe(_ vs: String, _ fs: String?, vd: MTLVertexDescriptor?, blend: Bool = false,
-                  additive: Bool = false, color: MTLPixelFormat = .bgra8Unorm, depth: MTLPixelFormat = .depth32Float) -> MTLRenderPipelineState {
+                  additive: Bool = false, premultiplied: Bool = false,
+                  color: MTLPixelFormat = .rgba16Float, depth: MTLPixelFormat = .depth32Float) -> MTLRenderPipelineState {
             let d = MTLRenderPipelineDescriptor()
             d.vertexFunction = lib.makeFunction(name: vs)
             if let fs { d.fragmentFunction = lib.makeFunction(name: fs) }
@@ -333,7 +366,7 @@ final class WorldRenderer {
                 d.colorAttachments[0].pixelFormat = color
                 if blend {
                     d.colorAttachments[0].isBlendingEnabled = true
-                    d.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+                    d.colorAttachments[0].sourceRGBBlendFactor = premultiplied ? .one : .sourceAlpha
                     d.colorAttachments[0].destinationRGBBlendFactor = additive ? .one : .oneMinusSourceAlpha
                     d.colorAttachments[0].sourceAlphaBlendFactor = .one
                     d.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
@@ -350,7 +383,12 @@ final class WorldRenderer {
         skyPipeline = pipe("sky_vs", "sky_fs", vd: nil)
         celestialPipeline = pipe("celestial_vs", "celestial_fs", vd: nil, blend: true)
         celestialAddPipeline = pipe("celestial_vs", "celestial_fs", vd: nil, blend: true, additive: true)
-        cloudPipeline = pipe("cloud_vs", "cloud_fs", vd: nil, blend: true)
+        cloudPipeline = pipe("fs_vs", "cloud_volume_fs", vd: nil, depth: .invalid)
+        cloudCompositePipeline = pipe("fs_vs", "cloud_composite_fs", vd: nil, blend: true, premultiplied: true, depth: .invalid)
+        waterPipeline = pipe("chunk_vs", "water_fs", vd: chunkVD)
+        waterDepthPipeline = pipe("chunk_vs", nil, vd: chunkVD, color: .invalid)
+        refractionTranslucentPipeline = pipe("chunk_vs", "translucent_refraction_fs", vd: chunkVD, blend: true)
+        rayResolvePipeline = pipe("fs_vs", "ray_resolve_fs", vd: nil)
 
         let starsVD = MTLVertexDescriptor()
         starsVD.attributes[0].format = .float3
@@ -406,9 +444,9 @@ final class WorldRenderer {
         spritePipelineHDR = pipe("sprite_vs", "sprite_fs", vd: nil, blend: true, color: .rgba16Float)
         bloomExtractPipeline = pipe("fs_vs", "bloom_extract_fs", vd: nil, depth: .invalid)
         blurPipeline = pipe("fs_vs", "blur_fs", vd: nil, depth: .invalid)
-        compositePipeline = pipe("fs_vs", "composite_fs", vd: nil, depth: .invalid)
-        titlePipeline = pipe("fs_vs", "title_fs", vd: nil, depth: .invalid)
-        logoPipeline = pipe("logo_vs", "logo_fs", vd: nil, blend: true, depth: .invalid)
+        compositePipeline = pipe("fs_vs", "composite_fs", vd: nil, color: .bgra8Unorm, depth: .invalid)
+        titlePipeline = pipe("fs_vs", "title_fs", vd: nil, color: .bgra8Unorm, depth: .invalid)
+        logoPipeline = pipe("logo_vs", "logo_fs", vd: nil, blend: true, color: .bgra8Unorm, depth: .invalid)
         if let path = bundleResourcePath("logo.png"),
            let d = FileManager.default.contents(atPath: path),
            let img = decodePNG(d) {
@@ -442,7 +480,7 @@ final class WorldRenderer {
         uiVD.attributes[2].offset = 16
         uiVD.attributes[2].bufferIndex = 0
         uiVD.layouts[0].stride = 32
-        uiPipeline = pipe("ui_vs", "ui_fs", vd: uiVD, blend: true, depth: .invalid)
+        uiPipeline = pipe("ui_vs", "ui_fs", vd: uiVD, blend: true, color: .bgra8Unorm, depth: .invalid)
 
         let dw = MTLDepthStencilDescriptor()
         dw.depthCompareFunction = .lessEqual
@@ -514,6 +552,7 @@ final class WorldRenderer {
     }
 
     func installStagedWorldAtlas(_ staged: StagedWorldAtlas) {
+        rayTracingAtlasGeneration &+= 1
         atlasTexture = staged.texture
         atlasRes = staged.res
         tileAnimations = staged.animations
@@ -756,40 +795,6 @@ final class WorldRenderer {
         }
     }
 
-    private func buildClouds() {
-        // blobby cellular clouds, wrapping — pattern pinned by the baselines
-        let size = 128
-        var px = [UInt8](repeating: 0, count: size * size * 4)
-        for y in 0..<size {
-            for x in 0..<size {
-                var v = 0.0
-                for (s, w) in [(8, 0.55), (16, 0.3), (32, 0.15)] {
-                    let cellW = size / s
-                    let gx = x / cellW, gy = y / cellW
-                    let fx = Double(x % cellW) / Double(cellW), fy = Double(y % cellW) / Double(cellW)
-                    func h(_ a: Int, _ b: Int) -> Double {
-                        Double(hash2(31337, ((a % s) + s) % s, ((b % s) + s) % s, UInt32(s))) / 4294967296.0
-                    }
-                    let v00 = h(gx, gy), v10 = h(gx + 1, gy), v01 = h(gx, gy + 1), v11 = h(gx + 1, gy + 1)
-                    let sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy)
-                    v += ((v00 * (1 - sx) + v10 * sx) * (1 - sy) + (v01 * (1 - sx) + v11 * sx) * sy) * w
-                }
-                let on: UInt8 = v > 0.56 ? 255 : 0
-                let i = (y * size + x) * 4
-                px[i] = on; px[i + 1] = on; px[i + 2] = on; px[i + 3] = 255
-            }
-        }
-        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: size, height: size, mipmapped: false)
-        td.usage = .shaderRead
-        cloudTexture = device.makeTexture(descriptor: td)!
-        px.withUnsafeBytes { raw in
-            cloudTexture.replace(region: MTLRegionMake2D(0, 0, size, size), mipmapLevel: 0,
-                                 withBytes: raw.baseAddress!, bytesPerRow: size * 4)
-        }
-    }
-
-    private func buildClouds_sampler() {}
-
     private func buildStars() {
         let N = 1300
         var data = [Float](repeating: 0, count: N * 4)
@@ -817,16 +822,19 @@ final class WorldRenderer {
         if w == fbWidth && h == fbHeight { return }
         fbWidth = max(1, w)
         fbHeight = max(1, h)
-        let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: fbWidth, height: fbHeight, mipmapped: false)
+        let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: fbWidth, height: fbHeight, mipmapped: false)
         cd.usage = [.renderTarget, .shaderRead]
         cd.storageMode = .private
         sceneColor = device.makeTexture(descriptor: cd)!
+        opaqueSceneColor = device.makeTexture(descriptor: cd)!
         let dd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .depth32Float, width: fbWidth, height: fbHeight, mipmapped: false)
         dd.usage = [.renderTarget, .shaderRead]   // ultra pass reads scene depth
         dd.storageMode = .private
         sceneDepth = device.makeTexture(descriptor: dd)!
+        opaqueSceneDepth = device.makeTexture(descriptor: dd)!
+        waterSurfaceDepth = device.makeTexture(descriptor: dd)!
         let bw = max(1, fbWidth >> 2), bh = max(1, fbHeight >> 2)
-        let bd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: bw, height: bh, mipmapped: false)
+        let bd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: bw, height: bh, mipmapped: false)
         bd.usage = [.renderTarget, .shaderRead]
         bd.storageMode = .private
         bloomA = device.makeTexture(descriptor: bd)!
@@ -837,6 +845,8 @@ final class WorldRenderer {
         ud.storageMode = .private
         ultraA = device.makeTexture(descriptor: ud)!
         ultraB = device.makeTexture(descriptor: ud)!
+        cloudLayerColor = device.makeTexture(descriptor: ud)!
+        rayTracer?.resize(width: fbWidth, height: fbHeight)
         if ultraDummy == nil {
             let dd1 = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: 1, height: 1, mipmapped: false)
             dd1.usage = .shaderRead
@@ -854,30 +864,36 @@ final class WorldRenderer {
         arena.release(gpu.opaque)
         arena.release(gpu.cutout)
         arena.release(gpu.translucent)
+        arena.release(gpu.water)
     }
 
     func uploadMesh(_ cx: Int, _ sy: Int, _ cz: Int, _ minY: Int, _ mesh: MeshOutput) {
         let key = SectionKey(cx: cx, sy: sy, cz: cz)
+        rayTracer?.uploadSection(key: key, minY: minY, mesh: mesh)
         if let old = sections.removeValue(forKey: key) { releaseSection(old) }
         let gpu = SectionGPU(key: key, minY: minY)
-        func make(_ layer: MeshLayer) -> MeshBlock? {
-            guard layer.count > 0, !layer.idx.isEmpty else { return nil }
+        func make(_ layer: MeshLayer, indices: [UInt32]? = nil) -> MeshBlock? {
+            let indices = indices ?? layer.idx
+            guard layer.count > 0, !indices.isEmpty else { return nil }
             let vbBytes = layer.data.count * 4
-            let ibBytes = layer.idx.count * 4
+            let ibBytes = indices.count * 4
             let (page, offset) = arena.alloc(vbBytes + ibBytes)
             let base = arena.pages[page].contents().advanced(by: offset)
             layer.data.withUnsafeBytes { base.copyMemory(from: $0.baseAddress!, byteCount: vbBytes) }
-            layer.idx.withUnsafeBytes { base.advanced(by: vbBytes).copyMemory(from: $0.baseAddress!, byteCount: ibBytes) }
+            indices.withUnsafeBytes { base.advanced(by: vbBytes).copyMemory(from: $0.baseAddress!, byteCount: ibBytes) }
             return MeshBlock(page: page, offset: offset, ibRel: vbBytes,
-                             size: (vbBytes + ibBytes + 255) & ~255, indexCount: layer.idx.count)
+                             size: (vbBytes + ibBytes + 255) & ~255, indexCount: indices.count)
         }
         gpu.opaque = make(mesh.opaque)
         gpu.cutout = make(mesh.cutout)
-        gpu.translucent = make(mesh.translucent)
-        if gpu.opaque == nil && gpu.cutout == nil && gpu.translucent == nil { return }
+        let fluids = WaterMeshIndices(words: mesh.translucent.data, indices: mesh.translucent.idx)
+        gpu.translucent = make(mesh.translucent, indices: fluids.other)
+        gpu.water = make(mesh.translucent, indices: fluids.water)
+        if gpu.opaque == nil && gpu.cutout == nil && gpu.translucent == nil && gpu.water == nil { return }
         sections[key] = gpu
     }
     func removeChunkMeshes(_ cx: Int, _ cz: Int, _ sectionCount: Int) {
+        rayTracer?.removeChunk(cx: cx, cz: cz, sectionCount: sectionCount)
         for sy in 0..<sectionCount {
             if let old = sections.removeValue(forKey: SectionKey(cx: cx, sy: sy, cz: cz)) {
                 releaseSection(old)
@@ -885,6 +901,9 @@ final class WorldRenderer {
         }
     }
     func clearAllSections() {
+        rayTracer?.clear()
+        rayTracingActive = false
+        rayTracingWorldIdentity &+= 1
         for gpu in sections.values { releaseSection(gpu) }
         sections.removeAll()
     }
@@ -957,9 +976,7 @@ final class WorldRenderer {
         arena.tick()
         let world = game.world
         let settings = game.settings
-        let ultraOn = settings.shader == "ultra"
-        let wantShadowSize = ultraOn ? 4096 : 2048
-        if shadowSizeNow != wantShadowSize { buildShadow(size: wantShadowSize) }
+        let requestedMode = GraphicsMode(shader: settings.shader)
 
         let aspect = Float(fbWidth) / Float(max(1, fbHeight))
         let far = max(256, Float(settings.renderDistance) * 16 * 1.6)
@@ -1003,7 +1020,53 @@ final class WorldRenderer {
 
         let angle = world.sunAngle()
         let sunDir = SIMD3<Float>(Float(-Foundation.sin(angle * .pi * 2 + .pi)), Float(Foundation.cos(angle * .pi * 2)), 0.18)
-        let shadowOK = settings.shadows && world.dim == .overworld && sky.dayLight > 0.1 && sunDir.y > 0.05
+        let camPos = SIMD3<Double>(cam.x, cam.y, cam.z)
+        let presentations = presentEntities(game: game, camPos: camPos, partial: partial, timeSec: timeSec)
+        var atmosphere = AtmosphereUniforms()
+        atmosphere.cameraTime = SIMD4<Float>(Float(cam.x), Float(cam.y), Float(cam.z), Float(timeSec))
+        atmosphere.sunDaylight = SIMD4<Float>(simd_normalize(sunDir), Float(sky.dayLight))
+        atmosphere.zenith = SIMD4<Float>(sky.zenith, 0)
+        atmosphere.horizon = SIMD4<Float>(sky.horizon, 0)
+        atmosphere.fogColor = SIMD4<Float>(fogColor, fogEnd)
+        atmosphere.weather = SIMD4<Float>(Float(world.rainLevel), Float(world.thunderLevel),
+                                          settings.clouds ? 1 : 0, cam.underwater ? 1 : 0)
+        atmosphere.options = SIMD4<Float>(world.dim == .nether ? 1 : world.dim == .end ? 2 : 0,
+                                          settings.reduceMotion ? 1 : 0, cam.blindness < 0.5 ? 1 : 0, 0)
+        var environment = EnvironmentRenderUniforms(inverseViewProjection: viewProj.inverse,
+            atmosphere: atmosphere, viewport: SIMD4(Float(fbWidth), Float(fbHeight),
+                                                     1 / Float(fbWidth), 1 / Float(fbHeight)))
+        var tracedColor: MTLTexture?
+        rayTracingPresentationIncomplete = false
+        if requestedMode == .rayTraced, let rayTracer {
+            let itemPresentation = rayItemScene.collect(game: game, camPos: camPos, cam: cam,
+                                                        partial: partial, atlasGeneration: rayTracingAtlasGeneration)
+            let instances = presentations.flatMap { presented -> [RayTracingEntityInstance] in
+                guard let snapshot = presented.snapshot else { return [] }
+                return entityRenderer.rayTracingInstances(snapshot: snapshot).map { source in
+                    var instance = source
+                    instance.identity = "entity:\(presented.entity.id):\(source.geometry.key)"
+                    instance.primaryVisible = presented.primaryVisible
+                    return instance
+                }
+            }
+            let frame = RayTracingFrame(viewProjection: viewProj, inverseViewProjection: viewProj.inverse,
+                camera: camPos, atmosphere: atmosphere, renderDistance: Float(settings.renderDistance * 16),
+                gamma: Float(settings.gamma),
+                heldLight: heldTorchLightVector(for: game.player), shadows: settings.shadows,
+                atlasGeneration: rayTracingAtlasGeneration, worldIdentity: rayTracingWorldIdentity,
+                fogStart: fogStart, fogEnd: fogEnd, nightVision: Float(cam.nightVision),
+                viewMatrix: viewM, projectionMatrix: proj)
+            rayTracingPresentationIncomplete = !itemPresentation.isComplete
+            if itemPresentation.isComplete {
+                tracedColor = rayTracer.render(command: cmd, frame: frame, atlas: atlasTexture,
+                                               entities: instances + itemPresentation.entities, blocks: itemPresentation.blocks)
+            }
+        }
+        rayTracingActive = tracedColor != nil
+        let ultraOn = requestedMode != .standard && !rayTracingActive
+        let wantShadowSize = ultraOn ? 4096 : 2048
+        if shadowSizeNow != wantShadowSize { buildShadow(size: wantShadowSize) }
+        let shadowOK = !rayTracingActive && settings.shadows && world.dim == .overworld && sky.dayLight > 0.1 && sunDir.y > 0.05
 
         var shadowMat = matrix_identity_float4x4
         // --- shadow pass ---
@@ -1075,13 +1138,21 @@ final class WorldRenderer {
         scenePass.colorAttachments[0].clearColor = MTLClearColor(red: Double(fogColor.x), green: Double(fogColor.y), blue: Double(fogColor.z), alpha: 1)
         scenePass.depthAttachment.texture = sceneDepth
         scenePass.depthAttachment.loadAction = .clear
-        scenePass.depthAttachment.storeAction = ultraOn ? .store : .dontCare
+        scenePass.depthAttachment.storeAction = .store
         scenePass.depthAttachment.clearDepth = 1
-        let enc = cmd.makeRenderCommandEncoder(descriptor: scenePass)!
+        var enc = cmd.makeRenderCommandEncoder(descriptor: scenePass)!
+
+        if let tracedColor, let tracedDepth = rayTracer?.depthTexture {
+            enc.setRenderPipelineState(rayResolvePipeline)
+            enc.setDepthStencilState(depthWrite)
+            enc.setFragmentTexture(tracedColor, index: 0)
+            enc.setFragmentTexture(tracedDepth, index: 1)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        }
 
         // sky dome + celestials + stars
         enc.setDepthStencilState(depthNone)
-        if !cam.underwater && !cam.underLava && cam.blindness < 0.5 {
+        if !rayTracingActive && !cam.underwater && !cam.underLava && cam.blindness < 0.5 {
             var skyU = SkyUniforms(
                 invViewProj: viewProj.inverse,
                 zenith: SIMD4<Float>(sky.zenith, 0),
@@ -1142,7 +1213,8 @@ final class WorldRenderer {
             fog: SIMD4<Float>(fogStart, fogEnd, 0, 1),
             fogColor: SIMD4<Float>(fogColor, 1),
             misc: SIMD4<Float>(Float(timeSec), packFluidDamp, ultraOn ? 1 : 0, 1 / Float(shadowSizeNow)),
-            heldLight: heldTorchLightVector(for: game.player))
+            heldLight: heldTorchLightVector(for: game.player),
+            worldOrigin: SIMD4<Float>(Float(cam.x), Float(cam.y), Float(cam.z), settings.reduceMotion ? 1 : 0))
         enc.setFragmentTexture(atlasTexture, index: 0)
         enc.setFragmentTexture(shadowTexture, index: 1)
         enc.setFragmentSamplerState(atlasSampler, index: 0)
@@ -1152,7 +1224,7 @@ final class WorldRenderer {
         visibleSections.removeAll(keepingCapacity: true)
         visibleSections.reserveCapacity(sections.count)
         for gpu in sections.values {
-            guard gpu.opaque != nil || gpu.cutout != nil || gpu.translucent != nil else {
+            guard gpu.opaque != nil || gpu.cutout != nil || gpu.translucent != nil || gpu.water != nil else {
                 cullingStats.emptySections += 1
                 continue
             }
@@ -1202,21 +1274,22 @@ final class WorldRenderer {
         // opaque front-to-back
         uni.fog.z = 0
         uni.fog.w = 1
-        drawLayer(opaquePipeline, { $0.opaque }, visibleSections, cull: true)
+        if !rayTracingActive { drawLayer(opaquePipeline, { $0.opaque }, visibleSections, cull: true) }
         // cutout: alpha test, back-cull — the mesher emits explicit two-sided
         // pairs for crosses/vines, and culling kills the coincident interior
         // leaf faces that z-fight (sway-displaced) when both rasterize
         uni.fog.z = 0.35
-        drawLayer(cutoutPipeline, { $0.cutout }, visibleSections, cull: true)
+        if !rayTracingActive { drawLayer(cutoutPipeline, { $0.cutout }, visibleSections, cull: true) }
         enc.setCullMode(.back)
 
         // entities + sprites + cubes + crack + selection + particles
-        let camPos = SIMD3<Double>(cam.x, cam.y, cam.z)
         drawEntities(enc, game: game, viewProj: viewProj, camPos: camPos, dayLight: sky.dayLight,
-                     fog: (fogColor, fogStart, fogEnd), partial: partial, timeSec: timeSec)
-        drawSprites(enc, game: game, viewProj: viewProj, camPos: camPos, cam: cam,
-                    dayLight: sky.dayLight, fog: (fogColor, fogStart, fogEnd), partial: partial)
-        drawCubes(enc, game: game, viewProj: viewProj, camPos: camPos, uni: &uni, partial: partial)
+                     fog: (fogColor, fogStart, fogEnd), presentations: presentations, drawModels: !rayTracingActive)
+        if !rayTracingActive {
+            drawSprites(enc, game: game, viewProj: viewProj, camPos: camPos, cam: cam,
+                        dayLight: sky.dayLight, fog: (fogColor, fogStart, fogEnd), partial: partial)
+            drawCubes(enc, game: game, viewProj: viewProj, camPos: camPos, uni: &uni, partial: partial)
+        }
         drawCrack(enc, game: game, camPos: camPos, uni: &uni)
         drawSelection(enc, game: game, viewProj: viewProj, camPos: camPos)
         let pr = SIMD3<Float>(Float(detCos(cam.yaw)), 0, Float(detSin(cam.yaw)))
@@ -1226,36 +1299,96 @@ final class WorldRenderer {
                          viewProj: viewProj, camPos: camPos, right: pr, up: pu, dayLight: sky.dayLight)
         enc.setDepthStencilState(depthWrite)
 
-        // translucent back-to-front
-        enc.setDepthStencilState(depthRead)
-        uni.fog.z = 0
-        uni.fog.w = 0.82
-        enc.setFragmentTexture(atlasTexture, index: 0)
-        enc.setFragmentSamplerState(atlasSampler, index: 0)
-        drawLayer(translucentPipeline, { $0.translucent }, visibleSections.reversed(), cull: true)
-        uni.fog.w = 1
-
-        // clouds
-        if settings.clouds && world.dim == .overworld && !cam.underwater {
-            let cy = Float(192.33 - cam.y)
-            let scroll = timeSec * 0.0006
-            var cu = CloudUniforms(
-                viewProj: viewProj,
-                offset: SIMD4<Float>(0, cy, 0, 2048),
-                scroll: SIMD4<Float>(Float((cam.x / 4096 + scroll).truncatingRemainder(dividingBy: 1)),
-                                     Float((cam.z / 4096).truncatingRemainder(dividingBy: 1)),
-                                     Float(0.75 + sky.dayLight * 0.25),
-                                     fogEnd * 2.5))
-            enc.setRenderPipelineState(cloudPipeline)
-            enc.setCullMode(.none)
-            enc.setVertexBytes(&cu, length: MemoryLayout<CloudUniforms>.stride, index: 1)
-            enc.setFragmentBytes(&cu, length: MemoryLayout<CloudUniforms>.stride, index: 1)
-            enc.setFragmentTexture(cloudTexture, index: 0)
-            enc.setFragmentSamplerState(linearSampler, index: 0)
-            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-            enc.setCullMode(.back)
-        }
         enc.endEncoding()
+
+        if !rayTracingActive {
+            // Sample stored depth without simultaneously attaching it. Volumetric clouds stop at
+            // solid geometry and retain the resource pack's sun/moon artwork behind the layer.
+            if settings.clouds && world.dim == .overworld && !cam.underwater && !cam.underLava && cam.blindness < 0.5 {
+                let cloudPass = MTLRenderPassDescriptor()
+                cloudPass.colorAttachments[0].texture = cloudLayerColor
+                cloudPass.colorAttachments[0].loadAction = .dontCare
+                cloudPass.colorAttachments[0].storeAction = .store
+                let ce = cmd.makeRenderCommandEncoder(descriptor: cloudPass)!
+                ce.setRenderPipelineState(cloudPipeline)
+                ce.setFragmentTexture(sceneDepth, index: 0)
+                ce.setFragmentBytes(&environment, length: MemoryLayout<EnvironmentRenderUniforms>.stride, index: 3)
+                ce.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                ce.endEncoding()
+                cloudPass.colorAttachments[0].texture = sceneColor
+                cloudPass.colorAttachments[0].loadAction = .load
+                let composite = cmd.makeRenderCommandEncoder(descriptor: cloudPass)!
+                composite.setRenderPipelineState(cloudCompositePipeline)
+                composite.setFragmentTexture(cloudLayerColor, index: 0)
+                composite.setFragmentTexture(sceneDepth, index: 1)
+                composite.setFragmentBytes(&environment, length: MemoryLayout<EnvironmentRenderUniforms>.stride, index: 3)
+                composite.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                composite.endEncoding()
+            }
+
+            let hasWater = visibleSections.contains { $0.gpu.water != nil }
+            if hasWater {
+                // Separate frontmost-water depth divides translucent objects into those seen
+                // through water and those in front. Submerged glass must not disappear or blend
+                // twice merely because water now has an opaque, optically resolved output.
+                let waterPass = MTLRenderPassDescriptor()
+                waterPass.depthAttachment.texture = waterSurfaceDepth
+                waterPass.depthAttachment.loadAction = .clear
+                waterPass.depthAttachment.storeAction = .store
+                waterPass.depthAttachment.clearDepth = 1
+                enc = cmd.makeRenderCommandEncoder(descriptor: waterPass)!
+                enc.setDepthStencilState(depthWrite)
+                drawLayer(waterDepthPipeline, { $0.water }, visibleSections, cull: false)
+                enc.endEncoding()
+
+                scenePass.colorAttachments[0].loadAction = .load
+                scenePass.depthAttachment.loadAction = .load
+                enc = cmd.makeRenderCommandEncoder(descriptor: scenePass)!
+                enc.setDepthStencilState(depthRead)
+                enc.setFragmentTexture(atlasTexture, index: 0)
+                enc.setFragmentTexture(shadowTexture, index: 1)
+                enc.setFragmentTexture(waterSurfaceDepth, index: 4)
+                enc.setFragmentSamplerState(atlasSampler, index: 0)
+                enc.setFragmentSamplerState(shadowSampler, index: 1)
+                uni.fog.z = 0
+                uni.fog.w = 0.82
+                drawLayer(refractionTranslucentPipeline, { $0.translucent }, visibleSections.reversed(), cull: true)
+                enc.endEncoding()
+            }
+            // Refraction reads an immutable scene snapshot, never its active attachment.
+            if hasWater, let copy = cmd.makeBlitCommandEncoder() {
+                copy.copy(from: sceneColor, sourceSlice: 0, sourceLevel: 0, sourceOrigin: .init(x: 0, y: 0, z: 0),
+                          sourceSize: .init(width: fbWidth, height: fbHeight, depth: 1),
+                          to: opaqueSceneColor, destinationSlice: 0, destinationLevel: 0,
+                          destinationOrigin: .init(x: 0, y: 0, z: 0))
+                copy.copy(from: sceneDepth, sourceSlice: 0, sourceLevel: 0, sourceOrigin: .init(x: 0, y: 0, z: 0),
+                          sourceSize: .init(width: fbWidth, height: fbHeight, depth: 1),
+                          to: opaqueSceneDepth, destinationSlice: 0, destinationLevel: 0,
+                          destinationOrigin: .init(x: 0, y: 0, z: 0))
+                copy.endEncoding()
+            }
+            scenePass.colorAttachments[0].loadAction = .load
+            scenePass.depthAttachment.loadAction = .load
+            enc = cmd.makeRenderCommandEncoder(descriptor: scenePass)!
+            enc.setDepthStencilState(depthWrite)
+            enc.setFragmentTexture(atlasTexture, index: 0)
+            enc.setFragmentTexture(shadowTexture, index: 1)
+            enc.setFragmentTexture(opaqueSceneColor, index: 2)
+            enc.setFragmentTexture(opaqueSceneDepth, index: 3)
+            enc.setFragmentSamplerState(atlasSampler, index: 0)
+            enc.setFragmentSamplerState(shadowSampler, index: 1)
+            enc.setFragmentBytes(&environment, length: MemoryLayout<EnvironmentRenderUniforms>.stride, index: 3)
+            uni.fog.z = 0
+            uni.fog.w = 1
+            // Water depth participates in later translucent effects. Both refraction inputs are
+            // snapshots, so no texture is simultaneously sampled and written by this pass.
+            if hasWater { drawLayer(waterPipeline, { $0.water }, visibleSections.reversed(), cull: false) }
+            uni.fog.w = 0.82
+            enc.setDepthStencilState(depthRead)
+            drawLayer(translucentPipeline, { $0.translucent }, visibleSections.reversed(), cull: true)
+            uni.fog.w = 1
+            enc.endEncoding()
+        }
 
         func blit(_ target: MTLTexture, _ pipeline: MTLRenderPipelineState, _ src: MTLTexture, dir: SIMD2<Float>?) {
             let pd = MTLRenderPassDescriptor()
@@ -1322,7 +1455,7 @@ final class WorldRenderer {
                                  settings.reduceMotion ? 0 : Float(cam.portalWarp),
                                  Float(timeSec), Float(cam.darkness)),
             tint: tint,
-            params2: SIMD4<Float>(ultraOn ? 1 : 0, 0.85, 1.0, 0))
+            params2: SIMD4<Float>(ultraOn ? 1 : 0, 0.85, 1.0, rayTracingActive ? 1 : 0))
         fenc.setFragmentBytes(&compU, length: MemoryLayout<CompositeUniforms>.stride, index: 1)
         fenc.setFragmentTexture(sceneColor, index: 0)
         fenc.setFragmentTexture(settings.bloom ? bloomA : sceneColor, index: 1)
@@ -1414,18 +1547,19 @@ final class WorldRenderer {
         return nil
     }
 
-    private func drawEntities(_ enc: MTLRenderCommandEncoder, game: GameCore, viewProj: simd_float4x4,
-                              camPos: SIMD3<Double>, dayLight: Double,
-                              fog: (SIMD3<Float>, Float, Float), partial: Double, timeSec: Double) {
+    private func presentEntities(game: GameCore, camPos: SIMD3<Double>,
+                                 partial: Double, timeSec: Double) -> [PresentedEntity] {
         let w = game.world
         let maxD = game.settings.entityDistance * game.settings.entityDistance
+        var result: [PresentedEntity] = []
         for e in w.entities {
             if e.dead { continue }
             guard let ent = e as? Entity else { continue }
-            if ent === game.player && game.perspective == 0 { continue }
+            let primaryVisible = !(ent === game.player && game.perspective == 0)
             let dx = ent.x - camPos.x, dz = ent.z - camPos.z
             if dx * dx + dz * dz > maxD { continue }
-            guard let name = modelNameFor(ent) else { continue }
+            let name = modelNameFor(ent)
+            guard name != nil || ent.type == "lightning" else { continue }
             let liv = ent as? LivingEntity
             let remotePose = (ent as? LANRemotePlayerEntity)?.presentationPose(timeSec: timeSec)
             let ix = remotePose?.x ?? ent.prevX + (ent.x - ent.prevX) * partial
@@ -1473,12 +1607,27 @@ final class WorldRenderer {
             pose.open = (ent as? Shulker)?.peekAmount ?? 0
             pose.hanging = (ent as? Bat)?.hanging ?? (ent.data.hanging ?? false)
             pose.alpha = deathFlip > 0 ? 1 - deathFlip * 0.6 : 1
-            enc.setDepthStencilState(depthWrite)
-            entityRenderer.draw(enc, pipeline: packTargets ? entityPipelineHDR : entityPipeline, sampler: atlasSampler,
-                                viewProj: viewProj, camPos: camPos, name: name, p: pose,
-                                time: timeSec, dayLight: dayLight,
-                                fog: (fog.0, fog.1, fog.2),
-                                gamma: game.settings.gamma, ambient: Double(w.info.ambientLight) / 15)
+            let snapshot = name.map { entityRenderer.snapshot(name: $0, p: pose, time: timeSec, origin: camPos) }
+            result.append(PresentedEntity(entity: ent, position: SIMD3(ix, iy, iz), snapshot: snapshot,
+                                          primaryVisible: primaryVisible))
+        }
+        return result
+    }
+
+    private func drawEntities(_ enc: MTLRenderCommandEncoder, game: GameCore, viewProj: simd_float4x4,
+                              camPos: SIMD3<Double>, dayLight: Double,
+                              fog: (SIMD3<Float>, Float, Float), presentations: [PresentedEntity],
+                              drawModels: Bool) {
+        for presented in presentations {
+            let ent = presented.entity
+            let ix = presented.position.x, iy = presented.position.y, iz = presented.position.z
+            if drawModels && presented.primaryVisible, let snapshot = presented.snapshot {
+                enc.setDepthStencilState(depthWrite)
+                entityRenderer.draw(enc, pipeline: packTargets ? entityPipelineHDR : entityPipeline, sampler: atlasSampler,
+                                    viewProj: viewProj, snapshot: snapshot, dayLight: dayLight,
+                                    fog: fog, gamma: game.settings.gamma,
+                                    ambient: Double(game.world.info.ambientLight) / 15)
+            }
             // end crystal beams + lightning via line overlay
             if let c = ent as? EndCrystal, let bt = c.beamTarget {
                 drawBoxOutline(enc, viewProj, [(

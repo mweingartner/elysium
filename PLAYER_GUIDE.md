@@ -904,7 +904,7 @@ that metadata grants no execution or mutation authority.
 **Options...** contains six tabs:
 
 - **Video** controls render distance, field of view, brightness, GUI scale, graphics effects, fullscreen,
-  particles, frame-rate limit, optional Ultra shaders, and the default-on **Show Minimap** setting.
+  particles, frame-rate limit, Standard/Ultra/Ray Traced graphics, and the default-on **Show Minimap** setting.
   Turning the compact minimap off clears it from the gameplay HUD but does not disable the expanded
   map opened with `M`. In the Nether, both map views follow the open cavern around your current
   height instead of drawing the sealed ceiling.
@@ -920,6 +920,36 @@ that metadata grants no execution or mutation authority.
 Reduce render distance, particles, shader effects, or the frame-rate limit when performance or heat is a
 problem. Use **Reduce Motion** and **Reduced Flashes** when camera movement or effects are uncomfortable;
 **High Contrast UI** and **Subtitles** can make visual and audio information easier to follow.
+
+### Graphics modes, water, and clouds
+
+Open **Options... → Video → Shaders** to cycle between **OFF** (Standard), **ULTRA**,
+and **RAY TRACED**. Ray Traced appears only when the selected Metal device supports
+the required ray-tracing capability. Your existing graphics choice is preserved;
+this update does not enable the more demanding mode automatically.
+
+Ray Traced follows actual loaded world geometry, including objects outside the
+camera view, for lighting, shadows, indirect illumination, reflections, and
+water/glass transmission. Animated creatures use the same poses and textures as
+Standard. It can take a short time to prepare newly loaded geometry; during
+preparation, or when the hardware or safe scene budget cannot support it, the game
+uses Ultra and displays a notice. `F3` reports the active mode, internal ray-tracing
+resolution, and GPU frame time. Ray tracing is substantially more demanding than
+Standard; lower render distance or choose Ultra when necessary.
+
+On supported Macs running macOS 26 or newer, MetalFX reduces ray noise while
+preserving texture detail. Other supported systems use the built-in filter.
+The world is traced at an aspect-preserving resolution up to 1440 × 900; the HUD
+still uses the full window resolution.
+
+Water has subtle moving normals, stronger reflections at grazing angles,
+refraction, deeper-water absorption, and restrained shoreline foam. Standard and
+Ultra use the visible scene and sky for these effects; Ray Traced also follows
+reflected and transmitted rays into the loaded world. Clouds have thickness,
+soft lighting, and greater coverage in rain. **Clouds** still switches them off,
+and **Reduce Motion** stops the new cloud drift and optical water-wave animation.
+The minimap, text, crosshair, and held-item presentation stay separate from world
+ray tracing, so their clarity does not depend on ray accumulation.
 
 ### Optional local AI
 

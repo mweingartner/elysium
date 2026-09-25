@@ -1096,6 +1096,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
             hud.debugInfo["chunkUpdates"] = String(n)
             hud.debugInfo["sections"] = String(renderer.sections.count)
             hud.debugInfo["drawCalls"] = String(renderer.drawCalls)
+            let ray = renderer.rayTracingDiagnostics
+            hud.debugInfo["graphics"] = game.settings.shader == "raytraced"
+                ? (renderer.rayTracingActive
+                    ? "Ray Traced \(ray.width)x\(ray.height) \(ray.denoiser) \(String(format: "%.1f", ray.gpuMilliseconds)) ms GPU"
+                    : "Ultra fallback: \(ray.status)")
+                : (game.settings.shader == "ultra" ? "Ultra" : "Standard")
+            hud.graphicsNotice = game.settings.shader == "raytraced" && !renderer.rayTracingActive
+                ? "Ray tracing: \(ray.status). Using Ultra." : nil
             hud.debugInfo["mem"] = "n/a"
             audio.applyVolumes(game.settings.volumes)
             applyFpsMode()

@@ -4,6 +4,7 @@
 import AppKit
 import CryptoKit
 import Foundation
+import Metal
 import QuartzCore
 import ElysiumCore
 
@@ -2247,14 +2248,16 @@ final class SettingsScreen: Screen {
                 }))
             y += 22
             let shaderB = Button(cx - 160, y, W, 18, "", {})
+            let rayTracingAvailable = MTLCreateSystemDefaultDevice()?.supportsRaytracing ?? false
             func shaderLabel() -> String {
-                "Shaders: \(game.settings.shader == "ultra" ? "§6ULTRA§r" : "OFF")"
+                GraphicsMode(shader: game.settings.shader).buttonLabel(rayTracingSupported: rayTracingAvailable)
             }
             shaderB.label = shaderLabel()
             shaderB.onClick = { [weak self, weak shaderB, weak game] in
                 guard let self, let shaderB, let game else { return }
                 guard self.persistSettingsMutation(game, {
-                    $0.shader = game.settings.shader == "ultra" ? nil : "ultra"
+                    $0.shader = GraphicsMode(shader: game.settings.shader)
+                        .next(rayTracingSupported: rayTracingAvailable).shader
                 }) else { return }
                 shaderB.label = shaderLabel()
             }

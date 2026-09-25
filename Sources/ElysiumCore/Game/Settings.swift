@@ -72,7 +72,8 @@ public struct Settings: Codable, Equatable {
     public var resourcePacks: [String]? = nil
     /// Explicit consent for reviewed bundled Faithful 64x add-ons. Nil/empty = none.
     public var bundledResourcePackAddOns: [String]? = nil
-    /// nil = off, "ultra" = built-in ultra preset, anything else = shader pack file name
+    /// nil = standard, "ultra" = raster Ultra, "raytraced" = capability-gated path tracing.
+    /// Other strings remain reserved for shader-pack file names.
     public var shader: String? = nil
     /// Local Ollama model name used by the in-game /ai command. Empty = unset.
     public var aiOllamaModel = ""

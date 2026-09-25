@@ -59,19 +59,43 @@ final class ModelGPU {
     let count: Int
     let texture: MTLTexture
     let model: MobModel
+    let rayTracingParts: [(partIndex: Int, geometry: RayTracingEntityGeometry)]
 
-    init(vb: MTLBuffer, count: Int, texture: MTLTexture, model: MobModel) {
+    init(vb: MTLBuffer, count: Int, texture: MTLTexture, model: MobModel,
+         rayTracingParts: [(partIndex: Int, geometry: RayTracingEntityGeometry)]) {
         self.vb = vb
         self.count = count
         self.texture = texture
         self.model = model
+        self.rayTracingParts = rayTracingParts
+    }
+}
+
+/// One immutable animation evaluation used by both presentation paths. Retains
+/// its model and skin even if a pack swap replaces the renderer's cache while a
+/// previously submitted GPU frame is still in flight.
+struct EntityRenderSnapshot {
+    let geometry: ModelGPU
+    let pose: EntityPose
+    let matrices: EntityPresentationMatrices
+}
+
+struct EntityPresentationMatrices {
+    let model: simd_float4x4
+    let parts: [simd_float4x4]
+    let overlay: SIMD4<Float>
+
+    func transform(forPart index: Int) -> simd_float4x4 {
+        model * parts[index]
     }
 }
 
 final class EntityRendererM {
     private let device: MTLDevice
     private var geoms: [String: ModelGPU] = [:]
-    private var partMats = [simd_float4x4](repeating: matrix_identity_float4x4, count: 24)
+    private var geometryOrder: [String] = []
+    static let maximumCachedModels = 128
+    private var skinGeneration: UInt64 = 0
 
     init(device: MTLDevice) {
         self.device = device
@@ -79,12 +103,14 @@ final class EntityRendererM {
 
     /// resource-pack swap: rebuild skins (geometry is rebuilt with them)
     func resetSkins() {
+        skinGeneration &+= 1
         geoms.removeAll()
+        geometryOrder.removeAll()
     }
 
     func geom(_ name: String) -> ModelGPU {
-        if let g = geoms[name] { return g }
         let resolved = hasModel(name) ? name : "pig"
+        if let g = geoms[resolved] { return g }
         let built = buildEntityGeometry(resolved)
         let vb = built.verts.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress!, length: max(1, $0.count))! }
         // pack entity texture when the model's UV layout matches vanilla and the
@@ -110,18 +136,37 @@ final class EntityRendererM {
             tex.replace(region: MTLRegionMake2D(0, 0, skinW, skinH), mipmapLevel: 0,
                         withBytes: raw.baseAddress!, bytesPerRow: skinW * 4)
         }
-        let g = ModelGPU(vb: vb, count: built.vertexCount, texture: tex, model: built.model)
+        // Native geometry is source-authored, not supplied by resource packs.
+        // Fail loudly if its frozen rigid-part contract is broken; silently
+        // skipping a malformed triangle would make RT and raster disagree.
+        guard let parts = EntityRigidGeometry.partition(built.verts,
+                            partCount: min(EntityRigidGeometry.maximumParts, built.model.parts.count)) else {
+            preconditionFailure("Invalid native entity geometry: \(resolved)")
+        }
+        let rayTracingParts = parts.map { part in
+            (partIndex: part.partIndex,
+             geometry: RayTracingEntityGeometry(
+                key: "entity:\(skinGeneration):\(resolved):\(part.partIndex)",
+                vertices: part.vertices, texture: tex))
+        }
+        let g = ModelGPU(vb: vb, count: built.vertexCount, texture: tex, model: built.model,
+                         rayTracingParts: rayTracingParts)
         if ProcessInfo.processInfo.environment["ELYSIUM_GEOM_DEBUG"] != nil {
             print("[geom] \(name): \(built.model.parts.count) parts, \(built.vertexCount) verts")
             fflush(stdout)
         }
-        geoms[name] = g
+        if geoms.count >= Self.maximumCachedModels, let oldest = geometryOrder.first {
+            geoms.removeValue(forKey: oldest)
+            geometryOrder.removeFirst()
+        }
+        geoms[resolved] = g
+        geometryOrder.append(resolved)
         return g
     }
 
     /// compute per-part matrices by animator profile
-    private func pose(_ g: ModelGPU, _ p: EntityPose, _ time: Double) {
-        let model = g.model
+    static func partTransforms(model: MobModel, pose p: EntityPose, time: Double) -> [simd_float4x4] {
+        var partMats = [simd_float4x4](repeating: matrix_identity_float4x4, count: 24)
         let swing = p.limbSwing
         let amp = p.limbAmp
         let walkA = Foundation.cos(swing * 0.6662) * 1.2 * amp
@@ -427,23 +472,20 @@ final class EntityRendererM {
             }
             partMats[i] = m
         }
+        return partMats
     }
 
-    func draw(_ enc: MTLRenderCommandEncoder, pipeline: MTLRenderPipelineState, sampler: MTLSamplerState,
-              viewProj: simd_float4x4, camPos: SIMD3<Double>, name: String, p: EntityPose,
-              time: Double, dayLight: Double, fog: (color: SIMD3<Float>, start: Float, end: Float),
-              gamma: Double, ambient: Double) {
-        let g = geom(name)
-        pose(g, p, time)
+    static func presentation(model: MobModel, pose p: EntityPose, time: Double,
+                             origin: SIMD3<Double>) -> EntityPresentationMatrices {
         var m = matrix_identity_float4x4
-        m = mTranslate(m, Float(p.x - camPos.x), Float(p.y - camPos.y), Float(p.z - camPos.z))
+        m = mTranslate(m, Float(p.x - origin.x), Float(p.y - origin.y), Float(p.z - origin.z))
         // Vanilla-rig facing flip: every mob model is authored with its face at -Z
         // (pig head z -6/snout -9, back legs +7), while the movement basis drives a
         // yaw-0 entity toward +Z (vx = -sin(yaw), vz = +cos(yaw)). Rotating by
         // (pi - yaw) instead of (-yaw) points the authored front along the direction
         // of travel; without the pi term every creature walks backwards.
         m = mRotateY(m, Float(.pi - p.yaw))
-        let sc = Float(p.scale * g.model.scale * (p.baby ? 0.5 : 1))
+        let sc = Float(p.scale * model.scale * (p.baby ? 0.5 : 1))
         m = mScale(m, sc, sc, sc)
 
         var overlay = SIMD4<Float>(1, 0.2, 0.2, Float(p.hurtFlash * 0.5))
@@ -455,16 +497,51 @@ final class EntityRendererM {
                 ? SIMD4<Float>(0.55, 0.85, 1, Float(p.fuseOverlay))
                 : SIMD4<Float>(1, 1, 1, Float(p.fuseOverlay))
         }
+        return EntityPresentationMatrices(model: m, parts: partTransforms(model: model, pose: p, time: time),
+                                          overlay: overlay)
+    }
+
+    func snapshot(name: String, p: EntityPose, time: Double,
+                  origin: SIMD3<Double>) -> EntityRenderSnapshot {
+        let g = geom(name)
+        return EntityRenderSnapshot(geometry: g, pose: p,
+            matrices: Self.presentation(model: g.model, pose: p, time: time, origin: origin))
+    }
+
+    func rayTracingInstances(snapshot: EntityRenderSnapshot) -> [RayTracingEntityInstance] {
+        snapshot.geometry.rayTracingParts.map { part in
+            RayTracingEntityInstance(geometry: part.geometry,
+                transform: snapshot.matrices.transform(forPart: part.partIndex),
+                tint: SIMD4<Float>(1, 1, 1, Float(snapshot.pose.alpha)), overlay: snapshot.matrices.overlay)
+        }
+    }
+
+    func draw(_ enc: MTLRenderCommandEncoder, pipeline: MTLRenderPipelineState, sampler: MTLSamplerState,
+              viewProj: simd_float4x4, camPos: SIMD3<Double>, name: String, p: EntityPose,
+              time: Double, dayLight: Double, fog: (color: SIMD3<Float>, start: Float, end: Float),
+              gamma: Double, ambient: Double) {
+        draw(enc, pipeline: pipeline, sampler: sampler, viewProj: viewProj,
+             snapshot: snapshot(name: name, p: p, time: time, origin: camPos), dayLight: dayLight,
+             fog: fog, gamma: gamma, ambient: ambient)
+    }
+
+    func draw(_ enc: MTLRenderCommandEncoder, pipeline: MTLRenderPipelineState, sampler: MTLSamplerState,
+              viewProj: simd_float4x4, snapshot: EntityRenderSnapshot,
+              dayLight: Double, fog: (color: SIMD3<Float>, start: Float, end: Float),
+              gamma: Double, ambient: Double) {
+        let g = snapshot.geometry
+        let p = snapshot.pose
+        let partMats = snapshot.matrices.parts
         var u = EntityUniforms(
             viewProj: viewProj,
-            model: m,
+            model: snapshot.matrices.model,
             parts: (partMats[0], partMats[1], partMats[2], partMats[3], partMats[4], partMats[5], partMats[6],
                     partMats[7], partMats[8], partMats[9], partMats[10], partMats[11], partMats[12], partMats[13],
                     partMats[14], partMats[15], partMats[16], partMats[17], partMats[18], partMats[19],
                     partMats[20], partMats[21], partMats[22], partMats[23]),
             light: SIMD4<Float>(Float(p.sky), Float(p.block), Float(dayLight), Float(gamma)),
             misc: SIMD4<Float>(Float(ambient), Float(p.alpha), fog.start, fog.end),
-            overlay: overlay,
+            overlay: snapshot.matrices.overlay,
             fogColor: SIMD4<Float>(fog.color.x, fog.color.y, fog.color.z, 1))
         enc.setRenderPipelineState(pipeline)
         enc.setVertexBuffer(g.vb, offset: 0, index: 0)

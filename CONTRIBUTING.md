@@ -125,6 +125,15 @@ These are not style preferences. Violating them corrupts worlds or breaks determ
 
 Elysium's approved in-app network surfaces are the loopback-only Ollama agent, the local-network LAN transport tracked in [LAN_MULTIPLAYER_PLAN.md](LAN_MULTIPLAYER_PLAN.md), and player-initiated Reality Derived map generation through the pinned Arnis UI/helper. LAN work must preserve the split where `ElysiumCore/Net` owns bounded protocol models/validation and `Sources/Elysium/LANTransport.swift` owns Network.framework. New networking beyond those surfaces, including NAT traversal, relay servers, account systems, raw sockets, or cloud services, needs an issue and security plan first. Performance work is welcome but must keep goldens green and come with before/after numbers. Be a normal, decent person in issues and reviews; that's the whole code of conduct.
 
+Rendering work has focused real-Metal coverage; run `swift test --filter
+'GraphicsModeTests|WaterMeshPartitionTests|AtmosphereShaderTests|RayTracing|RayTracedWorldRendererTests|WorldRendererIntegrationTests'`
+during iteration. Use the normal debug test configuration: existing persistence
+fault-injection tests intentionally depend on DEBUG-only seams. Build production
+separately. A capability skip on a non-ray-tracing device does not establish ray
+quality; inspect the native app on supported hardware and record scene/frame-time
+evidence as described in [Ray-traced worlds](docs/RAY_TRACING.md). Final deployment
+still uses the standard release pipeline and active Git hooks.
+
 By contributing you agree your contributions are licensed under the repository's MIT license.
 
 Elysium is an independent fan re-creation, not affiliated with Mojang Studios or Microsoft — see the README's [Disclaimer](README.md#disclaimer).

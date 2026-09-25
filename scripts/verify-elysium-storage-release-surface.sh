@@ -381,7 +381,9 @@ EXPECTED_CORE_OBJECT_SHA256='ea2d96cf2b3075443f8a58e22a1c6e8c8eaa7ab0b227234a016
 # app-target lifecycle/UI behavior only: Core, elysmoke, and the reviewed
 # storage/text-input surfaces remain byte-identical. The stripped Elysium
 # product pin renews from 17f963e3512e40f14a298b7fcee90512ba94cc667f47a4e8dcf1c72718520b9c.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='062c1a14c02349ad589525a620818bbd7159e3891fc1e0deb07e079bc8198093'
+# Ray-traced world/HDR atmosphere renderer only; reviewed normalization evidence is in
+# docs/ray-traced-worlds/build.md. Core/storage/text-input objects and all source pins are unchanged.
+EXPECTED_ELYSIUM_PRODUCT_SHA256='4846b2192c71a101618b77e1bd50c9666fcb6440cee418efaf1ae064b80be970'
 EXPECTED_SMOKE_PRODUCT_SHA256='3f5260664269be010db64237b3da923021fcfb0bcfa315126f2f16fb5f7cb1a9'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'

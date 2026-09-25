@@ -204,6 +204,64 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
 
 ## Rendering
 
+### Ray-traced world, clouds, and water — September 24, 2026
+
+- Status: implemented; 56 focused renderer tests and native-world inspection
+  pass. Release and publication evidence is tracked in
+  [the verification record](docs/ray-traced-worlds/build.md).
+- Outcome: an explicit Ray Traced video mode with traced primary world rays,
+  occluded sun/local illumination, diffuse indirect light, material reflections
+  and transmission; thicker weather-lit clouds and depth-dependent water optics
+  must retain Faithful detail. First-person items and the HUD remain separate
+  presentation passes, not camera-distorted world geometry.
+- Acceptance scene: a fixed waterfront with alpha-cutout trees, an off-screen
+  structure, and a moving creature. Reflections must retain off-screen geometry,
+  react to block edits and movement, and distinguish shallow from deep water.
+  Inspect clouds at noon, sunset, night and rain, underwater transitions, a
+  torch/lava cave, resize/teleport/world switches, and the raster fallback.
+- Constraints: preserve deterministic gameplay, saves/LAN and the packed mesher
+  ABI; macOS 14 remains the minimum. Query Metal capabilities and fail visibly
+  back to raster when unavailable. New GPU resources must be bounded, immutable
+  or ring-buffered, and retained until command completion. Ray-scene membership
+  cannot be limited to the camera frustum.
+- Chosen direction: reuse section triangles as incrementally built acceleration
+  structures and shared rigid entity poses as instances. Trace the world into
+  HDR targets, then denoise/filter before presentation. Share world-anchored
+  environment/water functions between visible sky and reflected/refracted rays.
+  The strongest alternative is raster primary visibility with complete traced
+  lighting; it offers easier incremental rollout, but adds G-buffer integration
+  while leaving the requested primary world mode ambiguous. Screen-space-only
+  reflections are not a substitute for ray tracing.
+- Evidence: this Mac reports Apple M5 Max (40 GPU cores, 128 GB), Metal 4, and
+  supported compute/render ray tracing. A real Metal acceleration-structure
+  build and compute trace returned distance 3 for the test triangle and a miss
+  for the control ray. Its approximately 4 ms first-use build/trace time is a
+  two-ray API smoke test, not an Elysium performance benchmark.
+- Quality decision: the initial native waterfront image rejected one-sample
+  tracing with an RGB history filter: indirect light and water remained visibly
+  grainy despite passing intersection tests. Supported macOS 26+ devices now use
+  same-resolution MetalFX temporal denoising with signed world normals, normalized
+  depth, current-to-previous motion, diffuse/specular albedo, and roughness guides.
+  Two paths per pixel and deterministic primary Fresnel branches feed that path;
+  older systems retain four paths with an albedo-guided spatial/temporal filter.
+  The native M5 GPU checkerboard probe reduced noise error by 98.8% while retaining
+  97% of contrast; this is a denoiser fixture, not full-game visual acceptance.
+  A same-camera Ultra comparison also isolated false-color speckles in fogged
+  ray-traced foliage. Camera fog and finite primary cloud segments now composite
+  after reconstruction, keeping surface radiance consistent with its material
+  guides. Water absorption and secondary-ray atmosphere remain in ray transport.
+  Primary air misses and fully distance-faded geometry share the same directional
+  atmospheric background, preventing a fog-colored outline of the loaded world
+  when flying through clouds. Short-range gameplay fog remains the final mask.
+- Design references: Apple's [ray tracing guide](https://developer.apple.com/videos/play/wwdc2023/10128/),
+  [intersection/performance guidance](https://developer.apple.com/videos/play/wwdc2022/10105/),
+  [hybrid alternative](https://developer.apple.com/videos/play/wwdc2021/10150/),
+  and [denoised-scaler requirements](https://developer.apple.com/documentation/metalfx/mtlfxtemporaldenoisedscalerdescriptor).
+- Revisit if: native images show missing geometry, alpha/shadow errors, stale
+  reflections or temporal ghosts; or measured GPU time/memory makes the default
+  quality impractical. Resolve with a bounded native probe before release gates,
+  not a claim based only on source assertions or device capability.
+
 First-person presentation uses `FirstPersonRenderer.swift` and `FirstPersonViewmodel.swift` in a
 camera-space Metal pass with an independent cleared depth buffer and fixed 70-degree lens. It runs
 after world compositing and before the HUD, so minimap/quickbar occlusion does not move held items.
@@ -335,7 +393,7 @@ pack selection.
 
 Engine side (`Render/`): the **mesher** consumes a padded 18×18×18 snapshot and emits opaque/cutout/translucent vertex buffers — greedy quad merging for full cubes, per-vertex AO, smooth light, biome tint, and an animation channel (water/lava/portal/fire/sway). Vertex format is 28 bytes / 7 words. Each mesh input owns an immutable, generation-tagged tint/provenance context; main-thread completion rejects an old generation or replaced section job before any upload or bookkeeping side effect. Generated and pack-backed atlas slices use the same top-origin row convention from CPU bytes through Metal sampling; semantic door, sign, bed, and chest slices, plus stateful gate/trapdoor and directional top/front UV routes, apply their facing, half/piece, hinge, open/in-wall, and expected-front transforms directly within that coordinate space. Paired chests extend their neighbor-aware shape boxes to one shared seam and use the entity unwrap's complete fifteen-texel left/right front crops, while single chests retain their fourteen-texel crop. Pack provenance selects only those semantic transforms and tint behavior, never a global V-axis flip. Torch and lantern fixtures have dedicated live-world cuboid emitters so placed blocks render as material-built 3D fixtures instead of transparent sprite cards. The **atlas substrate** generates all 757+ baseline tiles in code with integer-only color math (pinned byte-identical by `atlas-goldens.json`); the built-in Faithful art overlays it. Tiles that vanilla renders as block entities (beds, chests, standing/wall/hanging signs, the bell, the decorated pot) have no flat `block/` texture in the Java format — the loader composites or crops them from the art's `entity/` unwraps, so every visible surface comes from the Faithful set (the only substrate tiles left at runtime are the three airs, a particle speck, and the end-portal effect, which vanilla also renders as a shader rather than a texture).
 
-App side (`WorldRenderer`): runtime-compiled MSL (no `.metal` files — SPM doesn't build them), a **mesh arena** of 32 MB shared `MTLBuffer` pages with a first-fit free list and 3-frame deferred frees so all section draws bind one buffer at different offsets. Pass order: shadow (PCF/Poisson, snapped texel grid) → sky gradient → stars → celestials (Faithful sun/moon drawn additively) → clouds → opaque → cutout (back-culled) → translucent → entities (pose animator, Faithful skins) → particles (instanced, triple-buffered) → ultra (half-res SSAO + shadow-marched volumetrics) → bloom → composite (ACES) → first-person geometry (independent depth) → UI. The section mesher treats `Shape.cube` as the visible-geometry contract; `fullCube` remains an independent gameplay/occlusion property, so deliberately non-full cubes such as soul sand and translucent cubes such as honey cannot disappear from the mesh. The UI is a single draw call: `UICanvas` mimics Canvas2D (fillRect, gradients, transforms, text via a built-in 5×7 font or the Faithful font sheets) into one vertex stream with a texture-segmented batch. Pack GUI sheets share one bounded integral raster scale chosen from their highest supported native source (up to 4x), while logical source coordinates keep layout and glyph advances independent of physical composite size; this preserves Faithful 64x font and panel detail without a lossy 2x intermediate. Non-block item icons prefer active `textures/item` pack art; Elysium-only variants without pack art can derive from a matching packed sibling, such as copper tools from iron tools with only neutral metal pixels recolored, before falling back to deterministic procedural templates. Block item icons choose their flat-vs-3D path from registered shape boxes, so torch, lantern, chain, and other volumetric non-cube block items do not fall back to flat tile sprites. First-person hands and items use the dedicated 3D pass described above; `HudM.swift` draws no held-item sprites.
+App side (`WorldRenderer`): runtime-compiled MSL (no `.metal` files — SPM doesn't build them), a **mesh arena** of 32 MB shared `MTLBuffer` pages with a first-fit free list and 3-frame deferred frees so all section draws bind one buffer at different offsets. Raster pass order: shadow → sky/celestials → opaque/cutout/entities → presentation overlays/particles → half-resolution volumetric clouds with depth-aware resolve → water-depth prepass → submerged translucency → immutable scene snapshots → refractive water → foreground translucency. Ray Traced instead resolves denoised world color and primary depth before the shared presentation overlays. Both paths use HDR scene color, optional bloom, final tone mapping, independent-depth first-person geometry, and native-resolution UI; Ultra-only SSAO/volumetrics are not layered over ray-traced lighting. The section mesher treats `Shape.cube` as the visible-geometry contract; `fullCube` remains an independent gameplay/occlusion property, so deliberately non-full cubes such as soul sand and translucent cubes such as honey cannot disappear from the mesh. The UI is a single draw call: `UICanvas` mimics Canvas2D (fillRect, gradients, transforms, text via a built-in 5×7 font or the Faithful font sheets) into one vertex stream with a texture-segmented batch. Pack GUI sheets share one bounded integral raster scale chosen from their highest supported native source (up to 4x), while logical source coordinates keep layout and glyph advances independent of physical composite size; this preserves Faithful 64x font and panel detail without a lossy 2x intermediate. Non-block item icons prefer active `textures/item` pack art; Elysium-only variants without pack art can derive from a matching packed sibling, such as copper tools from iron tools with only neutral metal pixels recolored, before falling back to deterministic procedural templates. Block item icons choose their flat-vs-3D path from registered shape boxes, so torch, lantern, chain, and other volumetric non-cube block items do not fall back to flat tile sprites. First-person hands and items use the dedicated 3D pass described above; `HudM.swift` draws no held-item sprites.
 
 Chat and command-line rendering stays in the app shell (`ScreensM.swift` + `UICanvas`), but its wrapping and item-completion rules live in `ElysiumCore/Game/CommandLineSupport.swift` so XCTest can prove those behaviors against the real registered item list.
 

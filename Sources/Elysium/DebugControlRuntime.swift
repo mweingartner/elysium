@@ -1050,11 +1050,13 @@ final class DebugControlRuntime {
                 sections[scope.rawValue] = .array(blocks)
             case .renderer:
                 let culling = app.renderer.cullingStats
+                let ray = app.renderer.rayTracingDiagnostics
                 sections[scope.rawValue] = .object([
                     "drawableWidth": .integer(Int64(app.gameView.drawableSize.width)),
                     "drawableHeight": .integer(Int64(app.gameView.drawableSize.height)),
                     "atlasResolution": .integer(Int64(app.renderer.atlasRes)),
                     "drawCalls": .integer(Int64(app.renderer.drawCalls)),
+                    "framesPerSecond": .integer(Int64(app.hud.debugInfo["fps"] ?? "0") ?? 0),
                     "totalSections": .integer(Int64(culling.totalSections)),
                     "emptySections": .integer(Int64(culling.emptySections)),
                     "distanceCulledSections": .integer(Int64(culling.distanceCulledSections)),
@@ -1064,6 +1066,18 @@ final class DebugControlRuntime {
                     "shadowRangeCulledSections": .integer(Int64(culling.shadowRangeCulledSections)),
                     "shadowFrustumCulledSections": .integer(Int64(culling.shadowFrustumCulledSections)),
                     "shadowVisibleSections": .integer(Int64(culling.shadowVisibleSections)),
+                    "rayTracing": .object([
+                        "available": .bool(ray.available), "active": .bool(app.renderer.rayTracingActive),
+                        "ready": .bool(ray.ready), "status": .string(ray.status),
+                        "sections": .integer(Int64(ray.sections)), "pendingSections": .integer(Int64(ray.pendingSections)),
+                        "instances": .integer(Int64(ray.instances)), "triangles": .integer(Int64(ray.triangles)),
+                        "geometryBytes": .integer(Int64(ray.geometryBytes)),
+                        "width": .integer(Int64(ray.width)), "height": .integer(Int64(ray.height)),
+                        "historySamples": .integer(Int64(ray.historySamples)),
+                        "gpuMilliseconds": .number(ray.gpuMilliseconds),
+                        "denoiser": .string(ray.denoiser),
+                        "samplesPerPixel": .integer(Int64(ray.samplesPerPixel)),
+                    ]),
                 ])
             case .network:
                 sections[scope.rawValue] = .object(lanStatusValue())

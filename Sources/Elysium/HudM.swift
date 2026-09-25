@@ -48,6 +48,7 @@ final class HUD {
     var bossBars: [BossBarInfo] = []
     var debugVisible = false
     var debugInfo: [String: String] = [:]
+    var graphicsNotice: String?
     var hideGui = false
     // HUD timers are in 20Hz ticks but draw() runs per FRAME — convert real
     // time to whole tick steps or toasts/action bars expire 2-10× too fast
@@ -85,6 +86,9 @@ final class HUD {
         let W = ui.width, H = ui.height
         let cx = (W / 2).rounded(.down)
         let screenOpen = ui.hasScreen()
+        if let graphicsNotice, !screenOpen && !debugVisible {
+            cv.drawText(fitHUD(graphicsNotice, maxWidth: Int(max(1, W - 12))), 6, 6, 1, "#f4d28a", shadow: true)
+        }
         let rpgDrawPlan = rpgHUDDrawPlan(player, screenOpen: screenOpen)
         let rpgInsightLines = rpgInsightCache.resolve(
             key: rpgHUDInsightCacheKey(player, screenOpen: screenOpen)
@@ -541,6 +545,7 @@ final class HUD {
             "Time: \(world.dayTime) (day \(world.time / 24000))  Weather: \(world.raining ? (world.thundering ? "thunder" : "rain") : "clear")",
             "E: \(world.entities.count)  Sections: \(debugInfo["sections"] ?? "?")  Draw: \(debugInfo["drawCalls"] ?? "?")",
             "Mem: \(debugInfo["mem"] ?? "?")  Seed: \(world.seed)",
+            "Graphics: \(debugInfo["graphics"] ?? "Standard")",
         ]
         // scripting-ui-and-replication (change 3), design.md §12: "F3 summary" — script counts,
         // event/tick stats, budget trips, one line, only while a script runtime actually exists

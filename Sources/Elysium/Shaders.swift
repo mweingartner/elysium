@@ -1,7 +1,7 @@
 // All MSL shader sources — + the sprite shader from
 // the frozen baseline. Same lighting math, same packed vertex formats, same pass structure.
 
-let GAME_MSL = """
+let GAME_MSL = ELYSIUM_ENVIRONMENT_MSL + """
 #include <metal_stdlib>
 using namespace metal;
 
@@ -26,6 +26,7 @@ struct ChunkShared {
     float4 fogColor;
     float4 misc;       // x = time
     float4 heldLight;  // rgb = torch color * intensity, w = radius in blocks (w<=0 disables)
+    float4 worldOrigin; // camera world position; w = Reduce Motion
 };
 struct SkyU {
     float4x4 invViewProj;
@@ -44,10 +45,10 @@ struct StarsU {
     float4x4 viewProj;
     float4 params;      // time, alpha
 };
-struct CloudU {
-    float4x4 viewProj;
-    float4 offset;      // xyz + scale
-    float4 scroll;      // sx, sy, brightness, fogEnd
+struct EnvironmentRenderUniforms {
+    float4x4 inverseViewProjection;
+    ElyAtmosphereU atmosphere;
+    float4 viewport; // width, height, reciprocal width, reciprocal height
 };
 struct EntityU {
     float4x4 viewProj;
@@ -78,7 +79,7 @@ struct SpriteU {
 struct CompositeU {
     float4 params;      // bloomAmt, warp, time, darkness
     float4 tint;
-    float4 params2;     // ultraOn, aoStrength, volStrength, _
+    float4 params2;     // ultraOn, aoStrength, volStrength, ray-traced HDR tone mapping
 };
 struct UltraU {
     float4x4 invViewProj;   // camera-relative clip → world
@@ -110,11 +111,17 @@ struct ChunkVOut {
     float4 shadowPos;
     float skyAmt;
     float3 worldPos;
+    float3 faceNormal [[flat]];
+    float3 materialTint;
     uint layer [[flat]];
     uint anim [[flat]];
 };
 
 constant float FACE_SHADE[6] = {0.55, 1.0, 0.8, 0.8, 0.62, 0.62};
+constant float3 FACE_NORMAL[6] = {
+    float3(0,-1,0), float3(0,1,0), float3(0,0,-1),
+    float3(0,0,1), float3(-1,0,0), float3(1,0,0)
+};
 
 // rotated per-pixel for soft ultra shadows
 constant float2 POISSON12[12] = {
@@ -139,16 +146,16 @@ vertex ChunkVOut chunk_vs(ChunkVIn in [[stage_in]],
 
     float3 pos = in.pos;
     float3 wpos = pos + uOrigin.xyz;
+    float3 absolutePos = wpos + u.worldOrigin.xyz;
     if (anim == 5u || anim == 6u) {
         float amp = anim == 6u ? 0.06 : 0.025;
         float topFactor = anim == 6u ? clamp(1.0 - in.uv.y, 0.0, 1.0) : 1.0;
-        float ph = dot(floor(wpos.xz + 0.5), float2(0.7, 1.3));
+        float ph = dot(floor(absolutePos.xz + 0.5), float2(0.7, 1.3));
         pos.x += sin(time * 1.1 + ph) * amp * topFactor;
         pos.z += cos(time * 0.9 + ph * 1.7) * amp * topFactor;
     }
-    if (anim == 1u) {
-        pos.y += sin(time * 1.6 + (wpos.x + wpos.z) * 0.7) * 0.025 - 0.02;
-    }
+    // Water's shared mesher corner heights are authoritative. Animate optical
+    // normals rather than independently displacing top/side faces into gaps.
 
     float3 rel = pos + uOrigin.xyz;
     ChunkVOut out;
@@ -174,16 +181,15 @@ vertex ChunkVOut chunk_vs(ChunkVIn in [[stage_in]],
     out.layer = layer;
     out.anim = anim;
     out.worldPos = wpos;
+    out.faceNormal = FACE_NORMAL[min(normal, 5u)];
+    out.materialTint = tint;
     out.shadowPos = u.shadowMat * float4(rel, 1.0);
     return out;
 }
 
-fragment float4 chunk_fs(ChunkVOut in [[stage_in]],
-                         constant ChunkShared& u [[buffer(1)]],
-                         texture2d_array<float> atlas [[texture(0)]],
-                         depth2d<float> shadowMap [[texture(1)]],
-                         sampler atlasSmp [[sampler(0)]],
-                         sampler shadowSmp [[sampler(1)]]) {
+static float4 shadeChunk(ChunkVOut in, constant ChunkShared& u,
+                         texture2d_array<float> atlas, depth2d<float> shadowMap,
+                         sampler atlasSmp, sampler shadowSmp) {
     float time = u.misc.x;
     // misc.y = 1 when a resource pack frame-animates the fluids; the procedural
     // UV scroll/warp would double-animate the art, so damp it out
@@ -254,34 +260,139 @@ fragment float4 chunk_fs(ChunkVOut in [[stage_in]],
 
     float alpha = tex.a * u.fog.w;
 
-    // ultra: specular sun glint + fresnel on water (anim 1)
-    if (ultraOn > 0.5 && in.anim == 1u && dayLight > 0.02) {
-        float2 wp = in.worldPos.xz;
-        float t2 = time * 1.3;
-        // two-octave procedural wave normal
-        float h1 = sin(wp.x * 1.7 + t2) * cos(wp.y * 1.3 - t2 * 0.8);
-        float h2 = sin(wp.x * 3.9 - t2 * 1.7 + wp.y * 2.7) * 0.45;
-        float3 n = normalize(float3((h1 + h2) * 0.18, 1.0, (h1 - h2) * 0.18));
-        // sun dir = shadow matrix z-row (light-space depth axis); worldPos is
-        // camera-relative so the view vector is just -worldPos
-        float3 sr = float3(u.shadowMat[0].z, u.shadowMat[1].z, u.shadowMat[2].z);
-        float3 sunD = (u.light.w > 0.5 && dot(sr, sr) > 1e-6)
-            ? normalize(sr) : normalize(float3(-0.45, 0.85, 0.18));
-        if (sunD.y < 0.0) sunD = -sunD;
-        float3 viewD = normalize(-in.worldPos);
-        float3 hv = normalize(sunD + viewD);
-        float spec = pow(max(dot(n, hv), 0.0), 90.0) * 1.6;
-        float fres = pow(1.0 - clamp(viewD.y, 0.0, 1.0), 3.0);
-        col += float3(1.0, 0.95, 0.82) * spec * dayLight * shadow;
-        col += u.fogColor.rgb * fres * 0.18 * dayLight;
-        alpha = clamp(alpha + spec * 0.5 + fres * 0.1, 0.0, 1.0);
-    }
-
     float fogStart = u.fog.x, fogEnd = u.fog.y;
     float fog = clamp((in.fogDist - fogStart) / (fogEnd - fogStart), 0.0, 1.0);
     fog = fog * fog;
     col = mix(col, u.fogColor.rgb, fog);
     return float4(col, alpha);
+}
+
+fragment float4 chunk_fs(ChunkVOut in [[stage_in]],
+                         constant ChunkShared& u [[buffer(1)]],
+                         texture2d_array<float> atlas [[texture(0)]],
+                         depth2d<float> shadowMap [[texture(1)]],
+                         sampler atlasSmp [[sampler(0)]],
+                         sampler shadowSmp [[sampler(1)]]) {
+    return shadeChunk(in, u, atlas, shadowMap, atlasSmp, shadowSmp);
+}
+
+// Color behind the nearest water interface belongs in its refraction snapshot. Front-facing
+// glass remains for the ordinary later translucent pass, so it is neither hidden nor doubled.
+fragment float4 translucent_refraction_fs(ChunkVOut in [[stage_in]],
+                         constant ChunkShared& u [[buffer(1)]],
+                         texture2d_array<float> atlas [[texture(0)]],
+                         depth2d<float> shadowMap [[texture(1)]],
+                         depth2d<float> waterSurfaceDepth [[texture(4)]],
+                         sampler atlasSmp [[sampler(0)]],
+                         sampler shadowSmp [[sampler(1)]]) {
+    constexpr sampler depthSmp(coord::normalized, address::clamp_to_edge, filter::nearest);
+    float2 viewport = float2(waterSurfaceDepth.get_width(), waterSurfaceDepth.get_height());
+    float waterDepth = waterSurfaceDepth.sample(depthSmp, in.clip.xy / viewport);
+    // About two depth32 ULPs near the far plane: a 1e-5 bias swallowed whole submerged
+    // blocks at distance, after which the later water depth test also hid their glass.
+    if (waterDepth >= 0.99999 || in.clip.z <= waterDepth + 1.2e-7) discard_fragment();
+    return shadeChunk(in, u, atlas, shadowMap, atlasSmp, shadowSmp);
+}
+
+static float3 environmentWorldPosition(float2 uv, float depth,
+                                        constant EnvironmentRenderUniforms& e) {
+    float4 clip = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    float4 position = e.inverseViewProjection * clip;
+    return position.xyz / max(abs(position.w), 1e-7) * (position.w < 0.0 ? -1.0 : 1.0);
+}
+
+// Dedicated resolved water pass. The opaque color/depth pair is a completed, separate target;
+// neither shader samples the color/depth attachments to which this pass is currently writing.
+fragment float4 water_fs(ChunkVOut in [[stage_in]],
+                         constant ChunkShared& u [[buffer(1)]],
+                         constant EnvironmentRenderUniforms& e [[buffer(3)]],
+                         texture2d_array<float> atlas [[texture(0)]],
+                         depth2d<float> shadowMap [[texture(1)]],
+                         texture2d<float> opaqueColor [[texture(2)]],
+                         depth2d<float> opaqueDepth [[texture(3)]],
+                         sampler atlasSmp [[sampler(0)]],
+                         sampler shadowSmp [[sampler(1)]]) {
+    constexpr sampler colorSmp(coord::normalized, address::clamp_to_edge, filter::linear);
+    constexpr sampler depthSmp(coord::normalized, address::clamp_to_edge, filter::nearest);
+    float2 screenUV = in.clip.xy * e.viewport.zw;
+    float3 worldPosition = in.worldPos + u.worldOrigin.xyz;
+    float time = e.atmosphere.options.y > 0.5 ? 0.0 : e.atmosphere.cameraTime.w;
+    float3 view = elySafeDirection(-in.worldPos, float3(0,1,0));
+    float3 normal = elyWaterNormal(worldPosition, in.faceNormal, time, e.atmosphere.weather.x);
+    if (dot(normal, view) < 0.0) normal = -normal;
+    bool underwater = e.atmosphere.weather.w > 0.5;
+    float etaI = underwater ? 1.333 : 1.0, etaT = underwater ? 1.0 : 1.333;
+    float fresnel = elyDielectricFresnel(dot(normal, view), etaI, etaT);
+    float sceneDepth = opaqueDepth.sample(depthSmp, screenUV);
+    float transmittedDepth = sceneDepth;
+    float3 scenePosition = environmentWorldPosition(screenUV, sceneDepth, e);
+    float thickness = sceneDepth < 0.99999 ? length(scenePosition - in.worldPos) : 32.0;
+    thickness = clamp(thickness, 0.0, 128.0);
+
+    float3 refractedRay = refract(-view, normal, etaI / etaT);
+    float4 refractedClip = u.viewProj * float4(in.worldPos + refractedRay * min(thickness, 8.0), 1.0);
+    float2 refractedUV = screenUV;
+    if (refractedClip.w > 0.001 && dot(refractedRay, refractedRay) > 0.01) {
+        float2 projected = float2(refractedClip.x / refractedClip.w * 0.5 + 0.5,
+                                 0.5 - refractedClip.y / refractedClip.w * 0.5);
+        refractedUV += clamp(projected - screenUV, float2(-0.015), float2(0.015));
+        float candidateDepth = opaqueDepth.sample(depthSmp, refractedUV);
+        // Never pull the bank/foreground object across the water's silhouette. This also avoids
+        // sampling an offscreen clamped edge as though it were a real transmitted ray hit.
+        if (candidateDepth <= in.clip.z + 1.2e-7 || any(refractedUV <= 0.0) || any(refractedUV >= 1.0)) {
+            refractedUV = screenUV;
+        } else {
+            transmittedDepth = candidateDepth;
+            if (candidateDepth < 0.99999) {
+                scenePosition = environmentWorldPosition(refractedUV, candidateDepth, e);
+                thickness = clamp(length(scenePosition - in.worldPos), 0.0, 128.0);
+            }
+        }
+    }
+    float3 background = opaqueColor.sample(colorSmp, refractedUV).rgb;
+    if (underwater && transmittedDepth >= 0.99999 && dot(refractedRay, refractedRay) > 0.01) {
+        // The submerged raster camera suppresses its sky pass. A ray leaving the water must
+        // nevertheless see the air-side sky through Snell's window, not the fog-clear color.
+        background = elyAtmosphereRadianceAir(worldPosition + refractedRay * 0.02,
+                                              refractedRay, e.atmosphere, true);
+    }
+    float travelInWater = underwater ? length(in.worldPos) : thickness;
+    float3 transmission = elyWaterTransmittance(travelInWater, in.materialTint);
+    float3 transmitted = background * transmission
+        + elyWaterScattering(transmission, in.materialTint, e.atmosphere.sunDaylight.w);
+
+    // Keep the resource-pack ripple detail as a restrained modulation, not a solid blue overlay
+    // which would hide the actual refracted Faithful terrain under a shallow stream.
+    float2 atlasUV = in.uv + float2(time * 0.02, time * 0.055) * (1.0 - u.misc.y);
+    float4 art = atlas.sample(atlasSmp, atlasUV, in.layer);
+    float textureDetail = dot(art.rgb, float3(0.299, 0.587, 0.114));
+    transmitted *= mix(0.92, 1.08, textureDetail);
+    float3 reflected = elyAtmosphereRadiance(worldPosition + normal * 0.02,
+                                            reflect(-view, normal), e.atmosphere, true);
+    if (underwater) reflected *= transmission;
+    float3 color = mix(transmitted, reflected, fresnel);
+
+    float shadow = 1.0;
+    if (u.light.w > 0.5) {
+        float3 sp = in.shadowPos.xyz / max(in.shadowPos.w, 0.001);
+        float2 uv = float2(sp.x * 0.5 + 0.5, 0.5 - sp.y * 0.5);
+        if (all(uv > 0.0) && all(uv < 1.0) && sp.z > 0.0 && sp.z < 1.0) {
+            shadow = shadowMap.sample_compare(shadowSmp, uv, sp.z - 0.0012);
+        }
+    }
+    float3 sun = elySafeDirection(e.atmosphere.sunDaylight.xyz, float3(0,1,0));
+    float3 halfVector = elySafeDirection(view + sun, normal);
+    float specular = pow(max(dot(normal, halfVector), 0.0), 180.0)
+        * smoothstep(0.0, 0.12, sun.y) * e.atmosphere.sunDaylight.w * shadow;
+    color += elySunRadiance(e.atmosphere) * specular * 0.35
+        * elyCloudSunTransmittance(worldPosition, e.atmosphere);
+    if (!underwater && in.faceNormal.y > 0.65) {
+        float verticalDepth = max(0.0, in.worldPos.y - scenePosition.y);
+        float foam = sceneDepth < 0.99999 ? elyWaterFoam(verticalDepth, worldPosition, time, e.atmosphere.weather.x) : 0.0;
+        color = mix(color, float3(0.74,0.82,0.83) * max(0.12, e.atmosphere.sunDaylight.w), foam);
+    }
+    float fog = clamp((in.fogDist - u.fog.x) / max(u.fog.y - u.fog.x, 0.001), 0.0, 1.0);
+    return float4(mix(max(color, float3(0)), u.fogColor.rgb, fog * fog), 1.0);
 }
 
 vertex float4 shadow_vs(ChunkVIn in [[stage_in]],
@@ -395,32 +506,6 @@ fragment float4 stars_fs(StarVOut in [[stage_in]],
     float2 d = pc - 0.5;
     float a = smoothstep(0.5, 0.1, length(d)) * in.bright * u.params.y;
     return float4(float3(0.95, 0.96, 1.0), a);
-}
-
-struct CloudVOut {
-    float4 clip [[position]];
-    float2 uv;
-    float dist;
-};
-vertex CloudVOut cloud_vs(uint vid [[vertex_id]], constant CloudU& u [[buffer(1)]]) {
-    float2 corners[6] = {float2(-1,-1), float2(1,-1), float2(1,1), float2(-1,-1), float2(1,1), float2(-1,1)};
-    float2 a = corners[vid];
-    float3 p = float3(a.x * u.offset.w, 0.0, a.y * u.offset.w) + u.offset.xyz;
-    CloudVOut out;
-    out.clip = u.viewProj * float4(p, 1.0);
-    out.uv = a * 0.5 + 0.5;
-    out.dist = length(p.xz);
-    return out;
-}
-fragment float4 cloud_fs(CloudVOut in [[stage_in]],
-                         constant CloudU& u [[buffer(1)]],
-                         texture2d<float> cloudTex [[texture(0)]],
-                         sampler smp [[sampler(0)]]) {
-    float c = cloudTex.sample(smp, in.uv * 12.0 + u.scroll.xy).r;
-    if (c < 0.5) discard_fragment();
-    float fogEnd = u.scroll.w;
-    float fade = 1.0 - clamp((in.dist - fogEnd * 0.7) / (fogEnd * 0.6), 0.0, 1.0);
-    return float4(float3(u.scroll.z), 0.72 * fade);
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +651,83 @@ vertex FSVOut fs_vs(uint vid [[vertex_id]]) {
     out.uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
     return out;
 }
+
+fragment float4 cloud_volume_fs(FSVOut in [[stage_in]],
+                                constant EnvironmentRenderUniforms& e [[buffer(3)]],
+                                depth2d<float> sceneDepth [[texture(0)]]) {
+    constexpr sampler depthSmp(coord::normalized, address::clamp_to_edge, filter::nearest);
+    float depth = sceneDepth.sample(depthSmp, in.uv);
+    float3 rayEnd = environmentWorldPosition(in.uv, depth, e);
+    float3 direction = elySafeDirection(rayEnd, float3(0,1,0));
+    float maximumDistance = depth >= 0.99999 ? e.atmosphere.clouds.z : length(rayEnd);
+    float4 cloud = elyCloudLayer(e.atmosphere.cameraTime.xyz, direction, e.atmosphere, maximumDistance);
+    return float4(cloud.rgb, 1.0 - cloud.a);
+}
+
+// Upsample only compatible cloud samples. Full-resolution geometry decides whether there is any
+// cloud in front of the pixel; a half-resolution neighbor must not paint a halo over a roof/tree.
+fragment float4 cloud_composite_fs(FSVOut in [[stage_in]],
+                                   constant EnvironmentRenderUniforms& e [[buffer(3)]],
+                                   texture2d<float> cloudLayer [[texture(0)]],
+                                   depth2d<float> sceneDepth [[texture(1)]]) {
+    constexpr sampler nearestSmp(coord::normalized, address::clamp_to_edge, filter::nearest);
+    if (!elyCloudsEnabledForRay(e.atmosphere, false)) return float4(0);
+    float depth = sceneDepth.sample(nearestSmp, in.uv);
+    bool isSky = depth >= 0.99999;
+    float3 rayEnd = environmentWorldPosition(in.uv, depth, e);
+    float3 direction = elySafeDirection(rayEnd, float3(0,1,0));
+    float distance = length(rayEnd);
+    float maximumDistance = isSky ? e.atmosphere.clouds.z : distance;
+    float nearT, farT;
+    if (!elyCloudInterval(e.atmosphere.cameraTime.xyz, direction, e.atmosphere,
+                          maximumDistance, nearT, farT)) return float4(0);
+
+    int2 size = int2(cloudLayer.get_width(), cloudLayer.get_height());
+    float2 grid = in.uv * float2(size) - 0.5;
+    int2 base = int2(floor(grid));
+    float2 fraction = fract(grid);
+    float4 accumulated = float4(0);
+    float totalWeight = 0.0;
+    for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 2; ++x) {
+            int2 pixel = clamp(base + int2(x,y), int2(0), size - 1);
+            float2 sampleUV = (float2(pixel) + 0.5) / float2(size);
+            float neighborDepth = sceneDepth.sample(nearestSmp, sampleUV);
+            bool neighborIsSky = neighborDepth >= 0.99999;
+            if (neighborIsSky != isSky) continue;
+            if (!isSky) {
+                float neighborDistance = length(environmentWorldPosition(sampleUV, neighborDepth, e));
+                if (abs(neighborDistance - distance) > max(2.0, distance * 0.025)) continue;
+            }
+            float weight = (x == 0 ? 1.0 - fraction.x : fraction.x)
+                         * (y == 0 ? 1.0 - fraction.y : fraction.y);
+            accumulated += cloudLayer.read(uint2(pixel)) * weight;
+            totalWeight += weight;
+        }
+    }
+    if (totalWeight > 0.0001) return accumulated / totalWeight;
+    // A subpixel gap may have no compatible low-resolution neighbor. Shade that rare boundary
+    // directly instead of smearing an occluded neighbor into it or leaving a dark cloud hole.
+    float4 exact = elyCloudLayer(e.atmosphere.cameraTime.xyz, direction, e.atmosphere, maximumDistance);
+    return float4(exact.rgb, 1.0 - exact.a);
+}
+
+struct RayResolvedOutput {
+    float4 color [[color(0)]];
+    float depth [[depth(any)]];
+};
+fragment RayResolvedOutput ray_resolve_fs(FSVOut in [[stage_in]],
+                                         texture2d<float> radiance [[texture(0)]],
+                                         texture2d<float> rayDepth [[texture(1)]]) {
+    constexpr sampler linearSmp(coord::normalized, address::clamp_to_edge, filter::linear);
+    constexpr sampler nearestSmp(coord::normalized, address::clamp_to_edge, filter::nearest);
+    float3 color = radiance.sample(linearSmp, in.uv).rgb;
+    float depth = rayDepth.sample(nearestSmp, in.uv).r;
+    RayResolvedOutput out;
+    out.color = float4(all(isfinite(color)) ? max(color, float3(0)) : float3(0), 1);
+    out.depth = isfinite(depth) ? clamp(depth, 0.0, 1.0) : 1.0;
+    return out;
+}
 // title screen wordmark: positioned quad, straight-alpha blend
 struct LogoU {
     float4 rect;   // x0,y0,x1,y1 in NDC
@@ -637,8 +799,6 @@ fragment float4 ultra_fs(FSVOut in [[stage_in]],
     float3 rayDir = wpos / max(dist, 1e-5);
     bool isSky = depth >= 0.99999;
     float dayLight = u.sunDir.w;
-    float time = u.params.x;
-
     // --- SSAO: hemisphere of world-space offsets, depth-compared in screen space
     float ao = 1.0;
     if (!isSky && dist < 140.0) {
@@ -753,7 +913,7 @@ fragment float4 composite_fs(FSVOut in [[stage_in]],
         float d = distance(uv, float2(0.5));
         c *= mix(1.0, clamp(0.25 - d, 0.0, 0.25) * 4.0, darkness);
     }
-    if (ultraOn > 0.5) {
+    if (ultraOn > 0.5 || u.params2.w > 0.5) {
         c = acesTonemap(c);
         float lum = dot(c, float3(0.2126, 0.7152, 0.0722));
         c = mix(float3(lum), c, 1.12);             // gentle saturation lift
