@@ -186,9 +186,10 @@ final class RayTracedWorldRendererTests: XCTestCase {
         view.localLightTexture=try volume(level:192); view.localLightGeneration=2
         let lit=try render(f,frame:view).radiance[16*32+16]
         XCTAssertEqual(f.renderer.diagnostics.historySamples,1,"Source edits must discard old dark illumination")
-        XCTAssertGreaterThan(lit.x,dark.x+0.5)
-        XCTAssertGreaterThan(dark.x,0.15,"The enclosed-cave visibility floor must survive the tone mapper's dark toe")
-        XCTAssertLessThan(dark.x,0.25,"The cave safety floor must not make unlit walls fullbright")
+        XCTAssertGreaterThan(lit.x,dark.x+0.25)
+        XCTAssertLessThan(lit.x,dark.x+0.35,"Nearby diffuse lamp response must remain below the washed-out unit response")
+        XCTAssertGreaterThan(dark.x,0.035,"Display encoding preserves this deliberately dim linear cave floor")
+        XCTAssertLessThan(dark.x,0.06,"The cave visibility floor must not illuminate a room like daylight")
         view.localLightOrigin = .init(-33,-32,-32)
         _=try render(f,frame:view)
         XCTAssertEqual(f.renderer.diagnostics.historySamples,2,"Camera-only volume recentering is not a light-source edit")
@@ -215,6 +216,81 @@ final class RayTracedWorldRendererTests: XCTestCase {
         let off=try render(f,frame:view).radiance[16*32+16]
         XCTAssertLessThan(off.x,lit.x*0.3)
         XCTAssertEqual(f.renderer.diagnostics.historySamples,1)
+    }
+
+    func testEnclosedWhiteRoomDoesNotMultiplyPropagatedLightOrCaveFillAcrossDiffuseBounces() throws {
+        let f=try fixture()
+        var view=frame()
+        view.atmosphere.options.x=1 // Disable directional lighting; the surrounding sky is black.
+        view.atmosphere.fogColor = .zero
+        view.atmosphere.zenith = .zero; view.atmosphere.horizon = .zero
+        view.localLightOrigin = .init(-32,-32,-32)
+
+        func room(enclosed: Bool) -> MeshOutput {
+            var data:[UInt32]=[],indices:[UInt32]=[]
+            func quad(_ points: [SIMD3<Float>],normal: UInt32) {
+                let base=UInt32(data.count/7)
+                let uv:[SIMD2<Float>]=[.init(0,0),.init(1,0),.init(1,1),.init(0,1)]
+                for i in 0..<4 {
+                    let p=points[i]
+                    // Unit-albedo white, no emission and zero cached block/sky light.
+                    data += [p.x.bitPattern,p.y.bitPattern,p.z.bitPattern,uv[i].x.bitPattern,
+                             uv[i].y.bitPattern,normal<<12,0xffffff]
+                }
+                indices += [base,base+1,base+2,base,base+2,base+3]
+            }
+            quad([.init(-8,-8,-4),.init(8,-8,-4),.init(8,8,-4),.init(-8,8,-4)],normal:3)
+            if enclosed {
+                // Every diffuse ray leaving the front wall hits another white wall. This is
+                // the worst case for accidentally re-adding the same propagated solution.
+                quad([.init(-8,-8,4),.init(-8,8,4),.init(8,8,4),.init(8,-8,4)],normal:2)
+                quad([.init(-8,-8,-4),.init(-8,8,-4),.init(-8,8,4),.init(-8,-8,4)],normal:5)
+                quad([.init(8,-8,-4),.init(8,-8,4),.init(8,8,4),.init(8,8,-4)],normal:4)
+                quad([.init(-8,-8,-4),.init(-8,-8,4),.init(8,-8,4),.init(8,-8,-4)],normal:1)
+                quad([.init(-8,8,-4),.init(8,8,-4),.init(8,8,4),.init(-8,8,4)],normal:0)
+            }
+            return mesh(opaque:MeshLayer(data:data,idx:indices,count:data.count/7))
+        }
+        func volume(level: UInt8) throws -> MTLTexture {
+            let descriptor=MTLTextureDescriptor()
+            descriptor.textureType = .type3D; descriptor.pixelFormat = .rgba8Unorm
+            descriptor.width=64; descriptor.height=64; descriptor.depth=64
+            descriptor.usage = .shaderRead
+            let texture=try XCTUnwrap(f.device.makeTexture(descriptor:descriptor))
+            var pixels=[UInt8](repeating:255,count:64*64*64*4)
+            for i in 0..<(64*64*64) { pixels[i*4+3]=level }
+            pixels.withUnsafeBytes { texture.replace(region:MTLRegionMake3D(0,0,0,64,64,64),mipmapLevel:0,slice:0,
+                withBytes:$0.baseAddress!,bytesPerRow:64*4,bytesPerImage:64*64*4) }
+            return texture
+        }
+        func centerMean(_ image: Image) -> Float {
+            var result: Float=0
+            for y in 12..<20 { for x in 12..<20 { result+=image.radiance[y*image.width+x].x } }
+            return result/64
+        }
+
+        for level in [UInt8(0),128] {
+            view.localLightTexture=try volume(level:level)
+            view.localLightGeneration+=1
+            f.renderer.uploadSection(key:section,minY:0,mesh:room(enclosed:false))
+            let open=try render(f,frame:view)
+            f.renderer.uploadSection(key:section,minY:0,mesh:room(enclosed:true))
+            let closed=try render(f,frame:view)
+            XCTAssertEqual(f.renderer.diagnostics.triangles,12,"All six enclosing faces must enter the actual ray scene")
+            let openLight=centerMean(open),closedLight=centerMean(closed)
+            let normalized=Float(level)/255
+            let expected=Float(0.045)+0.40*RenderLocalLightPolicy.outputMultiplier*normalized/(4-3*normalized)
+            XCTAssertEqual(openLight,expected,accuracy:0.015)
+            XCTAssertEqual(closedLight,openLight,accuracy:0.015,
+                "Reflective enclosure must not turn one diffuse illumination cache into three copies")
+            if level == 0 {
+                XCTAssertGreaterThan(closedLight,0.035,"The dark room retains a dim readable floor")
+                XCTAssertLessThan(closedLight,0.06,"The floor is not compounded by secondary bounces")
+            } else {
+                XCTAssertGreaterThan(closedLight,0.15,"A lamp must still produce useful local illumination")
+                XCTAssertLessThan(closedLight,0.22,"Moderate cached light must not become daylight in an enclosure")
+            }
+        }
     }
 
     func testFallbackLocalLightingIsNotDimmedByMoreThan512RemoteEmissiveFaces() throws {

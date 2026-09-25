@@ -314,6 +314,21 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
 
 ### Underground emissive lighting — September 25, 2026
 
+- Close-range correction: the player's furnished cave exposed an over-bright
+  case missed by the earlier 18-block lamp probe. The normal furnace's full stone
+  casing was emissive despite having a separate flame overlay, and cached diffuse
+  lighting compounded across all three diffuse events. Decode its exact casing
+  tiles as non-emitting, retain the actual flame/source metadata, and sample the
+  propagated field plus ambient cache only at the first diffuse encounter (not
+  necessarily the primary hit, so glass and mirrors still work). Reduce the cave
+  floor from 0.18 to 0.045 now that correct display encoding preserves shadows.
+  The first native correction still washed out nearby walls, so use a 0.40
+  diffuse response for RT local field/cache, held lights, and light proxies.
+  This art-directed conversion leaves true visible flame emission intact.
+  Keep source power/reach and true ray-traced transport; do not globally darken
+  daylight or change player exposure. Acceptance now includes a small nearby-lamp
+  room, non-glowing furnace casing, dark/lit controls, and an enclosed-room GPU
+  bound that rejects repeated cached illumination.
 - Observed problem: a visibly glowing furnace in the installed game left the room
   almost black. Static ray lighting sampled one random source from a rotating global
   list, so numerous distant lava faces displaced useful nearby samples. Clamped

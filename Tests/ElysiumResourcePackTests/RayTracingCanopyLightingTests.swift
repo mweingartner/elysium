@@ -84,7 +84,8 @@ final class RayTracingCanopyLightingTests: XCTestCase {
                     rtCachedIllumination(0,0,uniforms[3]));
             } else {
                 result[index]=float4(rtCachedIllumination(1,0,uniforms[4]),
-                    rtCachedIllumination(1,0,uniforms[5]),0,0);
+                    rtCachedIllumination(1,0,uniforms[5]),
+                    rtCachedIllumination(0,1,uniforms[0]),rtCachedIllumination(0,0.5,uniforms[0]));
             }
         }
         """
@@ -210,17 +211,21 @@ final class RayTracingCanopyLightingTests: XCTestCase {
             }
         }
         XCTAssertEqual(values[160], SIMD4(1,0.30,0,0))
-        let expectedFill: [Float] = [0.185,0.08,0.18,0.0534]
+        let expectedFill: [Float] = [0.185,0.08,0.045,0.0534]
         for (channel, value) in expectedFill.enumerated() {
             XCTAssertEqual(values[161][channel], value, accuracy: 0.00001)
         }
-        for (channel,value) in [Float(0.045),0.18,0.045,0.18].enumerated() {
+        for (channel,value) in [Float(0.045),0.045,0.045,0.045].enumerated() {
             XCTAssertEqual(values[162][channel],value,accuracy:0.00001)
         }
         XCTAssertEqual(values[163].x, 0.115028, accuracy: 0.00001)
         XCTAssertEqual(values[163].y, 0.114972, accuracy: 0.00001)
         XCTAssertLessThan(abs(values[163].x-values[163].y), 0.0001,
             "Crossing the horizon must not switch the canopy fill between day/night constants")
+        XCTAssertEqual(values[163].z, 0.68, accuracy: 0.00001,
+            "Full legacy block light must use the same 0.40 diffuse response as the local field")
+        XCTAssertEqual(values[163].w, 0.136, accuracy: 0.00001,
+            "Half-strength cached light must retain the optical curve without a field-boundary boost")
 
         // Test-only variants of the actual path-tracing kernel: a counter records real solar
         // visibility evaluations, and one exact substitution disables only primary reuse.

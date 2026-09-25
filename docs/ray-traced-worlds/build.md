@@ -1,5 +1,63 @@
 # Ray-traced worlds verification — September 24, 2026
 
+## Close-range underground correction — September 25, 2026
+
+The user's actual furnished room remained too bright after the earlier long-range
+probe. The prior captures below are historical evidence, not acceptance of this
+close-range case. Source inspection found two artificial gains: the normal
+furnace's entire facade self-emitted, and the propagated diffuse solution plus
+visibility floor were added at each of three diffuse encounters. The correction
+removes facade emission (retaining animated fire and level-13 source metadata),
+uses the caches only at the first diffuse encounter, and lowers the enclosed
+visibility floor from 0.18 to 0.045. A first native comparison still showed washed
+out nearby walls despite corrected furnace stone. The final candidate also uses
+a 0.40 RT diffuse response for propagated/cache illumination and held/proxy lamps.
+Source power/range, visible flame emission, sunlight, gamma, and display encoding
+are unchanged.
+
+The final reviewed renderer/release-workflow scope passes **102 tests** in
+`/tmp/elysium-cave-final-tests.log`, including actual GPU open-wall versus enclosed
+white-room bounds and actual furnace meshes in all four orientations. The
+enclosure test requires one cache contribution, rejecting the former three-copy
+gain. Material tests retain torch/glowstone emission and furnace room-light data.
+
+The first candidate's native captures are intentionally not final acceptance.
+The renewed ray-traced comparison below supersedes the initial raster setup
+captures and the bright unit-response candidate.
+
+Final optimized native executable:
+`3ed02aa1914c3645989b146443256eacab8ca00cf3fdc51ab5e6a2ef2097ee99`.
+The 9×5×9 interior was inspected with the furnace about four blocks from the
+camera, then with an adjacent torch. Normal furnace stone retained gray detail,
+the mouth/flame remained bright, and the surrounding room was visibly dimmer
+than the washed-out candidate. Unlit furnishings and wall texture remained
+discernible. All four captures reported Ray Traced active/ready, 24 history
+samples, and zero pending sections. Session: `8ec618d6-7248-4c59-bf21-6af6fb9e6900`.
+
+- Unlit: `bb9ac5bd-425d-4ad1-99ce-043f940a4945`.
+- Furnace: `bc1ee9ad-31da-4af3-a181-d38caaa15971`.
+- Furnace and torch: `dc67ca15-867f-48f3-b82a-beedc9f369b7`.
+- Wall facing away from the lights: `81699ecc-b1c5-420d-aabd-8cb8ea5c51f9`.
+
+Paths and PNG hashes: `/tmp/elysium-close-room-final-native.jsonl`. The owned
+fixture was removed after inspection; no production-world blocks were changed.
+These captures demonstrate nearby-light appearance, not a long-duration flicker
+or performance study. Existing canopy/GPU continuity checks remain in scope.
+
+Final warning-free production build: 49.80 seconds,
+`/tmp/elysium-cave-final-release.log`. Disposable-copy `strip -S -x`
+normalization renews only Elysium to
+`4f41853e8f2644502368709ce898d129f2ee947cb5cd654c2204f3cfdd2a0d94`;
+Core, Storage, TextInput, and elysmoke remain byte-identical to the preceding
+release. Protected source/API/capability pins are unchanged.
+
+The nine-stage production pipeline passed with **102 scoped tests** and **491
+golden checks**, warning-free build, source/binary security, packaged AppKit
+keyboard/clipboard checks, installation, and installed identity/signature checks.
+Log: `/tmp/elysium-cave-final-pipeline.log`. Installed executable SHA-256:
+`418f978de948913318387b087b324f1db454dc5d4592fba890271aff1a95f410`.
+Git publication is checked separately after the unchanged pre-push gate.
+
 ## Underground emissive correction — September 25, 2026
 
 ### User-tuned release candidate

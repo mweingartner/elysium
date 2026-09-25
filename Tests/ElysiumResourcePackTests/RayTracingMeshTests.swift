@@ -23,6 +23,49 @@ final class RayTracingMeshTests: XCTestCase {
             cutout:cutout ? layer:empty,translucent:translucent ? layer:empty))
     }
 
+    private func actualBlockMesh(_ block: UInt16, metadata: Int = 0) -> MeshOutput {
+        var blocks = [UInt16](repeating: 0, count: 18 * 18 * 18)
+        blocks[(9 * 18 + 9) * 18 + 9] = cell(block, metadata)
+        return buildSectionMesh(MeshInput(blocks: blocks,
+            skyLight: [UInt8](repeating: 0, count: blocks.count),
+            blockLight: [UInt8](repeating: 13, count: blocks.count),
+            biomes: [UInt8](repeating: 0, count: 18 * 18)))
+    }
+
+    func testActualLitFurnaceCasingDoesNotEmitButMouthAndRoomLightRemain() throws {
+        registerAllBlocks()
+        let facades: Set<String> = ["furnace_top", "furnace_side", "furnace_front_lit"]
+        for facing in 0..<4 {
+            let mesh = actualBlockMesh(B.furnace_lit, metadata: facing)
+            let decoded = try XCTUnwrap(RayTracingMeshDecoder.decode(mesh))
+            let casing = decoded.primitives.filter { facades.contains(tileName(Int($0.material.y))) }
+            XCTAssertEqual(Set(casing.map { tileName(Int($0.material.y)) }), facades)
+            XCTAssertTrue(casing.allSatisfy { $0.normalEmission.w == 0 },
+                          "Furnace stone must not self-emit, including its front border")
+            let mouth = decoded.primitives.filter { tileName(Int($0.material.y)) == "fire" }
+            XCTAssertFalse(mouth.isEmpty)
+            XCTAssertTrue(mouth.allSatisfy { $0.normalEmission.w > 0 })
+            XCTAssertFalse(decoded.emitters.isEmpty, "The actual flame still supplies fallback ray lights")
+            let source = try XCTUnwrap(mesh.lighting?.emitters.first)
+            XCTAssertEqual(mesh.lighting?.emitters.count, 1)
+            XCTAssertEqual(source.level, 13, "Casing classification cannot remove placed-source illumination")
+            XCTAssertEqual(source.position, SIMD3<UInt8>(8, 8, 8))
+        }
+    }
+
+    func testActualTorchAndGlowstoneRetainSurfaceEmission() throws {
+        registerAllBlocks()
+        for (block, glowTile) in [(B.torch, "fire"), (B.glowstone, "glowstone")] {
+            let decoded = try XCTUnwrap(RayTracingMeshDecoder.decode(actualBlockMesh(block)))
+            let glow = decoded.primitives.filter { tileName(Int($0.material.y)) == glowTile }
+            XCTAssertFalse(glow.isEmpty)
+            XCTAssertTrue(glow.allSatisfy { $0.normalEmission.w > 0 })
+            XCTAssertFalse(decoded.emitters.isEmpty)
+            let stems = decoded.primitives.filter { tileName(Int($0.material.y)) == "oak_planks" }
+            XCTAssertTrue(stems.allSatisfy { $0.normalEmission.w == 0 })
+        }
+    }
+
     func testPrimitiveAndFrameABIExactlyMatchesMetal() {
         XCTAssertEqual(MemoryLayout<RayTracingPrimitive>.stride,64)
         XCTAssertEqual(MemoryLayout<RayTracingInstanceUniforms>.stride,240)

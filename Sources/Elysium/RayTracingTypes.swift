@@ -181,13 +181,18 @@ enum RayTracingMeshDecoder {
                 let normals: [SIMD3<Float>] = [.init(0,-1,0), .init(0,1,0), .init(0,0,-1),
                                              .init(0,0,1), .init(-1,0,0), .init(1,0,0)]
                 let anim = (b >> 24) & 7
-                let emission: Float = ((a >> 25) & 1) == 1
+                let layerIndex = Int(a & 4095)
+                let name = tiles.indices.contains(layerIndex) ? tiles[layerIndex] : ""
+                // The legacy emissive bit covers the entire lit furnace block. Its stone
+                // facade is reflective, not a lamp: the mesher supplies a separate fire
+                // overlay in the mouth, and source metadata supplies the room illumination.
+                let furnaceFacade = name == "furnace_top" || name == "furnace_side"
+                    || name == "furnace_front_lit"
+                let emission: Float = ((a >> 25) & 1) == 1 && !furnaceFacade
                     ? (anim == 2 ? 5 : 2) * RenderLocalLightPolicy.outputMultiplier : 0
                 let v0 = uv(0), v1 = uv(1), v2 = uv(2)
                 guard [v0.x,v0.y,v1.x,v1.y,v2.x,v2.y].allSatisfy(\.isFinite) else { return nil }
                 var flags = anim == 1 ? UInt32(2) : layerFlags
-                let layerIndex = Int(a & 4095)
-                let name = tiles.indices.contains(layerIndex) ? tiles[layerIndex] : ""
                 if foliageTiles.contains(name) { flags |= 32 | 1 }
                 if ["iron_block","gold_block","copper_block","netherite_block","raw_iron_block","raw_gold_block"].contains(name)
                     || name.hasPrefix("cut_copper") || name.hasSuffix("_copper") { flags |= 16 }

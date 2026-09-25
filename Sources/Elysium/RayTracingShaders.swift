@@ -70,12 +70,16 @@ static float rtDirectLightCosine(float3 normal,float3 lightDirection,uint flags)
     return max(cosine,0.0)+((flags&32u)!=0?0.30*max(-cosine,0.0):0.0);
 }
 
+// Art-directed conversion from the game's local irradiance scale to diffuse radiance.
+// The old unit response washed out nearby stone after correct display encoding.
+constant float rtLocalDiffuseResponse=0.40;
+
 static float rtCachedIllumination(float sky,float block,constant RTUniforms& u) {
     float localLevel=clamp(block,0.0,1.0);
-    // Preserve the daylight/canopy baseline, but keep enclosed unlit caves above the
-    // tone mapper's near-black toe. This is a bounded visibility floor, not another lamp.
-    float caveFloor=mix(0.18,0.045,clamp(sky*2,0.0,1.0));
-    float cached=max(caveFloor,elyNonSunLightOutput*localLevel/(4-3*localLevel));
+    // Display encoding now preserves shadow detail. A small neutral floor keeps caves
+    // readable without the former enclosed-room glow; daylight/canopy fill is unchanged.
+    float caveFloor=0.045;
+    float cached=max(caveFloor,rtLocalDiffuseResponse*elyNonSunLightOutput*localLevel/(4-3*localLevel));
     if(u.atmosphere.options.x>0.5) cached=max(cached,0.045);
     cached=max(cached,clamp(u.fogParameters.z,0.0,1.0)*0.55);
     if(u.atmosphere.options.x<0.5) {
@@ -379,29 +383,33 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
             if(d<u.heldLight.w && d>0.001) {
                 float fall=pow(clamp(1-d/u.heldLight.w,0.0,1.0),2.0);
                 float3 vis=rtVisibility(s.position,faceNormal,delta/d,d,scene,instances,textures,atlas);
-                radiance+=throughput*s.albedo*u.heldLight.rgb*vis*(fall*max(0.0,dot(faceNormal,delta/d))*2.5);
+                radiance+=throughput*s.albedo*u.heldLight.rgb*vis*(fall*max(0.0,dot(faceNormal,delta/d))*2.5*rtLocalDiffuseResponse);
             }
         }
         // The immutable propagated volume is deterministic and already respects solid voxel
         // occlusion. It provides local diffuse illumination without competition from remote
         // lava. Static proxy lights are not submitted when the volume is available.
-        float4 local=sampleRenderLocalLight(s.position,faceNormal,u.localLight,localLightTexture);
-        float cachedBlock=clamp(s.block,0.0,1.0);
-        float3 localIrradiance=local.rgb;
-        if(u.localLight.params.x>0.5) {
-            // Outside the bounded volume retain the original world light cache; interpolation
-            // is only a coverage blend, never filtering bright voxels through a solid wall.
-            float cachedRadiance=elyNonSunLightOutput*cachedBlock/(4-3*cachedBlock);
-            localIrradiance=mix(float3(cachedRadiance),local.rgb,local.a);
+        // These caches already approximate indirect diffuse transport. Reapplying them on
+        // secondary diffuse hits compounds the same illumination in enclosed rooms. Use the
+        // first DIFFUSE hit, including surfaces viewed through glass/water or in a mirror.
+        if(diffuseBounces==0) {
+            float4 local=sampleRenderLocalLight(s.position,faceNormal,u.localLight,localLightTexture);
+            float cachedBlock=clamp(s.block,0.0,1.0);
+            float3 localIrradiance=local.rgb;
+            if(u.localLight.params.x>0.5) {
+                // Outside the bounded volume retain the original world light cache; interpolation
+                // is only a coverage blend, never filtering bright voxels through a solid wall.
+                float cachedRadiance=elyNonSunLightOutput*cachedBlock/(4-3*cachedBlock);
+                localIrradiance=mix(float3(cachedRadiance),local.rgb,local.a);
+            }
+            radiance+=throughput*s.albedo*localIrradiance*rtLocalDiffuseResponse;
+            float cached=rtCachedIllumination(s.sky,u.localLight.params.x>0.5?0.0:s.block,u);
+            radiance+=throughput*s.albedo*cached;
         }
-        radiance+=throughput*s.albedo*localIrradiance;
         if(u.counts.y>0) {
-            radiance+=throughput*s.albedo*rtLocalProxyIrradiance(s.position,faceNormal,lights,u.counts.y,
+            radiance+=throughput*s.albedo*rtLocalDiffuseResponse*rtLocalProxyIrradiance(s.position,faceNormal,lights,u.counts.y,
                 scene,instances,textures,atlas);
         }
-        // Bounded neutral cache fill supports readable canopy shade without global exposure.
-        float cached=rtCachedIllumination(s.sky,u.localLight.params.x>0.5?0.0:s.block,u);
-        radiance+=throughput*s.albedo*cached;
         if(diffuseBounces++>=2) break;
         throughput*=s.albedo;
         if(max(throughput.x,max(throughput.y,throughput.z))<0.008) break;

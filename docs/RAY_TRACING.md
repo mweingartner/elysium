@@ -114,6 +114,18 @@ conversion previously crushed dim linear illumination toward black; correcting i
 does not increase the sun's emitted light. HUD, hand rendering, and the legacy
 raster color path remain outside that conversion.
 
+Close-range cave tuning keeps the neutral visibility floor at 0.045 linear (down
+from 0.18 after correcting display encoding). The propagated light and ambient
+cache are applied only at the first diffuse surface, including one seen through
+glass or a reflection; adding them again at each bounce made enclosed rooms too
+bright. The normal furnace's stone casing does not emit: its animated flame still
+glows and its level-13 source still illuminates the room. A 0.40 ray-traced local
+diffuse response tempers the propagated field, its legacy-cache fallback, and
+shadowed held/proxy lamps consistently. This is an art-directed response to the
+game's irradiance scale, not a measured material model. Source power and visible
+flame emission retain their 1.7× policy; lamp reach, sunlight, and player exposure
+settings are unchanged.
+
 ### Forest lighting and update stability
 
 Leaves use a separate render-only foliage classification, not the generic cutout

@@ -390,7 +390,9 @@ EXPECTED_CORE_OBJECT_SHA256='8c7f8cfeca0f904a51dabb2e6c341c784e5a26f67be3ed725d7
 # docs/ray-traced-worlds/build.md. Core/storage/text-input objects and all source pins are unchanged.
 # Adaptive ray-memory and canopy stability: renderer-only product renewal; normalized
 # Core/storage/text-input objects and elysmoke remain byte-identical. See build.md.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='10b192924179b948fd5117308506ccf65eca7574912ce318cb4c0829c32e4f7b'
+# Close-range cave lighting: calibrated first-diffuse cache, dimmer floor and non-emitting furnace
+# facade only. Disposable-copy normalization leaves Core/Storage/TextInput/smoke unchanged.
+EXPECTED_ELYSIUM_PRODUCT_SHA256='4f41853e8f2644502368709ce898d129f2ee947cb5cd654c2204f3cfdd2a0d94'
 EXPECTED_SMOKE_PRODUCT_SHA256='85f96e0560205a6d1fce44f252162bd0b21eede6cad8f16fd4532c38b7e91f7a'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
