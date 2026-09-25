@@ -224,7 +224,12 @@ public final class OverworldGen {
         if cl.c < -0.11 { return AquiferInfo(level: SEA, lava: false) }
         let n = aquiferNoise.sample2(x, z)
         if n > 0.28 { return AquiferInfo(level: Int((30 + (n - 0.28) * 60).rounded(.down)), lava: false) }
-        if n < -0.4 { return AquiferInfo(level: 12, lava: true) }
+        // Broaden lava-bearing regions without lifting their lake surface
+        // toward the player. Ocean and water-aquifer precedence stays intact;
+        // Default and every historic prehistoric revision keep the old cutoff.
+        let lavaThreshold = settings.preset == .moderateHillsResourceRich
+            || settings.preset.supportsVolcanicTerrain ? -0.30 : -0.4
+        if n < lavaThreshold { return AquiferInfo(level: 12, lava: true) }
         return AquiferInfo(level: -1000, lava: false)
     }
 
@@ -281,6 +286,7 @@ public final class OverworldGen {
 
         // density sampling on a 5 × 49 × 5 lattice (4×8×4 cells)
         let NX = 5, NY = WORLD_H / 8 + 1, NZ = 5
+        let volcanicCaves = settings.preset.supportsVolcanicTerrain
         var lattice = [Float](repeating: 0, count: NX * NY * NZ)
         for gz in 0..<NZ {
             for gx in 0..<NX {
@@ -291,12 +297,9 @@ public final class OverworldGen {
                 let cl = climate.at(wx, wz)
                 let terrainCl = terrainClimate(cl)
                 let target = terrainBaseHeight(cl)
-                // Rich Resources thins the cave noise so its hills stay solid, but lava only
-                // enters the overworld through cave voids under a lava aquifer. Those regions
-                // keep the full cave density so the preset still meets the periodic lava
-                // lakes every other map has.
-                let sparseCaves = settings.preset == .moderateHillsResourceRich
-                    && !aquiferAt(wx, wz, cl).lava
+                // Rich Resources now uses ordinary caves beneath its rolling
+                // hills. Only the explicitly versioned volcanic profiles widen
+                // the existing cave fields; historic profiles remain unchanged.
                 let ampBase = SPLINE_3D_AMP.at(terrainCl.e)
                     * clampD(mapRange(terrainCl.c, -0.19, -0.05, 0.35, 1), 0.35, 1)
                 let amp: Double
@@ -317,10 +320,9 @@ public final class OverworldGen {
                     if y < 58 {
                         let ch = cheese.sample3(wx * 0.9, y * 2.0, wz * 0.9)
                         let fade = clampD((58 - y) / 14, 0, 1) * clampD((y - Double(GEN_MIN_Y + 4)) / 10, 0, 1)
-                        let cheeseThreshold = sparseCaves ? 0.74 : 0.42
-                        let cheeseStrength = sparseCaves ? 120.0 : 260.0
+                        let cheeseThreshold = volcanicCaves ? 0.38 : 0.42
                         if ch > cheeseThreshold && fade > 0 {
-                            d = min(d, lerpD(d, (cheeseThreshold - ch) * cheeseStrength, fade))
+                            d = min(d, lerpD(d, (cheeseThreshold - ch) * 260.0, fade))
                         }
                     }
                     // spaghetti caves
@@ -328,9 +330,8 @@ public final class OverworldGen {
                         let s1 = spag1.sample3(wx, y * 1.6, wz)
                         let s2 = spag2.sample3(wx, y * 1.6, wz)
                         let tube = max(abs(s1), abs(s2))
-                        let thresh = sparseCaves
-                            ? 0.025 + clampD((y - 60) / 240, 0, 0.012)
-                            : 0.065 + clampD((y - 60) / 240, 0, 0.03)
+                        let thresh = (volcanicCaves ? 0.078 : 0.065)
+                            + clampD((y - 60) / 240, 0, 0.03)
                         if tube < thresh {
                             let fade = clampD((y - Double(GEN_MIN_Y + 3)) / 8, 0, 1)
                             if fade > 0 { d = min(d, (tube - thresh) * 900 * fade) }
@@ -341,11 +342,10 @@ public final class OverworldGen {
                         let n1 = noodleA.sample3(wx, y * 1.8, wz)
                         let n2 = noodleB.sample3(wx, y * 1.8, wz)
                         let tube = max(abs(n1), abs(n2))
-                        let thresh = sparseCaves ? 0.014 : 0.038
+                        let thresh = volcanicCaves ? 0.046 : 0.038
                         if tube < thresh {
                             let fade = clampD((y - Double(GEN_MIN_Y + 3)) / 8, 0, 1)
-                            let strength = sparseCaves ? 650.0 : 1200.0
-                            if fade > 0 { d = min(d, (tube - thresh) * strength * fade) }
+                            if fade > 0 { d = min(d, (tube - thresh) * 1200.0 * fade) }
                         }
                     }
                     lattice[(gy * NZ + gz) * NX + gx] = Float(d)
@@ -441,21 +441,22 @@ public final class OverworldGen {
     /// worm carvers + ravines, deterministic per source chunk, range 4
     public func carve(_ cx: Int, _ cz: Int, _ blocks: inout [UInt16]) {
         let RANGE = 4
-        let rareCaverns = settings.preset == .moderateHillsResourceRich
+        let volcanicCaves = settings.preset.supportsVolcanicTerrain
         for ocz in (cz - RANGE)...(cz + RANGE) {
             for ocx in (cx - RANGE)...(cx + RANGE) {
                 var rng = chunkRandom(seed, ocx, ocz, 1337)
-                // worm caves: 1 in 3 chunks spawn a system
-                if rng.nextFloat() < (rareCaverns ? 0.06 : 0.3) {
-                    let tunnels = rareCaverns ? 1 : 1 + rng.nextInt(3)
+                // Rich Resources shares Default's full worm systems. New
+                // volcanic profiles increase frequency, not scan/work bounds.
+                if rng.nextFloat() < (volcanicCaves ? 0.36 : 0.3) {
+                    let tunnels = 1 + rng.nextInt(3)
                     for _ in 0..<tunnels {
                         var x = Double(ocx * 16 + rng.nextInt(16))
                         var y = Double(GEN_MIN_Y + 8 + rng.nextInt(100))
                         var z = Double(ocz * 16 + rng.nextInt(16))
                         var yaw = rng.nextFloat() * Double.pi * 2
                         var pitch = (rng.nextFloat() - 0.5) * 0.6
-                        let length = rareCaverns ? 24 + rng.nextInt(24) : 40 + rng.nextInt(60)
-                        var radius = rareCaverns ? 0.9 + rng.nextFloat() * 1.0 : 1.4 + rng.nextFloat() * 1.8
+                        let length = 40 + rng.nextInt(60)
+                        var radius = 1.4 + rng.nextFloat() * 1.8
                         for i in 0..<length {
                             x += detCos(yaw) * detCos(pitch)
                             y += detSin(pitch) * 0.7
@@ -463,26 +464,26 @@ public final class OverworldGen {
                             yaw += (rng.nextFloat() - 0.5) * 0.5
                             pitch = clampD(pitch + (rng.nextFloat() - 0.5) * 0.3, -0.9, 0.9)
                             let r = radius * (1 + detSin(Double(i) / Double(length) * Double.pi) * 0.8)
-                            if rng.nextFloat() < (rareCaverns ? 0.006 : 0.02) {
-                                radius = rareCaverns ? 0.8 + rng.nextFloat() * 1.1 : 1.2 + rng.nextFloat() * 2.2
+                            if rng.nextFloat() < 0.02 {
+                                radius = 1.2 + rng.nextFloat() * 2.2
                             }
                             carveSphere(cx, cz, &blocks, x, y, z, r)
                             // occasional branching
-                            if i > 10 && rng.nextFloat() < (rareCaverns ? 0.004 : 0.02) && tunnels < 4 {
+                            if i > 10 && rng.nextFloat() < 0.02 && tunnels < 4 {
                                 yaw += (rng.nextBoolean() ? 1 : -1) * (0.8 + rng.nextFloat())
                             }
                         }
                     }
                 }
                 // ravines: rare
-                if rng.nextFloat() < (rareCaverns ? 0.003 : 0.02) {
+                if rng.nextFloat() < (volcanicCaves ? 0.025 : 0.02) {
                     var x = Double(ocx * 16 + rng.nextInt(16))
                     var z = Double(ocz * 16 + rng.nextInt(16))
                     let y = 20 + rng.nextInt(40)
                     var yaw = rng.nextFloat() * Double.pi * 2
-                    let length = rareCaverns ? 32 + rng.nextInt(35) : 60 + rng.nextInt(50)
-                    let depth = rareCaverns ? 14 + rng.nextInt(22) : 24 + rng.nextInt(36)
-                    let width = rareCaverns ? 1.4 + rng.nextFloat() * 1.4 : 2.2 + rng.nextFloat() * 2.4
+                    let length = 60 + rng.nextInt(50)
+                    let depth = 24 + rng.nextInt(36)
+                    let width = 2.2 + rng.nextFloat() * 2.4
                     for i in 0..<length {
                         x += detCos(yaw)
                         z += detSin(yaw)

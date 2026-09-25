@@ -1,7 +1,7 @@
 import XCTest
 @testable import ElysiumCore
 
-/// Contract coverage for the version-two prehistoric first-night shelter.
+/// Contract coverage for the v2-and-later prehistoric first-night shelter.
 /// These tests inspect real generated chunks and one complete GameCore world
 /// entry, so a visual-looking layout regression cannot be hidden behind an
 /// inventory shortcut or a post-generation spawn correction.
@@ -19,6 +19,15 @@ final class PrehistoricStarterShelterTests: XCTestCase {
     }
 
     private var currentProfiles: [WorldPreset] {
+        [
+            .prehistoricLostWorldV3,
+            .prehistoricJurassicGiantsV3,
+            .prehistoricCretaceousFrontiersV3,
+            .prehistoricAncientSeasV3,
+        ]
+    }
+
+    private var legacyV2Profiles: [WorldPreset] {
         [
             .prehistoricLostWorldV2,
             .prehistoricJurassicGiantsV2,
@@ -79,8 +88,8 @@ final class PrehistoricStarterShelterTests: XCTestCase {
                                  "starter supplies must remain a small first-night cache", file: file, line: line)
     }
 
-    func testV2SitesAreDeterministicAndClassicProfilesHaveNone() throws {
-        for preset in currentProfiles {
+    func testSupportedShelterSitesAreDeterministicAndClassicProfilesHaveNone() throws {
+        for preset in legacyV2Profiles + currentProfiles {
             let settings = WorldGenerationSettings(preset: preset)
             let first = try XCTUnwrap(prehistoricStarterShelterSite(seed: seed, settings: settings))
             let second = try XCTUnwrap(prehistoricStarterShelterSite(seed: seed, settings: settings))
@@ -102,7 +111,17 @@ final class PrehistoricStarterShelterTests: XCTestCase {
     }
 
     func testCurrentGenerationPublishesACompleteShelterAndWoodGrove() throws {
-        let settings = WorldGenerationSettings(preset: .prehistoricLostWorldV2)
+        for preset in currentProfiles {
+            try assertCompleteShelterAndWoodGrove(preset: preset)
+        }
+    }
+
+    func testLegacyV2GenerationRetainsACompleteShelterAndWoodGrove() throws {
+        try assertCompleteShelterAndWoodGrove(preset: .prehistoricLostWorldV2)
+    }
+
+    private func assertCompleteShelterAndWoodGrove(preset: WorldPreset) throws {
+        let settings = WorldGenerationSettings(preset: preset)
         let site = try XCTUnwrap(prehistoricStarterShelterSite(seed: seed, settings: settings))
         let outputs = generatedOutputs(for: site, settings: settings)
 
@@ -174,7 +193,13 @@ final class PrehistoricStarterShelterTests: XCTestCase {
     }
 
     func testRaisedAncientSeasDeckConnectsTheHutToItsGrove() throws {
-        let settings = WorldGenerationSettings(preset: .prehistoricAncientSeasV2)
+        for preset: WorldPreset in [.prehistoricAncientSeasV2, .prehistoricAncientSeasV3] {
+            try assertRaisedAncientSeasDeckConnectsTheHutToItsGrove(preset: preset)
+        }
+    }
+
+    private func assertRaisedAncientSeasDeckConnectsTheHutToItsGrove(preset: WorldPreset) throws {
+        let settings = WorldGenerationSettings(preset: preset)
         let oceanFixtureSeed: UInt32 = 2
         let site = try XCTUnwrap(prehistoricStarterShelterSite(seed: oceanFixtureSeed, settings: settings))
         XCTAssertTrue(site.usesRaisedPlatform,
@@ -247,14 +272,23 @@ final class PrehistoricStarterShelterTests: XCTestCase {
 
     @MainActor
     func testAncientSeasWorldEntryKeepsPlayerInsideShelterAndAdoptsWorldSeededChest() throws {
-        let settings = WorldGenerationSettings(preset: .prehistoricAncientSeasV2)
+        for preset: WorldPreset in [.prehistoricAncientSeasV2, .prehistoricAncientSeasV3] {
+            try assertAncientSeasWorldEntryKeepsPlayerInsideShelter(preset: preset)
+        }
+    }
+
+    @MainActor
+    private func assertAncientSeasWorldEntryKeepsPlayerInsideShelter(preset: WorldPreset) throws {
+        let settings = WorldGenerationSettings(preset: preset)
         let site = try XCTUnwrap(prehistoricStarterShelterSite(seed: seed, settings: settings))
 
         let game = PersistenceTestSupport.makeGame(owner: self, label: "prehistoric-starter-shelter")
         game.createWorld(name: "Ancient Seas Shelter", seedText: String(Int32(bitPattern: seed)),
                          mode: GameMode.survival, difficulty: 2,
-                         worldPreset: .prehistoricAncientSeasV2)
+                         worldPreset: preset)
         let record = try XCTUnwrap(game.worldRec)
+        XCTAssertEqual(record.worldPreset, preset.rawValue)
+        XCTAssertEqual(game.db.getWorld(record.id)?.worldPreset, preset.rawValue)
         XCTAssertEqual(record.spawnX, site.x)
         XCTAssertEqual(record.spawnY, site.y)
         XCTAssertEqual(record.spawnZ, site.z)
@@ -275,12 +309,19 @@ final class PrehistoricStarterShelterTests: XCTestCase {
 
     @MainActor
     func testModifiedShelterUsesADeckOrGroundFallbackInsteadOfItsRoof() throws {
-        let settings = WorldGenerationSettings(preset: .prehistoricAncientSeasV2)
+        for preset: WorldPreset in [.prehistoricAncientSeasV2, .prehistoricAncientSeasV3] {
+            try assertModifiedShelterUsesADeckOrGroundFallback(preset: preset)
+        }
+    }
+
+    @MainActor
+    private func assertModifiedShelterUsesADeckOrGroundFallback(preset: WorldPreset) throws {
+        let settings = WorldGenerationSettings(preset: preset)
         let site = try XCTUnwrap(prehistoricStarterShelterSite(seed: seed, settings: settings))
         let game = PersistenceTestSupport.makeGame(owner: self, label: "prehistoric-modified-shelter")
         game.createWorld(name: "Modified Shelter", seedText: String(Int32(bitPattern: seed)),
                          mode: GameMode.survival, difficulty: 2,
-                         worldPreset: .prehistoricAncientSeasV2)
+                         worldPreset: preset)
         game.world.setBlock(site.x, site.y - 1, site.z, 0)
         game.respawnPlayer()
         XCTAssertFalse(abs(ifloor(game.player.x) - site.x) <= 4

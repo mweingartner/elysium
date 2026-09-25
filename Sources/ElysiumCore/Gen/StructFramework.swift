@@ -542,6 +542,7 @@ func resetStructurePlanCacheForTesting() {
     surfacePlanWinnerCacheLock.lock()
     surfacePlanWinnerCache.removeAll(keepingCapacity: false)
     surfacePlanWinnerCacheLock.unlock()
+    resetPrehistoricVolcanoAdmissionCacheForTesting()
 }
 
 func structurePlanCacheStatsForTesting() -> StructurePlanCacheStats {
@@ -655,6 +656,9 @@ private func surfacePlanWinnerCacheKey(_ def: StructureDef, _ ctx: GenCtx,
 public func surfaceStructurePlanWins(_ def: StructureDef, _ plan: StructurePlan,
                                      _ ctx: GenCtx, _ ocx: Int, _ ocz: Int,
                                      collisionDefinitions: [StructureDef]) -> Bool {
+    if def.id == prehistoricVolcanoStructureID {
+        return prehistoricVolcanoPlanWins(plan, ctx, collisionDefinitions: collisionDefinitions)
+    }
     guard isConventionalSurfaceStructure(def), !plan.pieces.isEmpty else { return true }
     let conventionalDefinitions = orderedConventionalSurfaceDefinitions(collisionDefinitions)
     guard !conventionalDefinitions.isEmpty else { return true }

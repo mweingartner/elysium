@@ -622,8 +622,14 @@ final class WorldgenPlayabilityTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(counts[manyIndex], 5,
                                     "Rich Resources Many must retain five complete grounded settlements in the fixed envelope; \(countSummary)")
         let maxPlans = plansByDensity.last ?? []
-        XCTAssertGreaterThanOrEqual(maxPlans.count, 8,
-                                    "Rich Resources Max must retain eight complete grounded settlements in the fixed envelope; \(countSummary)")
+        // The deliberately expanded cave fields change terrain-valid sites:
+        // this unchanged real seed/envelope now yields 0,0,3,5,7. Keep the
+        // grounded-site checks rather than filling caves or weakening village
+        // admission to reproduce the former terrain's minimum of eight.
+        XCTAssertGreaterThanOrEqual(maxPlans.count, 7,
+                                    "Cave-rich Resources Max must retain seven complete grounded settlements in the fixed envelope; \(countSummary)")
+        XCTAssertGreaterThan(maxPlans.count, counts[manyIndex],
+                             "Max must retain a visible density increase over Many; \(countSummary)")
         for firstIndex in maxPlans.indices {
             for secondIndex in maxPlans.indices where secondIndex > firstIndex {
                 XCTAssertFalse(villageReferencesOverlap(maxPlans[firstIndex].reference,

@@ -37,8 +37,11 @@ requirements and installation, start with the [Elysium project overview](README.
    - **Superflat** creates a flat building world.
    - **Large Biomes** produces larger biome regions.
    - **Amplified** exaggerates terrain height.
-   - **Rich Resources** increases the world's resource emphasis.
+   - **Rich Resources** combines ore-rich rolling hills with plentiful caves and more underground lava areas.
    - **Single Biome** adds a separate **Biome** choice.
+   - **Nether World** starts you in the Nether beside an active portal, with basic iron tools and oak logs.
+   - **Lost World**, **Jurassic Giants**, **Cretaceous Frontiers**, and **Ancient Seas** offer prehistoric
+     wildlife, a supplied starter hut, extra caves and underground lava, and occasional small volcanoes.
    - **Reality Derived** opens an interactive Arnis map. Search for a location, draw or resize a
      rectangle, leave **Include buildings** checked to import OpenStreetMap and supplemental Overture
      buildings or clear it to omit buildings, then choose **Generate Map**. Real terrain and other mapped
@@ -286,6 +289,16 @@ roster of prehistoric creatures. Each creature has its own calls and action soun
 movement. A player-attributed kill gives ordinary experience based on that creature's configured combat
 difficulty—health, active damage, and predator/charge behaviour—not merely its apparent size. This is
 separate from the usage-based Melee and Ranged skill-tree XP described below.
+
+New dinosaur maps also have more underground caves and lava regions. Look for occasional small rocky
+volcanoes on dry land, with exposed lava inside their craters. They do not erupt, but their lava is still
+dangerous—keep creatures and wooden builds away. Ancient Seas retains its oceans; volcanoes appear only
+where there is suitable dry land. The starter hut and its nearby trees are kept clear of volcanoes.
+
+These dinosaur terrain features belong to newly created **v3** maps. Existing v1/v2 dinosaur maps keep
+their original terrain even as you explore. Rich Resources improvements apply whenever terrain is
+generated, including previously explored, unmodified areas saved only as entity records. Chunks saved
+with their full block data remain intact, so boundaries can show a change in cave patterns.
 
 ### Wildlife renewal and forests
 

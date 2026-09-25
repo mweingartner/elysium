@@ -284,12 +284,17 @@ public func structureDefinitionsForGeneration(dim: Dim,
         // cannot report a village that its matching world-generation branch
         // would never materialize. Other Overworld landmarks remain intact.
         if settings.preset.isPrehistoric {
-            return STRUCTURES.filter { !["village", "pillager_outpost"].contains($0.id) }
+            return STRUCTURES.filter {
+                !["village", "pillager_outpost"].contains($0.id)
+                    && ($0.id != prehistoricVolcanoStructureID || settings.preset.supportsVolcanicTerrain)
+            }
         }
         if settings.preset == .flat {
             return STRUCTURES.filter { $0.id == "village" || $0.id == "stronghold" }
         }
-        return STRUCTURES.filter { !["fortress", "bastion", "end_city"].contains($0.id) }
+        return STRUCTURES.filter {
+            !["fortress", "bastion", "end_city", prehistoricVolcanoStructureID].contains($0.id)
+        }
     case .nether:
         return STRUCTURES.filter { ["fortress", "bastion", "ruined_portal"].contains($0.id) }
     case .end:
@@ -551,7 +556,9 @@ func treeCanopyExclusions(forOriginChunk cx: Int, _ cz: Int, context: GenCtx,
                                         baseTerrainOracleVersion: context.baseTerrainOracleVersion,
                                         activeStructureDomainIdentity: context.activeStructureDomainIdentity,
                                         treeStructureSignature: signature(structures),
-                                        collisionStructureSignature: conventionalSurfaceCollisionSignature(collisionDefinitions),
+                                        collisionStructureSignature: conventionalSurfaceCollisionSignature(collisionDefinitions)
+                                            + (structures.contains { $0.id == prehistoricVolcanoStructureID }
+                                               ? "|volcano:" + structureDefinitionDomainIdentity(collisionDefinitions) : ""),
                                         cx: cx, cz: cz)
     if let cached = treeStructureExclusionsLock.withLock({ treeStructureExclusions[key] }) {
         return cached
@@ -723,7 +730,8 @@ public func generateChunk(_ dim: Dim, _ seed: UInt32, _ cx: Int, _ cz: Int,
         let surfaceBiomeAt: (Int, Int) -> Int = { x, z in gen.surfaceBiomeAt(Double(x), Double(z)).rawValue }
         let treeBlockingStructures = overworldStructs.filter { def in
             ["village", "desert_temple", "jungle_temple", "igloo", "witch_hut",
-             "pillager_outpost", "woodland_mansion", "ruined_portal", "trail_ruins"].contains(def.id)
+             "pillager_outpost", "woodland_mansion", "ruined_portal", "trail_ruins",
+             prehistoricVolcanoStructureID].contains(def.id)
         }
         for oz in (cz - 1)...(cz + 1) {
             for ox in (cx - 1)...(cx + 1) {

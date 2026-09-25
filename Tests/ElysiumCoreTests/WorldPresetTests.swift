@@ -350,11 +350,12 @@ final class WorldPresetTests: XCTestCase {
         XCTAssertGreaterThan(rich["emerald", default: 0], 0)
     }
 
-    func testModerateHillsResourceRichMakesCarvedCavernsRare() {
+    func testModerateHillsResourceRichRestoresOrdinaryCarvedCaverns() {
         let normal = carvedAirCount(settings: .normal)
         let rich = carvedAirCount(settings: WorldGenerationSettings(preset: .moderateHillsResourceRich))
         XCTAssertGreaterThan(normal, 0)
-        XCTAssertLessThan(rich, normal / 4)
+        XCTAssertEqual(rich, normal,
+                       "Rich Resources keeps ordinary cave systems instead of suppressing exploration")
     }
 
     /// Coal and iron must land in the ground players actually dig: the Rich Resources surface sits
@@ -375,16 +376,14 @@ final class WorldPresetTests: XCTestCase {
         }
     }
 
-    /// Lava only enters the overworld through cave voids under a lava aquifer. Rich Resources
-    /// thins its caves, but must keep the full cave density inside those aquifer regions so it
-    /// still generates the periodic lava lakes a default map has.
-    func testModerateHillsResourceRichStillGeneratesLavaLakes() {
+    /// Restored caves and broader inland aquifers must preserve the existing
+    /// origin-region lava witness, not merely add lava in a distant new fixture.
+    func testModerateHillsResourceRichGeneratesAtLeastOrdinaryLavaLakes() {
         let normal = lavaCellCount(settings: .normal)
         let rich = lavaCellCount(settings: WorldGenerationSettings(preset: .moderateHillsResourceRich))
-        // Measured 196 default / 65 rich lava cells here; the thinned caves alone left 4.
         XCTAssertGreaterThan(normal, 0)
         XCTAssertGreaterThanOrEqual(rich, 40, "Rich Resources lava lakes")
-        XCTAssertGreaterThanOrEqual(rich, normal / 4, "Rich Resources lava lakes relative to default")
+        XCTAssertGreaterThanOrEqual(rich, normal, "Rich Resources lava lakes relative to default")
     }
 
     private func lavaCellCount(settings: WorldGenerationSettings) -> Int {

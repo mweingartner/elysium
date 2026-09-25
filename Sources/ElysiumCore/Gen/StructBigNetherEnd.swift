@@ -788,6 +788,7 @@ private let structuresRegistered: Void = {
     registerUndergroundStructures()
     registerBigStructures()
     registerNetherEndStructures()
+    registerStructure(prehistoricVolcanoStructureDefinition())
 }()
 public func registerAllStructures() {
     _ = structuresRegistered

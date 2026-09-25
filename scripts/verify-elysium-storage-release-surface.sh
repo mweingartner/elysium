@@ -361,7 +361,11 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='63ced7f24fe9998202f54ec1386da3bd7944f7a09fce38
 # application product; Core and elysmoke remain byte-identical.
 # Creature/tree ecology renews GameCore/Saves domain codecs and linked products,
 # not storage SQL or the admitted API. See docs/creature-tree-ecology/build.md.
-EXPECTED_CORE_OBJECT_SHA256='6ac3ca7edcfe7cdf4ac0ed5a69e43f32221a27a8c37a1b19b71d422a6b086fbc'
+# volcanic-geology: v3 profile IDs, bounded volcano pieces, and Rich Resources
+# cave/lava tuning move only the Core object and its linked products. Storage,
+# Saves, GameCore, Player, capability manifests, and text-input pins are unchanged.
+# Reviewed normalization and old/new values: docs/volcanic-geology/build.md.
+EXPECTED_CORE_OBJECT_SHA256='ea2d96cf2b3075443f8a58e22a1c6e8c8eaa7ab0b227234a016361400ea4a498'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -377,8 +381,8 @@ EXPECTED_CORE_OBJECT_SHA256='6ac3ca7edcfe7cdf4ac0ed5a69e43f32221a27a8c37a1b19b71
 # app-target lifecycle/UI behavior only: Core, elysmoke, and the reviewed
 # storage/text-input surfaces remain byte-identical. The stripped Elysium
 # product pin renews from 17f963e3512e40f14a298b7fcee90512ba94cc667f47a4e8dcf1c72718520b9c.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='db2d0e79e5e5a720920e92311b002aaa478c5f3f2ed32c62f4477a114693de03'
-EXPECTED_SMOKE_PRODUCT_SHA256='450f4f5d43c1ad67dca18615db8f2443670309b1ef6f7f917cffefe32c49d5b1'
+EXPECTED_ELYSIUM_PRODUCT_SHA256='062c1a14c02349ad589525a620818bbd7159e3891fc1e0deb07e079bc8198093'
+EXPECTED_SMOKE_PRODUCT_SHA256='3f5260664269be010db64237b3da923021fcfb0bcfa315126f2f16fb5f7cb1a9'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'

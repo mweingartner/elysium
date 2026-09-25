@@ -288,10 +288,10 @@ final class WorldCreateVillageDensityUITests: XCTestCase {
         ui.open(screen, fixture.game)
 
         let prehistoricPresets: [WorldPreset] = [
-            .prehistoricLostWorldV2,
-            .prehistoricJurassicGiantsV2,
-            .prehistoricCretaceousFrontiersV2,
-            .prehistoricAncientSeasV2,
+            .prehistoricLostWorldV3,
+            .prehistoricJurassicGiantsV3,
+            .prehistoricCretaceousFrontiersV3,
+            .prehistoricAncientSeasV3,
         ]
         XCTAssertEqual(WorldPreset.normalCycle.filter { $0.isPrehistoric }, prehistoricPresets,
                        "adding a profile must extend this UI contract test")
@@ -302,7 +302,7 @@ final class WorldCreateVillageDensityUITests: XCTestCase {
         // of those profiles may clear a supported dungeon selection.
         try selectDungeonDensity(.more, on: screen, ui: ui, game: fixture.game)
         try selectVillageDensity(.many, on: screen, ui: ui, game: fixture.game)
-        try selectWorldPreset(.prehistoricLostWorldV2, on: screen, ui: ui, game: fixture.game)
+        try selectWorldPreset(.prehistoricLostWorldV3, on: screen, ui: ui, game: fixture.game)
         XCTAssertEqual(screen.dungeonDensity, .normal,
                        "the route through Superflat must preserve its historical dungeon canonicalization")
         XCTAssertEqual(screen.villageDensity, .normal,
@@ -328,5 +328,27 @@ final class WorldCreateVillageDensityUITests: XCTestCase {
             XCTAssertNil(screen.textAccessibilityDescriptors(ui, fixture.game)
                 .first { $0.id == "create.villages" })
         }
+    }
+
+    func testPrehistoricCreateSelectionPersistsTheCurrentVolcanicRevision() throws {
+        let fixture = try makeFixture()
+        let ui = try makeUI(width: 480, height: 240)
+        let screen = WorldCreateScreen()
+        ui.open(screen, fixture.game)
+        screen.seedField.text = "5366106"
+
+        try selectWorldPreset(.prehistoricLostWorldV3, on: screen, ui: ui, game: fixture.game)
+        XCTAssertEqual(try button("World Type:", on: screen).label, "World Type: Lost World")
+        try selectDungeonDensity(.more, on: screen, ui: ui, game: fixture.game)
+        tap(try button("Create World", on: screen), screen: screen, ui: ui, game: fixture.game)
+
+        let record = try XCTUnwrap(fixture.game.worldRec)
+        XCTAssertEqual(record.worldPreset, WorldPreset.prehistoricLostWorldV3.rawValue)
+        XCTAssertEqual(record.generationSettings.preset.prehistoricProfile, .lostWorld)
+        XCTAssertTrue(record.generationSettings.preset.prehistoricProfile?.supportsVolcanicTerrain == true)
+        let saved = try XCTUnwrap(fixture.game.db.getWorld(record.id))
+        XCTAssertEqual(saved.worldPreset, WorldPreset.prehistoricLostWorldV3.rawValue)
+        XCTAssertEqual(saved.generationSettings.dungeonDensity, .more)
+        XCTAssertEqual(saved.generationSettings.villageDensity, .normal)
     }
 }

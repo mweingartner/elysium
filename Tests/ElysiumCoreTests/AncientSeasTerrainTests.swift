@@ -110,8 +110,9 @@ final class AncientSeasTerrainTests: XCTestCase {
     /// selection.  Keeping this probe at the terrain level avoids constructing
     /// a save database merely to establish that the coast-heavy profile still
     /// offers a dry starting island for representative seeds.
-    private func hasDryInitialSpawnCandidate(seed: UInt32) -> Bool {
-        let settings = WorldGenerationSettings(preset: .prehistoricAncientSeas)
+    private func hasDryInitialSpawnCandidate(seed: UInt32,
+                                            preset: WorldPreset = .prehistoricAncientSeas) -> Bool {
+        let settings = WorldGenerationSettings(preset: preset)
         let generator = OverworldGen(seed, settings: settings)
         let seaLevel = DIMS[Dim.overworld.rawValue].seaLevel
         for radius in 0..<40 {
@@ -172,14 +173,29 @@ final class AncientSeasTerrainTests: XCTestCase {
         XCTAssertEqual(first.surfaceBiomes[8 * CHUNK_W + 8], UInt8(centerBiome.rawValue))
     }
 
-    func testCurrentAncientSeasRevisionKeepsTheVersionedTerrainDomain() {
+    func testLegacyV2AncientSeasKeepsTheV1TerrainDomain() {
         let legacy = WorldGenerationSettings(preset: .prehistoricAncientSeas)
-        let current = WorldGenerationSettings(preset: .prehistoricAncientSeasV2)
+        let v2 = WorldGenerationSettings(preset: .prehistoricAncientSeasV2)
         let legacyChunk = buildBaseTerrainChunk(seed: 0xCAFE_BABE, cx: -2, cz: 3, settings: legacy)
-        let currentChunk = buildBaseTerrainChunk(seed: 0xCAFE_BABE, cx: -2, cz: 3, settings: current)
+        let v2Chunk = buildBaseTerrainChunk(seed: 0xCAFE_BABE, cx: -2, cz: 3, settings: v2)
 
-        XCTAssertEqual(currentChunk.blocks, legacyChunk.blocks)
-        XCTAssertEqual(currentChunk.biomes, legacyChunk.biomes)
-        XCTAssertEqual(currentChunk.heights, legacyChunk.heights)
+        XCTAssertEqual(v2Chunk.blocks, legacyChunk.blocks)
+        XCTAssertEqual(v2Chunk.biomes, legacyChunk.biomes)
+        XCTAssertEqual(v2Chunk.heights, legacyChunk.heights)
+    }
+
+    func testCurrentVolcanicAncientSeasRetainsConnectedMarineHabitatAndLandfalls() {
+        let seed: UInt32 = 0x51EA_C0A5
+        let current = surveyWater(seed: seed,
+                                 settings: .init(preset: .prehistoricAncientSeasV3))
+        XCTAssertGreaterThan(current.deepWaterColumns, current.totalColumns / 4)
+        XCTAssertGreaterThan(current.largestDeepWaterComponent, current.totalColumns / 4,
+                             "volcanic terrain must not fragment Ancient Seas into isolated ponds")
+        XCTAssertLessThan(current.waterColumns, current.totalColumns * 9 / 10,
+                          "the current profile must keep dry island/coast landfalls")
+        for spawnSeed: UInt32 in [0, 1, seed, 0xCAFE_BABE] {
+            XCTAssertTrue(hasDryInitialSpawnCandidate(seed: spawnSeed,
+                                                      preset: .prehistoricAncientSeasV3))
+        }
     }
 }

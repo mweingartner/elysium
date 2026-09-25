@@ -24,9 +24,9 @@ recordings.
 
 ## Player outcome
 
-World creation offers the current v2 revision of the four profiles alongside
+World creation offers the current v3 revision of the four profiles alongside
 the existing presets. Selecting one is persisted in the world record and
-changes only that new world's profile domain. Explicit v1 preset IDs remain
+changes only that new world's profile domain. Explicit v1 and v2 preset IDs remain
 loadable with their original terrain and combat contract, but are not offered as a
 second set of duplicate create-world choices. Ancient Seas additionally applies a coast-heavy
 terrain treatment to its own continuous continentalness sample before terrain
@@ -46,16 +46,39 @@ deterministic starter shelter while keeping the ordered creature roster stable.
 It uses a distinct cache and LAN content identity; a v1 save continues to
 resolve to its v1 profile and cannot silently gain the new behavior. Historical
 unversioned import aliases retain their v1 meaning, while the create-world
-selector writes explicit v2 IDs.
+selector writes explicit v3 IDs. Version 3 retains v2's ecology and starter
+shelter while adding more caves, more inland underground lava areas, and rare
+small volcanoes with exposed crater lava. Version 1 and 2 terrain remains
+unchanged, including in newly explored chunks of those older worlds.
+
+### Caves and volcanic terrain
+
+All four current dinosaur profiles have wider noise caves and more tunnel and
+ravine starts than their older revisions. Inland lava-aquifer regions are more
+frequent, but their upper level stays at Y=12; ordinary ocean water still wins
+under ocean columns. Ancient Seas therefore retains its navigable seas and
+islands rather than replacing its water with lava.
+
+Small volcanoes are occasional surface landmarks, not eruptions. They use
+existing rock blocks and contain exposed lava in a crater. A cone spans 21–29
+blocks and rises 8–11 blocks above the highest surveyed ground; its lava pool
+has a 2–3-block radius and a raised rock rim. Each 24×24-chunk region has one
+candidate, not one guaranteed volcano. Placement requires
+a dry, supported footprint and rejects unsuitable slopes, water, the entire
+starter shelter/grove neighborhood, and conflicts with existing structures.
+Trees and snow respect an accepted volcano's footprint. No volcanoes are added
+to v1/v2 worlds, ordinary presets, or the Nether. Saved full-block chunks are
+never rewritten; v1/v2 also retain their original generator when unmodified
+chunks saved only as entity records are regenerated.
 
 ## Content model
 
 `PrehistoricWorldProfile` owns the canonical ordered roster of 36 stable
 `prehistoric.<name>` entity identifiers. The registry appends the roster after
-the historical entity range, preserving existing entity ordinals. Both
+the historical entity range, preserving existing entity ordinals. All
 supported revisions of the four profiles choose the same ordered subsets of
 that roster; Lost World contains the full mixed-era set. The version boundary
-therefore changes only explicitly versioned simulation rules, never entity
+therefore changes only explicitly versioned terrain and simulation rules, never entity
 ordinals or roster membership.
 
 One data definition drives collision bounds, health, attack, combat XP reward,
@@ -85,7 +108,7 @@ water population bounded by the existing category cap.
 
 ### Dawn replenishment and forest renewal
 
-**Options... → World → Creature Respawn** controls replenishment on both v1 and v2
+**Options... → World → Creature Respawn** controls replenishment on all supported
 maps without changing their roster, terrain, or combat revision. **Daily** is the
 default; **Alternate Days** and **Weekly** wait for two or seven actual in-game
 dawns. Sleeping counts as completing the current cycle. Each world's saved
@@ -122,7 +145,7 @@ both kinds of seedling output. See the [Player Guide](../PLAYER_GUIDE.md#wildlif
 
 ### Version-two land ecology and first-night shelter
 
-Only current v2 profiles opt into the land ecology. A land predator performs a
+Version 2 and 3 profiles opt into the land ecology. A land predator performs a
 bounded deterministic prey scan on a fixed cadence, selects a visible nearby
 land herd herbivore by distance then stable entity id, and keeps the normal
 player-target fallback at lower priority. It eats only after it has actually
@@ -132,14 +155,14 @@ their specialized air/water controllers rather than receiving a nonsensical
 land hunt rule.
 
 Land herd herbivores rally across compatible species when a nearby ally was
-recently struck by a living prehistoric land predator. Their v2-only defensive
+recently struck by a living prehistoric land predator. Their v2-and-later defensive
 attack, knockback resistance, and predator-only damage reduction make the
 response credible without changing player or environmental damage. Defensive
 creature XP uses the same bounded combat-difficulty policy, so a difficult
 defender remains worth more ordinary XP than a low-threat animal. Version-one
 profiles retain their original values and goal order.
 
-Every new v2 prehistoric world derives one bounded spawn site from its seed
+Every v2 or v3 prehistoric world derives one bounded spawn site from its seed
 and complete generation settings. The site is stamped as a physical seven by
 seven oak shelter after terrain, vegetation, and snow: it has a supported
 floor, enclosed walls, a roof, paired door, paired red bed, crafting table,
@@ -225,13 +248,13 @@ performance, and real-renderer acceptance work.
 
 Old world records with no prehistoric preset decode as normal worlds. New
 prehistory entity fields are optional, bounded, and ignored for unrelated
-entities. Explicit v1 identifiers and identities remain accepted for existing
-worlds; v2 identifiers select the current simulation contract. Unknown future
+entities. Explicit v1 and v2 identifiers and identities remain accepted for existing
+worlds; v3 identifiers select the current terrain and simulation contract. Unknown future
 prehistoric preset IDs fail closed at save and LAN decode boundaries rather
 than being normalized to a normal world. LAN summaries carry both the
 normalized profile preset and its versioned content identity, so a joining
 guest constructs the same transient generation settings or receives an
-explicit incompatibility rejection; a v1 peer can never join a v2 profile
+explicit incompatibility rejection; a peer cannot join a different profile revision
 under the same friendly profile label. Entity snapshots carry only validated
 presentation action/air fields. A mixed app version is also rejected by
 Elysium's existing version gate rather than silently differing on models or

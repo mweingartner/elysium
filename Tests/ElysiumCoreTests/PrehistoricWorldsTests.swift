@@ -129,21 +129,27 @@ final class PrehistoricWorldsTests: XCTestCase {
         XCTAssertEqual(Set(PrehistoricCreatureDefinition.allIDs).count, 36)
         XCTAssertEqual(PrehistoricWorldProfile.lostWorldV1.creatureIDs,
                        PrehistoricWorldProfile.allCreatureIDs)
+        XCTAssertEqual(PrehistoricWorldProfile.lostWorldV2.creatureIDs,
+                       PrehistoricWorldProfile.allCreatureIDs)
         XCTAssertEqual(PrehistoricWorldProfile.lostWorld.creatureIDs, PrehistoricWorldProfile.allCreatureIDs)
+        XCTAssertEqual(PrehistoricWorldProfile.currentContentVersion, 3)
         for profile in PrehistoricWorldProfile.allCases {
             XCTAssertEqual(profile.preset.prehistoricProfile, profile)
             XCTAssertTrue(profile.contentIdentity.hasSuffix(".v\(profile.contentVersion)"))
             XCTAssertEqual(profile.supportsPredatorHerdCombat,
-                           profile.contentVersion == PrehistoricWorldProfile.currentContentVersion)
+                           profile.contentVersion >= 2)
             XCTAssertEqual(profile.supportsStarterShelter,
-                           profile.contentVersion == PrehistoricWorldProfile.currentContentVersion)
+                           profile.contentVersion >= 2)
+            XCTAssertEqual(profile.supportsVolcanicTerrain, profile.contentVersion == 3)
             XCTAssertFalse(profile.creatureIDs.isEmpty)
             XCTAssertTrue(profile.creatureIDs.allSatisfy { PrehistoricCreatureDefinition.named($0) != nil })
         }
         XCTAssertEqual(PrehistoricWorldProfile.lostWorldV1.contentIdentity,
                        "elysium.prehistoric.lostWorld.v1")
-        XCTAssertEqual(PrehistoricWorldProfile.lostWorld.contentIdentity,
+        XCTAssertEqual(PrehistoricWorldProfile.lostWorldV2.contentIdentity,
                        "elysium.prehistoric.lostWorld.v2")
+        XCTAssertEqual(PrehistoricWorldProfile.lostWorld.contentIdentity,
+                       "elysium.prehistoric.lostWorld.v3")
         XCTAssertEqual(PrehistoricWorldProfile.lostWorldV1.creatureIDs,
                        PrehistoricWorldProfile.lostWorld.creatureIDs,
                        "the version bump must not reorder or alter the roster")
@@ -154,22 +160,29 @@ final class PrehistoricWorldsTests: XCTestCase {
         XCTAssertEqual(normalizedWorldPreset("elysium:prehistoric_ancient_seas_v1"), .prehistoricAncientSeas)
         XCTAssertEqual(normalizedWorldPreset("elysium:prehistoric_lost_world_v2"),
                        .prehistoricLostWorldV2)
+        XCTAssertEqual(normalizedWorldPreset("elysium:prehistoric_lost_world_v3"),
+                       .prehistoricLostWorldV3)
         XCTAssertNotEqual(WorldGenerationSettings(preset: .prehistoricLostWorld).cacheIdentity,
                           WorldGenerationSettings(preset: .prehistoricLostWorldV2).cacheIdentity)
         XCTAssertFalse(WorldPreset.prehistoricLostWorld.supportsPredatorHerdCombat)
         XCTAssertTrue(WorldPreset.prehistoricLostWorldV2.supportsPredatorHerdCombat)
         XCTAssertFalse(WorldPreset.prehistoricLostWorld.supportsStarterShelter)
         XCTAssertTrue(WorldPreset.prehistoricLostWorldV2.supportsStarterShelter)
+        XCTAssertTrue(WorldPreset.prehistoricLostWorldV3.supportsPredatorHerdCombat)
+        XCTAssertTrue(WorldPreset.prehistoricLostWorldV3.supportsStarterShelter)
+        XCTAssertNotEqual(WorldGenerationSettings(preset: .prehistoricLostWorldV2).cacheIdentity,
+                          WorldGenerationSettings(preset: .prehistoricLostWorldV3).cacheIdentity)
         XCTAssertEqual(WorldPreset.normalCycle.filter { $0.isPrehistoric }, [
-            .prehistoricLostWorldV2,
-            .prehistoricJurassicGiantsV2,
-            .prehistoricCretaceousFrontiersV2,
-            .prehistoricAncientSeasV2,
+            .prehistoricLostWorldV3,
+            .prehistoricJurassicGiantsV3,
+            .prehistoricCretaceousFrontiersV3,
+            .prehistoricAncientSeasV3,
         ])
         XCTAssertFalse(WorldPreset.normalCycle.contains(.prehistoricLostWorld))
+        XCTAssertFalse(WorldPreset.normalCycle.contains(.prehistoricLostWorldV2))
         let visiblePrehistoricNames = WorldPreset.normalCycle.filter(\.isPrehistoric).map(\.displayName)
         XCTAssertEqual(Set(visiblePrehistoricNames).count, visiblePrehistoricNames.count,
-                       "the current create-world cycle must not show duplicate v1/v2 labels")
+                       "the current create-world cycle must not show duplicate legacy/current labels")
     }
 
     func testPrehistoricSoundCatalogAndCombatXPRewardsAreDistinct() throws {
@@ -771,17 +784,17 @@ final class PrehistoricWorldsTests: XCTestCase {
         XCTAssertEqual(decodedSummary?.prehistoricContentIdentity,
                        PrehistoricWorldProfile.lostWorldV1.contentIdentity)
 
-        let currentSummary = LANWorldSummary(
+        let v2Summary = LANWorldSummary(
             worldID: "lost-world", worldName: "Lost World", seed: 1, gameMode: GameMode.survival,
             difficulty: 2, dimension: Dim.overworld.rawValue, playerCount: 1,
             worldPreset: WorldPreset.prehistoricLostWorldV2.rawValue
         )
-        XCTAssertEqual(currentSummary.worldPreset, WorldPreset.prehistoricLostWorldV2.rawValue)
-        XCTAssertEqual(currentSummary.prehistoricContentIdentity,
-                       PrehistoricWorldProfile.lostWorld.contentIdentity)
-        XCTAssertEqual(currentSummary.compatibleWorldPreset, .prehistoricLostWorldV2)
-        XCTAssertEqual(lanClientResumeKey(for: currentSummary),
-                       "lost-world#1#\(PrehistoricWorldProfile.lostWorld.contentIdentity)")
+        XCTAssertEqual(v2Summary.worldPreset, WorldPreset.prehistoricLostWorldV2.rawValue)
+        XCTAssertEqual(v2Summary.prehistoricContentIdentity,
+                       PrehistoricWorldProfile.lostWorldV2.contentIdentity)
+        XCTAssertEqual(v2Summary.compatibleWorldPreset, .prehistoricLostWorldV2)
+        XCTAssertEqual(lanClientResumeKey(for: v2Summary),
+                       "lost-world#1#\(PrehistoricWorldProfile.lostWorldV2.contentIdentity)")
 
         let hostile = LANEntitySnapshot(
             entityID: 77, type: "prehistoric.ichthyosaurus", x: 8.5, y: 64, z: 8.5,
@@ -824,6 +837,39 @@ final class PrehistoricWorldsTests: XCTestCase {
         XCTAssertEqual(aquaticMirror.airSupply, 119)
     }
 
+    func testEveryPrehistoricRevisionRoundTripsSaveAndLANWithoutUpgrading() throws {
+        for profile in PrehistoricWorldProfile.allCases {
+            let preset = profile.preset
+            let record = WorldRecord(
+                id: "versioned-profile", name: preset.displayName, seed: 7,
+                gameMode: GameMode.survival, difficulty: 2, worldPreset: preset,
+                dungeonDensity: .more, villageDensity: .max
+            )
+            let decodedRecord = try JSONDecoder().decode(
+                WorldRecord.self, from: JSONEncoder().encode(record))
+            XCTAssertEqual(decodedRecord.worldPreset, preset.rawValue)
+            XCTAssertEqual(decodedRecord.generationSettings.preset.prehistoricProfile, profile)
+            XCTAssertEqual(decodedRecord.generationSettings.cacheIdentity,
+                           record.generationSettings.cacheIdentity)
+            XCTAssertEqual(decodedRecord.generationSettings.dungeonDensity, .more)
+            XCTAssertEqual(decodedRecord.generationSettings.villageDensity, .normal)
+
+            let summary = LANWorldSummary(
+                worldID: record.id, worldName: record.name, seed: Int64(record.seed),
+                gameMode: record.gameMode, difficulty: record.difficulty,
+                dimension: Dim.overworld.rawValue, playerCount: 1,
+                worldPreset: preset.rawValue
+            )
+            let decodedSummary = try JSONDecoder().decode(
+                LANWorldSummary.self, from: JSONEncoder().encode(summary))
+            XCTAssertEqual(decodedSummary.worldPreset, preset.rawValue)
+            XCTAssertEqual(decodedSummary.prehistoricContentIdentity, profile.contentIdentity)
+            XCTAssertEqual(decodedSummary.compatibleWorldPreset, preset)
+            XCTAssertEqual(lanClientResumeKey(for: decodedSummary),
+                           "versioned-profile#7#\(profile.contentIdentity)")
+        }
+    }
+
     @MainActor
     func testSaveAndLANRejectUnknownOrMismatchedPrehistoricContent() throws {
         let record = WorldRecord(
@@ -833,32 +879,32 @@ final class PrehistoricWorldsTests: XCTestCase {
         )
         var futureSave = try XCTUnwrap(
             JSONSerialization.jsonObject(with: try JSONEncoder().encode(record)) as? [String: Any])
-        futureSave["worldPreset"] = "elysium:prehistoric_lost_world_v3"
+        futureSave["worldPreset"] = "elysium:prehistoric_lost_world_v4"
         let futureSaveData = try JSONSerialization.data(withJSONObject: futureSave)
         XCTAssertThrowsError(try JSONDecoder().decode(WorldRecord.self, from: futureSaveData))
-        futureSave["worldPreset"] = "other:prehistoric_lost_world_v3"
+        futureSave["worldPreset"] = "other:prehistoric_lost_world_v4"
         let foreignFutureSaveData = try JSONSerialization.data(withJSONObject: futureSave)
         XCTAssertThrowsError(try JSONDecoder().decode(WorldRecord.self, from: foreignFutureSaveData),
                              "a foreign namespace must not launder a future prehistoric profile into normal")
-        futureSave["worldPreset"] = "other:prehistoric lost world v3"
+        futureSave["worldPreset"] = "other:prehistoric lost world v4"
         let whitespaceFutureSaveData = try JSONSerialization.data(withJSONObject: futureSave)
         XCTAssertThrowsError(try JSONDecoder().decode(WorldRecord.self, from: whitespaceFutureSaveData),
                              "whitespace aliases must not launder a future prehistoric profile into normal")
-        futureSave["worldPreset"] = "other:prehistoric.lost_world_v3"
+        futureSave["worldPreset"] = "other:prehistoric.lost_world_v4"
         let punctuationFutureSaveData = try JSONSerialization.data(withJSONObject: futureSave)
         XCTAssertThrowsError(try JSONDecoder().decode(WorldRecord.self, from: punctuationFutureSaveData),
                              "punctuation aliases must not launder a future prehistoric profile into normal")
-        futureSave["worldPreset"] = "elysium:lost.world.v3"
+        futureSave["worldPreset"] = "elysium:lost.world.v4"
         let aliasedElysiumFutureSaveData = try JSONSerialization.data(withJSONObject: futureSave)
         XCTAssertThrowsError(try JSONDecoder().decode(WorldRecord.self, from: aliasedElysiumFutureSaveData))
-        futureSave["worldPreset"] = "other:prehistoricLostWorldV3"
+        futureSave["worldPreset"] = "other:prehistoricLostWorldV4"
         let camelCaseFutureSaveData = try JSONSerialization.data(withJSONObject: futureSave)
         XCTAssertThrowsError(try JSONDecoder().decode(WorldRecord.self, from: camelCaseFutureSaveData),
                              "a camel-cased future prehistoric profile must not fall back to normal")
-        futureSave["worldPreset"] = "elysium:lostWorldV3"
+        futureSave["worldPreset"] = "elysium:lostWorldV4"
         let camelCaseElysiumFutureSaveData = try JSONSerialization.data(withJSONObject: futureSave)
         XCTAssertThrowsError(try JSONDecoder().decode(WorldRecord.self, from: camelCaseElysiumFutureSaveData))
-        futureSave["worldPreset"] = "other:pre.historic_lost_world_v3"
+        futureSave["worldPreset"] = "other:pre.historic_lost_world_v4"
         let splitMarkerFutureSaveData = try JSONSerialization.data(withJSONObject: futureSave)
         XCTAssertThrowsError(try JSONDecoder().decode(WorldRecord.self, from: splitMarkerFutureSaveData),
                              "a split future prehistoric marker must not fall back to normal")
@@ -871,16 +917,16 @@ final class PrehistoricWorldsTests: XCTestCase {
         let directFutureSummary = LANWorldSummary(
             worldID: "future-profile", worldName: "Future Profile", seed: 7,
             gameMode: GameMode.survival, difficulty: 2, dimension: Dim.overworld.rawValue,
-            playerCount: 1, worldPreset: "elysium:prehistoric_lost_world_v3"
+            playerCount: 1, worldPreset: "elysium:prehistoric_lost_world_v4"
         )
-        XCTAssertEqual(directFutureSummary.worldPreset, "elysium:prehistoric_lost_world_v3")
+        XCTAssertEqual(directFutureSummary.worldPreset, "elysium:prehistoric_lost_world_v4")
         XCTAssertNil(directFutureSummary.compatibleWorldPreset)
         let directForeignFutureSummary = LANWorldSummary(
             worldID: "future-profile", worldName: "Future Profile", seed: 7,
             gameMode: GameMode.survival, difficulty: 2, dimension: Dim.overworld.rawValue,
-            playerCount: 1, worldPreset: "other:prehistoric_lost_world_v3"
+            playerCount: 1, worldPreset: "other:prehistoric_lost_world_v4"
         )
-        XCTAssertEqual(directForeignFutureSummary.worldPreset, "other:prehistoric_lost_world_v3")
+        XCTAssertEqual(directForeignFutureSummary.worldPreset, "other:prehistoric_lost_world_v4")
         XCTAssertNil(directForeignFutureSummary.compatibleWorldPreset)
         let encodedSummary = try JSONEncoder().encode(summary)
         var mismatchedSummary = try XCTUnwrap(
@@ -889,36 +935,36 @@ final class PrehistoricWorldsTests: XCTestCase {
         let mismatchedSummaryData = try JSONSerialization.data(withJSONObject: mismatchedSummary)
         XCTAssertThrowsError(try JSONDecoder().decode(LANWorldSummary.self, from: mismatchedSummaryData))
 
-        mismatchedSummary["worldPreset"] = "elysium:prehistoric_lost_world_v3"
-        mismatchedSummary["prehistoricContentIdentity"] = "elysium.prehistoric.lostWorld.v3"
+        mismatchedSummary["worldPreset"] = "elysium:prehistoric_lost_world_v4"
+        mismatchedSummary["prehistoricContentIdentity"] = "elysium.prehistoric.lostWorld.v4"
         let unknownSummaryData = try JSONSerialization.data(withJSONObject: mismatchedSummary)
         XCTAssertThrowsError(try JSONDecoder().decode(LANWorldSummary.self, from: unknownSummaryData))
 
-        mismatchedSummary["worldPreset"] = "other:prehistoric_lost_world_v3"
+        mismatchedSummary["worldPreset"] = "other:prehistoric_lost_world_v4"
         let foreignUnknownSummaryData = try JSONSerialization.data(withJSONObject: mismatchedSummary)
         XCTAssertThrowsError(try JSONDecoder().decode(LANWorldSummary.self, from: foreignUnknownSummaryData))
 
-        mismatchedSummary["worldPreset"] = "other:prehistoric lost world v3"
+        mismatchedSummary["worldPreset"] = "other:prehistoric lost world v4"
         let whitespaceUnknownSummaryData = try JSONSerialization.data(withJSONObject: mismatchedSummary)
         XCTAssertThrowsError(try JSONDecoder().decode(LANWorldSummary.self, from: whitespaceUnknownSummaryData))
 
-        mismatchedSummary["worldPreset"] = "other/prehistoric/lost_world_v3"
+        mismatchedSummary["worldPreset"] = "other/prehistoric/lost_world_v4"
         let punctuationUnknownSummaryData = try JSONSerialization.data(withJSONObject: mismatchedSummary)
         XCTAssertThrowsError(try JSONDecoder().decode(LANWorldSummary.self, from: punctuationUnknownSummaryData))
 
-        mismatchedSummary["worldPreset"] = "foreign:elysium:prehistoric_lost_world_v3"
+        mismatchedSummary["worldPreset"] = "foreign:elysium:prehistoric_lost_world_v4"
         let nestedUnknownSummaryData = try JSONSerialization.data(withJSONObject: mismatchedSummary)
         XCTAssertThrowsError(try JSONDecoder().decode(LANWorldSummary.self, from: nestedUnknownSummaryData))
 
-        mismatchedSummary["worldPreset"] = "other:prehistoricLostWorldV3"
+        mismatchedSummary["worldPreset"] = "other:prehistoricLostWorldV4"
         let camelCaseUnknownSummaryData = try JSONSerialization.data(withJSONObject: mismatchedSummary)
         XCTAssertThrowsError(try JSONDecoder().decode(LANWorldSummary.self, from: camelCaseUnknownSummaryData))
 
-        mismatchedSummary["worldPreset"] = "elysium:lostWorldV3"
+        mismatchedSummary["worldPreset"] = "elysium:lostWorldV4"
         let camelCaseElysiumUnknownSummaryData = try JSONSerialization.data(withJSONObject: mismatchedSummary)
         XCTAssertThrowsError(try JSONDecoder().decode(LANWorldSummary.self, from: camelCaseElysiumUnknownSummaryData))
 
-        mismatchedSummary["worldPreset"] = "other:pre.historic_lost_world_v3"
+        mismatchedSummary["worldPreset"] = "other:pre.historic_lost_world_v4"
         let splitMarkerUnknownSummaryData = try JSONSerialization.data(withJSONObject: mismatchedSummary)
         XCTAssertThrowsError(try JSONDecoder().decode(LANWorldSummary.self, from: splitMarkerUnknownSummaryData))
 

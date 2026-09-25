@@ -21,6 +21,11 @@ public enum PrehistoricWorldProfile: String, CaseIterable, Sendable {
     case jurassicGiantsV1
     case cretaceousFrontiersV1
     case ancientSeasV1
+    /// Preserve the original terrain of the predator/herd and shelter revision.
+    case lostWorldV2
+    case jurassicGiantsV2
+    case cretaceousFrontiersV2
+    case ancientSeasV2
     /// Current creation profiles. Keep these unqualified source names so new
     /// callers naturally use the current content revision.
     case lostWorld
@@ -28,46 +33,51 @@ public enum PrehistoricWorldProfile: String, CaseIterable, Sendable {
     case cretaceousFrontiers
     case ancientSeas
 
-    public static let currentContentVersion = 2
+    public static let currentContentVersion = 3
 
     /// The persisted content revision that controls simulation compatibility.
     public var contentVersion: Int {
         switch self {
         case .lostWorldV1, .jurassicGiantsV1, .cretaceousFrontiersV1, .ancientSeasV1:
             return 1
+        case .lostWorldV2, .jurassicGiantsV2, .cretaceousFrontiersV2, .ancientSeasV2:
+            return 2
         case .lostWorld, .jurassicGiants, .cretaceousFrontiers, .ancientSeas:
             return Self.currentContentVersion
         }
     }
 
     /// Stable profile name shared by the compatible revisions. Do not derive
-    /// this from the enum raw value: the raw value distinguishes v1 from v2.
+    /// this from the enum raw value: the raw value distinguishes revisions.
     public var profileID: String {
         switch self {
-        case .lostWorldV1, .lostWorld: return "lostWorld"
-        case .jurassicGiantsV1, .jurassicGiants: return "jurassicGiants"
-        case .cretaceousFrontiersV1, .cretaceousFrontiers: return "cretaceousFrontiers"
-        case .ancientSeasV1, .ancientSeas: return "ancientSeas"
+        case .lostWorldV1, .lostWorldV2, .lostWorld: return "lostWorld"
+        case .jurassicGiantsV1, .jurassicGiantsV2, .jurassicGiants: return "jurassicGiants"
+        case .cretaceousFrontiersV1, .cretaceousFrontiersV2, .cretaceousFrontiers: return "cretaceousFrontiers"
+        case .ancientSeasV1, .ancientSeasV2, .ancientSeas: return "ancientSeas"
         }
     }
 
     /// Version-two worlds opt into the predator/prey and herd-defense rules.
     /// Keeping this in the profile layer makes v1 save behavior explicit and
-    /// provides one reusable gate for later v2-only world features.
+    /// preserves those rules in both v2 and later compatible revisions.
     public var supportsPredatorHerdCombat: Bool {
-        contentVersion == Self.currentContentVersion
+        contentVersion >= 2
     }
 
     /// Version-two worlds also own the bounded starter-shelter contract.
     /// It stays false for v1 so an existing saved world never gains generated
     /// spawn structures from a later build.
     public var supportsStarterShelter: Bool {
-        contentVersion == Self.currentContentVersion
+        contentVersion >= 2
     }
+
+    /// New terrain is opt-in through a new persisted ID; v1/v2 stay unchanged.
+    public var supportsVolcanicTerrain: Bool { contentVersion >= 3 }
 
     public var isAncientSeas: Bool {
         switch self {
-        case .ancientSeasV1, .ancientSeas: return true
+        case .ancientSeasV1, .ancientSeasV2, .ancientSeas: return true
         default: return false
         }
     }
@@ -78,10 +88,14 @@ public enum PrehistoricWorldProfile: String, CaseIterable, Sendable {
         case .jurassicGiantsV1: return .prehistoricJurassicGiants
         case .cretaceousFrontiersV1: return .prehistoricCretaceousFrontiers
         case .ancientSeasV1: return .prehistoricAncientSeas
-        case .lostWorld: return .prehistoricLostWorldV2
-        case .jurassicGiants: return .prehistoricJurassicGiantsV2
-        case .cretaceousFrontiers: return .prehistoricCretaceousFrontiersV2
-        case .ancientSeas: return .prehistoricAncientSeasV2
+        case .lostWorldV2: return .prehistoricLostWorldV2
+        case .jurassicGiantsV2: return .prehistoricJurassicGiantsV2
+        case .cretaceousFrontiersV2: return .prehistoricCretaceousFrontiersV2
+        case .ancientSeasV2: return .prehistoricAncientSeasV2
+        case .lostWorld: return .prehistoricLostWorldV3
+        case .jurassicGiants: return .prehistoricJurassicGiantsV3
+        case .cretaceousFrontiers: return .prehistoricCretaceousFrontiersV3
+        case .ancientSeas: return .prehistoricAncientSeasV3
         }
     }
 
@@ -97,10 +111,14 @@ public enum PrehistoricWorldProfile: String, CaseIterable, Sendable {
         case .prehistoricJurassicGiants: return .jurassicGiantsV1
         case .prehistoricCretaceousFrontiers: return .cretaceousFrontiersV1
         case .prehistoricAncientSeas: return .ancientSeasV1
-        case .prehistoricLostWorldV2: return .lostWorld
-        case .prehistoricJurassicGiantsV2: return .jurassicGiants
-        case .prehistoricCretaceousFrontiersV2: return .cretaceousFrontiers
-        case .prehistoricAncientSeasV2: return .ancientSeas
+        case .prehistoricLostWorldV2: return .lostWorldV2
+        case .prehistoricJurassicGiantsV2: return .jurassicGiantsV2
+        case .prehistoricCretaceousFrontiersV2: return .cretaceousFrontiersV2
+        case .prehistoricAncientSeasV2: return .ancientSeasV2
+        case .prehistoricLostWorldV3: return .lostWorld
+        case .prehistoricJurassicGiantsV3: return .jurassicGiants
+        case .prehistoricCretaceousFrontiersV3: return .cretaceousFrontiers
+        case .prehistoricAncientSeasV3: return .ancientSeas
         default: return nil
         }
     }
@@ -131,9 +149,9 @@ public enum PrehistoricWorldProfile: String, CaseIterable, Sendable {
     /// mixed-era fantasy profile while the era labels offer focused encounters.
     public var creatureIDs: [String] {
         switch self {
-        case .lostWorldV1, .lostWorld:
+        case .lostWorldV1, .lostWorldV2, .lostWorld:
             return Self.allCreatureIDs
-        case .jurassicGiantsV1, .jurassicGiants:
+        case .jurassicGiantsV1, .jurassicGiantsV2, .jurassicGiants:
             return [
                 "prehistoric.compsognathus", "prehistoric.dilophosaurus", "prehistoric.allosaurus",
                 "prehistoric.ceratosaurus", "prehistoric.dryosaurus", "prehistoric.stegosaurus",
@@ -141,7 +159,7 @@ public enum PrehistoricWorldProfile: String, CaseIterable, Sendable {
                 "prehistoric.rhamphorhynchus", "prehistoric.ichthyosaurus", "prehistoric.plesiosaurus",
                 "prehistoric.liopleurodon",
             ]
-        case .cretaceousFrontiersV1, .cretaceousFrontiers:
+        case .cretaceousFrontiersV1, .cretaceousFrontiersV2, .cretaceousFrontiers:
             return [
                 "prehistoric.velociraptor", "prehistoric.deinonychus", "prehistoric.carnotaurus",
                 "prehistoric.tyrannosaurus", "prehistoric.spinosaurus", "prehistoric.pachycephalosaurus",
@@ -152,7 +170,7 @@ public enum PrehistoricWorldProfile: String, CaseIterable, Sendable {
                 "prehistoric.microraptor", "prehistoric.elasmosaurus", "prehistoric.mosasaurus",
                 "prehistoric.deinosuchus",
             ]
-        case .ancientSeasV1, .ancientSeas:
+        case .ancientSeasV1, .ancientSeasV2, .ancientSeas:
             return [
                 "prehistoric.pteranodon", "prehistoric.quetzalcoatlus", "prehistoric.ichthyosaurus",
                 "prehistoric.plesiosaurus", "prehistoric.elasmosaurus", "prehistoric.liopleurodon",
@@ -191,6 +209,10 @@ public extension WorldPreset {
     /// Gates the v2 dinosaur-world starter shelter without changing v1 saves.
     var supportsStarterShelter: Bool {
         prehistoricProfile?.supportsStarterShelter ?? false
+    }
+
+    var supportsVolcanicTerrain: Bool {
+        prehistoricProfile?.supportsVolcanicTerrain ?? false
     }
 
     /// Exact roster/simulation revision that LAN peers must share.  Normal
