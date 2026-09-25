@@ -265,6 +265,65 @@ Villager and wandering-trader catalogs remain deterministic in `Villagers.swift`
   quality impractical. Resolve with a bounded native probe before release gates,
   not a claim based only on source assertions or device capability.
 
+### Outdoor ray-tracing performance — September 25, 2026
+
+- Outcome: sustain at least 60 FPS in the player's dense LostWorld forest on the
+  current M5 Max, retaining Faithful detail, canopy transmission, transparent
+  materials, reflections, and the corrected cave lighting. This is a measured
+  scene/device acceptance target, not a guarantee for every world or GPU.
+- Baseline: an isolated copy of the player's save, 16-chunk distance, 2880 × 1620
+  drawable, 1440 × 810 traced input, two samples, about 7.13 million triangles,
+  fixed camera/daylight. A warmed 20-second sample measured 19–22 FPS (median 20).
+  Sparse Metal counters isolated median path tracing at 46.22 ms, reconstruction
+  at 2.52 ms, primary media at 0.034 ms, and TLAS preparation at 0.66 ms. Whole
+  command time includes other rendering and queue overlap; it is not path time.
+- Rejected probe: inline Metal intersection queries compiled and returned correct
+  alpha results, but the warmed forest fell to 13 FPS with a 76.03 ms path pass.
+  Fewer logical searches did not mean lower GPU cost. Do not retain that approach.
+- Traversal change: reject alpha holes within hardware-oriented intersection
+  callbacks. Candidate rejection retains exact texture coverage; ordered
+  leaf/water/glass transmission remains outside the unordered candidate walk.
+  Finite scene geometry and ray distance bound work;
+  more than 96 transparent faces no longer synthesize a black opaque surface.
+  Reuse the identical first primary hit across samples and omit cloud-shadow work
+  when geometry already blocks the light. Static translation-only terrain needs
+  neither general matrix inverses nor per-object motion history.
+- Alternatives: rebuilding the TLAS differently cannot address the measured
+  dominant cost. Reducing samples or removing reconstruction risks reintroducing
+  previously rejected noise.
+- Rejected quality tradeoff: 960 × 540 reconstruction reached 50–54 FPS, and
+  800 × 450 reached 59–63 FPS (median 60), but the user rejected the lower-input
+  image as blurry. These settings are not visual acceptance. Inspection found
+  that fixed pixel centers plus zero temporal jitter could not supply missing
+  subpixel texture information. A 32-frame Halton probe with de-jittered motion
+  and matching MetalFX offsets still failed the fine-detail contrast threshold
+  (0.349, required >0.45), and native captures showed changing leaf openings.
+  It was rejected, not accepted by weakening the test.
+- Selected design: separate primary surface detail from expensive lighting.
+  Stable full-resolution primary rays resolve authored texels, alpha coverage,
+  depth, and emission at the existing 1440 × 900 aspect-preserving surface cap.
+  The native MetalFX path traces and denoises incident diffuse lighting at an
+  aspect-preserving 640 × 400 cap. Only the first ordinary diffuse response is
+  whitened before transport; secondary materials retain their actual color.
+  Geometry-, normal-, and material-aware reconstruction restores exact primary
+  albedo without dividing black texels. Unmatched diffuse samples blend into
+  exact direct visibility plus the existing cached cave lighting. Water, glass,
+  metals, submerged views, and fading bodies retain radiance transport, with
+  full-path fallback when no compatible donor exists. Water/glass basis tags and
+  face-forward normals must survive guide generation. Unsupported native MetalFX
+  retains the original full-resolution four-sample path. No projection jitter.
+- Probe evidence: 720 × 405 lighting with 1440 × 810 surfaces restored visible
+  Faithful detail and measured 63–68 FPS (median 66) at the fixed forest camera,
+  65–70 FPS with simulation running, but 55–74 FPS during a camera sweep. The final
+  640 × 360 lighting choice preserves the same surface resolution and adds motion
+  headroom. Final release measurements belong in the linked build record.
+- Validation: compare the same saved forest camera, then movement, canopy edges,
+  water, and cave lighting. Actual GPU regressions cover nearest accepted alpha
+  hits, material ordering, primary masks, sample reuse, and resource lifetime.
+  Sparse counter collection is optional, completion-owned, and never a condition
+  for rendering. Revisit if measured throughput or native image quality fails;
+  unit-test success alone does not establish either.
+
 ### Ray-tracing memory policy correction — September 25, 2026
 
 - Observed failure: the production renderer rejected a normal 16-chunk Lost World

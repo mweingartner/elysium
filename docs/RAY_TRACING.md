@@ -32,10 +32,17 @@ This replaces the original fixed 1 GiB cap: the 128 GiB M5 Max's reported
 107.52 GiB recommendation permits a 26.88 GiB RT budget before headroom limits.
 Missing device advice uses a conservative physical-memory fallback. Scene limits
 also bound triangles, instances, texture slots, and per-frame build work. Internal ray
-resolution preserves aspect ratio within 1440 × 900. Supported macOS 26+ devices
-use same-resolution MetalFX temporal denoising with material, motion, normal,
-roughness, and depth guides; other devices use an albedo-guided temporal/spatial
-filter. Native denoising uses two paths per pixel; the compatible fallback uses
+surface resolution preserves aspect ratio within 1440 × 900. Supported macOS 26+
+devices trace expensive transport within 640 × 400, denoise that working image
+1:1 with MetalFX, then independently trace primary visibility and authored material
+color at the full surface resolution. Only ordinary diffuse incident lighting is
+reconstructed across compatible depth, normal, and material-class guides; primary
+emission is restored exactly afterward. Metal, glass, water, fading bodies, and
+submerged transport are not multiplied by a diffuse albedo. Missing special-material
+donors use the same bounded transport integrator at the native sample. Stable
+pixel centers keep leaf coverage out of temporal jitter. Other devices retain
+the original 1:1 albedo-guided temporal/spatial filter. Native denoising uses two
+paths per lighting pixel; the compatible fallback uses
 four. Primary water/glass Fresnel branches are both sampled each pixel. Geometry,
 world, atlas, teleport, and lighting discontinuities invalidate affected history.
 These are quality/performance tradeoffs, not claims of offline-render convergence.
@@ -85,6 +92,13 @@ covered by the separate device-wide headroom check.
 resources, and all Metal-resource allocations. These are not total process RAM
 or an assertion of currently free system memory. The debug renderer snapshot
 exposes the corresponding byte counts.
+
+Optional sparse GPU counters expose acceleration, path, denoise, native-surface,
+and media timings. Each sample owns its counter buffer through completion and
+uses Apple's [CPU/GPU timestamp calibration](https://developer.apple.com/documentation/metal/converting-gpu-timestamps-into-cpu-time).
+The sample frame index distinguishes fresh measurements from stale background
+diagnostics. Whole-command timing includes other passes and queue overlap; it
+is not a substitute for measured foreground frame rate.
 
 Policy and lifetime decisions use three Apple references:
 [recommended working set](https://developer.apple.com/documentation/metal/mtldevice/recommendedmaxworkingsetsize),
@@ -175,6 +189,15 @@ first-person visibility masks, geometry edits, incremental preparation, resize,
 world/resource-pack invalidation, water optics, clouds, and HDR tone mapping.
 Unsupported GPU hosts explicitly skip hardware-dependent tests. They do not
 turn CPU/source assertions into rendering evidence.
+
+The performance regression fixtures also verify three-output-pixel authored
+texels (including black channels), stationary alpha silhouettes across frames,
+and a coplanar emissive/non-emissive boundary. A prior RGB-upscaling experiment
+was rejected for blur; adding jitter improved sampling but introduced visible
+treetop shimmer and still failed the fine-detail contrast test. Neither approach
+is part of the shipping surface path. Sparse optional GPU counters distinguish
+transport, reconstruction, native surfaces, media, and acceleration preparation;
+their sampled frame index lets diagnostics reject stale/background measurements.
 
 Initial isolated full-screen cloud measurements reached approximately 22 ms at
 4K in rain. This prompted the half-resolution, depth-aware cloud path before

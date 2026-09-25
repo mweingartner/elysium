@@ -1099,7 +1099,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
             let ray = renderer.rayTracingDiagnostics
             hud.debugInfo["graphics"] = game.settings.shader == "raytraced"
                 ? (renderer.rayTracingActive
-                    ? "Ray Traced \(ray.width)x\(ray.height) \(ray.denoiser) \(String(format: "%.1f", ray.gpuMilliseconds)) ms GPU"
+                    ? "Ray Traced \(ray.outputWidth)x\(ray.outputHeight), lighting \(ray.width)x\(ray.height) \(String(format: "%.1f", ray.gpuMilliseconds)) ms GPU"
                     : "Ultra fallback: \(ray.status)")
                 : (game.settings.shader == "ultra" ? "Ultra" : "Standard")
             hud.graphicsNotice = game.settings.shader == "raytraced" && !renderer.rayTracingActive

@@ -392,7 +392,9 @@ EXPECTED_CORE_OBJECT_SHA256='8c7f8cfeca0f904a51dabb2e6c341c784e5a26f67be3ed725d7
 # Core/storage/text-input objects and elysmoke remain byte-identical. See build.md.
 # Close-range cave lighting: calibrated first-diffuse cache, dimmer floor and non-emitting furnace
 # facade only. Disposable-copy normalization leaves Core/Storage/TextInput/smoke unchanged.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='4f41853e8f2644502368709ce898d129f2ee947cb5cd654c2204f3cfdd2a0d94'
+# Split-rate ray lighting/native surfaces and alpha traversal; reviewed GPU/native
+# evidence in build.md. Disposable normalization leaves Core/Storage/TextInput/smoke unchanged.
+EXPECTED_ELYSIUM_PRODUCT_SHA256='d9cc426343e015f427bcceab1f84cbc2624c13fe2e8d7697a0f39e9e20b5634e'
 EXPECTED_SMOKE_PRODUCT_SHA256='85f96e0560205a6d1fce44f252162bd0b21eede6cad8f16fd4532c38b7e91f7a'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'

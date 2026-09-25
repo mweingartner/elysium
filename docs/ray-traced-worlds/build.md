@@ -1,5 +1,91 @@
 # Ray-traced worlds verification — September 24, 2026
 
+## Forest performance, blur, and foliage shimmer — September 25, 2026
+
+The final renderer separates expensive lighting from full-resolution authored
+surfaces. Hardware-oriented alpha callbacks preserve exact leaf holes without
+restarting a closest-hit query for each transparent texel. MetalFX denoises
+640 × 360 lighting for a 1440 × 810 surface image; primary material color, depth,
+and emission are resolved independently at that full surface resolution. There
+is no projection jitter. Fog/cloud composition remains after reconstruction.
+The general caps are aspect-preserving 640 × 400 lighting and 1440 × 900 surfaces.
+Unsupported native MetalFX retains the original full-resolution four-sample path.
+
+Acceptance used an isolated copy of LostWorld on the 128 GB M5 Max, on AC power:
+16-chunk distance, 2880 × 1620 drawable, Faithful atlas 128, about 7.13 million
+triangles, 7,492 selected sections, 8,239 loaded sections, and two lighting samples.
+The fixed camera was (7.6728, 79.2713, -106.9822), yaw 0.35263838,
+pitch 0.60300367, clear daylight tick 1421. Builds and GPU tests were not running
+during accepted performance measurements.
+
+| Measurement | Original | Final |
+| --- | --- | --- |
+| Fixed forest FPS | 19–22, median 20 (20 seconds) | 63–79, median 76 (30 seconds) |
+| Live simulation and camera sweep | Not sampled | 69–78, median 72 (20 seconds) |
+| Median path pass | 46.22 ms | 7.34 ms |
+| Median lighting denoise | 2.52 ms | 0.84 ms |
+| Median full-resolution surface resolve | Not applicable | 1.42 ms |
+
+Final stationary logs: `/tmp/elysium-rt-final640-clean-forest.jsonl`; motion:
+`/tmp/elysium-rt-final640-motion.jsonl`. All samples were RT active/ready with
+zero pending sections; GPU sample indices advanced by 2,280 and 1,380 frames,
+respectively. The camera sweep advanced simulation by 380 ticks. The earlier
+final-resolution run included synchronous PNG captures and briefly measured
+57 FPS; it is retained as `/tmp/elysium-rt-final640-forest.jsonl`, but is not an
+uninterrupted rendering benchmark. These results establish the tested scene on
+this device, not a universal minimum frame rate or a long-duration soak result.
+
+Rejected probes are preserved rather than presented as successful acceptance:
+inline intersection queries regressed to 13 FPS; whole-image 960 × 540 and
+800 × 450 reconstruction remained blurry; jittered reconstruction failed the
+fine-detail contrast threshold (0.349 versus >0.45) and changed treetop holes
+between native captures. A native-surface/720 × 405-lighting probe was sharp,
+but its motion sample dipped to 55 FPS. The final lower lighting extent leaves
+authored surface detail unchanged.
+
+Native executable SHA-256:
+`6253c69477d8a309e29fd70fb66ff1db19c11f6c2debd08a38b99a21892924ff`.
+Final capture session `a8612b28-180d-42fb-b2b7-f2b02de2e820`:
+
+- Fixed detail view: `1d691931-26da-4f65-aeaa-082b3a9514ca`, SHA-256
+  `830638e70fdfa5362108873fcf4eba30f9066b764bf80e125ccb9e41071eb066`.
+- Consecutive horizon/canopy views: `33123646-7e5e-4f62-a066-1613c3cffa16`
+  and `a36aa9bf-e5b2-4140-8dfb-42da6edde5dd`; visible leaf openings remain
+  aligned, without the prior jitter-driven crawling. Lighting remains temporally
+  reconstructed; this does not claim every pixel is identical or eliminate
+  ordinary subpixel aliasing during camera movement.
+
+The final focused GPU suite passes **35 tests**, including actual authored
+three-pixel texture/black-texel fidelity, stationary cutout depth identity,
+emission-boundary isolation, water/glass front/back donor reuse, canopy visibility,
+ordered transparency, cache contribution bounds, profiler calibration, and
+completion-owned resource lifetime. Log: `/tmp/elysium-rt-final-focused-tests.log`.
+Tests caught two donor fallback bugs before release: Fresnel guide updates must
+retain dielectric material tags, and glass backface normals must agree between
+lighting and native resolve. No simulation, save, registry, or LAN schema changed.
+The original debug profile was restored byte-for-byte; the benchmark database
+was retained separately, including its additional saved world, rather than deleted.
+
+The warning-free production build completed in 174.95 seconds:
+`/tmp/elysium-rt-final-release.log`. Disposable-copy `strip -S -x` normalization
+renews only the Elysium product pin to
+`d9cc426343e015f427bcceab1f84cbc2624c13fe2e8d7697a0f39e9e20b5634e`.
+Core, Storage, TextInput, and elysmoke remain byte-identical to the previous
+release; protected source/API/capability pins are unchanged. The normal production
+build also passed in 169.72 seconds with the same normalized product fingerprint
+(`/tmp/elysium-rt-final-production-build.log`). The first pipeline stopped on an
+Apple documentation URL in a source comment; moving the citation into the rendering
+documentation resolved that scanner finding without changing runtime behavior or
+bypassing the gate.
+
+The complete nine-stage pipeline passed: source/binary security, warning-free
+build, **463 impact-scoped tests**, **491 golden checks**, signed packaging,
+real AppKit keyboard/clipboard checks, installation to `/Applications/Elysium.app`,
+and installed identity/codesign verification. Log:
+`/tmp/elysium-rt-final-pipeline2.log`. Installed executable SHA-256:
+`f1876dab5a2bbc6bd4818bba1714f8d8bf7bfec430a0d0b2ad683c7f2a84d3e0`.
+Git publication is verified separately after the unchanged pre-push gate.
+
 ## Close-range underground correction — September 25, 2026
 
 The user's actual furnished room remained too bright after the earlier long-range

@@ -25,9 +25,12 @@ final class RayTracedWorldRendererTests: XCTestCase {
     private struct Image {
         let width: Int
         let height: Int
+        let colorWidth: Int
+        let colorHeight: Int
         let depth: [Float]
         let radiance: [SIMD4<Float>]
         func depthAt(_ x: Int, _ y: Int) -> Float { depth[y * width + x] }
+        func colorAt(_ x: Int, _ y: Int) -> SIMD4<Float> { radiance[y * colorWidth + x] }
     }
 
     private let section = SectionKey(cx: 0, sy: 0, cz: 0)
@@ -122,10 +125,10 @@ final class RayTracedWorldRendererTests: XCTestCase {
         let width = depth.width, height = depth.height
         // Blit row alignment is honored even for the small non-power-of-two resize fixture.
         let depthStride = ((width * 4 + 255) / 256) * 256
-        let colorStride = ((width * 8 + 255) / 256) * 256
+        let colorStride = ((color.width * 8 + 255) / 256) * 256
         let depthBytes = try XCTUnwrap(fixture.device.makeBuffer(length: depthStride * height,
                                                                 options: .storageModeShared))
-        let colorBytes = try XCTUnwrap(fixture.device.makeBuffer(length: colorStride * height,
+        let colorBytes = try XCTUnwrap(fixture.device.makeBuffer(length: colorStride * color.height,
                                                                 options: .storageModeShared))
         let blit = try XCTUnwrap(command.makeBlitCommandEncoder())
         blit.copy(from: depth, sourceSlice: 0, sourceLevel: 0, sourceOrigin: .init(x: 0, y: 0, z: 0),
@@ -133,9 +136,9 @@ final class RayTracedWorldRendererTests: XCTestCase {
                   destinationOffset: 0, destinationBytesPerRow: depthStride,
                   destinationBytesPerImage: depthStride * height)
         blit.copy(from: color, sourceSlice: 0, sourceLevel: 0, sourceOrigin: .init(x: 0, y: 0, z: 0),
-                  sourceSize: .init(width: width, height: height, depth: 1), to: colorBytes,
+                  sourceSize: .init(width: color.width, height: color.height, depth: 1), to: colorBytes,
                   destinationOffset: 0, destinationBytesPerRow: colorStride,
-                  destinationBytesPerImage: colorStride * height)
+                  destinationBytesPerImage: colorStride * color.height)
         blit.endEncoding()
         command.commit(); command.waitUntilCompleted()
         XCTAssertEqual(command.status, .completed, command.error?.localizedDescription ?? "GPU command failed")
@@ -143,9 +146,11 @@ final class RayTracedWorldRendererTests: XCTestCase {
         var depths: [Float] = [], colors: [SIMD4<Float>] = []
         for y in 0..<height {
             let depthRow = depthBytes.contents().advanced(by: y * depthStride).assumingMemoryBound(to: Float.self)
+            for x in 0..<width { depths.append(depthRow[x]) }
+        }
+        for y in 0..<color.height {
             let colorRow = colorBytes.contents().advanced(by: y * colorStride).assumingMemoryBound(to: UInt16.self)
-            for x in 0..<width {
-                depths.append(depthRow[x])
+            for x in 0..<color.width {
                 colors.append(SIMD4<Float>(Float(Float16(bitPattern: colorRow[x * 4])),
                     Float(Float16(bitPattern: colorRow[x * 4 + 1])),
                     Float(Float16(bitPattern: colorRow[x * 4 + 2])),
@@ -154,7 +159,8 @@ final class RayTracedWorldRendererTests: XCTestCase {
         }
         XCTAssertTrue(depths.allSatisfy { $0.isFinite && (0...1).contains($0) })
         XCTAssertTrue(colors.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite && $0.w.isFinite })
-        return Image(width: width, height: height, depth: depths, radiance: colors)
+        return Image(width: width, height: height,colorWidth:color.width,colorHeight:color.height,
+                     depth: depths, radiance: colors)
     }
 
     func testLocalLightVolumeBrightensCaveWithoutStaticProxyDoubleCountingAndResetsOnSourceEdit() throws {
@@ -348,6 +354,318 @@ final class RayTracedWorldRendererTests: XCTestCase {
         XCTAssertEqual(image.depthAt(8, 16), expectedDepth(distance: 6, frame: view), accuracy: 0.00001,
                        "Transparent atlas pixels must not become an invisible ray blocker")
         XCTAssertEqual(image.depthAt(24, 16), expectedDepth(distance: 3, frame: view), accuracy: 0.00001)
+    }
+
+    func testNativeSurfaceResolvePreservesFullResolutionCutoutDepthAndCameraMedia() throws {
+        let f=try fixture(splitAlpha:true,redTile:1)
+        guard #available(macOS 26.0, *),
+              MTLFXTemporalDenoisedScalerDescriptor.supportsDevice(f.device) else {
+            throw XCTSkip("Requires native lighting denoising")
+        }
+        f.renderer.uploadSection(key:section,minY:0,
+            mesh:mesh(opaque:plane(distance:6,halfSize:4,tile:1),
+                      cutout:plane(distance:3,halfSize:2,tile:0)))
+        let small=try render(f,frame:frame())
+        XCTAssertEqual(small.width,32); XCTAssertEqual(small.height,32)
+        XCTAssertEqual(small.colorWidth,32); XCTAssertEqual(small.colorHeight,32)
+        f.renderer.resize(width:1920,height:1080)
+        var view=frame(width:1920,height:1080)
+        var upscaled=try render(f,frame:view)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,1)
+        for _ in 0..<2 { upscaled=try render(f,frame:view) }
+        XCTAssertEqual(f.renderer.diagnostics.denoiser,"MetalFX temporal denoising")
+        XCTAssertEqual(upscaled.width,1440); XCTAssertEqual(upscaled.height,810)
+        XCTAssertEqual(upscaled.colorWidth,1440); XCTAssertEqual(upscaled.colorHeight,810)
+        XCTAssertEqual(f.renderer.diagnostics.width,640); XCTAssertEqual(f.renderer.diagnostics.height,360)
+        XCTAssertEqual(f.renderer.diagnostics.outputWidth,1440); XCTAssertEqual(f.renderer.diagnostics.outputHeight,810)
+        XCTAssertEqual(upscaled.depthAt(540,405),expectedDepth(distance:6,frame:view),accuracy:0.00001,
+            "Native primary rays must see through the transparent half")
+        XCTAssertEqual(upscaled.depthAt(900,405),expectedDepth(distance:3,frame:view),accuracy:0.00001,
+            "Low-rate lighting must not reduce visible geometry or overlay depth resolution")
+        let red=upscaled.colorAt(540,405),white=upscaled.colorAt(900,405)
+        XCTAssertGreaterThan(red.x-red.y,0.05,"The alpha opening must show the red backing surface")
+        XCTAssertGreaterThan(white.y-red.y,0.1,"Reconstruction must preserve both sides of the authored cutout")
+
+        // This is the complete renderer output after rt_media, not just MetalFX's output.
+        // A short gameplay-fog mask has an analytic answer at every output pixel, including
+        // pixels beyond the lighting texture's physical width/height.
+        view.fogStart=0.01; view.fogEnd=1
+        view.atmosphere.fogColor = .init(0.4,0.6,0.8,1)
+        let fogged=try render(f,frame:view)
+        let expected=SIMD3<Float>(pow(0.4,2.2),pow(0.6,2.2),pow(0.8,2.2))
+        for y in stride(from:0,to:fogged.colorHeight,by:67) {
+            for x in stride(from:0,to:fogged.colorWidth,by:71) {
+                let actual=fogged.colorAt(x,y)
+                for channel in 0..<3 { XCTAssertEqual(actual[channel],expected[channel],accuracy:0.001) }
+            }
+        }
+        XCTAssertEqual(fogged.depthAt(540,405),expectedDepth(distance:6,frame:view),accuracy:0.00001,
+            "Camera fog must not overwrite the depth used by raster overlays")
+
+        f.renderer.resize(width:48,height:24)
+        let restoredView=frame(width:48,height:24)
+        let restored=try render(f,frame:restoredView)
+        XCTAssertEqual(restored.width,48); XCTAssertEqual(restored.height,24)
+        XCTAssertEqual(restored.colorWidth,48); XCTAssertEqual(restored.colorHeight,24)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,1)
+        XCTAssertEqual(restored.depthAt(18,12),expectedDepth(distance:6,frame:restoredView),accuracy:0.00001)
+        XCTAssertEqual(restored.depthAt(30,12),expectedDepth(distance:3,frame:restoredView),accuracy:0.00001)
+        _=try render(f,frame:restoredView)
+        XCTAssertEqual(f.renderer.diagnostics.historySamples,2,
+            "After resizing back, correctly sized resources must resume normal temporal history")
+    }
+
+    /// Exactly three output pixels per authored atlas texel. Geometry spans the
+    /// projection, so the native oracle is screen x/3,y/3 without CPU ray tracing.
+    private func nativeDetailPlane(distance: Float, view: RayTracingFrame,
+                                   tile: UInt32 = 0, left: Float = 0, right: Float = 1,
+                                   emissive: Bool = false) -> MeshLayer {
+        let halfX = distance / view.projectionMatrix[0][0]
+        let halfY = distance / view.projectionMatrix[1][1]
+        let positions: [SIMD3<Float>] = [.init((left * 2 - 1) * halfX,-halfY,-distance),
+            .init((right * 2 - 1) * halfX,-halfY,-distance),
+            .init((right * 2 - 1) * halfX,halfY,-distance),
+            .init((left * 2 - 1) * halfX,halfY,-distance)]
+        let uv: [SIMD2<Float>] = [.init(left * 30,16.875),.init(right * 30,16.875),
+            .init(right * 30,0),.init(left * 30,0)] // 1440/48 by 810/48 repeats.
+        var words: [UInt32] = []
+        for index in 0..<4 {
+            let p = positions[index]
+            words += [p.x.bitPattern,p.y.bitPattern,p.z.bitPattern,uv[index].x.bitPattern,
+                uv[index].y.bitPattern,tile | (3 << 12) | (15 << 21) | (emissive ? 1 << 25 : 0),0xffffff]
+        }
+        return MeshLayer(data: words,idx: [0,1,2,0,2,3],count: 4)
+    }
+
+    private func nativeDetailFixture() throws -> (Fixture,RayTracingFrame) {
+        let f = try fixture()
+        guard #available(macOS 26.0, *),
+              MTLFXTemporalDenoisedScalerDescriptor.supportsDevice(f.device) else {
+            throw XCTSkip("Requires the split-rate native surface path")
+        }
+        f.renderer.resize(width:1440,height:810)
+        var view = frame(width:1440,height:810)
+        view.atmosphere.options.x = 1 // No directional light or environment radiance.
+        view.atmosphere.zenith = .zero; view.atmosphere.horizon = .zero
+        view.atmosphere.fogColor = .zero
+        return (f,view)
+    }
+
+    func testNativeSurfaceResolvePreservesThreePixelAuthoredDetailIncludingBlackTexels() throws {
+        let (f,view) = try nativeDetailFixture()
+        func texel(_ x: Int,_ y: Int) -> UInt8 {
+            if x % 16 == 15 && y % 16 == 15 { return 0 }
+            return (x+y).isMultiple(of:2) ? 64:224
+        }
+        var pixels: [UInt8] = []
+        for y in 0..<16 { for x in 0..<16 {
+            let value = texel(x,y); pixels += [value,value,value,255]
+        }}
+        pixels.withUnsafeBytes { f.atlas.replace(region:MTLRegionMake2D(0,0,16,16),mipmapLevel:0,slice:0,
+            withBytes:$0.baseAddress!,bytesPerRow:64,bytesPerImage:1024) }
+        f.renderer.uploadSection(key:section,minY:0,mesh:mesh(opaque:nativeDetailPlane(distance:4,view:view)))
+        var image = try render(f,frame:view)
+        for _ in 0..<3 { image = try render(f,frame:view) }
+        XCTAssertEqual(image.width,1440); XCTAssertEqual(image.height,810)
+        XCTAssertEqual(f.renderer.diagnostics.width,640); XCTAssertEqual(f.renderer.diagnostics.height,360)
+        var squaredError = 0.0, maximumError: Float = 0, dark = 0.0, bright = 0.0
+        var darkCount = 0, brightCount = 0, blackCount = 0, maximumBlack: Float = 0
+        for y in 300..<492 { for x in 600..<840 {
+            let authored = texel(x/3,y/3)
+            let expected = pow(Float(authored)/255,2.2) * (0.4 * RenderLocalLightPolicy.outputMultiplier)
+            let actual = image.colorAt(x,y).x
+            let error = abs(actual-expected)
+            maximumError = max(maximumError,error); squaredError += Double(error*error)
+            if authored == 0 { blackCount += 1; maximumBlack = max(maximumBlack,abs(actual)) }
+            else if authored == 64 { dark += Double(actual); darkCount += 1 }
+            else { bright += Double(actual); brightCount += 1 }
+        }}
+        XCTAssertLessThan(squaredError / Double(192*240),0.0001,
+            "Final GPU image must match the analytic full-resolution authored texture")
+        XCTAssertLessThan(maximumError,0.025,"Texel edges must not acquire interpolated material colors")
+        XCTAssertGreaterThan(bright/Double(brightCount)-dark/Double(darkCount),0.45,
+            "Keep the fine-detail contrast bar that rejected the blurry upscaling experiment")
+        XCTAssertGreaterThan(blackCount,0)
+        XCTAssertLessThan(maximumBlack,0.0001,"True black material channels cannot gain a division-floor glow")
+    }
+
+    func testNativeCutoutSilhouetteRemainsExactAcrossStationaryFrames() throws {
+        let (f,view) = try nativeDetailFixture()
+        var pixels = [UInt8](repeating:255,count:16*16*4)
+        for y in 0..<16 { for x in 0..<16 {
+            pixels[(y*16+x)*4+3] = (x+y).isMultiple(of:2) ? 0:255
+        }}
+        pixels.withUnsafeBytes { f.atlas.replace(region:MTLRegionMake2D(0,0,16,16),mipmapLevel:0,slice:0,
+            withBytes:$0.baseAddress!,bytesPerRow:64,bytesPerImage:1024) }
+        f.renderer.uploadSection(key:section,minY:0,
+            mesh:mesh(opaque:nativeDetailPlane(distance:6,view:view,tile:1),
+                      cutout:nativeDetailPlane(distance:3,view:view)))
+        let initial = try render(f,frame:view)
+        let near = expectedDepth(distance:3,frame:view), far = expectedDepth(distance:6,frame:view)
+        for _ in 0..<3 {
+            let next = try render(f,frame:view)
+            var changed = 0, maximumError: Float = 0
+            for y in 300..<492 { for x in 600..<840 {
+                let expected = (x/3+y/3).isMultiple(of:2) ? far:near
+                maximumError = max(maximumError,abs(next.depthAt(x,y)-expected))
+                if next.depthAt(x,y) != initial.depthAt(x,y) { changed += 1 }
+            }}
+            XCTAssertEqual(changed,0,"Static alpha coverage must not shimmer as temporal samples advance")
+            XCTAssertLessThan(maximumError,0.00001,"All three-pixel holes must expose the actual backing geometry")
+        }
+    }
+
+    func testNativeEmissionDoesNotBleedAcrossCoplanarMaterialBoundary() throws {
+        let (f,view) = try nativeDetailFixture()
+        let dark = nativeDetailPlane(distance:4,view:view,right:0.5)
+        let glowing = nativeDetailPlane(distance:4,view:view,tile:1,left:0.5,emissive:true)
+        let combined = MeshLayer(data:dark.data+glowing.data,
+            idx:dark.idx+glowing.idx.map { $0+4 },count:8)
+        f.renderer.uploadSection(key:section,minY:0,mesh:mesh(opaque:combined))
+        var image = try render(f,frame:view)
+        for _ in 0..<3 { image = try render(f,frame:view) }
+        let cached = 0.4 * RenderLocalLightPolicy.outputMultiplier
+        let emission = 2 * RenderLocalLightPolicy.outputMultiplier
+        for y in stride(from:320,to:480,by:13) {
+            for x in 716..<724 {
+                let expected = cached + (x>=720 ? emission:0)
+                XCTAssertEqual(image.colorAt(x,y).x,expected,accuracy:0.035,
+                    "Visible emission must stay on its exact native surface, not blur into neighboring stone")
+            }
+        }
+    }
+
+    func testDielectricGuidesPreserveMaterialTagsAndBackfacesReuseLightingOnGPU() throws {
+        guard let device = MTLCreateSystemDefaultDevice(),device.supportsRaytracing else {
+            throw XCTSkip("Requires actual Metal ray tracing")
+        }
+        let options = MTLCompileOptions(); options.languageVersion = .version3_1
+        let library = try device.makeLibrary(source:ELYSIUM_ENVIRONMENT_MSL+RAY_TRACING_MSL,options:options)
+        let pathFunction = try XCTUnwrap(library.makeFunction(name:"rt_pathtrace"))
+        let path = try XCTUnwrap(try RayTracingAlphaPipeline(device:device,library:library,function:pathFunction))
+        let surfaceFunction = try XCTUnwrap(library.makeFunction(name:"rt_surface_resolve"))
+        let surface = try XCTUnwrap(try RayTracingAlphaPipeline(device:device,library:library,function:surfaceFunction))
+        let queue = try XCTUnwrap(device.makeCommandQueue())
+        func buffer<T>(_ values: [T]) throws -> MTLBuffer {
+            try values.withUnsafeBytes { try XCTUnwrap(device.makeBuffer(bytes:$0.baseAddress!,
+                length:$0.count,options:.storageModeShared)) }
+        }
+        func texture(_ format: MTLPixelFormat,width: Int = 4) throws -> MTLTexture {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat:format,width:width,height:1,mipmapped:false)
+            descriptor.storageMode = .shared; descriptor.usage = [.shaderRead,.shaderWrite]
+            return try XCTUnwrap(device.makeTexture(descriptor:descriptor))
+        }
+        // Four pixel-center rays hit front/back water and front/back glass. The
+        // backface normal is deliberately opposite the face-forward shading normal.
+        var vertices: [SIMD3<Float>] = [], primitives: [RayTracingPrimitive] = []
+        for index in 0..<4 {
+            let x = Float(index*8-12)
+            vertices += [.init(x-3,-3,-4),.init(x+3,-3,-4),.init(x+3,3,-4),
+                         .init(x-3,-3,-4),.init(x+3,3,-4),.init(x-3,3,-4)]
+            for _ in 0..<2 {
+                primitives.append(.init(uv01:.init(repeating:0.5),uv2Light:.init(0.5,0.5,0,0),
+                    normalEmission:.init(0,0,index.isMultiple(of:2) ? 1:-1,0),
+                    material:.init(0xffffff,0,index<2 ? 2:4,0)))
+            }
+        }
+        let vertexBuffer = try buffer(vertices),primitiveBuffer = try buffer(primitives)
+        let triangles = MTLAccelerationStructureTriangleGeometryDescriptor()
+        triangles.vertexBuffer = vertexBuffer; triangles.vertexFormat = .float3
+        triangles.vertexStride = MemoryLayout<SIMD3<Float>>.stride; triangles.triangleCount = primitives.count
+        triangles.opaque = true; triangles.primitiveDataBuffer = primitiveBuffer
+        triangles.primitiveDataStride = MemoryLayout<RayTracingPrimitive>.stride
+        triangles.primitiveDataElementSize = MemoryLayout<RayTracingPrimitive>.stride
+        let bottomDescriptor = MTLPrimitiveAccelerationStructureDescriptor(); bottomDescriptor.geometryDescriptors = [triangles]
+        let bottomSize = device.accelerationStructureSizes(descriptor:bottomDescriptor)
+        let bottom = try XCTUnwrap(device.makeAccelerationStructure(size:bottomSize.accelerationStructureSize))
+        let bottomScratch = try XCTUnwrap(device.makeBuffer(length:max(1,bottomSize.buildScratchBufferSize),options:.storageModePrivate))
+        var descriptor = MTLAccelerationStructureInstanceDescriptor()
+        descriptor.transformationMatrix = MTLPackedFloat4x3(columns:(MTLPackedFloat3Make(1,0,0),
+            MTLPackedFloat3Make(0,1,0),MTLPackedFloat3Make(0,0,1),MTLPackedFloat3Make(0,0,0)))
+        descriptor.mask = 0xff; descriptor.options = .opaque; descriptor.accelerationStructureIndex = 0
+        let descriptorBuffer = try buffer([descriptor])
+        let topDescriptor = MTLInstanceAccelerationStructureDescriptor()
+        topDescriptor.instancedAccelerationStructures = [bottom]; topDescriptor.instanceCount = 1
+        topDescriptor.instanceDescriptorBuffer = descriptorBuffer
+        topDescriptor.instanceDescriptorStride = MemoryLayout<MTLAccelerationStructureInstanceDescriptor>.stride
+        let topSize = device.accelerationStructureSizes(descriptor:topDescriptor)
+        let scene = try XCTUnwrap(device.makeAccelerationStructure(size:topSize.accelerationStructureSize))
+        let topScratch = try XCTUnwrap(device.makeBuffer(length:max(1,topSize.buildScratchBufferSize),options:.storageModePrivate))
+        let instances = try buffer([RayTracingInstanceUniforms(transform:matrix_identity_float4x4,
+            normalTransform:matrix_identity_float4x4,previousFromCurrent:matrix_identity_float4x4,
+            tint:.init(repeating:1),overlay:.zero,info:.zero)])
+        let lights = try buffer([RayTracingLight(positionRadius:.zero,colorPower:.zero)])
+        let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat:.rgba8Unorm,width:1,height:1,mipmapped:false)
+        textureDescriptor.textureType = .type2DArray; textureDescriptor.arrayLength = 1; textureDescriptor.usage = .shaderRead
+        let atlas = try XCTUnwrap(device.makeTexture(descriptor:textureDescriptor))
+        var white = UInt32.max
+        atlas.replace(region:MTLRegionMake2D(0,0,1,1),mipmapLevel:0,slice:0,withBytes:&white,bytesPerRow:4,bytesPerImage:4)
+        let skin = try texture(.rgba8Unorm,width:1)
+        skin.replace(region:MTLRegionMake2D(0,0,1,1),mipmapLevel:0,withBytes:&white,bytesPerRow:4)
+        textureDescriptor.textureType = .type3D; textureDescriptor.depth = 1
+        let local = try XCTUnwrap(device.makeTexture(descriptor:textureDescriptor))
+        var zero: UInt32 = 0
+        local.replace(region:MTLRegionMake3D(0,0,0,1,1,1),mipmapLevel:0,slice:0,withBytes:&zero,bytesPerRow:4,bytesPerImage:4)
+        let argumentEncoder = pathFunction.makeArgumentEncoder(bufferIndex:4)
+        let arguments = try XCTUnwrap(device.makeBuffer(length:argumentEncoder.encodedLength,options:.storageModeShared))
+        argumentEncoder.setArgumentBuffer(arguments,offset:0)
+        for index in 0..<512 { argumentEncoder.setTexture(skin,index:index) }; argumentEncoder.setTexture(atlas,index:512)
+        let pathTable = try XCTUnwrap(path.makeTable(instances:instances,textures:arguments))
+        let surfaceTable = try XCTUnwrap(surface.makeTable(instances:instances,textures:arguments))
+        let raw = try texture(.rgba16Float),depth = try texture(.r32Float),normal = try texture(.rgba16Float)
+        let motion = try texture(.rgba16Float),diffuse = try texture(.rgba16Float),specular = try texture(.rgba16Float)
+        let resolved = try texture(.rgba16Float),resolvedDepth = try texture(.r32Float),resolvedNormal = try texture(.rgba16Float)
+        let projection = Elysium.mat4Perspective(fovYRad:.pi/2,aspect:4,near:0.1,far:64)
+        var atmosphere = AtmosphereUniforms()
+        atmosphere.options.x = 1; atmosphere.weather.z = 0
+        atmosphere.zenith = .zero; atmosphere.horizon = .zero; atmosphere.fogColor = .zero
+        var uniforms = RayTracingUniforms(inverseViewProjection:projection.inverse,viewProjection:projection,
+            previousViewProjection:projection,cameraDelta:.zero,params:.init(64,0.5,0,0),
+            heldLight:.zero,fogParameters:.init(32,64,0,0),quality:.init(2,0,0,1),counts:.init(0,0,4,1),atmosphere:atmosphere)
+        func encode(_ command: MTLCommandBuffer,pipeline: RayTracingAlphaPipeline,
+                    table: MTLIntersectionFunctionTable,textures: [MTLTexture]) throws {
+            let encoder = try XCTUnwrap(command.makeComputeCommandEncoder())
+            encoder.setComputePipelineState(pipeline.pipeline); encoder.setAccelerationStructure(scene,bufferIndex:0)
+            encoder.setBuffer(instances,offset:0,index:1); encoder.setBytes(&uniforms,length:MemoryLayout<RayTracingUniforms>.stride,index:2)
+            encoder.setBuffer(lights,offset:0,index:3); encoder.setBuffer(arguments,offset:0,index:4)
+            encoder.setIntersectionFunctionTable(table,bufferIndex:5)
+            for (index,texture) in textures.enumerated() { encoder.setTexture(texture,index:index) }
+            encoder.useResource(bottom,usage:.read); encoder.useResource(skin,usage:.read)
+            encoder.dispatchThreads(.init(width:4,height:1,depth:1),threadsPerThreadgroup:.init(width:4,height:1,depth:1))
+            encoder.endEncoding()
+        }
+        let command = try XCTUnwrap(queue.makeCommandBuffer())
+        let bottomBuild = try XCTUnwrap(command.makeAccelerationStructureCommandEncoder())
+        bottomBuild.build(accelerationStructure:bottom,descriptor:bottomDescriptor,scratchBuffer:bottomScratch,scratchBufferOffset:0)
+        bottomBuild.endEncoding()
+        let topBuild = try XCTUnwrap(command.makeAccelerationStructureCommandEncoder())
+        topBuild.build(accelerationStructure:scene,descriptor:topDescriptor,scratchBuffer:topScratch,scratchBufferOffset:0)
+        topBuild.endEncoding()
+        try encode(command,pipeline:path,table:pathTable,textures:[atlas,raw,depth,normal,motion,diffuse,specular,local])
+        command.commit(); command.waitUntilCompleted()
+        XCTAssertEqual(command.status,.completed,String(describing:command.error))
+        var guide = [Float16](repeating:0,count:16)
+        guide.withUnsafeMutableBytes { specular.getBytes($0.baseAddress!,bytesPerRow:32,from:MTLRegionMake2D(0,0,4,1),mipmapLevel:0) }
+        for index in 0..<4 {
+            XCTAssertEqual(Float(guide[index*4+3]),index<2 ? -2:-3,
+                "Fresnel RGB updates must retain the distinct water/glass donor tag")
+        }
+        // Write only after the first command completes. A conspicuous donor makes
+        // successful reconstruction distinguishable from a correct-looking retrace.
+        let donor: [Float16] = Array(repeating:[Float16(2),3,4,1],count:4).flatMap { $0 }
+        donor.withUnsafeBytes { raw.replace(region:MTLRegionMake2D(0,0,4,1),mipmapLevel:0,
+            withBytes:$0.baseAddress!,bytesPerRow:32) }
+        let resolve = try XCTUnwrap(queue.makeCommandBuffer())
+        try encode(resolve,pipeline:surface,table:surfaceTable,
+            textures:[atlas,raw,depth,normal,diffuse,resolved,resolvedDepth,resolvedNormal,local,specular])
+        resolve.commit(); resolve.waitUntilCompleted()
+        XCTAssertEqual(resolve.status,.completed,String(describing:resolve.error))
+        var output = [Float16](repeating:0,count:16)
+        output.withUnsafeMutableBytes { resolved.getBytes($0.baseAddress!,bytesPerRow:32,from:MTLRegionMake2D(0,0,4,1),mipmapLevel:0) }
+        for index in 0..<4 { for channel in 0..<3 {
+            XCTAssertEqual(Float(output[index*4+channel]),Float(channel+2),accuracy:0.001,
+                "Front/back water and glass must reuse matching lighting, not invoke full transport fallback")
+        }}
     }
 
     func testBlockGeometryReplacementInvalidatesHistoryAndChangesRealHit() throws {

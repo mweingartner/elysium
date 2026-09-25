@@ -74,6 +74,8 @@ final class RayTracedWorldRenderer {
     }
     let device: MTLDevice
     private let pathPipeline: MTLComputePipelineState
+    private let alphaPipeline: RayTracingAlphaPipeline
+    private let surfacePipeline: RayTracingAlphaPipeline
     private let temporalPipeline: MTLComputePipelineState
     private let filterPipeline: MTLComputePipelineState
     private let mediaPipeline: MTLComputePipelineState
@@ -112,7 +114,12 @@ final class RayTracedWorldRenderer {
     private var depths: [MTLTexture] = []
     private var normals: [MTLTexture] = []
     private var filtered: MTLTexture?
+    private var composited: MTLTexture?
+    private var resolved: MTLTexture?
+    private var resolvedDepth: MTLTexture?
+    private var resolvedNormal: MTLTexture?
     private var desiredWidth = 1, desiredHeight = 1
+    private var outputWidth = 1, outputHeight = 1
     private var allocationFailure: String?
     private var memoryPressureReason: String?
     private let memoryLedger=MemoryLedger()
@@ -129,6 +136,8 @@ final class RayTracedWorldRenderer {
     private let diagnosticsLock = NSLock()
     private var completedGPUTime = 0.0
     private var completedError: String?
+    private lazy var gpuProfiler=RayTracingGPUProfiler(device:device)
+    private var profilerFrameIndex: UInt64 = 0
     private(set) var diagnostics = RayTracingDiagnostics()
     /// The last successful frame's normalized Metal depth, not distance from the eye.
     private(set) var depthTexture: MTLTexture?
@@ -142,10 +151,14 @@ final class RayTracedWorldRenderer {
             let options=MTLCompileOptions(); options.languageVersion = .version3_1
             let library=try device.makeLibrary(source: ELYSIUM_ENVIRONMENT_MSL + "\n" + RAY_TRACING_MSL,options: options)
             guard let path=library.makeFunction(name:"rt_pathtrace"),
+                  let surface=library.makeFunction(name:"rt_surface_resolve"),
                   let temporal=library.makeFunction(name:"rt_temporal"),
                   let filter=library.makeFunction(name:"rt_filter"),
                   let media=library.makeFunction(name:"rt_media") else { return nil }
-            pathPipeline=try device.makeComputePipelineState(function:path)
+            guard let alpha=try RayTracingAlphaPipeline(device:device,library:library,function:path),
+                  let surfaceAlpha=try RayTracingAlphaPipeline(device:device,library:library,function:surface) else { return nil }
+            alphaPipeline=alpha;pathPipeline=alpha.pipeline
+            surfacePipeline=surfaceAlpha
             temporalPipeline=try device.makeComputePipelineState(function:temporal)
             filterPipeline=try device.makeComputePipelineState(function:filter)
             mediaPipeline=try device.makeComputePipelineState(function:media)
@@ -242,11 +255,16 @@ final class RayTracedWorldRenderer {
     func resize(width: Int,height: Int) {
         let scale=min(1,min(Double(RayTracingLimits.maximumInternalWidth)/Double(max(1,width)),
                             Double(RayTracingLimits.maximumInternalHeight)/Double(max(1,height))))
-        let w=max(1,Int(Double(width)*scale)), h=max(1,Int(Double(height)*scale))
-        guard w != desiredWidth || h != desiredHeight || raw == nil else { return }
-        desiredWidth=w; desiredHeight=h; historyFrames=0
-        func texture(_ format: MTLPixelFormat,_ label: String) -> MTLTexture? {
-            let d=MTLTextureDescriptor.texture2DDescriptor(pixelFormat:format,width:w,height:h,mipmapped:false)
+        let ow=max(1,Int(Double(width)*scale)), oh=max(1,Int(Double(height)*scale))
+        // Sample expensive transport at a lower extent, but retrace primary visibility
+        // and authored material color at the original output resolution.
+        let inputScale=denoiser == nil ? 1:min(1,min(Double(RayTracingLimits.maximumNativeTraceWidth)/Double(ow),
+                                                    Double(RayTracingLimits.maximumNativeTraceHeight)/Double(oh)))
+        let w=max(1,Int(Double(ow)*inputScale)), h=max(1,Int(Double(oh)*inputScale))
+        guard w != desiredWidth || h != desiredHeight || ow != outputWidth || oh != outputHeight || raw == nil else { return }
+        desiredWidth=w; desiredHeight=h; outputWidth=ow; outputHeight=oh; historyFrames=0
+        func texture(_ format: MTLPixelFormat,_ label: String,width: Int? = nil,height: Int? = nil) -> MTLTexture? {
+            let d=MTLTextureDescriptor.texture2DDescriptor(pixelFormat:format,width:width ?? w,height:height ?? h,mipmapped:false)
             d.storageMode = .private; d.usage = [.shaderRead,.shaderWrite]
             let t=device.makeTexture(descriptor:d); t?.label=label; return t
         }
@@ -254,10 +272,14 @@ final class RayTracedWorldRenderer {
         diffuseAlbedo=texture(.rgba16Float,"RT diffuse albedo and roughness")
         specularAlbedo=texture(.rgba16Float,"RT specular albedo")
         filtered=texture(.rgba16Float,"RT filtered radiance")
+        composited=texture(.rgba16Float,"RT reconstructed atmosphere",width:ow,height:oh)
+        resolved=texture(.rgba16Float,"RT full-resolution authored surfaces",width:ow,height:oh)
+        resolvedDepth=texture(.r32Float,"RT full-resolution primary depth",width:ow,height:oh)
+        resolvedNormal=texture(.rgba16Float,"RT full-resolution normal/distance",width:ow,height:oh)
         colors=(0..<2).compactMap { texture(.rgba16Float,"RT radiance history \($0)") }
         depths=(0..<2).compactMap { texture(.r32Float,"RT normalized depth \($0)") }
         normals=(0..<2).compactMap { texture(.rgba16Float,"RT normal/distance history \($0)") }
-        if raw == nil || motion == nil || diffuseAlbedo == nil || specularAlbedo == nil || filtered == nil || colors.count != 2 || depths.count != 2 || normals.count != 2 {
+        if raw == nil || motion == nil || diffuseAlbedo == nil || specularAlbedo == nil || filtered == nil || composited == nil || resolved == nil || resolvedDepth == nil || resolvedNormal == nil || colors.count != 2 || depths.count != 2 || normals.count != 2 {
             allocationFailure="Insufficient GPU memory for ray tracing targets"
         } else { allocationFailure=nil }
     }
@@ -345,11 +367,17 @@ final class RayTracedWorldRenderer {
                 entities dynamic: [RayTracingEntityInstance],blocks: [RayTracingBlockInstance] = []) -> MTLTexture? {
         diagnosticsLock.lock(); let gpuTime=completedGPUTime, gpuError=completedError; diagnosticsLock.unlock()
         diagnostics.gpuMilliseconds=gpuTime
+        let stageTimings=gpuProfiler.latest
+        diagnostics.gpuStageMilliseconds=stageTimings?.milliseconds ?? [:]
+        diagnostics.gpuStageFrameIndex=stageTimings?.sampleFrameIndex ?? 0
+        let profile=gpuProfiler.beginFrame(command:command,frameIndex:profilerFrameIndex)
+        profilerFrameIndex &+= 1
         memoryPressureReason=nil
         refreshMemoryDiagnostics()
         if let gpuError { return fail("Ray tracing GPU failure: "+gpuError) }
         if let allocationFailure { return fail(allocationFailure) }
-        guard let raw,let motion,let diffuseAlbedo,let specularAlbedo,let filtered,colors.count==2,depths.count==2,normals.count==2 else {
+        guard let raw,let motion,let diffuseAlbedo,let specularAlbedo,let filtered,let composited,
+              let resolved,let resolvedDepth,let resolvedNormal,colors.count==2,depths.count==2,normals.count==2 else {
             return fail("Preparing ray tracing targets")
         }
         let submission=Submission(ledger:memoryLedger)
@@ -384,6 +412,7 @@ final class RayTracedWorldRenderer {
         }
         diagnostics.sections=selected.count
         diagnostics.width=desiredWidth; diagnostics.height=desiredHeight
+        diagnostics.outputWidth=outputWidth; diagnostics.outputHeight=outputHeight
         requiredSectionKeys=Set(selected.map(\.key))
         // Retain a narrow margin beyond selection: walking back across a chunk/radius boundary
         // should not continually destroy and rebuild the same BLAS. Only selected geometry
@@ -476,6 +505,9 @@ final class RayTracedWorldRenderer {
         var structures:[MTLAccelerationStructure]=[],structureSlots:[ObjectIdentifier:Int]=[:]
         var lights:[RayTracingLight]=[]
         var transforms:[String:simd_float4x4]=[:]
+        descriptors.reserveCapacity(instances.count)
+        instanceUniforms.reserveCapacity(instances.count)
+        structures.reserveCapacity(instances.count)
         for instance in instances {
             let geometry=instance.geometry,identity=ObjectIdentifier(geometry)
             let structureIndex: Int
@@ -500,10 +532,13 @@ final class RayTracedWorldRenderer {
             guard textures.count<=RayTracingLimits.maximumTextures else {
                 return fail("Ray scene exceeds the safe texture budget; using raster")
             }
-            let previous=previousTransforms[instance.key]
-            transforms[instance.key]=m
-            instanceUniforms.append(.init(transform:m,normalTransform:m.inverse.transpose,
-                previousFromCurrent:(previous ?? m)*m.inverse,tint:instance.tint,overlay:instance.overlay,
+            // Terrain instances are translation-only and their reprojection uses cameraDelta.
+            // Only animated objects need matrix inversion or per-object transform history.
+            let previous=instance.dynamic ? previousTransforms[instance.key]:nil
+            if instance.dynamic { transforms[instance.key]=m }
+            let inverse=instance.dynamic ? m.inverse:matrix_identity_float4x4
+            instanceUniforms.append(.init(transform:m,normalTransform:instance.dynamic ? inverse.transpose:matrix_identity_float4x4,
+                previousFromCurrent:instance.dynamic ? (previous ?? m)*inverse:matrix_identity_float4x4,tint:instance.tint,overlay:instance.overlay,
                 info:.init(UInt32(textureIndex),instance.dynamic ? 1:0,(!instance.dynamic || previous != nil) ? 1:0,0)))
             for light in hasLocalLight && !instance.dynamic ? []:geometry.emitters {
                 var positioned=light; positioned.positionRadius = .init((m*SIMD4(light.positionRadius.x,light.positionRadius.y,light.positionRadius.z,1)).xyz,light.positionRadius.w)
@@ -525,6 +560,11 @@ final class RayTracedWorldRenderer {
         submission.retainTransient(textureArguments)
         textureEncoder.setArgumentBuffer(textureArguments,offset:0)
         for i in 0..<RayTracingLimits.maximumTextures { textureEncoder.setTexture(i<textures.count ? textures[i]:whiteTexture,index:i) }
+        textureEncoder.setTexture(atlas,index:RayTracingLimits.maximumTextures)
+        guard let intersectionFunctions=alphaPipeline.makeTable(instances:instanceBuffer,textures:textureArguments) else {
+            return fail("Unable to allocate ray alpha-intersection table; using raster")
+        }
+        submission.retainTransient(intersectionFunctions)
         let sceneDescriptor=MTLInstanceAccelerationStructureDescriptor()
         sceneDescriptor.instancedAccelerationStructures=structures; sceneDescriptor.instanceCount=descriptors.count
         sceneDescriptor.instanceDescriptorBuffer=descriptorBuffer
@@ -533,17 +573,19 @@ final class RayTracedWorldRenderer {
         let topScratchEstimate=max(1,device.heapBufferSizeAndAlign(length:max(1,size.buildScratchBufferSize),options:.storageModePrivate).size)
         guard admitsAllocation(RayTracingMemoryBudget.saturatingAdd(size.accelerationStructureSize,topScratchEstimate)),
               let scene=device.makeAccelerationStructure(size:size.accelerationStructureSize),
-              let scratch=device.makeBuffer(length:max(1,size.buildScratchBufferSize),options:.storageModePrivate),
-              let buildEncoder=command.makeAccelerationStructureCommandEncoder() else {
+              let scratch=device.makeBuffer(length:max(1,size.buildScratchBufferSize),options:.storageModePrivate) else {
             return fail(memoryPressureReason ?? "Unable to allocate top-level ray scene; using raster")
         }
         submission.retainTransient(scene); submission.retainTransient(scratch)
+        let buildEncoder=command.makeAccelerationStructureCommandEncoder(
+            descriptor:profile?.accelerationPass(start:.accelerationStart) ?? MTLAccelerationStructurePassDescriptor())
         buildEncoder.build(accelerationStructure:scene,descriptor:sceneDescriptor,scratchBuffer:scratch,scratchBufferOffset:0)
         buildEncoder.endEncoding()
         submission.geometry.append(contentsOf:instances.map(\.geometry))
         submission.resources.append(contentsOf:[atlas,whiteTexture,localLightTexture ?? emptyLocalLightTexture])
         submission.resources.append(contentsOf:textures)
-        submission.resources.append(contentsOf:[raw,motion,diffuseAlbedo,specularAlbedo,filtered]+colors+depths+normals)
+        submission.resources.append(contentsOf:[raw,motion,diffuseAlbedo,specularAlbedo,filtered,composited,
+                                               resolved,resolvedDepth,resolvedNormal]+colors+depths+normals)
         let dimension=frame.atmosphere.options.x,clock=frame.atmosphere.cameraTime.w
         let participatingSections=Dictionary(uniqueKeysWithValues:selected.map { ($0.key,$0.revision) })
         // Camera-only entry/exit from the selection radius is not a scene edit. Depth/motion
@@ -563,24 +605,27 @@ final class RayTracedWorldRenderer {
         // After that first failed frame, preserve the fallback's four-ray quality;
         // a later successful encode allows native two-ray denoising again.
         let samplesPerPixel=denoiser != nil && !denoiserFailed ? 2:4
+        let separateSurfaces=desiredWidth != outputWidth || desiredHeight != outputHeight
         bufferIndex=1-bufferIndex
         let current=bufferIndex,prior=1-current
         var uniforms=RayTracingUniforms(inverseViewProjection:frame.inverseViewProjection,viewProjection:frame.viewProjection,
             previousViewProjection:previousViewProjection,cameraDelta:.init(SIMD3<Float>(frame.camera-previousCamera),0),
             params:.init(max(256,frame.renderDistance*1.6),frame.gamma,historyFrames>0 ? 1:0,frame.shadows ? 1:0),
             heldLight:frame.heldLight,fogParameters:.init(frame.fogStart,frame.fogEnd,frame.nightVision,0),
-            quality:.init(Float(samplesPerPixel),0,0,0),
+            quality:.init(Float(samplesPerPixel),0,0,separateSurfaces ? 1:0),
             counts:.init(sampleIndex,UInt32(lights.count),UInt32(desiredWidth),UInt32(desiredHeight)),
             atmosphere:frame.atmosphere)
         uniforms.localLight.originAndSize = .init(frame.localLightOrigin ?? .zero,Float(localLightTexture?.width ?? 1))
         uniforms.localLight.params = .init(hasLocalLight ? 1:0,RenderLocalLightPolicy.outputMultiplier,0,0)
-        guard let encoder=command.makeComputeCommandEncoder() else { return fail("Unable to encode ray tracing") }
+        guard let encoder=command.makeComputeCommandEncoder(
+            descriptor:profile?.computePass(start:.pathStart,end:.pathEnd) ?? MTLComputePassDescriptor()) else { return fail("Unable to encode ray tracing") }
         encoder.label="Path traced world: primary, visibility, indirect and dielectric rays"
         encoder.setComputePipelineState(pathPipeline)
         encoder.setAccelerationStructure(scene,bufferIndex:0)
         encoder.setBuffer(instanceBuffer,offset:0,index:1)
         encoder.setBytes(&uniforms,length:MemoryLayout<RayTracingUniforms>.stride,index:2)
         encoder.setBuffer(lightBuffer,offset:0,index:3); encoder.setBuffer(textureArguments,offset:0,index:4)
+        encoder.setIntersectionFunctionTable(intersectionFunctions,bufferIndex:5)
         encoder.setTexture(atlas,index:0); encoder.setTexture(raw,index:1); encoder.setTexture(depths[current],index:2)
         encoder.setTexture(normals[current],index:3); encoder.setTexture(motion,index:4)
         encoder.setTexture(diffuseAlbedo,index:5); encoder.setTexture(specularAlbedo,index:6)
@@ -606,18 +651,48 @@ final class RayTracedWorldRenderer {
         for (index,texture) in [colors[current],depths[current],normals[current],filtered,diffuseAlbedo].enumerated() { filterEncoder.setTexture(texture,index:index) }
         dispatch(filterEncoder,pipeline:filterPipeline); filterEncoder.endEncoding()
         }
+        var surfaceColor=denoised ?? filtered
+        var surfaceDepth=depths[current],surfaceNormal=normals[current]
+        if separateSurfaces {
+            guard let surfaceFunctions=surfacePipeline.makeTable(instances:instanceBuffer,textures:textureArguments),
+                  let surfaceEncoder=command.makeComputeCommandEncoder(
+                    descriptor:profile?.computePass(start:.surfaceStart,end:.surfaceEnd) ?? MTLComputePassDescriptor()) else {
+                return fail("Unable to encode full-resolution ray surfaces")
+            }
+            submission.retainTransient(surfaceFunctions)
+            surfaceEncoder.label="Native primary visibility and authored material detail"
+            surfaceEncoder.setComputePipelineState(surfacePipeline.pipeline)
+            surfaceEncoder.setAccelerationStructure(scene,bufferIndex:0)
+            surfaceEncoder.setBuffer(instanceBuffer,offset:0,index:1)
+            surfaceEncoder.setBytes(&uniforms,length:MemoryLayout<RayTracingUniforms>.stride,index:2)
+            surfaceEncoder.setBuffer(lightBuffer,offset:0,index:3)
+            surfaceEncoder.setBuffer(textureArguments,offset:0,index:4)
+            surfaceEncoder.setIntersectionFunctionTable(surfaceFunctions,bufferIndex:5)
+            for (index,texture) in [atlas,surfaceColor,depths[current],normals[current],diffuseAlbedo,
+                                   resolved,resolvedDepth,resolvedNormal,
+                                   localLightTexture ?? emptyLocalLightTexture,specularAlbedo].enumerated() {
+                surfaceEncoder.setTexture(texture,index:index)
+            }
+            for structure in structures { surfaceEncoder.useResource(structure,usage:.read) }
+            for texture in textures { surfaceEncoder.useResource(texture,usage:.read) }
+            surfaceEncoder.useResource(whiteTexture,usage:.read)
+            dispatch(surfaceEncoder,pipeline:surfacePipeline.pipeline,width:outputWidth,height:outputHeight)
+            surfaceEncoder.endEncoding()
+            surfaceColor=resolved;surfaceDepth=resolvedDepth;surfaceNormal=resolvedNormal
+        }
         // Primary camera media does not share the material albedo used by reconstruction.
         // Composite it afterward to avoid colored fog artifacts on dark/saturated surfaces.
-        // Earlier serial encoders have finished reading raw, so reuse it as the final target;
-        // histories deliberately retain only reconstructed surface/transport radiance.
-        guard let mediaEncoder=command.makeComputeCommandEncoder() else { return fail("Unable to encode ray atmosphere") }
+        // Native surface guides keep fog and cutout silhouettes at output resolution.
+        // Histories deliberately retain only reconstructed surface/transport radiance.
+        guard let mediaEncoder=command.makeComputeCommandEncoder(
+            descriptor:profile?.computePass(start:.mediaStart,end:.mediaEnd) ?? MTLComputePassDescriptor()) else { return fail("Unable to encode ray atmosphere") }
         mediaEncoder.label="Primary cloud and camera fog composition"
         mediaEncoder.setComputePipelineState(mediaPipeline)
         mediaEncoder.setBytes(&uniforms,length:MemoryLayout<RayTracingUniforms>.stride,index:0)
-        for (index,texture) in [denoised ?? filtered,depths[current],normals[current],raw].enumerated() {
+        for (index,texture) in [surfaceColor,surfaceDepth,surfaceNormal,composited].enumerated() {
             mediaEncoder.setTexture(texture,index:index)
         }
-        dispatch(mediaEncoder,pipeline:mediaPipeline); mediaEncoder.endEncoding()
+        dispatch(mediaEncoder,pipeline:mediaPipeline,width:outputWidth,height:outputHeight); mediaEncoder.endEncoding()
         previousUsedDenoiser=denoised != nil
         historyFrames=min(24,historyFrames+1); sampleIndex &+= 1
         previousTransforms=transforms; previousCamera=frame.camera; previousViewProjection=frame.viewProjection
@@ -627,16 +702,16 @@ final class RayTracedWorldRenderer {
         previousParticipatingSections=participatingSections; previousSourceRevision=sectionsRevision
         hasPresentedCompleteScene=true
         previousSun=frame.atmosphere.sunDaylight; lastClock=clock; lastDimension=dimension
-        depthTexture=depths[current]
+        depthTexture=surfaceDepth
         diagnostics.ready=true; diagnostics.status="Ray Traced"; diagnostics.historySamples=historyFrames
         diagnostics.denoiser=denoised == nil ? "Albedo-guided temporal/spatial":"MetalFX temporal denoising"
         diagnostics.samplesPerPixel=samplesPerPixel
         refreshMemoryDiagnostics()
-        return raw
+        return composited
     }
-    private func dispatch(_ encoder: MTLComputeCommandEncoder,pipeline: MTLComputePipelineState) {
+    private func dispatch(_ encoder: MTLComputeCommandEncoder,pipeline: MTLComputePipelineState,width: Int? = nil,height: Int? = nil) {
         let w=min(8,pipeline.threadExecutionWidth),h=min(8,max(1,pipeline.maxTotalThreadsPerThreadgroup/w))
-        encoder.dispatchThreads(.init(width:desiredWidth,height:desiredHeight,depth:1),threadsPerThreadgroup:.init(width:w,height:h,depth:1))
+        encoder.dispatchThreads(.init(width:width ?? desiredWidth,height:height ?? desiredHeight,depth:1),threadsPerThreadgroup:.init(width:w,height:h,depth:1))
     }
 }
 

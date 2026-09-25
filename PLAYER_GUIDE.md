@@ -950,10 +950,12 @@ monster spawning and other gameplay light rules are unchanged.
 Lighting changes smoothly through dawn and dusk rather than switching
 between separate canopy day/night brightness values.
 
-On supported Macs running macOS 26 or newer, MetalFX reduces ray noise while
-preserving texture detail. Other supported systems use the built-in filter.
-The world is traced at an aspect-preserving resolution up to 1440 × 900; the HUD
-still uses the full window resolution.
+On supported Macs running macOS 26 or newer, MetalFX reduces lighting noise.
+Surface textures and leaf outlines are traced separately at an aspect-preserving
+resolution up to 1440 × 900, while expensive lighting uses a smaller working image.
+This keeps authored texture detail out of the smoothing filter. `F3` lists both
+surface and lighting resolutions. Other supported systems use the built-in filter.
+The HUD still uses the full window resolution.
 
 Water has subtle moving normals, stronger reflections at grazing angles,
 refraction, deeper-water absorption, and restrained shoreline foam. Standard and

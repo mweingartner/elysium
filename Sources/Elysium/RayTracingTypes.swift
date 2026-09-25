@@ -43,8 +43,12 @@ struct RayTracingDiagnostics {
     var deviceRecommendedBytes = 0
     var width = 0
     var height = 0
+    var outputWidth = 0
+    var outputHeight = 0
     var historySamples = 0
     var gpuMilliseconds = 0.0
+    var gpuStageMilliseconds: [String:Double] = [:]
+    var gpuStageFrameIndex: UInt64 = 0
     var denoiser = "Spatial/temporal"
     var samplesPerPixel = 4
 }
@@ -123,6 +127,9 @@ enum RayTracingLimits {
     static let buildTrianglesPerFrame = 250_000
     static let maximumInternalWidth = 1_440
     static let maximumInternalHeight = 900
+    // Expensive lighting is independent of full-resolution primary surfaces.
+    static let maximumNativeTraceWidth = 640
+    static let maximumNativeTraceHeight = 400
     static let maximumLights = 512
 }
 

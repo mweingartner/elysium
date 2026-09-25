@@ -33,7 +33,10 @@ struct RTUniforms {
     uint4 counts;
     ElyAtmosphereU atmosphere;
 };
-struct RTTextures { array<texture2d<float>,512> entities [[id(0)]]; };
+struct RTTextures {
+    array<texture2d<float>,512> entities [[id(0)]];
+    texture2d_array<float> atlas [[id(512)]];
+};
 struct RTSurface {
     float distance;
     float3 position;
@@ -95,97 +98,127 @@ static float rtCachedIllumination(float sky,float block,constant RTUniforms& u) 
     return cached;
 }
 
-static RTSurface rtIntersect(ray r, instance_acceleration_structure scene,
-                            device const RTInstance* instances, constant RTTextures& textures,
-                            texture2d_array<float> atlas,uint rayMask=0xff) {
-    RTSurface result; result.hit=false;
+static float3 rtCachedDiffuseIrradiance(RTSurface surface,float3 normal,constant RTUniforms& u,
+                                       texture3d<float,access::sample> localLightTexture) {
+    float4 local=sampleRenderLocalLight(surface.position,normal,u.localLight,localLightTexture);
+    float block=clamp(surface.block,0.0,1.0);
+    float3 irradiance=local.rgb;
+    if(u.localLight.params.x>0.5) {
+        float cached=elyNonSunLightOutput*block/(4-3*block);
+        irradiance=mix(float3(cached),local.rgb,local.a);
+    }
+    return irradiance*rtLocalDiffuseResponse
+        +rtCachedIllumination(surface.sky,u.localLight.params.x>0.5?0.0:surface.block,u);
+}
+
+struct RTFilteredHit {
+    bool hit;
+    float distance;
+    uint instance;
+    const device RTPrimitive* primitive;
+    float4 texel;
+};
+
+// Pure alpha rejection lets hardware continue traversal after transparent texels.
+// No payload writes, random draws or transmission accumulation: candidate calls
+// may repeat or arrive out of depth order. Shade only the final nearest hit.
+[[intersection(triangle,triangle_data,instancing)]]
+bool rt_alpha_accept(float2 bary [[barycentric_coord]],uint instanceID [[instance_id]],
+                     const device RTPrimitive* primitive [[primitive_data]],
+                     device const RTInstance* instances [[buffer(0)]],
+                     constant RTTextures& textures [[buffer(1)]]) {
+    const device RTPrimitive& p=*primitive;
+    const device RTInstance& instance=instances[instanceID];
+    float2 uv=p.uv01.xy*(1-bary.x-bary.y)+p.uv01.zw*bary.x+p.uv2Light.xy*bary.y;
+    constexpr sampler nearest(coord::normalized,address::repeat,filter::nearest);
+    float texAlpha=(p.material.z&8u)!=0
+        ? textures.entities[min(instance.info.x,511u)].sample(nearest,uv).a
+        : textures.atlas.sample(nearest,uv,p.material.y).a;
+    float alpha=texAlpha*instance.tint.a;
+    float coverage=(p.material.z&8u)!=0?texAlpha:alpha;
+    float cutoff=(p.material.z&8u)!=0?0.1:0.35;
+    return !(((p.material.z&1u)!=0 && coverage<cutoff) || alpha<0.005);
+}
+
+static RTFilteredHit rtFilteredIntersection(ray r,instance_acceleration_structure scene,
+                            device const RTInstance* instances,constant RTTextures& textures,
+                            texture2d_array<float> atlas,
+                            intersection_function_table<triangle_data,instancing> functions,uint rayMask,
+                            bool sampleSurfaceColor=true) {
+    RTFilteredHit result; result.hit=false;
     intersector<triangle_data,instancing> trace;
     trace.assume_geometry_type(geometry_type::triangle);
-    trace.force_opacity(forced_opacity::opaque);
-    constexpr sampler nearest(coord::normalized,address::repeat,filter::nearest);
-    // A finite continuation budget bounds malicious/all-transparent resource-pack geometry.
-    for (uint skip=0; skip<96; ++skip) {
-        auto hit=trace.intersect(r,scene,rayMask);
-        if(hit.type==intersection_type::none) return result;
-        RTPrimitive p=*(const device RTPrimitive*)hit.primitive_data;
-        RTInstance instance=instances[hit.instance_id];
-        float2 bary=hit.triangle_barycentric_coord;
-        float2 uv=p.uv01.xy*(1-bary.x-bary.y)+p.uv01.zw*bary.x+p.uv2Light.xy*bary.y;
-        float4 tex=(p.material.z&8u)!=0
-            ? textures.entities[min(instance.info.x,511u)].sample(nearest,uv)
-            : atlas.sample(nearest,uv,p.material.y);
-        float alpha=tex.a*instance.tint.a;
-        float cutoff=(p.material.z&8u)!=0?0.1:0.35;
-        // Skin alpha cuts holes; instance alpha is an independent whole-body death fade.
-        float coverage=(p.material.z&8u)!=0?tex.a:alpha;
-        if (((p.material.z&1u)!=0 && coverage<cutoff) || alpha<0.005) {
-            r.min_distance=hit.distance+0.0002; continue;
-        }
-        result.hit=true;
-        result.distance=hit.distance;
-        result.position=r.origin+r.direction*hit.distance;
-        result.normal=normalize((instance.normalTransform*float4(p.normalEmission.xyz,0)).xyz);
-        float3 color=tex.rgb*rtTint(p.material.x)*instance.tint.rgb;
-        color=mix(color,instance.overlay.rgb,instance.overlay.a);
-        result.albedo=rtLinear(clamp(color,float3(0),float3(1)));
-        result.alpha=alpha;
-        result.emission=p.normalEmission.w;
-        result.sky=p.uv2Light.z; result.block=p.uv2Light.w;
-        result.flags=p.material.z;
-        result.instance=hit.instance_id;
+    // Overrides both geometry and instance flags, preserving alpha-zero holes
+    // even in nominally opaque textures supplied by a custom resource pack.
+    trace.force_opacity(forced_opacity::non_opaque);
+    auto hit=trace.intersect(r,scene,rayMask,functions);
+    if(hit.type==intersection_type::none) return result;
+    result.hit=true;result.distance=hit.distance;result.instance=hit.instance_id;
+    result.primitive=(const device RTPrimitive*)hit.primitive_data;
+    const device RTPrimitive& p=*result.primitive;
+    // Alpha acceptance already happened inside traversal. Visibility needs accepted-hit
+    // color only for tinted glass; solid blockers, neutral leaves and water use constants.
+    // Keep full sampling for ordinary surface rays and preserve glass precedence exactly.
+    if(!sampleSurfaceColor && ((p.material.z&4u)==0 || (p.material.z&34u)!=0)) {
+        result.texel=float4(1);
         return result;
     }
-    // Conservatively occlude at the budget, never leak sunlight through a deep alpha stack.
-    result.hit=true; result.distance=r.min_distance;
-    result.position=r.origin+r.direction*r.min_distance;
-    result.normal=-r.direction; result.albedo=float3(0); result.alpha=1;
-    result.emission=0; result.sky=0; result.block=0; result.flags=0; result.instance=0;
+    const device RTInstance& instance=instances[hit.instance_id];
+    float2 bary=hit.triangle_barycentric_coord;
+    float2 uv=p.uv01.xy*(1-bary.x-bary.y)+p.uv01.zw*bary.x+p.uv2Light.xy*bary.y;
+    constexpr sampler nearest(coord::normalized,address::repeat,filter::nearest);
+    result.texel=(p.material.z&8u)!=0
+        ? textures.entities[min(instance.info.x,511u)].sample(nearest,uv)
+        : atlas.sample(nearest,uv,p.material.y);
+    return result;
+}
+
+static RTSurface rtIntersect(ray r, instance_acceleration_structure scene,
+                            device const RTInstance* instances, constant RTTextures& textures,
+                            texture2d_array<float> atlas,
+                            intersection_function_table<triangle_data,instancing> functions,uint rayMask=0xff) {
+    RTSurface result; result.hit=false;
+    RTFilteredHit hit=rtFilteredIntersection(r,scene,instances,textures,atlas,functions,rayMask);
+    if(!hit.hit) return result;
+    const device RTPrimitive& p=*hit.primitive;
+    const device RTInstance& instance=instances[hit.instance];
+    result.hit=true;
+    result.distance=hit.distance;
+    result.position=r.origin+r.direction*hit.distance;
+    result.normal=normalize((instance.normalTransform*float4(p.normalEmission.xyz,0)).xyz);
+    float3 color=hit.texel.rgb*rtTint(p.material.x)*instance.tint.rgb;
+    color=mix(color,instance.overlay.rgb,instance.overlay.a);
+    result.albedo=rtLinear(clamp(color,float3(0),float3(1)));
+    result.alpha=hit.texel.a*instance.tint.a;
+    result.emission=p.normalEmission.w;
+    result.sky=p.uv2Light.z; result.block=p.uv2Light.w;
+    result.flags=p.material.z;
+    result.instance=hit.instance;
     return result;
 }
 
 static float3 rtVisibility(float3 position,float3 normal,float3 direction,float distance,
                            instance_acceleration_structure scene,device const RTInstance* instances,
-                           constant RTTextures& textures,texture2d_array<float> atlas) {
+                           constant RTTextures& textures,texture2d_array<float> atlas,
+                           intersection_function_table<triangle_data,instancing> functions) {
     ray r; r.origin=position+normal*0.003; r.direction=direction;
     r.min_distance=0.001; r.max_distance=max(0.002,distance-0.008);
     float3 transmission(1);
-    intersector<triangle_data,instancing> trace;
-    trace.assume_geometry_type(geometry_type::triangle);
-    trace.force_opacity(forced_opacity::opaque);
-    constexpr sampler nearest(coord::normalized,address::repeat,filter::nearest);
     for(uint layer=0;layer<8;++layer) {
-        bool accepted=false;
-        // Keep the same alpha/layer budgets as surface intersection, but visibility needs no
-        // transformed normal, world position, emission, or diffuse albedo for foliage/stone.
-        for(uint skip=0;skip<96;++skip) {
-            auto hit=trace.intersect(r,scene,0xff);
-            if(hit.type==intersection_type::none) return transmission;
-            const device RTPrimitive& p=*(const device RTPrimitive*)hit.primitive_data;
-            const device RTInstance& instance=instances[hit.instance_id];
-            uint flags=p.material.z;
-            float2 bary=hit.triangle_barycentric_coord;
-            float2 uv=p.uv01.xy*(1-bary.x-bary.y)+p.uv01.zw*bary.x+p.uv2Light.xy*bary.y;
-            float4 tex=(flags&8u)!=0
-                ? textures.entities[min(instance.info.x,511u)].sample(nearest,uv)
-                : atlas.sample(nearest,uv,p.material.y);
-            float alpha=tex.a*instance.tint.a;
-            float coverage=(flags&8u)!=0?tex.a:alpha;
-            float cutoff=(flags&8u)!=0?0.1:0.35;
-            if(((flags&1u)!=0 && coverage<cutoff) || alpha<0.005) {
-                r.min_distance=hit.distance+0.0002; continue;
-            }
-            if((flags&32u)!=0) transmission*=0.62;
-            else if((flags&2u)!=0) transmission*=float3(0.7,0.86,0.92);
-            else if((flags&4u)!=0) {
-                float3 color=tex.rgb*rtTint(p.material.x)*instance.tint.rgb;
-                color=mix(color,instance.overlay.rgb,instance.overlay.a);
-                transmission*=mix(float3(1),rtLinear(clamp(color,float3(0),float3(1))),0.35);
-            } else return float3(0);
-            r.min_distance=hit.distance+0.003;
-            if(r.min_distance>=r.max_distance) return transmission;
-            accepted=true; break;
-        }
-        if(!accepted) return float3(0);
+        RTFilteredHit hit=rtFilteredIntersection(r,scene,instances,textures,atlas,functions,0xff,false);
+        if(!hit.hit) return transmission;
+        const device RTPrimitive& p=*hit.primitive;
+        const device RTInstance& instance=instances[hit.instance];
+        uint flags=p.material.z;
+        if((flags&32u)!=0) transmission*=0.62;
+        else if((flags&2u)!=0) transmission*=float3(0.7,0.86,0.92);
+        else if((flags&4u)!=0) {
+            float3 color=hit.texel.rgb*rtTint(p.material.x)*instance.tint.rgb;
+            color=mix(color,instance.overlay.rgb,instance.overlay.a);
+            transmission*=mix(float3(1),rtLinear(clamp(color,float3(0),float3(1))),0.35);
+        } else return float3(0);
+        r.min_distance=hit.distance+0.003;
+        if(r.min_distance>=r.max_distance) return transmission;
     }
     return float3(0);
 }
@@ -194,7 +227,8 @@ static float3 rtVisibility(float3 position,float3 normal,float3 direction,float 
 // stable strongest local sources without a global random lottery or biased inverse-PDF clamp.
 static float3 rtLocalProxyIrradiance(float3 position,float3 normal,device const RTLight* lights,uint count,
                                     instance_acceleration_structure scene,device const RTInstance* instances,
-                                    constant RTTextures& textures,texture2d_array<float> atlas) {
+                                    constant RTTextures& textures,texture2d_array<float> atlas,
+                                    intersection_function_table<triangle_data,instancing> functions) {
     uint indices[4]={0,0,0,0}; float weights[4]={0,0,0,0};
     for(uint index=0;index<count;++index) {
         RTLight light=lights[index]; float3 delta=light.positionRadius.xyz-position;
@@ -216,38 +250,47 @@ static float3 rtLocalProxyIrradiance(float3 position,float3 normal,device const 
         if(weights[slot]<=0) continue;
         RTLight light=lights[indices[slot]]; float3 delta=light.positionRadius.xyz-position;
         float d=length(delta);
-        float3 visible=rtVisibility(position,normal,delta/d,d,scene,instances,textures,atlas);
+        float3 visible=rtVisibility(position,normal,delta/d,d,scene,instances,textures,atlas,functions);
         irradiance+=light.colorPower.rgb*visible*weights[slot];
     }
     return irradiance;
 }
 
-kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
-                         device const RTInstance* instances [[buffer(1)]],
-                         constant RTUniforms& u [[buffer(2)]],
-                         device const RTLight* lights [[buffer(3)]],
-                         constant RTTextures& textures [[buffer(4)]],
-                         texture2d_array<float> atlas [[texture(0)]],
-                         texture2d<float,access::write> output [[texture(1)]],
-                         texture2d<float,access::write> depth [[texture(2)]],
-                         texture2d<float,access::write> normals [[texture(3)]],
-                         texture2d<float,access::write> motion [[texture(4)]],
-                         texture2d<float,access::write> diffuseAlbedo [[texture(5)]],
-                         texture2d<float,access::write> specularAlbedo [[texture(6)]],
-                         texture3d<float,access::sample> localLightTexture [[texture(7)]],
-                         uint2 pixel [[thread_position_in_grid]]) {
-    if(pixel.x>=u.counts.z || pixel.y>=u.counts.w) return;
-    // Pixel centers preserve the authored pixel art; secondary paths supply stochastic samples.
-    float2 uv=(float2(pixel)+0.5)/float2(u.counts.zw);
+struct RTPathResult {
+    float3 radiance;
+    float depth;
+    float4 normalDistance;
+    float4 motion;
+    float4 diffuse;
+    float4 specular;
+};
+
+static float rtRadianceBasis(uint flags) {
+    // Distinct unfactored classes prevent coplanar water and glass from sharing
+    // radiance merely because both use the same low material roughness.
+    return (flags&2u)!=0?-2.0:((flags&4u)!=0?-3.0:((flags&16u)!=0?-1.0:((flags&32u)!=0?-5.0:-4.0)));
+}
+
+// One bounded transport implementation serves the low-rate lighting pass and exact
+// native fallback. The caller supplies resolution-independent ray UV and RNG identity.
+static RTPathResult rtTracePixel(float2 uv,uint2 pixel,uint noiseWidth,
+                         instance_acceleration_structure scene,
+                         device const RTInstance* instances,constant RTUniforms& u,
+                         device const RTLight* lights,constant RTTextures& textures,
+                         intersection_function_table<triangle_data,instancing> functions,
+                         texture2d_array<float> atlas,
+                         texture3d<float,access::sample> localLightTexture,bool allowFactor) {
     float4 farPoint=u.inverseViewProjection*float4(uv.x*2-1,1-uv.y*2,1,1);
     float3 accumulated(0);
     float guideDepth=1; float4 guideNormal(0),guideMotion(0),guideDiffuse(1,1,1,1),guideSpecular(0);
     bool primarySolarValid=false;
     uint primarySolarInstance=0,primarySolarFlags=0;
     float3 primarySolarPosition(0),primarySolarNormal(0),primarySolarIrradiance(0);
+    RTSurface primarySurface;
+    bool factorPixel=allowFactor && u.quality.w>0.5 && u.atmosphere.weather.w<0.5;
     uint sampleCount=clamp(uint(u.quality.x),2u,4u);
     for(uint sample=0;sample<sampleCount;++sample) {
-    uint seed=rtHash(pixel.x+pixel.y*u.counts.z)^rtHash(u.counts.x*4u+sample+0x9e3779b9u);
+    uint seed=rtHash(pixel.x+pixel.y*noiseWidth)^rtHash(u.counts.x*4u+sample+0x9e3779b9u);
     seed=rtHash(seed);
     ray r; r.origin=float3(0); r.direction=normalize(farPoint.xyz/farPoint.w);
     r.min_distance=0.005; r.max_distance=u.params.x;
@@ -260,7 +303,19 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
     float4 skyClip=u.previousViewProjection*float4(r.direction,0);
     float4 previous=float4(skyClip.xy/skyClip.w*float2(0.5,-0.5)+0.5,1,skyClip.w>0?1:0);
     for(uint bounce=0;bounce<7;++bounce) {
-        RTSurface s=rtIntersect(r,scene,instances,textures,atlas,primaryPending?0x01:0xff);
+        // Every sample in this frame starts with the exact same primary ray. Cache only its raw
+        // first hit: entity fade decisions and all continuation rays remain per sample,
+        // as do the separate reflection/refraction lobes of primary water and glass.
+        RTSurface s;
+        if(bounce==0 && sample>0) s=primarySurface;
+        else {
+            s=rtIntersect(r,scene,instances,textures,atlas,functions,primaryPending?0x01:0xff);
+            if(bounce==0) primarySurface=s;
+        }
+        // All samples must share one material basis. A stochastic foreground body can
+        // reveal a different material per sample, so preserve ordinary radiance for it.
+        if(bounce==0 && s.hit && (s.flags&8u)!=0 && instances[s.instance].tint.a<1.0)
+            factorPixel=false;
         float segment=s.hit?s.distance:min(u.params.x,96.0);
         if(insideWater) {
             float3 trans=elyWaterTransmittance(segment,waterTint);
@@ -284,6 +339,12 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
             r.origin=s.position+r.direction*0.004; r.min_distance=0.001; continue;
         }
         bool firstSurface=primaryPending;
+        // Surface/lighting split: whiten only the primary ordinary diffuse
+        // response BEFORE transport. This carries irradiance without dividing dark texels;
+        // the native-resolution resolve restores the exact authored primary albedo.
+        // Secondary materials, water/glass, metals and submerged transport remain unchanged.
+        bool factorPrimary=factorPixel && firstSurface && (s.flags&22u)==0;
+        if(factorPrimary) s.albedo=float3(1);
         if(primaryPending) {
             primaryPending=false;
             float4 clip=u.viewProjection*float4(s.position,1);
@@ -292,6 +353,11 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
             bool dielectric=(s.flags&6u)!=0,metal=(s.flags&16u)!=0;
             primaryDiffuse=float4(dielectric || metal?float3(0):s.albedo,dielectric?0.06:(metal?0.16:0.85));
             primarySpecular=float4(metal?s.albedo:float3(dielectric?0.02:0.04),0);
+            // Alpha is unused by the neural specular guide. The native resolve uses it
+            // as explicit basis metadata: ordinary diffuse=1, foliage=2, negative
+            // values distinguish unfactored water/glass/metal and other radiance.
+            if(factorPrimary) primarySpecular.a=(s.flags&32u)!=0?2.0:1.0;
+            else if(u.quality.w>0.5) primarySpecular.a=rtRadianceBasis(s.flags);
             RTInstance instance=instances[s.instance];
             float3 prevPosition=instance.info.y!=0
                 ? (instance.previousFromCurrent*float4(s.position,1)).xyz
@@ -303,7 +369,9 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
         }
         float3 faceNormal=dot(s.normal,r.direction)<0?s.normal:-s.normal;
         float3 worldPosition=s.position+u.atmosphere.cameraTime.xyz;
-        radiance+=throughput*s.albedo*s.emission;
+        // Visible primary emission is restored exactly at native resolution, never
+        // blurred into neighboring irradiance or confused with a different material.
+        if(!factorPrimary) radiance+=throughput*s.albedo*s.emission;
         bool water=(s.flags&2u)!=0, glass=(s.flags&4u)!=0;
         if(water || glass) {
             float waveTime=u.atmosphere.options.y>0.5?0.0:u.atmosphere.cameraTime.w;
@@ -324,7 +392,7 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
                 primaryNormal.xyz=n;
                 // The reconstruction guide reflects the actual view-dependent dielectric
                 // response, not a constant normal-incidence value at grazing water angles.
-                primarySpecular=float4(float3(max(0.02,fresnel)),0);
+                primarySpecular.rgb=float3(max(0.02,fresnel));
             }
             r.direction=reflected?reflect(r.direction,n):normalize(refracted);
             if(!reflected) {
@@ -365,8 +433,11 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
                 if(reusePrimarySolar) solarIrradiance=primarySolarIrradiance;
                 else {
                     float3 visibility=u.params.w>0.5
-                        ?rtVisibility(s.position,faceNormal,lightDirection,u.params.x,scene,instances,textures,atlas):float3(1);
-                    float clouds=elyCloudSunTransmittanceAir(worldPosition,u.atmosphere);
+                        ?rtVisibility(s.position,faceNormal,lightDirection,u.params.x,scene,instances,textures,atlas,functions):float3(1);
+                    // A fully blocked solar ray contributes exactly zero regardless of
+                    // clouds; do not march their density again behind an opaque surface.
+                    float clouds=1;
+                    if(any(visibility>float3(0))) clouds=elyCloudSunTransmittanceAir(worldPosition,u.atmosphere);
                     solarIrradiance=lightColor*visibility*(cosine*lightStrength*clouds);
                     if(firstSurface) {
                         primarySolarValid=true; primarySolarInstance=s.instance; primarySolarFlags=s.flags;
@@ -382,7 +453,7 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
             float3 delta=float3(0.30,-0.30,0.25)-s.position; float d=length(delta);
             if(d<u.heldLight.w && d>0.001) {
                 float fall=pow(clamp(1-d/u.heldLight.w,0.0,1.0),2.0);
-                float3 vis=rtVisibility(s.position,faceNormal,delta/d,d,scene,instances,textures,atlas);
+                float3 vis=rtVisibility(s.position,faceNormal,delta/d,d,scene,instances,textures,atlas,functions);
                 radiance+=throughput*s.albedo*u.heldLight.rgb*vis*(fall*max(0.0,dot(faceNormal,delta/d))*2.5*rtLocalDiffuseResponse);
             }
         }
@@ -393,22 +464,11 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
         // secondary diffuse hits compounds the same illumination in enclosed rooms. Use the
         // first DIFFUSE hit, including surfaces viewed through glass/water or in a mirror.
         if(diffuseBounces==0) {
-            float4 local=sampleRenderLocalLight(s.position,faceNormal,u.localLight,localLightTexture);
-            float cachedBlock=clamp(s.block,0.0,1.0);
-            float3 localIrradiance=local.rgb;
-            if(u.localLight.params.x>0.5) {
-                // Outside the bounded volume retain the original world light cache; interpolation
-                // is only a coverage blend, never filtering bright voxels through a solid wall.
-                float cachedRadiance=elyNonSunLightOutput*cachedBlock/(4-3*cachedBlock);
-                localIrradiance=mix(float3(cachedRadiance),local.rgb,local.a);
-            }
-            radiance+=throughput*s.albedo*localIrradiance*rtLocalDiffuseResponse;
-            float cached=rtCachedIllumination(s.sky,u.localLight.params.x>0.5?0.0:s.block,u);
-            radiance+=throughput*s.albedo*cached;
+            radiance+=throughput*s.albedo*rtCachedDiffuseIrradiance(s,faceNormal,u,localLightTexture);
         }
         if(u.counts.y>0) {
             radiance+=throughput*s.albedo*rtLocalDiffuseResponse*rtLocalProxyIrradiance(s.position,faceNormal,lights,u.counts.y,
-                scene,instances,textures,atlas);
+                scene,instances,textures,atlas,functions);
         }
         if(diffuseBounces++>=2) break;
         throughput*=s.albedo;
@@ -417,36 +477,220 @@ kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
         r.direction=rtCosine(faceNormal,seed); r.min_distance=0.001;
     }
     radiance*=exp2((clamp(u.params.y,0.0,1.0)-0.5)*1.2);
-    radiance=all(isfinite(radiance))?clamp(radiance,float3(0),float3(32)):float3(0);
+    float bound=primarySpecular.a>0.5?4096.0:32.0;
+    radiance=all(isfinite(radiance))?clamp(radiance,float3(0),float3(bound)):float3(0);
     accumulated+=radiance;
     if(sample==0) { guideDepth=primaryDepth; guideNormal=primaryNormal; guideMotion=previous;
                    guideDiffuse=primaryDiffuse; guideSpecular=primarySpecular; }
     }
-    // Reconstruct surface radiance against its matching material guides. Camera-space fog
-    // and clouds are added afterward: neutral fog is not a green leaf's diffuse reflectance.
-    output.write(float4(accumulated/float(sampleCount),1),pixel);
-    depth.write(float4(guideDepth),pixel);
-    normals.write(guideNormal,pixel);
-    motion.write(guideMotion,pixel);
-    diffuseAlbedo.write(guideDiffuse,pixel); specularAlbedo.write(guideSpecular,pixel);
+    RTPathResult result;
+    result.radiance=accumulated/float(sampleCount); result.depth=guideDepth;
+    result.normalDistance=guideNormal; result.motion=guideMotion;
+    result.diffuse=guideDiffuse; result.specular=guideSpecular;
+    return result;
 }
 
-kernel void rt_media(texture2d<float,access::read> reconstructed [[texture(0)]],
+kernel void rt_pathtrace(instance_acceleration_structure scene [[buffer(0)]],
+                         device const RTInstance* instances [[buffer(1)]],
+                         constant RTUniforms& u [[buffer(2)]],
+                         device const RTLight* lights [[buffer(3)]],
+                         constant RTTextures& textures [[buffer(4)]],
+                         intersection_function_table<triangle_data,instancing> functions [[buffer(5)]],
+                         texture2d_array<float> atlas [[texture(0)]],
+                         texture2d<float,access::write> output [[texture(1)]],
+                         texture2d<float,access::write> depth [[texture(2)]],
+                         texture2d<float,access::write> normals [[texture(3)]],
+                         texture2d<float,access::write> motion [[texture(4)]],
+                         texture2d<float,access::write> diffuseAlbedo [[texture(5)]],
+                         texture2d<float,access::write> specularAlbedo [[texture(6)]],
+                         texture3d<float,access::sample> localLightTexture [[texture(7)]],
+                         uint2 pixel [[thread_position_in_grid]]) {
+    if(pixel.x>=u.counts.z || pixel.y>=u.counts.w) return;
+    float2 uv=(float2(pixel)+0.5)/float2(u.counts.zw);
+    RTPathResult result=rtTracePixel(uv,pixel,u.counts.z,scene,instances,u,lights,textures,functions,atlas,localLightTexture,true);
+    output.write(float4(result.radiance,1),pixel);
+    depth.write(float4(result.depth),pixel);
+    normals.write(result.normalDistance,pixel);
+    motion.write(result.motion,pixel);
+    diffuseAlbedo.write(result.diffuse,pixel); specularAlbedo.write(result.specular,pixel);
+}
+
+// Deterministic fallback for native diffuse surfaces too small to receive a compatible
+// low-resolution lighting sample. It preserves physical direct visibility and the same
+// propagated-light/cave policy, without making a missing low-res donor a black hole.
+static float3 rtNativeDiffuseIrradiance(RTSurface s,float3 rayDirection,
+                                     instance_acceleration_structure scene,
+                                     device const RTInstance* instances,constant RTUniforms& u,
+                                     device const RTLight* lights,constant RTTextures& textures,
+                                     intersection_function_table<triangle_data,instancing> functions,
+                                     texture2d_array<float> atlas,
+                                     texture3d<float,access::sample> localLightTexture) {
+    float3 normal=dot(s.normal,rayDirection)<0?s.normal:-s.normal;
+    float3 irradiance=rtCachedDiffuseIrradiance(s,normal,u,localLightTexture);
+    float3 sun=normalize(u.atmosphere.sunDaylight.xyz);
+    bool sunlight=sun.y>0;
+    float3 direction=sunlight?sun:-sun;
+    float cosine=rtDirectLightCosine(normal,direction,s.flags);
+    if(u.atmosphere.options.x<0.5 && cosine>0) {
+        float strength=sunlight?u.atmosphere.sunDaylight.w*2.5*smoothstep(0.0,0.04,sun.y):0.085*elyNonSunLightOutput;
+        float3 color=sunlight?mix(float3(1,0.53,0.24),float3(1,0.96,0.88),smoothstep(0.03,0.5,sun.y)):float3(0.40,0.55,0.9);
+        float3 visibility=u.params.w>0.5
+            ?rtVisibility(s.position,normal,direction,u.params.x,scene,instances,textures,atlas,functions):float3(1);
+        if(any(visibility>float3(0)))
+            irradiance+=color*visibility*(cosine*strength*elyCloudSunTransmittanceAir(s.position+u.atmosphere.cameraTime.xyz,u.atmosphere));
+    }
+    if(u.heldLight.w>0) {
+        float3 delta=float3(0.30,-0.30,0.25)-s.position;
+        float distance=length(delta);
+        if(distance>0.001 && distance<u.heldLight.w) {
+            float fall=pow(clamp(1-distance/u.heldLight.w,0.0,1.0),2.0);
+            float facing=max(0.0,dot(normal,delta/distance));
+            if(facing>0) irradiance+=u.heldLight.rgb
+                *rtVisibility(s.position,normal,delta/distance,distance,scene,instances,textures,atlas,functions)
+                *(fall*facing*2.5*rtLocalDiffuseResponse);
+        }
+    }
+    if(u.counts.y>0) irradiance+=rtLocalDiffuseResponse
+        *rtLocalProxyIrradiance(s.position,normal,lights,u.counts.y,scene,instances,textures,atlas,functions);
+    float exposure=exp2((clamp(u.params.y,0.0,1.0)-0.5)*1.2);
+    return irradiance*exposure;
+}
+
+// Native primary visibility and authored materials are never inferred from an upscaled
+// RGB image. Only eligible diffuse irradiance is reconstructed across a bounded 3x3
+// neighborhood. Camera fog/clouds consume these native primary guides in the next pass.
+kernel void rt_surface_resolve(instance_acceleration_structure scene [[buffer(0)]],
+                         device const RTInstance* instances [[buffer(1)]],
+                         constant RTUniforms& u [[buffer(2)]],
+                         device const RTLight* lights [[buffer(3)]],
+                         constant RTTextures& textures [[buffer(4)]],
+                         intersection_function_table<triangle_data,instancing> functions [[buffer(5)]],
+                         texture2d_array<float> atlas [[texture(0)]],
+                         texture2d<float,access::sample> lowDenoised [[texture(1)]],
+                         texture2d<float,access::read> lowDepth [[texture(2)]],
+                         texture2d<float,access::read> lowNormalDistance [[texture(3)]],
+                         texture2d<float,access::read> lowDiffuse [[texture(4)]],
+                         texture2d<float,access::write> fullRadiance [[texture(5)]],
+                         texture2d<float,access::write> fullDepth [[texture(6)]],
+                         texture2d<float,access::write> fullNormalDistance [[texture(7)]],
+                         texture3d<float,access::sample> localLightTexture [[texture(8)]],
+                         texture2d<float,access::read> lowSpecular [[texture(9)]],
+                         uint2 pixel [[thread_position_in_grid]]) {
+    uint2 fullSize(fullRadiance.get_width(),fullRadiance.get_height());
+    if(any(pixel>=fullSize)) return;
+    float2 uv=(float2(pixel)+0.5)/float2(fullSize);
+    float4 farPoint=u.inverseViewProjection*float4(uv.x*2-1,1-uv.y*2,1,1);
+    ray primary; primary.origin=float3(0); primary.direction=normalize(farPoint.xyz/farPoint.w);
+    primary.min_distance=0.005; primary.max_distance=u.params.x;
+    uint seed=rtHash(rtHash(pixel.x+pixel.y*fullSize.x)^rtHash(u.counts.x*4u+0x9e3779b9u));
+    RTSurface surface; surface.hit=false;
+    bool encounteredFade=false;
+    for(uint event=0;event<7;++event) {
+        RTSurface candidate=rtIntersect(primary,scene,instances,textures,atlas,functions,0x01);
+        if(!candidate.hit) break;
+        if((candidate.flags&8u)!=0 && instances[candidate.instance].tint.a<1.0) {
+            encounteredFade=true;
+            if(rtUnit(seed)>instances[candidate.instance].tint.a) {
+                primary.origin=candidate.position+primary.direction*0.004;
+                primary.min_distance=0.001;
+                continue;
+            }
+        }
+        surface=candidate; break;
+    }
+    constexpr sampler nearest(coord::normalized,address::clamp_to_edge,filter::nearest);
+    bool air=u.atmosphere.weather.w<0.5;
+    float3 radiance(0);
+    float depthValue=1;
+    float4 normalDistance(0,0,0,u.params.x);
+    if(surface.hit) {
+        float4 clip=u.viewProjection*float4(surface.position,1);
+        depthValue=clamp(clip.z/clip.w,0.0,1.0);
+        normalDistance=float4(surface.normal,length(surface.position));
+        bool dielectric=(surface.flags&6u)!=0,metal=(surface.flags&16u)!=0;
+        bool demodulated=u.quality.w>0.5 && air && !dielectric && !metal && !encounteredFade;
+        float basis=demodulated?((surface.flags&32u)!=0?2.0:1.0):rtRadianceBasis(surface.flags);
+        float materialType=dielectric?0.06:(metal?0.16:0.85);
+        float3 faceNormal=dot(surface.normal,primary.direction)<0?surface.normal:-surface.normal;
+        float3 matchNormal=dielectric?faceNormal:surface.normal;
+        if((surface.flags&2u)!=0) {
+            float waveTime=u.atmosphere.options.y>0.5?0.0:u.atmosphere.cameraTime.w;
+            matchNormal=elyWaterNormal(surface.position+u.atmosphere.cameraTime.xyz,faceNormal,waveTime,u.atmosphere.weather.x);
+            if(dot(matchNormal,faceNormal)<0) matchNormal=-matchNormal;
+            if(dot(matchNormal,primary.direction)>-0.001) matchNormal=faceNormal;
+        }
+        normalDistance.xyz=matchNormal;
+        uint2 lowSize(lowDepth.get_width(),lowDepth.get_height());
+        float2 lowPosition=uv*float2(lowSize)-0.5;
+        int2 center=int2(floor(lowPosition+0.5));
+        float3 sum(0); float total=0;
+        float planeTolerance=max(0.025,length(surface.position)*0.001);
+        for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x) {
+            int2 q=center+int2(x,y);
+            if(any(q<0) || any(q>=int2(lowSize))) continue;
+            float d=lowDepth.read(uint2(q)).x;
+            float4 n=lowNormalDistance.read(uint2(q));
+            float type=lowDiffuse.read(uint2(q)).a;
+            float lowBasis=lowSpecular.read(uint2(q)).a;
+            if(d>=0.999999 || !isfinite(d) || !all(isfinite(n))
+               || abs(type-materialType)>0.05 || abs(lowBasis-basis)>0.1) continue;
+            float alignment=dot(n.xyz,matchNormal);
+            if(alignment<0.94) continue;
+            float2 sampleUV=(float2(q)+0.5)/float2(lowSize);
+            float4 samplePosition=u.inverseViewProjection*float4(sampleUV.x*2-1,1-sampleUV.y*2,d,1);
+            if(!all(isfinite(samplePosition)) || abs(samplePosition.w)<0.000001) continue;
+            float planeError=abs(dot(samplePosition.xyz/samplePosition.w-surface.position,surface.normal));
+            if(planeError>=planeTolerance) continue;
+            float2 offset=float2(q)-lowPosition;
+            float weight=exp(-dot(offset,offset)*0.65)*pow(max(alignment,0.0),8.0)*(1-planeError/planeTolerance);
+            float3 value=lowDenoised.sample(nearest,sampleUV).rgb;
+            if(!all(isfinite(value))) continue;
+            sum+=value*weight; total+=weight;
+        }
+        if(demodulated) {
+            // Smooth donor confidence prevents a hard lighting jump when one small surface
+            // crosses the sampling grid. Most interiors take only reconstructed irradiance.
+            float confidence=smoothstep(0.02,0.20,total);
+            float3 irradiance=total>0.00001?sum/total:float3(0);
+            if(confidence<1) {
+                float3 fallback=rtNativeDiffuseIrradiance(surface,primary.direction,scene,instances,u,lights,
+                    textures,functions,atlas,localLightTexture);
+                irradiance=mix(fallback,irradiance,confidence);
+            }
+            float exposure=exp2((clamp(u.params.y,0.0,1.0)-0.5)*1.2);
+            radiance=surface.albedo*(irradiance+surface.emission*exposure);
+        } else if(total>0.00001 && !encounteredFade) radiance=sum/total;
+        else radiance=rtTracePixel(uv,pixel,fullSize.x,scene,instances,u,lights,textures,functions,atlas,localLightTexture,false).radiance;
+    } else if(!air || encounteredFade) {
+        // Air sky is deterministic and resolved in rt_media. Preserve existing submerged
+        // transport and stochastic-body samples rather than inventing a nearest donor.
+        radiance=rtTracePixel(uv,pixel,fullSize.x,scene,instances,u,lights,textures,functions,atlas,localLightTexture,false).radiance;
+    }
+    radiance=all(isfinite(radiance))?clamp(radiance,float3(0),float3(32)):float3(0);
+    fullRadiance.write(float4(radiance,1),pixel);
+    fullDepth.write(float4(depthValue),pixel);
+    fullNormalDistance.write(normalDistance,pixel);
+}
+
+kernel void rt_media(texture2d<float,access::sample> reconstructed [[texture(0)]],
                      texture2d<float,access::read> depth [[texture(1)]],
                      texture2d<float,access::read> normalDistance [[texture(2)]],
                      texture2d<float,access::write> output [[texture(3)]],
                      constant RTUniforms& u [[buffer(0)]],uint2 pixel [[thread_position_in_grid]]) {
     if(pixel.x>=output.get_width() || pixel.y>=output.get_height()) return;
-    float3 color=reconstructed.read(pixel).rgb;
+    float2 uv=(float2(pixel)+0.5)/float2(output.get_width(),output.get_height());
+    constexpr sampler linearClamp(coord::normalized,address::clamp_to_edge,filter::linear);
+    float3 color=reconstructed.sample(linearClamp,uv).rgb;
     color=all(isfinite(color))?max(color,float3(0)):float3(0);
-    float primaryDepth=depth.read(pixel).x;
-    float primaryDistance=normalDistance.read(pixel).w;
+    uint2 guideSize(depth.get_width(),depth.get_height());
+    uint2 guidePixel=min(uint2(uv*float2(guideSize)),guideSize-1);
+    float primaryDepth=depth.read(guidePixel).x;
+    float primaryDistance=normalDistance.read(guidePixel).w;
     float fog=clamp((primaryDistance-u.fogParameters.x)/max(0.01,u.fogParameters.y-u.fogParameters.x),0.0,1.0);
     bool gameplayFog=u.fogParameters.y<64;
     bool surface=primaryDepth<0.999999, air=u.atmosphere.weather.w<0.5;
     float exposure=exp2((clamp(u.params.y,0.0,1.0)-0.5)*1.2);
     if(air) {
-        float2 uv=(float2(pixel)+0.5)/float2(output.get_width(),output.get_height());
         float4 farPoint=u.inverseViewProjection*float4(uv.x*2-1,1-uv.y*2,1,1);
         float3 direction=normalize(farPoint.xyz/farPoint.w);
         // Clouds in front of a visible surface are a finite segment, not a second full sky.
@@ -545,11 +789,12 @@ kernel void rt_probe(instance_acceleration_structure scene [[buffer(0)]],
                      constant RTTextures& textures [[buffer(2)]],
                      device const float4* directions [[buffer(3)]],
                      device float4* results [[buffer(4)]],
+                     intersection_function_table<triangle_data,instancing> functions [[buffer(5)]],
                      texture2d_array<float> atlas [[texture(0)]],
                      uint id [[thread_position_in_grid]]) {
     ray r; r.origin=float3(0); r.direction=normalize(directions[id].xyz);
     r.min_distance=0.001; r.max_distance=100;
-    RTSurface s=rtIntersect(r,scene,instances,textures,atlas);
+    RTSurface s=rtIntersect(r,scene,instances,textures,atlas,functions);
     results[id]=float4(s.hit?s.distance:-1,s.hit?s.albedo:float3(0));
 }
 """
