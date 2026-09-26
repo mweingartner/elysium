@@ -837,6 +837,9 @@ public final class Dolphin: Animal {
     public override init(world: World) {
         super.init(world: world)
         nav.avoidWater = false   // lives in or returns to water
+        // dolphins spawn only from biome water tables: count them against the
+        // water population cap, like squid and fish, not the land animals'
+        category = "water"
         width = 0.9; height = 0.6
         maxHealth = 10; health = 10
         speed = 0.14

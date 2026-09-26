@@ -448,10 +448,33 @@ private struct PrehistoricWaterRouteNode {
     let parent: Int
 }
 
+/// The limits on V2+ land predation. Without them every land predator, down
+/// to a 1 m Compsognathus, hunted any herd herbivore every few seconds, and a
+/// predator returned to hunting moments after each kill, so a region's
+/// dinosaurs bled away between dawn refills. The policy reads only immutable
+/// definition data and the predator's own age: it adds no RNG draw, no save
+/// field and no LAN payload, and it applies in place to existing V2/V3 saves.
+enum PrehistoricPredationPolicy {
+    /// A land predator hunts herd prey no longer than this multiple of its
+    /// own authoring length (mirroring the aquatic "smaller prey" rule).
+    static let maximumPreyLengthRatio = 1.5
+    /// Ticks of the predator's own simulation during which it starts no new
+    /// hunt after a genuine kill (five in-game minutes).
+    static let satiationTicks = 6_000
+
+    static func landPredator(
+        _ predator: PrehistoricCreatureDefinition, mayHunt prey: PrehistoricCreatureDefinition
+    ) -> Bool {
+        predator.isLandPredator && prey.isLandHerdHerbivore
+            && prey.authoringLengthMetres <= predator.authoringLengthMetres * maximumPreyLengthRatio
+    }
+}
+
 /// A bounded, deterministic land-prey acquisition goal used only by V2
-/// prehistoric profiles. It owns neither a hunger meter nor a saved path:
-/// normal target/navigation state is intentionally transient and re-acquires
-/// from the authoritative loaded herd after a resume.
+/// prehistoric profiles. It owns no saved path: normal target/navigation
+/// state is intentionally transient and re-acquires from the authoritative
+/// loaded herd after a resume. `PrehistoricPredationPolicy` bounds which prey
+/// qualifies and pauses acquisition while the predator is satiated.
 private final class PrehistoricHuntTargetGoal: Goal {
     private static let acquisitionInterval = 80
     private let range: Double
@@ -465,7 +488,8 @@ private final class PrehistoricHuntTargetGoal: Goal {
     override func canUse() -> Bool {
         guard let predator = mob as? PrehistoricCreature,
               predator.usesPredatorHerdCombat,
-              predator.definition.isLandPredator
+              predator.definition.isLandPredator,
+              !predator.isSatiatedAfterKill
         else { return false }
 
         // Goal selectors try new targets only every other entity tick. Keep
@@ -553,6 +577,11 @@ public final class PrehistoricCreature: Animal {
     /// A fresh creature/load has no value and probes once immediately; later
     /// probes are throttled below.
     private var lastBreathingRouteProbeAge: Int?
+    /// The predator's own `age` until which it starts no new hunt after a
+    /// kill (`PrehistoricPredationPolicy.satiationTicks`). Deliberately
+    /// session-only: a resumed predator is simply hungry again, so no save or
+    /// LAN field is needed.
+    private var satiatedUntilAge: Int?
 
     public override var type: String { definition.id }
     public override func ambientSound() -> String? { definition.soundName(for: .ambient) }
@@ -574,6 +603,12 @@ public final class PrehistoricCreature: Animal {
     /// resumed, while V2 reacquires transient targets from its loaded world.
     fileprivate var usesPredatorHerdCombat: Bool {
         world.generationSettings.preset.supportsPredatorHerdCombat
+    }
+
+    /// True while a land predator is still digesting its last kill.
+    var isSatiatedAfterKill: Bool {
+        guard let satiatedUntilAge else { return false }
+        return age < satiatedUntilAge
     }
 
     public init(world: World, definition: PrehistoricCreatureDefinition) {
@@ -651,12 +686,13 @@ public final class PrehistoricCreature: Animal {
 
     /// Stable nearest-prey selection for a land predator. The explicit ID
     /// tiebreak preserves deterministic behavior even if a world later changes
-    /// its entity insertion order.
+    /// its entity insertion order. Only prey the predation policy admits for
+    /// this predator's size qualifies.
     fileprivate func nearestLandHerdPrey(range: Double) -> PrehistoricCreature? {
         let candidates = world.getEntitiesNear(x, y, z, range) { entity in
             guard let other = entity as? PrehistoricCreature else { return false }
             return other !== self && !other.dead && other.deathTime <= 0
-                && other.definition.isLandHerdHerbivore
+                && PrehistoricPredationPolicy.landPredator(self.definition, mayHunt: other.definition)
         }
         var best: PrehistoricCreature?
         var bestDistance = Double.infinity
@@ -840,10 +876,12 @@ public final class PrehistoricCreature: Animal {
         }
         if huntedHerdHerbivore && (target.health <= 0 || target.deathTime > 0) {
             // Feeding is a bounded presentation/action state after a genuine
-            // prey kill. It deliberately does not introduce hunger/carcass
-            // persistence beyond the existing authoritative death/drop path.
+            // prey kill, followed by a session-only satiation window. It
+            // deliberately does not introduce hunger/carcass persistence
+            // beyond the existing authoritative death/drop path.
             setAction(.eat, ticks: 48)
             setTarget(nil)
+            satiatedUntilAge = age + PrehistoricPredationPolicy.satiationTicks
         }
     }
 
@@ -1629,6 +1667,10 @@ public func prehistoricHasClearance(
                     if block != Int(B.water) && !(cell >= 0 && isWaterlogged(UInt16(cell))) { return false }
                 } else if block == Int(B.water) || block == Int(B.lava)
                     || block < 0 || (block != 0 && (block >= blockDefs.count || !blockDefs[block].replaceable)) {
+                    return false
+                } else if cell >= 0, cell <= Int(UInt16.max), isWaterlogged(UInt16(cell)) {
+                    // Seagrass is replaceable but still water: a land or air
+                    // body never stands in water-filled flora.
                     return false
                 }
             }

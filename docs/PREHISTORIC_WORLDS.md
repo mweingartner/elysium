@@ -122,7 +122,11 @@ portion of the night.
 
 At an eligible dawn, bounded attempts refill available population capacity near
 active players using the existing loaded-terrain, distance, water, and whole-body
-clearance checks. Successful land-dinosaur births follow **herbivore, herbivore,
+clearance checks. Prehistoric maps apply the category caps to each active player's
+own neighbourhood (creatures within 128 blocks of that player), so herds parked at
+the edge of loaded terrain (beyond the simulation radius) cannot hold every slot
+while the area around the player empties, and in LAN play one player's full region
+cannot use up another's vacancies; regular maps keep counting the whole loaded world. Successful land-dinosaur births follow **herbivore, herbivore,
 carnivore**, with the next position saved across waves. Failed attempts do not
 advance that ratio, and mortality can change the ratio of survivors. **Ancient
 Seas** deliberately has no land-herbivore table: its native pterosaur/marine
@@ -148,9 +152,12 @@ both kinds of seedling output. See the [Player Guide](../PLAYER_GUIDE.md#wildlif
 Version 2 and 3 profiles opt into the land ecology. A land predator performs a
 bounded deterministic prey scan on a fixed cadence, selects a visible nearby
 land herd herbivore by distance then stable entity id, and keeps the normal
-player-target fallback at lower priority. It eats only after it has actually
-killed that herbivore; there is no hidden hunger meter, corpse ledger, or
-chunk-order-dependent ecosystem state. Pterosaurs and marine reptiles retain
+player-target fallback at lower priority. It hunts only herbivores no longer
+than one and a half times its own length (a Compsognathus hunts none), eats only
+after it has actually killed its prey, and then starts no new hunt for 6000 of
+its own ticks. That satiation window lives only in the running session; there
+is no saved hunger meter, corpse ledger, or chunk-order-dependent ecosystem
+state, and these limits apply in place to existing v2 and v3 maps. Pterosaurs and marine reptiles retain
 their specialized air/water controllers rather than receiving a nonsensical
 land hunt rule.
 
@@ -286,6 +293,26 @@ Native visual review remains a separate empirical step: use the built game's
 roster to capture the renderer's real output. Audio recipe validation proves
 the source/packaging route, but a human listening review is separately labeled
 as unauditioned unless one is actually performed.
+
+### Dinosaur persistence and refill — September 26, 2026
+
+In-app probes ran the optimized debug-control build on the isolated debug copy of
+the user's prehistoric New World (`wmuhh0wumk62d`), counting live `prehistoric.*`
+entities by persistent id through the debug snapshot.
+
+- **Dawn births across quit.** Starting shortly before dawn, the unmodified
+  `0458c45` build refilled 284 to 288 dinosaurs, but its next launch found 287:
+  a dawn birth in a never-edited chunk was not saved on quit. The fixed build
+  refilled to 289 and its next launch found all 289 by id.
+- **Stable population.** 284 dinosaurs survived a 60 s run, a 600-block trip
+  that unloaded and reloaded their chunks, and a quit and reload, with identical ids.
+- **Rapid unload/reload.** Eight 360-block round trips about a second apart left
+  every home dinosaur in place. Extra ids seen after returning were the far chunks'
+  own worldgen residents, which reload only when those chunks load again.
+
+The unload/reload race itself is timing-dependent in the app; the
+`ChunkEntityPersistenceTests` reload-race cases are its deterministic proof
+(all three fail with the awaiting-commit lookup removed).
 
 ## Revisit conditions
 

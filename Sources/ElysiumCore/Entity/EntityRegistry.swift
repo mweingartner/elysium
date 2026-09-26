@@ -267,10 +267,13 @@ func canSpawnAt(_ world: World, _ mobType: String, _ cat: String, _ x: Int, _ y:
         return true
     }
     // land mobs never spawn inside fluids (water is "replaceable" and slipped
-    // through — zombies and chickens were spawning in the ocean)
+    // through — zombies and chickens were spawning in the ocean). Water-filled
+    // flora counts as water too: underwater tall seagrass on a sand seabed is
+    // replaceable and was admitting land animals and monsters into the sea.
     if atId == Int(B.water) || atId == Int(B.lava) { return false }
     let headId = world.getBlock(x, y + 1, z) >> 4
     if headId == Int(B.water) { return false }
+    if spawnPlacementCellIsWater(world, x, y, z) || spawnPlacementCellIsWater(world, x, y + 1, z) { return false }
     if atId != 0 && !blockDefs[atId].replaceable { return false }
     let head = world.getBlock(x, y + 1, z) >> 4
     if head != 0 && blockDefs[head].solid { return false }
@@ -320,6 +323,100 @@ func canSpawnAt(_ world: World, _ mobType: String, _ cat: String, _ x: Int, _ y:
         return prehistoricHasClearance(world, definition: definition, x: x, y: y, z: z, requireGround: true)
     }
     return true
+}
+
+// =============================================================================
+// Spawn placement
+// =============================================================================
+
+/// Where a spawned body belongs with respect to water. Only aquatic creatures
+/// may be put into water; everything that lives on land is kept out of it.
+public enum SpawnPlacementMedium: Equatable, Sendable {
+    /// Must be placed in water: fish, squid, dolphins, guardians, axolotls,
+    /// tadpoles and the prehistoric aquatic roster.
+    case water
+    /// Must keep its whole body out of water, lava and water-filled flora.
+    case land
+    /// At home in or out of water (drowned, turtles, frogs): only lava and
+    /// solid obstruction are refused.
+    case amphibious
+    /// Not a creature at all (boats, minecarts, end crystals): no fluid rule.
+    case object
+}
+
+/// Ordinary (non-prehistoric) mobs that live in water. Membership lookups only.
+let ORDINARY_AQUATIC_MOBS: Set<String> = [
+    "squid", "glow_squid", "cod", "salmon", "tropical_fish", "pufferfish",
+    "dolphin", "axolotl", "guardian", "elder_guardian", "tadpole",
+]
+/// Ordinary mobs equally at home in water and on land.
+let AMPHIBIOUS_MOBS: Set<String> = ["drowned", "turtle", "frog"]
+/// Spawnable entity types that are objects rather than creatures.
+let NON_CREATURE_SPAWN_TYPES: Set<String> = ["boat", "minecart", "end_crystal"]
+
+public func spawnPlacementMedium(forMob mobType: String) -> SpawnPlacementMedium {
+    if let definition = PrehistoricCreatureDefinition.named(mobType) {
+        return definition.medium == .aquatic ? .water : .land
+    }
+    if ORDINARY_AQUATIC_MOBS.contains(mobType) { return .water }
+    if AMPHIBIOUS_MOBS.contains(mobType) { return .amphibious }
+    if NON_CREATURE_SPAWN_TYPES.contains(mobType) { return .object }
+    return .land
+}
+
+/// Water or water-filled flora (seagrass, kelp, coral, sea pickles).
+func spawnPlacementCellIsWater(_ world: World, _ x: Int, _ y: Int, _ z: Int) -> Bool {
+    let cell = world.getBlock(x, y, z)
+    guard cell >= 0, cell <= Int(UInt16.max) else { return false }
+    return isWaterlogged(UInt16(cell))
+}
+
+/// Water, water-filled flora, or lava.
+func spawnPlacementCellIsFluid(_ world: World, _ x: Int, _ y: Int, _ z: Int) -> Bool {
+    spawnPlacementCellIsWater(world, x, y, z) || world.getBlock(x, y, z) >> 4 == Int(B.lava)
+}
+
+/// True when a two-cell ordinary body standing at (x, y, z) has its feet or
+/// head in water, water-filled flora or lava. This is the fluid part of
+/// `spawnPlacementIsValid` alone, for callers such as generated structure
+/// occupants whose authored cell may legitimately hold a non-replaceable block.
+func spawnBodyTouchesFluid(_ world: World, _ x: Int, _ y: Int, _ z: Int) -> Bool {
+    spawnPlacementCellIsFluid(world, x, y, z) || spawnPlacementCellIsFluid(world, x, y + 1, z)
+}
+
+/// The one shared, RNG-free placement rule for direct spawn paths (raid waves,
+/// patrols, the AI companion's summon). Aquatic creatures go only into water;
+/// land creatures keep their body out of water, lava and water-filled flora
+/// and may not stand directly on water; prehistoric creatures additionally
+/// need their whole-body clearance (`prehistoricHasClearance`, grounded for
+/// land and air). Unlike `canSpawnAt` it has no biome, light or ground-type
+/// rule and never draws randomness, so routing a caller through it cannot
+/// perturb any RNG stream.
+public func spawnPlacementIsValid(_ world: World, _ mobType: String, _ x: Int, _ y: Int, _ z: Int) -> Bool {
+    guard y > world.info.minY, y + 1 < world.info.minY + world.info.height,
+          world.isLoadedAt(x, z) else { return false }
+    if let definition = PrehistoricCreatureDefinition.named(mobType) {
+        return prehistoricHasClearance(world, definition: definition, x: x, y: y, z: z,
+                                       requireGround: definition.medium != .aquatic)
+    }
+    // Body cells must not be solid. A non-solid plant (a flower, tall grass)
+    // is a fine place to stand; callers wanting a stricter open-cell rule
+    // (the AI companion requires a replaceable foot cell) check it themselves.
+    func open(_ id: Int) -> Bool { id == 0 || (id > 0 && id < blockDefs.count && !blockDefs[id].solid) }
+    let feet = world.getBlock(x, y, z) >> 4
+    let head = world.getBlock(x, y + 1, z) >> 4
+    switch spawnPlacementMedium(forMob: mobType) {
+    case .water:
+        return spawnPlacementCellIsWater(world, x, y, z)
+    case .land:
+        if spawnBodyTouchesFluid(world, x, y, z) { return false }
+        // standing directly on water would drop the body straight into it
+        if spawnPlacementCellIsWater(world, x, y - 1, z) { return false }
+        return open(feet) && open(head)
+    case .amphibious, .object:
+        if feet == Int(B.lava) || head == Int(B.lava) { return false }
+        return open(feet) && open(head)
+    }
 }
 
 @inline(__always)

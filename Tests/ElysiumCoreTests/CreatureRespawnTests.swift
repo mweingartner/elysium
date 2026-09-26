@@ -250,6 +250,139 @@ final class CreatureRespawnTests: XCTestCase {
         XCTAssertEqual(world.creatureRespawnSequence, 1)
     }
 
+    // MARK: - local dawn census (prehistoric profiles)
+
+    /// Eighteen land dinosaurs parked in the fixture's loaded corners, more
+    /// than `PREHISTORIC_DAWN_CENSUS_RADIUS` from the player but well inside
+    /// the loaded area — the outer ring that never ticks in the real game.
+    private func parkFarLandDinosaurs(in world: World) throws -> [PrehistoricCreature] {
+        let dryosaurus = try XCTUnwrap(PrehistoricCreatureDefinition.named("prehistoric.dryosaurus"))
+        var parked: [PrehistoricCreature] = []
+        for index in 0..<18 {
+            let corner = index % 4
+            let x = (corner % 2 == 0 ? 1.0 : -1.0) * (100.5 + Double(index / 4))
+            let z = (corner / 2 == 0 ? 1.0 : -1.0) * (104.5 - Double(index / 4))
+            let creature = PrehistoricCreature(world: world, definition: dryosaurus)
+            creature.setPos(x, 64, z)
+            world.addEntity(creature)
+            XCTAssertGreaterThan((x * x + z * z).squareRoot(), PREHISTORIC_DAWN_CENSUS_RADIUS)
+            parked.append(creature)
+        }
+        return parked
+    }
+
+    func testFarLoadedDinosaursNoLongerBlockALocalPrehistoricRefill() throws {
+        let (world, player) = fixture(.prehistoricLostWorldV3)
+        let parked = try parkFarLandDinosaurs(in: world)
+        var rng = RandomX(0xFA5)
+        let report = replenishCreaturesAtDawn(world, [player], &rng)
+        XCTAssertGreaterThan(report.creaturesSpawned, 0,
+                             "far loaded dinosaurs must not occupy the region's refill vacancies")
+        XCTAssertLessThanOrEqual(report.creaturesSpawned, 18)
+        let parkedIDs = Set(parked.map(\.id))
+        let births = world.entities.compactMap { $0 as? PrehistoricCreature }
+            .filter { !parkedIDs.contains($0.id) && $0.definition.medium == .land }
+        XCTAssertEqual(births.count, report.creaturesSpawned)
+        for birth in births {
+            let dx = birth.x - player.x, dz = birth.z - player.z
+            let horizontal = (dx * dx + dz * dz).squareRoot()
+            XCTAssertGreaterThanOrEqual(horizontal, 23, "births stay outside the 24-block player margin")
+            XCTAssertLessThanOrEqual(horizontal, 105, "births come from the 24...104-block sampling ring")
+        }
+    }
+
+    func testLocalPrehistoricPopulationStillFillsTheCap() throws {
+        let (world, player) = fixture(.prehistoricLostWorldV3)
+        let dryosaurus = try XCTUnwrap(PrehistoricCreatureDefinition.named("prehistoric.dryosaurus"))
+        for index in 0..<18 {
+            let creature = PrehistoricCreature(world: world, definition: dryosaurus)
+            // Right at the census edge, inside the radius on the diagonal.
+            let offset = PREHISTORIC_DAWN_CENSUS_RADIUS / 2.0.squareRoot() - 1 - Double(index % 3)
+            creature.setPos(offset, 64, -offset)
+            world.addEntity(creature)
+        }
+        var rng = RandomX(0xFA5)
+        let report = replenishCreaturesAtDawn(world, [player], &rng)
+        XCTAssertEqual(report.creaturesSpawned, 0, "a local population at the cap leaves no vacancy")
+    }
+
+    func testCensusCountsDinosaursNearAnyEligiblePlayer() throws {
+        let (world, player) = fixture(.prehistoricLostWorldV3)
+        _ = try parkFarLandDinosaurs(in: world)
+        // A LAN guest standing among the parked herd makes it local again.
+        let guest = Player(world: world)
+        guest.setPos(102.5, 64, 102.5)
+        world.addEntity(guest)
+        let mob = try XCTUnwrap(world.entities.compactMap { $0 as? PrehistoricCreature }.first)
+        XCTAssertFalse(dawnCensusCounts(mob, prehistoric: true, players: [player]))
+        XCTAssertTrue(dawnCensusCounts(mob, prehistoric: true, players: [player, guest]))
+        XCTAssertTrue(dawnCensusCounts(mob, prehistoric: false, players: [player]),
+                      "ordinary worlds keep the whole-loaded-world census")
+    }
+
+    func testOrdinaryWorldsKeepTheWholeLoadedWorldCensus() throws {
+        let (world, player) = fixture()
+        for index in 0..<18 {
+            let cow = try XCTUnwrap(spawnMob(world, "cow", 104.5 - Double(index % 3), 64, -104.5))
+            XCTAssertGreaterThan(((cow.x * cow.x) + (cow.z * cow.z)).squareRoot(), PREHISTORIC_DAWN_CENSUS_RADIUS)
+        }
+        var rng = RandomX(0xD00D)
+        let before = state(rng)
+        let report = replenishCreaturesAtDawn(world, [player], &rng)
+        XCTAssertEqual(report.creaturesSpawned, 0, "far animals still fill a normal world's creature cap")
+        XCTAssertNotEqual(state(rng), before, "the ambient/water categories still sample as before")
+    }
+
+    /// `dawnCensusCounts` uses `<=`, not `<`: a mob exactly on the boundary
+    /// circle still occupies a vacancy, and only strictly beyond it is free.
+    func testDawnCensusRadiusBoundaryIsInclusiveAtExactlyTheLimit() throws {
+        let (world, player) = fixture(.prehistoricLostWorldV3)
+        let dryosaurus = try XCTUnwrap(PrehistoricCreatureDefinition.named("prehistoric.dryosaurus"))
+        let atLimit = PrehistoricCreature(world: world, definition: dryosaurus)
+        atLimit.setPos(player.x + PREHISTORIC_DAWN_CENSUS_RADIUS, player.y, player.z)
+        let justBeyond = PrehistoricCreature(world: world, definition: dryosaurus)
+        justBeyond.setPos(player.x + PREHISTORIC_DAWN_CENSUS_RADIUS + 0.01, player.y, player.z)
+        let justInside = PrehistoricCreature(world: world, definition: dryosaurus)
+        justInside.setPos(player.x + PREHISTORIC_DAWN_CENSUS_RADIUS - 0.01, player.y, player.z)
+        XCTAssertTrue(dawnCensusCounts(atLimit, prehistoric: true, players: [player]),
+                      "exactly at the census radius still counts (<=, not <)")
+        XCTAssertFalse(dawnCensusCounts(justBeyond, prehistoric: true, players: [player]),
+                       "just past the census radius no longer counts")
+        XCTAssertTrue(dawnCensusCounts(justInside, prehistoric: true, players: [player]))
+    }
+
+    /// A LAN world with players in two separate, distant regions: player A's
+    /// own neighbourhood is already saturated at the category cap, but player
+    /// B's neighbourhood — more than twice the census radius away, with
+    /// nothing of its own nearby — should still receive its own refill. The
+    /// cap is a single shared counter across every eligible player, so a
+    /// crowded region belonging to one player can silently starve every other
+    /// player's own separate, empty region.
+    func testASaturatedRegionDoesNotStarveARemoteEligiblePlayersOwnVacancy() throws {
+        let (world, playerA) = fixture(.prehistoricLostWorldV3)
+        // Both stay well within the fixture's loaded -112...111 chunk grid so
+        // player B's own sampling ring has real loaded ground to spawn onto.
+        playerA.setPos(-70.5, 64, -70.5)
+        let playerB = Player(world: world)
+        playerB.setPos(70.5, 64, 70.5)
+        world.addEntity(playerB)
+        let dx = playerB.x - playerA.x, dz = playerB.z - playerA.z
+        XCTAssertGreaterThan((dx * dx + dz * dz).squareRoot(), PREHISTORIC_DAWN_CENSUS_RADIUS,
+                             "the two players' regions must not overlap the census radius")
+
+        let dryosaurus = try XCTUnwrap(PrehistoricCreatureDefinition.named("prehistoric.dryosaurus"))
+        for index in 0..<18 {
+            let creature = PrehistoricCreature(world: world, definition: dryosaurus)
+            creature.setPos(playerA.x + Double(index % 6), 64, playerA.z)
+            world.addEntity(creature)
+        }
+        var rng = RandomX(0xFA5)
+        let report = replenishCreaturesAtDawn(world, [playerA, playerB], &rng)
+        XCTAssertGreaterThan(report.creaturesSpawned, 0,
+                             "player B's own empty region should still receive a refill even though " +
+                             "player A's separate, already-full region shares the same category cap")
+    }
+
     func testDawnSamplingAndSpeciesPicksAreDeterministic() {
         func run() -> ([String], [UInt32], CreatureRespawnReport) {
             let (world, player) = fixture(.prehistoricJurassicGiantsV2)

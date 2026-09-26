@@ -25,6 +25,29 @@ func prehistoricDawnLandEntries(profile: PrehistoricWorldProfile, sequence: Int)
     }
 }
 
+/// Horizontal radius, in blocks, of a prehistoric world's dawn census. Only
+/// living mobs this close to an eligible player occupy a refill vacancy. It
+/// covers the 104-block maximum sampling distance plus the largest body, so a
+/// crowded refill area still reads as full, while dinosaurs parked in the
+/// outer loaded ring (which never tick beyond the 96-block simulation radius)
+/// no longer hold every slot and starve the region around the player.
+let PREHISTORIC_DAWN_CENSUS_RADIUS = 128.0
+
+/// Whether `mob` counts against a dawn refill's category caps. Ordinary worlds
+/// keep the historical whole-loaded-world census; prehistoric profiles count
+/// only the population local to an eligible player. Pure distance arithmetic:
+/// no RNG and no dependence on entity order.
+func dawnCensusCounts(_ mob: Mob, prehistoric: Bool, players: [Entity]) -> Bool {
+    guard prehistoric else { return true }
+    return players.contains { dawnCensusIncludes(x: mob.x, z: mob.z, around: $0) }
+}
+
+/// Whether a position lies in one eligible player's prehistoric census neighbourhood.
+func dawnCensusIncludes(x: Double, z: Double, around player: Entity) -> Bool {
+    let dx = x - player.x, dz = z - player.z
+    return dx * dx + dz * dz <= PREHISTORIC_DAWN_CENSUS_RADIUS * PREHISTORIC_DAWN_CENSUS_RADIUS
+}
+
 /// Refill vacancies at one eligible dawn, with no debt carried into daytime.
 /// There are at most 128 site candidates and 38 successful births. The caller
 /// persists the consumed dawn and `creatureRespawnSequence`; this function
@@ -50,12 +73,23 @@ public func replenishCreaturesAtDawn(
     }
     guard !eligiblePlayers.isEmpty else { return report }
 
+    let profile = world.generationSettings.preset.prehistoricProfile
+    // Ordinary worlds keep one whole-loaded-world count per category. Prehistoric worlds keep
+    // one count per eligible player's neighbourhood, so a saturated region around one LAN
+    // player cannot use up the vacancies of another player's separate region.
     var counts: [String: Int] = [:]
+    var localCounts: [[String: Int]] = Array(repeating: [:], count: eligiblePlayers.count)
     for entity in world.entities {
         guard let mob = entity as? Mob, !mob.dead, mob.health > 0 else { continue }
-        counts[mob.category, default: 0] += 1
+        guard profile != nil else { counts[mob.category, default: 0] += 1; continue }
+        for (index, player) in eligiblePlayers.enumerated() where dawnCensusIncludes(x: mob.x, z: mob.z, around: player) {
+            localCounts[index][mob.category, default: 0] += 1
+        }
     }
-    let profile = world.generationSettings.preset.prehistoricProfile
+    func saturated(_ category: String, cap: Int) -> Bool {
+        profile == nil ? counts[category, default: 0] >= cap
+            : localCounts.allSatisfy { $0[category, default: 0] >= cap }
+    }
     let categories: [(name: String, cap: Int, budget: Int)] = [
         ("creature", 18, 64), ("ambient", 15, 32), ("water", 5, 32),
     ]
@@ -66,9 +100,11 @@ public func replenishCreaturesAtDawn(
             continue
         }
         for _ in 0..<category.budget {
-            if counts[category.name, default: 0] >= category.cap { break }
+            if saturated(category.name, cap: category.cap) { break }
             report.candidateAttempts += 1
-            let player = eligiblePlayers[rng.nextInt(eligiblePlayers.count)]
+            let playerIndex = rng.nextInt(eligiblePlayers.count)
+            let player = eligiblePlayers[playerIndex]
+            if profile != nil, localCounts[playerIndex][category.name, default: 0] >= category.cap { continue }
             let distance = 24 + rng.nextFloat() * 80
             let angle = rng.nextFloat() * .pi * 2
             let x = ifloor(player.x + detCos(angle) * distance)
@@ -108,7 +144,14 @@ public func replenishCreaturesAtDawn(
             }
             guard spawnMob(world, entry.mob, Double(x) + 0.5, Double(y), Double(z) + 0.5,
                            SpawnOpts(prehistoricSeedSalt: salt)) != nil else { continue }
-            counts[category.name, default: 0] += 1
+            if profile == nil {
+                counts[category.name, default: 0] += 1
+            } else {
+                for (index, other) in eligiblePlayers.enumerated()
+                    where dawnCensusIncludes(x: Double(x) + 0.5, z: Double(z) + 0.5, around: other) {
+                    localCounts[index][category.name, default: 0] += 1
+                }
+            }
             switch category.name {
             case "creature":
                 report.creaturesSpawned += 1

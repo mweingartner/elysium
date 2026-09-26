@@ -602,6 +602,20 @@ public final class GameCore {
     public var lastChunkUpdates = 0
     /// unload records awaiting the once-per-second batched write
     private var pendingChunkSaves: [String: ChunkRecord] = [:]
+    /// Chunk records handed to the serial save queue but not yet committed, by
+    /// DB key. A reload consults these (after `pendingChunkSaves`) before the
+    /// database, so a chunk revisited moments after unloading never rebuilds
+    /// from an older row. The hand-off sequence keeps an older batch's
+    /// completion from retiring a newer record for the same key.
+    private var inFlightChunkSaves: [String: (sequence: UInt64, record: ChunkRecord)] = [:]
+    private var chunkSaveHandoffSequence: UInt64 = 0
+    /// Per loaded host chunk: the sorted ids of the persistable entities that
+    /// reloading it from its current persisted state would reproduce (its
+    /// record's entities, or its worldgen spawns when it has no record). The
+    /// live residents differ exactly when an entity was born, died, arrived or
+    /// left — changes only a rewrite persists, which is how autosave finds
+    /// them without rewriting every chunk. Keyed lookups only, never iterated.
+    private var persistedChunkEntityIDs: [DimChunk: [Int]] = [:]
 
     private let genQueue = DispatchQueue(label: "elysium.gen", qos: .userInitiated, attributes: .concurrent)
     private let meshQueue = DispatchQueue(label: "elysium.mesh", qos: .userInitiated, attributes: .concurrent)
@@ -1393,6 +1407,10 @@ public final class GameCore {
         savedChunkKeys.removeAll()
         savedFullKeys.removeAll()
         pendingChunkSaves.removeAll()
+        // The terminal save above was synchronous on the serial save queue,
+        // so every earlier hand-off has committed by now.
+        inFlightChunkSaves.removeAll()
+        persistedChunkEntityIDs.removeAll()
         clearEntityTimeouts()
         resetLANClientRoutingState()
         host?.clearAllSections()
@@ -2325,6 +2343,7 @@ public final class GameCore {
         if let adv { advancements.load(adv) }
         dragonSpawned = false
         worlds.removeAll()
+        persistedChunkEntityIDs.removeAll()
         resetEntityIds(max(1, rec.nextEntityId))
         // object-graph-attributes change 1a, design.md Decision 3/Condition 7:
         // install the durable id-reservation hook for a real (non-LAN-client)
@@ -2615,18 +2634,31 @@ public final class GameCore {
     }
 #endif
 
+    /// Which loaded chunks a save rewrites.
+    enum ChunkCaptureScope {
+        /// Autosave: chunks whose blocks were modified or whose persisted
+        /// entity membership changed (a birth, death, arrival or departure).
+        /// Entity-only records keep this cheap for never-edited chunks.
+        case changed
+        /// Unload and terminal/explicit saves: additionally every chunk with
+        /// live residents (so their positions and health are current) or an
+        /// existing record (so an emptied chunk drops its stale entities).
+        case everythingResident
+    }
+
     public func saveAndFlush(synchronous: Bool = false) {
-        _ = saveAndFlushResult(synchronous: synchronous)
+        _ = saveAndFlushResult(synchronous: synchronous, scope: .changed)
     }
 
     /// Synchronous persistence contract for automation and other callers that must distinguish
-    /// a committed save from the ordinary best-effort autosave path.
+    /// a committed save from the ordinary best-effort autosave path. An explicit checked save
+    /// captures the current state of every resident entity, not just membership changes.
     @discardableResult
     public func saveAndFlushChecked() -> Bool {
-        saveAndFlushResult(synchronous: true)
+        saveAndFlushResult(synchronous: true, scope: .everythingResident)
     }
 
-    private func saveAndFlushResult(synchronous: Bool) -> Bool {
+    private func saveAndFlushResult(synchronous: Bool, scope: ChunkCaptureScope) -> Bool {
         guard inWorld else { return false }
         if isLANClientWorld {
             // A10: once the connection is known lost, stop overwriting the last-good resume
@@ -2698,20 +2730,28 @@ public final class GameCore {
         let advancementIDs = advancements.save()
         db.putAdvancements(rec.id, advancementIDs)
         let advancementsSaved = !synchronous || db.getAdvancements(rec.id) == advancementIDs
-        // all modified chunks across all dims
-        var records: [ChunkRecord] = []
-        for (d, w) in worlds {
-            for c in w.chunks.values where c.modified {
-                records.append(chunkRecord(rec.id, d, w, c))
+        // Unload records still waiting in the batch buffer go first: a chunk
+        // reloaded from one of them may be captured again below, and within a
+        // batch the last row for a key is the one that lands.
+        var records: [ChunkRecord] = pendingChunkSaves.keys.sorted().compactMap { pendingChunkSaves[$0] }
+        pendingChunkSaves.removeAll()
+        // Then every loaded chunk (all dimensions) the scope selects, in a
+        // fixed dimension/chunk order.
+        for d in worlds.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+            guard let w = worlds[d] else { continue }
+            let residentsByChunk = chunkResidents(w)
+            let temporaryEntityIDs = w.rpgTemporaryEntityIDsForPersistence()
+            for c in w.chunks.values.sorted(by: { $0.cx == $1.cx ? $0.cz < $1.cz : $0.cx < $1.cx }) {
+                if let record = captureChunkRecord(
+                    rec.id, w, c, residents: residentsByChunk[chunkKey(c.cx, c.cz)] ?? [],
+                    temporaryEntityIDs: temporaryEntityIDs, scope: scope) {
+                    records.append(record)
+                }
             }
         }
-        // include any unload records still waiting in the batch buffer
-        for r in pendingChunkSaves.values { records.append(r) }
-        pendingChunkSaves.removeAll()
         for r in records { savedChunkKeys.insert(r.key) }
-        let chunksSaved: Bool
+        let chunksSaved = writeChunkRecords(records, synchronous: synchronous)
         if synchronous {
-            chunksSaved = withSaveQueueSync { self.writeChunkBatch(records) }
             if !chunksSaved {
                 // Keep both live and already-unloaded records eligible for a retry. The async
                 // recovery scheduled by writeChunkBatch is intentionally redundant here.
@@ -2719,14 +2759,11 @@ public final class GameCore {
                     if let dimension = Dim(rawValue: record.dim),
                        let chunk = worlds[dimension]?.chunks[chunkKey(record.cx, record.cz)] {
                         chunk.modified = true
-                    } else {
+                    } else if pendingChunkSaves[record.key] == nil {
                         pendingChunkSaves[record.key] = record
                     }
                 }
             }
-        } else {
-            chunksSaved = true
-            withSaveQueueAsync { [weak self] in _ = self?.writeChunkBatch(records) }
         }
         if chunksSaved {
             for w in worlds.values {
@@ -2742,7 +2779,10 @@ public final class GameCore {
         guard inWorld else { return }
         for w in worlds.values { w.finalizeRPGTransientState() }
         player?.clearRPGTerminalUpkeeps()
-        saveAndFlush(synchronous: synchronous)
+        // The terminal save captures every loaded chunk that holds or held
+        // entities, so entity changes in never-edited chunks (a dawn birth,
+        // a dinosaur that wandered across a chunk border) survive the exit.
+        _ = saveAndFlushResult(synchronous: synchronous, scope: .everythingResident)
     }
 
     private func saveLANClientResume() {
@@ -2786,10 +2826,50 @@ public final class GameCore {
         host?.showActionBar(trimmed, 100)
     }
 
+    /// Hands a batch of chunk records to the serial save queue. Until it
+    /// commits, each record stays visible through `chunkRecordAwaitingCommit`,
+    /// so a chunk reloaded meanwhile adopts it rather than an older row. The
+    /// synchronous path also acts as a barrier behind every earlier hand-off.
+    @discardableResult
+    private func writeChunkRecords(_ records: [ChunkRecord], synchronous: Bool) -> Bool {
+        chunkSaveHandoffSequence &+= 1
+        let sequence = chunkSaveHandoffSequence
+        for record in records { inFlightChunkSaves[record.key] = (sequence, record) }
+        if synchronous {
+            let committed = withSaveQueueSync { self.writeChunkBatch(records, sequence: sequence) }
+            retireInFlightChunkSaves(records, sequence: sequence)
+            return committed
+        }
+        withSaveQueueAsync { [weak self] in
+            guard let self else { return }
+            _ = self.writeChunkBatch(records, sequence: sequence)
+            DispatchQueue.main.async { [weak self] in
+                self?.retireInFlightChunkSaves(records, sequence: sequence)
+            }
+        }
+        return true
+    }
+
+    /// Main thread: forgets hand-off `sequence`'s records once written (or
+    /// requeued after a failure), unless a newer hand-off owns the key.
+    private func retireInFlightChunkSaves(_ records: [ChunkRecord], sequence: UInt64) {
+        for record in records where inFlightChunkSaves[record.key]?.sequence == sequence {
+            inFlightChunkSaves.removeValue(forKey: record.key)
+        }
+    }
+
+    /// The newest record for `dbKey` that the database may not hold yet: a
+    /// buffered unload record, else one handed to the save queue but not yet
+    /// committed. Chunk loads prefer it over `db.getChunk`, which can still
+    /// return an older row (or none) for about a second after an unload.
+    func chunkRecordAwaitingCommit(_ dbKey: String) -> ChunkRecord? {
+        pendingChunkSaves[dbKey] ?? inFlightChunkSaves[dbKey]?.record
+    }
+
     /// runs ON the save queue; on failure re-marks the chunks dirty (on main)
     /// so the next autosave retries instead of silently losing the edits
     @discardableResult
-    private func writeChunkBatch(_ records: [ChunkRecord]) -> Bool {
+    private func writeChunkBatch(_ records: [ChunkRecord], sequence: UInt64) -> Bool {
         if db.putChunks(records) { return true }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -2798,8 +2878,10 @@ public final class GameCore {
                 guard let d = Dim(rawValue: r.dim), let w = self.worlds[d] else { continue }
                 if let c = w.chunks[chunkKey(r.cx, r.cz)] {
                     c.modified = true
-                } else {
-                    // already unloaded — requeue the record itself
+                } else if self.pendingChunkSaves[r.key] == nil,
+                          (self.inFlightChunkSaves[r.key]?.sequence ?? sequence) <= sequence {
+                    // already unloaded, and no newer record for it is queued
+                    // or in flight — requeue the record itself
                     self.pendingChunkSaves[r.key] = r
                 }
             }
@@ -2865,17 +2947,109 @@ public final class GameCore {
         }
     }
 
-    private func chunkRecord(_ worldId: String, _ d: Dim, _ w: World, _ c: Chunk) -> ChunkRecord {
-        // persist entities standing in this chunk (skip player + transient)
-        var ents: [[String: Any]] = []
-        let temporaryEntityIDs = w.rpgTemporaryEntityIDsForPersistence()
+    /// Live entities standing in each chunk, bucketed by chunk key in
+    /// `w.entities` order: every non-player, living `Entity` whose position
+    /// lies in the chunk (the residency rule a chunk record captures).
+    private func chunkResidents(_ w: World) -> [Int64: [Entity]] {
+        var residents: [Int64: [Entity]] = [:]
         for e in w.entities {
             guard let ent = e as? Entity, !ent.isPlayer, !ent.dead else { continue }
-            if temporaryEntityIDs.contains(ent.id) { continue }
-            if floorDiv(ifloor(ent.x), 16) != c.cx || floorDiv(ifloor(ent.z), 16) != c.cz { continue }
-            if (ent.type == "item" || ent.type == "xp_orb") && ent.age > 4000 { continue }
-            ents.append(ent.save())
+            residents[chunkKey(floorDiv(ifloor(ent.x), 16), floorDiv(ifloor(ent.z), 16)), default: []].append(ent)
         }
+        return residents
+    }
+
+    /// The residents a chunk record keeps: session-temporary RPG entities and
+    /// expired item/XP drops are never persisted.
+    private static func persistedEntities(_ residents: [Entity], temporaryEntityIDs: Set<Int>) -> [Entity] {
+        residents.filter { ent in
+            if temporaryEntityIDs.contains(ent.id) { return false }
+            if (ent.type == "item" || ent.type == "xp_orb") && ent.age > 4000 { return false }
+            return true
+        }
+    }
+
+    /// Shared record capture for unloading and saving a loaded host chunk.
+    /// Returns a record (and remembers its entity membership as persisted)
+    /// when `scope` finds state a reload would otherwise get wrong; nil when
+    /// the chunk's persisted state is already current for that scope.
+    private func captureChunkRecord(
+        _ worldId: String, _ w: World, _ c: Chunk, residents: [Entity],
+        temporaryEntityIDs: Set<Int>, scope: ChunkCaptureScope
+    ) -> ChunkRecord? {
+        let persisted = Self.persistedEntities(residents, temporaryEntityIDs: temporaryEntityIDs)
+        let persistedIDs = persisted.map(\.id).sorted()
+        let membershipKey = DimChunk(dim: w.dim.rawValue, key: chunkKey(c.cx, c.cz))
+        let membershipChanged = (persistedChunkEntityIDs[membershipKey] ?? []) != persistedIDs
+        let needed: Bool
+        switch scope {
+        case .changed:
+            needed = c.modified || membershipChanged
+        case .everythingResident:
+            needed = c.modified || membershipChanged || !residents.isEmpty
+                || savedChunkKeys.contains(db.chunkKey(worldId, w.dim.rawValue, c.cx, c.cz))
+        }
+        guard needed else { return nil }
+        let record = chunkRecord(worldId, w.dim, w, c, entities: persisted)
+        savedChunkKeys.insert(record.key)
+        persistedChunkEntityIDs[membershipKey] = persistedIDs
+        return record
+    }
+
+    /// Remembers the entities a reload of `c` would reproduce: everything just
+    /// adopted with it, from its record or from worldgen when it has none —
+    /// wherever they stand. A worldgen pack member placed across the border in
+    /// a neighbour therefore reads as having left `c`, so `c` gets a record
+    /// that stops a reload regenerating it while the neighbour persists it.
+    private func recordAdoptedEntityMembership(_ w: World, _ c: Chunk, _ adopted: [Entity]) {
+        let reproduced = adopted.filter { !$0.isPlayer && !$0.dead }
+        persistedChunkEntityIDs[DimChunk(dim: w.dim.rawValue, key: chunkKey(c.cx, c.cz))] =
+            Self.persistedEntities(reproduced, temporaryEntityIDs: []).map(\.id).sorted()
+    }
+
+#if DEBUG
+    /// Test seam: the entity ids a loaded chunk's persisted state reproduces.
+    func _testPersistedEntityIDs(_ dimension: Dim, cx: Int, cz: Int) -> [Int]? {
+        persistedChunkEntityIDs[DimChunk(dim: dimension.rawValue, key: chunkKey(cx, cz))]
+    }
+
+    /// Test seam: queue a record exactly as `unloadChunk` does, without unloading.
+    func _testBufferChunkRecord(_ record: ChunkRecord) {
+        pendingChunkSaves[record.key] = record
+    }
+
+    /// Test seam: mark a record handed to the save queue but not yet committed.
+    func _testMarkChunkRecordInFlight(_ record: ChunkRecord) {
+        chunkSaveHandoffSequence &+= 1
+        inFlightChunkSaves[record.key] = (chunkSaveHandoffSequence, record)
+    }
+
+    /// Test seam: park the serial save queue until the returned gate is
+    /// signalled, so hand-offs stay uncommitted (the reload race window).
+    func _testHoldSaveQueue() -> DispatchSemaphore {
+        let gate = DispatchSemaphore(value: 0)
+        saveQueue.async { gate.wait() }
+        return gate
+    }
+
+    /// Test seam: drop a loaded chunk through the real unload path.
+    func _testUnloadChunk(_ dimension: Dim, cx: Int, cz: Int) {
+        guard let w = worlds[dimension], let c = w.getChunk(cx, cz) else { return }
+        unloadChunk(w, c)
+    }
+
+    /// Test seam: load a chunk through the real synchronous load path.
+    func _testEnsureChunkLoaded(_ dimension: Dim, cx: Int, cz: Int) {
+        guard let w = worlds[dimension] else { return }
+        ensureChunksLoaded(w, cx, cz, 0)
+    }
+#endif
+
+    private func chunkRecord(_ worldId: String, _ d: Dim, _ w: World, _ c: Chunk,
+                             entities persisted: [Entity]) -> ChunkRecord {
+        // persist the entities standing in this chunk (already filtered to
+        // skip players, the dead, session-temporary and expired drops)
+        let ents: [[String: Any]] = persisted.map { $0.save() }
         let key = db.chunkKey(worldId, d.rawValue, c.cx, c.cz)
         // object-graph-attributes change 1a: a chunk carrying object records
         // must take the full path even when otherwise unmodified — the
@@ -3034,12 +3208,15 @@ public final class GameCore {
         let seed = w.seed
         let height = w.info.height
         let hasSky = w.info.hasSky
-        let saved = savedChunkKeys.contains(db.chunkKey(worldId, d.rawValue, cx, cz))
+        let dbKey = db.chunkKey(worldId, d.rawValue, cx, cz)
+        let saved = savedChunkKeys.contains(dbKey)
+        // A record not yet committed is newer than whatever the database holds.
+        let awaitingCommit = saved ? chunkRecordAwaitingCommit(dbKey) : nil
         let db = self.db
         let minY = w.info.minY
         genQueue.async { [weak self] in
-            var savedRec: ChunkRecord? = nil
-            if saved { savedRec = db.getChunk(worldId, d.rawValue, cx, cz) }
+            var savedRec: ChunkRecord? = awaitingCommit
+            if saved && savedRec == nil { savedRec = db.getChunk(worldId, d.rawValue, cx, cz) }
             let c: Chunk
             var beSpecs: [BESpec]? = nil
             var entitySpecs: [EntitySpec]? = nil
@@ -3239,10 +3416,12 @@ public final class GameCore {
             }
         }
         // entities: any saved record (full or entity-only) overrides worldgen spawns
+        var adopted: [Entity] = []
         if let saved {
             for ed in saved.entities {
                 if let e = loadEntity(w, ed) {
                     w.addEntity(e)
+                    adopted.append(e)
                     if let dragon = e as? EnderDragon { armDragon(dragon) }
                 }
             }
@@ -3251,8 +3430,10 @@ public final class GameCore {
                 guard Self.shouldMaterializeGeneratedEntity(es, in: w) else { continue }
                 let m = spawnMob(w, es.mob, es.x, es.y, es.z, spawnOptsFrom(es.data))
                 m?.persistent = true
+                if let m { adopted.append(m) }
             }
         }
+        recordAdoptedEntityMembership(w, c, adopted)
     }
 
     /// Fresh chunk output is normally admitted by the generator's local
@@ -3268,7 +3449,14 @@ public final class GameCore {
         // fresh generated EntitySpec. Existing saved entities remain
         // authoritative through the separate saved-record branch above.
         if world.generationSettings.preset.isPrehistoric, definition == nil { return false }
-        guard let definition else { return true }
+        guard let definition else {
+            // Ordinary structure occupants keep their authored cell (it may
+            // legitimately hold a door or carpet), but a land creature whose
+            // body would stand in water or lava is not materialized. Aquatic
+            // and amphibious occupants (monument guardians) are unaffected.
+            let x = ifloor(spec.x), y = ifloor(spec.y), z = ifloor(spec.z)
+            return spawnPlacementMedium(forMob: spec.mob) != .land || !spawnBodyTouchesFluid(world, x, y, z)
+        }
         return prehistoricHasClearance(
             world,
             definition: definition,
@@ -3508,7 +3696,8 @@ public final class GameCore {
                 if w.chunks[chunkKey(cx, cz)] != nil { continue }
                 var saved: ChunkRecord? = nil
                 if let worldId, savedChunkKeys.contains(db.chunkKey(worldId, w.dim.rawValue, cx, cz)) {
-                    saved = db.getChunk(worldId, w.dim.rawValue, cx, cz)
+                    let dbKey = db.chunkKey(worldId, w.dim.rawValue, cx, cz)
+                    saved = chunkRecordAwaitingCommit(dbKey) ?? db.getChunk(worldId, w.dim.rawValue, cx, cz)
                     if let s = saved, Self.recordUsable(s, height: w.info.height) {
                         let light = computeLocalLight(blocks: s.blocks!, height: w.info.height, hasSky: w.info.hasSky)
                         let chunk = Self.makeChunk(cx, cz, w.info.minY, w.info.height, s.blocks!, s.biomes!, light.sky, light.blk)
@@ -3582,13 +3771,12 @@ public final class GameCore {
         // Temporary blocks/entities are session state and must be restored or
         // removed before the chunk record is captured.
         w.cancelRPGTemporaryEffects(inChunkX: c.cx, z: c.cz)
-        // persist if edited, if live entities stand in it, or if a stale record exists
-        var hasEntities = false
+        // persisted (by `captureChunkRecord` below) if edited, if live entities
+        // stand in it, if its entity membership changed, or if a stale record exists
         var entitiesInChunk: [Entity] = []
         for e in w.entities {
             guard let ent = e as? Entity, !ent.isPlayer, !ent.dead else { continue }
             if floorDiv(ifloor(ent.x), 16) == c.cx && floorDiv(ifloor(ent.z), 16) == c.cz {
-                hasEntities = true
                 entitiesInChunk.append(ent)
             }
         }
@@ -3603,13 +3791,18 @@ public final class GameCore {
         // authority) — queuing them here would grow pendingChunkSaves unboundedly since
         // saveAndFlush never drains it for LAN client worlds.
         if !isLANClientWorld, let rec = worldRec {
-            let dbKey = db.chunkKey(rec.id, w.dim.rawValue, c.cx, c.cz)
-            if c.modified || hasEntities || savedChunkKeys.contains(dbKey) {
-                let record = chunkRecord(rec.id, w.dim, w, c)
-                savedChunkKeys.insert(record.key)
+            // re-read residents: an unload handler above may have changed them
+            let residents = w.entities.compactMap { $0 as? Entity }.filter { ent in
+                !ent.isPlayer && !ent.dead
+                    && floorDiv(ifloor(ent.x), 16) == c.cx && floorDiv(ifloor(ent.z), 16) == c.cz
+            }
+            if let record = captureChunkRecord(
+                rec.id, w, c, residents: residents,
+                temporaryEntityIDs: w.rpgTemporaryEntityIDsForPersistence(), scope: .everythingResident) {
                 pendingChunkSaves[record.key] = record
             }
         }
+        persistedChunkEntityIDs.removeValue(forKey: DimChunk(dim: w.dim.rawValue, key: chunkKey(c.cx, c.cz)))
         // entities standing in the chunk were captured in the record; drop the live ones
         for e in Array(w.entities) {
             guard let ent = e as? Entity, !ent.isPlayer, !ent.dead else { continue }
@@ -4319,9 +4512,9 @@ public final class GameCore {
 
         // batched unload writes — one transaction per second at most
         if !pendingChunkSaves.isEmpty && w.time % 20 == 0 {
-            let batch = Array(pendingChunkSaves.values)
+            let batch = pendingChunkSaves.keys.sorted().compactMap { pendingChunkSaves[$0] }
             pendingChunkSaves.removeAll()
-            withSaveQueueAsync { [weak self] in _ = self?.writeChunkBatch(batch) }
+            writeChunkRecords(batch, synchronous: false)
         }
 
         // autosave

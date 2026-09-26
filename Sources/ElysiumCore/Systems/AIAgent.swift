@@ -2167,7 +2167,7 @@ public func executeAIAgentAction(_ action: AIAgentAction, world: World, player: 
         guard world.isLoadedAt(target.x, target.z) else {
             throw AIAgentError.unloadedTarget(target.x, target.y, target.z)
         }
-        guard canAIAgentSpawnEntity(at: target, in: world) else {
+        guard canAIAgentSpawnEntity(entityName, at: target, in: world) else {
             throw AIAgentError.entitySpawnFailed(entityName)
         }
         let count = min(AIAgentMaxSpawnCount, max(1, action.count ?? 1))
@@ -2434,13 +2434,20 @@ private func removeAIAgentNearbyEntities(world: World, player: Player, rawEntity
     return removed
 }
 
-private func canAIAgentSpawnEntity(at target: (x: Int, y: Int, z: Int), in world: World) -> Bool {
+/// Admission for the companion's summon: the target must be open, and the
+/// shared spawn-placement rule must hold, so a land mob is never summoned
+/// into water (water is replaceable and passed the open-cell check alone)
+/// while fish, squid and other aquatic mobs still go into it. (Prehistoric
+/// species are not in the companion's spawnable-name list.)
+private func canAIAgentSpawnEntity(_ entityName: String, at target: (x: Int, y: Int, z: Int),
+                                   in world: World) -> Bool {
     let footId = world.getBlockId(target.x, target.y, target.z)
     if footId != 0 && !blockDefs[footId].replaceable {
         return false
     }
     let headId = world.getBlockId(target.x, target.y + 1, target.z)
-    return headId == 0 || !blockDefs[headId].solid
+    guard headId == 0 || !blockDefs[headId].solid else { return false }
+    return spawnPlacementIsValid(world, entityName, target.x, target.y, target.z)
 }
 
 public func buildAIAgentSnapshot(world: World, player: Player, cursor: RaycastHit?,

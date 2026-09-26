@@ -288,7 +288,9 @@ The four optional **Prehistoric Worlds** profiles replace the ordinary natural p
 roster of prehistoric creatures. Each creature has its own calls and action sounds, including attacks and
 movement. A player-attributed kill gives ordinary experience based on that creature's configured combat
 difficulty—health, active damage, and predator/charge behaviour—not merely its apparent size. This is
-separate from the usage-based Melee and Ranged skill-tree XP described below.
+separate from the usage-based Melee and Ranged skill-tree XP described below. On v2 and v3 maps land
+predators hunt only herbivores up to about one and a half times their own length and rest for a while
+after a successful kill.
 
 New dinosaur maps also have more underground caves and lava regions. Look for occasional small rocky
 volcanoes on dry land, with exposed lava inside their craters. They do not erupt, but their lava is still
@@ -308,7 +310,9 @@ night counts as reaching the next dawn. Each saved world retains its progress wh
 reload; changing the preference takes effect at a future eligible dawn, not immediately.
 
 At that dawn, Elysium attempts to refill vacancies near active players, subject to population caps and
-safe, loaded habitat. Regular maps use their ordinary animal, flying-creature, and aquatic tables.
+safe, loaded habitat. On prehistoric maps the caps apply around each player: only creatures within
+about 128 blocks of that player count, so distant herds at the edge of the loaded area (or another
+player's crowded region) no longer stop your surroundings from refilling. Regular maps use their ordinary animal, flying-creature, and aquatic tables.
 Prehistoric maps use their selected roster instead. New **land dinosaurs** follow a repeating
 **herbivore, herbivore, carnivore** sequence across successful spawns—even across separate dawns.
 This is a birth ratio, not a guarantee that the surviving population always has that ratio. **Ancient
