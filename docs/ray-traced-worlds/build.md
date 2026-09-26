@@ -65,6 +65,27 @@ a second world load; the cause was the debug manual clock remaining paused acros
 `world.load`, not a product defect. Probes also require a visible window; macOS
 stops drawing a fully covered MTKView.
 
+### Production release result
+
+Fresh-context reviews: the security review found no defect with a reachable trigger
+(GPU indexing, NaN/Inf propagation, loop bounds, the `info.w` float reinterpretation,
+sky-texture lifetime, cache growth, main-thread confinement). The test review added
+13 real-Metal tests (band-limited waves and the seamless 1800 s wrap, reflection
+horizon guard, luminance cap, R2 range, sky coordinate round trip, native top-water
+radiance with a sharp seabed edge, selection-cache refresh) and ran the full suite:
+2721 tests, 0 failures.
+
+Release-surface object pins reproduce only in the original `~/dev/pebble` checkout;
+identical source built elsewhere drifts. The product pin was renewed there from
+`af471e5e86293490b3804826f42dd8df176d9be83ce0eb17b2f8018de1dd65c5` to `c0e54413f6c934b6493115610ac6315218e747b06c0f296149d5ac339fea370f`;
+Core, Storage, TextInput and elysmoke are unchanged. `scripts/pipeline.sh` passed all
+nine stages: source security, warning-free release build, release surface and binary,
+2721 XCTest cases, 491 smoke checks with zero failures, signed packaging, AppKit text
+entry (two fields, no clipboard access), installation and installed identity/codesign.
+
+Installed production application: `/Applications/Elysium.app`, executable SHA-256
+`2a746007822d8a7c0a28cbb249e0f33ea42f4c1cf7920a5cbcafc8cea3fff8d5`.
+
 ## Forest performance, blur, and foliage shimmer — September 25, 2026
 
 The final renderer separates expensive lighting from full-resolution authored
