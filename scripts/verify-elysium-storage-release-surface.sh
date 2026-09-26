@@ -380,7 +380,11 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='bac98960847ed8da6628ac5f54aa25568f6362a36db418
 # waterlogged-plant mesher rule, the GameCore capture above, per-player prehistoric dawn caps,
 # predation limits and the shared spawn-placement validator. Disposable-copy strip -S -x keeps
 # ElysiumStorage.o and ElysiumTextInput.o byte-identical.
-EXPECTED_CORE_OBJECT_SHA256='35904f889ce1aded57b5cfa6f8c5899e138fca181e7f9e729ae37aeddc7fd286'
+# Predator balance + AI dinosaur summons (September 26, 2026): the Core object renews from
+# 35904f889ce1aded57b5cfa6f8c5899e138fca181e7f9e729ae37aeddc7fd286 for PrehistoricHerdEncounterPolicy
+# and the AI companion's prehistoric names, spawn_group skill and area placement. GameCore, Saves,
+# Player, storage and text-input sources and objects are byte-identical.
+EXPECTED_CORE_OBJECT_SHA256='34edb81054075654b14b735a077e58ec4aaa5a6d492023a11eba0f5acc710c4e'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -415,8 +419,11 @@ EXPECTED_CORE_OBJECT_SHA256='35904f889ce1aded57b5cfa6f8c5899e138fca181e7f9e729ae
 # the linked products from c0e54413f6c934b6493115610ac6315218e747b06c0f296149d5ac339fea370f
 # (Elysium) and 85f96e0560205a6d1fce44f252162bd0b21eede6cad8f16fd4532c38b7e91f7a (elysmoke),
 # built warning-free in this checkout. Evidence: docs/ray-traced-worlds/build.md.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='a285474e1660c88583fdc1615e24154b5c3462c0d76cc35f4a236d3d7269ecf5'
-EXPECTED_SMOKE_PRODUCT_SHA256='deed923b3b5ef5a477b866b0851a723e91332f5113f05d3b5301c75c6ad326f7'
+# The same Core change renews the linked products from a285474e1660c88583fdc1615e24154b5c3462c0d76cc35f4a236d3d7269ecf5
+# (Elysium) and deed923b3b5ef5a477b866b0851a723e91332f5113f05d3b5301c75c6ad326f7 (elysmoke), built
+# warning-free in this checkout; no app-target source changed.
+EXPECTED_ELYSIUM_PRODUCT_SHA256='561430af23190308b2b32a1fc6bbb5884de97651923dda68f83009da1911689d'
+EXPECTED_SMOKE_PRODUCT_SHA256='47973dfa8d0fae05554f331bb16ef34acdda2a965da4ecc7bd2d2dab53b03927'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'
