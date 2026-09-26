@@ -343,6 +343,14 @@ A Tyrannosaurus hunting five Triceratops for 6000 ticks retreated twice and surv
 at 49 of 62 health; all five Triceratops lived. The closed runs decline slowly
 because nothing refills them; in a real world the dawn refill replaces losses.
 
+The same release lets the AI companion summon any prehistoric species and populate
+the player's area. In the built app, `/ai spawn some predators and herbivores in my
+area` in the user's New World replied "Spawned 2 predators (2 Oviraptor) and 5
+herbivores (4 Dryosaurus, Pachycephalosaurus) around you", and all nine dinosaurs
+near the player were alive three minutes later. `bash scripts/pipeline.sh` passed all
+nine stages from `/Users/mweingar/dev/pebble` (2,823 tests, 491 golden checks); the
+installed `/Applications/Elysium.app` executable SHA-256 is `0a6418f3aa8d30088b4cd946a3a73524aefe17013c6205e264e3f1ec38d378f4`.
+
 ## Revisit conditions
 
 Revisit this design if a model exceeds the rigid-part budget, body-aware
