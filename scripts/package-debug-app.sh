@@ -90,6 +90,8 @@ cp "$ROOT/packaging/DebugInfo.plist" "$OUTPUT/Contents/Info.plist"
 cp "$ROOT/packaging/AppIcon.icns" "$OUTPUT/Contents/Resources/"
 cp "$ROOT/packaging/logo.png" "$OUTPUT/Contents/Resources/"
 cp "$ROOT/packaging/title-bg.png" "$OUTPUT/Contents/Resources/"
+python3 "$ROOT/scripts/verify-dinosaur-sounds.py" >&2
+cp -R "$ROOT/packaging/DinosaurSounds" "$OUTPUT/Contents/Resources/DinosaurSounds"
 PACK_ASSETS=(
     "Faithful 64x - December 2025 Release.zip"
     "Faithful 64x - Ore Borders 64x.zip"

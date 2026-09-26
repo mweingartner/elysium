@@ -157,6 +157,8 @@ cp "$ROOT/packaging/Info.plist" "$OUTPUT/Contents/Info.plist"
 cp "$ROOT/packaging/AppIcon.icns" "$OUTPUT/Contents/Resources/"
 cp "$ROOT/packaging/logo.png" "$OUTPUT/Contents/Resources/"
 cp "$ROOT/packaging/title-bg.png" "$OUTPUT/Contents/Resources/"
+python3 "$ROOT/scripts/verify-dinosaur-sounds.py" >&2
+cp -R "$ROOT/packaging/DinosaurSounds" "$OUTPUT/Contents/Resources/DinosaurSounds"
 mkdir -p "$OUTPUT/Contents/Resources/Helpers" "$OUTPUT/Contents/Resources/ArnisLegal"
 bash "$ROOT/scripts/build-arnis-helper.sh" \
     "$OUTPUT/Contents/Resources/Helpers/arnis-elysium" >&2

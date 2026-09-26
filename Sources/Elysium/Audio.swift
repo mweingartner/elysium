@@ -11,6 +11,12 @@ import ElysiumCore
 // ---------------------------------------------------------------------------
 // voices
 // ---------------------------------------------------------------------------
+struct CreatureSoundPosition {
+    let x: Double
+    let y: Double
+    let z: Double
+}
+
 private enum OscType {
     case sine, square, sawtooth, triangle
 }
@@ -38,6 +44,10 @@ private struct Voice {
     var noisePos = 0.0
     var z1 = 0.0, z2 = 0.0      // biquad state (transposed direct form II)
     var done = false
+    var sample: DinosaurSample?
+    var sampleCursor = 0.0
+    var creaturePosition: CreatureSoundPosition?
+    var creatureVolume = 1.0
     var isDisc = false          // jukebox voices — stopDisc cuts ONLY these
 }
 
@@ -80,11 +90,13 @@ final class AudioEngineM {
     var musicTimer = 600
     private var musicPlayingUntil = 0.0
     private var discUntil = 0.0
+    private var dinosaurSamples = DinosaurSampleBank()
     private var inited = false
 
-    func initEngine() {
+    func initEngine(startDevice: Bool = true) {
         if inited { return }
         inited = true
+        dinosaurSamples = DinosaurSampleBank.loadBundled()
         for i in 0..<noise.count { noise[i] = Float.random(in: -1...1) }
         let format = engine.outputNode.outputFormat(forBus: 0)
         sampleRate = format.sampleRate > 0 ? format.sampleRate : 48000
@@ -95,7 +107,7 @@ final class AudioEngineM {
         }
         engine.attach(srcNode)
         engine.connect(srcNode, to: engine.mainMixerNode, format: renderFormat)
-        try? engine.start()
+        if startDevice { try? engine.start() }
         applyVolumes(volumes)
     }
 
@@ -114,6 +126,8 @@ final class AudioEngineM {
         reverbAmt = caveFactor * 0.35
     }
     func setListener(_ x: Double, _ y: Double, _ z: Double, _ yaw: Double) {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
         listenerX = x
         listenerY = y
         listenerZ = z
@@ -122,9 +136,11 @@ final class AudioEngineM {
 
     /// play a positional game sound
     func play(_ name: String, _ x: Double, _ y: Double, _ z: Double, _ volume: Double = 1, _ pitch: Double = 1) {
-        guard inited,
-              let mix = positionalMix(x, y, z, volume) else { return }
-        playRecipe(name, mix.volume, pitch, mix.pan, true)
+        guard inited, pitch.isFinite, pitch > 0,
+              let mix = gameSoundMix(name, x, y, z, volume) else { return }
+        let creature = isCreatureSound(name) ? CreatureSoundPosition(x: x, y: y, z: z) : nil
+        playRecipe(name, mix.volume, pitch, mix.pan, true,
+                   creaturePosition: creature, creatureVolume: volume)
     }
 
     /// Produces the same positional attenuation/pan used by synthesized player sounds, with the
@@ -142,23 +158,20 @@ final class AudioEngineM {
         )
     }
 
-    private func positionalMix(
-        _ x: Double, _ y: Double, _ z: Double, _ volume: Double
+    /// Uses the production routing without requiring an audio device, so spatial contracts
+    /// can be checked numerically. Creature range is fixed, independent of caller volume.
+    func gameSoundMix(
+        _ name: String, _ x: Double, _ y: Double, _ z: Double, _ volume: Double
     ) -> (volume: Double, pan: Double)? {
-        guard x.isFinite, y.isFinite, z.isFinite, volume.isFinite, volume >= 0,
-              listenerX.isFinite, listenerY.isFinite, listenerZ.isFinite,
-              listenerYaw.isFinite else {
-            return nil
-        }
-        let dx = x - listenerX, dy = y - listenerY, dz = z - listenerZ
-        let dist = (dx * dx + dy * dy + dz * dz).squareRoot()
-        guard dist.isFinite else { return nil }
-        let maxDist = 18 * max(1, volume)
-        if dist > maxDist { return nil }
-        let atten = min(1, max(0, 1 - dist / maxDist))
-        let angle = Foundation.atan2(-dx, dz) - listenerYaw
-        let pan = min(1, max(-1, -Foundation.sin(angle))) * min(1, max(0, dist / 4))
-        return (volume * atten * atten, pan)
+        positionalMix(x, y, z, volume, maxDistance: isCreatureSound(name) ? 40 : nil)
+    }
+
+    private func positionalMix(
+        _ x: Double, _ y: Double, _ z: Double, _ volume: Double,
+        maxDistance: Double? = nil
+    ) -> (volume: Double, pan: Double)? {
+        positionalSoundMix(x, y, z, volume, listenerX, listenerY, listenerZ, listenerYaw,
+                           maxDistance: maxDistance ?? 18 * max(1, volume))
     }
     func playUI(_ name: String) {
         playRecipe(name, 0.8, 1, 0, false)
@@ -166,7 +179,8 @@ final class AudioEngineM {
 
     private func playRecipe(
         _ name: String, _ volume: Double, _ pitch: Double, _ pan: Double,
-        _ allowReverb: Bool
+        _ allowReverb: Bool, creaturePosition: CreatureSoundPosition? = nil,
+        creatureVolume: Double = 1
     ) {
         guard inited, volume > 0.001 else { return }
         guard let recipe = resolveRecipe(name) else { return }
@@ -176,9 +190,30 @@ final class AudioEngineM {
             return Double(seed) / 4294967296.0
         }
         let gain = min(1.5, volume) * (catGains[recipe.cat] ?? 1)
-        let reverbSend = allowReverb && caveFactor > 0.05 ? caveFactor * 0.6 : 0
+        // The shared room delay cannot follow an individual source after the listener
+        // leaves its radius. Keep creature calls dry so no delayed voice leaks past 40 blocks.
+        let reverbSend = allowReverb && creaturePosition == nil && caveFactor > 0.05 ? caveFactor * 0.6 : 0
         var sink = VoiceSink(start: now(), pan: pan, gain: gain, reverbSend: reverbSend)
-        recipe.build(&sink, pitch, rng)
+        if let sample = dinosaurSamples.sample(for: name) {
+            var voice = Voice()
+            voice.sample = sample
+            voice.pitchRate = min(2, max(0.5, pitch))
+            voice.dur = Double(sample.frames.count) / sample.sampleRate / voice.pitchRate
+            voice.vol = 1
+            voice.start = sink.start
+            voice.pan = pan
+            voice.gain = gain
+            voice.reverbSend = reverbSend
+            sink.voices.append(voice)
+        } else {
+            recipe.build(&sink, pitch, rng)
+        }
+        if let creaturePosition {
+            for i in sink.voices.indices {
+                sink.voices[i].creaturePosition = creaturePosition
+                sink.voices[i].creatureVolume = min(1.5, creatureVolume) * (catGains[recipe.cat] ?? 1)
+            }
+        }
         addVoices(sink.voices)
         if let sub = recipe.subtitle { onSubtitle?(sub) }
     }
@@ -353,7 +388,7 @@ final class AudioEngineM {
     }
 
     // ---- render ---------------------------------------------------------------
-    private func render(_ frameCount: AVAudioFrameCount, _ abl: UnsafeMutablePointer<AudioBufferList>) {
+    func render(_ frameCount: AVAudioFrameCount, _ abl: UnsafeMutablePointer<AudioBufferList>) {
         let buffers = UnsafeMutableAudioBufferListPointer(abl)
         guard buffers.count >= 2,
               let outL = buffers[0].mData?.assumingMemoryBound(to: Float.self),
@@ -363,6 +398,7 @@ final class AudioEngineM {
 
         os_unfair_lock_lock(&lock)
         let t = engineTime
+        let listener = (listenerX, listenerY, listenerZ, listenerYaw)
         engineTime += Double(n) * dt
         var local = voices
         if !voiceInbox.isEmpty {
@@ -395,6 +431,15 @@ final class AudioEngineM {
             }
             // scheduled in a future block — skip the whole sample loop
             if v.start >= t + Double(n) * dt { continue }
+            // Re-evaluate active creature calls as the listener walks or turns. Positions
+            // are the emission location, not a retained entity or simulation-thread reference.
+            if let source = v.creaturePosition {
+                let mix = positionalSoundMix(source.x, source.y, source.z, v.creatureVolume,
+                                             listener.0, listener.1, listener.2, listener.3,
+                                             maxDistance: 40)
+                v.gain = mix?.volume ?? 0
+                v.pan = mix?.pan ?? 0
+            }
             // biquad coefficients (recomputed per block — voices are short)
             var b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0
             if v.isNoise {
@@ -428,7 +473,9 @@ final class AudioEngineM {
                 if rel > v.dur + 0.05 { break }
                 // envelope: linear attack → exponential decay to 0.001 at dur
                 var env: Double
-                if rel < v.attack {
+                if v.sample != nil {
+                    env = rel < v.dur ? v.vol : 0
+                } else if rel < v.attack {
                     env = rel / v.attack * v.vol
                 } else if rel >= v.dur {
                     env = 0
@@ -438,7 +485,15 @@ final class AudioEngineM {
                 }
                 if env <= 0 { continue }
                 var sample: Double
-                if v.isNoise {
+                if let recorded = v.sample {
+                    let index = Int(v.sampleCursor)
+                    guard index < recorded.frames.count else { break }
+                    let next = min(index + 1, recorded.frames.count - 1)
+                    let fraction = v.sampleCursor - Double(index)
+                    sample = Double(recorded.frames[index]) * (1 - fraction) +
+                        Double(recorded.frames[next]) * fraction
+                    v.sampleCursor += recorded.sampleRate / sampleRate * v.pitchRate
+                } else if v.isNoise {
                     v.noisePos += v.pitchRate
                     let s = Double(noise[Int(v.noisePos) & noiseMask])
                     // TDF-II biquad
@@ -469,8 +524,9 @@ final class AudioEngineM {
                 outR[i] += s * panR
                 // reverb send into the delay lines
                 if v.reverbSend > 0 {
-                    delayL[(delayPos + i) % delayL.count] += s * Float(v.reverbSend)
-                    delayR[(delayPosR + i) % delayR.count] += s * Float(v.reverbSend)
+                    let spatialGain = v.creaturePosition == nil ? 1 : v.gain
+                    delayL[(delayPos + i) % delayL.count] += s * Float(v.reverbSend * spatialGain)
+                    delayR[(delayPosR + i) % delayR.count] += s * Float(v.reverbSend * spatialGain)
                 }
             }
             local[vi] = v
@@ -1526,4 +1582,97 @@ private func resolveRecipe(_ name: String) -> SoundRecipe? {
         return RECIPES[hostile ? "entity.zombie.\(parts[2])" : "entity.pig.\(parts[2])"]
     }
     return nil
+}
+
+/// Presentation-only: no simulation RNG, save state, or network authority changes.
+private func isCreatureSound(_ name: String) -> Bool {
+    guard name.hasPrefix("entity."), let recipe = resolveRecipe(name) else { return false }
+    return recipe.cat == "friendly" || recipe.cat == "hostile"
+}
+
+func positionalSoundMix(
+    _ x: Double, _ y: Double, _ z: Double, _ volume: Double,
+    _ listenerX: Double, _ listenerY: Double, _ listenerZ: Double, _ listenerYaw: Double,
+    maxDistance: Double
+) -> (volume: Double, pan: Double)? {
+    guard x.isFinite, y.isFinite, z.isFinite, volume.isFinite, volume > 0,
+          listenerX.isFinite, listenerY.isFinite, listenerZ.isFinite,
+          listenerYaw.isFinite, maxDistance.isFinite, maxDistance > 0 else { return nil }
+    let dx = x - listenerX, dy = y - listenerY, dz = z - listenerZ
+    let distance = (dx * dx + dy * dy + dz * dz).squareRoot()
+    guard distance.isFinite, distance < maxDistance else { return nil }
+    let attenuation = 1 - distance / maxDistance
+    let angle = Foundation.atan2(-dx, dz) - listenerYaw
+    let pan = min(1, max(-1, -Foundation.sin(angle))) * min(1, distance / 4)
+    return (volume * attenuation * attenuation, pan)
+}
+
+
+struct DinosaurSample {
+    let frames: [Float]
+    let sampleRate: Double
+}
+
+/// Fixed source-owned filenames only. Neither sound hooks nor saves supply filesystem paths.
+/// Decode once on engine startup; the audio callback sees immutable PCM with no file I/O.
+struct DinosaurSampleBank {
+    private(set) var samples: [String: DinosaurSample] = [:]
+
+    static func assetKey(for sound: String) -> String? {
+        let parts = sound.split(separator: ".")
+        guard parts.count == 4, parts[0] == "entity", parts[1] == "prehistoric",
+              PrehistoricCreatureDefinition.all.contains(where: { $0.id == "prehistoric." + parts[2] })
+        else { return nil }
+        let action: String
+        switch parts[3] {
+        case "ambient", "idle", "browse", "eat": action = "grazing"
+        case "attack": action = "attack"
+        case "hurt": action = "injured"
+        default: return nil
+        }
+        return "\(parts[2])-\(action)"
+    }
+
+    func sample(for sound: String) -> DinosaurSample? {
+        guard let key = Self.assetKey(for: sound) else { return nil }
+        return samples[key]
+    }
+
+    static func loadBundled() -> DinosaurSampleBank {
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            guard let resources = Bundle.main.resourceURL else { return DinosaurSampleBank() }
+            return load(directory: resources.appendingPathComponent("DinosaurSounds"))
+        }
+        // SwiftPM development executable; packaged apps never fall back to an authoring path.
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        return load(directory: root.appendingPathComponent("packaging/DinosaurSounds"))
+    }
+
+    static func load(directory: URL) -> DinosaurSampleBank {
+        var bank = DinosaurSampleBank()
+        for definition in PrehistoricCreatureDefinition.all {
+            let species = String(definition.id.dropFirst("prehistoric.".count))
+            for action in ["grazing", "attack", "injured"] {
+                let key = "\(species)-\(action)"
+                let url = directory.appendingPathComponent(key + ".wav")
+                guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+                      values.isRegularFile == true, values.isSymbolicLink != true,
+                      let size = values.fileSize, size > 44, size <= 512_000,
+                      let file = try? AVAudioFile(forReading: url),
+                      file.processingFormat.channelCount == 1,
+                      file.processingFormat.sampleRate == 24_000,
+                      file.length > 0, file.length <= 24_000 * 8,
+                      let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat,
+                                                    frameCapacity: AVAudioFrameCount(file.length))
+                else { continue }
+                do { try file.read(into: buffer) } catch { continue }
+                guard buffer.frameLength == file.length, let channel = buffer.floatChannelData?[0] else { continue }
+                let frames = Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+                guard frames.allSatisfy({ $0.isFinite && abs($0) <= 1 }) else { continue }
+                bank.samples[key] = DinosaurSample(frames: frames, sampleRate: 24_000)
+            }
+        }
+        return bank
+    }
 }

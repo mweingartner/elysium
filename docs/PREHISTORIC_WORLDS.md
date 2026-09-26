@@ -270,19 +270,23 @@ the legacy animal tail lift, while pterosaurs use a profile-safe standing pose
 instead of the generic phantom fold. This keeps a true in-game side view
 readable without adding a hierarchy or a new animation system.
 
-Creature voices are original runtime synthesis recipes with native accessibility
-subtitles. They do not read a user script-WAV library, external URL, authoring
-path, film/game recording, or network service. New action and locomotion cue
-variation is generated in the audio layer without consuming simulation RNG.
+Creature voices combine bundled Suno-derived recordings with native synthesis and accessibility
+subtitles. Each of the 36 species has its own grazing/quiet-feeding, attack, and injury WAV. The
+18 source masters cover six voice families; species-specific pitch, resonance, timing, and gain
+edits make 108 distinct runtime clips while staying within the existing subscription allowance.
+These are stylized creature effects, not claims about the actual voices of extinct animals.
+See `Assets/dinosaur-audio/` for original exports, prompts, source links, processing and hashes.
+The application never contacts Suno or reads the user script-WAV library for creature voices.
 
-Every roster member has a direct synthesized cue for ambient, injury, death,
-attack, every closed controller action, and its applicable movement rhythm
-(step, wingbeat, or swim stroke). Action cues emit only when the semantic state
-actually changes; motion cues are rate-limited from already-simulated age and
-movement, never by a new random stream. Each species carries a stable,
-source-authored acoustic signature and formant, so matching size/family alone
-cannot make two species share a voice. This preserves the no-external-audio
-constraint while making a nearby creature's action and identity distinguishable.
+Feeding samples cover ambient, idle, browse, and eat cues. Attack and injury use their own
+recordings; remaining action, movement and death cues keep the explicit per-species synthesis
+recipes, which also remain the fallback for missing or invalid recordings. Semantic transitions
+and motion rate limits are unchanged; no additional simulation RNG is consumed.
+
+All friendly/hostile creature entity sounds fade smoothly with distance to silence at 40 blocks,
+independent of caller volume. Active calls update their pan and gain when the player moves or
+turns; their source remains the location where the call was emitted. At 20 blocks amplitude is
+25% of the close level, and at 30 blocks it is 6.25%. Creature reverb sends follow the same fade.
 
 Player-attributed prehistoric kills award ordinary XP orbs from the creature's
 configured combat difficulty, not from visual body length: a bounded health

@@ -1,0 +1,392 @@
+{
+  "schema": 1,
+  "date": "2026-09-26",
+  "provider": "Suno",
+  "settings": {
+    "mode": "Sounds",
+    "type": "One-Shot",
+    "model_label": "v6",
+    "bpm": "Auto",
+    "key": "Any"
+  },
+  "plan_evidence": "Pro shown in account and official download dialogs during generation and export; 20 included downloads initially; 18 selected sources unlocked; no purchase.",
+  "review": {
+    "preview_controls_exercised": true,
+    "audible_acceptance": "User approved the complete current bank after approving the T-Rex attack preview; assistant audio perception unavailable.",
+    "objective_checks": "PCM decoding, duration, peak, fade endpoints, distinct hashes, game mixer and attenuation tests",
+    "user_acceptance": {
+      "date": "2026-09-26",
+      "feedback": "accept them all please",
+      "preview_feedback": "That sound is perfect for the T-Rex",
+      "runtime_sha256s": {
+        "compsognathus-grazing.wav": "63be676a6a8b1566a0b4b5334e436368ab724dec45aa998221788992eb4109b7",
+        "compsognathus-attack.wav": "04d7e484ed4e212b6d25ca371d02127e2d184e8e8dd7c377611066fa26e63dc3",
+        "compsognathus-injured.wav": "d2bc944be084b3979d4cafb35e2b1208e84bdb580c8941b08956ff6c0de4a102",
+        "coelophysis-grazing.wav": "63c7a1341d24415255083b3f0be078610c2370dc1cb493038060b87757459483",
+        "coelophysis-attack.wav": "19fc453af750b985829b56191621070453d13ce43b830114c8217f9994b91a30",
+        "coelophysis-injured.wav": "d6ce34e6579de1b3ac571e81e8d5dfcf5461607c2e9664648a295630e6aca672",
+        "velociraptor-grazing.wav": "a79e78d0ba1308f6a2fd7f5fcb0dc6380b78b28dd9479a2b1cabab6680f7a567",
+        "velociraptor-attack.wav": "a16bd4cacb716a9faafe7e8af0a8f1a240226ffb23982e74f045cb8510c603de",
+        "velociraptor-injured.wav": "b19100352f5859a761405617be5198b264e5200993cf06e9b92c67b495178c75",
+        "dilophosaurus-grazing.wav": "087fe18c53a14edcf6425d30fb38f634e88b70960e7419d065ef0568d813976a",
+        "dilophosaurus-attack.wav": "922e5b37b5125c589b276c1c3c06fc8f83585dd360abbd8a9eb9e8840f453a93",
+        "dilophosaurus-injured.wav": "f3c94c96c6dbc358ef47bcc27e1bf2e8b8ba57b6bd2295206d447cb1b6d9226d",
+        "deinonychus-grazing.wav": "9ac7a581ff4fe9ffa43f9ba441494b355557a088945e63979306fa4d33e6251d",
+        "deinonychus-attack.wav": "12c780bdfff11d9bc9266417bd5dec4d2a1ead68f3a3a6402c4366ca97ff1986",
+        "deinonychus-injured.wav": "0649d6d22f106ecdfba245ccff572cbf336692b2387a9a0ee48342a0be0309e5",
+        "allosaurus-grazing.wav": "2f301d989476f4fac6c9d5e767b01a2dc740f8e14eafc8e1e366a37e1926bd73",
+        "allosaurus-attack.wav": "1e517e28a48d76e00b80637be1749468fa64c330edd572ee57c3482123e5f389",
+        "allosaurus-injured.wav": "3c05d67b78d8518e701cf702ab8794a7e05e01c7b319c0c0cf80929f6352e872",
+        "ceratosaurus-grazing.wav": "ec68c8908405e30a3f429f55713944e5a8d21bbd89a763bec73ea41b01003200",
+        "ceratosaurus-attack.wav": "0470fef7f88f5f469e9fd9784c54ed1cf692d717b1b4073f4c535612ac16f247",
+        "ceratosaurus-injured.wav": "7f5a7cc95a3d8a31c9b2e476f1da30b564594f76afacaea0dd47953cff47fb8d",
+        "carnotaurus-grazing.wav": "a6cfb6f760f16af14a151f877cbf09b932c833bc06a0128114fc4b62bc6a16cb",
+        "carnotaurus-attack.wav": "51b6af3ee9d4f833aabc11a44c6121de9197ab72b7bfe90ca4ad33da7d1639ff",
+        "carnotaurus-injured.wav": "d9ca1bb19fd9683737621fe80d25303bf8d1cd8929fc984874b023ab7333cd83",
+        "tyrannosaurus-grazing.wav": "6d5d0000f77f77292cae5950ce11fbe5938613831c5ee23ce24c748673ca0515",
+        "tyrannosaurus-attack.wav": "727dd8dd77ad841d9fa864ef3f8099adbf5e982e18e53c3399723824a4c79e3e",
+        "tyrannosaurus-injured.wav": "7fc9f33d03ab366c2f3b81c623b50d4468e39a4d71885a45ec09826ee884c2c5",
+        "spinosaurus-grazing.wav": "0d495beecbe054a3d661cd4b9d0d33d249bc43eccaa9a6b7f4ea977a9e1728ff",
+        "spinosaurus-attack.wav": "259b4515d228769ae029d530cbdc4a8943cbba1525143e54d9903c99c54ef647",
+        "spinosaurus-injured.wav": "48a6eb5458d6d2ad611655e705c63964141e3014d7cae8dfd36b7fe3975b54c6",
+        "dryosaurus-grazing.wav": "a34be37a7fb83eed27c3c9819ab9c37b31f41cc368250110b1dc4f32cb2831c4",
+        "dryosaurus-attack.wav": "8a2479bd566ed16fb9a56f32fe12b3e8b94d8458df2010f0be8f2c8bb2a4f628",
+        "dryosaurus-injured.wav": "d4af68724d20c4f52ddce196af3e252e179bc793dc40dc6ba16efd20a2cdfb43",
+        "pachycephalosaurus-grazing.wav": "f479db8596bd82d9c9c57764f50e3c463cac1d6e4d275055ca794e84f2e5e584",
+        "pachycephalosaurus-attack.wav": "51fbb9bf390ca4c9bebcea69239100f93db6f75d0d5e5a72e0fe1132bd9de069",
+        "pachycephalosaurus-injured.wav": "69101237feab3b13966b220ae5b1f6c452fc24e87ba2c4f3aa8fb6817829aa23",
+        "gallimimus-grazing.wav": "243e26a4e2190ea2bac74a481699076389eaff2c728d8087c3b5cb1773377ee7",
+        "gallimimus-attack.wav": "61ca08170c34924920b307f96b7272c8e8c28b0f37ec2322d386c601e78c2b45",
+        "gallimimus-injured.wav": "1177a54a5c39e009fd2adb4c70ce9993372e146c8ecd023c92cce09d2663d118",
+        "oviraptor-grazing.wav": "59f2f493f4b51a6cc62ccf449df7b1ed5fb7523817dde5082baf183cca7a8099",
+        "oviraptor-attack.wav": "db6fc22eaf051128611547e3731f5dbbb59a0bdcbc4661b3057d56c8c48fd0af",
+        "oviraptor-injured.wav": "1f091bdda5a27198f15cc0a762178633a7e6f7ffeba04b304869947434d1ed53",
+        "parasaurolophus-grazing.wav": "81a1775ebfc9398527fdf75f380cd033020e93fb85c29b7f8cc48734ae3bc57b",
+        "parasaurolophus-attack.wav": "859139dc9373521c8b93b0a8b8a590a819c30921237c365d9a316b225da787eb",
+        "parasaurolophus-injured.wav": "abeafe7c04dd2fe41490c95f233a8c388b18859080378da936ac9fc5d8c05f2b",
+        "edmontosaurus-grazing.wav": "53ac272597007d2acddaa201dcf30eb69532719ba0eb86b9d95368dc1b03db74",
+        "edmontosaurus-attack.wav": "cd46d1acf6233d39d4b21290447ef6cc03f8988f606040d4b4a1415f35ceafec",
+        "edmontosaurus-injured.wav": "ce62be44e407bd027c78daf748d87195134f2dfa35a3756e511177bd8c2d7859",
+        "iguanodon-grazing.wav": "5a90b18e2245f381d4f5dc8b00e522ebc7bbf6c16d305902168b4076ce71ea78",
+        "iguanodon-attack.wav": "3a4bab0946311260f3d2379bff55305e35f9a5cd5efe54a93055c7f63250f086",
+        "iguanodon-injured.wav": "ef00f508dad766ed92ccdf41f589f56e6338cb19bd814fbf4edef8b6e4ef0296",
+        "triceratops-grazing.wav": "5545491f7a9d153c017507806cae599d13f6be454abb6d3e45f6d50dfa56c1ef",
+        "triceratops-attack.wav": "dc5f0094e2542f08faa84753ae4485c2dad97b36184a8c8fa4ffde105aa38bb7",
+        "triceratops-injured.wav": "dcbe89e7801ea2cd6b6a52efca2e3b6a284cccf5f206dccc4615eb530e2554db",
+        "styracosaurus-grazing.wav": "079f4fdca2558dc36fdbd8d6a3419735cf1730bc1ee04f99019ec1d641005d11",
+        "styracosaurus-attack.wav": "4bc6ede4588a5b9115ecc8e5d4a885c3e6b9544cafde715fa0b6b6e7b624aaf2",
+        "styracosaurus-injured.wav": "38ad215b06bc5369b5999ff005aa0f3b137251e1e13598c4b50006283c705f65",
+        "stegosaurus-grazing.wav": "0023c2cf7f066ab5f3d02c6a4d35590e4713f98f7d794b5b8b40a658c0ea3fb8",
+        "stegosaurus-attack.wav": "e40b324b423b0cd55ba964665eb3e275279a8f5a50fcd4586726c0aa4e4be300",
+        "stegosaurus-injured.wav": "60f4dfd565ad48ef68bbf22c0b41fadba5017a7266dccff133c30918c09c1e07",
+        "ankylosaurus-grazing.wav": "9e11b76f9d810bcbca06cb9c7cef1932f52b4cebdfe226d69fd07c21b1373942",
+        "ankylosaurus-attack.wav": "d41228b347ad8d079ba8bb5b4f09ad8c2b4af4a93caa06d20ee5e1ba93fbe5ff",
+        "ankylosaurus-injured.wav": "55a10521ac0bf1d0d090fa7714243842e66574ce3aa0f923813c24be3220ffd0",
+        "diplodocus-grazing.wav": "b4adeb19223e99bdda18633ea8e2c5fa251461ac0e4566ed38968a0ac020a5e5",
+        "diplodocus-attack.wav": "1f4bfe02d5241c8cac6c14c7b43f0f6174163e6636b38b3c71d67761fea7a613",
+        "diplodocus-injured.wav": "119e534ca94ca89270ecdc0b1194b4319bdb80868f118f51fecfb8b65025dfc0",
+        "brachiosaurus-grazing.wav": "3691966431ef7718e6ca393a5fa8d17d0c5cede19d03a5803bacf7c9d77440af",
+        "brachiosaurus-attack.wav": "54fcfa95eedfaa37d5ae7b2efd033fd9119c4cfec6d6de6f91f291e2572dbd47",
+        "brachiosaurus-injured.wav": "d7c9a699cb47b34536523625dba71f116b541affee771bffeec153f787b8f035",
+        "therizinosaurus-grazing.wav": "9fba0fc48b040f6e82b38e6dd50366b08cf6434242f060d537eaaf39e25625f8",
+        "therizinosaurus-attack.wav": "a5b05f361aa48edf537474b91c364345f387d6e274aeb63fdd2f5f4b2aa3c2f9",
+        "therizinosaurus-injured.wav": "1a2af430502fcc1e699719f86acb4ed2e0844132bdb4b4444ba292d5d18b45b6",
+        "dimorphodon-grazing.wav": "fbd58f5f2d37dc6537d29d4238422ef087832356b8d54889d1e082df3914340e",
+        "dimorphodon-attack.wav": "54c756d3be96b7ff640fc159ef67b29f62e087ce82a600429f4251794b5a14cc",
+        "dimorphodon-injured.wav": "5117b2b6045c9bdce0a090c9539492f47c24d19d425d9a4601165398170fc397",
+        "rhamphorhynchus-grazing.wav": "a3b4fd81c565294f31883eb07df7d4fc5cb21f781730ae567721c256ff8ce3d4",
+        "rhamphorhynchus-attack.wav": "582fcef6102788cf0b5471218e6918253f0bf33974d7830cd8626a272d2e654d",
+        "rhamphorhynchus-injured.wav": "07639bfdc599b7f7fa8addd9927dc3a4e5c0965c43408b94b014d6751e9c8576",
+        "pteranodon-grazing.wav": "e79e779f4aa709c749a2870eb33c16275522463f1bc64b42900b2b351334b185",
+        "pteranodon-attack.wav": "31d68c10d87ddb052755d9f0c82ee99dbb2c43c98261fcfc27c47073acf39723",
+        "pteranodon-injured.wav": "cd022e39dcf9a6a2bd9493c04fbfe4c75e91a76d2d963eb6bbfc7bdac0f255dd",
+        "tapejara-grazing.wav": "dca257a49f7237ea13c26fc8a545ebf5b21c32dff911c7a5a5fc30cd1ce619fe",
+        "tapejara-attack.wav": "fe66830807fdf82d6545ec44984ef5e2667161c8f548eed2d898db4a49869964",
+        "tapejara-injured.wav": "e6e7e1703b453704d50521e6ba7731128c9b2375f1f58ade17bcf927360640fe",
+        "quetzalcoatlus-grazing.wav": "ea209cd464bf78628adabd0ab71e7574f1de72a503e3a650d46c5ca563f553bf",
+        "quetzalcoatlus-attack.wav": "b2cd35b649532c40c8e39bfe64d08fbcd50d64755d088ac9f0d8027cc26bd687",
+        "quetzalcoatlus-injured.wav": "b1eaea47790d841240384326da559f93c75897d3b7e62e311827ab23ebdc560f",
+        "microraptor-grazing.wav": "532827d08656c6c21634fcedcc9a5a7223f76ea53fb781553fb7c469cfb313e2",
+        "microraptor-attack.wav": "3949144fb8c7aa2993fd95d413c91643dd624e85c01eea17387fe7e521631b55",
+        "microraptor-injured.wav": "f899ef307a876945861056778b8455b61cdc23b82dc788608b2e4ad6213d029a",
+        "ichthyosaurus-grazing.wav": "62b95c04793c20e30c0b33a556ea81becec435584368fe2d759d8559887b6e2b",
+        "ichthyosaurus-attack.wav": "17d6c8b2a32fbe3c1eb76c24bd4f8660e8bc29b41186cbc801b04e69eabcc948",
+        "ichthyosaurus-injured.wav": "6d0225f263973e540faf1a8e9481d31a2f68ba62caa04af4b9b3e62f6b082950",
+        "plesiosaurus-grazing.wav": "cdbde12ad65f12b73a3245ddbd5bc9f1a05750616393af6f7fd64451d9d4c8c7",
+        "plesiosaurus-attack.wav": "57d3ac5ca64a50ce562b0a2b6df8ba91aa9c9eb907fd632d7ed87b81ac923904",
+        "plesiosaurus-injured.wav": "f0c9eb2c2b957cc51e33c7e3f31ebd57b782841c600d146ce3dcd14dcff32a53",
+        "elasmosaurus-grazing.wav": "2b0b9eec6d718d97682cec2587e7051fb32c1ad1bb7c057908af3fcae5cc33c0",
+        "elasmosaurus-attack.wav": "5ff11d1c7f78a580aee30c56ec8a1f84673a58013a89eb8a2083af2538eec592",
+        "elasmosaurus-injured.wav": "d98ffaa5a3ee510cfe6e62a4a09c358d852ea49f9f92eeca19d37b3b7526c4da",
+        "liopleurodon-grazing.wav": "ee21e1b747a379fac262e97fb76baae977c3dc46ccac5a1bb08afe2df6e892bd",
+        "liopleurodon-attack.wav": "2085381faed894927b2993b4c78ea7296383981bd36d5695f43e827ff436c858",
+        "liopleurodon-injured.wav": "9acc23bb7f58dee01180330d33c001b00a5902862e73ba70b4cf5618ac12137a",
+        "mosasaurus-grazing.wav": "2d98c1c89871cf6bfe288429fcc7a1ac67a95ffd342b92ff0dec53dd413cf646",
+        "mosasaurus-attack.wav": "71e7274e899084242a12bc6101cd7632c8c040a00388a2e74f220612aafa532d",
+        "mosasaurus-injured.wav": "f3f6dc49a2af0c2d1a4d5fdef88fc5382cf9bc2af2b6c43c070c68997e3d879e",
+        "deinosuchus-grazing.wav": "e1cb7c08d505bdc3f6767d08e5ed81763d72d63db2080f7d76c09002b3b2e139",
+        "deinosuchus-attack.wav": "128fb4af76dc6ec061515662e4b1ed8fffb6ae717f308d4514e48a7113c43443",
+        "deinosuchus-injured.wav": "f6d1a4839167cbfc3e83264bba19d24371de86fd00e6f31811bd43a46b12f26e"
+      }
+    }
+  },
+  "rights_sources": [
+    "https://suno.com/terms",
+    "https://help.suno.com/en/articles/13876865"
+  ],
+  "rights_note": "Officially downloaded while Pro was active. Use remains subject to the applicable Suno terms; this provenance is not a guarantee of copyright protection.",
+  "sources": [
+    {
+      "key": "triceratops-grazing",
+      "url": "https://suno.com/song/10fe3e04-dc1f-47f6-91d7-82497ee35fb3",
+      "prompt": "Triceratops grazing: one quiet relaxed nasal rumble and crunchy leafy chewing, heavy leathery three-horned herbivore, low hollow chest resonance, gentle breathy snort. Dry isolated creature sound effect, close microphone, 2 seconds, clean decay. No music, instruments, speech, human voice, background ambience or other animals.",
+      "original": "originals/triceratops-grazing.wav",
+      "sha256": "feb8f2bb5201e14c5ac924230f18a8810c142efa2b117207e1814cb8af0bece7",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 7.36
+      },
+      "official_download": true
+    },
+    {
+      "key": "triceratops-attack",
+      "url": "https://suno.com/song/eeca70e5-9660-48c0-bd25-53e675f4f620",
+      "prompt": "Triceratops attack: one explosive defensive bellow, low brassy nasal honk breaking into a gravelly chest roar and forceful snort, heavy horned herbivore lunging. Dry isolated creature one-shot, 1.5 seconds, immediate attack and natural tail. No music, instruments, speech, human voice, ambience, footsteps or other animals.",
+      "original": "originals/triceratops-attack.wav",
+      "sha256": "c14d26d4d7cd5bf6dafca03287a5a18c7bc4928a7154f6191fd7cf1c80a0ce1c",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 8.4
+      },
+      "official_download": true
+    },
+    {
+      "key": "triceratops-injured",
+      "url": "https://suno.com/song/ac86a065-7138-4a86-9fcc-d40e2376e25b",
+      "prompt": "Triceratops injured: one short startled nasal pain bellow falling into a breathy gravelly whimper, heavy horned herbivore, hollow low chest resonance. Dry close isolated creature sound effect, one second, complete decay. No music, instruments, human voice, speech, background or other animals.",
+      "original": "originals/triceratops-injured.wav",
+      "sha256": "dc84f1143118d3beff7839b4deb6aac5229c22713636d30c85b726cfc8becfbb",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 3.4
+      },
+      "official_download": true
+    },
+    {
+      "key": "raptor-grazing",
+      "url": "https://suno.com/song/264a13cd-0d33-4ba2-9cee-19cd07a57942",
+      "prompt": "Raptor grazing: quiet feeding and idle call of a small feathered predatory dinosaur, quick dry birdlike throat clicks, soft rasping croak and tiny jaw snaps. One isolated 2 second creature effect, dry close perspective. No music, instruments, speech, human voice, background ambience or footsteps.",
+      "original": "originals/raptor-grazing.wav",
+      "sha256": "c03f80c3c7c87ca2eac4665c0b835edd477fbcf5a8ef7ac055ae9925d5e6c265",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 12.4
+      },
+      "official_download": true
+    },
+    {
+      "key": "raptor-attack",
+      "url": "https://suno.com/song/691f8cdc-d460-4bbb-948e-6d2465b05513",
+      "prompt": "Raptor attack: single sharp aggressive predatory dinosaur screech, piercing birdlike onset breaking into a raspy rattling hiss and jaw snap. Fast and dangerous, one isolated 1 second effect, dry close perspective, complete decay. No music, instruments, speech, human voice, background or footsteps.",
+      "original": "originals/raptor-attack.wav",
+      "sha256": "718baca6d3e3b73ab2f77dca964c0e271794aa5937e2cb4b424d8d699315edad",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 5.56
+      },
+      "official_download": true
+    },
+    {
+      "key": "raptor-injured",
+      "url": "https://suno.com/song/548215b2-f222-4dc4-957a-a46b53cb1543",
+      "prompt": "Raptor injured: one startled sharp birdlike dinosaur pain squawk dropping into a breathy strained rasp, thin agile throat resonance, short abrupt gasp. One isolated 1 second creature effect, dry close perspective, complete tail. No music, instruments, speech, human voice or background ambience.",
+      "original": "originals/raptor-injured.wav",
+      "sha256": "c06db3da60a7c3e330c625c30fdc8ec6fbbe608f10aa3bcad89f69ca4cf51635",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 4.4
+      },
+      "official_download": true
+    },
+    {
+      "key": "tyrannosaurus-grazing",
+      "url": "https://suno.com/song/c35a071e-70cb-4ef3-9fc9-3cae8c7eb4bd",
+      "prompt": "Tyrannosaurus grazing: quiet feeding and resting call of a giant predatory dinosaur, deep crocodilian closed-mouth rumble, slow rough exhale and soft wet jaw movement. One isolated 2 second creature effect, dry close perspective. No music, instruments, speech, human voice, background or footsteps.",
+      "original": "originals/tyrannosaurus-grazing.wav",
+      "sha256": "42d3c77e6e9c23bcb21ccf463d05e2cf371302be435edbee1551f83f3236ce6f",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 12.64
+      },
+      "official_download": true
+    },
+    {
+      "key": "tyrannosaurus-attack",
+      "url": "https://suno.com/song/ea4ba26c-e7fa-4848-86a6-c94fc0356c42",
+      "prompt": "Tyrannosaurus attack: one massive low predatory dinosaur bellow, explosive guttural onset, rough crocodilian growl and powerful chest resonance, ending in a forceful breath. Isolated 2 second dry close creature effect. No music, instruments, speech, human voice, footsteps or background ambience.",
+      "original": "originals/tyrannosaurus-attack.wav",
+      "sha256": "1f47f8a643ee08c486d6baa5d92f3eb558e02949e1c1a9400dc2837d7c70341e",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 4.8
+      },
+      "official_download": true
+    },
+    {
+      "key": "tyrannosaurus-injured",
+      "url": "https://suno.com/song/181bd031-5571-46eb-85e8-ad0905659299",
+      "prompt": "Tyrannosaurus injured: one short low dinosaur pain roar, abruptly rising strained guttural bellow breaking into a ragged chesty grunt, massive crocodilian throat. Isolated 1 second dry close creature effect with complete decay. No music, instruments, speech, human voice or background.",
+      "original": "originals/tyrannosaurus-injured.wav",
+      "sha256": "a4879269b458d1826dcee1fbd7ea48557ec673cd5d7fee3f191fe1cd01ddd70b",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 2.32
+      },
+      "official_download": true
+    },
+    {
+      "key": "hadrosaur-grazing",
+      "url": "https://suno.com/song/ba08ff8a-811a-4dce-b1e8-185b781b2c3c",
+      "prompt": "Hadrosaur grazing: one gentle hollow nasal coo with soft leafy munching, calm duck-billed dinosaur with a resonant crest, mellow reedlike animal throat. Isolated 2 second dry close creature effect. No music, instruments, speech, human voice, other animals or background ambience.",
+      "original": "originals/hadrosaur-grazing.wav",
+      "sha256": "d8be6883186654d126cf0aff5fed28c1ac7360cbcc10b4efbb403a87b16d1739",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 8.36
+      },
+      "official_download": true
+    },
+    {
+      "key": "hadrosaur-attack",
+      "url": "https://suno.com/song/7d8cd6fa-538b-42e4-8e5a-11eccc54c147",
+      "prompt": "Hadrosaur attack: one forceful defensive nasal bark and honking bellow from a duck-billed dinosaur, hollow crest resonance, short breathy rasp at the end. Isolated 1 second dry close creature effect. No music, instruments, speech, human voice, footsteps or background ambience.",
+      "original": "originals/hadrosaur-attack.wav",
+      "sha256": "4825a78d2ca814cdc54a9a682b7617f45b6c9d278d17b7403a0b8d6c3cf1dbe2",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 3.2
+      },
+      "official_download": true
+    },
+    {
+      "key": "hadrosaur-injured",
+      "url": "https://suno.com/song/11f5d918-23d0-41b1-b868-fbb81ed9df8b",
+      "prompt": "Hadrosaur injured: one startled plaintive nasal yelp falling into a weak breathy honk, hollow resonating dinosaur crest, strained but clearly animal. Isolated 1 second dry close creature effect. No music, instruments, speech, human voice or background ambience.",
+      "original": "originals/hadrosaur-injured.wav",
+      "sha256": "6dfeb25abe658c4312de0776ceccc2519ebf42176620bf22c816c1ff1e76e732",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 8.56
+      },
+      "official_download": true
+    },
+    {
+      "key": "pterosaur-grazing",
+      "url": "https://suno.com/song/f3e701a8-0059-4170-8321-eb122edfe369",
+      "prompt": "Pterosaur grazing: quiet feeding and idle throat chatter of a leathery flying reptile, dry beak clicks and a soft airy chirrup, lightly rasping seabirdlike croak. One isolated 2 second dry close creature effect. No music, instruments, speech, human voice, wing flaps or background.",
+      "original": "originals/pterosaur-grazing.wav",
+      "sha256": "a2d72cbd0208f636ee1eb899a926aea2053ad676456d97f1c5e668f5e65989dc",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 7.8
+      },
+      "official_download": true
+    },
+    {
+      "key": "pterosaur-attack",
+      "url": "https://suno.com/song/48aa2090-bcde-4aec-92e0-89d7ccebabef",
+      "prompt": "Pterosaur attack: one harsh piercing territorial reptile shriek with a serrated squawking edge and quick beak snap, airy thin throat resonance. Isolated 1 second dry close creature effect, clean ending. No music, instruments, speech, human voice, wing flaps or background.",
+      "original": "originals/pterosaur-attack.wav",
+      "sha256": "0683ffb63d95e3abf523e28def9923e9d3c002f6450c52277598097c861f128b",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 6.0
+      },
+      "official_download": true
+    },
+    {
+      "key": "pterosaur-injured",
+      "url": "https://suno.com/song/b1427626-1dd2-4a74-af03-0b86fc440854",
+      "prompt": "Pterosaur injured: one short shocked rasping reptile squeal, brittle squawk dropping into a thin breathy croak, clear startled pain reaction. Isolated 1 second dry close creature effect. No music, instruments, speech, human voice, flapping or background ambience.",
+      "original": "originals/pterosaur-injured.wav",
+      "sha256": "15b5e7be4528a7d8bcba388c879a513815f3e2f0c7e65652b170ef17370519a9",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 3.4
+      },
+      "official_download": true
+    },
+    {
+      "key": "marine-grazing",
+      "url": "https://suno.com/song/a5966ead-2ec4-49d9-a4e1-bee2bddf723e",
+      "prompt": "Marine reptile grazing: quiet feeding and idle call of a large prehistoric swimmer, low rounded throaty croon and soft clicking jaw pulses, smooth hollow wet resonance. One isolated 2 second dry close creature effect. No music, instruments, speech, human voice, splashing or background water.",
+      "original": "originals/marine-grazing.wav",
+      "sha256": "f892abb5fe72c7daa06bd05d1dd6c17a0f180ae2c4caf1e936e0a6ac91e435ff",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 7.92
+      },
+      "official_download": true
+    },
+    {
+      "key": "marine-attack",
+      "url": "https://suno.com/song/af9d725a-7fbd-4ae2-9f0f-9083b47c1a30",
+      "prompt": "Marine reptile attack: one explosive deep prehistoric predator bark, throaty rasp and powerful snapping jaws, rounded hollow wet chest resonance. Isolated 1 second close creature effect, clean tail. No music, instruments, speech, human voice, splashing or background water.",
+      "original": "originals/marine-attack.wav",
+      "sha256": "026b7e671af12d866cf2b4dda9b4bbb81e7baffaafff202bd1c11954d63e7765",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 4.4
+      },
+      "official_download": true
+    },
+    {
+      "key": "marine-injured",
+      "url": "https://suno.com/song/4998a013-2334-4f14-bf00-3cdf49db8e60",
+      "prompt": "Marine reptile injured: one abruptly strained hollow prehistoric reptile cry descending into a low bubbling grunt, shocked and breathy with rounded throat resonance. Isolated 1 second close creature effect. No music, instruments, speech, human voice, splashing or background water.",
+      "original": "originals/marine-injured.wav",
+      "sha256": "af0c94e0e97b9ff41a410e5aabad7b8e6411095a7a59791d273e156972e7df85",
+      "format": {
+        "channels": 2,
+        "sample_rate": 48000,
+        "bits_per_sample": 16,
+        "seconds": 8.8
+      },
+      "official_download": true
+    }
+  ]
+}

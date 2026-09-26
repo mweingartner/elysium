@@ -71,6 +71,7 @@ stage_surface() {
 }
 verify_pack_set() {
     local resources="$1"
+    python3 "$ROOT/scripts/verify-dinosaur-sounds.py" --directory "$resources/DinosaurSounds" || return 1
     [ "$(shasum -a 256 "$resources/Faithful 64x - December 2025 Release.zip" | awk '{print $1}')" = \
       a136d9101a4748558587980dace3cd7447b758fb72c4684d15fb805d0a812dac ] &&
     [ "$(shasum -a 256 "$resources/Faithful 64x - Ore Borders 64x.zip" | awk '{print $1}')" = \

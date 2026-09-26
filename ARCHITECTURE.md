@@ -75,6 +75,9 @@ Nether World keeps the ordinary terrain generators but makes the Nether the init
 
 ### Decision: species/action procedural audio and combat-scaled prehistoric XP — September 19, 2026
 
+The audio-source constraint below was superseded on September 26 by the user-requested bundled
+Suno sound bank described in Audio. The deterministic cue and XP contracts remain unchanged.
+
 - Status: implemented; acceptance requires the focused catalog/orb tests, full release gates, and a live installed-app listening/XP review.
 - User outcome and acceptance example: when a player encounters a Triceratops charge, a Pteranodon takeoff, or a Mosasaurus swim/bite, each named creature produces its own recognizable action cue; killing the harder creature grants more ordinary XP than killing a low-threat roster member.
 - Fixed constraints: no external/user audio files or network service; the new action and locomotion cues must not consume simulation RNG; controller state/save/LAN schemas remain closed; ordinary XP-orb semantics remain host-authoritative; and usage-based combat skill XP must not become a high-health farming multiplier.
@@ -837,12 +840,34 @@ future authority boundary.
 
 ## Audio
 
-`Audio.swift` remains the engine for ordinary game audio: each effect is a synthesized recipe that
+`Audio.swift` remains the engine for ordinary game audio: most effects use a synthesized recipe that
 spawns oscillator or filtered-noise voices with envelopes, pitch sweeps, and vibrato, mixed in an
 `AVAudioSourceNode` render callback at 48 kHz. RBJ biquad filters, positional stereo panning,
 underwater lowpass, and two coprime-length feedback delays provide the effects and cave reverb;
 ambient music and jukebox discs are still generated from scale/tempo configurations. The render
 thread owns the synthesized voice list and receives main-thread work through its locked inbox.
+
+The 36 prehistoric species also have three bundled mono PCM recordings each: grazing/quiet
+feeding, attack, and injury. Eighteen officially exported Suno source masters supply six voice
+families; reproducible species-specific pitch, resonance, cadence, and gain edits produce 108
+runtime files. This reuses the existing semantic hooks and mixer rather than introducing a second
+player engine. `DinosaurSampleBank` maps only canonical roster IDs and selected cue names to fixed
+filenames, decodes bounded 24 kHz mono WAVs once at startup, and passes immutable PCM through the
+same voice inbox. Apps load only sealed bundle resources; SwiftPM development executables use the
+repository packaging directory. Missing/invalid recordings retain the native synthesis fallback.
+`ambient`, `idle`, `browse`, and `eat` select the feeding recording; `attack` and `hurt` select their
+own files. Movement and remaining action/lifecycle cues retain the existing synthesis recipes.
+
+Creature-category entity sounds use quadratic amplitude falloff `(1 - distance/40)^2`, capped at
+40 blocks regardless of emission volume. The callback snapshots listener position/yaw under the
+inbox lock and recomputes active-call gain/pan each render block against the emission position.
+Creature calls bypass the shared cave delay so echoes cannot leak beyond the radius; underwater
+output filtering still applies. Ordinary block/player/script sounds retain their previous range. This presentation-only change consumes no simulation RNG and adds no save or LAN fields;
+the existing host-local semantic-audio limitation remains. The source originals, prompts, rights
+observations, exact processing parameters, and hashes live under `Assets/dinosaur-audio/`.
+The packaging verifier requires the complete roster/action matrix and exact runtime hashes.
+Subjective audible acceptance is separate from decoded-file, offline-mixer, and live-app evidence.
+
 The held-tool palette maps every registered tool family to a single action cue: mining/melee family
 strokes play whenever the arm begins a new completed swing (every four ticks while mining) and layer
 over the continuing material-hit loop, while flint and steel, fishing rod, bow, crossbow, trident,
