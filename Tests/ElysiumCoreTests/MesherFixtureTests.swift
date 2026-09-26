@@ -508,4 +508,161 @@ final class MesherFixtureTests: XCTestCase {
                            "cutout vegetation must grow from the authored bottom row")
         }
     }
+
+    // MARK: - waterlogged aquatic plants (seagrass, kelp, sea pickle, coral)
+
+    /// Builds a 5x5 sand seabed at y=6 with the given plant column standing on it at
+    /// (8, 8, 8), surrounded and covered by two layers of real water. `column` lists the
+    /// plant's own (block, meta) cells from bottom to top (length 1 for most plants, 2 for
+    /// tall_seagrass). The plant is fully submerged: real water fills every other cell in
+    /// the 5x5 footprint from its base up through two layers above its top.
+    private func submergedAquaticPlantCells(_ column: [(UInt16, Int)]) -> [(Int, Int, Int, UInt16, Int)] {
+        let baseY = 8
+        let topY = baseY + column.count - 1
+        var cells: [(Int, Int, Int, UInt16, Int)] = []
+        for x in 6...10 {
+            for z in 6...10 {
+                cells.append((x, baseY - 1, z, B.sand, 0))
+                for y in baseY...(topY + 2) {
+                    if x == 8, z == 8, y <= topY { continue }
+                    cells.append((x, y, z, B.water, 0))
+                }
+            }
+        }
+        for (offset, entry) in column.enumerated() {
+            cells.append((8, baseY + offset, 8, entry.0, entry.1))
+        }
+        return cells
+    }
+
+    func testWaterAboveSubmergedAquaticPlantHasNoInternalInterface() {
+        registerCoreIfNeeded()
+
+        let columns: [(String, [(UInt16, Int)])] = [
+            ("seagrass", [(B.seagrass, 0)]),
+            ("tall_seagrass (both halves)", [(B.tall_seagrass, 0), (B.tall_seagrass, 8)]),
+            ("kelp (falling meta 12)", [(B.kelp, 12)]),
+            ("kelp_plant", [(B.kelp_plant, 0)]),
+            ("sea_pickle", [(B.sea_pickle, 0)]),
+            ("tube_coral", [(B.tube_coral, 0)]),
+        ]
+
+        for (name, column) in columns {
+            let mesh = meshForCells(submergedAquaticPlantCells(column))
+            let topY = 8 + column.count - 1
+
+            // Before the fix, the real water cell directly above the plant's top emitted
+            // a spurious bottom-facing water quad at the plant/water boundary, splitting
+            // the water column in two. That boundary sits exactly one block above topY.
+            let internalInterface = quads(mesh.translucent, tileName: "water", normal: 0,
+                                          blockX: 8, blockY: topY + 1, blockZ: 8)
+            XCTAssertTrue(internalInterface.isEmpty,
+                         "\(name): found an internal water-to-air interface above the submerged plant")
+
+            // The real surface two layers above the plant must be undisturbed: full
+            // 14/16 height, animated as water.
+            let surfaceY = topY + 2
+            let surface = quads(mesh.translucent, tileName: "water", normal: 1,
+                                blockX: 8, blockY: surfaceY, blockZ: 8)
+            XCTAssertEqual(surface.count, 1, "\(name): expected exactly one surface quad over the plant column")
+            for vertex in surface.flatMap({ $0 }) {
+                XCTAssertEqual(vertex.y, Double(surfaceY) + 14.0 / 16, accuracy: 0.0001, "\(name)")
+            }
+            let surfaceAnim = materialVertices(in: mesh.translucent, matchingTileName: "water").filter {
+                $0.normal == 1 && $0.x >= 8 && $0.x <= 9 && $0.z >= 8 && $0.z <= 9
+                    && abs($0.y - (Double(surfaceY) + 14.0 / 16)) < 0.01
+            }
+            XCTAssertFalse(surfaceAnim.isEmpty, "\(name): surface quad vanished from the material scan")
+            XCTAssertEqual(Set(surfaceAnim.map(\.anim)), [1], "\(name): surface must stay animated water")
+        }
+    }
+
+    func testSurfaceLayerAquaticPlantCarriesTheWaterSurface() {
+        registerCoreIfNeeded()
+
+        let cases: [(String, UInt16, Int, String)] = [
+            ("seagrass", B.seagrass, 0, "seagrass"),
+            ("kelp (falling meta 12)", B.kelp, 12, "kelp"),
+            ("kelp_plant", B.kelp_plant, 0, "kelp_plant"),
+            ("sea_pickle", B.sea_pickle, 0, "sea_pickle"),
+            ("tube_coral", B.tube_coral, 0, "tube_coral"),
+        ]
+
+        for (name, block, meta, ownTile) in cases {
+            var cells: [(Int, Int, Int, UInt16, Int)] = []
+            for x in 6...10 {
+                for z in 6...10 {
+                    cells.append((x, 7, z, B.sand, 0))
+                    if !(x == 8 && z == 8) { cells.append((x, 8, z, B.water, 0)) }
+                }
+            }
+            cells.append((8, 8, 8, block, meta))
+            let mesh = meshForCells(cells)
+
+            // The plant's own water must fill the hole a bare cross/box mesh would leave:
+            // a full 14/16 surface, animated as water, matching the surrounding water.
+            let surface = quads(mesh.translucent, tileName: "water", normal: 1,
+                                blockX: 8, blockY: 8, blockZ: 8)
+            XCTAssertEqual(surface.count, 1, "\(name): expected the plant to carry its own water surface")
+            for vertex in surface.flatMap({ $0 }) {
+                XCTAssertEqual(vertex.y, 8 + 14.0 / 16, accuracy: 0.0001,
+                              "\(name): surface height must match GameWorld.fluidHeight's 14/16, never the plant's own meta")
+            }
+            let anim = materialVertices(in: mesh.translucent, matchingTileName: "water").filter {
+                $0.normal == 1 && $0.x >= 8 && $0.x <= 9 && $0.z >= 8 && $0.z <= 9
+            }
+            XCTAssertEqual(Set(anim.map(\.anim)), [1], "\(name)")
+
+            // No side wall between the plant's synthetic water and the real water beside it.
+            for direction in 2...5 {
+                let side = quads(mesh.translucent, tileName: "water", normal: direction,
+                                 blockX: 8, blockY: 8, blockZ: 8)
+                XCTAssertTrue(side.isEmpty, "\(name): unexpected water side face toward direction \(direction)")
+            }
+
+            // The plant's own geometry must still be present in the cutout layer.
+            XCTAssertTrue(tileNames(in: mesh.cutout).contains(ownTile),
+                         "\(name): plant geometry disappeared from the cutout layer")
+        }
+    }
+
+    func testWaterloggedPlantNextToOrBelowLavaNeverMergesTheTwoFluids() {
+        registerCoreIfNeeded()
+
+        // Lava directly above a waterlogged plant: a physically unusual world state, but the
+        // mesher must still treat lava as a different fluid instead of continuing the water
+        // column straight through it.
+        let above = meshForCells([(8, 7, 8, B.sand, 0), (8, 8, 8, B.seagrass, 0), (8, 9, 8, B.lava, 0)])
+        let topSurface = quads(above.translucent, tileName: "water", normal: 1, blockX: 8, blockY: 8, blockZ: 8)
+        XCTAssertEqual(topSurface.count, 1,
+                      "The plant's own synthetic water must surface a real interface, not merge into lava above")
+        for vertex in topSurface.flatMap({ $0 }) {
+            XCTAssertEqual(vertex.y, 8 + 14.0 / 16, accuracy: 0.0001,
+                          "Interface height must follow the water rule, never lava's own fluid-level math")
+        }
+
+        // Lava directly beside a waterlogged plant: the side boundary must remain real, not
+        // culled as though the two fluids were the same.
+        let beside = meshForCells([(8, 7, 8, B.sand, 0), (8, 8, 8, B.seagrass, 0), (9, 8, 8, B.lava, 0)])
+        let sideFace = quads(beside.translucent, tileName: "water", normal: 5, blockX: 8, blockY: 8, blockZ: 8)
+        XCTAssertFalse(sideFace.isEmpty,
+                      "A waterlogged plant's own water must show a real boundary face against neighboring lava")
+    }
+
+    func testKelpMetaNeverChangesTheSyntheticWaterSurfaceHeight() {
+        registerCoreIfNeeded()
+
+        // Kelp's meta (0-15) encodes plant age/orientation, not a fluid level. Every meta value
+        // must produce exactly the same synthetic water surface as every other.
+        for meta in 0...15 {
+            let mesh = meshForCells(submergedAquaticPlantCells([(B.kelp, meta)]))
+            let surfaceY = 8 + 2 // topY (8, single-cell column) + two layers of real water above
+            let surface = quads(mesh.translucent, tileName: "water", normal: 1, blockX: 8, blockY: surfaceY, blockZ: 8)
+            XCTAssertEqual(surface.count, 1, "kelp meta \(meta): expected exactly one surface quad")
+            for vertex in surface.flatMap({ $0 }) {
+                XCTAssertEqual(vertex.y, Double(surfaceY) + 14.0 / 16, accuracy: 0.0001,
+                              "kelp meta \(meta) must never be read as a fluid level for the surface height")
+            }
+        }
+    }
 }

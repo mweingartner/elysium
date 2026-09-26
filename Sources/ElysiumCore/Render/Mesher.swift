@@ -697,6 +697,23 @@ final class SectionMesher {
                         }
                     }
 
+                    // A waterlogged aquatic plant (seagrass, kelp, sea pickle, coral, ...)
+                    // carries water in its own cell in addition to its plant geometry. When
+                    // it sits at the top of the water column, that water forms the visible
+                    // surface; without emitting it here the surface would have a 1x1 hole
+                    // over the plant. When it is fully submerged, `emitLiquid`'s same-fluid
+                    // culling (see `sameFluid` above) removes every face it would emit, so
+                    // this costs nothing there.
+                    if id != Int(B.water) && isWaterlogged(UInt16(cell)) {
+                        let waterCell = Int(B.water) << 4
+                        let waterTile = Int(TILE_TABLE[(waterCell << 3) | 1])
+                        var waterTint = tintFor(waterCell, x, z)
+                        if input.renderContext.tintGate != nil, input.renderContext.removesBiomeTint(from: waterTile) {
+                            waterTint = WHITE
+                        }
+                        emitLiquid(translucent, x, y, z, waterCell, waterTile, waterTint, 1, s4, b4)
+                    }
+
                     if shape == .liquid {
                         emitLiquid(target, x, y, z, cell, tileOf(1), tint, anim, s4, b4)
                         continue
@@ -1292,7 +1309,15 @@ final class SectionMesher {
     private func emitLiquid(_ b: MeshBuilder, _ x: Int, _ y: Int, _ z: Int, _ cell: Int, _ tile: Int, _ tint: Int, _ anim: Int, _ sky: Int, _ blk: Int) {
         let id = cell >> 4
         let xd = Double(x), yd = Double(y), zd = Double(z)
-        let sameAbove = (cellAt(x, y + 1, z) >> 4) == id
+        // A waterlogged cell (an aquatic plant carrying water, per `isWaterlogged`) is the
+        // same fluid as water for meshing purposes: it must not open a false water-to-air
+        // interface where a plant pokes up into the water column above it. Its meta encodes
+        // plant state, not a fluid level (kelp age is 0-15), so it must never be routed
+        // through `heightOfFluid` — treat it as a flat 14/16 water surface instead.
+        func sameFluid(_ c: Int) -> Bool {
+            (c >> 4) == id || (id == Int(B.water) && isWaterlogged(UInt16(c)))
+        }
+        let sameAbove = sameFluid(cellAt(x, y + 1, z))
         let hSelf = sameAbove ? 1 : heightOfFluid(cell)
         let em = id == Int(B.lava) ? 1 : 0
         // corner heights: max over the 4 cells sharing the corner
@@ -1302,9 +1327,9 @@ final class SectionMesher {
             for (dx, dz) in [(cx - 1, cz - 1), (cx, cz - 1), (cx - 1, cz), (cx, cz)] {
                 if dx == 0 && dz == 0 { continue }
                 let n = cellAt(x + dx, y, z + dz)
-                if (n >> 4) == id {
-                    if (cellAt(x + dx, y + 1, z + dz) >> 4) == id { return 1 }
-                    h = max(h, heightOfFluid(n))
+                if sameFluid(n) {
+                    if sameFluid(cellAt(x + dx, y + 1, z + dz)) { return 1 }
+                    h = max(h, (n >> 4) == Int(B.water) ? heightOfFluid(n) : 14.0 / 16)
                 }
             }
             return h
@@ -1329,7 +1354,7 @@ final class SectionMesher {
         for (dx, dz, dir) in sides {
             let n = cellAt(x + dx, y, z + dz)
             let nid = n >> 4
-            if nid == id || OPAQUE[nid] == 1 || (isWaterlogged(UInt16(n)) && id == Int(B.water)) { continue }
+            if sameFluid(n) || OPAQUE[nid] == 1 { continue }
             let hA = dir == 2 ? h00 : dir == 3 ? h01 : dir == 4 ? h00 : h10
             let hB = dir == 2 ? h10 : dir == 3 ? h11 : dir == 4 ? h01 : h11
             if dir < 4 {
@@ -1353,7 +1378,7 @@ final class SectionMesher {
             }
         }
         let below = cellAt(x, y - 1, z)
-        if (below >> 4) != id && OPAQUE[below >> 4] == 0 {
+        if !sameFluid(below) && OPAQUE[below >> 4] == 0 {
             b.quad(
                 xd, yd, zd, xd, yd, zd + 1, xd + 1, yd, zd + 1, xd + 1, yd, zd,
                 0, 0, 0, 1, 1, 1, 1, 0,

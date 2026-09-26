@@ -32,6 +32,33 @@ final class RayTracingMeshTests: XCTestCase {
             biomes: [UInt8](repeating: 0, count: 18 * 18)))
     }
 
+    /// Builds a real mesher output for a fully submerged waterlogged plant `column`
+    /// (bottom-to-top (block, meta) pairs) standing on a 5x5 sand seabed at (8, 8, 8),
+    /// with two layers of real water above its top and around every other column.
+    private func submergedAquaticPlantMesh(_ column: [(UInt16, Int)]) -> MeshOutput {
+        let paddedCount = 18 * 18 * 18
+        var blocks = [UInt16](repeating: 0, count: paddedCount)
+        func index(_ x: Int, _ y: Int, _ z: Int) -> Int { ((y + 1) * 18 + (z + 1)) * 18 + (x + 1) }
+        let baseY = 8
+        let topY = baseY + column.count - 1
+        for x in 6...10 {
+            for z in 6...10 {
+                blocks[index(x, baseY - 1, z)] = cell(B.sand)
+                for y in baseY...(topY + 2) {
+                    if x == 8, z == 8, y <= topY { continue }
+                    blocks[index(x, y, z)] = cell(B.water)
+                }
+            }
+        }
+        for (offset, entry) in column.enumerated() {
+            blocks[index(8, baseY + offset, 8)] = cell(entry.0, entry.1)
+        }
+        return buildSectionMesh(MeshInput(blocks: blocks,
+            skyLight: [UInt8](repeating: 15, count: paddedCount),
+            blockLight: [UInt8](repeating: 0, count: paddedCount),
+            biomes: [UInt8](repeating: 0, count: 18 * 18)))
+    }
+
     func testActualLitFurnaceCasingDoesNotEmitButMouthAndRoomLightRemain() throws {
         registerAllBlocks()
         let facades: Set<String> = ["furnace_top", "furnace_side", "furnace_front_lit"]
@@ -151,5 +178,38 @@ final class RayTracingMeshTests: XCTestCase {
         let bad=RayTracingLight(positionRadius:.init(.nan,0,0,30),colorPower:.init(1,1,1,1))
         let off=RayTracingLight(positionRadius:.init(0,0,0,0),colorPower:.init(1,1,1,1))
         XCTAssertTrue(RayTracingLocalLightSelection.select([bad,off]).isEmpty)
+    }
+
+    func testDecodedMeshHasNoDownwardWaterPrimitiveInsideSubmergedPlantColumns() throws {
+        registerAllBlocks()
+
+        let columns: [(String, [(UInt16, Int)])] = [
+            ("seagrass", [(B.seagrass, 0)]),
+            ("tall_seagrass (both halves)", [(B.tall_seagrass, 0), (B.tall_seagrass, 8)]),
+            ("kelp (falling meta 12)", [(B.kelp, 12)]),
+            ("kelp_plant", [(B.kelp_plant, 0)]),
+            ("sea_pickle", [(B.sea_pickle, 0)]),
+            ("tube_coral", [(B.tube_coral, 0)]),
+        ]
+
+        for (name, column) in columns {
+            let mesh = submergedAquaticPlantMesh(column)
+            let decoded = try XCTUnwrap(RayTracingMeshDecoder.decode(mesh), "\(name)")
+            XCTAssertEqual(decoded.indices.count, decoded.primitives.count * 3, "\(name)")
+
+            let topY = Float(8 + column.count - 1)
+            let interfaceHeight = topY + 1 // the plant-top / real-water boundary
+            for (index, primitive) in decoded.primitives.enumerated() {
+                guard primitive.material.z & 2 != 0, primitive.normalEmission.y < -0.5 else { continue }
+                let p0 = decoded.positions[Int(decoded.indices[index * 3])]
+                let p1 = decoded.positions[Int(decoded.indices[index * 3 + 1])]
+                let p2 = decoded.positions[Int(decoded.indices[index * 3 + 2])]
+                let center = (p0 + p1 + p2) / 3
+                let insidePlantColumn = center.x >= 8 && center.x <= 9 && center.z >= 8 && center.z <= 9
+                let atTheFalseInterface = abs(center.y - interfaceHeight) < 0.05
+                XCTAssertFalse(insidePlantColumn && atTheFalseInterface,
+                              "\(name): downward water-flagged primitive at the false interface above the plant")
+            }
+        }
     }
 }
