@@ -319,7 +319,12 @@ EXPECTED_TEXT_INPUT_OBJECT_SHA256='0fcd8840b58e2db50fc3556144417b4615d99f1e7bb75
 # declarations, callers, counts, approved owners, and protected spans below
 # remain unchanged; this gameplay-only source renewal was checked before these
 # release pins were regenerated from a warning-free production build.
-EXPECTED_GAME_CORE_SOURCE_SHA256='63ced7f24fe9998202f54ec1386da3bd7944f7a09fce38bb4be694750eedf79d'
+# Dinosaur persistence/refill (September 26, 2026): GameCore renews from
+# 63ced7f24fe9998202f54ec1386da3bd7944f7a09fce38bb4be694750eedf79d for entity-membership
+# chunk capture (entity-only records through the existing putChunks path), a sequence-tagged
+# in-flight chunk-record lookup on reload, and fluid-safe structure occupants. No SQL, storage
+# API, Saves codec or player-record access changes; see docs/PREHISTORIC_WORLDS.md.
+EXPECTED_GAME_CORE_SOURCE_SHA256='bac98960847ed8da6628ac5f54aa25568f6362a36db4189347b7b1ba02d098f2'
 # worldgen-form-integrity: the final structure pass adds terrain-backed surface
 # plans, deterministic realized-piece collision resolution, and supported routes
 # through villages, dungeons, mineshafts, strongholds, Ancient Cities, and the
@@ -370,7 +375,12 @@ EXPECTED_GAME_CORE_SOURCE_SHA256='63ced7f24fe9998202f54ec1386da3bd7944f7a09fce38
 # Core and linked products renew; normalization/native evidence: docs/ray-traced-worlds/build.md.
 # Tuned 1.7x output and new-profile RT default preserve legacy settings decoding.
 # Reviewed normalized artifacts are recorded in docs/ray-traced-worlds/build.md.
-EXPECTED_CORE_OBJECT_SHA256='8c7f8cfeca0f904a51dabb2e6c341c784e5a26f67be3ed725d7894aa3c37417c'
+# Ray scene streaming + seagrass water + dinosaur persistence/spawn placement: the Core
+# object renews from 8c7f8cfeca0f904a51dabb2e6c341c784e5a26f67be3ed725d7894aa3c37417c for the
+# waterlogged-plant mesher rule, the GameCore capture above, per-player prehistoric dawn caps,
+# predation limits and the shared spawn-placement validator. Disposable-copy strip -S -x keeps
+# ElysiumStorage.o and ElysiumTextInput.o byte-identical.
+EXPECTED_CORE_OBJECT_SHA256='35904f889ce1aded57b5cfa6f8c5899e138fca181e7f9e729ae37aeddc7fd286'
 # Minecraft-reference ordinary item presentation: only app-side renderer, placement,
 # rig and animation sources change the product. Renewed from
 # 81e28db71efc533cb1e2dfb10cacd393689d3422f0db7abb528fc37bfad32b72 after a warning-free
@@ -400,8 +410,13 @@ EXPECTED_CORE_OBJECT_SHA256='8c7f8cfeca0f904a51dabb2e6c341c784e5a26f67be3ed725d7
 # caching, minimap colour rules and the 1920x1200 surface cap only. Renewed from
 # af471e5e86293490b3804826f42dd8df176d9be83ce0eb17b2f8018de1dd65c5 after a warning-free
 # release build in this checkout; Core/Storage/TextInput objects and elysmoke unchanged.
-EXPECTED_ELYSIUM_PRODUCT_SHA256='c0e54413f6c934b6493115610ac6315218e747b06c0f296149d5ac339fea370f'
-EXPECTED_SMOKE_PRODUCT_SHA256='85f96e0560205a6d1fce44f252162bd0b21eede6cad8f16fd4532c38b7e91f7a'
+# Ray scene streaming (nearest-first BLAS builds, stale-BLAS presentation, farthest-first
+# truncation, per-instance history invalidation, compaction) plus the Core changes above renew
+# the linked products from c0e54413f6c934b6493115610ac6315218e747b06c0f296149d5ac339fea370f
+# (Elysium) and 85f96e0560205a6d1fce44f252162bd0b21eede6cad8f16fd4532c38b7e91f7a (elysmoke),
+# built warning-free in this checkout. Evidence: docs/ray-traced-worlds/build.md.
+EXPECTED_ELYSIUM_PRODUCT_SHA256='a285474e1660c88583fdc1615e24154b5c3462c0d76cc35f4a236d3d7269ecf5'
+EXPECTED_SMOKE_PRODUCT_SHA256='deed923b3b5ef5a477b866b0851a723e91332f5113f05d3b5301c75c6ad326f7'
 STORAGE_SOURCE='Sources/ElysiumStorage/StorageEngine.swift'
 STORAGE_API_MANIFEST='scripts/elysium-storage-api-v1.json'
 SAVES_SOURCE='Sources/ElysiumCore/Game/Saves.swift'
