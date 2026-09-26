@@ -36,6 +36,24 @@ block; a standalone benchmark measured 117 ns per triangle before and 29 ns afte
 Compaction: the real-GPU fixture compacts an 8k-triangle section BLAS by more than
 10% with an identical hit; the flight peak fell by 26%.
 
+### Production release result
+
+The release shipped as three change commits: `5175459` for ray streaming, `d3e188f`
+for water-filled plant meshing, and `941ab05` for dinosaur persistence, refill and
+spawn placement. A fourth commit, `2ae4ff0`, renewed the release-surface pins. Only
+the GameCore source, ElysiumCore.o, Elysium and elysmoke pins moved; the storage and
+text-input objects are byte-identical.
+
+`bash scripts/pipeline.sh` passed all nine stages from `/Users/mweingar/dev/pebble`:
+source security, the warning-free release build, the release surface and binary
+checks, full-mode XCTest (2,786 tests), elysmoke (491 checks, 0 failures),
+packaging, packaged AppKit text entry, installation, and installed identity and
+codesign. The installed `/Applications/Elysium.app` executable SHA-256 is
+`dbf6fa86bdbcc4db420010c48cd6c190b3a1e725bcab822ac844dbe1719b4b69`.
+
+A final flight sweep on the combined debug build stayed ray traced in all 788
+samples, at a median of 76 FPS, with no truncated sections.
+
 ## Clean distance, native water and CPU frame time — September 25, 2026
 
 The user reported that ray casting was not clean, distance detail was too grainy and
