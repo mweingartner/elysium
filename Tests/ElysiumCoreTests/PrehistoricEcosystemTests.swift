@@ -237,7 +237,11 @@ final class PrehistoricEcosystemTests: XCTestCase {
     /// hunt phases (derived from ids) and every draw replay identically.
     /// `World.tick` is omitted: this flat, entity-only fixture has nothing
     /// for random ticks to change, and the entity loop dominates the cost.
-    private func runClosedLandAttrition(ticks: Int, sampleEvery: Int = 1_200) throws -> LandAttritionRun {
+    /// Where the twelve herbivores stand: isolated singles, or four herds of three.
+    enum AttritionLayout { case scattered, herds }
+
+    private func runClosedLandAttrition(ticks: Int, sampleEvery: Int = 1_200,
+                                        layout: AttritionLayout = .scattered) throws -> LandAttritionRun {
         resetGameRng(hashString("prehistoric-attrition"))
         resetEntityIds(1)
         let world = World(dim: .overworld, seed: 0xA771_0003,
@@ -274,11 +278,24 @@ final class PrehistoricEcosystemTests: XCTestCase {
         let prey = ["prehistoric.dryosaurus", "prehistoric.gallimimus", "prehistoric.parasaurolophus",
                     "prehistoric.pachycephalosaurus", "prehistoric.iguanodon", "prehistoric.dryosaurus"]
         var roster: [(String, Double, Double)] = []
-        for index in 0..<12 {
-            let column = index % 4, row = index / 4
-            let x = Double(column * 40 - 60) + 0.5
-            let z = Double(row * 40 - 40) + 0.5
-            roster.append((prey[index % prey.count], x, z))
+        switch layout {
+        case .scattered:
+            for index in 0..<12 {
+                let column = index % 4, row = index / 4
+                let x = Double(column * 40 - 60) + 0.5
+                let z = Double(row * 40 - 40) + 0.5
+                roster.append((prey[index % prey.count], x, z))
+            }
+        case .herds:
+            // Four mixed-size herds, each three animals a few blocks apart, so a
+            // strike on one member rallies the others.
+            let herds = [("prehistoric.dryosaurus", -40.5, -40.5), ("prehistoric.parasaurolophus", 40.5, -40.5),
+                         ("prehistoric.triceratops", -40.5, 40.5), ("prehistoric.stegosaurus", 40.5, 40.5)]
+            for herd in herds {
+                for (dx, dz) in [(0.0, 0.0), (4.0, 0.0), (0.0, 4.0)] {
+                    roster.append((herd.0, herd.1 + dx, herd.2 + dz))
+                }
+            }
         }
         roster += [
             ("prehistoric.tyrannosaurus", 0.5, 0.5), ("prehistoric.allosaurus", -20.5, 20.5),
@@ -323,11 +340,12 @@ final class PrehistoricEcosystemTests: XCTestCase {
 
         XCTAssertEqual(run.samples.count, 20)
         XCTAssertFalse(run.samples.contains(0), "the land population never collapses to zero")
-        XCTAssertGreaterThan(run.finalHerbivores, 0)
-        // Without the predation policy this exact fixture loses its whole
-        // predator guild to herd rallies by tick 4508 (population 18 -> 10);
-        // bounded hunting keeps a predator alive through the day.
-        XCTAssertGreaterThan(run.finalPredators, 0, "the predator trophic level survives a day")
+        // Before the herd-encounter policy this fixture ended the day with one
+        // predator of six (herds killed the rest); now predators retreat when
+        // hurt or outnumbered and recover, while half-day satiation keeps
+        // hunting at roughly what a dawn refill replaces.
+        XCTAssertGreaterThanOrEqual(run.finalPredators, 5, "herds do not wipe the predator guild out")
+        XCTAssertGreaterThanOrEqual(run.finalHerbivores, 6, "predators do not wipe the herbivores out either")
         XCTAssertFalse(run.deaths.isEmpty, "the ecology still kills: deaths continue to occur")
 
         // Every herbivore a land predator killed honours the size ratio, and no
@@ -354,6 +372,42 @@ final class PrehistoricEcosystemTests: XCTestCase {
         XCTAssertGreaterThan(predatorKills, 0, "predators still take herd prey")
     }
 
+    func testV3HerdsNoLongerWipeOutPredatorsInADay() throws {
+        let run = try runClosedLandAttrition(ticks: 24_000, layout: .herds)
+        print("[prehistoric-herds] samples=\(run.samples) herbivores=\(run.finalHerbivores) predators=\(run.finalPredators)")
+        XCTAssertGreaterThanOrEqual(run.finalPredators, 5, "rallied herds drive predators off instead of killing them")
+        XCTAssertGreaterThanOrEqual(run.finalHerbivores, 7, "grouped herds protect most members")
+        XCTAssertTrue(run.deaths.contains { PrehistoricCreatureDefinition.named($0.victimType)?.isLandHerdHerbivore == true },
+                      "predators still take herd prey")
+    }
+
+    func testTyrannosaurusRetreatsFromALargeTriceratopsHerdAndBothSurvive() throws {
+        let world = makeLandWorld(.prehistoricLostWorldV3)
+        let rex = try makeCreature(world, "prehistoric.tyrannosaurus", 8.5, 8.5)
+        var herd: [PrehistoricCreature] = []
+        for index in 0..<5 {
+            herd.append(try makeCreature(world, "prehistoric.triceratops",
+                                         20.5 + Double(index % 3) * 3, 14.5 + Double(index / 3) * 3))
+        }
+        var retreats = 0, wasRetreating = false
+        for _ in 0..<6_000 {
+            world.time += 1
+            for case let entity as Entity in Array(world.entities) where !entity.dead { entity.tick() }
+            for entity in Array(world.entities) where entity.dead { world.removeEntity(entity) }
+            if rex.isRetreating && !wasRetreating { retreats += 1 }
+            wasRetreating = rex.isRetreating
+        }
+        XCTAssertFalse(rex.dead, "a lone apex predator survives a large herd")
+        XCTAssertGreaterThan(retreats, 0, "it retreats instead of fighting to the death")
+        XCTAssertGreaterThanOrEqual(herd.filter { !$0.dead }.count, 4, "the herd defends itself successfully")
+    }
+
+    func testClosedHerdAttritionReplaysIdentically() throws {
+        let first = try runClosedLandAttrition(ticks: 4_000, sampleEvery: 500, layout: .herds)
+        let second = try runClosedLandAttrition(ticks: 4_000, sampleEvery: 500, layout: .herds)
+        XCTAssertEqual(first, second)
+    }
+
     func testClosedLandAttritionReplaysIdentically() throws {
         let first = try runClosedLandAttrition(ticks: 4_000, sampleEvery: 500)
         let second = try runClosedLandAttrition(ticks: 4_000, sampleEvery: 500)
@@ -377,5 +431,235 @@ final class PrehistoricEcosystemTests: XCTestCase {
         let beforePlayerHit = herbivore.health
         XCTAssertTrue(herbivore.hurt(10, "player", player))
         XCTAssertEqual(herbivore.health, beforePlayerHit - 10, accuracy: 0.000_001)
+    }
+
+    // MARK: - herd encounter policy
+
+    private func tick(_ world: World, _ creatures: [PrehistoricCreature], times: Int) {
+        for _ in 0..<times {
+            world.time += 1
+            for creature in creatures where !creature.dead { creature.tick() }
+        }
+    }
+
+    func testV3PredatorStandsItsGroundWhileV1KeepsItsPanicReflex() throws {
+        let v3 = try makeCreature(makeLandWorld(.prehistoricLostWorldV3), "prehistoric.allosaurus", 24.5, 8.5)
+        XCTAssertFalse(v3.goals.goals.contains { $0 is PanicGoal }, "a V3 predator does not bolt from every blow")
+        XCTAssertFalse(v3.targetGoals.goals.contains { $0 is HurtByTargetGoal })
+        XCTAssertEqual(v3.kbResist, PrehistoricHerdEncounterPolicy.current.largeTheropodKnockbackResistance)
+        let raptor = try makeCreature(makeLandWorld(.prehistoricLostWorldV3), "prehistoric.velociraptor", 24.5, 8.5)
+        XCTAssertEqual(raptor.kbResist, PrehistoricHerdEncounterPolicy.current.smallTheropodKnockbackResistance)
+
+        let v1 = try makeCreature(makeLandWorld(.prehistoricLostWorld), "prehistoric.allosaurus", 24.5, 8.5)
+        XCTAssertTrue(v1.goals.goals.contains { $0 is PanicGoal }, "V1 keeps its frozen goal set")
+        XCTAssertTrue(v1.targetGoals.goals.contains { $0 is HurtByTargetGoal })
+        XCTAssertEqual(v1.kbResist, 0)
+    }
+
+    func testHealthyPredatorFightsBackButWoundedOneRetreatsAndStaysWary() throws {
+        let world = makeLandWorld(.prehistoricLostWorldV3)
+        let predator = try makeCreature(world, "prehistoric.allosaurus", 24.5, 8.5)
+        let defender = try makeCreature(world, "prehistoric.triceratops", 27.5, 8.5)
+
+        defender.doMeleeAttack(predator)
+        tick(world, [predator], times: 2)
+        XCTAssertFalse(predator.isRetreating, "one blow does not send a healthy predator running")
+        XCTAssertTrue(predator.target === defender, "it turns on its attacker")
+
+        predator.invulnTicks = 0
+        predator.health = predator.maxHealth * 0.35
+        defender.doMeleeAttack(predator)
+        tick(world, [predator], times: 2)
+        XCTAssertTrue(predator.isRetreating, "a badly hurt predator retreats")
+        XCTAssertTrue(predator.isWaryOfHerds)
+        XCTAssertNil(predator.target, "and drops the fight")
+
+        // While wary it neither answers herd blows nor hunts.
+        predator.invulnTicks = 0
+        predator.hurtTime = 0
+        defender.doMeleeAttack(predator)
+        tick(world, [predator], times: 2)
+        XCTAssertNil(predator.target)
+    }
+
+    func testOutnumberedPredatorRetreats() throws {
+        let world = makeLandWorld(.prehistoricLostWorldV3)
+        let predator = try makeCreature(world, "prehistoric.allosaurus", 24.5, 8.5)
+        var defenders: [PrehistoricCreature] = []
+        for index in 0..<PrehistoricHerdEncounterPolicy.current.outnumberedDefenders {
+            let defender = try makeCreature(world, "prehistoric.parasaurolophus", 27.5, 5.5 + Double(index) * 3)
+            defender.setTarget(predator)
+            defenders.append(defender)
+        }
+        defenders[0].doMeleeAttack(predator)
+        XCTAssertGreaterThan(predator.health, predator.maxHealth * PrehistoricHerdEncounterPolicy.current.retreatHealthFraction)
+        tick(world, [predator], times: 2)
+        XCTAssertTrue(predator.isRetreating, "a healthy predator still retreats from a mob of defenders")
+    }
+
+    func testFedPredatorAbandonsItsKillToAMobbingHerd() throws {
+        let world = makeLandWorld(.prehistoricLostWorldV3)
+        let predator = try makeCreature(world, "prehistoric.deinonychus", 24.5, 8.5)
+        let prey = try makeCreature(world, "prehistoric.dryosaurus", 27.5, 8.5)
+        let defender = try makeCreature(world, "prehistoric.stegosaurus", 30.5, 8.5)
+        prey.health = 1
+        predator.doMeleeAttack(prey)
+        XCTAssertTrue(predator.isSatiatedAfterKill)
+        predator.invulnTicks = 0
+        defender.doMeleeAttack(predator)
+        tick(world, [predator], times: 2)
+        XCTAssertTrue(predator.isRetreating, "a fed predator leaves rather than fight the herd")
+        XCTAssertNil(predator.target)
+    }
+
+    func testHerdRallyEndsWhenThePredatorRetreatsOrStopsStriking() throws {
+        let world = makeLandWorld(.prehistoricLostWorldV3)
+        let predator = try makeCreature(world, "prehistoric.allosaurus", 24.5, 8.5)
+        let wounded = try makeCreature(world, "prehistoric.dryosaurus", 27.5, 8.5)
+        let defender = try makeCreature(world, "prehistoric.stegosaurus", 30.5, 8.5)
+        predator.doMeleeAttack(wounded)
+        tick(world, [defender], times: 2)
+        XCTAssertTrue(defender.target === predator, "a strike rallies the herd")
+
+        // The predator stops striking: once the rally memory lapses, the herd lets it go.
+        predator.age += PrehistoricHerdEncounterPolicy.current.rallyMemoryTicks + 1
+        tick(world, [defender], times: 2)
+        XCTAssertNil(defender.target, "the herd does not keep hunting a predator that stopped attacking")
+
+        // A fresh strike rallies again; the predator's retreat ends that rally at once.
+        wounded.invulnTicks = 0
+        wounded.health = wounded.maxHealth
+        predator.doMeleeAttack(wounded)
+        tick(world, [defender], times: 2)
+        XCTAssertTrue(defender.target === predator)
+        predator.invulnTicks = 0
+        predator.health = predator.maxHealth * 0.45
+        defender.doMeleeAttack(predator)
+        tick(world, [predator], times: 2)
+        XCTAssertTrue(predator.isRetreating)
+        tick(world, [defender], times: 2)
+        XCTAssertNil(defender.target, "the herd does not chase a retreating predator")
+    }
+
+    func testV3LandCreaturesRecoverOutOfCombatButV1DoNot() throws {
+        let policy = PrehistoricHerdEncounterPolicy.current
+        for (preset, recovers) in [(WorldPreset.prehistoricLostWorldV3, true), (.prehistoricLostWorld, false)] {
+            let world = makeLandWorld(preset)
+            let creature = try makeCreature(world, "prehistoric.triceratops", 24.5, 8.5)
+            creature.hurt(10, "test")
+            let injured = creature.health
+            tick(world, [creature], times: policy.recoveryDelayTicks - 1)
+            XCTAssertEqual(creature.health, injured, "no recovery during the delay (\(preset))")
+            tick(world, [creature], times: policy.recoveryIntervalTicks * 3)
+            if recovers {
+                XCTAssertGreaterThan(creature.health, injured, "V3 recovers out of combat")
+                XCTAssertLessThanOrEqual(creature.health, creature.maxHealth)
+            } else {
+                XCTAssertEqual(creature.health, injured, "V1 keeps its frozen no-regeneration rule")
+            }
+        }
+    }
+
+    func testRecoveryNeverExceedsMaxHealthEvenAfterManyIntervals() throws {
+        let world = makeLandWorld(.prehistoricLostWorldV3)
+        let creature = try makeCreature(world, "prehistoric.triceratops", 24.5, 8.5)
+        creature.hurt(1, "test")
+        let policy = PrehistoricHerdEncounterPolicy.current
+        // Far more intervals than are needed to fully heal a one-point wound.
+        tick(world, [creature], times: policy.recoveryDelayTicks + policy.recoveryIntervalTicks * 500)
+        XCTAssertEqual(creature.health, creature.maxHealth, accuracy: 0.000_001)
+        tick(world, [creature], times: policy.recoveryIntervalTicks * 20)
+        XCTAssertLessThanOrEqual(creature.health, creature.maxHealth, "recovery must never push health past the cap")
+    }
+
+    func testRecoveryNeverRunsForADeadCreature() throws {
+        let world = makeLandWorld(.prehistoricLostWorldV3)
+        let creature = try makeCreature(world, "prehistoric.dryosaurus", 24.5, 8.5)
+        XCTAssertTrue(creature.hurt(creature.maxHealth * 10, "test"), "a massive hit kills it outright")
+        XCTAssertGreaterThan(creature.deathTime, 0)
+        XCTAssertEqual(creature.health, 0)
+        tick(world, [creature], times: 5_000)
+        XCTAssertEqual(creature.health, 0, "a dead or dying creature never recovers")
+    }
+
+    func testRetaliationGoalDropsATargetBeyondThirtyTwoBlocks() throws {
+        let world = makeLandWorld(.prehistoricLostWorldV3)
+        let predator = try makeCreature(world, "prehistoric.allosaurus", 24.5, 8.5)
+        let attacker = try makeCreature(world, "prehistoric.triceratops", 27.5, 8.5)
+        attacker.doMeleeAttack(predator)
+        tick(world, [predator], times: 2)
+        XCTAssertTrue(predator.target === attacker, "a healthy predator turns on its attacker")
+
+        // The attacker wanders far beyond the retaliation goal's 32-block leash:
+        // the goal neither keeps nor re-acquires it, even while still flinching.
+        attacker.setPos(24.5, 64, 200.5)
+        tick(world, [predator], times: 2)
+        XCTAssertNil(predator.target, "a stale attacker far outside the leash is dropped, not chased forever")
+    }
+
+    func testV2WorldGetsTheSameHerdEncounterRulesAsV3() throws {
+        XCTAssertTrue(WorldPreset.prehistoricLostWorldV2.supportsPredatorHerdCombat)
+        let world = makeLandWorld(.prehistoricLostWorldV2)
+        let predator = try makeCreature(world, "prehistoric.allosaurus", 24.5, 8.5)
+        XCTAssertFalse(predator.goals.goals.contains { $0 is PanicGoal }, "V2 also removes the panic reflex")
+        XCTAssertFalse(predator.targetGoals.goals.contains { $0 is HurtByTargetGoal })
+        XCTAssertEqual(predator.kbResist, PrehistoricHerdEncounterPolicy.current.largeTheropodKnockbackResistance)
+
+        var defenders: [PrehistoricCreature] = []
+        for index in 0..<PrehistoricHerdEncounterPolicy.current.outnumberedDefenders {
+            let defender = try makeCreature(world, "prehistoric.parasaurolophus", 27.5, 5.5 + Double(index) * 3)
+            defender.setTarget(predator)
+            defenders.append(defender)
+        }
+        defenders[0].doMeleeAttack(predator)
+        tick(world, [predator], times: 2)
+        XCTAssertTrue(predator.isRetreating, "V2 predators also retreat once outnumbered")
+        XCTAssertTrue(predator.isWaryOfHerds)
+
+        // Out-of-combat recovery also applies on V2 (kept well clear of the
+        // predator/defender cluster, but inside the fixture's loaded chunks).
+        let herbivore = try makeCreature(world, "prehistoric.triceratops", 5.5, 20.5)
+        herbivore.hurt(10, "test")
+        let injured = herbivore.health
+        let policy = PrehistoricHerdEncounterPolicy.current
+        tick(world, [herbivore], times: policy.recoveryDelayTicks + policy.recoveryIntervalTicks * 3)
+        XCTAssertGreaterThan(herbivore.health, injured, "V2 land creatures also recover out of combat")
+    }
+
+    func testRetreatingPredatorStopsRetreatingAndCanHuntAgainAfterTheWaryWindow() throws {
+        let world = makeLandWorld(.prehistoricLostWorldV3)
+        let predator = try makeCreature(world, "prehistoric.allosaurus", 24.5, 8.5)
+        var defenders: [PrehistoricCreature] = []
+        for index in 0..<PrehistoricHerdEncounterPolicy.current.outnumberedDefenders {
+            let defender = try makeCreature(world, "prehistoric.parasaurolophus", 27.5, 5.5 + Double(index) * 3)
+            defender.setTarget(predator)
+            defenders.append(defender)
+        }
+        defenders[0].doMeleeAttack(predator)
+        tick(world, [predator], times: 2)
+        XCTAssertTrue(predator.isRetreating, "outnumbered predator retreats")
+        XCTAssertTrue(predator.isWaryOfHerds)
+
+        // Remove the ongoing threat entirely (the herd moves off) so neither
+        // the retreat nor the retaliation goal renews its own window, and so
+        // a defender cannot out-compete the fresh prey below for nearest-prey
+        // selection, then jump forward past the retreat and the wary window.
+        for defender in defenders { world.removeEntity(defender) }
+        predator.setTarget(nil)
+        predator.hurtTime = 0
+        let policy = PrehistoricHerdEncounterPolicy.current
+        predator.age += policy.retreatTicks + policy.waryTicks + 10
+        tick(world, [predator], times: 2)
+        XCTAssertFalse(predator.isRetreating, "the retreat window has elapsed")
+        XCTAssertFalse(predator.isWaryOfHerds, "the wary window has elapsed")
+
+        // With the window closed, the predator can acquire fresh, admissible prey again.
+        let prey = try makeCreature(world, "prehistoric.dryosaurus", 27.5, 8.5)
+        let phase = (abs(predator.id) % 40) * 2
+        var age = predator.age + 1
+        while age % 80 != phase { age += 1 }
+        predator.age = age - 1
+        predator.tick()
+        XCTAssertTrue(predator.target === prey, "the predator hunts again once no longer wary of herds")
     }
 }

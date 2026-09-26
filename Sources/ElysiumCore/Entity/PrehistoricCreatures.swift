@@ -459,14 +459,61 @@ enum PrehistoricPredationPolicy {
     /// own authoring length (mirroring the aquatic "smaller prey" rule).
     static let maximumPreyLengthRatio = 1.5
     /// Ticks of the predator's own simulation during which it starts no new
-    /// hunt after a genuine kill (five in-game minutes).
-    static let satiationTicks = 6_000
+    /// hunt after a genuine kill: half an in-game day, so a region's predators
+    /// take roughly what a dawn refill can replace.
+    static let satiationTicks = 12_000
 
     static func landPredator(
         _ predator: PrehistoricCreatureDefinition, mayHunt prey: PrehistoricCreatureDefinition
     ) -> Bool {
         predator.isLandPredator && prey.isLandHerdHerbivore
             && prey.authoringLengthMetres <= predator.authoringLengthMetres * maximumPreyLengthRatio
+    }
+}
+
+/// How a land predator and a defending herd resolve an encounter in V2+
+/// profiles. Without it every rallied herd fought to the death: defenders
+/// never broke off, while the predator's ordinary panic reflex cancelled its
+/// own attack on every hit, so herds wiped predators out. Now a predator stands
+/// its ground while healthy, retreats when badly hurt or outnumbered and then
+/// stays wary of herds, herds defend only while the predator keeps striking and
+/// never chase past the herd, and injured land creatures slowly recover out of
+/// combat. Every rule reads definition data, positions and the creatures' own
+/// ages; there is no RNG draw, no save field and no LAN payload, so it applies
+/// in place to existing V2/V3 saves.
+struct PrehistoricHerdEncounterPolicy {
+    /// A predator retreats from a herd once its health falls to this fraction.
+    let retreatHealthFraction = 0.4
+    /// ...or once this many herd defenders within `outnumberedRadius` target it.
+    let outnumberedDefenders = 3
+    let outnumberedRadius = 10.0
+    /// A retreat runs this far, for at most this long.
+    let retreatDistance = 20.0
+    let retreatTicks = 160
+    /// After a retreat the predator neither hunts nor answers herd blows.
+    let waryTicks = 2_400
+    /// Herd members keep defending only while the predator struck the herd this recently...
+    let rallyMemoryTicks = 200
+    /// ...and only while it stays this close (the rally does not chase).
+    let rallyLeash = 18.0
+    /// Out of combat for this long, a land creature recovers `recoveryFraction`
+    /// of its maximum health every `recoveryIntervalTicks`.
+    let recoveryDelayTicks = 400
+    let recoveryIntervalTicks = 40
+    let recoveryFraction = 0.02
+    /// Heavy theropods are not shoved out of reach by every defensive blow.
+    let largeTheropodKnockbackResistance = 0.4
+    let smallTheropodKnockbackResistance = 0.1
+
+    /// Tuned against the closed attrition harnesses in PrehistoricEcosystemTests.
+    static let current = PrehistoricHerdEncounterPolicy()
+
+    func predatorKnockbackResistance(_ definition: PrehistoricCreatureDefinition) -> Double {
+        switch definition.family {
+        case .largeTheropod: return largeTheropodKnockbackResistance
+        case .smallTheropod: return smallTheropodKnockbackResistance
+        default: return 0
+        }
     }
 }
 
@@ -489,7 +536,8 @@ private final class PrehistoricHuntTargetGoal: Goal {
         guard let predator = mob as? PrehistoricCreature,
               predator.usesPredatorHerdCombat,
               predator.definition.isLandPredator,
-              !predator.isSatiatedAfterKill
+              !predator.isSatiatedAfterKill,
+              !predator.isWaryOfHerds
         else { return false }
 
         // Goal selectors try new targets only every other entity tick. Keep
@@ -543,16 +591,105 @@ private final class PrehistoricHerdDefenseTargetGoal: Goal {
     }
 
     override func canContinue() -> Bool {
+        let leash = PrehistoricHerdEncounterPolicy.current.rallyLeash
         guard let defender = mob as? PrehistoricCreature,
               let threat = defender.target as? PrehistoricCreature,
               !threat.dead, threat.deathTime <= 0,
               threat.definition.isLandPredator,
-              defender.distanceToSq(threat) <= (range * 1.5) * (range * 1.5)
+              threat.isStillThreateningHerd,
+              defender.distanceToSq(threat) <= leash * leash
         else {
             mob.setTarget(nil)
             return false
         }
         return true
+    }
+}
+
+/// A land predator's answer to being hurt, replacing the generic hurt-by
+/// target goal in V2+ profiles: it turns on its attacker unless that attacker
+/// is a herd member it is currently wary of, and gives up a chase it has left
+/// far behind instead of pursuing one stale attacker indefinitely.
+private final class PrehistoricPredatorRetaliationGoal: Goal {
+    private static let leash = 32.0
+
+    init(_ mob: PrehistoricCreature, _ priority: Int) {
+        super.init(mob, priority)
+        flags = GoalFlag.target
+    }
+
+    override func canUse() -> Bool {
+        guard let predator = mob as? PrehistoricCreature,
+              predator.hurtTime > 0,
+              let attacker = predator.lastAttacker as? LivingEntity, !attacker.dead,
+              !predator.ignoresRetaliation(against: attacker),
+              predator.distanceToSq(attacker) <= Self.leash * Self.leash
+        else { return false }
+        predator.setTarget(attacker)
+        // Packmates of the same species join a fight the pack did not start.
+        for other in predator.world.getEntitiesNear(predator.x, predator.y, predator.z, 16, filter: {
+            ($0 as? Entity)?.type == predator.type
+        }) {
+            if let packmate = other as? PrehistoricCreature, packmate !== predator, packmate.target == nil,
+               !packmate.ignoresRetaliation(against: attacker) {
+                packmate.setTarget(attacker)
+            }
+        }
+        return true
+    }
+
+    override func canContinue() -> Bool {
+        guard let predator = mob as? PrehistoricCreature,
+              let target = predator.target, !target.dead,
+              !predator.ignoresRetaliation(against: target),
+              predator.distanceToSq(target) <= Self.leash * Self.leash
+        else {
+            mob.setTarget(nil)
+            return false
+        }
+        return true
+    }
+}
+
+/// Moves a badly hurt or outnumbered land predator away from the herd that is
+/// defending itself, or away from fire. While it runs, it cannot attack.
+private final class PrehistoricPredatorRetreatGoal: Goal {
+    private let speedMod: Double
+
+    init(_ mob: PrehistoricCreature, _ priority: Int, speedMod: Double) {
+        self.speedMod = speedMod
+        super.init(mob, priority)
+    }
+
+    override func canUse() -> Bool {
+        guard let predator = mob as? PrehistoricCreature else { return false }
+        return predator.shouldBeginRetreat()
+    }
+
+    override func canContinue() -> Bool {
+        guard let predator = mob as? PrehistoricCreature else { return false }
+        return predator.isRetreating
+    }
+
+    override func start() {
+        guard let predator = mob as? PrehistoricCreature else { return }
+        predator.beginRetreat()
+        runAway(predator)
+    }
+
+    override func tick() {
+        guard let predator = mob as? PrehistoricCreature, predator.isRetreating, predator.nav.isDone() else { return }
+        runAway(predator)
+    }
+
+    override func stop() { mob.nav.stop() }
+
+    private func runAway(_ predator: PrehistoricCreature) {
+        let from = predator.retreatOrigin ?? (predator.x, predator.z)
+        let angle = detAtan2(predator.x - from.x, predator.z - from.z)
+        let distance = PrehistoricHerdEncounterPolicy.current.retreatDistance
+        predator.nav.moveTo(predator.x + detSin(angle) * distance, predator.y,
+                            predator.z + detCos(angle) * distance, speedMod)
     }
 }
 
@@ -582,6 +719,15 @@ public final class PrehistoricCreature: Animal {
     /// session-only: a resumed predator is simply hungry again, so no save or
     /// LAN field is needed.
     private var satiatedUntilAge: Int?
+    /// Herd-encounter state (`PrehistoricHerdEncounterPolicy`). Session-only for
+    /// the same reason as satiation: a resumed creature starts fresh.
+    private var retreatUntilAge: Int?
+    private var waryUntilAge: Int?
+    fileprivate var retreatOrigin: (x: Double, z: Double)?
+    /// This predator's `age` when it last injured a herd herbivore.
+    private var lastHerdStrikeAge: Int?
+    /// This creature's `age` when it last took damage.
+    private var lastDamagedAge: Int?
 
     public override var type: String { definition.id }
     public override func ambientSound() -> String? { definition.soundName(for: .ambient) }
@@ -611,6 +757,73 @@ public final class PrehistoricCreature: Animal {
         return age < satiatedUntilAge
     }
 
+    /// True while a predator is running from a herd (or fire).
+    var isRetreating: Bool {
+        guard let retreatUntilAge else { return false }
+        return age < retreatUntilAge
+    }
+
+    /// True for a while after a retreat: the predator neither hunts herds nor
+    /// answers their blows.
+    var isWaryOfHerds: Bool {
+        guard let waryUntilAge else { return false }
+        return age < waryUntilAge
+    }
+
+    /// A herd keeps defending against this predator only while it is not
+    /// retreating and has struck the herd recently.
+    fileprivate var isStillThreateningHerd: Bool {
+        guard !isRetreating, let lastHerdStrikeAge else { return false }
+        return age - lastHerdStrikeAge <= PrehistoricHerdEncounterPolicy.current.rallyMemoryTicks
+    }
+
+    /// A wary or already-fed predator does not trade blows with a herd.
+    fileprivate func ignoresRetaliation(against attacker: Entity) -> Bool {
+        (isWaryOfHerds || isSatiatedAfterKill)
+            && (attacker as? PrehistoricCreature)?.definition.isLandHerdHerbivore == true
+    }
+
+    /// Herd defenders close enough to matter that are currently attacking this predator.
+    fileprivate func engagedHerdDefenders(within radius: Double) -> Int {
+        world.getEntitiesNear(x, y, z, radius) { entity in
+            guard let defender = entity as? PrehistoricCreature else { return false }
+            return !defender.dead && defender.deathTime <= 0
+                && defender.definition.isLandHerdHerbivore && defender.target === self
+        }.count
+    }
+
+    fileprivate func shouldBeginRetreat() -> Bool {
+        if fireTicks > 0 { return true }
+        guard hurtTime > 0,
+              let attacker = lastAttacker as? PrehistoricCreature,
+              attacker.definition.isLandHerdHerbivore
+        else { return false }
+        let policy = PrehistoricHerdEncounterPolicy.current
+        // A fed predator abandons its kill to a mobbing herd rather than fight for it.
+        return isSatiatedAfterKill
+            || health <= maxHealth * policy.retreatHealthFraction
+            || engagedHerdDefenders(within: policy.outnumberedRadius) >= policy.outnumberedDefenders
+    }
+
+    fileprivate func beginRetreat() {
+        let policy = PrehistoricHerdEncounterPolicy.current
+        let threat = lastAttacker
+        retreatOrigin = threat.map { ($0.x, $0.z) } ?? (x, z)
+        retreatUntilAge = age + policy.retreatTicks
+        if threat is PrehistoricCreature { waryUntilAge = age + policy.retreatTicks + policy.waryTicks }
+        setTarget(nil)
+        setAction(.alert, ticks: 20)
+    }
+
+    /// Out-of-combat recovery for V2+ land creatures.
+    private func tickRecovery() {
+        guard usesPredatorHerdCombat, health > 0, health < maxHealth else { return }
+        let policy = PrehistoricHerdEncounterPolicy.current
+        if let lastDamagedAge, age - lastDamagedAge < policy.recoveryDelayTicks { return }
+        guard age % policy.recoveryIntervalTicks == 0 else { return }
+        heal(max(1, maxHealth * policy.recoveryFraction))
+    }
+
     public init(world: World, definition: PrehistoricCreatureDefinition) {
         self.definition = definition
         // This bypasses LivingEntity's historical gameRng-based constructor
@@ -631,6 +844,9 @@ public final class PrehistoricCreature: Animal {
         if ecosystemCombat && definition.isLandHerdHerbivore {
             kbResist = definition.herdKnockbackResistance
         }
+        if ecosystemCombat && definition.isLandPredator {
+            kbResist = PrehistoricHerdEncounterPolicy.current.predatorKnockbackResistance(definition)
+        }
         xpReward = definition.combatXPReward(ecosystemCombat: ecosystemCombat)
         data.prehistoricAction = PrehistoricAction.idle.rawValue
         data.prehistoricActionTicks = 0
@@ -641,7 +857,14 @@ public final class PrehistoricCreature: Animal {
             category = "creature"
             nav.avoidWater = true
             addBasicGoals(definition.speed / 0.09, definition.speed / 0.07)
-            if definition.isPredatory || (definition.canCharge && !ecosystemCombat) {
+            if ecosystemCombat && definition.isLandPredator {
+                // A predator does not bolt from every blow; it retreats from a
+                // herd only when badly hurt or outnumbered (or from fire).
+                goals.goals.removeAll { $0 is PanicGoal }
+                goals.add(PrehistoricPredatorRetreatGoal(self, 1, speedMod: definition.speed / 0.07))
+                targetGoals.add(PrehistoricPredatorRetaliationGoal(self, 1))
+                goals.add(MeleeAttackGoal(self, 2, definition.canCharge ? 1.35 : 1.15))
+            } else if definition.isPredatory || (definition.canCharge && !ecosystemCombat) {
                 targetGoals.add(HurtByTargetGoal(self, 1, true))
                 goals.add(MeleeAttackGoal(self, 2, definition.canCharge ? 1.35 : 1.15))
             }
@@ -729,7 +952,8 @@ public final class PrehistoricCreature: Animal {
             guard herdMember.hurtTime > 0,
                   let threat = herdMember.lastAttacker as? PrehistoricCreature,
                   !threat.dead, threat.deathTime <= 0,
-                  threat.definition.isLandPredator
+                  threat.definition.isLandPredator,
+                  threat.isStillThreateningHerd
             else { continue }
             let allyDistance = distanceToSq(herdMember)
             let threatDistance = distanceToSq(threat)
@@ -819,6 +1043,7 @@ public final class PrehistoricCreature: Animal {
             super.tick()
             if dead || deathTime > 0 { return }
             tickGroundAction()
+            tickRecovery()
             tickLocomotionSound()
         case .air:
             tickFlight()
@@ -893,7 +1118,14 @@ public final class PrehistoricCreature: Animal {
                 $0.world === world && $0.definition.isLandPredator
             } == true
         let mitigatedAmount = predatorAttack ? amount * definition.herdPredatorDamageMultiplier : amount
-        return super.hurt(mitigatedAmount, source, attacker)
+        let applied = super.hurt(mitigatedAmount, source, attacker)
+        if applied {
+            lastDamagedAge = age
+            if predatorAttack, let predator = attacker as? PrehistoricCreature {
+                predator.lastHerdStrikeAge = predator.age
+            }
+        }
+        return applied
     }
 
     private func tickFlight() {

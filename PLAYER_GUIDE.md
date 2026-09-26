@@ -289,8 +289,10 @@ roster of prehistoric creatures. Each creature has its own calls and action soun
 movement. A player-attributed kill gives ordinary experience based on that creature's configured combat
 difficulty—health, active damage, and predator/charge behaviour—not merely its apparent size. This is
 separate from the usage-based Melee and Ranged skill-tree XP described below. On v2 and v3 maps land
-predators hunt only herbivores up to about one and a half times their own length and rest for a while
-after a successful kill.
+predators hunt only herbivores up to about one and a half times their own length and rest for half a day
+after a successful kill. Herds defend their members, but a predator that is badly hurt, outnumbered, or
+already fed retreats and leaves herds alone for a while, and herds stop defending once it backs off, so
+neither side wipes the other out. Injured dinosaurs slowly heal when left alone.
 
 New dinosaur maps also have more underground caves and lava regions. Look for occasional small rocky
 volcanoes on dry land, with exposed lava inside their craters. They do not erupt, but their lava is still

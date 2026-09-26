@@ -154,12 +154,24 @@ bounded deterministic prey scan on a fixed cadence, selects a visible nearby
 land herd herbivore by distance then stable entity id, and keeps the normal
 player-target fallback at lower priority. It hunts only herbivores no longer
 than one and a half times its own length (a Compsognathus hunts none), eats only
-after it has actually killed its prey, and then starts no new hunt for 6000 of
-its own ticks. That satiation window lives only in the running session; there
+after it has actually killed its prey, and then starts no new hunt for 12000 of
+its own ticks (half an in-game day). That satiation window lives only in the running session; there
 is no saved hunger meter, corpse ledger, or chunk-order-dependent ecosystem
 state, and these limits apply in place to existing v2 and v3 maps. Pterosaurs and marine reptiles retain
 their specialized air/water controllers rather than receiving a nonsensical
 land hunt rule.
+
+Herd encounters follow `PrehistoricHerdEncounterPolicy` so neither side wipes the
+other out. A predator stands its ground while healthy: it no longer bolts from
+every blow, answers its attacker, and resists being shoved out of reach (heavy
+theropods more than small ones). It retreats about twenty blocks when its health
+falls to 40%, when three herd defenders are on it, or when it has already fed,
+and then stays wary of herds for two minutes, neither hunting nor answering their
+blows. A herd keeps defending only while the predator struck one of its members
+in the last ten seconds and stays within eighteen blocks, so a rally ends when the
+predator retreats instead of chasing it down. Land creatures that have not been
+hurt for twenty seconds recover 2% of their health every two seconds. These rules
+are session-only and RNG-free; version-one profiles keep their frozen goals.
 
 Land herd herbivores rally across compatible species when a nearby ally was
 recently struck by a living prehistoric land predator. Their v2-and-later defensive
@@ -313,6 +325,23 @@ entities by persistent id through the debug snapshot.
 The unload/reload race itself is timing-dependent in the app; the
 `ChunkEntityPersistenceTests` reload-race cases are its deterministic proof
 (all three fail with the awaiting-commit lookup removed).
+
+### Predator balance — September 26, 2026
+
+The closed attrition harness (six mixed predators, twelve herbivores, flat v3
+plain, one in-game day) previously ended with one predator: herd rallies killed
+the rest. With the herd-encounter policy and half-day satiation:
+
+| Layout | Predators left of 6 | Herbivores left of 12 |
+|---|---:|---:|
+| Scattered herbivores, one day | 6 | 7 |
+| Four herds of three, one day | 6 | 8 |
+| Scattered herbivores, three days | 6 | 4 |
+| Four herds of three, three days | 6 | 7 |
+
+A Tyrannosaurus hunting five Triceratops for 6000 ticks retreated twice and survived
+at 49 of 62 health; all five Triceratops lived. The closed runs decline slowly
+because nothing refills them; in a real world the dawn refill replaces losses.
 
 ## Revisit conditions
 
