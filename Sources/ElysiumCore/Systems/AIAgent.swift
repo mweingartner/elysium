@@ -159,12 +159,25 @@ public let allAIAgentSkills: [AIAgentSkillDefinition] = [
         ]),
     AIAgentSkillDefinition(
         name: "spawn_entity",
-        summary: "Spawn registered mobs at the cursor placement cell.",
+        summary: "Spawn registered mobs or a prehistoric species (for example tyrannosaurus, triceratops, velociraptor) at the cursor placement cell.",
         required: ["entity", "target"],
         parameters: [
-            AIAgentSkillParameter(name: "entity", type: "string", summary: "Registered spawnable entity name."),
+            AIAgentSkillParameter(name: "entity", type: "string", summary: "Registered spawnable entity name or prehistoric species name."),
             AIAgentSkillParameter(name: "count", type: "integer", summary: "Spawn count.", minimum: 1, maximum: AIAgentMaxSpawnCount),
             AIAgentSkillParameter(name: "target", type: "string", summary: "Spawn target.", enumValues: ["cursor"]),
+            AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
+        ]),
+    AIAgentSkillDefinition(
+        name: "spawn_group",
+        summary: "Populate the area around the player with creatures; the engine picks random amounts, species and safe spots.",
+        required: ["entity", "target"],
+        parameters: [
+            AIAgentSkillParameter(name: "entity", type: "string",
+                                  summary: "Comma-separated groups (predators, herbivores, dinosaurs, pterosaurs, marine reptiles) or species/mob names, each optionally with a number such as \"2 raptors\"."),
+            AIAgentSkillParameter(name: "count", type: "integer", summary: "Exact count when only one group or species is named; omit for a random amount.",
+                                  minimum: 1, maximum: AIAgentAreaSpawnMaxPerItem),
+            AIAgentSkillParameter(name: "radius", type: "integer", summary: "Area radius around the player.", minimum: 12, maximum: AIAgentMaxAreaSpawnRadius),
+            AIAgentSkillParameter(name: "target", type: "string", summary: "Spawn target.", enumValues: ["area"]),
             AIAgentSkillParameter(name: "message", type: "string", summary: "Short chat response."),
         ]),
     AIAgentSkillDefinition(
@@ -448,6 +461,9 @@ public enum AIAgentError: Error, Equatable, CustomStringConvertible {
     case missingEntity
     case unknownEntity(String)
     case entitySpawnFailed(String)
+    case tooManySpawnGroups(Int)
+    case areaSpawnFailed(String)
+    case areaSpawnNotAllowed(String)
     case blockBreakFailed(String)
     case blockUseFailed(String)
     case regionFillTooLarge(Int, Int)
@@ -496,6 +512,10 @@ public enum AIAgentError: Error, Equatable, CustomStringConvertible {
         case .missingEntity: return "AI action did not name a spawnable entity"
         case .unknownEntity(let value): return "Unknown spawnable entity: \(value)"
         case .entitySpawnFailed(let value): return "Could not spawn \(value) at the cursor"
+        case .tooManySpawnGroups(let count):
+            return "AI spawn named \(count) groups; at most \(AIAgentAreaSpawnMaxItems) are allowed"
+        case .areaSpawnFailed(let value): return "Found no safe place around you for \(value)"
+        case .areaSpawnNotAllowed(let value): return "\(value) can only be summoned at the cursor"
         case .blockBreakFailed(let value): return "Could not break block: \(value)"
         case .blockUseFailed(let value): return "Could not use block: \(value)"
         case .regionFillTooLarge(let count, let max): return "Region fill is too large: \(count) blocks exceeds \(max)"
@@ -618,6 +638,14 @@ public func resolveAIAgentEntityName(_ raw: String) -> String? {
             if spawnable.contains(candidate) {
                 return candidate
             }
+        }
+    }
+    // Prehistoric roster ids are dotted ("prehistoric.tyrannosaurus"), which the
+    // normalized candidates above never match. Resolve species names, display
+    // names and nicknames ("t-rex", "raptors", "stegosaurs") to those ids.
+    for candidate in aiAgentNameCandidates(raw) {
+        if let definition = resolveAIAgentPrehistoricSpecies(candidate), spawnable.contains(definition.id) {
+            return definition.id
         }
     }
     return nil
@@ -932,6 +960,7 @@ private func inferDirectAIAgentWorldMutationAction(from userRequest: String) -> 
     if let action = inferDirectAIAgentTimeAction(from: normalized) { return action }
     if let action = inferDirectAIAgentWeatherAction(from: normalized) { return action }
     if let action = inferDirectAIAgentSpawnEntityAction(from: normalized) { return action }
+    if let action = inferDirectAIAgentAreaSpawnAction(from: normalized) { return action }
     if let action = inferDirectAIAgentGameModeAction(from: normalized) { return action }
     if let action = inferDirectAIAgentHealAction(from: normalized) { return action }
     if let action = inferDirectAIAgentEatAction(from: normalized) { return action }
@@ -1070,9 +1099,55 @@ private func inferDirectAIAgentSpawnEntityAction(from normalized: String) -> AIA
     }
     guard !filtered.isEmpty else { return nil }
     let phrase = filtered.joined(separator: " ")
-    guard let entity = resolveAIAgentEntityName(phrase) else { return nil }
     let count = min(AIAgentMaxSpawnCount, max(1, inferDirectAIAgentCount(from: entityWords)))
-    return AIAgentAction(action: "spawn_entity", count: count, target: "cursor", entity: entity)
+    if let entity = resolveAIAgentEntityName(phrase) {
+        return AIAgentAction(action: "spawn_entity", count: count, target: "cursor", entity: entity)
+    }
+    if let group = AIAgentCreatureGroup.named(phrase) {
+        return AIAgentAction(action: "spawn_entity", count: count, target: "cursor", entity: group.rawValue)
+    }
+    return nil
+}
+
+/// Words that start the "where" part of an area request.
+private let aiAgentAreaStopWords: Set<String> = [
+    "in", "around", "near", "nearby", "close", "here", "next", "by", "at", "within", "on", "to", "for",
+]
+
+/// "spawn some predators and herbivores in my area", "summon 3 raptors around me",
+/// "spawn dinosaurs": an area spawn around the player. Prehistoric creatures and
+/// groups default to the area even without a place phrase; ordinary mobs need one.
+private func inferDirectAIAgentAreaSpawnAction(from normalized: String) -> AIAgentAction? {
+    let padded = " \(normalized) "
+    // A negated or hedged request ("don't spawn predators near me") is left to the
+    // model rather than executed literally.
+    let negations = [" not ", " never ", " no ", " dont ", " don t ", " do not ", " stop ", " cancel ",
+                     " avoid ", " without ", " prevent "]
+    guard !negations.contains(where: { padded.contains($0) }) else { return nil }
+    let verbs = ["spawn", "summon", "bring", "release", "unleash", "populate", "add", "create", "generate"]
+    let words = normalized.split(separator: " ").map(String.init)
+    guard let verbIndex = words.firstIndex(where: { verbs.contains($0) }), !words.contains("egg"),
+          !words.contains("eggs") else { return nil }
+    let hasArea = [
+        " in my area ", " around me ", " near me ", " nearby ", " close by ", " around here ",
+        " in the area ", " around the area ", " near here ", " by me ", " next to me ", " around us ",
+        " close to me ",
+    ].contains { padded.contains($0) }
+    var phraseWords: [String] = []
+    for word in words[(verbIndex + 1)..<words.count] {
+        if !phraseWords.isEmpty && aiAgentAreaStopWords.contains(word) { break }
+        phraseWords.append(word)
+    }
+    let phrase = phraseWords.joined(separator: " ")
+    guard !phrase.isEmpty, let requests = try? parseAIAgentSpawnList(phrase), !requests.isEmpty else { return nil }
+    let prehistoric = requests.allSatisfy { request in
+        switch request.subject {
+        case .group: return true
+        case .entity(let id): return PrehistoricCreatureDefinition.named(id) != nil
+        }
+    }
+    guard hasArea || prehistoric else { return nil }
+    return AIAgentAction(action: "spawn_group", target: "area", entity: phrase)
 }
 
 private func inferDirectAIAgentGameModeAction(from normalized: String) -> AIAgentAction? {
@@ -1153,7 +1228,7 @@ private func inferDirectAIAgentDifficultyAction(from normalized: String) -> AIAg
     return nil
 }
 
-private func normalizeAIAgentRequestText(_ raw: String) -> String {
+func normalizeAIAgentRequestText(_ raw: String) -> String {
     var out = ""
     for scalar in raw.lowercased().unicodeScalars {
         if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" || scalar == ":" {
@@ -1202,7 +1277,7 @@ private func inferDirectAIAgentCount(from words: [String]) -> Int {
     return spelledAIAgentNumber(first) ?? Int(first) ?? 1
 }
 
-private func spelledAIAgentNumber(_ word: String) -> Int? {
+func spelledAIAgentNumber(_ word: String) -> Int? {
     [
         "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4,
         "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
@@ -2152,10 +2227,34 @@ public func executeAIAgentAction(_ action: AIAgentAction, world: World, player: 
         return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
                                       changedWorld: true)
 
-    case "spawn_entity", "spawn_mob", "summon":
-        try requireAIAgentTarget(action, expected: "cursor")
+    case "spawn_group", "spawn_nearby", "populate_area":
+        try requireAIAgentTarget(action, expected: "area")
         guard let rawEntity = action.entity ?? action.name ?? action.kind else { throw AIAgentError.missingEntity }
-        guard let entityName = resolveAIAgentEntityName(rawEntity) else { throw AIAgentError.unknownEntity(rawEntity) }
+        let result = try executeAIAgentAreaSpawn(rawEntity, count: action.count, radius: action.radius,
+                                                 world: world, player: player)
+        return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: result.message),
+                                      changedWorld: result.changedWorld)
+
+    case "spawn_entity", "spawn_mob", "summon":
+        guard let rawEntity = action.entity ?? action.name ?? action.kind else { throw AIAgentError.missingEntity }
+        if let rawTarget = action.target, normalizeAIAgentName(rawTarget) == "area" {
+            let result = try executeAIAgentAreaSpawn(rawEntity, count: action.count, radius: action.radius,
+                                                     world: world, player: player)
+            return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: result.message),
+                                          changedWorld: result.changedWorld)
+        }
+        try requireAIAgentTarget(action, expected: "cursor")
+        let entityName: String
+        if let resolved = resolveAIAgentEntityName(rawEntity) {
+            entityName = resolved
+        } else if let group = AIAgentCreatureGroup.named(rawEntity) {
+            // "a dinosaur at the cursor": one species of the group, chosen by the world RNG.
+            let pool = group.pool(for: world)
+            guard !pool.isEmpty else { throw AIAgentError.unknownEntity(rawEntity) }
+            entityName = world.rng.pickWeighted(pool) { $0.spawnWeight }.id
+        } else {
+            throw AIAgentError.unknownEntity(rawEntity)
+        }
         guard let cursor else { throw AIAgentError.missingCursorTarget }
         let target = aiCursorPlacementPosition(cursor, in: world)
         guard target.y >= world.info.minY && target.y < world.info.minY + world.info.height else {
@@ -2167,24 +2266,32 @@ public func executeAIAgentAction(_ action: AIAgentAction, world: World, player: 
         guard world.isLoadedAt(target.x, target.z) else {
             throw AIAgentError.unloadedTarget(target.x, target.y, target.z)
         }
-        guard canAIAgentSpawnEntity(entityName, at: target, in: world) else {
-            throw AIAgentError.entitySpawnFailed(entityName)
-        }
         let count = min(AIAgentMaxSpawnCount, max(1, action.count ?? 1))
+        // A large prehistoric body that does not fit at the exact cursor cell uses
+        // the nearest admitted cells within four blocks, one creature per cell.
+        let cells = aiAgentCursorSpawnCells(entityName, count: count, target: target, world: world) { x, y, z in
+            canAIAgentSpawnEntity(entityName, at: (x, y, z), in: world)
+        }
+        guard !cells.isEmpty else { throw AIAgentError.entitySpawnFailed(aiAgentCreatureDisplayName(entityName)) }
         var spawned = 0
-        for _ in 0..<count {
+        for (index, cell) in cells.enumerated() {
+            let salt: UInt32? = PrehistoricCreatureDefinition.named(entityName).map { _ in
+                hash3(world.seed ^ hashString(entityName), cell.x, cell.y, cell.z,
+                      UInt32(truncatingIfNeeded: world.time) ^ UInt32(truncatingIfNeeded: index))
+            }
             if spawnMob(
                 world,
                 entityName,
-                Double(target.x) + 0.5,
-                Double(target.y),
-                Double(target.z) + 0.5,
-                SpawnOpts(persistent: true)) != nil {
+                Double(cell.x) + 0.5,
+                Double(cell.y),
+                Double(cell.z) + 0.5,
+                SpawnOpts(persistent: true, prehistoricSeedSalt: salt)) != nil {
                 spawned += 1
             }
         }
-        guard spawned > 0 else { throw AIAgentError.entitySpawnFailed(entityName) }
-        let fallback = "Spawned \(spawned) \(entityName) at \(target.x) \(target.y) \(target.z)."
+        guard spawned > 0 else { throw AIAgentError.entitySpawnFailed(aiAgentCreatureDisplayName(entityName)) }
+        let displayName = PrehistoricCreatureDefinition.named(entityName) != nil ? aiAgentCreatureDisplayName(entityName) : entityName
+        let fallback = "Spawned \(spawned) \(displayName) at \(target.x) \(target.y) \(target.z)."
         return AIAgentExecutionResult(message: sanitizeAIAgentChatMessage(action.message, fallback: fallback),
                                       changedWorld: true)
 
@@ -2437,8 +2544,8 @@ private func removeAIAgentNearbyEntities(world: World, player: Player, rawEntity
 /// Admission for the companion's summon: the target must be open, and the
 /// shared spawn-placement rule must hold, so a land mob is never summoned
 /// into water (water is replaceable and passed the open-cell check alone)
-/// while fish, squid and other aquatic mobs still go into it. (Prehistoric
-/// species are not in the companion's spawnable-name list.)
+/// while fish, squid and other aquatic mobs still go into it. Prehistoric
+/// species also need their whole-body clearance there.
 private func canAIAgentSpawnEntity(_ entityName: String, at target: (x: Int, y: Int, z: Int),
                                    in world: World) -> Bool {
     let footId = world.getBlockId(target.x, target.y, target.z)
@@ -2569,6 +2676,8 @@ Rules:
 - To change time of day, use action "set_time"; ticks are normalized to one day and presets are day, noon, sunset, night, midnight, or sunrise.
 - To change weather, use action "set_weather"; only clear, rain, and thunder are allowed.
 - To spawn an animal or monster at the current cursor location, use action "spawn_entity", target "cursor", and one of the registered spawnable entity names. Keep count small.
+- Dinosaurs, pterosaurs and marine reptiles are spawnable by species name (tyrannosaurus, triceratops, velociraptor, stegosaurus, pteranodon, mosasaurus, and the other prehistoric.* entities).
+- To put creatures around the player ("in my area", "around me", "nearby"), use action "spawn_group", target "area", and entity listing groups or species, for example "predators, herbivores" or "2 raptors, triceratops". Leave count out unless the player gave a number; the engine picks random amounts, species and safe positions.
 - To remove nearby entities, use "remove_entities_nearby"; players are never removed by this action.
 - To rework the terrain/biome the player is standing in, use action "rework_biome", target "current_biome", and profile "rolling_hills_resource_rich". The engine chooses the loaded current biome patch; do not provide coordinates.
 - For player state, use "set_gamemode", "heal_player", "damage_player", "apply_effect", "clear_inventory", "add_xp", "set_spawnpoint", "eat_selected_food", or "teleport_player" with target "surface".

@@ -980,6 +980,16 @@ models from the configured loopback service. Cloud-tagged model names are reject
 surface. Use `/ai <request>` in command input after a model is available; `/ai cancel` stops a request
 that's still thinking.
 
+The AI can summon any dinosaur, pterosaur or marine reptile by name, including nicknames such as
+"T. rex", "raptor" or "trike": `/ai summon a triceratops at the cursor`. To populate the area around
+you, name groups or species: `/ai spawn some predators and herbivores in my area`,
+`/ai spawn 2 raptors and a stegosaurus around me`, or `/ai spawn some dinosaurs`. Elysium picks a
+random amount of each group, species from your map's roster, and safe spots between about 8 and 28
+blocks away (predators a little farther out), up to 16 creatures per request; land creatures never go
+into water and sea reptiles only into it. Bosses such as the Wither or Warden can only be summoned where you aim,
+never scattered around you. These spawns run for the host player; a LAN guest's `/ai`
+request goes to the scripting assistant, which cannot spawn creatures.
+
 Before you use `/ai`, understand the data flow: Elysium sends your request together with current game
 context—including the world seed, player position and state, inventory, nearby state, and saved template
 names or summaries—to the Ollama service through the local loopback address. Do not put secrets or

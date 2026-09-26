@@ -448,7 +448,22 @@ final class SpawnPlacementValidationTests: XCTestCase {
             }
         XCTAssertFalse(dryWorld.entities.contains { ($0 as? Entity)?.type == "squid" },
                        "an aquatic mob is never summoned onto dry land")
-        // The companion's name list has no prehistoric species; that is unchanged here.
-        XCTAssertNil(resolveAIAgentEntityName("prehistoric.ichthyosaurus"))
+
+        // The companion now names prehistoric species too, under the same placement rule.
+        XCTAssertEqual(resolveAIAgentEntityName("prehistoric.ichthyosaurus"), "prehistoric.ichthyosaurus")
+        let deepWater = makeLakeWorld(radius: 2)
+        let swimmerPlayer = Player(world: deepWater)
+        swimmerPlayer.setPos(4.5, 70, 4.5)
+        deepWater.addEntity(swimmerPlayer)
+        _ = try executeAIAgentAction(
+            AIAgentAction(action: "spawn_entity", count: 1, target: "cursor", entity: "ichthyosaur"),
+            world: deepWater, player: swimmerPlayer, cursor: waterHit)
+        XCTAssertEqual(deepWater.entities.compactMap { $0 as? Entity }.filter { $0.type == "prehistoric.ichthyosaurus" }.count, 1)
+        XCTAssertThrowsError(try executeAIAgentAction(
+            AIAgentAction(action: "spawn_entity", count: 1, target: "cursor", entity: "ichthyosaurus"),
+            world: dryWorld, player: landPlayer, cursor: landHit)) { error in
+                XCTAssertEqual(error as? AIAgentError, .entitySpawnFailed("Ichthyosaurus"))
+            }
+        XCTAssertFalse(dryWorld.entities.contains { ($0 as? Entity)?.type == "prehistoric.ichthyosaurus" })
     }
 }
